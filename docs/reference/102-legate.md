@@ -198,6 +198,34 @@ cap-stamp + scope). `usr/corvus/src/main.rs`:
   material, so eligibility is a plain record; the secret-bearing CRVS wrap (for
   `DISTINCT_SECRET` / `SYSTEM_KEY` levels) is the A-4c / v1.x extension.
 
+  **The `jit` level is USER-DEFAULT since #163.** `handle_user_create` seeds a
+  `{user, "jit"}` record for every user it mints, and `clearance_backfill_jit`
+  (run on BOTH `clearance_load` arms — present db AND absent db, which is
+  precisely the state a failed first seed leaves) heals any user lacking one.
+  Before #163 exactly one hardcoded name (`michael`, granted by joey's bringup)
+  was eligible, so **every other human account got `CAP_JIT refused` from any GL
+  program** — llvmpipe cannot JIT, so there is no rasteriser to bind. The
+  authority argument for the default: `CAP_JIT`'s only power is emitting code
+  into the caller's OWN process under the I-42 W^X dual map — `BURROW_TYPE_CODE`
+  is refused by `burrow_share_into` and the construction handle is dropped at
+  creation, so no handle exists to transfer and the capability cannot reach a
+  peer Proc. Activation is still gated (`user_eligible_for` + `RE_AUTH`); the
+  table remains authoritative for every other level.
+
+  Honest cost (#163 audit F1): this is not fully policy-neutral. Verb 15 grants
+  to the CALLER's stripes on presentation of a session token, so widening
+  eligibility multiplies the population of tokens that yield `CAP_JIT` from one
+  user to all. What bounds it is the I-42 containment above, not the table.
+  Verb 18 (SELF) has no such gap — identity is the kernel stamp, never a quoted
+  secret — and retiring verb 15 (task #140) removes the amplified surface.
+
+  Boot-gated by joey's susan probe: susan is created with no explicit grant, so
+  a `CLEARANCE_REVOKE susan jit` returning OK proves one of the two mechanisms
+  ran. The probe deliberately does NOT re-grant — an earlier draft did, and that
+  made it certify its own leftovers on every persistent-pool boot (audit F2);
+  consuming the record instead makes each boot test THIS boot's mechanism, with
+  the backfill as the designed healer.
+
 - **Verbs** (CORVUS-DESIGN §6.4 wire):
   - `CLEARANCE_LIST = 14` (user-facing, valid-session-token gated): the levels
     the session user is eligible for, each with `caps` as a versioned TLV (NOT a

@@ -27,6 +27,7 @@
 
 void test_pci_bar_decode_size(void);
 void test_pci_walk_caps_hostile(void);
+void test_pci_walk_caps_shm(void);
 void test_pci_claim_rng(void);
 void test_pci_claim_unknown(void);
 void test_pci_claim_exclusive(void);
@@ -110,14 +111,33 @@ static void cfg_put_vcap(u8 *cfg, u32 at, u8 next, u8 cfg_type, u8 bar,
     cfg_put32(cfg, at + 16, 0);  // notify_off_multiplier
 }
 
-// Allocate a zeroed 0x80-byte synthetic config buffer + a KObj_PCI (BAR 0
+// Write a SHARED_MEMORY (cfg_type 8) virtio_pci_cap64 at `at`: the base cap's
+// offset/length carry the LOW halves, the hi dwords follow at +16/+20, and the
+// cap's id byte (+5) is the shmid.
+static void cfg_put_shmcap(u8 *cfg, u32 at, u8 next, u8 bar, u8 shmid,
+                           u64 offset, u64 length) {
+    cfg[at + 0] = PCI_CAP_ID_VNDR;
+    cfg[at + 1] = next;
+    cfg[at + 2] = 0x18;          // cap_len (unread by the walk)
+    cfg[at + 3] = (u8)VIRTIO_PCI_CAP_SHARED_MEMORY_CFG;
+    cfg[at + 4] = bar;
+    cfg[at + 5] = shmid;
+    cfg_put32(cfg, at + 8,  (u32)(offset & 0xFFFFFFFFu));
+    cfg_put32(cfg, at + 12, (u32)(length & 0xFFFFFFFFu));
+    cfg_put32(cfg, at + 16, (u32)(offset >> 32));
+    cfg_put32(cfg, at + 20, (u32)(length >> 32));
+}
+
+// Allocate a zeroed 0x100-byte synthetic config buffer + a KObj_PCI (BAR 0
 // present, 4 KiB) via kmalloc(KP_ZERO) -- the kernel has no `memset` symbol, so a
 // large stack `= {0}` would emit an undefined memset call. Binds `d` to the
 // config + pre-sets the cap-list status bit and the first-cap pointer (0x40).
-// Returns false on OOM (frees any partial allocation). The 0x80 buffer covers
-// every offset these cases read (the caps live at 0x40 / 0x48; max read 0x58).
+// Returns false on OOM (frees any partial allocation). 0x100 covers every
+// offset these cases read (the shm cases chain 24-byte cap64s at 0x40 / 0x58 /
+// 0x70 -- chained caps MUST NOT overlap, or a later cap's header clobbers an
+// earlier cap's offset/length fields before the walk reads them).
 static bool walk_setup(u8 **cfg, struct KObj_PCI **k, struct virtio_pci_dev *d) {
-    *cfg = kmalloc(0x80, KP_ZERO);
+    *cfg = kmalloc(0x100, KP_ZERO);
     *k   = kmalloc(sizeof(**k), KP_ZERO);
     if (!*cfg || !*k) {
         kfree(*cfg);
@@ -209,6 +229,139 @@ void test_pci_walk_caps_hostile(void) {
         kfree(k);
         TEST_ASSERT(r == 0, "a well-formed common-cfg cap must resolve");
         TEST_ASSERT(present, "the resolved common region must be recorded present");
+    }
+}
+
+// --- cfg_type 8 shared-memory discovery (#166 / Warp-2; deterministic) -------
+//
+// Same synthetic-config harness as the hostile walk above. The 64-bit halves
+// get DISCRIMINATING vectors: case B's stored-value asserts fail if offset_hi
+// is dropped (a low-only parse still returns 0 there), and case C's verdict
+// itself flips if length_hi is dropped (0x1_00000100 > a 4 KiB BAR only when
+// the high dword is honored). Case E is the overflow-wrap vector a naive
+// offset+length compare would accept.
+void test_pci_walk_caps_shm(void) {
+    // A: a well-formed small shm cap resolves alongside a common-cfg region
+    //    (the two ladders don't disturb each other), and records shmid/bar.
+    {
+        u8 *cfg;
+        struct KObj_PCI *k;
+        struct virtio_pci_dev d = {0};
+        TEST_ASSERT(walk_setup(&cfg, &k, &d), "shm case A alloc");
+        cfg_put_vcap(cfg, 0x40, 0x58, (u8)VIRTIO_PCI_CAP_COMMON_CFG, 0, 0, 0x38);
+        cfg_put_shmcap(cfg, 0x58, 0x00, 0, 1, 0x200, 0x400);
+        int r = pci_walk_caps(k, &d);
+        bool common  = k->regions[VIRTIO_PCI_CAP_COMMON_CFG - 1].present;
+        bool present = k->shm[0].present;
+        u8   shmid   = k->shm[0].shmid;
+        u8   bar     = k->shm[0].bar;
+        u64  off     = k->shm[0].offset;
+        u64  len     = k->shm[0].length;
+        kfree(cfg);
+        kfree(k);
+        TEST_ASSERT(r == 0, "a well-formed shm cap must not fail the walk");
+        TEST_ASSERT(common, "the common region must still resolve beside a shm cap");
+        TEST_ASSERT(present, "the shm region must be recorded present");
+        TEST_EXPECT_EQ((u64)shmid, 1ull, "shm shmid must come from the cap id byte");
+        TEST_EXPECT_EQ((u64)bar, 0ull, "shm bar index mis-recorded");
+        TEST_EXPECT_EQ(off, 0x200ull, "shm offset mis-recorded");
+        TEST_EXPECT_EQ(len, 0x400ull, "shm length mis-recorded");
+    }
+
+    // B: 64-bit halves assemble. Synthetic 8 GiB BAR; offset_hi = 1. A parse
+    //    that drops the hi dwords still SUCCEEDS here — the stored offset is
+    //    what discriminates.
+    {
+        u8 *cfg;
+        struct KObj_PCI *k;
+        struct virtio_pci_dev d = {0};
+        TEST_ASSERT(walk_setup(&cfg, &k, &d), "shm case B alloc");
+        k->bars[0].size = 0x200000000ull;   // 8 GiB (synthetic; no hardware)
+        cfg_put_shmcap(cfg, 0x40, 0x00, 0, 1, 0x100000000ull, 0x80000000ull);
+        int r = pci_walk_caps(k, &d);
+        u64 off = k->shm[0].offset;
+        u64 len = k->shm[0].length;
+        kfree(cfg);
+        kfree(k);
+        TEST_ASSERT(r == 0, "an in-bounds 64-bit shm cap must resolve");
+        TEST_EXPECT_EQ(off, 0x100000000ull,
+                       "shm offset_hi dword dropped (offset must be 4 GiB)");
+        TEST_EXPECT_EQ(len, 0x80000000ull, "shm length mis-assembled");
+    }
+
+    // C: length_hi flips the verdict. Real length 0x1_00000100 > the 4 KiB
+    //    BAR — a low-only parse sees 0x100 and ACCEPTS.
+    {
+        u8 *cfg;
+        struct KObj_PCI *k;
+        struct virtio_pci_dev d = {0};
+        TEST_ASSERT(walk_setup(&cfg, &k, &d), "shm case C alloc");
+        cfg_put_shmcap(cfg, 0x40, 0x00, 0, 1, 0, 0x100000100ull);
+        int r = pci_walk_caps(k, &d);
+        kfree(cfg);
+        kfree(k);
+        TEST_ASSERT(r < 0,
+                    "a shm length exceeding the BAR via length_hi must be rejected");
+    }
+
+    // D: hostile BAR references — out-of-range index, then unassigned BAR.
+    {
+        u8 *cfg;
+        struct KObj_PCI *k;
+        struct virtio_pci_dev d = {0};
+        TEST_ASSERT(walk_setup(&cfg, &k, &d), "shm case D1 alloc");
+        cfg_put_shmcap(cfg, 0x40, 0x00, (u8)PCI_BAR_COUNT, 1, 0, 0x100);
+        int r = pci_walk_caps(k, &d);
+        kfree(cfg);
+        kfree(k);
+        TEST_ASSERT(r < 0, "a shm cap with an out-of-range BAR index must be rejected");
+    }
+    {
+        u8 *cfg;
+        struct KObj_PCI *k;
+        struct virtio_pci_dev d = {0};
+        TEST_ASSERT(walk_setup(&cfg, &k, &d), "shm case D2 alloc");
+        cfg_put_shmcap(cfg, 0x40, 0x00, 1, 1, 0, 0x100);   // BAR 1 not present
+        int r = pci_walk_caps(k, &d);
+        kfree(cfg);
+        kfree(k);
+        TEST_ASSERT(r < 0, "a shm cap referencing an unassigned BAR must be rejected");
+    }
+
+    // E: the overflow-wrap vector. offset 0x1000 (== BAR size, so offset alone
+    //    passes a <= check) + length 2^64-0x1000 wraps offset+length to 0 — a
+    //    naive sum compare accepts; the non-wrapping form must reject.
+    {
+        u8 *cfg;
+        struct KObj_PCI *k;
+        struct virtio_pci_dev d = {0};
+        TEST_ASSERT(walk_setup(&cfg, &k, &d), "shm case E alloc");
+        cfg_put_shmcap(cfg, 0x40, 0x00, 0, 1, 0x1000, 0xFFFFFFFFFFFFF000ull);
+        int r = pci_walk_caps(k, &d);
+        kfree(cfg);
+        kfree(k);
+        TEST_ASSERT(r < 0, "a wrapping shm offset+length must be rejected");
+    }
+
+    // F: slot exhaustion is bounded, not hostile — a third shm cap is ignored
+    //    (first two win), and the walk still succeeds.
+    {
+        u8 *cfg;
+        struct KObj_PCI *k;
+        struct virtio_pci_dev d = {0};
+        TEST_ASSERT(walk_setup(&cfg, &k, &d), "shm case F alloc");
+        cfg_put_shmcap(cfg, 0x40, 0x58, 0, 0, 0x000, 0x100);
+        cfg_put_shmcap(cfg, 0x58, 0x70, 0, 1, 0x100, 0x100);
+        cfg_put_shmcap(cfg, 0x70, 0x00, 0, 2, 0x200, 0x100);
+        int r = pci_walk_caps(k, &d);
+        bool s0 = k->shm[0].present, s1 = k->shm[1].present;
+        u8 id0 = k->shm[0].shmid, id1 = k->shm[1].shmid;
+        kfree(cfg);
+        kfree(k);
+        TEST_ASSERT(r == 0, "extra shm caps beyond the slots must not fail the walk");
+        TEST_ASSERT(s0 && s1, "the first two shm caps must occupy the two slots");
+        TEST_EXPECT_EQ((u64)id0, 0ull, "slot 0 must hold the FIRST cap (discovery order)");
+        TEST_EXPECT_EQ((u64)id1, 1ull, "slot 1 must hold the SECOND cap");
     }
 }
 

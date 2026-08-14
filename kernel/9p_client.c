@@ -14,6 +14,8 @@
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
+
+#include "../arch/arm64/uart.h"   // #210: the bounded ownerless-frame log
 #include <thylacine/types.h>
 
 #include "../mm/slub.h"
@@ -355,6 +357,7 @@ static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
 // violation -> mark dead.
 static void demux_frame_locked(struct p9_client *c, size_t len) {
     u32 size; u8 type; u16 tag;
+    c->frames_rx++;                // #210: every frame that reached the demux
     if (p9_peek_header(c->transport.recv_buf, len, &size, &type, &tag) < 0) {
         client_mark_dead_locked(c, false);
         return;
@@ -367,6 +370,7 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
     }
     struct p9_rpc *owner = c->inflight[tag];
     if (owner) {
+        c->demux_owned++;          // #210
         if (owner->on_complete) {
             // Async (POST_CQE, Loom): there is no submitter to dispatch +
             // extract the reply, so the engine does it HERE, under c->lock,
@@ -396,8 +400,55 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
         client_copy(owner->reply_buf, c->transport.recv_buf, len);
         owner->reply_len = (int)len;
         owner->done = true;
+        c->demux_wakes++;          // #210: sync-owner wake actually issued
         wakeup(&owner->rendez);
+    } else if (type == P9_RCLUNK) {
+        // #210: a LEGITIMATE ownerless flow — p9_client_clunk_async never
+        // registers inflight[tag], so every async Rclunk lands here by
+        // design (FID-LIFECYCLE). Counted apart so the loss counter below
+        // stays cold on a healthy system (the #214-F1 conflation lesson).
+        c->demux_orphan_clunk++;
+        struct p9_dispatch_result discard;
+        (void)p9_session_dispatch_rmsg(&c->session, c->transport.recv_buf,
+                                       len, &discard);
+    } else if (type == P9_RFLUSH) {
+        // #210: the other legitimate ownerless flow — the #845 abandon
+        // path sends its Tflush with no inflight owner, so the Rflush
+        // arrives ownerless by design (death-driven).
+        c->demux_orphan_flush++;
+        struct p9_dispatch_result discard;
+        (void)p9_session_dispatch_rmsg(&c->session, c->transport.recv_buf,
+                                       len, &discard);
+    } else if (c->session.outstanding[tag].active &&
+               c->session.outstanding[tag].awaiting_flush) {
+        // #210: the third legitimate ownerless flow — an abandoned op's
+        // LATE ORIGINAL reply (#845): the owner died and unwound, the tag
+        // sits awaiting_flush until its Rflush, and the original reply
+        // arrives first. Session state read under c->lock (every session
+        // mutation on this client runs lock-held).
+        c->demux_orphan_late++;
+        struct p9_dispatch_result discard;
+        (void)p9_session_dispatch_rmsg(&c->session, c->transport.recv_buf,
+                                       len, &discard);
     } else {
+        // #210: the ownerless discard is no longer silent. With all three
+        // by-design flows split out above, a frame landing here is one NO
+        // living mechanism accounts for — a misroute, tag corruption, or a
+        // genuine loss surfacing. Zero on every healthy boot (the full
+        // suite, death flows included, is the witness). Bounded to the
+        // first few per client so a storm cannot flood the console (uart
+        // TX is lockless-bounded and cons never re-enters c->lock, so
+        // printing lock-held is safe).
+        c->demux_orphan++;
+        if (c->demux_orphan <= 4) {
+            uart_puts("9p: ownerless frame tag=");
+            uart_putdec(tag);
+            uart_puts(" type=");
+            uart_putdec(type);
+            uart_puts(" orphans=");
+            uart_putdec(c->demux_orphan);
+            uart_puts("\n");
+        }
         struct p9_dispatch_result discard;
         (void)p9_session_dispatch_rmsg(&c->session, c->transport.recv_buf,
                                        len, &discard);
@@ -1245,6 +1296,13 @@ int p9_client_init(struct p9_client *c,
     c->reader_active  = false;
     c->dead           = false;
     c->done_reply_buf = NULL;
+    c->frames_rx          = 0;     // #210 demux counters (explicit for the
+    c->demux_owned        = 0;     // destroy->init recycled-client shape,
+    c->demux_orphan       = 0;     // same reason as the cache-mode flags)
+    c->demux_orphan_clunk = 0;
+    c->demux_orphan_flush = 0;
+    c->demux_orphan_late  = 0;
+    c->demux_wakes        = 0;
     poll_waiter_list_init(&c->send_waiters_list);   // #349 send-flow-control park (multi-waiter)
     c->send_progress  = 0;
     c->send_waiters   = 0;
@@ -1289,6 +1347,42 @@ void p9_client_destroy(struct p9_client *c) {
     larder_destroy(&c->larder);
     p9_transport_destroy(&c->transport);
     p9_session_destroy(&c->session);
+}
+
+// #210: consistent counter + in-flight snapshot for /ctl/9p-sessions.
+void p9_client_ctl_snapshot(struct p9_client *c, struct p9_client_ctl *out) {
+    if (!c || !out) return;
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+    if (c->magic != P9_CLIENT_MAGIC) return;
+    spin_lock(&c->lock);
+    out->frames_rx          = c->frames_rx;
+    out->demux_owned        = c->demux_owned;
+    out->demux_orphan       = c->demux_orphan;
+    out->demux_orphan_clunk = c->demux_orphan_clunk;
+    out->demux_orphan_flush = c->demux_orphan_flush;
+    out->demux_orphan_late  = c->demux_orphan_late;
+    out->demux_wakes        = c->demux_wakes;
+    out->total_ops     = c->total_ops;
+    out->total_errors  = c->total_errors;
+    out->reader_active = c->reader_active;
+    out->dead          = c->dead;
+    out->send_waiters  = c->send_waiters;
+    for (u32 t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
+        struct p9_rpc *r = c->inflight[t];
+        if (!r) continue;
+        if (out->n_inflight < P9_CTL_INFLIGHT_MAX) {
+            out->tags[out->n_inflight].tag   = (u16)t;
+            out->tags[out->n_inflight].done  = r->done;
+            out->tags[out->n_inflight].async = (r->on_complete != NULL);
+            // The sent T-type + target fid from the session table — what a
+            // parked op is WAITING ON (fence read vs present write vs event
+            // read), the wedge run 2 gap.
+            out->tags[out->n_inflight].kind  = c->session.outstanding[t].kind;
+            out->tags[out->n_inflight].fid   = c->session.outstanding[t].fid;
+        }
+        out->n_inflight++;
+    }
+    spin_unlock(&c->lock);
 }
 
 int p9_client_close(struct p9_client *c) {

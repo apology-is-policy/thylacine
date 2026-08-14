@@ -201,8 +201,19 @@ scripture; moved there verbatim 2026-08-05 so this always-loaded file stays
 small -- the per-row prosecution detail is ALSO expanded in
 `ARCHITECTURE.md §25.4`, which many rows declare authoritative; unifying
 the two is task #152). **Before modifying any file on the index below, read
-that surface's full row.** The index (one line per row; refresh with the
-table):
+that surface's full row.**
+
+**Context economy on `docs/AUDIT-TRIGGERS.md` (binding).** The file is
+~440 KB (~110K tokens); a whole-file `Read` is never justified and the
+default Read cap would silently truncate it anyway. Locate the row first
+(grep the index below, or grep the file by surface keyword), then `Read`
+ONLY that row's line window. To append a chunk's new row: `Edit` after
+that windowed read -- `Edit` requires *a* prior read of the file, not the
+whole file. Never `Write` (whole-file replace) it. The same discipline
+applies to every large scripture file: grep to locate, window to read,
+`Edit` to change.
+
+The index (one line per row; refresh with the table):
 
 - **Exception entry + EL0-entry trampolines** -- `arch/arm64/start.S`, `arch/arm64/exception.c`, `arch/arm64/vectors.S`, `arch/arm64/userla ...
 - **Halls of Extinction crash dump** -- `arch/arm64/halls.c`, `arch/arm64/halls.h`, `arch/arm64/exception.c` (the four entry wrapp ...
@@ -298,6 +309,7 @@ table):
 - **Spawn-time page-budget (the Clade arc F4; I-32 composition, CL-5)** -- `kernel/include/thylacine/proc.h` (`Proc.page_budget` + `Proc.page_peak` + `PROC_PAGE_HARD ...
 - **Process creation: `execve` + shared address spaces + COW `fork` (the LINEAGE arc, L-1..L-7; I-44)** -- **L-1 through L-5 LANDED (stock `fork()` works); L-6 NEXT (the VIVARIUM clone/execve/wait4 ...
 - **VIVARIUM: the syscall-entry phenotype branch + the spawn-time declaration (V-1b; I-43)** -- `kernel/syscall.c` (`syscall_dispatch`'s phenotype branch -> `viv_linux_dispatch`; the TIE ...
+- **Warp: the GPU seam -- the GPU-BO subtype + the `/dev/warp` tree + the fenced controlq (Warp-2; I-45)** -- `kernel/dma_handle.{c,h}` (the subtype enum + the 64 MiB envelope), `kernel/syscall.c` (`SYS_DMA_CRE ...
 - **Initial bringup** -- `kernel/main.c`, `init/init.c`
 - **Boot banner** -- `kernel/main.c`
 
@@ -581,6 +593,33 @@ Maintain these files:
 - `audit_rN_closed_list.md` — cumulative do-not-report preamble for audit rounds. Append after every round.
 - `user_profile.md` — user's role, preferences, preferred style.
 - `feedback_*.md` — durable feedback that should survive context compaction.
+- `TASK-ARCHIVE.md` — completed tasks booted from the live task list (see
+  "Task-list hygiene" below). Subject lines verbatim; the lookup for past
+  closes.
+
+### Task-list hygiene (binding; the 65% lesson)
+
+The harness re-injects the ENTIRE live task list — every task's subject
+AND description — into the conversation after tool batches. Measured
+2026-08-10: ~345 KB per injection, 23 injections in one working day =
+65% of that day's context volume; over the session's life, half the
+transcript. The injection cost scales with the LIVE list only, so the
+rule is:
+
+- **The live list carries OPEN work only.** Tasks may be as long,
+  descriptive, and detailed as the work deserves — verbosity is fine
+  precisely BECAUSE the list stays small.
+- **The moment a task completes, boot it**: finalize its subject as the
+  close record (hash, verdict, counts — the existing style), append that
+  subject line to `memory/TASK-ARCHIVE.md`, then delete the task
+  (`TaskUpdate` status `deleted`). Archive-then-delete, never the
+  reverse.
+- **Sweep at every checkpoint.** A completed task may linger at most
+  until the current chunk's close. If the live list exceeds ~40 entries,
+  something is being hoarded — prune before starting the next chunk.
+- The deeper records remain git log (close-commit bodies),
+  `docs/phaseN-status.md` rows, and `memory/MEMORY-ARCHIVE.md`; the task
+  archive is the fast index into them.
 
 ### Handoff protocol
 
@@ -844,6 +883,57 @@ tools/snapshot.sh restore <name>
 ```
 
 The `Makefile` at the root provides `make kernel`, `make all`, `make test`, etc. as conventional aliases.
+
+---
+
+## The thyla-pi host (permanent ARM64 / KVM / GPU box)
+
+A Raspberry Pi 400 — BCM2711 (4× Cortex-A72 @ 1.8 GHz), 4 GB RAM, VideoCore
+VI / V3D 4.2 GPU; Debian 13 arm64; QEMU 10.0.11 (distro) with
+`virtio-gpu-gl-pci` + `egl-headless`; `expect`; `/dev/kvm` and
+`/dev/dri/renderD128` accessible to user `cora` — is **permanently online**
+(user commitment 2026-08-12) and available to every instance for anything
+that benefits from real ARM64 silicon. No reservation protocol; keep QEMU
+single-flight (verify no stray: `ssh thyla-pi 'ps -eo pid,args | grep
+"[q]emu-system"'` — bracket-trick the pattern or it matches its own wrapper).
+
+**Access**: LAN `ssh thyla-pi` (thyla-pi.local, user `cora`, key
+`~/.ssh/thyla-pi`). From anywhere: `ssh thyla-pi-cf` (Cloudflare tunnel via
+`thyla-pi-ssh.treeso.net`; cloudflared ProxyCommand — both aliases live in
+`~/.ssh/config`; the Pi-side connector is a systemd service). After changing
+cora's groups, drop the control master: `ssh -O exit thyla-pi`.
+
+**Roles**:
+- **The KVM GL host** (Warp arc): `WARP_HOST=thyla-pi WARP_ACCEL=kvm
+  tools/warp-host.sh <sync|smoke|capset|prove|tri|bench|quake|decomp|wedge|wedge-gate>`.
+  Real-silicon KVM (`-cpu host -gic-version=host`, auto-detected by
+  run-vm.sh on Linux-aarch64 + rw /dev/kvm) boots the full gauntlet in
+  ~210 s where Pi-TCG never finishes. Real GPU: virgl on V3D 4.2.14 (first
+  Thylacine GL-on-silicon 2026-08-11; gl-host-probe rung 6 PASS) and a
+  Vulkan V3D ICD (the Warp-6/Venus prerequisite).
+- **Real-silicon SMP / memory-model witness**: the only non-Apple ARM
+  hardware in the loop (#214 was closed on it); A72 vs M2 diversity.
+- **General ARM64 Linux box**: native aarch64 builds, KVM guests, ad-hoc.
+
+**Layout**: repo sync at `~/projects/thylacine` (push with `WARP_HOST=thyla-pi
+tools/warp-host.sh sync` — git-archive of HEAD + boot artifacts + the pool via
+sparse gzip; uncommitted tool scripts ride separately, re-scp after editing).
+Working fixtures + logs in `~/warp/`.
+
+**Care**:
+- 4 GB RAM: ONE 2048 MiB guest at a time.
+- SD-card I/O is the bottleneck — FS-round-trip-heavy guest work (go builds)
+  dominates wall clock; budget bounds off the ~210 s banner, not TCG numbers.
+- The Pi's `build/` holds the **certified artifact set of the last sync**
+  (md5-stable). It has served as the bit-exact restore source after a local
+  bake clobbered the fixtures: reverse-sync (`ssh thyla-pi 'gzip -1 -c
+  .../pool.img' | gunzip | dd of=... conv=sparse bs=1m`) + md5 both sides.
+- Artifacts pair cryptographically: `pool.img` + the key-bearing `ramfs.cpio`
+  ship TOGETHER or the guest gets `STM_EBADTAG` (stratumd `rc=-201` ->
+  `EXTINCTION: joey exited non-zero`). **A reverse-sync recovery is only valid
+  if you sync BOTH and DO NOT rebuild** -- a rebuilt ramfs carries a fresh key
+  that no longer matches a reverse-synced pool. If a real code change forces a
+  rebuild, re-bake BOTH paired with `THYLACINE_MKFS_PRESERVE=0`, never `=1`.
 
 ---
 
@@ -1136,13 +1226,44 @@ This protects against audit findings being lost across session boundaries. The n
 
 ## Operational summary patterns
 
-End-of-iteration summaries (the response to a completed audit / chunk) follow a consistent structure for fast review:
+End-of-iteration summaries (the response to a completed audit / chunk) follow a consistent structure for fast review.
+
+**Order matters: orientation FIRST, detail after.** The user does not carry the
+identifier map in their head and does not remember where the arc was paused.
+Open with what this session was about and how it serves the arc; only then the
+journal. (Ratified 2026-08-14 at the user's request.)
 
 ```
+## <one-line title: what this session was about>
+
+**Focus**: <1-2 sentences: what this session actually worked on>.
+**Arc fit**: <how it serves the current arc's direction / why it was worth
+doing now>.
+
+**Arc state**: ON ARC — <the chunk being built>.
+   | PAUSED: the arc is stopped at <exact position>; this session is a side
+   quest on <the soundness / harness / instrument problem that preempted it>.
+   **Resumption needs**: <the specific remaining items, in order>.
+   (OMIT this field entirely when directly on arc — do not write "n/a".)
+
+**Key** — every identifier used below, in words. No bare ids anywhere:
+| Id | Is |
+|---|---|
+| <#N / C-x / P1a / I-nn> | <plain-language name, <=12 words> |
+
+**Arc metrics** (current values; a metric with no measurement says so):
+| Metric | Value | Measured | Source |
+|---|---|---|---|
+
+**Exit criteria** (the arc's ratified bar + how we move toward each):
+| Criterion | Target | Now | Moving via |
+|---|---|---|---|
+
 **This iteration landed (N new commits, tip <hash>)**:
 - <hash1> — <one-line scope>
-- <hash2> — <one-line scope>
-- ...
+
+<the detailed journal: what was found, what it means, what went wrong and how
+it was caught. Keep this rich — it is the part worth reading.>
 
 **Posture**: <suites> × (default + ASan + TSan) green. <spec count> specs
 clean. test_<X> at <count>.
@@ -1160,11 +1281,30 @@ blocker>.
 
 This structure lets the user (or a future session reading the conversation log) reconstruct state in under 30 seconds.
 
-The last four fields are the checkpoint contract made concrete — `Running`
-answers "is Claude still working?", `Handoff` answers "can I compact right
-now?", and `Next`/`Ahead` answer "where are we in the arc?". Emit all four at
-every checkpoint even when the answer is boring; a missing field reads as an
-unknown, and the whole point is that the user should not have to ask.
+Field notes, each earned:
+
+- **`Key` is not optional and not decorative.** Sessions accumulate dense
+  identifier vocabularies (`C-0`, `P1a`, `#240`, `I-45`, `Warp-C`) that are
+  perfectly legible in-session and opaque a day later. Expand every id used in
+  the summary, including ones that feel obvious. A summary the reader must
+  decode is a summary that does not work.
+- **`Arc state` exists because side quests are the norm, not the exception.**
+  The whole-system-stewardship rule guarantees that surfaced defects preempt
+  chunk work — so the user is frequently reading a report about something
+  other than the arc they last approved. Say where the arc is parked and what
+  it is waiting on, or they cannot tell a detour from a change of direction.
+- **`Arc metrics` + `Exit criteria` answer "are we winning?"** A chunk-by-chunk
+  narrative can read as steady progress while the number that defines success
+  has not moved. State the bar, the current standing against it, and the
+  mechanism that closes the gap. **Never quote a metric without its
+  provenance** — a figure from a different workload, lane, or host is a
+  different number wearing the same units (#236 is the standing example: two
+  lanes disagreed 2x on the same renderer at the same resolution).
+- The last four fields are the checkpoint contract made concrete — `Running`
+  answers "is Claude still working?", `Handoff` answers "can I compact right
+  now?", and `Next`/`Ahead` answer "where are we in the arc?". Emit all four at
+  every checkpoint even when the answer is boring; a missing field reads as an
+  unknown, and the whole point is that the user should not have to ask.
 
 ---
 

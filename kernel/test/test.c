@@ -76,6 +76,7 @@ void test_kaslr_mix64_avalanche(void);
 void test_dtb_chosen_kaslr_seed_present(void);
 void test_dtb_pci_intx_route(void);
 void test_dtb_pci_mem_window(void);
+void test_dtb_pci_mem_window64(void);
 void test_phys_alloc_smoke(void);
 void test_phys_leak_10k(void);
 void test_slub_kmem_smoke(void);
@@ -335,6 +336,7 @@ void test_weft_map_binding_lifetime(void);
 void test_weft_share_cap_gate(void);
 void test_weft_share_rejects_plain_dma(void);
 void test_weft_weave_share_and_claim(void);
+void test_weft_gpu_bo_share_and_claim(void);
 void test_weft_unshare_disarm(void);
 void test_weft_shared_map_budget_cap(void);
 void test_weft_weave_clunk_unmap_guard(void);
@@ -496,6 +498,7 @@ void test_loom_enter_min_complete_no_inflight(void);
 void test_loom_sqpoll_setup_and_teardown(void);
 void test_loom_sqpoll_drains_sq(void);
 void test_loom_sqpoll_parks_on_cq_full(void);
+void test_loom_sqpoll_charges_thread_budget(void);
 void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
@@ -628,6 +631,7 @@ void test_uart_rx_path_enabled(void);   // #943 console-RX guard
 void test_uart_putc_tx_bounded(void);   // #67 bounded TX spin (interrupt-dead hazard)
 void test_cons_poll_readiness(void);     // LS-8a
 void test_cons_poll_deferred_wake(void); // LS-8a
+void test_cons_mgr_hold_defers_consumption(void); // #187
 void test_cons_termios_default(void);            // LS-8b
 void test_cons_cook_canonical_line(void);        // LS-8b
 void test_cons_cook_echo_off_no_output(void);    // LS-8b
@@ -712,6 +716,7 @@ void test_devctl_cpu_sources_live(void);            // V-4c-2b: the /proc/stat +
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
 void test_devctl_stat_native_shapes(void);      // V-4b-5: /ctl stats as a dir; leaves as files
+void test_devctl_read_9p_sessions_format(void); // #210: the loss-discriminator ctl file
 void test_devdev_bestiary_smoke(void);
 void test_devdev_attach_returns_dir(void);
 void test_devdev_walk_to_each_leaf(void);
@@ -905,6 +910,7 @@ void test_srvconn_recv_deadline_timeout(void);
 void test_srvconn_teardown_eofs(void);
 void test_srvconn_teardown_wakes_blocked(void);
 void test_srvconn_server_send_blocks_then_drain_wakes(void);
+void test_srvconn_ctl_counters(void);           // #210: ring counters + ctl registry
 void test_srvconn_bulk_ring_class(void);
 void test_srvconn_role_park_second_writer(void);
 void test_srvconn_role_park_second_reader(void);
@@ -955,6 +961,7 @@ void test_virtio_pci_cfg_read_bounds(void);
 void test_virtio_pci_cfg_write_bounds(void);
 void test_pci_bar_decode_size(void);
 void test_pci_walk_caps_hostile(void);
+void test_pci_walk_caps_shm(void);
 void test_pci_claim_rng(void);
 void test_pci_claim_unknown(void);
 void test_pci_claim_exclusive(void);
@@ -1237,6 +1244,7 @@ void test_p9_attached_handshake_rlerror_ecode_overflow_clamped(void);
 void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
 void test_p9_attached_walked_outlives_root_no_uaf(void);
+void test_p9_attached_ctl_registry(void);       // #210: sessions registry + demux counters
 void test_sys_walk_open_max_length_name_nul_terminated(void);
 void test_spoor_transport_init_destroy(void);
 void test_spoor_transport_init_null_rejected(void);
@@ -1450,6 +1458,7 @@ struct test_case g_tests[] = {
     { "dtb.chosen_kaslr_seed_present", test_dtb_chosen_kaslr_seed_present, false, NULL },
     { "dtb.pci_intx_route",            test_dtb_pci_intx_route,            false, NULL },
     { "dtb.pci_mem_window",            test_dtb_pci_mem_window,            false, NULL },
+    { "dtb.pci_mem_window64",          test_dtb_pci_mem_window64,          false, NULL },
     { "phys.alloc_smoke",              test_phys_alloc_smoke,              false, NULL },
     { "phys.leak_10k",                 test_phys_leak_10k,                 false, NULL },
     { "slub.kmem_smoke",               test_slub_kmem_smoke,               false, NULL },
@@ -1794,6 +1803,7 @@ struct test_case g_tests[] = {
     { "weft.share_cap_gate",              test_weft_share_cap_gate,           false, NULL },
     { "weft.share_rejects_plain_dma",     test_weft_share_rejects_plain_dma,  false, NULL },
     { "weft.weave_share_and_claim",       test_weft_weave_share_and_claim,    false, NULL },
+    { "weft.gpu_bo_share_and_claim",      test_weft_gpu_bo_share_and_claim,   false, NULL },
     { "weft.unshare_disarm",              test_weft_unshare_disarm,           false, NULL },
     { "weft.shared_map_budget_cap",       test_weft_shared_map_budget_cap,    false, NULL },
     { "weft.weave_clunk_unmap_guard",     test_weft_weave_clunk_unmap_guard,  false, NULL },
@@ -2035,6 +2045,7 @@ struct test_case g_tests[] = {
     { "loom.sqpoll_setup_and_teardown",  test_loom_sqpoll_setup_and_teardown,  false, NULL },
     { "loom.sqpoll_drains_sq",           test_loom_sqpoll_drains_sq,           false, NULL },
     { "loom.sqpoll_parks_on_cq_full",    test_loom_sqpoll_parks_on_cq_full,    false, NULL },
+    { "loom.sqpoll_charges_thread_budget", test_loom_sqpoll_charges_thread_budget, false, NULL },
     { "thread.create_user_ctx_layout",         test_thread_create_user_ctx_layout,         false, NULL },
     { "thread.exit_self_marks_exiting",        test_thread_exit_self_marks_exiting,        false, NULL },
     { "thread.exit_self_last_thread_zombies",  test_thread_exit_self_last_thread_zombies,  false, NULL },
@@ -2182,6 +2193,7 @@ struct test_case g_tests[] = {
     { "uart.putc_tx_bounded",          test_uart_putc_tx_bounded,          false, NULL },
     { "cons.poll_readiness",           test_cons_poll_readiness,           false, NULL },
     { "cons.poll_deferred_wake",       test_cons_poll_deferred_wake,       false, NULL },
+    { "cons.mgr_hold_defers_consumption", test_cons_mgr_hold_defers_consumption, false, NULL },
     { "cons.termios_default",          test_cons_termios_default,          false, NULL },
     { "cons.cook_canonical_line",      test_cons_cook_canonical_line,      false, NULL },
     { "cons.cook_echo_off_no_output",  test_cons_cook_echo_off_no_output,  false, NULL },
@@ -2271,6 +2283,8 @@ struct test_case g_tests[] = {
     { "devctl.write_rejected",         test_devctl_write_rejected,         false, NULL },
     { "devctl.read_dir_returns_neg1",  test_devctl_read_dir_returns_neg1,  false, NULL },
     { "devctl.stat_native_shapes",     test_devctl_stat_native_shapes,     false, NULL },
+    { "devctl.read_9p_sessions_format",
+                                       test_devctl_read_9p_sessions_format, false, NULL },
     { "devdev.bestiary_smoke",         test_devdev_bestiary_smoke,         false, NULL },
     { "devdev.attach_returns_dir",     test_devdev_attach_returns_dir,     false, NULL },
     { "devdev.walk_to_each_leaf",      test_devdev_walk_to_each_leaf,      false, NULL },
@@ -2411,6 +2425,7 @@ struct test_case g_tests[] = {
                                        test_srvconn_server_send_blocks_then_drain_wakes,
                                                                            false, NULL },
     { "srvconn.bulk_ring_class",       test_srvconn_bulk_ring_class,       false, NULL },
+    { "srvconn.ctl_counters",          test_srvconn_ctl_counters,          false, NULL },
     { "srvconn.role_park_second_writer",
                                        test_srvconn_role_park_second_writer,
                                                                            false, NULL },
@@ -2497,6 +2512,7 @@ struct test_case g_tests[] = {
     { "virtio_pci.cfg_write_bounds",   test_virtio_pci_cfg_write_bounds,   false, NULL },
     { "pci.bar_decode_size",           test_pci_bar_decode_size,           false, NULL },
     { "pci.walk_caps_hostile",         test_pci_walk_caps_hostile,         false, NULL },
+    { "pci.walk_caps_shm",             test_pci_walk_caps_shm,             false, NULL },
     { "pci.claim_rng",                 test_pci_claim_rng,                 false, NULL },
     { "pci.claim_unknown",             test_pci_claim_unknown,             false, NULL },
     { "pci.claim_exclusive",           test_pci_claim_exclusive,           false, NULL },
@@ -2955,6 +2971,7 @@ struct test_case g_tests[] = {
     { "p9_attached.walked_outlives_root_no_uaf",
                                        test_p9_attached_walked_outlives_root_no_uaf,
                                                                            false, NULL },
+    { "p9_attached.ctl_registry",      test_p9_attached_ctl_registry,      false, NULL },
     { "sys_walk_open.max_length_name_nul_terminated",
                                        test_sys_walk_open_max_length_name_nul_terminated,
                                                                            false, NULL },

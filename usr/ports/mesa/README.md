@@ -33,8 +33,17 @@ git am <thylacine-repo>/usr/ports/mesa/patches/*.patch
 
 This is **verified, not asserted**: applying the series with `git am` to a
 pristine `mesa-26.1.6` worktree reproduces the fork tip's tree hash exactly
-(`414b19f24384ae66d2107cbbab46cb7c963641e6`). Re-check it after any refresh —
+(`b117c8e52774ba3b85082e7a9004d8dc0387c4f8` at 0009; 0008 was
+`88ade8b2af3d48b0ca3873e5fa955ef179895b44`, 0007
+`cd00196c85cea3d92fe87351563b2c60d14d76cd`, 0006
+`d302f50eb931bef25c8deab034093292adcc39ae`, 0005
+`414b19f24384ae66d2107cbbab46cb7c963641e6`). Re-check it after any refresh —
 a patch series that no longer round-trips is a fork you have already lost.
+(The builder's fork matches the durable series exactly: the #204 cycle
+committed 0008 on the fork, emitted the patch file, and re-`git am`'d the
+EMITTED file onto the 0007 tip in a scratch worktree to confirm it lands on
+`88ade8b2…` — a patch only known to match the working tree it came from has
+not been checked at all.)
 (`git am` reports four trailing-whitespace warnings from the grafted 25.0.7
 OSMesa source; they are cosmetic and it exits 0.)
 
@@ -329,6 +338,80 @@ Three things about that set are not guessable and cost a round each:
   an unrelated gallivm fault, which is precisely the ambiguity `0004` had already
   been bitten by. It now returns non-zero at every station, and that is what lets
   joey's `gl_gate` treat `rc=0` as a strong assertion and parse no output at all.
+
+- `0006` — Warp-3: the virgl winsys over the /srv/warp GPU seam. The
+  unmodified virgl gallium driver plus a new winsys
+  (`src/gallium/winsys/virgl/thylacine/`) whose transport is
+  `warp_client.c` — blocking file ops on tapestryd's warp tree via raw
+  Thylacine syscalls (`<thyla/syscall.h>`, carried into the build by the
+  generated cross file's c_args). vtest's 18 load-bearing slots minus
+  the displaytarget arms; fences counted client-side against the seam's
+  monotonic per-ctx `fence-signaled`; submits split at CCMD boundaries
+  under the 32 KiB msize. Meson gating keys on
+  `with_thylacine = cc.get_define('__thylacine__')` because the cross
+  file deliberately claims `system = 'linux'`. Configure adds virgl
+  (and, since Warp-4/#194, kills the driconf/expat pair):
+
+  ```
+  -Dgallium-drivers=llvmpipe,virgl -Dxmlconfig=disabled -Dexpat=disabled
+  ```
+
+  (a meson reconfigure on the existing tree, not a fresh setup; with
+  the 26.1.6 meson floor that is `/build/venv-meson/bin/meson setup
+  --reconfigure`, and it must run AGAIN after any missing-LLVM-archive
+  repair -- meson caches a failed `--libs` answer and reports "LLVM
+  found: YES" over empty link args). The osmesa target then carries
+  both drivers; `GALLIUM_DRIVER=virpipe` (or `virgl`) selects the warp
+  screen at runtime, with a loud fallback to llvmpipe. `virgl-prove`
+  is the new gate binary beside `osmesa-prove`: it never walks the
+  CAP_JIT clearance (so a silent llvmpipe fallback cannot pass it) and
+  asserts GL_RENDERER names virgl.
+
+  Six port findings from the builder cycles, all folded into the patch
+  or the configure, all of the builds-clean-when-wrong class:
+
+  - the osmesa target needed `inc_virtio` (`virgl_winsys.h` includes
+    `virtio-gpu/virgl_hw.h`);
+  - `<libsync.h>` resolves upstream from LIBDRM's installed copy, which
+    dropping `dep_libdrm` orphaned -- Thylacine points the include path
+    at Mesa's own vendored, self-contained `src/util/libsync.h`
+    instead. NOTE: this slipped GPU-DESIGN 2.3's portability census
+    because `libsync` matches none of the grepped patterns
+    (`__linux__` / `<sys/*>` / `DETECT_OS`) -- that census was
+    pattern-bounded, not complete;
+  - `inline_sw_helper.h`'s own `virpipe` arm hardwires
+    `virgl_vtest_winsys_wrap` under `GALLIUM_VIRGL`; on Thylacine the
+    arm is dead (the osmesa target forks to the warp winsys first) and
+    is guarded out so it cannot drag the vtest symbol into the link.
+    The target also links `libgalliumvl_stub` -- virgl's screen
+    references the gallium video layer, which llvmpipe never did;
+  - (#191, found by the tri gate, not the builder) virgl's disk-cache
+    keying `assert(note)`s a build-id note into existence, but the
+    static `ld.lld` ET_EXEC never passes `--build-id` and carries none,
+    so screen creation aborted in-guest before any triangle. The fork
+    makes the keying contribution conditional: no note -> return with
+    `disk_cache` NULL (the configuration `MESA_SHADER_CACHE_DISABLE`
+    ships, NULL-handled by every consumer) rather than link-flagging
+    `--build-id`, which would have *activated* the cache onto the 9P
+    home and its untested flock/mmap surface;
+  - (#194, found by the FIRST guest-side relink after Warp-3, not the
+    builder) virgl pulled `util/xmlconfig` (driconf), and meson's
+    `expat` feature auto-resolved through the `subprojects/expat.wrap`
+    FALLBACK -- it silently built a cross libexpat.a, linked the
+    builder-side provers against it, and the #138 fetch set never
+    carried it. Every builder artifact was green; every GUEST hand-link
+    of the archive (`gl-sdl-prove`, the GLQuake relink) was broken with
+    undefined `XML_*`, and build caching hid it until the Warp-4 shim
+    edit forced the first relink. Configure now disables the pair
+    (driconf is dead weight on Thylacine -- no /etc/drirc, defaults
+    only): `-Dxmlconfig=disabled -Dexpat=disabled` (both: expat cannot
+    be disabled while xmlconfig is enabled). Verified in the artifact:
+    `nm -u libOSMesa.a | grep -c XML_` is 0;
+  - (Warp-4) `osmesa_target.c`'s present bridge includes
+    `virgl_screen.h`/`virgl_resource.h`, whose chain reaches NIR's
+    GENERATED headers (`glsl_types.h -> builtin_types.h`);
+    `driver_virgl` links the driver but does not propagate that include
+    path, so the target's meson gains `idep_nir_headers`.
 
 ## Refresh — per arc, not "when the fork stops changing"
 

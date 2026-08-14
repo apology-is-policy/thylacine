@@ -77,7 +77,7 @@ impl Dma {
 // PCI (pci-2 — the virtio-PCI transport; the #140 resolution).
 
 pub enum PciRegion { Common = 0, Notify = 1, Isr = 2, Device = 3 } // cfg_type - 1
-pub enum PciError  { Claim, Info, MapBar, BarTooLarge }
+pub enum PciError  { Claim, Info, MapBar }
 pub const PCI_BAR_VA_STRIDE: u64 = 0x10_0000;  // per-BAR user-VA window
 
 pub struct PciDev { /* opaque */ }
@@ -85,11 +85,19 @@ pub struct PciDev { /* opaque */ }
 impl PciDev {
     // Compose SYS_PCI_CLAIM + SYS_PCI_INFO + SYS_PCI_MAP_BAR: claim the first
     // virtio function matching `virtio_device_id` (1 = net, 4 = rng) and map
-    // every present BAR `i` at `bar_window + i * PCI_BAR_VA_STRIDE`.
+    // every present BAR `i` that fits the stride at
+    // `bar_window + i * PCI_BAR_VA_STRIDE`. A BAR larger than the stride (the
+    // virtio-gpu hostmem shared-memory class, #166) is claimed but left
+    // unmapped: no capability region lives in one, region() fails closed on
+    // it, and its geometry reaches the driver via shm_region().
     pub unsafe fn claim(virtio_device_id: u32, bar_window: u64)
         -> core::result::Result<Self, PciError>;
 
     pub fn region(&self, kind: PciRegion) -> Option<(u64, u32)>; // (mapped VA, length)
+    // The discovered VIRTIO shared-memory region for `shmid` (cfg_type 8;
+    // gpu hostmem = 1): (device PA, byte length). Discovery only — mapping a
+    // subrange is the Venus-arc kernel delta (GPU-DESIGN.md section 6.2).
+    pub fn shm_region(&self, shmid: u8) -> Option<(u64, u64)>;
     pub fn intid(&self) -> Option<u32>;                          // INTx GIC INTID
     pub fn notify_off_multiplier(&self) -> u32;
     pub fn virtio_device_id(&self) -> u16;

@@ -84,11 +84,21 @@ static unsigned order_for_pages(size_t page_count) {
 // Lifecycle.
 // =============================================================================
 
+// The kernel-minted DMA subtype, chosen at create and immutable thereafter.
+// An enum rather than bool params so a caller cannot construct the
+// weave-AND-gpu_bo state (each mint sets exactly one bit, or neither).
+enum dma_subtype {
+    DMA_SUBTYPE_PLAIN,
+    DMA_SUBTYPE_WEAVE,     // G-2: device-READ framebuffer class
+    DMA_SUBTYPE_GPU_BO,    // Warp-2: device-WRITTEN GPU buffer class
+};
+
 // Shared construction body. `max_size` is the per-subtype envelope
-// (KOBJ_DMA_MAX_SIZE for general DMA; KOBJ_DMA_WEAVE_MAX_SIZE for a weave);
-// `weave` is the G-2 kernel-minted device-passive subtype bit, set here ONCE
-// and never written again (create-immutable, like `pa`).
-static struct KObj_DMA *dma_create_body(size_t size, size_t max_size, bool weave) {
+// (KOBJ_DMA_MAX_SIZE general; KOBJ_DMA_WEAVE_MAX_SIZE / KOBJ_DMA_GPU_BO_
+// MAX_SIZE per subtype); the subtype bit is set here ONCE and never written
+// again (create-immutable, like `pa`).
+static struct KObj_DMA *dma_create_body(size_t size, size_t max_size,
+                                        enum dma_subtype subtype) {
     if (!g_dma_initialized)               return NULL;
     if (size == 0)                        return NULL;
 
@@ -120,13 +130,14 @@ static struct KObj_DMA *dma_create_body(size_t size, size_t max_size, bool weave
         return NULL;
     }
 
-    k->magic = KOBJ_DMA_MAGIC;
-    k->pa    = page_to_pa(pages);
-    k->size  = aligned_size;
-    k->pages = pages;
-    k->order = order;
-    k->ref   = 1;
-    k->weave = weave;
+    k->magic  = KOBJ_DMA_MAGIC;
+    k->pa     = page_to_pa(pages);
+    k->size   = aligned_size;
+    k->pages  = pages;
+    k->order  = order;
+    k->ref    = 1;
+    k->weave  = (subtype == DMA_SUBTYPE_WEAVE);
+    k->gpu_bo = (subtype == DMA_SUBTYPE_GPU_BO);
 
     __atomic_fetch_add(&g_dma_created, 1u, __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_dma_live,    1u, __ATOMIC_RELAXED);
@@ -134,11 +145,15 @@ static struct KObj_DMA *dma_create_body(size_t size, size_t max_size, bool weave
 }
 
 struct KObj_DMA *kobj_dma_create(size_t size) {
-    return dma_create_body(size, KOBJ_DMA_MAX_SIZE, false);
+    return dma_create_body(size, KOBJ_DMA_MAX_SIZE, DMA_SUBTYPE_PLAIN);
 }
 
 struct KObj_DMA *kobj_dma_create_weave(size_t size) {
-    return dma_create_body(size, KOBJ_DMA_WEAVE_MAX_SIZE, true);
+    return dma_create_body(size, KOBJ_DMA_WEAVE_MAX_SIZE, DMA_SUBTYPE_WEAVE);
+}
+
+struct KObj_DMA *kobj_dma_create_gpu_bo(size_t size) {
+    return dma_create_body(size, KOBJ_DMA_GPU_BO_MAX_SIZE, DMA_SUBTYPE_GPU_BO);
 }
 
 void kobj_dma_ref(struct KObj_DMA *k) {

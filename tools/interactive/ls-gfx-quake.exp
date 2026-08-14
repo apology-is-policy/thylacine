@@ -35,7 +35,7 @@ set ::env(THYLACINE_ACCEL) hvf
 source [file join [file dirname [info script]] lib.exp]
 
 set repo $lc_repo
-set qmp "$repo/build/qmp.sock"
+set qmp [lc_qmp_sock]
 
 # Fingerprint a screendump PNG: (rolling hash of a pixel grid, distinct
 # color-bucket count). Two different game frames differ in the hash; a

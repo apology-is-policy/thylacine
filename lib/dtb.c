@@ -736,7 +736,9 @@ bool dtb_pci_intx_route(u8 pci_dev, u8 pin, u32 *out_gic_intid) {
     return false;
 }
 
-bool dtb_pci_mem_window(u64 *out_base, u64 *out_size) {
+// Shared walker for both MMIO windows. `want_space` is the phys.hi[25:24]
+// code: 0b10 = 32-bit MMIO, 0b11 = 64-bit MMIO.
+static bool dtb_pci_window_of(uint32_t want_space, u64 *out_base, u64 *out_size) {
     if (!out_base || !out_size) return false;
     const uint8_t *d;
     uint32_t len;
@@ -745,8 +747,9 @@ bool dtb_pci_mem_window(u64 *out_base, u64 *out_size) {
     // Each PCI `ranges` entry is 7 cells (28 bytes): child phys.hi/mid/lo
     // (3) + parent address (root #address-cells = 2) + size (2). phys.hi
     // bits [25:24] encode the space: 0b01 = I/O, 0b10 = 32-bit MMIO, 0b11
-    // = 64-bit MMIO. Return the 32-bit MMIO window (where virtio-pci BARs
-    // land on QEMU virt).
+    // = 64-bit MMIO. Returns the window matching `want_space` (32-bit is
+    // where virtio-pci BARs normally land on QEMU virt; the 64-bit one is
+    // the only arena that can hold a multi-GiB BAR).
     const uint32_t ENTRY_CELLS = 7u;
     if (len == 0 || (len % 4) != 0) return false;
     uint32_t cells = len / 4;
@@ -755,7 +758,7 @@ bool dtb_pci_mem_window(u64 *out_base, u64 *out_size) {
     for (uint32_t e = 0; e < nentries; e++) {
         const uint8_t *ent = d + (size_t)e * ENTRY_CELLS * 4;
         uint32_t phys_hi = be32_load(ent);
-        if (((phys_hi >> 24) & 0x3u) != 0x2u) continue;       // want 32-bit MMIO
+        if (((phys_hi >> 24) & 0x3u) != want_space) continue;
         uint32_t p_hi = be32_load(ent + 12);
         uint32_t p_lo = be32_load(ent + 16);
         uint32_t s_hi = be32_load(ent + 20);
@@ -765,6 +768,18 @@ bool dtb_pci_mem_window(u64 *out_base, u64 *out_size) {
         return true;
     }
     return false;
+}
+
+bool dtb_pci_mem_window(u64 *out_base, u64 *out_size) {
+    return dtb_pci_window_of(0x2u, out_base, out_size);   // 32-bit MMIO
+}
+
+// The 64-bit (usually prefetchable) MMIO window. QEMU virt places it at
+// 0x80_0000_0000 with 512 GiB of span -- the only arena that can hold a
+// large BAR (a virtio-gpu `hostmem=4G` presents a 4 GiB BAR, which the
+// ~752 MiB 32-bit window structurally cannot place; #166).
+bool dtb_pci_mem_window64(u64 *out_base, u64 *out_size) {
+    return dtb_pci_window_of(0x3u, out_base, out_size);
 }
 
 // Walk /chosen for a single property. Returns the property data bounds

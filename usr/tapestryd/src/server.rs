@@ -81,24 +81,106 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use libthyla_rs::ninep as p9;
+use libthyla_rs::time::Instant;
 use libthyla_rs::{
-    t_burrow_detach, t_close, t_dma_create_weave, t_dma_map, t_srv_peer, t_weft_share,
-    t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM, T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE,
-    T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
+    t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map, t_srv_peer,
+    t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM, T_PRINCIPAL_SYSTEM,
+    T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
+    T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
 
+/// Present-pressure window for the idle throttle (#164): two adjacent
+/// buckets of this width approximate a sliding window, so `animating()`
+/// is "at least PRESENT_BURST_MIN well-formed presents in the last
+/// ~2x250 ms" -- sustained >= ~8 Hz. Aurora's ~2 Hz cursor blink puts at
+/// most 1 present per bucket (sum <= 2, margin 2 under the threshold),
+/// so a quiet console still throttles (the residual-2 idle win holds);
+/// an animating client (a game at 60 fps, scrolling output, >= 8 fps
+/// video) holds the clock at the ctl rate. Content below ~8 fps stays
+/// throttled -- the 15 Hz idle tick displays it losslessly.
+const PRESENT_BURST_WINDOW_MS: u64 = 250;
+const PRESENT_BURST_MIN: u32 = 4;
+
 use crate::chords::{ChordAction, Chords};
-use crate::gpu::Gpu;
+use crate::gpu::{FencedErr, Gpu};
 use crate::pane::{self, Dir, Layout, Mode, Rect, Role};
 
 pub const MAX_CONNS: usize = 8;
-const MAX_FIDS: usize = 32;
+/// Of those, at most this many may be WARP conns (audit F7). Warp-2c fed
+/// a second listener into the same pool, so a GPU client opening
+/// `/srv/warp` eight times filled it and BOTH listeners stopped being
+/// polled -- the compositor's own listener starved, and aurora (the
+/// console renderer) could not reconnect. The renderer's door is never
+/// closed by GPU clients now.
+pub const MAX_WARP_CONNS: usize = 4;
+/// Sized for GL-scale connections, not the text protocol the original 32
+/// was chosen for: a warp client holds ONE OPEN FID PER LIVE BO MAPPING
+/// (the map fid's clunk is what drops the mapping, I-7), so a Quake-class
+/// texture set needs hundreds of live fids on one conn. At 32 the table
+/// capped a GL ctx at ~28 live textures -- every later walk refused
+/// E_NOMEM at Twalk, which the Mesa client saw as create3d/open failures
+/// (the #198 storm: bo-peak 26, deterministic first refusal, no server-
+/// side warp diagnostic, because the refusal never reached the warp
+/// dispatch). ~24 B/slot inline in Conn: 512 x 8 conns ~= 100 KiB.
+const MAX_FIDS: usize = 512;
 pub const SRV_MSIZE: u32 = 32768;
 const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 
 /// F9: the per-client surface-count cap + the global slot pool.
 const MAX_SURFACES: usize = 8;
 const MAX_SURFACES_PER_CONN: usize = 4;
+
+/// Warp-2c: the GPU-seam slot pools. ONE context per client (the I-45
+/// exposure bound, GPU-DESIGN section 8: no cross-context resource naming,
+/// one ctx per conn); BOs bounded per ctx (each is a kernel GPU-BO mint the
+/// client's shared-map budget also bounds -- this cap is the server's own
+/// bookkeeping bound, not the resource authority).
+const MAX_WARP_CTXS: usize = 8;
+/// Lifted 16 -> 128 at Warp-3 (st/mesa alone mints ~8 hw_res before the
+/// first draw; a GL app's textures are one hw_res each), then 128 -> 1024
+/// at #204: GLQuake's map load holds MORE than 128 textures live at once,
+/// so every create past the cap streamed GL_OUT_OF_MEMORY (#213, 1889
+/// lines on the Pi) and the draws over the missing textures fed the #198
+/// GL_INVALID_OPERATION storm. The per-ctx `bo-peak` census field is the
+/// witness this width is sized against -- read it after a real workload
+/// rather than re-guessing. The round-6 F1 cap argument is unchanged by
+/// the value: the creation-time `leaked_count + live_backed` cap admits
+/// at most one graveyard park per entry, and the graveyard reserves this
+/// same constant at ctx mint, so "no record is ever dropped" holds by
+/// construction at any width. The rows are HEAP allocations per minted
+/// ctx (~160 KiB each; 1024-wide rows outgrew the daemon's main-thread
+/// stack, where `Tapestryd` lives) -- a failed allocation fails the MINT
+/// clean, never a later park. The BYTE bound (WARP_CTX_BACKING_MAX) is
+/// the real resource authority and does not move: 1024 BOs averaging
+/// 64 KiB is exactly the 64 MiB envelope. Exposed to clients as ctl
+/// `bo-cap` (the prover's churn discriminator derives from it rather
+/// than hardcoding).
+const MAX_WARP_BOS_PER_CTX: usize = 1024;
+/// One ctx's share of the process-wide fenced lane (round-5 F4). Half, so
+/// a second client can always make progress and no single client can drive
+/// every slot into the abandonment poison.
+const WARP_CTX_FENCE_MAX: usize = crate::gpu::FENCED_SLOTS / 2;
+const _: () = {
+    // Round-6 F2: the share is a DIVISION, so it silently degenerates.
+    // At FENCED_SLOTS = 1 the cap is 0 and `fences_in_flight >= 0` is
+    // always true -- every submit and transfer returns E_AGAIN forever
+    // and the 3D seam is dead with no build-time signal. At 3 the cap is
+    // 1, which is sound but strands the prover, whose submit+transfer
+    // pair must be in flight together. Only the upper bound was pinned
+    // (gpu.rs asserts 2 + 2*FENCED_SLOTS <= QUEUE_SIZE); this is the
+    // floor, and it names the prover as the reason.
+    assert!(WARP_CTX_FENCE_MAX >= 2);
+};
+/// Total live BO backing per context (audit F2). The per-BO kernel
+/// envelope is 64 MiB, and 16 BOs x 8 ctxs would let clients pin 8 GiB of
+/// contiguous kernel memory that NOTHING charges -- graceful-OOM, but I-32
+/// exists so a non-TCB Proc cannot get there, and here the allocation is
+/// laundered through the TCB driver. 64 MiB/ctx (512 MiB total worst case)
+/// covers a 4K RGBA render target with room over.
+const WARP_CTX_BACKING_MAX: u64 = 64 * 1024 * 1024;
+/// The widest plausible bytes-per-pixel for the geometry sanity check
+/// (RGBA32F is 16); the host owns real format validity per section 2.1.
+const WARP_BO_MAX_BPP: u64 = 16;
 
 /// Triple buffering (D1): one weave carries three page-aligned slots.
 const WEAVE_SLOTS: u32 = 3;
@@ -108,6 +190,31 @@ const WEAVE_SLOTS: u32 = 3;
 const EVENT_QUEUE_CAP: usize = 128;
 
 const PAGE: u64 = 0x1000;
+
+// The #240 health probe's virgl vocabulary (GPU-DESIGN 4.5.4b). The seam is
+// otherwise opaque to command streams -- these exist ONLY because the probe
+// is the one stream the SERVER authors. virgl_protocol.h, wire-frozen.
+// 17, ONE PAST VIRGL_CCMD_BLIT (16). Both values are enum ORDINALS, and the
+// first cut of this constant read 96 -- a LINE NUMBER out of a grep of
+// virgl_protocol.h, the identical mistake that put BLIT at 21 in warp-prove
+// (21 is GET_QUERY_RESULT). warp-prove's own `VIRGL_CCMD_BLIT = 16` carries
+// that scar as a comment, and 96 should have been rejected on sight for
+// being nowhere near its neighbour. Derive ordinals by counting the enum,
+// never by grepping for the name.
+const VIRGL_CCMD_RESOURCE_COPY_REGION: u32 = 17;
+/// From `#define VIRGL_CMD_RESOURCE_COPY_REGION_SIZE 13` -- a real #define
+/// with a real value, unlike the opcode above.
+const VIRGL_CMD_RCR_SIZE: u32 = 13;
+const PIPE_TEXTURE_2D: u32 = 2;
+const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
+const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
+/// What `mark` holds. Arbitrary but FIXED, and deliberately not 0 or an
+/// all-ones word: a zeroed or untouched page must never read as a healthy
+/// verify.
+const PROBE_MARK: u32 = 0x5741_5250; // "WARP"
+/// The seed XOR base. The per-verify token mixes the sequence in, so
+/// "unchanged" cannot be satisfied by a value a PREVIOUS verify left.
+const PROBE_TOKEN_BASE: u32 = 0x2444_3040;
 
 /// The weave-mapping VA window in tapestryd's own AS (bump-allocated;
 /// freed VAs are not reused at stage 0 -- bounded by the surface caps per
@@ -131,6 +238,13 @@ const SURF_FLAG: u64 = 1 << 40;
 const PANE_FLAG: u64 = 1 << 41; // pane qids (G-6): PANE_FLAG | id<<8 | fk
 const FK_MASK: u64 = 0xff;
 const N_MASK: u64 = 0x00ff_ffff;
+/// The warp id field is wider than the surface/pane one (audit F11): warp
+/// qids reserve bits 38+ for their level flags, so bits 8..38 are free.
+/// A 30-bit field makes the monotonic-id-never-aliases property real
+/// rather than "true for the first 2^24 mints" -- ctx/BO resolvers compare
+/// the FULL u32 pub_id, so a truncating qid would resolve to an earlier
+/// live object of the same conn once the counter passed the mask.
+const WARP_N_MASK: u64 = 0x3fff_ffff;
 
 const FK_DIR: u64 = 0;
 const FK_CTL: u64 = 1;
@@ -184,12 +298,76 @@ fn is_pane(path: u64) -> bool {
     path & PANE_FLAG != 0
 }
 
+// --- The /dev/warp tree (Warp-2c; GPU-DESIGN.md section 4.1) ----------------
+//
+// A SECOND service tree served by the same process (the section 5 placement:
+// tapestryd hosts the GPU service on QEMU because warden binding is one
+// exclusive claimant per function). Warp conns attach at W_ROOT instead of
+// P_ROOT (Conn.root); the two trees share the conn/fid machinery and the
+// qid space is disjoint by WARP_FLAG. Contexts and BOs carry MONOTONIC
+// public ids (the pane discipline: never reused, so a stale fid resolves to
+// nothing and no generation machinery is needed); the DEVICE ctx id is the
+// slot index + 1 (small + reused only after a synchronous CTX_DESTROY --
+// virglrenderer's context-id space is bounded, a monotonic id is not).
+
+const WARP_FLAG: u64 = 1 << 42;
+const WARP_CTX: u64 = 1 << 39; // a ctx/<id> node (below the tag bits)
+const WARP_BO: u64 = 1 << 38; // a ctx bo/<id> node
+
+const W_ROOT: u64 = WARP_FLAG;
+/// The attach roots by listener (main.rs hands the accepting listener's
+/// root to Conn::new).
+pub const ROOT_TAPESTRY: u64 = P_ROOT;
+pub const ROOT_WARP: u64 = W_ROOT;
+const W_CTL: u64 = WARP_FLAG | 1;
+const W_CAPS: u64 = WARP_FLAG | 2;
+const W_CTX_DIR: u64 = WARP_FLAG | 3;
+const W_CTX_NEW: u64 = WARP_FLAG | 4;
+
+// Ctx-level file kinds (ctx/<id>/*).
+const WFK_DIR: u64 = 0;
+const WFK_CTL: u64 = 1;
+const WFK_SUBMIT: u64 = 2;
+const WFK_FENCE: u64 = 3;
+const WFK_BO_DIR: u64 = 4;
+const WFK_BO_NEW: u64 = 5;
+// BO-level file kinds (ctx/<id>/bo/<id>/*), under WARP_BO.
+const WFK_BO_CTL: u64 = 1;
+const WFK_BO_MAP: u64 = 2;
+const WFK_BO_INFO: u64 = 3;
+
+fn make_wctx(id: u32, fk: u64) -> u64 {
+    WARP_FLAG | WARP_CTX | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
+}
+fn make_wbo(id: u32, fk: u64) -> u64 {
+    WARP_FLAG | WARP_BO | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
+}
+fn warp_id(path: u64) -> u32 {
+    ((path >> 8) & WARP_N_MASK) as u32
+}
+fn warp_fk(path: u64) -> u64 {
+    path & FK_MASK
+}
+fn is_warp(path: u64) -> bool {
+    path & WARP_FLAG != 0
+}
+fn is_wctx(path: u64) -> bool {
+    is_warp(path) && path & WARP_CTX != 0 && path & WARP_BO == 0
+}
+fn is_wbo(path: u64) -> bool {
+    is_warp(path) && path & WARP_BO != 0
+}
+
 fn is_dir(path: u64) -> bool {
     path == P_ROOT
         || path == P_SURF_DIR
         || path == P_PANE_DIR
         || (is_surf(path) && surf_fk(path) == FK_DIR)
         || (is_pane(path) && pane_fk(path) == PFK_DIR)
+        || path == W_ROOT
+        || path == W_CTX_DIR
+        || (is_wctx(path) && (warp_fk(path) == WFK_DIR || warp_fk(path) == WFK_BO_DIR))
+        || (is_wbo(path) && warp_fk(path) == WFK_DIR)
 }
 
 // Mode constants (the ptyfs set).
@@ -351,6 +529,12 @@ struct Surface {
     held: Option<Held>,
     title: String,
     events: VecDeque<Tevent>,
+    /// Warp-4: the GL adoption's SURFACE half -- the warp ctx pub id this
+    /// surface accepts as its display source (`glsrc <ctx>`). Display
+    /// activates only while that ctx's own consent names this surface
+    /// incarnation back (mutual adoption, `gl_adoption`); resolved fresh
+    /// at every use, never cached, so either side's death is inert here.
+    gl_src: Option<u32>,
     presents: u64, // diagnostic counter
 }
 
@@ -438,6 +622,19 @@ pub struct Comp {
     surfaces: [Option<Surface>; MAX_SURFACES],
     gen_seq: u32,
     conn_seq: u64,
+    /// The ctx-less half of the create3d refusal one-shots (WDIAG_* bits):
+    /// parse/no-record/OPNOTSUPP arms fire before a ctx resolves, and the
+    /// per-ctx latch cannot carry them (the #198 hunt's blind spot). The
+    /// mask is comp-global (any conn can spend a bit for the daemon's
+    /// life), so it is EXPOSED in the global warp ctl (`diag-noctx-arms`)
+    /// -- a spent latch must at least be visible (audit F4).
+    warp_diag_noctx_arms: u32,
+    /// Refusals no per-ctx counter could take (the record never resolved:
+    /// E_NOENT always lands here, E_INVAL/E_OPNOTSUPP when the bo id is
+    /// dead). Global-ctl twin of the per-ctx `create-refused` -- without
+    /// it a post-#218 retry storm against consumed records is census-
+    /// invisible (audit F3, the #210 two-ledgers shape).
+    warp_create_refused_noctx: u64,
     /// GPU resource ids are PER-GENERATION (a reweave mints a fresh one);
     /// pre-incremented, so the first id is SCREEN_RES + 1.
     res_seq: u32,
@@ -445,6 +642,14 @@ pub struct Comp {
     layout: Layout,
     screen: Option<Screen>,
     scanout: Scanout,
+    /// Warp-4: the resource id the DEVICE currently scans out (0 = none/
+    /// disabled). `scanout` is the mode-machine's INTENT; this is the
+    /// device's truth -- they diverge across the soft-Off windows (the
+    /// 1037-style defer keeps the old pixels bound until the next
+    /// present-COMPLETE). The GL death-falls key on THIS: an unref of the
+    /// scanned-out resource is the one order the display cannot survive,
+    /// and only the device truth can name which resource that is.
+    bound_res: u32,
     /// The F16 deferred direct switch: SET_SCANOUT to this surface's
     /// resource rides its next present-COMPLETE, never earlier.
     pending_direct: Option<usize>,
@@ -457,6 +662,12 @@ pub struct Comp {
     /// The FRAME clock (section 18.4): a synthesized fixed-rate tick.
     pub tick: u64,
     pub clock_hz: u32,
+    /// Present-pressure buckets (#164; see PRESENT_BURST_WINDOW_MS).
+    /// Single-threaded like all of Comp -- written by `present()`, read
+    /// by the main loop's tick-rate decision, same loop pass.
+    present_bucket_start: Option<Instant>,
+    present_bucket_count: u32,
+    present_prev_count: u32,
     weave_va_next: u64,
     /// The surface TEV_FOCUS was last emitted for (G-6c): reconcile
     /// compares against the layout's focused surface and emits the
@@ -490,6 +701,225 @@ pub struct Comp {
     /// `tick` ctl writes) and TPRESENT_HOLD is accepted.
     #[cfg(feature = "test-mode")]
     test_mode: bool,
+    /// Warp-2c: the GPU-seam context slots + the monotonic public-id
+    /// sequences (the pane discipline -- tree names are never reused).
+    warp_ctxs: [Option<WarpCtx>; MAX_WARP_CTXS],
+    /// A slot retired while its device context may still hold live work
+    /// (round-2 F8): never re-minted, because dev_ctx is derived from the
+    /// slot index and reuse would alias a stale stream onto a new client.
+    warp_ctx_slot_poisoned: [bool; MAX_WARP_CTXS],
+    /// Backings the wedge posture refused to free, parked per ctx SLOT so
+    /// the vindication that proves the device finished can free them
+    /// (round-5 F1). Without this the vindication recovered the SLOT but
+    /// never the PAGES, and since the ctx -- and with it `leaked_bytes` --
+    /// dies at `wctx_finish`, each recovered slot handed the client a
+    /// fresh cap: 64 MiB leaked per cycle, unbounded.
+    ///
+    /// **This graveyard can never overflow (round-6 F1).** Round 5 bounded
+    /// it "by construction: a ctx holds at most MAX_WARP_BOS_PER_CTX
+    /// backings at a time" -- but `bos[]` slots are REUSED, so a
+    /// poisoned-yet-live ctx could mint/build/destroy in a loop and park
+    /// far more than 16 over its life, bounded only by bytes. The surplus
+    /// was dropped by value, and `WarpBo` has no `Drop`, so each drop
+    /// leaked a kernel handle AND a mapping. The real bound is the per-ctx
+    /// `leaked_count` cap enforced at BO creation, which admits at most
+    /// one park per graveyard entry -- so no record is ever dropped, and
+    /// the overflow flag this used to need is gone. Heap rows since #204
+    /// (the 1024 lift): capacity for the full cap is `try_reserve`d at ctx
+    /// MINT -- an OOM fails the mint clean -- so the parks themselves stay
+    /// infallible (a push within reserved capacity never allocates). The
+    /// capacity is never shrunk while the slot is poisoned; the row is
+    /// drained (records freed) only at vindication.
+    warp_ctx_leaked: [Vec<WarpBo>; MAX_WARP_CTXS],
+    /// The pub id whose poison condemned each slot, so a later
+    /// vindication can release it (round-3 F2). 0 = none.
+    warp_ctx_vindicate: [u32; MAX_WARP_CTXS],
+    warp_ctx_seq: u32,
+    warp_bo_seq: u32,
+    /// #204 census, the global half: max `bo_backed_peak` over every ctx
+    /// that ever lived -- readable AFTER a workload's ctx is gone (the
+    /// per-ctx field dies with the ctx). Read via global ctl `bo-peak`.
+    warp_bo_peak: u32,
+    /// The global BYTES-axis twin: max `bo_bytes_peak` over every ctx that
+    /// ever lived. Read via global ctl `bo-bytes-peak`.
+    warp_bo_bytes_peak: u64,
+    /// #210 custody mirror: parked reads + request-buffer residue across
+    /// ALL conns, folded per tick by main's conns walk (the ctl reader's
+    /// conn cannot see its siblings). fparked/rparked = pending fence /
+    /// event reads held server-side; inbuf_max = the largest partial
+    /// request buffered (a persistent nonzero = a parse desync); f_ctx +
+    /// f_fid identify the first parked fence read.
+    #[cfg(feature = "test-mode")]
+    pub w210_fparked: u32,
+    #[cfg(feature = "test-mode")]
+    pub w210_rparked: u32,
+    #[cfg(feature = "test-mode")]
+    pub w210_inbuf_max: u32,
+    #[cfg(feature = "test-mode")]
+    pub w210_f_ctx: u32,
+    #[cfg(feature = "test-mode")]
+    pub w210_f_fid: u32,
+}
+
+/// A GPU-seam rendering context (Warp-2c). Owned by one conn; the DEVICE
+/// ctx id is its slot + 1 (reused only after the synchronous CTX_DESTROY).
+/// The #240 health probe's two server-owned resources (GPU-DESIGN 4.5.4b).
+/// `mark` is painted once at ctx create and never written again; `sentinel`
+/// is seeded per verify and then copied into. Both are 1x1 B8G8R8A8, so the
+/// whole probe moves 4 bytes each way.
+struct CtxProbe {
+    mark_res: u32,
+    mark_fd: i64,
+    mark_va: u64,
+    sent_res: u32,
+    sent_fd: i64,
+    sent_va: u64,
+    size: u64,
+}
+
+struct WarpCtx {
+    owner_conn: u64,
+    pub_id: u32,
+    dev_ctx: u32,
+    /// The client's declared capset + ring count (`ctl` writes). Recorded
+    /// at the seam from day one; the device sees them when
+    /// F_CONTEXT_INIT / per-ring fencing are negotiated (Venus).
+    capset: u32,
+    rings: u32,
+    /// Fenced-lane bookkeeping (W2d): chains submitted-not-retired for
+    /// this ctx; the DENSE per-ctx completion count (#210 -- NOT the
+    /// device-global fence id); the newest count the fence file has
+    /// reported. signaled > reported = one unread record.
+    fences_in_flight: u32,
+    fence_signaled: u64,
+    fence_reported: u64,
+    /// #210 ledger reconciliation: every fenced write that REACHED the
+    /// dispatch funnel (rx), split by outcome (minted / E_AGAIN refused /
+    /// other error). The client's `issued` counts its successful fenced
+    /// writes, so at quiescence issued == minted must hold; rx - minted -
+    /// again - err > 0 would be an answered-without-dispatch arm.
+    fenced_rx: u64,
+    fenced_minted: u64,
+    fenced_again: u64,
+    fenced_err: u64,
+    /// A fence of this ctx was ABANDONED (never retired within the
+    /// driver's bound): the device may still be writing its backings, so
+    /// every later retire under this ctx LEAKS rather than frees.
+    fence_poisoned: bool,
+    /// Bytes of backing this ctx LEAKED (retired under a poisoned fence,
+    /// so the device may still DMA them). Round-2 F3: the leak used to
+    /// free the `bos[]` slot, which re-armed WARP_CTX_BACKING_MAX every
+    /// iteration -- a client could leak 64 MiB per cycle without bound.
+    /// Leaked bytes keep counting against the cap for the ctx's life.
+    leaked_bytes: u64,
+    /// Backings this ctx leaked, COUNTED (round-6 F1). The byte cap alone
+    /// does not bound the count -- at the minimum accepted size (PAGE) a
+    /// ctx can leak 16384 backings inside its 64 MiB budget, which is what
+    /// overran the 16-wide graveyard. Capped at MAX_WARP_BOS_PER_CTX at BO
+    /// creation so the graveyard is always wide enough to take every one.
+    /// Both counters reset together at the live un-poison, where the pages
+    /// are genuinely freed -- an uncharge is only honest when paired with
+    /// the drop that FREES.
+    leaked_count: u32,
+    /// Destroy was requested while fences were still in flight (audit
+    /// F5): the ctx is hidden from every client resolve immediately and
+    /// the serve-loop pump finishes the retire once quiesced. The old
+    /// shape blocked the dispatch for up to 2 s per object -- client-
+    /// multipliable into minutes of frozen console (#31/#125).
+    retiring: bool,
+    /// #240 health probe (GPU-DESIGN 4.5.4b). Two 1x1 resources the client
+    /// can never name: `mark` holds a fixed value, `sentinel` is the
+    /// target a verify copies into. Kept OUT of `bos[]` deliberately --
+    /// every client-facing resolve walks that array, so membership would
+    /// be the reachability the audit forbids (a client that can write
+    /// either can forge health, or manufacture a rejection against a
+    /// healthy ctx).
+    probe: Option<CtxProbe>,
+    /// vrend has latched this context's command stream off: submits are
+    /// still ACCEPTED and their fences still retire, but no command runs
+    /// (#240, measured). STICKY, exactly like the vrend latch it mirrors,
+    /// and exactly like `glGetGraphicsResetStatus` / VK_ERROR_DEVICE_LOST
+    /// -- the remedy is recreate, never retry. DISTINCT from
+    /// `fence_poisoned`, whose cause is a chain that never retired; #240
+    /// happened because the one was read through the other.
+    stream_rejected: bool,
+    /// The verify sequence that caught the loss. The offending stream lies
+    /// in (previous_verify, rejected_at] -- a window, never a command.
+    rejected_at: u64,
+    /// Verifies run on this ctx. Monotonic; `rejected_at` names one of
+    /// these, and a reader can tell "never verified" (0) from "verified
+    /// and healthy" (>0 with stream_rejected 0) -- the #184 distinction.
+    verify_seq: u64,
+    /// The compositor tick the last verify ran on. SELF-AUDIT FINDING: the
+    /// `verify` verb costs THREE synchronous device round trips on the
+    /// compositor's own dispatch thread, and it is client-triggered -- so
+    /// unrated it is a fresh DoS lever, a client spinning writes to starve
+    /// the present path. The fenced lane has `E_AGAIN` admission for exactly
+    /// this reason and the sync slot bypasses all of it. One probe per ctx
+    /// per tick is the bound: it is precisely the per-frame cadence 4.5.4b
+    /// designs for, so it costs the intended use nothing, and it caps the
+    /// whole box at MAX_WARP_CTXS probes per frame no matter what clients do.
+    verify_tick: u64,
+    /// Warp-4: the GL adoption's CTX half -- `present-to <surface> <bo>`:
+    /// this ctx consents to displaying its BO `bo_pub` on surface
+    /// (slot, gen). The gen pin makes a consent die with the surface
+    /// incarnation it named -- slot reuse cannot re-arm it against a
+    /// future tenant.
+    present_to: Option<(usize, u32, u32)>,
+    /// #204 census: the most BACKED BOs this ctx ever held at once -- the
+    /// quantity the creation-time cap gates, so it is the number the cap
+    /// width must be sized against. Read via ctl `bo-peak`.
+    bo_backed_peak: u32,
+    /// #204 census, the BYTES axis: the largest live-backing byte sum this
+    /// ctx ever held -- the quantity WARP_CTX_BACKING_MAX gates (bo-peak
+    /// 26 with thousands of refusals showed the BYTE cap can saturate at
+    /// tiny counts: few-but-large backings). Read via ctl `bo-bytes-peak`.
+    bo_bytes_peak: u64,
+    /// #218 one-shot diagnostic latch, PER ARM (a bitmask indexed by
+    /// WDIAG_*): the FIRST refusal of each kind per ctx says which arm
+    /// and with what parameters (four census runs died to silence here,
+    /// and the per-CTX-once predecessor could name only one kind per ctx
+    /// lifetime -- the #198 hunt needed the second). One-shot per arm so
+    /// a per-texture failure loop cannot become its own console storm.
+    build_diag_arms: u32,
+    /// Every create3d refusal of this ctx, ALL families (counted at the
+    /// ctl chokepoint beside the #218 unmint). The one-shots name the
+    /// first of each kind; this counts the storm, census-readably.
+    create_refused: u64,
+    /// Heap row (#204): MAX_WARP_BOS_PER_CTX slots, allocated at mint.
+    bos: alloc::boxed::Box<[Option<WarpBo>]>,
+}
+
+/// A GPU buffer object: a kernel-minted GPU-BO DMA chunk attached as the
+/// backing of a device-global 3D resource, shared to the client by Tweft.
+struct WarpBo {
+    pub_id: u32,
+    res_id: u32,
+    dma_fd: i64,
+    va: u64,
+    pa: u64,
+    size: u64,
+    /// The lazy Tweft mint (the weft_ensure precedent); disarmed at retire
+    /// BEFORE any backing free (the R2-F5 ordering).
+    share_id: Option<u64>,
+    w: u32,
+    h: u32,
+    /// Destroy requested under in-flight fences (audit F5): already
+    /// unresolvable to the client; the pump frees it when the ctx
+    /// quiesces (or leaks it if a fence was abandoned).
+    retiring: bool,
+}
+
+/// Warp-4: a resolved ACTIVE GL adoption (see `gl_adoption`) -- the
+/// device ctx + 3D resource + tapestryd's own mapping of its backing.
+/// A value is valid for the single dispatch that resolved it.
+#[derive(Clone, Copy)]
+struct GlAdopt {
+    dev_ctx: u32,
+    res_id: u32,
+    va: u64,
+    w: u32,
+    h: u32,
 }
 
 const NO_SURFACE: Option<Surface> = None;
@@ -501,15 +931,21 @@ impl Comp {
             surfaces: [NO_SURFACE; MAX_SURFACES],
             gen_seq: 0,
             conn_seq: 0,
+            warp_diag_noctx_arms: 0,
+            warp_create_refused_noctx: 0,
             res_seq: SCREEN_RES,
             layout: Layout::new(),
             screen: None,
             scanout: Scanout::Boot,
+            bound_res: 0,
             pending_direct: None,
             chrome_epoch: 0,
             geom_sig: 0,
             tick: 0,
             clock_hz: 60,
+            present_bucket_start: None,
+            present_bucket_count: 0,
+            present_prev_count: 0,
             weave_va_next: WEAVE_VA_BASE,
             last_focus: None,
             chord_down: [0; 4],
@@ -519,6 +955,24 @@ impl Comp {
             ptr_y: 0,
             #[cfg(feature = "test-mode")]
             test_mode: false,
+            warp_ctxs: [WARP_NO_CTX; MAX_WARP_CTXS],
+            warp_ctx_slot_poisoned: [false; MAX_WARP_CTXS],
+            warp_ctx_leaked: core::array::from_fn(|_| Vec::new()),
+            warp_ctx_vindicate: [0; MAX_WARP_CTXS],
+            warp_ctx_seq: 0,
+            warp_bo_seq: 0,
+            warp_bo_peak: 0,
+            warp_bo_bytes_peak: 0,
+            #[cfg(feature = "test-mode")]
+            w210_fparked: 0,
+            #[cfg(feature = "test-mode")]
+            w210_rparked: 0,
+            #[cfg(feature = "test-mode")]
+            w210_inbuf_max: 0,
+            #[cfg(feature = "test-mode")]
+            w210_f_ctx: 0,
+            #[cfg(feature = "test-mode")]
+            w210_f_fid: 0,
         }
     }
 
@@ -546,7 +1000,7 @@ impl Comp {
     }
 
     pub fn next_conn_id(&mut self) -> u64 {
-        self.conn_seq += 1;
+        self.conn_seq = self.conn_seq.wrapping_add(1);
         self.conn_seq
     }
 
@@ -594,13 +1048,14 @@ impl Comp {
             offered: None,
             title: String::new(),
             events: VecDeque::new(),
+            gl_src: None,
             presents: 0,
         });
         Some(n)
     }
 
     fn next_res_id(&mut self) -> u32 {
-        self.res_seq += 1;
+        self.res_seq = self.res_seq.wrapping_add(1);
         self.res_seq
     }
 
@@ -948,6 +1403,7 @@ impl Comp {
             }
             // The device now scans new.res (zeroed; reconcile's structural
             // repaint fills it this dispatch); old.res is no longer bound.
+            self.bound_res = new.res;
         }
         // Commit: the old screen is now un-scanned (rebound above) or was
         // never bound (Boot/Off/Direct) -- either way safe to free.
@@ -1176,6 +1632,7 @@ impl Comp {
                 self.pending_direct = None;
                 if self.scanout != Scanout::Off && self.scanout != Scanout::Boot {
                     let _ = self.gpu.set_scanout(0, dw, dh);
+                    self.bound_res = 0;
                     self.scanout = Scanout::Off;
                 }
             }
@@ -1224,7 +1681,9 @@ impl Comp {
                 if entering {
                     let sres = self.screen.as_ref().map(|s| s.res).unwrap_or(0);
                     say!("tapestryd: scanout composed ({}x{})", dw, dh);
-                    let _ = self.gpu.set_scanout(sres, dw, dh);
+                    if self.gpu.set_scanout(sres, dw, dh).is_ok() {
+                        self.bound_res = sres;
+                    }
                     // Flush AFTER the bind (#57): a RESOURCE_FLUSH reaches
                     // only scanouts bound to the resource, so the
                     // screen_flush_full above -- issued while the OLD
@@ -1306,6 +1765,11 @@ impl Comp {
     /// inside the present dispatch, for the slot the client just
     /// presented -- the G-6 tearing-freedom invariant. The caller pushes
     /// the region device-side (`screen_push`) -- or defers it (HOLD).
+    /// Warp-4 (`gl_src`): a GL adoption composes from the BO backing
+    /// tapestryd itself mapped -- same geometry as the surface (the
+    /// adoption gate), full-image tight stride -- instead of a weave
+    /// slot. Every rect/letterbox/crop path below is source-agnostic;
+    /// only the base pointer changes.
     fn blit_composed_pixels(
         &mut self,
         n: usize,
@@ -1314,6 +1778,7 @@ impl Comp {
         y: u32,
         pw: u32,
         ph: u32,
+        gl_src: Option<u64>,
     ) -> Option<Rect> {
         let (sw, slot_stride, weave_va) = match self.surf(n) {
             Some(s) => match &s.weave {
@@ -1334,7 +1799,16 @@ impl Comp {
             None => return None,
         };
         let dw = self.gpu.width as u64;
-        let src_base = weave_va + (slot as u64) * slot_stride;
+        let src_base = match gl_src {
+            Some(va) => va,
+            None => weave_va + (slot as u64) * slot_stride,
+        };
+        // Orientation: a GL source needs NO flip. The guest-visible
+        // transfer contract is gallium top-down -- osmesa_read_buffer's
+        // y_up=FALSE arm copies STRAIGHT and is the shipping llvmpipe
+        // path, and the same frontend readback works unchanged on virgl
+        // (virglrenderer compensates host-side), so row 0 of the BO
+        // backing is the scene TOP exactly like a weave row 0.
         let (sh_full, patchwork) = match self.surf(n) {
             Some(s) => (s.h, s.patchwork),
             None => return None,
@@ -1637,7 +2111,29 @@ impl Comp {
             if self.scanout == Scanout::Direct(n) {
                 let (dw, dh) = (self.gpu.width, self.gpu.height);
                 let _ = self.gpu.set_scanout(0, dw, dh);
+                self.bound_res = 0;
                 self.scanout = Scanout::Off;
+            }
+            // Warp-4: a GL-adopted scanout can survive the arms above --
+            // the soft-Off retarget window leaves the DEVICE bound to the
+            // adopted BO while `scanout` already reads Off. If the device
+            // still shows a BO consented to THIS surface incarnation,
+            // unbind: the display must not outlive the surface it was
+            // granted to. (The BO itself is the ctx's to free; only the
+            // binding is ours.)
+            let gl_bound = self.bound_res != 0
+                && self.warp_ctxs.iter().flatten().any(|c| match c.present_to {
+                    Some((sl, g, bp)) if sl == n && g == s.gen => c
+                        .bos
+                        .iter()
+                        .flatten()
+                        .any(|b| b.pub_id == bp && b.res_id == self.bound_res),
+                    _ => false,
+                });
+            if gl_bound {
+                let (dw, dh) = (self.gpu.width, self.gpu.height);
+                let _ = self.gpu.set_scanout(0, dw, dh);
+                self.bound_res = 0;
             }
             // (4) The GPU resource dies before its backing.
             let _ = self.gpu.detach_backing(s.resource_id);
@@ -1736,6 +2232,74 @@ impl Comp {
         }
         s.events.push_back(ev);
         true
+    }
+
+    /// Roll the #164 present-pressure buckets forward to now. Lazy: both
+    /// readers/writers (`note_present`, `animating`) call it first. The
+    /// staleness guard is the `>= 2 windows` arm itself -- it clears
+    /// both buckets at the FIRST later call, however long the gap
+    /// (audit F3: `animating` runs only in the frozen==false,
+    /// input-quiet regime, so "called every pass" holds only where its
+    /// value is read; do not remove the clear as redundant). The
+    /// promote arm carries exactly one window forward.
+    fn roll_present_buckets(&mut self) {
+        match self.present_bucket_start {
+            None => self.present_bucket_start = Some(Instant::now()),
+            Some(t0) => {
+                let age = t0.elapsed().as_millis() as u64;
+                if age >= 2 * PRESENT_BURST_WINDOW_MS {
+                    self.present_prev_count = 0;
+                    self.present_bucket_count = 0;
+                    self.present_bucket_start = Some(Instant::now());
+                } else if age >= PRESENT_BURST_WINDOW_MS {
+                    self.present_prev_count = self.present_bucket_count;
+                    self.present_bucket_count = 0;
+                    self.present_bucket_start = Some(Instant::now());
+                }
+            }
+        }
+    }
+
+    /// A well-formed present landed on surface `n`. It counts toward the
+    /// #164 pressure ONLY if it can change the screen (audit F1): a
+    /// HIDDEN pane's paced client still presents ~20/s via the SDL
+    /// pacer's 50 ms timeout ("timeout pacing"), does zero visible work
+    /// (blit_composed_pixels returns None for it), and must not hold the
+    /// clock -- else a game tabbed to the background pins 60 Hz on an
+    /// idle console and "a paced client naturally suspends while hidden"
+    /// inverts. Screen-changing = completing a direct-scanout switch,
+    /// being the scanned-out surface, or layout-visible (the same
+    /// predicate the compositor's own blit uses).
+    pub fn note_present(&mut self, n: usize) {
+        let visible = self.pending_direct == Some(n)
+            || self.scanout == Scanout::Direct(n)
+            || self
+                .layout
+                .find_hosting(n)
+                .and_then(|leaf| self.layout.get(leaf))
+                .map_or(false, |p| p.visible);
+        if !visible {
+            return;
+        }
+        self.roll_present_buckets();
+        self.present_bucket_count = self.present_bucket_count.saturating_add(1);
+    }
+
+    /// Is enough SCREEN-CHANGING present pressure arriving to count as
+    /// animation? (The #164 activity axis: ORed with input recency by
+    /// the main loop's tick-rate decision.) The count is a GLOBAL sum
+    /// across all visible surfaces (audit F2), not per-client: N
+    /// sub-threshold visible presenters compose, so e.g. the blink plus
+    /// a visible ~5 fps client in a split hold the clock together --
+    /// acceptable, since jointly they ARE visible animation; the blink
+    /// margin claim assumes aurora is the only idle-state presenter,
+    /// which holds at a settled prompt. A present-spamming visible
+    /// client pins the clock at the ctl rate -- exactly the
+    /// pre-throttle baseline, bounded, and fast visible presents ARE
+    /// activity by definition.
+    pub fn animating(&mut self) -> bool {
+        self.roll_present_buckets();
+        self.present_bucket_count + self.present_prev_count >= PRESENT_BURST_MIN
     }
 
     /// Emit the FRAME tick to every VISIBLE hosted surface (G-6: hidden
@@ -1918,8 +2482,13 @@ impl Comp {
     pub fn ptr_move_rel(&mut self, dx: i32, dy: i32, mods: u16) {
         self.ptr_rel_emit(dx, dy, mods);
         let (dw, dh) = (self.gpu.width as i32, self.gpu.height as i32);
-        let px = (self.ptr_x as i32 + dx).clamp(0, dw.max(1) - 1) as u32;
-        let py = (self.ptr_y as i32 + dy).clamp(0, dh.max(1) - 1) as u32;
+        // Saturating (round-4 F2): `dx`/`dy` arrive from the device via a
+        // saturating accumulator, so their ceiling IS i32::MAX -- a plain
+        // `+` here overflows for any ptr_x >= 1 and, under
+        // overflow-checks + panic=abort, kills the console. Round 3's
+        // commit message claimed this line was fixed; it was not.
+        let px = (self.ptr_x as i32).saturating_add(dx).clamp(0, dw.max(1) - 1) as u32;
+        let py = (self.ptr_y as i32).saturating_add(dy).clamp(0, dh.max(1) - 1) as u32;
         self.ptr_commit(px, py, mods);
     }
 
@@ -2169,16 +2738,1558 @@ struct PendingRead {
     cap: usize,
 }
 
+/// A parked fence-file read (W2d): delivered by poll_fences when its ctx
+/// posts a newer signaled id (or EOFs when the ctx dies). No cap field --
+/// the park guard already required room for a whole record.
+#[derive(Clone, Copy)]
+struct PendingFence {
+    fid: u32,
+    ctx_pub: u32,
+    tag: u16,
+}
+
+/// The largest fence record ("<u64 max>\n" = 21 bytes): the park guard's
+/// floor, like FK_EVENT's TEVENT_LEN.
+const FENCE_REC_MAX: usize = 21;
+
+const WARP_NO_CTX: Option<WarpCtx> = None;
+
+/// Heap BO row (#204: 1024-wide rows outgrew the daemon's stack).
+/// `try_reserve` so an OOM fails the caller (the ctx MINT) clean instead
+/// of aborting the compositor; `resize_with` within reserved capacity
+/// never reallocates.
+fn warp_bo_row() -> Option<alloc::boxed::Box<[Option<WarpBo>]>> {
+    let mut v: Vec<Option<WarpBo>> = Vec::new();
+    if v.try_reserve_exact(MAX_WARP_BOS_PER_CTX).is_err() {
+        return None;
+    }
+    v.resize_with(MAX_WARP_BOS_PER_CTX, || None);
+    Some(v.into_boxed_slice())
+}
+
+// --- Warp-2c: the GPU-seam object lifecycle -------------------------------
+impl Comp {
+    fn wctx_slot(&self, pub_id: u32) -> Option<usize> {
+        self.warp_ctxs
+            .iter()
+            .position(|c| c.as_ref().map_or(false, |c| c.pub_id == pub_id))
+    }
+
+    /// Resolve a live ctx the CALLER owns (the F2 gate, warp edition).
+    fn wctx(&self, pub_id: u32, conn: u64) -> Option<&WarpCtx> {
+        let c = self.warp_ctxs[self.wctx_slot(pub_id)?].as_ref().unwrap();
+        if c.owner_conn != conn || c.retiring {
+            return None;
+        }
+        Some(c)
+    }
+
+    fn wctx_mut(&mut self, pub_id: u32, conn: u64) -> Option<&mut WarpCtx> {
+        let i = self.wctx_slot(pub_id)?;
+        let c = self.warp_ctxs[i].as_mut().unwrap();
+        if c.owner_conn != conn || c.retiring {
+            return None;
+        }
+        Some(c)
+    }
+
+    /// Resolve a live BO (and its ctx pub id) the caller owns.
+    fn wbo(&self, bo_pub: u32, conn: u64) -> Option<(&WarpCtx, &WarpBo)> {
+        for c in self.warp_ctxs.iter().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for b in c.bos.iter().flatten() {
+                if b.pub_id == bo_pub && !b.retiring {
+                    return Some((c, b));
+                }
+            }
+        }
+        None
+    }
+
+    /// This conn's ctx pub_id, if it has one (#178: the harness levers are
+    /// scoped through it). `wctx_mint` enforces one ctx per client, so the
+    /// first match IS the answer.
+    #[cfg(feature = "test-mode")]
+    fn wctx_of_conn(&self, conn: u64) -> Option<u32> {
+        self.warp_ctxs
+            .iter()
+            .flatten()
+            .find(|c| c.owner_conn == conn)
+            .map(|c| c.pub_id)
+    }
+
+    /// Warp-4: the ACTIVE GL adoption for surface `n`, or None. Active =
+    /// the surface names a live ctx (`glsrc`), that ctx's consent names
+    /// this surface INCARNATION back (slot + gen), the consented BO is
+    /// alive on the ctx, and its geometry equals the surface's. Ownership
+    /// needs no check here: each half was written through its owner-gated
+    /// ctl, and pub-id resolution + the gen pin make a stale half inert.
+    /// Resolved fresh at every use -- either side's death simply makes
+    /// this return None (the routing then falls back to the 2D arms).
+    fn gl_adoption(&self, n: usize) -> Option<GlAdopt> {
+        let s = self.surfaces.get(n)?.as_ref()?;
+        let want_ctx = s.gl_src?;
+        let c = self
+            .warp_ctxs
+            .iter()
+            .flatten()
+            .find(|c| c.pub_id == want_ctx && !c.retiring)?;
+        let (slot, gen, bo_pub) = c.present_to?;
+        if slot != n || gen != s.gen {
+            return None;
+        }
+        let b = c
+            .bos
+            .iter()
+            .flatten()
+            .find(|b| b.pub_id == bo_pub && !b.retiring && b.dma_fd >= 0)?;
+        if b.w != s.w || b.h != s.h {
+            return None;
+        }
+        Some(GlAdopt {
+            dev_ctx: c.dev_ctx,
+            res_id: b.res_id,
+            va: b.va,
+            w: b.w,
+            h: b.h,
+        })
+    }
+
+    /// Warp-4: an adoption half changed for surface `n` (glsrc write,
+    /// present-to write, or either half's clean clear). If `n` is
+    /// currently direct-scanned, route the source SWITCH through the
+    /// uniform F16 pending rule (the resize-ack precedent): soft-Off --
+    /// no device call, the old pixels persist -- and the next
+    /// present-COMPLETE binds whatever source resolves then. The weave is
+    /// marked stale in the DEACTIVATION direction by the callers that
+    /// know it (GL frames never landed in it).
+    fn gl_retarget(&mut self, n: usize) {
+        if self.scanout == Scanout::Direct(n) {
+            self.scanout = Scanout::Off;
+            self.pending_direct = Some(n);
+        }
+    }
+
+    /// Warp-4: a BO is dying (its own destroy, or its whole ctx's
+    /// retire). If the DEVICE currently scans it out, rebind away FIRST
+    /// -- an unref of the scanned-out resource is the one order the
+    /// display cannot survive -- then re-arm the owning surface's own
+    /// switch through reconcile (its next present restores the display
+    /// from the weave, stale but bounded).
+    fn gl_evict_res(&mut self, res_id: u32) {
+        if res_id == 0 || self.bound_res != res_id {
+            return;
+        }
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let _ = self.gpu.set_scanout(0, dw, dh);
+        self.bound_res = 0;
+        if let Scanout::Direct(n) = self.scanout {
+            self.scanout = Scanout::Off;
+            self.pending_direct = Some(n);
+            if let Some(s) = self.surf_mut(n) {
+                s.res_stale = true;
+            }
+        } else {
+            self.scanout = Scanout::Off;
+        }
+        self.reconcile();
+    }
+
+    /// Mint a context for `conn` (one per client -- the I-45 exposure
+    /// bound): allocate the slot, CTX_CREATE on the device (virgl-gated by
+    /// the caller), roll the slot back if the device refuses.
+    fn wctx_mint(&mut self, conn: u64) -> Option<u32> {
+        // Count RETIRING contexts too (round-3 F2): they are still this
+        // conn's resources until they finish, and excluding them let one
+        // connection mint-poison-destroy in a loop, burning a ctx slot
+        // per abandoned fence.
+        if self.warp_ctxs.iter().flatten().any(|c| c.owner_conn == conn) {
+            return None; // one ctx per client
+        }
+        let slot = (0..MAX_WARP_CTXS)
+            .find(|&i| self.warp_ctxs[i].is_none() && !self.warp_ctx_slot_poisoned[i])?;
+        // Heap rows BEFORE any device state (#204): a failed allocation
+        // fails the mint with nothing to unwind. The graveyard row is
+        // reserved to the full cap here so `warp_park_leaked` -- which has
+        // no failure arm by round-6 F1's argument -- never allocates. A
+        // mintable slot's row is empty (parked records exist only while
+        // the slot is poisoned, and poisoned slots are skipped above).
+        let bos = warp_bo_row()?;
+        // The row is empty (len 0), so this guarantees capacity >= the
+        // full cap -- a no-op when a reused slot's row kept its capacity.
+        debug_assert!(self.warp_ctx_leaked[slot].is_empty());
+        if self.warp_ctx_leaked[slot]
+            .try_reserve_exact(MAX_WARP_BOS_PER_CTX)
+            .is_err()
+        {
+            return None;
+        }
+        let dev_ctx = (slot as u32) + 1;
+        if self.gpu.ctx_create(dev_ctx, b"warp").is_err() {
+            return None;
+        }
+        // Never mint 0: it is `warp_ctx_vindicate`'s "no condemned slot"
+        // sentinel, so a wrapped pub_id would make the vindication's
+        // `position(|&p| p == 0)` match an arbitrary unrelated slot,
+        // ctx_destroy a live host context and un-poison a legitimately
+        // condemned one. Same 2^32 family as the deferred res_seq wrap, but
+        // that one was dispositioned "verified to fail closed" -- this
+        // sibling fails OPEN, and skipping the value costs nothing.
+        self.warp_ctx_seq = self.warp_ctx_seq.wrapping_add(1);
+        if self.warp_ctx_seq == 0 {
+            self.warp_ctx_seq = 1;
+        }
+        let pub_id = self.warp_ctx_seq;
+        self.warp_ctxs[slot] = Some(WarpCtx {
+            owner_conn: conn,
+            pub_id,
+            dev_ctx,
+            capset: 0,
+            rings: 1,
+            fences_in_flight: 0,
+            fence_signaled: 0,
+            fence_reported: 0,
+            fenced_rx: 0,
+            fenced_minted: 0,
+            fenced_again: 0,
+            fenced_err: 0,
+            fence_poisoned: false,
+            leaked_bytes: 0,
+            leaked_count: 0,
+            retiring: false,
+            // #240: minted below, AFTER the ctx row exists. A probe that
+            // cannot be built leaves `None` and every verify answers
+            // "unknown" -- the ctx still works, it just cannot be asked.
+            // Failing the whole ctx mint here would turn a diagnostic into
+            // a new denial-of-service surface.
+            probe: None,
+            stream_rejected: false,
+            rejected_at: 0,
+            verify_seq: 0,
+            verify_tick: 0,
+            present_to: None,
+            bo_backed_peak: 0,
+            bo_bytes_peak: 0,
+            build_diag_arms: 0,
+            create_refused: 0,
+            bos,
+        });
+        // #240: the probe is built AFTER the row exists so its failure is
+        // recoverable -- a ctx with no probe still serves, it just answers
+        // "unknown" to every verify. Making a diagnostic's failure fail the
+        // whole mint would hand a client a new way to be denied a context.
+        let probe = self.warp_probe_build(dev_ctx);
+        if probe.is_none() {
+            say!("tapestryd: warp ctx {} has no #240 health probe (mint failed)", pub_id);
+        }
+        if let Some(c) = self.wctx_mut(pub_id, conn) {
+            c.probe = probe;
+        }
+        Some(pub_id)
+    }
+
+    /// Mint one 1x1 B8G8R8A8 render target owned by the SERVER, attached to
+    /// `dev_ctx` but recorded nowhere a client resolve can reach. Returns
+    /// `(res_id, fd, va)`. Every failure arm unwinds the device state in
+    /// reverse and BOTH halves of the guest backing -- `t_burrow_detach`
+    /// before `t_close`, since I-7's dual count frees nothing while a
+    /// mapping ref survives.
+    fn warp_probe_res(&mut self, dev_ctx: u32, size: u64) -> Option<(u32, i64, u64)> {
+        let fd = unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
+        if fd < 0 {
+            return None;
+        }
+        let va = self.weave_va_next;
+        self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
+        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
+        if pa < 0 {
+            unsafe { t_close(fd) };
+            return None;
+        }
+        self.res_seq = self.res_seq.wrapping_add(1);
+        let res_id = self.res_seq;
+        let undo = |gpu: &mut Gpu, stage: u32, res_id: u32| {
+            if stage >= 2 {
+                let _ = gpu.ctx_detach_resource(dev_ctx, res_id);
+            }
+            if stage >= 1 {
+                let _ = gpu.resource_unref(res_id);
+            }
+            unsafe { t_burrow_detach(va, size) };
+            unsafe { t_close(fd) };
+        };
+        if self
+            .gpu
+            .resource_create_3d(
+                res_id,
+                PIPE_TEXTURE_2D,
+                VIRGL_FORMAT_B8G8R8A8_UNORM,
+                VIRGL_BIND_RENDER_TARGET,
+                1,
+                1,
+                1,
+                1,
+                0,
+                0,
+                0,
+            )
+            .is_err()
+        {
+            undo(&mut self.gpu, 0, res_id);
+            return None;
+        }
+        if self.gpu.ctx_attach_resource(dev_ctx, res_id).is_err() {
+            undo(&mut self.gpu, 1, res_id);
+            return None;
+        }
+        if self.gpu.attach_backing(res_id, pa as u64, size as u32).is_err() {
+            undo(&mut self.gpu, 2, res_id);
+            return None;
+        }
+        Some((res_id, fd, va))
+    }
+
+    /// Build the #240 health probe for a freshly minted ctx (GPU-DESIGN
+    /// 4.5.4b). `mark` is painted ONCE here by UPLOAD, never by a CLEAR:
+    /// a CLEAR would need SET_FRAMEBUFFER_STATE, and virgl context state
+    /// persists across command buffers while Mesa dirty-tracks its own
+    /// binds -- so writing the mark that way would silently repoint a
+    /// client's framebuffer at our resource.
+    fn warp_probe_build(&mut self, dev_ctx: u32) -> Option<CtxProbe> {
+        let size = PAGE;
+        let (mark_res, mark_fd, mark_va) = self.warp_probe_res(dev_ctx, size)?;
+        let (sent_res, sent_fd, sent_va) = match self.warp_probe_res(dev_ctx, size) {
+            Some(v) => v,
+            None => {
+                let _ = self.gpu.detach_backing(mark_res);
+                let _ = self.gpu.ctx_detach_resource(dev_ctx, mark_res);
+                let _ = self.gpu.resource_unref(mark_res);
+                unsafe { t_burrow_detach(mark_va, size) };
+                unsafe { t_close(mark_fd) };
+                return None;
+            }
+        };
+        unsafe { core::ptr::write_volatile(mark_va as *mut u32, PROBE_MARK) };
+        if self
+            .gpu
+            .transfer_to_3d_sync(dev_ctx, mark_res, 1, 1, 4)
+            .is_err()
+        {
+            // The mark never reached the host, so a verify could not tell
+            // "the copy ran" from "the copy ran and copied garbage".
+            // Better no probe than a probe that answers wrongly.
+            return None;
+        }
+        Some(CtxProbe {
+            mark_res,
+            mark_fd,
+            mark_va,
+            sent_res,
+            sent_fd,
+            sent_va,
+            size,
+        })
+    }
+
+    /// One #240 health verify (GPU-DESIGN 4.5.4b): seed the sentinel with a
+    /// token, ask the CONTEXT to copy the mark over it, read it back.
+    ///
+    /// The copy is `RESOURCE_COPY_REGION` -- stateless, so it cannot
+    /// disturb whatever the client has bound. The seed and the readback are
+    /// virtio-gpu commands rather than command-buffer ones, which is why
+    /// they still work on a context vrend has latched off; that asymmetry
+    /// IS the detector.
+    ///
+    /// Returns `Some(true)` healthy, `Some(false)` latched, `None` unknown.
+    /// Every transport failure lands on `None`: an errored upload is not
+    /// evidence of refusal, and must never read as health either.
+    fn warp_ctx_verify(&mut self, ctx_pub: u32, conn: u64) -> Option<bool> {
+        let tick = self.tick;
+        let (dev_ctx, mark_res, sent_res, sent_va) = {
+            let c = self.wctx(ctx_pub, conn)?;
+            // One probe per ctx per compositor tick (see `verify_tick`). A
+            // second write in the same frame is answered from the state the
+            // first one established rather than re-running three synchronous
+            // device round trips. `verify_seq` deliberately does NOT advance
+            // here: it counts probes that RAN, which is the distinction a
+            // reader needs to tell "healthy" from "never asked".
+            if c.verify_seq > 0 && c.verify_tick == tick {
+                return Some(!c.stream_rejected);
+            }
+            let p = c.probe.as_ref()?;
+            (c.dev_ctx, p.mark_res, p.sent_res, p.sent_va)
+        };
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            c.verify_seq += 1;
+            c.verify_tick = tick;
+        }
+        let seq = self.wctx(ctx_pub, conn).map_or(0, |c| c.verify_seq);
+
+        // A token that differs from PROBE_MARK and from whatever the last
+        // verify left, so "unchanged" is never satisfied by a stale value.
+        //
+        // SELF-AUDIT FINDING: the mix alone is not enough. `PROBE_TOKEN_BASE
+        // ^ rot8(seq)` equals PROBE_MARK exactly when rot8(seq) is
+        // 0x24443040 ^ 0x57415250, i.e. at seq 0x10730562 -- roughly 53 days
+        // of 60 Hz verifying, which a long-lived compositor reaches. On that
+        // one verify a LATCHED ctx would seed the mark's own value, read it
+        // back, and be reported HEALTHY: a false negative on the exact
+        // question this probe exists to answer. Perturb instead of trusting
+        // the arithmetic.
+        let mut token = PROBE_TOKEN_BASE ^ (seq as u32).rotate_left(8);
+        if token == PROBE_MARK {
+            token = !token;
+        }
+        unsafe { core::ptr::write_volatile(sent_va as *mut u32, token) };
+        if self
+            .gpu
+            .transfer_to_3d_sync(dev_ctx, sent_res, 1, 1, 4)
+            .is_err()
+        {
+            return None;
+        }
+        let mut st: [u32; 14] = [0; 14];
+        st[0] = (VIRGL_CCMD_RESOURCE_COPY_REGION & 0xff) | (VIRGL_CMD_RCR_SIZE << 16);
+        st[1] = sent_res; // dst handle
+        st[2] = 0; // dst level
+        st[3] = 0; // dst x
+        st[4] = 0; // dst y
+        st[5] = 0; // dst z
+        st[6] = mark_res; // src handle
+        st[7] = 0; // src level
+        st[8] = 0; // src x
+        st[9] = 0; // src y
+        st[10] = 0; // src z
+        st[11] = 1; // src w
+        st[12] = 1; // src h
+        st[13] = 1; // src d
+        let mut bytes = [0u8; 56];
+        for (i, w) in st.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        if self.gpu.submit_3d_sync(dev_ctx, &bytes).is_err() {
+            return None;
+        }
+        if self
+            .gpu
+            .transfer_from_3d_sync(dev_ctx, sent_res, 1, 1, 4)
+            .is_err()
+        {
+            return None;
+        }
+        let got = unsafe { core::ptr::read_volatile(sent_va as *const u32) };
+        // THE HEALTHY PATH IS SILENT AND COSTS NOTHING EXTRA. Reading back
+        // PROBE_MARK is already proof that `mark` held PROBE_MARK -- the copy
+        // is what delivered it -- so no separate mark check is needed here,
+        // and no log line either: a `say!` per verify at the per-frame
+        // cadence this verb is designed for would flood the console and
+        // become its own performance defect.
+        if got == PROBE_MARK {
+            return Some(true);
+        }
+        // Everything below is about to make a SERIOUS claim ("this context is
+        // dead"), so it pays for corroboration. Read the mark back: if it
+        // does not hold PROBE_MARK then the upload/readback path is broken
+        // and nothing about the copy can be concluded. A good mark plus an
+        // unchanged sentinel is what genuinely means the copy did not run.
+        let mark_now = {
+            let mv = self
+                .wctx(ctx_pub, conn)
+                .and_then(|c| c.probe.as_ref())
+                .map(|p| p.mark_va);
+            match mv {
+                Some(va) => {
+                    if self.gpu.transfer_from_3d_sync(dev_ctx, mark_res, 1, 1, 4).is_err() {
+                        None
+                    } else {
+                        Some(unsafe { core::ptr::read_volatile(va as *const u32) })
+                    }
+                }
+                None => None,
+            }
+        };
+        if mark_now != Some(PROBE_MARK) {
+            say!(
+                "tapestryd: warp ctx {} verify {} -- the MARK reads {:?}, not {:#x}, so the \
+                 probe cannot judge the copy. UNKNOWN, not a verdict.",
+                ctx_pub, seq, mark_now, PROBE_MARK
+            );
+            return None;
+        }
+        if got != token {
+            // Neither the mark nor our seed: the readback is not carrying
+            // what this probe put there, so the probe itself is not
+            // trustworthy on this ctx. Unknown, never a verdict.
+            say!(
+                "tapestryd: warp ctx {} verify {} read {:#x} (neither mark nor token) -- unknown",
+                ctx_pub, seq, got
+            );
+            return None;
+        }
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            if !c.stream_rejected {
+                c.stream_rejected = true;
+                c.rejected_at = seq;
+                say!(
+                    "tapestryd: warp ctx {} STREAM REJECTED -- the host refused a submit \
+                     in (prev verify, {}]; the ctx is dead, recreate it (#240)",
+                    ctx_pub, seq
+                );
+            }
+        }
+        Some(false)
+    }
+
+    /// Mint a BO record under a ctx (no device state yet -- the ctl
+    /// `create3d` write allocates the backing + resource).
+    fn wbo_mint(&mut self, ctx_pub: u32, conn: u64) -> Option<u32> {
+        self.warp_bo_seq = self.warp_bo_seq.wrapping_add(1);
+        let pub_id = self.warp_bo_seq;
+        let c = self.wctx_mut(ctx_pub, conn)?;
+        let slot = c.bos.iter().position(|b| b.is_none())?;
+        c.bos[slot] = Some(WarpBo {
+            pub_id,
+            res_id: 0,
+            dma_fd: -1,
+            va: 0,
+            pa: 0,
+            size: 0,
+            share_id: None,
+            w: 0,
+            h: 0,
+            retiring: false,
+        });
+        Some(pub_id)
+    }
+
+    /// WDIAG_* arm indices for the create3d-refusal one-shot bitmasks.
+    /// One bit per refusal family so every arm names itself exactly once
+    /// per ctx (the per-ctx-once predecessor could name only ONE family
+    /// per ctx lifetime, which blinded the #198 hunt to the second).
+    const WDIAG_SIZE_ALIGN: u32 = 0;
+    const WDIAG_SIZE_CAP: u32 = 1;
+    const WDIAG_GEOMETRY: u32 = 2;
+    const WDIAG_BYTE_CAP: u32 = 3;
+    const WDIAG_COUNT_CAP: u32 = 4;
+    const WDIAG_NO_MINT: u32 = 5;
+    const WDIAG_DMA_CREATE: u32 = 6;
+    const WDIAG_DMA_MAP: u32 = 7;
+    const WDIAG_DEV_CREATE: u32 = 8;
+    const WDIAG_DEV_ATTACH_CTX: u32 = 9;
+    const WDIAG_DEV_ATTACH_BACKING: u32 = 10;
+    const WDIAG_ALREADY_BUILT: u32 = 11;
+    const WDIAG_CTX_GONE: u32 = 12;
+    const WDIAG_CTL_PARSE: u32 = 13;
+    const WDIAG_CTL_NO_RECORD: u32 = 14;
+    const WDIAG_CTL_NOT_VIRGL: u32 = 15;
+    const WDIAG_RECORD_VANISHED: u32 = 16;
+
+    /// #218 one-shot diagnostic: the FIRST refused build per ctx names the
+    /// failing arm + its parameters. Gated on the ctx latch, never the
+    /// counting (#95), so a per-texture failure loop cannot storm the
+    /// console it is diagnosing.
+    #[allow(clippy::too_many_arguments)]
+    fn wbo_diag_once(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        arm: u32,
+        why: &str,
+        detail: i64,
+        format: u32,
+        w: u32,
+        h: u32,
+        last_level: u32,
+        size: u64,
+    ) {
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            if c.build_diag_arms & (1 << arm) == 0 {
+                c.build_diag_arms |= 1 << arm;
+                say!(
+                    "tapestryd: warp create3d refused ({} {}) fmt={} {}x{} lvl={} size={} ctx={}",
+                    why, detail, format, w, h, last_level, size, ctx_pub
+                );
+            }
+        } else {
+            // A refusal whose ctx cannot be resolved must still be
+            // nameable -- the per-ctx latch silently ate exactly this
+            // class during the #198 hunt. Comp-level latch, same storm
+            // bound.
+            if self.warp_diag_noctx_arms & (1 << arm) == 0 {
+                self.warp_diag_noctx_arms |= 1 << arm;
+                say!(
+                    "tapestryd: warp create3d refused ({} {}) fmt={} {}x{} lvl={} size={} ctx={} (UNRESOLVED)",
+                    why, detail, format, w, h, last_level, size, ctx_pub
+                );
+            }
+        }
+    }
+
+    /// The BO backing build (the ctl `create3d` verb): kernel GPU-BO mint
+    /// -> map -> RESOURCE_CREATE_3D -> CTX_ATTACH -> ATTACH_BACKING, with
+    /// reverse unwind on any failure. Size is the client's declared backing
+    /// length; the kernel envelope + the client's own shared-map budget
+    /// bound it -- the server checks only page alignment and non-zero.
+    /// A `false` return leaves the mint record untouched HERE: the create3d
+    /// ctl arm consumes it (#218), so every refusal family -- including the
+    /// parse arms that never reach this function -- reclaims the slot at
+    /// one chokepoint.
+    #[allow(clippy::too_many_arguments)]
+    fn wbo_create(
+        &mut self,
+        ctx_pub: u32,
+        bo_pub: u32,
+        conn: u64,
+        target: u32,
+        format: u32,
+        bind: u32,
+        w: u32,
+        h: u32,
+        d: u32,
+        array: u32,
+        last_level: u32,
+        samples: u32,
+        flags: u32,
+        size: u64,
+    ) -> bool {
+        if size == 0 || size % PAGE != 0 {
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_SIZE_ALIGN, "size-align", size as i64, format, w, h, last_level, size);
+            return false;
+        }
+        // The backing is CLIENT-DECLARED, and nothing downstream charges
+        // it: the kernel mint is tapestryd's (TCB, I-32-exempt) and the
+        // per-Proc shared-map budget is charged only if the client ever
+        // MAPS it. So the seam owns the bound (audit F2 -- the old
+        // comment claimed the client's budget bounded this; it does not).
+        // Two gates: the declared geometry must plausibly need this many
+        // bytes (a 1x1 texture cannot ask for 64 MiB), and the ctx's
+        // total live backing is capped.
+        // Clamp against the ctx cap FIRST (round-2 F1 [P0]): every value
+        // below is client-chosen, the release profile sets
+        // overflow-checks = true + panic = "abort", and this Proc IS the
+        // console -- so an unchecked add here is a remote kill, not a
+        // wrong answer. Bounding `size` before the arithmetic means the
+        // geometry math can never see a hostile magnitude, and every
+        // step is checked anyway (belt AND braces: the round-1 version
+        // checked only the multiplications and panicked on `v + v/2`).
+        if size > WARP_CTX_BACKING_MAX {
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_SIZE_CAP, "size-cap", 0, format, w, h, last_level, size);
+            return false;
+        }
+        let px = (w as u64)
+            .checked_mul(h.max(1) as u64)
+            .and_then(|v| v.checked_mul(d.max(1) as u64))
+            .and_then(|v| v.checked_mul(array.max(1) as u64));
+        // Mip chains + alignment ride above the base level, so the slack
+        // is generous; the point is only to refuse the absurd.
+        let geom_max = match px
+            .and_then(|v| v.checked_mul(WARP_BO_MAX_BPP))
+            .and_then(|v| v.checked_add(v / 2))
+            .and_then(|v| v.checked_add(PAGE))
+        {
+            Some(v) => v.max(PAGE),
+            None => WARP_CTX_BACKING_MAX, // geometry alone is unbounded; the cap rules
+        };
+        if size > geom_max {
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_GEOMETRY, "geometry", geom_max as i64, format, w, h, last_level, size);
+            return false;
+        }
+        // The c-borrowing checks compute into locals first so the failure
+        // arms can reach the (&mut self) one-shot diagnostic (#218).
+        let (byte_fail, byte_live, count_fail, no_mint, already_built, dev_ctx) = {
+            let c = match self.wctx(ctx_pub, conn) {
+                Some(c) => c,
+                None => {
+                    self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_CTX_GONE, "ctx-gone", 0, format, w, h, last_level, size);
+                    return false;
+                }
+            };
+            // Saturating, not `+` (round-2 F1's second witness): `live` sums
+            // client-chosen sizes and the sum itself must never panic.
+            let live: u64 =
+                c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
+            let leaked = c.leaked_bytes;
+        // Round-6 F1: the byte cap does NOT bound the leak COUNT. The
+        // minimum accepted size is PAGE, so 16384 backings fit inside the
+        // 64 MiB budget -- and since `bos[]` slots are reused across
+        // mint/build/destroy, a poisoned-yet-live ctx could park all of
+        // them into a 16-wide graveyard. The overflow then dropped each
+        // surplus `WarpBo` by value, leaking a handle AND a mapping
+        // (`WarpBo` has no `Drop`).
+        //
+        // The quantity that must be bounded is every backing this ctx will
+        // EVER have to park, which is the ones already parked plus the ones
+        // still live -- a live backing is parked wholesale by the leak arm
+        // of `wctx_finish`. Bounding `leaked_count` alone would still admit
+        // 15 parked + 16 live = 31 parks into a 16-wide graveyard. Only
+        // BACKED BOs can be parked (`wbo_retire` returns 0, and so parks
+        // nothing, when `dma_fd < 0`), so an unbacked mint is correctly not
+        // counted here.
+            let live_backed = c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count();
+            (
+                live.saturating_add(leaked).saturating_add(size) > WARP_CTX_BACKING_MAX,
+                live,
+                c.leaked_count as usize + live_backed >= MAX_WARP_BOS_PER_CTX,
+                !c.bos.iter().flatten().any(|b| b.pub_id == bo_pub),
+                c.bos
+                    .iter()
+                    .flatten()
+                    .any(|b| b.pub_id == bo_pub && b.dma_fd >= 0),
+                c.dev_ctx,
+            )
+        };
+        if byte_fail {
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_BYTE_CAP, "byte-cap", byte_live as i64, format, w, h, last_level, size);
+            return false;
+        }
+        if count_fail {
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_COUNT_CAP, "count-cap", 0, format, w, h, last_level, size);
+            return false;
+        }
+        if no_mint {
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_NO_MINT, "no-mint-record", 0, format, w, h, last_level, size);
+            return false;
+        }
+        // Already built? create3d is once per BO -- benign, but SAY so:
+        // this was the one silent refusal arm, and a silent arm is where
+        // the #198 hunt lost a session to a contradiction it could not
+        // name (client saw a refusal, server named nothing).
+        if already_built {
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_ALREADY_BUILT, "already-built", 0, format, w, h, last_level, size);
+            return false;
+        }
+
+        let fd =
+            unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
+        if fd < 0 {
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DMA_CREATE, "dma-create", fd, format, w, h, last_level, size);
+            return false;
+        }
+        let va = self.weave_va_next;
+        self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
+        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
+        if pa < 0 {
+            unsafe { t_close(fd) };
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DMA_MAP, "dma-map", pa, format, w, h, last_level, size);
+            return false;
+        }
+
+        // Every failure arm from here unwinds the DEVICE state in reverse
+        // AND both halves of the guest backing: `t_burrow_detach` before
+        // `t_close`, because I-7's dual count frees nothing while a
+        // mapping ref survives (audit F4 -- dropping only the handle
+        // leaked up to 64 MiB of pinned contiguous pages for the life of
+        // a PERSISTENT driver).
+        let unwind = |gpu: &mut Gpu, stage: u32, res_id: u32| {
+            if stage >= 3 {
+                let _ = gpu.detach_backing(res_id);
+            }
+            if stage >= 2 {
+                let _ = gpu.ctx_detach_resource(dev_ctx, res_id);
+            }
+            if stage >= 1 {
+                let _ = gpu.resource_unref(res_id);
+            }
+            unsafe { t_burrow_detach(va, size) };
+            unsafe { t_close(fd) };
+        };
+
+        self.res_seq = self.res_seq.wrapping_add(1);
+        let res_id = self.res_seq;
+        if self
+            .gpu
+            .resource_create_3d(res_id, target, format, bind, w, h, d, array, last_level, samples, flags)
+            .is_err()
+        {
+            unwind(&mut self.gpu, 0, res_id);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DEV_CREATE, "dev-create", target as i64, format, w, h, last_level, size);
+            return false;
+        }
+        if self.gpu.ctx_attach_resource(dev_ctx, res_id).is_err() {
+            unwind(&mut self.gpu, 1, res_id);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DEV_ATTACH_CTX, "dev-attach-ctx", 0, format, w, h, last_level, size);
+            return false;
+        }
+        if self.gpu.attach_backing(res_id, pa as u64, size as u32).is_err() {
+            unwind(&mut self.gpu, 2, res_id);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DEV_ATTACH_BACKING, "dev-attach-backing", 0, format, w, h, last_level, size);
+            return false;
+        }
+
+        let c = self.wctx_mut(ctx_pub, conn).unwrap();
+        let mut built = false;
+        for b in c.bos.iter_mut().flatten() {
+            if b.pub_id == bo_pub {
+                b.res_id = res_id;
+                b.dma_fd = fd;
+                b.va = va;
+                b.pa = pa as u64;
+                b.size = size;
+                b.w = w;
+                b.h = h;
+                built = true;
+                break;
+            }
+        }
+        if !built {
+            // Unreachable (single-threaded dispatch; nothing between the
+            // no_mint check and this write-back touches `bos`) -- but a
+            // record that vanished must not strand the device state just
+            // built for it, and must NAME itself (audit F2: this was the
+            // one refusal arm still silent).
+            unwind(&mut self.gpu, 3, res_id);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_RECORD_VANISHED, "record-vanished", 0, format, w, h, last_level, size);
+            return false;
+        }
+        // #204 census: track the backed high-water on BOTH axes -- count
+        // (what MAX_WARP_BOS_PER_CTX gates) and bytes (what
+        // WARP_CTX_BACKING_MAX gates; bo-peak 26 with thousands of
+        // refusals proved the byte axis can saturate at tiny counts).
+        // Per-ctx AND global (the ctx's copy dies with it).
+        let live = c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count() as u32;
+        if live > c.bo_backed_peak {
+            c.bo_backed_peak = live;
+        }
+        let live_bytes: u64 =
+            c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
+        if live_bytes > c.bo_bytes_peak {
+            c.bo_bytes_peak = live_bytes;
+        }
+        let (ctx_peak, ctx_bytes_peak) = (c.bo_backed_peak, c.bo_bytes_peak);
+        if ctx_peak > self.warp_bo_peak {
+            self.warp_bo_peak = ctx_peak;
+        }
+        if ctx_bytes_peak > self.warp_bo_bytes_peak {
+            self.warp_bo_bytes_peak = ctx_bytes_peak;
+        }
+        true
+    }
+
+    /// #218 server half: remove a minted-but-unbuilt BO record whose
+    /// create3d was refused -- the mint's exact inverse. Without it a
+    /// per-texture failure loop filled `bos[]` with corpses and starved
+    /// `wbo_mint` for the ctx's life (the #198 cascade's second stage).
+    /// Bounded three ways: owner-conn (I-45 -- a foreign conn's failed
+    /// write can never unmint another client's record), UNBUILT
+    /// (`dma_fd < 0` -- a built BO is `wbo_destroy`'s to reclaim, so the
+    /// benign already-built refusal cannot touch it), and non-retiring
+    /// (a deferred destroy is the pump's). An unbacked record carries no
+    /// bytes, no census, no graveyard charge: removal has no accounting
+    /// to unwind.
+    fn wbo_unmint_refused(&mut self, bo_pub: u32, conn: u64) {
+        for c in self.warp_ctxs.iter_mut().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for slot in c.bos.iter_mut() {
+                if slot
+                    .as_ref()
+                    .map_or(false, |b| b.pub_id == bo_pub && b.dma_fd < 0 && !b.retiring)
+                {
+                    *slot = None;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The BO Tweft mint (the weft_ensure precedent): share once, echo the
+    /// stored id thereafter.
+    fn wbo_weft_ensure(&mut self, bo_pub: u32, conn: u64) -> Option<(u64, u32)> {
+        for c in self.warp_ctxs.iter_mut().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for b in c.bos.iter_mut().flatten() {
+                if b.pub_id != bo_pub || b.retiring {
+                    continue;
+                }
+                if b.dma_fd < 0 {
+                    return None; // not built yet
+                }
+                if let Some(id) = b.share_id {
+                    return Some((id, b.size as u32));
+                }
+                let id = unsafe { t_weft_share(b.va, b.size) };
+                if id <= 0 {
+                    say!("tapestryd: warp t_weft_share failed {}", id);
+                    return None;
+                }
+                b.share_id = Some(id as u64);
+                return Some((id as u64, b.size as u32));
+            }
+        }
+        None
+    }
+
+    /// Retire one BO: the I-40/R2-F5 order -- (1) disarm the un-claimed
+    /// share BEFORE any backing free (a Tweft claim racing the retire fails
+    /// closed; an already-claimed share is a harmless miss and the CLIENT's
+    /// mapping stays alive via the #847 dual count until its own teardown /
+    /// the reaper); (2) device detach, under the drained-or-leaking
+    /// precondition every caller establishes (W2d: each retire path drains
+    /// the ctx's fences first, restoring the empty-in-flight state the
+    /// Warp-2c synchrony gave by construction); (3) release the server's
+    /// own refs -- UNLESS `leak`: a deadlined drain means an undrained
+    /// fence may still DMA these pages, so the wedge posture pins them for
+    /// the Proc's life (handle + mapping kept: leak-on-wedge, never UAF).
+    /// Returns the byte count LEAKED (0 when the backing was freed) so the
+    /// caller can keep charging it against the ctx cap (round-2 F3).
+    fn wbo_retire(gpu: &mut Gpu, dev_ctx: u32, b: &mut WarpBo, leak: bool) -> u64 {
+        if let Some(id) = b.share_id.take() {
+            let _ = unsafe { t_weft_unshare(id) };
+        }
+        if b.dma_fd >= 0 {
+            let _ = gpu.detach_backing(b.res_id);
+            let _ = gpu.ctx_detach_resource(dev_ctx, b.res_id);
+            let _ = gpu.resource_unref(b.res_id);
+            // Capture BEFORE invalidating (round-3 F1 [P0]): round 2 moved
+            // the `= -1` above the branch so the early return could observe
+            // it, and left the close below reading the field -- t_close(-1)
+            // on EVERY normal retire, so the kernel handle ref never
+            // dropped and the whole 64 MiB backing stayed pinned for the
+            // life of a persistent driver. The happy path leaked, unbounded
+            // and uncharged, which is worse than the wedge leak the move
+            // was made for.
+            let fd = b.dma_fd;
+            if leak {
+                // `dma_fd` is deliberately LEFT VALID (round-5 F1): the
+                // caller parks this record in its slot's graveyard, and a
+                // later vindication -- the device proving it finished --
+                // frees it from there. Zeroing it here would hand the
+                // graveyard a record it could never free, which is the
+                // round-3 F1 shape with the ownership reversed: there a
+                // moved statement orphaned a use below it, here it would
+                // orphan a use in another function.
+                say!(
+                    "tapestryd: warp bo res {} leak-parked {} bytes (fence wedge)",
+                    b.res_id, b.size
+                );
+                return b.size;
+            }
+            b.dma_fd = -1;
+            unsafe { t_burrow_detach(b.va, b.size) };
+            unsafe { t_close(fd) };
+        }
+        0
+    }
+
+    /// Finish a ctx retire that is (or must be treated as) quiesced:
+    /// every BO, then CTX_DESTROY (synchronous, so the device-side ctx is
+    /// quiesced when the slot -- and with it the dev_ctx id -- becomes
+    /// reusable). `leak` propagates the wedge posture to every backing.
+    /// Park a backing the wedge posture refused to free, so the vindication
+    /// can free it once the device proves it is finished (round-5 F1).
+    ///
+    /// INFALLIBLE by construction (round-6 F1), and that is load-bearing:
+    /// the caller has already run `wbo_retire`, so there is no unwind left
+    /// -- a failure here could only drop the record, and a dropped `WarpBo`
+    /// leaks its still-valid `dma_fd` and its mapping with no `Drop` to
+    /// catch it. The creation-time `leaked_count` cap admits at most one
+    /// park per row entry, and the mint reserved the row to the full cap,
+    /// so the guarded push below never allocates; the debug assert names
+    /// that coupling rather than trusting it silently.
+    fn warp_park_leaked(&mut self, slot: usize, b: WarpBo) {
+        let g = &mut self.warp_ctx_leaked[slot];
+        if g.len() < MAX_WARP_BOS_PER_CTX {
+            g.push(b);
+        } else {
+            debug_assert!(false, "leak graveyard full: leaked_count cap breached");
+            say!(
+                "tapestryd: warp ctx slot {} leak graveyard full -- BUG, cap breached",
+                slot
+            );
+        }
+    }
+
+    /// Free every backing parked for this slot. Sound ONLY at vindication:
+    /// the device has just retired the chain that condemned them, which is
+    /// the same proof that lets the slot itself be recycled.
+    fn warp_free_leaked(&mut self, slot: usize) {
+        // drain keeps the row's capacity, so a reused slot's mint-time
+        // reserve stays a no-op.
+        for b in self.warp_ctx_leaked[slot].drain(..) {
+            if b.dma_fd >= 0 {
+                unsafe { t_burrow_detach(b.va, b.size) };
+                unsafe { t_close(b.dma_fd) };
+            }
+        }
+    }
+
+    fn wctx_finish(&mut self, slot: usize, leak: bool) {
+        if let Some(mut c) = self.warp_ctxs[slot].take() {
+            // Take each backing by VALUE: a leak-parked record must outlive
+            // this ctx (round-5 F1). Borrowing them, as this loop did, meant
+            // the leaked bytes AND the records were dropped at the `return`
+            // below -- and this was the one wbo_retire caller of three that
+            // discarded the returned count, so the round-2 F3 accounting
+            // died here with the only object holding it.
+            for j in 0..MAX_WARP_BOS_PER_CTX {
+                let mut b = match c.bos[j].take() {
+                    Some(b) => b,
+                    None => continue,
+                };
+                if Self::wbo_retire(&mut self.gpu, c.dev_ctx, &mut b, leak) > 0 {
+                    self.warp_park_leaked(slot, b);
+                }
+            }
+            // #240: the probe's two resources follow the SAME leak posture
+            // as the BOs above -- on a wedge the device may still be
+            // executing this ctx's stream, so neither the device state nor
+            // the guest backing may be touched, and both leak rather than
+            // risk a UAF on pages the host is mid-DMA into. On a clean
+            // retire they unwind in reverse, detach-before-close (I-7).
+            if let Some(p) = c.probe.take() {
+                if leak {
+                    say!(
+                        "tapestryd: warp ctx {} probe backings LEAKED ({} B, fence wedge)",
+                        c.pub_id,
+                        p.size * 2
+                    );
+                } else {
+                    for (res, va, fd) in [
+                        (p.mark_res, p.mark_va, p.mark_fd),
+                        (p.sent_res, p.sent_va, p.sent_fd),
+                    ] {
+                        let _ = self.gpu.detach_backing(res);
+                        let _ = self.gpu.ctx_detach_resource(c.dev_ctx, res);
+                        let _ = self.gpu.resource_unref(res);
+                        unsafe { t_burrow_detach(va, p.size) };
+                        unsafe { t_close(fd) };
+                    }
+                }
+            }
+            if leak {
+                // Round-2 F8: `leak` means "the device may still be
+                // executing this ctx's stream". Freeing the slot would
+                // hand its dev_ctx id to the NEXT client (dev_ctx =
+                // slot+1), so a stale stream could execute against a
+                // different client's context -- the I-45 breach F6
+                // already closed one level down for fenced SLOTS and
+                // that reasoning was not carried up to ctx slots.
+                // Retire the slot instead, and do NOT destroy a context
+                // with live work (that is what makes the host's
+                // behaviour undefined in the first place).
+                self.warp_ctx_slot_poisoned[slot] = true;
+                self.warp_ctx_vindicate[slot] = c.pub_id;
+                say!("tapestryd: warp ctx slot {} POISONED (fence wedge)", slot);
+                return;
+            }
+            // A CLEAN finish is a stronger proof than a vindication: it
+            // requires `fences_in_flight == 0` AND `!fence_poisoned`, and
+            // the poison only clears via a vindication, which itself
+            // requires the device to have retired every abandoned chain
+            // this ctx owned. So anything parked earlier in this ctx's life
+            // is provably free of the device now -- free it.
+            //
+            // Round 5 ALSO cleared an overflow-condemnation flag here, and
+            // that was round-6 F1: it un-condemned a slot whose surplus
+            // backings had been dropped and lost, handing the next ctx a
+            // fresh 64 MiB budget with those pages gone -- the unbounded
+            // cycle again, one abandoned fence per turn. The flag is gone
+            // entirely now; the creation-time count cap means nothing is
+            // ever dropped, so there is no condemnation left to clear and
+            // no way for the ceiling to be re-armed.
+            self.warp_free_leaked(slot);
+            // Round-5 F3, the same shape at the clean-retire site: the ctx
+            // was already taken above, so the slot -- and with it dev_ctx =
+            // slot+1 -- is free the moment this returns. A refused destroy
+            // means the host may still hold that context, so condemn the
+            // slot rather than mint into a live id. No `warp_ctx_vindicate`
+            // stamp: nothing can prove this one safe later, and a permanent
+            // condemnation that `warp_poisoned_slots` reports is honest.
+            if self.gpu.ctx_destroy(c.dev_ctx).is_err() {
+                self.warp_ctx_slot_poisoned[slot] = true;
+                say!(
+                    "tapestryd: warp ctx slot {} destroy REFUSED on clean retire -- condemned",
+                    slot
+                );
+            }
+        }
+    }
+
+    /// Retire one ctx. Quiesced (no fences in flight) -> finish NOW, the
+    /// common case. Otherwise mark it `retiring` -- instantly unresolvable
+    /// to every client -- and let `warp_pump_retires` finish it when the
+    /// last fence lands (audit F5: the old shape blocked the serve loop up
+    /// to 2 s per object, and a client could multiply that into minutes of
+    /// frozen console). Termination is the driver's: an unretired fence is
+    /// abandoned within FENCE_ABANDON_MS, which decrements the counter and
+    /// poisons the ctx, so `fences_in_flight` always reaches 0.
+    fn wctx_retire(&mut self, slot: usize) {
+        // Round-8 F1: release the hold HERE -- the one chokepoint every ctx
+        // death passes through (the ctl `destroy` verb and conn teardown
+        // both land here, and every `wctx_finish` is preceded by it). Round
+        // 7 put it on `warp_retire_conn` only, which missed a client that
+        // holds, submits, then `destroy`s its ctx while keeping the conn
+        // open: the swallowed retire kept `fences_in_flight` nonzero, so the
+        // pump could never finish the ctx it had just been told to retire.
+        // Releasing before the quiesce test is what lets the deferred
+        // retires replay in time for that test to succeed.
+        #[cfg(feature = "test-mode")]
+        if let Some(c) = self.warp_ctxs[slot].as_ref() {
+            let pub_id = c.pub_id;
+            self.gpu.test_hold_ctx_died(pub_id);
+        }
+        // Warp-4: the display must never keep scanning a resource this
+        // retire will free (or leak-park) -- an unref of the scanned-out
+        // resource is the one order the display cannot survive. Withdraw
+        // the consent (the partner surface's next present re-routes
+        // through its own 2D path, weave stale but bounded), then evict
+        // any of this ctx's BOs from the device binding. Runs at THIS
+        // chokepoint for the same reason the hold release does: every ctx
+        // death passes through here, and the deferred finish only frees
+        // what was already evicted now.
+        let (evict_res, consent_sl) = self.warp_ctxs[slot].as_ref().map_or((None, None), |c| {
+            (
+                c.bos
+                    .iter()
+                    .flatten()
+                    .map(|b| b.res_id)
+                    .find(|&r| r != 0 && r == self.bound_res),
+                c.present_to.map(|(sl, _, _)| sl),
+            )
+        });
+        if let Some(c) = self.warp_ctxs[slot].as_mut() {
+            c.present_to = None;
+        }
+        if let Some(sl) = consent_sl {
+            if let Some(s) = self.surf_mut(sl) {
+                s.res_stale = true;
+            }
+            self.gl_retarget(sl);
+        }
+        if let Some(r) = evict_res {
+            self.gl_evict_res(r);
+        }
+        let (quiesced, poisoned) = match &self.warp_ctxs[slot] {
+            Some(c) => (c.fences_in_flight == 0, c.fence_poisoned),
+            None => return,
+        };
+        if quiesced {
+            self.wctx_finish(slot, poisoned);
+            return;
+        }
+        if let Some(c) = self.warp_ctxs[slot].as_mut() {
+            c.retiring = true;
+        }
+    }
+
+    /// The deferred-retire pump (audit F5), run per serve-loop pass after
+    /// the fence drain: finish every ctx/BO whose fences have landed.
+    fn warp_pump_retires(&mut self) {
+        for i in 0..MAX_WARP_CTXS {
+            let (quiesced, poisoned, ctx_retiring) = match &self.warp_ctxs[i] {
+                Some(c) => (c.fences_in_flight == 0, c.fence_poisoned, c.retiring),
+                None => continue,
+            };
+            if !quiesced {
+                continue;
+            }
+            if ctx_retiring {
+                self.wctx_finish(i, poisoned);
+                continue;
+            }
+            let dev_ctx = self.warp_ctxs[i].as_ref().unwrap().dev_ctx;
+            for j in 0..MAX_WARP_BOS_PER_CTX {
+                let is_retiring = self.warp_ctxs[i].as_ref().unwrap().bos[j]
+                    .as_ref()
+                    .map_or(false, |b| b.retiring);
+                if !is_retiring {
+                    continue;
+                }
+                let mut b = self.warp_ctxs[i].as_mut().unwrap().bos[j].take().unwrap();
+                let leaked = Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
+                if leaked > 0 {
+                    // Park it too (round-5 F1): `leaked_bytes` bounds this
+                    // ctx's remaining life, but the ctx dies at wctx_finish
+                    // and a client can cycle mint->leak->destroy, so the
+                    // charge alone re-arms. The graveyard is what actually
+                    // gets the pages back at vindication.
+                    self.warp_park_leaked(i, b);
+                }
+                if let Some(c) = self.warp_ctxs[i].as_mut() {
+                    c.leaked_bytes = c.leaked_bytes.saturating_add(leaked);
+                    if leaked > 0 {
+                        c.leaked_count = c.leaked_count.saturating_add(1);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Retire a specific owned BO (the bo ctl `destroy` verb). An in-flight
+    /// fenced chain may reference THIS BO (streams are scoped to
+    /// ctx-attached resources), so a non-quiesced ctx defers: the BO
+    /// becomes unresolvable immediately and the pump frees it.
+    fn wbo_destroy(&mut self, bo_pub: u32, conn: u64) -> bool {
+        let (ctx_pub, quiesced, poisoned) = match self.wbo(bo_pub, conn) {
+            Some((c, _)) => (c.pub_id, c.fences_in_flight == 0, c.fence_poisoned),
+            None => return false,
+        };
+        let slot = match self.wctx_slot(ctx_pub) {
+            Some(s) => s,
+            None => return false,
+        };
+        // Warp-4: same eviction contract as wctx_retire, scoped to one BO
+        // -- both arms below make it unresolvable NOW (the deferred one
+        // frees it later from the pump), so the display drops it now too.
+        let (evict_res, consent_sl) = self.warp_ctxs[slot].as_ref().map_or((None, None), |c| {
+            (
+                c.bos
+                    .iter()
+                    .flatten()
+                    .find(|b| b.pub_id == bo_pub)
+                    .map(|b| b.res_id)
+                    .filter(|&r| r != 0 && r == self.bound_res),
+                match c.present_to {
+                    Some((sl, _, bp)) if bp == bo_pub => Some(sl),
+                    _ => None,
+                },
+            )
+        });
+        if let Some(sl) = consent_sl {
+            if let Some(c) = self.warp_ctxs[slot].as_mut() {
+                c.present_to = None;
+            }
+            if let Some(s) = self.surf_mut(sl) {
+                s.res_stale = true;
+            }
+            self.gl_retarget(sl);
+        }
+        if let Some(r) = evict_res {
+            self.gl_evict_res(r);
+        }
+        let dev_ctx = self.warp_ctxs[slot].as_ref().unwrap().dev_ctx;
+        for j in 0..MAX_WARP_BOS_PER_CTX {
+            let matches = self.warp_ctxs[slot].as_ref().unwrap().bos[j]
+                .as_ref()
+                .map_or(false, |b| b.pub_id == bo_pub);
+            if !matches {
+                continue;
+            }
+            if quiesced {
+                let mut b = self.warp_ctxs[slot].as_mut().unwrap().bos[j].take().unwrap();
+                let leaked = Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
+                if leaked > 0 {
+                    self.warp_park_leaked(slot, b);
+                }
+                if let Some(c) = self.warp_ctxs[slot].as_mut() {
+                    c.leaked_bytes = c.leaked_bytes.saturating_add(leaked);
+                    if leaked > 0 {
+                        c.leaked_count = c.leaked_count.saturating_add(1);
+                    }
+                }
+            } else {
+                self.warp_ctxs[slot].as_mut().unwrap().bos[j]
+                    .as_mut()
+                    .unwrap()
+                    .retiring = true;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Conn teardown, warp half: retire every ctx this conn owns.
+    fn warp_retire_conn(&mut self, conn: u64) {
+        // The hold release lives in `wctx_retire` (round-8 F1), which this
+        // calls -- one chokepoint rather than three that must agree.
+        for i in 0..MAX_WARP_CTXS {
+            if self.warp_ctxs[i]
+                .as_ref()
+                .map_or(false, |c| c.owner_conn == conn)
+            {
+                self.wctx_retire(i);
+            }
+        }
+    }
+
+    /// Ctx slots condemned by a fence wedge (round-3 F7): a pool fully
+    /// poisoned is a TERMINAL state, not a transient one, so it must be
+    /// visible rather than inferable from a retryable-looking E_NOMEM.
+    fn warp_poisoned_slots(&self) -> usize {
+        self.warp_ctx_slot_poisoned.iter().filter(|&&p| p).count()
+    }
+
+    /// RESOLVABLE contexts -- retiring ones are excluded (round-2 F10).
+    /// The `ctl` line and the arc's own gate assert on this, and a
+    /// retiring ctx is addressable by nobody, so counting it made a
+    /// correct system report a stale number (and the gate FAIL).
+    fn warp_live_ctxs(&self) -> usize {
+        self.warp_ctxs.iter().flatten().filter(|c| !c.retiring).count()
+    }
+
+    // --- Warp-2d: the fenced lane at the seam -----------------------------
+
+    /// The per-pass fence pump: drain retired fenced chains off the device
+    /// and post each on its owning ctx (poll_fences delivers them). A tag
+    /// whose ctx is gone is dropped -- every retire path drains first, so
+    /// only the wedge-leak path can orphan one.
+    pub fn warp_service_fences(&mut self) {
+        self.gpu.poll_completions();
+        for tag in self.gpu.take_completions() {
+            for c in self.warp_ctxs.iter_mut().flatten() {
+                if c.pub_id != tag.ctx_pub {
+                    continue;
+                }
+                c.fences_in_flight = c.fences_in_flight.saturating_sub(1);
+                if tag.abandoned {
+                    // NOT a completion: the chain may still be live
+                    // device-side, so the ctx's backings can never be
+                    // freed again (leak-on-wedge), and the fence must
+                    // NOT be reported as signaled.
+                    c.fence_poisoned = true;
+                } else {
+                    // #210 ROOT CAUSE FIX: count completions DENSELY per
+                    // ctx instead of publishing the device-GLOBAL max
+                    // fence id. The winsys counts fenced ops it ISSUED
+                    // and compares against `fence-signaled`; with the
+                    // global id, any ctx minted after prior fenced work
+                    // (the SECOND GL client of a boot) saw signaled >>
+                    // issued, and its unsigned in-flight throttle
+                    // (issued - signaled) wrapped -- the client parked on
+                    // the fence file forever while its next submit was
+                    // the only thing that could fill the park. Dense
+                    // per-ctx counts are the number space the client's
+                    // model (and this file's own W2d comment) always
+                    // assumed. Sound because completions are FIFO within
+                    // the single ring; pairs 1:1 with the in_flight
+                    // decrement above. The fence-file record's CONTENT
+                    // moves to count-space too -- the winsys never parses
+                    // it (the read is a doorbell; the counter is the
+                    // authority).
+                    c.fence_signaled += 1;
+                }
+                break;
+            }
+        }
+        // A late retire proves the host finished an abandoned chain, so
+        // its ctx (and the slot it may have condemned) recover -- without
+        // this, one client could burn all 8 ctx slots in ~62 s and kill
+        // the seam for the whole box permanently (round-3 F2).
+        for v in self.gpu.take_vindications() {
+            // #210 audit F1: a vindication IS a completion -- the device
+            // provably finished one abandoned chain -- so the dense fence
+            // count must take it, or the ctx is left one short of the
+            // client's issue count forever (the silent post-recovery park:
+            // signaled can never reach the parked wait's seq once nothing
+            // later is in flight). Counted BEFORE the poison gate below:
+            // take_vindications drains, and a vindication consumed while a
+            // SIBLING slot is still poisoned would otherwise lose its
+            // count permanently. The gate guards only the RECLAMATION
+            // (un-poison + free), not the arithmetic.
+            if let Some(c) = self
+                .warp_ctxs
+                .iter_mut()
+                .flatten()
+                .find(|c| c.pub_id == v.ctx_pub)
+            {
+                c.fence_signaled += 1;
+            }
+            // ONE retired chain is not proof for a ctx that abandoned
+            // SEVERAL (round-4 F1): a ctx can hold every fenced slot, and
+            // clearing its poison while siblings still execute would let
+            // the next destroy FREE pages the device is still writing
+            // (the UAF this posture exists to prevent) and recycle a
+            // dev_ctx whose stream is live (the I-45 breach). Wait until
+            // the driver holds no poisoned slot for this ctx at all.
+            if self.gpu.ctx_has_poisoned_slot(v.ctx_pub) {
+                continue;
+            }
+            // Un-poison a LIVE ctx, and make that a full reclamation point
+            // (round-6 F1). The `ctx_has_poisoned_slot` test above is the
+            // same device-done proof the slot recovery below relies on, so
+            // this ctx's parked backings are provably free of the device
+            // and can be freed HERE rather than waiting for it to die.
+            // Both counters reset with them: an uncharge is honest exactly
+            // when it is paired with the drop that FREES (the #130/#131
+            // rule), and these pages are genuinely returned. Without this
+            // a vindicated-but-still-live ctx stayed charged for memory it
+            // no longer held, and once `leaked_count` hit the cap it could
+            // never build another backing -- bricked while healthy.
+            let live_slot = self
+                .warp_ctxs
+                .iter()
+                .position(|c| c.as_ref().map_or(false, |c| c.pub_id == v.ctx_pub));
+            if let Some(s) = live_slot {
+                self.warp_free_leaked(s);
+                if let Some(c) = self.warp_ctxs[s].as_mut() {
+                    c.fence_poisoned = false;
+                    c.leaked_bytes = 0;
+                    c.leaked_count = 0;
+                }
+            }
+            let slot = match self.warp_ctx_vindicate.iter().position(|&p| p == v.ctx_pub) {
+                Some(s) => s,
+                None => continue,
+            };
+            // The leak arm skipped CTX_DESTROY (a context with live work
+            // must not be destroyed). Now that the device is provably
+            // finished, destroy it BEFORE the slot -- and with it dev_ctx =
+            // slot+1 -- returns to the pool, or the next client's
+            // CTX_CREATE would collide with a host context that still
+            // exists (round-4 F3). Round-5 F3: that was written as an
+            // assertion, not a check -- `ctx_destroy` is fallible on a
+            // HEALTHY engine (a resp-type mismatch does not latch `dead`),
+            // and the un-poison ran regardless. A refused destroy leaves
+            // the slot condemned instead.
+            if self.gpu.ctx_destroy((slot as u32) + 1).is_err() {
+                say!(
+                    "tapestryd: warp ctx slot {} destroy REFUSED -- slot stays condemned",
+                    slot
+                );
+                continue;
+            }
+            // Only now are the parked backings provably free of the device.
+            self.warp_free_leaked(slot);
+            self.warp_ctx_slot_poisoned[slot] = false;
+            self.warp_ctx_vindicate[slot] = 0;
+            say!("tapestryd: warp ctx slot {} recovered (device finished)", slot);
+        }
+        self.warp_pump_retires();
+    }
+
+    /// Does the serve loop need its 1 ms fence pace? A DEAD engine never
+    /// retires anything, so counting its stuck slots would pin the clamp
+    /// forever (self-found SF-1, same family as audit F6).
+    pub fn warp_fences_pending(&self) -> bool {
+        !self.gpu.engine_dead() && self.gpu.fenced_in_flight() > 0
+    }
+
+    /// SUBMIT_3D from the ctx submit file: one Twrite = one atomic opaque
+    /// submission on the fenced lane. Returns the fence id (the fence
+    /// file's completion record).
+    /// Admission for every fenced submission, returning the device ctx id.
+    ///
+    /// Two bounds the lane itself cannot express. **Round-5 F2**: a poisoned
+    /// ctx is TERMINAL -- the rest of the mechanism already treats its
+    /// backings as possibly-live-DMA, so letting it submit again is what let
+    /// a client re-arm its own fence stream and hide the wedge. **Round-5
+    /// F4**: `alloc_fenced_slot` is first-fit over a process-wide pool of
+    /// FENCED_SLOTS, and nothing capped a single ctx, so one client could
+    /// take all four -- starving every other client, then poisoning all four
+    /// at the abandonment deadline and killing 3D for the whole box. Half
+    /// the lane is the share: it leaves room for a second client always, and
+    /// still admits the submit+transfer pair a single client needs in
+    /// flight together.
+    fn warp_fenced_admit(&mut self, ctx_pub: u32, conn: u64) -> Result<u32, u32> {
+        let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
+        if c.fence_poisoned {
+            return Err(E_IO);
+        }
+        if c.fences_in_flight as usize >= WARP_CTX_FENCE_MAX {
+            return Err(E_AGAIN);
+        }
+        Ok(c.dev_ctx)
+    }
+
+    fn warp_submit(&mut self, ctx_pub: u32, conn: u64, stream: &[u8]) -> Result<u64, u32> {
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            c.fenced_rx += 1;      // #210: arrived at the fenced funnel
+        }
+        let r = (|| {
+            let dev_ctx = self.warp_fenced_admit(ctx_pub, conn)?;
+            match self.gpu.submit_3d(dev_ctx, ctx_pub, stream) {
+                Ok(f) => {
+                    self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
+                    Ok(f)
+                }
+                Err(e) => Err(map_fenced_err(e)),
+            }
+        })();
+        self.warp_fenced_account(ctx_pub, conn, &r);
+        r
+    }
+
+    /// #210: classify one fenced-funnel outcome on the ctx ledger.
+    fn warp_fenced_account(&mut self, ctx_pub: u32, conn: u64, r: &Result<u64, u32>) {
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            match r {
+                Ok(_) => c.fenced_minted += 1,
+                Err(e) if *e == E_AGAIN => c.fenced_again += 1,
+                Err(_) => c.fenced_err += 1,
+            }
+        }
+    }
+
+    /// TRANSFER_TO/FROM_HOST_3D from the bo ctl file (fence-bearing; the
+    /// completion rides the owning ctx's fence file like a submit's).
+    #[allow(clippy::too_many_arguments)]
+    fn warp_transfer(
+        &mut self,
+        bo_pub: u32,
+        conn: u64,
+        to_host: bool,
+        level: u32,
+        x: u32,
+        y: u32,
+        z: u32,
+        w: u32,
+        h: u32,
+        d: u32,
+        offset: u64,
+        stride: u32,
+        layer_stride: u32,
+    ) -> Result<u64, u32> {
+        let (ctx_pub, res_id, built) = match self.wbo(bo_pub, conn) {
+            Some((c, b)) => (c.pub_id, b.res_id, b.dma_fd >= 0),
+            None => return Err(p9::E_NOENT),
+        };
+        if !built {
+            return Err(p9::E_INVAL);
+        }
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            c.fenced_rx += 1;      // #210: arrived at the fenced funnel
+        }
+        let r = (|| {
+            let dev_ctx = self.warp_fenced_admit(ctx_pub, conn)?;
+            match self.gpu.transfer_3d(
+                to_host, dev_ctx, ctx_pub, res_id, level, x, y, z, w, h, d, offset, stride,
+                layer_stride,
+            ) {
+                Ok(f) => {
+                    self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
+                    Ok(f)
+                }
+                Err(e) => Err(map_fenced_err(e)),
+            }
+        })();
+        self.warp_fenced_account(ctx_pub, conn, &r);
+        r
+    }
+}
+
+fn map_fenced_err(e: FencedErr) -> u32 {
+    match e {
+        FencedErr::Again => E_AGAIN,
+        FencedErr::TooBig => p9::E_INVAL,
+        FencedErr::Dead => E_IO,
+    }
+}
+
 pub struct Conn {
     handle: i64,
     pub conn_id: u64,
+    /// Which tree this conn serves: P_ROOT (/srv/tapestry) or W_ROOT
+    /// (/srv/warp) -- set by which listener accepted it (Warp-2c). One Conn
+    /// type for both; the qid spaces are disjoint, so a warp conn simply
+    /// never resolves a tapestry path and vice versa.
+    root: u64,
     version_done: bool,
     msize: u32,
     fids: [Option<Fid>; MAX_FIDS],
+    /// One-shot: the fid table filled (walks now refuse E_NOMEM). The #198
+    /// hunt burned three instrumented runs because this refusal was the
+    /// ONE silent layer between the client's diag and the warp dispatch's.
+    fid_full_said: bool,
     in_buf: Vec<u8>,
     out_buf: Vec<u8>,
     defer: bool,
     pending_reads: Vec<PendingRead>,
+    pending_fences: Vec<PendingFence>,
 }
 
 const NO_FID: Option<Fid> = None;
@@ -2232,17 +4343,20 @@ fn rects_cover_full(rects: &[(u32, u32, u32, u32)], w: u32, h: u32) -> bool {
 }
 
 impl Conn {
-    pub fn new(handle: i64, conn_id: u64) -> Conn {
+    pub fn new(handle: i64, conn_id: u64, root: u64) -> Conn {
         Conn {
             handle,
             conn_id,
+            root,
             version_done: false,
             msize: SRV_MSIZE,
             fids: [NO_FID; MAX_FIDS],
+            fid_full_said: false,
             in_buf: Vec::new(),
             out_buf: Vec::new(),
             defer: false,
             pending_reads: Vec::new(),
+            pending_fences: Vec::new(),
         }
     }
 
@@ -2278,31 +4392,76 @@ impl Conn {
         }
     }
 
+    fn fid_full_diag_once(&mut self) {
+        if !self.fid_full_said {
+            self.fid_full_said = true;
+            say!(
+                "tapestryd: 9p fid table FULL (cap {}) conn={} -- walks refuse E_NOMEM",
+                MAX_FIDS, self.conn_id
+            );
+        }
+    }
+
     fn fid_clunk(&mut self, fid: u32) {
         if let Some(i) = self.fid_find(fid) {
             self.fids[i] = None;
         }
         // Cancel site 2 (clunk): this fid's held replies die with it.
         self.pending_reads.retain(|pr| pr.fid != fid);
+        self.pending_fences.retain(|pf| pf.fid != fid);
     }
 
     fn drop_all_fids(&mut self, comp: &mut Comp) {
         // Cancel site 3 (Tversion, session reset): surfaces this conn owns
-        // retire; every fid + held reply drops.
+        // retire; every fid + held reply drops. Warp objects too.
         comp.retire_conn(self.conn_id);
+        comp.warp_retire_conn(self.conn_id);
         self.fids = [NO_FID; MAX_FIDS];
+        // A new session gets a new one-shot budget (fid-lift audit F5): the
+        // reset empties the table, so a table that fills AGAIN deserves its
+        // own witness -- a spent latch here silenced the second fill.
+        self.fid_full_said = false;
         self.pending_reads.clear();
+        self.pending_fences.clear();
     }
 
     pub fn teardown(&mut self, comp: &mut Comp) {
         // Cancel site 1 (conn death): the owning conn's surfaces retire
-        // (spec Destroy via client death); held replies die.
+        // (spec Destroy via client death); held replies die. The warp half
+        // retires the conn's GPU contexts + BOs identically (Warp-2c).
         comp.retire_conn(self.conn_id);
+        comp.warp_retire_conn(self.conn_id);
         self.pending_reads.clear();
+        self.pending_fences.clear();
     }
 
     pub fn raw_fd(&self) -> i64 {
         self.handle
+    }
+
+    /// Which tree this conn serves (the F7 per-root budget).
+    pub fn root(&self) -> u64 {
+        self.root
+    }
+
+    /// #210 custody mirror input: this conn's parked fence/event reads +
+    /// request-buffer residue (a persistent nonzero in_buf between frames
+    /// is a parse desync), plus the first parked fence's identity. Folded
+    /// into Comp per tick by main's conns walk so the W_CTL reader (a
+    /// sibling conn) can see it.
+    #[cfg(feature = "test-mode")]
+    pub fn w210_summary(&self) -> (usize, usize, usize, u32, u32) {
+        let (fc, ff) = self
+            .pending_fences
+            .first()
+            .map_or((0, 0), |p| (p.ctx_pub, p.fid));
+        (
+            self.pending_fences.len(),
+            self.pending_reads.len(),
+            self.in_buf.len(),
+            fc,
+            ff,
+        )
     }
 
     // --- frame pump (the ptyfs bodies, verbatim shape) -----------------------
@@ -2440,10 +4599,12 @@ impl Conn {
         if a.afid != p9::P9_NOFID || a.fid == p9::P9_NOFID {
             return self.err(tag, p9::E_OPNOTSUPP);
         }
-        if !self.fid_set(a.fid, P_ROOT, 0) {
+        let root = self.root;
+        if !self.fid_set(a.fid, root, 0) {
+            self.fid_full_diag_once();
             return self.err(tag, p9::E_NOMEM);
         }
-        let q = self.qid_of(P_ROOT);
+        let q = self.qid_of(root);
         p9::build_rattach(&mut self.out_buf, tag, &q)
     }
 
@@ -2523,6 +4684,67 @@ impl Conn {
                 };
                 Some((make_surf(n, fk), s.gen))
             }
+            // --- The /dev/warp tree (Warp-2c) --------------------------------
+            W_ROOT => match name {
+                b".." => Some((W_ROOT, 0)),
+                b"ctl" => Some((W_CTL, 0)),
+                b"caps" => Some((W_CAPS, 0)),
+                b"ctx" => Some((W_CTX_DIR, 0)),
+                _ => None,
+            },
+            W_CTX_DIR => {
+                if name == b".." {
+                    return Some((W_ROOT, 0));
+                }
+                if name == b"new" {
+                    return Some((W_CTX_NEW, 0));
+                }
+                let id = parse_u32(name)?;
+                comp.wctx(id, self.conn_id)?; // F2: only the owner resolves
+                Some((make_wctx(id, WFK_DIR), 0))
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_DIR => {
+                let id = warp_id(d);
+                comp.wctx(id, self.conn_id)?;
+                let fk = match name {
+                    b".." => return Some((W_CTX_DIR, 0)),
+                    b"ctl" => WFK_CTL,
+                    b"submit" => WFK_SUBMIT,
+                    b"fence" => WFK_FENCE,
+                    b"bo" => WFK_BO_DIR,
+                    _ => return None,
+                };
+                Some((make_wctx(id, fk), 0))
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_BO_DIR => {
+                let cid = warp_id(d);
+                comp.wctx(cid, self.conn_id)?;
+                if name == b".." {
+                    return Some((make_wctx(cid, WFK_DIR), 0));
+                }
+                if name == b"new" {
+                    return Some((make_wctx(cid, WFK_BO_NEW), 0));
+                }
+                let bid = parse_u32(name)?;
+                let (c, _) = comp.wbo(bid, self.conn_id)?;
+                if c.pub_id != cid {
+                    return None;
+                }
+                Some((make_wbo(bid, WFK_DIR), 0))
+            }
+            d if is_wbo(d) && warp_fk(d) == WFK_DIR => {
+                let bid = warp_id(d);
+                let (c, _) = comp.wbo(bid, self.conn_id)?;
+                let parent = make_wctx(c.pub_id, WFK_BO_DIR);
+                let fk = match name {
+                    b".." => return Some((parent, 0)),
+                    b"ctl" => WFK_BO_CTL,
+                    b"map" => WFK_BO_MAP,
+                    b"info" => WFK_BO_INFO,
+                    _ => return None,
+                };
+                Some((make_wbo(bid, fk), 0))
+            }
             _ => None,
         }
     }
@@ -2565,6 +4787,7 @@ impl Conn {
         }
         if nwalked == a.nwname as usize {
             if !self.fid_set(a.newfid, cur, cur_gen) {
+                self.fid_full_diag_once();
                 return self.err(tag, p9::E_NOMEM);
             }
         } else if nwalked == 0 && a.nwname > 0 {
@@ -2608,6 +4831,51 @@ impl Conn {
             });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
+        }
+
+        // Warp mints (Warp-2c). ctx/new: allocate a context in THIS conn
+        // (CTX_CREATE on the device -- virgl-gated) + rebind the fid onto
+        // its ctl; the ctl read yields the public id. bo/new: the same
+        // idiom one level down (no device state until the ctl create3d).
+        if f.path == W_CTX_NEW {
+            if !comp.gpu.virgl {
+                return self.err(tag, p9::E_OPNOTSUPP);
+            }
+            let conn_id = self.conn_id;
+            let id = match comp.wctx_mint(conn_id) {
+                Some(id) => id,
+                None => return self.err(tag, p9::E_NOMEM),
+            };
+            let path = make_wctx(id, WFK_CTL);
+            self.fids[i] = Some(Fid { fid: a.fid, path, gen: 0, opened: true });
+            let q = self.qid_of(path);
+            return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
+        }
+        if is_wctx(f.path) && warp_fk(f.path) == WFK_BO_NEW {
+            let cid = warp_id(f.path);
+            let conn_id = self.conn_id;
+            if comp.wctx(cid, conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            let id = match comp.wbo_mint(cid, conn_id) {
+                Some(id) => id,
+                None => return self.err(tag, p9::E_NOMEM),
+            };
+            let path = make_wbo(id, WFK_BO_CTL);
+            self.fids[i] = Some(Fid { fid: a.fid, path, gen: 0, opened: true });
+            let q = self.qid_of(path);
+            return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
+        }
+        // Warp files: re-validate liveness + ownership (monotonic ids -- a
+        // stale fid resolves to nothing, the pane discipline).
+        if is_wctx(f.path)
+            && warp_fk(f.path) != WFK_DIR
+            && comp.wctx(warp_id(f.path), self.conn_id).is_none()
+        {
+            return self.err(tag, p9::E_NOENT);
+        }
+        if is_wbo(f.path) && comp.wbo(warp_id(f.path), self.conn_id).is_none() {
+            return self.err(tag, p9::E_NOENT);
         }
 
         // Surface files: re-validate liveness + ownership + generation (a
@@ -2677,6 +4945,315 @@ impl Conn {
         }
         if is_pane(f.path) {
             return self.pane_read(comp, f.path, tag, a.offset, cap);
+        }
+
+        // --- The /dev/warp files (Warp-2c) -----------------------------------
+        if f.path == W_CTL {
+            // `virgl <0|1>` first: the line joey's boot probe + a client's
+            // capability check parse. capset names the RETAINED blob (the
+            // caps file's content); ctxs is live-count introspection.
+            let mut s = String::new();
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "virgl {}\ncapsets {}\ncapset {} {} {}\nctxs {}\npoisoned {}\nbo-cap {}\nfence-lane {}\nbo-peak {}\n",
+                    comp.gpu.virgl as u32,
+                    comp.gpu.num_capsets,
+                    comp.gpu.capset_id,
+                    comp.gpu.capset_ver,
+                    comp.gpu.capset_blob.len(),
+                    comp.warp_live_ctxs(),
+                    comp.warp_poisoned_slots(),
+                    // Warp-3: client discovery of the per-ctx BO capacity, so
+                    // neither the winsys nor the prover's churn bound bakes
+                    // the constant in (#187: a claimed cross-file sync needs
+                    // a CHECK; reading it here IS the check).
+                    MAX_WARP_BOS_PER_CTX,
+                    // #204: the per-ctx fenced-lane share, for the same
+                    // reason -- the winsys throttles its in-flight depth to
+                    // this, and a hardcoded client mirror is what held the
+                    // pipeline at depth 2 (#215) after the server side grew.
+                    WARP_CTX_FENCE_MAX,
+                    // #204 census (global): max backed BOs any ctx ever
+                    // held -- readable after the workload's ctx is gone.
+                    comp.warp_bo_peak
+                ),
+            );
+            // The BYTES axis (what WARP_CTX_BACKING_MAX actually gates).
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!("bo-bytes-peak {}\n", comp.warp_bo_bytes_peak),
+            );
+            // Audit F3/F4: the ctx-less refusal ledger + the comp-global
+            // one-shot mask -- both are spendable/bumpable by ANY conn, so
+            // both must be READABLE or their state is invisible exactly
+            // when the hunt needs it.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "create-refused-noctx {}\ndiag-noctx-arms {}\n",
+                    comp.warp_create_refused_noctx, comp.warp_diag_noctx_arms
+                ),
+            );
+            // #175: the anti-vacuous counter. A prover that submits and
+            // then abandons is racing the drain; if the completion won,
+            // nothing was in flight, the abandon was a no-op, and every
+            // later assertion runs against a HEALTHY ctx while reporting
+            // PASS. Asserting `abandoned >= 1` first is what makes the
+            // poisoned-path legs mean anything.
+            #[cfg(feature = "test-mode")]
+            {
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!("abandoned {}\n", comp.gpu.test_abandoned_total()),
+                );
+                // #180: the departed-holder discriminator. `ctxs` cannot serve
+                // here -- warp_live_ctxs excludes `retiring` contexts, so a ctx
+                // whose deferred retires were never replayed (round-8 F1) reads
+                // exactly like one that finished. This counts the slots
+                // themselves, which is the resource that actually leaks.
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!("fenced-free {}\n", comp.gpu.test_fenced_free()),
+                );
+                // #210: the per-ctx fence ledger, readable from ANY conn. The
+                // signaled/reported pair splits a wedged fence wait three
+                // ways: reported == signaled == the id a parked client waits
+                // past means the newest record was CONSUMED by a read (an
+                // Rread was sent -- a client still parked lost it in
+                // transport); reported < signaled means an undelivered
+                // record sits here while the park never fills (a poll_fences
+                // gap); inflight > 0 belies fenced-free.
+                for c in comp.warp_ctxs.iter().flatten() {
+                    let _ = core::fmt::write(
+                        &mut s,
+                        format_args!(
+                            "wctx {} inflight {} signaled {} reported {} rx {} mint {} again {} err {}\n",
+                            c.pub_id,
+                            c.fences_in_flight,
+                            c.fence_signaled,
+                            c.fence_reported,
+                            c.fenced_rx,
+                            c.fenced_minted,
+                            c.fenced_again,
+                            c.fenced_err
+                        ),
+                    );
+                }
+                // #210 custody: reads the server HOLDS right now (folded
+                // per tick across ALL conns) + parse residue. fparked=0
+                // with a client-side parked Tread on a fence fid means
+                // the read never became a park -- look at inbuf.
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!(
+                        "w210 fparked {} rparked {} inbuf {} fctx {} ffid {}\n",
+                        comp.w210_fparked,
+                        comp.w210_rparked,
+                        comp.w210_inbuf_max,
+                        comp.w210_f_ctx,
+                        comp.w210_f_fid
+                    ),
+                );
+            }
+            return self.read_str(tag, &s, a.offset, cap);
+        }
+        if f.path == W_CAPS {
+            // The raw capset blob (decode with the ctl `capset` line).
+            let b = &comp.gpu.capset_blob;
+            let off = (a.offset as usize).min(b.len());
+            let take = (b.len() - off).min(cap);
+            let slice = b[off..off + take].to_vec();
+            return p9::build_rread(&mut self.out_buf, tag, &slice);
+        }
+        if is_wctx(f.path) {
+            let id = warp_id(f.path);
+            if comp.wctx(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WFK_CTL => {
+                    let mut s = String::new();
+                    let _ = core::fmt::write(&mut s, format_args!("{}\n", id));
+                    // #175: expose the per-ctx leak accounting so the
+                    // prover can watch the round-6 F1 cap directly rather
+                    // than inferring it from a refusal alone.
+                    if let Some(c) = comp.wctx(id, self.conn_id) {
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!(
+                                "poisoned {}\nleaked-count {}\nleaked-bytes {}\n",
+                                c.fence_poisoned as u32, c.leaked_count, c.leaked_bytes
+                            ),
+                        );
+                        // #240 (GPU-DESIGN 4.5.4b). DISTINCT from `poisoned`
+                        // on purpose: that one means a fence chain never
+                        // retired, this one means the host refused our
+                        // commands while every fence retired normally. The
+                        // defect existed because the second was read through
+                        // the first. `verify-seq` rides along so a reader
+                        // can tell "never asked" (0) from "asked, healthy"
+                        // -- a zero `stream-rejected` alone is satisfied by
+                        // a probe that never ran (#184).
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!(
+                                "stream-rejected {}\nrejected-at {}\nverify-seq {}\n",
+                                c.stream_rejected as u32, c.rejected_at, c.verify_seq
+                            ),
+                        );
+                    }
+                    // #180: a BOUNDED way to watch this ctx's fences land. The
+                    // fence fd is the only alternative and it parks, so a
+                    // broken per-ctx hold scope would hang a prover instead of
+                    // failing it -- and a hang reads as a boot timeout, which
+                    // is the least diagnosable failure this harness can emit.
+                    // `fence-signaled` rides alongside because the gauge alone
+                    // cannot carry the held-lane claim (#184): it is satisfied
+                    // by "no fence was ever queued" just as well as by "the
+                    // fence retired". `fence_signaled` is monotonic, and a
+                    // SWALLOWED retire never reaches the pump that raises it,
+                    // so an increase is positive evidence a fence really landed.
+                    //
+                    // PROMOTED out of test-mode at Warp-3: the Mesa winsys's
+                    // whole fence model rides `fence-signaled` (the client
+                    // counts fenced ops it ISSUED; the fence file coalesces,
+                    // so this monotonic counter is the only raceless way to
+                    // learn how many RETIRED -- the same #184 reasoning that
+                    // put it here). A production client cannot depend on a
+                    // test-mode field.
+                    {
+                        let signaled =
+                            comp.wctx(id, self.conn_id).map_or(0, |c| c.fence_signaled);
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!(
+                                "fences-in-flight {}\nfence-signaled {}\n",
+                                comp.gpu.ctx_fences_in_flight(id),
+                                signaled
+                            ),
+                        );
+                        // #204 census (per-ctx): live = backed right now
+                        // (what the creation cap counts); peak = the
+                        // high-water the cap width must be sized against;
+                        // the bytes twins gate WARP_CTX_BACKING_MAX.
+                        let (live, peak, live_b, peak_b) =
+                            comp.wctx(id, self.conn_id).map_or((0, 0, 0, 0), |c| {
+                                (
+                                    c.bos
+                                        .iter()
+                                        .flatten()
+                                        .filter(|b| b.dma_fd >= 0)
+                                        .count() as u32,
+                                    c.bo_backed_peak,
+                                    c.bos
+                                        .iter()
+                                        .flatten()
+                                        .map(|b| b.size)
+                                        .fold(0u64, u64::saturating_add),
+                                    c.bo_bytes_peak,
+                                )
+                            });
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!(
+                                "bo-live {}\nbo-peak {}\nbo-bytes {}\nbo-bytes-peak {}\n",
+                                live, peak, live_b, peak_b
+                            ),
+                        );
+                        // The #198-hunt storm scale: the one-shots name only
+                        // the FIRST refusal per family; this counts them all.
+                        // Appended LAST so the client-critical keys
+                        // (fence-signaled) stay inside a 255-byte snapshot.
+                        let refused =
+                            comp.wctx(id, self.conn_id).map_or(0, |c| c.create_refused);
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!("create-refused {}\n", refused),
+                        );
+                    }
+                    self.read_str(tag, &s, a.offset, cap)
+                }
+                // The fence completion stream (W2d): one record per read
+                // -- the newest completion COUNT (#210: dense per-ctx,
+                // not the device fence id), coalescing (FIFO within our
+                // single ring, so count N retires everything <= N); parks
+                // when nothing is unreported (the FK_EVENT netd leg).
+                // Offset is ignored: a stream, not a file image.
+                WFK_FENCE => {
+                    if cap < FENCE_REC_MAX {
+                        // Too small for a whole record: answer empty rather
+                        // than park a read that could never complete.
+                        return p9::build_rread(&mut self.out_buf, tag, &[]);
+                    }
+                    let c = comp.wctx(id, self.conn_id).unwrap();
+                    if c.fence_poisoned {
+                        // Stream over: a fence of this ctx was abandoned
+                        // and can never signal (round-2 F7). UNCONDITIONAL
+                        // since round-5 F2 -- the old `&& fence_signaled <=
+                        // fence_reported` conjunct let the client suppress
+                        // its own EOF: fence ids are globally monotone, so
+                        // ANY later submission that completes leaves
+                        // signaled > reported, and the read then returned
+                        // that higher id. Under the documented "id N
+                        // retires everything <= N" coalescing rule that
+                        // record ASSERTS the abandoned fence completed --
+                        // so the client would reuse a backing this very
+                        // seam believes the device may still be writing.
+                        // A vindication clears the poison and the stream
+                        // legitimately resumes.
+                        return p9::build_rread(&mut self.out_buf, tag, &[]);
+                    }
+                    if c.fence_signaled > c.fence_reported {
+                        let v = c.fence_signaled;
+                        comp.wctx_mut(id, self.conn_id).unwrap().fence_reported = v;
+                        let mut s = String::new();
+                        let _ = core::fmt::write(&mut s, format_args!("{}\n", v));
+                        return p9::build_rread(&mut self.out_buf, tag, s.as_bytes());
+                    }
+                    if self.pending_fences.len() >= MAX_FIDS {
+                        return self.err(tag, p9::E_PROTO);
+                    }
+                    self.pending_fences.push(PendingFence {
+                        fid: a.fid,
+                        ctx_pub: id,
+                        tag,
+                    });
+                    self.defer = true;
+                    Ok(0)
+                }
+                _ => self.err(tag, p9::E_INVAL),
+            };
+        }
+        if is_wbo(f.path) {
+            let id = warp_id(f.path);
+            let bo = match comp.wbo(id, self.conn_id) {
+                Some((_, b)) => b,
+                None => return self.err(tag, p9::E_NOENT),
+            };
+            return match warp_fk(f.path) {
+                WFK_BO_CTL => {
+                    let mut s = String::new();
+                    let _ = core::fmt::write(&mut s, format_args!("{}\n", id));
+                    self.read_str(tag, &s, a.offset, cap)
+                }
+                WFK_BO_INFO => {
+                    // `res` is the device-global resource id -- the name a
+                    // virgl command stream uses (the gpu_va slot of the
+                    // section 4.1 tree is v3d's; virgl addresses by id).
+                    // stride 0 = tight (the client picks per-transfer).
+                    let mut s = String::new();
+                    let _ = core::fmt::write(
+                        &mut s,
+                        format_args!(
+                            "res {} size {} stride 0 offset 0 w {} h {}\n",
+                            bo.res_id, bo.size, bo.w, bo.h
+                        ),
+                    );
+                    self.read_str(tag, &s, a.offset, cap)
+                }
+                _ => self.err(tag, p9::E_INVAL),
+            };
         }
 
         if !is_surf(f.path) {
@@ -2925,6 +5502,102 @@ impl Conn {
                 Err(e) => self.err(tag, e),
             };
         }
+        // --- The /dev/warp writes (Warp-2c) ----------------------------------
+        // #175: the warp-tree test levers must live HERE, not on the
+        // tapestry P_CTL where the other test-mode verbs are. A warp client
+        // is connected to /srv/warp and has no path to the tapestry tree at
+        // all, so verbs parked there were simply unreachable -- the gate
+        // caught that on its first real run, which is the harness earning
+        // its keep before it ever tested the seam. The cargo feature IS the
+        // production strip (#880).
+        #[cfg(feature = "test-mode")]
+        if f.path == W_CTL {
+            let s = core::str::from_utf8(a.data).unwrap_or("").trim();
+            if s == "warp-hold on" || s == "warp-hold off" || s == "warp-abandon" {
+                // #178: both levers act ONLY on the caller's own ctx. They
+                // ship (`default = ["test-mode"]`) and this ctl is mode
+                // 0666, so global versions were an unprivileged, permanent,
+                // box-wide DoS on the fenced lane -- handing any client the
+                // very wedge 149-warp.md documents as needing a hung GL
+                // chain. Authorizing the CALLER cannot work here: the
+                // in-guest battery is an ordinary uid-1000 client by design
+                // (the same reason SA-1 leaves the determinism surface
+                // ungated), so the power is bounded instead of the peer.
+                // Requiring a ctx also makes a mis-sequenced test fail loud
+                // rather than silently no-op.
+                let ctx_pub = match comp.wctx_of_conn(self.conn_id) {
+                    Some(v) => v,
+                    None => return self.err(tag, p9::E_INVAL),
+                };
+                if s == "warp-abandon" {
+                    comp.gpu.test_abandon_ctx(ctx_pub);
+                    return p9::build_rwrite(&mut self.out_buf, tag, a.count);
+                }
+                // Round-8 F1: at most ONE ctx may hold. Arming used to
+                // overwrite `hold_ctx` outright, so a second client
+                // displaced the first WITHOUT replaying its swallowed
+                // retires -- and the displaced ctx then never quiesced,
+                // stranding its fenced slot; four of those exhaust the
+                // shared lane for every client. Refusing the displacement
+                // keeps the departing-holder release sufficient by
+                // construction. A non-holder's "off" is likewise refused
+                // rather than silently releasing someone else's hold.
+                let held = comp.gpu.test_hold_ctx_current();
+                if s.ends_with("on") {
+                    if held.map_or(false, |h| h != ctx_pub) {
+                        return self.err(tag, p9::E_AGAIN);
+                    }
+                    comp.gpu.test_hold_ctx(Some(ctx_pub));
+                } else {
+                    if held.map_or(false, |h| h != ctx_pub) {
+                        return self.err(tag, p9::E_AGAIN);
+                    }
+                    comp.gpu.test_hold_ctx(None);
+                }
+                return p9::build_rwrite(&mut self.out_buf, tag, a.count);
+            }
+            return self.err(tag, p9::E_INVAL);
+        }
+        if is_wctx(f.path) {
+            let id = warp_id(f.path);
+            if comp.wctx(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WFK_CTL => match self.wctx_ctl(comp, id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
+                // One Twrite = one atomic submission (W2d): the opaque
+                // stream (section 2.1 -- unparsed) rides the fenced lane;
+                // the reply means QUEUED, the ctx fence file carries the
+                // completion. Bounded by iounit; the Loom-carried bulk
+                // path is the section 4.1 follow-on.
+                WFK_SUBMIT => {
+                    if !comp.gpu.virgl {
+                        return self.err(tag, p9::E_OPNOTSUPP);
+                    }
+                    match comp.warp_submit(id, self.conn_id, a.data) {
+                        Ok(_fence) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                        Err(e) => self.err(tag, e),
+                    }
+                }
+                _ => self.err(tag, p9::E_PERM),
+            };
+        }
+        if is_wbo(f.path) {
+            let id = warp_id(f.path);
+            if comp.wbo(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WFK_BO_CTL => match self.wbo_ctl(comp, id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
+                _ => self.err(tag, p9::E_PERM),
+            };
+        }
         if !is_surf(f.path) {
             return self.err(tag, p9::E_INVAL);
         }
@@ -2943,6 +5616,261 @@ impl Conn {
             },
             _ => self.err(tag, p9::E_PERM),
         }
+    }
+
+    /// ctx ctl verbs (Warp-2c): `capset <id>` + `rings <n>` record the
+    /// client's declaration at the seam (GPU-DESIGN section 4.3 -- the ABI
+    /// carries them from day one; the device sees them when F_CONTEXT_INIT /
+    /// per-ring fencing are negotiated); `destroy` retires the ctx.
+    fn wctx_ctl(&mut self, comp: &mut Comp, id: u32, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        let mut it = s.split_ascii_whitespace();
+        match it.next() {
+            Some("capset") => {
+                let v: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+                comp.wctx_mut(id, self.conn_id).ok_or(p9::E_NOENT)?.capset = v;
+                Ok(())
+            }
+            Some("rings") => {
+                let v: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+                if !(1..=64).contains(&v) {
+                    return Err(p9::E_INVAL);
+                }
+                comp.wctx_mut(id, self.conn_id).ok_or(p9::E_NOENT)?.rings = v;
+                Ok(())
+            }
+            Some("destroy") => {
+                let slot = comp.wctx_slot(id).ok_or(p9::E_NOENT)?;
+                if comp.wctx(id, self.conn_id).is_none() {
+                    return Err(p9::E_NOENT);
+                }
+                comp.wctx_retire(slot);
+                Ok(())
+            }
+            // #240 (GPU-DESIGN 4.5.4b): run one health probe NOW and fold
+            // the result into `stream-rejected`. The verb exists so CADENCE
+            // is the client's -- per frame, every Nth, or never -- because
+            // the server cannot know how much a given client is willing to
+            // pay for the answer. Deliberately returns Ok on every outcome:
+            // the ANSWER lives in the ctl fields, and an unknown (a
+            // transport failure mid-probe) is not a failure of the WRITE.
+            // Erroring here would tempt a client to treat a probe it could
+            // not run as a rejection, which is the direction that
+            // manufactures false deaths.
+            Some("verify") => {
+                if comp.wctx(id, self.conn_id).is_none() {
+                    return Err(p9::E_NOENT);
+                }
+                comp.warp_ctx_verify(id, self.conn_id);
+                Ok(())
+            }
+            Some("present-to") => {
+                // Warp-4, the adoption's CTX half: consent to displaying
+                // this ctx's BO <bo_pub> on surface <n>. The gen of the
+                // surface incarnation is captured HERE, so a later tenant
+                // of the same slot can never inherit the consent. Pure
+                // naming -- geometry (and both sides' liveness) gate
+                // ACTIVITY per-use in `gl_adoption`, never this write, so
+                // a resize racing the handshake degrades to inactive
+                // instead of failing the verb.
+                let a1 = it.next().ok_or(p9::E_INVAL)?;
+                if a1 == "off" {
+                    let c = comp.wctx_mut(id, self.conn_id).ok_or(p9::E_NOENT)?;
+                    let old = c.present_to.take();
+                    if let Some((sl, _, _)) = old {
+                        // Only perturb the surface if it actually names THIS
+                        // ctx (Warp-5 F1): present-to's surface lives on
+                        // another conn, so an ungated retarget + res_stale
+                        // let an unprivileged ctx soft-Off a stranger's
+                        // direct scanout at will. A surface naming a
+                        // different ctx (or none) was never fed by us --
+                        // leave it; its owner's glsrc drives its own switch.
+                        if comp.surf(sl).map_or(false, |s| s.gl_src == Some(id)) {
+                            if let Some(s) = comp.surf_mut(sl) {
+                                s.res_stale = true;
+                            }
+                            comp.gl_retarget(sl);
+                        }
+                    }
+                    return Ok(());
+                }
+                let sn: usize = a1.parse().map_err(|_| p9::E_INVAL)?;
+                let bo: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+                if it.next().is_some() {
+                    return Err(p9::E_INVAL);
+                }
+                {
+                    let c = comp.wctx(id, self.conn_id).ok_or(p9::E_NOENT)?;
+                    if !c
+                        .bos
+                        .iter()
+                        .flatten()
+                        .any(|b| b.pub_id == bo && !b.retiring && b.dma_fd >= 0)
+                    {
+                        return Err(p9::E_NOENT);
+                    }
+                }
+                let gen = match comp.surf(sn) {
+                    Some(s) => s.gen,
+                    None => return Err(p9::E_NOENT),
+                };
+                if let Some(c) = comp.wctx_mut(id, self.conn_id) {
+                    c.present_to = Some((sn, gen, bo));
+                }
+                // Re-arm the surface's direct switch only if it names THIS
+                // ctx (Warp-5 F1). If the surface has not yet glsrc'd us the
+                // pairing is not active anyway, and its own glsrc write will
+                // retarget when it lands -- so a foreign surface is never
+                // touched by our present-to.
+                if comp.surf(sn).map_or(false, |s| s.gl_src == Some(id)) {
+                    comp.gl_retarget(sn);
+                }
+                Ok(())
+            }
+            _ => Err(p9::E_INVAL),
+        }
+    }
+
+    /// bo ctl verbs (Warp-2c): `create3d <target> <format> <bind> <w> <h>
+    /// <d> <array> <last_level> <samples> <flags> <size>` builds the backing
+    /// (kernel GPU-BO mint + 3D resource + ctx attach + backing attach);
+    /// `destroy` retires the BO. W2d adds the fenced transfers:
+    /// `transfer_to <level> <x> <y> <z> <w> <h> <d> <offset> <stride>
+    /// <layer_stride>` and `transfer_from ...` (device <-> backing; the
+    /// completion rides the owning ctx's fence file). The parameter tuple
+    /// is the client's -- the host renderer owns 3D validity (section
+    /// 2.1); the server owns only the backing-size sanity its own
+    /// soundness needs.
+    fn wbo_ctl(&mut self, comp: &mut Comp, id: u32, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        let mut it = s.split_ascii_whitespace();
+        match it.next() {
+            Some("create3d") => {
+                // #218 server half: a create3d that did not succeed CONSUMES
+                // its mint record. The stock client treats a refused create3d
+                // as terminal for the BO -- it neither retries nor destroys
+                // it -- so the minted-but-unbuilt corpse used to sit in
+                // `bos[]` for the ctx's life, and ~1000 per-texture refusals
+                // starved `wbo_mint` into total BO death (the #198 cascade's
+                // second stage). Hooked HERE, not per-arm in `wbo_create`, so
+                // the parse/OPNOTSUPP arms that never reach it consume the
+                // mint too; the helper's own guards make the benign
+                // already-built refusal (and a foreign conn's) a no-op.
+                let ctx_pub = comp.wbo(id, self.conn_id).map(|(c, _)| c.pub_id);
+                let r = self.wbo_ctl_create3d(comp, id, it);
+                if let Err(e) = r {
+                    comp.wbo_unmint_refused(id, self.conn_id);
+                    // The #198-hunt accounting: EVERY refusal family passes
+                    // this chokepoint. A refusal whose record resolved
+                    // counts on ITS ctx; one whose record did not (E_NOENT
+                    // always; E_INVAL/E_OPNOTSUPP on a dead id) counts on
+                    // the comp-level twin -- per-ctx alone would make a
+                    // retry storm against consumed records census-invisible
+                    // (audit F3). The families that never reach wbo_create
+                    // name themselves below (E_IO already named its arm in
+                    // there; naming it again would double-report).
+                    let mut counted = false;
+                    if let Some(cp) = ctx_pub {
+                        if let Some(c) = comp.wctx_mut(cp, self.conn_id) {
+                            c.create_refused += 1;
+                            counted = true;
+                        }
+                    }
+                    if !counted {
+                        comp.warp_create_refused_noctx += 1;
+                    }
+                    let cp = ctx_pub.unwrap_or(0);
+                    if e == p9::E_INVAL {
+                        comp.wbo_diag_once(cp, self.conn_id, Comp::WDIAG_CTL_PARSE, "ctl-parse", data.len() as i64, 0, 0, 0, 0, 0);
+                    } else if e == p9::E_NOENT {
+                        comp.wbo_diag_once(cp, self.conn_id, Comp::WDIAG_CTL_NO_RECORD, "ctl-no-record", id as i64, 0, 0, 0, 0, 0);
+                    } else if e == p9::E_OPNOTSUPP {
+                        comp.wbo_diag_once(cp, self.conn_id, Comp::WDIAG_CTL_NOT_VIRGL, "ctl-not-virgl", 0, 0, 0, 0, 0, 0);
+                    }
+                }
+                r
+            }
+            Some("transfer_to") => self.wbo_transfer(comp, id, true, it),
+            Some("transfer_from") => self.wbo_transfer(comp, id, false, it),
+            Some("destroy") => {
+                if comp.wbo_destroy(id, self.conn_id) {
+                    Ok(())
+                } else {
+                    Err(p9::E_NOENT)
+                }
+            }
+            _ => Err(p9::E_INVAL),
+        }
+    }
+
+    /// The create3d verb body, extracted so the ctl arm can unmint on ANY
+    /// failure (#218) -- including the arms that fail before `wbo_create`.
+    fn wbo_ctl_create3d(
+        &mut self,
+        comp: &mut Comp,
+        id: u32,
+        mut it: core::str::SplitAsciiWhitespace<'_>,
+    ) -> Result<(), u32> {
+        if !comp.gpu.virgl {
+            return Err(p9::E_OPNOTSUPP);
+        }
+        let mut arg = |_name: &str| -> Result<u64, u32> {
+            it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)
+        };
+        let target = arg("target")? as u32;
+        let format = arg("format")? as u32;
+        let bind = arg("bind")? as u32;
+        let w = arg("w")? as u32;
+        let h = arg("h")? as u32;
+        let d = arg("d")? as u32;
+        let array = arg("array")? as u32;
+        let last_level = arg("last_level")? as u32;
+        let samples = arg("samples")? as u32;
+        let flags = arg("flags")? as u32;
+        let size = arg("size")?;
+        let ctx_pub = comp
+            .wbo(id, self.conn_id)
+            .map(|(c, _)| c.pub_id)
+            .ok_or(p9::E_NOENT)?;
+        if comp.wbo_create(
+            ctx_pub, id, self.conn_id, target, format, bind, w, h, d, array,
+            last_level, samples, flags, size,
+        ) {
+            Ok(())
+        } else {
+            Err(E_IO)
+        }
+    }
+
+    /// The W2d transfer verb tail: `<level> <x> <y> <z> <w> <h> <d>
+    /// <offset> <stride> <layer_stride>` -> the fenced TRANSFER chain.
+    fn wbo_transfer(
+        &mut self,
+        comp: &mut Comp,
+        id: u32,
+        to_host: bool,
+        mut it: core::str::SplitAsciiWhitespace<'_>,
+    ) -> Result<(), u32> {
+        if !comp.gpu.virgl {
+            return Err(p9::E_OPNOTSUPP);
+        }
+        let mut arg = |_name: &str| -> Result<u64, u32> {
+            it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)
+        };
+        let level = arg("level")? as u32;
+        let x = arg("x")? as u32;
+        let y = arg("y")? as u32;
+        let z = arg("z")? as u32;
+        let w = arg("w")? as u32;
+        let h = arg("h")? as u32;
+        let d = arg("d")? as u32;
+        let offset = arg("offset")?;
+        let stride = arg("stride")? as u32;
+        let layer_stride = arg("layer_stride")? as u32;
+        comp.warp_transfer(
+            id, self.conn_id, to_host, level, x, y, z, w, h, d, offset, stride, layer_stride,
+        )
+        .map(|_| ())
     }
 
     /// cfg-3 (AURORA-CONFIG.md section 3.3): does this conn's LIVE peer
@@ -2967,7 +5895,10 @@ impl Conn {
     /// to GATED" (an allowlist would silently ungate a verb added without
     /// touching the gate line).
     fn is_ungated_ctl(s: &str) -> bool {
-        s == "test-mode on" || s == "test-mode off" || s == "tick" || s.starts_with("release")
+        s == "test-mode on"
+            || s == "test-mode off"
+            || s == "tick"
+            || s.starts_with("release")
     }
 
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
@@ -3067,6 +5998,15 @@ impl Conn {
                 comp.frame_tick();
                 return Ok(());
             }
+            // #178: the warp poisoned-path levers used to ALSO live here,
+            // and #175 called them "unreachable" once they moved to the
+            // warp W_CTL. That was true only from the PROVER's vantage
+            // point -- a warp client has no path to this tree, but every
+            // TAPESTRY client does, and these arms drove the GLOBAL
+            // abandon/hold. A second door to the same box-wide wedge,
+            // opened by the commit that claimed to close it. They exist
+            // in exactly one place now: the W_CTL arm, scoped to the
+            // caller's own ctx -- which a tapestry client does not have.
             if let Some(rest) = s.strip_prefix("release") {
                 let rest = rest.trim();
                 if rest.is_empty() {
@@ -3086,7 +6026,10 @@ impl Conn {
             }
         }
         #[cfg(not(feature = "test-mode"))]
-        if s.starts_with("test-mode") || s == "tick" || s.starts_with("release") {
+        if s.starts_with("test-mode")
+            || s == "tick"
+            || s.starts_with("release")
+        {
             return Err(p9::E_OPNOTSUPP); // stripped for production (#880)
         }
         Err(p9::E_INVAL)
@@ -3127,6 +6070,42 @@ impl Conn {
                 return Err(p9::E_INVAL);
             }
             return comp.resize_ack(n, w, h, serial);
+        }
+        if let Some(rest) = s.strip_prefix("glsrc ") {
+            // Warp-4, the adoption's SURFACE half: accept warp ctx
+            // <pub_id> as this surface's display source. Naming a ctx
+            // grants NOTHING by itself -- display activates only when
+            // that ctx's own `present-to` names this surface incarnation
+            // back (mutual adoption), so no ownership check is needed
+            // here: a surface naming a stranger's ctx just never
+            // activates. The ctx must exist NOW (a mis-sequenced
+            // handshake fails loud, the #178 precedent); liveness is
+            // re-checked at every use.
+            let rest = rest.trim();
+            if rest == "off" {
+                if let Some(surf) = comp.surf_mut(n) {
+                    surf.gl_src = None;
+                    // The weave never saw the GL frames; the 2D machinery
+                    // heals from stale on its next switch.
+                    surf.res_stale = true;
+                }
+                comp.gl_retarget(n);
+                return Ok(());
+            }
+            let v: u32 = rest.parse().map_err(|_| p9::E_INVAL)?;
+            if !comp
+                .warp_ctxs
+                .iter()
+                .flatten()
+                .any(|c| c.pub_id == v && !c.retiring)
+            {
+                return Err(p9::E_NOENT);
+            }
+            if let Some(surf) = comp.surf_mut(n) {
+                surf.gl_src = Some(v);
+            }
+            comp.gl_retarget(n);
+            return Ok(());
         }
         Err(p9::E_INVAL)
     }
@@ -3208,6 +6187,12 @@ impl Conn {
             }
         }
 
+        // #164: past every validation gate = a well-formed present, on
+        // any routing arm below. Malformed spam never reaches this line,
+        // so it cannot hold the clock awake; hidden-surface presents are
+        // filtered inside (audit F1).
+        comp.note_present(n);
+
         // The #56 present-style latch: a present whose damage does not
         // cover the full surface marks the client an ACCUMULATOR --
         // placement (blit + ptr_hit) then crops instead of letterboxing.
@@ -3231,39 +6216,114 @@ impl Conn {
                 // switch IS composition); present unheld once first.
                 return Err(E_AGAIN);
             }
-            // The deferred direct switch (F16: SET_SCANOUT only at a
-            // present-COMPLETE). A stale client resource (composed-era
-            // presents never transferred to it) expands this transfer to
-            // the full surface first.
-            let stale = comp.surf(n).map_or(false, |s| s.res_stale);
-            let xfer: Vec<(u32, u32, u32, u32)> =
-                if stale { alloc::vec![(0, 0, w, h)] } else { rects.clone() };
-            for &(tx, ty, tw, th) in &xfer {
-                let offset =
-                    (slot as u64) * slot_stride + ((ty as u64) * (w as u64) + tx as u64) * 4;
-                if comp.gpu.transfer(res, offset, tx, ty, tw, th).is_err() {
-                    return Err(E_IO);
+            // Warp-4: an ACTIVE GL adoption switches to the client's own
+            // 3D resource -- the frame is already host-side, so there is
+            // no guest transfer at all; bind then flush (#57: a flush
+            // before the bind is dropped by spec). The WEAVE stays stale
+            // by construction (GL frames never land in it), so res_stale
+            // is forced TRUE -- the 2D machinery heals from it whenever
+            // the adoption later ends.
+            if let Some(g) = comp.gl_adoption(n) {
+                say!("tapestryd: scanout direct {} GL res {} ({}x{})", n, g.res_id, w, h);
+                if comp.gpu.set_scanout(g.res_id, w, h).is_ok() {
+                    comp.bound_res = g.res_id;
+                    let _ = comp.gpu.flush(g.res_id, 0, 0, w, h);
+                    comp.scanout = Scanout::Direct(n);
+                    comp.pending_direct = None;
                 }
-                if comp.gpu.flush(res, tx, ty, tw, th).is_err() {
-                    return Err(E_IO);
-                }
-            }
-            say!("tapestryd: scanout direct {} ({}x{})", n, w, h);
-            if comp.gpu.set_scanout(res, w, h).is_ok() {
-                // Post-bind full flush (#57): the per-rect flushes above
-                // targeted a not-yet-scanned-out resource (dropped by
-                // spec), and cocoa's same-size surface replace renders
-                // nothing -- without this the display keeps the stale
-                // composed frame until later client damage covers it
-                // (the lingering-dead-pane symptom).
-                let _ = comp.gpu.flush(res, 0, 0, w, h);
-                comp.scanout = Scanout::Direct(n);
-                comp.pending_direct = None;
                 if let Some(s) = comp.surf_mut(n) {
-                    s.res_stale = false;
+                    s.res_stale = true;
+                }
+            } else {
+                // The deferred direct switch (F16: SET_SCANOUT only at a
+                // present-COMPLETE). A stale client resource (composed-era
+                // presents never transferred to it) expands this transfer
+                // to the full surface first.
+                let stale = comp.surf(n).map_or(false, |s| s.res_stale);
+                let xfer: Vec<(u32, u32, u32, u32)> =
+                    if stale { alloc::vec![(0, 0, w, h)] } else { rects.clone() };
+                for &(tx, ty, tw, th) in &xfer {
+                    let offset = (slot as u64) * slot_stride
+                        + ((ty as u64) * (w as u64) + tx as u64) * 4;
+                    if comp.gpu.transfer(res, offset, tx, ty, tw, th).is_err() {
+                        return Err(E_IO);
+                    }
+                    if comp.gpu.flush(res, tx, ty, tw, th).is_err() {
+                        return Err(E_IO);
+                    }
+                }
+                say!("tapestryd: scanout direct {} ({}x{})", n, w, h);
+                if comp.gpu.set_scanout(res, w, h).is_ok() {
+                    // Post-bind full flush (#57): the per-rect flushes
+                    // above targeted a not-yet-scanned-out resource
+                    // (dropped by spec), and cocoa's same-size surface
+                    // replace renders nothing -- without this the display
+                    // keeps the stale composed frame until later client
+                    // damage covers it (the lingering-dead-pane symptom).
+                    let _ = comp.gpu.flush(res, 0, 0, w, h);
+                    comp.bound_res = res;
+                    comp.scanout = Scanout::Direct(n);
+                    comp.pending_direct = None;
+                    if let Some(s) = comp.surf_mut(n) {
+                        s.res_stale = false;
+                    }
                 }
             }
         } else if comp.scanout == Scanout::Direct(n) {
+            if let Some(g) = comp.gl_adoption(n) {
+                // Warp-4 steady-state GL direct: the render already
+                // happened host-side (the client's SUBMIT_3D was queued
+                // before this present arrived -- same controlq, FIFO), so
+                // a present is ONLY the display flush. Damage rects are
+                // ignored: GL frames are whole-frame by nature (the SDL
+                // swap presents full damage), and a partial flush of a 3D
+                // scanout buys nothing. HOLD is refused: its contract is
+                // a DEFERRED device-visible flush, and the GL arms have
+                // no deferral -- silently flushing now would make the
+                // determinism battery's hold legs lie.
+                if hold {
+                    return Err(p9::E_OPNOTSUPP);
+                }
+                if comp.bound_res != g.res_id {
+                    // Defensive (mode-machine-unreachable: every adoption
+                    // change routes through the pending switch): rebind
+                    // rather than flush a non-scanned-out resource, which
+                    // the spec drops silently.
+                    say!("tapestryd: GL direct rebind {} -> {}", comp.bound_res, g.res_id);
+                    if comp.gpu.set_scanout(g.res_id, w, h).is_err() {
+                        return Err(E_IO);
+                    }
+                    comp.bound_res = g.res_id;
+                }
+                if comp.gpu.flush(g.res_id, 0, 0, w, h).is_err() {
+                    return Err(E_IO);
+                }
+                if let Some(s) = comp.surf_mut(n) {
+                    s.res_stale = true;
+                }
+                if !hold {
+                    comp.release_held(n);
+                }
+                // The completion tail, mirrored from the end of this
+                // function (presents count + Woven->Live + the displaced-
+                // generation retire) -- keep in lockstep with it. The
+                // retire is correct here for the same reason as there:
+                // the display shows CURRENT content (the adopted BO), so
+                // no scanout references the displaced weave's resource.
+                {
+                    let s = comp.surf_mut(n).unwrap();
+                    s.presents += 1;
+                    if s.state == SurfState::Woven {
+                        s.state = SurfState::Live;
+                    }
+                }
+                if let Some((oldw, old_res)) =
+                    comp.surf_mut(n).and_then(|s| s.old_weave.take())
+                {
+                    comp.release_gen(&oldw, old_res);
+                }
+                return Ok(());
+            }
             // The stage-0 direct path, byte-identical for the single-rect
             // form: damage transfer + flush on the client's own
             // scanned-out resource (the zero-copy fullscreen case). A
@@ -3299,6 +6359,48 @@ impl Conn {
                 comp.release_held(n);
             }
         } else if comp.scanout == Scanout::Composed {
+            // Warp-4 composed GL (the ladder's readback fallback): pull
+            // the adopted frame host->guest into the BO's own backing --
+            // synchronously, so the present stays one dispatch (the I-40
+            // premise) -- then compose those pages like any weave.
+            // Full-frame always: GL damage is whole-frame by nature, and
+            // the transfer cost dwarfs any rect bookkeeping.
+            if let Some(g) = comp.gl_adoption(n) {
+                if hold {
+                    return Err(p9::E_OPNOTSUPP); // no GL deferral (see the direct arm)
+                }
+                if comp
+                    .gpu
+                    .transfer_from_3d_sync(g.dev_ctx, g.res_id, g.w, g.h, g.w * 4)
+                    .is_ok()
+                {
+                    if let Some(r) =
+                        comp.blit_composed_pixels(n, 0, 0, 0, w, h, Some(g.va))
+                    {
+                        comp.screen_push(r);
+                    }
+                }
+                if let Some(s) = comp.surf_mut(n) {
+                    s.res_stale = true;
+                }
+                if !hold {
+                    comp.release_held(n);
+                }
+                // The completion tail, mirrored (see the GL direct arm).
+                {
+                    let s = comp.surf_mut(n).unwrap();
+                    s.presents += 1;
+                    if s.state == SurfState::Woven {
+                        s.state = SurfState::Live;
+                    }
+                }
+                if let Some((oldw, old_res)) =
+                    comp.surf_mut(n).and_then(|s| s.old_weave.take())
+                {
+                    comp.release_gen(&oldw, old_res);
+                }
+                return Ok(());
+            }
             // Composed: blit the damage into the screen buffer at the
             // pane's content rect (a hidden/unhosted surface skips); the
             // client resource is now stale for a future direct switch.
@@ -3306,7 +6408,7 @@ impl Conn {
             // dispatch) and defer only the screen push.
             let mut acc: Option<Rect> = None;
             for &(x, y, pw, ph) in &rects {
-                if let Some(r) = comp.blit_composed_pixels(n, slot, x, y, pw, ph) {
+                if let Some(r) = comp.blit_composed_pixels(n, slot, x, y, pw, ph, None) {
                     if hold {
                         acc = Some(rect_union(acc.unwrap_or(Rect::ZERO), r));
                     } else {
@@ -3436,6 +6538,62 @@ impl Conn {
                     }
                 }
             }
+            // --- The /dev/warp tree (Warp-2c; mirrors walk_child -- a name
+            // in one ladder and not the other is walkable-but-invisible). ---
+            W_ROOT => {
+                names.push((b"ctl".to_vec(), W_CTL));
+                names.push((b"caps".to_vec(), W_CAPS));
+                names.push((b"ctx".to_vec(), W_CTX_DIR));
+            }
+            W_CTX_DIR => {
+                names.push((b"new".to_vec(), W_CTX_NEW));
+                for c in comp.warp_ctxs.iter().flatten() {
+                    // `!retiring` matches walk_child (round-3 F4): a name
+                    // listed here but rejected there is the inverse of the
+                    // walkable-but-invisible trap, and just as wrong.
+                    if c.owner_conn == self.conn_id && !c.retiring {
+                        let mut nm = String::new();
+                        let _ = core::fmt::write(&mut nm, format_args!("{}", c.pub_id));
+                        names.push((nm.into_bytes(), make_wctx(c.pub_id, WFK_DIR)));
+                    }
+                }
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_DIR => {
+                let id = warp_id(d);
+                if comp.wctx(id, self.conn_id).is_some() {
+                    for (nm, fk) in [
+                        (&b"ctl"[..], WFK_CTL),
+                        (&b"submit"[..], WFK_SUBMIT),
+                        (&b"fence"[..], WFK_FENCE),
+                        (&b"bo"[..], WFK_BO_DIR),
+                    ] {
+                        names.push((nm.to_vec(), make_wctx(id, fk)));
+                    }
+                }
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_BO_DIR => {
+                let cid = warp_id(d);
+                if let Some(c) = comp.wctx(cid, self.conn_id) {
+                    names.push((b"new".to_vec(), make_wctx(cid, WFK_BO_NEW)));
+                    for b in c.bos.iter().flatten().filter(|b| !b.retiring) {
+                        let mut nm = String::new();
+                        let _ = core::fmt::write(&mut nm, format_args!("{}", b.pub_id));
+                        names.push((nm.into_bytes(), make_wbo(b.pub_id, WFK_DIR)));
+                    }
+                }
+            }
+            d if is_wbo(d) && warp_fk(d) == WFK_DIR => {
+                let bid = warp_id(d);
+                if comp.wbo(bid, self.conn_id).is_some() {
+                    for (nm, fk) in [
+                        (&b"ctl"[..], WFK_BO_CTL),
+                        (&b"map"[..], WFK_BO_MAP),
+                        (&b"info"[..], WFK_BO_INFO),
+                    ] {
+                        names.push((nm.to_vec(), make_wbo(bid, fk)));
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -3521,6 +6679,7 @@ impl Conn {
         // Cancel site 4 (Tflush): the held reply under oldtag dies; per 9P
         // the client reuses oldtag only after this Rflush.
         self.pending_reads.retain(|pr| pr.tag != a.oldtag);
+        self.pending_fences.retain(|pf| pf.tag != a.oldtag);
         p9::build_rflush(&mut self.out_buf, tag)
     }
 
@@ -3537,6 +6696,18 @@ impl Conn {
             None => return self.err(tag, p9::E_BADF),
         };
         let f = self.fids[i].unwrap();
+        // Warp-2c: the BO map fid is the second Tweft anchor (the weave
+        // shape verbatim: lazy share, ring_entries 0 = the map-only kind
+        // the kernel cross-checks).
+        if f.opened && is_wbo(f.path) && warp_fk(f.path) == WFK_BO_MAP {
+            let id = warp_id(f.path);
+            return match comp.wbo_weft_ensure(id, self.conn_id) {
+                Some((share_id, size)) => {
+                    p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0)
+                }
+                None => self.err(tag, p9::E_NOMEM),
+            };
+        }
         if !f.opened || !is_surf(f.path) || surf_fk(f.path) != FK_WEAVE {
             return self.err(tag, p9::E_INVAL);
         }
@@ -3579,6 +6750,39 @@ impl Conn {
                 }
                 None => i += 1,
             }
+        }
+        true
+    }
+
+    /// Deliver held fence reads whose ctxs have unreported completions
+    /// (or died: EOF the stream). False = the conn's transport failed.
+    pub fn poll_fences(&mut self, comp: &mut Comp) -> bool {
+        let mut i = 0;
+        while i < self.pending_fences.len() {
+            let pf = self.pending_fences[i];
+            let rec = match comp.wctx(pf.ctx_pub, self.conn_id) {
+                None => None, // the ctx died with this read parked: EOF
+                // A poisoned ctx has a fence that will NEVER signal
+                // (abandoned, not completed). Reporting nothing forever
+                // stranded the reader with neither record nor EOF
+                // (round-2 F7) -- end the stream so the client learns.
+                // Unconditional since round-5 F2 -- see the h_read twin.
+                Some(c) if c.fence_poisoned => None,
+                Some(c) if c.fence_signaled > c.fence_reported => Some(c.fence_signaled),
+                Some(_) => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let mut s = String::new();
+            if let Some(v) = rec {
+                comp.wctx_mut(pf.ctx_pub, self.conn_id).unwrap().fence_reported = v;
+                let _ = core::fmt::write(&mut s, format_args!("{}\n", v));
+            }
+            if !self.deliver_read(pf.tag, s.as_bytes()) {
+                return false;
+            }
+            self.pending_fences.remove(i);
         }
         true
     }

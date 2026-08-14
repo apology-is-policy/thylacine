@@ -1,0 +1,1775 @@
+From 1f6f36f0c85117299dd833cd44aa46bc1cc76745 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Sat, 8 Aug 2026 22:39:39 +0200
+Subject: [PATCH] Thylacine Warp-3: the virgl winsys over the /srv/warp GPU
+ seam
+
+The unmodified virgl gallium driver, carried by a new winsys
+(src/gallium/winsys/virgl/thylacine/) whose transport is warp_client.c:
+blocking file ops on the tapestryd-served 9P tree via raw Thylacine
+syscalls (<thyla/syscall.h>, carried by the generated cross file's
+c_args). The vtest backend's 18 load-bearing slots, minus every
+displaytarget arm -- the OSMesa frontend reads back through pipe
+transfers, so flush_frontbuffer stays NULL (guarded upstream).
+
+Fences are counted, not parsed: the client counts fenced ops it ISSUED
+(submits + transfers, FIFO per ring) against the seam's monotonic
+per-ctx `fence-signaled` counter; the fence FILE is only the blocking
+primitive (its coalesced record content is ignored) and is never read
+with nothing in flight, so no park is unfillable. transfer_get is
+synchronous (queue + fence-wait) because the driver maps and reads on
+return -- the same choice vtest's protocol-v2 arm makes. Submits split
+at CCMD boundaries into <= 24 KiB writes (one Twrite = one atomic
+submission; msize is 32 KiB and past the iounit the kernel client
+would fragment mid-command); a single command wider than the bound
+fails loudly and latches (GPU-DESIGN 4.1's Loom bulk path is the
+successor). Hard failures LATCH the connection: the driver ignores
+submit_cmd's return, so a dropped command buffer must not be silent.
+
+Build wiring keys on `with_thylacine = cc.get_define('__thylacine__')`
+-- the cross file deliberately claims system='linux', so the compiler
+is the only honest meson-level signal (and it is the same one
+detect_os.h keys on). On thylacine the virgl driver drops dep_libdrm
+(zero xf86drm includes; its drm-uapi headers are the in-tree copies)
+and builds this winsys instead of drm+vtest. The osmesa target grows
+the virgl closure via link_whole (build.sh links by hand) and selects
+the screen at runtime on GALLIUM_DRIVER=virpipe|virgl, falling back
+loudly to the software rasteriser.
+
+virgl_prove.c is the Warp-3 gate binary: link proof on the builder,
+triangle-on-the-GPU prover in-guest. Discrimination is structural
+twice over: it never walks the CAP_JIT clearance (llvmpipe cannot run
+without it, so a fallback cannot paint the triangle) and GL_RENDERER
+must name virgl and not be bare llvmpipe. Exit 0/2/1 = PASS/SKIP/FAIL.
+
+The virgl disk-cache keying asserted a build-id note into existence; a
+static link that never passed --build-id has none, so the assert
+aborted screen creation in-guest at first tri-gate contact. The keying
+contribution is now conditional: no note -> return with disk_cache
+NULL, the exact configuration MESA_SHADER_CACHE_DISABLE ships, which
+every consumer already handles (the getter returns NULL and
+disk_cache_destroy is NULL-guarded). llvmpipe's util-path identifier
+fallback degrades the same way.
+---
+ meson.build                                   |  10 +
+ .../target-helpers/inline_sw_helper.h         |   7 +-
+ src/gallium/drivers/virgl/meson.build         |  28 +-
+ src/gallium/drivers/virgl/virgl_screen.c      |   6 +-
+ src/gallium/meson.build                       |   8 +-
+ src/gallium/targets/osmesa/meson.build        |  49 +-
+ src/gallium/targets/osmesa/osmesa_target.c    |  40 +-
+ src/gallium/targets/osmesa/virgl_prove.c      | 203 ++++++
+ .../winsys/virgl/thylacine/meson.build        |  16 +
+ .../virgl/thylacine/virgl_thylacine_public.h  |  15 +
+ .../virgl/thylacine/virgl_thylacine_winsys.c  | 631 ++++++++++++++++++
+ .../winsys/virgl/thylacine/warp_client.c      | 417 ++++++++++++
+ .../winsys/virgl/thylacine/warp_client.h      | 116 ++++
+ 13 files changed, 1534 insertions(+), 12 deletions(-)
+ create mode 100644 src/gallium/targets/osmesa/virgl_prove.c
+ create mode 100644 src/gallium/winsys/virgl/thylacine/meson.build
+ create mode 100644 src/gallium/winsys/virgl/thylacine/virgl_thylacine_public.h
+ create mode 100644 src/gallium/winsys/virgl/thylacine/virgl_thylacine_winsys.c
+ create mode 100644 src/gallium/winsys/virgl/thylacine/warp_client.c
+ create mode 100644 src/gallium/winsys/virgl/thylacine/warp_client.h
+
+diff --git a/meson.build b/meson.build
+index fa82575..7c84bdd 100644
+--- a/meson.build
++++ b/meson.build
+@@ -159,6 +159,16 @@ with_any_opengl = with_opengl or with_gles1 or with_gles2
+ 
+ system_has_kms_drm = ['openbsd', 'netbsd', 'freebsd', 'gnu/kfreebsd', 'dragonfly', 'linux', 'sunos', 'android', 'managarm'].contains(host_machine.system())
+ 
++# Thylacine (Warp-3): the cross file deliberately claims system = 'linux'
++# (its own comment explains why -- Mesa branches on host_machine.system()
++# in ~40 places and the linux arm assumes exactly the musl-shaped POSIX
++# pouch presents), so the system name cannot gate Thylacine-only build
++# arms. The compiler can: the aarch64-thylacine clang defines
++# __thylacine__, which is also what the source-level port (detect_os.h)
++# keys on -- one signal, both layers.
++with_thylacine = cc.get_define('__thylacine__') != ''
++
++
+ gallium_drivers = get_option('gallium-drivers')
+ if gallium_drivers.contains('auto')
+   if system_has_kms_drm
+diff --git a/src/gallium/auxiliary/target-helpers/inline_sw_helper.h b/src/gallium/auxiliary/target-helpers/inline_sw_helper.h
+index ddb67b3..e48c589 100644
+--- a/src/gallium/auxiliary/target-helpers/inline_sw_helper.h
++++ b/src/gallium/auxiliary/target-helpers/inline_sw_helper.h
+@@ -39,7 +39,12 @@ sw_screen_create_named(struct sw_winsys *winsys, const char *driver)
+       screen = llvmpipe_create_screen(winsys);
+ #endif
+ 
+-#if defined(GALLIUM_VIRGL)
++/* Thylacine: the vtest winsys does not exist there (no Unix-socket test
++ * server); GALLIUM_DRIVER=virpipe is handled one level up, in the osmesa
++ * target's screen fork, over the /srv/warp winsys -- so this arm is dead
++ * code that would only drag an undefined virgl_vtest_winsys_wrap into
++ * the link. */
++#if defined(GALLIUM_VIRGL) && !defined(__thylacine__)
+    if (screen == NULL && strcmp(driver, "virpipe") == 0) {
+       struct virgl_winsys *vws;
+       vws = virgl_vtest_winsys_wrap(winsys);
+diff --git a/src/gallium/drivers/virgl/meson.build b/src/gallium/drivers/virgl/meson.build
+index 7ddcc90..a984ae0 100644
+--- a/src/gallium/drivers/virgl/meson.build
++++ b/src/gallium/drivers/virgl/meson.build
+@@ -16,16 +16,38 @@ files_libvirgl = files(
+   'virgl_video.c',
+ )
+ 
++# Thylacine (Warp-3): no libdrm exists there, and the driver core does
++# not use it (zero xf86drm includes; its drm-uapi headers are the
++# in-tree copies) -- the dependency belongs to the drm WINSYS, which
++# Thylacine does not build.
++virgl_core_deps = [idep_mesautil, idep_xmlconfig, idep_nir]
++if not with_thylacine
++  virgl_core_deps += dep_libdrm
++endif
++
++# <libsync.h> resolves from LIBDRM's installed copy upstream; without
++# dep_libdrm the include has no home. Mesa vendors an API-identical,
++# self-contained copy at src/util/libsync.h (inline ioctl wrappers over
++# headers pouch carries; virgl_context.c makes no sync_* calls -- the
++# include just has to parse). Thylacine-only, so the upstream resolution
++# is untouched.
++virgl_core_incs = [inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_virtio]
++if with_thylacine
++  virgl_core_incs += include_directories('../../../util')
++endif
++
+ libvirgl = static_library(
+   'virgl',
+   [ files_libvirgl ],
+   gnu_symbol_visibility : 'hidden',
+-  include_directories : [inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_virtio],
+-  dependencies : [dep_libdrm, idep_mesautil, idep_xmlconfig, idep_nir],
++  include_directories : virgl_core_incs,
++  dependencies : virgl_core_deps,
+ )
+ 
+ virgl_deps = [libvirgl]
+-if not with_platform_windows
++if with_thylacine
++  virgl_deps += libvirglthylacine
++elif not with_platform_windows
+   virgl_deps += libvirgldrm
+   virgl_deps += libvirglvtest
+ endif
+diff --git a/src/gallium/drivers/virgl/virgl_screen.c b/src/gallium/drivers/virgl/virgl_screen.c
+index 1e0b7cb..aabac4d 100644
+--- a/src/gallium/drivers/virgl/virgl_screen.c
++++ b/src/gallium/drivers/virgl/virgl_screen.c
+@@ -905,9 +905,13 @@ static void virgl_disk_cache_create(struct virgl_screen *screen)
+    _mesa_blake3_init(&blake3_ctx);
+ 
+ #if HAVE_BUILD_ID
++   /* A static link that never passed --build-id carries no note; without a
++    * build key the cache cannot be versioned, so run cacheless rather than
++    * abort. */
+    const struct build_id_note *note =
+       build_id_find_nhdr_for_addr(virgl_disk_cache_create);
+-   assert(note);
++   if (!note)
++      return;
+ 
+    unsigned build_id_len = build_id_length(note);
+    assert(build_id_len == BUILD_ID_EXPECTED_HASH_LENGTH); /* sha1 */
+diff --git a/src/gallium/meson.build b/src/gallium/meson.build
+index d95ecb5..114154e 100644
+--- a/src/gallium/meson.build
++++ b/src/gallium/meson.build
+@@ -170,7 +170,13 @@ else
+ endif
+ if with_gallium_virgl
+   subdir('winsys/virgl/common')
+-  if not with_platform_windows
++  if with_thylacine
++    # Warp-3: the /srv/warp seam winsys. The drm winsys needs libdrm and
++    # the vtest winsys needs a Unix-socket test server; neither exists on
++    # Thylacine, and drivers/virgl selects its winsys set on the same
++    # condition.
++    subdir('winsys/virgl/thylacine')
++  elif not with_platform_windows
+     subdir('winsys/virgl/drm')
+     subdir('winsys/virgl/vtest')
+   endif
+diff --git a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/meson.build
+index e7b11cb..4ebd944 100644
+--- a/src/gallium/targets/osmesa/meson.build
++++ b/src/gallium/targets/osmesa/meson.build
+@@ -25,12 +25,34 @@
+ # trying to RUN it on the builder; linking it is the proof, running it on-device
+ # is the next one.
+ 
++# Warp-3: when virgl is enabled the target ALSO carries the virgl driver
++# + the Thylacine warp winsys, selected at runtime by GALLIUM_DRIVER in
++# osmesa_target.c (compiled in via driver_virgl's -DGALLIUM_VIRGL). The
++# archives ride link_whole for the same reason everything else here
++# does: build.sh links Thylacine binaries by hand, so libOSMesa.a must
++# be the whole closure. On the meson-side executables below the same
++# objects arriving again through driver_virgl's link_with is harmless --
++# archives are pull-based and every symbol is already defined.
++osmesa_link_whole = [
++  libosmesa_st, libgallium, libmesa, libws_null, libglapi, libglapi_bridge,
++]
++if with_gallium_virgl
++  # virgl_screen references the gallium VIDEO layer (vl_video_buffer_*);
++  # non-video targets satisfy it with the stub, exactly as the dri targets
++  # do when video is off. llvmpipe never referenced vl, which is why this
++  # target lived without it until virgl arrived.
++  osmesa_link_whole += [libvirgl, libvirglcommon, libgalliumvl_stub]
++  if with_thylacine
++    osmesa_link_whole += libvirglthylacine
++  endif
++endif
++
+ libosmesa = static_library(
+   'OSMesa',
+   'osmesa_target.c',
+   include_directories : [
+     inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_gallium_winsys,
+-    inc_gallium_drivers,
++    inc_gallium_drivers, inc_virtio,
+   ],
+   # glapi is a PAIR at 26.1.6, and neither half is inside libmesa -- which is
+   # what the first cut of this file assumed. libglapi (shared-glapi/core.c) has
+@@ -42,11 +64,10 @@ libosmesa = static_library(
+   #
+   # The archive built perfectly well with neither, and again with only one. Only
+   # linking the executable below ever said so.
+-  link_whole : [
+-    libosmesa_st, libgallium, libmesa, libws_null, libglapi, libglapi_bridge,
+-  ],
++  link_whole : osmesa_link_whole,
+   dependencies : [
+-    dep_thread, dep_clock, dep_unwind, driver_swrast, idep_mesautil,
++    dep_thread, dep_clock, dep_unwind, driver_swrast, driver_virgl,
++    idep_mesautil,
+   ],
+   install : true,
+ )
+@@ -65,3 +86,21 @@ osmesa_prove = executable(
+   ],
+   install : true,
+ )
++
++# The Warp-3 gate binary: the same link proof for the virgl+warp closure,
++# and the on-device prover for a triangle rendered on the HOST GPU. Built
++# only when the virgl driver is in the target -- on a llvmpipe-only
++# configure there is nothing for it to prove.
++if with_gallium_virgl
++  virgl_prove = executable(
++    'virgl-prove',
++    'virgl_prove.c',
++    include_directories : [inc_include, inc_src],
++    link_with : [libosmesa],
++    dependencies : [
++      dep_thread, dep_clock, dep_unwind, driver_swrast, driver_virgl,
++      idep_mesautil,
++    ],
++    install : true,
++  )
++endif
+diff --git a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osmesa/osmesa_target.c
+index 25985dd..8967953 100644
+--- a/src/gallium/targets/osmesa/osmesa_target.c
++++ b/src/gallium/targets/osmesa/osmesa_target.c
+@@ -21,11 +21,21 @@
+  */
+ 
+ 
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
+ #include "target-helpers/inline_sw_helper.h"
+ #include "target-helpers/inline_debug_helper.h"
+ 
+ #include "sw/null/null_sw_winsys.h"
+ 
++#ifdef GALLIUM_VIRGL
++#include "virgl/virgl_public.h"
++#include "virgl/virgl_winsys.h"
++#include "virgl/thylacine/virgl_thylacine_public.h"
++#endif
++
+ 
+ struct pipe_screen *
+ osmesa_create_screen(void);
+@@ -34,8 +44,36 @@ osmesa_create_screen(void);
+ struct pipe_screen *
+ osmesa_create_screen(void)
+ {
+-   struct sw_winsys *winsys;
+    struct pipe_screen *screen;
++   struct sw_winsys *winsys;
++
++#ifdef GALLIUM_VIRGL
++   /* Warp-3: GALLIUM_DRIVER=virpipe (Mesa's own name for virgl-without-
++    * DRM, the vtest lane's spelling) or =virgl selects the /srv/warp
++    * seam: the unmodified virgl gallium driver over the Thylacine
++    * winsys, rendering on the HOST GPU through virglrenderer. The
++    * frontend above is unchanged either way -- it reads pixels back
++    * through ordinary pipe transfers, which on virgl become fenced
++    * TRANSFER_FROM_HOST_3D readbacks.
++    *
++    * Fallback is DELIBERATE and loud: a prover that must not pass on
++    * llvmpipe discriminates itself (GL_RENDERER + the absence of the
++    * CAP_JIT walk); an ordinary app asking for virgl on a 2D box still
++    * deserves a picture. */
++   const char *gd = getenv("GALLIUM_DRIVER");
++   if (gd && (strcmp(gd, "virpipe") == 0 || strcmp(gd, "virgl") == 0)) {
++      struct virgl_winsys *vws = virgl_thylacine_winsys_create();
++      if (vws) {
++         screen = virgl_create_screen(vws, NULL);
++         if (screen)
++            return debug_screen_wrap(screen);
++         vws->destroy(vws);
++      }
++      fprintf(stderr, "osmesa: GALLIUM_DRIVER=%s requested but the warp "
++                      "seam is unavailable; falling back to the software "
++                      "rasteriser\n", gd);
++   }
++#endif
+ 
+    /* We use a null software winsys since we always just render to ordinary
+     * driver resources.
+diff --git a/src/gallium/targets/osmesa/virgl_prove.c b/src/gallium/targets/osmesa/virgl_prove.c
+new file mode 100644
+index 0000000..dfaa944
+--- /dev/null
++++ b/src/gallium/targets/osmesa/virgl_prove.c
+@@ -0,0 +1,203 @@
++/*
++ * virgl_prove.c -- the Warp-3 triangle-on-the-GPU prover.
++ * SPDX-License-Identifier: MIT
++ *
++ * The same two jobs as osmesa_prove.c: meson LINKS it to prove the
++ * virgl+thylacine-winsys closure closes, and on a GL host it RUNS to
++ * prove the whole Warp-3 path: the unmodified Mesa virgl driver encodes
++ * CCMD streams, the Thylacine winsys carries them over /srv/warp,
++ * tapestryd routes them to virtio-gpu, and virglrenderer rasterises on
++ * the HOST GPU -- then the pixels come back through a fenced
++ * TRANSFER_FROM_HOST_3D readback and are checked in-guest.
++ *
++ * Discrimination is structural, twice over (the #91/#109 discipline --
++ * a gate must prove WHICH mechanism produced its green):
++ *
++ *  1. This prover NEVER walks the CAP_JIT clearance. llvmpipe cannot
++ *     run without it (gallivm's first code Burrow fails, context
++ *     creation returns NULL), so a silent fallback to the software
++ *     rasteriser CANNOT paint the triangle -- it fails loudly instead
++ *     of passing on the wrong driver.
++ *  2. GL_RENDERER must name virgl and must not name llvmpipe.
++ *
++ * Exit: 0 PASS / 2 SKIP (no /srv/warp or a 2D device) / 1 FAIL.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "GL/osmesa.h"
++#include "GL/gl.h"
++
++#define W 64
++#define H 64
++
++#ifdef __thylacine__
++#include <stdint.h>
++#include <unistd.h>
++
++#define THYLA_SYS_OPEN  65
++#define THYLA_FROM_ROOT (-1L)
++#define THYLA_OREAD     0
++
++static long thyla_open(long dirfd, const char *name, unsigned long len,
++                       unsigned long omode)
++{
++    register long x0 __asm__("x0") = dirfd;
++    register long x1 __asm__("x1") = (long)(uintptr_t)name;
++    register long x2 __asm__("x2") = (long)len;
++    register long x3 __asm__("x3") = (long)omode;
++    register long x8 __asm__("x8") = THYLA_SYS_OPEN;
++    __asm__ volatile("svc #0"
++                     : "+r"(x0)
++                     : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
++                     : "memory", "cc");
++    return x0;
++}
++
++/* SKIP is a first-class verdict, decided BEFORE any GL: on a 2D device
++ * the winsys would fall back to llvmpipe and the renderer assert would
++ * report a confusing FAIL where "not applicable" is the truth. Raw
++ * syscall open + musl read: pouch fds are kernel handles 1:1 (the same
++ * mix osmesa_prove.c uses on its corvus fd). */
++static int warp_seam_present(void)
++{
++    char buf[128];
++    long root, ctl;
++    ssize_t n;
++
++    root = thyla_open(THYLA_FROM_ROOT, "/srv/warp", 9, THYLA_OREAD);
++    if (root < 0)
++        return 0;
++    ctl = thyla_open(root, "ctl", 3, THYLA_OREAD);
++    close((int)root);
++    if (ctl < 0)
++        return 0;
++    n = read((int)ctl, buf, sizeof(buf) - 1);
++    close((int)ctl);
++    if (n <= 0)
++        return 0;
++    buf[n] = '\0';
++    return strncmp(buf, "virgl 1", 7) == 0;
++}
++#else
++static int warp_seam_present(void) { return 1; }
++#endif
++
++static const unsigned char *px(const unsigned char *buf, int x, int y)
++{
++    return buf + ((size_t)y * W + (size_t)x) * 4;
++}
++
++static int near(int got, int want, int tol)
++{
++    int d = got - want;
++    if (d < 0)
++        d = -d;
++    return d <= tol;
++}
++
++int main(void)
++{
++    OSMesaContext ctx;
++    unsigned char *buf;
++    const unsigned char *p;
++    const char *renderer;
++    int fails = 0;
++
++    if (!warp_seam_present()) {
++        printf("virgl-prove: SKIP -- no warp seam / 2D device\n");
++        return 2;
++    }
++
++    /* The screen fork in osmesa_target.c keys on this. Set here rather
++     * than required of the spawner: ut has no export (#151), and the
++     * prover's identity IS "the virgl path", so it selects itself. */
++    setenv("GALLIUM_DRIVER", "virpipe", 1);
++
++    ctx = OSMesaCreateContextExt(OSMESA_RGBA, 16, 0, 0, NULL);
++    if (!ctx) {
++        printf("virgl-prove: FAIL -- OSMesaCreateContextExt returned NULL "
++               "(the warp winsys or virgl screen did not come up)\n");
++        return 1;
++    }
++
++    buf = malloc((size_t)W * H * 4);
++    if (!buf) {
++        printf("virgl-prove: FAIL -- out of memory\n");
++        return 1;
++    }
++    memset(buf, 0xAB, (size_t)W * H * 4);
++
++    if (!OSMesaMakeCurrent(ctx, buf, GL_UNSIGNED_BYTE, W, H)) {
++        printf("virgl-prove: FAIL -- OSMesaMakeCurrent\n");
++        return 1;
++    }
++
++    renderer = (const char *)glGetString(GL_RENDERER);
++    printf("virgl-prove: GL_VERSION  = %s\n", (const char *)glGetString(GL_VERSION));
++    printf("virgl-prove: GL_RENDERER = %s\n", renderer ? renderer : "(null)");
++    if (!renderer || !strstr(renderer, "virgl")) {
++        printf("virgl-prove: FAIL -- renderer does not name virgl "
++               "(the draw would prove the wrong driver)\n");
++        return 1;
++    }
++    if (strstr(renderer, "llvmpipe")) {
++        /* The host's GL may itself be llvmpipe-backed on a GPU-less CI
++         * box -- but then the string is virgl's "virgl (llvmpipe...)"
++         * composite and the virgl check above already passed. A BARE
++         * llvmpipe string means the guest fell back. */
++        if (strncmp(renderer, "llvmpipe", 8) == 0) {
++            printf("virgl-prove: FAIL -- guest fell back to llvmpipe\n");
++            return 1;
++        }
++    }
++
++    /* Clear to blue -- necessary, not sufficient (host-side fast paths
++     * exist for clears too). */
++    glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
++    glClear(GL_COLOR_BUFFER_BIT);
++    glFinish();
++
++    p = px(buf, 1, 1);
++    if (!near(p[0], 0, 4) || !near(p[1], 0, 4) || !near(p[2], 255, 4)) {
++        printf("virgl-prove: FAIL -- clear: corner is %u,%u,%u want 0,0,255\n",
++               p[0], p[1], p[2]);
++        fails++;
++    }
++
++    /* The triangle: vertex transform + fragment shading + rasterisation
++     * on the HOST renderer, readback through the fenced transfer path. */
++    glColor3f(1.0f, 0.0f, 0.0f);
++    glBegin(GL_TRIANGLES);
++    glVertex3f(-0.8f, -0.8f, 0.0f);
++    glVertex3f( 0.8f, -0.8f, 0.0f);
++    glVertex3f( 0.0f,  0.8f, 0.0f);
++    glEnd();
++    glFinish();
++
++    p = px(buf, W / 2, H / 3);
++    if (!near(p[0], 255, 8) || !near(p[1], 0, 8) || !near(p[2], 0, 8)) {
++        printf("virgl-prove: FAIL -- raster: interior is %u,%u,%u want 255,0,0\n",
++               p[0], p[1], p[2]);
++        fails++;
++    }
++    p = px(buf, 1, H - 2);
++    if (!near(p[2], 255, 8) || !near(p[0], 0, 8)) {
++        printf("virgl-prove: FAIL -- raster: exterior is %u,%u,%u want 0,0,255\n",
++               p[0], p[1], p[2]);
++        fails++;
++    }
++
++    OSMesaDestroyContext(ctx);
++    free(buf);
++
++    if (fails) {
++        printf("virgl-prove: FAIL (%d checks)\n", fails);
++        return 1;
++    }
++    printf("VIRGL-PROVE PASS (triangle rendered on the GPU via the warp seam, %dx%d)\n",
++           W, H);
++    return 0;
++}
+diff --git a/src/gallium/winsys/virgl/thylacine/meson.build b/src/gallium/winsys/virgl/thylacine/meson.build
+new file mode 100644
+index 0000000..af53bd4
+--- /dev/null
++++ b/src/gallium/winsys/virgl/thylacine/meson.build
+@@ -0,0 +1,16 @@
++# Copyright © 2026 the Thylacine project
++# SPDX-License-Identifier: MIT
++#
++# Thylacine (Warp-3): the virgl winsys over the /srv/warp GPU seam.
++# warp_client.c speaks raw Thylacine syscalls via <thyla/syscall.h>,
++# whose include path rides the generated cross file's c_args (it is a
++# machine-local path into the Thylacine repo, exactly what the cross
++# file exists to carry).
++
++libvirglthylacine = static_library(
++  'virglthylacine',
++  ['virgl_thylacine_winsys.c', 'warp_client.c'],
++  include_directories : [inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_gallium_drivers, inc_virtio],
++  dependencies : [dep_libvirglcommon, idep_mesautil],
++  gnu_symbol_visibility : 'hidden',
++)
+diff --git a/src/gallium/winsys/virgl/thylacine/virgl_thylacine_public.h b/src/gallium/winsys/virgl/thylacine/virgl_thylacine_public.h
+new file mode 100644
+index 0000000..315e844
+--- /dev/null
++++ b/src/gallium/winsys/virgl/thylacine/virgl_thylacine_public.h
+@@ -0,0 +1,15 @@
++/*
++ * The Thylacine winsys entry point (Warp-3).
++ *
++ * Returns NULL when the warp seam is unavailable (no /srv/warp in the
++ * namespace, a 2D device, or a pre-Warp-3 server) — the caller falls
++ * back to the software screen.
++ */
++#ifndef VIRGL_THYLACINE_PUBLIC_H
++#define VIRGL_THYLACINE_PUBLIC_H
++
++struct virgl_winsys;
++
++struct virgl_winsys *virgl_thylacine_winsys_create(void);
++
++#endif
+diff --git a/src/gallium/winsys/virgl/thylacine/virgl_thylacine_winsys.c b/src/gallium/winsys/virgl/thylacine/virgl_thylacine_winsys.c
+new file mode 100644
+index 0000000..0f41da8
+--- /dev/null
++++ b/src/gallium/winsys/virgl/thylacine/virgl_thylacine_winsys.c
+@@ -0,0 +1,631 @@
++/*
++ * virgl_thylacine_winsys — the Mesa virgl winsys over Thylacine's
++ * /srv/warp GPU seam (Warp-3; GPU-DESIGN.md section 12 row 3).
++ *
++ * Shape: the vtest backend's 18 load-bearing slots, minus every
++ * displaytarget/sw_winsys arm — on Thylacine the OSMesa frontend reads
++ * the front buffer back through ordinary pipe transfers, so the winsys
++ * never touches a display target and `flush_frontbuffer` stays NULL
++ * (guarded at virgl_screen.c). The transport is warp_client.{c,h}: a
++ * 9P connection whose ops are blocking file reads/writes, with fences
++ * counted client-side against the seam's monotonic per-ctx
++ * `fence-signaled` counter (see warp_client.h for why the fence FILE
++ * alone cannot carry the model).
++ *
++ * Semantics pinned here rather than left to intuition:
++ *
++ *  - transfer_get is SYNCHRONOUS: the seam's transfer verbs are fenced
++ *    and complete asynchronously, but the driver maps and reads the
++ *    backing immediately after transfer_get returns (virgl_resource.c
++ *    readback path), so this slot queues the device->guest transfer AND
++ *    waits its fence. vtest's protocol-v2 arm makes the same choice
++ *    (busy_wait WAIT inside the get). transfer_put stays asynchronous;
++ *    ordering against later submits is the ring's FIFO.
++ *
++ *  - resource_wait/resource_is_busy ride a per-resource
++ *    `last_use_seq`, stamped by every transfer naming the resource and
++ *    by every submit whose command stream references it (the emit_res
++ *    bo list — the same list vtest keeps). `signaled >= last_use_seq`
++ *    is "the device is done with it", by ring FIFO.
++ *
++ *  - One mutex serializes every RPC-bearing entry point. The
++ *    connection is a single 9P stream and GL contexts are effectively
++ *    single-threaded here (OSMesa current-context); the lock exists so
++ *    screen-level create/destroy from a second thread is safe, not as
++ *    a concurrency design. Internal helpers are unlocked; only vtable
++ *    entry points take the lock (cache callbacks run under it).
++ *
++ *  - A hard failure LATCHES (warp_client wedge): submits that cannot
++ *    be delivered would otherwise silently corrupt all later GL state,
++ *    because the driver ignores submit_cmd's return (virgl_context.c).
++ *    Wedged, every wait unblocks and every new op fails fast.
++ */
++#include <stdio.h>
++
++#include "util/u_memory.h"
++#include "util/u_inlines.h"
++#include "util/u_thread.h"
++#include "util/macros.h"
++#include "pipe/p_state.h"
++
++#include "virgl/virgl_winsys.h"
++#include "virgl_resource_cache.h"
++#include "virgl_thylacine_public.h"
++#include "warp_client.h"
++
++#define THY_CACHE_TIMEOUT_USEC 1000000
++
++struct virgl_hw_res {
++   struct pipe_reference reference;
++   uint32_t res_handle;    /* device-global id: what command streams name */
++   uint32_t bo_pub;        /* the seam's BO id: what the ctl tree names */
++   int num_cs_references;
++   void *ptr;              /* the weft mapping; NULL until first map */
++   long map_fd;            /* owns the mapping; -1 until first map */
++   uint32_t size;          /* page-rounded backing size */
++   uint32_t format;        /* pipe format (cache identity only) */
++   uint32_t bind;          /* virgl bind (cache identity + policy) */
++   uint32_t width, height;
++   uint64_t last_use_seq;  /* newest fenced op touching this res */
++   struct virgl_resource_cache_entry cache_entry;
++};
++
++struct virgl_thylacine_winsys {
++   struct virgl_winsys base;
++   struct warp_conn conn;
++   struct virgl_resource_cache cache;
++   mtx_t mutex;
++};
++
++struct virgl_thylacine_cmd_buf {
++   struct virgl_cmd_buf base;
++   uint32_t *buf;
++   unsigned nres;
++   unsigned cres;
++   struct virgl_hw_res **res_bo;
++   struct virgl_winsys *ws;
++};
++
++#define cache_entry_container_res(ptr) \
++   (struct virgl_hw_res *)((char *)ptr - offsetof(struct virgl_hw_res, cache_entry))
++
++static inline struct virgl_thylacine_winsys *
++virgl_thylacine_winsys(struct virgl_winsys *vws)
++{
++   return (struct virgl_thylacine_winsys *)vws;
++}
++
++static inline struct virgl_thylacine_cmd_buf *
++virgl_thylacine_cmd_buf(struct virgl_cmd_buf *cbuf)
++{
++   return (struct virgl_thylacine_cmd_buf *)cbuf;
++}
++
++/* Fences are seq numbers with a refcount — nothing server-side. */
++struct thy_fence {
++   struct pipe_reference reference;
++   uint64_t seq;
++};
++
++static inline struct thy_fence *thy_fence(struct pipe_fence_handle *f)
++{
++   return (struct thy_fence *)f;
++}
++
++static inline bool can_cache_resource_with_bind(uint32_t bind)
++{
++   return bind == VIRGL_BIND_CONSTANT_BUFFER ||
++          bind == VIRGL_BIND_INDEX_BUFFER ||
++          bind == VIRGL_BIND_VERTEX_BUFFER ||
++          bind == VIRGL_BIND_CUSTOM ||
++          bind == VIRGL_BIND_STAGING;
++}
++
++/* ---- unlocked internals ------------------------------------------------ */
++
++static void thy_hw_res_destroy(struct virgl_thylacine_winsys *tws,
++                               struct virgl_hw_res *res)
++{
++   warp_bo_destroy(&tws->conn, res->bo_pub, res->map_fd);
++   FREE(res);
++}
++
++static bool thy_res_is_busy_unlocked(struct virgl_thylacine_winsys *tws,
++                                     struct virgl_hw_res *res)
++{
++   if (warp_wedged(&tws->conn))
++      return false; /* nothing will ever complete */
++   if (tws->conn.signaled >= res->last_use_seq)
++      return false;
++   (void)warp_fence_refresh(&tws->conn);
++   return tws->conn.signaled < res->last_use_seq;
++}
++
++static void thy_res_wait_unlocked(struct virgl_thylacine_winsys *tws,
++                                  struct virgl_hw_res *res)
++{
++   (void)warp_fence_wait(&tws->conn, res->last_use_seq);
++}
++
++static void thy_resource_reference_unlocked(struct virgl_thylacine_winsys *tws,
++                                            struct virgl_hw_res **dres,
++                                            struct virgl_hw_res *sres)
++{
++   struct virgl_hw_res *old = *dres;
++   if (pipe_reference(&(*dres)->reference, &sres->reference)) {
++      if (!can_cache_resource_with_bind(old->bind)) {
++         thy_hw_res_destroy(tws, old);
++      } else {
++         virgl_resource_cache_add(&tws->cache, &old->cache_entry);
++      }
++   }
++   *dres = sres;
++}
++
++/* ---- resources --------------------------------------------------------- */
++
++static struct virgl_hw_res *
++thy_resource_create_unlocked(struct virgl_thylacine_winsys *tws,
++                             enum pipe_texture_target target,
++                             uint32_t format, uint32_t bind,
++                             uint32_t width, uint32_t height,
++                             uint32_t depth, uint32_t array_size,
++                             uint32_t last_level, uint32_t nr_samples,
++                             uint32_t flags, uint32_t size)
++{
++   struct virgl_hw_res *res = CALLOC_STRUCT(virgl_hw_res);
++   uint32_t sz = size;
++   uint32_t res_id = 0;
++   uint32_t bo;
++
++   if (!res)
++      return NULL;
++
++   bo = warp_bo_create(&tws->conn, (uint32_t)target,
++                       (uint32_t)pipe_to_virgl_format(format), bind,
++                       width, height, depth, array_size, last_level,
++                       nr_samples, flags, &sz, &res_id);
++   if (bo == 0) {
++      FREE(res);
++      return NULL;
++   }
++
++   res->res_handle = res_id;
++   res->bo_pub = bo;
++   res->map_fd = -1;
++   res->size = sz;
++   res->format = format;
++   res->bind = bind;
++   res->width = width;
++   res->height = height;
++
++   struct virgl_resource_params params = { .size = sz,
++                                           .bind = bind,
++                                           .format = format,
++                                           .flags = 0,
++                                           .nr_samples = nr_samples,
++                                           .width = width,
++                                           .height = height,
++                                           .depth = depth,
++                                           .array_size = array_size,
++                                           .last_level = last_level,
++                                           .target = target };
++   virgl_resource_cache_entry_init(&res->cache_entry, params);
++   pipe_reference_init(&res->reference, 1);
++   p_atomic_set(&res->num_cs_references, 0);
++   return res;
++}
++
++static struct virgl_hw_res *
++virgl_thylacine_resource_cache_create(struct virgl_winsys *vws,
++                                      enum pipe_texture_target target,
++                                      const void *map_front_private,
++                                      uint32_t format, uint32_t bind,
++                                      uint32_t width, uint32_t height,
++                                      uint32_t depth, uint32_t array_size,
++                                      uint32_t last_level, uint32_t nr_samples,
++                                      uint32_t flags, uint32_t size)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   struct virgl_hw_res *res;
++   struct virgl_resource_cache_entry *entry;
++   struct virgl_resource_params params = { .size = size,
++                                           .bind = bind,
++                                           .format = format,
++                                           .flags = 0,
++                                           .nr_samples = nr_samples,
++                                           .width = width,
++                                           .height = height,
++                                           .depth = depth,
++                                           .array_size = array_size,
++                                           .last_level = last_level,
++                                           .target = target };
++   (void)map_front_private; /* the sw-dt front-map path: never taken here */
++
++   mtx_lock(&tws->mutex);
++   if (can_cache_resource_with_bind(bind)) {
++      /* The cache keys on the DRIVER-requested size; a cached entry's
++       * page-rounded backing satisfies it by construction. */
++      entry = virgl_resource_cache_remove_compatible(&tws->cache, params);
++      if (entry) {
++         res = cache_entry_container_res(entry);
++         mtx_unlock(&tws->mutex);
++         pipe_reference_init(&res->reference, 1);
++         return res;
++      }
++   }
++   res = thy_resource_create_unlocked(tws, target, format, bind, width,
++                                      height, depth, array_size, last_level,
++                                      nr_samples, flags, size);
++   mtx_unlock(&tws->mutex);
++   return res;
++}
++
++static void virgl_thylacine_resource_reference(struct virgl_winsys *vws,
++                                               struct virgl_hw_res **dres,
++                                               struct virgl_hw_res *sres)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   mtx_lock(&tws->mutex);
++   thy_resource_reference_unlocked(tws, dres, sres);
++   mtx_unlock(&tws->mutex);
++}
++
++static void *virgl_thylacine_resource_map(struct virgl_winsys *vws,
++                                          struct virgl_hw_res *res)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   if (res->ptr)
++      return res->ptr;
++   mtx_lock(&tws->mutex);
++   if (!res->ptr)
++      res->ptr = warp_bo_map(&tws->conn, res->bo_pub, &res->map_fd);
++   mtx_unlock(&tws->mutex);
++   return res->ptr;
++}
++
++static void virgl_thylacine_resource_wait(struct virgl_winsys *vws,
++                                          struct virgl_hw_res *res)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   mtx_lock(&tws->mutex);
++   thy_res_wait_unlocked(tws, res);
++   mtx_unlock(&tws->mutex);
++}
++
++static bool virgl_thylacine_resource_is_busy(struct virgl_winsys *vws,
++                                             struct virgl_hw_res *res)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   bool busy;
++   mtx_lock(&tws->mutex);
++   busy = thy_res_is_busy_unlocked(tws, res);
++   mtx_unlock(&tws->mutex);
++   return busy;
++}
++
++/* ---- transfers --------------------------------------------------------- */
++
++static int virgl_thylacine_transfer_put(struct virgl_winsys *vws,
++                                        struct virgl_hw_res *res,
++                                        const struct pipe_box *box,
++                                        uint32_t stride, uint32_t layer_stride,
++                                        uint32_t buf_offset, uint32_t level)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   uint64_t seq;
++   mtx_lock(&tws->mutex);
++   seq = warp_transfer(&tws->conn, res->bo_pub, true, level,
++                       box->x, box->y, box->z,
++                       box->width, box->height, box->depth,
++                       buf_offset, stride, layer_stride);
++   if (seq)
++      res->last_use_seq = seq;
++   mtx_unlock(&tws->mutex);
++   return seq ? 0 : -1;
++}
++
++static int virgl_thylacine_transfer_get(struct virgl_winsys *vws,
++                                        struct virgl_hw_res *res,
++                                        const struct pipe_box *box,
++                                        uint32_t stride, uint32_t layer_stride,
++                                        uint32_t buf_offset, uint32_t level)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   uint64_t seq;
++   int ret = -1;
++   mtx_lock(&tws->mutex);
++   seq = warp_transfer(&tws->conn, res->bo_pub, false, level,
++                       box->x, box->y, box->z,
++                       box->width, box->height, box->depth,
++                       buf_offset, stride, layer_stride);
++   if (seq) {
++      res->last_use_seq = seq;
++      /* Synchronous by contract: the caller maps and reads on return. */
++      ret = warp_fence_wait(&tws->conn, seq) == 0 ? 0 : -1;
++   }
++   mtx_unlock(&tws->mutex);
++   return ret;
++}
++
++/* ---- command buffers + submit ------------------------------------------ */
++
++static struct virgl_cmd_buf *
++virgl_thylacine_cmd_buf_create(struct virgl_winsys *vws, uint32_t size)
++{
++   struct virgl_thylacine_cmd_buf *cbuf = CALLOC_STRUCT(virgl_thylacine_cmd_buf);
++   if (!cbuf)
++      return NULL;
++   cbuf->nres = 512;
++   cbuf->res_bo = CALLOC(cbuf->nres, sizeof(struct virgl_hw_res *));
++   if (!cbuf->res_bo) {
++      FREE(cbuf);
++      return NULL;
++   }
++   cbuf->buf = CALLOC(size, sizeof(uint32_t));
++   if (!cbuf->buf) {
++      FREE(cbuf->res_bo);
++      FREE(cbuf);
++      return NULL;
++   }
++   cbuf->ws = vws;
++   cbuf->base.buf = cbuf->buf;
++   return &cbuf->base;
++}
++
++static void thy_release_all_res(struct virgl_thylacine_winsys *tws,
++                                struct virgl_thylacine_cmd_buf *cbuf)
++{
++   unsigned i;
++   for (i = 0; i < cbuf->cres; i++) {
++      p_atomic_dec(&cbuf->res_bo[i]->num_cs_references);
++      thy_resource_reference_unlocked(tws, &cbuf->res_bo[i], NULL);
++   }
++   cbuf->cres = 0;
++}
++
++static void virgl_thylacine_cmd_buf_destroy(struct virgl_cmd_buf *_cbuf)
++{
++   struct virgl_thylacine_cmd_buf *cbuf = virgl_thylacine_cmd_buf(_cbuf);
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(cbuf->ws);
++   mtx_lock(&tws->mutex);
++   thy_release_all_res(tws, cbuf);
++   mtx_unlock(&tws->mutex);
++   FREE(cbuf->res_bo);
++   FREE(cbuf->buf);
++   FREE(cbuf);
++}
++
++static bool thy_res_is_added(struct virgl_thylacine_cmd_buf *cbuf,
++                             struct virgl_hw_res *res)
++{
++   unsigned i;
++   for (i = 0; i < cbuf->cres; i++)
++      if (cbuf->res_bo[i] == res)
++         return true;
++   return false;
++}
++
++static void virgl_thylacine_emit_res(struct virgl_winsys *vws,
++                                     struct virgl_cmd_buf *_cbuf,
++                                     struct virgl_hw_res *res, bool write_buf)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   struct virgl_thylacine_cmd_buf *cbuf = virgl_thylacine_cmd_buf(_cbuf);
++
++   if (write_buf)
++      cbuf->base.buf[cbuf->base.cdw++] = res->res_handle;
++
++   if (thy_res_is_added(cbuf, res))
++      return;
++
++   if (cbuf->cres >= cbuf->nres) {
++      unsigned new_nres = cbuf->nres + 256;
++      struct virgl_hw_res **grown =
++         REALLOC(cbuf->res_bo, cbuf->nres * sizeof(struct virgl_hw_res *),
++                 new_nres * sizeof(struct virgl_hw_res *));
++      if (!grown) {
++         fprintf(stderr, "warp winsys: failed to grow the relocation list "
++                         "(%u)\n", cbuf->cres);
++         return;
++      }
++      cbuf->res_bo = grown;
++      cbuf->nres = new_nres;
++   }
++
++   cbuf->res_bo[cbuf->cres] = NULL;
++   mtx_lock(&tws->mutex);
++   thy_resource_reference_unlocked(tws, &cbuf->res_bo[cbuf->cres], res);
++   mtx_unlock(&tws->mutex);
++   p_atomic_inc(&res->num_cs_references);
++   cbuf->cres++;
++}
++
++static bool virgl_thylacine_res_is_ref(struct virgl_winsys *vws,
++                                       struct virgl_cmd_buf *_cbuf,
++                                       struct virgl_hw_res *res)
++{
++   return p_atomic_read(&res->num_cs_references) != 0;
++}
++
++static struct pipe_fence_handle *thy_fence_create(uint64_t seq)
++{
++   struct thy_fence *f = CALLOC_STRUCT(thy_fence);
++   if (!f)
++      return NULL;
++   pipe_reference_init(&f->reference, 1);
++   f->seq = seq;
++   return (struct pipe_fence_handle *)f;
++}
++
++static int virgl_thylacine_submit_cmd(struct virgl_winsys *vws,
++                                      struct virgl_cmd_buf *_cbuf,
++                                      struct pipe_fence_handle **fence)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   struct virgl_thylacine_cmd_buf *cbuf = virgl_thylacine_cmd_buf(_cbuf);
++   uint64_t seq = 0;
++   unsigned i;
++   int ret = 0;
++
++   if (cbuf->base.cdw == 0)
++      return 0;
++
++   mtx_lock(&tws->mutex);
++   seq = warp_submit(&tws->conn, cbuf->base.buf, cbuf->base.cdw);
++   if (seq) {
++      /* Every resource this stream references is in-use until the
++       * LAST chunk's fence retires (ring FIFO). */
++      for (i = 0; i < cbuf->cres; i++)
++         cbuf->res_bo[i]->last_use_seq = seq;
++      if (fence)
++         *fence = thy_fence_create(seq);
++   } else {
++      ret = -1; /* warp_submit latched + reported */
++   }
++   thy_release_all_res(tws, cbuf);
++   mtx_unlock(&tws->mutex);
++   cbuf->base.cdw = 0;
++   return ret;
++}
++
++/* ---- caps + fences ------------------------------------------------------ */
++
++static int virgl_thylacine_get_caps(struct virgl_winsys *vws,
++                                    struct virgl_drm_caps *caps)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   long n;
++
++   virgl_ws_fill_new_caps_defaults(caps);
++   mtx_lock(&tws->mutex);
++   n = warp_read_caps(&tws->conn, &caps->caps, sizeof(caps->caps));
++   mtx_unlock(&tws->mutex);
++   if (n <= 0)
++      return -1;
++
++   /* Mirror vtest: without blob support the host->guest copy-transfer
++    * path has nowhere to land, and stripping it also keeps textures on
++    * real (mappable) backings rather than 1-byte staging stand-ins. */
++   caps->caps.v2.capability_bits_v2 &= ~VIRGL_CAP_V2_COPY_TRANSFER_BOTH_DIRECTIONS;
++   return 0;
++}
++
++static struct pipe_fence_handle *
++virgl_thylacine_cs_create_fence(struct virgl_winsys *vws, int fd)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   (void)fd; /* fd fences are the DRM path; supports_fences = 0 */
++   return thy_fence_create(tws->conn.issued);
++}
++
++static bool virgl_thylacine_fence_wait(struct virgl_winsys *vws,
++                                       struct pipe_fence_handle *fence,
++                                       uint64_t timeout)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   struct thy_fence *f = thy_fence(fence);
++   bool done;
++
++   mtx_lock(&tws->mutex);
++   if (warp_wedged(&tws->conn)) {
++      mtx_unlock(&tws->mutex);
++      return true; /* dead pipeline: end every wait, fail elsewhere */
++   }
++   if (tws->conn.signaled < f->seq)
++      (void)warp_fence_refresh(&tws->conn);
++   done = tws->conn.signaled >= f->seq;
++   if (!done && timeout != 0) {
++      /* Finite timeouts are coarsened to the wait's own progress
++       * events: the fence is in flight, so a retirement (or the poison
++       * EOF, which latches and unblocks) is coming. Nothing on the
++       * OSMesa path passes a finite timeout. Either way the wait is
++       * over on return: 0 = signaled; -1 = wedged (latched + loud). */
++      (void)warp_fence_wait(&tws->conn, f->seq);
++      done = true;
++   }
++   mtx_unlock(&tws->mutex);
++   return done;
++}
++
++static void virgl_thylacine_fence_reference(struct virgl_winsys *vws,
++                                            struct pipe_fence_handle **dst,
++                                            struct pipe_fence_handle *src)
++{
++   struct thy_fence *dfence = thy_fence(*dst);
++   struct thy_fence *sfence = thy_fence(src);
++   if (pipe_reference(dfence ? &dfence->reference : NULL,
++                      sfence ? &sfence->reference : NULL))
++      FREE(dfence);
++   *dst = src;
++}
++
++/* ---- cache callbacks (run under the winsys mutex) ---------------------- */
++
++static bool
++thy_cache_entry_is_busy(struct virgl_resource_cache_entry *entry, void *user)
++{
++   struct virgl_thylacine_winsys *tws = user;
++   return thy_res_is_busy_unlocked(tws, cache_entry_container_res(entry));
++}
++
++static void
++thy_cache_entry_release(struct virgl_resource_cache_entry *entry, void *user)
++{
++   struct virgl_thylacine_winsys *tws = user;
++   thy_hw_res_destroy(tws, cache_entry_container_res(entry));
++}
++
++/* ---- lifecycle ---------------------------------------------------------- */
++
++static void virgl_thylacine_winsys_destroy(struct virgl_winsys *vws)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   mtx_lock(&tws->mutex);
++   virgl_resource_cache_flush(&tws->cache);
++   warp_close(&tws->conn);
++   mtx_unlock(&tws->mutex);
++   mtx_destroy(&tws->mutex);
++   FREE(tws);
++}
++
++struct virgl_winsys *virgl_thylacine_winsys_create(void)
++{
++   struct virgl_thylacine_winsys *tws = CALLOC_STRUCT(virgl_thylacine_winsys);
++   if (!tws)
++      return NULL;
++
++   if (warp_open(&tws->conn) != 0) {
++      FREE(tws);
++      return NULL;
++   }
++
++   virgl_resource_cache_init(&tws->cache, THY_CACHE_TIMEOUT_USEC,
++                             thy_cache_entry_is_busy,
++                             thy_cache_entry_release, tws);
++   (void)mtx_init(&tws->mutex, mtx_plain);
++
++   tws->base.destroy = virgl_thylacine_winsys_destroy;
++   tws->base.transfer_put = virgl_thylacine_transfer_put;
++   tws->base.transfer_get = virgl_thylacine_transfer_get;
++   tws->base.resource_create = virgl_thylacine_resource_cache_create;
++   tws->base.resource_reference = virgl_thylacine_resource_reference;
++   tws->base.resource_map = virgl_thylacine_resource_map;
++   tws->base.resource_wait = virgl_thylacine_resource_wait;
++   tws->base.resource_is_busy = virgl_thylacine_resource_is_busy;
++   tws->base.cmd_buf_create = virgl_thylacine_cmd_buf_create;
++   tws->base.cmd_buf_destroy = virgl_thylacine_cmd_buf_destroy;
++   tws->base.submit_cmd = virgl_thylacine_submit_cmd;
++   tws->base.emit_res = virgl_thylacine_emit_res;
++   tws->base.res_is_referenced = virgl_thylacine_res_is_ref;
++   tws->base.get_caps = virgl_thylacine_get_caps;
++   tws->base.cs_create_fence = virgl_thylacine_cs_create_fence;
++   tws->base.fence_wait = virgl_thylacine_fence_wait;
++   tws->base.fence_reference = virgl_thylacine_fence_reference;
++
++   tws->base.supports_fences = 0;        /* fd fences are DRM-only */
++   tws->base.supports_encoded_transfers = 1; /* uploads ride the cmdbuf */
++   tws->base.supports_coherent = 0;      /* F2: no blobs at this tier */
++
++   return &tws->base;
++}
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.c b/src/gallium/winsys/virgl/thylacine/warp_client.c
+new file mode 100644
+index 0000000..22e81b8
+--- /dev/null
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.c
+@@ -0,0 +1,417 @@
++/*
++ * warp_client — Thylacine /srv/warp seam client (see warp_client.h).
++ *
++ * Everything here is blocking file ops over the raw syscall layer
++ * (<thyla/syscall.h>, the same substrate as the SDL port's thyla_tap):
++ * musl never sees these fds, so nothing below libc buffers or retries.
++ * Thylacine errnos are POSIX-value-pinned (the kernel's errno registry
++ * static-asserts the alignment), so musl's <errno.h> names are the
++ * correct comparators for the negative returns.
++ */
++#include <errno.h>
++#include <stdio.h>
++#include <string.h>
++
++#include <thyla/syscall.h>
++
++#include "warp_client.h"
++
++#define WARP_PAGE 4096u
++
++/* One write = one atomic submission, so every write must arrive at the
++ * server as ONE Twrite. /srv/warp is a default-msize service (32 KiB
++ * rings); past the iounit the kernel 9P client would fragment a large
++ * write into several Twrites, each of which the server would decode as
++ * its own submission — splitting mid-command. 24 KiB leaves margin
++ * under both the iounit (msize - 23) and the server's 64 KiB slot. */
++#define WARP_CHUNK_BYTES (24u * 1024u)
++#define WARP_CHUNK_DWORDS (WARP_CHUNK_BYTES / 4u)
++
++/* Client-side mirror of the server's per-ctx fenced-lane share
++ * (WARP_CTX_FENCE_MAX = FENCED_SLOTS / 2). Purely an optimization to
++ * make E_AGAIN rare — the retry loop below is the correctness path, so
++ * server-side drift costs a retry, never a wrong answer. */
++#define WARP_MAX_INFLIGHT 2u
++
++static long open_at(long root, const char *path, unsigned long omode)
++{
++   return t_open(root, path, strlen(path), omode);
++}
++
++/* Read a fresh snapshot of a small text file into buf (NUL-terminated).
++ * The server regenerates ctl content per read, so offset 0 always sees
++ * a whole current snapshot. Returns the length or -1. */
++static long read_snapshot(long fd, char *buf, unsigned long cap)
++{
++   long n = t_pread(fd, buf, cap - 1, 0);
++   if (n < 0)
++      return -1;
++   buf[n] = '\0';
++   return n;
++}
++
++static long open_read_snapshot(long root, const char *path, char *buf,
++                               unsigned long cap)
++{
++   long fd = open_at(root, path, T_OREAD);
++   long n;
++   if (fd < 0)
++      return -1;
++   n = read_snapshot(fd, buf, cap);
++   t_close(fd);
++   return n;
++}
++
++/* Parse "<key> <u64>" out of a "k v\n"-per-line snapshot. -1 if absent. */
++static long long parse_field(const char *s, const char *key)
++{
++   size_t klen = strlen(key);
++   const char *p = s;
++   while (p && *p) {
++      if (!strncmp(p, key, klen) && p[klen] == ' ') {
++         unsigned long long v = 0;
++         const char *q = p + klen + 1;
++         if (*q < '0' || *q > '9')
++            return -1;
++         while (*q >= '0' && *q <= '9')
++            v = v * 10 + (unsigned long long)(*q++ - '0');
++         return (long long)v;
++      }
++      p = strchr(p, '\n');
++      if (p)
++         p++;
++   }
++   return -1;
++}
++
++static int write_verb(long root, const char *path, const char *verb)
++{
++   long fd = open_at(root, path, T_OWRITE);
++   long n;
++   size_t len = strlen(verb);
++   if (fd < 0)
++      return -1;
++   n = t_write(fd, verb, len);
++   t_close(fd);
++   return (n == (long)len) ? 0 : -1;
++}
++
++/* Mint via the open+read idiom: reading <dir>/new yields "<id>\n". */
++static uint32_t mint_id(long root, const char *path)
++{
++   char buf[32];
++   uint32_t id = 0;
++   const char *q = buf;
++   if (open_read_snapshot(root, path, buf, sizeof(buf)) <= 0)
++      return 0;
++   if (*q < '0' || *q > '9')
++      return 0;
++   while (*q >= '0' && *q <= '9')
++      id = id * 10 + (uint32_t)(*q++ - '0');
++   return id;
++}
++
++int warp_fence_refresh(struct warp_conn *w)
++{
++   char buf[256];
++   long long v;
++   if (read_snapshot(w->ctx_ctl_fd, buf, sizeof(buf)) < 0)
++      return -1;
++   v = parse_field(buf, "fence-signaled");
++   if (v < 0)
++      return -1;
++   w->signaled = (uint64_t)v;
++   return 0;
++}
++
++/* Block until at least one fence retires, then refresh the counter.
++ * ONLY sound with in-flight > 0 (else the read parks unfillably); every
++ * caller checks. EOF means the ctx was poisoned or torn down: latch. */
++static int wait_progress(struct warp_conn *w)
++{
++   char rec[64];
++   long n = t_read(w->fence_fd, rec, sizeof(rec));
++   if (n <= 0) {
++      if (!w->wedged) {
++         fprintf(stderr, "warp: fence stream %s -- context is dead "
++                         "(poisoned or torn down); latching\n",
++                 n == 0 ? "EOF" : "error");
++         w->wedged = true;
++      }
++      return -1;
++   }
++   return warp_fence_refresh(w);
++}
++
++int warp_fence_wait(struct warp_conn *w, uint64_t seq)
++{
++   if (w->signaled >= seq)
++      return 0;
++   if (warp_fence_refresh(w) < 0)
++      return -1;
++   while (w->signaled < seq) {
++      /* seq <= issued and signaled < seq, so in-flight > 0: the park
++       * is fillable (a retirement or the poison EOF is coming). */
++      if (wait_progress(w) < 0)
++         return -1;
++   }
++   return 0;
++}
++
++/* The common fenced write: throttle under the per-ctx lane share, retry
++ * E_AGAIN by parking on the fence file (the lane's own back-pressure),
++ * and count the issue on success. Returns the seq or 0. */
++static uint64_t fenced_write(struct warp_conn *w, long fd, const void *buf,
++                             unsigned long len)
++{
++   int attempts;
++   if (w->wedged)
++      return 0;
++   for (attempts = 0; attempts < 64; attempts++) {
++      long n;
++      while (w->issued - w->signaled >= WARP_MAX_INFLIGHT) {
++         if (wait_progress(w) < 0)
++            return 0;
++      }
++      n = t_write(fd, buf, len);
++      if (n == (long)len)
++         return ++w->issued;
++      if (n == -EAGAIN) {
++         /* Lane momentarily full (another client's chains). If we have
++          * something in flight, park on it; otherwise the contention is
++          * foreign and a yield is all we can offer. */
++         if (w->issued > w->signaled) {
++            if (wait_progress(w) < 0)
++               return 0;
++         } else {
++            t_yield();
++         }
++         continue;
++      }
++      return 0; /* E_IO (poisoned / engine dead) or transport failure */
++   }
++   return 0;
++}
++
++uint64_t warp_submit(struct warp_conn *w, const uint32_t *dw, uint32_t ndw)
++{
++   uint32_t i = 0;
++   uint64_t seq = 0;
++   if (w->wedged)
++      return 0;
++   while (i < ndw) {
++      /* Greedy chunk at CCMD boundaries: dword 0 of each command is
++       * (len << 16 | ...), the payload follows. */
++      uint32_t start = i;
++      uint32_t chunk = 0;
++      while (i < ndw) {
++         uint32_t cmd_dw = 1 + (dw[i] >> 16);
++         if (cmd_dw > WARP_CHUNK_DWORDS) {
++            fprintf(stderr, "warp: single command of %u dwords exceeds "
++                            "the %u-dword submit bound -- the byte seam "
++                            "cannot carry it (GPU-DESIGN 4.1 is the "
++                            "successor); latching\n",
++                    cmd_dw, WARP_CHUNK_DWORDS);
++            w->wedged = true;
++            return 0;
++         }
++         if (chunk + cmd_dw > WARP_CHUNK_DWORDS)
++            break;
++         chunk += cmd_dw;
++         i += cmd_dw;
++      }
++      seq = fenced_write(w, w->submit_fd, dw + start, (unsigned long)chunk * 4);
++      if (seq == 0) {
++         if (!w->wedged) {
++            fprintf(stderr, "warp: submit failed -- a dropped command "
++                            "buffer poisons all downstream GL state; "
++                            "latching\n");
++            w->wedged = true;
++         }
++         return 0;
++      }
++   }
++   return seq;
++}
++
++uint64_t warp_transfer(struct warp_conn *w, uint32_t bo, bool to_host,
++                       uint32_t level, int x, int y, int z,
++                       int width, int height, int depth,
++                       uint32_t offset, uint32_t stride,
++                       uint32_t layer_stride)
++{
++   char path[64];
++   char verb[160];
++   long fd;
++   uint64_t seq = 0;
++   if (w->wedged)
++      return 0;
++   snprintf(path, sizeof(path), "ctx/%u/bo/%u/ctl", w->ctx, bo);
++   snprintf(verb, sizeof(verb), "%s %u %d %d %d %d %d %d %u %u %u",
++            to_host ? "transfer_to" : "transfer_from",
++            level, x, y, z, width, height, depth,
++            offset, stride, layer_stride);
++   fd = open_at(w->root, path, T_OWRITE);
++   if (fd < 0)
++      return 0;
++   seq = fenced_write(w, fd, verb, strlen(verb));
++   t_close(fd);
++   return seq;
++}
++
++uint32_t warp_bo_create(struct warp_conn *w,
++                        uint32_t target, uint32_t vformat, uint32_t vbind,
++                        uint32_t width, uint32_t height, uint32_t depth,
++                        uint32_t array_size, uint32_t last_level,
++                        uint32_t nr_samples, uint32_t flags,
++                        uint32_t *size_inout, uint32_t *res_id)
++{
++   char path[64];
++   char verb[192];
++   char info[160];
++   uint32_t bo, size;
++   long long rid;
++
++   if (w->wedged)
++      return 0;
++
++   /* The seam refuses unaligned or zero backings; the driver's
++    * staging-path textures legitimately ask for size 1. */
++   size = *size_inout ? *size_inout : 1;
++   size = (size + (WARP_PAGE - 1)) & ~(WARP_PAGE - 1);
++
++   snprintf(path, sizeof(path), "ctx/%u/bo/new", w->ctx);
++   bo = mint_id(w->root, path);
++   if (bo == 0)
++      return 0;
++
++   snprintf(path, sizeof(path), "ctx/%u/bo/%u/ctl", w->ctx, bo);
++   snprintf(verb, sizeof(verb),
++            "create3d %u %u %u %u %u %u %u %u %u %u %u",
++            target, vformat, vbind, width, height, depth, array_size,
++            last_level, nr_samples, flags, size);
++   if (write_verb(w->root, path, verb) != 0)
++      return 0; /* the minted-but-unbuilt record dies with the ctx */
++
++   snprintf(path, sizeof(path), "ctx/%u/bo/%u/info", w->ctx, bo);
++   if (open_read_snapshot(w->root, path, info, sizeof(info)) <= 0)
++      return 0;
++   rid = parse_field(info, "res");
++   if (rid <= 0)
++      return 0;
++
++   *size_inout = size;
++   *res_id = (uint32_t)rid;
++   return bo;
++}
++
++void *warp_bo_map(struct warp_conn *w, uint32_t bo, long *map_fd_out)
++{
++   char path[64];
++   long fd, va;
++   snprintf(path, sizeof(path), "ctx/%u/bo/%u/map", w->ctx, bo);
++   fd = open_at(w->root, path, T_OREAD);
++   if (fd < 0)
++      return NULL;
++   va = t_weft_map(fd, 0);
++   if (va < 0) {
++      t_close(fd);
++      return NULL;
++   }
++   *map_fd_out = fd;
++   return (void *)(uintptr_t)va;
++}
++
++void warp_bo_destroy(struct warp_conn *w, uint32_t bo, long map_fd)
++{
++   char path[64];
++   if (map_fd >= 0)
++      t_close(map_fd); /* the clunk drops the mapping */
++   snprintf(path, sizeof(path), "ctx/%u/bo/%u/ctl", w->ctx, bo);
++   (void)write_verb(w->root, path, "destroy");
++}
++
++long warp_read_caps(struct warp_conn *w, void *buf, unsigned long len)
++{
++   long fd = open_at(w->root, "caps", T_OREAD);
++   long total = 0;
++   if (fd < 0)
++      return -1;
++   while ((unsigned long)total < len) {
++      long n = t_pread(fd, (char *)buf + total, len - total, total);
++      if (n < 0) {
++         t_close(fd);
++         return -1;
++      }
++      if (n == 0)
++         break;
++      total += n;
++   }
++   t_close(fd);
++   return total;
++}
++
++int warp_open(struct warp_conn *w)
++{
++   char buf[512];
++   char path[64];
++   long long cap;
++
++   memset(w, 0, sizeof(*w));
++   w->root = w->ctx_ctl_fd = w->submit_fd = w->fence_fd = -1;
++
++   w->root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/warp", 9, T_OREAD);
++   if (w->root < 0)
++      return -1;
++
++   if (open_read_snapshot(w->root, "ctl", buf, sizeof(buf)) <= 0)
++      goto fail;
++   if (strncmp(buf, "virgl 1", 7) != 0)
++      goto fail; /* 2D device: the caller falls back / SKIPs */
++   cap = parse_field(buf, "bo-cap");
++   if (cap <= 0)
++      goto fail; /* pre-Warp-3 server: the fence counter is absent too */
++   w->bo_cap = (uint32_t)cap;
++
++   w->ctx = mint_id(w->root, "ctx/new");
++   if (w->ctx == 0)
++      goto fail;
++
++   snprintf(path, sizeof(path), "ctx/%u/ctl", w->ctx);
++   w->ctx_ctl_fd = open_at(w->root, path, T_OREAD);
++   snprintf(path, sizeof(path), "ctx/%u/submit", w->ctx);
++   w->submit_fd = open_at(w->root, path, T_OWRITE);
++   snprintf(path, sizeof(path), "ctx/%u/fence", w->ctx);
++   w->fence_fd = open_at(w->root, path, T_OREAD);
++   if (w->ctx_ctl_fd < 0 || w->submit_fd < 0 || w->fence_fd < 0)
++      goto fail;
++
++   /* The promoted counter is load-bearing (the whole fence model rides
++    * it): prove it parses before reporting the seam usable. */
++   if (warp_fence_refresh(w) != 0)
++      goto fail;
++   return 0;
++
++fail:
++   warp_close(w);
++   return -1;
++}
++
++void warp_close(struct warp_conn *w)
++{
++   char path[64];
++   if (w->ctx != 0 && w->root >= 0) {
++      snprintf(path, sizeof(path), "ctx/%u/ctl", w->ctx);
++      (void)write_verb(w->root, path, "destroy");
++   }
++   if (w->fence_fd >= 0)
++      t_close(w->fence_fd);
++   if (w->submit_fd >= 0)
++      t_close(w->submit_fd);
++   if (w->ctx_ctl_fd >= 0)
++      t_close(w->ctx_ctl_fd);
++   if (w->root >= 0)
++      t_close(w->root);
++   w->root = w->ctx_ctl_fd = w->submit_fd = w->fence_fd = -1;
++   w->ctx = 0;
++}
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.h b/src/gallium/winsys/virgl/thylacine/warp_client.h
+new file mode 100644
+index 0000000..e72c482
+--- /dev/null
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.h
+@@ -0,0 +1,116 @@
++/*
++ * warp_client — the C client library for Thylacine's /srv/warp GPU seam.
++ *
++ * The seam (docs/reference/149-warp.md in the Thylacine tree) is a 9P
++ * service tree served by tapestryd, the virtio-gpu owner. Opening
++ * /srv/warp is a CONNECT (each open mints a fresh server-side
++ * connection; ownership of everything minted below is keyed on it), and
++ * every operation is a blocking file op relative to that root:
++ *
++ *   ctl                    global: "virgl <0|1>\n... bo-cap <n>\n"
++ *   caps                   the retained capset blob, raw
++ *   ctx/new                open+read mints a context (ONE per connection)
++ *   ctx/<id>/ctl           per-ctx state incl. "fence-signaled <n>"
++ *   ctx/<id>/submit        one write = one atomic fenced CCMD submission
++ *   ctx/<id>/fence         read parks until an unreported fence retires
++ *   ctx/<id>/bo/new        mints a BO record
++ *   ctx/<id>/bo/<id>/ctl   "create3d ..." / "transfer_to/from ..." / "destroy"
++ *   ctx/<id>/bo/<id>/map   the map fid: t_weft_map() -> client VA
++ *
++ * Fence model. Every submit and every transfer verb is fence-bearing and
++ * completes FIFO within the context's single ring. The client counts the
++ * fenced ops it ISSUED; the per-ctx ctl `fence-signaled` counter is the
++ * monotonic count of ops that RETIRED. issued - signaled is the in-flight
++ * depth, and "op #seq is done" is exactly `signaled >= seq`. The fence
++ * FILE is only the blocking primitive: a read parks until a fence retires
++ * and its content (the coalesced newest fence id) is ignored — parking is
++ * safe iff in-flight > 0, which every wait loop here guarantees.
++ *
++ * Threading: the connection is one 9P stream; callers serialize through
++ * the winsys mutex. This library does no locking of its own.
++ *
++ * Errors: functions return 0/-1 (or a pointer/NULL); a hard transport
++ * failure or a poisoned context LATCHES the connection (warp_wedged())
++ * so a submit-drop can never silently corrupt downstream rendering.
++ */
++#ifndef WARP_CLIENT_H
++#define WARP_CLIENT_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++struct warp_conn {
++   long root;         /* the /srv/warp connection (open = connect) */
++   long ctx_ctl_fd;   /* kept open; fence-signaled polls are one t_pread */
++   long submit_fd;
++   long fence_fd;
++   uint32_t ctx;      /* the minted context's public id */
++   uint32_t bo_cap;   /* ctl `bo-cap`: per-ctx BO capacity (discovery) */
++   uint64_t issued;   /* fenced ops issued (submits + transfers) */
++   uint64_t signaled; /* last read of ctl `fence-signaled` */
++   bool wedged;       /* latched on transport failure / poison EOF */
++};
++
++/* Connect + mint the context + open the hot fds. Returns 0, or -1 when
++ * /srv/warp is absent, the device is 2D (`virgl 0`), or any mint fails —
++ * the caller falls back (or SKIPs); nothing is left open on failure. */
++int warp_open(struct warp_conn *w);
++void warp_close(struct warp_conn *w);
++
++/* Read the retained capset blob into buf (up to len). Returns the byte
++ * count (>= 0) or -1. */
++long warp_read_caps(struct warp_conn *w, void *buf, unsigned long len);
++
++/* Mint + build a BO. Geometry/format/bind are raw virgl wire values (the
++ * server passes them through to RESOURCE_CREATE_3D); size is rounded up
++ * to the page here (the seam refuses unaligned backings). On success
++ * returns the BO public id (>= 1) and stores the device-global resource
++ * id — the value command streams name — in *res_id. Returns 0 on
++ * failure (E_NOMEM at the bo-cap, E_IO on implausible geometry). */
++uint32_t warp_bo_create(struct warp_conn *w,
++                        uint32_t target, uint32_t vformat, uint32_t vbind,
++                        uint32_t width, uint32_t height, uint32_t depth,
++                        uint32_t array_size, uint32_t last_level,
++                        uint32_t nr_samples, uint32_t flags,
++                        uint32_t *size_inout, uint32_t *res_id);
++
++/* Map the BO's backing (opens the map fid + t_weft_map). The mapping
++ * lives until warp_bo_destroy closes the fid. NULL on failure. */
++void *warp_bo_map(struct warp_conn *w, uint32_t bo, long *map_fd_out);
++
++/* Destroy: closes the map fid (dropping the mapping) then writes the
++ * ctl `destroy` verb. Safe on a wedged connection (best-effort). */
++void warp_bo_destroy(struct warp_conn *w, uint32_t bo, long map_fd);
++
++/* Queue one fenced op. Each returns the op's issue seq (> 0) or 0 on
++ * failure (which latches the wedge for submits — a dropped command
++ * buffer corrupts all later state — but NOT for transfers, whose
++ * failure the driver surfaces per-call).
++ *
++ * warp_submit takes a dword stream and splits it into <= chunk-bound
++ * writes at CCMD boundaries (one write = one atomic submission; state
++ * persists across submissions in the same ctx, so a boundary split is
++ * transparent). A single command wider than the chunk bound cannot be
++ * carried by the byte seam and fails loudly (the Loom bulk path is the
++ * designed successor, GPU-DESIGN 4.1). */
++uint64_t warp_submit(struct warp_conn *w, const uint32_t *dw, uint32_t ndw);
++uint64_t warp_transfer(struct warp_conn *w, uint32_t bo, bool to_host,
++                       uint32_t level, int x, int y, int z,
++                       int width, int height, int depth,
++                       uint32_t offset, uint32_t stride,
++                       uint32_t layer_stride);
++
++/* Refresh `signaled` from the ctl fd (one pread). Returns 0 / -1. */
++int warp_fence_refresh(struct warp_conn *w);
++
++/* Block until signaled >= seq (refreshing as fences land). Latches the
++ * wedge and returns -1 on fence-stream EOF (poison/teardown); 0 on
++ * success. Never parks with nothing in flight. */
++int warp_fence_wait(struct warp_conn *w, uint64_t seq);
++
++static inline bool warp_wedged(const struct warp_conn *w)
++{
++   return w->wedged;
++}
++
++#endif /* WARP_CLIENT_H */
+-- 
+2.43.0
+

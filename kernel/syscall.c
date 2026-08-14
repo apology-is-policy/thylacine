@@ -597,6 +597,42 @@ static s64 sys_dma_create_weave_handler(u64 size, u64 rights) {
 }
 
 // =============================================================================
+// SYS_DMA_CREATE_GPU_BO — mint a share-admissible GPU buffer (Warp-2, §6.1).
+// =============================================================================
+//
+// AArch64 ABI: x0 = size, x1 = rights. Byte-for-byte the weave handler above
+// -- the SAME CAP_HW_CREATE gate + I-34 CreateBegin/CreateCommit pair --
+// differing only in the envelope and the minted subtype bit. See the
+// syscall.h doc block for the separate-number rationale and the GPU BO's
+// distinct device-WRITTEN safety argument.
+static s64 sys_dma_create_gpu_bo_handler(u64 size, u64 rights) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
+        return -1;
+    if (rights == 0 || (rights & ~(u64)RIGHT_ALL))   return -1;
+    if (size == 0)                                   return -1;
+
+    // I-34 CreateBegin: the allowance dma_max axis sees the FULL BO size -- a
+    // narrowed driver cannot mint a BO larger than its conferred bound.
+    if (!allowance_permits(p, HW_RES_DMA, size, 0))  return -1;
+
+    struct KObj_DMA *k = kobj_dma_create_gpu_bo((size_t)size);
+    if (!k)                                          return -1;
+
+    // I-34 CreateCommit: install under the allowance re-check (revoke race).
+    hidx_t h = allowance_handle_alloc(p, KOBJ_DMA, (rights_t)rights, k);
+    if (h < 0) {
+        kobj_dma_unref(k);
+        return -1;
+    }
+    return (s64)h;
+}
+
+// =============================================================================
 // SYS_DMA_MAP — install a user-VA mapping for a KObj_DMA handle (P4-Ic5b1b).
 // =============================================================================
 //
@@ -892,6 +928,13 @@ s64 sys_pci_info_handler(u64 hraw, u64 info_va) {
         info.regions[i].bar     = k->regions[i].bar;
         info.regions[i].present = k->regions[i].present ? 1u : 0u;
     }
+    for (u32 i = 0; i < PCI_SHM_COUNT; i++) {
+        info.shm[i].offset  = k->shm[i].offset;
+        info.shm[i].length  = k->shm[i].length;
+        info.shm[i].bar     = k->shm[i].bar;
+        info.shm[i].present = k->shm[i].present ? 1u : 0u;
+        info.shm[i].shmid   = k->shm[i].shmid;
+    }
     info.notify_off_multiplier = k->notify_off_multiplier;
     info.intid                 = k->intid;
     info.intid_valid           = k->intid_valid ? 1u : 0u;
@@ -1101,8 +1144,9 @@ static bool sys_validate_user_buf(u64 buf_va, u64 len) {
 // been explicit (the Plan 9 shape) -- the cursor is syscall-layer sugar. A
 // byte-mode /srv connection endpoint is itself a KOBJ_SPOOR conn Spoor, so
 // its bytes ride this path too -- devsrv_write picks the server arm
-// (srvconn_server_send) or the CSRVCLIENT client arm (srvconn_client_send)
-// by the conn direction. The client-side KObj_Srv conn handle that once
+// (srvconn_server_send_blocking, #348) or the CSRVCLIENT client arm
+// (srvconn_client_send_blocking, CF-3 B) by the conn direction. The
+// client-side KObj_Srv conn handle that once
 // routed here was retired with SYS_SRV_CONNECT (stalk-3c); the
 // kernel-attached no-direct-I/O guard moved with it into devsrv_write.
 static s64 spoor_write_common(struct Proc *p, hidx_t h, const u8 *kbuf,
@@ -5137,17 +5181,21 @@ s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
         return -1;
     }
     struct Burrow *v = vma->burrow;
-    // Admission (G-2): ANON (a netd flow ring), or the KERNEL-MINTED
-    // device-passive DMA weave (tapestryd's framebuffer backing --
-    // SYS_DMA_CREATE_WEAVE minted the immutable subtype bit; TAPESTRY.md
-    // §18.1). Plain DMA (virtqueue / descriptor class) + MMIO fail closed --
-    // the same structural gate burrow_share_into enforces at claim time; the
+    // Admission (G-2 + Warp-2): ANON (a netd flow ring), or a KERNEL-MINTED
+    // share-admissible DMA subtype -- the device-passive weave (tapestryd's
+    // framebuffer backing; TAPESTRY.md §18.1) or the GPU BO (GPU-DESIGN.md
+    // §6.1; the device-WRITTEN argument on KObj_DMA.gpu_bo). Plain DMA
+    // (virtqueue / descriptor class) + MMIO fail closed -- the same
+    // structural gate burrow_share_into enforces at claim time; the
     // register-side copy keeps an inadmissible region out of the registry
-    // entirely. RW (no exec -- the share is RW-only, W^X like
-    // SYS_BURROW_ATTACH); whole-region (ring_size == the Burrow size).
-    bool share_weave = (v->type == BURROW_TYPE_DMA &&
-                        v->kobj_dma != NULL && v->kobj_dma->weave);
-    if (v->type != BURROW_TYPE_ANON && !share_weave) {
+    // entirely, and the two MUST widen together (the Warp-2b test failed
+    // exactly here when only the claim side was widened). RW (no exec -- the
+    // share is RW-only, W^X like SYS_BURROW_ATTACH); whole-region
+    // (ring_size == the Burrow size).
+    bool share_admissible = (v->type == BURROW_TYPE_DMA &&
+                             v->kobj_dma != NULL &&
+                             (v->kobj_dma->weave || v->kobj_dma->gpu_bo));
+    if (v->type != BURROW_TYPE_ANON && !share_admissible) {
         spin_unlock(&p->as->lock);
         return -1;
     }
@@ -5231,8 +5279,8 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
     // gate keeps every Tweftio consumer off it); record the mapping pid for
     // the clunk-unmap. On OOM / invalid geometry / a non-weave Burrow, drop
     // BOTH the guest mapping AND the pin.
-    struct weft_binding *b = (kind == WEFT_BIND_WEAVE)
-        ? weft_binding_alloc_weave(v, va, (u32)bsize, p->pid)
+    struct weft_binding *b = weft_kind_maponly(kind)
+        ? weft_binding_alloc_maponly(v, va, (u32)bsize, p->pid)
         : weft_binding_alloc(v, va, (u32)bsize, ring_entries);
     if (!b) {
         spin_lock(&p->as->lock);
@@ -5263,7 +5311,7 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
     // still pins priv (a sibling-thread close cannot run until the syscall's
     // handle_put) -- so the register-vs-close order is structural. The
     // session pointers are borrowed via priv (see weft.h).
-    if (kind == WEFT_BIND_WEAVE)
+    if (weft_kind_maponly(kind))
         weft_reap_register(b, priv->attached_owner, priv->client);
     return (s64)va;
 }
@@ -5410,6 +5458,21 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     // earlier failure paths (above) ran with l->sqpoll == NULL, so loom_free
     // skipped the join there. The kthread immediately parks (no SQEs yet).
     if (flags & LOOM_SETUP_SQPOLL) {
+        // The F1 thread-budget charge FIRST: the kthread counts against
+        // this Proc's PROC_THREAD_MAX (its worker, whoever runs it). A
+        // refusal here is the I-32 floor working, same as the page charge
+        // above. loom_unref -> loom_free settles the charge via
+        // sqpoll_charged on every later path, including a start failure.
+        if (!proc_sqpoll_charge(p)) {
+            spin_lock(&p->as->lock);
+            (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
+            proc_page_uncharge(p, ring_pages);
+            spin_unlock(&p->as->lock);
+            loom_unref(l);
+            return -1;
+        }
+        l->sqpoll_owner = p;
+        l->sqpoll_charged = true;
         if (loom_start_sqpoll(l) != 0) {
             spin_lock(&p->as->lock);
             (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
@@ -10875,6 +10938,11 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_WEFT_UNSHARE:
         ctx->regs[0] = (u64)sys_weft_unshare_handler(ctx->regs[0]);
+        return;
+
+    case SYS_DMA_CREATE_GPU_BO:
+        ctx->regs[0] = (u64)sys_dma_create_gpu_bo_handler(ctx->regs[0],
+                                                          ctx->regs[1]);
         return;
 
     // I-42 / CL-7k: the JIT capability.

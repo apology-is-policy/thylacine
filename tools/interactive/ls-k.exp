@@ -14,6 +14,16 @@
 # spawn_id (lc_boot), match OUTPUT not typed input -- "uid=1000", "1000", and
 # "UTC" are all command OUTPUT and cannot appear in the typed lines.
 
+# G-3: HVF. MEASURED ~200s -> ~40s (this scenario is boot-dominated, and a
+# TCG boot is ~5x an HVF one). Coverage argument, because a green run under a
+# different accel is NOT the same as the same coverage: accel also picks the
+# CPU model and the GIC version (hvf -> -cpu host + GICv2; tcg -> -cpu max +
+# GICv3, tools/run-vm.sh), so a flip moves this scenario off those axes. It is
+# safe HERE because the wall-clock/RTC leg -- reads the PL031 and the time syscalls, which HVF serves identically, and because the GICv3 + `-cpu max` axes stay covered
+# by the TCG anchor set the wrapper enforces (freeze-172, flood-174, split173,
+# nora-demo, idle-probe, ls-7, pty-4). Set THYLACINE_ACCEL=tcg to A/B it.
+set ::env(THYLACINE_ACCEL) hvf
+
 source [file join [file dirname [info script]] lib.exp]
 
 lc_boot

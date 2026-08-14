@@ -338,24 +338,37 @@ struct Burrow;
 
 // The binding KIND (G-2; TAPESTRY.md §18.11 F10). Derived at claim time from
 // the KERNEL-MINTED Burrow type -- never from the server's declaration alone:
-//   WEFT_BIND_RING  -- a netd flow ring (BURROW_TYPE_ANON): carries the ring
-//                      view; drives the Tweftio data fast-paths.
-//   WEFT_BIND_WEAVE -- a tapestryd framebuffer weave (the DMA weave subtype):
-//                      NO ring view, NO Tweftio drive (weft_binding_validate_rw
-//                      is kind-gated, which closes all three fast-path
-//                      consumers -- the sync dev9p_weft_try_{read,write} AND
-//                      the Loom routing -- at one chokepoint); the map is the
-//                      whole deliverable (the client draws into it directly).
+//   WEFT_BIND_RING   -- a netd flow ring (BURROW_TYPE_ANON): carries the ring
+//                       view; drives the Tweftio data fast-paths.
+//   WEFT_BIND_WEAVE  -- a tapestryd framebuffer weave (the DMA weave subtype):
+//                       NO ring view, NO Tweftio drive (weft_binding_validate_rw
+//                       is kind-gated, which closes all three fast-path
+//                       consumers -- the sync dev9p_weft_try_{read,write} AND
+//                       the Loom routing -- at one chokepoint); the map is the
+//                       whole deliverable (the client draws into it directly).
+//   WEFT_BIND_GPU_BO -- a Warp GPU buffer (the DMA gpu_bo subtype, GPU-DESIGN
+//                       §6.1): the same map-only binding SHAPE as the weave
+//                       (no ring view, no Tweftio, clunk-unmap, orphan-reaped)
+//                       with the distinct device-WRITTEN safety argument
+//                       recorded on KObj_DMA.gpu_bo. A separate kind so the
+//                       binding names what it binds.
 enum weft_bind_kind {
-    WEFT_BIND_RING  = 0,
-    WEFT_BIND_WEAVE = 1,
+    WEFT_BIND_RING   = 0,
+    WEFT_BIND_WEAVE  = 1,
+    WEFT_BIND_GPU_BO = 2,
 };
+
+// True for the map-only kinds (WEAVE | GPU_BO) -- the bindings with no ring
+// view, whose clunk unmaps and whose orphans the reaper force-reclaims.
+static inline bool weft_kind_maponly(int kind) {
+    return kind == WEFT_BIND_WEAVE || kind == WEFT_BIND_GPU_BO;
+}
 
 // The per-data-fd binding recorded in dev9p_priv once a flow's ring / a
 // surface's weave has been mapped into the guest. Holds the registration pin
 // (transferred from the registry at claim); a weak record of the guest VA for
 // the idempotent SYS_WEFT_MAP return. Allocated by weft_binding_alloc /
-// weft_binding_alloc_weave at SYS_WEFT_MAP; released (pin dropped + struct
+// weft_binding_alloc_maponly at SYS_WEFT_MAP; released (pin dropped + struct
 // freed) by weft_binding_release at dev9p_close -- which for a WEAVE binding
 // additionally unmaps the client mapping when the closer IS the mapping Proc
 // (§18.1 "the weave fid's clunk drops the client mapping"; the RING mapping
@@ -436,8 +449,9 @@ int weft_share_unregister(struct Proc *owner, u64 share_id);
 // unit-testable in isolation). Derives the binding kind from the KERNEL-MINTED
 // Burrow type -- the single source of truth -- and CROSS-CHECKS the server's
 // declared geometry: an ANON ring must declare ring_entries != 0 (the layout
-// validates the exact value later); a DMA weave must declare ring_entries == 0
-// (a weave has no descriptor ring). Returns WEFT_BIND_RING / WEFT_BIND_WEAVE,
+// validates the exact value later); a DMA weave / gpu_bo must declare
+// ring_entries == 0 (neither has a descriptor ring). Returns WEFT_BIND_RING /
+// WEFT_BIND_WEAVE / WEFT_BIND_GPU_BO,
 // or -1 on a type/declaration mismatch or an inadmissible type (the caller
 // fails closed: unmaps nothing, drops the claimed pin). A mismatch means a
 // buggy/hostile server declared a geometry its own registered Burrow
@@ -454,14 +468,16 @@ int weft_claimed_kind(const struct Burrow *v, u32 ring_entries);
 struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,
                                         u32 ring_size, u32 ring_entries);
 
-// G-2: allocate a WEAVE weft_binding (the §18.11 F10 framebuffer map branch) --
-// no ring view, no Tweftio drive; records the mapping Proc's pid for the
-// clunk-unmap. Same pin-ownership contract as weft_binding_alloc. Returns NULL
-// on OOM or a non-weave Burrow (defense-in-depth: the caller's kind decision
-// already derived WEAVE from the type).
-struct weft_binding *weft_binding_alloc_weave(struct Burrow *burrow,
-                                              u64 guest_va, u32 size,
-                                              u32 map_pid);
+// G-2 (+Warp-2): allocate a MAP-ONLY weft_binding (the §18.11 F10 framebuffer
+// map branch; the gpu_bo kind rides the same shape) -- no ring view, no
+// Tweftio drive; records the mapping Proc's pid for the clunk-unmap; the
+// recorded kind names the actual subtype (WEAVE / GPU_BO, derived from the
+// KObj_DMA bits). Same pin-ownership contract as weft_binding_alloc. Returns
+// NULL on OOM or a Burrow of neither map-only subtype (defense-in-depth: the
+// caller's kind decision already derived the kind from the type).
+struct weft_binding *weft_binding_alloc_maponly(struct Burrow *burrow,
+                                                u64 guest_va, u32 size,
+                                                u32 map_pid);
 
 // Weft-6b-2/6b-3 data drive: validate a guest syscall buffer against the flow's
 // ring. Direction-agnostic -- a Tweftio WRITE source and a Tweftio READ

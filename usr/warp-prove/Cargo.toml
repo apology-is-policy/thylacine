@@ -1,0 +1,18 @@
+[package]
+name = "warp-prove"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "warp-prove"
+path = "src/main.rs"
+
+[dependencies]
+# The Warp-2 gate prover: connects to /srv/warp directly (its own conn =
+# its own identity), mints a ctx + a GPU-BO, submits a hand-built VIRGL
+# CCMD clear, reads it back through TRANSFER_FROM_HOST_3D + the fence
+# file, and asserts the clear color in the client mapping. SKIPs (exit 2)
+# on a 2D device -- the gate run is the thyla-gl virgl boot.
+libthyla-rs = { path = "../lib/libthyla-rs" }

@@ -820,15 +820,42 @@ which a drop counter reading zero never could.
   the test's stack `poll_waiter` on the list — the next walk extincted on the
   reused frame's clobbered magic (`EXTINCTION: pw_wake`, poll.c's stale-hook
   guard, 2026-07-21 — the guard caught real corruption; the corruption was a
-  test-lifetime leak, not a production defect). Both tests now also run their
-  dance through an error-string helper so the hook is unregistered on EVERY
-  exit path — the structural rule: a stack poll hook never outlives its test.
   test-lifetime leak, not a production defect). All THREE cons poll-hook
   tests (`poll_deferred_wake`, `drain_poll_deferred_wake`,
   `cook_canonical_poll_edge` — the class sweep found the third carrying the
   identical shape) now run their dance through an error-string helper so the
   hook is unregistered on EVERY exit path — the structural rule: a stack
   poll hook never outlives its test.
+
+  **The hold is mandatory for EVERY read of a deferred flag, in BOTH
+  directions (#187).** `cons_rx_input` / `cons_feed_write` end in
+  `wakeup(&g_cons_mgr_rendez)`, so between the produce and the read the mgr
+  can be dispatched on a peer CPU and drain the flag. The two failure modes
+  are opposite and both silent:
+
+  - a **positive** read (`cons_test_intr_pending()`) fails SPURIOUSLY — the
+    flag reading false means the interrupt was *delivered*, not lost;
+  - a **negative** read (`!cons_test_intr_pending()`) passes SPURIOUSLY — a
+    wrongly-set flag is consumed before the read, so the assertion is
+    satisfied by the exact bug it names.
+
+  The idiom is **sample-then-assert**: take every reading inside the held
+  window, release, *then* assert. `TEST_ASSERT` returns from the test, so an
+  assert inside the window strands the hold — which `cons_test_release_owned_state`
+  then reports as `LEAKED-STATE` against the *next* test.
+
+  Exactly three reads are deliberately UNHELD, and all three assert that the
+  mgr *did* consume (holding them would make them unsatisfiable):
+  `sak_via_console_mgr`'s post-transition `!sak_pending`, and the
+  `poll_wake_pending not consumed` check at the tail of each dance helper.
+
+  History worth keeping: the #129-audit F6 fix wrapped one site and its own
+  comment asserted that "every sibling deferred-flag test wraps against this
+  and this one did not". That was false and inverted — the hold was armed at
+  two sites in the whole file and seven sibling reads ran bare. One of them
+  (`drain_feed_runs_discipline`) extincted the suite on ~1-in-8 SMP boots
+  before the sweep was actually done. **A claim about sites you did not
+  enumerate is a guess wearing a finding's clothes.**
   Direct-drive via `cons_test_service_deferred` bypasses the cond and is never
   blocked by the hold.
 - **The PL011 RX IRQ handler MUST clear ICR *before* draining the FIFO (#172).**

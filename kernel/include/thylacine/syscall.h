@@ -2029,6 +2029,21 @@ enum {
     //   -T_E_AGAIN   the child could not be created (the I-32 child cap, a
     //                narrowed hardware allowance, or OOM)
     SYS_RFORK = 105,
+
+    // SYS_DMA_CREATE_GPU_BO(size, rights) -> hidx / -1  (Warp-2; GPU-DESIGN.md
+    //   §6.1; the ABI addition signed off via the Warp-0 scripture commit
+    //   e29cd096). Byte-for-byte the SYS_DMA_CREATE_WEAVE contract -- the SAME
+    //   CAP_HW_CREATE gate + I-34 allowance HW_RES_DMA CreateBegin/CreateCommit
+    //   pair -- differing only in the envelope (KOBJ_DMA_GPU_BO_MAX_SIZE) and
+    //   the kernel-minted create-immutable `gpu_bo` subtype bit, the SECOND
+    //   share-admissible DMA kind (burrow_share_into + SYS_WEFT_SHARE). A
+    //   separate number for the same reason the weave got one (the #112
+    //   garbage-x2 missed-caller class): existing two-arg mint callers leave
+    //   x2 as garbage, and a flags word read from garbage could accidentally
+    //   select a share-admissible kind. The GPU BO's safety argument is
+    //   DISTINCT from the weave's -- device-WRITTEN, bounded by owner-programmed
+    //   GPU translation -- and is recorded on KObj_DMA.gpu_bo.
+    SYS_DMA_CREATE_GPU_BO = 106,   // arg: size (x0), rights (x1)
 };
 
 // SYS_JIT_CREATE out-parameter: the two aliases of one code region.
@@ -2120,6 +2135,25 @@ _Static_assert(__builtin_offsetof(struct t_pci_region, length)  == 4, "t_pci_reg
 _Static_assert(__builtin_offsetof(struct t_pci_region, bar)     == 8, "t_pci_region.bar @8");
 _Static_assert(__builtin_offsetof(struct t_pci_region, present) == 9, "t_pci_region.present @9");
 
+// A discovered VIRTIO shared-memory region (cfg_type 8 — virtio-gpu hostmem,
+// virtio-fs DAX). 64-bit offset/length: the hostmem BAR is the one BAR class
+// that outgrows u32 (Warp; GPU-DESIGN.md §6.2). Discovery-only at this ABI:
+// mapping a subrange is a separate, explicit act by the device owner.
+struct t_pci_shm {
+    u64 offset;    // 0:  byte offset within bars[bar]
+    u64 length;    // 8:  byte length (offset + length <= bars[bar].size)
+    u8  bar;       // 16: which BAR holds it (< 6, present)
+    u8  present;   // 17: 1 if this slot holds a discovered region
+    u8  shmid;     // 18: the cap's id byte (gpu hostmem = 1, fs DAX = 0)
+    u8  _pad[5];   // 19: pad to 24
+};
+_Static_assert(sizeof(struct t_pci_shm) == 24, "t_pci_shm ABI size 24");
+_Static_assert(__builtin_offsetof(struct t_pci_shm, offset)  == 0,  "t_pci_shm.offset @0");
+_Static_assert(__builtin_offsetof(struct t_pci_shm, length)  == 8,  "t_pci_shm.length @8");
+_Static_assert(__builtin_offsetof(struct t_pci_shm, bar)     == 16, "t_pci_shm.bar @16");
+_Static_assert(__builtin_offsetof(struct t_pci_shm, present) == 17, "t_pci_shm.present @17");
+_Static_assert(__builtin_offsetof(struct t_pci_shm, shmid)   == 18, "t_pci_shm.shmid @18");
+
 struct t_pci_info {
     struct t_pci_bar    bars[6];     // 0:   the assigned memory BARs
     struct t_pci_region regions[4];  // 144: VIRTIO_PCI_CAP regions, (cfg_type - 1):
@@ -2132,8 +2166,10 @@ struct t_pci_info {
     u8  fn;                          // 203
     u16 virtio_device_id;            // 204
     u8  _pad[2];                     // 206: pad to 208
+    struct t_pci_shm shm[2];         // 208: cfg_type 8 regions, discovery order
+                                     //      (appended; prior offsets unchanged)
 };
-_Static_assert(sizeof(struct t_pci_info) == 208, "t_pci_info ABI size 208");
+_Static_assert(sizeof(struct t_pci_info) == 256, "t_pci_info ABI size 256");
 _Static_assert(__builtin_offsetof(struct t_pci_info, bars)    == 0,   "t_pci_info.bars @0");
 _Static_assert(__builtin_offsetof(struct t_pci_info, regions) == 144, "t_pci_info.regions @144");
 _Static_assert(__builtin_offsetof(struct t_pci_info, notify_off_multiplier) == 192,
@@ -2145,6 +2181,7 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, dev)         == 202, "t_pci
 _Static_assert(__builtin_offsetof(struct t_pci_info, fn)          == 203, "t_pci_info.fn @203");
 _Static_assert(__builtin_offsetof(struct t_pci_info, virtio_device_id) == 204,
                "t_pci_info.virtio_device_id @204");
+_Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci_info.shm @208");
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the
 // kernel uses the caller's Territory's root_spoor as the walk source

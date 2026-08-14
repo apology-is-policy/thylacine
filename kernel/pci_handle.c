@@ -56,6 +56,18 @@ static bool g_pci_bar_inited;
 static u64  g_pci_bar_base;
 static u64  g_pci_bar_end;
 static u64  g_pci_bar_next;
+// The 64-bit MMIO arena (#166, audit F3). A BAR too large for the 32-bit
+// window -- a `hostmem=N` virtio-gpu presents a multi-GiB one -- is
+// structurally unplaceable there (QEMU virt's 32-bit window is ~752 MiB),
+// so the claim aborted before userspace's "claim but leave unmapped"
+// policy could ever run: the whole point of #166. Seeded lazily +
+// independently; absent on a DTB without a 64-bit range, in which case an
+// oversized BAR still fails the claim (honestly, as before).
+static bool g_pci_bar64_inited;
+static bool g_pci_bar64_absent;
+static u64  g_pci_bar64_base;
+static u64  g_pci_bar64_end;
+static u64  g_pci_bar64_next;
 
 u64 kobj_pci_total_created(void) {
     return __atomic_load_n(&g_pci_created, __ATOMIC_RELAXED);
@@ -112,30 +124,67 @@ static int find_pci_slot_by_owner(struct KObj_PCI *k) {
 // BAR claim size) and `align` are powers of two; on QEMU virt they are equal
 // (natural BAR alignment). Returns false if the arena is absent (no DTB window)
 // or exhausted. Caller MUST NOT hold g_pci_lock — this takes it.
-static bool pci_bar_alloc(u64 size, u64 *out_pa) {
+// `is64` is load-bearing (round-2 F4): a 32-bit BAR can only be programmed
+// with a 32-bit address, so it must NEVER be placed in the high arena --
+// pci_assign_one_bar writes only the low dword for it, silently truncating
+// a high PA to something the device would decode inside RAM while the
+// kernel's claim sat on the untruncated address.
+static bool pci_bar_alloc(u64 size, bool is64, u64 *out_pa) {
     irq_state_t s = spin_lock_irqsave(&g_pci_lock);
 
     if (!g_pci_bar_inited) {
         u64 base = 0, len = 0;
-        if (!dtb_pci_mem_window(&base, &len) || len == 0) {
-            spin_unlock_irqrestore(&g_pci_lock, s);
-            return false;
+        if (dtb_pci_mem_window(&base, &len) && len != 0) {
+            g_pci_bar_base = base;
+            g_pci_bar_end  = base + len;   // dtb_pci_mem_window bounds this < IPS
+            g_pci_bar_next = base;
+            g_pci_bar_inited = true;
         }
-        g_pci_bar_base = base;
-        g_pci_bar_end  = base + len;       // dtb_pci_mem_window bounds this < IPS
-        g_pci_bar_next = base;
-        g_pci_bar_inited = true;
+    }
+    if (!g_pci_bar64_inited && !g_pci_bar64_absent) {
+        u64 base = 0, len = 0;
+        if (dtb_pci_mem_window64(&base, &len) && len != 0) {
+            g_pci_bar64_base = base;
+            g_pci_bar64_end  = base + len;
+            g_pci_bar64_next = base;
+            g_pci_bar64_inited = true;
+        } else {
+            g_pci_bar64_absent = true;
+        }
     }
 
-    // Align next up to `size` (a power of two >= PAGE_SIZE).
-    u64 a = (g_pci_bar_next + (size - 1)) & ~(size - 1);
-    // Bounds + overflow: a >= base (alignment only advances), a + size must not
-    // wrap and must fit the window.
-    if (a < g_pci_bar_base || a + size < a || a + size > g_pci_bar_end) {
+    // Pick the arena by SIZE, not by the BAR's 64-bit-capable bit: a small
+    // 64-bit BAR still places fine below 4 GiB, so every existing driver
+    // keeps its current addresses. Only a BAR that cannot fit the 32-bit
+    // window at all is routed high.
+    // Prefer the 32-bit arena while it can still SERVE the request (round-2
+    // F11: the old test compared against the window's total span, so once
+    // the arena was exhausted every later BAR failed there instead of
+    // falling through to the 512 GiB one). A 64-bit-capable BAR may then
+    // fall high; a 32-bit BAR may not, and fails honestly as it did before
+    // the arena existed.
+    u64 avail32 = 0;
+    if (g_pci_bar_inited) {
+        u64 a32 = (g_pci_bar_next + (size - 1)) & ~(size - 1);
+        if (a32 >= g_pci_bar_base && a32 + size >= a32 && a32 + size <= g_pci_bar_end)
+            avail32 = 1;
+    }
+    bool fits32 = avail32 != 0;
+    if (!fits32 && (!is64 || !g_pci_bar64_inited)) {
+        spin_unlock_irqrestore(&g_pci_lock, s);   // no arena may hold it
+        return false;
+    }
+    u64 *next   = fits32 ? &g_pci_bar_next : &g_pci_bar64_next;
+    u64 lo      = fits32 ? g_pci_bar_base  : g_pci_bar64_base;
+    u64 hi      = fits32 ? g_pci_bar_end   : g_pci_bar64_end;
+
+    // Align up to `size` (a power of two >= PAGE_SIZE); bounds + overflow.
+    u64 a = (*next + (size - 1)) & ~(size - 1);
+    if (a < lo || a + size < a || a + size > hi) {
         spin_unlock_irqrestore(&g_pci_lock, s);
         return false;
     }
-    g_pci_bar_next = a + size;
+    *next = a + size;
     spin_unlock_irqrestore(&g_pci_lock, s);
 
     *out_pa = a;
@@ -216,7 +265,7 @@ static int pci_assign_one_bar(struct KObj_PCI *k, struct virtio_pci_dev *d,
     u64 claim_size = bar_claim_size(size);
 
     u64 pa = 0;
-    if (!pci_bar_alloc(claim_size, &pa)) return -1;   // window exhausted / no DTB
+    if (!pci_bar_alloc(claim_size, is64, &pa)) return -1;  // exhausted / unplaceable
 
     // Program the BAR with the assigned PA. The PA is claim_size-aligned (>=
     // page), so its low attribute bits are 0; the device's read-only attribute
@@ -297,8 +346,37 @@ int pci_walk_caps(struct KObj_PCI *k, struct virtio_pci_dev *d) {
                             virtio_pci_cfg_read32(d, ptr + 16u);
                     }
                 }
+            } else if (cfg_type == VIRTIO_PCI_CAP_SHARED_MEMORY_CFG) {
+                // §4.1.4.7: a virtio_pci_cap64 — the base cap's offset/length
+                // are the LOW halves; the hi dwords follow the 16-byte cap.
+                // cap.id (@+5) is the shmid. Same hostile-layout posture as
+                // the regions above: a bad BAR reference or an extent past
+                // the decoded BAR size rejects the claim. The extent check is
+                // the non-wrapping form — offset + length on u64 halves can
+                // overflow, and a wrapped sum would pass a naive compare.
+                u8  bar  = virtio_pci_cfg_read8(d, ptr + 4u);
+                u8  shmid = virtio_pci_cfg_read8(d, ptr + 5u);
+                u64 off  = (u64)virtio_pci_cfg_read32(d, ptr + 8u)
+                         | ((u64)virtio_pci_cfg_read32(d, ptr + 16u) << 32);
+                u64 len  = (u64)virtio_pci_cfg_read32(d, ptr + 12u)
+                         | ((u64)virtio_pci_cfg_read32(d, ptr + 20u) << 32);
+
+                if (bar >= PCI_BAR_COUNT) return -1;           // hostile BAR index
+                if (!k->bars[bar].present) return -1;          // unassigned BAR
+                if (off > k->bars[bar].size) return -1;        // OOB start
+                if (len > k->bars[bar].size - off) return -1;  // OOB extent (no wrap)
+
+                for (u32 s = 0; s < PCI_SHM_COUNT; s++) {
+                    if (k->shm[s].present) continue;
+                    k->shm[s].present = true;
+                    k->shm[s].shmid   = shmid;
+                    k->shm[s].bar     = bar;
+                    k->shm[s].offset  = off;
+                    k->shm[s].length  = len;
+                    break;             // further caps beyond the slots: ignored
+                }
             }
-            // cfg_type 5 (PCI_CFG) / 8 (SHARED_MEMORY) are not mapped here.
+            // cfg_type 5 (PCI_CFG) is not mapped here.
         }
         ptr = cap_next;
     }
@@ -313,6 +391,20 @@ int pci_walk_caps(struct KObj_PCI *k, struct virtio_pci_dev *d) {
 // exclusivity slot. Shared by free_internal (last unref) and the claim-failure
 // rollback (where ref is still 1). The g_pci_claims slot was installed before
 // any path that reaches here, so a missing slot is corruption.
+// Stop the device decoding + mastering. Idempotent, and safe to call from
+// the Proc-death quiesce BEFORE the handle table is torn down (audit F8):
+// a PCI driver's registers are BAR-decoded, so the virtio-MMIO reset sweep
+// cannot reach them, and a still-mastering device would DMA into pages the
+// exit path has already returned to the buddy.
+bool kobj_pci_quiesce(struct KObj_PCI *k) {
+    if (!k || k->magic != KOBJ_PCI_MAGIC || !k->vpd) return false;
+    u16 cmd = virtio_pci_cfg_read16(k->vpd, PCI_CFG_COMMAND);
+    if (!(cmd & (PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER))) return false;
+    cmd &= ~(u16)(PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER);
+    virtio_pci_cfg_write16(k->vpd, PCI_CFG_COMMAND, cmd);
+    return true;
+}
+
 static void pci_release_bars_and_claim(struct KObj_PCI *k) {
     // Quiesce: disable MEM-decode + bus-master before releasing the BAR PA
     // claims (which may be re-handed-out). Config space is kernel-owned, so the

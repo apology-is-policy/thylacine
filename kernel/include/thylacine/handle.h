@@ -11,7 +11,7 @@
 //     transferable) + Srv (a /srv service or connection object, non-
 //     transferable; P5-corvus-srv).
 //   - Six rights (per §18.2): READ / WRITE / MAP / TRANSFER / DMA / SIGNAL.
-//   - Per-Proc HandleTable is a fixed-size array (PROC_HANDLE_MAX = 64).
+//   - Per-Proc HandleTable is a fixed-size array (PROC_HANDLE_MAX below).
 //     Phase 5+ refactors to growable RB-tree when the syscall surface
 //     lands.
 //   - Underlying-kobj refcount integration: not yet. handle_close just
@@ -156,17 +156,21 @@ _Static_assert(__builtin_offsetof(struct Handle, magic) == 0,
                "makes every slot's magic == 0, naturally signaling free");
 
 // Per-Proc handle table size. 64 was a v1.0 toy limit the code always
-// anticipated growing (Phase 5+ -> growable). Real fd-hungry workloads --
-// the on-device Go toolchain (cmd/go + compile/asm/link spawn fast and hold
-// many open files), multi-fd servers -- need well more than 64, so it is
-// raised to 256. 256 slots = 8 + 24*256 = 6152 bytes exceeds
-// SLUB_MAX_OBJECT_SIZE (2048), so the table is kmalloc-backed (handle.c) --
-// kmalloc routes the oversize object through alloc_pages (2 pages here) --
-// rather than a dedicated slab cache, which cannot hold it. The growable
-// table (a two-level fdtable keyed by hidx_t, the Linux model) is the v1.x
-// design once a Proc needs >> 256; it touches the #844 shared-table lock
-// discipline (peer threads snapshot slots by-value). Tracked as #355.
-#define PROC_HANDLE_MAX 256
+// anticipated growing; 256 (the Go-toolchain lift) fell next, to the #198
+// GL client: a warp GL program holds ONE handle per live BO mapping plus
+// its files, so a Quake-class texture set needs 300-500 live handles --
+// and tapestryd itself holds a dma_fd per BUILT BO on the same constant
+// (the #214 ~237 dma-create wall). 1024 covers both sides with the same
+// clean-refusal I-32 semantics; measured on thyla-pi KVM, the lift (with
+// the session-fid and tapestryd-fid lifts) took GLQuake from a 2323-OOM
+// dispatch-wedge storm at 0.6 fps to a zero-refusal 44.7 fps run. Table =
+// 8 + bitmap + 24*1024 ~= 24.7 KiB, kmalloc-backed via alloc_pages
+// (handle.c) -- far past SLUB_MAX_OBJECT_SIZE either way. The growable
+// table (a two-level fdtable keyed by hidx_t, the Linux model) remains
+// the v1.x design once a Proc needs >> 1024; it touches the #844
+// shared-table lock discipline (peer threads snapshot slots by-value).
+// Tracked as #355.
+#define PROC_HANDLE_MAX 1024
 
 // #151: close-on-exec lives in a BITMAP PARALLEL TO THE SLOT ARRAY, not in
 // struct Handle. Both halves of that are deliberate.
@@ -180,8 +184,9 @@ _Static_assert(__builtin_offsetof(struct Handle, magic) == 0,
 //
 // NOT IN struct Handle, also because that struct has no slack: 8 + 4 + 4 + 8 is
 // exactly the 24 its _Static_assert pins. A u32 there grows it to 32, taking the
-// table from 6152 to 8200 bytes -- across the 2-page boundary into 3, a 50%
-// per-Proc increase to carry one bit per slot. The bitmap costs 32 bytes total.
+// table from 24712 to 32904 bytes -- across the order-3 alloc_pages boundary
+// into order-4, doubling the physical allocation to carry one bit per slot.
+// The bitmap costs 128 bytes total.
 #define HANDLE_CLOEXEC_WORDS ((PROC_HANDLE_MAX + 63) / 64)
 
 struct HandleTable {

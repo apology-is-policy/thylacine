@@ -1,0 +1,146 @@
+From 85f0b595f84fa2ca65db44212e8701b9e1cb15d8 Mon Sep 17 00:00:00 2001
+From: Thylacine Clade <clade@thylacine.invalid>
+Date: Wed, 12 Aug 2026 09:32:56 +0000
+Subject: [PATCH] Thylacine #204: fence-lane discovery + the #210 in-flight
+ conservation clamp
+
+The winsys throttle depth becomes a ctl discovery (fence-lane, the
+server per-ctx admission share) instead of a compile-time mirror: the
+hardcoded 2 held the submit pipeline at depth 2 after the server lane
+grew, serializing every GL frame against a full guest->host->retire
+round trip (#215, the ~300x per-draw collapse). Absent field (pre-#204
+server) keeps depth 2; the value is clamped to [1, 64].
+
+The in-flight arithmetic gains the #210 conservation clamp: signaled
+running PAST issued (a server-side counting bug -- the exact #210 wedge
+shape) used to wrap the u64 subtraction huge and latch the throttle
+forever. inflight_depth() clamps to 0 (full speed, no park; the server
+own E_AGAIN admission stays the back-pressure) and warns once.
+---
+ .../winsys/virgl/thylacine/warp_client.c      | 53 ++++++++++++++++---
+ .../winsys/virgl/thylacine/warp_client.h      |  7 +++
+ 2 files changed, 53 insertions(+), 7 deletions(-)
+
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.c b/src/gallium/winsys/virgl/thylacine/warp_client.c
+index 68eb76d..356f965 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.c
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.c
+@@ -27,11 +27,12 @@
+ #define WARP_CHUNK_BYTES (24u * 1024u)
+ #define WARP_CHUNK_DWORDS (WARP_CHUNK_BYTES / 4u)
+ 
+-/* Client-side mirror of the server's per-ctx fenced-lane share
+- * (WARP_CTX_FENCE_MAX = FENCED_SLOTS / 2). Purely an optimization to
+- * make E_AGAIN rare — the retry loop below is the correctness path, so
+- * server-side drift costs a retry, never a wrong answer. */
+-#define WARP_MAX_INFLIGHT 2u
++/* The in-flight throttle depth lives in warp_conn (ctl `fence-lane`,
++ * discovered at warp_open): the compile-time mirror this replaces sat
++ * at 2 after the server's lane grew, which serialized every frame
++ * against a full guest->host->retire round trip (#215). The server's
++ * own admission cap stays the correctness path -- an over-deep client
++ * just converts throttle parks into E_AGAIN retries. */
+ 
+ static long open_at(long root, const char *path, unsigned long omode)
+ {
+@@ -177,6 +178,30 @@ int warp_fence_wait(struct warp_conn *w, uint64_t seq)
+    return 0;
+ }
+ 
++/* In-flight depth under the #210 conservation clamp. `signaled` is the
++ * server's ledger; a server-side counting bug that runs it PAST
++ * `issued` would wrap the u64 subtraction huge and latch the throttle
++ * forever -- the exact shape of the #210 wedge (a device-global id
++ * compared against a per-ctx count), which this client-side guard now
++ * survives. Clamp to 0 (full speed, no park) and say so once: a
++ * disabled throttle degrades to the server's own E_AGAIN
++ * back-pressure; a latched one is a dead pipeline. */
++static uint64_t inflight_depth(struct warp_conn *w)
++{
++   if (w->signaled > w->issued) {
++      if (!w->ledger_warned) {
++         fprintf(stderr, "warp: fence ledger inverted (issued %llu < "
++                         "signaled %llu) -- server count bug; throttle "
++                         "disabled\n",
++                 (unsigned long long)w->issued,
++                 (unsigned long long)w->signaled);
++         w->ledger_warned = true;
++      }
++      return 0;
++   }
++   return w->issued - w->signaled;
++}
++
+ /* The common fenced write: throttle under the per-ctx lane share, retry
+  * E_AGAIN by parking on the fence file (the lane's own back-pressure),
+  * and count the issue on success. Returns the seq or 0. */
+@@ -188,7 +213,7 @@ static uint64_t fenced_write(struct warp_conn *w, long fd, const void *buf,
+       return 0;
+    for (attempts = 0; attempts < 64; attempts++) {
+       long n;
+-      while (w->issued - w->signaled >= WARP_MAX_INFLIGHT) {
++      while (inflight_depth(w) >= w->max_inflight) {
+          if (wait_progress(w) < 0)
+             return 0;
+       }
+@@ -199,7 +224,7 @@ static uint64_t fenced_write(struct warp_conn *w, long fd, const void *buf,
+          /* Lane momentarily full (another client's chains). If we have
+           * something in flight, park on it; otherwise the contention is
+           * foreign and a yield is all we can offer. */
+-         if (w->issued > w->signaled) {
++         if (inflight_depth(w) > 0) {
+             if (wait_progress(w) < 0)
+                return 0;
+          } else {
+@@ -392,6 +417,20 @@ int warp_open(struct warp_conn *w)
+       goto fail; /* pre-Warp-3 server: the fence counter is absent too */
+    w->bo_cap = (uint32_t)cap;
+ 
++   /* The per-ctx fenced-lane share (#204): the server's admission cap,
++    * adopted as the in-flight throttle depth. Absent = a pre-#204
++    * server: keep the old depth of 2. Clamped -- 0 would park
++    * fenced_write's throttle loop forever, and an absurd width is a
++    * parse gone wrong; excess over the server's real share only
++    * converts throttle parks into E_AGAIN retries. */
++   cap = parse_field(buf, "fence-lane");
++   if (cap < 1)
++      w->max_inflight = 2;
++   else if (cap > 64)
++      w->max_inflight = 64;
++   else
++      w->max_inflight = (uint32_t)cap;
++
+    w->ctx = mint_id(w->root, "ctx/new");
+    if (w->ctx == 0)
+       goto fail;
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.h b/src/gallium/winsys/virgl/thylacine/warp_client.h
+index 90f8589..3b9f9f8 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.h
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.h
+@@ -26,6 +26,11 @@
+  * and its content (the coalesced newest fence id) is ignored — parking is
+  * safe iff in-flight > 0, which every wait loop here guarantees.
+  *
++ * The throttle depth is DISCOVERED (ctl `fence-lane`, the server's
++ * per-ctx admission share) rather than mirrored at compile time, and
++ * the in-flight arithmetic is clamped against a ledger that runs
++ * backwards (#210) -- see inflight_depth in warp_client.c.
++ *
+  * Threading: the connection is one 9P stream; callers serialize through
+  * the winsys mutex. This library does no locking of its own.
+  *
+@@ -46,9 +51,11 @@ struct warp_conn {
+    long fence_fd;
+    uint32_t ctx;      /* the minted context's public id */
+    uint32_t bo_cap;   /* ctl `bo-cap`: per-ctx BO capacity (discovery) */
++   uint32_t max_inflight; /* ctl `fence-lane`: the throttle depth (#204) */
+    uint64_t issued;   /* fenced ops issued (submits + transfers) */
+    uint64_t signaled; /* last read of ctl `fence-signaled` */
+    bool wedged;       /* latched on transport failure / poison EOF */
++   bool ledger_warned; /* one-shot: the #210 conservation clamp fired */
+ };
+ 
+ /* Connect + mint the context + open the hot fds. Returns 0, or -1 when
+-- 
+2.43.0
+

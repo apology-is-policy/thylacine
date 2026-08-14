@@ -35,7 +35,7 @@ check is manual; its standing result, and the three documents currently
 over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 
 <!-- generated:begin -->
-**46 absorbed · 105 live · 151 total.**
+**46 absorbed · 106 live · 152 total.**
 
 | document | state | absorbed into |
 |---|---|---|
@@ -105,6 +105,7 @@ over-claiming, live in [[chg-2026-08-02-absorption-reconciliation]].
 | 146-addrspace.md | live | — |
 | 147-execve.md | live | — |
 | 148-fork.md | live | — |
+| 149-warp.md | live | — |
 | 15-scheduler.md | absorbed | [[seam-eevdf-math]], [[sub-kernel-rendez]], [[sub-kernel-sched-smp]], [[sub-kernel-sched]] |
 | 16-rendez.md | absorbed | [[lock-wait]], [[sub-kernel-rendez]] |
 | 17-smp-bringup.md | absorbed | [[seam-sparse-mpidr]], [[sub-kernel-sched-smp]] |

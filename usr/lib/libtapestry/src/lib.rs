@@ -446,6 +446,19 @@ impl Surface {
         Ok(())
     }
 
+    /// Warp-4: write one verb on THIS surface's own ctl -- the fid the
+    /// surface/new mint rebound, so it rides the owning conn by
+    /// construction (F2: no other conn can even resolve this surface).
+    /// The glsrc adoption half is the first consumer; present/release
+    /// keep their dedicated paths.
+    pub fn surface_ctl(&self, cmd: &str) -> Result<(), TapError> {
+        let rc = unsafe { t_write(self.ctl, cmd.as_ptr(), cmd.len()) };
+        if rc < 0 {
+            return Err(TapError::Protocol);
+        }
+        Ok(())
+    }
+
     /// cfg-3: write one global-ctl command on THIS connection. The
     /// apply-authority gate checks the CONN's kernel-stamped peer, so an
     /// authority verb (`mode ...`) must ride the caller's own conn --

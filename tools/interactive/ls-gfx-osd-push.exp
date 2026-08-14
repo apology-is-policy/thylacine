@@ -25,7 +25,7 @@ set ::env(THYLACINE_ACCEL) hvf
 source [file join [file dirname [info script]] lib.exp]
 
 set repo $lc_repo
-set qmp "$repo/build/qmp.sock"
+set qmp [lc_qmp_sock]
 
 set BONFIRE_BG "0E0C0C"
 set SPINIFEX_BG "0A0F0A"

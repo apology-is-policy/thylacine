@@ -199,6 +199,13 @@ struct srvconn_chan {
                                   // every role release + at teardown.
     u8            *buf;           // heap ring storage, `cap` bytes; owned by
                                   // the SrvConn (freed at the last unref)
+    // #210 loss discriminator: lifetime byte totals through this ring,
+    // mutated ONLY inside chan_ring_write / chan_ring_read (every caller
+    // holds ch->lock), read by /ctl/9p-sessions. produced == consumed +
+    // count is the ring conservation law; produced > consumed with a
+    // parked client means the reply is sitting UNDRAINED in the ring.
+    u64            produced;      // bytes ever accepted into the ring
+    u64            consumed;      // bytes ever drained from the ring
 };
 
 // A kernel-minted /srv connection. Allocated by srvconn_create; freed
@@ -244,12 +251,26 @@ struct SrvConn {
     struct srvconn_chan c2s;               // kernel client → corvus
     struct srvconn_chan s2c;               // corvus → kernel client
 
+    // #210: count of WHOLE server reply buffers delivered into s2c
+    // (srvconn_server_send_blocking full-delivery completions — one per 9P
+    // reply frame on the devsrv server arm). Incremented role-held (the
+    // #354 writer role serializes blocking producers), read by
+    // /ctl/9p-sessions. Compared against the attached client's frames_rx:
+    // frames the server finished sending that the client never assembled.
+    u64                 s2c_frames;
+
+    // #210: /ctl/9p-sessions registry linkage. Guarded by the registry
+    // lock in srvconn.c; linked at create, unlinked on the last unref
+    // BEFORE teardown/free (the ctl walker holds the registry lock across
+    // its whole walk, so it can never observe a freed conn).
+    struct SrvConn     *ctl_next;
+
     // Pollers registered on this connection's server endpoint (P5-poll-b).
     // The hook list is connection-wide because the server endpoint Spoor
     // is bidirectional — POLLIN watches c2s, POLLOUT watches s2c, and a
     // teardown surfaces POLLHUP/POLLERR on both. Every producer site
     // (srvconn_client_send + srvconn_server_send into chan_produce,
-    // srvconn_teardown's chan_set_eof on both directions) calls
+    // srvconn_teardown's eof latch on both directions) calls
     // poll_waiter_list_wake(&poll_list) after releasing the channel lock,
     // mirroring kernel/pipe.c's discipline (specs/poll.tla MakeReady).
     struct poll_waiter_list poll_list;
@@ -285,7 +306,7 @@ struct SrvConn {
     // SYS_ATTACH_9P_SRV wraps a byte-mode SrvConn in a kernel-owned 9P
     // client (via p9_srvconn_transport). After this call, the SrvConn's
     // c2s / s2c rings are LOAD-BEARING for the kernel client — any
-    // teardown (chan_set_eof on either ring) breaks all subsequent
+    // teardown (the eof latch on either ring) breaks all subsequent
     // Twalk / Tread / Twrite sends.
     //
     // The default handle_close discipline for KOBJ_SRV is "close the
@@ -557,5 +578,29 @@ short srvconn_poll(struct SrvConn *cn, short events, struct poll_waiter *pw);
 // Cumulative counters. (created - freed) == live SrvConn count.
 u64 srvconn_total_created(void);
 u64 srvconn_total_freed(void);
+
+// #210: one live connection's counter snapshot for /ctl/9p-sessions.
+// Ring conservation: produced == consumed + buffered per direction; a
+// violation (or produced > consumed with the attached client parked) is
+// the reply-undrained arm of the loss discriminator.
+struct srvconn_ctl_row {
+    int  peer_pid;
+    u32  msize;
+    u8   state;            // enum srvconn_state
+    bool byte_mode;
+    bool kernel_attached;
+    u64  c2s_produced, c2s_consumed;
+    u64  s2c_produced, s2c_consumed;
+    u64  s2c_frames;       // whole server reply buffers delivered into s2c
+    u32  c2s_buffered, s2c_buffered;
+    bool c2s_eof, s2c_eof;
+};
+
+// Walk every live SrvConn, invoking cb per connection with a consistent
+// snapshot (taken under each chan's lock). The registry lock is held
+// across the whole walk — cb must not block or re-enter srvconn create/
+// free. Returns when the walk completes or cb returns false.
+typedef bool (*srvconn_ctl_cb)(const struct srvconn_ctl_row *row, void *arg);
+void srvconn_ctl_iterate(srvconn_ctl_cb cb, void *arg);
 
 #endif  // THYLACINE_SRVCONN_H

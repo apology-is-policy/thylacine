@@ -81,6 +81,14 @@ void exception_sync_lower_el(struct exception_context *ctx);
 // at Phase 2).
 void exception_irq_curr_el(struct exception_context *ctx);
 
+// #214 audit F1: clear this CPU's EL1h-sync recursion-depth counter.
+// Called by the scheduler at every context switch: a switch proves the
+// handler chain on this CPU is making progress (a genuine runaway
+// faults synchronously and never reaches sched()), so interleaved
+// SLEEPING handlers -- kernel-uaccess demand paging blocks in 9P --
+// cannot accumulate a false park.
+void exception_sync_depth_reset_this_cpu(void);
+
 #endif // __ASSEMBLER__
 
 #endif // THYLACINE_ARCH_ARM64_EXCEPTION_H

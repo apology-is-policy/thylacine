@@ -47,6 +47,7 @@ void test_weft_map_binding_lifetime(void);
 void test_weft_share_cap_gate(void);
 void test_weft_share_rejects_plain_dma(void);
 void test_weft_weave_share_and_claim(void);
+void test_weft_gpu_bo_share_and_claim(void);
 void test_weft_unshare_disarm(void);
 void test_weft_shared_map_budget_cap(void);
 void test_weft_weave_clunk_unmap_guard(void);
@@ -443,7 +444,7 @@ void test_weft_weave_share_and_claim(void) {
     // Tweftio fast path at one chokepoint. The RING allocator refuses the
     // weave outright (pages == NULL + non-ANON).
     struct weft_binding *b =
-        weft_binding_alloc_weave(v, WEFT_TEST_VA, 2u * PAGE_SIZE, client->pid);
+        weft_binding_alloc_maponly(v, WEFT_TEST_VA, 2u * PAGE_SIZE, client->pid);
     TEST_ASSERT(b != NULL, "weave binding alloc");
     u32 off = 0;
     TEST_EXPECT_EQ(weft_binding_validate_rw(b, WEFT_TEST_VA + 64, 128, &off), -1,
@@ -470,6 +471,90 @@ void test_weft_weave_share_and_claim(void) {
         "weave frees when the last ref drops");
     TEST_EXPECT_EQ(kobj_dma_live_count(), live_before - 1,
         "the KObj_DMA pixel chunk freed with its burrow (the second domain)");
+
+    drop_proc(server);
+    drop_proc(client);
+}
+
+// Warp-2 (GPU-DESIGN.md 6.1): the GPU-BO subtype rides the weave's whole
+// share/claim/budget/binding path with its own kernel-minted bit and its own
+// kind. Mirrors test_weft_weave_share_and_claim; fails on pre-Warp-2 code
+// (no gpu_bo bit existed: the mint had no entry point and the admission gate
+// rejected everything but ANON + weave).
+void test_weft_gpu_bo_share_and_claim(void) {
+    struct Proc *server = make_proc();    // the GPU service's role (tapestryd)
+    struct Proc *client = make_proc();    // the 3D client's role
+    TEST_ASSERT(server != NULL && client != NULL, "proc_alloc failed");
+    server->caps = CAP_HW_CREATE;
+
+    // Envelope: over-bound mints must fail without allocating.
+    TEST_ASSERT(kobj_dma_create_gpu_bo(KOBJ_DMA_GPU_BO_MAX_SIZE + 1) == NULL,
+        "a GPU BO past its envelope must not mint");
+    TEST_ASSERT(kobj_dma_create_gpu_bo(0) == NULL, "a zero-size GPU BO must not mint");
+
+    struct KObj_DMA *k = kobj_dma_create_gpu_bo(2u * PAGE_SIZE);
+    TEST_ASSERT(k != NULL, "kobj_dma_create_gpu_bo");
+    TEST_ASSERT(k->gpu_bo, "the gpu_bo bit is kernel-minted at create");
+    TEST_ASSERT(!k->weave, "the two subtype bits are mutually exclusive");
+    struct Burrow *v = burrow_create_dma(k);              // {h:1, m:0}
+    TEST_ASSERT(v != NULL, "burrow_create_dma over the gpu_bo kobj");
+    kobj_dma_unref(k);
+
+    spin_lock(&server->as->lock);
+    TEST_EXPECT_EQ(burrow_map(server, v, WEFT_TEST_VA, 2u * PAGE_SIZE, VMA_PROT_RW), 0,
+        "server maps its GPU BO");
+    spin_unlock(&server->as->lock);
+    burrow_unref(v);                       // the SYS_DMA_MAP shape: {h:0, m:1}
+
+    // Register: the share gate ADMITS the kernel-minted GPU-BO subtype.
+    s64 id = sys_weft_share_for_proc(server, WEFT_TEST_VA, 2u * PAGE_SIZE);
+    TEST_ASSERT(id > 0, "SYS_WEFT_SHARE admits the GPU BO");
+    TEST_EXPECT_EQ(burrow_handle_count(v), 1, "the registration pin held");
+
+    // Claim + the kind decision: GPU_BO, and ONLY with entries == 0.
+    struct Burrow *claimed = weft_share_claim((u64)id);
+    TEST_EXPECT_EQ(claimed, v, "claim returns the GPU BO");
+    TEST_EXPECT_EQ(weft_claimed_kind(v, 0), (int)WEFT_BIND_GPU_BO,
+        "gpu_bo + entries==0 -> the GPU-BO kind (not WEAVE, not RING)");
+    TEST_EXPECT_EQ(weft_claimed_kind(v, 8), -1,
+        "gpu_bo + a declared ring geometry -> mismatch, fail closed");
+
+    // Share into the client: budget charges exactly npages.
+    spin_lock(&client->as->lock);
+    TEST_EXPECT_EQ(burrow_share_into(client, v, WEFT_TEST_VA, VMA_PROT_RW), 0,
+        "share the GPU BO into the client");
+    spin_unlock(&client->as->lock);
+    TEST_EXPECT_EQ(client->as->shared_map_pages, 2u, "the shared-in budget charged");
+
+    // The map-only binding records the ACTUAL kind; the Tweftio kind gate and
+    // the ring allocator both refuse it, like the weave.
+    struct weft_binding *b =
+        weft_binding_alloc_maponly(v, WEFT_TEST_VA, 2u * PAGE_SIZE, client->pid);
+    TEST_ASSERT(b != NULL, "map-only binding alloc over a GPU BO");
+    TEST_EXPECT_EQ((int)b->kind, (int)WEFT_BIND_GPU_BO,
+        "the binding kind names the gpu_bo subtype");
+    u32 off = 0;
+    TEST_EXPECT_EQ(weft_binding_validate_rw(b, WEFT_TEST_VA + 64, 128, &off), -1,
+        "a GPU-BO binding never validates a Tweftio drive (the kind gate)");
+    TEST_ASSERT(weft_binding_alloc(v, WEFT_TEST_VA, 2u * PAGE_SIZE, 8) == NULL,
+        "the RING allocator refuses a GPU-BO Burrow");
+
+    // Teardown mirrors the weave: unmap uncharges; the last mapping frees
+    // both refcount domains.
+    u64 destroyed_before = burrow_total_destroyed();
+    u64 live_before = kobj_dma_live_count();
+    weft_binding_release(b);
+    spin_lock(&client->as->lock);
+    TEST_EXPECT_EQ(burrow_unmap(client, WEFT_TEST_VA, 2u * PAGE_SIZE), 0,
+        "client unmaps the GPU BO");
+    spin_unlock(&client->as->lock);
+    TEST_EXPECT_EQ(client->as->shared_map_pages, 0u,
+        "the unmap uncharges the shared-in budget");
+    vma_drain(server);                                    // {h:0, m:0} -> free
+    TEST_EXPECT_EQ(burrow_total_destroyed(), destroyed_before + 1,
+        "GPU BO frees when the last ref drops");
+    TEST_EXPECT_EQ(kobj_dma_live_count(), live_before - 1,
+        "the KObj_DMA chunk freed with its burrow");
 
     drop_proc(server);
     drop_proc(client);
@@ -591,7 +676,7 @@ void test_weft_weave_clunk_unmap_guard(void) {
         "share the weave into the client");
     spin_unlock(&client->as->lock);
     struct weft_binding *b =
-        weft_binding_alloc_weave(weave, WEFT_TEST_VA, (u32)PAGE_SIZE, client->pid);
+        weft_binding_alloc_maponly(weave, WEFT_TEST_VA, (u32)PAGE_SIZE, client->pid);
     TEST_ASSERT(b != NULL, "weave binding");
 
     // (c) The pid gate: a different Proc's close skips (the mapping survives).
@@ -698,7 +783,7 @@ static void reap_fixture(struct Proc *server,
     spin_unlock(&client->as->lock);
 
     struct weft_binding *b =
-        weft_binding_alloc_weave(v, WEFT_TEST_VA, 2u * PAGE_SIZE, client->pid);
+        weft_binding_alloc_maponly(v, WEFT_TEST_VA, 2u * PAGE_SIZE, client->pid);
     TEST_ASSERT(b != NULL, "weave binding alloc");
     *out_v = v;
     *out_b = b;

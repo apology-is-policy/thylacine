@@ -108,6 +108,14 @@ struct p9_attached {
     struct p9_spoor_transport   *adapter;
     struct Spoor                *transport_tx;
     struct Spoor                *transport_rx;
+    // #210: /ctl/9p-sessions registry linkage + identity. Linked at create
+    // success, unlinked at the top of the last-unref destroy (the walker
+    // holds the registry lock across its walk, pinning lifetimes). Label
+    // defaults to the attach aname; srvconn_attach_dev9p_root relabels
+    // with the conn's peer pid so a /srv session is attributable.
+    struct p9_attached          *ctl_next;
+    char                         ctl_label[12];
+    int                          ctl_id;       // peer pid for /srv conns; -1 else
 };
 
 // Create + handshake + return ownership. `transport_ops` is the byte-
@@ -180,6 +188,22 @@ void p9_attached_destroy(struct p9_attached *a);
 
 // Query: is this attached's session OPEN?
 bool p9_attached_is_open(const struct p9_attached *a);
+
+// #210: relabel a registered attached for /ctl/9p-sessions (label is
+// copied, truncated to the ctl_label field; id is free-form — the /srv
+// path stamps the conn's peer pid). Safe any time between create and the
+// last unref.
+void p9_attached_set_ctl_ident(struct p9_attached *a, const char *label,
+                               int id);
+
+// #210: walk every live attached session for /ctl/9p-sessions. cb gets
+// the label/id/msize plus a consistent client snapshot; the registry lock
+// is held across the walk, so cb must not block or attach/destroy.
+struct p9_client_ctl;
+typedef bool (*p9_attached_ctl_cb)(const char *label, int id, u32 msize,
+                                   const struct p9_client_ctl *snap,
+                                   void *arg);
+void p9_attached_ctl_iterate(p9_attached_ctl_cb cb, void *arg);
 
 // srvconn_attach_dev9p_root -- wrap a byte-transport SrvConn's CLIENT side into
 // a mountable dev9p root Spoor (stalk-3b-β). kmalloc a p9_srvconn_transport

@@ -1448,10 +1448,11 @@ static inline long t_dma_map(long h, unsigned long vaddr, unsigned long prot) {
 }
 
 // struct t_pci_info — userspace mirror of the kernel's struct t_pci_info from
-// <thylacine/syscall.h> (pci-1c). 208 bytes; field offsets pinned by the
-// _Static_asserts below. Filled by t_pci_info (SYS_PCI_INFO). On LP64 aarch64
-// `unsigned long` = u64, `unsigned int` = u32, `unsigned short` = u16,
-// `unsigned char` = u8 -- matching the kernel fixed-width fields.
+// <thylacine/syscall.h> (pci-1c; shm appended at Warp-2). 256 bytes; field
+// offsets pinned by the _Static_asserts below. Filled by t_pci_info
+// (SYS_PCI_INFO). On LP64 aarch64 `unsigned long` = u64, `unsigned int` = u32,
+// `unsigned short` = u16, `unsigned char` = u8 -- matching the kernel
+// fixed-width fields.
 struct t_pci_bar {
     unsigned long pa;        //  0
     unsigned long size;      //  8
@@ -1466,6 +1467,14 @@ struct t_pci_region {
     unsigned char present;   //  9
     unsigned char _pad[2];   // 10
 };
+struct t_pci_shm {
+    unsigned long offset;    //  0
+    unsigned long length;    //  8
+    unsigned char bar;       // 16
+    unsigned char present;   // 17
+    unsigned char shmid;     // 18 (gpu hostmem = 1, fs DAX = 0)
+    unsigned char _pad[5];   // 19
+};
 struct t_pci_info {
     struct t_pci_bar    bars[6];     //   0
     struct t_pci_region regions[4];  // 144
@@ -1477,14 +1486,17 @@ struct t_pci_info {
     unsigned char  fn;               // 203
     unsigned short virtio_device_id; // 204
     unsigned char  _pad[2];          // 206
+    struct t_pci_shm shm[2];         // 208 (cfg_type 8, discovery order)
 };
 _Static_assert(sizeof(struct t_pci_bar) == 24, "libt t_pci_bar ABI size 24");
 _Static_assert(sizeof(struct t_pci_region) == 12, "libt t_pci_region ABI size 12");
-_Static_assert(sizeof(struct t_pci_info) == 208, "libt t_pci_info ABI size 208");
+_Static_assert(sizeof(struct t_pci_shm) == 24, "libt t_pci_shm ABI size 24");
+_Static_assert(sizeof(struct t_pci_info) == 256, "libt t_pci_info ABI size 256");
 _Static_assert(__builtin_offsetof(struct t_pci_info, regions) == 144, "t_pci_info.regions @144");
 _Static_assert(__builtin_offsetof(struct t_pci_info, intid)   == 196, "t_pci_info.intid @196");
 _Static_assert(__builtin_offsetof(struct t_pci_info, virtio_device_id) == 204,
                "t_pci_info.virtio_device_id @204");
+_Static_assert(__builtin_offsetof(struct t_pci_info, shm)     == 208, "t_pci_info.shm @208");
 
 // t_pci_claim — the arg packs `virtio_device_id | nth<<32` (G-7c): the low 32
 // bits are the VIRTIO device id (1 = net, 4 = rng, 18 = input, ...), the high

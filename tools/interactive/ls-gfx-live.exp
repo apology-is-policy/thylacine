@@ -31,7 +31,7 @@
 source [file join [file dirname [info script]] lib.exp]
 
 set repo $lc_repo
-set qmp "$repo/build/qmp.sock"
+set qmp [lc_qmp_sock]
 set ::env(THYLACINE_ACCEL) hvf
 # #127: allocated, never hardcoded -- QEMU and the rfb client below MUST agree
 # on the number, and a fixed one collides with the sibling tree deterministically.

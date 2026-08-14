@@ -916,6 +916,58 @@ void test_loom_sqpoll_parks_on_cq_full(void) {
     test_proc_drop(p);
 }
 
+// Fid-lift audit F1: an SQPOLL kthread charges the CREATOR's PROC_THREAD_MAX
+// budget (I-32). The kthread runs under kproc (exempt), so pre-F1 an
+// unprivileged Proc could mint one 32-KiB-kstack kthread per ring, bounded only
+// by the handle table the fid lift just quadrupled. The budget is pre-loaded to
+// the boundary (the test_resource.c idiom) so only two real kthreads spawn:
+// refusal at the cap, no over-settle by the refused ring's free, plain rings
+// uncharged, and the close -> uncharge -> fits-again round trip.
+void test_loom_sqpoll_charges_thread_budget(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->principal_id = 1000u;                  // a real user -- NOT I-32 exempt
+    u64 destroyed0 = loom_total_destroyed();
+
+    p->thread_count = PROC_THREAD_MAX - 1;    // boundary without 255 real threads
+
+    // At cap-1: one SQPOLL setup fits and takes the charge.
+    struct loom_params kp;
+    hidx_t fd1 = -1;
+    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd1), 0,
+                   "SQPOLL setup at cap-1 succeeds");
+    TEST_EXPECT_EQ((u64)p->loom_sqpoll_count, (u64)1, "kthread charged to the creator");
+
+    // At the cap: the next SQPOLL setup is REFUSED (pre-F1 it succeeded and the
+    // kthread escaped the budget entirely).
+    hidx_t fd2 = -1;
+    TEST_ASSERT(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd2) < 0,
+                "SQPOLL setup at the cap refused");
+    // The refused ring never took a charge, and its free must not settle one
+    // (sqpoll_charged gates the uncharge): still exactly 1.
+    TEST_EXPECT_EQ((u64)p->loom_sqpoll_count, (u64)1, "refusal did not over-settle");
+    TEST_EXPECT_EQ(loom_total_destroyed() - destroyed0, (u64)1,
+                   "the refused ring itself was reclaimed");
+
+    // A plain (non-SQPOLL) ring is not thread-charged -- the budget bounds
+    // kthreads, not rings.
+    hidx_t fd3 = -1;
+    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, 0, &kp, &fd3), 0,
+                   "a plain ring still fits at the thread cap");
+    TEST_EXPECT_EQ((u64)p->loom_sqpoll_count, (u64)1, "plain ring took no charge");
+
+    // Close the charged ring: loom_free joins the kthread and settles the
+    // charge exactly once; the freed budget admits a new SQPOLL setup.
+    TEST_EXPECT_EQ(handle_close(p, fd1), 0, "close the SQPOLL ring");
+    TEST_EXPECT_EQ((u64)p->loom_sqpoll_count, (u64)0, "charge settled on close");
+    hidx_t fd4 = -1;
+    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd4), 0,
+                   "SQPOLL setup fits again after the close (uncharge proof)");
+
+    p->thread_count = 0;                      // reset for proc_free's gate
+    test_proc_drop(p);
+}
+
 // ---------------------------------------------------------------------------
 // #130: the I-32 charge balances across the WHOLE Loom lifetime, in both
 // directions.

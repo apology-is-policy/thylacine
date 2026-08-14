@@ -5,11 +5,39 @@
 
 #include <thylacine/cons.h>
 #include <thylacine/extinction.h>
+#include <thylacine/smp.h>
 
 #include "../arch/arm64/halls.h"
 #include "../arch/arm64/uart.h"
 
 extern void _torpor(void) __attribute__((noreturn));
+
+// #214: extinction re-entrancy guard. If the dump path itself faults
+// (halls_dump dereferencing state the crash already destroyed), the fault
+// handler calls extinction again and the pair descend forever, scribbling
+// exception frames across RAM (see exception.c's EL1h-sync recursion
+// guard — the two catch the same loop at different points). On re-entry:
+// print the message with the dump suppressed and park. If even that
+// banner faults, the third entry parks silently. Per-CPU so one CPU's
+// extinction doesn't gag an independent extinction on a peer.
+static volatile u8 g_extinction_depth[DTB_MAX_CPUS];
+
+// Returns only at depth 1 (the normal path). Depth >= 2 parks.
+static void extinction_reentry_guard(const char *msg) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    u8 depth = (u8)(g_extinction_depth[cpu] + 1u);
+    g_extinction_depth[cpu] = depth;
+    if (depth < 2u) return;
+    if (depth == 2u) {
+        uart_puts("\nEXTINCTION: (recursive on cpu ");
+        uart_putdec((u64)cpu);
+        uart_puts("; halls dump suppressed) ");
+        uart_puts(msg);
+        uart_puts("\n");
+    }
+    _torpor();
+}
 
 // #75 / P1-F: console output now stages through a ring the TX interrupt drains,
 // and a dying machine runs IRQ-masked -- so anything still in the ring would be
@@ -22,6 +50,7 @@ static void extinction_flush_console(void) {
 }
 
 void extinction(const char *msg) {
+    extinction_reentry_guard(msg);
     extinction_flush_console();
     uart_puts("\n");
     uart_puts("EXTINCTION: ");
@@ -36,6 +65,7 @@ void extinction(const char *msg) {
 }
 
 void extinction_with_addr(const char *msg, uintptr_t addr) {
+    extinction_reentry_guard(msg);
     extinction_flush_console();
     uart_puts("\n");
     uart_puts("EXTINCTION: ");

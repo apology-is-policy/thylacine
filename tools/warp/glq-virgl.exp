@@ -1,0 +1,328 @@
+#!/usr/bin/expect -f
+# Warp-4c: GLQuake on virgl -- the GPU-DESIGN.md section 12 ladder row 4
+# acceptance ("present integration: SET_SCANOUT of a 3D resource (Direct),
+# readback fallback (Composed)"). The fps figure is REPORTED, never gated,
+# and its only honest comparator is the SAME host's own llvmpipe leg --
+# bands do not transfer across hosts (#196: the 192.8 anchor was macOS/HVF;
+# thyla-gl TCG's band was 2.4-5.9 at 640x480; the Pi/KVM llvmpipe is ~30 at
+# 1280x800). The GPU-DESIGN section 13 exit bar is the measurement protocol.
+#
+# One boot on the GL device, one timedemo through the BARE ramfs name --
+# the launcher's production path: its /srv/warp ctl probe (the two-step
+# attach, wprobe2-proven) reads "virgl 1", writes /env/GALLIUM_DRIVER=
+# virpipe, and execs the pool binary, which the SDL shim then adopts
+# (glsrc + present-to). BOTH present arms are exercised in one run:
+#
+#   launch  -window -width DW -height DH  -> two visible leaves (console +
+#           game), the game letterboxed in its half-pane -> Composed-GL
+#           (sync transfer_from_3d + blit) carries the early demo;
+#   zoom    (Super+F, the DEFAULT chord, typed over QMP -- the game's pane
+#           took focus at host()) -> one visible leaf hosting a
+#           display-sized surface -> pending-direct -> at the game's next
+#           present-COMPLETE the pending-GL arm fires SET_SCANOUT(bo) and
+#           says "scanout direct N GL res R" -> Direct flush-only presents
+#           carry the rest of the demo;
+#   ^C      -> the game dies mid-session: conn teardown retires the
+#           surface, the stale zoom self-clears, the BO eviction
+#           (set-scanout-away-BEFORE-unref) runs live, and the console's
+#           next present completes the switch back -- the 2D
+#           "scanout direct N (WxH)" line is the eviction evidence.
+#
+# Verdict lines (the #186 discipline: each is printed by THIS script only
+# on its own positive evidence; no failure text contains a success
+# pattern; the warp-host verb requires GLQ-VIRGL PASS *and* the lc_pass
+# scenario line):
+#   GLQ-VIRGL RENDERER: <string>      guest GL_RENDERER (must name virgl)
+#   GLQ-VIRGL DIRECT: surface N res R the direct-switch say line fired
+#   GLQ-VIRGL FPS: N S F              timedemo figures (REPORTED, not
+#                                     gated -- the ls-gfx-glquake rule;
+#                                     quote against the same-host band)
+#   GLQ-VIRGL STRIPS-k: ...           top/bottom strip means per dump
+#                                     (orientation evidence; calibrated
+#                                     look-first before any gating)
+#   GLQ-VIRGL PASS                    all gated legs held
+#
+# Runs ON the GL host (Linux; lib.exp takes the direct-pty transport).
+# env: WARP_REPO (default ~/projects/thylacine), WARP_WORK (default ~/warp).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+# tcg unless the caller pins an accel (KVM GL hosts ride warp-host.sh WARP_ACCEL)
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_SHARE) 1
+set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
+set ::env(THYLACINE_DISPLAY) egl-headless
+# QMP stays ON (unlike the tri gate): the zoom chord and the screendumps
+# ride it.
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+# The GL device head. QEMU's virtio-gpu default; the local 2D box reports
+# the same. If a future device changes it, the zoom leg fails loud (the
+# surface is no longer display-sized, the direct switch never fires) and
+# this pair is the first thing to re-derive.
+set DW 1280
+set DH 800
+
+# Host-side swap sampling (the bench lesson): swap is an OOM airbag, and a
+# figure measured while swapping is a measurement of swapping.
+proc pswp {} {
+    set f [open /proc/vmstat r]
+    set d [read $f]
+    close $f
+    set in 0
+    set out 0
+    regexp {pswpin (\d+)} $d -> in
+    regexp {pswpout (\d+)} $d -> out
+    return [list $in $out]
+}
+
+file mkdir $work
+# Per-attempt fixture isolation (#78/#85): the synced images are never
+# booted directly.
+file delete -force $work/pool-glq.img $work/disk-glq.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-glq.img
+exec cp $repo/build/disk.img $work/disk-glq.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-glq.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-glq.img
+
+source $repo/tools/interactive/lib.exp
+
+set qmp [lc_qmp_sock]
+
+# Pixel capture is BEST-EFFORT on this host (#195): under egl-headless +
+# virtio-gpu-gl every scanout is host-GL-backed, QEMU keeps no software
+# DisplaySurface, and QMP screendump reports "no surface" -- for every
+# mode, composed included. The degrade is ANNOUNCED, never silent, and
+# the structural legs (say-lines + fps + eviction) carry the gate. The
+# local HVF 2D box keeps full pixel coverage (the ls-gfx family).
+proc dump_best_effort {tag out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} {
+        puts "\nGLQ-VIRGL DUMP-$tag SKIPPED (#195 host-side capture unavailable): [lindex [split $err \n] end]\n"
+        return -1
+    }
+    set fp [exec python3 $repo/tools/interactive/gfx_fp.py $out]
+    set strips [exec python3 $repo/tools/interactive/gfx_strip.py $out]
+    puts "\nGLQ-VIRGL STRIPS-$tag: $strips (buckets [lindex $fp 1])\n"
+    return [lindex $fp 1]
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+set s0 [pswp]
+
+# The BARE name: ut resolves the ramfs launcher; the launcher's seam probe
+# + /env write + exec are part of what this gate proves.
+# -noglcompression (#216): the guest Mesa advertises
+# GL_EXT_texture_compression_s3tc while the virgl screen rejects the DXT
+# formats on an S3TC-less host (V3D), so every compressed upload fails
+# guest-side (1692 GL_OUT_OF_MEMORY) and the draws over the incomplete
+# textures feed the #198 storm, which gates the frame rate below the
+# lane's own fps wait. Disabling compression is what the game WOULD do if
+# the extension string were honest -- the #216 Mesa fix makes this flag
+# redundant, not wrong. Revisit after #216.
+lc_send "tyr-glquake -window -width $DW -height $DH -nosound -noglcompression +timedemo demo1"
+
+# Composed-entry leg: the window's arrival splits the layout (console +
+# game, two visible leaves) and the compositor leaves Direct(console) --
+# the entry say line is the structural half of the Composed-arm evidence
+# (once adopted, res_stale holds the weave out, so only the Composed-GL
+# arm can feed the screen until the zoom). Run-1 measured order: this
+# line lands BEFORE the GL_RENDERER print.
+set timeout 900
+expect {
+    -re {scanout composed \((\d+)x(\d+)\)} { lc_step "composed entry (two leaves)" }
+    "user fault" { lc_fail "segv before the game window opened" }
+    "Sys_Error"  { lc_fail "Sys_Error before the game window opened" }
+    timeout      { lc_fail "no composed-entry line within 900s" }
+}
+
+# Renderer leg. The anchored capture (the measured [\r\n] rule from
+# ls-gfx-glquake); virgl's composite may embed the HOST's renderer
+# (including a host llvmpipe on a GPU-less box), so the discriminator is
+# virgl_prove.c's: the string must CONTAIN virgl, and a string STARTING
+# with llvmpipe means the guest fell back (launcher probe or seam dead).
+set timeout 900
+expect {
+    -re {GL_RENDERER: ([^\r\n]*)[\r\n]} {
+        set rend $expect_out(1,string)
+        if {[string match "llvmpipe*" $rend]} {
+            lc_fail "guest fell back to the software rasteriser: '$rend'"
+        }
+        if {![string match "*virgl*" $rend]} {
+            lc_fail "renderer names neither virgl nor a fallback: '$rend'"
+        }
+        puts "\nGLQ-VIRGL RENDERER: $rend\n"
+        lc_step "GL context is live on virgl"
+    }
+    "user fault" { lc_fail "tyr-glquake segv during GL init" }
+    "Sys_Error"  { lc_fail "tyr-glquake Sys_Error during GL init" }
+    timeout      { lc_fail "no GL_RENDERER line within 900s" }
+}
+
+expect {
+    "Quake Initialized" { lc_step "engine init complete" }
+    "user fault" { lc_fail "tyr-glquake segv during engine init" }
+    "Sys_Error"  { lc_fail "tyr-glquake Sys_Error during engine init" }
+    timeout      { lc_fail "no 'Quake Initialized' within 900s" }
+}
+
+# Composed-arm evidence: the "scanout composed" say line fired at window
+# creation (two leaves), and the demo is running through the Composed-GL
+# arm (sync transfer + blit -- res_stale holds the weave out, so ONLY that
+# arm can be feeding the screen). A dump corroborates when the host can
+# capture (#195: best-effort here).
+sleep 4
+set c1 [dump_best_effort 1 $work/glq-virgl-1.png]
+if {$c1 >= 0 && $c1 < 8} {
+    lc_fail "composed dump too flat ($c1 colour buckets) -- the game is not visibly rendering"
+}
+if {$c1 >= 8} { lc_step "composed-arm frames on the scanout ($c1 buckets)" }
+
+# The zoom (Super+F, default chord; the game's pane holds focus from
+# host()). The switch defers to the game's next present-COMPLETE (F16), so
+# the running demo completes it within a frame or two.
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k meta_l+f} err]} {
+    lc_fail "qmp zoom chord failed: $err"
+}
+set timeout 120
+expect {
+    -re {scanout direct (\d+) GL res (\d+) \((\d+)x(\d+)\)} {
+        puts "\nGLQ-VIRGL DIRECT: surface $expect_out(1,string) res $expect_out(2,string) ($expect_out(3,string)x$expect_out(4,string))\n"
+        lc_step "direct switch fired -- SET_SCANOUT of the 3D resource"
+    }
+    "user fault" { lc_fail "segv around the zoom/direct switch" }
+    timeout      { lc_fail "no direct-switch say line within 120s of the zoom (surface not display-sized? head != ${DW}x${DH}?)" }
+}
+
+# Direct-arm evidence: the switch say line above IS the SET_SCANOUT(bo)
+# proof; a settled mid-demo dump corroborates when capturable (#195).
+sleep 2
+set c2 [dump_best_effort 2 $work/glq-virgl-2.png]
+if {$c2 >= 0 && $c2 < 8} {
+    lc_fail "direct dump too flat ($c2 colour buckets) -- the direct scanout is not showing the game"
+}
+if {$c2 >= 8} { lc_step "direct-arm frames on the scanout ($c2 buckets)" }
+
+# The demo runs out under the Direct arm; figures REPORTED, not gated.
+# The wait is env-tunable (GLQ_FPS_WAIT, default 1800) so a diagnostic
+# run can reach the census leg quickly; a TIMEOUT no longer aborts on
+# the spot -- it falls through to the ^C + census legs FIRST (three
+# storm-bound runs died holding the bo-peak number, #204/#216) and
+# fails at the end, so a failing run still reports the census.
+set fps_wait 1800
+if {[info exists ::env(GLQ_FPS_WAIT)]} { set fps_wait $::env(GLQ_FPS_WAIT) }
+set timeout $fps_wait
+set fps_seen 0
+expect {
+    -re {([0-9]+) frames +([0-9.]+) seconds +([0-9.]+) fps} {
+        # The comparator band is HOST-SPECIFIC -- compare against the same
+        # host's own llvmpipe leg (thyla-gl TCG measured 2.4-5.9 at 640x480;
+        # the Pi's KVM llvmpipe is ~30 at 1280x800). A number pasted from
+        # another host's band reads as a verdict and is not one.
+        puts "\nGLQ-VIRGL FPS: $expect_out(1,string) frames $expect_out(2,string)s $expect_out(3,string) fps (compare the SAME host's llvmpipe leg)\n"
+        lc_step "timedemo complete"
+        set fps_seen 1
+    }
+    "user fault" { lc_fail "segv during the timedemo" }
+    "Sys_Error"  { lc_fail "Sys_Error during the timedemo" }
+    timeout {
+        puts "\nGLQ-VIRGL FPS-TIMEOUT after ${fps_wait}s -- proceeding to teardown + census, FAIL at the end\n"
+    }
+}
+
+# Teardown leg: ^C kills the game mid-session -- the surface retires, the
+# stale zoom self-clears, and the BO eviction runs. The console's return
+# to the direct scanout is a CHAIN, not one event (run-2 lesson): the
+# console surface is still HALF-sized from the split, so the ^C prompt
+# paint re-enters Composed (letterboxed), the compositor offers a
+# display-size CONFIGURE, kaua reweaves, and only the console's NEXT
+# present completes pending-direct. Every hop needs console OUTPUT, so
+# drive the chain with echo ticks and accept the direct line whenever it
+# lands (unmatched buffer content persists across expects, so a line
+# arriving between ticks is caught by the next one).
+send -- "\003"
+set restored 0
+for {set i 0} {$i < 6 && !$restored} {incr i} {
+    lc_send "echo glq-tick-$i"
+    set timeout 20
+    expect {
+        -re {scanout direct (\d+) \((\d+)x(\d+)\)} { set restored 1 }
+        "glq-tick-$i" { }
+        timeout { }
+    }
+}
+if {!$restored} {
+    lc_fail "console direct scanout not restored within 6 driven ticks of ^C"
+}
+lc_step "console scanout restored after the game died (eviction leg)"
+lc_send "echo glq-cleanup-ok"
+set timeout 30
+expect {
+    "glq-cleanup-ok" { lc_step "prompt back after ^C" }
+    timeout          { lc_fail "prompt never returned after ^C" }
+}
+
+# #204 census: the GLOBAL backed-BO high-water survives the game ctx's
+# teardown, so this read reports the number the bo-cap width is sized
+# against. REPORTED, not gated (a missing field is a pre-#204 server).
+# Via warp-prove's ctl mode -- the shell cannot cross the srv post
+# (`cat /srv/warp/ctl` fails "not a directory"); the prover owns the
+# two-step attach. BARE name: the session is post-pivot (its / is the
+# pool), so /warp-prove resolves nowhere -- ramfs bins are reachable
+# only through the bare-name exec fallback (warp-prove.exp precedent).
+lc_send "warp-prove ctl"
+set timeout 30
+expect {
+    -re {bo-peak (\d+)} {
+        puts "\nGLQ-VIRGL BO-PEAK: $expect_out(1,string) (the #204 cap-width census witness)\n"
+        lc_step "bo-peak census read"
+        # The BYTES axis (what WARP_CTX_BACKING_MAX gates): bo-peak 26
+        # with thousands of refusals proved the byte cap saturates at
+        # tiny counts, so the count alone cannot attribute exhaustion.
+        set timeout 10
+        expect {
+            -re {bo-bytes-peak (\d+)} {
+                puts "\nGLQ-VIRGL BO-BYTES-PEAK: $expect_out(1,string)\n"
+            }
+            timeout {
+                puts "\nGLQ-VIRGL BO-BYTES-PEAK: absent (pre-bytes-census server)\n"
+            }
+        }
+    }
+    timeout {
+        puts "\nGLQ-VIRGL BO-PEAK: unreadable (pre-#204 server or ctl timeout; census missed, not gated)\n"
+    }
+}
+
+set s1 [pswp]
+set din  [expr {[lindex $s1 0] - [lindex $s0 0]}]
+set dout [expr {[lindex $s1 1] - [lindex $s0 1]}]
+puts "GLQ-VIRGL swap-delta: pswpin +$din pswpout +$dout"
+# Calibrated 2026-08-10 (runs 5+6): this 3.9G host steadily writes ~3000
+# pages OUT during any run -- pressure evidence, not stall -- while pswpin
+# sat at noise (15, then 2). The figure-polluting signature is READBACK
+# thrash (the bench's demo-3 collapse class, thousands of pswpin); 64
+# pages = 256 KB of faults spread over a multi-minute run cannot move a
+# 2-figure fps number. The bench's din!=0 rule is therefore deliberately
+# NOT copied here; pswpout stays reported above as the pressure witness.
+if {$din > 64} {
+    puts "GLQ-VIRGL SWAPPED -- the fps figure measures swapping, DISCARD IT"
+}
+
+# Deferred fps-timeout failure: the census + swap figures above are the
+# point of running the teardown legs on a timed-out demo; the lane still
+# FAILS (the gate needs a completed timedemo).
+if {!$fps_seen} {
+    lc_fail "no timedemo fps line within ${fps_wait}s (teardown + census reported above)"
+}
+
+puts "\nGLQ-VIRGL PASS\n"
+lc_quit
+lc_pass "glq-virgl: GLQuake on virgl through both present arms (Composed blit, then SET_SCANOUT Direct) -- the ladder row 4 gate"
+exit 0

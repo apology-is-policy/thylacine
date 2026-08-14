@@ -43,7 +43,7 @@ set ::env(THYLACINE_ACCEL) hvf
 source [file join [file dirname [info script]] lib.exp]
 
 set repo $lc_repo
-set qmp "$repo/build/qmp.sock"
+set qmp [lc_qmp_sock]
 
 set BG "16 16 20"        ;# pane::BG_COLOR 0x101014, decimal RGB
 set BONFIRE "14 12 12"   ;# bonfire bg 0x0E0C0C

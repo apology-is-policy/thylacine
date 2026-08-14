@@ -1,0 +1,82 @@
+#!/usr/bin/expect -f
+# tools/warp/quarry-bench.exp -- the in-guest renderer comparison, driven by
+# quarry itself (`quarry bench demo1`): every READY renderer's timedemo, piped
+# and parsed IN-GUEST, one table out. This is the guest-native successor to
+# driving each lane from the host: the host asserts only that quarry ran the
+# matrix and the hardware row really was virgl.
+#
+# Run on a GL host (thyla-pi KVM: WARP_HOST=thyla-pi-cf WARP_ACCEL=kvm
+# tools/warp-host.sh, or directly: THYLACINE_ACCEL=kvm expect this-file).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_QMP) 1
+set ::env(THYLACINE_NO_SHARE) 1
+# The GL stack keys on the display backend (run-vm: the -gl device models
+# refuse to realise without one). Without this the boot comes up virgl=0 and
+# the hw-gl row honestly reports a 2D device -- which is the lane failing its
+# own premise, not quarry failing (learned the hard way, first run).
+set ::env(THYLACINE_DISPLAY) egl-headless
+set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+# Per-attempt fixture isolation (#78/#85): the synced images are never
+# booted directly.
+file mkdir $work
+file delete -force $work/pool-quarry.img $work/disk-quarry.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-quarry.img
+exec cp $repo/build/disk.img $work/disk-quarry.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-quarry.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-quarry.img
+
+source [file join [file dirname [info script]] .. interactive lib.exp]
+
+# The whole matrix runs as ONE command -- three timedemos plus loads, all
+# inside quarry. The window must outlive quarry's OWN per-leg deadline times
+# the number of legs, or the harness fails a run quarry would have reported
+# on: at 600 s per leg that is 1800 s of legs, and the first #231 run died at
+# exactly this boundary (600 s harness vs a leg that never returned). Floor at
+# 2400 s (the warp-prove.exp floor pattern -- lc_expect stomps `timeout` from
+# lc_cmd_timeout per call, so THIS is the knob; a caller's larger
+# LS_CI_CMD_TIMEOUT passes through). For scale, glq-bench.exp allows 1800 s
+# for ONE timedemo on these hosts.
+if {$lc_cmd_timeout < 2400} { set lc_cmd_timeout 2400 }
+
+# QUARRY_LEGS selects, orders and SIZES the legs (`hw-gl@1280x800 ...`);
+# unset keeps the historical whole-matrix run. The window has to grow with the
+# list for the reason the 2400 s floor exists at all -- a bound below the
+# honest runtime reports a healthy leg as hung -- so budget a full per-leg
+# deadline each rather than assuming the legs stay fast.
+set LEGS [expr {[info exists ::env(QUARRY_LEGS)] ? $::env(QUARRY_LEGS) : ""}]
+if {$LEGS ne ""} {
+    set want [expr {[llength $LEGS] * 700}]
+    if {$lc_cmd_timeout < $want} { set lc_cmd_timeout $want }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# The probe matrix first: on a 3D host the hw-gl row must be READY -- a
+# missing /srv/warp here means the boot is wrong, not the renderer.
+lc_send "quarry list"
+lc_expect "hw-gl     ready" "quarry: the hardware GL row probes ready"
+lc_pass "quarry-bench: matrix probed (hw-gl ready)"
+
+# The bench: quarry runs every ready renderer's timedemo piped, then prints
+# the table. The table's "backend" column must name virgl for the hw row --
+# the fps figures are DATA (reported, not gated; the GPU-DESIGN section 13
+# bar is judged by the #208 protocol, not this lane).
+lc_send "quarry bench demo1 $LEGS"
+lc_expect "benching" "quarry bench started"
+lc_expect "backend" "quarry bench table printed"
+lc_expect "virgl" "quarry bench: the hardware row ran on virgl"
+lc_pass "quarry-bench: the in-guest renderer comparison ran end to end"
+
+lc_quit
+lc_pass "LS-CI PASS: quarry-bench: the matrix comparison"
+exit 0

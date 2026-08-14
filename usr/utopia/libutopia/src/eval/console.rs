@@ -128,15 +128,16 @@ pub(crate) fn restore_screen() {
 
 /// Whether `argv0` names a full-screen TUI child that needs the raw-mode dance.
 /// Matches on the BASENAME so `/bin/nora` and a bare `nora` both qualify. v1.0
-/// carries a fixed set (`nora`, `ptyhost`, `prowl` -- the PTY-4 session host
-/// wants the outer console as a raw byte pipe, so the pts it hosts is the one
-/// line discipline; `prowl` is the full-screen process monitor); a binary
+/// carries a fixed set (`nora`, `ptyhost`, `prowl`, `quarry` -- the PTY-4
+/// session host wants the outer console as a raw byte pipe, so the pts it
+/// hosts is the one line discipline; `prowl` is the full-screen process
+/// monitor; `quarry` is the GPU demo-bench launcher); a binary
 /// self-declaring its console needs (a spawn flag or an on-disk manifest) is a
 /// recorded v1.x seam (KAUA.md) -- until then a name a user gives their own
 /// non-TUI binary that collides with this set is a known limitation.
 pub fn is_raw_command(argv0: &str) -> bool {
     let base = argv0.rsplit('/').next().unwrap_or(argv0);
-    matches!(base, "nora" | "ptyhost" | "prowl")
+    matches!(base, "nora" | "ptyhost" | "prowl" | "quarry")
 }
 
 // === PTY-4b: pts detection (the session-dance trigger) ===
@@ -215,6 +216,9 @@ mod tests {
         // prowl-2: the full-screen process monitor (Kaua TUI).
         assert!(is_raw_command("prowl"));
         assert!(is_raw_command("/bin/prowl"));
+        // quarry: the GPU demo-bench launcher (Kaua TUI).
+        assert!(is_raw_command("quarry"));
+        assert!(is_raw_command("/bin/quarry"));
         // Ordinary externals stay on the normal spawn path.
         assert!(!is_raw_command("cat"));
         assert!(!is_raw_command("/bin/ut"));

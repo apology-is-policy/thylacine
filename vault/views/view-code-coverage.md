@@ -65,15 +65,17 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**370 owned · 64 unowned · 434 files (85% owned) · ~11837 unswept lines.**
+**370 owned · 67 unowned · 437 files (84% owned) · ~14885 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **63 files, ~26448 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **63 files, ~26475 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/ports | 0 | 13 | 3403 |
+| usr/ports | 0 | 14 | 3612 |
 | usr/pouch-hello | 0 | 20 | 3161 |
-| kernel | 116 | 22 | 3078 |
+| kernel | 116 | 22 | 3157 |
+| usr/warp-prove | 0 | 1 | 1732 |
+| usr/quarry | 0 | 1 | 1028 |
 | arch | 34 | 4 | 971 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/lib | 40 | 2 | 390 |
@@ -114,24 +116,26 @@ Excluded as harness and counted here rather than dropped: **63 files, ~26448 lin
 
 | file | lines |
 |---|---:|
+| usr/warp-prove/src/main.rs | 1732 |
 | usr/ports/gnumake/config.h | 1357 |
+| usr/quarry/src/main.rs | 1028 |
 | arch/arm64/uart.c | 674 |
 | kernel/joey.c | 478 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
+| usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 390 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | kernel/include/thylacine/errno.h | 342 |
-| usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 335 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents.c | 324 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 323 |
+| usr/ports/sdl2/thylacine/thyla_tap.c | 320 |
 | usr/lib/thylajit/thyla_capjit.h | 318 |
-| usr/ports/sdl2/thylacine/thyla_tap.c | 306 |
 | kernel/fault_test.c | 295 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
+| kernel/include/thylacine/smp.h | 282 |
 | usr/pouch-hello/pouch-hello.c | 278 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
-| kernel/include/thylacine/smp.h | 233 |
 | usr/pouch-hello/pouch-hello-pty.c | 221 |
 | kernel/include/thylacine/devcap.h | 208 |
 | kernel/include/thylacine/context.h | 201 |
@@ -143,11 +147,12 @@ Excluded as harness and counted here rather than dropped: **63 files, ~26448 lin
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/cpio.c | 152 |
 | arch/arm64/uart.h | 151 |
+| usr/ports/tyrquake/tyr-glquake-launcher.c | 134 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | usr/pouch-hello/pouch-hello-spawn.c | 126 |
+| usr/ports/sdl2/thylacine/thyla_tap.h | 125 |
 | usr/pouch-hello/pouch-hello-malloc.c | 122 |
 | usr/pouch-hello/pouch-hello-fopen.c | 120 |
-| usr/ports/sdl2/thylacine/thyla_tap.h | 119 |
 | usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
 | kernel/canary.c | 111 |
@@ -159,6 +164,7 @@ Excluded as harness and counted here rather than dropped: **63 files, ~26448 lin
 | usr/ports/sdl2/thylacine/SDL_thylacinevideo.h | 79 |
 | usr/pouch-hello/pouch-hello-getrandom.c | 79 |
 | arch/arm64/psci.c | 78 |
+| kernel/extinction.c | 78 |
 | kernel/include/thylacine/vdso.h | 73 |
 | usr/lib/pouch/compiler-rt/aarch64-thylacine.c | 72 |
 | arch/arm64/psci.h | 68 |
@@ -171,7 +177,6 @@ Excluded as harness and counted here rather than dropped: **63 files, ~26448 lin
 | usr/ports/sdl2/thylacine/SDL_thylacineopengl.h | 52 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
 | kernel/include/thylacine/canary.h | 50 |
-| kernel/extinction.c | 48 |
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
 | kernel/include/thylacine/extinction.h | 37 |
