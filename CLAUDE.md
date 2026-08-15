@@ -648,10 +648,15 @@ When token/time budget is low:
 
 ### The checkpoint contract (binding; every time you hand back)
 
-A **checkpoint** is any turn that returns control to the user at a resting point
-— a landed chunk, a closed audit, a surfaced fork, a stopping report. At every
-checkpoint, do these three WITHOUT BEING ASKED. They exist because the user
-cannot see what you can see, and the cost of them guessing is real.
+A **checkpoint** is any **resting point** in the work — a landed chunk, a closed
+audit, a surfaced fork, a stopping report. Note that a checkpoint is *not* by
+itself a decision to hand back: whether you yield or roll straight into the next
+chunk is governed by the 600k line in §"When to recommend `/compact`", and the
+default under granted autonomy is to **keep going**. What follows is owed at
+every checkpoint either way — including the ones you run straight through, where
+it is the only thing keeping the tree pickup-ready. Do these three WITHOUT BEING
+ASKED. They exist because the user cannot see what you can see, and the cost of
+them guessing is real.
 
 **1. Account for every attached shell, monitor, and background task.**
 
@@ -1095,6 +1100,57 @@ Implication for sessions in Phase 7+: treat the v1.0-rc as a real ship target. D
 ---
 
 ## When to recommend `/compact`
+
+### The 600k checkpoint line — run THROUGH checkpoints until it fires
+
+**A checkpoint is not a stopping point.** Under granted autonomy, land a chunk,
+report it, and **start the next one in the same run**. Do not yield after every
+chunk waiting to be told to continue; do not compact "to be safe" at 300k. The
+cost of stopping early is real and asymmetric — a fresh context has to re-derive
+the subsystem knowledge the current one already holds, and the re-derivation is
+where wrong turns come from.
+
+**The signal that ends the run is the `ctx-hook` CHECKPOINT WINDOW line at
+600k** (`~/.claude/ctx-hook.sh`, `CTX_CKPT`; ~66% of the 900k window, which is
+the "~60-70%" the bullets below already named). That hook fires on every tool
+call, so it sees the budget continuously — you do not have to estimate it, and
+you should not try. Three levels, three different meanings:
+
+| Level | Fires | Means |
+|---|---|---|
+| **600k CHECKPOINT WINDOW** | once per crossing | **The intended compaction point.** Carry the current step to a clean boundary, then recommend `/compact`. |
+| **750k** | every call | Wind down. Finish the step; do not open a new arc. |
+| **880k** | every call | At the wrap line. Commit, hand off, yield. |
+
+So the rule is: **below 600k, keep working through as many checkpoints as the
+work takes; at 600k, finish to a clean boundary and recommend the compaction.**
+The 600k line is advisory and deliberately fires ONCE — it is a "this is the
+right moment," not an alarm. Reaching it mid-chunk does not mean stopping
+mid-chunk: carry to the next clean boundary (committed, gates green, handoff
+current) and recommend from there. If that boundary is genuinely far away, say
+so and keep going — 750k is the level that means wind down.
+
+**What does NOT change: the checkpoint contract still fires at every
+checkpoint** (§"The checkpoint contract"). Account for running processes, keep
+the handoff current, say what is next — at each one, whether or not you yield.
+That is precisely what makes this rule safe: if the handoff is continuously
+current, then compaction is free at *any* moment, so choosing to run on costs
+nothing and the 600k line can be a recommendation rather than a scramble.
+
+**What also does NOT change: the escalation list.** Running through checkpoints
+is autonomy over *sequencing*, never over the items in §"Autonomy + escalation"
+— a format break, a destructive operation, an architectural deviation, a
+scripture-altering design fork still stops the run and asks, at 100k or 700k.
+
+**If the hook is not installed, this rule has no brake.** `ctx-hook.sh` lives in
+`~/.claude/`, outside this repo, so a fresh machine or a differently-configured
+session may not have it — and then "run until the signal fires" means running
+past the wrap line into a hard overflow, because a signal that never arrives is
+indistinguishable from one that has not arrived *yet*. So: an autonomous run
+that has passed roughly two thirds of its budget **without ever seeing a
+CONTEXT line** should treat the hook as absent and fall back to the judgement
+bullets below rather than keep waiting. Verify with
+`ls -l ~/.claude/ctx-hook.sh` if in doubt; one command settles it.
 
 When all of the following hold:
 
