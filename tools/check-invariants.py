@@ -21,6 +21,15 @@ Two properties, both cheap:
      an invariant that section 28 does not define hands a reviewer a dangling
      reference, and the round either skips the surface's named invariant or
      reconstructs it from the code under test.
+
+  C. Rows appear in ascending numeric order in both tables. Added after the
+     first version of this checker passed a table whose I-41 row -- whose ENTIRE
+     PURPOSE is to explain the gap between I-40 and I-42 -- had been appended
+     after I-44, where nobody scanning numerically would ever reach it. A/B was
+     green throughout, because a set comparison has no opinion about order: the
+     check was structurally incapable of covering the defect, and its green
+     result made the misplacement HARDER to notice rather than easier. A
+     registry is read in number order; that is the only order that matters.
 """
 import re
 import sys
@@ -70,6 +79,16 @@ def main():
     if c - a:
         problems.append(f"in CLAUDE.md but MISSING from ARCH section 28: "
                         f"{sorted(c - a, key=key)}")
+
+    for name, rs in (("ARCH section 28", arch), ("CLAUDE.md", claude)):
+        nums = [key(r) for r in rs]
+        if nums != sorted(nums):
+            bad = [f"{rs[i]} after {rs[i-1]}"
+                   for i in range(1, len(nums)) if nums[i] < nums[i - 1]]
+            problems.append(f"{name} rows are OUT OF NUMERIC ORDER: "
+                            f"{bad} -- a registry is read in number order, so a "
+                            f"row filed elsewhere answers a question where it is "
+                            f"not asked")
 
     trig = (ROOT / "docs/AUDIT-TRIGGERS.md").read_text(encoding="utf-8")
     cited = {f"I-{n}" for n in CITE.findall(trig)}
