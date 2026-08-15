@@ -2,17 +2,17 @@
 id: sub-kernel-exec
 type: sub
 parent: moc-kernel-execution
-title: "Exec — turning a forked Proc into a running program, by two paths that are not the two the docs describe"
+title: "Exec — turning a forked Proc into a running program, by three paths that are not the ones the docs describe"
 code: [kernel/exec.c, kernel/include/thylacine/exec.h]
 audit: hard
-guarded-by: [inv-i36, inv-i12, inv-i32, inv-i33]
+guarded-by: [inv-i36, inv-i12, inv-i32, inv-i33, inv-i44]
 validated-by: [prose, gate-smp]
 locks: []
 hazards: []
 abis: []
-design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md"]
+design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -25,14 +25,22 @@ Creation in this tree is two steps, and this is the second one.
 
 ## Contract
 
-Three entry points over **two paths**, and which is which matters more than the
+Five entry points over **three paths**, and which is which matters more than the
 count:
 
-| entry | source | who calls it |
-|---|---|---|
-| `exec_setup` | a whole ELF already in memory | **the boot path** — `joey.c` loads init this way — and the kernel tests |
-| `exec_setup_with_argv` | same, plus argv | nothing today |
-| `exec_setup_from_spoor` | a pinned file, header only | every `SYS_SPAWN_*` |
+| entry | source | target | who calls it |
+|---|---|---|---|
+| `exec_setup` | a whole ELF already in memory | the Proc | **the boot path** — `joey.c` loads init this way — and the kernel tests |
+| `exec_setup_with_argv` | same, plus argv | the Proc | nothing today |
+| `exec_setup_from_spoor` | a pinned file, header only | the Proc | every `SYS_SPAWN_*` |
+| `exec_load_into` | a pinned file, header only | **a detached address space** | `execve` |
+| `exec_stage_env` | the caller's own environment | a kernel buffer | `execve`'s native front end |
+
+The fourth is the fork arc's addition and it is what closed the
+replace-in-place seam — see Mechanism. The fifth is not a loader at all: it
+projects a process's environment into kernel memory so the *new* image's stack
+can carry it, which has to happen before the commit that would otherwise make
+the source unreachable.
 
 The header describes the blob path as *"retained for the kernel test suite"*, and
 the audit-trigger row calls it *"kept test-only"*. Both are wrong: `kernel/joey.c`
@@ -41,14 +49,45 @@ Proc in the system through `exec_setup`. See Caveats — the error is worth more
 than a correction, because the two paths have genuinely different properties and
 a reader told "test-only" will not prosecute the one that boots the machine.
 
-All three share the same failure contract: **on any error the Proc is left
-partially built and the caller must dispose of it.** Nothing here unwinds.
+All five share the same failure contract: **on any error the target is left
+partially built and the caller must dispose of it.** Nothing here unwinds — and
+for the detached-target loader that is not a caveat but the design: the caller's
+only reference is the one it is about to release.
 
 ## Mechanism
 
-Both paths run the same spine — validate, map each `PT_LOAD`, map the stack,
-map the vDSO, build the frame — and differ only in where segment bytes come
-from.
+Every path runs the same spine — validate, map each `PT_LOAD`, map the stack,
+map the vDSO, build the frame — and they differ in where segment bytes come
+from and what they build *into*.
+
+### Replace-in-place was built, and not the way this dossier expected
+
+The recorded seam said there is no `exec(2)`: both bodies reject a target that
+already has mappings, so exec is spawn-only. `execve` now exists, and **the
+reject did not move.** `exec_load_into` still refuses a non-empty target — the
+comment on the line reads *clean target only* — because the target is no longer
+the process. It is a **freshly allocated, detached address space**, and the swap
+happens one layer up ([[sub-kernel-proc]]) after the load has completely
+succeeded.
+
+That is worth stating as a shape rather than a fact, because it is the better
+answer to the problem the seam described. Teaching exec to replace in place
+would have meant tearing down a live image *while* building its successor, with
+a failure in the middle leaving neither. Keeping "clean target only" and
+supplying a clean target instead means a failed load has touched nothing the
+caller can observe: the detached space is the only reference, and releasing it
+drains whatever got mapped.
+
+**And the prediction attached to that seam came true exactly.** This dossier's
+Concurrency section recorded that nothing rejects an exec on a Proc that already
+has threads — the clean-address-space test excludes the multi-thread case only
+*as a side effect* — and warned that this is "a real guarantee arrived at
+sideways ... exactly the guarantee replace-in-place removes." It did remove it,
+and two explicit checks replaced it: the exec-alone gate in the syscall's shared
+core, and a re-check of the live-peer count *inside the same critical section as
+the swap*, which extincts if a peer appeared. The second exists because proving
+the property at the moment it matters is cheaper than asking a future reader to
+reconstruct why no peer could have appeared.
 
 **The blob path** copies each segment out of the in-memory image into a fresh
 anonymous Burrow through the kernel direct map. Simple, and bounded by however
@@ -84,6 +123,43 @@ Since #45 this is **not** a text-vs-data split but a writable-vs-not split:
 read-only rodata — roughly half a Go binary — rides the same shared, demand-paged
 path as text.
 
+### A segment no longer has to be page-aligned, and that changed the arithmetic everywhere
+
+A real-world binary arrived whose `PT_LOAD` did not start on a page boundary,
+and ELF does not require one. The mapping now starts at the **page-aligned floor
+below** the segment's address, carrying an intra-page `lead` offset; the end
+still rounds up. So the Burrow's offset 0 is the floor, and the segment's own
+bytes land `lead` into it, with `[0, lead)` keeping its zero fill.
+
+That single change propagates into four separate calculations, each of which had
+silently assumed alignment, and the source marks all four: the copy destination
+(`+ lead`), the file-page count inside a sparse backing (`lead + filesz`, which
+is why the populated run always starts at slot 0), the instruction-cache span
+(deliberately taken from the Burrow base rather than the copy pointer, *because*
+that pointer is `lead`-offset), and the demand-paging fault arm — which still
+**requires** offset 0 to equal the segment address, so the eager and file-backed
+arms now differ in a property they used to share.
+
+### Non-executable segments are sparsely backed
+
+The eager-data cost has been partly lifted, and the reason is a measurement:
+init's writable segment is 8 bytes of data behind 345 KiB of zero, and the
+identity daemon's is 128 bytes behind 24 MiB. Eagerly allocating *and zeroing*
+all of that at every exec was pure waste, so a non-executable segment now gets a
+lazy backing populated only over the pages its file bytes cover; the rest
+demand-zeroes on first touch.
+
+Executable segments stay eager, and the reason is the instruction-cache
+maintenance: the coherency sweep runs over the whole page-rounded segment from
+the Burrow base, which is only a valid pointer because the allocation is eager.
+The source says so at the sync site — widening the sparse gate to admit
+executable segments would run that sweep over a lazily-populated Burrow. The
+gate and the sweep are two hundred lines apart and each names the other, which
+is what makes the coupling checkable.
+
+Either way `[filesz, size)` reads as zero. Only *when* the page is allocated
+differs.
+
 ## Data structures
 
 No types of its own. It consumes `struct elf_image` from [[sub-kernel-elf]] and
@@ -92,8 +168,14 @@ produces VMAs and Burrows.
 The one layout it owns is the **System V startup frame**, in two shapes. Shape A
 is a fixed 176 bytes: argc, two NULL terminators, up to eight auxv entries, and a
 16-byte `AT_RANDOM` block at the end. Shape B is variable — real argc, an argv
-array pointing into a strings region, the same auxv block, the same random block
-16-aligned, then the strings.
+array pointing into a strings region, **an envp array between argv and auxv**,
+the same auxv block, the same random block 16-aligned, then both strings regions.
+
+The environment vector is the fork arc's addition and it is bounded on two axes
+independently: a pointer count and a data size, because a caller can exhaust
+either without the other. The frame's zero case is still exactly the fixed size —
+asserted — which is what keeps shape A a special case of shape B rather than a
+second layout.
 
 Both shapes route through one auxv builder, deliberately, *"so the entry set
 cannot diverge"* — which is the right instinct and the reason a reader can trust
@@ -178,12 +260,18 @@ the assert does not enforce this).
 
 ## Seams
 
-- **No exec-replaces-in-place.** Both bodies reject a Proc that already has
-  VMAs, so exec is spawn-only; there is no `exec(2)`.
+- ~~**No exec-replaces-in-place.**~~ **CLOSED**, by supplying a clean target
+  rather than by relaxing the clean-target rule — see Mechanism. The reject is
+  still there; what it guards moved from the process to a detached address
+  space.
 - **The blob path's whole-image slurp** survives for boot, bounded by its own
   init-blob cap rather than by the file-backed path's header read.
-- **Anonymous copy-on-write data** is the recorded v1.x lift; data is eager
-  today.
+- **Anonymous copy-on-write data** is the recorded v1.x lift. **Partly
+  overtaken**: a non-executable segment's zero tail is now demand-filled rather
+  than eagerly allocated, which is a different lift from copy-on-write and
+  removes most of the same waste. What remains owed is sharing a *written* data
+  page between parent and child, which is the fork arc's business, not this
+  file's.
 - **Dynamic linking is refused permanently**, not deferred.
 
 ## Caveats
@@ -207,6 +295,22 @@ two prose statements — of which one says 4096 for a constant that is 65536, in
 the same header that says 64 KiB seventy lines earlier. Nothing ties any copy to
 any other. Task #65.
 
+**The segment mapper's step list still describes the alignment rule that was
+removed, and its own correction is four lines below.** The block heading
+`exec_map_segment` says step 1 is *"round vaddr range up to page boundaries"* —
+the start now rounds **down** — and the copy comment beneath it says *"vmaddr_start
+corresponds to BURROW offset 0 (the segment is page-aligned)"*. The parenthetical
+is exactly the assumption the page-floor change deleted, and `vmaddr_start` is a
+variable that no longer exists; the geometry struct's `floor` replaced it.
+
+The *conclusion* survives — the floor really does correspond to Burrow offset 0,
+because the mapping is installed at the floor. Only its stated reason is false.
+That is the sharper version of the defect, not the milder one: a reader checking
+the justification finds it untrue and has no way to tell whether the claim above
+it survived. The correcting comment sits four lines down and says the opposite in
+plain terms, so the file contains both readings and does not mark which is
+current. No behavioural risk; filed as task #178.
+
 **The auxv-count assert pins the macro, not the writer.** It fixes
 `EXEC_INIT_AUXV_COUNT` at 8 and its message enumerates the eight entries, but
 nothing relates that number to how many entries `exec_fill_auxv` actually
@@ -220,7 +324,10 @@ Born as the P3-Eb blob loader; grew argv at the pouch-stratumd boot chunk;
 rebuilt as the file-backed path at [[arc-revenant]] R-4, which retired the
 1 MiB whole-binary cap. #45 widened the shared path from text to all
 non-writable segments. #107 fixed the I-cache span. The name and exe-path
-stamps arrived with prowl and [[arc-vivarium]].
+stamps arrived with prowl and [[arc-vivarium]]. The fork arc added the
+detached-target loader that closed the replace-in-place seam, the environment
+vector in the frame, the page-floor mapping geometry, and sparse backing for
+non-executable segments: [[chg-2026-08-15-exec-lineage]].
 
 ## Tests
 

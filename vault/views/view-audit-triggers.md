@@ -33,7 +33,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-dtb]] | lib/dtb.c, kernel/include/thylacine/dtb.h | inv-i15 | - **Property order independence.** Any new node-matching lookup must accumulate |
 | [[sub-kernel-elf]] | kernel/elf.c, kernel/include/thylacine/elf.h | inv-i12 | On any change: that the W^X check stays **above** the switch, so a new segment |
 | [[sub-kernel-exception]] | arch/arm64/vectors.S, arch/arm64/exception.c, arch/arm64/exception.h, arch/arm64/userland.S | inv-i21, inv-i13, inv-i24, inv-i39 | - **Any new hand-rolled `eret` to EL0 must mask across the link-register-set to |
-| [[sub-kernel-exec]] | kernel/exec.c, kernel/include/thylacine/exec.h | inv-i36, inv-i12, inv-i32, inv-i33 | On any change: that the Spoor ref ledger balances on every path — the Image |
+| [[sub-kernel-exec]] | kernel/exec.c, kernel/include/thylacine/exec.h | inv-i36, inv-i12, inv-i32, inv-i33, inv-i44 | On any change: that the Spoor ref ledger balances on every path — the Image |
 | [[sub-kernel-fault]] | arch/arm64/fault.c, arch/arm64/fault.h | inv-i12, inv-i32, inv-i7, inv-i36 | On any change here: that the file arm's four-step protocol keeps its pin across |
 | [[sub-kernel-gic]] | arch/arm64/gic.c, arch/arm64/gic.h | inv-i15, inv-i18 | - The two generations are **different code for the same behaviour**, and a run |
 | [[sub-kernel-halls]] | arch/arm64/halls.c, arch/arm64/halls.h, arch/arm64/halls_symtab.h, arch/arm64/halls_symtab.stub.c |  | On any change, re-establish: |
