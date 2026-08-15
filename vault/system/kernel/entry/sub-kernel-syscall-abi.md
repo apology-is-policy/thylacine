@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -36,11 +36,13 @@ deliberately Linux's AArch64 convention, so a ported libc's syscall stub needs
 renumbering and nothing else. Userspace issues `svc #0`; the immediate is
 ignored at v1.0 and reserved as a future class selector.
 
-Numbers are **append-only and never reused**. Four of the 104 allocated slots
-are holes: three retired when `/srv` moved from dedicated syscalls to ordinary
-namespace operations, one reserved for an unbuilt device-class query. Each hole
-carries a comment naming what used to be there or what is coming. An unknown
-number returns `-1` rather than terminating the caller.
+Numbers are **append-only and never reused** — with one bounded exception, a
+pre-merge collision between two branches, argued under Mechanism. Four of the
+107 allocated slots are holes: three retired when `/srv` moved from dedicated
+syscalls to ordinary namespace operations, one reserved for an unbuilt
+device-class query. Each hole carries a comment naming what used to be there or
+what is coming. An unknown number returns `-1` rather than terminating the
+caller.
 
 Return values follow two conventions and the split is per-syscall, not
 per-family: older calls return a bare `-1` for every failure; newer ones return
@@ -54,27 +56,94 @@ failure", and the header says so, steering POSIX-EPERM contours to
 
 ### The number space is coherent, and that is verifiable
 
-100 numbers are live; `syscall_dispatch`'s switch has exactly 100 arms; the two
-sets are equal with no gaps in either direction. Every mirrored number agrees
-across all three copies — there is no case where a name means one number to the
-kernel and another to a library.
+**103** numbers are live; `syscall_dispatch`'s switch has exactly **103** arms;
+the two sets are equal with **both** differences empty. Every mirrored number
+agrees across all three copies — there is no case where a name means one number
+to the kernel and another to a library.
+
+Compare the *sets*, not the counts. Two lists of equal length can disagree
+about their members, so a count match passes vacuously; the empty
+difference in each direction is the claim worth making.
 
 That is worth stating precisely because it is *not* guaranteed by anything. It
 is the current state, maintained by hand.
 
+The allocated span runs to **106** with **four holes** — 26, 30, 43 and 80 —
+unchanged in count and identity since the last sweep, which is the append-only
+rule visibly holding.
+
 ### The libraries are subsets, not copies
 
 Neither mirror carries the whole set, and neither is expected to: the C library
-exposes 74 numbers, the Rust library 92, and each omits what its consumers do
-not call. So the invariant that matters is not "the mirrors are complete" but
-"where they overlap, they agree" — which holds.
+exposes **75** numbers, the Rust library **95**, and each omits what its
+consumers do not call. So the invariant that matters is not "the mirrors are
+complete" but "where they overlap, they agree" — which holds.
+
+**Counting the Rust mirror has a trap in it, and it caught this sweep.** The
+Rust side spells *bounds constants* with the same `T_SYS_` prefix as syscall
+numbers — the argv count and data caps sit in the same namespace as the calls —
+so a census keyed on the prefix returns 97 and two of those are not syscalls.
+The kernel keeps the two categories apart by **form** (an enum for numbers, a
+`#define` for bounds); the Rust mirror flattens both into `pub const`, and the
+prefix no longer discriminates. Intersect against the kernel's enum rather than
+trusting the prefix.
 
 ### Nothing pins a mirror to the kernel
 
-The kernel header carries 100 compile-time assertions; the C mirror 46; the Rust
-mirror 33. Every one of them constrains **its own file**. Across the two mirrors
-the word "mirror" appears on 73 lines, 22 of them as "MUST mirror". Neither
-phrase is a mechanism.
+The kernel header carries **109** compile-time assertions; the C mirror **50**;
+the Rust mirror **43**. Every one of them constrains **its own file**. Across
+the mirrors the word "mirror" appears on **80** lines, **23** of them as some
+casing of "must mirror". Neither phrase is a mechanism.
+
+(State the method with the figure: those counts are case-insensitive line
+counts across the two mirrors plus the poll header. A case-*sensitive* count of
+`MUST mirror` gives 11, which read against a case-insensitive predecessor looks
+like the phrase halving. It did not — nothing in this census shrank.)
+
+### And the hazard is not only drift; it is concurrent allocation
+
+The sharpest demonstration is a collision that did happen. Two branches
+independently allocated the same two numbers — one for the process-creation
+pair, one for the JIT pair — both live, both with real consumers.
+
+**Duplicate enum values are legal C.** The merge would have compiled *silently*
+and stayed silent until two dispatch cases collided; and fixing the collision is
+not fixing the bug, because every mirror carries its own copy of the number.
+
+Which side moved was decided on measured edit cost, not seniority: one side
+embedded the literal once, in-tree; the other embedded it three times inside
+**patch files** against an out-of-tree dependency rebuilt remotely, each beside
+a comment naming the syscall it would no longer be. Editing a patch file is the
+riskiest edit in this tree — `patch` trusts the hunk header and silently drops
+added lines past it.
+
+**It took five sites, and the fifth is the one that generalizes.** Four were
+findable: the kernel enum, the two Rust constants, and a naked `mov x8, #N` in
+assembly. The fifth was a constant defined as *"the highest assigned native
+syscall number"* — and **it contains no syscall number to grep for.** It is a
+*semantic* mirror, invalidated by a renumber of the top because the renumber
+moves what it is defined against. Both agents' censuses missed it, and neither
+was looking for that kind of thing.
+
+The consequence would have been silent and security-shaped: the phenotype
+collision argument is keyed to that ceiling, so a stale ceiling voids the
+argument for every row at or below the new value, with nothing failing.
+
+**What caught it was a `_Static_assert` written at the point of the hazard**,
+whose message says what to do and why — left by someone who had already lived
+the same failure, since the header records that this constant "was previously
+written out as a literal in four places and was stale in all four." The
+re-check the message demands is itself mechanized: the ceiling-dependent rows
+each assert individually, so the compiler adjudicates a bump rather than a hand
+scan. This is the one place on this surface where the enforcement is a
+mechanism rather than an instruction to a person.
+
+**And the append-only rule survives the apparent violation.** A renumber is
+exactly what that rule forbids — but append-only is a property of the
+**shipped** number space, and two unmerged branches do not have one shipped
+space between them. The rule binds allocation *from* a released ABI; it cannot
+adjudicate two branches that allocated concurrently from the same free list.
+Nothing prevents the recurrence except that the free list is now shorter.
 
 There is no generator, no shared header, and no build step that reads one file
 and checks the other — `tools/build.sh` never mentions either mirror. The
@@ -207,6 +276,17 @@ be one 4 KiB staging buffer per round trip.
 - **A mirror change must be made in all three files in the same commit**, because
   nothing else will catch it. The mirrors are subsets, so "not present" is
   legitimate and indistinguishable from "forgotten".
+- **Enumerate mirrors by what they MEAN, not by what they CONTAIN.** A census
+  that greps for the value cannot find a constant that holds the value only by
+  *definition* — "the highest assigned number", "one past the last", "the same
+  as X". Those are mirrors and they carry no token to search for. The five-site
+  renumber found four by grep and the fifth by an assert.
+- **A number allocated on an unmerged branch is not allocated.** Duplicate enum
+  values compile, so two branches drawing from the same free list collide
+  silently and the merge is where it surfaces — after both sides have
+  consumers. Check the far branch's tip before taking the next number.
+- **Count against the kernel enum, not against the `T_SYS_` prefix.** The Rust
+  mirror puts bounds constants in that namespace too.
 - **A new oversize bound must choose clamp or refuse deliberately**, and the
   choice is semantic: clamp iff a short result is a complete answer the caller
   can loop on. Refuse otherwise.
