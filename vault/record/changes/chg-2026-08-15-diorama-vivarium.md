@@ -4,7 +4,7 @@ type: chg
 title: "diorama re-swept: a second operating mode the dossier never saw, and a read buffer half its source"
 date: 2026-08-15
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["2a0c3699"]
 touched: [sub-diorama]
 established: []
 closed: []
