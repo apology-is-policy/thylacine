@@ -1110,10 +1110,23 @@ run-longer half without them is **strictly worse than not adopting it**:
    fires" degrades into "run past the wrap line", because a signal that never
    arrives is indistinguishable from one that has not arrived YET. A run two
    thirds through its budget having seen NO `CONTEXT` line should treat the
-   hook as absent and fall back to judgement. **Verify rather than assume**:
-   this worktree defines its own `PostToolUse` (the yip line-hook) in
-   `.claude/settings.local.json`, so the user-level hook reaching aux is a
-   claim about hook merging, not an observed fact.
+   hook as absent and fall back to judgement.
+
+   **The wiring is CONFIRMED for aux** (2026-08-15), which was worth checking
+   because this worktree defines its own `PostToolUse` (the yip line-hook) in
+   `.claude/settings.local.json` — so whether the user-level hook *also* runs
+   was a question about hook merging, not something to assume. It does:
+   **hooks MERGE across the user and project/local layers**, and aux runs
+   both. Observed the awkward way — the hook announced itself by reporting a
+   shell parse error mid-edit (`PostToolUse:Bash hook blocking error ...
+   ctx-hook.sh: line 52`), and a hook that errors is still a hook that ran.
+   Never having seen a `CONTEXT` line is explained by this context sitting far
+   below 600k, not by an override.
+
+   **A user-level hook is executed by every live session on every tool call**,
+   so editing one in place opens a window where other sessions run a partial
+   file. Write to a temp path and `mv` it over (a same-filesystem rename is
+   atomic; an in-place write is not).
 
 This is autonomy over SEQUENCING only. The escalation list is untouched —
 format breaks, destructive operations and scripture forks still stop the run.
