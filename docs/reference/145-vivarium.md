@@ -459,9 +459,27 @@ the handler is entered.
 **Proving it in-guest needed the one signal a v1.0 guest can raise.** `kill`,
 `tkill` and `clone` are not table rows, so a Linux guest can signal neither
 another Proc nor itself through the obvious route -- and cannot spawn a thread
-to race its own disposition table either, which is what makes the lock-free
-`viv_sigtab` sound today (the only cross-thread reader is `notes_post`'s
-`SIG_IGN` hook, and it touches one naturally-aligned `u64`). What remains is
+to race its own disposition table either. **What makes the lock-free
+`viv_sigtab` sound is stated below rather than by that narrowness** -- this
+sentence previously claimed "the only cross-thread reader is `notes_post`'s
+`SIG_IGN` hook, and it touches one naturally-aligned `u64`", and main#243
+established that BOTH halves were wrong. There are **two** cross-Proc readers:
+`notes_post`'s hook (`notes.c` ~378, one `u64`) and `notes_proc_has_live_handler`
+(`notes.c` ~299), and the second copies the **whole 32-byte** `viv_ksigaction`
+out (`*out = *a`) rather than touching one word. The soundness argument is
+therefore not "nobody races it" but: the table is never freed while reachable
+(reset in place at exec, freed only at `proc_free`), and every field is written
+at 8-byte granularity so no reader can observe a value that was never stored.
+Entry-to-entry consistency is explicitly NOT promised -- a reader may see a mix
+of pre- and post-reset entries, which is the POSIX exec-vs-signal race.
+
+> This claim has now been wrong twice in the same place. `docs/VIVARIUM.md`
+> records the first: V-6c asserted byte-sized entries could not tear, true at
+> V-6b and false once entries widened to 32 bytes (task #97) -- corrected there
+> and not here. Whoever narrows this argument again should check the reader set
+> and the store width, in that order.
+
+What remains is
 self-infliction: the bundle declares `org.thylacine.sigpipe-selftest`, `viv`
 hands the entrypoint fd 0 as the write end of a reader-less pipe, and the
 guest's own `write()` makes the kernel post `pipe`. Synchronous, no second Proc

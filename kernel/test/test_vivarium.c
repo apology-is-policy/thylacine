@@ -1280,6 +1280,7 @@ void test_vivarium_sigtab(void) {
                 "no table -> nothing ignored");
     TEST_ASSERT(!viv_sigtab_set(NULL, VIV_SIGNOTE_PIPE, &ign),
                 "setting through a NULL table fails rather than faulting");
+    viv_sigtab_reset(NULL);   // #243: advertised NULL-safe; the battery's fourth arm
     TEST_ASSERT(!viv_sigtab_note_handler(NULL, VIV_SIGNOTE_PIPE, &got),
                 "no table -> no handler");
 
