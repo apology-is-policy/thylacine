@@ -4,7 +4,7 @@ type: chg
 title: "The syscall ABI re-swept: two branches allocated the same number, and the fifth mirror had nothing to grep for"
 date: 2026-08-15
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["e603637d"]
 touched: [sub-kernel-syscall-abi]
 established: []
 closed: []
