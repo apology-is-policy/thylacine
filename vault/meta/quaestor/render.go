@@ -837,6 +837,7 @@ var renderers = map[string]func(*Registry) string{
 	"seams":                  renderSeams,
 	"audit-triggers":         renderAuditTriggers,
 	"audit-trigger-coverage": renderAuditTriggerCoverage,
+	"invariant-registry":     renderInvariantRegistry,
 	"roadmap":                renderRoadmap,
 	"absorption":             renderAbsorption,
 	"spec-coverage":          renderSpecCoverage,
@@ -917,4 +918,123 @@ func renderViews(reg *Registry) []string {
 		}
 	}
 	return changed
+}
+
+// invRe matches an I-NN citation anywhere in prose or a table cell.
+var invRe = regexp.MustCompile(`\bI-([0-9]+)\b`)
+
+// invRowRe matches a section-28-style table ROW (the leading cell is the id),
+// which is what makes something a REGISTRY entry rather than a mention.
+var invRowRe = regexp.MustCompile(`(?m)^\| ?(I-[0-9]+) `)
+
+func invSet(re *regexp.Regexp, body string, group int) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(body, -1) {
+		id := m[group]
+		if group == 1 && !strings.HasPrefix(id, "I-") {
+			id = "I-" + id
+		}
+		out[id] = true
+	}
+	return out
+}
+
+func sortedInvs(m map[string]bool) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return atoiOr0(out[i][2:]) < atoiOr0(out[j][2:]) })
+	return out
+}
+
+// renderInvariantRegistry: do the three places that enumerate invariants agree?
+//
+// ARCHITECTURE.md section 28 is the registry CLAUDE.md calls authoritative and
+// the prosecutor template tells an auditor to enumerate. CLAUDE.md carries a
+// condensed copy under an explicit instruction to keep the row set in sync.
+// docs/AUDIT-TRIGGERS.md cites invariants per surface. Nothing compared them.
+//
+// It was worth building because the drift it detects had already happened
+// TWICE by the time this was written -- once repaired as RW-10 (the note is
+// still in CLAUDE.md above the table), and once live: CLAUDE.md's table ended
+// at I-39 while ARCH ran to I-44, and I-45 was the named invariant of an
+// audit-trigger surface while appearing in NEITHER. A rule saying "keep these
+// in sync" is safe-if-remembered; only a check that fails is safe-by-default,
+// and the repaired-then-recurred history is the proof that remembering loses.
+//
+// A CITATION is any `I-NN` token. A ROW is a table line whose leading cell is
+// the id -- that distinction is the whole check, because a document can discuss
+// an invariant at length while not registering it, which is exactly the I-45
+// state (GPU-DESIGN.md defines it in prose under a "(proposed)" heading).
+func renderInvariantRegistry(reg *Registry) string {
+	root := vaultRoot(reg)
+	if root == "" {
+		return "**(registry empty — cannot locate the repo root.)**"
+	}
+	read := func(p string) string {
+		b, err := os.ReadFile(filepath.Join(root, p))
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	}
+	arch, claude, trig := read("docs/ARCHITECTURE.md"), read("CLAUDE.md"), read("docs/AUDIT-TRIGGERS.md")
+	if arch == "" || claude == "" || trig == "" {
+		return "**(one of ARCHITECTURE.md / CLAUDE.md / AUDIT-TRIGGERS.md is unreadable — cannot compare.)**"
+	}
+	archRows := invSet(invRowRe, arch, 1)
+	claudeRows := invSet(invRowRe, claude, 1)
+	cited := invSet(invRe, trig, 1)
+	notes := map[string]bool{}
+	for _, n := range reg.OfType("inv") {
+		if num := n.Front.Str("number"); num != "" {
+			notes[num] = true
+		}
+	}
+
+	var citedNotRegistered, archNotClaude, claudeNotArch, registeredNoNote []string
+	for _, id := range sortedInvs(cited) {
+		if !archRows[id] {
+			citedNotRegistered = append(citedNotRegistered, id)
+		}
+	}
+	for _, id := range sortedInvs(archRows) {
+		if !claudeRows[id] {
+			archNotClaude = append(archNotClaude, id)
+		}
+		if !notes[id] {
+			registeredNoNote = append(registeredNoNote, id)
+		}
+	}
+	for _, id := range sortedInvs(claudeRows) {
+		if !archRows[id] {
+			claudeNotArch = append(claudeNotArch, id)
+		}
+	}
+
+	out := []string{fmt.Sprintf(
+		"**ARCH §28: %d rows · CLAUDE.md: %d rows · AUDIT-TRIGGERS cites %d · vault notes: %d.**",
+		len(archRows), len(claudeRows), len(cited), len(notes)), ""}
+	row := func(label string, ids []string, why string) {
+		if len(ids) == 0 {
+			return
+		}
+		out = append(out, fmt.Sprintf("| %s | `%s` | %s |", label, strings.Join(ids, "`, `"), why))
+	}
+	body := []string{"| gap | invariants | why it matters |", "|---|---|---|"}
+	head := len(out)
+	out = append(out, body...)
+	row("**cited by a trigger row, not registered in ARCH §28**", citedNotRegistered,
+		"the prosecutor template says to enumerate §28, so a round on that surface is pointed at a list omitting the invariant it was spawned to prosecute")
+	row("**in ARCH §28, missing from CLAUDE.md**", archNotClaude,
+		"CLAUDE.md is loaded into every session, so this is what an instance believes by DEFAULT — a §28 row it lacks is one nobody reads unless they open ARCH")
+	row("**in CLAUDE.md, missing from ARCH §28**", claudeNotArch,
+		"drift the other way: the condensed copy asserts a row the registry does not have")
+	row("registered but no vault note", registeredNoNote,
+		"the vault has not written this one up; not a scripture defect")
+	if len(out) == head+len(body) {
+		return out[0] + "\n\nAll three enumerations agree, and every registered invariant has a note."
+	}
+	return strings.Join(out, "\n")
 }
