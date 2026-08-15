@@ -52,6 +52,8 @@ extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
 extern int  sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
                                         const char *name);   // #241
+extern s64  sys_postnote_self_for_test(struct Proc *caller,
+                                       const char *name);    // aux#253
 
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -82,6 +84,7 @@ void test_notes_kill_terminates_single_thread(void);
 void test_notes_ndflt_stop_discarded_after_cont(void);
 void test_notes_susp_gate_reads_phenotype_sigtab(void);   // #251
 void test_notes_masked_susp_stops_at_delivery(void);      // #252
+void test_notes_self_kill_through_full_ring(void);        // aux#253
 
 // ---------------------------------------------------------------------------
 // queue_alloc_free_smoke
@@ -1377,6 +1380,78 @@ void test_notes_kill_terminates_single_thread(void) {
     proc_test_unlink(parent);
     parent->state = PROC_STATE_ZOMBIE;
     proc_free(parent);
+}
+
+// aux#253: the SELF arm's twin of the above. Round-2 F4 -- a self `kill` used
+// to cascade only when live_threads > 1 and otherwise fall through to
+// notes_post, so a Proc whose note ring was FULL took the -EAGAIN and SURVIVED
+// ITS OWN SIGKILL. N-4 says kill terminates unconditionally; it may not fail
+// for want of ring space.
+//
+// The arm was untestable when F4 landed because sys_postnote_handler resolves
+// its target from current_thread(), which in the harness is the harness's own
+// thread. It is reachable now because the arm was extracted to postnote_self
+// and given sys_postnote_self_for_test -- the sys_postnote_cross_for_test
+// convention: the hook drives the REAL arm, not a second copy of the decision.
+void test_notes_self_kill_through_full_ring(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    proc_test_link(p);
+
+    // ONE thread -- the whole point. A Proc that accidentally had peers would
+    // take the pre-existing multi-thread cascade and pass for the wrong reason.
+    static struct Thread th;
+    th.magic             = THREAD_MAGIC;
+    th.proc              = p;
+    th.note_mask         = 0;
+    th.next_in_proc      = NULL;
+    th.rendez_blocked_on = NULL;
+    p->threads = &th;
+
+    TEST_ASSERT(p->group_exit_msg == NULL,
+                "precondition: not already terminating");
+
+    // Fill the ring. `synthetic = false` (the userspace shape, and what the
+    // self arm itself posts with) never coalesces -- the coalesce block is
+    // gated on `synthetic` -- so the count rises straight to NOTE_QUEUE_DEPTH
+    // rather than stalling at NOTE_COALESCE_THRESHOLD the way a synthetic
+    // poster of one (name, sender) pair would.
+    for (u32 i = 0; i < NOTE_QUEUE_DEPTH; i++)
+        (void)notes_post(p, NOTE_NAME_CHILD_EXIT, i, NULL, false);
+
+    // THE CONTROL, and it is the load-bearing part of this test. Every
+    // assertion below is of the form "the kill worked", which a ring that
+    // never filled satisfies perfectly -- and the full ring IS the entire
+    // precondition of the defect. Two independent readings of fullness, so a
+    // single broken one cannot fake it: the counter, and a live post refused.
+    TEST_EXPECT_EQ((int)p->notes->count, (int)NOTE_QUEUE_DEPTH,
+                   "control: the ring reached NOTE_QUEUE_DEPTH");
+    TEST_ASSERT(notes_post(p, NOTE_NAME_CHILD_EXIT, 99u, NULL, false) != 0,
+                "control: the ring is genuinely FULL -- an ordinary post is "
+                "now REFUSED, which is the -EAGAIN the old arm returned");
+
+    // Drive the real self arm.
+    s64 rc = sys_postnote_self_for_test(p, NOTE_NAME_KILL);
+
+    // ORDER MATTERS HERE. TEST_ASSERT `return`s on failure, so only the FIRST
+    // failing assertion is ever observed -- which makes assertion order decide
+    // what a sabotage actually proves. The INVARIANT (N-4: the Proc died) goes
+    // first, so the sabotage demonstrates the property; the ABI symptom (the
+    // syscall's return value) goes second. Written the other way round, the
+    // sabotage reddened on the return value and this assertion never executed,
+    // leaving the claim "red pre-fix" untested next to a test that looked
+    // thorough.
+    TEST_ASSERT(p->group_exit_msg != NULL,
+                "aux#253: group_exit_msg SET -- the self kill cascaded THROUGH "
+                "a full ring instead of failing for want of a queue slot");
+    TEST_EXPECT_EQ((int)rc, 0,
+                   "and the syscall reports success -- pre-fix it returned the "
+                   "-EAGAIN the full ring gave notes_post");
+
+    proc_test_unlink(p);
+    p->threads = NULL;                  // the static outlives proc_free
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
 }
 
 // #240: a cont that overtakes a susp must CANCEL the stop, not be overwritten

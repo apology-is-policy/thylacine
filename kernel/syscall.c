@@ -4151,6 +4151,28 @@ struct postnote_walk_ctx {
                                   //      (stop walk).
 };
 
+// N-4 in ONE place: `kill` terminates its target, whatever the target's thread
+// count and whatever state its note ring is in. Returns true iff `name` was
+// `kill` and the cascade ran, so a caller's remaining work is the not-a-kill
+// path only.
+//
+// It exists because the two SYS_POSTNOTE arms (self and cross) each carried
+// their own spelling of this rule and DRIFTED: aux#241 removed the cross arm's
+// `live_threads > 1` gate and left the self arm's, and round-2 F4 then found
+// the self arm failing a kill on a full ring. Two arms agreeing by inspection
+// is what produced both defects; sharing the decision is the fix that outlives
+// either one. A third spelling already exists in devproc.c's `/proc/<pid>/ctl`
+// kill verb -- fold it in here if that file is ever touched for this reason.
+//
+// CALLER MUST HOLD g_proc_table_lock: proc_group_terminate's universal
+// death-wake walks p->threads (#811, ARCH section 8.8.1). The cross arm holds
+// it via proc_for_each; the self arm takes it around this call.
+static bool postnote_kill_cascade_locked(struct Proc *target, const char *name) {
+    if (!notes_name_is_kill(name)) return false;
+    proc_group_terminate(target, "killed");
+    return true;
+}
+
 static int postnote_walk_cb(struct Proc *target, void *arg) {
     struct postnote_walk_ctx *w = (struct postnote_walk_ctx *)arg;
     if (target->pid != w->target_pid) return 0;     // keep walking
@@ -4201,13 +4223,13 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
     // <pid>/ctl `kill` verb, which has always dispatched via
     // proc_group_terminate uniformly (devproc.c).
     //
-    // The SELF-post fast path in sys_postnote_handler keeps its thread-count
-    // gate deliberately: the posting thread is by definition RUNNING, and the
-    // EL0-return tail delivers notes BEFORE el0_return_stop_check, so a
-    // self-kill cannot be swallowed by a stop. Changing it would move the
-    // death to a slightly earlier point in the tail for no defect.
-    if (notes_name_is_kill(w->name)) {
-        proc_group_terminate(target, "killed");
+    // Round-2 F4 (aux#253): the SELF arm used to keep its thread-count gate,
+    // and the paragraph here used to argue that was deliberate. It named a real
+    // property (a self-kill cannot be SWALLOWED by a stop, since the tail
+    // delivers notes before el0_return_stop_check) and mistook it for the whole
+    // obligation -- a full note ring made the self-kill fail for want of space.
+    // Both arms now route through the ONE predicate below.
+    if (postnote_kill_cascade_locked(target, w->name)) {
         w->result = 1;
         return 1;
     }
@@ -4244,6 +4266,46 @@ int sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
     };
     (void)proc_for_each(postnote_walk_cb, &wctx);
     return wctx.result;
+}
+
+// The SELF arm, extracted from sys_postnote_handler so it has a name a test can
+// call (aux#253). The handler resolves `p` from current_thread(); everything
+// after that resolution uses only `p` and the validated name, so the arm splits
+// cleanly here and the syscall keeps driving THIS function rather than a copy.
+//
+// Returns the syscall's own value: 0 posted-or-killed, -1 refused.
+static s64 postnote_self(struct Proc *p, const char *name) {
+    // Unlike the cross arm we are not already under g_proc_table_lock, so take
+    // it around the cascade. `p` is self and cannot be reaped while running it.
+    irq_state_t s = proc_table_lock_acquire();
+    bool killed = postnote_kill_cascade_locked(p, name);
+    proc_table_lock_release(s);
+    if (killed) return 0;
+
+    int rc = notes_post(p, name, 0u, p, false);
+    // LS-5c (P3-terminate): a self-post of `interrupt` in a multi-thread Proc
+    // may arm the terminate latch while a PEER thread is blocked in a rendez
+    // sleep -- wake the peers so they unwind to their tails (the posting thread
+    // itself is running and reaches its own tail at this syscall's return). The
+    // wake walks p->threads, so it needs g_proc_table_lock (the #811 contract);
+    // take it only when the latch armed (the read is a benign pre-check -- the
+    // wake re-validates under its own internal gate, and `p` is self, immune to
+    // reap here).
+    if (rc == 0 && proc_intr_terminate_pending(p)) {
+        irq_state_t ws = proc_table_lock_acquire();
+        proc_interrupt_terminate_wake(p);
+        proc_table_lock_release(ws);
+    }
+    return (rc == 0) ? 0 : (s64)-1;
+}
+
+// Test support, the sys_postnote_cross_for_test twin: drives the REAL self arm
+// with an explicit caller, because the production entry takes its target from
+// current_thread() and a kernel unit test's current thread is the harness's.
+// Deliberately absent from any header; no production caller.
+s64 sys_postnote_self_for_test(struct Proc *caller, const char *name);
+s64 sys_postnote_self_for_test(struct Proc *caller, const char *name) {
+    return postnote_self(caller, name);
 }
 
 static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
@@ -4287,52 +4349,12 @@ static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
     //
     // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): a
     // self-kill cascades the whole Proc instead of being refused (the prior
-    // `kill -> -EIO`, 13b R1-F9). proc_group_terminate's universal death-wake
-    // walks p->threads and so MUST run UNDER g_proc_table_lock (#811, ARCH
-    // §8.8.1). self cannot be reaped while running here; the caller returns
-    // success + self-exits at its own EL0-return die-check before userspace
-    // resumes.
-    //
-    // ROUND-2 F4: this arm used to cascade only when `live_threads > 1` and
-    // let a SINGLE-thread self-kill fall through to notes_post. #241 removed
-    // exactly that gate from the CROSS arm and deliberately left this one,
-    // arguing a self-kill cannot be SWALLOWED by a job stop -- true (the tail
-    // delivers notes before el0_return_stop_check) but not the only failure
-    // direction, and #241's own close named the other one: "the old arm could
-    // return -1 when notes_post hit a full queue -- i.e. a kill that failed
-    // for lack of ring space, itself an N-4 violation."
-    //
-    // That was still true here. A Proc with no handler and no notes fd never
-    // drains non-terminate-class notes, so child_exit/pipe posts accumulate to
-    // NOTE_QUEUE_DEPTH; the next raise(SIGKILL) hit the full-queue -1 and the
-    // Proc SURVIVED ITS OWN SIGKILL. N-4 says kill terminates, unconditionally
-    // -- it may not fail for want of ring space. Cascading always also makes
-    // this arm agree with the cross arm and with /proc/<pid>/ctl kill, which
-    // has always dispatched uniformly, so all three spellings of "kill" now
-    // mean one thing.
-    if (target_pid == p->pid || pid_raw == 0) {
-        if (notes_name_is_kill(buf)) {
-            irq_state_t s = proc_table_lock_acquire();
-            proc_group_terminate(p, "killed");
-            proc_table_lock_release(s);
-            return 0;
-        }
-        int rc = notes_post(p, buf, 0u, p, false);
-        // LS-5c (P3-terminate): a self-post of `interrupt` in a multi-thread
-        // Proc may arm the terminate latch while a PEER thread is blocked in
-        // a rendez sleep -- wake the peers so they unwind to their tails (the
-        // posting thread itself is running and reaches its own tail at this
-        // syscall's return). The wake walks p->threads, so it needs
-        // g_proc_table_lock (the #811 contract); take it only when the latch
-        // armed (the read is a benign pre-check -- the wake re-validates
-        // under its own internal gate, and `p` is self, immune to reap here).
-        if (rc == 0 && proc_intr_terminate_pending(p)) {
-            irq_state_t ws = proc_table_lock_acquire();
-            proc_interrupt_terminate_wake(p);
-            proc_table_lock_release(ws);
-        }
-        return (rc == 0) ? 0 : (s64)-1;
-    }
+    // `kill -> -EIO`, 13b R1-F9). The caller returns success + self-exits at
+    // its own EL0-return die-check before userspace resumes. The arm's body and
+    // its lock discipline live on postnote_self; WHY the kill decision is
+    // shared with the cross arm (round-2 F4, aux#253) lives on
+    // postnote_kill_cascade_locked.
+    if (target_pid == p->pid || pid_raw == 0) return postnote_self(p, buf);
 
     // Cross-Proc post: walk the proc tree via proc_for_each, which runs
     // its callback under g_proc_table_lock. We do the find + permission-
