@@ -6,13 +6,13 @@ title: "Bringup — spawn, wait for an event, attach, pivot"
 code:
   - usr/joey/joey.c
 audit: hard
-guarded-by: [inv-i28]
+guarded-by: [inv-i28, inv-i45]
 validated-by: [prose, gate-smp, gate-interactive]
 locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-08-03
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -87,6 +87,42 @@ private tree has no system-mount byte reader. Those are the conditions
 under which [[inv-i38]]'s close-to-open guarantees still hold with
 revalidation relaxed. Any of them ceasing to be true revokes the flag here.
 
+**Not every served tree should be mounted, and the discriminator is where its
+authority lives.** This is the newest rule in the sequence and it arrived as a
+P1, so it is worth stating before the carry list rather than after.
+
+The compositor daemon posts two services. joey mounts one of them globally and
+deliberately does not mount the other:
+
+| service | mounted at boot | why |
+|---|---|---|
+| the compositor tree | **yes**, onto `/dev/tapestry` | a shared tree is what it is for |
+| the GPU seam | **no** — posted only | its authority is *per-connection* |
+
+The GPU seam's entire authority model keys on the connection: the owning
+connection gates every context and buffer resolve, and one context per
+connection *is* the [[inv-i45]] exposure bound. **A shared mount is one
+server-side connection.** So mounting it once for everyone aliased every process
+on the box onto joey's single connection — one process could submit an arbitrary
+command stream into another's rendering context, read its buffers back, or
+destroy them, and no second process could ever obtain a context at all. The
+audit rated it P1 and the fix was to stop mounting: clients open the service
+directly or mount it into their *own* namespace, which is what makes the
+design's "per-process by construction" claim actually true.
+
+Two details of the corrected shape matter here. The boot probe now reads the
+seam's control file **over the connection it just opened**, by walking the
+returned descriptor rather than a namespace path — introspection only, no
+context minted, so the aliasing hazard never arises even transiently. And joey
+holds no standing connection to the seam afterwards, because a second listener
+sharing the daemon's connection pool had already starved the compositor's own
+listener once (eight opens against an eight-slot pool), which is now bounded by
+a per-root budget.
+
+So the init program's mount question is not "carry it or lose it" but **"should
+this tree be global at all?"** — and the answer is no whenever the served tree's
+authority is per-connection.
+
 **The pivot is a swap, so everything else must be carried by hand.** Seven
 O_PATH handles are taken *before* the swap and re-grafted after: `/srv`,
 the whole devramfs root (→ `/bin`), `/proc`, `/ctl`, `/dev`, `/hw`, `/env`.
@@ -158,6 +194,13 @@ event-driven; no timing constant appears in this path.
   Any line printed before the bind is optimistic and unusable.
 - A new pre-pivot mount must acquire its O_PATH handle before the swap and
   re-graft after, or it vanishes silently at pivot.
+- **Before that: decide whether it should be a global mount at all.** If the
+  served tree's authority is per-connection, a boot-time mount collapses every
+  process onto init's single connection and is a privilege breach, not a
+  convenience. Ask where the tree's authority lives before asking how to carry
+  it. The seven carried handles are the trees for which "global" is the right
+  answer; that list has not grown since, and one candidate was explicitly
+  refused.
 - The loose-mode premise list is a claim about the whole system, not this
   file. A change that gives some other writer access to this pool revokes
   it here.
@@ -189,6 +232,36 @@ event-driven; no timing constant appears in this path.
   real owners ([[sub-kernel-territory]], [[sub-kernel-ninep-client]]) and lost
   nothing. See [[chg-2026-08-03-syscall-abi-sweep]].
 
+- **THE FILE THAT SURVIVED THAT NARROWING IS ITSELF ONLY PARTLY DESCRIBED HERE,
+  AND THIS DOSSIER IS ITS SOLE OWNER.** `usr/joey/joey.c` is **9771 lines and
+  about fifty functions**. What is written above is the bringup sequence — the
+  daemon spawn, the readiness handshake, the attach, the pivot and the
+  re-grafts, plus the service-post decision. That is a few hundred lines.
+
+  The rest of the file is init's other jobs and nothing in the vault describes
+  any of them: the long-lived-daemon registry and the adopted-orphan reaper; the
+  ~850-line identity-daemon bringup and its wire helpers; the boundary-line smoke
+  suite; the exec, fork and foreign-shell gates; the login and recovery
+  end-to-end runs; the **session getty loop, which is what init actually spends
+  its life doing**; the language-toolchain and GL gates; and seven numbered
+  regression probes. Searching the vault for the terms that name these — the
+  foreign-shell gate, the identity-daemon bringup, the smoke suite, the
+  toolchain gate, the orphan reaper's own function — returns **zero notes each**.
+
+  This is not a defect in what is written above, which is accurate and scoped by
+  its own title. It is a defect in the **ownership record**, and it now has teeth
+  the batch-35 version did not: the ratified per-surface cutover
+  ([[dec-2026-08-15-cutover]]) reads `quaestor owner`'s exit 0 as *"the vault
+  carries that surface, so the prose belongs there."* For this file the tool
+  answers OWNED, and for eight-ninths of it that answer sends a writer to a
+  dossier with no place to put what they know. Tracked as task #177 — and note
+  that the in-guest test surface it contains is the userspace twin of task #119,
+  which records the same gap for the in-kernel runner.
+
 ## Provenance
 
 [[chg-2026-08-02-stratum-sweep]].
+
+[[chg-2026-08-15-joey-boot]] is the re-sweep after Warp-2: the nine contract
+steps re-verified unchanged, the service-post decision added, and the
+ownership scope of this file measured.

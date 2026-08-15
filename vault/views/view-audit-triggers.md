@@ -93,7 +93,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-pouch-tty]] | usr/lib/pouch/patches/0021-pouch-pty.patch, usr/lib/pouch/patches/0029-pouch-cons-winsize.patch |  | - The `S_ISCHR`-then-flag gate order, and the disjointness of bit 40 |
 | [[sub-ptyfs]] | usr/ptyfs/src/server.rs, usr/ptyfs/src/main.rs | inv-i20, inv-i9, inv-i1 | - The **ECHO-off** guarantee is the one to re-derive on any ldisc |
 | [[sub-stratum-bdev]] | stratum: src/block/bdev_thylacine.c |  | - Any new op must take the mutex; B-2 is what makes the single shared |
-| [[sub-stratum-boot]] | usr/joey/joey.c | inv-i28 | - A new readiness signal must be emitted **after** the last fallible step. |
+| [[sub-stratum-boot]] | usr/joey/joey.c | inv-i28, inv-i45 | - A new readiness signal must be emitted **after** the last fallible step. |
 | [[sub-stratum-server]] | stratum: src/9p/server.c, stratum: src/cmd/stratumd/serve.c, stratum: src/cmd/stratumd/peer_creds.c, stratum: src/cmd/stratumd/run.c | inv-i1, inv-i28 | - `n_uname` must stay ignored while `SO_PEERCRED` is the channel. Honouring |
 | [[sub-stratum-session]] | usr/login/src/main.rs, stratum: src/cmd/stratumd/proxy_9p.c, stratum: src/cmd/stratumd/dataset_pattern.c, stratum: src/cmd/stratumd/corvus_notify.c | inv-i1 | - The `/ctl` attach must outlive the session; the DEK lease is bound to |
 | [[sub-tapestryd]] | usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs | inv-i40, inv-i5, inv-i34, inv-i1, inv-i45 | - The **retire order** is the invariant: unshare before any backing |
