@@ -986,6 +986,25 @@ func renderInvariantRegistry(reg *Registry) string {
 	archRows := invSet(invRowRe, arch, 1)
 	claudeRows := invSet(invRowRe, claude, 1)
 	cited := invSet(invRe, trig, 1)
+	// Guard the guard (main's, adopted after they probed it and I did not).
+	// If a table reformats, `invRowRe` matches nothing and set-equality between
+	// two empty sets passes -- the check reports agreement precisely when it
+	// has stopped reading its inputs. Mine is also the more brittle regex of
+	// the two: theirs absorbs arbitrary whitespace after the pipe, mine allows
+	// one space, so a cosmetic reflow breaks this parser first.
+	//
+	// Worth stating how this was found, because it is the rule under test: I
+	// probed their guard with a sabotage that did not break their parse, so it
+	// passed, and "their guard did not fire" was a finding I nearly reported
+	// off my own inert fixture. The real probe -- dropping the leading pipe --
+	// fired it correctly. A negative result is only evidence once the sabotage
+	// is shown to bite.
+	if len(archRows) < 20 || len(claudeRows) < 20 {
+		return fmt.Sprintf("**A TABLE PARSED AS NEAR-EMPTY (ARCH=%d, CLAUDE.md=%d) — "+
+			"the row pattern no longer matches the table format, so every comparison "+
+			"below would agree vacuously. This view is reporting nothing until the "+
+			"parser is fixed.**", len(archRows), len(claudeRows))
+	}
 	notes := map[string]bool{}
 	for _, n := range reg.OfType("inv") {
 		if num := n.Front.Str("number"); num != "" {
