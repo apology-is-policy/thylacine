@@ -498,6 +498,42 @@ func cmdOwner(root string, args []string) int {
 			}
 			printOwner(a)
 		}
+		// A MIXED answer is the common case and the exit status cannot
+		// express it: a chunk usually touches several files, and one
+		// unowned path among owned ones drives the whole run to exit 1.
+		// A caller following "exit 1 -> write the reference section" then
+		// writes one covering every path in the run, INCLUDING the surfaces
+		// a dossier already describes -- which is precisely the divergence
+		// this command exists to prevent, produced by the command.
+		//
+		// The exit code is one bit and the question is per-path, so no
+		// choice of code fixes this; the answer is to say plainly that both
+		// actions are owed. Printed only for multi-path runs, where it is
+		// the whole point, and never for one path, where it would be noise.
+		if len(answers) > 1 {
+			var vault, refdoc []string
+			for _, a := range answers {
+				if a.Covered {
+					vault = append(vault, a.Path)
+				} else {
+					refdoc = append(refdoc, a.Path)
+				}
+			}
+			fmt.Println()
+			switch {
+			case len(refdoc) == 0:
+				fmt.Printf("ALL %d paths are carried by the vault -- no reference section is owed.\n",
+					len(vault))
+			case len(vault) == 0:
+				fmt.Printf("NONE of the %d paths is carried by the vault -- reference section owed for all.\n",
+					len(refdoc))
+			default:
+				fmt.Printf("MIXED -- BOTH actions are owed, and the exit status below says only that the first is:\n")
+				fmt.Printf("  reference section owed for: %s\n", strings.Join(refdoc, " "))
+				fmt.Printf("  the vault already carries:   %s  <- do NOT write these into a reference doc\n",
+					strings.Join(vault, " "))
+			}
+		}
 	}
 	if allCovered {
 		return 0
