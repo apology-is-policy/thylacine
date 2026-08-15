@@ -13,7 +13,7 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -39,6 +39,37 @@ pairing is mandatory — see Concurrency.
 
 `handle_dup(p, h, new_rights)` installs a second reference to the same
 object with `new_rights ⊆ parent->rights`.
+
+**Four duplication primitives, and they are not conveniences over each
+other.** Two axes decide which one a caller needs — where the source comes
+from, and whether the destination may already be occupied:
+
+| | source | destination |
+|---|---|---|
+| `handle_dup_posix` | a slot | first free ≥ `min_idx`; the index is an **output** |
+| `handle_replace` | a caller-held object | a fixed index that must be **live**; outgoing released |
+| `handle_table_copy_into` | a slot in **another** table | the same fixed index, which must be free |
+| `handle_dup_to` | a slot | a fixed index, free **or** live; outgoing released if live |
+
+`min_idx` is why `handle_dup_posix` exists rather than being folded into
+`handle_dup`: a shell's `savefd()` asks for the lowest free descriptor **at
+or above 10**, precisely to move its bookkeeping out of the low range where
+a user redirection could collide with it. Returning the first free slot
+regardless would hand back fd 3 and break the guarantee the call was made
+to obtain — silently, and only under a redirection.
+
+The two are also kept separate rather than folded behind a sentinel because
+zero rights already means `RIGHT_NONE` and would have to mean its opposite
+here — `handle_dup` **reduces** rights (the capability surface),
+`handle_dup_posix` carries them **verbatim** (POSIX: the new descriptor has
+the same access, and I-6 is satisfied by non-increasing).
+
+`handle_close_on_exec(p)` closes every flagged handle. It runs **after
+exec's commit point**, for two reasons pulling the same way: the closes may
+**sleep** (a Spoor's Dev close hook sends a 9P `Tclunk`), so it cannot run
+under any lock; and a failed exec must leave the process unchanged, so it
+must not run before the last thing that can fail. Linux places its
+equivalent after its own point of no return for the second reason.
 
 Four kinds of rejection are structural rather than incidental: a
 non-transferable kind cannot be duplicated; rights can only narrow; empty
@@ -99,10 +130,52 @@ on both the size and the `magic` offset at 0. A slot is free iff
 `magic == 0`, which is why the `KP_ZERO` table allocation is meaningful and
 not merely tidy.
 
-`struct HandleTable` is a lock plus `PROC_HANDLE_MAX` (64) inline slots. It
-exceeds `SLUB_MAX_OBJECT_SIZE`, so it is kmalloc-backed through
-`alloc_pages` rather than getting a dedicated slab cache — which is why
-`handle_init` has nothing to do.
+`struct HandleTable` is a lock, a **close-on-exec bitmap**, and
+`PROC_HANDLE_MAX` (**1024**) inline slots — about 24.7 KiB. It far exceeds
+`SLUB_MAX_OBJECT_SIZE`, so it is kmalloc-backed through `alloc_pages`
+rather than getting a dedicated slab cache — which is why `handle_init` has
+nothing to do. A `_Static_assert` pins the total against
+`8 + 8*HANDLE_CLOEXEC_WORDS + 24*PROC_HANDLE_MAX`.
+
+**1024 is a measured number, not a round one.** A GL client holds one
+handle per live BO mapping plus its files, so a Quake-class texture set
+needs 300–500 live handles, and the compositor holds a DMA handle per built
+BO on the same constant. The growable two-level table keyed by `hidx_t` —
+the Linux model — remains the v1.x design for a Proc that needs far more,
+and it is deferred because it touches the shared-table lock discipline
+below (peer threads snapshot slots by value).
+
+Read the fps figure attached to that lift carefully, because the header
+states it precisely and it is easy to quote wrongly: the lift is credited
+**only in combination** with the session-fid and compositor-fid lifts. The
+A/B ladder's second rung is the reason — raising this constant *alone* was
+**byte-identical**, an exoneration. Four nested tables bound the same
+workload in series, and lifting any one of them just moved the binder.
+
+**The close-on-exec bitmap sits beside the slot array rather than inside
+`struct Handle`, and both halves of that are load-bearing.**
+
+*Parallel*, because close-on-exec is a property of the **descriptor**, not
+of the open file description behind it: `dup(fd)` yields a second
+descriptor onto the same description with the flag **clear**, and setting
+it on either must not touch the other. A bit inside `struct Handle` would
+be shared by exactly the things POSIX says must differ. Linux keeps it as a
+bitmap beside `fd[]` for this reason and the shape is not a coincidence.
+
+*Not inside*, also because that struct has **no slack** — 8 + 4 + 4 + 8 is
+exactly the 24 its own assert pins. A `u32` there grows it to 32, taking
+the table from 24712 to 32904 bytes: **across the order-3 `alloc_pages`
+boundary into order-4, doubling the physical allocation to carry one bit
+per slot.** The bitmap costs 128 bytes total. The size assert on `struct
+Handle` is what forced the better design rather than merely recording it.
+
+A second assert requires the bitmap to cover every slot, because a short
+one "would silently drop the flag on the high slots" — the failure that
+would otherwise appear only above whatever index the words happened to
+reach.
+
+`hidx_t` is the handle index type: signed, with -1 for
+invalid / not-found / table-full.
 
 ## Concurrency
 
@@ -123,6 +196,48 @@ handshake. Release must run outside the lock because it may sleep —
 reference, and install the child slot under **one** lock hold. The earlier
 shape — `handle_get` then `handle_alloc` — took the lock twice and left a
 window in which the parent could be closed between the two.
+
+**`handle_dup_to` exists for the same reason, and its argument is the
+sharpest statement of the rule in the file.** The obvious implementation —
+close the destination, then dup with `min_idx` set to it — is wrong because
+**the freed index is not reserved**: a peer thread's fd-creating syscall
+can take it between the two calls, and the dup then lands somewhere else
+entirely, silently, and only under concurrency. Doing it in one hold is
+also what makes the outgoing release happen **after** the new object is
+installed, so the slot is never momentarily empty for anyone to allocate
+into.
+
+Its source passes the same alias gate `handle_dup` uses, because it creates
+a second handle naming one object and faces the identical hazard. Its
+**destination is deliberately ungated by kind**, and the asymmetry is
+argued rather than assumed: the destination is being *closed*, and
+`handle_close` places no kind restriction on closing, so refusing here
+would invent a rule that dup2-onto-fd-N is less permitted than
+close(N)-then-dup. `handle_replace` refuses a non-Spoor outgoing for a
+reason the header says does **not** transfer — its swap is internal to
+`connect()` and invisible to the guest, whereas a dup3 caller has
+explicitly named the fd it wants gone.
+
+**The close-on-exec flag is set after the alloc rather than passed through
+it, and the window is argued closed rather than assumed small.** A flag
+parameter on `handle_alloc` would mean touching ~100 call sites for one
+bit. The gap between alloc and set is provably empty: only exec consumes
+the flag, execve refuses unless it is the Proc's only live thread, and the
+caller **is** a live thread mid-syscall — so no exec can run between them.
+
+**Fork copies the table, and what it declines to copy is the interesting
+half.** `handle_table_copy_into` carries rights verbatim (POSIX fork gives
+the child the parent's access; I-6 holds by non-increasing) and each copied
+slot takes its own reference, so the child's `handle_table_free` releases
+them and a failed fork's rollback is already correct. It cannot fail — no
+per-slot allocation, and the destination is known-empty and the same size.
+
+Hardware handles are **not** inherited: a Proc that needs hardware
+authority gets it the way every other Proc does, through the warden's
+confer path, never through fd inheritance. The resulting hole is
+*observable* — the child sees `EBADF` at that index, and its next open
+lands there where Linux's would not — which the header calls the honest
+report of an authority the child was never eligible to hold.
 
 `handle_alloc` is the other `#844` lesson, found by audit rather than by
 reasoning: it was left unlocked while get / close / dup were locked, even
@@ -168,10 +283,20 @@ acquired reference is released **outside** the lock.
 
 ## Performance
 
-Linear scan of 64 slots for a free index — O(64) worst case on every fd
-creation, uncontended in practice. Growable tables via an index-keyed tree
-are a stated Phase-5+ refinement. `g_handle_allocated` / `g_handle_freed`
-are relaxed atomics for diagnostics only.
+Linear scan for a free index — **O(1024)** worst case on every fd creation,
+under the table lock. That figure moved 16× with `PROC_HANDLE_MAX` and the
+scan did not change shape, so what was a cheap bounded walk is now the
+strongest argument for the growable two-level table: the cost is paid on
+every fd creation by every Proc, while the 1024 slots exist for the handful
+of GL clients that need them.
+
+Not a defect today — the scan stops at the first free slot, so a Proc
+holding few handles pays little regardless of the ceiling, and the worst
+case needs a nearly-full table. But it is the one property of this surface
+that the ceiling lift made materially worse rather than merely larger, and
+it is worth stating because the header's own rationale for 1024 is a
+throughput argument. `g_handle_allocated` / `g_handle_freed` are relaxed
+atomics for diagnostics only.
 
 ## Prosecution
 
@@ -182,7 +307,21 @@ are relaxed atomics for diagnostics only.
   `handle_acquire_obj`. The `KOBJ_SRV` no-op is sound only because that
   handle is always a non-refcounted service listener.
 - Any new fd-creating path must install through `handle_install_locked`
-  under the table lock — the `#844` F1 lesson.
+  under the table lock — the `#844` F1 lesson, now with four callers. It is
+  the single install chokepoint and takes the starting index and the
+  close-on-exec bit as parameters precisely so the four duplication
+  primitives cannot each re-implement the scan.
+- A new duplication primitive must be justified on the two axes (source,
+  destination-may-be-occupied) or it is a convenience over an existing one.
+  Composing two of them is the specific thing to refuse: the index freed by
+  the first is **not reserved**, so a peer thread can take it before the
+  second runs.
+- Anything that lifts `PROC_HANDLE_MAX` must re-run every proof that named
+  it. The lift to 1024 voided one (a kthread bounded "by the 64-slot
+  table"), and left `poll.h` and `syscall.h` still quoting 64 (#184, #166).
+- The close-on-exec bitmap must stay sized off `PROC_HANDLE_MAX`; its
+  coverage assert is what stops a short bitmap silently dropping the flag
+  on high slots.
 - Release may sleep; acquire may not. Anything called under the table lock
   must be non-blocking.
 - The lockless `handle_table_free` rests on "no cross-Proc handle access
@@ -198,8 +337,23 @@ sides), are stated Phase-5+ items.
 
 ## Caveats
 
-- `PROC_HANDLE_MAX` is 64. A Proc that needs more fds has no growth path at
-  v1.0.
+- ~~`PROC_HANDLE_MAX` is 64.~~ **It is 1024, and this dossier was wrong when
+  it was written, not merely stale.** The constant went 64 → 256 on
+  2026-06-24 and 256 → 1024 on 2026-08-13; this dossier was written on
+  2026-08-02, six weeks after the first lift, and said 64 in two places.
+
+  Worth keeping rather than quietly fixing, because the failure has a
+  source and the source is still live: **`poll.h` and `syscall.h` both
+  still say `PROC_HANDLE_MAX = 64` today** (tasks #184, #166). A sweep that
+  reads the surrounding prose instead of the `#define` inherits whatever
+  the prose last believed — which is the [[chg-2026-08-15-build-targets]]
+  lesson (*prefer the shortest list*) arriving from the other direction. The
+  rule that would have caught it is the one the tree keeps teaching: a
+  stale-constant sweep is where an error is most easily laundered, so read
+  what each mention **claims**, and take the value from the definition.
+
+  A Proc needing far more than 1024 fds still has no growth path at v1.0;
+  the two-level table is the v1.x design.
 - The header's own preamble is stale in one respect: it describes
   `CapsCeiling` as "forward-looking; rfork mask is AND-only at Phase 5+".
   The unconditional `& ~CAP_ELEVATION_ONLY` strip landed at A-4-pre — see
