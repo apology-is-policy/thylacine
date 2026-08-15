@@ -223,3 +223,53 @@ func captureOwner(a ownerAnswer) string {
 	b, _ := io.ReadAll(r)
 	return string(b)
 }
+
+// A document is not a surface, and UNOWNED about one is the most damaging wrong
+// answer this command can give: it routes the caller AWAY from the vault
+// ("write the reference doc as today") for a surface a dossier may well carry.
+// Reported by main 2026-08-15 -- every docs/reference/NN-*.md answered UNOWNED
+// while its code surface answered OWNED, so the tool gave opposite answers for a
+// file and the document describing it.
+//
+// Three legs, because the refusal has to hold in three different places and
+// each could regress alone.
+func TestOwnerRefusesDocumentPaths(t *testing.T) {
+	for _, p := range []string{
+		"docs/reference/145-vivarium.md",
+		"docs/manual/10-shells.md",
+	} {
+		if !notCodeSurface(p) {
+			t.Fatalf("%s should be refused as a document", p)
+		}
+	}
+	// The control: the refusal must not swallow real code. A docs-SHAPED path
+	// outside the two document trees, and an ordinary source file, both stay
+	// answerable -- without this leg the test would pass against
+	// `return strings.HasPrefix(p, "docs/")` or even `return true`.
+	for _, p := range []string{
+		"docs/ARCHITECTURE.md", // scripture, not a per-surface reference doc
+		"kernel/vivarium.c",
+		"tools/build.sh",
+	} {
+		if notCodeSurface(p) {
+			t.Fatalf("%s must still be answerable, not refused", p)
+		}
+	}
+
+	out := captureOwner(ownerAnswer{
+		Path: "docs/reference/145-vivarium.md", Kind: "file", NotCode: true,
+	})
+	// The VERDICT line, not the whole output. A bare Contains(out, "UNOWNED")
+	// fails here and the failure is the test's, not the code's: the refusal
+	// EXPLAINS why UNOWNED would be wrong, so the word appears in its own
+	// reasoning. A substring check over prose matches more than it means --
+	// which is the same mistake, in miniature, as the unbounded `sid` grep
+	// that matched inside ASID earlier today.
+	verdict := strings.SplitN(out, "\n", 2)[0]
+	if strings.Contains(verdict, "UNOWNED") {
+		t.Fatalf("a document path VERDICT was UNOWNED -- the away-from-vault routing:\n%s", out)
+	}
+	if !strings.Contains(verdict, "NOT A CODE SURFACE") {
+		t.Fatalf("a document path did not print the refusal verdict:\n%s", out)
+	}
+}

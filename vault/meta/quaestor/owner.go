@@ -80,7 +80,33 @@ type ownerAnswer struct {
 	TwinExists bool       `json:"twin-exists,omitempty"`
 	TwinOwner  []string   `json:"twin-owner,omitempty"`
 	RefBy      []string   `json:"referenced-by,omitempty"`
+	// NotCode marks a path this command should refuse rather than answer:
+	// a reference doc or a user-manual page. See notCodeSurface.
+	NotCode    bool       `json:"not-code-surface,omitempty"`
 	Neighbours
+}
+
+// notCodeSurface -- a documentation path is not a code surface, and answering
+// UNOWNED about one is the single most damaging wrong answer this command can
+// give. Reported by main 2026-08-15: every docs/reference/NN-*.md probed comes
+// back UNOWNED while its code surface comes back OWNED, so the tool gives
+// OPPOSITE answers for a file and the document describing it -- and the doc's
+// answer is the one that routes AWAY from the vault ("write the reference doc
+// as today"), re-opening the two-sources divergence the cutover closes.
+//
+// CLAUDE.md's step 0 is correct as written -- it says `owner <changed paths>`,
+// meaning the code -- so this is a guard against the available slip, not a
+// normal path. The sentence step 0 sits under is about writing a reference
+// doc, which is exactly what makes naming the doc the natural mistake.
+//
+// It REFUSES rather than resolving. A mapping from a reference doc to its code
+// surfaces is not recorded anywhere: two dossiers name one in `design:`, out of
+// the whole corpus, so any resolution would be a guess from the filename. A
+// guess here fails in the away-from-vault direction, which is the one that
+// costs something. An honest "ask about the code instead" costs one re-run.
+func notCodeSurface(p string) bool {
+	return strings.HasPrefix(p, "docs/reference/") ||
+		strings.HasPrefix(p, "docs/manual/")
 }
 
 // Neighbours is the "nearest thing" report for an unowned path: of the files
@@ -264,6 +290,10 @@ func answerOwner(root string, reg *Registry, idx map[string][]*Note,
 	if isDir {
 		a.Kind = "dir"
 	}
+	if notCodeSurface(q) {
+		a.NotCode = true
+		return a
+	}
 
 	add := func(ns []*Note, claim string) {
 		for _, n := range ns {
@@ -372,6 +402,14 @@ func answerOwner(root string, reg *Registry, idx map[string][]*Note,
 }
 
 func printOwner(a ownerAnswer) {
+	if a.NotCode {
+		fmt.Printf("%s  NOT A CODE SURFACE\n", a.Path)
+		fmt.Printf("  -> this is a document, not a surface. Ask about the CODE it\n")
+		fmt.Printf("     describes; step 0 takes the paths your chunk CHANGED.\n")
+		fmt.Printf("     Answering UNOWNED here would route you away from the vault\n")
+		fmt.Printf("     for a surface a dossier may well carry.\n")
+		return
+	}
 	verdict := "UNOWNED"
 	switch {
 	case a.Owned:
@@ -536,9 +574,14 @@ func cmdOwner(root string, args []string) int {
 
 	var answers []ownerAnswer
 	allCovered := true
+	codePaths := 0
 	for _, p := range paths {
 		a := answerOwner(root, reg, idx, stale, p)
 		answers = append(answers, a)
+		if a.NotCode {
+			continue // neither covered nor uncovered; it was not a question
+		}
+		codePaths++
 		if !a.Covered {
 			allCovered = false
 		}
@@ -566,13 +609,21 @@ func cmdOwner(root string, args []string) int {
 		// actions are owed. Printed only for multi-path runs, where it is
 		// the whole point, and never for one path, where it would be noise.
 		if len(answers) > 1 {
-			var vault, refdoc []string
+			var vault, refdoc, notcode []string
 			for _, a := range answers {
-				if a.Covered {
+				switch {
+				case a.NotCode:
+					notcode = append(notcode, a.Path)
+				case a.Covered:
 					vault = append(vault, a.Path)
-				} else {
+				default:
 					refdoc = append(refdoc, a.Path)
 				}
+			}
+			if len(notcode) > 0 {
+				fmt.Printf("\nNOT ANSWERED (documents, not surfaces): %s\n",
+					strings.Join(notcode, " "))
+				fmt.Printf("  Re-run against the code those describe.\n")
 			}
 			fmt.Println()
 			switch {
@@ -589,6 +640,12 @@ func cmdOwner(root string, args []string) int {
 					strings.Join(vault, " "))
 			}
 		}
+	}
+	if codePaths == 0 {
+		// Every path was a document. Neither verdict applies, and returning 1
+		// would be read as "no dossier -- write the reference doc", which is
+		// the away-from-vault routing this refusal exists to prevent.
+		return 2
 	}
 	if allCovered {
 		return 0

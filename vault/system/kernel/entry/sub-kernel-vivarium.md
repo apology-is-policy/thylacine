@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-08-06
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -182,7 +182,10 @@ deliberately no `bound` flag: an unbound socket and one bound to
 `0.0.0.0:0` are indistinguishable in every path the table feeds.
 
 `struct viv_socktab` / `struct viv_sigtab` — per-Proc, lazily allocated,
-CAS-installed, freed at `proc_free`, **not** rfork-inherited. `viv_sigtab`
+CAS-installed, freed at `proc_free` **and nowhere else**, **not**
+rfork-inherited. That sentence was incomplete when written — the table was also
+freed at exec, unmentioned — and it became true by the other free site being
+*deleted* rather than by the prose being edited (see Concurrency). `viv_sigtab`
 is indexed by *note kind*, not by signal number, which is legitimate only
 because `viv_signal_owns_note_exclusively` gates every write.
 
@@ -197,23 +200,79 @@ the host cc gives 2328 where `--target=aarch64-linux-gnu` gives 4384.
 
 ## Concurrency
 
-**None, by construction.** Every function here is pure. There is no lock
-in this file and no lock ordering to state, which is the point of the
-decide/build split: the part that can race is the shell's, and it lives
-next door.
+**No lock, and no longer "no mutation".** There is still no lock in this
+file and no lock ordering to state, which is the point of the decide/build
+split: the part that can race is the shell's, and it lives next door. But
+the claim that every function here is *pure* is now false in one place —
+`viv_sigtab_reset` mutates a table and carries a release fence. The
+narrowing matters because purity was doing argumentative work below.
 
-The two per-Proc tables are read and written **lock-free**, and the
-argument is a property of the clone row's argument domain rather than of
-the tables: `vivarium_clone_decide` admits exactly two words by *exact
-equality*, neither carrying CLONE_THREAD, so a PHENO_LINUX Proc cannot
-obtain a peer thread and there is no peer to race. A `fork` yields a new
-Proc with its own table.
+### The lock-free argument was refuted, and not at the edge it guarded
 
-**That argument evaporates the moment the domain admits the thread set** —
-a one-line change with no compiler consequence anywhere near either
-struct. The comment recording it was already corrected once at #157, when
-the stated mechanism ("clone is not a table row") expired without anything
-failing. Widening the domain means re-deriving this.
+The recorded argument was a property of the clone row's argument domain
+rather than of the tables: the clone decision admits exactly two flag words
+by *exact equality*, neither carrying the thread-sharing bit, so a
+Linux-phenotype process cannot obtain a peer thread and there is no peer to
+race. The caveat attached to it said the argument *"evaporates the moment
+the domain admits the thread set"*, and told a future reader to re-derive
+it if the domain widened.
+
+**The domain never widened, and the argument was refuted anyway.** The
+readers that actually raced were never peer *threads* — they were other
+**processes**, reaching in through the note-post path, which takes the
+posting process as an explicit parameter and loads the target's table twice
+with a bare acquire and no lock: once in the ignore-disposition hook, once
+through the live-handler query on the interrupt-terminate arm. So an exec
+racing a note post from *any* other process freed the table under a live
+reader.
+
+No-thread-sharing was never sufficient. The argument was already
+insufficient the day it was written, and its stated trip-wire watches an
+axis the defect does not travel on.
+
+Enumerating the readers by *enclosing function* rather than by grep hit
+finds a **third** lock-free load, in the Linux signal-delivery path's
+reset-handler arm. That one is genuinely same-process — it runs at the
+target's own return to user mode — so the exec-alone gate really does cover
+it, and the cross-process count stands at two. Worth stating because the
+count is what the argument turns on, and "two of three" is a different fact
+from "two".
+
+**The generalizable half:** *a safety argument can be precise about the
+wrong scope.* The gate it rests on is real and correctly derived — the
+clone domain genuinely does exclude peer threads — but it bounds *threads*
+and was used to prove a claim about *processes*. A correct premise, a
+correct derivation from it, and a conclusion that does not follow. That is
+harder to catch than a wrong premise, because everything checkable checks
+out. ([[sub-kernel-death]] records the same shape found independently on
+the other side of the same fix, forty lines from a *valid* use of the same
+gate.)
+
+### The fix, and why it is written per field
+
+The exec path no longer frees the table; it **zeroes it in place**, so the
+allocation lives until reap — the lifetime it had before the free was moved
+forward to exec. Every accessor is null-safe, so an all-default table and a
+null one answer identically, which is exactly why the free looked harmless.
+
+The reset writes **per field** rather than as a block, and that is measured
+rather than stylistic: under the kernel's freestanding, no-builtin build the
+compiler cannot form a block store from a byte loop, and a byte loop emits
+half-word stores — **torn writes under a lock-free cross-process reader**.
+The store width is an ABI property here, not an optimisation detail.
+
+The memory-safety half is split into its own function so it can be unit
+tested, with the exec-alone precondition stated on it.
+
+### The test asserts pointer identity, and that is the only observable
+
+Because the accessors are null-safe, no end-to-end test can distinguish the
+fix from the defect: a freed-and-nulled table and a zeroed one behave
+identically at every call site. **Behavioural invisibility.** So the
+regression asserts that the table pointer is *unchanged* across the reset
+(plus that every byte is zero), which looks like testing an implementation
+detail and is not — it is testing the only thing that separates the two
+states.
 
 ## Invariants enforced
 
