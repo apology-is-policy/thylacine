@@ -2,7 +2,7 @@
 id: sub-substrate-build
 type: sub
 parent: moc-substrate
-title: "The build — targets, the ledger, and the two staleness checks"
+title: "The build — targets, the ledger, and the four guards on a stale artifact"
 code:
   - tools/build.sh
   - tools/mkcpio.py
@@ -14,7 +14,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -30,9 +30,16 @@ userspace, the pouch POSIX sysroot, the Go GOROOT, the Clade toolchain, the
 all -> kernel -> { userspace, pouch-progs, stratumd, pool-fixture, ramfs, disk }
 ```
 
-Sub-targets (`userspace`, `sysroot`, `pouch-progs`, `stratumd`, `pool`,
-`ramfs`, `disk`) build one stage. `clean` is the only true from-scratch
+Sub-targets build one stage each. `clean` is the only true from-scratch
 reset.
+
+**There are nineteen targets and three lists of them, no two of which
+agree.** The dispatcher's `case` arms are ground truth at nineteen; the
+"Unknown target" error advertises fifteen; the header comment block names
+ten. The two graphics/toolchain families — the Clade compiler stages and the
+ported-game builders — are the bulk of what the shorter lists omit. Nothing
+is advertised that does not exist, so there is no phantom; the drift is one
+directional, and it is toward silence.
 
 **Every run ends with a `SUMMARY for target ...` block listing exactly what
 was BUILT / REUSED / PRESERVED.** That block is the contract: read it to
@@ -92,6 +99,32 @@ finishes by cloning `pool.img` and `system.key` to `.baked-snapshot`
 siblings (`cp -c`, APFS clonefile, plain copy elsewhere). Those twins are
 what every downstream harness restores from per boot or per attempt — and
 why the key twin can be compared to prove a restore is coherent.
+
+**A third check now runs before any target does, and it is the file's best
+structural argument.** A hand-written patch series is validated for
+unified-diff hunk line counts at one unconditional chokepoint ahead of the
+dispatcher — ~50 ms for 281 hunks. Its comment states the reason plainly:
+there are several `patch` loops (the sysroot, the SDL port, the game port,
+the compiler and graphics ports), and the lesson from the earlier bake
+failure is *verify at one chokepoint instead of copying a check into every
+caller.* It exists because the tool ate a function definition out of a port
+patch and exited zero — a `patch` that reports success having dropped added
+lines past a mis-counted hunk header.
+
+Note what makes this different in kind from the two staleness checks: those
+watch mtimes and can only warn. This one reads the artifact's own internal
+arithmetic and refuses.
+
+**A fourth guard warns about a stage the main chain never refreshes.** The
+compiler-toolchain staging step is reachable only as its own explicit
+target, never from `all`, so a rebuilt graphics binary does not reach the
+staged tree on its own — and the pool then re-mints faithfully around the
+*previous* binary with every ledger line green. That trap has been paid for
+twice, and the second time the gate failed three times out of three on a
+binary twenty-seven minutes older than the fix under test, *looking exactly
+like a real defect in the change*. The warning compares mtimes deliberately:
+a content check would mean stripping a ~145 MB binary on every pool bake.
+See Caveats for what its own comment claims versus what it does.
 
 **Host-side pool population reuses shipped Stratum tools, not new code.**
 The "installer" is shell orchestration: `stratum-mkfs` creates the pool,
@@ -153,14 +186,51 @@ LS-CI mints one with `mkdisk.py` at need.
 
 ## Caveats
 
-- The header comment block is the most accurate documentation of the target
-  chain in the tree and is actively maintained — prefer it to any prose
-  elsewhere, including the absorbed reference docs.
+- ~~The header comment block is the most accurate documentation of the target
+  chain and is actively maintained — prefer it to any prose elsewhere.~~
+  **THAT ADVICE IS NOW WRONG, AND THIS DOSSIER GAVE IT.** The header is
+  still the best account of *what each target it names does* — the caching
+  footguns, the pool/key coupling, the summary contract are all there and
+  all correct. But as a *list*, it is the least complete of the three: ten
+  entries against the dispatcher's nineteen, so it is silent about nine
+  working targets including every Clade toolchain stage.
+
+  The failure is worth more than the correction. The claim was true when
+  written and decayed without anything failing, because a target added to
+  the dispatcher works perfectly whether or not the header mentions it —
+  there is no build error, no test, and no user complaint, since the people
+  adding targets already know they exist. The only reader who pays is the
+  one who does not, and they cannot tell an omission from an absence. That
+  is why the recommendation was the dangerous part: it routed exactly that
+  reader to the list most likely to be short. Task #180.
 - `THYLACINE_MKFS_PRESERVE=1` skips populate entirely, so new pool content
   needs a one-time `PRESERVE=0`. A runtime "file absent" for something you
   believe you baked is that, and it has produced at least one gate that
   reported PASS having verified nothing.
 
+- **The stale-stage warning claims a property it achieves by maintenance,
+  not by construction — and its own comment is the argument against
+  itself.** The comment says it is *"checked for EVERY staged GL binary, not
+  just the one that caught it: the trap is a property of the staging step,
+  so a name-by-name check would go quiet again the moment a binary is added
+  — which tyr-glquake then was."* The loop two lines below is a name-by-name
+  check of four.
+
+  It is **complete today** — the staged set and the watched set were diffed
+  and match exactly, with nothing staged-but-unwatched — so the sharper
+  finding ("a fifth will go quiet") would have been wrong, and checking is
+  what stopped it being filed. What is true is weaker and still real: the
+  set is maintained by hand in two places, and adding a binary takes two
+  edits with nothing failing if only one is made. The failure mode is a
+  warning that does not print, which is the quietest outcome in the file.
+
+  One line from safe-by-default, because the staging step already computes
+  the authoritative set. Task #181.
+
 ## Provenance
 
 [[chg-2026-08-01-substrate-sweep]].
+
+[[chg-2026-08-15-build-targets]] is the re-sweep: the target set nearly
+doubled, the patch-hunk chokepoint and the stale-stage warning arrived, and
+this dossier's own "prefer the header block" advice was falsified.

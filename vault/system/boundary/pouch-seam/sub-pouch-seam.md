@@ -7,14 +7,13 @@ code:
   - usr/lib/pouch/patches/0001-pouch-syscall-seam.patch
   - usr/lib/pouch/patches/0002-pouch-stdio-no-iovec.patch
   - usr/lib/pouch/patches/0008-pouch-hw-syscalls.patch
-  - tools/build.sh
 audit: hard
 guarded-by: []
 validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -184,3 +183,15 @@ per-call errno approximation built on top of it.
 [[adt-seam-r1]] 1 P0) → [[chg-2026-05-25-16b-beta-hw-openat]] (0008, the
 hw numbers for Stratum's in-process virtio-blk driver) → the number table
 has grown at nearly every subsequent pouch landing.
+
+[[chg-2026-08-15-build-targets]] **dropped `tools/build.sh` from this
+dossier's `code:` list.** The claim dated from the original landing ("0001 +
+0002 + the build wiring") and had never been paid for: the whole file
+mentioned the build script exactly once, in the `code:` line claiming it.
+Meanwhile [[sub-substrate-build]] describes the sysroot rebuild, the patch
+series application and the staleness checks in full, so nothing was lost.
+What it cost while it stood was a false signal — an 841-line churn figure
+attributed to a dossier that described none of it, competing for a place at
+the head of the sweep queue. Same narrowing as the batch-35 pass, for the
+same reason: **traversal is not a sweep, and neither is being built by
+something.**
