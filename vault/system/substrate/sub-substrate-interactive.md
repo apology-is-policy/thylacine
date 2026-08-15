@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-08-02
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -33,7 +33,12 @@ dropped). This is the only harness that can catch that class.
   (or the named ones). Exit 0 iff no scenario failed.
 - **Optional gate**: SKIPs (exit 0) when `expect` is absent.
 - Default `THYLACINE_ACCEL=tcg` — the portable compat run, and a *different
-  CPU* from `test.sh`'s HVF `-cpu host`.
+  CPU* from `test.sh`'s HVF `-cpu host`. **Since G-3 it is only a default**:
+  14 graphics scenarios override it to `hvf` in the `.exp` itself, and the
+  timings table reports what actually **booted** rather than what this
+  variable said.
+- `LS_CI_JOBS` scenarios run at once (**3** by default — but see the
+  caveats, the file says otherwise twice).
 - Per-scenario bounded retry (`LS_CI_ATTEMPTS`, default 3); a scenario fails
   only if ALL attempts fail.
 - Scenario exit 77 = SKIP (a missing optional host artifact).
@@ -182,7 +187,43 @@ the old behaviour, not an unknown one."
 "qemu-system-aarch64.*$BUILD_DIR/"`. The old pattern
 (`qemu-system-aarch64.*thylacine`) matched every thylacine worktree, so two
 sessions gating concurrently shot each other's live VMs — "qemu GONE, guest
-healthy" mid-scenario failures on both sides (#59).
+healthy" mid-scenario failures on both sides (#59). The intra-tree half of
+that same bug is closed by refusal rather than by narrowing; see
+Concurrency.
+
+**Accel is not a speed knob, and G-3's anchor set is the best structure in
+the file.** `run-vm.sh` derives the CPU model *and* the GIC version from
+it: hvf gives `-cpu host` + GICv2, tcg gives `-cpu max` + GICv3 (HVF cannot
+do v3 here at all — its emulated GICv3 distributor trips an `isv`
+data-abort assert). So every scenario moved to HVF stops covering GICv3 and
+`-cpu max`, and #166 is the standing proof that a scenario can go **inert
+under HVF while still reporting PASS** — the worst outcome available, a
+green test that quietly stopped testing.
+
+Seven scenarios therefore stay on TCG, and the list is **mechanical rather
+than "whatever nobody got round to flipping"** — each has a recorded reason
+and several are the *only* remaining coverage of an open bug: two whose
+trigger IS TCG's serialized vCPU, one pinning tcg for a deterministic
+split, one that breaks under HVF outright, the tickless-idle guard (whose
+HVF side is covered by a separate gate), a TCG-only watchpoint livelock
+whose regression would otherwise be retired, and a bug that reproduces only
+under TCG gate load. Together they keep GICv3 and `-cpu max` live in every
+run.
+
+**And it is enforced, not documented**: an hvf directive inside an anchor's
+`.exp` is *refused* with a message naming the coverage it would drop,
+never silently honoured. The comment states the principle exactly — "a
+coverage rule that depends on nobody editing the wrong file is not a rule."
+Read the caveats for where that principle is not applied.
+
+**Timings are recorded per scenario and per attempt (G-1).** A TSV plus a
+sorted on-screen summary, and the accel column is read out of the boot
+artifact rather than taken from the harness's own environment — because 14
+scenarios override it, and a timings table whose accel column is wrong is
+*worse* than one with no accel column, since it invites the tcg-vs-hvf
+comparison it exists to prevent. The instrument came first on purpose: G-2
+needed a per-scenario cost to pack slots and a before/after to prove it
+gained anything, and G-3 allocates a scarce riskier resource **by** cost.
 
 ## Data structures
 
@@ -192,8 +233,53 @@ Per scenario: a `.log` transcript (full PTY session) and a `.steps` file
 
 ## Concurrency
 
-One VM at a time within a run; the residual expect-channel bug is
-load-sensitive, so interactive gates want an otherwise-idle host.
+~~One VM at a time within a run.~~ **Three, by default, since G-2/G-3** —
+the gate now runs `LS_CI_JOBS` scenarios at once, and every shared thing it
+touched became per-slot to allow it: the pool fixture, the QMP socket, the
+reaper. Measured on the full set: 4908 s serial → 2925 s wall.
+
+**Concurrency here is RAM-bound, not core-bound.** Each VM takes
+`THYLACINE_MEM_MIB`, so ~3 is the honest ceiling on an 8 GB host regardless
+of its 8 cores. Overcommitting swaps, and a swapping host "makes every
+timeout in the suite marginal — which would then get read as guest
+flakiness."
+
+**Budgets scale with the job count, and the reasoning is the fail-open
+one.** Under contention the same *healthy* guest is legitimately slower —
+each VM gets 4 vCPUs, so N VMs oversubscribe the host and TCG is CPU-bound.
+Measured: three scenarios that take ~190 s serially take ~400 s each,
+blowing a fixed 300 s budget while their logs show the guest still counting
+up the boot ladder — a harness fault reported as a guest regression. The
+boot timeout exists to catch a **wedge**, not to enforce an SLA, so erring
+generous is the safe direction: an over-large budget only delays declaring
+a wedged guest dead, while an undersized one reports failures that do not
+exist. An explicitly pinned budget always wins; the scaling touches only
+the default, and whether the caller pinned it is recorded *before* the
+defaults make that unknowable.
+
+**Two reapers, and the second exists because `bash` surprised someone.**
+The tree-wide reaper is correct serially and catastrophic in parallel — a
+scenario finishing its first boot would shoot down every neighbour. So each
+forked scenario re-traps to its own slot before doing anything, and the
+reason is **measured, not assumed**: bash resets *signal* traps in a
+subshell but the `EXIT` trap still fires when that subshell exits, so a
+forked scenario inherits the tree-wide reaper and runs it on the way out.
+That is #59's cross-tree shootout reproduced *inside* one tree, presenting
+as "qemu GONE, guest healthy" — indistinguishable from a guest fault, and
+exactly the shape this project keeps mistaking for load.
+
+**In-tree concurrency with any other VM is refused up front (#217).** The
+`EXIT` trap is still tree-wide, so a VM this script never started — an SMP
+gate, a `test.sh` boot, a manual run — would die uncatchably on the way
+out, its log simply stopping: the misread-as-flake shape again. Refusal
+beats narrowing, because in-tree concurrency is unsafe for a second reason
+anyway (both gates restore the same `pool.img`, and a restore under a live
+VM manufactures exactly the corruption the gates exist to detect), so a
+named operator error beats a silent mutual-corruption race.
+
+**The check must precede the trap install**, and that ordering is a scar:
+install-then-refuse fires the reaper on the refusal's own exit, killing the
+VM it just declined to disturb.
 
 ## Invariants enforced
 
@@ -236,6 +322,15 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
 - The shutdown path must be verified **positively** (`EOF clean` in the steps
   file). A dead monitor still PASSes: expect simply times out and the wrapper
   reaps QEMU, so absence of a complaint proves nothing here.
+- A forked scenario must re-trap to its own slot before doing anything. The
+  inherited `EXIT` trap is tree-wide, and a scenario that runs it takes down
+  every neighbour — presenting as a guest fault.
+- Moving a scenario to HVF drops GICv3 and `-cpu max` coverage, and #166
+  proves a scenario can go **inert under HVF and still report PASS**. The
+  anchor gate refuses this mechanically; removing a name from the anchor
+  list must say why in the same commit.
+- A timing without its accel is unusable. Read the accel from the boot
+  artifact, never from the harness's environment — 14 scenarios override it.
 
 ## Seams
 
@@ -254,6 +349,33 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
 - The absorbed `09-test-harness.md` numbered this section's "Four
   portability facts are load-bearing" and then listed **six** — the list grew
   and its header did not.
+
+- **The job-count default is stated three times and two are wrong — in the
+  file that argues a rule nothing enforces is not a rule.** The usage block
+  says *"(default 1)"*; the code is `${LS_CI_JOBS:-3}`; and a third copy
+  three hundred lines down still says *"the default stays 1 until a
+  parallel run has been proven green."* G-2 landed all three consistent at
+  1; G-3 flipped the code and updated neither prose copy — so the surviving
+  policy sentence names a precondition as unmet, three hundred lines below
+  the comment citing the very run that met it.
+
+  Not cosmetic, because the parallel branch changes behaviour a reader
+  would not go looking for: the boot budget an unconfigured run actually
+  gets is 900 s rather than 300, the command budget 90 rather than 30, and
+  three VMs start on a host the reader believes is running one. The file
+  itself notes that a swapping host "makes every timeout in the suite
+  marginal — which would then get read as guest flakiness," which is the
+  failure this dossier exists to keep legible. Task #183.
+
+  The fix is to derive rather than restate. The pointed part is that the
+  anchor gate 300 lines above already knows this: *"Enforced, not
+  documented… a coverage rule that depends on nobody editing the wrong file
+  is not a rule."* Right principle, not applied to its own neighbour.
+
+  Method note for anyone re-checking: `git log -S 'LS_CI_JOBS:-'` does
+  **not** find the flip. `-S` counts occurrences of the string, and
+  `:-1` → `:-3` leaves the prefix count unchanged, so the commit that made
+  the change is invisible to the search most likely to be reached for.
 
 ## Provenance
 

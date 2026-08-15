@@ -128,9 +128,9 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-15 [[chg-2026-08-15-build-targets]] — build.sh re-swept: three target lists that disagree, and the vault recommended the shortest
 - 2026-08-15 [[chg-2026-08-15-diorama-vivarium]] — diorama re-swept: a second operating mode the dossier never saw, and a read buffer half its source
 - 2026-08-15 [[chg-2026-08-15-exec-lineage]] — exec re-swept after LINEAGE: a seam closed sideways, and a prediction that came true
+- 2026-08-15 [[chg-2026-08-15-interactive-gating]] — LS-CI re-swept: the gate went parallel, and its own default is stated three times
 - 2026-08-15 [[chg-2026-08-15-joey-boot]] — joey re-swept after Warp-2: a mount deliberately not made, and the scope of what this dossier owns
 - 2026-08-15 [[chg-2026-08-15-proc-lineage]] — proc.c re-swept after LINEAGE: the address-space extraction, the second rfork shape, and the vfork park
 - 2026-08-15 [[chg-2026-08-15-stale-by-cotenancy]] — Two dossiers verified current without change: churn measured per file, not per surface
 - 2026-08-15 [[chg-2026-08-15-syscall-dispatch-lineage]] — The dispatcher re-swept after LINEAGE and VIVARIUM: the prologue, the frame-taking arms, and the core split
-- 2026-08-14 [[chg-2026-08-14-merge-fold-124]] — The 124-commit merge, and what --ours would have thrown away
 <!-- generated:end -->
