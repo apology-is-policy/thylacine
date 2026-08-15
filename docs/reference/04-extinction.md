@@ -65,7 +65,7 @@ This contract is shared between:
 - `tools/test.sh` — `EXTINCTION_MARKER="EXTINCTION:"`; pattern-match.
 - `TOOLING.md §10` — documents the contract.
 - `CLAUDE.md` "Boot banner contract" — references the same.
-- (Future) `tools/agent-protocol.md` — full agent-side handling.
+- Full agent-side handling lives in `TOOLING.md §10` itself. (This line previously promised a future `tools/agent-protocol.md`; it was planned in Phase 1, never written, and the promise was retired rather than kept — main#244.)
 
 Changing the prefix requires coordinated updates across all five surfaces in the same commit. Don't.
 
