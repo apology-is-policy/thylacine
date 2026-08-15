@@ -5,12 +5,12 @@ title: "The death path: the ZOMBIE chokepoint and the universal death-wake"
 parent: moc-kernel-execution
 code: ["kernel/proc.c"]
 audit: hard
-guarded-by: [inv-i24, inv-i9]
+guarded-by: [inv-i24, inv-i9, inv-i44]
 validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
-design: ["docs/ARCHITECTURE.md"]
+design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -131,6 +131,51 @@ whole finding: `group_exit_msg` is set on *every* `SYS_EXIT_GROUP` — a clean
 `exit_group(0)` included — so without it the orderly final close read as
 "dying" and every sleep-capable hook short-circuited, silently dropping the
 dev9p write-behind flush and skipping the close-time Tclunk.
+
+**The vfork park, and why death pays nothing for it.** A fork that shares the
+parent's address space suspends the parent until the child leaves it, and the
+child leaving is one of three events — it exec'd, it died, or it is gone from
+the children list. The park reuses the parent's `child_waiters` list, which is
+what makes **the death release free**: the ZOMBIE chokepoint already wakes that
+list, so a vfork child dying releases its parent through machinery that predates
+vfork by months. Only the exec release needed a new wake, and it is one line
+under the same lock at the address-space swap.
+
+The design principle is stated in the source and is worth carrying, because it
+is the same one the [[dec-2026-08-15-cutover]] decision rests on:
+
+> The release condition is not a *record* of the release, it **is** the release.
+
+"The child is off my frame" means "the child no longer maps my address space",
+and that is a fact already written down — the child's address-space pointer. A
+flag would have been the obvious design and is strictly worse: it records the
+release somewhere other than where the release happens, so a third release path
+added later would silently strand every vfork parent. The pointer comparison
+cannot drift from reality because it *is* reality.
+
+Three properties keep it sound:
+
+- **The comparison is not an ABA** only because the parent still holds a
+  reference to the shared address space, so the outgoing object cannot be freed
+  and its address cannot be recycled underneath the comparison. That is a
+  direct dividend of the extraction having moved the VMA drain into the address
+  space's last drop.
+- **"Gone from the list" counts as released, deliberately.** It would mean some
+  path removed the child without passing either release site, and the only two
+  dispositions available are "resume" and "hang forever". A parent that resumes
+  early corrupts a frame the child has already stopped using; a parent that
+  hangs looks unkillable and never recovers. It fails toward the one that
+  terminates.
+- **A parent killed while parked returns `SLEEP_INTR` and does not loop** —
+  re-sleeping would re-interrupt forever — and leaves nothing behind, because it
+  registered no state anywhere but its own stack. The park re-initialises its
+  waiter on every iteration so a wake left over from the previous pass cannot
+  make it spin.
+
+The exec-side wake is unconditional rather than tested against "is anyone
+suspended", and the reason is this dossier's recurring one: a test would be a
+second place that has to agree with the park about who is waiting. A spurious
+wake costs a re-scan.
 
 **The stop park.** Two independent owners can park a thread —
 `debug_stop_req` (I-39) and `job_stop_req` (I-20) — and they share one park
@@ -262,4 +307,33 @@ What a change **must** re-establish:
   cannot accelerate an interrupt-death. The no-IPI shape is also what lets
   the unit test drive the real waker on the single-CPU harness.
 
+- **A single-thread guarantee bounds threads, and says nothing about other
+  processes.** exec resets the signal dispositions, and for one release it did so
+  by *freeing* the table — reasoning from the exec-alone gate that there could be
+  only one reader. That gate bounds the *threads of this process*. It says
+  nothing whatever about other processes, and the note-post path reaches this
+  process's table with somebody else as the poster on essentially every call: the
+  child-exit note to a parent, an explicit post, the process-group fan, the
+  console interrupt, a terminal hangup. Those readers load the pointer with a
+  bare acquire and hold no lock of exec's. So the free was a use-after-free
+  across CPUs — one loads the pointer, this one frees it, the first dereferences
+  freed slab.
+
+  The fix resets **in place** and never frees; the allocation lives until reap,
+  which is the lifetime it had before the free was moved forward to exec. Zeroing
+  is byte-identical to the freshly-allocated table, so the dispositions really are
+  back to default.
+
+  Worth carrying as a shape, not just an incident: the wrong comment was not
+  vague, it was *precise about the wrong scope*, and it cited a real guarantee
+  that really does hold. The same exec path clears the hardware breakpoint and
+  watchpoint slots under the same guarantee — and there the reasoning is sound,
+  because a debugger can only have armed them while the target was fully stopped
+  and this is the only live thread. Same gate, one valid use and one invalid one,
+  forty lines apart.
+
 ## Provenance
+
+[[chg-2026-08-15-proc-lineage]] is the re-sweep after the LINEAGE arc: the
+vfork park that rides the existing child-waiter wake, and the exec-time
+disposition reset that had to stop being a free.

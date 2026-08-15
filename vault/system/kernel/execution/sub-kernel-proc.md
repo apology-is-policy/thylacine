@@ -5,12 +5,12 @@ title: "The Proc: table, lineage, creation, and wait"
 parent: moc-kernel-execution
 code: ["kernel/proc.c", "kernel/include/thylacine/proc.h"]
 audit: hard
-guarded-by: [inv-i1, inv-i32, inv-i33]
+guarded-by: [inv-i1, inv-i32, inv-i33, inv-i44]
 validated-by: [gate-smp]
 locks: [lock-proc-table]
-design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md"]
+design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -32,7 +32,7 @@ keeps the tree rooted and therefore keeps every Proc findable.
 | Surface | Shape |
 |---|---|
 | `proc_alloc` / `proc_free` | allocate a KP_ZERO'd Proc with a fresh pid + stripes + pgtable + handle table + note queue; free one that is ZOMBIE with no threads and no children |
-| `rfork` / `rfork_with_caps` | the sole Proc-creation chokepoint; `RFPROC` only, all other flags **extinct** |
+| `rfork` / `rfork_with_caps` / `rfork_forked` | the sole Proc-creation chokepoint; `RFPROC` **or** `RFPROC\|RFMEM`, every other flag **extincts** |
 | `proc_find_by_pid` / `proc_for_each` | DFS from `kproc`; the callback runs under [[lock-proc-table]] |
 | `wait_pid_for(want_pid, flags, status_out)` | reap a ZOMBIE child, or (PTY-1e) *report* a stopped/continued one; pid/pgrp selectors + `WNOHANG` |
 | `proc_setsid` / `setpgid` / `getpgid` / `getsid` | the POSIX session + process-group cores ([[sub-kernel-pts]] and [[sub-kernel-jobctl]] are what read them) |
@@ -46,6 +46,37 @@ resolves against — a fresh monotonic u64 per `proc_alloc`, never inherited,
 `0` reserved as the fail-closed sentinel.
 
 ## Mechanism
+
+**Three shapes, one discriminator.** Since the fork arc there are exactly three
+answers to "what address space does the child get", and each *is* what its shape
+means:
+
+| Shape | Address space | What it is |
+|---|---|---|
+| kernel entry, no `RFMEM` | a fresh empty one | spawn — the child starts at a kernel entry point and execs, so copying would be waste thrown away at the exec |
+| `RFMEM` | the parent's, **shared** | vfork |
+| a fork context, no `RFMEM` | a copy-on-write clone | stock `fork()` |
+
+The discriminator is the fork context — the saved caller frame the child will
+return onto — and **the handle table two hundred lines below is discriminated by
+the same thing, deliberately rather than by coincidence.** A fork context means
+the child *is* the parent, continuing on its frame, so it must see the parent's
+memory *and* the parent's descriptors or its very next instruction reads
+something that is not there. One fact, two consequences.
+
+What is **not** conditional on `RFMEM` is the point Plan 9's flag word exists to
+make: the Territory, the note queue, the environment and the handle table remain
+the child's own, because each is governed by its own flag and all of those are
+still refused. "Shares memory" and "shares file descriptors" are independent
+claims — and the Linux shape this eventually serves depends on the separation,
+since `posix_spawn` passes the memory-sharing flag *without* the
+descriptor-sharing one precisely so the child's descriptor manipulation cannot
+disturb the parent.
+
+The clone's reference accounting is worth stating because it makes the failure
+paths need nothing bespoke: the clone is born with one reference (the creator's),
+allocation takes the child's, the creator drops its own — so an allocation
+rollback drops the child's and the creator's unref then takes the last one.
 
 **Creation.** `rfork_internal` is the one path, and its body is best read as
 a ledger of three columns:
@@ -120,9 +151,15 @@ distinct statuses so the pid *and* the status each discriminate.
 
 ## Data structures
 
-`struct Proc` is 400 bytes, grown strictly by appending, with **every**
-load-bearing offset individually `_Static_assert`ed and each assert carrying
-the reason its field landed where it did. `magic` is at offset 0 so SLUB's
+`struct Proc` is 392 bytes and no longer holds a page table at all — it holds a
+pointer to a refcounted address space, which is what makes the vfork and
+copy-on-write shapes above expressible. That extraction is the **only change in
+the struct's recorded history that ever made it smaller**: 408 → 376 in one
+commit, against a run of appends before and after (it is back to 392 through a
+socket table and a ring-poll field). Worth naming because the struct is
+otherwise grown strictly by appending, with **every** load-bearing offset
+individually `_Static_assert`ed and each assert carrying the reason its field
+landed where it did. `magic` is at offset 0 so SLUB's
 freelist write clobbers it — a double `proc_free` reads the clobbered value
 and extincts with a clear diagnostic rather than corrupting.
 
@@ -166,7 +203,16 @@ accountant.
 
 - [[inv-i1]] — a child gets a *cloned* Territory (`territory_clone`), never
   a shared one; `RFNAMEG` is unimplemented, so per-Proc namespace isolation
-  holds by construction at this layer.
+  holds by construction at this layer. **This survived the address-space
+  sharing intact, and that is the flag word earning its keep**: `RFMEM` shares
+  memory and nothing else, so two Procs on one address space still hold two
+  independent namespaces.
+- [[inv-i44]] — an address space now outlives any single Proc and is
+  reference-counted, so this file's contribution is the three-shape decision
+  above plus the reference discipline around it. The teardown moved with it: the
+  VMA drain happens at the address space's last drop, not at Proc free, which is
+  what makes the vfork release comparison safe against recycling
+  ([[sub-kernel-death]]).
 - [[inv-i32]] — the four axes charged here (pages, VMAs, shared-in pages,
   children/threads) plus the unforgeable `PRINCIPAL_SYSTEM` exemption.
 - The I-2 capability strip — `& ~CAP_ELEVATION_ONLY` on every fork.
@@ -227,8 +273,9 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
 
 ## Seams
 
-- [[seam-rfork-flags-unimplemented]] — eight of the nine Plan 9 rfork flags
-  extinct.
+- [[seam-rfork-flags-unimplemented]] — **seven** of the nine Plan 9 rfork flags
+  now extinct; `RFMEM` was implemented by the fork arc and each of the rest is
+  reserved to make its own case rather than inheriting approval from that one.
 - [[seam-proc-find-no-refcount]] — no Proc refcounting; lookup returns a
   bare pointer.
 - [[seam-legate-member-sweep-race]] — a member spawned racing the legate
@@ -265,3 +312,7 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   and task #69.
 
 ## Provenance
+
+[[chg-2026-08-15-proc-lineage]] is the re-sweep after the LINEAGE arc: the
+address-space extraction, the second accepted rfork shape, and the three-shape
+creation decision.
