@@ -4,7 +4,7 @@ type: chg
 title: "The handle table re-swept: POSIX descriptors arrived, and the dossier's ceiling was wrong when written"
 date: 2026-08-15
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["cd1bc407"]
 touched: [sub-kernel-handle]
 established: []
 closed: []
