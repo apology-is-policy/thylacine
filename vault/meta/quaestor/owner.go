@@ -322,7 +322,24 @@ func answerOwner(root string, reg *Registry, idx map[string][]*Note,
 		a.Twin = t
 	}
 	a.RefBy = referencedBy(reg, q)
-	a.Covered = len(a.TwinOwner) > 0 || len(a.RefBy) > 0
+	// A reference is a LEAD, never coverage -- and getting this wrong was a
+	// false positive exactly as bad as the false UNOWNED the rest of this file
+	// defends against, in the opposite direction.
+	//
+	// The caller's real question at the doc step is "will the prose I am about
+	// to write end up somewhere a future reader finds it?". A twin or a
+	// directory claim answers yes: a DOSSIER describes that surface, so the
+	// prose has a home. A `pinned-by:` on a registry note does not -- it means
+	// the file is SPOKEN FOR, not that the surface is DESCRIBED. Both live
+	// instances are `abi` notes (abi-errno pins errno.h, abi-boot-banner pins
+	// extinction.c): they pin VALUES and STRINGS, and a description of a
+	// mechanism has nowhere to go in either.
+	//
+	// So exit 0 on this route would send a session to the vault to write
+	// something the vault cannot hold. The lead is still worth printing loudly
+	// -- an errno addition genuinely does need abi-errno updated -- but it is
+	// printed BESIDE the "write the reference doc" verdict, not instead of it.
+	a.Covered = len(a.TwinOwner) > 0
 	dir := filepath.Dir(q)
 	if dir != "." {
 		a.Dir = dir
@@ -396,8 +413,9 @@ func printOwner(a ownerAnswer) {
 		}
 	}
 	if len(a.RefBy) > 0 {
-		fmt.Printf("  NOT swept, but named by %s -- read those before writing anything new\n",
+		fmt.Printf("  ALSO named by %s -- not a dossier, so it cannot hold a\n",
 			strings.Join(firstNStr(a.RefBy, 4), ", "))
+		fmt.Printf("  %-34s description; check whether your change belongs there TOO\n", "")
 		if len(a.RefBy) > 4 {
 			fmt.Printf("  %-34s (+%d more)\n", "", len(a.RefBy)-4)
 		}
@@ -422,7 +440,8 @@ func printOwner(a ownerAnswer) {
 	case len(a.TwinOwner) > 0:
 		fmt.Println("  -> the surface IS swept: extend the twin's dossier, not a reference doc.")
 	case len(a.RefBy) > 0:
-		fmt.Println("  -> not swept, but the vault speaks about it: update what is named above too.")
+		fmt.Println("  -> no dossier: write the reference doc as today, file the sweep,")
+		fmt.Println("     AND check the note above -- it may need the same change.")
 	default:
 		fmt.Println("  -> no dossier: write the reference doc as today, and file the sweep.")
 	}

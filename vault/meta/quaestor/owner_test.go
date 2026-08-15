@@ -120,6 +120,38 @@ func TestReferencedByBoundsItsMatch(t *testing.T) {
 	}
 }
 
+// TestReferenceIsALeadNotCoverage: a `pinned-by:` on a registry note must NOT
+// reach exit 0. Found by main at the doc step, and it is the mirror image of
+// the false-UNOWNED this file is otherwise built against -- I defended one
+// direction so hard I opened the other.
+//
+// The question the exit status answers is "will the prose I am about to write
+// end up somewhere a future reader finds it?". A twin says yes: a DOSSIER
+// describes the surface. A registry pin says only that the file is SPOKEN FOR
+// -- abi-errno pins errno.h's VALUES and abi-boot-banner pins extinction.c's
+// STRINGS, and a description of a mechanism has nowhere to go in either. Exit 0
+// there sends a session to the vault to write something the vault cannot hold.
+//
+// The lead is still reported, loudly, beside the write-the-reference-doc
+// verdict -- an errno addition genuinely does need abi-errno updated too.
+func TestReferenceIsALeadNotCoverage(t *testing.T) {
+	root := t.TempDir()
+	mkdirAll(t, filepath.Join(root, "kernel", "include", "thylacine"))
+
+	pin := &Note{ID: "abi-errno",
+		Front: frontWith("pinned-by", "_Static_assert per value (kernel/include/thylacine/errno.h, 20 asserts)")}
+	reg := &Registry{byID: map[string]*Note{}, ordered: []*Note{pin}}
+
+	a := answerOwner(root, reg, map[string][]*Note{}, nil, "kernel/include/thylacine/errno.h")
+	if a.Covered {
+		t.Error("a registry pin is a LEAD, not coverage -- exit 0 here sends the " +
+			"author to write a mechanism description into a value registry")
+	}
+	if len(a.RefBy) != 1 || a.RefBy[0] != "abi-errno" {
+		t.Errorf("the lead must still be reported: %v", a.RefBy)
+	}
+}
+
 func mkdirAll(t *testing.T, p string) {
 	t.Helper()
 	if err := os.MkdirAll(p, 0o755); err != nil {

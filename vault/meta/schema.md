@@ -412,14 +412,26 @@ It reports **two** verdicts and they are not the same question:
 - **covered** — the vault carries the surface by any route, which is what
   the decision actually turns on. The exit status follows this one.
 
-Three routes make a path covered but not owned, each a live case in the
-corpus: the `kernel/foo.{c,h}` house convention, where the `.c` sits in
-`kernel/` and the `.h` in `kernel/include/thylacine/` (7 headers — every one
-of them answered UNOWNED before the twin arm existed); a directory claim
-covering files beneath it; and a non-`sub` note that names the file in a
-frontmatter field other than `code:` (`abi-errno` pins `errno.h` through
-`pinned-by:` and has swept nothing, so an errno addition told "unowned,
-write the reference doc" would duplicate the errno registry).
+**Two** routes make a path covered but not owned, and both mean a *dossier*
+describes the surface under a different path: the `kernel/foo.{c,h}` house
+convention, where the `.c` sits in `kernel/` and the `.h` in
+`kernel/include/thylacine/` (7 headers — every one of them answered UNOWNED
+before the twin arm existed); and a directory claim covering files beneath
+it.
+
+A third signal is reported and is deliberately **not** a route to covered:
+a non-`sub` note naming the file in a frontmatter field other than `code:`.
+Both live instances are `abi` registries — `abi-errno` pins `errno.h`'s
+values, `abi-boot-banner` pins `extinction.c`'s strings — and a registry
+pin means the file is *spoken for*, not that the surface is *described*.
+The question the exit status answers is "will the prose I am about to write
+end up somewhere a future reader finds it?", and a value registry cannot
+hold a description of a mechanism. Counting it as coverage sent an author
+to the vault to write something the vault could not hold: the mirror image
+of the false unowned, opened by defending the other direction too hard.
+Found at the doc step by the consumer, not by the author. The lead is still
+printed loudly beside the write-the-reference-doc verdict, because an errno
+addition genuinely does need `abi-errno` updated too.
 
 The failure mode that governs the design is a **false unowned** — it
 re-opens the two-sources-of-truth divergence the cutover exists to close,
