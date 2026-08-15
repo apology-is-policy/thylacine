@@ -10,8 +10,10 @@ package main
 // not a demonstration of an intended behaviour.
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -170,4 +172,54 @@ func frontWith(k, v string) *Front {
 	f := newFront()
 	f.Set(k, list([]string{v}))
 	return f
+}
+
+// The title is reported because an ID IS NOT A SCOPE. `sub-stratum-boot` reads
+// as "the whole Stratum boot"; its title -- "Bringup -- spawn, wait for an
+// event, attach, pivot" -- is what tells a writer holding foreign-shell-gate
+// prose that this dossier is not where it goes. Measured 2026-08-15: that
+// dossier is the SOLE owner of a 9771-line file it describes a few hundred
+// lines of, and the ratified cutover reads exit 0 as "the prose belongs there".
+//
+// The control is the second half: a hit with no title must print no title
+// LINE, not an empty pair of quotes. Without it this test would pass against
+// an implementation that emitted `""` for every dossier, which is noise
+// wearing the shape of a signal.
+func TestOwnerReportsTheDossierTitle(t *testing.T) {
+	titled := ownerHit{
+		Note: "sub-stratum-boot", Rel: "vault/system/stratum/sub-stratum-boot.md",
+		Audit: "hard", Updated: "2026-08-15", Claim: "usr/joey/joey.c",
+		Title: "Bringup -- spawn, wait for an event, attach, pivot",
+	}
+	out := captureOwner(ownerAnswer{
+		Path: "usr/joey/joey.c", Kind: "file", Owned: true, Covered: true,
+		Owners: []ownerHit{titled},
+	})
+	if !strings.Contains(out, `"Bringup -- spawn, wait for an event, attach, pivot"`) {
+		t.Fatalf("owner did not report the title; a reader cannot judge scope:\n%s", out)
+	}
+
+	untitled := titled
+	untitled.Title = ""
+	out = captureOwner(ownerAnswer{
+		Path: "usr/joey/joey.c", Kind: "file", Owned: true, Covered: true,
+		Owners: []ownerHit{untitled},
+	})
+	if strings.Contains(out, `""`) {
+		t.Fatalf("a title-less hit printed empty quotes -- noise, not signal:\n%s", out)
+	}
+}
+
+// captureOwner runs printOwner and returns what it wrote. Kept here rather
+// than asserting on the struct: the struct always had the data available, and
+// what the finding was about is whether a HUMAN sees it at the decision point.
+func captureOwner(a ownerAnswer) string {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	printOwner(a)
+	_ = w.Close()
+	os.Stdout = old
+	b, _ := io.ReadAll(r)
+	return string(b)
 }

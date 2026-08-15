@@ -42,6 +42,15 @@ type ownerHit struct {
 	Updated string `json:"updated"`
 	Claim   string `json:"claim"` // the `code:` entry that matched
 	Stale   string `json:"stale,omitempty"`
+	// The dossier's own title, reported because an id is not a scope. A large
+	// file can be sole-owned by a dossier that describes one part of it, and
+	// then OWNED routes a writer somewhere their prose does not belong. The id
+	// `sub-stratum-boot` reads as "the whole boot"; its title, "Bringup --
+	// spawn, wait for an event, attach, pivot", is what lets the reader see
+	// that a foreign-shell gate is not covered by it. Printing the title does
+	// not make the ownership record right -- it makes a wrong one visible at
+	// the moment the decision is taken.
+	Title string `json:"title,omitempty"`
 }
 
 // Owned and Covered are deliberately two fields, and the exit code follows
@@ -259,7 +268,8 @@ func answerOwner(root string, reg *Registry, idx map[string][]*Note,
 	add := func(ns []*Note, claim string) {
 		for _, n := range ns {
 			h := ownerHit{Note: n.ID, Rel: n.Rel, Audit: n.Front.Str("audit"),
-				Updated: n.Front.Str("updated"), Claim: claim}
+				Updated: n.Front.Str("updated"), Claim: claim,
+				Title: n.Front.Str("title")}
 			if s, ok := stale[n.ID+"\x00"+claim]; ok {
 				h.Stale = s
 			}
@@ -381,6 +391,12 @@ func printOwner(a ownerAnswer) {
 		}
 		fmt.Printf("  %-34s %s  audit:%-5s updated:%s%s\n",
 			h.Note, h.Rel, audit, h.Updated, claim)
+		// The title, on its own line, because an id is not a scope. See the
+		// ownerHit.Title comment: OWNED means a dossier claims the path, not
+		// that it describes the part of the file you are about to write about.
+		if h.Title != "" {
+			fmt.Printf("  %-34s %q\n", "", h.Title)
+		}
 		if h.Stale != "" {
 			fmt.Printf("  %-34s STALE -- %s\n", "", h.Stale)
 		}

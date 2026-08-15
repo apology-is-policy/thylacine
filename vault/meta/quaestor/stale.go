@@ -331,7 +331,21 @@ func cmdStale(root string, args []string) int {
 		byNote[s.note] = append(byNote[s.note], s)
 	}
 
-	fmt.Printf("# Dossiers whose code changed after they were written\n\n")
+	// Co-tenancy, reusing ownerIndex rather than re-reading `code:` -- two
+	// different readings of one field is the drift codeTarget's comment warns
+	// about, and this census must agree with `owner` about who claims what.
+	//
+	// WHY THIS IS REPORTED. The churn on a line is the FILE's, not the
+	// surface's. A dossier sharing a file with a hot surface reads as heavily
+	// stale while its own material has not moved -- measured 2026-08-15, where
+	// two dossiers sat in the top six at ~910 and ~1440 lines and a
+	// word-bounded diff over their own vocabulary found one comment line and
+	// zero semantic changes respectively. Since this ordering IS the sweep's
+	// priority queue, a borrowed number does not merely waste a slot: it
+	// displaces a dossier that really moved. Naming the co-tenants lets the
+	// reader discount it, which is honest; inferring a per-surface number
+	// would not be.
+	idx := ownerIndex(reg)
 	for _, id := range order {
 		hits := byNote[id]
 		tot := 0
@@ -341,7 +355,16 @@ func cmdStale(root string, args []string) int {
 		fmt.Printf("%-42s updated=%s  %d file(s)  ~%d lines moved since\n",
 			id, hits[0].updated, len(hits), tot)
 		for _, h := range hits {
-			fmt.Printf("    %-52s changed %s  (+/-%d)\n", h.file, h.changed, h.churn)
+			share := ""
+			if others := len(idx[h.file]) - 1; others > 0 {
+				noun := "dossiers"
+				if others == 1 {
+					noun = "dossier"
+				}
+				share = fmt.Sprintf("  [shared with %d other %s]", others, noun)
+			}
+			fmt.Printf("    %-52s changed %s  (+/-%d)%s\n",
+				h.file, h.changed, h.churn, share)
 		}
 	}
 	if len(order) == 0 {
