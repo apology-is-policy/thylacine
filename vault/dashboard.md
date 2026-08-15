@@ -131,6 +131,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-15 [[chg-2026-08-15-handle-posix-fds]] — The handle table re-swept: POSIX descriptors arrived, and the dossier's ceiling was wrong when written
 - 2026-08-15 [[chg-2026-08-15-interactive-gating]] — LS-CI re-swept: the gate went parallel, and its own default is stated three times
 - 2026-08-15 [[chg-2026-08-15-joey-boot]] — joey re-swept after Warp-2: a mount deliberately not made, and the scope of what this dossier owns
+- 2026-08-15 [[chg-2026-08-15-libthyla-rs-resolution]] — libthyla-rs re-swept: the kernel resolves now, and the primitive that got it wrong is still public
 - 2026-08-15 [[chg-2026-08-15-proc-lineage]] — proc.c re-swept after LINEAGE: the address-space extraction, the second rfork shape, and the vfork park
-- 2026-08-15 [[chg-2026-08-15-stale-by-cotenancy]] — Two dossiers verified current without change: churn measured per file, not per surface
 <!-- generated:end -->

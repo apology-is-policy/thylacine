@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -152,6 +152,39 @@ compare-exchange, makes the syscall, initializes the heap, and publishes with a
 release store; a loser spins on an acquire load until it sees the published
 state. If the reservation fails there is no recovery, so the winner exits the
 process — which is also what unblocks the losers, by killing them.
+
+### The kernel resolves; userspace only splits
+
+The largest change since this dossier was written, and it is a principle
+rather than a fix. The crate used to join a relative path onto the working
+directory and **lexically clean** it — popping `..` without proving the popped
+component existed, dropping `.` and trailing separators — so the kernel's
+resolver never saw the components its gates exist to judge.
+
+Six consequences were measured on the pre-fix library, not reasoned about:
+removing `f/` deleted the very file the slash asserts is a directory; removing
+`nope/../x` removed `x` through a directory that does not exist; `/a/f/.`
+acted on `f`; renaming `d/.` renamed the directory itself; opening `/a/../f`
+failed as an invalid argument; opening `f/` opened `f`.
+
+The fix deleted the cleaning entirely. **Nothing in the crate pops a `..` or
+drops a dot any more** — verified, not taken on trust. Two shapes replace it:
+
+- **A plain open hands the whole path to the kernel in one call.** The
+  working-directory join, dot resolution under containment, the trailing-slash
+  and not-a-directory gates, per-component search permission and the real
+  errno are all kernel-side. This also retired an N-syscall per-component walk
+  in favour of one resolution.
+- **The create and mutation paths need a `(parent, leaf)` pair**, so the path
+  is split **lexically at the last component only** — no cleaning — and the
+  parent prefix goes back through the same resolver. That is what gives
+  Linux's parent-walk-first ordering: removing `f/..` reports not-a-directory
+  from walking `f`, rather than is-a-directory from the dot row.
+
+**The same defect existed at three layers independently** — the kernel's join,
+the ported libc's splitter, and this — each getting it wrong differently. That
+is the argument for the principle: when N layers each normalize, they each
+normalize wrong, and the fix is not to fix N implementations but to have one.
 
 ### Two invariants are enforced by absence rather than by checking
 
@@ -311,9 +344,16 @@ instant, and falling back to the syscall when the page is absent.
   more must attach its own regions. See Caveats for what exceeding it looks
   like.
 - **Per-command environment and working directory are absent.** Environment is
-  inherited wholesale — the ABI's reserved field is still reserved, and the
-  environment arrived instead as a per-process filesystem. Working directory is
-  a whole-namespace operation, so a per-spawn one needs a different surface.
+  inherited wholesale — the ABI's reserved field is still reserved. Working
+  directory is a whole-namespace operation, so a per-spawn one needs a
+  different surface.
+
+- **There is no `set_var`.** The environment is mutable — writing `/env/NAME`
+  is how a program changes it — but the crate exposes only the read side, so a
+  program that wants to set a variable opens the file itself. That is the
+  library-side half of the shell's inability to implement `export` (#106): the
+  shell links the module that documents the mechanism and finds no method for
+  it.
 - **The thread module is the raw surface only.** There is no closure-taking
   spawn: doing it needs stack allocation, closure marshalling and a join
   protocol, and the module argues it should wait for a consumer. None of the
@@ -372,6 +412,50 @@ instant, and falling back to the syscall when the page is absent.
   type deliberately permits bits outside it, on the argument that the kernel
   rejects them at creation — which is true, and means the type is a vocabulary
   rather than a validator.
+
+  `Path` is now the second type in this crate with that shape, and arrived at
+  it the harder way: it *was* a resolver, its resolution was proven wrong six
+  ways, and the resolution was deleted rather than corrected. What remains is
+  a lexical vocabulary. Both are the right end state; only one of them was
+  designed that way.
+
+- **The path splitter is `pub(crate)` and the lossy iterator is `pub`.**
+  `components()` still skips empty segments — consecutive slashes, trailing
+  slashes — and still classifies `.` and `..`, which is exactly the mechanism
+  behind two of the six defects the resolution rewrite measured. The callers
+  that resolved with it are gone; the primitive is not, the file contains no
+  reference to the rewrite that indicted it, and its rustdoc's worked example
+  is `///foo//bar/` — a **trailing-slash input, shown having its slash
+  dropped, as an illustration of the iterator working correctly.**
+
+  So a caller outside the crate reaching for "does this path escape my root"
+  or "normalize before comparing" finds the lossy function, finds the safe
+  splitter unavailable, and finds a doc that reads as encouragement. Task #185.
+
+  Worth contrasting with how the same lesson landed in the kernel, because the
+  asymmetry is the point: there it became gates *inside* the resolver, so a new
+  kernel caller inherits them. Here it became deletions in the callers, so a
+  new userspace caller inherits nothing. **Removing a defect's callers does not
+  disarm the primitive.**
+
+- **The environment has two surfaces and they are not the same object** —
+  worth stating plainly because both are correct and they can disagree. `/env`
+  is authoritative and mutable, inherited by children through the kernel's
+  clone. The startup frame's `envp` is a *snapshot* the kernel projected at
+  exec, so a later `/env` write does not appear in it; it exists because every
+  C runtime expects `environ` on the stack, and because a Linux guest's
+  `execve` passes an environment that has nowhere else to land.
+
+  They diverge exactly there: an `execve` from a phenotyped guest puts its
+  `envp` on the new image's frame without rewriting `/env`, so the enumerator
+  reports what the caller asked for while the single-variable reader reports
+  what the process inherited.
+
+  **This is documented well and is recorded as a positive.** The divergence is
+  in the module header *and* repeated on the enumerator's own rustdoc, which
+  says which one a Thylacine program usually wants and names the two cases
+  where the frame is the right answer. A reader at the call site is warned —
+  which is the standard the neighbouring `components()` fails.
 
 ## Provenance
 
