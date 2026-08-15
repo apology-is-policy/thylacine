@@ -52,6 +52,13 @@
 #include "../arch/arm64/uart.h"
 #include "../mm/slub.h"
 
+// Declared here rather than by including <thylacine/vivarium.h> ON PURPOSE.
+// `struct viv_sigtab` stays INCOMPLETE in this file (proc.h forward-declares
+// it), so proc.c can hold the pointer and hand it to vivarium.c but cannot
+// reach into the layout -- which is what keeps exec's disposition reset a
+// single call to the owning module instead of a field walk that drifts from it.
+void viv_sigtab_reset(struct viv_sigtab *tab);
+
 static struct kmem_cache *g_proc_cache;
 static struct Proc       *g_kproc;
 // 2B-F3: init (joey, the first user Proc) -- the orphan-adopter per ARCH
@@ -680,10 +687,23 @@ void proc_free(struct Proc *p) {
     p->debug_hw = NULL;
 
     // VIVARIUM V-6b: release the per-Proc Linux signal dispositions. Same
-    // discipline as debug_hw -- freed ONLY here at reap, so the EL0-return-tail
-    // reader (notes_deliver_at_el0_return) can never see it disappear under a
-    // live thread: every thread of `p` was reaped and on_cpu-spun before
-    // proc_free runs, so no CPU is inside a delivery for this Proc.
+    // discipline as debug_hw, and since #254 this is the ONLY free -- exec
+    // resets the table in place rather than freeing it, precisely so that the
+    // pointer is stable for the whole life of the Proc.
+    //
+    // State the safety over the READER SET, not over one reader: the table is
+    // read lock-free by threads of `p` (the EL0-return delivery tail) AND from
+    // other Procs' CPUs (notes_post's SIG_IGN hook, notes_arm_intr_terminate_
+    // locked, the ^Z fan's disposition gate). Naming only the first is what
+    // made exec's free look safe for as long as it did.
+    //
+    // Sound here for a reason that covers both, and that no future reader can
+    // fall outside of: this frees a field of a Proc that is ITSELF being freed.
+    // A cross-Proc reader must hold `p` to reach `p->sigtab`, so any caller
+    // that could observe this free already has a dangling Proc -- a Proc
+    // lifetime violation, which is a different and louder bug. The intra-Proc
+    // half is bounded too (every thread was reaped and on_cpu-spun before
+    // proc_free runs, so no CPU is inside a delivery for this Proc).
     kfree(p->sigtab);
     p->sigtab = NULL;
 
@@ -3015,8 +3035,28 @@ bool proc_exec_alone(struct Proc *p) {
 // next field gets missed, which is exactly how #247 happened.
 static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self) {
     __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
-    kfree(p->sigtab);            // VIVARIUM V-6b Linux dispositions; lazily re-made
-    p->sigtab = NULL;
+
+    // VIVARIUM V-6b Linux dispositions, reset IN PLACE -- the table is NOT
+    // freed here (#254). It used to be, with the pointer NULLed, under no lock:
+    // g_proc_table_lock is released well above this, and `p->sigtab` is loaded
+    // and dereferenced from OTHER Procs' CPUs by notes_post's SIG_IGN hook, by
+    // notes_arm_intr_terminate_locked, and by the ^Z fan's disposition gate --
+    // all three take an arbitrary Proc. That made this a use-after-free read.
+    //
+    // The free's old justification named ONE reader ("notes_deliver_at_el0_
+    // return, which runs on a thread of THIS Proc") and concluded from
+    // proc_exec_alone that there was nobody else. The single-THREAD half was
+    // true; the single-READER half was not, and the gap is invisible from the
+    // free's own line. Zeroing is exact POSIX (viv_sigtab_reset has the
+    // SIG_DFL==0 argument), so nothing is lost by keeping the object alive, and
+    // an immortal-per-Proc table is safe as the reader set GROWS rather than
+    // safe while everyone remembers a rule.
+    //
+    // A cross-Proc post racing this reset may observe either the old or the new
+    // disposition. That is not a defect: it is the same latitude POSIX gives a
+    // sigaction racing a signal already in flight, which proc.h's sigtab
+    // paragraph already states as the standing rule for this field.
+    viv_sigtab_reset(p->sigtab);
     self->note_mask = 0u;
 
     // #247: and the in-handler LATCH, which the reset above missed until it was

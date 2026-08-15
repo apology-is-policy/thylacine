@@ -2038,20 +2038,56 @@ void test_proc_exec_drops_image_note_state(void) {
     // the post-condition below asserted a value that was never armed, and
     // deleting the sigtab reset from proc_exec_drop_image_state left the whole
     // suite GREEN. Executed, not argued: the sabotage was run and passed.
-    // (kzalloc, not kmalloc -- the helper kfree()s it, so it must be a real
-    // heap block; the test_notes.c linux_sigign_discard fixture is the pattern.)
+    // (kzalloc, not kmalloc -- it must be a real heap block because proc_free
+    // releases it at teardown; the test_notes.c linux_sigign_discard fixture is
+    // the pattern.)
+    //
+    // #254: a kzalloc'd table is ALL-DEFAULT, so "reads as default afterwards"
+    // is satisfied by a table nothing ever wrote -- the same hole F3 found one
+    // field over. ARM TWO ROWS, one per encoding: SIG_IGN (handler == 1) and a
+    // real handler address, since viv_sigtab_note_handler discriminates on
+    // exactly that boundary and a reset that cleared only one would pass a
+    // single-row check.
     p->sigtab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    struct viv_sigtab *tab_before = p->sigtab;
+    struct viv_ksigaction ign  = { .handler = VIV_SIG_IGN, .flags = 0,
+                                   .restorer = 0, .mask = 0 };
+    struct viv_ksigaction hand = { .handler = 0x4000u, .flags = 0,
+                                   .restorer = 0, .mask = 0 };
+    (void)viv_sigtab_set(p->sigtab, VIV_SIGNOTE_PIPE, &ign);
+    (void)viv_sigtab_set(p->sigtab, VIV_SIGNOTE_TTY_WINCH, &hand);
+
     TEST_ASSERT(p->handler_va != 0,  "precondition: a handler is registered");
     TEST_ASSERT(th.note_mask != 0,   "precondition: the note mask is non-empty");
     TEST_ASSERT(th.in_handler,       "precondition: the thread is MID-HANDLER");
     TEST_ASSERT(p->sigtab != NULL,   "precondition: a Linux sigtab is installed");
+    TEST_ASSERT(viv_sigtab_note_ignored(p->sigtab, VIV_SIGNOTE_PIPE),
+                "precondition: the sigtab carries a SIG_IGN row");
+    struct viv_ksigaction probe;
+    TEST_ASSERT(viv_sigtab_note_handler(p->sigtab, VIV_SIGNOTE_TTY_WINCH, &probe),
+                "precondition: the sigtab carries a real HANDLER row");
 
     proc_exec_drop_image_state_for_test(p, &th);
 
     TEST_ASSERT(p->handler_va == 0,
                 "exec dropped the handler entry point (an address in the old "
                 "image)");
-    TEST_ASSERT(p->sigtab == NULL, "exec dropped the Linux disposition table");
+    // #254, the memory-safety half -- and the ONLY assertion that separates the
+    // fix from the bug. There is NO behavioural test to write here: the
+    // accessors are NULL-safe and answer "nothing ignored, no handler" for a
+    // NULL table, which is EXACTLY what they answer for an all-default one. So
+    // freed-and-NULLed and reset-in-place are indistinguishable at every
+    // observable surface, including the ^Z fan. What differs is only whether a
+    // pointer another CPU is holding stays valid -- so assert on the object.
+    TEST_ASSERT(p->sigtab == tab_before,
+                "#254: exec reset the disposition table IN PLACE -- the object "
+                "SURVIVES. Cross-Proc readers (notes_post's SIG_IGN hook, the "
+                "^Z fan's gate) hold this pointer with no lock, so freeing it "
+                "here was a use-after-free READ");
+    TEST_ASSERT(!viv_sigtab_note_ignored(p->sigtab, VIV_SIGNOTE_PIPE),
+                "exec cleared the SIG_IGN row (the POSIX half of the reset)");
+    TEST_ASSERT(!viv_sigtab_note_handler(p->sigtab, VIV_SIGNOTE_TTY_WINCH, &probe),
+                "exec cleared the HANDLER row -- an address in the old image");
     TEST_ASSERT(th.note_mask == 0, "exec dropped the note mask");
     TEST_ASSERT(!th.in_handler,
                 "#247: exec dropped the in-handler LATCH -- without this the "

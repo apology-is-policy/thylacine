@@ -1826,6 +1826,31 @@ bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
     return true;
 }
 
+// exec's disposition reset, in place -- the table object SURVIVES.
+//
+// Zeroing is not an approximation of the POSIX reset, it IS the reset: by the
+// note_handler rule twenty lines up, SIG_DFL is 0 and SIG_IGN is 1, so neither
+// is an address, and a zeroed entry reads as all-default. viv_sigtab_of
+// allocates with kzalloc, so the zeroed table is byte-identical to a fresh one.
+//
+// The object surviving is the POINT, not a convenience (#254). exec used to
+// kfree the table and NULL the pointer while holding no lock, and `p->sigtab`
+// is loaded and dereferenced from OTHER Procs' CPUs -- notes_post's SIG_IGN
+// hook, notes_arm_intr_terminate_locked, and the ^Z fan's disposition gate all
+// take an arbitrary Proc. That was a use-after-free read. Keeping one immortal
+// table per Proc removes the dangling pointer instead of racing to guard it,
+// which is what makes the reader set safe to GROW: a lock only protects the
+// readers who remember to take it, and the third reader here was added by the
+// same session that found the bug.
+void viv_sigtab_reset(struct viv_sigtab *tab) {
+    if (!tab) return;
+    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) {
+        struct viv_ksigaction dfl = { .handler = VIV_SIG_DFL, .flags = 0,
+                                      .restorer = 0, .mask = 0 };
+        tab->act[i] = dfl;
+    }
+}
+
 void vivarium_build_sigframe(struct viv_sigframe_head *out, u64 signum,
                              u64 sigmask, const u64 *regs31,
                              u64 sp, u64 pc, u64 pstate) {

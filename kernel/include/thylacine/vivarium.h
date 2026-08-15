@@ -1339,6 +1339,12 @@ bool viv_sigtab_note_handler(const struct viv_sigtab *tab, enum viv_signote note
 bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
                     const struct viv_ksigaction *act);
 
+// exec's POSIX disposition reset, applied IN PLACE. NULL-safe (nothing to
+// reset). The table object survives and the pointer never changes -- cross-Proc
+// readers hold it without a lock, so freeing it here was a UAF (#254). The only
+// free is proc_free, where the Proc itself is gone.
+void viv_sigtab_reset(struct viv_sigtab *tab);
+
 // Decide whether an `rt_sigaction` is inside the translatable domain. PURE.
 //
 // `signum` must be 1..64, must not be SIGKILL/SIGSTOP (POSIX: uncatchable, and

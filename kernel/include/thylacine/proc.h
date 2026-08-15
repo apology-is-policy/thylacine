@@ -795,10 +795,30 @@ struct Proc {
     // outside every lock (the 8a-2b debug_hw shape).
     //
     // LOCK-FREE ENTRY ACCESS, AND WHY (task #97 replaced a wrong paragraph
-    // here; task #158 replaced its REASON, which had expired the same way).
-    // Entries are read and written with no lock. That is sound because a
-    // PHENO_LINUX Proc **cannot obtain a peer thread**, so there is no peer to
-    // race and nothing to serialise.
+    // here; task #158 replaced its REASON, which had expired the same way;
+    // task #254 added the axis all three of them missed).
+    //
+    // Entries are read and written with no lock, and there are TWO independent
+    // axes of concurrency here. Every previous version of this paragraph
+    // answered only the first and read as though it had answered both.
+    //
+    //   INTRA-Proc (peer threads of `p`): excluded. A PHENO_LINUX Proc cannot
+    //   obtain a peer thread -- the mechanism is spelled out below -- so there
+    //   is no peer to race and nothing to serialise. This is what the writers
+    //   (rt_sigaction, SA_RESETHAND) rest on, and it is why they are safe.
+    //
+    //   CROSS-Proc (another Proc's CPU reading THIS table): NOT excluded, and
+    //   real. notes_post's SIG_IGN hook, notes_arm_intr_terminate_locked and
+    //   the ^Z fan's disposition gate each take an arbitrary Proc and read its
+    //   dispositions lock-free. Sound because the POINTER is stable for the
+    //   life of the Proc -- lazily CAS-installed once, reset IN PLACE at exec,
+    //   freed only at proc_free where the Proc itself is gone (#254; exec used
+    //   to free it here, which was a use-after-free read) -- and because the
+    //   VALUE a racing reader observes is covered by the POSIX latitude stated
+    //   at the end of this comment.
+    //
+    // Read the cross-Proc half before adding a reader, and do not narrow this
+    // back to a claim about threads: the reader set has grown three times.
     //
     // THE MECHANISM, stated precisely because the previous one stopped being
     // true without anything failing. It is NOT that `clone` is unserved -- it
@@ -827,7 +847,9 @@ struct Proc {
 
     // VIVARIUM V-5: the per-Proc Linux socket table, or NULL.
     //
-    // The sigtab's exact shape and lifetime: lazily allocated on the Proc's
+    // The socktab's exact shape and lifetime (this paragraph said "sigtab" and
+    // described socket() -- a copy-paste that pointed anyone grepping for the
+    // sigtab's lifetime at the wrong field): lazily allocated on the Proc's
     // first translated socket(), CAS-installed outside every lock, freed at
     // proc_free, NOT rfork-inherited. It holds the (proto, N, state) tuple a
     // translated socket needs and that neither the fd nor any path can carry

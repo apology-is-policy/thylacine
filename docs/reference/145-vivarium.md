@@ -293,8 +293,10 @@ reuse an existing cross-Proc gate verbatim, never invent a third.)
 
 V-6b makes `rt_sigaction` and `rt_sigprocmask` real. `rt_sigprocmask` maps onto
 the per-`Thread` `note_mask`; `rt_sigaction` records `SIG_DFL`/`SIG_IGN` in a
-lazily-allocated per-`Proc` `struct viv_sigtab` (`Proc.sigtab`, freed at
-`proc_free`, not `rfork`-inherited — the `handler_va` precedent), and an ignored
+lazily-allocated per-`Proc` `struct viv_sigtab` (`Proc.sigtab`, reset **in
+place** at exec and freed only at `proc_free` — so the pointer is stable for the
+life of the Proc, which is what makes the lock-free cross-Proc readers below
+safe (#254) — and not `rfork`-inherited, the `handler_va` precedent), and an ignored
 signal's note is then **discarded at generation** inside `notes_post`, exactly as
 Linux discards it, returning success because Linux's `kill()` to a process
 ignoring the signal succeeds.
@@ -469,8 +471,16 @@ the handler is entered.
 `tkill` and `clone` are not table rows, so a Linux guest can signal neither
 another Proc nor itself through the obvious route -- and cannot spawn a thread
 to race its own disposition table either, which is what makes the lock-free
-`viv_sigtab` sound today (the only cross-thread reader is `notes_post`'s
-`SIG_IGN` hook, and it touches one naturally-aligned `u64`). What remains is
+`viv_sigtab` **writers** sound today. That argument covers the intra-Proc axis
+only, and this sentence used to stop there — it said the SIG_IGN hook in
+`notes_post` was "the only cross-thread reader", which was already false and
+became the premise under which exec's `kfree` looked safe (#254). The readers
+are a **set**, each taking an arbitrary `Proc`: `notes_post`'s `SIG_IGN` hook,
+`notes_arm_intr_terminate_locked`, and the `^Z` fan's disposition gate. They are
+sound because the pointer never dies under them (reset in place at exec, freed
+only at `proc_free`) and because a racing reader may observe either the old or
+the new disposition — the same latitude POSIX gives a `sigaction` racing a
+signal already in flight. What remains is
 self-infliction: the bundle declares `org.thylacine.sigpipe-selftest`, `viv`
 hands the entrypoint fd 0 as the write end of a reader-less pipe, and the
 guest's own `write()` makes the kernel post `pipe`. Synchronous, no second Proc
