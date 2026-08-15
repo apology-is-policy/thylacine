@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -306,3 +306,18 @@ points.
 [[sub-kernel-proc]] (the session and group fields, and the wait scan that
 consumes the latches) · [[sub-kernel-devproc]] (the single-target verbs) ·
 [[inv-i20]] · [[spec-pty-stop]].
+
+[[chg-2026-08-15-stale-by-cotenancy]] re-verified this dossier without changing it.
+Its two files moved ~1440 lines in the interval; a word-bounded diff over every
+job-control token found **zero semantic changes**. `kernel/proc.c` had none at
+all, and every hit in `proc.h` was an offset shift — the session and group ids
+moved from 336/340 to 304/308 because the address-space extraction shrank the
+struct out from under them.
+
+One detail from that shift is worth keeping, because it inverts the usual
+lesson: a *summary* assertion message that had spelled the offsets out
+numerically was rewritten to name the fields without the numbers, while the
+individual per-field asserts were updated to the new values. Dropping a number
+is normally how a proof goes stale — here it removed the only copy that had to
+be maintained by hand, three lines above the copies that are checked by the
+compiler.

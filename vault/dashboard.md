@@ -126,11 +126,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-08-15 [[chg-2026-08-15-proc-lineage]] — proc.c re-swept after LINEAGE: the address-space extraction, the second rfork shape, and the vfork park
+- 2026-08-15 [[chg-2026-08-15-stale-by-cotenancy]] — Two dossiers verified current without change: churn measured per file, not per surface
 - 2026-08-15 [[chg-2026-08-15-syscall-dispatch-lineage]] — The dispatcher re-swept after LINEAGE and VIVARIUM: the prologue, the frame-taking arms, and the core split
 - 2026-08-14 [[chg-2026-08-14-merge-fold-124]] — The 124-commit merge, and what --ours would have thrown away
 - 2026-08-06 [[chg-2026-08-06-ledger-correction]] — Correction: batch 55's pre-sweep baseline was 17829, and proximity beat provenance
 - 2026-08-06 [[chg-2026-08-06-process-creation-arc]] — The process-creation arc, and three comments that outlived their code
 - 2026-08-05 [[chg-2026-08-05-staleness-is-computable]] — Coverage was never currency — 45 of 112 dossiers describe code that moved
 - 2026-08-04 [[chg-2026-08-04-identity-transport-crypto-sweep]] — Identity and transport crypto — one deleted cap, two dead premises, and a backstop on the wrong loop
-- 2026-08-04 [[chg-2026-08-04-leaf-commands-sweep]] — The leaf commands — one rule enforced by construction, one delegated by convention
 <!-- generated:end -->

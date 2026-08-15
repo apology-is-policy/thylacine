@@ -14,7 +14,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -228,3 +228,10 @@ so the invariant holds trivially today.
 ## Provenance
 
 [[chg-2026-08-02-authority-sweep]].
+
+[[chg-2026-08-15-stale-by-cotenancy]] re-verified this dossier without changing it.
+`kernel/proc.c` moved ~910 lines in the interval, all of it the fork/exec arc;
+a word-bounded diff over every capability token across the whole interval found
+**one comment line and two call sites gaining a trailing parameter**, with
+`CAP_NONE` unchanged at each. The staleness was borrowed from a co-tenant
+surface, not earned. See the note on what that means for the churn ordering.
