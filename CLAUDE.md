@@ -1079,6 +1079,52 @@ Recommendation format: short, includes rationale. "Working tree clean at tip X; 
 
 Do NOT recommend compaction mid-chunk or with uncommitted state.
 
+### A checkpoint is not a stopping point (the 600k line)
+
+**Under granted autonomy, land a chunk, report it, and start the next one IN
+THE SAME RUN.** Do not yield after every chunk waiting to be told to continue;
+do not compact "to be safe" at 300k. Stopping early is not free — a fresh
+context re-derives subsystem knowledge the current one already holds, and the
+re-derivation is where wrong turns come from.
+
+**The signal that ends the run is the `600k CHECKPOINT WINDOW` line** emitted by
+the user-level `~/.claude/ctx-hook.sh` PostToolUse hook. It has three levels
+that mean three DIFFERENT things, and collapsing them into one "context is
+getting high" warning is how the 600k line turns back into an alarm:
+
+| Level | Fires | Means |
+|---|---|---|
+| 600k CHECKPOINT WINDOW | once per crossing | the intended compaction point — carry the current step to a clean boundary, then recommend `/compact` |
+| 750k approaching | every call | wind down; start no new arc |
+| 880k AT THE WRAP LINE | every call | commit, hand off, yield |
+
+Two conditions make this safe rather than merely faster, and adopting the
+run-longer half without them is **strictly worse than not adopting it**:
+
+1. **The checkpoint contract still fires at every checkpoint**, including the
+   ones you run straight through. Account for running processes, keep the
+   handoff current, say what is next. A continuously-current handoff is what
+   makes compaction free at any moment — which is what lets 600k be a
+   recommendation instead of a scramble.
+2. **If the hook is absent, the rule has no brake.** "Run until the signal
+   fires" degrades into "run past the wrap line", because a signal that never
+   arrives is indistinguishable from one that has not arrived YET. A run two
+   thirds through its budget having seen NO `CONTEXT` line should treat the
+   hook as absent and fall back to judgement. **Verify rather than assume**:
+   this worktree defines its own `PostToolUse` (the yip line-hook) in
+   `.claude/settings.local.json`, so the user-level hook reaching aux is a
+   claim about hook merging, not an observed fact.
+
+This is autonomy over SEQUENCING only. The escalation list is untouched —
+format breaks, destructive operations and scripture forks still stop the run.
+
+**Host holds are the cost, and they land on the other tracks.** Longer runs
+mean longer exclusive holds on the one machine (an SMP gate is ~20 min, LS-CI
+~30). Check `yip presence` before committing to a timed measurement, keep the
+refuse-up-front gates (`849d85fc`), and say on the line when you want a quiet
+host. Named here so a contention-shaped failure is never attributed to
+something else later.
+
 **The handoff is ready before you recommend anything.** Per the checkpoint
 contract, a compactable state means the handoff docs are ALREADY written — so
 this section is only about whether to *suggest* compacting, never about whether
