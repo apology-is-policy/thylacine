@@ -4,7 +4,7 @@ type: chg
 title: "LS-CI re-swept: the gate went parallel, and its own default is stated three times"
 date: 2026-08-15
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["355ffa3e"]
 touched: [sub-substrate-interactive]
 established: []
 closed: []
