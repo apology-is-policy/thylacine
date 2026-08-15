@@ -30,6 +30,17 @@ MAIN_SESSION="thylacine"
 VAULT_SESSION="knowledge"
 WINDOW="agents"
 
+# THE LAUNCH COMMAND IS PART OF EACH AGENT'S IDENTITY -- a bare `claude` is NOT
+# a neutral default here, it silently starts a FRESH conversation and discards
+# the arc. Measured from the running processes rather than assumed: main and
+# aux both run `claude --continue`, the vault runs `claude -r knowledge` (its
+# conversation lives under the AUX project key, so --continue would resume the
+# wrong one). The first version of this script sent bare `claude` and produced
+# exactly that: a fresh, historyless main.
+MAIN_CMD="claude --continue"
+AUX_CMD="claude --continue"
+VAULT_CMD="claude -r $VAULT_SESSION"
+
 die() { echo "thyla-tmux: $*" >&2; exit 2; }
 
 command -v tmux >/dev/null || die "tmux is not installed"
@@ -57,7 +68,36 @@ claude_in() {
     return 1
 }
 
-pane_alive() { tmux list-panes -t "$1" -F '#{pane_id}' 2>/dev/null | grep -q .; }
+claude_pid_in() {
+    local dir="$1" pid
+    for pid in $(claude_pids); do
+        [ "$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')" = "$dir" ] && { echo "$pid"; return 0; }
+    done
+    return 1
+}
+
+# Start a pane's agent, or explain IN THE PANE why it was not started.
+#
+# The explanation must land in the pane, not on the script's stdout: the attach
+# that follows repaints the screen immediately, so anything echoed here is lost
+# and the operator is left with a bare shell and no reason for it. That is
+# precisely what the first real run produced -- the guard was working and
+# looked like a bug.
+#
+# When it declines, the command is PRE-TYPED but not executed, so recovering is
+# one Enter after quitting the other session rather than remembering the flags.
+launch_pane() {
+    local target="$1" dir="$2" cmd="$3" label="$4" pid
+    if pid=$(claude_pid_in "$dir"); then
+        tmux send-keys -t "$target" \
+            "clear; echo; echo '  thyla-tmux: did NOT start $label here.'; echo '  A claude is already serving $dir (pid $pid).'; echo '  Quit that one, then press Enter to run the command already typed below.'; echo" C-m
+        tmux send-keys -t "$target" "$cmd"      # deliberately no C-m
+        echo "  $label: already running (pid $pid) -- pane left with the command pre-typed."
+    else
+        tmux send-keys -t "$target" "$cmd" C-m
+        echo "  $label: started -> $cmd"
+    fi
+}
 
 start_pair() {
     if tmux has-session -t "$MAIN_SESSION" 2>/dev/null; then
@@ -79,10 +119,8 @@ start_pair() {
         tmux set-option -t "$MAIN_SESSION" pane-border-status top
         tmux set-option -t "$MAIN_SESSION" pane-border-format ' #{pane_index} #{pane_title} #{pane_current_path} '
 
-        claude_in "$MAIN_DIR" && echo "  NOTE: a claude is already serving $MAIN_DIR -- not starting a second one." \
-                              || tmux send-keys -t "$MAIN_SESSION:$WINDOW.0" 'claude' C-m
-        claude_in "$AUX_DIR"  && echo "  NOTE: a claude is already serving $AUX_DIR -- not starting a second one." \
-                              || tmux send-keys -t "$MAIN_SESSION:$WINDOW.1" 'claude' C-m
+        launch_pane "$MAIN_SESSION:$WINDOW.0" "$MAIN_DIR" "$MAIN_CMD" main
+        launch_pane "$MAIN_SESSION:$WINDOW.1" "$AUX_DIR"  "$AUX_CMD"  aux
         tmux select-pane -t "$MAIN_SESSION:$WINDOW.0"
         echo "thyla-tmux: '$MAIN_SESSION' up -- pane 0 main ($MAIN_DIR), pane 1 aux ($AUX_DIR)"
     fi
@@ -99,7 +137,7 @@ start_vault() {
 
     tmux new-session -d -s "$VAULT_SESSION" -n vault -c "$VAULT_DIR"
     tmux set-option -p -t "$VAULT_SESSION:vault.0" @thyla-role vault
-    tmux send-keys -t "$VAULT_SESSION:vault.0" "claude -r $VAULT_SESSION" C-m
+    tmux send-keys -t "$VAULT_SESSION:vault.0" "$VAULT_CMD" C-m
 
     # THE CHECK IS BEHAVIOURAL, NOT PREDICTIVE, and the distinction is
     # deliberate. Nothing on disk resolves the name "knowledge" -- there is no
