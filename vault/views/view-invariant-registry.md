@@ -42,11 +42,9 @@ same shape as [[view-audit-trigger-coverage]]'s limit: presence is necessary and
 never sufficient.
 
 <!-- generated:begin -->
-**ARCH §28: 43 rows · CLAUDE.md: 39 rows · AUDIT-TRIGGERS cites 43 · vault notes: 37.**
+**ARCH §28: 45 rows · CLAUDE.md: 45 rows · AUDIT-TRIGGERS cites 43 · vault notes: 37.**
 
 | gap | invariants | why it matters |
 |---|---|---|
-| **cited by a trigger row, not registered in ARCH §28** | `I-45` | the prosecutor template says to enumerate §28, so a round on that surface is pointed at a list omitting the invariant it was spawned to prosecute |
-| **in ARCH §28, missing from CLAUDE.md** | `I-40`, `I-42`, `I-43`, `I-44` | CLAUDE.md is loaded into every session, so this is what an instance believes by DEFAULT — a §28 row it lacks is one nobody reads unless they open ARCH |
-| registered but no vault note | `I-2`, `I-4`, `I-6`, `I-14`, `I-25`, `I-35`, `I-42` | the vault has not written this one up; not a scripture defect |
+| registered but no vault note | `I-2`, `I-4`, `I-6`, `I-14`, `I-25`, `I-35`, `I-41`, `I-42` | the vault has not written this one up; not a scripture defect |
 <!-- generated:end -->

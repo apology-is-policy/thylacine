@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**370 owned · 67 unowned · 437 files (84% owned) · ~14885 unswept lines.**
+**370 owned · 67 unowned · 437 files (84% owned) · ~15226 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **63 files, ~26475 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,7 +74,7 @@ Excluded as harness and counted here rather than dropped: **63 files, ~26475 lin
 | usr/ports | 0 | 14 | 3612 |
 | usr/pouch-hello | 0 | 20 | 3161 |
 | kernel | 116 | 22 | 3157 |
-| usr/warp-prove | 0 | 1 | 1732 |
+| usr/warp-prove | 0 | 1 | 2073 |
 | usr/quarry | 0 | 1 | 1028 |
 | arch | 34 | 4 | 971 |
 | usr/stratumd-stub | 0 | 1 | 453 |
@@ -116,7 +116,7 @@ Excluded as harness and counted here rather than dropped: **63 files, ~26475 lin
 
 | file | lines |
 |---|---:|
-| usr/warp-prove/src/main.rs | 1732 |
+| usr/warp-prove/src/main.rs | 2073 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/quarry/src/main.rs | 1028 |
 | arch/arm64/uart.c | 674 |

@@ -40,7 +40,7 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**97 declared surfaces · 93 covered by a hard-audit dossier · 1 soft-owned · 0 unowned · 3 unparsed · 13 cited path(s) that do not resolve.**
+**97 declared surfaces · 96 covered by a hard-audit dossier · 1 soft-owned · 0 unowned · 0 unparsed · 12 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
@@ -54,7 +54,6 @@ changed on main? — is the next increment, tracked as task #169.
 | Page fault + COW + W^X | `mm/vm.c` | **possibly a documented NEGATIVE — read the claim** |
 | Page fault + COW + W^X | `mm/wxe.c` | no such file in the tree |
 | Syscall byte-I/O staging + bulk uaccess + the per-service bulk ring (C… | `kernel/user` | no such file in the tree |
-| The Larder: guest-side 9P FS cache (L1c substrate + attr sub-cache; L1… | `kernel/include/thylacine/larder.c` | no such file in the tree |
 | VMO / BURROW | `mm/vmo_pages.c` | no such file in the tree |
 | `thread_spawn` / `thread_exit` / multi-thread exit | `specs/pthread.tla` | **possibly a documented NEGATIVE — read the claim** |
 | `torpor_wait` / `torpor_wake` | `specs/futex.tla` | **possibly a documented NEGATIVE — read the claim** |
@@ -64,8 +63,5 @@ changed on main? — is the next increment, tracked as task #169.
 
 | declared surface | state | why |
 |---|---|---|
-| Capability checks | **unparsed** | no path token extracted — the ledger cannot judge this row |
-| JIT code Burrow + `SYS_ICACHE_SYNC` + `CAP_JIT` (the Clade arc, CL-7k; I-42) | **unparsed** | no path token extracted — the ledger cannot judge this row |
 | Kaua console-TUI substrate: the cons/consctl backend + the ut raw-mode dance (LS-7) | soft-owned | owned by [[sub-kaua]], [[sub-nora-engine]], [[sub-nora-host]], [[sub-nora-view]] (+2 more), none `audit: hard` |
-| Process creation: `execve` + shared address spaces + COW `fork` (the LINEAGE arc, L-1..L-7… | **unparsed** | no path token extracted — the ledger cannot judge this row |
 <!-- generated:end -->
