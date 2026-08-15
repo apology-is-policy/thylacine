@@ -231,12 +231,47 @@ insufficient the day it was written, and its stated trip-wire watches an
 axis the defect does not travel on.
 
 Enumerating the readers by *enclosing function* rather than by grep hit
-finds a **third** lock-free load, in the Linux signal-delivery path's
-reset-handler arm. That one is genuinely same-process — it runs at the
-target's own return to user mode — so the exec-alone gate really does cover
-it, and the cross-process count stands at two. Worth stating because the
-count is what the argument turns on, and "two of three" is a different fact
-from "two".
+finds **four** lock-free loads in the notes layer, not two: the two
+cross-process ones above, plus the Linux delivery path's reset-handler arm
+and the return-to-user-mode delivery entry. Both of those are genuinely
+same-process, so the exec-alone gate really does cover them and the
+cross-process count stands at two.
+
+Stating the total matters more than it looks. A reader who greps finds four
+and, handed an enumeration of two or three, cannot tell which of the
+unaccounted sites was evaluated and which was missed — and **the one most
+easily dropped is the one the original false comment was about**, since the
+pre-fix text named the return-to-user-mode delivery entry as the sigtab's
+"only reader". That is the shape that gets a closed finding re-opened.
+
+### The same sentence is sound at one site and unsound at another
+
+The delivery entry carries, in capitals, directly above its load:
+*widening that domain to admit the thread-sharing flag voids this argument*
+— the identical trip-wire as the refuted paragraph, on the identical axis.
+**And there it is correct**, because that reader really is the target's own
+thread, so peer threads really are the only racers and bounding them really
+does the job.
+
+So the generalization is stronger than "an argument can be precise about the
+wrong scope":
+
+> **The identical argument is sound at one site and unsound at another, so
+> soundness cannot be inherited by copying the sentence — it has to be
+> re-derived per reader.** Several copies are not evidence the claim was
+> checked several times; they are several chances for one to be wrong, and
+> the wrong one is indistinguishable from the right ones.
+
+The prediction that follows — look for *other* sites restating the same
+bound — was run, and it found two more, one of them live. The field's own
+**declaration site** still carries the refuted sentence verbatim, and its
+header records that the same paragraph has already been corrected twice
+before (once for a wrong claim, once for a reason that expired while the
+claim stayed). The socket table beside it then inherits its safety *by
+pointing at that paragraph* — though its conclusion happens to survive for
+a different and stronger reason: every one of its readers is same-process
+**by construction**, because unlike the note-post path there is no
+cross-process entry point to it at all. Task #179.
 
 **The generalizable half:** *a safety argument can be precise about the
 wrong scope.* The gate it rests on is real and correctly derived — the
