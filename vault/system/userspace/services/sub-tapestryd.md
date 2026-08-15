@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-08-14
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -33,10 +33,9 @@ Since the Warp arc it is **also the GPU seam**: when the device offers
 `VIRTIO_GPU_F_VIRGL`, tapestryd serves a second tree, `/srv/warp`,
 through which a client creates a virgl context, mints GPU buffer
 objects, and submits 3D command streams. That half holds [[inv-i45]] —
-which is enforced in code and prosecuted by name in the source, and is
-**not in `ARCHITECTURE.md` §28**, whose table runs I-40, I-42, I-43,
-I-44 and stops. The wikilink is therefore deliberately dangling; see
-Caveats.
+whose **guest-exposure axis** is what this dossier describes; its host
+and v3d axes are reserved and unbuilt respectively, so cite the axis
+rather than the bare number.
 
 ## Contract
 
@@ -434,14 +433,15 @@ construction: one IRQ wait per GPU command.
   is stripped to `E_OPNOTSUPP` in production builds. Pixel work still
   happens in-dispatch even when held, so tearing-freedom is unaffected
   by which build is running.
-- **[[inv-i45]] has no note and no `ARCHITECTURE.md` §28 row**, while
-  being cited by the audit-trigger table, `GPU-DESIGN.md`, `NOVEL.md`,
-  the phase-7 status doc, the retired reference doc, `CLAUDE.md`, and
-  both `gpu.rs` and `server.rs` — the last of which prosecutes "the I-45
-  breach F6" by name. So the invariant is real, enforced, and audited,
-  and absent from the one list the prosecutor prompt template tells an
-  auditor to enumerate. The wikilink is left dangling as the marker.
-  Filed for main as **#173**; `ARCHITECTURE.md` is theirs to edit.
+- **[[inv-i45]] names three axes and only one is enforced.** The
+  guest-exposure half is what this dossier describes; the host half is
+  *reserved, not enforced* — virglrenderer does the bounding and is
+  documented trusted — and the v3d half is unbuilt. Cite the axis, not
+  the bare number. (Until main's `5da054e4` there was no §28 row at all
+  and the only definition was headed "(proposed)" while calling the same
+  bound enforced 360 lines earlier, which is how the ambiguity arose;
+  `tools/check-invariants.py` now fails the build if that registry drifts
+  again.)
 - **The fenced lane's test hold ships in production.** The crate's
   default features include `test-mode`, no build passes
   `--no-default-features`, and `/srv/warp`'s `ctl` is mode 0666 — so the
