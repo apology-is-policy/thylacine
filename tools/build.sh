@@ -557,6 +557,18 @@ EOF
     python3 "$REPO_ROOT/tools/check-v80-floor.py" \
         || { echo "==> v8.0 floor check FAILED -- see PORTABILITY.md section 3" >&2
              exit 1; }
+
+    # #173: the invariant registries. CLAUDE.md instructs "keep the ROW SET in
+    # sync with ARCH section 28", records that the drift already happened once
+    # (RW-10), and had drifted again by four rows -- while I-45, enforced in
+    # code and prosecuted by name, had no row in either table. The repair left
+    # nothing that could fail, so it recurred. Same argument as the floor check
+    # above: fatal, no skip switch. Sub-second.
+    echo "==> invariant registry check (task #173)"
+    python3 "$REPO_ROOT/tools/check-invariants.py" \
+        || { echo "==> invariant registry check FAILED -- ARCH section 28 and" >&2
+             echo "    CLAUDE.md's condensed table must carry the same rows" >&2
+             exit 1; }
 }
 
 # GOOS=thylacine Go-port (Stage 1): cross-compile the runtime-direct Go probe
