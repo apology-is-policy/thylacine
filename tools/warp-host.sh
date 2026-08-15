@@ -226,18 +226,46 @@ prove)
 reject)
     out="$REPO_ROOT/build/warp-reject.log"
     ssh "$HOST" "cd $RREPO && ${RENV}expect tools/warp/warp-reject.exp" | tee "$out" || true
-    echo "== #240 observation =="
-    # NOT a gate -- it reports what the seam does. Anchor on ANSWER=, which
-    # only the leg prints: lc_expect's timeout text repeats its own pattern,
-    # so keying on "C0-REJECT DONE" would match a run that never happened
-    # (#186). Print the sample timeline too; the ANSWER line alone hides
-    # whether the control ever moved.
-    if grep -q "C0-REJECT ANSWER=" "$out"; then
-        grep "C0-REJECT" "$out"
-    else
-        echo "#240 OBSERVATION UNVERIFIED -- the leg never printed an ANSWER"
+    echo "== #240 observation + the C-0d detector gate =="
+    # AUDIT F8: this WAS report-only, and stayed that way after C-0d turned
+    # it into a gate -- the conjunction below grepped `C0-REJECT` while the
+    # detector's lines are prefixed `C0-DETECT`, so the command exited 0 on
+    # `C0-DETECT FAIL(vacuous)`: exactly the outcome GPU-DESIGN 4.5.4b names
+    # as the thing this gate exists to catch. It caught it once only because
+    # a human was reading the output.
+    #
+    # Four terms, each covering a different way to be wrong:
+    #   ANSWER=       the #240 measurement ran at all
+    #   DETECT PASS   the detector DISCRIMINATES (rejected 1, healthy 0)
+    #   STICKY PASS   a SECOND REAL probe still reads (1 0)
+    #   F1 DEFENDED   a client that WRITES the probe's mark cannot blind it
+    #   LS-CI PASS    the SCENARIO completed -- without a completion term an
+    #                 aborted run (ctx_field's fail() path, F9) still shows
+    #                 ANSWER= and would read as verified.
+    #
+    # ROUND-2 F3: that last term was `C0-REJECT DONE`, which is exactly the
+    # token warp-reject.exp's own header says never to key a pass on --
+    # lc_expect writes its own pattern into its timeout text ("waiting for
+    # [C0-REJECT DONE]"), so a guest that hung AFTER `C0-F1 DEFENDED` would
+    # have had the fifth term supplied by the failure message itself, over a
+    # run that never finished. I wrote that warning and then walked into it.
+    # The defence I argued -- "a timeout also costs us the other terms" --
+    # assumed the hang can only happen before they print, which is a guess
+    # about hang location, not a property of the gate. `lc_pass`'s prefix
+    # can only be produced by the success path, and it is what `prove`,
+    # `tri` and `quake` already require.
+    grep -E "C0-REJECT|C0-DETECT|C0-F1" "$out" || true
+    ok=1
+    for pat in "C0-REJECT ANSWER=" "C0-DETECT PASS" "C0-DETECT STICKY PASS" "C0-F1 DEFENDED" "LS-CI PASS: warp-prove reject"; do
+        if ! grep -q "$pat" "$out"; then
+            echo "#240 GATE FAIL -- missing: $pat"
+            ok=0
+        fi
+    done
+    if [ "$ok" != 1 ]; then
         exit 1
     fi
+    echo "C-0d DETECTOR GATE: VERIFIED (discriminates + sticky + ran to completion)"
     ;;
 tri)
     out="$REPO_ROOT/build/warp-tri.log"

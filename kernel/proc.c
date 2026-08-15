@@ -42,6 +42,7 @@
 #include <thylacine/torpor.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
+#include <thylacine/vivarium.h>  // viv_sigtab_reset -- exec resets dispositions in place
 #include <thylacine/vma.h>
 #include <thylacine/weft.h>
 
@@ -3045,6 +3046,17 @@ bool proc_exec_alone(struct Proc *p) {
     return alone;
 }
 
+// POSIX's exec disposition reset, split out from proc_exec_replace so the
+// memory-safety half can be tested: the semantic half is INVISIBLE to any
+// behavioural test, because a NULL table and an all-default table both read as
+// "everything at SIG_DFL". Freeing versus resetting differs only in whether a
+// pointer another CPU is holding stays valid, so that is what the test asserts.
+void proc_exec_reset_dispositions(struct Proc *p) {
+    if (!p) return;
+    __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
+    viv_sigtab_reset(__atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE));
+}
+
 void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     if (!p || p->magic != PROC_MAGIC) extinction("proc_exec_replace: bad Proc");
     if (!nas)                         extinction("proc_exec_replace: NULL address space");
@@ -3116,16 +3128,25 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     // the image's -- and so does the fd-shaped delivery path; only the
     // registered handler entry points go.
     //
-    // Freeing the sigtab here is safe for the same reason proc_free's is: its
-    // only reader is notes_deliver_at_el0_return, which runs on a thread of
-    // THIS Proc, and we are the only live one. That is a precondition rather
-    // than a coincidence -- proc_exec_alone established it and the swap above
-    // re-checked it under the lock, so this line inherits the guarantee rather
-    // than assuming it. (V-6b freed it only at reap precisely because that was
-    // the only other point where the same thing was true.)
-    __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
-    kfree(p->sigtab);            // VIVARIUM V-6b Linux dispositions; lazily re-made
-    p->sigtab = NULL;
+    // RESET IN PLACE, NEVER FREE. The table has readers on OTHER CPUs holding
+    // no lock of ours: notes_post's SIG_IGN hook (which sits above that
+    // function's q->lock and returns before taking it) and
+    // notes_proc_has_live_handler both load ->sigtab with a bare acquire. And
+    // notes_post is reached with somebody ELSE as its target on every call --
+    // child_exit to the parent, SYS_POSTNOTE, the pgrp fan, the console
+    // interrupt, TTY hup. So a kfree here is a use-after-free: that CPU loads
+    // the pointer, this one frees it, that one dereferences freed slab.
+    //
+    // proc_exec_alone bounds the THREADS of this Proc, which is what keeps the
+    // same-Proc paths (EL0-return delivery, rt_sigaction) safe. It says nothing
+    // whatever about other PROCS -- and that is the half the comment previously
+    // standing here got wrong when it claimed a single reader.
+    //
+    // Zeroing is byte-identical to the kzalloc'd table viv_sigtab_of hands out,
+    // so the dispositions really are back to default; the allocation simply
+    // lives until reap, which is the lifetime it had before V-6b moved the free
+    // forward to exec.
+    proc_exec_reset_dispositions(p);
     self->note_mask = 0u;
 
     // L-7 F2: hardware breakpoints and watchpoints are addresses in the OLD

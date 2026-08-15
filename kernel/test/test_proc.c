@@ -45,6 +45,8 @@
 #include <thylacine/syscall.h>    // PTY-4: SYS_WAIT_PID + the wait flags
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/vivarium.h>      // #243: the sigtab accessors the exec-reset test drives
+#include "../../mm/slub.h"           // #243: kzalloc for that test's disposition table
 
 #include "../../arch/arm64/timer.h"   // PTY-1f: the sleeper thunk's deadlines
 #include <thylacine/page.h>           // PTY-4e #19: the torpor sleeper's page
@@ -1896,6 +1898,67 @@ static void js_anchor_thunk(void *arg) {
     TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_js_anchor_release,
                                           __ATOMIC_ACQUIRE) != 0u);
     exits("ok");
+}
+
+// #243: exec must RESET the disposition table in place, never free it.
+//
+// Why this asserts on a pointer rather than on behaviour: the semantic half of
+// the fix is INVISIBLE. viv_sigtab_note_ignored/_handler are NULL-safe and
+// report "nothing ignored, no handler" for a NULL table, which is exactly what
+// they report for an all-default one -- so a freed-and-NULLed table and a reset
+// table are behaviourally identical. The ONLY difference is whether the pointer
+// another CPU is holding stays valid. notes_post's SIG_IGN hook and
+// notes_proc_has_live_handler both load ->sigtab with a bare acquire and no lock
+// exec holds, and notes_post targets ANOTHER Proc on every call, so freeing here
+// is a use-after-free. That is what this pins.
+void test_proc_exec_reset_dispositions(void);
+void test_proc_exec_reset_dispositions(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    struct viv_sigtab *tab =
+        (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(tab != NULL, "kzalloc sigtab");
+
+    // Seed BOTH non-default kinds the accessors distinguish: an explicit
+    // SIG_IGN and a real handler address.
+    struct viv_ksigaction ign = { .handler = VIV_SIG_IGN, .flags = 0,
+                                  .restorer = 0, .mask = 0 };
+    struct viv_ksigaction hnd = { .handler = 0x400000, .flags = 0,
+                                  .restorer = 0x400100, .mask = 0 };
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &ign), "seed IGN");
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_TTY_HUP, &hnd), "seed handler");
+    p->sigtab     = tab;
+    p->handler_va = 0x400000ull;
+
+    // Non-vacuity: prove the pre-state is genuinely non-default, so the
+    // post-conditions below cannot pass against a table that was already clean.
+    struct viv_ksigaction got;
+    TEST_ASSERT(viv_sigtab_note_ignored(tab, VIV_SIGNOTE_INTERRUPT),
+                "pre: interrupt really is ignored");
+    TEST_ASSERT(viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_HUP, &got),
+                "pre: tty_hup really has a handler");
+
+    proc_exec_reset_dispositions(p);
+
+    // The memory-safety assertion -- the point of the test. Revert-probed:
+    // restoring the old `kfree(p->sigtab); p->sigtab = NULL;` fails HERE.
+    TEST_ASSERT(p->sigtab == tab,
+                "exec must reset the sigtab IN PLACE -- freeing it is a UAF "
+                "against notes_post's lockless cross-Proc reader");
+
+    // ...and the POSIX half: every disposition is back to default.
+    TEST_ASSERT(!viv_sigtab_note_ignored(tab, VIV_SIGNOTE_INTERRUPT),
+                "exec must clear an explicit SIG_IGN");
+    TEST_ASSERT(!viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_HUP, &got),
+                "exec must clear a registered handler");
+    TEST_ASSERT(p->handler_va == 0ull, "exec must clear handler_va");
+
+    // Reap frees the table -- the one point where freeing IS sound, because
+    // every thread is reaped and the Proc is off the table, so no cross-Proc
+    // reader can still resolve it.
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
 }
 
 void test_proc_job_stop_orphan_rule(void);

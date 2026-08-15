@@ -1668,6 +1668,17 @@ bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
     return true;
 }
 
+void viv_sigtab_reset(struct viv_sigtab *tab) {
+    if (!tab) return;
+
+    // Zero the whole object rather than walking act[]. viv_sigtab_of allocates
+    // with kzalloc, so this makes a reset table BYTE-IDENTICAL to a fresh one --
+    // the two are indistinguishable to every accessor above, which is what lets
+    // exec reset in place instead of freeing and re-allocating lazily.
+    u8 *raw = (u8 *)tab;
+    for (u32 i = 0; i < (u32)sizeof(*tab); i++) raw[i] = 0;
+}
+
 void vivarium_build_sigframe(struct viv_sigframe_head *out, u64 signum,
                              u64 sigmask, const u64 *regs31,
                              u64 sp, u64 pc, u64 pstate) {

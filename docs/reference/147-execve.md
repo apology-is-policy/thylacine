@@ -122,7 +122,7 @@ by writing the new TTBR0 (a *different* ASID) and `isb`-ing first.
 | | Why |
 |---|---|
 | note handler (`handler_va`) | an inherited handler is an address in an image that no longer exists |
-| Linux signal dispositions (`sigtab`) | same; lazily re-allocated |
+| Linux signal dispositions (`sigtab`) | same. Zeroed **in place**, never freed (#243): `notes_post`'s SIG_IGN hook and `notes_proc_has_live_handler` load `->sigtab` locklessly, and `notes_post` targets *another* Proc, so freeing here is a UAF. `proc_exec_alone` bounds this Proc's threads, not other Procs. The table is freed only at reap |
 | the thread's note mask | per-image policy |
 | `TPIDR_EL0` | musl's `__pthread_self` reads it; a stale value is a live pointer into the old image's TCB |
 | FP/SIMD (V0–V31, FPSR, **FPCR**) | FPCR carries rounding mode and trap enables, which a fresh image expects at defaults |
