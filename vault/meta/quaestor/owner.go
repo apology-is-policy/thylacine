@@ -479,6 +479,45 @@ func cmdOwner(root string, args []string) int {
 	idx := ownerIndex(reg)
 	stale := staleFor(root, reg)
 
+	// This command answers from the VAULT WORKTREE's checkout, and its caller
+	// runs it from a different tree (CLAUDE.md's doc step: `cd
+	// ~/projects/thylacine-vault && ... owner <changed paths>`). Those two
+	// trees drift, so an answer can be computed against a tree that has never
+	// seen the file being asked about -- and the honest answer there is not
+	// UNOWNED, it is "I cannot see that file".
+	//
+	// Both facts are reported rather than silently absorbed. UNOWNED is the
+	// safe verdict either way (it sends the caller to write the reference doc,
+	// which is recoverable), but a caller who is told "no dossier" about a file
+	// this checkout simply lacks has been given a confident answer to a
+	// question that was never evaluated -- the shape this whole protocol was
+	// built to stop, reappearing in the tool that enforces it.
+	behind := 0
+	if out, err := exec.Command("git", "-C", root, "rev-list", "--count",
+		"HEAD..main").Output(); err == nil {
+		behind = atoiOr0(strings.TrimSpace(string(out)))
+	}
+	var unseen []string
+	for _, p := range paths {
+		if strings.Contains(p, ":") {
+			continue // sibling-repo form; not resolvable here
+		}
+		q := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(p), "./"), "/")
+		if _, err := os.Stat(filepath.Join(root, q)); err != nil {
+			unseen = append(unseen, q)
+		}
+	}
+	if len(unseen) > 0 {
+		fmt.Printf("NOT IN THIS CHECKOUT -- the vault worktree cannot see: %s\n",
+			strings.Join(unseen, " "))
+		fmt.Printf("  The vault is %d commit(s) behind main. Those path(s) were NOT\n", behind)
+		fmt.Printf("  evaluated against anything; treat their verdict as UNKNOWN, not\n")
+		fmt.Printf("  as \"no dossier\". Sync the vault, or ring vault to sweep them.\n\n")
+	} else if behind > 20 {
+		fmt.Printf("(note: the vault worktree is %d commits behind main -- verdicts are\n", behind)
+		fmt.Printf(" computed against that older tree.)\n\n")
+	}
+
 	var answers []ownerAnswer
 	allCovered := true
 	for _, p := range paths {
