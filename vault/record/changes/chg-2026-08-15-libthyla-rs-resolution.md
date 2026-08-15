@@ -4,7 +4,7 @@ type: chg
 title: "libthyla-rs re-swept: the kernel resolves now, and the primitive that got it wrong is still public"
 date: 2026-08-15
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["1de67850"]
 touched: [sub-libthyla-rs]
 established: []
 closed: []
