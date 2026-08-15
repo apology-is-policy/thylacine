@@ -1,7 +1,7 @@
 ---
 id: sub-diorama
 type: sub
-title: "diorama — the synthetic Linux world, and a reformatter that must never become an authority"
+title: "diorama — the synthetic Linux world in two modes, and a reformatter that must never become an authority"
 parent: moc-userspace
 code:
   - usr/diorama/src/server.rs
@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/VIVARIUM.md"]
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-08-15
 ---
 ## Purpose
 
@@ -55,12 +55,36 @@ refused at open rather than at write, so a caller learns where it can act
 on it. That one decision removes most of the surface a `/proc` would
 carry.
 
+**Nothing is a child of a file** — `.` and `..` included, at four sites.
+Walking a name from a file is `ENOTDIR`, which is Linux's own answer.
+
+**`environ` stats as size 0, and alone in that.** Its content is a window,
+so there is no total to report without reading the whole file on every
+stat — and the previous answer, the *truncated* length, was a lie the
+moment an environment passed the render cap. Zero is the only number here
+that is not a guess, and it says the true thing: read to EOF. It also
+matches the native source, which sets no size for any `/proc` file.
+Deliberately not extended to the rest: their sources are bounded and one
+render measures them exactly, and a stat that agrees with its read is
+worth more than symmetry with a zero.
+
 **`self` means the connection's peer** — the process that opened it,
 which for a mounted tree is the *mounter*. So the tree belongs in a
 per-container territory, and that is not a limitation to engineer around:
 a container mounts it privately, so it gets itself by construction. The
 alternative, letting a client name a pid, is the failure mode and is
 deliberately not offered.
+
+**There are two modes, and the second is not a variation on the first.**
+`--vivarium <runner-pid>` (V-7) posts `/srv/viv-dio` instead of
+`/srv/diorama` and filters pid **enumeration** and per-pid **existence**
+to the container's process tree. `/proc/self` is unchanged in both — it
+answers about the connection's own process, so a non-member reader still
+reads only itself.
+
+A malformed or missing `--vivarium` value is a hard startup failure, not
+a fall back to the unfiltered mode, and the reason is the whole point:
+falling back would serve the **host** view to a container.
 
 ## Mechanism
 
@@ -109,6 +133,50 @@ the phenotype speaking about itself. `osrelease` is the one with teeth:
 glibc refuses to start below a minimum kernel version, so it declares
 6.1 — with a `-thylacine` suffix, because Linux's own convention carries
 local suffixes and anything that prints the string then tells the truth.
+
+**Container membership is ppid-descent, and the root is *located* rather
+than passed.** The entrypoint's pid does not exist yet when the diorama
+must already be up to serve the pre-spawn territory mounts, so it cannot
+be an argument: the roots are the runner's children minus this server,
+and members are those plus their ppid-descendants to a fixpoint. Before
+the entrypoint exists the set is **empty** — fail-closed, never a host
+view. Stating it over a root *set* rather than a single entrypoint is
+deliberate: a hypothetical extra runner child widens the view to its own
+tree, never to the host's.
+
+The descent excludes the runner itself, which is what stops this server
+re-entering through the back door — it is excluded from the roots by pid,
+and cannot be re-added by descent because its parent (the runner) is
+never a member. Sound, but by a two-step argument that only the first
+step states.
+
+**The attach gate exists because a fixed service name fails open.**
+`/srv/viv-dio` is first-come-first-served, so a second concurrent
+container's runner lands on the **first** container's server — ungated,
+that mounts container A's `/proc` into container B. The check cannot live
+in the runner: at the moment the runner holds the connection it has
+nothing to compare against (`SYS_SRV_PEER` is server-side only, the
+registry's poster pid is never exposed to EL0, and every diorama's member
+set is equally empty pre-entrypoint). Here the peer pid is
+kernel-stamped and unforgeable.
+
+It gates **attach**, not each operation, and that is the stronger
+property: every fid descends from the attach root, so the refusal fails
+the opener's `SYS_OPEN` outright — the cross-mount becomes impossible
+rather than merely detectable.
+
+**Every read is a window, and the contract is one sentence for every
+node.** `render` means "the bytes at `[off, ...)`" whether the renderer
+produced the whole file and had its prefix dropped, or — as `environ`
+does — read only that window natively. The reasoning is recorded at the
+site and is the right one: *a caller that had to know which is a caller
+that can get it wrong.*
+
+The positioned reader is **not** a drop-in for the whole-file one:
+`t_pread` fails `ESPIPE` on a Dev that is not `.seekable`, and devctl is
+not — so every `/ctl` source here must keep the cursor reader, and
+devproc's seekability is exactly what makes the one positioned caller
+legal.
 
 ## Data structures
 
@@ -203,8 +271,21 @@ position in a list that moves.
 - **The two trees stay siblings.** Hanging the sysfs tree off a root that
   *is* `/proc` would put a directory in a container's namespace that Linux
   has never had. Both directions are asserted.
+- **All arithmetic stays checked or saturating, parsers included.** Both
+  numeric parsers once accumulated with wrapping multiply-and-add and no
+  bound, which is the same class as the message-size subtraction below and
+  was fixed in the same pass. In a crate that builds with overflow checks
+  and abort-on-panic there is no such thing as a quiet wrap here — the
+  choice is between a saturated value and a dead server.
+
 - **Message-size arithmetic stays saturating.** See the caveats — this one
   has already been a whole-server abort.
+
+- **In vivarium mode, a widening is the failure.** Membership may only
+  ever narrow under a partial snapshot. Any change that lets a missing row
+  *add* a pid — or that falls back to the unfiltered mode on a bad
+  argument — hands a container the host's view, which is the one outcome
+  this mode exists to prevent.
 
 ## Seams
 
@@ -221,13 +302,27 @@ derivable from the registers available, and Linux's `kernel_max` comes
 from a compile-time constant with no readable equivalent. Omitting beats
 reporting a different number under a name that means something else.
 
-**Pid visibility is not container-scoped**, because there is no such
-scoping natively — the native process list shows every process on the
-box. So this server serves exactly what native `/proc` serves to exactly
-the same readers. When containment lands, that becomes a real question
-about `/proc` and the native process list *first*; scoping it here alone
-would be theatre, since a contained process that can reach native `/proc`
-would read around it.
+~~**Pid visibility is not container-scoped**, because there is no such
+scoping natively… scoping it here alone would be theatre, since a
+contained process that can reach native `/proc` would read around it.~~
+**BUILT, AND THE ARGUMENT AGAINST IT WAS WRONG** — see the vivarium mode
+above. The premise was the error, not the reasoning: a container's
+*territory* is what withholds native `/proc`, and the diorama is mounted
+*inside* that territory, so filtering here is not theatre but the closing
+of the last hole. The code's own words: *"so the diorama cannot be a read
+oracle for the surface the container's territory withheld"*, citing the
+section 7.1 F6 close.
+
+Worth keeping as a lesson about which half to distrust. The mechanism
+reasoning was sound; the model of the *surrounding containment* was
+wrong, and that is the more dangerous half to get wrong, because it
+produces a confident argument for not building the thing.
+
+**Pid-1 virtualization** is the surviving seam, and the code names its
+shape as a known non-defect: membership is by *live* ppid chains, so a
+container process orphaned by its parent's death reparents to init and
+falls **out** of the container's view. It disappears; it gains nothing.
+Linux virtualizes this with a pid namespace.
 
 ## Caveats
 
@@ -252,11 +347,54 @@ would read around it.
   — saw nothing. The lesson is specific: a resolution test and an
   enumeration test are different tests.
 
-- **The environ gate keys on the reader, and the reader is this server.**
-  Sound today because the file exists only under `self`. If a per-container
-  instance ever runs as its container's principal, or a delegated-authority
-  mechanism lands, the per-pid form becomes servable — and until then the
-  absence is the whole protection.
+- **The `/ctl/procs` read buffer is half the kernel's, and the comment
+  asserting they match is why nobody noticed.** The buffer is 2048 with
+  the comment *"matches the kernel's DEVCTL_READ_BUF"*; the kernel's is
+  **4096**. It was true when written — the constant went 512 → 2048 at
+  prowl-1, the diorama landed against 2048, and #210 lifted it to 4096 for
+  an unrelated instrument, a change with no reason to open this file.
+
+  Both consumers ride that window, and the second is the one that matters:
+  the membership reader feeds the container's enumeration *and* per-pid
+  existence. The arithmetic is exact rather than estimated — 29 bytes of
+  fixed separators plus eight fields makes the shortest possible row 43
+  bytes against 1977 usable, an absolute ceiling of 45 rows — so
+  `VIV_PROCS_MAX = 64`, the declared capacity of both the pair table and
+  the member set, is **unreachable by arithmetic**, and would be reachable
+  at the kernel's actual size. The stale mirror is what keeps the declared
+  capacity fictional.
+
+  **The security claim survives**: the kernel callback stops at first
+  overflow and membership only ever adds pids present in the snapshot, so
+  a lost row can only *narrow* the set. "Never the reverse" is correct.
+  The correctness consequence is the worse one, because the kernel's
+  iteration is a **pre-order DFS from kproc**, not a pid scan: the
+  container's rows sit wherever the runner sits in the tree, so a cut
+  landing before that subtree empties the member set entirely — the
+  container's `/proc` shows nothing, including its own siblings, while
+  `/proc/self` keeps working. Task #182.
+
+  **It came with its own control**, 758 lines away in the same file and in
+  the identical idiom: `// matches the kernel's DEVPROC_READ_BUF`, which is
+  **correct** — that constant has never moved. Nothing about the writing
+  distinguishes the two. The difference is entirely external, which is the
+  argument against the idiom rather than against the author.
+
+- **The environ caveat's trigger fired, and the answer beat the
+  prediction.** This dossier said: *if a per-container instance ever runs
+  as its container's principal, the per-pid form becomes servable.* A
+  per-container instance landed — and it does **not** run as the
+  container's principal. `/proc/self` stays peer-based and unfiltered, so
+  a non-member reads only itself, and the source now carries this
+  dossier's own reasoning under its own name: *"the /self/environ
+  authority-coincidence argument, never a cross-boundary leak."*
+
+  The caveat was right about the trigger and right about what would change.
+  What it did not anticipate is the third option the design took: keep
+  `self` peer-scoped *while* filtering everything else. The gate still
+  keys on the reader, and the reader is still this server, so the standing
+  form of the caveat is unchanged — a delegated-authority mechanism is now
+  the only live trigger.
 
 - **The maps path column rests on a stated premise.** A file-backed
   mapping renders the executable's path, which is correct only while the
