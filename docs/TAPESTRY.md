@@ -6,9 +6,11 @@ is the **Loom arc** (`docs/LOOM.md`); the graphics half (virtio-gpu scanout +
 the canonical scripture; it is folded from the auxiliary-track design notes +
 native proof-of-concept (`usr/apps/TAPESTRY-DESIGN.md` + `usr/apps/libtapestry`
 + `usr/apps/tapestry-demo`, authored on `aux/userspace-apps`), elevated here to
-binding form with the Loom-arc integration made precise. The POC compiles
-(the auxiliary track never boots); the kernel-side pieces are the main track's
-to build.
+binding form with the Loom-arc integration made precise. **That sentence is
+provenance, not a location** — the POC was PROMOTED into the main tree
+(`usr/lib/libtapestry` + `usr/tapestry-demo`) and the original paths no longer
+exist. It runs; the "compiles but never boots" caveat this paragraph used to
+carry was overtaken by the promotion and is corrected in section 11.
 
 Tapestry is the answer to "what is Loom *for*, beyond files?" — the concrete
 consumer that shapes Loom-5 (multishot) and Loom-6 (registered buffers + the
@@ -229,24 +231,28 @@ Loom arc's obligation is to deliver item 1 shaped to fit (the §7 requirements).
 
 ---
 
-## 11. The proof-of-concept (auxiliary track)
+## 11. The proof-of-concept — PROMOTED, and it runs
 
-Built + compiling on `aux/userspace-apps` (`cargo build`; never booted):
+**Corrected 2026-08-16 (aux#237).** This section described the POC as "built +
+compiling on `aux/userspace-apps` (`cargo build`; never booted)" against paths
+under `usr/apps/`. Every operative word of that is now false, and it was false
+in the direction that matters: the demo is the **end-to-end liveness witness
+for the G-2/G-3 path**, verified by `tools/screendump.sh -v`, and the doc
+called it never-booted. Promotion is the event that invalidates a description,
+and it never announces itself at the old location.
 
-- `usr/apps/libtapestry` — `Display` / `Tapestry` / `Event` / `Rect` + the
-  `Loom` seam trait + `MockLoom`. The full client model (triple-buffer + the
-  present recycle-gate + the multishot event drain) compiling against the
-  documented future Loom surface. The handoff seam is one line: swap `MockLoom`
-  for a `libthyla_rs::loom`-backed impl (Loom-6) with **zero** change to
-  `Display` / `Tapestry`.
-- `usr/apps/tapestry-demo` — an animated XOR-plasma software renderer (pure
-  integer, no FP/libm) driving the model end to end. Compile-only; `MockLoom`
-  completes presents immediately + schedules a `Close` so the offline run
-  terminates. On real hardware the same source displays the live plasma. See
-  `usr/apps/tapestry-demo/TEST-PLAN.md`.
+- `usr/lib/libtapestry` (was `usr/apps/libtapestry`) — `Display` / `Tapestry` /
+  `Event` / `Rect`. The one-line handoff seam described here as pending is
+  **taken**: `lib.rs` imports the real ring directly
+  (`use libthyla_rs::loom::{Cqe, Ring, RegisteredBuffer, Sqe, ENTER_GETEVENTS}`),
+  so `MockLoom` is no longer the substrate. The prediction held — `Display` /
+  `Tapestry` were unchanged by the swap.
+- `usr/tapestry-demo` (was `usr/apps/tapestry-demo`) — the animated XOR-plasma
+  software renderer (pure integer, no FP/libm). It drives the model end to end
+  **on a real boot**, not offline against a mock.
 
-When `aux/userspace-apps` merges, `usr/apps/TAPESTRY-DESIGN.md` remains the POC's
-design notes; **this document is the binding scripture** it was folded into.
+`usr/apps/TAPESTRY-DESIGN.md` no longer exists at that path; **this document is
+the binding scripture** it was folded into.
 
 ---
 
@@ -1385,8 +1391,10 @@ dual-refcount addition.
   I-29/I-30, §10 the sub-chunk decomposition Tapestry shapes).
 - `docs/NOVEL.md` §3.2 (Angle #2, BURROW zero-copy drivers) + §3.3 (Angle #3,
   pipelined 9P client) + §3.4 (Angle #4, Halcyon).
-- `usr/apps/TAPESTRY-DESIGN.md` + `usr/apps/libtapestry` + `usr/apps/tapestry-demo`
-  (the auxiliary-track design notes + POC this scripture was folded from).
+- `usr/lib/libtapestry` + `usr/tapestry-demo` (the POC this scripture was
+  folded from, at its PRESENT paths -- promoted off the auxiliary track, where
+  it lived under `usr/apps/` alongside a `TAPESTRY-DESIGN.md` that no longer
+  exists; corrected 2026-08-16, aux#237).
 - `usr/virtio-gpu` (the controlq probe; the scanout half is the graphics-phase
   unblock item) + `irq-bench` (the present IRQ-cost budget).
 - `ARCHITECTURE.md` §28 (where T-1 reserves a number when the graphics phase

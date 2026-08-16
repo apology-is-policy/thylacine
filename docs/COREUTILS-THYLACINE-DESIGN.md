@@ -1,8 +1,10 @@
 # Coreutils: the Thylacine visual language
 
 Design record for the coreutils "make it exotic" arc (user-directed 2026-06-16).
-Aux-authored (`usr/apps/`); the main agent owns folding the binding parts into
-`docs/` (the scripture reconciliation is owed -- see "Scripture change" below).
+Aux-authored (originally under `usr/apps/`, which no longer exists -- the work
+was promoted into the main tree; corrected 2026-08-16, aux#237). The scripture
+reconciliation this line called "owed" has at least partly HAPPENED: the
+companion spec it cites below is now `docs/SYS-FD-DEVCLASS-SPEC.md`.
 
 ## The decision
 
@@ -82,7 +84,7 @@ should expose -- aux specs it; the main agent adds it (kernel is off-limits to
 aux). **User-chosen 2026-06-16: `SYS_FD_DEVCLASS`** (return the fd's Dev class
 char) over a minimal boolean `SYS_ISATTY` -- the richer call also sharpens the ls
 REALM column + powers the proposed `realm`/`qid` tools. Full implementation-ready
-spec: **`usr/apps/SYS-FD-DEVCLASS-SPEC.md`** (ABI, the dc-char table, the kernel
+spec: **`docs/SYS-FD-DEVCLASS-SPEC.md`** (ABI, the dc-char table, the kernel
 sketch, the libthyla-rs wrapper, the consumers).
 
 When it lands, `ls::stdout_is_console()` becomes `io::stdout().is_terminal()` and

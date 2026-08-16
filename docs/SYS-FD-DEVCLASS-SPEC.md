@@ -7,8 +7,11 @@ the audit-trigger discipline (a new syscall surface). The number is reassigned
 spec; the coreutils `ls --color=auto` flip [docs/COREUTILS-THYLACINE-DESIGN.md]
 is its first consumer (the seam is stubbed to `always` until this lands).**
 
-Implementation-ready spec, aux-authored for the main agent to pick up (kernel is
-off-limits to the aux track). Motivated by the coreutils-exotic arc
+Implementation-ready spec, aux-authored for the main agent to pick up. (The
+parenthetical here read "kernel is off-limits to the aux track" -- false since
+at least 2026-07, corrected 2026-08-16, aux#237: the aux track works `kernel/`
+routinely. Whoever picks this up, either track may.) Motivated by the
+coreutils-exotic arc
 (COREUTILS-THYLACINE-DESIGN.md); user-chosen 2026-06-16 over a minimal `isatty`.
 
 ## Why
