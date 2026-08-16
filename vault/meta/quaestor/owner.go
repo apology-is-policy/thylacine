@@ -342,6 +342,13 @@ func answerOwner(root string, reg *Registry, idx map[string][]*Note,
 	if ns, ok := idx[q]; ok {
 		add(ns, q)
 		a.Owned, a.Covered = true, true
+		// The pins are computed for an OWNED path too. Ownership answers
+		// "where does my prose go?"; a pin is a CO-UPDATE obligation, and the
+		// two are orthogonal -- so returning here suppressed exactly the
+		// warning the best-covered files need. There were TWO returns on this
+		// predicate, this one and one in the report, and each hid the other:
+		// removing either alone changes no observable output.
+		a.RefBy = referencedBy(reg, q)
 		return a
 	}
 
@@ -453,6 +460,22 @@ func printOwner(a ownerAnswer) {
 		}
 		return
 	}
+	// The lead prints for OWNED paths too, and that ordering is the fix for a
+	// real hole: `if a.Owned { return }` used to sit above this, so the
+	// better-covered a file was, the LESS this said about it. A pin is a
+	// CO-UPDATE obligation, not a statement about where prose goes -- the two
+	// are orthogonal, and only the second is what ownership answers. The worked
+	// case: `kernel/main.c` prints the boot banner and is owned by a boot
+	// dossier, so the one edit most likely to break the banner ABI reported
+	// nothing about it, while unowned `kernel/extinction.c` beside it did.
+	if len(a.RefBy) > 0 {
+		fmt.Printf("  ALSO named by %s -- a PIN, not a dossier: it cannot hold\n",
+			strings.Join(firstNStr(a.RefBy, 4), ", "))
+		fmt.Printf("  %-34s a description, and it names a co-update set. Check it TOO.\n", "")
+		if len(a.RefBy) > 4 {
+			fmt.Printf("  %-34s (+%d more)\n", "", len(a.RefBy)-4)
+		}
+	}
 	if a.Owned {
 		return
 	}
@@ -464,14 +487,6 @@ func printOwner(a ownerAnswer) {
 				a.Twin, strings.Join(a.TwinOwner, ", "))
 		case a.TwinExists:
 			fmt.Printf("  twin %s exists and is unowned too\n", a.Twin)
-		}
-	}
-	if len(a.RefBy) > 0 {
-		fmt.Printf("  ALSO named by %s -- not a dossier, so it cannot hold a\n",
-			strings.Join(firstNStr(a.RefBy, 4), ", "))
-		fmt.Printf("  %-34s description; check whether your change belongs there TOO\n", "")
-		if len(a.RefBy) > 4 {
-			fmt.Printf("  %-34s (+%d more)\n", "", len(a.RefBy)-4)
 		}
 	}
 	if a.Dir != "" && a.DirTotal > 0 {

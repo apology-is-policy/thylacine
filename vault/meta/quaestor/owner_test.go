@@ -224,6 +224,84 @@ func captureOwner(a ownerAnswer) string {
 	return string(b)
 }
 
+// An OWNED path must still report its pins. `if a.Owned { return }` used to sit
+// ABOVE the RefBy print, so the better-covered a file was the LESS this command
+// said about it -- and a pin is a CO-UPDATE obligation, orthogonal to the
+// "where does my prose go?" question ownership answers.
+//
+// Raised by main 2026-08-16 as the condition on deriving the boot-banner mirror
+// check: the check has to fire where the CHANGE happens, not only where the
+// registry lives. The worked case is exactly that: `kernel/main.c` prints the
+// banner and is owned by a boot dossier, so the single edit most likely to
+// break the banner ABI reported nothing about it -- while unowned
+// `kernel/extinction.c`, one line down in the same answer, did.
+//
+// Asserted on the OUTPUT, not on `a.RefBy`: the field was populated the whole
+// time. Only the human could not see it, which is the same reason captureOwner
+// exists at all.
+func TestOwnedPathStillReportsItsPins(t *testing.T) {
+	owned := ownerAnswer{
+		Path: "kernel/main.c", Kind: "file", Owned: true, Covered: true,
+		Owners: []ownerHit{{Note: "sub-kernel-boot-sequence", Rel: "vault/system/kernel/boot/sub-kernel-boot-sequence.md", Title: "The boot sequence"}},
+		RefBy:  []string{"abi-boot-banner"},
+	}
+	out := captureOwner(owned)
+	if !strings.Contains(out, "abi-boot-banner") {
+		t.Fatalf("an owned path must still surface its pin -- this is the whole "+
+			"co-update obligation:\n%s", out)
+	}
+	// The control: ownership itself must still be reported, and the UNOWNED-only
+	// advice must NOT leak onto an owned path. Without this the test is
+	// satisfied by printing everything unconditionally, which would tell a
+	// covered surface to go write a reference doc.
+	if !strings.Contains(out, "sub-kernel-boot-sequence") {
+		t.Fatalf("the owner is still the primary answer:\n%s", out)
+	}
+	if strings.Contains(out, "write the reference doc") {
+		t.Fatalf("an owned path must never be routed to the reference docs:\n%s", out)
+	}
+}
+
+// The leg above is NOT sufficient, and finding out why is the finding.
+//
+// It hand-builds an ownerAnswer with RefBy already populated -- a state
+// answerOwner could NOT produce, because it also returned early on `Owned`
+// before ever calling referencedBy. So there were TWO returns on the same
+// predicate, in the computation and in the report, and each hid the other:
+// removing either alone changes no observable output, and a unit test on the
+// half you fixed passes while the command's behaviour is unchanged. It did.
+//
+// This leg goes through answerOwner, so it is satisfiable only by a path that
+// really produces the pin.
+func TestOwnedPathComputesItsPinsEndToEnd(t *testing.T) {
+	root := t.TempDir()
+	mkdirAll(t, filepath.Join(root, "kernel"))
+	writeFile(t, filepath.Join(root, "kernel", "main.c"), "x")
+
+	owner := &Note{ID: "sub-kernel-boot-sequence", Rel: "vault/system/sub-boot.md",
+		Front: frontWith("code", "kernel/main.c")}
+	pin := &Note{ID: "abi-boot-banner",
+		Front: frontWith("pinned-by", "kernel/main.c (boot_mark_complete)")}
+	reg := &Registry{byID: map[string]*Note{owner.ID: owner, pin.ID: pin},
+		ordered: []*Note{owner, pin}}
+	idx := map[string][]*Note{"kernel/main.c": {owner}}
+
+	a := answerOwner(root, reg, idx, nil, "kernel/main.c")
+	if !a.Owned {
+		t.Fatalf("precondition: the path must be owned, or this proves nothing: %+v", a)
+	}
+	if len(a.RefBy) != 1 || a.RefBy[0] != "abi-boot-banner" {
+		t.Fatalf("an owned path must still COMPUTE its pins, not only print "+
+			"them when handed them: %+v", a.RefBy)
+	}
+	// The annotated form is the one that matters and the one live in the
+	// corpus: `pinned-by` entries carry a "(symbol)" suffix, and a bare-path
+	// fixture would pass against a matcher that cannot handle the real data.
+	if !strings.Contains(captureOwner(a), "abi-boot-banner") {
+		t.Fatalf("and it must reach the human")
+	}
+}
+
 // A document is not a surface, and UNOWNED about one is the most damaging wrong
 // answer this command can give: it routes the caller AWAY from the vault
 // ("write the reference doc as today") for a surface a dossier may well carry.
