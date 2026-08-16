@@ -712,6 +712,35 @@ where the current chunk sits in the arc without opening the tracker.
 
 ---
 
+## The run journal (`docs/JOURNAL.md`) — binding, user-requested 2026-08-16
+
+After a long autonomous run the user has to reconstruct what happened, and doing
+that from `git log` + six status rows + a memory directory is work they should
+not have to do. **`docs/JOURNAL.md` is the single narrative thread**: what
+landed, in order, why, what it cost, what it left open.
+
+**Append an entry per autonomous run**, newest run first, as part of the run —
+not reconstructed at the end from memory, which is how the interesting parts get
+lost. A checkpoint you run *through* still earns its paragraph.
+
+What belongs there, and what does not:
+
+- **NOT a changelog.** `git log` owns the commits; duplicating them here rots.
+  **NOT a status doc** — `docs/phaseN-status.md` owns per-chunk rows.
+- **The reasoning, the wrong turns, and the findings nobody planned.** A wrong
+  turn that got caught is worth more than a win, because the catch is the
+  reusable part. Record what caught it — a control, a sabotage, a measurement —
+  not just that it was caught.
+- **Evidence on every claim**: a hash, a measured number, a file:line.
+- **Exactness about what "fixed" covers.** Half a defect closed is written as a
+  half, with the other halves named. A run that reads as uniformly successful is
+  usually a run that was written up carelessly.
+- **Decisions that needed the user**, and what they chose — so the next session
+  can tell a ratified decision from an assumed one.
+
+This is the operator's window into an unattended run. Treat a missing entry the
+same as a missing status row: the work is not finished without it.
+
 ## Reference documentation discipline (load-bearing)
 
 **Two parallel references, both maintained continuously, both binding for every PR**:
