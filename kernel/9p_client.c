@@ -98,6 +98,21 @@ static int map_error(int session_send_rc, int exchange_rc,
         // halt reachable by any Rlerror on any op), and an out-of-range ecode
         // would surface a nonsense errno. 4095 is the top of the pouch
         // boundary-line's [-4095,-2] errno passthrough window.
+        //
+        // NOTE THE ONE-VALUE MISMATCH, because it has already misled a reader.
+        // This clamp accepts ecode in [1,4095] and so yields [-4095,-1] -- one
+        // value WIDER at the bottom than the [-4095,-2] window named above.
+        // Ecode 1 (EPERM) therefore returns -1, which collides with the generic
+        // sentinel. That collision is DELIBERATE-BY-INHERITANCE rather than
+        // accidental: `stalk`'s `err_code` names the value and folds it to
+        // T_E_IO, and `dev9p_read` documents the same collision. It is not
+        // narrowed here because doing so would change what userspace observes
+        // for a server EPERM -- an ABI question, not a cleanup.
+        //
+        // Do not read the window text as a bound this code enforces. A comment
+        // stating a range one value off from the code beside it was read back
+        // as a fact by a second author, who then asserted in `dev9p_stat_native`
+        // that -1 could never arrive here.
         if (r->ecode == 0 || r->ecode > 4095u) return -P9_E_IO;
         return -(int)r->ecode;
     }

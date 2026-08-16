@@ -783,10 +783,28 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
         return 0;
     }
     struct p9_attr attr;
-    // errno-rollout: propagate the server's POSIX errno (p9_client_getattr
-    // returns -ecode on Rlerror, e.g. -T_E_NOENT for a vanished file; I-14
-    // bounds it to [-4095,-2], so it is never the generic -1/-T_E_PERM). The
-    // caller (spoor_stat_native -> stalk/SYS_FSTAT) propagates it as -errno.
+    // errno-rollout: propagate the server's POSIX errno -- p9_client_getattr
+    // returns -ecode on Rlerror, e.g. -T_E_NOENT for a vanished file.
+    //
+    // IT IS NOT BOUNDED AWAY FROM -1. This comment claimed I-14 bounds the value
+    // to [-4095,-2] "so it is never the generic -1/-T_E_PERM", and that is
+    // false: `map_error` rejects only `ecode == 0 || ecode > 4095`, so a server
+    // EPERM (ecode 1) arrives here as -1, intact and indistinguishable from the
+    // generic sentinel. `stalk`'s `err_code` already handles exactly that value
+    // by name, and `dev9p_read`'s own comment already records the collision --
+    // so this file contradicted itself, and the frame BELOW knew better than the
+    // frame above. A guard is a load-bearing statement about reachability: when
+    // one frame handles a value explicitly and its caller asserts the value
+    // cannot occur, the guard wins, because somebody measured.
+    //
+    // (The likely origin: map_error's own comment names the passthrough window
+    // as [-4095,-2], one value narrower than the clamp it sits above actually
+    // implements. A mistake made once in a comment, read back as a fact.)
+    //
+    // AND ONLY ONE CALLER PROPAGATES IT. stalk converts it for `*errp` (ER-1, as
+    // designed); `sys_fstat_for_proc` collapses every non-zero to the flat -1
+    // sentinel, which is precisely the half ERRORS.md ER-2 still lists as owed.
+    // So do not read this as "the path already propagates" -- half of it does.
     int gr = p9_client_getattr(p->client, p->fid, P9_GETATTR_BASIC, &attr);
     if (gr != 0)
         return gr;
