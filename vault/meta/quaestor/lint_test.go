@@ -233,6 +233,41 @@ func TestFileLineCitationWarnsOnPresentOnly(t *testing.T) {
 	}
 }
 
+// The extension list was c/h/rs/go/py/S/s/tla/md until 2026-08-16, so R4 was
+// blind on the harness -- `tools/` is almost entirely sh and exp, and those
+// churn faster than the kernel sources the check did cover. One case per
+// newly-covered extension, because a single representative would pass on an
+// allowlist that had gained only that one.
+func TestFileLineCitationCoversHarnessExtensions(t *testing.T) {
+	for _, cite := range []string{
+		"tools/test.sh:103", "tools/interactive/lib.exp:582",
+		"arch/arm64/kernel.ld:12", "vault/meta/x.json:4",
+		"Cargo.toml:9", "ci.yml:31", "a.yaml:2",
+		"usr/lib/pouch/patches/0016-x.patch:77", "specs/x.cfg:5",
+	} {
+		root := fixture(t)
+		mutate(t, root, "vault/system/t/sub-t-x.md",
+			"## Purpose\np\n", "## Purpose\nSee "+cite+" for it.\n")
+		fails, warns := runLint(root, false)
+		if len(fails) != 0 {
+			t.Fatalf("%s: want no fails, got %v", cite, fails)
+		}
+		if len(warns) != 1 || !strings.Contains(warns[0], "'"+cite+"'") {
+			t.Fatalf("%s: want the R4 warn, got %v", cite, warns)
+		}
+	}
+	// The control: a bare version-like token is NOT a citation. Without this
+	// the widened allowlist could be satisfied by matching far too much, and
+	// every case above would still pass.
+	root := fixture(t)
+	mutate(t, root, "vault/system/t/sub-t-x.md",
+		"## Purpose\np\n", "## Purpose\nQEMU 10.0.11 and ratio 3:1 and v1.0:x.\n")
+	fails, warns := runLint(root, false)
+	if len(fails) != 0 || len(warns) != 0 {
+		t.Fatalf("want clean on non-citations, got fails=%v warns=%v", fails, warns)
+	}
+}
+
 // --- views ---
 
 func addClosedView(t *testing.T, root string) {

@@ -33,6 +33,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-932-devsrv-readdir]] | open | sub-kernel-devsrv | fnd-957-r1-f2 | task #932 |
 | [[seam-9p-tag-block-on-full]] | open | sub-kernel-ninep-session | adt-rw4-r1 | RW-4 R3-F3 register (scripture-vs-impl; user call) |
 | [[seam-affinity-mask]] | open | sub-kernel-sched-smp | chg-2026-06-22-ti4-work-conservation | a future SYS_SCHED_SETATTR |
+| [[seam-boot-banner-coupdate-list]] | open | sub-substrate-gates | chg-2026-08-16-boot-banner-mirror-set | yip to main 2026-08-16; sequel to main#244 |
 | [[seam-buddy-bulk-op]] | open | sub-kernel-mm-phys | chg-2026-05-04-p1d-phys-allocator | HT11.R1-F6 |
 | [[seam-close-flush-unbounded]] | open | sub-kernel-death | fnd-68-r2-f3 | unfiled |
 | [[seam-co-fidless-wstat]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-fid-lifecycle |  |

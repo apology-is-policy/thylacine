@@ -108,8 +108,13 @@ var SUB_SECTIONS = []string{"Purpose", "Contract", "Mechanism",
 	"Data structures", "Concurrency", "Invariants enforced", "Error paths",
 	"Performance", "Prosecution", "Seams", "Caveats", "Provenance"}
 
+// The extension set is the thing this check is actually about, so it is
+// enumerated by what it MEANS -- a file a reader will open and scroll to a
+// line in -- not by which languages the kernel happens to be written in. The
+// harness half (sh/exp/py) was missing until 2026-08-16, which made R4 blind
+// on `tools/`, i.e. on exactly the sources that churn fastest.
 var fileLineRe = regexp.MustCompile(
-	`\b[\w./-]+\.(?:c|h|rs|go|py|S|s|tla|md):\d+\b`)
+	`\b[\w./-]+\.(?:c|h|rs|go|py|S|s|tla|md|sh|exp|ld|json|toml|yml|yaml|patch|cfg):\d+\b`)
 var wikilinkRe = regexp.MustCompile(`\[\[([^\]#|]+)`)
 var waivedRe = regexp.MustCompile(`(?m)^>\s*waived:\s*(.+?)\s+--`)
 var sectionRe = regexp.MustCompile(`(?m)^##\s+(.+?)\s*$`)

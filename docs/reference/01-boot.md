@@ -20,9 +20,20 @@ dossiers are written from the code): it names the fatal-output ABI as
 rename. The same sentence states that the format "does not change without
 coordinated updates to `tools/run-vm.sh`, `tools/agent-protocol.md`,
 `CLAUDE.md`, and `TOOLING.md`" — a list this document is not on. It changed,
-the four listed places were updated, and the document that stated the
-coordination requirement is the one that fell out of it. The ABI's home is now
-`vault/system/boundary/registries/abi-boot-banner.md`, which has it right.
+and the document that stated the coordination requirement is the one that fell
+out of it. The ABI's home is now
+`vault/system/boundary/registries/abi-boot-banner.md`.
+
+**Two corrections to the paragraph above, both mine, both found on
+2026-08-16.** It said "the four listed places were updated" — two of the four
+could not have been. `tools/agent-protocol.md` has never existed (planned in
+Phase 1, never written; retired from the scripture on the user's vote at
+main#244), and `tools/run-vm.sh` matches neither string, so there was nothing
+in it to update. And it vouched for the successor — "which has it right" — a
+claim about a *different file*, asserted while writing the redirect and never
+re-checked. The registry carried the same phantom until the sweep that found
+this. An absorption stub that certifies its destination is making the one kind
+of claim it is worst placed to make.
 
 Also stale: the framing throughout is P1-A ("no scheduler, no MMU, no devices
 beyond the polled UART; the kernel halts in a `wfi` loop after the banner"),

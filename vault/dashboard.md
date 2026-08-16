@@ -36,7 +36,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 84
+## Open seams: 85
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -57,6 +57,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-932-devsrv-readdir]] (sub-kernel-devsrv)
 - [[seam-9p-tag-block-on-full]] (sub-kernel-ninep-session)
 - [[seam-affinity-mask]] (sub-kernel-sched-smp)
+- [[seam-boot-banner-coupdate-list]] (sub-substrate-gates)
 - [[seam-buddy-bulk-op]] (sub-kernel-mm-phys)
 - [[seam-close-flush-unbounded]] (sub-kernel-death)
 - [[seam-co-fidless-wstat]] (sub-kernel-ninep-dev9p)
@@ -125,6 +126,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-08-16 [[chg-2026-08-16-boot-banner-mirror-set]] — The boot-banner ABI note carried the phantom it was supposed to be the cure for
 - 2026-08-15 [[chg-2026-08-15-build-targets]] — build.sh re-swept: three target lists that disagree, and the vault recommended the shortest
 - 2026-08-15 [[chg-2026-08-15-diorama-vivarium]] — diorama re-swept: a second operating mode the dossier never saw, and a read buffer half its source
 - 2026-08-15 [[chg-2026-08-15-exec-lineage]] — exec re-swept after LINEAGE: a seam closed sideways, and a prediction that came true
@@ -132,5 +134,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-15 [[chg-2026-08-15-interactive-gating]] — LS-CI re-swept: the gate went parallel, and its own default is stated three times
 - 2026-08-15 [[chg-2026-08-15-joey-boot]] — joey re-swept after Warp-2: a mount deliberately not made, and the scope of what this dossier owns
 - 2026-08-15 [[chg-2026-08-15-libthyla-rs-resolution]] — libthyla-rs re-swept: the kernel resolves now, and the primitive that got it wrong is still public
-- 2026-08-15 [[chg-2026-08-15-proc-lineage]] — proc.c re-swept after LINEAGE: the address-space extraction, the second rfork shape, and the vfork park
 <!-- generated:end -->
