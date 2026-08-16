@@ -4,7 +4,7 @@ type: chg
 title: "The guard that fabricated a kernel death, and the fourth eret that isn't one"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["d6324261"]
 touched: [sub-kernel-exception]
 established: []
 closed: []
