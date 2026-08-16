@@ -2,17 +2,17 @@
 id: sub-kernel-fault
 type: sub
 parent: moc-kernel-memory
-title: "The fault dispatcher — classification, demand paging, and the five backing arms"
+title: "The fault dispatcher — classification, demand paging, six backing arms, and the COW break"
 code: [arch/arm64/fault.c, arch/arm64/fault.h]
 audit: hard
-guarded-by: [inv-i12, inv-i32, inv-i7, inv-i36]
+guarded-by: [inv-i12, inv-i32, inv-i7, inv-i36, inv-i44]
 validated-by: [prose, gate-smp]
 locks: []
 hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -138,7 +138,13 @@ were read.
 allocation, so the count equals true resident-set size and a cap hit frees
 nothing. Over-budget fails the fault, which terminates one Proc — never the box.
 
-## The five backing arms
+## The backing arms
+
+**Six**, not the five this heading and the title claimed until 2026-08-16 —
+against a table in the same block, which is the second miscount of exactly that
+shape found in one sweep (the notes dossier said "four families" over five
+rows). A count no argument rests on is invisible to every reader, its author
+included.
 
 | type | resolution | notes |
 |---|---|---|
@@ -161,6 +167,80 @@ thing — handed `WRITE|EXEC` it emits a writable, user-executable PTE faithfull
 The property holds because `vma_alloc` refuses to create such a VMA. On the one
 surface that deliberately holds two mappings of one code region, the comment
 points at the wrong guard. Task #59.
+
+## The COW break — a different axis, not a seventh row
+
+The table above is indexed by **backing type** and answers a **translation**
+fault: nothing is mapped here, what should be? The copy-on-write break answers
+a **permission** fault on a page that is already mapped and readable, and it is
+keyed on a **VMA flag** rather than a Burrow type. Adding it as a row would be
+the category error; it is a second question asked at a different fault class.
+
+**The decision is one step under a global leaf lock.** Two sharers of one page
+hold *different* Burrow locks, so no per-Burrow lock can serialise "is my share
+the last one?". The model says the decide happens under the Burrow lock; its
+actual requirement is that drop-decide-act be **one step**, which a global leaf
+lock satisfies — and Plan 9 serialises its page refcount under the allocator
+lock for exactly this reason. Worth reading as the correct way to depart from a
+spec: the letter differs, the obligation is met, and the departure is argued at
+the site rather than discovered later.
+
+The share-drop primitive returns the **free verdict**, never the count. A
+caller that read a count and then acted would be racing precisely the way the
+buggy configuration describes, so the API shape *is* the safety property.
+
+**Two outcomes, and both change the PTE:** copy into a fresh private page, or —
+when this sharer is the last — take the page in place and re-install it
+writable.
+
+### The defect found by reading, not by testing
+
+`mmu_install_user_pte` **refuses** a mismatching install over a valid leaf — it
+returns failure rather than overwriting. **Both break outcomes mismatch**: the
+copy path changes the physical address, and take-in-place changes the
+permission bits.
+
+Since a *read* of a COW page installs a read-only PTE, the first **write after
+a read** would have failed its install and killed the Proc. The uninstall at
+the top of the write branch is what makes read-then-write work at all — a step
+that reads as redundant unless you know the install primitive's refusal
+contract. Revert-probed: the suite fails at exactly that assertion and nothing
+else.
+
+It is worth noting how this was found. Not by a test — a test would have caught
+it only if some case did read-then-write on a COW page — but by **reading the
+contract of the primitive being called**. The same shape as the through-a-file
+gate in [[sub-kernel-stalk]], where the answer was already a field on the object
+and nobody had asked it.
+
+### Three properties that look like details and are not
+
+**The break's retained share is the model's pin.** The copy path holds its own
+share across the allocate and the copy, releasing only once the copy is done.
+The model carries a separate `pin` variable; realising it with a held share is
+**strictly stronger** — a held share also keeps the count off zero — so this
+refines the model rather than deviating from it.
+
+**The parent is modified by the fork, and must be.** Its already-installed
+writable PTEs for every COW range are uninstalled, so its next touch re-faults
+read-only. Leaving them is the [[inv-i44]] violation directly: the parent
+writing through a stale writable translation into a page the child now shares.
+That pass runs on **success only**, so a refused fork leaves the parent exactly
+as it was found.
+
+**The COW flag is never cleared.** The flag is *routing*; the per-page count is
+the *truth*. A VMA whose pages have all been taken in place costs one extra
+fault per page — clearing it would require a scan proving no page in the range
+is still shared, which is a worse trade than the fault.
+
+### The charge is taken at the fork, not the break
+
+Each address space maps the shared page, so each counts it — the Linux RSS
+reading. That **over-counts physical memory between fork and break,
+deliberately, in the safe direction**: the fork fails up front where the
+failure can be reported, rather than the break running out later where there is
+nowhere good to put it. The break itself takes no charge, since one mapped page
+becomes one mapped page. See [[sub-kernel-burrow]] for the attribution half.
 
 ## Error paths
 
