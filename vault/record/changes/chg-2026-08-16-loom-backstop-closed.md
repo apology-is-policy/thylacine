@@ -4,7 +4,7 @@ type: chg
 title: "My remedy would have leaked, and the refutation was in my own message"
 date: 2026-08-16
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["1d4bbc27"]
 touched: [sub-kernel-loom]
 established: []
 closed: [seam-loom-sqpoll-owner-unbackstopped]
