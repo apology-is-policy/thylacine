@@ -41,6 +41,18 @@ use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{t_exits, t_putstr};
 
 // Substring search over captured bytes (no_std, no regex).
+// A marker that must not be satisfiable by the line that ARMS the thing it is
+// meant to witness: true iff some LINE holds `needle` while holding none of
+// `not`. Whole-buffer `contains` cannot express that, and the difference is not
+// academic -- stage C's parkLoop marker was matched by its own
+// "Breakpoint 1 set at 0x... for main.parkLoop()" line, so a run where the
+// breakpoint never fired still reported parkloop=1.
+fn line_with(hay: &[u8], needle: &[u8], not: &[&[u8]]) -> bool {
+    hay.split(|&b| b == b'\n').any(|line| {
+        contains(line, needle) && !not.iter().any(|n| contains(line, n))
+    })
+}
+
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
@@ -335,7 +347,20 @@ fn launch_e2e() -> bool {
     // main.parkLoop. SENTINEL is 0x0AABB00DCAFE0001 == 768901734683508737.
     let saw_bp_set = contains(&out, b"Breakpoint 1");
     let saw_bt = contains(&out, b"0  0x");
-    let saw_parkloop = contains(&out, b"parkLoop");
+    // NOT a whole-buffer search for "parkLoop". Delve's own arm line --
+    // `Breakpoint 1 set at 0x... for main.parkLoop() child.go:37` -- names the
+    // function, so the old `contains(&out, b"parkLoop")` was satisfied by the
+    // SAME line that sets saw_bp_set and could never distinguish "the bp fired"
+    // from "the bp was armed and nothing happened". It reported parkloop=1 on
+    // the 2026-08-14 failure, which sent the diagnosis toward inspection when
+    // the breakpoint had simply never fired. This is stage B's own lesson
+    // (line ~245: its parkLoop marker was a false positive matched by the
+    // `goroutines` listing) left unapplied at the second site.
+    //
+    // A HW code bp fires with PC == parkLoop before the instruction retires, so
+    // on a real hit parkLoop is named by the stop-location line AND by bt frame
+    // 0 -- neither of which is the arm line.
+    let saw_parkloop = line_with(&out, b"parkLoop", &[b"Breakpoint 1 set at"]);
     let saw_sentinel = contains(&out, b"768901734683508737");
     t_putstr(&format!(
         "ambush-probe: stage C markers -- bp_set={} bt={} parkloop={} sentinel={}\n",
