@@ -4,7 +4,7 @@ type: chg
 title: "A blind instrument reports the number that means broken"
 date: 2026-08-16
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["35bdda96"]
 touched: [sub-kernel-mm-phys]
 established: []
 closed: []
