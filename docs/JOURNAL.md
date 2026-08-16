@@ -254,6 +254,31 @@ the line when it had simply not been shown it — `boot-probe.sh` keeps the full
 log on the host, and the line was there. A truncated capture and a missing
 feature are the same reading until you check which one you have.
 
+### C-2b — the 3D screen, landed gated and HONESTLY UNPROVEN on its own arm
+
+The screen becomes a host-side 3D resource attached to the compositor context
+where GL exists, falling back to the 2D resource everywhere else. Guest backing
+stays on both paths, because at C-2b the screen is still CPU-filled — only its
+host-side representation changes. `screen_push` grows a 3D arm, and there the
+sync transfer moves the whole surface rather than the damage rect: a deliberate
+trade, since C-3 deletes the CPU fill outright and building a rect path for a
+mechanism already scheduled for removal is waste.
+
+**What is verified, and what is not — stated because the gap is the finding.**
+The FALLBACK arm is verified: suite 1367/1367, and LS-CI 35/35 where the
+`ls-gfx` scenarios assert exact pixels via screendump and therefore cannot pass
+without a working composed screen. **The 3D arm has never executed.**
+`alloc_screen` runs only under `Scanout::Composed`, and neither the dev-loop
+boot nor the Pi's `capset` boot enters it, so `screen res N 3D (compositor ctx)`
+printed on neither host. `prove` produced no new boot log to grep.
+
+So this lands **gated off on every host I could exercise** — dead on the dev
+loop by capability, unproven on the Pi by opportunity — and the commit says so
+rather than calling a clean boot a verification. What it needs is a Pi run that
+drives a surface into composed scanout; identifying that verb is the next step,
+not an afterthought. Booting green proves the gate did not fire, which is
+exactly what an `if (false)` would also prove.
+
 ### Still open leaving this run
 
 - **Warp-C C-2** — the attach verb and the per-slot host resources §4.5.8 now

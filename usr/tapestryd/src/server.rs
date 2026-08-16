@@ -596,6 +596,11 @@ struct Screen {
     va: u64,
     size: u64,
     res: u32,
+    /// Warp-C C-2b: this is a 3D resource attached to COMPOSITOR_CTX rather
+    /// than a plain 2D one. Only ever true where virgl negotiated; the
+    /// capability gate (4.5.9) keeps the 2D path alive everywhere else, and
+    /// BOTH must keep working -- the CPU path is permanent.
+    is3d: bool,
 }
 
 /// The res_seq base: per-generation resource ids (surface weaves + the
@@ -1434,18 +1439,68 @@ impl Comp {
         // mode change -- never a prior occupant's bytes.
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
         let res = self.next_res_id();
-        if self.gpu.resource_create_2d(res, dw, dh).is_err() {
-            unsafe { t_burrow_detach(va, size) };
-            unsafe { t_close(handle) };
-            return None;
+        // Warp-C C-2b: where the host has GL, the screen becomes a 3D resource
+        // owned by the compositor's own context -- the object C-3's per-frame
+        // VIRGL_CCMD_BLITs will compose INTO. Same shape as the audited
+        // warp_probe_res mint (create_3d -> ctx_attach -> attach_backing).
+        //
+        // The guest backing stays on BOTH paths. At C-2b the screen is still
+        // CPU-filled by blit_composed_pixels; only its host-side representation
+        // changes, so the pixels must still have somewhere to land. C-3 is what
+        // deletes the CPU fill.
+        //
+        // A 3D failure is NOT fatal -- it falls back to the 2D resource. 4.5.9:
+        // the CPU path is permanent, so every GL step degrades into it rather
+        // than failing the display.
+        let is3d = self.comp_ctx
+            && self
+                .gpu
+                .resource_create_3d(
+                    res,
+                    PIPE_TEXTURE_2D,
+                    VIRGL_FORMAT_B8G8R8A8_UNORM,
+                    VIRGL_BIND_RENDER_TARGET,
+                    dw,
+                    dh,
+                    1,
+                    1,
+                    0,
+                    0,
+                    0,
+                )
+                .is_ok()
+            && self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res).is_ok();
+        if !is3d {
+            // Either no GL, or the 3D mint failed partway. A create that
+            // succeeded and an attach that did not would leave a resource
+            // behind, so unref before falling back -- and unref of a
+            // never-created id is a harmless no-op on the device.
+            if self.comp_ctx {
+                let _ = self.gpu.resource_unref(res);
+            }
+            if self.gpu.resource_create_2d(res, dw, dh).is_err() {
+                unsafe { t_burrow_detach(va, size) };
+                unsafe { t_close(handle) };
+                return None;
+            }
         }
         if self.gpu.attach_backing(res, pa as u64, size as u32).is_err() {
+            if is3d {
+                let _ = self.gpu.ctx_detach_resource(COMPOSITOR_CTX, res);
+            }
             let _ = self.gpu.resource_unref(res);
             unsafe { t_burrow_detach(va, size) };
             unsafe { t_close(handle) };
             return None;
         }
-        Some(Screen { handle, va, size, res })
+        say!(
+            "tapestryd: screen res {} {} ({}x{})",
+            res,
+            if is3d { "3D (compositor ctx)" } else { "2D" },
+            dw,
+            dh
+        );
+        Some(Screen { handle, va, size, res, is3d })
     }
 
     /// Tear down a displaced screen generation (the release_gen order,
@@ -1455,6 +1510,9 @@ impl Comp {
     /// Composed scanout to the NEW screen first; Direct/Boot/Off never
     /// referenced it).
     fn free_screen(&mut self, s: Screen) {
+        if s.is3d {
+            let _ = self.gpu.ctx_detach_resource(COMPOSITOR_CTX, s.res);
+        }
         let _ = self.gpu.detach_backing(s.res);
         let _ = self.gpu.resource_unref(s.res);
         unsafe { t_burrow_detach(s.va, s.size) };
@@ -2052,11 +2110,25 @@ impl Comp {
         if r.is_empty() {
             return;
         }
-        let res = match &self.screen {
-            Some(s) => s.res,
+        let (res, is3d) = match &self.screen {
+            Some(s) => (s.res, s.is3d),
             None => return,
         };
         let dw = self.gpu.width as u64;
+        if is3d {
+            // TRANSFER_TO_HOST_2D is not the transfer for a 3D resource. The
+            // sync form moves the WHOLE surface rather than the damage rect,
+            // which is a deliberate trade and not an oversight: C-3 deletes the
+            // CPU fill outright (composition becomes host-side blits), so the
+            // rect path here is machinery for a mechanism already scheduled for
+            // removal. It costs a full upload per frame on GL hosts only, and
+            // the CPU path -- which every non-GL host takes -- keeps its rects.
+            let _ = self
+                .gpu
+                .transfer_to_3d_sync(COMPOSITOR_CTX, res, self.gpu.width, self.gpu.height, self.gpu.width * 4);
+            let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
+            return;
+        }
         let off = ((r.y as u64) * dw + r.x as u64) * 4;
         let _ = self.gpu.transfer(res, off, r.x, r.y, r.w, r.h);
         let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
