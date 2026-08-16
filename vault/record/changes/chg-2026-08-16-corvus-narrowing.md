@@ -4,7 +4,7 @@ type: chg
 title: "corvus re-swept: the AUTH gate was a narrowing, and the expired premise had three dependents"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["915131ce"]
 touched: [sub-corvus]
 established: []
 closed: []
