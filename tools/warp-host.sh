@@ -9,6 +9,7 @@
 #   tools/warp-host.sh bench     # llvmpipe GLQuake baseline (paced + unpaced x2)
 #   tools/warp-host.sh capset    # virtio-gpu-gl-pci + egl-headless capset probe
 #   tools/warp-host.sh prove     # Warp-2 gate: /warp-prove on the virgl device
+#   tools/warp-host.sh composed  # Warp-C C-2b gate: the composed screen's arm, GL vs 2D (both legs)
 #   tools/warp-host.sh reject    # #240: is a REJECTED command stream observable in-guest?
 #   tools/warp-host.sh p1b       # GPU-DESIGN 4.5.4: does ctx_attach permit a cross-context blit? (host-side, no guest)
 #   tools/warp-host.sh p2        # GPU-DESIGN 4.5.4: does the blit observe the client's FINISHED frame? (host-side)
@@ -217,6 +218,49 @@ capset)
         echo "CAPSET GATE: UNVERIFIED (need BOOT-capset PASS + a GET_CAPSET line)"
         exit 1
     fi
+    ;;
+composed)
+    # Warp-C C-2b: does the compositor's SCREEN follow the host's GL
+    # capability? Two legs on ONE host differing in the DEVICE alone --
+    # that difference IS the control. A GL-only leg would pass equally well
+    # against a build that ignored the capability and always minted 3D, so
+    # the 2D leg is not a bonus; it is what makes the GL leg mean anything.
+    out="$REPO_ROOT/build/warp-composed.log"
+    : > "$out"
+    for d in virtio-gpu-gl-pci virtio-gpu-pci; do
+        echo "== composed leg: $d =="
+        ssh "$HOST" "cd $RREPO && ${RENV}THYLACINE_GPU_DEV=$d expect tools/warp/composed-screen.exp" |
+            tee -a "$out" || true
+    done
+    echo "== composed verdict =="
+    grep -E "WARP-COMPOSED" "$out" || true
+    ok=1
+    # Four terms. The SCREEN lines carry the claim; the scenario PASS lines
+    # prove each leg RAN TO COMPLETION -- without them a leg that died right
+    # after printing its screen line still shows the evidence the gate greps
+    # for. The 3D pattern cannot be satisfied by the 2D leg (its arm reads
+    # "2D"), and "composed-screen: virtio-gpu-pci" cannot be satisfied by the
+    # GL leg (whose device string carries the extra "gl-").
+    if ! grep -qE "WARP-COMPOSED SCREEN: res [0-9]+ 3D \(compositor ctx\)" "$out"; then
+        echo "C-2b GATE FAIL -- no 3D screen mint on the GL device"
+        ok=0
+    fi
+    if ! grep -qE "WARP-COMPOSED SCREEN: res [0-9]+ 2D \(" "$out"; then
+        echo "C-2b GATE FAIL -- no 2D screen mint on the non-GL device"
+        ok=0
+    fi
+    if ! grep -qF "LS-CI PASS: composed-screen: virtio-gpu-gl-pci" "$out"; then
+        echo "C-2b GATE FAIL -- the GL leg did not run to completion"
+        ok=0
+    fi
+    if ! grep -qF "LS-CI PASS: composed-screen: virtio-gpu-pci" "$out"; then
+        echo "C-2b GATE FAIL -- the non-GL leg did not run to completion"
+        ok=0
+    fi
+    if [ "$ok" != 1 ]; then
+        exit 1
+    fi
+    echo "C-2b COMPOSED-SCREEN GATE: VERIFIED (3D on GL, 2D without -- discriminates)"
     ;;
 prove)
     out="$REPO_ROOT/build/warp-prove.log"

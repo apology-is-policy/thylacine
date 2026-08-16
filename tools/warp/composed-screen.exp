@@ -1,0 +1,200 @@
+#!/usr/bin/expect -f
+# Warp-C C-2b's verification driver: force the compositor into COMPOSED
+# scanout on a host that has virgl, and assert the screen resource was
+# minted on the arm the host's capability implies.
+#
+# WHY THIS EXISTS AT ALL. C-2b makes the compositor's screen a 3D resource
+# in its own virgl context (GPU-DESIGN 4.5.2), but `alloc_screen` runs only
+# under `Scanout::Composed` -- and NOTHING that ran on either host entered
+# that state. The dev loop is virgl=0 (default virtio-gpu-pci) so it can
+# only ever mint the 2D fallback; and every pre-existing warp verb that
+# boots the GL device (`capset`, `prove`, `tri`) drives at most ONE
+# display-sized surface, which reconcile() resolves to Direct -- scanning
+# out the client's own resource and bypassing the screen entirely. So the
+# 3D arm shipped never having executed, and a green boot proved nothing
+# about it: an `if (false)` would have booted identically.
+#
+# The driver is /bin/tapestry-battery -- a ramfs-native client that brings
+# up TWO surfaces. Two visible leaves is the cheapest thing reconcile()
+# resolves to Composed (server.rs, the scanout mode machine), and the
+# battery needs neither GL nor the pool. That isolation is the point: the
+# ONLY GL object in play is the compositor's own screen, so a failure here
+# cannot be a client's GL problem wearing C-2b's clothes.
+#
+# THE CONTROL IS THE DEVICE, and it is the whole reason this file takes a
+# parameter instead of hardcoding the GL device. Run twice on ONE host with
+# ONE variable changed:
+#
+#   virtio-gpu-gl-pci  -> posture GPU -> screen res N 3D (compositor ctx)
+#   virtio-gpu-pci     -> posture CPU -> screen res N 2D
+#
+# Each arm asserts the OTHER arm's outcome is wrong, so a gate that had
+# stopped reading the capability (say a screen that is always 2D, or always
+# 3D) fails on one leg or the other. A single GL-only leg would pass just as
+# happily against a build that ignored `comp_ctx`, which is exactly the
+# not-discriminating shape this project keeps re-learning.
+#
+# Two independent claims, deliberately not collapsed into one:
+#   1. the POSTURE line matches the device      (feature negotiation works)
+#   2. the SCREEN arm matches the posture       (C-2b follows the capability)
+# Claim 2 is the one C-2b owns; claim 1 exists so a host that silently lost
+# its GL cannot satisfy claim 2 by making both sides equally wrong.
+#
+# WHAT THE "3D" WORD ATTESTS, since virtio-gpu commands LOOK fire-and-forget.
+# They are not here: `Ctrl::step` (gpu.rs) submits and WAITS, then compares the
+# device's response type against the expected one and returns Err on mismatch.
+# So the arm printing "3D (compositor ctx)" is the conjunction of four
+# response-checked round trips the host actually answered OK -- CTX_CREATE of
+# the compositor context, RESOURCE_CREATE_3D, CTX_ATTACH_RESOURCE, and
+# ATTACH_BACKING -- against real virglrenderer. That is a claim about the HOST
+# accepting the object, not about our having sent the commands.
+#
+# WHAT THIS DOES NOT PROVE, stated so a later reader does not over-read it.
+# It proves the compositor MINTED the screen on the arm the host's capability
+# implies, and that it entered Composed. It says NOTHING about the pixels: the
+# screen is still CPU-filled at C-2b (only its host-side representation
+# changed), so correct pixels here would prove the CPU path, not the GL one.
+# Pixel evidence needs screendumps, which need QMP -- deliberately off below,
+# because this gate wants the cheapest boot that reaches the mint. C-3, which
+# replaces the CPU fill with per-frame blits, is where the pixel oracle becomes
+# load-bearing and where this scenario grows a QMP arm.
+#
+# Verdict lines (printed by the success path only -- #186: never key a gate
+# on a token the harness's own timeout text can quote):
+#   WARP-COMPOSED POSTURE: <GPU|CPU>
+#   WARP-COMPOSED SCREEN: res N <arm> (WxH)
+#   WARP-COMPOSED PASS
+#
+# Runs ON the GL host (Linux; lib.exp takes the direct-pty transport).
+# env: WARP_REPO (default ~/projects/thylacine), WARP_WORK (default ~/warp),
+#      THYLACINE_GPU_DEV (default virtio-gpu-gl-pci -- the parameter).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+# tcg unless the caller pins an accel (KVM GL hosts ride warp-host.sh WARP_ACCEL)
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_QMP) 1
+set ::env(THYLACINE_NO_SHARE) 1
+if {![info exists ::env(THYLACINE_GPU_DEV)]} {
+    set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
+}
+set dev $::env(THYLACINE_GPU_DEV)
+# egl-headless is what makes virgl reachable on a headless GL host; the 2D
+# leg takes the same display so the two legs differ in the DEVICE alone.
+set ::env(THYLACINE_DISPLAY) egl-headless
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+# What this device is expected to produce. Derived, not passed: a caller
+# that could set the expectation independently of the device could set both
+# wrong and never know.
+if {$dev eq "virtio-gpu-gl-pci"} {
+    set want_posture GPU
+    set want_arm "3D (compositor ctx)"
+} else {
+    set want_posture CPU
+    set want_arm "2D"
+}
+
+file mkdir $work
+# Per-attempt fixture isolation (#78/#85): the synced images are never
+# booted directly, and a stale copy from a prior leg must never be booted
+# under this leg's tag.
+set tag [expr {$want_posture eq "GPU" ? "composed-gl" : "composed-2d"}]
+file delete -force $work/pool-$tag.img $work/disk-$tag.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-$tag.img
+exec cp $repo/build/disk.img $work/disk-$tag.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-$tag.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-$tag.img
+
+source $repo/tools/interactive/lib.exp
+
+lc_boot
+
+# Claim 1, taken BETWEEN boot and login while it is still in the buffer:
+# tapestryd reports the composed path at bringup (it is a property of the
+# host fixed at feature negotiation, so it is said where the host comes up,
+# not where a screen is allocated -- that placement was itself a bug this
+# arc paid for).
+set timeout 900
+expect {
+    -re {tapestryd: composed path = (GPU|CPU)[^\r\n]*[\r\n]} {
+        set got_posture $expect_out(1,string)
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction before the posture line" }
+    timeout { lc_fail "no 'composed path =' line within 900s on $dev" }
+    eof     { lc_fail "qemu exited before the posture line on $dev" }
+}
+if {$got_posture ne $want_posture} {
+    lc_fail "posture is $got_posture on $dev, want $want_posture -- the host's\
+             GL capability is not what this leg assumes, so the screen-arm\
+             claim below would be meaningless"
+}
+puts "\nWARP-COMPOSED POSTURE: $got_posture\n"
+lc_step "posture $got_posture matches $dev"
+
+lc_login michael correct-horse-battery-staple-v1
+
+# The driver. Foreground; its say! lines and the compositor's share the
+# serial tee. We need only its first two surfaces -- everything after the
+# structural stage is somebody else's gate (ls-gfx-panes owns the battery's
+# full acceptance run, locally, with QMP for the pixel legs).
+lc_send "tapestry-battery"
+
+# Both lines, in either order. The code emits `screen res` first
+# (ensure_screen runs before the entering say), but ordering that a future
+# refactor could flip is not something a gate should depend on -- and an
+# expect that waits for the second one first would silently discard the
+# first and then hang.
+set got_arm ""
+set got_res ""
+set got_w 0
+set got_h 0
+set got_composed 0
+set timeout 300
+expect {
+    -re {tapestryd: screen res (\d+) (3D \(compositor ctx\)|2D) \((\d+)x(\d+)\)} {
+        set got_res $expect_out(1,string)
+        set got_arm $expect_out(2,string)
+        set got_w $expect_out(3,string)
+        set got_h $expect_out(4,string)
+        if {!$got_composed} { exp_continue }
+    }
+    -re {tapestryd: scanout composed \((\d+)x(\d+)\)} {
+        set got_composed 1
+        if {$got_arm eq ""} { exp_continue }
+    }
+    -ex "tapestry-battery: FAIL" {
+        lc_fail_detail "the battery failed before the compositor entered Composed"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction while forcing Composed" }
+    timeout {
+        lc_fail "no screen-mint + composed-entry pair within 300s on $dev\
+                 (screen='$got_arm' composed=$got_composed) -- if the battery\
+                 came up but the compositor stayed Direct, reconcile() no\
+                 longer resolves two leaves to Composed"
+    }
+    eof { lc_fail "qemu exited while forcing Composed on $dev" }
+}
+
+if {$got_arm ne $want_arm} {
+    lc_fail "screen minted '$got_arm' on $dev (posture $got_posture), want\
+             '$want_arm' -- the C-2b branch is not following the host's\
+             capability"
+}
+# The screen is the DISPLAY-sized compositing target; a mint at some other
+# geometry would satisfy the arm check while being a different object.
+if {$got_w == 0 || $got_h == 0} {
+    lc_fail "screen minted at ${got_w}x${got_h} -- degenerate geometry"
+}
+puts "\nWARP-COMPOSED SCREEN: res $got_res $got_arm (${got_w}x${got_h})\n"
+lc_step "screen arm '$got_arm' matches posture $got_posture"
+lc_step "composed entry observed (two visible leaves)"
+
+puts "\nWARP-COMPOSED PASS\n"
+lc_pass "composed-screen: $dev -> posture $got_posture -> screen res $got_res\
+         $got_arm at ${got_w}x${got_h} (the C-2b arm, exercised)"
+lc_vm_kill

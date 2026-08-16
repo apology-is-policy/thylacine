@@ -293,12 +293,95 @@ half. Building one (two surfaces, or a mode change that un-sizes a single one,
 which is what `ls-gfx-mode` does locally) is the next task, and it gates C-2b,
 C-3, and the arc's exit criterion alike.
 
+### The driver — C-2b's 3D arm finally executes, and my own note was wrong
+
+The task I left myself was "build a Pi driver that forces Composed scanout."
+Before building anything I checked the claim under it, and **it was false**. The
+section above says "no verb in `warp-host.sh` produces either" — but
+`glq-virgl.exp`, which `quake` runs, opens GLQuake in a window and its very
+first assertion is `-re {scanout composed \((\d+)x(\d+)\)}` with the label
+"composed entry (two leaves)". `decomp` and `wedge` split the layout too. What
+was actually true is narrower and duller: the verbs I had *read the boot logs
+of* — `capset`, `smoke` — boot with no client at all, so aurora alone is
+display-sized and lands in Direct. I generalised from the two logs I had to a
+claim about all ten verbs, and wrote it into two documents.
+
+Worth noting how cheap the catch was: one grep for `composed` across
+`tools/warp/*.exp`, run because the note asserted a negative over a set I had
+not enumerated. **The evidence that a thing is absent has to come from the whole
+set, not from the members that happened to be in front of me** — and a note
+written confidently at a compaction boundary is exactly where that error
+survives, because the far side inherits it as established fact.
+
+I still did not use `quake`. It drags in the pool's `tyr-glquake`, S3TC quirks
+(#216), the #198 storm, and 900-second timeouts — a lot of machinery that can
+fail for reasons having nothing to do with C-2b. `/bin/tapestry-battery` brings
+up two surfaces, lives in the ramfs, and needs no GL of its own, so **the only
+GL object in the experiment is the compositor's own screen**. That isolation is
+the reason to pick it, not availability.
+
+`tools/warp/composed-screen.exp` boots, takes the posture line between boot and
+login (it prints at bringup, which is where a host property belongs — a lesson
+this arc already paid for), runs the battery, and asserts the screen mint. **The
+control is the device**, which is why the scenario takes one as a parameter
+instead of hardcoding the GL model: two legs, one host, one variable, each
+asserting the other's outcome is wrong.
+
+```
+virtio-gpu-gl-pci -> composed path = GPU -> screen res 67 3D (compositor ctx) (1280x800)
+virtio-gpu-pci    -> composed path = CPU -> screen res 67 2D (1280x800)
+```
+
+**C-2b's 3D arm has now executed**, on real V3D silicon through virgl. The
+second line is what makes the first mean something: a GL-only leg would pass
+identically against a tapestryd that ignored the negotiated bit and always
+minted 3D. Two legs that *disagree* are stronger evidence than two that both
+pass — the control produced a different answer rather than merely staying quiet.
+Both legs minting `res 67` is a small corroboration on the side: everything
+upstream of the branch is identical, so the arm is the only thing that moved.
+
+The gate keeps two claims separate rather than collapsing them — posture matches
+the device, screen arm matches the posture — so a host that had silently lost
+its GL could not satisfy the second by making both sides equally wrong. And
+`tools/warp-host.sh composed` requires each leg's scenario-completion line as
+well as its screen line, because a leg that died immediately after printing its
+screen line would otherwise still show the gate everything it greps for. That
+term is not hypothetical caution: the `reject` verb in this same file shipped
+grepping `C0-REJECT` while its producer printed `C0-DETECT`, and exited 0 on the
+exact failure it existed to catch.
+
+### Found in passing: `docs/REFERENCE.md`'s snapshot block died in Phase 5
+
+The doc-update step sent me to `docs/REFERENCE.md` to refresh its Snapshot
+block, which `CLAUDE.md` calls non-negotiable per chunk. **The newest "Tip"
+bullet in it is a Phase 5 chunk** (`P5-stratumd-stub-bringup` audit close), and
+there are 101 bullets behind it. The file's last commit of any kind is
+`418688cf`, 2026-08-01. It contains **zero** occurrences of "Warp", "Tapestry",
+"Clade" or "PTY-" — three whole arcs and a subsystem that do not exist as far as
+the as-built technical reference is concerned.
+
+So a binding per-PR obligation has been quietly unmet across roughly two phases,
+including by me, several times this week. It is the "*a status field whose flip
+is nobody's step stays unflipped*" shape: every chunk's author is told to
+refresh it, no chunk's work makes them, and nothing fails when they do not.
+
+**I deliberately did NOT patch my own bullet onto the top.** A dead list with
+one fresh entry reads as maintained, which is worse than one that visibly
+stopped — the reader trusts it again. The real question is what that block is
+*for* now that `docs/phaseN-status.md` carries per-chunk rows and this journal
+carries the narrative; answering it is a scripture-shaped decision, not a doc
+edit to slip into a tooling commit. Enqueued rather than fixed in passing, and
+enqueued in memory because the tracker is down this session.
+
 ### Still open leaving this run
 
-- **Warp-C C-2** — the attach verb and the per-slot host resources §4.5.8 now
-  specifies.
+- **Warp-C C-2c/C-2d** — the attach verb (P1b's authority-conferral point) and
+  the per-slot host resources §4.5.8 now specifies. C-2a/C-2b are landed *and
+  exercised* on both capability arms as of this run.
 - **Two thirds of the extinction tear** (the vault seam, `IPI_HALT`), and a
   prosecutor round owed on the landed third.
 - **`main#228`** — Fable rounds on C-0d and #243, quota-blocked. Deliberately
   *not* run on an Opus fallback: what is owed there is lineage independence, and
   a fallback round would spend the surface without buying it.
+- **`docs/REFERENCE.md`'s snapshot block** — dead since Phase 5 (above). Needs a
+  decision about what it is for, not a patch.

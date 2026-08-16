@@ -976,6 +976,38 @@ hardware that does not all have a GPU seam. It also sharpens §4.5.5's
 capset-neutrality obligation: the model must now stay neutral across *three*
 fills (CPU, virgl, Venus), not two.
 
+**Follow-through — C-2 verified on that host, both arms (2026-08-16).**
+Consequence 1 said where the verification belongs; this records it happening,
+and one thing it cost. C-2a/C-2b shipped with the 3D arm having never executed,
+because `alloc_screen` runs only under `Scanout::Composed` and **no verb that
+boots the GL device ever entered that state**: `capset`, `prove` and `tri` each
+drive at most one display-sized surface, which §4.5.1's mode machine resolves to
+**Direct**, scanning out the client's own resource and bypassing the screen
+entirely. A capability-gated path needs a driver that reaches it, and the
+absence of one is invisible in a green boot — that is this section's practical
+corollary, and it generalises past graphics: *a gate whose precondition nothing
+constructs is indistinguishable from a gate that works.*
+
+`tools/warp/composed-screen.exp` supplies the driver by running
+`/bin/tapestry-battery` — a ramfs-native client that brings up TWO surfaces,
+which is the cheapest thing `reconcile()` resolves to Composed and needs neither
+GL nor the pool, so the only GL object in play is the compositor's own screen.
+**The control is the device**, and the two legs disagree on one host with one
+variable changed:
+
+```
+virtio-gpu-gl-pci -> composed path = GPU -> screen res 67 3D (compositor ctx) (1280x800)
+virtio-gpu-pci    -> composed path = CPU -> screen res 67 2D (1280x800)
+```
+
+The second line is not a formality. A GL-only leg would pass identically against
+a tapestryd that ignored the negotiated bit and always minted 3D, so the non-GL
+leg is what makes the first line mean anything — and a measured *disagreement*
+is stronger than two agreeing greens. The gate keeps the two claims separate
+(posture matches the device; screen arm matches the posture) so a host that
+silently lost its GL cannot satisfy the second by making both sides equally
+wrong. `tools/warp-host.sh composed` runs both legs and requires both.
+
 ## 5. Placement — where the server lives, per backend
 
 The seam is identical on both; the process topology is not, and both are forced:

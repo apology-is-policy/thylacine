@@ -1096,3 +1096,44 @@ proven against synthetic pass/fail/swapped logs including the poisoned
 half-match. The battery's glsrc 2D reject legs (off idempotent / unknown
 ctx E_NOENT / junk E_INVAL — a warp ctx cannot exist on 2D, the mint is
 virgl-gated) ride the local interactive gate.
+
+The Warp-C **C-2b** gate is `tools/warp-host.sh composed`
+(`tools/warp/composed-screen.exp`): does the compositor's SCREEN follow the
+host's negotiated GL capability? It exists because C-2a/C-2b shipped with the
+3D arm having never executed — `alloc_screen` runs only under
+`Scanout::Composed`, and every verb above that boots the GL device (`capset`,
+`prove`, `tri`) drives at most one display-sized surface, which `reconcile()`
+resolves to Direct, scanning out the client's own resource and bypassing the
+screen entirely. (`quake`/`decomp`/`wedge` DO reach Composed — but through
+GLQuake, i.e. the pool binary, S3TC quirks and 900 s budgets.) The driver here
+is `/bin/tapestry-battery`: a ramfs-native client whose two surfaces are the
+cheapest thing `reconcile()` resolves to Composed, needing neither GL nor the
+pool, so the only GL object in the experiment is the compositor's own screen.
+**The device IS the control**, which is why the scenario takes one as a
+parameter rather than hardcoding the GL model — two legs on one host, one
+variable, each asserting the other's outcome is wrong: `virtio-gpu-gl-pci` →
+posture `GPU` → `screen res N 3D (compositor ctx)`; `virtio-gpu-pci` → posture
+`CPU` → `screen res N 2D`. A GL-only leg would pass identically against a
+tapestryd that ignored `comp_ctx` and always minted 3D, so the non-GL leg is
+what makes the GL one mean anything. Two claims stay separate rather than
+collapsing (the posture matches the DEVICE; the screen arm matches the POSTURE),
+so a host that silently lost its GL cannot satisfy the second by making both
+sides equally wrong. The verb's four-term conjunction requires both screen lines
+AND both `LS-CI PASS: composed-screen:` completions — a leg that died right
+after printing its screen line would otherwise still show the gate everything it
+greps for, which is the `reject` verb's own F8 failure (it grepped `C0-REJECT`
+while the producer printed `C0-DETECT`) in a different costume. First measured
+on thyla-pi (KVM, real V3D) 2026-08-16: `res 67 3D (compositor ctx)
+(1280x800)` and `res 67 2D (1280x800)` — the identical resource id on both legs
+corroborating that the capability branch is the only thing that moved.
+
+**What the `3D` word attests**, since virtio-gpu commands *look* fire-and-forget:
+`Ctrl::step` submits and WAITS, comparing the device's response type against the
+expected one and returning `Err(Error::Hardware)` on mismatch. So that arm is the
+conjunction of four **response-checked** round trips the host answered OK —
+`CTX_CREATE` of the compositor context, `RESOURCE_CREATE_3D`,
+`CTX_ATTACH_RESOURCE`, `ATTACH_BACKING` — against real virglrenderer. It is a
+claim about the host ACCEPTING the object, not about the guest having sent the
+commands. What it is *not* is a claim about pixels: the screen is still
+CPU-filled at C-2b, so correct pixels here would evidence the CPU path. The pixel
+oracle becomes load-bearing at C-3, where this scenario grows a QMP arm.
