@@ -4,7 +4,7 @@ type: chg
 title: "The redundant safety net was redundant because of the bug"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["25d4aaa2"]
 touched: [sub-kernel-territory]
 established: []
 closed: []
