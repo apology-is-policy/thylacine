@@ -4,7 +4,7 @@ type: chg
 title: "A safety argument that was fiction, and the system was correct anyway"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["f0c5d507"]
 touched: [sub-kernel-mmu]
 established: []
 closed: []
