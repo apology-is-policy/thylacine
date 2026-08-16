@@ -58,7 +58,14 @@ R5. **Every gate/verification claim carries `blind-to`.** A gate note must
     assertion-satisfiable-by-a-broken-system lesson). A verification claim
     without a stated blind spot is incomplete.
 
-R6. **Every ABI note enumerates its `mirrors`.** A change touching an ABI must
+R6. **Every ABI note enumerates its `mirrors`**, and where the ABI is a
+    fixed STRING the set is DERIVED rather than trusted: declare
+    `literals` + `literal-scan` (+ `literal-mentions` for matches judged
+    comment-only) and quaestor diffs the tree's hit set against the
+    declaration in both directions, failing on an undeclared matcher, on
+    a declared mirror that matches nothing, and on an empty hit set. The
+    same check runs inside `quaestor owner`, so it fires at the change
+    site rather than only where the note lives. A change touching an ABI must
     check off the full mirror set in its change note (`mirrors-checked`). This
     is the `t_stat` lesson made structural: a per-mirror assert verifies only
     that mirror; only the enumerated set verifies the family.

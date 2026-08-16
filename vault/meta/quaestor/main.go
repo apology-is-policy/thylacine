@@ -44,6 +44,7 @@ func lintRun(root, mode string) int {
 	fails, warns := validate(reg, preErrors)
 	fails = append(fails, checkViews(reg)...)
 	fails = append(fails, checkCodePaths(reg)...)
+	fails = append(fails, checkAbiLiterals(root, reg)...)
 	if reg.Len() == 0 {
 		// FAIL CLOSED: an empty registry means the root is wrong or the
 		// vault is gone -- a gate that validates nothing must not pass

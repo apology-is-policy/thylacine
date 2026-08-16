@@ -80,6 +80,7 @@ type ownerAnswer struct {
 	TwinExists bool       `json:"twin-exists,omitempty"`
 	TwinOwner  []string   `json:"twin-owner,omitempty"`
 	RefBy      []string   `json:"referenced-by,omitempty"`
+	AbiLead    []string   `json:"abi-literal-lead,omitempty"`
 	// NotCode marks a path this command should refuse rather than answer:
 	// a reference doc or a user-manual page. See notCodeSurface.
 	NotCode    bool       `json:"not-code-surface,omitempty"`
@@ -349,6 +350,7 @@ func answerOwner(root string, reg *Registry, idx map[string][]*Note,
 		// predicate, this one and one in the report, and each hid the other:
 		// removing either alone changes no observable output.
 		a.RefBy = referencedBy(reg, q)
+		a.AbiLead = abiLiteralLead(root, reg, q)
 		return a
 	}
 
@@ -369,6 +371,7 @@ func answerOwner(root string, reg *Registry, idx map[string][]*Note,
 		a.Twin = t
 	}
 	a.RefBy = referencedBy(reg, q)
+	a.AbiLead = abiLiteralLead(root, reg, q)
 	// A reference is a LEAD, never coverage -- and getting this wrong was a
 	// false positive exactly as bad as the false UNOWNED the rest of this file
 	// defends against, in the opposite direction.
@@ -475,6 +478,11 @@ func printOwner(a ownerAnswer) {
 		if len(a.RefBy) > 4 {
 			fmt.Printf("  %-34s (+%d more)\n", "", len(a.RefBy)-4)
 		}
+	}
+	// Derived, not declared: this fires for a file NOBODY has connected to the
+	// ABI yet, which is the case a pin cannot cover by construction.
+	for _, l := range a.AbiLead {
+		fmt.Printf("  %s\n", l)
 	}
 	if a.Owned {
 		return

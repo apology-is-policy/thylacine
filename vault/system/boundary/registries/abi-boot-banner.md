@@ -24,6 +24,15 @@ mirrors:
   - "tools/interactive/ls-gfx-font.exp"
   - "tools/warp/quarry-wedge.exp"
   - "tools/stall-watch.py (`kernel base:` — see below)"
+literals:
+  - "Thylacine boot OK"
+  - "EXTINCTION:"
+  - "kernel base:"
+literal-scan:
+  - "tools"
+literal-mentions:
+  - "tools/warp-host.sh (a usage comment)"
+  - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
 updated: 2026-08-16
 ---
@@ -99,13 +108,56 @@ rather than broken, so they are not mirrors. 14 + 2 = the 16 files under
 So the corrected four-file list still names one file that cannot break and
 misses fourteen that can. That is [[seam-boot-banner-coupdate-list]].
 
-### What would make it safe-by-default
+### The mirror set is now DERIVED, not declared
 
 The program half of this is mechanically checkable and the document half is
-not — `mirrors` above is the checkable list, and R6 already requires a change
-touching this note to check it off. The gap is that nothing derives the list
-from the tree. A lint rule that greps for the two literals and diffs the hit
-set against `mirrors` would have failed on the day `dap-nora.exp` was written.
+not, so that is exactly where the line was drawn. `literals` /
+`literal-scan` / `literal-mentions` in this note's frontmatter are the
+declaration; quaestor sweeps the scan roots and diffs the hit set against
+`mirrors` ∪ `pinned-by` ∪ `literal-mentions`. **It fails, it does not warn.**
+
+Two directions, because they catch different failures:
+
+- **undeclared** — a file matches a literal and this note does not name it.
+  The new-consumer case: someone writes another `.exp` and it silently joins
+  the ABI's blast radius. This would have fired the day `dap-nora.exp` was
+  written.
+- **unmatched** — this note names a file containing none of the literals. The
+  rename-or-retire case, and the one that turns a mirror list into fiction an
+  entry at a time. It is how `tools/agent-protocol.md` survived: nothing ever
+  asked whether the named file matched anything.
+
+Plus a **positive control**: an empty hit set is a FAIL, never a pass. A
+declared ABI whose literals appear nowhere means the scan is broken or the
+literals are wrong. That control is not decoration — the first implementation
+borrowed a tree-walker whose filter admits only C-family kernel sources, so
+scanning `tools` returned no files and the check reported all fifteen mirrors
+as unmatched: fifteen confident findings measured against no data.
+
+**It also runs inside `quaestor owner`**, which is the half that matters, and
+the condition main set when voting for this shape: a lint that only runs under
+`vault lint` is safe-if-remembered wearing a check's clothing. The instance
+rewording a banner string is on another track and never runs the vault's lint
+suite — but it does run `owner` at the mandatory doc-update step, on the very
+paths it is changing. A file matching a literal and absent from `mirrors` is
+named to the person creating it.
+
+**What it cannot judge is comment-versus-code.** `tools/warp-host.sh` names the
+banner in a usage comment and `tools/interactive/go8d.exp` in a prose note;
+both go stale rather than break, so neither is a mirror. That call is made once
+per file and recorded in `literal-mentions`. If a file listed there later grows
+a genuine matcher, the check stays quiet — from the outside the two look
+identical. What it does guarantee is that **no file joins the hit set
+unnoticed**: the mention list is a set of decisions somebody made, not a set of
+files somebody skipped.
+
+**And it cannot cover the document half at all**, by construction. `docs/` is
+full of prose quoting these strings, so a scan there would drown. That is not a
+gap being hidden — it is the diagnosis above, honoured: the co-update list
+conflates programs (which break) with documents (which merely go wrong), and
+only the first kind is derivable. The other half is closed differently:
+`TOOLING.md` and `CLAUDE.md` now **repoint at this note's `mirrors`** instead of
+carrying a competing transcription. Neither half would have sufficed alone.
 
 ## The emission rule, and what changed at A-5a
 
