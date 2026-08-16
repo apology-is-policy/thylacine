@@ -229,24 +229,28 @@ Loom arc's obligation is to deliver item 1 shaped to fit (the §7 requirements).
 
 ---
 
-## 11. The proof-of-concept (auxiliary track)
+## 11. The proof-of-concept — LANDED; no longer a POC
 
-Built + compiling on `aux/userspace-apps` (`cargo build`; never booted):
+**Corrected 2026-08-16 (main#237).** This section described an unbooted,
+`cargo build`-only POC living on the `aux/userspace-apps` branch. It was
+promoted into `main` (the aux-merge intermezzo, `docs/phase8-status.md`), grew a
+compositor, and now runs — so the text sent readers hunting a stale branch for
+code sitting in their own tree.
 
-- `usr/apps/libtapestry` — `Display` / `Tapestry` / `Event` / `Rect` + the
-  `Loom` seam trait + `MockLoom`. The full client model (triple-buffer + the
-  present recycle-gate + the multishot event drain) compiling against the
-  documented future Loom surface. The handoff seam is one line: swap `MockLoom`
-  for a `libthyla_rs::loom`-backed impl (Loom-6) with **zero** change to
-  `Display` / `Tapestry`.
-- `usr/apps/tapestry-demo` — an animated XOR-plasma software renderer (pure
-  integer, no FP/libm) driving the model end to end. Compile-only; `MockLoom`
-  completes presents immediately + schedules a `Close` so the offline run
-  terminates. On real hardware the same source displays the live plasma. See
-  `usr/apps/tapestry-demo/TEST-PLAN.md`.
+| Then (aux POC) | Now (`main`, in the `usr/` workspace) |
+|---|---|
+| `usr/apps/libtapestry` | `usr/lib/libtapestry` |
+| `usr/apps/tapestry-demo` | `usr/tapestry-demo` |
+| — | `usr/tapestryd` (the compositor) + `usr/tapestry-battery` |
+| `usr/apps/TAPESTRY-DESIGN.md` | folded into THIS document, the binding scripture |
 
-When `aux/userspace-apps` merges, `usr/apps/TAPESTRY-DESIGN.md` remains the POC's
-design notes; **this document is the binding scripture** it was folded into.
+All four are Cargo workspace members in `usr/Cargo.toml`. The `MockLoom` seam is
+gone — the real backend was wired at `5f2217f6` ("wire the real Loom backend
+(RingLoom) after merging main"), so the one-line handoff this section described
+as pending is done. And `usr/tapestry-demo` is now the end-to-end liveness
+witness for the whole G-2/G-3 path (private `/srv/tapestry` session -> surface
+mint -> `SYS_WEFT_MAP` -> present), verified by `tools/screendump.sh -v`:
+"never booted" is exactly backwards.
 
 ---
 
@@ -1385,8 +1389,9 @@ dual-refcount addition.
   I-29/I-30, §10 the sub-chunk decomposition Tapestry shapes).
 - `docs/NOVEL.md` §3.2 (Angle #2, BURROW zero-copy drivers) + §3.3 (Angle #3,
   pipelined 9P client) + §3.4 (Angle #4, Halcyon).
-- `usr/apps/TAPESTRY-DESIGN.md` + `usr/apps/libtapestry` + `usr/apps/tapestry-demo`
-  (the auxiliary-track design notes + POC this scripture was folded from).
+- The auxiliary-track design notes + POC this scripture was folded from. Those
+  `usr/apps/*` paths no longer exist: the design notes became THIS document, and
+  the code was promoted to `usr/lib/libtapestry` + `usr/tapestry-demo` (section 11).
 - `usr/virtio-gpu` (the controlq probe; the scanout half is the graphics-phase
   unblock item) + `irq-bench` (the present IRQ-cost budget).
 - `ARCHITECTURE.md` §28 (where T-1 reserves a number when the graphics phase

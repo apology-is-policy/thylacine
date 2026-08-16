@@ -166,9 +166,10 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   boundary by I-29/I-30, which neither io_uring (no capability model) nor a raw
   shared-memory ring (no safety) can claim. The kernel/transport half is the Loom
   arc; the graphics half (virtio-gpu scanout + `tapestryd` + an SDL backend that
-  ports Quake/DOSBox) is a post-Loom graphics phase feeding Halcyon (Angle #4). A
-  native proof-of-concept compiles on the auxiliary track (`usr/apps/libtapestry`
-  + `usr/apps/tapestry-demo`). **Deepened 2026-06-08**: TAPESTRY.md §13-17 elevate
+  ports Quake/DOSBox) is a post-Loom graphics phase feeding Halcyon (Angle #4). The
+  native proof-of-concept was PROMOTED into `main` and now runs -- `usr/lib/libtapestry`
+  + `usr/tapestry-demo` + `usr/tapestryd`, all Cargo workspace members (the aux
+  `usr/apps/*` paths this once named are stale; main#237). **Deepened 2026-06-08**: TAPESTRY.md §13-17 elevate
   `tapestryd` to the compositor (placement-transparent surfaces + live promotion),
   give Halcyon its anti-window UX model + layout-as-9P, add the agentic-enablement
   ABI, and fix the graphics sequencing (fbcon = stage 0 -> compositor + SDL /

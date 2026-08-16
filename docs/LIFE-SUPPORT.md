@@ -176,12 +176,14 @@ scenario here.
 
 ### LS-3 — Essential coreutils (adopt from the aux branch)
 
-**Userspace.** The aux track (`aux/userspace-apps` branch, `usr/apps/**`) already
-has ~23 coreutils **written + compiling**; adoption = copy each into
-`usr/coreutils/src/bin/`, substitute `aux-rt` -> `libthyla-rs` (`env::args` +
-`io::{stdin,stdout,stderr}` + the print macros — the exact U-6e-pre-b pattern),
-wire `tools/build.sh usr_rs_bins` + the cpio. Their deps already exist
-(`fs::read_dir`, `SYS_WALK_CREATE`, `SYS_UNLINK`, `SYS_RENAME`, `SYS_FSTAT`).
+**Userspace — EXECUTED** (LS-3a/LS-3b below are both marked done; `usr/coreutils/src/bin/`
+holds 51 binaries today). The plan as written was: the aux track had ~23 coreutils
+written + compiling, and adoption = copy each into `usr/coreutils/src/bin/`,
+substitute `aux-rt` -> `libthyla-rs` (`env::args` + `io::{stdin,stdout,stderr}` +
+the print macros — the U-6e-pre-b pattern), wire `tools/build.sh usr_rs_bins` +
+the cpio. That is what happened; the deps it named (`fs::read_dir`,
+`SYS_WALK_CREATE`, `SYS_UNLINK`, `SYS_RENAME`, `SYS_FSTAT`) all exist. Retained
+as the record of the adoption route, not as outstanding work.
 Closes most of #925. Split:
 
 - **LS-3a — navigate + inspect [done]**: `ls` (uses `fs::read_dir`), `stat` (uses `t_fstat`), `clear` (ANSI), adopted from `usr/apps/{ls,stat}` (aux branch) onto the libthyla-rs surface; `clear` authored native. Built into the cpio + LS-CI `ls-3a.exp` (`ls /var`->lib, `ls /`->thylacine-version, `stat /thylacine-version`->regular file, `clear`+alive). **#955 fixed** (the `ls /` headline): `ls` was the first consumer to ever readdir the pivot ROOT in a paginating loop, which surfaced a kernel readdir-cookie sign-truncation -- Stratum's Treaddir resume cookies for real dirents exceed INT64_MAX (bit 63 set), but the kernel carried the cookie through the SIGNED `s64 Spoor.offset` and `dev9p_readdir` clamped any "negative" offset to 0, restarting enumeration so the reader re-fetched batch 0 forever. Fixed by treating the cookie as an opaque u64 (no clamp) + a non-advancing-cursor EOD guard. NOT a Stratum bug, NOT an ls defect. `cat`/`head`/`tail`/`wc` already verified against real files (coreutil-smoke).

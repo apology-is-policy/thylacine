@@ -222,8 +222,9 @@ input/vsync = multishot `LOOM_OP_READ`, the framebuffer a zero-copy shared Burro
 (host DMA-read out of band, not a Loom regbuf). Adds the **T-1 no-torn-scanout**
 graphics-layer invariant (the #847 dual-refcount + #898 quiesce are the
 mechanism), audited at the post-Loom graphics phase (virtio-gpu scanout +
-`tapestryd`), not in the Loom arc. A native POC compiles on the aux track
-(`usr/apps/libtapestry` + `usr/apps/tapestry-demo`).
+`tapestryd`), not in the Loom arc. The native POC was promoted into `main` and now
+runs (`usr/lib/libtapestry` + `usr/tapestry-demo` + `usr/tapestryd`; the
+`usr/apps/*` paths this once named are stale -- main#237).
 
 The ARCH §28 invariant-table edit reserving **I-29 + I-30** lands **with the
 impl** (Loom-2), the way Lazarus deferred its §28 edit to W1 (docs/LOOM.md §9).
