@@ -4,7 +4,7 @@ type: chg
 title: "pouch: the third layer could not delete its normalisation, so the rule is 'never decide'"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["1586527b"]
 touched: [sub-pouch-fs]
 established: []
 closed: []
