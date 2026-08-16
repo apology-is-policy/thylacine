@@ -19,7 +19,7 @@ locks: []
 abis: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -66,8 +66,69 @@ opened with the caller's omode, and the real `-errno` comes back. CL-1a
 `O_PATH` — born R|W (the A-1.7 navigation base the primitives accept),
 resolved through the full stalk walk. `__pouch_open_parent` is that one
 shared split: no `/` means the cwd (`"."`); a leading-`/`-only prefix
-means the root; a trailing slash is `EINVAL` (no leaf). `renameat` opens
-BOTH parents and closes both.
+means the root; ~~a trailing slash is `EINVAL` (no leaf)~~ — see below.
+`renameat` opens BOTH parents and closes both.
+
+### The trailing slash: strip, report, and let the kernel decide
+
+The blanket `EINVAL` was wrong in **both** directions. POSIX 4.13 makes a
+trailing `/` assert *the leaf names a directory*, so `unlink("f/")` wants
+`ENOTDIR` — and `rmdir("dir/")` must **succeed**, which is the row that
+actually bites: `rm -r dir/` and every script that builds `"$DIR/"` paths.
+
+The splitter now **strips** the separator run and **reports** the assertion
+through a `dir_required` out-parameter, with the leaf becoming a
+length-bounded slice — every caller passes that length rather than a `strlen`
+of the leaf, which would run into the stripped separators. A shared probe
+then does **one `SYS_STAT` of the still-slash-terminated path**, which runs
+the kernel's own audited trailing-slash gate: zero only for an existing
+directory, otherwise the real `ENOTDIR` / `ENOENT` / `EACCES`.
+
+**The POSIX rule is enforced where it is audited, never re-derived here.**
+That sentence is the whole design, and it is what makes this layer's fix
+different from the other two in the same family — see below.
+
+Each caller then applies its own **Linux** row, chosen deliberately: the rows
+were measured on a POSIX host first, and where macOS and Linux diverge the
+Linux answer wins, because musl's target ABI is Linux.
+
+| call | answer |
+|---|---|
+| `mkdir("d/")` | creates `d` — strip alone; `file/` stays `EEXIST` |
+| `rmdir("d/")` | removes `d`; `f/` is `ENOTDIR` — strip alone, because the remove-directory primitive already enforces dir-ness |
+| `unlink("x/")` | `ENOENT` / `EISDIR` / `ENOTDIR`, and it must **never reach the unlink syscall** |
+| `open("x/", O_CREAT)` | `EISDIR`, existing or not (macOS says `ENOENT` when absent) |
+| `rename` (either name `x/`) | the Linux rule verbatim — unless the source is a directory, trailing slashes give `ENOTDIR` — answered by one probe of the slash-terminated **source** |
+| all-slashes (`"/"`) | `EISDIR` from the splitter |
+
+The `unlink` row carries the sharpest reasoning: **stripped and passed
+through, a plain unlink would delete the very file the slash says must not be
+touched.** That is byte-for-byte the defect the native runtime had, arrived at
+from the opposite direction.
+
+The splitter serves exactly **four** callers — the `O_CREAT` arm, `mkdirat`,
+`renameat` (both names), and `unlinkat` (which is also `rmdir` via
+`AT_REMOVEDIR`). Smaller than the task's "every leaf-name syscall" framing:
+the rest pass full paths and were already kernel-gated.
+
+### Where this layer differs, and the principle that covers all three
+
+Three layers independently normalised paths and all three were repaired in the
+same window — the kernel's cwd join, this splitter, and the native runtime's
+`Path`. The other two were fixed by **deleting** the normalisation. This one
+could not be: splitting `(parent, leaf)` is structurally required, because the
+kernel's mutation primitives take a parent fd and a leaf name rather than a
+path. The separator genuinely has to come off.
+
+So the rule is not *never transform*. It is **never DECIDE**:
+
+> A layer that must transform a path may strip, but it may not adjudicate. It
+> reports what the original asserted and re-asks the authority.
+
+Under that reading all three fixes are the same fix. The kernel and the native
+runtime had nothing to transform, so for them "do not decide" collapses to
+"delete the cleaning". Here it means strip, carry the assertion forward in a
+side channel, and spend one extra `SYS_STAT` to have the audited gate answer.
 
 **`fchmod` on a read-only fd is correct, not a bug.** `SYS_WSTAT`'s write
 authority is *identity* (owner or CAP), not the fd's rights (#47) — so
@@ -178,6 +239,25 @@ in-place translation pass.
   program — would otherwise overflow it.
 - Any `struct t_stat` mirror added or edited must be checked against the
   KERNEL's size, not against itself.
+- **A stripped separator must never be silently forgotten.** Every caller of
+  the splitter takes the reported `dir_required` and the leaf *length*, not a
+  `strlen` of the leaf. The `unlink` row is the one that shows why: stripped
+  and passed through, a plain unlink deletes the very file the slash asserts
+  must be a directory.
+- **The trailing-slash verdict comes from the kernel, never from here.** The
+  shared probe exists so the audited gate answers; re-deriving "is this a
+  directory" in the boundary-line would put a second, unaudited copy of a
+  POSIX rule one layer below the one that was reviewed.
+- **A patch's CONTEXT lines are a dependency on another patch's output.**
+  0030's `openat` hunks carried the old `strlen(leaf)` call as context, so
+  editing 0024 alone would have broken 0030's apply — silently, at bake time,
+  in the direction this project has already been bitten by. Any edit to a
+  shared helper's call sites must be re-diffed across the whole series from a
+  scratch tree and dry-run-verified before the build.
+- **`size_t` in scope for every CALLER is not every INCLUDER.** A header that
+  gains a prototype with a `size_t` parameter must include `<stddef.h>`
+  itself; a file including it only for the syscall constants otherwise breaks
+  the build under `-nostdinc`.
 
 ## Seams
 

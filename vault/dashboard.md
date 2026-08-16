@@ -129,8 +129,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-16 [[chg-2026-08-16-burrow-attribution]] — The Burrow re-swept: the type says SHAPE, and that lesson has now arrived three times
 - 2026-08-16 [[chg-2026-08-16-corvus-narrowing]] — corvus re-swept: the AUTH gate was a narrowing, and the expired premise had three dependents
 - 2026-08-16 [[chg-2026-08-16-notes-fp-and-phenotype]] — Notes re-swept: 'the entire user context' was one word too many, and it was mine
+- 2026-08-16 [[chg-2026-08-16-pouch-trailing-slash]] — pouch: the third layer could not delete its normalisation, so the rule is 'never decide'
 - 2026-08-16 [[chg-2026-08-16-stalk-posix-form]] — stalk: the POSIX form gates merged, and a gate binds only what it sees
 - 2026-08-15 [[chg-2026-08-15-build-targets]] — build.sh re-swept: three target lists that disagree, and the vault recommended the shortest
 - 2026-08-15 [[chg-2026-08-15-diorama-vivarium]] — diorama re-swept: a second operating mode the dossier never saw, and a read buffer half its source
-- 2026-08-15 [[chg-2026-08-15-exec-lineage]] — exec re-swept after LINEAGE: a seam closed sideways, and a prediction that came true
 <!-- generated:end -->
