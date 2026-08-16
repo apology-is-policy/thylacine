@@ -2,12 +2,13 @@
 id: seam-loom-sqpoll-owner-unbackstopped
 type: seam
 title: "The SQPOLL owner pointer rests on a backstopped argument without the backstop"
-status: open
+status: closed
 surface: sub-kernel-loom
 opened-by: chg-2026-08-16-loom-charge-ledger
 tracker: "unfiled -- yip to main 2026-08-16"
 created: 2026-08-16
 updated: 2026-08-16
+closed-by: chg-2026-08-16-loom-backstop-closed
 ---
 ## Owed
 

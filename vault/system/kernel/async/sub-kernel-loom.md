@@ -239,8 +239,50 @@ teardown must, which means it has to be recorded before anything can fail.
 Same goal — settle exactly once — reached by inverting the discipline, because
 one ledger is settled by the rollback and the other by the teardown. Merging
 the two pointers, or moving either binding toward the other, silently breaks
-whichever it was not written for: one double-refunds, the other leaks. Nothing
-in the code says these are a matched pair.
+whichever it was not written for: one double-refunds, the other leaks. **The
+source now says this**, where previously nothing did.
+
+### The thread ledger is backstopped, and the shape of the backstop is the point
+
+The thread-ledger pointer was dereferenced bare while its sibling, forty lines
+away in the same teardown, was validated against the owning process's magic word
+and stored identifier. Both rested on the **same** lifetime argument — the ring
+handle is non-transferable and non-dup-able, so a ring is reachable only through
+its creator's table, torn down while that process is still allocated.
+
+That argument is still believed and is **no longer trusted at the use**, matching
+what an earlier round did for the page ledger. The sharper reason: the thread
+ledger's use is a **write** — a decrement — where the page ledger's is a read. If
+the argument ever stopped holding, the page ledger degrades to a skipped refund
+(inert, as designed) while this one decrements a *recycled* process's counter: an
+under-count on a process that never charged, inflating its thread budget. The
+[[inv-i32]]-breaking direction, and the one every other tie here is deliberately
+broken away from.
+
+**The obvious one-line fix is wrong, and wrong on paths that are exercised.**
+Routing the settle unconditionally through the page ledger's liveness helper
+reads the **page** owner — the one bound *last*. Both rollbacks (poll-thread
+start failure, handle allocation failure) reach teardown with the thread charge
+outstanding and the page owner still unset, so the helper returns nothing, the
+uncharge is **skipped**, and a thread charge leaks for the process's whole life.
+That converts a backstop into a defect.
+
+The correct form validates only when there is something to validate:
+
+> take the liveness-checked owner **if the page owner is bound**; otherwise use
+> the thread owner directly.
+
+And the reason the fallback is safe is the good part: **an unset page owner is
+itself proof the process is alive.** It means setup never reached its last
+stanza, so no handle exists, so the only reference to the ring is the local one
+in the setup syscall — execution is inside the creator's own call. *Validate when
+there is something to validate; rely on the synchronous path when there is not.*
+
+**A defence and its subject can require opposite treatments at one call site.**
+The instinct that produced the wrong fix is exactly the instinct the section
+above warns against — treating the two pointers as duplication — and it survives
+knowing better, because a substitution that removes a redundant-looking read
+looks like tidying rather than like a semantic change.
 
 ## Data structures
 
@@ -435,4 +477,6 @@ consumer.
 
 ## Provenance
 
-[[chg-2026-08-02-async-sweep]], [[chg-2026-08-16-loom-charge-ledger]].
+[[chg-2026-08-02-async-sweep]], [[chg-2026-08-16-loom-charge-ledger]],
+[[chg-2026-08-16-loom-backstop-closed]] (the thread-ledger backstop, and the
+one-line fix that would have leaked).
