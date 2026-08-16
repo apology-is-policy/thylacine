@@ -1118,12 +1118,40 @@ you should not try. Three levels, three different meanings:
 
 | Level | Fires | Means |
 |---|---|---|
-| **600k CHECKPOINT WINDOW** | once per crossing | **The intended compaction point.** Carry the current step to a clean boundary, then recommend `/compact`. |
+| **600k CHECKPOINT WINDOW** | once per crossing | **The intended compaction point.** Carry to a clean boundary, write the resume note, then run `tools/thyla-selfcompact.sh "<reason>"`. |
 | **750k** | every call | Wind down. Finish the step; do not open a new arc. |
 | **880k** | every call | At the wrap line. Commit, hand off, yield. |
 
+**At 600k you compact yourself; you do not ask.** `tools/thyla-selfcompact.sh`
+types `/compact` into your own tmux pane, and `~/.claude/resume-note.py`
+re-injects your last message on the far side — the two steps the user was
+performing by hand at every boundary. Three things follow from that:
+
+- **Your final message before invoking it IS the resume note.** Not a report to
+  a reader who will answer — a note to yourself with no memory of writing it.
+  It must say what is in flight and, more importantly, **what must NOT be
+  redone**: gates already green, commits already pushed, measurements already
+  taken. A fresh context that re-runs a two-hour bar has been failed by that
+  message.
+- **Invoking it is a request, not a decision.** It refuses on a dirty tree or
+  outside tmux, and it **belays** — hands back to the user — when HEAD has not
+  moved across two consecutive self-compactions. That gate exists because the
+  dangerous failure is not a runaway but a *quiet loop*: hit a problem,
+  compact, return with less context, fail the same way. Every turn looks like
+  progress and none is, and an iteration cap cannot catch it because the
+  pathological case sits under the cap. Only landed work distinguishes stuck
+  from thinking, so only landed work re-arms the mechanism.
+- **A belay is a stop, and it is the good outcome.** When it fires, hand back
+  with what was attempted and what it needs. Do not clear the state file to get
+  moving again; that is disabling the one guard standing between a long run and
+  an expensive one.
+
+Where the script is absent (a worktree that has not merged it), the hook says
+"recommend `/compact`" instead and the old behaviour stands — the two arms are
+discrimination-tested, not assumed.
+
 So the rule is: **below 600k, keep working through as many checkpoints as the
-work takes; at 600k, finish to a clean boundary and recommend the compaction.**
+work takes; at 600k, finish to a clean boundary and self-compact.**
 The 600k line is advisory and deliberately fires ONCE — it is a "this is the
 right moment," not an alarm. Reaching it mid-chunk does not mean stopping
 mid-chunk: carry to the next clean boundary (committed, gates green, handoff
