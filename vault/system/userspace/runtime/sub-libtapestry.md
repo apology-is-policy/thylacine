@@ -14,7 +14,7 @@ hazards: []
 abis: []
 design: ["docs/TAPESTRY.md"]
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -41,6 +41,19 @@ server connection per opener, so one client's surfaces are unresolvable
 from any other session. Processes that deliberately share a session by
 inheriting the descriptor share its surfaces — that is the Plan 9
 shared-mount semantic, not a leak.
+
+`surface_ctl(cmd)` writes one verb on **this surface's own** control
+descriptor — the one the surface mint rebound — so it rides the owning
+connection **by construction**. That is the point of the shape rather than a
+convenience: because no other connection can even resolve this surface, the
+verb cannot be aimed at someone else's, and no addressing argument is needed
+to prove it. Present and release keep their dedicated paths; this is the
+general escape hatch for verbs that do not.
+
+**Authority carried by which descriptor you hold, rather than by a check on
+what you named** — the same shape as the inherited control descriptor on the
+console, and the reason the per-opener session above is load-bearing rather
+than tidy.
 
 `Drop` closes everything: the weave descriptor's clunk drops the client
 mapping, the control clunk and connection close retire the surface.

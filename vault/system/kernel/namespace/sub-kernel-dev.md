@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -63,6 +63,22 @@ a NULL `poll` means ALWAYS READY (the POSIX-correct answer for a
 regular file), while a NULL `fsync`, `readdir` or `stat_native` means
 the corresponding syscall returns -1. So one absent slot is a graceful
 default and another is a hard refusal, and only the header says which.
+
+**Two slots changed their failure contract, and the header now separates
+absence from refusal.** `rename` and `unlink` return 0 on success and a
+**specific** negative errno on failure — no longer a flat `-1` — because
+the handlers forward the value verbatim. An implementation that still
+returns `-1` therefore surfaces as the generic sentinel and silently
+re-opens the error-loss the change closed, and one that forwards a
+*server's* errno must bound it first.
+
+The interesting half is the NULL meaning: an absent slot now answers
+`-T_E_OPNOTSUPP` — **distinct from any verdict an implementation can
+return.** "This Dev has no such operation" and "the operation ran and
+refused" were previously the same value, so a caller could not tell a
+missing capability from a denied one. Worth generalizing across the
+table: **an optional slot's absence should be inexpressible by its
+present implementations**, or the two facts collapse.
 
 ## Mechanism
 

@@ -23,7 +23,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -95,6 +95,27 @@ restores the terminal and the prompt line discipline on **every** outcome
 including a stop. No note forwarding happens on this path. Every job-control arm
 is inert while `job_control` is `None`, so the console path is unchanged by the
 existence of the other one.
+
+### The raw-mode set is a closed allowlist, and joining it is a deliberate act
+
+Programs that need the console as an unprocessed byte pipe — the editor, the
+pseudoterminal host, the process monitor, and now the graphics bench launcher —
+are named in a **fixed list** matched on the command's basename, with the path
+form covered too.
+
+**The default is cooked, and joining requires an edit plus a test.** Nothing
+infers raw mode from what a program does, so a new full-screen program gets the
+line discipline until someone says otherwise — the same absence-as-safe-default
+shape as the substrate's watchpoint exemption, and it holds for the same reason:
+the exemption is keyed to the programs that need it rather than to a list of the
+ones that do not, so a new arrival inherits nothing by accident.
+
+The per-entry justifications are worth keeping in the list rather than
+compressed away, because they are not the same reason. The pseudoterminal host
+wants the outer console as a raw pipe **because the terminal it hosts is the one
+line discipline** — two disciplines in series would double-cook. The others are
+full-screen renderers. A future entry owes its own sentence; "it looks like a
+TUI" is not the criterion.
 
 ### A note read while looking for something else is held, not dropped
 
@@ -301,3 +322,5 @@ one.
 ## Provenance
 
 [[chg-2026-08-03-utopia-eval-sweep]].
+
+[[chg-2026-08-16-seven-small-surfaces]] records this interval.

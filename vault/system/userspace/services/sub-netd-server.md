@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/NET-DESIGN.md", "docs/NET-THROUGHPUT.md"]
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -71,6 +71,33 @@ consuming socket data; zero revents DEFERS. `qid_of` marks it
 `P9_QTPOLL` — the central qid builder (walk/lopen/getattr all route
 through it) so the kernel's cached qid always carries the bit; only a
 QTPOLL file is ever probed by the kernel bridge.
+
+**The fd that gets polled is not the fd that gets read**, and the Linux
+phenotype's poll translator is where that becomes visible. A socket's
+descriptor names the `data` file — an *ordinary* remote file, which the
+9P device reports as **always ready**: correct for a file, useless for a
+socket. So the translation is entirely a descriptor substitution: open
+the sibling `ready`, poll **that**, and put the caller's own descriptor
+number back in the result.
+
+**The readiness split is not an implementation detail of this server; it
+is a fact every consumer has to model.** A layer that polls the obvious
+descriptor gets a permanently-ready answer and a busy loop, and nothing
+reports an error.
+
+**And the caching decision differs between the two consumers for a reason
+that does not transfer.** The ported-libc boundary caches the readiness
+descriptor; the kernel translator opens it **per call**. Caching there
+would place a descriptor the guest never asked for into **the guest's own
+number space** — where the guest can close it, leaving a cached number
+naming whatever was allocated next, and where it violates the
+lowest-available-descriptor guarantee. In the ported libc that hazard is
+absent, because there the readiness descriptor **is** a guest descriptor
+its own library opened.
+
+Same optimization, sound in one layer and unsound in the other, and the
+discriminator is *who owns the number space* — not anything visible at
+the call site.
 
 **Weft** (`Tweft`/`Tweftio` on an opened `data` fid of a live slot,
 else fail-closed E_INVAL): `Tweft` lazily allocates the per-flow ring
@@ -390,6 +417,8 @@ The net-2b-2→2c skeleton-to-live arc
 [[adt-net8d-r1]] (the dual-stack routing), [[adt-weft7-r1]] (the ring
 sites), [[adt-294-r1]] (the ready-fd clunk verification). The
 do-not-re-report preamble: [[view-closed-sub-netd-server]].
+[[chg-2026-08-16-seven-small-surfaces]] adds the phenotype poll
+translator's readiness substitution and its per-call open.
 
 ## Tests
 

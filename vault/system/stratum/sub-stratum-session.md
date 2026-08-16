@@ -15,7 +15,7 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 9.9", "docs/CORVUS-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -44,6 +44,26 @@ write is a partial payload and therefore EINVAL — a short write is a hard
 failure, never resumable.
 
 ## Mechanism
+
+**The echo mask is set BEFORE the prompt is written, never after**, and the
+ordering is the whole mechanism — there is no window to lose.
+
+A sender that reacts to the prompt string — an expect script, a paste, a fast
+typist — puts bytes on the wire inside *any* gap between the prompt and the
+mode flip. In that gap echo is still **on** from the username read, so the byte
+is **rendered on the trusted path**; then the flip discards it, because a mode
+change starts a fresh line by design. Two failures from one race: a visible
+passphrase prefix, and a truncated read that surfaces as **a plain
+authentication failure**.
+
+That last part is why ordering rather than narrowing is the fix. The symptom is
+"wrong password" — indistinguishable from actually typing the wrong password —
+so the defect has no diagnostic signature of its own and could not be found from
+a report.
+
+**The username prompt above it already had the ordering right.** A correct
+instance and an incorrect one, adjacent, in one function — which is how the
+wrong one survived review: the pattern is visibly present in the file.
 
 **`login` never holds a raw DEK.** It forwards only the opaque 33-byte
 corvus session token; the coordinator does the UNWRAP and WRAP through its
@@ -171,3 +191,5 @@ for on a single vCPU.
 ## Provenance
 
 [[chg-2026-08-02-stratum-sweep]].
+
+[[chg-2026-08-16-seven-small-surfaces]] records this interval.

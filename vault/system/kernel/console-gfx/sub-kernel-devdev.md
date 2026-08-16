@@ -14,7 +14,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.4"
   - "docs/IDENTITY-DESIGN.md section 9.8"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -28,9 +28,26 @@ console's second front door, and therefore where the trusted-path gates live.
 
 ## Contract
 
-Single-level. Walk `/dev/<name>`, open, read or write. The three stub
-directories exist so the resolver can traverse onto them and cross to the Dev
-actually mounted there.
+Single-level. Walk `/dev/<name>`, open, read or write. The stub directories
+exist so the resolver can traverse onto them and cross to the Dev actually
+mounted there.
+
+**One stub is deliberately never mounted over, and the reason is a capability
+hole the pattern would otherwise have opened.** The GPU-seam stub was added
+"same shape again" — empty pre-mount, with init expected to replace-mount the
+graphics server's tree over it, exactly like its siblings. An audit round caught
+that the shape does not transfer: **a shared mount is one server-side
+connection, and that tree's authority is per-connection**, so a global mount
+would let any process drive any other's rendering context.
+
+The disposition inverted: the stub stays empty and a client that wants the tree
+mounts it **itself, in its own namespace**, getting its own connection.
+
+**"Same shape again" was the tell, written in the comment that introduced the
+defect.** Every previous stub's authority was per-*file*, so a single shared
+connection was fine; this one's is per-*connection*, so sharing is the whole
+hazard. A stub-shaped surface says nothing about the authority model behind it,
+and the mount pattern is a statement about that model.
 
 The walk **reuses the caller's pre-cloned Spoor** rather than minting its own —
 the contract the resolver requires. A Dev that mints its own is unreachable
@@ -179,6 +196,12 @@ first thing to look at if anything ever streams from them.
   close too.
 - **The walk must keep reusing the caller's Spoor.** A Dev that mints its own is
   unreachable through the resolver.
+- **A new stub owes a statement about the mounted tree's authority granularity,
+  not just its shape.** All stubs look identical here; whether init may mount
+  globally over one depends entirely on whether the tree behind it grants
+  authority per *file* or per *connection*. Per-connection means a shared mount
+  collapses every client onto one authority — the GPU seam's stub is the worked
+  example, and "same shape again" is how it nearly landed.
 - **A new leaf needs four registrations** — the kind, the name table, the read
   and write dispatches — plus the stat switch, and see below for which of them
   fails quietly.
@@ -229,3 +252,5 @@ first thing to look at if anything ever streams from them.
 ## Provenance
 
 [[chg-2026-08-02-console-sweep]].
+
+[[chg-2026-08-16-seven-small-surfaces]] records this interval.

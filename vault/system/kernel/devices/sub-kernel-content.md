@@ -22,7 +22,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.7"
   - "docs/PORTABILITY.md section 6"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -84,6 +84,33 @@ unnamed stream, whose walk always misses, because there is nothing here to name.
 shows.** A value is stored in an allocation sized exactly to its length, so any
 write past the end reallocates and copies; a short write over a longer value
 keeps the tail, which is ordinary file behaviour rather than a special case.
+
+**The environment's flat-block reader gained a second caller, and the rule
+guarding it had to be rewritten because the new caller correctly violates it.**
+
+The block read — the whole environment serialized in one span — was written for
+the introspection device, which resolves an arbitrary process under the table
+lock and is therefore **cross-process**. The block reader itself checks no
+identity, so the rule attached to it read: *do not add a second caller without
+carrying the gate.*
+
+The second caller is the exec path's projection of the environment onto a new
+image's stack, and it carries **no gate** — correctly. It projects a process's
+**own** environment onto its **own** new stack, reaching nothing that process
+could not reach by reading the environment device itself. The gate exists for
+the case where **reader and owner differ**, which is the introspection device's
+case and not exec's.
+
+**A rule stated as a mechanism is violated correctly by its first legitimate
+exception.** "Carry the gate" names the remedy; the property is "reader and
+owner may differ". Stated the first way, the exception looks like a breach and
+the rule looks wrong — and the usual outcome is that the rule quietly stops
+being cited.
+
+The rewritten form demands an argument in either direction: a new caller is
+same-process (no gate, and say why) or cross-process (carry the gate). **What is
+forbidden is a caller that does neither** — which is a stronger obligation than
+the original, not a relaxation of it.
 
 **The boot filesystem manufactures directories that contain nothing.** A mount
 needs somewhere to land — a graft onto a path that does not resolve is not a
@@ -314,3 +341,5 @@ initialization against the strong re-seed, every caller of the random API, the
 seek and positioned-read gates, the metadata stamp, the permission path's choice
 of vtable slot, the device-registration consistency check, the archive
 generator's mode handling, and the 40 registered tests across the five files.
+
+[[chg-2026-08-16-seven-small-surfaces]] records this interval.
