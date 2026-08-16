@@ -274,10 +274,24 @@ printed on neither host. `prove` produced no new boot log to grep.
 
 So this lands **gated off on every host I could exercise** — dead on the dev
 loop by capability, unproven on the Pi by opportunity — and the commit says so
-rather than calling a clean boot a verification. What it needs is a Pi run that
-drives a surface into composed scanout; identifying that verb is the next step,
-not an afterthought. Booting green proves the gate did not fire, which is
-exactly what an `if (false)` would also prove.
+rather than calling a clean boot a verification. Booting green proves the gate
+did not fire, which is exactly what an `if (false)` would also prove.
+
+**Then I found why, and it is a tooling gap rather than a code problem.** The
+Pi logs say `tapestryd: scanout direct 0 (1280x800)`: every existing Pi verb
+drives a SINGLE display-sized GL client, and that takes the **Direct** path —
+scanning out the client's own resource and bypassing the compositor screen
+entirely. §4.5.1 spells out the condition: Direct demands one visible surface
+AND one visible leaf AND an exactly display-sized surface. So composed scanout
+needs two surfaces, or one smaller than the display, and **no verb in
+`warp-host.sh` produces either.** `capset` and `smoke` both land in Direct;
+`tri` and `prove` left no new boot log at all.
+
+That is worth more than a failed check: it says the composed path — the entire
+subject of the Warp-C arc — has no driver on the only host that can run its GPU
+half. Building one (two surfaces, or a mode change that un-sizes a single one,
+which is what `ls-gfx-mode` does locally) is the next task, and it gates C-2b,
+C-3, and the arc's exit criterion alike.
 
 ### Still open leaving this run
 
