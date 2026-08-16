@@ -11,6 +11,7 @@
 #   tools/warp-host.sh prove     # Warp-2 gate: /warp-prove on the virgl device
 #   tools/warp-host.sh reject    # #240: is a REJECTED command stream observable in-guest?
 #   tools/warp-host.sh p1b       # GPU-DESIGN 4.5.4: does ctx_attach permit a cross-context blit? (host-side, no guest)
+#   tools/warp-host.sh p2        # GPU-DESIGN 4.5.4: does the blit observe the client's FINISHED frame? (host-side)
 #   tools/warp-host.sh quake     # Warp-4 gate: GLQuake on virgl, both present arms
 #   tools/warp-host.sh decomp gl|2d  # #196: unpaced per-arm figures + CPU attribution
 #   tools/warp-host.sh wedge     # #210: direct-arm wedge autopsy (paced vs unpaced)
@@ -442,6 +443,49 @@ wedge-gate)
         echo "WEDGE GATE: PASS (both legs progress)"
     else
         echo "WEDGE GATE: FAIL (a leg wedged or the probe died -- the #210 class)"
+        exit 1
+    fi
+    ;;
+p2)
+    # GPU-DESIGN 4.5.4: does a blit on the compositor's ctx observe the client
+    # ctx's FINISHED frame with nothing ordering them? Host-side, no guest.
+    d='~/warp/p1b'
+    ssh "$HOST" "mkdir -p $d && cd $d && for f in virglrenderer.h virgl_protocol.h virgl_hw.h; do
+        [ -s \$f ] || curl -sSfL -o \$f https://gitlab.freedesktop.org/virgl/virglrenderer/-/raw/main/src/\$f || exit 1
+      done
+      [ -s virgl-version.h ] || printf '%s\n' '#define VIRGL_VERSION_MAJOR 1' '#define VIRGL_VERSION_MINOR 9' '#define VIRGL_VERSION_MICRO 0' '#define VIRGL_VERSION_STRING \"1.9.0\"' > virgl-version.h" || {
+        echo "P2: header fetch failed"; exit 1; }
+    scp -q "$REPO_ROOT/tools/warp/p2-cross-ctx-order.c" "$HOST:$d/" || exit 1
+
+    out="$REPO_ROOT/build/warp-p2.log"
+    ssh "$HOST" "cd $d && gcc -O1 -g -Wall -Wextra -I. -o p2 p2-cross-ctx-order.c -l:libvirglrenderer.so.1 || exit 1
+      for dep in ${P2_DEPTHS:-24 64 256}; do
+        echo \"===== depth=\$dep =====\"
+        P2_DEPTH=\$dep P2_TRIALS='${P2_TRIALS:-150}' timeout 900 ./p2 2>&1
+      done" | tee "$out" || true
+
+    echo "== P2 verdict =="
+    # THE SENSITIVITY TERM IS THE ONE THAT MATTERS. A clean UNSYNCED result is
+    # equally consistent with "ordering holds" and "this probe cannot see a
+    # stale read" -- so the INVERTED arm, which is stale BY CONSTRUCTION, must
+    # have mismatched on every trial before a clean measurement means anything.
+    # Requiring only the verdict line would accept a blind probe's silence.
+    runs=$(grep -c "^===== depth=" "$out" || true)
+    sens=$(grep -c "the probe CAN see a stale read" "$out" || true)
+    verd=$(grep -c "REORDERING OBSERVED" "$out" || true)
+    reord=$(grep -c "^  REORDERING OBSERVED" "$out" || true)
+    instr=$(grep -c "INSTRUMENT FAILURE" "$out" || true)
+    if [ "$runs" -ge 1 ] && [ "$sens" = "$runs" ] && [ "$verd" = "$runs" ] && [ "$instr" = 0 ] && [ "$reord" = 0 ]; then
+        grep -E "UNSYNCED|NO REORDERING" "$out"
+        echo "P2 GATE: PASS -- sensitivity proven on every run, no reordering observed"
+    elif [ "$reord" -gt 0 ]; then
+        echo "P2 GATE: HAZARD OBSERVED -- the blit did NOT see the finished frame."
+        echo "  This is a REAL finding, not a broken run: C-1 must model it before C-4"
+        echo "  removes the readback. See $out"
+        exit 1
+    else
+        echo "P2 GATE: NO VERDICT (runs=$runs sensitivity=$sens verdicts=$verd instrument-failures=$instr)"
+        echo "  a clean UNSYNCED arm without the sensitivity term is not a result"
         exit 1
     fi
     ;;

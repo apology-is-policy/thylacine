@@ -529,6 +529,47 @@ and require the destination to change), never merely "no error returned".
 > over a runtime from another is the setup that yields a confident wrong
 > answer.
 
+> **P2 MEASURED 2026-08-16 — no reordering observed in 500 unsynced trials, and
+> the probe was proven able to see one.** Host-side on thyla-pi (real V3D),
+> `tools/warp-host.sh p2`, across queue depths 24 / 64 / 256 at 1024×1024:
+>
+> | Arm | What it establishes | Result |
+> |---|---|---|
+> | SYNCED | the probe can report a CLEAN run (encoding, blit, readback sound) | 0 mismatches |
+> | **INVERTED** | **the probe can report a DIRTY one** — blits BEFORE the clear, so staleness is guaranteed by construction | **40/40 mismatch, every run** |
+> | UNSYNCED | the measurement | **0 / 500** |
+>
+> **The INVERTED arm is why the result means anything.** A clean UNSYNCED run is
+> equally consistent with "the ordering holds" and "this probe cannot see a stale
+> read", and separating those is the entire job — the same trap that made P1a's
+> same-context control load-bearing. Building it took two corrections, both
+> instructive: the arm first scored 39/40 because trial 0 has no previous frame
+> to be stale from, and the first fix seeded the *destination*, which changed
+> nothing **because a blit overwrites the destination wholesale — staleness here
+> is always a property of the SOURCE.** Seeding the source restored a strict
+> all-must-mismatch bar rather than relaxing it to *n−1*, which would have
+> papered over a real one-trial blind spot.
+>
+> **What this does NOT establish.** A negative is not a proof: a race that did
+> not reproduce is not a race that cannot happen. By the rule of three, 0 events
+> in 500 trials bounds any per-trial reorder rate at roughly **0.6% (95%)** on
+> *this* stack (virglrenderer 1.9.0 + Mesa/V3D) for *this* access pattern.
+> Note also that V3D is a single-queue tiled renderer, so submission-order
+> execution may be a property of the hardware here rather than of virglrenderer
+> — which would say nothing about a multi-queue desktop GPU. **C-1 still models
+> the hazard**; this bounds how hard it is to hit and gives the spec a measured
+> starting point instead of a guess.
+>
+> One structural limit worth stating: each trial ends in a readback, which
+> serializes it, so the amount of work that can be outstanding when the blit
+> issues is bounded. The INVERTED arm runs under the *same* serialization and
+> still detects staleness every time, so the sensitivity claim holds for this
+> pattern — but a probe that never reads back would stress it harder and cannot
+> detect anything, which is the tension the design has to live with.
+>
+> Probe: `tools/warp/p2-cross-ctx-order.c` (`P2_DEPTH` / `P2_TRIALS`; the verb
+> sweeps `P2_DEPTHS`).
+
 ##### 4.5.4a #240 measured — a refusal reads as SUCCESS, and it is sticky (2026-08-14)
 
 Measured on thyla-pi (KVM, real V3D) by the `warp-prove reject` leg
