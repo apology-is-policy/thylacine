@@ -4,7 +4,7 @@ type: chg
 title: "A failing catch-all buries failures too, and my own correction left the summary behind"
 date: 2026-08-16
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["6a275990"]
 touched: [sub-substrate-gates, gate-smp]
 established: []
 closed: []
