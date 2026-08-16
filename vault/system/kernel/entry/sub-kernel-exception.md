@@ -2,7 +2,7 @@
 id: sub-kernel-exception
 type: sub
 parent: moc-kernel-entry
-title: "Exception entry, the EL0 return tails, and the three ways into userspace"
+title: "Exception entry, the EL0 return tails, and the ways into userspace"
 code:
   - arch/arm64/vectors.S
   - arch/arm64/exception.c
@@ -17,13 +17,14 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-08-03
+updated: 2026-08-16
 ---
 ## Purpose
 
 The vector table and the C handlers behind it: every syscall, every interrupt,
 and every fault in the system enters the kernel through one of sixteen slots
-here, and every return to userspace leaves through one of three `eret`s.
+here, and every return to userspace leaves through one of three `eret`s -- a
+fourth path reaches EL0 by branching into the first rather than adding one.
 
 ## Contract
 
@@ -82,7 +83,7 @@ is closed, so the frame is clean and no C handler is live on the stack. A
 thread preempted and stolen here resumes at a clean frame rather than
 mid-handler.
 
-### Three ways to reach EL0, and one rule they all obey
+### Three `eret`s to EL0, and one rule they all obey
 
 The shared return trampoline handles the ordinary case: a thread that entered
 via an exception returns the way it came. It is always reached with interrupts
@@ -113,6 +114,33 @@ Both also zero every general-purpose register before the `eret`, so no kernel
 register state crosses the boundary. The thread-spawn trampoline zeroes all but
 one, which carries the entry argument by calling convention.
 
+### The fourth way in, which is deliberately not a fourth `eret`
+
+A forked child also reaches EL0 for the first time through a trampoline, and it
+is the interesting one precisely because it **adds no `eret`**. It lives in the
+vector file rather than beside the other trampolines for a single reason: from
+there it can branch to the shared return's own local label, handing the child to
+the one audited return-to-user path instead of hand-rolling a second.
+
+That is the standing rule being satisfied by refusing to create the situation it
+governs. A new hand-rolled return would have owed the masking argument, the
+ordering argument, and a fresh review; branching into the existing one owes none
+of them, because the child's frame was constructed at exactly the address and
+layout that path already expects.
+
+**And it zeroes nothing, which is correct for a reason the other two do not
+share.** The other trampolines *construct* an EL0 context out of a kernel
+context, so any register they do not overwrite carries kernel residue across the
+boundary — hence the sweep. This one *restores* a saved EL0 frame, copied from
+the parent's own, so every register already holds a userspace value by
+construction. There is no residue to sweep, and sweeping would destroy the fork:
+the child continues the parent's C frame, and the frame pointer and the return
+address are exactly the state it must keep.
+
+Same invariant, opposite action, because one path's registers come from the
+kernel and the other's come from userspace. The sweep is not the rule; *no kernel
+state crosses* is the rule.
+
 ### An EL0 fault terminates a Proc; a kernel fault kills the machine
 
 The two synchronous handlers share a fault decoder and diverge on what an
@@ -125,6 +153,58 @@ The kernel synchronous handler carries one extra arm, and it is the interesting
 one: if the fault came from the kernel but the faulting *address* is in the
 user half, it may be a deliberate crossing rather than a corrupted pointer, and
 it is handed to [[sub-kernel-uaccess]].
+
+### The descent guard, and the premise it shipped with
+
+A kernel fault whose handler faults on the same bad state recurses, and each
+iteration builds a frame on the same stack — so the recursion marches *downward*
+through mapped memory, writing frames across physical RAM until the page tables
+themselves hold exception frames. That is not hypothetical; it is how one
+uninitialized pointer took a whole machine ([[sub-kernel-boot-entry]] owns the
+root).
+
+So the kernel synchronous handler counts its own depth per CPU and, at three,
+stops trying: it flushes the staged console ring with a bounded try-lock so
+already-staged diagnostics still reach the wire, prints **one** raw banner naming
+the frame that killed the handler, and parks that CPU with the stack corpse
+intact for an external autopsy.
+
+Two deliberate refusals in that sequence. It does **not** run the crash dump,
+because the dump machinery is the most likely amplifier — the thing you would
+reach for is the thing most likely to fault again. And the banner prints at
+*exactly* the threshold, so if the banner itself faults, the next entry parks
+silently rather than looping through the print.
+
+**The guard shipped with a false premise, and it was a P1.** Its reasoning was
+that legitimate depth is one — that a kernel synchronous handler runs to
+completion without yielding. It does not. A kernel-side access to a cold
+file-backed page blocks in the filesystem client, so a perfectly healthy handler
+*sleeps*, and independent threads time-sharing one CPU can each be asleep inside
+one. Three such sleepers reach the threshold, and the guard parks a healthy CPU
+and prints a **fabricated extinction line** — the string the entire test harness
+reads as "the kernel died" — under nothing more exotic than a parallel build.
+
+The repair is a better discriminator rather than a larger threshold. The
+scheduler clears the counter at **every context switch**, because a switch
+*proves the handler chain is making forward progress*, while a genuine runaway —
+a fault whose handler faults, synchronously, with interrupts masked — never
+reaches the scheduler at all, so its count survives to trip.
+
+**Depth alone conflates recursion with interleaving.** Adding "did we yield?"
+separates them, and it is the only signal available that distinguishes the two
+without knowing anything about what the handlers are doing.
+
+The reset-on-unwind is a separate mechanism from the reset-at-switch, and both
+are needed: unwinding resets to zero rather than decrementing so a handler that
+migrated mid-flight cannot strand a foreign CPU's increment.
+
+The residual is documented rather than hidden: a recursive chain that *unmasks*
+interrupts partway could be preempt-cleared and evade the count. The observed
+class runs interrupts-masked and is still bounded, the terminal path carries its
+own re-entrancy guard beneath this one, and the failure mode of a miss is a spin
+rather than corruption. **A guard with a known hole and an argued containment is
+worth more than one whose hole nobody has looked for** — and this one earned that
+posture by having its first premise disproved.
 
 ### The hardware-debug exception classes
 
@@ -198,8 +278,20 @@ interrupt slot currently holds **thirty-one** of its thirty-two instructions.
   masked; the kernel-to-kernel trampoline is exempt because it does not `eret`
   to EL0 at all. Nothing else is exempt.
 - **A noreturn check must run before the mask, not inside it.**
-- **The register sweep must stay complete.** A newly-added register that is not
-  zeroed is a kernel-state leak across the privilege boundary.
+- **The register sweep must stay complete** on the paths that *construct* an EL0
+  context from a kernel one. A newly-added register that is not zeroed there is a
+  kernel-state leak across the privilege boundary. The rule is "no kernel state
+  crosses", not "always zero" — a path that *restores* a saved EL0 frame must not
+  sweep, because its registers are userspace values and clearing them destroys
+  the thing being restored.
+- **Prefer branching into the shared return over writing a new one.** A new
+  hand-rolled path inherits the masking obligation, the ordering obligation and a
+  review; a branch into the audited one inherits its correctness. Building the
+  frame at the address that path already expects is what buys this.
+- **The descent guard's threshold is not the mechanism — the reset is.** It must
+  keep clearing at every context switch, or legitimate sleeping handlers
+  accumulate and the guard fabricates a kernel-death report on the tooling ABI.
+  Raising the threshold instead would only move the load at which that happens.
 - **The frame layout assertions must be updated with the frame.** Assembly
   writes by offset; only the assertions tie it to the struct.
 - **The tail ordering must stay preempt, die, notes, stop.** Moving the
@@ -244,4 +336,4 @@ interrupt slot currently holds **thirty-one** of its thirty-two instructions.
 
 ## Provenance
 
-[[chg-2026-08-02-entry-sweep]].
+[[chg-2026-08-02-entry-sweep]], [[chg-2026-08-16-exception-descent-guard]].
