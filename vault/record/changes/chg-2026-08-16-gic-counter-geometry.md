@@ -4,7 +4,7 @@ type: chg
 title: "The number did not change; the reason did"
 date: 2026-08-16
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["14e30922"]
 touched: [sub-kernel-gic]
 established: []
 closed: []
