@@ -4,7 +4,7 @@ type: chg
 title: "A literal inside a filter reads as validation and was a selection"
 date: 2026-08-16
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["971639cb"]
 touched: [sub-kernel-dtb]
 established: []
 closed: []
