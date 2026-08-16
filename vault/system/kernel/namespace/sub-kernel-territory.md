@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -34,7 +34,7 @@ Four structures on `struct Territory`, three of them live:
 
 | Field | What | Reached by |
 |---|---|---|
-| `mounts[20]` | `(dc, devno, qid.path) -> source Spoor` grafts | `mount_lookup` from [[sub-kernel-stalk]]; `SYS_MOUNT`/`SYS_UNMOUNT` |
+| `mounts[32]` | `(dc, devno, qid.path) -> source Spoor` grafts | `mount_lookup` from [[sub-kernel-stalk]]; `SYS_MOUNT`/`SYS_UNMOUNT` |
 | `root_spoor` | the resolution floor + FROM_ROOT walk base | `territory_root_ref`; `SYS_CHROOT`/`SYS_PIVOT_ROOT` |
 | `dot_path` | the cwd string (`NULL` == `"/"`) | `SYS_CHDIR`/`SYS_GETCWD`; the `SYS_OPEN` relative join |
 | `binds[8]` | Plan 9 path-to-path edges | **nothing — see Caveats** |
@@ -131,15 +131,65 @@ is the spec's "DestroyTerritory requires `mounts[p] = {}`" precondition
 discharged as a sequence of Unmounts. Skipping it is
 `BUGGY_DESTROY_LEAK`.
 
-**The cwd is a cleaned absolute string, not a handle.**
+**The cwd is a cleaned absolute string, not a handle** — but *joining* to it
+and *cleaning* it are two jobs, and running them as one was a resolution
+bug.
+
 `cwd_lexical_resolve` is a pure, allocation-free, lock-free resolver: it
 seeds from `dot` for a relative input (an absolute input ignores the
 cwd), then walks components resolving `.` and `..` LEXICALLY, popping at
-`olen` with a hard floor at 0 so excess `..` nets to `"/"`. Its output
-is always absolute-from-root, which is why [[inv-i28]] gains no new
-mechanism from LS-4: stalk's own `..` clamp becomes a redundant safety
-net. `territory_setdot` is fed ONLY by that resolver's output, so
-`dot_path` is always cleaned.
+`olen` with a hard floor at 0 so excess `..` nets to `"/"`.
+
+**It is no longer on the resolution path.** A lexical `..` pops a component
+without proving it exists, so a cwd-relative path that traversed a directory
+that was not there resolved successfully and handed back a working descriptor
+— and the change-directory check validated the wrong object entirely, testing
+directory-ness against the parent it had already massaged the path into. The
+absolute spelling of the same path answered correctly, because it went through
+the resolver's gates. Two code paths for one question, disagreeing.
+
+The repair separates the jobs rather than adding a fourth gate:
+
+- **`cwd_join` — resolution.** Emits the cwd, a separator, and the input
+  **verbatim**. A `.`, a `..`, a trailing separator all survive into the path
+  the resolver receives, so a cwd-relative path is subject to exactly the gates
+  its absolute spelling gets.
+- **`cwd_lexical_resolve` — canonicalization.** Narrowed to one production
+  role: computing the string change-directory stores.
+
+The entry point was renamed from *resolve* to *join*, because the old name
+described the bug — it implied resolving the dots, which is precisely what it
+must not do.
+
+**Change-directory is the one caller needing both**, in three ordered steps:
+join verbatim, resolve that, then canonicalize **the already-resolved join**
+with no cwd seed — so the stored string is derived from the path that was just
+validated, and a peer thread's concurrent change cannot make the two disagree.
+
+**What this does to [[inv-i28]] is worth stating precisely, because the
+dossier previously had the emphasis backwards.** Containment never rested on
+this function, and still does not — the joined path resolves from `root_spoor`
+and the resolver clamps `..` at its trail floor exactly as it does for an
+absolute path. That was true before. What changed is that the clamp used to be
+*unexercised* on cwd-relative paths, since the lexical cleaning consumed every
+`..` before the resolver saw one. It was accurate to call it a redundant safety
+net then, and it is the sole mechanism now.
+
+**The redundancy was itself the defect.** The cleaning that made the clamp
+look superfluous was the code popping unwalked components. Removing it
+promoted a net nobody was relying on into the thing doing the work — which is
+the good outcome, and a reason to be wary of describing a second mechanism as
+redundant when what makes it redundant is a duplicate of the first.
+
+Three consequences, accepted rather than fixed: a cwd-relative path spelled
+with `..` no longer takes the fused fast path (the same cost its absolute
+spelling always paid, on exactly the paths that were resolving wrongly); the
+joined path is longer, so the length bound is reached sooner, and it surfaces
+as a bare failure because the too-long errno is not in the registry yet; and a
+deleted working directory now fails relative resolution, matching POSIX.
+
+`territory_setdot` is still fed ONLY by the canonicalizer's output, so
+`dot_path` remains cleaned.
 
 **`territory_format_ns`** renders `/proc/<pid>/ns` under `ns_lock`, one
 whole `mount <point> <source>` line at a time: snapshot `off`, rewind on
@@ -157,10 +207,15 @@ with no namespace name.
 its 8-byte stride. It was 16 bytes before stalk-2 re-keyed it and 32
 before #66b added `mp_path`.
 
-`struct Territory` is pinned at **920 bytes** — a 24-byte header
+`struct Territory` is pinned at **1400 bytes** — a 24-byte header
 (`magic`, `ref`, `nbinds`, `nmounts`, `_pad`), `root_spoor` at 24,
-`binds[8]` at 32, `mounts[20]` at 96, then `dot_lock` / `dot_path`
-(LS-4) and `ns_lock` (RW-4) appended at the tail. **Every load-bearing
+`binds[8]` at 32, `mounts[32]` at 96, then `dot_lock` / `dot_path`
+(LS-4) and `ns_lock` (RW-4) appended at the tail. **The assertion is
+written as an expression over the two array bounds rather than as a
+literal**, so growing a table updates it automatically; only prose
+restating the arithmetic can rot, and this dossier's previous figure of
+920 was exactly that — correct for a twenty-entry table and stale the
+moment the cap grew. **Every load-bearing
 offset is individually `_Static_assert`ed**, not just the size — a field
 reorder that preserved the total would otherwise silently break the
 FROM_ROOT path and the mount iteration ([[fnd-stube2-r1-f5]]). That is
@@ -174,13 +229,24 @@ at the next `territory_ref`/`unref` rather than corrupting silently.
 their compile-time caps before the copy loops, so a torn count cannot
 walk past the arrays.
 
-`PGRP_MAX_MOUNTS` is **20**, grown 8 → 16 → 20. joey is the high-water
-mark and the reason: the kproc boot namespace mounts `/srv`, `/proc`,
+`PGRP_MAX_MOUNTS` is **32**, grown 8 → 16 → 20 → 32. Init was the
+original high-water mark: the boot namespace mounts `/srv`, `/proc`,
 `/ctl`, `/dev`, `/env`, and the pre-pivot mounts ORPHAN at pivot (their
-devramfs mount points stop being reachable from the disk root) while
+ramfs mount points stop being reachable from the disk root) while
 staying in the table — so the cost is pre+post per re-grafted directory.
-The real fix is a pivot-time GC ([[seam-80-pivot-orphan-mounts]]); the
-cap growth is the holding action.
+
+The last growth had a different driver and a sharper failure. A container
+runner **inherits** the session namespace — roughly sixteen entries
+including that orphaned pre-pivot generation — and then adds its own root
+plus about ten more from its recipe. At twenty, the recipe overflowed and
+the first over-cap mount failed the container. So the orphan accumulation
+stopped being a tidiness matter and became the thing consuming the budget a
+feature needed: **a leak that only wastes a resource is invisible until
+something else wants that resource.**
+
+The real fix is still a pivot-time collection ([[seam-80-pivot-orphan-mounts]]);
+the cap growth remains the holding action, now at a per-clone deep-copy
+cost of roughly 1.3 KiB per spawn.
 
 ## Concurrency
 
@@ -310,6 +376,16 @@ On any change to this file, prosecute:
   would break the Plan 9 model and every confined Proc's own-namespace
   composition; adding a capability gate would break the container
   keystone.
+- **The cwd join stays verbatim.** Any cleaning re-introduced there resolves
+  dots the resolver never walks, and the failure is silent success rather than a
+  refusal — a path through a directory that does not exist opening a working
+  descriptor. The canonicalizer keeps exactly one caller, and it runs on an
+  already-resolved path.
+- **Nothing may become the only enforcement by accident.** The `..` clamp was
+  described as a redundant net while a duplicate mechanism upstream consumed its
+  inputs; when that duplicate was removed as a defect, the clamp became load-
+  bearing without anyone changing it. Before calling a second mechanism
+  redundant, check whether the thing making it so is a duplicate of it.
 
 ## Seams
 
@@ -377,3 +453,5 @@ lends authority to the stale ones below it, so the partial update is
 harder to catch than wholesale rot.
 
 ## Provenance
+
+[[chg-2026-08-16-territory-verbatim-join]].
