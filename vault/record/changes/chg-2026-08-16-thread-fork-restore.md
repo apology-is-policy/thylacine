@@ -4,7 +4,7 @@ type: chg
 title: "The constructor that restores a frame, and a number my own query hid"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["b87de478"]
 touched: [sub-kernel-thread]
 established: []
 closed: []
