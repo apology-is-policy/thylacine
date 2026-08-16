@@ -142,19 +142,42 @@ printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ROLE" "${HEAD:0
 # LATER compaction the moment this one claims it, so a forgotten rewrite fails
 # loudly (no note) instead of quietly shipping yesterday's.
 mv "$NOTE" "$NOTE_PENDING"
-printf 'role=%s\nhead=%s\nreason=%s\nat=%s\n' \
-    "$ROLE" "$HEAD" "$REASON" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$NOTE_PENDING.meta"
+printf 'role=%s\nhead=%s\nreason=%s\nat=%s\npane=%s\n' \
+    "$ROLE" "$HEAD" "$REASON" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TMUX_PANE" > "$NOTE_PENDING.meta"
 
 # The peers' half: a compacted agent has lost the TEXTURE of recent exchanges
 # even where the facts survive, so a peer should re-state rather than assume.
 [ -x "$YIP" ] && "$YIP" busy "compacted at ${HEAD:0:8} -- context reset, re-state anything subtle" >/dev/null 2>&1
 
 # --- do it ----------------------------------------------------------------
+# THE NUDGE IS NOT OPTIONAL DRESSING -- WITHOUT IT THE FAR SIDE NEVER WAKES.
+# Measured on the first live run: the note landed perfectly and then nothing
+# happened. A SessionStart hook's additionalContext is PASSIVE -- it seeds a
+# context, it does not submit a turn -- so the resumed session sat at an empty
+# prompt holding a note that says "no one is waiting on you", waiting for
+# someone. Autonomy across the boundary needs something to press enter, and the
+# only thing in a position to do that is the same keystroke channel that sent
+# the /compact. So queue the nudge directly behind it.
+#
+# WHETHER THE QUEUE SURVIVES THE COMPACTION IS AN EMPIRICAL QUESTION, and the
+# next self-compaction answers it for free -- cheaper than reasoning about it.
+# If it turns out the queue is cleared when the context is rebuilt, the fallback
+# is for ~/.claude/resume-note.py to send the nudge itself at SessionStart; that
+# is why `pane=` now rides in the .meta, so the fallback is a small edit rather
+# than a rediscovery of a fact this side already knew.
+#
+# Tagged [auto-nudge] because it lands in the transcript looking like the
+# operator speaking, and it is not.
+NUDGE="${THYLA_NUDGE:-[auto-nudge] Continue from your resume note.}"
+
 tmux send-keys -t "$TMUX_PANE" C-u          # never submit residue
 tmux send-keys -t "$TMUX_PANE" "/compact"
 tmux send-keys -t "$TMUX_PANE" C-m          # fires when this turn ends
+tmux send-keys -t "$TMUX_PANE" "$NUDGE"
+tmux send-keys -t "$TMUX_PANE" C-m
 say ""
 say "note armed  : $NOTE_PENDING (${NOTE_CHARS} chars, ${NOTE_AGE}s old)"
 say "/compact queued -- it submits when this turn ends."
+say "nudge queued: $NUDGE"
 say "The far side consumes the pending note exactly once and is told this was a"
 say "SELF-compaction, so it knows to continue rather than wait for direction."
