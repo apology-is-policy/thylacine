@@ -4,7 +4,7 @@ type: chg
 title: "The Burrow re-swept: the type says SHAPE, and that lesson has now arrived three times"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["0fd20c64"]
 touched: [sub-kernel-burrow]
 established: []
 closed: []
