@@ -4,7 +4,7 @@ type: chg
 title: "Loom's I-32 ledger: owning the ring is not paying for the pages"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["7e89a3b6"]
 touched: [sub-kernel-loom]
 established: []
 closed: []
