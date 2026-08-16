@@ -16,7 +16,7 @@ design:
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -129,6 +129,75 @@ off-CPU. Each conjunct closed a real failure:
 - the group-exit check, because a dying target's threads go EXITING (which the
   parked scan *skips*) and then write their context outside the global lock. Death
   wins over a stop, everywhere.
+
+### The park predicate lied about a thread on its way out
+
+Two of those conjuncts — registered on the debug rendezvous, and off-CPU — both
+hold on a thread that is **leaving** the park, and for a reason that lives in
+another subsystem: the waker sets the thread runnable and queues it, but
+deliberately does **not** clear the blocked-on registration, because only the
+owning thread may clear it, so the group-terminate cascade can read it under the
+wait lock.
+
+So between a resume's wake and the thread actually being dispatched, the
+registration is stale and the predicate says *parked* about a thread that is
+about to run.
+
+The consequence is worth following all the way down, because the shape of the
+damage is not where the defect is. A stop issued while a prior start's wake was
+still undispatched finds the stale park, the blocking wait returns immediately,
+and the read that follows lands after the thread has been dispatched and cleared
+its registration but before it has re-parked. The fully-stopped conjunction is
+then false, and the caller receives **a bare denial it cannot distinguish from a
+real authorization refusal** — so the debugger treats a transient as fatal, and
+the process supervising it exits non-zero.
+
+**A single return value for "not permitted" and "not yet" is what turned a race
+into a fatal.** The race is a one-in-eighty event; the ambiguity is what made it
+unrecoverable. That is this surface's error-path posture — everything is one
+value — colliding with a state that is genuinely temporary, and it is the
+strongest argument the file offers for eventually distinguishing them.
+
+It surfaced only under hardware-accelerated virtualization, because the faster
+processor widens the undispatched window. Substrate again deciding whether a
+latent race is observable.
+
+**The fix is a third conjunct — the thread's own state — and its three
+properties are worth separating**, because any one of them alone would have been
+a working fix rather than the right one:
+
+- **It only narrows.** The added term can turn a true into a false and never the
+  reverse, so nothing becomes newly readable. On a privilege surface that is the
+  only direction a change can move and still be safe by construction rather than
+  by argument.
+- **It converges.** A runnable peer is dispatched, re-checks its condition, and
+  re-registers as sleeping — so the poll terminates rather than spinning on a
+  state that never settles.
+- **It composes.** A job-parked thread is also sleeping, so a debugger stopping
+  an already-job-stopped target still reads fully-stopped immediately, which the
+  design elsewhere depends on.
+
+**The stepping path needed no change, and why not is the interesting part.** It
+polls the full stopped-conjunction, whose stop-requested term already rejects the
+stale window. A stop caller has no such discriminator **because it sets that
+flag itself before waiting** — so the one term that serves both callers had to be
+the thread state. A discriminator that one caller establishes cannot discriminate
+for that caller.
+
+**No model changed, and the reason generalizes.** The formal model has an
+*abstract* parked state; the defect lived in the implementation's **two-field
+encoding** of that state, which admitted a configuration the model does not have.
+The fix moved the implementation toward the model rather than the model toward
+the implementation, so the model stayed the gate. **A correct model does not
+guarantee a correct encoding of its states** — the gap between an abstract
+predicate and the fields standing in for it is a place defects live, and it is
+invisible from the model's side.
+
+The decision is extracted as a **pure function** of the three inputs, so it is
+assertable without constructing a thread. Both layers are probed separately, and
+the reason is exact: they are blind to each other in **both** directions —
+dropping the term fails only the pure assertion, while hardcoding the argument at
+the call site fails only the walk, with every pure assertion still green.
 
 ### The register write has a privilege guard
 
@@ -260,6 +329,17 @@ performance backlog.
 - **The stopped-only predicate must stay a conjunction**, and must keep reading
   `debug_stop_req` alone. Generalizing it to the job-stop flag makes a Ctrl-Z'd
   process debugger-readable.
+- **The park predicate keeps all three terms.** Registration alone is stale
+  between a wake and its dispatch, because the waker cannot clear it — only the
+  owning thread may, and the death cascade reads it. Dropping the state term
+  restores a predicate that reports *parked* about a thread that is about to run.
+- **Any new term on a privilege predicate must only narrow.** It may turn a true
+  into a false and never the reverse; that is what makes it safe by construction
+  instead of by argument, and it is checkable without reasoning about the race.
+- **A gate extracted as a pure function needs its own probe, and so does its
+  caller.** They are blind to each other in both directions: removing the logic
+  fails only the pure assertion, and hardcoding the argument at the call site
+  fails only the walk. One probe passing proves nothing about the other layer.
 - **Death must keep winning.** The group-exit check inside the fully-stopped
   predicate is what keeps a dying target's EXITING threads out of the register and
   stack readers.
@@ -324,4 +404,4 @@ performance backlog.
 
 ## Provenance
 
-[[chg-2026-08-02-introspection-sweep]].
+[[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devproc-park-predicate]].
