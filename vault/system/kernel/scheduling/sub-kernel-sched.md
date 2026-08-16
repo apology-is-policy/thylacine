@@ -5,11 +5,11 @@ parent: moc-kernel-scheduling
 title: "Dispatch — per-CPU run trees, the bands, and preemption"
 code: ["kernel/sched.c", "kernel/include/thylacine/sched.h"]
 audit: hard
-guarded-by: [inv-i8, inv-i17, inv-i21]
+guarded-by: [inv-i8, inv-i17, inv-i21, inv-i44]
 validated-by: [spec-scheduler, spec-sched-alpha, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -48,6 +48,9 @@ machinery around it.
 - **A plain spinlock may never be held across `sched()`.** This is
   checked, not documented: `sched()` extincts on `prev->preempt_count != 0`
   and names the outermost acquire site.
+- `sched_activate_addrspace(t)` — install `t`'s CURRENT address space in
+  the hardware **now**, rather than at the next switch. Exactly one caller
+  is correct (execve); see Mechanism.
 
 ## Mechanism
 
@@ -59,9 +62,11 @@ practice because the realized INTERACTIVE set is narrow and mostly
 blocked (see Caveats).
 
 `sched_mark_interactive` is the only promoter: sticky, one-way
-`NORMAL -> INTERACTIVE`, USER threads only (`proc->pgtable_root != 0`, so
-the in-kernel test runner stays NORMAL), and it never touches an IDLE
-thread. Its two callers each apply their own trust gate — `kobj_irq_wait`
+`NORMAL -> INTERACTIVE`, USER threads only (`proc->as != NULL` since the
+L-1 address-space extraction — the test was `pgtable_root != 0`, and the
+root now lives one indirection further out, so **the in-kernel test runner
+stays NORMAL because it has no AddrSpace**, not because its root is zero),
+and it never touches an IDLE thread. Its two callers each apply their own trust gate — `kobj_irq_wait`
 is implicitly `CAP_HW_CREATE`-gated by needing an IRQ kobj, and
 `devcons_read` gates on the trusted console session.
 
@@ -123,6 +128,51 @@ the first cut hit: an IRQ landing mid-RMW read the pre-increment `0`,
 passed the gate, the thread migrated, and the store then poisoned the
 *old* CPU's slot permanently non-preemptible. A per-thread count travels
 with the migration, so the gate and the RMW always name the same object.
+
+**The switch is also a liveness proof for a counter this layer does not
+own.** `sched()` calls `exception_sync_depth_reset_this_cpu()`, clearing
+the entry layer's per-CPU EL1-sync recursion depth. The reason belongs to
+[[sub-kernel-exception]] and is worth reading there in full, but the shape
+matters here: **depth alone cannot separate a recursive runaway from
+several threads legitimately asleep inside handlers**, and no threshold
+can, because both raise the same number. The second axis is "did this CPU
+switch?" — a switch proves the chain is progressing, while a genuine
+runaway is synchronous and IRQ-masked and therefore never reaches
+`sched()` at all. **The scheduler is where that fact is available**, which
+is why the reset lives here rather than in the handler.
+
+### `sched_activate_addrspace` — the one place TTBR0 moves outside a switch
+
+Every other TTBR0 change happens at a context switch, where the value is
+loaded from the incoming thread's saved context. **execve is the sole path
+that swaps a LIVE thread's address space and then returns straight to EL0
+through the exception frame** — no switch occurs, so nothing would load
+the new root and the `eret` would land the new image's entry PC in the OLD
+translation.
+
+IRQs are masked across the compose-and-install pair for **two** reasons,
+and each is independently sufficient to require the mask:
+
+1. The ASID resolver publishes into *this* CPU's active slot, and its
+   contract is that the caller has IRQs masked on the CPU the address
+   space is about to run on.
+2. **The context-save path reads TTBR0 back out of the hardware.**
+   `cpu_switch_context` does `mrs x9, ttbr0_el1` into `prev->ctx.ttbr0`,
+   so a preemption landing between the ctx write and the `msr` would
+   overwrite the freshly-composed value with the stale hardware one — and
+   the thread would resume translating through an address space that is
+   being torn down.
+
+That second reason generalizes past this function: **wherever a save path
+reads a register rather than trusting the struct, any "update the struct,
+then the register" sequence is a critical section**, because a preemption
+in the window makes the hardware win.
+
+The trailing `isb` is not only for this thread's correctness. It is **the
+caller's barrier**: after it, no instruction fetch or data access on this
+CPU can still be walking the old root, which is precisely the precondition
+the outgoing address space's teardown needs. Removing it does not just
+risk a stale fetch — it removes the licence to free the old tables.
 
 ## Data structures
 
@@ -199,6 +249,12 @@ external caller can arrive already holding one.
   is that `pick_next` and `try_steal` both assert their victim is
   `RUNNABLE && !on_cpu` before taking it, and that `prev == next` is an
   extinction rather than a re-insert.
+- **[[inv-i44]]** — address-space integrity under sharing. This layer's
+  share is narrow but load-bearing: the TTBR0 composition reads the root
+  and the context id **through `Proc.as`**, so two Procs sharing one
+  address space compose the same value and resolve the same ASID; and
+  `sched_activate_addrspace`'s `isb` is the barrier the outgoing space's
+  teardown depends on.
 
 ## Error paths
 
@@ -269,6 +325,24 @@ secondary mis-init. It is kept as a loud failure rather than deleted.
 - **Band promotion stays narrow.** `sched_mark_interactive` has no
   demotion path, so every new caller permanently widens the set that can
   starve NORMAL. Each caller owes its own trust gate.
+- **`sched_activate_addrspace` has exactly one correct caller.** It is not
+  a general "make this address space current" primitive: it is sound only
+  where the thread is about to `eret` without a switch. A second caller
+  that then blocks, or that expects the install to survive a migration,
+  gets neither — the value is re-derived at the next switch from the
+  thread's saved context.
+- **The IRQ mask around it is not a formality and neither half is
+  redundant.** Drop it and either the ASID publishes onto the wrong CPU or
+  the context save writes the stale hardware root back over the new one.
+  The second is the quieter failure: it looks like a correct install that
+  silently reverts.
+- **The `isb` is the teardown's precondition.** Anything that frees the
+  outgoing address space is relying on it, so it cannot be relaxed on the
+  argument that this CPU will fault harmlessly.
+- **The EL1-sync depth reset must stay at the switch.** Moving it to a
+  wake, a tick, or an IRQ return would clear the counter on paths a real
+  runaway *does* reach, and the guard would stop discriminating — the
+  reset's whole value is that a genuine runaway cannot reach the site.
 - Deliberately **not** prosecuted here: the telemetry counters
   (`run_ns`, `nsched`, `nmigrations`, `last_cpu`, `idle_ns`, `nctxt`).
   They are stamped at the single switch chokepoint, single-writer by the
@@ -319,4 +393,6 @@ Wake-preemption and the realized INTERACTIVE band are
 are [[chg-2026-07-05-33-sys-yield]].
 
 Absorbed `docs/reference/15-scheduler.md` at
-[[chg-2026-08-01-sched-sweep]].
+[[chg-2026-08-01-sched-sweep]]. The LINEAGE address-space extraction and
+the execve immediate-install, plus the #214 F1 depth reset, are
+[[chg-2026-08-16-sched-addrspace-install]].

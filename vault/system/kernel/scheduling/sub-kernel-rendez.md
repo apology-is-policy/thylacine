@@ -9,7 +9,7 @@ guarded-by: [inv-i9, inv-i8]
 validated-by: [spec-scheduler, spec-tsleep, spec-death-wake, gate-smp]
 locks: [lock-wait, lock-timerwait, lock-rendez]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -273,3 +273,13 @@ widening rides [[arc-life-support]]; the stop detour and the frame-atomic
 block-through are [[arc-go-ide]] and [[arc-pty]].
 
 Absorbed `docs/reference/16-rendez.md` at [[chg-2026-08-01-sched-sweep]].
+
+**2026-08-16: re-verified, no content owed.** `kernel/sched.c` moved ~48
+lines since the last sweep and this dossier was flagged for it, but every
+hunk landed in `ready`, `sched_arm_clear_on_cpu`, `sched_install_asid_ttbr0`
+and `sched()` — the dispatch half of a file two dossiers share. **Churn is
+per FILE; ownership is per SURFACE**, and the two do not line up whenever a
+file carries more than one layer. The check was hunk-context against the
+function set this dossier owns (`sleep`, `tsleep`, `wakeup`,
+`wake_rendez_waiter`, `timerwait_*`); none was touched. The dispatch-side
+changes are on [[sub-kernel-sched]] ([[chg-2026-08-16-sched-addrspace-install]]).

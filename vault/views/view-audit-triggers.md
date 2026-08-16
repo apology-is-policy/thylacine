@@ -64,7 +64,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-proc]] | kernel/proc.c, kernel/include/thylacine/proc.h | inv-i1, inv-i32, inv-i33, inv-i44 | - The `rfork` ledger: every field is inherited, freshened or stripped |
 | [[sub-kernel-pts]] | kernel/pts.c, kernel/include/thylacine/pts.h | inv-i20, inv-i1, inv-i22, inv-i9 | - The signal call must never grow a target parameter. The invariant is the |
 | [[sub-kernel-rendez]] | kernel/sched.c, kernel/include/thylacine/rendez.h | inv-i9, inv-i8 | - **The unconditional `r->lock` acquire in `wakeup` is LOAD-BEARING** |
-| [[sub-kernel-sched]] | kernel/sched.c, kernel/include/thylacine/sched.h | inv-i8, inv-i17, inv-i21 | - **The mask-before-read rule holds at every per-CPU read.** Any new site |
+| [[sub-kernel-sched]] | kernel/sched.c, kernel/include/thylacine/sched.h | inv-i8, inv-i17, inv-i21, inv-i44 | - **The mask-before-read rule holds at every per-CPU read.** Any new site |
 | [[sub-kernel-sched-smp]] | kernel/sched.c, kernel/smp.c, arch/arm64/context.S | inv-i21, inv-i18, inv-i8, inv-i9 | - **The claim happens under the victim's lock.** Moving `on_cpu = true` |
 | [[sub-kernel-spoor]] | kernel/spoor.c, kernel/include/thylacine/spoor.h | inv-i33 | - **The refcount balances on every path.** `spoor_total_allocated` / |
 | [[sub-kernel-srvconn]] | kernel/srvconn.c, kernel/include/thylacine/srvconn.h | inv-i9 | What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed): |
