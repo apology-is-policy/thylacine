@@ -4,7 +4,7 @@ type: chg
 title: "The one TTBR0 write outside a switch, and a save path that reads the hardware"
 date: 2026-08-16
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["99c737b2"]
 touched: [sub-kernel-sched, sub-kernel-rendez]
 established: []
 closed: []
