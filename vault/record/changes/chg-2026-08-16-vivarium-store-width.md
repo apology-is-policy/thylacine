@@ -4,7 +4,7 @@ type: chg
 title: "The flags that make it a kernel are the flags that make the idiom unsafe"
 date: 2026-08-16
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["5dfa43bb"]
 touched: [sub-kernel-vivarium]
 established: []
 closed: []
