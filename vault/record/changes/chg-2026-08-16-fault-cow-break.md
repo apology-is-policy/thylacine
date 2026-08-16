@@ -4,7 +4,7 @@ type: chg
 title: "The fault dispatcher gains the COW break, and a defect found by reading a contract"
 date: 2026-08-16
 arc: arc-vault
-commits: ["56d0e433"]
+commits: ["56d0e433", "7e89a3b6"]
 touched: [sub-kernel-fault]
 established: []
 closed: []
