@@ -19,7 +19,7 @@ design:
   - "docs/ARCHITECTURE.md section 13"
   - "docs/VIRTIO-PCI-DESIGN.md"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -75,14 +75,70 @@ holds bus/device/function triples rather than addresses; the register windows th
 function decodes get their exclusivity by each becoming a *register-range claim*
 in the first mechanism. So one object's exclusivity is built out of another's.
 
+### The subtype the caller cannot get wrong
+
+A DMA buffer carries a kernel-minted class — plain, a compositor's framebuffer
+(device-*read*), or a GPU buffer object (device-*written*) — fixed at creation
+and never rewritten. Each class carries its own size ceiling.
+
+The classes are stored as **separate flag bits** but selected through a single
+**enumerated** constructor argument, and the reason is stated where it is
+enforced: with one boolean per class, a caller could pass both, and the struct
+would hold a state with no meaning. With an enum it cannot be expressed at the
+call. The bits remain independent in memory; only the door is narrow.
+
+This is the third distinct place in the tree where **the shape of an interface
+is the safety property** rather than a check inside it — alongside the charge
+claim that returns pages instead of a record, and the share-drop that returns a
+verdict instead of a count. In each, the wrong call is not rejected at runtime;
+it cannot be written.
+
+The cost is a coupling that neither end declares. A consumer in the network
+dataplane maps a buffer's class to a binding kind with an ordered
+if-else — framebuffer tested first, GPU buffer second, anything else refused —
+which is unambiguous **only because both bits can never be set at once**. That
+guarantee lives in this file, in a constructor; the reader is in another
+subsystem, and its comment carefully justifies re-checking that the region is
+admissible while saying nothing about why the ordering is safe. Verified: the
+constructor is the sole writer of either bit in the whole kernel, so the
+guarantee holds today. It is an argument, held at a distance, with no tripwire
+between the two ends.
+
 **Assignment, for a bus function, is done by us.** There is no firmware to have
 done it, so the kernel sizes each window by the architectural dance — write all
 ones with decoding off, read back which address bits are writable, invert and add
-one — and hands out addresses from a bump arena seeded from the device tree. Two
+one — and hands out addresses from bump arenas seeded from the device tree. Two
 details are load-bearing. The inversion is **width-correct**: a 32-bit window's
 mask occupies only the low half, and inverting it at 64 bits would set the upper
 half and yield a multi-exabyte size. And decoding stays off for the whole probe,
 so the transient all-ones address a window briefly decodes is inert.
+
+**Placement is a second width question, and it is not the same one.** There are
+two arenas — the host bridge's low window, and a high one — because a GPU asked
+to expose host memory presents a window of several gigabytes, which the low
+window (well under a gigabyte on the reference machine) structurally cannot
+hold. Routing picks by **size**, so a small window that merely *could* live high
+still lands low and every existing driver keeps the addresses it had.
+
+Size alone is not sufficient, though, and this is where it went wrong. A window
+that is too large for the low arena but is *not* 64-bit-capable must fail rather
+than move: only its low half is ever written back, so a high address would be
+truncated on the way to the device — which would then decode a truncated address
+somewhere inside RAM while the kernel's exclusivity claim sat on the untruncated
+one. Two views of the same window, disagreeing, with the device's view pointing
+at memory. So placement takes the capability bit as well as the size, and a
+32-bit window that will not fit low fails honestly.
+
+**The two width rules are about different things and neither implies the
+other.** One governs *decoding a size*, the other *writing an address*. They live
+in the same file, they are the same 32-versus-64 confusion, and having got the
+first right is no evidence at all about the second.
+
+A third bug sat in the same routing: the low arena's fit test compared the
+request against the window's **total span** rather than what remained, so once
+the arena was exhausted every later window failed there instead of falling
+through to the high one. Capacity is not availability, and a full container that
+reports its size still answers "yes, that fits."
 
 **Then the capability list is walked** to find the transport's regions, and every
 region is validated against the window it names: the index must exist, the window
@@ -91,6 +147,15 @@ decoded. The walk is bounded by the address window capabilities live in and by a
 hop counter, so a device offering a circular list terminates. This is the one
 place in the area that reads a structure a device controls, and it is written as
 if the device were hostile.
+
+The walk also collects **shared-memory regions**, whose extents are 64-bit and
+split into halves across the capability — so the containment check is written in
+its non-wrapping form: the start is compared against the window size, then the
+length against what remains after the start. The naive sum of two hostile halves
+overflows, and a wrapped sum compares as small. A device offering more of these
+than there are slots has the surplus silently ignored, which is fail-safe (the
+driver sees fewer regions, never a wrong one) but is a silent truncation and not
+signalled anywhere.
 
 **Ordering, on the claim path, is what makes rollback total.** The exclusivity
 slot is installed *before* any device state is touched — so a double claim and a
@@ -122,10 +187,18 @@ table — which works because the two operations that read the table want differ
 things: overlap-checking ignores ownership entirely, and owner-lookup is only ever
 called with real object pointers, so it can never match the sentinel.
 
-A bump arena for window addresses, seeded lazily from the device tree. It does not
-reclaim: a freed window's address is never handed out again, and the argument is
-headroom — the window is large enough for tens of thousands of claims against a
-handful of live ones.
+Two bump arenas for window addresses, low and high, each seeded lazily and
+independently from the device tree; the high one is additionally marked *absent*
+when the tree describes no such range, so the probe is not retried on every
+allocation. Neither reclaims: a freed window's address is never handed out
+again, and the argument is headroom — the low window alone is large enough for
+tens of thousands of claims against a handful of live ones. Note that the
+exclusivity table *does* reclaim, so a re-claim of the same hardware succeeds
+and simply receives a fresh address.
+
+The function object also carries a small fixed set of shared-memory region
+records — identifier, window index, offset, length — filled from the capability
+walk.
 
 ## Concurrency
 
@@ -208,7 +281,19 @@ function is one-shot at driver startup.
   reading.
 - The two locks must stay unnested; the sequence, not the nesting, is what makes
   the order acyclic.
-- The window-size inversion must stay width-correct.
+- **The two width rules are independent.** The size inversion must stay
+  width-correct, *and* placement must keep refusing to put a 32-bit window in the
+  high arena. Getting either right proves nothing about the other: one decodes a
+  size, the other writes an address, and only the second can leave the device and
+  the kernel decoding different memory.
+- **Arena selection must test what remains, not what the window holds.** The
+  fall-through to the high arena is reachable only if the low one reports itself
+  full rather than merely large enough in principle.
+- **Only the constructor may decide a buffer's class.** The mutual exclusivity of
+  the class bits is enforced by the enumerated argument and nothing else; a
+  consumer elsewhere disambiguates them by test order, so adding a class as
+  another boolean, or a buffer that is legitimately two classes, silently
+  re-kinds it there.
 - The capability walk must stay bounded and must keep validating regions against
   the decoded size — it is the only device-controlled structure in the area.
 - The buffer allocator's rounding is computed by a **local copy** of the page-order
@@ -221,9 +306,17 @@ function is one-shot at driver startup.
 ## Seams
 
 The cumulative per-driver DMA budget does not exist; the per-buffer ceiling is the
-only bound. The bump arena never reclaims. The virtio transport slots are
-deliberately unreserved under a trust-boundary argument with a stated expiry —
-see [[inv-i5]].
+only bound — and there are now three ceilings rather than one, so the missing sum
+spans more classes than when the gap was recorded. Neither bump arena reclaims.
+The virtio transport slots are deliberately unreserved under a trust-boundary
+argument with a stated expiry — see [[inv-i5]].
+
+GPU buffer objects are allocated **at runtime, per client request**, where
+framebuffers are minted once at startup — so they meet long-uptime allocator
+fragmentation in a way the earlier class never did, at a ceiling that needs a
+large contiguous run. The contiguity is this object's constraint and not the
+device's: the hardware interface accepts a scattered list. Recorded in the header
+as the follow-on if it bites.
 
 ## Caveats
 
@@ -250,5 +343,13 @@ Read from `kernel/mmio_handle.c` (471 lines), `kernel/dma_handle.c` (198),
 Cross-checked: the handle-partition masks and their assertions, the capability
 list, the struct size assertion, the allowance gates in the create handlers, the
 counter call sites across the whole tree, and the thirty registered tests.
+
+Re-read 2026-08-16 at `efd83109` — `dma_handle.c` now 213, `pci_handle.c` now
+561, `mmio_handle.c` unchanged. The GPU work landed the high arena, the placement
+width rule, the arena availability test, the shared-memory capability, and the
+buffer class enum. Cross-checked this pass: every writer of either class bit
+across the kernel and architecture trees (one, the constructor), the class
+readers in the network dataplane, and the shared-memory containment arithmetic.
+[[chg-2026-08-16-hwcap-widths]].
 
 Absorbed `docs/reference/39-hw-handles.md` and `docs/reference/115-pci-claim.md`.
