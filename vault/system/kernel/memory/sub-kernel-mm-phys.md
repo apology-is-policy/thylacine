@@ -9,7 +9,7 @@ guarded-by: []
 validated-by: [gate-smp]
 locks: [lock-buddy-zone]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -95,9 +95,17 @@ sets with no coordination; test-harness and shutdown use only.
 `struct page` — **48 bytes, `_Static_assert`-pinned** (P1-I F35;
 the array scales with RAM — 24 MiB at 2 GiB — so silent growth is a
 BSS tax): `next`/`prev` (free-list), `order`, `flags`
-(`PG_FREE`/`PG_RESERVED`/`PG_KERNEL`/`PG_SLAB`), `refcount`, pad,
-plus the two SLUB fields (`slab_freelist`, `slab_cache` — valid only
-under `PG_SLAB`; a deliberate no-union choice).
+(`PG_FREE`/`PG_RESERVED`/`PG_KERNEL`/`PG_SLAB`), `refcount`,
+**`cow_share`**, plus the two SLUB fields (`slab_freelist`,
+`slab_cache` — valid only under `PG_SLAB`; a deliberate no-union
+choice).
+
+**The pad is spent.** `cow_share` took the former 4-byte alignment
+slack, so the struct is still 48 bytes and the per-RAM reservation did
+not move — the static assertion would have failed the build otherwise,
+and did not. The consequence is that **the next field here costs 8
+bytes of struct and a proportional slice of BSS at every RAM size**;
+there is no free slot left to absorb one quietly.
 
 **The refcount trap**, pinned in project memory and repeated here on
 purpose: `page.refcount` LOOKS like the COW/BURROW share count and is
@@ -106,6 +114,33 @@ marker); SLUB repurposes it as the slab inuse count; the BURROW
 refcount lives in `struct Burrow` (the #847 dual count), not here.
 `page.h`'s own comment says "placeholder". A lineage/COW design that
 reads it as a share count is wrong on arrival.
+
+**That prediction was tested and held.** The copy-on-write arc needed
+exactly such a count and did not take `refcount`, on two *measured*
+grounds rather than on the general warning: the buddy writes it **per
+block head**, so every tail page of an order>0 block carries a stale
+value; and SLUB double-books it as a slab inuse count observed reaching
+85. Neither reaches the new field, because no allocator path touches
+it.
+
+**`cow_share` is ESTABLISHED, NEVER INHERITED, and that contract is the
+whole of its correctness.** A page recycled through the buddy carries
+whatever its last owner left, so a stale count is a premature free or a
+leak. Every site that puts a page into an anon Burrow slot sets it to
+one rather than assuming — a **closed, enumerated set of three** (lazy
+populate, the demand-zero fault install, the break). Every other writer
+of those slots is file-backed text, shared read-only and never broken,
+and deliberately does not participate. The operations extinct on a zero
+count rather than guess, because zero means a site skipped the
+establish.
+
+The allocator's own initialization zeroes it **for a clean initial state
+only**. That is not maintenance: nothing in this layer keeps the field,
+and nothing may read it on a page that is not currently in an anon
+Burrow slot. The distinction matters because a field the allocator
+*zeroes* looks like a field the allocator *owns*, which is precisely how
+`refcount` became the trap above — **"a field whose name states a
+contract nothing keeps."**
 
 Magazine pages in the stack carry `flags = 0` — deliberately NOT
 `PG_FREE` (magazine ownership is not free-list membership).
@@ -157,6 +192,47 @@ of a zeroed alloc (page-sized store loop + one `dsb ish`).
   section — correct only while the page is private to the caller;
   a future shared-magazine design loses that.
 - Anything reading `page.refcount` as a share count.
+- **`cow_share` is not this layer's field.** It is zeroed at init for a
+  clean start and otherwise untouched; no allocator path may read,
+  write, or preserve it. A future allocator that "helpfully" maintains
+  it recreates the refcount trap at the next field along.
+- **A new `struct page` field is now a real BSS cost.** The slack is
+  gone, so the next one grows the struct and the whole per-RAM array
+  with it. The static assertion is the gate; do not raise it to make a
+  field fit.
+
+### The instrument trap: `phys_free_pages()` is blind to order-0
+
+Worth its own heading because it produced a red that reads exactly like
+a broken mechanism.
+
+**An order-0 free does not reach the buddy at all.** `mag_free` pushes
+it onto the current CPU's magazine, so the buddy's free count never
+moves. A test that samples `phys_free_pages()` across an order-0
+teardown therefore measures **zero delta whether the free happened or
+not** — the instrument is blind to both arms equally, which is
+indistinguishable from the code under test doing nothing.
+
+That is the failure mode to fear: a blind instrument does not report
+"cannot measure", it reports the number that means "broken". The copy-on-write
+teardown test hit it, and the only reason a working mechanism did not get
+"fixed" around it was a temporary diagnostic rather than reasoning from
+theory.
+
+`magazines_drain_all()` before each sample makes the figure a true total
+again. Measured with the drain in place: the private teardown returns one
+page, the shared teardown returns zero.
+
+**The earlier draft of the same test was worse — it passed.** It asserted
+on `PG_FREE`, which is unusable here because the buddy's coalesce anchors
+on the **lower-pfn** buddy: a freed page that merges rightward never gets
+the flag set on its own `struct page`, so the assertion succeeded
+vacuously. A vacuous pass and a blind zero are the same defect at
+different signs.
+
+The surviving form asserts the **difference between two otherwise
+identical runs**, so the incidental allocations on the path cancel
+instead of having to be reasoned about individually.
 
 ## Seams
 
@@ -187,4 +263,6 @@ of a zeroed alloc (page-sized store loop + one `dsb ish`).
 P3-Bb direct map / P3-Bda / P4-E initrd →
 [[chg-2026-05-26-16bg-hardening-f3f4f5]] (the cap + the barriers) →
 [[chg-2026-05-31-807-magazines]] →
-[[chg-2026-05-31-808-directmap-pagemap]].
+[[chg-2026-05-31-808-directmap-pagemap]] →
+[[chg-2026-08-16-page-cow-share]] (the pad spent, and the
+order-0 instrument trap).
