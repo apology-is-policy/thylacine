@@ -348,6 +348,32 @@ an opinion, and it settled it in one command.
     said 3, because the second matched the shell running my own grep. Self-match
     is not a curiosity; it is the default when you search a list your own
     command is in (the same trap as `capture-pane`, §1b).
+16. **`ps` DOES NOT DISTINGUISH TREES — only cwd or an absolute artifact path
+    does.** Both tracks invoke gates by *relative* path (`tools/test-interactive.sh`),
+    so a `[t]est-interactive` grep run from either tree matches the other's
+    processes identically. This is the same hazard as the pattern-kill, one
+    layer up: it corrupts *accounting* rather than destroying work, so it fails
+    quietly — I nearly reported "nothing running" while three of a peer's
+    processes matched my own check. Discriminate with `lsof -a -p <pid> -d cwd`,
+    or by an absolute path in the args. **Three agents reached this rule by
+    three different routes in one day** — main by ancestry-tracing a kill, aux
+    by `lsof` when killing a futile retry run, vault by identifying a peer's
+    QEMU from its `-kernel` path. A rule that three independent parties derive
+    the same day is one the environment is actively teaching.
+
+### The payoff was measured, not assumed
+
+Standing down was not merely polite. aux's LS-CI on the freed host: **33/35,
+0 FAIL, 0 retries burned**, against their earlier contended measurement of 5
+scenarios in 76 minutes with 4 retries burned. So the serialization protocol has
+a number attached now, from both directions, and the cost of the courtesy was
+~10 minutes of discarded gate.
+
+That matters beyond etiquette: **a burned retry is not just slower, it is
+evidence-destroying.** A gate that passes on attempt 2 cannot distinguish "the
+host was busy" from "this is intermittently broken", which is precisely the
+ambiguity the no-host-load rule exists to prevent. Serializing buys clean
+evidence, not just wall clock.
 
 ---
 
