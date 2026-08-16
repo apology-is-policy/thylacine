@@ -161,12 +161,25 @@ path into. Checking the wrong object entirely.
 **The fix was a unification, not a fifth gate.** Joining and canonicalising had
 been one function; they were separated, leaving exactly one production caller
 of the canonicalising half. That is the same move [[sub-libthyla-rs]] made at
-the same time and for the same reason — and the pair is the argument for the
-principle rather than for either fix: **three layers independently normalised
-paths (this join, the ported libc's splitter, the native runtime's), each was
-wrong differently, and all three were repaired by DELETING the normalisation
-rather than correcting it.** When N layers each clean a path, they each clean
-it wrong, and the resolver's gates never see what they exist to judge.
+the same time and for the same reason: **three layers independently normalised
+paths — this join, the ported libc's splitter, the native runtime's — and each
+was wrong differently.**
+
+**Correction, same day, from the third layer** ([[chg-2026-08-16-pouch-trailing-slash]]):
+this note first stated the lesson as "all three were repaired by DELETING the
+normalisation". Two of them were. The **pouch splitter could not be** —
+splitting `(parent, leaf)` is structurally required, because the kernel's
+mutation primitives take a parent fd and a leaf name rather than a path, so the
+separator genuinely has to come off there.
+
+The rule that covers all three is not *never transform*, it is **never
+DECIDE**: a layer that must transform a path may strip, but it may not
+adjudicate — it reports what the original asserted and re-asks the authority.
+Pouch does exactly that, spending one extra `SYS_STAT` of the un-stripped path
+so **this** resolver's audited gate answers. For the two layers with nothing to
+transform, "do not decide" simply collapses to "delete the cleaning", which is
+why the collapsed form looked like the general one until a third instance
+disagreed.
 
 ### Mount crossing (Plan 9 domount, stalk-2)
 
@@ -397,12 +410,17 @@ authoritative audit-trigger copy):
   `Dev.walk`, so anything added to the real-component arm does not cover
   them. Both tokens, not just `..`: two separate tasks named only `..` and
   the measurement showed both behaved identically in every row.
-- **No caller may canonicalise before calling stalk.** Every gate here
-  binds only what stalk sees, and a caller that resolves dots or strips a
-  trailing separator first bypasses all of them for whatever path form it
-  handles. This is the single defect class that has recurred at three
-  independent layers; the rule is that joining and canonicalising stay
-  separate operations, and only stalk does the second.
+- **No caller may DECIDE before calling stalk.** Every gate here binds only
+  what stalk sees, so a caller that resolves dots or strips a trailing
+  separator and then acts on its own reading bypasses all of them for
+  whatever path form it handles. This is the single defect class that has
+  recurred at three independent layers. Joining and canonicalising stay
+  separate operations and only stalk does the second — but a caller that
+  *must* transform (the pouch splitter, whose kernel primitives take a
+  parent fd and a leaf, not a path) is not thereby exempt: it strips, carries
+  the assertion forward explicitly, and spends a `SYS_STAT` so **this**
+  resolver adjudicates. Transforming is sometimes forced; adjudicating never
+  is.
 - **`STALK_STAT` and the cached-open arm are separate success exits and
   each needs the quarry-shaped gates repeated.** The trailing-slash check
   lives at three sites for exactly this reason — two of the three exits
