@@ -4,7 +4,7 @@ type: chg
 title: "Membership as the liveness proof, and a fixed class that came back as data"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["35b8847b"]
 touched: [sub-kernel-ninep-attach]
 established: []
 closed: []
