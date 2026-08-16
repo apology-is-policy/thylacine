@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-08-15
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -321,3 +321,13 @@ individual per-field asserts were updated to the new values. Dropping a number
 is normally how a proof goes stale — here it removed the only copy that had to
 be maintained by hand, three lines above the copies that are checked by the
 compiler.
+
+**2026-08-16: flagged by co-tenancy, nothing owed.** `kernel/proc.c` and its
+header moved ~37 lines and this dossier was flagged for it. Checked by hunk
+context against the function set it owns — sessions, process groups, the group
+note fan, the terminal seam, the job-control stop: **none was touched.** Every
+hunk landed in `proc_exec_alone` / `proc_exec_replace` /
+`proc_exec_reset_dispositions`, which are [[sub-kernel-proc]]'s
+([[chg-2026-08-16-proc-exec-ledger]]). The same disposition
+[[chg-2026-08-15-stale-by-cotenancy]] recorded for the capability surface,
+which shares the same file.

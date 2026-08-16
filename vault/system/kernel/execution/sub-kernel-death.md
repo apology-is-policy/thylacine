@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-08-15
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -337,3 +337,11 @@ What a change **must** re-establish:
 [[chg-2026-08-15-proc-lineage]] is the re-sweep after the LINEAGE arc: the
 vfork park that rides the existing child-waiter wake, and the exec-time
 disposition reset that had to stop being a free.
+
+**2026-08-16: flagged by co-tenancy, nothing owed.** The interval's `proc.c`
+churn is entirely the exec path — the disposition reset this dossier already
+records as having stopped being a free, plus its audit follow-up on store width.
+The group-termination cascade, the zombie transition and the death-wake legs are
+untouched. Checked by hunk context, not by reading the diff for anything
+familiar; the exec-side content is on [[sub-kernel-proc]] and
+[[sub-kernel-vivarium]].

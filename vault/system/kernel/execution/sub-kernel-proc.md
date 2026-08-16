@@ -149,6 +149,63 @@ single incidental reap before extincting on it. Pinned by
 exact arrangement — an adopted orphan ZOMBIE ahead of the target, with
 distinct statuses so the pid *and* the status each discriminate.
 
+### Image replacement: what must be reset, and why those things
+
+`proc_exec_replace` swaps a live process's address space in place. The rule
+governing everything it clears is one sentence: **the image is gone, so anything
+holding an address into it, or a disposition installed by it, is now a pointer
+into someone else's program.**
+
+Three such things are reset, and they are worth reading together because the
+second and third share a failure mode the first does not.
+
+- **The registered handler entry points.** Their addresses were the old image's.
+  The fd-shaped delivery path survives, because it names no address; only the
+  registered entries go.
+- **The pending-note mask.**
+- **The hardware breakpoint and watchpoint slots.**
+
+**The debug slots are the instructive one.** Nothing else disarms them — the
+debug state lives until the process is freed — and the context-switch path
+**re-arms unconditionally** from the stored counts at every switch. So a
+surviving slot fires on whatever now occupies that virtual address and delivers a
+stop **in a program the debugger never set a breakpoint in.**
+
+The *attachment* deliberately survives, matching the reference system, which
+clears the slots and keeps the tracer. So the reset is per-image, not
+per-relationship.
+
+**The pattern: the state that bites at exec is the state some other mechanism
+re-arms without asking.** A field nobody touches again is merely stale; a field a
+periodic path restores from a count is actively re-installed into the new image,
+every switch, forever. When auditing an exec path, enumerate by *who re-arms
+this*, not by *what looks like it belongs to the image*.
+
+### The disposition table is reset in place and never freed
+
+The full account of why lives on [[sub-kernel-vivarium]] — the lock-free
+cross-process readers, the earlier comment that was true about threads and false
+about processes, the store-width hazard.
+
+What belongs here is the boundary it draws around this function's own guarantee.
+`proc_exec_alone` bounds **the threads of this process**. It says nothing
+whatever about other processes, and that is exactly the half the superseded
+comment got wrong. The same gate correctly covers the same-process readers and
+covers nothing else.
+
+And the reset is explicitly **not a snapshot**: a lock-free reader on another
+processor can see an arbitrary mix of pre- and post-reset entries. Sound, because
+every entry it sees was either genuinely installed or the default — but it is a
+per-field guarantee, and the first version of the comment claiming it overclaimed
+by saying reader-set growth was simply "safe by default".
+
+**The helper's precondition is unenforced, and the reason is a test.** The
+production caller extincts on a non-self target; the split-out helper does not,
+because the kernel test drives it directly on a process it built and never
+scheduled. Stated in the header rather than hidden, which is the right
+disposition — but it means the check that protects the production path does not
+protect a future second caller.
+
 ## Data structures
 
 `struct Proc` is 392 bytes and no longer holds a page table at all — it holds a
@@ -261,6 +318,17 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   KP_ZERO-fresh, which is the safe direction for authority but the **wrong**
   direction for anything POSIX expects to inherit (the `sid`/`pgid` pair is
   the worked example of a field that had to be added to the inherit block).
+- **The exec ledger is the same obligation on a different axis, and it is
+  enumerated by WHO RE-ARMS.** A new per-process field holding an address into
+  the image, or a disposition installed by it, must be reset at image
+  replacement. The ones that bite are the ones another mechanism restores
+  unconditionally — the hardware debug slots are re-armed from their counts at
+  *every* context switch, so a slot left set is not stale, it is actively
+  re-installed into the new image forever.
+- **`proc_exec_alone` bounds threads, not processes.** Any argument that reaches
+  for it as an exclusivity guarantee owes a check on whether the racer is a peer
+  thread or another process. It has been misread in that direction once already,
+  in a comment that stood for the life of the feature.
 - The elevation strip is unconditional and must stay so; `caps_mask` alone
   cannot enforce it.
 - The `proc_flags` never-inherited rule is what stops a remote-login chain
