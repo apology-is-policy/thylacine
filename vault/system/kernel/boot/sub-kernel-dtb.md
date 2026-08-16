@@ -14,7 +14,7 @@ abis: []
 design:
   - "docs/ARCHITECTURE.md section 5"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -77,6 +77,33 @@ sequence. The comment is honest that reading the original through the direct map
 *before* this point empirically fails, and attributes it to cache state inherited
 from the pre-MMU window — an observation, not a proof.
 
+**Two PCI memory windows, and the second exists because a device outgrew the
+first.** The host-bridge ranges property encodes an address-space code in its
+high word; the walker originally matched only the 32-bit code, because every
+device the tree had ever placed fits the roughly 750 MiB window that code names.
+
+A graphics device configured with host memory presents a **multi-gigabyte**
+region, which that window **structurally cannot place** — not "does not
+currently", cannot. So the second code, the 64-bit window, is now matched too;
+on the reference board it is a half-terabyte span.
+
+The walker was **generalized to take the code as a parameter** rather than
+copied, and the two entry points are one-line wrappers. That matters more than
+it looks: the parsing is the part that took several attempts to get right (the
+property-order hazard above), and a parallel copy would have duplicated exactly
+the fragile half while diverging on the trivial half.
+
+**The constant that had to change was invisible as a constant.** It appeared as
+a literal comparison inside a filter — the shape that reads as *validating* the
+entry rather than *selecting among* several. A reader auditing the walker sees a
+well-formed check against a specification value and has no reason to ask "which
+of the legal values is this, and are the others reachable?"
+
+The generalization's own comment then had to be corrected in a later round,
+because it still said the function returns the 32-bit window — true of the
+wrapper, false of the shared walker it now describes. **A function that gains a
+parameter gains a new contract, and the sentence above it keeps the old one.**
+
 **The tree-walk API** is a separate, later surface: offset-addressed node and
 property accessors that let a device expose the tree to userspace. Its discipline
 is different from the boot accessors' — every caller-supplied offset is
@@ -134,6 +161,15 @@ across the relocation.
   a pointer, and name scans must be length-bounded.
 - **Cap behaviour.** Exceeding the depth cap must stay a clean not-found. The
   guards are on every stack access, not on the index advance.
+- **A literal inside a filter is a selection, not a validation.** The address-
+  space comparison in the ranges walker looked like a well-formed check against
+  a specification value and was actually a choice among several legal ones, with
+  the rest silently unreachable. Any new comparison of a tree-encoded enum owes
+  the question *which of the legal values is this, and who needs the others?* —
+  the answer is not visible from a correct-looking equality test.
+- **A parameterized walker's comment describes the wrapper, not the walker.**
+  When a lookup gains a selector, its own doc comment inherits the pre-parameter
+  contract and now describes only one of its callers.
 - **Relocation ordering.** The copy must happen after the allocator and before
   the identity map is retired, and both halves of that sandwich live in another
   file.
@@ -167,3 +203,6 @@ Three registered tests: the presence of a chosen-node seed, PCI interrupt
 routing, and the PCI memory window. The parser's structural behaviours — property
 ordering, the depth cap, relocation — have no direct test and are covered by the
 boot, which consults this file for every hardware fact it prints.
+
+The second PCI memory window and the parameterized ranges walker are
+[[chg-2026-08-16-dtb-second-window]].
