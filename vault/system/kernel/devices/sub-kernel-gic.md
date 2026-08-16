@@ -15,7 +15,7 @@ design:
   - "docs/ARCHITECTURE.md section 12.3"
   - "docs/PORTABILITY.md section 5"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -151,6 +151,53 @@ at the point *every* interrupt passes, rather than reusing the narrower count of
 interrupts forwarded to driver processes: publishing the narrow number under the
 wide name would have been a plausible-looking fabrication.
 
+**That argument is about correctness and says nothing about geometry, which is
+how the array shipped as the worst false-sharing site in the kernel.** Eight
+slots of eight bytes is exactly one coherency granule — one line that *every*
+CPU stores to on *every* interrupt, hit at tick rate by the timer alone before
+any device interrupt or IPI exists.
+
+Nothing about "single-writer per CPU, no read-modify-write needed" is wrong. It
+is simply an answer on a different axis, and **an argument that is correct and
+silent reads as complete.** The tell was available at the time: a sibling
+counter added in the same change lives inside a large per-CPU structure and got
+the right geometry *for free*, so one of two counters introduced together was
+accidentally fine — which is precisely how the other one's problem stayed
+invisible.
+
+Each slot is now padded to the maximum granule and **the array itself is
+aligned**. Both halves are load-bearing and the second is the one that looks
+decorative: padding separates the slots from each other, but only alignment
+keeps slot zero out of the granule occupied by whatever precedes it in BSS.
+
+### The pad size is a margin argument, not a hardware claim
+
+The tracked fix sketch proposed a 64-byte granule. A first draft justified 128
+by asserting Apple silicon reports a 128-byte coherency granule. **One boot
+falsified that**: the granule equals the minimum line size at 64 under *both*
+hardware virtualization on the real development host and full emulation.
+
+The constant stayed at 128 and the *reasoning* changed — which is the
+interesting outcome, because nothing about the code moved. Over-padding costs
+512 bytes of BSS once; under-padding **silently restores the contention with no
+symptom any test would catch.** An asymmetry that severe justifies the margin
+without needing the fabricated fact, and the architecture exposes no
+outer-level line size anyway, so any hardware-queried pad is a lower bound
+rather than an answer.
+
+Getting there required decoding a cache field the kernel had never read. **The
+coherency granule is the one that governs false sharing; the minimum line size
+is the smallest a level will allocate, and the two are permitted to differ** —
+the kernel had only ever decoded the second. A granule field of zero means the
+part declines to report, and that is recorded verbatim rather than decoded into
+a size or promoted to the architectural maximum, because *no information* and
+*small* are different facts.
+
+**No speedup is claimed.** The emulator does not model coherence traffic, so
+quantifying this needs real multi-core hardware and a targeted microbenchmark.
+The change is justified as geometry and the test proves geometry — the scope of
+the claim and the scope of the evidence are the same size, deliberately.
+
 **The pending state is a bitmap, not a queue.** This is the fact the rest of the
 system's interrupt reasoning rests on. Set-pending and clear-pending are
 registers of one bit per interrupt number. There is nowhere for a second
@@ -231,6 +278,22 @@ architectural requirement — the cost is paid only on that generation.
 - Affinity routing must be enabled before the routing registers are written, and
   the groups enabled only after.
 - The edge-configuration barrier must precede the enable.
+- **A per-CPU array on this path needs a geometry argument as well as a
+  correctness one.** "Single-writer, no read-modify-write" is a complete answer
+  to the wrong question here, and its completeness on that axis is what makes it
+  read as sufficient. Any new per-CPU counter, flag or slot touched at interrupt
+  rate is padded *and* aligned, or it is one line every core writes.
+- **Padding without alignment is a half-fix.** It separates the slots from each
+  other and leaves slot zero sharing a granule with whatever precedes it.
+- **Do not shrink the pad to a measured granule.** The measurement is a lower
+  bound — the architecture exposes no outer-level line size — and the failure
+  direction is silent: under-padding restores the contention with no symptom any
+  test can see, while over-padding costs a fixed few hundred bytes of BSS once.
+- **The counter stays in this file.** Folding it into the scheduler's per-CPU
+  structure is the tidier shape and was refused with reasons: that structure is
+  private to the scheduler, so the fold adds a cross-translation-unit call on
+  the hottest path in the kernel and points the architecture layer at scheduler
+  internals, to save about a kilobyte of BSS.
 
 ## Seams
 
@@ -263,5 +326,9 @@ Read from `arch/arm64/gic.c` (968 lines) and `arch/arm64/gic.h` (237), 2026-08-0
 at `f109477e`. Cross-checked: the five attach sites and their enables, the
 enable and disable call sites, the inter-processor interrupt definitions, the
 reservation entries for both generations, and the registered tests.
+
+The counter's geometry — the false-sharing repair, the coherency-granule
+decode, and the margin argument that replaced a fabricated hardware claim — is
+[[chg-2026-08-16-gic-counter-geometry]].
 
 Absorbed `docs/reference/10-gic.md`.
