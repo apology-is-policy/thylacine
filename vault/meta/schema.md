@@ -53,6 +53,32 @@ R4. **Citations by symbol and test name, not file:line.** `file:line` rots;
     symbols and test names survive refactors and stay greppable. Line numbers
     are permitted only in Record notes, where they are frozen-in-time correct.
 
+    **Two distinct failure modes, and the second is worse.** *Rot* is a line
+    number that drifts within one history — annoying, and at least plausibly
+    noticed. *Crossing* is a line number read on a different branch, where the
+    two trees are different coordinate systems that merely share a filename: the
+    citation is not stale, it is **wrong on arrival**, and it resolves silently
+    to unrelated code that the reader then reasons about with full confidence.
+    Measured 2026-08-16: a cross-worktree citation at line 1350 of a file that is
+    1300 lines here and 1530 lines there. It failed loudly only because it landed
+    past end-of-file; a hundred lines either way and it would have returned
+    something plausible. Symbols answer "not on your branch" instead of
+    answering wrongly.
+
+    The Record-note exemption is therefore narrower than it reads: a frozen line
+    number is correct *for the branch it was written on*, which is the vault's
+    branch. It carries no guarantee for a reader on another one.
+
+    **This deliberately differs from the reference-doc discipline in
+    `CLAUDE.md`, which mandates file:line** — and the difference is the reading
+    context, not a disagreement about precision. A reference document ships
+    beside the tree it describes and is read against that tree, where a line
+    number is checkable and its rot is the maintenance cost of the doc-per-PR
+    rule. A vault note is read across branches and long after its commit, where
+    the same string has no checkable referent. Same citation, different truth
+    value depending on which side reads it, so the two disciplines are both
+    right for their own audience.
+
 R5. **Every gate/verification claim carries `blind-to`.** A gate note must
     state what it structurally cannot catch (the
     assertion-satisfiable-by-a-broken-system lesson). A verification claim
