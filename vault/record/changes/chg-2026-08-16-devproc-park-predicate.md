@@ -4,7 +4,7 @@ type: chg
 title: "A correct model does not guarantee a correct encoding of its states"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["92992da9"]
 touched: [sub-kernel-devproc]
 established: []
 closed: []
