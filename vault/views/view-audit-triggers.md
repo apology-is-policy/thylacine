@@ -77,7 +77,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-torpor]] | kernel/torpor.c, kernel/include/thylacine/torpor.h | inv-i9, inv-i24 | - The lock-free mismatch return must never be extended to the EQUAL |
 | [[sub-kernel-uaccess]] | arch/arm64/uaccess.S, arch/arm64/uaccess.c, arch/arm64/uaccess.h | inv-i13 | - **A new fault point needs a table entry.** The entry is what separates |
 | [[sub-kernel-vivarium]] | kernel/vivarium.c, kernel/include/thylacine/vivarium.h | inv-i43 | What a change must re-establish: |
-| [[sub-kernel-vma]] | kernel/vma.c, kernel/include/thylacine/vma.h | inv-i12, inv-i7, inv-i32 | The things to re-examine when this file changes: that `vma_alloc` remains the |
+| [[sub-kernel-vma]] | kernel/vma.c, kernel/include/thylacine/vma.h | inv-i12, inv-i7, inv-i32, inv-i44 | The things to re-examine when this file changes: that `vma_alloc` remains the |
 | [[sub-kernel-weft]] | kernel/weft.c, kernel/include/thylacine/weft.h | inv-i37, inv-i30, inv-i9, inv-i32 | - **Admission stays kernel-minted.** Anonymous, or the allocation-time |
 | [[sub-libdriver-discovery]] | usr/lib/libdriver/src/source.rs, usr/lib/libdriver/src/dtb.rs, usr/lib/libdriver/src/supervise.rs, usr/lib/libdriver/src/readyline.rs | inv-i34 | - **The warden must never read a device register.** The moment it does, the |
 | [[sub-libdriver-grant]] | usr/lib/libdriver/src/lib.rs, usr/lib/libdriver/src/manifest.rs, usr/lib/libdriver/src/resource.rs, usr/lib/libdriver/src/driver.rs | inv-i34 | - **Every axis must stay node-supplied.** A new axis whose concrete values come |

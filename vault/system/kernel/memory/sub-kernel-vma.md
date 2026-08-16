@@ -5,20 +5,20 @@ parent: moc-kernel-memory
 title: "VMAs — the per-Proc address-space description, and where W^X is actually decided"
 code: [kernel/vma.c, kernel/include/thylacine/vma.h]
 audit: hard
-guarded-by: [inv-i12, inv-i7, inv-i32]
+guarded-by: [inv-i12, inv-i7, inv-i32, inv-i44]
 validated-by: [prose, gate-smp]
-locks: []
+locks: [lock-vma]
 hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-08-16
 ---
 ## Purpose
 
 A VMA says "this range of user addresses is backed by that memory object, with
-these permissions." The sorted list of them hanging off a Proc *is* its address
-space description — the thing a page fault is dispatched against, and the thing
+these permissions." The sorted list of them hanging off an address space *is* its
+description — the thing a page fault is dispatched against, and the thing
 `exec` builds when it lays out a binary.
 
 It is a small file. It matters out of proportion to its size because
@@ -30,7 +30,7 @@ tearing it down.
 
 `vma_alloc(start, end, prot, burrow, offset)` mints a descriptor and takes a
 **mapping** reference on the Burrow. `vma_free` drops it. `vma_insert` links
-into a Proc's sorted list or rejects an overlap; `vma_remove` unlinks;
+into an address space's sorted list or rejects an overlap; `vma_remove` unlinks;
 `vma_lookup` finds the VMA covering an address; `vma_find_gap` finds somewhere
 to put a new one; `vma_drain` tears the whole list down at Proc death.
 
@@ -79,30 +79,73 @@ and byte offset into it, and the two list pointers.
 `flags` was the alignment pad until G-2 needed `VMA_FLAG_SHARED_IN` — the
 marker that this VMA's Burrow is *another Proc's* memory (a network flow ring
 or a compositor weave) mapped in cross-Proc. It exists to make one accounting
-statement exact: the per-Proc shared-mapping budget must equal the summed pages
+statement exact: the shared-mapping budget must equal the summed pages
 of flagged VMAs, so the flag is read at both teardown paths to uncharge exactly
 once per charge.
 
+The second flag marks a mapping as participating in **copy-on-write**, and three
+things about it are worth stating because each would be natural to get wrong.
+
+**It is routing, not truth.** The per-*page* share count is what decides an
+individual break; the flag only says "a write here must go through the break
+path rather than straight to the page". So a mapping whose pages have all been
+taken in place costs one extra fault per page and nothing else.
+
+**It is never cleared, deliberately.** Clearing it would require a scan proving
+no page in the range is still shared — strictly more work than the extra faults
+it would save, and a scan that could race the very sharing it is checking for.
+
+**The permissions deliberately disagree with the hardware.** `prot` keeps its
+write bit and the *page table entry* is what goes read-only. That inversion is
+load-bearing: the fault handler's permission check reads `prot`, so a mapping
+that dropped write would turn every copy-on-write write into a fatal fault
+instead of a break. The entry is the enforcement; the mapping's permission is
+the statement of what the program is *allowed* to do, and during copy-on-write
+those are different questions.
+
+That divergence does not touch [[inv-i12]], and the reason is worth being
+explicit about rather than assumed: a copy-on-write mapping is writable and not
+executable, so the rejected combination never arises. W^X is decided on the pair
+at allocation, and nothing here can turn a write-only mapping into a
+write-and-execute one afterward.
+
 ## Concurrency
 
-**`Proc.vma_lock` serializes this list**, and every mutator holds it: the
+**The list no longer hangs off the Proc.** Since the address-space extraction it
+belongs to a `struct AddrSpace`, and the operations gained parallel forms that
+take one directly — which is what lets `exec` populate a *detached* address space
+it is still building, and what lets two Procs sharing one address space see one
+list rather than two views of it. [[lock-vma]] moved with it.
+
+**That lock serializes this list**, and every mutator holds it: the
 attach and share paths, the detach and share-teardown paths, and — since G-3 —
 `vma_drain` itself, which retired its lockless exemption when the weft reaper
-gained a cross-Proc reclaim that holds a *target's* `vma_lock` across a
+gained a cross-Proc reclaim that holds a *target's* lock across a
 multi-millisecond unmap loop. The reaper is why draining now takes a lock it is
 otherwise uncontended on.
+
+The move is more than a rename, and [[inv-i1]] is why it had to be one: two Procs
+sharing an address space must contend on **the same** lock, not each on its own.
+The old no-cycle argument was "a Proc never takes another Proc's list lock" —
+disjointness. That argument is gone; what carries the property now is the
+ordering, since two sharers take one lock rather than two.
 
 The fault handler is a **reader** that holds the same lock, which is the whole
 of the #713 fix: before it, an unlocked walker could follow a half-unlinked
 list into a freed VMA and install a leaf PTE aliasing a page already recycled
 into kernel memory.
 
-**The header does not say this.** `vma_insert`'s docblock still reads "Phase 5+
-multi-thread Procs need a per-Proc lock around the list; documented as a
-trip-hazard when added" — while `vma_find_gap`'s docblock, twenty-five lines
-below it in the same file, instructs the caller to hold `Proc.vma_lock` across
-the find and the insert. The `.c` is correct throughout; the `.h` contradicts
-itself and is what a caller reads. Task #60.
+**The header does not say this, and the gap has widened.** `vma_insert`'s
+docblock still reads "Phase 5+ multi-thread Procs need a per-Proc lock around the
+list; documented as a trip-hazard when added" — while `vma_find_gap`'s docblock,
+twenty-five lines below it in the same file, instructs the caller to hold the lock
+across the find and the insert. The `.c` is correct throughout; the `.h`
+contradicts itself and is what a caller reads.
+
+It is now wrong twice over: the lock exists, **and** it is no longer per-Proc.
+A reader following that docblock would add a lock to the wrong structure, and the
+resulting code would look right and serialize nothing between two Procs sharing
+one address space. Task #60, and the extraction made it more expensive to leave.
 
 ## Invariants enforced
 
@@ -113,6 +156,14 @@ user mapping in the system passes.
 The VMA's existence in a list *is* the mapping the Burrow's second refcount
 counts. A guard VMA takes none, and `vma_free` is null-Burrow-safe, so the pair
 stays balanced across both shapes.
+
+**The release now reports whether it was the drop that freed the pages.** That
+exists because "the mapping went away" and "the pages went away" are different
+events the moment a region has a second owner — a ring, a registered buffer, a
+cross-Proc share — and which drop is last cannot be predicted from the mapping's
+type nor from a count sampled beforehand. Only the drop itself knows, so it
+answers. The accounting sites pair their refund to that answer rather than to the
+unmap.
 
 [[inv-i32]] — the live-VMA count is charged at insert and uncharged at remove.
 The charge sits deliberately **after** the overlap walk (a rejected overlap
@@ -162,6 +213,10 @@ Callers wanting the page do the masking themselves.
 P3-Da built the list; P6 #713 added the lock coverage that made it
 multi-thread-safe; G-2 added the cross-Proc share flag; G-3 made `vma_drain`
 take the lock. The I-32 charge arrived with the overcommit model.
+
+Re-read 2026-08-16: the LINEAGE arc moved the list onto the address space and
+added the copy-on-write flag; the attribution work made the release report
+whether it freed. [[chg-2026-08-16-vma-cow-flag]].
 
 ## Tests
 
