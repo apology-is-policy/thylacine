@@ -121,6 +121,57 @@ Keying on the pid alone would have handed me the machine mid-gate.
 
 ---
 
+## 2b. Long gates vs the harness — the detached-gate pattern
+
+**The harness stops its own background tasks, and it did it twice in one hour**
+(status `killed` / "was stopped", which is the #128 discriminator for
+harness-side vs a real external kill). The first casualty was the LS-CI run
+itself; ~35 minutes of gate would have been lost silently.
+
+The shape that survived it, and the one to use for anything long:
+
+1. **Detach the WORK from the harness.** `nohup … > log 2>&1 < /dev/null &`
+   launched from an ordinary Bash call. It reparents, so a harness stop cannot
+   reach it. (Do NOT combine `&` with `run_in_background` —
+   [[feedback-background-double-detach]]: the `&` detaches and the completion
+   notification then describes the LAUNCHER, not the work.)
+2. **Make the WAITER disposable.** A separate bounded `run_in_background`
+   waiter provides the wake. When the harness killed *that*, the gate kept
+   running underneath and re-arming cost one call. Verified live: waiter dead,
+   `test-interactive.sh` and six qemu/expect processes still up.
+3. **Never pipe gate output** (aux, after four repeats): `cmd | tail -N`
+   buffers, so a killed run yields an empty log, AND the pipeline's exit status
+   is `tail`'s, so failure reads as success. I did exactly this to LS-CI one
+   hour after adopting the rule. Redirect to a file and read the file.
+
+The general principle: **the thing that does the work and the thing that
+reports it should have independent lifetimes**, so losing the reporter never
+loses the work.
+
+## 2c. The recurring failure family, now at five instances in one day
+
+Every one of these returned a **confident wrong answer instead of an error**,
+and each was caught only by contradiction with some other observation:
+
+| Query | Reported | Truth |
+|---|---|---|
+| `git rev-parse main:<missing>` | the path, echoed back — non-empty, so every truthiness test reads it as a HIT | absent |
+| `git log --diff-filter=D` empty | "never deleted" -> "still present" | a rebase drops a file with no deletion record |
+| zsh `$files` unquoted into a checker | "1 file checked, 1 finding" | 14 paths passed as ONE argument; the finding was the open() error |
+| a failed zsh glob into a counter | `stageC-markers=0` — reads as "the probe never ran" | the glob matched nothing because the path was a file, not a dir |
+| a token census over `notes.c` | "confirmed: nothing FP/SIMD is saved" | `fp_save_area(t->note_saved_fp)` contains NONE of the register-name tokens I grepped for |
+
+The last is the sharpest and it was mine: I enumerated **register names** when
+the thing I needed was a **mechanism name**, and a good fix does not mention
+the registers it saves — it calls a routine. I was one step from opening a P1
+soundness hunt into a bug fixed weeks ago.
+
+**The rule, aux's formulation, which is larger than any of the individual
+ones:** *a tool given a malformed or mis-scoped query reports a plausible
+RESULT rather than an error.* So: **no census, existence claim, or gate result
+without a control that has been shown to detect the negative.** In the FP case
+the control was one line — "does this pattern match the known-present case?"
+
 ## 3. yip and agent coordination
 
 ### It is working, and the value is not marginal
