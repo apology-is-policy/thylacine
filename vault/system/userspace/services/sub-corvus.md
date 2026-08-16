@@ -8,13 +8,13 @@ code:
   - usr/corvus/Cargo.toml
 audit: hard
 guarded-by: [inv-i22, inv-i23]
-validated-by: [prose, gate-smp]
+validated-by: [spec-corvus, prose, gate-smp]
 locks: []
 hazards: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md", "docs/IDENTITY-DESIGN.md"]
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -42,7 +42,7 @@ tree's smallest program with the largest blast radius:
 
 It is *not* the identity name service alone: `RESOLVE_ID` / `RESOLVE_NAME`
 exist, but the interesting half is that everything above rides the same
-14-verb wire on the same one connection.
+**15-verb** wire on the same one connection.
 
 ## Contract
 
@@ -66,6 +66,16 @@ RateLimited, BadFormat, InternalError. The distinction between BadAuth and
 NotFound is deliberately *not* preserved at the AUTH boundary — an unknown
 user and a wrong passphrase both return BadAuth, so the wire does not
 enumerate accounts.
+
+**The verb space is 1..18 with fifteen built.** Verbs 2
+(`CHANGE_PASSPHRASE`), 6 (`USER_DELETE`) and 9 (`ROTATE_KEY`) are rows in
+`CORVUS-DESIGN.md` §6.4's table — with byte-level payload formats, in the
+same table and the same style as the fifteen that exist — and no handler.
+Neither the table nor the source marks them, and the seven statuses have no
+way to say "unbuilt": a spec-conformant `CHANGE_PASSPHRASE` lands on the
+dispatcher's default arm and gets **`BadFormat`**, which means *your framing
+is wrong* when the framing was right. The absence of verb 2 in particular is
+a user-visible consequence and not just a gap in a table — see the caveats.
 
 **A session** is one user, one 33-byte opaque token, and one unwrapped
 keypair. `AUTH` mints it and returns the token; `WRAP` / `UNWRAP` present
@@ -139,6 +149,48 @@ matters because the first user creation is the one that needs no
 authority, so a database that reads as empty would hand the next caller a
 free hostowner candidate.
 
+**Clearance activation has two forms, and the newer one quotes nothing.**
+`CLEARANCE_ACTIVATE` (verb 15) is the **bearer** form: present a session
+token, and the grant lands on whoever presented it. `CLEARANCE_ACTIVATE_SELF`
+(verb 18) is the same verb with the token removed — the identity comes from
+the connection's kernel-stamped principal, so the caller is authorized as who
+it demonstrably *is* rather than what it can quote. That is the Plan 9
+factotum shape, and it is strictly tighter on two axes: there is no bearer
+secret to steal or delegate, and the identity axis and the grant target
+become the same Proc, where verb 15 lets them differ.
+
+Both survive because both are needed. The boot provers run as the system
+principal — joey spawns them with a plain spawn, no identity stamp — so they
+are not corvus users and must AUTH to borrow a user's identity. Switching
+verb 15 in place would have broken all three, so verb 18 is additive and 15
+is byte-unchanged. The fork is the identity and nothing else: both share one
+grant helper for eligibility, the re-auth requirement, the self-restrict mask
+and the kernel grant. Verb 18 satisfies re-auth without a token by requiring
+a live session for the **same principal, compared by id rather than name** —
+corvus knows the user authenticated, the kernel vouches this Proc is that
+user, and with nobody logged in it fails closed.
+
+It was also a **distinct verb rather than a magic value inside 15**, on the
+stated reasoning that two authorization paths should be nameable on the wire
+and separately auditable, not discriminated by payload length.
+
+**One clearance level is a user default, and the argument is containment
+rather than harmlessness.** Every minted user is seeded eligible for `jit`,
+and users minted before the seed existed are healed at load, so an existing
+pool repairs itself with no migration step. The authority argument: `CAP_JIT`
+emits code only into the **caller's own** process under the I-42 dual map —
+the code Burrow type is refused by the cross-Proc share and the construction
+handle is dropped at creation, so no handle exists to transfer — and it stays
+elevation-only and activation-gated. The eligibility table remains
+authoritative for every other level.
+
+The cost is stated at the site rather than elided, which is what makes it
+worth recording here: widening eligibility from one user to all users
+multiplies the population of *tokens* that yield `CAP_JIT`, and what bounds
+that damage is I-42's self-process containment, **not** the eligibility
+table. Verb 18 has no such gap. The seed also consumes one eligibility slot
+per user, so the admin-grantable remainder is half the table's nominal size.
+
 **Recovery is a second keyslot, not a backdoor.** The recovery wrap holds
 the *same* keypair under a phrase-derived key, so recovering does not
 re-encrypt any data — every existing DEK envelope stays valid. corvus
@@ -204,8 +256,41 @@ written down:
   to pull a home DEK, and mid-session legate elevation re-presents the
   same token.
 
-The stated justification for the single global slot is neither of these;
-see the caveats.
+### The AUTH gate is a narrowing, not a design — and it cost a capability
+
+This note previously presented the AUTH gate as the load-bearing safety
+mechanism. That identified the right mechanism and gave it the wrong
+character, which #139 settled by reading the model against the code.
+
+`corvus.tla`'s `AuthSuccess` says `~(\E s \in sessions : s.owner_proc = p)`
+— no session owned by **this** Proc. The model permits concurrent sessions
+from different Procs. The implementation refuses AUTH from *any* Proc while
+*any* session exists, because there is one global slot to overwrite. The gate
+is therefore **strictly stricter than the model**, and the comment that
+claimed spec authority for it quoted the formula correctly while paraphrasing
+away the `s.owner_proc = p` — the exact clause the strictness hides in.
+
+The narrowing was sound for the world it was written in: joey the only
+console-attached Proc, one connection per peer. Login and user programs
+arrived later and the bound stayed. **A correct bound whose reason had
+expired**, and the consequence was structural rather than a visible refusal:
+no post-login program could obtain a session token, so token-gated
+`CLEARANCE_ACTIVATE` was unreachable for every user-launched program — with
+`CAP_JIT` inside it, i.e. all of GL. A whole capability class walled off, in
+a system whose eligibility table said the user was allowed it.
+
+The fix routes around the gate rather than widening it (verb 18, below),
+because widening re-opens the A-5b cross-session-wipe question that
+`owner_conn_id` closed. The multi-session lift remains what the model already
+describes.
+
+**The layering is the lesson.** This note's own caveat correctly found that
+the single-slot justification cites a kernel cap that no longer exists — and
+then rested the safety argument on the AUTH gate, without checking that the
+AUTH gate's *own* justification was the same expired cap one layer down. An
+expired premise does not sit in one comment. It is inherited by the argument
+written to replace it, where it is harder to see because it now appears as a
+conclusion.
 
 ## Invariants enforced
 
@@ -312,37 +397,98 @@ AUTH attempts are bounded only by the cost of Argon2id itself.
 ## Caveats
 
 - **The justification for the single global session names a kernel cap
-  that no longer exists** (task #148). The session table's comment
-  explains that one slot is adequate because a per-process kernel cap of
-  one connection means at most one is live. That cap was removed when the
-  service registry moved into the namespace; the live bound is a global
-  64, and corvus itself sizes for eight simultaneous connections. The
-  design is still safe, but for a mechanism the comment does not mention —
-  AUTH's refusal while a session is bound — and the resulting limit, one
-  *user* at a time, is written down nowhere. The contradiction is visible
-  inside the same declaration: the ownership field twenty lines below
-  exists precisely because several connections coexist. Eight other sites
-  across the source, the specs and the reference docs still name the
-  deleted cap.
+  that no longer exists** (task #148, **still open, re-measured
+  2026-08-16**). The session table's comment explains that one slot is
+  adequate because a per-process kernel cap of one connection means at most
+  one is live. The design is still safe, but for a mechanism the comment
+  does not mention — AUTH's refusal while a session is bound — and the
+  resulting limit, one *user* at a time, is written down nowhere. The
+  contradiction is visible inside the same declaration: the ownership field
+  twenty lines below exists precisely because several connections coexist.
+
+  Three corrections to this caveat as first written, all found by measuring
+  rather than re-reading:
+
+  **The census was scoped narrower than it read.** "Eight other sites" was
+  true of source + specs + reference docs. Tree-wide the phantom appears
+  **19 times across 12 files** — the design and status docs carry the rest.
+  Two of the nineteen are in `main.rs` itself: the session-table comment and
+  the file header, both using it to justify the same decision.
+
+  **"The live bound is a global 64" was wrong — there is no bound.**
+  `srvconn_create` is a plain `kmalloc` of a linked-list node with no cap of
+  any kind: no per-Proc limit, no global limit, no fixed table. corvus's own
+  `MAX_CONNS = 8` is the only ceiling anywhere on this path, and it is
+  corvus's. Where the 64 came from is unrecoverable; the nearest 64 in the
+  header is `SRVCONN_PATH_MAX`, a *path length*. The shape is worth more
+  than the number: **a stale constant does not stay in the note that quotes
+  it — it gets reused as a premise next door**, where it names no constant
+  and so survives every value-grep and every name-grep alike.
+
+  **The premise is inherited, not merely repeated** (see Concurrency).
+  #139 repaired the third dependent — `handle_auth`'s comment, the one that
+  had just cost an outage — and left the two in `main.rs` untouched. Correct
+  as a priority call; incomplete as a sweep, because both remaining copies
+  still teach the next reader the same false thing.
+
+- **Three verbs are fully specified and unbuilt, and the wire cannot say
+  so.** `CORVUS-DESIGN.md` §6.4's table has eighteen rows; fifteen have
+  handlers. Verbs 2 (`CHANGE_PASSPHRASE`), 6 (`USER_DELETE`) and 9
+  (`ROTATE_KEY`) carry byte-level payload formats and no implementation, and
+  nothing in the table or the source marks them. A client written from the
+  table gets `BadFormat` — the status for *malformed framing* — for a frame
+  that was framed exactly as specified.
+
+  The missing verb 2 is the sharp one: **corvus has no passphrase-change
+  path.** The only verb that sets a new passphrase is `RECOVER`, which
+  demands the 24-word paper phrase and rolls it. So a user who simply wants
+  to change their passphrase must spend and replace their recovery phrase —
+  and the design's own threat model has a row for "snapshot rollback after
+  passphrase change", an operation nothing implements.
+
+  Adjacent and smaller: the comment above the 9P dispatcher states that a
+  `BadFormat` staged by the verb dispatcher "signals tear-down to the
+  caller". True at two of the three staging sites — the version mismatch and
+  the oversize payload, which set `tear_down_after_drain` explicitly — and
+  **false at the unknown-verb arm**, which stages and continues. That is the
+  one a real client reaches. A new fail-stop condition written on the
+  strength of that comment would silently keep the connection open.
 
 - **A full connection table plus a waiting connection is a spin, and the
-  comment calls it a deferral** (task #149). When the table is full corvus
-  declines to accept and continues. But the listener's readiness is
-  level-triggered on a non-empty backlog, so the infinite-timeout poll
-  returns immediately every iteration, no work is done, and the loop
-  burns a processor until a slot frees. Same root as the caveat above:
-  while the per-process cap existed this branch was unreachable, so
-  writing it as benign cost nothing.
+  comment calls it a deferral** (task #149, **still open; both ends
+  verified in the kernel 2026-08-16**). When the table is full corvus
+  declines to accept and continues. The listener's readiness probe sets
+  POLLIN whenever the accept backlog is non-empty — level-triggered, under
+  the registry lock — so the infinite-timeout poll returns immediately every
+  iteration, no work is done, and the loop burns a processor until a slot
+  frees. Same root as the caveat above: while the per-process cap existed
+  this branch was unreachable, so writing it as benign cost nothing.
+
+  The two constants make the window as wide as it can be rather than as
+  narrow: corvus serves **8** connections and the kernel's accept backlog
+  holds **16**, so the spin is reachable across a range twice corvus's own
+  capacity. The comment's "the backlog will drain as conns close" is true
+  and describes the outcome, not the cost of arriving at it.
 
 - **The file header describes a daemon four arcs younger than this one**
-  (task #150). It states that storage is in-memory only and that
-  filesystem persistence "lands once that tree is mounted" — persistence
-  landed, and three of its loaders are boot-fatal. It marks the peer
-  snapshot dead code awaiting the administrative verbs — those verbs
-  landed, they deliberately refuse to read it, and a different handler
-  reads it anyway to report file ownership. And the daemon prints its
-  construction sub-chunk in the boot banner on every boot, so the
+  (task #150, **still open, re-read 2026-08-16**). It states that storage is
+  in-memory only and that filesystem persistence "lands once that tree is
+  mounted" — persistence landed, and three of its loaders are boot-fatal. It
+  marks the peer snapshot dead code awaiting the administrative verbs —
+  those verbs landed, they deliberately refuse to read it, and a different
+  handler reads it anyway to report file ownership. And the daemon prints
+  its construction sub-chunk in the boot banner on every boot, so the
   staleness is not merely internal.
+
+  Two additions from the re-read. The header **enumerates the verb set as
+  five** — AUTH, SESSION_CLOSE, UNWRAP, USER_CREATE, WRAP — where fifteen
+  exist; it is not vague, it is a specific wrong list, which is the kind a
+  reader trusts. And it is the second of the two `main.rs` sites carrying
+  the phantom kernel cap, using it to argue that per-connection sessions and
+  a global session are equivalent. Every load-bearing claim in this header
+  is now false, which makes it a better example than the caveat above of why
+  a header is the worst place to narrate a chunk: it is written once, at the
+  moment of least knowledge, and read first.
 
 - **The recovery-failure table's bound is one entry per user plus one, and
   the plus-one is the whole point.** A flat per-user bound would let table

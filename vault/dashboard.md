@@ -127,11 +127,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-08-16 [[chg-2026-08-16-boot-banner-mirror-set]] — The boot-banner ABI note carried the phantom it was supposed to be the cure for
+- 2026-08-16 [[chg-2026-08-16-corvus-narrowing]] — corvus re-swept: the AUTH gate was a narrowing, and the expired premise had three dependents
 - 2026-08-15 [[chg-2026-08-15-build-targets]] — build.sh re-swept: three target lists that disagree, and the vault recommended the shortest
 - 2026-08-15 [[chg-2026-08-15-diorama-vivarium]] — diorama re-swept: a second operating mode the dossier never saw, and a read buffer half its source
 - 2026-08-15 [[chg-2026-08-15-exec-lineage]] — exec re-swept after LINEAGE: a seam closed sideways, and a prediction that came true
 - 2026-08-15 [[chg-2026-08-15-handle-posix-fds]] — The handle table re-swept: POSIX descriptors arrived, and the dossier's ceiling was wrong when written
 - 2026-08-15 [[chg-2026-08-15-interactive-gating]] — LS-CI re-swept: the gate went parallel, and its own default is stated three times
 - 2026-08-15 [[chg-2026-08-15-joey-boot]] — joey re-swept after Warp-2: a mount deliberately not made, and the scope of what this dossier owns
-- 2026-08-15 [[chg-2026-08-15-libthyla-rs-resolution]] — libthyla-rs re-swept: the kernel resolves now, and the primitive that got it wrong is still public
 <!-- generated:end -->
