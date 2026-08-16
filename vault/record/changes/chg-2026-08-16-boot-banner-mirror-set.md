@@ -4,7 +4,7 @@ type: chg
 title: "The boot-banner ABI note carried the phantom it was supposed to be the cure for"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["9fdfda23"]
 touched: [abi-boot-banner]
 established: []
 closed: []
