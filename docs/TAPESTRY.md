@@ -1054,7 +1054,17 @@ ls-gfx / ls-gfx-live / the per-boot `-c` gate stay green. As-built:
 weave generations.** The §18.3 resize protocol is live. A surface's
 `weave`/`resource_id` name its CURRENT generation (GPU resource ids are
 per-generation, minted above SCREEN_RES so a fresh resource never
-aliases the old — closing the #317 stale-content class); `alloc_weave`
+aliases the old — closing the #317 stale-content class; **at Warp-C C-2
+a generation mints one resource PER SLOT rather than one per generation
+— GPU-DESIGN §4.5.8, user-voted 2026-08-16, RESERVED.** The guest weave
+is triple-buffered while the host side is single-buffered, which is
+invisible while the transfer is synchronous and becomes the blit/fill
+collision the moment the compositor is a second async reader; the fix
+restores the 1:1 slot↔resource correspondence the offset-transfer
+collapsed. Consequence worth carrying: **the D1 recycle gate does not
+survive the composed path unchanged** — a present's terminal CQE stops
+meaning the resource is free once a composition may still be reading
+it); `alloc_weave`
 (the shared body of `create` + `resize_ack`) allocates a full
 generation, `release_gen` tears one down in the R2-F5 order. A
 size-changing CONFIGURE offer records `offered = (serial, w, h)` (only
