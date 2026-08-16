@@ -4,7 +4,7 @@ type: chg
 title: "Zero bytes written, on purpose, is a thing the convention cannot say"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["25caa9b8"]
 touched: [sub-kernel-devctl]
 established: []
 closed: []
