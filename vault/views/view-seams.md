@@ -14,6 +14,7 @@ Generated from note fields — do not edit between the markers
 |---|---|---|---|---|
 | [[seam-848-pivot-walk-race]] | closed | sub-kernel-ninep-attach | fnd-16c-r1-f6 | task #848 |
 | [[seam-90-death-half]] | closed | sub-kernel-ninep-client | fnd-8c3-r1-f1 | task #90 |
+| [[seam-posix-pathname-form-gates]] | closed | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
 | [[seam-220-netd-listener-poll]] | open | sub-netd-server | chg-2026-06-18-net6b-poll-bridge | task #220 |
 | [[seam-221-idle-pump-wake]] | open | sub-kernel-ninep-dev9p-poll | fnd-net6b-r1-f3 | task #221 |
 | [[seam-223-pump-tail-starvation]] | open | sub-kernel-ninep-dev9p-poll | fnd-net6b-r2-f1 | task #223 |
@@ -66,7 +67,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-netd-host-tests]] | open | sub-netd-server, sub-netd-nic | adt-net2d-r1 |  |
 | [[seam-poll-heap-waiters]] | open | sub-kernel-poll | chg-2026-06-24-355-poll-decouple | #355 companion |
 | [[seam-poll-srv-registry-retain]] | open | sub-kernel-poll | chg-2026-06-10-rw2-poll-retain | RW-2 R2-poll F1 (#18) |
-| [[seam-posix-pathname-form-gates]] | open | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
 | [[seam-pouch-dirfd]] | open | sub-pouch-fs | chg-2026-07-23-cl1a-fs-wires | CL-1a |
 | [[seam-pouch-dup2-target]] | open | sub-pouch-process | chg-2026-07-23-cl1b-process | CL-1b |
 | [[seam-pouch-errno-channel]] | open | sub-pouch-seam, sub-pouch-fs, sub-pouch-net | chg-2026-05-22-p6-syscall-seam | POUCH-DESIGN.md 5.1 |

@@ -411,7 +411,7 @@ func closeNote(root, id string, fields map[string]string) (string, error) {
 	if len(allowed) == 0 {
 		return "", fmt.Errorf("type '%s' has no closure fields (schema 5.3)", t)
 	}
-	if !isRecord(n.Rel) {
+	if !closurePlaneOK(t, n.Rel) {
 		return "", fmt.Errorf("%s is not on the Record plane", n.Rel)
 	}
 	if len(fields) == 0 {
@@ -470,7 +470,7 @@ func closeNote(root, id string, fields map[string]string) (string, error) {
 
 func cmdClose(root string, args []string) int {
 	if len(args) < 1 {
-		fmt.Println("usage: quaestor close <id> --status S [--fixed-by C] [--regression R] [--seam S] [--superseded-by D]")
+		fmt.Println("usage: quaestor close <id> --status S [--fixed-by C] [--regression R] [--seam S] [--superseded-by D] [--closed-by C]")
 		return 2
 	}
 	id := args[0]

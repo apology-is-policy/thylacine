@@ -2,12 +2,13 @@
 id: seam-posix-pathname-form-gates
 type: seam
 title: "POSIX pathname-form gates — landed on the unmerged vivarium branch"
-status: open
+status: closed
 surface: [sub-kernel-stalk]
 opened-by: chg-2026-07-31-stalk-sweep
 tracker: "tasks #79-#87 (vivarium numbering)"
 created: 2026-08-01
 updated: 2026-08-01
+closed-by: chg-2026-08-16-stalk-posix-form
 ---
 ## Owed
 

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -100,6 +100,73 @@ clunks the quarry (if popped) then unwinds. Zero real components (`"/"`,
 (9P forbids Twalk from an opened fid). `clone_walk_zero` validates
 `w->nqid == 0` with the same rigor as the main loop (RW-4 R1-F1,
 [[fnd-rw4-rev1-f1]]).
+
+### The POSIX shape gates, and the one ordering rule behind all of them
+
+Five commits added four gates, and they read as one design rather than four
+patches because a single rule governs every one: **type before permission,
+always.**
+
+| gate | asks | subject |
+|---|---|---|
+| through-a-file | is the parent I am walking through a directory? | the **crossed** parent |
+| dot-out-of-a-file | is the position `.`/`..` resolve in a directory? | the **uncrossed** tip |
+| trailing slash | is the quarry a directory, as the path asserted? | the **crossed** quarry |
+| dot-search | may the caller search the directory the dot resolves in? | the **uncrossed** tip |
+
+**The ordering is argued, not conventional.** The x bit on a non-directory says
+nothing about whether it can be traversed, so gating on permission first would
+answer `EACCES` for a path that can never resolve *as written*. A `0000`
+regular file is `ENOTDIR`, and an unreadable `file/` is `ENOTDIR` rather than
+`EACCES`. Every one of the four sits before the permission check it is adjacent
+to. For `..` there is a second ordering: the search check runs **before the
+pop**, while the directory being popped out of is still the subject.
+
+**Two gates read the same field and disagree about crossing, deliberately.**
+The dot gates read `qid.type` **uncrossed**; the trailing-slash gate reads it
+**crossed**. That is not an inconsistency to tidy — they ask different
+questions of one field. `.` and `..` are about **where resolution stands**, so
+`/mnt/.` must equal `/mnt` and crossing would move it; a trailing slash is
+about **what the quarry is**, so a directory mounted over a file legitimately
+makes `file/` resolve. Unifying them would silently break whichever one lost.
+
+The dot gates also had to be written **separately from** the through-a-file
+gate, for a structural reason worth keeping: `.` and `..` are handled by stalk
+itself and **never reach `Dev.walk`**, so a gate sitting on the real-component
+arm cannot see them. `a/b/..` popped back to `a` and `a/b/.` handed back `b`
+while `/bin/ls/foo` was correctly refused.
+
+Containment is **strengthened, never touched**. At depth 0 the subject of a dot
+gate is `start` itself, and answering `ENOTDIR` there is strictly more
+restrictive than the old no-op — the gate can only turn a success into a
+failure, never move a pop further up. So no path that previously stopped at
+`start` can now pass it ([[inv-i28]]).
+
+### A gate binds only what it SEES
+
+All four gates live here, so they bound only the paths that reach here — and
+the **cwd join did not let the commonest form in a shell reach here**. It
+resolved `.` and `..` and dropped a trailing separator *before* calling stalk,
+so every gate above was bypassed for every relative path.
+
+Seven consequences were **measured on the pre-fix tree**, from a working
+directory holding a regular file `f`: `open("f/..")`, `open("f/.")`,
+`open("f/")` all returned working descriptors; `stat("f/")` and `stat("f/..")`
+succeeded; and the two that make it a resolution bug rather than a conformance
+nit — **`open("nope/..")` returned a working fd**, because a lexical `..` pops
+a component without proving it exists, and **`chdir("f/..")` succeeded**,
+having run its directory check against the parent it had already massaged the
+path into. Checking the wrong object entirely.
+
+**The fix was a unification, not a fifth gate.** Joining and canonicalising had
+been one function; they were separated, leaving exactly one production caller
+of the canonicalising half. That is the same move [[sub-libthyla-rs]] made at
+the same time and for the same reason — and the pair is the argument for the
+principle rather than for either fix: **three layers independently normalised
+paths (this join, the ported libc's splitter, the native runtime's), each was
+wrong differently, and all three were repaired by DELETING the normalisation
+rather than correcting it.** When N layers each clean a path, they each clean
+it wrong, and the resolver's gates never see what they exist to judge.
 
 ### Mount crossing (Plan 9 domount, stalk-2)
 
@@ -315,6 +382,32 @@ authoritative audit-trigger copy):
 - **`..` containment**: the pop guard (`depth > 0`) and the borrowed-start
   no-op are I-28's floor; the #957 single-hop crosses must stay
   symmetric with stalk's base/quarry crosses.
+- **Type before permission, at every gate.** A non-directory answers
+  `ENOTDIR`, never `EACCES` — the x bit on a non-directory says nothing
+  about traversability, so a permission-first order answers the wrong
+  question about a path that can never resolve as written. And `..`'s
+  search check runs **before the pop**, while the directory being popped
+  out of is still the subject.
+- **The dot gates read the tip UNCROSSED; the trailing-slash gate reads the
+  quarry CROSSED.** They ask different questions of one field — *where
+  resolution stands* versus *what the quarry is* — and unifying them
+  silently breaks whichever loses. `/mnt/.` must equal `/mnt`; a directory
+  mounted over a file must make `file/` legal.
+- **A dot arm needs its own copy of every gate.** `.` and `..` never reach
+  `Dev.walk`, so anything added to the real-component arm does not cover
+  them. Both tokens, not just `..`: two separate tasks named only `..` and
+  the measurement showed both behaved identically in every row.
+- **No caller may canonicalise before calling stalk.** Every gate here
+  binds only what stalk sees, and a caller that resolves dots or strips a
+  trailing separator first bypasses all of them for whatever path form it
+  handles. This is the single defect class that has recurred at three
+  independent layers; the rule is that joining and canonicalising stay
+  separate operations, and only stalk does the second.
+- **`STALK_STAT` and the cached-open arm are separate success exits and
+  each needs the quarry-shaped gates repeated.** The trailing-slash check
+  lives at three sites for exactly this reason — two of the three exits
+  never reach the ordinary `return quarry`, and they read the leaf's fused
+  record instead.
 
 ## Seams
 

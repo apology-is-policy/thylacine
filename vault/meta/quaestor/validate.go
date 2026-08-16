@@ -97,11 +97,31 @@ var STRICT_EDGE_FIELDS = set(
 var EDGE_LITERALS = set("prose", "global")
 
 // Record-plane closure fields (schema section 5.3).
+// Schema 5.3 is the authority here, and this map drifted from it: it listed
+// four types while 5.3 designates `seam.status` and `seam.closed-by` too. The
+// symptom was that closing a seam -- the single most ordinary lifecycle event
+// the type has -- was impossible through the tool, so the only way to do it was
+// the hand-edit the tool exists to replace.
 var CLOSURE = map[string]map[string]bool{
-	"fnd": set("status", "fixed-by", "regression", "seam"),
-	"dec": set("superseded-by", "status"),
-	"chg": set("commits"),
-	"adt": {},
+	"fnd":  set("status", "fixed-by", "regression", "seam"),
+	"dec":  set("superseded-by", "status"),
+	"chg":  set("commits"),
+	"seam": set("status", "closed-by"),
+	"adt":  {},
+}
+
+// closurePlaneOK: the Record plane is append-only, so its closure fields are
+// the designated exception. A `seam` is deliberately NOT on that plane --
+// schema 5.3: "Seams are Present-plane (debt is a fact about the system now)"
+// -- and yet 5.3 names its closure fields in the same breath. Both are right:
+// the append-only rule is what the Record-plane check enforces, and a seam is
+// not subject to it. Requiring `vault/record/` for every closure was reading
+// one rule as though it were the other.
+func closurePlaneOK(typ, rel string) bool {
+	if typ == "seam" {
+		return true
+	}
+	return isRecord(rel)
 }
 
 var SUB_SECTIONS = []string{"Purpose", "Contract", "Mechanism",

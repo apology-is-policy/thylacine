@@ -36,7 +36,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 85
+## Open seams: 84
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -90,7 +90,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-netd-host-tests]] (sub-netd-server, sub-netd-nic)
 - [[seam-poll-heap-waiters]] (sub-kernel-poll)
 - [[seam-poll-srv-registry-retain]] (sub-kernel-poll)
-- [[seam-posix-pathname-form-gates]] (sub-kernel-stalk)
 - [[seam-pouch-dirfd]] (sub-pouch-fs)
 - [[seam-pouch-dup2-target]] (sub-pouch-process)
 - [[seam-pouch-errno-channel]] (sub-pouch-seam, sub-pouch-fs, sub-pouch-net)
@@ -130,8 +129,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-16 [[chg-2026-08-16-burrow-attribution]] — The Burrow re-swept: the type says SHAPE, and that lesson has now arrived three times
 - 2026-08-16 [[chg-2026-08-16-corvus-narrowing]] — corvus re-swept: the AUTH gate was a narrowing, and the expired premise had three dependents
 - 2026-08-16 [[chg-2026-08-16-notes-fp-and-phenotype]] — Notes re-swept: 'the entire user context' was one word too many, and it was mine
+- 2026-08-16 [[chg-2026-08-16-stalk-posix-form]] — stalk: the POSIX form gates merged, and a gate binds only what it sees
 - 2026-08-15 [[chg-2026-08-15-build-targets]] — build.sh re-swept: three target lists that disagree, and the vault recommended the shortest
 - 2026-08-15 [[chg-2026-08-15-diorama-vivarium]] — diorama re-swept: a second operating mode the dossier never saw, and a read buffer half its source
 - 2026-08-15 [[chg-2026-08-15-exec-lineage]] — exec re-swept after LINEAGE: a seam closed sideways, and a prediction that came true
-- 2026-08-15 [[chg-2026-08-15-handle-posix-fds]] — The handle table re-swept: POSIX descriptors arrived, and the dossier's ceiling was wrong when written
 <!-- generated:end -->
