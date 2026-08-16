@@ -946,6 +946,11 @@ Three consequences, and the third corrects this document:
    on **thyla-pi** (KVM, real V3D, `virtio-gpu-gl-pci` + `egl-headless`). The
    dev loop can still verify that the *fallback* is unregressed — which is the
    larger share of the risk, since that is the path everything else boots on.
+   **That host is PROVEN, not assumed** (2026-08-16,
+   `WARP_HOST=thyla-pi WARP_ACCEL=kvm tools/warp-host.sh capset`): `tapestryd:
+   gpu up -- 1280x800, pci intid=35, virgl=1 capsets=2`, capset id=2
+   max_version=2, `CAPSET GATE: VERIFIED`. The two readings — `virgl=0` here,
+   `virgl=1` there — are this section's whole argument, one line each.
 2. **The composed path must be capability-GATED at runtime**, keyed on the
    negotiated feature bit rather than on a build flag. A tapestryd that assumed
    GL would take the console dark on the default device, which is the

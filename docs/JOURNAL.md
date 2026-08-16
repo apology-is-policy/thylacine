@@ -204,6 +204,26 @@ The cost is stated rather than left to be discovered: tapestryd carries **two
 composition paths permanently**, and they must stay behaviourally identical from
 the outside or the gate that proves one is silent about the other.
 
+### The C-2 verification host, proven rather than assumed
+
+Having established the dev loop *cannot* run the composed path, the next
+question was whether anything can. Synced HEAD to thyla-pi (all 80 pool chunks
+hash-verified, artifacts paired) and booted `virtio-gpu-gl-pci` under KVM on
+real V3D:
+
+```
+tapestryd: gpu virgl -- num_scanouts=1 num_capsets=2
+tapestryd: gpu capset[1] id=2 max_version=2 max_size=1384
+tapestryd: gpu up -- 1280x800, pci intid=35, virgl=1 capsets=2
+CAPSET GATE: VERIFIED
+```
+
+So C-2 has a working verification host, and the two figures — `virgl=0` here,
+`virgl=1` there — are the whole argument for §4.5.9 in one line each. Worth
+doing before the implementation rather than after: had C-2 been written first,
+its first symptom on the dev loop would have been a dark console, which is a
+long way from its cause.
+
 ### Still open leaving this run
 
 - **Warp-C C-2** — the attach verb and the per-slot host resources §4.5.8 now
