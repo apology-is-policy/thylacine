@@ -128,6 +128,7 @@ set(KERNEL_TEST_SRCS
     test/test_gic.c
     test/test_timer.c
     test/test_clock.c
+    test/test_extinction.c
     test/test_hardening.c
     test/test_hwdebug.c
     test/test_alternatives.c

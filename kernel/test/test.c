@@ -88,6 +88,8 @@ void test_gic_cpu_irq_counter_geometry(void);  // V-4c-3 F5 (#73)
 void test_timer_tick_increments(void);
 void test_timer_oneshot_tval_clamps(void);
 void test_timer_arm_oneshot_restores(void);
+void test_extinction_claim_word_exactly_one_winner(void);
+void test_extinction_console_unclaimed_on_clean_boot(void);
 void test_clock_monotonic_advances(void);
 void test_clock_realtime_anchored(void);
 void test_clock_wallclock_offset_math(void);
@@ -1471,6 +1473,8 @@ struct test_case g_tests[] = {
     { "timer.tick_increments",         test_timer_tick_increments,         false, NULL },
     { "timer.oneshot_tval_clamps",     test_timer_oneshot_tval_clamps,     false, NULL },
     { "timer.arm_oneshot_restores",    test_timer_arm_oneshot_restores,    false, NULL },
+    { "extinction.claim_word_exactly_one_winner", test_extinction_claim_word_exactly_one_winner, false, NULL },
+    { "extinction.console_unclaimed_on_clean_boot", test_extinction_console_unclaimed_on_clean_boot, false, NULL },
     { "clock.monotonic_advances",      test_clock_monotonic_advances,      false, NULL },
     { "clock.realtime_anchored",       test_clock_realtime_anchored,       false, NULL },
     { "clock.wallclock_offset_math",   test_clock_wallclock_offset_math,   false, NULL },
