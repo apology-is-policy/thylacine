@@ -556,6 +556,7 @@ void test_notes_self_kill_through_full_ring(void);     // aux#253
 void test_notes_ndflt_stop_discarded_after_cont(void); // #240
 void test_notes_susp_gate_reads_phenotype_sigtab(void); // #251
 void test_notes_masked_susp_stops_at_delivery(void);   // #252
+void test_notes_stop_dequeue_picks_its_own_note(void);  // the class-blind pop
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
@@ -2141,6 +2142,7 @@ struct test_case g_tests[] = {
     { "notes.ndflt_stop_discarded_after_cont", test_notes_ndflt_stop_discarded_after_cont, false, NULL },
     { "notes.susp_gate_reads_phenotype_sigtab", test_notes_susp_gate_reads_phenotype_sigtab, false, NULL },
     { "notes.masked_susp_stops_at_delivery", test_notes_masked_susp_stops_at_delivery, false, NULL },
+    { "notes.stop_dequeue_picks_its_own_note", test_notes_stop_dequeue_picks_its_own_note, false, NULL },
     { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
     { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },

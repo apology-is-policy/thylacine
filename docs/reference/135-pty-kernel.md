@@ -364,13 +364,32 @@ lost and one of `NOTE_QUEUE_DEPTH`'s 16 slots went with it.
 
 `notes_stop_note_name_locked` (`kernel/notes.c`) is the STOP-class twin of the terminate
 scanner, and the tail's `handler_va == 0` branch consults it after the terminate check
-misses: on a hit it dequeues the note, drops `q->lock`, and applies the stop through
+misses: on a hit it dequeues the note **through `notes_stop_dequeue_locked`**, drops
+`q->lock`, and applies the stop through
 **`proc_job_stop_self`** — the same primitive `SYS_NOTED(NDFLT)` uses, so the orphan rule
 and #240's `susp_stop_armed` freshness check both apply without being restated. A
 `tty:cont` that arrived while the note sat masked has already disarmed the flag, so the
 deferred stop correctly evaporates instead of resurrecting a superseded `^Z`. Because the
 peek only yields a note once its family bit is unmasked, the stop lands exactly when the
 guest unblocks the signal.
+
+**Why the consume is its own function and not the general `notes_dequeue_locked` (P1,
+found the first time this arm was actually executed).** The peek is *class-filtered* — it
+returns the first deliverable STOP-class note at **any** index. `notes_dequeue_locked` is
+class-**blind**: it pops the first mask-permitted entry in FIFO order, i.e. the queue
+head. On a one-note queue the two are indistinguishable, and every queue any test had
+ever built held exactly one note. Put a `child_exit` in front of the susp and they
+diverge: the stop applies, the `child_exit` is popped into a stack local nobody reads
+(destroyed rather than delivered — a wait notification silently gone), and the `tty:susp`
+stays queued to re-fire at the next EL0 return. `notes_stop_dequeue_locked` shares the
+peek's index-returning scan, so the note that decides the stop is the note that gets
+consumed; both run under the same unbroken `q->lock` hold, so a non-NULL peek always
+implies a successful pop. The general lesson, worth carrying past this file: **a decision
+and its consumption written as two scans are two predicates**, and only a test that puts
+something between them can tell. Regression:
+`notes.stop_dequeue_picks_its_own_note`, whose leg A *executes* the class-blind pop and
+asserts it takes the wrong note, so the leg cannot decay into a tautology if the two
+rules ever converge again.
 
 Accumulation was **bounded but not harmless** before the fix: repeated `^Z` from the pts
 fan all share `(name, sender_pid=0)`, so once `q->count` reaches
@@ -383,8 +402,33 @@ was the defect.
 `notes.masked_susp_stops_at_delivery` pins the pending/unmask sequence, the cont-cancels
 composition with #240, and the self-managing exemption. It does **not** cover the tail's
 three lines of wiring — a unit test cannot install a `current_thread()` — which is the
-same coverage boundary the terminate twin has, and which the in-guest `^Z` E2E owed by
-task #238 would close.
+same coverage boundary the terminate twin has.
+
+The two twins are **not** in the same position in-guest, though, and the difference is
+worth stating so a future session does not go hunting for a hole that isn't there: an
+ordinary `^C` on an uncaught native program reaches the terminate arm directly (the fan
+posts `interrupt`, no post-time action exists for it, and the tail terminates — `jc-probe`'s
+`int` rung and `pty-4` both drive it). Only the STOP arm was orphaned, because only the
+STOP class has a *post-time* decider that normally consumes the note before the tail sees
+it.
+
+**That wiring is covered by `jc-probe`'s `maskstop` rung, and the correction is
+worth stating because this paragraph previously named the wrong closer.** It said an
+"in-guest `^Z` E2E" would close the gap; that is false for *any* `^Z` E2E, including the
+one that subsequently landed (`pty-susp-pouch`, aux#238). An ordinary `^Z` never reaches
+this arm at all — `proc_job_stop_pgrp` takes the stop at POST time, so the note is never
+left queued-and-deliverable. The arm's precondition is a state that must be **constructed**:
+every thread masks `NOTE_BIT_TTY`, the fan posts instead of stopping, and the mask then
+lifts. Three green E2Es sat over the hole; deleting the arm left all three green. They
+were not wrong, they were *irrelevant*, and a green cannot distinguish the two.
+
+`/susp-mask-child` constructs it — mask, absorb a `^Z`, unmask — and the rung asserts the
+ladder in an order that makes the pass mean something: the ARM assertion (ticks continue
+through the `^Z`; a `Stopped` there is a named failure, not a hang) comes **first**,
+because a mask that never installed would produce a perfectly good `Stopped`, quiet
+window, and resume — a full pass of the POST-time mechanism wearing this one's clothes.
+Being boot-fatal via joey, it also proves the `q->lock` → `g_proc_table_lock` order under
+real contention on every boot.
 
 ### 7.3 The shared wake cascade
 
@@ -594,6 +638,13 @@ New test hooks: `proc_test_link_child` (fabricated parent-edges the orphan-rule 
 qualification reads); `proc_test_unlink` now unlinks from the actual parent
 (backward-compatible — a test-linked Proc's parent is kproc).
 
+In-guest E2Es (boot-fatal via joey, so they ride every boot of every gate):
+
+| Probe | Covers |
+|---|---|
+| `jc-probe` rungs `run`/`stop`/`jobs`/`restop`/`bg`/`int` | the POST-time stop ladder over a hosted `ut` on a real pts: `^Z` → `proc_job_stop_pgrp` → the `WAIT_UNTRACED` report → `fg`/`bg` resume → `^C`. The `restop` rung is task #19's decisive leg (only a RUNNING job can stop again). |
+| `jc-probe` rung `maskstop` + `/susp-mask-child` | the **EL0-return tail's** `NOTE_DFL_STOP` arm — the only leg that reaches it. Constructs the state no `^Z` E2E can: mask `NOTE_BIT_TTY`, absorb a `^Z` (the fan POSTS, ticks continue — the ARM assertion, first and loud), unmask, and the deferred stop lands on that syscall's EL0 return. Also the only leg that exercises the `q->lock` drop before `proc_job_stop_self` under real contention. |
+
 **What the tests deliberately don't cover**: the full multi-Proc-survivor-during-stop
 E2E (the shared owed cross-Proc multi-in-flight SMP harness, carried across
 #841/#845/#349/Loom) — the job-reader release is exercised via the sleep detour in the
@@ -615,10 +666,17 @@ per-entry binding overflow → `-T_E_NOMEM`.
 
 ## 13. Known caveats / footguns
 
-- **The all-masked stop-on-unmask deviation** (documented v1.0): if every thread masks
-  `NOTE_BIT_TTY`, an uncaught susp is delivered **note-only** — the POSIX "stop on the
-  first unmask of a pending stop signal" is not modeled (the disposition is evaluated
-  once, at post). Masking a stop signal is rare.
+- ~~**The all-masked stop-on-unmask deviation**~~ — **NO LONGER TRUE; corrected here
+  rather than deleted, because it stood as a documented v1.0 deviation for the whole
+  window in which it had already been fixed.** It read: "if every thread masks
+  `NOTE_BIT_TTY`, an uncaught susp is delivered note-only — the POSIX 'stop on the first
+  unmask of a pending stop signal' is not modeled (the disposition is evaluated once, at
+  post)." Round-2 F2 / #252 modeled exactly that (§7.2): the note stays pending and the
+  EL0-return tail applies the stop when the mask lifts. The entry survived because
+  nothing re-reads a caveat when the thing it describes is fixed — the arc that
+  *satisfies* a documented deviation is not what watches for it, so a reader landing
+  here got the pre-fix answer with a "documented v1.0" stamp on it. Masking a stop
+  signal is still rare; it is no longer unmodeled.
 - **The hup-surviving-shell-with-stopped-bg-jobs corner** (v1.x seam): once a pts entry
   is **freed**, `SYS_TTY_CONT`'s pointer-identity resolve dies with it, so a shell that
   catches the teardown hup and survives with stopped background jobs on a freed pts can

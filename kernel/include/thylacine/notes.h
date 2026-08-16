@@ -458,12 +458,30 @@ const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t);
 // A stop-class note is only ever QUEUED when the post-time fan (job_stop_cb)
 // found every thread masking the family and posted instead of stopping -- the
 // POSIX "a blocked stop signal becomes pending" case. This is where that
-// pending stop lands once the mask lifts. The dispatcher calls it under
-// q->lock and, on non-NULL, dequeues + drops the lock + calls
-// proc_job_stop_self (which re-checks the orphan rule and #240's freshness
-// flag). Exposed because the dispatcher takes no Thread argument, so a unit
-// test can only drive the decision here. Caller MUST hold p->notes->lock.
+// pending stop lands once the mask lifts.
+//
+// PREDICATE ONLY, and NOT on the dispatcher's path -- the dispatcher calls
+// notes_stop_dequeue_locked below, which answers the same question and
+// consumes in one call. (It used to call this and then dequeue separately;
+// that is the split that let the two disagree.) This is kept because the
+// dispatcher takes no Thread argument, so a unit test can only drive the
+// DECISION here -- but a test that drives only this is testing a function
+// production no longer calls, so pair it with the consumer.
+// Caller MUST hold p->notes->lock.
 const char *notes_stop_note_name_locked(struct Proc *p, struct Thread *t);
+
+// Consume the note notes_stop_note_name_locked selected. Returns 1 and writes
+// `out` on a hit, 0 otherwise. Same gates, same class-filtered scan.
+//
+// It exists because the general notes_dequeue_locked is CLASS-BLIND: it pops
+// the first mask-permitted entry in FIFO order, which is the queue head, not
+// necessarily the note the stop decision was about. With [child_exit,
+// tty:susp] queued, the tail stopped correctly and popped the child_exit into
+// a stack local nobody reads -- destroying it -- while the tty:susp stayed
+// queued to re-fire. Never reach for the general dequeue from a path that
+// selected its note by class. Caller MUST hold p->notes->lock.
+int notes_stop_dequeue_locked(struct Proc *p, struct Thread *t,
+                              struct Note *out);
 
 // PTY-1b (PTY-DESIGN.md section 4): kernel-synthetic note fan-out to a
 // process group -- the pgrp generalization of proc_console_post_interrupt.

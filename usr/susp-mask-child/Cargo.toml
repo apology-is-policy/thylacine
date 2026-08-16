@@ -1,0 +1,11 @@
+[package]
+name = "susp-mask-child"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "susp-mask-child"
+path = "src/main.rs"
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }

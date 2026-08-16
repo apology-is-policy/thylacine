@@ -46,6 +46,14 @@
 //          Post-resume signal delivery, the F4 leg -- no deadline reliance.
 //   health `echo fgok | tr a-z A-Z` -> FGOK (the shell owns the terminal and
 //          still runs pipelines after the whole stop/resume cycle)
+//   maskst `susp-mask-child` MASKS NOTE_BIT_TTY, so `^Z` finds no thread
+//          willing to take the stop and the fan POSTS the note instead
+//          (POSIX pending). It keeps ticking through the ^Z -- the ARM
+//          assertion, and the leg that must fail LOUDLY -- then unmasks, and
+//          the deferred stop lands on the EL0 return from that very syscall.
+//          The ONLY leg that reaches the tail's NOTE_DFL_STOP arm: every rung
+//          above takes the POST-time stop, which consumes the signal before
+//          the note is ever left queued.
 //   exit   `exit` -> drain-then-EOF + a clean reap.
 
 #![no_std]
@@ -87,10 +95,16 @@ const SETTLE: Duration = Duration::from_millis(400);
 
 /// The silent-hang watchdog (PTY-4e F2): a mis-routed signal leaves the ladder
 /// blocked in `t_read` with no further bytes ever arriving -- ptyfs is
-/// deliberately non-QTPOLL, so no read timeout exists. Normal completion is a
-/// couple of seconds; 25 s covers heavy-host dilation while still converting a
-/// hang into a clean named FAIL well inside the boot timeout.
-const WATCHDOG_SECS: u64 = 25;
+/// deliberately non-QTPOLL, so no read timeout exists. 40 s covers heavy-host
+/// dilation while still converting a hang into a clean named FAIL well inside
+/// the 90 s boot timeout.
+///
+/// Raised from 25 s when the maskstop rung landed: that rung waits on the
+/// CHILD's own 250 ms tick schedule (~5 s of it) plus a 2 s quiet window, so
+/// nominal completion went from ~2 s to ~11 s. The dominant new term is
+/// wall-clock SLEEPING, which does not dilate under TCG the way compute does --
+/// but the margin is sized for the whole ladder dilating anyway.
+const WATCHDOG_SECS: u64 = 40;
 const WATCHDOG_STACK: u64 = 32 * 1024;
 
 /// R2-F3: the disarm. Set by run() the moment the ladder has PASSED, so a
@@ -191,6 +205,72 @@ impl Driver {
             self.acc.extend_from_slice(&b[..n as usize]);
             reads += 1;
         }
+    }
+
+    /// Read until `want` has appeared `count` times since `mark`, FAILING with
+    /// a named diagnosis if `bad` shows up first.
+    ///
+    /// This exists for the maskstop rung's ARM ASSERTION, where the thing being
+    /// asserted is that the child keeps RUNNING through a `^Z`. Without the
+    /// `bad` arm a mask that never installed would stop the child, `want` would
+    /// never arrive, and the leg would hang into the 25 s watchdog -- a failure
+    /// that names the leg but not the cause, and reads identically to a kernel
+    /// bug in the path the rung is actually testing. `bad` is the shell's
+    /// `Stopped` report, which is exactly the witness that the ^Z was applied at
+    /// POST time -- i.e. that the precondition was never constructed and nothing
+    /// downstream of it would have meant anything.
+    fn read_until_unless(
+        &mut self,
+        mark: usize,
+        want: &[u8],
+        count: usize,
+        bad: &str,
+        leg: &str,
+    ) -> bool {
+        let mut reads = 0;
+        loop {
+            // Name the token that fired. "precondition never held" was true but
+            // said nothing: the three uses fail for three different reasons
+            // (the mask never installed / the child ran to completion without
+            // stopping / the vehicle could not mask at all), and under sabotage
+            // the log line IS the diagnosis.
+            if occurrences(&self.acc[mark..], bad.as_bytes()) > 0 {
+                t_putstr("jc-probe: FAIL (saw '");
+                t_putstr(bad);
+                t_putstr("' first) at leg ");
+                t_putstr(leg);
+                t_putstr("\n");
+                return false;
+            }
+            if occurrences(&self.acc[mark..], want) >= count {
+                return true;
+            }
+            if reads >= MAX_READS_PER_LEG {
+                t_putstr("jc-probe: FAIL (marker never arrived) at leg ");
+                t_putstr(leg);
+                t_putstr("\n");
+                return false;
+            }
+            let mut b = [0u8; 512];
+            // SAFETY: SVC wrapper over this fn's stack buffer.
+            let n = unsafe { t_read(self.mfd, b.as_mut_ptr(), b.len()) };
+            if n <= 0 {
+                t_putstr("jc-probe: FAIL (master EOF) at leg ");
+                t_putstr(leg);
+                t_putstr("\n");
+                return false;
+            }
+            self.acc.extend_from_slice(&b[..n as usize]);
+            reads += 1;
+        }
+    }
+
+    /// How many times `needle` occurs since `mark`. The quiet-window assertion
+    /// reads this AFTER a positively-terminated window, never as a blocking
+    /// wait -- ptyfs is non-QTPOLL, so "read and hope nothing comes" would park
+    /// forever exactly when the code under test is WORKING.
+    fn count_since(&self, mark: usize, needle: &[u8]) -> usize {
+        occurrences(&self.acc[mark..], needle)
     }
 
     /// Read until EOF (the exit leg). True iff EOF arrived within bounds.
@@ -397,7 +477,143 @@ fn run() -> i64 {
         return 10;
     }
 
-    // (i) `exit` unwinds the session; the master EOFs; the reap is clean.
+    // (i) THE MASK-CONSTRUCTING RUNG. Every rung above -- and pty-4, and
+    //     pty-susp-pouch -- exercises the POST-time stop: the pts ldisc raises
+    //     tty:susp, proc_job_stop_pgrp finds a thread willing to take it, and
+    //     the Proc stops inside the fan. The kernel's OTHER spelling of the
+    //     same default, the EL0-return tail's NOTE_DFL_STOP arm, was reached by
+    //     NOTHING -- and not because it is dead. Its precondition is a state no
+    //     test constructed: the post-time decider only declines when EVERY
+    //     thread masks NOTE_BIT_TTY, in which case the fan POSTS the note and
+    //     the stop is owed at the next delivery point. Deleting the arm left
+    //     every existing green untouched, which is the whole problem -- those
+    //     tests were not wrong, they were irrelevant, and a green cannot tell
+    //     the two apart.
+    //
+    //     susp-mask-child constructs it: mask, absorb a ^Z, unmask. The stop
+    //     lands on the EL0 return from the unmask syscall itself.
+    //
+    //     Read the leg order as the proof it is: the ARM assertion comes first
+    //     and fails LOUDLY, because everything after it is meaningless if the
+    //     mask never installed -- a ^Z that stopped the child at POST time
+    //     would produce a perfectly good `Stopped`, a perfectly quiet window,
+    //     and a perfectly good resume, i.e. a full PASS of the wrong mechanism.
+    leg("maskstop");
+    let m = d.mark();
+    if !d.send(b"susp-mask-child\r", "maskstop-spawn")
+        || !d.read_until_unless(m, b"MASKREADY", 1, "MASKFAIL", "maskstop-spawn")
+    {
+        return 12;
+    }
+    // POSITIVE 1: the vehicle runs. (MASKREADY is printed only after the child
+    // read its own mask back from the kernel, so it is also the in-child half
+    // of the arm assertion -- two independent witnesses that the bit is set.)
+    let pre = d.mark();
+    if !d.read_until(pre, b"MTICK", 2, "maskstop-pre") {
+        return 12;
+    }
+    // THE ARM: from the ^Z all the way to the child's own unmask announcement,
+    // it must keep running. A `Stopped` anywhere in that span means the fan
+    // took the stop -- the deferral never happened, the precondition was never
+    // built, and read_until_unless says so by name instead of hanging.
+    settle();
+    let armed = d.mark();
+    if !d.send(&[0x1a], "maskstop-susp")
+        || !d.read_until_unless(armed, b"MASKOFF", 1, "Stopped", "maskstop-armed")
+    {
+        return 12;
+    }
+    // Belt-and-braces on the same claim. The LOAD-BEARING arm proof is the leg
+    // above -- reaching MASKOFF (tick 12) with no `Stopped` is already
+    // conclusive that the child ran through the ^Z. This counter is cheap
+    // corroboration, so its threshold is set to the smallest value that cannot
+    // be reached by accident, NOT to the tightest one the nominal timing allows.
+    //
+    // The floor: `armed` is acc.len(), i.e. bytes ALREADY READ, so ticks emitted
+    // during the settle() above are still in flight and land on this side of the
+    // mark. The settle is 400 ms at a 250 ms cadence, so at most 2 such
+    // stragglers exist, and 3 is therefore the smallest count a stopped child
+    // provably cannot produce.
+    //
+    // The ceiling is why it is not higher: `read_until` returns the moment its
+    // needle count is met, but a single 512-byte read can swallow ~85 buffered
+    // MTICKs at once, so on a dilated host `armed` can land much closer to tick
+    // 12 than the nominal schedule suggests. A threshold picked off the nominal
+    // count would then fail a healthy run -- a false RED, which costs more than
+    // the tightness buys.
+    if d.count_since(armed, b"MTICK") < 3 {
+        t_putstr("jc-probe: FAIL (masked child did not keep running) at leg maskstop-armed\n");
+        return 12;
+    }
+    // THE CLAIM: unmasking delivers the deferred stop. Matched from `armed`,
+    // not from a fresh mark: the arm leg above already proved no `Stopped`
+    // exists between the ^Z and MASKOFF, so the first one in this window is
+    // necessarily the tail's -- and reading from the older mark cannot lose it
+    // to a 512-byte chunk that carried MASKOFF and `Stopped` together.
+    // MASKDONE is the `bad` arm, and it is what makes the sabotage control
+    // cheap: with the tail's stop arm deleted the child simply runs to
+    // completion, and this leg then names that in ~2 s instead of hanging out
+    // the 40 s watchdog. MASKDONE cannot legitimately precede `Stopped` -- the
+    // child stops at tick 12 and only reaches MASKDONE at tick 20, after `fg`.
+    if !d.read_until_unless(armed, b"Stopped", 1, "MASKDONE", "maskstop-stop")
+        || !d.read_until(armed, PROMPT, 1, "maskstop-prompt")
+    {
+        return 12;
+    }
+    // STOPPED, not DEAD: `jobs` still lists it. Without this the quiet window
+    // below is equally satisfied by a child that died on the unmask syscall.
+    let m = d.mark();
+    if !d.send(b"jobs\r", "maskstop-jobs") || !d.read_until(m, b"Stopped", 1, "maskstop-jobs") {
+        return 12;
+    }
+    // THE NEGATIVE, bracketed at BOTH ends by uppercase output tokens.
+    //
+    // The obvious spelling -- send `sleep 2`, wait for the PROMPT, count -- is
+    // broken, and subtly enough that it is worth naming: ut's line editor
+    // redraws the prompt on every keystroke, so the PROMPT that closes the
+    // window is the ECHO of the command being typed, not the one the finished
+    // sleep returns to. The window would collapse to ~0 and the assertion would
+    // be vacuous while looking exactly like this one. Sleeping before taking
+    // the mark does not fix it either: the mark is a read offset, and unread
+    // echo bytes land on the far side of it whenever they were produced.
+    //
+    // So both ends are `tr`-uppercased tokens, which no echo can forge, and the
+    // two commands are sent back-to-back -- the second queues in the pts input
+    // buffer while `sleep 2` holds the foreground, so MORE cannot appear until
+    // the sleep has finished. A running child would have put ~8 MTICKs inside.
+    let m = d.mark();
+    if !d.send(b"echo quiet | tr a-z A-Z\r", "maskstop-quiet-open")
+        || !d.read_until(m, b"QUIET", 1, "maskstop-quiet-open")
+    {
+        return 12;
+    }
+    let quiet = d.mark();
+    if !d.send(b"sleep 2\r", "maskstop-quiet")
+        || !d.send(b"echo more | tr a-z A-Z\r", "maskstop-quiet-close")
+        || !d.read_until(quiet, b"MORE", 1, "maskstop-quiet-close")
+    {
+        return 12;
+    }
+    if d.count_since(quiet, b"MTICK") != 0 {
+        t_putstr("jc-probe: FAIL (a job-stopped child kept ticking) at leg maskstop-quiet\n");
+        return 12;
+    }
+    // POSITIVE 2: `fg` resumes it and it runs to its own clean exit. The ticks
+    // after the resume are what separate "was stopped" from "was killed", and
+    // MASKDONE proves the child returned from the set_mask syscall the stop
+    // landed on rather than being unwound out of it.
+    let m = d.mark();
+    if !d.send(b"fg\r", "maskstop-fg") || !d.read_until(m, b"MTICK", 2, "maskstop-fg") {
+        return 12;
+    }
+    if !d.read_until(m, b"MASKDONE", 1, "maskstop-done") {
+        return 12;
+    }
+    if !d.read_until(m, PROMPT, 1, "maskstop-done-prompt") {
+        return 12;
+    }
+
+    // (j) `exit` unwinds the session; the master EOFs; the reap is clean.
     leg("exit");
     if !d.send(b"exit\r", "exit") || !d.read_to_eof("exit") {
         return 11;
@@ -412,7 +628,9 @@ fn run() -> i64 {
     }
 
     WD_DISARM.store(true, core::sync::atomic::Ordering::Release);
-    t_putstr("jc-probe: PASS (run/stop/jobs/fg-restop/bg/fg-int/exit over a hosted ut)\n");
+    t_putstr(
+        "jc-probe: PASS (run/stop/jobs/fg-restop/bg/fg-int/maskstop/exit over a hosted ut)\n",
+    );
     0
 }
 

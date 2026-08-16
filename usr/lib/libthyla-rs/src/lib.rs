@@ -608,12 +608,25 @@ pub const T_NOTE_BIT_KILL:       u8 = 1;
 pub const T_NOTE_BIT_PIPE:       u8 = 2;
 pub const T_NOTE_BIT_CHILD_EXIT: u8 = 3;
 pub const T_NOTE_BIT_SNARE:      u8 = 4;
+// The tty:* family -- ONE bit for winch / susp / cont / quit / hup. Unlike
+// SNARE (bit 4, reserved for v1.x) this one is LOAD-BEARING at v1.0: the
+// tty:* names are in the kernel's g_known_notes, so masking the bit really
+// does defer a ^Z, and the kernel routes an all-masked pgrp's tty:susp to a
+// note POST whose stop is applied later at the EL0-return tail.
+pub const T_NOTE_BIT_TTY:        u8 = 5;
 
 // NOTE_MASK_SUPPORTED — the union of every NOTE_BIT_* the kernel knows
 // about today. Setting bits outside this is tolerated (no-op) so future
 // note additions don't break old userspace; SYS_POSTNOTE with an
 // unsupported note NAME returns -1.
-pub const T_NOTE_MASK_SUPPORTED: u64 = 0x1f;
+//
+// MIRROR of NOTE_MASK_SUPPORTED in <thylacine/notes.h>. It sat at 0x1f from
+// before PTY-1b through every chunk that made the tty bit live -- nothing
+// consumed it, so nothing could notice. The const assertion in notes.rs now
+// ties it to the NoteClass set at compile time, which catches a variant added
+// without the bit; it CANNOT catch the kernel growing a bit this file never
+// hears about, because both sides of that check live here.
+pub const T_NOTE_MASK_SUPPORTED: u64 = 0x3f;
 
 // SYS_POSTNOTE sentinel for "send to my own Proc" (kernel maps pid == 0
 // to the calling Proc's pid; matches POSIX kill(0, sig) "send to my

@@ -84,6 +84,7 @@ void test_notes_kill_terminates_single_thread(void);
 void test_notes_ndflt_stop_discarded_after_cont(void);
 void test_notes_susp_gate_reads_phenotype_sigtab(void);   // #251
 void test_notes_masked_susp_stops_at_delivery(void);      // #252
+void test_notes_stop_dequeue_picks_its_own_note(void);     // the class-blind pop
 void test_notes_self_kill_through_full_ring(void);        // aux#253
 
 // ---------------------------------------------------------------------------
@@ -1734,9 +1735,21 @@ void test_notes_susp_gate_reads_phenotype_sigtab(void) {
 // at all, dequeues on non-NULL, and drops q->lock before proc_job_stop_self.
 // Deleting that block leaves every assertion below passing. The terminate
 // twin has the identical hole for the identical reason (a unit test cannot
-// install a current_thread), and closing it needs the in-guest ^Z E2E that
-// task #238 already tracks -- which is the only leg that would also prove the
-// lock order under contention.
+// install a current_thread).
+//
+// This used to name "the in-guest ^Z E2E that task #238 already tracks" as the
+// closer, and that was WRONG -- doubly so, which is why it is worth the
+// correction rather than a quiet edit. An ordinary ^Z, from any E2E, cannot
+// reach this arm at all: proc_job_stop_pgrp applies the stop at POST time, so
+// the note never becomes queued-and-deliverable. #238 landed, passed, and
+// covered nothing here. The arm's precondition is a state that must be
+// CONSTRUCTED: every thread masks NOTE_BIT_TTY, the fan posts instead of
+// stopping, and the mask then lifts.
+//
+// The closer is jc-probe's `maskstop` rung + /susp-mask-child (boot-fatal, so
+// it rides every boot): mask -> absorb a ^Z -> unmask -> the deferred stop
+// lands on the EL0 return from the unmask syscall itself. That is also the leg
+// that proves the lock order under real contention.
 void test_notes_masked_susp_stops_at_delivery(void) {
     struct Proc *leader = proc_alloc();
     TEST_ASSERT(leader != NULL, "proc_alloc leader");
@@ -1792,12 +1805,19 @@ void test_notes_masked_susp_stops_at_delivery(void) {
 
     // The tail's action on that decision: consume, then apply via the shared
     // primitive. Asserted separately so a fix that answered right and acted
-    // wrong is still caught.
+    // wrong is still caught. It calls notes_stop_dequeue_locked because that is
+    // what the tail calls -- this leg used to call the general
+    // notes_dequeue_locked, mirroring a tail that did the same, and on a
+    // ONE-NOTE queue the two are indistinguishable. See
+    // notes.stop_dequeue_picks_its_own_note for the queue that tells them
+    // apart.
     spin_lock(&m->notes->lock);
     struct Note consumed;
-    int got_it = notes_dequeue_locked(m, &th, &consumed);
+    int got_it = notes_stop_dequeue_locked(m, &th, &consumed);
     spin_unlock(&m->notes->lock);
     TEST_EXPECT_EQ(got_it, 1, "B: the note dequeues");
+    TEST_ASSERT(susp_name_is(consumed.name, NOTE_NAME_TTY_SUSP),
+                "B: and the note CONSUMED is the one the peek named");
     TEST_EXPECT_EQ(m->notes->count, 0u, "B: the slot is RECLAIMED");
     TEST_ASSERT(proc_job_stop_self(m), "B: and the deferred stop applies");
     TEST_EXPECT_EQ((int)m->job_stop_req, 1, "B: the guest is stopped");
@@ -1841,6 +1861,16 @@ void test_notes_masked_susp_stops_at_delivery(void) {
     TEST_ASSERT(self_managed == NULL,
                 "D: the tail does NOT consume it -- devnotes_read owns it");
 
+    // The same refusal from the CONSUMER, which is what the tail actually
+    // calls. Asserting only the predicate would leave the exemption verified
+    // on a function production no longer reaches -- the exact gap leg B had.
+    spin_lock(&m->notes->lock);
+    struct Note must_not_take;
+    int took = notes_stop_dequeue_locked(m, &th, &must_not_take);
+    spin_unlock(&m->notes->lock);
+    TEST_EXPECT_EQ(took, 0, "D: and the CONSUMER refuses it too");
+    TEST_EXPECT_EQ(m->notes->count, 1u, "D: the note is still there for the fd");
+
     proc_test_unlink(m);
     m->threads = NULL;                  // the static outlives proc_free
     m->state = PROC_STATE_ZOMBIE;
@@ -1848,4 +1878,144 @@ void test_notes_masked_susp_stops_at_delivery(void) {
     proc_test_unlink(leader);
     leader->state = PROC_STATE_ZOMBIE;
     proc_free(leader);
+}
+
+// ---------------------------------------------------------------------------
+// stop_dequeue_picks_its_own_note
+// ---------------------------------------------------------------------------
+//
+// The EL0 tail's stop arm DECIDES with a class-filtered scan
+// (notes_stop_note_name_locked: first deliverable STOP-class note, at any
+// index) and used to CONSUME with the general notes_dequeue_locked, which pops
+// the first mask-permitted entry in FIFO order regardless of class. On a
+// one-note queue those two agree, and every queue any prior test built held
+// exactly one note -- so the disagreement had nowhere to show.
+//
+// Put something in front of the susp and they diverge: the stop applies, the
+// child_exit is popped into a stack local nobody reads (destroyed, not
+// delivered -- a wait notification silently gone), and the tty:susp stays
+// queued to re-fire at the next EL0 return.
+//
+// Leg A EXECUTES the old behaviour rather than describing it. That is what
+// keeps this test honest: if the two selection rules ever converge again, leg
+// A fails and says so, instead of leg B quietly becoming a tautology that
+// passes for the wrong reason.
+void test_notes_stop_dequeue_picks_its_own_note(void) {
+    struct Proc *leader = proc_alloc();
+    struct Proc *m = (leader != NULL) ? proc_alloc() : NULL;
+    if (leader == NULL || m == NULL) {
+        if (m) proc_free(m);
+        if (leader) proc_free(leader);
+        TEST_ASSERT(false, "proc_alloc leader + m");
+        return;
+    }
+    proc_test_link(leader);
+    m->sid  = (u32)leader->pid;
+    m->pgid = (u32)m->pid;
+    proc_test_link_child(leader, m);
+
+    static struct Thread th2;
+    th2.magic             = THREAD_MAGIC;
+    th2.next_in_proc      = NULL;
+    th2.rendez_blocked_on = NULL;
+    th2.proc              = m;
+    th2.note_mask         = 0;
+    m->threads    = &th2;
+    m->handler_va = 0u;
+
+    // ---- OBSERVE FIRST, ASSERT LAST. ------------------------------------
+    //
+    // Every observation below is captured into a local and every assertion is
+    // deferred past the teardown, because TEST_ASSERT *returns* on failure --
+    // so an assertion placed before the unlink leaves `leader` and `m` ALIVE
+    // and linked in the proc table. That is not hypothetical: it was measured.
+    // Under the sabotage that reddens leg B, this test returned early, and the
+    // next test to run `while (wait_pid(&st) > 0)` (cons.sys_puts_uses_shared_
+    // console_path) waited forever on a child that could never exit -- the boot
+    // hung at 99% CPU with no further output. A sabotage that HANGS the harness
+    // downstream is a different experiment, not a stronger one: it destroys the
+    // clean per-assertion verdict the control exists to produce.
+    //
+    // This is the idiom test_cons.c:2198 already states for the same reason
+    // ("Sample + DISARM before asserting ... one broken test reporting as
+    // three"); this file did not follow it.
+    int  a_post_child = notes_post(m, NOTE_NAME_CHILD_EXIT, 42u, NULL, true);
+    int  a_post_susp  = notes_post(m, NOTE_NAME_TTY_SUSP, 0u, NULL, true);
+    u32  a_count      = m->notes->count;
+
+    spin_lock(&m->notes->lock);
+    const char *decided = notes_stop_note_name_locked(m, &th2);
+    spin_unlock(&m->notes->lock);
+    bool a_decided_susp = (decided != NULL) &&
+                          susp_name_is(decided, NOTE_NAME_TTY_SUSP);
+
+    struct Note blind = { 0 };
+    spin_lock(&m->notes->lock);
+    int blind_got = notes_dequeue_locked(m, &th2, &blind);
+    spin_unlock(&m->notes->lock);
+    bool a_blind_is_child = (blind_got == 1) &&
+                            susp_name_is(blind.name, NOTE_NAME_CHILD_EXIT);
+
+    spin_lock(&m->notes->lock);
+    while (m->notes->count > 0) {
+        struct Note drain;
+        notes_dequeue_locked(m, NULL, &drain);
+    }
+    spin_unlock(&m->notes->lock);
+    u32 b_reset_count = m->notes->count;
+
+    int b_post_child = notes_post(m, NOTE_NAME_CHILD_EXIT, 42u, NULL, true);
+    int b_post_susp  = notes_post(m, NOTE_NAME_TTY_SUSP, 0u, NULL, true);
+    u32 b_count      = m->notes->count;
+
+    struct Note picked = { 0 };
+    spin_lock(&m->notes->lock);
+    int picked_got = notes_stop_dequeue_locked(m, &th2, &picked);
+    spin_unlock(&m->notes->lock);
+    bool b_picked_susp = (picked_got == 1) &&
+                         susp_name_is(picked.name, NOTE_NAME_TTY_SUSP);
+    u32 b_remaining = m->notes->count;
+
+    struct Note survivor = { 0 };
+    spin_lock(&m->notes->lock);
+    int surv_got = notes_dequeue_locked(m, &th2, &survivor);
+    spin_unlock(&m->notes->lock);
+    bool b_surv_is_child = (surv_got == 1) &&
+                           susp_name_is(survivor.name, NOTE_NAME_CHILD_EXIT);
+
+    // ---- TEARDOWN, unconditionally, before the first assertion. ---------
+    proc_test_unlink(m);
+    m->threads = NULL;                  // the static outlives proc_free
+    m->state = PROC_STATE_ZOMBIE;
+    proc_free(m);
+    proc_test_unlink(leader);
+    leader->state = PROC_STATE_ZOMBIE;
+    proc_free(leader);
+
+    // ---- LEG A: the CONTROL -- the class-blind pop takes the wrong note. --
+    TEST_EXPECT_EQ(a_post_child, 0, "A: a child_exit is queued FIRST");
+    TEST_EXPECT_EQ(a_post_susp, 0, "A: then a deferred ^Z lands behind it");
+    TEST_EXPECT_EQ(a_count, 2u, "A precondition: TWO notes queued");
+    TEST_ASSERT(a_decided_susp,
+                "A: the DECISION is about the susp, which is at index 1");
+    TEST_EXPECT_EQ(blind_got, 1, "A: the class-blind pop returns a note");
+    TEST_ASSERT(a_blind_is_child,
+                "A: and it is the CHILD_EXIT -- the head, not the note the "
+                "stop decision named. This is the defect, executed.");
+
+    // ---- LEG B: the fix -- the same state, the tail's real consumer. ------
+    TEST_EXPECT_EQ(b_reset_count, 0u, "B: queue reset between the legs");
+    TEST_EXPECT_EQ(b_post_child, 0, "B: child_exit first again");
+    TEST_EXPECT_EQ(b_post_susp, 0, "B: susp behind it again");
+    TEST_EXPECT_EQ(b_count, 2u, "B precondition: TWO notes queued");
+    TEST_EXPECT_EQ(picked_got, 1, "B: the stop consumer returns a note");
+    TEST_ASSERT(b_picked_susp,
+                "B: and it is the SUSP -- the note the decision named");
+
+    // Both halves of the conservation claim. Count alone would pass if the
+    // consumer had taken the child_exit and left the susp.
+    TEST_EXPECT_EQ(b_remaining, 1u, "B: exactly one note remains");
+    TEST_EXPECT_EQ(surv_got, 1, "B: the survivor dequeues");
+    TEST_ASSERT(b_surv_is_child,
+                "B: the child_exit SURVIVED -- it was never the stop's to eat");
 }

@@ -862,18 +862,33 @@ const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t) {
 // The STOP-class twin of the scanner above (round-2 F2). Same shape, reading
 // the `dfl` column instead of the terminate latch, so the two spellings of
 // "which notes act by default" stay one table lookup apart.
-static const char *notes_stop_pending_name_locked(struct NoteQueue *q,
-                                                  struct Thread *t) {
+//
+// It returns the ring INDEX, and both the peek and the pop below go through
+// it, because the alternative silently destroyed notes. The EL0 tail used to
+// decide with this class-filtered scan and then consume with the GENERAL
+// notes_dequeue_locked, which pops the first mask-permitted entry in FIFO
+// order regardless of class -- so a queue of [child_exit, tty:susp] stopped
+// correctly while popping (and discarding into an unread stack local) the
+// child_exit, leaving the tty:susp queued to re-fire. A decision and its
+// consumption written as two scans are two predicates; one index is one.
+static int notes_stop_pending_idx_locked(struct NoteQueue *q,
+                                         struct Thread *t) {
     u32 mask = (t != NULL) ? t->note_mask : 0u;
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         const char *name = q->ring[idx].name;
         if (notes_default_action(name) == NOTE_DFL_STOP &&
             (mask & (1u << (u32)notes_name_to_bit(name))) == 0)
-            return notes_canonical_name_ptr(name);
+            return (int)idx;
         idx = (idx + 1) % NOTE_QUEUE_DEPTH;
     }
-    return NULL;
+    return -1;
+}
+
+static const char *notes_stop_pending_name_locked(struct NoteQueue *q,
+                                                  struct Thread *t) {
+    int idx = notes_stop_pending_idx_locked(q, t);
+    return (idx < 0) ? NULL : notes_canonical_name_ptr(q->ring[idx].name);
 }
 
 // The STOP-class twin of notes_terminate_note_name_locked (round-2 F2): the
@@ -898,6 +913,38 @@ const char *notes_stop_note_name_locked(struct Proc *p, struct Thread *t) {
     if (!notes_proc_default_applies(p, NOTE_NAME_TTY_SUSP)) return NULL;
     if (proc_is_self_managing_notes(p)) return NULL;
     return notes_stop_pending_name_locked(p->notes, t);
+}
+
+// The dispatcher's stop consumer: decide and consume in ONE call, sharing the
+// peek's index scan so the note that decides the stop is the note that goes.
+//
+// The general notes_dequeue_locked is deliberately NOT used here: it is
+// class-blind, so it pops the queue head whenever the head is not the note the
+// stop decision was about. See notes_stop_pending_idx_locked's comment for
+// what that cost. Non-static so a unit test can put a second note in the ring
+// and prove the right one goes -- the defect is invisible on a one-note queue,
+// which is every queue any prior test built.
+//
+// The gate list is restated verbatim from notes_stop_note_name_locked rather
+// than factored out. That predicate is now TEST-ONLY, and the two must keep
+// answering identically or the tests that drive it would be verifying a
+// disposition production does not apply. Side-by-side is what makes that
+// diffable by eye.
+int notes_stop_dequeue_locked(struct Proc *p, struct Thread *t,
+                              struct Note *out) {
+    if (!p || !p->notes || !out) return 0;
+    if (!notes_proc_default_applies(p, NOTE_NAME_TTY_SUSP)) return 0;
+    if (proc_is_self_managing_notes(p)) return 0;
+    struct NoteQueue *q = p->notes;
+    int idx = notes_stop_pending_idx_locked(q, t);
+    if (idx < 0) return 0;
+    *out = q->ring[idx];
+    notes_pop_at_locked(q, (u32)idx);
+    // A no-op for every STOP-class name today (the helper acts only on
+    // `interrupt`), kept so a future STOP-class addition cannot skip the
+    // latch bookkeeping every other pop site performs.
+    notes_drain_intr_locked(p, q, out);
+    return 1;
 }
 
 // LS-5c: the SYS_NOTIFY body. The handler store and the latch clear run
@@ -1347,9 +1394,14 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
         // susp_stop_armed freshness check -- so a tty:cont that landed while
         // the note sat masked has already disarmed it, and this stop correctly
         // becomes a no-op rather than resurrecting a superseded ^Z.
-        if (notes_stop_note_name_locked(p, t)) {
-            struct Note stop_note;
-            (void)notes_dequeue_locked(p, t, &stop_note);
+        // ONE call, not a peek followed by a pop. The peek predicate still
+        // exists (notes_stop_note_name_locked, which a unit test can drive
+        // without a current_thread) but it is deliberately NOT on this path:
+        // two calls means two gate lists and two scans that must agree, and
+        // "must agree" is a property a reader has to check. One call cannot
+        // disagree with itself.
+        struct Note stop_note;
+        if (notes_stop_dequeue_locked(p, t, &stop_note)) {
             spin_unlock(&q->lock);
             (void)proc_job_stop_self(p);
             return;

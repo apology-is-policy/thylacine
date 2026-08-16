@@ -9939,8 +9939,14 @@ int main(void) {
         // Stopped is the resume proof AND the task-#19 regression); `bg`
         // resumes it backgrounded; `fg` + ^C -> interrupt terminates it
         // (post-resume signal delivery, the F4 leg); the shell reclaims the
-        // terminal + still runs pipelines; `exit` -> drain-then-EOF + a clean
-        // reap (incl. the orphan-rule teardown of the session). Boot-fatal;
+        // terminal + still runs pipelines; then the `maskstop` rung, which is
+        // the ONLY leg that reaches the EL0-return tail's NOTE_DFL_STOP arm --
+        // /susp-mask-child masks NOTE_BIT_TTY so the ^Z fan POSTS instead of
+        // stopping, keeps running through the ^Z, and takes the deferred stop
+        // on the EL0 return from its own unmask syscall (an ordinary ^Z can
+        // never get there: proc_job_stop_pgrp consumes it at POST time);
+        // `exit` -> drain-then-EOF + a clean reap (incl. the orphan-rule
+        // teardown of the session). Boot-fatal;
         // a silent hang is converted to a named FAIL by the probe's watchdog.
         // (Interactive `cat`-under-^Z stays the documented TTIN follow-up --
         // task #18; see docs/reference/136-ptyfs.md.)
@@ -9958,7 +9964,8 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: PTY-4 job-control E2E OK (hosted ut: run/stop/"
-                     "jobs/fg-restop/bg/fg-int/exit over a live pts)\n");
+                     "jobs/fg-restop/bg/fg-int/maskstop/exit over a live "
+                     "pts)\n");
         }
 #endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip + the 2e openpty E2E + the PTY-3 pouch probe + the PTY-4 jc E2E) */
     }
