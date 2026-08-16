@@ -7,12 +7,12 @@ code: [arch/arm64/mmu.c, arch/arm64/mmu.h]
 audit: hard
 guarded-by: [inv-i12, inv-i13, inv-i16, inv-i31, inv-i39]
 validated-by: [prose, gate-smp]
-locks: []
+locks: [lock-vma]
 hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/PORTABILITY.md"]
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -121,8 +121,43 @@ walker reaching a recycled page should find zeros.
 The kernel tables are built once, single-CPU, before secondaries start; they are
 read-mostly for the rest of the boot. The runtime mutation paths are the leaf
 flips described above, which need no lock by construction, and the per-Proc
-paths, which are serialized by the caller's `Proc.vma_lock`
-([[sub-kernel-fault]] holds it across the whole resolve-and-install).
+paths, which are serialized by the caller's address-space lock ([[lock-vma]];
+[[sub-kernel-fault]] holds it across the whole resolve-and-install).
+
+### How other CPUs see tables this one built — and a safety argument that was fiction
+
+The primary builds and mutates the tables through **cacheable** mappings, and
+there is **no cache clean anywhere** on that path. That is sound for every
+walker, and the reason is a translation-control setting rather than any
+maintenance: the walks themselves are configured cacheable and inner-shareable,
+so a secondary's table walker **participates in coherency** and observes the
+primary's dirty lines directly.
+
+This dossier previously said nothing about that, which is worth admitting
+plainly: it was not wrong here, it was silent, and **an omission that happens to
+avoid an error is not a correct treatment of the topic.**
+
+The account that *was* written down, in the source, was **false twice over**. It
+claimed the table builder cleans the tables to the point of coherency, and named
+the instruction it used to do so. No such clean exists — and the named
+instruction operates to the point of *unification*, not coherency, so it would
+not have accomplished what was claimed even if it had been there.
+
+Nothing was ever broken, because the coherent walker never needed it.
+
+**That is the whole lesson: a safety argument can be entirely fictional while the
+system is correct, which proves the argument was never what made it correct.** A
+reader auditing multi-processor coherence would have found that comment, believed
+the tables were cleaned, and reasoned from a false premise to a true conclusion —
+with nothing available to signal the gap, because the conclusion checks out. The
+comment survived precisely *because* it was describing something inessential; a
+fictional account of a load-bearing mechanism would have been falsified by the
+first failure.
+
+The genuinely non-coherent accesses on this path are elsewhere and are handled
+explicitly: the secondary's own writes before its translation is enabled, which
+bypass the caches and are confined to a documented mailbox protocol
+([[sub-kernel-boot-entry]]).
 
 The patcher runs single-CPU with interrupts fully masked, before any secondary
 exists. Full masking rather than interrupt-only is deliberate: it also closes
@@ -189,6 +224,19 @@ lock-free guard path depends on it entirely; that every user-PTE clear keeps its
 broadcast invalidate; that table teardown continues to free only table pages and
 to zero them; and that cross-Proc write keeps refusing read-only leaves.
 
+Two more, both about arguments rather than code:
+
+- **Table-walk coherence rests on the translation-control settings, not on cache
+  maintenance.** Nothing cleans the tables and nothing needs to. A change that
+  made the walks non-cacheable or non-shareable would silently require the
+  maintenance that has never existed, and the failure would appear on a secondary
+  as a walk of stale table memory.
+- **A safety comment describing maintenance that is not performed is worse than
+  no comment**, and this file carried one for a long time. When a mechanism is
+  cited as the reason something is safe, check that it exists and that it does
+  what its name says — the previous claim failed both tests and survived because
+  the property it purported to guarantee was guaranteed by something else.
+
 ## Seams
 
 - Three of the seven W^X-bearing composites carry no `_Static_assert` — the
@@ -225,6 +273,10 @@ P3-Dc the user install; P6 hardening #2 the unmap-plus-invalidate that closed
 the corruption bug; #808 the boot pre-demote; W1.5 the patcher; the debug
 surface added cross-Proc access; I-42 the JIT's outward generalization of the
 alias trick.
+
+Re-read 2026-08-16: the real-silicon bring-up corrected a table-walk coherence
+claim that named a maintenance operation the tree does not perform.
+[[chg-2026-08-16-mmu-fictional-clean]].
 
 ## Tests
 
