@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-08-15
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -283,6 +283,32 @@ out. ([[sub-kernel-death]] records the same shape found independently on
 the other side of the same fix, forty lines from a *valid* use of the same
 gate.)
 
+### The severity was escalated and then withdrawn, and the reporter was right
+
+Worth recording because the correction runs **downward**, which almost never
+gets written down.
+
+The defect arrived from the other track as a **use-after-free read**. Verifying
+it locally turned up two writer call sites, and on their strength the severity
+was raised to "use-after-free *writes* — heap corruption".
+
+**That escalation was wrong and was withdrawn.** Both writers run on a thread of
+the target process, exactly like the two same-process readers, so the
+exec-alone gate really does exclude them. The reporter's narrower original read
+was the correct one, and the ceiling is **a wrong disposition, not corruption**.
+
+Two things generalize. **Finding more call sites is not the same as finding more
+exposure** — the count went up and the reachable set did not, because the new
+sites sat inside the gate that was already holding. And **a reporter who scoped
+their own claim carefully deserves to have that scope tested before it is
+widened**, since the widening here came from the verifier, not from the report.
+
+The scope check itself was right to run: the report flagged one reader and said
+plainly it had not audited this tree for others. This tree has seven sites.
+Checking rather than trusting is what found the four readers enumerated above —
+and also what produced the withdrawn escalation. **The same diligence produced
+the real finding and the false one.**
+
 ### The fix, and why it is written per field
 
 The exec path no longer frees the table; it **zeroes it in place**, so the
@@ -295,6 +321,30 @@ rather than stylistic: under the kernel's freestanding, no-builtin build the
 compiler cannot form a block store from a byte loop, and a byte loop emits
 half-word stores — **torn writes under a lock-free cross-process reader**.
 The store width is an ABI property here, not an optimisation detail.
+
+The measured artefact is worth stating exactly, because the reasoning is the
+reusable part. The byte loop compiled to an **unroll-by-two emitting 2-byte
+stores** — precisely *because* `-ffreestanding -fno-builtin` are what stop the
+compiler recognising the loop as a block fill. So each eight-byte handler was
+written as **four independent halfword stores**, and a concurrent reader could
+observe a handler value **no code ever wrote** — half an old address, half zero
+— and pass the validity gate on it.
+
+**The flags that make this a kernel are the flags that make the idiom unsafe.**
+A byte loop is a perfectly good block fill in a hosted build, where the compiler
+recycles it into one; here it is guaranteed not to be, which inverts the usual
+intuition about which spelling is conservative.
+
+A field-wise struct assignment gives paired register stores instead —
+single-copy-atomic at the eight-byte granule, which is the granule every
+accessor actually reads.
+
+**What it deliberately does NOT promise**: a reader still sees an arbitrary
+*mix* of pre- and post-reset entries. That is the POSIX exec-versus-signal race
+and is fine, because every entry it sees is one that was genuinely installed or
+the default. **The guarantee is per-field integrity, not a snapshot** — and
+saying so is the difference between a bounded claim and one a later reader will
+over-read into atomicity the code never had.
 
 The memory-safety half is split into its own function so it can be unit
 tested, with the exec-alone precondition stated on it.
