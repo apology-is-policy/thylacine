@@ -15,7 +15,7 @@ design:
   - "docs/ARCHITECTURE.md section 5"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -57,11 +57,46 @@ firmware left the bank. This is [[inv-i21]] at its origin: the kernel is
 uniformly EL1h from its first instruction, so a thread's execution mode is never
 a function of its scheduling history.
 
-**Clear BSS, then make the per-CPU registers deterministic.** `TPIDR_EL0` and
-`TPIDR_EL1` have architecturally UNKNOWN reset values, so "BSS is zero" does not
-cover them — a pre-`thread_init` read of `current_thread()` would otherwise
-return firmware residue, and `TPIDR_EL0` would leak that residue into the first
-thread's saved TLS. Two instructions close both.
+**Clear BSS, then make the per-CPU registers deterministic.** `TPIDR_EL0`,
+`TPIDR_EL1` and `TPIDRRO_EL0` have architecturally UNKNOWN reset values, so "BSS
+is zero" does not cover them — a pre-`thread_init` read of `current_thread()`
+would otherwise return firmware residue, and `TPIDR_EL0` would leak that residue
+into the first thread's saved TLS.
+
+The third register is on a different axis from the other two and is worth
+separating. The kernel never writes it, and userspace can always read it — so a
+boot leftover there is not a correctness hazard that resolves at the first
+thread creation, it is **disclosure that persists for the machine's uptime**.
+Two of the three are about being wrong; the third is about being seen.
+
+### The trampoline did not inherit any of it
+
+The secondaries enter through a separate stub in this same file, and for a long
+time that stub zeroed none of these registers. The reset values are UNKNOWN at
+power-on-secondary entry for exactly the reason they are UNKNOWN at cold boot;
+the argument that motivated the primary's fix applied verbatim, and the code
+that implemented it was never copied across.
+
+**What kept it invisible is the sharper half.** Every emulated substrate the
+project runs on resets these registers to zero, so the thread-pointer read
+returned NULL and the NULL guard downstream held — *by accident*, on a value the
+platform supplied rather than the code. Real hardware under a hypervisor that
+deliberately poisons unknown-reset registers produced a non-zero, non-NULL
+pointer instead, and the first dereference walked into the poison.
+
+So the guard was never doing the work it appeared to do, and no amount of
+testing on the usual substrates could show that: **a guard that passes because
+the environment happens to supply the value it checks for is indistinguishable
+from a guard that works, until the environment changes.**
+
+This is the reason the project keeps a real-silicon host in the loop, stated
+concretely rather than as a principle.
+
+**And it is the canonical shape of a fix that stops at one site.** The two entry
+paths are in the same file, a few hundred lines apart, doing the same job for
+different CPUs. The primary's version carried a comment explaining precisely why
+the zeroing was necessary — which is what made it feel handled, and what stopped
+the question being asked one screen further down.
 
 **Derive and apply PAC keys.** Keys come from the counter, are derived once, and
 are stored so every CPU can apply the *same* ones. Per-CPU keys would be
@@ -106,6 +141,27 @@ secondary trampoline in the same file runs one CPU at a time under a serialized
 bring-up owned by [[sub-kernel-sched-smp]]. Every subsequent design that relies
 on "single-CPU at this moment" is relying on where its call sits relative to
 this.
+
+**The trampoline's stores are not coherent with the primary's view, and that is
+architectural rather than incidental.** It executes with the MMU off, so its
+writes are Device-typed and go straight to the point of coherency, while the
+primary is reading the same locations through a cacheable mapping. The two do
+not see each other without explicit maintenance, so the online handshake is a
+deliberate protocol — the flag isolated to its own cache line and published with
+an explicit clean — rather than an ordinary shared variable. The subsystem's own
+notes had recorded this as a caveat before it caused anything; it later did.
+
+The same hazard bounds what the trampoline may *call*. A helper invoked across
+the point where the MMU is enabled would push its call frame as a Device write
+and pop it as a cacheable read of a possibly-stale line, so a routine used there
+must be genuinely leaf, and the constraint is documented at the call rather than
+assumed — with the compiler's output checked, since leaf-ness is a property of
+what was generated and not of what was written.
+
+**The vector base is installed here, before any C runs.** It had previously been
+left at its UNKNOWN reset value until later in bring-up, which meant a fault
+taken by a secondary in that window vectored somewhere arbitrary — the failure
+mode being silence, since a wrong vector base does not report anything.
 
 ## Invariants enforced
 
@@ -155,6 +211,20 @@ register and written to memory only after the clear.
   not mapped yet.
 - **The stack re-anchor must precede identity-map retirement.** Both are in the
   sequence, in different files.
+- **Every determinism step owed by the primary is owed by the trampoline.** They
+  are two entry paths to the same state, in one file, and the trampoline is the
+  one that gets forgotten. Anything zeroed, installed or asserted before C runs
+  on the boot CPU must be checked against the secondary path explicitly — a
+  comment on the primary explaining *why* it is needed is the thing most likely
+  to make the omission feel already handled.
+- **A guard whose passing depends on the substrate is not a guard.** The NULL
+  check downstream of the thread pointer held on every emulator and on no real
+  machine. When a check tests for a value the platform happens to supply,
+  nothing in the test suite distinguishes it from a working one.
+- **Nothing reached before the MMU is enabled may make a non-leaf call.** A frame
+  pushed as a Device write and popped as a cacheable read is a silent corruption,
+  and leaf-ness must be verified in the generated code rather than inferred from
+  the source.
 
 ## Seams
 
@@ -179,10 +249,23 @@ by name — because one place claims it and does not do it.
 signoff"; the tree contains no `_hang` at all. The rename landed and the record
 of it did not.
 
+**The first real-silicon failure was four stacked defects, and this file owns
+only the root.** The uninitialized thread pointer is here; the recursion that
+turned one bad dereference into physical-memory corruption is bounded in
+[[sub-kernel-exception]]; the bring-up timeout that had never fired in its entire
+history — and so froze rather than reporting — is in
+[[sub-kernel-sched-smp]], which also records the decision to treat a partial
+bring-up as fatal rather than continue on fewer CPUs than were asked for. A
+reader tracing that failure needs all three; no single dossier holds it, and this
+note exists so the trail does not end here.
+
 ## Provenance
 
 Read from `arch/arm64/start.S` (704 lines) and `arch/arm64/kernel.ld` (255) in
-full, 2026-08-02, during the boot sweep. The linker script carries five
+full, 2026-08-02, during the boot sweep. Re-read 2026-08-16 at `efd83109` —
+`start.S` now 798, the linker script unchanged; the delta is the secondary
+trampoline's determinism fix and its instrumentation
+([[chg-2026-08-16-boot-entry-trampoline]]). The linker script carries five
 build-time assertions — link address, boot stack size, guard page size, and two
 about the kernel image fitting inside the fixed page-grain mapping without
 straddling a table boundary. Those two are the only mechanical protection against
