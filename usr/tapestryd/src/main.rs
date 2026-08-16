@@ -285,6 +285,7 @@ impl Driver for Tapestryd {
         // readiness pipe waits on exactly this line.
         let mut out = libthyla_rs::io::stdout();
         let _ = out.write_all(b"READY\n");
+        self.comp.report_composed_posture();
         say!(
             "tapestryd: serving /srv/tapestry + /srv/warp ({}x{})",
             self.comp.gpu.width,

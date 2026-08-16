@@ -224,6 +224,36 @@ doing before the implementation rather than after: had C-2 been written first,
 its first symptom on the dev loop would have been a dark console, which is a
 long way from its cause.
 
+### C-2a — the capability gate and the compositor context
+
+The first landable piece of C-2: a reserved compositor virgl context
+(`COMPOSITOR_CTX = 0x100`, far above the client `slot + 1` range so a client's
+stream can never author against the screen), minted only where `virgl`
+negotiated, and a startup line reporting which composition path the host can
+actually take.
+
+**The first cut reported nothing, and the boot passed anyway.** I had hung the
+posture report off `ensure_screen`, beside the other display resources — but
+`ensure_screen` runs only under `Scanout::Composed`, a state a normal boot never
+enters, so the line sat behind an unconstructed state and printed on neither
+host. The suite went 1367/1367 with the feature effectively absent. Which
+composition path is *available* is a property of the HOST, fixed at feature
+negotiation, so it now reports where the host is brought up.
+
+**Verified on both arms, differing in exactly one variable** — a negative
+assertion alone would have been satisfied by a broken fixture:
+
+| Host | Negotiation | Posture |
+|---|---|---|
+| dev loop, `virtio-gpu-pci` | `virgl=0` | `composed path = CPU (virgl=0)` |
+| thyla-pi, `virtio-gpu-gl-pci` | `virgl=1 capsets=2` | `compositor ctx 256 up` → `composed path = GPU` |
+
+Getting the positive arm took one correction of its own: the `capset` verb
+filters its output at the capset markers, so the Pi run *looked* like it lacked
+the line when it had simply not been shown it — `boot-probe.sh` keeps the full
+log on the host, and the line was there. A truncated capture and a missing
+feature are the same reading until you check which one you have.
+
 ### Still open leaving this run
 
 - **Warp-C C-2** — the attach verb and the per-slot host resources §4.5.8 now

@@ -602,6 +602,19 @@ struct Screen {
 /// screen since cfg-3) mint strictly above this -- no id ever aliases.
 const SCREEN_RES: u32 = 0x40;
 
+/// Warp-C C-2: the COMPOSITOR's own virgl context. Client warp ctxs take ids
+/// `slot + 1` over `0..MAX_WARP_CTXS`, so this sits far above that range and
+/// can never alias one -- a compositor ctx colliding with a client's would let
+/// a client's stream author commands against the screen.
+///
+/// CAPABILITY-GATED (GPU-DESIGN 4.5.9). It exists only where VIRTIO_GPU_F_VIRGL
+/// negotiated. Measured: the dev loop reports `virgl=0` on the default
+/// `virtio-gpu-pci`, thyla-pi reports `virgl=1 capsets=2` on real V3D -- so the
+/// composed GPU path is reachable ONLY on a GL host and the CPU path stays the
+/// universal one. A tapestryd that assumed GL here would take the console dark
+/// on the default device, which is what everything else boots under.
+const COMPOSITOR_CTX: u32 = 0x100;
+
 /// cfg-3 display-mode bounds (AURORA-CONFIG.md section 3.4): base
 /// virtio-gpu reports one preferred rect, not a mode list, so `mode W H`
 /// validates against sane bounds. The coarse dimension caps are a first
@@ -651,6 +664,10 @@ pub struct Comp {
     /// GPU resource ids are PER-GENERATION (a reweave mints a fresh one);
     /// pre-incremented, so the first id is SCREEN_RES + 1.
     res_seq: u32,
+    /// Warp-C C-2: is COMPOSITOR_CTX live? False on a non-GL host, where the
+    /// composed path stays the CPU one. Never torn down -- like `screen`, it is
+    /// held for the process lifetime and reclaimed by the RW-7 crash contract.
+    comp_ctx: bool,
     /// The container tree (G-6): hosting, geometry, focus.
     layout: Layout,
     screen: Option<Screen>,
@@ -1007,6 +1024,7 @@ impl Comp {
             warp_diag_noctx_arms: 0,
             warp_create_refused_noctx: 0,
             res_seq: SCREEN_RES,
+            comp_ctx: false,
             layout: Layout::new(),
             screen: None,
             scanout: Scanout::Boot,
@@ -1330,6 +1348,51 @@ impl Comp {
         // single leaf acking up to display size becomes Direct-eligible).
         self.reconcile();
         Ok(())
+    }
+
+    /// Warp-C C-2: mint the compositor's own virgl context, once, if the host
+    /// has GL. Returns whether it is live.
+    ///
+    /// Deliberately NOT fatal when absent or when CTX_CREATE fails: 4.5.9 makes
+    /// the CPU-composed path permanent, so "no compositor context" is a normal
+    /// operating state (every non-GL host, and bare metal, where virgl is a
+    /// virtualization transport with nothing to negotiate) rather than an error
+    /// to report. The one thing it must never do is leave `comp_ctx` true on a
+    /// failed create -- a later blit against a context the host never built is
+    /// the failure this whole arc is trying to make impossible to reach
+    /// silently, since a refused stream reports SUCCESS (4.5.4a).
+    /// Report the composed-path posture once at startup, and mint the context
+    /// if the host has GL.
+    ///
+    /// This is deliberately NOT hung off the composed-scanout path where the
+    /// other display resources are built. It was, and the line never printed:
+    /// `ensure_screen` runs only under `Scanout::Composed`, a state a normal
+    /// boot does not enter, so the report sat behind an unconstructed state and
+    /// said nothing on the one host whose posture most needed saying. Which
+    /// composition path is AVAILABLE is a property of the host, fixed at
+    /// feature negotiation -- so it is reported where the host is brought up.
+    pub fn report_composed_posture(&mut self) {
+        if self.ensure_comp_ctx() {
+            say!("tapestryd: composed path = GPU (compositor ctx {})", COMPOSITOR_CTX);
+        } else {
+            say!("tapestryd: composed path = CPU (virgl={})", self.gpu.virgl as u32);
+        }
+    }
+
+    fn ensure_comp_ctx(&mut self) -> bool {
+        if self.comp_ctx {
+            return true;
+        }
+        if !self.gpu.virgl {
+            return false;
+        }
+        if self.gpu.ctx_create(COMPOSITOR_CTX, b"tapestry").is_err() {
+            say!("tapestryd: compositor ctx create failed -- staying on the CPU composed path");
+            return false;
+        }
+        self.comp_ctx = true;
+        say!("tapestryd: compositor ctx {} up (virgl)", COMPOSITOR_CTX);
+        true
     }
 
     /// Allocate the compositor's screen buffer + resource (lazy; replaced
