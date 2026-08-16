@@ -4,7 +4,7 @@ type: chg
 title: "Two vault notes disagreed about I-32, and the newer one was right"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["2fd57a69"]
 touched: [inv-i32, sub-kernel-proc]
 established: []
 closed: []
