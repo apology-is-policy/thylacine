@@ -4,7 +4,7 @@ type: chg
 title: "Notes re-swept: 'the entire user context' was one word too many, and it was mine"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["abbcb026"]
 touched: [sub-kernel-notes]
 established: []
 closed: []
