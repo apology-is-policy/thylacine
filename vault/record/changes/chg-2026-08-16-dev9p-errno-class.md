@@ -4,7 +4,7 @@ type: chg
 title: "The channel existed and the value was being discarded"
 date: 2026-08-16
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["07b79f0b"]
 touched: [sub-kernel-ninep-dev9p]
 established: []
 closed: []
