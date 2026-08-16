@@ -169,7 +169,7 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   ports Quake/DOSBox) is a post-Loom graphics phase feeding Halcyon (Angle #4). The
   native proof-of-concept was PROMOTED into `main` and now runs -- `usr/lib/libtapestry`
   + `usr/tapestry-demo` + `usr/tapestryd`, all Cargo workspace members (the aux
-  `usr/apps/*` paths this once named are stale; main#237). **Deepened 2026-06-08**: TAPESTRY.md §13-17 elevate
+  `usr/apps/*` paths this once named are stale; aux#237). **Deepened 2026-06-08**: TAPESTRY.md §13-17 elevate
   `tapestryd` to the compositor (placement-transparent surfaces + live promotion),
   give Halcyon its anti-window UX model + layout-as-9P, add the agentic-enablement
   ABI, and fix the graphics sequencing (fbcon = stage 0 -> compositor + SDL /

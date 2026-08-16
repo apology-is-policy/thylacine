@@ -231,7 +231,7 @@ Loom arc's obligation is to deliver item 1 shaped to fit (the §7 requirements).
 
 ## 11. The proof-of-concept — LANDED; no longer a POC
 
-**Corrected 2026-08-16 (main#237).** This section described an unbooted,
+**Corrected 2026-08-16 (aux#237).** This section described an unbooted,
 `cargo build`-only POC living on the `aux/userspace-apps` branch. It was
 promoted into `main` (the aux-merge intermezzo, `docs/phase8-status.md`), grew a
 compositor, and now runs — so the text sent readers hunting a stale branch for

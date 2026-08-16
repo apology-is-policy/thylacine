@@ -600,5 +600,6 @@ editors, eventually Ctrl-Z).
 
 - LS-1 root-cause + fix: commit `6e533d6`; `arch/arm64/uart.c` (`uart_rx_init`, `uart_rx_path_enabled`), `usr/login/src/main.rs` (`read_line`).
 - Interactive-terminal gap survey + U-PTY scope: `docs/ARCHITECTURE.md` 23.5, `docs/UTOPIA-SHELL-DESIGN.md` 10.1-10.8 + 13 (editor), `specs` gate-9 (`pty.tla`).
-- Coreutils gap: task #925; the aux `usr/apps/**` ready set.
+- Coreutils gap: task #925. (The "aux `usr/apps/**` ready set" this named was
+  promoted into `usr/coreutils/src/bin/`, 51 binaries; aux#237.)
 - The external-stdio flip seam: `usr/utopia/libutopia/src/eval/stmt.rs:71-81`, 476-532.

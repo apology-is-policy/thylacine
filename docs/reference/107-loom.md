@@ -981,7 +981,7 @@ serialize SQ/CQ access externally and may only call `enter()` lock-free.
 
 **The Tapestry seam** (`docs/TAPESTRY.md`). The libtapestry `Loom` trait
 (`usr/lib/libtapestry`, promoted into `main`; the `aux/userspace-apps` location
-this once named is stale -- main#237) maps onto this surface with a one-line
+this once named is stale -- aux#237) maps onto this surface with a one-line
 handoff -- `impl tapestry::Loom for libthyla_rs::loom::Ring`. **Already wired**
 at `5f2217f6`; the mapping below is the as-built correspondence, not a plan:
 
