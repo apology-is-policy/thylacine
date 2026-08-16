@@ -4,7 +4,7 @@ type: chg
 title: "A third shareable kind, and a leak that breached nothing only by coincidence"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["d6c983b0"]
 touched: [sub-kernel-weft]
 established: []
 closed: []
