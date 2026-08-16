@@ -4,7 +4,7 @@ type: chg
 title: "A rule stated as a mechanism is violated correctly by its first exception"
 date: 2026-08-16
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["f29a42cc"]
 touched: [sub-kernel-devdev, sub-netd-server, sub-kernel-content, sub-kernel-dev, sub-libtapestry, sub-utopia-eval, sub-stratum-session]
 established: []
 closed: []
