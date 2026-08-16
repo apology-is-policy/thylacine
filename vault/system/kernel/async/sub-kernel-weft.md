@@ -15,7 +15,7 @@ design:
   - "docs/NET-THROUGHPUT.md"
   - "docs/reference/125-weft.md"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -58,23 +58,37 @@ reference to police.
 
 ### Admission is minted, never asserted
 
-A shareable region is one of exactly two kinds, and the kernel decides which by
+A shareable region is one of exactly three kinds, and the kernel decides which by
 reading the region's *type*, not a flag its creator set:
 
 - an ordinary anonymous region — a flow ring;
-- a device-passive framebuffer region, whose immutable subtype bit is set only
-  by the allocation call that mints it.
+- a device-passive framebuffer region, which the device **reads**;
+- a graphics buffer object, which the device **writes**.
 
-Everything else — a plain device region holding a command queue or descriptor
-table, and all memory-mapped I/O — is structurally unshareable. There is no flag
-a caller can set to admit one. Sharing a region the *device interprets* is
-therefore impossible by construction, which is the point: the bit is minted at
-allocation by the kernel and is create-immutable.
+The last two are distinguished by immutable subtype bits set only by the
+allocation calls that mint them. Everything else — a plain device region holding
+a command queue or descriptor table, and all memory-mapped I/O — is structurally
+unshareable. There is no flag a caller can set to admit one. Sharing a region the
+device *interprets* is therefore impossible by construction, which is the point:
+the bits are minted at allocation by the kernel and are create-immutable.
+
+**The direction of device access is what separates the two device kinds, and
+neither direction weakens the admission argument.** What matters is that the
+device treats the region as *data* — pixels in, pixels out — rather than as
+instructions to execute.
 
 The claim path re-derives the kind from the type and cross-checks it against the
-server's declared geometry — a ring must declare descriptor slots, a framebuffer
-must declare none. A server whose declaration contradicts its own registered
-region fails closed and is never mapped.
+server's declared geometry — a ring must declare descriptor slots, and **both**
+map-only kinds must declare none, since neither has a descriptor ring and a
+declared geometry over one is a contradiction. A server whose declaration
+contradicts its own registered region fails closed and is never mapped.
+
+**The two device kinds are read by test order, in two places here**, and the
+ordering is unambiguous only because the allocator cannot mint a region that is
+both. That guarantee lives in [[sub-kernel-hwcap]]'s constructor — an enumerated
+argument, so the illegal combination cannot be written at the call — and nothing
+at either reading site says so. Verified: that constructor is the sole writer of
+either bit across the kernel. It holds, and it holds at a distance.
 
 ### The pin is the lifetime
 
@@ -245,6 +259,31 @@ budget. The pages are the *sharer's* commitment, so the client's ordinary page
 count is untouched; this separate axis is what bounds a client's pin, including
 across a sharer crash.
 
+**And the sharer's own charge had nothing settling it at all.** The daemon
+detaches its ring when a flow closes — every closed zero-copy flow — while the
+guest's mapping and the binding's pin live on. So the drop that finally frees the
+pages is the *guest's* address-space teardown: generic code, in another process,
+holding that process's lock, with no way to name who paid. Sixty-four pages per
+closed flow, monotonically.
+
+The release rule is now: the sharer settles **when the region is shared out and
+this process has unmapped it**, whether or not the pages freed. Once it has
+handed the region across and let go of its own view, it cannot reach those pages,
+and charging a process for memory it cannot touch caps it for nothing — from
+there the consumer's own shared-mapping axis accounts them.
+
+**The discriminator is deliberately "shared out" and not "does anything still
+hold this."** A process's *own* other claim — a ring registered into its own
+async ring, say — also keeps the region alive, and there the charge must stay
+until that claim drops. The broader test would release it early, which is the
+budget-inflating direction.
+
+Worth recording plainly: **the leak breached no bound only because the daemon
+happens to be exempt.** That exemption follows from an identity chain granted for
+entirely unrelated reasons, so the safety was a coincidence of two independent
+gates rather than a property anyone enforced — and the first non-exempt driver
+would have made it a live monotonic leak.
+
 ## Error paths
 
 `-1` from share for a non-driver caller, a zero or oversize length, an
@@ -292,6 +331,18 @@ hybrid split the orthodox 9P transport uses.
   computed wide.
 - **The budget charge and uncharge pair on the mapping flag**, so every teardown
   of a shared mapping uncharges.
+- **The sharer settles on "shared out", never on "still held".** Broadening that
+  test to any surviving reference releases the charge while the process's own
+  claim is still live — an under-count, which is the direction that breaks the
+  bound.
+- **A refund goes to the recorded payer, not to whoever is dropping.** Claim
+  against the region before the drop, restore if it did not free; the reaper's
+  sweep runs the same protocol, because the owner it is sweeping is not
+  necessarily the payer.
+- **The two device kinds are disambiguated by test order** in both the kind
+  derivation and the binding allocation. That is sound only while the two subtype
+  bits are mutually exclusive by construction, which is enforced in another
+  subsystem's constructor and stated at neither reader.
 - **The close-time unmap keeps its identity guard.** Trusting the recorded
   address alone tears down whatever now lives there.
 - **The reaper unregisters before the close reads the binding**, under the same
@@ -327,4 +378,4 @@ hybrid split the orthodox 9P transport uses.
 
 ## Provenance
 
-[[chg-2026-08-02-async-sweep]].
+[[chg-2026-08-02-async-sweep]], [[chg-2026-08-16-weft-third-kind]].
