@@ -131,28 +131,49 @@ start_pair() {
     fi
     for d in "$MAIN_DIR" "$AUX_DIR"; do [ -d "$d" ] || die "missing worktree: $d"; done
 
+    # ADDRESS PANES BY ID, NEVER BY INDEX. `-P -F '#{pane_id}'` makes tmux hand
+    # back the id (%0, %1) it just created; ids are absolute, never renumber,
+    # and are immune to base-index settings.
+    #
+    # The first version used `.0` and `.1` and was silently, catastrophically
+    # wrong on any host with `pane-base-index 1` -- which is a very common
+    # setting and is this one. Measured on the live session: with panes at
+    # indices 1 and 2, `.0` -> %0, `.1` -> %0, `.2` -> %1, `.3` -> %0. AN
+    # OUT-OF-RANGE PANE INDEX DOES NOT ERROR; TMUX ALIASES IT TO THE FIRST
+    # PANE. So both send-keys landed on main: it received its own resume
+    # command AND aux's, the latter typed straight into the running agent's
+    # input box, while aux's pane got nothing at all. Two distinct addresses
+    # collapsed onto one target with no diagnostic.
+    #
     # Launch a SHELL and type the command into it, rather than making claude the
     # pane's root process: if claude exits (crash, /exit, a bad resume) the pane
     # then survives holding the error instead of vanishing with it.
-    tmux new-session -d -s "$TMUX_PAIR" -n "$WINDOW" -c "$MAIN_DIR"
-    tmux split-window -h -t "$TMUX_PAIR:$WINDOW" -c "$AUX_DIR"
+    local p_main p_aux
+    p_main=$(tmux new-session -d -P -F '#{pane_id}' -s "$TMUX_PAIR" -n "$WINDOW" -c "$MAIN_DIR") \
+        || die "could not create tmux session '$TMUX_PAIR'"
+    p_aux=$(tmux split-window -h -P -F '#{pane_id}' -t "$p_main" -c "$AUX_DIR") \
+        || die "could not split the aux pane"
 
-    tmux select-pane -t "$TMUX_PAIR:$WINDOW.0" -T "main:$main_conv"
-    tmux select-pane -t "$TMUX_PAIR:$WINDOW.1" -T "aux:$aux_conv"
-    tmux set-option -p -t "$TMUX_PAIR:$WINDOW.0" @thyla-role main
-    tmux set-option -p -t "$TMUX_PAIR:$WINDOW.1" @thyla-role aux
+    # The control that would have caught the index bug on its first run.
+    [ -n "$p_main" ] && [ -n "$p_aux" ] && [ "$p_main" != "$p_aux" ] \
+        || die "pane ids are not distinct (main='$p_main' aux='$p_aux') -- refusing to drive two agents into one pane"
+
+    tmux select-pane -t "$p_main" -T "main:$main_conv"
+    tmux select-pane -t "$p_aux"  -T "aux:$aux_conv"
+    tmux set-option -p -t "$p_main" @thyla-role main
+    tmux set-option -p -t "$p_aux"  @thyla-role aux
     tmux set-option -t "$TMUX_PAIR" pane-border-status top
     tmux set-option -t "$TMUX_PAIR" pane-border-format ' #{pane_index} #{pane_title} #{pane_current_path} '
 
-    launch_pane "$TMUX_PAIR:$WINDOW.0" "$MAIN_DIR" "claude --resume $main_conv" main && started=1
-    launch_pane "$TMUX_PAIR:$WINDOW.1" "$AUX_DIR"  "claude --resume $aux_conv"  aux  && started=1
+    launch_pane "$p_main" "$MAIN_DIR" "claude --resume $main_conv" main && started=1
+    launch_pane "$p_aux"  "$AUX_DIR"  "claude --resume $aux_conv"  aux  && started=1
 
     if [ "$started" = 1 ]; then
         sleep 6
         settled "$MAIN_DIR" main
         settled "$AUX_DIR"  aux
     fi
-    tmux select-pane -t "$TMUX_PAIR:$WINDOW.0"
+    tmux select-pane -t "$p_main"
     echo "thyla-tmux: '$TMUX_PAIR' up -- pane 0 main ($main_conv), pane 1 aux ($aux_conv)"
     attach "$TMUX_PAIR"
 }
@@ -166,10 +187,12 @@ start_vault() {
     fi
     claude_pid_in "$VAULT_DIR" >/dev/null && die "a claude is already serving $VAULT_DIR (outside tmux?) -- refusing a second one"
 
-    tmux new-session -d -s "$TMUX_VAULT" -n vault -c "$VAULT_DIR"
-    tmux select-pane -t "$TMUX_VAULT:vault.0" -T "vault:$conv"
-    tmux set-option -p -t "$TMUX_VAULT:vault.0" @thyla-role vault
-    tmux send-keys -t "$TMUX_VAULT:vault.0" "claude --resume $conv" C-m
+    local p_vault
+    p_vault=$(tmux new-session -d -P -F '#{pane_id}' -s "$TMUX_VAULT" -n vault -c "$VAULT_DIR") \
+        || die "could not create tmux session '$TMUX_VAULT'"
+    tmux select-pane -t "$p_vault" -T "vault:$conv"
+    tmux set-option -p -t "$p_vault" @thyla-role vault
+    tmux send-keys -t "$p_vault" "claude --resume $conv" C-m
 
     # THE CHECK IS BEHAVIOURAL, NOT PREDICTIVE, deliberately. Nothing on disk
     # resolves a conversation name -- there is no vault project dir to inspect
