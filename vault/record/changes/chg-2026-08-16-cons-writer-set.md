@@ -4,7 +4,7 @@ type: chg
 title: "A role serializes only against writers who take it"
 date: 2026-08-16
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["b6254daf"]
 touched: [sub-kernel-cons, abi-boot-banner]
 established: []
 closed: []
