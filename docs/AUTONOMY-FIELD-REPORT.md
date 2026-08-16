@@ -34,13 +34,60 @@ keystroke channel.
 
 ### Still untested
 
-- **The nudge.** Whether queued input survives the context rebuild is unknown;
-  the next self-compaction answers it for free. If it does not survive, the
-  fallback is `resume-note.py` sending it at SessionStart — which is why `pane=`
-  now rides in the `.meta`.
+- ~~**The nudge.**~~ **ANSWERED, and not the way this predicted** — see §1b.
 - **The belay.** Needs two consecutive static-HEAD compactions. Never exercised.
   It is the most safety-critical path and the least tested.
 - **The transcript fallback.** Only the slot path has run live.
+
+## 1b. The nudge — measured, and the obvious diagnosis was wrong
+
+The queued nudge did nothing. The tempting conclusion was "the input queue only
+holds one message" or "`/compact` discards queued input". **Both are false, and
+the operator supplied the correction that made the real mechanism visible.**
+
+What was actually measured:
+
+| Probe | Result |
+|---|---|
+| `/copy` + Enter, then a plain message + Enter, no delay | **both arrived** — the queue holds two, and a slash command followed by a message is exactly the failing shape |
+| the same two behind `/compact` | the second never appeared, and the operator confirms the text was never even visible |
+| the pane afterwards | 45 lines — **`/compact` clears the scrollback**, so nothing of the attempt survives to inspect |
+
+So the queue is fine. What a queued message does not survive is **the rebuild**:
+queued *before* the compaction it belongs to the session being torn down and
+goes with it. The operator's manual habit is the working version and the thing
+worth copying — submit `/compact`, wait for it to *start*, and type **while it
+runs**, so the message lands in the session being *built*. **The difference is
+about two seconds in when the keystrokes are sent, and it is the whole
+difference between waking and not.**
+
+Fixed by `tools/thyla-nudge-watch.sh`: a detached watcher armed *before* the
+`/compact`, polling the pane for the compacting state, then typing. Keyed on the
+observable transition rather than a guessed delay, because the compaction's
+duration varies with the summary length — a sleep long enough to be safe is also
+long enough to miss a fast one. A finished-state stem is the second trigger, so
+the window cannot be missed by being slightly *late*, only by being absent.
+
+**Two lessons, both about controls, both cheap and both nearly missed:**
+
+- **The negative control passed because the watcher was never running.** The
+  first version used `setsid`, which **macOS does not ship**; it died instantly
+  and "nothing fired" was perfectly true. Only the second leg — *is the process
+  still alive?* — caught it. A negative assertion is satisfied by a broken
+  fixture ([[bug-215-negative-assert-satisfied-by-broken-fixture]]).
+- **`capture-pane` sees the TUI, not tool output.** A call's *command text*
+  renders; its *result* never does. The first positive control tried to publish
+  a marker by `echo`ing it and silently could not work. This also means the
+  marker must never be passed as an argument — the launching command line is
+  itself rendered, so it would match itself instantly.
+
+**Residual risk, named rather than papered over:** neither marker has ever been
+observed in a real pane; they are inferred from the client's behaviour, and the
+only way to see the real string is to run a real compaction. Mitigated by
+matching the case-insensitive *stem* (surviving "Compacting conversation…" vs
+"Compacting…") and by the timeout logging `nudge-timeout` — so a wrong guess
+fails **loudly in the ledger** rather than silently as a session that just sat
+there. The next real compaction settles it either way.
 
 ### Open decision (user's)
 

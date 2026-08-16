@@ -157,27 +157,43 @@ printf 'role=%s\nhead=%s\nreason=%s\nat=%s\npane=%s\n' \
 # prompt holding a note that says "no one is waiting on you", waiting for
 # someone. Autonomy across the boundary needs something to press enter, and the
 # only thing in a position to do that is the same keystroke channel that sent
-# the /compact. So queue the nudge directly behind it.
+# the /compact -- but WHEN it types turns out to matter more than that it does.
 #
-# WHETHER THE QUEUE SURVIVES THE COMPACTION IS AN EMPIRICAL QUESTION, and the
-# next self-compaction answers it for free -- cheaper than reasoning about it.
-# If it turns out the queue is cleared when the context is rebuilt, the fallback
-# is for ~/.claude/resume-note.py to send the nudge itself at SessionStart; that
-# is why `pane=` now rides in the .meta, so the fallback is a small edit rather
-# than a rediscovery of a fact this side already knew.
+# THE FIRST FIX QUEUED THE NUDGE DIRECTLY BEHIND THE /compact AND DID NOTHING.
+# Measured afterwards, the reason is not the one it looks like: the client's
+# input queue holds two messages perfectly well (probed with a /copy standing in
+# for the /compact -- the second message arrived intact). What a queued message
+# does not survive is the REBUILD. Queued before the compaction, it belongs to
+# the session being torn down and goes with it; the operator never saw the text
+# appear at all, and /compact clears the pane, so nothing of it survives to
+# inspect afterwards either. A component test of every link would have passed.
 #
-# Tagged [auto-nudge] because it lands in the transcript looking like the
-# operator speaking, and it is not.
-NUDGE="${THYLA_NUDGE:-[auto-nudge] Continue from your resume note.}"
+# What works is the operator's own manual habit, which is the thing this script
+# automates: submit /compact, wait for it to START, and type while it runs -- a
+# message typed during the rebuild lands in the session being built and submits
+# when it finishes. That is a two-second difference in when the keystrokes are
+# sent, and it is the entire difference between waking and not.
+#
+# Nothing in THIS process survives to do that waiting, so the waiting is
+# delegated to a detached watcher, armed BEFORE the /compact is queued so that
+# it is already polling when the client changes state.
+WATCH="$(cd "$(dirname "$0")" && pwd)/thyla-nudge-watch.sh"
+if [ -x "$WATCH" ]; then
+    nohup "$WATCH" "$TMUX_PANE" >/dev/null 2>&1 < /dev/null &
+    NUDGE_STATE="armed -- detached watcher pid $!"
+else
+    # Named, not silent: without it the compaction still works perfectly and the
+    # far side simply never wakes, which is the failure mode hardest to tell
+    # from "the agent decided to stop".
+    NUDGE_STATE="NOT ARMED -- $WATCH missing or not executable; the far side will sit at a prompt"
+fi
 
 tmux send-keys -t "$TMUX_PANE" C-u          # never submit residue
 tmux send-keys -t "$TMUX_PANE" "/compact"
 tmux send-keys -t "$TMUX_PANE" C-m          # fires when this turn ends
-tmux send-keys -t "$TMUX_PANE" "$NUDGE"
-tmux send-keys -t "$TMUX_PANE" C-m
 say ""
 say "note armed  : $NOTE_PENDING (${NOTE_CHARS} chars, ${NOTE_AGE}s old)"
 say "/compact queued -- it submits when this turn ends."
-say "nudge queued: $NUDGE"
+say "nudge       : $NUDGE_STATE"
 say "The far side consumes the pending note exactly once and is told this was a"
 say "SELF-compaction, so it knows to continue rather than wait for direction."
