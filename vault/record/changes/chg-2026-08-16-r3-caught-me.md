@@ -4,7 +4,7 @@ type: chg
 title: "I claimed the rule was unenforceable and the hook refused the commit"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["8f0a7b6d"]
 touched: []
 established: []
 closed: []
