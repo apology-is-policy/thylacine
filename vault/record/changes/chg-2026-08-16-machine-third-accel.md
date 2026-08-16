@@ -4,7 +4,7 @@ type: chg
 title: "A default tested by a real event, and a defence written before its collision"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["37e5e96d"]
 touched: [sub-substrate-machine]
 established: []
 closed: []
