@@ -5,16 +5,16 @@ title: "The Thread: context, kstack, and the on_cpu protocol"
 parent: moc-kernel-execution
 code: ["kernel/thread.c", "kernel/include/thylacine/thread.h"]
 audit: hard
-guarded-by: []
+guarded-by: [inv-i21, inv-i31, inv-i44]
 validated-by: [gate-smp]
 locks: [lock-proc-table]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-16
 ---
 ## Purpose
 
 A `Thread` is a schedulable register context with a kernel stack, a Proc
-backref, and a run state. This dossier owns its allocation, its four
+backref, and a run state. This dossier owns its allocation, its five
 creation shapes, its stack geometry, and the one property that makes freeing
 it safe: `on_cpu`.
 
@@ -29,6 +29,7 @@ default), which several guards rely on.
 |---|---|---|---|
 | `thread_create` / `thread_create_with_arg` | EL1 | `thread_trampoline` → `blr entry` | own 32 KiB alloc |
 | `thread_create_user` | EL0 | `thread_user_trampoline` → `eret` | own 32 KiB alloc |
+| `thread_create_forked` | EL0 | `thread_fork_trampoline` → the shared exception return | own 32 KiB alloc |
 | `thread_init` (kthread) / `thread_init_per_cpu_idle` | EL1 | never (born RUNNING) | none — the boot stack |
 | `thread_create_bootcpu_idle` | EL1 | `thread_trampoline` | none — a dedicated BSS stack |
 
@@ -63,6 +64,62 @@ ASID is not known until switch time; the context-switch pre-hook installs
 the real value. Baking the kernel root means a hypothetical missing-pre-hook
 path faults *safely* instead of aliasing ASID 0 onto a user page table.
 
+### The fourth shape restores a frame instead of building one
+
+Every other constructor *composes* a starting context: pick a trampoline, stuff
+the callee-saved slots with arguments, let the trampoline assemble a world. The
+forked one is the inverse. It receives the parent's live exception frame and
+reproduces it, because the child is not starting — it is **continuing the
+parent's C frame**, at the same instruction, with the same condition flags.
+
+The decision is a **pure function** of (destination, source, child stack), split
+out deliberately so it is reachable by a test with no Proc in existence. It is
+the source frame with exactly **two** edits: the first argument register zeroed,
+which is the entirety of "this call returns twice", and the stack pointer
+replaced, which is mandatory — two Procs sharing an address space must not share
+a stack pointer.
+
+**Every omission from that list is load-bearing**, which is why the copy is
+written out field by field rather than as an assignment. The return address
+copied verbatim *is* "resumes at the same instruction". The saved process state
+copied verbatim carries the parent's condition flags, live if a conditional
+follows the syscall — and it cannot be forged from EL0 because the hardware
+wrote it on exception entry. The remaining general registers are verbatim
+because the child continues the parent's frame.
+
+There is a second, blunter reason for the field-by-field form: a whole-struct
+assignment of this size compiles to a memory-copy call that a freestanding
+kernel does not link.
+
+**The frame is carved at the exact address the exception entry path would have
+chosen** — the top of the child's own fresh kernel stack, less one frame. That
+address is the whole trick: it lets the trampoline hand the child to the
+**shared, audited exception-return** rather than open-coding a second return to
+user mode. The return path's loads are stack-relative and its final adjustment
+lands precisely on the stack top, exactly as from any other return. Alignment is
+*asserted* rather than assumed, because a misaligned stack pointer at the return
+faults at kernel level with the frame half-restored.
+
+**The absence of a register-zeroing sweep is the correctness argument.** The
+ordinary user-thread trampoline scrubs the general registers so a fresh thread
+cannot inherit kernel residue. This one deliberately does not, and the inversion
+is exact: the child is resuming its parent's userspace frame, so scrubbing would
+break the fork rather than harden it. Two trampolines, opposite dispositions on
+the same question, each right for its own case.
+
+**Floating-point state comes from the live registers, not the caller's saved
+context.** The caller is *running*, so its saved context holds whatever it had at
+its last switch-out — stale by definition. This is the same trap as the note
+delivery path's [[sub-kernel-notes]] register save: the structure that looks like
+"the caller's state" is only current for a caller that is not currently running,
+and the fork path is exactly the case where it isn't.
+
+**The thread-local pointer is programmed verbatim, and that is a layering
+decision.** The interface documents zero as "inherit the caller's". Resolving it
+here would require this layer to read a live system register on another thread's
+behalf; the syscall handler has the caller in scope and owns the meaning. The
+constructor stores what it is given.
+
 **The `on_cpu` protocol.** `on_cpu` is true while a thread is actively
 running on some CPU — registers live, saved `ctx` stale. It is set when the
 thread is picked and cleared by the *destination* CPU's resume frame **after**
@@ -79,13 +136,22 @@ here should now be impossible, so extinct rather than free-under-run); then
 
 ## Data structures
 
-`struct Thread` is 1232 bytes, pinned by a `_Static_assert` whose message is
+`struct Thread` is 1760 bytes, pinned by a `_Static_assert` whose message is
 a running changelog of every append and why. `magic` at offset 0, same SLUB
 double-free defence as `Proc`. Alignment is `_Alignof(struct Thread)` (16,
 from the embedded `Context`'s `_Alignas(16)` vector block) — passing a
 hardcoded 8 worked only by the accident that the size happened to be a
 multiple of 16, and a future field could have silently misaligned every
 slab object after the first.
+
+The largest single append is a **520-byte floating-point save area** for note
+delivery, which took the structure from 1232 to 1760 and cost the dedicated
+slab cache one object per page — three per page down to two. The alternative,
+allocating that area lazily or on the heap, was considered and rejected on a
+hard constraint rather than a preference: **note delivery must stay
+allocation-free**, so the space has to be pre-committed in the descriptor or it
+cannot be relied on at the moment it is needed. The assertion message carries
+the whole argument, which is why it reads as a changelog rather than a number.
 
 The tail is dense with single-purpose flags that each fit an existing
 padding hole: `cpu_pinned`, `exit_close_active`, `debug_ss_armed`,
@@ -126,8 +192,15 @@ restored when `prev` is switched back to.
 ## Invariants enforced
 
 - The `on_cpu` gate is the impl of "a ctx/kstack is never written by two
-  CPUs concurrently" (I-21's thread half; the scheduler dossier owns the
+  CPUs concurrently" ([[inv-i21]]'s thread half; the scheduler dossier owns the
   migration protocol proper).
+- [[inv-i44]]'s thread half: a forked child resumes the parent's frame on its
+  **own** stack, and the constructor refuses to be the place that decides
+  otherwise — the stack pointer is a required argument, not a default.
+- [[inv-i31]] composes here rather than being enforced: a shared-memory child
+  gets a fresh `Thread` over the *parent's* address space, so the pre-switch hook
+  resolves the same address-space identifier. One address space is one ASID
+  however many threads reach it.
 - `cpu_pinned` keeps every boot/idle-stack thread on its own CPU.
 - The kstack guard region enforces stack-overflow detection per thread.
 
@@ -167,6 +240,22 @@ is the running proof that the window is real.
   no-access would silently fault its next user, whatever that user is.
 - `_Alignof` in the cache creation must stay; a hardcoded alignment is a
   latent slab-misalignment bug.
+- **The fork frame copy enumerates fields, so it is complete only for the
+  struct as it stands.** A member added to the exception frame is silently not
+  copied — the child would inherit a zero where the parent had a value. What
+  actually prevents that is a size assertion living with the *assembly* frame
+  layout, in another file, whose purpose is the entry/exit ABI: an added field
+  trips it and forces the author to update the assembly. Nothing routes them
+  here. The completeness is real and the guard is incidental.
+- **The two user trampolines must keep disagreeing about register scrubbing.**
+  Fresh-thread zeroes, forked does not. Making them consistent breaks whichever
+  one is changed.
+- **Floating-point for a fork must come from the live registers.** The caller's
+  saved context is stale precisely because the caller is running.
+- **The forked frame must stay at the top-of-stack address the entry path would
+  have used.** Moving it silently breaks the shared exception return, whose
+  offsets are stack-relative — the reuse of that audited path is the reason the
+  address is what it is.
 
 ## Seams
 
@@ -190,3 +279,15 @@ is the running proof that the window is real.
   are `sleep`/`wakeup`.
 
 ## Provenance
+
+Originally written 2026-08-01; the section was left empty at the time, so the
+first read's exact tip is not recoverable and is not guessed at here.
+
+Re-read 2026-08-16 at `efd83109` — `kernel/thread.c` (820 lines) and
+`kernel/include/thylacine/thread.h` (773). The only change since was the
+fork-restore constructor and its pure decision function. Cross-checked this
+pass: the exception-frame struct against the copy's field list (complete), the
+size and offset assertions that guard it, both user trampolines' opposite
+register-scrub dispositions, and the floating-point save's source.
+
+[[chg-2026-08-16-thread-fork-restore]].

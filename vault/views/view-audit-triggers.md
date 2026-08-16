@@ -72,7 +72,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-syscall-abi]] | kernel/include/thylacine/syscall.h, usr/lib/libt/include/thyla/syscall.h, usr/lib/libt/include/thyla/poll.h, usr/lib/libt/src/start.S, usr/lib/libthyla-rs/src/lib.rs | inv-i5, inv-i13, inv-i32 | - **A new syscall appends. It never fills a hole.** The three retired numbers |
 | [[sub-kernel-syscall-dispatch]] | kernel/syscall.c | inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44 | - **A new syscall's authority gate goes in the inner, not the handler**, unless |
 | [[sub-kernel-territory]] | kernel/territory.c, kernel/include/thylacine/territory.h | inv-i1, inv-i3, inv-i33 | On any change to this file, prosecute: |
-| [[sub-kernel-thread]] | kernel/thread.c, kernel/include/thylacine/thread.h |  | - **#788 is the shape to keep in mind.** `thread_free` freeing a |
+| [[sub-kernel-thread]] | kernel/thread.c, kernel/include/thylacine/thread.h | inv-i21, inv-i31, inv-i44 | - **#788 is the shape to keep in mind.** `thread_free` freeing a |
 | [[sub-kernel-timer]] | arch/arm64/timer.c, arch/arm64/timer.h, arch/arm64/rtc.c, arch/arm64/rtc.h | inv-i15, inv-i17 | - The periodic path must stay byte-unchanged for a running CPU — the slice model |
 | [[sub-kernel-torpor]] | kernel/torpor.c, kernel/include/thylacine/torpor.h | inv-i9, inv-i24 | - The lock-free mismatch return must never be extended to the EQUAL |
 | [[sub-kernel-uaccess]] | arch/arm64/uaccess.S, arch/arm64/uaccess.c, arch/arm64/uaccess.h | inv-i13 | - **A new fault point needs a table entry.** The entry is what separates |
