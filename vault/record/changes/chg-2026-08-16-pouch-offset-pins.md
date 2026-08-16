@@ -4,7 +4,7 @@ type: chg
 title: "A per-artifact assert certifies that artifact, never the one in the link"
 date: 2026-08-16
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["0768785d"]
 touched: [sub-pouch-process]
 established: []
 closed: []
