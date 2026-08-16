@@ -10,9 +10,13 @@
 #   tools/warp-host.sh capset    # virtio-gpu-gl-pci + egl-headless capset probe
 #   tools/warp-host.sh prove     # Warp-2 gate: /warp-prove on the virgl device
 #   tools/warp-host.sh reject    # #240: is a REJECTED command stream observable in-guest?
+#   tools/warp-host.sh p1b       # GPU-DESIGN 4.5.4: does ctx_attach permit a cross-context blit? (host-side, no guest)
+#   tools/warp-host.sh p2        # GPU-DESIGN 4.5.4: does the blit observe the client's FINISHED frame? (host-side)
 #   tools/warp-host.sh quake     # Warp-4 gate: GLQuake on virgl, both present arms
 #   tools/warp-host.sh decomp gl|2d  # #196: unpaced per-arm figures + CPU attribution
 #   tools/warp-host.sh wedge     # #210: direct-arm wedge autopsy (paced vs unpaced)
+#   tools/warp-host.sh wedge-gate # #210 regression gate: BOTH legs must progress
+#   tools/warp-host.sh tri       # Warp-3 gate: clear/triangle pixels through the fenced readback
 #   tools/warp-host.sh quarry-bench  # in-guest renderer table; QUARRY_LEGS= sweeps resolutions (#215)
 #   tools/warp-host.sh quarry-wedge  # #232: does killing a live GL client wedge the console?
 #   tools/warp-host.sh native-bench  # GPU-DESIGN 13: the HW-GL exit bar's native anchor (V3D vs llvmpipe, surfaceless)
@@ -38,7 +42,12 @@ RPOLLS="${WARP_BOOT_POLLS:+WARP_BOOT_POLLS=$WARP_BOOT_POLLS }"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RREPO='~/projects/thylacine'
 
-usage() { sed -n '2,15p' "$0"; exit 2; }
+# Ranged to the verb block's TERMINATOR, not to a line number. The fixed '2,15p'
+# it replaces had silently stopped listing quarry-bench, quarry-wedge and
+# native-bench as they were added below it, and wedge-gate never appeared at
+# all -- a usage message that omits a third of the verbs, failing in the
+# direction where nobody notices. Adding a verb can no longer truncate the list.
+usage() { sed -n '2,/^# Verification is fail-closed/p' "$0" | sed '$d'; exit 2; }
 [[ $# -ge 1 ]] || usage
 cmd="$1"
 
@@ -434,6 +443,99 @@ wedge-gate)
         echo "WEDGE GATE: PASS (both legs progress)"
     else
         echo "WEDGE GATE: FAIL (a leg wedged or the probe died -- the #210 class)"
+        exit 1
+    fi
+    ;;
+p2)
+    # GPU-DESIGN 4.5.4: does a blit on the compositor's ctx observe the client
+    # ctx's FINISHED frame with nothing ordering them? Host-side, no guest.
+    d='~/warp/p1b'
+    ssh "$HOST" "mkdir -p $d && cd $d && for f in virglrenderer.h virgl_protocol.h virgl_hw.h; do
+        [ -s \$f ] || curl -sSfL -o \$f https://gitlab.freedesktop.org/virgl/virglrenderer/-/raw/main/src/\$f || exit 1
+      done
+      [ -s virgl-version.h ] || printf '%s\n' '#define VIRGL_VERSION_MAJOR 1' '#define VIRGL_VERSION_MINOR 9' '#define VIRGL_VERSION_MICRO 0' '#define VIRGL_VERSION_STRING \"1.9.0\"' > virgl-version.h" || {
+        echo "P2: header fetch failed"; exit 1; }
+    scp -q "$REPO_ROOT/tools/warp/p2-cross-ctx-order.c" "$HOST:$d/" || exit 1
+
+    out="$REPO_ROOT/build/warp-p2.log"
+    ssh "$HOST" "cd $d && gcc -O1 -g -Wall -Wextra -I. -o p2 p2-cross-ctx-order.c -l:libvirglrenderer.so.1 || exit 1
+      for dep in ${P2_DEPTHS:-24 64 256}; do
+        echo \"===== depth=\$dep =====\"
+        P2_DEPTH=\$dep P2_TRIALS='${P2_TRIALS:-150}' timeout 900 ./p2 2>&1
+      done" | tee "$out" || true
+
+    echo "== P2 verdict =="
+    # THE SENSITIVITY TERM IS THE ONE THAT MATTERS. A clean UNSYNCED result is
+    # equally consistent with "ordering holds" and "this probe cannot see a
+    # stale read" -- so the INVERTED arm, which is stale BY CONSTRUCTION, must
+    # have mismatched on every trial before a clean measurement means anything.
+    # Requiring only the verdict line would accept a blind probe's silence.
+    runs=$(grep -c "^===== depth=" "$out" || true)
+    sens=$(grep -c "the probe CAN see a stale read" "$out" || true)
+    verd=$(grep -c "REORDERING OBSERVED" "$out" || true)
+    reord=$(grep -c "^  REORDERING OBSERVED" "$out" || true)
+    instr=$(grep -c "INSTRUMENT FAILURE" "$out" || true)
+    if [ "$runs" -ge 1 ] && [ "$sens" = "$runs" ] && [ "$verd" = "$runs" ] && [ "$instr" = 0 ] && [ "$reord" = 0 ]; then
+        grep -E "UNSYNCED|NO REORDERING" "$out"
+        echo "P2 GATE: PASS -- sensitivity proven on every run, no reordering observed"
+    elif [ "$reord" -gt 0 ]; then
+        echo "P2 GATE: HAZARD OBSERVED -- the blit did NOT see the finished frame."
+        echo "  This is a REAL finding, not a broken run: C-1 must model it before C-4"
+        echo "  removes the readback. See $out"
+        exit 1
+    else
+        echo "P2 GATE: NO VERDICT (runs=$runs sensitivity=$sens verdicts=$verd instrument-failures=$instr)"
+        echo "  a clean UNSYNCED arm without the sensitivity term is not a result"
+        exit 1
+    fi
+    ;;
+p1b)
+    # GPU-DESIGN 4.5.4: does an explicit ctx_attach_resource permit the
+    # cross-context blit that P1a proved is refused WITHOUT one? Runs entirely
+    # host-side, against virglrenderer directly -- no guest, no accel plumbing
+    # -- because the in-guest path is circular: P1b gates C-2, and the verb it
+    # needs is what C-2 would build.
+    #
+    # Headers are FETCHED (1.9.0, matching the runtime) rather than taken from
+    # Debian's libvirglrenderer-dev, which is 1.1.0. A header from one ABI over
+    # a runtime from another is the setup that yields a confident wrong answer.
+    d='~/warp/p1b'
+    ssh "$HOST" "mkdir -p $d && cd $d && for f in virglrenderer.h virgl_protocol.h virgl_hw.h; do
+        [ -s \$f ] || curl -sSfL -o \$f https://gitlab.freedesktop.org/virgl/virglrenderer/-/raw/main/src/\$f || exit 1
+      done
+      [ -s virgl-version.h ] || printf '%s\n' '#define VIRGL_VERSION_MAJOR 1' '#define VIRGL_VERSION_MINOR 9' '#define VIRGL_VERSION_MICRO 0' '#define VIRGL_VERSION_STRING \"1.9.0\"' > virgl-version.h" || {
+        echo "P1B: header fetch failed"; exit 1; }
+    scp -q "$REPO_ROOT/tools/warp/p1b-cross-ctx-blit.c" "$HOST:$d/" || exit 1
+
+    out="$REPO_ROOT/build/warp-p1b.log"
+    ssh "$HOST" "cd $d && gcc -O1 -g -Wall -Wextra -I. -o p1b p1b-cross-ctx-blit.c -l:libvirglrenderer.so.1 || exit 1
+      echo '===== ARM 1: WITH attach ====='
+      timeout 120 ./p1b 2>&1
+      echo '===== ARM 2: WITHOUT attach (control) ====='
+      P1B_NO_ATTACH=1 timeout 120 ./p1b 2>&1" | tee "$out" || true
+
+    echo "== P1b verdict =="
+    # FOUR terms, because each single one is satisfiable by a different broken
+    # instrument -- the failure the `reject` verb above documents (a gate that
+    # grepped the wrong prefix and exited 0 on its own FAIL) is the standing
+    # warning here:
+    #   WORKS          the attached arm actually moved pixels
+    #   CONTROL        the UNATTACHED arm was refused. Without this the whole
+    #                  result is vacuous: a renderer that isolates nothing
+    #                  passes the first term identically, and the two readings
+    #                  are opposite for I-45.
+    #   CONFIRMED x2   a SAME-context blit moved pixels in BOTH arms, so a
+    #                  mis-encoded blit cannot masquerade as a refusal
+    #   no failures    no CHECK() tripped in either arm
+    ok_works=$(grep -c "WORKS: an attached cross-context blit" "$out" || true)
+    ok_ctl=$(grep -c "CONTROL AS EXPECTED" "$out" || true)
+    ok_enc=$(grep -c "blit encoding CONFIRMED working" "$out" || true)
+    bad=$(grep -c "checks failed: [1-9]" "$out" || true)
+    if [ "$ok_works" -ge 1 ] && [ "$ok_ctl" -ge 1 ] && [ "$ok_enc" -ge 2 ] && [ "$bad" = 0 ]; then
+        echo "P1b GATE: PASS -- attach permits the blit, absence of attach refuses it"
+    else
+        echo "P1b GATE: UNVERIFIED (works=$ok_works control=$ok_ctl encoding=$ok_enc failed=$bad)"
+        echo "  a missing CONTROL term is not a weaker pass -- it is NO result"
         exit 1
     fi
     ;;

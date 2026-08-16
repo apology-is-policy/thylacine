@@ -34,13 +34,60 @@ keystroke channel.
 
 ### Still untested
 
-- **The nudge.** Whether queued input survives the context rebuild is unknown;
-  the next self-compaction answers it for free. If it does not survive, the
-  fallback is `resume-note.py` sending it at SessionStart — which is why `pane=`
-  now rides in the `.meta`.
+- ~~**The nudge.**~~ **ANSWERED, and not the way this predicted** — see §1b.
 - **The belay.** Needs two consecutive static-HEAD compactions. Never exercised.
   It is the most safety-critical path and the least tested.
 - **The transcript fallback.** Only the slot path has run live.
+
+## 1b. The nudge — measured, and the obvious diagnosis was wrong
+
+The queued nudge did nothing. The tempting conclusion was "the input queue only
+holds one message" or "`/compact` discards queued input". **Both are false, and
+the operator supplied the correction that made the real mechanism visible.**
+
+What was actually measured:
+
+| Probe | Result |
+|---|---|
+| `/copy` + Enter, then a plain message + Enter, no delay | **both arrived** — the queue holds two, and a slash command followed by a message is exactly the failing shape |
+| the same two behind `/compact` | the second never appeared, and the operator confirms the text was never even visible |
+| the pane afterwards | 45 lines — **`/compact` clears the scrollback**, so nothing of the attempt survives to inspect |
+
+So the queue is fine. What a queued message does not survive is **the rebuild**:
+queued *before* the compaction it belongs to the session being torn down and
+goes with it. The operator's manual habit is the working version and the thing
+worth copying — submit `/compact`, wait for it to *start*, and type **while it
+runs**, so the message lands in the session being *built*. **The difference is
+about two seconds in when the keystrokes are sent, and it is the whole
+difference between waking and not.**
+
+Fixed by `tools/thyla-nudge-watch.sh`: a detached watcher armed *before* the
+`/compact`, polling the pane for the compacting state, then typing. Keyed on the
+observable transition rather than a guessed delay, because the compaction's
+duration varies with the summary length — a sleep long enough to be safe is also
+long enough to miss a fast one. A finished-state stem is the second trigger, so
+the window cannot be missed by being slightly *late*, only by being absent.
+
+**Two lessons, both about controls, both cheap and both nearly missed:**
+
+- **The negative control passed because the watcher was never running.** The
+  first version used `setsid`, which **macOS does not ship**; it died instantly
+  and "nothing fired" was perfectly true. Only the second leg — *is the process
+  still alive?* — caught it. A negative assertion is satisfied by a broken
+  fixture ([[bug-215-negative-assert-satisfied-by-broken-fixture]]).
+- **`capture-pane` sees the TUI, not tool output.** A call's *command text*
+  renders; its *result* never does. The first positive control tried to publish
+  a marker by `echo`ing it and silently could not work. This also means the
+  marker must never be passed as an argument — the launching command line is
+  itself rendered, so it would match itself instantly.
+
+**Residual risk, named rather than papered over:** neither marker has ever been
+observed in a real pane; they are inferred from the client's behaviour, and the
+only way to see the real string is to run a real compaction. Mitigated by
+matching the case-insensitive *stem* (surviving "Compacting conversation…" vs
+"Compacting…") and by the timeout logging `nudge-timeout` — so a wrong guess
+fails **loudly in the ledger** rather than silently as a session that just sat
+there. The next real compaction settles it either way.
 
 ### Open decision (user's)
 
@@ -121,6 +168,57 @@ Keying on the pid alone would have handed me the machine mid-gate.
 
 ---
 
+## 2b. Long gates vs the harness — the detached-gate pattern
+
+**The harness stops its own background tasks, and it did it twice in one hour**
+(status `killed` / "was stopped", which is the #128 discriminator for
+harness-side vs a real external kill). The first casualty was the LS-CI run
+itself; ~35 minutes of gate would have been lost silently.
+
+The shape that survived it, and the one to use for anything long:
+
+1. **Detach the WORK from the harness.** `nohup … > log 2>&1 < /dev/null &`
+   launched from an ordinary Bash call. It reparents, so a harness stop cannot
+   reach it. (Do NOT combine `&` with `run_in_background` —
+   [[feedback-background-double-detach]]: the `&` detaches and the completion
+   notification then describes the LAUNCHER, not the work.)
+2. **Make the WAITER disposable.** A separate bounded `run_in_background`
+   waiter provides the wake. When the harness killed *that*, the gate kept
+   running underneath and re-arming cost one call. Verified live: waiter dead,
+   `test-interactive.sh` and six qemu/expect processes still up.
+3. **Never pipe gate output** (aux, after four repeats): `cmd | tail -N`
+   buffers, so a killed run yields an empty log, AND the pipeline's exit status
+   is `tail`'s, so failure reads as success. I did exactly this to LS-CI one
+   hour after adopting the rule. Redirect to a file and read the file.
+
+The general principle: **the thing that does the work and the thing that
+reports it should have independent lifetimes**, so losing the reporter never
+loses the work.
+
+## 2c. The recurring failure family, now at five instances in one day
+
+Every one of these returned a **confident wrong answer instead of an error**,
+and each was caught only by contradiction with some other observation:
+
+| Query | Reported | Truth |
+|---|---|---|
+| `git rev-parse main:<missing>` | the path, echoed back — non-empty, so every truthiness test reads it as a HIT | absent |
+| `git log --diff-filter=D` empty | "never deleted" -> "still present" | a rebase drops a file with no deletion record |
+| zsh `$files` unquoted into a checker | "1 file checked, 1 finding" | 14 paths passed as ONE argument; the finding was the open() error |
+| a failed zsh glob into a counter | `stageC-markers=0` — reads as "the probe never ran" | the glob matched nothing because the path was a file, not a dir |
+| a token census over `notes.c` | "confirmed: nothing FP/SIMD is saved" | `fp_save_area(t->note_saved_fp)` contains NONE of the register-name tokens I grepped for |
+
+The last is the sharpest and it was mine: I enumerated **register names** when
+the thing I needed was a **mechanism name**, and a good fix does not mention
+the registers it saves — it calls a routine. I was one step from opening a P1
+soundness hunt into a bug fixed weeks ago.
+
+**The rule, aux's formulation, which is larger than any of the individual
+ones:** *a tool given a malformed or mis-scoped query reports a plausible
+RESULT rather than an error.* So: **no census, existence claim, or gate result
+without a control that has been shown to detect the negative.** In the FP case
+the control was one line — "does this pattern match the known-present case?"
+
 ## 3. yip and agent coordination
 
 ### It is working, and the value is not marginal
@@ -176,6 +274,106 @@ Concrete wins in one day, none of which either track produces alone:
     protocol, adopted into CLAUDE.md). "unknown, 6 cores" tells the peer to
     serialize; "30 min" implies a bound nobody can honour. This is the single
     best coordination rule to come out of the day.
+
+---
+
+## 3b. The three-agent day — what cross-track review actually bought
+
+2026-08-16 ran main + aux + vault concurrently for a full day. The headline:
+**every single cross-track finding was RIGHT about the defect and WRONG about
+the fix**, in all three directions. That is a pattern, not a coincidence, and it
+is the strongest argument for the arrangement rather than against it.
+
+| Reporter | The finding (correct) | The prescription (wrong) |
+|---|---|---|
+| vault -> main | `loom.c`'s sqpoll thread-ledger deref is unbackstopped while its page-ledger twin is validated — and it is the I-32-breaking direction | "route it through `loom_owner_live(l)`" — which returns NULL on every rollback path and would have **leaked a thread charge permanently** |
+| aux -> main | `notes.c`'s no-handler stop arm is covered by nothing; deleting it reddens no test | "if unreachable it is dead code, delete it" — it is an unconstructed STATE, and deleting it removes I-20's stop leg |
+| main -> aux | native programs install no note handler (`T_SYS_NOTIFY` appears once, as a constant) — correct and load-bearing | "so it is the default path all 51 coreutils take" — **false**, and aux's own message contained the datum falsifying it |
+
+**So the rule to operate by: take the SMELL, re-derive the REMEDY.** Never apply
+a peer's fix without walking the code it touches — and never discount the
+reporter when their fix is wrong, because the finding survives independently. In
+all three cases the defect was real and worth the round trip.
+
+### The mechanism, which vault named better than anyone
+
+The descriptive half of an analysis is read OUT of the evidence; the generative
+half is pattern-matched off the SHAPE of the problem. **Generation never
+consults the analysis, because prescribing does not present itself as a step
+that HAS inputs — it arrives wearing the confidence the analysis earned.**
+
+Three instances in one day, from three authors, including one (mine) twenty
+minutes after having the mechanism explained. That rules out carelessness. The
+adopted rule, cheap and the only one that would have caught all three:
+
+> **Before asserting a claim or a fix, re-read the evidence you were GIVEN as if
+> someone else wrote it, against your conclusion.** Not "is my conclusion
+> sound?" but "does anything already in front of me contradict it?"
+
+Advance tell: **a prescription that argues for its own smallness has not been
+checked against the thing that makes it large.**
+
+## 3c. Host contention — the protocol worked, after I broke it
+
+I launched a full bar at 10:18:18Z into a host aux had claimed at 10:14:27Z. I
+had read their announcement and started anyway.
+
+What made it recoverable was measuring instead of arguing: **load 7.32 on 8
+cores with only ~115% total qemu** — my smp4 guest was getting 106% of the ~400%
+it wants, so both gates were queueing rather than running. That is a number, not
+an opinion, and it settled it in one command.
+
+12. **Precedence is by announcement time, and it needs to be stated as a rule.**
+    Whoever announced first owns the host; the second party stands down. Without
+    that, both parties reason "I'm already running" and neither yields. Cost of
+    yielding here was ~10 minutes of discarded gate; cost of not yielding is two
+    ambiguous results, and by aux's own A/B a contended LS-CI is 76 min with 4
+    burned retries against 10 min with 0.
+13. **`presence` still cannot answer "is the host busy".** It reports declared
+    state, and the declaration goes stale. `ps` + `uptime` is what actually
+    answered it, both times. Making `presence` surface observed qemu/build pids
+    would close this — it is the single highest-value yip change on the list.
+14. **KILLING YOUR OWN GATE IS THE MOST DANGEROUS ROUTINE OPERATION IN A
+    MULTI-AGENT SESSION, and a pattern kill is how you take out a peer.** Two
+    `ci-smp-gate.sh` were live and one was aux's; `pkill -f qemu` or
+    `pkill -f ci-smp-gate` would have destroyed a 40-boot run mid-flight. What
+    worked: walk each qemu's **ppid chain** to its owning gate, kill only your
+    own chain by explicit PID, then re-scan for **orphans reparented to init**
+    (my dying gate launched one more boot on its way down) and identify those by
+    **artifact path** — `/projects/thylacine/build` vs `/projects/thylacine-aux/build`.
+    The tree in the command line is the ownership proof when the process tree is
+    gone.
+15. **Two greps that differ by three characters gave opposite answers about
+    whether my own processes were dead** — `[l]oombar.sh` said 0, `[l]oombar`
+    said 3, because the second matched the shell running my own grep. Self-match
+    is not a curiosity; it is the default when you search a list your own
+    command is in (the same trap as `capture-pane`, §1b).
+16. **`ps` DOES NOT DISTINGUISH TREES — only cwd or an absolute artifact path
+    does.** Both tracks invoke gates by *relative* path (`tools/test-interactive.sh`),
+    so a `[t]est-interactive` grep run from either tree matches the other's
+    processes identically. This is the same hazard as the pattern-kill, one
+    layer up: it corrupts *accounting* rather than destroying work, so it fails
+    quietly — I nearly reported "nothing running" while three of a peer's
+    processes matched my own check. Discriminate with `lsof -a -p <pid> -d cwd`,
+    or by an absolute path in the args. **Three agents reached this rule by
+    three different routes in one day** — main by ancestry-tracing a kill, aux
+    by `lsof` when killing a futile retry run, vault by identifying a peer's
+    QEMU from its `-kernel` path. A rule that three independent parties derive
+    the same day is one the environment is actively teaching.
+
+### The payoff was measured, not assumed
+
+Standing down was not merely polite. aux's LS-CI on the freed host: **33/35,
+0 FAIL, 0 retries burned**, against their earlier contended measurement of 5
+scenarios in 76 minutes with 4 retries burned. So the serialization protocol has
+a number attached now, from both directions, and the cost of the courtesy was
+~10 minutes of discarded gate.
+
+That matters beyond etiquette: **a burned retry is not just slower, it is
+evidence-destroying.** A gate that passes on attempt 2 cannot distinguish "the
+host was busy" from "this is intermittently broken", which is precisely the
+ambiguity the no-host-load rule exists to prevent. Serializing buys clean
+evidence, not just wall clock.
 
 ---
 

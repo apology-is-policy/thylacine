@@ -480,6 +480,96 @@ and require the destination to change), never merely "no error returned".
 > > 2026-08-14 — that was wrong, and wrong in the more dangerous direction.
 > > See §4.5.4a.**
 
+> **P1b ANSWERED 2026-08-16 — YES: an explicit `ctx_attach_resource` permits
+> the cross-context blit.** Measured on thyla-pi against the real 1.9.0
+> virglrenderer, deterministic across 3 runs per arm:
+>
+> | Arm | `ctx_attach_resource(B, A's res)` | Destination after blit |
+> |---|---|---|
+> | 1 | yes | **GREEN** — the blit ran |
+> | 2 | no | **RED**, `vrend_renderer_blit: context error reported 2 "ctxB" Illegal resource 1080` |
+>
+> **Answered HOST-SIDE, outside Thylacine, because the guest path is
+> circular.** P1b must pass before anything structural lands, but in-guest it
+> needs a cross-attach verb that does not exist — `CTX_ATTACH_RESOURCE` lives
+> only inside tapestryd and both call sites attach to the resource's OWN
+> `dev_ctx`, while the client-facing ctl verbs are only `verify` /
+> `present-to` / `submit`. Building that verb is C-2, and P1b gates C-2. Asking
+> virglrenderer directly cuts the circle with no guest change, no I-45
+> authority decision, and no scripture change.
+>
+> **The two arms are the point, not the first one.** A success WITH the attach
+> shows only that the attach did not *prevent* the blit; it takes the arm
+> without it to show the attach is what *permits* it. The pair distinguishes
+> two opposite readings — "the attach is the authority gate" versus
+> "virglrenderer does not isolate resources between contexts at all", the
+> latter of which would mean the guest-exposure half of I-45 cannot rest on the
+> renderer refusing.
+>
+> **The instrument agrees with an independently obtained result.** Arm 2
+> reproduces P1a's refusal in the same words (`Illegal resource 1080`), from a
+> different program, on a different day, through the host API rather than the
+> guest seam. A new instrument that re-derives a known answer before reporting
+> a new one is worth more than either measurement alone.
+>
+> **Consequence for Warp-C: the design survives, and C-2's attach verb is the
+> authority-conferral point** rather than a formality — composition authority
+> is a deliberate per-surface grant, exactly as §4.5.4 hoped.
+>
+> **This does NOT retire the C-0d prerequisite.** `submit_cmd` returned **rc=0
+> in BOTH arms** — the refusal reports success at the host API too, confirming
+> §4.5.4a's finding one layer down. Pixel readback was the only oracle that
+> could tell the arms apart. So the *design* risk is closed while the *guest
+> readability* gap is untouched: a compositor still cannot be built on a submit
+> channel with no failure report.
+>
+> Probe: `tools/warp/p1b-cross-ctx-blit.c` (`P1B_NO_ATTACH=1` selects the control
+> arm). Built against the fetched 1.9.0 headers, never Debian's 1.1.0
+> `-dev` package, and linked `-l:libvirglrenderer.so.1` — a header from one ABI
+> over a runtime from another is the setup that yields a confident wrong
+> answer.
+
+> **P2 MEASURED 2026-08-16 — no reordering observed in 500 unsynced trials, and
+> the probe was proven able to see one.** Host-side on thyla-pi (real V3D),
+> `tools/warp-host.sh p2`, across queue depths 24 / 64 / 256 at 1024×1024:
+>
+> | Arm | What it establishes | Result |
+> |---|---|---|
+> | SYNCED | the probe can report a CLEAN run (encoding, blit, readback sound) | 0 mismatches |
+> | **INVERTED** | **the probe can report a DIRTY one** — blits BEFORE the clear, so staleness is guaranteed by construction | **40/40 mismatch, every run** |
+> | UNSYNCED | the measurement | **0 / 500** |
+>
+> **The INVERTED arm is why the result means anything.** A clean UNSYNCED run is
+> equally consistent with "the ordering holds" and "this probe cannot see a stale
+> read", and separating those is the entire job — the same trap that made P1a's
+> same-context control load-bearing. Building it took two corrections, both
+> instructive: the arm first scored 39/40 because trial 0 has no previous frame
+> to be stale from, and the first fix seeded the *destination*, which changed
+> nothing **because a blit overwrites the destination wholesale — staleness here
+> is always a property of the SOURCE.** Seeding the source restored a strict
+> all-must-mismatch bar rather than relaxing it to *n−1*, which would have
+> papered over a real one-trial blind spot.
+>
+> **What this does NOT establish.** A negative is not a proof: a race that did
+> not reproduce is not a race that cannot happen. By the rule of three, 0 events
+> in 500 trials bounds any per-trial reorder rate at roughly **0.6% (95%)** on
+> *this* stack (virglrenderer 1.9.0 + Mesa/V3D) for *this* access pattern.
+> Note also that V3D is a single-queue tiled renderer, so submission-order
+> execution may be a property of the hardware here rather than of virglrenderer
+> — which would say nothing about a multi-queue desktop GPU. **C-1 still models
+> the hazard**; this bounds how hard it is to hit and gives the spec a measured
+> starting point instead of a guess.
+>
+> One structural limit worth stating: each trial ends in a readback, which
+> serializes it, so the amount of work that can be outstanding when the blit
+> issues is bounded. The INVERTED arm runs under the *same* serialization and
+> still detects staleness every time, so the sensitivity claim holds for this
+> pattern — but a probe that never reads back would stress it harder and cannot
+> detect anything, which is the tension the design has to live with.
+>
+> Probe: `tools/warp/p2-cross-ctx-order.c` (`P2_DEPTH` / `P2_TRIALS`; the verb
+> sweeps `P2_DEPTHS`).
+
 ##### 4.5.4a #240 measured — a refusal reads as SUCCESS, and it is sticky (2026-08-14)
 
 Measured on thyla-pi (KVM, real V3D) by the `warp-prove reject` leg

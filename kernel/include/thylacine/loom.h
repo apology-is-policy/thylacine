@@ -489,6 +489,15 @@ struct Loom {
     // handle-close-at-exit -- always before proc_free. `sqpoll_charged` keys
     // the uncharge (set iff the charge succeeded, whether or not the kthread
     // then started), so every unwind path settles the budget exactly once.
+    //
+    // That argument is still believed, and is no longer TRUSTED at the use --
+    // loom_free validates before the decrement, mirroring what #130 did for
+    // the page ledger. The two pointers below and `owner` above must stay
+    // SEPARATE: they bind at opposite ends of setup on purpose (`owner` last,
+    // after the final failure path, so rollbacks cannot be double-refunded;
+    // `sqpoll_owner` first, at the charge, because rollbacks deliberately do
+    // not settle it). Merging them to remove the duplication breaks one of the
+    // two ledgers; so does moving either binding toward the other.
     struct Proc            *sqpoll_owner;
     bool                    sqpoll_charged;
     // The registered-handle table.
