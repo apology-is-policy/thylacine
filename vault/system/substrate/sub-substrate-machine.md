@@ -2,7 +2,7 @@
 id: sub-substrate-machine
 type: sub
 parent: moc-substrate
-title: "The machine — run-vm.sh, the QEMU virt board, HVF vs TCG"
+title: "The machine — run-vm.sh, the QEMU virt board, and the three accelerators"
 code:
   - tools/run-vm.sh
 audit: none
@@ -12,7 +12,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -77,12 +77,26 @@ resident driver (tapestryd's GPU + keyboard + tablet, netd's NIC) takes a
 PCI function while the one-shot kernel-test probes keep the MMIO devices.
 Hence the deliberate `gpu0`/`gpu-mmio0` and `kbd-pci0`/`kbd0` pairs.
 
-**The accel matrix is two coherent configurations, not a knob.**
+**The accel matrix is three coherent configurations, not a knob.**
 
 | | accel | `-cpu` | GIC | Why |
 |---|---|---|---|---|
 | default on Apple Silicon | `hvf` | `host` | v2 | HVF's emulated GICv3 distributor MMIO trips an `isv` data-abort assert; the GICv2 MMIO CPU interface is the HVF enabler (Lazarus W2) |
+| Linux on ARM silicon | `kvm` | `host` | `host` | the guest GIC is the in-kernel one matching the actual silicon |
 | fallback / compat | `tcg` | `max` | v3 | full ISA incl. RNDR; v3 is QEMU-virt's modern default |
+
+**The third row's GIC entry is a different *kind* of choice from the other
+two.** Both emulated arms name a version; the hardware arm names *the host's*,
+delegating the question to the silicon rather than answering it. That works
+because the guest autodetects version 2 versus 3 from the device tree anyway, so
+neither an emulated pin nor a hardware passthrough is baked into the kernel.
+
+A consequence of that delegation shows up in the announce line, which prints the
+GIC field with a literal `v` prefix and therefore reads `gic=vhost` on the
+hardware arm. Checked rather than assumed: **no consumer parses that field** —
+every downstream reader extracts the accel token alone — so it is cosmetic. The
+contract above is accurate that harnesses read this line back, and imprecise
+about which part.
 
 Auto-detection probes the host (`kern.hv_support`) AND the qemu build, so
 the launcher still works on a non-Apple box. The kernel autodetects v2-vs-v3
@@ -105,6 +119,45 @@ polarity is the design: absence means "watchpoints work", so every
 substrate that is not TCG keeps the hard assertion, and `test.sh` enforces
 the fire on any accel that can deliver it. A new substrate cannot silently
 inherit the exemption.
+
+**That polarity has since been tested by a real event rather than argued.** A
+third accelerator arrived — hardware virtualization on ARM silicon — and did not
+inherit the exemption, because the exemption is keyed to the one substrate that
+needs it rather than to a list of substrates that do not. The default held
+without anyone revisiting it, which is the whole return on choosing absence as
+the safe state.
+
+**The token array is appended to, never assigned, and the comment says why.** A
+second boot token arrived later, and had the array been rebuilt rather than
+extended, that arrival would have silently dropped the watchpoint token and
+re-wedged the original defect under emulation. Nothing would have failed
+loudly — the guest would simply have started arming watchpoints again on the
+substrate that cannot deliver them.
+
+**A second thing arriving is how the first thing gets silently voided**, and it
+is worth noting the defence was written *before* the second token existed. That
+is unusual: most instances of this class in the tree are recorded after the
+collision.
+
+**The second token opts a boot out of the build storm, and the reasoning is
+about matched budgets rather than about the storm.** The compile-heavy pre-login
+gate costs most of five minutes per boot under emulation, against an interactive
+harness's five-minute login budget — so a disk image minted for the compiler gate
+made every interactive scenario fail by timeout **with a completely healthy
+guest**. Opting out *removes* the mismatch rather than detecting it, which is
+what lets one image serve both gates.
+
+The proof is not weakened, and the argument for that is the part worth keeping:
+the storm still runs unconditionally on the ordinary boot, which is where the
+charter it proves is actually tested. It merely stops being repeated dozens of
+times by a harness that is not testing it. **Coverage is about the claim being
+exercised somewhere, not about it being exercised everywhere** — and a gate that
+re-runs an unrelated proof on every scenario is paying for it in the budget of
+the thing it *is* testing.
+
+The opt-out is compared against the string `1` rather than tested for
+non-emptiness, because the obvious emptiness test is true for the string `0` —
+so the documented way to turn the feature off would have been inert on arrival.
 
 **The vnc display drops the MMIO GPU.** A display backend binds QemuConsole
 0, and `gpu-mmio0` (probe-only, driverless in a resident boot) would squat
@@ -155,7 +208,18 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
   failure the absence-default is designed to prevent.
 - `-cpu host` under HVF means the gate's CPU is the *dev machine's* CPU —
   LSE is present, so this path is structurally blind to an ARMv8.0 floor
-  regression. That is [[gate-v80-floor]]'s job.
+  regression. That is [[gate-v80-floor]]'s job. **The hardware-virtualization arm
+  inherits the same blindness for the same reason**, and adds a second: its GIC
+  is whatever the silicon has, so a version-specific defect is only exercised on
+  whatever board happens to be in the loop.
+- **The boot-token array must keep being appended to.** Rebuilding it drops
+  whichever token was added first, silently, and the guest resumes the behaviour
+  the dropped token exists to prevent.
+- **A new accelerator must be reasoned about against the watchpoint exemption
+  explicitly**, even though the absence-default means doing nothing is usually
+  right. Doing nothing is right *because* the exemption is keyed to the one
+  substrate that needs it; a future token keyed to a list of substrates that do
+  not would invert that.
 
 ## Seams
 
@@ -176,6 +240,8 @@ sized for the slower TCG compat run. Idle cost under HVF was the subject of
 
 ## Provenance
 
-[[chg-2026-08-01-substrate-sweep]] records the sweep. The board accreted
+[[chg-2026-08-01-substrate-sweep]] records the sweep;
+[[chg-2026-08-16-machine-third-accel]] the hardware-virtualization arm and the
+two boot tokens. The board accreted
 across the whole project; the load-bearing corrections are noted inline
 above (G-1 co-page, the INTx ordering, Lazarus W2/W3, task #70).
