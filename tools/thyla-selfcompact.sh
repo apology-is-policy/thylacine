@@ -50,6 +50,16 @@ ROLE=$(tmux show-options -pv @thyla-role 2>/dev/null || true)
 [ -n "$ROLE" ] || ROLE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || echo unknown)")
 STATE="$STATE_DIR/$ROLE.state"
 
+# The note slot is keyed by the ENCODED PROJECT PATH, not the role, because the
+# consumer on the far side (~/.claude/resume-note.py) only knows the transcript
+# path -- and `basename(dirname(transcript))` IS this exact string. Two
+# independent derivations of one key, no shared config to drift.
+TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+ENC=$(printf '%s' "$TOPLEVEL" | sed 's|/|-|g')
+NOTE="$STATE_DIR/$ENC.note"
+NOTE_PENDING="$STATE_DIR/$ENC.note.pending"
+NOTE_MAX_AGE=${THYLA_NOTE_MAX_AGE:-600}     # seconds; a note older than this is not about this compaction
+
 # --- preconditions --------------------------------------------------------
 [ -n "${TMUX_PANE:-}" ] || deny "not inside tmux -- there is no pane to type into"
 command -v tmux >/dev/null || deny "tmux is not installed"
@@ -58,6 +68,23 @@ git rev-parse --git-dir >/dev/null 2>&1 || deny "not in a git worktree; cannot p
 HEAD=$(git rev-parse HEAD 2>/dev/null) || deny "cannot read HEAD"
 DIRTY=$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')
 [ "$DIRTY" = 0 ] || deny "$DIRTY uncommitted tracked change(s) -- commit first; a compaction is only free when the handoff is already current"
+
+# --- the resume note must exist and be FRESH ------------------------------
+# A note file is better than guessing which message was the note, but it brings
+# its own failure: a file written earlier and not updated is re-injected with
+# total confidence and reads as current. That already happened once today from
+# the transcript side, and it asserted an unrun bar and unpushed commits that
+# were neither. So the note is a ONE-SHOT SLOT: it must be fresh here, it is
+# renamed to .pending at compaction, and the far side consumes it exactly once.
+# A pending note can then only mean "written for THIS compaction".
+[ -f "$NOTE" ] || deny "no resume note at $NOTE
+  Write it FIRST -- it is a note to a self with no memory of writing it. Say
+  what is in flight and, above all, WHAT MUST NOT BE REDONE (gates already
+  green, commits already pushed, measurements already taken)."
+NOTE_AGE=$(( $(date +%s) - $(stat -f %m "$NOTE" 2>/dev/null || echo 0) ))
+[ "$NOTE_AGE" -le "$NOTE_MAX_AGE" ] || deny "the resume note is ${NOTE_AGE}s old (max ${NOTE_MAX_AGE}s) -- rewrite it for THIS compaction rather than shipping a stale one"
+NOTE_CHARS=$(wc -c < "$NOTE" | tr -d ' ')
+[ "$NOTE_CHARS" -ge 200 ] || deny "the resume note is only ${NOTE_CHARS} chars -- too thin to orient a fresh context"
 
 # --- the progress gate ----------------------------------------------------
 LAST_HEAD=""; NOPROG=0
@@ -111,6 +138,13 @@ mkdir -p "$STATE_DIR"
 printf 'last_head=%s\nno_progress=%s\n' "$HEAD" "$NEW_NOPROG" > "$STATE"
 printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ROLE" "${HEAD:0:8}" "$VERDICT" "$REASON" >> "$LOG"
 
+# Arm the one-shot slot. mv, not cp: the note stops being available to any
+# LATER compaction the moment this one claims it, so a forgotten rewrite fails
+# loudly (no note) instead of quietly shipping yesterday's.
+mv "$NOTE" "$NOTE_PENDING"
+printf 'role=%s\nhead=%s\nreason=%s\nat=%s\n' \
+    "$ROLE" "$HEAD" "$REASON" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$NOTE_PENDING.meta"
+
 # The peers' half: a compacted agent has lost the TEXTURE of recent exchanges
 # even where the facts survive, so a peer should re-state rather than assume.
 [ -x "$YIP" ] && "$YIP" busy "compacted at ${HEAD:0:8} -- context reset, re-state anything subtle" >/dev/null 2>&1
@@ -120,6 +154,7 @@ tmux send-keys -t "$TMUX_PANE" C-u          # never submit residue
 tmux send-keys -t "$TMUX_PANE" "/compact"
 tmux send-keys -t "$TMUX_PANE" C-m          # fires when this turn ends
 say ""
+say "note armed  : $NOTE_PENDING (${NOTE_CHARS} chars, ${NOTE_AGE}s old)"
 say "/compact queued -- it submits when this turn ends."
-say "Make this turn's final message the resume note: what is in flight, and"
-say "what must NOT be redone. resume-note.py re-injects it on the far side."
+say "The far side consumes the pending note exactly once and is told this was a"
+say "SELF-compaction, so it knows to continue rather than wait for direction."
