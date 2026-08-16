@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -93,9 +93,13 @@ priv inherits `attached_owner` and refs it.
 `_Static_assert(DEV_WALK_ATTRS_MAX == P9_MAX_WALK)`):
 
 - **Capability latch**: `client->wga_unsupported` → return the
-  `DEV_WALK_ATTRS_UNSUPPORTED` sentinel; first `-T_E_NOSYS` reply sets it
-  (the majority of servers — every native userspace 9P server — answer
-  ENOSYS; Stratum is the one v1.0 speaker). The resolver then uses the
+  `DEV_WALK_ATTRS_UNSUPPORTED` sentinel; first `-T_E_NOSYS` reply sets it.
+  **Non-support is the MAJORITY case and must be read as a class, not as a
+  named example.** Stratum is the only v1.0 server that implements the op;
+  every native userspace one (netd, ptyfs, tapestryd, the VIVARIUM diorama)
+  falls through its unknown-op arm to ENOSYS, and **the list only grows** —
+  each new native server joins the non-supporting side by default, since
+  implementing the op is the deliberate act. The resolver then uses the
   per-component loop for the session's lifetime, RPC-free.
 - **L1d dentry serve**: a fully-cached run serves RPC-free — a negative
   (miss) in EITHER form; a full positive ONLY in the query form
@@ -111,8 +115,13 @@ priv inherits `attached_owner` and refs it.
   latch `client->cacheable = true` (**the L1e cacheability gate**: a
   successful Twalkgetattr is the v1.0 proxy for a content-versioned,
   offset-stable FS — the latch is what admits the attr/dentry/page caches
-  for this session, and its absence is what keeps netd's stream files
-  uncached), then per-component: fill `sts[i]`, attr-install (gen-guarded),
+  for this session, and its absence is what keeps **every non-supporting
+  server's tree** out of them: netd's streams, ptyfs, tapestryd, the
+  diorama, and each future native server. **The ENOSYS latch above is
+  therefore the cache-admission decision**, which is why the class matters
+  and a single named example actively misleads — a reader who takes one
+  instance for the rule concludes the other sessions are cached. They are
+  not), then per-component: fill `sts[i]`, attr-install (gen-guarded),
   positive-dentry-install (parent = previous component). A partial walk
   negative-installs the missing name under the last walked parent; a
   first-component `-T_E_NOENT` negative-installs under `c`. Bind form
@@ -209,6 +218,24 @@ DOWNGRADE the parent dirs, and drop the touched (dir,name) bindings.
 Errors latch `fid_suspect` on the borrowed dir privs. Neither allocates a
 transient fid (borrow-only — the create-path leak class structurally
 absent).
+
+**Both now report WHY they failed** (#80): local argument rejects answer
+`-T_E_INVAL`; the server's verdict passes through `dev9p_wire_errno` and
+reaches userspace as itself. **No side-channel was needed and that is the
+whole shape of the fix** — these slots return `int` and the client already
+returned `-errno`, so unlike the create path (#99, whose `Dev.create`
+returns a `Spoor *` with nowhere to put a cause) the value was merely being
+discarded. `return rc` plus one bounding helper; no new state.
+
+`dev9p_wire_errno` folds exactly one value: a server EPERM arrives as `-1`,
+which **is** the flat generic-failure sentinel, so it becomes `-T_E_ACCES`
+— the registry's sanctioned permission-denied stand-in. A deliberate small
+lie, chosen over reporting a permission problem as an I/O error. Everything
+else in `[-4095,-2]` crosses unchanged, including codes with no `T_E_*`
+name (EISDIR 21, ENOTEMPTY 39, EXDEV 18): **a SERVER errno crosses by
+value**, and both boundary lines map numerically, so the motivating cases
+needed zero registry appends. Only errnos the KERNEL originates must be
+named.
 
 `dev9p_readdir`: the Treaddir offset is an **opaque resume cookie, not a
 byte position** — Stratum derives it from an entry hash, so real cookies
@@ -319,12 +346,37 @@ deliberately not owned here — the resolver post-scans.
 
 ## Error paths
 
-Real-errno propagation on read/write/fsync/getattr (#3/Area-F; residual:
-server EPERM ecode 1 collides with the generic -1 → EIO); `dev9p_create`'s
-errno record + accessor (#99); NULL/`-1` per the Dev convention elsewhere.
-`walk_attrs` returns the distinct `DEV_WALK_ATTRS_UNSUPPORTED` sentinel for
-the capability miss (NOT a walk failure — nothing about the path was
-learned).
+Real-errno propagation on read/write/fsync/getattr (#3/Area-F) and on
+rename/unlink (#80). `dev9p_create`'s errno record + accessor (#99).
+NULL/`-1` per the Dev convention elsewhere. `walk_attrs` returns the
+distinct `DEV_WALK_ATTRS_UNSUPPORTED` sentinel for the capability miss (NOT
+a walk failure — nothing about the path was learned).
+
+**The EPERM collision is handled THREE different ways in this file, and the
+difference is not decoration.** A server EPERM is ecode 1, and the client's
+mapper rejects only ecode 0 and anything above 4095 — so it arrives as
+`-1`, which is the flat generic sentinel. Each path decided separately:
+
+| Path | On server EPERM | Userspace sees |
+|---|---|---|
+| rename / unlink (#80) | folded to `-T_E_ACCES` | EACCES |
+| write (#3) | returned raw | the flat sentinel → EIO |
+| create (#99) | falls outside the `[-4095,-2]` accessor window → `-1` | EIO under pouch; a blanket EPERM on go's native seam |
+
+The write path documents its collision as a known residual owed to the
+rollout. The create accessor's window silently excludes it, so a
+permission-denied create and a permission-denied unlink give the same
+caller different answers to the same class of denial. Neither is a bug
+today; both are the shape the remaining ER stages exist to converge.
+
+**One comment on this surface asserts immunity it does not have.** The
+native-stat arm claims the integrity invariant bounds the code into
+`[-4095,-2]` so `-1` can never arrive, and claims both its named callers
+propagate. The mapper's clamp refutes the first; the resolver propagates
+but the stat syscall flattens to `-1`, refuting the second — and the
+resolver's own converter **guards explicitly against the value the leaf says
+cannot occur**, which is the strongest available evidence that it can.
+[[seam-fstat-errno-flattened-above-the-leaf]].
 
 ## Performance
 
@@ -358,6 +410,16 @@ kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
   `cacheable`; the latch is set ONLY by a successful Twalkgetattr. A
   future POUNCE-speaking-but-streaming server breaks the proxy — that
   needs an explicit capability (recorded v1.x).
+- **Read the ENOSYS latch as a CLASS.** Non-support is the majority and the
+  default; a new native server is non-supporting unless someone implements
+  the op. Any statement here that names one server is wrong the moment a
+  second lands, and it fails in the dangerous direction — it invites the
+  reader to conclude the unnamed sessions ARE cached.
+- **A server errno crosses by value; only kernel-originated ones need
+  registry names.** Adding a `T_E_*` for a code the server supplies is
+  wasted ABI surface. The one exception is the EPERM/`-1` collision, and
+  the three paths above answer it differently — check which one you are on
+  before copying a neighbour's treatment.
 - **Budget balance** on every path (grow, fallback, error, close, death).
 
 ## Seams
@@ -373,6 +435,10 @@ kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
   file's OWN attr stale in metadata-only fields (L1f-F3);
   [[seam-larder-cacheable-proxy]] — the Twalkgetattr-success latch as
   the cacheability proxy. All three live on [[sub-kernel-larder]].
+- [[seam-fstat-errno-flattened-above-the-leaf]] — the native-stat arm's
+  comment asserts an immunity the mapper does not grant and a propagation
+  the stat syscall does not perform. Comment-only; the behaviour matches
+  the rollout's own staging.
 
 ## Caveats
 
@@ -395,7 +461,9 @@ kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
 (generated from incoming `touched` edges — the shaping chunks:
 P5-attach-dev, FS-alpha/beta/gamma, A-2a/A-3b, #37, #99, POUNCE P-3,
 Larder L1c/L1d/L1e, wb F1, G1/G2/G3/G4, FID-LIFECYCLE cached-open,
-Weft-6b-2/6b-3a, net-6b QTPOLL wiring, #955, D44, task-#44.)
+Weft-6b-2/6b-3a, net-6b QTPOLL wiring, #955, D44, task-#44, #80 the
+name-op errno propagation, and the V-4c-3 self-audit's class correction.)
+[[chg-2026-08-16-dev9p-errno-class]] records the last two.
 
 ## Tests
 

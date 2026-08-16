@@ -71,6 +71,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-expect-channel-close]] (sub-substrate-interactive)
 - [[seam-f-notif-unwired]] (sub-kernel-weft, sub-kernel-loom)
 - [[seam-fid-monotonic-reclaim]] (sub-kernel-ninep-client)
+- [[seam-fstat-errno-flattened-above-the-leaf]] (sub-kernel-ninep-dev9p)
 - [[seam-gic-handler-slot-never-cleared]] (sub-kernel-gic, sub-kernel-irqfwd)
 - [[seam-handle-based-dot]] (sub-kernel-territory)
 - [[seam-hmp-push]] (sub-kernel-sched-smp)
@@ -111,7 +112,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-rfork-flags-unimplemented]] (sub-kernel-proc)
 - [[seam-runq-rbtree]] (sub-kernel-sched)
 - [[seam-sak-revoke-note]] (sub-kernel-proc)
-- [[seam-scripture-invariant-mirror-drift]] (inv-i32)
 - [[seam-slub-debug-mode]] (sub-kernel-mm-slub)
 - [[seam-sparse-mpidr]] (sub-kernel-sched-smp)
 - [[seam-srv-9p-connect-unit]] (sub-kernel-devsrv)
@@ -131,8 +131,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-16 [[chg-2026-08-16-boot-entry-trampoline]] — The guard held because the emulator supplied the value it checked for
 - 2026-08-16 [[chg-2026-08-16-burrow-attribution]] — The Burrow re-swept: the type says SHAPE, and that lesson has now arrived three times
 - 2026-08-16 [[chg-2026-08-16-corvus-narrowing]] — corvus re-swept: the AUTH gate was a narrowing, and the expired premise had three dependents
+- 2026-08-16 [[chg-2026-08-16-dev9p-errno-class]] — The channel existed and the value was being discarded
 - 2026-08-16 [[chg-2026-08-16-devctl-empty-emit]] — Zero bytes written, on purpose, is a thing the convention cannot say
 - 2026-08-16 [[chg-2026-08-16-devproc-park-predicate]] — A correct model does not guarantee a correct encoding of its states
 - 2026-08-16 [[chg-2026-08-16-exception-descent-guard]] — The guard that fabricated a kernel death, and the fourth eret that isn't one
-- 2026-08-16 [[chg-2026-08-16-fault-cow-break]] — The fault dispatcher gains the COW break, and a defect found by reading a contract
 <!-- generated:end -->

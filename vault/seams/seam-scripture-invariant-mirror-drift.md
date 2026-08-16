@@ -2,12 +2,13 @@
 id: seam-scripture-invariant-mirror-drift
 type: seam
 title: "The always-loaded invariant mirror drifted from the authoritative table"
-status: open
+status: closed
 surface: inv-i32
 opened-by: chg-2026-08-16-i32-scope-correction
 tracker: "unfiled -- yip to main 2026-08-16"
 created: 2026-08-16
 updated: 2026-08-16
+closed-by: chg-2026-08-16-mirror-drift-closed
 ---
 ## Owed
 

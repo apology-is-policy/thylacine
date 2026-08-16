@@ -15,6 +15,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-848-pivot-walk-race]] | closed | sub-kernel-ninep-attach | fnd-16c-r1-f6 | task #848 |
 | [[seam-90-death-half]] | closed | sub-kernel-ninep-client | fnd-8c3-r1-f1 | task #90 |
 | [[seam-posix-pathname-form-gates]] | closed | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
+| [[seam-scripture-invariant-mirror-drift]] | closed | inv-i32 | chg-2026-08-16-i32-scope-correction | unfiled -- yip to main 2026-08-16 |
 | [[seam-220-netd-listener-poll]] | open | sub-netd-server | chg-2026-06-18-net6b-poll-bridge | task #220 |
 | [[seam-221-idle-pump-wake]] | open | sub-kernel-ninep-dev9p-poll | fnd-net6b-r1-f3 | task #221 |
 | [[seam-223-pump-tail-starvation]] | open | sub-kernel-ninep-dev9p-poll | fnd-net6b-r2-f1 | task #223 |
@@ -48,6 +49,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-expect-channel-close]] | open | sub-substrate-interactive | chg-2026-08-01-substrate-sweep | #78 residual |
 | [[seam-f-notif-unwired]] | open | sub-kernel-weft, sub-kernel-loom | chg-2026-08-02-async-sweep |  |
 | [[seam-fid-monotonic-reclaim]] | open | sub-kernel-ninep-client | fnd-stalk2-r1-f2 | RW-4 R3-F2 register |
+| [[seam-fstat-errno-flattened-above-the-leaf]] | open | sub-kernel-ninep-dev9p | chg-2026-08-16-dev9p-errno-class | unfiled -- yip to main 2026-08-16 |
 | [[seam-gic-handler-slot-never-cleared]] | open | sub-kernel-gic, sub-kernel-irqfwd | chg-2026-08-02-devices-interrupt-time-sweep |  |
 | [[seam-handle-based-dot]] | open | sub-kernel-territory | chg-2026-06-09-ls4-cwd | unfiled |
 | [[seam-hmp-push]] | open | sub-kernel-sched-smp | chg-2026-06-05-864-hmp-foundation | ARCH 8.4.4 -- the verification boundary |
@@ -88,7 +90,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-rfork-flags-unimplemented]] | open | sub-kernel-proc | chg-2026-05-05-p2d-rfork-exits-wait | unfiled |
 | [[seam-runq-rbtree]] | open | sub-kernel-sched | chg-2026-05-05-p2b-sched-dispatch | ARCH 8.4 design intent; Phase 7 |
 | [[seam-sak-revoke-note]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
-| [[seam-scripture-invariant-mirror-drift]] | open | inv-i32 | chg-2026-08-16-i32-scope-correction | unfiled -- yip to main 2026-08-16 |
 | [[seam-slub-debug-mode]] | open | sub-kernel-mm-slub | chg-2026-05-04-p1e-slub | named at P1-E; still unbuilt |
 | [[seam-sparse-mpidr]] | open | sub-kernel-sched-smp | chg-2026-06-05-863-smp-soundness-core | the DTB MPIDR -> dense-logical-index map |
 | [[seam-srv-9p-connect-unit]] | open | sub-kernel-devsrv | chg-2026-06-03-stalk3b-open-connect |  |
