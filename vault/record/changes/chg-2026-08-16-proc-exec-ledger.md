@@ -4,7 +4,7 @@ type: chg
 title: "Enumerate the exec reset by who re-arms, not by what looks like it belongs"
 date: 2026-08-16
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["b964652a"]
 touched: [sub-kernel-proc, sub-kernel-jobctl, sub-kernel-death, sub-kernel-caps]
 established: []
 closed: []
