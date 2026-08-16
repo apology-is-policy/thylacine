@@ -1335,6 +1335,14 @@ This protects against audit findings being lost across session boundaries. The n
 
 ## Operational summary patterns
 
+**FIRST, THE TRIGGER — because this section reads as "chunk done -> write this", and that instruction is what ends the run.** Emitting the full summary IS the yield: final text ends the turn, and in this harness nothing restarts you afterwards but the user. So a summary written at a completed chunk silently converts "running through checkpoints" into "handing back", no matter what §"The 600k checkpoint line" says. Measured 2026-08-16, on the first autonomous run: the chunk landed, the summary got written because scripture said to, and the run stopped at ~160k of a 600k budget. The concrete ritual beats the abstract rule every time.
+
+**So the full summary below belongs to STOPPING, not to finishing.** Write it when you are actually handing back: at the 600k line, on an item from §"Autonomy + escalation", when genuinely blocked, or when the user asks. At a checkpoint you are running THROUGH, the checkpoint contract is discharged in **three lines or fewer** — what landed (hash), what is running, what is next — and then you **open the next item in the same turn**, without final prose.
+
+**The tell:** if you are writing a `Key` table, an `Arc state` field, or an `Ahead` line, you are writing a hand-back. Stop and ask whether you actually intend to stop. If you do not, delete it and make the next tool call instead.
+
+(This is behavioural, so it is only as good as your remembering it -- the mechanism that would make it structural is a `Stop` hook, deliberately not built: see §"The 600k checkpoint line". Until one exists, a turn that ends is a turn the user must restart, so ending one is a decision, never a default.)
+
 End-of-iteration summaries (the response to a completed audit / chunk) follow a consistent structure for fast review.
 
 **Order matters: orientation FIRST, detail after.** The user does not carry the
