@@ -9,7 +9,7 @@ guarded-by: [inv-i7, inv-i32]
 validated-by: [spec-burrow, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-08-03
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -52,6 +52,11 @@ handle count sampled before the drop answers a different question — so the
 operation has to report its own effect. Resource accounting is its only caller.
 `burrow_share_into(dst, v, vaddr, prot)` is the cross-Proc form.
 `burrow_decommit` releases resident pages of a lazy region without unmapping it.
+
+**Charge attribution** is three more calls — `burrow_charge_record` /
+`burrow_charge_claim` / `burrow_charge_restore` — plus
+`burrow_is_shared_out`. They exist for the same reason
+`burrow_unmap_reporting` does, one axis over; see below.
 
 `burrow_backing_pages(size)` reports what a region of that size actually
 **occupies**, which is not what it requests. Every resource-accounting site must
@@ -120,6 +125,71 @@ extincts with a use-after-free diagnostic rather than proceeding into
 half-recycled memory. The free path also clears it explicitly before returning
 the object.
 
+### The type says SHAPE. Everything else must be carried, not inferred
+
+This is the layer's organising lesson, and it arrived three separate times on
+three different axes before anyone named it.
+
+A Burrow's type tells you how its pages are *arranged*. It has been asked three
+times to answer a question about something else, and it was wrong every time:
+
+| the question | inferred from | why it broke |
+|---|---|---|
+| may userspace map this executable? | "it is anonymous" | a caller could assert it at map time |
+| did *this* unmap free the pages? | the type + a sampled count | neither is the drop's own effect |
+| who **paid** for these pages? | the region's shape | shape stops naming a payer the moment two Procs can reach the region |
+
+Each was fixed the same way: **the property moved onto the object, minted by
+the kernel, unforgeable by the caller.** `BURROW_TYPE_CODE` carries
+executability. `burrow_unmap_reporting` reports its own effect. The charge
+record names its payer. The three landed independently, in different arcs, for
+different reasons — which is what makes the convergence worth writing down
+rather than treating as one design.
+
+### The charge record: a refund must be attributed
+
+`struct Burrow` records who paid: `charge_pid` (a pid, never a pointer — the
+payer can die while the region lives on in a consumer), `charge_pages` (the
+buddy-rounded count actually billed), and `shared_out`.
+
+- **`burrow_charge_record`** stamps the payer at each eager charge — the
+  attach, the JIT create, the Loom ring.
+- **`burrow_charge_claim`** is a **read-and-clear**, returning what this Proc
+  paid or zero if it is not the recorded payer. The clear is what makes a
+  refund exactly-once: two paths racing to settle the same region cannot both
+  win, so the counter can never be refunded twice — the direction that would
+  inflate a Proc's budget.
+- **`burrow_charge_restore`** puts a claim back when the caller decides not to
+  settle. Callers must claim **before** the drop, because a freeing drop takes
+  the record with it. The window's failure mode is stated and asymmetric: a
+  concurrent settler that sees the momentarily-cleared record simply skips, so
+  the charge outlives its region until the payer's next release point — an
+  over-charge on the payer, never a refund to a Proc that did not pay.
+
+`charge_pages`, not `charge_pid`, is the held sentinel — **pid 0 is a
+legitimate identity**, since `proc_alloc` stamps 0 and the fork path assigns
+later.
+
+**The release rule is user-voted and is not "follow the pages".** A detach
+settles on `freed || shared_out`. `freed` is sufficient — if nothing holds the
+region, this Proc certainly does not — but not necessary: once a region is
+shared out and this Proc has unmapped it, the Proc cannot reach those pages,
+and charging it for memory it cannot touch caps it for nothing. From there the
+consumer's shared-mapping axis accounts them.
+
+`shared_out` rather than "does anything still hold it" is load-bearing: the
+Proc's *own* other claim — a Loom pin on its own buffer — also keeps the region
+alive, and there the charge must **stay** until that claim drops. The prior art
+was surveyed and the three answers genuinely differ: Linux memcg keeps the
+charge with the allocator and reparents on death, seL4 lets it follow the
+capability holder, Zircon counts shared pages in every mapper. Thylacine's dual
+axis takes seL4's answer for the sharer half.
+
+A nonzero claim also replaced the older "is this an eager anon VMA" boolean
+outright, and is **strictly narrower**: an eager region that was never charged
+now refunds nothing instead of a recomputed occupancy. Attribution rather than
+an enumeration of shapes.
+
 ### The cross-Proc share
 
 `burrow_share_into` makes one Burrow reachable from **two** Procs — the first
@@ -133,16 +203,46 @@ Its preconditions are the caller's to satisfy and are not checked: hold the
 destination's address-space lock, and guarantee the Burrow stays live across the
 call.
 
+**It is no longer anon-only**, and the widening is the worked example of this
+note's own prosecution rule being honoured rather than bypassed. Admissible
+now: `BURROW_TYPE_ANON`, or a DMA Burrow whose hardware object carries one of
+two **kernel-minted, create-immutable, mutually-exclusive** subtype bits —
+`weave` (device-passive: pinned Normal-WB RAM the device only DMA-*reads*,
+pixels outbound) or `gpu_bo` (device-*written*: a render target or readback
+destination). Plain DMA and MMIO remain structurally unshareable.
+
+The two bits are not one relaxation with two names; **their safety arguments
+differ and each lives on its own field.** The weave's is that the device only
+reads. The GPU BO's is that what the device may *write* is bounded by GPU-side
+address translation that only the trusted device owner programs — a claim about
+hardware the kernel does not itself enforce, which is why it is a distinct bit
+carrying a distinct argument rather than a widened `weave`. Neither conveys
+hardware authority: the client's PTEs are the same cacheable attributes an anon
+share installs (never Device-nGnRnE), and the share prot is RW with the VMA
+layer rejecting X, so W^X holds.
+
+Note the pattern, again: both bits are set **only** by their own minting
+syscall. Same discipline as `BURROW_TYPE_CODE` — the admissibility is a
+property the kernel mints at creation, never one the caller asserts at map
+time.
+
 ## Data structures
 
-`struct Burrow`: magic, type, size, page count, the lock, the two counts, and
-then a union-by-convention of per-type fields — `pages`/`order` for contiguous
+`struct Burrow`: magic, type, size, page count, the lock, the two counts, the
+charge record (`charge_pid` / `charge_pages` / `shared_out`), and then a
+union-by-convention of per-type fields — `pages`/`order` for contiguous
 backings, a hardware-object pointer and PA for the foreign ones, a Spoor plus
 file offset plus cache-key scalars for file-backed, the sparse array shared
 between file-backed and lazy-anon.
 
 The fields are not an actual union; each type leaves the others zero. That is
 what lets the free arm's per-type double-free guards be simple null tests.
+
+The charge triple is under the same `lock` as the counts. `shared_out` is
+**monotonic** — a region is never un-shared in a way that returns the charge to
+the sharer — which is what makes `burrow_is_shared_out` safe to read without
+the lock: false→true only ever *adds* a reason to release, so a stale read is
+stale in the harmless direction.
 
 ## Concurrency
 
@@ -167,6 +267,26 @@ leak, and the model checks it as an iff for that reason.
 Proc's page charge is computed, and the eager types charge occupancy at create
 while the lazy type charges per page at fault, because a free reservation that
 charged its whole extent would defeat its own purpose.
+
+It now participates a second way, and this half is the one an audit should
+prosecute: the **refund** is attributed rather than inferred. Two defects in
+opposite directions made the case. In one, a Loom registered-buffer refund went
+to the Loom's owner on the argument that registering requires a loom fd from
+that Proc's own table — an argument that proves who owns the *Loom* and says
+nothing about who paid for the *buffer*, so a consumer could be refunded for a
+sharer's pages (an under-count, inflating a non-exempt Proc's budget, reachable
+through the public API). In the other, nothing settled the sharer's charge at
+all: the last drop was the *guest's* teardown, in another Proc, holding that
+Proc's lock, structurally unable to name the payer — pages leaked per closed
+flow. **Neither is visible from the region's shape**, which is exactly why the
+payer had to become a recorded fact.
+
+The second one had no live bound breach only because the leaking daemon happens
+to run as the system principal, which is exempt — a coincidence of two
+independent gates rather than an enforced property. That is worth keeping as a
+reasoning pattern: *a bound that holds only because of who happens to be
+running is not a bound*, and the first non-exempt driver on that path converts
+it to a real monotonic leak.
 
 ## Error paths
 
@@ -204,9 +324,28 @@ which is the point.
   order-0 per-page path must not.
 - **The magic must stay at offset 0** and be cleared before the object is
   returned to the slab.
-- **Cross-Proc sharing is anon-only.** Widening it to the foreign types needs
-  the hardware-isolation analysis that was explicitly deferred, not just a
-  relaxed type check.
+- **Cross-Proc sharing admits ANON plus the two kernel-minted DMA subtype
+  bits, and nothing else.** ~~anon-only~~ — the widening happened, and it
+  arrived carrying exactly the hardware-isolation analysis this rule demanded
+  rather than a relaxed type check, which is the outcome the rule was written
+  for. The rule now binds the new boundary: a third admissible kind needs its
+  **own** argument on its **own** field. `weave` and `gpu_bo` are separate bits
+  precisely because device-read and device-written are different claims, and
+  collapsing them into one "shareable" flag would silently extend the weaker
+  argument over the stronger case.
+- **A share-admissibility bit is minted, never asserted.** Any path that lets a
+  caller set `weave` or `gpu_bo` outside its own creating syscall breaks the
+  same rule `BURROW_TYPE_CODE` exists to enforce for executability.
+- **A charge is claimed before the drop, and a claim is read-and-clear.**
+  Claiming after a freeing drop reads a dead Burrow; making the claim
+  non-clearing lets two racing settlers both refund, which under-counts — the
+  direction that breaks the bound. A caller that claims and then declines must
+  `burrow_charge_restore`, never simply drop it.
+- **Never snapshot the VMA to reach the Burrow across an unmap.**
+  `burrow_unmap_reporting` frees the `Vma`, so `vma->burrow` dangles the moment
+  it returns. Snapshot the Burrow pointer first.
+- **`charge_pages` is the sentinel, not `charge_pid`.** Pid 0 is a legitimate
+  identity, so a zero-pid test reads "unpaid" on a real payer.
 
 ## Seams
 
@@ -218,13 +357,20 @@ which is the point.
 
 ## Caveats
 
-**The header's own summary contradicts its own enum, in the same file.** The
-preamble says the backing type is "`BURROW_TYPE_ANON` at v1.0; PHYS at Phase 3;
-FILE post-v1.0" and, twenty lines later, "At v1.0: `BURROW_TYPE_ANON` only" —
-while sixty lines below that the enum defines **six** types, including the two
-sparse ones and the executable-memory one, each with a substantial comment of
-its own. The stale text is the file's opening, which is what a reader reads
-first.
+**The header's own summary contradicts its own enum, in the same file**
+(re-verified 2026-08-16, unchanged). The preamble says the backing type is
+"`BURROW_TYPE_ANON` at v1.0; PHYS at Phase 3; FILE post-v1.0" and, twenty lines
+later, "At v1.0: `BURROW_TYPE_ANON` only" — while sixty lines below that the
+enum defines **six** types, including the two sparse ones and the
+executable-memory one, each with a substantial comment of its own. The stale
+text is the file's opening, which is what a reader reads first.
+
+Two arcs have since landed through this file — the charge record and the share
+widening — and both wrote extensive, careful comments *at their own sites*
+while leaving the opening summary alone. That is the normal and locally-correct
+behaviour, and it is why an opening summary decays faster than anything else in
+a file: every author is drawn to the line they are changing, and nobody's change
+is ever *about* the preamble.
 
 The model is three types behind for the same reason, and that gap is
 substantive rather than cosmetic: it predates the sparse backings entirely. See
@@ -238,3 +384,17 @@ when the handle count hits zero, free when the mapping count hits zero, never
 free. The lock came much later, when the first heavily-threaded server made the
 race reachable, and its arrival is what made the two-site free decision a
 problem worth naming.
+
+**The charge record's own test fixture nearly proved nothing.** Its two Procs
+initially both sat at pid 0 — the value `proc_alloc` stamps before the fork path
+assigns a real one — so the payer check matched by *coincidence* and the test
+would have passed without exercising attribution at all. Giving the two Procs
+distinct pids is what turned it into a test. It is the same class as any
+fixture whose default state happens to satisfy the assertion: the fix was in the
+fixture, and nothing about the assertion looked wrong.
+
+The two regressions were then **revert-probed on distinct assertions** — undoing
+the Loom-side claim fails only the foreign-charge leg, undoing the `shared_out`
+arm fails only the payer-settles legs, and neither masks the other. Two fixes,
+two independently-failing tests, which is the bar a single test covering both
+would have quietly missed.
