@@ -277,6 +277,80 @@ Concrete wins in one day, none of which either track produces alone:
 
 ---
 
+## 3b. The three-agent day — what cross-track review actually bought
+
+2026-08-16 ran main + aux + vault concurrently for a full day. The headline:
+**every single cross-track finding was RIGHT about the defect and WRONG about
+the fix**, in all three directions. That is a pattern, not a coincidence, and it
+is the strongest argument for the arrangement rather than against it.
+
+| Reporter | The finding (correct) | The prescription (wrong) |
+|---|---|---|
+| vault -> main | `loom.c`'s sqpoll thread-ledger deref is unbackstopped while its page-ledger twin is validated — and it is the I-32-breaking direction | "route it through `loom_owner_live(l)`" — which returns NULL on every rollback path and would have **leaked a thread charge permanently** |
+| aux -> main | `notes.c`'s no-handler stop arm is covered by nothing; deleting it reddens no test | "if unreachable it is dead code, delete it" — it is an unconstructed STATE, and deleting it removes I-20's stop leg |
+| main -> aux | native programs install no note handler (`T_SYS_NOTIFY` appears once, as a constant) — correct and load-bearing | "so it is the default path all 51 coreutils take" — **false**, and aux's own message contained the datum falsifying it |
+
+**So the rule to operate by: take the SMELL, re-derive the REMEDY.** Never apply
+a peer's fix without walking the code it touches — and never discount the
+reporter when their fix is wrong, because the finding survives independently. In
+all three cases the defect was real and worth the round trip.
+
+### The mechanism, which vault named better than anyone
+
+The descriptive half of an analysis is read OUT of the evidence; the generative
+half is pattern-matched off the SHAPE of the problem. **Generation never
+consults the analysis, because prescribing does not present itself as a step
+that HAS inputs — it arrives wearing the confidence the analysis earned.**
+
+Three instances in one day, from three authors, including one (mine) twenty
+minutes after having the mechanism explained. That rules out carelessness. The
+adopted rule, cheap and the only one that would have caught all three:
+
+> **Before asserting a claim or a fix, re-read the evidence you were GIVEN as if
+> someone else wrote it, against your conclusion.** Not "is my conclusion
+> sound?" but "does anything already in front of me contradict it?"
+
+Advance tell: **a prescription that argues for its own smallness has not been
+checked against the thing that makes it large.**
+
+## 3c. Host contention — the protocol worked, after I broke it
+
+I launched a full bar at 10:18:18Z into a host aux had claimed at 10:14:27Z. I
+had read their announcement and started anyway.
+
+What made it recoverable was measuring instead of arguing: **load 7.32 on 8
+cores with only ~115% total qemu** — my smp4 guest was getting 106% of the ~400%
+it wants, so both gates were queueing rather than running. That is a number, not
+an opinion, and it settled it in one command.
+
+12. **Precedence is by announcement time, and it needs to be stated as a rule.**
+    Whoever announced first owns the host; the second party stands down. Without
+    that, both parties reason "I'm already running" and neither yields. Cost of
+    yielding here was ~10 minutes of discarded gate; cost of not yielding is two
+    ambiguous results, and by aux's own A/B a contended LS-CI is 76 min with 4
+    burned retries against 10 min with 0.
+13. **`presence` still cannot answer "is the host busy".** It reports declared
+    state, and the declaration goes stale. `ps` + `uptime` is what actually
+    answered it, both times. Making `presence` surface observed qemu/build pids
+    would close this — it is the single highest-value yip change on the list.
+14. **KILLING YOUR OWN GATE IS THE MOST DANGEROUS ROUTINE OPERATION IN A
+    MULTI-AGENT SESSION, and a pattern kill is how you take out a peer.** Two
+    `ci-smp-gate.sh` were live and one was aux's; `pkill -f qemu` or
+    `pkill -f ci-smp-gate` would have destroyed a 40-boot run mid-flight. What
+    worked: walk each qemu's **ppid chain** to its owning gate, kill only your
+    own chain by explicit PID, then re-scan for **orphans reparented to init**
+    (my dying gate launched one more boot on its way down) and identify those by
+    **artifact path** — `/projects/thylacine/build` vs `/projects/thylacine-aux/build`.
+    The tree in the command line is the ownership proof when the process tree is
+    gone.
+15. **Two greps that differ by three characters gave opposite answers about
+    whether my own processes were dead** — `[l]oombar.sh` said 0, `[l]oombar`
+    said 3, because the second matched the shell running my own grep. Self-match
+    is not a curiosity; it is the default when you search a list your own
+    command is in (the same trap as `capture-pane`, §1b).
+
+---
+
 ## 4. The one-line summary
 
 The machinery works. Every failure so far has had the same shape — **a message
