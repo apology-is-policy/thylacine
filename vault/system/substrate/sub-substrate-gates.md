@@ -16,7 +16,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -30,7 +30,7 @@ what shipped can run on the baseline CPU.
 - `test.sh` → exit 0 iff the boot reached [[abi-boot-banner]] with no
   extinction, and every enforced post-boot gate passed.
 - `smp-multiboot.sh <label> <cpus> <N> [sanitizer]` → exit 0 iff
-  0 CORRUPTION **and** 0 OTHER across N boots.
+  0 CORRUPTION, 0 EXTERNAL-KILL **and** 0 OTHER across N boots.
 - `ci-smp-gate.sh` → builds each kernel once, runs the matrix, aggregates.
 - `check-v80-floor.py` → exit non-zero if any tracked build input asks above
   ARMv8.0-A, or any shipped userspace binary carries an ungated LSE.
@@ -56,17 +56,72 @@ N≥10 boots per config against ONE built kernel (host jitter varies the
 timing), across four configs. UBSan-smp4 is the amplifier: on the broken
 bringup it crashed 33–43% of boots and 0% of a single lucky one.
 
-**The classifier has FOUR classes, and two of them fail the gate.**
+**The classifier has FIVE classes, and three of them fail the gate.** The
+ladder is ordered, so each row is also "everything above it did not match".
 
 | Class | Fails? | Anchored on |
 |---|---|---|
 | CORRUPTION | yes | exact extinction strings (invalid prev state, stack canary mismatch, kernel stack overflow, already on_cpu, #860, …) |
+| EXTERNAL-KILL | **yes** | QEMU's own `terminating on signal N from pid M` (#88) |
 | INJECT-MISS | no | the full green-guest proof (below) |
 | TIMING | no | EMITTED warn strings only (`[SOFT-WARN]`, the irq-bench budget text) |
 | OTHER | **yes** | nothing — an unclassified nonzero exit |
 
 OTHER failing is the load-bearing choice: an unexplained red is surfaced,
 never absorbed. There is deliberately no bucket for "probably fine."
+
+**But OTHER-fails is necessary and not sufficient, which is what #88 is
+about.** A single boot of forty reported `OTHER fail: <unclassified>` and
+failed the whole gate — while the guest was provably healthy (1236/1236
+PASS, 0 extinction) and the log's last line was QEMU announcing it had been
+signalled from outside. The verdict was not wrong. It was **undifferentiated**,
+and that costs twice: a full investigation every occurrence, and camouflage
+for any genuine failure landing in the same bucket.
+
+So the dossier's older lesson has a twin. The #362 regression showed that **a
+benign catch-all buries failures by passing them**; #88 shows that **a failing
+catch-all buries them too, by making the red routine.** Both destroy the
+signal; one by silence, one by crying wolf. The fix in each case is the same
+shape — take the explainable cause out of the bucket and give it its own honest
+label — and in neither case does the verdict change.
+
+**EXTERNAL-KILL is sound because of what CANNOT produce its evidence.** The
+message names a signal and a sender pid, but that content is not the argument.
+The argument is negative space: a guest cannot signal its own hypervisor, and
+the harness's only kill is `kill -KILL` — **uncatchable, so QEMU prints
+nothing for it.** The one killer that would make the line ambiguous is
+structurally incapable of writing it. Existence of the line is therefore the
+evidence; the signal number and pid are a bonus the classifier had been
+discarding.
+
+**The pattern was validated against a fresh specimen, not against the captured
+incident** — and that is the whole reason it works. Generating a real kill from
+*this host's* QEMU binary revealed a trailing ` (<unknown process>)` suffix
+that the original capture did not have, so an end-anchored regex would have
+matched the historical log and missed every future one. The pattern
+deliberately does not anchor the line end; both forms match, and where QEMU can
+resolve the sender the suffix names it for free.
+
+**Ladder position is load-bearing in both directions.** After CORRUPTION, so a
+real corruption signature is never masked by a kill that landed afterwards;
+before INJECT-MISS, so a killed-but-green boot cannot be absorbed into a
+non-failing class. Either move loses a real failure.
+
+**The exit-0 branch checks CORRUPTION and deliberately does not check
+EXTERNAL-KILL**, and the asymmetry has a reason on each side. A corruption
+marker on a passing boot is a leak worth catching regardless of exit status. A
+kill line on a passing boot means the signal arrived *after* the verdict was
+computed — the boot passed every gate before dying, so it is a genuine PASS.
+
+**The sender is `ps`'d at CLASSIFY time, not at report time.** Seconds after
+the kill a long-lived sender may still be alive; by the time an operator opens
+the log the pid is long gone and unresolvable. Volatile evidence has to be
+captured at detection, which is a general instrument rule and not a detail of
+this class.
+
+The two proving boots were removed from the capture directory afterwards: a
+self-inflicted EXTERNAL-KILL capture left in `build/multiboot-fails/` would
+read as a real incident to the next operator.
 
 **Two precision rules the classifier learned the hard way.** The corruption
 regex uses exact strings because a bare `canary` matched the benign
@@ -140,18 +195,33 @@ G-4 passed a violet-fringed screen. G-5 added the blend-integrity pass —
 every pixel 8-adjacent to an exact-fg core must lie inside the per-channel
 `[bg,fg]` convex envelope.
 
+**A hardcoded socket path is a serialization constraint wearing a default's
+clothes.** `screendump.sh` addressed the QMP control socket at a fixed
+`build/qmp.sock`, so two boots in one tree could not run at once — not because
+anything forbade it, but because they would have addressed the same file. G-2
+made it `THYLACINE_QMP_SOCK`-overridable, and that one-line change is what
+unlocked running N interactive scenarios at a time. The same family as the
+fixed-host-port trap: **the constraint was invisible precisely because nothing
+enforced it**; it only surfaced as a collision when someone tried the
+concurrency the tool never said it lacked.
+
 ## Data structures
 
 None persistent. `build/multiboot-fails/` accumulates captured logs, cleared
 **per label** (not whole-dir) so a matrix running several labels
 back-to-back does not wipe a sibling's evidence, while stale captures from a
-since-fixed run cannot masquerade as current findings.
+since-fixed run cannot masquerade as current findings. Each failing class
+writes BOTH streams (`$LABEL-$i-<CLASS>.log` guest serial, `-harness.log` the
+harness side), and EXTERNAL-KILL appends its resolved sender record to the
+harness capture.
 
 ## Concurrency
 
 The matrix is sequential by construction. Two worktrees can gate
 concurrently — which is what makes reap-scoping load-bearing
-([[sub-substrate-interactive]]).
+([[sub-substrate-interactive]]). The interactive gate runs N scenarios at a
+time within one tree since G-2, which is what the per-scenario QMP socket
+override exists for.
 
 ## Invariants enforced
 
@@ -180,6 +250,20 @@ ceiling, so it is run as subsets via `SMP_GATE_CONFIGS`.
   the template.
 - A new "benign" class must not be reachable without a positive green-guest
   proof; INJECT-MISS's five conjuncts are the bar.
+- **A new class needs its LADDER POSITION argued in both directions** — what
+  it must not mask (the rows above) and what must not absorb it (the rows
+  below). #88 states both; a class inserted without that argument is a
+  reordering of every verdict, not an addition to them.
+- **Validate a log pattern against a specimen you generate NOW**, from the
+  binary actually in the loop — never against a captured incident. QEMU's kill
+  message gained a suffix between the incident and the fix; a pattern fitted to
+  the capture would have matched history and nothing else.
+- **Capture volatile forensics at DETECTION, not at report.** A sender pid is
+  resolvable for seconds and unresolvable by the time anyone reads the log.
+- **A red class that fires routinely is as blind as a green one that
+  over-matches.** When an explainable cause keeps landing in the catch-all,
+  the fix is a new honest label, not a higher bar — the operator has already
+  begun discounting the verdict either way.
 - Adding a feature to the bake requires adding its verification to the
   chokepoint, or the gate silently stops seeing it (#101).
 - `check-v80-floor.py --binaries` must NOT be pointed at the kernel ELF: the
@@ -202,9 +286,18 @@ ceiling, so it is run as subsets via `SMP_GATE_CONFIGS`.
   P-cores vs E-cores, with `-smp 1` → 0.39 s spread and `taskpolicy -b` →
   170–220 s as the controls. This is what the "no host load" discipline
   actually demands: measure it, or do not claim it.
-- The gate's own note [[gate-smp]] described two classes; the code has four.
-  Corrected at this sweep.
+- The gate's own note [[gate-smp]] described two classes; the code had four
+  at the first sweep and has five now. **Both times the count drifted the same
+  direction** — the code grew a class and the prose describing it did not — and
+  the second drift happened while this dossier was the thing describing it.
+  A class count is a fact with no owner: adding one is a change to the
+  classifier, and updating everything that states the total is nobody's step.
+- The #88 incident's original sender **was never identified**. The two known
+  QEMU-killers in the tree were checked and falsified. The classify-time `ps`
+  exists precisely so a recurrence names it — the class is a standing trap, not
+  a closed case.
 
 ## Provenance
 
-[[chg-2026-08-01-substrate-sweep]].
+[[chg-2026-08-01-substrate-sweep]]; [[chg-2026-08-16-gates-external-kill]] the
+fifth class and the G-2 socket override.
