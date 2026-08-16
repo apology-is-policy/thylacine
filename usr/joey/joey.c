@@ -817,6 +817,26 @@ static int do_pouch_hello_smoke(void) {
         return -1;
     t_putstr("joey: pouch-hello-signals smoke ok (sigaction + raise via SYS_NOTIFY/POSTNOTE/NOTED)\n");
 
+    // The N-3 handler re-entrancy guard, exercised rather than read. Nothing
+    // tested that in_handler SUPPRESSES delivery; the severity argument for the
+    // exec-drops-the-latch finding rested on reading the gate at notes.c:1244.
+    // It cannot be unit-tested -- notes_deliver_at_el0_return takes no Thread
+    // argument, so the kernel suite cannot reach the EL0 tail at all.
+    //
+    // /pouch-hello-reentry raises SIGCHLD from inside its SIGINT handler and
+    // then makes five nanosleep calls, so the tail RUNS (and must decline) on
+    // real EL0 returns rather than never being consulted. It self-reports both
+    // failure directions: delivered-too-early (the guard leaked) and
+    // never-delivered (the guard dropped instead of deferring). N3-PASS is
+    // printed only when neither holds, and pouch_smoke_one additionally
+    // requires exit 0 -- so the marker and the status must agree.
+    static const char pn3_name[]   = "pouch-hello-reentry";
+    static const char pn3_expect[] = "N3-PASS";
+    if (pouch_smoke_one(pn3_name, sizeof(pn3_name) - 1,
+                        pn3_expect, sizeof(pn3_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-reentry smoke ok (N-3 DEFERS a note posted inside a handler)\n");
+
     // P6-pouch-libsodium (sub-chunk 14): the libsodium cross-build proving
     // binary. Cross-compiled against pouch's sysroot (which now ships
     // libsodium.a) and run inside Thylacine. Five primitives exercised:
