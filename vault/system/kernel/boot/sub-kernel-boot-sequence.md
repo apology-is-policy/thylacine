@@ -15,7 +15,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -92,6 +92,33 @@ identifier and cache line size are recorded *by each CPU, into its own slot*, at
 its own bring-up, with a release store publishing validity last. The header
 explains why: both registers genuinely differ on a heterogeneous machine, so a
 boot-CPU-only read would be wrong precisely where the values matter.
+
+**Two cache sizes are now decoded, and they answer different questions.** The
+minimum data line is the smallest span a level will allocate — the maintenance
+number, the one every cache-clean loop strides by. The **writeback granule** is
+the largest span one eviction may write back, and it is the number that governs
+**false sharing**; the architecture permits them to differ, and only the second
+one tells you how far apart two hot per-CPU fields must sit
+([[sub-kernel-gic]] is the consumer).
+
+A granule field of zero is decoded as **zero, verbatim** — architecturally it
+means "this part provides no writeback-granule information", which is a
+different fact from "the granule is four bytes" and a different fact again from
+the architectural maximum. Recording the raw distinction is what lets a consumer
+apply its own policy instead of inheriting a fabricated one. Full emulation
+reports zero.
+
+The padding constant is a **compile-time** value because struct layout is, so it
+cannot be the measured number; it is set to twice the largest granule any target
+reports, on an asymmetry argument (over-padding wastes a fixed few hundred bytes
+once; under-padding silently restores contention with no symptom a test can
+catch). The recorded per-CPU value is what keeps that constant honest — a
+registered test fails loudly if a target ever reports a granule the constant
+does not cover.
+
+**The falsification is recorded in the header and the falsified claim still
+stands in the source file.** See Caveats — it is the clearest instance in this
+vault of a correction landing only where it was noticed.
 
 **The suite runs in a deliberately UP-like configuration.** Cross-CPU wakeup
 notifications and secondary preemption are both off during the tests and enabled
@@ -171,6 +198,38 @@ loop feels slow.
 
 ## Caveats
 
+**A measured falsification and its own falsified claim ship in the same commit,
+in two files.** The header's constant records, honestly and in detail, that an
+earlier draft asserted the development host's silicon reports a 128-byte
+writeback granule, that **one boot falsified it** — the granule equals the
+minimum line, at 64, under both hardware virtualization on that host and full
+emulation — and that the constant now rests on a margin argument instead.
+
+The decode site in the source file still says the opposite, as a parenthetical
+supporting the (true) general point that the two sizes may differ: *a part may
+allocate 64-byte lines while its coherency protocol moves 128 — this silicon
+does exactly that.*
+
+The general claim is correct and the instance cited is the one that was
+measured and refuted. Worse, the header scopes its own correction to *"an
+earlier draft of **this comment**"*, which reads as though the claim were
+handled — and the surviving copy is a **different** comment that made the
+**same** claim.
+
+Two further points bound how it should be fixed:
+
+- **A delete is not obviously right.** The measurement was taken *through* a
+  hypervisor, and whether that path presents the silicon's own cache register
+  or a synthesized one is itself unverified. So the parenthetical is not
+  merely refuted — the claim is **unverified in both directions**, and the
+  honest replacement says so rather than asserting the opposite.
+- **Nothing depends on it.** The constant is a margin, the recorded value is
+  raw, and the geometry test compares them. This is a reader hazard, not a
+  correctness one — which is exactly why it survived: the sentence it lives in
+  is load-bearing and true, and only its example is wrong.
+
+[[seam-cwg-parenthetical-refuted]].
+
 **The boot path's test is the boot.** Seven registered tests cover this whole area
 — one for the entropy mix, three for the tree parser, two for the patcher, one for
 feature detection — against roughly four thousand lines. That is not a coverage
@@ -193,3 +252,8 @@ would go looking for a file that was never there.
 Read from `kernel/main.c` (932 lines) and `arch/arm64/hwfeat.c` (199) in full,
 2026-08-02, during the boot sweep. The feature-detection call has exactly one
 caller — this function, on the boot CPU — verified by census across the tree.
+
+The writeback-granule decode, the compile-time padding constant, and the
+refuted parenthetical are [[chg-2026-08-16-boot-cwg-parenthetical]]. The banner
+emitter's writer role — the delivery half of [[abi-boot-banner]] — is
+[[chg-2026-08-16-cons-writer-set]].
