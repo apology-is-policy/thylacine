@@ -62,6 +62,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-larder-stale-child-attr]] | open | sub-kernel-larder | fnd-l1f-r1-f3 |  |
 | [[seam-legate-member-sweep-race]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
 | [[seam-loom-rearm-needs-blocking-enter]] | open | sub-kernel-loom | chg-2026-08-02-async-sweep |  |
+| [[seam-loom-sqpoll-owner-unbackstopped]] | open | sub-kernel-loom | chg-2026-08-16-loom-charge-ledger | unfiled -- yip to main 2026-08-16 |
 | [[seam-mm-directmap-cap-absolute]] | open | sub-kernel-mm-phys | chg-2026-05-31-808-directmap-pagemap | #808 audit F2; Lazarus board bringup |
 | [[seam-mount-graph-unmodeled]] | open | sub-kernel-territory | fnd-stalk2-r1-f1 | unfiled |
 | [[seam-netd-host-tests]] | open | sub-netd-server, sub-netd-nic | adt-net2d-r1 |  |

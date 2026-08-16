@@ -195,17 +195,21 @@ writable.
 
 ### The defect found by reading, not by testing
 
+**Closed, at the site, in the code as it stands.** The write branch of the
+break *uninstalls* the stale read-only leaf before installing anything, and
+says why in a comment there. What follows is why that line is load-bearing
+rather than redundant — not an open hazard.
+
 `mmu_install_user_pte` **refuses** a mismatching install over a valid leaf — it
 returns failure rather than overwriting. **Both break outcomes mismatch**: the
 copy path changes the physical address, and take-in-place changes the
 permission bits.
 
 Since a *read* of a COW page installs a read-only PTE, the first **write after
-a read** would have failed its install and killed the Proc. The uninstall at
-the top of the write branch is what makes read-then-write work at all — a step
-that reads as redundant unless you know the install primitive's refusal
-contract. Revert-probed: the suite fails at exactly that assertion and nothing
-else.
+a read** would fail its install and kill the Proc if the uninstall were removed
+— which is exactly what makes it read as a redundant step to anyone who does
+not know the install primitive's refusal contract. Revert-probed: the suite
+fails at exactly that assertion and nothing else.
 
 It is worth noting how this was found. Not by a test — a test would have caught
 it only if some case did read-then-write on a COW page — but by **reading the

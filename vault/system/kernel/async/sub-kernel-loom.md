@@ -15,7 +15,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -170,6 +170,78 @@ the reap protocol instead: mask interrupts, mark itself exiting, release the
 handshake flag, and switch away permanently. Teardown spins on that flag and
 then reclaims it.
 
+The thread is charged against the **creating** Proc's thread budget, not the
+kernel process's — otherwise a ring is a way to buy a thread outside
+[[inv-i32]] by parenting it somewhere exempt. The check and the increment
+happen under one lock hold, because unlike ordinary thread creation a ring
+setup has no other serialization point. Exempt Procs skip the *cap* but are
+still counted, so the uncharge is unconditional either way.
+
+The uncharge keys on a **flag**, not on the thread pointer: a setup that
+charged and then failed to start the thread still owes the refund, and keying
+on "is there a thread" would silently keep it.
+
+### Who paid — the I-32 ledger
+
+Loom's teardown is the one page-charge settlement point in the tree with **no
+Proc argument**. A ring outlives the syscall that made it and is freed from a
+handle close, so the Proc that was billed has to be recorded on the object.
+
+Two questions look like one here, and conflating them was a live defect:
+
+**Which Proc owns this ring?** Answered by a stored pointer plus its pid. The
+pointer is safe because the ring handle is neither transferable nor dup-able,
+so a ring is reachable only through its creator's handle table, and that table
+is torn down while the creator's own structure is still allocated. That is an
+*argument*, not an enforced invariant, so it is backstopped rather than
+trusted: the magic-and-pid pair turns any future violation into a skipped
+refund on a dying Proc — inert — instead of a write through a dangling pointer
+or a charge stolen from a recycled one.
+
+**Which Proc paid for this region?** A different question, and the ownership
+proof does not answer it. Buffer registration accepts any writable anonymous
+region of the owner — which a network ring that the driver allocated and shared
+in satisfies exactly, and the shipped flow API registers the whole ring. So the
+owner can hold a pin on pages it never bought.
+
+The answer therefore comes from the **region**, not the ring. Each eager charge
+stamps its payer on the Burrow; a settler *claims* that record — a read that
+also **clears** it — and refunds only what comes back. A region the owner never
+paid for returns zero, so nothing is refunded. The clear is what makes the
+refund exactly-once: two paths racing to settle cannot both win.
+
+The claim happens **before** the drop, because a freeing drop takes the record
+with it. If the drop turns out not to free, the claim is put back. The window
+between claim and restore is a real one, and its failure mode is deliberately
+chosen: a concurrent settler sees the cleared record and skips, leaving a
+charge that outlives its region until the payer's next release point. An
+over-charge on the payer — never a refund to a Proc that did not pay.
+
+**The direction of the error is the whole design.** An over-charge caps a Proc
+early; an under-charge inflates its budget, which is the bound failing. Every
+tie in this mechanism is broken toward over-charging.
+
+### The two owner pointers must stay apart
+
+The ring records the same Proc twice — once for the page ledger, once for the
+thread ledger — and the two are bound at **opposite ends** of setup. That looks
+like duplication and is not.
+
+The page owner is bound **last**, after the final failure path, so it marks a
+fully-constructed ring. Every rollback before that point uncharges explicitly
+and then tears down a ring whose page owner is still unset, so teardown cannot
+refund what the rollback already did.
+
+The thread owner is bound **first**, at the moment the charge succeeds, for the
+identical reason read the other way: the rollbacks do *not* refund it, so
+teardown must, which means it has to be recorded before anything can fail.
+
+Same goal — settle exactly once — reached by inverting the discipline, because
+one ledger is settled by the rollback and the other by the teardown. Merging
+the two pointers, or moving either binding toward the other, silently breaks
+whichever it was not written for: one double-refunds, the other leaks. Nothing
+in the code says these are a matched pair.
+
 ## Data structures
 
 **The ring** — one anonymous region: a 64-byte header, the submission index
@@ -240,8 +312,11 @@ structural rather than hopeful.
 **[[inv-i30]]** — the submit-time pin, and the ring TOCTOU. Resolve and snapshot
 at submit; never re-read a shared word after checking it.
 
-**[[inv-i32]]** — the ring region is charged to the creating Proc's page budget,
-so rings are bounded like any other anonymous commitment.
+**[[inv-i32]]** — on two axes. The ring region is charged to the creating
+Proc's page budget, so rings are bounded like any other anonymous commitment;
+the poll thread is charged to that same Proc's thread budget, so a ring is not
+a way to buy a thread parented somewhere exempt. Both settle exactly once,
+through the ledger above, and both break ties toward over-charging.
 
 ## Error paths
 
@@ -295,6 +370,16 @@ consumer.
   a wrong kernel address with no tripwire.
 - **Every failure path posts a completion.** A silently dropped submission is
   unobservable to the caller.
+- **Never refund a page charge to the ring's owner without asking the region who
+  paid.** "This Proc owns the ring" and "this Proc bought these pages" are
+  different claims, and buffer registration accepts shared-in regions, so the
+  first does not imply the second. Claim against the Burrow; refund only what
+  the claim returns.
+- **Claim before the drop, restore if it did not free.** The record dies with
+  the region, so a claim after a freeing drop reads nothing and silently loses
+  the charge.
+- **Settle the thread budget on the flag, never on the thread pointer.** A
+  charge whose thread never started still owes its refund.
 
 ## Seams
 
@@ -311,6 +396,9 @@ consumer.
   carve-out first.
 - **[[seam-loom-rearm-needs-blocking-enter]]** — re-arm runs only in the two
   drive loops, so a non-blocking consumer never re-arms a multishot stream.
+- **[[seam-loom-sqpoll-owner-unbackstopped]]** — the thread ledger's owner
+  pointer is dereferenced bare where the page ledger's identical pointer, resting
+  on the identical argument, is validated against magic and pid.
 
 ## Caveats
 
@@ -326,9 +414,25 @@ consumer.
   what it does. The same drift, in the same place, as the console's and the
   entry area's header blocks.
 - **An overflow-safety comment over-estimates the completion array** at twice its
-  real maximum size. The direction is fail-safe — the bound it proves still
-  holds — but it is arithmetic in a comment whose only job is that arithmetic.
+  real maximum size, and the way it gets there is the interesting part: two
+  errors in opposite directions. It uses the submission ring's entry *count*
+  where the completion ring's is double, and the uniform sixty-four-byte entry
+  *size* where a completion entry is a quarter of that. Four times too large
+  against two times too small, landing at twice. So it is not a slip in the
+  arithmetic — it is the conservative uniform bound applied one region too far,
+  which is why it reads as deliberate. The direction is fail-safe and the
+  headroom on the conclusion is enormous (the overflow it rules out needs about
+  four thousand times the largest ring), but the number is decorative rather
+  than load-bearing, and only the compensation makes it conservative: widen a
+  completion entry and the same comment starts under-estimating.
+- **A constant's rationale was replaced rather than its value**, which is the
+  pattern worth copying. The registered-handle table bound used to be justified
+  by matching the per-Proc handle limit; when that limit was lifted the match
+  stopped being a reason, and the fix left the number alone and wrote the real
+  argument — the table is charged per *ring*, and a Proc may hold many rings, so
+  the bound was never about how many handles a Proc can hold. A stale-constant
+  sweep that only re-checked values would have found nothing wrong here.
 
 ## Provenance
 
-[[chg-2026-08-02-async-sweep]].
+[[chg-2026-08-02-async-sweep]], [[chg-2026-08-16-loom-charge-ledger]].

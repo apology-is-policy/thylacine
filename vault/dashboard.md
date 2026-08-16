@@ -36,7 +36,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 84
+## Open seams: 85
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -85,6 +85,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-larder-stale-child-attr]] (sub-kernel-larder)
 - [[seam-legate-member-sweep-race]] (sub-kernel-proc)
 - [[seam-loom-rearm-needs-blocking-enter]] (sub-kernel-loom)
+- [[seam-loom-sqpoll-owner-unbackstopped]] (sub-kernel-loom)
 - [[seam-mm-directmap-cap-absolute]] (sub-kernel-mm-phys)
 - [[seam-mount-graph-unmodeled]] (sub-kernel-territory)
 - [[seam-netd-host-tests]] (sub-netd-server, sub-netd-nic)
@@ -129,8 +130,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-16 [[chg-2026-08-16-burrow-attribution]] — The Burrow re-swept: the type says SHAPE, and that lesson has now arrived three times
 - 2026-08-16 [[chg-2026-08-16-corvus-narrowing]] — corvus re-swept: the AUTH gate was a narrowing, and the expired premise had three dependents
 - 2026-08-16 [[chg-2026-08-16-fault-cow-break]] — The fault dispatcher gains the COW break, and a defect found by reading a contract
+- 2026-08-16 [[chg-2026-08-16-loom-charge-ledger]] — Loom's I-32 ledger: owning the ring is not paying for the pages
 - 2026-08-16 [[chg-2026-08-16-notes-fp-and-phenotype]] — Notes re-swept: 'the entire user context' was one word too many, and it was mine
 - 2026-08-16 [[chg-2026-08-16-pouch-trailing-slash]] — pouch: the third layer could not delete its normalisation, so the rule is 'never decide'
 - 2026-08-16 [[chg-2026-08-16-stalk-posix-form]] — stalk: the POSIX form gates merged, and a gate binds only what it sees
-- 2026-08-15 [[chg-2026-08-15-build-targets]] — build.sh re-swept: three target lists that disagree, and the vault recommended the shortest
 <!-- generated:end -->
