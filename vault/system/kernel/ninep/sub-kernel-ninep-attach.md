@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -98,6 +98,57 @@ sits at offset 0 in BOTH adapter types, making the wrong-typed read
 layout-safe. Only after both destroys does the adapter kfree (the client's
 ops vtable held it as `ctx` by value — destroy must run while it is alive).
 
+### The session registry, and why the walk needs no refcount
+
+Every attached session links itself into one global list at construction and
+unlinks at the top of its last-unref teardown. That list is what makes live 9P
+sessions visible for diagnosis — an instrument built during a reply-loss
+investigation, when the question "which sessions exist and what are their ring
+counters" had no answer at all.
+
+**The lifetime argument is the elegant part, and it is a pairing rather than a
+mechanism.** The walker holds the registry lock across its *entire* walk, and the
+unlink runs *first* in the teardown — before the root clunk, before the client
+destroy, before anything is freed. Those two facts together mean membership in
+the list is itself the liveness proof: a session the walker can reach has not
+begun tearing down, and a session that has begun tearing down is already
+unreachable. No reference is taken and none is needed.
+
+Reverse either half and it breaks. A walker that dropped the lock mid-walk could
+resume into a freed entry; an unlink placed after any teardown step would leave a
+window where the walker reaches a half-destroyed session and snapshots it.
+
+Lock order is registry then client — the walker takes the registry lock and then
+snapshots each session under its own client lock. Linking and unlinking take
+*only* the registry lock, so there is no path that could invert them.
+
+**The registry sees production sessions only.** Test loopback clients never
+register, because they do not go through this layer. That is correct for the
+instrument's purpose and worth stating as a coverage property rather than
+leaving implicit: a bug visible only in the registry's output is a bug no test
+can currently observe.
+
+### The label is sanitized because an empty string is a sentinel elsewhere
+
+Session labels default to the attach name, truncated to a small fixed field,
+with every non-printable byte replaced — and **an empty result replaced by a
+placeholder**.
+
+That last clause is not tidiness. The consumer that renders this registry treats
+*bytes written* as its overflow signal, so a zero-length field is
+indistinguishable from a full buffer and aborts the entire listing. The
+consumer-side guard exists too; this is the producer half of the same defence.
+
+**The interesting part is the history.** That collision was found and fixed once,
+as a literal empty string in a conditional. It came back here **as data** — a
+label that happens to be empty at runtime rather than a constant written into the
+source. Fixing the instance did not fix the class, and the second instance could
+not have been found by looking for the first one's shape.
+
+The connecting service path relabels with the peer's process id, because the
+attach name is usually empty there — which is precisely the input that would have
+produced the empty label.
+
 **The client-struct economics**: `struct p9_client` is ~36 KiB (it inlines
 the 32 KiB default-tier `out_buf`; a bulk session kmallocs an msize-sized
 `out_buf` besides — CF-3 B), so kmalloc routes it through the alloc_pages
@@ -167,6 +218,15 @@ are rare (mount-time); nothing here is hot.
   TU).
 - **The `loose` stamp's pre-publication window** — a stamp after the root
   handle publishes would race dev9p's relaxed reads.
+- **The registry unlink must stay first in teardown, and the walk must hold its
+  lock throughout.** Neither half is safe alone: together they make list
+  membership the liveness proof, which is why the walk takes no reference. Moving
+  the unlink after any teardown step, or releasing the lock mid-walk, reopens a
+  use-after-free that nothing else in this layer would catch.
+- **A label may never be empty.** The consumer reads bytes-written as its
+  overflow signal, so an empty label aborts the whole listing. Both ends guard
+  it; the producer's guard is the one that covers labels that are empty *by
+  data* rather than by literal.
 
 ## Seams
 
@@ -195,7 +255,8 @@ are rare (mount-time); nothing here is hot.
 (generated from incoming `touched` edges — shaped by P5-attach-create,
 SYS_ATTACH_9P/55, 16c [[chg-2026-05-26-16c-attach-srv]] + its two audit
 rounds, stalk-3b's shared open=connect path, A-3c out_err, CF-3 B msize
-classes, B1 loose.)
+classes, B1 loose, and #210's session registry --
+[[chg-2026-08-16-ninep-attach-registry]].)
 
 ## Tests
 
