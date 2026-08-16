@@ -4,7 +4,7 @@ type: chg
 title: "The guard held because the emulator supplied the value it checked for"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["4a635539"]
 touched: [sub-kernel-boot-entry]
 established: []
 closed: []
