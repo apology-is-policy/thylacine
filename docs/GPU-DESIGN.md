@@ -923,6 +923,54 @@ sound — merely conservative — once slots become distinct host objects.
 
 ---
 
+#### 4.5.9 The composed path is CAPABILITY-GATED, and the CPU path is PERMANENT (measured 2026-08-16, before C-2 wrote a line)
+
+**Measured, not inferred.** The primary dev loop reports, in the boot log of the
+run that gated the extinction fix:
+
+```
+tapestryd: gpu up -- 1280x800, pci intid=35, virgl=0 capsets=0
+```
+
+`tools/run-vm.sh` defaults `gpu_dev` to **`virtio-gpu-pci`** — a device with no
+GL — and `gpu.rs` negotiates `VIRTIO_GPU_F_VIRGL` and records the result. The
+`-gl` models refuse to realise without a Linux GL host, which is why they run on
+thyla-pi and not on the M2. So **`CTX_CREATE`, `RESOURCE_CREATE_3D` and
+`SUBMIT_3D` are unavailable on the default dev loop**, and every mechanism §4.5
+describes is unavailable with them.
+
+Three consequences, and the third corrects this document:
+
+1. **C-2 and C-3 cannot be verified on the dev loop.** A compositor context and
+   a 3D screen require `virgl=1`, so the arc's functional verification belongs
+   on **thyla-pi** (KVM, real V3D, `virtio-gpu-gl-pci` + `egl-headless`). The
+   dev loop can still verify that the *fallback* is unregressed — which is the
+   larger share of the risk, since that is the path everything else boots on.
+2. **The composed path must be capability-GATED at runtime**, keyed on the
+   negotiated feature bit rather than on a build flag. A tapestryd that assumed
+   GL would take the console dark on the default device, which is the
+   configuration the whole aurora/console stack boots under.
+3. **The CPU-composed path is PERMANENT, and "C-4 retire the readback path"
+   must be read as "stop *taking* it where GPU composition is available" — never
+   as deleting it.** This is not a preference. It is forced twice over: by the
+   plain `virtio-gpu` device that is the default here, and more fundamentally by
+   bare metal, where there is no virtio-gpu at all and virgl is a
+   *virtualization* transport with nothing to negotiate. The universal path is
+   the CPU one; GPU composition is the accelerated path *where a GPU seam
+   exists*. §4.4's own framing already said the Direct/Composed split is
+   Fuchsia's `DisplayCompositor` pattern "with the fallback's GPU half unbuilt";
+   what was missing is that the fallback does not go away when its GPU half is
+   built.
+
+**The cost this carries, stated rather than discovered later:** tapestryd will
+carry TWO composition paths for the foreseeable life of the system, and they
+must stay behaviourally identical from the outside — `ls-gfx*` byte-identical
+across both, or the gate that proves one is silent about the other. That is a
+standing maintenance and audit burden, and it is the price of running on
+hardware that does not all have a GPU seam. It also sharpens §4.5.5's
+capset-neutrality obligation: the model must now stay neutral across *three*
+fills (CPU, virgl, Venus), not two.
+
 ## 5. Placement — where the server lives, per backend
 
 The seam is identical on both; the process topology is not, and both are forced:
@@ -1225,7 +1273,7 @@ scope shifts with them.
 | **Warp-3** | `virgl_thylacine_winsys` (18 slots) + the client library; unmodified Mesa virgl driver — **LANDED** (3a `ef6af62c` seam capacity 128 + the `fence-signaled`/`bo-cap` ctl promotion; 3b `8b8ca40d` fork patch 0006: the winsys + `warp_client` + `virgl-prove`; 3c `eb62f97c` the builder cycle; `c64ddbe4` the #191 build-id cacheless fallback, port finding 4; as-built `docs/reference/149-warp.md`) | a triangle, in-guest, on the GPU — **met: `GL_RENDERER = virgl (Apple M2 (Compat))`, via `tools/warp-host.sh tri`** |
 | **Warp-4** | present integration: `SET_SCANOUT` of a 3D resource (Direct), readback fallback (Composed) — **LANDED** (4a+4b `ec2bd8ad` the mutual-adoption protocol, both halves + fork patch 0007; 4c the gate: the launcher auto-detect + `tools/warp-host.sh quake` — both arms in one run, the `scanout direct N GL res R` switch live on thyla-gl; as-built `docs/reference/149-warp.md` §Warp-4) | **GLQuake on virgl** — **measured: ~3 fps aggregate at 1280×800 (the mechanism gate is met). PREMISE CORRECTED 2026-08-10: the 192.8 anchor was macOS/HVF and does not transfer (its own Warp-1 row said so); the same-host llvmpipe band is 2.4–5.9 fps at 640×480, so ~3 fps at 3.3× the pixels sits INSIDE the software band — #196 now asks stall-vs-compute (the `decomp` verb: per-arm unpaced figures + qemu CPU attribution), not "why 20–25× under"**. Findings ledger: #195 (GL-host capture), #197 (console ^C owner-only), #198 (demo-end context break), #199 (caught notes never interrupt blocking syscalls) |
 | **Warp-5** | the focused audit; I-45 enumerated; reference docs | Fable-5-max round closed |
-| **Warp-C** | **GPU composition (§4.5; designed 2026-08-13, RESERVED)** — the compositor's own virgl context; the screen becomes a host-side 3D resource; per-frame `VIRGL_CCMD_BLIT` composition replacing the readback; chrome becomes a damage-uploaded texture; the I-40 drain. Sub-chunks: **C-0** the two gating probes (§4.5.4 P1 cross-context blit with a pixel-asserting positive control, P2 cross-context ordering) — *nothing structural lands until both pass* — plus **C-0d**, the #240 detector (§4.5.4b: the sentinel stamp behind a sticky `stream-rejected` on the ctx ctl), which is a PREREQUISITE of P1b rather than a parallel nicety: a WITH-attach retry that silently does nothing is unreadable while a refusal reports success; **C-1 LANDED 2026-08-16** the spec extension (async present + drain; `drain_skipped` + a P2 ordering counterexample **per direction**, since the exclusion is symmetric) BEFORE impl — TLC-green, additive by measurement (the six pre-existing cfgs reproduce 5413 exactly with `ALLOW_COMPOSE = FALSE`), and it surfaced a C-2/C-3 obligation the prose had not: **the D1 recycle gate does not survive the composed path unchanged**, because tapestryd runs ONE host resource per surface and a present's terminal CQE stops meaning "free" once the compositor is a second reader; **C-2** compositor ctx + 3D screen (**owes the attach verb — P1b's authority-conferral point — and the blit/fill exclusion C-1 named, whose mechanism is decided at §4.5.8: one host resource PER SLOT for software surfaces, a fence for GL ones**); **C-3** blit composition + chrome-as-texture; **C-4** retire the readback path; **C-5** focused audit (an I-40 surface + a new cross-context authority path) | **the composed path reaches direct-path parity** — i.e. the #215 43% is gone at 1280×800, measured by the same two-method protocol, with `ls-gfx*` byte-identical and tearing-freedom held under P2 stress |
+| **Warp-C** | **GPU composition (§4.5; designed 2026-08-13, RESERVED)** — the compositor's own virgl context; the screen becomes a host-side 3D resource; per-frame `VIRGL_CCMD_BLIT` composition replacing the readback; chrome becomes a damage-uploaded texture; the I-40 drain. Sub-chunks: **C-0** the two gating probes (§4.5.4 P1 cross-context blit with a pixel-asserting positive control, P2 cross-context ordering) — *nothing structural lands until both pass* — plus **C-0d**, the #240 detector (§4.5.4b: the sentinel stamp behind a sticky `stream-rejected` on the ctx ctl), which is a PREREQUISITE of P1b rather than a parallel nicety: a WITH-attach retry that silently does nothing is unreadable while a refusal reports success; **C-1 LANDED 2026-08-16** the spec extension (async present + drain; `drain_skipped` + a P2 ordering counterexample **per direction**, since the exclusion is symmetric) BEFORE impl — TLC-green, additive by measurement (the six pre-existing cfgs reproduce 5413 exactly with `ALLOW_COMPOSE = FALSE`), and it surfaced a C-2/C-3 obligation the prose had not: **the D1 recycle gate does not survive the composed path unchanged**, because tapestryd runs ONE host resource per surface and a present's terminal CQE stops meaning "free" once the compositor is a second reader; **C-2** compositor ctx + 3D screen (**owes the attach verb — P1b's authority-conferral point — and the blit/fill exclusion C-1 named, whose mechanism is decided at §4.5.8: one host resource PER SLOT for software surfaces, a fence for GL ones**); **C-3** blit composition + chrome-as-texture; **C-4** retire the readback path **where GL is available** (never delete it -- 4.5.9: `virgl=0` on the default dev device and there is no virtio-gpu at all on bare metal, so the CPU path is the UNIVERSAL one and permanent); **C-5** focused audit (an I-40 surface + a new cross-context authority path) | **the composed path reaches direct-path parity** — i.e. the #215 43% is gone at 1280×800, measured by the same two-method protocol, with `ls-gfx*` byte-identical and tearing-freedom held under P2 stress |
 | **Warp-6** | Venus: hostmem mapping (§6.2), `vn_renderer_thylacine`, blobs — **now also owes the §4.5.5 generalization: the blob-mediated capset-neutral blit, extending Warp-C's mechanism without reshaping its model** | a Vulkan prover in-guest |
 | **Warp-7+** | RPi: the v3d leaf driver on the MENAGERIE substrate — own charter, F3's posture built in | own gate |
 

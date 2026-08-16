@@ -181,6 +181,29 @@ been killed; a slow gate really can be slow), which is precisely why it was not
 self-correcting. The fix is to find where a tool actually writes its verdict
 before reading any verdict from it.
 
+### Before C-2 wrote a line: the composed path cannot run on the dev loop
+
+Checked the precondition rather than assuming it, and it changed the arc. The
+boot log of the very run I had just gated says
+`tapestryd: gpu up -- 1280x800, pci intid=35, virgl=0 capsets=0`, and
+`tools/run-vm.sh` defaults to `virtio-gpu-pci` — a device with no GL. So
+`CTX_CREATE` / `RESOURCE_CREATE_3D` / `SUBMIT_3D` are unavailable on the primary
+dev loop, and with them every mechanism §4.5 describes.
+
+Three consequences, recorded as GPU-DESIGN §4.5.9. C-2/C-3 must be verified on
+**thyla-pi**, not here. The composed path must be capability-gated on the
+negotiated feature bit — a tapestryd that assumed GL would take the console dark
+on the default device. And the third corrects the roadmap: **"C-4 retire the
+readback path" cannot mean delete it.** That is forced twice over — by the plain
+`virtio-gpu` that is the default here, and more fundamentally by bare metal,
+where there is no virtio-gpu at all and virgl is a *virtualization* transport
+with nothing to negotiate. The CPU path is the universal one; GPU composition is
+the accelerated path where a GPU seam exists.
+
+The cost is stated rather than left to be discovered: tapestryd carries **two
+composition paths permanently**, and they must stay behaviourally identical from
+the outside or the gate that proves one is silent about the other.
+
 ### Still open leaving this run
 
 - **Warp-C C-2** — the attach verb and the per-slot host resources §4.5.8 now
