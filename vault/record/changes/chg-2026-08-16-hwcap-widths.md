@@ -4,7 +4,7 @@ type: chg
 title: "Two width rules in one file, and neither implied the other"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["2b7d16ee"]
 touched: [sub-kernel-hwcap]
 established: []
 closed: []
