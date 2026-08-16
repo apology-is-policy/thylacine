@@ -104,7 +104,14 @@ The dispatcher, in order:
    onto the user stack, save the user context into the thread, mark it
    in-handler, and rewrite the return context to land at the handler.
 
-### The save was not the whole machine, and this note said it was
+### The save was not the whole machine, and this note said it was — FIXED
+
+**Disposition first, because the defect is the interesting half and that is
+exactly how a disposition gets dropped:** this was #96 and it is **closed in
+the tree**. Both delivery paths now save the FP/SIMD bank and share one
+restore; the exec path zeros the area; a test asserts the restore actually
+restores. What follows is the defect and why it hid, in the past tense
+throughout.
 
 An earlier revision of this section said delivery saves "the **entire** user
 context". It did not, and that word was the defect in one syllable: the save
@@ -117,9 +124,9 @@ path. Nothing else saved them. The first thing a handler did that touched a
 vector register silently corrupted the interrupted computation — and that is
 not exotic: any float arithmetic, any autovectorised `memcpy`, any `printf`
 with a `%f` does it. Never an authority question, since the registers are the
-Proc's own; **silent data corruption**, live on the native path since the
-signals sub-chunk, and made reachable by ordinary compiled C once the phenotype
-arrived.
+Proc's own; **silent data corruption**, which had been live on the native path
+from the signals sub-chunk until #96 closed it, and which ordinary compiled C
+made reachable once the phenotype arrived.
 
 **Why it hid for that long is the part worth generalising.** The four save
 lines *were* exhaustive — with respect to `struct exception_context`. Every
