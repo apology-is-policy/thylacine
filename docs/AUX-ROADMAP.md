@@ -1,10 +1,26 @@
 # Aux track roadmap
 
-**As of 2026-07-28. Branch `gfx-4` @ `45186b64`, clean + pushed (both mirrors).**
+**As of 2026-08-16. Branch `aux-2`.** Read the branch off the worktree
+(`git branch --show-current`), never off this line — on 2026-08-16 three
+sources gave three answers (main's CLAUDE.md said `aux/userspace-apps`, this
+header said `gfx-4 @ 45186b64`, the worktree was on `aux-2`), and `gfx-4` is a
+separate live branch rather than a rename of anything. A branch name written
+into a document is stale from the moment the track moves; the worktree cannot
+be.
 
 Supersedes the narrow `usr/apps/AUX-ROADMAP.md` (the old userspace-apps-only aux
-agent). This track now owns the graphics arc, the Aurora environment, and — new
-today — the VIVARIUM arc.
+agent). This track now owns the graphics arc, the Aurora environment, and the
+VIVARIUM arc — **plus the kernel surfaces those arcs land on**, which is where
+its recent work actually sits: measured over the 250 commits from `45186b64` to
+`aux-2`, the touched tree is `kernel/test` (52 files), `docs/reference` (41),
+`usr/ports` (28), `kernel/include` (27), `usr/lib` (19), `tools/interactive`
+(13), `arch/arm64` (11). The notes / signals / job-control / PTY line
+(aux#240..aux#255) is a kernel arc by any honest reading, and this track runs
+its own full bar for it: the suite, the SMP gate, the pty spec set, and LS-CI.
+
+The 2026-07-28 version of this header described the track as graphics-only and
+went unrefreshed for three weeks while the work moved. Refresh this block
+whenever the arc changes, not whenever it is convenient.
 
 ---
 

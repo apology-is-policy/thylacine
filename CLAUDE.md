@@ -1031,14 +1031,57 @@ Operational implications:
 
 ---
 
-## Parallel auxiliary track — native userspace apps (worktree-isolated)
+## Parallel auxiliary track — a second full engineering track (worktree-isolated)
 
-A **parallel auxiliary agent** runs in a separate git worktree (sibling dir, typically `../thylacine-aux`) on branch **`aux/userspace-apps`**, established 2026-06-07 to use spare quota in parallel with the main (kernel) track. Its mission: **author NATIVE `libthyla-rs` userspace applications from the system documentation, build them to compile (never run), and produce a per-app test plan + a documentation-completeness gap report.** Every session reads this file, so the boundary is common knowledge:
+A **parallel auxiliary agent** works a separate git worktree (sibling dir,
+typically `../thylacine-aux`) on branch **`aux-2`**, established 2026-06-07 to
+use spare quota alongside the main (kernel) track. Every session of both tracks
+reads this file, so the boundary is common knowledge.
 
-- **The aux track owns `usr/apps/**` only** (its apps + a vendored `usr/apps/vendor/` for native crate forks like ratatui→nora). Its constitution is `usr/apps/AUX-DIRECTIVE.md`; its worklist + across-compaction memory is `usr/apps/AUX-ROADMAP.md`; its top deliverable is `usr/apps/DOC-GAP-REPORT.md`.
-- **It never touches the main track's surface:** no `kernel/` / `arch/` / `mm/` / `specs/` / `tools/`, no edits to `docs/reference/*` (it only READS them and RECORDS gaps), and it never extends `libthyla-rs`. **It never boots QEMU** — `cargo build` is its verification ceiling (so it never contends with the main track's QEMU boots, the host-oversubscription flake source).
-- **For the MAIN (this) agent:** don't edit `usr/apps/**` — it's the aux branch's domain (avoid a cross-branch collision). When `aux/userspace-apps` merges (clean — disjoint trees), its `usr/apps/<app>/TEST-PLAN.md` files become a ready-to-run in-VM test backlog, and its `DOC-GAP-REPORT.md` is the input for a docs pass: **fold verified findings into `docs/reference/*`** (the main agent owns the real reference docs). The only shared-file touchpoint is the `libthyla-rs` module list at Loom-6 (when the aux track adopts the native Loom API for its Phase-B server apps) — a trivial members-list merge.
-- Roadmap shape (in `AUX-ROADMAP.md`): Phase A = native coreutils + the Thylacine-distinctive `ns`/`bind`/`srv`/`9p`/`ps`/`cap` tools + the **nora** editor arc (ratatui forked native); Phase B = Loom/network apps (design+skeleton+test-plan until Loom-6 + the net stack land); Phase C = ports (Zig/SDL) as feasibility/gap-analysis only (ports are pouch, not native, and need execution to verify).
+**Rewritten 2026-08-16 (main#237 / aux side) after measurement found every
+operative claim here false.** The superseded text said the track ran on
+`aux/userspace-apps`, owned `usr/apps/**` ONLY, never touched
+`kernel/`/`arch/`/`mm/`/`specs/`/`tools/`, never edited `docs/reference/*`, and
+**never booted QEMU** — `cargo build` as its verification ceiling, "so it never
+contends with the main track's QEMU boots". Measured against `aux-2`: **zero**
+files changed under `usr/apps/`, 41 `kernel/` + 12 `tools/` + 1 `specs/` + 17
+`docs/reference/`, and the track boots HVF VMs and runs its own SMP + LS-CI
+gates. Do not restore any of it from memory of an older session. Note the
+shape, because it is the recurring one: the drift was invisible for two months
+precisely because the section reads as settled fact and nothing ever checked
+it.
+
+- **This is a full second engineering track, not a userspace-apps annex.** It
+  works the same surfaces main does. **Read the branch off the worktree, never
+  off a doc** — when this was measured, three sources gave three answers
+  (main's CLAUDE.md said `aux/userspace-apps`, `docs/AUX-ROADMAP.md`'s header
+  said `gfx-4 @ 45186b64`, the worktree was on `aux-2`; `gfx-4` is a separate
+  live branch, not a rename). The worklist + across-compaction memory is
+  `docs/AUX-ROADMAP.md` (which superseded the narrow `usr/apps/AUX-ROADMAP.md`
+  by moving and broadening — the old path is stale, the document is alive).
+- **The real shared surface is `kernel/` + `tools/` + `docs/reference/`.** The
+  old "don't edit `usr/apps/**`" guard guarded an empty room, and was worse
+  than useless: it aimed attention away from where the tracks actually meet.
+  Collisions there are routine and handled well by both sides landing findings
+  in each other's trees. Coordinate through yip — `presence` answers "is the
+  other track gating?" with no call placed; `busy` announces a long gate;
+  `call` for anything needing a reply.
+- **HOST CONTENTION IS REAL, AND IT MAY EXPLAIN NOTHING BUT WALL CLOCK.** The
+  contended resource is **CPU CORES, not QEMU-ness**: TCG is a pure CPU
+  emulator, an HVF guest runs real vCPU threads, and `cargo build -j` / a TLC
+  run / a sanitizer build each saturate every core — so builds, model checks
+  and guest boots are ONE contention class. The deleted clause ("it never
+  contends with the main track's QEMU boots, the host-oversubscription flake
+  source") was false in **both** halves: it pre-cleared a heavy host user that
+  does contend, and it called host oversubscription "the flake source" —
+  a pre-approved instance of the "host load" non-explanation this same file
+  forbids ~1000 lines above. It misled **both agents on one day**: main
+  reasoned from it, and aux told main "no need to hold your CPU work" minutes
+  before measuring java at 307% against its own starved TCG boot. Announce the
+  **RESOURCE and the UNCERTAINTY**, not the duration — "unknown, 6 cores" tells
+  the peer to serialize where "30 min" implies a bound. Slowness may be
+  attributed to contention; **a RED RESULT never may.** When a timing-thin gate
+  needs a quiet host, ASK for one.
 - **Kaua (LS-7) supersedes the aux `nora` (ratatui-fork) item (2026-06-13, user-directed).** MAIN now owns the console TUI substrate (`usr/lib/kaua`, `docs/KAUA.md`) + the runtime editor (`usr/nora`, native libthyla-rs *on Kaua*). The Phase-A "nora editor arc (ratatui forked native)" folds into Kaua: an editor needs ~10% of a general TUI framework, so a focused native Kaua core (immediate-mode cell-diff over cons/consctl) beats a full ratatui fork. The aux `nora`/`vendor` skeleton, if produced, is **reference-only** -- MAIN builds the runtime `nora` directly on Kaua and does NOT wait for the aux fork. The aux `libtapestry` (the **graphics** weave, `docs/TAPESTRY.md`) is unaffected -- a different layer. (Kaua = the **text** weave; named for the Kauaʻi ʻōʻō, the last of family Mohoidae; stands outside the Loom-woven names, `Weft` reserved -- KAUA.md §1.1.)
 
 ---
