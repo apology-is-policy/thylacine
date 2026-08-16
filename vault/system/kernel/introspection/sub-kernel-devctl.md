@@ -12,14 +12,14 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17"]
 created: 2026-08-02
-updated: 2026-08-03
+updated: 2026-08-16
 ---
 ## Purpose
 
-The `/ctl` Dev (`dc='C'`, uppercase to leave `c` for the console): seven flat
+The `/ctl` Dev (`dc='C'`, uppercase to leave `c` for the console): eight flat
 text files rendering machine-wide state — the process list, physical memory,
-the registered Devs, the KASLR base, scheduler stats, per-CPU meters, and the
-console's admission counters.
+the registered Devs, the KASLR base, scheduler stats, per-CPU meters, the
+console's admission counters, and the live 9P sessions.
 
 Read-only. Admin *commands* were deferred and never landed; `write` refuses
 unconditionally.
@@ -65,6 +65,40 @@ The mode reported by `stat_native` follows the gate (0400 for `kernel-base`,
 0444 elsewhere) so the advertised mode does not lie about a file the caller
 cannot in fact read — but as with `/proc`, `perm_enforced` is false, so that mode
 is documentation and the check at the read site is the enforcement.
+
+### Zero means overflow, and an empty string writes zero bytes
+
+The emit macros are the file's whole formatting discipline: call a helper, and
+**treat a return of zero as "the buffer is full"** — set the full flag, abandon
+the row, return. Every field in every row goes through them.
+
+An empty string writes zero bytes. So emitting one is indistinguishable from
+running out of space, and the format aborts at that point.
+
+This is not hypothetical: the newest leaf carried a conditional suffix written as
+a ternary with an empty alternative, and every read of that file truncated at
+**exactly** the same offset — deterministically, which is what ruled out
+interleaving and pointed straight at the format rather than the console. One
+partial row and nothing after it, on a file whose entire purpose was diagnosing
+something else.
+
+**A success that produces nothing is indistinguishable from a failure that
+produces nothing.** The convention has no room to say "wrote zero bytes, on
+purpose" — which is the same shape as a gauge reading zero because the thing
+never started.
+
+The repair is stated as a rule at the site and generalizes past the literal that
+caused it: never route a possibly-empty value through an emit. Conditional
+suffixes are guarded by an `if` instead of a ternary with an empty arm, and a
+**runtime-computed** value that could be empty — a session label — emits a
+placeholder rather than nothing. The surrounding ternaries had always had two
+non-empty arms, which is why only the new code broke; the rule was being followed
+before anyone had written it down.
+
+**The test passed through all of it.** It asserted a *prefix* of the row, and the
+prefix sat before the truncation point — so the assertion could not observe the
+failure it was there to catch. It now asserts through the row's tail, which is
+the only version a mid-row abort cannot satisfy.
 
 ### The process list bounds its own lock hold
 
@@ -137,6 +171,13 @@ the same offset-aware multi-read that `/proc` wants would fix both.
 - **The offline-CPU row must stay short.** Emitting a numeric idle time for a
   never-online CPU renders a dead core as a pegged one.
 - **Row columns are append-only.** Readers parse positionally.
+- **Never emit a possibly-empty value.** Zero bytes written *is* the overflow
+  sentinel, so an empty string aborts the whole file. Guard conditional suffixes
+  with a branch rather than a ternary carrying an empty arm, and give any
+  runtime-computed field a placeholder.
+- **A row's test must assert through its tail.** A prefix assertion sits before
+  wherever a mid-row abort would land, so it passes on exactly the failure it
+  exists to catch.
 
 ## Seams
 
@@ -163,6 +204,23 @@ the same offset-aware multi-read that `/proc` wants would fix both.
   append is independently bounds-checked so there is no overflow; the visible
   effect of an exhausted buffer is a line missing its value rather than a
   truncated file. The sibling Dev checks both.
+
+  **This caveat named the right convention and only one of its two directions.**
+  It warned about a genuine failure being *ignored*. The defect that actually
+  landed was the mirror image — a genuine success being *read as failure*,
+  because zero is the overflow sentinel and an empty string writes zero bytes.
+  Same fragile convention, opposite direction, and worse in effect: the ignored
+  failure loses a field, the invented failure loses the rest of the file. Having
+  enumerated one direction made the write-up read as though the hazard had been
+  covered.
+- **The default-allow read gate has now been exercised, and the default was
+  right.** A new leaf landed and is world-readable, which is exactly the shape
+  the caveat below predicts. Its content — peer identifiers, buffer counters,
+  frame counts — is ordinary introspection and narrower than the process list
+  already beside it, so nothing was disclosed that should not have been. Worth
+  recording as evidence about the *rate* rather than as a refutation: the
+  mechanism fired once and landed benignly, which is what a default-allow shape
+  does until the one time it does not.
 - **The process list is a full-system disclosure.** Names, parents, states,
   thread and page counts and CPU time for every process, to any reader. This is
   the Plan 9 posture and is shared with `/proc/<pid>/status`, but it is worth
@@ -175,4 +233,4 @@ the same offset-aware multi-read that `/proc` wants would fix both.
 
 ## Provenance
 
-[[chg-2026-08-02-introspection-sweep]].
+[[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devctl-empty-emit]].
