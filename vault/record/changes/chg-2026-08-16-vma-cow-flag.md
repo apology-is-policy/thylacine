@@ -4,7 +4,7 @@ type: chg
 title: "Routing is not truth, and a stale docblock got wrong twice over"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["ac337061"]
 touched: [sub-kernel-vma]
 established: []
 closed: []
