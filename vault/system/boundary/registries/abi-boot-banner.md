@@ -7,6 +7,7 @@ title: "The boot-banner contract — `Thylacine boot OK` and `EXTINCTION:`"
 pinned-by:
   - "kernel/main.c (boot_mark_complete)"
   - "kernel/extinction.c"
+  - "kernel/cons.c (cons_kernel_writer_begin/end -- the DELIVERY half)"
   - "docs/TOOLING.md §10"
 mirrors:
   - "tools/test.sh"
@@ -179,6 +180,79 @@ Three properties the emission must keep:
    console-attached** (joey, the boot console-trust anchor) — so a spawned
    child cannot emit a premature banner and manufacture a false PASS.
 
+## The delivery hazard: an unchanged string that does not arrive
+
+Everything above is about the string's **value**. None of it covers the string
+**arriving intact**, and that is a separate ABI surface which was open for the
+project's life.
+
+The banner was emitted through the lock-free byte-at-a-time UART path, holding
+none of the console's writer role. The compositor writes the console *through*
+that role. A role serializes only against writers who take it — so on a boot
+where both wrote at once the result was
+
+    Thylacine tboapot esOKtr
+    yd: scanout pending-direct 0 (1280x800)
+
+the banner woven byte-wise through the compositor's line. **The string was
+byte-correct, emitted by the right code, at the right moment, and did not
+match.** The consumer timed out reporting no boot marker on a provably healthy
+guest — login reached, both users authenticated, zero extinctions.
+
+**"Must appear on a line by itself" reads as a property of the emitter and is
+not one.** It is a joint property of the emitter and of every concurrent writer
+of the same device, which means it cannot be established by inspecting the code
+that prints it. This note stated the requirement in its first paragraph and
+carried no obligation that would produce it.
+
+Closed by enrolling the kernel's own emitters in the console writer role
+([[sub-kernel-cons]]). Two properties of that fix belong here because they bound
+what the guarantee is worth:
+
+- **It excludes the extinction path deliberately.** Those emitters run on a
+  dying machine and must stay lock-free and bounded, so `EXTINCTION:` has the
+  *old* delivery guarantee — none. That is the right trade (a torn crash line
+  still contains the anchored prefix far more often than a parked crash
+  handler prints anything at all), but it means the two ABI strings do not have
+  the same integrity.
+- **It prefers a torn line to a dropped one.** If the park is interrupted by a
+  death unwind, the emitter proceeds *unserialized* rather than losing the
+  line.
+
+### The protected string has the narrower readership
+
+Forced to enumerate by the mirror rule, and the answer inverts the fix's value.
+Classifying all fifteen mirrors by which literal each actually matches:
+
+| Literal | Delivery | Mirrors matching |
+|---|---|---|
+| `Thylacine boot OK` | **serialized** (writer role) | 8 |
+| `EXTINCTION:` | **unserialized** — lock-free, no role | **14** |
+| `kernel base:` | unserialized | 1 |
+
+**Every consumer of this ABI except one matches the string with no delivery
+guarantee**, and the string that got the guarantee is matched by roughly half of
+them. The crash path emits through the same lock-free byte-at-a-time put the
+banner used, does **not** stop peer processors first, and its pre-emit flush is
+a bounded try-lock that *skips* when a peer holds the ring — so a peer mid-write
+is precisely the case it declines to handle.
+
+Two costs, and they differ in kind:
+
+- **A torn prefix loses a corruption verdict.** Consumers check `^EXTINCTION:`
+  first on every poll, and the multi-boot classifier keys its corruption class
+  on it. A tear demotes a real corruption to the unclassified bucket — the
+  classifier's own worst outcome, arrived at from outside it.
+- **A torn message body inverts a fault-injection result.** The fault gate
+  matches seven full message strings (seventeen matches in that file alone); a
+  torn one reports that a protection **did not fire** when it fired correctly.
+
+Recorded as [[seam-extinction-line-unserialized]] rather than fixed here. The
+exclusion is deliberate and the reasoning behind it is sound — a primitive that
+parks must never run on a dying machine — so the lift is a *try*-acquire of the
+role rather than a park, which is the shape the pre-emit flush already uses.
+That is the implementation track's call.
+
 ## Consumer obligations
 
 - **Extinction outranks the banner.** A crash is a FAIL whether or not the
@@ -210,8 +284,19 @@ Three properties the emission must keep:
   the only thing preventing a forged PASS.
 - A consumer that matches the banner without an extinction pre-check, or
   without the grace window, will report a crashed boot as green.
+- **A new kernel emitter of either literal must take the console writer role.**
+  This is a delivery obligation, not a content one, and it does not appear
+  anywhere in the co-update list or the derived mirror check — both of which
+  reason entirely about *who reads the string*. Nothing here can detect an
+  emitter that prints the right bytes unserialized; the failure surfaces only
+  as a consumer timeout on a healthy guest.
+- **Do not "fix" a tear by flushing before the emit.** A flush drains what is
+  already queued and does nothing about a peer that starts writing during the
+  emit. That half-fix was in place, with a comment naming this exact tear, and
+  did not prevent it.
 
 ## Referenced by
 
 [[sub-substrate-gates]] · [[sub-substrate-machine]] ·
-[[sub-substrate-interactive]] · [[moc-substrate]].
+[[sub-substrate-interactive]] · [[moc-substrate]] · [[sub-kernel-cons]] (the
+delivery half).

@@ -36,7 +36,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 86
+## Open seams: 87
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -69,6 +69,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-el0-irq-tail-no-notes]] (sub-kernel-exception)
 - [[seam-exiting-tails-never-sleep]] (sub-kernel-death)
 - [[seam-expect-channel-close]] (sub-substrate-interactive)
+- [[seam-extinction-line-unserialized]] (abi-boot-banner)
 - [[seam-f-notif-unwired]] (sub-kernel-weft, sub-kernel-loom)
 - [[seam-fid-monotonic-reclaim]] (sub-kernel-ninep-client)
 - [[seam-fstat-errno-flattened-above-the-leaf]] (sub-kernel-ninep-dev9p)
@@ -130,9 +131,9 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-16 [[chg-2026-08-16-boot-banner-mirror-set]] — The boot-banner ABI note carried the phantom it was supposed to be the cure for
 - 2026-08-16 [[chg-2026-08-16-boot-entry-trampoline]] — The guard held because the emulator supplied the value it checked for
 - 2026-08-16 [[chg-2026-08-16-burrow-attribution]] — The Burrow re-swept: the type says SHAPE, and that lesson has now arrived three times
+- 2026-08-16 [[chg-2026-08-16-cons-writer-set]] — A role serializes only against writers who take it
 - 2026-08-16 [[chg-2026-08-16-corvus-narrowing]] — corvus re-swept: the AUTH gate was a narrowing, and the expired premise had three dependents
 - 2026-08-16 [[chg-2026-08-16-dev9p-errno-class]] — The channel existed and the value was being discarded
 - 2026-08-16 [[chg-2026-08-16-devctl-empty-emit]] — Zero bytes written, on purpose, is a thing the convention cannot say
 - 2026-08-16 [[chg-2026-08-16-devproc-park-predicate]] — A correct model does not guarantee a correct encoding of its states
-- 2026-08-16 [[chg-2026-08-16-exception-descent-guard]] — The guard that fabricated a kernel death, and the fourth eret that isn't one
 <!-- generated:end -->

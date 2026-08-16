@@ -20,7 +20,7 @@ design:
   - "docs/TAPESTRY.md section 18.7 (the renderer drain/feed)"
   - "docs/LIFE-SUPPORT.md LS-8"
 created: 2026-08-02
-updated: 2026-08-03
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -134,6 +134,42 @@ fix it, and conflating them is the standing hazard:
 The role is a sleeping park, not a spinlock: a contending writer parks, so a
 long write makes peers wait without pinning a CPU.
 
+**And the writer set was incomplete for a year, in the one place it mattered
+most.** A role serializes only against writers who *take* it — which sounds
+tautological and is the entire defect. The role was given to the device write
+path and the corresponding syscall; the kernel's **own** direct UART emitters
+were never enrolled, and one of them prints `Thylacine boot OK`, the tooling-ABI
+line every gate greps for.
+
+So a boot where the compositor wrote the console concurrently produced
+
+    Thylacine tboapot esOKtr
+    yd: scanout pending-direct 0 (1280x800)
+
+— the banner woven byte-wise through the compositor's line. The harness greps
+the exact string, does not find it, and times out reporting no boot marker. **A
+provably healthy guest** (same log: login reached, both users authenticated,
+zero extinctions) **reported as a boot failure.** It was found by a gate it
+failed, and read off both halves rather than inferred.
+
+**A flush is not a lock, and the earlier half-fix is the demonstration.** The
+banner path already flushed the transmit ring before emitting — a fix from a
+previous audit whose comment names this exact tear. Flushing drains what is
+*already* queued; a peer starting a write immediately afterwards refills the
+ring while the caller is still mid-emit. **A flush is a point in time; the
+hazard is an interval.** The role is what makes the peer park instead, and the
+flush now happens *under* it.
+
+The kernel-emitter bracket has two deliberate edges:
+
+- **It prefers a torn line to a dropped one.** The begin call returns false when
+  a death unwind interrupted the park; the caller then emits *without*
+  serialization rather than losing the line, and must not call end.
+- **It is explicitly not for the extinction path.** That runs on a dying machine
+  and must stay lock-free and bounded, so the crash emitters keep the direct
+  byte-at-a-time put and the bounded try-lock flush. **A serialization primitive
+  that can park is exactly wrong where parking may never return.**
+
 A write returns **short** on either a stalled consumer (the room wait is
 deadlined) or a dying thread. Short is POSIX-legal and is the inherited
 disposition: a bounded-and-lossy console beats a wedged writer. It must never
@@ -187,6 +223,34 @@ Three properties make the refusal honest rather than a narrower drop:
   four properties of the holdback all fail *silently*, which is why it is seeded
   and inspected directly by a test rather than left to the counters.
 
+**The holdback itself then stranded, at exactly one exit, and the reason it was
+a real defect rather than a cosmetic one is that it could not self-heal.** The
+scripture asserted the held-but-unpaused state unreachable. It was reachable:
+the last unit of the drain budget is spent on a refusal whose recheck then
+*lifts* the pause, and the loop's continue lands on a failed budget test.
+
+What makes that P1 is where the byte lives. **A held byte sits in a software
+variable, not in the hardware FIFO** — so it raises neither the receive
+interrupt nor the receive timeout, and the hardware re-fire that covers every
+ordinary budget-hit exit does not cover this one. The pump short-circuits while
+unpaused. The byte waits for an unrelated later arrival: a keystroke that
+vanishes and comes back when the user next types, with no counter and no log
+entry. Ordering survives, nothing wedges, and any later byte recovers it — which
+is precisely why it could sit there.
+
+**Every other exit was already sound for a reason that does not generalize**:
+three of them return with the pause *standing*, and the fourth is only reachable
+with nothing held. So the bug was not "an exit was forgotten" but "one exit had
+a different post-condition from its siblings", which no amount of reading the
+siblings would reveal.
+
+The severity note is worth keeping separate from the bug. Two prosecutors found
+it independently and graded it differently — P1 citing the architecture
+document, P2 citing only the code comment — and the higher grade was taken after
+verifying the quote was verbatim. **A contradicted comment is a bug; a
+contradicted binding document means the commit's own claim is false.** The same
+defect earns a different grade depending on what it falsifies.
+
 The counters distinguish the two dispositions by name: back-pressure (a raw byte
 or a cooked flush refused for room) is not loss and does not arm the report,
 while a real drop is a byte past the line limit. A third counter exists to stay
@@ -232,9 +296,26 @@ apply are separate passes.
 
 A mode change **discards any half-assembled canonical line**, so a
 canonical→raw→canonical flip cannot strand a fragment that then prepends the
-next line. No current consumer flips mid-line, but the kernel is unambiguous
-against any writer — and, importantly, the production path and the test hook do
-the same thing here, so a fragment-survival regression would be caught.
+next line. The production path and the test hook do the same thing here, so a
+fragment-survival regression would be caught.
+
+**The discard is deliberate — it is what a terminal API buys with a flushing
+attribute-set — and it imposes an ordering rule on every writer of the control
+file: set the mode BEFORE emitting the prompt that invites the input, never
+after.**
+
+A flip placed *after* the prompt loses a race against a fast typist twice over.
+The racing byte is **echoed**, because the pre-flip mode is still in force, and
+then **discarded** here — so the user sees a rendered prefix of their passphrase
+and the read silently returns a truncated one. Two failures from one window, and
+the visible one is a disclosure.
+
+This dossier previously carried the opposite claim, inherited verbatim from the
+source: *"no current consumer flips mid-line; login flips between completed
+reads."* The login passphrase prompt did exactly that. **The claim held because
+the window is narrow, not because it was shut** — which is the difference
+between a property and a coincidence, and it is invisible from the code that
+relies on it.
 
 The window size posts its change note **iff the size actually changed**. An
 unchanged rewrite must not post: a repeat-post storm would be a notes-queue
@@ -348,7 +429,21 @@ gave up.
   configurable.
 - **The feed's line-condition parameter stays hardwired false.**
 - **The control write stays parse-all-then-apply**, and a mode change keeps
-  discarding the partial line.
+  discarding the partial line. **Every consumer owes the ordering**: mode
+  first, prompt second. The kernel cannot enforce it — a flip after the prompt
+  is a well-formed control write — so it is a contract on the writer, and the
+  failure it produces is a rendered secret plus a truncated read.
+- **A new kernel emitter of the tooling-ABI strings takes the writer role.**
+  The role protects only against writers who take it, so enrolling a path is
+  not optional hardening; a path left out is a torn line that reports a healthy
+  boot as a failure. And **flushing first is not a substitute** — it drains the
+  past, not the interval.
+- **The extinction path stays out of the writer role.** It runs on a dying
+  machine and must never park.
+- **Every drain-loop exit must leave the holdback and the pause agreeing.**
+  The exits do not share a post-condition, so a new one has to be argued on its
+  own; a held byte is invisible to the hardware and therefore cannot be
+  recovered by a re-fire.
 - **The window-size post stays iff-changed.**
 - **The reader must keep releasing [[lock-cons]] before pumping the UART**, or
   the receive lock order becomes cyclic.
@@ -394,6 +489,16 @@ gave up.
   flags, which is what makes the deferred-wake tests deterministic on multiple
   CPUs. It is inert in production, but it is a test hook inside the modelled
   relay, which is a place to be careful.
+- **There are now two such hooks, and the second is more interesting than it
+  looks.** The force-full hook makes the ring's room query report FULL while the
+  admission query — which reads the count directly rather than the room — still
+  reports space. **That divergence between two views IS the race**, and
+  single-threaded it is otherwise unreachable. It is the general technique worth
+  naming: *to test a race you cannot schedule, construct the state disagreement
+  the race produces rather than trying to reproduce the timing.* The cost is the
+  same one the manager hold carries — a production-inert hook living inside the
+  machinery it validates, where a future refactor could make it non-inert
+  without any test failing.
 - **The file's own opening comment is thoroughly stale.** It describes a
   write-only console whose reads return end-of-file and whose control file is
   "held until a later phase" — the state of the world several arcs ago. Every
@@ -406,4 +511,6 @@ gave up.
 
 ## Provenance
 
-[[chg-2026-08-02-console-sweep]].
+[[chg-2026-08-02-console-sweep]]; [[chg-2026-08-16-cons-writer-set]] the
+kernel-emitter writer role, the mode-flip ordering rule, and the holdback
+strand.
