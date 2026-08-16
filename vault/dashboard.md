@@ -131,7 +131,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-16 [[chg-2026-08-16-corvus-narrowing]] — corvus re-swept: the AUTH gate was a narrowing, and the expired premise had three dependents
 - 2026-08-16 [[chg-2026-08-16-fault-cow-break]] — The fault dispatcher gains the COW break, and a defect found by reading a contract
 - 2026-08-16 [[chg-2026-08-16-hwcap-widths]] — Two width rules in one file, and neither implied the other
+- 2026-08-16 [[chg-2026-08-16-i32-scope-correction]] — Two vault notes disagreed about I-32, and the newer one was right
 - 2026-08-16 [[chg-2026-08-16-loom-charge-ledger]] — Loom's I-32 ledger: owning the ring is not paying for the pages
 - 2026-08-16 [[chg-2026-08-16-notes-fp-and-phenotype]] — Notes re-swept: 'the entire user context' was one word too many, and it was mine
-- 2026-08-16 [[chg-2026-08-16-pouch-trailing-slash]] — pouch: the third layer could not delete its normalisation, so the rule is 'never decide'
 <!-- generated:end -->

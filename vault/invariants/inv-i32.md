@@ -1,21 +1,25 @@
 ---
 id: inv-i32
 type: inv
-title: "I-32 — the per-Proc resource floor"
+title: "I-32 — the resource floor (per-Proc, and per-address-space since L-2)"
 number: I-32
 guards: [sub-kernel-proc, sub-kernel-hwcap, sub-kernel-content]
 validated-by: [gate-smp]
 strength: prose
 created: 2026-08-01
-updated: 2026-08-02
+updated: 2026-08-16
 ---
 ## Statement
 
 A non-TCB Proc's resource use is bounded on every axis a hostile or buggy
 program can drive, so a fork bomb / thread bomb / memory bomb hits a clean
-per-Proc limit instead of stressing the allocator toward the box-killing
+limit instead of stressing the allocator toward the box-killing
 cliff. On a bound, creation fails cleanly (`-ENOMEM` / `-EAGAIN` / a refused
 fault) — it never box-extincts.
+
+The invariant is still named "per-Proc" and that is now only half right: the
+memory axes bound an **address space**, which one or several Procs may share.
+See the enforcement table.
 
 This is a **resource** axis, deliberately orthogonal to authority: it is not
 a privilege gate and it composes with, rather than substitutes for, the
@@ -23,22 +27,53 @@ capability model.
 
 ## Enforcement
 
-Five axes, all counted on `struct Proc` and all defined in
-`kernel/include/thylacine/proc.h`:
+Five axes — but they are no longer counted in one place, and since the
+address-space extraction three of them are **not per-Proc at all**:
 
-| Axis | Counter | Cap | Charged under |
-|---|---|---|---|
-| anon pages | `page_count` (+ `page_peak`) | `page_budget`, seeded `PROC_PAGE_MAX`, ≤ `PROC_PAGE_HARD_MAX` | `p->vma_lock` — **exact** |
-| live VMAs | `vma_count` | `PROC_VMA_MAX` | `p->vma_lock` — **exact** |
-| shared-in pages | `shared_map_pages` | `PROC_SHARED_MAP_MAX_PAGES` | `p->vma_lock` — **exact** |
-| direct children | `child_count` | `PROC_CHILD_MAX` | [[lock-proc-table]] — bounded overshoot |
-| live threads | `thread_count` | `PROC_THREAD_MAX` | [[lock-proc-table]] — bounded overshoot |
+| Axis | Counter | Lives on | Cap | Charged under |
+|---|---|---|---|---|
+| anon pages | `page_count` (+ `page_peak`) | `AddrSpace` | `AddrSpace.page_budget` — the *enforced* cap, seeded from the creating Proc's `page_budget` *authorization*; ≤ `PROC_PAGE_HARD_MAX` | [[lock-vma]] — exact *against a sibling on the same address space* |
+| live VMAs | `vma_count` | `AddrSpace` | `PROC_VMA_MAX` | [[lock-vma]] — same |
+| shared-in pages | `shared_map_pages` | `AddrSpace` | `PROC_SHARED_MAP_MAX_PAGES` | [[lock-vma]] — same |
+| direct children | `child_count` | `Proc` | `PROC_CHILD_MAX` | [[lock-proc-table]] — bounded overshoot |
+| live threads | `thread_count` (+ the poll-thread count) | `Proc` | `PROC_THREAD_MAX` | [[lock-proc-table]] — bounded overshoot |
 
-The three `vma_lock` axes are exact because check-and-charge happen inside
-the lock that already serializes the attach/detach path. The two creation
-gates read under the table lock and increment at a *later* hold, so they
-carry a TOCTOU overshoot of at most `ncpus-1` concurrent spawners — stated
-in the code as acceptable **for a floor**: a bound, not an accountant.
+**The first three moved with the mapping list, and that changed what they
+bound.** Two Procs sharing an address space share its pages, so one charge is
+the honest count and the per-Proc cap becomes a **per-address-space** cap. The
+fork bomb stays bounded by a different argument than before: N children means N
+address spaces, each capped separately. Keeping the counters per-Proc would have
+given two sharers divergent counts for one region set, and left the uncharge —
+which runs off the mapping list — with no way to know whose counter to
+decrement.
+
+**The cap had to move with the counter, and the argument for that is the best
+line in this invariant.** Counting on the address space while capping on the
+Proc was considered and rejected: two siblings sharing one counter would then
+return *different verdicts* about it, making the effective bound depend on which
+sibling happened to fault first. A resource bound whose value depends on
+scheduling is not a bound. So the enforced ceiling lives beside the counter, and
+the Proc keeps only the *authorization* it seeds a new address space from — the
+same split as everywhere else in this system, where the right to confer and the
+thing conferred are different objects. The high-water mark moved for a plainer
+reason: separated from the counter it mirrors, it had already come close to
+being silently reverted by a merge.
+
+**"Exact" is narrower than it reads, and the note used to overstate it.** The
+arithmetic is a compare-and-swap loop and assumes *no* lock, because the
+uncharge sits where the pages actually free — a ring's pages are released from a
+handle close, which holds no address-space lock, and a sibling's attach can
+interleave. What the lock buys is the **cap decision**: holding it across
+check-then-charge makes the bound exact against another charge on the same
+address space. Two charges from *outside* it can both pass and both land,
+overshooting by at most the smaller. The compare-and-swap guarantees no update
+is ever *lost*, which is the property an accounting bound genuinely cannot do
+without.
+
+So the honest reading is the one the code states: **a floor, not an accountant**
+— on all five axes, differing only in the size of the tolerated overshoot. The
+two creation gates read under the table lock and increment at a later hold,
+carrying a window of at most one per concurrently-spawning CPU.
 
 `bounce_bytes` (the transient byte-I/O staging heap) is an I-32-shaped sixth
 axis with a softer failure mode — over budget *degrades* to the stack tier,
@@ -83,13 +118,14 @@ each subsystem that allocates on a Proc's behalf carries its own ceiling. A
 reader auditing "is this Proc bounded" must therefore consult both, and the table
 alone will read as more complete than it is.
 
-`page_budget` (CL-5) makes the page axis per-Proc rather than global:
+`page_budget` (CL-5) makes the page axis scoped rather than global:
 inherited across `rfork` (load-bearing — `make` and `clang` are Pouch ports
 that know nothing of budgets, so only inheritance carries a raise from the
 build root down to `cc1`), freely *lowered* by any spawner (monotonic
 reduction, the I-2 shape), raised only with
 `PROC_FLAG_MAY_RAISE_PAGE_BUDGET`, and never above the hard cap by any
-authority.
+authority. Read it as the **authorization** half of the split above: what a Proc
+may seed into an address space, not what any address space is currently held to.
 
 ## Validation
 

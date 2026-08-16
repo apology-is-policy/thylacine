@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-08-15
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -36,7 +36,7 @@ keeps the tree rooted and therefore keeps every Proc findable.
 | `proc_find_by_pid` / `proc_for_each` | DFS from `kproc`; the callback runs under [[lock-proc-table]] |
 | `wait_pid_for(want_pid, flags, status_out)` | reap a ZOMBIE child, or (PTY-1e) *report* a stopped/continued one; pid/pgrp selectors + `WNOHANG` |
 | `proc_setsid` / `setpgid` / `getpgid` / `getsid` | the POSIX session + process-group cores ([[sub-kernel-pts]] and [[sub-kernel-jobctl]] are what read them) |
-| `proc_page_charge` / `vma_charge` / `shared_map_charge` (+ uncharges) | the I-32 counters; the **caller must hold `p->vma_lock`** |
+| `proc_page_charge` / `vma_charge` / `shared_map_charge` (+ uncharges) | **policy only** since L-2 — "has an address space" and "is exempt"; the counters and their arithmetic live on the `AddrSpace` ([[lock-vma]] for what the lock does and does not buy) |
 | `proc_thread_cap_ok` / `proc_child_cap_ok` | the I-32 creation gates (take the table lock themselves) |
 | `proc_apply_identity` | the single audited identity-mutation site |
 | `proc_mark_*` / `proc_is_*` | the one-way `proc_flags` stamps and their fail-closed readers |
@@ -188,10 +188,15 @@ Everything else on a Proc is either (a) written once before the Proc runs at
 EL0 and read plainly thereafter (identity, `stripes`), (b) an atomic RMW
 because it became multi-writer (`proc_flags`, once the SAK kthread started
 mutating the console bit from a different thread than the owner), or (c)
-guarded by a *different* lock — the I-32 page/VMA/shared-map counters are
-exact precisely because their callers hold `p->vma_lock`, the lock that
-already serializes the attach/detach path, so check-and-charge is atomic
-against a sibling attach.
+guarded by a *different* lock — or, for the I-32 page/VMA/shared-map
+counters, (d) **no longer on this structure at all**. Those three moved to the
+address space with the mapping list they account for, and their arithmetic is a
+compare-and-swap loop that assumes no lock, because the uncharge runs where the
+pages actually free — reachable from a handle close, which holds no
+address-space lock. What [[lock-vma]] still buys is the *cap decision*: held
+across check-then-charge it makes the bound exact against another charge on the
+same address space, and charges from outside it can overshoot by at most the
+smaller. A floor, not an accountant.
 
 The child and thread caps are the deliberate exceptions: they read under the
 table lock and the increment happens at a later, separate hold, so they
@@ -263,9 +268,10 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   word must be atomic-RMW (the word is multi-writer since the SAK).
 - `wait_pid_for`'s register-then-observe: the waiter registration and the
   no-zombie scan must stay in **one** critical section.
-- The I-32 charge helpers' `p->vma_lock` precondition is what makes the caps
-  exact; a caller that charges without it silently degrades them to
-  best-effort.
+- The I-32 charge helpers hold **no** counter state here; they route to the
+  address space and decide only exemption. A caller that charges without
+  [[lock-vma]] does not corrupt the count — the compare-and-swap prevents a lost
+  update — it degrades the *cap decision* to a bounded overshoot.
 - `proc_find_by_pid` returns an **unrefcounted** pointer
   ([[seam-proc-find-no-refcount]]) — safe today only because every consumer
   either holds the table lock across its use or lets only *values* escape
