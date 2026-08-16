@@ -921,7 +921,65 @@ different thing, and we already have it — the CQE.
 stated whole-generation, which is correct for today's geometry and remains
 sound — merely conservative — once slots become distinct host objects.
 
----
+##### 4.5.8a REFUTED AS WRITTEN — per-slot resources break damage-only presents (found 2026-08-16, before C-2d wrote a line; OPEN, needs a vote)
+
+**The vote stands; its stated mechanism does not survive the tree.** Reading the
+present path to implement §4.5.8 turned up a dependency the decision analysis
+did not have. Three facts, each checkable:
+
+1. **Every client rotates slots on every present** —
+   `self.cur_slot = (self.cur_slot + 1) % self.nslots`
+   (`usr/lib/libtapestry/src/lib.rs:525`), unconditionally, in both scanout
+   modes.
+2. **Nothing carries content from slot *N* to slot *N+1*.** `pixels()` hands
+   back the raw current slot (`lib.rs:396-404`); there is no copy-forward
+   anywhere in the client or the server. So a slot's non-repainted pixels are
+   whatever that slot held `nslots` presents ago.
+3. **Today the single per-generation host resource IS the accumulation
+   buffer.** A damage-only present transfers only its rect
+   (`server.rs:6770-6778`), so the host resource retains the rest of the
+   previous frame and the stale guest slots never reach the host.
+
+**Therefore one host resource per slot makes damage-only presents render a
+`nslots`-frames-stale background around each fresh rect** — in Direct
+immediately, and in Composed at C-3 once the blit sources from a slot's
+resource. This is not a corner: **aurora, the console renderer, is a
+damage-only accumulator** (`usr/aurora/src/main.rs:1027-1038` renders only rows
+`r0..r1` and presents that rect) **and is the default Direct-scanout client on
+every boot** — the `scanout direct 0 (1280x800)` line in every Pi log.
+
+A second, smaller consequence rides along: per-slot resources also make Direct
+scanout rebind (`SET_SCANOUT` + the #57 post-bind full flush) on every slot
+rotation. That is normal for a display stack — it is exactly a KMS page flip
+with a per-buffer framebuffer — but it is a per-frame cost on the path Warp-C
+exists to make fast, and it was not in the comparison either.
+
+**Options, for the vote. The recommendation is 4.**
+
+1. **Client copies slot *N-1* → *N*.** Correct, trivially. Costs a full-surface
+   memcpy per frame in every client (~4 MB at 1280×800), which is precisely the
+   copy the zero-copy weave exists to delete. Rejected on its face; listed
+   because it is the obvious first thought.
+2. **Keep one host resource per generation; fence the blit against the fill.**
+   §4.5.8's own rejected 1× option — but this finding is a NEW argument for it,
+   because the single resource is not merely cheaper, it is *doing a job*
+   (accumulation) that nothing else currently does. Cost is the serialization
+   the vote rejected: draw-ahead survives, upload-ahead does not.
+3. **Per-slot resources PLUS a separate accumulation resource** the compositor
+   blits from. Restores correctness at 4× VRAM plus a host-side slot →
+   accumulator copy per frame. Strictly worse than 4 on both axes.
+4. **Per-slot resources plus BUFFER AGE** — report how old the slot handed back
+   is, and let an accumulator repaint the union of damage since that slot was
+   last presented. **This is exactly `EGL_EXT_buffer_age` + Wayland's
+   `wl_surface.damage_buffer`**, the mechanism the rest of the world built for
+   this identical problem, and Android's BufferQueue exposes the same thing.
+   No extra VRAM, no memcpy; the client repaints slightly more area. Costs a
+   small ABI addition (the age on the present completion) and a change in
+   aurora. It keeps the §4.5.8 vote intact and makes it implementable, and it
+   retires a latent hazard rather than working around one.
+
+**Do not implement C-2d until this is settled** — every option changes what
+C-2c attaches and what C-3 blits from.
 
 #### 4.5.9 The composed path is CAPABILITY-GATED, and the CPU path is PERMANENT (measured 2026-08-16, before C-2 wrote a line)
 

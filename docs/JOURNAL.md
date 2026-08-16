@@ -350,6 +350,48 @@ term is not hypothetical caution: the `reject` verb in this same file shipped
 grepping `C0-REJECT` while its producer printed `C0-DETECT`, and exited 0 on the
 exact failure it existed to catch.
 
+### Then C-2d refuted itself before it wrote a line (§4.5.8a, OPEN)
+
+With the driver landed I went to implement §4.5.8 — the per-slot host resources
+the operator voted for — and read the present path first. The decision does not
+survive it, for a reason nobody had in view at the vote.
+
+Three facts, each one grep:
+
+1. Every client rotates slots on every present: `cur_slot = (cur_slot + 1) %
+   nslots`, `libtapestry/src/lib.rs:525`, unconditional, both scanout modes.
+2. Nothing copies content from slot *N* to slot *N+1*. `pixels()` hands back
+   the raw current slot; there is no carry-forward anywhere.
+3. **The single per-generation host resource is therefore doing a job nobody
+   wrote down: it is the accumulation buffer.** A damage-only present transfers
+   only its rect, so the host resource keeps the rest of the previous frame and
+   the stale guest slots never reach the host.
+
+Give each slot its own host resource and that job has no owner. A damage-only
+present would render a three-frames-stale background around each fresh rect —
+in Direct immediately, and in Composed at C-3. And the client this lands on is
+**aurora**: it repaints only rows `r0..r1` and presents that rect
+(`aurora/src/main.rs:1027-1038`), and it is the default Direct client on every
+boot. The very line I have been reading all session, `scanout direct 0
+(1280x800)`, is that client.
+
+What makes this worth recording is not the catch but where the load was.
+§4.5.8's analysis compared 3× / 2× / 1× VRAM and serialization — a complete
+comparison of the properties anyone had *named*. The single resource's real
+function was invisible because nothing declared it; it was an emergent
+consequence of "transfer only the damage rect", and it had been load-bearing
+for the console for as long as the console has existed. **A design comparison
+can be sound over every property you listed and still miss the one the code is
+actually relying on.** Only reading the path surfaces those.
+
+I recorded it as **§4.5.8a** with four options rather than picking one, because
+the vote is the operator's and this changes the terms they voted on. The
+recommendation is buffer age — `EGL_EXT_buffer_age` and Wayland's
+`wl_surface.damage_buffer` exist for this exact problem, Android's BufferQueue
+exposes the same, and it keeps the per-slot vote intact at no VRAM cost while
+retiring the latent hazard instead of routing around it. C-2c and C-3 both wait
+on the answer: every option changes what gets attached and what gets blitted.
+
 ### Found in passing: `docs/REFERENCE.md`'s snapshot block died in Phase 5
 
 The doc-update step sent me to `docs/REFERENCE.md` to refresh its Snapshot
