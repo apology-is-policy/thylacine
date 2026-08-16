@@ -4,7 +4,7 @@ type: chg
 title: "stalk: the POSIX form gates merged, and a gate binds only what it sees"
 date: 2026-08-16
 arc: arc-vault
-commits: []
+commits: ["79a93f65"]
 touched: [sub-kernel-stalk]
 established: []
 closed: []
