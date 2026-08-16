@@ -16,7 +16,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-16
 ---
 ## Purpose
 
@@ -118,9 +118,53 @@ routes through mmap permanently — a documented mallocng fallback.
 
 ## Data structures
 
-`struct pouch_spawn_args` — a hand-mirrored 96-byte copy of the kernel's
-`sys_spawn_args`, pinned by `_Static_assert`. `struct __dirstream`
-(unchanged) for the `/env` scan.
+`struct pouch_spawn_args` — a hand-mirrored **104-byte** copy of the
+kernel's `sys_spawn_args`, pinned by **twenty-one** `_Static_assert`s: one
+on the size and **one per field offset**. `struct __dirstream` (unchanged)
+for the `/env` scan.
+
+**A size assert cannot see a field-order mismatch, and that is why the
+offsets exist.** Swap two same-width fields and the struct is still the
+right size, still compiles, and a caller then fills the wrong one — here,
+a page budget written into the phenotype word, which the kernel reads as
+an unknown-bit phenotype request and refuses. The failure surfaces at
+runtime, in the kernel, as a validation error naming neither field.
+
+**The struct grew 96 → 104 because two branches each authored against the
+same reserved slot.** A page budget and a phenotype word were independently
+placed in the one `_pad_allow`, so the merge could not let either quietly
+take the other's bytes and had to grow the struct instead. **A reserved pad
+slot is a cross-branch collision point**, invisible on either branch alone
+— each is a correct, size-preserving use of documented slack. The offset
+asserts are what make the *next* claimant disagree with the kernel loudly,
+at build time, rather than in a refused syscall.
+
+### The asserts all held and the binaries were wrong anyway
+
+Worth recording in full, because it is the sharpest available statement of
+what a compile-time assertion buys.
+
+Landing the offset pins exposed an unrelated defect: a workaround elsewhere
+was a **blind directory overlay** that reverted the sysroot's C archive to a
+day-old snapshot. Twenty-five ported binaries relinked against the **old
+96-byte** struct, and the kernel's 104-byte validator refused their spawns.
+
+**Both sets of assertions held throughout.** The new offset asserts were
+compiled into the header the fresh build used and were correct about it. The
+stale archive carried its own then-correct 96-byte assert and was correct
+about *itself*. Two artifacts, two true self-descriptions, one broken link.
+
+**A per-artifact assert certifies that artifact, never that the artifact in
+the link is the one you just built.** Compile-time checking cannot reach
+across a build-system substitution, because the substituted object was
+compiled — correctly — at a different time against a different truth. The
+gap is not in the assertions; it is that nothing compares the *thing you
+built* to the *thing that got linked*.
+
+The patch's own hunk header had to move 81 → 108 for the added lines,
+counted **from the hunk body** rather than derived from the delta — `patch`
+trusts the stated count and silently drops added lines past it, so an
+arithmetic slip there removes content while reporting success.
 
 ## Concurrency
 
@@ -169,7 +213,16 @@ per process. Every `malloc` past mallocng's first is userspace-only.
   path.
 - `__pouch_env_init` must stay fail-soft and stay ordered after
   `__init_libc` and before the ctors.
-- The 96-byte spawn-args mirror against the KERNEL's struct.
+- The 104-byte spawn-args mirror against the KERNEL's struct — **size AND
+  every field offset**. A size-only pin is blind to a field-order swap, and
+  the reserved slot is where independent branches collide.
+- **An assert certifies its own artifact, not the link.** A stale archive
+  substituted into the sysroot carries its own correct assert for its own
+  older layout, so a mismatched binary can ship with every assertion in the
+  tree holding. Whatever compares built-to-linked has to live outside the
+  compiler.
+- **A patch hunk header's line count is authoritative and unchecked**: it is
+  trusted, and added lines past it are dropped silently. Count the body.
 
 ## Seams
 
@@ -201,3 +254,6 @@ retargeted to `SYS_BURROW_ATTACH_LAZY` at #321) →
 [[chg-2026-05-26-16bg-hardening-3c]] (0013) →
 [[chg-2026-07-23-cl1b0-env]] (0025) →
 [[chg-2026-07-23-cl1b-process]] (0026).
+
+The 104-byte widening, the twenty offset pins, and the stale-archive
+relink are [[chg-2026-08-16-pouch-offset-pins]].
