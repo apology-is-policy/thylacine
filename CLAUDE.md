@@ -648,10 +648,15 @@ When token/time budget is low:
 
 ### The checkpoint contract (binding; every time you hand back)
 
-A **checkpoint** is any turn that returns control to the user at a resting point
-— a landed chunk, a closed audit, a surfaced fork, a stopping report. At every
-checkpoint, do these three WITHOUT BEING ASKED. They exist because the user
-cannot see what you can see, and the cost of them guessing is real.
+A **checkpoint** is any **resting point** in the work — a landed chunk, a closed
+audit, a surfaced fork, a stopping report. Note that a checkpoint is *not* by
+itself a decision to hand back: whether you yield or roll straight into the next
+chunk is governed by the 600k line in §"When to recommend `/compact`", and the
+default under granted autonomy is to **keep going**. What follows is owed at
+every checkpoint either way — including the ones you run straight through, where
+it is the only thing keeping the tree pickup-ready. Do these three WITHOUT BEING
+ASKED. They exist because the user cannot see what you can see, and the cost of
+them guessing is real.
 
 **1. Account for every attached shell, monitor, and background task.**
 
@@ -975,7 +980,7 @@ Thylacine boot OK
 
 The `hardening:` / `features:` lines are informational (only `Thylacine boot OK` + the `EXTINCTION:` prefix are the binding tooling ABI). Since Lazarus W1 (`PORTABILITY.md §4`) the `hardening:` line lists the unconditional set and marks PAC/BTI/LSE runtime-conditional; the `features:` line reports what the running CPU implements.
 
-A kernel **extinction** (ELE — Extinction Level Event; the thematic name for kernel panic) prints `EXTINCTION: <message>` as a recognizable prefix. Use `extinction(msg)` or `extinction_with_addr(msg, addr)` from `kernel/extinction.c`; `ASSERT_OR_DIE(expr, msg)` for assert-style checks. These two strings (boot banner success line + EXTINCTION prefix) are part of the kernel ABI with the development tooling. They do not change without updating `tools/run-vm.sh`, `tools/test.sh`, `tools/agent-protocol.md`, and this document in the same commit.
+A kernel **extinction** (ELE — Extinction Level Event; the thematic name for kernel panic) prints `EXTINCTION: <message>` as a recognizable prefix. Use `extinction(msg)` or `extinction_with_addr(msg, addr)` from `kernel/extinction.c`; `ASSERT_OR_DIE(expr, msg)` for assert-style checks. These two strings (boot banner success line + EXTINCTION prefix) are part of the kernel ABI with the development tooling. They do not change without updating `tools/run-vm.sh`, `tools/test.sh`, `docs/TOOLING.md §10` (which IS the agent-side protocol), and this document in the same commit. (Until 2026-08-15 this list named `tools/agent-protocol.md`, planned in Phase 1 and never written — an unfollowable item in a mandatory list teaches the reader the whole list is advisory, so the citation was removed rather than the doc invented; main#244.)
 
 ---
 
@@ -1062,15 +1067,28 @@ Operational implications:
 
 ---
 
-## Parallel auxiliary track — native userspace apps (worktree-isolated)
+## Parallel auxiliary track — the aux agent (worktree-isolated)
 
-A **parallel auxiliary agent** runs in a separate git worktree (sibling dir, typically `../thylacine-aux`) on branch **`aux/userspace-apps`**, established 2026-06-07 to use spare quota in parallel with the main (kernel) track. Its mission: **author NATIVE `libthyla-rs` userspace applications from the system documentation, build them to compile (never run), and produce a per-app test plan + a documentation-completeness gap report.** Every session reads this file, so the boundary is common knowledge:
+A **parallel auxiliary agent** works a separate git worktree (sibling dir, typically `../thylacine-aux`) on branch **`aux-2`**, established 2026-06-07 to use spare quota alongside the main (kernel) track. Every session of both tracks reads this file, so the boundary is common knowledge.
 
-- **The aux track owns `usr/apps/**` only** (its apps + a vendored `usr/apps/vendor/` for native crate forks like ratatui→nora). Its constitution is `usr/apps/AUX-DIRECTIVE.md`; its worklist + across-compaction memory is `usr/apps/AUX-ROADMAP.md`; its top deliverable is `usr/apps/DOC-GAP-REPORT.md`.
-- **It never touches the main track's surface:** no `kernel/` / `arch/` / `mm/` / `specs/` / `tools/`, no edits to `docs/reference/*` (it only READS them and RECORDS gaps), and it never extends `libthyla-rs`. **It never boots QEMU** — `cargo build` is its verification ceiling (so it never contends with the main track's QEMU boots, the host-oversubscription flake source).
-- **For the MAIN (this) agent:** don't edit `usr/apps/**` — it's the aux branch's domain (avoid a cross-branch collision). When `aux/userspace-apps` merges (clean — disjoint trees), its `usr/apps/<app>/TEST-PLAN.md` files become a ready-to-run in-VM test backlog, and its `DOC-GAP-REPORT.md` is the input for a docs pass: **fold verified findings into `docs/reference/*`** (the main agent owns the real reference docs). The only shared-file touchpoint is the `libthyla-rs` module list at Loom-6 (when the aux track adopts the native Loom API for its Phase-B server apps) — a trivial members-list merge.
-- Roadmap shape (in `AUX-ROADMAP.md`): Phase A = native coreutils + the Thylacine-distinctive `ns`/`bind`/`srv`/`9p`/`ps`/`cap` tools + the **nora** editor arc (ratatui forked native); Phase B = Loom/network apps (design+skeleton+test-plan until Loom-6 + the net stack land); Phase C = ports (Zig/SDL) as feasibility/gap-analysis only (ports are pouch, not native, and need execution to verify).
-- **Kaua (LS-7) supersedes the aux `nora` (ratatui-fork) item (2026-06-13, user-directed).** MAIN now owns the console TUI substrate (`usr/lib/kaua`, `docs/KAUA.md`) + the runtime editor (`usr/nora`, native libthyla-rs *on Kaua*). The Phase-A "nora editor arc (ratatui forked native)" folds into Kaua: an editor needs ~10% of a general TUI framework, so a focused native Kaua core (immediate-mode cell-diff over cons/consctl) beats a full ratatui fork. The aux `nora`/`vendor` skeleton, if produced, is **reference-only** -- MAIN builds the runtime `nora` directly on Kaua and does NOT wait for the aux fork. The aux `libtapestry` (the **graphics** weave, `docs/TAPESTRY.md`) is unaffected -- a different layer. (Kaua = the **text** weave; named for the Kauaʻi ʻōʻō, the last of family Mohoidae; stands outside the Loom-woven names, `Weft` reserved -- KAUA.md §1.1.)
+**Rewritten 2026-08-16 (aux#237) after measurement found EVERY operative claim here false** — and rewritten in aux's tree the same hour, because aux carried the identical paragraph and had therefore been loading a false description of *itself* for two months. The prior text claimed a 2026-06 charter ("owns `usr/apps/**` only", "never touches `kernel/`…`tools/`", "no edits to `docs/reference/*`", "never boots QEMU", plus a constitution / worklist / deliverable under `usr/apps/`) that the tree flatly contradicts: `aux-2` changes 41 `kernel/`, 17 `docs/reference/`, 12 `tools/`, 1 `specs/` and **zero** `usr/apps/` files, and aux boots HVF VMs and runs its own SMP gate + LS-CI.
+
+**It was not describing a track that failed. It was describing a track whose output MOVED INTO THIS TREE, and whose charter was never rewritten to say so** — the coreutils became `usr/coreutils` (51 binaries), the Tapestry POC became `usr/lib/libtapestry` + `usr/tapestry-demo` + `usr/tapestryd`, and five documents you now depend on (`MENAGERIE.md`, `TRUSTED-PATH.md`, `INSTALLER.md`, `TAPESTRY.md`, `AURORA.md`) began life as `usr/apps/*-DESIGN.md`. **Promotion is the event that invalidates a description, and it never announces itself at the old location.**
+
+**Why this is a defect and not mere staleness:** on 2026-08-12 the deleted contention clause produced the *same wrong operational call in both readers within one day* — main reasoned from it, and aux reached the identical conclusion independently ("your specs are CPU-only and mine is one TCG VM, so we are genuinely not colliding"), about ninety minutes before measuring a TLC run at 307.5% CPU against aux's own starved boot. It misled the reader with most reason to trust it AND the reader with most reason to know better. **Neither noticing required new information — only a check that never ran.**
+
+**Method note, because two opposite probes both lie here.** A file-existence test at a cited path answers "is this PATH stale", never "does this DOCUMENT exist" — it reported the roadmap deleted when it had merely moved. And `git log --diff-filter=D` answers "was it deleted **in a commit**": a rebase drops a file leaving *no* deletion record, so empty output reads as "never deleted" = "still present". One over-reports absence, the other over-reports presence, and running both without noticing they disagree concludes a file is simultaneously gone and alive. Only a **tip scan across all refs** answers the real question.
+
+- **The aux track is a full second engineering track, not a userspace-apps annex.** In aux's own words (2026-08-16, landed verbatim on request): *the aux track owns the VIVARIUM arc (running unmodified Linux binaries; `docs/VIVARIUM.md`), the graphics arc G-6..G-9 and the Aurora environment, and the kernel surfaces those arcs land on — currently the notes/signals/job-control/PTY line. It runs its own full bar for that work: the suite, the SMP gate, the pty spec set, and LS-CI. Its worklist is `docs/AUX-ROADMAP.md`; its branch is whatever `git branch --show-current` says in `../thylacine-aux`.* **Read the branch off the worktree, never off a doc**: this file said `aux/userspace-apps`, the roadmap said `gfx-4`, the worktree is on `aux-2` — and `gfx-1`..`gfx-4` are all still live branches, so these are parallel refs, not a rename chain. Only the worktree is ever current.
+- **The real shared surface is `kernel/` + `tools/` + `docs/reference/`.** The old `usr/apps/**` guard was a guard on an empty room, and worse than useless: it aimed attention away from where the tracks actually meet. Collisions there are routine and handled well by both sides landing findings in each other's trees (worked example: the tree-wide-`pkill` / `mktemp` hazard sweep, yip call 0009). Coordinate through **yip** — `presence` answers "is the other track gating?" with no call placed; `busy` announces a long gate; `call` for anything needing a reply.
+- **HOST CONTENTION IS REAL, AND IT MAY EXPLAIN NOTHING BUT WALL CLOCK.** The contended resource is **CPU CORES**, not QEMU-ness: TCG is a pure CPU emulator, an HVF guest runs real vCPU threads, and `cargo build -j` / a TLC run / a sanitizer build each saturate every core — so builds, model checks and guest boots are **ONE contention class**. This host has 8 cores; the SMP gate's `smp8` configs alone ask for 8 vCPU threads, so a concurrent build is direct core-for-core competition. **Measured 2026-08-16, same tree and same commit** — contended: aux ran 5 LS-CI scenarios in 76 min, 4 of them burning attempt-1 retries; quiet host: **8 scenarios in 10 min, 0 retries, and all four of those scenarios pass.** Concurrently main's TLC went 307.5% -> 629.0% CPU when aux parked. Neither agent was getting the machine, and neither could see it.
+
+  **What that licenses, exactly.** Contention may explain a **wall-clock budget miss** — a timeout, a burned retry, a thin scenario overrunning. It may NEVER explain a corruption, a wrong value, a crash, or a nondeterministic assertion failure; those stay races to be hunted per §"Whole-system stewardship". And even for a timeout it is a conclusion you MEASURE, never one you reach for: aux's diagnosis rested on process-state evidence (`RN+` — running, not sleeping) taken while it was happening, and the quiet-host green is only CORROBORATION, because **passing later never proves why something failed earlier**. A retry count with no host conditions stamped on it is the same fiction as a benchmark with no lane named.
+
+  **Announce the RESOURCE and the UNCERTAINTY, not the duration** (aux's protocol, binding on both tracks): "unknown, 6 cores" tells the peer to serialize; "30 min" implies a bound nobody can honour. When a timing-thin gate needs a quiet host, ASK — the negotiation has been run cleanly twice (yip 0009 turns 7-11; 0014).
+
+  The deleted clause claimed aux "never contends with the main track's QEMU boots, the host-oversubscription flake source" — false in both halves, and its parenthetical licensed, in always-loaded scripture, the exact "host load" non-explanation that §"Whole-system stewardship" forbids ~1000 lines above.
+- **Kaua (LS-7) supersedes the `nora` ratatui-fork item (2026-06-13, user-directed).** MAIN owns the console TUI substrate (`usr/lib/kaua`, `docs/KAUA.md`) + the runtime editor (`usr/nora`, native libthyla-rs *on Kaua*): an editor needs ~10% of a general TUI framework, so a focused native Kaua core (immediate-mode cell-diff over cons/consctl) beats a full ratatui fork. `libtapestry` (the **graphics** weave, `docs/TAPESTRY.md`) is a different layer and unaffected. (Kaua = the **text** weave; named for the Kauaʻi ʻōʻō, the last of family Mohoidae; stands outside the Loom-woven names, `Weft` reserved -- KAUA.md §1.1.)
 
 ---
 
@@ -1095,6 +1113,85 @@ Implication for sessions in Phase 7+: treat the v1.0-rc as a real ship target. D
 ---
 
 ## When to recommend `/compact`
+
+### The 600k checkpoint line — run THROUGH checkpoints until it fires
+
+**A checkpoint is not a stopping point.** Under granted autonomy, land a chunk,
+report it, and **start the next one in the same run**. Do not yield after every
+chunk waiting to be told to continue; do not compact "to be safe" at 300k. The
+cost of stopping early is real and asymmetric — a fresh context has to re-derive
+the subsystem knowledge the current one already holds, and the re-derivation is
+where wrong turns come from.
+
+**The signal that ends the run is the `ctx-hook` CHECKPOINT WINDOW line at
+600k** (`~/.claude/ctx-hook.sh`, `CTX_CKPT`; ~66% of the 900k window, which is
+the "~60-70%" the bullets below already named). That hook fires on every tool
+call, so it sees the budget continuously — you do not have to estimate it, and
+you should not try. Three levels, three different meanings:
+
+| Level | Fires | Means |
+|---|---|---|
+| **600k CHECKPOINT WINDOW** | once per crossing | **The intended compaction point.** Carry to a clean boundary, write the resume note, then run `tools/thyla-selfcompact.sh "<reason>"`. |
+| **750k** | every call | Wind down. Finish the step; do not open a new arc. |
+| **880k** | every call | At the wrap line. Commit, hand off, yield. |
+
+**At 600k you compact yourself; you do not ask.** `tools/thyla-selfcompact.sh`
+types `/compact` into your own tmux pane, and `~/.claude/resume-note.py`
+re-injects your last message on the far side — the two steps the user was
+performing by hand at every boundary. Three things follow from that:
+
+- **Your final message before invoking it IS the resume note.** Not a report to
+  a reader who will answer — a note to yourself with no memory of writing it.
+  It must say what is in flight and, more importantly, **what must NOT be
+  redone**: gates already green, commits already pushed, measurements already
+  taken. A fresh context that re-runs a two-hour bar has been failed by that
+  message.
+- **Invoking it is a request, not a decision.** It refuses on a dirty tree or
+  outside tmux, and it **belays** — hands back to the user — when HEAD has not
+  moved across two consecutive self-compactions. That gate exists because the
+  dangerous failure is not a runaway but a *quiet loop*: hit a problem,
+  compact, return with less context, fail the same way. Every turn looks like
+  progress and none is, and an iteration cap cannot catch it because the
+  pathological case sits under the cap. Only landed work distinguishes stuck
+  from thinking, so only landed work re-arms the mechanism.
+- **A belay is a stop, and it is the good outcome.** When it fires, hand back
+  with what was attempted and what it needs. Do not clear the state file to get
+  moving again; that is disabling the one guard standing between a long run and
+  an expensive one.
+
+Where the script is absent (a worktree that has not merged it), the hook says
+"recommend `/compact`" instead and the old behaviour stands — the two arms are
+discrimination-tested, not assumed.
+
+So the rule is: **below 600k, keep working through as many checkpoints as the
+work takes; at 600k, finish to a clean boundary and self-compact.**
+The 600k line is advisory and deliberately fires ONCE — it is a "this is the
+right moment," not an alarm. Reaching it mid-chunk does not mean stopping
+mid-chunk: carry to the next clean boundary (committed, gates green, handoff
+current) and recommend from there. If that boundary is genuinely far away, say
+so and keep going — 750k is the level that means wind down.
+
+**What does NOT change: the checkpoint contract still fires at every
+checkpoint** (§"The checkpoint contract"). Account for running processes, keep
+the handoff current, say what is next — at each one, whether or not you yield.
+That is precisely what makes this rule safe: if the handoff is continuously
+current, then compaction is free at *any* moment, so choosing to run on costs
+nothing and the 600k line can be a recommendation rather than a scramble.
+
+**What also does NOT change: the escalation list.** Running through checkpoints
+is autonomy over *sequencing*, never over the items in §"Autonomy + escalation"
+— a format break, a destructive operation, an architectural deviation, a
+scripture-altering design fork still stops the run and asks, at 100k or 700k.
+
+**If the hook is not installed, this rule has no brake.** `ctx-hook.sh` lives in
+`~/.claude/`, outside this repo, so a fresh machine or a differently-configured
+session may not have it — and then "run until the signal fires" means running
+past the wrap line into a hard overflow, because a signal that never arrives is
+indistinguishable from one that has not arrived *yet*. So: an autonomous run
+that has passed roughly two thirds of its budget **without ever seeing a
+CONTEXT line** should treat the hook as absent and fall back to the judgement
+bullets below rather than keep waiting. Verify with
+`ls -l ~/.claude/ctx-hook.sh` if in doubt; one command settles it.
 
 When all of the following hold:
 
@@ -1243,6 +1340,14 @@ This protects against audit findings being lost across session boundaries. The n
 ---
 
 ## Operational summary patterns
+
+**FIRST, THE TRIGGER — because this section reads as "chunk done -> write this", and that instruction is what ends the run.** Emitting the full summary IS the yield: final text ends the turn, and in this harness nothing restarts you afterwards but the user. So a summary written at a completed chunk silently converts "running through checkpoints" into "handing back", no matter what §"The 600k checkpoint line" says. Measured 2026-08-16, on the first autonomous run: the chunk landed, the summary got written because scripture said to, and the run stopped at ~160k of a 600k budget. The concrete ritual beats the abstract rule every time.
+
+**So the full summary below belongs to STOPPING, not to finishing.** Write it when you are actually handing back: at the 600k line, on an item from §"Autonomy + escalation", when genuinely blocked, or when the user asks. At a checkpoint you are running THROUGH, the checkpoint contract is discharged in **three lines or fewer** — what landed (hash), what is running, what is next — and then you **open the next item in the same turn**, without final prose.
+
+**The tell:** if you are writing a `Key` table, an `Arc state` field, or an `Ahead` line, you are writing a hand-back. Stop and ask whether you actually intend to stop. If you do not, delete it and make the next tool call instead.
+
+(This is behavioural, so it is only as good as your remembering it -- the mechanism that would make it structural is a `Stop` hook, deliberately not built: see §"The 600k checkpoint line". Until one exists, a turn that ends is a turn the user must restart, so ending one is a decision, never a default.)
 
 End-of-iteration summaries (the response to a completed audit / chunk) follow a consistent structure for fast review.
 

@@ -1954,6 +1954,18 @@ void test_proc_exec_reset_dispositions(void) {
                 "exec must clear a registered handler");
     TEST_ASSERT(p->handler_va == 0ull, "exec must clear handler_va");
 
+    // The two assertions above probe act[1].handler and act[9].handler and
+    // nothing else -- 2 of 14 entries, 1 of 4 fields. A regression that zeroed
+    // only each entry's `handler`, or that stopped iterating at entry 9, passes
+    // both. The fix's stated ground is that a reset table is indistinguishable
+    // from a fresh kzalloc'd one, so assert THAT directly. Non-vacuous: the
+    // seed above sets .restorer, which no accessor-level assertion reaches.
+    const u8 *raw = (const u8 *)tab;
+    for (u32 i = 0; i < (u32)sizeof(struct viv_sigtab); i++)
+        TEST_ASSERT(raw[i] == 0u,
+                    "reset must zero EVERY byte of the table, not just the "
+                    "fields the accessors happen to gate on");
+
     // Reap frees the table -- the one point where freeing IS sound, because
     // every thread is reaped and the Proc is off the table, so no cross-Proc
     // reader can still resolve it.

@@ -1671,12 +1671,32 @@ bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
 void viv_sigtab_reset(struct viv_sigtab *tab) {
     if (!tab) return;
 
-    // Zero the whole object rather than walking act[]. viv_sigtab_of allocates
-    // with kzalloc, so this makes a reset table BYTE-IDENTICAL to a fresh one --
-    // the two are indistinguishable to every accessor above, which is what lets
-    // exec reset in place instead of freeing and re-allocating lazily.
-    u8 *raw = (u8 *)tab;
-    for (u32 i = 0; i < (u32)sizeof(*tab); i++) raw[i] = 0;
+    // PER-FIELD, never per-byte. This table is read LOCK-FREE by other CPUs
+    // (notes_post's SIG_IGN hook; notes_proc_has_live_handler), so the width of
+    // these stores is an ABI with those readers, not an implementation detail.
+    //
+    // The byte loop this replaced was measured, not assumed, to compile to
+    // 2-byte `sturh` under the kernel's own flags -- `-ffreestanding
+    // -fno-builtin` is exactly what stops LoopIdiomRecognize forming a memset,
+    // leaving an unroll-by-2. Each 8-byte `handler` was therefore written as
+    // four independent halfword stores, so a concurrent reader could observe a
+    // handler value NO CODE EVER WROTE (half old address, half zero) and pass
+    // the `> VIV_SIG_IGN` gate on it. A struct assignment gives `stp` of X
+    // registers: single-copy-atomic per 8-byte field, which is the granule
+    // every accessor actually reads.
+    //
+    // What this does NOT promise, deliberately: a reader still sees an
+    // arbitrary MIX of pre- and post-reset entries. That is the POSIX
+    // exec-vs-signal race and is fine -- each entry it sees is one that was
+    // genuinely installed or the default. The guarantee is per-field integrity,
+    // not a snapshot.
+    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++)
+        tab->act[i] = (struct viv_ksigaction){ 0 };
+
+    // Publish the zeroing rather than leaving it to whatever lock the caller
+    // happens to take next. Free on this path, and it removes a question a
+    // future reader would otherwise have to re-answer.
+    __atomic_thread_fence(__ATOMIC_RELEASE);
 }
 
 void vivarium_build_sigframe(struct viv_sigframe_head *out, u64 signum,

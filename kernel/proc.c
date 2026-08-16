@@ -3142,10 +3142,19 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     // whatever about other PROCS -- and that is the half the comment previously
     // standing here got wrong when it claimed a single reader.
     //
-    // Zeroing is byte-identical to the kzalloc'd table viv_sigtab_of hands out,
-    // so the dispositions really are back to default; the allocation simply
-    // lives until reap, which is the lifetime it had before V-6b moved the free
-    // forward to exec.
+    // The reset table is indistinguishable from the kzalloc'd one viv_sigtab_of
+    // hands out ONCE SETTLED, so the dispositions really are back to default;
+    // the allocation simply lives until reap, which is the lifetime it had
+    // before V-6b moved the free forward to exec.
+    //
+    // "Once settled" is load-bearing and was missing here. The reset is NOT a
+    // snapshot: a lock-free reader on another CPU can see an arbitrary mix of
+    // pre- and post-reset entries. That mix is sound -- POSIX leaves the
+    // exec-vs-signal race undefined and every entry it sees was either genuinely
+    // installed or the default -- but it is a per-FIELD guarantee, not a
+    // whole-table one, and it holds only because viv_sigtab_reset writes
+    // 8-byte fields rather than bytes. See its comment: the earlier byte loop
+    // compiled to halfword stores and could publish a handler nobody wrote.
     proc_exec_reset_dispositions(p);
     self->note_mask = 0u;
 

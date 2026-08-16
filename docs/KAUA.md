@@ -468,7 +468,8 @@ test-covered, not audit-gated. The §25.4 audit-trigger row records this.
 
 ## 11. Coordination with the auxiliary track
 
-The auxiliary track (`aux/userspace-apps`, which owns `usr/apps/**`) carries a
+The auxiliary track (branch per `docs/AUX-ROADMAP.md`; it does NOT own
+`usr/apps/**` -- that description was measured false at aux#237) carried a
 roadmap item "the nora editor arc (ratatui forked native)". **That folds into
 Kaua**: MAIN owns the console TUI substrate (`usr/lib/kaua`) and the runtime
 editor (`usr/nora`); the aux ratatui-fork plan is superseded by the focused

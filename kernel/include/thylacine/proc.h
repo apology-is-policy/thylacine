@@ -1433,8 +1433,24 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas);
 // a bare atomic load by the author who was holding the finding at the time.
 // This tree is one predicate away from the same thing: the cross-Proc call
 // site already exists at proc_tty_susp_would_stop_locked; only the sigtab read
-// is missing. Resetting removes the dangling pointer outright, so reader-set
-// growth is safe BY DEFAULT instead of safe-if-remembered.
+// is missing. Resetting removes the dangling pointer outright, so MEMORY safety
+// under reader-set growth is unconditional rather than remembered.
+//
+// Be precise about what that does and does not buy, because the first version
+// of this comment overclaimed it. Unconditional: no dangling pointer, ever, and
+// per-FIELD integrity (viv_sigtab_reset writes 8-byte fields; a byte loop there
+// compiled to halfword stores and could publish a handler nobody wrote). NOT
+// bought: a snapshot. A lock-free reader can see a mix of pre- and post-reset
+// entries, which is the POSIX exec-vs-signal race and is sound, but a new
+// reader must not assume the table is self-consistent across entries.
+//
+// PRECONDITION, unenforced here and therefore stated: the caller must be the
+// only live thread of `p` -- proc_exec_alone(p), which exec establishes and
+// re-checks under g_proc_table_lock at the swap. This function writes the table
+// without any lock, so calling it on a Proc that is running would interleave a
+// 448-byte reset with that Proc's own viv_sigtab_set. proc_exec_replace
+// extincts on a non-self target; this helper does not, because the kernel test
+// drives it directly on a Proc it built and never scheduled.
 void proc_exec_reset_dispositions(struct Proc *p);
 
 // EL0-return-tail die-check (ARCH §7.9.1, invariant I-24). Called at every

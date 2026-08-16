@@ -979,9 +979,11 @@ constructors (`Sqe::nop` / `fsync` / `read` / `write` / `with_flags`).
 the CQ single-consumer, so a multi-thread consumer (e.g. `loom-stress`) must
 serialize SQ/CQ access externally and may only call `enter()` lock-free.
 
-**The Tapestry seam** (`docs/TAPESTRY.md`). The libtapestry `Loom` trait (defined
-on the `aux/userspace-apps` branch) maps onto this surface with a one-line
-handoff -- `impl tapestry::Loom for libthyla_rs::loom::Ring`:
+**The Tapestry seam** (`docs/TAPESTRY.md`). The libtapestry `Loom` trait
+(`usr/lib/libtapestry`, promoted into `main`; the `aux/userspace-apps` location
+this once named is stale -- aux#237) maps onto this surface with a one-line
+handoff -- `impl tapestry::Loom for libthyla_rs::loom::Ring`. **Already wired**
+at `5f2217f6`; the mapping below is the as-built correspondence, not a plan:
 
 | libtapestry call | maps to |
 |---|---|

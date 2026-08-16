@@ -32,7 +32,6 @@ The `tools/` directory is a first-class part of the repository. It is not a coll
 tools/
   run-vm.sh           ← launch QEMU with the correct flags
   deploy.sh           ← update kernel/binary in running VM via 9P share
-  agent-protocol.md   ← the command/result convention for agentic interaction
   build.sh            ← full build wrapper around CMake + Cargo
   test.sh             ← run the test suite against a running VM
   snapshot.sh         ← save/restore QEMU VM state
@@ -719,7 +718,9 @@ The `EXTINCTION:` prefix is the agent's catastrophic-failure-detection signal. A
 
 The function is `extinction(const char *msg)` / `extinction_with_addr(const char *msg, uintptr_t addr)` in `kernel/extinction.c` (header `kernel/include/thylacine/extinction.h`). Convenience macro `ASSERT_OR_DIE(expr, msg)` for assert-style checks.
 
-These two strings (the success banner and the EXTINCTION prefix) are part of the kernel ABI with the development tooling. They do not change without updating `tools/run-vm.sh`, `tools/test.sh`, `tools/agent-protocol.md`, and `CLAUDE.md` in the same commit.
+These two strings (the success banner and the EXTINCTION prefix) are part of the kernel ABI with the development tooling. They do not change without updating `tools/run-vm.sh`, `tools/test.sh`, and `CLAUDE.md` in the same commit — and **this section (§10) is the agent-side protocol**, so a change lands here too.
+
+> Until 2026-08-15 this list also named `tools/agent-protocol.md`. That file was planned in Phase 1 and never written (zero git history), so the requirement was unfollowable — and an unfollowable item in a mandatory list teaches the reader that the whole list is advisory, which is a worse failure than the missing file. The protocol lives here; the citation was removed rather than the doc invented (main#244).
 
 ---
 
