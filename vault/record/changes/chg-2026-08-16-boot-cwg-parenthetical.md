@@ -4,7 +4,7 @@ type: chg
 title: "Two comments in one commit disagree about a measured result"
 date: 2026-08-16
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["22ebbc01"]
 touched: [sub-kernel-boot-sequence]
 established: []
 closed: []
