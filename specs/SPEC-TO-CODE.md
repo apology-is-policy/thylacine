@@ -1762,12 +1762,49 @@ distinct states); the KERNEL SHARE HALF landed at G-2** (the DMA-weave
 `burrow_share_into` admission + the Weft generalization; the ABI
 `SYS_DMA_CREATE_WEAVE`/`SYS_WEFT_UNSHARE` user-signed-off 2026-07-19); **the
 SERVER HALF landed at G-3** (tapestryd stage 0 + the R2-F3 reaper — the map
-below). Clean cfg GREEN 5413 distinct (unperturbed across G-2 and G-3 —
-neither impl half changed the model); liveness GREEN (`EventuallyRetired`
-incl. across `ServerDeath`); the 4 buggy cfgs each fire their named
-invariant (`premature_reuse` → RecycleGate,
+below); **the GPU-COMPOSED path landed model-first at Warp-C C-1**
+(2026-08-16, GPU-DESIGN §4.5.6 — model BEFORE impl; the impl is C-2/C-3).
+Clean cfg GREEN 5413 distinct (unperturbed across G-2 and G-3 — neither impl
+half changed the model — and unperturbed across C-1, which is the measured
+control on that extension being additive rather than a rewrite); liveness
+GREEN (`EventuallyRetired` incl. across `ServerDeath`); the 7 buggy cfgs each
+fire their named invariant (`premature_reuse` → RecycleGate,
 `retire_during_transfer`/`reweave_without_quiesce` → NoTornScanout,
-`map_after_retire` → NoStaleMap).
+`map_after_retire` → NoStaleMap, `drain_skipped` → NoTornCompose,
+`blit_during_fill`/`fill_during_blit` → NoStaleCompose). Gate:
+`specs/check-tapestry.sh`.
+
+### The C-1 composed extension (model-first; no impl site yet)
+
+Behind `ALLOW_COMPOSE`, so the direct path is bit-recoverable. New actions
+and the sites they will bind at C-2/C-3:
+
+- **`Attach(g)` / `Detach(g)`** ↔ the compositor-context attach verb C-2
+  builds. `ctx_attach_resource` is the I-45 AUTHORITY-CONFERRAL point, not a
+  formality: P1b measured that without it vrend refuses the cross-context
+  blit by name (`Illegal resource 1080`) and with it the blit runs. `Detach`
+  requires `~InBlit(g)`.
+- **`ComposeBlit(g)` / `ComposeComplete(g)`** ↔ the per-frame
+  `VIRGL_CCMD_BLIT` list in one fenced `submit_3d`, and the fence retiring →
+  `SET_SCANOUT`(screen) + `RESOURCE_FLUSH`. `ComposeBlit` requires
+  `filled[g]` — the resource has been populated at least once — which is
+  deliberately NOT the same as `intransfer = 0`, a condition equally true of
+  "the fill landed" and "no fill was ever issued".
+- **`DrainedOfBlits(g)` on `ServerRelease` + `Free`** ↔ the real drain the
+  §28 I-40 row pre-recorded as owed. Modeled as an OMITTED CONJUNCT under
+  `BUGGY_DRAIN_SKIPPED` rather than as a twin buggy action, so the buggy arm
+  differs from the correct one in exactly the conjunct under test.
+
+**A design obligation C-1 surfaced for C-2/C-3, before any code:** the D1
+recycle gate does not survive the composed path unchanged. tapestryd
+allocates ONE 2D resource per surface (whole-weave `ATTACH_BACKING`,
+per-present offset transfer — `usr/tapestryd/src/gpu.rs`), so guest-side
+slots buy no host-side concurrency and a fill of ANY slot collides with a
+blit. In the direct path a present's terminal CQE means the host has finished
+reading; once the compositor is a SECOND reader of that one resource, the CQE
+stops meaning the resource is free, and nothing in the old rule notices. The
+impl must supply the exclusion — fence ordering, or a double-buffered host
+resource.
 
 The G-3 action ↔ site map (the server half; `usr/tapestryd/src/server.rs`
 unless noted — a USERSPACE realization: the spec's server actions are

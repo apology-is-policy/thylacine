@@ -785,6 +785,56 @@ model-first and spec-first is RE-ENABLED on this surface, so the model is
 extended BEFORE the impl, with a `drain_skipped` counterexample cfg and (per
 P2) a cross-context-ordering counterexample.
 
+> **C-1 LANDED 2026-08-16 — the model is extended and TLC-green, and it
+> refuted a premise of its own first draft.** `tapestry_present.tla` gains the
+> composed path behind `ALLOW_COMPOSE`: `Attach`/`Detach` (P1b's
+> authority-conferral point), `ComposeBlit`/`ComposeComplete`, the
+> `DrainedOfBlits` conjunct on `ServerRelease` + `Free`, and two invariants
+> repeating T-1's own LIFETIME/CONTENT split — `NoTornCompose` (pages stay
+> backed under an in-flight blit) and `NoStaleCompose` (a blit and a fill of
+> one host resource never overlap). Eleven cfgs, all reporting what their
+> headers claim: 4 clean (`tapestry_present`, `_liveness`, `_composed`,
+> `_composed_liveness`) + 7 buggy, verified by `specs/check-tapestry.sh`.
+>
+> **The additive claim is CHECKED, not asserted.** With `ALLOW_COMPOSE =
+> FALSE` the two new variables never leave their initial values, so the six
+> pre-existing cfgs must reproduce their exact distinct-state counts — and do
+> (5413, measured before and after). Coverage confirms the composed actions
+> fire `0:0` on the direct path and 2264/7328 times on the composed one, so
+> the green is over a constructed state rather than an unreachable one.
+>
+> **What the model found, and it is a real design obligation for C-2/C-3.**
+> The first draft carried the in-flight blit as the *slot* it reads, on the
+> assumption that slots are host-side buffers — so a client filling a
+> different slot during a composition would be legitimate pipelining. TLC
+> refuted the model built on that assumption, and the tree refutes the
+> assumption: tapestryd allocates **one 2D resource per surface** with
+> whole-weave `ATTACH_BACKING` and transfers at a per-present *offset*
+> (`usr/tapestryd/src/gpu.rs`). Guest-side slots buy **no host-side
+> concurrency**, so a fill of any slot collides with a blit, and the exclusion
+> is whole-resource. Concretely: **the D1 recycle gate does not survive the
+> composed path unchanged.** In the direct path a slot is released by its
+> present's terminal CQE, and that CQE genuinely does mean the host has
+> finished reading; once the compositor is a *second* reader of the same host
+> resource, the CQE stops meaning the resource is free — and nothing in the
+> old rule notices. C-2/C-3 must supply that exclusion (fence ordering, or a
+> double-buffered host resource), which is the sort of thing that is cheap
+> here and expensive at C-4.
+>
+> The exclusion is symmetric, so it is sabotaged per direction rather than
+> once: `buggy_blit_during_fill` (P2 proper — the absent cross-context sync)
+> and `buggy_fill_during_blit` (the buffer-in-use violation). A single flag
+> opening both gates would only ever demonstrate whichever end TLC reached
+> first.
+>
+> Note what `_composed_liveness` is for: the load-bearing question a real
+> drain raises is not safety but **termination** — a drain that blocks forever
+> strands the weave as surely as no drain corrupts it, and stage-0 synchrony
+> could not deadlock because it had nothing to wait on. `EventuallyRetired` is
+> verified over the complete 44696-state space (TLC: *"Checking temporal
+> properties for the complete state space"*), so the drain provably does not
+> deadlock teardown.
+
 #### 4.5.7 Prior art
 
 The pattern is **Fuchsia's `DisplayCompositor`** (prefer direct scanout, fall
@@ -1107,7 +1157,7 @@ scope shifts with them.
 | **Warp-3** | `virgl_thylacine_winsys` (18 slots) + the client library; unmodified Mesa virgl driver — **LANDED** (3a `ef6af62c` seam capacity 128 + the `fence-signaled`/`bo-cap` ctl promotion; 3b `8b8ca40d` fork patch 0006: the winsys + `warp_client` + `virgl-prove`; 3c `eb62f97c` the builder cycle; `c64ddbe4` the #191 build-id cacheless fallback, port finding 4; as-built `docs/reference/149-warp.md`) | a triangle, in-guest, on the GPU — **met: `GL_RENDERER = virgl (Apple M2 (Compat))`, via `tools/warp-host.sh tri`** |
 | **Warp-4** | present integration: `SET_SCANOUT` of a 3D resource (Direct), readback fallback (Composed) — **LANDED** (4a+4b `ec2bd8ad` the mutual-adoption protocol, both halves + fork patch 0007; 4c the gate: the launcher auto-detect + `tools/warp-host.sh quake` — both arms in one run, the `scanout direct N GL res R` switch live on thyla-gl; as-built `docs/reference/149-warp.md` §Warp-4) | **GLQuake on virgl** — **measured: ~3 fps aggregate at 1280×800 (the mechanism gate is met). PREMISE CORRECTED 2026-08-10: the 192.8 anchor was macOS/HVF and does not transfer (its own Warp-1 row said so); the same-host llvmpipe band is 2.4–5.9 fps at 640×480, so ~3 fps at 3.3× the pixels sits INSIDE the software band — #196 now asks stall-vs-compute (the `decomp` verb: per-arm unpaced figures + qemu CPU attribution), not "why 20–25× under"**. Findings ledger: #195 (GL-host capture), #197 (console ^C owner-only), #198 (demo-end context break), #199 (caught notes never interrupt blocking syscalls) |
 | **Warp-5** | the focused audit; I-45 enumerated; reference docs | Fable-5-max round closed |
-| **Warp-C** | **GPU composition (§4.5; designed 2026-08-13, RESERVED)** — the compositor's own virgl context; the screen becomes a host-side 3D resource; per-frame `VIRGL_CCMD_BLIT` composition replacing the readback; chrome becomes a damage-uploaded texture; the I-40 drain. Sub-chunks: **C-0** the two gating probes (§4.5.4 P1 cross-context blit with a pixel-asserting positive control, P2 cross-context ordering) — *nothing structural lands until both pass* — plus **C-0d**, the #240 detector (§4.5.4b: the sentinel stamp behind a sticky `stream-rejected` on the ctx ctl), which is a PREREQUISITE of P1b rather than a parallel nicety: a WITH-attach retry that silently does nothing is unreadable while a refusal reports success; **C-1** the spec extension (async present + drain; `drain_skipped` + a P2 ordering counterexample cfg) BEFORE impl; **C-2** compositor ctx + 3D screen; **C-3** blit composition + chrome-as-texture; **C-4** retire the readback path; **C-5** focused audit (an I-40 surface + a new cross-context authority path) | **the composed path reaches direct-path parity** — i.e. the #215 43% is gone at 1280×800, measured by the same two-method protocol, with `ls-gfx*` byte-identical and tearing-freedom held under P2 stress |
+| **Warp-C** | **GPU composition (§4.5; designed 2026-08-13, RESERVED)** — the compositor's own virgl context; the screen becomes a host-side 3D resource; per-frame `VIRGL_CCMD_BLIT` composition replacing the readback; chrome becomes a damage-uploaded texture; the I-40 drain. Sub-chunks: **C-0** the two gating probes (§4.5.4 P1 cross-context blit with a pixel-asserting positive control, P2 cross-context ordering) — *nothing structural lands until both pass* — plus **C-0d**, the #240 detector (§4.5.4b: the sentinel stamp behind a sticky `stream-rejected` on the ctx ctl), which is a PREREQUISITE of P1b rather than a parallel nicety: a WITH-attach retry that silently does nothing is unreadable while a refusal reports success; **C-1 LANDED 2026-08-16** the spec extension (async present + drain; `drain_skipped` + a P2 ordering counterexample **per direction**, since the exclusion is symmetric) BEFORE impl — TLC-green, additive by measurement (the six pre-existing cfgs reproduce 5413 exactly with `ALLOW_COMPOSE = FALSE`), and it surfaced a C-2/C-3 obligation the prose had not: **the D1 recycle gate does not survive the composed path unchanged**, because tapestryd runs ONE host resource per surface and a present's terminal CQE stops meaning "free" once the compositor is a second reader; **C-2** compositor ctx + 3D screen (**owes the attach verb — P1b's authority-conferral point — and the blit/fill exclusion C-1 named**); **C-3** blit composition + chrome-as-texture; **C-4** retire the readback path; **C-5** focused audit (an I-40 surface + a new cross-context authority path) | **the composed path reaches direct-path parity** — i.e. the #215 43% is gone at 1280×800, measured by the same two-method protocol, with `ls-gfx*` byte-identical and tearing-freedom held under P2 stress |
 | **Warp-6** | Venus: hostmem mapping (§6.2), `vn_renderer_thylacine`, blobs — **now also owes the §4.5.5 generalization: the blob-mediated capset-neutral blit, extending Warp-C's mechanism without reshaping its model** | a Vulkan prover in-guest |
 | **Warp-7+** | RPi: the v3d leaf driver on the MENAGERIE substrate — own charter, F3's posture built in | own gate |
 
