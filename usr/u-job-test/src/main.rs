@@ -36,6 +36,9 @@
 //   15. `mask note 'interrupt' { ... }` defers a queued `interrupt` across the
 //       body (the kernel Thread mask holds it) and the handler fires only at
 //       the post-block drain (scripture 10.8).
+//   15c. `mask note 'tty:*'` maps the whole tty family to ONE kernel class and
+//       engages NOTE_BIT_TTY for the body -- read back from the kernel. It
+//       used to parse, run the body, and mask nothing.
 //
 //   U-7c-b (interruptible foreground wait + Ctrl-C forward):
 //   16. The forward primitive: `interrupt` can be posted to a LIVE foreground
@@ -71,7 +74,9 @@ use libthyla_rs::notes::{self, NoteClass, NoteTarget};
 use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::time::{self, Duration};
 use libthyla_rs::{t_putstr, t_wait_pid_for, T_WAIT_WNOHANG};
-use libutopia::eval::{deliver_pending_notes, eval_source, wait_pids_interruptible, Env};
+use libutopia::eval::{
+    deliver_pending_notes, eval_source, note_class_for_name, wait_pids_interruptible, Env,
+};
 use libutopia::repl::Repl;
 
 #[global_allocator]
@@ -495,6 +500,89 @@ pub extern "C" fn rs_main() -> i64 {
     deliver_pending_notes(&mut env_d); // unmasked -> now fires
     if env_d.get("fired").as_scalar() != "yes" {
         return fail("mask-mech: unmasked note did not deliver after the mask lifted");
+    }
+
+    // 15c. `mask note 'tty:*'` -- the tty family maps to ONE kernel class and
+    //      the block engages it. Before this arm existed the name PARSED, the
+    //      body RAN, and nothing was masked: `mask note 'tty:susp' { ... }` was
+    //      a silent no-op, and the EL0 tail could apply a deferred ^Z mid-body.
+    //      Two links, each observed where it lives:
+    //
+    //      (i)  the PARSER: every tty:* name maps to NoteClass::Tty, the three
+    //           legacy names still map, and non-tty names do not. This is the
+    //           leg a sabotage of the arm reddens; it is the control that would
+    //           have caught the no-op.
+    //      (ii) the MECHANISM, read back from the KERNEL: with the fd open,
+    //           adding the Tty class pushes NOTE_BIT_TTY into the Thread mask
+    //           and removing it clears the bit. `set_mask` returns the PREVIOUS
+    //           mask, so re-setting the current value is a readback -- a Tty
+    //           bit in the answer is the kernel's testimony, not ours (the
+    //           /susp-mask-child idiom). Then the parsed block end to end: the
+    //           body runs and the kernel mask comes back restored.
+    //
+    //      What this CANNOT do, stated so the green reads no larger: post a
+    //      real tty:susp. The family is kernel-synthetic-only on the POST axis
+    //      (notes_post refuses a userspace tty:* name), so "a masked tty:susp
+    //      is HELD across the body" is proven one layer down by
+    //      /susp-mask-child (jc-probe's maskstop rung), which receives a real
+    //      one from a pts and reads its own mask back the same way. And the
+    //      harness cannot observe the kernel from inside a script body, so
+    //      mid-body engagement is the composition of (i) and (ii), not a
+    //      third observation.
+    for (name, want) in [
+        ("tty:susp", Some(NoteClass::Tty)),
+        ("tty:winch", Some(NoteClass::Tty)),
+        ("tty:hup", Some(NoteClass::Tty)),
+        ("tty:quit", Some(NoteClass::Tty)),
+        ("tty:cont", Some(NoteClass::Tty)),
+        ("interrupt", Some(NoteClass::Interrupt)),
+        ("pipe", Some(NoteClass::Pipe)),
+        ("child_exit", Some(NoteClass::ChildExit)),
+        ("kill", None),
+        ("ttysusp", None), // no colon: not the family
+        ("snare:segv", None),
+    ] {
+        if note_class_for_name(name) != want {
+            return fail("mask-tty: note_class_for_name maps a name to the wrong class");
+        }
+    }
+    let mut env_t = Env::new();
+    env_t.interactive = true;
+    match notes::Notes::open_self() {
+        Ok(nq) => env_t.set_notes(Some(nq)),
+        Err(_) => return fail("mask-tty: could not open the self note queue"),
+    }
+    deliver_pending_notes(&mut env_t);
+    // Precondition, from the kernel: no Tty bit before the leg starts.
+    match notes::set_mask(env_t.note_mask()) {
+        Ok(prev) if !prev.contains(NoteClass::Tty) => {}
+        Ok(_) => return fail("mask-tty: precondition -- the kernel already masks Tty"),
+        Err(_) => return fail("mask-tty: could not read the kernel mask back"),
+    }
+    if !env_t.note_mask_add(NoteClass::Tty) {
+        return fail("mask-tty: note_mask_add reported Tty already present");
+    }
+    match notes::set_mask(env_t.note_mask()) {
+        Ok(prev) if prev.contains(NoteClass::Tty) => {}
+        Ok(_) => return fail("mask-tty: the kernel mask does NOT carry NOTE_BIT_TTY after note_mask_add"),
+        Err(_) => return fail("mask-tty: could not read the kernel mask back"),
+    }
+    env_t.note_mask_remove(NoteClass::Tty);
+    match notes::set_mask(env_t.note_mask()) {
+        Ok(prev) if !prev.contains(NoteClass::Tty) => {}
+        Ok(_) => return fail("mask-tty: the kernel mask still carries NOTE_BIT_TTY after note_mask_remove"),
+        Err(_) => return fail("mask-tty: could not read the kernel mask back"),
+    }
+    if eval_source(&mut env_t, "mask note 'tty:susp' { let ttybody = yes }").is_err() {
+        return fail("mask-tty: evaluating the masked block errored");
+    }
+    if env_t.get("ttybody").as_scalar() != "yes" {
+        return fail("mask-tty: masked body did not run");
+    }
+    match notes::set_mask(env_t.note_mask()) {
+        Ok(prev) if !prev.contains(NoteClass::Tty) => {}
+        Ok(_) => return fail("mask-tty: the kernel mask still carries NOTE_BIT_TTY after the block"),
+        Err(_) => return fail("mask-tty: could not read the kernel mask back"),
     }
 
     // ----- U-7c-b: interruptible foreground wait + Ctrl-C forward -----
