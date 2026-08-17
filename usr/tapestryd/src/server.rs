@@ -248,6 +248,15 @@ const VIRGL_CMD_BLIT_SIZE: u32 = 21;
 /// case; the two paths must look the same from outside, 4.5.9).
 const PIPE_MASK_RGBA: u32 = 0xF;
 const PIPE_TEXTURE_2D: u32 = 2;
+/// The OSMesa gallium frontend mints its framebuffer textures
+/// `PIPE_TEXTURE_RECT` (every SDL/OSMesa GL client's presented BO on this
+/// system -- GLQuake's `res 84` read exactly this at the C-5 close); the
+/// C-2c witness and the C-3 blit have composed such BOs on the reference
+/// host since C-3, so RECT is part of the composable shape alongside 2D.
+/// gallium's enum: BUFFER 0, 1D 1, 2D 2, 3D 3, CUBE 4, RECT 5 (the first
+/// cut of this constant said 3 -- 3D -- and the SKIPPED say line's tuple,
+/// `target 5`, is what corrected it).
+const PIPE_TEXTURE_RECT: u32 = 5;
 const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
 /// A BUFFER resource (Warp-C C-4): `PIPE_BUFFER`, one byte per texel in
@@ -1358,6 +1367,21 @@ struct WarpBo {
     /// composition blit, whose source-format word must name the resource's
     /// own format (the renderer reinterprets on mismatch).
     format: u32,
+    /// C-5 F1/F3: the BO has the ONE shape the compositor ever composes by
+    /// GPU and the bring-up probe measured -- a flags-0 `PIPE_TEXTURE_2D`
+    /// `B8G8R8A8_UNORM`, one layer, one level, unsampled. Only such a BO is
+    /// imported into COMPOSITOR_CTX (a witness copy from any other shape is
+    /// a command the renderer may refuse, and a refusal latches the SHARED
+    /// compositor context for the process lifetime -- a client-reachable
+    /// all-client degradation to the CPU path) or blitted (a `Y_0_TOP` BO
+    /// would compose mirrored under the flags-0 convention). Everything
+    /// else takes the readback arm, which was already the destination of
+    /// every non-`B8G8R8A8` BO.
+    composable: bool,
+    /// The declared target + flags, kept so a refused import names its
+    /// shape (the SKIPPED say line) instead of leaving it to be guessed.
+    target: u32,
+    flags: u32,
 }
 
 /// Warp-4: a resolved ACTIVE GL adoption (see `gl_adoption`) -- the
@@ -1376,6 +1400,9 @@ struct GlAdopt {
     comp_imported: bool,
     /// The BO's declared virgl format (the blit's source-format word).
     format: u32,
+    /// C-5 F1/F3: the composable shape (see `WarpBo.composable`); the
+    /// import gate implies it, the blit gate re-checks it.
+    composable: bool,
 }
 
 const NO_SURFACE: Option<Surface> = None;
@@ -1993,14 +2020,31 @@ impl Comp {
         if !self.comp_ctx {
             return;
         }
-        let (res_id, already) = match self
+        let (res_id, already, composable, shape) = match self
             .wctx(ctx_pub, conn)
             .and_then(|c| c.bos.iter().flatten().find(|b| b.pub_id == bo_pub))
         {
-            Some(b) => (b.res_id, b.comp_imported),
+            Some(b) => (b.res_id, b.comp_imported, b.composable, (b.target, b.format, b.flags)),
             None => return,
         };
         if already || res_id == 0 {
+            return;
+        }
+        // C-5 F1: only the shape the compositor composes is imported. The
+        // witness copies texel (0,0) of the BO into the compositor's
+        // B8G8R8A8 texture sentinel; from a buffer, a depth/compressed/other
+        // format, a mip level or an array the renderer may REFUSE that copy,
+        // and a refused command latches the shared context for the process
+        // lifetime (4.5.4a) -- a client-reachable degradation of EVERY
+        // client's composition to the CPU path. Such a BO was never going
+        // to be blitted (`compose_gpu_bo_words` refuses it), so skipping the
+        // import loses nothing: it composes through the readback arm.
+        if !composable {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: SKIPPED (not a composable BO shape: target {} format {} flags {:#x})",
+                ctx_pub, bo_pub, res_id, sn, shape.0, shape.1, shape.2
+            );
             return;
         }
         if self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res_id).is_err() {
@@ -3720,6 +3764,21 @@ impl Comp {
                     self.paint_chrome();
                     self.geom_sig = sig;
                     self.screen_flush_full();
+                    // C-5 SA-1: every held region is superseded by this
+                    // repaint (the same rule `set_mode` applies): a
+                    // Held::Composed `cpu` region released later would
+                    // upload the buffer's chrome bytes over whatever pane
+                    // the new layout put under it -- on the GPU path a live
+                    // GPU-composed pane, blanked until its next present.
+                    // On the CPU path the held pixels were equally lost at
+                    // this repaint (paint_chrome overwrote them), so
+                    // dropping is behaviour-preserving there; the fan below
+                    // makes every client repaint either way.
+                    for n in 0..MAX_SURFACES {
+                        if let Some(s) = self.surf_mut(n) {
+                            s.held = None;
+                        }
+                    }
                 } else if self.chrome_epoch != self.layout.epoch {
                     // Focus-only: redraw the frames + strip highlights,
                     // keep the content -- and push ONLY those rects (Warp-C
@@ -4901,6 +4960,7 @@ impl Comp {
             h: b.h,
             comp_imported: b.comp_imported,
             format: b.format,
+            composable: b.composable,
         })
     }
 
@@ -5507,6 +5567,9 @@ impl Comp {
             retiring: false,
             comp_imported: false,
             format: 0,
+            composable: false,
+            target: 0,
+            flags: 0,
         });
         Some(pub_id)
     }
@@ -5777,6 +5840,15 @@ impl Comp {
                 b.w = w;
                 b.h = h;
                 b.format = format;
+                b.composable = (target == PIPE_TEXTURE_2D || target == PIPE_TEXTURE_RECT)
+                    && format == VIRGL_FORMAT_B8G8R8A8_UNORM
+                    && (flags & VIRGL_RESOURCE_Y_0_TOP) == 0
+                    && d == 1
+                    && array == 1
+                    && last_level == 0
+                    && samples == 0;
+                b.target = target;
+                b.flags = flags;
                 built = true;
                 break;
             }
@@ -8922,6 +8994,7 @@ impl Conn {
                 let mut done = false;
                 let bo_gpu = comp.gpu_compose_ready()
                     && g.comp_imported
+                    && g.composable
                     && g.format != 0
                     && scr.map_or(false, |(_, is3d)| is3d)
                     && comp.comp_conv.map_or(false, |c| c.bo_u.is_some() || c.bo_s.is_some());
@@ -9034,6 +9107,12 @@ impl Conn {
                 }
                 if !blits.is_empty() {
                     if comp.submit_blits(COMPOSITOR_CTX, &blits).is_err() {
+                        // C-5 F2: the slot's host copy now holds only this
+                        // present's partial damage and the flag would say
+                        // otherwise; a failed compose leaves it undefined.
+                        if let Some(s) = comp.surf_mut(n) {
+                            s.res_stale[slot as usize] = true;
+                        }
                         return Err(E_IO);
                     }
                     if comp.comp_health_tick() {

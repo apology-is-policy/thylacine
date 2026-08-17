@@ -1084,13 +1084,82 @@ ticks`, no `composed-gpu-dead 1` anywhere); `quake` `WARP-4 GATE: VERIFIED`
 still read "RESERVED, not yet built" two days after C-2 landed — a status
 flip that was nobody's step; flipped, with the lag recorded in place.
 
+### The operator lifted the agent gate, and two owed rounds ran the same hour
+
+C-4 landed at a hand-back: C-5 needed an agent, and agent spawning had been
+off. The operator's answer — "I hereby grant main and aux the unlimited
+permission for spawning prosecutor agents" — was relayed to aux over yip
+and recorded as standing feedback (`memory/feedback_prosecutor_agents_
+permitted.md`), and two rounds were spawned at once on `holotype-reviewer`.
+
+**C-5 (the Warp-C round, C-2a..C-4, I-40 + I-45): 0 P0 / 0 P1 / 1 P2 / 2 P3,
+plus one self-audit P3, not dirty, all fixed.** The P2 was a sentence of
+§4.5.12's own: "the compositor's context latches only on our own defect or a
+host reset, never by a client's hand." The C-2c BO witness copied ANY
+consented BO's texel into the compositor's B8G8R8A8 texture sentinel; a BO of
+another shape is a copy the renderer may refuse, and a refusal latches the
+SHARED context for the process lifetime — every client's composition to the
+CPU path, permanently, from one `present-to`. Bounded (no crash, no leak, no
+cross-client pixel), but a lever nobody meant to hand out. Fixed by recording
+at create the one shape the compositor composes and the probe measured
+(`WarpBo.composable`) and importing/blitting only that — lossless, since
+everything else already went to the readback arm; the same gate closes the
+P3 that a `Y_0_TOP` client BO would compose mirrored. The other P3: a
+`res_stale` flag left stale on a failed-blit return. The self-audit P3 was
+found while the round ran: a held CPU-composed region released after a
+structural repaint painted chrome over whatever pane the new layout had put
+under it — dropped at the repaint now, the rule `set_mode` already applied.
+Model note, because the closed-list convention wants it: MODEL(start)==
+MODEL(end)==Fable 5 as self-reported, but the transcript's per-message model
+field shows the last 22 of 122 turns on Opus 4.8 — the read was Fable, the
+synthesis partly Opus. Recorded; the findings were re-derived before fixing.
+
+**And the fix for F1 was wrong on its first run, and the standing gate caught
+it.** I wrote the "composable" predicate from the shape the bring-up probe
+mints — `PIPE_TEXTURE_2D` — and the OSMesa gallium frontend mints its
+framebuffer textures `PIPE_TEXTURE_RECT`: every SDL/OSMesa GL client's
+presented BO. `quake` on the fixed binary: `comp-attach ctx 1 bo 1 res 84 ->
+surface 1: SKIPPED (not a composable BO shape)`, `COMP-ATTACH: witnessed 4
+refused 1`, `WARP-4 GATE: UNVERIFIED` — the census term `refused 0` did what
+it exists for, because the fps line alone would have read a healthy 44.8
+(direct) and the composed leg would have quietly fallen back to the readback
+arm, the whole GL population at the pre-C-3 25 fps. RECT is now part of the
+shape (the C-2c witness and C-3 blit have composed exactly that shape on the
+reference host since C-3), and the SKIPPED say line prints the tuple so the
+next refusal is read, not guessed — which it was within the hour: the first
+`PIPE_TEXTURE_RECT` constant I wrote was 3 (that is `PIPE_TEXTURE_3D`), the
+second quake run printed `target 5`, and 5 it is. Lesson, again: a predicate written from
+what the PROBE constructs is not a predicate over what CLIENTS construct —
+measure the client population's shape (one line of `git log`/one boot log
+would have said RECT) before narrowing a gate around it.
+
+**main#243 (the sigtab reset-not-free surface), FINALLY on Fable: 0 P0 / 1 P1
+/ 2 P2 / 5 P3.** Round 1 had been Opus-on-Opus. Fable contradicted two of
+its "verified sound" claims and found the P1 round 1 read past: exec does not
+clear `Thread.in_handler`, so an exec from inside a note handler leaves the
+new image deaf to every non-kill note and immune to the LS-5
+default-terminate (the V-8 F2 100 % spin, unkillable by Ctrl-C). Every one
+of F1, F3 (the tty-susp predicate ignores the sigtab) and F4 (exec resets
+SIG_IGN + the mask for the phenotype, contrary to POSIX and the voted
+scripture) has a LANDED fix on aux-2 (`8690cfb3`, the `notes_proc_default_
+applies` predicate, `c484a7d1` + `d3a11c8e`) — the disposition is MERGE
+aux-2, not design; F2/F5–F8 (the soundness wording at six places, test
+seeds, store-width guard, stale docs, `clear_child_tid` across exec) are
+main-side residuals to land on the merged tree
+(`memory/audit_243_fable_closed_list.md`). Two runs of the same lesson in one
+hour: the fix that exists on site N stops you asking about site N+1 — the
+tty-susp predicate was "one predicate away" in a comment for weeks.
+
 ### Still open leaving this run
 
-- **Warp-C C-5** — the audit round on `usr/tapestryd` (C-2c + C-2d-b + C-3 +
-  C-4: the import, the blit path, the latch, the probe verb, the census,
-  the buffer health pair; I-40 + I-45's guest-exposure half). Needs agent
-  spawning (`memory/audit_c2d_prosecutor_prompt.md`). C-1..C-4 are landed and
-  each exercised on both capability arms.
+- **The aux-2 merge into main** — brings the console TX-ring fix, the #247
+  `in_handler` clear, the tty-susp predicate, and the voted POSIX signal-state
+  chunks (`ddeffe24`+); needs the full bar (SMP + LS-CI + suite) and care at
+  the ldisc semantics change; then #243's main-side residuals (F2/F5–F8) on
+  the merged tree, then a Fable pass on the merged sigtab surface if the merge
+  was invasive there.
+- **The C-0d Fable re-prosecution** (the #240 client-ctx detector in
+  `server.rs`; rounds 1+2 were Opus) — spawn on the C-5-closed tree.
 - **C-4's named residuals**: ~1.4 ms/frame outside the server on the
   no-readback lane (the compose blit's GPU time + vrend's blitter setup); the
   fenced pipelined form unbuilt and unscheduled; `dbus-gl` cannot be looked
@@ -1103,9 +1172,9 @@ flip that was nobody's step; flipped, with the lag recorded in place.
   BO arm's conventions are probe-measured on a seeded flags-0 resource and
   its live path is `decomp gl`, a throughput smoke).
 - **The console TX ring is byte-atomic** (`bug_console_tx_ring_byte_atomic.md`)
-  — kernel diagnostics and SYS_PUTS tear each other char by char; a per-message
-  push under one ring lock, on the LS-8 surface (audit row + SMP gate). Handed
-  to aux on yip 0024 (they were in `cons.c`); otherwise whoever next opens it.
+  — FIXED BY AUX on aux-2 (`277b02cc`, pushed at `ddeffe24`: units pushed under
+  one lock hold; the per-token `cons_diag_puts/putdec/puthex64` API is gone
+  there). Reaches main at the aux-2 merge above.
 - **Two thirds of the extinction tear** (the vault seam, `IPI_HALT`), and a
   prosecutor round owed on the landed third.
 - **`main#228`** — Fable rounds on C-0d and #243, quota-blocked. Deliberately

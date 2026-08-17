@@ -365,7 +365,7 @@ device). Our `t_dma_create` allocations are already contiguous, so the weave is
 natively the right object on that side; what the seam must carry is the
 **import** direction.
 
-### 4.5 GPU composition — the Warp-C arc (designed 2026-08-13; **BUILT** C-1..C-4 2026-08-16/17, §4.5.10–4.5.12; C-5 the audit owed)
+### 4.5 GPU composition — the Warp-C arc (designed 2026-08-13; **BUILT** C-1..C-4 2026-08-16/17, §4.5.10–4.5.12; **C-5 audited + closed 2026-08-17**, §4.5.12 tail)
 
 §4.4 above records GPU composition as a follow-on "to be built once the direct
 path is proven." **That precondition is now discharged**: Warp-4 built the
@@ -2038,6 +2038,33 @@ client population takes the blit), a latched context — and both decomp
 legs record zero `readback` and zero `present-composed-cpu` on the GL host.
 It is retired in the only sense §4.5.9 permits: not taken where the GPU can
 compose. The CPU path is untouched and permanent.
+
+**C-5, the audit (2026-08-17), and one word of §4.5.12 it corrected.** The
+owed I-40/I-45 round ran on Fable 5 (see `memory/audit_c5_closed_list.md`):
+0 P0 / 0 P1 / 1 P2 / 2 P3, plus one self-audit P3, all fixed. The P2 was
+this section's own premise: "the compositor's context latches only on our
+own defect or a host reset, never by a client's hand" was FALSE — the C-2c
+BO witness copied ANY consented BO's texel into the compositor's B8G8R8A8
+texture sentinel, and a BO of another shape (a buffer, another format, a
+mip, an array) is a copy the renderer may refuse, which latches the SHARED
+context for the process lifetime: a client-reachable, permanent degradation
+of every client's composition to the CPU path (bounded — no crash, no leak,
+no cross-client pixel — but a lever). Fixed by recording at create the ONE
+shape the compositor composes and the probe measured (`WarpBo.composable`:
+flags-0 `PIPE_TEXTURE_2D` or `PIPE_TEXTURE_RECT` — the OSMesa frontend's
+framebuffer target, i.e. every SDL/OSMesa client's presented BO; the first
+cut of the predicate said 2D only and the `quake` gate went red on
+`witnessed 4 refused 1` — `B8G8R8A8_UNORM`, one layer, one level,
+unsampled) and importing/blitting only that; every other BO takes the
+readback arm, where it was going anyway. The premise now reads: the
+compositor's context latches only on our own defect or a host reset, and
+the only client-supplied objects it ever names are `composable` ones. The
+same gate excludes a client BO minted `Y_0_TOP` (which would compose
+mirrored under the flags-0 convention — P3). The remaining two P3s: a
+`res_stale` flag left stale on the GPU arm's failed-blit return, and a held
+CPU-composed region released after a structural repaint painting chrome
+bytes over the pane the new layout put under it (dropped at the repaint
+now, the `set_mode` rule).
 
 **Lessons, the reusable part.** A measurement can be of the instrument:
 the display backend that made the GL host measurable also priced every
