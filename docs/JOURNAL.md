@@ -531,3 +531,11 @@ full runs before them said "32/34; 2 SKIPPED" in the harness's own words. The
 included `lib.exp`, minus the two SKIPs: a derived figure that propagated as a
 measured one six times before a run's tally was set beside it. Corrected
 everywhere; the tally now comes from the harness's `==> LS-CI:` lines only.
+
+### The bar over the tip (`01f076f2`: the handler-time mask)
+
+SMP gate 40/40 (default + UBSan × smp4/smp8, N=10, 0 corruption / 0
+external-kill / 0 other, two halves — the kernel byte-changed); LS-CI 33 PASS +
+2 SKIP over 35 (GL not baked; six batches, TCG); suite 1413/1413; sabotages
+SM1/SM2/SM3 each red on the named check. Pushed to both mirrors after the
+fixup.
