@@ -1752,10 +1752,14 @@ void test_notes_susp_gate_reads_phenotype_sigtab(void) {
 // that proves the lock order under real contention.
 void test_notes_masked_susp_stops_at_delivery(void) {
     struct Proc *leader = proc_alloc();
-    TEST_ASSERT(leader != NULL, "proc_alloc leader");
+    struct Proc *m = (leader != NULL) ? proc_alloc() : NULL;
+    if (leader == NULL || m == NULL) {
+        if (m) proc_free(m);
+        if (leader) proc_free(leader);
+        TEST_ASSERT(false, "proc_alloc leader + m");
+        return;
+    }
     proc_test_link(leader);
-    struct Proc *m = proc_alloc();
-    TEST_ASSERT(m != NULL, "proc_alloc m");
     m->sid  = (u32)leader->pid;
     m->pgid = (u32)m->pid;
     proc_test_link_child(leader, m);
@@ -1769,58 +1773,58 @@ void test_notes_masked_susp_stops_at_delivery(void) {
     m->threads    = &th;
     m->handler_va = 0u;
 
-    // ---- POSITIVE CONTROL: unmasked, the fan stops immediately. ----------
-    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "control: the fan visits m");
-    TEST_EXPECT_EQ((int)m->job_stop_req, 1,
-                   "CONTROL: unmasked + uncaught stops at POST time");
-    TEST_EXPECT_EQ(m->notes->count, 0u, "control: consumed by the stop");
+    // ---- OBSERVE FIRST, ASSERT LAST -- the idiom stop_dequeue_picks_its_own_
+    // note states below and this test did not follow until now: TEST_ASSERT
+    // *returns*, so any assertion placed before the unlink leaves `leader` and
+    // `m` alive and linked, and the next test's `while (wait_pid(&st) > 0)`
+    // hangs the boot. Every observation is captured; every assertion waits
+    // for the teardown. Name-comparisons are guarded on the observation that
+    // produced them so a NULL peek reads as a false leg, not a fault.
+
+    // ---- CONTROL: unmasked, the fan stops immediately. ----------------
+    int  ctl_visits = proc_job_stop_pgrp(m->pgid);
+    int  ctl_stop   = (int)m->job_stop_req;
+    u32  ctl_count  = m->notes->count;
 
     // ---- LEG A: masked -- the fan POSTS, and the stop is pending. --------
     m->job_stop_req        = 0;
     m->stop_report_pending = false;
     m->susp_stop_armed     = 0u;
     th.note_mask = (1u << NOTE_BIT_TTY);
-    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "A: the fan visits m");
-    TEST_EXPECT_EQ((int)m->job_stop_req, 0, "A: all-masked defers the stop");
-    TEST_EXPECT_EQ(m->notes->count, 1u, "A: it was posted instead");
-    TEST_EXPECT_EQ((int)m->susp_stop_armed, 1, "A: and the post armed #240");
+    int  a_visits = proc_job_stop_pgrp(m->pgid);
+    int  a_stop   = (int)m->job_stop_req;
+    u32  a_count  = m->notes->count;
+    int  a_armed  = (int)m->susp_stop_armed;
 
     spin_lock(&m->notes->lock);
     const char *pending_masked = notes_stop_note_name_locked(m, &th);
     spin_unlock(&m->notes->lock);
-    TEST_ASSERT(pending_masked == NULL,
-                "A: still MASKED, so not yet deliverable -- a stop applied "
-                "here would fire while the guest has it blocked");
 
     // ---- LEG B: unmask -- the pending stop becomes deliverable. ----------
     th.note_mask = 0;
     spin_lock(&m->notes->lock);
     const char *pending_open = notes_stop_note_name_locked(m, &th);
     spin_unlock(&m->notes->lock);
-    TEST_ASSERT(pending_open != NULL,
-                "B: unmasking makes the pending ^Z deliverable -- pre-fix "
-                "this was NULL forever and the note leaked its slot");
-    TEST_ASSERT(susp_name_is(pending_open, NOTE_NAME_TTY_SUSP),
-                "B: and it is the susp, not some other queued note");
+    bool b_open_is_susp = (pending_open != NULL) &&
+                          susp_name_is(pending_open, NOTE_NAME_TTY_SUSP);
 
     // The tail's action on that decision: consume, then apply via the shared
-    // primitive. Asserted separately so a fix that answered right and acted
+    // primitive. Observed separately so a fix that answered right and acted
     // wrong is still caught. It calls notes_stop_dequeue_locked because that is
     // what the tail calls -- this leg used to call the general
     // notes_dequeue_locked, mirroring a tail that did the same, and on a
     // ONE-NOTE queue the two are indistinguishable. See
     // notes.stop_dequeue_picks_its_own_note for the queue that tells them
     // apart.
+    struct Note consumed = { 0 };
     spin_lock(&m->notes->lock);
-    struct Note consumed;
-    int got_it = notes_stop_dequeue_locked(m, &th, &consumed);
+    int  b_got = notes_stop_dequeue_locked(m, &th, &consumed);
     spin_unlock(&m->notes->lock);
-    TEST_EXPECT_EQ(got_it, 1, "B: the note dequeues");
-    TEST_ASSERT(susp_name_is(consumed.name, NOTE_NAME_TTY_SUSP),
-                "B: and the note CONSUMED is the one the peek named");
-    TEST_EXPECT_EQ(m->notes->count, 0u, "B: the slot is RECLAIMED");
-    TEST_ASSERT(proc_job_stop_self(m), "B: and the deferred stop applies");
-    TEST_EXPECT_EQ((int)m->job_stop_req, 1, "B: the guest is stopped");
+    bool b_consumed_is_susp = (b_got == 1) &&
+                              susp_name_is(consumed.name, NOTE_NAME_TTY_SUSP);
+    u32  b_count   = m->notes->count;
+    bool b_applied = proc_job_stop_self(m);
+    int  b_stop    = (int)m->job_stop_req;
 
     // ---- LEG C: a cont while masked cancels it (#240 composition). -------
     //
@@ -1832,14 +1836,13 @@ void test_notes_masked_susp_stops_at_delivery(void) {
     m->cont_report_pending = false;
     m->susp_stop_armed     = 0u;
     th.note_mask = (1u << NOTE_BIT_TTY);
-    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "C: a masked ^Z");
-    TEST_EXPECT_EQ((int)m->susp_stop_armed, 1, "C: armed");
-    TEST_EXPECT_EQ(proc_job_cont_pgrp(m->pgid), 1, "C: a cont arrives");
-    TEST_EXPECT_EQ((int)m->susp_stop_armed, 0, "C: which disarmed it");
+    int  c_visits     = proc_job_stop_pgrp(m->pgid);
+    int  c_armed      = (int)m->susp_stop_armed;
+    int  c_cont       = proc_job_cont_pgrp(m->pgid);
+    int  c_disarmed   = (int)m->susp_stop_armed;
     th.note_mask = 0;
-    TEST_ASSERT(!proc_job_stop_self(m),
-                "C: the deferred stop is DISCARDED -- superseded by the cont");
-    TEST_EXPECT_EQ((int)m->job_stop_req, 0, "C: the job is not stranded");
+    bool c_applied    = proc_job_stop_self(m);
+    int  c_stop       = (int)m->job_stop_req;
 
     // ---- LEG D: a self-managing Proc keeps its note. ---------------------
     //
@@ -1850,27 +1853,24 @@ void test_notes_masked_susp_stops_at_delivery(void) {
         notes_dequeue_locked(m, NULL, &drain);
     }
     spin_unlock(&m->notes->lock);
-    TEST_EXPECT_EQ(m->notes->count, 0u, "D: queue clean before the leg");
+    u32  d_clean = m->notes->count;
     notes_mark_self_managing(m);
-    TEST_EXPECT_EQ(notes_post(m, NOTE_NAME_TTY_SUSP, 0u, NULL, true), 0,
-                   "D: a susp is posted to a self-managing Proc");
-    TEST_EXPECT_EQ(m->notes->count, 1u, "D precondition: it IS queued");
+    int  d_post  = notes_post(m, NOTE_NAME_TTY_SUSP, 0u, NULL, true);
+    u32  d_count = m->notes->count;
     spin_lock(&m->notes->lock);
     const char *self_managed = notes_stop_note_name_locked(m, &th);
     spin_unlock(&m->notes->lock);
-    TEST_ASSERT(self_managed == NULL,
-                "D: the tail does NOT consume it -- devnotes_read owns it");
 
     // The same refusal from the CONSUMER, which is what the tail actually
-    // calls. Asserting only the predicate would leave the exemption verified
+    // calls. Observing only the predicate would leave the exemption verified
     // on a function production no longer reaches -- the exact gap leg B had.
+    struct Note must_not_take = { 0 };
     spin_lock(&m->notes->lock);
-    struct Note must_not_take;
-    int took = notes_stop_dequeue_locked(m, &th, &must_not_take);
+    int  d_took      = notes_stop_dequeue_locked(m, &th, &must_not_take);
     spin_unlock(&m->notes->lock);
-    TEST_EXPECT_EQ(took, 0, "D: and the CONSUMER refuses it too");
-    TEST_EXPECT_EQ(m->notes->count, 1u, "D: the note is still there for the fd");
+    u32  d_remaining = m->notes->count;
 
+    // ---- TEARDOWN, unconditionally, before the first assertion. ---------
     proc_test_unlink(m);
     m->threads = NULL;                  // the static outlives proc_free
     m->state = PROC_STATE_ZOMBIE;
@@ -1878,6 +1878,51 @@ void test_notes_masked_susp_stops_at_delivery(void) {
     proc_test_unlink(leader);
     leader->state = PROC_STATE_ZOMBIE;
     proc_free(leader);
+
+    // ---- CONTROL ---------------------------------------------------------
+    TEST_EXPECT_EQ(ctl_visits, 1, "control: the fan visits m");
+    TEST_EXPECT_EQ(ctl_stop, 1, "CONTROL: unmasked + uncaught stops at POST time");
+    TEST_EXPECT_EQ(ctl_count, 0u, "control: consumed by the stop");
+
+    // ---- LEG A -----------------------------------------------------------
+    TEST_EXPECT_EQ(a_visits, 1, "A: the fan visits m");
+    TEST_EXPECT_EQ(a_stop, 0, "A: all-masked defers the stop");
+    TEST_EXPECT_EQ(a_count, 1u, "A: it was posted instead");
+    TEST_EXPECT_EQ(a_armed, 1, "A: and the post armed #240");
+    TEST_ASSERT(pending_masked == NULL,
+                "A: still MASKED, so not yet deliverable -- a stop applied "
+                "here would fire while the guest has it blocked");
+
+    // ---- LEG B -----------------------------------------------------------
+    TEST_ASSERT(pending_open != NULL,
+                "B: unmasking makes the pending ^Z deliverable -- pre-fix "
+                "this was NULL forever and the note leaked its slot");
+    TEST_ASSERT(b_open_is_susp,
+                "B: and it is the susp, not some other queued note");
+    TEST_EXPECT_EQ(b_got, 1, "B: the note dequeues");
+    TEST_ASSERT(b_consumed_is_susp,
+                "B: and the note CONSUMED is the one the peek named");
+    TEST_EXPECT_EQ(b_count, 0u, "B: the slot is RECLAIMED");
+    TEST_ASSERT(b_applied, "B: and the deferred stop applies");
+    TEST_EXPECT_EQ(b_stop, 1, "B: the guest is stopped");
+
+    // ---- LEG C -----------------------------------------------------------
+    TEST_EXPECT_EQ(c_visits, 1, "C: a masked ^Z");
+    TEST_EXPECT_EQ(c_armed, 1, "C: armed");
+    TEST_EXPECT_EQ(c_cont, 1, "C: a cont arrives");
+    TEST_EXPECT_EQ(c_disarmed, 0, "C: which disarmed it");
+    TEST_ASSERT(!c_applied,
+                "C: the deferred stop is DISCARDED -- superseded by the cont");
+    TEST_EXPECT_EQ(c_stop, 0, "C: the job is not stranded");
+
+    // ---- LEG D -----------------------------------------------------------
+    TEST_EXPECT_EQ(d_clean, 0u, "D: queue clean before the leg");
+    TEST_EXPECT_EQ(d_post, 0, "D: a susp is posted to a self-managing Proc");
+    TEST_EXPECT_EQ(d_count, 1u, "D precondition: it IS queued");
+    TEST_ASSERT(self_managed == NULL,
+                "D: the tail does NOT consume it -- devnotes_read owns it");
+    TEST_EXPECT_EQ(d_took, 0, "D: and the CONSUMER refuses it too");
+    TEST_EXPECT_EQ(d_remaining, 1u, "D: the note is still there for the fd");
 }
 
 // ---------------------------------------------------------------------------
