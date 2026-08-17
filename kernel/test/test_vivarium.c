@@ -3085,3 +3085,79 @@ void test_vivarium_dup3_domain(void) {
     TEST_EXPECT_EQ((int)vivarium_dup3_decide(0, NULL), (int)VIV_FORWARD,
                    "NULL cloexec_out -> FORWARD");
 }
+
+// The T2 fcntl SHELL's F_DUPFD errnos (found by the c8ab2744 close's L-6c legs).
+//
+// The decide half above is pure; this drives the arm that turns a decision into
+// an errno, because that is where the defect lived: handle_dup_posix folds
+// "no such fd" and "table full" into one -1, and the arm answered EMFILE for
+// both. busybox ash's redirect() probes the TARGET fd of every `N>&M` with
+// fcntl(N, F_DUPFD, 10) precisely to learn whether N is open -- EBADF means
+// "not open, nothing to save", ANY other errno is "strange" and aborts the
+// command. fd 3 is not open in the L-6c gate's shell, so every `3>&1` died with
+// `fcntl(3,F_DUPFD,10): No file descriptors available`, the command
+// substitution around it yielded "", and the two legs asserting an EMPTY
+// capture passed VACUOUSLY -- only the positive control (L6C-K) said no.
+//
+// Driven through viv_fcntl_for_test (the real arm, on a fresh Proc: no
+// exception frame, which the FCNTL case never reads).
+extern s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
+void test_vivarium_fcntl_dupfd_errnos(void);
+void test_vivarium_fcntl_dupfd_errnos(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+
+    // ---- POSITIVE CONTROL: a live fd dups at or above the minimum. ------
+    // Every negative below is an errno; a shell whose DUPFD arm was wired to
+    // nothing would answer them all with the same wrong number. This proves the
+    // arm reaches handle_dup_posix and honours the minimum first.
+    hidx_t live = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p);
+    s64 ctl = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, 10);
+
+    // ---- LEG A: F_DUPFD on a CLOSED fd is EBADF -- the ash probe. ---------
+    // fd 3 is closed in a fresh Proc (the control's source took slot 0 and its
+    // dup landed at or above 10); asserted, not assumed.
+    int a_closed = handle_get_cloexec(p, 3);
+    s64 a = viv_fcntl_for_test(p, 3, VIV_F_DUPFD, 10);
+    // The CLOEXEC spelling is the same op with the flag on -- same answer.
+    s64 a2 = viv_fcntl_for_test(p, 3, VIV_F_DUPFD_CLOEXEC, 10);
+
+    // ---- LEG B: F_DUPFD on a LIVE fd with a FULL table is EMFILE. ---------
+    // Fill every free slot, prove fullness two ways (the count and a live
+    // alloc now refused), then ask.
+    int filled = 0;
+    while (handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL) >= 0) filled++;
+    int b_count = handle_table_count(p->handles);
+    hidx_t b_refused = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    s64 b = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, 0);
+    // (Leg A had to run BEFORE the fill: full means every index is live, so
+    // no closed fd exists to probe afterwards.)
+
+    // ---- LEG C: a minimum at or past the table is EINVAL (Linux: RLIMIT). --
+    s64 c = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, (u64)PROC_HANDLE_MAX);
+
+    // ---- TEARDOWN, then assert. ---------------------------------------
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);                       // closes every straggler handle
+
+    TEST_ASSERT(live >= 0, "control precondition: a live fd was allocated");
+    TEST_ASSERT(ctl >= 10,
+                "CONTROL: F_DUPFD(live, 10) lands at or above 10 -- the arm is "
+                "wired and honours the minimum");
+    TEST_EXPECT_EQ(a_closed, -1, "A precondition: fd 3 is CLOSED");
+    TEST_EXPECT_EQ(a, -(s64)T_E_BADF,
+                   "A: F_DUPFD on a closed fd is EBADF -- ash's `N>&M` probe "
+                   "reads any other errno as fatal (pre-fix: EMFILE)");
+    TEST_EXPECT_EQ(a2, -(s64)T_E_BADF,
+                   "A: F_DUPFD_CLOEXEC on a closed fd is EBADF too");
+    TEST_ASSERT(filled > 0, "B precondition: the fill allocated something");
+    TEST_EXPECT_EQ(b_count, PROC_HANDLE_MAX, "B precondition: the table is FULL");
+    TEST_EXPECT_EQ(b_refused, -1, "B precondition: a live alloc is now refused");
+    TEST_EXPECT_EQ(b, -(s64)T_E_MFILE,
+                   "B: F_DUPFD on a LIVE fd with a full table is EMFILE -- the "
+                   "two errnos are DISTINCT (a fix that always said EBADF "
+                   "would fail here)");
+    TEST_EXPECT_EQ(c, -(s64)T_E_INVAL,
+                   "C: a minimum at the table size is EINVAL, not EMFILE");
+}

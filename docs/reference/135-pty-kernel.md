@@ -391,6 +391,23 @@ something between them can tell. Regression:
 asserts it takes the wrong note, so the leg cannot decay into a tautology if the two
 rules ever converge again.
 
+**The disposition gate is per note, inside both class scans (the c8ab2744 round, F1).**
+The stop consumer used to gate on `notes_proc_default_applies(p, NOTE_NAME_TTY_SUSP)`
+outside its scan — right for a one-row STOP class, but it mirrored a TERMINATE scan
+that had *no* per-Proc disposition gate at all: `notes_terminate_pending_name_locked`
+tested `handler_va` (always 0 for a Linux guest) and returned the first latch-class name
+at any index, so a phenotyped Proc whose `SIG_DFL` susp fell through from the phenotype
+branch could be `exits()`ed on a CAUGHT `tty:hup`/`interrupt` queued behind it. Both
+scans now gate every hit on `notes_proc_default_applies(p, name)`; per-note subsumes
+fixed-name, and the reader gate list of the peek and the consumer is again identical
+(self-managing, then the gated scan). Native behaviour is byte-identical. The consumer
+also no longer calls `notes_drain_intr_locked` after its pop: it pops only names whose
+`dfl` is STOP, for which `notes_name_terminate_latch` is 0 by construction, so the
+helper returned at its first line for every note this path can ever pop — the comment
+that kept it ("a future STOP-class addition") described a case the code could not
+reach (F3). Regression: `notes.class_scans_read_phenotype_sigtab` (see
+`145-vivarium.md`, "The class scans read the sigtab per note").
+
 Accumulation was **bounded but not harmless** before the fix: repeated `^Z` from the pts
 fan all share `(name, sender_pid=0)`, so once `q->count` reaches
 `NOTE_COALESCE_THRESHOLD` (12) further posts coalesce into the existing entry rather than

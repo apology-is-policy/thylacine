@@ -458,14 +458,67 @@ boundary, and an EMPTY record chain is the truthful report -- note delivery does
 not save Q0-Q31 (task #96), so an FPSIMD record would claim state that is not
 there.
 
-**Two deliberate delivery behaviours beyond "call the handler".** A `SIG_IGN`
+**Three deliberate delivery behaviours beyond "call the handler".** A `SIG_IGN`
 disposition drops a note that was already queued when the disposition changed
 (Linux discards pending signals on `SIG_IGN`; the V-6b post-time hook cannot
 catch one that arrived first), and a `SIG_DFL` whose Linux default is *ignore*
 (SIGCHLD/SIGWINCH/SIGCONT) is dropped rather than left in the ring -- a Linux
 guest has no notes fd, so nothing would ever consume it and the queue would
 fill. `SA_RESETHAND` is honoured: the disposition returns to `SIG_DFL` before
-the handler is entered.
+the handler is entered. And a `SIG_DFL` whose Linux default is *terminate*
+(SIGPIPE / SIGINT / SIGHUP / SIGQUIT -- `viv_signote_default_is_terminate`)
+`exits()` the Proc **from the phenotype branch itself**, on the candidate, with
+the note's canonical name, instead of falling through to the native uncaught
+arm. That arm scans for the *native* terminate latch, and the native `pipe`
+note has none (task #237, a Plan 9 ABI question this does not touch) -- so
+before the c8ab2744 round a `SIG_DFL` SIGPIPE was consumed by **no** arm: the
+terminate scan skipped it, the stop consumer skipped it, and "leave it queued
+for the fd reader" stranded it at the head of a queue no fd will ever read.
+It became the dispatcher candidate for the life of the guest; every later
+caught signal was blocked behind it, every later default-ignore note was never
+dropped, and (F1 below) every later caught terminate-class note killed the
+guest. Linux's answer -- SIG_DFL SIGPIPE terminates -- is not in doubt, so the
+phenotype answers it for its own Procs. The phenotype `wait4` folds a
+note-death into an EXITED status (#91), so `exits("pipe")` reads exactly as
+`exits("interrupt")` already did. Only the STOP default (`tty:susp`) still
+falls through, to the native branch's stop consumer. In-guest: the L-6c gate's
+`L6C-J` (`yes | head -n 1`, both ends writing into one fd-3 capture -- head its
+one line, the writer its stderr -- so the capture is EXACTLY `y`: an exec'd
+all-`SIG_DFL` binary is killed before its write returns; pre-fix it appended
+`yes: write error: Broken pipe` and lived), `L6C-K` (the positive control: a
+subshell writer that runs `trap "" PIPE` in its own process -- a fork does not
+inherit the sigtab and an exec resets it -- so the write RETURNS EPIPE and the
+builtin `echo` reports `write error` after the line, proving the capture can
+see a message when there is one) and `L6C-L` (K with the trap removed, one
+variable away: the capture is exactly head's line again). The script logs the
+raw K capture as `L6C-K-RAW:` for the errno text; that line is diagnostics. K
+earned its keep on its first boot: the capture itself was broken (the `fcntl`
+errno defect below), J and L passed vacuously on an empty capture, and K alone
+went red.
+
+**The class scans read the sigtab per note (the c8ab2744 round, F1).** The
+fall-through above (a `SIG_DFL` `tty:susp`, masked then unmasked) enters the
+native `handler_va == 0` branch, whose TERMINATE scan
+(`notes_terminate_pending_name_locked`) used to gate on `handler_va` alone and
+return the first latch-class name at ANY index. `handler_va` is always 0 for a
+Linux guest, so a CAUGHT `tty:hup` or `interrupt` queued behind the candidate
+was returned and the tail `exits()`ed a guest with its SIGHUP/SIGINT handler
+installed. Both class scans -- the terminate scan and the STOP index scan behind
+`notes_stop_dequeue_locked` -- now gate every hit on
+`notes_proc_default_applies(p, name)` (a native handler, a sigtab handler, or a
+sigtab `SIG_IGN` for THAT name each veto it); the fixed-name
+`notes_proc_default_applies(p, NOTE_NAME_TTY_SUSP)` gate that used to sit
+outside the stop scan is subsumed. Native Procs are byte-identical (the
+predicate is unconditionally true with no handler and no phenotype, and the
+arm is only reached with `handler_va == 0`). Regression:
+`notes.class_scans_read_phenotype_sigtab` -- positive control (phenotype,
+all-`SIG_DFL`, `[child_exit, tty:hup]` names the hup at index 1), then
+`[tty:susp, interrupt+handler]` (terminate scan NULL, the stop consumer takes
+the susp and the interrupt survives), the control's queue with SIGHUP caught
+(NULL), an interrupt queued under `SIG_DFL` and then `SIG_IGN`ed (NULL), the
+stop consumer with a SIGTSTP handler (declines; takes it once the row is
+`SIG_DFL` again), and the native control with the same table (names the
+interrupt -- the phenotype is the gate, not the table).
 
 **Proving it in-guest needed the one signal a v1.0 guest can raise.** `kill`,
 `tkill` and `clone` are not table rows, so a Linux guest can signal neither
@@ -2045,7 +2098,7 @@ native counterpart.
 | cmd | served | note |
 |---|---|---|
 | `F_GETFD` / `F_SETFD` | yes | `F_SETFD` **masks** `arg & FD_CLOEXEC` rather than validating — Linux ignores every other bit, and being *stricter* than Linux for an input a guest may legally send is its own mistranslation |
-| `F_DUPFD` / `F_DUPFD_CLOEXEC` | yes | `handle_dup_posix` — rights verbatim, lowest free slot ≥ `arg` |
+| `F_DUPFD` / `F_DUPFD_CLOEXEC` | yes | `handle_dup_posix` — rights verbatim, lowest free slot ≥ `arg`; closed fd → `EBADF`, table full → `EMFILE`, `arg` ≥ the table → `EINVAL` |
 | everything else | `ENOSYS` | not Linux's `EINVAL`: that claims the cmd is not a valid fcntl operation, which for `F_GETFL` or `F_SETLK` is false. `ENOSYS` says the surface is absent, which is true |
 
 `F_GETFD` and `F_DUPFD` join the two measured cmds because each is the exact
@@ -2057,6 +2110,27 @@ declining the other is an arbitrary edge for a guest to discover at runtime.
 out of the low range a user redirection could collide with. Returning the first
 free slot regardless would hand back fd 3 and break the guarantee the call was
 made to obtain — silently, and only under a redirection.
+
+**The errnos are load-bearing too, and were wrong until the c8ab2744 close.**
+`handle_dup_posix` folds "no such fd" and "table full" into one -1, and the arm
+answered `EMFILE` for both — on the argument that a guest which just used the
+fd knows it exists. That is backwards for the one shell that matters: busybox
+ash's `redirect()` probes the TARGET fd of every `N>&M` with
+`fcntl(N, F_DUPFD, 10)` precisely to learn whether N is open (`EBADF` — not
+open, nothing to save; anything else — "strange", and the whole command is
+aborted with `fcntl(N,F_DUPFD,10): <strerror>`). fd 3 is not open in a script
+shell, so every `3>&1` died — measured on the L-6c gate the moment a leg used
+one: the command substitution around it yielded "" and the two legs asserting an
+EMPTY stderr capture (`L6C-J`, `L6C-L`) passed *vacuously*; only the positive
+control (`L6C-K`) said no. The arm now re-checks liveness after a failed dup
+(the same lookup the `F_GETFD` arm uses): closed fd → `EBADF`; the residual
+(table full, a non-dup-able kind, a rights failure) → `EMFILE`. POSIX says
+exactly that. Regression `vivarium.fcntl_dupfd_errnos` (through
+`viv_fcntl_for_test`, the real T2 arm on a fresh Proc): control (a live fd dups
+at ≥ 10), a closed fd → `EBADF` for both spellings, a live fd with a FULL table
+→ `EMFILE` (proved full two ways first — so the two errnos are distinct and a
+fix that always said `EBADF` fails there), a minimum at the table size →
+`EINVAL`.
 
 ### `O_CLOEXEC` is now honoured for real
 

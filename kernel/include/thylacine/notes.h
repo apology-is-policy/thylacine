@@ -288,10 +288,13 @@ struct NoteQueue {
 // them like any note (bash/vim/tmux install SIGTSTP handlers; SIGWINCH is
 // routinely caught). Uncaught defaults: tty:quit / tty:hup TERMINATE (the
 // LS-5 interrupt pattern -- fires only with no handler + not self-managing
-// + unmasked); tty:susp STOPS (LIVE since PTY-1f: an UNCAUGHT susp is
-// CONSUMED by the default stop at post time -- proc_job_stop_pgrp sets
-// job_stop_req and never queues the note, so nothing stays pending across
-// the stop; only a CAUGHT one is queued); tty:winch /
+// + unmasked); tty:susp STOPS (LIVE since PTY-1f: when some thread has the
+// family unmasked and nothing catches it, proc_job_stop_pgrp applies the
+// stop at POST time and queues nothing; the susp is QUEUED when a handler
+// or self-management catches it, when EVERY thread masks the family (POSIX
+// pending -- the EL0 tail's stop consumer takes it once the mask lifts), or
+// when the Proc has no thread yet, and the tail's stop arm applies the
+// deferred default for the last two); tty:winch /
 // tty:cont are informational (queue for the fd-read path, no default
 // action -- the pipe/child_exit shape; cont's RESUME side effect is the
 // kernel stop-clear -- proc_job_cont_pgrp -- not a note disposition).
@@ -455,10 +458,14 @@ const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t);
 // disposition test goes through notes_proc_default_applies so a phenotyped
 // Proc's sigtab is consulted.
 //
-// A stop-class note is only ever QUEUED when the post-time fan (job_stop_cb)
-// found every thread masking the family and posted instead of stopping -- the
-// POSIX "a blocked stop signal becomes pending" case. This is where that
-// pending stop lands once the mask lifts.
+// A stop-class note is QUEUED whenever the post-time fan (job_stop_cb)
+// declined to apply the stop, and it posts on EVERY such reason: a handler or
+// self-management catches it, every thread masks the family (the POSIX "a
+// blocked stop signal becomes pending" case), or the Proc has no thread yet
+// (the spawn window). The reader gates plus the per-note disposition gate keep
+// the first out of this arm; this is where a pending stop lands once the mask
+// lifts, and where a spawn-window ^Z -- posted with susp_stop_armed set -- is
+// taken by the first thread's first EL0 return.
 //
 // PREDICATE ONLY, and NOT on the dispatcher's path -- the dispatcher calls
 // notes_stop_dequeue_locked below, which answers the same question and

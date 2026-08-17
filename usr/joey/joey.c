@@ -1222,6 +1222,46 @@ static int do_alpine_shell_gate(void) {
         L6C_MK("L6C-F-substitution"),
         L6C_MK("L6C-G-loop"),
         L6C_MK("L6C-H-nested-shell"),
+        // SIGPIPE under the Linux phenotype (the c8ab2744 round, F2). A
+        // SIG_DFL SIGPIPE must TERMINATE the writer -- Linux's default -- and
+        // it used to be consumed by NOTHING: the native `pipe` note carries no
+        // terminate latch (#237), so the phenotype fall-through into the
+        // native uncaught arm skipped it, and a Linux guest has no notes fd to
+        // read it with. It sat at the head of the queue for the life of the
+        // Proc, and every caught signal after it was stranded behind it.
+        //
+        // Three legs, one detector: each pipes a writer into `head -n 1`,
+        // and BOTH ends write into the same fd-3 capture -- head its one line,
+        // the writer its stderr -- so the capture proves the reader really
+        // read (the line is there) AND says whether the writer got to report
+        // the EPIPE (nothing after the line, or a message).
+        //   J  `yes | head` -- an exec'd binary, all-SIG_DFL: killed before
+        //      its write returns, so the capture is EXACTLY "y". Pre-fix it
+        //      printed "yes: write error: Broken pipe" after the y and lived.
+        //   K  the POSITIVE CONTROL: a subshell writer that runs `trap "" PIPE`
+        //      first (SIG_IGN lives in the writer's own sigtab -- a fork does
+        //      not inherit and an exec resets, so the trap has to be set in
+        //      the process that writes). Ignored, the write RETURNS EPIPE and
+        //      the builtin echo reports it -- which proves the fd-3 capture is
+        //      armed and can see a message when there is one, so J's bare "y"
+        //      is a killed writer and not a broken fixture. It earned its keep
+        //      on its first boot: the capture WAS broken (fcntl(3,F_DUPFD,10)
+        //      answered EMFILE for a closed fd and ash aborted every `3>&1`),
+        //      J and L passed vacuously on an empty capture, and K alone went
+        //      red -- see vivarium.fcntl_dupfd_errnos.
+        //   L  K with the trap removed -- ONE variable from K -- killed
+        //      silently, like J (the capture is exactly head's one line). K/L
+        //      pin that the DISPOSITION is what flips the outcome; J pins the
+        //      exec'd-binary shape users actually hit.
+        // The script also logs the raw K capture (L6C-K-RAW:) so the errno
+        // text is in the log; it is diagnostics, not a leg. head writes to fd 3
+        // rather than /dev/null because `>/dev/null` is an O_CREAT|O_TRUNC
+        // open under ash and O_CREAT is not yet a served openat flag (the
+        // interactive-container blocker list) -- a fixture must not lean on a
+        // known gap.
+        L6C_MK("L6C-J-sigpipe-kills-silently"),
+        L6C_MK("L6C-K-sigign-epipe-message"),
+        L6C_MK("L6C-L-dfl-writer-killed-silently"),
         L6C_MK("L6C-I-exitcode="),
         // DISTRO D-2. The rootfs's OWN /lib/ld-musl-aarch64.so.1 -- a stock,
         // unmodified, foreign ET_DYN PIE -- exec'd with no arguments. Reaching

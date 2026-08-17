@@ -443,6 +443,23 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
 
 **Landed (newest first, 2026-08-17 back to aux#240):**
 
+- *(pending)* -- the `c8ab2744` audit close (Fable 5 round: 0 P0 / 1 P1 / 1 P2 /
+  2 P3, ALL pre-existing three lines above the audited arm). F1 [P1]: both
+  class scans (terminate + STOP) now gate every hit per note on
+  `notes_proc_default_applies(p, name)` -- the terminate scan was phenotype-
+  blind and any-index, so a Linux guest died of a CAUGHT `tty:hup`/`interrupt`
+  queued behind a `SIG_DFL` candidate. F2 [P2]: a `SIG_DFL` `pipe` on
+  PHENO_LINUX was consumed by NO arm (no native latch, #237) and sat as the
+  dispatcher candidate for life; the phenotype branch now `exits()` on a
+  `SIG_DFL` terminate-default candidate (`viv_signote_default_is_terminate`).
+  F3: the consumer's dead drain call deleted; F4: three "never queued"
+  contract sentences reworded. Unit `notes.class_scans_read_phenotype_sigtab`
+  + L-6c legs J/K/L -- whose POSITIVE CONTROL (K) caught a second bug on its
+  first boot: viv `fcntl(F_DUPFD)` answered EMFILE for a CLOSED fd, ash's
+  `N>&M` probe aborted every `3>&1`, and J/L passed vacuously on an empty
+  capture. Fixed (EBADF/EMFILE split; `vivarium.fcntl_dupfd_errnos`).
+- `4525023a` -- the change-of-watch pair + Stop hook + launcher imported from
+  main (aux's first self-compaction followed).
 - `11173762` -- LS-CI failure-time state probe (`::lc_fail_probe`); pty-4 arms
   it so its next burned retry says INPUT vs OUTPUT vs lost-^Z from the log.
 - `3a7f50f1` -- `mask note 'tty:*'` masked NOTHING (parser had no tty arm);
@@ -460,19 +477,16 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
 
 **Open, in order:**
 
-1. **The prosecutor round on `c8ab2744`** -- IN FLIGHT 2026-08-17 (spawned with
-   the operator's yes; self-audit arms clean, one P3 comment nit queued for the
-   close: notes.c:943 says the drain helper "acts only on `interrupt`" -- it is
-   per-class since PTY-1b).
-2. **The tail's delivery-time SIG_IGN discard arm is reached by nothing** --
+1. **The tail's delivery-time SIG_IGN discard arm is reached by nothing** --
    the second unconstructed state found by sweeping for the class
-   (`bug_delivery_time_sigign_discard_uncovered.md`); its own chunk, after the
-   round closes (same file).
-3. **pty-4's burned retry** -- instrumented, not diagnosed; wait for the next
+   (`bug_delivery_time_sigign_discard_uncovered.md`); its own chunk (same
+   file as the close above).
+2. **pty-4's burned retry** -- instrumented, not diagnosed; wait for the next
    miss and read `build/ls-ci-pty-4.attemptN.steps`.
-4. **The bar for the push**: SMP gate + LS-CI have NOT been re-run since
-   `26a678a8` (the two code commits since are a test restructure and a
-   shell-parser change); run once after the audit close, then push.
+3. **#237 stays open and is now sharper**: the phenotype answers SIG_DFL
+   SIGPIPE for its own Procs; the NATIVE `pipe` note still carries no latch,
+   so a native program that writes to a closed pipe with no handler and no fd
+   reader keeps a stranded `pipe` note -- a Plan 9 ABI decision (signoff).
 
 ---
 

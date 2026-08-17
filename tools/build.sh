@@ -1137,6 +1137,10 @@ echo L6C-A-shell-runs
 sub=$(/bin/busybox echo captured); [ "$sub" = captured ] && echo L6C-F-substitution
 i=0; for w in a b c; do i=$(/bin/busybox expr $i + 1); done; [ "$i" = 3 ] && echo L6C-G-loop
 /bin/busybox sh -c '/bin/busybox echo nested' && echo L6C-H-nested-shell
+err=$( { /bin/busybox yes 2>&3 | /bin/busybox head -n 1 >&3; } 3>&1 ); [ "$err" = y ] && echo L6C-J-sigpipe-kills-silently
+err2=$( { { trap "" PIPE; i=0; while [ $i -lt 4000 ]; do echo yyyyyyyyyyyyyyyy || break; i=$((i+1)); done; } 2>&3 | /bin/busybox head -n 1 >&3; } 3>&1 ); case "$err2" in *"write error"*) echo L6C-K-sigign-epipe-message ;; esac
+echo L6C-K-RAW:$err2
+err3=$( { { i=0; while [ $i -lt 4000 ]; do echo yyyyyyyyyyyyyyyy || break; i=$((i+1)); done; } 2>&3 | /bin/busybox head -n 1 >&3; } 3>&1 ); [ "$err3" = yyyyyyyyyyyyyyyy ] && echo L6C-L-dfl-writer-killed-silently
 /bin/busybox false; echo L6C-I-exitcode=$?
 echo D2-LDSO-BEGIN
 /lib/ld-musl-aarch64.so.1 2>&1

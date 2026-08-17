@@ -10446,11 +10446,25 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             // decide because PROC_HANDLE_MAX is a fact about the handle table.
             if (min_fd >= (u64)PROC_HANDLE_MAX)      return -(s64)T_E_INVAL;
             hidx_t nfd = handle_dup_posix(p, fd, (hidx_t)min_fd, cloexec);
-            // handle_dup_posix folds "no such fd" and "table full" into one -1,
-            // and EMFILE is the more useful of the two to a shell: a guest that
-            // just used this fd knows it exists, and EBADF would send it looking
-            // for a bug it does not have.
-            if (nfd < 0)                             return -(s64)T_E_MFILE;
+            // handle_dup_posix folds "no such fd" and "table full" into one -1;
+            // split them here, because the two errnos are LOAD-BEARING to a
+            // shell and not interchangeable. This used to answer EMFILE for
+            // both, on the argument that a guest which just used the fd knows
+            // it exists -- but busybox ash's redirect() probes the TARGET fd of
+            // every `N>&M` with fcntl(N, F_DUPFD, 10) precisely to learn
+            // whether N is open: EBADF means "not open, nothing to save", and
+            // ANY other errno is "strange" and aborts the command
+            // (`fcntl(3,F_DUPFD,10): No file descriptors available`, once per
+            // `3>&1` in the L-6c gate). POSIX: closed fd -> EBADF; table full
+            // -> EMFILE. The liveness re-check is the same lookup the GETFD arm
+            // uses; the residual -1 set (table full, a non-dup-able kind, a
+            // rights failure) stays EMFILE. A peer closing the fd between the
+            // dup and this lookup misreports one errno -- unreachable for a
+            // single-threaded phenotype Proc, and harmless if it were not.
+            if (nfd < 0) {
+                if (handle_get_cloexec(p, fd) < 0)  return -(s64)T_E_BADF;
+                return -(s64)T_E_MFILE;
+            }
             return (s64)nfd;
         }
         default:
@@ -11124,6 +11138,18 @@ static void viv_trace_call(u64 nr, struct Proc *p) {
     uart_puts("\n");
 }
 #endif
+
+// Test support (the burrow_*_for_test convention): drive the T2 fcntl arm on a
+// caller-supplied Proc with no exception frame. Deliberately absent from the
+// header; the harness extern-declares it. Safe ONLY because the FCNTL case
+// reads `p` and `args` and never touches ctx -- a hook that handed a NULL frame
+// to the arms that measure user memory (openat, the stat family) would fault,
+// so this is not a general T2 driver and must not grow into one.
+s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
+s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg) {
+    u64 args[VIV_NARGS] = { fd, cmd, arg, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_FCNTL, args);
+}
 
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
 #if VIV_TRACE

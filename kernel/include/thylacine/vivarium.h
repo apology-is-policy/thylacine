@@ -915,6 +915,25 @@ u64 viv_signote_to_signal(enum viv_signote note);
 // (task #15)". 434c3fd9 built that arm; the premise is discharged.)
 bool viv_signote_default_is_ignore(enum viv_signote note);
 
+// Is this note's LINUX default action "terminate"? PURE. SIGPIPE, SIGINT,
+// SIGHUP, SIGQUIT -- the catchable terminate-default signals a note carries.
+//
+// The phenotype branch of the EL0 tail acts on this for a SIG_DFL candidate
+// instead of falling through to the native uncaught arm, because that arm is
+// keyed on the NATIVE terminate latch, and the native `pipe` note has none
+// (task #237, a Plan 9 ABI question). A Linux guest has no notes fd, so a
+// SIG_DFL SIGPIPE nothing acts on becomes the queue head forever: every later
+// caught signal is stranded behind it and every later default-ignore note is
+// never dropped. Linux's answer is not in doubt -- SIG_DFL SIGPIPE terminates
+// -- so the phenotype answers it for its own Procs and leaves the native
+// question where it is.
+//
+// SIGKILL terminates too but is answered by the dispatcher's kill branch before
+// any disposition is read (non-catchable, and vivarium_sigaction_decide refuses
+// it a sigtab row); SIGTSTP stops (the STOP arm consumes it); the three
+// `default_is_ignore` rows are dropped; the snare:* rows never reach a queue.
+bool viv_signote_default_is_terminate(enum viv_signote note);
+
 // Per-Proc signal disposition. Lazily allocated on a Proc's first translatable
 // `rt_sigaction`; freed at proc_free. NOT inherited across rfork -- the
 // `handler_va` precedent (notes.h F13), and the POSIX-exec rule agrees for

@@ -298,9 +298,13 @@ static int notes_find_locked(struct NoteQueue *q, const char *name,
 // PTY-1b: the terminate class -- names whose UNCAUGHT default disposition
 // is process termination at the EL0-return tail (the LS-5 interrupt pattern
 // generalized: interrupt == SIGINT, tty:quit == SIGQUIT, tty:hup == SIGHUP).
-// tty:susp's default is STOP, applied at POST time by proc_job_stop_pgrp
-// (PTY-1f) -- an uncaught susp never reaches a queue, so it deliberately has
-// NO latch here -- and tty:winch /
+// tty:susp's default is STOP -- applied at POST time by proc_job_stop_pgrp
+// (PTY-1f) when a thread has the family unmasked, or by the EL0 tail's stop
+// consumer when the note had to be QUEUED (every thread masked, or no thread
+// yet). Either way it deliberately has NO latch here: the latch is the
+// TERMINATE class's lock-free die predicate (it turns every sleep into
+// SLEEP_INTR so the Proc reaches the tail and dies), and a STOP has nothing
+// to say to a sleeper -- and tty:winch /
 // tty:cont are informational (queue for the fd-read path, no default
 // action -- the pipe/child_exit shape). Returns the class's LATCH flag
 // (PROC_FLAG_INTR_TERMINATE_PENDING for interrupt,
@@ -817,14 +821,28 @@ __attribute__((noreturn)) extern void exits(const char *msg);
 // masked family's note is NOT deliverable (the program chose to defer it),
 // per-family: a thread that masked interrupts still terminates on an
 // unmasked tty:hup, and vice versa.
-static const char *notes_terminate_pending_name_locked(struct NoteQueue *q,
+//
+// Every hit is ALSO gated per note on notes_proc_default_applies. The class
+// test is a table lookup -- "this NAME's uncaught default is terminate" --
+// but whether the default applies is a per-Proc, per-note question, and for
+// a phenotyped Proc the answer lives in its sigtab: a Linux guest never calls
+// SYS_NOTIFY, so `handler_va` is 0 whatever it installed. Without the gate,
+// a SIG_DFL candidate that fell through from the phenotype branch (a masked-
+// then-unmasked tty:susp) let this scan return a CAUGHT tty:hup or interrupt
+// queued behind it, and the tail exits()ed a guest with its SIGHUP/SIGINT
+// handler installed. Native Procs are byte-identical: with no handler and no
+// phenotype the predicate is unconditionally true, and the arm is only reached
+// with handler_va == 0.
+static const char *notes_terminate_pending_name_locked(struct Proc *p,
                                                        struct Thread *t) {
+    struct NoteQueue *q = p->notes;
     u32 mask = (t != NULL) ? t->note_mask : 0u;
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         const char *name = q->ring[idx].name;
         if (notes_name_terminate_latch(name) != 0 &&
-            (mask & (1u << (u32)notes_name_to_bit(name))) == 0)
+            (mask & (1u << (u32)notes_name_to_bit(name))) == 0 &&
+            notes_proc_default_applies(p, name))
             return notes_canonical_name_ptr(name);
         idx = (idx + 1) % NOTE_QUEUE_DEPTH;
     }
@@ -851,12 +869,13 @@ int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t) {
 // acquire pairs with SYS_NOTIFY's release, F9), and a self-managing Proc
 // consumes its own notes -- neither ever default-terminates. The tail
 // passes the returned canonical name to exits() so the exit_msg reports
-// WHICH signal terminated the Proc.
+// WHICH signal terminated the Proc. The per-note disposition (a phenotype
+// sigtab handler or SIG_IGN for THAT name) is applied inside the scan.
 const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t) {
     if (!p || !p->notes) return NULL;
     if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0) return NULL;
     if (proc_is_self_managing_notes(p)) return NULL;
-    return notes_terminate_pending_name_locked(p->notes, t);
+    return notes_terminate_pending_name_locked(p, t);
 }
 
 // The STOP-class twin of the scanner above (round-2 F2). Same shape, reading
@@ -871,24 +890,33 @@ const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t) {
 // correctly while popping (and discarding into an unread stack local) the
 // child_exit, leaving the tty:susp queued to re-fire. A decision and its
 // consumption written as two scans are two predicates; one index is one.
-static int notes_stop_pending_idx_locked(struct NoteQueue *q,
-                                         struct Thread *t) {
+//
+// The disposition gate is per NOTE, inside the scan, for the reason spelled
+// out at notes_terminate_pending_name_locked. It used to be a fixed-name
+// gate outside the scan (`notes_proc_default_applies(p, NOTE_NAME_TTY_SUSP)`,
+// mirroring the one-row STOP class); per-note subsumes fixed-name, and a
+// second STOP-class row would otherwise be gated on the first row's sigtab
+// entry.
+static int notes_stop_pending_idx_locked(struct Proc *p, struct Thread *t) {
+    struct NoteQueue *q = p->notes;
     u32 mask = (t != NULL) ? t->note_mask : 0u;
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         const char *name = q->ring[idx].name;
         if (notes_default_action(name) == NOTE_DFL_STOP &&
-            (mask & (1u << (u32)notes_name_to_bit(name))) == 0)
+            (mask & (1u << (u32)notes_name_to_bit(name))) == 0 &&
+            notes_proc_default_applies(p, name))
             return (int)idx;
         idx = (idx + 1) % NOTE_QUEUE_DEPTH;
     }
     return -1;
 }
 
-static const char *notes_stop_pending_name_locked(struct NoteQueue *q,
+static const char *notes_stop_pending_name_locked(struct Proc *p,
                                                   struct Thread *t) {
-    int idx = notes_stop_pending_idx_locked(q, t);
-    return (idx < 0) ? NULL : notes_canonical_name_ptr(q->ring[idx].name);
+    int idx = notes_stop_pending_idx_locked(p, t);
+    return (idx < 0) ? NULL
+                     : notes_canonical_name_ptr(p->notes->ring[idx].name);
 }
 
 // The STOP-class twin of notes_terminate_note_name_locked (round-2 F2): the
@@ -903,16 +931,16 @@ static const char *notes_stop_pending_name_locked(struct NoteQueue *q,
 //
 // The disposition gate goes through the shared predicate, not a bare
 // handler_va load, for the reason spelled out at proc_tty_susp_would_stop_-
-// locked: a phenotyped Proc keeps its disposition in the sigtab.
+// locked: a phenotyped Proc keeps its disposition in the sigtab. It is
+// applied per note INSIDE the scan (see notes_stop_pending_idx_locked).
 //
 // Non-static + header-declared for the same reason as the terminate twin --
 // the dispatcher takes no Thread argument (it reads current_thread()), so a
 // unit test can only drive this decision directly.
 const char *notes_stop_note_name_locked(struct Proc *p, struct Thread *t) {
     if (!p || !p->notes) return NULL;
-    if (!notes_proc_default_applies(p, NOTE_NAME_TTY_SUSP)) return NULL;
     if (proc_is_self_managing_notes(p)) return NULL;
-    return notes_stop_pending_name_locked(p->notes, t);
+    return notes_stop_pending_name_locked(p, t);
 }
 
 // The dispatcher's stop consumer: decide and consume in ONE call, sharing the
@@ -933,17 +961,18 @@ const char *notes_stop_note_name_locked(struct Proc *p, struct Thread *t) {
 int notes_stop_dequeue_locked(struct Proc *p, struct Thread *t,
                               struct Note *out) {
     if (!p || !p->notes || !out) return 0;
-    if (!notes_proc_default_applies(p, NOTE_NAME_TTY_SUSP)) return 0;
     if (proc_is_self_managing_notes(p)) return 0;
     struct NoteQueue *q = p->notes;
-    int idx = notes_stop_pending_idx_locked(q, t);
+    int idx = notes_stop_pending_idx_locked(p, t);
     if (idx < 0) return 0;
     *out = q->ring[idx];
     notes_pop_at_locked(q, (u32)idx);
-    // A no-op for every STOP-class name today (the helper acts only on
-    // `interrupt`), kept so a future STOP-class addition cannot skip the
-    // latch bookkeeping every other pop site performs.
-    notes_drain_intr_locked(p, q, out);
+    // No terminate-latch bookkeeping here, BY CONSTRUCTION rather than by
+    // omission: this pops only names whose `dfl` is STOP, and
+    // notes_name_terminate_latch is 0 for every such name (it answers 0 unless
+    // `dfl` is TERMINATE), so notes_drain_intr_locked would return at its first
+    // line for any note this can ever pop -- present or future. The other pop
+    // sites call it because THEY can pop a terminate-class note.
     return 1;
 }
 
@@ -1346,11 +1375,33 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
             notes_deliver_linux_locked(ctx, p, t, q, sn, &act);
             return;                     // the helper owns the unlock either way
         }
-        // Otherwise SIG_DFL with a default that ACTS -- terminate or stop.
-        // Fall through to the handler_va == 0 branch below, which carries both
-        // arms. (This used to say "with a terminating default", which was a
-        // false case analysis: tty:susp's default is STOP, so the fall-through
-        // hit the terminate check, missed, and left the note queued forever --
+
+        // SIG_DFL with a TERMINATING Linux default: act here, on the
+        // candidate, with the Linux table -- not by falling through to the
+        // native uncaught arm. That arm scans for the native terminate LATCH,
+        // and `pipe` has none (#237, a native-ABI question this does not
+        // touch): a SIG_DFL SIGPIPE fell through, the terminate scan skipped
+        // it, the stop consumer skipped it, and "leave it queued for the fd
+        // reader" stranded it at the head of a queue no fd will ever read --
+        // every later caught signal blocked behind it for the life of the
+        // guest. Linux terminates; so does this. exits() with the canonical
+        // .rodata name, the same way the native arm reports interrupt/hup/quit
+        // (the phenotype wait4 folds a note-death into an EXITED status, so
+        // "pipe" reads exactly as "interrupt" already does). The lock is
+        // dropped first; the note stays in the about-to-be-freed queue.
+        if (viv_signote_default_is_terminate(sn)) {
+            // sn decoded from a canonical literal, so the lookup cannot miss;
+            // the "unknown" arm is the F10 convention, not a reachable case.
+            const char *tname = notes_canonical_name_ptr(candidate.name);
+            spin_unlock(&q->lock);
+            exits(tname ? tname : "unknown");
+            // unreachable
+        }
+        // Otherwise SIG_DFL with a default that STOPS (tty:susp). Fall through
+        // to the handler_va == 0 branch below, whose stop arm consumes it.
+        // (This used to say "with a terminating default", which was a false
+        // case analysis: tty:susp's default is STOP, so the fall-through hit
+        // the terminate check, missed, and left the note queued forever --
         // round-2 F2.)
     }
 

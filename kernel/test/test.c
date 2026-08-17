@@ -557,6 +557,7 @@ void test_notes_ndflt_stop_discarded_after_cont(void); // #240
 void test_notes_susp_gate_reads_phenotype_sigtab(void); // #251
 void test_notes_masked_susp_stops_at_delivery(void);   // #252
 void test_notes_stop_dequeue_picks_its_own_note(void);  // the class-blind pop
+void test_notes_class_scans_read_phenotype_sigtab(void); // c8ab2744 F1
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
@@ -702,6 +703,7 @@ void test_vivarium_wait4_domain(void);                   // LINEAGE L-6b
 void test_vivarium_startup_batch_rows(void);             // #150 (LINEAGE L-6c)
 void test_vivarium_writev_domain(void);                  // #150
 void test_vivarium_fcntl_domain(void);                   // #151
+void test_vivarium_fcntl_dupfd_errnos(void);            // c8ab2744 close: EBADF vs EMFILE
 void test_vivarium_pipe2_domain(void);
 void test_vivarium_dup3_domain(void);    // #157
 void test_vivarium_uname_fill(void);                     // #150
@@ -2143,6 +2145,7 @@ struct test_case g_tests[] = {
     { "notes.susp_gate_reads_phenotype_sigtab", test_notes_susp_gate_reads_phenotype_sigtab, false, NULL },
     { "notes.masked_susp_stops_at_delivery", test_notes_masked_susp_stops_at_delivery, false, NULL },
     { "notes.stop_dequeue_picks_its_own_note", test_notes_stop_dequeue_picks_its_own_note, false, NULL },
+    { "notes.class_scans_read_phenotype_sigtab", test_notes_class_scans_read_phenotype_sigtab, false, NULL },
     { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
     { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },
@@ -2307,6 +2310,7 @@ struct test_case g_tests[] = {
     { "vivarium.startup_batch_rows",     test_vivarium_startup_batch_rows,     false, NULL },
     { "vivarium.writev_domain",          test_vivarium_writev_domain,          false, NULL },
     { "vivarium.fcntl_domain",           test_vivarium_fcntl_domain,           false, NULL },
+    { "vivarium.fcntl_dupfd_errnos",     test_vivarium_fcntl_dupfd_errnos,     false, NULL },
     { "vivarium.dup3_domain",          test_vivarium_dup3_domain,          false, NULL },
     { "vivarium.pipe2_domain",           test_vivarium_pipe2_domain,           false, NULL },
     { "vivarium.uname_fill",             test_vivarium_uname_fill,             false, NULL },

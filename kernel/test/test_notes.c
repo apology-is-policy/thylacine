@@ -85,6 +85,7 @@ void test_notes_ndflt_stop_discarded_after_cont(void);
 void test_notes_susp_gate_reads_phenotype_sigtab(void);   // #251
 void test_notes_masked_susp_stops_at_delivery(void);      // #252
 void test_notes_stop_dequeue_picks_its_own_note(void);     // the class-blind pop
+void test_notes_class_scans_read_phenotype_sigtab(void);   // c8ab2744 F1
 void test_notes_self_kill_through_full_ring(void);        // aux#253
 
 // ---------------------------------------------------------------------------
@@ -2063,4 +2064,252 @@ void test_notes_stop_dequeue_picks_its_own_note(void) {
     TEST_EXPECT_EQ(surv_got, 1, "B: the survivor dequeues");
     TEST_ASSERT(b_surv_is_child,
                 "B: the child_exit SURVIVED -- it was never the stop's to eat");
+}
+
+// ---------------------------------------------------------------------------
+// class_scans_read_phenotype_sigtab (the c8ab2744 round, F1)
+// ---------------------------------------------------------------------------
+//
+// The two class scans behind the EL0 tail's uncaught arms -- the TERMINATE
+// scan (notes_terminate_note_name_locked) and the STOP scan behind
+// notes_stop_dequeue_locked -- answer "is a note of this class deliverable to
+// this thread?" at ANY index. The class is a table fact; whether the DEFAULT
+// applies is a per-Proc, per-note fact, and for a phenotyped Proc it lives in
+// the sigtab, not in handler_va (a Linux guest never calls SYS_NOTIFY). The
+// terminate scan gated on handler_va only, so on PHENO_LINUX a CAUGHT tty:hup
+// or interrupt queued behind a SIG_DFL candidate was returned, and the tail
+// exits()ed a guest with its handler installed. #251 put the per-Proc
+// disposition on the post-time decider and on the stop predicates, and not
+// here -- the fix that exists on site N stops you asking about site N+1.
+//
+// The scans are driven directly (they take a Thread; the dispatcher reads
+// current_thread()). No Proc is linked and nothing is stopped, so the fixture
+// is the unlinked one linux_sigign_discard uses. Observations first, one
+// teardown, assertions last.
+void test_notes_class_scans_read_phenotype_sigtab(void) {
+    struct Proc *m = proc_alloc();
+    struct viv_sigtab *tab = (m != NULL)
+        ? (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0) : NULL;
+    if (m == NULL || tab == NULL) {
+        if (m) { m->state = PROC_STATE_ZOMBIE; proc_free(m); }
+        TEST_ASSERT(false, "proc_alloc m + sigtab alloc");
+        return;
+    }
+    m->sigtab     = tab;                // freed by proc_free
+    m->handler_va = 0u;                 // the native axis stays silent
+    m->phenotype  = PHENO_LINUX;
+
+    static struct Thread th;
+    th.magic             = THREAD_MAGIC;
+    th.next_in_proc      = NULL;
+    th.rendez_blocked_on = NULL;
+    th.proc              = m;
+    th.note_mask         = 0;           // UNMASKED: every leg reaches the
+                                        // disposition question
+    const struct viv_ksigaction dfl  = { .handler = VIV_SIG_DFL, .flags = 0,
+                                         .restorer = 0, .mask = 0 };
+    const struct viv_ksigaction hand = { .handler = 0x4000u, .flags = 0,
+                                         .restorer = 0, .mask = 0 };
+    const struct viv_ksigaction ign  = { .handler = VIV_SIG_IGN, .flags = 0,
+                                         .restorer = 0, .mask = 0 };
+
+    // ---- POSITIVE CONTROL: phenotype + all-SIG_DFL, [child_exit, tty:hup]
+    // -> the scan names the hup, at index 1. Every negative leg below expects
+    // NULL, and a scan that always answered NULL would satisfy all of them;
+    // this is one sigtab row away from leg B and proves the scan reaches a
+    // terminate decision at all, past a leading note of another class.
+    int  ctl_post_child = notes_post(m, NOTE_NAME_CHILD_EXIT, 1u, NULL, true);
+    int  ctl_post_hup   = notes_post(m, NOTE_NAME_TTY_HUP, 0u, NULL, true);
+    u32  ctl_count      = m->notes->count;
+    spin_lock(&m->notes->lock);
+    const char *ctl_name = notes_terminate_note_name_locked(m, &th);
+    spin_unlock(&m->notes->lock);
+    bool ctl_is_hup = susp_name_is(ctl_name, NOTE_NAME_TTY_HUP);
+    spin_lock(&m->notes->lock);
+    while (m->notes->count > 0) {
+        struct Note drain;
+        notes_dequeue_locked(m, NULL, &drain);
+    }
+    spin_unlock(&m->notes->lock);
+
+    // ---- LEG A: [tty:susp SIG_DFL, interrupt HANDLER] -- the deferred-^Z
+    // shape. The terminate scan must NOT name the caught interrupt, and the
+    // stop consumer must take the susp (index 0) and leave the interrupt for
+    // the phenotype delivery path. Pre-fix: the guest died of "interrupt"
+    // with a SIGINT handler installed.
+    bool a_set        = viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &hand);
+    int  a_post_susp  = notes_post(m, NOTE_NAME_TTY_SUSP, 0u, NULL, true);
+    int  a_post_int   = notes_post(m, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    u32  a_count      = m->notes->count;
+    spin_lock(&m->notes->lock);
+    const char *a_name = notes_terminate_note_name_locked(m, &th);
+    spin_unlock(&m->notes->lock);
+    struct Note a_taken = { 0 };
+    spin_lock(&m->notes->lock);
+    int  a_got = notes_stop_dequeue_locked(m, &th, &a_taken);
+    spin_unlock(&m->notes->lock);
+    bool a_took_susp = (a_got == 1) &&
+                       susp_name_is(a_taken.name, NOTE_NAME_TTY_SUSP);
+    struct Note a_surv = { 0 };
+    spin_lock(&m->notes->lock);
+    int  a_surv_got = notes_dequeue_locked(m, NULL, &a_surv);
+    spin_unlock(&m->notes->lock);
+    bool a_surv_is_int = (a_surv_got == 1) &&
+                         susp_name_is(a_surv.name, NOTE_NAME_INTERRUPT);
+    u32  a_left = m->notes->count;
+
+    // ---- LEG B: the CONTROL's queue with ONE row changed -- SIGHUP caught.
+    bool b_set        = viv_sigtab_set(tab, VIV_SIGNOTE_TTY_HUP, &hand);
+    int  b_post_child = notes_post(m, NOTE_NAME_CHILD_EXIT, 1u, NULL, true);
+    int  b_post_hup   = notes_post(m, NOTE_NAME_TTY_HUP, 0u, NULL, true);
+    u32  b_count      = m->notes->count;
+    spin_lock(&m->notes->lock);
+    const char *b_name = notes_terminate_note_name_locked(m, &th);
+    spin_unlock(&m->notes->lock);
+    spin_lock(&m->notes->lock);
+    while (m->notes->count > 0) {
+        struct Note drain;
+        notes_dequeue_locked(m, NULL, &drain);
+    }
+    spin_unlock(&m->notes->lock);
+    bool b_reset = viv_sigtab_set(tab, VIV_SIGNOTE_TTY_HUP, &dfl);
+
+    // ---- LEG C: an interrupt queued under SIG_DFL, then SIG_IGN installed.
+    // notes_post's V-6b discard cannot see it (it ran before the install);
+    // Linux discards a pending signal when its disposition becomes SIG_IGN,
+    // and the scan must not terminate the guest on a signal it now ignores.
+    bool c_dfl        = viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &dfl);
+    int  c_post_child = notes_post(m, NOTE_NAME_CHILD_EXIT, 1u, NULL, true);
+    int  c_post_int   = notes_post(m, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    u32  c_count      = m->notes->count;
+    spin_lock(&m->notes->lock);
+    const char *c_name_before = notes_terminate_note_name_locked(m, &th);
+    spin_unlock(&m->notes->lock);
+    bool c_before_is_int = susp_name_is(c_name_before, NOTE_NAME_INTERRUPT);
+    bool c_ign        = viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &ign);
+    spin_lock(&m->notes->lock);
+    const char *c_name_after = notes_terminate_note_name_locked(m, &th);
+    spin_unlock(&m->notes->lock);
+    spin_lock(&m->notes->lock);
+    while (m->notes->count > 0) {
+        struct Note drain;
+        notes_dequeue_locked(m, NULL, &drain);
+    }
+    spin_unlock(&m->notes->lock);
+
+    // ---- LEG D: the STOP scan's per-note gate. [tty:susp] with a SIGTSTP
+    // handler: the predicate and the consumer both decline (the phenotype
+    // delivery path owns it); flip the row to SIG_DFL and the consumer takes
+    // it. Before this round the gate was a fixed-name test outside the scan;
+    // it is now per note inside it, and this leg is what a future edit that
+    // drops it reddens.
+    bool d_hand       = viv_sigtab_set(tab, VIV_SIGNOTE_TTY_SUSP, &hand);
+    int  d_post       = notes_post(m, NOTE_NAME_TTY_SUSP, 0u, NULL, true);
+    u32  d_count      = m->notes->count;
+    spin_lock(&m->notes->lock);
+    const char *d_name = notes_stop_note_name_locked(m, &th);
+    spin_unlock(&m->notes->lock);
+    struct Note d_refused = { 0 };
+    spin_lock(&m->notes->lock);
+    int  d_took = notes_stop_dequeue_locked(m, &th, &d_refused);
+    spin_unlock(&m->notes->lock);
+    u32  d_kept = m->notes->count;
+    bool d_dfl        = viv_sigtab_set(tab, VIV_SIGNOTE_TTY_SUSP, &dfl);
+    struct Note d_taken = { 0 };
+    spin_lock(&m->notes->lock);
+    int  d_took_dfl = notes_stop_dequeue_locked(m, &th, &d_taken);
+    spin_unlock(&m->notes->lock);
+    bool d_taken_susp = (d_took_dfl == 1) &&
+                        susp_name_is(d_taken.name, NOTE_NAME_TTY_SUSP);
+    u32  d_left = m->notes->count;
+
+    // ---- LEG E: NATIVE with the SAME table (SIGINT still SIG_IGN, SIGHUP
+    // handler re-armed) names the interrupt. The phenotype is the gate, not
+    // the presence of a table: a fix that consulted the table unconditionally
+    // would pass A-D while changing native behaviour.
+    bool e_hand       = viv_sigtab_set(tab, VIV_SIGNOTE_TTY_HUP, &hand);
+    m->phenotype = PHENO_NATIVE;
+    int  e_post_child = notes_post(m, NOTE_NAME_CHILD_EXIT, 1u, NULL, true);
+    int  e_post_int   = notes_post(m, NOTE_NAME_INTERRUPT, 0u, NULL, true);
+    u32  e_count      = m->notes->count;
+    spin_lock(&m->notes->lock);
+    const char *e_name = notes_terminate_note_name_locked(m, &th);
+    spin_unlock(&m->notes->lock);
+    bool e_is_int = susp_name_is(e_name, NOTE_NAME_INTERRUPT);
+    bool e_ign_still = viv_sigtab_note_ignored(tab, VIV_SIGNOTE_INTERRUPT);
+
+    // ---- TEARDOWN, unconditionally, before the first assertion. ---------
+    m->threads = NULL;
+    m->state = PROC_STATE_ZOMBIE;
+    proc_free(m);                       // frees the sigtab too
+
+    // ---- CONTROL ---------------------------------------------------------
+    TEST_EXPECT_EQ(ctl_post_child, 0, "control: child_exit queued first");
+    TEST_EXPECT_EQ(ctl_post_hup, 0, "control: tty:hup queued behind it");
+    TEST_EXPECT_EQ(ctl_count, 2u, "control precondition: TWO notes queued");
+    TEST_ASSERT(ctl_name != NULL,
+                "CONTROL: phenotype + SIG_DFL -- the scan reaches a terminate "
+                "decision (a scan that always said NULL would pass every "
+                "leg below)");
+    TEST_ASSERT(ctl_is_hup, "control: and it names the hup, at index 1");
+
+    // ---- LEG A -----------------------------------------------------------
+    TEST_ASSERT(a_set, "A precondition: the SIGINT handler row was WRITTEN");
+    TEST_EXPECT_EQ(a_post_susp, 0, "A: a deferred susp is queued first");
+    TEST_EXPECT_EQ(a_post_int, 0, "A: a caught interrupt lands behind it");
+    TEST_EXPECT_EQ(a_count, 2u, "A precondition: TWO notes queued");
+    TEST_ASSERT(a_name == NULL,
+                "A: the terminate scan does NOT name the CAUGHT interrupt -- "
+                "pre-fix the guest died of it with its SIGINT handler "
+                "installed");
+    TEST_EXPECT_EQ(a_got, 1, "A: the stop consumer returns a note");
+    TEST_ASSERT(a_took_susp, "A: and it is the SUSP");
+    TEST_EXPECT_EQ(a_surv_got, 1, "A: the survivor dequeues");
+    TEST_ASSERT(a_surv_is_int,
+                "A: the caught interrupt SURVIVED for the phenotype delivery");
+    TEST_EXPECT_EQ(a_left, 0u, "A: nothing else was created or destroyed");
+
+    // ---- LEG B -----------------------------------------------------------
+    TEST_ASSERT(b_set, "B precondition: the SIGHUP handler row was WRITTEN");
+    TEST_EXPECT_EQ(b_post_child, 0, "B: the control's child_exit again");
+    TEST_EXPECT_EQ(b_post_hup, 0, "B: the control's tty:hup again");
+    TEST_EXPECT_EQ(b_count, 2u, "B precondition: TWO notes queued");
+    TEST_ASSERT(b_name == NULL,
+                "B: ONE row changed from the control -- SIGHUP caught -- and "
+                "the scan no longer names it");
+    TEST_ASSERT(b_reset, "B: the row was reset for the legs after");
+
+    // ---- LEG C -----------------------------------------------------------
+    TEST_ASSERT(c_dfl, "C precondition: SIGINT back to SIG_DFL");
+    TEST_EXPECT_EQ(c_post_child, 0, "C: child_exit first");
+    TEST_EXPECT_EQ(c_post_int, 0, "C: an interrupt queued under SIG_DFL");
+    TEST_EXPECT_EQ(c_count, 2u, "C precondition: TWO notes queued");
+    TEST_ASSERT(c_before_is_int,
+                "C control: while SIG_DFL, the scan names the interrupt");
+    TEST_ASSERT(c_ign, "C precondition: SIG_IGN installed AFTER the post");
+    TEST_ASSERT(c_name_after == NULL,
+                "C: a pending interrupt the guest now IGNORES is not a reason "
+                "to terminate it");
+
+    // ---- LEG D -----------------------------------------------------------
+    TEST_ASSERT(d_hand, "D precondition: the SIGTSTP handler row was WRITTEN");
+    TEST_EXPECT_EQ(d_post, 0, "D: a susp is queued");
+    TEST_EXPECT_EQ(d_count, 1u, "D precondition: it IS queued");
+    TEST_ASSERT(d_name == NULL, "D: the stop PREDICATE declines a caught susp");
+    TEST_EXPECT_EQ(d_took, 0, "D: and the CONSUMER declines it too");
+    TEST_EXPECT_EQ(d_kept, 1u, "D: the note is kept for the phenotype delivery");
+    TEST_ASSERT(d_dfl, "D precondition: SIGTSTP back to SIG_DFL");
+    TEST_EXPECT_EQ(d_took_dfl, 1, "D: now the consumer takes it");
+    TEST_ASSERT(d_taken_susp, "D: and it is the susp");
+    TEST_EXPECT_EQ(d_left, 0u, "D: consumed");
+
+    // ---- LEG E -----------------------------------------------------------
+    TEST_ASSERT(e_hand, "E precondition: the SIGHUP handler row is set again");
+    TEST_ASSERT(e_ign_still, "E precondition: SIGINT is STILL SIG_IGN in the table");
+    TEST_EXPECT_EQ(e_post_child, 0, "E: child_exit first");
+    TEST_EXPECT_EQ(e_post_int, 0, "E: interrupt behind it");
+    TEST_EXPECT_EQ(e_count, 2u, "E precondition: TWO notes queued");
+    TEST_ASSERT(e_is_int,
+                "E: a NATIVE Proc ignores the table and the scan names the "
+                "interrupt -- the phenotype is the gate");
 }
