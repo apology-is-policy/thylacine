@@ -1518,7 +1518,38 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // child has not run, so no reader can race the plain store; the mask is
     // owner-written thereafter (rt_sigprocmask). Native keeps a zero mask (the
     // rfork rule).
-    if (parent->phenotype == PHENO_LINUX) ct->note_mask = t->note_mask;
+    if (parent->phenotype == PHENO_LINUX) {
+        ct->note_mask = t->note_mask;
+        // And the HANDLER-EXECUTION SNAPSHOT (the d3a11c8e round's F1): this
+        // design keeps the interrupted user context KERNEL-side -- the sigframe
+        // the guest sees is written for reading, and rt_sigreturn restores from
+        // the per-Thread save block (notes_noted_restore) -- so a fork() issued
+        // from INSIDE a signal handler (async-signal-safe, POSIX-permitted)
+        // produces a child whose user stack says "in a handler" while a
+        // KP_ZERO child thread says "not". Its handler return would then be
+        // refused (-1 from rt_sigreturn) and the child would run on past the
+        // svc into whatever follows the restorer -- silent UB under musl's
+        // __restore_rt. On Linux the frame lives on the (copied) user stack and
+        // the child simply returns to the interruption point; here the block IS
+        // that frame's other half, so it crosses the fork with the mask. The
+        // child's own trap frame (x0 = 0, the fork return) is untouched -- this
+        // is the PRE-handler context it resumes at after its sigreturn. The
+        // fork+exec / fork+_exit shapes were already fine (exec clears the
+        // block, #247; _exit never returns); the flag is written last, once the
+        // block is whole. Native: a Plan 9 child is not notified (sysrfork), and
+        // no native handler crosses rfork either (the handler_va precedent).
+        if (t->in_handler) {
+            for (u32 i = 0; i < 31u; i++) ct->note_saved_regs[i] = t->note_saved_regs[i];
+            ct->note_saved_sp_el0 = t->note_saved_sp_el0;
+            ct->note_saved_elr    = t->note_saved_elr;
+            ct->note_saved_spsr   = t->note_saved_spsr;
+            for (u32 i = 0; i < sizeof(ct->note_saved_fp); i++)
+                ct->note_saved_fp[i] = t->note_saved_fp[i];
+            for (u32 i = 0; i < sizeof(ct->note_handling_name); i++)
+                ct->note_handling_name[i] = t->note_handling_name[i];
+            ct->in_handler = true;
+        }
+    }
 
     // P3-A: link child into parent's children list under the proc-table
     // lock. This is the publication point — after release, the child is
@@ -3186,26 +3217,10 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     // (an inherited handler would be an address in an image that no longer
     // exists). The note QUEUE survives -- pending notes are the process's, not
     // the image's -- and so does the fd-shaped delivery path; only the
-    // registered handler entry points go.
-    //
-    // THE SIGTAB FREE HERE IS A KNOWN HAZARD, tracked -- see task #254 before
-    // touching it. This comment used to claim the free was safe because "its
-    // only reader is notes_deliver_at_el0_return, which runs on a thread of
-    // THIS Proc, and we are the only live one". The single-thread half is
-    // true (proc_exec_alone established it and the swap above re-checked it
-    // under the lock). The single-READER half is NOT: `p->sigtab` is loaded
-    // and dereferenced from OTHER Procs' CPUs by notes_post's V-6b SIG_IGN
-    // hook -- which notes.c names in as many words as "the sole cross-thread
-    // reader" -- and, since the round-2 F1 fix, by notes_proc_default_applies
-    // on the ^Z fan's path. g_proc_table_lock is RELEASED above, so it
-    // serializes none of them against this kfree.
-    //
-    // Left as-is deliberately rather than patched in passing: no reader shares
-    // a lock with this free, so closing it is a design question (one agreed
-    // lock, a refcount, or -- the narrower candidate -- zeroing the table in
-    // place instead of freeing it, which keeps the POSIX reset and leaves no
-    // dangling pointer at all). V-6b freed it only at reap precisely because
-    // that was the one other point where the claim above actually held.
+    // registered handler entry points go. The sigtab is reset IN PLACE, never
+    // freed here (#254: cross-Proc readers reach `p->sigtab` lock-free, so the
+    // object is immortal per Proc; proc_free is the only free), and WHAT resets
+    // is phenotype-conditional -- both live in proc_exec_drop_image_state.
     proc_exec_drop_image_state(p, self);
 
     // L-7 F2: hardware breakpoints and watchpoints are addresses in the OLD

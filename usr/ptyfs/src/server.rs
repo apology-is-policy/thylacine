@@ -2175,23 +2175,27 @@ pub fn selftest() -> Result<(), &'static str> {
     }
 
     // (e4) An ISIG character DISCARDS the pending canonical line (PTY-DESIGN,
-    // the ccb597b8 round's F5, operator-voted): "ab", then VINTR, then "cd\n"
-    // -> the slave reads exactly "cd\n"; the INT class was raised; the ^C
-    // itself was neither delivered nor echoed (SignalXorByte); no drop counter
-    // moved (a disposition, not a loss). Then the CONTROL one variable away
-    // (-isig): the same 0x03 is a data byte, buffered, echoed and delivered --
-    // "ab\x03cd\n" -- so the discard is gated on ISIG-consumption, not on
-    // the byte value.
+    // the ccb597b8 round's F5, operator-voted): a committed "x\n" (unread, in
+    // m2s), then "ab" (pending, in line[]), then VINTR, then "cd\n" -> the
+    // slave reads exactly "x\ncd\n" (the COMMITTED line survived, the pending
+    // "ab" did not); the INT class was raised; the ^C itself was neither
+    // delivered nor echoed (SignalXorByte); the two earlier echoes are still
+    // sitting unread in s2m afterwards (s2m is NOT flushed -- the d3a11c8e
+    // round's F5: without the committed line and the unread echo, an
+    // over-broad discard that also cleared m2s/s2m passed this leg); no drop
+    // counter moved (a disposition, not a loss). Then the CONTROL one variable
+    // away (-isig): the same 0x03 is a data byte, buffered, echoed and
+    // delivered -- "ab\x03cd\n" -- so the discard is gated on ISIG-consumption,
+    // not on the byte value.
     if ptys.ctl_apply(n, b"+isig +icanon").is_err() {
         return Err("isigflush-apply");
     }
     let _ = ptys.take_sigs(n); // clear any class collected by earlier legs
-    if ptys.master_write(n, b"ab") != 2 {
-        return Err("isigflush-type");
+    if ptys.master_write(n, b"x\n") != 2 {
+        return Err("isigflush-commit"); // "x\n" committed into m2s, echo "x\r\n" left in s2m
     }
-    match ptys.master_read(n, &mut buf) {
-        RecvOutcome::Data(2) if &buf[..2] == b"ab" => {} // drain the echo
-        _ => return Err("isigflush-echo"),
+    if ptys.master_write(n, b"ab") != 2 {
+        return Err("isigflush-type"); // "ab" pending in line[], echo "ab" left in s2m
     }
     let (df0, dl0, de0, dm0) = ptys.drops(n);
     if ptys.master_write(n, &[CH_INTR]) != 1 {
@@ -2200,20 +2204,18 @@ pub fn selftest() -> Result<(), &'static str> {
     if ptys.take_sigs(n) & sig_class_bit(T_TTY_SIG_INT) == 0 {
         return Err("isigflush-not-raised");
     }
-    match ptys.slave_read(n, &mut buf) {
-        RecvOutcome::WouldBlock => {} // the ^C delivered nothing
-        _ => return Err("isigflush-leaked"),
-    }
     match ptys.master_read(n, &mut buf) {
-        RecvOutcome::WouldBlock => {} // ...and echoed nothing
-        _ => return Err("isigflush-intr-echoed"),
+        // The two earlier echoes, intact and in order; NOTHING for the ^C.
+        RecvOutcome::Data(5) if &buf[..5] == b"x\r\nab" => {}
+        _ => return Err("isigflush-s2m-flushed-or-intr-echoed"),
     }
     if ptys.master_write(n, b"cd\n") != 3 {
         return Err("isigflush-type2");
     }
     match ptys.slave_read(n, &mut buf) {
-        RecvOutcome::Data(3) if &buf[..3] == b"cd\n" => {} // ab was DISCARDED
-        _ => return Err("isigflush-not-discarded"),
+        // The committed line survived the discard; the pending "ab" did not.
+        RecvOutcome::Data(5) if &buf[..5] == b"x\ncd\n" => {}
+        _ => return Err("isigflush-not-discarded-or-m2s-flushed"),
     }
     match ptys.master_read(n, &mut buf) {
         RecvOutcome::Data(4) if &buf[..4] == b"cd\r\n" => {}

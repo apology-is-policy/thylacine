@@ -331,3 +331,46 @@ suite 1408/1408 per commit; sabotages S9/S10 (F5) and S11–S15 (fork/exec)
 each red on the named check — S14/S15 are the WIRING witnesses (the unit test
 cannot see proc.c; the probe legs L223/L226 can, and they went red). Pushed to
 both mirrors after the fixup.
+
+## 2026-08-17 (aux) — the d3a11c8e round: the fork rule was one field short
+
+The operator said spawn; the round (Fable 5, read-only, 0/0/1/6) re-derived
+both mechanisms sound — the fork copy is published before the child is
+reachable and aliases nothing, the exec reset uses the same "caught" predicate
+delivery uses, the ISIG discard is one field under the right lock in both ldiscs
+— and found the one place the voted RULE was short. "fork copies everything
+(POSIX fork(2))" copied what POSIX names: dispositions and mask. This design has
+a third piece of thread signal state POSIX never has to name, because Linux
+keeps it on the user stack: the kernel-side handler-execution snapshot (the
+sigframe here is written for reading; `rt_sigreturn` restores from the
+per-Thread save block). A `fork()` issued from INSIDE a handler — async-signal-
+safe, POSIX-permitted — therefore produced a child whose user stack said "in a
+handler" while its KP_ZERO thread said "not"; its handler return was refused
+and it ran on past the svc into whatever followed the restorer (musl: silent UB;
+the probe: `brk #0`). Fork+exec and fork+`_exit` from a handler were fine, which
+is why nothing had surfaced. Fixed by copying the block with the mask
+(`in_handler` written last, before `ready()`); phenotype only — a Plan 9 child
+is not notified. Lesson: enumerate what the RESTORE path reads, not what the
+standard lists.
+
+The witness leg cost two extra boots for a reason worth keeping: its first
+draft had the child exit 3 and the parent reap "exactly 3", and it went red on a
+WORKING fix — v1.0's phenotype exit path collapses every non-zero
+`exit_group(N)` to 1 (VIVARIUM task #91, "`exit(N)` is boolean"). A diag with
+`exit(5)` read as 1 too. So the oracle is exit 0 versus anything else, and the
+child's own marker (re-emitted by the parent on failure) carries the why. A
+status oracle must be a value the status channel can carry.
+
+Six P3s: a pre-#254 "known hazard" paragraph in `proc_exec_replace` that
+contradicted the in-place reset it now calls; a phantom `viv_sigtab_copy_into`
+in 145; PTY-DESIGN naming leg (f) for (e4); the ptyfs (e4) leg with no witness
+for "m2s/s2m are NOT flushed" (both were EMPTY at the VINTR, so an over-broad
+discard passed — it now commits `x\n` unread and leaves the echoes unread and
+asserts both survive); the fcntl test's header comment migrated onto the sigtab
+test; and the ISIG-DISCARD + ccb597b8-ROUND addenda living only on the
+AUDIT-TRIGGERS rows that declare ARCH 25.4 authoritative (mirrored). Enqueued
+from the observations: `Proc.socktab` is not cloned at fork (the fork half of
+the LINEAGE dup3 note — a real L-6 gap for fork-per-connection servers), the
+handler mask discipline (sa_mask|sig never applied during a handler; sigreturn
+does not restore the mask), and `pty.tla`'s CookSignal echoing a char neither
+ldisc echoes.

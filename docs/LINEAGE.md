@@ -700,6 +700,13 @@ the silent half-service the argument-domain rule exists to forbid. Reproducing
 Linux needs a refcounted entry, a real change to a table V-5 audited, and that
 belongs in a chunk about it; the cost is bounded and named (the inetd
 `dup2(connfd,0); dup2(connfd,1)` idiom), published in VIVARIUM §9's DEGRADED tier.
+**The fork half of the same class is OPEN** (the d3a11c8e round, 2026-08-17): `rfork_internal`
+copies the handle table but not the socktab, so a forked child holding an inherited socket
+fd is in the *omitting* case above by construction -- the fork-per-connection server shape.
+Enqueued (`memory/bug_socktab_not_cloned_at_fork.md`, AUX-ROADMAP Stream 4 #6): a per-Proc
+clone next to the sigtab clone -- but a plain COPY has the *copying* problem above (two
+state machines over one connection), so it needs the same refcounted entry the dup3 case
+names; one chunk for both halves, with a probe leg.
 
 **The fd-freeing obligation is paid in a different arm from `close`'s, and that
 is the rule a future promotion follows.** `close` pays in the entry hook, which is

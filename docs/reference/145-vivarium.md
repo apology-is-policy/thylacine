@@ -355,9 +355,19 @@ the exec. Native Procs keep the Plan 9 rule (ARCH §7.6: the sigtab, the mask,
 `handler_va` and `in_handler` all clear at exec; nothing crosses rfork). The
 phenotype branch is decided in `proc.c` on `p->phenotype`, and the table's
 lifetime rule is unchanged (immortal per Proc; the child gets its OWN table --
-`viv_sigtab_copy_into` -- so the cross-Proc lock-free readers still never see
+`viv_sigtab_clone_into` -- so the cross-Proc lock-free readers still never see
 a freed table). Pending notes are never inherited (POSIX: the child's pending
-set is empty; a fresh Proc has a fresh queue).
+set is empty; a fresh Proc has a fresh queue). Two more facts cross a fork with
+the mask (the d3a11c8e round): the HANDLER-EXECUTION SNAPSHOT -- this design keeps
+the interrupted user context kernel-side (the sigframe is written for reading;
+`rt_sigreturn` restores from the per-Thread save block), so a `fork()` issued
+from inside a handler copies `in_handler` + the save block onto the child thread,
+and BOTH processes return from the handler to the interruption point (before
+this the child's return was refused and it ran on past the svc); and the
+COARSENESS of the mask crosses with it -- `NOTE_BIT_TTY` is one family bit (see
+the mask section below: blocking SIGWINCH really does block SIGHUP), so a parent
+that blocks SIGWINCH hands its forked and exec'd children a blocked
+SIGHUP/SIGTSTP/SIGCONT/SIGQUIT too, where Linux inherits only SIGWINCH.
 
 (V-6b's "a real handler still declines" paragraph stood here; V-6c landed the
 Tier-1 frame and a real handler installs and RUNS — see "V-6c" below.)

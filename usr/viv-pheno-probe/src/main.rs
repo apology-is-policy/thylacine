@@ -266,6 +266,30 @@ extern "C" fn viv_sig_handler(signo: i32, info: *const u8, uc: *const u8) {
     }
 }
 
+/// The fork-in-handler leg (L233-L236; the d3a11c8e round's F1): a handler
+/// that fork()s and RETURNS, in both processes. The child's return goes through
+/// the restorer -> rt_sigreturn -> the kernel's per-Thread save block, so it
+/// only works if that block crossed the fork; a child whose kernel says "not in
+/// a handler" gets -1 and runs on into the restorer's `brk #0`. The child marks
+/// its own (COW-private) copy of FIH_AM_CHILD so the code after the interrupted
+/// write can tell the two processes apart.
+static mut FIH_CHILD: i64 = 0;
+static mut FIH_AM_CHILD: u64 = 0;
+
+extern "C" fn viv_fork_in_handler(_signo: i32, _info: *const u8, _uc: *const u8) {
+    unsafe {
+        let pid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if pid == 0 {
+            core::ptr::write_volatile(&raw mut FIH_AM_CHILD, 1);
+        } else {
+            core::ptr::write_volatile(&raw mut FIH_CHILD, pid);
+        }
+    }
+}
+fn fork_handler_addr() -> u64 { viv_fork_in_handler as usize as u64 }
+fn fih_child() -> i64 { unsafe { core::ptr::read_volatile(&raw const FIH_CHILD) } }
+fn fih_am_child() -> u64 { unsafe { core::ptr::read_volatile(&raw const FIH_AM_CHILD) } }
+
 // Task #96 sentinel buffers for the phenotype-path FP check (L39-L41).
 static mut FP_SENT: [u8; 512] = [0; 512];
 static mut FP_SEEN: [u8; 512] = [0; 512];
@@ -1225,6 +1249,55 @@ unsafe fn run_linux() -> ! {
     );
     ksa = [SIG_DFL, 0, 0, 0]; // restore: SIGCHLD back to default
     let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+
+    // --- L233-L236: fork() from INSIDE a handler, and the child RETURNS from
+    // it (the d3a11c8e round's F1). Thylacine keeps the interrupted user
+    // context kernel-side (the sigframe is written for reading; rt_sigreturn
+    // restores from the per-Thread save block), so a child forked inside a
+    // handler needs that block copied with the mask -- or its sigreturn is
+    // refused and it runs on into the restorer's `brk #0`. POSIX permits
+    // fork() in a handler (async-signal-safe); Linux's child just returns to
+    // the interruption point off its copied user stack. Here: SIGPIPE raised
+    // by the reader-less fd 0 write, the handler forks; BOTH processes return
+    // from the handler and resume after the write; the child then exits 0 --
+    // the ONLY exit code that survives v1.0's status collapse (exit_group(N):
+    // N != 0 -> exits("fail") -> 1, kernel/syscall.c) -- and the parent reaps
+    // exactly a clean 0. Every failure reads 1: a refused sigreturn (the child
+    // dies at `brk #0` -- a `snare:brk` user-fault line names it), or a child
+    // that resumed with its store lost (it runs the parent's L234 and exits 1
+    // with its own marker, which the parent re-emits below so joey shows the
+    // CHILD's leg). Sabotage SF1 (drop the snapshot copy in rfork_internal):
+    // L235 reddens; the parent's own return is unaffected.
+    ksa = [fork_handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L233\n"
+    );
+    let wrc_f = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    if fih_am_child() != 0 {
+        // The CHILD, back from its own handler return: the save block crossed.
+        linux_exit(0)
+    }
+    leg!(rep, wrc_f < 0 && fih_child() > 0, b"L234\n"); // the handler ran + forked
+    sst = -1;
+    let wr = svc4(NR_WAIT4, fih_child() as u64, &mut sst as *mut i32 as u64, 0, 0);
+    if !(wr == fih_child() && (sst & 0x7f) == 0 && ((sst >> 8) & 0xff) == 0) {
+        // Re-emit the child's own marker if it left one (its handle shares
+        // offset 0 with ours), so the log names the child's leg, not just ours.
+        let mut cm: [u8; 5] = [0; 5];
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        let _ = svc3(NR_READ, rep as u64, cm.as_mut_ptr() as u64, 5);
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        if cm[0] == b'L' { leg!(rep, false, &cm[..]); }
+        leg!(rep, false, b"L235\n");
+    }
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0]; // SIGPIPE back to the counting handler
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L236\n"
+    );
 
     // --- V-5a: sockets -----------------------------------------------------
     // The container's manifest grants /net, so these run against the LIVE netd

@@ -424,13 +424,16 @@ canonical assembly. It is an explicit I-20 DISPOSITION of those bytes, like an
 erase — not a drop, not counted; the ISIG cooking itself (raise the signal,
 never a byte, never an echo) is unchanged.** Deliberately NARROWER than POSIX's
 full flush, and recorded as such: complete lines already committed to the ring
-by Enter stay (the user finished them), and the OUTPUT queue is never
+by Enter stay (the user finished them -- and so they WILL run at the next
+prompt: `rm -rf x<Enter>` typed at a foreground job that never reads it, then
+^C, executes where Linux's full flush would have discarded it; the exposure
+is the residual of the narrowing), and the OUTPUT queue is never
 discarded (the kernel console's TX ring carries kernel diagnostics no signal
 character may eat; a pts's s2m carries the job's last output the shell is
 about to read). Plan 9's `devcons` has no such flush — this is a POSIX-shape
 choice, made because both ldiscs already model termios and every consumer of
 a pts is a POSIX program. Tests: `cons.cook_isig_discards_pending_line` (kernel)
-and ptyfs selftest leg (f) pin it in each ldisc.
+and ptyfs selftest leg (e4) pin it in each ldisc.
 
 *As-built (PTY-2d)*: the teardown legs. Drain-then-EOF was structural since 2a
 (`ring_drain` serves Data while non-empty regardless of the peer's closure;

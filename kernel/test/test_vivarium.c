@@ -3088,21 +3088,6 @@ void test_vivarium_dup3_domain(void) {
                    "NULL cloexec_out -> FORWARD");
 }
 
-// The T2 fcntl SHELL's F_DUPFD errnos (found by the c8ab2744 close's L-6c legs).
-//
-// The decide half above is pure; this drives the arm that turns a decision into
-// an errno, because that is where the defect lived: handle_dup_posix folds
-// "no such fd" and "table full" into one -1, and the arm answered EMFILE for
-// both. busybox ash's redirect() probes the TARGET fd of every `N>&M` with
-// fcntl(N, F_DUPFD, 10) precisely to learn whether N is open -- EBADF means
-// "not open, nothing to save", ANY other errno is "strange" and aborts the
-// command. fd 3 is not open in the L-6c gate's shell, so every `3>&1` died with
-// `fcntl(3,F_DUPFD,10): No file descriptors available`, the command
-// substitution around it yielded "", and the two legs asserting an EMPTY
-// capture passed VACUOUSLY -- only the positive control (L6C-K) said no.
-//
-// Driven through viv_fcntl_for_test (the real arm, on a fresh Proc: no
-// exception frame, which the FCNTL case never reads).
 // The phenotype's fork/exec signal-state rule (task #127; ARCH 7.6, POSIX;
 // operator-voted 2026-08-17): rfork COPIES the sigtab into the child's OWN
 // table; execve resets CAUGHT rows to SIG_DFL and KEEPS SIG_IGN rows. This
@@ -3185,6 +3170,21 @@ void test_vivarium_sigtab_fork_exec_rule(void) {
 }
 
 extern s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
+// The T2 fcntl SHELL's F_DUPFD errnos (found by the c8ab2744 close's L-6c legs).
+//
+// The decide half above is pure; this drives the arm that turns a decision into
+// an errno, because that is where the defect lived: handle_dup_posix folds
+// "no such fd" and "table full" into one -1, and the arm answered EMFILE for
+// both. busybox ash's redirect() probes the TARGET fd of every `N>&M` with
+// fcntl(N, F_DUPFD, 10) precisely to learn whether N is open -- EBADF means
+// "not open, nothing to save", ANY other errno is "strange" and aborts the
+// command. fd 3 is not open in the L-6c gate's shell, so every `3>&1` died with
+// `fcntl(3,F_DUPFD,10): No file descriptors available`, the command
+// substitution around it yielded "", and the two legs asserting an EMPTY
+// capture passed VACUOUSLY -- only the positive control (L6C-K) said no.
+//
+// Driven through viv_fcntl_for_test (the real arm, on a fresh Proc: no
+// exception frame, which the FCNTL case never reads).
 void test_vivarium_fcntl_dupfd_errnos(void);
 void test_vivarium_fcntl_dupfd_errnos(void) {
     struct Proc *p = proc_alloc();

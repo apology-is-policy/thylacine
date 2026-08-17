@@ -497,9 +497,17 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
 
 **Open, in order:**
 
-1. **AUDIT ROUND OWED** on the fork/exec signal-state chunk (proc.c rfork +
+1. ~~AUDIT ROUND OWED~~ RAN + CLOSED 2026-08-17 (Fable 5, 0/0/1/6): F1 -- a fork()
+   from INSIDE a handler got no copy of the kernel-side handler snapshot (only
+   the mask), so its rt_sigreturn was refused; the snapshot now crosses fork
+   with the mask (probe L233-L236). Six P3s closed; enqueued from the
+   observations: `Proc.socktab` not cloned at fork (LINEAGE, the fork half of
+   the dup3 note), the handler mask discipline (sa_mask|sig never applied;
+   sigreturn does not restore the mask), `pty.tla` CookSignal's echo arm vs the
+   ldiscs. `memory/audit_d3a11c8e_closed_list.md`. (Formerly: on the fork/exec
+   signal-state chunk (proc.c rfork +
    exec, vivarium.c helpers; the Notes + LINEAGE rows) and, lighter, on the F5
-   ISIG-discard change (cons.c/ptyfs, LS-8 + ptyfs rows) -- ask. (The
+   ISIG-discard change (cons.c/ptyfs, LS-8 + ptyfs rows) -- ask. The
    `7580c1f7` round RAN and CLOSED 2026-08-17: Fable 5, 0/0/0/4, mechanism
    sound; `audit_7580c1f7_closed_list.md`. The `ccb597b8` round RAN and CLOSED 2026-08-17:
    Fable 5, 0/0/2/6, all on the new drop site's witness -- positive controls
@@ -534,6 +542,22 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    SIGPIPE for its own Procs; the NATIVE `pipe` note still carries no latch,
    so a native program that writes to a closed pipe with no handler and no fd
    reader keeps a stranded `pipe` note -- a Plan 9 ABI decision (signoff).
+   Researched option set in `memory/design_237_pipe_note_default.md` (Plan 9
+   kills; Rust-std/pouch mask; the Go port has no note handling at all):
+   recommend terminate-for-real + libthyla-rs/Go-port startup masks.
+6. **`Proc.socktab` is NOT cloned at fork** (the d3a11c8e round, seen in passing;
+   `memory/bug_socktab_not_cloned_at_fork.md`): a phenotype child forked with an
+   open socket fd inherits the HANDLE but no `(proto,N)` row -- the fork half of
+   LINEAGE.md:691's dup3 note; fork-per-connection servers are the L-6c
+   population. Own chunk: `socktab_clone_into` next to the sigtab clone + a
+   probe leg + the VIVARIUM row.
+7. **Handler mask discipline on the phenotype** (`memory/bug_handler_mask_
+   discipline_phenotype.md`): sa_mask|sig is never applied while a handler
+   runs (N-3's blanket guard stands in), and `notes_noted_restore` does not
+   restore `note_mask` (a handler's rt_sigprocmask persists past sigreturn;
+   Linux restores uc_sigmask). Permissive-direction divergences; one small
+   chunk + a probe leg. Also `pty.tla` CookSignal echoes the signal char while
+   neither ldisc does -- spec vs impl on one arm, decide at the next PTY touch.
 
 ---
 
