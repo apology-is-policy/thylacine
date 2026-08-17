@@ -50,10 +50,22 @@ ROLE=$(tmux show-options -pv @thyla-role 2>/dev/null || true)
 [ -n "$ROLE" ] || ROLE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || echo unknown)")
 STATE="$STATE_DIR/$ROLE.state"
 
-# The note slot is keyed by the ENCODED PROJECT PATH, not the role, because the
-# consumer on the far side (~/.claude/resume-note.py) only knows the transcript
-# path -- and `basename(dirname(transcript))` IS this exact string. Two
-# independent derivations of one key, no shared config to drift.
+# The note slot is keyed by the ENCODED PROJECT PATH. This comment used to add
+# that `basename(dirname(transcript))` IS this exact string on the consumer
+# side -- "two independent derivations of one key, no shared config to drift".
+# THAT WAS FALSE, and stating it here is what kept it unexamined: the encoded
+# transcript directory is where the session was LAUNCHED, this is its GIT
+# TOPLEVEL, and they agree only when those coincide. The vault session is
+# launched from the thylacine tree and works in thylacine-vault, so it armed
+# `-Users-...-thylacine-vault.note.pending` while the consumer looked for
+# `-Users-...-thylacine.note.pending`, matched nothing, and fell through with
+# no ledger row -- leaving that session at a prompt for a day (2026-08-16
+# 10:44:32Z `allow`, never `consumed`; found by aux reading the ledger).
+#
+# Two derivations that must agree are safe-if-they-agree, never safe by
+# default. The consumer now prefers `pane=` below -- an identity tmux hands to
+# both sides -- and keeps the path as a fallback; it also logs an `orphan-note`
+# row when a slot it did not match is left armed, so the silent case is over.
 TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 ENC=$(printf '%s' "$TOPLEVEL" | sed 's|/|-|g')
 NOTE="$STATE_DIR/$ENC.note"
