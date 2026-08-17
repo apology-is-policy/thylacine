@@ -1583,7 +1583,14 @@ all-`SIG_DFL`, while POSIX `fork(2)` inherits both caught handlers and `SIG_IGN`
 It is not fixed here, and the comment itself says why: `execve(2)` needs the
 *opposite* rule (reset caught dispositions to `SIG_DFL`, preserve ignored ones),
 so this is two behaviours and a design decision rather than a copy — and the
-sigtab sits on the V-6 audit surface. The v1.0 exposure is also narrow: the only
+sigtab sits on the V-6 audit surface.
+
+*Resolved 2026-08-17 (operator-voted, the aux track):* both behaviours are
+now specified as POSIX for the phenotype — `rfork`/`clone` copies the sigtab
+and the caller's `note_mask` into the child; `execve` resets CAUGHT rows to
+`SIG_DFL` and keeps `SIG_IGN` rows and the mask (native keeps the Plan 9 clear).
+ARCH §7.6 carries the rule; the impl is the aux chunk that follows the
+scripture commit. The v1.0 exposure is also narrow: the only
 admitted clone shape is vfork-then-exec, and musl's `posix_spawn` child resets
 its own dispositions before exec'ing. It belongs with `execve` and `wait4` at
 L-6. The comment was corrected in this chunk to say *reachable but unfixed*

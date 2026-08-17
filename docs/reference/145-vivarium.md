@@ -296,7 +296,7 @@ the per-`Thread` `note_mask`; `rt_sigaction` records `SIG_DFL`/`SIG_IGN` in a
 lazily-allocated per-`Proc` `struct viv_sigtab` (`Proc.sigtab`, reset **in
 place** at exec and freed only at `proc_free` — so the pointer is stable for the
 life of the Proc, which is what makes the lock-free cross-Proc readers below
-safe (#254) — and not `rfork`-inherited, the `handler_va` precedent), and an ignored
+safe (#254) — **copied into an `rfork`/`clone` child and reset-caught-only at exec since the fork/exec POSIX rule of 2026-08-17** (it used to be neither inherited nor SIG_IGN-preserving; see "Signal state across fork and exec" below), and an ignored
 signal's note is then **discarded at generation** inside `notes_post`, exactly as
 Linux discards it, returning success because Linux's `kill()` to a process
 ignoring the signal succeeds.
@@ -330,6 +330,26 @@ in-guest: pending -> `SIG_IGN` -> unblock survives with nothing fired and no
 stale note at the head; pending -> `SIG_IGN` -> handler -> unblock fires NOTHING
 -- the leg that separates install-time from delivery-time; each round ends with
 a fresh SIGPIPE delivered exactly once).
+
+**Signal state across fork and exec (POSIX; operator-voted 2026-08-17).**
+Two halves of one recorded decision (task #127 named both when clone became a
+table row): (1) `rfork`/`clone` COPIES the parent's `viv_sigtab` -- every
+disposition, caught and ignored -- and the calling Thread's `note_mask` into
+the child (POSIX `fork(2)`); before, `child->sigtab` stayed NULL (all-`SIG_DFL`)
+and the child thread's mask was 0, so `trap '' PIPE; cmd | head` handed `cmd` a
+`SIG_DFL` SIGPIPE. (2) `execve` resets CAUGHT rows to `SIG_DFL` and KEEPS
+`SIG_IGN` rows and the `note_mask` (POSIX `execve(2)`: ignored stays ignored,
+the mask is inherited); before, `proc_exec_drop_image_state` zeroed both, and
+its comment "Zeroing is exact POSIX" was true of caught handlers only -- so
+`nohup cmd`, a non-interactive `cmd &` (SIGINT/SIGQUIT ignored in the child by
+the shell before exec) and `trap '' INT; exec prog` all lost their immunity at
+the exec. Native Procs keep the Plan 9 rule (ARCH §7.6: the sigtab, the mask,
+`handler_va` and `in_handler` all clear at exec; nothing crosses rfork). The
+phenotype branch is decided in `proc.c` on `p->phenotype`, and the table's
+lifetime rule is unchanged (immortal per Proc; the child gets its OWN table --
+`viv_sigtab_copy_into` -- so the cross-Proc lock-free readers still never see
+a freed table). Pending notes are never inherited (POSIX: the child's pending
+set is empty; a fresh Proc has a fresh queue).
 
 **A real handler still declines**, and that is deliberate rather than
 unfinished: the Tier-1 frame that would call it is V-6c, and accepting an install
