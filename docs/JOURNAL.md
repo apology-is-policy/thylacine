@@ -629,8 +629,9 @@ attempt 1 — the console `viv run /vivarium/probe` printed the probe's leg-6
 line, the `ptyhost`ed `viv run /vivarium/alpine-ash` showed `/ $ ` on the pts
 and answered `ASH-ALIVE` through it (a pts trio passes `stdio_born` and flows
 both ways — the question the retracted hypothesis raised, answered by the
-witness rather than the fix), `exit` returned to `ut` twice over. The full
-LS-CI run rides the next chunk's bar (the ^C finding below), one bar for both.
+witness rather than the fix), `exit` returned to `ut` twice over. Landed as
+`437213c4`; the full LS-CI run rode the next chunk's bar (the ^C finding
+below), one bar for both.
 
 ## 2026-08-18 (aux) — the first ^C killed the runner; and a hosted `ut` loses a line after two
 
@@ -687,5 +688,26 @@ own root cause before its scenario joins LS-CI. Every gate we had covers ^C on
 a foreground JOB; none covered ^C at an idle hosted prompt.
 
 The R5-F9 question itself — does busybox ash's `raise_interrupt` longjmp out of
-its SIGINT handler and wedge `in_handler` — is still the open one; its
-experiment runs next, on the runner that now survives the ^C it needs.
+its SIGINT handler and wedge `in_handler` — ran next, on the runner that now
+survives the ^C it needs, and came back INCONCLUSIVE on the wedge and
+conclusive on something underneath it: after ash's prompt (blocked in `read`)
+a ^C produced NOTHING for ten seconds, twice; the next typed line was then
+discarded (`^C`, newline, reprompt AFTER the line) — the SIGINT was delivered
+exactly when the read completed. Read in the kernel: `thread_die_pending` is
+the only sleep-unwind predicate and it fires for group death and the UNCAUGHT
+terminate latches only, so a CAUGHT note never wakes a thread blocked in a
+syscall wait; Plan 9 (`Eintr`) and Linux (`EINTR`/`ERESTARTSYS`) both do. A
+note that arrives with the next line is not late, it is undelivered. That is a
+kernel design fork (item 11, `memory/design_caught_notes_do_not_interrupt_
+waits.md`), the operator's to vote, and it very likely owns item 10 too.
+
+### The bar over the tip (`5336c894`: the channel + the ^C masks)
+
+Boot (first after the change, no retries): kernel suite 1413/1413 — the kernel
+binary was not rebuilt (no `kernel/`/`arch/`/`mm/` file changed), so no SMP
+gate; the joey `viv-channel` legs + `V-7 viv-probe (containered, x2
+concurrent) PASS`; V-1b + L-6c + D-5 PASS; `Thylacine boot OK`. LS-CI **34
+PASS + 2 SKIP (GL not baked) over 36 scenarios, 0 retries** (TCG, sequential,
+~55 min), the new `viv-run` among them. Pushed to both mirrors after the
+fixup; main ratified the channel design on the line (call 0025) and had merged
+aux-2 @13149152 into main (8a58112d) meanwhile.

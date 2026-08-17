@@ -603,7 +603,13 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    real, a P1 for interactive phenotype shells that needs an abandoned-frame
    rule or a per-thread stack of save blocks (design; vote).
    **Blocked first by item 9** (found while building the experiment): the
-   interactive `viv run` never ran a container at all.
+   interactive `viv run` never ran a container at all. **RAN 2026-08-18
+   (3/3, after items 9 + the ^C mask): INCONCLUSIVE on the wedge, conclusive on
+   item 11** -- after ash's prompt (blocked in read) a ^C produced NOTHING for
+   10 s, twice; the next typed line was then discarded (`^C`, newline,
+   reprompt AFTER the line): the SIGINT was delivered only when the read
+   completed. Re-run once item 11 lands (the wedge witness needs a promptly
+   delivered first ^C).
 9. **An interactive `viv run` never ran the container -- LANDED (pending its
    bar) 2026-08-17** (`memory/bug_viv_interactive_container_no_stdio.md`):
    the console line `viv: spawn /bin/diorama` in every R5-F9 log is viv's
@@ -649,6 +655,22 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    its line-discard eats characters of the NEXT line. Aux's own line
    (notes/job control/PTY): reproduce, root-cause (ut's hosted-session poll set
    / notes-fd wake / ldisc post order), fix, adopt the scenario into LS-CI.
+   Likely the same mechanism as item 11 (a poll parked inside a dev9p wait).
+11. **A CAUGHT note does not wake a thread blocked in a syscall wait -- VOTE
+   OWED (kernel notes design)** (`memory/design_caught_notes_do_not_interrupt_
+   waits.md`; measured 3/3 + read in code): `thread_die_pending` is the only
+   sleep-unwind predicate and fires for group death and the UNCAUGHT terminate
+   latches only, so a handler-having (or notes-fd) program blocked in read()
+   gets its ^C only when the read completes -- after the user's next line,
+   which the handler then discards. Plan 9 (Eintr) and Linux (EINTR /
+   ERESTARTSYS + SA_RESTART) both interrupt the wait. Fork: (A) note-
+   interruptible waits (extend the #811 predicate with "a deliverable note is
+   pending"; native -EINTR [no `T_E_INTR` in errno.h -- an ERRORS.md ABI row,
+   signoff]; phenotype restart per SA_RESTART; the 9P client's blocked read
+   unwinds frame-atomically per #90) -- RECOMMENDED, audit-bearing (Notes +
+   Pipe + 9P client rows + SMP gate); (B) a Dev-level unwind for pts/cons reads
+   only; (C) v1.x. Retires the "late ^C eats the next line" family (items 8,
+   10) in one move.
 
 ---
 

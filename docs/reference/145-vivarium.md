@@ -2946,8 +2946,8 @@ LS-CI `viv-run`: PASS on attempt 1 -- the console `viv run /vivarium/probe`
 printed the leg-6 line, the `ptyhost`ed `viv run /vivarium/alpine-ash` showed
 `/ $ ` on the pts and answered `ASH-ALIVE` through it (so the stdio question
 the earlier hypothesis raised is answered: a pts trio passes `stdio_born` and
-flows both ways), `exit` returned to `ut` twice over. Full LS-CI: see the
-status row.
+flows both ways), `exit` returned to `ut` twice over. Full LS-CI over `5336c894`
+(this + the ^C masks): 34 PASS + 2 SKIP (GL) over 36, 0 retries.
 
 ### A wart worth naming: the pipe note on a dead diorama
 
