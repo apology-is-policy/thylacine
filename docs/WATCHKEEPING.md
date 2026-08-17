@@ -1027,10 +1027,16 @@ without a session having to start. Filed to memory
 (`.mcp.json` + hooks) to `~/.yip/bin/yip` (Aug 5 build); main to
 `~/.local/bin/yip` (Aug 16, leases). "MCP tools after you restart" is false
 for the former — a restart re-execs the old binary. `yip version` prints
-`0.1.0` for both, so `doctor`'s "binary runs" cannot tell them apart. *Fix:*
-re-run `install --local` from the current binary in each checkout + restart;
-stamp the version from `git describe`; have `doctor` compare the wired binary
-against the newest install.
+`0.1.0` for both, so `doctor`'s "binary runs" cannot tell them apart. *Fix
+(yip `2868227`, same day):* the version is stamped from `git describe` by
+`make`, and `doctor` asks each wired binary for its version and compares it
+with its own — `binary runs, current (2868227)` vs `binary STALE: ~/.yip/bin/
+yip reports 0.1.0, this yip is 2868227 -- re-run install ... then restart`;
+e2e leg 13 pins it with a runs-but-answers-differently specimen and its
+control. aux was rewired with `install --local` (effective at its next
+restart); the vault's tracked `.claude/settings.json` still names the old
+path — that is its owner's tree to change, and `doctor` now says so from
+inside it.
 
 **R3 — SPECIMEN ERROR: "a fourth unregistered session".** The lease
 rationale (the `resource.go` header and the lease commit body) cites a
