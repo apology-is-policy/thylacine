@@ -513,16 +513,24 @@ struct Surface {
     /// the geometry reads, and every post-fence present serve/validate
     /// against THIS one.
     weave: Option<Weave>,
-    /// The CURRENT generation's GPU resource (per-generation ids minted
-    /// from Comp.res_seq -- a reweave's fresh resource never aliases the
-    /// old one or SCREEN_RES).
-    resource_id: u32,
+    /// The CURRENT generation's GPU resources, ONE PER SLOT (GPU-DESIGN
+    /// 4.5.8, operator-voted). Ids stay per-generation, minted from
+    /// Comp.res_seq, so a reweave's fresh mints never alias the old ones or
+    /// SCREEN_RES -- a generation simply mints `WEAVE_SLOTS` of them, each
+    /// backed by its own slot at `slot_stride`.
+    ///
+    /// Slot <-> host resource is 1:1 so a compositor blit of slot i and a
+    /// client fill of slot j (i != j) cannot collide: the collision does not
+    /// exist rather than being scheduled around. The cost is that nothing
+    /// accumulates frames on the host any more, which is what 4.5.8b's
+    /// buffer age replaces.
+    res_ids: [u32; WEAVE_SLOTS as usize],
     /// The DISPLACED generation draining after a resize ack (weave + its
     /// resource id). At most one -- the spec's <=2-gens bound: a second
     /// ack while this drains is E_AGAIN (busy). Retired by the first
     /// post-fence present (RetireDisplaced + ServerRelease) or the
     /// surface retire.
-    old_weave: Option<(Weave, u32)>,
+    old_weave: Option<(Weave, [u32; WEAVE_SLOTS as usize])>,
     /// The CONFIGURE serial counter (section 18.3; low 16 bits ride the
     /// tevent `code`).
     cfg_serial: u16,
@@ -530,11 +538,15 @@ struct Surface {
     /// echo exactly this; a newer emission overwrites it (only the
     /// latest offer is ackable -- the wayland serial dance).
     offered: Option<(u16, u32, u32)>,
-    /// The client 2D resource's host-side content is stale (presents were
-    /// composed, not transferred to it -- or the resource is a reweave's
-    /// fresh mint). A deferred direct-scanout switch must expand its
-    /// first transfer to the full surface (G-6).
-    res_stale: bool,
+    /// PER SLOT: this slot's host resource has no valid content -- presents
+    /// were composed rather than transferred to it, or the generation is a
+    /// fresh mint. A deferred direct-scanout switch expands its first
+    /// transfer to the full surface (G-6).
+    ///
+    /// Per-slot since C-2d-b, and it must be: one resource per slot makes
+    /// staleness a property of the SLOT, and a single flag would report slot
+    /// 0's history for slot 2's resource.
+    res_stale: [bool; WEAVE_SLOTS as usize],
     /// A TPRESENT_HOLD's deferred scanout push (section 18.6/F13, G-6c):
     /// the region whose device-visible flush waits for `release`. Held
     /// presents union in (most-recent bytes win where they overlap); a
@@ -560,9 +572,23 @@ struct Surface {
 /// superseded the held region).
 #[derive(Clone, Copy)]
 enum Held {
-    /// Direct mode: the surface-space region awaiting RESOURCE_FLUSH.
-    Direct(Rect),
+    /// Direct mode: the surface-space regions awaiting RESOURCE_FLUSH, ONE
+    /// PER SLOT (C-2d-b). Entry `i` is slot `i`'s pending region, empty when
+    /// that slot has none.
+    ///
+    /// This was a single `Rect` union, which is well-defined only while every
+    /// held present lands on ONE host resource. Per-slot resources break that:
+    /// a present rotates the slot, so two held presents sit on DIFFERENT
+    /// resources and there is no single resource for a union to be flushed
+    /// against. Bounded by construction -- a client cannot hold more presents
+    /// than it has slots -- so this is an array, not a growable list.
+    ///
+    /// Unioning still happens, but PER SLOT: a second held present on the same
+    /// slot merges, which is the case the old union actually served.
+    Direct([Rect; WEAVE_SLOTS as usize]),
     /// Composed mode: the SCREEN-space region awaiting transfer + flush.
+    /// Unaffected by the per-slot split -- the screen is one resource
+    /// regardless of which client slot fed it.
     Composed(Rect),
 }
 
@@ -1142,9 +1168,9 @@ impl Comp {
             patchwork: false,
             slot_stride: 0,
             weave: None,
-            resource_id: 0, // minted with the first generation (create)
+            res_ids: [0; WEAVE_SLOTS as usize], // minted with the first generation
             old_weave: None,
-            res_stale: false,
+            res_stale: [false; WEAVE_SLOTS as usize],
             held: None,
             cfg_serial: 0,
             offered: None,
@@ -1164,9 +1190,13 @@ impl Comp {
     /// Allocate one weave GENERATION: DMA chunk + map + zero + a fresh 2D
     /// resource with the whole weave attached as backing. The shared body
     /// of the spec's WeaveFirst (create) and Reweave (resize ack).
-    /// Returns (weave, slot_stride, resource_id); every failure path
-    /// rolls back fully.
-    fn alloc_weave(&mut self, w: u32, h: u32) -> Result<(Weave, u64, u32), u32> {
+    /// Returns (weave, slot_stride, per-slot resource ids); every failure
+    /// path rolls back fully.
+    fn alloc_weave(
+        &mut self,
+        w: u32,
+        h: u32,
+    ) -> Result<(Weave, u64, [u32; WEAVE_SLOTS as usize]), u32> {
         let stride = (w as u64) * 4;
         let slot_bytes = stride * (h as u64);
         let slot_stride = (slot_bytes + PAGE - 1) & !(PAGE - 1);
@@ -1192,17 +1222,37 @@ impl Comp {
         // occupant's bytes into a client mapping.
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
 
-        let res = self.next_res_id();
-        if self.gpu.resource_create_2d(res, w, h).is_err() {
-            unsafe { t_burrow_detach(va, size) };
-            unsafe { t_close(handle) };
-            return Err(p9::E_NOMEM);
-        }
-        if self.gpu.attach_backing(res, pa as u64, size as u32).is_err() {
-            let _ = self.gpu.resource_unref(res);
-            unsafe { t_burrow_detach(va, size) };
-            unsafe { t_close(handle) };
-            return Err(p9::E_NOMEM);
+        // ONE RESOURCE PER SLOT (4.5.8), each backed by its own slot at
+        // `pa + i*slot_stride` rather than by the whole weave -- that is what
+        // makes slot <-> resource 1:1. The weave's PA is contiguous (the
+        // whole-weave attach this replaces relied on exactly that), so the
+        // per-slot offsets are sound.
+        let mut res_ids = [0u32; WEAVE_SLOTS as usize];
+        for i in 0..WEAVE_SLOTS as usize {
+            let res = self.next_res_id();
+            let ok = self.gpu.resource_create_2d(res, w, h).is_ok()
+                && self
+                    .gpu
+                    .attach_backing(
+                        res,
+                        pa as u64 + (i as u64) * slot_stride,
+                        slot_stride as u32,
+                    )
+                    .is_ok();
+            if !ok {
+                // Roll back THIS mint (a create that succeeded with a failed
+                // attach leaves a resource behind) and every earlier one, so
+                // a partial generation never escapes.
+                let _ = self.gpu.resource_unref(res);
+                for &prev in &res_ids[..i] {
+                    let _ = self.gpu.detach_backing(prev);
+                    let _ = self.gpu.resource_unref(prev);
+                }
+                unsafe { t_burrow_detach(va, size) };
+                unsafe { t_close(handle) };
+                return Err(p9::E_NOMEM);
+            }
+            res_ids[i] = res;
         }
         Ok((
             Weave {
@@ -1212,7 +1262,7 @@ impl Comp {
                 share_id: None,
             },
             slot_stride,
-            res,
+            res_ids,
         ))
     }
 
@@ -1223,15 +1273,17 @@ impl Comp {
     /// caller has already ensured no scanout references `res` (the mode
     /// machine + force-away in retire; the present-tail old drop runs
     /// after the current generation's content took the display).
-    fn release_gen(&mut self, w: &Weave, res: u32) {
+    fn release_gen(&mut self, w: &Weave, res_ids: &[u32; WEAVE_SLOTS as usize]) {
         if let Some(id) = w.share_id {
             let rc = unsafe { t_weft_unshare(id) };
             if rc < 0 {
                 // Already claimed (consumed at Map) -- expected.
             }
         }
-        let _ = self.gpu.detach_backing(res);
-        let _ = self.gpu.resource_unref(res);
+        for &res in res_ids.iter() {
+            let _ = self.gpu.detach_backing(res);
+            let _ = self.gpu.resource_unref(res);
+        }
         unsafe { t_burrow_detach(w.va, w.size) };
         unsafe { t_close(w.handle) };
     }
@@ -1248,14 +1300,14 @@ impl Comp {
         if w == 0 || h == 0 || w > disp_w || h > disp_h {
             return Err(p9::E_INVAL);
         }
-        let (weave, slot_stride, res) = self.alloc_weave(w, h)?;
+        let (weave, slot_stride, res_ids) = self.alloc_weave(w, h)?;
 
         let s = self.surf_mut(n).unwrap();
         s.w = w;
         s.h = h;
         s.slot_stride = slot_stride;
         s.weave = Some(weave);
-        s.resource_id = res;
+        s.res_ids = res_ids;
         s.state = SurfState::Woven;
         // G-6: host at create -- the focused empty leaf takes it, else the
         // focused leaf splits. A pane-table-exhausted surface stays
@@ -1327,17 +1379,17 @@ impl Comp {
 
         // Reweave: mint the new generation FIRST (a failure leaves the
         // current one untouched and the offer standing for a retry).
-        let (weave, slot_stride, res) = self.alloc_weave(w, h)?;
+        let (weave, slot_stride, res_ids) = self.alloc_weave(w, h)?;
         let s = self.surf_mut(n).unwrap();
         let old = s.weave.take().unwrap();
-        let old_res = s.resource_id;
+        let old_res = s.res_ids;
         s.old_weave = Some((old, old_res));
         s.weave = Some(weave);
-        s.resource_id = res;
+        s.res_ids = res_ids;
         s.w = w;
         s.h = h;
         s.slot_stride = slot_stride;
-        s.res_stale = true; // the fresh resource has no content yet
+        s.res_stale = [true; WEAVE_SLOTS as usize]; // the fresh resource has no content yet
         s.offered = None;
         // Defensive (mode-machine-unreachable: Direct(n) implies the
         // surface was display-sized, which implies any outstanding offer
@@ -2144,10 +2196,20 @@ impl Comp {
             None => return,
         };
         match held {
-            Held::Direct(r) => {
+            Held::Direct(rects) => {
                 if self.scanout == Scanout::Direct(n) {
-                    if let Some(res) = self.surf(n).map(|s| s.resource_id) {
-                        let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
+                    // Flush EVERY slot that has a pending region, each against
+                    // its own resource. Flushing only "the current slot" would
+                    // silently drop the others -- a flush the client was
+                    // promised by `release`.
+                    let ids = match self.surf(n).map(|s| s.res_ids) {
+                        Some(ids) => ids,
+                        None => return,
+                    };
+                    for (i, r) in rects.iter().enumerate() {
+                        if !r.is_empty() {
+                            let _ = self.gpu.flush(ids[i], r.x, r.y, r.w, r.h);
+                        }
                     }
                 }
             }
@@ -2349,9 +2411,13 @@ impl Comp {
                 let _ = self.gpu.set_scanout(0, dw, dh);
                 self.bound_res = 0;
             }
-            // (4) The GPU resource dies before its backing.
-            let _ = self.gpu.detach_backing(s.resource_id);
-            let _ = self.gpu.resource_unref(s.resource_id);
+            // (4) The GPU resources die before their backing -- all
+            // WEAVE_SLOTS of them (C-2d-b), or a retire leaks every slot but
+            // one, in the process that IS the console.
+            for &res in s.res_ids.iter() {
+                let _ = self.gpu.detach_backing(res);
+                let _ = self.gpu.resource_unref(res);
+            }
             // (5) Drop the server refs: unmap our own mapping, close the
             // weave handle (serverRef -> FALSE; #847 keeps the pages until
             // the client's mapping ref drops too).
@@ -2363,7 +2429,7 @@ impl Comp {
         // resource was never scanned out (only a post-fence present could
         // have made it visible, and that present would have retired it).
         if let Some((oldw, old_res)) = s.old_weave {
-            self.release_gen(&oldw, old_res);
+            self.release_gen(&oldw, &old_res);
         }
         // No diagnostic (#55b): a surface retire is routine steady-state
         // traffic (every client exit / pane close), and with a live-acking
@@ -3122,7 +3188,7 @@ impl Comp {
             self.scanout = Scanout::Off;
             self.pending_direct = Some(n);
             if let Some(s) = self.surf_mut(n) {
-                s.res_stale = true;
+                s.res_stale = [true; WEAVE_SLOTS as usize];
             }
         } else {
             self.scanout = Scanout::Off;
@@ -4271,7 +4337,7 @@ impl Comp {
         }
         if let Some(sl) = consent_sl {
             if let Some(s) = self.surf_mut(sl) {
-                s.res_stale = true;
+                s.res_stale = [true; WEAVE_SLOTS as usize];
             }
             self.gl_retarget(sl);
         }
@@ -4369,7 +4435,7 @@ impl Comp {
                 c.present_to = None;
             }
             if let Some(s) = self.surf_mut(sl) {
-                s.res_stale = true;
+                s.res_stale = [true; WEAVE_SLOTS as usize];
             }
             self.gl_retarget(sl);
         }
@@ -6212,7 +6278,7 @@ impl Conn {
                         // leave it; its owner's glsrc drives its own switch.
                         if comp.surf(sl).map_or(false, |s| s.gl_src == Some(id)) {
                             if let Some(s) = comp.surf_mut(sl) {
-                                s.res_stale = true;
+                                s.res_stale = [true; WEAVE_SLOTS as usize];
                             }
                             comp.gl_retarget(sl);
                         }
@@ -6612,7 +6678,7 @@ impl Conn {
                     surf.gl_src = None;
                     // The weave never saw the GL frames; the 2D machinery
                     // heals from stale on its next switch.
-                    surf.res_stale = true;
+                    surf.res_stale = [true; WEAVE_SLOTS as usize];
                 }
                 comp.gl_retarget(n);
                 return Ok(());
@@ -6681,9 +6747,12 @@ impl Conn {
             return Err(p9::E_INVAL);
         }
 
-        let (w, h, slot_stride, res, state) = {
+        // No `slot_stride` here since C-2d-b: the slot IS the resource, so no
+        // transfer on this path needs a slot base any more. The composed arm
+        // still needs one and reads it off the surface itself.
+        let (w, h, res_ids, state) = {
             let s = comp.surf(n).ok_or(p9::E_BADF)?;
-            (s.w, s.h, s.slot_stride, s.resource_id, s.state)
+            (s.w, s.h, s.res_ids, s.state)
         };
         if state == SurfState::Minted {
             return Err(p9::E_INVAL); // no weave yet
@@ -6757,19 +6826,23 @@ impl Conn {
                     comp.pending_direct = None;
                 }
                 if let Some(s) = comp.surf_mut(n) {
-                    s.res_stale = true;
+                    s.res_stale = [true; WEAVE_SLOTS as usize];
                 }
             } else {
                 // The deferred direct switch (F16: SET_SCANOUT only at a
                 // present-COMPLETE). A stale client resource (composed-era
                 // presents never transferred to it) expands this transfer
                 // to the full surface first.
-                let stale = comp.surf(n).map_or(false, |s| s.res_stale);
+                let stale = comp
+                    .surf(n)
+                    .map_or(false, |s| s.res_stale[slot as usize]);
                 let xfer: Vec<(u32, u32, u32, u32)> =
                     if stale { alloc::vec![(0, 0, w, h)] } else { rects.clone() };
+                // C-2d-b: the slot IS the resource now, so the transfer
+                // offset loses its slot base and carries only the rect origin.
+                let res = res_ids[slot as usize];
                 for &(tx, ty, tw, th) in &xfer {
-                    let offset = (slot as u64) * slot_stride
-                        + ((ty as u64) * (w as u64) + tx as u64) * 4;
+                    let offset = ((ty as u64) * (w as u64) + tx as u64) * 4;
                     if comp.gpu.transfer(res, offset, tx, ty, tw, th).is_err() {
                         return Err(E_IO);
                     }
@@ -6777,7 +6850,7 @@ impl Conn {
                         return Err(E_IO);
                     }
                 }
-                say!("tapestryd: scanout direct {} ({}x{})", n, w, h);
+                say!("tapestryd: scanout direct {} slot {} ({}x{})", n, slot, w, h);
                 if comp.gpu.set_scanout(res, w, h).is_ok() {
                     // Post-bind full flush (#57): the per-rect flushes
                     // above targeted a not-yet-scanned-out resource
@@ -6790,7 +6863,9 @@ impl Conn {
                     comp.scanout = Scanout::Direct(n);
                     comp.pending_direct = None;
                     if let Some(s) = comp.surf_mut(n) {
-                        s.res_stale = false;
+                        // Only the slot just transferred is clean; the others
+                        // still hold whatever the composed era left them.
+                        s.res_stale[slot as usize] = false;
                     }
                 }
             }
@@ -6824,7 +6899,7 @@ impl Conn {
                     return Err(E_IO);
                 }
                 if let Some(s) = comp.surf_mut(n) {
-                    s.res_stale = true;
+                    s.res_stale = [true; WEAVE_SLOTS as usize];
                 }
                 if !hold {
                     comp.release_held(n);
@@ -6845,7 +6920,7 @@ impl Conn {
                 if let Some((oldw, old_res)) =
                     comp.surf_mut(n).and_then(|s| s.old_weave.take())
                 {
-                    comp.release_gen(&oldw, old_res);
+                    comp.release_gen(&oldw, &old_res);
                 }
                 return Ok(());
             }
@@ -6853,10 +6928,26 @@ impl Conn {
             // form: damage transfer + flush on the client's own
             // scanned-out resource (the zero-copy fullscreen case). A
             // held present transfers but defers every flush to release.
+            // C-2d-b: bind the PRESENTED slot's resource. A client rotates
+            // slots every present, so steady-state Direct now rebinds per
+            // frame -- a KMS page flip with a per-buffer framebuffer, which is
+            // what every display stack does. The offset loses its slot base.
+            let res = res_ids[slot as usize];
+            if comp.bound_res != res {
+                if comp.gpu.set_scanout(res, w, h).is_err() {
+                    return Err(E_IO);
+                }
+                comp.bound_res = res;
+                // The #57 post-bind full flush: a same-size surface REPLACE
+                // renders nothing under the cocoa frontend, so a per-rect
+                // flush after a rebind would show the previous slot's frame.
+                if comp.gpu.flush(res, 0, 0, w, h).is_err() {
+                    return Err(E_IO);
+                }
+            }
             let mut acc: Option<Rect> = None;
             for &(x, y, pw, ph) in &rects {
-                let offset =
-                    (slot as u64) * slot_stride + ((y as u64) * (w as u64) + x as u64) * 4;
+                let offset = ((y as u64) * (w as u64) + x as u64) * 4;
                 if comp.gpu.transfer(res, offset, x, y, pw, ph).is_err() {
                     return Err(E_IO);
                 }
@@ -6870,9 +6961,20 @@ impl Conn {
                 }
             }
             if let Some(r) = acc {
+                // Merge into THIS SLOT's entry (C-2d-b). Other slots' pending
+                // regions are untouched: they sit on different resources and
+                // are owed their own flush at release.
                 let held = match comp.surf(n).and_then(|s| s.held) {
-                    Some(Held::Direct(prev)) => Held::Direct(rect_union(prev, r)),
-                    _ => Held::Direct(r), // a stale Composed hold is superseded
+                    Some(Held::Direct(mut prev)) => {
+                        prev[slot as usize] = rect_union(prev[slot as usize], r);
+                        Held::Direct(prev)
+                    }
+                    // A stale Composed hold is superseded (unchanged).
+                    _ => {
+                        let mut fresh = [Rect::ZERO; WEAVE_SLOTS as usize];
+                        fresh[slot as usize] = r;
+                        Held::Direct(fresh)
+                    }
                 };
                 if let Some(s) = comp.surf_mut(n) {
                     s.held = Some(held);
@@ -6906,7 +7008,7 @@ impl Conn {
                     }
                 }
                 if let Some(s) = comp.surf_mut(n) {
-                    s.res_stale = true;
+                    s.res_stale = [true; WEAVE_SLOTS as usize];
                 }
                 if !hold {
                     comp.release_held(n);
@@ -6922,7 +7024,7 @@ impl Conn {
                 if let Some((oldw, old_res)) =
                     comp.surf_mut(n).and_then(|s| s.old_weave.take())
                 {
-                    comp.release_gen(&oldw, old_res);
+                    comp.release_gen(&oldw, &old_res);
                 }
                 return Ok(());
             }
@@ -6953,14 +7055,14 @@ impl Conn {
                 comp.release_held(n);
             }
             if let Some(s) = comp.surf_mut(n) {
-                s.res_stale = true;
+                s.res_stale = [true; WEAVE_SLOTS as usize];
             }
         } else {
             // Boot / Off / another surface's Direct: the present completes
             // without pixels (D1 contract kept; content heals on later
             // presents once visible).
             if let Some(s) = comp.surf_mut(n) {
-                s.res_stale = true;
+                s.res_stale = [true; WEAVE_SLOTS as usize];
             }
         }
 
@@ -6980,7 +7082,7 @@ impl Conn {
         // server refs drop here. The client's own old mapping drains via
         // its weave-fid clunk (ClunkMap; #847 keeps the pages until then).
         if let Some((oldw, old_res)) = comp.surf_mut(n).and_then(|s| s.old_weave.take()) {
-            comp.release_gen(&oldw, old_res);
+            comp.release_gen(&oldw, &old_res);
             // No diagnostic here (#55b): a generation retire is now ROUTINE
             // steady-state traffic -- the fbcon acks every pane resize, so
             // this fires per split/unsplit while the SESSION is printing,

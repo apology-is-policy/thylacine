@@ -1104,6 +1104,38 @@ correct in every slot only because age 0 routes that slot's first use through
 the full-frame branch, which BG-fills the whole surface. Remove the age-0 route
 and margins rot in slots 1..n-1.
 
+##### 4.5.8c C-2d-b IS LANDED AND UNVERIFIED — no gate can see it fail (2026-08-17)
+
+**The sabotage passed, and that is the finding.** With per-slot resources live,
+aurora's age handling was disabled — `stale_slot = false`, `back = 0`, i.e.
+exactly the pre-C-2d-a client against a server that no longer accumulates — and
+**`ls-gfx` still reported PASS.**
+
+So the two gates that looked like verification are not. `ls-gfx` asserts the
+frame *looks like a console* (`screendump -c`) and that dumps *differ* after a
+command; neither notices a three-frames-stale background around fresh rows. And
+`ls-gfx-panes` drives `tapestry-battery`, which presents **full-frame only** and
+therefore never exercises the accumulator path at all. Between them they cover
+everything about the compositor except the property C-2d changes.
+
+This is the "a green boot proves the gate did not fire" trap one level up: the
+implementation is landed, the existing gates are green, and **there is no
+evidence the rendering is correct** — only evidence that these gates cannot
+tell. It is stated here rather than discovered later.
+
+**What the missing gate must do:** paint a region, damage only a *different*
+region, rotate through all `WEAVE_SLOTS`, then sample a pixel in the region that
+was painted several frames earlier and not since. A correct client repaints the
+union and the pixel holds; a broken one shows what that slot held `nslots`
+presents ago. `ls-gfx-panes` already has the sampling machinery
+(`screendump -P` + `ppm-sample.py` at coordinates the client prints), so the
+work is a scenario, not an instrument. The battery would have to gain a
+damage-only stage to be the vehicle — it presents full-frame everywhere today.
+
+Until that exists, treat C-2d as **implemented, not verified**, and note the
+focused audit is owed too (`usr/tapestryd` is an I-40 audit-trigger surface and
+this changes the live scanout path).
+
 **C-2d-b contains a design sub-problem that is NOT a mechanical edit: HOLD ×
 per-slot × the scanout rebind.** Found by starting the refactor and stopping at
 it (2026-08-17); recorded rather than decided in a hurry, because it changes a
