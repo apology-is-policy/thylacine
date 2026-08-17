@@ -30,7 +30,7 @@ aux's for the first ~1.5 h of the run (its viv-run LS-CI legs), so this run
 did all its reading, editing and design with no cores and queued on the lease
 for the build — which is what the leases are for.
 
-### The close (F1 / F5 / F6 fixed, F3 recorded)
+### The close (F1 / F5 / F6 fixed, F3 recorded) — `ef58d639`
 
 **F1 was C-4's own residue.** §4.5.12 had measured that a texture transfer
 or readback on a tiled renderer is a blit job behind everything the *device*
