@@ -475,6 +475,16 @@ run_one_scenario() {
     export THYLACINE_POOL_IMG="$slot/pool.img"
     export THYLACINE_DISK_IMG="$slot/disk.img"
     export THYLACINE_QMP_SOCK="$slot/qmp.sock"
+    # The SECOND monitor #230 gave run-vm.sh for the console screendump gate
+    # (`build/qmp-gate.sock` by default) is a fixed path too, and it arrived
+    # AFTER the paragraph above was written -- so at JOBS=3 the first batch's
+    # three VMs raced on it: run-vm.sh's `rm -f` then bind, interleaved, and
+    # the loser died at t=0 with "Failed to bind socket ... File exists"
+    # (three attempt-1 INFRA failures in one 37-scenario run, each retried
+    # green -- exactly the deterministic-collision-read-as-flake this comment
+    # warns about). Per-slot like its sibling; run-vm.sh reads the same
+    # variable test.sh's gate does.
+    export THYLACINE_QMP_SOCK2="$slot/qmp-gate.sock"
     # Spread the VNC probe's starting point per slot. lc_pick_vnc_display derives
     # its base from the REPO PATH, which separates trees but gives every scenario
     # in THIS tree the same base -- fine when one runs at a time, a race between
@@ -637,7 +647,7 @@ run_one_scenario() {
 # (verdict, timings) stays until the parent has merged it, and every artifact a
 # failure needs -- transcripts, steps, per-attempt archives -- lives in build/
 # and is not touched here.
-slot_release() { rm -f "$1/pool.img" "$1/disk.img" "$1/qmp.sock" 2>/dev/null || true; }
+slot_release() { rm -f "$1/pool.img" "$1/disk.img" "$1/qmp.sock" "$1/qmp-gate.sock" 2>/dev/null || true; }
 
 # --- G-2: run the scenarios, up to $JOBS at a time ----------------------------
 #
