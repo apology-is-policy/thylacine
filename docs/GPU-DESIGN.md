@@ -1416,6 +1416,99 @@ is stronger than two agreeing greens. The gate keeps the two claims separate
 silently lost its GL cannot satisfy the second by making both sides equally
 wrong. `tools/warp-host.sh composed` runs both legs and requires both.
 
+#### 4.5.10 C-2c — the attach is a compositor-side IMPORT, bounded by hosting; there is no client verb (decided 2026-08-17)
+
+**What C-2c is.** P1b (§4.5.4) proved that a `CTX_ATTACH_RESOURCE` of a client's
+resource into another context is what PERMITS a cross-context blit — without it
+vrend refuses with `Illegal resource`. C-3's composition blits run in
+`COMPOSITOR_CTX` and read every visible surface's resource, so before C-3 can
+blit, something must attach those resources to the compositor's context. GPU-
+DESIGN has called that "the attach verb" and "the I-45 authority-conferral
+point" since 2026-08-13 and left two questions to this chunk: **who may request
+the attach, and bounded by what?**
+
+**The research collapses the fork, so this is a decision reported, not a vote
+requested.** Three shapes were on the table:
+
+1. **A client-facing ctl verb** (`compose-attach <res>` or similar): the client
+   asks that its resource be attached to the compositor's context. **Rejected.**
+   It hands a client a way to *name* a resource for a context it does not own,
+   which is exactly the cross-context naming I-45's guest-exposure half forbids
+   (§8: "no cross-context resource naming"); and it is unnecessary — the client
+   has already expressed the only consent that matters by *presenting into a
+   hosted surface*.
+2. **Attach at blit time, per frame** (attach → blit → detach). Same authority
+   as (3), strictly worse: an attach/detach round trip per surface per frame on
+   the controlq, and a lifetime hazard, since a detach racing a fenced blit that
+   still names the resource is the I-45 "buffers live until the last in-flight
+   submission retires" clause violated by construction. **Rejected.**
+3. **Attach on host, by the compositor, for surfaces it hosts; detach on
+   unhost / retire, after quiesce.** The compositor imports the resources of the
+   surfaces it composes into its own context, exactly once per resource
+   lifetime, and releases them when the surface (or the BO) goes. **Chosen.**
+
+**Prior art, which is unanimous on shape (3).** Wayland compositors import each
+`wl_buffer` (an EGLImage / DMA-BUF) into the compositor's own GL/Vulkan context
+when the client attaches it to a surface — the import *is* the attach, the
+authority *is* the client's `wl_surface.attach` + `commit`, the compositor holds
+its reference while it composes and returns the buffer with
+`wl_buffer.release`. Fuchsia's Scenic takes a sysmem `BufferCollection` import
+token — a capability the client hands over — and imports into its own Vulkan
+device; the client never names Scenic's images. Genode's nitpicker composes
+from client framebuffer dataspaces handed to it through the session; the client
+paints, nitpicker owns the screen. Plan 9's rio draws every window from the
+image the client drew into via `/dev/draw`; the client never touches the
+screen image. In every one of them **the client's act of handing the buffer to
+the compositor is the whole grant, the compositor performs the import into its
+own rendering context, and the reverse direction — a client reaching the
+compositor's or a peer's buffer — does not exist as a verb.** That is shape
+(3), and it is what I-45's guest-exposure half already says in the negative.
+
+**The rule, stated so it can be audited:**
+
+- **Who:** only tapestryd, into `COMPOSITOR_CTX`, and only when `comp_ctx` is
+  live (§4.5.9 — on a `virgl=0` device there is no compositor context and no
+  attach; the CPU path is untouched).
+- **What:** the resources a composition blit can name — for a software surface,
+  all `WEAVE_SLOTS` per-slot resources of a generation (§4.5.8: the presented
+  slot varies per frame, and attaching once per generation beats attaching per
+  present); for a GL-adopted surface (Warp-4 `glsrc` + `present-to`), the
+  consented BO's `res_id`.
+- **When:** at import — `alloc_weave` right after the per-slot mint, and the
+  adoption pairing when it becomes active — never lazily inside the blit path.
+  An attach failure is NOT fatal to the surface: it is recorded per resource
+  (`comp_attached`), the surface keeps working on the CPU/2D arms, and C-3
+  simply does not blit from a resource that is not attached (it falls back to
+  the readback for that surface, exactly as a `virgl=0` host does for all).
+- **Bounded by:** hosting. A resource is attached to the compositor's context
+  iff its surface is one tapestryd hosts; the attach confers nothing to the
+  client (its own context's view is unchanged) and nothing to any peer.
+- **Revoked:** `release_gen` (a generation dies) and the BO's own death
+  (`wbo` destroy / ctx retire) detach BEFORE `resource_unref`, and — once C-3
+  exists — only after the last fenced blit naming the resource has retired
+  (I-45's in-flight clause; C-1's spec already carries the drain). At C-2c
+  there are no blits, so detach-before-unref is the whole ordering; C-3 must
+  add the fence wait in the same commit as the first blit, not after.
+
+**What C-2c can be verified to do, exactly — and this paragraph was rewritten
+before it was ever true, which is the point of §4.5.4c.** The first draft said
+"the host ACCEPTING the attach: a per-generation `comp-attach 3/3` line is the
+conjunction of response-checked round trips virglrenderer answered OK — the
+same standard the C-2b screen line meets". §4.5.4c falsified that standard the
+same hour: `CTX_ATTACH_RESOURCE`'s OK response attests nothing about the
+renderer, so an attach-count line would be a gate that cannot fail. **C-2c's
+gate is therefore P1b's two arms, in-guest**: after the compositor attaches a
+hosted surface's slot resource, blit a small box of it into the screen in
+`COMPOSITOR_CTX` and read the screen back (`TRANSFER_FROM_HOST_3D`) — pixels
+match with the attach; the no-attach control arm (a build flag or a ctl toggle
+that skips the import) must read the renderer's refusal as unchanged pixels,
+i.e. RED. Which means **C-2c lands together with the first blit witness rather
+than before it**, and C-3 grows from that witness instead of introducing the
+blit cold. The device control still applies on top: on `virtio-gpu-pci` there
+is no compositor context, no import, and the surface is unaffected — a
+GL-only leg would pass against a tapestryd that attached unconditionally and
+broke the CPU path.
+
 ## 5. Placement — where the server lives, per backend
 
 The seam is identical on both; the process topology is not, and both are forced:
