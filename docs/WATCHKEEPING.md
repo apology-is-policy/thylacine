@@ -594,8 +594,7 @@ blocks **once**, returning `{"decision":"block","reason":…}` with the question
 > above: the next chunk is the one on your own Next/Ahead line — open it in
 > this turn instead of yielding.
 
-Three things keep it from nagging: `stop_hook_active` (set when it already
-blocked this stop — fire again and it loops forever); a **floor** (120k —
+Three things keep it from nagging: `stop_hook_active`; a **floor** (120k —
 below it the session is conversational, stopping is the expected shape); a
 **ceiling** at the checkpoint line (at/above it stopping is what the contract
 wants; a second voice contradicting the warner would be worse than silence);
@@ -606,12 +605,38 @@ commands carry a caveat marker, and the nudge is tagged — **none of those
 reset the counter**, or the hook would be silent during exactly the long runs
 it is for. Fail-open on every error path.
 
+**What `stop_hook_active` actually means — corrected 2026-08-17 (§8 R12).**
+The hook's own comment reads it as "already blocked *this* stop", i.e. a
+once-per-stop guard. It is not. The harness documents the flag as "whether
+[your hook] already triggered a continuation", and it stays true for **every**
+Stop event until the turn genuinely ends or a user message / compaction
+starts a new one — so as written the hook asks **once per continuation**: it
+guards the *first* unearned stop of a long run (the one most likely to be
+earned) and none after it. Measured by main on their own transcript: fired at
+480k/507 turns; silent at the next stop at 530k/73 turns, squarely inside the
+window; the pattern repeats across the session. The loop-safety the flag
+check was thought to provide is actually supplied by the harness itself,
+which "overrides a Stop hook after it blocks eight times in a row without
+progress" (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`) — the very cap value the field
+report had proposed. The correct scope derives from the transcript, not the
+flag: the block *is* in the transcript (the harness writes the reason as a
+"Stop hook feedback: STOP CHECK …" user record), so count *assistant turns
+since the last block* and re-ask only when that count clears `MIN_TURNS` —
+an immediate re-stop after an answer stays silent structurally, a stop after
+real work asks again, and the harness cap remains the outer belay.
+
 **Proven.** Discrimination-tested across all seven conditions — proven *able
 to fire*, not merely observed staying quiet — with the tool-result and
-notification legs tested to still fire. Live in this session: fired once at
-132k after 20 turns when the assistant paused at the operator's explicit
-"please pause"; the answer "2 — the user asked; answered" ended it, and it did
-not ask again. Asks, does not veto: working as designed.
+notification legs tested to still fire. Live in this session: fired at 132k
+after 20 turns when the assistant paused at the operator's explicit "please
+pause" and again at 386k after 49 turns — each in a *different* user turn;
+the answer "2 — the user asked; answered" ended each, and neither continuation
+was asked twice. Asks, does not veto: working as designed *within* a
+continuation. What the tests did not cover — and what nobody could see,
+because the hook exits 0 on every path and leaves no trace — is the second
+stop of one continuation; "correctly silent", "silenced by the flag" and
+"crashed in the parser" are indistinguishable from outside. The fix begins
+with a ledger row per invocation (R12).
 
 Where it lives is a deliberate trade with a sharp edge (§8 R4): in the repo
 (`tools/`) so it is versioned and survives a clone — but wired from the
@@ -938,7 +963,7 @@ reasoning.
 | resume-note | arm a slot by hand (fresh `.note` → `.pending` + `.meta`), start a session: header names head/reason; slot deleted; `consumed` row | fresh transcript, no slot: nothing emitted |
 | selfcompact `--check` | first run allows; static HEAD twice → BELAY rc 3; HEAD moved resets | dirty tracked change → REFUSED; not in tmux → REFUSED; untracked-only → allowed (the control that must not refuse) |
 | nudge-watch | runtime-random marker rendered in a scratch pane: fires within ~2 s, ledger row | marker absent: silent to the bound, `nudge-timeout`, **and the process was alive the whole time** |
-| stop-hook | a transcript ≥ floor with ≥ 6 assistant turns and no genuine user turn → block JSON; with tool-results and notifications interleaved → still blocks | below floor / above ceiling / few turns / `stop_hook_active` → exit 0 silently |
+| stop-hook | a transcript ≥ floor with ≥ 6 assistant turns and no genuine user turn → block JSON; with tool-results and notifications interleaved → still blocks; **and the second stop of a continuation after ≥ 6 further turns → blocks again** (R12) | below floor / above ceiling / few turns → exit 0 silently; the immediate re-stop after an answer (few turns since the block record) → silent; a "Stop hook feedback" record or a textless user record does NOT reset the user counter |
 | yip | `make test` (Go tests + e2e over an isolated line); `yip doctor` in each checkout; from each checkout `yip presence` shows `(you)` on the *right* member | an uninstalled checkout attaches to a peer — the impersonation trap |
 | leases | two shells `hold` the same resource: exactly one HELD, the other WAITING #1; `release` resolves it; `steal` refused while time remains | `go test -race` — the 24-goroutine exclusivity test |
 
@@ -1091,8 +1116,31 @@ before anyone else adopts it.
 percentage read conservative. Known and chosen; document it where the numbers
 are read.
 
-None of these is a hole in the design; R1 is a hole in a *premise* the design
-stated ("no shared config to drift"), which is why it is first.
+**R12 — the Stop hook asks once per CONTINUATION, not once per stop (main's
+measurement, 2026-08-17; docs confirm).** `stop_hook_active` means "this hook
+already triggered a continuation" and stays true for every later Stop event
+of that turn, so after its first block the hook is silent for the rest of the
+run — measured: fired at 480k/507 turns, silent at 530k/73 turns inside the
+window, repeated across the session. The comment on the guard ("already
+blocked *this* stop") states the belief, not the mechanism; §4.7 of this
+document repeated it uncorrected until today. Two secondaries from the same
+replay: the hook's own "Stop hook feedback" record is a plain user-type text
+that matches none of the non-genuine markers, so it **resets the
+turns-since-user counter** (the number reported is "since the hook last
+spoke"); and a user record whose content has no text block joins to `""`,
+matches nothing, and also resets it. *Fix shape (agreed on the line; main's
+file):* first make it **audible** — a ledger row per invocation (ctx,
+turns-since-user, turns-since-block, flag, decision, why); then derive scope
+from the transcript — re-ask when `MIN_TURNS` assistant turns have passed
+since the last block record — with the harness's own eight-consecutive-blocks
+cap (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`) as the outer belay; exclude the
+feedback record and textless records from "the user spoke". Sabotage: drop
+the since-block conjunct and the same-stop leg must go red.
+
+None of these is a hole in the design; R1 and R12 are holes in a *premise*
+each mechanism stated about itself ("no shared config to drift"; "already
+blocked this stop"), which is why they lead — a comment that names its own
+hazard and asserts it away is what keeps the hazard unexamined.
 
 ---
 
