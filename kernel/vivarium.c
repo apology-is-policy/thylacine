@@ -13,6 +13,8 @@
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
+#include "../mm/slub.h"              // the fork-time sigtab clone (kzalloc)
+
 // The native ceiling, pinned. vivarium.h cannot see syscall.h (the dependency is
 // deliberately one-way), so the constant is declared there and checked here --
 // the only file that can see both.
@@ -1782,10 +1784,11 @@ bool viv_signote_default_is_ignore(enum viv_signote note) {
         return true;
 
     // Everything else terminates, stops, or has no note. TTY_SUSP is the one
-    // worth naming: its default is STOP, and Thylacine's kernel NDFLT-stop arm
-    // is unbuilt (task #15, an ABI decision needing signoff). Reporting
-    // "ignore" for it would be a lie in the opposite direction from the one
-    // V-6b spent its time removing.
+    // worth naming: its default is STOP -- applied at post time by job_stop_cb
+    // or at delivery by the tail's NDFLT-stop arm (434c3fd9 built it; the
+    // header's paragraph has the history). Reporting "ignore" for it would be
+    // a lie in the opposite direction from the one V-6b spent its time
+    // removing.
     default:
         return false;
     }
@@ -1888,6 +1891,49 @@ void viv_sigtab_reset(struct viv_sigtab *tab) {
                                       .restorer = 0, .mask = 0 };
         tab->act[i] = dfl;
     }
+}
+
+// execve's reset for the PHENOTYPE (POSIX execve(2); ARCH 7.6's fork/exec
+// signal-state rule, 2026-08-17): CAUGHT rows go back to SIG_DFL -- the handler
+// was an address in the OLD image and its flags/restorer/mask went with it --
+// while SIG_IGN rows survive intact ("signals set to be ignored by the calling
+// process image shall be set to be ignored by the new process image"). SIG_DFL
+// rows are already default. Same in-place discipline as viv_sigtab_reset: the
+// object survives (#254).
+void viv_sigtab_reset_caught(struct viv_sigtab *tab) {
+    if (!tab) return;
+    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) {
+        struct viv_ksigaction *a = &tab->act[i];
+        if (a->handler == VIV_SIG_DFL || a->handler == VIV_SIG_IGN) continue;
+        struct viv_ksigaction dfl = { .handler = VIV_SIG_DFL, .flags = 0,
+                                      .restorer = 0, .mask = 0 };
+        *a = dfl;
+    }
+}
+
+// fork's copy for the PHENOTYPE (POSIX fork(2); the same rule): the child gets
+// its OWN table holding every one of the parent's dispositions, caught and
+// ignored. Its own, not a shared pointer, because the table's whole safety
+// argument is one immortal object per Proc read lock-free from other CPUs
+// (#254) -- sharing would make one Proc's exec reset the other's dispositions
+// and one Proc's proc_free dangle the other's pointer. A parent with no table
+// is all-SIG_DFL: the child's stays NULL. The child is under construction and
+// unpublished, so the plain store into child->sigtab needs no CAS (contrast
+// viv_sigtab_of, which races peer threads); the parent's table is read once
+// under an acquire load -- a concurrent rt_sigaction on the parent may leave
+// the child with either the old or the new row, the latitude POSIX gives a
+// fork racing sigaction. Returns 0, or -1 on OOM with child->sigtab left NULL
+// (proc_free's kfree(NULL) is a clean no-op).
+int viv_sigtab_clone_into(struct Proc *child, const struct Proc *parent) {
+    if (!child || !parent) return -1;
+    const struct viv_sigtab *src =
+        __atomic_load_n(&parent->sigtab, __ATOMIC_ACQUIRE);
+    if (!src) return 0;
+    struct viv_sigtab *dst = (struct viv_sigtab *)kzalloc(sizeof(*dst), 0);
+    if (!dst) return -1;
+    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) dst->act[i] = src->act[i];
+    __atomic_store_n(&child->sigtab, dst, __ATOMIC_RELEASE);
+    return 0;
 }
 
 void vivarium_build_sigframe(struct viv_sigframe_head *out, u64 signum,

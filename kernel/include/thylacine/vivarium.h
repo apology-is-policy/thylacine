@@ -1369,6 +1369,16 @@ bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
 // free is proc_free, where the Proc itself is gone.
 void viv_sigtab_reset(struct viv_sigtab *tab);
 
+// The phenotype's fork/exec signal-state rule (ARCH 7.6, POSIX; 2026-08-17).
+// execve: reset CAUGHT rows to SIG_DFL, keep SIG_IGN rows (the mask is kept by
+// the caller). NULL-safe.
+void viv_sigtab_reset_caught(struct viv_sigtab *tab);
+// fork: give `child` its OWN copy of `parent`'s table (NULL parent table ->
+// child NULL). 0, or -1 on OOM (child->sigtab left NULL). The child must be
+// unpublished (a plain store, no CAS).
+struct Proc;
+int viv_sigtab_clone_into(struct Proc *child, const struct Proc *parent);
+
 // Decide whether an `rt_sigaction` is inside the translatable domain. PURE.
 //
 // `signum` must be 1..64, must not be SIGKILL/SIGSTOP (POSIX: uncatchable, and

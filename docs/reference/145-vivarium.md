@@ -297,9 +297,17 @@ lazily-allocated per-`Proc` `struct viv_sigtab` (`Proc.sigtab`, reset **in
 place** at exec and freed only at `proc_free` — so the pointer is stable for the
 life of the Proc, which is what makes the lock-free cross-Proc readers below
 safe (#254) — **copied into an `rfork`/`clone` child and reset-caught-only at exec since the fork/exec POSIX rule of 2026-08-17** (it used to be neither inherited nor SIG_IGN-preserving; see "Signal state across fork and exec" below), and an ignored
-signal's note is then **discarded at generation** inside `notes_post`, exactly as
-Linux discards it, returning success because Linux's `kill()` to a process
-ignoring the signal succeeds.
+signal's note is then **discarded at generation** inside `notes_post`, returning
+success because Linux's `kill()` to a process ignoring the signal succeeds. One
+stated divergence from Linux, POSIX-permitted (the 7580c1f7 round, F3): the
+generation-time drop is MASK-BLIND -- a `SIG_IGN` signal that is currently
+BLOCKED is discarded too, where Linux `sig_ignored()` queues it ("blocked signals
+are never ignored, since the handler may change by the time it is unblocked")
+and discards at dequeue. POSIX 2.4.1 leaves it unspecified "whether the signal is
+discarded immediately upon generation or remains pending", so both are
+conformant; the observable difference is the ordering `block; SIG_IGN; raise;
+handler; unblock` -- Linux fires the handler, Thylacine fires nothing. Chosen
+for the slot/latch reasons below and recorded rather than matched.
 
 Post-time and not delivery-time is the load-bearing choice. An ignored note that
 reached the queue would occupy one of 16 slots, would arm the LS-5c terminate
@@ -351,11 +359,8 @@ lifetime rule is unchanged (immortal per Proc; the child gets its OWN table --
 a freed table). Pending notes are never inherited (POSIX: the child's pending
 set is empty; a fresh Proc has a fresh queue).
 
-**A real handler still declines**, and that is deliberate rather than
-unfinished: the Tier-1 frame that would call it is V-6c, and accepting an install
-we would never honour is the silent mistranslation §4 forbids — worse than
-`ENOSYS`, because the guest would believe it is protected. One line in
-`vivarium_sigaction_decide` moves when delivery lands.
+(V-6b's "a real handler still declines" paragraph stood here; V-6c landed the
+Tier-1 frame and a real handler installs and RUNS — see "V-6c" below.)
 
 Two corrections came out of building this, both from measuring rather than
 reasoning:

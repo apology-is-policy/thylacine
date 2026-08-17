@@ -497,9 +497,11 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
 
 **Open, in order:**
 
-1. **AUDIT ROUND OWED** on the SIG_IGN install-time discard chunk
-   (`7580c1f7`: `kernel/notes.c` + the `rt_sigaction` shell; the Notes +
-   VIVARIUM rows) -- ask. (The `ccb597b8` round RAN and CLOSED 2026-08-17:
+1. **AUDIT ROUND OWED** on the fork/exec signal-state chunk (proc.c rfork +
+   exec, vivarium.c helpers; the Notes + LINEAGE rows) and, lighter, on the F5
+   ISIG-discard change (cons.c/ptyfs, LS-8 + ptyfs rows) -- ask. (The
+   `7580c1f7` round RAN and CLOSED 2026-08-17: Fable 5, 0/0/0/4, mechanism
+   sound; `audit_7580c1f7_closed_list.md`. The `ccb597b8` round RAN and CLOSED 2026-08-17:
    Fable 5, 0/0/2/6, all on the new drop site's witness -- positive controls
    in both ldiscs, ptyfs's own `drop_modeflush`, the report line names the
    site, pty-4's leg gained an ARMED witness; `audit_ccb597b8_closed_list.md`.)
@@ -508,13 +510,9 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
 2. ~~F5 vote~~ VOTED + LANDED (POSIX: an ISIG char discards the pending line
    in both ldiscs; PTY-DESIGN `e69e9baf` + the impl commit; the PTY-3 probe's
    old `xy\n` expectation went red on the first boot and was updated).
-3. **exec RESETS a phenotyped Proc's SIG_IGN rows + blocked mask** -- POSIX/
-   Linux keep both across `execve` (`nohup`, `sh -c 'cmd &'`, `trap '' INT;
-   exec`); `proc_exec_drop_image_state`'s "Zeroing is exact POSIX" is true of
-   CAUGHT handlers only. A phenotype-conditional exec rule = a scripture
-   decision (ARCH 7.6 names the clear as the native rule): options in
-   `memory/bug_exec_resets_sigign_and_mask_phenotype.md`; recommend "phenotype
-   keeps SIG_IGN + mask". Signoff, then a small LINEAGE change + a probe leg.
+3. ~~exec resets SIG_IGN + mask~~ VOTED + LANDED with the fork half (task #127
+   both halves; scripture `c484a7d1` + the impl commit): fork copies the sigtab
+   + mask into the child, exec keeps SIG_IGN + mask on the phenotype.
 4. **THE CONSOLE TX RING IS BYTE-ATOMIC, NOT MESSAGE-ATOMIC** (handed to aux by
    main 2026-08-17; `memory/bug_console_tx_ring_byte_atomic.md`): the kernel's
    `cons_diag_puts` (the #126 non-blocking IRQ-safe emitter -- per BYTE under

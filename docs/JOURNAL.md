@@ -285,3 +285,40 @@ into this pool; not a guest result, not coverage). pty-4 passed WITH the new
 armed witness (the pts's cooked echo matched before the cursor-35 anchor — the
 delivery path was exercised, not merely reached). Pushed to both mirrors after
 the fixup.
+
+## 2026-08-17 (aux) — the votes came back: ISIG discards, fork/exec goes POSIX, and the 7580c1f7 round
+
+The operator answered all three questions in one round: spawn the 7580c1f7
+round (yes), F5 (adopt POSIX — an ISIG character discards the pending line in
+both ldiscs), and the exec item (the phenotype keeps `SIG_IGN` + the mask). Each
+landed scripture-first.
+
+**F5** (`e69e9baf` scripture, `4df51c30` impl): the kernel ISIG arm and the
+ptyfs ISIG arm zero the pending assembly when ICANON is set — a disposition like
+an erase, not a counted drop, deliberately narrower than POSIX's full flush
+(committed lines in the ring stay; output is never flushed — the console TX ring
+carries kernel diagnostics). The PTY-3 pouch probe's leg H had pinned the OLD
+posture (`x` ^C `y` CR → `xy\n`) and went red on the first boot — the fixture
+that encoded the divergence, found by the change that removed it; updated to
+`y\n` as on Linux. Sabotages S9/S10 each red on the named check.
+
+**fork/exec** (`c484a7d1` scripture): reading `proc_exec_drop_image_state` for
+the exec half surfaced the fork half too — task #127, recorded at L-3d as "two
+behaviours and a design decision", never landed. So the chunk is the pair:
+`rfork` copies the parent's sigtab into the child's OWN table (before the child
+is postable) plus the caller's `note_mask`; `execve` resets caught rows only and
+keeps `SIG_IGN` + the mask; native keeps the Plan 9 clear. Probe legs L217–L228
+drive a real fork and a real exec (the children name the first wrong fact
+through the report dup); the unit test pins the two primitives.
+
+**The 7580c1f7 round** (Fable 5, 0/0/0/4) re-derived the install-time discard
+SOUND — the linearization, the primitive, the shell, the pre-stamp arithmetic —
+and found the one ordering nobody had tested: `block; SIG_IGN; raise; handler;
+unblock`. Linux queues a blocked ignored signal ("the handler may change by the
+time it is unblocked") and discards at dequeue; Thylacine drops at generation,
+mask-blind. POSIX 2.4.1 permits both, so it is recorded as a stated divergence
+rather than matched — but the docs had said "exactly as Linux", and the lesson
+worth keeping is that "exactly as X" is a claim about every ordering. F1: the
+SIG_DFL/default-ignore purge disjunct had no driver → L229–L232 with a positive
+control (S13 reddens only the negative). F2/F4: an over-claiming comment and two
+stale sentences.

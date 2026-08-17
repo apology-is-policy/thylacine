@@ -38,6 +38,8 @@
                                     //       against the REAL constants, not copies
 #include <thylacine/vivarium.h>
 
+#include "../../mm/slub.h"          // #127: a real sigtab, so proc_free frees it
+
 void test_vivarium_t1_renumbers(void);
 void test_vivarium_rejects_are_deliberate(void);
 void test_vivarium_unknown_forwards(void);
@@ -3101,6 +3103,87 @@ void test_vivarium_dup3_domain(void) {
 //
 // Driven through viv_fcntl_for_test (the real arm, on a fresh Proc: no
 // exception frame, which the FCNTL case never reads).
+// The phenotype's fork/exec signal-state rule (task #127; ARCH 7.6, POSIX;
+// operator-voted 2026-08-17): rfork COPIES the sigtab into the child's OWN
+// table; execve resets CAUGHT rows to SIG_DFL and KEEPS SIG_IGN rows. This
+// pins the two primitives where the table is directly observable (the in-guest
+// legs L217-L228 drive them through a real fork + execve). Each leg names the
+// row that would read wrong under the OLD behaviour (a full zero at exec; no
+// copy at fork).
+void test_vivarium_sigtab_fork_exec_rule(void);
+void test_vivarium_sigtab_fork_exec_rule(void) {
+    struct viv_sigtab *tab =
+        (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(tab != NULL, "sigtab alloc");
+    struct viv_ksigaction ign = { .handler = VIV_SIG_IGN, .flags = 0,
+                                  .restorer = 0, .mask = 0 };
+    struct viv_ksigaction hnd = { .handler = 0x400000ull, .flags = 0x14000000ull,
+                                  .restorer = 0x400100ull, .mask = 0x2ull };
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_PIPE, &ign);        // ignored
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &hnd);   // caught
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_TTY_HUP, &hnd);     // caught
+
+    // ---- exec: caught -> SIG_DFL (flags/restorer/mask too); ignored KEPT.
+    viv_sigtab_reset_caught(tab);
+    struct viv_ksigaction got;
+    TEST_ASSERT(!viv_sigtab_note_handler(tab, VIV_SIGNOTE_INTERRUPT, &got),
+                "exec: the caught interrupt row is no longer a handler");
+    TEST_ASSERT(tab->act[(u32)VIV_SIGNOTE_INTERRUPT].handler == VIV_SIG_DFL
+                && tab->act[(u32)VIV_SIGNOTE_INTERRUPT].flags == 0
+                && tab->act[(u32)VIV_SIGNOTE_INTERRUPT].restorer == 0
+                && tab->act[(u32)VIV_SIGNOTE_INTERRUPT].mask == 0,
+                "exec: the caught row is a clean SIG_DFL (flags/restorer/mask zeroed)");
+    TEST_ASSERT(!viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_HUP, &got),
+                "exec: the second caught row reset too");
+    TEST_ASSERT(viv_sigtab_note_ignored(tab, VIV_SIGNOTE_PIPE),
+                "exec: SIG_IGN SURVIVES execve (POSIX) -- the row the old full zero lost");
+    TEST_ASSERT(!viv_sigtab_note_ignored(tab, VIV_SIGNOTE_CHILD_EXIT),
+                "exec: an untouched SIG_DFL row stays SIG_DFL");
+    viv_sigtab_reset_caught(NULL);                             // NULL-safe
+
+    // ---- fork: the child gets its OWN equal copy; a NULL parent table -> NULL.
+    struct Proc *parent = proc_alloc();
+    struct Proc *child  = proc_alloc();
+    TEST_ASSERT(parent != NULL && child != NULL, "proc_alloc x2");
+    parent->phenotype = PHENO_LINUX;
+    child->phenotype  = PHENO_LINUX;
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &hnd);   // re-arm a caught row
+    parent->sigtab = tab;
+    TEST_EXPECT_EQ(viv_sigtab_clone_into(child, parent), 0, "fork: clone succeeds");
+    TEST_ASSERT(child->sigtab != NULL && child->sigtab != parent->sigtab,
+                "fork: the child has its OWN table (never the parent's pointer)");
+    bool equal = true;
+    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) {
+        if (child->sigtab->act[i].handler  != tab->act[i].handler  ||
+            child->sigtab->act[i].flags    != tab->act[i].flags    ||
+            child->sigtab->act[i].restorer != tab->act[i].restorer ||
+            child->sigtab->act[i].mask     != tab->act[i].mask) equal = false;
+    }
+    TEST_ASSERT(equal, "fork: every row copied -- caught AND ignored (POSIX fork(2))");
+    TEST_ASSERT(viv_sigtab_note_ignored(child->sigtab, VIV_SIGNOTE_PIPE)
+                && viv_sigtab_note_handler(child->sigtab, VIV_SIGNOTE_INTERRUPT, &got)
+                && got.handler == 0x400000ull,
+                "fork: the child reads the ignored PIPE and the caught INTERRUPT");
+    // The copy is a SNAPSHOT: a later change on the parent does not reach the child.
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_PIPE, &hnd);
+    TEST_ASSERT(viv_sigtab_note_ignored(child->sigtab, VIV_SIGNOTE_PIPE),
+                "fork: the child's table is independent of later parent changes");
+    struct Proc *child2 = proc_alloc();
+    struct Proc *bare   = proc_alloc();
+    TEST_ASSERT(child2 != NULL && bare != NULL, "proc_alloc x2 (bare)");
+    bare->phenotype = PHENO_LINUX;
+    child2->phenotype = PHENO_LINUX;
+    TEST_EXPECT_EQ(viv_sigtab_clone_into(child2, bare), 0, "fork: a NULL parent table succeeds");
+    TEST_ASSERT(child2->sigtab == NULL, "fork: ...and leaves the child's NULL (all-SIG_DFL)");
+    TEST_EXPECT_EQ(viv_sigtab_clone_into(NULL, bare), -1, "fork: NULL child refused");
+
+    // proc_free owns each table (the immortal-per-Proc rule): parent frees tab.
+    parent->state = PROC_STATE_ZOMBIE; proc_free(parent);
+    child->state  = PROC_STATE_ZOMBIE; proc_free(child);
+    child2->state = PROC_STATE_ZOMBIE; proc_free(child2);
+    bare->state   = PROC_STATE_ZOMBIE; proc_free(bare);
+}
+
 extern s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
 void test_vivarium_fcntl_dupfd_errnos(void);
 void test_vivarium_fcntl_dupfd_errnos(void) {

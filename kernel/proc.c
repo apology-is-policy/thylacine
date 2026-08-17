@@ -57,7 +57,13 @@
 // it), so proc.c can hold the pointer and hand it to vivarium.c but cannot
 // reach into the layout -- which is what keeps exec's disposition reset a
 // single call to the owning module instead of a field walk that drifts from it.
+// The three are the phenotype's fork/exec signal-state rule (ARCH 7.6, POSIX):
+// rfork copies the table (viv_sigtab_clone_into: the child gets its OWN
+// table, or NULL when the parent has none), execve resets CAUGHT rows only
+// (viv_sigtab_reset_caught: SIG_IGN survives), and the native full reset stays.
 void viv_sigtab_reset(struct viv_sigtab *tab);
+void viv_sigtab_reset_caught(struct viv_sigtab *tab);
+int  viv_sigtab_clone_into(struct Proc *child, const struct Proc *parent);
 
 static struct kmem_cache *g_proc_cache;
 static struct Proc       *g_kproc;
@@ -1331,28 +1337,15 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // no fork can walk a Proc INTO a non-default ABI -- only exec-under-a-
     // vivarium sets it in the first place.
     child->phenotype      = parent->phenotype;
-    // #102 F7, the seam this line's own reasoning opens: the phenotype crosses
-    // the fork but the SIGNAL DISPOSITIONS do not. `child->sigtab` stays NULL,
-    // which reads as all-SIG_DFL, so a forked Linux child would silently lose
-    // every handler and every SIG_IGN its parent installed -- POSIX fork(2)
-    // inherits both. (execve(2) is the different rule, and also unimplemented:
-    // it resets CAUGHT dispositions to SIG_DFL and PRESERVES ignored ones, so
-    // whoever builds process creation needs two behaviours here, not one.)
-    //
-    // REACHABLE SINCE LINEAGE L-3d, and this paragraph used to claim the
-    // opposite: "UNREACHABLE at v1.0 ... no clone/fork/execve number is a table
-    // row, so a PHENO_LINUX Proc cannot create another Proc at all." True when
-    // written (#102 F7), FALSE the moment clone became a VIV_TIER2 row. A
-    // forked Linux child now really does lose every handler and every SIG_IGN
-    // its parent installed.
-    //
-    // STILL NOT FIXED HERE, for the reason the original text itself gave:
-    // execve(2) needs the OPPOSITE rule (reset CAUGHT dispositions to SIG_DFL,
-    // PRESERVE ignored ones), so this is two behaviours and a design decision
-    // rather than a copy -- and the sigtab is on the V-6 audit surface.
-    // Exposure is narrow: the only clone shape vivarium_clone_decide admits is
-    // vfork-then-exec, and musl's posix_spawn child resets its own dispositions
-    // before exec'ing. Task #127; it lands with execve and wait4 at L-6.
+    // #102 F7 / task #127: the phenotype crosses the fork and, since the
+    // fork/exec signal-state rule (2026-08-17, ARCH 7.6), so do the SIGNAL
+    // DISPOSITIONS and the caller's note_mask -- copied further down, once the
+    // child's table and thread exist. The two behaviours the original comment
+    // asked for are both specified now: fork copies everything (POSIX fork(2));
+    // execve resets CAUGHT rows to SIG_DFL and PRESERVES ignored ones (POSIX
+    // execve(2); proc_exec_drop_image_state). Before this a forked Linux child
+    // read all-SIG_DFL with an empty mask (`trap '' PIPE; cmd | head` handed
+    // cmd a SIG_DFL SIGPIPE), and the exec image lost SIG_IGN and the mask.
     //
     // THE SINGLE-THREADEDNESS THIS PARAGRAPH USED TO BUY SURVIVES, ON DIFFERENT
     // GROUNDS -- and notes.c leans on it for the sigtab tearing argument, so
@@ -1438,6 +1431,23 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
         return -1;
     }
 
+    // POSIX fork(2) for the PHENOTYPE (task #127; the fork/exec signal-state
+    // rule, ARCH 7.6): the child inherits every signal disposition -- caught
+    // and ignored -- in a table of its OWN, so the immortal-per-Proc lifetime
+    // that keeps the lock-free cross-Proc readers safe (#254) is unchanged. A
+    // NULL parent table is all-SIG_DFL and leaves the child's NULL. Native
+    // Procs: nothing crosses rfork (the handler_va precedent). On OOM
+    // child->sigtab stays NULL and proc_free's kfree is a clean no-op (the
+    // allowance/env discipline above); the fork fails rather than producing a
+    // child with the wrong dispositions. The mask half is copied onto the child
+    // thread below, once it exists.
+    if (parent->phenotype == PHENO_LINUX &&
+        viv_sigtab_clone_into(child, parent) != 0) {
+        child->state = PROC_STATE_ZOMBIE;
+        proc_free(child);
+        return -1;
+    }
+
     // P5-hostowner-a: child->proc_flags stays 0 (KP_ZERO from
     // proc_alloc) — deliberately NOT copied from the parent. In
     // particular PROC_FLAG_CONSOLE_ATTACHED is never conferred by
@@ -1503,6 +1513,12 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
         proc_free(child);
         return -1;
     }
+    // POSIX fork(2), the mask half (the phenotype only): the child's thread
+    // starts with the CALLING thread's note_mask. Written before ready() -- the
+    // child has not run, so no reader can race the plain store; the mask is
+    // owner-written thereafter (rt_sigprocmask). Native keeps a zero mask (the
+    // rfork rule).
+    if (parent->phenotype == PHENO_LINUX) ct->note_mask = t->note_mask;
 
     // P3-A: link child into parent's children list under the proc-table
     // lock. This is the publication point — after release, the child is
@@ -3047,17 +3063,32 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self) {
     // return, which runs on a thread of THIS Proc") and concluded from
     // proc_exec_alone that there was nobody else. The single-THREAD half was
     // true; the single-READER half was not, and the gap is invisible from the
-    // free's own line. Zeroing is exact POSIX (viv_sigtab_reset has the
-    // SIG_DFL==0 argument), so nothing is lost by keeping the object alive, and
-    // an immortal-per-Proc table is safe as the reader set GROWS rather than
-    // safe while everyone remembers a rule.
+    // free's own line. Resetting IN PLACE loses nothing (a reset row reads
+    // SIG_DFL by the SIG_DFL==0 argument in viv_sigtab_reset), so keeping the
+    // object alive costs nothing, and an immortal-per-Proc table is safe as
+    // the reader set GROWS rather than safe while everyone remembers a rule.
     //
     // A cross-Proc post racing this reset may observe either the old or the new
     // disposition. That is not a defect: it is the same latitude POSIX gives a
     // sigaction racing a signal already in flight, which proc.h's sigtab
     // paragraph already states as the standing rule for this field.
-    viv_sigtab_reset(p->sigtab);
-    self->note_mask = 0u;
+    //
+    // WHAT resets is phenotype-conditional (the fork/exec signal-state rule,
+    // ARCH 7.6, 2026-08-17). POSIX execve(2): "signals set to be caught ...
+    // shall be set to the default action; ... signals set to be ignored shall
+    // be set to be ignored by the new process image; ... the signal mask is
+    // inherited." So a PHENO_LINUX image keeps its SIG_IGN rows and its
+    // note_mask (nohup, a non-interactive `cmd &` whose SIGINT/SIGQUIT the
+    // shell ignored before exec, `trap '' INT; exec prog` all depend on it) and
+    // resets only the caught rows. The sentence this used to carry -- "Zeroing
+    // is exact POSIX" -- was true of the caught rows and false of the rest. A
+    // native Proc keeps the Plan 9 rule: everything clears.
+    if (p->phenotype == PHENO_LINUX) {
+        viv_sigtab_reset_caught(p->sigtab);
+    } else {
+        viv_sigtab_reset(p->sigtab);
+        self->note_mask = 0u;
+    }
 
     // #247: and the in-handler LATCH, which the reset above missed until it was
     // audited. It is not a disposition, so it does not read as one -- but

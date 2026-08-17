@@ -1239,9 +1239,11 @@ static int do_alpine_shell_gate(void) {
         //      its write returns, so the capture is EXACTLY "y". Pre-fix it
         //      printed "yes: write error: Broken pipe" after the y and lived.
         //   K  the POSITIVE CONTROL: a subshell writer that runs `trap "" PIPE`
-        //      first (SIG_IGN lives in the writer's own sigtab -- a fork does
-        //      not inherit and an exec resets, so the trap has to be set in
-        //      the process that writes). Ignored, the write RETURNS EPIPE and
+        //      first, in the process that writes (its SIG_IGN lives in its own
+        //      sigtab; the parent shell's SIGPIPE is SIG_DFL, so neither the
+        //      fork's inheritance nor the exec's SIG_IGN preservation -- the
+        //      2026-08-17 fork/exec rule -- hands the writer an ignore it did
+        //      not set itself). Ignored, the write RETURNS EPIPE and
         //      the builtin echo reports it -- which proves the fd-3 capture is
         //      armed and can see a message when there is one, so J's bare "y"
         //      is a killed writer and not a broken fixture. It earned its keep
