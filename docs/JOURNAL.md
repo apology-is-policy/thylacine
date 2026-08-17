@@ -223,6 +223,65 @@ phenotype-conditional and a scripture decision — surfaced with options in
 `memory/bug_exec_resets_sigign_and_mask_phenotype.md`; recommendation:
 phenotype keeps `SIG_IGN` + mask.
 
-### The bar
+### The bar (`7580c1f7`)
 
-BAR-PENDING
+Suite 1406/1406 (+1); V-1b PASS (L205–L216 green); L-6c PASS. Sabotages, each
+reddening exactly its named assertion: S1 (the shell never purges) → V-1b
+`marker=L215` — and NOT L209, because the tail's arm still saved that ordering,
+which is the whole reason the arm stays; S2 (S1 + the tail's `SIG_IGN` disjunct
+deleted) → `marker=L209` — the guest died at the unblock and the pre-stamp named
+the leg; S3 (purge without the latch drain) → the unit test at "removing the
+last interrupt drained the latch", 1405/1406. SMP gate + LS-CI ran over the tip
+together with the round close below (see the fixup).
+
+## 2026-08-17 (aux) — the ccb597b8 round came back: sound delivery, an unwitnessed counter
+
+The operator said yes to the round while the chunk above was being built; the
+prosecutor (Fable 5, read-only) ran ~20 minutes and reported 0 P0 / 0 P1 / 2 P2
+/ 6 P3 — every finding on the NEW DROP SITE's witness, none on the delivery it
+was asked to break. It re-derived the I-9 wake pairing, the poll relay, the SMP
+ordering under `g_cons.lock`, the hook/production parity and ptyfs's
+single-threaded ordering line by line and found them as claimed.
+
+What it found instead is worth keeping. **F1**: the fifth drop site's counting
+path had only a NEGATIVE test in both ldiscs — leg B "it fit, no drop counted"
+against an empty ring — so a misattribution to `rx_drop_ring` (the must-stay-
+zero witness) or not counting at all read green. The tree's own
+`test_cons_rx_drop_counters` header says exactly why that is worse than no
+counter, and I had shipped one anyway because the negative FELT like coverage.
+Legs (d)/(e) now drive the site (512 filler + 10 pending → 10 counted here,
+every sibling asserted unmoved, filler intact; 507 + 10 → the 5-byte PREFIX
+delivered in order); the ptyfs selftest drives its site on a fresh pts.
+**F2**: ptyfs had folded that drop into `drop_flush` — against PTY-DESIGN,
+which named "its own counter" for BOTH ldiscs, and against `drop_flush`'s own
+documented shape (a short cooked flush loses tail + newline so the line never
+runs; a short mode-flush loses the tail and the terminator arrives raw, so the
+truncated command RUNS — #95's exact shape, hidden under a name whose doc said
+it could not produce it). One of two twins diverged from a rule written for
+both, and a re-read of the scripture would have caught it. **F3/F4/F6/F7**: the
+one-shot report did not name the new site; the "reachable only by a wedged
+reader" claim was false (ut re-arms before it drains, so a paste can reach it);
+three comments still said TCSAFLUSH; 111-cons.md carried the deleted test with
+the reversed semantics. **F8**: pty-4's type-ahead leg had no ARMED witness —
+bytes landing raw before CHILD_MODE or after the re-arm satisfied the cursor-35
+anchor too, under the old posture as well; it now first requires the pts's
+cooked echo as plain text directly after the CRLF, which only CHILD_MODE cooking
+produces. **F5** stays open as a scripture vote: an ISIG-consumed ^C/^\/^Z does
+not flush the pending canonical line (POSIX and Linux do; Plan 9 does not) —
+the old reset masked it, delivery makes it visible; recommendation: adopt POSIX
+in both ldiscs.
+
+Closed at `56b5a412`: suite 1406/1406; S7 (kernel misattributes to
+`rx_drop_ring`) → "(d) modeflush counts exactly the 10 bytes the full ring could
+not take"; S8 (ptyfs folds into `drop_flush`) → `ptyfs: selftest FAIL:
+modeflush-drop-not-counted`, boot-fatal.
+
+### The bar over the tip (`56b5a412`, both commits)
+
+One run for both (disjoint surfaces): SMP gate 40/40 — default + UBSan ×
+smp4/smp8, N=10, 0 corruption / 0 external-kill / 0 other, in two halves —
+then LS-CI in six batches on TCG: 34 PASS + 2 SKIP (the GL half is not baked
+into this pool; not a guest result, not coverage). pty-4 passed WITH the new
+armed witness (the pts's cooked echo matched before the cursor-35 anchor — the
+delivery path was exercised, not merely reached). Pushed to both mirrors after
+the fixup.

@@ -443,7 +443,7 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
 
 **Landed (newest first, 2026-08-17 back to aux#240):**
 
-- `*(pending)*` -- SIG_IGN discards a PENDING signal at the INSTALL (POSIX
+- `7580c1f7` (+ the ccb597b8 audit close `56b5a412`) -- SIG_IGN discards a PENDING signal at the INSTALL (POSIX
   2.4.3 / Linux `flush_sigqueue_mask`): `notes_discard_name` (mask-blind,
   per-class latch drain, `kill` refused) called by the phenotype `rt_sigaction`
   shell after the store whenever the new disposition ignores; `notes_post`'s
@@ -518,7 +518,24 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    decision (ARCH 7.6 names the clear as the native rule): options in
    `memory/bug_exec_resets_sigign_and_mask_phenotype.md`; recommend "phenotype
    keeps SIG_IGN + mask". Signoff, then a small LINEAGE change + a probe leg.
-4. **#237 stays open and is now sharper**: the phenotype answers SIG_DFL
+4. **THE CONSOLE TX RING IS BYTE-ATOMIC, NOT MESSAGE-ATOMIC** (handed to aux by
+   main 2026-08-17; `memory/bug_console_tx_ring_byte_atomic.md`): the kernel's
+   `cons_diag_puts` (the #126 non-blocking IRQ-safe emitter -- per BYTE under
+   `g_cons_tx.lock`) and a userspace `SYS_PUTS`/`cons_output_write` (under the
+   P1-F writer ROLE, but still per-byte into the same ring) interleave char by
+   char (`ttaappeessttrryydd` on thyla-pi); any gate anchored on a console line
+   printed near a kernel diagnostic burst can go falsely RED. Fix shape: a
+   bounded per-MESSAGE push (`cons_tx_push_bulk` under ONE lock hold; the diag
+   side drops the whole message when it does not fit -- the echo disposition,
+   never spin; the role side pushes what fits under one hold and room-waits for
+   the rest -- so a diag can land BETWEEN two of a writer's chunks but never
+   inside one). Design point to settle first: whether the diag path can take the
+   writer role like the banner does (#152 `cons_kernel_writer_begin`) -- it
+   cannot (IRQ context; the role sleeps), so bulk-push is the honest floor and
+   "anchor lines are short (< the ring's free space)" the residual rule.
+   kernel/cons.c is the LS-8 audit row: audit round + SMP gate. Same family as
+   the OPEN extinction-vs-peer tear (vault seam) and IPI_HALT.
+5. **#237 stays open and is now sharper**: the phenotype answers SIG_DFL
    SIGPIPE for its own Procs; the NATIVE `pipe` note still carries no latch,
    so a native program that writes to a closed pipe with no handler and no fd
    reader keeps a stranded `pipe` note -- a Plan 9 ABI decision (signoff).
