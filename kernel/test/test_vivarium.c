@@ -1446,6 +1446,55 @@ void test_vivarium_sigset_to_notemask(void) {
 }
 
 // -----------------------------------------------------------------------------
+// vivarium.handler_mask — the mask a handler runs under (Linux
+// signal_delivered: blocked |= sa_mask; blocked |= sig unless SA_NODEFER).
+// The delivery path stores this in note_mask for the handler's duration and
+// rt_sigreturn puts the pre-handler mask back (notes.phenotype_sigreturn_
+// restores_mask covers that half; the probe's L237-L244 the wiring).
+// -----------------------------------------------------------------------------
+void test_vivarium_handler_mask(void) {
+    const struct viv_notebit_map m = {
+        .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
+        .snare = 4, .tty = 5,
+    };
+    const u64 CHILD = 1ULL << 3, INTR = 1ULL << 0, PIPE = 1ULL << 2,
+              TTY = 1ULL << 5;
+
+    // mask | sa_mask | sig: the pre-handler mask is KEPT, sa_mask added, the
+    // delivered signal added.
+    u64 hm = vivarium_handler_mask(CHILD, 1ULL << (VIV_SIGINT - 1), 0,
+                                   VIV_SIGPIPE, &m);
+    TEST_ASSERT(hm == (CHILD | INTR | PIPE), "mask | sa_mask | sig");
+
+    // SA_NODEFER: sa_mask still applied, the signal itself NOT added.
+    hm = vivarium_handler_mask(CHILD, 1ULL << (VIV_SIGINT - 1), VIV_SA_NODEFER,
+                               VIV_SIGPIPE, &m);
+    TEST_ASSERT(hm == (CHILD | INTR), "SA_NODEFER omits the delivered signal");
+
+    // Both additions go through the forward translation: a tty-family sa_mask
+    // entry blocks the FAMILY bit (the coarseness the mask row reports), and
+    // SIGKILL in sa_mask is dropped, never a bit.
+    hm = vivarium_handler_mask(0, (1ULL << (VIV_SIGWINCH - 1)) |
+                                  (1ULL << (VIV_SIGKILL - 1)), 0,
+                               VIV_SIGINT, &m);
+    TEST_ASSERT(hm == (TTY | INTR), "sa_mask via the same coarse translation; SIGKILL dropped");
+
+    // An empty sa_mask still blocks the delivered signal (musl's plain signal()
+    // installs with sa_mask = 0): the common case.
+    hm = vivarium_handler_mask(0, 0, 0, VIV_SIGCHLD, &m);
+    TEST_ASSERT(hm == CHILD, "empty sa_mask: exactly the delivered signal");
+
+    // A signal with no note adds no bit (SIGUSR1 = 10); an out-of-range signum
+    // adds nothing rather than shifting by 64+.
+    hm = vivarium_handler_mask(0, 0, 0, 10, &m);
+    TEST_ASSERT(hm == 0, "a note-less signal adds no bit");
+    hm = vivarium_handler_mask(INTR, 0, 0, 0, &m);
+    TEST_ASSERT(hm == INTR, "signum 0 adds nothing (no shift by -1)");
+    hm = vivarium_handler_mask(INTR, 0, 0, 65, &m);
+    TEST_ASSERT(hm == INTR, "signum > VIV_NSIG adds nothing");
+}
+
+// -----------------------------------------------------------------------------
 // vivarium.signal_exclusivity — the domain rule that makes a per-signal
 // disposition representable at all (V-6b, §6.22).
 // -----------------------------------------------------------------------------

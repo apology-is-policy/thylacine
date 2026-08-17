@@ -2222,10 +2222,16 @@ run while SIGPIPE is masked, and must run at the `rt_sigprocmask` that unblocks
 it.
 
 **What Tier 2 still owes**, unchanged from §5.4: queued `siginfo`, `SA_RESTART`
-(a restartable syscall needs the EINTR plumbing LS-8 defers), `SA_NODEFER` and
-`SA_ONSTACK`. Thylacine's `in_handler` blocks *all* delivery for the duration
-where Linux blocks only the delivered signal plus `sa_mask` — a stated
-imprecision in the conservative direction.
+(a restartable syscall needs the EINTR plumbing LS-8 defers) and `SA_ONSTACK`.
+Thylacine's `in_handler` blocks *all* delivery for the duration where Linux
+blocks only the delivered signal plus `sa_mask` — a stated imprecision in the
+conservative direction. **The MASK a handler runs under is Linux's since
+2026-08-17** (aux item 7; ARCH §7.6): `note_mask` = pre-handler | `sa_mask` |
+sig (omitted under `SA_NODEFER`, which is therefore honoured for the mask), and
+`rt_sigreturn` restores the pre-handler mask from the kernel-side save — so a
+handler's own `rt_sigprocmask` does not outlive it, and an `execve`/`fork()`
+from inside a handler passes on what Linux passes on. The guard above is what
+still differs, and it only defers.
 
 ---
 

@@ -423,3 +423,111 @@ scenarios, and so did the two before it; the 34 came from the c8ab2744 close's
 — minus the two SKIPs. A derived figure propagated as a measured one, six
 times, before a run's own tally was set beside it. The tally is now taken from
 the harness's `==> LS-CI:` lines only.
+
+## 2026-08-17 (aux) — the handler-time mask is Linux's; three socket findings; a file count that was not a scenario count
+
+Item 7 of the notes line was the smallest thing on the queue and the only one
+without a vote in front of it (the #237 `pipe` default and the socktab posture
+both alter user-signed scripture), so it went first while the votes ride the
+report. The d3a11c8e round had recorded two permissive-direction divergences:
+delivery never applied `sa_mask | sig` while a handler ran — N-3's blanket
+`in_handler` guard stood in for it — and `rt_sigreturn` did not restore
+`note_mask`, so a handler's own `rt_sigprocmask` outlived the handler, and an
+`execve` from inside a handler handed the image the PRE-handler mask where
+Linux hands it mask | sa_mask | sig.
+
+The change is three lines and a field. `notes_deliver_linux_locked` saves the
+pre-handler mask into a new `Thread.note_saved_mask` and stores Linux's
+`signal_delivered` value — mask | sa_mask | sig, sig omitted under
+`SA_NODEFER`, both additions through the same coarse translation as
+`rt_sigprocmask` (a tty-family `sa_mask` entry blocks the family; SIGKILL is
+dropped); the phenotype's `rt_sigreturn` restores the saved mask, gated on
+`t->proc->phenotype` because a PHENO_LINUX Proc reaches delivery only through
+the Linux path and a native Proc never does; and the fork-from-inside-a-handler
+copy from the round's F1 gained the field — the round's own lesson, "enumerate
+what the restore reads", applied to the next field. Delivery is untouched: the
+guard still holds every note for the handler's duration (VIVARIUM 6.22's stated
+conservative imprecision), so what changed is the mask a handler OBSERVES and
+PASSES ON. The frame's `uc_sigmask` still carries the pre-handler mask and is
+written for reading — a handler that edits it changes nothing, which Linux
+would honour; recorded as the conservative-direction divergence of this frame
+design. Native `noted` keeps the as-built rule.
+
+Two things the witness taught. A signal with no note (SIGUSR1/2) reads back
+CLEAR whatever is blocked — the translation has nothing to set — so a
+`sa_mask = {SIGUSR1}` witness would have proved nothing; the legs use SIGINT,
+SIGCHLD, SIGWINCH and SIGPIPE, one note bit each. And the pre-handler mask is
+{SIGCHLD}, non-zero on purpose: a restore that puts back ZERO is
+indistinguishable from a correct one against an empty pre-handler mask, and
+the fork leg (the child forked from inside the handler restores at ITS
+sigreturn) is exactly the leg a missing copy would pass with zero. The Thread
+grew by a u64 and its size did not change — the 8 bytes landed in the pad
+before the 16-aligned FP area — and that was measured with
+`-fdump-record-layouts` before the size assert's message said so, not derived.
+
+The first boot reddened the "handler's own block undone" leg on a WORKING
+restore, and the reason is the reusable part: probe leg L26, far above, blocks
+SIGWINCH to assert the tty family's honest over-report — and nothing since
+unblocks it. So the pre-handler mask carried the tty bit, the restore put it
+back exactly as it should, and the leg read that as "the block persisted". A
+premise assumed is a premise that can be false without anyone's fault; it is
+now asserted as its own leg (L237: the pre-handler mask is exactly {SIGCHLD}),
+with the tty family unblocked first and re-blocked after so the legs below run
+under the state they always had.
+
+Sabotages, each red on exactly its named check: SM1 (no handler-time store) →
+probe L239 (the mask inside lacks sa_mask|sig; 1413/1413); SM2 (no restore) →
+`notes.phenotype_sigreturn_restores_mask` leg A (1412/1413 — the suite fails
+first, so the probe is not reached; L240/L241 had already shown they
+discriminate, on the premise failure above); SM3 (the fork copy skips the
+field) → probe L244 only (the child forked from inside the handler restores
+zero, and zero is not {SIGCHLD}).
+
+### Three socket findings, from reading before touching
+
+The socktab item (fork does not clone it) was researched instead of started,
+and the research moved it. The enqueued plan said "a refcounted entry"; a
+refcounted ENTRY cannot carry the ctl->data handle swap `connect` performs in
+one table, so it reproduces Linux no better than a per-process copy — and a
+per-process copy is Plan 9 APE's own posture (rocks live in process memory;
+fork copies them). Every fork shape that occurs (accept-then-fork,
+prefork-accept) works under a copy; the divergence — a state mutation through
+one alias not seen through another — is the one LINEAGE already published for
+dup3. VIVARIUM 5.5.2 states today's "not rfork-inherited" as design, so the
+flip is the operator's vote (`memory/design_socktab_across_images.md`).
+
+Alongside it, two defects verified in the tree. `handle_close_on_exec` closes
+a close-on-exec socket handle and pays no socktab drop, and `fcntl(F_SETFD,
+FD_CLOEXEC)` is a served row — so `socket; fcntl; execve` leaves a stale
+(proto, N) entry keyed on a number the new image's next fd-creating call is
+handed: the "dial verb to a stranger" class the V-5 header names as the
+sharpest this table can have, reached through exec rather than dup. And the
+reach is wide, because of the third finding: `socket()` answers EINVAL for
+`SOCK_CLOEXEC|SOCK_NONBLOCK` "rather than masking them off", and EINVAL is
+exactly musl 1.2.5's fallback trigger (`third_party/musl/src/network/socket.c`):
+it retries without the flags, then issues `fcntl(F_SETFD, FD_CLOEXEC)` — served,
+so every musl `SOCK_CLOEXEC` socket reaches the stale-entry path — and
+`fcntl(F_SETFL, O_NONBLOCK)` — unserved, ENOSYS, and musl ignores the result. The
+guest ends up holding a BLOCKING socket it believes non-blocking, the very
+failure the refusal's comment says it prevents. A refusal is only as honest as
+the libc that receives it; the claim was verified on the artifact, not on the
+kernel's return value. Both enqueued (memory + AUX-ROADMAP), main told
+(V-5 is theirs).
+
+Also to verify, not yet verified: holotype R5-F9 (longjmp out of a handler
+wedges `in_handler`) was registered against pouch programs, but busybox ash's
+`raise_interrupt` longjmps out of the SIGINT handler when interrupts are
+enabled, and the phenotype population is every musl-static shell. One VM
+experiment settles it; if real it is a P1 for interactive shells and needs an
+abandoned-frame rule (design).
+
+### The count that was a file count
+
+The push bar over `277b02cc` measured LS-CI at 33 PASS + 2 SKIP; the record —
+three JOURNAL stanzas, four status rows, this session's own resume note — said
+34 + 2. Every bar today measured 33 + 2 over the same 35 scenarios, and the two
+full runs before them said "32/34; 2 SKIPPED" in the harness's own words. The
+34 was the c8ab2744 close message's "36 scenarios", an `*.exp` count that
+included `lib.exp`, minus the two SKIPs: a derived figure that propagated as a
+measured one six times before a run's tally was set beside it. Corrected
+everywhere; the tally now comes from the harness's `==> LS-CI:` lines only.

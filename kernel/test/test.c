@@ -559,6 +559,7 @@ void test_notes_masked_susp_stops_at_delivery(void);   // #252
 void test_notes_stop_dequeue_picks_its_own_note(void);  // the class-blind pop
 void test_notes_class_scans_read_phenotype_sigtab(void); // c8ab2744 F1
 void test_notes_discard_name_purges_pending(void);      // the install-time SIG_IGN discard
+void test_notes_phenotype_sigreturn_restores_mask(void); // the mask half of sigreturn
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
@@ -717,6 +718,7 @@ void test_vivarium_identity_map(void);                   // #150
 void test_vivarium_signal_map(void);                     // VIVARIUM V-6a
 void test_vivarium_sigaction_domain(void);               // VIVARIUM V-6a
 void test_vivarium_sigset_to_notemask(void);             // VIVARIUM V-6a
+void test_vivarium_handler_mask(void);                    // the handler-time mask
 void test_vivarium_signal_exclusivity(void);             // VIVARIUM V-6b
 void test_vivarium_signote_deliverable(void);            // VIVARIUM V-6b
 void test_vivarium_sigtab(void);                         // VIVARIUM V-6b
@@ -2153,6 +2155,7 @@ struct test_case g_tests[] = {
     { "notes.stop_dequeue_picks_its_own_note", test_notes_stop_dequeue_picks_its_own_note, false, NULL },
     { "notes.class_scans_read_phenotype_sigtab", test_notes_class_scans_read_phenotype_sigtab, false, NULL },
     { "notes.discard_name_purges_pending",     test_notes_discard_name_purges_pending,     false, NULL },
+    { "notes.phenotype_sigreturn_restores_mask", test_notes_phenotype_sigreturn_restores_mask, false, NULL },
     { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
     { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },
@@ -2330,6 +2333,7 @@ struct test_case g_tests[] = {
     { "vivarium.signal_map",             test_vivarium_signal_map,             false, NULL },
     { "vivarium.sigaction_domain",       test_vivarium_sigaction_domain,       false, NULL },
     { "vivarium.sigset_to_notemask",     test_vivarium_sigset_to_notemask,     false, NULL },
+    { "vivarium.handler_mask",           test_vivarium_handler_mask,           false, NULL },
     { "vivarium.signal_exclusivity",     test_vivarium_signal_exclusivity,     false, NULL },
     { "vivarium.signote_deliverable",    test_vivarium_signote_deliverable,    false, NULL },
     { "vivarium.sigtab",                 test_vivarium_sigtab,                 false, NULL },

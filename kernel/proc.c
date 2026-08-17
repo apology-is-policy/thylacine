@@ -1545,11 +1545,18 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
         // block, #247; _exit never returns); the flag is written last, once the
         // block is whole. Native: a Plan 9 child is not notified (sysrfork), and
         // no native handler crosses rfork either (the handler_va precedent).
+        //
+        // The list below is EVERYTHING notes_noted_restore reads -- the round's
+        // lesson was that a copy rule written from the standard's field list
+        // misses the fields the implementation added; a field added to the
+        // restore is added here in the same commit (note_saved_mask, the
+        // pre-handler mask the child's own sigreturn puts back).
         if (t->in_handler) {
             for (u32 i = 0; i < 31u; i++) ct->note_saved_regs[i] = t->note_saved_regs[i];
             ct->note_saved_sp_el0 = t->note_saved_sp_el0;
             ct->note_saved_elr    = t->note_saved_elr;
             ct->note_saved_spsr   = t->note_saved_spsr;
+            ct->note_saved_mask   = t->note_saved_mask;
             for (u32 i = 0; i < sizeof(ct->note_saved_fp); i++)
                 ct->note_saved_fp[i] = t->note_saved_fp[i];
             for (u32 i = 0; i < sizeof(ct->note_handling_name); i++)

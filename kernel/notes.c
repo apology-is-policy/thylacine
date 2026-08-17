@@ -1258,6 +1258,23 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
         t->note_handling_name[i] = popped.name[i];
     t->in_handler = true;
 
+    // The handler-time MASK (Linux signal_delivered: blocked |= sa_mask, and
+    // the delivered signal itself unless SA_NODEFER). The frame's uc_sigmask
+    // above was built from the PRE-handler mask, and that is what the
+    // phenotype's rt_sigreturn puts back (notes_noted_restore, from
+    // note_saved_mask -- the frame is written for reading). What this changes
+    // is the mask a running handler OBSERVES and PASSES ON: rt_sigprocmask
+    // reads inside the handler, an execve from inside it (the image inherits
+    // mask|sa_mask|sig, as on Linux), a fork from inside it (the child inherits
+    // the handler-time mask and ITS sigreturn restores the saved one) -- and a
+    // handler's own rt_sigprocmask no longer outlives the handler. Delivery
+    // itself is unchanged: the in_handler guard above still holds every note
+    // for the handler's duration (VIVARIUM 6.22's stated conservative
+    // imprecision), so the mask cannot admit a nested delivery here.
+    t->note_saved_mask = t->note_mask;
+    t->note_mask = vivarium_handler_mask(t->note_mask, act->mask, act->flags,
+                                        signum, &g_viv_notebits);
+
     // SA_RESETHAND: Linux restores SIG_DFL before invoking the handler, which is
     // what makes the one-shot `sysv_signal` idiom safe against a second signal
     // arriving mid-handler. Cheap to honour and wrong to skip.
@@ -1638,6 +1655,19 @@ int notes_noted_restore(struct exception_context *ctx, struct Thread *t) {
     // in V0-V31. Written to the live hardware registers rather than to `ctx`
     // (which has no FP fields); the eret out to EL0 carries them.
     fp_restore_area(t->note_saved_fp);
+
+    // The MASK half of a phenotype sigreturn: Linux restores uc_sigmask from
+    // the frame; here it comes from the kernel-side save the Linux delivery
+    // path wrote beside the registers (the frame is written for reading), so a
+    // handler's own rt_sigprocmask does not outlive the handler and the
+    // handler-time sa_mask|sig block is lifted. PHENOTYPE ONLY, and read off
+    // the Proc rather than off "which delivery path wrote the save": a
+    // PHENO_LINUX Proc reaches delivery through the Linux path exclusively
+    // (its handler_va is never set), and a native Proc never through it. A
+    // native handler keeps the as-built rule -- a mask changed inside the
+    // handler stays changed past noted; the field is not written for it.
+    if (t->proc && t->proc->phenotype == PHENO_LINUX)
+        t->note_mask = t->note_saved_mask;
 
     // Clear in-handler state. note_handling_name is left intact — it
     // becomes dead state after in_handler clears (no consumer reads it

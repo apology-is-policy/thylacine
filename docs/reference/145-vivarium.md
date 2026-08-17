@@ -369,6 +369,29 @@ the mask section below: blocking SIGWINCH really does block SIGHUP), so a parent
 that blocks SIGWINCH hands its forked and exec'd children a blocked
 SIGHUP/SIGTSTP/SIGCONT/SIGQUIT too, where Linux inherits only SIGWINCH.
 
+**The handler-time mask (aux item 7, 2026-08-17).** While a phenotype handler
+runs, `note_mask` is Linux's `signal_delivered` value -- the pre-handler mask |
+`sa_mask` | the delivered signal (omitted under `SA_NODEFER`), computed by the
+pure `vivarium_handler_mask` through the same coarse translation as
+`rt_sigprocmask` (a tty-family `sa_mask` entry blocks the family; SIGKILL in
+`sa_mask` is dropped) -- and the phenotype's `rt_sigreturn` restores the
+PRE-handler mask from `Thread.note_saved_mask`, which the Linux delivery path
+writes beside the register block (`notes_deliver_linux_locked`) and which the
+fork copy above carries with the snapshot. The frame's `uc_sigmask` still
+carries the pre-handler mask and is written for reading: a handler that edits
+it changes nothing (Linux would honour the edit -- a conservative-direction
+divergence of this frame design). Consequences, each a probe leg (L237-L244):
+a handler's own `rt_sigprocmask` does not outlive the handler; a read inside
+the handler shows mask|sa_mask|sig; an `execve` from inside a handler hands the
+image mask|sa_mask|sig plus whatever the handler blocked (Linux keeps the
+current blocked set across exec); a `fork()` from inside a handler gives the
+child the handler-time mask AND a sigreturn that restores the saved one.
+Delivery is unchanged: the `in_handler` guard still holds every note for the
+handler's duration (VIVARIUM 6.22's stated imprecision), so the mask cannot
+admit a nested delivery. Native `noted` keeps the as-built rule: a mask changed
+inside a handler stays changed (`notes.phenotype_sigreturn_restores_mask` has
+that as its control).
+
 (V-6b's "a real handler still declines" paragraph stood here; V-6c landed the
 Tier-1 frame and a real handler installs and RUNS — see "V-6c" below.)
 

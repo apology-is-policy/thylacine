@@ -290,6 +290,58 @@ fn fork_handler_addr() -> u64 { viv_fork_in_handler as usize as u64 }
 fn fih_child() -> i64 { unsafe { core::ptr::read_volatile(&raw const FIH_CHILD) } }
 fn fih_am_child() -> u64 { unsafe { core::ptr::read_volatile(&raw const FIH_AM_CHILD) } }
 
+/// The handler-time MASK legs (L237-L244). Linux `signal_delivered`: while a
+/// handler runs the blocked set is mask | sa_mask | sig (sig omitted under
+/// SA_NODEFER), and rt_sigreturn puts the pre-handler mask back, undoing any
+/// rt_sigprocmask the handler itself did. This handler READS the mask it runs
+/// under (into MH_MASK_IN, before it changes anything), then BLOCKS SIGWINCH --
+/// the change the sigreturn must undo -- and, by mode, forks or execs from
+/// inside the handler so the mask a handler PASSES ON is witnessed too.
+/// SIGWINCH/SIGINT/SIGCHLD/SIGPIPE are used because each maps to a note bit;
+/// a signal with no note (SIGUSR1/2) reads back clear no matter what.
+static mut MH_MODE: u64 = 0;       // 0 = plain, 1 = fork inside, 2 = exec inside
+static mut MH_RUNS: u64 = 0;
+static mut MH_MASK_IN: u64 = 0;
+static mut MH_CHILD: i64 = 0;
+static mut MH_AM_CHILD: u64 = 0;
+
+extern "C" fn viv_mask_handler(_signo: i32, _info: *const u8, _uc: *const u8) {
+    unsafe {
+        MH_RUNS += 1;
+        let mut cur: u64 = 0;
+        // rt_sigprocmask(SIG_BLOCK=0, NULL, &cur): query only.
+        let _ = svc4(NR_RT_SIGPROCMASK, 0, 0, &mut cur as *mut u64 as u64, 8);
+        core::ptr::write_volatile(&raw mut MH_MASK_IN, cur);
+        let winch: u64 = 1u64 << (28 - 1);            // SIGWINCH
+        let _ = svc4(NR_RT_SIGPROCMASK, 0, &winch as *const u64 as u64, 0, 8);
+        match core::ptr::read_volatile(&raw const MH_MODE) {
+            1 => {
+                let pid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+                if pid == 0 {
+                    core::ptr::write_volatile(&raw mut MH_AM_CHILD, 1);
+                } else {
+                    core::ptr::write_volatile(&raw mut MH_CHILD, pid);
+                }
+            }
+            2 => {
+                let selfp = b"/bin/viv-pheno-probe\0";
+                let c0 = b"viv-pheno-probe\0";
+                let c1 = b"maskexec-child\0";
+                let cargv: [u64; 3] = [c0.as_ptr() as u64, c1.as_ptr() as u64, 0];
+                let _ = svc3(NR_EXECVE, selfp.as_ptr() as u64, cargv.as_ptr() as u64, 0);
+                // only reachable if the exec FAILED: the caller exits 1
+            }
+            _ => {}
+        }
+    }
+}
+fn mask_handler_addr() -> u64 { viv_mask_handler as usize as u64 }
+fn mh_set_mode(m: u64) { unsafe { core::ptr::write_volatile(&raw mut MH_MODE, m) } }
+fn mh_runs() -> u64 { unsafe { core::ptr::read_volatile(&raw const MH_RUNS) } }
+fn mh_mask_in() -> u64 { unsafe { core::ptr::read_volatile(&raw const MH_MASK_IN) } }
+fn mh_child() -> i64 { unsafe { core::ptr::read_volatile(&raw const MH_CHILD) } }
+fn mh_am_child() -> u64 { unsafe { core::ptr::read_volatile(&raw const MH_AM_CHILD) } }
+
 // Task #96 sentinel buffers for the phenotype-path FP check (L39-L41).
 static mut FP_SENT: [u8; 512] = [0; 512];
 static mut FP_SEEN: [u8; 512] = [0; 512];
@@ -1298,6 +1350,140 @@ unsafe fn run_linux() -> ! {
         svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
         b"L236\n"
     );
+
+    // --- L237-L244: the handler-time mask discipline (Linux signal_delivered
+    // + rt_sigreturn). While a handler runs, blocked = mask | sa_mask | sig
+    // (sig omitted under SA_NODEFER); sigreturn puts the PRE-handler mask back,
+    // undoing the handler's own rt_sigprocmask; an exec from inside the
+    // handler inherits the handler-time mask; a fork from inside it gives the
+    // child the handler-time mask AND a sigreturn that restores the saved one.
+    // Delivery is unchanged (the in_handler guard still holds every note for
+    // the handler's duration); what these witness is the mask a handler
+    // OBSERVES and PASSES ON. The pre-handler mask is {SIGCHLD}, NON-ZERO on
+    // purpose: a restore that puts back zero must not pass (L240/L243). sa_mask
+    // = {SIGINT}; the handler blocks SIGWINCH; the signal is SIGPIPE via the
+    // reader-less fd 0 -- four signals that each map to a note bit.
+    // Sabotages: SM1 (no handler-time mask) -> L239/L242/L243; SM2 (no restore)
+    // -> L240/L241/L244; SM3 (the fork copy skips note_saved_mask) -> L244.
+    // The pre-handler mask is made EXACT first: L26 blocked SIGWINCH (the tty
+    // family) and nothing since unblocked it, so a restore that put the tty
+    // bit back was read as "the handler's block persisted" on the first boot
+    // -- the fixture's premise, not the mechanism. Unblocked here, re-blocked
+    // at the end so the legs below run under the state they always had.
+    const SA_NODEFER: u64 = 0x4000_0000;
+    set = bit(SIGWINCH);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8);
+    set = bit(SIGCHLD);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64, 0, 8);
+    let mut pre: u64 = 0;
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, &mut pre as *mut u64 as u64, 8);
+    leg!(
+        rep,
+        (pre & bit(SIGCHLD)) != 0
+            && (pre & (bit(SIGWINCH) | bit(SIGINT) | bit(SIGPIPE))) == 0,
+        b"L237\n"                          // the premise, asserted, not assumed
+    );
+    mh_set_mode(0);
+    ksa = [mask_handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), bit(SIGINT)];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L238\n"
+    );
+    let mh0 = mh_runs();
+    let wrc_m = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    let inside = mh_mask_in();
+    leg!(
+        rep,
+        wrc_m < 0 && mh_runs() == mh0 + 1
+            && (inside & bit(SIGPIPE)) != 0      // the delivered signal
+            && (inside & bit(SIGINT)) != 0       // sa_mask
+            && (inside & bit(SIGCHLD)) != 0,     // the pre-handler mask, kept
+        b"L239\n"
+    );
+    let mut now: u64 = 0;
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, &mut now as *mut u64 as u64, 8);
+    leg!(rep, (now & bit(SIGWINCH)) == 0, b"L240\n"); // the handler's own block, undone
+    leg!(
+        rep,
+        (now & (bit(SIGPIPE) | bit(SIGINT))) == 0 && (now & bit(SIGCHLD)) != 0,
+        b"L241\n"                                       // exactly the pre-handler mask
+    );
+    // SA_NODEFER: sa_mask still applied, the signal itself not.
+    ksa = [mask_handler_addr(), SA_RESTORER | SA_SIGINFO | SA_NODEFER, restorer_addr(), bit(SIGINT)];
+    let _ = svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8);
+    let wrc_n = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    let inside_n = mh_mask_in();
+    leg!(
+        rep,
+        wrc_n < 0 && (inside_n & bit(SIGINT)) != 0 && (inside_n & bit(SIGPIPE)) == 0,
+        b"L242\n"
+    );
+    // exec from INSIDE the handler: the image inherits mask | sa_mask | sig,
+    // plus the handler's own block (Linux keeps the current blocked set across
+    // execve). The child forks first so the parent survives its own exec.
+    ksa = [mask_handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), bit(SIGINT)];
+    let _ = svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8);
+    let xk = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if xk == 0 {
+        svc3(NR_FCNTL, rep as u64, F_DUPFD, 20);
+        mh_set_mode(2);
+        let _ = svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1);
+        linux_exit(1)                      // the handler did not run / exec failed
+    }
+    sst = -1;
+    let xr = svc4(NR_WAIT4, xk as u64, &mut sst as *mut i32 as u64, 0, 0);
+    if !(xk > 0 && xr == xk && (sst & 0x7f) == 0 && ((sst >> 8) & 0xff) == 0) {
+        let mut cm: [u8; 5] = [0; 5];
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        let _ = svc3(NR_READ, rep as u64, cm.as_mut_ptr() as u64, 5);
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        if cm[0] == b'L' { leg!(rep, false, &cm[..]); }
+        leg!(rep, false, b"L243\n");
+    }
+    // fork from INSIDE the handler: the child returns through ITS sigreturn and
+    // must read the PRE-handler mask -- the snapshot's mask half crossed the
+    // fork (SIGCHLD set; SIGPIPE/SIGINT/SIGWINCH clear).
+    mh_set_mode(1);
+    let _ = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    if mh_am_child() != 0 {
+        let mut cmask: u64 = 0;
+        let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, &mut cmask as *mut u64 as u64, 8);
+        if (cmask & bit(SIGCHLD)) != 0
+            && (cmask & (bit(SIGPIPE) | bit(SIGINT) | bit(SIGWINCH))) == 0
+        {
+            linux_exit(0)
+        }
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        let m = b"L244\n";
+        let _ = svc3(NR_WRITE, rep as u64, m.as_ptr() as u64, m.len() as u64);
+        linux_exit(1)
+    }
+    sst = -1;
+    let kr = svc4(NR_WAIT4, mh_child() as u64, &mut sst as *mut i32 as u64, 0, 0);
+    if !(mh_child() > 0 && kr == mh_child() && (sst & 0x7f) == 0 && ((sst >> 8) & 0xff) == 0) {
+        let mut cm: [u8; 5] = [0; 5];
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        let _ = svc3(NR_READ, rep as u64, cm.as_mut_ptr() as u64, 5);
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        if cm[0] == b'L' { leg!(rep, false, &cm[..]); }
+        leg!(rep, false, b"L244\n");
+    }
+    mh_set_mode(0);
+    // Restore what the legs below expect: SIGPIPE on the counting handler +
+    // unblocked; SIGCHLD back to its counting handler and unblocked -- via a
+    // SIG_DFL install first, which purges the child_exit notes the reaps above
+    // queued under the block (L231's mechanism), so nothing fires late.
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8);
+    ksa = [SIG_DFL, 0, 0, 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+    set = bit(SIGCHLD) | bit(SIGINT) | bit(SIGPIPE);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8);
+    set = bit(SIGWINCH);                   // back to L26's state for the legs below
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64, 0, 8);
 
     // --- V-5a: sockets -----------------------------------------------------
     // The container's manifest grants /net, so these run against the LIVE netd
@@ -2909,6 +3095,29 @@ unsafe fn run_sigexec_child() -> ! {
     linux_exit(sigstate_check(20, false))
 }
 
+/// L243: the image exec'd from INSIDE a signal handler. Linux carries the
+/// current blocked set across execve, and inside a handler that set is
+/// mask | sa_mask | sig plus whatever the handler blocked itself -- here
+/// {SIGCHLD} | {SIGINT} | {SIGPIPE} | {SIGWINCH}. Reports through fd 20.
+unsafe fn run_maskexec_child() -> ! {
+    const SIGINT: u64 = 2;
+    const SIGPIPE: u64 = 13;
+    const SIGCHLD: u64 = 17;
+    const SIGWINCH: u64 = 28;
+    let mut m: u64 = 0;
+    let want = (1u64 << (SIGINT - 1)) | (1u64 << (SIGPIPE - 1))
+             | (1u64 << (SIGCHLD - 1)) | (1u64 << (SIGWINCH - 1));
+    if svc4(NR_RT_SIGPROCMASK, 0, 0, &mut m as *mut u64 as u64, 8) == 0
+        && (m & want) == want
+    {
+        linux_exit(0)
+    }
+    let mk = b"L243\n";
+    let _ = svc3(NR_LSEEK, 20, 0, SEEK_SET);
+    let _ = svc3(NR_WRITE, 20, mk.as_ptr() as u64, mk.len() as u64);
+    linux_exit(1)
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     let mode: &[u8] = env::args().nth(1).unwrap_or(&[]);
@@ -2923,6 +3132,9 @@ pub extern "C" fn rs_main() -> i64 {
     }
     if mode == b"sigexec-child".as_slice() {
         unsafe { run_sigexec_child() }
+    }
+    if mode == b"maskexec-child".as_slice() {
+        unsafe { run_maskexec_child() }
     }
     if mode == b"native".as_slice() {
         return run_native();

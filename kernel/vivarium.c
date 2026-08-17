@@ -2144,6 +2144,20 @@ u64 viv_notemask_to_sigset(u64 notemask, const struct viv_notebit_map *m) {
     return out;
 }
 
+u64 vivarium_handler_mask(u64 note_mask, u64 sa_mask, u64 sa_flags, u64 signum,
+                          const struct viv_notebit_map *m) {
+    // Linux kernel/signal.c signal_delivered():
+    //     sigorsets(&blocked, &current->blocked, &ka->sa.sa_mask);
+    //     if (!(ka->sa.sa_flags & SA_NODEFER)) sigaddset(&blocked, sig);
+    // Both additions go through the forward translation, so they inherit its
+    // two properties: SIGKILL is dropped, and a tty-family signal blocks the
+    // family (the coarseness the mask row already reports honestly).
+    u64 out = note_mask | viv_sigset_to_notemask(sa_mask, m);
+    if (!(sa_flags & VIV_SA_NODEFER) && signum >= 1 && signum <= VIV_NSIG)
+        out |= viv_sigset_to_notemask(1ULL << (signum - 1), m);
+    return out;
+}
+
 // =============================================================================
 // REAPING -- the pure layer (LINEAGE L-6b). See docs/LINEAGE.md section 5.5.
 // =============================================================================

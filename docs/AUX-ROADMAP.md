@@ -580,7 +580,11 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    refusal's comment claims to prevent (`memory/bug_sock_nonblock_refusal_
    defeated_by_musl.md`; a V-5 design call: a loud non-retried errno vs
    serving non-blocking /net I/O).
-7. **Handler mask discipline on the phenotype** (`memory/bug_handler_mask_
+7. ~~Handler mask discipline on the phenotype~~ **LANDED 2026-08-17** (the
+   handler-time mask is Linux's: mask|sa_mask|sig via `vivarium_handler_mask`,
+   the phenotype's sigreturn restores `note_saved_mask`, the fork copy carries
+   it; +2 unit tests, probe L237-L244, SM1-SM3; hash in the status row).
+   Formerly (`memory/bug_handler_mask_
    discipline_phenotype.md`): sa_mask|sig is never applied while a handler
    runs (N-3's blanket guard stands in), and `notes_noted_restore` does not
    restore `note_mask` (a handler's rt_sigprocmask persists past sigreturn;

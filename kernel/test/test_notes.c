@@ -47,6 +47,7 @@
 // absent from the headers, so every consumer extern-declares them).
 extern u32  notes_name_terminate_latch_for_test(const char *name);
 extern int  notes_noted_default(struct exception_context *ctx, struct Thread *t);
+extern int  notes_noted_restore(struct exception_context *ctx, struct Thread *t);
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
@@ -2416,4 +2417,74 @@ void test_notes_class_scans_read_phenotype_sigtab(void) {
     TEST_ASSERT(e_is_int,
                 "E: a NATIVE Proc ignores the table and the scan names the "
                 "interrupt -- the phenotype is the gate");
+}
+
+// -----------------------------------------------------------------------------
+// notes.phenotype_sigreturn_restores_mask -- the mask half of a phenotype
+// sigreturn (Linux restores uc_sigmask; here the kernel-side note_saved_mask
+// the Linux delivery path wrote beside the registers), and its NATIVE control:
+// a native noted leaves the mask exactly as the handler left it (the as-built
+// rule; the field is not written for it). Both legs use the SAME thread
+// contents, so an unconditional restore fails the control and a missing
+// restore fails the phenotype leg. vivarium.handler_mask covers the value the
+// delivery path stores; the probe's L237-L244 cover the wiring end to end.
+// -----------------------------------------------------------------------------
+void test_notes_phenotype_sigreturn_restores_mask(void);
+void test_notes_phenotype_sigreturn_restores_mask(void) {
+    struct Proc *m = proc_alloc();
+    if (m == NULL) {
+        TEST_ASSERT(false, "proc_alloc m");
+        return;
+    }
+    static struct Thread th;            // BSS-zeroed
+    static struct exception_context ctx;
+    const u64 PRE  = 0x08u;             // the pre-handler mask (child_exit)
+    const u64 HAND = 0x2Du;             // handler-time: pre | sa_mask | sig | own
+
+    // ---- LEG A: PHENO_LINUX -- the restore puts PRE back. ---------------
+    m->phenotype = PHENO_LINUX;
+    th.magic             = THREAD_MAGIC;
+    th.proc              = m;
+    th.next_in_proc      = NULL;
+    th.rendez_blocked_on = NULL;
+    th.in_handler        = true;
+    for (u32 i = 0; i < 31; i++) th.note_saved_regs[i] = 0xA000u + i;
+    th.note_saved_sp_el0 = 0xB000u;
+    th.note_saved_elr    = 0xC000u;
+    th.note_saved_spsr   = 0u;
+    th.note_saved_mask   = PRE;
+    th.note_mask         = HAND;
+    int  a_rc      = notes_noted_restore(&ctx, &th);
+    u64  a_mask    = th.note_mask;
+    bool a_left    = !th.in_handler;
+    u64  a_elr     = ctx.elr;
+
+    // ---- LEG B: NATIVE, same contents -- the mask is left alone. -------
+    m->phenotype = PHENO_NATIVE;
+    th.in_handler      = true;
+    th.note_saved_mask = PRE;
+    th.note_mask       = HAND;
+    int  b_rc   = notes_noted_restore(&ctx, &th);
+    u64  b_mask = th.note_mask;
+    bool b_left = !th.in_handler;
+
+    // ---- LEG C: not in a handler -> refused, nothing touched. ------------
+    th.note_mask = HAND;
+    int  c_rc   = notes_noted_restore(&ctx, &th);
+    u64  c_mask = th.note_mask;
+
+    // ---- TEARDOWN before the first assertion. --------------------------
+    th.proc  = NULL;
+    m->state = PROC_STATE_ZOMBIE;
+    proc_free(m);
+
+    TEST_EXPECT_EQ(a_rc, 0, "A: the phenotype restore succeeds");
+    TEST_ASSERT(a_left, "A: the handler is left");
+    TEST_EXPECT_EQ((int)(a_elr - 0xC000u), 0, "A: the pc is restored (the register half still runs)");
+    TEST_ASSERT(a_mask == PRE, "A: PHENO_LINUX sigreturn restores the PRE-handler mask");
+    TEST_EXPECT_EQ(b_rc, 0, "B: the native restore succeeds");
+    TEST_ASSERT(b_left, "B: the handler is left");
+    TEST_ASSERT(b_mask == HAND, "B: a NATIVE noted leaves the mask as the handler left it (control)");
+    TEST_EXPECT_EQ(c_rc, -1, "C: not in a handler -> refused");
+    TEST_ASSERT(c_mask == HAND, "C: a refused restore touches nothing");
 }

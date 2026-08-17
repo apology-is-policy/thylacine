@@ -1465,6 +1465,17 @@ extern const struct viv_notebit_map g_viv_notebits;
 // "blocked" would describe a state that does not exist.
 u64 viv_notemask_to_sigset(u64 notemask, const struct viv_notebit_map *m);
 
+// The mask a handler RUNS under (Linux signal_delivered): the interrupted
+// thread's mask, plus the action's sa_mask, plus the delivered signal itself
+// unless SA_NODEFER. `sa_mask` is the raw sigset word the guest sent
+// (viv_ksigaction.mask); `signum` the Linux number being delivered. PURE --
+// the delivery path stores the result in note_mask for the handler's duration
+// and puts the pre-handler mask back at rt_sigreturn. Through the same
+// coarse translation as rt_sigprocmask, so a tty-family sa_mask entry blocks
+// the family and SIGKILL in sa_mask is dropped, exactly as the mask row does.
+u64 vivarium_handler_mask(u64 note_mask, u64 sa_mask, u64 sa_flags, u64 signum,
+                          const struct viv_notebit_map *m);
+
 // -----------------------------------------------------------------------------
 // TIER 1 -- the signal frame (V-6c). See VIVARIUM.md §6.22.
 //
