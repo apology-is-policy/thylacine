@@ -313,8 +313,93 @@ proc lc_fail_detail {msg} {
     }
 }
 
+# ---------------------------------------------------------------------------
+# The failure-time state probe -- a scenario's OWN account of the guest at the
+# moment its assertion missed.
+#
+# WHY: pty-4 burned a retry (2026-08-16) at "^Z stops the foreground sleep":
+# the echo stopped at `sleep ` and `Stopped` never came, guest ALIVE. Two
+# causes fit that capture EXACTLY -- the guest received `sleep ` + Enter (INPUT
+# truncation: sleep exited at once, no job to stop) or it received `sleep 30`
+# and stopped correctly while the pts output was lost (OUTPUT loss) -- and a
+# third fits too (the ^Z byte itself lost: sleep 30 RUNNING in the foreground,
+# nobody reading the terminal). Raising sensitivity on the capture cannot
+# separate them; only a SECOND AXIS can. The guest can be ASKED: `jobs` says
+# whether a stopped job exists; a ^C then `jobs` says whether a foreground job
+# was running; an uppercase-pipe token says whether the channel is alive at all.
+#
+# So a scenario sets `::lc_fail_probe` to a script, and lc_fail runs it ONCE,
+# before the kill, only while the VM is alive. It RECORDS, it does not assert:
+# every byte the guest answers is logged (control bytes escaped) as
+# `fail-probe:` steps, and the scenario's comment says how to read them. A
+# probe that fails must not recurse into lc_fail -- so it is cleared before it
+# runs, and lc_probe_capture never calls lc_fail (it uses a bare expect).
+#
+# NOT a retry and NOT a tolerance: it changes nothing on the passing path (a
+# probe set but never needed costs nothing) and turns "the next occurrence
+# will have to be re-derived" into "the next occurrence is decidable from the
+# log". Same principle as the compaction ledger: make the miss AUDIBLE.
+# ---------------------------------------------------------------------------
+set ::lc_fail_probe {}
+
+# Send `bytes` (may be empty: just listen), then record everything the guest
+# answers within `secs` seconds of quiet. Bounded twice: by the quiet timeout
+# and by a chunk cap, so a streaming guest cannot hold the probe open.
+proc lc_probe_capture {bytes secs what} {
+    global timeout
+    set saved $timeout
+    set timeout $secs
+    if {$bytes ne ""} {
+        if {[catch {send -- $bytes} err]} {
+            lc_step "fail-probe: send failed for \[$what\]: $err"
+            set timeout $saved
+            return
+        }
+    }
+    set buf ""
+    set chunks 0
+    expect {
+        -re {.+} {
+            append buf $expect_out(0,string)
+            incr chunks
+            if {$chunks < 200} { exp_continue }
+        }
+        timeout {}
+        eof { append buf "<EOF>" }
+    }
+    set timeout $saved
+    # Escape so the log is one greppable line per probe: ESC and other control
+    # bytes become <xx>; ANSI sequences stay visible instead of repainting the
+    # log.
+    set shown ""
+    foreach ch [split $buf ""] {
+        scan $ch %c code
+        if {$code < 32 || $code == 127} {
+            append shown [format "<%02x>" $code]
+        } else {
+            append shown $ch
+        }
+    }
+    lc_step "fail-probe: \[$what\] -> ${chunks} chunk(s): $shown"
+}
+
+proc lc_fail_probe_run {} {
+    if {![info exists ::lc_fail_probe] || $::lc_fail_probe eq ""} return
+    set probe $::lc_fail_probe
+    set ::lc_fail_probe {}          ;# one-shot: no recursion through lc_fail
+    if {![info exists ::lc_vm_pid]} return
+    if {[catch {exec ps -p $::lc_vm_pid -o stat=} st]} return
+    if {[string match {Z*} [string trim $st]]} return
+    lc_step "fail-probe: begin (VM alive; asking the guest for its own account)"
+    if {[catch {uplevel #0 $probe} err]} {
+        lc_step "fail-probe: script errored: $err"
+    }
+    lc_step "fail-probe: end"
+}
+
 proc lc_fail {msg} {
     lc_step "FAIL: $msg"
+    lc_fail_probe_run
     # Evidence BEFORE the kill: the VM's process state at failure time splits
     # "qemu exited" (stat Z* -- Tcl lazy-reaps, so a dead child lingers as a
     # zombie; kill -0 would lie) from "the serial bridge died under a LIVE VM"
