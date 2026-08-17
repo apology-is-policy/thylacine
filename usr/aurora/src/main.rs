@@ -796,6 +796,17 @@ pub extern "C" fn rs_main() -> i64 {
                     let sub_floor =
                         ow / m.cell_w < 20 || oh / m.cell_h < 5;
                     if sub_floor && !(ow == w && oh == h) {
+                        // This arm declines the offer and keeps the current
+                        // generation, so it never reaches handle_configure --
+                        // and therefore would never reach the slot
+                        // invalidation living inside it (GPU-DESIGN 4.5.8b).
+                        // It IS an invalidation: this CONFIGURE can be the one
+                        // announcing a return to visibility, and while hidden
+                        // the compositor skips transfers. Marking rows dirty is
+                        // not enough on two counts -- it repaints ROWS, never
+                        // the margins outside the grid, and it repaints ONE
+                        // slot where every slot is suspect.
+                        surf.invalidate();
                         for d in term.dirty.iter_mut() {
                             *d = true;
                         }

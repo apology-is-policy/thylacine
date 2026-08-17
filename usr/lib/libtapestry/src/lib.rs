@@ -447,6 +447,22 @@ impl Surface {
         (self.presents - seen).min(u32::MAX as u64) as u32
     }
 
+    /// Mark every slot's content undefined, so the next `nslots` presents each
+    /// see `age` 0 and repaint fully (GPU-DESIGN 4.5.8b).
+    ///
+    /// `handle_configure` and `reweave` call this for you. It is PUBLIC for the
+    /// case they cannot cover: a client that handles a `CONFIGURE` itself
+    /// without routing it through `handle_configure` -- declining a degenerate
+    /// resize offer, say -- takes an invalidation that no library call sees.
+    /// Leaving that to be remembered is what put the invalidation out of reach
+    /// in aurora's sub-floor arm.
+    ///
+    /// One full repaint is NOT a substitute: it fixes the slot it lands in and
+    /// leaves the other `nslots - 1` stale.
+    pub fn invalidate(&mut self) {
+        self.invalidate_slots();
+    }
+
     /// Mark every slot's content undefined: the next `nslots` presents each
     /// see `age` 0 and repaint fully. The compositor's redraw request and a
     /// reweave both land here -- a redraw invalidates EVERY slot, not just
