@@ -322,3 +322,12 @@ worth keeping is that "exactly as X" is a claim about every ordering. F1: the
 SIG_DFL/default-ignore purge disjunct had no driver → L229–L232 with a positive
 control (S13 reddens only the negative). F2/F4: an over-claiming comment and two
 stale sentences.
+
+### The bar over the tip (`d3a11c8e`: F5 + fork/exec + the round close)
+
+SMP gate 40/40 (default + UBSan × smp4/smp8, N=10, 0 corruption / 0
+external-kill / 0 other, two halves); LS-CI 34 PASS + 2 SKIP (GL not baked);
+suite 1408/1408 per commit; sabotages S9/S10 (F5) and S11–S15 (fork/exec)
+each red on the named check — S14/S15 are the WIRING witnesses (the unit test
+cannot see proc.c; the probe legs L223/L226 can, and they went red). Pushed to
+both mirrors after the fixup.
