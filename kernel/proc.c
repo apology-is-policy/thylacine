@@ -1009,30 +1009,37 @@ static void proc_reparent_children(struct Proc *p) {
         // Rare + notable by construction: Thylacine has no daemonize idiom (joey
         // spawns its servers directly), so an adoption means some Proc exited
         // with a live child, and a kproc-adopted one never gets reaped at all.
-        // #126: this goes through the TX RING (cons_diag_*), NEVER the direct
-        // uart_* path. uart_putc's #67 bound is 20 ms PER BYTE, and this line is
-        // ~90 bytes emitted back-to-back while holding g_proc_table_lock -- which
-        // proc.c takes irqsave 40 times and plain 0 times. So against a stalled
-        // host consumer the direct path held the GLOBAL process-table lock
-        // IRQ-masked for ~1.8 s per adoption: precisely the interrupt-dead stall
-        // #67's bound was introduced to prevent, reconstituted by iterating it.
-        // A per-item bound is not a per-operation bound. cons_diag_* never spins
-        // and never sleeps (leaf locks only, woken outside), so this emit costs a
-        // bounded handful of MMIO accesses however stalled the console is -- and
-        // it reaches the framebuffer console too (#76), which uart_* does not.
-        // name[] is always NUL-terminated (proc_set_name) and "" on a
-        // never-exec'd Proc.
-        cons_diag_puts("proc: orphan pid=");
-        cons_diag_putdec((u64)c->pid);
-        cons_diag_puts(" name=\"");
-        cons_diag_puts(c->name);
-        cons_diag_puts("\" (parent pid=");
-        cons_diag_putdec((u64)p->pid);
-        cons_diag_puts(" name=\"");
-        cons_diag_puts(p->name);
-        cons_diag_puts("\" exiting) -> adopted by pid=");
-        cons_diag_putdec((u64)adopter->pid);
-        cons_diag_puts("\n");
+        // #126: this goes through the TX RING (the cons_diag_line API), NEVER
+        // the direct uart_* path. uart_putc's #67 bound is 20 ms PER BYTE, and
+        // this line is ~90 bytes emitted back-to-back while holding
+        // g_proc_table_lock -- which proc.c takes irqsave 40 times and plain 0
+        // times. So against a stalled host consumer the direct path held the
+        // GLOBAL process-table lock IRQ-masked for ~1.8 s per adoption:
+        // precisely the interrupt-dead stall #67's bound was introduced to
+        // prevent, reconstituted by iterating it. A per-item bound is not a
+        // per-operation bound. The line never spins and never sleeps (leaf
+        // locks only, woken outside), so this emit costs a bounded handful of
+        // MMIO accesses however stalled the console is -- and it reaches the
+        // framebuffer console too (#76), which uart_* does not. And it is ONE
+        // push (ARCH 23.5.2 "UNIT ATOMICITY"): the per-token predecessor pushed
+        // each byte under its own hold, and warden's exit burst of these lines
+        // interleaved byte-for-byte with tapestryd's posture line on another
+        // CPU (`ttaappeessttrryydd`, thyla-pi). name[] is always NUL-terminated
+        // (proc_set_name) and "" on a never-exec'd Proc.
+        struct cons_diag_line dl;
+        cons_diag_line_init(&dl);
+        cons_diag_line_puts(&dl, "proc: orphan pid=");
+        cons_diag_line_putdec(&dl, (u64)c->pid);
+        cons_diag_line_puts(&dl, " name=\"");
+        cons_diag_line_puts(&dl, c->name);
+        cons_diag_line_puts(&dl, "\" (parent pid=");
+        cons_diag_line_putdec(&dl, (u64)p->pid);
+        cons_diag_line_puts(&dl, " name=\"");
+        cons_diag_line_puts(&dl, p->name);
+        cons_diag_line_puts(&dl, "\" exiting) -> adopted by pid=");
+        cons_diag_line_putdec(&dl, (u64)adopter->pid);
+        cons_diag_line_puts(&dl, "\n");
+        cons_diag_line_emit(&dl);
         // #65 (I-32): reparent splices directly (no proc_link/unlink_child), so
         // rebase both counts to keep child_count == list length. p is dying
         // (its count is about to vanish) but track it symmetrically anyway.
@@ -2644,7 +2651,7 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
     // NULL case is latent. But the function downstream passes `name`
     // to the console emit and to exits (which strcmp's against "ok").
     // A NULL passed in via a future caller bug would NULL-deref the
-    // kernel from the console layer -- cons_diag_puts happens to guard
+    // kernel from the console layer -- cons_diag_line_puts happens to guard
     // NULL, but exits' strcmp does not, so the guard stays load-bearing.
     // Cheap to guard here; matches the surrounding extinction-on-
     // contract-violation pattern.
@@ -2687,26 +2694,30 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
     // CLASS: a steady-state, EL0-reachable diagnostic on the direct uart_* path,
     // where the #67 bound is 20 ms PER BYTE, so a stalled host consumer made a
     // ~100-byte line cost seconds on a fault path reached with IRQs masked. It
-    // was also invisible to the framebuffer console (#76). cons_diag_* fixes
-    // both, and keeps this file's emits on one sanctioned path.
-    cons_diag_puts("user fault: pid=");
-    cons_diag_putdec((u64)p->pid);
-    cons_diag_puts(" reason=\"");
-    cons_diag_puts(name);
-    cons_diag_puts("\" addr=");
-    cons_diag_puthex64((u64)faulting_addr);
+    // was also invisible to the framebuffer console (#76). The cons_diag_line
+    // API fixes both, keeps this file's emits on one sanctioned path, and lands
+    // the line as ONE push (ARCH 23.5.2 "UNIT ATOMICITY").
+    struct cons_diag_line dl;
+    cons_diag_line_init(&dl);
+    cons_diag_line_puts(&dl, "user fault: pid=");
+    cons_diag_line_putdec(&dl, (u64)p->pid);
+    cons_diag_line_puts(&dl, " reason=\"");
+    cons_diag_line_puts(&dl, name);
+    cons_diag_line_puts(&dl, "\" addr=");
+    cons_diag_line_puthex64(&dl, (u64)faulting_addr);
     // The faulting EL0 PC (+ lr): debug_trapframe is recorded at the
     // EL0-sync entry choke point (#88), so on this path -- reached only
     // from an EL0 exception -- it names the fault frame. A static
     // non-PIE pouch binary's PC symbolizes directly against its ELF;
     // without this line every userspace segv is a blind addr.
     if (t->debug_trapframe) {
-        cons_diag_puts(" pc=");
-        cons_diag_puthex64(t->debug_trapframe->elr);
-        cons_diag_puts(" lr=");
-        cons_diag_puthex64(t->debug_trapframe->regs[30]);
+        cons_diag_line_puts(&dl, " pc=");
+        cons_diag_line_puthex64(&dl, t->debug_trapframe->elr);
+        cons_diag_line_puts(&dl, " lr=");
+        cons_diag_line_puthex64(&dl, t->debug_trapframe->regs[30]);
     }
-    cons_diag_puts(" -- terminating Proc\n");
+    cons_diag_line_puts(&dl, " -- terminating Proc\n");
+    cons_diag_line_emit(&dl);
 
     exits(name);
     /* UNREACHABLE -- exits is noreturn (single-thread: sched; multi-thread:

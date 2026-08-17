@@ -374,3 +374,35 @@ the LINEAGE dup3 note — a real L-6 gap for fork-per-connection servers), the
 handler mask discipline (sa_mask|sig never applied during a handler; sigreturn
 does not restore the mask), and `pty.tla`'s CookSignal echoing a char neither
 ldisc echoes.
+
+## 2026-08-17 (aux) — the console TX ring pushes UNITS now
+
+Main handed over the byte-atomic tear it measured on thyla-pi: `proc: orphan
+pid=2119 name="ttaappeessttrryydd"` — the kernel's orphan-adoption burst and
+tapestryd's posture line on another CPU, byte for byte, because every producer
+pushed each byte under its own `g_cons_tx.lock` hold and the writer role cannot
+serialize a diagnostic emitter (IRQ context; the role sleeps). ARCH 23.5.2 had
+already named the missing piece — "full echo-exclusion via a bulk-push fast
+path" was #79, a documented v1.x item withdrawn from an earlier draft because it
+"carries a two-ring lock-ordering design". The design point resolved as: never
+nested. Tap under the drain lock, release, push under the ring lock, release.
+
+The rule now: every producer pushes a UNIT under one hold. A kernel diagnostic
+is a line assembled on the caller's stack (`struct cons_diag_line`) and pushed
+once, all-or-nothing — the per-token trio is gone, because a per-token API
+cannot be line-atomic without hidden state, and a per-CPU accumulator would
+splice an IRQ handler's line into the process-context line half-assembled below
+it; a caller-owned object is nesting-safe by construction. Echo pushes its
+staged unit whole (half a `\b \b` walks the cursor over the prompt). The role
+writer stages a 512-byte chunk, cuts it back to the last NL when the input
+continues, pushes what fits and room-waits for the rest — so a ring-fitting
+write, which is every console line, is whole against every producer. The
+residual is named and Linux-equivalent: a long write spans chunks; a FULL ring
+splits at a chunk boundary, because progress beats atomicity under congestion.
+
+Three tests, one of them the tear's own witness: two kthreads hammer a STALLED
+ring with 64-byte units from two CPUs, the ring is read back through a new peek
+hook and parsed as frames, and every frame must be one producer's unit — with an
+overlap witness so the test says whether the interleave was exercised (it was).
+The other two pin the boundary deterministically on one CPU: room = len-1 moves
+the count by zero and `dropped` by exactly len; room = len lands whole.

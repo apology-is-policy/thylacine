@@ -33,6 +33,8 @@
 
 #include <thylacine/cons.h>
 #include "../../arch/arm64/uart.h"   // #129-audit F2: the RX holdback test hooks
+#include "../../arch/arm64/gic.h"    // tx_unit_smp_no_tear: IPI_RESCHED to the secondaries
+#include <thylacine/smp.h>           // tx_unit_smp_no_tear: smp_cpu_count
 #include <thylacine/dev.h>
 #include <thylacine/handle.h>   // A-5a: struct Handle / handle_get / KOBJ_SPOOR / RIGHT_*
 #include <thylacine/notes.h>
@@ -2463,4 +2465,319 @@ void test_cons_kernel_writer_bracket(void) {
     TEST_ASSERT(cons_kernel_writer_begin(), "the role is re-claimable");
     cons_kernel_writer_end();
     TEST_ASSERT(!cons_test_tx_role_held(), "and released again");
+}
+
+// ---------------------------------------------------------------------------
+// cons.tx_unit_diag_line_atomic -- a kernel diagnostic LINE is one push unit
+// ---------------------------------------------------------------------------
+//
+// The byte-atomic tear (thyla-pi, 2026-08-17): `proc: orphan` and a userspace
+// posture line came out as `ttaappeessttrryydd` because every byte of a
+// diagnostic took its own ring-lock hold. ARCH 23.5.2 "UNIT ATOMICITY" makes a
+// line ONE hold and ALL-OR-NOTHING. This pins both halves deterministically on
+// one CPU:
+//   (a) a line lands contiguous, byte-exact (peek == the staged bytes);
+//   (b) with room = len - 1 the line is dropped WHOLE: the count does not move,
+//       nothing partial lands, and `dropped` grows by exactly len;
+//   (c) with room = len it lands whole again (the boundary is exact).
+// The ring is stalled so the bytes stay where the push put them, and the
+// filler is DISCARDED, never flushed (the #85/#87 harness-blindness rule).
+// Sabotage S1 (per-byte pushes in cons_diag_line_emit) -> (b) fails on the
+// count, (a)/(c) still pass -- the discriminator is the boundary leg.
+
+static u32 tud_build(struct cons_diag_line *l) {
+    cons_diag_line_init(l);
+    cons_diag_line_puts(l, "diag-unit pid=");
+    cons_diag_line_putdec(l, 4242u);
+    cons_diag_line_puts(l, " addr=");
+    cons_diag_line_puthex64(l, 0xdeadull);
+    cons_diag_line_puts(l, " -- one unit\n");
+    return l->len;
+}
+
+static bool tud_bytes_eq(const u8 *a, const u8 *b, u32 n) {
+    for (u32 i = 0; i < n; i++) if (a[i] != b[i]) return false;
+    return true;
+}
+
+static u8 g_tu_filler[8192];
+static u8 g_tu_peek[8192];
+
+void test_cons_tx_unit_diag_line_atomic(void) {
+    static const u8 want[] =
+        "diag-unit pid=4242 addr=0x000000000000dead -- one unit\r\n";
+    const u32 wl  = (u32)(sizeof(want) - 1u);
+    const u32 cap = cons_test_tx_ring_capacity();
+    TEST_ASSERT(cons_test_tx_armed(), "TX ring must be armed or this test is vacuous");
+    TEST_ASSERT(cap <= sizeof(g_tu_filler), "filler must cover the ring -- grow g_tu_filler");
+    for (u32 i = 0; i < sizeof(g_tu_filler); i++) g_tu_filler[i] = (u8)' ';
+
+    struct cons_diag_line l;
+    u32 built = tud_build(&l);
+    TEST_EXPECT_EQ(built, wl, "the staged line has the expected length");
+    TEST_ASSERT(tud_bytes_eq(l.buf, want, wl), "the staged line is byte-exact (ONLCR applied)");
+
+    uart_test_tx_stall(true);
+    cons_test_tx_ring_free(cap, true);
+
+    // (a) empty ring: the line lands whole and contiguous.
+    u32 d0 = cons_test_tx_dropped();
+    cons_diag_line_emit(&l);
+    u32  a_cnt = cons_test_tx_ring_count();
+    u32  a_got = cons_test_tx_ring_peek(g_tu_peek, sizeof(g_tu_peek));
+    bool a_eq  = (a_got == wl) && tud_bytes_eq(g_tu_peek, want, wl);
+    u32  a_drop = cons_test_tx_dropped();
+    cons_test_tx_ring_free(cap, true);
+
+    // (b) room = wl - 1: dropped WHOLE. Fill with a role write that fits
+    // exactly (no park), then emit.
+    long b_fill   = cons_output_write(g_tu_filler, (long)(cap - (wl - 1u)));
+    u32  b_before = cons_test_tx_ring_count();
+    tud_build(&l);
+    cons_diag_line_emit(&l);
+    u32  b_after = cons_test_tx_ring_count();
+    u32  b_drop  = cons_test_tx_dropped();
+    u32  b_got   = cons_test_tx_ring_peek(g_tu_peek, sizeof(g_tu_peek));
+    bool b_only_filler = true;
+    for (u32 i = 0; i < b_got; i++) if (g_tu_peek[i] != (u8)' ') { b_only_filler = false; break; }
+    cons_test_tx_ring_free(cap, true);
+
+    // (c) room = wl exactly: lands whole; the tail of the ring is the line.
+    long c_fill = cons_output_write(g_tu_filler, (long)(cap - wl));
+    tud_build(&l);
+    cons_diag_line_emit(&l);
+    u32  c_after = cons_test_tx_ring_count();
+    u32  c_got   = cons_test_tx_ring_peek(g_tu_peek, sizeof(g_tu_peek));
+    bool c_tail  = (c_got == cap) && tud_bytes_eq(g_tu_peek + (cap - wl), want, wl);
+    u32  c_drop  = cons_test_tx_dropped();
+    cons_test_tx_ring_free(cap, true);
+    u32 end_cnt = cons_test_tx_ring_count();
+    uart_test_tx_stall(false);
+
+    TEST_EXPECT_EQ(a_cnt, wl, "(a) the whole line is in the ring");
+    TEST_ASSERT(a_eq, "(a) the line landed contiguous and byte-exact");
+    TEST_EXPECT_EQ(a_drop, d0, "(a) nothing dropped");
+    TEST_EXPECT_EQ((u32)b_fill, cap - (wl - 1u), "(b) filler write fit without parking");
+    TEST_EXPECT_EQ(b_before, cap - (wl - 1u), "(b) room is exactly len - 1");
+    TEST_EXPECT_EQ(b_after, b_before,
+                   "(b) a line that does not fit moves the count by ZERO (dropped whole)");
+    TEST_ASSERT(b_only_filler, "(b) nothing partial landed -- the ring holds filler only");
+    TEST_EXPECT_EQ(b_drop, d0 + wl, "(b) the drop is counted in bytes, once, for the whole line");
+    TEST_EXPECT_EQ((u32)c_fill, cap - wl, "(c) filler write fit");
+    TEST_EXPECT_EQ(c_after, cap, "(c) room = len: the line fits exactly");
+    TEST_ASSERT(c_tail, "(c) the line is the contiguous tail of the ring");
+    TEST_EXPECT_EQ(c_drop, d0 + wl, "(c) no further drop");
+    TEST_EXPECT_EQ(end_cnt, 0u, "filler discarded -- nothing reached the console");
+}
+
+// ---------------------------------------------------------------------------
+// cons.tx_unit_echo_atomic -- the IRQ-context echo unit is all-or-nothing
+// ---------------------------------------------------------------------------
+//
+// A cooked-mode erase echoes "\b \b" as one unit (cons_rx_input stages it,
+// then emits once). Per-byte pushes let a full ring keep "\b " and drop the
+// second "\b" -- the cursor visibly walks left over the prompt. The unit
+// either lands whole or not at all. Capture is OFF (the real ring path);
+// the TX ring is stalled; the RX ring is a different ring (unaffected).
+// Sabotage S3 (per-byte pushes in cons_emit_bulk) -> the "room = 3" leg lands
+// two of the three bytes.
+
+void test_cons_tx_unit_echo_atomic(void) {
+    const u32 cap = cons_test_tx_ring_capacity();
+    TEST_ASSERT(cons_test_tx_armed(), "TX ring must be armed or this test is vacuous");
+    for (u32 i = 0; i < sizeof(g_tu_filler); i++) g_tu_filler[i] = (u8)' ';
+
+    cons_test_reset();
+    cons_test_echo_capture(false);
+    cons_test_set_termios(CONS_ICANON | CONS_ECHO);
+    uart_test_tx_stall(true);
+    cons_test_tx_ring_free(cap, true);
+
+    // Positive control: room = 4 -> 'a' echoes (1), the erase unit (3) fits.
+    (void)cons_output_write(g_tu_filler, (long)(cap - 4u));
+    u32 d0 = cons_test_tx_dropped();
+    (void)cons_rx_input((u8)'a', false);
+    u32 p_after_a = cons_test_tx_ring_count();
+    (void)cons_rx_input(0x7fu, false);
+    u32 p_after_del = cons_test_tx_ring_count();
+    u32 p_got = cons_test_tx_ring_peek(g_tu_peek, sizeof(g_tu_peek));
+    bool p_tail = (p_got == cap) && g_tu_peek[cap - 4u] == (u8)'a'
+                  && g_tu_peek[cap - 3u] == (u8)'\b' && g_tu_peek[cap - 2u] == (u8)' '
+                  && g_tu_peek[cap - 1u] == (u8)'\b';
+    u32 p_drop = cons_test_tx_dropped();
+    cons_test_tx_ring_free(cap, true);
+    cons_test_reset();                                   // line[] back to empty
+    cons_test_set_termios(CONS_ICANON | CONS_ECHO);
+
+    // The leg: room = 3 -> 'a' echoes (room 2), the 3-byte erase unit does NOT
+    // fit -> dropped WHOLE.
+    (void)cons_output_write(g_tu_filler, (long)(cap - 3u));
+    (void)cons_rx_input((u8)'a', false);
+    u32 n_after_a = cons_test_tx_ring_count();
+    (void)cons_rx_input(0x7fu, false);
+    u32 n_after_del = cons_test_tx_ring_count();
+    u32 n_got = cons_test_tx_ring_peek(g_tu_peek, sizeof(g_tu_peek));
+    bool n_tail = (n_got == cap - 2u) && g_tu_peek[cap - 3u] == (u8)'a';
+    u32 n_drop = cons_test_tx_dropped();
+    cons_test_tx_ring_free(cap, true);
+    u32 end_cnt = cons_test_tx_ring_count();
+    uart_test_tx_stall(false);
+    cons_test_reset();
+
+    TEST_EXPECT_EQ(p_after_a, cap - 3u, "control: 'a' echoed (room 4 -> 3)");
+    TEST_EXPECT_EQ(p_after_del, cap, "control: the 3-byte erase unit landed whole");
+    TEST_ASSERT(p_tail, "control: the ring tail is a \\b \\b");
+    TEST_EXPECT_EQ(p_drop, d0, "control: nothing dropped");
+    TEST_EXPECT_EQ(n_after_a, cap - 2u, "leg: 'a' echoed (room 3 -> 2)");
+    TEST_EXPECT_EQ(n_after_del, cap - 2u,
+                   "leg: the erase unit that does not fit moves the count by ZERO");
+    TEST_ASSERT(n_tail, "leg: nothing partial landed after the 'a'");
+    TEST_EXPECT_EQ(n_drop, d0 + 3u, "leg: the whole unit is counted dropped (3 bytes)");
+    TEST_EXPECT_EQ(end_cnt, 0u, "filler discarded");
+}
+
+// ---------------------------------------------------------------------------
+// cons.tx_unit_smp_no_tear -- two producers on two CPUs never tear a unit
+// ---------------------------------------------------------------------------
+//
+// The system-level witness for the byte-atomic tear: a kernel-diagnostic
+// emitter and a role writer (SYS_PUTS's path) hammer the ring from two
+// kthreads with 64-byte units, the UART stalled so nothing drains; afterwards
+// the ring is read back and parsed as 64-byte frames -- every frame must be
+// entirely one producer's unit with a valid sequence number, and each
+// producer's sequence must ascend. Under per-byte pushes the frames mix within
+// a few units. The overlap witness (each side samples the other's in-emit flag
+// before each unit) says whether the interleave was actually exercised this
+// boot; with < 2 CPUs the test prints a SKIP note and returns (one CPU cannot
+// interleave two pushers). Sabotage S1/S2 (per-byte pushes on either side)
+// -> torn frames whenever the emits overlapped.
+
+#define TUS_UNITS   60u
+#define TUS_UNIT    64u
+
+static volatile u32  g_tus_a_done, g_tus_b_done;
+static volatile bool g_tus_a_busy, g_tus_b_busy;
+static volatile u32  g_tus_overlap;
+static volatile bool g_tus_a_exited, g_tus_b_exited;
+
+static void tus_fill_unit(u8 *u, u8 tag, u32 seq, u8 pad) {
+    u[0] = tag;
+    u[1] = (u8)('0' + (seq / 1000u) % 10u);
+    u[2] = (u8)('0' + (seq / 100u) % 10u);
+    u[3] = (u8)('0' + (seq / 10u) % 10u);
+    u[4] = (u8)('0' + seq % 10u);
+    for (u32 i = 5; i < TUS_UNIT - 2u; i++) u[i] = pad;
+    u[TUS_UNIT - 2u] = (u8)'\r';
+    u[TUS_UNIT - 1u] = (u8)'\n';
+}
+
+static void tus_diag_thread(void) {
+    for (u32 s = 0; s < TUS_UNITS; s++) {
+        struct cons_diag_line l;
+        cons_diag_line_init(&l);
+        char seq[5] = { (char)('0' + (s / 1000u) % 10u), (char)('0' + (s / 100u) % 10u),
+                        (char)('0' + (s / 10u) % 10u),   (char)('0' + s % 10u), 0 };
+        cons_diag_line_puts(&l, "D");
+        cons_diag_line_puts(&l, seq);
+        for (u32 i = 5; i < TUS_UNIT - 2u; i++) cons_diag_line_puts(&l, "d");
+        cons_diag_line_puts(&l, "\n");             // -> "\r\n": 64 on the wire
+        if (g_tus_b_busy) g_tus_overlap++;
+        g_tus_a_busy = true;
+        cons_diag_line_emit(&l);
+        g_tus_a_busy = false;
+        g_tus_a_done++;
+    }
+    test_kthread_park_terminal(&g_tus_a_exited);
+}
+
+static void tus_writer_thread(void) {
+    for (u32 s = 0; s < TUS_UNITS; s++) {
+        u8 u[TUS_UNIT];
+        tus_fill_unit(u, (u8)'W', s, (u8)'w');
+        // The input is 63 bytes ending in a bare NL; ONLCR (set for the test)
+        // makes it 64 on the wire, the same frame as the diag line.
+        u[TUS_UNIT - 2u] = (u8)'\n';
+        if (g_tus_a_busy) g_tus_overlap++;
+        g_tus_b_busy = true;
+        (void)cons_output_write(u, (long)(TUS_UNIT - 1u));
+        g_tus_b_busy = false;
+        g_tus_b_done++;
+    }
+    test_kthread_park_terminal(&g_tus_b_exited);
+}
+
+void test_cons_tx_unit_smp_no_tear(void) {
+    const u32 cap = cons_test_tx_ring_capacity();
+    TEST_ASSERT(cons_test_tx_armed(), "TX ring must be armed or this test is vacuous");
+    TEST_ASSERT(2u * TUS_UNITS * TUS_UNIT < cap, "the two producers must fit the ring together");
+    unsigned cpus = smp_cpu_count();
+    if (cpus < 2) {
+        uart_puts(" (SKIP: one CPU -- two pushers cannot interleave) ");
+        return;
+    }
+
+    g_tus_a_done = g_tus_b_done = 0;
+    g_tus_a_busy = g_tus_b_busy = false;
+    g_tus_overlap = 0;
+    g_tus_a_exited = g_tus_b_exited = false;
+
+    cons_test_reset();
+    cons_test_echo_capture(false);
+    cons_test_set_termios(CONS_ONLCR);
+    uart_test_tx_stall(true);
+    cons_test_tx_ring_free(cap, true);
+    u32 d0 = cons_test_tx_dropped();
+
+    struct Thread *ta = thread_create(kproc(), tus_diag_thread);
+    struct Thread *tb = thread_create(kproc(), tus_writer_thread);
+    if (ta) ready(ta);
+    if (tb) ready(tb);
+    // Wake the secondaries so they steal (the work-stealing smoke's method).
+    for (unsigned i = 1; i < cpus; i++) (void)gic_send_ipi(i, IPI_RESCHED);
+    TEST_YIELD_UNTIL_SOFT(g_tus_a_done >= TUS_UNITS && g_tus_b_done >= TUS_UNITS);
+    u32 a_done = g_tus_a_done, b_done = g_tus_b_done, overlap = g_tus_overlap;
+
+    u32 cnt  = cons_test_tx_ring_count();
+    u32 got  = cons_test_tx_ring_peek(g_tu_peek, sizeof(g_tu_peek));
+    u32 drop = cons_test_tx_dropped();
+    cons_test_tx_ring_free(cap, true);
+    u32 end_cnt = cons_test_tx_ring_count();
+    uart_test_tx_stall(false);
+    cons_test_reset();
+
+    // Parse (touching nothing global), join, THEN assert.
+    u32 frames = got / TUS_UNIT;
+    u32 next_a = 0, next_b = 0, torn = 0;
+    for (u32 f = 0; f < frames; f++) {
+        const u8 *u = g_tu_peek + f * TUS_UNIT;
+        u8 want[TUS_UNIT];
+        bool ok = false;
+        if (u[0] == (u8)'D') {
+            tus_fill_unit(want, (u8)'D', next_a, (u8)'d');
+            ok = tud_bytes_eq(u, want, TUS_UNIT);
+            if (ok) next_a++;
+        } else if (u[0] == (u8)'W') {
+            tus_fill_unit(want, (u8)'W', next_b, (u8)'w');
+            ok = tud_bytes_eq(u, want, TUS_UNIT);
+            if (ok) next_b++;
+        }
+        if (!ok) torn++;
+    }
+
+    if (ta) test_kthread_join_free(ta, &g_tus_a_exited);
+    if (tb) test_kthread_join_free(tb, &g_tus_b_exited);
+    cons_settle_mgr();
+
+    TEST_ASSERT(ta != NULL && tb != NULL, "thread_create");
+    TEST_EXPECT_EQ(a_done, TUS_UNITS, "the diag producer finished");
+    TEST_EXPECT_EQ(b_done, TUS_UNITS, "the writer producer finished");
+    TEST_EXPECT_EQ(drop, d0, "nothing dropped (the ring had room for both)");
+    TEST_EXPECT_EQ(cnt, 2u * TUS_UNITS * TUS_UNIT, "every unit is in the ring");
+    TEST_EXPECT_EQ(got % TUS_UNIT, 0u, "the ring holds whole frames");
+    TEST_EXPECT_EQ(torn, 0u, "no frame is torn -- every 64-byte frame is one producer's unit");
+    TEST_EXPECT_EQ(next_a, TUS_UNITS, "every diag unit present, in order");
+    TEST_EXPECT_EQ(next_b, TUS_UNITS, "every writer unit present, in order");
+    TEST_EXPECT_EQ(end_cnt, 0u, "filler discarded");
+    if (overlap == 0u)
+        uart_puts(" (note: no emit overlap observed -- the interleave was not exercised this boot) ");
 }

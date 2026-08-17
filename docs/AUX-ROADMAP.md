@@ -521,7 +521,11 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
 3. ~~exec resets SIG_IGN + mask~~ VOTED + LANDED with the fork half (task #127
    both halves; scripture `c484a7d1` + the impl commit): fork copies the sigtab
    + mask into the child, exec keeps SIG_IGN + mask on the phenotype.
-4. **THE CONSOLE TX RING IS BYTE-ATOMIC, NOT MESSAGE-ATOMIC** (handed to aux by
+4. ~~THE CONSOLE TX RING IS BYTE-ATOMIC, NOT MESSAGE-ATOMIC~~ **LANDED 2026-08-17**
+   (ARCH 23.5.2 "UNIT ATOMICITY"; every producer pushes a UNIT under one lock
+   hold -- the caller-stack `cons_diag_line`, the echo unit, the writer's staged
+   chunk; closes #79; three tests + S1-S3; the LS-8 row addendum). Formerly:
+   (handed to aux by
    main 2026-08-17; `memory/bug_console_tx_ring_byte_atomic.md`): the kernel's
    `cons_diag_puts` (the #126 non-blocking IRQ-safe emitter -- per BYTE under
    `g_cons_tx.lock`) and a userspace `SYS_PUTS`/`cons_output_write` (under the

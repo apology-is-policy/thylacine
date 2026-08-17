@@ -640,6 +640,9 @@ void test_cons_blocking_read_wakeup(void);
 void test_cons_tx_role_serializes_writers(void);
 void test_cons_kernel_writer_bracket(void);              // #152
 void test_cons_tx_room_wait_and_deadline(void);
+void test_cons_tx_unit_diag_line_atomic(void);
+void test_cons_tx_unit_echo_atomic(void);
+void test_cons_tx_unit_smp_no_tear(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_full_refuses(void);
 void test_cons_rx_can_accept_boundary(void);
@@ -2244,6 +2247,9 @@ struct test_case g_tests[] = {
     { "cons.tx_role_serializes_writers", test_cons_tx_role_serializes_writers, false, NULL },
     { "cons.kernel_writer_bracket",    test_cons_kernel_writer_bracket,    false, NULL },
     { "cons.tx_room_wait_and_deadline", test_cons_tx_room_wait_and_deadline, false, NULL },
+    { "cons.tx_unit_diag_line_atomic", test_cons_tx_unit_diag_line_atomic, false, NULL },
+    { "cons.tx_unit_echo_atomic",      test_cons_tx_unit_echo_atomic,      false, NULL },
+    { "cons.tx_unit_smp_no_tear",      test_cons_tx_unit_smp_no_tear,      false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_full_refuses",        test_cons_ring_full_refuses,        false, NULL },
     { "cons.rx_can_accept_boundary",   test_cons_rx_can_accept_boundary,   false, NULL },

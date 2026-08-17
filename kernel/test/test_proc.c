@@ -478,7 +478,7 @@ void test_proc_orphan_diag_uses_cons_path(void) {
     TEST_EXPECT_EQ(g_diag_orphan_ran, 1u, "#126: grandchild did not run");
 
     // THE PROPERTY: the orphan diagnostic reached the drain tap, so it went
-    // through cons_diag_* (TX ring, non-spinning, tapped) and not uart_puts.
+    // through the cons_diag_line API (TX ring, non-spinning, tapped, one push) and not uart_puts.
     TEST_ASSERT(have > 0u,
                 "#126: the orphan diagnostic never reached the drain tap -- it "
                 "is still on the direct uart_* path (or was deleted)");
