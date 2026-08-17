@@ -602,6 +602,37 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    it (^C at the prompt / inside `read` / inside `wait`, then ^C a job); if
    real, a P1 for interactive phenotype shells that needs an abandoned-frame
    rule or a per-thread stack of save blocks (design; vote).
+   **Blocked first by item 9** (found while building the experiment): the
+   interactive `viv run` never ran a container at all.
+9. **An interactive `viv run` never ran the container -- LANDED (pending its
+   bar) 2026-08-17** (`memory/bug_viv_interactive_container_no_stdio.md`):
+   the console line `viv: spawn /bin/diorama` in every R5-F9 log is viv's
+   ERROR path -- viv requested `MAY_POST_SERVICE` for its per-container diorama
+   (which posted the fixed `/srv/viv-dio`) and nothing past login holds the
+   bit (login confers CONSOLE_OWNER on ut; ut confers nothing), so
+   `spawn_perm_grant_check` refused; every boot `viv` was joey-spawned WITH
+   the bit, so no gate ran the interactive path. The V-7 commit body listed
+   the seam; nobody enqueued it. Fix: the diorama channel is a PRIVATE PIPE
+   PAIR + `SYS_ATTACH_9P` (Plan 9's mount(fd); the Phase-5 stub-driver
+   transport's first production consumer) -- no name, no privilege, no
+   collision: concurrent containers moved OUT -> IN (VIVARIUM 7.2.1), the V-8
+   F3 attach gate became structural (the joey #101 leg -> the `viv-channel`
+   leg, two spawns one variable apart; the V-7 leg runs TWO probe containers
+   concurrently), joey's boot `viv run`s pass no perm bits (they now run the
+   interactive path). Userspace-only (viv, diorama, joey, libt/libthyla-rs
+   wrappers); kernel byte-unchanged. Rejected: widening `MAY_POST_SERVICE` to
+   user commands (one shared boot registry -> name squatting). Reference:
+   `docs/reference/145-vivarium.md` "The diorama channel is a private pipe
+   pair". **Residual, OPEN (kernel, Pipe audit row):** `devpipe_write` posts a
+   `pipe` note to the WRITING Proc on a dead reader, and the kernel 9P spoor
+   transport writes in the syscalling Proc's context -- a container Proc that
+   touches `/proc` after its diorama died (an orphan outliving its runner; a
+   diorama crash) gets a SIGPIPE-shaped note where the /srv transport gave an
+   error; fix = a `MSG_NOSIGNAL`-shaped kernel-internal transport write (Linux
+   trans_fd writes from a workqueue). Also OPEN, seen once, unreproduced: two
+   ^C at a `ptyhost`ed ut's IDLE prompt, then the next command echoed but not
+   executed (`scratchpad/r5f9/ctrlc-idle.exp` is the 2-line reproduction to
+   run; adopt into `tools/interactive/` if it reproduces).
 
 ---
 

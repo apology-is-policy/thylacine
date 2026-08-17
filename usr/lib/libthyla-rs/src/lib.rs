@@ -110,6 +110,9 @@ pub const T_SYS_PIPE: u64            = 8;
 pub const T_SYS_READ: u64            = 9;
 pub const T_SYS_WRITE: u64           = 10;
 pub const T_SYS_CLOSE: u64           = 11;
+// P5-attach-syscall: a 9P attach over a byte-pipe pair (tx, rx). Backs
+// t_attach_9p; the byte-mode /srv twin is T_SYS_ATTACH_9P_SRV (52).
+pub const T_SYS_ATTACH_9P: u64       = 13;
 // P5-spawn-wait: reap one zombie child + return its (pid, status). Backs
 // t::process::Child::wait (U-2d).
 pub const T_SYS_WAIT_PID: u64        = 22;
@@ -1328,6 +1331,32 @@ pub unsafe fn t_pivot_root(new_root_fd: i64) -> i64 {
         "svc #0",
         inlateout("x0") x0,
         in("x8") T_SYS_PIVOT_ROOT,
+        options(nostack)
+    );
+    x0
+}
+
+/// t_attach_9p -- drive a 9P attach over a byte-pipe PAIR (SYS_ATTACH_9P):
+/// `tx_fd` carries client->server bytes (needs RIGHT_WRITE), `rx_fd`
+/// server->client bytes (needs RIGHT_READ) -- two Plan 9 pipes from `t_pipe`
+/// with the matching ends handed to the server (the stub-driver shape), or one
+/// duplex Spoor passed as both. The kernel runs Tversion + Tattach (asserting
+/// the caller's kernel-stamped principal as `n_uname`; the value passed here
+/// is vestigial) and returns a KOBJ_SPOOR rooting the attached tree
+/// (R|W|TRANSFER). The attach holds its own refs on both transport Spoors, so
+/// the pipe fds may be closed afterwards. Returns the new fd (>= 0) or -1.
+#[inline(always)]
+pub unsafe fn t_attach_9p(tx_fd: i64, rx_fd: i64, aname: *const u8, aname_len: usize,
+                          n_uname: u64) -> i64 {
+    let mut x0: i64 = tx_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") rx_fd as u64,
+        in("x2") aname as u64,
+        in("x3") aname_len as u64,
+        in("x4") n_uname,
+        in("x8") T_SYS_ATTACH_9P,
         options(nostack)
     );
     x0

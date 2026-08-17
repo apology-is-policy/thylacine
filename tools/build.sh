@@ -1195,6 +1195,33 @@ GATEEOF
 VIVEOF
             if [[ "$bb_ok" == 1 ]]; then
                 echo "==> viv bundles: Alpine bundle staged from $tarball (/bin/sh <- $(basename "$bbapk"))"
+                # The INTERACTIVE twin: the same rootfs, no gate script, args
+                # ["/bin/sh", "-i"] -- for expect scenarios that drive a
+                # phenotype ash at its prompt from a session shell
+                # (tools/interactive/viv-run.exp: the interactive `viv run`
+                # path no boot gate runs, and the R5-F9 experiment). A COPY of
+                # the rootfs, not a symlink: viv requires root.path == "rootfs"
+                # literally, and the pool put's symlink handling is not
+                # something a fixture should be the first test of (~4 MB).
+                local ib="$vstage/alpine-ash"
+                rm -rf "$ib"; mkdir -p "$ib"
+                cp -R "$ab/rootfs" "$ib/rootfs"
+                rm -rf "$ib/rootfs/gate"
+                cat > "$ib/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "-i"],
+        "env": [],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux"
+    }
+}
+VIVEOF
+                echo "==> viv bundles: Alpine INTERACTIVE twin staged at $ib (args /bin/sh -i -- ioctl is unserved, so isatty() is false and ash needs the flag to be interactive)"
             else
                 rm -rf "$ab"
                 echo "==> viv bundles: Alpine bundle SKIPPED -- the minirootfs is present but no busybox-static apk is (every stock Alpine ELF is dynamic PIE, which the loader rejects; task #145). Drop busybox-static-*.apk in build/cache/ or set THYLACINE_BUSYBOX_STATIC_APK." >&2
@@ -1315,7 +1342,7 @@ VIVEOF
             echo "==> viv bundles: untar of $tarball into the stock bundle FAILED -- DISTRO ARC gate bundle skipped" >&2
         fi
     fi
-    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" )$( [[ -d "$vstage/alpine-stock" ]] && echo " + alpine-stock" ))"
+    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" )$( [[ -d "$vstage/alpine-ash" ]] && echo " + alpine-ash" )$( [[ -d "$vstage/alpine-stock" ]] && echo " + alpine-stock" ))"
 }
 
 build_sysroot() {

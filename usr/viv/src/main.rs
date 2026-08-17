@@ -10,8 +10,15 @@
 // The assembly order is forced by capability mechanics and is the part worth
 // reading twice:
 //
-//   1. parse the manifest; spawn the PER-CONTAINER diorama (--vivarium <us>,
-//      posting /srv/viv-dio) and mount it over /dio in OUR territory;
+//   1. parse the manifest; make a PRIVATE 9P channel -- two Plan 9 pipes --
+//      spawn the PER-CONTAINER diorama (--vivarium <us>) with the server ends
+//      as its fds 0/1, attach the client ends (SYS_ATTACH_9P: the Plan 9
+//      mount(fd) idiom) and mount the root over /dio in OUR territory. No
+//      /srv name is involved: nothing else in the namespace can reach this
+//      diorama, two containers cannot collide on a name, and viv needs no
+//      posting privilege (the interactive `viv run` from a session shell,
+//      where nothing past login holds MAY_POST_SERVICE, was refused at this
+//      very spawn before the channel went private);
 //   2. set our own /env to exactly the manifest's set (the child env is the
 //      kernel Env CLONE at spawn -- "inherits nothing the manifest does not
 //      name");
@@ -28,9 +35,8 @@
 //
 // viv holds NO capability beyond the invoker's: chroot/mount/chdir are
 // per-territory ops, the container principal is the invoker's (no
-// CAP_SET_IDENTITY anywhere), no hardware allowance is conferred, and the
-// only spawn perm it passes on is MAY_POST_SERVICE to its own diorama --
-// which is also the one perm viv itself must be spawned with.
+// CAP_SET_IDENTITY anywhere), no hardware allowance is conferred, and it
+// passes NO spawn perm on -- a plain user shell can run it.
 
 #![no_std]
 #![no_main]
@@ -47,11 +53,10 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 mod json;
 
 use libthyla_rs::{
-    t_chdir, t_chroot, t_close, t_fstat, t_getpid, t_mount, t_open, t_pipe, t_poll, t_putstr,
-    t_read, t_spawn_full_argv, t_unlink, t_wait_pid_for, t_walk_create, t_write, TPollFd,
-    TSpawnArgs, T_MNOEXEC, T_MREPL, T_OPATH, T_OREAD, T_OWRITE, T_POLLIN,
-    T_SPAWN_PERM_MAY_POST_SERVICE,
-    T_SPAWN_PHENO_LINUX, T_WAIT_WNOHANG, T_WALK_OPEN_FROM_ROOT,
+    t_attach_9p, t_chdir, t_chroot, t_close, t_fstat, t_getpid, t_mount, t_open, t_pipe,
+    t_putstr, t_read, t_spawn_full_argv, t_unlink, t_wait_pid_for, t_walk_create, t_write,
+    TSpawnArgs, T_MNOEXEC, T_MREPL, T_OPATH, T_OREAD, T_OWRITE, T_SPAWN_PHENO_LINUX,
+    T_WALK_OPEN_FROM_ROOT,
 };
 
 // Manifest bounds (fail closed past any of them; the kernel's own spawn/env
@@ -118,21 +123,14 @@ fn read_file_bounded(path: &str, cap: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn sleep_ms(pipe_rd: i64, ms: i32) {
-    let mut pf = TPollFd { fd: pipe_rd as i32, events: T_POLLIN, revents: 0 };
-    let _ = unsafe { t_poll(&mut pf as *mut TPollFd, 1, ms) };
-}
-
 /// Raw argv spawn -- NOT process::Command, deliberately: Command always endows
 /// the parent's fds 0/1/2 on the child, and `viv` itself is routinely FD-LESS
 /// (joey spawns its boot daemons with no fds; output rides SYS_PUTS), so the
-/// endowment's handle lookup would fail the whole spawn. `with_stdio` is the
-/// BORN-WITH-STDIO fact captured at startup (see rs_main) -- not probed here:
-/// viv's own transient opens recycle low fd numbers, so a late fstat(0) can
-/// see e.g. the diorama ctl fd at slot 0 and mis-endow a half-empty trio
-/// (which fails the whole spawn at the kernel's fd bump). caps 0 always.
-fn spawn_raw(name: &str, args: &[String], perm_flags: u32, with_stdio: bool,
-             pheno_flags: u32, fd0_override: i64) -> i64 {
+/// endowment's handle lookup would fail the whole spawn. `fds` are OUR fds,
+/// landing at the child's slots 0..n in order (a half-empty trio fails the
+/// whole spawn at the kernel's fd bump, so the caller decides the whole list
+/// from facts it holds -- see the entrypoint spawn). caps 0, no perms.
+fn spawn_raw(name: &str, args: &[String], fds: &[u32], pheno_flags: u32) -> i64 {
     let mut argv_buf: Vec<u8> = Vec::new();
     argv_buf.extend_from_slice(name.as_bytes());
     argv_buf.push(0);
@@ -142,28 +140,15 @@ fn spawn_raw(name: &str, args: &[String], perm_flags: u32, with_stdio: bool,
         argv_buf.push(0);
         argc += 1;
     }
-    // fd0_override endows exactly ONE fd, landing at the child's fd 0, and
-    // takes precedence over stdio: the sigpipe selftest wants a known-dead
-    // write end there and nothing else.
-    let have_stdio = with_stdio && fd0_override < 0;
-    let fd_list: [u32; 3] = [0, 1, 2];
-    let fd_one: [u32; 1] = [if fd0_override < 0 { 0 } else { fd0_override as u32 }];
-    let (fd_va, fd_n): (u64, u32) = if fd0_override >= 0 {
-        (fd_one.as_ptr() as u64, 1)
-    } else if have_stdio {
-        (fd_list.as_ptr() as u64, 3)
-    } else {
-        (0, 0)
-    };
     let req = TSpawnArgs {
         name_va: name.as_ptr() as u64,
         argv_data_va: argv_buf.as_ptr() as u64,
-        fd_list_va: fd_va,
+        fd_list_va: if fds.is_empty() { 0 } else { fds.as_ptr() as u64 },
         name_len: name.len() as u32,
         argv_data_len: argv_buf.len() as u32,
         argc,
-        fd_count: fd_n,
-        perm_flags,
+        fd_count: fds.len() as u32,
+        perm_flags: 0,
         _pad_envp: 0,
         cap_mask: 0,
         principal_id: 0,
@@ -188,15 +173,6 @@ fn wait_status(pid: i64) -> i64 {
         return -1;
     }
     st as i64
-}
-
-/// Has `pid` already exited? REAPS it when so -- the caller must not reap
-/// again (a by-pid wait for a non-child returns -1 rather than blocking, so a
-/// double reap is harmless, but writing `kill` to a reaped pid's /proc path is
-/// not something to do on purpose).
-fn child_exited(pid: i64) -> bool {
-    let mut st: i32 = 0;
-    unsafe { t_wait_pid_for(pid as i32, T_WAIT_WNOHANG, &mut st as *mut i32) == pid }
 }
 
 fn extract_manifest(doc: &json::Json) -> Result<Manifest, &'static str> {
@@ -424,53 +400,50 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
     };
 
     // --- the per-container diorama ----------------------------------------
+    // Its 9P channel is a PRIVATE pipe pair, never a /srv name (the
+    // stub-driver shape; Plan 9's mount(fd)): c2s carries our requests, s2c
+    // the diorama's replies. The diorama gets the server ends as ITS fds 0/1
+    // and nothing else -- it has no stdio to want (its diagnostics ride
+    // SYS_PUTS) and its only client is us, by construction: nobody else holds
+    // an end. That is what makes the V-8 F3 attach gate structural, lets two
+    // containers run at once, and lets a plain session shell run viv (posting
+    // a name needs MAY_POST_SERVICE, which nothing past login holds).
+    let (c2s_rd, c2s_wr) = unsafe { t_pipe() };
+    let (s2c_rd, s2c_wr) = unsafe { t_pipe() };
+    if c2s_rd < 0 || c2s_wr < 0 || s2c_rd < 0 || s2c_wr < 0 {
+        return Err(String::from("pipe pair for the diorama channel"));
+    }
     let my_pid = unsafe { t_getpid() };
     let dio_args = [String::from("--vivarium"), format!("{}", my_pid)];
-    let dio_pid =
-        spawn_raw("/bin/diorama", &dio_args, T_SPAWN_PERM_MAY_POST_SERVICE as u32,
-                  stdio_born, /*pheno_flags=*/0, /*fd0_override=*/-1);
+    let dio_fds: [u32; 2] = [c2s_rd as u32, s2c_wr as u32];
+    let dio_pid = spawn_raw("/bin/diorama", &dio_args, &dio_fds, /*pheno_flags=*/0);
+    // Our copies of the SERVER ends go now, spawn or no spawn: while we hold
+    // c2s_rd the diorama's death could never surface as EOF on our reads (a
+    // ring with a live reader ref is not read_eof), and s2c_wr would keep the
+    // diorama's own EOF from ever arriving.
+    let _ = unsafe { t_close(c2s_rd) };
+    let _ = unsafe { t_close(s2c_wr) };
     if dio_pid <= 0 {
+        let _ = unsafe { t_close(c2s_wr) };
+        let _ = unsafe { t_close(s2c_rd) };
         return Err(String::from("spawn /bin/diorama"));
     }
 
-    // From here on every failure kills + reaps the diorama -- a leaked
-    // half-container daemon would hold the fixed /srv/viv-dio name against
-    // the next run.
-    let (pr, pw) = unsafe { t_pipe() };
-    let mut dio_root: i64 = -1;
-    let mut dio_died = false;
-    if pr >= 0 {
-        for _ in 0..50 {
-            dio_root = open_from_root("/srv/viv-dio", T_OREAD);
-            if dio_root >= 0 {
-                break;
-            }
-            // A dead diorama can never post, so stop the moment our own child
-            // is gone instead of burning the whole 5s. #101: the likely reason
-            // it is gone is that a concurrent `viv run` already held the fixed
-            // name, so its post failed -- worth telling apart from a timeout.
-            if child_exited(dio_pid) {
-                dio_died = true;
-                break;
-            }
-            sleep_ms(pr, 100);
-        }
-        let _ = unsafe { t_close(pr) };
-        let _ = unsafe { t_close(pw) };
-    }
+    // From here on every failure kills + reaps the diorama.
+    //
+    // The attach drives Tversion + Tattach over the pair; a diorama that died
+    // in its selftest closes s2c_wr with it, our reply read sees EOF, and the
+    // attach fails clean. The attach holds its own refs on both transport
+    // Spoors, so our two fds close right after: the session, not the fds,
+    // keeps the channel.
+    let dio_root = unsafe { t_attach_9p(c2s_wr, s2c_rd, b"/".as_ptr(), 1, 0) };
+    let _ = unsafe { t_close(c2s_wr) };
+    let _ = unsafe { t_close(s2c_rd) };
     if dio_root < 0 {
-        if dio_died {
-            // Already reaped by child_exited -- do NOT reap_diorama again.
-            return Err(String::from(
-                "the container diorama exited before posting /srv/viv-dio. \
-                 Usually that means another `viv run` is already using it: \
-                 the name is fixed, so containers cannot run concurrently \
-                 yet (a known limit, not a fault in this bundle). \
-                 Otherwise check the diorama selftest line on the console.",
-            ));
-        }
         reap_diorama(dio_pid, -1);
-        return Err(String::from("/srv/viv-dio never came up (diorama selftest?)"));
+        return Err(String::from(
+            "attach the container diorama (check the diorama selftest line on the console)",
+        ));
     }
 
     // The diorama kill channel, pre-opened while its /proc path still
@@ -604,7 +577,13 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
     // The sigpipe selftest fd, if the bundle asked for one. The READ end is
     // closed BEFORE the spawn, so the pipe is already reader-less when the
     // child's first write lands -- there is no window in which the write could
-    // succeed instead.
+    // succeed instead. It endows exactly ONE fd, landing at the child's fd 0,
+    // and takes precedence over stdio: the selftest wants a known-dead write
+    // end there and nothing else. Otherwise the child gets our whole trio iff
+    // we were BORN with one (stdio_born, captured at rs_main entry -- not
+    // probed here: our own transient opens recycle low fd numbers, so a late
+    // fstat(0) can see e.g. the diorama ctl fd at slot 0 and mis-endow a
+    // half-empty trio, which fails the whole spawn at the kernel's fd bump).
     let mut sp_w: i64 = -1;
     if m.sigpipe_selftest {
         let (r, w) = unsafe { t_pipe() };
@@ -613,7 +592,16 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
             sp_w = w;
         }
     }
-    let child_pid = spawn_raw(&m.args[0], &m.args[1..], 0, stdio_born, pheno, sp_w);
+    let stdio_fds: [u32; 3] = [0, 1, 2];
+    let sp_fds: [u32; 1] = [if sp_w >= 0 { sp_w as u32 } else { 0 }];
+    let child_fds: &[u32] = if sp_w >= 0 {
+        &sp_fds
+    } else if stdio_born {
+        &stdio_fds
+    } else {
+        &[]
+    };
+    let child_pid = spawn_raw(&m.args[0], &m.args[1..], child_fds, pheno);
     if sp_w >= 0 {
         let _ = unsafe { t_close(sp_w) };
     }

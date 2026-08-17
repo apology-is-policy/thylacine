@@ -539,3 +539,95 @@ external-kill / 0 other, two halves — the kernel byte-changed); LS-CI 33 PASS 
 2 SKIP over 35 (GL not baked; six batches, TCG); suite 1413/1413; sabotages
 SM1/SM2/SM3 each red on the named check. Pushed to both mirrors after the
 fixup.
+
+## 2026-08-17 (aux) — the interactive `viv run` that never ran; the diorama channel goes private
+
+The R5-F9 experiment needed an interactive Alpine ash under `viv`, and the
+first attempt to drive one from a `ptyhost`ed `ut` produced nothing: no ash
+prompt, no output from a `sh -c 'echo …'` bisect, viv back at the outer prompt
+at once. The resume note going into this watch carried a hypothesis — viv's
+`stdio_born` gate (`fstat` on fds 0/1/2) fails on a pts, so the entrypoint is
+spawned fd-less — and the instruction to VERIFY before fixing. The verification
+took one grep. Every one of the four logs has the console line
+`viv: spawn /bin/diorama` right after the `viv run` echo, and that line is not
+progress: it is `Err(String::from("spawn /bin/diorama"))` reaching `say`. The
+container never existed. The line reads like an announcement, and the previous
+watch read it as one; the source says it is the report that the announced thing
+failed. **A line that names an action may be the report that the action
+failed — grep the source for the string before reading it as progress.**
+
+The mechanism took a few more. `viv` requests `SPAWN_PERM_MAY_POST_SERVICE`
+for its per-container diorama, because the diorama posted the fixed name
+`/srv/viv-dio`; `spawn_perm_grant_check` grants that bit only to a
+console-attached granter or an existing holder; joey confers it on login, login
+confers `CONSOLE_OWNER` on `ut` and nothing more, `ut` confers nothing on its
+externals — so no session shell's `viv` was ever a holder, and every boot-gate
+`viv` was joey-spawned WITH the bit, so no gate ever ran the path a person
+runs. The V-7 commit body had listed exactly this as a "known seam" and moved
+on. A bug that lives only in prose is a bug being walked past in slow motion;
+this one waited eighteen days for someone to type `viv run` at a prompt.
+
+Two fixes were possible and the research collapsed them to one. Widening the
+privilege — login confers the bit on `ut`, `ut` on every command — puts every
+user program in a position to squat names in the ONE shared boot registry
+(`/srv/home-<user>` before that user logs in; a tombstoned `/srv/net` after
+netd dies is re-postable by any marked Proc), and leaves the fixed-name
+collision in place. The other reading is Plan 9's own: a 9P server a process
+starts for itself is reached by `mount(fd)` over a pipe, and `srv(3)` exists to
+publish fds to strangers — this channel has no strangers. The kernel had the
+primitive since Phase 5: `SYS_ATTACH_9P(tx, rx)` over two Plan 9 pipes, the
+`stub-driver` shape, tested by `test_attach_probe` and used in production by
+nothing. Now `viv` makes two pipes, spawns `diorama --vivarium <pid>` with the
+server ends as the child's fds 0/1 and nothing else, attaches the client ends,
+mounts at `/dio` as before; the diorama serves that one connection until EOF.
+No name, no privilege, no collision. Three seams closed by removing a
+mechanism rather than adding one: the interactive path works, concurrent
+containers move from OUT to IN, and the V-8 F3 attach gate — a peer-pid check
+in `h_attach` plus a joey deny leg — becomes structural (nobody but the runner
+holds an end) and comes out. What the diorama still checks is its one scoping
+premise, that the argv runner is its parent, read off its own status file's
+`ppid` line. Its `self` is derived rather than kernel-stamped now (there is no
+`SYS_SRV_PEER` on a pipe): the runner's pid, its own uid/gid, a native
+liveness resolve — the same content the stamp gave, since the peer was always
+the mounter (#90 unchanged).
+
+The gates were rebuilt around the new shape rather than deleted with the old
+one. The `#101` deny leg became the `viv-channel` leg: two spawns of `diorama
+--vivarium` one variable apart — joey's own pid (the attach must succeed, and
+with the server provably up `/srv/viv-dio` must NOT resolve, and closing the
+attach root must make the diorama exit on EOF within a bounded wait) and a pid
+joey is not (the diorama must exit at its parent check before Tversion, so the
+attach must fail). Neither branch can pass for the wrong reason: a diorama that
+cannot start satisfies only the refusal, a diorama with no parent check
+satisfies only the serve. And the V-7 leg now spawns two `viv run
+/vivarium/probe` concurrently: each probe asserts its pid view is exactly
+`{self}`, so two live containers prove from the inside what `#101` proved from
+outside, under the concurrency the old design refused. Every boot `viv run`
+was also stripped of the perm bit it no longer needs, so the gates run the
+interactive path instead of a privileged twin of it — the same shape as the
+L26 premise trap a stanza above: a gate that runs a different path than the
+user does is a gate on the wrong thing.
+
+One residual, recorded and not built here because it is kernel-side on the
+Pipe audit row: `devpipe_write` posts a `pipe` note to the WRITING Proc when a
+ring's reader is gone, and the kernel 9P client's spoor transport writes in the
+syscalling Proc's context — so a container Proc that touches `/proc` after its
+diorama has died (an orphan outliving its runner; a diorama crash) gets a
+`SIGPIPE`-shaped note where the `/srv` transport gave only an error. Linux's
+kernel 9P client signals nothing (it writes from a workqueue); the fix is a
+`MSG_NOSIGNAL`-shaped kernel-internal transport write.
+
+### The bar over the tip
+
+First boot after the change, no retries: kernel suite 1413/1413 (the kernel
+binary was not rebuilt — no `kernel/`/`arch/`/`mm/` file changed);
+`joey: V-7 viv-probe (containered, x2 concurrent) PASS`; `joey: viv-channel:
+private pair serves, no /srv name, EOF-exit`; `diorama: --vivarium pid is not
+my parent` then `joey: viv-channel: non-parent runner REFUSED`; V-1b + L-6c +
+D-5 PASS; `Thylacine boot OK`. LS-CI `viv-run` (the new scenario): PASS on
+attempt 1 — the console `viv run /vivarium/probe` printed the probe's leg-6
+line, the `ptyhost`ed `viv run /vivarium/alpine-ash` showed `/ $ ` on the pts
+and answered `ASH-ALIVE` through it (a pts trio passes `stdio_born` and flows
+both ways — the question the retracted hypothesis raised, answered by the
+witness rather than the fix), `exit` returned to `ut` twice over. The full
+LS-CI run rides the next chunk's bar (the ^C finding below), one bar for both.

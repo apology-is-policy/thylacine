@@ -1062,7 +1062,10 @@ static int run_viv_bundle(const char *vargv, unsigned int vargv_len,
         .argc          = argc,
         .fd_list_va    = (unsigned long)fds,
         .fd_count      = 3,
-        .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+        // No perm bits: viv needs none (its per-container diorama rides a
+        // private pipe pair, not a /srv name), and every boot `viv run` is
+        // spawned the plain way a session shell spawns it -- so these gates
+        // run the interactive path, not a privileged twin of it.
     };
     long pid = t_spawn_full_argv(&req);
     if (pid <= 0) {
@@ -9426,13 +9429,23 @@ int main(void) {
 
             // === VIVARIUM V-7 gate: a viv-assembled container, proven from
             // the inside. Boot-fatal. joey spawns `viv run /vivarium/probe`
-            // with MAY_POST_SERVICE (viv confers it on its per-container
-            // diorama; joey is the grant root). viv assembles the section-7.2
-            // territory -- bundle rootfs as /, the per-container diorama's
-            // /proc + /sys, the /dev leaf binds, the manifest env -- and
-            // spawns /bin/viv-probe inside it; the probe's legs (host absent,
-            // pid view == {self}, principal == invoker's, live /dev binds)
-            // are the gate. viv exits with the probe's status.
+            // -- with NO perm bits: viv needs none (its per-container diorama
+            // rides a private pipe pair, not a /srv name), and this spawn is
+            // deliberately the plain shape a session shell uses, so the boot
+            // gate runs the same path an interactive `viv run` does. viv
+            // assembles the section-7.2 territory -- bundle rootfs as /, the
+            // per-container diorama's /proc + /sys, the /dev leaf binds, the
+            // manifest env -- and spawns /bin/viv-probe inside it; the probe's
+            // legs (host absent, pid view == {self}, principal == invoker's,
+            // live /dev binds) are the gate. viv exits with the probe's status.
+            //
+            // TWO of them, CONCURRENTLY. Each probe asserts its pid view is
+            // EXACTLY {self}, so two live containers prove from the inside
+            // what the retired #101 leg proved from outside: container A's
+            // /proc never shows container B (each diorama filters by ITS
+            // runner's descendants; nothing shared -- no fixed name -- exists
+            // to cross them). It is also the concurrent-containers claim, gated
+            // rather than asserted.
             {
                 const char vb[] = "/vivarium/probe/config.json";
                 long bfd = t_open(T_WALK_OPEN_FROM_ROOT, vb, sizeof(vb) - 1,
@@ -9453,130 +9466,170 @@ int main(void) {
                     .name_len      = sizeof(vname) - 1,
                     .argv_data_len = sizeof(vargv),
                     .argc          = 3,
-                    .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
                 };
-                long vpid = t_spawn_full_argv(&vreq);
-                if (vpid <= 0) {
-                    t_putstr("joey: V-7 spawn /bin/viv FAILED\n");
-                    return 1;
+                long vpid[2] = { -1, -1 };
+                for (int k = 0; k < 2; k++) {
+                    vpid[k] = t_spawn_full_argv(&vreq);
+                    if (vpid[k] <= 0) {
+                        t_putstr("joey: V-7 spawn /bin/viv FAILED\n");
+                        return 1;
+                    }
                 }
-                int  vst  = 0;
-                long vgot = t_wait_pid_for((int)vpid, 0, &vst);
-                if (vgot != vpid || vst != 0) {
-                    t_putstr("joey: V-7 viv-probe (containered) FAILED rc=");
-                    t_putstr(itoa_dec(vst, pbuf, sizeof(pbuf)));
-                    t_putstr("\n");
-                    return 1;
+                for (int k = 0; k < 2; k++) {
+                    int  vst  = 0;
+                    long vgot = t_wait_pid_for((int)vpid[k], 0, &vst);
+                    if (vgot != vpid[k] || vst != 0) {
+                        t_putstr("joey: V-7 viv-probe (containered, x2 concurrent) "
+                                 "FAILED rc=");
+                        t_putstr(itoa_dec(vst, pbuf, sizeof(pbuf)));
+                        t_putstr("\n");
+                        return 1;
+                    }
                 }
-                t_putstr("joey: V-7 viv-probe (containered) PASS\n");
+                t_putstr("joey: V-7 viv-probe (containered, x2 concurrent) PASS\n");
             }
 
-            // === V-8 F3 (#101): the vivarium diorama refuses a foreign runner.
+            // === The per-container diorama CHANNEL (supersedes the V-8 F3
+            // #101 leg). A vivarium diorama serves ONE private pipe pair --
+            // the server ends arrive as its fds 0/1, the runner attaches the
+            // client ends with SYS_ATTACH_9P -- and posts NO /srv name, so no
+            // second runner can reach it (what #101's peer-pid gate used to
+            // check) and no posting privilege is needed (what kept a session
+            // shell's `viv run` from ever spawning its diorama). Its one
+            // startup premise is that the argv runner is its PARENT -- the
+            // Proc that could have made the pair; membership descends from
+            // that pid, so a wrong one is a wrong view and must fail hard.
             //
-            // The leg above proves the ALLOW branch (a real `viv run` still
-            // mounts its own diorama). It does NOT prove the gate is wired at
-            // all -- an `if (false)` gate would pass it identically -- so the
-            // DENY branch needs its own proof, and this is the only place a
-            // non-runner can reach a vivarium-mode diorama: inside the
-            // container /srv is not bound, so viv-probe cannot attempt it.
-            //
-            // Spawn one whose declared runner is a pid joey cannot be, then
-            // attempt the open joey has no right to. Runs AFTER the container
-            // leg so it cannot collide with the real /srv/viv-dio.
-            {
+            // Two spawns one variable apart, so neither branch can pass for
+            // the wrong reason (a diorama that cannot start would satisfy the
+            // refusal leg alone; a diorama with no parent check would satisfy
+            // the serve leg alone):
+            //   1. runner = joey (its true parent): the attach MUST succeed,
+            //      and, with the server provably up, /srv/viv-dio MUST NOT
+            //      resolve -- the "posts nothing" negative with its positive
+            //      control in the same breath. Closing the attach root is the
+            //      last client-end drop; the diorama MUST see EOF and exit on
+            //      its own (the brace a dead runner's container relies on).
+            //   2. runner = 4294967295 (a pid joey is not): the diorama exits
+            //      at its parent check before answering Tversion; our reply
+            //      read sees EOF and the attach MUST fail.
+            for (int leg = 0; leg < 2; leg++) {
                 const char dname[] = "/bin/diorama";
-                const char dargv[] = "/bin/diorama\0--vivarium\0" "4294967295";
+                char dargv[64];
+                unsigned dargv_len = 0;
+                {
+                    const char a0[] = "/bin/diorama";
+                    const char a1[] = "--vivarium";
+                    for (unsigned k = 0; k < sizeof(a0); k++) dargv[dargv_len++] = a0[k];
+                    for (unsigned k = 0; k < sizeof(a1); k++) dargv[dargv_len++] = a1[k];
+                    if (leg == 0) {
+                        char nb[24];
+                        const char *ns = itoa_dec(t_getpid(), nb, sizeof(nb));
+                        for (unsigned k = 0; ns[k]; k++) dargv[dargv_len++] = ns[k];
+                        dargv[dargv_len++] = '\0';
+                    } else {
+                        const char bogus[] = "4294967295";
+                        for (unsigned k = 0; k < sizeof(bogus); k++)
+                            dargv[dargv_len++] = bogus[k];
+                    }
+                }
+                long c2s_rd = -1, c2s_wr = -1, s2c_rd = -1, s2c_wr = -1;
+                if (t_pipe(&c2s_rd, &c2s_wr) < 0 || t_pipe(&s2c_rd, &s2c_wr) < 0) {
+                    t_putstr("joey: viv-channel t_pipe FAILED\n");
+                    return 1;
+                }
+                unsigned int dfds[2] = { (unsigned int)c2s_rd, (unsigned int)s2c_wr };
                 struct t_sys_spawn_args dreq = {
                     .name_va       = (unsigned long)dname,
                     .argv_data_va  = (unsigned long)dargv,
                     .name_len      = sizeof(dname) - 1,
-                    .argv_data_len = sizeof(dargv),
+                    .argv_data_len = dargv_len,
                     .argc          = 3,
-                    .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+                    .fd_list_va    = (unsigned long)dfds,
+                    .fd_count      = 2,
                 };
                 long fpid = t_spawn_full_argv(&dreq);
+                // Our copies of the server ends go regardless: while we hold
+                // c2s_rd the diorama's death can never surface as EOF to us.
+                (void)t_close(c2s_rd);
+                (void)t_close(s2c_wr);
                 if (fpid <= 0) {
-                    t_putstr("joey: #101 spawn diorama(foreign) FAILED\n");
+                    t_putstr("joey: viv-channel spawn diorama FAILED\n");
                     return 1;
                 }
+                long root = t_attach_9p(c2s_wr, s2c_rd, "/", 1, 0);
+                (void)t_close(c2s_wr);
+                (void)t_close(s2c_rd);
 
-                // PRECONDITION, and the whole leg rests on it: prove the
-                // service is POSTED before concluding anything from a refused
-                // open. Without this the assertion below is satisfied just as
-                // well by a diorama that never came up. O_PATH walks to the
-                // service without opening it, so it is not itself gated --
-                // devsrv's open IS the connect, and only the connect attaches.
-                const char vd[] = "/srv/viv-dio";
-                long posted = -1;
-                long fr = -1, fw = -1;
-                if (t_pipe(&fr, &fw) == 0) {
-                    for (int i = 0; i < 30; i++) {
-                        posted = t_open(T_WALK_OPEN_FROM_ROOT, vd,
-                                        sizeof(vd) - 1, T_OPATH);
-                        if (posted >= 0) break;
-                        int fst = 0;
-                        if (t_wait_pid_for((int)fpid, WAIT_WNOHANG, &fst)
-                            == fpid) {
-                            t_putstr("joey: #101 diorama(foreign) died before "
-                                     "posting -- leg would be vacuous\n");
-                            t_close(fr);
-                            t_close(fw);
-                            return 1;
-                        }
-                        struct pollfd fpf = { .fd      = (int)fr,
-                                              .events  = POLLIN,
-                                              .revents = 0 };
-                        (void)t_poll(&fpf, 1, 500);
+                if (leg == 0) {
+                    if (root < 0) {
+                        t_putstr("joey: viv-channel FAILED -- the runner could "
+                                 "not attach its own diorama over the pipe pair\n");
+                        return 1;
                     }
-                    t_close(fr);
-                    t_close(fw);
+                    const char vd[] = "/srv/viv-dio";
+                    long named = t_open(T_WALK_OPEN_FROM_ROOT, vd, sizeof(vd) - 1,
+                                        T_OPATH);
+                    (void)t_close(root);
+                    if (named >= 0) {
+                        (void)t_close(named);
+                        t_putstr("joey: viv-channel FAILED -- a vivarium diorama "
+                                 "posted /srv/viv-dio\n");
+                        return 1;
+                    }
+                    // EOF-exit: bounded wait for the diorama to leave on its
+                    // own; a diorama that outlives its channel is a leak the
+                    // ctl-kill below would mask.
+                    int st = -1;
+                    long got = -1;
+                    for (int i = 0; i < 40 && got != fpid; i++) {
+                        got = t_wait_pid_for((int)fpid, WAIT_WNOHANG, &st);
+                        if (got == fpid) break;
+                        long pr = -1, pw = -1;
+                        if (t_pipe(&pr, &pw) == 0) {
+                            struct pollfd fpf = { .fd = (int)pr, .events = POLLIN,
+                                                  .revents = 0 };
+                            (void)t_poll(&fpf, 1, 100);
+                            (void)t_close(pr);
+                            (void)t_close(pw);
+                        }
+                    }
+                    if (got != fpid) {
+                        char fctl[64];
+                        unsigned fctl_len = 0;
+                        char nb[24];
+                        const char *ns = itoa_dec(fpid, nb, sizeof(nb));
+                        const char pfx[] = "/proc/";
+                        for (unsigned k = 0; k < sizeof(pfx) - 1; k++)
+                            fctl[fctl_len++] = pfx[k];
+                        for (unsigned k = 0; ns[k]; k++) fctl[fctl_len++] = ns[k];
+                        const char sfx[] = "/ctl";
+                        for (unsigned k = 0; k < sizeof(sfx) - 1; k++)
+                            fctl[fctl_len++] = sfx[k];
+                        long kfd = t_open(T_WALK_OPEN_FROM_ROOT, fctl, fctl_len,
+                                          T_OWRITE);
+                        if (kfd >= 0) {
+                            (void)t_write(kfd, "kill", 4);
+                            (void)t_close(kfd);
+                        }
+                        (void)t_wait_pid_for((int)fpid, 0, &st);
+                        t_putstr("joey: viv-channel FAILED -- the diorama did not "
+                                 "exit on channel EOF (killed)\n");
+                        return 1;
+                    }
+                    t_putstr("joey: viv-channel: private pair serves, no /srv name, "
+                             "EOF-exit\n");
+                } else {
+                    int st = -1;
+                    (void)t_wait_pid_for((int)fpid, 0, &st);
+                    if (root >= 0) {
+                        (void)t_close(root);
+                        t_putstr("joey: viv-channel FAILED -- a diorama served a "
+                                 "runner that is not its parent\n");
+                        return 1;
+                    }
+                    t_putstr("joey: viv-channel: non-parent runner REFUSED\n");
                 }
-
-                // Teardown, built once: the diorama serves forever, and it
-                // holds /srv/viv-dio, so it MUST be gone before boot moves on.
-                char fctl[64];
-                unsigned fctl_len = 0;
-                {
-                    char nb[24];
-                    const char *ns = itoa_dec(fpid, nb, sizeof(nb));
-                    const char pfx[] = "/proc/";
-                    for (unsigned k = 0; k < sizeof(pfx) - 1; k++)
-                        fctl[fctl_len++] = pfx[k];
-                    for (unsigned k = 0; ns[k]; k++) fctl[fctl_len++] = ns[k];
-                    const char sfx[] = "/ctl";
-                    for (unsigned k = 0; k < sizeof(sfx) - 1; k++)
-                        fctl[fctl_len++] = sfx[k];
-                    fctl[fctl_len] = '\0';
-                }
-
-                if (posted < 0) {
-                    t_putstr("joey: #101 /srv/viv-dio never posted -- leg "
-                             "would be vacuous\n");
-                    return 1;
-                }
-                (void)t_close(posted);
-
-                // THE ASSERTION: joey is not pid 4294967295, so the attach
-                // must be refused and the open must fail.
-                long stolen = t_open(T_WALK_OPEN_FROM_ROOT, vd,
-                                     sizeof(vd) - 1, T_OREAD);
-
-                long kfd = t_open(T_WALK_OPEN_FROM_ROOT, fctl, fctl_len,
-                                  T_OWRITE);
-                if (kfd >= 0) {
-                    (void)t_write(kfd, "kill", 4);
-                    (void)t_close(kfd);
-                }
-                int fst2 = 0;
-                (void)t_wait_pid_for((int)fpid, 0, &fst2);
-
-                if (stolen >= 0) {
-                    (void)t_close(stolen);
-                    t_putstr("joey: #101 FAILED -- a foreign runner mounted "
-                             "the container diorama\n");
-                    return 1;
-                }
-                t_putstr("joey: #101 foreign-runner attach REFUSED\n");
             }
 
             // === VIVARIUM V-1b gate: the phenotype, from both vantages.
@@ -9663,7 +9716,6 @@ int main(void) {
                     .name_len      = sizeof(hname) - 1,
                     .argv_data_len = sizeof(hargv),
                     .argc          = 3,
-                    .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
                 };
                 long hpid = t_spawn_full_argv(&hreq);
                 if (hpid <= 0) {

@@ -102,7 +102,7 @@ enum {
     T_SYS_CHDIR             = 69,  // LS-4: set the per-Proc cwd (dot_path)
     T_SYS_GETCWD            = 70,  // LS-4: read the per-Proc cwd (dot_path)
     T_SYS_FD2PATH           = 71,  // #66: fd -> namespace name (Plan 9 fd2path)
-    // 72..74 = getpid/uid/gid (native libthyla-rs only).
+    T_SYS_GETPID            = 72,  // LS-K: the caller's own pid (73/74 = uid/gid: native libthyla-rs only)
     T_SYS_CLOCK_GETTIME     = 75,  // LS-K: read CLOCK_REALTIME / CLOCK_MONOTONIC
     T_SYS_PCI_CLAIM         = 76,  // pci-1c: claim a VirtIO-PCI function -> KOBJ_PCI
     T_SYS_PCI_MAP_BAR       = 77,  // pci-1c: map a KObj_PCI BAR into user VA
@@ -1630,6 +1630,20 @@ static inline long t_walk_open(long spoor_fd, const char *name,
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_getpid — the caller's own pid (LS-K; SYS_GETPID). Always > 0.
+__attribute__((always_inline))
+static inline long t_getpid(void) {
+    register long x0 __asm__("x0");
+    register long x8 __asm__("x8") = T_SYS_GETPID;
+    __asm__ volatile (
+        "svc #0"
+        : "=r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     return x0;

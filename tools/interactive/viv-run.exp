@@ -1,0 +1,71 @@
+#!/usr/bin/expect -f
+# tools/interactive/viv-run.exp -- `viv run` from a SESSION SHELL runs a
+# container (the interactive path every boot gate used to bypass).
+#
+# Until 2026-08-17 an interactive `viv run` never ran anything: viv asked
+# SPAWN_PERM_MAY_POST_SERVICE for its per-container diorama (which posted the
+# fixed /srv/viv-dio) and nothing past login holds that bit, so the diorama
+# spawn was refused and viv printed `viv: spawn /bin/diorama` -- its ERROR
+# line, misread as progress for eighteen days. Every boot gate spawned viv
+# WITH the bit, so no gate ran the path a person runs. The diorama channel is
+# a private pipe pair now (VIVARIUM 7.2.1) and this scenario is the regression
+# net for the path itself: a plain user shell, no privilege, a container that
+# provably assembles and runs.
+#
+# Two vantages, because their stdio substrates differ:
+#   1. the CONSOLE ut (fds = the cons handle): `viv run /vivarium/probe`. The
+#      probe bundle is always baked; its manifest expects the JOEY gate's
+#      principal (VIV_EXPECT_UID = SYSTEM), so from a user the FIRST failing
+#      leg is #6, "principal is not the invoker's" -- and that exact line is
+#      the witness: legs 1-5 (rootfs is /, /proc + /sys serve from the
+#      diorama, pid view == {self}, host /srv unreachable, /net absent) held
+#      under a user principal from a plain shell before it was reached. A
+#      viv that cannot spawn its diorama never prints a probe line at all.
+#   2. the PTS (a ptyhost'ed ut): `viv run /vivarium/alpine-ash` -- the
+#      interactive phenotype ash (args /bin/sh -i; ioctl is unserved so
+#      isatty() is false and ash needs the flag). Its prompt on the pts, a
+#      command answered through stdin/stdout, `exit` back to ut. SKIPs when
+#      the bundle is not staged (it needs the Alpine minirootfs + busybox
+#      apk in build/cache, like the L-6c gate).
+#
+# Echo discipline: the pts ldisc echoes typed text, so every control matches
+# an UPPERCASE token only a `| tr a-z A-Z` pipeline can produce (pty-4).
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set ash_bundle "$repo/build/vivarium/alpine-ash/config.json"
+set have_ash [file exists $ash_bundle]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# --- 1. the console ut ------------------------------------------------------
+lc_send "viv run /vivarium/probe"
+lc_expect "viv-probe: FAIL: principal is not the invoker's" \
+    "the probe container ran from the console shell (legs 1-5 held; leg 6 is the fixture's SYSTEM expectation)"
+sleep 1
+lc_run_expect "echo viv-console | tr a-z A-Z" "VIV-CONSOLE"
+
+# --- 2. the pts (ptyhost) --------------------------------------------------
+if {$have_ash} {
+    lc_send "ptyhost"
+    lc_expect "job control active" "the hosted ut's session dance"
+    sleep 1
+    lc_run_expect "echo pts-up | tr a-z A-Z" "PTS-UP"
+
+    lc_send "viv run /vivarium/alpine-ash"
+    lc_expect_re {/ [#$] } "the phenotype ash prompt on the pts"
+    lc_send "echo ash-alive | tr a-z A-Z"
+    lc_expect "ASH-ALIVE" "ash answers through the pts (stdin in, stdout out)"
+    lc_send "exit"
+    sleep 1
+    lc_run_expect "echo pts-after | tr a-z A-Z" "PTS-AFTER"
+    lc_send "exit"
+    sleep 1
+    lc_run_expect "echo viv-outer | tr a-z A-Z" "VIV-OUTER"
+    lc_pass "VIV-RUN: a plain user shell runs a container on the console and on a pts"
+} else {
+    lc_step "alpine-ash bundle not staged ($ash_bundle) -- the pts half is skipped"
+    lc_pass "VIV-RUN: console half PASS; the pts half needs the Alpine bundle staged"
+}

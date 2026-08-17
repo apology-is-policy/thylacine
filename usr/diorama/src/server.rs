@@ -24,6 +24,9 @@
 // /proc/self/... is not a file, it is a question about the CALLER. This server
 // answers it with SYS_SRV_PEER, which reports the peer of the 9P CONNECTION --
 // that is, the Proc that opened it, which for a mounted tree is the MOUNTER.
+// (The per-container --vivarium mode has no /srv connection to ask about: its
+// one client is the runner that handed it a private pipe pair, and the peer is
+// derived from that fact -- see the vivarium section below.)
 //
 // So `self` means "the Proc that owns this connection", and that is correct ONLY
 // when the mount is per-Proc or per-container. A SHARED mount (the way joey
@@ -95,23 +98,31 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
-    t_close, t_open, t_srv_peer, t_walk_create, TSrvPeerInfo, T_OPATH, T_OREAD,
-    T_WALK_OPEN_FROM_ROOT,
+    t_close, t_getgid, t_getuid, t_open, t_srv_peer, t_walk_create, TSrvPeerInfo, T_OPATH,
+    T_OREAD, T_WALK_OPEN_FROM_ROOT,
 };
 
 // --- V-7: the vivarium (per-container) mode --------------------------------
 //
 // `--vivarium <runner-pid>` puts the server in per-container mode
-// (docs/VIVARIUM.md section 7.2): it posts /srv/viv-dio instead of
-// /srv/diorama, and both pid ENUMERATION and per-pid EXISTENCE answer only
-// for pids in the container's process tree -- so the diorama cannot be a read
-// oracle for the surface the container's territory withheld (the section 7.1
-// F6 close). Membership is ppid-descent from the container ENTRYPOINT, and
-// the entrypoint is located rather than passed: it is the runner's child that
-// is not this server (the runner spawns exactly two children -- this diorama,
-// then the entrypoint -- and the entrypoint's pid does not exist yet when the
-// diorama must already be up to serve the pre-spawn territory mounts). Before
-// the entrypoint exists the set is EMPTY -- fail-closed, never a host view.
+// (docs/VIVARIUM.md section 7.2). It posts NO /srv name: the runner spawned it
+// with the server ends of a private pipe pair as its fds 0 (requests in) and
+// 1 (replies out), and serves that ONE connection until EOF (the Plan 9
+// mount(fd) idiom; the kernel side is SYS_ATTACH_9P over the client ends).
+// Nobody else can hold an end, so nobody else can attach -- the V-8 F3
+// "second concurrent viv run mounts the first container's /proc" hole is
+// closed by construction, not by a check, and no posting privilege is
+// involved (which is what let a plain session shell run viv at all).
+//
+// Both pid ENUMERATION and per-pid EXISTENCE answer only for pids in the
+// container's process tree -- so the diorama cannot be a read oracle for the
+// surface the container's territory withheld (the section 7.1 F6 close).
+// Membership is ppid-descent from the container ENTRYPOINT, and the entrypoint
+// is located rather than passed: it is the runner's child that is not this
+// server (the runner spawns exactly two children -- this diorama, then the
+// entrypoint -- and the entrypoint's pid does not exist yet when the diorama
+// must already be up to serve the pre-spawn territory mounts). Before the
+// entrypoint exists the set is EMPTY -- fail-closed, never a host view.
 //
 // Known shape (not a defect): membership is by LIVE ppid chains, so a
 // container proc orphaned by its parent's death is reparented to init and
@@ -122,6 +133,16 @@ use libthyla_rs::{
 // /proc/self stays PEER-based and unfiltered: `self` answers about the
 // CONNECTION'S OWN Proc, so a non-member reader reads only itself -- the
 // /self/environ authority-coincidence argument, never a cross-boundary leak.
+// In this mode the peer is the RUNNER, and every field of it is kernel state
+// this server reads about itself or its parent, never a client-supplied value:
+// the pid is the argv one, checked at startup against the ppid line of our
+// own native /proc/<self>/status (a runner that is not our parent is a hard
+// failure); the ids are our own (`t_getuid`/`t_getgid` -- a plain spawn
+// inherits the runner's, and the diorama's authority is its own principal's
+// whatever it reports, I-43); liveness is a native /proc/<runner> resolve.
+// Same content as SYS_SRV_PEER gave when the runner opened a /srv name -- the
+// mounter -- and task #90 (self names the mounter, not the reader) is
+// unchanged by the channel.
 static VIV_RUNNER: AtomicU32 = AtomicU32::new(0);
 static VIV_SELF: AtomicU32 = AtomicU32::new(0);
 
@@ -132,6 +153,26 @@ pub fn set_vivarium(runner_pid: u32, self_pid: u32) {
 
 fn viv_runner() -> u32 {
     VIV_RUNNER.load(Ordering::Relaxed)
+}
+
+/// Startup check for the vivarium mode: the argv runner must be OUR PARENT --
+/// the Proc that made the pipe pair we are serving. Pure over the native
+/// /proc/<self>/status text ("ppid:    N", devproc's format_status) so the
+/// truth table is selftestable; the caller reads the live file. Our OWN status
+/// rather than the /ctl/procs table because the table is read into a bounded
+/// window that drops rows past the cut, and a healthy container must not fail
+/// its startup check on a busy box.
+pub fn viv_runner_is_parent(status_text: &[u8], runner: u32) -> bool {
+    runner != 0 && parse_kv_dec(status_text, b"ppid") == Some(runner as u64)
+}
+
+/// Does `runner` name our parent right now?
+pub fn viv_check_parent() -> bool {
+    let mut pbuf = [0u8; 64];
+    let n = native_proc_path(VIV_SELF.load(Ordering::Relaxed), b"status", &mut pbuf);
+    let mut sbuf = [0u8; RENDER_MAX];
+    let got = read_native(&pbuf[..n], &mut sbuf).unwrap_or(0);
+    viv_runner_is_parent(&sbuf[..got], viv_runner())
 }
 
 pub const MAX_CONNS: usize = 8;
@@ -722,16 +763,7 @@ fn native_pid_exists(pid: u32) -> bool {
     if viv_runner() != 0 && !viv_is_member(pid) {
         return false;
     }
-    let mut r = Render::new();
-    r.push(b"/proc/");
-    r.push_dec(pid as u64);
-    let p = r.bytes();
-    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, p.as_ptr(), p.len(), T_OPATH) };
-    if fd < 0 {
-        return false;
-    }
-    let _ = unsafe { t_close(fd) };
-    true
+    native_pid_alive(pid)
 }
 
 // V-7 membership. VIV_PROCS_MAX bounds both the (pid, ppid) table and the
@@ -760,11 +792,20 @@ fn viv_members(out: &mut [u32]) -> usize {
     compute_members(&pairs[..np], runner, VIV_SELF.load(Ordering::Relaxed), out)
 }
 
-/// The #101 attach gate, as a pure decision so its truth table is testable
-/// without a live connection. `runner == 0` is the shared boot diorama --
-/// unfiltered by design, so there is no gate at all there.
-pub fn viv_attach_allowed(runner: u32, peer_alive: u32, peer_pid: u32) -> bool {
-    runner == 0 || (peer_alive != 0 && peer_pid == runner)
+/// Is `pid` a live Proc, UNFILTERED by container membership -- the runner is
+/// deliberately not a member of its own container's view, so the vivarium
+/// peer's liveness cannot go through native_pid_exists.
+fn native_pid_alive(pid: u32) -> bool {
+    let mut r = Render::new();
+    r.push(b"/proc/");
+    r.push_dec(pid as u64);
+    let p = r.bytes();
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, p.as_ptr(), p.len(), T_OPATH) };
+    if fd < 0 {
+        return false;
+    }
+    let _ = unsafe { t_close(fd) };
+    true
 }
 
 fn viv_is_member(pid: u32) -> bool {
@@ -2028,7 +2069,10 @@ struct Fid {
 }
 
 pub struct Conn {
-    handle: i64,
+    /// Requests arrive here; replies leave through `tx`. One /srv connection
+    /// endpoint is both (rx == tx); the vivarium pipe pair is two fds (0, 1).
+    rx: i64,
+    tx: i64,
     version_done: bool,
     msize: u32,
     fids: [Option<Fid>; MAX_FIDS],
@@ -2037,9 +2081,16 @@ pub struct Conn {
 }
 
 impl Conn {
+    /// A /srv connection endpoint (accept's product): read and written alike.
     pub fn new(handle: i64) -> Conn {
+        Conn::over(handle, handle)
+    }
+
+    /// A half-duplex pair -- the vivarium mode's fds 0 (in) and 1 (out).
+    pub fn over(rx: i64, tx: i64) -> Conn {
         Conn {
-            handle,
+            rx,
+            tx,
             version_done: false,
             msize: SRV_MSIZE,
             fids: [None; MAX_FIDS],
@@ -2048,17 +2099,30 @@ impl Conn {
         }
     }
 
+    /// The fd to poll for requests (and to close when the connection drops).
     pub fn handle(&self) -> i64 {
-        self.handle
+        self.rx
     }
 
-    /// The kernel-stamped identity of whoever opened this connection. Queried
-    /// LIVE per use rather than cached at accept: `alive`/`caps`/`pid` are
-    /// alive-gated, so a peer that exited reports alive == 0 and the renderers
-    /// serve empty instead of a stale answer.
+    /// The identity of whoever is at the other end. A /srv connection asks the
+    /// kernel (SYS_SRV_PEER, the accept-side stamp); the vivarium mode's peer
+    /// is its runner -- see the vivarium section for why every field is
+    /// kernel state we hold about ourselves or our parent. Queried LIVE per use
+    /// rather than cached: `alive` is what makes a peer that exited render
+    /// empty instead of a stale answer, in both modes.
     fn peer(&self) -> TSrvPeerInfo {
+        let runner = viv_runner();
+        if runner != 0 {
+            let alive = native_pid_alive(runner);
+            let mut info = TSrvPeerInfo::default();
+            info.pid = if alive { runner } else { 0 };
+            info.alive = alive as u32;
+            info.principal_id = unsafe { t_getuid() } as u32;
+            info.primary_gid = unsafe { t_getgid() } as u32;
+            return info;
+        }
         let mut info = TSrvPeerInfo::default();
-        let rc = unsafe { t_srv_peer(self.handle, &mut info as *mut TSrvPeerInfo) };
+        let rc = unsafe { t_srv_peer(self.rx, &mut info as *mut TSrvPeerInfo) };
         if rc != 0 {
             // Fail closed: an unreadable peer is an unknown peer.
             return TSrvPeerInfo::default();
@@ -2091,7 +2155,7 @@ impl Conn {
         }
         let want = SRV_MSIZE_USIZE - cur;
         self.in_buf.resize(cur + want, 0);
-        let n = unsafe { libthyla_rs::t_read(self.handle, self.in_buf.as_mut_ptr().add(cur), want) };
+        let n = unsafe { libthyla_rs::t_read(self.rx, self.in_buf.as_mut_ptr().add(cur), want) };
         if n <= 0 {
             self.in_buf.truncate(cur);
             return false;
@@ -2152,7 +2216,7 @@ impl Conn {
         let mut sent = 0usize;
         while sent < rlen {
             let w = unsafe {
-                libthyla_rs::t_write(self.handle, self.out_buf.as_ptr().add(sent), rlen - sent)
+                libthyla_rs::t_write(self.tx, self.out_buf.as_ptr().add(sent), rlen - sent)
             };
             if w <= 0 {
                 return false;
@@ -2196,37 +2260,18 @@ impl Conn {
         if !self.version_done {
             return self.err(tag, p9::E_PROTO);
         }
-        // V-8 F3 (#101): /srv/viv-dio is a FIXED name (post_srv_diorama, and
-        // fixed on purpose -- task #33), so it is first-come-first-served. A
-        // SECOND concurrent `viv run` opening it lands HERE, on the FIRST
-        // container's server; ungated it would mount container A's /proc into
-        // container B, so B enumerates A's processes. That fails OPEN.
-        //
-        // The check has to be here and not in the runner, because at the point
-        // the runner holds the connection it has nothing to compare: SYS_SRV_
-        // PEER is server-side only (the client endpoint is refused outright --
-        // kernel/syscall.c sys_srv_peer_for_proc), the registry's poster_pid
-        // is never exposed to EL0, and membership is ppid-descent from an
-        // ENTRYPOINT THAT DOES NOT EXIST YET, so every diorama's member set is
-        // equally empty. Here the peer pid is kernel-stamped and unforgeable.
-        //
-        // Gating ATTACH (not each op) makes the cross-mount impossible rather
-        // than merely detectable: every fid descends from the attach root, so
-        // the refusal fails the opener's SYS_OPEN outright -- which is the
-        // "the runner fails closed" this mode's header note already promised.
-        let runner = viv_runner();
-        if runner != 0 {
-            // self.peer() is a syscall, so only the vivarium mode pays for it;
-            // the shared boot diorama's attach path is untouched.
-            let peer = self.peer();
-            if !viv_attach_allowed(runner, peer.alive, peer.pid) {
-                return self.err(tag, p9::E_PERM);
-            }
-        }
         let a = match p9::parse_tattach(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
         };
+        // V-8 F3 (#101) used to be a peer-pid gate here: /srv/viv-dio was a
+        // FIXED name, so a SECOND concurrent `viv run` opening it landed on the
+        // FIRST container's server and, ungated, mounted container A's /proc
+        // into container B. There is no name any more: the vivarium channel is
+        // a private pipe pair only the runner holds, so no second runner can
+        // reach this attach at all, and the runner's identity is ours by
+        // construction (a plain spawn). Nothing is left to check at attach --
+        // the startup parent check (main.rs) is where a mis-wired runner fails.
         if a.afid != p9::P9_NOFID {
             return self.err(tag, p9::E_OPNOTSUPP); // no auth fid (trusted local transport)
         }
@@ -2594,27 +2639,21 @@ impl Conn {
     }
 }
 
-/// Post /srv/diorama (9P-mode). Requires PROC_FLAG_MAY_POST_SERVICE (joey spawns
-/// the diorama with T_SPAWN_PERM_MAY_POST_SERVICE, the ptyfs/corvus precedent).
-///
-/// V-7: vivarium mode posts the FIXED name /srv/viv-dio instead. Fixed on
-/// purpose: the boot SrvRegistry never frees a dead entry (task #33), so a
-/// per-container unique name would burn a registry slot per `viv run` forever;
-/// a fixed name rebinds one tombstone across sequential runs. A CONCURRENT
-/// second container collides here and the runner fails closed -- concurrent
-/// containers are a v1.x seam riding the #33 registry-lifecycle fix.
-/// The service name this server posts, mode-dependent. Exposed so the startup
-/// failure message can name the ACTUAL name: a vivarium diorama posts viv-dio
-/// but used to report "/srv/diorama FAILED" -- precisely the wrong name on the
-/// collision path (#101), which is the one path where that message matters.
+/// The shared boot diorama's service name. The vivarium mode posts nothing --
+/// its channel is the runner's private pipe pair (the vivarium section) -- so
+/// there is exactly one name, and it is joey's.
 pub fn srv_name() -> &'static str {
-    if viv_runner() != 0 {
-        "viv-dio"
-    } else {
-        "diorama"
-    }
+    "diorama"
 }
 
+/// Post /srv/diorama (9P-mode). Requires PROC_FLAG_MAY_POST_SERVICE (joey spawns
+/// the boot diorama with T_SPAWN_PERM_MAY_POST_SERVICE, the ptyfs/corvus
+/// precedent). Boot mode only: a per-container diorama used to post the FIXED
+/// name /srv/viv-dio here (fixed because the boot SrvRegistry never frees a
+/// dead entry, task #33, so a per-run name would burn a slot forever) -- which
+/// made two concurrent containers collide (V-8 F3) and made a runner without
+/// the posting privilege unable to run a container at all. Both went away with
+/// the name.
 pub fn post_srv_diorama() -> Result<i64, ()> {
     let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
     if srv < 0 {
@@ -2878,35 +2917,22 @@ pub fn selftest() -> Result<(), &'static str> {
         }
     }
 
-    // --- V-8 F3 (#101): the attach gate's truth table.
-    //
-    // Note the vector directly above: pre-entrypoint membership is EMPTY, so
-    // at the moment a runner holds a fresh connection there is nothing in the
-    // TREE to tell two dioramas apart. The peer pid is the only discriminator
-    // that exists that early, which is why the gate is peer-based.
+    // --- The vivarium startup check (the V-8 F3 successor: the channel is
+    //     the attach gate now, and this is the one premise left to verify):
+    //     the argv runner must be our parent, read off our own native status
+    //     render (the ppid line).
     {
-        // Our own runner attaches.
-        if !viv_attach_allowed(10, 1, 10) {
-            return Err("attach gate refused our own runner");
+        let st = b"name:    diorama\npid:     11\nstate:   ALIVE\nthreads: 1\n\
+                   cpu_ns:  0\nppid:    10\nprincipal:1000 gid:1000\n";
+        if !viv_runner_is_parent(st, 10) {
+            return Err("parent check refused our own parent");
         }
-        // A SECOND concurrent `viv run` attaches: the whole point.
-        if viv_attach_allowed(10, 1, 11) {
-            return Err("attach gate admitted a foreign runner");
+        if viv_runner_is_parent(st, 12) {
+            return Err("parent check admitted a non-parent runner");
         }
-        // An unreadable peer is an unknown peer -- fail closed, matching
-        // Conn::peer()'s own default-on-error contract (a zeroed info would
-        // otherwise read as pid 0, which must never match a live runner).
-        if viv_attach_allowed(10, 0, 10) {
-            return Err("attach gate admitted a dead peer");
-        }
-        if viv_attach_allowed(10, 0, 0) {
-            return Err("attach gate admitted an unreadable peer");
-        }
-        // The shared boot diorama is deliberately unfiltered: runner == 0
-        // means no gate, so every peer -- including an unreadable one --
-        // attaches exactly as it did before this check existed.
-        if !viv_attach_allowed(0, 1, 99) || !viv_attach_allowed(0, 0, 0) {
-            return Err("attach gate filtered the shared diorama");
+        // No runner / no ppid line: fail closed.
+        if viv_runner_is_parent(st, 0) || viv_runner_is_parent(b"pid:     11\n", 10) {
+            return Err("parent check admitted an absent fact");
         }
     }
 

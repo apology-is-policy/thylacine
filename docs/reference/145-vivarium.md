@@ -1229,6 +1229,13 @@ reason.
 
 ## V-8 F3 [P2] -- the fixed diorama name was first-come-first-served
 
+> **SUPERSEDED 2026-08-17** -- the per-container diorama no longer posts any
+> name: its channel is a private pipe pair handed at spawn (see "The diorama
+> channel is a private pipe pair" at the end of this document). The gate, the
+> `#101` joey leg and the "concurrent containers are still unsupported" note
+> below describe the state between V-8 and that change; kept as the record of
+> why the fixed name existed and what it cost.
+
 `/srv/viv-dio` is a FIXED name, and deliberately so: the boot `SrvRegistry`
 never frees a dead entry (task #33), so a per-container unique name would burn
 a registry slot on every `viv run` forever, where a fixed one rebinds a single
@@ -2809,3 +2816,152 @@ the pool when changing them, and confirm from the build log's
 `populate pool: viv bundles baked at /vivarium` -- **not** from a green boot, and
 not by grepping `pool.img`, whose contents are encrypted and will never show a
 plaintext marker.
+
+## The diorama channel is a private pipe pair (aux, 2026-08-17)
+
+### The defect: an interactive `viv run` never ran the container
+
+`viv run <bundle>` from a session shell -- `ut`, hosted by `ptyhost` or not --
+printed one line on the console, `viv: spawn /bin/diorama`, and returned. That
+line is not progress: it is `Err(String::from("spawn /bin/diorama"))` reaching
+`say`. The per-container diorama posted the fixed name `/srv/viv-dio`, so `viv`
+requested `SPAWN_PERM_MAY_POST_SERVICE` for it, and `spawn_perm_grant_check`
+grants that bit only to a console-attached granter or an existing holder. Nothing
+past login is one: joey confers it on `/sbin/login`, login confers
+`CONSOLE_OWNER` on `ut` (`usr/login/src/main.rs`, the shell spawn) and nothing
+else, `ut` confers nothing on its externals. Every boot-gate `viv` was
+joey-spawned WITH the bit, so no gate had ever run the interactive path. The V-7
+commit body listed the seam ("interactive `viv` from a session shell needs ut to
+hold+confer MAY_POST_SERVICE") and nothing enqueued it.
+
+Two readings of the fix were on the table:
+
+* **Widen the privilege** -- login confers `MAY_POST_SERVICE` on `ut`, `ut` on
+  every command. Rejected: at v1.0 there is ONE shared boot `SrvRegistry`, so
+  every user program could then squat `/srv/home-<user>` before that user logs
+  in, or re-post a tombstoned trusted name (`/srv/net` after netd dies -- a
+  tombstone is re-postable by any marked Proc). And the fixed-name collision
+  (V-8 F3) stays.
+* **Need no name.** The runner and its diorama are parent and child; the
+  channel between them can be handed at spawn. This is Plan 9's own idiom --
+  `mount(fd, ...)` over a pipe; `srv(3)` only PUBLISHES fds for strangers to
+  find -- and the capability-microkernel one (a component's private service
+  channel arrives in its startup handles). The kernel already has the primitive:
+  `SYS_ATTACH_9P(tx, rx)` over two Plan 9 pipes, the P5 `stub-driver` shape,
+  exercised by `test_attach_probe` since Phase 5 and until now by nothing in
+  production.
+
+The second is what landed. It removes the privilege, the name, and the
+collision at once, and turns the F3 attach gate from a check into a structural
+property.
+
+### The shape
+
+`viv` (`usr/viv/src/main.rs::run`):
+
+```
+c2s = t_pipe(); s2c = t_pipe()
+spawn /bin/diorama --vivarium <my pid>   with fds [c2s_rd, s2c_wr]  (its 0 and 1)
+close c2s_rd, s2c_wr                     -- ours; while held, no EOF could ever surface
+root = t_attach_9p(c2s_wr, s2c_rd, "/")  -- Tversion + Tattach over the pair
+close c2s_wr, s2c_rd                     -- the attach holds its own transport refs
+mount root at /dio  ...                  -- unchanged from here
+```
+
+The diorama's server ends are its ONLY fds: it wants no stdio (diagnostics ride
+`SYS_PUTS`), and the fewer things a per-container server holds the better. The
+runner passes NO perm bits, and joey's boot `viv run`s were changed to pass none
+either -- so every gate now runs the same path a session shell runs.
+
+`diorama --vivarium` (`usr/diorama/src/main.rs`): after the selftest, verify the
+argv runner is our PARENT (the ppid line of our own native
+`/proc/<self>/status`; `viv_runner_is_parent` is pure and in the selftest), then
+serve ONE `Conn::over(0, 1)` -- `Conn` grew a distinct `tx` (a /srv endpoint is
+both; the pair is two fds) -- until `service()` reports EOF, then exit 0. No
+listener, no post. The boot mode (`/srv/diorama`, joey-spawned with the bit) is
+untouched.
+
+**Who is `self` now.** There is no `SYS_SRV_PEER` on a pipe. `Conn::peer()` in
+vivarium mode builds the peer from kernel state this server holds about itself
+and its parent: pid = the runner (checked against our ppid at startup), alive = a
+native `/proc/<runner>` resolve (unfiltered -- the runner is not a member of its
+own container's view, so it cannot go through `native_pid_exists`), ids = our
+own `t_getuid`/`t_getgid` (a plain spawn inherits the runner's; and I-43 holds
+whatever we report -- the diorama's authority is its own principal's). Same
+content SYS_SRV_PEER gave when the runner opened the name: the mounter. Task #90
+(`/proc/self` names the mounter, not the reader) is unchanged by the channel.
+
+The Tattach `n_uname` -- which `sys_attach_9p_handler` overwrites with the
+caller's kernel-stamped principal -- was considered as a consistency check
+against `t_getuid()` and dropped: it would guard only the Uid line's cosmetics
+(authority never depended on it), and a check nothing can drive is a gate the
+"boot OK proves nothing" rule forbids carrying.
+
+### The V-8 F3 section above is superseded
+
+Its mechanism -- `viv_attach_allowed(runner, peer_alive, peer_pid)` in
+`h_attach`, the joey `#101` deny leg, the "concurrent containers are still
+unsupported" note -- is gone. The property it protected (container A never
+mounts container B's `/proc`) now holds because no second runner can reach the
+attach at all: nobody but the runner holds an end. What remains checkable is the
+startup premise (the runner is the parent), and it is checked.
+
+### Gates
+
+The joey `#101` leg became the **viv-channel** leg, two spawns of
+`diorama --vivarium` one variable apart so neither branch passes for the wrong
+reason:
+
+| runner argv | expected | proves |
+|---|---|---|
+| joey's own pid | the attach over the pair SUCCEEDS; with the server provably up, `/srv/viv-dio` does NOT resolve; closing the attach root (the last client-end drop) makes the diorama exit on EOF within a bounded wait | the channel serves; nothing is posted; a dead runner's diorama does not linger |
+| `4294967295` | the diorama exits at its parent check before Tversion; the reply read sees EOF; the attach FAILS | the parent check is wired |
+
+And the V-7 leg now spawns **two** `viv run /vivarium/probe` **concurrently** and
+waits for both: each probe's leg 3 asserts its pid view is EXACTLY {self}, so two
+live containers prove from the inside what `#101` proved from outside (A never
+shows B), and the concurrent-containers claim is gated rather than asserted.
+The interactive path itself -- the one no boot leg can run -- is
+`tools/interactive/viv-run.exp` (LS-CI, 36 scenarios now): from the CONSOLE
+`ut`, `viv run /vivarium/probe` must print `viv-probe: FAIL: principal is not
+the invoker's` -- the probe bundle's manifest expects the joey gate's SYSTEM
+principal, so from a user the FIRST failing leg is #6, and that exact line
+proves legs 1-5 (rootfs, `/proc`+`/sys` from the diorama, pid view == {self},
+host `/srv` unreachable, `/net` absent) held under a user principal from a
+plain shell (a viv that cannot spawn its diorama prints no probe line at all);
+then from a `ptyhost`ed `ut`, `viv run /vivarium/alpine-ash` (the new
+INTERACTIVE twin `tools/build.sh` stages beside the L-6c bundle: same rootfs,
+args `/bin/sh -i`) must show the ash prompt on the pts, answer a `| tr`
+pipeline through stdin/stdout, and `exit` back to `ut` -- the pts half SKIPs
+when the Alpine bundle is not staged.
+
+Measured (this chunk, first boot after the change, no retries): kernel suite
+1413/1413 (the kernel binary is not rebuilt -- no `kernel/`/`arch/`/`mm/`
+file changed); `joey: V-7 viv-probe (containered, x2 concurrent) PASS`
+(two `viv-probe: PASS` lines, two `diorama: selftest PASS` lines);
+`joey: viv-channel: private pair serves, no /srv name, EOF-exit`;
+`diorama: --vivarium pid is not my parent` then `joey: viv-channel:
+non-parent runner REFUSED`; V-1b + L-6c + D-5 PASS; `Thylacine boot OK`.
+LS-CI `viv-run`: PASS on attempt 1 -- the console `viv run /vivarium/probe`
+printed the leg-6 line, the `ptyhost`ed `viv run /vivarium/alpine-ash` showed
+`/ $ ` on the pts and answered `ASH-ALIVE` through it (so the stdio question
+the earlier hypothesis raised is answered: a pts trio passes `stdio_born` and
+flows both ways), `exit` returned to `ut` twice over. Full LS-CI: see the
+status row.
+
+### A wart worth naming: the pipe note on a dead diorama
+
+`devpipe_write` posts a `pipe` note to the WRITING Proc when the ring's reader
+is gone (`kernel/pipe.c`, the EPIPE arm), and the kernel 9P client's spoor
+transport writes from the syscalling Proc's context. So a container Proc that
+issues a 9P op through `/dio` after the diorama has DIED gets a `pipe` note --
+under the phenotype, a `SIGPIPE`-shaped death for a `/proc` read -- where the
+`/srv` transport (a dead SrvConn) returned only an error. The diorama dies only
+when its channel is already gone (EOF) or when `viv` kills it after the
+entrypoint has exited, so the reachable case is a container Proc that outlives
+its runner (an orphaned daemon) touching `/proc` afterwards, or a diorama crash.
+Linux's kernel 9P client does not signal the process on a dead transport
+(`net/9p/trans_fd.c` writes from a workqueue). The clean fix is a
+`MSG_NOSIGNAL`-shaped kernel-internal pipe write for transports -- a
+`kernel/pipe.c` change on the Pipe wait/wake audit surface, deliberately NOT
+folded into this userspace-only chunk. Recorded in `docs/AUX-ROADMAP.md`.

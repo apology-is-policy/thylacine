@@ -2387,6 +2387,54 @@ names are unreachable; `/net` is absent unless granted; the I-32 floor holds.
 "An Alpine shell runs" (§10's V-7 row) is the **arc** gate — it additionally
 needs V-1b's declaration + dispatch and V-2's tables, and lands with them.
 
+### 7.2.1 The diorama channel — a private pipe pair, no name (as-built 2026-08-17)
+
+**How the runner reaches its diorama.** V-7 as first built had the
+per-container diorama post the fixed name `/srv/viv-dio` and `viv` open it.
+That cornered the design three ways at once: the boot `SrvRegistry` never
+frees a dead entry (#33), so the name had to be fixed, so two concurrent
+containers collided (V-8 F3 made the collision fail closed instead of open);
+and posting needs `MAY_POST_SERVICE`, which every joey-spawned boot `viv` was
+handed and **no session shell's `viv` ever held** — so an interactive
+`viv run` failed at its very first spawn (`viv: spawn /bin/diorama`) and no
+gate noticed, because every gate ran the privileged twin of the path.
+
+**The resolution is Plan 9's:** a 9P server a process starts for itself is
+reached by `mount(fd)` over a pipe; `srv(3)` exists to *publish* an fd to
+strangers, and this channel has no strangers. `viv` makes two Plan 9 pipes,
+spawns `diorama --vivarium <its pid>` with the server ends as the child's fds
+0/1 and nothing else, attaches the client ends with `SYS_ATTACH_9P` (the
+Phase-5 `stub-driver` transport, its first production consumer) and mounts the
+root at `/dio` exactly as before. The diorama serves that one connection until
+EOF. Consequences, each now a gated fact rather than a note:
+
+- **No privilege.** `viv` passes no perm bits and needs none; joey's boot
+  `viv run`s pass none either, so the gates run the interactive path.
+- **No name, no collision.** Concurrent containers moved from §9's OUT list to
+  IN; the V-7 boot leg runs two `viv run /vivarium/probe` at once and each
+  probe asserts its pid view is exactly `{self}` — the F3 property (A never
+  shows B) proven from the inside, under concurrency.
+- **The attach gate is structural.** Nobody but the runner holds an end, so
+  the peer-pid check in `h_attach` and the joey `#101` deny leg are gone; what
+  the diorama still verifies at startup is its one scoping premise, that the
+  argv runner is its parent (membership descends from that pid).
+- **`self` is derived, not stamped.** With no `SYS_SRV_PEER` on a pipe, the
+  diorama's peer is the runner it was spawned by — pid from argv checked
+  against its own ppid, ids its own (`t_getuid`/`t_getgid`, inherited by the
+  plain spawn), liveness a native `/proc/<runner>` resolve. Same content the
+  stamp gave (the mounter); the #90 caveat is unchanged.
+
+The capability-microkernel reading is the same answer (a component's private
+service channel arrives in its startup handles), which is why this went in as
+a routine correction rather than a design fork. Residual, recorded rather than
+built here: a kernel-internal pipe write to a dead reader posts the writer a
+`pipe` note (`kernel/pipe.c`), so a container Proc touching `/proc` after its
+diorama has died — an orphan outliving its runner, or a diorama crash — gets a
+`SIGPIPE`-shaped note where the `/srv` transport gave only an error; the fix is
+a `MSG_NOSIGNAL`-shaped transport write on the Pipe audit surface
+(`docs/AUX-ROADMAP.md`). Reference: `docs/reference/145-vivarium.md`, "The
+diorama channel is a private pipe pair".
+
 ---
 
 ## 8. Invariants and audit surface
@@ -2466,11 +2514,13 @@ sections later is exactly the WSL1 failure this section exists to avoid.
   symlink resolution in `stalk` (#146),
   `epoll` (v1.1 candidate), `inotify` (degrade), `io_uring`, `bpf`,
   `perf_event_open`, `ptrace`, glibc-dynamic (best-effort), `AF_INET6`,
-  cgroups/seccomp, full signal fidelity (Tier 2), **concurrent containers** (a
-  second simultaneous `viv run` is refused at the diorama attach and says so —
-  V-8 F3, `docs/reference/145-vivarium.md`; sequential runs are fine, and lifting
-  it is the #33 registry work), and in-guest OCI image acquisition (`viv pull` —
-  registry/TLS/layer-unpack; the v1.0 bundle is host-baked, §7.2).
+  cgroups/seccomp, full signal fidelity (Tier 2), and in-guest OCI image
+  acquisition (`viv pull` — registry/TLS/layer-unpack; the v1.0 bundle is
+  host-baked, §7.2). **Concurrent containers** were OUT until 2026-08-17 (a
+  second simultaneous `viv run` collided on the fixed `/srv/viv-dio` name and
+  was refused at the diorama attach — V-8 F3); they are IN since the diorama
+  channel became a private pipe pair (§7.2.1), gated by the boot leg that runs
+  two `viv run /vivarium/probe` at once.
 
 A Linux binary needing anything in the OUT list gets a clean `ENOSYS`, never a silent
 wrong answer. **`ENOSYS` is a supported outcome; a lie is not.**
