@@ -2423,6 +2423,16 @@ EOF. Consequences, each now a gated fact rather than a note:
   against its own ppid, ids its own (`t_getuid`/`t_getgid`, inherited by the
   plain spawn), liveness a native `/proc/<runner>` resolve. Same content the
   stamp gave (the mounter); the #90 caveat is unchanged.
+- **^C is the container's, never the runner's** (2026-08-18). An interactive
+  `viv run` is the terminal's foreground job, so the pts's `interrupt` reaches
+  its whole pgrp — `viv`, its diorama, the container. The container's shell
+  handles SIGINT; the two native members used to DIE of it (LS-5's uncaught
+  default), orphaning the shell into a terminal it then shared with the outer
+  `ut`. `viv` masks `interrupt` (the tty family stays unmasked so ^Z stops it
+  with the container and the shell's job control sees the stop); the diorama
+  masks `interrupt` and the tty family (a server never dies of a keystroke —
+  its lifetime is its channel's). A spawned child starts with a zero mask, so
+  the container inherits nothing.
 
 The capability-microkernel reading is the same answer (a component's private
 service channel arrives in its startup handles), which is why this went in as

@@ -28,7 +28,8 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 mod server;
 
 use libthyla_rs::{
-    t_close, t_getpid, t_poll, t_putstr, t_srv_accept, TPollFd, T_POLLHUP, T_POLLIN,
+    t_close, t_getpid, t_note_mask, t_poll, t_putstr, t_srv_accept, TPollFd,
+    T_NOTE_BIT_INTERRUPT, T_NOTE_BIT_TTY, T_POLLHUP, T_POLLIN,
 };
 
 #[no_mangle]
@@ -59,6 +60,21 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
     }
+
+    // A server does not die of a keystroke. In vivarium mode this Proc sits in
+    // the terminal's foreground pgrp with the container it serves, so the pts's
+    // `interrupt` (^C) and the tty family (^Z, ^\, hangup) reach it too, and a
+    // native Proc with no handler DIES of the terminate-class ones -- taking
+    // the container's /proc with it. Its lifetime is its channel's: it exits
+    // on EOF when the last client is gone (or when the runner kills it), never
+    // on what the user typed at the shell. Mask both families; the mask starts
+    // at zero on a spawn, so this is ours alone. (The boot diorama never
+    // receives either -- the console's ^C goes to the console owner, LS-5 --
+    // and masking is harmless there.)
+    let _ = unsafe {
+        t_note_mask((1u64 << T_NOTE_BIT_INTERRUPT) | (1u64 << T_NOTE_BIT_TTY),
+                    core::ptr::null_mut())
+    };
 
     // Prove the tree walk + the bounded renderer + the parser before serving --
     // deterministic and mount-independent (the ptyfs selftest-before-post

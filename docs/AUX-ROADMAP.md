@@ -631,8 +631,24 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    error; fix = a `MSG_NOSIGNAL`-shaped kernel-internal transport write (Linux
    trans_fd writes from a workqueue). Also OPEN, seen once, unreproduced: two
    ^C at a `ptyhost`ed ut's IDLE prompt, then the next command echoed but not
-   executed (`scratchpad/r5f9/ctrlc-idle.exp` is the 2-line reproduction to
-   run; adopt into `tools/interactive/` if it reproduces).
+   executed -- REPRODUCED, see item 10.
+   **LANDED `437213c4`** (boot: 1413/1413, `V-7 viv-probe (containered, x2
+   concurrent) PASS`, both `viv-channel` lines, V-1b/L-6c/D-5 PASS; LS-CI
+   viv-run PASS attempt 1). **Follow-on, same watch (2026-08-18):** the first
+   ^C at the interactive ash's prompt KILLED viv and its diorama (the pts's
+   `interrupt` reaches the whole fg pgrp; a native Proc with no handler dies of
+   it, LS-5), orphaning the shell into a terminal it then shared with the
+   outer ut (`memory/bug_viv_dies_on_ctrlc.md`) -- viv masks `interrupt` (tty
+   family unmasked so ^Z stops it with the container), the diorama masks both
+   families; viv-run.exp gained the ^C leg (`uname -s | tr` -> LINUX after ^C).
+10. **Two ^C at a `ptyhost`ed ut's IDLE prompt lose the next command line**
+   (`memory/bug_hosted_ut_double_ctrlc_idle.md`; REPRODUCED 2026-08-18 by
+   `scratchpad/r5f9/ctrlc-idle.exp`: outer-cc=1 inner-c=1 **inner-cc=0**
+   recover=1 -- one ^C is fine, the console ut is fine, an extra Enter
+   recovers). The render suggests the hosted ut's `interrupt` arrives LATE and
+   its line-discard eats characters of the NEXT line. Aux's own line
+   (notes/job control/PTY): reproduce, root-cause (ut's hosted-session poll set
+   / notes-fd wake / ldisc post order), fix, adopt the scenario into LS-CI.
 
 ---
 

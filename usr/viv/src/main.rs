@@ -53,10 +53,10 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 mod json;
 
 use libthyla_rs::{
-    t_attach_9p, t_chdir, t_chroot, t_close, t_fstat, t_getpid, t_mount, t_open, t_pipe,
-    t_putstr, t_read, t_spawn_full_argv, t_unlink, t_wait_pid_for, t_walk_create, t_write,
-    TSpawnArgs, T_MNOEXEC, T_MREPL, T_OPATH, T_OREAD, T_OWRITE, T_SPAWN_PHENO_LINUX,
-    T_WALK_OPEN_FROM_ROOT,
+    t_attach_9p, t_chdir, t_chroot, t_close, t_fstat, t_getpid, t_mount, t_note_mask, t_open,
+    t_pipe, t_putstr, t_read, t_spawn_full_argv, t_unlink, t_wait_pid_for, t_walk_create,
+    t_write, TSpawnArgs, T_MNOEXEC, T_MREPL, T_NOTE_BIT_INTERRUPT, T_OPATH, T_OREAD, T_OWRITE,
+    T_SPAWN_PHENO_LINUX, T_WALK_OPEN_FROM_ROOT,
 };
 
 // Manifest bounds (fail closed past any of them; the kernel's own spawn/env
@@ -656,6 +656,21 @@ pub extern "C" fn rs_main() -> i64 {
         let mut st = [0u8; 88];
         (0..3).all(|fd| unsafe { t_fstat(fd, st.as_mut_ptr()) } == 0)
     };
+
+    // ^C is the CONTAINER's to handle, not ours. An interactive `viv run` is
+    // the terminal's foreground job, so its pgrp -- viv, its diorama and every
+    // container Proc -- receives the pts's `interrupt`; the container's
+    // processes see it as SIGINT and do what they will, but a native Proc with
+    // no handler DIES of it (LS-5's uncaught-interrupt default), which is what
+    // happened here: the first ^C at an interactive ash's prompt killed viv,
+    // orphaned the shell and its diorama, and left the orphaned shell and the
+    // outer ut competing for the terminal. Masking is the runner's whole answer
+    // -- the container already gets the note directly (same pgrp; nothing to
+    // forward), and a spawned child starts with a ZERO mask (only a
+    // PHENO_LINUX fork copies it), so nothing here reaches the entrypoint. The
+    // tty family stays UNMASKED on purpose: ^Z must stop viv with the container
+    // so the shell's job control sees the job stop; a hangup ends viv with it.
+    let _ = unsafe { t_note_mask(1u64 << T_NOTE_BIT_INTERRUPT, core::ptr::null_mut()) };
 
     if let Err(e) = json::selftest() {
         say("json selftest FAIL:");

@@ -631,3 +631,61 @@ and answered `ASH-ALIVE` through it (a pts trio passes `stdio_born` and flows
 both ways — the question the retracted hypothesis raised, answered by the
 witness rather than the fix), `exit` returned to `ut` twice over. The full
 LS-CI run rides the next chunk's bar (the ^C finding below), one bar for both.
+
+## 2026-08-18 (aux) — the first ^C killed the runner; and a hosted `ut` loses a line after two
+
+With the channel fixed, the R5-F9 experiment finally reached an interactive
+phenotype ash — and its first ^C at the prompt produced not the ash prompt but
+`proc: orphan pid=N name="sh" (parent viv exiting)`, then the same line for the
+diorama, then a terminal in which nothing answered coherently. Three of three
+attempts. Not the R5-F9 wedge at all: the pts's ISIG cooks 0x03 into an
+`interrupt` for the FOREGROUND PGRP, and `viv` runs as `ut`'s foreground job,
+so its pgrp is `viv` + its diorama + every container Proc. The container's
+shell sees SIGINT and handles it; the two NATIVE members have no handler and no
+notes fd and die of an uncaught `interrupt` — LS-5's default, working exactly
+as designed on the wrong recipients. The orphaned shell then kept reading the
+same pts as the outer `ut` and split every later keystroke with it, which is
+why the control legs saw nothing: PTY-4's "no TTIN arbitration" footnote seen
+from the other side.
+
+The fix is a mask and only a mask. `viv` masks `interrupt`: the container needs
+nothing forwarded (it is in the pgrp; the note reaches it directly) and
+inherits nothing (a spawned child starts with a zero mask — `rfork_internal`
+copies `note_mask` only when the PARENT is `PHENO_LINUX`, and the native
+exec-image reset zeroes it). The tty family stays UNMASKED in `viv` on purpose:
+^Z must STOP `viv` with the container, or `ut`'s `wait_pid(WUNTRACED)` on the
+job never sees it stop and the terminal is never handed back; a hangup ends
+`viv` with the container; ^\ still kills the runner and detaches a running
+container, as `docker run` does under SIGQUIT. The diorama has no such
+constraint — nothing waits on it as a job — so it masks both families: a
+server never dies of a keystroke, and its lifetime is its channel's. Two kernel
+facts were read rather than assumed first: the terminate LATCH is armed at post
+regardless of the mask, but both its consumers — the EL0 tail's terminate scan
+and the #811 sleep predicate — honour the per-thread mask, so a masked
+`interrupt` neither delivers nor unwinds the blocked `wait_pid`; and the
+ldisc's post is `synthetic`, so repeated ^C coalesce rather than fill the
+queue.
+
+`viv-run.exp` gained the leg, with a witness that names WHICH shell answered:
+`uname -s | tr a-z A-Z` says `LINUX` from the phenotype ash and `THYLACINE`
+from `ut`'s coreutil, so a runner that died and handed the terminal back could
+not pass it by `ut` executing the line. PASS on attempt 1 on the build whose
+only change from `437213c4` is the two masks.
+
+And the "unexplained" note from the previous watch reproduced on its first
+try. `scratchpad/r5f9/ctrlc-idle.exp`: two ^C at the console `ut`'s idle
+prompt, then a command — answered; ONE ^C at a `ptyhost`ed `ut`'s idle prompt,
+then a command — answered; TWO ^C there, then a command — echoed, not executed
+within 30 s; an Enter, then a command — answered
+(`outer-cc=1 inner-c=1 inner-cc=0 recover=1`). The rendering suggests the
+hosted `ut`'s `interrupt` arrives late and its line-discard eats characters of
+the NEXT line; with two, the second discard lands around Enter and takes the
+whole line. That is aux's own line — notes, job control, the pts — and it is
+enqueued as item 10 (`memory/bug_hosted_ut_double_ctrlc_idle.md`) rather than
+folded in here: it is a different mechanism from this chunk's, and it wants its
+own root cause before its scenario joins LS-CI. Every gate we had covers ^C on
+a foreground JOB; none covered ^C at an idle hosted prompt.
+
+The R5-F9 question itself — does busybox ash's `raise_interrupt` longjmp out of
+its SIGINT handler and wedge `in_handler` — is still the open one; its
+experiment runs next, on the runner that now survives the ^C it needs.

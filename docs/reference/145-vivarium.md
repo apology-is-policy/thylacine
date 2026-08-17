@@ -2965,3 +2965,60 @@ Linux's kernel 9P client does not signal the process on a dead transport
 `MSG_NOSIGNAL`-shaped kernel-internal pipe write for transports -- a
 `kernel/pipe.c` change on the Pipe wait/wake audit surface, deliberately NOT
 folded into this userspace-only chunk. Recorded in `docs/AUX-ROADMAP.md`.
+
+## ^C reaches the container, not the runner (aux, 2026-08-18)
+
+The first thing the channel fix let anyone type at an interactive phenotype
+ash was ^C, and the first ^C killed `viv`. The R5-F9 experiment scenario
+(`scratchpad/r5f9/r5f9-ash.exp`, 3/3 attempts) put the console line right
+where the prompt should have been: `proc: orphan pid=N name="sh" (parent
+pid=M name="viv" exiting) -> adopted by pid=1974`, then the same for the
+diorama. Mechanism, all as-built: the pts's ISIG cooks 0x03 into an
+`interrupt` posted to the terminal's FOREGROUND PGRP; `viv` runs as `ut`'s
+foreground job, so its pgrp is `viv` + its diorama + every container Proc; the
+container's shell sees SIGINT and handles it, but a NATIVE Proc with no
+handler and no notes fd dies of an uncaught `interrupt` (LS-5's default) --
+so both native members died, the shell and its `/proc` server were orphaned to
+init, and the orphaned shell went on reading the same pts as the outer `ut`,
+splitting every later keystroke between two readers so that neither answered.
+(That input-stealing shape is the v1.0 pts's missing TTIN arbitration, PTY-4's
+own footnote, seen from the other side.)
+
+**The fix is a mask, and only a mask.** `viv` masks `interrupt` at startup
+(`SYS_NOTE_MASK`, bit 0). The container needs nothing forwarded -- it is in the
+pgrp and receives the note directly -- and nothing leaks into it: a spawned
+child starts with a ZERO mask (`rfork_internal` copies `note_mask` only when
+the PARENT is `PHENO_LINUX`, and the native exec-image reset zeroes it). The
+tty family stays UNMASKED in `viv` on purpose: ^Z (`tty:susp`) must STOP `viv`
+together with the container, or `ut`'s `wait_pid(WUNTRACED)` on the job never
+sees it stop and the terminal is never handed back; a hangup ends `viv` with
+the container; ^\ (`tty:quit`) still kills the runner and detaches a running
+container, which is what `docker run` does under SIGQUIT too. The diorama has
+no such constraint -- nothing waits on it as a job -- so it masks BOTH
+families: a server never dies of a keystroke, and its lifetime is its
+channel's (EOF, or the runner's kill).
+
+Kernel facts this rests on, read rather than assumed: the terminate LATCH is
+armed at post regardless of the mask (`notes_arm_intr_terminate_locked` gates
+on the name, kproc, a live handler and self-management), but both consumers
+honour the per-thread mask -- the EL0 tail's `notes_terminate_pending_name_
+locked` skips a masked family, and the #811 sleep predicate reads the latch
+through the mask -- so a masked `interrupt` is neither delivered nor unwinds a
+blocked `wait_pid`; the ldisc's post is `synthetic`, so repeated ^C coalesce at
+the queue threshold rather than filling it.
+
+Coverage: `tools/interactive/viv-run.exp` gained the leg -- at the ash prompt
+on the pts, `uname -s | tr a-z A-Z` answers `LINUX` (the phenotype's `uname`
+row; the outer `ut`'s coreutil says `THYLACINE`, so the token names WHICH shell
+answered), then ^C, then the same command must answer `LINUX` again through
+the same `viv`. Measured: PASS on attempt 1 (`saw: ash still answers after ^C
+(the runner survived it; ut would say THYLACINE)`), on the build whose only
+change from `437213c4` is the two masks.
+
+**Found alongside, OPEN, aux's own line (`memory/bug_hosted_ut_double_ctrlc_
+idle.md`):** two ^C at a `ptyhost`ed `ut`'s IDLE prompt, then the next typed
+command is echoed but not executed until an extra Enter -- one ^C is fine, and
+the console `ut` is fine either way (`scratchpad/r5f9/ctrlc-idle.exp`,
+RESULT `outer-cc=1 inner-c=1 inner-cc=0 recover=1`). The R5-F9 question itself
+(does ash's `raise_interrupt` longjmp wedge `in_handler`) is still unanswered:
+its experiment could not get past the runner dying, and runs next.

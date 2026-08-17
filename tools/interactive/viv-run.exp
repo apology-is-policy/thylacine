@@ -56,15 +56,31 @@ if {$have_ash} {
 
     lc_send "viv run /vivarium/alpine-ash"
     lc_expect_re {/ [#$] } "the phenotype ash prompt on the pts"
-    lc_send "echo ash-alive | tr a-z A-Z"
-    lc_expect "ASH-ALIVE" "ash answers through the pts (stdin in, stdout out)"
+    # `uname -s` inside the container answers LINUX (the phenotype's uname row);
+    # the outer ut's coreutil answers THYLACINE -- so the token names WHICH
+    # shell answered, not just that one did.
+    lc_send "uname -s | tr a-z A-Z"
+    lc_expect "LINUX" "ash answers through the pts (stdin in, stdout out; the phenotype's uname)"
+    # ^C at the ash prompt: the pts's `interrupt` reaches the whole foreground
+    # pgrp -- viv, its diorama and ash. Before 2026-08-18 the two NATIVE members
+    # died of it (LS-5's uncaught-interrupt default), orphaning ash into a
+    # terminal it then shared with the outer ut; now viv masks `interrupt` and
+    # the diorama masks it plus the tty family, and only ash decides what ^C
+    # means (a fresh prompt). The witness is the shell still ANSWERING through
+    # the same viv afterwards -- a dead runner returns the terminal to ut, whose
+    # own `uname` would answer THYLACINE (if the orphaned ash let it answer at
+    # all).
+    send "\x03"
+    sleep 1
+    lc_send "uname -s | tr a-z A-Z"
+    lc_expect "LINUX" "ash still answers after ^C (the runner survived it; ut would say THYLACINE)"
     lc_send "exit"
     sleep 1
     lc_run_expect "echo pts-after | tr a-z A-Z" "PTS-AFTER"
     lc_send "exit"
     sleep 1
     lc_run_expect "echo viv-outer | tr a-z A-Z" "VIV-OUTER"
-    lc_pass "VIV-RUN: a plain user shell runs a container on the console and on a pts"
+    lc_pass "VIV-RUN: a plain user shell runs a container on the console and on a pts, and ^C reaches the container, not the runner"
 } else {
     lc_step "alpine-ash bundle not staged ($ash_bundle) -- the pts half is skipped"
     lc_pass "VIV-RUN: console half PASS; the pts half needs the Alpine bundle staged"
