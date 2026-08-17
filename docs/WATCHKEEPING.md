@@ -1077,9 +1077,16 @@ project on the machine runs this project's stop check, and every worktree runs
 *main's* copy — a branch checkout on main that lacks the file silently removes
 the hook everywhere (fail-open, so harmlessly, but invisibly). Also
 `ctx-hook.sh` and `resume-note.py` are unversioned in one home directory with
-three agents depending on them. *Fix:* version all three under `tools/hooks/`
-with an install step; wire project-specific hooks from project settings, user
-ones from user settings; never cross.
+three agents depending on them. *Fix (proposed; the operator's call, since it
+changes every session's wiring):* version all three under `tools/hooks/` with
+an install step; wire the Stop entry as `[ -x "$CLAUDE_PROJECT_DIR/tools/
+stop-hook.sh" ] || "$CLAUDE_PROJECT_DIR/tools/stop-hook.sh"` so each worktree
+runs its *own* versioned copy and non-Thylacine projects get silence for free
+— with one caveat stated rather than discovered: `$CLAUDE_PROJECT_DIR` is the
+*launch* directory (the identity R1 tripped on), so a session launched from
+another checkout, as the vault is, runs *that* checkout's copy. Wire
+project-specific hooks from project settings, user ones from user settings;
+never cross.
 
 **R5 — a ledger with no reader** (the general form of R1). `log.tsv` is
 written by four writers and, until today, read by nobody. The R1 fix makes the
