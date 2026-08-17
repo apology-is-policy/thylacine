@@ -454,6 +454,50 @@ commit message, a scripture section and the handoff, because a grep that
 *returns results* feels like a sweep that *finished*. Corrected in §4.5.8b and
 the handoff; the commit body stands as written, with this as its correction.
 
+### C-2d-b landed, and the sabotage that proved it unverified (`f86177b6`)
+
+The server half went in as voted: each generation mints `WEAVE_SLOTS` host
+resources instead of one, backed per-slot instead of whole-weave. The
+consequences were all followed rather than found later — `res_stale` becomes
+per-slot; Direct binds the presented slot's resource and therefore rebinds every
+frame (a KMS page flip, carrying the #57 post-bind flush); transfer offsets lose
+their slot base, which the compiler confirmed by reporting `slot_stride` newly
+unused; retire and `release_gen` unref all three or leak two per surface in the
+process that IS the console.
+
+`Held::Direct(Rect)` was the one that needed design rather than editing, and it
+is why I stopped the first attempt at it. A rect union is well-defined only
+while every held present lands on one resource; presents rotate slots, so two
+held presents sit on different resources and `release` must flush each against
+its own. Now `[Rect; WEAVE_SLOTS]` — bounded by construction, since a client
+cannot hold more presents than it has slots.
+
+**Then the sabotage passed, and that is the result worth the whole chunk.** I
+disabled aurora's age handling with per-slot resources live — `stale_slot =
+false`, `back = 0`, exactly the pre-C-2d-a client against a non-accumulating
+server — and **`ls-gfx` still reported PASS.**
+
+So the two gates I had been treating as verification are not. `ls-gfx` asserts
+the frame *looks like* a console and that dumps *differ* after a command;
+neither notices a stale background around fresh rows. `ls-gfx-panes` drives the
+battery, which presents full-frame only and never exercises the accumulator path
+at all. Between them they cover everything about the compositor **except the
+property C-2d changes.**
+
+That is the same trap as C-2b at the start of this run — a green result that
+proves the gate did not fire — except this time I was the one about to be
+fooled by it, having written the C-2b version into scripture that morning. The
+difference between the two is not insight, it is that I ran the sabotage. Had I
+not, this would have landed as "green on both pixel gates", which is *true* and
+means nothing.
+
+C-2d is therefore **implemented, not verified**, and the commit says so. §4.5.8c
+records what the missing gate has to do: paint a region, damage a *different*
+region, rotate all slots, sample the first region. `ls-gfx-panes` already has
+the sampling machinery, so it is a scenario to write, not an instrument. The
+focused audit is owed too — `usr/tapestryd` is an I-40 trigger surface and this
+is the live scanout path — and could not run here because agent spawning is off.
+
 ### The self-compaction slot had two keys that did not agree (`7061115a`)
 
 aux found this by reading the ledger nobody reads, and it is the best kind of
