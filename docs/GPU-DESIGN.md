@@ -747,6 +747,66 @@ the readback is removed.** The failure mode is a torn or stale frame — an I-40
 tearing-freedom violation, i.e. a soundness question, not a perf detail. This
 is where the spec work concentrates.
 
+##### 4.5.4c #240 generalized — a virtio-gpu OK is NOT the renderer's verdict for the whole mint family (found 2026-08-17)
+
+§4.5.4a measured that a refused `SUBMIT_3D` reads as success. That finding was
+filed against one command and not checked against its neighbours, and the
+neighbours are worse. Read from QEMU v10.0.0 `hw/display/virtio-gpu-virgl.c`
+(thyla-pi runs 10.0.11), the virgl path's handlers **ignore the
+`virgl_renderer_*` return value** for `CTX_CREATE`, `RESOURCE_CREATE_2D/3D`,
+`CTX_ATTACH_RESOURCE`, `CTX_DETACH_RESOURCE`, `TRANSFER_TO_HOST_3D`,
+`SUBMIT_3D` and `CTX_DESTROY`, and for `ATTACH_BACKING` check it only to
+clean up the iov mapping — never setting `cmd->error`. What an OK response
+attests for those is that **QEMU parsed the command**: a nonzero,
+non-duplicate resource id (QEMU keeps its own `reslist`, and inserts into it
+*before* calling the renderer, so its list and the renderer's can disagree), a
+valid iov, a permitted `context_init` flag. Whether virglrenderer created,
+attached, or transferred anything is invisible. Two commands DO consult the
+renderer: **`SET_SCANOUT`** (`virgl_renderer_resource_get_info_ext` — an
+unknown resource is `INVALID_RESOURCE_ID`) and `RESOURCE_UNREF` (QEMU-side
+existence only).
+
+**What that falsified, and what it broke.** The C-2b gate's header and
+`149-warp.md` said the screen's "3D" word was "the conjunction of four
+response-checked round trips the host answered OK — a claim about the host
+accepting the object". False: those four are exactly the ignored ones. And it
+was not only prose: `alloc_screen`'s "a 3D failure is NOT fatal — it falls back
+to the 2D resource" was dead for a renderer-side refusal, because
+`resource_create_3d(..).is_ok()` is true whenever QEMU parsed it, so `is3d`
+reduced to `comp_ctx`, "3D" printed, and the failure landed later — silently —
+as an `INVALID_RESOURCE_ID` at the composed `SET_SCANOUT`, whose result the
+code dropped, leaving the *previous* scanout on the display. The C-2b gate
+would have passed identically against that host.
+
+**The repair, in the shape #240's detector already established: make the
+producer prove it, with pixels.** `alloc_screen` now earns "3D" by a sentinel
+round trip through the compositor context — write 16 sentinel pixels into the
+fresh screen's backing, `TRANSFER_TO_HOST_3D`, clobber the backing,
+`TRANSFER_FROM_HOST_3D`, compare, restore the zeros. It succeeds only if the
+renderer holds the resource, has it attached to `COMPOSITOR_CTX`, and moves
+pixels through it — none of which a response can fake, and each of which a
+refused create or attach silently defeats (their transfers become no-ops at
+the renderer). A refusal now falls back to 2D *for real* and the screen line
+says why (`-- 3D refused: create | ctx attach | attach backing | renderer round
+trip`). The composed switch prints its line **after** the bind with the verdict
+(`res N bound` / `BIND FAILED`), and `composed-screen.exp` grew a fifth term:
+the resource the display was handed IS the minted screen. Sabotage that
+discriminates it — a bogus `VIRGL_FORMAT` (0x7FFF) in the 3D create, which
+the renderer refuses and QEMU answers OK — measured on thyla-pi (results in
+`149-warp.md` "What the 3D word attests"): the reason printed is `renderer
+round trip`, i.e. create, attach and backing all returned OK from the device
+under a format the renderer cannot accept — the measured form of this
+section's claim — and the old `is3d` (`comp_ctx && create.is_ok() &&
+attach.is_ok()`) would have printed 3D.
+
+**Consequence for C-2c and C-3, stated here because it changes their gates.**
+`CTX_ATTACH_RESOURCE`'s response witnesses nothing, so C-2c cannot be verified
+by its attach responses at all: its gate is P1b's two arms in-guest — attach +
+one blit + readback pixel oracle, with the no-attach control red — which
+means C-2c lands *with* the first blit witness rather than before it. And
+every future "the device accepted X" claim in this arc names which command's
+response carries a verdict, or reads back pixels.
+
 #### 4.5.5 Venus — the model generalizes, the mechanism must be extended (F2 vote, 2026-08-13)
 
 The composition **model** is capset-neutral. The composition **mechanism** is

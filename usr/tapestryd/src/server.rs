@@ -1504,8 +1504,23 @@ impl Comp {
         // A 3D failure is NOT fatal -- it falls back to the 2D resource. 4.5.9:
         // the CPU path is permanent, so every GL step degrades into it rather
         // than failing the display.
-        let is3d = self.comp_ctx
-            && self
+        //
+        // THE DEVICE'S OK IS NOT THE RENDERER'S VERDICT. QEMU's virgl path
+        // (v10.0.0 hw/display/virtio-gpu-virgl.c) answers RESP_OK_NODATA for
+        // CTX_CREATE, RESOURCE_CREATE_3D, CTX_ATTACH_RESOURCE and
+        // ATTACH_BACKING whatever virgl_renderer_* returned -- those returns
+        // are ignored -- so `.is_ok()` on each of them says only "the device
+        // parsed it". A 3D resource the renderer refused would reach the say
+        // line below as "3D" and fail SILENTLY later, at the composed bind
+        // (SET_SCANOUT is the one command whose response does consult vrend),
+        // leaving the previous scanout on the display. So the 3D word is
+        // earned by a pixel round trip through the renderer (below), the
+        // same technique as the #240 detector: the only witness a virtio-gpu
+        // response cannot fake.
+        let mut is3d = false;
+        let mut why = "";
+        if self.comp_ctx {
+            let created = self
                 .gpu
                 .resource_create_3d(
                     res,
@@ -1520,39 +1535,92 @@ impl Comp {
                     0,
                     0,
                 )
-                .is_ok()
-            && self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res).is_ok();
-        if !is3d {
-            // Either no GL, or the 3D mint failed partway. A create that
-            // succeeded and an attach that did not would leave a resource
-            // behind, so unref before falling back -- and unref of a
-            // never-created id is a harmless no-op on the device.
-            if self.comp_ctx {
+                .is_ok();
+            let attached = created && self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res).is_ok();
+            let backed = attached && self.gpu.attach_backing(res, pa as u64, size as u32).is_ok();
+            if backed && self.screen_3d_roundtrip(res, va, dw) {
+                is3d = true;
+            } else {
+                why = if !created {
+                    " -- 3D refused: create"
+                } else if !attached {
+                    " -- 3D refused: ctx attach"
+                } else if !backed {
+                    " -- 3D refused: attach backing"
+                } else {
+                    " -- 3D refused: renderer round trip"
+                };
+                // Unwind whatever the device accepted, in reverse, then
+                // fall back. A create the device accepted and a later step
+                // it did not would leave a resource behind; an unref of a
+                // never-created id is a harmless error on the device.
+                if backed {
+                    let _ = self.gpu.detach_backing(res);
+                }
+                if attached {
+                    let _ = self.gpu.ctx_detach_resource(COMPOSITOR_CTX, res);
+                }
                 let _ = self.gpu.resource_unref(res);
             }
+        }
+        if !is3d {
             if self.gpu.resource_create_2d(res, dw, dh).is_err() {
                 unsafe { t_burrow_detach(va, size) };
                 unsafe { t_close(handle) };
                 return None;
             }
-        }
-        if self.gpu.attach_backing(res, pa as u64, size as u32).is_err() {
-            if is3d {
-                let _ = self.gpu.ctx_detach_resource(COMPOSITOR_CTX, res);
+            if self.gpu.attach_backing(res, pa as u64, size as u32).is_err() {
+                let _ = self.gpu.resource_unref(res);
+                unsafe { t_burrow_detach(va, size) };
+                unsafe { t_close(handle) };
+                return None;
             }
-            let _ = self.gpu.resource_unref(res);
-            unsafe { t_burrow_detach(va, size) };
-            unsafe { t_close(handle) };
-            return None;
         }
         say!(
-            "tapestryd: screen res {} {} ({}x{})",
+            "tapestryd: screen res {} {} ({}x{}){}",
             res,
             if is3d { "3D (compositor ctx)" } else { "2D" },
             dw,
-            dh
+            dh,
+            why
         );
         Some(Screen { handle, va, size, res, is3d })
+    }
+
+    /// The witness behind the screen's "3D" word: a sentinel written into
+    /// the first pixels of the guest backing, TRANSFER_TO_HOST_3D'd through
+    /// the compositor context, clobbered in the backing, TRANSFER_FROM_HOST_
+    /// 3D'd back, and compared. It succeeds only if virglrenderer really
+    /// holds the resource, has it attached to COMPOSITOR_CTX, and moves
+    /// pixels through it -- none of which the device's OK responses attest.
+    /// A refused create or attach makes both transfers no-ops at the
+    /// renderer (their returns are ignored by QEMU too), so the clobber
+    /// survives and the compare fails. Restores the zeroed backing after.
+    fn screen_3d_roundtrip(&mut self, res: u32, va: u64, dw: u32) -> bool {
+        const N: usize = 16;
+        let stride = dw * 4;
+        let px = va as *mut u32;
+        let seed = |i: usize| 0xA5A5_0000u32 ^ ((i as u32) * 0x0101_0101);
+        for i in 0..N {
+            unsafe { px.add(i).write_volatile(seed(i)) };
+        }
+        let up = self
+            .gpu
+            .transfer_to_3d_sync(COMPOSITOR_CTX, res, N as u32, 1, stride)
+            .is_ok();
+        for i in 0..N {
+            unsafe { px.add(i).write_volatile(!seed(i)) };
+        }
+        let down = up
+            && self
+                .gpu
+                .transfer_from_3d_sync(COMPOSITOR_CTX, res, N as u32, 1, stride)
+                .is_ok();
+        let ok = down && (0..N).all(|i| unsafe { px.add(i).read_volatile() } == seed(i));
+        for i in 0..N {
+            unsafe { px.add(i).write_volatile(0) };
+        }
+        ok
     }
 
     /// Tear down a displaced screen generation (the release_gen order,
@@ -1932,9 +2000,20 @@ impl Comp {
                 }
                 if entering {
                     let sres = self.screen.as_ref().map(|s| s.res).unwrap_or(0);
-                    say!("tapestryd: scanout composed ({}x{})", dw, dh);
+                    // Report the bind's VERDICT, after the bind. SET_SCANOUT is
+                    // the one virtio-gpu command whose response consults the
+                    // renderer (an unknown resource is INVALID_RESOURCE_ID),
+                    // so it is the witness that the screen the display is
+                    // being handed exists; printing "composed" before it, as
+                    // this line once did, reported an intent as an event.
                     if self.gpu.set_scanout(sres, dw, dh).is_ok() {
                         self.bound_res = sres;
+                        say!("tapestryd: scanout composed ({}x{}) res {} bound", dw, dh, sres);
+                    } else {
+                        say!(
+                            "tapestryd: scanout composed ({}x{}) res {} BIND FAILED -- display keeps the previous scanout",
+                            dw, dh, sres
+                        );
                     }
                     // Flush AFTER the bind (#57): a RESOURCE_FLUSH reaches
                     // only scanouts bound to the resource, so the

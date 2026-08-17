@@ -1127,16 +1127,54 @@ on thyla-pi (KVM, real V3D) 2026-08-16: `res 67 3D (compositor ctx)
 (1280x800)` and `res 67 2D (1280x800)` — the identical resource id on both legs
 corroborating that the capability branch is the only thing that moved.
 
-**What the `3D` word attests**, since virtio-gpu commands *look* fire-and-forget:
-`Ctrl::step` submits and WAITS, comparing the device's response type against the
-expected one and returning `Err(Error::Hardware)` on mismatch. So that arm is the
-conjunction of four **response-checked** round trips the host answered OK —
-`CTX_CREATE` of the compositor context, `RESOURCE_CREATE_3D`,
-`CTX_ATTACH_RESOURCE`, `ATTACH_BACKING` — against real virglrenderer. It is a
-claim about the host ACCEPTING the object, not about the guest having sent the
-commands. What it is *not* is a claim about pixels: the screen is still
-CPU-filled at C-2b, so correct pixels here would evidence the CPU path. The pixel
-oracle becomes load-bearing at C-3, where this scenario grows a QMP arm.
+**What the `3D` word attests — corrected 2026-08-17.** This paragraph used to say
+the arm was "the conjunction of four response-checked round trips the host
+answered OK — `CTX_CREATE`, `RESOURCE_CREATE_3D`, `CTX_ATTACH_RESOURCE`,
+`ATTACH_BACKING` — a claim about the host ACCEPTING the object". That was
+**false** (GPU-DESIGN §4.5.4c): `Ctrl::step` does wait and check the response
+type, but QEMU's virgl path (v10.0.0 `hw/display/virtio-gpu-virgl.c`) answers
+`RESP_OK_NODATA` for all four whatever virglrenderer returned — those
+`virgl_renderer_*` returns are ignored — so the responses attested that QEMU
+*parsed* the commands (nonzero, non-duplicate ids) and nothing about the
+renderer. Only `SET_SCANOUT` (via `resource_get_info_ext`) and
+`RESOURCE_UNREF` (QEMU-side existence) carry a verdict, and tapestryd dropped
+the first one's result at the composed switch. #240 had already shown this for
+`SUBMIT_3D`; the mistake was not checking the rest of the family.
+
+Now the word is **earned**: `alloc_screen` writes 16 sentinel pixels into the
+fresh screen's backing, `TRANSFER_TO_HOST_3D`s them through `COMPOSITOR_CTX`,
+clobbers the backing, `TRANSFER_FROM_HOST_3D`s back and compares (then restores
+the zeros) — a round trip that succeeds only if the renderer holds the
+resource, has it attached to the compositor context, and moves pixels through
+it. A refusal falls back to 2D *for real* and the screen line says why
+(`-- 3D refused: create | ctx attach | attach backing | renderer round trip`);
+the composed-entry line prints *after* the bind with its verdict (`scanout
+composed (WxH) res N bound` / `BIND FAILED`), and the scenario's fifth term is
+that the bound resource is the minted screen (`WARP-COMPOSED BOUND: res N`, on
+both legs; the verb requires exactly two). What the arm is *still not* is a
+claim about composed pixels: the screen is CPU-filled at C-2b, so correct
+pixels here would evidence the CPU path. The pixel oracle becomes load-bearing
+at C-3, where this scenario grows a QMP arm.
+
+**Measured on thyla-pi (KVM, real V3D, boot-ms ~212 000, 2026-08-17).**
+*Sabotage* (the 3D create issued with `VIRGL_FORMAT` `0x7FFF`, which the
+renderer refuses and QEMU parses): GL leg → `composed path = GPU`, then
+**`screen res 71 2D (1280x800) -- 3D refused: renderer round trip`**, then
+`scanout composed (1280x800) res 71 bound` — i.e. `CREATE_3D`,
+`CTX_ATTACH_RESOURCE` and `ATTACH_BACKING` all returned OK from the device
+under a format the renderer cannot accept (the reason would otherwise have
+named the step), the renderer refused, the fallback to 2D was real and the
+display got a working screen; the scenario went RED on the arm (`want 3D`),
+the verb reported three GATE FAIL terms. The non-GL leg was unaffected (`2D`,
+`res 71 bound`, PASS). From the old `is3d` — `comp_ctx && create.is_ok() &&
+attach.is_ok()` — those measured OKs would have printed `3D`, and the bind of
+the phantom resource would have failed silently: that half is inferred from
+the measured OKs and the old boolean, not itself measured. *Clean build*, same host, same hour: GL leg → **`screen res
+71 3D (compositor ctx) (1280x800)`** — the word now earned by 16 pixels round-
+tripping through the renderer on real V3D — then `scanout composed (1280x800)
+res 71 bound`, `WARP-COMPOSED BOUND: res 71`, PASS; non-GL leg → `2D`, `res 71
+bound`, PASS; the verb's five terms all held (rc 0). One variable (the format
+the renderer will accept), two verdicts, on the same resource id both times.
 
 The Warp-C **C-2d** gate is `tools/interactive/ls-gfx-age.exp` (LS-CI, HVF,
 local — it needs no GL: the property is the guest client's, not the host's).

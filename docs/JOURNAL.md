@@ -704,11 +704,78 @@ still off). The vault-owned prose (`sub-aurora`, `sub-libtapestry`,
 `sub-tapestryd`) for C-2d and the recording fix goes over yip; the local
 reference carries the gate.
 
+### The device's OK was never the renderer's verdict — C-2b's "3D" word re-earned
+
+Found while designing C-2c's gate, and by the one move that keeps saving this
+arc: reading the source of the thing making the claim before repeating the
+claim. My C-2c draft was about to say, for the third time in a week, that a
+`CTX_ATTACH_RESOURCE` answered OK "attests the host accepted it". Before
+writing that I fetched QEMU v10.0.0 `hw/display/virtio-gpu-virgl.c` (thyla-pi
+runs 10.0.11) and read the handlers. **They ignore the `virgl_renderer_*` return
+value** — for `CTX_CREATE`, `RESOURCE_CREATE_2D/3D`, `CTX_ATTACH/DETACH`,
+`TRANSFER_TO_HOST_3D`, `SUBMIT_3D`, `CTX_DESTROY`; `ATTACH_BACKING` checks it
+only to clean up the iov. `RESP_OK_NODATA` means "QEMU parsed it": nonzero,
+non-duplicate id, valid iov. Only `SET_SCANOUT` (`resource_get_info_ext`) and
+`RESOURCE_UNREF` (QEMU-side existence) consult anything.
+
+**So three of my own documents were false in the same sentence.** C-2b's gate
+header, `149-warp.md` and (by reference) the status row said the screen's "3D"
+word was "the conjunction of four response-checked round trips the host
+answered OK — a claim about the host accepting the object". Those four are
+exactly the ignored ones. And it was not only prose: `alloc_screen`'s "a 3D
+failure is NOT fatal — it falls back to 2D" was dead for a renderer-side
+refusal — `is3d` reduced to `comp_ctx`, "3D" printed, and the failure landed
+later, silently, as `INVALID_RESOURCE_ID` at the composed `SET_SCANOUT`, whose
+result the code dropped after printing "scanout composed" *before* the bind.
+The display would have kept the previous scanout, and the C-2b gate would have
+said VERIFIED. #240 had measured this exact shape for `SUBMIT_3D` four days
+earlier; the finding was filed against one command and never checked against
+its family — the same lesson as the C-2d gate pattern that morning, one level
+up.
+
+**The repair is #240's own technique**: make the producer prove it with pixels.
+`alloc_screen` writes 16 sentinel pixels into the fresh screen's backing,
+`TRANSFER_TO_HOST_3D`s them through the compositor context, clobbers the
+backing, `TRANSFER_FROM_HOST_3D`s back, compares, restores the zeros. Only a
+resource the renderer holds, has attached to `COMPOSITOR_CTX`, and moves pixels
+through can pass; a refused create or attach makes both transfers renderer-side
+no-ops and the clobber survives. A refusal now falls back to 2D for real, the
+screen line says why, the composed line prints after the bind with its verdict,
+and `composed-screen.exp` grew a fifth term (the bound resource IS the minted
+screen; the verb requires it on both legs).
+
+**Measured on thyla-pi** (KVM, real V3D, boot-ms ~212 000), one variable —
+the format the renderer will accept — two runs. *Sabotage*, `VIRGL_FORMAT`
+`0x7FFF` in the 3D create: GL leg `screen res 71 2D (1280x800) -- 3D refused:
+renderer round trip`, then `scanout composed (1280x800) res 71 bound` — so
+`CREATE_3D`, `CTX_ATTACH_RESOURCE` and `ATTACH_BACKING` all came back OK from
+the device under a format the renderer cannot accept (the reason would have
+named the step otherwise), the renderer refused, the fallback was real and the
+display got a working screen; the scenario went RED on the arm and the verb
+reported three GATE FAIL terms; the non-GL leg was unaffected. *Clean*: GL leg
+**`screen res 71 3D (compositor ctx) (1280x800)`** + `res 71 bound`, non-GL
+`2D` + `res 71 bound`, all five terms, rc 0. The half that says the OLD code
+would have printed 3D under the sabotage is inferred from the measured OKs and
+the old boolean (`comp_ctx && create.is_ok() && attach.is_ok()`), not itself
+measured — I chose not to spend a third Pi cycle on a one-line inference and
+say so here.
+
+**What this changes downstream**: `CTX_ATTACH_RESOURCE`'s response witnesses
+nothing, so C-2c cannot be verified by its attach at all — its gate is P1b's two
+arms in-guest (attach + one blit + readback; no-attach control red), which means
+C-2c lands WITH the first blit witness. The C-2c design draft
+(compositor-side import on host, bounded by hosting, no client verb — every
+compositor in the prior art does it that way) is written and waits on that
+correction; it goes into GPU-DESIGN as §4.5.10 with the next chunk.
+
 ### Still open leaving this run
 
-- **Warp-C C-2c** — the attach verb (P1b's authority-conferral point). C-2d is
-  landed AND verified as of the entry above (`ls-gfx-age`, red under both
-  sabotages); C-2a/C-2b are landed and exercised on both capability arms.
+- **Warp-C C-2c** — the compositor-side import (§4.5.10, decided: no client
+  verb; bounded by hosting; detach-before-unref) — lands WITH its blit witness,
+  since §4.5.4c showed the attach response witnesses nothing. C-2d is landed
+  AND verified (`ls-gfx-age`, red under both sabotages); C-2a/C-2b are landed,
+  exercised on both capability arms, and C-2b's "3D" word is now earned by a
+  pixel round trip.
 - **The C-2d-b audit round** on `usr/tapestryd` (I-40) — owed since
   `f86177b6`; needs agent spawning.
 - **Two thirds of the extinction tear** (the vault seam, `IPI_HALT`), and a

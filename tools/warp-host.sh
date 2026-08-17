@@ -167,7 +167,7 @@ sync_all() {
     # dirty iteration loop still tests what you edited.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-reject.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
+    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-reject.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/composed-screen.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -255,6 +255,14 @@ composed)
     fi
     if ! grep -qF "LS-CI PASS: composed-screen: virtio-gpu-pci" "$out"; then
         echo "C-2b GATE FAIL -- the non-GL leg did not run to completion"
+        ok=0
+    fi
+    # Fifth term (2026-08-17): BOTH legs bound the display to the screen they
+    # minted. SET_SCANOUT is the one virtio-gpu command whose OK consults the
+    # renderer, so this is the host-side witness the mint responses are not
+    # (QEMU answers OK to CREATE_3D / CTX_ATTACH / ATTACH_BACKING regardless).
+    if [ "$(grep -cE 'WARP-COMPOSED BOUND: res [0-9]+' "$out")" != 2 ]; then
+        echo "C-2b GATE FAIL -- expected the screen BOUND on both legs"
         ok=0
     fi
     if [ "$ok" != 1 ]; then
