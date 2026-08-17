@@ -1137,3 +1137,29 @@ claim about the host ACCEPTING the object, not about the guest having sent the
 commands. What it is *not* is a claim about pixels: the screen is still
 CPU-filled at C-2b, so correct pixels here would evidence the CPU path. The pixel
 oracle becomes load-bearing at C-3, where this scenario grows a QMP arm.
+
+The Warp-C **C-2d** gate is `tools/interactive/ls-gfx-age.exp` (LS-CI, HVF,
+local — it needs no GL: the property is the guest client's, not the host's).
+C-2d is the per-slot host resource (`GPU-DESIGN.md` §4.5.8: one host resource
+per weave slot, so a compositor blit of slot *i* cannot collide with a client
+fill of slot *j*), and its cost is that the single accumulating resource
+damage-only clients silently relied on is gone — a client must repaint the
+union of everything that changed since the slot it is about to draw into was
+last presented (`libtapestry::age()`, the `EGL_EXT_buffer_age` contract,
+derived client-side because the library owns the rotation and the loom CQE is
+kernel ABI). Landed as C-2d-a (client, `931bf15a`) then C-2d-b (server,
+`f86177b6`) — and `f86177b6` shipped **explicitly unverified**: the §4.5.8c
+sabotage (aurora's age handling disabled) left `ls-gfx` green, because
+`ls-gfx` asserts a console-shaped frame and `ls-gfx-panes` drives a full-frame
+client. The gate that can see it is described in `140-aurora.md` "The gates";
+its structural points: it must run in DIRECT scanout (composed blits only the
+damage rect into the screen, which is itself the accumulator, so a stale client
+slot is invisible there), the slot phase is DRIVEN by keystrokes rather than
+sampled at random, and the 1,1,2,1,1,2,1,1 key pattern covers all three slot
+residues for any constant blink rate — the one-stale-slot class (an off-by-one
+in the union) is otherwise passed 2/3 of the time per dump. Both sabotage
+classes measured red 3/3 attempts (S1 rounds 2,1,2; S2 rounds 2,5,2), the fixed
+build green 0/368280 px on 8/8 dumps. What it does not cover: the composed
+path (C-3's property), the hidden→visible redraw fan (aurora is never hidden
+here), and tapestryd's per-slot refactor as such — the focused audit round on
+`usr/tapestryd` (I-40 surface) is still owed.

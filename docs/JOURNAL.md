@@ -629,11 +629,88 @@ carries the narrative; answering it is a scripture-shaped decision, not a doc
 edit to slip into a tooling commit. Enqueued rather than fixed in passing, and
 enqueued in memory because the tracker is down this session.
 
+### The gate that sees C-2d, red under both sabotages — and the defect building it found (after the self-compaction at `a733402e`)
+
+Resumed from my own note with one instruction: build the §4.5.8c gate on aurora
+in Direct, and validate it by re-running the sabotage that had passed `ls-gfx`
+and requiring red. That is what happened, with two things the note did not
+anticipate.
+
+**The gate** (`tools/interactive/ls-gfx-age.exp` + `gfx_region.py`). Fill three
+times with `yes … | head -n 200` so every slot carries glyphs; a POSITIVE
+control — the same region assert, four keystroke-rotated dumps, each must show
+text (a negative with no positive twin is satisfied by a broken fixture); then
+`clear`, which blanks every cell in one all-rows present into ONE slot; then
+eight rounds of keystrokes + dump, region exactly Bonfire, every pixel read.
+The region is in cells (rows 6..rows-3, cols 2..cols/2) off aurora's own
+`console up` line, so a font change moves it rather than breaks it.
+
+**What the note left to the author, and how it was decided.** The detector is
+slot-phased: the screen shows the slot presented LAST, so one dump samples one
+slot. I had written "probabilistic — require N consecutive dumps". Working it
+through, the honest model is *driven*, not sampled: each keystroke is a
+row-0-only redraw, i.e. one present into the next slot, so the rounds advance
+the phase deterministically plus whatever blink presents fall in the round.
+That reframing exposed the real trap: **a broken client can have ONE stale
+slot, not two** — an off-by-one in the union (`back = age-2`) leaves exactly one
+— and the 1,2,3,1,2,3,… key pattern I first sketched (meant to break any
+phase-lock with the blink) visits residues 1,0,0,1,0,0,1,0 under `b=0`: it never
+reaches residue 2 and would pass an off-by-one every time. A plain one key per
+round does reach it (1,2,0,1,2,0…) but is the pattern a 60 Hz blink can
+phase-lock. So the negative leg types 1,1,2,1,1,2,1,1 keys, which visits all
+three residues for *any* constant blink count per round (checked for b=0,1,2 in
+the header); the
+independence bounds — 3^-8 for the no-age class, (2/3)^8 = 3.9% for the
+one-stale-slot class — are the fallback if the blink rate varies mid-leg, and
+the header says which claim is load-bearing.
+
+**Measured** (HVF, 128×36 cells, region 368 280 px). Fixed build: positive
+63 882/368 280 non-bg on 4/4 dumps (identical counts — every slot holds the
+same fill, as a correct client guarantees), negative **0/368 280 on 8/8**,
+43 s. **S1** — the §4.5.8c sabotage, `stale_slot = false` + `back = 0`: **red
+3/3 attempts**, at rounds 2, 1, 2 (63 882 stale px, i.e. the pre-clear fill
+verbatim). **S2** — `back` off by one: **red 3/3**, at rounds 2, 5, 2. The
+five-round attempt is the 1,1,2 pattern paying for itself: four dumps landed on
+the two good slots before the fifth reached the one stale one. Restore green.
+Both sabotages applied and reverted with `Edit`, and `grep SABOTAGE` empty
+before the restore build.
+
+**The defect the gate found — in C-2d-a, not C-2d-b.** Reading aurora's damage
+branch to predict the sabotage outcomes, I traced what `931bf15a` records into
+`dmg_hist`: **the WIDENED range** ("this is what actually reached the slot, and
+the next union reads it"). That reasoning conflates *repaint* with *damage*.
+The union answers "what changed since slot X was last presented"; what changed
+between two presents is the dirty span, and the widening only says how much of
+it THIS slot had to catch up on. Recording the widened range makes any
+full-rows entry — every scroll — re-enter every later union, so every present
+after it repaints all rows, forever. Aurora has been repainting the whole grid
+on every cursor blink since C-2d-a landed: correct pixels, dead damage path.
+Fixed to record the dirty span (`dirty0, dirty1` captured before the widening);
+a full entry now falls out of the window after `nslots` presents. Two things
+follow that are worth having in writing: S2 is a sabotage only against the
+*fixed* recording — under the widened one an off-by-one is masked, since any
+`back ≥ 1` propagates the full-rows entry (the old code had slack precisely
+because it had no damage path); and the tight recording is guarded by the gate
+that was built in the same chunk, which is the right order.
+
+**Wrong turns, caught:** the first run failed on my own Tcl (`gfx_dump` takes
+two args and I passed one) — three attempts, ~30 s each, all on the harness
+side, before a pixel was read. And the resume note's "the sampling machinery is
+in `ls-gfx-panes`" was true and unhelpful: `ppm-sample.py` reads one pixel; the
+gate needs a region census with a positive control, which is a 40-line tool.
+
+**Owed, unchanged:** the focused audit on `usr/tapestryd` (I-40; agent spawning
+still off). The vault-owned prose (`sub-aurora`, `sub-libtapestry`,
+`sub-tapestryd`) for C-2d and the recording fix goes over yip; the local
+reference carries the gate.
+
 ### Still open leaving this run
 
-- **Warp-C C-2c/C-2d** — the attach verb (P1b's authority-conferral point) and
-  the per-slot host resources §4.5.8 now specifies. C-2a/C-2b are landed *and
-  exercised* on both capability arms as of this run.
+- **Warp-C C-2c** — the attach verb (P1b's authority-conferral point). C-2d is
+  landed AND verified as of the entry above (`ls-gfx-age`, red under both
+  sabotages); C-2a/C-2b are landed and exercised on both capability arms.
+- **The C-2d-b audit round** on `usr/tapestryd` (I-40) — owed since
+  `f86177b6`; needs agent spawning.
 - **Two thirds of the extinction tear** (the vault seam, `IPI_HALT`), and a
   prosecutor round owed on the landed third.
 - **`main#228`** — Fable rounds on C-0d and #243, quota-blocked. Deliberately

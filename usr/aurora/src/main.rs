@@ -1057,6 +1057,7 @@ pub extern "C" fn rs_main() -> i64 {
             // presents that landed in the OTHER slots since. Row ranges union
             // as (min, max) -- rows in the gap are repainted too, which costs
             // a little redraw and cannot be wrong.
+            let (dirty0, dirty1) = (r0, r1);
             let back = (surf.age() as usize).saturating_sub(1).min(dmg_seen).min(tapestry::MAX_SLOTS);
             let (mut u0, mut u1) = (r0, r1);
             for k in 0..back {
@@ -1098,9 +1099,17 @@ pub extern "C" fn rs_main() -> i64 {
                     *d = false;
                 }
                 prev_cursor = cursor;
-                // The WIDENED range, not the originally-dirty one: this is
-                // what actually reached the slot, and the next union reads it.
-                dmg_hist[dmg_seen % tapestry::MAX_SLOTS] = (r0, r1);
+                // Record the DAMAGE (the originally-dirty span), not the
+                // widened repaint. The history answers "what changed since
+                // slot X was last presented", and what changed between two
+                // presents is exactly the dirty span -- the widening only
+                // says how much of it THIS slot had to catch up on. Recording
+                // the widened range instead is correct but never converges:
+                // one full-rows entry (any scroll) re-enters every later
+                // union, so every present after it repaints all rows forever
+                // and the damage path is dead. With the dirty span, a full
+                // entry falls out of the window after `nslots` presents.
+                dmg_hist[dmg_seen % tapestry::MAX_SLOTS] = (dirty0, dirty1);
                 dmg_seen += 1;
             }
         }

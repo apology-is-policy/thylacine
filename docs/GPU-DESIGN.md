@@ -1104,7 +1104,7 @@ correct in every slot only because age 0 routes that slot's first use through
 the full-frame branch, which BG-fills the whole surface. Remove the age-0 route
 and margins rot in slots 1..n-1.
 
-##### 4.5.8c C-2d-b IS LANDED AND UNVERIFIED — no gate can see it fail (2026-08-17)
+##### 4.5.8c C-2d-b IS LANDED AND UNVERIFIED — no gate can see it fail (2026-08-17; CLOSED the same day by §4.5.8d, kept as the record of what was missing)
 
 **The sabotage passed, and that is the finding.** With per-slot resources live,
 aurora's age handling was disabled — `stale_slot = false`, `back = 0`, i.e.
@@ -1196,6 +1196,80 @@ the host, and is survivable only because the switch also emits the redraw
 per-slot, and the age contract arguably subsumes it; keeping both is belt and
 braces, dropping it needs the redraw emission to be proven unconditional. Decide
 it explicitly rather than porting it by reflex.
+
+##### 4.5.8d The gate exists, both sabotages go red, and C-2d is VERIFIED (2026-08-17)
+
+**`tools/interactive/ls-gfx-age.exp`** (LS-CI, HVF) with its instrument
+`tools/interactive/gfx_region.py` — the shape §4.5.8c specified, with the two
+things it left to the author decided:
+
+- **Vehicle**: aurora, in Direct scanout, per §4.5.8c. The scenario reads the
+  grid off aurora's own `console up WxH cells (... cell cwxch)` bringup line
+  and works in **cells** (rows 6..rows-3, cols 2..cols/2), so it survives a
+  font or mode change and stays clear of row 0, of the bottom rows, and of
+  every margin.
+- **Fill → positive control → clear → negative leg.** Three `yes … | head -n
+  200` runs scroll glyphs through every row of every slot; then the SAME
+  instrument that will assert "no text" first asserts "text" on four
+  slot-rotated dumps (a negative assertion with no positive twin is satisfied
+  by a broken fixture — aux#215); then `clear` (`ESC[2J`) blanks every cell in
+  one all-rows present into ONE slot; then eight rounds of keystrokes (each a
+  row-0-only redraw, i.e. a present into the NEXT slot) + a dump, each of which
+  must show the region **exactly** background — `off == 0`, every pixel read,
+  no stride, because a subsampled zero proves nothing about the pixels it
+  skipped.
+- **The slot phase is driven, not waited for.** The screen shows the slot
+  presented LAST, so one dump samples one slot, and a broken client has 1 or 2
+  stale slots of 3 (no age handling: 2; an off-by-one in the union: exactly 1).
+  Rounds type 1,1,2,1,1,2,1,1 keys: for ANY constant number of blink presents
+  per round the cumulative advance visits all three residues mod 3 within the
+  eight rounds (b=0: 1,2,1,2,0,2,0,1; b=1: 2,1,1,0,2,2,1,0; b=2: 0,0,1,1,1,2,2,2),
+  so every slot is sampled and either class is caught deterministically. Only
+  if the blink count varies mid-leg does that degrade to the independence
+  bound — (1/3)^8 = 1.5e-4 for the no-age class, (2/3)^8 = 3.9% for the
+  one-stale-slot class — which is why the constant-rate coverage, not the
+  bound, is the load-bearing claim, and why the 1,1,2 pattern exists at all
+  (a plain 1-per-round pattern never visits residue 2 under b=0 and would pass
+  the off-by-one class every time).
+
+**Measured, 2026-08-17, HVF, 128×36 cells / cell 10×22 / region x 20..640
+y 132..726 (368 280 px):**
+
+| build | positive control | negative leg | verdict |
+|---|---|---|---|
+| fixed aurora (below) | 63 882/368 280 non-bg on 4/4 dumps (17.3%, identical — every slot holds the same fill) | **0/368 280 on 8/8** dumps | GREEN, 43 s |
+| **S1**: `stale_slot = false`, `back = 0` (no age handling — the §4.5.8c sabotage) | 4/4 (the fill reached every slot even without widening) | RED at rounds **2, 1, 2** across three attempts (63 882 stale px) | RED 3/3 |
+| **S2**: `back` off by one (`age-2`; exactly one stale slot) | 4/4 | RED at rounds **2, 5, 2** | RED 3/3 |
+| restore | 4/4 | 0/368 280 on 8/8 | GREEN, 43 s |
+
+S2's attempt that needed five rounds is the 1,1,2 pattern earning its keep: four
+dumps landed on the two good slots before the fifth reached the stale one.
+
+**Building the gate found a defect in C-2d-a, and the gate is why it matters.**
+`931bf15a` recorded the **widened** repaint range as the damage history ("the
+WIDENED range, not the originally-dirty one: this is what actually reached the
+slot"). That is correct and never converges: the union answers "what changed
+since slot X was last presented", and what changed between two presents is the
+dirty span — the widening only says how much of it THIS slot had to catch up
+on. Recording the widened range instead makes one full-rows entry (any scroll)
+re-enter every later union, so every present after it repaints all rows
+forever: the damage path was dead, and aurora was repainting the whole grid on
+every cursor blink since C-2d-a landed. Fixed to record the dirty span; a
+full-rows entry now falls out of the window after `nslots` presents. Two
+consequences worth stating: (a) S2 is a sabotage only against the fixed
+recording — under the widened one an off-by-one was **masked**, since any
+`back ≥ 1` propagates the full-rows entry; the old code had slack precisely
+because it had no damage path; (b) the tight recording is now guarded by this
+gate, which is the order these things should land in.
+
+**What this gate does NOT cover, so nobody reads more into it:** the composed
+path (by §4.5.8c's own scoping the screen is the accumulator there — C-3's
+property, C-3's gate); the hidden→visible half of the C-2d invariant (a
+compositor that skips a hidden surface's transfer and must fan the redraw
+`CONFIGURE` on unhide — aurora is never hidden here); and tapestryd's per-slot
+refactor as such — the gate proves the client+server pair renders correctly on
+the live Direct path, not that every branch of `f86177b6` is right. **The
+focused audit round on `usr/tapestryd` (an I-40 trigger surface) is still owed.**
 
 #### 4.5.9 The composed path is CAPABILITY-GATED, and the CPU path is PERMANENT (measured 2026-08-16, before C-2 wrote a line)
 
