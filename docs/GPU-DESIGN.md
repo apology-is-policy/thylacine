@@ -365,14 +365,17 @@ device). Our `t_dma_create` allocations are already contiguous, so the weave is
 natively the right object on that side; what the seam must carry is the
 **import** direction.
 
-### 4.5 GPU composition — the Warp-C arc (designed 2026-08-13; **RESERVED**, not yet built)
+### 4.5 GPU composition — the Warp-C arc (designed 2026-08-13; **BUILT** C-1..C-4 2026-08-16/17, §4.5.10–4.5.12; C-5 the audit owed)
 
 §4.4 above records GPU composition as a follow-on "to be built once the direct
 path is proven." **That precondition is now discharged**: Warp-4 built the
-direct path and #215 priced it. This subsection is the design; it is
+direct path and #215 priced it. This subsection is the design; it was
 **RESERVED** in the I-20/I-40 staged sense — the mechanism is fixed, two
 premises (§4.5.4) are gating, and it becomes ENFORCED at the sub-chunk that
-lands each.
+lands each. (This heading read "RESERVED, not yet built" until 2026-08-17,
+two days after C-2 landed — the flip was nobody's step. The as-built record
+is §4.5.10a (C-2c), §4.5.11 (C-3) and §4.5.12 (C-4); the audit round that
+would make the ENFORCED claim more than the author's is C-5, owed.)
 
 #### 4.5.1 What it costs today, measured
 
@@ -1909,6 +1912,143 @@ smoke, not a pixel oracle. And the composed path's scaled sampling: GL
 nearest and the CPU loop's floor arithmetic can differ by one source texel
 at scale boundaries, invisible on the battery's solid fills.
 
+#### 4.5.12 C-4 AS BUILT — the residual decomposed, and the health verify taken off the GPU queue (landed 2026-08-17)
+
+**What C-4 was asked.** §4.5.11 closed with 4.6 ms of composed-present cost
+per frame left over the direct arm and the instruction that it was "C-4's
+to decompose, not to guess." C-4 built the instrument, measured, and found
+that the residual was not what the closing paragraph of §4.5.11 listed
+first — the sync round trips — but the health verify, and that the number
+itself was mostly a property of the measurement host's display backend.
+
+**The instrument: a present-path cost census.** tapestryd times every
+synchronous device step the present path issues, where it issues it, and
+every present dispatch whole, attributed to the arm it took (`Cost` in
+`server.rs`: `present-direct-gl` / `present-direct-2d` /
+`present-composed-bo` / `present-composed-slot` / `present-composed-cpu` /
+`present-other`; `xfer`, `blit`, `health` (+ `health-issue`, `health-read`),
+`flush`, `flush-direct`, `scanout`, `readback`, `cpu`, `push`), cumulative
+since boot as `cost <kind> <n> <sum_us> <max_us>` lines in the tapestry
+global ctl. Guest-side wall of a sync step INCLUDES the host's work on it,
+because each `.step` waits its response, and it includes whatever sits
+ahead of it in the controlq — so a step that drains the GPU shows the drain,
+and a step queued behind the client's frame decode shows that wait.
+`glq-decomp.exp` snapshots the census before and after each leg and prints
+the delta as `GLQ-DECOMP COST-<dev>-<leg>`, beside the fps it already
+measured — one run, both numbers.
+
+**The second axis: the display backend is part of the figure.** Under
+`-display egl-headless` every `RESOURCE_FLUSH` is a full-frame
+`glReadPixels` into QEMU's console surface (`egl_fb_read`); the direct arm's
+whole present is that flush, and it measured **17.0 ms** of the 22.5 ms
+frame. That is a cost of the instrument — a display nobody looks at,
+reading back 4 MB per frame — not of the guest, and it shapes both arms:
+whichever step drains the GPU first pays the frame's GPU time, the flush
+pays the rest. So `tools/run-vm.sh` grew `THYLACINE_DISPLAY=dbus-gl`
+(`-display dbus,p2p=on,gl=on`: the same render-node EGL context, a flush that
+updates no listener) and `warp-host.sh decomp` takes `WARP_DISPLAY=dbus-gl`;
+the .exp prints `GLQ-DECOMP DISPLAY-gl: <lane>` with the figures. Nothing
+can look at that display; it is the lane for the guest's own present costs
+and only that. Under it the direct present is **2.7 ms** — and that 2.7 ms
+is not the flush's own work but the FIFO wait behind the client's frame
+decode already queued when the present arrives (the composed arm's blit
+pays the same wait, which is why `blit` reads 1.3–3 ms).
+
+**What the census found (thyla-pi, KVM, V3D 4.2, 2026-08-17; C-3 as landed
+at `7296bf07`).** egl-headless: composed 36.9 fps against direct 44.8, the
+composed-BO present **20.7 ms = blit 1.44 + health 8.34 + flush 11.12**
+(the health copy ran on 1062 of 1093 blitted presents — once per tick at
+60 Hz is once per present at 37 fps); direct 17.0 = its flush. dbus-gl:
+composed **62.8** against direct **113.2**, the composed present **9.62 ms =
+blit 1.63 + health 8.92 + flush 0.12**; direct 2.73. **The health verify
+was the residual**: `comp_ctx_health` uploaded the mark and a token into two
+1×1 TEXTURES, copied one to the other inside the compositor context, and
+read the sentinel back — and on a tiled renderer every texture transfer is
+a BLIT JOB (Mesa's v3d prefers blit-based texture transfers), appended to
+the one in-order GPU queue behind every frame the client has in flight, and
+the readback then WAITS for that job: a `glFinish` over the client's queue,
+per tick, which is exactly what the direct arm's `glFlush`-only swap
+avoids. On egl-headless it was masked in the total (the flush drained what
+the health tick had not); on dbus-gl it was the whole gap.
+
+**Two steps, both measured.** *Deferred read* (issue the copy now, read it
+`HEALTH_PERIOD` = 4 ticks later, issue the next only after the read): on
+dbus-gl composed went 62.8 → 84.5 fps, but `health-read` still cost ~15 ms
+per working call — because the readback of a texture is itself a blit into
+a staging buffer, enqueued behind whatever the client has queued at READ
+time; deferral changed when the drain happened, not whether. *Buffer pair*
+(`warp_hprobe_build`: the health mark/sentinel minted as `PIPE_BUFFER`
+resources, `R8_UNORM`, 4 bytes copied by `RESOURCE_COPY_REGION` — buffer
+transfers and buffer copies are CPU-side there, no GPU job at any step):
+`health-issue` 0.43 ms + `health-read` 0.19 ms per period, i.e. **0.17 ms
+per present**, and composed reached **92.8 fps against direct 113.0 — 1.22×,
+1.9 ms/frame**, the composed-BO present **3.18 ms** (blit ~2.9 incl. the FIFO
+wait the direct flush also pays, flush 0.14, health 0.17) against the direct
+present's 2.67 (the final binary, with the issue-step control below: **93.1
+vs 112.7 fps**, composed present 3.48, health 0.21 per present, direct
+present 2.45 — the same picture). The remaining ~1.4 ms is not in the server: the compose
+blit's own GPU time and vrend's `util_blitter` setup on the host thread the
+client's decode shares. The texture pair (`comp_probe`) stays, because the
+C-2c import witnesses copy slot TEXTURES into its sentinel; the health verify
+falls back to it where the buffer pair cannot be minted (correct, and
+slower — say line `comp-health verify on the TEXTURE pair`). **The verify
+carries its own positive control** (added at the self-audit): the verdict
+"the sentinel holds the mark" is satisfied by a token upload that never
+reached the host — the previous copy's mark would still be there — so the
+issue step reads the sentinel back after poisoning it and requires the token
+before it asks for the copy (one more CPU-side round trip per period on the
+buffer pair; a second drain on the texture fallback, which is the slow path
+anyway); a control that fails is UNKNOWN, and UNKNOWN latches, like every
+other errored step.
+
+**What the deferral costs, decided.** The verdict lags a latch by at most
+two periods (~130 ms at 60 Hz): a latched compositor context shows stale
+composed panes for that long, then the CPU path heals them — freeze-and-
+report on a 130 ms clock instead of a 16 ms one. §4.5.4b's "once per
+composed frame" was priced for the fenced form, where the verify would ride
+a fence wait already paid; on the sync form it cost a drain per frame. The
+compositor's context latches only on our own defect or a host reset — never
+by a client's hand (contexts are separate) — so the window is a soundness
+non-event and a debuggability delay only. Fail-closed is unchanged: an
+errored step is a latch. The census over-counts `composed gpu` by at most
+2·PERIOD presents around a latch (blits vrend dropped before the read saw
+it).
+
+**egl-headless after C-4: 37.5 vs 44.4 fps (final binary 37.6 vs 44.8),
+unchanged, and that is the correct result.** The health cost fell to ~0.2
+ms per call, and the flush rose from 11.1 to 18.4–18.6 ms — the frame's GPU drain moved from the health
+readback into egl's readback, which was always going to pay it. The 4.2 ms
+that remain on that lane are the compose blit's issue (1.3) plus the extra
+GPU work the display readback then waits for; they belong to the backend.
+The figure the arc quotes from now on is the dbus-gl one, and every figure
+names its lane.
+
+**What C-4 did NOT do, and why.** The fenced pipelined form (§4.5.11's
+"C-4+ evolution": blit on the fenced lane, flush riding fence completion,
+a real drain before retire per `DrainedOfBlits`) is not built: the sync
+round trips were not what was left. The blit stays on the sync slot; I-40's
+by-construction shape (`ComposeBlit`/`ComposeComplete` in one dispatch, the
+in-flight set empty at every retire) is untouched, and `drain_skipped`
+remains the spec's counterexample for whoever does build it. "Retire the
+readback where GL exists" (§4.5.9's reading): on a GL host the readback
+fallback (`transfer_from_3d_sync` of the frame) is taken only when the BO
+arm cannot be — an unwitnessed import, a format other than the probe's
+`B8G8R8A8` (the SDL shim's `OSMESA_BGRA` front buffer IS that format, so the
+client population takes the blit), a latched context — and both decomp
+legs record zero `readback` and zero `present-composed-cpu` on the GL host.
+It is retired in the only sense §4.5.9 permits: not taken where the GPU can
+compose. The CPU path is untouched and permanent.
+
+**Lessons, the reusable part.** A measurement can be of the instrument:
+the display backend that made the GL host measurable also priced every
+frame at ~17 ms, and both arms' figures inherited it — a second lane, not a
+finer probe, is what separates the two (the #214 rule again). A texture is a
+GPU object on a tiled renderer: touching four bytes of one from the CPU is a
+job in the queue behind everything else, so a "tiny" transfer is not tiny —
+it is a barrier. And "once per frame" cadences must be priced against the
+mechanism they ride: free on a fence already waited for, a full drain on a
+sync slot.
+
 ## 5. Placement — where the server lives, per backend
 
 The seam is identical on both; the process topology is not, and both are forced:
@@ -2211,7 +2351,7 @@ scope shifts with them.
 | **Warp-3** | `virgl_thylacine_winsys` (18 slots) + the client library; unmodified Mesa virgl driver — **LANDED** (3a `ef6af62c` seam capacity 128 + the `fence-signaled`/`bo-cap` ctl promotion; 3b `8b8ca40d` fork patch 0006: the winsys + `warp_client` + `virgl-prove`; 3c `eb62f97c` the builder cycle; `c64ddbe4` the #191 build-id cacheless fallback, port finding 4; as-built `docs/reference/149-warp.md`) | a triangle, in-guest, on the GPU — **met: `GL_RENDERER = virgl (Apple M2 (Compat))`, via `tools/warp-host.sh tri`** |
 | **Warp-4** | present integration: `SET_SCANOUT` of a 3D resource (Direct), readback fallback (Composed) — **LANDED** (4a+4b `ec2bd8ad` the mutual-adoption protocol, both halves + fork patch 0007; 4c the gate: the launcher auto-detect + `tools/warp-host.sh quake` — both arms in one run, the `scanout direct N GL res R` switch live on thyla-gl; as-built `docs/reference/149-warp.md` §Warp-4) | **GLQuake on virgl** — **measured: ~3 fps aggregate at 1280×800 (the mechanism gate is met). PREMISE CORRECTED 2026-08-10: the 192.8 anchor was macOS/HVF and does not transfer (its own Warp-1 row said so); the same-host llvmpipe band is 2.4–5.9 fps at 640×480, so ~3 fps at 3.3× the pixels sits INSIDE the software band — #196 now asks stall-vs-compute (the `decomp` verb: per-arm unpaced figures + qemu CPU attribution), not "why 20–25× under"**. Findings ledger: #195 (GL-host capture), #197 (console ^C owner-only), #198 (demo-end context break), #199 (caught notes never interrupt blocking syscalls) |
 | **Warp-5** | the focused audit; I-45 enumerated; reference docs | Fable-5-max round closed |
-| **Warp-C** | **GPU composition (§4.5; designed 2026-08-13, RESERVED)** — the compositor's own virgl context; the screen becomes a host-side 3D resource; per-frame `VIRGL_CCMD_BLIT` composition replacing the readback; chrome becomes a damage-uploaded texture; the I-40 drain. Sub-chunks: **C-0** the two gating probes (§4.5.4 P1 cross-context blit with a pixel-asserting positive control, P2 cross-context ordering) — *nothing structural lands until both pass* — plus **C-0d**, the #240 detector (§4.5.4b: the sentinel stamp behind a sticky `stream-rejected` on the ctx ctl), which is a PREREQUISITE of P1b rather than a parallel nicety: a WITH-attach retry that silently does nothing is unreadable while a refusal reports success; **C-1 LANDED 2026-08-16** the spec extension (async present + drain; `drain_skipped` + a P2 ordering counterexample **per direction**, since the exclusion is symmetric) BEFORE impl — TLC-green, additive by measurement (the six pre-existing cfgs reproduce 5413 exactly with `ALLOW_COMPOSE = FALSE`), and it surfaced a C-2/C-3 obligation the prose had not: **the D1 recycle gate does not survive the composed path unchanged**, because tapestryd runs ONE host resource per surface and a present's terminal CQE stops meaning "free" once the compositor is a second reader; **C-2** compositor ctx + 3D screen (**owes the attach verb — P1b's authority-conferral point — and the blit/fill exclusion C-1 named, whose mechanism is decided at §4.5.8: one host resource PER SLOT for software surfaces, a fence for GL ones**); **C-3** blit composition + chrome-as-texture; **C-4** retire the readback path **where GL is available** (never delete it -- 4.5.9: `virgl=0` on the default dev device and there is no virtio-gpu at all on bare metal, so the CPU path is the UNIVERSAL one and permanent); **C-5** focused audit (an I-40 surface + a new cross-context authority path) | **the composed path reaches direct-path parity** — i.e. the #215 43% is gone at 1280×800, measured by the same two-method protocol, with `ls-gfx*` byte-identical and tearing-freedom held under P2 stress |
+| **Warp-C** | **GPU composition (§4.5; designed 2026-08-13, RESERVED)** — the compositor's own virgl context; the screen becomes a host-side 3D resource; per-frame `VIRGL_CCMD_BLIT` composition replacing the readback; chrome becomes a damage-uploaded texture; the I-40 drain. Sub-chunks: **C-0** the two gating probes (§4.5.4 P1 cross-context blit with a pixel-asserting positive control, P2 cross-context ordering) — *nothing structural lands until both pass* — plus **C-0d**, the #240 detector (§4.5.4b: the sentinel stamp behind a sticky `stream-rejected` on the ctx ctl), which is a PREREQUISITE of P1b rather than a parallel nicety: a WITH-attach retry that silently does nothing is unreadable while a refusal reports success; **C-1 LANDED 2026-08-16** the spec extension (async present + drain; `drain_skipped` + a P2 ordering counterexample **per direction**, since the exclusion is symmetric) BEFORE impl — TLC-green, additive by measurement (the six pre-existing cfgs reproduce 5413 exactly with `ALLOW_COMPOSE = FALSE`), and it surfaced a C-2/C-3 obligation the prose had not: **the D1 recycle gate does not survive the composed path unchanged**, because tapestryd runs ONE host resource per surface and a present's terminal CQE stops meaning "free" once the compositor is a second reader; **C-2** compositor ctx + 3D screen (**owes the attach verb — P1b's authority-conferral point — and the blit/fill exclusion C-1 named, whose mechanism is decided at §4.5.8: one host resource PER SLOT for software surfaces, a fence for GL ones**); **C-3** blit composition + chrome-as-texture; **C-4** retire the readback path **where GL is available** (never delete it -- 4.5.9: `virgl=0` on the default dev device and there is no virtio-gpu at all on bare metal, so the CPU path is the UNIVERSAL one and permanent); **C-5** focused audit (an I-40 surface + a new cross-context authority path). **LANDED C-2a/2b/2c/2d + C-3 + C-4 (2026-08-16/17; §4.5.9–4.5.12)**; C-5 owed | **the composed path reaches direct-path parity** — i.e. the #215 43% is gone at 1280×800, measured by the same two-method protocol, with `ls-gfx*` byte-identical and tearing-freedom held under P2 stress. **Standing at C-4 (thyla-pi, V3D, `decomp gl`)**: the 43% (1.75×) is gone — composed/direct **1.22× on the no-readback `dbus-gl` lane (93.1 vs 112.7 fps, 1.9 ms/frame; ~0.5 ms of it server-side)** and 1.19× on egl-headless (37.6 vs 44.8, the backend's readback drain); `ls-gfx*` byte-identical (LS-CI 36/36 through C-3 and C-4); P2 measured 0/500 (C-0), the fenced form unbuilt. Full parity is not claimed: the residual is the compose blit's own GPU time + vrend's blitter setup, outside the server |
 | **Warp-6** | Venus: hostmem mapping (§6.2), `vn_renderer_thylacine`, blobs — **now also owes the §4.5.5 generalization: the blob-mediated capset-neutral blit, extending Warp-C's mechanism without reshaping its model** | a Vulkan prover in-guest |
 | **Warp-7+** | RPi: the v3d leaf driver on the MENAGERIE substrate — own charter, F3's posture built in | own gate |
 

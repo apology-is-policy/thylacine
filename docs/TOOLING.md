@@ -120,6 +120,15 @@ launching terminal). `=vnc:N` serves the gpu0 console on
 (`tools/interactive/ls-gfx-live.exp` + `tools/rfb-refresh.py` drive it;
 in this mode the vestigial `gpu-mmio0` device is dropped so the gpu0
 console binds QemuConsole 0, which a VNC client attaches to).
+`=egl-headless` is the Warp arc's headless GL backend on a Linux GL host
+(the `-gl` device models need it; every `RESOURCE_FLUSH` there is a
+full-frame host readback into QEMU's console surface — measured 17 ms of
+every direct frame on thyla-pi/V3D, GPU-DESIGN §4.5.12). `=dbus-gl`
+(`-display dbus,p2p=on,gl=on`, Warp-C C-4) is the same render-node GL
+context with NO listener and no readback: nothing can look at it
+(no screendump, no VNC), so it is the measurement lane for the guest's
+own present costs and only that (`WARP_DISPLAY=dbus-gl
+tools/warp-host.sh decomp gl`). Both drop `gpu-mmio0` like `vnc:N`.
 
 **N is ALLOCATED, never hardcoded (#127).** `lc_pick_vnc_display`
 (`tools/interactive/lib.exp`) derives a per-tree base from the repo's

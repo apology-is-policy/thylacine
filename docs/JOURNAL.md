@@ -985,14 +985,116 @@ from 1.75× to 1.20×. What is left in the 4.6 ms is the C-4 question (the blit
 + flush round trips, the per-tick health copy, the display readback under
 egl-headless), to be decomposed rather than guessed.
 
+### C-4 — the residual decomposed, and it was neither of the two things named first (after the self-compaction at `d591c35e`)
+
+Resumed from the third self-compaction of the day; the note said "next is
+C-4: decompose the remaining 4.6 ms, retire the readback where GL exists, the
+fenced form if the sync round trips are what is left." Read §4.5.11 + §4.5.9 +
+149-warp's #196/#215 decomposition first, as the note demanded, then built
+the instrument before touching the mechanism.
+
+**The instrument** (`Cost` in `server.rs`): every synchronous device step of
+the present path timed where it is issued, every present dispatch timed
+whole and attributed to its arm, cumulative `cost <kind> <n> <sum_us>
+<max_us>` lines in the tapestry ctl; `glq-decomp.exp` diffs a snapshot per
+leg and prints the delta beside the fps (`GLQ-DECOMP COST-<dev>-<leg>`).
+Cheap — `Instant::now()` twice per step — and it answered on the first run.
+
+**Finding 1 — the figure was mostly the instrument's.** egl-headless, C-3 as
+landed: composed present **20.7 ms = blit 1.44 + health 8.34 + flush 11.12**;
+direct present **17.0 ms = its flush**. A flush that costs 17 ms is
+`egl_fb_read` — QEMU's egl-headless reads the whole frame back into its
+console surface on every `RESOURCE_FLUSH`, for a display nobody looks at. Both
+arms inherited it. So `run-vm.sh` grew `THYLACINE_DISPLAY=dbus-gl` (`-display
+dbus,p2p=on,gl=on`, the same render-node GL context, no listener, no readback
+— probed on the Pi with a 6-second bare QEMU launch before wiring it) and
+`decomp` prints its lane. Under it the direct present is 2.7 ms and the direct
+frame 8.8 ms (113 fps against egl-headless's 44.8) — the same guest, the same
+GPU, one variable changed. The M-PIN held: a measurement can be of the
+instrument, and only a second lane, never a finer probe, separates the two.
+
+**Finding 2 — the residual was the health verify, not the round trips.**
+dbus-gl, C-3 as landed: composed **62.8** vs direct **113.2** fps; composed
+present **9.62 = blit 1.63 + health 8.92 + flush 0.12**. `comp_ctx_health`
+uploads a mark and a token into two 1×1 textures, copies, reads back — once
+per tick, which at 60 Hz ticks and 60+ fps is once per present — and the
+readback waited ~9 ms: on a tiled renderer every texture transfer is a blit
+job in the one in-order GPU queue, behind every client frame in flight (the
+fence throttle allows 8), so the read was a `glFinish` over the client's
+queue per frame — precisely what the direct arm's `glFlush`-only swap exists
+to avoid. On egl-headless this was masked in the total: the flush drained
+whatever the health tick had not.
+
+**The first fix was half a fix, and the census said so.** Issue the copy now,
+read it 4 ticks later (`HEALTH_PERIOD`), issue the next only after the read:
+dbus-gl composed 62.8 → 84.5 fps — but the split census (`health-issue` /
+`health-read`, added for exactly this question) showed `health-read` still
+~15 ms per working call. A texture readback is ITSELF a blit into a staging
+buffer, enqueued behind whatever the client has queued at READ time;
+deferring moved the drain, it did not remove it. **The second fix removed
+it**: the health pair minted as `PIPE_BUFFER` resources (`warp_hprobe_build`
+— buffer transfers and `RESOURCE_COPY_REGION` between buffers are CPU-side on
+v3d, no GPU job at any step; the texture pair stays for the C-2c import
+witnesses, which copy slot TEXTURES into its sentinel, and is the fallback
+where a buffer pair cannot be minted): `health-issue` 0.43 + `health-read`
+0.19 ms per period → 0.17 ms per present; dbus-gl composed **92.8 fps vs
+direct 113.0 — 1.22×, 1.9 ms/frame** (from 1.8× / 7.1 ms), composed present
+**3.18 ms** vs direct 2.67. What is left is ~0.5 ms server-side (the blit's
+own issue) and ~1.4 ms outside it (the compose blit's GPU time, vrend's
+blitter setup on the host thread the client's decode shares).
+
+**Finding 3 — the "blit" and "flush-direct" numbers are mostly the FIFO.**
+The direct arm's 2.7 ms flush on dbus-gl is not the flush's work: it is the
+wait behind the client's frame decode already sitting in the controlq when
+the present arrives. The composed blit pays the same wait (1.3–3 ms). Which
+is why the fenced pipelined form — the thing §4.5.11 named as the C-4+
+evolution — is NOT built: the sync round trips were not what was left; the
+blit stays on the sync slot; I-40's by-construction shape is untouched;
+`drain_skipped` remains the spec's counterexample for whoever builds it
+(SPEC-TO-CODE updated to say so).
+
+**egl-headless after all this: 37.5 vs 44.4 fps, unchanged — the correct
+result.** Health fell to 0.19 ms per call and the flush rose 11.1 → 18.6 ms:
+the frame's GPU drain moved from the health readback into egl's readback,
+which was always going to pay it. The 4.2 ms remaining on that lane are the
+backend's. Every figure now names its lane, and the arc quotes dbus-gl.
+
+**Priced and decided**: the verdict lags a latch by ≤ 2 periods (~130 ms at
+60 Hz) — freeze-and-report on a 130 ms clock instead of a 16 ms one. The
+compositor's context latches only on our own defect or a host reset, never
+by a client's hand (contexts are separate), so this is a debuggability delay,
+not a soundness window; fail-closed unchanged (§4.5.12).
+
+**The self-audit added a control, and the Pi re-ran.** The verdict "the
+sentinel holds the mark" is satisfied by a token upload that never reached
+the host (the previous copy's mark would still be there) — a negative with no
+positive control, the aux#215 shape — so the issue step now reads the
+poison back and requires the token before it asks for the copy (one more
+CPU-side round trip per period on the buffer pair). Re-verified on the
+final binary (ramfs `207d2039…`): dbus-gl **93.1 vs 112.7 fps**, health 0.21
+ms/present (issue 0.58 + read 0.20 per period); egl-headless 37.6 vs 44.8.
+
+**Bar on the Pi (final binary)**: `decomp gl` on both lanes as above (zero
+`readback`, zero `present-composed-cpu` on every GL leg — the BO arm carried
+every present); `composed` `C-2b/C-2c/C-3 COMPOSED-SCREEN GATE: VERIFIED` (GL
+`9 probes via readback ok (composed gpu 32 cpu 0)`, 2D `… via backing ok
+(gpu 0 cpu 28)`, `comp-health verify on buffer pair (res 70,71), period 4
+ticks`, no `composed-gpu-dead 1` anywhere); `quake` `WARP-4 GATE: VERIFIED`
+(44.4 fps, `comp-attach witnessed 5`). Also found: GPU-DESIGN §4.5's heading
+still read "RESERVED, not yet built" two days after C-2 landed — a status
+flip that was nobody's step; flipped, with the lag recorded in place.
+
 ### Still open leaving this run
 
-- **Warp-C C-4** — decompose the composed arm's remaining 4.6 ms/frame
-  (blit + flush round trips, the per-tick health copy, egl-headless's display
-  readback) and retire the readback WHERE GL exists (§4.5.9: never delete the
-  CPU path); the pipelined fenced form with a real drain if the decomposition
-  says the sync round trips are what is left. Then **C-5**, the audit.
-  C-2a/b/c/d and C-3 are landed and each exercised on both capability arms.
+- **Warp-C C-5** — the audit round on `usr/tapestryd` (C-2c + C-2d-b + C-3 +
+  C-4: the import, the blit path, the latch, the probe verb, the census,
+  the buffer health pair; I-40 + I-45's guest-exposure half). Needs agent
+  spawning (`memory/audit_c2d_prosecutor_prompt.md`). C-1..C-4 are landed and
+  each exercised on both capability arms.
+- **C-4's named residuals**: ~1.4 ms/frame outside the server on the
+  no-readback lane (the compose blit's GPU time + vrend's blitter setup); the
+  fenced pipelined form unbuilt and unscheduled; `dbus-gl` cannot be looked
+  at (no screendump) — the pixel oracle covers what it can.
 - **C-3's named residuals**: the 3D screen's DISPLAY orientation is anchored
   (QEMU flips `Y_0_TOP` scanouts; every Linux guest), not measured — a VNC
   framebuffer grab on the GL host is the instrument (#195's residue); GL
@@ -1004,12 +1106,6 @@ egl-headless), to be decomposed rather than guessed.
   — kernel diagnostics and SYS_PUTS tear each other char by char; a per-message
   push under one ring lock, on the LS-8 surface (audit row + SMP gate). Handed
   to aux on yip 0024 (they were in `cons.c`); otherwise whoever next opens it.
-- **The C-2c + C-2d-b + C-3 audit round** on `usr/tapestryd` (I-40 + I-45's
-  guest-exposure half: the import is a new cross-context authority path; the
-  blit path, the latch, the probe verb) — owed since `f86177b6`, wider again;
-  needs agent spawning (`memory/audit_c2d_prosecutor_prompt.md`, scope
-  extended to C-3; the tapestryd row in `docs/AUDIT-TRIGGERS.md` carries the
-  Warp-C prosecution addendum since this run).
 - **Two thirds of the extinction tear** (the vault seam, `IPI_HALT`), and a
   prosecutor round owed on the landed third.
 - **`main#228`** — Fable rounds on C-0d and #243, quota-blocked. Deliberately

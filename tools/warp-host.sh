@@ -38,7 +38,7 @@ HOST="${WARP_HOST:-thyla-gl}"
 # WARP_BOOT_TIMEOUT as LS_CI_BOOT_TIMEOUT (the .exp files floor it at 900;
 # a larger caller value passes through -- SD-backed pools boot slower than
 # that). boot-probe legs auto-detect accel; WARP_BOOT_POLLS is their bound.
-RENV="${WARP_ACCEL:+THYLACINE_ACCEL=$WARP_ACCEL }${WARP_BOOT_TIMEOUT:+LS_CI_BOOT_TIMEOUT=$WARP_BOOT_TIMEOUT }${GLQ_FPS_WAIT:+GLQ_FPS_WAIT=$GLQ_FPS_WAIT }"
+RENV="${WARP_ACCEL:+THYLACINE_ACCEL=$WARP_ACCEL }${WARP_BOOT_TIMEOUT:+LS_CI_BOOT_TIMEOUT=$WARP_BOOT_TIMEOUT }${GLQ_FPS_WAIT:+GLQ_FPS_WAIT=$GLQ_FPS_WAIT }${WARP_DISPLAY:+WARP_GL_DISPLAY=$WARP_DISPLAY }"
 RPOLLS="${WARP_BOOT_POLLS:+WARP_BOOT_POLLS=$WARP_BOOT_POLLS }"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RREPO='~/projects/thylacine'
@@ -416,7 +416,10 @@ decomp)
         echo "usage: tools/warp-host.sh decomp gl|2d"
         exit 2
     fi
-    out="$REPO_ROOT/build/warp-decomp-$sub.log"
+    # WARP_DISPLAY=dbus-gl (Warp-C C-4) runs the gl legs on the no-readback
+    # display lane; the log name carries the lane so two lanes' figures never
+    # overwrite each other.
+    out="$REPO_ROOT/build/warp-decomp-$sub${WARP_DISPLAY:+-$WARP_DISPLAY}.log"
     ssh "$HOST" "cd $RREPO && WARP_DECOMP_DEV=$sub ${RENV}expect tools/warp/glq-decomp.exp" | tee "$out" || true
     echo "== decomp $sub verdict =="
     if grep -q "GLQ-DECOMP SWAPPED" "$out"; then

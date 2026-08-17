@@ -32,13 +32,24 @@
 #
 # Verdict lines (#186: each printed by THIS script only on its own
 # positive evidence; figures REPORTED, never gated):
+#   GLQ-DECOMP DISPLAY-<dev>: <egl-headless|dbus-gl|none (2d device)>
+#     (the GL display backend the figures were taken under -- egl-headless
+#      reads every flushed frame back host-side, dbus-gl with no listener
+#      does not; a figure without its lane is a different number)
 #   GLQ-DECOMP RENDERER-<leg>: <GL_RENDERER>
 #   GLQ-DECOMP FPS-<dev>-<leg>: N frames Ss F fps
 #   GLQ-DECOMP CPU-<dev>-<leg>: n=K mean=M min=A max=B  (qemu %CPU)
+#   GLQ-DECOMP COST-<dev>-<leg>: <kind> n=N us=T avg=A max=M ...
+#     (Warp-C C-4: tapestryd's present-path cost census, `cost <kind> <n>
+#      <sum_us> <max_us>` lines of /dev/tapestry/ctl, DELTA across the leg
+#      -- so the composed arm's residual over the direct arm is decomposed
+#      per op class, in the server's own wall time, on the same run that
+#      measures the fps. One line per kind with a nonzero count.)
 #   GLQ-DECOMP SWAP-<leg>: pswpin +X pswpout +Y [+ SWAPPED discard marker]
 #   GLQ-DECOMP PASS <dev>
 #
 # Runs ON the GL host (Linux). env: WARP_DECOMP_DEV=gl|2d (required),
+# WARP_GL_DISPLAY=egl-headless|dbus-gl (gl device only; default egl-headless),
 # WARP_REPO, WARP_WORK as the sibling scenarios.
 
 set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
@@ -60,8 +71,13 @@ set ::env(THYLACINE_NOSTORM) 1
 set ::env(THYLACINE_NO_SHARE) 1
 if {$dev eq "gl"} {
     set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
-    set ::env(THYLACINE_DISPLAY) egl-headless
+    # The GL display backend is part of the figure (Warp-C C-4): egl-headless
+    # reads the whole frame back on every flush; dbus-gl (no listener) does
+    # not. WARP_GL_DISPLAY picks it (warp-host.sh WARP_DISPLAY); the lane is
+    # printed with the figures, never inferred.
+    set ::env(THYLACINE_DISPLAY) [expr {[info exists ::env(WARP_GL_DISPLAY)] ? $::env(WARP_GL_DISPLAY) : "egl-headless"}]
 }
+set gl_display [expr {$dev eq "gl" ? $::env(THYLACINE_DISPLAY) : "none (2d device)"}]
 # QMP stays ON for both devices: the zoom chord rides it.
 if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
     set ::env(LS_CI_BOOT_TIMEOUT) 900
@@ -142,6 +158,54 @@ proc cpu_report {tag file} {
         $tag $n [expr {$sum / $n}] $mn $mx]
 }
 
+# The present-path cost census (Warp-C C-4): read tapestryd's global ctl and
+# collect its `cost <kind> <n> <sum_us> <max_us>` lines. The census prints
+# EVERY kind in a fixed order ending with `push`, so the last line is the
+# stop condition -- no sequencing marker needed (the typed command's own
+# echo matches nothing here: it contains no `cost <kind> <digits>`). Returns
+# a dict kind -> {n sum max}; a read that never completes returns what it
+# got (figures reported, never gated -- #186).
+proc cost_snap {} {
+    set d [dict create]
+    lc_send "cat /dev/tapestry/ctl"
+    set timeout 30
+    set done 0
+    while {!$done} {
+        expect {
+            -re {cost ([a-z0-9-]+) (\d+) (\d+) (\d+)[\r\n]} {
+                dict set d $expect_out(1,string) [list $expect_out(2,string) $expect_out(3,string) $expect_out(4,string)]
+                if {$expect_out(1,string) eq "push"} { set done 1 }
+            }
+            timeout { set done 1 }
+        }
+    }
+    return $d
+}
+
+# Report the census DELTA across a leg: one COST line per kind whose count
+# moved, `n=` presents/ops, `us=` summed wall, `avg=` per op, `max=` the
+# largest single op in the leg (a max is not differenceable; the leg's own
+# max is unknowable from two cumulative snapshots, so the printed max is the
+# cumulative one -- an upper bound, labelled as such).
+proc cost_report {tag before after} {
+    set parts {}
+    dict for {k v} $after {
+        lassign $v n1 s1 m1
+        set n0 0
+        set s0 0
+        if {[dict exists $before $k]} { lassign [dict get $before $k] n0 s0 m0 }
+        set dn [expr {$n1 - $n0}]
+        set ds [expr {$s1 - $s0}]
+        if {$dn <= 0} { continue }
+        lappend parts [format "%s n=%d us=%d avg=%.1f max<=%d" $k $dn $ds [expr {double($ds) / $dn}] $m1]
+    }
+    if {[llength $parts] == 0} {
+        puts "\nGLQ-DECOMP COST-$tag: (no census -- ctl unreadable or no presents)\n"
+        return
+    }
+    puts "\nGLQ-DECOMP COST-$tag: [join $parts {; }]\n"
+}
+
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
@@ -184,6 +248,7 @@ expect {
 proc run_leg {leg zoom} {
     global dev qmp repo work DW DH sampf qpid
     set d0 [pswp]
+    set c0 [cost_snap]
     lc_send "./rp6 /bin/tyr-glquake -window -width $DW -height $DH -nosound +timedemo demo1"
     set timeout 60
     expect {
@@ -320,6 +385,7 @@ proc run_leg {leg zoom} {
         "decomp-$leg-ok" { lc_step "$leg: prompt back" }
         timeout          { lc_fail "$leg: prompt never returned after ^C" }
     }
+    cost_report "$dev-$leg" $c0 [cost_snap]
     set d1 [pswp]
     set din  [expr {[lindex $d1 0] - [lindex $d0 0]}]
     set dout [expr {[lindex $d1 1] - [lindex $d0 1]}]
@@ -331,6 +397,7 @@ proc run_leg {leg zoom} {
     }
 }
 
+puts "\nGLQ-DECOMP DISPLAY-$dev: $gl_display\n"
 run_leg composed 0
 run_leg direct 1
 

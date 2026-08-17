@@ -1825,8 +1825,14 @@ and the sites they will bind at C-2/C-3:
   construction at C-3 (nothing is in flight past a response; the GL object
   lifetime rules cover the host side of an issued blit). The **fenced,
   pipelined** form — flush riding fence completion, the drain as a real wait
-  — is the C-4+ evolution and must implement it before touching retire;
-  `drain_skipped` stays its counterexample.
+  — was named the C-4+ evolution; **C-4 (2026-08-17, GPU-DESIGN §4.5.12)
+  measured that the sync round trips were NOT the residual** (the health
+  verify's GPU drain was, and it is gone) and left the sync form in place,
+  so the fenced form is unscheduled. Whoever builds it must implement the
+  drain before touching retire; `drain_skipped` stays its counterexample.
+  The C-4 health-verify change (a buffer pair, issued per period and read a
+  period later) is below the model: the verify is a witness, not an
+  ordering step, and no spec action names it.
 - The **exclusion** the obligation below asked for landed at C-2d-b as ONE
   HOST RESOURCE PER SLOT (GPU-DESIGN 4.5.8): a fill of slot j and a blit of
   slot i (i≠j) touch different objects; same-slot fill-vs-blit is separated

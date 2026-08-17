@@ -788,6 +788,53 @@ fenced-chains poll clamp. The Direct arm's throughput is unmeasurable
 while #210 stands; the Warp-4c aggregate (3.0 fps, paced, direct-
 majority) bounds it ~25–40% above Composed.
 
+### The composed residual decomposed (Warp-C C-4, 2026-08-17)
+
+Measured on thyla-pi (KVM, V3D 4.2.14.0), `tools/warp-host.sh decomp gl`,
+GLQuake timedemo1 1280×800 windowed unpaced, one boot per row, with
+tapestryd's present-path cost census (GPU-DESIGN §4.5.12) — server-side
+wall per present, decomposed by op. Every row names its display lane: under
+`egl-headless` each flush is a full-frame host readback (~17 ms of every
+direct frame — the instrument's cost, not the guest's); `dbus-gl` has none.
+
+| lane | tapestryd | composed fps | direct fps | Δ ms/frame | composed-BO present | = blit + health + flush | direct present |
+|---|---|---:|---:|---:|---:|---|---:|
+| egl-headless | C-3 as landed (`7296bf07`) | 36.9 | 44.8 | 4.8 | 20.7 ms | 1.44 + 8.34 + 11.12 | 17.0 (flush 16.9) |
+| egl-headless | + deferred read (texture pair) | 37.2 | 44.5 | 4.4 | 20.3 | 1.40 + 2.45 + 16.46 | 17.2 |
+| egl-headless | + buffer health pair | 37.5 | 44.4 | 4.2 | 20.2 | 1.32 + 0.19 + 18.57 | 17.2 |
+| egl-headless | + the issue-step poison control (**C-4 final**) | 37.6 | 44.8 | 4.3 | 20.1 | 1.39 + 0.24 + 18.37 | 17.0 |
+| dbus-gl | C-3 as landed | 62.8 | 113.2 | 7.1 | 9.62 | 1.63 + 8.92 + 0.12 | 2.73 (flush 2.67) |
+| dbus-gl | + deferred read (texture pair) | 84.5 | 112.4 | 2.9 | 4.95 | 3.06 + 3.67 + 0.14 | 2.68 |
+| dbus-gl | + buffer health pair | 92.8 | 113.0 | 1.9 | 3.18 | ~2.9 + 0.17 + 0.14 | 2.67 |
+| dbus-gl | + the issue-step poison control (**C-4 final**) | **93.1** | **112.7** | **1.9** | **3.48** | ~3.2 + 0.21 + 0.14 | 2.45 |
+
+Readings. (1) The health verify was the residual: `comp_ctx_health` on two
+1×1 TEXTURES ran once per tick (= once per present at these rates) and its
+readback waited for a blit job queued behind every client frame in flight
+— 8.3–8.9 ms per call on both lanes, a `glFinish` the direct arm's
+`glFlush`-only swap never pays. Deferring the read by 4 ticks did not
+remove it (a texture readback is itself a blit into staging, enqueued
+behind whatever is queued at READ time: `health-read` still ~15 ms per
+working call); minting the pair as `PIPE_BUFFER` resources did (buffer
+transfers and copies are CPU-side on v3d: `health-issue` 0.43 ms +
+`health-read` 0.19 ms per 4-tick period, 0.17 ms per present; with the
+issue step's poison-readback control 0.58 + 0.20 per period, 0.21 ms per
+present). (2) The
+`blit` and `flush-direct` figures are mostly FIFO wait behind the client's
+frame decode already in the controlq when the present arrives, not the
+op's own work — the composed blit pays what the direct flush pays. (3) On
+egl-headless the composed/direct gap is unchanged after C-4 because the
+frame's GPU drain moved from the health readback into the flush's readback
+(11.1 → 18.6 ms), which was always going to pay it; the 4.2 ms that remain
+there are the backend's. (4) The residual on the no-readback lane is 1.9
+ms/frame (1.22×), of which ~0.5 ms is server-side; the rest is the compose
+blit's GPU time and vrend's blitter setup on the host thread the client's
+decode shares. `present-composed-cpu` and `readback` read zero on both GL
+legs: the BO arm carried every present. Raw logs:
+`build/warp-decomp-gl{,-dbus}-c4-run{1,2,3,4}.out` (this session's names;
+the verb writes `build/warp-decomp-gl[-dbus-gl].log`; run 4 = the final
+binary, ramfs md5 `207d2039…`).
+
 ## Error paths
 
 | Path | Verdict |
@@ -1279,9 +1326,11 @@ MEASURED at bring-up per (source shape × size class) with a confirmation
 each (`blit-conv <slot|bo> <U|S> <variant>: rows <16-char map> -> …`,
 `… confirm (…): rows … -> CONFIRMED`) on throwaway contexts, fail closed per
 class; the compose path picks the class by the op's box sizes and issues
-through the same builder. The compositor runs its #240 health copy once per
-tick after a GPU-composed present and latches GPU composition OFF (sticky,
-`composed-gpu-dead`, a structural repaint at the next tick) on a failure.
+through the same builder. The compositor runs its #240 health copy after a
+GPU-composed present and latches GPU composition OFF (sticky,
+`composed-gpu-dead`, a structural repaint at the next tick) on a failure —
+since C-4 on a BUFFER pair, issued once per `HEALTH_PERIOD` (4 ticks) and
+read a period later, so no step of it enqueues GPU work (§4.5.12).
 **The pixel oracle** is `probe-screen X Y` (tapestry global ctl, test-mode,
 ungated like the determinism verbs, rate-limited): the compositor reads texel
 (X,Y) of the SCREEN back — `via readback` (TRANSFER_FROM_HOST_3D through the
@@ -1314,3 +1363,23 @@ tab-cycled A red `(960,402)` — `9 probes via readback ok (composed gpu 35 cpu
 0)`, GL leg PASS. The 2D leg (run 1's, the CPU path with the same battery)
 `9 probes via backing ok (composed gpu 0 cpu N)`, PASS. Run 3 (both legs on
 the final binary) + the sabotages: see the C-3 status row.
+
+**Warp-C C-4 — the decomp instrument grew a cost census and a second display
+lane** (`tools/warp/glq-decomp.exp`, `tools/warp-host.sh decomp`,
+`tools/run-vm.sh`; GPU-DESIGN §4.5.12). Each leg now snapshots tapestryd's
+present-path cost census (`cost <kind> <n> <sum_us> <max_us>` lines of
+`/dev/tapestry/ctl`, read with `cat` before the launch and after the
+teardown — the census prints every kind in a fixed order ending in `push`,
+which is the parse's stop condition, so no sequencing marker is typed) and
+prints the DELTA as `GLQ-DECOMP COST-<dev>-<leg>: <kind> n=N us=T avg=A
+max<=M; …` (one entry per kind whose count moved; the max is the cumulative
+one, an upper bound, labelled `<=`). `GLQ-DECOMP DISPLAY-<dev>: <lane>`
+names the GL display backend the figures were taken under: `egl-headless`
+(the default; a full-frame `glReadPixels` per flush) or `dbus-gl`
+(`WARP_DISPLAY=dbus-gl` → `WARP_GL_DISPLAY` → `THYLACINE_DISPLAY=dbus-gl` →
+`-display dbus,p2p=on,gl=on`, no listener, no readback; the log is
+`build/warp-decomp-gl-dbus-gl.log`). Figures reported, never gated, as
+before. Under `dbus-gl` nothing can screendump the guest — it is the lane
+for the guest's own present costs, and only that. Measured 2026-08-17 on
+thyla-pi (KVM, V3D): see "The composed residual decomposed" under
+Performance characteristics.

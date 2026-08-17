@@ -250,6 +250,15 @@ const PIPE_MASK_RGBA: u32 = 0xF;
 const PIPE_TEXTURE_2D: u32 = 2;
 const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
+/// A BUFFER resource (Warp-C C-4): `PIPE_BUFFER`, one byte per texel in
+/// `R8_UNORM`, width = the byte length. The compositor's health verify
+/// pair is minted this way (`warp_probe_res_kind`), because on a tiled
+/// renderer every TEXTURE upload and readback is a blit job appended to the
+/// GPU queue, so touching a 1x1 texture waits for everything the client has
+/// in flight; buffer transfers and copies are CPU-side there.
+const PIPE_BUFFER: u32 = 0;
+const VIRGL_FORMAT_R8_UNORM: u32 = 64;
+const VIRGL_BIND_VERTEX_BUFFER: u32 = 1 << 4;
 /// The resource-create flag QEMU sets on EVERY 2D create (`virgl_cmd_create_
 /// resource_2d`) and that a 3D create may carry: row 0 is the TOP row, and
 /// the display flips such a resource at SET_SCANOUT where it shows a flags-0
@@ -784,6 +793,14 @@ struct Landing {
 
 const CONV_ROWS: usize = 16;
 
+/// The compositor-context health verify's period, in ticks (Warp-C C-4): a
+/// copy issued at tick k is read at k+PERIOD, and the next issued then. Four
+/// ticks at the 60 Hz active clock is 67 ms -- past the client's fence
+/// throttle depth (8 frames) at the measured direct-arm frame times, so the
+/// read finds the copy executed and does not drain the client's queue; the
+/// verdict lags a latch by at most two periods (`comp_health_tick`).
+const HEALTH_PERIOD: u64 = 4;
+
 /// One composition op (Warp-C C-3): the surface-space source rect and the
 /// screen-space destination rect it lands on, source-agnostic -- the same
 /// geometry drives the CPU copy and the GPU blit, so the two paths place
@@ -793,6 +810,100 @@ const CONV_ROWS: usize = 16;
 struct ComposeOp {
     src: Rect,
     dst: Rect,
+}
+
+/// The present-path cost census (Warp-C C-4): one cell per op class, wall
+/// time cumulative since boot, read as `cost <kind> <n> <sum_us> <max_us>`
+/// in the global ctl. It exists so the composed arm's residual over the
+/// direct arm is DECOMPOSED by measurement (GPU-DESIGN 4.5.12), never
+/// inferred from the frame rate: every synchronous device step the present
+/// path issues is timed where it is issued, and each present dispatch is
+/// timed whole and attributed to the arm it took. Guest-side wall time of a
+/// sync step includes the host's work on it -- each `.step` waits its
+/// response -- so a step that drains the GPU shows the drain here.
+#[derive(Clone, Copy, PartialEq)]
+#[repr(usize)]
+enum Cost {
+    /// A whole present dispatch, by arm.
+    PresentDirectGl,
+    PresentDirect2d,
+    PresentComposedBo,
+    PresentComposedSlot,
+    PresentComposedCpu,
+    PresentOther,
+    /// TRANSFER_TO_HOST_2D of a present's damage (per present, all rects).
+    Xfer,
+    /// The composition blit run (`submit_blits`, per present).
+    Blit,
+    /// The compositor context's health step (`comp_health_tick`, per call),
+    /// and its two halves when they ran: the issue (uploads + copy) and the
+    /// readback.
+    Health,
+    HealthIssue,
+    HealthRead,
+    /// RESOURCE_FLUSH of a composed region (`screen_flush_rect`).
+    Flush,
+    /// The direct arms' RESOURCE_FLUSH (per present, all rects).
+    FlushDirect,
+    /// SET_SCANOUT + its post-bind full flush (a direct rebind).
+    Scanout,
+    /// The readback fallback's TRANSFER_FROM_HOST_3D of a GL frame.
+    Readback,
+    /// The CPU compose pass (`blit_composed_pixels`, per rect).
+    Cpu,
+    /// A CPU-composed region's upload + flush (`screen_push`).
+    Push,
+}
+
+impl Cost {
+    const COUNT: usize = Cost::Push as usize + 1;
+    const ALL: [Cost; Cost::COUNT] = [
+        Cost::PresentDirectGl,
+        Cost::PresentDirect2d,
+        Cost::PresentComposedBo,
+        Cost::PresentComposedSlot,
+        Cost::PresentComposedCpu,
+        Cost::PresentOther,
+        Cost::Xfer,
+        Cost::Blit,
+        Cost::Health,
+        Cost::HealthIssue,
+        Cost::HealthRead,
+        Cost::Flush,
+        Cost::FlushDirect,
+        Cost::Scanout,
+        Cost::Readback,
+        Cost::Cpu,
+        Cost::Push,
+    ];
+    fn name(self) -> &'static str {
+        match self {
+            Cost::PresentDirectGl => "present-direct-gl",
+            Cost::PresentDirect2d => "present-direct-2d",
+            Cost::PresentComposedBo => "present-composed-bo",
+            Cost::PresentComposedSlot => "present-composed-slot",
+            Cost::PresentComposedCpu => "present-composed-cpu",
+            Cost::PresentOther => "present-other",
+            Cost::Xfer => "xfer",
+            Cost::Blit => "blit",
+            Cost::Health => "health",
+            Cost::HealthIssue => "health-issue",
+            Cost::HealthRead => "health-read",
+            Cost::Flush => "flush",
+            Cost::FlushDirect => "flush-direct",
+            Cost::Scanout => "scanout",
+            Cost::Readback => "readback",
+            Cost::Cpu => "cpu",
+            Cost::Push => "push",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct CostCell {
+    n: u64,
+    sum_ns: u64,
+    max_ns: u64,
 }
 
 /// cfg-3 display-mode bounds (AURORA-CONFIG.md section 3.4): base
@@ -858,6 +969,10 @@ pub struct Comp {
     /// with no witness. `None` = the pair could not be built; every import
     /// then reports SKIPPED and stays unattached (fail closed).
     comp_probe: Option<CtxProbe>,
+    /// Warp-C C-4: the compositor's HEALTH-verify pair, minted as BUFFERS
+    /// (`warp_hprobe_build`) so the per-period verify enqueues no GPU work.
+    /// `None` = the texture pair above carries the verify.
+    comp_hprobe: Option<CtxProbe>,
     /// Varies the witness sentinel per probe (the verify token discipline:
     /// "unchanged" must never be satisfied by a value a previous probe left).
     comp_probe_seq: u32,
@@ -879,17 +994,27 @@ pub struct Comp {
     comp_gpu_dead: bool,
     /// A latch asked for a structural repaint; `frame_tick` performs it.
     comp_repaint_pending: bool,
-    /// The tick the compositor context's health was last verified on: at
-    /// most ONE health copy per tick, run after the first GPU-composed
-    /// present of that tick (the 4.5.4b cadence -- per composed frame,
-    /// never per present).
+    /// The tick the compositor context's health was last attended to: at
+    /// most ONE health step per tick, run after the first GPU-composed
+    /// present of that tick (`comp_health_tick`).
     comp_verify_tick: u64,
+    /// Warp-C C-4: a health copy has been ISSUED and not yet READ (the
+    /// deferred verify -- issued at `comp_verify_issue_tick`, read no
+    /// earlier than `HEALTH_PERIOD` ticks later, so the read never drains
+    /// the client's queue behind which the copy sits; GPU-DESIGN 4.5.12).
+    comp_verify_pending: bool,
+    comp_verify_issue_tick: u64,
     /// The composed-present census by path (readable in the global ctl):
     /// how many presents the GPU composed vs the CPU. Both paths must stay
     /// live everywhere the seam exists (4.5.9), so which one is being taken
     /// has to be countable, not inferred from a boot log.
     composed_gpu: u64,
     composed_cpu: u64,
+    /// Warp-C C-4: the present-path cost census (see `Cost`).
+    cost: [CostCell; Cost::COUNT],
+    /// The arm the present being dispatched took -- set inside `present`,
+    /// read by the dispatch timer at its call site.
+    cost_arm: Cost,
     /// `probe-screen` rate limit: probes admitted this tick (test-mode).
     probe_tick: u64,
     probe_count: u32,
@@ -1267,6 +1392,7 @@ impl Comp {
             res_seq: SCREEN_RES,
             comp_ctx: false,
             comp_probe: None,
+            comp_hprobe: None,
             comp_probe_seq: 0,
             comp_attach_witnessed: 0,
             comp_attach_refused: 0,
@@ -1274,8 +1400,12 @@ impl Comp {
             comp_gpu_dead: false,
             comp_repaint_pending: false,
             comp_verify_tick: u64::MAX,
+            comp_verify_pending: false,
+            comp_verify_issue_tick: u64::MAX,
             composed_gpu: 0,
             composed_cpu: 0,
+            cost: [CostCell::default(); Cost::COUNT],
+            cost_arm: Cost::PresentOther,
             probe_tick: u64::MAX,
             probe_count: 0,
             layout: Layout::new(),
@@ -1653,27 +1783,101 @@ impl Comp {
     /// prior ILLEGAL_RESOURCE, 4.5.4a) drops the copy silently and the
     /// poison survives.
     fn comp_ctx_health(&mut self) -> bool {
-        let (mark_res, mark_va, sent_res, sent_va) = match self.comp_probe.as_ref() {
-            Some(p) => (p.mark_res, p.mark_va, p.sent_res, p.sent_va),
+        // A deferred verify in flight is superseded: this synchronous copy
+        // overwrites the pair it was going to read (`comp_health_tick`).
+        self.comp_verify_pending = false;
+        self.comp_health_issue() && self.comp_health_read()
+    }
+
+    /// The ISSUE half of the health copy: repaint the mark, poison the
+    /// sentinel with a fresh token, copy mark -> sentinel inside the
+    /// compositor context. Three sync steps, none of which waits for the GPU
+    /// unless the pair still has a job pending on it -- which is why the
+    /// per-tick verify (`comp_health_tick`) always READS the previous copy
+    /// before issuing the next: a texture upload onto a resource a queued
+    /// job still reads or writes waits for that job, and the job sits
+    /// behind everything the client has in flight.
+    fn comp_health_issue(&mut self) -> bool {
+        let (buf, mark_res, mark_va, sent_res, sent_va) = match self.health_pair() {
+            Some(v) => v,
             None => return false,
         };
         let token = self.comp_probe_token();
         unsafe { core::ptr::write_volatile(mark_va as *mut u32, PROBE_MARK) };
-        if self.gpu.transfer_to_3d_sync(COMPOSITOR_CTX, mark_res, 1, 1, 4).is_err() {
+        if self.health_upload(buf, mark_res).is_err() {
             return false;
         }
         unsafe { core::ptr::write_volatile(sent_va as *mut u32, token) };
-        if self.gpu.transfer_to_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4).is_err() {
+        if self.health_upload(buf, sent_res).is_err() {
             return false;
         }
-        if self.comp_copy_px(mark_res, sent_res).is_err() {
+        // The poison is READ BACK before the copy is asked for: the verdict
+        // "the sentinel holds the mark" is satisfied by a token upload that
+        // never reached the host (the previous copy's mark would still be
+        // there), so the negative needs its positive control one step
+        // earlier -- the sentinel must be seen holding the token first. On
+        // the buffer pair this is one CPU-side round trip; on the texture
+        // fallback it is a second drain, and that pair is the slow path
+        // anyway.
+        unsafe { core::ptr::write_volatile(sent_va as *mut u32, !token) };
+        if self.health_readback(buf, sent_res).is_err() {
             return false;
         }
-        if self.gpu.transfer_from_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4).is_err() {
+        if unsafe { core::ptr::read_volatile(sent_va as *const u32) } != token {
+            return false;
+        }
+        // A buffer copy names BYTES: 4 of them (the texture form's 1x1
+        // texel is the same 4 bytes).
+        self.comp_copy_region(mark_res, sent_res, if buf { 4 } else { 1 }).is_ok()
+    }
+
+    /// The READ half: the sentinel back, true iff it holds the mark. On a
+    /// texture pair this is the step that waits for the copy to have
+    /// EXECUTED -- and on a tiled renderer the readback itself is a blit job
+    /// behind whatever the client has queued NOW (measured 8-15 ms on
+    /// thyla-pi/V3D whichever tick it ran on); on the buffer pair it is a
+    /// mapped read.
+    fn comp_health_read(&mut self) -> bool {
+        let (buf, _, _, sent_res, sent_va) = match self.health_pair() {
+            Some(v) => v,
+            None => return false,
+        };
+        if self.health_readback(buf, sent_res).is_err() {
             return false;
         }
         let got = unsafe { core::ptr::read_volatile(sent_va as *const u32) };
         got == PROBE_MARK
+    }
+
+    /// Read the first 4 bytes of a health resource back into its backing.
+    fn health_readback(&mut self, buf: bool, res: u32) -> Result<(), Error> {
+        if buf {
+            self.gpu.transfer_from_3d_box_sync(COMPOSITOR_CTX, res, 0, 0, 4, 1, 0, 0)
+        } else {
+            self.gpu.transfer_from_3d_sync(COMPOSITOR_CTX, res, 1, 1, 4)
+        }
+    }
+
+    /// The pair the health verify runs on: the buffer pair (`comp_hprobe`)
+    /// where it could be minted, else the texture pair. `(is_buffer,
+    /// mark_res, mark_va, sent_res, sent_va)`.
+    fn health_pair(&self) -> Option<(bool, u32, u64, u32, u64)> {
+        if let Some(p) = self.comp_hprobe.as_ref() {
+            return Some((true, p.mark_res, p.mark_va, p.sent_res, p.sent_va));
+        }
+        self.comp_probe
+            .as_ref()
+            .map(|p| (false, p.mark_res, p.mark_va, p.sent_res, p.sent_va))
+    }
+
+    /// Upload the first 4 bytes of a health resource's backing to the host:
+    /// a 4-byte box on a buffer, the 1x1 texel on a texture.
+    fn health_upload(&mut self, buf: bool, res: u32) -> Result<(), Error> {
+        if buf {
+            self.gpu.transfer_to_3d_box_sync(COMPOSITOR_CTX, res, 0, 0, 4, 1, 0, 0)
+        } else {
+            self.gpu.transfer_to_3d_sync(COMPOSITOR_CTX, res, 1, 1, 4)
+        }
     }
 
     /// One VIRGL_CCMD_RESOURCE_COPY_REGION of pixel (0,0) `src` -> (0,0)
@@ -1682,11 +1886,17 @@ impl Comp {
     /// sync transfer and before every later one by construction: one
     /// controlq, one slot, each `.step` waits its response.
     fn comp_copy_px(&mut self, src: u32, dst: u32) -> Result<(), Error> {
+        self.comp_copy_region(src, dst, 1)
+    }
+
+    /// The same copy with a box `w` wide (texels on a texture, BYTES on a
+    /// buffer -- the compositor's health pair, Warp-C C-4), 1 high, 1 deep.
+    fn comp_copy_region(&mut self, src: u32, dst: u32, w: u32) -> Result<(), Error> {
         let mut st: [u32; 14] = [0; 14];
         st[0] = (VIRGL_CCMD_RESOURCE_COPY_REGION & 0xff) | (VIRGL_CMD_RCR_SIZE << 16);
         st[1] = dst;
         st[6] = src;
-        st[11] = 1;
+        st[11] = w;
         st[12] = 1;
         st[13] = 1;
         let mut bytes = [0u8; 56];
@@ -1963,6 +2173,7 @@ impl Comp {
     /// sync transfer -- the same construction the C-2c witness rests on.
     fn submit_blits(&mut self, ctx: u32, blits: &[[u32; 22]]) -> Result<(), Error> {
         const BLIT_BYTES: usize = 22 * 4;
+        let t0 = Instant::now();
         let per = (Gpu::sync_stream_max() / BLIT_BYTES).max(1);
         for chunk in blits.chunks(per) {
             let mut bytes: Vec<u8> = Vec::with_capacity(chunk.len() * BLIT_BYTES);
@@ -1973,7 +2184,22 @@ impl Comp {
             }
             self.gpu.submit_3d_sync(ctx, &bytes)?;
         }
+        self.cost_add(Cost::Blit, t0);
         Ok(())
+    }
+
+    /// Charge the wall time since `t0` to census cell `k` (Warp-C C-4).
+    fn cost_add(&mut self, k: Cost, t0: Instant) {
+        self.cost_add_ns(k, t0.elapsed().as_nanos() as u64);
+    }
+
+    fn cost_add_ns(&mut self, k: Cost, ns: u64) {
+        let c = &mut self.cost[k as usize];
+        c.n += 1;
+        c.sum_ns = c.sum_ns.saturating_add(ns);
+        if ns > c.max_ns {
+            c.max_ns = ns;
+        }
     }
 
     /// The renderer's answer, at bring-up, to how blit boxes must be issued
@@ -2381,18 +2607,55 @@ impl Comp {
     }
 
     /// The per-tick health verify of the compositor context, run right
-    /// after a composition blit was submitted: at most one health copy per
-    /// tick (the 4.5.4b cadence). Returns true when the context is known or
-    /// assumed healthy this tick; false when THIS call found it latched --
-    /// in which case GPU composition is already OFF (`comp_gpu_latch`) and
-    /// the caller composes the present it just blitted the CPU way instead,
-    /// so no frame is lost to the discovery.
+    /// after a composition blit was submitted, at most one step per tick.
+    /// Returns true when the context is known or assumed healthy; false
+    /// when THIS call found it latched -- in which case GPU composition is
+    /// already OFF (`comp_gpu_latch`) and the caller composes the present it
+    /// just blitted the CPU way instead, so no frame is lost to the
+    /// discovery.
+    ///
+    /// DEFERRED (Warp-C C-4, GPU-DESIGN 4.5.12): the copy is issued now and
+    /// READ `HEALTH_PERIOD` ticks later. C-3 read it back in the same call,
+    /// and that read waited for the copy to execute -- behind every frame the
+    /// client had queued, up to its fence throttle's depth: measured 8.3-8.9
+    /// ms per verify on thyla-pi, a per-frame drain that was the whole
+    /// composed residual (a `glFinish` the direct arm never pays). Read a
+    /// period later the copy has long executed and the read costs a round
+    /// trip; issued only after the previous read, the uploads never touch a
+    /// resource with a job still pending. What is bought: the verdict lags
+    /// by up to two periods (a latched context shows stale composed panes
+    /// for that long, then the CPU path heals them) -- freeze-and-report on
+    /// a ~130 ms clock instead of a 16 ms one, and the compositor's context
+    /// latches only on our own defect or a host reset, never by a client's
+    /// hand (contexts are separate). Fail closed: an errored step is a latch.
     fn comp_health_tick(&mut self) -> bool {
         if self.comp_verify_tick == self.tick {
             return true;
         }
         self.comp_verify_tick = self.tick;
-        if self.comp_ctx_health() {
+        let t0 = Instant::now();
+        let mut ok = true;
+        let due = self.comp_verify_pending
+            && self.tick.wrapping_sub(self.comp_verify_issue_tick) >= HEALTH_PERIOD;
+        if due {
+            self.comp_verify_pending = false;
+            let t1 = Instant::now();
+            ok = self.comp_health_read();
+            self.cost_add(Cost::HealthRead, t1);
+        }
+        if ok && !self.comp_verify_pending {
+            let t1 = Instant::now();
+            let issued = self.comp_health_issue();
+            self.cost_add(Cost::HealthIssue, t1);
+            if issued {
+                self.comp_verify_pending = true;
+                self.comp_verify_issue_tick = self.tick;
+            } else {
+                ok = false;
+            }
+        }
+        self.cost_add(Cost::Health, t0);
+        if ok {
             return true;
         }
         self.comp_gpu_latch("health copy failed after a composition blit");
@@ -2855,6 +3118,22 @@ impl Comp {
                 None => say!(
                     "tapestryd: composed pixels = CPU (blit conventions not established) -- GPU composition OFF"
                 ),
+            }
+            // Warp-C C-4: the health verify's own BUFFER pair (see
+            // `warp_hprobe_build`), after the anchors like everything else
+            // that costs round trips.
+            if self.comp_conv.is_some() {
+                self.comp_hprobe = self.warp_hprobe_build(COMPOSITOR_CTX);
+                match self.comp_hprobe.as_ref() {
+                    Some(p) => say!(
+                        "tapestryd: comp-health verify on buffer pair (res {},{}), period {} ticks",
+                        p.mark_res, p.sent_res, HEALTH_PERIOD
+                    ),
+                    None => say!(
+                        "tapestryd: comp-health verify on the TEXTURE pair (buffer pair mint failed), period {} ticks",
+                        HEALTH_PERIOD
+                    ),
+                }
             }
         } else {
             say!(
@@ -3606,8 +3885,10 @@ impl Comp {
         };
         let dw = self.gpu.width as u64;
         let off = ((r.y as u64) * dw + r.x as u64) * 4;
+        let t0 = Instant::now();
         let _ = self.gpu.transfer(res, off, r.x, r.y, r.w, r.h);
         let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
+        self.cost_add(Cost::Push, t0);
     }
 
     /// The GPU composed path's device-visible step (Warp-C C-3): the pixels
@@ -3622,7 +3903,9 @@ impl Comp {
             Some(s) => s.res,
             None => return,
         };
+        let t0 = Instant::now();
         let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
+        self.cost_add(Cost::Flush, t0);
     }
 
     /// Flush surface `n`'s held region (F13 release; also the implicit
@@ -4767,6 +5050,12 @@ impl Comp {
     /// before `t_close`, since I-7's dual count frees nothing while a
     /// mapping ref survives.
     fn warp_probe_res(&mut self, dev_ctx: u32, size: u64) -> Option<(u32, i64, u64)> {
+        self.warp_probe_res_kind(dev_ctx, size, false)
+    }
+
+    /// The same mint as a BUFFER resource of `size` bytes (`buffer` = true;
+    /// Warp-C C-4, see `PIPE_BUFFER`) or the 1x1 render target (false).
+    fn warp_probe_res_kind(&mut self, dev_ctx: u32, size: u64, buffer: bool) -> Option<(u32, i64, u64)> {
         let fd = unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if fd < 0 {
             return None;
@@ -4790,9 +5079,22 @@ impl Comp {
             unsafe { t_burrow_detach(va, size) };
             unsafe { t_close(fd) };
         };
-        if self
-            .gpu
-            .resource_create_3d(
+        let created = if buffer {
+            self.gpu.resource_create_3d(
+                res_id,
+                PIPE_BUFFER,
+                VIRGL_FORMAT_R8_UNORM,
+                VIRGL_BIND_VERTEX_BUFFER,
+                size as u32,
+                1,
+                1,
+                1,
+                0,
+                0,
+                0,
+            )
+        } else {
+            self.gpu.resource_create_3d(
                 res_id,
                 PIPE_TEXTURE_2D,
                 VIRGL_FORMAT_B8G8R8A8_UNORM,
@@ -4805,8 +5107,8 @@ impl Comp {
                 0,
                 0,
             )
-            .is_err()
-        {
+        };
+        if created.is_err() {
             undo(&mut self.gpu, 0, res_id);
             return None;
         }
@@ -4878,6 +5180,44 @@ impl Comp {
             // `Some(p)` this arm never stores. The unwind lived inline in
             // the arm above, so the third arm silently had none: the reason
             // it is a shared helper now.
+            self.warp_probe_res_undo(dev_ctx, sent_res, sent_va, sent_fd, size);
+            self.warp_probe_res_undo(dev_ctx, mark_res, mark_va, mark_fd, size);
+            return None;
+        }
+        Some(CtxProbe {
+            mark_res,
+            mark_fd,
+            mark_va,
+            sent_res,
+            sent_fd,
+            sent_va,
+            size,
+        })
+    }
+
+    /// The compositor's HEALTH-verify pair (Warp-C C-4): the same mark /
+    /// sentinel discipline as `warp_probe_build`, minted as BUFFER resources
+    /// (see `PIPE_BUFFER`) so that the per-period verify's uploads, copy and
+    /// readback never enqueue GPU work behind the client's frames. Distinct
+    /// from `comp_probe`, which stays a TEXTURE pair because the C-2c import
+    /// witnesses copy slot textures into it. `None` = could not be built;
+    /// the texture pair then carries the verify (correct, and slower).
+    fn warp_hprobe_build(&mut self, dev_ctx: u32) -> Option<CtxProbe> {
+        let size = PAGE;
+        let (mark_res, mark_fd, mark_va) = self.warp_probe_res_kind(dev_ctx, size, true)?;
+        let (sent_res, sent_fd, sent_va) = match self.warp_probe_res_kind(dev_ctx, size, true) {
+            Some(v) => v,
+            None => {
+                self.warp_probe_res_undo(dev_ctx, mark_res, mark_va, mark_fd, size);
+                return None;
+            }
+        };
+        unsafe { core::ptr::write_volatile(mark_va as *mut u32, PROBE_MARK) };
+        if self
+            .gpu
+            .transfer_to_3d_box_sync(dev_ctx, mark_res, 0, 0, 4, 1, 0, 0)
+            .is_err()
+        {
             self.warp_probe_res_undo(dev_ctx, sent_res, sent_va, sent_fd, size);
             self.warp_probe_res_undo(dev_ctx, mark_res, mark_va, mark_fd, size);
             return None;
@@ -6892,6 +7232,23 @@ impl Conn {
                     comp.composed_gpu, comp.composed_cpu, comp.comp_gpu_dead as u32
                 ),
             );
+            // Warp-C C-4: the present-path cost census, one line per op
+            // class -- `cost <kind> <n> <sum_us> <max_us>`, cumulative since
+            // boot (a reader diffs snapshots). Every kind is printed, zero or
+            // not, so a parser never has to infer a missing line.
+            for k in Cost::ALL {
+                let c = comp.cost[k as usize];
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!(
+                        "cost {} {} {} {}\n",
+                        k.name(),
+                        c.n,
+                        c.sum_ns / 1000,
+                        c.max_ns / 1000
+                    ),
+                );
+            }
             #[cfg(feature = "test-mode")]
             {
                 let _ = core::fmt::write(
@@ -7672,10 +8029,19 @@ impl Conn {
                 Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                 Err(e) => self.err(tag, e),
             },
-            FK_PRESENT => match self.present(comp, n, a.data) {
-                Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
-                Err(e) => self.err(tag, e),
-            },
+            FK_PRESENT => {
+                // Warp-C C-4: the whole dispatch is timed and charged to
+                // the arm it took (`present` records the arm).
+                let t0 = Instant::now();
+                comp.cost_arm = Cost::PresentOther;
+                let r = self.present(comp, n, a.data);
+                let arm = comp.cost_arm;
+                comp.cost_add(arm, t0);
+                match r {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                }
+            }
             _ => self.err(tag, p9::E_PERM),
         }
     }
@@ -8417,20 +8783,25 @@ impl Conn {
                 if hold {
                     return Err(p9::E_OPNOTSUPP);
                 }
+                comp.cost_arm = Cost::PresentDirectGl;
                 if comp.bound_res != g.res_id {
                     // Defensive (mode-machine-unreachable: every adoption
                     // change routes through the pending switch): rebind
                     // rather than flush a non-scanned-out resource, which
                     // the spec drops silently.
                     say!("tapestryd: GL direct rebind {} -> {}", comp.bound_res, g.res_id);
+                    let t0 = Instant::now();
                     if comp.gpu.set_scanout(g.res_id, w, h).is_err() {
                         return Err(E_IO);
                     }
+                    comp.cost_add(Cost::Scanout, t0);
                     comp.bound_res = g.res_id;
                 }
+                let t0 = Instant::now();
                 if comp.gpu.flush(g.res_id, 0, 0, w, h).is_err() {
                     return Err(E_IO);
                 }
+                comp.cost_add(Cost::FlushDirect, t0);
                 if let Some(s) = comp.surf_mut(n) {
                     s.res_stale = [true; WEAVE_SLOTS as usize];
                 }
@@ -8466,7 +8837,9 @@ impl Conn {
             // frame -- a KMS page flip with a per-buffer framebuffer, which is
             // what every display stack does. The offset loses its slot base.
             let res = res_ids[slot as usize];
+            comp.cost_arm = Cost::PresentDirect2d;
             if comp.bound_res != res {
+                let t0 = Instant::now();
                 if comp.gpu.set_scanout(res, w, h).is_err() {
                     return Err(E_IO);
                 }
@@ -8477,21 +8850,33 @@ impl Conn {
                 if comp.gpu.flush(res, 0, 0, w, h).is_err() {
                     return Err(E_IO);
                 }
+                comp.cost_add(Cost::Scanout, t0);
             }
             let mut acc: Option<Rect> = None;
+            let (mut xfer_ns, mut flush_ns) = (0u64, 0u64);
             for &(x, y, pw, ph) in &rects {
                 let offset = ((y as u64) * (w as u64) + x as u64) * 4;
+                let t0 = Instant::now();
                 if comp.gpu.transfer(res, offset, x, y, pw, ph).is_err() {
                     return Err(E_IO);
                 }
+                xfer_ns += t0.elapsed().as_nanos() as u64;
                 if hold {
                     acc = Some(rect_union(
                         acc.unwrap_or(Rect::ZERO),
                         Rect { x, y, w: pw, h: ph },
                     ));
-                } else if comp.gpu.flush(res, x, y, pw, ph).is_err() {
-                    return Err(E_IO);
+                } else {
+                    let t1 = Instant::now();
+                    if comp.gpu.flush(res, x, y, pw, ph).is_err() {
+                        return Err(E_IO);
+                    }
+                    flush_ns += t1.elapsed().as_nanos() as u64;
                 }
+            }
+            comp.cost_add_ns(Cost::Xfer, xfer_ns);
+            if !hold {
+                comp.cost_add_ns(Cost::FlushDirect, flush_ns);
             }
             if let Some(r) = acc {
                 // Merge into THIS SLOT's entry (C-2d-b). Other slots' pending
@@ -8552,6 +8937,7 @@ impl Conn {
                                 if comp.comp_health_tick() {
                                     comp.screen_flush_rect(op.dst);
                                     comp.composed_gpu += 1;
+                                    comp.cost_arm = Cost::PresentComposedBo;
                                     comp.say_gpu_once(n, "BO", g.res_id, scr_res);
                                     done = true;
                                 }
@@ -8562,14 +8948,18 @@ impl Conn {
                     }
                 }
                 if !done {
-                    if comp
+                    comp.cost_arm = Cost::PresentComposedCpu;
+                    let t0 = Instant::now();
+                    let pulled = comp
                         .gpu
                         .transfer_from_3d_sync(g.dev_ctx, g.res_id, g.w, g.h, g.w * 4)
-                        .is_ok()
-                    {
-                        if let Some(r) =
-                            comp.blit_composed_pixels(n, 0, 0, 0, w, h, Some(g.va))
-                        {
+                        .is_ok();
+                    comp.cost_add(Cost::Readback, t0);
+                    if pulled {
+                        let t1 = Instant::now();
+                        let r = comp.blit_composed_pixels(n, 0, 0, 0, w, h, Some(g.va));
+                        comp.cost_add(Cost::Cpu, t1);
+                        if let Some(r) = r {
                             comp.screen_push(r);
                             comp.composed_cpu += 1;
                         }
@@ -8618,12 +9008,14 @@ impl Conn {
             if gpu_path {
                 let scr_res = scr.map(|(r, _)| r).unwrap_or(0);
                 let res = res_ids[slot as usize];
+                let t0 = Instant::now();
                 for &(x, y, pw, ph) in &rects {
                     let offset = ((y as u64) * (w as u64) + x as u64) * 4;
                     if comp.gpu.transfer(res, offset, x, y, pw, ph).is_err() {
                         return Err(E_IO);
                     }
                 }
+                comp.cost_add(Cost::Xfer, t0);
                 let mut ops: Vec<ComposeOp> = Vec::new();
                 for &(x, y, pw, ph) in &rects {
                     if let Some(op) = comp.compose_geometry(n, x, y, pw, ph) {
@@ -8659,6 +9051,7 @@ impl Conn {
                         }
                     }
                     comp.composed_gpu += 1;
+                    comp.cost_arm = Cost::PresentComposedSlot;
                     comp.say_gpu_once(n, "slot", res, scr_res);
                     // The slot's host copy now holds exactly what was
                     // transferred: valid in full iff this present's damage
@@ -8675,7 +9068,10 @@ impl Conn {
             if !took_gpu {
                 let mut composed = false;
                 for &(x, y, pw, ph) in &rects {
-                    if let Some(r) = comp.blit_composed_pixels(n, slot, x, y, pw, ph, None) {
+                    let t0 = Instant::now();
+                    let r = comp.blit_composed_pixels(n, slot, x, y, pw, ph, None);
+                    comp.cost_add(Cost::Cpu, t0);
+                    if let Some(r) = r {
                         composed = true;
                         if hold {
                             acc_cpu = Some(rect_union(acc_cpu.unwrap_or(Rect::ZERO), r));
@@ -8688,6 +9084,7 @@ impl Conn {
                 // fully clipped present composes nothing on either path).
                 if composed {
                     comp.composed_cpu += 1;
+                    comp.cost_arm = Cost::PresentComposedCpu;
                 }
                 if let Some(s) = comp.surf_mut(n) {
                     s.res_stale = [true; WEAVE_SLOTS as usize];

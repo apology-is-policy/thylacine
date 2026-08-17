@@ -320,7 +320,8 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" ]]; then
     # the resident boot) would squat it -- the client must land on gpu0's
     # head (the ls-gfx-live #31 leg). cocoa keeps the canonical device set
     # (its View menu switches consoles interactively).
-    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "egl-headless" ]]; then
+    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "egl-headless" \
+       || "${THYLACINE_DISPLAY:-none}" == "dbus-gl" ]]; then
         gpu_flags=(
             -device "$gpu_dev,id=gpu0,disable-legacy=on"
         )
@@ -409,7 +410,17 @@ case "${THYLACINE_DISPLAY:-none}" in
     # the substrate witness). Serial stays on -serial below -- only
     # `none` implies -nographic.
     egl-headless) display_flags=(-display egl-headless) ;;
-    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|cocoa|vnc:N|egl-headless)" >&2
+    # Headless GL WITHOUT the display readback (Warp-C C-4): the dbus display
+    # in peer-to-peer mode with no listener attached gives the -gl models the
+    # same render-node EGL context egl-headless does, but a RESOURCE_FLUSH
+    # then updates nobody -- egl-headless's flush is a full-frame
+    # glReadPixels into the console surface on every flush (measured 11-17 ms
+    # of every frame on thyla-pi/V3D, GPU-DESIGN 4.5.12), which is a cost of
+    # the INSTRUMENT, not of the guest. Nothing can look at this display
+    # (no screendump, no VNC): it is the lane for measuring the guest's own
+    # present costs, and only that.
+    dbus-gl) display_flags=(-display dbus,p2p=on,gl=on) ;;
+    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|cocoa|vnc:N|egl-headless|dbus-gl)" >&2
            exit 2 ;;
 esac
 
