@@ -454,6 +454,57 @@ commit message, a scripture section and the handoff, because a grep that
 *returns results* feels like a sweep that *finished*. Corrected in §4.5.8b and
 the handoff; the commit body stands as written, with this as its correction.
 
+### The stop hook guarded the wrong stop, and the guard was never needed (`b3632942`, `cd0b3390`, `b61ca929`)
+
+The operator noticed the Stop hook fired once in the long run and then went
+quiet at a second stop it should have caught, and asked aux and me to work out
+why. It is the third instance this week of the same family, and the sharpest.
+
+**The measurement.** Replaying the hook's own parser over the real 805 MB
+transcript: the silent stop sat at **530k / 73 turns** — inside the window on
+both axes. So "it was correctly silent above the checkpoint" is dead. Isolating
+the logic with synthetic input showed it behaves exactly as written. The cause
+was upstream, and the pattern repeats: every firing is followed by silence for
+the rest of the continuation, re-arming only when the user speaks or a
+compaction lands.
+
+**What I got wrong, and it was not the code.** `stop_hook_active` means "this
+hook already triggered a continuation" — per-continuation by definition. I
+exited early on it, which made the hook a once-per-*run* nudge guarding the
+first stop and nothing after, i.e. the stop most likely to be earned and none
+of the ones that follow. I kept that early exit because I believed it was the
+loop guard.
+
+**It never was.** aux fetched the contract: the harness overrides a Stop hook
+after **eight consecutive blocks** (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`). The
+belay already existed one level up. So I had built a guard against a loop
+something else was already preventing, and paid for it with the exact behaviour
+the hook exists to provide. That is a different failure from a bug: **the code
+did what I meant; what I meant rested on a contract I had not read.** No amount
+of testing my own intent would have found it — only reading someone else's.
+
+**The instrument came before the fix, and earned it twice.** The hook had nine
+silent exits, so "correctly silent", "suppressed", and "crashed" were one
+observation and any diagnosis could only be a guess — the same shape that had
+just cost the vault a stranded day. So a ledger row on every path landed first.
+Then it caught two things I would not have:
+
+- Its own blind spot: the `stop_hook_active` parser printed `"1"` on exception,
+  so a malformed stdin logged as `silent-stop-hook-active`. **The instrument
+  built to separate those two causes could not separate those two causes.** The
+  malformed-stdin test leg printed the wrong row, which is the only reason I
+  looked.
+- On its first *real* output: three rows in 24 seconds with incoherent context
+  jumps, because the ledger is shared by main/aux/vault and I had dropped the
+  session field from aux's spec. An interleaved log with no writer is worse
+  than no log — it invites a confident reconstruction of one impossible session
+  out of three real ones.
+
+**And the fix validated itself in production before I finished writing it up:**
+the reworded stem ("fires once per stop") came back in a live firing that
+re-armed mid-continuation after real work — something the old version could not
+do — with the ledger row `588458ctx/44t/27b/flag1` showing exactly why.
+
 ### C-2d-b landed, and the sabotage that proved it unverified (`f86177b6`)
 
 The server half went in as voted: each generation mints `WEAVE_SLOTS` host
