@@ -635,8 +635,8 @@ was asked twice. Asks, does not veto: working as designed *within* a
 continuation. What the tests did not cover — and what nobody could see,
 because the hook exits 0 on every path and leaves no trace — is the second
 stop of one continuation; "correctly silent", "silenced by the flag" and
-"crashed in the parser" are indistinguishable from outside. The fix begins
-with a ledger row per invocation (R12).
+"crashed in the parser" are indistinguishable from outside. The fix (R12,
+landed `b3632942` + `cd0b3390`) begins with a ledger row per invocation.
 
 Where it lives is a deliberate trade with a sharp edge (§8 R4): in the repo
 (`tools/`) so it is versioned and survives a clone — but wired from the
@@ -1128,14 +1128,28 @@ replay: the hook's own "Stop hook feedback" record is a plain user-type text
 that matches none of the non-genuine markers, so it **resets the
 turns-since-user counter** (the number reported is "since the hook last
 spoke"); and a user record whose content has no text block joins to `""`,
-matches nothing, and also resets it. *Fix shape (agreed on the line; main's
-file):* first make it **audible** — a ledger row per invocation (ctx,
-turns-since-user, turns-since-block, flag, decision, why); then derive scope
-from the transcript — re-ask when `MIN_TURNS` assistant turns have passed
-since the last block record — with the harness's own eight-consecutive-blocks
-cap (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`) as the outer belay; exclude the
-feedback record and textless records from "the user spoke". Sabotage: drop
-the since-block conjunct and the same-stop leg must go red.
+matches nothing, and also resets it. *Fix — landed by main the same morning
+(`b3632942` the ledger, `cd0b3390` the scope):* first **audible** — a ledger
+row per invocation (`ctx/turns_user/turns_block/flag` + decision + why) into
+the self-compaction tsv, so the morning read is one directory; then scope
+derived from the transcript — `block iff FLOOR ≤ ctx < CKPT ∧ turns_user ≥
+MIN ∧ (flag == false ∨ turns_block ≥ MIN)` — with the harness's own
+eight-consecutive-blocks cap (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`) as the outer
+belay; the feedback record and textless records excluded from "the user
+spoke"; counters start at 0 at the tail window's head and only anchors reset
+them, so a block record aged out of the 8 MiB tail fails toward *asks again*,
+never toward quiet. Five legs (fresh turn → block; flag true + 2 turns → same-
+stop silent; flag true + 20 turns → block; block record does not reset the
+user counter; textless record does not) plus the sabotage: drop the
+since-block conjunct and leg 2 goes red. Two additions the tests forced,
+both worth stealing: **one shell variable is the source for the stem the hook
+emits and the stem it detects** (two copies would drift the first time the
+prose was reworded and the detector would silently stop finding its own
+blocks — the class being fixed); and the ledger's flag parser printed `"1"`
+on exception, so a malformed stdin logged as *silent-because-flag* — the
+instrument built to separate two causes could not separate them; now `"E"`
+and a distinct `silent-stdin-unparsable` row, still fail-open. Nobody found
+that by reading; the malformed-stdin leg printed the wrong row.
 
 None of these is a hole in the design; R1 and R12 are holes in a *premise*
 each mechanism stated about itself ("no shared config to drift"; "already
