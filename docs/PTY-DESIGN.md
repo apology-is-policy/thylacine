@@ -410,6 +410,28 @@ behaves like `TCSANOW`; a program that needs a real input flush has no spelling
 for it, which is a fidelity gap of the previous posture too (it flushed
 unasked) and is recorded rather than built.
 
+**ISIG characters DISCARD the pending line (2026-08-17, operator-voted; the
+ccb597b8 round's F5).** POSIX termios (NOFLSH clear, the default) performs "the
+normal flush of the input and output queues associated with the INTR, QUIT and
+SUSP characters"; Linux `n_tty_receive_signal_char` flushes the read buffer.
+The old unconditional mode-write reset MASKED this: type-ahead into a
+foreground job followed by ^C was thrown away by the shell's PROMPT-mode re-arm,
+by accident. Delivery made it visible — `rm -rf x` typed into a job, then ^C to
+abandon it, arrived at the next prompt as pre-typed input. The rule now, in both
+ldiscs: **an ISIG-consumed signal character (kernel console: Ctrl-C; pts:
+VINTR/VQUIT/VSUSP) received in canonical mode discards the pending
+canonical assembly. It is an explicit I-20 DISPOSITION of those bytes, like an
+erase — not a drop, not counted; the ISIG cooking itself (raise the signal,
+never a byte, never an echo) is unchanged.** Deliberately NARROWER than POSIX's
+full flush, and recorded as such: complete lines already committed to the ring
+by Enter stay (the user finished them), and the OUTPUT queue is never
+discarded (the kernel console's TX ring carries kernel diagnostics no signal
+character may eat; a pts's s2m carries the job's last output the shell is
+about to read). Plan 9's `devcons` has no such flush — this is a POSIX-shape
+choice, made because both ldiscs already model termios and every consumer of
+a pts is a POSIX program. Tests: `cons.cook_isig_discards_pending_line` (kernel)
+and ptyfs selftest leg (f) pin it in each ldisc.
+
 *As-built (PTY-2d)*: the teardown legs. Drain-then-EOF was structural since 2a
 (`ring_drain` serves Data while non-empty regardless of the peer's closure;
 Eof only on empty+peer-closed) — 2d adds the **HUP raise**: `open_dec` reports
