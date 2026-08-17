@@ -114,6 +114,15 @@ const STAGING_LEN: usize = 4096;
 /// 32 + 16*(k-1) bytes -> k <= 63 (the server caps at 64 independently).
 pub const MAX_RECTS: usize = (EV_OFF as usize - TPRESENT_LEN) / TRECT_LEN + 1;
 
+/// Slot count this library can track ages for (GPU-DESIGN 4.5.8b). The server
+/// ships 3; the bound exists so the array below is fixed-size in no_std, and
+/// `attach` refuses a larger advertisement rather than truncating.
+pub const MAX_SLOTS: usize = 8;
+
+/// `slot_seen` sentinel: this slot's content is UNDEFINED -- never presented on
+/// this generation, or invalidated since. `age` reports 0 for it.
+const SLOT_UNSEEN: u64 = u64::MAX;
+
 const UD_PRESENT: u64 = 1;
 const UD_EVENT: u64 = 2;
 
@@ -136,6 +145,11 @@ pub struct Surface {
     ring: Ring,
     staging: RegisteredBuffer,
     cur_slot: u32,
+    /// Presents completed on this generation; the clock `slot_seen` reads.
+    presents: u64,
+    /// Per slot, the `presents` value at which it was last presented, or
+    /// `SLOT_UNSEEN` when its content is undefined. Drives `age`.
+    slot_seen: [u64; MAX_SLOTS],
     event_armed: bool,
     /// Latched when the event stream EOFs (the surface retired server-side):
     /// no further reads are armed -- without the latch, a non-blocking
@@ -247,7 +261,11 @@ impl Surface {
         let stride: u32 = it.next().and_then(|s| s.parse().ok()).ok_or(TapError::Protocol)?;
         let slot_stride: u64 = it.next().and_then(|s| s.parse().ok()).ok_or(TapError::Protocol)?;
         let nslots: u32 = it.next().and_then(|s| s.parse().ok()).ok_or(TapError::Protocol)?;
-        if gw != w || gh != h || stride != w * 4 || nslots == 0 {
+        // `nslots` bounds the age bookkeeping, so it is validated against the
+        // array that holds it -- a server advertising more slots than we can
+        // track would silently lose invalidations, which is the one failure
+        // mode `age` exists to prevent.
+        if gw != w || gh != h || stride != w * 4 || nslots == 0 || nslots as usize > MAX_SLOTS {
             return fail(&[root, ctl, weave_fd], TapError::Protocol);
         }
         let map_va = unsafe { t_weft_map(weave_fd as u64, 0) };
@@ -296,6 +314,8 @@ impl Surface {
             ring,
             staging,
             cur_slot: 0,
+            presents: 0,
+            slot_seen: [SLOT_UNSEEN; MAX_SLOTS],
             event_armed: false,
             closed: false,
             pending: Vec::new(),
@@ -318,7 +338,11 @@ impl Surface {
         let cw = ev.value >> 16;
         let ch = ev.value & 0xffff;
         if cw == self.w && ch == self.h {
-            return Ok(false); // the redraw request; geometry unchanged
+            // The redraw request. Geometry is unchanged, but the compositor
+            // may have skipped transfers while we were hidden, so EVERY slot's
+            // host-side content is now suspect (GPU-DESIGN 4.5.8b).
+            self.invalidate_slots();
+            return Ok(false);
         }
         self.reweave(cw, ch, ev.code)?;
         Ok(true)
@@ -390,7 +414,46 @@ impl Surface {
         self.stride = stride;
         self.slot_stride = slot_stride;
         self.cur_slot = 0;
+        // A fresh generation: every slot is zeroed server-side, so no slot
+        // carries usable content.
+        self.invalidate_slots();
         Ok(())
+    }
+
+    /// BUFFER AGE of the slot `pixels` is about to hand out (GPU-DESIGN
+    /// 4.5.8b; the `EGL_EXT_buffer_age` contract). **0 means the slot's
+    /// content is UNDEFINED -- repaint the whole surface.** `n >= 1` means it
+    /// holds the frame presented `n` presents ago, so a client that repaints
+    /// only damage must repaint the UNION of every damage rect since then.
+    ///
+    /// Why a client must consult this at all: slots rotate and nothing copies
+    /// content between them, so a slot's non-repainted pixels are whatever
+    /// this client last wrote there -- `nslots` presents back. That was
+    /// invisible while one host resource per generation quietly accumulated
+    /// the frames; per-slot resources (C-2d) remove that accumulator.
+    ///
+    /// Derived here rather than reported by the compositor because this
+    /// library owns the rotation. That is sound only while every server-side
+    /// invalidation reaches us as a redraw or a reweave -- the C-2d invariant
+    /// in GPU-DESIGN 4.5.8b, which is the compositor's side of this contract.
+    pub fn age(&self) -> u32 {
+        let seen = self.slot_seen[self.cur_slot as usize];
+        if seen == SLOT_UNSEEN {
+            return 0;
+        }
+        // Saturates rather than wrapping: `presents` only ever advances past
+        // a recorded `seen`, so this is a total function on real state, and a
+        // corrupted one degrades to "repaint more", never to "repaint less".
+        (self.presents - seen).min(u32::MAX as u64) as u32
+    }
+
+    /// Mark every slot's content undefined: the next `nslots` presents each
+    /// see `age` 0 and repaint fully. The compositor's redraw request and a
+    /// reweave both land here -- a redraw invalidates EVERY slot, not just
+    /// the one about to be drawn, so one full repaint is NOT enough.
+    fn invalidate_slots(&mut self) {
+        self.slot_seen = [SLOT_UNSEEN; MAX_SLOTS];
+        self.presents = 0;
     }
 
     /// The CURRENT draw slot's pixels (u32 BGRA little-endian: 0xAARRGGBB).
@@ -520,8 +583,12 @@ impl Surface {
                 saw = true;
                 if cqe.user_data == ud {
                     if cqe.result < 0 {
+                        // No rotation on failure, so no slot changed hands and
+                        // the age bookkeeping must not advance either.
                         return Err(TapError::Present);
                     }
+                    self.slot_seen[self.cur_slot as usize] = self.presents;
+                    self.presents += 1;
                     self.cur_slot = (self.cur_slot + 1) % self.nslots;
                     return Ok(());
                 }

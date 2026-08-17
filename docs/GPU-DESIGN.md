@@ -1031,9 +1031,35 @@ therefore get a named invariant, a test, and a line in the reference. The
 wrong: one full repaint after unhide fixes one slot and leaves the other two
 stale.
 
-**Sequencing.** The age plumbing lands with C-2d, in one chunk with the per-slot
-resources, because either alone is a regression: per-slot resources without age
-break accumulators, and age without per-slot resources is inert.
+**Sequencing — split into C-2d-a (client) then C-2d-b (server).** The two are
+not symmetric, which is what makes the split safe. Per-slot resources without
+age would break every accumulator, so the server half can never go first. Age
+without per-slot resources is *inert but harmless* — a client repainting the
+union of the last `age` frames' damage produces byte-identical pixels on
+today's accumulating single resource, and merely redraws more. So the client
+half lands first, gated on "unregressed" rather than on any new behaviour, and
+the server half lands into a tree where every client is already correct.
+
+**Be exact about what C-2d-a can be verified to do: nothing observable.** Its
+effect is invisible until C-2d-b removes the accumulator, so its gate is the
+`ls-gfx*` pixel asserts staying green, plus the reasoning above. Claiming more
+would be claiming a green boot proves a gate is wired.
+
+**C-2d-b's prerequisite list, from a sweep rather than from memory: every
+libtapestry client that presents partial damage must consult `age`.** There are
+three (`grep 'present(Some\|present_rects'`): `usr/aurora` (done, C-2d-a),
+`usr/tapestry-demo:140`, and `usr/tapestry-battery:480`. The battery is the one
+with teeth — `ls-gfx-panes` asserts exact pane-centre pixels, so if it is left
+un-updated the server half fails that gate rather than shipping quietly broken.
+
+**C-2d-b also owes a decision on `res_stale`.** Today it means "this client
+resource has no valid content" and forces a full-surface transfer of the current
+slot on a direct switch — which pushes an accumulator's *stale slot memory* to
+the host, and is survivable only because the switch also emits the redraw
+`CONFIGURE` that makes the client repaint next frame. Per-slot resources make it
+per-slot, and the age contract arguably subsumes it; keeping both is belt and
+braces, dropping it needs the redraw emission to be proven unconditional. Decide
+it explicitly rather than porting it by reflex.
 
 #### 4.5.9 The composed path is CAPABILITY-GATED, and the CPU path is PERMANENT (measured 2026-08-16, before C-2 wrote a line)
 
