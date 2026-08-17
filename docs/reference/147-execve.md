@@ -134,9 +134,11 @@ switch that may never come.
 
 **Kept** (and each is correct):
 
-- **the handle table** — POSIX keeps fds across exec (there is no `O_CLOEXEC` at
-  v1.0). The prover leans on this: its post-exec PASS line is written to an fd
-  inherited across the swap.
+- **the handle table** — POSIX keeps fds across exec, MINUS the close-on-exec
+  set: `O_CLOEXEC` landed (#151; the `cloexec` bitmap beside `fd[]` in
+  `handle.h`, honoured by `handle_close_on_exec` on the exec path). The prover
+  leans on the keep: its post-exec PASS line is written to an fd inherited
+  across the swap.
 - **the Territory**, the process tree, identity, capabilities, `/env`.
 - **the pid** — which is what distinguishes execve from spawn, and what the
   prover checks so a degradation to "spawn a child and exit" would fail.

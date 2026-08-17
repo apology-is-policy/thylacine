@@ -1838,11 +1838,52 @@ static bool viv_signote_indexable(enum viv_signote note) {
     return (u32)note != (u32)VIV_SIGNOTE_NONE && (u32)note < VIV_SIGNOTE_COUNT;
 }
 
+// THE ACCESS DISCIPLINE FOR `viv_sigtab` ENTRIES (main#243 F2/F6; aux#254).
+//
+// The table is read LOCK-FREE from other Procs' CPUs (notes_post's SIG_IGN hook,
+// notes_proc_has_live_handler, notes_proc_default_applies -- each takes an
+// arbitrary Proc) while its own Proc's thread writes it (rt_sigaction,
+// SA_RESETHAND, exec's reset). Three facts make that sound, and each is a
+// CONSTRUCTION here rather than a codegen property someone once measured:
+//
+//   1. Every field is accessed with a __atomic_* op on a naturally aligned u64
+//      -- single-copy-atomic per FIELD by C11, so no reader ever observes a word
+//      NO WRITER STORED (the byte loop this replaced was measured to compile to
+//      halfword stores under -ffreestanding -fno-builtin, and could publish a
+//      handler half old / half zero that passed the `> VIV_SIG_IGN` gate).
+//   2. An INSTALL publishes `handler` LAST with RELEASE and a reader loads it
+//      with ACQUIRE -- so a reader that sees a live handler sees the flags /
+//      restorer / mask installed WITH it (message passing), never a torn entry
+//      from a concurrent rt_sigaction.
+//   3. A RESET zeroes `handler` FIRST: a reader either sees SIG_DFL and stops,
+//      or sees the old live handler beside fields that may already be zero.
+//      That second view is the ONLY inconsistent entry a reader can observe,
+//      and it is harmless for exactly one reason -- every CROSS-Proc reader
+//      acts on `handler` alone (notes_proc_has_live_handler discards its copy;
+//      note_ignored reads nothing else), and every reader that CONSUMES the
+//      copied fields (delivery at EL0 return, the handler-mask compose) runs
+//      on a thread of the table's own Proc, which cannot run during that
+//      Proc's exec (proc_exec_alone). A future cross-Proc consumer of the
+//      copied fields re-opens this argument; say so at the site.
+//
+// What is deliberately NOT promised: entry-to-entry consistency. A reader may
+// see a mix of pre- and post-reset ENTRIES, which is the latitude POSIX gives a
+// sigaction racing a signal already in flight.
+static inline u64 sigact_ld_handler(const struct viv_ksigaction *a) {
+    return __atomic_load_n(&a->handler, __ATOMIC_ACQUIRE);
+}
+static inline void sigact_st_default(struct viv_ksigaction *a) {
+    __atomic_store_n(&a->handler,  VIV_SIG_DFL, __ATOMIC_RELAXED);   // gate first
+    __atomic_store_n(&a->flags,    0ull,        __ATOMIC_RELAXED);
+    __atomic_store_n(&a->restorer, 0ull,        __ATOMIC_RELAXED);
+    __atomic_store_n(&a->mask,     0ull,        __ATOMIC_RELAXED);
+}
+
 bool viv_sigtab_note_ignored(const struct viv_sigtab *tab,
                              enum viv_signote note) {
     if (!tab) return false;                       // no table == nothing ignored
     if (!viv_signote_indexable(note)) return false;
-    return tab->act[(u32)note].handler == VIV_SIG_IGN;
+    return sigact_ld_handler(&tab->act[(u32)note]) == VIV_SIG_IGN;
 }
 
 bool viv_sigtab_note_handler(const struct viv_sigtab *tab,
@@ -1854,9 +1895,15 @@ bool viv_sigtab_note_handler(const struct viv_sigtab *tab,
     const struct viv_ksigaction *a = &tab->act[(u32)note];
     // SIG_DFL is 0 and SIG_IGN is 1 -- neither is an address to jump to. A
     // zeroed table therefore reads as all-default with no separate init.
-    if (a->handler == VIV_SIG_DFL || a->handler == VIV_SIG_IGN) return false;
+    // The handler is loaded ONCE (acquire) and gated on that value: a second
+    // load could see a different disposition and hand out a stale address.
+    u64 h = sigact_ld_handler(a);
+    if (h == VIV_SIG_DFL || h == VIV_SIG_IGN) return false;
 
-    *out = *a;
+    out->handler  = h;
+    out->flags    = __atomic_load_n(&a->flags,    __ATOMIC_RELAXED);
+    out->restorer = __atomic_load_n(&a->restorer, __ATOMIC_RELAXED);
+    out->mask     = __atomic_load_n(&a->mask,     __ATOMIC_RELAXED);
     return true;
 }
 
@@ -1864,7 +1911,12 @@ bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
                     const struct viv_ksigaction *act) {
     if (!tab || !act) return false;
     if (!viv_signote_indexable(note)) return false;
-    tab->act[(u32)note] = *act;
+    struct viv_ksigaction *a = &tab->act[(u32)note];
+    // Fields first, the gate LAST with release (discipline point 2 above).
+    __atomic_store_n(&a->flags,    act->flags,    __ATOMIC_RELAXED);
+    __atomic_store_n(&a->restorer, act->restorer, __ATOMIC_RELAXED);
+    __atomic_store_n(&a->mask,     act->mask,     __ATOMIC_RELAXED);
+    __atomic_store_n(&a->handler,  act->handler,  __ATOMIC_RELEASE);
     return true;
 }
 
@@ -1885,16 +1937,13 @@ bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
 // readers who remember to take it, and the third reader here was added by the
 // same session that found the bug.
 //
-// PER-FIELD, never per-byte. Because those readers are lock-free, the WIDTH of
-// these stores is an ABI with them, not an implementation detail. The byte loop
-// this replaced was measured, not assumed, to compile to 2-byte `sturh` under
-// the kernel's own flags -- `-ffreestanding -fno-builtin` is exactly what stops
-// LoopIdiomRecognize forming a memset, leaving an unroll-by-2. Each 8-byte
-// `handler` was therefore written as four independent halfword stores, so a
-// concurrent reader could observe a handler value NO CODE EVER WROTE (half old
-// address, half zero) and pass the `> VIV_SIG_IGN` gate on it. A struct
-// assignment gives `stp` of X registers: single-copy-atomic per 8-byte field,
-// which is the granule every accessor actually reads.
+// PER-FIELD, never per-byte, and the width is a CONSTRUCTION (the access
+// discipline above; main#243 F6): each field is one __atomic_store_n on an
+// aligned u64, `handler` first. Because the readers are lock-free, that width
+// is an ABI with them, not an implementation detail -- the byte loop this
+// replaced was measured to compile to `sturh` halves under the kernel's flags,
+// and the struct assignment that replaced THAT gave the right `stp` only
+// because the compiler happened to emit it.
 //
 // What this does NOT promise, deliberately: a reader still sees an arbitrary
 // MIX of pre- and post-reset entries. That is the POSIX exec-vs-signal race and
@@ -1902,11 +1951,8 @@ bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
 // default. The guarantee is per-field integrity, not a snapshot.
 void viv_sigtab_reset(struct viv_sigtab *tab) {
     if (!tab) return;
-    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) {
-        struct viv_ksigaction dfl = { .handler = VIV_SIG_DFL, .flags = 0,
-                                      .restorer = 0, .mask = 0 };
-        tab->act[i] = dfl;
-    }
+    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++)
+        sigact_st_default(&tab->act[i]);
     // Publish the zeroing rather than leaving it to whatever lock the caller
     // happens to take next. Free on this path, and it removes a question a
     // future reader would otherwise have to re-answer.
@@ -1924,10 +1970,9 @@ void viv_sigtab_reset_caught(struct viv_sigtab *tab) {
     if (!tab) return;
     for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) {
         struct viv_ksigaction *a = &tab->act[i];
-        if (a->handler == VIV_SIG_DFL || a->handler == VIV_SIG_IGN) continue;
-        struct viv_ksigaction dfl = { .handler = VIV_SIG_DFL, .flags = 0,
-                                      .restorer = 0, .mask = 0 };
-        *a = dfl;
+        u64 h = sigact_ld_handler(a);
+        if (h == VIV_SIG_DFL || h == VIV_SIG_IGN) continue;
+        sigact_st_default(a);
     }
     __atomic_thread_fence(__ATOMIC_RELEASE);
 }

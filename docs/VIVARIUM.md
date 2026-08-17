@@ -614,7 +614,14 @@ shape: a load-bearing sentence must name the mechanism that is *actually*
 holding, or nobody can re-check it when that mechanism moves.)
 (V-6c left the opposite claim on `sigtab` — that byte-sized entries could not tear
 — which was true at V-6b and false once entries widened to 32 bytes; corrected in
-the same commit as this section, task #97.)
+the same commit as this section, task #97. And the intra-Proc argument above was
+never the whole of it: `sigtab` is read lock-free from OTHER Procs' CPUs too —
+`notes_post`'s SIG_IGN hook, `notes_proc_has_live_handler`, the `^Z` fan — which
+is the axis aux#254 / main#243 added; that half rests on the table never being
+freed while reachable and on every field being accessed as one atomic u64 with
+`handler` published last on install and zeroed first on reset — `kernel/vivarium.c`,
+"the access discipline". Widening the clone domain re-opens only the intra-Proc
+half; the cross-Proc half does not care how many threads the Proc has.)
 
 #### 5.5.3 The server path — `bind` remembered, `listen` spent, `accept` walked
 

@@ -818,6 +818,10 @@ _Static_assert(sizeof(struct viv_ksigaction) == VIV_KSIGACTION_SIZE,
 _Static_assert(__builtin_offsetof(struct viv_ksigaction, flags)    == VIV_KSIGACTION_OFF_FLAGS,    "flags @8");
 _Static_assert(__builtin_offsetof(struct viv_ksigaction, restorer) == VIV_KSIGACTION_OFF_RESTORER, "restorer @16");
 _Static_assert(__builtin_offsetof(struct viv_ksigaction, mask)     == VIV_KSIGACTION_OFF_MASK,     "mask @24");
+// The lock-free per-field access discipline (vivarium.c) is single-copy-atomic
+// only on naturally aligned u64s: pin the alignment the argument stands on.
+_Static_assert(_Alignof(struct viv_ksigaction) == 8 && sizeof(u64) == 8,
+               "sigtab fields must be naturally aligned 8-byte words");
 
 // Which note carries a given Linux signal. PURE.
 //
@@ -935,9 +939,13 @@ bool viv_signote_default_is_ignore(enum viv_signote note);
 bool viv_signote_default_is_terminate(enum viv_signote note);
 
 // Per-Proc signal disposition. Lazily allocated on a Proc's first translatable
-// `rt_sigaction`; freed at proc_free. NOT inherited across rfork -- the
-// `handler_va` precedent (notes.h F13), and the POSIX-exec rule agrees for
-// handlers. SIG_IGN's survival across exec is a stated fidelity gap (§9).
+// `rt_sigaction`; freed ONLY at proc_free (reset in place at exec -- #254).
+// Across process creation the rule is POSIX's, phenotype-conditional (ARCH 7.6,
+// operator-voted 2026-08-17): fork COPIES the table into the child's OWN
+// allocation (viv_sigtab_clone_into), exec resets the CAUGHT rows and KEEPS
+// SIG_IGN (viv_sigtab_reset_caught); a native Proc clears everything. (This
+// paragraph said "NOT inherited across rfork" and called SIG_IGN's survival a
+// "stated fidelity gap (section 9)" -- both false since d3a11c8e.)
 //
 // Indexed by `enum viv_signote`, NOT by signal number -- legitimate ONLY
 // because `viv_signal_owns_note_exclusively` gates every write, so each live

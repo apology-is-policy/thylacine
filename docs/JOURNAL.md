@@ -21,6 +21,84 @@ needed the operator.
   defect closed is written as a half.
 
 ---
+
+## 2026-08-17 — the aux-2 merge: two tracks fixed one UAF, and 23 conflicts said which one to keep
+
+Resumed from the self-compaction at `a9a4a4fe` (Warp-C closed). The note said
+"merge aux-2 first", and the reason it was first is the interesting part: the
+main#243 Fable round had found a P1 (exec leaves `in_handler` set) plus two P2s,
+and every one of them was ALREADY FIXED on aux-2 — aux had found the same UAF
+(`#254`) the same week, from the other direction. Two independent proofs of the
+same defect are worth more than one; two independent FIXES of it are a merge
+conflict, and the conflict is where the decision lives.
+
+### The merge itself (`8a58112d`)
+
+104 aux commits over the common base `72ab319d`; 216 main commits the other
+way; 23 conflicted files. The rule for every conflict was "which side's version
+is the RATIFIED one", not "which is mine":
+
+- **The sigtab UAF, twice.** main `a41fc9eb` reset the table in place through a
+  public `proc_exec_reset_dispositions`; aux `c2a09473` + `8690cfb3` + `d3a11c8e`
+  did the same through a static `proc_exec_drop_image_state` that ALSO clears
+  the in-handler latch (#247 = main F1) and applies the operator-voted
+  phenotype rule (F4). Aux's is the superset and is kept as THE one place; main's
+  function is gone. What main had that aux did not was the per-8-byte-FIELD
+  paragraph and an every-byte-zero test — folded into aux's comment, and the test
+  ported onto aux's `_for_test` hook rather than deleted, because it asserts a
+  property aux's test does not (a reset that stops early passes aux's).
+- **`cons.c`'s mode write.** main's side was a COMMENT change (#233: login must
+  set the mode before the prompt); aux's was a semantics change ratified in
+  PTY-DESIGN and audited (a write clearing ICANON DELIVERS the pending line).
+  Aux's code, plus main's corollary — the disclosure half of #233's race exists
+  under either semantics, so the sentence still binds.
+- **The bin lists** (`tools/build.sh`, `usr/Cargo.toml`): the union, verified
+  programmatically against the base — no member dropped by either side.
+- **AUDIT-TRIGGERS.md** was an add/add (both trees created it from CLAUDE.md's
+  table on the same day and each appended rows): resolved ROW BY ROW against the
+  base row, so main's vault-#170 path fixes and pipe escapes and aux's addenda
+  both survive; the LS-8 row carries both sides' addenda in order.
+- **147-execve.md's sigtab row** was stale on BOTH sides (main said "zeroed in
+  place", aux said "zeroing is exact POSIX because SIG_DFL == 0" — aux's own later
+  commit had made the reset phenotype-conditional). Rewritten to the MERGED rule
+  rather than picking a stale side; the note-mask and in-handler rows added.
+- **Seven ragged doc rows** (six pre-existing on both tips, one in aux's newest
+  addendum) escaped with the two controls `85c1ee9c` used: the checker to zero,
+  and de-escaped-line == original with only the named lines differing.
+
+**One thing the resume note did not say and the build did:** aux's DISTRO gates
+are pool-resident and SOFT-SKIP without the Alpine tarball, which main's cache
+did not have. A green `tools/test.sh` with two skipped arc gates is a gate not
+run — so the fixtures were copied from aux's cache and the pool + ramfs re-baked
+PAIRED (`PRESERVE=0`, fresh key both sides). `arc gates: 2/2 ran -- L-6c=PASS
+D-5=PASS` on the merged tree; suite 1424/1424; clade 3/3.
+
+### The main#243 residuals, on the merged tree (F2/F5/F6/F7/F8)
+
+The round's F6 was the sharpest: the 8-byte store width that the whole lock-free
+argument rests on was a MEASURED codegen property (a struct assignment happened
+to give `stp`), not a construction. It is a construction now — every entry field
+is one `__atomic_*` op on an aligned u64 (`_Static_assert`ed), the install
+publishes `handler` last with release and readers acquire it, the reset zeroes
+`handler` first; objdump shows `str xzr` per field and `stlr`/`ldar` on the
+gate. F2 wrote the load-bearing sentence AT `notes_proc_has_live_handler`
+("a cross-Proc reader that acts on `handler` alone; the copy is discarded"),
+which is the sentence the three earlier statements of the argument had each
+left implicit. F5's discrimination was checked the only way that counts: two
+sabotages (a reset one entry short; the gate field only) each went RED on the
+named assertions, and the tree was reverted with text replacement, not
+`git checkout`. F8 clears `clear_child_tid` at exec beside `in_handler`. F7
+retired four stale sentences (three of them "X is not a table row" claims that
+the LINEAGE arc had falsified without anything failing).
+
+### Meanwhile
+
+The C-0d Fable re-prosecution — the #240 detector's first read from a
+different lineage after three Opus rounds — was spawned under the standing
+permission while the merge built; its verdict is the next entry's business.
+
+---
+
 > **Two tracks, one thread.** Entries marked `(aux)` were written on `aux-2`
 > and merged into this file when aux-2 merged into main (2026-08-17); the two
 > tracks ran concurrently, so a main run entry and the aux entries beside it

@@ -815,7 +815,12 @@ struct Proc {
     //   freed only at proc_free where the Proc itself is gone (#254; exec used
     //   to free it here, which was a use-after-free read) -- and because the
     //   VALUE a racing reader observes is covered by the POSIX latitude stated
-    //   at the end of this comment.
+    //   at the end of this comment, at the granularity of one FIELD: every
+    //   entry field is accessed as one atomic u64 (`handler` published last
+    //   on install, zeroed first on reset -- vivarium.c, "the access
+    //   discipline"), so a reader sees a word some writer stored, never a
+    //   torn one; entry-to-entry consistency is NOT promised, and every
+    //   cross-Proc reader acts on `handler` alone (main#243 F2/F6).
     //
     // Read the cross-Proc half before adding a reader, and do not narrow this
     // back to a claim about threads: the reader set has grown three times.

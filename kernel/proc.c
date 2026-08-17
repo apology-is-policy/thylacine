@@ -3211,6 +3211,13 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self) {
     // invariant notes_noted_restore states when it deliberately leaves the name
     // buffer intact), so they need no separate scrub.
     self->in_handler = false;
+
+    // main#243 F8: the set_tid_address slot names a VA in the OLD image. Linux
+    // clears it in mm_release at exec; left alone, a new image that never calls
+    // set_tid_address (a native image, or anything not musl-shaped) would get a
+    // 4-byte zero stored at exit into whatever it mapped at that VA -- bounds-
+    // checked, so contained, but a write the image never asked for.
+    self->clear_child_tid = 0;
 }
 
 // Test hook (the *_for_test convention; deliberately absent from the header --

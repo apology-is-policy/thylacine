@@ -536,9 +536,11 @@ field the guest reads 8 bytes out of place. The numbers were re-taken under
 The kernel writes the first **600** bytes plus an 8-byte `_aarch64_ctx`
 terminator, and leaves the rest of `__reserved` alone. That is not a shortcut:
 the region is the guest's own stack below its own sp, so nothing crosses a
-boundary, and an EMPTY record chain is the truthful report -- note delivery does
-not save Q0-Q31 (task #96), so an FPSIMD record would claim state that is not
-there.
+boundary, and an EMPTY record chain is the truthful report of what the GUEST
+may edit: since task #96 the kernel saves Q0-Q31 + FPSR/FPCR itself at delivery
+(`fp_save_area` into `note_saved_fp`) and restores that copy at `rt_sigreturn`,
+so a frame-side FPSIMD record would be a copy the guest could edit to no effect
+-- a record that claims an authority it does not have.
 
 **Three deliberate delivery behaviours beyond "call the handler".** A `SIG_IGN`
 disposition drops a note that was already queued when the disposition changed
@@ -606,9 +608,11 @@ stop consumer with a SIGTSTP handler (declines; takes it once the row is
 `SIG_DFL` again), and the native control with the same table (names the
 interrupt -- the phenotype is the gate, not the table).
 
-**Proving it in-guest needed the one signal a v1.0 guest can raise.** `kill`,
-`tkill` and `clone` are not table rows, so a Linux guest can signal neither
-another Proc nor itself through the obvious route -- and cannot spawn a thread
+**Proving it in-guest needed the one signal a v1.0 guest can raise.** `kill`
+and `tkill` are not table rows, so a Linux guest can signal neither another
+Proc nor itself through the obvious route -- and `clone` IS a row (LINEAGE
+L-3d, the fork shape only: `vivarium_clone_decide` admits no CLONE_THREAD
+word), so it still cannot spawn a thread
 to race its own disposition table either. **What makes the lock-free
 `viv_sigtab` sound is stated below rather than by that narrowness** -- this
 sentence used to claim "the only cross-thread reader is `notes_post`'s `SIG_IGN`
@@ -1434,9 +1438,13 @@ POSIX fork(2) inherits both, and execve(2) is the different rule again (reset
 caught, preserve ignored), so process creation needs two behaviours here rather
 than one.
 
-Unreachable rather than untested: no clone/fork/execve number is a table row, so
-a PHENO_LINUX Proc cannot create another Proc at all. Task #93 is what makes it
-reachable and where the copy belongs. Pinned in a comment beside the line whose
+(This paragraph said "no clone/fork/execve number is a table row, so a
+PHENO_LINUX Proc cannot create another Proc at all" and pointed at task #93.
+Both landed: `clone` (fork shape, L-3d) and `execve` (L-6a) are rows, and the
+copy exists -- `viv_sigtab_clone_into` at fork, `viv_sigtab_reset_caught` at
+exec, the POSIX rule voted 2026-08-17; `vivarium.sigtab_fork_exec_rule` is the
+test.) The rest of this note is kept as the record of the reasoning that
+opened the gap. Pinned in a comment beside the line whose
 own reasoning opens the gap -- the same single-threadedness notes.c leans on for
 its sigtab tearing argument.
 

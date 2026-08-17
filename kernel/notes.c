@@ -368,13 +368,24 @@ u32 notes_name_terminate_latch_for_test(const char *name) {
 // faulting copy-out) leave the note queued AND the latch armed, and every
 // EL0-return tail retries and fails identically. The guest then spins at 100%
 // forever: it never runs its handler, never blocks, and never terminates.
+//
+// THIS IS A CROSS-Proc READER, AND IT ACTS ON `handler` ALONE (main#243 F2 --
+// the load-bearing sentence, written where it bears the load). `p` is an
+// arbitrary Proc -- notes_post's terminate latch and the ^Z fan reach here from
+// another Proc's CPU -- and its sigtab may be mid-RESET on p's own thread (an
+// exec) with no lock between us. vivarium.c's access discipline makes every
+// field single-copy-atomic and zeroes `handler` FIRST, so the only inconsistent
+// entry this can observe is {old live handler, fields already zero}. That is
+// harmless HERE because the copy is discarded: the answer is "is there a live
+// handler", not "what is it". A future cross-Proc reader that CONSUMES the
+// copied fields (delivers, composes a mask) does not inherit this argument.
 static bool notes_proc_has_live_handler(struct Proc *p, const char *name) {
     if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0) return true;
     if (p->phenotype != PHENO_LINUX) return false;
 
     const struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
     if (!tab) return false;                 // all-SIG_DFL: genuinely uncaught
-    struct viv_ksigaction act;
+    struct viv_ksigaction act;              // discarded -- see above
     return viv_sigtab_note_handler(tab, viv_signote_from_note_name(name), &act);
 }
 

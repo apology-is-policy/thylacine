@@ -1925,13 +1925,22 @@ void test_proc_exec_reset_dispositions(void) {
     TEST_ASSERT(tab != NULL, "kzalloc sigtab");
 
     // Seed BOTH non-default kinds the accessors distinguish: an explicit
-    // SIG_IGN and a real handler address.
+    // SIG_IGN and a real handler address -- with ALL FOUR fields non-zero on
+    // the handler rows and the LAST entry seeded too (main#243 F5): the seeds
+    // used to leave flags/mask zero and stop at entry 9 of 14, so a reset that
+    // zeroed handler+restorer only, or iterated 0..9, passed the every-byte
+    // assertion below.
     struct viv_ksigaction ign = { .handler = VIV_SIG_IGN, .flags = 0,
                                   .restorer = 0, .mask = 0 };
-    struct viv_ksigaction hnd = { .handler = 0x400000, .flags = 0,
-                                  .restorer = 0x400100, .mask = 0 };
+    struct viv_ksigaction hnd = { .handler = 0x400000, .flags = 0x14000000ull,
+                                  .restorer = 0x400100, .mask = 0x2ull };
+    struct viv_ksigaction lst = { .handler = 0x400200, .flags = 0x10000000ull,
+                                  .restorer = 0x400300, .mask = 0x4ull };
+    _Static_assert(VIV_SIGNOTE_TTY_CONT + 1u == VIV_SIGNOTE_COUNT,
+                   "the last-entry seed must sit at COUNT-1");
     TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &ign), "seed IGN");
     TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_TTY_HUP, &hnd), "seed handler");
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_TTY_CONT, &lst), "seed COUNT-1");
     p->sigtab     = tab;
     p->handler_va = 0x400000ull;
 
@@ -1942,6 +1951,12 @@ void test_proc_exec_reset_dispositions(void) {
                 "pre: interrupt really is ignored");
     TEST_ASSERT(viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_HUP, &got),
                 "pre: tty_hup really has a handler");
+    TEST_ASSERT(got.flags == 0x14000000ull && got.restorer == 0x400100ull &&
+                got.mask == 0x2ull,
+                "pre: the accessor hands back the fields installed WITH the "
+                "handler (the install publishes handler last)");
+    TEST_ASSERT(viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_CONT, &got),
+                "pre: the last entry really has a handler");
 
     // Driven through the exec path's extracted note-side helper (see
     // test_proc_exec_drops_image_note_state for why the helper and not
@@ -1951,8 +1966,12 @@ void test_proc_exec_reset_dispositions(void) {
     static struct Thread rd_th;         // BSS-zeroed
     rd_th.magic = THREAD_MAGIC;
     rd_th.proc  = p;
+    rd_th.clear_child_tid = 0x7000A000ull;      // main#243 F8: an OLD-image VA
+    TEST_ASSERT(rd_th.clear_child_tid != 0, "pre: set_tid_address slot armed");
     proc_exec_drop_image_state_for_test(p, &rd_th);
     rd_th.proc  = NULL;                 // the static outlives proc_free
+    TEST_ASSERT(rd_th.clear_child_tid == 0,
+                "exec must forget the old image's set_tid_address slot (F8)");
 
     // The memory-safety assertion -- the point of the test. Revert-probed:
     // restoring the old `kfree(p->sigtab); p->sigtab = NULL;` fails HERE.
