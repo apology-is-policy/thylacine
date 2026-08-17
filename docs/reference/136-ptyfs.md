@@ -87,7 +87,12 @@ console's ISIG-only boot word is a console posture, not the pts one).
 Write = the tcsetattr-atomic grammar: whitespace tokens, `+name`/`-name` over
 the five flags + `winsize <cols> <rows>` (decimal ≤ 65535); ALL tokens are
 validated before ANY applies — one malformed token rejects the whole write
-with the mode unchanged; a flag apply resets the ICANON assembly (TCSAFLUSH).
+with the mode unchanged; a write that CLEARS ICANON delivers the pending
+canonical line to the slave as raw bytes (`deliver_partial_line`; a short push
+into a full m2s counts under `drop_flush`), any other write leaves the assembly
+alone (PTY-DESIGN "Mode writes deliver, never discard", 2026-08-17 — it used to
+zero the assembly on any flag write, and dropped the head of a type-ahead line
+between a job's last output and ut's PROMPT-mode re-arm; LS-CI `pty-4`).
 A winsize CHANGE raises `TTY_SIG_WINCH` (iff changed — the Linux TIOCSWINSZ
 behavior); the kernel routes `tty:winch` to the fg pgrp. Read = one
 offset-served line: `+icanon +echo +isig +icrnl +onlcr winsize C R\n`
@@ -180,7 +185,10 @@ seam.
   ISIG trio collected + not-a-byte + not-echoed; ECHO-off no-leak; raw+ISIG;
   output ONLCR; line overflow), the ctl battery (render format; atomic
   reject; winsize raise-iff-changed + band/arity rejects; mixed atomic write;
-  TCSAFLUSH; the walk grammar), the teardown algebra (queued-bytes
+  the mode-write delivery legs -- canonical→canonical keeps the fragment,
+  canonical→raw delivers it with the next raw byte in order and no drop
+  counted, raw→canonical prepends nothing; the walk grammar), the teardown
+  algebra (queued-bytes
   drain-then-EOF both directions; the hup edge fires once; slave-close
   silent; the master-read-before-slave park; free-on-last-unref).
 - **The joey 2a-2 probe** (boot-fatal, every boot): the wire data path over

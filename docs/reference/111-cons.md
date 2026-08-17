@@ -249,13 +249,30 @@ stdin `Piped`→`Inherit` + restore `ut`'s mode after) is **LS-7** — the edito
 where the child's mode needs are known; `Repl::console_apply_default` is the
 primitive it builds on.
 
-A consctl write that applies a mode also **discards any half-assembled canonical
-line** (resets `g_cons.line_len` under `g_cons.lock` — the `tcsetattr` TCSAFLUSH
-discipline). So a `canonical → raw → canonical` flip can never strand a fragment
-that then prepends the next line, and the production path matches the test hook
-`cons_test_set_termios` ("a mode flip starts a fresh line"). No v1.0 consumer
-flips mid-line (login flips between completed reads; `ut` at prompt boundaries),
-but the kernel is unambiguous against any consctl writer (LS-8 audit F1).
+A consctl write that **clears ICANON delivers the half-assembled canonical
+line** to the input ring as raw bytes, no newline appended
+(`cons_deliver_partial_line_locked`, under `g_cons.lock`, then the same
+reader/mgr wakes an RX push performs); a write that leaves ICANON as it was
+leaves the assembly alone; a raw→canonical write has nothing pending by
+construction. This is PTY-DESIGN "Mode writes deliver, never discard"
+(2026-08-17): the previous posture zeroed `line_len` on ANY mode write ("a mode
+flip starts a fresh line", the LS-8 audit-F1 remedy — TCSAFLUSH), on the
+premise that no consumer flips mid-line; the pts job-control shell does, around
+every foreground job, and the head of a type-ahead line was cooked-echoed and
+then dropped while its tail ran as a different command (LS-CI `pty-4`, the
+`11173762` probe). Plan 9's `devcons` `rawon` and Linux's `n_tty_set_termios`
+both deliver on this transition and discard on none. The F1 hazard — a fragment
+stranded across `canonical → raw → canonical` and prepending the next line —
+stays closed, because canonical→raw now delivers it. What does not fit the ring
+at that instant is a real drop under its own counter, `rx_drop_modeflush`
+(`/ctl/cons`; a mode write cannot back-pressure, and the #95 rule gives a new
+drop site its own name). The test hook `cons_test_set_termios` carries the same
+rule so the production path and the cooking tests cannot diverge. Regression
+`cons.cook_mode_flip_delivers`: canonical→canonical `+echo` keeps `abc` (Enter
+delivers `abc\n`); canonical→raw `-icanon` delivers `de` at once and `f`
+follows in order; the F1 shape (`gh` → raw → canonical → `ij\n`) yields exactly
+`ij\n`. Every drain is guarded by the non-blocking depth first — `devcons.read`
+parks on an empty ring, and a regression must read as a red line, not a hang.
 
 ## The console winsize + `tty:winch` — #55 (as-built)
 

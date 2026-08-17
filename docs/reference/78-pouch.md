@@ -1486,7 +1486,7 @@ makes the unpatched upper wrappers work:
 | Request | Translation |
 |---|---|
 | `TCGETS` | read `/dev/pts/<n>ctl`, parse the five ± tokens → synthesize `struct termios` (the fixed cc trio `VINTR=^C VQUIT=^\ VSUSP=^Z`, `VERASE=DEL`, `VMIN=1`) |
-| `TCSETS`/`SW`/`SF` | decompose the five honored flags (`ICANON`/`ECHO`/`ISIG`; `ICRNL`; `OPOST`+`ONLCR`) → one atomic ctl mode write (the PTY-2c grammar is TCSAFLUSH-flavored) |
+| `TCSETS`/`SW`/`SF` | decompose the five honored flags (`ICANON`/`ECHO`/`ISIG`; `ICRNL`; `OPOST`+`ONLCR`) → one atomic ctl mode write (the PTY-2c grammar behaves like `TCSANOW` since 2026-08-17: a write clearing ICANON delivers the pending line, nothing is flushed -- `TCSETSF`'s flush half has no spelling; PTY-DESIGN "Mode writes deliver, never discard") |
 | `TIOCGWINSZ` / `TIOCSWINSZ` | the ctl `winsize <cols> <rows>` op (note the col/row order inversion vs `struct winsize`) |
 | `TIOCGPTN` | the fstat qid decode (`PTS_FLAG\|N<<8\|fk`); master-only |
 | `TIOCSPTLCK` | no-op 0 on a master (pts pairs are born unlocked — the mint IS the grant) |

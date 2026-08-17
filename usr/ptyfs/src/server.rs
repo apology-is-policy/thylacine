@@ -649,13 +649,37 @@ impl Ptys {
         }
     }
 
-    /// Set the per-pts termios word (the 2c ctl surface + the selftest). A mode
-    /// change resets the ICANON assembly line (the TCSAFLUSH posture the kernel
-    /// consctl apply carries).
+    /// Deliver the half-assembled canonical line to the slave, as raw bytes,
+    /// no newline appended -- what a mode write that CLEARS ICANON owes the
+    /// reader (PTY-DESIGN "Mode writes deliver, never discard": Plan 9's rawon
+    /// pushes kbd.line to the reader, Linux's n_tty makes the partial line
+    /// readable as-is; the previous posture zeroed it -- TCSAFLUSH -- and
+    /// dropped the head of a type-ahead line, echoed, while its tail ran as a
+    /// different command). A short push into a full m2s is a real drop and is
+    /// counted under the flush counter: it IS the flush site's shape.
+    fn deliver_partial_line(p: &mut Pts) {
+        let len = p.line_len;
+        if len == 0 {
+            return;
+        }
+        let took = Ptys::ring_push(&mut p.m2s, &p.line[..len]);
+        if took < len {
+            note_drop(&mut p.drop_flush, (len - took) as u32, "mode-change flush (m2s full)");
+        }
+        p.line_len = 0;
+    }
+
+    /// Set the per-pts termios word (the 2c ctl surface + the selftest). A
+    /// change that CLEARS ICANON delivers the pending line to the slave; any
+    /// other change leaves the assembly alone (a raw->canonical change has
+    /// nothing pending by construction).
     fn set_tio(&mut self, n: u32, tio: u32) {
         if let Some(p) = self.slot_mut(n) {
+            let was_canon = p.tio & TIO_ICANON != 0;
             p.tio = tio;
-            p.line_len = 0;
+            if was_canon && tio & TIO_ICANON == 0 {
+                Ptys::deliver_partial_line(p);
+            }
         }
     }
 
@@ -690,8 +714,9 @@ impl Ptys {
     /// write with the mode unchanged, the kernel consctl contract). Grammar:
     /// whitespace-separated tokens; "+name"/"-name" over the five LS-8 flags;
     /// "winsize <cols> <rows>" (decimal, <= 65535; canonical -- no leading
-    /// zeros). Ops apply in order; a flag change resets the ICANON assembly
-    /// (TCSAFLUSH). Returns Ok(winsize_changed) -- the caller raises
+    /// zeros). Ops apply in order; a write that CLEARS ICANON delivers the
+    /// pending line to the slave (deliver_partial_line), any other write leaves
+    /// the assembly untouched. Returns Ok(winsize_changed) -- the caller raises
     /// TTY_SIG_WINCH iff the size actually changed (the Linux TIOCSWINSZ
     /// behavior); Err(()) on any malformed token.
     fn ctl_apply(&mut self, n: u32, data: &[u8]) -> Result<bool, ()> {
@@ -751,7 +776,7 @@ impl Ptys {
         }
         // Pass 2: apply in order.
         let p = self.slot_mut(n).ok_or(())?;
-        let mut flags_touched = false;
+        let was_canon = p.tio & TIO_ICANON != 0;
         let mut winch = false;
         for op in ops.iter().take(nops) {
             match *op {
@@ -761,7 +786,6 @@ impl Ptys {
                     } else {
                         p.tio &= !bit;
                     }
-                    flags_touched = true;
                 }
                 CtlOp::Winsize(c, r) => {
                     if (c, r) != (p.winsz_cols, p.winsz_rows) {
@@ -772,8 +796,12 @@ impl Ptys {
                 }
             }
         }
-        if flags_touched {
-            p.line_len = 0; // TCSAFLUSH: a mode change resets the assembly
+        // The one thing a mode write does to the assembly: canonical->raw hands
+        // the reader what was typed. It used to zero line_len on ANY flag write
+        // (TCSAFLUSH) -- and lost the head of every type-ahead line that landed
+        // between a foreground job's last output and ut's PROMPT-mode re-arm.
+        if was_canon && p.tio & TIO_ICANON == 0 {
+            Ptys::deliver_partial_line(p);
         }
         Ok(winch)
     }
@@ -2036,28 +2064,91 @@ pub fn selftest() -> Result<(), &'static str> {
         return Err("ctl-restore");
     }
 
-    // (e) A flag apply resets the assembly (TCSAFLUSH): a half-typed line is
-    // discarded by the mode change; the following NL flushes an EMPTY line.
+    // (e) A mode write DELIVERS the pending line, never discards it (PTY-DESIGN
+    // "Mode writes deliver, never discard"; the TCSAFLUSH posture this leg
+    // used to pin dropped the head of a type-ahead line -- LS-CI pty-4).
+    // (e1) canonical->canonical (+echo, ICANON untouched) leaves "zz" assembled:
+    // the following NL flushes "zz\n", not an empty line.
     if ptys.master_write(n, b"zz") != 2 {
-        return Err("tcsaflush-type");
+        return Err("modeflush-type");
     }
     match ptys.master_read(n, &mut buf) {
         RecvOutcome::Data(2) => {} // drain the "zz" echo
-        _ => return Err("tcsaflush-echo"),
+        _ => return Err("modeflush-echo"),
     }
     if ptys.ctl_apply(n, b"+icanon").is_err() {
-        return Err("tcsaflush-apply");
-    }
-    if ptys.master_write(n, b"\n") != 1 {
-        return Err("tcsaflush-nl");
+        return Err("modeflush-apply-canon");
     }
     match ptys.slave_read(n, &mut buf) {
-        RecvOutcome::Data(1) if buf[0] == b'\n' => {} // just the NL: "zz" gone
-        _ => return Err("tcsaflush-reset"),
+        RecvOutcome::WouldBlock => {} // still assembling: NOTHING delivered yet
+        _ => return Err("modeflush-canon-leaked"),
+    }
+    if ptys.master_write(n, b"\n") != 1 {
+        return Err("modeflush-nl");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(3) if &buf[..3] == b"zz\n" => {} // the WHOLE line
+        _ => return Err("modeflush-canon-kept"),
     }
     match ptys.master_read(n, &mut buf) {
         RecvOutcome::Data(2) if &buf[..2] == b"\r\n" => {}
-        _ => return Err("tcsaflush-nl-echo"),
+        _ => return Err("modeflush-nl-echo"),
+    }
+    // (e2) canonical->raw (-icanon) DELIVERS the pending "yy" to the slave at
+    // once, as raw bytes, no newline appended -- the type-ahead case: the head
+    // of the next line, typed while the previous job's cooked mode was still
+    // on, reaches the raw editor instead of vanishing.
+    if ptys.master_write(n, b"yy") != 2 {
+        return Err("modeflush-type2");
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(2) => {} // drain the "yy" echo
+        _ => return Err("modeflush-echo2"),
+    }
+    let (df0, _, _) = ptys.drops(n);
+    if ptys.ctl_apply(n, b"-icanon").is_err() {
+        return Err("modeflush-apply-raw");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(2) if &buf[..2] == b"yy" => {} // delivered, no NL
+        _ => return Err("modeflush-raw-delivered"),
+    }
+    let (df1, _, _) = ptys.drops(n);
+    if df1 != df0 {
+        return Err("modeflush-counted-a-drop"); // it fit; nothing was lost
+    }
+    // ...and the next raw byte follows in order, after the delivered fragment.
+    if ptys.master_write(n, b"q") != 1 {
+        return Err("modeflush-raw-type");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(1) if buf[0] == b'q' => {}
+        _ => return Err("modeflush-raw-order"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(1) if buf[0] == b'q' => {} // raw echo of q
+        _ => return Err("modeflush-raw-echo"),
+    }
+    // (e3) raw->canonical (+icanon) has nothing pending: nothing is delivered
+    // and nothing prepends the next line -- the LS-8b F1 hazard, closed by
+    // delivery rather than by discard: type "cd\n" and get exactly "cd\n".
+    if ptys.ctl_apply(n, b"+icanon").is_err() {
+        return Err("modeflush-apply-canon2");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::WouldBlock => {}
+        _ => return Err("modeflush-canon2-leaked"),
+    }
+    if ptys.master_write(n, b"cd\n") != 3 {
+        return Err("modeflush-type3");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(3) if &buf[..3] == b"cd\n" => {} // no stranded prefix
+        _ => return Err("modeflush-no-prepend"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(4) if &buf[..4] == b"cd\r\n" => {}
+        _ => return Err("modeflush-echo3"),
     }
 
     // (f) The walk grammar: "<n>ctl" resolves while live; degenerate shapes do

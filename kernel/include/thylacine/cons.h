@@ -237,6 +237,11 @@ bool cons_rx_can_accept(void);
 //                        check authorized it, i.e. #129's room arithmetic
 //                        disagrees with the ring. Non-zero is a kernel bug.
 void cons_rx_counters(u32 *bp_raw, u32 *bp_flush, u32 *drop_line, u32 *drop_ring);
+// The fifth RX-side site: bytes of a half-assembled canonical line that a
+// consctl write clearing ICANON delivered to the ring but the ring could not
+// take (a real drop; a mode write cannot back-pressure). Its own accessor so
+// the four-counter callers are untouched.
+u32 cons_rx_drop_modeflush(void);
 
 // #95: the TX-side loss counts (#75/#126), for the same /ctl/cons surface.
 void cons_tx_drops(u32 *dropped, u32 *room_waits);

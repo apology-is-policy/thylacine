@@ -140,6 +140,13 @@ struct cons_input {
     //                   a diagnostic counter but an invariant WITNESS: it has no
     //                   reachable driver by construction, and that is the claim
     //                   it exists to falsify.
+    //   rx_drop_modeflush -- a consctl write that CLEARS ICANON delivers the
+    //                   half-assembled line[] to the ring (PTY-DESIGN "Mode
+    //                   writes deliver, never discard"); a mode write cannot
+    //                   back-pressure, so what does not fit is a REAL DROP, and
+    //                   the #95 rule gives a new drop site its own counter.
+    //                   Reachable only by a reader wedged with the ring nearly
+    //                   full at the instant of a mode change.
     //
     // Counting is NOT a fix for any of them; it is what makes the next
     // occurrence decidable instead of unexplained.
@@ -147,6 +154,7 @@ struct cons_input {
     u32         rx_bp_flush;
     u32         rx_drop_line;
     u32         rx_drop_ring;
+    u32         rx_drop_modeflush;
 
     // #95: set by any drop site, drained by console_mgr, which emits ONE loud
     // line in process context (the intr/sak/pollwake deferred-relay pattern --
@@ -914,6 +922,26 @@ static void cons_rx_note_drop(u32 *site, bool *wake_mgr) {
     }
 }
 
+// A mode write that CLEARS ICANON hands the reader what was typed: the
+// half-assembled line[] goes to the ring as raw bytes, no newline appended
+// (PTY-DESIGN "Mode writes deliver, never discard" -- Plan 9's rawon pushes
+// kbd.line to the reader; Linux's n_tty makes the partial line readable as-is
+// on the same transition). It used to be zeroed on ANY mode write (the LS-8b
+// F1 remedy, "TCSAFLUSH"), and that dropped the head of a type-ahead line that
+// landed between a foreground job's last output and the shell's raw-mode
+// re-arm -- echoed by the cooked ldisc, then gone, its tail executed as a
+// different command (LS-CI pty-4, 2026-08-17). A mode write cannot refuse the
+// way cons_rx_input's #129 gate does (there is no producer to hold the bytes),
+// so what does not fit is a real drop under its own counter. Caller holds
+// g_cons.lock; the wake flags are the caller's to act on after the unlock.
+static void cons_deliver_partial_line_locked(bool *wake_data, bool *wake_mgr) {
+    for (u32 i = 0; i < g_cons.line_len; i++) {
+        if (cons_ring_push(g_cons.line[i], wake_mgr)) *wake_data = true;
+        else cons_rx_note_drop(&g_cons.rx_drop_modeflush, wake_mgr);
+    }
+    g_cons.line_len = 0u;
+}
+
 bool cons_rx_input(u8 byte, bool is_break) {
     bool wake_data = false, wake_mgr = false;
     bool accepted = true;
@@ -1178,6 +1206,7 @@ void cons_test_reset(void) {
     g_cons.rx_bp_flush = 0u;
     g_cons.rx_drop_line = 0u;
     g_cons.rx_drop_ring = 0u;
+    g_cons.rx_drop_modeflush = 0u;
     cons_dropreport_store(false);
     g_cons.drop_reported = false;
     spin_unlock_irqrestore(&g_cons.lock, s);
@@ -1223,6 +1252,16 @@ void cons_rx_counters(u32 *bp_raw, u32 *bp_flush, u32 *drop_line, u32 *drop_ring
     spin_unlock_irqrestore(&g_cons.lock, s);
 }
 
+// The fifth site, its own accessor so the four-counter callers above stay as
+// they are: bytes of a half-assembled line that a mode write delivered but the
+// ring could not take (see cons_deliver_partial_line_locked).
+u32 cons_rx_drop_modeflush(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 v = g_cons.rx_drop_modeflush;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return v;
+}
+
 bool cons_test_intr_pending(void) {
     return cons_intr_load();
 }
@@ -1250,10 +1289,20 @@ u32 cons_test_termios(void) {
 }
 
 void cons_test_set_termios(u32 v) {
+    // The SAME rule as cons_set_mode_cmd (a canonical->raw flip delivers the
+    // pending line; nothing else touches it), so the hook and the production
+    // path cannot diverge -- the divergence the old "fresh line" reset existed
+    // to prevent, now in the other direction.
+    bool wake_data = false, wake_mgr = false;
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
-    cons_termios_store(v & CONS_TERMIOS_ALL);
-    g_cons.line_len = 0u;                        // a mode flip starts a fresh line
+    u32 cur = cons_termios_load();
+    u32 nxt = v & CONS_TERMIOS_ALL;
+    cons_termios_store(nxt);
+    if ((cur & CONS_ICANON) != 0u && (nxt & CONS_ICANON) == 0u)
+        cons_deliver_partial_line_locked(&wake_data, &wake_mgr);
     spin_unlock_irqrestore(&g_cons.lock, s);
+    if (wake_data) wakeup(&g_cons_data_rendez);
+    if (wake_mgr)  wakeup(&g_cons_mgr_rendez);
 }
 
 void cons_test_echo_capture(bool on) {
@@ -1788,9 +1837,11 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
     if (tokens == 0) return -1;                               // empty command
 
     bool winch = false;                                       // #55 changed?
+    bool wake_data = false, wake_mgr = false;
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
     u32 cur = cons_termios_load();
-    cons_termios_store((cur | set_mask) & ~clear_mask);
+    u32 nxt = (cur | set_mask) & ~clear_mask;
+    cons_termios_store(nxt);
     if (have_ws) {
         // #55: iff-changed (the Linux TIOCSWINSZ / ptyfs semantics). An
         // unchanged rewrite must NOT post -- a repeat-post storm would be a
@@ -1802,16 +1853,25 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
             winch = true;
         }
     }
-    // A mode change starts a FRESH canonical line (the TCSAFLUSH discipline):
-    // discard any half-assembled line[] so a canonical->raw->canonical flip can
-    // never strand a fragment that then prepends the next line. This matches the
-    // test hook (cons_test_set_termios) -- without it the production consctl
-    // path and the test path diverge (the cooking tests would not catch a
-    // fragment-survival regression). No current consumer flips mid-line (login
-    // flips between completed reads; ut at prompt boundaries), but the kernel
-    // must be unambiguous against any consctl writer.
-    g_cons.line_len = 0u;
+    // The one thing a mode write does to the canonical assembly: a write that
+    // CLEARS ICANON delivers the pending line[] to the reader; any other write
+    // leaves it alone, and raw->canonical has nothing pending by construction.
+    // (This used to zero line_len unconditionally -- "a mode change starts a
+    // FRESH canonical line, the TCSAFLUSH discipline" -- on the premise that no
+    // consumer flips mid-line. The pts job-control shell does, around every
+    // foreground job, and the type-ahead head was lost. PTY-DESIGN "Mode writes
+    // deliver, never discard"; the test hook cons_test_set_termios carries the
+    // same rule so the production path and the cooking tests cannot diverge.)
+    if ((cur & CONS_ICANON) != 0u && (nxt & CONS_ICANON) == 0u)
+        cons_deliver_partial_line_locked(&wake_data, &wake_mgr);
     spin_unlock_irqrestore(&g_cons.lock, s);
+
+    // The delivered fragment wakes the reader / the mgr exactly as an RX push
+    // does (cons_rx_input's tail): wakeup() is IRQ-safe and a no-op with no
+    // waiter; the condition was set under g_cons.lock (I-9, the register-then-
+    // observe pairing on the Rendez).
+    if (wake_data) wakeup(&g_cons_data_rendez);
+    if (wake_mgr)  wakeup(&g_cons_mgr_rendez);
 
     // #55: the tty:winch post runs AFTER g_cons.lock drops -- no g_cons.lock
     // -> g_proc_table_lock edge (the 25.4 row's ordering obligation). This is

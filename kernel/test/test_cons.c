@@ -91,7 +91,7 @@ void test_cons_cook_onlcr_output(void);               // LS-8b (output NL -> CR 
 void test_cons_consctl_parse(void);                   // LS-8b (+/-flag parse + malformed)
 void test_cons_consctl_render(void);                  // LS-8b (read-back render)
 void test_cons_cook_line_overflow(void);              // LS-8b (bounded line buffer)
-void test_cons_cook_mode_flip_fresh_line(void);       // LS-8b audit F1 (consctl flip discards the fragment)
+void test_cons_cook_mode_flip_delivers(void);         // PTY-DESIGN: a mode write delivers, never discards
 void test_cons_cook_canonical_poll_edge(void);        // LS-8b audit F2a (whole-line poll edge)
 
 // cons.c test hooks + the extern Dev (read slot ignores the Spoor arg, so the
@@ -1551,36 +1551,103 @@ void test_cons_cook_line_overflow(void) {
     cons_settle_mgr();
 }
 
-// LS-8b audit F1: a consctl mode change starts a FRESH canonical line (the
-// TCSAFLUSH discipline) -- a half-assembled line[] is DISCARDED by any
-// cons_set_mode_cmd write, so a flip can never strand a fragment that then
-// prepends the next line. Drives the PRODUCTION cons_set_mode_cmd (NOT the
-// cons_test_set_termios hook), the path the cooking tests otherwise never take:
-// pre-fix the fragment survived (this delivered "abc\n", n == 4); post-fix only
-// the post-flip line delivers (n == 1).
-void test_cons_cook_mode_flip_fresh_line(void) {
+// PTY-DESIGN "Mode writes deliver, never discard" (2026-08-17; supersedes the
+// LS-8b audit-F1 remedy this test used to pin). A consctl mode write that
+// CLEARS ICANON delivers the half-assembled line[] to the ring as raw bytes; a
+// write that leaves ICANON as it was leaves the assembly alone; raw->canonical
+// has nothing pending. The old posture zeroed line[] on ANY write ("TCSAFLUSH")
+// and lost the head of a type-ahead line that landed between a foreground
+// job's last output and the shell's raw re-arm (LS-CI pty-4: `sle` echoed and
+// dropped, `ep 30` executed). Drives the PRODUCTION cons_set_mode_cmd for each
+// transition; the F1 hazard (a fragment prepending the NEXT line across
+// canonical->raw->canonical) is re-asserted in leg C -- closed by delivery.
+void test_cons_cook_mode_flip_delivers(void) {
     cons_test_reset();
     sched();
     cons_test_set_termios(CONS_ICANON | CONS_ISIG);   // cooked
     cons_test_echo_capture(true);                     // swallow the +echo NL echo (no stray UART byte)
+    u8 a_buf[16] = {0}, b_buf[16] = {0}, b2_buf[16] = {0}, c_buf[16] = {0}, c2_buf[16] = {0};
 
-    // Buffer a partial line (no Enter): "abc" sits in line[], the ring is empty.
+    // OBSERVE FIRST, TEAR DOWN, ASSERT LAST: TEST_ASSERT returns, and this test
+    // arms echo capture + drives the production consctl path, so an assertion
+    // that returned early would leave that state armed for the next test (the
+    // #133 sweep names it "LEAKED-STATE(echo-capture)"). Every drain below is
+    // ALSO gated on the non-blocking depth: devcons.read parks on an empty
+    // ring, and a regression must read as a red line, not a hang.
+
+    // ---- LEG A: canonical->canonical (+echo) KEEPS the fragment. -----------
     cons_rx_input((u8)'a', false);
     cons_rx_input((u8)'b', false);
     cons_rx_input((u8)'c', false);
-
-    // A production consctl write (turns ECHO on + stays canonical) MUST discard
-    // the fragment -- the flip itself is what resets the line, regardless of flags.
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5, true), 5L, "consctl +echo accepted");
-
-    // Deliver: only the bare NL arrives -- the "abc" fragment was discarded by
-    // the mode change (pre-fix it would prepend, delivering "abc\n").
+    long a_rc    = cons_set_mode_cmd("+echo", 5, true);
+    u32  a_mid   = cons_test_rx_count();              // still assembling: 0
     cons_rx_input((u8)'\n', false);
-    u8 buf[8];
-    long n = cons_drain(buf, sizeof(buf));
-    TEST_EXPECT_EQ(n, 1L, "mode flip discarded the fragment: only the NL delivered");
-    TEST_EXPECT_EQ((long)buf[0], (long)'\n', "the delivered byte is the bare NL");
+    u32  a_cnt   = cons_test_rx_count();              // abc + NL: 4
+    long a_n     = (a_cnt > 0u) ? cons_drain(a_buf, sizeof(a_buf)) : -1;
+
+    // ---- LEG B: canonical->raw (-icanon) DELIVERS the fragment at once. ----
+    cons_rx_input((u8)'d', false);
+    cons_rx_input((u8)'e', false);
+    u32  b_pre   = cons_test_rx_count();              // assembling: 0
+    u32  b_mf0   = cons_rx_drop_modeflush();
+    long b_rc    = cons_set_mode_cmd("-icanon", 7, true);
+    u32  b_cnt   = cons_test_rx_count();              // de delivered: 2 (pre-fix 0)
+    long b_n     = (b_cnt > 0u) ? cons_drain(b_buf, sizeof(b_buf)) : -1;
+    u32  b_mf1   = cons_rx_drop_modeflush();
+    cons_rx_input((u8)'f', false);                    // the next raw byte follows
+    u32  b2_cnt  = cons_test_rx_count();
+    long b2_n    = (b2_cnt > 0u) ? cons_drain(b2_buf, sizeof(b2_buf)) : -1;
+
+    // ---- LEG C: the F1 shape -- gh -> raw -> canonical -> ij + NL. --------
+    long c_rc1   = cons_set_mode_cmd("+icanon", 7, true);
+    cons_rx_input((u8)'g', false);
+    cons_rx_input((u8)'h', false);
+    long c_rc2   = cons_set_mode_cmd("-icanon", 7, true);
+    u32  c_cnt   = cons_test_rx_count();              // gh delivered on the flip: 2
+    long c_n     = (c_cnt > 0u) ? cons_drain(c_buf, sizeof(c_buf)) : -1;
+    long c_rc3   = cons_set_mode_cmd("+icanon", 7, true);
+    u32  c_pend  = cons_test_rx_count();              // nothing pending: 0
+    cons_rx_input((u8)'i', false);
+    cons_rx_input((u8)'j', false);
+    cons_rx_input((u8)'\n', false);
+    u32  c2_cnt  = cons_test_rx_count();              // exactly ij + NL: 3
+    long c2_n    = (c2_cnt > 0u) ? cons_drain(c2_buf, sizeof(c2_buf)) : -1;
+
+    // ---- TEARDOWN, unconditionally, before the first assertion. ---------
     cons_settle_mgr();
+
+    // ---- LEG A -----------------------------------------------------------
+    TEST_EXPECT_EQ(a_rc, 5L, "A: consctl +echo accepted");
+    TEST_EXPECT_EQ(a_mid, 0u,
+                   "A: still assembling -- nothing reached the ring on a canonical->canonical write");
+    TEST_EXPECT_EQ(a_cnt, 4u, "A: Enter delivered abc + NL to the ring -- the write did not eat abc");
+    TEST_EXPECT_EQ(a_n, 4L, "A: the WHOLE line drains");
+    TEST_ASSERT(a_buf[0] == 'a' && a_buf[1] == 'b' && a_buf[2] == 'c' && a_buf[3] == '\n',
+                "A: and it is abc + NL");
+
+    // ---- LEG B -----------------------------------------------------------
+    TEST_EXPECT_EQ(b_pre, 0u, "B precondition: de is assembling, ring empty");
+    TEST_EXPECT_EQ(b_rc, 7L, "B: consctl -icanon accepted");
+    TEST_EXPECT_EQ(b_cnt, 2u,
+                   "B: the mode write put de in the ring (pre-fix: 0, the fragment was zeroed)");
+    TEST_EXPECT_EQ(b_n, 2L, "B: the pending de DRAINS -- no newline appended");
+    TEST_ASSERT(b_buf[0] == 'd' && b_buf[1] == 'e', "B: and it is de");
+    TEST_EXPECT_EQ(b_mf1, b_mf0, "B: it fit -- no drop counted");
+    TEST_EXPECT_EQ(b2_cnt, 1u, "B: the next raw byte is in the ring");
+    TEST_EXPECT_EQ(b2_n, 1L, "B: and drains after de");
+    TEST_ASSERT(b2_buf[0] == 'f', "B: and it is f");
+
+    // ---- LEG C -----------------------------------------------------------
+    TEST_EXPECT_EQ(c_rc1, 7L, "C: back to canonical");
+    TEST_EXPECT_EQ(c_rc2, 7L, "C: canonical->raw accepted");
+    TEST_EXPECT_EQ(c_cnt, 2u, "C: gh delivered on the flip");
+    TEST_EXPECT_EQ(c_n, 2L, "C: gh drains");
+    TEST_EXPECT_EQ(c_rc3, 7L, "C: raw->canonical accepted");
+    TEST_EXPECT_EQ(c_pend, 0u, "C: nothing pending after raw->canonical");
+    TEST_EXPECT_EQ(c2_cnt, 3u, "C: exactly ij + NL reached the ring -- no stranded prefix");
+    TEST_EXPECT_EQ(c2_n, 3L, "C: the next line drains whole");
+    TEST_ASSERT(c2_buf[0] == 'i' && c2_buf[1] == 'j' && c2_buf[2] == '\n',
+                "C: and it is ij + NL");
 }
 
 // LS-8b audit F2a: the canonical WHOLE-LINE poll edge. Ordinary chars buffer in

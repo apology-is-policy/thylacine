@@ -680,7 +680,7 @@ void test_cons_winsize_roundtrip(void);          // #55
 void test_cons_winsize_winch_iff_changed(void);  // #55
 void test_cons_stat_native_qid_contract(void);   // #55
 void test_cons_cook_line_overflow(void);         // LS-8b
-void test_cons_cook_mode_flip_fresh_line(void);  // LS-8b audit F1
+void test_cons_cook_mode_flip_delivers(void);    // PTY-DESIGN: mode writes deliver, never discard
 void test_cons_cook_canonical_poll_edge(void);   // LS-8b audit F2a
 void test_cons_drain_tap_mirrors_output(void);       // G-4
 void test_cons_sys_puts_uses_shared_console_path(void);  // #76
@@ -2283,7 +2283,7 @@ struct test_case g_tests[] = {
     { "cons.winsize_winch_iff_changed", test_cons_winsize_winch_iff_changed, false, NULL },
     { "cons.stat_native_qid_contract", test_cons_stat_native_qid_contract, false, NULL },
     { "cons.cook_line_overflow",       test_cons_cook_line_overflow,       false, NULL },
-    { "cons.cook_mode_flip_fresh_line", test_cons_cook_mode_flip_fresh_line, false, NULL },
+    { "cons.cook_mode_flip_delivers", test_cons_cook_mode_flip_delivers, false, NULL },
     { "cons.cook_canonical_poll_edge", test_cons_cook_canonical_poll_edge, false, NULL },
     { "cons.drain_tap_mirrors_output", test_cons_drain_tap_mirrors_output, false, NULL },
     { "cons.sys_puts_uses_shared_console_path", test_cons_sys_puts_uses_shared_console_path, false, NULL },

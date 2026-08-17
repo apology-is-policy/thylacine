@@ -108,6 +108,26 @@ send "\x03"
 sleep 1
 lc_run_expect "echo pty-fg | tr a-z A-Z" "PTY-FG"
 
+# THE TYPE-AHEAD LEG (PTY-DESIGN "Mode writes deliver, never discard",
+# 2026-08-17). A line typed WHILE a foreground job runs is assembled by the
+# COOKED pts (ut hands the job CHILD_MODE) and must survive ut's PROMPT-mode
+# re-arm at the next prompt: the mode write that clears ICANON DELIVERS the
+# pending fragment to the raw editor. This is the exact shape that burned this
+# scenario's retries -- `sleep 30` typed right after PTY-INNER landed as `sle`
+# (cooked-echoed, then DISCARDED by the mode write) + `ep 30` (delivered,
+# executed) -- made DETERMINISTIC: type the line WITHOUT Enter one second into
+# a `sleep 2` (CHILD_MODE is certainly on; the bytes certainly arrive before
+# the sleep exits), wait until the editor HOLDS all 31 chars (its redraw ends
+# with cursor-forward 4 + len = 35 -- unique in this scenario), then Enter.
+# Pre-fix the fragment was zeroed: the cursor never reached 35 and the command
+# never ran (a 30 s timeout here, not a flake). Regression: sabotage-verified.
+lc_send "sleep 2"
+sleep 1
+send "echo type-ahead-ok | tr a-z A-Z"
+lc_expect "\x1b\[35C" "the editor holds the 31-char type-ahead delivered by the mode write"
+send "\r"
+lc_expect "TYPE-AHEAD-OK" "the type-ahead line ran WHOLE (nothing dropped at the head)"
+
 # Leave the inner session: ut exits -> the master drains-then-EOFs -> ptyhost
 # reaps + exits -> the outer ut restores its prompt mode + screen. The outer
 # probe proves the whole unwind.

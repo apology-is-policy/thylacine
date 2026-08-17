@@ -110,3 +110,47 @@ landed at `11173762`: see the next entry, because the probe answered.
 - `>/dev/null` from a Linux shell under viv fails on `O_CREAT` (#201) — the
   most common redirection in existence; the L-6c fixture routes around it.
 - pty-4's burned retry: instrumented, not diagnosed.
+
+## 2026-08-17 (aux) — pty-4's burned retry, diagnosed on the probe's first miss: the ldisc flushed type-ahead
+
+The failure-time probe landed at `11173762` the day before, on the theory that
+INPUT truncation and OUTPUT loss are indistinguishable in a plain capture and
+only the guest can say which. Its first miss (LS-CI batch 6 of the c8ab2744
+close bar) said, in order: `[listen]` — the raw stream showed `sle` as PLAIN
+echoed text after `PTY-INNER`, then only SIX empty editor redraws where the
+passing attempt shows NINE (`sleep 30\r`); `[jobs]` — nothing listed;
+`[channel alive?]` — the editor answered; VM alive, bridge alive. The editor
+never echoes typed text (the harness header says so), so plain `sle` can only be
+the pts line discipline echoing in cooked mode.
+
+So: `lc_run_expect` returns the instant `PTY-INNER` is SEEN — before `ut` has
+reaped the pipeline, restored PROMPT_MODE and redrawn — and `lc_send "sleep 30"`
+fires at once. On TCG the window is sometimes wide enough that `s`,`l`,`e` land
+in CHILD_MODE (+icanon +echo): assembled, echoed, then ut writes PROMPT_MODE and
+ptyfs `ctl_apply` does `p.line_len = 0; // TCSAFLUSH: a mode change resets the
+assembly` — the three bytes are gone and `ep 30\r` reaches the raw editor. A
+race, and a real one — but the DEFECT is the guest's: Plan 9's `devcons` `rawon`
+pushes the partial line to the reader ("flush output on rawoff -> rawon", the
+clumsy-hack zero byte), Linux's `n_tty_set_termios` never discards on a canon
+change, and TCSAFLUSH is a caller-chosen flush that bash/readline deliberately
+do NOT use (`TCSADRAIN`). Thylacine's ctl grammar offered no choice: every mode
+write flushed. Type-ahead across a job's end — a paste of two lines, a script
+driving a pts, LS-CI — lost the HEAD of the next line and executed the TAIL.
+
+The posture came from the LS-8b audit's F1 remedy ("a fragment stranded across
+canonical→raw→canonical prepends the next line"), copied per-pts by PTY-2c, on
+the stated premise that "no current consumer flips mid-line". The premise was
+falsified by the one consumer that flips around every foreground job. Both
+ldiscs now DELIVER on ICANON-clear and touch nothing otherwise
+(`c62eb738` scripture, PTY-DESIGN "Mode writes deliver, never discard"; then the
+impl): the F1 hazard stays closed because canonical→raw delivers, so nothing is
+stranded, and I-20's byte conservation now holds across a mode write. A
+delivery into a full ring is a real drop under a new counter
+(`rx_drop_modeflush`, the #95 rule). Not built: an explicit flush verb — pouch's
+`TCSETS/SW/SF` all map to the one write, which now behaves like `TCSANOW`.
+
+Two things worth keeping from this: (1) the instrument earned its keep on its
+FIRST miss, and the reason it could is that it asked the guest in a fixed order
+with a control at the end (`channel alive?`); (2) a "posture" chosen as an audit
+remedy is still a claim about consumers, and consumers change — the sentence
+"no current consumer flips mid-line" was true when written and had no test.

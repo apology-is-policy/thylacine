@@ -478,23 +478,30 @@ static size_t format_cpu(char *buf, size_t cap) {
 //   rx_drop_ring  -- MUST BE ZERO. A ring push failed after the under-lock room
 //                    check authorized it: #129's arithmetic disagrees with the
 //                    ring. This is an invariant witness, not a diagnostic.
+//   rx_drop_modeflush -- a real drop: bytes of a half-assembled line that a
+//                    consctl write clearing ICANON delivered to the ring but the
+//                    ring could not take (a mode write cannot back-pressure).
+//                    Reachable only by a wedged reader at the instant of a mode
+//                    change.
 //   tx_*          -- the output side (#75/#126), unchanged.
 static size_t format_cons(char *buf, size_t cap) {
     u32 rx_bp_raw = 0, rx_bp_flush = 0, rx_drop_line = 0, rx_drop_ring = 0;
     u32 tx_dropped = 0, tx_room_waits = 0;
     cons_rx_counters(&rx_bp_raw, &rx_bp_flush, &rx_drop_line, &rx_drop_ring);
+    u32 rx_drop_modeflush = cons_rx_drop_modeflush();
     cons_tx_drops(&tx_dropped, &tx_room_waits);
 
-    static const char *const labels[6] = {
+    static const char *const labels[7] = {
         "rx_bp_raw:     ", "rx_bp_flush:   ",
         "rx_drop_line:  ", "rx_drop_ring:  ",
+        "rx_drop_modeflush: ",
         "tx_dropped:    ", "tx_room_waits: ",
     };
-    u32 vals[6] = { rx_bp_raw, rx_bp_flush, rx_drop_line, rx_drop_ring,
-                    tx_dropped, tx_room_waits };
+    u32 vals[7] = { rx_bp_raw, rx_bp_flush, rx_drop_line, rx_drop_ring,
+                    rx_drop_modeflush, tx_dropped, tx_room_waits };
 
     size_t off = 0, n;
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 7; i++) {
         n = fmt_str(buf, cap, off, labels[i]);              if (!n) return off; off += n;
         n = fmt_udec(buf, cap, off, (unsigned long)vals[i]); if (!n) return off; off += n;
         n = fmt_str(buf, cap, off, "\n");                   if (!n) return off; off += n;
