@@ -443,6 +443,10 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
 
 **Landed (newest first, 2026-08-17 back to aux#240):**
 
+- `277b02cc` -- the console TX ring pushes UNITS (item 4 below; ARCH 23.5.2
+  UNIT ATOMICITY; closes #79) and `920bbfca` -- the d3a11c8e + 4df51c30 audit
+  close (item 1 below; a fork() from inside a handler carries the handler
+  snapshot). Bar over `277b02cc`: SMP 40/40, LS-CI 33 PASS + 2 SKIP; pushed.
 - `7580c1f7` (+ the ccb597b8 audit close `56b5a412`) -- SIG_IGN discards a PENDING signal at the INSTALL (POSIX
   2.4.3 / Linux `flush_sigqueue_mask`): `notes_discard_name` (mask-blind,
   per-class latch drain, `kill` refused) called by the phenotype `rt_sigaction`
@@ -555,6 +559,27 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    LINEAGE.md:691's dup3 note; fork-per-connection servers are the L-6c
    population. Own chunk: `socktab_clone_into` next to the sigtab clone + a
    probe leg + the VIVARIUM row.
+   **Re-derived 2026-08-17 (`memory/design_socktab_across_images.md`, VOTE
+   OWED -- VIVARIUM 5.5.2 states "not rfork-inherited" as design):** a
+   refcounted ENTRY cannot carry the per-table ctl->data handle swap, so it
+   reproduces Linux no better than a copy; Plan 9 APE's own posture IS a
+   per-process copy, and every fork shape that occurs (accept-then-fork,
+   prefork accept) works under one. Recommend COPY at fork + lift dup3/F_DUPFD
+   to the same alias rule + record the socket OBJECT as the faithful shape.
+   Found alongside, same chunk (both verified in the tree): **(6b) exec leaves a
+   STALE entry** -- `handle_close_on_exec` closes a close-on-exec socket handle
+   without a socktab drop, and `fcntl(F_SETFD, FD_CLOEXEC)` is a served row
+   (musl 1.2.5's `socket(SOCK_CLOEXEC)` fallback issues exactly it), so the
+   exec'd image's next fd-creating call inherits (proto, N) -- the "dial verb
+   to a stranger" class the V-5 header names as the sharpest this table can
+   have (`memory/bug_socktab_stale_entry_at_exec.md`); a bug under every
+   posture, no vote needed. **(6c) the SOCK_NONBLOCK refusal is defeated by
+   musl** -- EINVAL is exactly musl's fallback trigger; it retries without the
+   flag and IGNORES the failing `fcntl(F_SETFL, O_NONBLOCK)` (unserved), so the
+   guest holds a BLOCKING socket it believes non-blocking, the very failure the
+   refusal's comment claims to prevent (`memory/bug_sock_nonblock_refusal_
+   defeated_by_musl.md`; a V-5 design call: a loud non-retried errno vs
+   serving non-blocking /net I/O).
 7. **Handler mask discipline on the phenotype** (`memory/bug_handler_mask_
    discipline_phenotype.md`): sa_mask|sig is never applied while a handler
    runs (N-3's blanket guard stands in), and `notes_noted_restore` does not
@@ -562,6 +587,17 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    Linux restores uc_sigmask). Permissive-direction divergences; one small
    chunk + a probe leg. Also `pty.tla` CookSignal echoes the signal char while
    neither ldisc does -- spec vs impl on one arm, decide at the next PTY touch.
+   VOTE-FREE (POSIX fidelity, permissive direction) -- the next chunk while the
+   #237 / socktab votes are pending.
+8. **R5-F9 under the phenotype -- TO VERIFY** (`memory/bug_r5f9_longjmp_wedge_
+   phenotype_exposure.md`): busybox ash's `raise_interrupt` longjmps OUT of the
+   SIGINT handler when interrupts are enabled (dash lineage; it unmasks all
+   signals first, so the mask is fine), and the kernel-side `in_handler` latch
+   then never clears -- registered v1.x against pouch programs, but the
+   phenotype population is every musl-static shell. One VM experiment settles
+   it (^C at the prompt / inside `read` / inside `wait`, then ^C a job); if
+   real, a P1 for interactive phenotype shells that needs an abandoned-frame
+   rule or a per-thread stack of save blocks (design; vote).
 
 ---
 

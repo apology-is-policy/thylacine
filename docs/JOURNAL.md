@@ -96,7 +96,7 @@ liveness cfgs green, 6 buggy cfgs violate (rc 12/13) — after fixing the runner
 which first "passed" all ten legs in 0 s because `/usr/bin/java` is the macOS
 stub and every rc was 1 for the wrong reason (the buggy legs read as
 violations). Keyed on the exit code AND the `TLC2 Version` banner now. SMP gate
-40/40 (default+UBSan × smp4/smp8, N=10, 0 corruption). LS-CI 34 PASS + 2 SKIP (GL not
+40/40 (default+UBSan × smp4/smp8, N=10, 0 corruption). LS-CI 33 PASS + 2 SKIP (GL not
 baked) — and pty-4 burned a retry AGAIN, this time INTO the failure-time probe
 landed at `11173762`: see the next entry, because the probe answered.
 
@@ -280,7 +280,7 @@ modeflush-drop-not-counted`, boot-fatal.
 
 One run for both (disjoint surfaces): SMP gate 40/40 — default + UBSan ×
 smp4/smp8, N=10, 0 corruption / 0 external-kill / 0 other, in two halves —
-then LS-CI in six batches on TCG: 34 PASS + 2 SKIP (the GL half is not baked
+then LS-CI in six batches on TCG: 33 PASS + 2 SKIP (the GL half is not baked
 into this pool; not a guest result, not coverage). pty-4 passed WITH the new
 armed witness (the pts's cooked echo matched before the cursor-35 anchor — the
 delivery path was exercised, not merely reached). Pushed to both mirrors after
@@ -326,7 +326,7 @@ stale sentences.
 ### The bar over the tip (`d3a11c8e`: F5 + fork/exec + the round close)
 
 SMP gate 40/40 (default + UBSan × smp4/smp8, N=10, 0 corruption / 0
-external-kill / 0 other, two halves); LS-CI 34 PASS + 2 SKIP (GL not baked);
+external-kill / 0 other, two halves); LS-CI 33 PASS + 2 SKIP (GL not baked);
 suite 1408/1408 per commit; sabotages S9/S10 (F5) and S11–S15 (fork/exec)
 each red on the named check — S14/S15 are the WIRING witnesses (the unit test
 cannot see proc.c; the probe legs L223/L226 can, and they went red). Pushed to
@@ -406,3 +406,20 @@ hook and parsed as frames, and every frame must be one producer's unit — with 
 overlap witness so the test says whether the interleave was exercised (it was).
 The other two pin the boundary deterministically on one CPU: room = len-1 moves
 the count by zero and `dropped` by exactly len; room = len lands whole.
+
+### The bar over the tip (`277b02cc`: the round close + the TX-ring unit)
+
+SMP gate 40/40 (default + UBSan × smp4/smp8, N=10, 0 corruption / 0
+external-kill / 0 other, two halves — the kernel byte-changed, so the whole
+matrix re-ran); LS-CI 33 PASS + 2 SKIP (GL not baked; six batches, TCG); suite
+1408/1408 (`920bbfca`) and 1411/1411 (`277b02cc`) per commit; sabotages
+SF1/S16/S17/SP5 (the round close) and S1–S3 (the unit rule) each red on the
+named check. Pushed to both mirrors after the fixup.
+
+A number corrected on the way: three earlier bar stanzas and four status rows
+said "LS-CI 34 PASS + 2 SKIP". Every bar today measured 33 + 2 over the same 35
+scenarios, and so did the two before it; the 34 came from the c8ab2744 close's
+"36 scenarios" — an `ls tools/interactive/*.exp` count that included `lib.exp`
+— minus the two SKIPs. A derived figure propagated as a measured one, six
+times, before a run's own tally was set beside it. The tally is now taken from
+the harness's `==> LS-CI:` lines only.
