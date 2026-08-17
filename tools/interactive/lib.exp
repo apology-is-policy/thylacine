@@ -645,6 +645,20 @@ proc lc_expect {pat phase} {
     }
 }
 
+# The REGEX twin of lc_expect: for anchors whose PROOF is in what precedes the
+# text (e.g. "plain text directly after a CRLF" -- a cooked pts echo -- versus the
+# same text inside an editor redraw, behind a prompt). Same failure discipline.
+proc lc_expect_re {pat phase} {
+    global lc_cmd_timeout timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -re $pat        { lc_step "saw: $phase" }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout         { lc_fail "timeout (${lc_cmd_timeout}s) waiting for regex \[$pat\] during '$phase'" }
+        eof             { lc_fail "unexpected EOF during '$phase'" }
+    }
+}
+
 # Type a command line + Enter (CR -- a raw terminal sends CR; LS-1 made login +
 # the editor accept it).
 proc lc_send {line} {

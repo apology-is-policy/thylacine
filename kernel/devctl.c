@@ -481,8 +481,10 @@ static size_t format_cpu(char *buf, size_t cap) {
 //   rx_drop_modeflush -- a real drop: bytes of a half-assembled line that a
 //                    consctl write clearing ICANON delivered to the ring but the
 //                    ring could not take (a mode write cannot back-pressure).
-//                    Reachable only by a wedged reader at the instant of a mode
-//                    change.
+//                    Reachable by ordinary type-ahead volume: the shell re-arms
+//                    PROMPT_MODE before it drains, so a ring's worth of pasted
+//                    complete lines into a non-reading job plus a trailing
+//                    partial line meets a full ring at the re-arm.
 //   tx_*          -- the output side (#75/#126), unchanged.
 static size_t format_cons(char *buf, size_t cap) {
     u32 rx_bp_raw = 0, rx_bp_flush = 0, rx_drop_line = 0, rx_drop_ring = 0;

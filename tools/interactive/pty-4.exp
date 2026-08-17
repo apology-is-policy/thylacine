@@ -121,9 +121,21 @@ lc_run_expect "echo pty-fg | tr a-z A-Z" "PTY-FG"
 # with cursor-forward 4 + len = 35 -- unique in this scenario), then Enter.
 # Pre-fix the fragment was zeroed: the cursor never reached 35 and the command
 # never ran (a 30 s timeout here, not a flake). Regression: sabotage-verified.
-lc_send "sleep 2"
+#
+# THE ARMED WITNESS (the ccb597b8 round, F8): the cursor-35 anchor proves the
+# 31 chars REACHED the editor, not that the mode-write delivery carried them.
+# If they landed before ut wrote CHILD_MODE (raw, un-echoed, into m2s) or after
+# the PROMPT-mode re-arm, the editor shows them just the same and the leg is
+# green with the delivery path unexercised -- under the OLD posture too. So
+# first require the pts's COOKED ECHO of the line as PLAIN text directly after
+# the accepted line's CRLF: only bytes cooked in CHILD_MODE are echoed there
+# (raw bytes are not echoed at all, and the editor's own redraw shows the text
+# behind the prompt after `\r\x1b[K`, never after a CRLF). A `sleep 4` widens
+# the window the send must land in.
+lc_send "sleep 4"
 sleep 1
 send "echo type-ahead-ok | tr a-z A-Z"
+lc_expect_re {\r\necho type-ahead-ok \| tr a-z A-Z} "the pts COOKED-ECHOED the type-ahead right after the CRLF (CHILD_MODE was on: the delivery path is ARMED)"
 lc_expect "\x1b\[35C" "the editor holds the 31-char type-ahead delivered by the mode write"
 send "\r"
 lc_expect "TYPE-AHEAD-OK" "the type-ahead line ran WHOLE (nothing dropped at the head)"

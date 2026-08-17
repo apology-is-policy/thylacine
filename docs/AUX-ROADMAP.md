@@ -497,20 +497,28 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
 
 **Open, in order:**
 
-1. **AUDIT ROUNDS OWED**: on `ccb597b8` (kernel cons.c + ptyfs; the LS-8 +
-   ptyfs audit rows) -- RUNNING 2026-08-17 with the operator's yes; and on the
-   SIG_IGN install-time discard chunk above (`kernel/notes.c` + the
-   `rt_sigaction` shell; the Notes + VIVARIUM rows) -- ask. Also owed at some
-   point: an explicit flush verb (POSIX TCSAFLUSH / tcflush) -- pouch's
-   TCSETS/SW/SF now all behave like TCSANOW.
-2. **exec RESETS a phenotyped Proc's SIG_IGN rows + blocked mask** -- POSIX/
+1. **AUDIT ROUND OWED** on the SIG_IGN install-time discard chunk
+   (`7580c1f7`: `kernel/notes.c` + the `rt_sigaction` shell; the Notes +
+   VIVARIUM rows) -- ask. (The `ccb597b8` round RAN and CLOSED 2026-08-17:
+   Fable 5, 0/0/2/6, all on the new drop site's witness -- positive controls
+   in both ldiscs, ptyfs's own `drop_modeflush`, the report line names the
+   site, pty-4's leg gained an ARMED witness; `audit_ccb597b8_closed_list.md`.)
+   Also owed at some point: an explicit flush verb (POSIX TCSAFLUSH /
+   tcflush) -- pouch's TCSETS/SW/SF now all behave like TCSANOW.
+2. **F5 of that round -- a scripture VOTE**: an ISIG-consumed INTR/QUIT/SUSP
+   char in canonical mode does NOT flush the pending line; POSIX (NOFLSH
+   clear) and Linux `n_tty` DO, Plan 9 does not. The old unconditional reset
+   masked it; delivery makes it visible (`rm -rf x` typed into a job, then
+   ^C, arrives at the prompt as pre-typed input). Recommend adopting POSIX in
+   BOTH ldiscs as an explicit I-20 disposition (PTY-DESIGN clause + tests).
+3. **exec RESETS a phenotyped Proc's SIG_IGN rows + blocked mask** -- POSIX/
    Linux keep both across `execve` (`nohup`, `sh -c 'cmd &'`, `trap '' INT;
    exec`); `proc_exec_drop_image_state`'s "Zeroing is exact POSIX" is true of
    CAUGHT handlers only. A phenotype-conditional exec rule = a scripture
    decision (ARCH 7.6 names the clear as the native rule): options in
    `memory/bug_exec_resets_sigign_and_mask_phenotype.md`; recommend "phenotype
    keeps SIG_IGN + mask". Signoff, then a small LINEAGE change + a probe leg.
-3. **#237 stays open and is now sharper**: the phenotype answers SIG_DFL
+4. **#237 stays open and is now sharper**: the phenotype answers SIG_DFL
    SIGPIPE for its own Procs; the NATIVE `pipe` note still carries no latch,
    so a native program that writes to a closed pipe with no handler and no fd
    reader keeps a stranded `pipe` note -- a Plan 9 ABI decision (signoff).

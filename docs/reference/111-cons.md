@@ -398,9 +398,15 @@ malformed-batch atomicity), `cons.winsize_winch_iff_changed` (counter: change
   too-small buffer renders nothing.
 - (LS-8b) `cons.cook_line_overflow` — a pathologically long line is bounded (the
   line buffer never overflows past `CONS_LINE_MAX`; ASAN-clean).
-- (LS-8 audit F1) `cons.cook_mode_flip_fresh_line` — drives the **production**
-  `cons_set_mode_cmd`: a buffered fragment is discarded by a mode change, so only
-  the post-flip line delivers (pre-fix it prepended `"abc\n"`).
+- (LS-8 audit F1 → PTY-DESIGN "Mode writes deliver, never discard", 2026-08-17)
+  `cons.cook_mode_flip_delivers` — drives the **production** `cons_set_mode_cmd`
+  in three legs: A canonical→canonical `+echo` KEEPS the assembled `abc` (Enter
+  delivers `abc\n`); B canonical→raw `-icanon` DELIVERS the pending `de` at once,
+  no drop counted, the next raw byte follows in order; C the F1 shape (`gh` →
+  raw → canonical → `ij\n`) yields exactly `ij\n` — the fragment was delivered,
+  not stranded, so nothing prepends. (It replaced `cook_mode_flip_fresh_line`,
+  which pinned the discard this reversed.) The fifth drop site's positive
+  control is legs (d)/(e) of `cons.rx_drop_counters`, below.
 - (LS-8 audit F2a) `cons.cook_canonical_poll_edge` — a multi-byte canonical line
   arms the empty→non-empty poll edge **once** on the Enter flush (the chars buffer
   with the ring empty → no edge while assembling); the deferred mgr walk then makes
@@ -705,8 +711,9 @@ pointing at data loss that did not happen.
 | `rx_bp_flush` | `cons_rx_input`, cooked Enter-flush | the whole `line_len + 1` flush did not fit, so it was refused **as a unit** with the line left intact. Re-offering the terminator after a drain delivers the whole line. |
 | `rx_drop_line` | `cons_rx_input`, line assembly | **a real drop:** a byte past `CONS_LINE_MAX`, un-echoed. Deliberately still a drop -- back-pressuring a fixed-size line buffer would wedge on a user who never presses Enter. |
 | `rx_drop_ring` | `cons_ring_push` after the room check | **must stay zero.** A push failed after the under-lock room check authorized it, i.e. `cons_ring_room()` disagrees with the ring. An invariant *witness*, not a diagnostic: it has no reachable driver by construction, and that is the claim it exists to falsify. |
+| `rx_drop_modeflush` | `cons_deliver_partial_line_locked` (a consctl write clearing ICANON) | **a real drop:** bytes of the half-assembled canonical line that the mode write delivered but the ring could not take. A mode write cannot back-pressure (no producer holds the bytes). Reachable by ordinary type-ahead volume — the shell re-arms PROMPT_MODE before it drains, so a ring's worth of pasted complete lines into a non-reading job plus a trailing partial line meets a full ring at the re-arm — not only by a wedged reader. Note the shape: the fragment's TAIL is lost and the terminator then arrives as a raw byte, so a truncated command RUNS — #95's exact shape, now counted and named. Positive control: `cons.rx_drop_counters` legs (d) (512 filler + 10 pending → 10 counted here, `rx_drop_ring` 0, filler intact) and (e) (507 + 10 → the 5-byte PREFIX delivered in order, 5 counted). |
 
-Read them at `/ctl/cons` (`cons_rx_counters` / `cons_tx_drops`).
+Read them at `/ctl/cons` (`cons_rx_counters` + `cons_rx_drop_modeflush` / `cons_tx_drops`).
 
 ### The one-shot report
 
@@ -717,7 +724,7 @@ relay -- the drop sites run in IRQ context under `g_cons.lock` and must not
 emit themselves):
 
 ```
-cons: INPUT DROP (#95) line=3 ring=0 (bp raw=0 flush=12) -- further drops counted silently at /ctl/cons
+cons: INPUT DROP (#95) line=3 ring=0 modeflush=0 (bp raw=0 flush=12) -- further drops counted silently at /ctl/cons
 ```
 
 **Only a real loss arms the latch (#129).** The two back-pressure counters ride

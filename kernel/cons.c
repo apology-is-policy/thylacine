@@ -145,8 +145,12 @@ struct cons_input {
     //                   writes deliver, never discard"); a mode write cannot
     //                   back-pressure, so what does not fit is a REAL DROP, and
     //                   the #95 rule gives a new drop site its own counter.
-    //                   Reachable only by a reader wedged with the ring nearly
-    //                   full at the instant of a mode change.
+    //                   Reachable by ordinary type-ahead volume, not only a
+    //                   wedged reader: the shell re-arms PROMPT_MODE BEFORE it
+    //                   drains, so a paste of a ring's worth of complete lines
+    //                   into a non-reading foreground job fills the ring by
+    //                   Enter-flushes and the trailing partial line meets a
+    //                   full ring at the re-arm (the ccb597b8 round, F4).
     //
     // Counting is NOT a fix for any of them; it is what makes the next
     // occurrence decidable instead of unexplained.
@@ -1112,6 +1116,7 @@ static void cons_service_deferred(void) {
     // many further drops occur.
     bool do_drop_report = cons_dropreport_load();
     u32  d_line = g_cons.rx_drop_line, d_ring = g_cons.rx_drop_ring;
+    u32  d_mode = g_cons.rx_drop_modeflush;
     u32  b_raw = g_cons.rx_bp_raw, b_flush = g_cons.rx_bp_flush;
     cons_dropreport_store(false);
     if (do_drop_report) g_cons.drop_reported = true;
@@ -1131,11 +1136,16 @@ static void cons_service_deferred(void) {
     // events is disarmed exactly when it matters.) The bp counts ride along in
     // the line as context -- they say how hard the console was pushed when the
     // loss happened -- but they never trigger it.
+    // The site NAME is the decisive datum, so every REAL-loss site is on the
+    // line: a mode-flush drop that printed only line=0 ring=0 would spend the
+    // one-shot latch without naming what fired it (the ccb597b8 round, F3).
     if (do_drop_report) {
         cons_diag_puts("cons: INPUT DROP (#95) line=");
         cons_diag_putdec(d_line);
         cons_diag_puts(" ring=");
         cons_diag_putdec(d_ring);
+        cons_diag_puts(" modeflush=");
+        cons_diag_putdec(d_mode);
         cons_diag_puts(" (bp raw=");
         cons_diag_putdec(b_raw);
         cons_diag_puts(" flush=");

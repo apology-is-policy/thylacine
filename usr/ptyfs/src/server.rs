@@ -313,9 +313,17 @@ struct Pts {
     /// assembly overflow past LINE_MAX; `drop_echo` is the deliberate
     /// best-effort echo drop toward the master (documented at `echo`), counted
     /// separately precisely so it can never be mistaken for the other two.
+    /// `drop_modeflush` is the fourth site (the ccb597b8 round, F2): a ctl
+    /// write clearing ICANON delivers the pending line into m2s, and what a
+    /// full m2s cannot take is a real drop with ITS OWN counter -- folded into
+    /// `drop_flush` it would falsify that counter's meaning (a short cooked
+    /// flush loses the tail AND the newline, so the line never runs; a short
+    /// mode-flush loses the tail and the terminator then arrives raw, so the
+    /// truncated command RUNS -- #95's exact shape).
     drop_flush: u32,
     drop_line: u32,
     drop_echo: u32,
+    drop_modeflush: u32,
 }
 
 /// #95: the loud-report gate + one-shot latch.
@@ -388,6 +396,7 @@ impl Ptys {
             drop_flush: 0,
             drop_line: 0,
             drop_echo: 0,
+            drop_modeflush: 0,
         });
         Some(n)
     }
@@ -630,11 +639,11 @@ impl Ptys {
     /// raises the set members via the pts-scoped SYS_TTY_SIGNAL AFTER the ring
     /// work (the syscall stays out of the pure cook, so the selftest asserts
     /// the set directly -- its local pts has no kernel entry to signal).
-    /// #95: this pts's (flush, line, echo) drop counts. Selftest-only.
-    fn drops(&mut self, n: u32) -> (u32, u32, u32) {
+    /// #95: this pts's (flush, line, echo, modeflush) drop counts. Selftest-only.
+    fn drops(&mut self, n: u32) -> (u32, u32, u32, u32) {
         match self.slot_mut(n) {
-            Some(p) => (p.drop_flush, p.drop_line, p.drop_echo),
-            None => (0, 0, 0),
+            Some(p) => (p.drop_flush, p.drop_line, p.drop_echo, p.drop_modeflush),
+            None => (0, 0, 0, 0),
         }
     }
 
@@ -655,8 +664,10 @@ impl Ptys {
     /// pushes kbd.line to the reader, Linux's n_tty makes the partial line
     /// readable as-is; the previous posture zeroed it -- TCSAFLUSH -- and
     /// dropped the head of a type-ahead line, echoed, while its tail ran as a
-    /// different command). A short push into a full m2s is a real drop and is
-    /// counted under the flush counter: it IS the flush site's shape.
+    /// different command). A short push into a full m2s is a real drop under
+    /// its OWN counter, `drop_modeflush` (PTY-DESIGN: "a mode-change delivery
+    /// into a full ring is a real drop and gets its own counter" -- the #95
+    /// rule; the kernel twin is `rx_drop_modeflush`).
     fn deliver_partial_line(p: &mut Pts) {
         let len = p.line_len;
         if len == 0 {
@@ -664,7 +675,7 @@ impl Ptys {
         }
         let took = Ptys::ring_push(&mut p.m2s, &p.line[..len]);
         if took < len {
-            note_drop(&mut p.drop_flush, (len - took) as u32, "mode-change flush (m2s full)");
+            note_drop(&mut p.drop_modeflush, (len - took) as u32, "mode-change flush (m2s full)");
         }
         p.line_len = 0;
     }
@@ -1817,7 +1828,9 @@ pub fn selftest() -> Result<(), &'static str> {
     }
 
     // ---- The COOKED battery (PTY-2b: the ldisc truth table vs the cons.c
-    // reference). set_tio resets the assembly line (the TCSAFLUSH posture).
+    // reference). Nothing is pending here (the raw battery drained), so this
+    // raw->canonical set_tio touches no assembly (a mode write delivers on
+    // ICANON-clear and otherwise leaves the line alone).
     ptys.set_tio(n, TIO_DEFAULT);
 
     // (1) ICRNL + ICANON flush + ECHO + ONLCR in one stroke: "hi\r" -> the CR
@@ -1992,11 +2005,11 @@ pub fn selftest() -> Result<(), &'static str> {
         // future zero reading meaningless. And it must NOT have reported: the
         // arm gate exists so the selftest's deliberate drop cannot cry wolf, nor
         // spend the one-shot latch that a real drop needs.
-        let (df, dl, de) = ptys.drops(n);
+        let (df, dl, de, dm) = ptys.drops(n);
         if dl != 1 {
             return Err("overflow-not-counted");
         }
-        if df != 0 || de != 0 {
+        if df != 0 || de != 0 || dm != 0 {
             return Err("overflow-miscounted");
         }
         if drop_reported() {
@@ -2105,7 +2118,7 @@ pub fn selftest() -> Result<(), &'static str> {
         RecvOutcome::Data(2) => {} // drain the "yy" echo
         _ => return Err("modeflush-echo2"),
     }
-    let (df0, _, _) = ptys.drops(n);
+    let (_, _, _, dm0) = ptys.drops(n);
     if ptys.ctl_apply(n, b"-icanon").is_err() {
         return Err("modeflush-apply-raw");
     }
@@ -2113,8 +2126,8 @@ pub fn selftest() -> Result<(), &'static str> {
         RecvOutcome::Data(2) if &buf[..2] == b"yy" => {} // delivered, no NL
         _ => return Err("modeflush-raw-delivered"),
     }
-    let (df1, _, _) = ptys.drops(n);
-    if df1 != df0 {
+    let (_, _, _, dm1) = ptys.drops(n);
+    if dm1 != dm0 {
         return Err("modeflush-counted-a-drop"); // it fit; nothing was lost
     }
     // ...and the next raw byte follows in order, after the delivered fragment.
@@ -2181,6 +2194,59 @@ pub fn selftest() -> Result<(), &'static str> {
         ptys.ref_path(make_pts(b, FK_SLAVE));
         if ptys.unref_path(make_pts(b, FK_SLAVE)) != Some(0) {
             return Err("backpressure-free");
+        }
+    }
+
+    // ---- The mode-flush drop site, DRIVEN (the ccb597b8 round, F1/F2), on a
+    // third fresh pts: a canonical->raw ctl write delivering into a FULL m2s
+    // is a real drop, counted under drop_modeflush and under nothing else,
+    // and the report gate holds (the selftest is not armed). Without this
+    // the site's counter had only a negative -- an instrument that cannot be
+    // shown to fire makes a later zero meaningless (the #95 rule).
+    {
+        let c = ptys.mint().ok_or("mint3")? as u32;
+        ptys.open_inc(c, true); // master open: an empty m2s reads WouldBlock, not Eof
+        ptys.set_tio(c, 0); // raw, no echo
+        let fill = alloc::vec![0x5bu8; RING_CAP + 8];
+        // Raw into an empty m2s: back-pressure at RING_CAP -- the ring is now
+        // exactly full and nothing was dropped.
+        if ptys.master_write(c, &fill) != RING_CAP {
+            return Err("modeflush-fill");
+        }
+        ptys.set_tio(c, TIO_ICANON); // raw->canonical: nothing pending
+        if ptys.master_write(c, b"yy") != 2 {
+            return Err("modeflush-full-type"); // assembled in line[], not in the ring
+        }
+        let (df0, dl0, de0, dm0) = ptys.drops(c);
+        ptys.set_tio(c, 0); // canonical->raw: deliver "yy" into a full ring
+        let (df1, dl1, de1, dm1) = ptys.drops(c);
+        if dm1 != dm0 + 2 {
+            return Err("modeflush-drop-not-counted");
+        }
+        if df1 != df0 || dl1 != dl0 || de1 != de0 {
+            return Err("modeflush-drop-miscounted");
+        }
+        if drop_reported() {
+            return Err("modeflush-drop-reported-too-early");
+        }
+        // The ring held exactly the filler: RING_CAP bytes, then WouldBlock --
+        // no delivered byte overwrote anything, none is stranded.
+        let mut dbuf = alloc::vec![0u8; 512];
+        let mut drained = 0usize;
+        loop {
+            match ptys.slave_read(c, &mut dbuf) {
+                RecvOutcome::Data(k) => drained += k,
+                RecvOutcome::WouldBlock => break,
+                RecvOutcome::Eof => return Err("modeflush-drain-eof"),
+            }
+        }
+        if drained != RING_CAP {
+            return Err("modeflush-drain-count");
+        }
+        let _ = ptys.open_dec(c, true);
+        ptys.ref_path(make_pts(c, FK_SLAVE));
+        if ptys.unref_path(make_pts(c, FK_SLAVE)) != Some(0) {
+            return Err("modeflush-free");
         }
     }
 

@@ -708,7 +708,7 @@ diff a/src/misc/ioctl.c b/src/misc/ioctl.c
  }
  
  int ioctl(int fd, int req, ...)
-@@ -132,20 +221,171 @@
+@@ -132,20 +221,173 @@
  	va_start(ap, req);
  	arg = va_arg(ap, void *);
  	va_end(ap);
@@ -761,9 +761,11 @@ diff a/src/misc/ioctl.c b/src/misc/ioctl.c
 +	case TCSETSW:
 +	case TCSETSF: {
 +		/* All three variants collapse onto the atomic ctl mode write
-+		 * (the PTY-2c grammar applies TCSAFLUSH-style: apply-all,
-+		 * reset the cooked assembly line). Drain/flush distinctions
-+		 * are moot on the synchronous rings — see the TCSBRK note. */
++		 * (the PTY-2c grammar: apply-all; a write clearing ICANON
++		 * DELIVERS the pending cooked line, nothing is discarded --
++		 * so all three behave like TCSANOW; there is no flush
++		 * spelling). Drain distinctions are moot on the synchronous
++		 * rings — see the TCSBRK note. */
 +		const struct termios *tio = arg;
 +		if (!tio) { errno = EINVAL; return -1; }
 +		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }

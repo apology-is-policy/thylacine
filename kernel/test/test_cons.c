@@ -642,6 +642,53 @@ void test_cons_rx_drop_counters(void) {
     TEST_EXPECT_EQ(n, 11L, "the whole 10-char line and its newline survived the refusal");
     TEST_EXPECT_EQ((long)cbuf[10], (long)'\n', "terminator last -- nothing was truncated");
 
+    // (d) The fifth site: a mode write clearing ICANON delivers the pending
+    //     line into a FULL ring. A mode write cannot back-pressure (no producer
+    //     holds the bytes), so every byte that does not fit is a real drop under
+    //     rx_drop_modeflush -- and ONLY there: rx_drop_ring must stay zero (the
+    //     #129 witness), the flush/line/raw sites must not move. This is the
+    //     positive control the ccb597b8 round (F1) found missing: without it a
+    //     misattribution to rx_drop_ring, or not counting at all, read green.
+    //     Fill exactly 512 raw (no refusals), switch to ICANON (raw->canonical
+    //     has nothing pending), assemble 10, then -icanon.
+    cons_test_reset();
+    for (u32 i = 0; i < 512u; i++) cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+icanon", 7, true), 7L, "(d) +icanon accepted");
+    for (int i = 0; i < 10; i++) cons_rx_input((u8)('a' + i), false);
+    TEST_EXPECT_EQ(cons_rx_drop_modeflush(), 0u, "(d) nothing counted before the mode write");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("-icanon", 7, true), 7L, "(d) -icanon accepted");
+    TEST_EXPECT_EQ(cons_rx_drop_modeflush(), 10u,
+                   "(d) modeflush counts exactly the 10 bytes the full ring could not take");
+    cons_rx_counters(&bp_raw, &bp_flush, &d_line, &d_ring);
+    TEST_EXPECT_EQ((long)d_ring,   0L, "(d) a mode-flush drop is NOT attributed to rx_drop_ring");
+    TEST_EXPECT_EQ((long)bp_flush, 0L, "(d) nor to the flush site");
+    TEST_EXPECT_EQ((long)d_line,   0L, "(d) nor to the line site");
+    TEST_EXPECT_EQ((long)bp_raw,   0L, "(d) 512 offers into 512 slots refused nothing");
+    n = cons_drain(cbuf, (long)sizeof(cbuf));
+    TEST_EXPECT_EQ(n, 512L, "(d) the ring held exactly the filler -- no delivered byte overwrote it");
+    bool filler_ok = true;
+    for (u32 i = 0; i < 512u; i++)
+        if (cbuf[i] != (u8)(0x80u | (i & 0x7fu))) filler_ok = false;
+    TEST_ASSERT(filler_ok, "(d) the 512 filler bytes are intact and in order");
+
+    // (e) Partial fit: 507 filler + a 10-byte fragment -> the PREFIX (5 bytes)
+    //     is delivered in order, the tail (5) is counted, and the delivered
+    //     bytes follow the filler in the ring.
+    cons_test_reset();
+    for (u32 i = 0; i < 507u; i++) cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+icanon", 7, true), 7L, "(e) +icanon accepted");
+    for (int i = 0; i < 10; i++) cons_rx_input((u8)('a' + i), false);
+    TEST_EXPECT_EQ(cons_set_mode_cmd("-icanon", 7, true), 7L, "(e) -icanon accepted");
+    TEST_EXPECT_EQ(cons_rx_drop_modeflush(), 5u, "(e) the 5 that did not fit are counted");
+    cons_rx_counters(&bp_raw, &bp_flush, &d_line, &d_ring);
+    TEST_EXPECT_EQ((long)d_ring, 0L, "(e) rx_drop_ring untouched");
+    n = cons_drain(cbuf, (long)sizeof(cbuf));
+    TEST_EXPECT_EQ(n, 512L, "(e) 507 filler + 5 delivered = a full ring");
+    bool prefix_delivered = true;
+    for (u32 i = 0; i < 5u; i++)
+        if (cbuf[507u + i] != (u8)('a' + i)) prefix_delivered = false;
+    TEST_ASSERT(prefix_delivered, "(e) the delivered bytes are the fragment's PREFIX, in order, after the filler");
+
     cons_test_reset();
     cons_settle_mgr();
 }
