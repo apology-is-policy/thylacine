@@ -1567,8 +1567,10 @@ The joey boot-fatal probe (the first POSIX `openpty()` program
 Thylacine runs): mint → ptsname → isatty trio → the fresh-pts FULL
 COOKED default → cfmakeraw round-trip → winsize → the session dance
 (`setsid`+`TIOCSCTTY`+`tc[gs]etpgrp`) → a LIVE cooked `^C` (SIGINT
-handler fires; the `0x03` is consumed — the slave line reads `xy\n`,
-the echo carries no `^C`: SignalXorByte through the POSIX view) →
+handler fires; the `0x03` is consumed AND discards the pending `x` — the
+slave line reads `y\n` (POSIX NOFLSH-clear; PTY-DESIGN "ISIG characters
+DISCARD the pending line", 2026-08-17 — it read `xy\n` before), the echo
+carries no `^C`: SignalXorByte through the POSIX view) →
 live WINCH + HUP handlers → the EPERM receive-only gate → `forkpty`
 honest-fail → master close → slave EOF (drain-then-EOF).
 

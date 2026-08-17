@@ -149,7 +149,7 @@ user-voted 2026-06-12) gate the cooking:
 |---|---|---|
 | `CONS_ICANON` | line mode: assemble a line, deliver on Enter, handle erase (BS/DEL) | `cons_rx_input` |
 | `CONS_ECHO` | echo each input byte to output (HARD off-guarantee: the password mask) | `cons_rx_input` |
-| `CONS_ISIG` | Ctrl-C (0x03) → the `interrupt` note (LS-5); off → a `0x03` data byte | `cons_rx_input` |
+| `CONS_ISIG` | Ctrl-C (0x03) → the `interrupt` note (LS-5); off → a `0x03` data byte. In canonical mode the consumed Ctrl-C also DISCARDS the pending assembly (POSIX NOFLSH-clear; PTY-DESIGN "ISIG characters DISCARD the pending line", 2026-08-17) — a disposition like an erase, not a counted drop; the ring (committed lines) and the TX side are never flushed | `cons_rx_input` |
 | `CONS_ICRNL` | input CR (0x0d) → NL (0x0a) | `cons_rx_input` |
 | `CONS_ONLCR` | output (and echoed) NL → CR NL | `cons_output_write` + echo |
 
@@ -389,6 +389,11 @@ malformed-batch atomicity), `cons.winsize_winch_iff_changed` (counter: change
   line echoes **zero** bytes yet still delivers to the reader (the password mask).
 - (LS-8b) `cons.cook_isig_toggle` — ISIG set → Ctrl-C is the note; clear → `0x03`
   is ring data.
+- (PTY-DESIGN F5, 2026-08-17) `cons.cook_isig_discards_pending_line` — canonical
+  `+isig`: `ab` ^C `cd\n` → the ring gets exactly `cd\n`, the interrupt is
+  pending, no drop counter moved; the CONTROL `-isig` (one variable away): the
+  same `0x03` is data and `ab 03 cd NL` (6 bytes) all deliver; a committed
+  `x\n` already in the ring survives a later ^C.
 - (LS-8b) `cons.cook_icrnl` — input CR → NL when set; verbatim when clear.
 - (LS-8b) `cons.cook_onlcr_output` — output NL → CR NL when set; bare LF when
   clear (via the `cons_emit` capture sink).

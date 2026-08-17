@@ -550,6 +550,16 @@ impl Ptys {
                 };
                 if class != 0 {
                     p.sig_set |= sig_class_bit(class); // dedup-on-collect; never overflows
+                    // POSIX NOFLSH-clear: INTR/QUIT/SUSP discard the pending
+                    // canonical assembly (PTY-DESIGN "ISIG characters DISCARD
+                    // the pending line" -- an I-20 disposition like an erase,
+                    // not a counted drop; the ring and s2m are NOT flushed).
+                    // The old mode-write reset masked this: type-ahead + ^C
+                    // was thrown away by the shell's re-arm by accident, and
+                    // delivery made `rm -rf x` + ^C arrive as pre-typed input.
+                    if p.tio & TIO_ICANON != 0 {
+                        p.line_len = 0;
+                    }
                     consumed += 1;
                     continue;
                 }
@@ -2162,6 +2172,87 @@ pub fn selftest() -> Result<(), &'static str> {
     match ptys.master_read(n, &mut buf) {
         RecvOutcome::Data(4) if &buf[..4] == b"cd\r\n" => {}
         _ => return Err("modeflush-echo3"),
+    }
+
+    // (e4) An ISIG character DISCARDS the pending canonical line (PTY-DESIGN,
+    // the ccb597b8 round's F5, operator-voted): "ab", then VINTR, then "cd\n"
+    // -> the slave reads exactly "cd\n"; the INT class was raised; the ^C
+    // itself was neither delivered nor echoed (SignalXorByte); no drop counter
+    // moved (a disposition, not a loss). Then the CONTROL one variable away
+    // (-isig): the same 0x03 is a data byte, buffered, echoed and delivered --
+    // "ab\x03cd\n" -- so the discard is gated on ISIG-consumption, not on
+    // the byte value.
+    if ptys.ctl_apply(n, b"+isig +icanon").is_err() {
+        return Err("isigflush-apply");
+    }
+    let _ = ptys.take_sigs(n); // clear any class collected by earlier legs
+    if ptys.master_write(n, b"ab") != 2 {
+        return Err("isigflush-type");
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(2) if &buf[..2] == b"ab" => {} // drain the echo
+        _ => return Err("isigflush-echo"),
+    }
+    let (df0, dl0, de0, dm0) = ptys.drops(n);
+    if ptys.master_write(n, &[CH_INTR]) != 1 {
+        return Err("isigflush-intr");
+    }
+    if ptys.take_sigs(n) & sig_class_bit(T_TTY_SIG_INT) == 0 {
+        return Err("isigflush-not-raised");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::WouldBlock => {} // the ^C delivered nothing
+        _ => return Err("isigflush-leaked"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::WouldBlock => {} // ...and echoed nothing
+        _ => return Err("isigflush-intr-echoed"),
+    }
+    if ptys.master_write(n, b"cd\n") != 3 {
+        return Err("isigflush-type2");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(3) if &buf[..3] == b"cd\n" => {} // ab was DISCARDED
+        _ => return Err("isigflush-not-discarded"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(4) if &buf[..4] == b"cd\r\n" => {}
+        _ => return Err("isigflush-echo2"),
+    }
+    if ptys.drops(n) != (df0, dl0, de0, dm0) {
+        return Err("isigflush-counted"); // a disposition, never a drop
+    }
+    // The control: ISIG clear, same bytes, nothing lost.
+    if ptys.ctl_apply(n, b"-isig").is_err() {
+        return Err("isigflush-ctl-apply");
+    }
+    if ptys.master_write(n, b"ab") != 2 {
+        return Err("isigflush-ctl-type");
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(2) => {}
+        _ => return Err("isigflush-ctl-echo"),
+    }
+    if ptys.master_write(n, &[CH_INTR]) != 1 {
+        return Err("isigflush-ctl-byte");
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(1) if buf[0] == CH_INTR => {} // echoed as an ordinary byte
+        _ => return Err("isigflush-ctl-byte-echo"),
+    }
+    if ptys.master_write(n, b"cd\n") != 3 {
+        return Err("isigflush-ctl-type2");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(6) if &buf[..6] == b"ab\x03cd\n" => {} // kept, in order
+        _ => return Err("isigflush-ctl-kept"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(4) => {}
+        _ => return Err("isigflush-ctl-echo2"),
+    }
+    if ptys.ctl_apply(n, b"+isig").is_err() {
+        return Err("isigflush-restore");
     }
 
     // (f) The walk grammar: "<n>ctl" resolves while live; degenerate shapes do

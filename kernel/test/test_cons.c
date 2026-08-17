@@ -92,6 +92,7 @@ void test_cons_consctl_parse(void);                   // LS-8b (+/-flag parse + 
 void test_cons_consctl_render(void);                  // LS-8b (read-back render)
 void test_cons_cook_line_overflow(void);              // LS-8b (bounded line buffer)
 void test_cons_cook_mode_flip_delivers(void);         // PTY-DESIGN: a mode write delivers, never discards
+void test_cons_cook_isig_discards_pending_line(void); // PTY-DESIGN: an ISIG char discards the pending line (F5)
 void test_cons_cook_canonical_poll_edge(void);        // LS-8b audit F2a (whole-line poll edge)
 
 // cons.c test hooks + the extern Dev (read slot ignores the Spoor arg, so the
@@ -1608,6 +1609,98 @@ void test_cons_cook_line_overflow(void) {
 // dropped, `ep 30` executed). Drives the PRODUCTION cons_set_mode_cmd for each
 // transition; the F1 hazard (a fragment prepending the NEXT line across
 // canonical->raw->canonical) is re-asserted in leg C -- closed by delivery.
+// PTY-DESIGN "ISIG characters DISCARD the pending line" (the ccb597b8 round's F5,
+// operator-voted 2026-08-17): an ISIG-consumed Ctrl-C in canonical mode
+// discards the pending assembly (POSIX NOFLSH-clear; Linux n_tty flushes) --
+// a disposition like an erase, not a counted drop; committed lines in the ring
+// stay. Three legs, each with the byte value held constant so the discard is
+// shown gated on ISIG-CONSUMPTION, not on 0x03:
+//   A canonical +isig: "ab" ^C "cd\n" -> the ring gets exactly "cd\n"; the
+//     interrupt is pending; no drop counter moved (rx_drop_* all unchanged).
+//   B canonical -isig (the CONTROL, one variable away): 0x03 is a data byte and
+//     is BUFFERED -- "ab" 0x03 "cd\n" -> "ab\x03cd\n" (6 bytes): the same
+//     bytes without ISIG lose nothing.
+//   C a committed line survives: "x\n" (in the ring) then "ab" ^C "y\n" ->
+//     the ring holds "x\n" + "y\n" -- the ^C discarded ONLY the pending
+//     assembly, never the ring.
+// Observe -> tear down -> assert (TEST_ASSERT returns; the drains are guarded
+// by the non-blocking depth so a regression reads red, not as a hang).
+void test_cons_cook_isig_discards_pending_line(void) {
+    cons_test_reset();
+    sched();
+    u8 a_buf[16] = {0}, b_buf[16] = {0}, c_buf[16] = {0};
+    u32 bp_raw0 = 1, bp_flush0 = 1, d_line0 = 1, d_ring0 = 1;
+    u32 bp_raw1 = 0, bp_flush1 = 0, d_line1 = 0, d_ring1 = 0;
+
+    // ---- LEG A: canonical + ISIG: ^C discards "ab". ----------------------
+    cons_test_set_termios(CONS_ICANON | CONS_ISIG);
+    cons_rx_counters(&bp_raw0, &bp_flush0, &d_line0, &d_ring0);
+    u32 mf0 = cons_rx_drop_modeflush();
+    cons_rx_input((u8)'a', false);
+    cons_rx_input((u8)'b', false);
+    cons_rx_input(0x03u, false);                      // ISIG-consumed: discard the assembly
+    bool a_intr = cons_test_intr_pending();
+    u32 a_depth_after_ctrlc = cons_test_rx_count();  // nothing reached the ring yet
+    cons_rx_input((u8)'c', false);
+    cons_rx_input((u8)'d', false);
+    cons_rx_input((u8)'\n', false);
+    u32  a_cnt = cons_test_rx_count();
+    long a_n   = (a_cnt > 0u) ? cons_drain(a_buf, (long)sizeof(a_buf)) : -1;
+    cons_rx_counters(&bp_raw1, &bp_flush1, &d_line1, &d_ring1);
+    u32 mf1 = cons_rx_drop_modeflush();
+
+    // ---- LEG B: the CONTROL -- canonical, ISIG CLEAR: 0x03 is data. -----
+    cons_test_reset();
+    sched();
+    cons_test_set_termios(CONS_ICANON);
+    cons_rx_input((u8)'a', false);
+    cons_rx_input((u8)'b', false);
+    cons_rx_input(0x03u, false);                      // a data byte, buffered
+    cons_rx_input((u8)'c', false);
+    cons_rx_input((u8)'d', false);
+    cons_rx_input((u8)'\n', false);
+    u32  b_cnt = cons_test_rx_count();
+    long b_n   = (b_cnt > 0u) ? cons_drain(b_buf, (long)sizeof(b_buf)) : -1;
+
+    // ---- LEG C: a COMMITTED line in the ring survives the ^C. -----------
+    cons_test_reset();
+    sched();
+    cons_test_set_termios(CONS_ICANON | CONS_ISIG);
+    cons_rx_input((u8)'x', false);
+    cons_rx_input((u8)'\n', false);                   // committed: in the ring
+    cons_rx_input((u8)'a', false);
+    cons_rx_input((u8)'b', false);
+    cons_rx_input(0x03u, false);                      // discards only "ab"
+    cons_rx_input((u8)'y', false);
+    cons_rx_input((u8)'\n', false);
+    u32  c_cnt = cons_test_rx_count();
+    long c_n   = (c_cnt > 0u) ? cons_drain(c_buf, (long)sizeof(c_buf)) : -1;
+
+    // ---- TEAR DOWN, then ASSERT. ------------------------------------------
+    cons_settle_mgr();
+
+    TEST_ASSERT(a_intr, "A: the Ctrl-C was ISIG-consumed (interrupt pending)");
+    TEST_EXPECT_EQ((long)a_depth_after_ctrlc, 0L, "A: nothing reached the ring at the ^C");
+    TEST_EXPECT_EQ((long)a_cnt, 3L, "A: the ring holds exactly cd + NL");
+    TEST_EXPECT_EQ(a_n, 3L, "A: drained 3 bytes");
+    TEST_ASSERT(a_buf[0] == 'c' && a_buf[1] == 'd' && a_buf[2] == '\n',
+                "A: the delivered line is cd + NL -- ab was DISCARDED by the ^C");
+    TEST_ASSERT(bp_raw1 == bp_raw0 && bp_flush1 == bp_flush0 && d_line1 == d_line0
+                && d_ring1 == d_ring0 && mf1 == mf0,
+                "A: a disposition, not a drop -- no counter moved");
+
+    TEST_EXPECT_EQ((long)b_cnt, 6L, "B (control, ISIG clear): 0x03 is data -- ab,03,cd,NL all delivered");
+    TEST_EXPECT_EQ(b_n, 6L, "B: drained 6 bytes");
+    TEST_ASSERT(b_buf[0] == 'a' && b_buf[1] == 'b' && b_buf[2] == 0x03u
+                && b_buf[3] == 'c' && b_buf[4] == 'd' && b_buf[5] == '\n',
+                "B: ab 03 cd NL in order -- the discard is gated on ISIG-consumption, not on the byte");
+
+    TEST_EXPECT_EQ((long)c_cnt, 4L, "C: the committed x+NL and the later y+NL are both in the ring");
+    TEST_EXPECT_EQ(c_n, 4L, "C: drained 4 bytes");
+    TEST_ASSERT(c_buf[0] == 'x' && c_buf[1] == '\n' && c_buf[2] == 'y' && c_buf[3] == '\n',
+                "C: x NL y NL -- the ^C discarded only the pending ab, never the ring");
+}
+
 void test_cons_cook_mode_flip_delivers(void) {
     cons_test_reset();
     sched();

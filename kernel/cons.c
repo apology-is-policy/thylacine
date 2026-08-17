@@ -977,6 +977,16 @@ bool cons_rx_input(u8 byte, bool is_break) {
             // (the LS-5 path). ISIG clear -> 0x03 falls through as a data byte.
             cons_intr_store(true);
             wake_mgr = true;
+            // POSIX NOFLSH-clear: the INTR character discards the pending
+            // canonical assembly (PTY-DESIGN "ISIG characters DISCARD the
+            // pending line", operator-voted 2026-08-17). An I-20 disposition
+            // of those bytes like an erase -- not a drop, not counted; the ring
+            // (lines already committed by Enter) and the TX side are NOT
+            // flushed. The old unconditional mode-write reset masked this by
+            // accident; delivery made type-ahead + ^C arrive at the next prompt
+            // as pre-typed input. Under g_cons.lock with the arm, so a mode
+            // write racing this cannot deliver what the ^C discarded.
+            if (tio & CONS_ICANON) g_cons.line_len = 0u;
         } else if (tio & CONS_ICANON) {
             // Canonical (cooked) mode: assemble a line; deliver it on NL.
             if (byte == 0x7fu || byte == 0x08u) {     // DEL / BS: erase one char

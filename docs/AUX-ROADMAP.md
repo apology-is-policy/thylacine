@@ -505,12 +505,9 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    site, pty-4's leg gained an ARMED witness; `audit_ccb597b8_closed_list.md`.)
    Also owed at some point: an explicit flush verb (POSIX TCSAFLUSH /
    tcflush) -- pouch's TCSETS/SW/SF now all behave like TCSANOW.
-2. **F5 of that round -- a scripture VOTE**: an ISIG-consumed INTR/QUIT/SUSP
-   char in canonical mode does NOT flush the pending line; POSIX (NOFLSH
-   clear) and Linux `n_tty` DO, Plan 9 does not. The old unconditional reset
-   masked it; delivery makes it visible (`rm -rf x` typed into a job, then
-   ^C, arrives at the prompt as pre-typed input). Recommend adopting POSIX in
-   BOTH ldiscs as an explicit I-20 disposition (PTY-DESIGN clause + tests).
+2. ~~F5 vote~~ VOTED + LANDED (POSIX: an ISIG char discards the pending line
+   in both ldiscs; PTY-DESIGN `e69e9baf` + the impl commit; the PTY-3 probe's
+   old `xy\n` expectation went red on the first boot and was updated).
 3. **exec RESETS a phenotyped Proc's SIG_IGN rows + blocked mask** -- POSIX/
    Linux keep both across `execve` (`nohup`, `sh -c 'cmd &'`, `trap '' INT;
    exec`); `proc_exec_drop_image_state`'s "Zeroing is exact POSIX" is true of

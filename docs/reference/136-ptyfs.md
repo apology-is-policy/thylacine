@@ -67,7 +67,10 @@ console's ISIG-only boot word is a console posture, not the pts one).
 - **Input cook** (`master_write`, per byte, the cons.c order): ICRNL first
   (CR→NL) → ISIG (the standard trio: `0x03`→INT, `0x1c`→QUIT, `0x1a`→TSTP —
   the class is collected and the byte CONSUMED: never enqueued, never echoed
-  = `pty.tla` SignalXorByte) → ICANON (erase `\b \b`; NL flushes the line
+  = `pty.tla` SignalXorByte; in canonical mode it also DISCARDS the pending
+  assembly — POSIX NOFLSH-clear, PTY-DESIGN "ISIG characters DISCARD the
+  pending line", 2026-08-17: a disposition, not a counted drop; m2s/s2m are
+  never flushed) → ICANON (erase `\b \b`; NL flushes the line
   INCLUDING its newline; a byte past `LINE_MAX`=256 drops un-echoed) → raw.
 - **Output cook** (`slave_write`): ONLCR NL→CR NL, pair-atomic back-pressure
   (an expansion that doesn't fit stops BEFORE its input byte — a torn pair
@@ -182,7 +185,9 @@ seam.
 - **The in-server selftest** (boot-gated; runs before the post): the ring
   battery (empty/round-trip/FIFO/raw transparency), the full ldisc truth
   table (ICRNL+flush+echo+ONLCR; assembly-holds; erase + empty-erase; the
-  ISIG trio collected + not-a-byte + not-echoed; ECHO-off no-leak; raw+ISIG;
+  ISIG trio collected + not-a-byte + not-echoed; leg (e4) an ISIG char
+  discards the pending line, its `-isig` control keeps the same bytes;
+  ECHO-off no-leak; raw+ISIG;
   output ONLCR; line overflow), the ctl battery (render format; atomic
   reject; winsize raise-iff-changed + band/arity rejects; mixed atomic write;
   the mode-write delivery legs -- canonical→canonical keeps the fragment,
