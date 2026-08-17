@@ -39,8 +39,19 @@
 //                 the in-flight present set is EMPTY at every retire
 //                 decision point: the tapestry_present.tla quiesce
 //                 obligation (ServerRelease's "intransfer = 0") holds BY
-//                 CONSTRUCTION at stage 0. A pipelined controlq (G-6+) must
-//                 implement the real drain before touching retire.
+//                 CONSTRUCTION at stage 0. Warp-C C-3 keeps that shape for
+//                 GPU composition: a Composed present on a GL host is
+//                 transfer (into the presented slot's own resource) ->
+//                 VIRGL_CCMD_BLIT slot -> screen on the compositor
+//                 context's SYNC slot -> RESOURCE_FLUSH, each step's
+//                 response before the next, so ComposeBlit/ComposeComplete
+//                 (the spec's ALLOW_COMPOSE actions) close inside the same
+//                 dispatch and DrainedOfBlits holds at every retire point
+//                 the way "intransfer = 0" does -- nothing is in flight past
+//                 a response. A pipelined controlq (fenced blits with the
+//                 flush riding fence completion) must implement the real
+//                 drain before touching retire; that is the C-4+ evolution
+//                 the spec is already cut for.
 //   Complete's displayed update = scanout_take(): on a present completion,
 //                 a surface with no scanout owner takes scanout (the F16
 //                 switch-at-first-present-COMPLETE alignment; never before
@@ -225,9 +236,28 @@ const VIRGL_CCMD_RESOURCE_COPY_REGION: u32 = 17;
 /// From `#define VIRGL_CMD_RESOURCE_COPY_REGION_SIZE 13` -- a real #define
 /// with a real value, unlike the opcode above.
 const VIRGL_CMD_RCR_SIZE: u32 = 13;
+/// VIRGL_CCMD_BLIT: enum ordinal 16, ONE BELOW RESOURCE_COPY_REGION above
+/// (the same counted-not-grepped derivation; warp-prove's C-0 leg and
+/// tools/warp/p1b-cross-ctx-blit.c encode it identically). The composition
+/// blit of Warp-C C-3 (GPU-DESIGN 4.5.2): 21 payload dwords, scaling and
+/// format-converting, filter in S0. `#define VIRGL_CMD_BLIT_SIZE 21`.
+const VIRGL_CCMD_BLIT: u32 = 16;
+const VIRGL_CMD_BLIT_SIZE: u32 = 21;
+/// PIPE_MASK_RGBA in BLIT S0 bits 0..7; PIPE_TEX_FILTER_NEAREST (0) in bits
+/// 8..9 -- nearest, like the CPU path's letterbox (crisp for the retro-game
+/// case; the two paths must look the same from outside, 4.5.9).
+const PIPE_MASK_RGBA: u32 = 0xF;
 const PIPE_TEXTURE_2D: u32 = 2;
 const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
+/// The resource-create flag QEMU sets on EVERY 2D create (`virgl_cmd_create_
+/// resource_2d`) and that a 3D create may carry: row 0 is the TOP row, and
+/// the display flips such a resource at SET_SCANOUT where it shows a flags-0
+/// (GL-native, row 0 = bottom) resource unflipped. Warp-C C-3 mints the
+/// composed screen with it so slot -> screen blits are same-convention and
+/// the CPU-painted chrome reaches a 3D screen exactly as it reaches the 2D
+/// one (4.5.11).
+const VIRGL_RESOURCE_Y_0_TOP: u32 = 1 << 0;
 /// What `mark` holds. Arbitrary but FIXED, and deliberately not 0 or an
 /// all-ones word: a zeroed or untouched page must never read as a healthy
 /// verify.
@@ -563,6 +593,10 @@ struct Surface {
     /// context off for the process lifetime (4.5.4a). C-3 blits from a
     /// surface only while this is true; otherwise it composes the CPU way.
     comp_attached: bool,
+    /// Warp-C C-3 one-shot: the first present of this surface the GPU
+    /// composed said so (`surface N composed via GPU blit`); the census in
+    /// the global ctl carries the rate.
+    gpu_said: bool,
     /// A TPRESENT_HOLD's deferred scanout push (section 18.6/F13, G-6c):
     /// the region whose device-visible flush waits for `release`. Held
     /// presents union in (most-recent bytes win where they overlap); a
@@ -602,10 +636,17 @@ enum Held {
     /// Unioning still happens, but PER SLOT: a second held present on the same
     /// slot merges, which is the case the old union actually served.
     Direct([Rect; WEAVE_SLOTS as usize]),
-    /// Composed mode: the SCREEN-space region awaiting transfer + flush.
-    /// Unaffected by the per-slot split -- the screen is one resource
-    /// regardless of which client slot fed it.
-    Composed(Rect),
+    /// Composed mode: the SCREEN-space regions awaiting their device-visible
+    /// step. Unaffected by the per-slot split -- the screen is one resource
+    /// regardless of which client slot fed it. Split by HOW the pixels got
+    /// there (Warp-C C-3): a CPU-composed present wrote the screen BUFFER
+    /// and owes an upload + flush; a GPU-composed present already blitted
+    /// the screen RESOURCE and owes only the flush -- uploading its region
+    /// would paint the stale buffer over the blit. A surface's held presents
+    /// are all one kind in practice (the kind is per generation); should the
+    /// two overlap across a reweave or a mid-hold GPU latch, the upload runs
+    /// first and wins in the overlap.
+    Composed { cpu: Rect, gpu: Rect },
 }
 
 fn rect_union(a: Rect, b: Rect) -> Rect {
@@ -661,6 +702,98 @@ const SCREEN_RES: u32 = 0x40;
 /// universal one. A tapestryd that assumed GL here would take the console dark
 /// on the default device, which is what everything else boots under.
 const COMPOSITOR_CTX: u32 = 0x100;
+
+/// Warp-C C-3: the throwaway contexts the bring-up CONVENTION PROBE runs on
+/// (`comp_measure_conventions`), one fresh id per attempt above the
+/// compositor's own -- a request the renderer refuses latches the context it
+/// ran on (4.5.4a), and the probe deliberately tries requests it does not
+/// know the host honours (a row-mirroring blit). Latching a throwaway is the
+/// point; latching COMPOSITOR_CTX would take GPU composition down before it
+/// began. Destroyed after each attempt; never re-minted.
+const CONV_PROBE_CTX_BASE: u32 = COMPOSITOR_CTX + 1;
+
+/// The renderer's MEASURED blit-box conventions (Warp-C C-3, GPU-DESIGN
+/// 4.5.11): how a box named in guest rows must be issued so the rows land
+/// where the guest means -- PER SOURCE SHAPE (a Y_0_TOP slot, a flags-0 BO)
+/// AND PER SIZE CLASS (unscaled, scaled). Measured at bring-up on throwaway
+/// contexts with seeded probes of each resource kind, never assumed. The two
+/// size classes are measured separately because the renderer routes them
+/// differently: the first Pi run of C-3 found an UNSCALED same-format blit
+/// (vrend redirects it to the texel-exact copy-image path) wanting the
+/// boxes flipped on both Y_0_TOP sides, while the SCALED blit of the very
+/// same pair (the glBlitFramebuffer path with its own per-side flip) wanted
+/// the raw boxes -- one convention applied to both composed the battery's
+/// panes vertically swapped. Any (shape, class) the probe cannot establish
+/// is `None`: that class composes the CPU way (fail closed, 4.5.9).
+#[derive(Clone, Copy)]
+struct BlitConv {
+    slot_u: Option<ClassConv>,
+    slot_s: Option<ClassConv>,
+    bo_u: Option<ClassConv>,
+    bo_s: Option<ClassConv>,
+}
+
+/// One (shape, size class)'s measured convention: the request variant that
+/// lands the rows in the ORDER that shape needs (straight for a slot,
+/// mirrored for a BO -- a BO's GL row H-1 is its visual top), and the box
+/// flips to apply on top of it (`y' = h - y - box_h` when set).
+#[derive(Clone, Copy)]
+struct ClassConv {
+    variant: BlitVariant,
+    src_flip: bool,
+    dst_flip: bool,
+}
+
+/// The request shape: plain positive boxes, or the gallium flip idiom of a
+/// negative box height on one side (what Mesa itself sends for a flipped
+/// glBlitFramebuffer).
+#[derive(Clone, Copy, PartialEq)]
+enum BlitVariant {
+    Plain,
+    SrcNeg,
+    DstNeg,
+}
+
+/// The convention probe's three seeded resources + their backings.
+struct ConvProbe {
+    /// The slot kind: `resource_create_2d` (Y_0_TOP by QEMU), 1x4, rows T0..T3.
+    slot_res: u32,
+    slot_fd: i64,
+    slot_va: u64,
+    /// The BO kind: `resource_create_3d` flags 0, 1x4, rows U0..U3.
+    bo_res: u32,
+    bo_fd: i64,
+    bo_va: u64,
+    /// The screen kind: `resource_create_3d` flags Y_0_TOP, 1x16, the target.
+    scr_res: u32,
+    scr_fd: i64,
+    scr_va: u64,
+}
+
+/// What one probe request did: the run of source rows it landed, where.
+#[derive(Clone, Copy)]
+struct Landing {
+    /// First guest row of the run in the 16-row target.
+    first: usize,
+    /// The lowest source-row index the run carried (0 or 2 -- the source
+    /// flip: a box at y=0 named rows {0,1} or {2,3}).
+    src_lo: usize,
+    /// Rows in ascending source order (true) or descending (false).
+    straight: bool,
+}
+
+const CONV_ROWS: usize = 16;
+
+/// One composition op (Warp-C C-3): the surface-space source rect and the
+/// screen-space destination rect it lands on, source-agnostic -- the same
+/// geometry drives the CPU copy and the GPU blit, so the two paths place
+/// pixels identically (4.5.9). Scaled iff the two sizes differ (the
+/// letterbox arm); the crop arm is same-size.
+#[derive(Clone, Copy)]
+struct ComposeOp {
+    src: Rect,
+    dst: Rect,
+}
 
 /// cfg-3 display-mode bounds (AURORA-CONFIG.md section 3.4): base
 /// virtio-gpu reports one preferred rect, not a mode list, so `mode W H`
@@ -732,6 +865,34 @@ pub struct Comp {
     /// refused/skipped, so a silent degradation to the CPU path is visible.
     comp_attach_witnessed: u64,
     comp_attach_refused: u64,
+    /// Warp-C C-3: the renderer's measured blit conventions (see BlitConv).
+    /// `None` = GPU composition unavailable; every composed present takes
+    /// the CPU path. Set once at bring-up by `comp_measure_conventions`.
+    comp_conv: Option<BlitConv>,
+    /// Warp-C C-3: the compositor context stopped executing command
+    /// buffers AFTER a composition blit (the per-tick health copy failed) --
+    /// vrend's sticky latch (4.5.4a), seen from the compositor's own side.
+    /// STICKY like the latch: GPU composition is OFF for the process
+    /// lifetime; the CPU path takes every present from then on and a
+    /// structural repaint heals the screen. Read as `composed-gpu-dead` in
+    /// the global ctl.
+    comp_gpu_dead: bool,
+    /// A latch asked for a structural repaint; `frame_tick` performs it.
+    comp_repaint_pending: bool,
+    /// The tick the compositor context's health was last verified on: at
+    /// most ONE health copy per tick, run after the first GPU-composed
+    /// present of that tick (the 4.5.4b cadence -- per composed frame,
+    /// never per present).
+    comp_verify_tick: u64,
+    /// The composed-present census by path (readable in the global ctl):
+    /// how many presents the GPU composed vs the CPU. Both paths must stay
+    /// live everywhere the seam exists (4.5.9), so which one is being taken
+    /// has to be countable, not inferred from a boot log.
+    composed_gpu: u64,
+    composed_cpu: u64,
+    /// `probe-screen` rate limit: probes admitted this tick (test-mode).
+    probe_tick: u64,
+    probe_count: u32,
     /// The container tree (G-6): hosting, geometry, focus.
     layout: Layout,
     screen: Option<Screen>,
@@ -1068,6 +1229,10 @@ struct WarpBo {
     /// consent withdrawn/replaced, the consented surface's retire, and the
     /// BO's own retire (which detaches BEFORE the unref).
     comp_imported: bool,
+    /// The client's declared virgl format (create3d), recorded for the C-3
+    /// composition blit, whose source-format word must name the resource's
+    /// own format (the renderer reinterprets on mismatch).
+    format: u32,
 }
 
 /// Warp-4: a resolved ACTIVE GL adoption (see `gl_adoption`) -- the
@@ -1080,6 +1245,12 @@ struct GlAdopt {
     va: u64,
     w: u32,
     h: u32,
+    /// C-2c: the BO is imported into COMPOSITOR_CTX, witnessed -- the C-3
+    /// blit's precondition (a blit naming an unimported resource latches the
+    /// compositor context).
+    comp_imported: bool,
+    /// The BO's declared virgl format (the blit's source-format word).
+    format: u32,
 }
 
 const NO_SURFACE: Option<Surface> = None;
@@ -1099,6 +1270,14 @@ impl Comp {
             comp_probe_seq: 0,
             comp_attach_witnessed: 0,
             comp_attach_refused: 0,
+            comp_conv: None,
+            comp_gpu_dead: false,
+            comp_repaint_pending: false,
+            comp_verify_tick: u64::MAX,
+            composed_gpu: 0,
+            composed_cpu: 0,
+            probe_tick: u64::MAX,
+            probe_count: 0,
             layout: Layout::new(),
             screen: None,
             scanout: Scanout::Boot,
@@ -1215,6 +1394,7 @@ impl Comp {
             old_weave: None,
             res_stale: [false; WEAVE_SLOTS as usize],
             comp_attached: false,
+            gpu_said: false,
             held: None,
             cfg_serial: 0,
             offered: None,
@@ -1734,6 +1914,736 @@ impl Comp {
         }
     }
 
+    // --- Warp-C C-3: GPU composition -- the blit, its measured conventions,
+    //     and the compose ops (GPU-DESIGN 4.5.2 / 4.5.11) ---------------------
+
+    /// The 22-dword VIRGL_CCMD_BLIT: box `(sx, sy, sw, sh)` of `src_res`
+    /// (format `src_fmt`) -> box `(dx, dy, dw, dh)` of `dst_res` (B8G8R8A8),
+    /// RGBA mask, nearest filter, no scissor, level 0, depth 1. The boxes are
+    /// the RENDERER'S -- convention-corrected by the caller from `BlitConv`
+    /// -- and a height may be NEGATIVE (the gallium flip idiom Mesa itself
+    /// sends for a flipped glBlitFramebuffer), which is why heights are i32.
+    #[allow(clippy::too_many_arguments)]
+    fn blit_words(
+        dst_res: u32,
+        dx: u32,
+        dy: i32,
+        dw: u32,
+        dh: i32,
+        src_res: u32,
+        src_fmt: u32,
+        sx: u32,
+        sy: i32,
+        sw: u32,
+        sh: i32,
+    ) -> [u32; 22] {
+        let mut st = [0u32; 22];
+        st[0] = (VIRGL_CCMD_BLIT & 0xff) | (VIRGL_CMD_BLIT_SIZE << 16);
+        st[1] = PIPE_MASK_RGBA; // filter NEAREST (0) in bits 8..9
+        st[4] = dst_res;
+        st[6] = VIRGL_FORMAT_B8G8R8A8_UNORM;
+        st[7] = dx;
+        st[8] = dy as u32;
+        st[10] = dw;
+        st[11] = dh as u32;
+        st[12] = 1;
+        st[13] = src_res;
+        st[15] = src_fmt;
+        st[16] = sx;
+        st[17] = sy as u32;
+        st[19] = sw;
+        st[20] = sh as u32;
+        st[21] = 1;
+        st
+    }
+
+    /// Submit a run of blits on `ctx`'s SYNCHRONOUS slot, chunked at the
+    /// slot's stream bound. Each chunk's response arrives before the next is
+    /// staged, so the run is ordered end to end, and after every earlier
+    /// sync transfer -- the same construction the C-2c witness rests on.
+    fn submit_blits(&mut self, ctx: u32, blits: &[[u32; 22]]) -> Result<(), Error> {
+        const BLIT_BYTES: usize = 22 * 4;
+        let per = (Gpu::sync_stream_max() / BLIT_BYTES).max(1);
+        for chunk in blits.chunks(per) {
+            let mut bytes: Vec<u8> = Vec::with_capacity(chunk.len() * BLIT_BYTES);
+            for st in chunk {
+                for w in st.iter() {
+                    bytes.extend_from_slice(&w.to_le_bytes());
+                }
+            }
+            self.gpu.submit_3d_sync(ctx, &bytes)?;
+        }
+        Ok(())
+    }
+
+    /// The renderer's answer, at bring-up, to how blit boxes must be issued
+    /// (`BlitConv`). Runs on throwaway contexts (`CONV_PROBE_CTX_BASE`+),
+    /// never on COMPOSITOR_CTX: a request the renderer refuses latches the
+    /// context it ran on, and this probe deliberately tries requests whose
+    /// acceptance is the thing being measured. Three seeded resources -- one
+    /// of each kind the compositor blits between (a Y_0_TOP slot, a flags-0
+    /// BO, the Y_0_TOP screen) -- and a fresh context per attempt, so a
+    /// latch from one attempt cannot make the next read as "dropped".
+    ///
+    /// Per (shape, size class): try the request variants in order and take
+    /// the first whose landing has the ORDER the shape needs (a slot lands
+    /// straight; a BO, whose GL row H-1 is its visual top, lands mirrored),
+    /// read the box flips off WHERE it landed and WHICH rows it read, then
+    /// CONFIRM the derived convention with corrected boxes at an asymmetric
+    /// offset -- exact rows, nothing else touched. Every landing is SAID, so
+    /// one boot log answers what the host does even where the decode did
+    /// not anticipate it; anything the decode cannot place fails CLOSED for
+    /// that class.
+    fn comp_measure_conventions(&mut self) -> Option<BlitConv> {
+        let p = self.conv_probe_build()?;
+        let mut seq = 0u32;
+        let r = self.conv_measure(&p, &mut seq);
+        self.conv_probe_undo(p);
+        r
+    }
+
+    fn conv_measure(&mut self, p: &ConvProbe, seq: &mut u32) -> Option<BlitConv> {
+        // Tokens: distinct RGB, alpha forced, never zero (the target's rest
+        // state) and never equal to one another.
+        let mut tok = [0u32; 8];
+        for t in tok.iter_mut() {
+            *t = self.comp_probe_token();
+        }
+        let mut t = [0u32; 4];
+        let mut u = [0u32; 4];
+        t.copy_from_slice(&tok[0..4]);
+        u.copy_from_slice(&tok[4..8]);
+        // Seed the sources ONCE through the transfers the real paths use:
+        // the slot kind by TRANSFER_TO_HOST_2D (the present path's); the BO
+        // kind by TRANSFER_TO_HOST_3D inside each attempt's context (a BO's
+        // texels are what its client rendered; here, what we uploaded --
+        // texel-exact for a flags-0 resource, Mesa's own contract).
+        for i in 0..4 {
+            unsafe {
+                core::ptr::write_volatile((p.slot_va as *mut u32).add(i), t[i]);
+                core::ptr::write_volatile((p.bo_va as *mut u32).add(i), u[i]);
+            }
+        }
+        if self.gpu.transfer(p.slot_res, 0, 0, 0, 1, 4).is_err() {
+            say!("tapestryd: blit-conv: slot seed transfer failed");
+            return None;
+        }
+        let slot_u = self.conv_measure_class(p, seq, false, false, &t);
+        let slot_s = self.conv_measure_class(p, seq, false, true, &t);
+        let bo_u = self.conv_measure_class(p, seq, true, false, &u);
+        let bo_s = self.conv_measure_class(p, seq, true, true, &u);
+        if slot_u.is_none() && slot_s.is_none() && bo_u.is_none() && bo_s.is_none() {
+            return None;
+        }
+        Some(BlitConv { slot_u, slot_s, bo_u, bo_s })
+    }
+
+    /// Measure + confirm one (shape, size class). `bo` selects the flags-0
+    /// source (mirrored landing wanted) over the Y_0_TOP slot (straight);
+    /// `scaled` selects the 2x-vertical class (each source row lands twice)
+    /// over the same-size one. Source box = rows 0..2 of the 4-row source
+    /// (asymmetric, so a source flip shows as rows {2,3} coming instead of
+    /// {0,1}); destination y = 1 raw (so a destination flip shows as the run
+    /// landing at 16-1-dh instead of 1). Then the confirmation: source rows
+    /// 1..4 into destination row 3.., with the derived corrections, must
+    /// land those exact rows in the wanted order and touch nothing else.
+    fn conv_measure_class(&mut self, p: &ConvProbe, seq: &mut u32, bo: bool, scaled: bool, toks: &[u32; 4]) -> Option<ClassConv> {
+        let (src_res, src_name) = if bo { (p.bo_res, "bo") } else { (p.slot_res, "slot") };
+        let cls = if scaled { "S" } else { "U" };
+        let mult: usize = if scaled { 2 } else { 1 };
+        let mut found: Option<ClassConv> = None;
+        for variant in [BlitVariant::Plain, BlitVariant::SrcNeg, BlitVariant::DstNeg] {
+            let dh = 2 * mult as u32;
+            let words = Self::conv_words(p.scr_res, src_res, variant, false, false, 4, 0, 2, 1, dh);
+            let rows = match self.conv_attempt(p, seq, |c, ctx| c.submit_blits(ctx, &[words])) {
+                Some(r) => r,
+                None => continue,
+            };
+            let landing = Self::conv_decode(&rows, toks, mult);
+            say!(
+                "tapestryd: blit-conv {} {} {}: rows {} -> {}",
+                src_name,
+                cls,
+                Self::variant_name(variant),
+                Self::conv_rows_str(&rows, toks),
+                match landing {
+                    Some(l) => alloc::format!(
+                        "run at row {} src rows {}..{} {}",
+                        l.first, l.src_lo, l.src_lo + 2, if l.straight { "straight" } else { "mirrored" }
+                    ),
+                    None => String::from("no clean run"),
+                }
+            );
+            let l = match landing {
+                Some(l) => l,
+                None => continue,
+            };
+            // A slot needs its rows straight; a BO needs them mirrored.
+            if l.straight == bo {
+                continue;
+            }
+            let src_flip = l.src_lo == 2;
+            let dst_flip = match l.first {
+                1 => false,
+                f if f == CONV_ROWS - 1 - dh as usize => true,
+                _ => continue,
+            };
+            found = Some(ClassConv { variant, src_flip, dst_flip });
+            break;
+        }
+        let conv = found?;
+        // Confirmation with the corrections applied: source rows 1..4 ->
+        // destination row 3.. (3 rows, or 6 scaled). Expected: exactly those
+        // rows, in the wanted order, at rows 3..3+3*mult, and zero elsewhere.
+        let dh = 3 * mult as u32;
+        let words = Self::conv_words(p.scr_res, src_res, conv.variant, conv.src_flip, conv.dst_flip, 4, 1, 3, 3, dh);
+        let rows = self.conv_attempt(p, seq, |c, ctx| c.submit_blits(ctx, &[words]))?;
+        let rgb = |v: u32| v & 0x00FF_FFFF;
+        let mut ok = true;
+        for (i, &r) in rows.iter().enumerate() {
+            let want = if (3..3 + dh as usize).contains(&i) {
+                let k = (i - 3) / mult; // 0..3 = the k-th landed source row
+                let src_row = if bo { 3 - k } else { 1 + k }; // BO mirrored: rows 3,2,1; slot straight: 1,2,3
+                rgb(toks[src_row])
+            } else {
+                0
+            };
+            if rgb(r) != want {
+                ok = false;
+            }
+        }
+        say!(
+            "tapestryd: blit-conv {} {} confirm ({} sf{} df{}): rows {} -> {}",
+            src_name,
+            cls,
+            Self::variant_name(conv.variant),
+            conv.src_flip as u32,
+            conv.dst_flip as u32,
+            Self::conv_rows_str(&rows, toks),
+            if ok { "CONFIRMED" } else { "FAILED -- class OFF" }
+        );
+        if ok {
+            Some(conv)
+        } else {
+            None
+        }
+    }
+
+    fn variant_name(v: BlitVariant) -> &'static str {
+        match v {
+            BlitVariant::Plain => "plain",
+            BlitVariant::SrcNeg => "src-neg",
+            BlitVariant::DstNeg => "dst-neg",
+        }
+    }
+
+    /// The target rows as a compact string: `.` for zero, `Tk` for the k-th
+    /// token of the source under test, `?` for anything else.
+    fn conv_rows_str(rows: &[u32; CONV_ROWS], toks: &[u32; 4]) -> String {
+        let rgb = |v: u32| v & 0x00FF_FFFF;
+        let mut out = String::new();
+        for &r in rows.iter() {
+            if r == 0 {
+                out.push('.');
+            } else if let Some(k) = toks.iter().position(|&t| rgb(t) == rgb(r)) {
+                out.push(char::from(b'0' + k as u8));
+            } else {
+                out.push('?');
+            }
+        }
+        out
+    }
+
+    /// Decode a landing: a run of `2*mult` rows carrying two distinct source
+    /// tokens (each repeated `mult` times, the 2x nearest scale), consecutive
+    /// source rows in either order, everything else zero. None otherwise.
+    fn conv_decode(rows: &[u32; CONV_ROWS], toks: &[u32; 4], mult: usize) -> Option<Landing> {
+        let rgb = |v: u32| v & 0x00FF_FFFF;
+        let idx = |v: u32| toks.iter().position(|&t| rgb(t) == rgb(v));
+        let first = rows.iter().position(|&r| r != 0)?;
+        let len = 2 * mult;
+        if first + len > CONV_ROWS {
+            return None;
+        }
+        // Everything outside the run must be zero.
+        if rows.iter().enumerate().any(|(i, &r)| !(first..first + len).contains(&i) && r != 0) {
+            return None;
+        }
+        let a = idx(rows[first])?;
+        let b = idx(rows[first + mult])?;
+        for j in 0..len {
+            let want = if j < mult { a } else { b };
+            if idx(rows[first + j]) != Some(want) {
+                return None;
+            }
+        }
+        let (lo, straight) = if b == a + 1 {
+            (a, true)
+        } else if a == b + 1 {
+            (b, false)
+        } else {
+            return None;
+        };
+        if lo != 0 && lo != 2 {
+            return None;
+        }
+        Some(Landing { first, src_lo: lo, straight })
+    }
+
+    /// Build one probe/composition request from GUEST boxes and a class
+    /// convention: apply the flips (`y' = h - y - box_h`), then the variant
+    /// (a negative height on the source or the destination side). `hs` is
+    /// the source's height; the target's is CONV_ROWS here and the screen's
+    /// in the compose path (`blit_request`).
+    #[allow(clippy::too_many_arguments)]
+    fn conv_words(dst_res: u32, src_res: u32, variant: BlitVariant, src_flip: bool, dst_flip: bool,
+                  hs: u32, sy: u32, sh: u32, dy: u32, dh: u32) -> [u32; 22] {
+        Self::blit_request(dst_res, CONV_ROWS as u32, 0, dy, 1, dh,
+                           src_res, VIRGL_FORMAT_B8G8R8A8_UNORM, hs, 0, sy, 1, sh,
+                           ClassConv { variant, src_flip, dst_flip })
+    }
+
+    /// The general request: source box (sx, sy, sw, sh) of `src_res` (height
+    /// `hs`) -> destination box (dx, dy, dw, dh) of `dst_res` (height `hd`),
+    /// both in GUEST rows, under `conv`.
+    #[allow(clippy::too_many_arguments)]
+    fn blit_request(dst_res: u32, hd: u32, dx: u32, dy: u32, dw: u32, dh: u32,
+                    src_res: u32, src_fmt: u32, hs: u32, sx: u32, sy: u32, sw: u32, sh: u32,
+                    conv: ClassConv) -> [u32; 22] {
+        let syp = (if conv.src_flip { hs - sy - sh } else { sy }) as i32;
+        let dyp = (if conv.dst_flip { hd - dy - dh } else { dy }) as i32;
+        let (fsy, fsh, fdy, fdh) = match conv.variant {
+            BlitVariant::Plain => (syp, sh as i32, dyp, dh as i32),
+            BlitVariant::SrcNeg => (syp + sh as i32, -(sh as i32), dyp, dh as i32),
+            BlitVariant::DstNeg => (syp, sh as i32, dyp + dh as i32, -(dh as i32)),
+        };
+        Self::blit_words(dst_res, dx, fdy, dw, fdh, src_res, src_fmt, sx, fsy, sw, fsh)
+    }
+
+    /// One convention-probe attempt on a FRESH throwaway context: create it,
+    /// attach the three probe resources, zero the target and re-seed the BO
+    /// kind through that context, run `body` (the request under test), read
+    /// the target's guest rows back, destroy the context. `None` = a
+    /// device-level failure of the scaffolding, never a verdict about the
+    /// request (a refused request reads as an untouched -- all-zero --
+    /// target, which the decode reports as "no clean run").
+    fn conv_attempt<F>(&mut self, p: &ConvProbe, seq: &mut u32, body: F) -> Option<[u32; CONV_ROWS]>
+    where
+        F: FnOnce(&mut Self, u32) -> Result<(), Error>,
+    {
+        let ctx = CONV_PROBE_CTX_BASE + *seq;
+        *seq += 1;
+        if self.gpu.ctx_create(ctx, b"tapestry-conv").is_err() {
+            return None;
+        }
+        let ok = self.gpu.ctx_attach_resource(ctx, p.slot_res).is_ok()
+            && self.gpu.ctx_attach_resource(ctx, p.bo_res).is_ok()
+            && self.gpu.ctx_attach_resource(ctx, p.scr_res).is_ok();
+        let mut out: Option<[u32; CONV_ROWS]> = None;
+        if ok {
+            for i in 0..CONV_ROWS {
+                unsafe { core::ptr::write_volatile((p.scr_va as *mut u32).add(i), 0) };
+            }
+            let staged = self.gpu.transfer_to_3d_box_sync(ctx, p.scr_res, 0, 0, 1, CONV_ROWS as u32, 0, 4).is_ok()
+                && self.gpu.transfer_to_3d_box_sync(ctx, p.bo_res, 0, 0, 1, 4, 0, 4).is_ok();
+            if staged && body(self, ctx).is_ok() {
+                for i in 0..CONV_ROWS {
+                    unsafe { core::ptr::write_volatile((p.scr_va as *mut u32).add(i), 0xDEAD_BEEF) };
+                }
+                if self.gpu.transfer_from_3d_box_sync(ctx, p.scr_res, 0, 0, 1, CONV_ROWS as u32, 0, 4).is_ok() {
+                    let mut rows = [0u32; CONV_ROWS];
+                    for (i, r) in rows.iter_mut().enumerate() {
+                        *r = unsafe { core::ptr::read_volatile((p.scr_va as *const u32).add(i)) };
+                    }
+                    // A readback that never landed leaves the clobber; that
+                    // is a scaffolding failure, not a measurement.
+                    if rows.iter().any(|&r| r != 0xDEAD_BEEF) {
+                        out = Some(rows);
+                    }
+                }
+            }
+        }
+        let _ = self.gpu.ctx_destroy(ctx);
+        out
+    }
+
+    /// Mint the three convention-probe resources (1x4 slot kind, 1x4 BO
+    /// kind, 1x16 screen kind), each with its own page as backing, attached
+    /// to no context yet (each attempt attaches them to its own). Rolls
+    /// back fully on any failure.
+    fn conv_probe_build(&mut self) -> Option<ConvProbe> {
+        let (slot_res, slot_fd, slot_va) = self.conv_probe_res(0)?;
+        let (bo_res, bo_fd, bo_va) = match self.conv_probe_res(1) {
+            Some(v) => v,
+            None => {
+                self.conv_probe_res_undo(slot_res, slot_va, slot_fd);
+                return None;
+            }
+        };
+        let (scr_res, scr_fd, scr_va) = match self.conv_probe_res(2) {
+            Some(v) => v,
+            None => {
+                self.conv_probe_res_undo(bo_res, bo_va, bo_fd);
+                self.conv_probe_res_undo(slot_res, slot_va, slot_fd);
+                return None;
+            }
+        };
+        Some(ConvProbe { slot_res, slot_fd, slot_va, bo_res, bo_fd, bo_va, scr_res, scr_fd, scr_va })
+    }
+
+    /// One probe resource of `kind` (0 = slot: `resource_create_2d`, the
+    /// Y_0_TOP QEMU stamps on every 2D create; 1 = BO: 3D flags 0; 2 =
+    /// screen: 3D flags Y_0_TOP, CONV_ROWS rows), backed by a fresh page.
+    fn conv_probe_res(&mut self, kind: u32) -> Option<(u32, i64, u64)> {
+        let size = PAGE;
+        let fd = unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
+        if fd < 0 {
+            return None;
+        }
+        let va = self.weave_va_next;
+        self.weave_va_next += size;
+        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
+        if pa < 0 {
+            unsafe { t_close(fd) };
+            return None;
+        }
+        unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
+        let res = self.next_res_id();
+        let h = if kind == 2 { CONV_ROWS as u32 } else { 4 };
+        let created = if kind == 0 {
+            self.gpu.resource_create_2d(res, 1, h).is_ok()
+        } else {
+            let flags = if kind == 2 { VIRGL_RESOURCE_Y_0_TOP } else { 0 };
+            self.gpu
+                .resource_create_3d(
+                    res,
+                    PIPE_TEXTURE_2D,
+                    VIRGL_FORMAT_B8G8R8A8_UNORM,
+                    VIRGL_BIND_RENDER_TARGET,
+                    1,
+                    h,
+                    1,
+                    1,
+                    0,
+                    0,
+                    flags,
+                )
+                .is_ok()
+        };
+        if !created {
+            unsafe { t_burrow_detach(va, size) };
+            unsafe { t_close(fd) };
+            return None;
+        }
+        if self.gpu.attach_backing(res, pa as u64, size as u32).is_err() {
+            let _ = self.gpu.resource_unref(res);
+            unsafe { t_burrow_detach(va, size) };
+            unsafe { t_close(fd) };
+            return None;
+        }
+        Some((res, fd, va))
+    }
+
+    fn conv_probe_res_undo(&mut self, res: u32, va: u64, fd: i64) {
+        let _ = self.gpu.detach_backing(res);
+        let _ = self.gpu.resource_unref(res);
+        unsafe { t_burrow_detach(va, PAGE) };
+        unsafe { t_close(fd) };
+    }
+
+    fn conv_probe_undo(&mut self, p: ConvProbe) {
+        self.conv_probe_res_undo(p.scr_res, p.scr_va, p.scr_fd);
+        self.conv_probe_res_undo(p.bo_res, p.bo_va, p.bo_fd);
+        self.conv_probe_res_undo(p.slot_res, p.slot_va, p.slot_fd);
+    }
+
+    /// Is the GPU composed path available right now? Every conjunct is a
+    /// measured fact, none a capability bit: a compositor context that came
+    /// up, a witness probe to verify it with, blit conventions the probe
+    /// could establish, and no latch since.
+    fn gpu_compose_ready(&self) -> bool {
+        self.comp_ctx && self.comp_probe.is_some() && self.comp_conv.is_some() && !self.comp_gpu_dead
+    }
+
+    /// Is surface `n` hosted in a VISIBLE pane with a screen to compose
+    /// into? The GPU path checks this BEFORE transferring, so a hidden
+    /// surface's present costs no guest->host traffic (the C-2d redraw
+    /// contract heals it on reveal: the reveal is structural and fans the
+    /// redraw CONFIGURE).
+    fn compose_visible(&self, n: usize) -> bool {
+        if self.screen.is_none() {
+            return false;
+        }
+        match self.layout.find_hosting(n) {
+            Some(leaf) => self.layout.get(leaf).map_or(false, |p| p.visible),
+            None => false,
+        }
+    }
+
+    /// The per-tick health verify of the compositor context, run right
+    /// after a composition blit was submitted: at most one health copy per
+    /// tick (the 4.5.4b cadence). Returns true when the context is known or
+    /// assumed healthy this tick; false when THIS call found it latched --
+    /// in which case GPU composition is already OFF (`comp_gpu_latch`) and
+    /// the caller composes the present it just blitted the CPU way instead,
+    /// so no frame is lost to the discovery.
+    fn comp_health_tick(&mut self) -> bool {
+        if self.comp_verify_tick == self.tick {
+            return true;
+        }
+        self.comp_verify_tick = self.tick;
+        if self.comp_ctx_health() {
+            return true;
+        }
+        self.comp_gpu_latch("health copy failed after a composition blit");
+        false
+    }
+
+    /// One-shot per surface: the first present the GPU composed says so.
+    fn say_gpu_once(&mut self, n: usize, kind: &str, src_res: u32, scr_res: u32) {
+        let first = match self.surf_mut(n) {
+            Some(s) if !s.gpu_said => {
+                s.gpu_said = true;
+                true
+            }
+            _ => false,
+        };
+        if first {
+            say!(
+                "tapestryd: surface {} composed via GPU blit ({} res {} -> screen res {})",
+                n, kind, src_res, scr_res
+            );
+        }
+    }
+
+    /// The composed screen's pixel oracle (Warp-C C-3): read texel (x, y) of
+    /// the SCREEN back and say it. On the 3D screen the value comes from the
+    /// resource by TRANSFER_FROM_HOST_3D through the compositor context --
+    /// the only place GPU-composed pixels exist -- landed at the pixel's own
+    /// offset in the buffer (idempotent where the buffer mirrors the host;
+    /// a don't-care the next structural repaint rewrites where it does not);
+    /// on the 2D screen the buffer IS what was transferred. Says which,
+    /// with the scanout mode (a Direct scanout does not display the screen,
+    /// so a probe then describes an undisplayed resource) and the census.
+    #[cfg(feature = "test-mode")]
+    pub fn probe_screen(&mut self, x: u32, y: u32) -> Result<(), u32> {
+        if x >= self.gpu.width || y >= self.gpu.height {
+            return Err(p9::E_INVAL);
+        }
+        if self.probe_tick != self.tick {
+            self.probe_tick = self.tick;
+            self.probe_count = 0;
+        }
+        if self.probe_count >= 64 {
+            return Err(E_AGAIN);
+        }
+        self.probe_count += 1;
+        let (res, is3d, va) = match &self.screen {
+            Some(s) => (s.res, s.is3d, s.va),
+            None => {
+                say!("tapestryd: screen-probe ({},{}) = none (no screen)", x, y);
+                return Ok(());
+            }
+        };
+        let dw = self.gpu.width;
+        let off = ((y as u64) * (dw as u64) + x as u64) * 4;
+        let via = if is3d && self.comp_ctx {
+            if self
+                .gpu
+                .transfer_from_3d_box_sync(COMPOSITOR_CTX, res, x, y, 1, 1, off, dw * 4)
+                .is_ok()
+            {
+                "readback"
+            } else {
+                "readback FAILED (backing shown)"
+            }
+        } else {
+            "backing"
+        };
+        let v = unsafe { core::ptr::read_volatile((va + off) as *const u32) };
+        say!(
+            "tapestryd: screen-probe ({},{}) = #{:06x} via {} [scanout {}; composed gpu {} cpu {}]",
+            x,
+            y,
+            v & 0x00FF_FFFF,
+            via,
+            self.scanout_name(),
+            self.composed_gpu,
+            self.composed_cpu
+        );
+        Ok(())
+    }
+
+    /// The compositor context stopped executing after a composition blit:
+    /// GPU composition goes OFF, sticky, and the screen is repainted
+    /// structurally (chrome + the CONFIGURE fan) so every pane heals through
+    /// the CPU path. Freeze-and-report, never freeze-and-lie (4.5.4b).
+    fn comp_gpu_latch(&mut self, why: &str) {
+        if self.comp_gpu_dead {
+            return;
+        }
+        self.comp_gpu_dead = true;
+        say!(
+            "tapestryd: composed pixels = CPU (compositor ctx latched: {}) -- GPU composition OFF, sticky",
+            why
+        );
+        // A structural repaint at the next tick (`frame_tick`): the geometry
+        // signature is forced stale so the Composed arm of reconcile repaints
+        // chrome and fans the redraw CONFIGUREs (the C-2d redraw contract does
+        // the rest). Deferred, because this runs inside a present dispatch.
+        self.comp_repaint_pending = true;
+    }
+
+    /// The compose GEOMETRY for a present of surface `n`: the source rect
+    /// (surface space) and the screen-space destination it lands on, or
+    /// None when nothing is composed (hidden, unhosted, no screen, fully
+    /// clipped). Shared by the CPU copy and the GPU blit so both place
+    /// pixels identically. Fork 2 + the #56 patchwork latch decide the arm:
+    /// a full-frame presenter (patchwork never latched) whose size differs
+    /// from its pane LETTERBOXES (aspect-preserving scale, centered; damage
+    /// rects ignored -- the whole scaled rect redraws); an accumulator, or
+    /// a same-size surface, takes the damage-clipped CROP.
+    fn compose_geometry(&mut self, n: usize, x: u32, y: u32, pw: u32, ph: u32) -> Option<ComposeOp> {
+        let (sw, sh_full, patchwork) = match self.surf(n) {
+            Some(s) if s.weave.is_some() => (s.w, s.h, s.patchwork),
+            _ => return None,
+        };
+        let content = match self.layout.find_hosting(n) {
+            Some(leaf) => match self.layout.get(leaf) {
+                Some(p) if p.visible => p.content,
+                _ => return None, // hidden: no compose target
+            },
+            None => return None, // unhosted
+        };
+        self.screen.as_ref()?;
+        if (sw != content.w || sh_full != content.h) && !patchwork {
+            if content.w == 0 || content.h == 0 || sh_full == 0 || sw == 0 {
+                return None;
+            }
+            let (ox, oy, dw2, dh2) = Self::letterbox(sw, sh_full, content.w, content.h);
+            // One-shot geometry diagnostic (per distinct placement).
+            if let Some(su) = self.surf_mut(n) {
+                let sig = (ox, oy, dw2, dh2);
+                if su.lb_logged != Some(sig) {
+                    su.lb_logged = Some(sig);
+                    say!(
+                        "tapestryd: surface {} letterbox {}x{} -> {}x{} @({},{}) in {}x{}",
+                        n, sw, sh_full, dw2, dh2, ox, oy, content.w, content.h
+                    );
+                }
+            }
+            return Some(ComposeOp {
+                src: Rect { x: 0, y: 0, w: sw, h: sh_full },
+                dst: Rect { x: content.x + ox, y: content.y + oy, w: dw2, h: dh2 },
+            });
+        }
+        // Same-size fast path: damage-clipped.
+        let inter = Rect { x, y, w: pw, h: ph }
+            .intersect(Rect { x: 0, y: 0, w: content.w, h: content.h });
+        if inter.is_empty() {
+            return None;
+        }
+        Some(ComposeOp {
+            src: inter,
+            dst: Rect { x: content.x + inter.x, y: content.y + inter.y, w: inter.w, h: inter.h },
+        })
+    }
+
+    /// The measured convention for one (shape, size class), or None when
+    /// that class composes the CPU way on this host.
+    fn class_conv(&self, bo: bool, scaled: bool) -> Option<ClassConv> {
+        let c = self.comp_conv?;
+        match (bo, scaled) {
+            (false, false) => c.slot_u,
+            (false, true) => c.slot_s,
+            (true, false) => c.bo_u,
+            (true, true) => c.bo_s,
+        }
+    }
+
+    /// The GPU compose of one op from a SLOT resource (Y_0_TOP source):
+    /// one VIRGL_CCMD_BLIT under the measured convention of the op's size
+    /// class. The caller has transferred the damage into `src_res` and holds
+    /// `comp_attached` for its generation; the screen is the 3D one. None =
+    /// this class is CPU-composed on this host.
+    fn compose_gpu_slot_words(&self, op: ComposeOp, src_res: u32, sh_full: u32, scr_res: u32) -> Option<[u32; 22]> {
+        let scaled = op.src.w != op.dst.w || op.src.h != op.dst.h;
+        let conv = self.class_conv(false, scaled)?;
+        Some(Self::blit_request(
+            scr_res, self.gpu.height, op.dst.x, op.dst.y, op.dst.w, op.dst.h,
+            src_res, VIRGL_FORMAT_B8G8R8A8_UNORM, sh_full, op.src.x, op.src.y, op.src.w, op.src.h,
+            conv,
+        ))
+    }
+
+    /// The GPU compose of one op from a BO (flags-0, GL-native source): the
+    /// FULL BO, row-mirrored into the destination by the request the probe
+    /// found this renderer honours for the op's size class. None = readback
+    /// arm (no measured request for the class, or a partial/foreign-format
+    /// source the probe did not measure).
+    fn compose_gpu_bo_words(&self, op: ComposeOp, bo_res: u32, bo_fmt: u32, bo_h: u32, scr_res: u32) -> Option<[u32; 22]> {
+        // Measured for the FULL source only (a GL frame is whole-frame by
+        // nature; the GL arms present full damage) and for the probe's own
+        // format: a partial source op, or another format, is not something
+        // this code has a measured request for -- readback arm.
+        if op.src.x != 0 || op.src.y != 0 || op.src.h != bo_h || op.src.w == 0 || bo_fmt != VIRGL_FORMAT_B8G8R8A8_UNORM {
+            return None;
+        }
+        let scaled = op.src.w != op.dst.w || op.src.h != op.dst.h;
+        let conv = self.class_conv(true, scaled)?;
+        Some(Self::blit_request(
+            scr_res, self.gpu.height, op.dst.x, op.dst.y, op.dst.w, op.dst.h,
+            bo_res, bo_fmt, bo_h, 0, 0, op.src.w, bo_h,
+            conv,
+        ))
+    }
+
+    /// The CPU compose of one op: copy `op.src` of the source image (`src_base`,
+    /// tight stride `sw`, `sh_full` rows) into the screen BUFFER at
+    /// `op.dst`, nearest-neighbour when scaled. Client bytes are read ONLY
+    /// here, inside the present dispatch (the G-6 tearing-freedom
+    /// invariant); the caller pushes `op.dst` device-side or defers it.
+    fn compose_cpu(&mut self, op: ComposeOp, src_base: u64, sw: u32, sh_full: u32) {
+        let screen_va = match &self.screen {
+            Some(s) => s.va,
+            None => return,
+        };
+        let dw = self.gpu.width as u64;
+        if op.src.w != op.dst.w || op.src.h != op.dst.h {
+            // SAFETY: src reads stay inside the source image (sx < sw, sy <
+            // sh_full by the ratio bound: lx < dst.w => lx*sw/dst.w < sw --
+            // valid for scale-down and up); dst rows stay inside the screen
+            // buffer (letterbox() bounds the scaled rect inside content, and
+            // content inside the display by the geometry pass).
+            unsafe {
+                for row in 0..op.dst.h as u64 {
+                    let sy = (row * sh_full as u64) / op.dst.h as u64;
+                    let dy = op.dst.y as u64 + row;
+                    let srow = (src_base + sy * sw as u64 * 4) as *const u32;
+                    let drow = (screen_va + (dy * dw + op.dst.x as u64) * 4) as *mut u32;
+                    for col in 0..op.dst.w as u64 {
+                        let sx = (col * sw as u64) / op.dst.w as u64;
+                        *drow.add(col as usize) = *srow.add(sx as usize);
+                    }
+                }
+            }
+            return;
+        }
+        // SAFETY: src rows lie within the source image (damage was validated
+        // against the surface geometry; the op only shrinks it); dst rows
+        // lie within the screen buffer (content is inside the display by the
+        // geometry pass; the op is inside content).
+        unsafe {
+            for row in 0..op.src.h as u64 {
+                let sy = op.src.y as u64 + row;
+                let dy = op.dst.y as u64 + row;
+                let src = (src_base + (sy * sw as u64 + op.src.x as u64) * 4) as *const u8;
+                let dst = (screen_va + (dy * dw + op.dst.x as u64) * 4) as *mut u8;
+                core::ptr::copy_nonoverlapping(src, dst, op.src.w as usize * 4);
+            }
+        }
+    }
+
     /// `create W H`: the spec's WeaveFirst -- allocate + zero the weave,
     /// create the 2D resource, attach the whole weave as its backing.
     fn create(&mut self, n: usize, w: u32, h: u32) -> Result<(), u32> {
@@ -1915,11 +2825,43 @@ impl Comp {
                     "tapestryd: comp-attach witness UNAVAILABLE (probe build failed) -- imports stay unattached"
                 ),
             }
+            // Warp-C C-3: measure the renderer's blit conventions on
+            // throwaway contexts, then say which composed-PIXEL path this
+            // host gets. Its own line, after the anchors, like the witness.
+            self.comp_conv = if self.comp_probe.is_some() {
+                self.comp_measure_conventions()
+            } else {
+                None
+            };
+            let cc = |c: Option<ClassConv>| -> String {
+                match c {
+                    Some(c) => alloc::format!(
+                        "{} sf{} df{}",
+                        Self::variant_name(c.variant),
+                        c.src_flip as u32,
+                        c.dst_flip as u32
+                    ),
+                    None => String::from("CPU"),
+                }
+            };
+            match self.comp_conv {
+                Some(c) => say!(
+                    "tapestryd: composed pixels = GPU (blit conv: slot U {}, S {}; bo U {}, S {})",
+                    cc(c.slot_u),
+                    cc(c.slot_s),
+                    cc(c.bo_u),
+                    cc(c.bo_s)
+                ),
+                None => say!(
+                    "tapestryd: composed pixels = CPU (blit conventions not established) -- GPU composition OFF"
+                ),
+            }
         } else {
             say!(
                 "tapestryd: composed path = CPU (virgl={}); comp-attach: skipped (no compositor ctx)",
                 self.gpu.virgl as u32
             );
+            say!("tapestryd: composed pixels = CPU (no compositor ctx)");
         }
     }
 
@@ -2007,6 +2949,15 @@ impl Comp {
         let mut is3d = false;
         let mut why = "";
         if self.comp_ctx {
+            // Y_0_TOP (Warp-C C-3, 4.5.11): the screen is filled top-down --
+            // by the CPU chrome upload on every path and by same-convention
+            // slot blits on the GPU one -- and displayed like the 2D screen,
+            // which the ls-gfx pixel gates verify. C-2b minted it flags 0,
+            // the GL-native (row 0 = bottom, unflipped at scanout)
+            // convention, and a top-down CPU fill of THAT displays inverted
+            // on a GL display -- a state no gate could see (#195: no host
+            // pixel capture on the GL host). The convention probe measures
+            // what the flag actually did on this renderer.
             let created = self
                 .gpu
                 .resource_create_3d(
@@ -2020,7 +2971,7 @@ impl Comp {
                     1,
                     0,
                     0,
-                    0,
+                    VIRGL_RESOURCE_Y_0_TOP,
                 )
                 .is_ok();
             let attached = created && self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res).is_ok();
@@ -2243,18 +3194,22 @@ impl Comp {
                 *px.add(i) = pane::BG_COLOR;
             }
         }
-        self.paint_borders();
-        self.paint_strips();
+        let _ = self.paint_borders();
+        let _ = self.paint_strips();
         self.chrome_epoch = self.layout.epoch;
     }
 
     /// Redraw ONLY the 1px leaf frames (focus ring moves must not blank
-    /// idle clients' content).
-    fn paint_borders(&mut self) {
+    /// idle clients' content). Returns the edge rects it painted, so a
+    /// focus-only repaint can upload exactly those (Warp-C C-3): on the GPU
+    /// composed path the screen BUFFER holds chrome but not client pixels,
+    /// so a whole-buffer push here would blank every pane.
+    fn paint_borders(&mut self) -> Vec<Rect> {
+        let mut painted: Vec<Rect> = Vec::new();
         let dw = self.gpu.width as u64;
         let va = match &self.screen {
             Some(s) => s.va,
-            None => return,
+            None => return painted,
         };
         let px = va as *mut u32;
         let focused = self.layout.focused;
@@ -2284,7 +3239,12 @@ impl Comp {
                     *px.add((y as u64 * dw + (r.x + r.w - 1) as u64) as usize) = color;
                 }
             }
+            painted.push(Rect { x: r.x, y: r.y, w: r.w, h: 1 });
+            painted.push(Rect { x: r.x, y: r.y + r.h - 1, w: r.w, h: 1 });
+            painted.push(Rect { x: r.x, y: r.y, w: 1, h: r.h });
+            painted.push(Rect { x: r.x + r.w - 1, y: r.y, w: 1, h: r.h });
         }
+        painted
     }
 
     /// Paint the tab/stack indicator strips (G-6c; D7 glyph-free -- pure
@@ -2294,17 +3254,19 @@ impl Comp {
     /// FOCUS_COLOR when the focused leaf is inside it, ACTIVE_COLOR
     /// otherwise; the rest are BORDER_COLOR. Repainted with the borders
     /// on focus-only epochs (the highlight follows focus).
-    fn paint_strips(&mut self) {
+    fn paint_strips(&mut self) -> Vec<Rect> {
+        let mut painted: Vec<Rect> = Vec::new();
         let dw = self.gpu.width as u64;
         let va = match &self.screen {
             Some(s) => s.va,
-            None => return,
+            None => return painted,
         };
         let px = va as *mut u32;
-        let fill = |r: Rect, color: u32| {
+        let mut fill = |r: Rect, color: u32| {
             if r.is_empty() {
                 return;
             }
+            painted.push(r);
             // SAFETY: strip areas lie inside their container's rect,
             // which the geometry pass bounds inside the display.
             unsafe {
@@ -2360,6 +3322,8 @@ impl Comp {
                 _ => {}
             }
         }
+        drop(fill);
+        painted
     }
 
     /// A signature of the visible leaf geometry (FNV-1a over id + content
@@ -2479,11 +3443,18 @@ impl Comp {
                     self.screen_flush_full();
                 } else if self.chrome_epoch != self.layout.epoch {
                     // Focus-only: redraw the frames + strip highlights,
-                    // keep the content.
-                    self.paint_borders();
-                    self.paint_strips();
+                    // keep the content -- and push ONLY those rects (Warp-C
+                    // C-3): on the GPU composed path the screen buffer does
+                    // not hold client pixels, so a whole-buffer push here
+                    // would blank every pane; on the CPU path the buffer
+                    // mirrors the host and the rect push is the same pixels
+                    // (both paths behave identically from outside, 4.5.9).
+                    let mut rects = self.paint_borders();
+                    rects.extend(self.paint_strips());
                     self.chrome_epoch = self.layout.epoch;
-                    self.screen_flush_full();
+                    for r in rects {
+                        self.screen_push(r);
+                    }
                 }
                 if entering {
                     let sres = self.screen.as_ref().map(|s| s.res).unwrap_or(0);
@@ -2576,18 +3547,15 @@ impl Comp {
         }
     }
 
-    /// Blit a presented damage rect from the client's weave slot into the
-    /// screen buffer at its pane's content rect (clipped both ways),
-    /// returning the SCREEN-space region written (None: hidden /
-    /// unhosted / fully clipped). Client weave bytes are read ONLY here,
-    /// inside the present dispatch, for the slot the client just
-    /// presented -- the G-6 tearing-freedom invariant. The caller pushes
-    /// the region device-side (`screen_push`) -- or defers it (HOLD).
-    /// Warp-4 (`gl_src`): a GL adoption composes from the BO backing
-    /// tapestryd itself mapped -- same geometry as the surface (the
-    /// adoption gate), full-image tight stride -- instead of a weave
-    /// slot. Every rect/letterbox/crop path below is source-agnostic;
-    /// only the base pointer changes.
+    /// Compose a presented damage rect the CPU way: read the client's slot
+    /// (or a GL adoption's BO backing, `gl_src`) into the screen BUFFER at
+    /// the geometry `compose_geometry` decides, returning the SCREEN-space
+    /// region written (None: hidden / unhosted / fully clipped). Client
+    /// bytes are read ONLY here, inside the present dispatch, for the slot
+    /// the client just presented -- the G-6 tearing-freedom invariant. The
+    /// caller pushes the region device-side (`screen_push`) -- or defers it
+    /// (HOLD). The universal path (4.5.9): every non-GL host, and every
+    /// surface the GPU path cannot take on a GL one.
     fn blit_composed_pixels(
         &mut self,
         n: usize,
@@ -2598,157 +3566,62 @@ impl Comp {
         ph: u32,
         gl_src: Option<u64>,
     ) -> Option<Rect> {
-        let (sw, slot_stride, weave_va) = match self.surf(n) {
+        let (sw, sh_full, slot_stride, weave_va) = match self.surf(n) {
             Some(s) => match &s.weave {
-                Some(w) => (s.w, s.slot_stride, w.va),
+                Some(w) => (s.w, s.h, s.slot_stride, w.va),
                 None => return None,
             },
             None => return None,
         };
-        let content = match self.layout.find_hosting(n) {
-            Some(leaf) => match self.layout.get(leaf) {
-                Some(p) if p.visible => p.content,
-                _ => return None, // hidden: no compose target
-            },
-            None => return None, // unhosted
-        };
-        let screen_va = match &self.screen {
-            Some(s) => s.va,
-            None => return None,
-        };
-        let dw = self.gpu.width as u64;
+        let op = self.compose_geometry(n, x, y, pw, ph)?;
+        // Orientation: a GL source needs NO flip on this path. The
+        // guest-visible readback contract is gallium top-down --
+        // osmesa_read_buffer's y_up=FALSE arm copies STRAIGHT and is the
+        // shipping llvmpipe path, and the same frontend readback works
+        // unchanged on virgl (virglrenderer compensates host-side), so row
+        // 0 of the BO backing is the scene TOP exactly like a weave row 0.
         let src_base = match gl_src {
             Some(va) => va,
             None => weave_va + (slot as u64) * slot_stride,
         };
-        // Orientation: a GL source needs NO flip. The guest-visible
-        // transfer contract is gallium top-down -- osmesa_read_buffer's
-        // y_up=FALSE arm copies STRAIGHT and is the shipping llvmpipe
-        // path, and the same frontend readback works unchanged on virgl
-        // (virglrenderer compensates host-side), so row 0 of the BO
-        // backing is the scene TOP exactly like a weave row 0.
-        let (sh_full, patchwork) = match self.surf(n) {
-            Some(s) => (s.h, s.patchwork),
-            None => return None,
-        };
-        if (sw != content.w || sh_full != content.h) && !patchwork {
-            // Fork 2 + the #56 patchwork latch (both user-voted
-            // 2026-07-21): a FULL-FRAME presenter (patchwork never
-            // latched) LETTERBOXES into its pane -- aspect-preserving
-            // scale, up OR down, centered, nearest-neighbor (crisp for
-            // the retro-game case; cheap integer math). Damage
-            // sub-rects are ignored: any present redraws the FULL
-            // scaled rect -- sound exactly BECAUSE the latch is clear:
-            // every present so far carried whole-frame bytes. A LATCHED
-            // surface is an accumulator (aurora's cell-diff over
-            // rotating weave slots): its slots are PATCHWORK, and
-            // scaling a full slot composes alternating half-stale
-            // frames -- the live-play "utopia pane flipping" bug -- so
-            // any size mismatch takes the damage-clipped CROP path
-            // below instead. (The pre-#56 discriminator was fit-inside
-            // BY SIZE, which cropped a 2px-overflowing split Quake; the
-            // present style is the property that actually matters, and
-            // it is protocol-observable.) Aurora's pane-tracking resize
-            // is the real close (#55). The bars around a letterboxed
-            // rect are the pane background, painted by the chrome pass.
-            // The geometry comes from the SAME letterbox() ptr_hit
-            // inverts -- one authority, no drift.
-            if content.w == 0 || content.h == 0 || sh_full == 0 || sw == 0 {
-                return None;
-            }
-            let (ox, oy, dw2, dh2) = Self::letterbox(sw, sh_full, content.w, content.h);
-            // One-shot geometry diagnostic (per distinct placement).
-            if let Some(su) = self.surf_mut(n) {
-                let sig = (ox, oy, dw2, dh2);
-                if su.lb_logged != Some(sig) {
-                    su.lb_logged = Some(sig);
-                    say!(
-                        "tapestryd: surface {} letterbox {}x{} -> {}x{} @({},{}) in {}x{}",
-                        n, sw, sh_full, dw2, dh2, ox, oy, content.w, content.h
-                    );
-                }
-            }
-            // SAFETY: src reads stay inside the weave slot (sx < sw,
-            // sy < sh by the division bound: lx < dw2 => lx*sw/dw2 <
-            // sw -- ratio math, valid for scale-down as well as up);
-            // dst rows stay inside the screen buffer (letterbox()
-            // bounds dw2 <= cw and dh2 <= ch by construction in BOTH
-            // directions, so the scaled rect is inside content, and
-            // content inside the display by the geometry pass).
-            unsafe {
-                for row in 0..dh2 as u64 {
-                    let sy = (row * sh_full as u64) / dh2 as u64;
-                    let dy = content.y as u64 + oy as u64 + row;
-                    let srow = (src_base + sy * sw as u64 * 4) as *const u32;
-                    let drow = (screen_va
-                        + (dy * dw + (content.x + ox) as u64) * 4)
-                        as *mut u32;
-                    for col in 0..dw2 as u64 {
-                        let sx = (col * sw as u64) / dw2 as u64;
-                        *drow.add(col as usize) = *srow.add(sx as usize);
-                    }
-                }
-            }
-            return Some(Rect {
-                x: content.x + ox,
-                y: content.y + oy,
-                w: dw2,
-                h: dh2,
-            });
-        }
-        // Same-size fast path: the byte-copy blit, damage-clipped.
-        let inter = Rect { x, y, w: pw, h: ph }
-            .intersect(Rect { x: 0, y: 0, w: content.w, h: content.h });
-        if inter.is_empty() {
-            return None;
-        }
-        // SAFETY: src rows lie within the weave slot (damage was validated
-        // against the surface geometry; inter only shrinks it); dst rows
-        // lie within the screen buffer (content is inside the display by
-        // the geometry pass; inter is inside content).
-        unsafe {
-            for row in 0..inter.h as u64 {
-                let sy = inter.y as u64 + row;
-                let dy = content.y as u64 + inter.y as u64 + row;
-                let src = (src_base + (sy * sw as u64 + inter.x as u64) * 4) as *const u8;
-                let dst = (screen_va + (dy * dw + (content.x + inter.x) as u64) * 4) as *mut u8;
-                core::ptr::copy_nonoverlapping(src, dst, inter.w as usize * 4);
-            }
-        }
-        Some(Rect {
-            x: content.x + inter.x,
-            y: content.y + inter.y,
-            w: inter.w,
-            h: inter.h,
-        })
+        self.compose_cpu(op, src_base, sw, sh_full);
+        Some(op.dst)
     }
 
-    /// Push a screen-buffer region to the host resource + display.
+    /// Push a screen-BUFFER region to the host resource + display: the CPU
+    /// composed path's device-visible step, and the chrome's on every path.
+    /// TRANSFER_TO_HOST_2D on both screen kinds (Warp-C C-3): the command
+    /// names a resource, not a kind -- QEMU hands it to
+    /// `virgl_renderer_transfer_write_iov` with the RESOURCE stride, and the
+    /// 3D screen's structural repaints (`screen_flush_full`) have always
+    /// landed through it. The C-2b special case that re-uploaded the WHOLE
+    /// frame per rect on the 3D screen is gone with the CPU fill it served.
     fn screen_push(&mut self, r: Rect) {
         if r.is_empty() {
             return;
         }
-        let (res, is3d) = match &self.screen {
-            Some(s) => (s.res, s.is3d),
+        let res = match &self.screen {
+            Some(s) => s.res,
             None => return,
         };
         let dw = self.gpu.width as u64;
-        if is3d {
-            // TRANSFER_TO_HOST_2D is not the transfer for a 3D resource. The
-            // sync form moves the WHOLE surface rather than the damage rect,
-            // which is a deliberate trade and not an oversight: C-3 deletes the
-            // CPU fill outright (composition becomes host-side blits), so the
-            // rect path here is machinery for a mechanism already scheduled for
-            // removal. It costs a full upload per frame on GL hosts only, and
-            // the CPU path -- which every non-GL host takes -- keeps its rects.
-            let _ = self
-                .gpu
-                .transfer_to_3d_sync(COMPOSITOR_CTX, res, self.gpu.width, self.gpu.height, self.gpu.width * 4);
-            let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
-            return;
-        }
         let off = ((r.y as u64) * dw + r.x as u64) * 4;
         let _ = self.gpu.transfer(res, off, r.x, r.y, r.w, r.h);
+        let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
+    }
+
+    /// The GPU composed path's device-visible step (Warp-C C-3): the pixels
+    /// are already in the screen RESOURCE (the blit landed there), so only
+    /// the display flush is owed -- an upload here would paint the buffer's
+    /// stale bytes over them.
+    fn screen_flush_rect(&mut self, r: Rect) {
+        if r.is_empty() {
+            return;
+        }
+        let res = match &self.screen {
+            Some(s) => s.res,
+            None => return,
+        };
         let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
     }
 
@@ -2779,9 +3652,13 @@ impl Comp {
                     }
                 }
             }
-            Held::Composed(r) => {
+            Held::Composed { cpu, gpu } => {
                 if self.scanout == Scanout::Composed {
-                    self.screen_push(r);
+                    // The CPU-composed region owes upload + flush; the
+                    // GPU-composed one only the flush (its pixels are already
+                    // in the resource, and the buffer's are stale there).
+                    self.screen_push(cpu);
+                    self.screen_flush_rect(gpu);
                 }
             }
         }
@@ -3164,6 +4041,17 @@ impl Comp {
     pub fn frame_tick(&mut self) {
         self.tick += 1;
         let t = self.tick;
+        // Warp-C C-3: a GPU-composition latch asked for a structural repaint
+        // (chrome + the redraw CONFIGURE fan). Run it HERE, at the tick,
+        // never inline in the present dispatch that found the latch: the
+        // fan can wedge-retire a surface, and retiring the surface whose
+        // present is mid-dispatch would leave that dispatch holding a
+        // record that is gone.
+        if self.comp_repaint_pending {
+            self.comp_repaint_pending = false;
+            self.geom_sig = self.geom_sig.wrapping_add(1);
+            self.reconcile();
+        }
         let vis: Vec<usize> = self.layout.visible_hosted().iter().map(|v| v.1).collect();
         for n in vis {
             let ev = Tevent {
@@ -3728,6 +4616,8 @@ impl Comp {
             va: b.va,
             w: b.w,
             h: b.h,
+            comp_imported: b.comp_imported,
+            format: b.format,
         })
     }
 
@@ -4276,6 +5166,7 @@ impl Comp {
             h: 0,
             retiring: false,
             comp_imported: false,
+            format: 0,
         });
         Some(pub_id)
     }
@@ -4545,6 +5436,7 @@ impl Comp {
                 b.size = size;
                 b.w = w;
                 b.h = h;
+                b.format = format;
                 built = true;
                 break;
             }
@@ -5989,6 +6881,17 @@ impl Conn {
                     comp.layout.id_of(comp.layout.focused).unwrap_or(0)
                 ),
             );
+            // Warp-C C-3: which composed-pixel path presents are taking,
+            // and whether the GPU one latched off. Both paths must stay
+            // live wherever the seam exists (4.5.9), so a silent slide to
+            // the CPU one has to be a number, not a boot-log grep.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "composed gpu {} cpu {}\ncomposed-gpu-dead {}\n",
+                    comp.composed_gpu, comp.composed_cpu, comp.comp_gpu_dead as u32
+                ),
+            );
             #[cfg(feature = "test-mode")]
             {
                 let _ = core::fmt::write(
@@ -7102,6 +8005,7 @@ impl Conn {
             || s == "test-mode off"
             || s == "tick"
             || s.starts_with("release")
+            || s.starts_with("probe-screen ")
     }
 
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
@@ -7201,6 +8105,22 @@ impl Conn {
                 comp.frame_tick();
                 return Ok(());
             }
+            // Warp-C C-3: the composed screen's PIXEL ORACLE -- read one
+            // texel of the screen back and say it. Test-mode only (a
+            // client-triggered sync round trip; #880 strip class), ungated
+            // like the other determinism verbs (the in-guest battery is not
+            // the renderer), rate-limited per tick. Not gated on
+            // `test_mode` being ON: the battery's pixel stages run before it
+            // enters determinism mode.
+            if let Some(rest) = s.strip_prefix("probe-screen ") {
+                let mut it = rest.split_ascii_whitespace();
+                let x: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+                let y: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+                if it.next().is_some() {
+                    return Err(p9::E_INVAL);
+                }
+                return comp.probe_screen(x, y);
+            }
             // #178: the warp poisoned-path levers used to ALSO live here,
             // and #175 called them "unreachable" once they moved to the
             // warp W_CTL. That was true only from the PROVER's vantage
@@ -7232,6 +8152,7 @@ impl Conn {
         if s.starts_with("test-mode")
             || s == "tick"
             || s.starts_with("release")
+            || s.starts_with("probe-screen ")
         {
             return Err(p9::E_OPNOTSUPP); // stripped for production (#880)
         }
@@ -7598,25 +8519,60 @@ impl Conn {
                 comp.release_held(n);
             }
         } else if comp.scanout == Scanout::Composed {
-            // Warp-4 composed GL (the ladder's readback fallback): pull
-            // the adopted frame host->guest into the BO's own backing --
-            // synchronously, so the present stays one dispatch (the I-40
-            // premise) -- then compose those pages like any weave.
-            // Full-frame always: GL damage is whole-frame by nature, and
-            // the transfer cost dwarfs any rect bookkeeping.
+            let scr = comp.screen.as_ref().map(|s| (s.res, s.is3d));
+            // Warp-4 composed GL. Warp-C C-3 (GPU-DESIGN 4.5.11): where the
+            // BO is imported into the compositor's context (C-2c) and the
+            // renderer honours a row-mirroring blit for a GL-native source
+            // (the bring-up probe), the frame is composed by ONE blit BO ->
+            // screen inside COMPOSITOR_CTX -- no guest pixel traffic at all.
+            // Otherwise the ladder's readback fallback: pull the adopted
+            // frame host->guest into the BO's own backing -- synchronously,
+            // so the present stays one dispatch (the I-40 premise) -- then
+            // compose those pages like any weave. Full-frame always: GL
+            // damage is whole-frame by nature.
             if let Some(g) = comp.gl_adoption(n) {
                 if hold {
                     return Err(p9::E_OPNOTSUPP); // no GL deferral (see the direct arm)
                 }
-                if comp
-                    .gpu
-                    .transfer_from_3d_sync(g.dev_ctx, g.res_id, g.w, g.h, g.w * 4)
-                    .is_ok()
-                {
-                    if let Some(r) =
-                        comp.blit_composed_pixels(n, 0, 0, 0, w, h, Some(g.va))
+                let mut done = false;
+                let bo_gpu = comp.gpu_compose_ready()
+                    && g.comp_imported
+                    && g.format != 0
+                    && scr.map_or(false, |(_, is3d)| is3d)
+                    && comp.comp_conv.map_or(false, |c| c.bo_u.is_some() || c.bo_s.is_some());
+                if bo_gpu {
+                    match comp.compose_geometry(n, 0, 0, w, h) {
+                        None => done = true, // hidden / unhosted: nothing to compose either way
+                        Some(op) => {
+                            let scr_res = scr.map(|(r, _)| r).unwrap_or(0);
+                            if let Some(b) = comp.compose_gpu_bo_words(op, g.res_id, g.format, g.h, scr_res) {
+                                if comp.submit_blits(COMPOSITOR_CTX, &[b]).is_err() {
+                                    return Err(E_IO);
+                                }
+                                if comp.comp_health_tick() {
+                                    comp.screen_flush_rect(op.dst);
+                                    comp.composed_gpu += 1;
+                                    comp.say_gpu_once(n, "BO", g.res_id, scr_res);
+                                    done = true;
+                                }
+                                // A latch here fell through: the readback
+                                // arm below composes THIS present the CPU way.
+                            }
+                        }
+                    }
+                }
+                if !done {
+                    if comp
+                        .gpu
+                        .transfer_from_3d_sync(g.dev_ctx, g.res_id, g.w, g.h, g.w * 4)
+                        .is_ok()
                     {
-                        comp.screen_push(r);
+                        if let Some(r) =
+                            comp.blit_composed_pixels(n, 0, 0, 0, w, h, Some(g.va))
+                        {
+                            comp.screen_push(r);
+                            comp.composed_cpu += 1;
+                        }
                     }
                 }
                 if let Some(s) = comp.surf_mut(n) {
@@ -7640,34 +8596,117 @@ impl Conn {
                 }
                 return Ok(());
             }
-            // Composed: blit the damage into the screen buffer at the
-            // pane's content rect (a hidden/unhosted surface skips); the
-            // client resource is now stale for a future direct switch.
-            // Held presents blit NOW (weave bytes read only inside this
-            // dispatch) and defer only the screen push.
-            let mut acc: Option<Rect> = None;
-            for &(x, y, pw, ph) in &rects {
-                if let Some(r) = comp.blit_composed_pixels(n, slot, x, y, pw, ph, None) {
-                    if hold {
-                        acc = Some(rect_union(acc.unwrap_or(Rect::ZERO), r));
-                    } else {
-                        comp.screen_push(r);
+            // Composed, a software surface. Warp-C C-3: where the screen is
+            // the 3D one and this generation's slot resources are imported
+            // into the compositor's context (C-2c, `comp_attached`), the
+            // damage is TRANSFERRED into the presented slot's own resource
+            // (the direct arm's transfer, no slot base since C-2d-b) and
+            // composed by BLITs slot -> screen inside COMPOSITOR_CTX; the
+            // screen buffer is never touched. Otherwise -- no compositor ctx,
+            // an unimported generation, a latched context, a hidden surface
+            // -- the CPU way: blit the damage into the screen buffer at the
+            // pane's content rect and push it. Held presents do their pixel
+            // work NOW (weave bytes read only inside this dispatch) and defer
+            // only the device-visible step, per kind.
+            let mut acc_cpu: Option<Rect> = None;
+            let mut acc_gpu: Option<Rect> = None;
+            let mut took_gpu = false;
+            let gpu_path = comp.gpu_compose_ready()
+                && scr.map_or(false, |(_, is3d)| is3d)
+                && comp.surf(n).map_or(false, |s| s.comp_attached)
+                && comp.compose_visible(n);
+            if gpu_path {
+                let scr_res = scr.map(|(r, _)| r).unwrap_or(0);
+                let res = res_ids[slot as usize];
+                for &(x, y, pw, ph) in &rects {
+                    let offset = ((y as u64) * (w as u64) + x as u64) * 4;
+                    if comp.gpu.transfer(res, offset, x, y, pw, ph).is_err() {
+                        return Err(E_IO);
+                    }
+                }
+                let mut ops: Vec<ComposeOp> = Vec::new();
+                for &(x, y, pw, ph) in &rects {
+                    if let Some(op) = comp.compose_geometry(n, x, y, pw, ph) {
+                        let scaled = op.src.w != op.dst.w || op.src.h != op.dst.h;
+                        ops.push(op);
+                        if scaled {
+                            break; // the letterbox arm redraws the whole scaled rect ONCE
+                        }
+                    }
+                }
+                let mut blits: Vec<[u32; 22]> = Vec::with_capacity(ops.len());
+                for op in &ops {
+                    if let Some(b) = comp.compose_gpu_slot_words(*op, res, h, scr_res) {
+                        blits.push(b);
+                    }
+                }
+                if !blits.is_empty() {
+                    if comp.submit_blits(COMPOSITOR_CTX, &blits).is_err() {
+                        return Err(E_IO);
+                    }
+                    if comp.comp_health_tick() {
+                        took_gpu = true;
+                        for op in &ops {
+                            acc_gpu = Some(rect_union(acc_gpu.unwrap_or(Rect::ZERO), op.dst));
+                        }
+                    }
+                    // A latch: the CPU arm below composes THIS present.
+                }
+                if took_gpu {
+                    if !hold {
+                        if let Some(r) = acc_gpu {
+                            comp.screen_flush_rect(r);
+                        }
+                    }
+                    comp.composed_gpu += 1;
+                    comp.say_gpu_once(n, "slot", res, scr_res);
+                    // The slot's host copy now holds exactly what was
+                    // transferred: valid in full iff this present's damage
+                    // covered the surface (the direct arm's own rule); a
+                    // damage-only present leaves it partial and a later direct
+                    // switch expands its first transfer (4.5.8c's decision:
+                    // explicit, not ported by reflex).
+                    let full = rects_cover_full(&rects, w, h);
+                    if let Some(s) = comp.surf_mut(n) {
+                        s.res_stale[slot as usize] = !full;
                     }
                 }
             }
-            if let Some(r) = acc {
+            if !took_gpu {
+                let mut composed = false;
+                for &(x, y, pw, ph) in &rects {
+                    if let Some(r) = comp.blit_composed_pixels(n, slot, x, y, pw, ph, None) {
+                        composed = true;
+                        if hold {
+                            acc_cpu = Some(rect_union(acc_cpu.unwrap_or(Rect::ZERO), r));
+                        } else {
+                            comp.screen_push(r);
+                        }
+                    }
+                }
+                // The census counts presents that COMPOSED (a hidden or
+                // fully clipped present composes nothing on either path).
+                if composed {
+                    comp.composed_cpu += 1;
+                }
+                if let Some(s) = comp.surf_mut(n) {
+                    s.res_stale = [true; WEAVE_SLOTS as usize];
+                }
+            }
+            if acc_cpu.is_some() || acc_gpu.is_some() {
+                let (ncpu, ngpu) = (acc_cpu.unwrap_or(Rect::ZERO), acc_gpu.unwrap_or(Rect::ZERO));
                 let held = match comp.surf(n).and_then(|s| s.held) {
-                    Some(Held::Composed(prev)) => Held::Composed(rect_union(prev, r)),
-                    _ => Held::Composed(r), // a stale Direct hold is superseded
+                    Some(Held::Composed { cpu, gpu }) => Held::Composed {
+                        cpu: rect_union(cpu, ncpu),
+                        gpu: rect_union(gpu, ngpu),
+                    },
+                    _ => Held::Composed { cpu: ncpu, gpu: ngpu }, // a stale Direct hold is superseded
                 };
                 if let Some(s) = comp.surf_mut(n) {
                     s.held = Some(held);
                 }
             } else if !hold {
                 comp.release_held(n);
-            }
-            if let Some(s) = comp.surf_mut(n) {
-                s.res_stale = [true; WEAVE_SLOTS as usize];
             }
         } else {
             // Boot / Off / another surface's Direct: the present completes

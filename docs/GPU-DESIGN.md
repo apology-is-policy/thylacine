@@ -1676,6 +1676,239 @@ the in-flight clause: at C-2c there are no fenced blits, so detach-before-
 unref is the whole ordering, and C-3 must add the fence wait in the commit
 that adds the first blit.
 
+#### 4.5.11 C-3 AS BUILT — composition by blit, on the compositor's sync slot, under measured conventions (landed 2026-08-17)
+
+**What C-3 is.** The Composed present stops filling the screen on the CPU
+where the GPU can compose it. On a GL host, for a surface whose current
+generation is imported into `COMPOSITOR_CTX` (C-2c, `comp_attached`) and a
+3D screen, a present is: TRANSFER_TO_HOST_2D of its damage rects into the
+**presented slot's own resource** (per slot since C-2d-b — the same transfer
+the direct arm issues, no slot base), then one `VIRGL_CCMD_BLIT` per compose
+op slot → screen inside `COMPOSITOR_CTX`, then `RESOURCE_FLUSH` of the union
+of destination rects. The screen BUFFER is not touched; the pixels exist only
+in the screen resource. A GL adoption's consented BO (Warp-4 `present-to`)
+whose import was witnessed composes by ONE blit BO → screen — no readback,
+no CPU pass, no upload: per-frame guest↔host pixel traffic for a windowed GL
+client is zero, which is §4.5.1's whole point. Everything else — a `virgl=0`
+host, an unimported generation, a hidden surface, a latched compositor
+context — takes the CPU path exactly as before (§4.5.9: permanent, and
+identical from outside).
+
+**Chrome stays CPU-painted, uploaded on damage, on BOTH paths.** The screen
+buffer holds the chrome (background, 1-px frames, the D7 strips). A
+structural repaint paints it whole and uploads the whole buffer — content
+blanks and panes heal through the CONFIGURE fan, exactly the pre-C-3
+behaviour — but a focus-only repaint now uploads only the frame and strip
+RECTS it painted (`paint_borders`/`paint_strips` return them): on the GPU
+path the buffer does not hold client pixels, so the whole-buffer push that
+used to serve focus changes would have blanked every pane. On the CPU path
+the buffer mirrors the host, so the rect push is the same pixels; one code
+path, two identical outcomes. The uploads are TRANSFER_TO_HOST_2D on both
+screen kinds — the command names a resource, not a kind, and the 3D screen's
+structural repaints have always landed through it; the C-2b special case
+that re-uploaded the whole frame per rect on a 3D screen is gone with the
+CPU fill it served.
+
+**Why the blits ride the SYNC slot, and what that buys and costs.** §4.5.2
+sketched "all blits for a frame in ONE fenced `submit_3d`; on fence
+completion `SET_SCANOUT` + `RESOURCE_FLUSH`" — a pipelined compositor. C-3
+lands the synchronous refinement of it: `submit_3d_sync` on the compositor
+context, each response before the next command, inside the present
+dispatch. It buys the I-40 property by construction — the present is still
+one dispatch, `ComposeBlit`/`ComposeComplete` close together, the in-flight
+blit set is empty at every retire decision point, so detach-before-unref
+(C-2c) remains the whole ordering and no drain code exists that could be
+wrong; and it costs one controlq round trip per present (~µs on KVM: QEMU
+answers when virglrenderer has decoded and issued the blit, it does not wait
+for the GPU), against the ~4 MB readback + CPU pass + ~4 MB upload it
+replaces for a GL client. What it does NOT give is GL-completion ordering
+across contexts: the slot fill runs on vrend's context 0, the blit on the
+compositor's, and GL orders those only in practice (single-queue V3D). That
+residual is P2 proper — measured 0/500 with the probe proven able to see a
+stale read (§4.5.4) and modelled by `buggy_blit_during_fill` — and its
+failure is a transient stale frame corrected by the next present, never a
+lifetime hazard. Closing it needs a fence the guest can wait on: a
+FENCE-flagged command on this same slot would make `.step` wait for GL
+completion with no new lane machinery, at the cost of QEMU's fence-poll
+latency per present; that, and the fenced pipelined form with a real drain,
+are the C-4+ evolution the spec is already cut for. Both were weighed and
+neither was needed to make composition correct.
+
+**The screen is minted `Y_0_TOP`, and here is why that was a defect and not
+a preference.** C-2b minted the 3D screen flags 0 — the GL-native
+convention, row 0 at the bottom, shown UNFLIPPED at `SET_SCANOUT` — and
+filled it top-down from the CPU by TRANSFER_TO_HOST_3D. Every 2D resource
+QEMU creates carries `Y_0_TOP` and is FLIPPED at scanout; that pairing is
+what shows a Linux guest's fbcon upright on `virtio-gpu-gl` under
+egl-headless, and the flags-0/unflipped pairing is what shows its Weston
+desktop upright. A top-down fill of a flags-0 resource therefore displays
+inverted on a GL display — the C-2b composed screen on thyla-pi, from the
+day it landed, and nothing could see it: #195 (no host pixel capture on the
+GL host) plus a gate that read a say line. C-3's `Y_0_TOP` screen makes the
+3D screen's display convention the 2D screen's, whose uprightness the
+`ls-gfx` pixel gates measure on every LS-CI run; makes slot → screen blits a
+same-convention pair; and makes the CPU-painted chrome reach the 3D screen
+exactly as it reaches the 2D one. The display half of that argument is
+still an anchor, not a measurement — the flip a GL display applies to a
+`Y_0_TOP` scanout is QEMU's code, verified by every Linux guest and by
+nothing of ours — and it is named as such below.
+
+**Conventions are MEASURED at bring-up, never assumed (`BlitConv`) — per
+source SHAPE and per SIZE CLASS, and the second axis was found by the first
+Pi run, not designed in.** The C-2c witness found that on thyla-pi/V3D a
+`RESOURCE_COPY_REGION` from a `Y_0_TOP` source names texel row h−1 for a
+y=0 box, and that the texel-exact copy-image path of another host would
+answer row 0. A blit box is a request in the renderer's coordinates, and
+which edge those coordinates count from is the renderer's to answer per
+resource kind — and, it turns out, per request shape: virglrenderer routes an
+UNSCALED same-format nearest RGBA blit to the texel-exact copy-image path and
+a SCALED one to `glBlitFramebuffer`, and the two paths hold opposite
+conventions for a `Y_0_TOP` pair whose transfers invert rows (guest row r ↔
+GL row h−1−r): copy-image wants the boxes flipped on both sides (`y' = h − y
+− box_h`), the blit path applies that flip itself and wants the raw boxes.
+The first draft of the probe measured one unscaled request, derived one
+convention, and applied it to everything; the battery's panes — A
+letterboxed 1280×800 → 638×398, B 640×400 → 636×398, both SCALED — composed
+vertically swapped, and the pixel oracle read blue at A's centre on the very
+first probe. So `comp_measure_conventions` asks, once, after the compositor
+context and its witness probe come up, for each of (slot, BO) × (unscaled,
+scaled ×2): three seeded probes — a 1×4 slot kind (`resource_create_2d`, the
+`Y_0_TOP` QEMU stamps), a 1×4 BO kind (3D create, flags 0), a 1×16 screen
+kind (3D create, `Y_0_TOP`) — and for each request under test a FRESH
+throwaway context (`CONV_PROBE_CTX_BASE`+, destroyed after), because a
+request the renderer refuses latches the context it ran on and the probe
+deliberately tries requests whose acceptance is the question. Per (shape,
+class): try the request variants in order — plain positive boxes, a
+negative source height, a negative destination height (the gallium flip
+idiom Mesa itself sends for a flipped `glBlitFramebuffer`) — with source
+rows 0..2 (asymmetric, so a source flip shows as rows {2,3} coming instead
+of {0,1}) into destination row 1 raw (a destination flip shows as the run
+landing at 16−1−h instead of 1); take the first whose landing has the ORDER
+the shape needs (a slot lands straight; a BO, whose GL row H−1 is its visual
+top, lands mirrored); read the flips off where it landed and which rows it
+carried; then CONFIRM the derived convention with corrected boxes at an
+asymmetric offset (source rows 1..4 → destination row 3, ×2 for the scaled
+class): exact rows, wanted order, nothing else touched. Every landing is
+SAID as a 16-character row map (`blit-conv slot S plain: rows .0011.......…
+-> run at row 1 src rows 0..2 straight`; `… confirm (plain sf0 df0): rows
+...112233....... -> CONFIRMED`) so one boot log answers what a host does even
+where the decode did not anticipate it; anything the decode cannot place or
+confirm FAILS CLOSED for that (shape, class) — that class composes the CPU
+way — and a host where nothing can be established reports `composed pixels =
+CPU (blit conventions not established)`. The compose path picks the class by
+the op's box sizes (the renderer's own predicate) and issues the request
+through one builder (`blit_request`), so what was measured is what is sent.
+BO composition is further restricted to the probe's own format
+(`B8G8R8A8`); another format is not something the probe measured — readback
+arm. The posture line: `composed pixels = GPU (blit conv: slot U plain sf1
+df1, S plain sf0 df0; bo U plain sf0 df1, S src-neg sf0 df0)` on thyla-pi.
+
+**The compositor verifies its own context, per composed frame, and latches
+off.** After the first GPU-composed present of a tick the compositor runs
+its #240 health copy (mark → sentinel through `COMPOSITOR_CTX`, the C-2c
+instrument) — the §4.5.4b cadence, per composed frame and never per present.
+A failed copy means vrend has latched the compositor's stream (§4.5.4a):
+`comp_gpu_latch` turns GPU composition OFF, sticky, says so, and forces a
+structural repaint (chrome + the redraw CONFIGURE fan) so every pane heals
+through the CPU path; the present that discovered it is composed the CPU
+way in the same dispatch, so no frame is lost to the discovery. Readable as
+`composed-gpu-dead` and the `composed gpu G cpu C` census in the tapestry
+global ctl.
+
+**`res_stale`, decided explicitly (per §4.5.8c's demand).** A GPU-composed
+present leaves the slot's host copy holding exactly what was transferred:
+valid in full iff the present's damage covered the surface — the direct
+arm's own rule — so `res_stale[slot] = !covers_full` there; a damage-only
+present leaves it partial and a later direct switch expands its first
+transfer as before. The CPU-composed arm still marks every slot stale (it
+transferred nothing).
+
+**HOLD (test-mode).** A held GPU-composed present does its pixel work now —
+transfer + blit — and defers only the flush; a held CPU-composed present
+defers upload + flush. `Held::Composed` therefore carries two screen-space
+regions, `cpu` and `gpu`, released as upload+flush and flush respectively —
+uploading the buffer over a GPU-composed region would paint stale bytes over
+the blit. Same posture as `Held::Direct`, whose transfers already land in
+the (scanned-out) resource before release. A GL display that redraws its
+scanout texture on its own refresh could show a held blit before release;
+QEMU's egl-headless renders only on flush and no hold gate runs on a GL
+display, so this is recorded, not worked around.
+
+**The pixel oracle, since the display cannot be captured.** `probe-screen X
+Y` (tapestry global ctl; test-mode, ungated like the other determinism verbs
+because the in-guest battery is not the renderer, rate-limited per tick)
+makes the compositor read texel (X,Y) of the SCREEN back and say it: on the
+3D screen by TRANSFER_FROM_HOST_3D through `COMPOSITOR_CTX` — the only place
+a GPU-composed pixel exists — landed at the pixel's own offset in the buffer
+(idempotent where the buffer mirrors the host, a don't-care the next
+structural repaint rewrites where it does not); on the 2D screen the buffer
+is what was transferred. `tapestryd: screen-probe (X,Y) = #rrggbb via
+readback|backing [scanout S; composed gpu G cpu C]`. The battery probes its
+own sample points at every pixel stage, plus two new legs: `multirect-v` (B
+split TOP/BOTTOM green over yellow — the vertical asymmetry a mirrored or
+displaced blit box cannot fake, which a solid fill and a left/right split
+never show) and `tab-cycled ready` (A hidden by the tab, revealed by the
+cycle, presented red, probed — the C-2d redraw contract on the composed
+path). `tools/warp-host.sh composed` grew terms eight and nine: 9/9 probes
+exact `via readback` with ≥ 1 GPU-composed present on the GL leg (a build
+whose GPU path silently routed everything to the CPU one composes CORRECT
+pixels, and only the census tells that apart), 9/9 exact `via backing` with
+0 on the non-GL leg — the same coordinates and colors on both, the first
+pixel witness that the two composition paths agree from outside.
+
+**Measured on thyla-pi (KVM, V3D 4.2), 2026-08-17.** *Run 1* — one
+convention (measured unscaled: both boxes flipped) applied to every blit:
+`slot confirm: rows [0, T1, T2, T3, 0…]` CONFIRMED on the probe, then the
+battery's panes composed vertically swapped — `screen-probe (960,200) =
+#0000ff` for A's red, `LS-CI FAIL` on the first probe; the 2D leg of the same
+run `9 probes via backing ok`, PASS (the CPU path and the oracle were right;
+the GL convention was wrong for the scaled class). *Run 2* — the per-class
+probe: `slot U plain: rows .............23. -> run at row 13 src rows 2..4
+straight` → `confirm (plain sf1 df1): ...123.......... CONFIRMED`; `slot S
+plain: .0011........... -> run at row 1 src rows 0..2 straight` → `confirm
+(plain sf0 df0): ...112233....... CONFIRMED`; `bo U plain: .............10.
+-> run at row 13 mirrored` → `confirm (plain sf0 df1): ...321.......... CONFIRMED`;
+`bo S plain: .0011........... straight` (rejected for a BO), `bo S src-neg:
+.1100........... mirrored` → `confirm (src-neg sf0 df0): ...332211.......
+CONFIRMED`; posture `composed pixels = GPU (blit conv: slot U plain sf1 df1,
+S plain sf0 df0; bo U plain sf0 df1, S src-neg sf0 df0)`; then A red
+`(960,200)`, B blue `(960,600)`, multirect `(800,600)` green / `(1119,600)`
+yellow, multirect-v `(960,500)` green / `(960,699)` yellow, tab strips
+`(800,2) #3a3a44` / `(1120,2) #7a9ecc`, tab-cycled A red `(960,402)` — `9
+probes via readback ok (composed gpu 35 cpu 0)`, PASS. *Run 3* (the final
+binary, both legs): GL `9 probes via readback ok (composed gpu 34 cpu 0)`, 2D
+`9 probes via backing ok (composed gpu 0 cpu 27)`, verb `C-2b/C-2c/C-3
+COMPOSED-SCREEN GATE: VERIFIED` (nine terms). *Sabotage S1* (the blit never
+submitted, everything else of the GPU path intact): `(960,200) = #101014` —
+the pane background — with `composed gpu 10`, RED on the first probe.
+*Sabotage S2* (every present routed to the CPU path): all nine pixels exact
+`via readback` — the CPU upload into the 3D screen composes right too — but
+`composed gpu 0 cpu 31`, RED on the census term, the discriminator a
+correct-pixels sabotage needs. Run 1 is the third sabotage, the natural one.
+*`quake`* (the standing GL gate): `WARP-4 GATE: VERIFIED`, 969 frames at
+44.9 fps, the BO import witnessed, and the BO composed arm's first live
+execution (`surface 1 composed via GPU blit (BO res 82 -> screen res 76)` in
+the Composed window before the direct switch). *`decomp gl`* (§4.5.1's own
+instrument): composed **36.9 fps (26.3 s)** against the **25.4 fps (38.1 s)**
+of 2026-08-10 on the same host and demo, the direct arm identical at 44.4 fps
+both days — the composed present's cost fell from 16.8 ms to 4.6 ms per
+frame, the windowed-GL overhead from 1.75× to 1.20×. What remains in the 4.6
+ms (blit + flush round trips, the per-tick health copy, egl-headless's own
+display readback) is C-4's to decompose, not to guess.
+
+**What C-3 does NOT establish, stated so nobody over-reads the gate.** The
+DISPLAY orientation of the 3D screen — the oracle reads the resource, and
+`Y_0_TOP` at scanout is QEMU's flip, anchored on Linux guests, not measured
+here (a VNC framebuffer grab on the GL host is the instrument that could;
+#195's residue). GL-completion ordering across contexts (P2, measured not
+proven; the fenced form is the remedy). The BO composed arm's pixels: no
+gate on the Pi drives a GL client into Composed with a known frame — its
+mirror convention is measured by the probe on a seeded flags-0 resource,
+its live path by `decomp gl` (which enters Composed by zoom toggling) as a
+smoke, not a pixel oracle. And the composed path's scaled sampling: GL
+nearest and the CPU loop's floor arithmetic can differ by one source texel
+at scale boundaries, invisible on the battery's solid fills.
+
 ## 5. Placement — where the server lives, per backend
 
 The seam is identical on both; the process topology is not, and both are forced:

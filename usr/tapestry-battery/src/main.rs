@@ -17,9 +17,14 @@
 //                 B reweaves onto its pane's exact size;
 //   multirect   : ONE present carrying TWO rects paints B's halves green
 //                 + yellow -- both quarter points must land (G-6c);
+//   multirect-v : the same, split TOP/BOTTOM (Warp-C C-3): a vertical
+//                 asymmetry that a mirrored or displaced composition blit
+//                 cannot fake -- probed, not dumped;
 //   tabbed      : mode tabbed on [A/B] -- A hides, the D7 glyph-free
 //                 strip paints (segment colors sampled), `tab next`
-//                 cycles the active child (G-6c);
+//                 cycles the active child (G-6c); the revealed A then
+//                 presents red and its center is probed (the C-2d redraw
+//                 contract on the composed path, Warp-C C-3);
 //   zoom        : the focused-pane zoom toggle -- A alone at full
 //                 display (the direct-scanout path), then restore;
 //   move        : directional re-parenting (D6) -- B pulls out of the
@@ -38,6 +43,12 @@
 // Clipping is exercised deliberately: A (display-sized) is larger than
 // its pane -> the compose blit crops it; solid fills keep the pixel
 // asserts exact either way.
+//
+// Every pixel stage also PROBES its sample points through the compositor's
+// `probe-screen` verb (Warp-C C-3): tapestryd reads the texel back from the
+// composed screen -- the resource itself on a GL host, the buffer on the
+// 2D device -- and says it, so the same coordinates the host dumps here are
+// asserted in-guest on the GL host where no display capture exists.
 
 #![no_std]
 #![no_main]
@@ -117,6 +128,16 @@ struct PaneInfo {
 
 /// Parse a layout line like `5* leaf surface=1 [641,1,638,397]` for the
 /// leaf hosting `surf`; returns its pane id + content rect.
+/// Warp-C C-3: ask the compositor to read texel (x, y) of its composed
+/// SCREEN back and say it -- `tapestryd: screen-probe (x,y) = #rrggbb via
+/// readback|backing [...]` -- the pixel oracle the composed-screen gate
+/// asserts on the GL host, where no display capture exists (#195). Best
+/// effort: a refusal (a production build strips the verb) is not a battery
+/// failure; the host-side scenario decides what to require.
+fn probe(root: i64, x: u32, y: u32) {
+    let _ = write_file(root, "ctl", &alloc::format!("probe-screen {} {}", x, y));
+}
+
 fn find_pane(layout: &str, surf: u32) -> Option<PaneInfo> {
     let want = alloc::format!("surface={}", surf);
     for line in layout.lines() {
@@ -402,6 +423,8 @@ pub extern "C" fn rs_main() -> i64 {
     say!("tapestry-battery: structure OK");
     say!("battery: stage1 centers {} {} {} {}",
         pa.x + pa.w / 2, pa.y + pa.h / 2, pb.x + pb.w / 2, pb.y + pb.h / 2);
+    probe(root, pa.x + pa.w / 2, pa.y + pa.h / 2);
+    probe(root, pb.x + pb.w / 2, pb.y + pb.h / 2);
     nap(DUMP_MS);
 
     // Scenario 2 (G-6b, the resize protocol). B's pane content differs
@@ -483,11 +506,46 @@ pub extern "C" fn rs_main() -> i64 {
         }
         say!("battery: multirect ready {} {} {} {}",
             pb.x + bw / 4, pb.y + bh / 2, pb.x + 3 * bw / 4, pb.y + bh / 2);
+        probe(root, pb.x + bw / 4, pb.y + bh / 2);
+        probe(root, pb.x + 3 * bw / 4, pb.y + bh / 2);
         nap(DUMP_MS);
     }
     fill(&mut b, BLUE);
     if b.present(None).is_err() {
         say!("tapestry-battery: FAIL post-multirect restore");
+        return 1;
+    }
+    // Scenario 2b-v (Warp-C C-3): the same two-rect present split TOP /
+    // BOTTOM (green over yellow). A vertical asymmetry is what a solid
+    // fill and a left/right split can never show: a composition that lands
+    // rows mirrored or displaced (a blit box measured from the wrong edge)
+    // reads the wrong color at one of the two quarter points, while every
+    // other stage in this battery reads right. Probed, not dumped: the host
+    // dump scenarios were written for the stages above and skip this line.
+    {
+        let (bw, bh) = (b.w, b.h);
+        let px = b.pixels();
+        for y in 0..bh {
+            for x in 0..bw {
+                px[(y * bw + x) as usize] = if y < bh / 2 { GREEN } else { YELLOW };
+            }
+        }
+        let rects = [
+            Rect { x: 0, y: 0, w: bw, h: bh / 2 },
+            Rect { x: 0, y: bh / 2, w: bw, h: bh - bh / 2 },
+        ];
+        if b.present_rects(&rects).is_err() {
+            say!("tapestry-battery: FAIL multirect-v present");
+            return 1;
+        }
+        say!("battery: multirect-v ready {} {} {} {}",
+            pb.x + bw / 2, pb.y + bh / 4, pb.x + bw / 2, pb.y + 3 * bh / 4);
+        probe(root, pb.x + bw / 2, pb.y + bh / 4);
+        probe(root, pb.x + bw / 2, pb.y + 3 * bh / 4);
+    }
+    fill(&mut b, BLUE);
+    if b.present(None).is_err() {
+        say!("tapestry-battery: FAIL post-multirect-v restore");
         return 1;
     }
 
@@ -526,6 +584,8 @@ pub extern "C" fn rs_main() -> i64 {
         let sax = cx + cw / 4;
         let sbx = cx + 3 * cw / 4;
         say!("battery: tabbed ready {} {} {}", sy, sax, sbx);
+        probe(root, sax, sy);
+        probe(root, sbx, sy);
         nap(DUMP_MS);
     }
     // Cycle the active child: A reveals, B hides, focus follows into A.
@@ -548,6 +608,21 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
     say!("battery: tab cycled");
+    // Warp-C C-3 / the C-2d redraw contract on the COMPOSED path: A was
+    // hidden (its presents composed nothing) and is revealed by the cycle;
+    // its next present must land in the revealed pane. Present A red, then
+    // probe the pane's center: the composed-screen gate requires red on
+    // both device legs.
+    {
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        if let Some(ta) = find_pane(&fresh, a.id) {
+            fill(&mut a, RED);
+            let _ = a.present(None);
+            say!("battery: tab-cycled ready {} {}", ta.x + ta.w / 2, ta.y + ta.h / 2);
+            probe(root, ta.x + ta.w / 2, ta.y + ta.h / 2);
+            nap(DUMP_MS);
+        }
+    }
     // Restore splitv; heal both.
     if !write_file(root, "layout", &alloc::format!("mode {} splitv", pa.id)) {
         say!("tapestry-battery: FAIL mode splitv restore");

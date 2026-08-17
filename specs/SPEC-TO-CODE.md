@@ -1763,7 +1763,9 @@ distinct states); the KERNEL SHARE HALF landed at G-2** (the DMA-weave
 `SYS_DMA_CREATE_WEAVE`/`SYS_WEFT_UNSHARE` user-signed-off 2026-07-19); **the
 SERVER HALF landed at G-3** (tapestryd stage 0 + the R2-F3 reaper — the map
 below); **the GPU-COMPOSED path landed model-first at Warp-C C-1**
-(2026-08-16, GPU-DESIGN §4.5.6 — model BEFORE impl; the impl is C-2/C-3).
+(2026-08-16, GPU-DESIGN §4.5.6 — model BEFORE impl); **its impl sites landed
+at C-2c (Attach/Detach) and C-3 (ComposeBlit/ComposeComplete, 2026-08-17)**
+— the binding paragraph below.
 Clean cfg GREEN 5413 distinct (unperturbed across G-2 and G-3 — neither impl
 half changed the model — and unperturbed across C-1, which is the measured
 control on that extension being additive rather than a rewrite); liveness
@@ -1794,6 +1796,42 @@ and the sites they will bind at C-2/C-3:
   §28 I-40 row pre-recorded as owed. Modeled as an OMITTED CONJUNCT under
   `BUGGY_DRAIN_SKIPPED` rather than as a twin buggy action, so the buggy arm
   differs from the correct one in exactly the conjunct under test.
+
+### The C-2c/C-3 binding (landed 2026-08-17; the composed actions have impl sites)
+
+- **`Attach(g)`** ↔ `Comp::comp_import_slots` (every slot resource of a
+  generation, at `alloc_weave`, WITNESSED by a slot→sentinel copy inside
+  `COMPOSITOR_CTX`, C-2c) and `Comp::comp_import_bo` (the GL adoption's
+  consented BO at `present-to`). The recorded fact is `Surface.comp_attached`
+  / `WarpBo.comp_imported`, false = fail closed. **`Detach(g)`** ↔
+  `Comp::comp_detach_res` from `release_gen`, `retire` step (4),
+  `wbo_retire`, `comp_release_bo`, `comp_release_consents_for` — always
+  BEFORE the resource's unref.
+- **`ComposeBlit(g)` / `ComposeComplete(g)`** ↔ C-3's Composed present arm
+  (`Conn::present`): TRANSFER_TO_HOST_2D of the damage into the presented
+  slot's own resource, then `Comp::submit_blits(COMPOSITOR_CTX, …)` — one
+  `VIRGL_CCMD_BLIT` per compose op, box-corrected by the measured
+  `BlitConv` — on the compositor context's **SYNCHRONOUS slot**
+  (`Gpu::submit_3d_sync`), then `RESOURCE_FLUSH`. The C-1 paragraph above
+  bound these to "one fenced `submit_3d` … the fence retiring"; the landed
+  form is the synchronous REFINEMENT of that: the blit's response arrives
+  inside the present dispatch, so `ComposeBlit` and `ComposeComplete` close
+  in one dispatch and the in-flight blit set is empty at every retire point
+  — the same by-construction shape as `intransfer = 0`. `filled[g]` ↔ the
+  transfer that precedes the blit in the same dispatch (a blit never names a
+  slot the present did not just fill, and never a resource without
+  `comp_attached`).
+- **`DrainedOfBlits(g)` on `ServerRelease` + `Free`** ↔ holds by
+  construction at C-3 (nothing is in flight past a response; the GL object
+  lifetime rules cover the host side of an issued blit). The **fenced,
+  pipelined** form — flush riding fence completion, the drain as a real wait
+  — is the C-4+ evolution and must implement it before touching retire;
+  `drain_skipped` stays its counterexample.
+- The **exclusion** the obligation below asked for landed at C-2d-b as ONE
+  HOST RESOURCE PER SLOT (GPU-DESIGN 4.5.8): a fill of slot j and a blit of
+  slot i (i≠j) touch different objects; same-slot fill-vs-blit is separated
+  by the synchronous present (blit response before the CQE that recycles
+  the slot) — the GL-execution residual is P2, measured 0/500 (4.5.4).
 
 **A design obligation C-1 surfaced for C-2/C-3, before any code:** the D1
 recycle gate does not survive the composed path unchanged. tapestryd

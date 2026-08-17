@@ -1,7 +1,10 @@
 #!/usr/bin/expect -f
-# Warp-C C-2b's verification driver: force the compositor into COMPOSED
-# scanout on a host that has virgl, and assert the screen resource was
-# minted on the arm the host's capability implies.
+# Warp-C C-2b/C-2c/C-3's verification driver: force the compositor into
+# COMPOSED scanout on a host that has virgl, assert the screen resource was
+# minted on the arm the host's capability implies, that the hosted surfaces
+# were imported into the compositor's context, and -- C-3 -- that the pixels
+# the compositor composed are the ones the clients painted, read back from
+# the screen itself.
 #
 # WHY THIS EXISTS AT ALL. C-2b makes the compositor's screen a 3D resource
 # in its own virgl context (GPU-DESIGN 4.5.2), but `alloc_screen` runs only
@@ -65,16 +68,15 @@
 # bind with its verdict (`res N bound` / `BIND FAILED`), so this scenario's
 # fifth term is that the resource the display was handed IS the minted screen.
 #
-# WHAT THIS DOES NOT PROVE, stated so a later reader does not over-read it.
-# It proves the compositor MINTED the screen on the arm the host's capability
-# implies, that pixels round-trip through it, and that the display was bound
-# to it. It says NOTHING about composed pixels: the screen is still CPU-filled
-# at C-2b (only its host-side representation changed), so correct pixels here
-# would prove the CPU path, not the GL one. Pixel evidence needs screendumps,
-# which need QMP -- deliberately off below, because this gate wants the
-# cheapest boot that reaches the mint. C-3, which replaces the CPU fill with
-# per-frame blits, is where the pixel oracle becomes load-bearing and where
-# this scenario grows a QMP arm.
+# WHAT THE FIRST THREE CLAIMS DO NOT PROVE, stated so a later reader does not
+# over-read them. They prove the compositor MINTED the screen on the arm the
+# host's capability implies, that pixels round-trip through it, that the
+# display was bound to it, and that the hosted surfaces' slots are imported
+# into the compositor context. They say NOTHING about composed pixels. That
+# is claim 4 (Warp-C C-3, below): the pixel oracle. This header used to say
+# it would grow "a QMP arm" -- it cannot: QMP screendump reports no surface
+# under egl-headless (#195), so the oracle is IN-GUEST -- the compositor reads
+# its own screen resource back and says the texel.
 #
 # WARP-C C-2c (GPU-DESIGN 4.5.10) RIDES THE SAME TWO LEGS, as a third claim.
 # The compositor imports every hosted surface's slot resources into its own
@@ -109,6 +111,7 @@
 #   WARP-COMPOSED SCREEN: res N <arm> (WxH)
 #   WARP-COMPOSED BOUND: res N
 #   WARP-COMPOSED ATTACH: witnessed K surfaces | skipped (no compositor ctx)
+#   WARP-COMPOSED PIXELS: 9 probes via <readback|backing> ok (composed gpu G cpu C)
 #   WARP-COMPOSED PASS
 #
 # Runs ON the GL host (Linux; lib.exp takes the direct-pty transport).
@@ -332,7 +335,114 @@ if {$want_posture eq "GPU"} {
     lc_step "C-2c: no import on the device without a compositor ctx (the control)"
 }
 
+# Claim 4 (Warp-C C-3, GPU-DESIGN 4.5.11): COMPOSED PIXELS. The battery
+# paints known colors and, at every pixel stage, asks the compositor to read
+# the sample texels back from the SCREEN through `probe-screen` (test-mode
+# ctl verb): on the GL device the value comes from the 3D screen RESOURCE by
+# TRANSFER_FROM_HOST_3D through the compositor context (`via readback`) --
+# the only place a GPU-composed pixel exists, so this is the composition
+# oracle where no display capture exists (#195); on the 2D device it is the
+# screen buffer (`via backing`), the CPU path's truth. Same coordinates, same
+# colors, both legs -- the two paths must look identical from outside (4.5.9),
+# and this is the first pixel witness of that. Every probe must read the
+# stage's color and come `via` the leg's mechanism; the GL leg must have
+# GPU-composed >= 1 present by the end (a build whose GPU path silently
+# routed everything to the CPU one composes CORRECT pixels, and only the
+# census tells that apart), the 2D leg none.
+#   stage1      : A red at its center (letterbox), B blue at its center;
+#   multirect   : B green (left quarter) / yellow (right quarter);
+#   multirect-v : B green (top quarter) / yellow (bottom quarter) -- the
+#                 vertical split a mirrored/displaced blit box cannot fake;
+#   tabbed      : the strip segments (border grey / focus blue) -- chrome,
+#                 CPU-painted and uploaded on BOTH paths;
+#   tab-cycled  : A red again after being hidden and revealed (the C-2d
+#                 redraw contract on the composed path).
+set want_via [expr {$want_posture eq "GPU" ? "readback" : "backing"}]
+set probes_ok 0
+set last_gpu -1
+set last_cpu -1
+proc want_probe {x y color stage} {
+    global want_via probes_ok last_gpu last_cpu dev
+    set timeout 60
+    expect {
+        -re {tapestryd: screen-probe \((\d+),(\d+)\) = #([0-9a-f]{6}) via (.+?) \[scanout ([^;]+); composed gpu (\d+) cpu (\d+)\][\r\n]} {
+            set px $expect_out(1,string)
+            set py $expect_out(2,string)
+            set got $expect_out(3,string)
+            set via $expect_out(4,string)
+            set sc  $expect_out(5,string)
+            set last_gpu $expect_out(6,string)
+            set last_cpu $expect_out(7,string)
+            if {$px != $x || $py != $y} {
+                lc_fail "$stage: probe answered for ($px,$py), asked ($x,$y) on $dev"
+            }
+            if {$via ne $want_via} {
+                lc_fail "$stage: probe ($x,$y) came via '$via' on $dev, want '$want_via'"
+            }
+            if {$sc ne "composed"} {
+                lc_fail "$stage: probe ($x,$y) taken while scanout is '$sc' on $dev -- the screen is not what the display shows"
+            }
+            if {$got ne $color} {
+                lc_fail "$stage: pixel ($x,$y) = #$got on $dev, want #$color (via $via; composed gpu $last_gpu cpu $last_cpu)"
+            }
+            incr probes_ok
+        }
+        -ex "tapestry-battery: FAIL" { lc_fail_detail "the battery failed at $stage" }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction at $stage" }
+        timeout { lc_fail "$stage: no screen-probe line for ($x,$y) within 60s on $dev" }
+        eof { lc_fail "qemu exited at $stage on $dev" }
+    }
+}
+proc want_stage {pattern nvars stage} {
+    upvar 1 out out
+    global dev
+    set timeout 120
+    expect {
+        -re $pattern {
+            set out {}
+            for {set i 1} {$i <= $nvars} {incr i} { lappend out $expect_out($i,string) }
+        }
+        -ex "tapestry-battery: FAIL" { lc_fail_detail "the battery failed before $stage" }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction before $stage" }
+        timeout { lc_fail "battery never reached $stage on $dev" }
+        eof { lc_fail "qemu exited before $stage on $dev" }
+    }
+}
+want_stage {battery: stage1 centers (\d+) (\d+) (\d+) (\d+)[\r\n]} 4 "stage1"
+lassign $out ax ay bx by
+want_probe $ax $ay ff0000 "stage1 A (letterbox, red)"
+want_probe $bx $by 0000ff "stage1 B (letterbox, blue)"
+want_stage {battery: multirect ready (\d+) (\d+) (\d+) (\d+)[\r\n]} 4 "multirect"
+lassign $out gx gy yx yy
+want_probe $gx $gy 00ff00 "multirect left (green)"
+want_probe $yx $yy ffff00 "multirect right (yellow)"
+want_stage {battery: multirect-v ready (\d+) (\d+) (\d+) (\d+)[\r\n]} 4 "multirect-v"
+lassign $out tx ty ux uy
+want_probe $tx $ty 00ff00 "multirect-v top (green)"
+want_probe $ux $uy ffff00 "multirect-v bottom (yellow)"
+want_stage {battery: tabbed ready (\d+) (\d+) (\d+)[\r\n]} 3 "tabbed"
+lassign $out sy sax sbx
+want_probe $sax $sy 3a3a44 "tab strip A (border)"
+want_probe $sbx $sy 7a9ecc "tab strip B (focus)"
+want_stage {battery: tab-cycled ready (\d+) (\d+)[\r\n]} 2 "tab-cycled"
+lassign $out cx cy
+want_probe $cx $cy ff0000 "tab-cycled A revealed (red)"
+if {$probes_ok != 9} {
+    lc_fail "only $probes_ok/9 pixel probes passed on $dev"
+}
+if {$want_posture eq "GPU"} {
+    if {$last_gpu < 1} {
+        lc_fail "GL leg: composed gpu $last_gpu -- no present was GPU-composed (the pixels came out right through the CPU path)"
+    }
+} else {
+    if {$last_gpu != 0} {
+        lc_fail "2D leg: composed gpu $last_gpu on a device with no compositor ctx"
+    }
+}
+puts "\nWARP-COMPOSED PIXELS: 9 probes via $want_via ok (composed gpu $last_gpu cpu $last_cpu)\n"
+lc_step "C-3: 9/9 pixel probes exact via $want_via; composed gpu $last_gpu cpu $last_cpu"
+
 puts "\nWARP-COMPOSED PASS\n"
 lc_pass "composed-screen: $dev -> posture $got_posture -> screen res $got_res\
-         $got_arm at ${got_w}x${got_h} (the C-2b arm, exercised)"
+         $got_arm at ${got_w}x${got_h} (the C-2b arm, exercised; C-3 pixels via $want_via)"
 lc_vm_kill

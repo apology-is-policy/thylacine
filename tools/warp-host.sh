@@ -9,7 +9,7 @@
 #   tools/warp-host.sh bench     # llvmpipe GLQuake baseline (paced + unpaced x2)
 #   tools/warp-host.sh capset    # virtio-gpu-gl-pci + egl-headless capset probe
 #   tools/warp-host.sh prove     # Warp-2 gate: /warp-prove on the virgl device
-#   tools/warp-host.sh composed  # Warp-C C-2b + C-2c gate: the composed screen's arm + the witnessed imports, GL vs 2D (both legs)
+#   tools/warp-host.sh composed  # Warp-C C-2b + C-2c + C-3 gate: the composed screen's arm + the witnessed imports + the composed pixels read back, GL vs 2D (both legs)
 #   tools/warp-host.sh reject    # #240: is a REJECTED command stream observable in-guest?
 #   tools/warp-host.sh p1b       # GPU-DESIGN 4.5.4: does ctx_attach permit a cross-context blit? (host-side, no guest)
 #   tools/warp-host.sh p2        # GPU-DESIGN 4.5.4: does the blit observe the client's FINISHED frame? (host-side)
@@ -278,10 +278,24 @@ composed)
         echo "C-2c GATE FAIL -- the non-GL leg did not declare the import skipped"
         ok=0
     fi
+    # Eighth + ninth terms (Warp-C C-3, GPU-DESIGN 4.5.11): the composed
+    # PIXELS. Nine probes per leg read back exact -- through the 3D screen
+    # RESOURCE on the GL leg (`via readback`, and >= 1 present GPU-composed
+    # by the census), through the screen buffer on the non-GL leg (`via
+    # backing`, none GPU-composed). Same coordinates, same colors: the two
+    # composition paths agree from outside, measured.
+    if ! grep -qE 'WARP-COMPOSED PIXELS: 9 probes via readback ok \(composed gpu [1-9][0-9]* cpu [0-9]+\)' "$out"; then
+        echo "C-3 GATE FAIL -- the GL leg's 9 pixel probes did not read back exact via the 3D screen with >= 1 GPU-composed present"
+        ok=0
+    fi
+    if ! grep -qE 'WARP-COMPOSED PIXELS: 9 probes via backing ok \(composed gpu 0 cpu [0-9]+\)' "$out"; then
+        echo "C-3 GATE FAIL -- the non-GL leg's 9 pixel probes did not read exact via the buffer with 0 GPU-composed presents"
+        ok=0
+    fi
     if [ "$ok" != 1 ]; then
         exit 1
     fi
-    echo "C-2b/C-2c COMPOSED-SCREEN GATE: VERIFIED (3D screen + witnessed imports on GL, 2D + no import without -- discriminates)"
+    echo "C-2b/C-2c/C-3 COMPOSED-SCREEN GATE: VERIFIED (3D screen + witnessed imports + 9/9 exact readback pixels on GL, 2D + no import + 9/9 exact buffer pixels without -- discriminates)"
     ;;
 prove)
     out="$REPO_ROOT/build/warp-prove.log"

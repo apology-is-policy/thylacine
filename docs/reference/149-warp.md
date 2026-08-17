@@ -1261,3 +1261,56 @@ What it does not cover: composed PIXELS (the screen is
 still CPU-filled; C-3 owns the first composition blit and grows from
 `comp_copy_px`), the in-flight clause (no fenced blits exist yet), and the
 focused I-40/I-45 audit on `usr/tapestryd`, still owed.
+
+The Warp-C **C-3** gate is the same scenario's fourth claim — the composed
+PIXELS — plus two battery legs (`GPU-DESIGN.md` §4.5.11). C-3 replaces the
+CPU fill of the composed screen: on a GL host a software surface's present
+transfers its damage into the presented slot's own resource and composes by
+`VIRGL_CCMD_BLIT` slot → screen inside `COMPOSITOR_CTX` on the compositor's
+SYNC slot (`submit_blits`, one dispatch: transfer → blit → flush, so the
+I-40 by-construction shape is kept and detach-before-unref stays the whole
+retire ordering); a witnessed GL adoption composes by one blit BO → screen;
+chrome stays CPU-painted and uploaded on damage on both paths (a focus-only
+repaint uploads only the frame/strip rects — the whole-buffer push would
+blank every pane on the GPU path); the screen is minted `Y_0_TOP` (the 2D
+screen's display convention; C-2b's flags-0 screen displayed a top-down CPU
+fill inverted on a GL display, invisible under #195). Box conventions are
+MEASURED at bring-up per (source shape × size class) with a confirmation
+each (`blit-conv <slot|bo> <U|S> <variant>: rows <16-char map> -> …`,
+`… confirm (…): rows … -> CONFIRMED`) on throwaway contexts, fail closed per
+class; the compose path picks the class by the op's box sizes and issues
+through the same builder. The compositor runs its #240 health copy once per
+tick after a GPU-composed present and latches GPU composition OFF (sticky,
+`composed-gpu-dead`, a structural repaint at the next tick) on a failure.
+**The pixel oracle** is `probe-screen X Y` (tapestry global ctl, test-mode,
+ungated like the determinism verbs, rate-limited): the compositor reads texel
+(X,Y) of the SCREEN back — `via readback` (TRANSFER_FROM_HOST_3D through the
+compositor ctx, the only place a GPU-composed pixel exists) on the 3D screen,
+`via backing` on the 2D one — and says `screen-probe (X,Y) = #rrggbb via …
+[scanout S; composed gpu G cpu C]`. The battery probes its own sample points
+at every pixel stage and grew `multirect-v` (B split top/bottom green over
+yellow — the vertical asymmetry a mirrored/displaced box cannot fake) and
+`tab-cycled ready` (A hidden by the tab, revealed by the cycle, presented
+red, probed — the C-2d redraw contract on the composed path). Gate terms:
+9/9 probes exact `via readback` with `composed gpu ≥ 1` on the GL leg (a
+build whose GPU path silently routed everything to the CPU one composes
+CORRECT pixels; only the census tells that apart), 9/9 exact `via backing`
+with `gpu 0` on the non-GL leg — verb terms eight/nine. **Measured on
+thyla-pi (KVM, V3D), 2026-08-17.** Run 1, one convention for both classes
+(measured unscaled, applied everywhere): the battery's panes — both SCALED
+(A 1280×800 → 638×398, B 640×400 → 636×398: the 1-px frame inset makes every
+"matching" pane the scaled class) — composed vertically swapped; the first
+probe read `(960,200) = #0000ff` for A's red, `LS-CI FAIL` — the oracle at
+real geometry caught what the probe's own (unscaled) confirmation could not.
+Run 2, per-class: `slot U plain sf1 df1` (the copy-image path, both sides
+inverting), `slot S plain sf0 df0` (glBlitFramebuffer, raw boxes), `bo U
+plain sf0 df1` (copy-image lands a GL-native source mirrored on its own), `bo
+S src-neg sf0 df0` (the plain scaled request landed STRAIGHT `.0011…`; the
+negative-source-height idiom mirrors it), all four CONFIRMED; then A red
+`(960,200)`, B blue `(960,600)`, multirect green/yellow `(800,600)/(1119,600)`,
+multirect-v green/yellow `(960,500)/(960,699)`, tab strips `#3a3a44`/`#7a9ecc`
+at `(800,2)/(1120,2)` (chrome through the 2D transfer into the 3D screen),
+tab-cycled A red `(960,402)` — `9 probes via readback ok (composed gpu 35 cpu
+0)`, GL leg PASS. The 2D leg (run 1's, the CPU path with the same battery)
+`9 probes via backing ok (composed gpu 0 cpu N)`, PASS. Run 3 (both legs on
+the final binary) + the sabotages: see the C-3 status row.

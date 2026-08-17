@@ -197,7 +197,13 @@ const CURSOR_USED_OFF: u64 = 0xA00;
 const REQ_OFF: u64 = 0xB00;
 const RESP_OFF: u64 = 0x1000;
 
-const REQ_REGION_LEN: u32 = 0x100;
+/// The sync slot's request buffer: everything between the cursorq's used
+/// ring and the response page. 0x100 -> 0x500 at Warp-C C-3: the compositor's
+/// composition stream rides this slot (`submit_3d_sync`), and one present can
+/// carry several VIRGL_CCMD_BLITs (22 dwords each) -- 0x100 admitted two. The
+/// layout assert below is what makes the width safe: the buffer still ends
+/// where the device-writable response region begins.
+const REQ_REGION_LEN: u32 = 0x500;
 const RESP_REGION_LEN: u32 = 0x1000;
 
 const _: () = {
@@ -1616,9 +1622,10 @@ impl Gpu {
     /// client streams -- those keep the fenced lane and its admission.
     pub fn submit_3d_sync(&mut self, ctx_id: u32, stream: &[u8]) -> Result<(), Error> {
         // Audit F6: the fenced twin bounds its payload against the slot
-        // (`fenced_begin`); this lane had no bound at all. Unreachable
-        // today -- the sole caller passes a fixed 56 bytes -- but the next
-        // caller is who gets hurt, and the overrun is silent: past
+        // (`fenced_begin`); this lane had no bound at all. It was
+        // unreachable when the sole caller passed a fixed 56 bytes; the
+        // compositor's C-3 blit stream is the next caller (it chunks at
+        // `sync_stream_max`), and the overrun is silent: past
         // REQ_REGION_LEN the copy walks into the DEVICE-WRITABLE response
         // region, so the failure would surface as a corrupted response
         // rather than as this request being too big.
@@ -1657,16 +1664,36 @@ impl Gpu {
         h: u32,
         stride: u32,
     ) -> Result<(), Error> {
+        self.transfer_to_3d_box_sync(ctx_id, res_id, 0, 0, w, h, 0, stride)
+    }
+
+    /// The RECT form (Warp-C C-3): box (x, y, w, h) at level 0, read from
+    /// the attached backing at `offset` with row `stride` -- the 3D twin of
+    /// `transfer` (TRANSFER_TO_HOST_2D), which is how the composed screen's
+    /// CPU-painted chrome and its CPU-composed surfaces reach a 3D screen
+    /// without re-uploading the whole frame. Same sync slot, same ordering.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transfer_to_3d_box_sync(
+        &mut self,
+        ctx_id: u32,
+        res_id: u32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        offset: u64,
+        stride: u32,
+    ) -> Result<(), Error> {
         let req_va = self.ring_va + REQ_OFF;
         unsafe {
             write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, ctx_id);
-            w32(req_va + 24, 0); // box.x
-            w32(req_va + 28, 0); // box.y
+            w32(req_va + 24, x); // box.x
+            w32(req_va + 28, y); // box.y
             w32(req_va + 32, 0); // box.z
             w32(req_va + 36, w);
             w32(req_va + 40, h);
             w32(req_va + 44, 1); // box.d
-            w64(req_va + 48, 0); // offset into the backing
+            w64(req_va + 48, offset); // offset into the backing
             w32(req_va + 56, res_id);
             w32(req_va + 60, 0); // level
             w32(req_va + 64, stride);
@@ -1742,16 +1769,35 @@ impl Gpu {
         h: u32,
         stride: u32,
     ) -> Result<(), Error> {
+        self.transfer_from_3d_box_sync(ctx_id, res_id, 0, 0, w, h, 0, stride)
+    }
+
+    /// The RECT readback (Warp-C C-3): box (x, y, w, h) at level 0 into the
+    /// attached backing at `offset` with row `stride`. The composed screen's
+    /// pixel oracle (`probe-screen`) reads ONE texel this way, and the
+    /// bring-up convention probe reads its few rows -- never a frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transfer_from_3d_box_sync(
+        &mut self,
+        ctx_id: u32,
+        res_id: u32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        offset: u64,
+        stride: u32,
+    ) -> Result<(), Error> {
         let req_va = self.ring_va + REQ_OFF;
         unsafe {
             write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, ctx_id);
-            w32(req_va + 24, 0); // box.x
-            w32(req_va + 28, 0); // box.y
+            w32(req_va + 24, x); // box.x
+            w32(req_va + 28, y); // box.y
             w32(req_va + 32, 0); // box.z
             w32(req_va + 36, w);
             w32(req_va + 40, h);
             w32(req_va + 44, 1); // box.d
-            w64(req_va + 48, 0); // offset into the backing
+            w64(req_va + 48, offset); // offset into the backing
             w32(req_va + 56, res_id);
             w32(req_va + 60, 0); // level
             w32(req_va + 64, stride);
@@ -1763,6 +1809,12 @@ impl Gpu {
             GPU_CTRL_HDR_LEN,
             VIRTIO_GPU_RESP_OK_NODATA,
         )
+    }
+
+    /// The largest command stream `submit_3d_sync` admits (Warp-C C-3): the
+    /// compositor chunks a present's blit stream at this bound.
+    pub fn sync_stream_max() -> usize {
+        REQ_REGION_LEN as usize - GPU_CTRL_HDR_LEN as usize - 8
     }
 
     /// The serve loop's non-blocking completion pump (Warp-2d).
