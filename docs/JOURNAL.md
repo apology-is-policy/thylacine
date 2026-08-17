@@ -866,7 +866,7 @@ builds + suite + LS-CI + the SMP halves); the C-2c cargo check/build ran at
 `-j2` under an explicit yes on yip 0024, everything else waited for the
 release; the Pi lease was mine (`hold pi`) for the whole verification.
 
-### C-3 — the compositor composes by blit, and the pixel oracle caught the model on its first probe (after the self-compaction at `115cbc5a`)
+### C-3 — the compositor composes by blit, and the pixel oracle caught the model on its first probe (`7296bf07`; after the self-compaction at `115cbc5a`)
 
 Resumed from the third self-compaction (`115cbc5a`, everything pushed; the
 note said "next is C-3, a large chunk", and it was).
