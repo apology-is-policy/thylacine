@@ -443,7 +443,7 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
 
 **Landed (newest first, 2026-08-17 back to aux#240):**
 
-- *(pending)* -- the `c8ab2744` audit close (Fable 5 round: 0 P0 / 1 P1 / 1 P2 /
+- `93a91c6c` -- the `c8ab2744` audit close (Fable 5 round: 0 P0 / 1 P1 / 1 P2 /
   2 P3, ALL pre-existing three lines above the audited arm). F1 [P1]: both
   class scans (terminate + STOP) now gate every hit per note on
   `notes_proc_default_applies(p, name)` -- the terminate scan was phenotype-

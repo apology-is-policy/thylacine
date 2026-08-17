@@ -36,7 +36,7 @@ do not re-derive it" — the Fable 5 round on `c8ab2744` had reported the audite
 change CLEAN and four PRE-EXISTING findings three lines above it, and the fix
 plan was already written in `memory/audit_15_closed_list.md`.
 
-### The four fixes (one commit; hash in `docs/phase7-status.md`)
+### The four fixes (`93a91c6c`)
 
 - **F1 [P1] — both class scans read the sigtab per note.** The terminate scan
   gated on `handler_va` (0 for every Linux guest) and returned the first
