@@ -768,16 +768,123 @@ C-2c lands WITH the first blit witness. The C-2c design draft
 compositor in the prior art does it that way) is written and waits on that
 correction; it goes into GPU-DESIGN as §4.5.10 with the next chunk.
 
+### C-2c — the compositor imports what it composes, and the import is witnessed (after the self-compaction at `8c20b1f8`)
+
+Resumed from the second self-compaction of the run (`8c20b1f8`, all pushed;
+the note said "next is C-2c WITH its blit witness", and that is what this is).
+
+**What C-2c is, in one line:** at `alloc_weave` tapestryd now
+`CTX_ATTACH_RESOURCE`s every slot resource of a generation into
+`COMPOSITOR_CTX`, and at `present-to` it imports the GL adoption's consented
+BO — the client handing its buffer to the compositor is the whole grant, no
+client verb (§4.5.10) — and every import is revoked BEFORE the resource's
+unref on every death path (`release_gen`, `retire`, `wbo_retire`, `present-to
+off`/replace, the consented surface's retire).
+
+**The witness, and why it is not the one the design paragraph drew.**
+§4.5.4c had already established that `CTX_ATTACH_RESOURCE`'s OK attests
+nothing, so C-2c had to land with a pixel witness. The design said "blit a box
+of the slot into the screen and read the screen back". Built instead: the
+compositor context's own #240 mark/sentinel pair (`warp_probe_build
+(COMPOSITOR_CTX)`, minted with the ctx), and per slot: seed tokens into the
+slot's host copy through the present path's own `TRANSFER_TO_HOST_2D` (the
+guest pixels are borrowed while NO client mapping of the weave exists yet —
+`alloc_weave` runs before the Tweft that maps it is answered — then zeroed),
+poison the sentinel, `RESOURCE_COPY_REGION` slot → sentinel inside
+`COMPOSITOR_CTX`, read the sentinel back. A 1×1 compositor-owned target
+instead of the screen: same claim (pixels through the compositor context or
+nothing), the direction C-3 will use (the slot as SOURCE), no screen pixels
+to save/restore, no question about the screen's coordinates — and it made
+import time the natural site, since the reason the design gave for composed
+entry ("the screen may not exist yet at import") no longer applied.
+
+**A health copy runs before every witness, and the reason is the latch.** A
+copy naming a resource the renderer does not hold in the context reports
+`ILLEGAL_RESOURCE`, and vrend then refuses every later command buffer on that
+context (§4.5.4a). So a genuinely refused import kills GPU composition for the
+process lifetime, silently — which is (a) why `comp_attached` fails closed and
+C-3 must never blit from a resource without it, (b) why the mark → sentinel
+health copy runs first, so a REFUSED is attributable to THAT import and later
+generations read `SKIPPED (compositor ctx unhealthy)` as a measured state, and
+(c) why the witness runs at a rare structural moment (~16 controlq round trips
+per generation) and never per frame.
+
+**What the Pi taught before it answered the question it was asked** (six
+`composed` cycles; the sixth is the one that counts). (1) The clean build read
+`REFUSED (slot 0 copy did not land)` on its first run — the witness's own
+seed was at guest row 0 and the compositor's copy of a y=0 box on a `Y_0_TOP`
+source lands from texel row **h−1** (vrend's FBO copy path measures such boxes
+from the bottom; the texel-exact copy-image path was not the one taken). The
+instrument needed a control of its own: it now seeds rows 0 and h−1 with
+distinct tokens and REPORTS which came back — `witnessed 3/3 (copy read texel
+row 799)` — a measured convention C-3's blit boxes inherit rather than a
+guess. (2) The posture anchor came out `ttaappeessttrryydd`: the kernel's
+`proc: orphan` burst at warden's exit and tapestryd's SYS_PUTS interleaved
+BYTE for BYTE — the console TX ring is byte-atomic, not line-atomic, and my
+probe mint had moved the anchor into the burst. Not fixed here (LS-8 surface,
+aux mid-change in `cons.c`, and it costs the kernel-byte-unchanged property);
+the anchor is printed first again, the armed state moved to its own line, the
+defect enqueued (`bug_console_tx_ring_byte_atomic.md`) and handed to aux on
+yip. (3) The gate script then cost three cycles of its own: a say-line format
+change under an anchored regexp; three `-re` arms — pattern ORDER beats buffer
+position, so the arm listed first ate a later comp-attach line and discarded
+the screen/composed pair before it; and one ordered pattern that matched
+PARTIAL lines (serial arrives in chunks) — three GL-leg hangs ending on the
+battery's own later FAIL, while an offline replay of the same log passed. The
+anchored single-pattern form went green: `WARP-COMPOSED ATTACH: witnessed 2
+surfaces (copy read texel rows: 799 797)`, both legs PASS, verb VERIFIED on
+seven terms.
+
+**The sabotage measured more than it was asked to.** Skipping the slot
+attaches: the first import `REFUSED (slot 0 copy did not land)`, then every
+later import `SKIPPED (compositor ctx unhealthy)` — the latch is now a
+measurement, not a recollection of vrend — **and the screen's own 3D mint fell
+back**: `screen res 73 2D (1280x800) -- 3D refused: renderer round trip`. The
+§4.5.4c fallback, built two chunks ago against a hypothetical, ran for real:
+the display kept working on the CPU/2D arm while GPU composition was loudly
+gone. Verb RED, 2D leg unaffected.
+
+**The quake gate found a C-2d-b leftover.** `glq-virgl.exp`'s eviction leg
+waits for `scanout direct N (WxH)`; C-2d-b (`f86177b6`) changed that say line
+to `scanout direct N slot S (WxH)` and the check made then enumerated the
+`scanout composed` consumers and missed the `scanout direct` ones — five
+patterns across `glq-virgl` / `glq-decomp` / `glq-wedge-probe`, all silently
+broken since, all failing CLOSED (a false RED on the console-restore leg after
+^C, the first time any of them ran after that commit). Fixed to take the
+`slot S` token as optional. #230's lesson again: a mirror set is enumerated by
+what its members MEAN, not by the substring one happened to grep.
+
+**Gates.** `composed-screen.exp` grew a third claim (GL leg: ≥ 2 per-surface
+`witnessed n/n` lines — the battery's two surfaces — none refused; 2D leg: the
+import declared skipped, no per-surface line — the control), the `composed`
+verb terms six/seven, and `glq-virgl.exp` gates the ctl census (`comp-attach
+witnessed W refused R`: R must be 0) after the game dies — the BO import
+through the SDL shim's real `present-to`.
+
+**Coordination.** Aux held the mac all afternoon (its pty-4 root-cause fix:
+builds + suite + LS-CI + the SMP halves); the C-2c cargo check/build ran at
+`-j2` under an explicit yes on yip 0024, everything else waited for the
+release; the Pi lease was mine (`hold pi`) for the whole verification.
+
 ### Still open leaving this run
 
-- **Warp-C C-2c** — the compositor-side import (§4.5.10, decided: no client
-  verb; bounded by hosting; detach-before-unref) — lands WITH its blit witness,
-  since §4.5.4c showed the attach response witnesses nothing. C-2d is landed
-  AND verified (`ls-gfx-age`, red under both sabotages); C-2a/C-2b are landed,
-  exercised on both capability arms, and C-2b's "3D" word is now earned by a
-  pixel round trip.
-- **The C-2d-b audit round** on `usr/tapestryd` (I-40) — owed since
-  `f86177b6`; needs agent spawning.
+- **Warp-C C-3** — blit composition + chrome-as-texture, growing from the C-2c
+  witness (`comp_copy_px` is the encoding; the copy box on a `Y_0_TOP` source
+  names texel row h−1−y on this host — measured; the 3D screen is minted with
+  flags 0, so decide there whether it should be `Y_0_TOP` like the slots and
+  the 2D screen); the fence wait lands in the SAME commit as the first blit
+  (I-45's in-flight clause); its gate grows a QMP pixel arm and the C-2d
+  hidden→visible redraw leg. C-2a/b/c/d are landed and each exercised on both
+  capability arms.
+- **The console TX ring is byte-atomic** (`bug_console_tx_ring_byte_atomic.md`)
+  — kernel diagnostics and SYS_PUTS tear each other char by char; a per-message
+  push under one ring lock, on the LS-8 surface (audit row + SMP gate). Handed
+  to aux on yip 0024 (they were in `cons.c`); otherwise whoever next opens it.
+- **The C-2c + C-2d-b audit round** on `usr/tapestryd` (I-40 + I-45's
+  guest-exposure half: the import is a new cross-context authority path) —
+  owed since `f86177b6`, wider now; needs agent spawning
+  (`memory/audit_c2d_prosecutor_prompt.md`, extend its scope to the C-2c
+  commit).
 - **Two thirds of the extinction tear** (the vault seam, `IPI_HALT`), and a
   prosecutor round owed on the landed third.
 - **`main#228`** — Fable rounds on C-0d and #243, quota-blocked. Deliberately

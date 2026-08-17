@@ -1509,6 +1509,173 @@ is no compositor context, no import, and the surface is unaffected — a
 GL-only leg would pass against a tapestryd that attached unconditionally and
 broke the CPU path.
 
+##### 4.5.10a C-2c AS BUILT — the import at `alloc_weave`, the witness through the compositor's own sentinel (landed 2026-08-17)
+
+**Two refinements to the gate paragraph above, both in the direction of a
+witness that touches less.** (1) The readback target is not the screen but a
+compositor-owned 1×1 sentinel resource — the compositor context's own #240
+mark/sentinel pair (`Comp.comp_probe`, built by `warp_probe_build(COMPOSITOR_
+CTX)` the moment the context is minted). Copying slot → sentinel instead of
+slot → screen tests exactly the direction C-3 will use (the slot as a copy
+*source*), needs no save/restore of screen pixels, and asks no question about
+the screen's texel coordinates (a 1×1 target has one texel). (2) The site is
+**import time** — the end of `alloc_weave`, for `create` and the resize ack
+alike — not composed entry. The stated reason for composed entry was that the
+screen may not exist yet at import; with the sentinel as the target that
+reason is gone, and import time is where `comp_attached` is decided anyway,
+so the witness and the record it justifies are one step. Both hold what the
+paragraph above requires: pixels through the compositor context, or nothing.
+
+**Per generation, in order** (`comp_import_slots`, ~16 synchronous controlq
+round trips on the compositor's sync slot, so ordered by construction):
+`CTX_ATTACH_RESOURCE(COMPOSITOR_CTX, slot_i)` for every slot (a device-level
+`Err` detaches the earlier ones and reports `attach failed (device)`); then
+the **health copy** — repaint the mark, poison the sentinel with a fresh token,
+`RESOURCE_COPY_REGION` mark → sentinel *inside* `COMPOSITOR_CTX`, read the
+sentinel back: it holds the mark iff the context executed a command buffer
+just now; then per slot the **witness** — seed two DISTINCT tokens into the
+slot's guest pixels (0,0) and (0,h−1), `TRANSFER_TO_HOST_2D` each (the present
+path's own transfer), zero both guest pixels, poison the sentinel, copy slot
+box (0,0,1,1) → sentinel in `COMPOSITOR_CTX`, read the sentinel back, compare
+RGB against both tokens. Two rows because a slot is a `Y_0_TOP` resource and
+the sentinel is not, and which texel a copy box at y=0 names on such a source
+— row 0 through the texel-exact copy-image path, row h−1 through the FBO path,
+which measures `Y_0_TOP` boxes from the bottom — is the renderer's to answer;
+either token witnesses the import, and WHICH came back is printed (`copy read
+texel row R`), so C-3's blit boxes start from a measured convention. The
+seeds ride the guest pixels for the transfers only and are legal because **no
+client mapping of this weave exists yet** — the Tweft that maps it is
+answered after `alloc_weave` returns — so the client maps the zeroed weave it
+is owed. The HOST copy keeps the tokens at those two texels, unobservably: in
+Composed mode slot host copies are never scanned out, and every Direct-mode
+present of a never-presented slot carries full damage (age 0, §4.5.8b), which
+overwrites them before the slot is first bound. (The slot resources are
+`B8G8R8A8` like the sentinel — `resource_create_2d` mints format 1 — so the
+copy is same-format; RGB is compared because alpha is not part of the claim.)
+The say line is one per generation — `comp-attach surface N res A..B:
+witnessed 3/3 (copy read texel row R)` /
+`REFUSED (slot i copy did not land)` / `SKIPPED (compositor ctx unhealthy)` /
+`SKIPPED (no witness probe)` / `attach failed (device, slot i)` — and
+`comp_attached` is true only on `witnessed`. On a `virgl=0` device the posture
+line carries `comp-attach: skipped (no compositor ctx)` once and no per-
+surface line ever prints; on a GL device the instrument reports on its OWN
+line after the posture anchor — `comp-attach witness armed (probe res M,S)`,
+or `UNAVAILABLE (probe build failed)`, in which case every import reads
+SKIPPED and nothing becomes a blit source (fail closed). Its own line, and
+printed AFTER the anchor, because the first measured run put the probe mint
+(device round trips) between "ctx up" and the posture line and the anchor
+came out torn byte-wise by the kernel's `proc: orphan` burst at warden's exit
+— the console TX ring is byte-atomic, not line-atomic, so any two concurrent
+writers tear each other (the `#55b` class; a system defect recorded in the
+journal, not fixed here). Census: `comp-attach witnessed W refused R` in the
+global warp ctl.
+
+**Why the health copy runs first, and what it measures.** A copy that names
+a resource the renderer does not hold in the context reports
+`VIRGL_ERROR_CTX_ILLEGAL_RESOURCE`, and vrend then refuses every later
+command buffer on that context (§4.5.4a's latch — whose reach the sabotage
+below measured further: the screen's 3D mint, attached to the context AFTER
+the latch, failed its transfer round trip too, so §4.5.4a's "transfers still
+work on a latched context" is established for the probe pair attached before
+the latch and does not extend to a resource attached after it). So a
+witness that failed for a genuine reason would leave the compositor context
+dead for the process lifetime, and every later generation's REFUSED would be
+a consequence, not a finding. Running the health copy before the slots makes
+the first line attributable to *that* import and every later one read
+`SKIPPED (compositor ctx unhealthy)` — the measured state. This is also why
+`comp_attached` fails closed and why C-3 must never blit from a resource
+without it: the cost of one wrong blit is the whole GPU composition path,
+silently, forever. And it is why the witness runs where the compositor can
+afford the answer — a rare structural event, ~16 round trips — never per
+frame.
+
+**The GL adoption's import.** `present-to <n> <bo>` is the ctx handing its
+buffer to the compositor, so it is where the BO is imported: attach → the
+health copy → a **change** witness (the BO's host texel (0,0) is the client's
+own rendering, unknown to us; poison the sentinel, copy BO (0,0) → sentinel,
+read back — a value other than the poison means the copy landed; two rounds
+with two distinct poisons make it exact, since the client's texel can equal
+at most one). The BO is only read, one texel of it, and its backing is never
+touched. Recorded on the BO (`WarpBo.comp_imported`), so every death path
+revokes it before the unref: `present-to off`, a replaced consent, the
+consented surface's retire (`comp_release_consents_for`), and the BO's own
+retire (`wbo_retire`), which detaches from `COMPOSITOR_CTX` before its
+`RESOURCE_UNREF`. Say line: `comp-attach ctx C bo B res R -> surface N:
+witnessed | REFUSED | SKIPPED | attach failed`.
+
+**Revocation of the slot imports** is `release_gen` (a displaced generation)
+and `retire` step (4): `CTX_DETACH_RESOURCE(COMPOSITOR_CTX, slot_i)` before
+`DETACH_BACKING` + `RESOURCE_UNREF`, unconditionally under a live compositor
+context — a detach of a never-imported resource is a lookup miss at the
+renderer, not a context error, so the sabotage-skipped attaches and the
+device-refused ones need no separate bookkeeping to be released.
+
+**Gate.** `tools/warp-host.sh composed` (both legs, `composed-screen.exp`)
+grew a third claim: GL leg — ≥ 2 per-surface lines (the battery's two
+surfaces) all read `witnessed n/n`, none REFUSED/SKIPPED (a witnessed line
+implies the instrument was armed; the anchor line carries no second claim);
+2D leg — the posture line declares the import skipped
+and no per-surface line prints (the control). Verb terms six and seven:
+`WARP-COMPOSED ATTACH: witnessed K surfaces` on GL, `skipped (no compositor
+ctx)` without. `glq-virgl.exp` (the `quake` verb) gates the ctl census at its
+tail — `refused` must be 0 and `witnessed ≥ 1` on the GL device — which
+covers the BO import through the SDL shim's real `present-to`. Sabotage that
+discriminates: skip the slot attaches in `comp_import_slots` (the path under
+test, nothing else) — the health copy stays green, the first slot's copy is
+`Illegal resource`, the line reads REFUSED, the scenario fails.
+
+**Measured on thyla-pi (KVM, V3D 4.2), 2026-08-17.** *Clean* (`warp-host.sh
+composed`, GL leg): `comp-attach witness armed (probe res 65,66)`; aurora
+`surface 0 res 67..69: witnessed 3/3 (copy read texel row 799)`; the battery
+`surface 1 res 70..72: witnessed 3/3 (row 799)`; screen `res 73 3D (compositor
+ctx)` + `res 73 bound`; aurora's reweave `surface 0 res 74..76: witnessed 3/3
+(row 797)` (h = 798 now); across the run every generation import witnessed —
+`surface 2 res 77..79 (row 399)`, `80..82 (row 397)`, `surface 0 res 83..85
+(row 797)` — **8/8, and the row is always h−1**: on this host the compositor's
+`RESOURCE_COPY_REGION` from a `Y_0_TOP` source goes through the FBO copy path
+(the box measured from the bottom, `height0 − y − height`), NOT the texel-exact
+copy-image path, so a compositor blit box at y names texel row h−1−y. That is
+a measured convention C-3's blit boxes inherit. `WARP-COMPOSED ATTACH:
+witnessed 2 surfaces (copy read texel rows: 799 797)`, scenario PASS; 2D leg
+`composed path = CPU (virgl=0); comp-attach: skipped (no compositor ctx)`, no
+per-surface line, `ATTACH: skipped`, PASS; verb `C-2b/C-2c COMPOSED-SCREEN
+GATE: VERIFIED`, rc 0 on all seven terms. *Sabotage* (skip the slot attaches
+in `comp_import_slots`, nothing else): the first import `surface 0 res
+67..69: REFUSED (slot 0 copy did not land)` — the health copy passed, the
+unattached slot's copy did not — and then **every later import `SKIPPED
+(compositor ctx unhealthy)`** (five of them): the latch, measured rather than
+inferred; **and the screen's own 3D mint read `screen res 73 2D (1280x800) --
+3D refused: renderer round trip`** — its sentinel round trip through the now-
+latched context failed and the §4.5.4c fallback ran for real: the display kept
+working on the 2D/CPU arm while the GPU composition path was loudly gone. The
+verb's C-2b terms and the C-2c term all RED (rc 1); the 2D leg unaffected. One
+variable, two verdicts. **The instrument needed a control of its own first**:
+the single-row seed (guest row 0 only) read REFUSED on the CLEAN build — the
+copy was landing, from row h−1 — which is why the witness seeds two rows with
+distinct tokens and reports which came back; and the gate script cost three
+more Pi cycles (a say-line format change under an anchored regexp; three
+`-re` arms whose ORDER beat buffer position and discarded the screen/composed
+pair; then one ordered pattern that matched PARTIAL lines because it had no
+line terminator — three GL-leg hangs ending on the battery's later FAIL while
+an offline replay of the same log passed) before the anchored single-pattern
+form went green. *`quake`* (the BO import through the SDL shim's real
+`present-to`, KVM/V3D): `comp-attach ctx 1 bo 1 res 79 -> surface 1:
+witnessed`, then `scanout direct 1 GL res 79`, the timedemo at 44.7 fps, and
+the census after the game died `GLQ-VIRGL COMP-ATTACH: witnessed 5 refused 0`
+(three console generations + the game's surface + its BO), `WARP-4 GATE:
+VERIFIED` — after a first quake run failed CLOSED on a C-2d-b leftover: the
+`scanout direct N (WxH)` regexps of `glq-virgl`/`glq-decomp`/`glq-wedge-probe`
+(five, three files) had been broken since `f86177b6` renamed the line to
+`scanout direct N slot S (WxH)`, the first time any of them ran after it; the
+`slot S` token is optional in all five now.
+
+**What C-2c does NOT establish.** Nothing about composed pixels: the screen
+is still CPU-filled; C-3 owns the first composition blit and grows from this
+witness (`comp_copy_px` is the encoding it will generalize). Nothing about
+the in-flight clause: at C-2c there are no fenced blits, so detach-before-
+unref is the whole ordering, and C-3 must add the fence wait in the commit
+that adds the first blit.
+
 ## 5. Placement — where the server lives, per backend
 
 The seam is identical on both; the process topology is not, and both are forced:

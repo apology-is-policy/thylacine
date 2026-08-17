@@ -76,11 +76,39 @@
 # per-frame blits, is where the pixel oracle becomes load-bearing and where
 # this scenario grows a QMP arm.
 #
+# WARP-C C-2c (GPU-DESIGN 4.5.10) RIDES THE SAME TWO LEGS, as a third claim.
+# The compositor imports every hosted surface's slot resources into its own
+# context at import time (`alloc_weave`), and -- because CTX_ATTACH_RESOURCE's
+# OK attests nothing (4.5.4c) -- WITNESSES each import by a pixel copy: a
+# sentinel seeded into the slot's host copy, copied slot -> the compositor's
+# own 1x1 sentinel resource INSIDE COMPOSITOR_CTX, read back. tapestryd says
+# one line per generation:
+#   comp-attach surface N res A..B: witnessed 3/3          (every slot copied)
+#   comp-attach surface N res A..B: REFUSED (slot i ...)   (renderer refused)
+#   comp-attach surface N res A..B: SKIPPED (...)          (no probe / ctx dead)
+#   comp-attach surface N res A..B: attach failed (device, slot i)
+# and on a host with no compositor context the POSTURE line carries
+# `comp-attach: skipped (no compositor ctx)` and no per-surface line ever
+# prints (on a GL host the instrument reports separately: `comp-attach
+# witness armed (probe res M,S)`). So:
+#   GL leg : >= 2 per-surface lines (the battery's two surfaces -- the expect
+#            runs on past the composed pair until it has them; aurora's own
+#            line at boot is usually eaten by the login dance and is a bonus),
+#            ALL `witnessed n/n` with n > 0, and no REFUSED/SKIPPED/failed
+#            line (a witnessed line implies the instrument was armed);
+#   2D leg : the posture line says the import is skipped, and NO per-surface
+#            comp-attach line appears before the composed pair.
+# The 2D leg is again the control: a tapestryd that attached unconditionally
+# would print per-surface lines (or fail the CTX command) on the device that
+# has no context. Validated by sabotage: with the slot attach skipped in
+# `alloc_weave`, the GL leg's lines read REFUSED and this scenario fails.
+#
 # Verdict lines (printed by the success path only -- #186: never key a gate
 # on a token the harness's own timeout text can quote):
 #   WARP-COMPOSED POSTURE: <GPU|CPU>
 #   WARP-COMPOSED SCREEN: res N <arm> (WxH)
 #   WARP-COMPOSED BOUND: res N
+#   WARP-COMPOSED ATTACH: witnessed K surfaces | skipped (no compositor ctx)
 #   WARP-COMPOSED PASS
 #
 # Runs ON the GL host (Linux; lib.exp takes the direct-pty transport).
@@ -138,9 +166,11 @@ lc_boot
 # not where a screen is allocated -- that placement was itself a bug this
 # arc paid for).
 set timeout 900
+set got_posture_tail ""
 expect {
-    -re {tapestryd: composed path = (GPU|CPU)[^\r\n]*[\r\n]} {
+    -re {tapestryd: composed path = (GPU|CPU)([^\r\n]*)[\r\n]} {
         set got_posture $expect_out(1,string)
+        set got_posture_tail $expect_out(2,string)
     }
     -re {EXTINCTION:} { lc_extinction_fail "kernel extinction before the posture line" }
     timeout { lc_fail "no 'composed path =' line within 900s on $dev" }
@@ -153,6 +183,21 @@ if {$got_posture ne $want_posture} {
 }
 puts "\nWARP-COMPOSED POSTURE: $got_posture\n"
 lc_step "posture $got_posture matches $dev"
+# C-2c, the posture half: on the non-GL device the import must be declared
+# skipped -- the control leg's half of claim 3. On the GL device the witness
+# instrument reports on its OWN line (`comp-attach witness armed (probe res
+# M,S)`), deliberately not on the posture anchor: the probe mint costs
+# device round trips, and the first measured run showed the anchor torn
+# byte-wise by the kernel's `proc: orphan` burst at warden's exit once it
+# was printed after the mint. That line is not asserted here -- a witnessed
+# per-surface line below implies the instrument existed, and an anchor that
+# can be torn by an unrelated writer must not carry a second claim.
+if {$want_posture ne "GPU"} {
+    if {![string match "*comp-attach: skipped (no compositor ctx)*" $got_posture_tail]} {
+        lc_fail "CPU posture on $dev does not declare the import skipped:\
+                 '$got_posture_tail'"
+    }
+}
 
 lc_login michael correct-horse-battery-staple-v1
 
@@ -174,32 +219,66 @@ set got_w 0
 set got_h 0
 set got_composed 0
 set got_bound ""
+# C-2c: per-surface import verdicts. The GL leg must see the battery's two
+# surfaces witnessed (aurora's own line at boot is consumed by the login
+# dance and is a bonus if it lands here); the 2D leg must see none.
+set got_attach_ok 0
+set got_attach_bad ""
+set got_attach_rows {}
+set want_attach [expr {$want_posture eq "GPU" ? 2 : 0}]
 set timeout 300
+# ONE pattern for the three line kinds, dispatched inside. Expect matches the
+# earliest occurrence of a single pattern, so lines are consumed in ARRIVAL
+# order -- with three separate -re arms, pattern ORDER beats buffer position:
+# a comp-attach arm listed first would match a comp-attach line that arrived
+# AFTER the screen/composed pair already sitting in the buffer, and the match
+# discards everything before it, pair included. Measured: the first C-2c run
+# hung on exactly that and died on the battery's own later FAIL.
 expect {
-    -re {tapestryd: screen res (\d+) (3D \(compositor ctx\)|2D) \((\d+)x(\d+)\)( -- 3D refused: [^\r\n]*)?} {
-        set got_res $expect_out(1,string)
-        set got_arm $expect_out(2,string)
-        set got_w $expect_out(3,string)
-        set got_h $expect_out(4,string)
-        # expect leaves a non-participating optional group UNSET on some
-        # builds rather than empty -- guard the read.
-        set got_why [expr {[info exists expect_out(5,string)] ? [string trim $expect_out(5,string)] : ""}]
-        if {!$got_composed} { exp_continue }
-    }
-    -re {tapestryd: scanout composed \((\d+)x(\d+)\) res (\d+) (bound|BIND FAILED)} {
-        set got_composed 1
-        if {$expect_out(4,string) eq "bound"} { set got_bound $expect_out(3,string) }
-        if {$got_arm eq ""} { exp_continue }
+    -re {tapestryd: (comp-attach surface [^\r\n]*|screen res [^\r\n]*|scanout composed [^\r\n]*)[\r\n]} {
+        # The trailing [\r\n] is load-bearing: without it the alternation
+        # matches a PARTIAL line (serial output arrives in chunks), the inner
+        # regexps then fail on the truncated text, and the rest of that line
+        # is discarded unseen -- measured as the GL leg hanging until the
+        # battery's own later FAIL, three runs in a row, while an offline
+        # replay of the same log (whole file at once) passed.
+        set line $expect_out(1,string)
+        if {[regexp {^comp-attach surface (\d+) res (\d+)\.\.(\d+): (.*)$} $line -> csn cr0 cr1 verdict]} {
+            set verdict [string trim $verdict]
+            # `witnessed n/n (copy read texel row R)` -- the row is the
+            # renderer's measured answer to which texel a y=0 box names on a
+            # Y_0_TOP source (row h-1 on thyla-pi/V3D: the FBO copy path
+            # measures such boxes from the bottom); recorded, not gated.
+            if {[regexp {^witnessed (\d+)/(\d+)( \(copy read texel row (\d+)\))?$} $verdict -> wa wb _ wrow] && $wa == $wb && $wa > 0} {
+                incr got_attach_ok
+                if {$wrow ne ""} { lappend got_attach_rows $wrow }
+            } elseif {$got_attach_bad eq ""} {
+                set got_attach_bad "surface $csn res $cr0..$cr1: $verdict"
+            }
+        } elseif {[regexp {^screen res (\d+) (3D \(compositor ctx\)|2D) \((\d+)x(\d+)\)( -- 3D refused: .*)?$} $line -> sres sarm sw sh swhy]} {
+            set got_res $sres
+            set got_arm $sarm
+            set got_w $sw
+            set got_h $sh
+            set got_why [string trim $swhy]
+        } elseif {[regexp {^scanout composed \((\d+)x(\d+)\) res (\d+) (bound|BIND FAILED)$} $line -> cw ch cres cverdict]} {
+            set got_composed 1
+            if {$cverdict eq "bound"} { set got_bound $cres }
+        }
+        if {!$got_composed || $got_arm eq "" || $got_attach_ok < $want_attach} { exp_continue }
     }
     -ex "tapestry-battery: FAIL" {
         lc_fail_detail "the battery failed before the compositor entered Composed"
     }
     -re {EXTINCTION:} { lc_extinction_fail "kernel extinction while forcing Composed" }
     timeout {
-        lc_fail "no screen-mint + composed-entry pair within 300s on $dev\
-                 (screen='$got_arm' composed=$got_composed) -- if the battery\
-                 came up but the compositor stayed Direct, reconcile() no\
-                 longer resolves two leaves to Composed"
+        lc_fail "no screen-mint + composed-entry pair (+ $want_attach witnessed\
+                 comp-attach lines) within 300s on $dev (screen='$got_arm'\
+                 composed=$got_composed witnessed=$got_attach_ok\
+                 bad='$got_attach_bad') -- if the battery came up but the\
+                 compositor stayed Direct, reconcile() no longer resolves two\
+                 leaves to Composed; if the pair came and the witnessed count\
+                 did not, the C-2c import lines are missing or not witnessed"
     }
     eof { lc_fail "qemu exited while forcing Composed on $dev" }
 }
@@ -230,6 +309,28 @@ puts "\nWARP-COMPOSED SCREEN: res $got_res $got_arm (${got_w}x${got_h})\n"
 puts "\nWARP-COMPOSED BOUND: res $got_bound\n"
 lc_step "screen arm '$got_arm' matches posture $got_posture"
 lc_step "composed entry observed (two visible leaves), screen res $got_bound bound"
+# Claim 3 (C-2c): the imports. Any non-witnessed line fails the GL leg
+# outright -- a REFUSED means the renderer does not hold a hosted surface's
+# slot in the compositor's context, which is the one thing C-2c exists to
+# establish; a SKIPPED means the instrument was not there to ask. On the 2D
+# leg any per-surface line at all is the failure (an import attempted with
+# no compositor context).
+if {$got_attach_bad ne ""} {
+    lc_fail "comp-attach not witnessed on $dev: $got_attach_bad"
+}
+if {$want_posture eq "GPU"} {
+    if {$got_attach_ok < $want_attach} {
+        lc_fail "only $got_attach_ok witnessed comp-attach line(s) on $dev, want >= $want_attach"
+    }
+    puts "\nWARP-COMPOSED ATTACH: witnessed $got_attach_ok surfaces (copy read texel rows: $got_attach_rows)\n"
+    lc_step "C-2c: $got_attach_ok surface generations imported into the compositor ctx, each witnessed by a slot->sentinel copy"
+} else {
+    if {$got_attach_ok != 0} {
+        lc_fail "$got_attach_ok comp-attach line(s) on $dev, which has no compositor ctx -- an import was attempted where none can exist"
+    }
+    puts "\nWARP-COMPOSED ATTACH: skipped (no compositor ctx)\n"
+    lc_step "C-2c: no import on the device without a compositor ctx (the control)"
+}
 
 puts "\nWARP-COMPOSED PASS\n"
 lc_pass "composed-screen: $dev -> posture $got_posture -> screen res $got_res\

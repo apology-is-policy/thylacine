@@ -11,8 +11,10 @@
 //
 //   WeaveFirst  = `create W H` on the surface ctl: t_dma_create_weave (the
 //                 G-2 kernel-minted share-admissible subtype) + map + zero +
-//                 RESOURCE_CREATE_2D + whole-weave ATTACH_BACKING
-//                 (backed := TRUE, serverRef := TRUE). `armed` becomes real
+//                 one RESOURCE_CREATE_2D per slot, each ATTACH_BACKING'd to
+//                 its own slot (C-2d-b), then -- on a GL host -- the C-2c
+//                 import of every slot resource into COMPOSITOR_CTX,
+//                 witnessed (backed := TRUE, serverRef := TRUE). `armed` becomes real
 //                 LAZILY at the first Tweft (weft_ensure below) -- the
 //                 netd precedent; the Map guard is indifferent to when the
 //                 registration happens, only that retire disarms it.
@@ -53,7 +55,11 @@
 //                     closed; on an already-claimed share the unshare is a
 //                     harmless miss);
 //                 (3) scanout release (SET_SCANOUT 0 if displayed);
-//                 (4) DETACH_BACKING + RESOURCE_UNREF (the GPU resource
+//                 (4) the compositor's import is revoked (Warp-C C-2c:
+//                     CTX_DETACH_RESOURCE from COMPOSITOR_CTX, GPU-DESIGN
+//                     4.5.10 -- BEFORE the unref, per slot resource; and
+//                     the GL adoption's consented BO the same way), then
+//                     DETACH_BACKING + RESOURCE_UNREF (the GPU resource
 //                     dies before its backing);
 //                 (5) unmap + close the weave DMA (serverRef := FALSE; the
 //                     pages free when the client's mapping ref also drops,
@@ -103,6 +109,7 @@ const PRESENT_BURST_MIN: u32 = 4;
 
 use crate::chords::{ChordAction, Chords};
 use crate::gpu::{FencedErr, Gpu};
+use libdriver::Error;
 use crate::pane::{self, Dir, Layout, Mode, Rect, Role};
 
 pub const MAX_CONNS: usize = 8;
@@ -547,6 +554,15 @@ struct Surface {
     /// staleness a property of the SLOT, and a single flag would report slot
     /// 0's history for slot 2's resource.
     res_stale: [bool; WEAVE_SLOTS as usize],
+    /// Warp-C C-2c (GPU-DESIGN 4.5.10): the CURRENT generation's slot
+    /// resources are imported into COMPOSITOR_CTX AND that import was
+    /// witnessed by a pixel copy through the compositor's context. False on
+    /// a non-GL host, on a device-refused attach, and on an unwitnessed one
+    /// -- fail closed, because a composition blit that names a resource the
+    /// renderer does not hold in the compositor's context latches that
+    /// context off for the process lifetime (4.5.4a). C-3 blits from a
+    /// surface only while this is true; otherwise it composes the CPU way.
+    comp_attached: bool,
     /// A TPRESENT_HOLD's deferred scanout push (section 18.6/F13, G-6c):
     /// the region whose device-visible flush waits for `release`. Held
     /// presents union in (most-recent bytes win where they overlap); a
@@ -699,6 +715,23 @@ pub struct Comp {
     /// composed path stays the CPU one. Never torn down -- like `screen`, it is
     /// held for the process lifetime and reclaimed by the RW-7 crash contract.
     comp_ctx: bool,
+    /// Warp-C C-2c: the compositor context's OWN #240 mark/sentinel pair,
+    /// minted with the context. It is the instrument behind every
+    /// `comp-attach` verdict: the health check copies mark -> sentinel to
+    /// prove the context still executes commands, and each import witness
+    /// copies the imported resource -> sentinel and reads the sentinel back.
+    /// A device's OK to CTX_ATTACH_RESOURCE attests nothing about the
+    /// renderer (4.5.4c), so without this pair the import would be a claim
+    /// with no witness. `None` = the pair could not be built; every import
+    /// then reports SKIPPED and stays unattached (fail closed).
+    comp_probe: Option<CtxProbe>,
+    /// Varies the witness sentinel per probe (the verify token discipline:
+    /// "unchanged" must never be satisfied by a value a previous probe left).
+    comp_probe_seq: u32,
+    /// C-2c census, readable in the global warp ctl: imports witnessed vs.
+    /// refused/skipped, so a silent degradation to the CPU path is visible.
+    comp_attach_witnessed: u64,
+    comp_attach_refused: u64,
     /// The container tree (G-6): hosting, geometry, focus.
     layout: Layout,
     screen: Option<Screen>,
@@ -1029,6 +1062,12 @@ struct WarpBo {
     /// unresolvable to the client; the pump frees it when the ctx
     /// quiesces (or leaks it if a fence was abandoned).
     retiring: bool,
+    /// Warp-C C-2c: this BO is imported into COMPOSITOR_CTX (the ctx's
+    /// `present-to` consent handed it to the compositor) and the import was
+    /// witnessed by a copy through that context. Cleared by every detach:
+    /// consent withdrawn/replaced, the consented surface's retire, and the
+    /// BO's own retire (which detaches BEFORE the unref).
+    comp_imported: bool,
 }
 
 /// Warp-4: a resolved ACTIVE GL adoption (see `gl_adoption`) -- the
@@ -1056,6 +1095,10 @@ impl Comp {
             warp_create_refused_noctx: 0,
             res_seq: SCREEN_RES,
             comp_ctx: false,
+            comp_probe: None,
+            comp_probe_seq: 0,
+            comp_attach_witnessed: 0,
+            comp_attach_refused: 0,
             layout: Layout::new(),
             screen: None,
             scanout: Scanout::Boot,
@@ -1171,6 +1214,7 @@ impl Comp {
             res_ids: [0; WEAVE_SLOTS as usize], // minted with the first generation
             old_weave: None,
             res_stale: [false; WEAVE_SLOTS as usize],
+            comp_attached: false,
             held: None,
             cfg_serial: 0,
             offered: None,
@@ -1187,16 +1231,21 @@ impl Comp {
         self.res_seq
     }
 
-    /// Allocate one weave GENERATION: DMA chunk + map + zero + a fresh 2D
-    /// resource with the whole weave attached as backing. The shared body
-    /// of the spec's WeaveFirst (create) and Reweave (resize ack).
-    /// Returns (weave, slot_stride, per-slot resource ids); every failure
-    /// path rolls back fully.
+    /// Allocate one weave GENERATION: DMA chunk + map + zero + one 2D
+    /// resource PER SLOT, each backed by its slot, then -- on a GL host --
+    /// the C-2c import of every slot resource into the compositor's own
+    /// context, witnessed. The shared body of the spec's WeaveFirst (create)
+    /// and Reweave (resize ack); `n` names the surface for the import's
+    /// say line only. Returns (weave, slot_stride, per-slot resource ids,
+    /// comp_attached); every failure path rolls back fully. An import
+    /// failure is NOT a failure of the generation (4.5.10): the surface
+    /// works on the CPU/2D arms and only `comp_attached` reads false.
     fn alloc_weave(
         &mut self,
+        n: usize,
         w: u32,
         h: u32,
-    ) -> Result<(Weave, u64, [u32; WEAVE_SLOTS as usize]), u32> {
+    ) -> Result<(Weave, u64, [u32; WEAVE_SLOTS as usize], bool), u32> {
         let stride = (w as u64) * 4;
         let slot_bytes = stride * (h as u64);
         let slot_stride = (slot_bytes + PAGE - 1) & !(PAGE - 1);
@@ -1254,6 +1303,16 @@ impl Comp {
             }
             res_ids[i] = res;
         }
+        // Warp-C C-2c: the compositor imports the generation it will
+        // compose from, at import time and never lazily in a blit path
+        // (4.5.10). Runs BEFORE any client mapping of this weave exists --
+        // the Tweft that maps it is answered after this returns -- which is
+        // what lets the witness borrow one guest pixel per slot unseen.
+        let comp_attached = if self.comp_ctx {
+            self.comp_import_slots(n, &res_ids, va, slot_stride, w, h)
+        } else {
+            false
+        };
         Ok((
             Weave {
                 handle,
@@ -1263,16 +1322,21 @@ impl Comp {
             },
             slot_stride,
             res_ids,
+            comp_attached,
         ))
     }
 
     /// Tear down one weave generation's server side, in the R2-F5 order:
-    /// unshare (registry-removal-before-page-free) -> the GPU resource
-    /// dies before its backing -> unmap + close (serverRef -> FALSE; #847
-    /// keeps the pages until the client's mapping ref drops too). The
-    /// caller has already ensured no scanout references `res` (the mode
-    /// machine + force-away in retire; the present-tail old drop runs
-    /// after the current generation's content took the display).
+    /// unshare (registry-removal-before-page-free) -> the compositor's
+    /// import is revoked (C-2c: detach from COMPOSITOR_CTX BEFORE the
+    /// unref -- 4.5.10's ordering, and unconditional under a live
+    /// compositor ctx since a detach of a never-imported resource is a
+    /// no-op at the renderer) -> the GPU resource dies before its backing
+    /// -> unmap + close (serverRef -> FALSE; #847 keeps the pages until the
+    /// client's mapping ref drops too). The caller has already ensured no
+    /// scanout references `res` (the mode machine + force-away in retire;
+    /// the present-tail old drop runs after the current generation's
+    /// content took the display).
     fn release_gen(&mut self, w: &Weave, res_ids: &[u32; WEAVE_SLOTS as usize]) {
         if let Some(id) = w.share_id {
             let rc = unsafe { t_weft_unshare(id) };
@@ -1281,11 +1345,393 @@ impl Comp {
             }
         }
         for &res in res_ids.iter() {
+            self.comp_detach_res(res);
             let _ = self.gpu.detach_backing(res);
             let _ = self.gpu.resource_unref(res);
         }
         unsafe { t_burrow_detach(w.va, w.size) };
         unsafe { t_close(w.handle) };
+    }
+
+    /// Revoke the compositor's import of `res` (C-2c). Ordered by every
+    /// caller BEFORE the resource's unref; harmless when nothing was
+    /// imported (the renderer's detach of an unattached resource is a
+    /// lookup miss, not a context error), and skipped without a compositor
+    /// context, where the CTX commands are not even valid on the device.
+    fn comp_detach_res(&mut self, res: u32) {
+        if self.comp_ctx && res != 0 {
+            let _ = self.gpu.ctx_detach_resource(COMPOSITOR_CTX, res);
+        }
+    }
+
+    /// The C-2c import of one generation's slot resources into
+    /// COMPOSITOR_CTX, witnessed. Attach every slot; prove the compositor
+    /// context still executes commands (the mark -> sentinel health copy);
+    /// then, per slot, prove the renderer holds THAT resource in the
+    /// compositor's context by copying a pixel out of it into the sentinel
+    /// and reading the sentinel back. One say line per generation carries
+    /// the verdict. Returns the `comp_attached` value for the generation:
+    /// true only when every step held. Attaches that the device accepted are
+    /// left in place on a witness failure (revoked with the generation as
+    /// usual); an unwitnessed import simply never becomes a blit source.
+    ///
+    /// The health check runs FIRST so a slot's REFUSED is attributable to
+    /// that slot's import and not to a context an earlier refusal already
+    /// latched -- after the first genuine refusal every later generation
+    /// reads `SKIPPED (compositor ctx unhealthy)`, which is the measured
+    /// state, not an inference from the first line.
+    fn comp_import_slots(
+        &mut self,
+        n: usize,
+        res_ids: &[u32; WEAVE_SLOTS as usize],
+        va: u64,
+        slot_stride: u64,
+        w: u32,
+        h: u32,
+    ) -> bool {
+        let (r0, rl) = (res_ids[0], res_ids[WEAVE_SLOTS as usize - 1]);
+        for (i, &res) in res_ids.iter().enumerate() {
+            if self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res).is_err() {
+                for &prev in &res_ids[..i] {
+                    let _ = self.gpu.ctx_detach_resource(COMPOSITOR_CTX, prev);
+                }
+                self.comp_attach_refused += 1;
+                say!(
+                    "tapestryd: comp-attach surface {} res {}..{}: attach failed (device, slot {})",
+                    n, r0, rl, i
+                );
+                return false;
+            }
+        }
+        if self.comp_probe.is_none() {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach surface {} res {}..{}: SKIPPED (no witness probe)",
+                n, r0, rl
+            );
+            return false;
+        }
+        if !self.comp_ctx_health() {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach surface {} res {}..{}: SKIPPED (compositor ctx unhealthy)",
+                n, r0, rl
+            );
+            return false;
+        }
+        let mut rows = [0u32; WEAVE_SLOTS as usize];
+        for (i, &res) in res_ids.iter().enumerate() {
+            let slot_va = va + (i as u64) * slot_stride;
+            match self.comp_witness_slot(res, slot_va, w, h) {
+                Some(row) => rows[i] = row,
+                None => {
+                    self.comp_attach_refused += 1;
+                    say!(
+                        "tapestryd: comp-attach surface {} res {}..{}: REFUSED (slot {} copy did not land)",
+                        n, r0, rl, i
+                    );
+                    return false;
+                }
+            }
+        }
+        self.comp_attach_witnessed += 1;
+        // The row the copy read is REPORTED (measured, not assumed): it is
+        // the renderer's answer to which texel a box at y=0 names on a
+        // Y_0_TOP source, and C-3's blit boxes inherit that answer.
+        if rows.iter().all(|&r| r == rows[0]) {
+            say!(
+                "tapestryd: comp-attach surface {} res {}..{}: witnessed {}/{} (copy read texel row {})",
+                n, r0, rl, WEAVE_SLOTS, WEAVE_SLOTS, rows[0]
+            );
+        } else {
+            say!(
+                "tapestryd: comp-attach surface {} res {}..{}: witnessed {}/{} (copy read texel rows {:?})",
+                n, r0, rl, WEAVE_SLOTS, WEAVE_SLOTS, rows
+            );
+        }
+        true
+    }
+
+    /// A per-probe sentinel: never PROBE_MARK, never a value the previous
+    /// probe left, alpha byte forced so no B8G8R8X8 round trip can be
+    /// mistaken for a comparison on the alpha channel (which an X8 hop
+    /// drops -- the witnesses compare RGB only, see `comp_witness_slot`).
+    fn comp_probe_token(&mut self) -> u32 {
+        self.comp_probe_seq = self.comp_probe_seq.wrapping_add(1);
+        let mut t = (PROBE_TOKEN_BASE ^ self.comp_probe_seq.rotate_left(8)) | 0x5A00_0000;
+        if (t & 0x00FF_FFFF) == (PROBE_MARK & 0x00FF_FFFF) {
+            t ^= 0x0000_00FF;
+        }
+        t
+    }
+
+    /// The compositor context's health copy (the #240 triple on the
+    /// compositor's own pair): repaint the mark, poison the sentinel with a
+    /// fresh token, copy mark -> sentinel INSIDE the compositor context,
+    /// read the sentinel back. True iff it now holds the mark -- i.e. the
+    /// context executed a command buffer just now. A latched context (a
+    /// prior ILLEGAL_RESOURCE, 4.5.4a) drops the copy silently and the
+    /// poison survives.
+    fn comp_ctx_health(&mut self) -> bool {
+        let (mark_res, mark_va, sent_res, sent_va) = match self.comp_probe.as_ref() {
+            Some(p) => (p.mark_res, p.mark_va, p.sent_res, p.sent_va),
+            None => return false,
+        };
+        let token = self.comp_probe_token();
+        unsafe { core::ptr::write_volatile(mark_va as *mut u32, PROBE_MARK) };
+        if self.gpu.transfer_to_3d_sync(COMPOSITOR_CTX, mark_res, 1, 1, 4).is_err() {
+            return false;
+        }
+        unsafe { core::ptr::write_volatile(sent_va as *mut u32, token) };
+        if self.gpu.transfer_to_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4).is_err() {
+            return false;
+        }
+        if self.comp_copy_px(mark_res, sent_res).is_err() {
+            return false;
+        }
+        if self.gpu.transfer_from_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4).is_err() {
+            return false;
+        }
+        let got = unsafe { core::ptr::read_volatile(sent_va as *const u32) };
+        got == PROBE_MARK
+    }
+
+    /// One VIRGL_CCMD_RESOURCE_COPY_REGION of pixel (0,0) `src` -> (0,0)
+    /// `dst`, submitted on the compositor context's synchronous slot (the
+    /// #240 encoding, `warp_ctx_verify_probe`). Ordered after every earlier
+    /// sync transfer and before every later one by construction: one
+    /// controlq, one slot, each `.step` waits its response.
+    fn comp_copy_px(&mut self, src: u32, dst: u32) -> Result<(), Error> {
+        let mut st: [u32; 14] = [0; 14];
+        st[0] = (VIRGL_CCMD_RESOURCE_COPY_REGION & 0xff) | (VIRGL_CMD_RCR_SIZE << 16);
+        st[1] = dst;
+        st[6] = src;
+        st[11] = 1;
+        st[12] = 1;
+        st[13] = 1;
+        let mut bytes = [0u8; 56];
+        for (i, w) in st.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        self.gpu.submit_3d_sync(COMPOSITOR_CTX, &bytes)
+    }
+
+    /// Witness one slot resource's import (C-2c's gate, 4.5.10, in the
+    /// direction C-3 will use it -- the slot as a copy SOURCE): seed tokens
+    /// into the slot's own host copy through the 2D transfer the present
+    /// path uses, poison the compositor's sentinel resource, copy slot (0,0)
+    /// -> sentinel inside COMPOSITOR_CTX, read the sentinel back. The copy
+    /// lands only if the renderer holds the slot resource in the
+    /// compositor's context; without the import it is `Illegal resource`
+    /// and the poison survives (P1b, measured; the device answers OK to
+    /// every step either way, which is why the pixel is the witness).
+    /// Returns the texel row the copy read (0 or h-1), None if it did not
+    /// land.
+    ///
+    /// TWO seeds, in guest rows 0 and h-1, with DISTINCT tokens: a slot is a
+    /// Y_0_TOP resource and the sentinel is not, and which texel a copy box
+    /// at y=0 names on such a source (row 0 through the texel-exact copy-
+    /// image path, or row h-1 through the FBO path, which measures Y_0_TOP
+    /// boxes from the bottom) is the renderer's to answer, not this code's
+    /// to assume. Either token witnesses the import; WHICH one came back is
+    /// reported, so C-3's blit boxes start from a measured convention.
+    ///
+    /// The seeds ride the GUEST slot pixels for the duration of the
+    /// transfers and are zeroed again: the weave has no client mapping yet
+    /// (see `alloc_weave`), so the client maps the zeroed weave it is owed.
+    /// The HOST copy keeps the tokens at those two texels, which is
+    /// unobservable: in Composed mode the slot host copies are never scanned
+    /// out, and every Direct-mode present of a never-presented slot carries
+    /// full damage (buffer age 0, 4.5.8b), overwriting them before the slot
+    /// is first bound. Compares RGB only -- alpha is not part of the claim.
+    fn comp_witness_slot(&mut self, res: u32, slot_va: u64, w: u32, h: u32) -> Option<u32> {
+        let (sent_res, sent_va) = match self.comp_probe.as_ref() {
+            Some(p) => (p.sent_res, p.sent_va),
+            None => return None,
+        };
+        let seed0 = self.comp_probe_token();
+        let seed1 = self.comp_probe_token();
+        let mut poison = !seed0 | 0x5A00_0000;
+        if (poison & 0x00FF_FFFF) == (seed1 & 0x00FF_FFFF) {
+            poison ^= 0x0000_00FF;
+        }
+        let last = h.saturating_sub(1);
+        let off_last = (last as u64) * (w as u64) * 4;
+        let px0 = slot_va as *mut u32;
+        let px1 = (slot_va + off_last) as *mut u32;
+        unsafe { core::ptr::write_volatile(px0, seed0) };
+        let mut up = self.gpu.transfer(res, 0, 0, 0, 1, 1).is_ok();
+        if last > 0 {
+            unsafe { core::ptr::write_volatile(px1, seed1) };
+            up = up && self.gpu.transfer(res, off_last, 0, last, 1, 1).is_ok();
+        }
+        unsafe { core::ptr::write_volatile(px0, 0) };
+        if last > 0 {
+            unsafe { core::ptr::write_volatile(px1, 0) };
+        }
+        if !up {
+            return None;
+        }
+        unsafe { core::ptr::write_volatile(sent_va as *mut u32, poison) };
+        if self.gpu.transfer_to_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4).is_err() {
+            return None;
+        }
+        if self.comp_copy_px(res, sent_res).is_err() {
+            return None;
+        }
+        if self.gpu.transfer_from_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4).is_err() {
+            return None;
+        }
+        let got = unsafe { core::ptr::read_volatile(sent_va as *const u32) } & 0x00FF_FFFF;
+        if got == (seed0 & 0x00FF_FFFF) {
+            Some(0)
+        } else if last > 0 && got == (seed1 & 0x00FF_FFFF) {
+            Some(last)
+        } else {
+            None
+        }
+    }
+
+    /// C-2c for the GL adoption (Warp-4): a ctx's `present-to <n> <bo>` is
+    /// the client handing its buffer to the compositor -- the whole grant,
+    /// as in every compositor with prior art (4.5.10) -- so the compositor
+    /// imports THAT BO into its own context here, witnessed, and records it
+    /// on the BO. Idempotent per BO (a re-consent of an imported BO is not
+    /// re-witnessed). Everything short of a witnessed import leaves the BO
+    /// `comp_imported == false`: it composes through the readback arm.
+    fn comp_import_bo(&mut self, ctx_pub: u32, conn: u64, bo_pub: u32, sn: usize) {
+        if !self.comp_ctx {
+            return;
+        }
+        let (res_id, already) = match self
+            .wctx(ctx_pub, conn)
+            .and_then(|c| c.bos.iter().flatten().find(|b| b.pub_id == bo_pub))
+        {
+            Some(b) => (b.res_id, b.comp_imported),
+            None => return,
+        };
+        if already || res_id == 0 {
+            return;
+        }
+        if self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res_id).is_err() {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: attach failed (device)",
+                ctx_pub, bo_pub, res_id, sn
+            );
+            return;
+        }
+        if self.comp_probe.is_none() {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: SKIPPED (no witness probe)",
+                ctx_pub, bo_pub, res_id, sn
+            );
+            return;
+        }
+        if !self.comp_ctx_health() {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: SKIPPED (compositor ctx unhealthy)",
+                ctx_pub, bo_pub, res_id, sn
+            );
+            return;
+        }
+        let ok = self.comp_witness_bo(res_id);
+        if ok {
+            if let Some(b) = self
+                .wctx_mut(ctx_pub, conn)
+                .and_then(|c| c.bos.iter_mut().flatten().find(|b| b.pub_id == bo_pub))
+            {
+                b.comp_imported = true;
+            }
+            self.comp_attach_witnessed += 1;
+            say!(
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: witnessed",
+                ctx_pub, bo_pub, res_id, sn
+            );
+        } else {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: REFUSED (copy did not land)",
+                ctx_pub, bo_pub, res_id, sn
+            );
+        }
+    }
+
+    /// Witness a BO import. The BO's host texel (0,0) is the client's own
+    /// rendering -- unknown to us, so the test is CHANGE, not equality:
+    /// poison the sentinel, copy BO (0,0) -> sentinel in COMPOSITOR_CTX,
+    /// read back; a value other than the poison means the copy landed. Two
+    /// rounds with two distinct poisons make it exact: the client's texel
+    /// can equal at most one of them, so an unattached BO (both reads still
+    /// the poison) is never confused with an unlucky match. The BO is only
+    /// READ, and only one texel of it. Never touches the BO's backing.
+    fn comp_witness_bo(&mut self, res: u32) -> bool {
+        let (sent_res, sent_va) = match self.comp_probe.as_ref() {
+            Some(p) => (p.sent_res, p.sent_va),
+            None => return false,
+        };
+        for _ in 0..2 {
+            let poison = self.comp_probe_token();
+            unsafe { core::ptr::write_volatile(sent_va as *mut u32, poison) };
+            if self.gpu.transfer_to_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4).is_err() {
+                return false;
+            }
+            if self.comp_copy_px(res, sent_res).is_err() {
+                return false;
+            }
+            if self.gpu.transfer_from_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4).is_err() {
+                return false;
+            }
+            let got = unsafe { core::ptr::read_volatile(sent_va as *const u32) };
+            if (got & 0x00FF_FFFF) != (poison & 0x00FF_FFFF) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Revoke one BO's import (consent withdrawn or replaced). Detach
+    /// BEFORE anything else happens to the resource; a no-op unless the BO
+    /// was imported.
+    fn comp_release_bo(&mut self, ctx_pub: u32, conn: u64, bo_pub: u32) {
+        let res_id = match self
+            .wctx_mut(ctx_pub, conn)
+            .and_then(|c| c.bos.iter_mut().flatten().find(|b| b.pub_id == bo_pub))
+        {
+            Some(b) if b.comp_imported => {
+                b.comp_imported = false;
+                b.res_id
+            }
+            _ => return,
+        };
+        self.comp_detach_res(res_id);
+    }
+
+    /// Surface `n` (incarnation `gen`) is retiring: every ctx whose consent
+    /// names it loses the compositor's import of its consented BO. The
+    /// consent record itself is left to its gen pin (inert), as before.
+    fn comp_release_consents_for(&mut self, n: usize, gen: u32) {
+        if !self.comp_ctx {
+            return;
+        }
+        let mut to_detach: Vec<u32> = Vec::new();
+        for c in self.warp_ctxs.iter_mut().flatten() {
+            if let Some((sl, g, bp)) = c.present_to {
+                if sl == n && g == gen {
+                    if let Some(b) = c.bos.iter_mut().flatten().find(|b| b.pub_id == bp) {
+                        if b.comp_imported {
+                            b.comp_imported = false;
+                            to_detach.push(b.res_id);
+                        }
+                    }
+                }
+            }
+        }
+        for res in to_detach {
+            self.comp_detach_res(res);
+        }
     }
 
     /// `create W H`: the spec's WeaveFirst -- allocate + zero the weave,
@@ -1300,14 +1746,28 @@ impl Comp {
         if w == 0 || h == 0 || w > disp_w || h > disp_h {
             return Err(p9::E_INVAL);
         }
-        let (weave, slot_stride, res_ids) = self.alloc_weave(w, h)?;
+        let (weave, slot_stride, res_ids, comp_attached) = self.alloc_weave(n, w, h)?;
 
+        let comp_ctx = self.comp_ctx;
         let s = self.surf_mut(n).unwrap();
         s.w = w;
         s.h = h;
         s.slot_stride = slot_stride;
         s.weave = Some(weave);
         s.res_ids = res_ids;
+        s.comp_attached = comp_attached;
+        // C-2c: the import witness leaves its tokens in the slots' HOST
+        // copies (never the guest's), so under a compositor ctx a fresh
+        // generation's host copies are stale in the flag's own sense -- a
+        // deferred direct switch expands its first transfer to the full
+        // surface. Same bytes as the client's own first present of a fresh
+        // slot (buffer age 0 = full damage), so nothing visible changes;
+        // the flag just says what is true. Untouched without a compositor
+        // ctx: the CPU path stays byte-identical to what the pixel gates
+        // measured.
+        if comp_ctx {
+            s.res_stale = [true; WEAVE_SLOTS as usize];
+        }
         s.state = SurfState::Woven;
         // G-6: host at create -- the focused empty leaf takes it, else the
         // focused leaf splits. A pane-table-exhausted surface stays
@@ -1379,13 +1839,14 @@ impl Comp {
 
         // Reweave: mint the new generation FIRST (a failure leaves the
         // current one untouched and the offer standing for a retry).
-        let (weave, slot_stride, res_ids) = self.alloc_weave(w, h)?;
+        let (weave, slot_stride, res_ids, comp_attached) = self.alloc_weave(n, w, h)?;
         let s = self.surf_mut(n).unwrap();
         let old = s.weave.take().unwrap();
         let old_res = s.res_ids;
         s.old_weave = Some((old, old_res));
         s.weave = Some(weave);
         s.res_ids = res_ids;
+        s.comp_attached = comp_attached;
         s.w = w;
         s.h = h;
         s.slot_stride = slot_stride;
@@ -1431,8 +1892,34 @@ impl Comp {
     pub fn report_composed_posture(&mut self) {
         if self.ensure_comp_ctx() {
             say!("tapestryd: composed path = GPU (compositor ctx {})", COMPOSITOR_CTX);
+            // C-2c: the context's own mark/sentinel pair -- the instrument
+            // every import verdict is read through. Built once, held for the
+            // process lifetime like the context itself; a failed build
+            // degrades every import to SKIPPED (fail closed), never the
+            // composed path. Built AFTER the posture line, and reported on
+            // its OWN line: the mint costs device round trips, and the first
+            // measured run showed the posture line -- a gate anchor -- torn
+            // byte-wise by the kernel's `proc: orphan` burst at warden's
+            // exit when it was printed after the mint (the console TX ring
+            // is byte-atomic, not line-atomic; every concurrent writer pair
+            // tears). Printing the anchor first keeps the timing the anchor
+            // had; the armed line is a record, and a witnessed import
+            // implies it anyway.
+            self.comp_probe = self.warp_probe_build(COMPOSITOR_CTX);
+            match self.comp_probe.as_ref() {
+                Some(p) => say!(
+                    "tapestryd: comp-attach witness armed (probe res {},{})",
+                    p.mark_res, p.sent_res
+                ),
+                None => say!(
+                    "tapestryd: comp-attach witness UNAVAILABLE (probe build failed) -- imports stay unattached"
+                ),
+            }
         } else {
-            say!("tapestryd: composed path = CPU (virgl={})", self.gpu.virgl as u32);
+            say!(
+                "tapestryd: composed path = CPU (virgl={}); comp-attach: skipped (no compositor ctx)",
+                self.gpu.virgl as u32
+            );
         }
     }
 
@@ -2492,8 +2979,10 @@ impl Comp {
             }
             // (4) The GPU resources die before their backing -- all
             // WEAVE_SLOTS of them (C-2d-b), or a retire leaks every slot but
-            // one, in the process that IS the console.
+            // one, in the process that IS the console. The compositor's
+            // import goes first (C-2c: detach BEFORE unref).
             for &res in s.res_ids.iter() {
+                self.comp_detach_res(res);
                 let _ = self.gpu.detach_backing(res);
                 let _ = self.gpu.resource_unref(res);
             }
@@ -2503,6 +2992,13 @@ impl Comp {
             unsafe { t_burrow_detach(w.va, w.size) };
             unsafe { t_close(w.handle) };
         }
+        // Warp-4 x C-2c: a GL adoption consented to THIS surface incarnation
+        // imported its BO into the compositor's context; the surface is
+        // going, so the import goes with it (bounded by hosting, 4.5.10).
+        // The consent record itself stays inert on the ctx behind its gen
+        // pin, exactly as before. Outside the weave block: a consent can
+        // name a surface that never wove.
+        self.comp_release_consents_for(n, s.gen);
         // A displaced generation still draining (resize acked, no present
         // yet) dies with the surface -- same per-generation order; its
         // resource was never scanned out (only a post-fence present could
@@ -3779,6 +4275,7 @@ impl Comp {
             w: 0,
             h: 0,
             retiring: false,
+            comp_imported: false,
         });
         Some(pub_id)
     }
@@ -4161,6 +4658,13 @@ impl Comp {
             let _ = unsafe { t_weft_unshare(id) };
         }
         if b.dma_fd >= 0 {
+            // C-2c: the compositor's import dies with the BO, BEFORE the
+            // unref (4.5.10's ordering); it exists only where the compositor
+            // ctx does, so the flag alone gates the CTX command.
+            if b.comp_imported {
+                let _ = gpu.ctx_detach_resource(COMPOSITOR_CTX, b.res_id);
+                b.comp_imported = false;
+            }
             let _ = gpu.detach_backing(b.res_id);
             let _ = gpu.ctx_detach_resource(dev_ctx, b.res_id);
             let _ = gpu.resource_unref(b.res_id);
@@ -5568,6 +6072,17 @@ impl Conn {
                     comp.warp_create_refused_noctx, comp.warp_diag_noctx_arms
                 ),
             );
+            // C-2c census: imports witnessed vs refused/skipped. A silent
+            // degradation to the CPU composition path -- every import
+            // REFUSED after a latched compositor ctx -- must be countable,
+            // not only greppable in a boot log that may be gone.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "comp-attach witnessed {} refused {}\n",
+                    comp.comp_attach_witnessed, comp.comp_attach_refused
+                ),
+            );
             // #175: the anti-vacuous counter. A prover that submits and
             // then abandons is racing the drain; if the completion won,
             // nothing was in flight, the abandon was a no-op, and every
@@ -6347,6 +6862,11 @@ impl Conn {
                 if a1 == "off" {
                     let c = comp.wctx_mut(id, self.conn_id).ok_or(p9::E_NOENT)?;
                     let old = c.present_to.take();
+                    if let Some((_, _, old_bo)) = old {
+                        // C-2c: consent withdrawn -> the compositor's import
+                        // of the consented BO goes with it.
+                        comp.comp_release_bo(id, self.conn_id, old_bo);
+                    }
                     if let Some((sl, _, _)) = old {
                         // Only perturb the surface if it actually names THIS
                         // ctx (Warp-5 F1): present-to's surface lives on
@@ -6384,9 +6904,22 @@ impl Conn {
                     Some(s) => s.gen,
                     None => return Err(p9::E_NOENT),
                 };
+                let prev_bo = comp
+                    .wctx(id, self.conn_id)
+                    .and_then(|c| c.present_to)
+                    .map(|(_, _, b)| b);
                 if let Some(c) = comp.wctx_mut(id, self.conn_id) {
                     c.present_to = Some((sn, gen, bo));
                 }
+                // C-2c: the consent IS the grant (4.5.10) -- the compositor
+                // imports the consented BO into its own context here,
+                // witnessed, and releases the one a replaced consent named.
+                if let Some(pb) = prev_bo {
+                    if pb != bo {
+                        comp.comp_release_bo(id, self.conn_id, pb);
+                    }
+                }
+                comp.comp_import_bo(id, self.conn_id, bo, sn);
                 // Re-arm the surface's direct switch only if it names THIS
                 // ctx (Warp-5 F1). If the surface has not yet glsrc'd us the
                 // pairing is not active anyway, and its own glsrc write will

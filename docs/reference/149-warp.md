@@ -1201,3 +1201,63 @@ build green 0/368280 px on 8/8 dumps. What it does not cover: the composed
 path (C-3's property), the hidden→visible redraw fan (aurora is never hidden
 here), and tapestryd's per-slot refactor as such — the focused audit round on
 `usr/tapestryd` (I-40 surface) is still owed.
+
+The Warp-C **C-2c** gate rides `tools/warp-host.sh composed` as the scenario's
+third claim (`composed-screen.exp`) and the `quake` verb's ctl census
+(`glq-virgl.exp`). C-2c is the compositor-side import (`GPU-DESIGN.md`
+§4.5.10, as built §4.5.10a): at `alloc_weave` every slot resource of a
+generation is `CTX_ATTACH_RESOURCE`d into `COMPOSITOR_CTX`, and — because
+that command's OK attests nothing about the renderer (§4.5.4c) — each import
+is WITNESSED by a pixel copy: two distinct tokens seeded into the slot's host
+copy at guest rows 0 and h−1 through the present path's own
+`TRANSFER_TO_HOST_2D` (the guest pixels are borrowed for the transfers while no
+client mapping exists yet, then zeroed), the compositor's own 1×1 sentinel
+poisoned, `RESOURCE_COPY_REGION` slot box (0,0,1,1) → sentinel *inside* the
+compositor context, the sentinel read back, RGB compared against both tokens
+(which row the copy read on the `Y_0_TOP` source is REPORTED, not assumed —
+`witnessed 3/3 (copy read texel row R)`). A health copy
+(mark → sentinel) runs first so a REFUSED is attributable to that import and
+not to a context an earlier refusal latched (`vrend` refuses every later
+command buffer on a context that reported `ILLEGAL_RESOURCE`, §4.5.4a — which
+is also why `comp_attached` fails closed and C-3 must never blit from a
+resource without it). One say line per generation (`comp-attach surface N res
+A..B: witnessed 3/3 | REFUSED (slot i copy did not land) | SKIPPED (...) |
+attach failed (device, slot i)`); the instrument reports on its own line on
+GL (`comp-attach witness armed (probe res M,S)`, after the posture anchor —
+not on it, since the mint's round trips put the anchor into the kernel's
+`proc: orphan` burst on the first measured run and it came out torn), and
+the posture line carries `comp-attach: skipped (no compositor ctx)` without a
+compositor ctx; the global warp ctl
+carries `comp-attach witnessed W refused R`. The GL adoption's consented BO
+is imported at `present-to` with a two-poison CHANGE witness (the BO's texel
+is the client's rendering, unknown to us) and revoked before its unref on
+every death path (`wbo_retire`, `present-to off`/replace, the surface's
+retire). Gate terms: GL leg — ≥ 2 per-surface `witnessed n/n` lines (the
+battery's two surfaces) and none refused (the posture anchor carries no C-2c
+claim on GL); 2D leg — the import declared skipped and no per-surface line
+(the control); verb terms six/seven `WARP-COMPOSED ATTACH: witnessed K
+surfaces` / `skipped (no compositor ctx)`; `quake` — `refused` 0 and
+`witnessed ≥ 1` in the census read after the game died. **Measured on
+thyla-pi (KVM, V3D), 2026-08-17** — clean: 8/8 generation imports `witnessed
+3/3`, the copy reading texel row h−1 every time (the FBO copy path measures a
+`Y_0_TOP` box from the bottom; C-3's blit boxes inherit that), `WARP-COMPOSED
+ATTACH: witnessed 2 surfaces (copy read texel rows: 799 797)`, both legs
+PASS, verb VERIFIED (7 terms); sabotage (slot attaches skipped): first import
+`REFUSED (slot 0 copy did not land)`, every later one `SKIPPED (compositor ctx
+unhealthy)` — the vrend latch measured — and the screen's 3D mint fell back
+(`2D ... -- 3D refused: renderer round trip`, the §4.5.4c fallback taken for
+real), verb RED, 2D leg unaffected. Wrong turns paid: a single-row seed read
+REFUSED on the clean build (the copy lands from row h−1 → the two-row seed);
+the posture anchor torn by the kernel's `proc: orphan` burst (the console TX
+ring is byte-atomic — OPEN, `memory/bug_console_tx_ring_byte_atomic.md`); and
+three gate-script defects (a say-line format change under an anchored regexp;
+`-re` arm ORDER beating buffer position; an unanchored alternation matching
+PARTIAL serial lines). `quake` (KVM/V3D): `comp-attach ctx 1 bo 1 res 79 ->
+surface 1: witnessed`, `GLQ-VIRGL COMP-ATTACH: witnessed 5 refused 0`, WARP-4
+GATE VERIFIED — after a first run failed closed on a C-2d-b leftover (five
+`scanout direct N (WxH)` regexps in `glq-virgl`/`glq-decomp`/`glq-wedge-probe`
+broken since `f86177b6` added the `slot S` token; optional in all five now).
+What it does not cover: composed PIXELS (the screen is
+still CPU-filled; C-3 owns the first composition blit and grows from
+`comp_copy_px`), the in-flight clause (no fenced blits exist yet), and the
+focused I-40/I-45 audit on `usr/tapestryd`, still owed.

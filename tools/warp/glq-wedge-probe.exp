@@ -271,7 +271,7 @@ proc reap_progressing_leg {tag} {
         lc_send "echo probe-tick-$tag-$i"
         set timeout 20
         expect {
-            -re {scanout direct (\d+) \((\d+)x(\d+)\)} { set restored 1 }
+            -re {scanout direct (\d+) (?:slot \d+ )?\((\d+)x(\d+)\)} { set restored 1 }
             "probe-tick-$tag-$i" { }
             timeout { }
         }

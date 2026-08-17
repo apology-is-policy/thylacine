@@ -9,7 +9,7 @@
 #   tools/warp-host.sh bench     # llvmpipe GLQuake baseline (paced + unpaced x2)
 #   tools/warp-host.sh capset    # virtio-gpu-gl-pci + egl-headless capset probe
 #   tools/warp-host.sh prove     # Warp-2 gate: /warp-prove on the virgl device
-#   tools/warp-host.sh composed  # Warp-C C-2b gate: the composed screen's arm, GL vs 2D (both legs)
+#   tools/warp-host.sh composed  # Warp-C C-2b + C-2c gate: the composed screen's arm + the witnessed imports, GL vs 2D (both legs)
 #   tools/warp-host.sh reject    # #240: is a REJECTED command stream observable in-guest?
 #   tools/warp-host.sh p1b       # GPU-DESIGN 4.5.4: does ctx_attach permit a cross-context blit? (host-side, no guest)
 #   tools/warp-host.sh p2        # GPU-DESIGN 4.5.4: does the blit observe the client's FINISHED frame? (host-side)
@@ -265,10 +265,23 @@ composed)
         echo "C-2b GATE FAIL -- expected the screen BOUND on both legs"
         ok=0
     fi
+    # Sixth + seventh terms (Warp-C C-2c, GPU-DESIGN 4.5.10): the GL leg
+    # witnessed the compositor's import of >= 2 surface generations by a
+    # slot->sentinel pixel copy inside the compositor ctx (the attach's OK
+    # response attests nothing, 4.5.4c); the non-GL leg declared the import
+    # skipped and printed no per-surface line -- the control, again.
+    if ! grep -qE 'WARP-COMPOSED ATTACH: witnessed [2-9][0-9]* surfaces' "$out"; then
+        echo "C-2c GATE FAIL -- the GL leg did not witness >= 2 surface imports"
+        ok=0
+    fi
+    if ! grep -qF 'WARP-COMPOSED ATTACH: skipped (no compositor ctx)' "$out"; then
+        echo "C-2c GATE FAIL -- the non-GL leg did not declare the import skipped"
+        ok=0
+    fi
     if [ "$ok" != 1 ]; then
         exit 1
     fi
-    echo "C-2b COMPOSED-SCREEN GATE: VERIFIED (3D on GL, 2D without -- discriminates)"
+    echo "C-2b/C-2c COMPOSED-SCREEN GATE: VERIFIED (3D screen + witnessed imports on GL, 2D + no import without -- discriminates)"
     ;;
 prove)
     out="$REPO_ROOT/build/warp-prove.log"

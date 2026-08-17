@@ -251,7 +251,7 @@ proc run_leg {leg zoom} {
             }
         } else {
             expect {
-                -re {scanout direct (\d+) \((\d+)x(\d+)\)} {
+                -re {scanout direct (\d+) (?:slot \d+ )?\((\d+)x(\d+)\)} {
                     lc_step "$leg: direct switch fired (2D arm)"
                 }
                 "user fault" { lc_fail "$leg: segv around the zoom/direct switch" }
@@ -285,7 +285,7 @@ proc run_leg {leg zoom} {
             -re {scanout direct (\d+) GL res} {
                 lc_fail "$leg: composed leg went GL-direct mid-demo -- zoom leaked?"
             }
-            -re {scanout direct (\d+) \(} {
+            -re {scanout direct (\d+) (?:slot \d+ )?\(} {
                 lc_fail "$leg: composed leg lost its split mid-demo -- game window died?"
             }
             "user fault" { lc_fail "$leg: segv during the timedemo" }
@@ -305,7 +305,7 @@ proc run_leg {leg zoom} {
         lc_send "echo decomp-tick-$leg-$i"
         set timeout 20
         expect {
-            -re {scanout direct (\d+) \((\d+)x(\d+)\)} { set restored 1 }
+            -re {scanout direct (\d+) (?:slot \d+ )?\((\d+)x(\d+)\)} { set restored 1 }
             "decomp-tick-$leg-$i" { }
             timeout { }
         }
