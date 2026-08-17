@@ -32,6 +32,7 @@ whenever the arc changes, not whenever it is convenient.
 | **Track B — Aurora config (cfg-1..cfg-5)** | **COMPLETE.** OSD + persistence + OSC session push + the apply-authority gate + runtime chords/gaps + baked font sizes, each audited. |
 | **VIVARIUM (V-0..V-8)** | **STARTED.** V-0 scripture + V-1a (phenotype ledger + brand hint) landed; V-4 specced build-ready. |
 | **Halcyon G-8/G-9** | Not started. The graphics endgame. |
+| **Notes / job control / PTY (the kernel line, aux#240..)** | **ACTIVE.** See Stream 4 below. |
 
 ---
 
@@ -431,6 +432,47 @@ so the compositor never grows a glyph path; the richer end state is Acme's
 - #43 (synthetic key-release on focus change — stuck key) · #44 (4K weave cap +
   multi-point pixel asserts) · #32 (`ls /srv` → "I/O error"; devsrv has no
   `.readdir`) · #13 (per-pts ownership + 0600).
+
+---
+
+## Stream 4 — notes / job control / PTY (the kernel line)
+
+The line the header names: the EL0-return tail's note dispatch, the STOP
+class, the tty family, the pts job-control seam, and the tests that construct
+their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
+
+**Landed (newest first, 2026-08-17 back to aux#240):**
+
+- `11173762` -- LS-CI failure-time state probe (`::lc_fail_probe`); pty-4 arms
+  it so its next burned retry says INPUT vs OUTPUT vs lost-^Z from the log.
+- `3a7f50f1` -- `mask note 'tty:*'` masked NOTHING (parser had no tty arm);
+  prefix -> `NoteClass::Tty`; u-job-test 15c pins it + reads the kernel mask.
+- `ffb8f0ab` -- `notes.masked_susp_stops_at_delivery` observes -> tears down
+  -> asserts (an early-return assertion left ALIVE linked Procs and hung the
+  next test's `wait_pid` loop).
+- `c8ab2744` -- the deferred-^Z stop arm was reached by NOTHING (an
+  unconstructed state); `/susp-mask-child` + jc-probe `maskstop` construct it;
+  reading the arm found a P1 (decided class-filtered, consumed class-blind: a
+  queued `child_exit` destroyed) -> `notes_stop_dequeue_locked`.
+- aux#254 (sigtab UAF at exec), aux#253 (self-kill on a full queue), aux#251 +
+  aux#252 (phenotype-blind catchability gate; the STOP class had no
+  delivery-time reader), aux#247, aux#240 (`susp_stop_armed` freshness).
+
+**Open, in order:**
+
+1. **The prosecutor round on `c8ab2744`** -- IN FLIGHT 2026-08-17 (spawned with
+   the operator's yes; self-audit arms clean, one P3 comment nit queued for the
+   close: notes.c:943 says the drain helper "acts only on `interrupt`" -- it is
+   per-class since PTY-1b).
+2. **The tail's delivery-time SIG_IGN discard arm is reached by nothing** --
+   the second unconstructed state found by sweeping for the class
+   (`bug_delivery_time_sigign_discard_uncovered.md`); its own chunk, after the
+   round closes (same file).
+3. **pty-4's burned retry** -- instrumented, not diagnosed; wait for the next
+   miss and read `build/ls-ci-pty-4.attemptN.steps`.
+4. **The bar for the push**: SMP gate + LS-CI have NOT been re-run since
+   `26a678a8` (the two code commits since are a test restructure and a
+   shell-parser change); run once after the audit close, then push.
 
 ---
 
