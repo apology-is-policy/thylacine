@@ -454,6 +454,63 @@ commit message, a scripture section and the handoff, because a grep that
 *returns results* feels like a sweep that *finished*. Corrected in §4.5.8b and
 the handoff; the commit body stands as written, with this as its correction.
 
+### The self-compaction slot had two keys that did not agree (`7061115a`)
+
+aux found this by reading the ledger nobody reads, and it is the best kind of
+find: the mechanism had been quietly half-broken since it was built, and the
+evidence had been sitting in a file the whole time.
+
+`~/.claude/thyla-selfcompact/log.tsv` has vault's `allow` at 2026-08-16
+10:44:32Z with **no `consumed` and no `nudge`**, and its `.note.pending` still
+in the slot dir a day later. Every `main` row is paired; only vault's is
+orphaned. That session compacted itself and was never handed its own resume
+note — it sat at a prompt for the rest of the day.
+
+The cause is a key mismatch, and **the comment is the interesting part.**
+`tools/thyla-selfcompact.sh` said, in as many words: *"Two independent
+derivations of one key, no shared config to drift."* The producer keys on `git
+rev-parse --show-toplevel`; the consumer on `basename(dirname(transcript))`,
+which is where the session was **launched**. Those coincide for main and aux
+and do not for vault, which is launched from the thylacine tree and works in
+thylacine-vault. So the comment **named the hazard and then asserted it away**,
+and that assertion is what kept it unexamined for the mechanism's whole life.
+It is every "keep these in sync" note that has ever rotted, except this one had
+the confidence of sounding like an argument.
+
+The fix needed no new identity, because one was already there and unused: the
+arming script has always stamped `pane=$TMUX_PANE` into the meta, and a hook is
+a child of the same claude, so it reads the same value. Pane match first, path
+key as fallback.
+
+**But the half that mattered was the silence.** The old failure was not doing
+the wrong thing — it did *nothing*, and left no evidence, so `allow` without
+`consumed` was the only trace. There is now an `orphan-note` row whenever a
+pending slot goes unmatched, plus a 30-minute staleness discard.
+
+**Then the test caught a bug in the fix that was worse than the bug.** The
+first age check used `time.mktime` on a UTC stamp — `mktime` reads a
+`struct_time` as *local* — so a note stamped that same second measured as an
+hour old and was **discarded**. In any non-UTC zone that breaks every
+legitimate resume: the repair would have converted a vault-only silent miss
+into a universal one. I saw it only because leg 1 of the test printed
+`stale-discarded` on a note written a moment earlier. Four legs, with legs 3–4
+as the controls that make leg 1 mean anything — same note, same path-key
+mismatch, only the pane varies:
+
+```
+1 pane matches, fresh    -> INJECTED,     consumed
+2 pane matches, 25h old  -> not injected, stale-discarded
+3 CONTROL no TMUX_PANE   -> not injected, orphan-note
+4 CONTROL wrong pane     -> not injected, orphan-note
+```
+
+aux also retracted something in the same message, which is worth recording
+because the retraction is worth more than the claim was: the "fourth
+unregistered session" cited in the yip lease rationale **was aux itself** —
+`ps -o ppid` on its own tool shell resolved to the process it had been reading
+as a stranger. A census needs a control, and the control was its own identity.
+Same family as `ps` matching its own command line, from the other end.
+
 ### Found in passing: `docs/REFERENCE.md`'s snapshot block died in Phase 5
 
 The doc-update step sent me to `docs/REFERENCE.md` to refresh its Snapshot
