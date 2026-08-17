@@ -1127,10 +1127,33 @@ tell. It is stated here rather than discovered later.
 region, rotate through all `WEAVE_SLOTS`, then sample a pixel in the region that
 was painted several frames earlier and not since. A correct client repaints the
 union and the pixel holds; a broken one shows what that slot held `nslots`
-presents ago. `ls-gfx-panes` already has the sampling machinery
-(`screendump -P` + `ppm-sample.py` at coordinates the client prints), so the
-work is a scenario, not an instrument. The battery would have to gain a
-damage-only stage to be the vehicle — it presents full-frame everywhere today.
+presents ago.
+
+**It must run in DIRECT scanout, which rules out the obvious vehicle.** The
+first draft of this paragraph said to give `tapestry-battery` a damage-only
+stage. That cannot work, and the reason is §4.5.8b's own scoping: **Composed
+blits only the damage rect into the screen, and the screen is the accumulator**,
+so every pixel outside the damage rect comes from the screen's history and a
+stale client slot is *invisible*. The battery runs in Composed (two panes) —
+a battery-based test would be green against a completely broken client.
+
+So the vehicle has to satisfy Direct's conditions — one visible leaf, sole
+visible surface, display-sized — which in practice means **aurora**, painting
+the console. Shape: paint the top of the screen, issue several commands that
+damage only the bottom, then assert the top region.
+
+**And that detector is inherently probabilistic, which its author must handle
+rather than discover.** The scanout shows whichever slot was presented last, so
+a broken client renders a bad top only ~`(nslots-1)/nslots` of the time; a
+single sample passes a broken build one time in three. Require the region to be
+correct across N consecutive dumps taken over a period spanning many presents
+(the cursor blink guarantees presents keep happening), and state N's false-pass
+rate rather than leaving it implied.
+
+`ls-gfx-panes` already has the sampling machinery (`screendump -P` +
+`ppm-sample.py`), so the instrument exists; what is owed is the scenario.
+**Validate it by re-running the same sabotage — `stale_slot = false`,
+`back = 0` in aurora — and requiring it to go RED.**
 
 Until that exists, treat C-2d as **implemented, not verified**, and note the
 focused audit is owed too (`usr/tapestryd` is an I-40 audit-trigger surface and
