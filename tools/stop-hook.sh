@@ -38,19 +38,45 @@ FLOOR="${STOP_FLOOR:-120000}"        # below: conversational, stay silent
 CKPT="${CTX_CKPT:-600000}"           # at/above: stopping is correct, stay silent
 LIMIT="${CTX_LIMIT:-900000}"
 MIN_TURNS="${STOP_MIN_TURNS:-6}"     # assistant turns since the user last spoke
+LEDGER="${THYLA_SELFCOMPACT_DIR:-$HOME/.claude/thyla-selfcompact}/log.tsv"
 
-IN=$(cat 2>/dev/null) || exit 0
+# EVERY EXIT PATH LEAVES A ROW. Without this the hook has NINE silent exits and
+# they are one observation from outside: "correctly silent", "suppressed by
+# stop_hook_active", and "crashed in the parser" are indistinguishable, so the
+# only way to explain a missed firing is to guess. That is not hypothetical --
+# it cost a full investigation on 2026-08-17 (a second stop at 530k/73 turns
+# that should have fired and left no trace of why), and the same shape had just
+# cost the self-compaction slot a day of a stranded vault session.
+#
+# The rule the two share: a guard whose failure mode is SILENCE cannot be
+# debugged, only theorised about. So the instrument comes before the fix.
+#
+# Never fatal, never noisy on stderr: a logging failure must not change the
+# decision, and this hook's whole contract is that it fails OPEN.
+led() {
+    { printf '%s\tstop\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${2:-?}" "$1" "${3:-}" >> "$LEDGER"; } 2>/dev/null || true
+}
+
+IN=$(cat 2>/dev/null) || { led silent-no-stdin; exit 0; }
 
 # 1. Already blocked once this stop -- never block twice.
 ACTIVE=$(printf '%s' "$IN" | python3 -c 'import sys,json
 try: print("1" if json.load(sys.stdin).get("stop_hook_active") else "0")
-except Exception: print("1")' 2>/dev/null) || exit 0
-[ "$ACTIVE" = "1" ] && exit 0
+except Exception: print("E")' 2>/dev/null) || { led silent-active-parse-failed; exit 0; }
+# "E", not "1", on exception. Both still fail OPEN -- an unparsable stdin must
+# never block -- but they are now DIFFERENT ROWS. The first cut printed "1"
+# here, which made a parse crash indistinguishable from a live flag in the very
+# ledger built to tell causes apart; the test caught it, because the malformed
+# -stdin leg logged `silent-stop-hook-active`. An instrument with a blind spot
+# exactly where the ambiguity lives is the thing it was supposed to replace.
+[ "$ACTIVE" = "E" ] && { led silent-stdin-unparsable; exit 0; }
+[ "$ACTIVE" = "1" ] && { led silent-stop-hook-active; exit 0; }
 
 T=$(printf '%s' "$IN" | python3 -c 'import sys,json
 try: print(json.load(sys.stdin).get("transcript_path",""))
-except Exception: print("")' 2>/dev/null) || exit 0
-{ [ -z "$T" ] || [ ! -f "$T" ]; } && exit 0
+except Exception: print("")' 2>/dev/null) || { led silent-path-parse-failed; exit 0; }
+{ [ -z "$T" ] || [ ! -f "$T" ]; } && { led silent-no-transcript; exit 0; }
 
 # Context used + assistant turns since the last genuine user message. Same
 # byte-bounded tail + compaction anchoring as ctx-hook.sh, so the two agree on
@@ -101,16 +127,17 @@ for line in sys.stdin:
     if v > 0:
         last = v
 print("%d %d" % (last or 0, turns))
-' 2>/dev/null) || exit 0
+' 2>/dev/null) || { led silent-replay-failed; exit 0; }
 
 CTX=$(printf '%s' "$READ" | awk '{print $1}')
 TURNS=$(printf '%s' "$READ" | awk '{print $2}')
-case "$CTX$TURNS" in *[!0-9]*|"") exit 0 ;; esac
+case "$CTX$TURNS" in *[!0-9]*|"") led silent-nonnumeric; exit 0 ;; esac
+STATE="${CTX}ctx/${TURNS}t"
 
 # 2/3. Outside the window this rule is about -- say nothing.
-[ "$CTX" -lt "$FLOOR" ] && exit 0
-[ "$CTX" -ge "$CKPT" ] && exit 0
-[ "$TURNS" -lt "$MIN_TURNS" ] && exit 0
+[ "$CTX" -lt "$FLOOR" ] && { led silent-below-floor "$STATE"; exit 0; }
+[ "$CTX" -ge "$CKPT" ] && { led silent-at-checkpoint "$STATE"; exit 0; }
+[ "$TURNS" -lt "$MIN_TURNS" ] && { led silent-few-turns "$STATE"; exit 0; }
 
 K=$((CTX/1000)); LK=$((LIMIT/1000)); CK=$((CKPT/1000))
 read -r -d '' REASON <<EOF
@@ -140,5 +167,7 @@ the closing summary and make the next tool call -- per CLAUDE.md, writing an
 "Ahead" line or a "Key" table IS the tell that you are handing back.
 EOF
 
-python3 -c 'import json,sys; print(json.dumps({"decision":"block","reason":sys.argv[1]}))' "$REASON" 2>/dev/null || exit 0
+python3 -c 'import json,sys; print(json.dumps({"decision":"block","reason":sys.argv[1]}))' "$REASON" 2>/dev/null \
+    || { led silent-emit-failed "$STATE"; exit 0; }
+led block "$STATE"
 exit 0
