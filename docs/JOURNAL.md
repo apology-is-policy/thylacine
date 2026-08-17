@@ -91,11 +91,56 @@ named assertions, and the tree was reverted with text replacement, not
 retired four stale sentences (three of them "X is not a table row" claims that
 the LINEAGE arc had falsified without anything failing).
 
-### Meanwhile
+### The C-0d Fable round came back while the bar ran: two P1s the three Opus rounds could not see
 
-The C-0d Fable re-prosecution — the #240 detector's first read from a
-different lineage after three Opus rounds — was spawned under the standing
-permission while the merge built; its verdict is the next entry's business.
+The #240 detector's first read from a different lineage (98 of 101 model
+turns Fable; the last three, the write-up, fell back to Opus 4.8 — recorded):
+**0 P0 / 2 P1 / 1 P2 / 2 P3, dirty on the P1 criterion.** Both P1s are the
+same blind spot from two sides, and it is exactly the one family independence
+exists to buy: three Opus rounds gated the synchronous lane on the CALLER's
+fence gauges, and none re-asked the cross-context question after C-4 measured
+that a texture readback on a tiled renderer drains the whole device queue.
+
+- **F1**: the CLIENT-ctx probe is still the TEXTURE pair. C-4 moved the
+  compositor's health pair to buffers for precisely this cost and left the
+  client detector as it was — so a `verify` on client A drains behind client
+  B's queue while the gate reads only A's gauges, and 149-warp.md promises
+  clients the opposite. Fix: the buffer pair for clients too (the C0-F1 leg's
+  attack source has to become a buffer BO, or it "defends" for the wrong
+  reason — a texture-to-buffer copy is refused, not repainted away).
+- **F2**: the composed READBACK arm — the CPU fallback — is a synchronous
+  full-frame readback of the client's render target on the client's own
+  queue; the client picks its length; and `fence_poisoned`, round 3's gate,
+  cannot protect it because the poison is produced by the reaper on the very
+  serve loop that is blocked. Only READBACKS carry this (a blit's SUBMIT_3D
+  response is written at decode time, before the GPU runs it), so the fix is
+  not a gauge but the fenced form C-4 measured its way past — a bounded or
+  deferred readback: **Warp-C C-6**, the next chunk. Gating the fallback on
+  `fences_in_flight == 0` was weighed and rejected: it would collapse the
+  safety net GPU-DESIGN 4.5.9 keeps for every continuously-rendering client.
+- F3 (probe VA rides the never-reclaimed `weave_va_next`, a second driver
+  for #171), F5 (`present-to` re-import witness storm on the shared ctx, no
+  rate limit), F6 (the reject scenario's pass token is printed unconditionally;
+  the real 5-term gate lives only in `warp-host.sh`). Dispositions in
+  `memory/audit_c0d_fable_closed_list.md`; the close is the next chunk after
+  the push, then the dirty-close follow-up round.
+
+### The bar found one more thing, and it was ours from the merge
+
+The merged tree's first LS-CI (JOBS=3) came back 37/37 — with **three attempt-1
+failures at t=0-1 s**, every one `-qmp unix:build/qmp-gate.sock ... Failed to
+bind socket: File exists`, every one classified INFRA by aux's failure-time
+probe ("the VM never started, so this attempt says NOTHING about the guest").
+aux's #230 had given run-vm.sh a SECOND QMP monitor for test.sh's screendump
+gate — a fixed path — and test-interactive.sh's per-slot export list, written
+for #127's lesson that "a fixed host resource is a DETERMINISTIC collision at
+N>1, not a flake", predates it. Three VMs launched in one batch interleave
+run-vm.sh's `rm -f` and bind, and the loser dies before boot. A retry budget
+turned a deterministic collision into three green retries; the count is what
+gave it away. `e680fdd5` exports `THYLACINE_QMP_SOCK2` per slot; the re-run
+was **37/37, 0 retries, wall 1744 s** against 2569 s before — and the SMP gate
+on the merged kernel: **40/40, 0 corruption / 0 external-kill** across
+default+UBSan x smp4/smp8. Pushed to both mirrors at `e680fdd5`.
 
 ---
 
