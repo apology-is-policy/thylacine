@@ -340,16 +340,19 @@ cooked truth table (ICRNL+flush+echo+ONLCR, assembly-holds, erase + empty-line
 erase, the ISIG trio, ECHO-off no-leak, raw+ISIG, output ONLCR, line
 overflow); the boot probe drives the cooked default live (master `"ping\r"` →
 slave `"ping\n"`; the master's read sees the echo `"ping\r\n"` then `"pong"`).
-The per-pts **ctl surface to change the word is PTY-2c** (`set_tio` is landed,
-resets the assembly — the TCSAFLUSH posture).
+The per-pts **ctl surface to change the word is PTY-2c** (`set_tio` is landed;
+a write that CLEARS ICANON delivers the half-assembled line to the slave — see
+"Mode writes deliver, never discard" below; it used to reset the assembly, the
+TCSAFLUSH posture, until 2026-08-17).
 
 *As-built (PTY-2c)*: the per-pts ctl at **`/dev/pts/<n>ctl`** (the Plan 9
 suffix-ctl idiom — `eia0`/`eia0ctl` — so the flat Linux-devpts slave names
 stay POSIX-intact; a ctl fid holds the slot ref but is **not** an EOF-counted
 endpoint). The grammar = the LS-8b consctl grammar per-pts (`+name`/`-name`
 over the five flags; ALL tokens validated before ANY applied — one malformed
-token rejects the whole write, the tcsetattr-atomic posture; a flag apply
-resets the assembly = TCSAFLUSH) **+ the winsize op** `winsize <cols> <rows>`
+token rejects the whole write, the tcsetattr-atomic posture; a write that
+clears ICANON DELIVERS the pending fragment to the slave, any other write leaves
+the assembly alone — see below) **+ the winsize op** `winsize <cols> <rows>`
 (decimal ≤ 65535; stores the per-pts winsize and raises
 `SYS_TTY_SIGNAL(WINCH)` **iff the size changed** — the Linux TIOCSWINSZ
 behavior; the kernel routes `tty:winch` to the fg pgrp). Read-back is one
@@ -363,6 +366,49 @@ live: the `-echo` **no-leak proof without a blocking read** (type a line under
 `-echo`, then `+echo` and type another — the master's next drain shows ONLY
 the second line's echo) + the winsize round-trip via `t_pread` (the ctl fd's
 cursor advanced with the writes — positioned read from 0).
+
+**Mode writes deliver, never discard (design change 2026-08-17; supersedes the
+"a flag apply resets the assembly = TCSAFLUSH" posture above and the LS-8b
+audit-F1 remedy it copied).** The posture was: ANY consctl / pts-ctl flag write
+zeroes the canonical assembly line, so a canonical→raw→canonical flip can never
+strand a fragment that prepends the next line, on the premise that "no current
+consumer flips mid-line (login flips between completed reads; ut at prompt
+boundaries)". The premise is false for the pts: a job-control `ut` writes
+`CHILD_MODE` (+icanon +echo) around every foreground job and `PROMPT_MODE`
+(-icanon -echo) at the next prompt, and any input that lands between the job's
+last output and that re-arm — a pasted second line, a script driving the pts,
+LS-CI's `send` right after the previous command's output — is assembled and
+ECHOED by the cooked ldisc and then DISCARDED by the mode write, PARTIALLY:
+`sleep 30\r` arrived as `sle` (echoed, dropped) + `ep 30\r` (delivered to the
+raw editor and executed). Measured on LS-CI `pty-4` (`build/ls-ci-pty-4.
+attempt1.steps`, the failure-time probe of `11173762`), which had burned
+retries on exactly this for a day. Data loss plus a different command run.
+
+The heritage and the SOTA agree on the replacement, and it is what this section
+now specifies: **a mode write that clears ICANON delivers the pending fragment
+to the reader as raw bytes (no newline appended); a mode write that leaves
+ICANON as it was — including a canonical→canonical `-echo`/`+echo` — leaves the
+assembly untouched; a raw→canonical write has nothing pending by construction.**
+Plan 9's `devcons` does precisely this on `rawon` (the "clumsy hack" zero byte
+makes `consread` push `kbd.line[0..x]` to `lineq` — "flush output on rawoff ->
+rawon"); Linux's `n_tty_set_termios` never discards on a canon change (clearing
+ICANON makes the partial line readable as-is; setting it pushes pending bytes
+as a line), and TCSAFLUSH is a CALLER-chosen flush that bash/readline
+deliberately do not use (`TCSADRAIN`). The LS-8b F1 hazard stays closed, by a
+different mechanism: canonical→raw can no longer strand a fragment because it
+delivers it, and canonical→canonical is not a stranding — it is the same line
+continuing (type-ahead into a `-echo` password prompt behaves as on Linux).
+Byte conservation — I-20's stated property (`consumed = dataProduced +
+sigCount`) — now holds across a mode write too; `pty.tla` models cooking one
+char to one byte and is below the assembly, so it is unchanged. Both ldiscs
+carry the rule (kernel `cons_set_mode_cmd` + `cons_test_set_termios`; ptyfs
+`ctl_apply` + `set_tio`); a mode-change delivery into a full ring is a real
+drop and gets its own counter (`rx_drop_modeflush`, the #95 rule). Not built:
+an explicit flush verb (POSIX `TCSAFLUSH` / `tcflush(TCIFLUSH)` on request) —
+pouch's `TCSETS`/`TCSETSW`/`TCSETSF` all map to the one mode write, which now
+behaves like `TCSANOW`; a program that needs a real input flush has no spelling
+for it, which is a fidelity gap of the previous posture too (it flushed
+unasked) and is recorded rather than built.
 
 *As-built (PTY-2d)*: the teardown legs. Drain-then-EOF was structural since 2a
 (`ring_drain` serves Data while non-empty regardless of the peer's closure;
