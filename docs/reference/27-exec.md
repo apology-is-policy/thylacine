@@ -21,11 +21,11 @@ ARCH §16: "exec is the boundary between the kernel-internal Proc/Thread model a
 
 // System V process-startup frame (P6-pouch-kernel-auxv) — see
 // "Initial process stack" below. EXEC_INIT_STACK_SIZE is a 16-aligned
-// computed macro; it resolves to 176 (8 auxv entries since AT_HWCAP;
-// AT_VDSO_CLOCK landed at #343).
-#define EXEC_INIT_AUXV_COUNT     8
-#define EXEC_INIT_STACK_SIZE     176   // argc+argv+envp + 8 auxv + 16 random
-#define EXEC_INIT_RANDOM_OFFSET  160   // EXEC_INIT_STACK_SIZE - 16
+// computed macro; it resolves to 192 (9 auxv entries: AT_HWCAP, then
+// AT_VDSO_CLOCK at #343, then AT_ENTRY at DISTRO D-2).
+#define EXEC_INIT_AUXV_COUNT     9
+#define EXEC_INIT_STACK_SIZE     192   // argc+argv+envp + 9 auxv + 16 random
+#define EXEC_INIT_RANDOM_OFFSET  176   // EXEC_INIT_STACK_SIZE - 16
 
 int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
                u64 *entry_out, u64 *sp_out);
@@ -146,14 +146,14 @@ General layout, low → high address (`R` = `round_up(structured, 16)`, the `AT_
 | 8 + 8*argc                   | 8            | `argv[]` terminator (NULL) |
 | 16 + 8*argc + 8*j            | 8            | `envp[j]`, j = 0..envc-1 |
 | 16 + 8*argc + 8*envc         | 8            | `envp[]` terminator (NULL) |
-| 24 + 8*argc + 8*envc         | 128          | `auxv[]` — up to eight `Elf64_auxv_t` (16 B each) |
+| 24 + 8*argc + 8*envc         | 144          | `auxv[]` — up to nine `Elf64_auxv_t` (16 B each) |
 | ...                          | 0–15         | alignment padding (zero, from `KP_ZERO`) |
 | R                            | 16           | `AT_RANDOM` entropy block |
 | R + 16                       | argv_data_len| argv strings — concatenated, NUL-terminated |
 | R + 16 + argv_data_len       | env_data_len | envp strings — same packing, `NAME=VALUE\0` records |
 | frame_size                   | —            | `EXEC_USER_STACK_TOP` |
 
-At `argc == 0, envc == 0` that is: `argc` at 0, the two NULLs at 8 and 16, auxv at 24, pad at 152, `AT_RANDOM` at 160, `EXEC_USER_STACK_TOP` at 176 — `EXEC_INIT_STACK_SIZE`.
+At `argc == 0, envc == 0` that is: `argc` at 0, the two NULLs at 8 and 16, auxv at 24, pad at 168, `AT_RANDOM` at 176, `EXEC_USER_STACK_TOP` at 192 — `EXEC_INIT_STACK_SIZE`.
 
 **Where the environment comes from.** The builder takes env DATA, not a Proc, and that is forced rather than stylistic: `exec_load_into` builds into a *detached* address space and commits only after everything failable has succeeded (LINEAGE L-2a), so at that moment the Proc still holds the OLD environment. `exec_stage_env` does the projection for the callers whose answer is "whatever this Proc already has" — every `SYS_SPAWN_*` thunk (projecting the child's already-cloned `/env`) and the native `SYS_EXECVE`, whose ABI has no envp argument and therefore means *preserve*. A phenotyped Linux `execve` packs its own block from the guest's `envp`. The block is bounded independently of the `/env` maxima (`EXEC_ENV_MAX` / `EXEC_ENV_DATA_MAX`, argued in `exec.h`) and an environment that exceeds it is refused with `T_E_2BIG`, never truncated.
 
@@ -161,16 +161,19 @@ The auxv entries (`a_type`, `a_val`), written by `exec_fill_auxv` (both frame sh
 
 | a_type | a_val |
 |---|---|
-| `AT_PHDR` (3)    | user VA of the ELF program-header table, or 0 |
+| `AT_PHDR` (3)    | user VA of the ELF program-header table, or 0. **Load-bearing for dynamic loading**: a directly-exec'd stock ldso decides it was invoked as a program by testing this against its own self-relocated `base + e_phoff` (`musl ldso/dynlink.c:1834`), so the biased value D-2 produces is what makes that branch correct — see the D-2 note below |
 | `AT_PHENT` (4)   | `e_phentsize` (56 — `sizeof(Elf64_Phdr)`) |
 | `AT_PHNUM` (5)   | `e_phnum`, or 0 when `AT_PHDR` is unresolved |
 | `AT_PAGESZ` (6)  | `PAGE_SIZE` (4096) |
 | `AT_HWCAP` (16)  | the Linux-compatible arm64 CPU-feature word (`g_hw_features.linux_hwcap` — FP/ASIMD/AES/PMULL/SHA1/SHA2/SHA512/SHA3/CRC32/ATOMICS/ASIMDDP at the Linux uapi bit numbers, derived from ID_AA64ISAR0/PFR0 at boot; `hwcap_CPUID` is never set — see `12-hardening.md`) |
-| `AT_RANDOM` (25) | user VA of the 16-byte entropy block (`sp + 160` in Shape A) |
+| `AT_RANDOM` (25) | user VA of the 16-byte entropy block (`sp + 176` with no argv and an empty env) |
+| `AT_ENTRY` (9)   | the loaded image's FINAL entry — `img->entry`, which already carries the PIE bias for an ET_DYN and equals `e_entry` for an ET_EXEC (DISTRO D-2). Unconditional |
 | `AT_VDSO_CLOCK` (0x5654) | user VA of the RO clock page — OPTIONAL, present only when the vDSO page mapped (see `11-timer.md`); when absent the AT_NULL terminator moves up and the slot stays zeroed padding |
 | `AT_NULL` (0)    | 0 — vector terminator |
 
-The minimum a static musl process needs (per POUCH-DESIGN.md §12.1) plus the two informational entries. `AT_HWCAP` is the STANDARD SysV tag — musl's `getauxval`, libsodium's armcrypto runtime gate, and the Go runtime's `internal/cpu` init read it directly; consumers treat a clear bit as feature-absent (fail-safe on crypto-less cores). Other optional entries (`AT_SECURE`, `AT_CLKTCK`, ...) remain deliberately omitted — a C runtime supplies its own defaults for absent entries. All known consumers scan the vector by tag to `AT_NULL`; nothing parses by fixed offset.
+**What AT_ENTRY is and is not for (DISTRO D-2).** It is the standard SysV tag — `getauxval(AT_ENTRY)` answers it, and the v1.x in-kernel dual-image `PT_INTERP` lift would need it to name the PROGRAM's entry while `AT_PHDR` named the program's phdrs. It is **not** what makes stock ldso work, despite what the D-2 design text said before this was measured. musl discriminates direct invocation on `AT_PHDR` (above); inside that branch it *writes* `aux[AT_ENTRY]` itself from the app it just mapped (`dynlink.c:1914`) and only reads it at the final `CRTJMP` (`:2075`). Confirmed by sabotage, not just by reading: with AT_ENTRY forced to 0 on the PIE path the stock-ldso boot gate still PASSES, and with AT_PHDR forced to 0 it FAILS — while the unit suite stays 1363/1363 in both cases, so the gate is what caught it. See `docs/DISTRO.md` §5 and task #186.
+
+The minimum a static musl process needs (per POUCH-DESIGN.md §12.1) plus the informational entries. `AT_HWCAP` is the STANDARD SysV tag — musl's `getauxval`, libsodium's armcrypto runtime gate, and the Go runtime's `internal/cpu` init read it directly; consumers treat a clear bit as feature-absent (fail-safe on crypto-less cores). Other optional entries (`AT_SECURE`, `AT_CLKTCK`, ...) remain deliberately omitted — a C runtime supplies its own defaults for absent entries. All known consumers scan the vector by tag to `AT_NULL`; nothing parses by fixed offset.
 
 **The initial sp** = `EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE`. It is 16-byte aligned — the AArch64 SysV ABI requirement — because `EXEC_INIT_STACK_SIZE` is rounded up to a 16-byte multiple and `EXEC_USER_STACK_TOP` is itself aligned. The header pins this with `_Static_assert(EXEC_INIT_STACK_SIZE % 16 == 0)`.
 
@@ -414,3 +417,159 @@ gate and the frame-run computation — are separately load-bearing.
 ## Naming rationale
 
 `exec_setup` (not `exec` proper) — emphasizes that this is the load-and-map step, NOT the transition-to-EL0 step. The full exec syscall (Phase 5+) is `exec()` + the asm trampoline; `exec_setup` is the address-space-population half.
+
+## DISTRO D-4 — the PT_INTERP rewrite to the interpreter
+
+`elf_load` has always reported `PT_INTERP` as `ELF_LOAD_HAS_INTERP`, and until D-4 that
+was only ever a refusal. D-4 upgrades it from diagnosis to **dispatch** for a
+`PHENO_LINUX` image, and leaves it a refusal for every native one. The kernel still loads
+exactly ONE image per exec, before and after — what changes is WHICH image.
+
+### Where it lives, and why that placement is load-bearing
+
+Inside `exec_load_into` (`kernel/exec.c`), immediately after the first `elf_load`. Two
+consequences fall out of that choice rather than being arranged:
+
+- **ONE mechanism, both entries.** The in-container `execve` (`viv_execve` ->
+  `sys_execve_core`) and the runner's ENTRY spawn (`sys_spawn_full_argv_thunk` ->
+  `exec_setup_from_spoor`) both funnel here, so there is no second copy of the decision.
+- **`/proc/<pid>/exe` stays faithful.** The Proc-side stamps (`proc_set_name`,
+  `proc_set_exe_path`) run in the two CALLERS, which still hold the ORIGINAL `exe`. The
+  2026-08-05 vote listed "`/proc/self/exe` reports ldso" as an accepted gap; it does not,
+  and the reason is purely that the rewrite is below the stamps.
+
+`exec_load_into` gained `struct Proc *nsp` for this. It is read-only in the strict sense
+— no field of it is written — and supplies exactly two things: the phenotype that gates
+the rewrite, and the namespace the interpreter resolves through. `NULL` disables the
+rewrite entirely and restores the pre-D-4 behaviour byte for byte.
+
+### The steps
+
+1. `elf_read_interp` (`kernel/elf.c`) extracts the path from the already-read header
+   prefix — bounded, NUL-checked, `ELF_INTERP_MAX` = 255. Anything unreadable,
+   unterminated, empty, or over-long is reported ABSENT, never truncated: a truncated
+   `/lib/ld-musl-aarch64.so.1` is `/lib/ld`, which names a different file.
+2. `exec_resolve_from_namespace(nsp, ...)` — the SAME `OEXEC`-gated helper the program
+   itself came through, so "what is executable from this namespace" has one answer and
+   not two. The interp path is container-relative and crosses its own symlink, which is
+   why D-1 precedes D-4.
+3. `exec_interp_argv` builds the rebuilt vector (below).
+4. `exec_read_header` + `elf_load` again, now on the interpreter.
+
+**One level, structurally.** The block is straight-line, not a loop, so the second
+`elf_load` sees the interpreter's phdrs and an interpreter carrying its own `PT_INTERP`
+falls through to the unchanged refusal.
+
+### The argv shape
+
+```
+[interp_path, "--argv0", orig_argv0, "--", orig_path, orig argv[1..]]
+```
+
+`argc + 4` slots. musl's direct mode uses ONE slot for both "which file to load" and
+"what argv[0] becomes" (`dynlink.c:1901` then `:1913`), so passing the path alone would
+hand the program the name it RESOLVED from rather than the name its caller INVOKED it by
+— and `argv[0]` is a dispatch input for both programs this arc runs (busybox picks its
+applet from `basename(argv[0])`; a login shell is identified by a leading `-`).
+`--argv0` separates them; musl applies it at `dynlink.c:2071`. `--` is unconditional so a
+program path beginning with `--` is not eaten by the option parser. musl consumes exactly
+the four inserted slots and rewrites argc in `argv[-1]` (`dynlink.c:1891`), so the
+program observes its original `argc` and vector.
+
+### The interpreter's parse, replayed
+
+Not read off the source -- musl 1.2.5's `dynlink.c:1862-1924` + `:2071` were
+replayed verbatim against the exact vector `exec_interp_argv` emits, and this is
+what the APP was measured to see:
+
+| Emitted vector | ldso opens | app `argc` | app `argv` |
+|---|---|---|---|
+| `[LD, --argv0, ls, --, /bin/busybox, -l]` | `/bin/busybox` | 2 | `["ls", "-l"]` |
+| `[LD, --argv0, "", --, /bin/true]` | `/bin/true` | 1 | `[""]` |
+| `[LD, --argv0, -sh, --, /bin/sh]` | `/bin/sh` | 1 | `["-sh"]` |
+| `[LD, --argv0, --argv0, --, --weird]` | `--weird` | 1 | `["--argv0"]` |
+| `[LD, --argv0, getconf, --, /usr/bin/getconf, PAGESIZE]` | `/usr/bin/getconf` | 2 | `["getconf", "PAGESIZE"]` |
+| the 08-05 vote's shape: `[LD, /bin/busybox, -l]` | `/bin/busybox` | 2 | `["/bin/busybox", "-l"]` |
+
+Row 1 is the claim: the app's vector is byte-identical to the caller's. Row 3 is
+the login-shell convention. Row 4 is why `--` is unconditional -- an `argv0` that
+is literally `--argv0` and a path that is literally `--weird` both survive
+intact. The last row is the correction's whole reason, measured rather than
+argued: the voted shape hands the program its PATH.
+
+**Why envp and auxv still land correctly**, which is the non-obvious half (D-4
+round, independently derived): musl shifts the argv base UP by 4 and shrinks
+argc BY 4, so `argv_base + argc` is conserved. The app's argv NULL terminator
+therefore falls exactly on the terminator the kernel wrote, and envp/auxv are
+exactly where the kernel put them. The four inserted slots cost nothing
+downstream.
+
+`orig_path` comes from a NEW `prog_name` parameter threaded from the callers, **not** from
+`exe->path`. That is I-33: the Spoor's `Path` is cosmetic and no syscall result may turn
+on it, so an exec that failed because a path-alloc OOM'd would be the invariant's own
+counterexample. The argv spawn carries the name inline in `struct spawn_full_argv_args`
+(the resolution that consumed it happened in the parent); the two native-only spawn
+thunks pass `NULL`, which is the honest answer — a `PHENO_LINUX` Proc cannot reach a
+native syscall number at all, so neither can produce a dynamic image.
+
+### Disposal
+
+The rewrite allocates two things — the interpreter's pinned Spoor and the rebuilt argv
+block — and `exec_load_into` was split into a thin wrapper plus `exec_load_body` so both
+have exactly ONE disposal site. The body reports what it took through out-params, so all
+dozen of its early returns are covered by construction. This is the D-3c F1/F5 lesson
+applied ahead of time: a cleanup that was right at three sites and missing at the fourth.
+
+### What this does NOT do
+
+No auxv change. Direct mode is selected by `aux[AT_PHDR] == ldso.phdr`
+(`dynlink.c:1834`), which is automatically true once the ldso IS the loaded image — our
+`AT_PHDR` (`exec.c:655`) and musl's `laddr(&ldso, e_phoff)` are the same value for a
+segment-0-at-file-offset-0 PIE. `AT_BASE` and `AT_ENTRY` are for the in-kernel dual-image
+model the 2026-08-05 vote REJECTED.
+
+**The consequence, named because it is a real fidelity delta (D-4 round F2):**
+`AT_PHDR` therefore describes the INTERPRETER, and musl reads it only to select
+direct mode -- it never rewrites the slot. So a program calling
+`getauxval(AT_PHDR)` sees ldso's phdrs, not its own. That differs from Linux's
+NORMAL dynamic exec (which maps both images and points `AT_PHDR` at the
+program) while matching Linux's own `ld.so ./prog` direct-invocation semantics
+exactly, so it is a consequence of the model the vote chose rather than a defect
+in the implementation of it. `dl_iterate_phdr` is UNAFFECTED -- musl builds it
+from `map_library`'s result, not from the auxv -- which is why the programs this
+arc runs are indifferent to it.
+
+### Known gaps (the DISTRO.md section 3.2 ledger)
+
+| Surface | Behaviour | Why |
+|---|---|---|
+| `argc == 0` | becomes `argc == 1`, `argv[0] == ""` | the loader's command line must name a pathname |
+| mode `0111` (X, not R) | refused at load | the ldso re-opens the program `O_RDONLY`; the kernel's `OEXEC` gate still runs first, so this only SUBTRACTS reachability |
+| the program path | resolved twice (kernel peek, then ldso `open`) | benign — the kernel's resolution only decides "this needs an interpreter"; a file swapped between them is caught by `map_library`, never by the kernel mapping wrong bytes |
+| non-musl interpreters | `--argv0`/`--` are a musl CLI dependency | glibc distros are already a recorded seam; failure is LOUD (usage text, exit 1) |
+
+### Tests, and what each can and cannot see
+
+`exec.interp_argv_shape` asserts the block BYTE FOR BYTE. Not optional coverage:
+`exec_build_init_stack` EXTINCTS when the NUL count disagrees with argc, so an off-by-one
+in the slot arithmetic is a dead kernel rather than a failed exec. It is also the ONLY
+place the `--argv0` claim is discriminable — in a container a caller's `argv[0]` always
+equals the path it resolved.
+
+`elf.read_interp` covers the shared bounded walk from the side that ACTS on its answer
+(`elf_brand_hint` is now a caller of it), including the absent-not-truncated cases.
+
+In-guest: `D4-A-byname-getconf-4096` and `D4-B-argv0-is-the-program`, boot-fatal in the
+L-6c leg list.
+
+**Three-way discrimination, measured 2026-08-10 — the two layers are complementary, and
+neither alone is sufficient:**
+
+| Sabotage | Gate | Unit suite |
+|---|---|---|
+| control (none) | PASS (D4-A + D4-B) | 1389/1389 |
+| S1 — rewrite disabled | REDDENS at exactly `D4-A`; `D3-A` stays green | **fully blind** (1389/1389 through it) |
+| S2 — `argv[0] := path` (the vote's literal shape) | **fully green through it** (GATE PASS) | reddens on exactly its own leg |
+
+S1 is why the gate exists: it names by-NAME execution, which no unit test reaches. S2 is
+why the unit test exists: the claim it carries has no in-guest producer.

@@ -1,0 +1,6 @@
+==> Booting kernel under QEMU (timeout 90s)...
+    Log: /Users/northkillpd/projects/thylacine-aux/build/test-boot.log
+/Users/northkillpd/projects/thylacine-aux/tools/test.sh: line 259: 37098 Killed: 9               THYLACINE_BUILD_DIR="$KERNEL_BUILD" "$REPO_ROOT/tools/run-vm.sh" --no-share --cpus "${THYLACINE_TEST_CPUS:-4}" < /dev/null > "$LOG_FILE" 2>&1
+==> harness: qemu_alive_at_teardown=0
+==> FAIL: QEMU exited without emitting boot marker.
+--- full log ---

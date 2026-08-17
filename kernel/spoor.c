@@ -189,11 +189,27 @@ struct Spoor *spoor_clone(struct Spoor *c) {
 
 // spoor_next_devno -- mint a fresh per-instance device number (Plan 9 Chan.dev)
 // for a multi-instance Dev's attach. Monotonic from 1 (0 is the static
-// single-instance default set in spoor_alloc_internal). The wrap after 2^32
-// attaches is benign: the mount key is per-Territory, not a security boundary,
-// and a collision would require two LIVE same-devno sessions in one Territory's
-// mount table -- astronomically unlikely and non-exploitable (it is identity
-// disambiguation, not a capability).
+// single-instance default set in spoor_alloc_internal).
+//
+// #217 CONSULTS devno IN A SECURITY DECISION (mount_noexec_covers keys MNOEXEC
+// on the (dc, devno) a file shares with its mount source), so the old wording
+// here -- "not a security boundary ... identity disambiguation, not a
+// capability" -- is retired. It was exactly the kind of stale reassurance that
+// tells a future reader not to look.
+//
+// For the MNOEXEC key the wrap stays benign, but for a DIFFERENT reason than
+// before: a collision can only ever ADD coverage (a queried file matches some
+// other MNOEXEC entry's source and is refused), never remove it, so it is
+// fail-closed over-restriction rather than a bypass. A Proc cannot choose or
+// influence its devno either -- the counter is kernel-internal and monotonic.
+//
+// SCOPED DELIBERATELY to that consumer, because devno has a SECOND one: the
+// REVENANT Image cache keys on (dc, devno, qid.path), where a collision is NOT
+// over-restriction but an I-1 cache alias (two live Envs sharing a devno could
+// serve one Proc the other's bytes on a non-exec file map). That is
+// pre-existing, shared by every Dev, and needs 2^32 attaches in one boot to
+// reach -- but an unqualified "the wrap is benign" would be the same
+// over-broad reassurance this comment was rewritten to retire.
 u32 spoor_next_devno(void) {
     return __atomic_add_fetch(&g_spoor_devno_ctr, 1u, __ATOMIC_RELAXED);
 }

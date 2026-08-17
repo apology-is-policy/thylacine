@@ -331,6 +331,102 @@ Before the shell exists, the agent looks for:
 
 The kernel must print a canonical success banner once init's boot-test asserts pass (via `SYS_BOOT_COMPLETE`; see §10). This is not optional — it is the agent's signal that the boot succeeded.
 
+### 5.1 The arc-gate report line (`joey: ARC-GATES`, #212)
+
+The boot banner is a *whole-boot* verdict, and some gates legitimately do not
+run: the DISTRO **D-5** and LINEAGE **L-6c** arc gates need an external Alpine
+tarball that is deliberately untracked (it lives only in gitignored
+`build/cache/`), so on a fresh clone, in CI, and in any hermetic build they
+**soft-skip**. That disposition is correct — a missing input is not a broken
+kernel — but until #212 nothing carried it into the exit status, so a tree
+whose D-1..D-4 chain had *regressed* exited 0 identically to one where the
+whole arc worked. The log held the distinction; the verdict discarded it. An
+assertion that never executed is an UNKNOWN, and this one was being reported
+as a PASS.
+
+joey therefore emits one structured line, in **every** build shape:
+
+```
+joey: ARC-GATES l6c=<state> d5=<state>       # PASS | SKIPPED | KNOWN-BLOCKED | MISSING
+joey: ARC-GATES not-built (THYLA_BOOT_PROBES=OFF)
+```
+
+`tools/check-arc-gates.sh` reads it (from `build/test-boot.log` by default) and
+`tools/test.sh` consumes its exit status on the pass path:
+
+| State | Verdict | Reported as |
+|---|---|---|
+| `PASS` | ok | counted in `N/2 ran` |
+| `SKIPPED` | ok | `; M SKIPPED (external Alpine fixture absent -- NOT a guest result, and NOT coverage)` |
+| `KNOWN-BLOCKED` | ok | `; M KNOWN-BLOCKED (deliberately non-fatal -- NOT coverage)` |
+| `MISSING` | **FAIL** | the gate was never called, or returned without recording |
+| report line absent | **FAIL** | the boot never reached the gates, or the report was removed |
+| `not-built` | ok | the `--production` shape (§9's `THYLA_BOOT_PROBES=OFF`) |
+
+Two properties are deliberate. The **producer reports the fact** rather than
+the harness inferring a build shape from a missing line — an absence it could
+not tell from a deleted gate (the same reason `test.sh` reports
+`qemu_alive_at_teardown` instead of letting the SMP gate deduce it, #222). And
+`MISSING` is the *default* state of both gates, so an edit that drops a gate
+call reddens the boot instead of printing nothing and reading as a pass.
+
+What makes the check sound rather than racy is the **ordering**: joey signals
+`SYS_BOOT_COMPLETE` (`joey.c:10145`) long after it prints the report
+(`joey.c:9675`), so on any boot where the harness sees the banner at all, the
+line is already in the log. There is no window in which a banner-observed boot
+can legitimately lack it.
+
+The `not-built` arm is no longer theoretical: #228 restored the lean build, and
+a `--production` boot prints it and is read by the checker end to end —
+
+```
+joey: ARC-GATES not-built (THYLA_BOOT_PROBES=OFF)
+==> arc gates: NOT BUILT (THYLA_BOOT_PROBES=OFF -- the lean production shape; NOT coverage)
+```
+
+**What this buys, and what it does not.** It makes a skip a visible, deliberate,
+reported state; it does **not** manufacture coverage. With the fixture absent
+the arc is still unverified — the report now says so. `THYLA_ARC_GATES=require`
+(or `--require`) makes a skip fatal, for the shapes that ship the fixture; the
+default stays lenient because a fresh clone has none.
+
+`tools/check-arc-gates.sh --selftest` drives the real checker over synthetic
+logs — 32 cases, every arm plus its negatives, across both report families
+(§5.2). The load-bearing one is a **pre-#212 log** (both gates PASS in prose,
+no report line): it must FAIL, or the check is decorative. Fast; no boots. Also
+`make check-arc-gates`.
+
+### 5.2 The clade-gate report line (`joey: CLADE-GATES`, #231/#232)
+
+The same mechanism, same script, for the three **clade** gates — CL-4 (the
+on-device toolchain), CL-7b (llvmpipe/GL) and CL-5 (the build storm). They
+soft-skip on a pool with no `THYLACINE_BAKE_CLADE` bake, which is most pools.
+
+```
+joey: CLADE-GATES cl4=<s> gl=<s> storm=<s>   # PASS | SKIPPED | DECLINED | KNOWN-BLOCKED | MISSING
+joey: CLADE-GATES not-built (THYLA_BOOT_PROBES=OFF)
+```
+
+**#232 made this line necessary rather than merely nice.** Before it, the lean
+image still *ran* the gates and printed their skips, so a deleted call was at
+least visible as missing prose. Now the lean image does not compile them at
+all — so "no clade output" is the correct state for one build shape and a
+dropped gate in the other, and only the report line separates the two.
+
+Two states differ from §5.1. **`FAILED` does not exist**: all three gates are
+boot-fatal, so a failure returns from `main()` before the report and is carried
+by the absent boot banner instead. And the storm alone has **`DECLINED`** —
+`thylacine.nostorm` on the kernel cmdline (`THYLACINE_NOSTORM=1`;
+`tools/test-interactive.sh` sets it to skip a multi-minute build). An operator
+opting out is a different fact from an unbaked pool, so it gets a different
+state rather than a looser shared "skipping" pattern; the checker rejects a
+`SKIPPED` claim backed only by the decline prose, and vice versa.
+
+`THYLA_CLADE_GATES=require` (or `--require-clade`) is the separate opt-in, and
+deliberately **not** folded into `--require`: the arc gates need an Alpine
+tarball, these need a whole clade pool, and a configuration with one rarely has
+the other.
+
 ---
 
 ## 6. QEMU snapshots — the kernel development safety net
@@ -653,15 +749,126 @@ boot shape**, flipping two CMake options in lockstep:
   `tests: DISABLED (KERNEL_TESTS=OFF production build)`). Kernel flat binary
   929 KiB → 282 KiB.
 - `THYLA_BOOT_PROBES=OFF` — compiles joey without its boot-test probe ladder.
-  The **real bringup is unconditional**: stratumd mount → `pivot_root` → `/srv`
-  re-graft → corvus spawn → `SYS_BOOT_COMPLETE` → console relinquish → the
-  login getty. Only the probes (torture/stress/bench + the corvus
-  USER_CREATE/AUTH/RECOVER/login E2E ladder) compile out.
+  Most **real bringup is unconditional**: stratumd mount → `pivot_root` → `/srv`
+  re-graft → corvus spawn → ptyfs → diorama → `SYS_BOOT_COMPLETE` → console
+  relinquish → the login getty. The probes (torture/stress/bench, the corvus
+  USER_CREATE/AUTH/RECOVER/login E2E ladder, the Clade/Go on-device toolchain
+  gates, the whole `/net` probe run) compile out.
+
+  > **The WARDEN is NOT among them, since #230.** It used to be — it entered at
+  > 5c as the bind-loop *proof* and stayed in the ladder when netd and tapestryd
+  > were hung off it — so the lean image had no drivers, no network and no
+  > compositor at all. It is now unconditional, and only the two FIXTURE
+  > manifests (`menagerie-probe`, `crash-probe`) are probe-gated, via the
+  > `--with-fixtures` argv joey passes only from its ladder. A lean boot now
+  > reports `warden: 3 bound, 3 up, 0 gave up, 0 failed` and brings up `/net`,
+  > `/dev/tapestry` and the rendered console.
+
+**This shape did not build at all between some earlier chunk and 2026-08-12
+(#228)**, because probe blocks were appended after their gate's `#endif` and
+called helpers that only exist inside it — joey failed with 11 errors. Nothing
+noticed, because nothing builds it: not `tools/test.sh`, not the SMP gate, not
+the interactive harness, not any Makefile default. **`tools/check-production.sh`
+(~2 s, no boot) guards it**; `--all` runs the full production build too.
+
+**Since #229 it is no longer a target you have to remember: `tools/test.sh`
+builds the lean shape before booting the dev one**, and fails the run if it does
+not compile. That is the actual fix for "nothing builds this shape" — a
+`make` target guards nothing on the iterations where nobody types it. It costs
+~2 s, uses a scratch build dir, and SKIPS (loudly, as *not* coverage) when
+`build/generated` is absent, since a kernel-only iteration legitimately has no
+generated headers.
+
+### The probe/production boundary in `joey.c`, and its tripwire (#229)
+
+joey is ~10k lines of which about two thirds is probe ladder, spread over
+nineteen `#if THYLA_BOOT_PROBES` regions: **five at file scope** (the helpers)
+and **fourteen as statement blocks inside a function** — thirteen in `main()`,
+one in `do_corvus_bringup`. (The #229 commit message says "thirteen inside
+`main()`"; that was the in-*function* count of the day, off by the
+`do_corvus_bringup` one. Recounted at #231 and again at #232, which added the
+`main()` region holding the three clade gates.) That scattering
+is the shared root of
+#228 (a probe block outside its gate), #229 (probe helpers outside every gate)
+and #232 (probe-shaped gates running in the ship image) — while editing, the
+boundary is invisible.
+
+Two things now hold it:
+
+1. **One region for the helpers.** Every probe-only helper lives in a single
+   `#if THYLA_BOOT_PROBES` block below *all* the production helpers. It can be
+   one region because the dependency is one-way: probes call production helpers,
+   never the reverse. Add a new probe helper inside it.
+2. **`-Werror=unused-function` on the joey target.** A helper typed outside the
+   region is dead code in the lean image; before #229 the only signal was a
+   warning in a log nothing read, and eleven had accumulated. Now the build
+   refuses, in both shapes, naming the function.
+
+The second is what actually prevents recurrence, and it is worth being clear
+that the first does not: moving the helpers into their own region — or their own
+file — does not stop the next person typing a new one wherever they happen to be
+editing. **The compiler is the only reader that is always present.** A function
+genuinely meant to be uncalled says so with `__attribute__((unused))`.
+
+**What belongs on which side is decided by what the code asserts, not by which
+arc wrote it (#232).** The ungated tail of `main()` held four boot-fatal blocks
+and they split two ways. The three clade gates exercise an on-device toolchain
+the ship image never bakes, so in `--production` they could only ever no-op —
+scaffolding, now inside the gate. The fourth opens `/dev/null` and requires it
+to `fstat` as a character device: the clade arc found that bug, but the
+invariant is the namespace's, every configuration mounts `/dev`, and a failure
+there is a broken boot whoever is looking. It ships, reworded off its `CL-4
+PROBE` label so a v1.0 log does not read as a boot test. **Provenance is not
+category** — an assertion named after the arc that discovered it will keep
+getting filed as that arc's scaffolding.
+
+The tripwire is what makes such a move verifiable rather than hopeful. Gating
+the three callers turned their definitions probe-only, and *transitively* seven
+more — `-Werror=unused-function` named each one until the region held all eight.
+Census first (a warning count is a lower bound: a dead callee referenced by a
+dead caller is silent), then let the compiler confirm the set was exactly right.
+
+`check-production.sh` verifies the tripwire is *armed* by reading
+`-Werror=unused-function` off the flags CMake generated — not off
+`usr/joey/CMakeLists.txt`, which is the same source the build reads, so agreeing
+with it would only prove the file agrees with itself. Deleting the option makes
+the check FAIL rather than quietly pass (verified both ways).
+
+`tools/test.sh` understands the shape as of #228: it reads joey's own
+`ARC-GATES not-built` line and reports the **debug-probe hwwatch** check as NOT
+APPLICABLE rather than failing it (debug-probe is a probe, so the marker can
+never appear). It keys on the build-shape report, never on the absence of the
+thing a gate looks for — that absence is also what the corresponding regression
+prints, and skipping on it would convert a failure into a skip.
+
+**The G-4 console gate is NOT skipped** — #230 briefly did skip it, on the
+reasoning that the lean shape had no compositor, but that was the defect and
+not the shape. With the warden unconditional the lean image renders a console
+like any other, and the gate runs against it.
+
+**Two QMP monitors (#230).** A QMP chardev in `server,nowait` serves ONE client
+at a time, and `tools/qmp-inject-key.py` connects at launch and holds the
+monitor for the whole boot (deliberately, #362 — it pays connect+capabilities
+before the guest needs it). That is harmless whenever the injector finishes
+early, and fatal when its `AWAITING_QMP_KEY` sentinel never comes: the lean
+shape does not build that probe, so the G-4 screendump got
+`ConnectionRefusedError` and the gate blamed the renderer for a socket it could
+not open. `run-vm.sh` therefore opens a second monitor at
+`build/qmp-gate.sock` (`THYLACINE_QMP_SOCK2`) and the gate uses that one, so
+the two consumers are independent rather than ordering-dependent. The G-4 FAIL
+arm now also prints the checker's own numbers instead of guessing at causes.
 
 Measured: the production shape boots to `Thylacine boot OK` in **~21.5 ms**
 (TCG) — vs ~525 ms for the dev build — well under the 500 ms `VISION.md §4.5`
 target. The `Thylacine boot OK` banner + the `EXTINCTION:` prefix (the binding
 tooling ABI, §10) are byte-identical in both shapes.
+
+Re-measured at #228 on the first boot the shape had had in a long time, as a
+same-host same-accel pair (HVF, guest-reported `boot-ms`): **1244 ms lean vs
+11203 ms dev**, a ~9x reduction. Not comparable to the TCG figures above — a
+different accelerator, a different tree, and a pool + GOROOT the earlier
+measurement did not carry — so it is recorded beside them rather than over
+them.
 
 **Caveat — first-login provisioning is a seam.** The dev/CI shape's probe
 ladder also mints the bootstrap users (michael/susan/cora) as test fixtures.

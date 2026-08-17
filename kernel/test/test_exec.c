@@ -193,7 +193,7 @@ static void drop_proc(struct Proc *p) {
 // address of byte `off` within the Burrow, or NULL if that slot is not resident.
 //
 // Every caller below reads a run that lies wholly inside ONE page (the init frame
-// is 176 bytes at the top of the stack; the data-segment checks are the first 256
+// is EXEC_INIT_STACK_SIZE bytes at the top of the stack; the data-segment checks are the first 256
 // bytes), so one lookup covers each. A run that spanned a page boundary would need
 // to re-look-up at the crossing -- separate pages are not contiguous in the direct
 // map, which is the whole point of the sparse representation.
@@ -224,7 +224,7 @@ void test_exec_from_spoor_rodata_dispatch(void) {
     exe->qid.vers = 7;
 
     u64 entry = 0, sp = 0;
-    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp);
+    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, NULL, 0, 0, &entry, &sp);
     TEST_EXPECT_EQ(rc, 0, "exec_setup_from_spoor");
     TEST_EXPECT_EQ(entry, (u64)0x10000, "entry == e_entry");
 
@@ -300,7 +300,7 @@ void test_exec_unaligned_stays_off_image_cache(void) {
     exe->qid.vers = 1;
 
     u64 entry = 0, sp = 0;
-    TEST_EXPECT_EQ(exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp),
+    TEST_EXPECT_EQ(exec_setup_from_spoor(p, exe, size, NULL, 0, NULL, 0, 0, &entry, &sp),
                    0, "the unaligned rodata segment still loads");
 
     struct Vma *text = vma_lookup(p, 0x10000ull);
@@ -348,7 +348,7 @@ void test_exec_from_spoor_aliased_window_distinct(void) {
     exe->qid.vers = 3;
 
     u64 entry = 0, sp = 0;
-    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp);
+    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, NULL, 0, 0, &entry, &sp);
     TEST_EXPECT_EQ(rc, 0, "exec_setup_from_spoor (aliased window)");
 
     struct Vma *text = vma_lookup(p, 0x10000ull);
@@ -732,7 +732,7 @@ void test_exec_setup_auxv(void) {
     // Read the frame back from the stack BURROW via the direct map.
     struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
     TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
-    // L-4a: the stack is sparse; the frame lives in the last page (176 bytes).
+    // L-4a: the stack is sparse; the frame lives in the last page.
     u8 *fb = lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
     TEST_ASSERT(fb != NULL, "init-frame page populated by exec");
     u64 *w = (u64 *)fb;
@@ -742,9 +742,9 @@ void test_exec_setup_auxv(void) {
     TEST_EXPECT_EQ(w[1], 0ull, "argv[] terminator is NULL");
     TEST_EXPECT_EQ(w[2], 0ull, "envp[] terminator is NULL");
 
-    // auxv — eight (a_type, a_val) pairs: AT_PHDR/PHENT/PHNUM/PAGESZ,
-    // AT_HWCAP, AT_RANDOM, AT_VDSO_CLOCK (the vDSO page maps at boot --
-    // vdso_init ran), AT_NULL last.
+    // auxv — nine (a_type, a_val) pairs: AT_PHDR/PHENT/PHNUM/PAGESZ,
+    // AT_HWCAP, AT_RANDOM, AT_ENTRY (D-2), AT_VDSO_CLOCK (the vDSO page maps
+    // at boot -- vdso_init ran), AT_NULL last.
     TEST_EXPECT_EQ(w[3],  (u64)AT_PHDR,   "auxv[0].a_type == AT_PHDR");
     TEST_EXPECT_EQ(w[4],  0x10040ull,     "AT_PHDR == seg0 vaddr + e_phoff");
     TEST_EXPECT_EQ(w[5],  (u64)AT_PHENT,  "auxv[1].a_type == AT_PHENT");
@@ -763,10 +763,15 @@ void test_exec_setup_auxv(void) {
     TEST_ASSERT((w[12] & 0x3ull) == 0x3ull,
         "AT_HWCAP carries FP|ASIMD (the PFR0 decode)");
     TEST_EXPECT_EQ(w[13], (u64)AT_RANDOM, "auxv[5].a_type == AT_RANDOM");
-    TEST_EXPECT_EQ(w[15], (u64)AT_VDSO_CLOCK, "auxv[6].a_type == AT_VDSO_CLOCK");
-    TEST_EXPECT_EQ(w[16], EXEC_USER_VDSO_BASE, "AT_VDSO_CLOCK == EXEC_USER_VDSO_BASE");
-    TEST_EXPECT_EQ(w[17], (u64)AT_NULL,   "auxv[7].a_type == AT_NULL");
-    TEST_EXPECT_EQ(w[18], 0ull,           "AT_NULL.a_val == 0");
+    // D-2: AT_ENTRY carries the image's FINAL entry. This blob is ET_EXEC,
+    // so the final entry IS e_entry -- the bias is 0 and the tag must not
+    // have acquired one. The ET_DYN twin is elf.pie_load_bias.
+    TEST_EXPECT_EQ(w[15], (u64)AT_ENTRY,  "auxv[6].a_type == AT_ENTRY");
+    TEST_EXPECT_EQ(w[16], 0x10000ull,     "AT_ENTRY == e_entry (ET_EXEC: unbiased)");
+    TEST_EXPECT_EQ(w[17], (u64)AT_VDSO_CLOCK, "auxv[7].a_type == AT_VDSO_CLOCK");
+    TEST_EXPECT_EQ(w[18], EXEC_USER_VDSO_BASE, "AT_VDSO_CLOCK == EXEC_USER_VDSO_BASE");
+    TEST_EXPECT_EQ(w[19], (u64)AT_NULL,   "auxv[8].a_type == AT_NULL");
+    TEST_EXPECT_EQ(w[20], 0ull,           "AT_NULL.a_val == 0");
 
     // AT_RANDOM points at the 16-byte entropy block, which must lie
     // within the user stack region.
@@ -943,7 +948,7 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
 
     struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
     TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
-    // L-4a: the stack is sparse; the frame lives in the last page (176 bytes).
+    // L-4a: the stack is sparse; the frame lives in the last page.
     u8 *fb = lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
     TEST_ASSERT(fb != NULL, "init-frame page populated by exec");
     u64 *w = (u64 *)fb;
@@ -956,10 +961,10 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
     // a coherent "no phdrs" auxv (audit F1).
     TEST_EXPECT_EQ(w[6], 0ull, "AT_PHENT == 0 when AT_PHDR is unresolved");
     // The startup frame is otherwise well-formed. With the vDSO page mapped,
-    // AT_VDSO_CLOCK occupies the slot at w[15] and AT_NULL terminates at
-    // w[17] (AT_HWCAP shifted the tail by one entry).
+    // AT_ENTRY occupies w[15] and AT_VDSO_CLOCK w[17], so AT_NULL terminates
+    // at w[19] (AT_HWCAP and then D-2's AT_ENTRY each shifted the tail by one).
     TEST_EXPECT_EQ(w[0],  0ull,          "argc == 0");
-    TEST_EXPECT_EQ(w[17], (u64)AT_NULL,  "auxv terminated by AT_NULL");
+    TEST_EXPECT_EQ(w[19], (u64)AT_NULL,  "auxv terminated by AT_NULL");
 
     drop_proc(p);
 }
@@ -1073,7 +1078,7 @@ void test_exec_from_spoor_bss_only_text_icache_synced(void) {
     u64 calls0 = exec_icache_calls_for_test();
 
     u64 entry = 0, sp = 0;
-    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp);
+    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, NULL, 0, 0, &entry, &sp);
     TEST_EXPECT_EQ(rc, 0, "exec_setup_from_spoor (PF_X, filesz == 0)");
 
     struct Vma *text = vma_lookup(p, 0x10000ull);
@@ -1142,7 +1147,7 @@ void test_execve_load_into_detached(void) {
     TEST_ASSERT(nas != p->as, "the target is a DIFFERENT address space");
 
     u64 entry = 0, sp = 0;
-    int rc = exec_load_into(nas, /*exempt=*/false, exe, size,
+    int rc = exec_load_into(nas, /*exempt=*/false, /*nsp=*/NULL, exe, size, NULL, 0,
                             NULL, 0, 0, NULL, 0, 0, &entry, &sp);
     TEST_EXPECT_EQ(rc, 0, "exec_load_into into a detached address space");
     TEST_EXPECT_EQ(entry, (u64)0x10000, "entry == e_entry");
@@ -1198,13 +1203,13 @@ void test_execve_load_into_rejects_dirty(void) {
 
     // Load once -- succeeds and leaves the target populated.
     u64 entry = 0, sp = 0;
-    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    0, "first load into a clean target");
 
     // Loading again into the SAME (now dirty) target must refuse rather than
     // overlay a second image on top of the first.
-    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    -1, "a second load into a dirty target is refused");
 
@@ -1244,7 +1249,7 @@ void test_execve_failed_load_leaves_target_drainable(void) {
     TEST_ASSERT(nas != NULL, "addrspace_alloc");
 
     u64 entry = 0, sp = 0;
-    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    -1, "a mid-load failure is reported");
     TEST_ASSERT(nas->vmas != NULL, "the target really is partially populated");
@@ -1356,4 +1361,168 @@ void test_exec_stack_is_sparse(void) {
         "only the stack frame's page is charged (the eager text is not)");
 
     drop_proc(p);
+}
+
+// ---------------------------------------------------------------------------
+// exec.interp_argv_shape -- DISTRO D-4.
+//
+// The block exec_interp_argv builds is the whole of the D-4 ABI toward the
+// interpreter, and it is asserted BYTE FOR BYTE rather than by shape, for two
+// reasons that pull the same way:
+//
+//   1. exec_build_init_stack EXTINCTS when the NUL count disagrees with argc.
+//      An off-by-one in the slot arithmetic is therefore a dead kernel, not a
+//      failed exec, and no in-guest gate can survive to report it.
+//   2. This is the ONLY place the `--argv0` claim is discriminable. In a
+//      container, a caller's argv[0] always equals the path it resolved -- the
+//      shells pass the word they typed -- so the gate cannot tell "argv[0] was
+//      carried" from "the path happened to be the same string". Here the two
+//      are deliberately DIFFERENT strings.
+// ---------------------------------------------------------------------------
+
+// Compare `blob` against `n` expected strings laid out back-to-back, each
+// NUL-terminated. Returns the index of the first slot that differs, or -1.
+static int argv_blob_differs_at(const char *blob, u32 blob_len,
+                                const char *const *want, u32 n) {
+    u32 off = 0;
+    for (u32 i = 0; i < n; i++) {
+        u32 j = 0;
+        for (;;) {
+            if (off + j >= blob_len) return (int)i;      // ran off the end
+            char b = blob[off + j];
+            char w = want[i][j];
+            if (b != w) return (int)i;
+            if (b == '\0') break;
+            j++;
+        }
+        off += j + 1;
+    }
+    return (off == blob_len) ? -1 : (int)n;              // trailing junk
+}
+
+void test_exec_interp_argv_shape(void) {
+    static const char INTERP[] = "/lib/ld-musl-aarch64.so.1";
+    u32 len = 0, n = 0;
+
+    // (1) THE DISCRIMINATING CASE: argv[0] is NOT the path. A busybox applet
+    // invoked as `ls` out of `/bin/busybox` is exactly this, and it is the
+    // shape that separates --argv0 from handing over the path alone.
+    {
+        static const char argv[] = "ls\0-l";             // argc 2
+        char *b = exec_interp_argv(INTERP, sizeof(INTERP) - 1,
+                                   "/bin/busybox", 12,
+                                   argv, sizeof(argv), 2, &len, &n);
+        TEST_ASSERT(b != NULL, "the rewrite builds");
+        static const char *want[] = { INTERP, "--argv0", "ls", "--",
+                                      "/bin/busybox", "-l" };
+        TEST_EXPECT_EQ(argv_blob_differs_at(b, len, want, 6), -1,
+            "argv0 travels in --argv0 while the PATH stays the program slot");
+        TEST_EXPECT_EQ((u64)n, 6ull, "argc + 4");
+        kfree(b);
+    }
+
+    // (2) The frame builder's contract, stated as its own assertion: exactly
+    // `n` NULs, and the last byte is one. This is the extinction above.
+    {
+        static const char argv[] = "sh\0-c\0echo hi";     // argc 3
+        char *b = exec_interp_argv(INTERP, sizeof(INTERP) - 1, "/bin/sh", 7,
+                                   argv, sizeof(argv), 3, &len, &n);
+        TEST_ASSERT(b != NULL, "the rewrite builds");
+        u32 nuls = 0;
+        for (u32 i = 0; i < len; i++) if (b[i] == '\0') nuls++;
+        TEST_EXPECT_EQ((u64)nuls, (u64)n, "exactly argc NULs (the frame contract)");
+        TEST_EXPECT_EQ((u64)b[len - 1], 0ull, "the block ends in a NUL");
+        TEST_EXPECT_EQ((u64)n, 7ull, "argc 3 -> 7");
+        kfree(b);
+    }
+
+    // (3) argc == 0. Representable on both entries and unrepresentable through
+    // a loader that must name a pathname, so the program is handed an empty
+    // argv[0] and sees argc == 1 -- the DISTRO.md section 3.2 ledger row.
+    {
+        char *b = exec_interp_argv(INTERP, sizeof(INTERP) - 1, "/bin/true", 9,
+                                   NULL, 0, 0, &len, &n);
+        TEST_ASSERT(b != NULL, "the rewrite builds with no argv at all");
+        static const char *want[] = { INTERP, "--argv0", "", "--", "/bin/true" };
+        TEST_EXPECT_EQ(argv_blob_differs_at(b, len, want, 5), -1,
+            "argc 0 yields an EMPTY argv0 slot, never a missing one");
+        TEST_EXPECT_EQ((u64)n, 5ull, "argc 0 -> 5 slots (the app then sees 1)");
+        kfree(b);
+    }
+
+    // (4) The bounds REFUSE rather than truncate. An argv block already at the
+    // ABI ceiling cannot absorb four more slots, and the honest answer is a
+    // failed exec -- a silently shortened vector would run the program with
+    // arguments it never received.
+    {
+        static char big[EXEC_ARGV_DATA_MAX];
+        for (u32 i = 0; i < sizeof(big) - 1; i++) big[i] = 'x';
+        big[sizeof(big) - 1] = '\0';
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin/x", 6,
+                           big, sizeof(big), 1, &len, &n), 0ull,
+            "an argv block at the ceiling REFUSES the rewrite");
+    }
+    {
+        // The COUNT ceiling, independently: one NUL per slot, argc at the max.
+        static char many[EXEC_ARGV_MAX];
+        for (u32 i = 0; i < sizeof(many); i++) many[i] = '\0';
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin/x", 6,
+                           many, sizeof(many), EXEC_ARGV_MAX, &len, &n), 0ull,
+            "an argc at the ceiling REFUSES the rewrite");
+    }
+
+    // (5) A mis-packed input (argc > 0 but argv[0] unterminated within the
+    // block) is refused here rather than carried into the frame builder, whose
+    // answer to a bad count is an extinction.
+    {
+        static const char bad[] = { 'l', 's' };          // no NUL anywhere
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin/ls", 7,
+                           bad, sizeof(bad), 1, &len, &n), 0ull,
+            "an unterminated argv[0] REFUSES the rewrite");
+    }
+    {
+        // ...and the same for the TAIL. Both production entries validate this
+        // before the rewrite runs, so this guards the EXPORTED surface rather
+        // than a live path -- which is precisely the case that would rot.
+        static const char bad[] = { 'l', 's', '\0', '-', 'l' };   // no final NUL
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin/ls", 7,
+                           bad, sizeof(bad), 2, &len, &n), 0ull,
+            "an argv block not ending in a NUL REFUSES the rewrite");
+    }
+
+    // (6) SELF-AUDIT SA-1/SA-9. The rules that make the NUL-count identity hold
+    // for ANY input rather than only for the two production callers. Each of
+    // these desyncs argc from the block's NUL count, and the frame builder
+    // answers a desync with an EXTINCTION -- so each must be refused here.
+    {
+        static const char argv[] = "ls\0-l";              // 2 NULs
+        // argc that OVERSTATES the block.
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin/ls", 7,
+                           argv, sizeof(argv), 3, &len, &n), 0ull,
+            "argc disagreeing with the block's NUL count REFUSES");
+        // an embedded NUL in the PATH would split one slot into two.
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin\0ls", 7,
+                           argv, sizeof(argv), 2, &len, &n), 0ull,
+            "an embedded NUL in the path REFUSES");
+        // ...and in the interpreter.
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           "/lib\0ld", 7, "/bin/ls", 7,
+                           argv, sizeof(argv), 2, &len, &n), 0ull,
+            "an embedded NUL in the interpreter REFUSES");
+        // A zero-length path would have the ldso open("").
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "", 0,
+                           argv, sizeof(argv), 2, &len, &n), 0ull,
+            "an empty program path REFUSES");
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           "", 0, "/bin/ls", 7,
+                           argv, sizeof(argv), 2, &len, &n), 0ull,
+            "an empty interpreter path REFUSES");
+    }
 }

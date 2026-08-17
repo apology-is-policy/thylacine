@@ -153,7 +153,7 @@ enum {
     //   x0 = path_va  (user VA of the absolute mount-point path)
     //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX; bytes, NUL-free)
     //   x2 = source_spoor_fd (hidx_t; must be a KOBJ_SPOOR handle)
-    //   x3 = flags (u32; MREPL / MBEFORE / MAFTER / MCREATE)
+    //   x3 = flags (u32; MREPL / MBEFORE / MAFTER / MCREATE / MNOEXEC)
     // stalk-2: path-keyed (was an abstract target_path_id). The kernel
     // `stalk`s `path` from the caller's Territory root to the mount-point
     // Spoor (STALK_MOUNT: resolve, do NOT cross the final mount, do NOT
@@ -167,7 +167,7 @@ enum {
     //   - path absent / empty / too long / not resolvable / NUL-embedded
     //   - invalid source_spoor_fd (not KOBJ_SPOOR, out-of-range)
     //   - missing RIGHT_READ on the source (it must be consumable as a tree)
-    //   - flags has bits outside the MREPL|MBEFORE|MAFTER|MCREATE set
+    //   - flags has bits outside the MREPL|MBEFORE|MAFTER|MCREATE|MNOEXEC set
     //   - territory mount table full (PGRP_MAX_MOUNTS reached)
     //
     // Lifecycle (per ARCH §9.6.6): `mount` bumps the source Spoor's refcount
@@ -786,12 +786,32 @@ enum {
 
     // SYS_NOTED(arg) — return from a running note handler.
     //   x0 = arg    NCONT (= 0; restore saved user context + resume)
-    //               NDFLT (= 1; take the note's default action — for the
-    //                            v1.0 supported set, exits with a status
-    //                            string matching the note name)
-    // NEVER RETURNS NORMALLY. Either the saved user context is restored
-    // (the syscall's exception_context is rewritten with the t->note_saved_*
-    // fields), or the Proc transitions to ZOMBIE via exits.
+    //               NDFLT (= 1; take the note's default action)
+    //
+    // NDFLT's action is PER-NOTE since #15 -- it is NOT "exits(name)" for
+    // every note, which is what this block used to say. The kernel looks the
+    // in-flight note's name up in its default-action table and does one of
+    // three things:
+    //   TERMINATE  interrupt / kill / pipe / tty:quit / tty:hup
+    //              -> exits(name); the Proc goes ZOMBIE (multi-thread: the
+    //              whole Proc, via the group-terminate cascade). NEVER RETURNS.
+    //   STOP       tty:susp
+    //              -> the saved user context is restored exactly as NCONT
+    //              restores it, then the kernel job-stops the Proc; execution
+    //              resumes at the interrupted instruction when a tty:cont
+    //              arrives. RETURNS (x0 = the restored pre-handler value).
+    //              DISCARDED, having done nothing, if the caller's process
+    //              group is orphaned -- POSIX, because no one could resume it.
+    //              An implementer cannot distinguish that from a stop-then-
+    //              resume, and should not need to.
+    //   IGNORE     child_exit / tty:winch / tty:cont
+    //              -> restore and return; byte-identical to NCONT, because
+    //              doing nothing IS the default action. RETURNS.
+    //
+    // So NCONT never returns normally, and NDFLT returns for two of its three
+    // dispositions. In every returning case the exception_context has been
+    // rewritten from t->note_saved_*, so x0 carries the pre-handler value
+    // rather than a status.
     //
     // Returns -1 on:
     //   - caller is NOT in a handler (t->in_handler == false)
@@ -2584,6 +2604,13 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // boundary-line passes t_stat.mode straight through to st_mode, so this value
 // must stay POSIX S_IFIFO (0010000) for S_ISFIFO to work.
 #define T_S_IFIFO   0010000u
+// DISTRO D-1: symlinks. Reported by a lstat-shaped stat (the resolver's
+// STALK_NOFOLLOW path) on a link's own record, so `S_ISLNK(st.st_mode)` works
+// across the pouch boundary-line -- which is what `ls -l` and every
+// tree-walker branch on. The dev9p mapper derives it from the 9P qid's
+// P9_QTSYMLINK bit when the server's Tgetattr mode does not already carry it;
+// the value must stay POSIX S_IFLNK (0120000).
+#define T_S_IFLNK   0120000u
 
 // SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Which of the
 // (mode, uid, gid, size) register arguments the kernel applies. Chosen to
@@ -2707,8 +2734,9 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 
 // Permitted omode bits for SYS_WALK_OPEN. Plan 9 modes: OREAD=0,
 // OWRITE=1, ORDWR=2, OEXEC=3 (low 2 bits) plus the OTRUNC modifier
-// (0x10). Phase 5+ may extend (OCEXEC=0x20, ORCLOSE=0x40, OEXCL=0x1000)
-// as callers materialize. Any bit outside this mask → -1.
+// (0x10). Phase 5+ may extend (ORCLOSE=0x40, OEXCL=0x1000) as callers
+// materialize -- NOT 0x20, which D-1 took for SYS_WALK_OPEN_NOFOLLOW below.
+// Any bit outside this mask → -1.
 //
 // FS-delta (IDENTITY-DESIGN.md §9.4): SYS_WALK_OPEN_OPATH = 0x80 is the
 // Linux-O_PATH / Plan-9-walk equivalent -- walk to the component but do
@@ -2718,7 +2746,31 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // O_PATH handle IS (and is a valid SYS_CHROOT target). When set, the
 // access bits are ignored (the handle carries no byte-I/O open).
 #define SYS_WALK_OPEN_OPATH        0x80u
-#define SYS_WALK_OPEN_OMODE_VALID  0x93u
+// D-1 (DISTRO.md section 4.3): do NOT follow a symlink at the path's FINAL
+// component -- the Linux O_NOFOLLOW / lstat-shape resolution flag. Consumed by
+// SYS_OPEN (threaded into the resolver as STALK_NOFOLLOW; the bit is STRIPPED
+// before the omode reaches Dev.open, so no server sees it). Composable with
+// OPATH (the Linux O_PATH|O_NOFOLLOW open-the-link-itself idiom: the returned
+// navigation handle IS the link; SYS_FSTAT on it reports the link's own
+// metadata -- the native lstat emulation). Without OPATH, a final symlink
+// answers -T_E_LOOP (a symlink cannot be byte-opened). A trailing slash on the
+// path overrides the flag (POSIX 4.13).
+//
+// SYS_WALK_OPEN admits the bit and its ANSWER is the same as SYS_OPEN's, for
+// the same reason -- the single-hop twin does not EXPAND (one hop cannot follow
+// a multi-component target), but it does REFUSE: a walked symlink without OPATH
+// is -T_E_LOOP there too. The earlier "admit and ignore, honestly" reading was
+// wrong and the audit caught it: ignoring the flag meant opening the link and
+// returning success to a caller who had just said "not a symlink", and the DAC
+// check on that open reads the LINK's mode -- 0777 by POSIX convention, so it
+// passes for everyone. SYS_WALK_CREATE does still ignore it: a created child is
+// never a symlink (there is no create-a-link mode), so the flag is vacuous
+// there by construction rather than by omission.
+//
+// The bit is STRIPPED before the omode reaches Dev.open / Dev.create on every
+// path, so no server and no Spoor.mode ever sees it.
+#define SYS_WALK_OPEN_NOFOLLOW     0x20u
+#define SYS_WALK_OPEN_OMODE_VALID  0xB3u
 
 // SYS_WALK_CREATE perm: the Plan 9 perm word. Low 9 bits are the POSIX
 // rwxrwxrwx mode; the DMDIR bit selects directory creation. All other Plan 9

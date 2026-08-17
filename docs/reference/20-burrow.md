@@ -85,6 +85,12 @@ u64           burrow_total_destroyed(void);
 
 After the last unref/release that brings BOTH counts to 0, the v pointer is **invalid**. `burrow_free_internal` clobbers `v->magic = 0` immediately before `kmem_cache_free` (R9 F148 discipline; closed at R13 F213 / P4-N); SLUB's freelist write may then overwrite the slot's first 8 bytes with its next-pointer. Either way, the slot's first qword is no longer `VMO_MAGIC`. A subsequent stale-pointer `burrow_ref` / `burrow_acquire_mapping` extincts via the magic check rather than masking the UAF. Callers must not dereference v after the free transition. The high-level `burrow_unmap(Proc*, ...)` entry routes through `vma_free` → `burrow_release_mapping`; the same caveat applies, with the additional note that the VMA itself is also freed.
 
+### Deferred free — `burrow_release_mapping_deferred` / `burrow_free_deferred` (D-3c F1)
+
+A `BURROW_TYPE_FILE` free reaches `spoor_clunk`, which on the last 9P session ref runs a **synchronous `Tclunk`** — it **may sleep**. Every teardown that frees a Burrow under `as->lock` (`sys_burrow_detach_for_proc`, `sys_munmap_range_for_proc`, `vma_drain_in`, and — since the D-3c re-audit F5 — `vma_replace_range_in`'s `MAP_FIXED` exact-cover arm, reached via `burrow_map_fixed`) therefore cannot free inline: sleeping under a plain spinlock is the `sched()` lock-across-sleep extinction. This is the teardown twin of #193 (which hoisted the mmap **success-path construction-handle** unref outside the lock; the **mapping-ref** teardown drop did not inherit it until D-3c, because before D-3 no *detachable* Burrow's free slept — ANON `free_pages` never does, and exec's FILE Burrows sit outside the detach window). D-3 put a 9P-backed FILE Burrow at a guest-detachable address, making it live.
+
+The mechanism: `burrow_release_mapping_deferred` drops the mapping ref under `v->lock` and, if that was the last ref, returns the now-dead Burrow **without freeing**; the caller pushes it onto a `deferred_free_next` single-linked stack (a Burrow field, meaningful only while on such a stack — the Burrow is at `{handle:0, mapping:0}`, unreachable by any other path, so the link needs no lock) and calls `burrow_free_deferred` for the whole chain **after** dropping `as->lock`. The range munmap collects across one continuous lock hold (so all VMA removals stay atomic — the straddle-refusal validation depends on it) and frees the chain after the unlock. `burrow_unmap_reporting`'s `out_free` param selects deferral (non-NULL) vs the inline free (NULL — the `burrow_unmap` wrapper's non-sleeping ANON/CODE/DMA callers). The D-3c re-audit F5 threads the **same** `out_free` idiom through `vma_replace_range_in` → `burrow_map_fixed_in` → `burrow_map_fixed`, so the `MAP_FIXED` exact-cover free of the replaced old Burrow is handed back to the two `sys_mmap_fixed_*_for_proc` arms and freed past their `spin_unlock` (F1 deferred only detach/munmap/drain; the `MAP_FIXED` replace was the fourth site). `detach_one_locked` now takes a **mandatory** `out_free` (extincts on NULL) — it always runs under `as->lock`, so it must always defer (F6). Tests: `burrow.detach_file_frees_outside_lock` / `..._munmap_range_...` / `..._map_fixed_replace_...` (a stub Dev `.close` records `current_thread()->preempt_count`; asserts 0; each revert-probes red on its own inline-free site).
+
 ### `burrow_map(Proc*, Burrow*, vaddr, length, prot)` — return semantics
 
 | Return | Meaning |
@@ -289,7 +295,11 @@ Page count is `ceil(size / PAGE_SIZE)`; allocation is a single `alloc_pages(orde
 
 `BURROW_TYPE_ANON` (anonymous, demand-paged) is the P3-Db type. `BURROW_TYPE_MMIO` (`burrow_create_mmio`, P4-Ic1) and `BURROW_TYPE_DMA` (`burrow_create_dma`, P4-Ic5b1b) back device-MMIO and DMA buffers respectively -- both landed in Phase 4 (the `BURROW_TYPE_PHYS` placeholder this section once named was superseded by the MMIO/DMA split).
 
-`BURROW_TYPE_FILE` (Stratum page cache) requires the 9P client + the page cache; post-v1.0.
+`BURROW_TYPE_FILE` **landed at REVENANT** (`burrow_create_file`: the adopted+pinned
+Spoor, the sparse `filepages[]`, demand-paged through `arch/arm64/fault.c`; since
+DISTRO D-3 it also backs phenotype file mmaps, and carries `file_limit` — the
+#194 SIGBUS-past-EOF bound). This section's earlier "post-v1.0" claim was stale;
+the FILE type's authoritative reference is `docs/reference/126-revenant.md`.
 
 ### `burrow_map(Proc*, ...)` does NOT install PTEs
 
@@ -328,7 +338,7 @@ The struct contains `enum burrow_type` whose underlying integer type is implemen
 | `burrow_create_mmio(struct KObj_MMIO *)` (BURROW_TYPE_MMIO) | **Landed (P4-Ic1)** — wraps KObj_MMIO; holds a ref on the underlying kobj for the Burrow's lifetime; pages=NULL; burrow_free_internal type-dispatches between free_pages (ANON) and kobj_mmio_unref (MMIO). |
 | `burrow_create_dma(struct KObj_DMA *)` (BURROW_TYPE_DMA) | **Landed (P4-Ic5b1b)** — wraps KObj_DMA; holds a ref on the underlying kobj for the Burrow's lifetime; pages=NULL (the contiguous page chunk lives on the KObj_DMA itself); burrow_free_internal type-switch adds DMA → `kobj_dma_unref`. Used by `SYS_DMA_MAP` + the IRQ-latency-bench's shared-memory mechanism. |
 | Magic clobber on `burrow_free_internal` (R9 F148 discipline) | **Landed (P4-N / R13 F213)** — `v->magic = 0` immediately before `kmem_cache_free`. Sibling kobjs (kobj_mmio, kobj_dma) had this discipline since R9; burrow.c was the outlier until P4-N. |
-| `BURROW_TYPE_FILE` (Stratum page cache) | Post-v1.0 |
+| `BURROW_TYPE_FILE` | **Landed (REVENANT R-1)** — see `126-revenant.md`; this row was stale ("post-v1.0") until D-3c |
 | PTE installation (demand paging) for ANON | **Landed (P3-Dc)** — `userland_demand_page` in arch/arm64/fault.c |
 | PTE installation for MMIO (device-memory PTE attrs) | **Landed (P4-Ic2)** — `userland_demand_page` dispatches on `vma->burrow->type`; `mmu_install_user_pte` accepts `bool device_memory` flag |
 | `SYS_MMIO_MAP` syscall | **Landed (P4-Ic2)** — calls `burrow_create_mmio` + `burrow_map`; PTEs install lazily via demand-page |

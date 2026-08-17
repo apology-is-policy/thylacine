@@ -44,6 +44,8 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/syscall.h>    // PTY-4: SYS_WAIT_PID + the wait flags
 #include <thylacine/thread.h>
+#include <thylacine/vivarium.h>  // #247/F3: the sigtab the exec reset frees
+#include "../../mm/slub.h"      // #247/F3: kzalloc -- a REAL sigtab, so the kfree runs
 #include <thylacine/types.h>
 #include <thylacine/vivarium.h>      // #243: the sigtab accessors the exec-reset test drives
 #include "../../mm/slub.h"           // #243: kzalloc for that test's disposition table
@@ -76,6 +78,8 @@ extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 extern void proc_test_legate_teardown(u32 scope_id, struct Proc *except);
 extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
 extern void proc_test_set_init(struct Proc *p);
+extern void proc_exec_drop_image_state_for_test(struct Proc *p,
+                                                struct Thread *t);   // #247
 
 static volatile u32 g_proc_test_ran;
 static volatile u64 g_cpu_run_count[DTB_MAX_CPUS];
@@ -476,7 +480,7 @@ void test_proc_orphan_diag_uses_cons_path(void) {
     TEST_EXPECT_EQ(g_diag_orphan_ran, 1u, "#126: grandchild did not run");
 
     // THE PROPERTY: the orphan diagnostic reached the drain tap, so it went
-    // through cons_diag_* (TX ring, non-spinning, tapped) and not uart_puts.
+    // through the cons_diag_line API (TX ring, non-spinning, tapped, one push) and not uart_puts.
     TEST_ASSERT(have > 0u,
                 "#126: the orphan diagnostic never reached the drain tap -- it "
                 "is still on the direct uart_* path (or was deleted)");
@@ -1939,7 +1943,16 @@ void test_proc_exec_reset_dispositions(void) {
     TEST_ASSERT(viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_HUP, &got),
                 "pre: tty_hup really has a handler");
 
-    proc_exec_reset_dispositions(p);
+    // Driven through the exec path's extracted note-side helper (see
+    // test_proc_exec_drops_image_note_state for why the helper and not
+    // proc_exec_replace). A NATIVE Proc: the Plan 9 rule, everything clears --
+    // the phenotype arm (SIG_IGN rows + mask survive) is a different claim
+    // with its own test.
+    static struct Thread rd_th;         // BSS-zeroed
+    rd_th.magic = THREAD_MAGIC;
+    rd_th.proc  = p;
+    proc_exec_drop_image_state_for_test(p, &rd_th);
+    rd_th.proc  = NULL;                 // the static outlives proc_free
 
     // The memory-safety assertion -- the point of the test. Revert-probed:
     // restoring the old `kfree(p->sigtab); p->sigtab = NULL;` fails HERE.
@@ -2064,4 +2077,108 @@ void test_proc_job_stop_orphan_rule(void) {
     // d's death reparented c/c2 to kproc; the parent-aware unlink cleans up.
     legate_drop_linked(c);
     legate_drop_linked(c2);
+}
+
+void test_proc_exec_drops_image_note_state(void);
+
+// #247: a successful exec must drop every note-side thing that names the OLD
+// image -- including the in-handler LATCH, which the reset missed.
+//
+// Why the latch and not just the dispositions: notes_deliver_at_el0_return
+// returns early on `t->in_handler`, and that gate sits ABOVE both the phenotype
+// and handler_va branches. A thread that execs from inside a note handler
+// therefore carries the latch into the new image, and the new image never
+// receives another note -- `kill` excepted, since the kill peek is checked
+// above the gate. execve is async-signal-safe and "catch the hangup, re-exec
+// myself" is the standard supervisor idiom, so this is an ordinary shape.
+//
+// Driven through the extracted helper rather than proc_exec_replace: that
+// function demands current_thread()->proc == p and performs a real TTBR0 swap,
+// neither of which a unit test can honestly supply.
+void test_proc_exec_drops_image_note_state(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    proc_test_link(p);
+
+    static struct Thread th;            // BSS-zeroed
+    th.magic = THREAD_MAGIC;
+    th.proc  = p;
+
+    // ARM every field the reset is supposed to drop -- and assert here that it
+    // IS armed. This block is not ceremony: every post-condition below is of
+    // the form "and now it is zero", which a fixture that never set it
+    // satisfies perfectly. The precondition is what makes the zero a
+    // measurement instead of a starting value.
+    // NOTE_BIT_* are bit INDICES, not masks (NOTE_BIT_INTERRUPT is 0u) -- the
+    // shift is required. Assigning the bare constant sets the mask to ZERO,
+    // which the precondition below caught on this test's first run: the
+    // post-condition "note_mask == 0" would otherwise have passed against a
+    // mask that was never armed.
+    p->handler_va  = 0x1000u;
+    th.note_mask   = (1u << NOTE_BIT_INTERRUPT) | (1u << NOTE_BIT_TTY);
+    th.in_handler  = true;
+    // The sigtab needs a REAL allocation. Round-2 F3: this line was missing,
+    // so `p->sigtab` was NULL from KP_ZERO both before and after the helper --
+    // the post-condition below asserted a value that was never armed, and
+    // deleting the sigtab reset from proc_exec_drop_image_state left the whole
+    // suite GREEN. Executed, not argued: the sabotage was run and passed.
+    // (kzalloc, not kmalloc -- it must be a real heap block because proc_free
+    // releases it at teardown; the test_notes.c linux_sigign_discard fixture is
+    // the pattern.)
+    //
+    // #254: a kzalloc'd table is ALL-DEFAULT, so "reads as default afterwards"
+    // is satisfied by a table nothing ever wrote -- the same hole F3 found one
+    // field over. ARM TWO ROWS, one per encoding: SIG_IGN (handler == 1) and a
+    // real handler address, since viv_sigtab_note_handler discriminates on
+    // exactly that boundary and a reset that cleared only one would pass a
+    // single-row check.
+    p->sigtab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    struct viv_sigtab *tab_before = p->sigtab;
+    struct viv_ksigaction ign  = { .handler = VIV_SIG_IGN, .flags = 0,
+                                   .restorer = 0, .mask = 0 };
+    struct viv_ksigaction hand = { .handler = 0x4000u, .flags = 0,
+                                   .restorer = 0, .mask = 0 };
+    (void)viv_sigtab_set(p->sigtab, VIV_SIGNOTE_PIPE, &ign);
+    (void)viv_sigtab_set(p->sigtab, VIV_SIGNOTE_TTY_WINCH, &hand);
+
+    TEST_ASSERT(p->handler_va != 0,  "precondition: a handler is registered");
+    TEST_ASSERT(th.note_mask != 0,   "precondition: the note mask is non-empty");
+    TEST_ASSERT(th.in_handler,       "precondition: the thread is MID-HANDLER");
+    TEST_ASSERT(p->sigtab != NULL,   "precondition: a Linux sigtab is installed");
+    TEST_ASSERT(viv_sigtab_note_ignored(p->sigtab, VIV_SIGNOTE_PIPE),
+                "precondition: the sigtab carries a SIG_IGN row");
+    struct viv_ksigaction probe;
+    TEST_ASSERT(viv_sigtab_note_handler(p->sigtab, VIV_SIGNOTE_TTY_WINCH, &probe),
+                "precondition: the sigtab carries a real HANDLER row");
+
+    proc_exec_drop_image_state_for_test(p, &th);
+
+    TEST_ASSERT(p->handler_va == 0,
+                "exec dropped the handler entry point (an address in the old "
+                "image)");
+    // #254, the memory-safety half -- and the ONLY assertion that separates the
+    // fix from the bug. There is NO behavioural test to write here: the
+    // accessors are NULL-safe and answer "nothing ignored, no handler" for a
+    // NULL table, which is EXACTLY what they answer for an all-default one. So
+    // freed-and-NULLed and reset-in-place are indistinguishable at every
+    // observable surface, including the ^Z fan. What differs is only whether a
+    // pointer another CPU is holding stays valid -- so assert on the object.
+    TEST_ASSERT(p->sigtab == tab_before,
+                "#254: exec reset the disposition table IN PLACE -- the object "
+                "SURVIVES. Cross-Proc readers (notes_post's SIG_IGN hook, the "
+                "^Z fan's gate) hold this pointer with no lock, so freeing it "
+                "here was a use-after-free READ");
+    TEST_ASSERT(!viv_sigtab_note_ignored(p->sigtab, VIV_SIGNOTE_PIPE),
+                "exec cleared the SIG_IGN row (the POSIX half of the reset)");
+    TEST_ASSERT(!viv_sigtab_note_handler(p->sigtab, VIV_SIGNOTE_TTY_WINCH, &probe),
+                "exec cleared the HANDLER row -- an address in the old image");
+    TEST_ASSERT(th.note_mask == 0, "exec dropped the note mask");
+    TEST_ASSERT(!th.in_handler,
+                "#247: exec dropped the in-handler LATCH -- without this the "
+                "new image is deaf to every note but kill");
+
+    th.proc = NULL;                     // the static outlives proc_free
+    proc_test_unlink(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
 }

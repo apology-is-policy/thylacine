@@ -98,6 +98,33 @@ if pgrep -f "qemu-system-aarch64.*$BUILD_DIR/" >/dev/null 2>&1; then
     exit 2
 fi
 reap_qemu() { pkill -9 -f "qemu-system-aarch64.*$BUILD_DIR/" 2>/dev/null || true; }
+
+# #224: the 2026-07-21 fix above narrowed this reaper from cross-tree to
+# TREE-WIDE, which closed the cross-tree half of the bug and left the intra-tree
+# half live. It still SIGKILLs every VM in this tree, including boots it did not
+# start -- so an SMP gate running concurrently here loses a boot to a signal it
+# cannot see the source of, presenting as exactly the symptom the comment above
+# already names: "qemu GONE, guest healthy".
+#
+# Narrowing the pattern further is the wrong fix, because concurrency in one
+# tree is unsafe for a SECOND, independent reason: this gate and the SMP gate
+# both restore the same build/fixtures/pool.img, and pool_restore overwriting an
+# image under a live VM manufactures the corruption this gate exists to detect.
+# A narrower reaper would leave that collision in place and merely stop
+# announcing it. So REFUSE instead of killing: turn a silent mutual-corruption
+# race into an operator error with a name.
+#
+# This check MUST precede `trap reap_qemu EXIT` -- installing the trap first
+# would make the refusal itself kill the VM it is refusing to disturb.
+foreign_vms="$(pgrep -f "qemu-system-aarch64.*$BUILD_DIR/" 2>/dev/null | tr '\n' ' ')"
+if [[ -n "${foreign_vms// /}" ]]; then
+    echo "test-interactive: REFUSING to start -- a VM from this tree is already running (pid(s): ${foreign_vms% })." >&2
+    echo "  This gate's reaper is tree-wide, so starting would SIGKILL a boot it does not own," >&2
+    echo "  and both gates restore the same $BUILD_DIR/fixtures/pool.img." >&2
+    echo "  Wait for the other run to finish, or use a separate worktree." >&2
+    exit 2
+fi
+
 trap reap_qemu EXIT
 
 # G-2: the SLOT-scoped reaper. reap_qemu above kills every VM in this tree,

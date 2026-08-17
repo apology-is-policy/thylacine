@@ -17,13 +17,18 @@
 //     these into typed instants.
 //   - blksize + blocks for stat(2)-style I/O sizing.
 //
-// SYMLINKS:
-//   - v1.0 Thylacine has no symlink surface. `is_symlink()` always
-//     returns false; `symlink_metadata()` is the same as `metadata()`.
+// SYMLINKS (DISTRO D-1):
+//   - The resolver expands links, so an ordinary `metadata(path)` reports the
+//     TARGET -- `is_symlink()` on it is false for a link, exactly as POSIX
+//     stat(2). Seeing the link's OWN record takes a non-expanding open:
+//     `File::open_link(path)` then `.metadata()` -- the v1.0 lstat spelling.
+//   - There is deliberately no free `symlink_metadata(path)`: it would need a
+//     flags argument on SYS_STAT, whose handler pins stalk_flags to 0, and a
+//     syscall-ABI change is not something this mirror may make unilaterally.
 
 use crate::err::{Error, Result};
 use crate::{
-    t_fstat, T_S_IFCHR, T_S_IFDIR, T_S_IFMT, T_S_IFREG,
+    t_fstat, T_S_IFCHR, T_S_IFDIR, T_S_IFLNK, T_S_IFMT, T_S_IFREG,
 };
 use core::mem::MaybeUninit;
 
@@ -90,12 +95,16 @@ impl Metadata {
         (self.mode & T_S_IFMT) == T_S_IFCHR
     }
 
-    /// `true` iff this is a symbolic link. Always `false` at v1.0;
-    /// Thylacine has no symlink surface yet.
+    /// `true` iff this is a symbolic link.
+    ///
+    /// Only ever true for metadata taken through a NON-EXPANDING open
+    /// (`T_OPATH | T_ONOFOLLOW`) -- a plain `metadata(path)` resolved the link
+    /// and is describing its target, so this is false there for the same reason
+    /// POSIX `stat` never reports `S_IFLNK`.
     #[inline]
     #[must_use]
     pub const fn is_symlink(&self) -> bool {
-        false
+        (self.mode & T_S_IFMT) == T_S_IFLNK
     }
 
     /// `true` iff `len() == 0`.

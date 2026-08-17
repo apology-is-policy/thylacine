@@ -207,10 +207,19 @@ fail-safe direction preserved.
   own errors survive: `EINVAL` for 0, `ENOMEM` for anything the target refuses.
   Translating that refusal matters — Thylacine signals failure with a bare `-1`,
   which a Linux libc would read as `-EPERM`.
-- **`munmap` (215) → `SYS_BURROW_DETACH`**, exact-match subset. This row has no
-  pure `_decide` because its domain is a question about *state*; the resolution
-  is that it needs none, since `sys_burrow_detach_for_proc` already enforces the
-  match. Attempt, and read the answer.
+- **`munmap` (215) → `sys_munmap_range_for_proc`** (#199, D-3c; was the
+  exact-match `SYS_BURROW_DETACH` subset). The range form detaches every VMA
+  wholly inside `[addr, addr+len)` — each one WHOLE, never partial — succeeds
+  on an empty range (the Linux no-op), and refuses ATOMICALLY (nothing
+  detached) on a boundary straddle or a CODE region. Needed because D-3b's
+  MAP_FIXED split turns one library map into 2-3 VMAs and musl's
+  `unmap_library` munmaps the whole span in one call (its error path and
+  dlclose). The per-VMA accounting body is the factored `detach_one_locked`
+  the native exact syscall also uses; the native `SYS_BURROW_DETACH` ABI keeps
+  exact-match. Refused shapes decline `ENOSYS` (claiming success on a partial
+  overlap would leave a mapping the guest believes gone). Tests:
+  `burrow.munmap_range_{tiled,partial_refused,empty_ok}`; the straddle refusal
+  revert-probed (S3: only its own leg reddens, 1382/1383).
 - **`mprotect` (226) → `ENOSYS`**, recorded rather than left to the default.
 
 **The protection degradation.** Thylacine anonymous memory is always RW/XN and
@@ -284,11 +293,21 @@ reuse an existing cross-Proc gate verbatim, never invent a third.)
 
 V-6b makes `rt_sigaction` and `rt_sigprocmask` real. `rt_sigprocmask` maps onto
 the per-`Thread` `note_mask`; `rt_sigaction` records `SIG_DFL`/`SIG_IGN` in a
-lazily-allocated per-`Proc` `struct viv_sigtab` (`Proc.sigtab`, freed at
-`proc_free`, not `rfork`-inherited — the `handler_va` precedent), and an ignored
-signal's note is then **discarded at generation** inside `notes_post`, exactly as
-Linux discards it, returning success because Linux's `kill()` to a process
-ignoring the signal succeeds.
+lazily-allocated per-`Proc` `struct viv_sigtab` (`Proc.sigtab`, reset **in
+place** at exec and freed only at `proc_free` — so the pointer is stable for the
+life of the Proc, which is what makes the lock-free cross-Proc readers below
+safe (#254) — **copied into an `rfork`/`clone` child and reset-caught-only at exec since the fork/exec POSIX rule of 2026-08-17** (it used to be neither inherited nor SIG_IGN-preserving; see "Signal state across fork and exec" below), and an ignored
+signal's note is then **discarded at generation** inside `notes_post`, returning
+success because Linux's `kill()` to a process ignoring the signal succeeds. One
+stated divergence from Linux, POSIX-permitted (the 7580c1f7 round, F3): the
+generation-time drop is MASK-BLIND -- a `SIG_IGN` signal that is currently
+BLOCKED is discarded too, where Linux `sig_ignored()` queues it ("blocked signals
+are never ignored, since the handler may change by the time it is unblocked")
+and discards at dequeue. POSIX 2.4.1 leaves it unspecified "whether the signal is
+discarded immediately upon generation or remains pending", so both are
+conformant; the observable difference is the ordering `block; SIG_IGN; raise;
+handler; unblock` -- Linux fires the handler, Thylacine fires nothing. Chosen
+for the slot/latch reasons below and recorded rather than matched.
 
 Post-time and not delivery-time is the load-bearing choice. An ignored note that
 reached the queue would occupy one of 16 slots, would arm the LS-5c terminate
@@ -296,11 +315,85 @@ latch (an ignoring Proc has no handler and is not self-managing, so it passes
 every arm gate), and would leave blocked threads unwinding `*_INTR` until the
 EL0-return tail got round to dropping it. Never posting touches none of that.
 
-**A real handler still declines**, and that is deliberate rather than
-unfinished: the Tier-1 frame that would call it is V-6c, and accepting an install
-we would never honour is the silent mistranslation §4 forbids — worse than
-`ENOSYS`, because the guest would believe it is protected. One line in
-`vivarium_sigaction_decide` moves when delivery lands.
+**And the other half of POSIX 2.4.3 is done at the INSTALL (2026-08-17).**
+Generation-time covers a note that arrives after `SIG_IGN`; a note that arrived
+*before* -- blocked, or in the window -- was left for the EL0 tail's
+delivery-time discard arm, which is correct for `SIG_IGN` alone and visibly
+wrong the moment a guest re-installs a handler before unblocking (Linux delivers
+nothing: the pending instance died at the `SIG_IGN`; the deferred discard ran the
+handler for it). So `rt_sigaction` now stores the disposition and then calls
+`notes_discard_name(p, name)` whenever the new disposition IGNORES (`SIG_IGN`, or
+`SIG_DFL` for a default-ignore signal -- Linux `do_sigaction`'s
+`flush_sigqueue_mask`): every queued note of that name is removed under
+`q->lock`, mask-blind, each removal draining the class latch as a dequeue does;
+`kill` is never removed. `notes_post`'s disposition read moved UNDER `q->lock` so
+the two are one step: a poster that read `SIG_DFL` enqueued in a lock hold the
+discard follows; one that takes the lock after the discard reads `SIG_IGN` and
+drops. No ordering leaves a stale ignored note, so the tail's `SIG_IGN` arm is
+now defense-in-depth (kept: its absence would hand such a note to the
+`SIG_DFL`-terminate arm). Pinned by `notes.discard_name_purges_pending` (the
+primitive: mask-blind, per-class latch drain, order preserved, `kill` refused, a
+purged full ring is really empty) and by viv-pheno-probe L205-L216 (the shell,
+in-guest: pending -> `SIG_IGN` -> unblock survives with nothing fired and no
+stale note at the head; pending -> `SIG_IGN` -> handler -> unblock fires NOTHING
+-- the leg that separates install-time from delivery-time; each round ends with
+a fresh SIGPIPE delivered exactly once).
+
+**Signal state across fork and exec (POSIX; operator-voted 2026-08-17).**
+Two halves of one recorded decision (task #127 named both when clone became a
+table row): (1) `rfork`/`clone` COPIES the parent's `viv_sigtab` -- every
+disposition, caught and ignored -- and the calling Thread's `note_mask` into
+the child (POSIX `fork(2)`); before, `child->sigtab` stayed NULL (all-`SIG_DFL`)
+and the child thread's mask was 0, so `trap '' PIPE; cmd | head` handed `cmd` a
+`SIG_DFL` SIGPIPE. (2) `execve` resets CAUGHT rows to `SIG_DFL` and KEEPS
+`SIG_IGN` rows and the `note_mask` (POSIX `execve(2)`: ignored stays ignored,
+the mask is inherited); before, `proc_exec_drop_image_state` zeroed both, and
+its comment "Zeroing is exact POSIX" was true of caught handlers only -- so
+`nohup cmd`, a non-interactive `cmd &` (SIGINT/SIGQUIT ignored in the child by
+the shell before exec) and `trap '' INT; exec prog` all lost their immunity at
+the exec. Native Procs keep the Plan 9 rule (ARCH §7.6: the sigtab, the mask,
+`handler_va` and `in_handler` all clear at exec; nothing crosses rfork). The
+phenotype branch is decided in `proc.c` on `p->phenotype`, and the table's
+lifetime rule is unchanged (immortal per Proc; the child gets its OWN table --
+`viv_sigtab_clone_into` -- so the cross-Proc lock-free readers still never see
+a freed table). Pending notes are never inherited (POSIX: the child's pending
+set is empty; a fresh Proc has a fresh queue). Two more facts cross a fork with
+the mask (the d3a11c8e round): the HANDLER-EXECUTION SNAPSHOT -- this design keeps
+the interrupted user context kernel-side (the sigframe is written for reading;
+`rt_sigreturn` restores from the per-Thread save block), so a `fork()` issued
+from inside a handler copies `in_handler` + the save block onto the child thread,
+and BOTH processes return from the handler to the interruption point (before
+this the child's return was refused and it ran on past the svc); and the
+COARSENESS of the mask crosses with it -- `NOTE_BIT_TTY` is one family bit (see
+the mask section below: blocking SIGWINCH really does block SIGHUP), so a parent
+that blocks SIGWINCH hands its forked and exec'd children a blocked
+SIGHUP/SIGTSTP/SIGCONT/SIGQUIT too, where Linux inherits only SIGWINCH.
+
+**The handler-time mask (aux item 7, 2026-08-17).** While a phenotype handler
+runs, `note_mask` is Linux's `signal_delivered` value -- the pre-handler mask |
+`sa_mask` | the delivered signal (omitted under `SA_NODEFER`), computed by the
+pure `vivarium_handler_mask` through the same coarse translation as
+`rt_sigprocmask` (a tty-family `sa_mask` entry blocks the family; SIGKILL in
+`sa_mask` is dropped) -- and the phenotype's `rt_sigreturn` restores the
+PRE-handler mask from `Thread.note_saved_mask`, which the Linux delivery path
+writes beside the register block (`notes_deliver_linux_locked`) and which the
+fork copy above carries with the snapshot. The frame's `uc_sigmask` still
+carries the pre-handler mask and is written for reading: a handler that edits
+it changes nothing (Linux would honour the edit -- a conservative-direction
+divergence of this frame design). Consequences, each a probe leg (L237-L244):
+a handler's own `rt_sigprocmask` does not outlive the handler; a read inside
+the handler shows mask|sa_mask|sig; an `execve` from inside a handler hands the
+image mask|sa_mask|sig plus whatever the handler blocked (Linux keeps the
+current blocked set across exec); a `fork()` from inside a handler gives the
+child the handler-time mask AND a sigreturn that restores the saved one.
+Delivery is unchanged: the `in_handler` guard still holds every note for the
+handler's duration (VIVARIUM 6.22's stated imprecision), so the mask cannot
+admit a nested delivery. Native `noted` keeps the as-built rule: a mask changed
+inside a handler stays changed (`notes.phenotype_sigreturn_restores_mask` has
+that as its control).
+
+(V-6b's "a real handler still declines" paragraph stood here; V-6c landed the
+Tier-1 frame and a real handler installs and RUNS — see "V-6c" below.)
 
 Two corrections came out of building this, both from measuring rather than
 reasoning:
@@ -447,31 +540,101 @@ boundary, and an EMPTY record chain is the truthful report -- note delivery does
 not save Q0-Q31 (task #96), so an FPSIMD record would claim state that is not
 there.
 
-**Two deliberate delivery behaviours beyond "call the handler".** A `SIG_IGN`
+**Three deliberate delivery behaviours beyond "call the handler".** A `SIG_IGN`
 disposition drops a note that was already queued when the disposition changed
-(Linux discards pending signals on `SIG_IGN`; the V-6b post-time hook cannot
-catch one that arrived first), and a `SIG_DFL` whose Linux default is *ignore*
+(defense-in-depth since 2026-08-17: `rt_sigaction`'s install-time
+`notes_discard_name` plus `notes_post`'s under-lock disposition read leave no
+ordering in which such a note reaches the tail -- see "the other half of POSIX
+2.4.3" above -- and the arm stays because its absence would hand a stale note
+to the terminate arm), and a `SIG_DFL` whose Linux default is *ignore*
 (SIGCHLD/SIGWINCH/SIGCONT) is dropped rather than left in the ring -- a Linux
 guest has no notes fd, so nothing would ever consume it and the queue would
-fill. `SA_RESETHAND` is honoured: the disposition returns to `SIG_DFL` before
-the handler is entered.
+fill; this cause is live (a `child_exit` lands under `SIG_DFL` constantly).
+`SA_RESETHAND` is honoured: the disposition returns to `SIG_DFL` before
+the handler is entered. And a `SIG_DFL` whose Linux default is *terminate*
+(SIGPIPE / SIGINT / SIGHUP / SIGQUIT -- `viv_signote_default_is_terminate`)
+`exits()` the Proc **from the phenotype branch itself**, on the candidate, with
+the note's canonical name, instead of falling through to the native uncaught
+arm. That arm scans for the *native* terminate latch, and the native `pipe`
+note has none (task #237, a Plan 9 ABI question this does not touch) -- so
+before the c8ab2744 round a `SIG_DFL` SIGPIPE was consumed by **no** arm: the
+terminate scan skipped it, the stop consumer skipped it, and "leave it queued
+for the fd reader" stranded it at the head of a queue no fd will ever read.
+It became the dispatcher candidate for the life of the guest; every later
+caught signal was blocked behind it, every later default-ignore note was never
+dropped, and (F1 below) every later caught terminate-class note killed the
+guest. Linux's answer -- SIG_DFL SIGPIPE terminates -- is not in doubt, so the
+phenotype answers it for its own Procs. The phenotype `wait4` folds a
+note-death into an EXITED status (#91), so `exits("pipe")` reads exactly as
+`exits("interrupt")` already did. Only the STOP default (`tty:susp`) still
+falls through, to the native branch's stop consumer. In-guest: the L-6c gate's
+`L6C-J` (`yes | head -n 1`, both ends writing into one fd-3 capture -- head its
+one line, the writer its stderr -- so the capture is EXACTLY `y`: an exec'd
+all-`SIG_DFL` binary is killed before its write returns; pre-fix it appended
+`yes: write error: Broken pipe` and lived), `L6C-K` (the positive control: a
+subshell writer that runs `trap "" PIPE` in its own process -- a fork does not
+inherit the sigtab and an exec resets it -- so the write RETURNS EPIPE and the
+builtin `echo` reports `write error` after the line, proving the capture can
+see a message when there is one) and `L6C-L` (K with the trap removed, one
+variable away: the capture is exactly head's line again). The script logs the
+raw K capture as `L6C-K-RAW:` for the errno text; that line is diagnostics. K
+earned its keep on its first boot: the capture itself was broken (the `fcntl`
+errno defect below), J and L passed vacuously on an empty capture, and K alone
+went red.
+
+**The class scans read the sigtab per note (the c8ab2744 round, F1).** The
+fall-through above (a `SIG_DFL` `tty:susp`, masked then unmasked) enters the
+native `handler_va == 0` branch, whose TERMINATE scan
+(`notes_terminate_pending_name_locked`) used to gate on `handler_va` alone and
+return the first latch-class name at ANY index. `handler_va` is always 0 for a
+Linux guest, so a CAUGHT `tty:hup` or `interrupt` queued behind the candidate
+was returned and the tail `exits()`ed a guest with its SIGHUP/SIGINT handler
+installed. Both class scans -- the terminate scan and the STOP index scan behind
+`notes_stop_dequeue_locked` -- now gate every hit on
+`notes_proc_default_applies(p, name)` (a native handler, a sigtab handler, or a
+sigtab `SIG_IGN` for THAT name each veto it); the fixed-name
+`notes_proc_default_applies(p, NOTE_NAME_TTY_SUSP)` gate that used to sit
+outside the stop scan is subsumed. Native Procs are byte-identical (the
+predicate is unconditionally true with no handler and no phenotype, and the
+arm is only reached with `handler_va == 0`). Regression:
+`notes.class_scans_read_phenotype_sigtab` -- positive control (phenotype,
+all-`SIG_DFL`, `[child_exit, tty:hup]` names the hup at index 1), then
+`[tty:susp, interrupt+handler]` (terminate scan NULL, the stop consumer takes
+the susp and the interrupt survives), the control's queue with SIGHUP caught
+(NULL), an interrupt queued under `SIG_DFL` and then `SIG_IGN`ed (NULL), the
+stop consumer with a SIGTSTP handler (declines; takes it once the row is
+`SIG_DFL` again), and the native control with the same table (names the
+interrupt -- the phenotype is the gate, not the table).
 
 **Proving it in-guest needed the one signal a v1.0 guest can raise.** `kill`,
 `tkill` and `clone` are not table rows, so a Linux guest can signal neither
 another Proc nor itself through the obvious route -- and cannot spawn a thread
 to race its own disposition table either. **What makes the lock-free
 `viv_sigtab` sound is stated below rather than by that narrowness** -- this
-sentence previously claimed "the only cross-thread reader is `notes_post`'s
-`SIG_IGN` hook, and it touches one naturally-aligned `u64`", and main#243
-established that BOTH halves were wrong. There are **two** cross-Proc readers:
-`notes_post`'s hook (`notes.c` ~378, one `u64`) and `notes_proc_has_live_handler`
-(`notes.c` ~299), and the second copies the **whole 32-byte** `viv_ksigaction`
-out (`*out = *a`) rather than touching one word. The soundness argument is
-therefore not "nobody races it" but: the table is never freed while reachable
-(reset in place at exec, freed only at `proc_free`), and every field is written
-at 8-byte granularity so no reader can observe a value that was never stored.
-Entry-to-entry consistency is explicitly NOT promised -- a reader may see a mix
-of pre- and post-reset entries, which is the POSIX exec-vs-signal race.
+sentence used to claim "the only cross-thread reader is `notes_post`'s `SIG_IGN`
+hook, and it touches one naturally-aligned `u64`", and both halves were wrong
+(main#243, aux#254 -- found independently on the two tracks in the same week).
+The intra-Proc narrowness bounds only the *writers* (a v1.0 Linux guest has no
+peer thread; rt_sigaction, SA_RESETHAND and exec's reset all run on a thread of
+THIS Proc). The **readers are a set, each taking an arbitrary `Proc`**, and it
+grows for the most ordinary reason there is -- a new disposition predicate needs
+the dispositions: `notes_post`'s `SIG_IGN` hook (`notes.c`, one `u64`);
+`notes_proc_has_live_handler` (`notes.c`), which copies the **whole 32-byte**
+`viv_ksigaction` out (`*out = *a`) and is reached from
+`notes_arm_intr_terminate_locked` and from `notes_proc_default_applies`; and
+`notes_proc_default_applies` itself (the ignored gate), which the pgrp fans and
+the `^Z` fan (`proc_tty_susp_would_stop_locked`) call on any group member.
+The soundness argument is therefore not "nobody races it" but two facts: (1)
+the table is **never freed while reachable** -- reset in place at exec
+(`viv_sigtab_reset` / `viv_sigtab_reset_caught`), freed only at `proc_free`,
+one immortal object per Proc (a lock would protect only the readers who
+remember to take it; the third reader above was written as a bare atomic load
+by the author holding the finding); and (2) **every field is written at 8-byte
+granularity** (a struct assignment -> `stp` of X registers), so no reader can
+observe a value that was never stored -- the byte loop this replaced was
+measured to compile to halfword stores. Entry-to-entry consistency is explicitly
+NOT promised: a reader may see a mix of pre- and post-reset entries, which is
+the latitude POSIX gives a `sigaction` racing a signal already in flight.
 
 > This claim has now been wrong twice in the same place. `docs/VIVARIUM.md`
 > records the first: V-6c asserted byte-sized entries could not tear, true at
@@ -2044,7 +2207,7 @@ native counterpart.
 | cmd | served | note |
 |---|---|---|
 | `F_GETFD` / `F_SETFD` | yes | `F_SETFD` **masks** `arg & FD_CLOEXEC` rather than validating — Linux ignores every other bit, and being *stricter* than Linux for an input a guest may legally send is its own mistranslation |
-| `F_DUPFD` / `F_DUPFD_CLOEXEC` | yes | `handle_dup_posix` — rights verbatim, lowest free slot ≥ `arg` |
+| `F_DUPFD` / `F_DUPFD_CLOEXEC` | yes | `handle_dup_posix` — rights verbatim, lowest free slot ≥ `arg`; closed fd → `EBADF`, table full → `EMFILE`, `arg` ≥ the table → `EINVAL` |
 | everything else | `ENOSYS` | not Linux's `EINVAL`: that claims the cmd is not a valid fcntl operation, which for `F_GETFL` or `F_SETLK` is false. `ENOSYS` says the surface is absent, which is true |
 
 `F_GETFD` and `F_DUPFD` join the two measured cmds because each is the exact
@@ -2056,6 +2219,27 @@ declining the other is an arbitrary edge for a guest to discover at runtime.
 out of the low range a user redirection could collide with. Returning the first
 free slot regardless would hand back fd 3 and break the guarantee the call was
 made to obtain — silently, and only under a redirection.
+
+**The errnos are load-bearing too, and were wrong until the c8ab2744 close.**
+`handle_dup_posix` folds "no such fd" and "table full" into one -1, and the arm
+answered `EMFILE` for both — on the argument that a guest which just used the
+fd knows it exists. That is backwards for the one shell that matters: busybox
+ash's `redirect()` probes the TARGET fd of every `N>&M` with
+`fcntl(N, F_DUPFD, 10)` precisely to learn whether N is open (`EBADF` — not
+open, nothing to save; anything else — "strange", and the whole command is
+aborted with `fcntl(N,F_DUPFD,10): <strerror>`). fd 3 is not open in a script
+shell, so every `3>&1` died — measured on the L-6c gate the moment a leg used
+one: the command substitution around it yielded "" and the two legs asserting an
+EMPTY stderr capture (`L6C-J`, `L6C-L`) passed *vacuously*; only the positive
+control (`L6C-K`) said no. The arm now re-checks liveness after a failed dup
+(the same lookup the `F_GETFD` arm uses): closed fd → `EBADF`; the residual
+(table full, a non-dup-able kind, a rights failure) → `EMFILE`. POSIX says
+exactly that. Regression `vivarium.fcntl_dupfd_errnos` (through
+`viv_fcntl_for_test`, the real T2 arm on a fresh Proc): control (a live fd dups
+at ≥ 10), a closed fd → `EBADF` for both spellings, a live fd with a FULL table
+→ `EMFILE` (proved full two ways first — so the two errnos are distinct and a
+fix that always said `EBADF` fails there), a minimum at the table size →
+`EINVAL`.
 
 ### `O_CLOEXEC` is now honoured for real
 
@@ -2308,3 +2492,343 @@ directions: removing the socktab drop leaves the unit suite at a full
 
 **The arc gate passes** -- `L6C-A` through `L6C-I` -- and `L6C_GATE_FATAL` flips
 to 1 in the same commit, because a gate that cannot redden is a disabled test.
+
+---
+
+## DISTRO D-5 -- the stock rootfs bundle and THE ARC GATE
+
+### What the L-6c gate could not prove
+
+The L-6c bundle at `/vivarium/alpine` substitutes a busybox-**static** binary we
+supply over `/bin/sh` and `/bin/busybox`. That substitution was correct when it
+was written -- every ELF in the stock minirootfs is an `ET_DYN` PIE linked
+against `/lib/ld-musl-aarch64.so.1`, and the loader accepted neither `ET_DYN`
+(until D-2) nor `PT_INTERP` (until D-4) -- but it means the one file every
+`L6C-*` leg runs through is ours. Whatever those nine legs prove about
+fork/exec/pipe/substitute/reap, they cannot prove that a stock distro runs.
+
+D-5 closes that with a SECOND bundle, `/vivarium/alpine-stock`, staged from the
+same tarball with nothing replaced.
+
+### Why a second bundle rather than flipping the first
+
+Flipping `/vivarium/alpine` to the stock dynamic shell would put all nine `L6C-*`
+legs plus `D2-*`/`D3-*`/`D4-*` behind D-4, so any regression in the interpreter
+dispatch would present as "the shell did not run" with no first-missing signal.
+The split is not caution, it is the discrimination: a red stock gate beside a
+green `L6C-A..I` isolates the fault to the stock-dynamic path specifically. It
+costs a second 8.1 MiB copy in the pool, and `tools/build.sh` carries the
+reasoning at both staging sites.
+
+### "Unmodified", stated precisely
+
+No stock file is replaced, removed, or edited. The only additions are the mount
+anchors the recipe structurally requires -- a bind needs an existing mount point
+-- which are the `/net` and `/env` directories (`/proc`, `/sys` and `/dev` are
+already in the image) and the six `/dev` leaf files. Nothing is written into the
+rootfs to carry the gate itself: the script rides in the manifest's
+`process.args`, so the staged tree is the tarball plus anchors and nothing else.
+
+Measured composition of `alpine-minirootfs-3.21.0-aarch64.tar.gz` (sha256
+`f31202c4…efac1`): 520 entries = 335 symlinks, 88 regular files, 97 directories,
+and **zero device nodes**. The arc plan had carried an item to skip device nodes
+and document the skip; there are none to skip, so it is recorded as a
+measurement instead of performed as a step. `tar -xzf` exits 0 with no
+privileged operation.
+
+### The fixture is sha256-pinned, and a mismatch is fatal
+
+Both external inputs are pinned. Discovery deliberately stays a glob: pinning the
+filename would turn a wrong-version drop into "no tarball found", a silent
+hermetic skip of the arc gate. Glob-plus-hash gives the three outcomes that are
+actually wanted -- absent is a skip (the default build stays hermetic),
+matching proceeds, and present-but-different is a loud build failure. Fatal is
+right because every expected value downstream was derived from those exact
+bytes, including the `D2`/`D3`/`D4` output strings and D-5's in-guest
+`VERSION_ID` assertion; a different image would quietly move what PASS means.
+
+### The gate: five legs, one new mechanism each
+
+`do_stock_distro_gate` (`usr/joey/joey.c`) spawns `viv run
+/vivarium/alpine-stock` and matches markers against the drained container
+output. Each leg adds exactly one mechanism to the one before it, so a
+first-missing marker names a cause rather than a symptom.
+
+| Leg | Marker | The one new mechanism |
+|---|---|---|
+| A | `DISTRO-A-stock-sh` | The stock shell starts at all: `/bin/sh` (an absolute POOL symlink, re-anchored at the container root by I-28) -> stock `ET_DYN` PIE busybox -> `PT_INTERP` -> stock ldso -> applet dispatch on `basename(argv[0]) == "sh"`. Printed by a shell BUILTIN, so no second exec stands between the chain and the signal. |
+| B | `DISTRO-B-stock-exec` | fork + exec of a stock dynamic binary FROM a stock dynamic parent, in busybox's multiplexer form (`/bin/busybox echo`): a real file, argv[0]-independent, so B is clear of both symlinks and argv[0]. |
+| C | `DISTRO-C-applet-by-symlink` | A second absolute pool symlink resolved for EXEC, plus argv[0] applet dispatch: `/bin/cat` (a symlink) reading `/usr/lib/os-release` (a REAL file). |
+| D | `DISTRO-D-relative-symlink` | A RELATIVE pool symlink crossing `..` (`/etc/os-release -> ../usr/lib/os-release`), read through B's already-proven multiplexer form so the link is the only new variable. |
+| E | `DISTRO-E-pinned-image` | The pool holds the PINNED image, asserted from inside the guest. |
+| — | `DISTRO-DONE` | The script reached its end, distinguishing a failed leg from a shell that died mid-script. |
+
+C and D are deliberately independent: C is a symlinked applet on a real target,
+D a multiplexer on a symlinked target, so neither can mask the other.
+
+Leg C is the one worth stating carefully, because it is easy to overclaim. It
+does **not** discriminate `--argv0` from passing the path alone -- nothing on
+this rootfs can produce a vector where those differ, for the reason the `D4-B`
+comment gives, and that claim stays at the unit level in
+`exec.interp_argv_shape`. What C discriminates is a separate property that
+nothing tested before: **symlink resolution must not become visible in
+`argv[0]`.** If the kernel ever passed the resolved path, busybox would see
+`basename == "busybox"`, take the filename for an applet name, and emit nothing.
+Every busybox-based distro depends on this.
+
+### The first run went red at leg C, and the leg was the thing that was wrong
+
+Worth recording in full, because the failure mode is a general one.
+
+The gate's first guest run reported
+`first-missing=DISTRO-C-applet-by-symlink status=0` -- A, B, D, E and DONE all
+fired, and the shell exited cleanly. The obvious reading was the one the leg was
+built to catch: the kernel had leaked the resolved path into `argv[0]`.
+
+The log said otherwise. Because the container's stderr shares the drained pipe,
+the actual error was already sitting next to the markers:
+
+```
+ls: can't open '/': Function not implemented
+vivarium: unserved linux syscall nr=56 (T2 row declined these arguments)
+```
+
+busybox printed **`ls:`** -- it had dispatched to the `ls` applet and was naming
+itself by applet, which is only possible if `argv[0]` was `/bin/ls`. The
+property leg C exists to prove was **satisfied**; the leg simply could not
+observe it, because the version of C that shipped ran `/bin/ls /`, and listing a
+directory needs enumeration on top of dispatch. `openat` declines `O_DIRECTORY`
+by design (`kernel/vivarium.c:470`) and `getdents64` has no row at all, so
+nothing here can list a directory (task #209).
+
+So the leg violated the very rule the ladder is built on -- one new mechanism
+per leg -- and reddened for a mechanism it was not testing. That is strictly
+worse than a leg that fails honestly: it accuses the wrong subsystem. The fix is
+to read a REAL file through a SYMLINKED applet (`/bin/cat /usr/lib/os-release`),
+which leaves argv[0] dispatch as the only untested variable and, as a bonus,
+makes C independent of D.
+
+Two lessons, both already project canon and both re-earned here: a leg's
+dependency set must be no larger than its claim; and when a gate goes red, read
+what the artifact actually printed before believing the hypothesis the gate was
+designed around.
+
+Leg D exists because the loader path cannot cover the relative class at all:
+`libc.musl-aarch64.so.1` matches the `"c."` entry of musl's reserved list
+(`third_party/musl/ldso/dynlink.c:1074-1082`), so `load_library` short-circuits
+it to `&ldso` and never opens the file. The
+`/lib/libc.musl-aarch64.so.1 -> ld-musl-aarch64.so.1` link is present in the
+image and never followed.
+
+Leg E is the **#126 stale-bake detector**. The bundle is pool-resident, so a
+`PRESERVE=1` build silently serves the old rootfs; E is the one assertion here
+that a stale bake cannot satisfy. It reads D's capture, so a broken D darkens E
+too -- that nesting is by design, and D is the leg to read first.
+
+### No `>` redirection anywhere in the script
+
+Not a style rule. #201: the vivarium's `openat` refuses `O_CREAT`
+unconditionally, and a plain `>` passes `O_WRONLY|O_CREAT|O_TRUNC` even onto a
+file that already exists. Every assertion is therefore a `$( )` capture (a pipe)
+or a `2>&1` dup, the same constraint D-3c's gate line already works under. This
+is a real fidelity gap being routed around; #201 remains open.
+
+**The "#201's full fix must re-open #192" clause is RETIRED at D-close
+(2026-08-10, the arc round's F1 [P1]).** It rested on #192 being coupled to
+"the phenotype cannot create/write files", and the write half was never true:
+`VIV_LINUX_WRITE -> SYS_WRITE` is a tier-1 direct row (`vivarium.c:149`) and
+`openat O_RDWR` is translated (`vivarium.c:532`). A container can already write
+any existing file it has DAC write on, so `write(shellcode)` + `mmap(R+X)` +
+jump is a `CAP_JIT`/I-42 bypass **today**, with or without `O_CREAT` — the
+create fix was never what would open it. #192 is now tied to per-mount `noexec`
+(task #217, user-voted 2026-08-10) rather than to #201, and re-opens at that
+chunk or at any change admitting a new `PROT_EXEC` file-mapping shape.
+Full analysis: `docs/DISTRO.md` section 6.
+
+### Marker honesty (#186)
+
+No marker can be forged by a diagnostic line. The script's only raw output is
+`DISTRO-RAW-OSREL:` followed by the os-release contents, measured to contain
+zero `DISTRO-` occurrences; and joey's own failure text -- which does print the
+first-missing marker name -- goes to the console, never into the accumulator,
+which holds container bytes only.
+
+### Fatality
+
+`DISTRO_GATE_FATAL` is 1 from the start, with no KNOWN-BLOCKED arm. L-6c earned
+its non-fatal period by having a NAMED blocker in front of it at every moment
+(#149 -> #150 -> #151 -> #140 -> #155 -> #157, each cleared in turn); this gate
+has none. A soft-skip still applies when the bundle is absent, because an
+external tarball is a missing input rather than a broken kernel -- the fatality
+applies to a gate that RAN.
+
+### Coverage, and what the layers cannot see
+
+`run_viv_bundle` was factored out of `do_alpine_shell_gate` in the same commit
+so both gates share one spawn/drain/reap path; the refactor's blast radius is
+loud rather than silent, since L-6c is itself boot-fatal.
+
+The leg logic was discriminated on the host before it ever booted, against a
+stub busybox reproducing applet dispatch: the control lights all six markers,
+an argv[0]-is-the-resolved-path sabotage darkens **C alone**, a broken relative
+symlink darkens **D and E**, and a stale image darkens **E alone**. The first
+run of that harness darkened C in the CONTROL -- an absolute symlink dangles on
+a host with no container root -- which is the reason the harness rewrites the
+link and the reason a sabotage matrix is only readable once its control is
+fully green.
+
+The harness regenerates the script by parsing it back out of `tools/build.sh`
+rather than keeping its own copy, so what it discriminates is the artifact that
+actually ships. A second copy would have drifted at the leg-C fix and gone on
+certifying the old legs.
+
+What the host run cannot see: anything about the guest. No pool, no stalk, no
+I-28 re-anchoring, no ldso, no `PT_INTERP`. It proves the script's patterns CAN
+match and that each leg reddens for its own reason -- nothing more. Legs A and B
+have no host sabotage because on the host they are the harness itself.
+
+### `run_viv_bundle` drains to EOF BEFORE it reaps (#213)
+
+The shared helper reads the pipe to EOF and only then calls `t_wait_pid_for`.
+The order is the whole safety argument.
+
+Reaping first deadlocks on a talkative container. The ring is 4 KiB
+(`PIPE_BUF_SIZE`), all three of the container's fds are the SAME write end, and
+nothing drains while joey sits in `wait_pid_for` -- so a container emitting more
+than 4 KiB before exiting blocks in `write()` on a full ring while joey blocks
+waiting for it to exit. **That is not a corner case for these gates, it is their
+failure mode**: a broken loader emits one `Error relocating` line per unresolved
+symbol, so reap-first hangs precisely when the thing the gate exists to catch has
+happened, and reports cleanly only when it has not.
+
+Draining first is safe because #68/#926 moved the handle close to EXIT
+(`proc_close_handles_at_exit`, from `exits()`) rather than to reap: the child's
+write end closes while it is still ALIVE, so EOF arrives without joey reaping
+first. joey's own `wr` is closed before the loop, and that is load-bearing rather
+than tidiness -- joey holding a writer means EOF never arrives.
+
+**The regression leg lives on the L-6c bundle, not the D-5 one, and that
+placement is deliberate twice over.** L-6c's bundle is OURS and is already the
+fork/exec/pipe/reap mechanism gate, which is what a pipe-drain regression is;
+putting it in the stock-distro gate would have bundled a pipe mechanism into a
+claim about Alpine -- the one-mechanism-per-leg rule that gate's own leg-C fix
+exists to enforce. It is also the only one that FITS: D-5 drives its script
+through `sh -c`, and viv bounds every process arg at `PATH_MAX` = 512
+(`usr/viv/src/main.rs:226`). Measured, that script uses 431 bytes and the emitter
+needs more, so the first attempt died at `viv: manifest: arg bounds` with the
+container producing nothing. L-6c drives a script FILE (`/gate/run.sh`), which
+has no such cap.
+
+The leg emits 5120 bytes after `L6C-DONE` and is asserted on the BYTE COUNT, not
+a marker: joey's `acc` is 2048 bytes, so nothing past it is reachable to a marker
+check and the only honest assertion is the counter (`run_viv_bundle` reports a
+`total_out` that `acc_len` cannot, since `acc_len` saturates). The threshold is
+the RING rather than the payload, so an edit to the emitting line cannot make the
+leg brittle. It reports under its own name and says explicitly that it is *not* a
+busybox/vivarium leg failure -- a leg that reddens under someone else's name
+accuses the wrong subsystem.
+
+**A/B revert-probed, and the measurement corrected the prediction.** Control:
+both gates PASS, 5120 bytes through the pipe, suite 1389/1389. Sabotage (restore
+reap-before-drain, verified present in source AND in a changed `ramfs.cpio` hash
+before booting): **the boot HANGS** -- `FAIL: timeout, no boot marker`. The
+prediction had been a *partial* ~4096-byte bulk in the log; the measurement shows
+**zero container stdout at all**, because busybox's stdout to a pipe is FULLY
+buffered, so the whole script's output sits in libc's buffer and the ring fills
+on the first flush, before a byte is relayed. Kernel-side `vivarium:` messages
+keep flowing throughout (46 of them), which is what proves the guest is BLOCKED
+rather than dead -- the deadlock's signature, not a crash. So the pre-fix failure
+was worse than described: not a truncated diagnostic but a silent gate and a
+stopped boot.
+
+`pouch_smoke_one` still reaps first, and that is correct FOR ITS CALLERS rather
+than an inconsistency: its children are our own binaries with bounded output. Its
+comment used to justify the order as forced ("a zombie holds its handle table
+until reap"); #68 made that false, so the order there is now a CHOICE and the
+comment states the 4 KiB precondition as a live constraint to check before wiring
+a new caller (#147).
+
+---
+
+## #218 -- MNOEXEC, witnessed from INSIDE a live container (L200-L204)
+
+### The gap this closes, and why it was not pedantic
+
+#217 proved every kernel link of the executable-mapping gate in isolation: five
+sabotages with five distinct attributions, plus the `may_back_exec` floor that
+round-1 forced underneath the flag. What none of it proved is the LAST link --
+that `viv`'s **actual** mounts carry `MNOEXEC` in a running system.
+
+That gap is invisible to every other gate. The arc gates passing shows only that
+noexec does not **break** a container; it does not show noexec is **applied** to
+one. Those are two readings of the same green, and only a deny-path witness
+separates them. Had some path dropped the flag between `viv`'s `t_mount` and
+`PgrpMount.flags`, the whole tree would still have been green -- the standing
+"boot OK does not prove a gate is wired" rule.
+
+### The pair, chosen so only the mount flag differs
+
+| target | Dev | `may_back_exec` | arrived by | `PROT_READ\|PROT_EXEC` |
+|---|---|---|---|---|
+| `/bin/viv-pheno-probe` | dev9p | true | **chroot** (not a mount) | **admitted** (L201) |
+| `/proc/meminfo` | dev9p | true | **MNOEXEC mount** | **refused** (L204) |
+
+Same Dev, same mapping machinery, same phenotype arm. The only difference is the
+mount flag, which is what makes L204 a statement about `MNOEXEC` rather than
+about containers in general.
+
+**`/env` and the `/dev` leaves cannot witness this at all.** The `may_back_exec`
+floor refuses them *before* the flag is ever consulted (#217 round-1 F1), so a
+denial there would prove nothing about `MNOEXEC` -- it would prove the floor.
+Choosing a target the floor does **not** cover is the entire point of the pair.
+
+L203 is the control that makes L204 mean something: the *same fd* maps cleanly
+without `PROT_EXEC`, so the refusal cannot be explained by a bad descriptor, an
+unmappable file, or a broken mount. noexec bounds what may become **code**, not
+what may be **read**.
+
+### The errno is a flat `-1`, and that is correct here
+
+`errno.h` carries a standing warning: **do not return `-T_E_PERM` from a syscall
+handler**, because value 1 collides with the pouch boundary line's flat-`-1`
+sentinel and `__syscall_ret` maps it to `EIO`. That warning does not apply to
+this path and L204 must not be "fixed" on the strength of it:
+`sys_mmap_file_for_proc` has **exactly one caller**, the vivarium dispatch, so
+the value only ever reaches a PHENO_LINUX guest -- for whom `-1` IS `-EPERM` by
+Linux's own numbering. (The exec-side `MNOEXEC` site returns no errno at all; it
+fails resolution and yields NULL.)
+
+`-1` is nevertheless a WEAK value on its own, since it is also
+`syscall_dispatch`'s generic sentinel. L203 is what upgrades it from "something
+went wrong" to "the exec gate refused".
+
+### Discrimination, proven by A/B
+
+Dropping `T_MNOEXEC` from `viv`:
+
+```
+joey: V-7  viv-probe (containered) PASS          <- native leg unaffected
+joey: V-1b linux-phenotype leg FAILED marker=L204 status=1
+tests: 1394/1394                                 <- kernel suite unaffected
+(no "Thylacine boot OK")
+```
+
+Restoring it returns `V-1b phenotype (native + containered linux) PASS` and the
+boot marker. The failure isolates to the new leg alone.
+
+**BOTH `viv` call sites must be sabotaged to see the flip.**
+`mount_noexec_covers` matches the mount **source's** `(dc, devno)`, and `/dio`
+and `/proc` are the SAME diorama 9P instance -- so dropping only the `/proc`
+bind leaves the `/dio` entry still covering the device, the verdict does not
+change, and the experiment reports "no discrimination" while having sabotaged
+nothing. A sabotage that quietly passes is the finding, not the control.
+
+### Trip hazard: these legs are POOL-RESIDENT
+
+The probe ships inside `/vivarium/pheno`, which lives in the Stratum pool. A run
+under `THYLACINE_MKFS_PRESERVE=1` executes the **stale** binary, so new legs
+silently do not exist and the boot is green for the wrong reason (#126). Re-bake
+the pool when changing them, and confirm from the build log's
+`populate pool: viv bundles baked at /vivarium` -- **not** from a green boot, and
+not by grepping `pool.img`, whose contents are encrypted and will never show a
+plaintext marker.

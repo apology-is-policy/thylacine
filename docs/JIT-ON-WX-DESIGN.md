@@ -122,6 +122,38 @@ extension of the W1.5 self-patcher's discipline turned outward. It belongs in
 4. **SMP / icache coherence** is the W1.5 dance (already coded); a userspace JIT
    that relocates/moves code re-runs `icache_sync` over the moved range.
 
+*(5 and 6 added 2026-08-13, after CL-7k landed the primitive. Both are gaps this
+document originally missed; the full write-up with verified file:line evidence
+is task #235, which is DORMANT until a real consumer exists.)*
+
+5. **The permanent writer alias weakens W^X *within* the JIT process — and that
+   matters only for UNTRUSTED JIT.** An arbitrary-write primitive can write
+   through `writer_va` and jump to `exec_va`. I-12 still holds literally (no VA
+   is both W and X), but the property people *want* from W^X is softened; this
+   is why V8 moved toward pkey-based protection where the hardware offers it.
+   Irrelevant for a JVM or a trusted compiler, central for a browser.
+   **Thylacine has an answer Linux and macOS do not**: `burrow_share_into` takes
+   a *per-Proc* prot, so the two views can live in **different address spaces** —
+   a codegen Proc holding RW, an executing Proc holding only RX, which cannot
+   reach the writable alias at all because it is not mapped there. That is
+   caveat 1's confinement made concrete on the Weft (I-37) substrate. Open cost
+   question: an IPC per patch is likely too slow for inline caches, so it
+   probably wants tiering — a measurement, not an argument.
+
+6. **Dynamic binary translators (FEX-class) are blocked on something else
+   entirely: resumable faults.** SMC detection means write-protecting *guest*
+   code pages, trapping the write, invalidating translated blocks, and
+   **resuming** — the same primitive GC write barriers and CRIU need, and
+   nothing to do with emitting code. We are one wire from it: `SYS_NOTED(NCONT)`
+   already restores a saved user context, and `snare:segv`/`snare:bus` are
+   already synthesized on EL0 faults — but `snare:*` is **not in
+   `g_known_notes`** at v1.0 and any unhandled one terminates. Connecting them
+   is a connection, not a new mechanism, and the Linux phenotype needs it
+   regardless to be honest about a guest that installs a `SIGSEGV` handler and
+   expects to continue. The delivery model (in-thread Plan 9 `notify`/`noted`
+   vs. an out-of-thread exception channel à la Fuchsia/seL4/Mach) is a real
+   fork and audit-bearing on I-19 — scripture before code.
+
 ## The spectrum, ranked
 
 1. **Interpreter / jitless** -- works today, zero kernel change, slower. Fine
@@ -149,4 +181,13 @@ LSE patcher, turned outward and gated as a capability.**
   main-track; aux cannot implement it.
 - Motivating use-cases on record: V8 for Node.js / Claude Code (see the
   conversation), and the JS engine inside a Ladybird-based Halcyon browser.
+- **The browser use-case largely de-risks itself, so it is NOT the consumer
+  that would wake this** (noted 2026-08-13): V8 has a supported jitless mode
+  (Ignition), and Ladybird's LibJS is a bytecode interpreter — its JIT was
+  abandoned rather than shipped. *(That last is a recollection; verify before
+  relying on it.)* So a Halcyon browser is a **performance** decision here, not
+  a bring-up blocker. Interpreters run today with zero kernel change.
 - Post-v1.0. Not a roadmap item; a design idea banked for when it matters.
+  **Dormant queue entry: task #235**, which carries the verified evidence, the
+  two gaps above, and the delivery-model fork with a recommendation. Wake it
+  when a real consumer lands, not before.

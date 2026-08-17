@@ -97,6 +97,14 @@ void test_stalk_cached_open_arm(void);
 void test_stalk_cached_open_denials(void);
 void test_stalk_cached_open_mount_fallback(void);
 
+// D-1: symlink expansion (DISTRO.md section 4; the I-28 refinement).
+void test_stalk_symlink_follow(void);
+void test_stalk_symlink_bounds(void);
+void test_stalk_symlink_nofollow(void);
+void test_stalk_symlink_stat_vs_lstat(void);
+void test_stalk_symlink_pounce_split(void);
+void test_stalk_symlink_lifetime(void);
+
 // =============================================================================
 // The fixture Dev.
 // =============================================================================
@@ -105,30 +113,53 @@ struct fixnode {
     u64         path;
     u64         parent;
     const char *name;
-    u8          type;   // QTDIR | QTFILE
+    u8          type;   // QTDIR | QTFILE | QTSYMLINK
     u32         mode;   // low 9 rwx bits (the X-search reads owner bits)
+    const char *target; // D-1: the symlink target (NULL for non-links)
 };
 
 static const struct fixnode g_fix[] = {
-    { 0, 0, "/",      QTDIR,  0755u },
-    { 1, 0, "a",      QTDIR,  0755u },
-    { 2, 1, "b",      QTFILE, 0644u },
-    { 3, 1, "deep",   QTDIR,  0755u },
-    { 4, 3, "leaf",   QTFILE, 0640u },
-    { 5, 0, "nox",    QTDIR,  0644u },
-    { 6, 5, "sekret", QTFILE, 0600u },
-    { 7, 0, "loop",   QTDIR,  0755u },
-    { 8, 1, "nor",    QTFILE, 0200u },   // owner write-only: the leaf-R deny
-    { 9, 0, "xfile",  QTFILE, 0755u },   // #79: an EXECUTABLE file. The only
-                                         // node whose x bit is set while it is
-                                         // not a directory -- without it the
-                                         // ENOTDIR gate could not be shown to
-                                         // be mode-INDEPENDENT (every other
+    { 0, 0, "/",      QTDIR,  0755u, NULL },
+    { 1, 0, "a",      QTDIR,  0755u, NULL },
+    { 2, 1, "b",      QTFILE, 0644u, NULL },
+    { 3, 1, "deep",   QTDIR,  0755u, NULL },
+    { 4, 3, "leaf",   QTFILE, 0640u, NULL },
+    { 5, 0, "nox",    QTDIR,  0644u, NULL },
+    { 6, 5, "sekret", QTFILE, 0600u, NULL },
+    { 7, 0, "loop",   QTDIR,  0755u, NULL },
+    { 8, 1, "nor",    QTFILE, 0200u, NULL },   // owner write-only: leaf-R deny
+    { 9, 0, "xfile",  QTFILE, 0755u, NULL },   // #79: an EXECUTABLE file. The
+                                         // only node whose x bit is set while
+                                         // it is not a directory -- without it
+                                         // the ENOTDIR gate could not be shown
+                                         // to be mode-INDEPENDENT (every other
                                          // file here lacks x, so an x-first
                                          // ordering would answer EACCES and
                                          // look equally correct).
+
+    // ---- D-1 symlinks (DISTRO.md section 4). Mode 0777 throughout: POSIX
+    // ignores a symlink's own permission bits for traversal, and giving them
+    // the widest bits keeps every leg's failure attributable to the FOLLOW
+    // logic rather than to a perm denial.
+    { 10, 0, "lnb",    QTSYMLINK, 0777u, "a/b" },      // relative, one hop
+    { 11, 0, "lnabs",  QTSYMLINK, 0777u, "/a/b" },     // ABSOLUTE -> re-anchor
+    { 12, 0, "lndir",  QTSYMLINK, 0777u, "a/deep" },   // link -> a DIRECTORY
+    { 13, 0, "lnchain",QTSYMLINK, 0777u, "lnb" },      // link -> link -> file
+    { 14, 0, "lnself", QTSYMLINK, 0777u, "lnself" },   // the cycle (ELOOP)
+    { 15, 0, "lndead", QTSYMLINK, 0777u, "nosuch" },   // dangling
+    { 16, 3, "lnup",   QTSYMLINK, 0777u, "../b" },     // '..'-bearing target:
+                                         // resolves a/deep/lnup -> a/b, and
+                                         // takes the RESTART arm (a pop needs
+                                         // a 1:1 trail).
+    { 17, 0, "lnnox",  QTSYMLINK, 0777u, "nox/sekret" },  // through a no-X dir
+    { 18, 3, "lnleaf", QTSYMLINK, 0777u, "leaf" },     // MID-RUN link, so a
+                                         // pounced run must split at it
 };
 #define FIX_LOOP_PATH 7u
+// The first symlink qid -- the boundary the fixture walk uses to answer
+// readlink and that the tests reference by name.
+#define FIX_LNB_PATH    10u
+#define FIX_LNSELF_PATH 14u
 
 static bool fix_streq(const char *a, const char *b) {
     while (*a && (*a == *b)) { a++; b++; }
@@ -196,7 +227,8 @@ static int fix_stat_qid(u64 qid_path, struct t_stat *out) {
     const struct fixnode *fn = fix_node(qid_path);
     if (!fn) return -1;
     for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
-    out->mode     = ((fn->type & QTDIR) ? T_S_IFDIR : T_S_IFREG) | fn->mode;
+    out->mode     = ((fn->type & QTDIR)     ? T_S_IFDIR :
+                     (fn->type & QTSYMLINK) ? T_S_IFLNK : T_S_IFREG) | fn->mode;
     out->nlink    = 1;
     out->qid_path = fn->path;
     out->qid_type = fn->type;
@@ -264,6 +296,26 @@ static struct Spoor *fix_open(struct Spoor *c, int omode) {
 
 static void fix_close(struct Spoor *c) { (void)c; /* qid-based: no heap aux */ }
 
+// D-1: the fixture readlink. Counted so a test can prove the resolver issued
+// exactly the expansions it should (a chain costs two, a cached answer would
+// cost fewer -- there is no target cache at v1.0, and this is what would
+// notice one appearing).
+static int g_fix_readlink_calls;
+
+static long fix_readlink(struct Spoor *c, char *buf, long n) {
+    if (!c || !buf || n <= 0) return -T_E_INVAL;
+    g_fix_readlink_calls++;
+    const struct fixnode *fn = fix_node(c->qid.path);
+    if (!fn || !fn->target) return -T_E_INVAL;   // not a symlink (server-side)
+    long i = 0;
+    while (fn->target[i] != '\0') {
+        if (i >= n) return -T_E_INVAL;           // target exceeds the caller's cap
+        buf[i] = fn->target[i];
+        i++;
+    }
+    return i;
+}
+
 // FID-LIFECYCLE cached-open fixture slot. Controllable: g_fix_co_enable false
 // declines every attempt (the arm must fall back byte-identically); enabled, it
 // resolves the run through the FIXTURE table (the "underlying tree" -- blind to
@@ -318,6 +370,7 @@ static struct Dev stalkfix = {
     .stat_native   = fix_stat_native,
     .open          = fix_open,
     .close         = fix_close,
+    .readlink      = fix_readlink,   // D-1: the expansion RPC
 };
 
 // The A/B twin: the SAME tree with NO walk_attrs slot -- resolves through the
@@ -332,6 +385,7 @@ static struct Dev stalkfix_nowa = {
     .stat_native   = fix_stat_native,
     .open          = fix_open,
     .close         = fix_close,
+    .readlink      = fix_readlink,   // D-1: the expansion RPC
 };
 
 static struct Spoor *fix_root_nowa(void) {
@@ -369,6 +423,7 @@ static struct Dev stalkfix_replace = {
     .stat_native   = fix_stat_native,
     .open          = fix_open_replace,
     .close         = fix_close,
+    .readlink      = fix_readlink,   // D-1: the expansion RPC
 };
 
 static struct Spoor *fix_root_replace(void) {
@@ -403,6 +458,7 @@ static struct Dev stalkfix_replace_nopath = {
     .stat_native   = fix_stat_native,
     .open          = fix_open_replace_nopath,
     .close         = fix_close,
+    .readlink      = fix_readlink,   // D-1: the expansion RPC
 };
 
 static struct Spoor *fix_root_replace_nopath(void) {
@@ -795,11 +851,11 @@ void test_stalk_trailing_slash(void) {
     // -- Site C: the STALK_STAT walk-query fast path, which returns from the
     // fused leaf record WITHOUT ever materializing a quarry.
     e = -12345;
-    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/b/", 4, &st, &e), (u64)-1,
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/b/", 4, 0, &st, &e), (u64)-1,
                    "stat a/b/ fails");
     TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "the stat query path gates too");
     e = -12345;
-    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/deep/", 7, &st, &e), (u64)0,
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/deep/", 7, 0, &st, &e), (u64)0,
                    "stat a/deep/ still succeeds");
     TEST_EXPECT_EQ((u64)st.qid_path, (u64)3, "and reports the directory");
 
@@ -1613,7 +1669,7 @@ void test_stalk_stat_query(void) {
     int e = -12345;
     g_fix_walk_calls = 0; g_fix_walkattrs_calls = 0;
     u64 alloc_before = spoor_total_allocated();
-    int rc = stalk_stat(&p, root, "a/deep/leaf", 11, &st, &e);
+    int rc = stalk_stat(&p, root, "a/deep/leaf", 11, 0, &st, &e);
     u64 alloc_after = spoor_total_allocated();
     TEST_EXPECT_EQ((u64)rc, (u64)0, "stalk_stat a/deep/leaf");
     TEST_EXPECT_EQ((u64)st.qid_path, (u64)4, "attrs are the leaf's (qid 4)");
@@ -1626,17 +1682,17 @@ void test_stalk_stat_query(void) {
 
     // Resolution failures carry the stalk errnos.
     e = -12345;
-    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/nope", 6, &st, &e), (u64)-1,
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/nope", 6, 0, &st, &e), (u64)-1,
                    "stat of a missing path fails");
     TEST_EXPECT_EQ((u64)e, (u64)T_E_NOENT, "missing -> NOENT");
     e = -12345;
-    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "nox/sekret", 10, &st, &e), (u64)-1,
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "nox/sekret", 10, 0, &st, &e), (u64)-1,
                    "stat under a no-X dir fails");
     TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "denied -> ACCES (fail-ordering)");
 
     // The stat of "/" (zero real components) takes the fallback quarry path.
     e = -12345;
-    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "/", 1, &st, &e), (u64)0, "stat /");
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "/", 1, 0, &st, &e), (u64)0, "stat /");
     TEST_EXPECT_EQ((u64)st.qid_path, (u64)0, "root attrs");
     TEST_EXPECT_EQ((u64)st.mode, (u64)(T_S_IFDIR | 0755u), "root mode");
 
@@ -1659,7 +1715,7 @@ void test_stalk_stat_mount_leaf(void) {
 
     struct t_stat st;
     int e = -12345;
-    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "loop", 4, &st, &e), (u64)0,
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "loop", 4, 0, &st, &e), (u64)0,
                    "stat of a mount point succeeds");
     TEST_EXPECT_EQ((u64)st.qid_path, (u64)1,
                    "attrs are the MOUNTED a-root's (qid 1), not loop's (qid 7)");
@@ -1672,7 +1728,7 @@ void test_stalk_stat_mount_leaf(void) {
 
 // SYS_STAT's testable inner (the #37 *_for_proc shape; kernel path + kernel
 // t_stat -- the handler's uaccess staging wraps it).
-extern s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
+extern s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len, u32 stalk_flags,
                              struct t_stat *out_k);
 
 void test_sys_stat_for_proc(void) {
@@ -1684,26 +1740,26 @@ void test_sys_stat_for_proc(void) {
     TEST_EXPECT_EQ(territory_chroot(p.territory, root), 0, "chroot to fixture");
 
     struct t_stat st;
-    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/a/b", 4, &st), (u64)0,
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/a/b", 4, 0, &st), (u64)0,
                    "SYS_STAT inner: absolute path");
     TEST_EXPECT_EQ((u64)st.qid_path, (u64)2, "/a/b -> qid 2");
     TEST_EXPECT_EQ((u64)st.mode, (u64)(T_S_IFREG | 0644u), "b mode 0644");
 
     // Relative path joins the cwd (dot unset == "/"); same answer.
-    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "a/b", 3, &st), (u64)0,
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "a/b", 3, 0, &st), (u64)0,
                    "SYS_STAT inner: relative path via the cwd join");
     TEST_EXPECT_EQ((u64)st.qid_path, (u64)2, "a/b -> qid 2");
 
     // Resolution errnos pass through as -errno.
-    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/a/nope", 7, &st),
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/a/nope", 7, 0, &st),
                    (u64)(s64)-T_E_NOENT, "missing -> -T_E_NOENT");
-    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/nox/sekret", 11, &st),
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/nox/sekret", 11, 0, &st),
                    (u64)(s64)-T_E_ACCES, "denied -> -T_E_ACCES");
 
     // Structural rejects -> the bare -1.
-    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, NULL, 3, &st), (u64)(s64)-1,
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, NULL, 3, 0, &st), (u64)(s64)-1,
                    "NULL path -> -1");
-    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/a/b", 0, &st), (u64)(s64)-1,
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/a/b", 0, 0, &st), (u64)(s64)-1,
                    "zero-length path -> -1");
 
     territory_unref(p.territory);
@@ -1753,7 +1809,7 @@ void test_stalk_pounce_unsupported_fallback(void) {
     // stalk_stat degrades too: the fallback quarry path stats + clunks.
     struct t_stat st;
     int e = -12345;
-    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/b", 3, &st, &e), (u64)0,
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/b", 3, 0, &st, &e), (u64)0,
                    "stalk_stat via the fallback");
     TEST_EXPECT_EQ((u64)st.qid_path, (u64)2, "correct attrs via stat_native");
 
@@ -1911,5 +1967,279 @@ void test_stalk_cached_open_mount_fallback(void) {
     territory_unref(p.territory);
     spoor_clunk(src);
     spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+// =============================================================================
+// D-1: symlink expansion (docs/DISTRO.md section 4; the I-28 refinement).
+// =============================================================================
+
+// The follow legs: a link in the MIDDLE of a path, at the END, chained, to a
+// directory, and one whose target is absolute (the re-anchor + restart arm).
+void test_stalk_symlink_follow(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    // FINAL component is a link -> the resolution lands on its TARGET.
+    g_fix_readlink_calls = 0;
+    struct Spoor *q = stalk(&p, root, "lnb", 3, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve lnb");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)2, "lnb -> a/b (qid 2), not the link");
+    TEST_EXPECT_EQ((u64)g_fix_readlink_calls, (u64)1, "exactly one readlink");
+    spoor_clunk(q);
+
+    // MID-PATH link: lndir -> a/deep, so lndir/leaf is a/deep/leaf. Without
+    // expansion this is the #79 ENOTDIR gate (a link is not a directory), so
+    // this leg fails LOUDLY on a resolver that only handles the final hop.
+    g_fix_readlink_calls = 0;
+    q = stalk(&p, root, "lndir/leaf", 10, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve lndir/leaf");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)4, "lndir/leaf -> a/deep/leaf (qid 4)");
+    TEST_EXPECT_EQ((u64)g_fix_readlink_calls, (u64)1, "one readlink mid-path");
+    spoor_clunk(q);
+
+    // CHAIN: lnchain -> lnb -> a/b. Two expansions, and the count PROVES the
+    // second one happened rather than the first having landed by luck.
+    g_fix_readlink_calls = 0;
+    q = stalk(&p, root, "lnchain", 7, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve lnchain");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)2, "lnchain -> lnb -> a/b (qid 2)");
+    TEST_EXPECT_EQ((u64)g_fix_readlink_calls, (u64)2, "two readlinks (the chain)");
+    spoor_clunk(q);
+
+    // ABSOLUTE target: the RESTART arm. Requires a Territory (the re-anchor
+    // reads its root), so this leg uses the cross_setup Proc rather than the
+    // bare fixture one -- and that is the point: an absolute target re-anchors
+    // at the CALLER'S OWN root, never a global one (I-28).
+    spoor_unref(root);
+    struct Proc p2;
+    struct Spoor *root2 = cross_setup(&p2);
+    TEST_ASSERT(root2 != NULL && p2.territory != NULL, "cross_setup");
+    TEST_EXPECT_EQ(territory_chroot(p2.territory, root2), 0, "chroot to fixture");
+    g_fix_readlink_calls = 0;
+    q = stalk(&p2, root2, "lnabs", 5, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve lnabs (absolute target)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)2, "/a/b re-anchored at OUR root -> qid 2");
+    TEST_EXPECT_EQ((u64)g_fix_readlink_calls, (u64)1, "one readlink");
+    spoor_clunk(q);
+
+    // A '..'-BEARING target (a/deep/lnup -> ../b): the other restart arm. The
+    // pop must land 1:1, which is why this target cannot take the in-place
+    // splice -- and the assertion here is simply that it RESOLVES, which a
+    // splice into a pounced trail would not.
+    q = stalk(&p2, root2, "a/deep/lnup", 11, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve a/deep/lnup");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)2, "a/deep/lnup -> a/b (qid 2)");
+    spoor_clunk(q);
+
+    territory_unref(p2.territory);
+    spoor_unref(root2);
+}
+
+// The refusal legs: the follow bound (a cycle), a dangling target, and a link
+// whose target crosses a directory the caller cannot search (fail-ordering:
+// the DENIAL must survive expansion, not be laundered into a miss).
+void test_stalk_symlink_bounds(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    // The cycle: lnself -> lnself. Terminates on the follow budget with ELOOP
+    // (never spins -- a hang here is the failure mode this bound exists for).
+    int e = -12345;
+    g_fix_readlink_calls = 0;
+    struct Spoor *q = stalk_err(&p, root, "lnself", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a symlink cycle does not resolve");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_LOOP, "cycle -> T_E_LOOP");
+    TEST_EXPECT_EQ((u64)g_fix_readlink_calls, (u64)STALK_MAX_FOLLOWS,
+                   "exactly STALK_MAX_FOLLOWS expansions, then the bound");
+
+    // Dangling: lndead -> nosuch. The target is expanded and then MISSES --
+    // ENOENT, the same answer the spelled-out path gives.
+    e = -12345;
+    q = stalk_err(&p, root, "lndead", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a dangling symlink does not resolve");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOENT, "dangling -> T_E_NOENT");
+
+    // Through a no-X directory: lnnox -> nox/sekret. The expansion re-enters
+    // the SAME loop, so the per-component X-search binds the expanded
+    // components exactly as it binds spelled-out ones -- EACCES, not ENOENT.
+    // This is the I-28 containment claim in its sharpest form: expansion
+    // cannot be used to reach past a gate.
+    e = -12345;
+    q = stalk_err(&p, root, "lnnox", 5, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a link into a no-X dir does not resolve");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES,
+                   "the expanded path is X-gated -> ACCES (never NOENT)");
+
+    spoor_unref(root);
+}
+
+// The no-follow dispositions (POSIX + Linux): open(O_NOFOLLOW) -> ELOOP,
+// O_PATH|O_NOFOLLOW -> the link itself, lstat -> the link's own record, and a
+// TRAILING SLASH overriding the flag.
+void test_stalk_symlink_nofollow(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    // A byte-open of a link with the flag: ELOOP (a symlink cannot be opened).
+    int e = -12345;
+    struct Spoor *q = stalk_err(&p, root, "lnb", 3,
+                                STALK_OPEN | STALK_NOFOLLOW, 0, &e);
+    TEST_ASSERT(q == NULL, "O_NOFOLLOW open of a link fails");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_LOOP, "-> T_E_LOOP (Linux O_NOFOLLOW)");
+
+    // O_PATH|O_NOFOLLOW: the navigation handle IS the link.
+    q = stalk(&p, root, "lnb", 3, STALK_WALK | STALK_NOFOLLOW, 0);
+    TEST_ASSERT(q != NULL, "O_PATH|O_NOFOLLOW resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)FIX_LNB_PATH,
+                   "the quarry is the LINK (qid 10), not its target");
+    TEST_ASSERT((q->qid.type & QTSYMLINK) != 0, "and it is marked QTSYMLINK");
+    spoor_clunk(q);
+
+    // Only the FINAL component is held back: an INTERMEDIATE link still
+    // follows even under the flag (POSIX -- a mid-path link is a directory
+    // position, and no-follow is a statement about what the path NAMES).
+    q = stalk(&p, root, "lndir/leaf", 10, STALK_OPEN | STALK_NOFOLLOW, 0);
+    TEST_ASSERT(q != NULL, "an intermediate link follows under NOFOLLOW");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)4, "-> a/deep/leaf");
+    spoor_clunk(q);
+
+    // TRAILING SLASH overrides the flag (POSIX 4.13): "lndir/" names the
+    // directory the link resolves to, so it follows and answers the target.
+    q = stalk(&p, root, "lndir/", 6, STALK_OPEN | STALK_NOFOLLOW, 0);
+    TEST_ASSERT(q != NULL, "lndir/ follows despite NOFOLLOW");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)3, "-> a/deep (qid 3)");
+    spoor_clunk(q);
+
+    // A trailing slash on a link to a FILE is ENOTDIR (the #82 gate reads the
+    // followed quarry -- the link resolved, and what it named is not a dir).
+    e = -12345;
+    q = stalk_err(&p, root, "lnb/", 4, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "lnb/ (link to a file) fails");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "-> T_E_NOTDIR");
+
+    // An unknown amode/flag bit is still rejected LOUDLY (the stalk-1 F1
+    // guard, which D-1 widened by exactly one bit and no more).
+    e = -12345;
+    q = stalk_err(&p, root, "a/b", 3, STALK_OPEN | 0x200, 0, &e);
+    TEST_ASSERT(q == NULL, "an unknown amode flag is refused");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_INVAL, "-> T_E_INVAL");
+
+    spoor_unref(root);
+}
+
+// stalk_stat's two shapes: stat FOLLOWS (reporting the target) and lstat does
+// not (reporting the link -- S_IFLNK). The pounce serves both from the fused
+// leaf record, so this also pins that the fast path does not silently follow.
+void test_stalk_symlink_stat_vs_lstat(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    struct t_stat st;
+    int e = -12345;
+
+    // stat("lnb") -> the TARGET's record.
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "lnb", 3, 0, &st, &e), (u64)0,
+                   "stat lnb");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)2, "stat follows -> a/b (qid 2)");
+    TEST_EXPECT_EQ((u64)(st.mode & T_S_IFMT), (u64)T_S_IFREG, "-> a regular file");
+
+    // lstat("lnb") -> the LINK's own record.
+    e = -12345;
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "lnb", 3, STALK_NOFOLLOW, &st, &e),
+                   (u64)0, "lstat lnb");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)FIX_LNB_PATH,
+                   "lstat does NOT follow -> the link (qid 10)");
+    TEST_EXPECT_EQ((u64)(st.mode & T_S_IFMT), (u64)T_S_IFLNK, "-> S_IFLNK");
+
+    // lstat of a DANGLING link succeeds (the link exists even though its
+    // target does not) -- the divergence a follow-always resolver cannot show.
+    e = -12345;
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "lndead", 6, STALK_NOFOLLOW, &st, &e),
+                   (u64)0, "lstat of a dangling link succeeds");
+    TEST_EXPECT_EQ((u64)(st.mode & T_S_IFMT), (u64)T_S_IFLNK, "-> S_IFLNK");
+    e = -12345;
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "lndead", 6, 0, &st, &e), (u64)-1,
+                   "stat of the same dangling link FAILS");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOENT, "-> NOENT");
+
+    // An unknown flag bit is refused (stalk_stat's own guard).
+    e = -12345;
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/b", 3, 0x4u, &st, &e), (u64)-1,
+                   "an unknown stat flag is refused");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_INVAL, "-> T_E_INVAL");
+
+    spoor_unref(root);
+}
+
+// The POUNCE interaction: a link INSIDE a batched run must split the run at
+// its parent and resume per-component. Asserted by ENGAGEMENT counters, since
+// a resolver that silently fell back to the per-component loop everywhere
+// would answer correctly and prove nothing about the split.
+void test_stalk_symlink_pounce_split(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    // a/deep/lnleaf: the run gathers all three, walk_attrs reports component 2
+    // as QTSYMLINK, and the resolver splits at its parent (a/deep), resumes at
+    // `lnleaf` per-component, expands it, and lands on a/deep/leaf.
+    g_fix_walk_calls = 0; g_fix_walkattrs_calls = 0; g_fix_readlink_calls = 0;
+    struct Spoor *q = stalk(&p, root, "a/deep/lnleaf", 13, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve a/deep/lnleaf");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)4, "-> a/deep/leaf (qid 4)");
+    TEST_EXPECT_EQ((u64)g_fix_readlink_calls, (u64)1, "one expansion");
+    TEST_ASSERT(g_fix_walkattrs_calls > 0, "the POUNCE ran (not a silent fallback)");
+    TEST_ASSERT(g_fix_walk_calls > 0,
+                "and the split resumed PER-COMPONENT for the link hop");
+    spoor_clunk(q);
+
+    // The same tree resolved with NO walk_attrs slot must agree exactly -- the
+    // A/B parity the pounce battery uses, extended to symlinks.
+    struct Spoor *rootn = fix_root_nowa();
+    TEST_ASSERT(rootn != NULL, "fix_root_nowa");
+    q = stalk(&p, rootn, "a/deep/lnleaf", 13, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "the no-walk_attrs twin resolves it too");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)4, "-> the SAME qid 4");
+    spoor_clunk(q);
+    spoor_unref(rootn);
+
+    spoor_unref(root);
+}
+
+// Lifetime: a resolution that expands must leak no Spoor and free no Spoor
+// twice. The allocated-minus-freed identity is the same instrument the
+// stalk.lifetime battery uses; a link adds a transient clone per expansion
+// (the walked link, clunked after its readlink), so a leak here is a real
+// per-symlink leak on the commonest path in a stock rootfs.
+void test_stalk_symlink_lifetime(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    // Every shape: follow, chain, mid-path, no-follow, refusal, cycle.
+    struct Spoor *q = stalk(&p, root, "lnb", 3, STALK_OPEN, 0);
+    if (q) spoor_clunk(q);
+    q = stalk(&p, root, "lnchain", 7, STALK_OPEN, 0);
+    if (q) spoor_clunk(q);
+    q = stalk(&p, root, "lndir/leaf", 10, STALK_OPEN, 0);
+    if (q) spoor_clunk(q);
+    q = stalk(&p, root, "lnb", 3, STALK_WALK | STALK_NOFOLLOW, 0);
+    if (q) spoor_clunk(q);
+    q = stalk(&p, root, "lndead", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q == NULL, "dangling still fails");
+    q = stalk(&p, root, "lnself", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q == NULL, "the cycle still fails");
+
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before,
+                   "expansion leaks no Spoor and double-frees none");
+
     spoor_unref(root);
 }

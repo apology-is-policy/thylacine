@@ -1,10 +1,26 @@
 # Aux track roadmap
 
-**As of 2026-07-28. Branch `gfx-4` @ `45186b64`, clean + pushed (both mirrors).**
+**As of 2026-08-16. Branch `aux-2`.** Read the branch off the worktree
+(`git branch --show-current`), never off this line — on 2026-08-16 three
+sources gave three answers (main's CLAUDE.md said `aux/userspace-apps`, this
+header said `gfx-4 @ 45186b64`, the worktree was on `aux-2`), and `gfx-4` is a
+separate live branch rather than a rename of anything. A branch name written
+into a document is stale from the moment the track moves; the worktree cannot
+be.
 
 Supersedes the narrow `usr/apps/AUX-ROADMAP.md` (the old userspace-apps-only aux
-agent). This track now owns the graphics arc, the Aurora environment, and — new
-today — the VIVARIUM arc.
+agent). This track now owns the graphics arc, the Aurora environment, and the
+VIVARIUM arc — **plus the kernel surfaces those arcs land on**, which is where
+its recent work actually sits: measured over the 250 commits from `45186b64` to
+`aux-2`, the touched tree is `kernel/test` (52 files), `docs/reference` (41),
+`usr/ports` (28), `kernel/include` (27), `usr/lib` (19), `tools/interactive`
+(13), `arch/arm64` (11). The notes / signals / job-control / PTY line
+(aux#240..aux#255) is a kernel arc by any honest reading, and this track runs
+its own full bar for it: the suite, the SMP gate, the pty spec set, and LS-CI.
+
+The 2026-07-28 version of this header described the track as graphics-only and
+went unrefreshed for three weeks while the work moved. Refresh this block
+whenever the arc changes, not whenever it is convenient.
 
 ---
 
@@ -16,6 +32,7 @@ today — the VIVARIUM arc.
 | **Track B — Aurora config (cfg-1..cfg-5)** | **COMPLETE.** OSD + persistence + OSC session push + the apply-authority gate + runtime chords/gaps + baked font sizes, each audited. |
 | **VIVARIUM (V-0..V-8)** | **STARTED.** V-0 scripture + V-1a (phenotype ledger + brand hint) landed; V-4 specced build-ready. |
 | **Halcyon G-8/G-9** | Not started. The graphics endgame. |
+| **Notes / job control / PTY (the kernel line, aux#240..)** | **ACTIVE.** See Stream 4 below. |
 
 ---
 
@@ -415,6 +432,176 @@ so the compositor never grows a glyph path; the richer end state is Acme's
 - #43 (synthetic key-release on focus change — stuck key) · #44 (4K weave cap +
   multi-point pixel asserts) · #32 (`ls /srv` → "I/O error"; devsrv has no
   `.readdir`) · #13 (per-pts ownership + 0600).
+
+---
+
+## Stream 4 — notes / job control / PTY (the kernel line)
+
+The line the header names: the EL0-return tail's note dispatch, the STOP
+class, the tty family, the pts job-control seam, and the tests that construct
+their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
+
+**Landed (newest first, 2026-08-17 back to aux#240):**
+
+- `277b02cc` -- the console TX ring pushes UNITS (item 4 below; ARCH 23.5.2
+  UNIT ATOMICITY; closes #79) and `920bbfca` -- the d3a11c8e + 4df51c30 audit
+  close (item 1 below; a fork() from inside a handler carries the handler
+  snapshot). Bar over `277b02cc`: SMP 40/40, LS-CI 33 PASS + 2 SKIP; pushed.
+- `7580c1f7` (+ the ccb597b8 audit close `56b5a412`) -- SIG_IGN discards a PENDING signal at the INSTALL (POSIX
+  2.4.3 / Linux `flush_sigqueue_mask`): `notes_discard_name` (mask-blind,
+  per-class latch drain, `kill` refused) called by the phenotype `rt_sigaction`
+  shell after the store whenever the new disposition ignores; `notes_post`'s
+  disposition read moved under `q->lock` so no stale ignored note survives --
+  the EL0 tail's delivery-time SIG_IGN arm (the open item below, "reached by
+  nothing") is now defense-in-depth by construction rather than an
+  unconstructed mechanism. Found while designing it: the deferred discard was
+  observably WRONG for `pending -> SIG_IGN -> handler -> unblock` (Linux fires
+  nothing; the tail ran the handler). Unit `notes.discard_name_purges_pending`
+  + viv-pheno-probe L205-L216 (in-guest, deterministic via the reader-less
+  fd 0; L215 is the install-vs-delivery leg, RED before).
+- `c62eb738` + `ccb597b8` -- pty-4's burned retry ROOT-CAUSED by the 11173762
+  probe on its first miss and FIXED: both ldiscs zeroed the canonical assembly
+  on every mode write (LS-8b F1 "TCSAFLUSH"), so type-ahead between a job's
+  last output and ut's PROMPT-mode re-arm was cooked-echoed then dropped,
+  partially (`sle` gone, `ep 30` ran). Now a write clearing ICANON DELIVERS the
+  pending line (Plan 9 rawon / Linux n_tty); new `rx_drop_modeflush` counter;
+  `cons.cook_mode_flip_delivers`, ptyfs selftest e1-e3, and a DETERMINISTIC
+  type-ahead leg in pty-4 (3/3 red under the old posture).
+- `93a91c6c` -- the `c8ab2744` audit close (Fable 5 round: 0 P0 / 1 P1 / 1 P2 /
+  2 P3, ALL pre-existing three lines above the audited arm). F1 [P1]: both
+  class scans (terminate + STOP) now gate every hit per note on
+  `notes_proc_default_applies(p, name)` -- the terminate scan was phenotype-
+  blind and any-index, so a Linux guest died of a CAUGHT `tty:hup`/`interrupt`
+  queued behind a `SIG_DFL` candidate. F2 [P2]: a `SIG_DFL` `pipe` on
+  PHENO_LINUX was consumed by NO arm (no native latch, #237) and sat as the
+  dispatcher candidate for life; the phenotype branch now `exits()` on a
+  `SIG_DFL` terminate-default candidate (`viv_signote_default_is_terminate`).
+  F3: the consumer's dead drain call deleted; F4: three "never queued"
+  contract sentences reworded. Unit `notes.class_scans_read_phenotype_sigtab`
+  + L-6c legs J/K/L -- whose POSITIVE CONTROL (K) caught a second bug on its
+  first boot: viv `fcntl(F_DUPFD)` answered EMFILE for a CLOSED fd, ash's
+  `N>&M` probe aborted every `3>&1`, and J/L passed vacuously on an empty
+  capture. Fixed (EBADF/EMFILE split; `vivarium.fcntl_dupfd_errnos`).
+- `4525023a` -- the change-of-watch pair + Stop hook + launcher imported from
+  main (aux's first self-compaction followed).
+- `11173762` -- LS-CI failure-time state probe (`::lc_fail_probe`); pty-4 arms
+  it so its next burned retry says INPUT vs OUTPUT vs lost-^Z from the log.
+- `3a7f50f1` -- `mask note 'tty:*'` masked NOTHING (parser had no tty arm);
+  prefix -> `NoteClass::Tty`; u-job-test 15c pins it + reads the kernel mask.
+- `ffb8f0ab` -- `notes.masked_susp_stops_at_delivery` observes -> tears down
+  -> asserts (an early-return assertion left ALIVE linked Procs and hung the
+  next test's `wait_pid` loop).
+- `c8ab2744` -- the deferred-^Z stop arm was reached by NOTHING (an
+  unconstructed state); `/susp-mask-child` + jc-probe `maskstop` construct it;
+  reading the arm found a P1 (decided class-filtered, consumed class-blind: a
+  queued `child_exit` destroyed) -> `notes_stop_dequeue_locked`.
+- aux#254 (sigtab UAF at exec), aux#253 (self-kill on a full queue), aux#251 +
+  aux#252 (phenotype-blind catchability gate; the STOP class had no
+  delivery-time reader), aux#247, aux#240 (`susp_stop_armed` freshness).
+
+**Open, in order:**
+
+1. ~~AUDIT ROUND OWED~~ RAN + CLOSED 2026-08-17 (Fable 5, 0/0/1/6): F1 -- a fork()
+   from INSIDE a handler got no copy of the kernel-side handler snapshot (only
+   the mask), so its rt_sigreturn was refused; the snapshot now crosses fork
+   with the mask (probe L233-L236). Six P3s closed; enqueued from the
+   observations: `Proc.socktab` not cloned at fork (LINEAGE, the fork half of
+   the dup3 note), the handler mask discipline (sa_mask|sig never applied;
+   sigreturn does not restore the mask), `pty.tla` CookSignal's echo arm vs the
+   ldiscs. `memory/audit_d3a11c8e_closed_list.md`. (Formerly: on the fork/exec
+   signal-state chunk (proc.c rfork +
+   exec, vivarium.c helpers; the Notes + LINEAGE rows) and, lighter, on the F5
+   ISIG-discard change (cons.c/ptyfs, LS-8 + ptyfs rows) -- ask. The
+   `7580c1f7` round RAN and CLOSED 2026-08-17: Fable 5, 0/0/0/4, mechanism
+   sound; `audit_7580c1f7_closed_list.md`. The `ccb597b8` round RAN and CLOSED 2026-08-17:
+   Fable 5, 0/0/2/6, all on the new drop site's witness -- positive controls
+   in both ldiscs, ptyfs's own `drop_modeflush`, the report line names the
+   site, pty-4's leg gained an ARMED witness; `audit_ccb597b8_closed_list.md`.)
+   Also owed at some point: an explicit flush verb (POSIX TCSAFLUSH /
+   tcflush) -- pouch's TCSETS/SW/SF now all behave like TCSANOW.
+2. ~~F5 vote~~ VOTED + LANDED (POSIX: an ISIG char discards the pending line
+   in both ldiscs; PTY-DESIGN `e69e9baf` + the impl commit; the PTY-3 probe's
+   old `xy\n` expectation went red on the first boot and was updated).
+3. ~~exec resets SIG_IGN + mask~~ VOTED + LANDED with the fork half (task #127
+   both halves; scripture `c484a7d1` + the impl commit): fork copies the sigtab
+   + mask into the child, exec keeps SIG_IGN + mask on the phenotype.
+4. ~~THE CONSOLE TX RING IS BYTE-ATOMIC, NOT MESSAGE-ATOMIC~~ **LANDED 2026-08-17**
+   (ARCH 23.5.2 "UNIT ATOMICITY"; every producer pushes a UNIT under one lock
+   hold -- the caller-stack `cons_diag_line`, the echo unit, the writer's staged
+   chunk; closes #79; three tests + S1-S3; the LS-8 row addendum). Formerly:
+   (handed to aux by
+   main 2026-08-17; `memory/bug_console_tx_ring_byte_atomic.md`): the kernel's
+   `cons_diag_puts` (the #126 non-blocking IRQ-safe emitter -- per BYTE under
+   `g_cons_tx.lock`) and a userspace `SYS_PUTS`/`cons_output_write` (under the
+   P1-F writer ROLE, but still per-byte into the same ring) interleave char by
+   char (`ttaappeessttrryydd` on thyla-pi); any gate anchored on a console line
+   printed near a kernel diagnostic burst can go falsely RED. Fix shape: a
+   bounded per-MESSAGE push (`cons_tx_push_bulk` under ONE lock hold; the diag
+   side drops the whole message when it does not fit -- the echo disposition,
+   never spin; the role side pushes what fits under one hold and room-waits for
+   the rest -- so a diag can land BETWEEN two of a writer's chunks but never
+   inside one). Design point to settle first: whether the diag path can take the
+   writer role like the banner does (#152 `cons_kernel_writer_begin`) -- it
+   cannot (IRQ context; the role sleeps), so bulk-push is the honest floor and
+   "anchor lines are short (< the ring's free space)" the residual rule.
+   kernel/cons.c is the LS-8 audit row: audit round + SMP gate. Same family as
+   the OPEN extinction-vs-peer tear (vault seam) and IPI_HALT.
+5. **#237 stays open and is now sharper**: the phenotype answers SIG_DFL
+   SIGPIPE for its own Procs; the NATIVE `pipe` note still carries no latch,
+   so a native program that writes to a closed pipe with no handler and no fd
+   reader keeps a stranded `pipe` note -- a Plan 9 ABI decision (signoff).
+   Researched option set in `memory/design_237_pipe_note_default.md` (Plan 9
+   kills; Rust-std/pouch mask; the Go port has no note handling at all):
+   recommend terminate-for-real + libthyla-rs/Go-port startup masks.
+6. **`Proc.socktab` is NOT cloned at fork** (the d3a11c8e round, seen in passing;
+   `memory/bug_socktab_not_cloned_at_fork.md`): a phenotype child forked with an
+   open socket fd inherits the HANDLE but no `(proto,N)` row -- the fork half of
+   LINEAGE.md:691's dup3 note; fork-per-connection servers are the L-6c
+   population. Own chunk: `socktab_clone_into` next to the sigtab clone + a
+   probe leg + the VIVARIUM row.
+   **Re-derived 2026-08-17 (`memory/design_socktab_across_images.md`, VOTE
+   OWED -- VIVARIUM 5.5.2 states "not rfork-inherited" as design):** a
+   refcounted ENTRY cannot carry the per-table ctl->data handle swap, so it
+   reproduces Linux no better than a copy; Plan 9 APE's own posture IS a
+   per-process copy, and every fork shape that occurs (accept-then-fork,
+   prefork accept) works under one. Recommend COPY at fork + lift dup3/F_DUPFD
+   to the same alias rule + record the socket OBJECT as the faithful shape.
+   Found alongside, same chunk (both verified in the tree): **(6b) exec leaves a
+   STALE entry** -- `handle_close_on_exec` closes a close-on-exec socket handle
+   without a socktab drop, and `fcntl(F_SETFD, FD_CLOEXEC)` is a served row
+   (musl 1.2.5's `socket(SOCK_CLOEXEC)` fallback issues exactly it), so the
+   exec'd image's next fd-creating call inherits (proto, N) -- the "dial verb
+   to a stranger" class the V-5 header names as the sharpest this table can
+   have (`memory/bug_socktab_stale_entry_at_exec.md`); a bug under every
+   posture, no vote needed. **(6c) the SOCK_NONBLOCK refusal is defeated by
+   musl** -- EINVAL is exactly musl's fallback trigger; it retries without the
+   flag and IGNORES the failing `fcntl(F_SETFL, O_NONBLOCK)` (unserved), so the
+   guest holds a BLOCKING socket it believes non-blocking, the very failure the
+   refusal's comment claims to prevent (`memory/bug_sock_nonblock_refusal_
+   defeated_by_musl.md`; a V-5 design call: a loud non-retried errno vs
+   serving non-blocking /net I/O).
+7. ~~Handler mask discipline on the phenotype~~ **LANDED 2026-08-17** (the
+   handler-time mask is Linux's: mask|sa_mask|sig via `vivarium_handler_mask`,
+   the phenotype's sigreturn restores `note_saved_mask`, the fork copy carries
+   it; +2 unit tests, probe L237-L244, SM1-SM3; hash in the status row).
+   Formerly (`memory/bug_handler_mask_
+   discipline_phenotype.md`): sa_mask|sig is never applied while a handler
+   runs (N-3's blanket guard stands in), and `notes_noted_restore` does not
+   restore `note_mask` (a handler's rt_sigprocmask persists past sigreturn;
+   Linux restores uc_sigmask). Permissive-direction divergences; one small
+   chunk + a probe leg. Also `pty.tla` CookSignal echoes the signal char while
+   neither ldisc does -- spec vs impl on one arm, decide at the next PTY touch.
+   VOTE-FREE (POSIX fidelity, permissive direction) -- the next chunk while the
+   #237 / socktab votes are pending.
+8. **R5-F9 under the phenotype -- TO VERIFY** (`memory/bug_r5f9_longjmp_wedge_
+   phenotype_exposure.md`): busybox ash's `raise_interrupt` longjmps OUT of the
+   SIGINT handler when interrupts are enabled (dash lineage; it unmasks all
+   signals first, so the mask is fine), and the kernel-side `in_handler` latch
+   then never clears -- registered v1.x against pouch programs, but the
+   phenotype population is every musl-static shell. One VM experiment settles
+   it (^C at the prompt / inside `read` / inside `wait`, then ^C a job); if
+   real, a P1 for interactive phenotype shells that needs an abandoned-frame
+   rule or a per-thread stack of save blocks (design; vote).
 
 ---
 

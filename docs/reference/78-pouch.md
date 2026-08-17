@@ -1486,7 +1486,7 @@ makes the unpatched upper wrappers work:
 | Request | Translation |
 |---|---|
 | `TCGETS` | read `/dev/pts/<n>ctl`, parse the five ± tokens → synthesize `struct termios` (the fixed cc trio `VINTR=^C VQUIT=^\ VSUSP=^Z`, `VERASE=DEL`, `VMIN=1`) |
-| `TCSETS`/`SW`/`SF` | decompose the five honored flags (`ICANON`/`ECHO`/`ISIG`; `ICRNL`; `OPOST`+`ONLCR`) → one atomic ctl mode write (the PTY-2c grammar is TCSAFLUSH-flavored) |
+| `TCSETS`/`SW`/`SF` | decompose the five honored flags (`ICANON`/`ECHO`/`ISIG`; `ICRNL`; `OPOST`+`ONLCR`) → one atomic ctl mode write (the PTY-2c grammar behaves like `TCSANOW` since 2026-08-17: a write clearing ICANON delivers the pending line, nothing is flushed -- `TCSETSF`'s flush half has no spelling; PTY-DESIGN "Mode writes deliver, never discard") |
 | `TIOCGWINSZ` / `TIOCSWINSZ` | the ctl `winsize <cols> <rows>` op (note the col/row order inversion vs `struct winsize`) |
 | `TIOCGPTN` | the fstat qid decode (`PTS_FLAG\|N<<8\|fk`); master-only |
 | `TIOCSPTLCK` | no-op 0 on a master (pts pairs are born unlocked — the mint IS the grant) |
@@ -1567,8 +1567,10 @@ The joey boot-fatal probe (the first POSIX `openpty()` program
 Thylacine runs): mint → ptsname → isatty trio → the fresh-pts FULL
 COOKED default → cfmakeraw round-trip → winsize → the session dance
 (`setsid`+`TIOCSCTTY`+`tc[gs]etpgrp`) → a LIVE cooked `^C` (SIGINT
-handler fires; the `0x03` is consumed — the slave line reads `xy\n`,
-the echo carries no `^C`: SignalXorByte through the POSIX view) →
+handler fires; the `0x03` is consumed AND discards the pending `x` — the
+slave line reads `y\n` (POSIX NOFLSH-clear; PTY-DESIGN "ISIG characters
+DISCARD the pending line", 2026-08-17 — it read `xy\n` before), the echo
+carries no `^C`: SignalXorByte through the POSIX view) →
 live WINCH + HUP handlers → the EPERM receive-only gate → `forkpty`
 honest-fail → master close → slave EOF (drain-then-EOF).
 
@@ -1589,9 +1591,12 @@ honest-fail → master close → slave EOF (drain-then-EOF).
   prosecutors converged) the controlling-terminal arms gained the
   `pts_resolve` ENOTTY pre-gate. All three fixed in-patch.
 - **Deferred with signoff** (kernel ABI-semantics changes, deliberately
-  not landed): the NDFLT-stop arm for `tty:susp` (makes SIG_DFL `^Z`
-  actually stop a pouch program — see `83-pouch-signals.md`), and the
-  `SYS_POSTNOTE` pgrp arm (`kill(-pgrp)`).
+  not landed at PTY-3): the NDFLT-stop arm for `tty:susp` (makes SIG_DFL
+  `^Z` actually stop a pouch program) and the `SYS_POSTNOTE` pgrp arm
+  (`kill(-pgrp)`). **The first has since LANDED** — #15 made
+  `SYS_NOTED(NDFLT)` per-note rather than always-terminate, and patch
+  0021's SIG_DFL branch now routes `SIGTSTP` to NDFLT; see
+  `83-pouch-signals.md`. The `kill(-pgrp)` arm is still open (task #16).
 
 ## The FS/process wires — `0024-pouch-fs-process-wires.patch` (Clade CL-1a)
 

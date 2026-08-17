@@ -6,9 +6,11 @@ is the **Loom arc** (`docs/LOOM.md`); the graphics half (virtio-gpu scanout +
 the canonical scripture; it is folded from the auxiliary-track design notes +
 native proof-of-concept (`usr/apps/TAPESTRY-DESIGN.md` + `usr/apps/libtapestry`
 + `usr/apps/tapestry-demo`, authored on `aux/userspace-apps`), elevated here to
-binding form with the Loom-arc integration made precise. The POC compiles
-(the auxiliary track never boots); the kernel-side pieces are the main track's
-to build.
+binding form with the Loom-arc integration made precise. **That sentence is
+provenance, not a location** — the POC was PROMOTED into the main tree
+(`usr/lib/libtapestry` + `usr/tapestry-demo`) and the original paths no longer
+exist. It runs; the "compiles but never boots" caveat this paragraph used to
+carry was overtaken by the promotion and is corrected in section 11.
 
 Tapestry is the answer to "what is Loom *for*, beyond files?" — the concrete
 consumer that shapes Loom-5 (multishot) and Loom-6 (registered buffers + the
@@ -246,8 +248,10 @@ code sitting in their own tree.
 
 All four are Cargo workspace members in `usr/Cargo.toml`. The `MockLoom` seam is
 gone — the real backend was wired at `5f2217f6` ("wire the real Loom backend
-(RingLoom) after merging main"), so the one-line handoff this section described
-as pending is done. And `usr/tapestry-demo` is now the end-to-end liveness
+(RingLoom) after merging main"): `lib.rs` imports the ring directly
+(`use libthyla_rs::loom::{Cqe, Ring, RegisteredBuffer, Sqe, ENTER_GETEVENTS}`),
+so the one-line handoff this section described as pending is done, and the
+prediction held — `Display` / `Tapestry` were unchanged by the swap. And `usr/tapestry-demo` is now the end-to-end liveness
 witness for the whole G-2/G-3 path (private `/srv/tapestry` session -> surface
 mint -> `SYS_WEFT_MAP` -> present), verified by `tools/screendump.sh -v`:
 "never booted" is exactly backwards.
@@ -1399,9 +1403,10 @@ dual-refcount addition.
   I-29/I-30, §10 the sub-chunk decomposition Tapestry shapes).
 - `docs/NOVEL.md` §3.2 (Angle #2, BURROW zero-copy drivers) + §3.3 (Angle #3,
   pipelined 9P client) + §3.4 (Angle #4, Halcyon).
-- The auxiliary-track design notes + POC this scripture was folded from. Those
-  `usr/apps/*` paths no longer exist: the design notes became THIS document, and
-  the code was promoted to `usr/lib/libtapestry` + `usr/tapestry-demo` (section 11).
+- `usr/lib/libtapestry` + `usr/tapestry-demo` (the POC this scripture was
+  folded from, at its PRESENT paths -- promoted off the auxiliary track, where
+  it lived under `usr/apps/` alongside a `TAPESTRY-DESIGN.md` that no longer
+  exists; corrected 2026-08-16, aux#237).
 - `usr/virtio-gpu` (the controlq probe; the scanout half is the graphics-phase
   unblock item) + `irq-bench` (the present IRQ-cost budget).
 - `ARCHITECTURE.md` §28 (where T-1 reserves a number when the graphics phase

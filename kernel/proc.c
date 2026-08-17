@@ -54,6 +54,19 @@
 #include "../arch/arm64/uart.h"
 #include "../mm/slub.h"
 
+// Declared here rather than by including <thylacine/vivarium.h> ON PURPOSE.
+// `struct viv_sigtab` stays INCOMPLETE in this file (proc.h forward-declares
+// it), so proc.c can hold the pointer and hand it to vivarium.c but cannot
+// reach into the layout -- which is what keeps exec's disposition reset a
+// single call to the owning module instead of a field walk that drifts from it.
+// The three are the phenotype's fork/exec signal-state rule (ARCH 7.6, POSIX):
+// rfork copies the table (viv_sigtab_clone_into: the child gets its OWN
+// table, or NULL when the parent has none), execve resets CAUGHT rows only
+// (viv_sigtab_reset_caught: SIG_IGN survives), and the native full reset stays.
+void viv_sigtab_reset(struct viv_sigtab *tab);
+void viv_sigtab_reset_caught(struct viv_sigtab *tab);
+int  viv_sigtab_clone_into(struct Proc *child, const struct Proc *parent);
+
 static struct kmem_cache *g_proc_cache;
 static struct Proc       *g_kproc;
 // 2B-F3: init (joey, the first user Proc) -- the orphan-adopter per ARCH
@@ -696,10 +709,23 @@ void proc_free(struct Proc *p) {
     p->debug_hw = NULL;
 
     // VIVARIUM V-6b: release the per-Proc Linux signal dispositions. Same
-    // discipline as debug_hw -- freed ONLY here at reap, so the EL0-return-tail
-    // reader (notes_deliver_at_el0_return) can never see it disappear under a
-    // live thread: every thread of `p` was reaped and on_cpu-spun before
-    // proc_free runs, so no CPU is inside a delivery for this Proc.
+    // discipline as debug_hw, and since #254 this is the ONLY free -- exec
+    // resets the table in place rather than freeing it, precisely so that the
+    // pointer is stable for the whole life of the Proc.
+    //
+    // State the safety over the READER SET, not over one reader: the table is
+    // read lock-free by threads of `p` (the EL0-return delivery tail) AND from
+    // other Procs' CPUs (notes_post's SIG_IGN hook, notes_arm_intr_terminate_
+    // locked, the ^Z fan's disposition gate). Naming only the first is what
+    // made exec's free look safe for as long as it did.
+    //
+    // Sound here for a reason that covers both, and that no future reader can
+    // fall outside of: this frees a field of a Proc that is ITSELF being freed.
+    // A cross-Proc reader must hold `p` to reach `p->sigtab`, so any caller
+    // that could observe this free already has a dangling Proc -- a Proc
+    // lifetime violation, which is a different and louder bug. The intra-Proc
+    // half is bounded too (every thread was reaped and on_cpu-spun before
+    // proc_free runs, so no CPU is inside a delivery for this Proc).
     kfree(p->sigtab);
     p->sigtab = NULL;
 
@@ -999,30 +1025,37 @@ static void proc_reparent_children(struct Proc *p) {
         // Rare + notable by construction: Thylacine has no daemonize idiom (joey
         // spawns its servers directly), so an adoption means some Proc exited
         // with a live child, and a kproc-adopted one never gets reaped at all.
-        // #126: this goes through the TX RING (cons_diag_*), NEVER the direct
-        // uart_* path. uart_putc's #67 bound is 20 ms PER BYTE, and this line is
-        // ~90 bytes emitted back-to-back while holding g_proc_table_lock -- which
-        // proc.c takes irqsave 40 times and plain 0 times. So against a stalled
-        // host consumer the direct path held the GLOBAL process-table lock
-        // IRQ-masked for ~1.8 s per adoption: precisely the interrupt-dead stall
-        // #67's bound was introduced to prevent, reconstituted by iterating it.
-        // A per-item bound is not a per-operation bound. cons_diag_* never spins
-        // and never sleeps (leaf locks only, woken outside), so this emit costs a
-        // bounded handful of MMIO accesses however stalled the console is -- and
-        // it reaches the framebuffer console too (#76), which uart_* does not.
-        // name[] is always NUL-terminated (proc_set_name) and "" on a
-        // never-exec'd Proc.
-        cons_diag_puts("proc: orphan pid=");
-        cons_diag_putdec((u64)c->pid);
-        cons_diag_puts(" name=\"");
-        cons_diag_puts(c->name);
-        cons_diag_puts("\" (parent pid=");
-        cons_diag_putdec((u64)p->pid);
-        cons_diag_puts(" name=\"");
-        cons_diag_puts(p->name);
-        cons_diag_puts("\" exiting) -> adopted by pid=");
-        cons_diag_putdec((u64)adopter->pid);
-        cons_diag_puts("\n");
+        // #126: this goes through the TX RING (the cons_diag_line API), NEVER
+        // the direct uart_* path. uart_putc's #67 bound is 20 ms PER BYTE, and
+        // this line is ~90 bytes emitted back-to-back while holding
+        // g_proc_table_lock -- which proc.c takes irqsave 40 times and plain 0
+        // times. So against a stalled host consumer the direct path held the
+        // GLOBAL process-table lock IRQ-masked for ~1.8 s per adoption:
+        // precisely the interrupt-dead stall #67's bound was introduced to
+        // prevent, reconstituted by iterating it. A per-item bound is not a
+        // per-operation bound. The line never spins and never sleeps (leaf
+        // locks only, woken outside), so this emit costs a bounded handful of
+        // MMIO accesses however stalled the console is -- and it reaches the
+        // framebuffer console too (#76), which uart_* does not. And it is ONE
+        // push (ARCH 23.5.2 "UNIT ATOMICITY"): the per-token predecessor pushed
+        // each byte under its own hold, and warden's exit burst of these lines
+        // interleaved byte-for-byte with tapestryd's posture line on another
+        // CPU (`ttaappeessttrryydd`, thyla-pi). name[] is always NUL-terminated
+        // (proc_set_name) and "" on a never-exec'd Proc.
+        struct cons_diag_line dl;
+        cons_diag_line_init(&dl);
+        cons_diag_line_puts(&dl, "proc: orphan pid=");
+        cons_diag_line_putdec(&dl, (u64)c->pid);
+        cons_diag_line_puts(&dl, " name=\"");
+        cons_diag_line_puts(&dl, c->name);
+        cons_diag_line_puts(&dl, "\" (parent pid=");
+        cons_diag_line_putdec(&dl, (u64)p->pid);
+        cons_diag_line_puts(&dl, " name=\"");
+        cons_diag_line_puts(&dl, p->name);
+        cons_diag_line_puts(&dl, "\" exiting) -> adopted by pid=");
+        cons_diag_line_putdec(&dl, (u64)adopter->pid);
+        cons_diag_line_puts(&dl, "\n");
+        cons_diag_line_emit(&dl);
         // #65 (I-32): reparent splices directly (no proc_link/unlink_child), so
         // rebase both counts to keep child_count == list length. p is dying
         // (its count is about to vanish) but track it symmetrically anyway.
@@ -1354,28 +1387,15 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // no fork can walk a Proc INTO a non-default ABI -- only exec-under-a-
     // vivarium sets it in the first place.
     child->phenotype      = parent->phenotype;
-    // #102 F7, the seam this line's own reasoning opens: the phenotype crosses
-    // the fork but the SIGNAL DISPOSITIONS do not. `child->sigtab` stays NULL,
-    // which reads as all-SIG_DFL, so a forked Linux child would silently lose
-    // every handler and every SIG_IGN its parent installed -- POSIX fork(2)
-    // inherits both. (execve(2) is the different rule, and also unimplemented:
-    // it resets CAUGHT dispositions to SIG_DFL and PRESERVES ignored ones, so
-    // whoever builds process creation needs two behaviours here, not one.)
-    //
-    // REACHABLE SINCE LINEAGE L-3d, and this paragraph used to claim the
-    // opposite: "UNREACHABLE at v1.0 ... no clone/fork/execve number is a table
-    // row, so a PHENO_LINUX Proc cannot create another Proc at all." True when
-    // written (#102 F7), FALSE the moment clone became a VIV_TIER2 row. A
-    // forked Linux child now really does lose every handler and every SIG_IGN
-    // its parent installed.
-    //
-    // STILL NOT FIXED HERE, for the reason the original text itself gave:
-    // execve(2) needs the OPPOSITE rule (reset CAUGHT dispositions to SIG_DFL,
-    // PRESERVE ignored ones), so this is two behaviours and a design decision
-    // rather than a copy -- and the sigtab is on the V-6 audit surface.
-    // Exposure is narrow: the only clone shape vivarium_clone_decide admits is
-    // vfork-then-exec, and musl's posix_spawn child resets its own dispositions
-    // before exec'ing. Task #127; it lands with execve and wait4 at L-6.
+    // #102 F7 / task #127: the phenotype crosses the fork and, since the
+    // fork/exec signal-state rule (2026-08-17, ARCH 7.6), so do the SIGNAL
+    // DISPOSITIONS and the caller's note_mask -- copied further down, once the
+    // child's table and thread exist. The two behaviours the original comment
+    // asked for are both specified now: fork copies everything (POSIX fork(2));
+    // execve resets CAUGHT rows to SIG_DFL and PRESERVES ignored ones (POSIX
+    // execve(2); proc_exec_drop_image_state). Before this a forked Linux child
+    // read all-SIG_DFL with an empty mask (`trap '' PIPE; cmd | head` handed
+    // cmd a SIG_DFL SIGPIPE), and the exec image lost SIG_IGN and the mask.
     //
     // THE SINGLE-THREADEDNESS THIS PARAGRAPH USED TO BUY SURVIVES, ON DIFFERENT
     // GROUNDS -- and notes.c leans on it for the sigtab tearing argument, so
@@ -1461,6 +1481,23 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
         return -1;
     }
 
+    // POSIX fork(2) for the PHENOTYPE (task #127; the fork/exec signal-state
+    // rule, ARCH 7.6): the child inherits every signal disposition -- caught
+    // and ignored -- in a table of its OWN, so the immortal-per-Proc lifetime
+    // that keeps the lock-free cross-Proc readers safe (#254) is unchanged. A
+    // NULL parent table is all-SIG_DFL and leaves the child's NULL. Native
+    // Procs: nothing crosses rfork (the handler_va precedent). On OOM
+    // child->sigtab stays NULL and proc_free's kfree is a clean no-op (the
+    // allowance/env discipline above); the fork fails rather than producing a
+    // child with the wrong dispositions. The mask half is copied onto the child
+    // thread below, once it exists.
+    if (parent->phenotype == PHENO_LINUX &&
+        viv_sigtab_clone_into(child, parent) != 0) {
+        child->state = PROC_STATE_ZOMBIE;
+        proc_free(child);
+        return -1;
+    }
+
     // P5-hostowner-a: child->proc_flags stays 0 (KP_ZERO from
     // proc_alloc) — deliberately NOT copied from the parent. In
     // particular PROC_FLAG_CONSOLE_ATTACHED is never conferred by
@@ -1525,6 +1562,50 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
         child->state = PROC_STATE_ZOMBIE;
         proc_free(child);
         return -1;
+    }
+    // POSIX fork(2), the mask half (the phenotype only): the child's thread
+    // starts with the CALLING thread's note_mask. Written before ready() -- the
+    // child has not run, so no reader can race the plain store; the mask is
+    // owner-written thereafter (rt_sigprocmask). Native keeps a zero mask (the
+    // rfork rule).
+    if (parent->phenotype == PHENO_LINUX) {
+        ct->note_mask = t->note_mask;
+        // And the HANDLER-EXECUTION SNAPSHOT (the d3a11c8e round's F1): this
+        // design keeps the interrupted user context KERNEL-side -- the sigframe
+        // the guest sees is written for reading, and rt_sigreturn restores from
+        // the per-Thread save block (notes_noted_restore) -- so a fork() issued
+        // from INSIDE a signal handler (async-signal-safe, POSIX-permitted)
+        // produces a child whose user stack says "in a handler" while a
+        // KP_ZERO child thread says "not". Its handler return would then be
+        // refused (-1 from rt_sigreturn) and the child would run on past the
+        // svc into whatever follows the restorer -- silent UB under musl's
+        // __restore_rt. On Linux the frame lives on the (copied) user stack and
+        // the child simply returns to the interruption point; here the block IS
+        // that frame's other half, so it crosses the fork with the mask. The
+        // child's own trap frame (x0 = 0, the fork return) is untouched -- this
+        // is the PRE-handler context it resumes at after its sigreturn. The
+        // fork+exec / fork+_exit shapes were already fine (exec clears the
+        // block, #247; _exit never returns); the flag is written last, once the
+        // block is whole. Native: a Plan 9 child is not notified (sysrfork), and
+        // no native handler crosses rfork either (the handler_va precedent).
+        //
+        // The list below is EVERYTHING notes_noted_restore reads -- the round's
+        // lesson was that a copy rule written from the standard's field list
+        // misses the fields the implementation added; a field added to the
+        // restore is added here in the same commit (note_saved_mask, the
+        // pre-handler mask the child's own sigreturn puts back).
+        if (t->in_handler) {
+            for (u32 i = 0; i < 31u; i++) ct->note_saved_regs[i] = t->note_saved_regs[i];
+            ct->note_saved_sp_el0 = t->note_saved_sp_el0;
+            ct->note_saved_elr    = t->note_saved_elr;
+            ct->note_saved_spsr   = t->note_saved_spsr;
+            ct->note_saved_mask   = t->note_saved_mask;
+            for (u32 i = 0; i < sizeof(ct->note_saved_fp); i++)
+                ct->note_saved_fp[i] = t->note_saved_fp[i];
+            for (u32 i = 0; i < sizeof(ct->note_handling_name); i++)
+                ct->note_handling_name[i] = t->note_handling_name[i];
+            ct->in_handler = true;
+        }
     }
 
     // P3-A: link child into parent's children list under the proc-table
@@ -2620,7 +2701,7 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
     // NULL case is latent. But the function downstream passes `name`
     // to the console emit and to exits (which strcmp's against "ok").
     // A NULL passed in via a future caller bug would NULL-deref the
-    // kernel from the console layer -- cons_diag_puts happens to guard
+    // kernel from the console layer -- cons_diag_line_puts happens to guard
     // NULL, but exits' strcmp does not, so the guard stays load-bearing.
     // Cheap to guard here; matches the surrounding extinction-on-
     // contract-violation pattern.
@@ -2663,26 +2744,30 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
     // CLASS: a steady-state, EL0-reachable diagnostic on the direct uart_* path,
     // where the #67 bound is 20 ms PER BYTE, so a stalled host consumer made a
     // ~100-byte line cost seconds on a fault path reached with IRQs masked. It
-    // was also invisible to the framebuffer console (#76). cons_diag_* fixes
-    // both, and keeps this file's emits on one sanctioned path.
-    cons_diag_puts("user fault: pid=");
-    cons_diag_putdec((u64)p->pid);
-    cons_diag_puts(" reason=\"");
-    cons_diag_puts(name);
-    cons_diag_puts("\" addr=");
-    cons_diag_puthex64((u64)faulting_addr);
+    // was also invisible to the framebuffer console (#76). The cons_diag_line
+    // API fixes both, keeps this file's emits on one sanctioned path, and lands
+    // the line as ONE push (ARCH 23.5.2 "UNIT ATOMICITY").
+    struct cons_diag_line dl;
+    cons_diag_line_init(&dl);
+    cons_diag_line_puts(&dl, "user fault: pid=");
+    cons_diag_line_putdec(&dl, (u64)p->pid);
+    cons_diag_line_puts(&dl, " reason=\"");
+    cons_diag_line_puts(&dl, name);
+    cons_diag_line_puts(&dl, "\" addr=");
+    cons_diag_line_puthex64(&dl, (u64)faulting_addr);
     // The faulting EL0 PC (+ lr): debug_trapframe is recorded at the
     // EL0-sync entry choke point (#88), so on this path -- reached only
     // from an EL0 exception -- it names the fault frame. A static
     // non-PIE pouch binary's PC symbolizes directly against its ELF;
     // without this line every userspace segv is a blind addr.
     if (t->debug_trapframe) {
-        cons_diag_puts(" pc=");
-        cons_diag_puthex64(t->debug_trapframe->elr);
-        cons_diag_puts(" lr=");
-        cons_diag_puthex64(t->debug_trapframe->regs[30]);
+        cons_diag_line_puts(&dl, " pc=");
+        cons_diag_line_puthex64(&dl, t->debug_trapframe->elr);
+        cons_diag_line_puts(&dl, " lr=");
+        cons_diag_line_puthex64(&dl, t->debug_trapframe->regs[30]);
     }
-    cons_diag_puts(" -- terminating Proc\n");
+    cons_diag_line_puts(&dl, " -- terminating Proc\n");
+    cons_diag_line_emit(&dl);
 
     exits(name);
     /* UNREACHABLE -- exits is noreturn (single-thread: sched; multi-thread:
@@ -3046,15 +3131,99 @@ bool proc_exec_alone(struct Proc *p) {
     return alone;
 }
 
-// POSIX's exec disposition reset, split out from proc_exec_replace so the
-// memory-safety half can be tested: the semantic half is INVISIBLE to any
-// behavioural test, because a NULL table and an all-default table both read as
-// "everything at SIG_DFL". Freeing versus resetting differs only in whether a
-// pointer another CPU is holding stays valid, so that is what the test asserts.
-void proc_exec_reset_dispositions(struct Proc *p) {
-    if (!p) return;
+// The note-side half of "drop everything that names the OUTGOING image",
+// factored out of proc_exec_replace so it can be driven directly by a test --
+// the exec path itself cannot be, since it demands current_thread()->proc == p
+// and performs a real TTBR0 swap. Its caller supplies the single-live-thread
+// guarantee (proc_exec_alone, re-checked under the lock at the swap); nothing
+// here re-establishes it.
+//
+// Keep this the ONE place the note-side reset happens. Splitting it -- an
+// in_handler clear here and a mask clear at the call site, say -- is how the
+// next field gets missed, which is exactly how #247 happened.
+static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self) {
     __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
-    viv_sigtab_reset(__atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE));
+
+    // VIVARIUM V-6b Linux dispositions, reset IN PLACE -- the table is NOT
+    // freed here (#254). It used to be, with the pointer NULLed, under no lock:
+    // g_proc_table_lock is released well above this, and `p->sigtab` is loaded
+    // and dereferenced from OTHER Procs' CPUs by notes_post's SIG_IGN hook, by
+    // notes_arm_intr_terminate_locked, and by the ^Z fan's disposition gate --
+    // all three take an arbitrary Proc. That made this a use-after-free read.
+    //
+    // The free's old justification named ONE reader ("notes_deliver_at_el0_
+    // return, which runs on a thread of THIS Proc") and concluded from
+    // proc_exec_alone that there was nobody else. The single-THREAD half was
+    // true; the single-READER half was not, and the gap is invisible from the
+    // free's own line. Resetting IN PLACE loses nothing (a reset row reads
+    // SIG_DFL by the SIG_DFL==0 argument in viv_sigtab_reset), so keeping the
+    // object alive costs nothing, and an immortal-per-Proc table is safe as
+    // the reader set GROWS rather than safe while everyone remembers a rule.
+    //
+    // A cross-Proc post racing this reset may observe either the old or the new
+    // disposition. That is not a defect: it is the same latitude POSIX gives a
+    // sigaction racing a signal already in flight, which proc.h's sigtab
+    // paragraph already states as the standing rule for this field.
+    //
+    // The reset table is indistinguishable from the kzalloc'd one viv_sigtab_of
+    // hands out ONCE SETTLED. "Once settled" is load-bearing: the reset is NOT
+    // a snapshot -- a lock-free reader on another CPU can see an arbitrary mix
+    // of pre- and post-reset entries. That mix is sound (POSIX leaves the
+    // exec-vs-signal race undefined and every entry it sees was either
+    // genuinely installed or the default), but it is a per-FIELD guarantee,
+    // not a whole-table one, and it holds only because viv_sigtab_reset writes
+    // 8-byte fields rather than bytes -- see its comment: the earlier byte
+    // loop compiled to halfword stores and could publish a handler nobody
+    // wrote.
+    //
+    // WHAT resets is phenotype-conditional (the fork/exec signal-state rule,
+    // ARCH 7.6, 2026-08-17). POSIX execve(2): "signals set to be caught ...
+    // shall be set to the default action; ... signals set to be ignored shall
+    // be set to be ignored by the new process image; ... the signal mask is
+    // inherited." So a PHENO_LINUX image keeps its SIG_IGN rows and its
+    // note_mask (nohup, a non-interactive `cmd &` whose SIGINT/SIGQUIT the
+    // shell ignored before exec, `trap '' INT; exec prog` all depend on it) and
+    // resets only the caught rows. The sentence this used to carry -- "Zeroing
+    // is exact POSIX" -- was true of the caught rows and false of the rest. A
+    // native Proc keeps the Plan 9 rule: everything clears.
+    if (p->phenotype == PHENO_LINUX) {
+        viv_sigtab_reset_caught(p->sigtab);
+    } else {
+        viv_sigtab_reset(p->sigtab);
+        self->note_mask = 0u;
+    }
+
+    // #247: and the in-handler LATCH, which the reset above missed until it was
+    // audited. It is not a disposition, so it does not read as one -- but
+    // notes_deliver_at_el0_return returns early on it, ABOVE both the phenotype
+    // and handler_va branches, so a thread that execs from inside a note handler
+    // carries the latch into the new image and that image never receives another
+    // note. `kill` is the one exception, checked above the gate (the R2-F7 fix),
+    // which is the only reason this was a deafness bug rather than an
+    // unkillable-process bug.
+    //
+    // exec from a handler is an ordinary shape, not a contrivance: execve is
+    // async-signal-safe and "catch the hangup, re-exec myself" is the standard
+    // supervisor idiom.
+    //
+    // Clearing this ONE flag is the whole fix -- note_handling_name and the
+    // note_saved_* block are unreachable while in_handler is false (the
+    // invariant notes_noted_restore states when it deliberately leaves the name
+    // buffer intact), so they need no separate scrub.
+    self->in_handler = false;
+}
+
+// Test hook (the *_for_test convention; deliberately absent from the header --
+// the harness extern-declares it and there is no production caller). The
+// precondition is unenforced here and therefore stated: `p` must have no live
+// thread but `t` -- exec establishes that (proc_exec_alone, re-checked under
+// g_proc_table_lock at the swap); the table is written without a lock, so
+// driving this on a RUNNING Proc would interleave a whole-table reset with that
+// Proc's own viv_sigtab_set. The test drives it on a Proc it built and never
+// scheduled.
+void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t);
+void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t) {
+    proc_exec_drop_image_state(p, t);
 }
 
 void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
@@ -3126,37 +3295,11 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     // (an inherited handler would be an address in an image that no longer
     // exists). The note QUEUE survives -- pending notes are the process's, not
     // the image's -- and so does the fd-shaped delivery path; only the
-    // registered handler entry points go.
-    //
-    // RESET IN PLACE, NEVER FREE. The table has readers on OTHER CPUs holding
-    // no lock of ours: notes_post's SIG_IGN hook (which sits above that
-    // function's q->lock and returns before taking it) and
-    // notes_proc_has_live_handler both load ->sigtab with a bare acquire. And
-    // notes_post is reached with somebody ELSE as its target on every call --
-    // child_exit to the parent, SYS_POSTNOTE, the pgrp fan, the console
-    // interrupt, TTY hup. So a kfree here is a use-after-free: that CPU loads
-    // the pointer, this one frees it, that one dereferences freed slab.
-    //
-    // proc_exec_alone bounds the THREADS of this Proc, which is what keeps the
-    // same-Proc paths (EL0-return delivery, rt_sigaction) safe. It says nothing
-    // whatever about other PROCS -- and that is the half the comment previously
-    // standing here got wrong when it claimed a single reader.
-    //
-    // The reset table is indistinguishable from the kzalloc'd one viv_sigtab_of
-    // hands out ONCE SETTLED, so the dispositions really are back to default;
-    // the allocation simply lives until reap, which is the lifetime it had
-    // before V-6b moved the free forward to exec.
-    //
-    // "Once settled" is load-bearing and was missing here. The reset is NOT a
-    // snapshot: a lock-free reader on another CPU can see an arbitrary mix of
-    // pre- and post-reset entries. That mix is sound -- POSIX leaves the
-    // exec-vs-signal race undefined and every entry it sees was either genuinely
-    // installed or the default -- but it is a per-FIELD guarantee, not a
-    // whole-table one, and it holds only because viv_sigtab_reset writes
-    // 8-byte fields rather than bytes. See its comment: the earlier byte loop
-    // compiled to halfword stores and could publish a handler nobody wrote.
-    proc_exec_reset_dispositions(p);
-    self->note_mask = 0u;
+    // registered handler entry points go. The sigtab is reset IN PLACE, never
+    // freed here (#254: cross-Proc readers reach `p->sigtab` lock-free, so the
+    // object is immortal per Proc; proc_free is the only free), and WHAT resets
+    // is phenotype-conditional -- both live in proc_exec_drop_image_state.
+    proc_exec_drop_image_state(p, self);
 
     // L-7 F2: hardware breakpoints and watchpoints are addresses in the OLD
     // image, for exactly the reason the handler entry points above are. Nothing
@@ -3667,6 +3810,15 @@ static bool proc_job_stop_one_locked(struct Proc *m) {
 // only the resume machinery is stop-gated).
 static void proc_job_resume_one_locked(struct Proc *m) {
     if (!m || m->magic != PROC_MAGIC) return;
+    // #240: BEFORE the not-stopped early return, never after. A cont aimed at
+    // a target that has NOT yet stopped is not a no-op -- it is the whole
+    // defect. Post-#15 a susp routed to a handler leaves a stop decision in
+    // flight for the length of an EL0 handler; a cont arriving in that window
+    // (the pts teardown's hup-then-cont, the PTY-1 close's named carrier-loss
+    // rescue) finds job_stop_req still 0 and would fall out below, after which
+    // SYS_NOTED(NDFLT) applies the stop the cont was meant to cancel and the
+    // job strands. Disarming here is what the cont means in that state.
+    __atomic_store_n(&m->susp_stop_armed, 0u, __ATOMIC_RELEASE);
     if (__atomic_load_n(&m->job_stop_req, __ATOMIC_ACQUIRE) == 0) return;
     // Clear BEFORE the wake walk (the I-9 register-then-observe close on the
     // CLEAR -- proc_debug_resume's discipline verbatim, on the job owner).
@@ -3685,11 +3837,26 @@ static void proc_job_resume_one_locked(struct Proc *m) {
 // The tty:susp catchability gate (round-2 R2-F3; the LS-5
 // notes_interrupt_should_terminate_locked analog, evaluated at POST time
 // because the stop -- unlike the terminate -- is applied post-side, not at
-// the tail): the default STOP fires only when the target has no async
-// handler, is not self-managing (no notes fd -- it would read + act on the
-// susp itself), and at least one thread leaves NOTE_BIT_TTY unmasked (the
-// POSIX any-thread-unblocked delivery shape; all-masked defers to a
-// note-only post). handler_va / proc_flags are read lock-free -- a handler
+// the tail): the default STOP fires only when the target's disposition IS the
+// default (notes_proc_default_applies -- no native handler, and for a
+// phenotyped Proc no sigtab handler and no SIG_IGN either), is not
+// self-managing (no notes fd -- it would read + act on the susp itself), and
+// at least one thread leaves NOTE_BIT_TTY unmasked (the POSIX
+// any-thread-unblocked delivery shape; all-masked defers to a note-only post,
+// whose stop is then applied at delivery -- see the NOTE_DFL_STOP arm in
+// notes_deliver_at_el0_return).
+//
+// The disposition test is DELEGATED rather than spelled here, and that is the
+// whole point of the round-2 F1 fix: this function used to load handler_va
+// directly, which reads a Linux guest -- whose SIGTSTP disposition lives in
+// the sigtab with handler_va at 0 -- as having no disposition at all. Both a
+// phenotype handler and a phenotype SIG_IGN were therefore stopped. The
+// sibling site (notes_arm_intr_terminate_locked) had already been corrected
+// for exactly this at V-8 F2; this one was missed because the fix existed
+// there. Route every disposition question through the shared predicate so a
+// third site cannot repeat it.
+//
+// handler_va / proc_flags are read lock-free -- a handler
 // registered concurrently with the decision orders before-or-after it,
 // indistinguishable from the signal arriving a moment earlier (the POSIX
 // signal race; the LS-5c latch coherence concern does not apply since no
@@ -3697,7 +3864,7 @@ static void proc_job_resume_one_locked(struct Proc *m) {
 // g_proc_table_lock; note_mask is owner-written (SYS_NOTE_MASK), so the
 // cross-thread load is the same benign-race read, made explicit atomic.
 static bool proc_tty_susp_would_stop_locked(struct Proc *m) {
-    if (__atomic_load_n(&m->handler_va, __ATOMIC_ACQUIRE) != 0) return false;
+    if (!notes_proc_default_applies(m, NOTE_NAME_TTY_SUSP)) return false;
     if (proc_is_self_managing_notes(m)) return false;
     for (struct Thread *th = m->threads; th; th = th->next_in_proc) {
         if ((__atomic_load_n(&th->note_mask, __ATOMIC_RELAXED) &
@@ -3866,6 +4033,49 @@ int proc_job_stop_pgrp(u32 pgid) {
     return ctx.affected;
 }
 
+// #15: the SELF stop -- SYS_NOTED(NDFLT) on a note whose default action is
+// STOP. Full contract in proc.h.
+//
+// This is proc_job_stop_pgrp's UNCAUGHT arm applied to one Proc, and it is
+// deliberately the same code rather than a lookalike: NDFLT means "do what
+// would have happened had no handler been installed", so any rule the
+// no-handler path applies must apply here too or the two spellings of "the
+// default" diverge.
+//
+// It keeps the ORPHAN rule and drops the CATCHABILITY gate, and both halves
+// matter. The orphan rule is kept because a stop nobody can resume is a hang
+// -- POSIX discards a stop signal for an orphaned group precisely because no
+// shell-shaped process remains to continue it, and a group already orphaned
+// when it stops never gets the hup+cont rescue that proc_become_zombie_locked
+// fires for a group orphaned LATER. The catchability gate
+// (proc_tty_susp_would_stop_locked) is dropped because it has already run and
+// already answered: it is what routed this note to the handler in the first
+// place. Re-asking it here would read `handler_va != 0`, conclude "caught",
+// and refuse the very stop the handler just asked for -- which is the ignore
+// behaviour #15 exists to remove.
+bool proc_job_stop_self(struct Proc *m) {
+    if (!m || m->magic != PROC_MAGIC) return false;
+    bool stopped = false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    // #240: the SECOND premise. The orphan re-check below covers the shell-
+    // DEATH variant of "nobody can resume this"; nothing covered carrier
+    // loss, where the shell is alive and the terminal is gone. Both are the
+    // same root property -- a disposition decided at POST is applied here,
+    // an EL0 handler later, and the world may have moved. Read under
+    // g_proc_table_lock, the same lock proc_job_resume_one_locked's clear
+    // runs under, so a cont cannot land between this load and the stop.
+    if (__atomic_load_n(&m->susp_stop_armed, __ATOMIC_ACQUIRE) != 0 &&
+        !pgrp_orphaned_locked(m->pgid, NULL))
+        stopped = proc_job_stop_one_locked(m);
+    // The peers, not the caller: this thread parks at its own EL0-return tail
+    // a few instructions from here, but a peer RUNNING at EL0 on another CPU
+    // only reaches its tail when something traps it. Sleeping peers were woken
+    // inside the one_locked helper.
+    if (stopped) smp_resched_others();
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return stopped;
+}
+
 // The tty:cont fan-out (SYS_TTY_CONT / the F8 teardown resume). Full
 // contract in proc.h.
 struct job_cont_ctx { u32 pgid; int visited; };
@@ -3893,8 +4103,19 @@ int proc_job_cont_pgrp(u32 pgid) {
 // group-global reschedule IPI (the F2 hoist) so a peer RUNNING at EL0 traps to its
 // stop checkpoint; CONT clears job_stop_req + wakes the parked threads
 // (proc_job_resume_one_locked, which does its own wake walk). Caller holds
-// g_proc_table_lock (devproc's proc_for_each). Idempotent (a second stop / a
-// cont-of-a-running Proc is a no-op via the one_locked guards).
+// g_proc_table_lock (devproc's proc_for_each). A second stop is idempotent via
+// the one_locked guard.
+//
+// A cont-of-a-RUNNING Proc is NO LONGER a no-op (round-2 F6). #240 moved the
+// susp_stop_armed clear ABOVE proc_job_resume_one_locked's `job_stop_req == 0`
+// early return -- deliberately, since a cont aimed at a not-yet-stopped target
+// is the whole case that fix exists for. The side effect reaches here: a
+// monitor that periodically writes `resume` to /proc/N/ctl, previously
+// harmless, now disarms any tty:susp decision in flight, so a user's ^Z on
+// that Proc silently does nothing. The behaviour is correct -- an explicit
+// resume SHOULD cancel a pending suspend -- but it is not idempotent, and the
+// comment that said so sat directly above the two functions a reader reasons
+// from.
 //
 // UNCONDITIONAL -- unlike the pts SIGTSTP fan (proc_job_stop_pgrp) there is NO
 // tty:susp/tty:cont note and NO catchability gate (proc_tty_susp_would_stop_-

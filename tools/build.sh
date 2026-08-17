@@ -445,7 +445,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -500,7 +500,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "tyr-glquake" "make" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "tyr-glquake" "make" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -1039,16 +1039,32 @@ VIVEOF
     # The second is not a convenience. MEASURED 2026-08-03: the minirootfs
     # contains exactly two ELF binaries (bin/busybox, sbin/apk) and BOTH are
     # ET_DYN PIE linked against /lib/ld-musl-aarch64.so.1 -- there is not one
-    # statically-linked file in the image. `kernel/elf.c` rejects ET_DYN
-    # (:83), PT_INTERP (:180) and PT_DYNAMIC (:185) by deliberate v1.0 policy,
-    # so the stock shell cannot load. Alpine's own busybox-static package is
-    # ET_EXEC with neither dynamic segment -- exactly the shape the loader
-    # accepts. See task #145 (dynamic linking) -- a separate deferred axis,
-    # NOT a LINEAGE gap.
+    # statically-linked file in the image.
     #
-    # /bin/sh is also a SYMLINK to /bin/busybox in the stock image, and the
-    # resolver does not follow symlinks (task #146), so the static binary is
-    # installed at BOTH paths as a real file rather than relinked.
+    # FULLY CLEARED as of DISTRO D-4 (2026-08-10). elf.c accepted neither
+    # ET_DYN nor PT_DYNAMIC when this was written; D-2 accepted both, and D-4
+    # made PT_INTERP dispatch to the interpreter instead of refusing -- so the
+    # stock dynamic busybox in this tarball IS runnable now, and the D4 legs in
+    # the gate script below prove it on a stock dynamic getconf named without
+    # its interpreter.
+    #
+    # busybox-static NEVERTHELESS STAYS the /bin/sh here, deliberately, and the
+    # reason is now blast radius rather than capability: /bin/sh is what every
+    # L6C-* leg runs through, so flipping it to the dynamic binary would make
+    # the entire leg list depend on D-4 and turn any D-4 hiccup into "the shell
+    # did not run" with no first-missing signal. Task #145 is closed by D-4.
+    #
+    # AND D-5 DID NOT FLIP IT. The flip was this comment's plan; D-5 measured the
+    # trade and rejected it, staging a SECOND bundle (/vivarium/alpine-stock,
+    # below) from the same tarball instead. Keeping the two apart is what buys
+    # the discrimination: a red stock gate beside a green L6C-A..I isolates the
+    # fault to the stock-dynamic path, where one flipped bundle would only have
+    # said "the shell did not run". The cost is a second 8.1 MiB pool copy.
+    #
+    # /bin/sh is also a SYMLINK to /bin/busybox in the stock image. D-1 made
+    # the resolver follow symlinks (task #146), but the static binary is still
+    # installed at BOTH paths as a real file: what /bin/sh must point AT here
+    # is the substitute, not the stock PIE the link names.
     local tarball="${THYLACINE_ALPINE_TARBALL:-}"
     if [[ -z "$tarball" ]]; then
         tarball="$(ls "$REPO_ROOT/build/cache"/alpine-minirootfs-*-aarch64.tar.gz 2>/dev/null | head -1 || true)"
@@ -1056,6 +1072,46 @@ VIVEOF
     local bbapk="${THYLACINE_BUSYBOX_STATIC_APK:-}"
     if [[ -z "$bbapk" ]]; then
         bbapk="$(ls "$REPO_ROOT/build/cache"/busybox-static-*.apk 2>/dev/null | head -1 || true)"
+    fi
+
+    # DISTRO D-5: both external inputs are sha256-PINNED.
+    #
+    # Discovery stays a GLOB on purpose. Pinning the filename instead would turn
+    # a wrong-version drop into "no tarball found" -- a silent hermetic skip of
+    # the arc gate, which is the failure mode this project keeps re-learning. A
+    # glob plus a hash check gives the three outcomes we actually want: absent is
+    # a skip (the default build stays hermetic), present-and-matching proceeds,
+    # and present-but-different is a LOUD build failure.
+    #
+    # A mismatch has to be fatal because every expected value downstream was
+    # derived from these exact bytes -- the D2/D3/D4 legs' output strings, and
+    # D-5's in-guest VERSION_ID assertion. A different image would quietly move
+    # what "PASS" means. To adopt one, change the pin here AND the stock bundle's
+    # VERSION_ID leg below, together, in one reviewable edit.
+    local alpine_sha="f31202c4070c4ef7de9e157e1bd01cb4da3a2150035d74ea5372c5e86f1efac1"
+    local bbapk_sha="6fd7ea97062beb51fa785ba858f823e1dfe4daf6bfa91ff4d5359b1061988c69"
+    local got_sha
+    if [[ -n "$tarball" && -f "$tarball" ]]; then
+        got_sha="$(shasum -a 256 "$tarball" | awk '{print $1}')"
+        if [[ "$got_sha" != "$alpine_sha" ]]; then
+            echo "==> viv bundles: Alpine minirootfs sha256 MISMATCH -- refusing to stage" >&2
+            echo "      file     $tarball" >&2
+            echo "      got      $got_sha" >&2
+            echo "      expected $alpine_sha (alpine-minirootfs-3.21.0-aarch64)" >&2
+            echo "    The gate legs' expected output was measured against the pinned image;" >&2
+            echo "    update the pin in tools/build.sh AND the stock bundle's VERSION_ID leg." >&2
+            exit 1
+        fi
+    fi
+    if [[ -n "$bbapk" && -f "$bbapk" ]]; then
+        got_sha="$(shasum -a 256 "$bbapk" | awk '{print $1}')"
+        if [[ "$got_sha" != "$bbapk_sha" ]]; then
+            echo "==> viv bundles: busybox-static apk sha256 MISMATCH -- refusing to stage" >&2
+            echo "      file     $bbapk" >&2
+            echo "      got      $got_sha" >&2
+            echo "      expected $bbapk_sha (busybox-static-1.37.0-r14)" >&2
+            exit 1
+        fi
     fi
     if [[ -n "$tarball" && -f "$tarball" ]]; then
         local ab="$vstage/alpine"
@@ -1097,8 +1153,46 @@ echo L6C-A-shell-runs
 sub=$(/bin/busybox echo captured); [ "$sub" = captured ] && echo L6C-F-substitution
 i=0; for w in a b c; do i=$(/bin/busybox expr $i + 1); done; [ "$i" = 3 ] && echo L6C-G-loop
 /bin/busybox sh -c '/bin/busybox echo nested' && echo L6C-H-nested-shell
+err=$( { /bin/busybox yes 2>&3 | /bin/busybox head -n 1 >&3; } 3>&1 ); [ "$err" = y ] && echo L6C-J-sigpipe-kills-silently
+err2=$( { { trap "" PIPE; i=0; while [ $i -lt 4000 ]; do echo yyyyyyyyyyyyyyyy || break; i=$((i+1)); done; } 2>&3 | /bin/busybox head -n 1 >&3; } 3>&1 ); case "$err2" in *"write error"*) echo L6C-K-sigign-epipe-message ;; esac
+echo L6C-K-RAW:$err2
+err3=$( { { i=0; while [ $i -lt 4000 ]; do echo yyyyyyyyyyyyyyyy || break; i=$((i+1)); done; } 2>&3 | /bin/busybox head -n 1 >&3; } 3>&1 ); [ "$err3" = yyyyyyyyyyyyyyyy ] && echo L6C-L-dfl-writer-killed-silently
 /bin/busybox false; echo L6C-I-exitcode=$?
+echo D2-LDSO-BEGIN
+/lib/ld-musl-aarch64.so.1 2>&1
+echo D2-LDSO-END-rc=$?
+ldso_out=$(/lib/ld-musl-aarch64.so.1 2>&1)
+case "$ldso_out" in *"Dynamic Program Loader"*) echo D2-A-stock-ldso-usage ;; esac
+case "$ldso_out" in *"musl libc (aarch64)"*) echo D2-B-stock-ldso-arch ;; esac
+echo D3-GETCONF-BEGIN
+/lib/ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE 2>&1
+echo D3-GETCONF-END-rc=$?
+d3_out=$(/lib/ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE 2>&1); d3_rc=$?
+[ "$d3_rc" = 0 ] && [ "$d3_out" = 4096 ] && echo D3-A-getconf-pagesize-4096
+echo D4-BYNAME-BEGIN
+/usr/bin/getconf PAGESIZE 2>&1
+echo D4-BYNAME-END-rc=$?
+d4_out=$(/usr/bin/getconf PAGESIZE 2>&1); d4_rc=$?
+[ "$d4_rc" = 0 ] && [ "$d4_out" = 4096 ] && echo D4-A-byname-getconf-4096
+d4b=$(/usr/bin/getconf 2>&1)
+echo D4-USAGE-RAW:$d4b
+case "$d4b" in "Usage: /usr/bin/getconf system_var"*) echo D4-B-argv0-is-the-program ;; esac
 echo L6C-DONE
+# #213 regression -- emitted AFTER L6C-DONE, on purpose, and asserted by joey on
+# the BYTE COUNT rather than a marker. joey's acc buffer is 2048 bytes, so
+# nothing past it is reachable to a marker check; the only honest assertion is
+# the counter. 16*8*8 = 1024 per $L, five of them = 5120 bytes, comfortably past
+# the 4096-byte pipe ring. Under a reap-before-drain joey the container blocks
+# in write() here on a full ring while joey waits for it to exit, and the boot
+# hangs -- which is the defect's true symptom. It lives in THIS bundle and not
+# the stock one for two reasons: this bundle is OURS (a mechanism gate, which is
+# what a pipe-drain regression is), and the stock bundle drives its script
+# through `sh -c`, whose whole string viv bounds at PATH_MAX=512 -- measured, it
+# had 81 bytes of headroom and this needs more. A script FILE has no such cap.
+L=0123456789abcdef
+L=$L$L$L$L$L$L$L$L
+L=$L$L$L$L$L$L$L$L
+echo $L$L$L$L$L
 GATEEOF
             chmod 0644 "$ab/rootfs/gate/run.sh"
             cat > "$ab/config.json" <<'VIVEOF'
@@ -1126,9 +1220,118 @@ VIVEOF
             echo "==> viv bundles: untar of $tarball FAILED -- Alpine bundle skipped" >&2
         fi
     else
-        echo "==> viv bundles: no Alpine minirootfs tarball -- Alpine bundle skipped (the ARC gate's fixture, not the V-7 probe gate's; set THYLACINE_ALPINE_TARBALL or drop one in build/cache/)"
+        echo "==> viv bundles: no Alpine minirootfs tarball -- Alpine + stock bundles skipped (the L-6c and DISTRO ARC gate fixtures, not the V-7 probe gate's; set THYLACINE_ALPINE_TARBALL or drop one in build/cache/)"
     fi
-    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" ))"
+
+    # DISTRO D-5, THE ARC GATE fixture: the SAME tarball, staged UNMODIFIED.
+    #
+    # "Unmodified" is the whole point and it is meant literally: no stock file is
+    # replaced, removed or edited. The bundle above substitutes busybox-static
+    # over /bin/sh and /bin/busybox, so whatever else it proves, it does not
+    # prove that a stock distro runs. This one changes nothing, which is why
+    # /bin/sh is still the image's own SYMLINK to a stock ET_DYN PIE busybox --
+    # and following it is the D-1..D-4 chain end to end, on a rootfs nobody
+    # prepared for us.
+    #
+    # The only additions are the mount ANCHORS the recipe structurally requires
+    # (a bind needs an existing mount point). /proc, /sys and /dev are already
+    # in the image; /net and /env are Thylacine-shaped and are not. Nothing is
+    # written into the rootfs to carry the gate itself: the script rides in
+    # process.args, so the staged tree is the tarball plus anchors and nothing
+    # else. Measured: 520 entries, 335 of them symlinks, ZERO device nodes -- so
+    # there is no privileged tar operation here and no node-skipping to do.
+    #
+    # It stages WITHOUT the busybox-static apk, unlike the bundle above. That is
+    # the D-5 dependency inversion: needing a substitute shell was exactly the
+    # condition D-4 removed.
+    #
+    # #126 applies VERBATIM: this bundle is pool-resident, so a PRESERVE=1 build
+    # runs the OLD rootfs. The in-guest VERSION_ID leg is the detector -- it is
+    # the one assertion here that a stale bake cannot satisfy.
+    if [[ -n "$tarball" && -f "$tarball" ]]; then
+        local sb="$vstage/alpine-stock"
+        mkdir -p "$sb/rootfs"
+        if tar -xzf "$tarball" -C "$sb/rootfs" 2>/dev/null; then
+            mkdir -p "$sb/rootfs/proc" "$sb/rootfs/sys" "$sb/rootfs/dev" \
+                     "$sb/rootfs/net" "$sb/rootfs/env"
+            for leaf in null zero full random urandom tty; do
+                : > "$sb/rootfs/dev/$leaf"
+                chmod 0666 "$sb/rootfs/dev/$leaf"
+            done
+            # The gate script, inline in the manifest. Five legs, each adding
+            # EXACTLY ONE mechanism to the one before it, so a first-missing
+            # marker names a cause instead of a symptom:
+            #
+            #   A  the stock shell starts AT ALL -- /bin/sh (absolute pool
+            #      symlink) -> stock ET_DYN PIE busybox -> PT_INTERP -> stock
+            #      ldso -> applet dispatch on basename(argv[0]). Printed by a
+            #      BUILTIN echo, so no second exec is in the way of the signal.
+            #   B  fork+exec of a stock dynamic binary FROM a stock dynamic
+            #      parent, in busybox's multiplexer form: a real file, and
+            #      argv[0]-independent, so B isolates exec from both symlinks
+            #      and argv[0].
+            #   C  a second absolute pool symlink resolved for EXEC, plus argv[0]
+            #      applet dispatch. C is the leg that reddens if the kernel ever
+            #      leaks the symlink-RESOLVED path into argv[0]: busybox would
+            #      then see basename == "busybox", treat the filename as an
+            #      applet name, and emit nothing. (It does NOT discriminate
+            #      --argv0 from passing the path alone -- nothing on this rootfs
+            #      can produce a vector where those differ; that claim stays at
+            #      the unit level in exec.interp_argv_shape.)
+            #
+            #      C READS A REAL FILE THROUGH A SYMLINKED APPLET, and the target
+            #      being real is the point. The first version ran `/bin/ls /`,
+            #      which needs directory ENUMERATION on top of applet dispatch --
+            #      two mechanisms in one leg, against this file's own rule. It
+            #      failed on the second: openat declines O_DIRECTORY by design
+            #      (kernel/vivarium.c:470) and getdents64 has no row at all, so
+            #      no Linux program can list a directory here (task #209). The
+            #      dispatch it was actually testing had WORKED -- busybox printed
+            #      "ls: can't open '/'", naming itself by applet -- but the
+            #      marker could not fire, so the leg reported a mechanism that
+            #      was fine. Reading /usr/lib/os-release (a plain file) through
+            #      /bin/cat (a symlink) leaves argv[0] dispatch as the only
+            #      untested variable.
+            #   D  a RELATIVE pool symlink crossing `..` (/etc/os-release ->
+            #      ../usr/lib/os-release), read through B's already-proven
+            #      multiplexer form so the link is the only new variable. C and D
+            #      are now INDEPENDENT: C is symlinked-applet + real target, D is
+            #      multiplexer + symlinked target, so neither can mask the other.
+            #      The loader path cannot cover D's class:
+            #      libc.musl-aarch64.so.1 matches the "c." entry of musl's
+            #      reserved list (dynlink.c:1074-1082), so load_library
+            #      short-circuits it to &ldso and never opens the file.
+            #   E  the pool holds the PINNED image, asserted from inside the
+            #      guest. This is the #126 stale-bake detector.
+            #
+            # NO `>` REDIRECTION ANYWHERE, and it is not a style choice: #201,
+            # the vivarium's openat refuses O_CREAT unconditionally, and a plain
+            # `>` passes O_CREAT even onto a file that already exists. Every
+            # assertion is a $( ) capture (a pipe) or a 2>&1 dup.
+            #
+            # The RAW line is diagnostics, never the assertion, and it cannot
+            # forge one (#186): os-release contains no "DISTRO-" string.
+            cat > "$sb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "-c", "echo DISTRO-A-stock-sh\nb=$(/bin/busybox echo bb-ok); [ \"$b\" = bb-ok ] && echo DISTRO-B-stock-exec\nc=$(/bin/cat /usr/lib/os-release); echo DISTRO-RAW-C:$c\ncase \"$c\" in *\"Alpine Linux\"*) echo DISTRO-C-applet-by-symlink ;; esac\no=$(/bin/busybox cat /etc/os-release); echo DISTRO-RAW-OSREL:$o\ncase \"$o\" in *\"Alpine Linux\"*) echo DISTRO-D-relative-symlink ;; esac\ncase \"$o\" in *VERSION_ID=3.21.0*) echo DISTRO-E-pinned-image ;; esac\necho DISTRO-DONE"],
+        "env": [],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux"
+    }
+}
+VIVEOF
+            echo "==> viv bundles: STOCK Alpine bundle staged at $sb (3.21.0 UNMODIFIED -- /bin/sh is the image's own symlink to its own dynamic busybox)"
+        else
+            rm -rf "$sb"
+            echo "==> viv bundles: untar of $tarball into the stock bundle FAILED -- DISTRO ARC gate bundle skipped" >&2
+        fi
+    fi
+    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" )$( [[ -d "$vstage/alpine-stock" ]] && echo " + alpine-stock" ))"
 }
 
 build_sysroot() {
@@ -2680,7 +2883,7 @@ build_pouch_progs() {
     rm -f "$progs_out"/pouch-hello*.o "$progs_out"/pouch-hello*
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.
@@ -2781,8 +2984,32 @@ build_sdl2() {
     local gl_prove="$BUILD_DIR/clade/gl/gl-sdl-prove"
     local gl_needed=""
     [[ -f "$BUILD_DIR/clade/gl/lib/libOSMesa.a" ]] && gl_needed=1
+
+    # #239: which GL backend this archive gets compiled with. The Mesa headers
+    # are fetched, not vendored, AND they land inside build/sysroot/include --
+    # a directory build_sysroot recreates. So their absence is the normal state
+    # of a fresh checkout and the eventual state of every machine that rebuilds
+    # its sysroot, not an exceptional one. Absent them, the nogl backend
+    # compiles in place of SDL_thylacineopengl.c (usr/ports/sdl2/thylacine-nogl)
+    # and the archive is GL-less rather than unbuildable.
+    #
+    # It is a THIRD term of the cache key, not a build-time detail: the mode is
+    # an INPUT the archive consumed, and nothing in the timestamp comparison can
+    # see it change. Fetching the headers into an up-to-date tree moves no file
+    # this guard stats, so without the sentinel the next build would report
+    # REUSED and keep serving the GL-less archive -- and worse, a later
+    # gl-sdl-prove would link the real libOSMesa.a against it. Same lesson as
+    # the two above, third axis.
+    local gl_hdr=""
+    [[ -f "$sysroot/include/GL/osmesa.h" ]] && gl_hdr=1
+    local gl_mode_file="$sysroot/lib/.libSDL2.gl-mode"
+    local gl_mode="nogl"
+    [[ -n "$gl_hdr" ]] && gl_mode="gl"
+
     if [[ -f "$archive" && -f "$progs_out/sdl-probe" ]] &&
-       [[ -z "$gl_needed" || -f "$gl_prove" ]]; then
+       [[ -z "$gl_needed" || -f "$gl_prove" ]] &&
+       [[ -f "$gl_mode_file" ]] &&
+       [[ "$(cat "$gl_mode_file" 2>/dev/null)" == "$gl_mode" ]]; then
         local stale
         stale="$(find "$sdl_vendor" "$port_dir" "$REPO_ROOT/usr/sdl-probe" \
                       "$REPO_ROOT/usr/gl-sdl-prove" \
@@ -2796,7 +3023,7 @@ build_sdl2() {
         [[ -n "$gl_needed" && "$BUILD_DIR/clade/gl/lib/libOSMesa.a" -nt "$gl_prove" ]] \
             && gl_stale=1
         if [[ -z "$stale" && -z "$gl_stale" && ! "$sysroot/lib/libc.a" -nt "$archive" ]]; then
-            ledger "libSDL2.a: REUSED (cached + up-to-date)"
+            ledger "libSDL2.a: REUSED (cached + up-to-date, $gl_mode)"
             return 0
         fi
     fi
@@ -2815,6 +3042,19 @@ build_sdl2() {
     mkdir -p "$sdl_src/src/video/thylacine"
     cp "$port_dir"/thylacine/*.c "$port_dir"/thylacine/*.h \
         "$sdl_src/src/video/thylacine/"
+
+    # #239: swap the GL backend in the COPY, so the glob below stays the
+    # compile list and exactly one of the two is ever compiled. Announced, not
+    # silent: this is a real capability the archive will not have, and a build
+    # that quietly drops one reads exactly like a build that has it.
+    if [[ -z "$gl_hdr" ]]; then
+        rm -f "$sdl_src/src/video/thylacine/SDL_thylacineopengl.c"
+        cp "$port_dir"/thylacine-nogl/*.c "$sdl_src/src/video/thylacine/"
+        echo "    NO GL: $sysroot/include/GL/osmesa.h is absent -- building the"
+        echo "           GL-less backend (#239). SDL programs build and run;"
+        echo "           SDL_GL_CreateContext reports no OSMesa. Fetch the Mesa"
+        echo "           headers per usr/ports/mesa/README.md for a GL archive."
+    fi
 
     local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
                    -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
@@ -2899,7 +3139,14 @@ build_sdl2() {
 
     build_gl_sdl_prove "$sysroot" "$sdl_obj"
 
-    ledger "libSDL2.a: BUILT (+ sdl-probe)"
+    # LAST, deliberately. The archive is written well before this point, so a
+    # build that dies in between leaves no sentinel -- and the guard above then
+    # declines to reuse it. That is the #138 output-half lesson applied to the
+    # mode: the sentinel records a COMPLETED build in a known mode, not an
+    # attempted one.
+    printf '%s\n' "$gl_mode" > "$gl_mode_file"
+
+    ledger "libSDL2.a: BUILT ($gl_mode, + sdl-probe)"
 }
 
 build_gl_sdl_prove() {

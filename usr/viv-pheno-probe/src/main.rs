@@ -266,6 +266,82 @@ extern "C" fn viv_sig_handler(signo: i32, info: *const u8, uc: *const u8) {
     }
 }
 
+/// The fork-in-handler leg (L233-L236; the d3a11c8e round's F1): a handler
+/// that fork()s and RETURNS, in both processes. The child's return goes through
+/// the restorer -> rt_sigreturn -> the kernel's per-Thread save block, so it
+/// only works if that block crossed the fork; a child whose kernel says "not in
+/// a handler" gets -1 and runs on into the restorer's `brk #0`. The child marks
+/// its own (COW-private) copy of FIH_AM_CHILD so the code after the interrupted
+/// write can tell the two processes apart.
+static mut FIH_CHILD: i64 = 0;
+static mut FIH_AM_CHILD: u64 = 0;
+
+extern "C" fn viv_fork_in_handler(_signo: i32, _info: *const u8, _uc: *const u8) {
+    unsafe {
+        let pid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if pid == 0 {
+            core::ptr::write_volatile(&raw mut FIH_AM_CHILD, 1);
+        } else {
+            core::ptr::write_volatile(&raw mut FIH_CHILD, pid);
+        }
+    }
+}
+fn fork_handler_addr() -> u64 { viv_fork_in_handler as usize as u64 }
+fn fih_child() -> i64 { unsafe { core::ptr::read_volatile(&raw const FIH_CHILD) } }
+fn fih_am_child() -> u64 { unsafe { core::ptr::read_volatile(&raw const FIH_AM_CHILD) } }
+
+/// The handler-time MASK legs (L237-L244). Linux `signal_delivered`: while a
+/// handler runs the blocked set is mask | sa_mask | sig (sig omitted under
+/// SA_NODEFER), and rt_sigreturn puts the pre-handler mask back, undoing any
+/// rt_sigprocmask the handler itself did. This handler READS the mask it runs
+/// under (into MH_MASK_IN, before it changes anything), then BLOCKS SIGWINCH --
+/// the change the sigreturn must undo -- and, by mode, forks or execs from
+/// inside the handler so the mask a handler PASSES ON is witnessed too.
+/// SIGWINCH/SIGINT/SIGCHLD/SIGPIPE are used because each maps to a note bit;
+/// a signal with no note (SIGUSR1/2) reads back clear no matter what.
+static mut MH_MODE: u64 = 0;       // 0 = plain, 1 = fork inside, 2 = exec inside
+static mut MH_RUNS: u64 = 0;
+static mut MH_MASK_IN: u64 = 0;
+static mut MH_CHILD: i64 = 0;
+static mut MH_AM_CHILD: u64 = 0;
+
+extern "C" fn viv_mask_handler(_signo: i32, _info: *const u8, _uc: *const u8) {
+    unsafe {
+        MH_RUNS += 1;
+        let mut cur: u64 = 0;
+        // rt_sigprocmask(SIG_BLOCK=0, NULL, &cur): query only.
+        let _ = svc4(NR_RT_SIGPROCMASK, 0, 0, &mut cur as *mut u64 as u64, 8);
+        core::ptr::write_volatile(&raw mut MH_MASK_IN, cur);
+        let winch: u64 = 1u64 << (28 - 1);            // SIGWINCH
+        let _ = svc4(NR_RT_SIGPROCMASK, 0, &winch as *const u64 as u64, 0, 8);
+        match core::ptr::read_volatile(&raw const MH_MODE) {
+            1 => {
+                let pid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+                if pid == 0 {
+                    core::ptr::write_volatile(&raw mut MH_AM_CHILD, 1);
+                } else {
+                    core::ptr::write_volatile(&raw mut MH_CHILD, pid);
+                }
+            }
+            2 => {
+                let selfp = b"/bin/viv-pheno-probe\0";
+                let c0 = b"viv-pheno-probe\0";
+                let c1 = b"maskexec-child\0";
+                let cargv: [u64; 3] = [c0.as_ptr() as u64, c1.as_ptr() as u64, 0];
+                let _ = svc3(NR_EXECVE, selfp.as_ptr() as u64, cargv.as_ptr() as u64, 0);
+                // only reachable if the exec FAILED: the caller exits 1
+            }
+            _ => {}
+        }
+    }
+}
+fn mask_handler_addr() -> u64 { viv_mask_handler as usize as u64 }
+fn mh_set_mode(m: u64) { unsafe { core::ptr::write_volatile(&raw mut MH_MODE, m) } }
+fn mh_runs() -> u64 { unsafe { core::ptr::read_volatile(&raw const MH_RUNS) } }
+fn mh_mask_in() -> u64 { unsafe { core::ptr::read_volatile(&raw const MH_MASK_IN) } }
+fn mh_child() -> i64 { unsafe { core::ptr::read_volatile(&raw const MH_CHILD) } }
+fn mh_am_child() -> u64 { unsafe { core::ptr::read_volatile(&raw const MH_AM_CHILD) } }
+
 // Task #96 sentinel buffers for the phenotype-path FP check (L39-L41).
 static mut FP_SENT: [u8; 512] = [0; 512];
 static mut FP_SEEN: [u8; 512] = [0; 512];
@@ -318,6 +394,21 @@ const NEG_ECHILD: i64 = -10;
 // #151: close-on-exec. EBADF is the whole assertion on the far side of an
 // exec -- a descriptor the sweep closed must be GONE, not merely flagged.
 const NEG_EBADF: i64 = -9;
+
+// #218: the MNOEXEC refusal. WEAK ON ITS OWN and deliberately paired with a
+// control below -- -1 is also syscall_dispatch's generic sentinel, so "== -1"
+// alone is satisfied by almost any breakage. It is the CONTROL leg (the same
+// fd mapping fine without PROT_EXEC) that makes this number mean "the exec
+// gate refused" rather than "something went wrong".
+//
+// Why -1 is nevertheless the RIGHT number here, despite errno.h's standing
+// "DO NOT RETURN -T_E_PERM FROM A SYSCALL HANDLER": that warning is about the
+// pouch boundary line, where __syscall_ret reads a flat -1 as its generic
+// sentinel and reports EIO. sys_mmap_file_for_proc has exactly one caller --
+// the vivarium dispatch -- so this value only ever reaches a PHENO_LINUX
+// guest, for whom -1 IS -EPERM by Linux's own numbering. The exec-side MNOEXEC
+// site does not return an errno at all (it fails resolution, yielding NULL).
+const NEG_EPERM: i64 = -1;
 const NR_FCNTL: u64 = 25;
 const F_DUPFD: u64 = 0;
 const F_GETFD: u64 = 1;
@@ -504,6 +595,25 @@ macro_rules! leg {
     };
 }
 
+/// Pre-stamp a leg whose NEXT step can kill this process outright (a signal
+/// whose broken disposition terminates): write the marker at offset 0 and
+/// rewind, so a death leaves the leg's name where joey would otherwise read
+/// the "??" sentinel. The marker channel is fail-only by design, so this is
+/// the one place a marker is written before the verdict is known.
+unsafe fn stamp_armed(rep: i64, mark: &[u8]) {
+    let _ = svc3(NR_WRITE, rep as u64, mark.as_ptr() as u64, mark.len() as u64);
+    let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+}
+
+/// Survived: put the sentinel shape back (five bytes, so a five-byte stamp is
+/// fully overwritten and a later marker or the OK lands on a clean head) and
+/// rewind again.
+unsafe fn stamp_disarm(rep: i64) {
+    let m: &[u8] = b"??\n\n\n";
+    let _ = svc3(NR_WRITE, rep as u64, m.as_ptr() as u64, m.len() as u64);
+    let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+}
+
 /// The linux-mode body: raw Linux numbers only, no allocation, never returns.
 unsafe fn run_linux() -> ! {
     // The report channel comes FIRST, because a verdict we cannot deliver is
@@ -577,12 +687,19 @@ unsafe fn run_linux() -> ! {
     leg!(rep, st2.st_ino == st.st_ino, b"L11\n");
     leg!(rep, st2.st_dev == st.st_dev, b"L12\n");
 
-    // --- L13: the documented reject stays rejected --------------------------
-    // AT_SYMLINK_NOFOLLOW is what lstat() compiles to. It is refused ON
-    // PURPOSE: stat == lstat holds at v1.0 only because symlinks are ABSENT,
-    // and admitting it would silently start reporting targets instead of links
-    // the day they land. Asserting the refusal keeps a future "optimisation"
-    // from quietly deleting the safeguard.
+    // --- L13: lstat, TRANSLATED since DISTRO D-1 ----------------------------
+    // This leg used to assert the OPPOSITE -- that AT_SYMLINK_NOFOLLOW was
+    // refused -- and its reasoning named its own expiry: "stat == lstat holds
+    // at v1.0 only because symlinks are ABSENT, and admitting it would
+    // silently start reporting targets instead of links the day they land."
+    // D-1 landed them, and the flag came with the feature rather than after
+    // it, so the safeguard was spent as designed rather than deleted.
+    //
+    // The subject here is a REGULAR file (the probe's own binary), where stat
+    // and lstat must agree exactly -- so this asserts BOTH that the call is
+    // served and that no-follow did not perturb the answer. The divergence
+    // (a real symlink) is proven kernel-side by stalk.symlink_stat_vs_lstat;
+    // the container's rootfs has no link to point at.
     leg!(
         rep,
         svc4(
@@ -591,9 +708,11 @@ unsafe fn run_linux() -> ! {
             SELF_PATH.as_ptr() as u64,
             &mut st2 as *mut LinuxStat as u64,
             AT_SYMLINK_NOFOLLOW
-        ) == NEG_ENOSYS,
+        ) == 0,
         b"L13\n"
     );
+    leg!(rep, st2.st_ino == st.st_ino, b"L13a\n");
+    leg!(rep, (st2.st_mode & S_IFMT) == S_IFREG, b"L13b\n");
 
     leg!(rep, svc3(NR_CLOSE, fd as u64, 0, 0) == 0, b"L14\n");
 
@@ -640,13 +759,33 @@ unsafe fn run_linux() -> ! {
         b"L20\n"
     );
 
-    // MAP_FIXED is where `addr` stops being a hint and becomes a requirement.
+    // MAP_FIXED is where `addr` stops being a hint and becomes a requirement --
+    // and since DISTRO D-3b the kernel MEETS that requirement instead of
+    // declining it (musl's map_library overlays each PT_LOAD onto its whole-span
+    // reservation this way, so a dynamic guest cannot load a library without it).
+    //
+    // The leg therefore asserts the requirement itself: the mapping must land at
+    // EXACTLY the requested address, not merely succeed. Asserting "not an errno"
+    // would pass on any address the kernel felt like picking, which is the one
+    // thing MAP_FIXED forbids.
+    //
+    // 0x40000000 is unmapped here, so this is the FREE-space shape. It is served
+    // (Linux places a fixed mapping at an unmapped address rather than failing);
+    // answering ENOMEM instead was #196, and ENOMEM is the worse reply because an
+    // allocator cannot tell it from real memory pressure.
+    let f = svc6(NR_MMAP, 0x40000000, MAP_LEN, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANON | MAP_FIXED, (-1i64) as u64, 0);
+    leg!(rep, f == 0x40000000, b"L21\n");
+    // It is real memory, not just a bookkeeping entry: write and read back
+    // through the LAST page, which also proves the whole span got mapped.
+    (f as *mut u64).add((MAP_LEN / 8 - 1) as usize).write_volatile(0x5A5A_A5A5);
     leg!(
         rep,
-        svc6(NR_MMAP, 0x40000000, MAP_LEN, PROT_READ | PROT_WRITE,
-             MAP_PRIVATE | MAP_ANON | MAP_FIXED, (-1i64) as u64, 0) == NEG_ENOSYS,
-        b"L21\n"
+        (f as *mut u64).add((MAP_LEN / 8 - 1) as usize).read_volatile()
+            == 0x5A5A_A5A5,
+        b"L21b\n"
     );
+    let _ = svc3(NR_MUNMAP, f as u64, MAP_LEN, 0);
 
     // mprotect is the explicit ENOSYS row. musl DEPENDS on this answer being
     // ENOSYS specifically: mallocng/malloc.c:92 proceeds when mprotect fails
@@ -947,6 +1086,404 @@ unsafe fn run_linux() -> ! {
         unsafe { (0..512).all(|i| FP_SEEN[i] == FP_SENT[i]) },
         b"L157\n"
     );
+
+    // --- L205-L216: SIG_IGN discards a PENDING signal (POSIX 2.4.3) ---------
+    //
+    // The state the kernel's discard paths exist for -- a note queued BEFORE
+    // its disposition became SIG_IGN -- constructed deterministically: block
+    // SIGPIPE, raise it (the reader-less fd 0 again), THEN install SIG_IGN.
+    // Linux discards the pending instance AT THE INSTALL, blocked or not, and
+    // that is observable: a handler installed afterwards, still blocked, must
+    // see nothing on unblock. A discard deferred to delivery time runs that
+    // handler for a signal POSIX says died at the SIG_IGN -- which is exactly
+    // what the EL0 tail's arm did before notes_discard_name.
+    //
+    // Two rounds. Round A (L205-L211): pending -> SIG_IGN -> unblock. We
+    // SURVIVE (a broken discard falls into the SIG_DFL-terminate arm and kills
+    // us, so L209 is pre-stamped: that death names its leg instead of leaving
+    // joey's "??"), nothing fired, and a handler installed AFTER the unblock
+    // finds the queue empty (L210 -- it asserts the install succeeds and nothing
+    // fires; it does NOT separate install-time from delivery-time, since the
+    // tail's arm would already have dropped the note at L209: L215 is the only
+    // leg that does). Round B
+    // (L212-L216): pending -> SIG_IGN -> handler -> unblock: install-time, not
+    // delivery-time -- nothing fires. Each round ends with a fresh SIGPIPE
+    // delivered exactly once, so a queue wedged by the experiment cannot read
+    // as "nothing fired".
+
+    // Round A.
+    ksa = [SIG_DFL, 0, 0, 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L205\n"
+    );
+    set = bit(SIGPIPE);
+    leg!(
+        rep,
+        svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64, 0, 8) == 0,
+        b"L206\n"
+    );
+    let fired_a = sig_fired();
+    let wrc_a = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    // Queued, blocked, under SIG_DFL: nothing fired -- and we are alive, which
+    // a delivered SIG_DFL SIGPIPE would have ended right here.
+    leg!(rep, wrc_a < 0 && sig_fired() == fired_a, b"L207\n");
+    ksa = [SIG_IGN, 0, 0, 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L208\n"
+    );
+    // The unblock is the moment a broken discard kills us. Stamp the leg
+    // FIRST and rewind, so joey reads "L209" off a corpse; on survival the
+    // stamp is put back to the sentinel shape before the next assertion.
+    stamp_armed(rep, b"L209\n");
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8);
+    stamp_disarm(rep);
+    leg!(rep, sig_fired() == fired_a, b"L209\n");
+    // Installing the handler now must not deliver anything (the queue is empty
+    // whichever discard emptied it -- see the round-A note above).
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0
+            && sig_fired() == fired_a,
+        b"L210\n"
+    );
+    // The queue still works: a fresh SIGPIPE reaches the handler exactly once.
+    let wrc_a2 = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    leg!(
+        rep,
+        wrc_a2 < 0 && sig_fired() == fired_a + 1 && sig_signo() == SIGPIPE,
+        b"L211\n"
+    );
+
+    // Round B: the install-time proof.
+    let fired_b = sig_fired();
+    leg!(
+        rep,
+        svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64, 0, 8) == 0,
+        b"L212\n"
+    );
+    let wrc_b = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    // Pending, blocked, with the handler installed: not delivered yet.
+    leg!(rep, wrc_b < 0 && sig_fired() == fired_b, b"L213\n");
+    ksa = [SIG_IGN, 0, 0, 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L214\n"
+    );
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8);
+    // Nothing fired: the pending instance died at the SIG_IGN, not at the
+    // unblock. (Delivery-time discard alone reads fired_b + 1 here.)
+    leg!(rep, sig_fired() == fired_b, b"L215\n");
+    let wrc_b2 = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    leg!(
+        rep,
+        wrc_b2 < 0 && sig_fired() == fired_b + 1 && sig_signo() == SIGPIPE,
+        b"L216\n"
+    );
+
+    // --- L217-L222: signal state across fork and exec is POSIX (task #127) ---
+    //
+    // (operator-voted 2026-08-17; scripture c484a7d1.) Set up three facts --
+    // SIGPIPE ignored, SIGINT caught, SIGPIPE blocked -- then ask a forked
+    // child and an exec'd child what they see. POSIX fork(2): all three
+    // inherited. POSIX execve(2): SIG_IGN kept, the caught row back to
+    // SIG_DFL, the mask kept. Before this chunk the fork child read all-SIG_DFL
+    // with an empty mask, and the exec image lost SIG_IGN and the mask -- so
+    // `nohup`, a non-interactive `cmd &`, and `trap '' PIPE; cmd | head` all
+    // lost their immunity. The children report a WHICH-fact marker through fd
+    // 20 (the report dup) and their exit status; the parent asserts the reap.
+    // SIGPIPE is restored to the handler + unblocked afterwards -- the state
+    // the socket legs below expect.
+    ksa = [SIG_IGN, 0, 0, 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L217\n"
+    );
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGINT, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L218\n"
+    );
+    set = bit(SIGPIPE);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64, 0, 8);
+
+    // The fork half: the child inherits all three.
+    let fk = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if fk == 0 {
+        svc3(NR_FCNTL, rep as u64, F_DUPFD, 20);
+        linux_exit(sigstate_check(20, true))
+    }
+    leg!(rep, fk > 0, b"L219\n");
+    let mut sst: i32 = -1;
+    leg!(
+        rep,
+        svc4(NR_WAIT4, fk as u64, &mut sst as *mut i32 as u64, 0, 0) == fk
+            && (sst & 0x7f) == 0 && ((sst >> 8) & 0xff) == 0,
+        b"L220\n"
+    );
+
+    // The exec half: the re-execed image keeps SIG_IGN + the mask, loses the
+    // handler.
+    let ek = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if ek == 0 {
+        svc3(NR_FCNTL, rep as u64, F_DUPFD, 20);
+        let selfp = b"/bin/viv-pheno-probe\0";
+        let c0 = b"viv-pheno-probe\0";
+        let c1 = b"sigexec-child\0";
+        let cargv: [u64; 3] = [c0.as_ptr() as u64, c1.as_ptr() as u64, 0];
+        svc3(NR_EXECVE, selfp.as_ptr() as u64, cargv.as_ptr() as u64, 0);
+        linux_exit(9)                      // only reachable if the exec FAILED
+    }
+    leg!(rep, ek > 0, b"L221\n");
+    sst = -1;
+    leg!(
+        rep,
+        svc4(NR_WAIT4, ek as u64, &mut sst as *mut i32 as u64, 0, 0) == ek
+            && (sst & 0x7f) == 0 && ((sst >> 8) & 0xff) == 0,
+        b"L222\n"
+    );
+
+    // Restore what the legs below expect: SIGPIPE caught + unblocked.
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8);
+
+    // --- L229-L232: SIG_DFL for a DEFAULT-IGNORE signal also purges (the
+    // 7580c1f7 round, F1) -- Linux sig_handler_ignored covers SIG_DFL +
+    // sig_kernel_ignore, and the shell's purge condition has that second
+    // disjunct, which nothing else drives. Block SIGCHLD; a child exits (its
+    // child_exit note is queued under SIG_DFL -- notes_post drops only
+    // SIG_IGN); rt_sigaction(SIGCHLD, SIG_DFL) -> the purge; install a SIGCHLD
+    // handler; unblock -> NOTHING fires. Then the POSITIVE CONTROL, one
+    // variable away (no SIG_DFL install between the exit and the unblock): the
+    // handler fires exactly once. Sabotage: drop the disjunct -> only L231 reddens.
+    set = bit(SIGCHLD);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64, 0, 8);
+    let fired_c = sig_fired();
+    let ck = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if ck == 0 {
+        linux_exit(0)
+    }
+    leg!(rep, ck > 0, b"L229\n");
+    sst = -1;
+    let _ = svc4(NR_WAIT4, ck as u64, &mut sst as *mut i32 as u64, 0, 0);
+    ksa = [SIG_DFL, 0, 0, 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L230\n"
+    );
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8);
+    leg!(rep, sig_fired() == fired_c, b"L231\n"); // the SIG_DFL install purged it
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64, 0, 8);
+    let ck2 = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if ck2 == 0 {
+        linux_exit(0)
+    }
+    sst = -1;
+    let _ = svc4(NR_WAIT4, ck2 as u64, &mut sst as *mut i32 as u64, 0, 0);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8);
+    leg!(
+        rep,
+        sig_fired() == fired_c + 1 && sig_signo() == SIGCHLD,
+        b"L232\n"
+    );
+    ksa = [SIG_DFL, 0, 0, 0]; // restore: SIGCHLD back to default
+    let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+
+    // --- L233-L236: fork() from INSIDE a handler, and the child RETURNS from
+    // it (the d3a11c8e round's F1). Thylacine keeps the interrupted user
+    // context kernel-side (the sigframe is written for reading; rt_sigreturn
+    // restores from the per-Thread save block), so a child forked inside a
+    // handler needs that block copied with the mask -- or its sigreturn is
+    // refused and it runs on into the restorer's `brk #0`. POSIX permits
+    // fork() in a handler (async-signal-safe); Linux's child just returns to
+    // the interruption point off its copied user stack. Here: SIGPIPE raised
+    // by the reader-less fd 0 write, the handler forks; BOTH processes return
+    // from the handler and resume after the write; the child then exits 0 --
+    // the ONLY exit code that survives v1.0's status collapse (exit_group(N):
+    // N != 0 -> exits("fail") -> 1, kernel/syscall.c) -- and the parent reaps
+    // exactly a clean 0. Every failure reads 1: a refused sigreturn (the child
+    // dies at `brk #0` -- a `snare:brk` user-fault line names it), or a child
+    // that resumed with its store lost (it runs the parent's L234 and exits 1
+    // with its own marker, which the parent re-emits below so joey shows the
+    // CHILD's leg). Sabotage SF1 (drop the snapshot copy in rfork_internal):
+    // L235 reddens; the parent's own return is unaffected.
+    ksa = [fork_handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L233\n"
+    );
+    let wrc_f = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    if fih_am_child() != 0 {
+        // The CHILD, back from its own handler return: the save block crossed.
+        linux_exit(0)
+    }
+    leg!(rep, wrc_f < 0 && fih_child() > 0, b"L234\n"); // the handler ran + forked
+    sst = -1;
+    let wr = svc4(NR_WAIT4, fih_child() as u64, &mut sst as *mut i32 as u64, 0, 0);
+    if !(wr == fih_child() && (sst & 0x7f) == 0 && ((sst >> 8) & 0xff) == 0) {
+        // Re-emit the child's own marker if it left one (its handle shares
+        // offset 0 with ours), so the log names the child's leg, not just ours.
+        let mut cm: [u8; 5] = [0; 5];
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        let _ = svc3(NR_READ, rep as u64, cm.as_mut_ptr() as u64, 5);
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        if cm[0] == b'L' { leg!(rep, false, &cm[..]); }
+        leg!(rep, false, b"L235\n");
+    }
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0]; // SIGPIPE back to the counting handler
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L236\n"
+    );
+
+    // --- L237-L244: the handler-time mask discipline (Linux signal_delivered
+    // + rt_sigreturn). While a handler runs, blocked = mask | sa_mask | sig
+    // (sig omitted under SA_NODEFER); sigreturn puts the PRE-handler mask back,
+    // undoing the handler's own rt_sigprocmask; an exec from inside the
+    // handler inherits the handler-time mask; a fork from inside it gives the
+    // child the handler-time mask AND a sigreturn that restores the saved one.
+    // Delivery is unchanged (the in_handler guard still holds every note for
+    // the handler's duration); what these witness is the mask a handler
+    // OBSERVES and PASSES ON. The pre-handler mask is {SIGCHLD}, NON-ZERO on
+    // purpose: a restore that puts back zero must not pass (L240/L243). sa_mask
+    // = {SIGINT}; the handler blocks SIGWINCH; the signal is SIGPIPE via the
+    // reader-less fd 0 -- four signals that each map to a note bit.
+    // Sabotages: SM1 (no handler-time mask) -> L239/L242/L243; SM2 (no restore)
+    // -> L240/L241/L244; SM3 (the fork copy skips note_saved_mask) -> L244.
+    // The pre-handler mask is made EXACT first: L26 blocked SIGWINCH (the tty
+    // family) and nothing since unblocked it, so a restore that put the tty
+    // bit back was read as "the handler's block persisted" on the first boot
+    // -- the fixture's premise, not the mechanism. Unblocked here, re-blocked
+    // at the end so the legs below run under the state they always had.
+    const SA_NODEFER: u64 = 0x4000_0000;
+    set = bit(SIGWINCH);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8);
+    set = bit(SIGCHLD);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64, 0, 8);
+    let mut pre: u64 = 0;
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, &mut pre as *mut u64 as u64, 8);
+    leg!(
+        rep,
+        (pre & bit(SIGCHLD)) != 0
+            && (pre & (bit(SIGWINCH) | bit(SIGINT) | bit(SIGPIPE))) == 0,
+        b"L237\n"                          // the premise, asserted, not assumed
+    );
+    mh_set_mode(0);
+    ksa = [mask_handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), bit(SIGINT)];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L238\n"
+    );
+    let mh0 = mh_runs();
+    let wrc_m = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    let inside = mh_mask_in();
+    leg!(
+        rep,
+        wrc_m < 0 && mh_runs() == mh0 + 1
+            && (inside & bit(SIGPIPE)) != 0      // the delivered signal
+            && (inside & bit(SIGINT)) != 0       // sa_mask
+            && (inside & bit(SIGCHLD)) != 0,     // the pre-handler mask, kept
+        b"L239\n"
+    );
+    let mut now: u64 = 0;
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, &mut now as *mut u64 as u64, 8);
+    leg!(rep, (now & bit(SIGWINCH)) == 0, b"L240\n"); // the handler's own block, undone
+    leg!(
+        rep,
+        (now & (bit(SIGPIPE) | bit(SIGINT))) == 0 && (now & bit(SIGCHLD)) != 0,
+        b"L241\n"                                       // exactly the pre-handler mask
+    );
+    // SA_NODEFER: sa_mask still applied, the signal itself not.
+    ksa = [mask_handler_addr(), SA_RESTORER | SA_SIGINFO | SA_NODEFER, restorer_addr(), bit(SIGINT)];
+    let _ = svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8);
+    let wrc_n = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    let inside_n = mh_mask_in();
+    leg!(
+        rep,
+        wrc_n < 0 && (inside_n & bit(SIGINT)) != 0 && (inside_n & bit(SIGPIPE)) == 0,
+        b"L242\n"
+    );
+    // exec from INSIDE the handler: the image inherits mask | sa_mask | sig,
+    // plus the handler's own block (Linux keeps the current blocked set across
+    // execve). The child forks first so the parent survives its own exec.
+    ksa = [mask_handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), bit(SIGINT)];
+    let _ = svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8);
+    let xk = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if xk == 0 {
+        svc3(NR_FCNTL, rep as u64, F_DUPFD, 20);
+        mh_set_mode(2);
+        let _ = svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1);
+        linux_exit(1)                      // the handler did not run / exec failed
+    }
+    sst = -1;
+    let xr = svc4(NR_WAIT4, xk as u64, &mut sst as *mut i32 as u64, 0, 0);
+    if !(xk > 0 && xr == xk && (sst & 0x7f) == 0 && ((sst >> 8) & 0xff) == 0) {
+        let mut cm: [u8; 5] = [0; 5];
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        let _ = svc3(NR_READ, rep as u64, cm.as_mut_ptr() as u64, 5);
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        if cm[0] == b'L' { leg!(rep, false, &cm[..]); }
+        leg!(rep, false, b"L243\n");
+    }
+    // fork from INSIDE the handler: the child returns through ITS sigreturn and
+    // must read the PRE-handler mask -- the snapshot's mask half crossed the
+    // fork (SIGCHLD set; SIGPIPE/SIGINT/SIGWINCH clear).
+    mh_set_mode(1);
+    let _ = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    if mh_am_child() != 0 {
+        let mut cmask: u64 = 0;
+        let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, &mut cmask as *mut u64 as u64, 8);
+        if (cmask & bit(SIGCHLD)) != 0
+            && (cmask & (bit(SIGPIPE) | bit(SIGINT) | bit(SIGWINCH))) == 0
+        {
+            linux_exit(0)
+        }
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        let m = b"L244\n";
+        let _ = svc3(NR_WRITE, rep as u64, m.as_ptr() as u64, m.len() as u64);
+        linux_exit(1)
+    }
+    sst = -1;
+    let kr = svc4(NR_WAIT4, mh_child() as u64, &mut sst as *mut i32 as u64, 0, 0);
+    if !(mh_child() > 0 && kr == mh_child() && (sst & 0x7f) == 0 && ((sst >> 8) & 0xff) == 0) {
+        let mut cm: [u8; 5] = [0; 5];
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        let _ = svc3(NR_READ, rep as u64, cm.as_mut_ptr() as u64, 5);
+        let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+        if cm[0] == b'L' { leg!(rep, false, &cm[..]); }
+        leg!(rep, false, b"L244\n");
+    }
+    mh_set_mode(0);
+    // Restore what the legs below expect: SIGPIPE on the counting handler +
+    // unblocked; SIGCHLD back to its counting handler and unblocked -- via a
+    // SIG_DFL install first, which purges the child_exit notes the reaps above
+    // queued under the block (L231's mechanism), so nothing fires late.
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8);
+    ksa = [SIG_DFL, 0, 0, 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+    set = bit(SIGCHLD) | bit(SIGINT) | bit(SIGPIPE);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8);
+    set = bit(SIGWINCH);                   // back to L26's state for the legs below
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64, 0, 8);
 
     // --- V-5a: sockets -----------------------------------------------------
     // The container's manifest grants /net, so these run against the LIVE netd
@@ -2358,6 +2895,57 @@ unsafe fn run_linux() -> ! {
     let _ = svc3(NR_CLOSE, pfd[0] as u64, 0, 0);
     let _ = svc3(NR_CLOSE, pfd[1] as u64, 0, 0);
 
+    // --- L200-L204 (#218): MNOEXEC is LIVE on this container's mounts -------
+    //
+    // #217 proved every kernel link in isolation (5 sabotages, 5 distinct
+    // attributions). The link nothing proved is the LAST one: that viv's ACTUAL
+    // mounts carry the bit in a running container. Every arc gate passing shows
+    // only that noexec does not BREAK a container -- not that it is APPLIED to
+    // one, and those are two readings of the same green. Had some path dropped
+    // the flag between viv's t_mount and PgrpMount.flags, the whole tree would
+    // still be green, which is the standing "boot OK does not prove a gate is
+    // wired" rule.
+    //
+    // THE PAIR IS CHOSEN SO ONLY THE MOUNT FLAG DIFFERS:
+    //   /bin/viv-pheno-probe   dev9p, may_back_exec, arrived by CHROOT -> R+X ok
+    //   /proc/meminfo          dev9p, may_back_exec, MNOEXEC MOUNT     -> refused
+    // Same Dev, same mapping machinery, same phenotype arm. /env and the /dev
+    // leaves cannot witness this AT ALL: the may_back_exec FLOOR (#217 F1)
+    // refuses them before the mount flag is ever consulted, so a denial there
+    // would prove nothing about MNOEXEC. Choosing a target the floor does NOT
+    // cover is the entire point of the pair.
+    const XMAP: u64 = 4096;
+    let selfp2 = b"/bin/viv-pheno-probe\0";
+    let fd_self = svc4(NR_OPENAT, AT_FDCWD, selfp2.as_ptr() as u64, O_RDONLY, 0);
+    leg!(rep, fd_self >= 0, b"L200\n");
+    // CONTROL 1: an R+X FILE mapping is reachable here at all. Without it the
+    // deny leg is satisfied by "a container can never map R+X", which is a
+    // different and much weaker claim than "this mount forbids it".
+    let xok = svc6(NR_MMAP, 0, XMAP, PROT_READ | PROT_EXEC, MAP_PRIVATE,
+                   fd_self as u64, 0);
+    leg!(rep, xok > 0 && !(-4095..0).contains(&xok), b"L201\n");
+    let _ = svc3(NR_MUNMAP, xok as u64, XMAP, 0);
+    let _ = svc3(NR_CLOSE, fd_self as u64, 0, 0);
+
+    let memp = b"/proc/meminfo\0";
+    let fd_mem = svc4(NR_OPENAT, AT_FDCWD, memp.as_ptr() as u64, O_RDONLY, 0);
+    leg!(rep, fd_mem >= 0, b"L202\n");
+    // CONTROL 2: the file on the noexec mount IS mappable without PROT_EXEC.
+    // noexec bounds what may become CODE, not what may be read -- and without
+    // this leg the deny below is satisfied by the file being unmappable, the fd
+    // being bad, or the mount being broken.
+    let rok = svc6(NR_MMAP, 0, XMAP, PROT_READ, MAP_PRIVATE, fd_mem as u64, 0);
+    leg!(rep, rok > 0 && !(-4095..0).contains(&rok), b"L203\n");
+    let _ = svc3(NR_MUNMAP, rok as u64, XMAP, 0);
+    // THE WITNESS. Same fd that just mapped cleanly, one bit added.
+    leg!(
+        rep,
+        svc6(NR_MMAP, 0, XMAP, PROT_READ | PROT_EXEC, MAP_PRIVATE,
+             fd_mem as u64, 0) == NEG_EPERM,
+        b"L204\n"
+    );
+    let _ = svc3(NR_CLOSE, fd_mem as u64, 0, 0);
+
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its
     // own territory. If the renumber were wrong the bytes would not be there,
@@ -2459,6 +3047,77 @@ unsafe fn run_env_child() -> ! {
     linux_exit(0)
 }
 
+/// #127: what a forked / exec'd child must see of its parent's signal state.
+/// `as_forked` = the fork half (SIGINT still CAUGHT); false = the exec half
+/// (SIGINT back to SIG_DFL). SIGPIPE must be ignored and blocked either way.
+/// Reports the FIRST wrong fact through `fd` (L223-L225 fork, L226-L228 exec)
+/// and returns the exit status; silent on success (joey reads "OK" at offset
+/// 0 -- see run_cloexec_child).
+unsafe fn sigstate_check(fd: u64, as_forked: bool) -> i64 {
+    const SIG_DFL: u64 = 0;
+    const SIG_IGN: u64 = 1;
+    const SIGINT: u64 = 2;
+    const SIGPIPE: u64 = 13;
+    const SIG_BLOCK: u64 = 0;
+    let mut old: [u64; 4] = [0xDEAD; 4];
+    let mut oldset: u64 = 0;
+    let (m1, m2, m3): (&[u8], &[u8], &[u8]) = if as_forked {
+        (b"L223\n", b"L224\n", b"L225\n")
+    } else {
+        (b"L226\n", b"L227\n", b"L228\n")
+    };
+    if svc4(NR_RT_SIGACTION, SIGPIPE, 0, &mut old as *mut u64 as u64, 8) != 0
+        || old[0] != SIG_IGN
+    {
+        let _ = svc3(NR_WRITE, fd, m1.as_ptr() as u64, m1.len() as u64);
+        return 1;
+    }
+    old = [0xDEAD; 4];
+    let want_int = if as_forked { handler_addr() } else { SIG_DFL };
+    if svc4(NR_RT_SIGACTION, SIGINT, 0, &mut old as *mut u64 as u64, 8) != 0
+        || old[0] != want_int
+    {
+        let _ = svc3(NR_WRITE, fd, m2.as_ptr() as u64, m2.len() as u64);
+        return 1;
+    }
+    if svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, &mut oldset as *mut u64 as u64, 8) != 0
+        || (oldset & (1u64 << (SIGPIPE - 1))) == 0
+    {
+        let _ = svc3(NR_WRITE, fd, m3.as_ptr() as u64, m3.len() as u64);
+        return 1;
+    }
+    0
+}
+
+/// #127: the re-execed image of the exec half -- still phenotype code (exec
+/// does not change the phenotype), reporting through fd 20 like its siblings.
+unsafe fn run_sigexec_child() -> ! {
+    linux_exit(sigstate_check(20, false))
+}
+
+/// L243: the image exec'd from INSIDE a signal handler. Linux carries the
+/// current blocked set across execve, and inside a handler that set is
+/// mask | sa_mask | sig plus whatever the handler blocked itself -- here
+/// {SIGCHLD} | {SIGINT} | {SIGPIPE} | {SIGWINCH}. Reports through fd 20.
+unsafe fn run_maskexec_child() -> ! {
+    const SIGINT: u64 = 2;
+    const SIGPIPE: u64 = 13;
+    const SIGCHLD: u64 = 17;
+    const SIGWINCH: u64 = 28;
+    let mut m: u64 = 0;
+    let want = (1u64 << (SIGINT - 1)) | (1u64 << (SIGPIPE - 1))
+             | (1u64 << (SIGCHLD - 1)) | (1u64 << (SIGWINCH - 1));
+    if svc4(NR_RT_SIGPROCMASK, 0, 0, &mut m as *mut u64 as u64, 8) == 0
+        && (m & want) == want
+    {
+        linux_exit(0)
+    }
+    let mk = b"L243\n";
+    let _ = svc3(NR_LSEEK, 20, 0, SEEK_SET);
+    let _ = svc3(NR_WRITE, 20, mk.as_ptr() as u64, mk.len() as u64);
+    linux_exit(1)
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     let mode: &[u8] = env::args().nth(1).unwrap_or(&[]);
@@ -2470,6 +3129,12 @@ pub extern "C" fn rs_main() -> i64 {
     }
     if mode == b"env-child".as_slice() {
         unsafe { run_env_child() }
+    }
+    if mode == b"sigexec-child".as_slice() {
+        unsafe { run_sigexec_child() }
+    }
+    if mode == b"maskexec-child".as_slice() {
+        unsafe { run_maskexec_child() }
     }
     if mode == b"native".as_slice() {
         return run_native();

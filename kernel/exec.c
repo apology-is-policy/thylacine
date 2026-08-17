@@ -533,24 +533,30 @@ static bool exec_fill_ptr_vector(u64 *out, u64 base_va,
 // the user VA of the frame's `argc` word.
 // Fill the System V auxv block: AT_PHDR/PHENT/PHNUM/PAGESZ, AT_HWCAP (the
 // Linux-compatible feature word from g_hw_features.linux_hwcap — read-only
-// after boot, so a plain read is coherent), AT_RANDOM, the OPTIONAL
+// after boot, so a plain read is coherent), AT_RANDOM, AT_ENTRY, the OPTIONAL
 // AT_VDSO_CLOCK (only when vdso_va != 0 — the page mapped), then the AT_NULL
-// terminator. `a` has room for EXEC_INIT_AUXV_COUNT (8) entries; with no
-// vDSO it writes 7 and the 8th 16-byte slot stays the caller-zeroed padding
+// terminator. `a` has room for EXEC_INIT_AUXV_COUNT (9) entries; with no
+// vDSO it writes 8 and the 9th 16-byte slot stays the caller-zeroed padding
 // before the AT_RANDOM block (the reader stops at the AT_NULL terminator). Both
 // frame shapes route through here, so the entry set cannot diverge.
-_Static_assert(EXEC_INIT_AUXV_COUNT == 8,
-               "exec_fill_auxv reserves room for exactly 8 auxv entries "
+//
+// AT_ENTRY (D-2) is the image's FINAL entry — img->entry, which already
+// carries the PIE bias. Unconditional: an ET_EXEC's entry is as real as a
+// PIE's, and a tag that appears only sometimes is the harder contract to
+// reason about. See elf.h for what it is and is not load-bearing for.
+_Static_assert(EXEC_INIT_AUXV_COUNT == 9,
+               "exec_fill_auxv reserves room for exactly 9 auxv entries "
                "(AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_HWCAP, AT_RANDOM, "
-               "AT_VDSO_CLOCK, AT_NULL) — keep this in sync with the macro");
+               "AT_ENTRY, AT_VDSO_CLOCK, AT_NULL) — keep this in sync with the macro");
 static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
-                           u64 rand_va, u64 vdso_va) {
+                           u64 rand_va, u64 vdso_va, u64 entry_va) {
     *a++ = AT_PHDR;   *a++ = phdr_va;
     *a++ = AT_PHENT;  *a++ = phent;
     *a++ = AT_PHNUM;  *a++ = phnum;
     *a++ = AT_PAGESZ; *a++ = PAGE_SIZE;
     *a++ = AT_HWCAP;  *a++ = g_hw_features.linux_hwcap;
     *a++ = AT_RANDOM; *a++ = rand_va;
+    *a++ = AT_ENTRY;  *a++ = entry_va;
     if (vdso_va) { *a++ = AT_VDSO_CLOCK; *a++ = vdso_va; }
     *a++ = AT_NULL;   *a++ = 0;
 }
@@ -577,11 +583,9 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
     if (argc > 0) {
         if (argv_data_len == 0 || !argv_data)
             extinction("exec_build_init_stack: argc > 0 with no argv_data");
-        if (argc > 512u)                   // mirrors SYS_SPAWN_ARGV_MAX — kept
-                                           // local to this file to avoid a
-                                           // syscall.h include cycle
+        if (argc > EXEC_ARGV_MAX)
             extinction("exec_build_init_stack: argc exceeds bound");
-        if (argv_data_len > 65536u)        // mirrors SYS_SPAWN_ARGV_DATA_MAX
+        if (argv_data_len > EXEC_ARGV_DATA_MAX)
             extinction("exec_build_init_stack: argv_data_len exceeds bound");
         if (argv_data[argv_data_len - 1] != '\0')
             extinction("exec_build_init_stack: argv_data not NUL-terminated");
@@ -687,7 +691,7 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
     // block ends precisely where the AT_RANDOM padding begins. The trailing
     // slots beyond the AT_NULL the helper writes stay zero.
     exec_fill_auxv(&w[3 + argc + envc], phdr_va, phent, phnum,
-                   sp + random_offset_from_sp, vdso_va);
+                   sp + random_offset_from_sp, vdso_va, img->entry);
 
     // Copy both strings regions in. Bounded by the frame_size arithmetic above,
     // which reserved exactly argv_data_len + env_data_len bytes after the
@@ -884,9 +888,16 @@ static int map_file_backed(struct AddrSpace *as, bool exempt, struct Spoor *exe,
     // image_lookup_or_create CONSUMES one spoor ref (adopts on miss / clunks on
     // hit). The thunk keeps the borrowed `exe`, so hand the lookup a FRESH ref;
     // on a NULL return it consumed nothing -> drop the fresh ref.
+    //
+    // #194: the sampled size lets the fault arm refuse pages wholly past EOF,
+    // which closes the lying-ELF mint (a phdr claiming filesz beyond the real
+    // file end used to demand-zero the difference, uncharged). exec ADMITS
+    // UNKNOWN -- the only size-less backing Dev is the baked ramfs, which no
+    // guest can write, so a lying ELF cannot exist there.
     spoor_ref(exe);
     struct Burrow *b = image_lookup_or_create(exe, seg->file_offset, seg->filesz,
-                                              (seg->flags & PF_X) != 0);
+                                              (seg->flags & PF_X) != 0,
+                                              spoor_file_size(exe));
     if (!b) { spoor_clunk(exe); return -1; }
 
     // The segment's own ELF prot: R+X for text, R-only (XN) for rodata. W^X
@@ -1047,6 +1058,130 @@ static void *exec_read_header(struct Spoor *exe, size_t *got_out) {
     return hdr;
 }
 
+// =============================================================================
+// DISTRO D-4 -- the PT_INTERP rewrite to the interpreter (docs/DISTRO.md 7.1).
+// =============================================================================
+//
+// The kernel loads exactly ONE image per exec, before D-4 and after it. What
+// changes is WHICH image: a PHENO_LINUX exec of a binary carrying PT_INTERP
+// loads the INTERPRETER, and hands it the program on its own command line.
+// Stock ldso then open()/mmap()s the program itself -- its supported
+// direct-invocation mode. That mode is selected by `AT_PHDR == ldso.phdr`
+// (musl dynlink.c:1834), which is automatically true once the ldso IS the
+// loaded image, so no auxv field changes here.
+//
+// The shape, and why every slot of it is there:
+//
+//     [interp, "--argv0", orig_argv0, "--", orig_path, orig argv[1..]]
+//
+// musl's direct mode uses ONE slot for both "which file to load" and "what
+// argv[0] becomes" (dynlink.c:1901 then 1913). Passing only the path would
+// therefore hand the program the name it was RESOLVED from instead of the name
+// its caller INVOKED it by -- and argv[0] is a dispatch input for the two
+// programs this arc runs: busybox picks its applet from basename(argv[0]), and
+// a login shell is identified by a leading '-'. `--argv0` separates the two
+// (dynlink.c:1883, applied at :2071). `--` is unconditional so that a program
+// path beginning with "--" is not eaten by the option parser, and so the shape
+// does not vary with its data -- a shape with two branches is a shape whose
+// second branch never gets exercised.
+//
+// musl consumes exactly the four inserted slots and rewrites argc in argv[-1]
+// (dynlink.c:1891), so the program observes the ORIGINAL argc and vector.
+
+// Build the rewritten block. Returns a kmalloc'd buffer (caller frees) with
+// *out_len / *out_argc set, or NULL if it does not fit the argv bounds or the
+// allocation fails. Pure: touches no Proc and no address space.
+char *exec_interp_argv(const char *interp, u32 interp_len,
+                       const char *path, u32 path_len,
+                       const char *argv_data, u32 argv_data_len, u32 argc,
+                       u32 *out_len, u32 *out_argc) {
+    static const char OPT_ARGV0[] = "--argv0";   // 7 + NUL
+    static const char OPT_END[]   = "--";        // 2 + NUL
+
+    // THE INPUTS ARE VALIDATED, NOT TRUSTED, and the reason is specific: the
+    // block this returns goes straight to exec_build_init_stack, which
+    // EXTINCTS when the NUL count disagrees with argc. Every rule below exists
+    // so that identity holds for ANY input rather than only for the two
+    // production callers -- an off-by-one reached from a container is a dead
+    // kernel, not a failed exec, and "the callers already check" is exactly the
+    // argument that stops being true when a third caller appears.
+    //
+    // An embedded NUL inside `interp` or `path` would split one slot into two
+    // and desync the count. Neither producer can emit one today
+    // (elf_read_interp scans TO the first NUL; both exec entries reject an
+    // embedded NUL in the path), which is precisely why it would rot unchecked.
+    if (!interp || interp_len == 0) return NULL;
+    if (!path   || path_len   == 0) return NULL;   // the ldso would open("")
+    for (u32 i = 0; i < interp_len; i++) if (interp[i] == '\0') return NULL;
+    for (u32 i = 0; i < path_len;   i++) if (path[i]   == '\0') return NULL;
+
+
+
+    // argv[0] of the original vector, and the tail that follows it. argc == 0
+    // is representable on both entries (execve(p, NULL, e) and a no-argv
+    // spawn); it has no argv[0], so the program is handed an empty one. The
+    // program then sees argc == 1 rather than 0, which is unavoidable: the
+    // interpreter's own command line must name a pathname, so a zero-length
+    // vector cannot be expressed through it (DISTRO.md 3.2 ledger).
+    const char *a0 = "";
+    u32 a0_len = 0;
+    const char *tail = NULL;
+    u32 tail_len = 0;
+    if (argc > 0) {
+        // The caller's packing contract, RE-CHECKED rather than assumed. Both
+        // production entries validate it before exec_load_into gets here, but
+        // this function is exported and its output goes straight to a frame
+        // builder that EXTINCTS on a bad count -- so an input that cannot
+        // produce a well-formed block is refused at the door instead of being
+        // copied into one. (Found by its own test, which passed a block whose
+        // trailing NUL had been trimmed and got a mis-packed block back.)
+        if (!argv_data || argv_data_len == 0) return NULL;
+        if (argv_data[argv_data_len - 1] != '\0') return NULL;
+        // The count itself, not just the termination. A block with FEWER NULs
+        // than argc claims produces a rebuilt block with fewer than out_argc,
+        // and the frame builder answers that with an extinction rather than an
+        // error -- so it is refused here, where it is still an error.
+        u32 nuls = 0;
+        for (u32 i = 0; i < argv_data_len; i++) if (argv_data[i] == '\0') nuls++;
+        if (nuls != argc) return NULL;
+        a0 = argv_data;
+        while (a0_len < argv_data_len && argv_data[a0_len] != '\0') a0_len++;
+        if (a0_len == argv_data_len) return NULL;   // unterminated argv[0]
+        tail     = argv_data + a0_len + 1;
+        tail_len = argv_data_len - (a0_len + 1);
+    }
+
+    // u64 throughout so the bound below is the only thing that can reject an
+    // oversized request -- never a wrapped u32 that looks small.
+    u64 len = (u64)interp_len + 1
+            + sizeof(OPT_ARGV0)          // includes its NUL
+            + (u64)a0_len + 1
+            + sizeof(OPT_END)            // includes its NUL
+            + (u64)path_len + 1
+            + (u64)tail_len;
+    u64 n   = (u64)(argc > 0 ? argc - 1 : 0) + 5;   // + interp, --argv0, a0,
+                                                    //   --, path
+    if (len > EXEC_ARGV_DATA_MAX || n > EXEC_ARGV_MAX) return NULL;
+
+    char *blob = kmalloc((size_t)len, 0);
+    if (!blob) return NULL;
+
+    u32 w = 0;
+    for (u32 i = 0; i < interp_len; i++) blob[w++] = interp[i];
+    blob[w++] = '\0';
+    for (u32 i = 0; i < sizeof(OPT_ARGV0); i++) blob[w++] = OPT_ARGV0[i];
+    for (u32 i = 0; i < a0_len; i++) blob[w++] = a0[i];
+    blob[w++] = '\0';
+    for (u32 i = 0; i < sizeof(OPT_END); i++) blob[w++] = OPT_END[i];
+    for (u32 i = 0; i < path_len; i++) blob[w++] = path[i];
+    blob[w++] = '\0';
+    for (u32 i = 0; i < tail_len; i++) blob[w++] = tail[i];
+
+    *out_len  = w;
+    *out_argc = (u32)n;
+    return blob;
+}
+
 // LINEAGE L-2: the file-backed load, addressed by AddrSpace. This is the whole
 // of exec_setup_from_spoor's body except the Proc-side name/exe_path stamps,
 // which are deliberately NOT here -- they mutate the Proc, and execve must be
@@ -1054,11 +1189,56 @@ static void *exec_read_header(struct Spoor *exe, size_t *got_out) {
 // only at the commit point. The spawn wrapper below keeps applying them inline
 // (its Proc is a fresh child that is discarded on failure, so the distinction
 // cannot be observed there).
-int exec_load_into(struct AddrSpace *as, bool exempt,
+// D-4 splits the body out so that the two things the rewrite ALLOCATES -- the
+// interpreter's pinned Spoor and the rebuilt argv block -- have exactly one
+// disposal site. The body has a dozen early returns; reporting what it took
+// through out-params means every one of them is covered by construction rather
+// than by a reviewer checking twelve paths (the F1/F5 lesson from D-3c, where a
+// cleanup that was right at three sites was missing at the fourth).
+static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
+                          struct Spoor *exe, size_t exe_size,
+                          const char *prog_name, u32 prog_name_len,
+                          const char *argv_data, u32 argv_data_len, u32 argc,
+                          const char *env_data, u32 env_data_len, u32 envc,
+                          u64 *entry_out, u64 *sp_out,
+                          struct Spoor **interp_out, char **rw_argv_out);
+
+int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                    struct Spoor *exe, size_t exe_size,
+                   const char *prog_name, u32 prog_name_len,
                    const char *argv_data, u32 argv_data_len, u32 argc,
                    const char *env_data, u32 env_data_len, u32 envc,
                    u64 *entry_out, u64 *sp_out) {
+    struct Spoor *interp = NULL;    // owned HERE once the body sets it; the
+    char *rw_argv        = NULL;    // caller's own `exe` is untouched either way
+    int rc = exec_load_body(as, exempt, nsp, exe, exe_size,
+                            prog_name, prog_name_len,
+                            argv_data, argv_data_len, argc,
+                            env_data, env_data_len, envc,
+                            entry_out, sp_out, &interp, &rw_argv);
+    // Both frees are legal here for the reason exec_setup_from_spoor's own
+    // spoor_clunk is: no lock is held across this return, and a FILE Spoor's
+    // clunk may sleep on a 9P Tclunk.
+    if (interp) spoor_clunk(interp);
+    kfree(rw_argv);
+    return rc;
+}
+
+static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
+                          struct Spoor *exe, size_t exe_size,
+                          const char *prog_name, u32 prog_name_len,
+                          const char *argv_data, u32 argv_data_len, u32 argc,
+                          const char *env_data, u32 env_data_len, u32 envc,
+                          u64 *entry_out, u64 *sp_out,
+                          struct Spoor **interp_out, char **rw_argv_out) {
+    // The disposal contract FIRST, before any return can skip it: a caller
+    // without out-params would silently leak the interpreter Spoor and the
+    // rebuilt argv, which is the F7 shape from D-3c (a tolerant NULL that
+    // leaks is worse than the inline free it replaced).
+    if (!interp_out || !rw_argv_out)
+        extinction("exec_load_body without disposal out-params");
+    *interp_out  = NULL;
+    *rw_argv_out = NULL;
     if (!as || !exe || !entry_out || !sp_out)  return -1;
     if (as->vmas != NULL)                      return -1;     // clean target only
     if (!exe->dev || !exe->dev->read)          return -1;
@@ -1090,18 +1270,99 @@ int exec_load_into(struct AddrSpace *as, bool exempt,
     if (!hdr)                                  return -1;
     struct elf_image img;
     int r = elf_load(hdr, exe_size, &img);
+
+    // DISTRO D-4: PT_INTERP -> the interpreter. `elf_load` already reports the
+    // segment as ELF_LOAD_HAS_INTERP, which was previously only a refusal; this
+    // upgrades it from diagnosis to dispatch for a PHENO_LINUX image, and
+    // leaves it a refusal for every native one.
+    //
+    // ONE LEVEL, structurally: this is straight-line, not a loop, so the second
+    // `elf_load` below sees the INTERPRETER's phdrs and an interpreter that
+    // itself carries PT_INTERP falls through to the unchanged refusal.
+    if (r == ELF_LOAD_HAS_INTERP && nsp && nsp->phenotype == PHENO_LINUX) {
+        if (!prog_name || prog_name_len == 0) {
+            // Unreachable today: the one entry that can produce a PHENO_LINUX
+            // image threads its name, and a PHENO_LINUX Proc cannot reach the
+            // native SYS_SPAWN numbers at all (vivarium.h). Loud rather than
+            // silent because the failure mode of a future entry forgetting the
+            // name is "dynamic binaries mysteriously do not run here".
+            exec_report_fail("PT_INTERP rewrite needs the program's own name and "
+                             "this exec entry threaded none -- refusing", 0);
+        } else {
+            char interp[ELF_INTERP_MAX + 1];
+            size_t ilen = elf_read_interp(hdr, hdr_got, interp, sizeof(interp));
+            // ilen == 0 means the path did not survive the bounded read
+            // (outside the header prefix, unterminated, empty, too long).
+            // Fall through to the refusal -- never resolve a partial path.
+            if (ilen > 0) {
+                // Resolved through the EXECING Proc's namespace, by the same
+                // OEXEC-gated helper the program itself came through: the
+                // interpreter path is container-relative and crosses its own
+                // symlink (which is why D-1 precedes D-4), and it must be
+                // executable from where the program is, not from anywhere else.
+                size_t isize = 0;
+                struct Spoor *ispoor =
+                    exec_resolve_from_namespace(nsp, interp, ilen, &isize);
+                if (!ispoor) {
+                    exec_report_fail("PT_INTERP names an interpreter this "
+                                     "namespace cannot execute -- refusing", 0);
+                } else {
+                    u32 nlen = 0, nargc = 0;
+                    char *nargv = exec_interp_argv(interp, (u32)ilen,
+                                                   prog_name, prog_name_len,
+                                                   argv_data, argv_data_len, argc,
+                                                   &nlen, &nargc);
+                    if (!nargv) {
+                        spoor_clunk(ispoor);
+                        exec_report_fail("PT_INTERP rewrite does not fit the argv "
+                                         "bound -- refusing", (u64)argv_data_len);
+                    } else {
+                        // Committed. From here the image being loaded is the
+                        // INTERPRETER; `exe` is reassigned and the caller's own
+                        // Spoor is left exactly as it was (it still owns that
+                        // ref, and its Proc-side stamps still name the PROGRAM,
+                        // which is why /proc/<pid>/exe stays faithful).
+                        *interp_out  = ispoor;      // disposal: the wrapper
+                        *rw_argv_out = nargv;
+                        exe            = ispoor;
+                        exe_size       = isize;
+                        argv_data      = nargv;
+                        argv_data_len  = nlen;
+                        argc           = nargc;
+
+                        kfree(hdr);
+                        hdr = exec_read_header(exe, &hdr_got);
+                        if (!hdr)              return -1;
+                        r = elf_load(hdr, exe_size, &img);
+                    }
+                }
+            }
+        }
+    }
+
     // VIVARIUM section 12.1 rule 4: the ELF brand is ADVISORY -- it may never
     // decide a phenotype (rule 3: outside a vivarium the answer is always
     // native), but an obvious mismatch should earn "a diagnostic and a clean
     // failure, not a silent mis-decode". This is that diagnostic, and it is
     // the hint function's first caller. Consulted ONLY on an already-failed
     // load, so it can never change an outcome -- it only explains one. The
-    // failure is the pre-existing dynamic-binary reject (v1.0 is static-only,
-    // section 9's OUT list); before this, a user got a bare -1.
+    // failure is the dynamic-binary reject; before this, a user got a bare -1.
+    //
+    // D-4 SPLIT THE MESSAGE, because the old one ("Thylacine v1.0 runs
+    // statically-linked ELF only") stopped being true the moment a PHENO_LINUX
+    // exec started running interpreters -- and a diagnostic that states a rule
+    // the kernel no longer follows sends its reader to the wrong place. Which
+    // arm we are on is decided by whether the rewrite already ran: `*interp_out`
+    // is the record of that, so a post-rewrite failure names the INTERPRETER
+    // rather than repeating the native refusal about it.
     if (r == ELF_LOAD_HAS_INTERP || r == ELF_LOAD_HAS_DYNAMIC) {
-        if (elf_brand_hint(hdr, hdr_got) == ELF_BRAND_LINUX_LIKELY) {
-            uart_puts("exec: dynamic Linux binary rejected -- Thylacine v1.0 "
-                      "runs statically-linked ELF only (VIVARIUM section 9)\n");
+        if (*interp_out) {
+            uart_puts("exec: the PT_INTERP interpreter is itself dynamic -- "
+                      "one interpreter level only (DISTRO section 7.1)\n");
+        } else if (elf_brand_hint(hdr, hdr_got) == ELF_BRAND_LINUX_LIKELY) {
+            uart_puts("exec: dynamic Linux binary rejected -- a NATIVE exec "
+                      "runs statically-linked ELF only; a dynamic one needs a "
+                      "PHENO_LINUX vivarium (DISTRO section 7.1)\n");
         }
     }
     kfree(hdr);
@@ -1200,6 +1461,7 @@ int exec_load_into(struct AddrSpace *as, bool exempt,
 // apply the two Proc-side stamps. Every SYS_SPAWN_* thunk and the boot init-load
 // come through here; execve does not (see exec_load_into's header).
 int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
+                          const char *prog_name, u32 prog_name_len,
                           const char *argv_data, u32 argv_data_len, u32 argc,
                           u64 *entry_out, u64 *sp_out) {
     if (!p || !exe)                            return -1;
@@ -1229,7 +1491,8 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
         return -1;
     }
 
-    int rc = exec_load_into(p->as, proc_resource_exempt(p), exe, exe_size,
+    int rc = exec_load_into(p->as, proc_resource_exempt(p), p, exe, exe_size,
+                            prog_name, prog_name_len,
                             argv_data, argv_data_len, argc,
                             env_data, env_len, envc, entry_out, sp_out);
     kfree(env_data);            // copied into the frame; no-op on NULL

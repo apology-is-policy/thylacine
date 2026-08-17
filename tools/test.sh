@@ -120,6 +120,11 @@ INPUT_INJECT="${THYLACINE_INPUT_INJECT:-1}"
 INPUT_SENTINEL="virtio-input: AWAITING_QMP_KEY"
 INPUT_SUCCESS_MARKER="virtio-input: saw target key"
 QMP_SOCK="${THYLACINE_QMP_SOCK:-$BUILD_DIR/qmp.sock}"
+# #230: the G-4 gate uses run-vm.sh's SECOND monitor. One QMP chardev serves one
+# client, and the injector holds the first for the whole boot whenever its
+# sentinel never arrives -- which is every lean-shape boot. Separate monitors
+# make the two consumers independent instead of ordering-dependent.
+QMP_GATE_SOCK="${THYLACINE_QMP_SOCK2:-$BUILD_DIR/qmp-gate.sock}"
 INJECT_LOG="$BUILD_DIR/test-inject.log"
 
 mkdir -p "$BUILD_DIR"
@@ -131,6 +136,31 @@ if [[ ! -f "$KERNEL_ELF" ]]; then
         "$REPO_ROOT/tools/build.sh" kernel "--sanitize=$sanitize"
     else
         "$REPO_ROOT/tools/build.sh" kernel
+    fi
+fi
+
+# #229: build the LEAN shape here, before booting the dev one. #228's root cause
+# was not that --production was broken -- it was that NOTHING BUILT IT, so it
+# stayed broken silently for weeks while every gate stayed green. A Makefile
+# target nobody remembers to run does not fix that; putting it in the loop that
+# actually runs does. It costs ~2 s and does not touch the tree (scratch dir).
+#
+# Skipped, not failed, when its input is absent: the generated headers are a
+# product of `build.sh userspace`, and a kernel-only iteration legitimately has
+# no build/generated. A SKIP is REPORTED, and reported as not-coverage (#212).
+if [[ -x "$REPO_ROOT/tools/check-production.sh" ]]; then
+    if [[ -d "$REPO_ROOT/build/generated" ]]; then
+        if prod_out="$("$REPO_ROOT/tools/check-production.sh" 2>&1)"; then
+            echo "==> lean --production shape: builds (#228/#229 guard)"
+        else
+            echo "$prod_out" >&2
+            echo "==> FAIL: the lean --production shape does not build." >&2
+            echo "    Nothing else here can see this -- the dev boot below uses" >&2
+            echo "    THYLA_BOOT_PROBES=ON and passes either way." >&2
+            exit 1
+        fi
+    else
+        echo "==> lean --production shape: SKIPPED (no build/generated -- NOT coverage)"
     fi
 fi
 
@@ -210,14 +240,35 @@ while [[ $(date +%s) -lt $deadline ]]; do
         # persistent miss is a FAIL (tapestryd or aurora down/blank). Skipped
         # when the device/socket is absent (THYLACINE_NO_GPU=1 /
         # THYLACINE_NO_QMP=1), THYLACINE_GPU_GATE=0, or python3 is missing.
-        if [[ "$result" == "pass" && "${THYLACINE_NO_GPU:-0}" != "1" \
+        # The build shape, from joey's own report (#212's line, which prints
+        # before the banner and so is already in the log). Used below to skip
+        # gates that are structurally inapplicable to the lean image -- keyed on
+        # the SHAPE, never on the absence of the thing a gate looks for, since
+        # that absence is also what the corresponding regression looks like.
+        #
+        # #230 NARROWED THIS. It briefly also skipped the G-4 console gate,
+        # because the lean shape had no compositor -- but that was the DEFECT,
+        # not the shape: the warden was probe-gated, so the lean image had no
+        # drivers at all. With the warden unconditional, the lean image renders
+        # a console like any other and G-4 applies to it. Only the debug-probe
+        # check below stays skipped, because debug-probe really is a probe.
+        lean_shape=0
+        grep -aq "ARC-GATES not-built" "$LOG_FILE" 2>/dev/null && lean_shape=1
+        if [[ "$result" == "pass" \
+              && "${THYLACINE_NO_GPU:-0}" != "1" \
               && "${THYLACINE_NO_QMP:-0}" != "1" && "${THYLACINE_GPU_GATE:-1}" != "0" ]] \
-           && [[ -S "$QMP_SOCK" ]] && command -v python3 >/dev/null 2>&1 \
+           && [[ -S "$QMP_GATE_SOCK" ]] && command -v python3 >/dev/null 2>&1 \
            && kill -0 "$QEMU_PID" 2>/dev/null; then
+            # Keep the LAST attempt's output: screendump -c prints the actual
+            # numbers ("bg 12.3%, exact-fg 41, edges ...") and names which
+            # threshold missed. Discarding it left this gate's FAIL arm
+            # guessing at causes in prose -- and a gate that cannot say why it
+            # failed sends the reader to the wrong subsystem (#112's family).
             gpu_gate_ok=0
             for _try in $(seq 1 20); do
-                if "$REPO_ROOT/tools/screendump.sh" -s "$QMP_SOCK" -c \
-                       "$BUILD_DIR/pattern-gate.png" >/dev/null 2>&1; then
+                if "$REPO_ROOT/tools/screendump.sh" -s "$QMP_GATE_SOCK" -c \
+                       "$BUILD_DIR/pattern-gate.png" \
+                       >"$BUILD_DIR/gpu-gate-verify.log" 2>&1; then
                     gpu_gate_ok=1
                     break
                 fi
@@ -228,7 +279,7 @@ while [[ $(date +%s) -lt $deadline ]]; do
                 gpu_gate_ok=0
                 for _try in $(seq 1 6); do
                     sleep 0.7
-                    if "$REPO_ROOT/tools/screendump.sh" -s "$QMP_SOCK" \
+                    if "$REPO_ROOT/tools/screendump.sh" -s "$QMP_GATE_SOCK" \
                            "$BUILD_DIR/pattern-gate2.png" >/dev/null 2>&1; then
                         if ! cmp -s "$BUILD_DIR/pattern-gate.png" \
                                     "$BUILD_DIR/pattern-gate2.png"; then
@@ -259,6 +310,21 @@ while [[ $(date +%s) -lt $deadline ]]; do
 done
 
 # Halt QEMU + reap injector.
+#
+# Report whether QEMU was still alive when we came to kill it, because it is
+# the one fact only this script knows and the SMP gate cannot otherwise
+# recover it (#222). The gate classifies an external kill (#200) from the
+# shell's own job notification -- 'line N: PID Killed: 9' in the harness
+# stream -- but that notification is NOT a "someone else did it" signal:
+# bash emits it whenever a job died by signal and a command boundary elapsed
+# before the shell reaped it, so the harness's OWN kill prints it too if any
+# command runs between the kill and the wait below (measured; the two are
+# adjacent here for exactly that reason, which is a fragile thing to rest a
+# classification on). alive=0 means the harness's kill hit an already-dead
+# process, so a reported signal death cannot have come from here.
+qemu_alive_at_teardown=0
+kill -0 "$QEMU_PID" 2>/dev/null && qemu_alive_at_teardown=1
+echo "==> harness: qemu_alive_at_teardown=$qemu_alive_at_teardown"
 kill -KILL "$QEMU_PID" 2>/dev/null || true
 wait "$QEMU_PID" 2>/dev/null || true
 if [[ -n "$INJECT_PID" ]]; then
@@ -288,8 +354,12 @@ case "$result" in
         # task #70: require the watchpoint fire on any accel that can deliver it.
         # run-vm.sh logs the chosen accel ("==> qemu: accel=<a> ..."), so read it
         # back rather than re-deriving the auto-detect here.
+        # #228: `lean_shape` again -- debug-probe IS a boot probe, so the lean
+        # production shape never runs it and the marker can never appear. Unlike
+        # the virtio-input check below-above, this one has no sentinel of its own
+        # to self-skip on, so it needs the build shape explicitly.
         boot_accel="$(LC_ALL=C sed -n 's/^==> qemu: accel=\([a-z0-9]*\).*$/\1/p' "$LOG_FILE" | head -1 || true)"
-        if [[ -n "$boot_accel" && "$boot_accel" != "tcg" ]] \
+        if [[ -n "$boot_accel" && "$boot_accel" != "tcg" && "${lean_shape:-0}" != "1" ]] \
            && ! grep -aq "$HWWATCH_MARKER" "$LOG_FILE"; then
             echo "==> FAIL: accel=$boot_accel delivers EL0 watchpoints, but debug-probe never reported it." >&2
             echo "    Expected log line: '$HWWATCH_MARKER'" >&2
@@ -301,6 +371,36 @@ case "$result" in
             echo "-----------------------------" >&2
             exit 1
         fi
+        # #212: propagate the DISTRO D-5 / LINEAGE L-6c arc gates into the
+        # verdict. Both soft-skip when their external Alpine bundle is absent,
+        # which is right, but nothing carried the skip into the exit status --
+        # so a tree with a REGRESSED D-1..D-4 chain exited 0 identically to one
+        # where the arc ran. The checker fails on an ABSENT report (a dropped
+        # gate, the shape a green boot could otherwise hide) and otherwise
+        # states what actually ran, in test-interactive.sh's discipline: a skip
+        # is reported, and reported as NOT coverage.
+        # THYLA_ARC_GATES=require makes a skip fatal (for shapes that ship the
+        # fixture); the default stays lenient because a fresh clone has none.
+        #
+        # #232: the same checker now also answers for the three CLADE gates,
+        # which need it more than the arc gates do -- the lean image no longer
+        # compiles them at all, so their silence is correct in one build shape
+        # and a dropped call in the other. It emits ONE LINE PER FAMILY, hence
+        # the read loop: `echo "==> $var"` would prefix only the first and the
+        # clade verdict would print looking like stray log output.
+        # THYLA_CLADE_GATES=require is its separate opt-in (a clade bake is far
+        # rarer than the Alpine bundle, so folding it into --require would
+        # break that flag's existing callers).
+        if ! gate_report="$("$REPO_ROOT/tools/check-arc-gates.sh" "$LOG_FILE")"; then
+            echo "==> FAIL: arc/clade gate verdict (see the reason above)." >&2
+            exit 1
+        fi
+        while IFS= read -r gate_line; do
+            [[ -n "$gate_line" ]] && echo "==> $gate_line"
+        done <<<"$gate_report"
+        if [[ "${lean_shape:-0}" == "1" ]]; then
+            echo "==> lean shape (THYLA_BOOT_PROBES=OFF): debug-probe hwwatch NOT APPLICABLE (the probe is not built, so it is not coverage); the G-4 console gate DID run"
+        fi
         echo "--- log tail ---"
         tail -20 "$LOG_FILE"
         echo "----------------"
@@ -308,10 +408,12 @@ case "$result" in
         ;;
     gpu-gate)
         echo "==> FAIL: G-4 console gate -- the Aurora scanout did not verify." >&2
-        echo "    Either tools/screendump.sh -c could not see the rendered console" >&2
-        echo "    (Bonfire bg dominant + exact-fg text) post-boot, or the liveness" >&2
-        echo "    retry never saw a differing dump (cursor blink / prompt arrival" >&2
-        echo "    -- a dead present loop)." >&2
+        echo "--- screendump -c, last attempt (the numbers, not a guess) ---" >&2
+        cat "$BUILD_DIR/gpu-gate-verify.log" >&2 2>/dev/null || \
+            echo "    (no verify log -- the signature leg never ran)" >&2
+        echo "    An OK line above with a FAIL verdict here means the SIGNATURE" >&2
+        echo "    leg passed and the LIVENESS retry never saw a differing dump" >&2
+        echo "    (cursor blink / prompt arrival -- i.e. a dead present loop)." >&2
         echo "--- aurora/tapestryd/warden log slice ---" >&2
         grep -aE "aurora:|tapestryd:|warden:" "$LOG_FILE" | tail -20 >&2 || true
         echo "---------------------------------------" >&2

@@ -338,12 +338,28 @@ fi
 # Disabled by THYLACINE_NO_QMP=1. The socket path lives under build/
 # alongside other build artifacts; it's overwritten per run (server
 # mode), so stale sockets from a previous run don't accumulate.
+#
+# TWO monitors, not one (#230). A QMP chardev in `server,nowait` mode serves
+# ONE client at a time: while the key-injector holds the monitor for the whole
+# boot (it connects at launch by design, #362), a second connect is REFUSED.
+# That is invisible whenever the injector finishes early -- it sends its key on
+# the AWAITING_QMP_KEY sentinel and exits -- and it bites the moment the
+# sentinel never comes: the lean production shape does not build that probe, so
+# the injector held the socket to teardown and the G-4 console gate failed with
+# `ConnectionRefusedError`, reported as "the Aurora scanout did not verify".
+# A gate blaming the renderer for a socket it could not open sends the reader to
+# the wrong subsystem entirely.
+#
+# So the gate gets its own monitor. Ordering between the two consumers stops
+# mattering, rather than being relied upon.
 qmp_flags=()
 if [[ "${THYLACINE_NO_QMP:-0}" != "1" ]]; then
     qmp_sock="${THYLACINE_QMP_SOCK:-$REPO_ROOT/build/qmp.sock}"
+    qmp_sock2="${THYLACINE_QMP_SOCK2:-$REPO_ROOT/build/qmp-gate.sock}"
     mkdir -p "$(dirname "$qmp_sock")"
-    rm -f "$qmp_sock"
-    qmp_flags=(-qmp "unix:$qmp_sock,server,nowait")
+    rm -f "$qmp_sock" "$qmp_sock2"
+    qmp_flags=(-qmp "unix:$qmp_sock,server,nowait"
+               -qmp "unix:$qmp_sock2,server,nowait")
 fi
 
 # 9P host share — appears at /host inside the guest once the 9P client lands

@@ -877,7 +877,10 @@ early-console `chosen/stdout-path` selection is kernel.
   enforced) -- then exits, and the warden reaps it. Proven in joey's
   `THYLA_BOOT_PROBES` ladder: `45 /hw nodes discovered -> bind arm,pl061 ->
   1 bound, 1 up -> joey: warden ok -> Thylacine boot OK`, 0 EXTINCTION, + the SMP
-  gate (default + UBSan x smp4/smp8). One notable bring-up find: a boot-probe Proc
+  gate (default + UBSan x smp4/smp8). **The PROBE stays ladder-gated; the WARDEN
+  no longer is (#230)** -- `menagerie-probe` is one of the two fixture manifests
+  the warden binds only when joey passes `--with-fixtures`, while the warden
+  itself runs in every build shape, since netd and tapestryd are bound by it. One notable bring-up find: a boot-probe Proc
   has no stdio fds, so `Command`'s default `Stdio::Inherit` (which bumps the
   parent's fd 0/1/2) fails before the kernel even resolves the binary -- the
   warden hands each driver `/dev/null` for the three slots (the driver logs via

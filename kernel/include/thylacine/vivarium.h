@@ -505,7 +505,12 @@ void vivarium_stat_to_linux(const struct t_stat *in, struct viv_linux_stat *out)
 // `vivarium_stat_to_linux`, and copy out 128 bytes — exactly `fstat`'s shape.
 // So `newfstatat` is `openat`'s front half joined to `fstat`'s back half, and
 // the missing build function is what that join looks like.
-enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags);
+//
+// D-1: `*stalk_flags_out` is 0 (follow -- POSIX stat) or nonzero (the lstat
+// shape -- AT_SYMLINK_NOFOLLOW admitted since symlinks landed); the shell
+// forwards it to sys_stat_for_proc, which owns the resolver vocabulary.
+enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags,
+                                         u32 *stalk_flags_out);
 
 // -----------------------------------------------------------------------------
 // TIER 2 — `mmap` (V-2d). See VIVARIUM.md §6.21.
@@ -604,6 +609,123 @@ enum {
 // or VIV_FORWARD. Never ENOSYS: `mmap` exists.
 enum viv_verdict vivarium_mmap_decide(u64 addr, u64 prot, u64 flags,
                                       u64 fd, u64 offset);
+
+// -----------------------------------------------------------------------------
+// TIER 2 — the FILE mmap arm (DISTRO D-3). See docs/DISTRO.md §6.
+//
+// A SECOND decider rather than a widened first one, and the split is deliberate.
+// The two domains are disjoint by construction (the anon arm demands
+// MAP_ANONYMOUS and fd == -1; this one demands its absence and fd >= 0), so
+// nothing needs to arbitrate between them -- but keeping them apart means the
+// anon arm's 18 domain tests still exercise BYTE-IDENTICAL code after D-3, which
+// is what makes them a regression net for this change rather than a casualty of
+// it. `vivarium_mmap_arms_disjoint` pins the disjointness itself.
+//
+// The domain is MEASURED off stock ldso, not derived from Linux. musl's
+// map_library (third_party/musl/ldso/dynlink.c:809) opens a library with exactly
+// one call of this shape -- the whole-span reservation:
+//
+//     mmap(addr_min, map_len, prot, MAP_PRIVATE, fd, off_start)
+//
+// where `prot` is the LOWEST PT_LOAD's prot and `addr_min` is a bare hint (no
+// MAP_FIXED). Read against the shipped Alpine libc that is
+// `mmap(0, 0xc3000, PROT_READ|PROT_EXEC, MAP_PRIVATE, fd, 0)`.
+//
+// THE ADMITTED prot IS R, OR R|X -- NEVER WRITABLE, and that is the I-36 line
+// rather than a convenience. A writable file mapping would have to write back,
+// which is the one thing REVENANT's file-backed Burrow does not do; D-3's answer
+// to a writable request is a private eager COPY (a separate arm), so no
+// userspace writable file mapping exists on any path. PROT_WRITE therefore
+// declines HERE and is served elsewhere -- it does not ride this arm.
+//
+// `offset` MUST be page-aligned. Linux gives EINVAL for a misaligned offset, but
+// this is stricter than fidelity: map_file_backed's #149 note records that the
+// FILE fault arm derives each page's file position as
+// `v->file_offset + (page-floored burrow offset)`, which is only the mapping's
+// own bytes when the Burrow's offset 0 IS the mapping's start. The alignment
+// requirement is what keeps that identity true by construction.
+//
+// `len` is NOT judged here, for the same reason the anon arm does not judge it.
+#define VIV_MMAP_FILE_FLAGS_ADMITTED ((u32)VIV_MAP_PRIVATE)
+#define VIV_MMAP_FILE_PROT_ADMITTED  ((u32)(VIV_PROT_READ | VIV_PROT_EXEC))
+
+enum viv_verdict vivarium_mmap_file_decide(u64 prot, u64 flags,
+                                           u64 fd, u64 offset);
+
+// -----------------------------------------------------------------------------
+// TIER 2 — the two MAP_FIXED arms (DISTRO D-3b). See docs/DISTRO.md §6.
+//
+// map_library reserves a whole span (the D-3a arm above) and then OVERLAYS each
+// remaining PT_LOAD onto it. Two more shapes, both MEASURED off dynlink.c:
+//
+//   arm 2, :842 -- every PT_LOAD past the lowest, at its OWN prot:
+//     mmap_fixed(base+this_min, this_max-this_min, prot,
+//                MAP_PRIVATE|MAP_FIXED, fd, off_start)
+//
+//   arm 3, :851 -- the whole-page bss tail, gated on
+//   `p_memsz > p_filesz && (p_flags & PF_W)`:
+//     mmap_fixed(pgbrk, base+this_max-pgbrk, prot,
+//                MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)
+//
+// NOTE that arm 2's `this_max` derives from p_memsz, NOT p_filesz -- so arm 2
+// maps file-backed PAST the file's data and arm 3 then overlays the whole bss
+// pages. Between them musl memsets the partial tail page (:849), which is a
+// WRITE into arm 2's mapping.
+//
+// THAT WRITE IS WHY A WRITABLE arm 2 IS NOT A FILE MAPPING. A writable private
+// file mapping would need copy-on-write over the shared Image-cache pages, and a
+// bug there would leak one container's writes into another's view of the same
+// library. So a PROT_WRITE arm-2 request is served by an EAGER PRIVATE COPY into
+// an anonymous Burrow -- which is a conforming MAP_PRIVATE (POSIX and Linux both
+// leave post-mmap file changes unspecified for private mappings), is the
+// CONSERVATIVE reading, and keeps "no userspace writable file mapping exists"
+// true by construction rather than by care. I-36 is untouched.
+//
+// MEASURED cost of that copy, over every ELF in the stock Alpine rootfs: 888 KiB
+// if every library were mapped at once; 372 KiB for the largest single one
+// (libcrypto.so.3); 16 KiB for the ld-musl a typical dynamic process maps.
+//
+// ALSO MEASURED, and it bounds what the in-guest gate can prove: all 18 ELFs in
+// that rootfs carry exactly two PT_LOADs, `R-X` then `RW-`. So arm 2 is ALWAYS
+// writable there -- the non-writable arm-2 path (which rides the shared Image
+// cache exactly as D-3a does) has NO producer on this rootfs and is exercised
+// only by the unit suite. It is built because the ELF format permits it and a
+// `-z separate-code` toolchain (binutils >= 2.31, so Debian/Fedora) emits the
+// four-segment `R / R-X / R / RW-` layout that produces it; it is NOT claimed as
+// gate-covered.
+//
+// PROT_NONE DECLINES on both arms, and on arm 3 that deliberately diverges from
+// the non-fixed anon arm, which degrades PROT_NONE to writable. The difference
+// is that a FIXED PROT_NONE request over an existing mapping is a GUARD -- and
+// silently handing back a writable page where a guard was asked for is not a
+// degradation anyone would sanction. Measured, it costs nothing: arm 3 fires
+// only under PF_W, so its prot always carries R|W.
+//
+// `addr` is a REQUIREMENT here, not the hint it is on the non-fixed arms, so it
+// must be page-aligned and non-zero (a fixed map at NULL is refused).
+#define VIV_MMAP_FIXED_FILE_FLAGS_ADMITTED \
+    ((u32)(VIV_MAP_PRIVATE | VIV_MAP_FIXED))
+#define VIV_MMAP_FIXED_FILE_PROT_ADMITTED \
+    ((u32)(VIV_PROT_READ | VIV_PROT_WRITE | VIV_PROT_EXEC))
+
+#define VIV_MMAP_FIXED_ANON_FLAGS_ADMITTED \
+    ((u32)(VIV_MAP_PRIVATE | VIV_MAP_FIXED | VIV_MAP_ANONYMOUS))
+#define VIV_MMAP_FIXED_ANON_PROT_ADMITTED \
+    ((u32)(VIV_PROT_READ | VIV_PROT_WRITE))
+
+enum viv_verdict vivarium_mmap_fixed_file_decide(u64 addr, u64 prot, u64 flags,
+                                                 u64 fd, u64 offset);
+enum viv_verdict vivarium_mmap_fixed_anon_decide(u64 addr, u64 prot, u64 flags,
+                                                 u64 fd, u64 offset);
+
+// True iff no argument tuple is admitted by more than ONE mmap arm. Pure; exists
+// so the disjointness the arms' comments CLAIM is a checked fact rather than a
+// set of assertions that agree with each other. Covers all four arms pairwise --
+// they separate on the flags word alone (each arm demands EXACT equality against
+// a distinct value), so this also fails loudly if a future edit relaxes any of
+// those equalities into a mask test.
+bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
+                                 u64 fd, u64 offset);
 
 // -----------------------------------------------------------------------------
 // TIER 0/2 — signals (V-6). See VIVARIUM.md §6.22.
@@ -781,10 +903,36 @@ u64 viv_signote_to_signal(enum viv_signote note);
 // consume. Dropping them at delivery is what Linux does and what keeps the
 // queue bounded.
 //
-// SIGTSTP is deliberately NOT here: its default is STOP, not ignore, and the
-// kernel NDFLT-stop arm is an unbuilt ABI decision (task #15). Claiming
-// "ignore" for it would be a stored lie in the other direction.
+// SIGTSTP is deliberately NOT here: its default is STOP, not ignore, so
+// claiming "ignore" for it would be a stored lie in the other direction. The
+// STOP is applied, not dropped -- at POST time by job_stop_cb when any thread
+// leaves the tty family unmasked, and at DELIVERY time by the NOTE_DFL_STOP
+// arm of notes_deliver_at_el0_return when they were all masked and the note
+// had to wait. So the "queue would fill with notes nothing consumes" hazard
+// above does not apply to it either: both arms consume.
+//
+// (This used to defer on "the kernel NDFLT-stop arm is an unbuilt ABI decision
+// (task #15)". 434c3fd9 built that arm; the premise is discharged.)
 bool viv_signote_default_is_ignore(enum viv_signote note);
+
+// Is this note's LINUX default action "terminate"? PURE. SIGPIPE, SIGINT,
+// SIGHUP, SIGQUIT -- the catchable terminate-default signals a note carries.
+//
+// The phenotype branch of the EL0 tail acts on this for a SIG_DFL candidate
+// instead of falling through to the native uncaught arm, because that arm is
+// keyed on the NATIVE terminate latch, and the native `pipe` note has none
+// (task #237, a Plan 9 ABI question). A Linux guest has no notes fd, so a
+// SIG_DFL SIGPIPE nothing acts on becomes the queue head forever: every later
+// caught signal is stranded behind it and every later default-ignore note is
+// never dropped. Linux's answer is not in doubt -- SIG_DFL SIGPIPE terminates
+// -- so the phenotype answers it for its own Procs and leaves the native
+// question where it is.
+//
+// SIGKILL terminates too but is answered by the dispatcher's kill branch before
+// any disposition is read (non-catchable, and vivarium_sigaction_decide refuses
+// it a sigtab row); SIGTSTP stops (the STOP arm consumes it); the three
+// `default_is_ignore` rows are dropped; the snare:* rows never reach a queue.
+bool viv_signote_default_is_terminate(enum viv_signote note);
 
 // Per-Proc signal disposition. Lazily allocated on a Proc's first translatable
 // `rt_sigaction`; freed at proc_free. NOT inherited across rfork -- the
@@ -1193,6 +1341,11 @@ bool vivarium_pollfds_to_fdset(const struct pollfd *pfds, u32 count,
 // treated as a signal.
 enum viv_signote viv_signote_from_note_name(const char *name);
 
+// The inverse: the canonical notes.h name literal (program-lifetime .rodata)
+// for a decodable note, NULL for VIV_SIGNOTE_NONE. PURE. The rt_sigaction
+// shell hands it to notes_discard_name when a new disposition ignores.
+const char *viv_signote_note_name(enum viv_signote note);
+
 // Is the note carrying `note` currently ignored by this Proc? PURE + NULL-safe
 // (a Proc that never called rt_sigaction has no table and ignores nothing).
 bool viv_sigtab_note_ignored(const struct viv_sigtab *tab, enum viv_signote note);
@@ -1210,14 +1363,23 @@ bool viv_sigtab_note_handler(const struct viv_sigtab *tab, enum viv_signote note
 bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
                     const struct viv_ksigaction *act);
 
-// Put every disposition back to SIG_DFL, IN PLACE. NULL-safe.
-//
-// This exists so exec can honour POSIX's disposition reset WITHOUT freeing the
-// table. The pointer has readers on other CPUs that hold no lock of exec's --
-// notes_post's SIG_IGN hook and notes_proc_has_live_handler both load ->sigtab
-// with a bare acquire, and notes_post takes another Proc as its target -- so a
-// free there is a use-after-free, while a reset leaves nothing to dangle.
+// exec's POSIX disposition reset, applied IN PLACE. NULL-safe (nothing to
+// reset). The table object survives and the pointer never changes -- cross-Proc
+// readers (notes_post's SIG_IGN hook, notes_proc_has_live_handler, the ^Z fan)
+// hold it with a bare acquire and no lock of exec's, so freeing it here was a
+// UAF (#254 / #243). The only free is proc_free, where the Proc itself is gone.
+// Stores are per 8-byte FIELD (the granule those readers load), never per byte.
 void viv_sigtab_reset(struct viv_sigtab *tab);
+
+// The phenotype's fork/exec signal-state rule (ARCH 7.6, POSIX; 2026-08-17).
+// execve: reset CAUGHT rows to SIG_DFL, keep SIG_IGN rows (the mask is kept by
+// the caller). NULL-safe.
+void viv_sigtab_reset_caught(struct viv_sigtab *tab);
+// fork: give `child` its OWN copy of `parent`'s table (NULL parent table ->
+// child NULL). 0, or -1 on OOM (child->sigtab left NULL). The child must be
+// unpublished (a plain store, no CAS).
+struct Proc;
+int viv_sigtab_clone_into(struct Proc *child, const struct Proc *parent);
 
 // Decide whether an `rt_sigaction` is inside the translatable domain. PURE.
 //
@@ -1304,6 +1466,17 @@ extern const struct viv_notebit_map g_viv_notebits;
 // Signals with no note are never reported blocked: nothing can deliver them, so
 // "blocked" would describe a state that does not exist.
 u64 viv_notemask_to_sigset(u64 notemask, const struct viv_notebit_map *m);
+
+// The mask a handler RUNS under (Linux signal_delivered): the interrupted
+// thread's mask, plus the action's sa_mask, plus the delivered signal itself
+// unless SA_NODEFER. `sa_mask` is the raw sigset word the guest sent
+// (viv_ksigaction.mask); `signum` the Linux number being delivered. PURE --
+// the delivery path stores the result in note_mask for the handler's duration
+// and puts the pre-handler mask back at rt_sigreturn. Through the same
+// coarse translation as rt_sigprocmask, so a tty-family sa_mask entry blocks
+// the family and SIGKILL in sa_mask is dropped, exactly as the mask row does.
+u64 vivarium_handler_mask(u64 note_mask, u64 sa_mask, u64 sa_flags, u64 signum,
+                          const struct viv_notebit_map *m);
 
 // -----------------------------------------------------------------------------
 // TIER 1 -- the signal frame (V-6c). See VIVARIUM.md §6.22.

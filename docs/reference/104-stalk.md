@@ -786,6 +786,112 @@ check. All 18 Devs were checked when the gate landed: every walkable root
 stamps `QTDIR` (eight via `dev_simple_attach`, dev9p and devsrv at birth), and
 the `QTFILE` roots are exactly the hierarchy-less leaves the gate should reject.
 
+## Symlink expansion (DISTRO D-1)
+
+`docs/DISTRO.md` section 4 is the design; this is the as-built.
+
+### Expansion produces components, not answers
+
+A walked Spoor carrying `QTSYMLINK` is expanded through `Dev.readlink` and the
+target is **spliced into the path buffer**, after which resolution **re-enters
+the same loop**. This is the whole soundness argument: an expanded component is
+not a shortcut past the resolver, it is more input to it. The `#79` ENOTDIR
+gate, the `#81` dot gate, the `#82` trailing-slash gate, the `#84` dot X-search,
+the per-component X-search and mount crossing therefore bind expanded
+components **by construction** — no gate had to be re-implemented on an
+expansion path, because there is no expansion path. The test that shows this is
+`stalk.symlink_*`'s link into an unsearchable directory: it answers `EACCES`,
+not `ENOENT`, because expansion cannot be used to reach past a gate.
+
+`Dev.readlink` is a NULL-permitted slot. A Dev without it makes its symlinks
+opaque leaves — fail-closed, not fail-open. Only dev9p implements it today
+(`Treadlink`); no native Dev mints `QTSYMLINK`.
+
+### Two arms: splice-in-place and restart
+
+`stalk_expand_link` returns `0` (splice) or `1` (restart). The restart arm
+exists for exactly two target shapes:
+
+- **absolute** — the target re-anchors at the caller's own Territory root, read
+  through `territory_root_ref` (the RW-4 SA-F1 atomic read+ref, so a concurrent
+  `pivot_root` cannot free the root mid-expansion) and held for the rest of the
+  resolution.
+- **`..`-bearing** — a `..` pop lands on a trail ENTRY, and a POUNCE-compressed
+  entry is not one component. `pounce_ok` is sticky-AND and never re-enabled
+  mid-resolution, which makes "a compressed entry and a `..` pop never coexist"
+  true by construction rather than by hope.
+
+Both unwind the trail and re-enter at the `restart:` label, where every
+path-derived field recomputes from the new buffer.
+
+The bound is `STALK_MAX_FOLLOWS` (40), answering `T_E_LOOP`.
+
+### The I-28 containment claim, and what proves it
+
+The claim is that an absolute target anchors at **the caller's own root, as of
+this resolution**. That is two properties, and it takes two probe legs:
+
+- **it anchors at the root, not at the resolution base** — invisible to any
+  caller whose base already IS the root, which is every `SYS_OPEN` from
+  `FROM_ROOT` *and* every cwd-relative path (the LS-4 join makes those absolute
+  and resolves them from the root too). Only `SYS_OPEN` with an explicit dirfd
+  has a non-root base. `symlink-probe` leg **L** is that shape.
+- **it is the CURRENT root** — `symlink-probe` leg **K** chroots mid-run and
+  measures two absolute-target links on both sides; the verdicts invert.
+
+Deleting the re-anchor store passes leg K, all 22 other probe legs, and the
+entire unit suite; it fails leg L alone. Recorded because the obvious single
+leg is the one that does not discriminate — the same trap `probe83` names when
+it says it runs from a non-root cwd because "the trivial case would pass either
+way."
+
+### Final-component dispositions
+
+`STALK_NOFOLLOW` is a FLAG on the amode (`0x100`), not a new amode, because what
+"do not follow" yields depends on the rest of the request:
+
+| request | final component is a link | result |
+|---|---|---|
+| `STALK_OPEN` + NOFOLLOW | yes | `T_E_LOOP` (Linux `O_NOFOLLOW`) |
+| `STALK_WALK` (O_PATH) + NOFOLLOW | yes | the LINK itself — the v1.0 `lstat` |
+| either + NOFOLLOW | no | resolves normally; the flag narrows, it does not require |
+| either + NOFOLLOW, trailing `/` | yes | FOLLOWS anyway (POSIX 4.13) |
+| `STALK_MOUNT`, no trailing `/` | yes | never follows (forced NOFOLLOW) |
+| `STALK_MOUNT` + trailing `/` | yes | FOLLOWS — the slash overrides for every caller, so the mount keys on the target. Matches Linux `mount()`; per-Proc, so contained (I-1) |
+
+Non-final components expand regardless — the flag scopes to the quarry.
+
+### The single-hop twin does not EXPAND, but it does REFUSE (#184, `6ad9bbc3`)
+
+`sys_walk_open_handler` never enters `stalk_core`; it walks one component
+directly through `src->dev->walk`. It therefore cannot expand — one hop cannot
+follow a multi-component target — and that is deliberate: `SYS_WALK_OPEN` is the
+component primitive libthyla-rs builds paths out of, not a resolution.
+
+What it must NOT do is hand a symlink to `Dev.open`, and until `6ad9bbc3` it
+did. The gate is now the same shape as stalk's quarry gate: with `T_OPATH` the
+handle IS the link (the lstat spelling, and the base a caller needs in order to
+unlink or rename it); without it, `T_E_LOOP`.
+
+The deferral that let this sit was a false safety argument, worth recording
+because it reads plausible: *"the returned Spoor is a symlink fid, which the
+server will not `Tlopen` for byte I/O."* Stratum's `h_lopen` refuses a symlink
+**only under `O_TRUNC`** — a plain OREAD/OWRITE `Tlopen` on a link fid succeeds.
+Two consequences followed:
+
+- The DAC check in the twin reads the **link's** mode. A symlink is minted 0777
+  by POSIX convention, so `other` is rwx and the check passed for every
+  principal regardless of who owned the link or its directory. The gate was
+  vacuous on exactly this shape.
+- On Stratum the writes then land in the link's own inode — silent data loss,
+  not a redirect. Against a **path-based** 9P server (QEMU 9pfs, `diod`) that
+  implements `Tlopen` as `open(path, flags)`, the same call opens the TARGET
+  with only that vacuous check: a complete DAC bypass. **I-14 exists to forbid
+  resting a kernel gate on server behaviour**, which is what the deferral did.
+
+`/symlink-probe` leg M pins both directions on the live FS and is
+revert-probed: disabling the gate fails M alone, boot-fatally.
+
 ## Performance characteristics
 
 One `Dev.walk` per path component on the per-component loop; a run of

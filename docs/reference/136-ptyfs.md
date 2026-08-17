@@ -67,7 +67,10 @@ console's ISIG-only boot word is a console posture, not the pts one).
 - **Input cook** (`master_write`, per byte, the cons.c order): ICRNL first
   (CR→NL) → ISIG (the standard trio: `0x03`→INT, `0x1c`→QUIT, `0x1a`→TSTP —
   the class is collected and the byte CONSUMED: never enqueued, never echoed
-  = `pty.tla` SignalXorByte) → ICANON (erase `\b \b`; NL flushes the line
+  = `pty.tla` SignalXorByte; in canonical mode it also DISCARDS the pending
+  assembly — POSIX NOFLSH-clear, PTY-DESIGN "ISIG characters DISCARD the
+  pending line", 2026-08-17: a disposition, not a counted drop; m2s/s2m are
+  never flushed) → ICANON (erase `\b \b`; NL flushes the line
   INCLUDING its newline; a byte past `LINE_MAX`=256 drops un-echoed) → raw.
 - **Output cook** (`slave_write`): ONLCR NL→CR NL, pair-atomic back-pressure
   (an expansion that doesn't fit stops BEFORE its input byte — a torn pair
@@ -87,7 +90,12 @@ console's ISIG-only boot word is a console posture, not the pts one).
 Write = the tcsetattr-atomic grammar: whitespace tokens, `+name`/`-name` over
 the five flags + `winsize <cols> <rows>` (decimal ≤ 65535); ALL tokens are
 validated before ANY applies — one malformed token rejects the whole write
-with the mode unchanged; a flag apply resets the ICANON assembly (TCSAFLUSH).
+with the mode unchanged; a write that CLEARS ICANON delivers the pending
+canonical line to the slave as raw bytes (`deliver_partial_line`; a short push
+into a full m2s is a real drop under its OWN counter, `drop_modeflush`), any other write leaves the assembly
+alone (PTY-DESIGN "Mode writes deliver, never discard", 2026-08-17 — it used to
+zero the assembly on any flag write, and dropped the head of a type-ahead line
+between a job's last output and ut's PROMPT-mode re-arm; LS-CI `pty-4`).
 A winsize CHANGE raises `TTY_SIG_WINCH` (iff changed — the Linux TIOCSWINSZ
 behavior); the kernel routes `tty:winch` to the fg pgrp. Read = one
 offset-served line: `+icanon +echo +isig +icrnl +onlcr winsize C R\n`
@@ -177,10 +185,15 @@ seam.
 - **The in-server selftest** (boot-gated; runs before the post): the ring
   battery (empty/round-trip/FIFO/raw transparency), the full ldisc truth
   table (ICRNL+flush+echo+ONLCR; assembly-holds; erase + empty-erase; the
-  ISIG trio collected + not-a-byte + not-echoed; ECHO-off no-leak; raw+ISIG;
+  ISIG trio collected + not-a-byte + not-echoed; leg (e4) an ISIG char
+  discards the pending line, its `-isig` control keeps the same bytes;
+  ECHO-off no-leak; raw+ISIG;
   output ONLCR; line overflow), the ctl battery (render format; atomic
   reject; winsize raise-iff-changed + band/arity rejects; mixed atomic write;
-  TCSAFLUSH; the walk grammar), the teardown algebra (queued-bytes
+  the mode-write delivery legs -- canonical→canonical keeps the fragment,
+  canonical→raw delivers it with the next raw byte in order and no drop
+  counted, raw→canonical prepends nothing; the walk grammar), the teardown
+  algebra (queued-bytes
   drain-then-EOF both directions; the hup edge fires once; slave-close
   silent; the master-read-before-slave park; free-on-last-unref).
 - **The joey 2a-2 probe** (boot-fatal, every boot): the wire data path over
@@ -206,13 +219,14 @@ discipline before reaching the shell, and every one of those sites discarded
 (`room.min(data.len())`), so a partial write silently dropped the remainder and
 reported it in a value nobody read.
 
-Per-pts counters (`drop_flush` / `drop_line` / `drop_echo`) now record them:
+Per-pts counters (`drop_flush` / `drop_line` / `drop_echo` / `drop_modeflush`) now record them:
 
 | Counter | Site | Notes |
 |---|---|---|
 | `drop_flush` | the cooked Enter-flush into `m2s` | the site that would carry **command** bytes. Both the line push and the newline push are counted. |
 | `drop_line` | line assembly past `LINE_MAX` | dropped un-echoed, the cons contract. |
-| `drop_echo` | `echo()` into `s2m` | the drop is deliberate and documented (echo is best-effort and cannot back-pressure the writer) -- counted under its own name precisely so it can never be mistaken for the two `m2s` sites that carry real input. |
+| `drop_echo` | `echo()` into `s2m` | the drop is deliberate and documented (echo is best-effort and cannot back-pressure the writer) -- counted under its own name precisely so it can never be mistaken for the `m2s` sites that carry real input. |
+| `drop_modeflush` | `deliver_partial_line` (a ctl write clearing ICANON) into `m2s` | **a real drop with its own name** (the ccb597b8 round, F2; PTY-DESIGN's rule for both ldiscs; the kernel twin is `rx_drop_modeflush`). A mode write cannot back-pressure. It was briefly folded into `drop_flush`, which would have falsified that row: a short cooked flush loses the tail AND the newline (the line never runs), a short mode-flush loses the tail and the terminator then arrives raw in the new mode, so the truncated command RUNS -- #95's exact shape. Driven on purpose by the selftest (a full `m2s`, a pending `yy`, a canonical->raw `set_tio`: +2 here, the other three unchanged, no report; the ring drains exactly `RING_CAP` then WouldBlock). |
 
 The first drop also emits one line naming the SITE:
 
@@ -227,13 +241,15 @@ would leave the next occurrence as unexplained as #95 itself.
 battery step 9 drops a byte on purpose (`B` past `LINE_MAX`). An armed report
 would cry wolf every boot and spend the one-shot latch. The selftest asserts
 all three properties: the deliberate drop IS counted, it is counted at the LINE
-site and not the other two, and it did NOT report.
+site and not the other three, and it did NOT report.
 
 Note what a short flush actually loses: the tail of the line and then the
 newline -- so the shell would never execute the line at all. That is why this
 site alone does not explain #95's observed shape (interior byte lost,
 terminator delivered, command ran); the counter is here to say whether it is
-involved, not because it is assumed to be.
+involved, not because it is assumed to be. The mode-flush site CAN produce that
+shape (tail lost, terminator delivered raw, command runs) -- which is exactly why
+it carries its own counter rather than sharing this one.
 
 ## Known caveats / seams
 

@@ -60,8 +60,8 @@ use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
 use crate::io::{Read, Seek, SeekFrom, Write};
 use crate::{
-    t_close, t_lseek, t_open, t_read, t_walk_create, t_walk_open, t_write, T_OPATH, T_OREAD,
-    T_OTRUNC, T_OWRITE, T_SEEK_CUR, T_SEEK_END, T_SEEK_SET, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_lseek, t_open, t_read, t_walk_create, t_walk_open, t_write, T_ONOFOLLOW, T_OPATH,
+    T_OREAD, T_OTRUNC, T_OWRITE, T_SEEK_CUR, T_SEEK_END, T_SEEK_SET, T_WALK_OPEN_FROM_ROOT,
     T_WALK_OPEN_NAME_MAX,
 };
 use super::path::Path;
@@ -92,6 +92,46 @@ impl File {
     #[inline]
     pub fn open<P: AsRef<Path>>(path: P) -> Result<File> {
         Self::open_with_omode(path.as_ref(), T_OREAD)
+    }
+
+    /// Open the LINK named by `path` rather than what it points at -- the v1.0
+    /// `lstat` spelling (DISTRO D-1). `T_OPATH | T_ONOFOLLOW`: the walk expands
+    /// every intermediate component as usual and stops at the final one, so
+    /// `.metadata()` on the result reports the link's own record
+    /// (`is_symlink()` true, `len()` the target string's length).
+    ///
+    /// On a path whose last component is NOT a link this is an ordinary O_PATH
+    /// open -- the flag narrows what the quarry may be, it does not require one.
+    /// A trailing '/' defeats it (POSIX 4.13 asserts a directory, which can only
+    /// be checked by following).
+    #[inline]
+    pub fn open_link<P: AsRef<Path>>(path: P) -> Result<File> {
+        Self::open_with_omode(path.as_ref(), T_OPATH | T_ONOFOLLOW)
+    }
+
+    /// Open `path` as a NAVIGATION handle (`T_OPATH`): walked, never opened.
+    ///
+    /// Not a byte-I/O channel -- read/write/readdir on it are refused. It is the
+    /// base for creating/walking/renaming/unlinking children, a valid
+    /// `t_chroot` target, and the handle a Loom ring registers for the
+    /// directory-child ops. Born `READ | WRITE` and exempt from the R/W
+    /// permission gate, because traversal authority is the X-search on the path,
+    /// not R or W on the directory.
+    #[inline]
+    pub fn open_with_opath<P: AsRef<Path>>(path: P) -> Result<File> {
+        Self::open_with_omode(path.as_ref(), T_OPATH)
+    }
+
+    /// Open `path` for reading, refusing a symlink as the FINAL component
+    /// (`T_OREAD | T_ONOFOLLOW`) -- Linux `O_NOFOLLOW`, which answers
+    /// `Error::SymlinkLoop` rather than opening the link.
+    ///
+    /// Intermediate components still expand: the flag says "the thing I name
+    /// must not be a link", not "resolve nothing". To open the link ITSELF, use
+    /// [`File::open_link`]. A trailing '/' defeats it (POSIX 4.13).
+    #[inline]
+    pub fn open_nofollow<P: AsRef<Path>>(path: P) -> Result<File> {
+        Self::open_with_omode(path.as_ref(), T_OREAD | T_ONOFOLLOW)
     }
 
     /// Create-or-open `path` for writing, truncating on open

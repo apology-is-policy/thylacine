@@ -129,37 +129,63 @@ void cons_tx_flush(void);
 // The two kernel-side emit mechanisms below arrived on different branches and
 // serve DISJOINT contexts; read them as a pair.
 //
-//   cons_diag_*                 never sleeps, never spins -> legal in IRQ
-//                               context and under a spinlock (main#126)
+//   cons_diag_line_*            never sleeps, never spins -> legal in IRQ
+//                               context and under a spinlock (main#126; one
+//                               push per LINE since the unit rule)
 //   cons_kernel_writer_begin    PARKS for the writer role -> process context
 //                               only (aux#152)
 //
 // They are complementary, not alternatives: the role works by making other
-// writers park, and cons_diag_* exists precisely because some callers cannot.
-// That is also their composition GAP -- the role does not exclude a cons_diag_*
-// refill, and cons_tx_drain_from_irq does not consult the role, so a diagnostic
-// from a peer CPU can still drain INTO a bracketed run. Tracked as main#144;
-// the fix gates the DRAIN, never the pusher.
+// writers park, and the diag line exists precisely because some callers cannot.
+// The composition GAP that remains is main#144: cons_tx_drain_from_irq does not
+// consult the role, so a diagnostic pushed by a peer CPU can still DRAIN into a
+// bracketed direct-uart_puts run; the fix gates the DRAIN, never the pusher.
+// (The other half of the gap -- a diagnostic landing INSIDE a role writer's
+// ring pushes -- is closed by the unit rule: ARCH 23.5.2 "UNIT ATOMICITY".)
 
-// #126: the NON-BLOCKING kernel diagnostic emit. Use these -- NOT uart_puts /
-// uart_putdec / uart_puthex64 -- for any steady-state kernel diagnostic issued
-// from a context that can neither sleep nor spin: IRQ context, or under a
-// spinlock (every g_proc_table_lock acquisition in proc.c is irqsave).
+// #126 + the unit rule: the NON-BLOCKING kernel diagnostic LINE. Use this --
+// NOT uart_puts / uart_putdec / uart_puthex64 -- for any steady-state kernel
+// diagnostic issued from a context that can neither sleep nor spin: IRQ
+// context, or under a spinlock (every g_proc_table_lock acquisition in proc.c
+// is irqsave). Assemble the line on your OWN stack, then emit it ONCE:
+//
+//     struct cons_diag_line l;
+//     cons_diag_line_init(&l);
+//     cons_diag_line_puts(&l, "proc: orphan pid=");
+//     cons_diag_line_putdec(&l, pid);
+//     cons_diag_line_puts(&l, "\n");
+//     cons_diag_line_emit(&l);
 //
 // The direct arch emitters spin on a full TX FIFO for up to 20 ms PER BYTE
 // before dropping it (#67). That bound does NOT compose: ~90 bytes of
 // diagnostic emitted back-to-back under a global irqsave lock is ~1.8 s
 // interrupt-dead with that lock held -- the #126 defect, and exactly the stall
-// #67's per-byte bound exists to prevent. These push into the TX ring instead
-// (never spinning; dropping on a full ring, the echo disposition) and feed the
-// G-4 drain tap, so the line also reaches the framebuffer console (#76).
+// #67's per-byte bound exists to prevent. The line pushes into the TX ring
+// instead (never spinning) and feeds the G-4 drain tap, so it also reaches the
+// framebuffer console (#76). And it pushes as ONE unit under one lock hold: the
+// per-token predecessor pushed each byte under its own hold, and a peer CPU's
+// SYS_PUTS interleaved with it byte-for-byte (`ttaappeessttrryydd`). A line the
+// ring cannot take is dropped WHOLE and counted; over-length is cut at
+// CONS_DIAG_LINE_MAX - 2 with the terminator forced. The object is caller-owned
+// (not per-CPU) so a nested IRQ-context line cannot splice into a process-
+// context one half-assembled below it.
 //
-// Never sleep; never spin; take only leaf locks and wake outside them. Legal
-// wherever cons_emit is -- which includes the UART RX IRQ handler. Pre-arm they
-// fall through to the direct bounded path, so boot output is byte-identical.
-void cons_diag_puts(const char *s);
-void cons_diag_putdec(u64 v);
-void cons_diag_puthex64(u64 v);
+// Never sleeps; never spins; takes only leaf locks and wakes outside them.
+// Legal wherever cons_emit_bulk is -- which includes the UART RX IRQ handler.
+// Pre-arm it falls through to the direct bounded path, so boot output is
+// byte-identical. Not echo-capture-aware (a diagnostic must never land in the
+// 128-byte echo-assertion buffer).
+#define CONS_DIAG_LINE_MAX 256u
+struct cons_diag_line {
+    u8   buf[CONS_DIAG_LINE_MAX];
+    u32  len;
+    bool truncated;
+};
+void cons_diag_line_init(struct cons_diag_line *l);
+void cons_diag_line_puts(struct cons_diag_line *l, const char *s);   // ONLCR-translating, NULL-safe
+void cons_diag_line_putdec(struct cons_diag_line *l, u64 v);
+void cons_diag_line_puthex64(struct cons_diag_line *l, u64 v);
+void cons_diag_line_emit(struct cons_diag_line *l);                  // one push; all-or-nothing
 
 // #152: bracket a KERNEL diagnostic emission (a run of uart_puts/uart_putdec)
 // so a peer's cons_output_write on another CPU cannot interleave with it. The
@@ -203,6 +229,10 @@ bool cons_test_tx_role_held(void);
 // number of bytes actually freed.
 u32  cons_test_tx_ring_free(u32 n, bool wake);
 u32  cons_test_tx_ring_count(void);
+// The unit-atomicity witness: a NON-consuming copy of up to n bytes from the
+// ring head (with the UART stalled, the ring holds exactly what the pushes put
+// there, in push order -- so a torn unit is visible as interleaved bytes).
+u32  cons_test_tx_ring_peek(u8 *out, u32 n);
 u32  cons_test_tx_dropped(void);
 u32  cons_test_tx_room_waits(void);
 bool cons_test_tx_armed(void);
@@ -237,6 +267,11 @@ bool cons_rx_can_accept(void);
 //                        check authorized it, i.e. #129's room arithmetic
 //                        disagrees with the ring. Non-zero is a kernel bug.
 void cons_rx_counters(u32 *bp_raw, u32 *bp_flush, u32 *drop_line, u32 *drop_ring);
+// The fifth RX-side site: bytes of a half-assembled canonical line that a
+// consctl write clearing ICANON delivered to the ring but the ring could not
+// take (a real drop; a mode write cannot back-pressure). Its own accessor so
+// the four-counter callers are untouched.
+u32 cons_rx_drop_modeflush(void);
 
 // #95: the TX-side loss counts (#75/#126), for the same /ctl/cons surface.
 void cons_tx_drops(u32 *dropped, u32 *room_waits);

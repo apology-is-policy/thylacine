@@ -7,10 +7,13 @@
 
 #include <thylacine/handle.h>           // V-5c-2: PROC_HANDLE_MAX = the fd clamp
 #include <thylacine/notes.h>            // V-6b: the canonical note-name literals
+#include <thylacine/page.h>             // D-3: PAGE_SIZE bounds the FILE arm's offset
 #include <thylacine/poll.h>             // V-5c: POLL_MAX_NFDS bounds the domain
 #include <thylacine/proc.h>             // #150: PRINCIPAL_SYSTEM / GID_SYSTEM
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
+
+#include "../mm/slub.h"              // the fork-time sigtab clone (kzalloc)
 
 // The native ceiling, pinned. vivarium.h cannot see syscall.h (the dependency is
 // deliberately one-way), so the constant is declared there and checked here --
@@ -425,8 +428,17 @@ enum {
 // The three admissions above share one structure: the flag requests behaviour we
 // ALREADY provide unconditionally, so honouring it is a no-op AND correct. That
 // is the only reason a flag may be ignored. Contrast the rejects below.
+//
+//   O_NOFOLLOW  ADMITTED AND TRANSLATED since DISTRO D-1 -- the resolver now
+//               follows symlinks, so the flag maps 1:1 onto
+//               SYS_WALK_OPEN_NOFOLLOW (real semantics, not a no-op: a final
+//               symlink answers ELOOP, and with O_PATH the returned handle IS
+//               the link -- both the Linux contours). This closes the very trap
+//               the V-2b reject named ("would become wrong the moment symlinks
+//               land, with nothing to catch it"): the moment arrived, and the
+//               flag rode the same chunk that landed the feature.
 #define VIV_OPENAT_ADMITTED                                                  \
-    ((u32)(VIV_O_ACCMODE | VIV_O_TRUNC | VIV_O_PATH |                        \
+    ((u32)(VIV_O_ACCMODE | VIV_O_TRUNC | VIV_O_PATH | VIV_O_NOFOLLOW |       \
            VIV_O_CLOEXEC | VIV_O_NOCTTY | VIV_O_LARGEFILE))
 
 // Why each notable rejected flag is rejected -- i.e. why ignoring it would be a
@@ -462,12 +474,10 @@ enum {
 //                a successful open of a regular file. The worst kind of wrong.
 //   O_APPEND     Every write must seek to end. SYS_OPEN's omode mask has no
 //                append bit; ignoring it silently corrupts a log writer.
-//   O_NOFOLLOW   Thylacine's resolver has no symlinks at v1.0, so ignoring it is
-//                harmless TODAY -- and would become wrong the moment symlinks
-//                land, with nothing to catch it. Rejected on that basis: a flag
-//                whose correctness depends on a feature being absent is a trap.
 //   O_EXCL, O_NONBLOCK, O_SYNC/O_DSYNC, O_DIRECT, O_NOATIME, O_TMPFILE, O_ASYNC
 //                each carry semantics with no SYS_OPEN counterpart.
+//                (O_NOFOLLOW moved to the ADMITTED list at DISTRO D-1 -- the
+//                resolver grew symlinks, and the flag translates for real.)
 
 enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
                                         u64 *start_fd_out, u32 *omode_out,
@@ -530,6 +540,13 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
         }
         if (fl & VIV_O_TRUNC) omode |= VIV_OMODE_TRUNC;
     }
+    // D-1: O_NOFOLLOW rides BOTH arms -- it is one of the three flags Linux's
+    // O_PATH does NOT ignore (the #151 comment below lists them), and
+    // O_PATH|O_NOFOLLOW is the open-the-link-itself idiom (the returned handle
+    // IS the symlink; fstat on it reports the link's own metadata). Without
+    // O_PATH it is the ELOOP-on-a-final-link contour. Both are exactly what
+    // SYS_WALK_OPEN_NOFOLLOW means, so the map is 1:1.
+    if (fl & VIV_O_NOFOLLOW) omode |= SYS_WALK_OPEN_NOFOLLOW;
 
     // Belt-and-braces: never emit an omode SYS_OPEN would reject. A future
     // admission that forgets to add its bit to the kernel's mask fails HERE, as
@@ -706,21 +723,21 @@ void vivarium_stat_to_linux(const struct t_stat *in, struct viv_linux_stat *out)
 //                    correctness, not reach. The V-2b precedent is O_LARGEFILE,
 //                    equally unset by musl-aarch64 and equally correct.)
 //
+//   AT_SYMLINK_NOFOLLOW  ADMITTED AND TRANSLATED since DISTRO D-1. The V-2c
+//                    reject that stood here said it plainly: "the day symlinks
+//                    land there is nothing in this file, or in a build, that
+//                    would fail" -- so it forwarded every lstat() rather than
+//                    silently reporting the TARGET instead of the link. The day
+//                    arrived, and the flag rode the same chunk that landed the
+//                    feature: it now maps onto the resolver's STALK_NOFOLLOW
+//                    (via sys_stat_for_proc's stalk_flags), so lstat() reports
+//                    the LINK's own record -- S_IFLNK mode, target-length size
+//                    -- exactly the Linux answer. The reject's reasoning is
+//                    preserved above as the model for every flag whose
+//                    correctness depends on a feature being absent.
+//
 // And the rejects, each because ignoring it would be a silent wrong answer:
 //
-//   AT_SYMLINK_NOFOLLOW  REJECTED -- and this is the one that costs reach, so
-//                    the reasoning matters. It is what musl/glibc/Go compile
-//                    `lstat()` into, so rejecting it forwards every lstat.
-//                    SYS_STAT's own contract says "Symlinks do not exist at
-//                    v1.0 (G11), so stat == lstat" (syscall.h:1615), which looks
-//                    like a licence to admit it. It is not. That equivalence is
-//                    scoped to v1.0 and holds only because the feature is
-//                    ABSENT -- exactly the O_NOFOLLOW trap V-2b named, and the
-//                    day symlinks land there is nothing in this file, or in a
-//                    build, that would fail. Admitting it would mean every
-//                    lstat() in every Linux guest silently reporting the TARGET
-//                    instead of the link, with no tripwire. Forwarding costs a
-//                    supervisor round trip; admitting costs correctness later.
 //   AT_EMPTY_PATH    An empty path means "operate on dirfd itself" (with
 //                    AT_FDCWD: the cwd). SYS_STAT requires path_len >= 1, and
 //                    serving it would mean SYNTHESISING a "." argument the
@@ -732,9 +749,15 @@ void vivarium_stat_to_linux(const struct t_stat *in, struct viv_linux_stat *out)
 //                    rejected here, on the same ground as openat's
 //                    (flags & O_ACCMODE) == 3: minting errors is not this
 //                    table's job.
-#define VIV_FSTATAT_ADMITTED ((u32)VIV_AT_NO_AUTOMOUNT)
+#define VIV_FSTATAT_ADMITTED \
+    ((u32)(VIV_AT_NO_AUTOMOUNT | VIV_AT_SYMLINK_NOFOLLOW))
 
-enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags) {
+enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags,
+                                         u32 *stalk_flags_out) {
+    // Fail toward the decline, never toward a dispatch (the openat shape).
+    if (!stalk_flags_out) return VIV_FORWARD;
+    *stalk_flags_out = 0;
+
     // Both are `int` in the Linux ABI, so only the low 32 bits are significant;
     // `dirfd` is compared signed for the AT_FDCWD sign-extension reason spelled
     // out in vivarium_openat_decide.
@@ -746,6 +769,11 @@ enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags) {
     // header comment.
     if (dfd != VIV_AT_FDCWD)        return VIV_FORWARD;
     if (fl & ~VIV_FSTATAT_ADMITTED) return VIV_FORWARD;
+
+    // D-1: lstat. STALK_NOFOLLOW's value is deliberately not leaked into this
+    // pure table -- the shell passes the out-param to sys_stat_for_proc, which
+    // owns the resolver vocabulary.
+    if (fl & VIV_AT_SYMLINK_NOFOLLOW) *stalk_flags_out = 1;
 
     return VIV_TRANSLATED;
 }
@@ -802,6 +830,138 @@ enum viv_verdict vivarium_mmap_decide(u64 addr, u64 prot, u64 flags,
     // shell reproduces both exactly. Forwarding on length here would answer
     // ENOSYS for a call Linux gives a specific errno.
     return VIV_TRANSLATED;
+}
+
+// -----------------------------------------------------------------------------
+// TIER 2 — the FILE mmap arm (DISTRO D-3). Domain measured off musl's
+// map_library (dynlink.c:809), not derived from Linux. See the header.
+// -----------------------------------------------------------------------------
+
+enum viv_verdict vivarium_mmap_file_decide(u64 prot, u64 flags,
+                                           u64 fd, u64 offset) {
+    // Same 32-bit narrowing as the anon arm, and for the same reason: Linux
+    // declares prot/flags/fd as `int`, so the narrowing IS the ABI.
+    u32 pr = (u32)prot;
+    u32 fl = (u32)flags;
+
+    // PROT_WRITE is the one refusal worth naming, because it is the refusal
+    // that keeps I-36 intact. Everything this arm maps rides a shared
+    // BURROW_TYPE_FILE Burrow demand-paged from the file, and that Burrow has
+    // no write-back path -- so a writable file mapping here would either lose
+    // the guest's writes or leak them into a file (and into every OTHER Proc
+    // sharing the Image). Refusing keeps "no userspace writable file mapping
+    // exists" true on this path by construction rather than by care.
+    //
+    // An ALLOW-LIST for the same reason the anon arm uses one: PROT_BTI /
+    // PROT_MTE / PROT_GROWSDOWN are all outside it without being enumerated.
+    if (pr & ~VIV_MMAP_FILE_PROT_ADMITTED) return VIV_FORWARD;
+
+    // PROT_NONE (== 0) DECLINES here, and that is a real difference from the
+    // anon arm, which admits it as a documented degradation to writable. There
+    // is no analogous degradation available: a PROT_NONE file map is a pure
+    // address-space RESERVATION whose bytes must fault, and serving it as a
+    // readable file map would hand the guest bytes it asked not to be given.
+    // Declining costs nothing measured -- map_library's whole-span call always
+    // carries the lowest PT_LOAD's prot, which always includes PF_R.
+    if ((pr & VIV_PROT_READ) == 0)         return VIV_FORWARD;
+
+    // EXACT equality: MAP_PRIVATE alone. This is what excludes MAP_FIXED,
+    // MAP_FIXED_NOREPLACE and MAP_SHARED without naming them -- and excluding
+    // MAP_SHARED matters most, since a shared file mapping is the write-back
+    // semantics the prot gate above just refused, arriving by another door.
+    if (fl != VIV_MMAP_FILE_FLAGS_ADMITTED) return VIV_FORWARD;
+
+    // A real descriptor. The (s32) cast is what makes -1 (the anon sentinel)
+    // land below zero rather than at 4294967295.
+    if ((s32)(u32)fd < 0)                   return VIV_FORWARD;
+
+    // Page-aligned offset. Not fidelity (Linux says EINVAL) but STRUCTURE: the
+    // FILE fault arm reads each page at `burrow->file_offset + page-floored
+    // burrow offset`, which is the mapping's own bytes only when the Burrow's
+    // offset 0 is the mapping's start. See the header.
+    if (offset & (u64)(PAGE_SIZE - 1))      return VIV_FORWARD;
+
+    return VIV_TRANSLATED;
+}
+
+// -----------------------------------------------------------------------------
+// TIER 2 — the two MAP_FIXED arms (DISTRO D-3b). Domains measured off
+// map_library's overlay calls (dynlink.c:842 and :851). See the header.
+// -----------------------------------------------------------------------------
+
+// Shared by both fixed arms: with MAP_FIXED the address is a REQUIREMENT, not
+// the hint it is on the non-fixed arms, so it has to be a real page. Zero is
+// refused separately from misalignment because a fixed map at NULL is a distinct
+// mistake -- it would put a mapping where a null-pointer dereference must fault.
+static bool fixed_addr_ok(u64 addr) {
+    if (addr == 0)                    return false;
+    if (addr & (u64)(PAGE_SIZE - 1))  return false;
+    return true;
+}
+
+enum viv_verdict vivarium_mmap_fixed_file_decide(u64 addr, u64 prot, u64 flags,
+                                                 u64 fd, u64 offset) {
+    u32 pr = (u32)prot;
+    u32 fl = (u32)flags;
+
+    if (!fixed_addr_ok(addr))                    return VIV_FORWARD;
+
+    // Unlike the D-3a arm, PROT_WRITE IS admitted here -- served by an eager
+    // private copy, never by a writable file mapping (see the header). What is
+    // NOT admitted is W together with X: vma_alloc would reject it anyway, but
+    // I-12 is worth failing closed on at the domain edge too, so a W+X request
+    // is declined before it can reach anything that has to argue about it.
+    if (pr & ~VIV_MMAP_FIXED_FILE_PROT_ADMITTED) return VIV_FORWARD;
+    if ((pr & VIV_PROT_WRITE) && (pr & VIV_PROT_EXEC)) return VIV_FORWARD;
+    if ((pr & VIV_PROT_READ) == 0)               return VIV_FORWARD;
+
+    if (fl != VIV_MMAP_FIXED_FILE_FLAGS_ADMITTED) return VIV_FORWARD;
+    if ((s32)(u32)fd < 0)                         return VIV_FORWARD;
+
+    // Page-aligned offset, for the same STRUCTURAL reason as the D-3a arm: the
+    // FILE fault arm derives each page's file position from the Burrow's own
+    // offset 0, which is the mapping's start only when the offset is aligned.
+    // The eager-copy path does not need it (it reads at an explicit offset), but
+    // requiring it uniformly keeps ONE domain for the arm rather than a domain
+    // that silently depends on which backing the prot happens to select.
+    if (offset & (u64)(PAGE_SIZE - 1))            return VIV_FORWARD;
+
+    return VIV_TRANSLATED;
+}
+
+enum viv_verdict vivarium_mmap_fixed_anon_decide(u64 addr, u64 prot, u64 flags,
+                                                 u64 fd, u64 offset) {
+    u32 pr = (u32)prot;
+    u32 fl = (u32)flags;
+
+    if (!fixed_addr_ok(addr))                    return VIV_FORWARD;
+
+    if (pr & ~VIV_MMAP_FIXED_ANON_PROT_ADMITTED) return VIV_FORWARD;
+    // PROT_NONE declines rather than degrading to writable, which is the
+    // non-fixed anon arm's documented behaviour. A FIXED PROT_NONE over an
+    // existing mapping is a GUARD; handing back a writable page instead would
+    // not be a degradation but a hole. See the header.
+    if ((pr & VIV_PROT_READ) == 0)               return VIV_FORWARD;
+
+    if (fl != VIV_MMAP_FIXED_ANON_FLAGS_ADMITTED) return VIV_FORWARD;
+    if ((s32)(u32)fd != -1)                       return VIV_FORWARD;
+    if (offset != 0)                              return VIV_FORWARD;
+
+    return VIV_TRANSLATED;
+}
+
+bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
+                                 u64 fd, u64 offset) {
+    int admitted = 0;
+    if (vivarium_mmap_decide(addr, prot, flags, fd, offset) == VIV_TRANSLATED)
+        admitted++;
+    if (vivarium_mmap_file_decide(prot, flags, fd, offset) == VIV_TRANSLATED)
+        admitted++;
+    if (vivarium_mmap_fixed_file_decide(addr, prot, flags, fd, offset) == VIV_TRANSLATED)
+        admitted++;
+    if (vivarium_mmap_fixed_anon_decide(addr, prot, flags, fd, offset) == VIV_TRANSLATED)
+        admitted++;
+    return admitted <= 1;
 }
 
 // =============================================================================
@@ -1579,6 +1739,21 @@ enum viv_signote viv_signote_from_note_name(const char *name) {
     return VIV_SIGNOTE_NONE;
 }
 
+const char *viv_signote_note_name(enum viv_signote note) {
+    switch (note) {
+    case VIV_SIGNOTE_INTERRUPT:  return NOTE_NAME_INTERRUPT;
+    case VIV_SIGNOTE_KILL:       return NOTE_NAME_KILL;
+    case VIV_SIGNOTE_PIPE:       return NOTE_NAME_PIPE;
+    case VIV_SIGNOTE_CHILD_EXIT: return NOTE_NAME_CHILD_EXIT;
+    case VIV_SIGNOTE_TTY_HUP:    return NOTE_NAME_TTY_HUP;
+    case VIV_SIGNOTE_TTY_QUIT:   return NOTE_NAME_TTY_QUIT;
+    case VIV_SIGNOTE_TTY_WINCH:  return NOTE_NAME_TTY_WINCH;
+    case VIV_SIGNOTE_TTY_SUSP:   return NOTE_NAME_TTY_SUSP;
+    case VIV_SIGNOTE_TTY_CONT:   return NOTE_NAME_TTY_CONT;
+    default:                     return NULL;
+    }
+}
+
 // THE canonical NOTE_BIT_* map (vivarium.h says why there is exactly one).
 // This file already includes notes.h for the canonical note-name literals, so
 // the numbering is taken from its defining header rather than retyped.
@@ -1609,10 +1784,35 @@ bool viv_signote_default_is_ignore(enum viv_signote note) {
         return true;
 
     // Everything else terminates, stops, or has no note. TTY_SUSP is the one
-    // worth naming: its default is STOP, and Thylacine's kernel NDFLT-stop arm
-    // is unbuilt (task #15, an ABI decision needing signoff). Reporting
-    // "ignore" for it would be a lie in the opposite direction from the one
-    // V-6b spent its time removing.
+    // worth naming: its default is STOP -- applied at post time by job_stop_cb
+    // or at delivery by the tail's NDFLT-stop arm (434c3fd9 built it; the
+    // header's paragraph has the history). Reporting "ignore" for it would be
+    // a lie in the opposite direction from the one V-6b spent its time
+    // removing.
+    default:
+        return false;
+    }
+}
+
+bool viv_signote_default_is_terminate(enum viv_signote note) {
+    switch (note) {
+    // SIGPIPE / SIGINT / SIGHUP / SIGQUIT: the POSIX default is to terminate.
+    // PIPE is the row that earns this function its existence: the native
+    // `pipe` note has no terminate latch (a Plan 9 ABI question, task #237),
+    // so the native uncaught arm never acts on it -- and a Linux guest, which
+    // has no notes fd, would otherwise carry a SIG_DFL SIGPIPE at the head of
+    // its queue for the rest of its life. The Linux default is not in
+    // question, so the phenotype branch answers it here, for its own Procs.
+    case VIV_SIGNOTE_PIPE:
+    case VIV_SIGNOTE_INTERRUPT:
+    case VIV_SIGNOTE_TTY_HUP:
+    case VIV_SIGNOTE_TTY_QUIT:
+        return true;
+
+    // KILL also terminates, but it is answered by the dispatcher's kill branch
+    // before any disposition is consulted (non-catchable both sides), and it
+    // can never sit in a sigtab. The snare:* rows never reach a queue. TTY_SUSP
+    // stops; the three above ignore; NONE has no note.
     default:
         return false;
     }
@@ -1668,35 +1868,93 @@ bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
     return true;
 }
 
+// exec's disposition reset, in place -- the table object SURVIVES.
+//
+// Zeroing is not an approximation of the POSIX reset, it IS the reset: by the
+// note_handler rule twenty lines up, SIG_DFL is 0 and SIG_IGN is 1, so neither
+// is an address, and a zeroed entry reads as all-default. viv_sigtab_of
+// allocates with kzalloc, so the zeroed table is byte-identical to a fresh one.
+//
+// The object surviving is the POINT, not a convenience (#254). exec used to
+// kfree the table and NULL the pointer while holding no lock, and `p->sigtab`
+// is loaded and dereferenced from OTHER Procs' CPUs -- notes_post's SIG_IGN
+// hook, notes_arm_intr_terminate_locked, and the ^Z fan's disposition gate all
+// take an arbitrary Proc. That was a use-after-free read. Keeping one immortal
+// table per Proc removes the dangling pointer instead of racing to guard it,
+// which is what makes the reader set safe to GROW: a lock only protects the
+// readers who remember to take it, and the third reader here was added by the
+// same session that found the bug.
+//
+// PER-FIELD, never per-byte. Because those readers are lock-free, the WIDTH of
+// these stores is an ABI with them, not an implementation detail. The byte loop
+// this replaced was measured, not assumed, to compile to 2-byte `sturh` under
+// the kernel's own flags -- `-ffreestanding -fno-builtin` is exactly what stops
+// LoopIdiomRecognize forming a memset, leaving an unroll-by-2. Each 8-byte
+// `handler` was therefore written as four independent halfword stores, so a
+// concurrent reader could observe a handler value NO CODE EVER WROTE (half old
+// address, half zero) and pass the `> VIV_SIG_IGN` gate on it. A struct
+// assignment gives `stp` of X registers: single-copy-atomic per 8-byte field,
+// which is the granule every accessor actually reads.
+//
+// What this does NOT promise, deliberately: a reader still sees an arbitrary
+// MIX of pre- and post-reset entries. That is the POSIX exec-vs-signal race and
+// is fine -- each entry it sees is one that was genuinely installed or the
+// default. The guarantee is per-field integrity, not a snapshot.
 void viv_sigtab_reset(struct viv_sigtab *tab) {
     if (!tab) return;
-
-    // PER-FIELD, never per-byte. This table is read LOCK-FREE by other CPUs
-    // (notes_post's SIG_IGN hook; notes_proc_has_live_handler), so the width of
-    // these stores is an ABI with those readers, not an implementation detail.
-    //
-    // The byte loop this replaced was measured, not assumed, to compile to
-    // 2-byte `sturh` under the kernel's own flags -- `-ffreestanding
-    // -fno-builtin` is exactly what stops LoopIdiomRecognize forming a memset,
-    // leaving an unroll-by-2. Each 8-byte `handler` was therefore written as
-    // four independent halfword stores, so a concurrent reader could observe a
-    // handler value NO CODE EVER WROTE (half old address, half zero) and pass
-    // the `> VIV_SIG_IGN` gate on it. A struct assignment gives `stp` of X
-    // registers: single-copy-atomic per 8-byte field, which is the granule
-    // every accessor actually reads.
-    //
-    // What this does NOT promise, deliberately: a reader still sees an
-    // arbitrary MIX of pre- and post-reset entries. That is the POSIX
-    // exec-vs-signal race and is fine -- each entry it sees is one that was
-    // genuinely installed or the default. The guarantee is per-field integrity,
-    // not a snapshot.
-    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++)
-        tab->act[i] = (struct viv_ksigaction){ 0 };
-
+    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) {
+        struct viv_ksigaction dfl = { .handler = VIV_SIG_DFL, .flags = 0,
+                                      .restorer = 0, .mask = 0 };
+        tab->act[i] = dfl;
+    }
     // Publish the zeroing rather than leaving it to whatever lock the caller
     // happens to take next. Free on this path, and it removes a question a
     // future reader would otherwise have to re-answer.
     __atomic_thread_fence(__ATOMIC_RELEASE);
+}
+
+// execve's reset for the PHENOTYPE (POSIX execve(2); ARCH 7.6's fork/exec
+// signal-state rule, 2026-08-17): CAUGHT rows go back to SIG_DFL -- the handler
+// was an address in the OLD image and its flags/restorer/mask went with it --
+// while SIG_IGN rows survive intact ("signals set to be ignored by the calling
+// process image shall be set to be ignored by the new process image"). SIG_DFL
+// rows are already default. Same in-place, per-8-byte-field discipline as
+// viv_sigtab_reset: the object survives (#254), a reader sees whole fields.
+void viv_sigtab_reset_caught(struct viv_sigtab *tab) {
+    if (!tab) return;
+    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) {
+        struct viv_ksigaction *a = &tab->act[i];
+        if (a->handler == VIV_SIG_DFL || a->handler == VIV_SIG_IGN) continue;
+        struct viv_ksigaction dfl = { .handler = VIV_SIG_DFL, .flags = 0,
+                                      .restorer = 0, .mask = 0 };
+        *a = dfl;
+    }
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+}
+
+// fork's copy for the PHENOTYPE (POSIX fork(2); the same rule): the child gets
+// its OWN table holding every one of the parent's dispositions, caught and
+// ignored. Its own, not a shared pointer, because the table's whole safety
+// argument is one immortal object per Proc read lock-free from other CPUs
+// (#254) -- sharing would make one Proc's exec reset the other's dispositions
+// and one Proc's proc_free dangle the other's pointer. A parent with no table
+// is all-SIG_DFL: the child's stays NULL. The child is under construction and
+// unpublished, so the plain store into child->sigtab needs no CAS (contrast
+// viv_sigtab_of, which races peer threads); the parent's table is read once
+// under an acquire load -- a concurrent rt_sigaction on the parent may leave
+// the child with either the old or the new row, the latitude POSIX gives a
+// fork racing sigaction. Returns 0, or -1 on OOM with child->sigtab left NULL
+// (proc_free's kfree(NULL) is a clean no-op).
+int viv_sigtab_clone_into(struct Proc *child, const struct Proc *parent) {
+    if (!child || !parent) return -1;
+    const struct viv_sigtab *src =
+        __atomic_load_n(&parent->sigtab, __ATOMIC_ACQUIRE);
+    if (!src) return 0;
+    struct viv_sigtab *dst = (struct viv_sigtab *)kzalloc(sizeof(*dst), 0);
+    if (!dst) return -1;
+    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) dst->act[i] = src->act[i];
+    __atomic_store_n(&child->sigtab, dst, __ATOMIC_RELEASE);
+    return 0;
 }
 
 void vivarium_build_sigframe(struct viv_sigframe_head *out, u64 signum,
@@ -1904,6 +2162,20 @@ u64 viv_notemask_to_sigset(u64 notemask, const struct viv_notebit_map *m) {
         }
         if (notemask & bit) out |= 1ULL << (sig - 1);
     }
+    return out;
+}
+
+u64 vivarium_handler_mask(u64 note_mask, u64 sa_mask, u64 sa_flags, u64 signum,
+                          const struct viv_notebit_map *m) {
+    // Linux kernel/signal.c signal_delivered():
+    //     sigorsets(&blocked, &current->blocked, &ka->sa.sa_mask);
+    //     if (!(ka->sa.sa_flags & SA_NODEFER)) sigaddset(&blocked, sig);
+    // Both additions go through the forward translation, so they inherit its
+    // two properties: SIGKILL is dropped, and a tty-family signal blocks the
+    // family (the coarseness the mask row already reports honestly).
+    u64 out = note_mask | viv_sigset_to_notemask(sa_mask, m);
+    if (!(sa_flags & VIV_SA_NODEFER) && signum >= 1 && signum <= VIV_NSIG)
+        out |= viv_sigset_to_notemask(1ULL << (signum - 1), m);
     return out;
 }
 

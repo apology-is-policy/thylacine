@@ -140,6 +140,38 @@ struct PgrpMount {
 #define MAFTER    0x0004
 #define MCREATE   0x0008
 
+// MNOEXEC (#217) -- the one non-Plan-9 flag: the mounted device instance may
+// not back an executable mapping. Refuses BOTH exec resolution and the
+// file-backed PROT_EXEC phenotype mmap arm, because a mount that still permits
+// exec is not noexec.
+//
+// Why a mount flag at all: ARCH 6.5 arm (b) lets a phenotype map a readable
+// file PROT_READ|PROT_EXEC -- bytes into a live address space with no ELF
+// validation, no X bit, at any offset. W^X (I-12) bounds what a PAGE may be at
+// one instant and says nothing about PROVENANCE, so a file that is writable
+// now and mapped executable later never violates it. The vouching has to come
+// from somewhere that is not the mapper; the mount is the Fuchsia answer (an
+// executable filesystem hands out executable mappings; a scratch one does not).
+//
+// GRANULARITY, recorded rather than discovered: the flag is consulted per
+// DEVICE INSTANCE -- the (dc, devno) a file necessarily shares with its mount
+// source, since spoor_clone propagates devno through every walk and cross --
+// not per mount POINT. One device instance mounted twice therefore cannot
+// carry two different verdicts.
+//
+// **AND IT DOES NOT REACH EVERY DEV. #217 F1 (Fable 5) falsified the original
+// claim here -- "sound for every mount we make (each Env / dev9p session mints
+// its own devno)".** dev9p and devsrv mint a devno per SESSION at attach, and
+// walked descendants inherit it via spoor_clone, so the key holds for them.
+// devenv does NOT: devenv_walk stamps the CALLING Proc's env devno (an I-1 fix
+// -- entry ids restart at 1 per Env, so without it two Procs' unrelated
+// variables claim to be the same file and the REVENANT Image cache serves one
+// the other's bytes). A container's /env files therefore never share an
+// identity with the /env mount source its runner installed, and NO MNOEXEC
+// mount can ever cover devenv. That is why `Dev.may_back_exec` exists as a
+// FLOOR beneath this flag; do not re-derive the coverage claim from the key.
+#define MNOEXEC   0x0010
+
 struct Territory {
     u64                  magic;      // PGRP_MAGIC
     int                  ref;        // refcount; rfork(RFNAMEG) shares (Phase 5+)
@@ -341,11 +373,24 @@ int unbind(struct Territory *territory, path_id_t src, path_id_t dst);
 // future union-mount work; at v1.0 they're treated as "append a new entry."
 //
 // Idempotency: mount(t, S, mp, flags) where (key(mp), S) is already in the
-// mount table is a no-op success (returns 0; refcount not bumped; the spec's
-// `<<path, s>> \notin mounts[p]` precondition under the re-keyed identity).
+// mount table adds no entry and bumps no refcount (the spec's
+// `<<path, s>> \notin mounts[p]` precondition under the re-keyed identity),
+// but it DOES converge the existing entry's `flags` to the requested set
+// (#219). Before that it returned 0 having consulted nothing, so a re-mount
+// ADDING MNOEXEC reported success and left the pair unrestricted -- fail-open.
+// Convergence is symmetric (a re-mount without MNOEXEC drops it from THIS
+// ENTRY), so a 0 always means "this entry now says what you asked for" -- NOT
+// "the restriction is gone": mount_noexec_covers is an ANY-scan, so a device
+// instance mounted at two points stays covered while either entry has the bit.
+// Symmetry is safe
+// rather than merely convenient: mount flags are deliberately NOT locks --
+// unmount() is ungated and MREPL overwrites `flags` wholesale -- so the
+// loosening direction grants nothing that was not already two calls away.
+// `mp_path` is deliberately not re-captured (I-33: Path is write-only,
+// cosmetic to /proc/<pid>/ns, and the fresh Spoor keys to the same identity).
 //
 // Return values:
-//    0   success (entry added or idempotent no-op).
+//    0   success (entry added, or the existing entry's flags converged).
 //   -1   source or mountpoint is NULL / has corrupted magic.
 //   -2   mounts[] full (PGRP_MAX_MOUNTS reached).
 //   -3   would create a mount cycle (I-3) -- a self-mount (source identity ==
@@ -390,6 +435,28 @@ struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe);
 bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
                        u64 qid_path);
 
+// mount_noexec_covers (#217): does ANY mount entry in this Territory carry
+// MNOEXEC over the device instance (dc, devno)? The SOURCE-side twin of
+// mount_is_point_id, which keys on the mount POINT.
+//
+// Answering from (dc, devno) is what makes the check total: a file Spoor is
+// always a clone-descendant of the mount source it was reached through, and
+// spoor_clone copies devno, so the identity survives every walk and every
+// mount-over-mount cross without anything having to carry a flag forward.
+//
+// FAIL-CLOSED on a corrupted-but-non-NULL Territory would be wrong here (an
+// extinction is the honest answer to corruption, and matches its siblings).
+// FAIL-OPEN on a NULL Territory is right on the merits -- a Proc with no
+// namespace has no mount that could have conferred the restriction -- but the
+// arm is DEFENSIVE AND UNREACHABLE, not load-bearing, and an earlier version of
+// this comment claimed otherwise ("the kernel's own boot-time exec runs in
+// exactly that state"). It does not: kproc is given kpgrp() at proc.c's init,
+// exec's own path returns on territory_root_ref(NULL) BEFORE reaching the gate,
+// and the mmap path is PHENO_LINUX-only where every Proc carries a cloned
+// Territory. Recorded because the false version actively warned a reader off a
+// change that would have broken nothing.
+bool mount_noexec_covers(struct Territory *territory, int dc, u32 devno);
+
 // territory_root_ref: atomically read root_spoor + take a ref under ns_lock, so
 // the read+ref cannot race a concurrent territory_pivot_root / territory_chroot
 // that swaps root_spoor + clunks the displaced one to zero (RW-4 SA-F1). Returns
@@ -415,7 +482,8 @@ struct Spoor *territory_root_ref(struct Territory *territory);
 //
 // Idempotency: territory_chroot(territory, S) where root_spoor == S is a
 // no-op success (returns 0; refcount not bumped). Mirrors mount()'s
-// idempotent-same-source semantics.
+// idempotent-same-source REFCOUNT semantics, but not its flag convergence --
+// chroot carries no flags word to converge (#219).
 //
 // Spec: maps to `specs/territory.tla::Chroot(p, s)`. Refcount discipline
 // pinned by MountRefcountConsistency (refcount[s] = mount-table-count +

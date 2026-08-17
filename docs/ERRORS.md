@@ -89,6 +89,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_NOSYS`     | 38    | `ENOSYS`     | Function not implemented (placeholder syscall slot or unimpl path) |
 | `T_E_PIPE`      | 32    | `EPIPE`      | Broken pipe (write to closed pipe/socket) |
 | `T_E_RANGE`     | 34    | `ERANGE`     | Numerical result out of range |
+| `T_E_LOOP`      | 40    | `ELOOP`      | Symlink resolution did not terminate, or terminated on a link the caller refused to follow. TWO emitters share the code, as on Linux (DISTRO D-1, user-signed-off 2026-08-05): (1) the resolver exceeded `STALK_MAX_FOLLOWS` (40) -- a cycle, or a chain deeper than the bound; (2) the final component is a symlink and the open passed `SYS_WALK_OPEN_NOFOLLOW` **without** `T_OPATH`, i.e. Linux `O_NOFOLLOW` semantics: the caller asked for not-a-symlink and got one, and a symlink cannot be opened for byte I/O. With `T_OPATH` the same flag instead RETURNS the link (the v1.0 `lstat` spelling) and no error is raised. A trailing `/` overrides the flag entirely (POSIX 4.13), so `link/` follows and can answer `T_E_NOTDIR` instead |
 | `T_E_TIMEDOUT`  | 110   | `ETIMEDOUT`  | Operation timed out |
 | `T_E_CANCELED`  | 125   | `ECANCELED`  | Operation canceled (Loom LINK-chain cancel: a CQE for a linked SQE dropped when an earlier link failed) |
 

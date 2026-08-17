@@ -533,6 +533,12 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
                 ok = ns_put_str(buf, cap, &off, dev);
             }
         }
+        // #217: render MNOEXEC. A restriction that cannot be observed cannot be
+        // debugged -- an operator asking "is this container's /env actually
+        // noexec?" has no other way to find out, and "the code passes the flag"
+        // is not an answer about a RUNNING namespace. Rendered as a suffix so
+        // every existing parse of the line's first two fields is unchanged.
+        if (ok && (m->flags & MNOEXEC)) ok = ns_put_str(buf, cap, &off, " noexec");
         if (ok) ok = ns_put_str(buf, cap, &off, "\n");
 
         if (!ok) { off = line_start; truncated = true; break; }   // discard partial
@@ -766,12 +772,43 @@ int mount(struct Territory *territory, struct Spoor *source,
     // cyclic mount cannot be installed + then resolve to a wrong endpoint.
     if (would_create_mount_cycle(territory, source, mountpoint)) { rc = -3; goto out; }
 
-    // Idempotency: (key(mountpoint), source) pair already in the table → no-op.
-    // Spec: <<path, s>> \notin mounts[p] precondition under the re-keyed
-    // identity. Caller sees no refcount bump.
+    // Idempotency: (key(mountpoint), source) pair already in the table → no new
+    // entry, no refcount bump. Spec: <<path, s>> \notin mounts[p] precondition
+    // under the re-keyed identity (territory.tla models mounts as a set of
+    // <<point, source>> pairs and does not model `flags` at all, so the
+    // convergence below sits beneath the model).
+    //
+    // #219: the arm used to `goto out` with rc = 0 WITHOUT consulting flags, so
+    // mount(..., MNOEXEC) over an already-mounted pair reported success and
+    // never applied the restriction. The direction is what made it worth
+    // fixing: silent success in the PERMISSIVE direction is the dangerous one
+    // for a flag that carries an enforcement decision (#217's MNOEXEC), and a
+    // return value satisfied by the un-restricted state teaches its caller
+    // nothing.
+    //
+    // Converge in BOTH directions rather than refusing on a mismatch, so 0
+    // always means "THIS ENTRY now says what you asked for" -- which is not the
+    // same as "the restriction is gone", and must not be read as it: coverage
+    // is an ANY-scan over the table (mount_noexec_covers), so a device instance
+    // mounted at two points stays covered while EITHER entry carries the bit.
+    // Dropping the bit here converges one entry, never a device. Converging is the
+    // honest semantic here because it grants no authority the caller lacked:
+    // unmount() is ungated and MREPL overwrites `flags` wholesale below, so the
+    // same loosening is already two calls away for anyone who can reach this
+    // one. Refusing would buy nothing and would invite the belief that a
+    // mount flag is a LOCK -- it is not, deliberately (see
+    // territory_mount.noexec_covers: "authority conferred by a namespace edit
+    // is revoked by the inverse edit"). If a lock is ever wanted it needs a
+    // locked-by-WHOM axis that Territory has no notion of today.
+    //
+    // mp_path is deliberately NOT re-captured (MREPL does re-capture it): I-33
+    // makes Path non-load-bearing -- write-only, cosmetic to /proc/<pid>/ns --
+    // and the fresh mountpoint Spoor keys to the same identity by construction,
+    // so a ref-swap under ns_lock would buy no semantic difference.
     for (int i = 0; i < territory->nmounts; i++) {
         if (mount_key_eq(&territory->mounts[i], mountpoint) &&
             territory->mounts[i].source == source) {
+            territory->mounts[i].flags = flags;
             rc = 0;
             goto out;
         }
@@ -919,6 +956,27 @@ bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
     }
     spin_unlock(&territory->ns_lock);
     return hit;
+}
+
+bool mount_noexec_covers(struct Territory *territory, int dc, u32 devno) {
+    if (!territory)                    return false;
+    if (territory->magic != PGRP_MAGIC) extinction("mount_noexec_covers on corrupted Territory");
+
+    bool noexec = false;
+    spin_lock(&territory->ns_lock);
+    for (int i = 0; i < territory->nmounts; i++) {
+        const struct PgrpMount *m = &territory->mounts[i];
+        if (!(m->flags & MNOEXEC)) continue;
+        // dc/devno are set at spoor_alloc and never mutate, so reading them
+        // through the entry needs only the ns_lock that keeps `source` alive.
+        if (!m->source) continue;
+        if (m->source->dc == dc && m->source->devno == devno) {
+            noexec = true;
+            break;
+        }
+    }
+    spin_unlock(&territory->ns_lock);
+    return noexec;
 }
 
 // =============================================================================

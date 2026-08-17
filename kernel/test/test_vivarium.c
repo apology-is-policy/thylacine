@@ -38,6 +38,8 @@
                                     //       against the REAL constants, not copies
 #include <thylacine/vivarium.h>
 
+#include "../../mm/slub.h"          // #127: a real sigtab, so proc_free frees it
+
 void test_vivarium_t1_renumbers(void);
 void test_vivarium_rejects_are_deliberate(void);
 void test_vivarium_unknown_forwards(void);
@@ -350,8 +352,17 @@ void test_vivarium_openat_domain(void) {
                              "O_DIRECTORY forwards (no is-a-dir check to honour)");
     viv_expect_open_forwards(VIV_O_WRONLY | VIV_O_APPEND,
                              "O_APPEND forwards (no append mode in omode)");
-    viv_expect_open_forwards(VIV_O_RDONLY | VIV_O_NOFOLLOW,
-                             "O_NOFOLLOW forwards (correct only while symlinks are absent)");
+    // D-1: the V-2b reject INVERTED on the day its own rationale predicted --
+    // symlinks landed, so O_NOFOLLOW now TRANSLATES to the resolver's
+    // no-follow omode bit (real semantics: ELOOP on a final link; with O_PATH
+    // the handle IS the link).
+    viv_expect_open(VIV_T_ATCWD, VIV_O_RDONLY | VIV_O_NOFOLLOW,
+                    0u | SYS_WALK_OPEN_NOFOLLOW,
+                    "O_NOFOLLOW translates to the no-follow omode bit (D-1)");
+    viv_expect_open(VIV_T_ATCWD, VIV_O_PATH | VIV_O_NOFOLLOW,
+                    SYS_WALK_OPEN_OPATH | SYS_WALK_OPEN_NOFOLLOW,
+                    "O_PATH|O_NOFOLLOW keeps the flag (the lstat-fd idiom; "
+                    "one of the three flags O_PATH does not ignore)");
     viv_expect_open_forwards(VIV_O_RDONLY | VIV_O_NONBLOCK,
                              "O_NONBLOCK forwards");
     viv_expect_open_forwards(VIV_O_WRONLY | VIV_O_EXCL, "O_EXCL forwards");
@@ -507,12 +518,14 @@ void test_vivarium_stat_to_linux(void) {
 // -----------------------------------------------------------------------------
 
 static void viv_expect_statat(u64 dirfd, u64 flags, const char *what) {
-    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(dirfd, flags),
+    u32 sf = 0xFFu;   // poison: a translate must WRITE it (0 or the lstat mark)
+    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(dirfd, flags, &sf),
                    (int)VIV_TRANSLATED, what);
 }
 
 static void viv_expect_statat_forwards(u64 flags, const char *what) {
-    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD, flags),
+    u32 sf = 0;
+    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD, flags, &sf),
                    (int)VIV_FORWARD, what);
 }
 
@@ -520,6 +533,12 @@ void test_vivarium_fstatat_domain(void) {
     // Plain stat() -- flags 0. This is the row that carries the value: on
     // aarch64, stat() compiles to newfstatat, not to a stat(2) of its own.
     viv_expect_statat(VIV_T_ATCWD, 0, "flags 0 (plain stat) translates");
+    {
+        u32 sf = 0xFFu;
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD, 0, &sf),
+                       (int)VIV_TRANSLATED, "plain stat translates (sf probe)");
+        TEST_EXPECT_EQ((u64)sf, (u64)0, "plain stat follows (sf == 0)");
+    }
 
     // The one no-op admission. A Thylacine namespace is composed explicitly, so
     // nothing mounts as a side effect of traversal -- the flag asks for what we
@@ -528,13 +547,33 @@ void test_vivarium_fstatat_domain(void) {
     viv_expect_statat(VIV_T_ATCWD, VIV_AT_NO_AUTOMOUNT,
                       "AT_NO_AUTOMOUNT is a no-op (nothing mounts on traversal)");
 
-    // The costly reject, pinned by name because it is the one a future reader
-    // will be tempted to admit: SYS_STAT's contract literally says "stat ==
-    // lstat" at v1.0. That equivalence holds only because SYMLINKS ARE ABSENT,
-    // so admitting it would silently return the target's metadata the day they
-    // land -- the O_NOFOLLOW trap, on the stat surface.
-    viv_expect_statat_forwards(VIV_AT_SYMLINK_NOFOLLOW,
-                               "AT_SYMLINK_NOFOLLOW forwards (lstat; correct only while symlinks are absent)");
+    // D-1: the V-2c reject INVERTED, on the day its own comment predicted
+    // ("the day symlinks land there is nothing ... that would fail" -- this
+    // leg is the something). lstat now TRANSLATES, with the out-param marking
+    // the no-follow shape for sys_stat_for_proc.
+    {
+        u32 sf = 0;
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD,
+                                                    VIV_AT_SYMLINK_NOFOLLOW, &sf),
+                       (int)VIV_TRANSLATED,
+                       "AT_SYMLINK_NOFOLLOW translates (lstat; D-1)");
+        TEST_EXPECT_EQ((u64)(sf != 0), (u64)1, "lstat marks the no-follow shape");
+    }
+    {
+        // Both admitted bits together translate (the pre-D-1 leg asserted the
+        // combination FORWARDED; the mask grew, the whole-word check stands).
+        u32 sf = 0;
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(
+                           VIV_T_ATCWD,
+                           VIV_AT_NO_AUTOMOUNT | VIV_AT_SYMLINK_NOFOLLOW, &sf),
+                       (int)VIV_TRANSLATED,
+                       "NO_AUTOMOUNT + SYMLINK_NOFOLLOW both admitted");
+        TEST_EXPECT_EQ((u64)(sf != 0), (u64)1, "the combination keeps the lstat mark");
+    }
+
+    // Fail toward the decline on a bad call site (the openat shape).
+    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD, 0, NULL),
+                   (int)VIV_FORWARD, "NULL out-param forwards, never dispatches");
 
     // Serving this would mean synthesising a "." the caller never passed.
     viv_expect_statat_forwards(VIV_AT_EMPTY_PATH,
@@ -550,7 +589,7 @@ void test_vivarium_fstatat_domain(void) {
 
     // An unadmitted bit forwards even in combination with an admitted one --
     // the check is a whole-word mask, not a scan for known flags.
-    viv_expect_statat_forwards(VIV_AT_NO_AUTOMOUNT | VIV_AT_SYMLINK_NOFOLLOW,
+    viv_expect_statat_forwards(VIV_AT_EMPTY_PATH | VIV_AT_SYMLINK_NOFOLLOW,
                                "a rejected bit forwards even beside an admitted one");
     viv_expect_statat_forwards(0x80000000u, "an unknown high bit forwards");
 
@@ -562,12 +601,15 @@ void test_vivarium_fstatat_domain(void) {
     // SYS_STAT takes (path, len, out) and has no base argument at all, so there
     // is nowhere for a dirfd to go. Contrast openat, which at least HAS a
     // start_fd it could carry.
-    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(3, 0), (int)VIV_FORWARD,
-                   "a real dirfd forwards (SYS_STAT has no base argument)");
+    {
+        u32 sf = 0;
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(3, 0, &sf), (int)VIV_FORWARD,
+                       "a real dirfd forwards (SYS_STAT has no base argument)");
 
-    // Only the low 32 bits of dirfd are significant.
-    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(0x1234567800000003ull, 0),
-                   (int)VIV_FORWARD, "the high half of dirfd is not consulted");
+        // Only the low 32 bits of dirfd are significant.
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(0x1234567800000003ull, 0, &sf),
+                       (int)VIV_FORWARD, "the high half of dirfd is not consulted");
+    }
 }
 
 // The mmap argument domain (V-2d). Each admitted argument and each decline is
@@ -674,6 +716,243 @@ void test_vivarium_mmap_domain(void) {
     // No length judgement here: `len` is a SEMANTIC question the shell answers
     // (EINVAL for 0, ENOMEM for too-large), so it is not a decide parameter at
     // all -- this asserts the signature has not grown one by accident.
+}
+
+// The FILE mmap argument domain (DISTRO D-3). Measured off musl's map_library,
+// so the admitted case is asserted as THE CALL STOCK LDSO MAKES rather than as a
+// shape we thought reasonable -- and each decline is named, because this arm
+// hands a guest a mapping of a FILE and a widening here is an I-36 question, not
+// a fidelity one.
+void test_vivarium_mmap_file_domain(void) {
+    const u64 priv = (u64)VIV_MAP_PRIVATE;
+    const u64 rx   = (u64)(VIV_PROT_READ | VIV_PROT_EXEC);
+    const u64 fd   = 3;
+
+    // THE MEASURED CALL. dynlink.c:809 `mmap(addr_min, map_len, prot,
+    // MAP_PRIVATE, fd, off_start)`, read against the shipped Alpine libc whose
+    // lowest PT_LOAD is R+X at file offset 0: this exact tuple is what opening
+    // /lib/ld-musl-aarch64.so.1 produces.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, fd, 0),
+                   (int)VIV_TRANSLATED, "R+X private fd-backed is the measured shape");
+
+    // R-only: the same call against a library whose lowest PT_LOAD is R-only
+    // (a -z separate-code layout). Not hypothetical -- it is the OTHER shape the
+    // same line emits, decided by the linker rather than by the caller.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide((u64)VIV_PROT_READ, priv, fd, 0),
+                   (int)VIV_TRANSLATED, "R-only private fd-backed admitted too");
+
+    // PROT_WRITE is THE refusal that keeps I-36 intact: this arm's Burrow is
+    // shared and has no write-back path, so a writable file mapping would either
+    // lose the writes or leak them into every other Proc sharing the Image.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       (u64)(VIV_PROT_READ | VIV_PROT_WRITE), priv, fd, 0),
+                   (int)VIV_FORWARD, "PROT_WRITE declines -- I-36 has no write-back");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       (u64)(VIV_PROT_READ | VIV_PROT_WRITE | VIV_PROT_EXEC),
+                       priv, fd, 0),
+                   (int)VIV_FORWARD, "W+X declines (I-12 too, two independent gates)");
+
+    // PROT_NONE declines HERE while the anon arm admits it -- the asymmetry is
+    // deliberate and is asserted so a future "make the arms consistent" tidy-up
+    // has to argue with a test. There is no degradation available: serving a
+    // PROT_NONE file map readably would hand over bytes the caller declined.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide((u64)VIV_PROT_NONE, priv, fd, 0),
+                   (int)VIV_FORWARD, "PROT_NONE declines on the FILE arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide((u64)VIV_PROT_EXEC, priv, fd, 0),
+                   (int)VIV_FORWARD, "X-without-R declines (no readable page to exec)");
+
+    // An allow-list, so the aarch64 extras fall out without being enumerated.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx | (u64)VIV_PROT_BTI, priv, fd, 0),
+                   (int)VIV_FORWARD, "PROT_BTI declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx | (u64)VIV_PROT_MTE, priv, fd, 0),
+                   (int)VIV_FORWARD, "PROT_MTE declines");
+
+    // MAP_SHARED is the write-back semantics arriving by a second door, and
+    // MAP_FIXED is the caller-chosen address D-3a does not serve (D-3b does,
+    // through its own arm). Exact equality refuses both without naming them.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, (u64)VIV_MAP_SHARED, fd, 0),
+                   (int)VIV_FORWARD, "MAP_SHARED declines -- write-back by another name");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       rx, priv | (u64)VIV_MAP_FIXED, fd, 0),
+                   (int)VIV_FORWARD, "MAP_FIXED declines on this arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       rx, priv | (u64)VIV_MAP_FIXED_NOREPLACE, fd, 0),
+                   (int)VIV_FORWARD, "MAP_FIXED_NOREPLACE declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       rx, priv | (u64)VIV_MAP_ANONYMOUS, fd, 0),
+                   (int)VIV_FORWARD, "MAP_ANONYMOUS declines -- that is the other arm");
+
+    // BOTH spellings of -1, the AT_FDCWD trap again: a caller may leave x4
+    // sign-extended or merely zero-extended, and neither is a real descriptor.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, (u64)-1, 0),
+                   (int)VIV_FORWARD, "sign-extended -1 fd declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, 0xFFFFFFFFull, 0),
+                   (int)VIV_FORWARD, "zero-extended -1 fd declines");
+
+    // A page-aligned offset is STRUCTURE, not fidelity: the FILE fault arm reads
+    // each page at file_offset + page-floored burrow offset, an identity that
+    // only holds when the Burrow's offset 0 is the mapping's start.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, fd, 0x1000),
+                   (int)VIV_TRANSLATED, "a page-aligned non-zero offset is admitted");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, fd, 1),
+                   (int)VIV_FORWARD, "a misaligned offset declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, fd, 0xFFF),
+                   (int)VIV_FORWARD, "one byte short of a page declines");
+
+    // prot/flags/fd are `int` in the Linux ABI, so their high halves are noise.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(0xDEADBEEF00000000ull | rx,
+                                                  0xCAFE000000000000ull | priv,
+                                                  0x1234567800000003ull, 0),
+                   (int)VIV_TRANSLATED, "the high half of prot/flags/fd is unread");
+}
+
+// The two MAP_FIXED argument domains (DISTRO D-3b). Measured off map_library's
+// overlay calls, so each admitted case is asserted as THE CALL STOCK LDSO MAKES.
+void test_vivarium_mmap_fixed_domain(void) {
+    const u64 pf   = (u64)(VIV_MAP_PRIVATE | VIV_MAP_FIXED);
+    const u64 pfa  = (u64)(VIV_MAP_PRIVATE | VIV_MAP_FIXED | VIV_MAP_ANONYMOUS);
+    const u64 rw   = (u64)(VIV_PROT_READ | VIV_PROT_WRITE);
+    const u64 rx   = (u64)(VIV_PROT_READ | VIV_PROT_EXEC);
+    const u64 addr = 0x40001000ull;                  // a real page
+    const u64 fd   = 3;
+
+    // ---- arm 2 (dynlink.c:842) -----------------------------------------------
+
+    // THE MEASURED CALL. All 18 ELFs in the stock Alpine rootfs are `R-X` then
+    // `RW-`, so the ONE arm-2 request any of them makes is this: the writable
+    // data segment, page-aligned file offset, MAP_PRIVATE|MAP_FIXED.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, rw, pf, fd, 0x1000),
+                   (int)VIV_TRANSLATED, "RW private fixed fd-backed is the measured shape");
+
+    // R+X and R-only arm-2 requests. NO PRODUCER on this rootfs -- they need a
+    // `-z separate-code` four-segment layout. Admitted because the ELF format
+    // permits them and a Debian/Fedora toolchain emits them; asserted HERE
+    // because the in-guest gate cannot reach them, so this is their only cover.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, rx, pf, fd, 0),
+                   (int)VIV_TRANSLATED, "R+X fixed fd-backed admitted (separate-code layout)");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, (u64)VIV_PROT_READ,
+                                                        pf, fd, 0),
+                   (int)VIV_TRANSLATED, "R-only fixed fd-backed admitted");
+
+    // W+X declines at the domain edge. vma_alloc would reject it too, but I-12
+    // is worth failing closed on before anything has to argue about it.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(
+                       addr, (u64)(VIV_PROT_READ | VIV_PROT_WRITE | VIV_PROT_EXEC),
+                       pf, fd, 0),
+                   (int)VIV_FORWARD, "W+X declines -- I-12 fails closed here too");
+
+    // PROT_NONE is a pure reservation; there is no honourable service for it.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, 0, pf, fd, 0),
+                   (int)VIV_FORWARD, "PROT_NONE declines");
+
+    // addr is a REQUIREMENT under MAP_FIXED, not the hint it is on the non-fixed
+    // arms. Zero and misaligned are separate mistakes and both must decline.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(0, rw, pf, fd, 0),
+                   (int)VIV_FORWARD, "a fixed map at NULL declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr + 1, rw, pf, fd, 0),
+                   (int)VIV_FORWARD, "a misaligned fixed addr declines");
+
+    // MAP_SHARED is the write-back semantics this whole arc refuses, arriving by
+    // another door. Exact flag equality is what excludes it.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(
+                       addr, rw, (u64)(VIV_MAP_SHARED | VIV_MAP_FIXED), fd, 0),
+                   (int)VIV_FORWARD, "MAP_SHARED declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(
+                       addr, rw, pf | (u64)VIV_MAP_ANONYMOUS, fd, 0),
+                   (int)VIV_FORWARD, "MAP_ANONYMOUS is the OTHER arm, not this one");
+
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, rw, pf, (u64)-1, 0),
+                   (int)VIV_FORWARD, "fd == -1 declines on the fd-backed arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, rw, pf, fd, 1),
+                   (int)VIV_FORWARD, "a misaligned offset declines");
+
+    // ---- arm 3 (dynlink.c:851) -----------------------------------------------
+
+    // THE MEASURED CALL: the bss tail, gated in musl on memsz > filesz && PF_W,
+    // so its prot always carries R|W and its offset is always 0.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rw, pfa, (u64)-1, 0),
+                   (int)VIV_TRANSLATED, "RW private fixed anon is the measured shape");
+
+    // PROT_NONE declines HERE, and that DIVERGES from the non-fixed anon arm,
+    // which degrades it to writable. A fixed PROT_NONE over an existing mapping
+    // is a guard; answering it with a writable page is a hole, not a degradation.
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(addr, 0, (u64)(VIV_MAP_PRIVATE |
+                                                            VIV_MAP_ANONYMOUS),
+                                             (u64)-1, 0),
+                   (int)VIV_TRANSLATED, "the NON-fixed anon arm does admit PROT_NONE");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, 0, pfa, (u64)-1, 0),
+                   (int)VIV_FORWARD, "but the FIXED anon arm refuses it -- a guard");
+
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rx, pfa, (u64)-1, 0),
+                   (int)VIV_FORWARD, "PROT_EXEC declines on the anon arm (I-42/CAP_JIT)");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rw, pfa, 3, 0),
+                   (int)VIV_FORWARD, "a real fd declines on the anonymous arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rw, pfa, (u64)-1, 0x1000),
+                   (int)VIV_FORWARD, "a nonzero offset declines on the anonymous arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(0, rw, pfa, (u64)-1, 0),
+                   (int)VIV_FORWARD, "a fixed anon map at NULL declines");
+}
+
+// The FOUR mmap arms are pairwise DISJOINT. Every decider's comment claims it;
+// without this they would only agree with each other. The dispatch site relies
+// on it to make its try-order free rather than load-bearing -- if some tuple
+// were admitted by two arms, the order would silently decide which semantics a
+// guest receives, and D-3b's arms differ in whether the guest gets shared
+// demand-paged file bytes or a private eager copy.
+void test_vivarium_mmap_arms_disjoint(void) {
+    // Sweep the cross product of every prot/flag/fd/offset value either arm
+    // reasons about. Cheap and exhaustive over the interesting space -- far more
+    // convincing than a handful of hand-picked tuples, and it is the shape that
+    // would catch a FUTURE widening of either arm colliding with the other.
+    const u64 prots[] = {
+        0, VIV_PROT_READ, VIV_PROT_WRITE, VIV_PROT_EXEC,
+        VIV_PROT_READ | VIV_PROT_WRITE, VIV_PROT_READ | VIV_PROT_EXEC,
+        VIV_PROT_WRITE | VIV_PROT_EXEC,
+        VIV_PROT_READ | VIV_PROT_WRITE | VIV_PROT_EXEC,
+        VIV_PROT_BTI, VIV_PROT_MTE,
+    };
+    const u64 flags[] = {
+        0, VIV_MAP_SHARED, VIV_MAP_PRIVATE, VIV_MAP_FIXED, VIV_MAP_ANONYMOUS,
+        VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS,
+        VIV_MAP_PRIVATE | VIV_MAP_FIXED,
+        VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS | VIV_MAP_FIXED,
+        VIV_MAP_PRIVATE | VIV_MAP_FIXED_NOREPLACE,
+    };
+    const u64 fds[]  = { 0, 3, (u64)-1, 0xFFFFFFFFull };
+    const u64 offs[] = { 0, 1, 0x1000 };
+    // The FIXED arms judge `addr`, so it joins the sweep: 0 and a misaligned
+    // value must reach the two decliners, and a real page must reach admission.
+    const u64 addrs[] = { 0, 0x1000, 0x1001, 0x40000000ull };
+
+    int adm_file = 0, adm_anon = 0, adm_fixed_file = 0, adm_fixed_anon = 0;
+    for (unsigned ai = 0; ai < sizeof(addrs) / sizeof(addrs[0]); ai++)
+    for (unsigned pi = 0; pi < sizeof(prots) / sizeof(prots[0]); pi++)
+    for (unsigned fi = 0; fi < sizeof(flags) / sizeof(flags[0]); fi++)
+    for (unsigned di = 0; di < sizeof(fds)   / sizeof(fds[0]);   di++)
+    for (unsigned oi = 0; oi < sizeof(offs)  / sizeof(offs[0]);  oi++) {
+        u64 a = addrs[ai], pr = prots[pi], fl = flags[fi];
+        u64 fd = fds[di],  off = offs[oi];
+        TEST_ASSERT(vivarium_mmap_arms_disjoint(a, pr, fl, fd, off),
+                    "no tuple may be admitted by more than ONE mmap arm");
+        if (vivarium_mmap_file_decide(pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_file++;
+        if (vivarium_mmap_decide(a, pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_anon++;
+        if (vivarium_mmap_fixed_file_decide(a, pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_fixed_file++;
+        if (vivarium_mmap_fixed_anon_decide(a, pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_fixed_anon++;
+    }
+
+    // Disjointness is satisfiable by admitting NOTHING, so the sweep proves
+    // nothing until EVERY arm is shown to admit something inside it. These are
+    // the checks that keep the loop above from passing vacuously -- and they are
+    // per-arm rather than a total, because a total is satisfied by one arm
+    // admitting everything while another admits nothing at all.
+    TEST_ASSERT(adm_file       > 0, "the sweep must reach the FILE arm's domain");
+    TEST_ASSERT(adm_anon       > 0, "the sweep must reach the anon arm's domain");
+    TEST_ASSERT(adm_fixed_file > 0, "the sweep must reach the FIXED FILE domain");
+    TEST_ASSERT(adm_fixed_anon > 0, "the sweep must reach the FIXED anon domain");
 }
 
 // The clone argument domain (LINEAGE L-3d). This row hands a guest a second
@@ -1164,6 +1443,55 @@ void test_vivarium_sigset_to_notemask(void) {
     TEST_ASSERT(vivarium_sigprocmask_decide(3, 8) == VIV_FORWARD, "bad how");
     TEST_ASSERT(vivarium_sigprocmask_decide(VIV_SIG_BLOCK, 16) == VIV_FORWARD,
                 "sigsetsize must be 8");
+}
+
+// -----------------------------------------------------------------------------
+// vivarium.handler_mask — the mask a handler runs under (Linux
+// signal_delivered: blocked |= sa_mask; blocked |= sig unless SA_NODEFER).
+// The delivery path stores this in note_mask for the handler's duration and
+// rt_sigreturn puts the pre-handler mask back (notes.phenotype_sigreturn_
+// restores_mask covers that half; the probe's L237-L244 the wiring).
+// -----------------------------------------------------------------------------
+void test_vivarium_handler_mask(void) {
+    const struct viv_notebit_map m = {
+        .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
+        .snare = 4, .tty = 5,
+    };
+    const u64 CHILD = 1ULL << 3, INTR = 1ULL << 0, PIPE = 1ULL << 2,
+              TTY = 1ULL << 5;
+
+    // mask | sa_mask | sig: the pre-handler mask is KEPT, sa_mask added, the
+    // delivered signal added.
+    u64 hm = vivarium_handler_mask(CHILD, 1ULL << (VIV_SIGINT - 1), 0,
+                                   VIV_SIGPIPE, &m);
+    TEST_ASSERT(hm == (CHILD | INTR | PIPE), "mask | sa_mask | sig");
+
+    // SA_NODEFER: sa_mask still applied, the signal itself NOT added.
+    hm = vivarium_handler_mask(CHILD, 1ULL << (VIV_SIGINT - 1), VIV_SA_NODEFER,
+                               VIV_SIGPIPE, &m);
+    TEST_ASSERT(hm == (CHILD | INTR), "SA_NODEFER omits the delivered signal");
+
+    // Both additions go through the forward translation: a tty-family sa_mask
+    // entry blocks the FAMILY bit (the coarseness the mask row reports), and
+    // SIGKILL in sa_mask is dropped, never a bit.
+    hm = vivarium_handler_mask(0, (1ULL << (VIV_SIGWINCH - 1)) |
+                                  (1ULL << (VIV_SIGKILL - 1)), 0,
+                               VIV_SIGINT, &m);
+    TEST_ASSERT(hm == (TTY | INTR), "sa_mask via the same coarse translation; SIGKILL dropped");
+
+    // An empty sa_mask still blocks the delivered signal (musl's plain signal()
+    // installs with sa_mask = 0): the common case.
+    hm = vivarium_handler_mask(0, 0, 0, VIV_SIGCHLD, &m);
+    TEST_ASSERT(hm == CHILD, "empty sa_mask: exactly the delivered signal");
+
+    // A signal with no note adds no bit (SIGUSR1 = 10); an out-of-range signum
+    // adds nothing rather than shifting by 64+.
+    hm = vivarium_handler_mask(0, 0, 0, 10, &m);
+    TEST_ASSERT(hm == 0, "a note-less signal adds no bit");
+    hm = vivarium_handler_mask(INTR, 0, 0, 0, &m);
+    TEST_ASSERT(hm == INTR, "signum 0 adds nothing (no shift by -1)");
+    hm = vivarium_handler_mask(INTR, 0, 0, 65, &m);
+    TEST_ASSERT(hm == INTR, "signum > VIV_NSIG adds nothing");
 }
 
 // -----------------------------------------------------------------------------
@@ -2808,4 +3136,161 @@ void test_vivarium_dup3_domain(void) {
     // Fail toward the refusal on a bad call site.
     TEST_EXPECT_EQ((int)vivarium_dup3_decide(0, NULL), (int)VIV_FORWARD,
                    "NULL cloexec_out -> FORWARD");
+}
+
+// The phenotype's fork/exec signal-state rule (task #127; ARCH 7.6, POSIX;
+// operator-voted 2026-08-17): rfork COPIES the sigtab into the child's OWN
+// table; execve resets CAUGHT rows to SIG_DFL and KEEPS SIG_IGN rows. This
+// pins the two primitives where the table is directly observable (the in-guest
+// legs L217-L228 drive them through a real fork + execve). Each leg names the
+// row that would read wrong under the OLD behaviour (a full zero at exec; no
+// copy at fork).
+void test_vivarium_sigtab_fork_exec_rule(void);
+void test_vivarium_sigtab_fork_exec_rule(void) {
+    struct viv_sigtab *tab =
+        (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(tab != NULL, "sigtab alloc");
+    struct viv_ksigaction ign = { .handler = VIV_SIG_IGN, .flags = 0,
+                                  .restorer = 0, .mask = 0 };
+    struct viv_ksigaction hnd = { .handler = 0x400000ull, .flags = 0x14000000ull,
+                                  .restorer = 0x400100ull, .mask = 0x2ull };
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_PIPE, &ign);        // ignored
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &hnd);   // caught
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_TTY_HUP, &hnd);     // caught
+
+    // ---- exec: caught -> SIG_DFL (flags/restorer/mask too); ignored KEPT.
+    viv_sigtab_reset_caught(tab);
+    struct viv_ksigaction got;
+    TEST_ASSERT(!viv_sigtab_note_handler(tab, VIV_SIGNOTE_INTERRUPT, &got),
+                "exec: the caught interrupt row is no longer a handler");
+    TEST_ASSERT(tab->act[(u32)VIV_SIGNOTE_INTERRUPT].handler == VIV_SIG_DFL
+                && tab->act[(u32)VIV_SIGNOTE_INTERRUPT].flags == 0
+                && tab->act[(u32)VIV_SIGNOTE_INTERRUPT].restorer == 0
+                && tab->act[(u32)VIV_SIGNOTE_INTERRUPT].mask == 0,
+                "exec: the caught row is a clean SIG_DFL (flags/restorer/mask zeroed)");
+    TEST_ASSERT(!viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_HUP, &got),
+                "exec: the second caught row reset too");
+    TEST_ASSERT(viv_sigtab_note_ignored(tab, VIV_SIGNOTE_PIPE),
+                "exec: SIG_IGN SURVIVES execve (POSIX) -- the row the old full zero lost");
+    TEST_ASSERT(!viv_sigtab_note_ignored(tab, VIV_SIGNOTE_CHILD_EXIT),
+                "exec: an untouched SIG_DFL row stays SIG_DFL");
+    viv_sigtab_reset_caught(NULL);                             // NULL-safe
+
+    // ---- fork: the child gets its OWN equal copy; a NULL parent table -> NULL.
+    struct Proc *parent = proc_alloc();
+    struct Proc *child  = proc_alloc();
+    TEST_ASSERT(parent != NULL && child != NULL, "proc_alloc x2");
+    parent->phenotype = PHENO_LINUX;
+    child->phenotype  = PHENO_LINUX;
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_INTERRUPT, &hnd);   // re-arm a caught row
+    parent->sigtab = tab;
+    TEST_EXPECT_EQ(viv_sigtab_clone_into(child, parent), 0, "fork: clone succeeds");
+    TEST_ASSERT(child->sigtab != NULL && child->sigtab != parent->sigtab,
+                "fork: the child has its OWN table (never the parent's pointer)");
+    bool equal = true;
+    for (u32 i = 0; i < (u32)VIV_SIGNOTE_COUNT; i++) {
+        if (child->sigtab->act[i].handler  != tab->act[i].handler  ||
+            child->sigtab->act[i].flags    != tab->act[i].flags    ||
+            child->sigtab->act[i].restorer != tab->act[i].restorer ||
+            child->sigtab->act[i].mask     != tab->act[i].mask) equal = false;
+    }
+    TEST_ASSERT(equal, "fork: every row copied -- caught AND ignored (POSIX fork(2))");
+    TEST_ASSERT(viv_sigtab_note_ignored(child->sigtab, VIV_SIGNOTE_PIPE)
+                && viv_sigtab_note_handler(child->sigtab, VIV_SIGNOTE_INTERRUPT, &got)
+                && got.handler == 0x400000ull,
+                "fork: the child reads the ignored PIPE and the caught INTERRUPT");
+    // The copy is a SNAPSHOT: a later change on the parent does not reach the child.
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_PIPE, &hnd);
+    TEST_ASSERT(viv_sigtab_note_ignored(child->sigtab, VIV_SIGNOTE_PIPE),
+                "fork: the child's table is independent of later parent changes");
+    struct Proc *child2 = proc_alloc();
+    struct Proc *bare   = proc_alloc();
+    TEST_ASSERT(child2 != NULL && bare != NULL, "proc_alloc x2 (bare)");
+    bare->phenotype = PHENO_LINUX;
+    child2->phenotype = PHENO_LINUX;
+    TEST_EXPECT_EQ(viv_sigtab_clone_into(child2, bare), 0, "fork: a NULL parent table succeeds");
+    TEST_ASSERT(child2->sigtab == NULL, "fork: ...and leaves the child's NULL (all-SIG_DFL)");
+    TEST_EXPECT_EQ(viv_sigtab_clone_into(NULL, bare), -1, "fork: NULL child refused");
+
+    // proc_free owns each table (the immortal-per-Proc rule): parent frees tab.
+    parent->state = PROC_STATE_ZOMBIE; proc_free(parent);
+    child->state  = PROC_STATE_ZOMBIE; proc_free(child);
+    child2->state = PROC_STATE_ZOMBIE; proc_free(child2);
+    bare->state   = PROC_STATE_ZOMBIE; proc_free(bare);
+}
+
+extern s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
+// The T2 fcntl SHELL's F_DUPFD errnos (found by the c8ab2744 close's L-6c legs).
+//
+// The decide half above is pure; this drives the arm that turns a decision into
+// an errno, because that is where the defect lived: handle_dup_posix folds
+// "no such fd" and "table full" into one -1, and the arm answered EMFILE for
+// both. busybox ash's redirect() probes the TARGET fd of every `N>&M` with
+// fcntl(N, F_DUPFD, 10) precisely to learn whether N is open -- EBADF means
+// "not open, nothing to save", ANY other errno is "strange" and aborts the
+// command. fd 3 is not open in the L-6c gate's shell, so every `3>&1` died with
+// `fcntl(3,F_DUPFD,10): No file descriptors available`, the command
+// substitution around it yielded "", and the two legs asserting an EMPTY
+// capture passed VACUOUSLY -- only the positive control (L6C-K) said no.
+//
+// Driven through viv_fcntl_for_test (the real arm, on a fresh Proc: no
+// exception frame, which the FCNTL case never reads).
+void test_vivarium_fcntl_dupfd_errnos(void);
+void test_vivarium_fcntl_dupfd_errnos(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+
+    // ---- POSITIVE CONTROL: a live fd dups at or above the minimum. ------
+    // Every negative below is an errno; a shell whose DUPFD arm was wired to
+    // nothing would answer them all with the same wrong number. This proves the
+    // arm reaches handle_dup_posix and honours the minimum first.
+    hidx_t live = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p);
+    s64 ctl = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, 10);
+
+    // ---- LEG A: F_DUPFD on a CLOSED fd is EBADF -- the ash probe. ---------
+    // fd 3 is closed in a fresh Proc (the control's source took slot 0 and its
+    // dup landed at or above 10); asserted, not assumed.
+    int a_closed = handle_get_cloexec(p, 3);
+    s64 a = viv_fcntl_for_test(p, 3, VIV_F_DUPFD, 10);
+    // The CLOEXEC spelling is the same op with the flag on -- same answer.
+    s64 a2 = viv_fcntl_for_test(p, 3, VIV_F_DUPFD_CLOEXEC, 10);
+
+    // ---- LEG B: F_DUPFD on a LIVE fd with a FULL table is EMFILE. ---------
+    // Fill every free slot, prove fullness two ways (the count and a live
+    // alloc now refused), then ask.
+    int filled = 0;
+    while (handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL) >= 0) filled++;
+    int b_count = handle_table_count(p->handles);
+    hidx_t b_refused = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    s64 b = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, 0);
+    // (Leg A had to run BEFORE the fill: full means every index is live, so
+    // no closed fd exists to probe afterwards.)
+
+    // ---- LEG C: a minimum at or past the table is EINVAL (Linux: RLIMIT). --
+    s64 c = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, (u64)PROC_HANDLE_MAX);
+
+    // ---- TEARDOWN, then assert. ---------------------------------------
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);                       // closes every straggler handle
+
+    TEST_ASSERT(live >= 0, "control precondition: a live fd was allocated");
+    TEST_ASSERT(ctl >= 10,
+                "CONTROL: F_DUPFD(live, 10) lands at or above 10 -- the arm is "
+                "wired and honours the minimum");
+    TEST_EXPECT_EQ(a_closed, -1, "A precondition: fd 3 is CLOSED");
+    TEST_EXPECT_EQ(a, -(s64)T_E_BADF,
+                   "A: F_DUPFD on a closed fd is EBADF -- ash's `N>&M` probe "
+                   "reads any other errno as fatal (pre-fix: EMFILE)");
+    TEST_EXPECT_EQ(a2, -(s64)T_E_BADF,
+                   "A: F_DUPFD_CLOEXEC on a closed fd is EBADF too");
+    TEST_ASSERT(filled > 0, "B precondition: the fill allocated something");
+    TEST_EXPECT_EQ(b_count, PROC_HANDLE_MAX, "B precondition: the table is FULL");
+    TEST_EXPECT_EQ(b_refused, -1, "B precondition: a live alloc is now refused");
+    TEST_EXPECT_EQ(b, -(s64)T_E_MFILE,
+                   "B: F_DUPFD on a LIVE fd with a full table is EMFILE -- the "
+                   "two errnos are DISTINCT (a fix that always said EBADF "
+                   "would fail here)");
+    TEST_EXPECT_EQ(c, -(s64)T_E_INVAL,
+                   "C: a minimum at the table size is EINVAL, not EMFILE");
 }

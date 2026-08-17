@@ -4,7 +4,7 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive smp-gate idle-gate check-floor test-a72 run run-tcg gdb specs help
+.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive test-classify check-arc-gates check-production smp-gate idle-gate check-floor test-a72 run run-tcg gdb specs help
 
 all:
 	@tools/build.sh all
@@ -51,6 +51,26 @@ test-interactive:
 
 smp-gate:
 	@tools/ci-smp-gate.sh
+
+# The SMP gate's failure classifier, exercised without booting anything (#222).
+# Fast, so there is no excuse for the ladder to go untested again -- the
+# EXTERNAL-KILL bucket was structurally unable to see SIGKILL for as long as
+# nobody drove it.
+test-classify:
+	@tools/test-smp-classify.sh
+
+# The arc-gate verdict checker, exercised without booting anything (#212). Its
+# load-bearing case is a PRE-#212 boot log: a check that passed one of those
+# would be decorative, since that is what every boot looked like while the
+# D-5/L-6c skip was invisible.
+check-arc-gates:
+	@tools/check-arc-gates.sh --selftest
+
+# #228: prove the lean production shape still BUILDS. It had stopped -- joey
+# failed with 11 errors at THYLA_BOOT_PROBES=OFF -- and nothing noticed for as
+# long as nothing built it. ~2 s for joey; --all adds the full production build.
+check-production:
+	@tools/check-production.sh
 
 idle-gate:
 	@tools/ci-idle-gate.sh
@@ -159,6 +179,10 @@ help:
 	@echo "               optional gate, SKIPs without 'expect'. THYLACINE_ACCEL=tcg default."
 	@echo "  smp-gate   — SMP soundness CI gate: multi-boot the smp4/smp8 x default/UBSan"
 	@echo "               matrix N>=10 (single boots lie). SMP_GATE_N / SMP_GATE_CONFIGS env."
+	@echo "  check-arc-gates — #212: the D-5/L-6c arc-gate verdict checker, over"
+	@echo "               synthetic logs. No boots; seconds."
+	@echo "  check-production — #228: prove the production shape still COMPILES (~2 s)."
+	@echo "               --all also runs the full production build."
 	@echo "  check-floor— #91: full ARMv8.0 floor scan incl. /clade + /goroot (~6 min)."
 	@echo "               build.sh already runs the fast ramfs scan on every bake."
 	@echo "  test-a72   — boot on -cpu cortex-a72 (ARMv8.0-only): the floor's"

@@ -517,6 +517,11 @@ static u8 qid_type_p9_to_kernel(u8 p9) {
     if (p9 & P9_QTDIR)     out |= QTDIR;
     if (p9 & P9_QTAUTH)    out |= QTAUTH;
     if (p9 & P9_QTTMP)     out |= QTTMP;
+    // DISTRO D-1: carry the symlink marker so the resolver can expand
+    // (stalk.c; docs/DISTRO.md section 4). A server that never sets it ->
+    // links are invisible, which is the pre-D-1 status quo (fail-safe).
+    // P9_QTSYMLINK == QTSYMLINK == 0x02.
+    if (p9 & P9_QTSYMLINK) out |= QTSYMLINK;
     // net-6b-2b: carry the readiness marker through so dev9p_poll's QTPOLL gate
     // (on the cached qid) sees it. A server that never sets it -> dev9p_poll is
     // POSIX always-ready (fail-safe). P9_QTPOLL == QTPOLL == 0x01.
@@ -748,6 +753,20 @@ static void t_stat_from_p9_attr(struct t_stat *out, const struct p9_attr *attr) 
     if (attr->valid & P9_GETATTR_MODE) out->mode = attr->mode;
     if (attr->valid & P9_GETATTR_UID)  out->uid  = attr->uid;
     if (attr->valid & P9_GETATTR_GID)  out->gid  = attr->gid;
+
+    // D-1: the qid is the authority on symlink-ness -- it is what the RESOLVER
+    // reads, so a server whose qid says QTSYMLINK gets its links expanded no
+    // matter what its Tgetattr.mode says. Carry that same answer into the mode's
+    // type field when the server left one out, so lstat cannot report a link as
+    // a regular file whose size happens to be the target string's length. The
+    // syscall.h registry claimed this derivation existed; it did not, and only a
+    // server that sets the qid bit but omits S_IFLNK could tell -- which is the
+    // I-14 case the claim was there to cover. Guarded on a ZERO type field: a
+    // server that reported a real type keeps it (we do not overrule a server
+    // that disagrees with itself -- that is its bug to surface, not ours to
+    // paper over).
+    if ((out->mode & T_S_IFMT) == 0 && (out->qid_type & QTSYMLINK))
+        out->mode |= T_S_IFLNK;
 }
 
 // Native fstat surface (A-2a; IDENTITY-DESIGN.md §9.5) -> Stratum Tgetattr.
@@ -1945,6 +1964,28 @@ static long dev9p_readdir(struct Spoor *c, void *buf, long n, s64 off) {
 // -- Trenameat operates on the dirfids by name without transitioning them, like
 // Tsync / Treaddir). The SYS_RENAME handler already required the same Dev; this
 // adds the same-SESSION guard (two dev9p mounts are distinct p9_clients, and a
+// DISTRO D-1: Dev.readlink -- Treadlink on the walked link fid. `c` is the
+// resolver's transient walked-link clone: never opened, never donated to the
+// G2 dir-fid cache (donation gates on QTDIR, and a link's qid never carries
+// it), clunked by the resolver right after this returns. No Larder surface
+// touches the target (the per-crossing RPC is the honest v1.0 cost --
+// DISTRO.md section 4.4; the link-target sub-cache is a recorded seam).
+static long dev9p_readlink(struct Spoor *c, char *buf, long n) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || !buf || n <= 0) return -T_E_INVAL;
+    if (p->fid == P9_NOFID) return -T_E_INVAL;   // fidless Spoor (cached open)
+    u16 cap = (n < 0xFFFF) ? (u16)n : 0xFFFFu;
+    u16 len = cap;
+    int rc = p9_client_readlink(p->client, p->fid, (u8 *)buf, &len);
+    // A truncated target comes back as the client's -P9_E_INVAL (the reply
+    // exceeded our cap); dev9p_wire_errno passes it through as -T_E_INVAL --
+    // the resolver treats it as the over-long-splice bound (fail clean, the
+    // #83 ENAMETOOLONG-class note).
+    if (rc != 0) { p->fid_suspect = true; return dev9p_wire_errno(rc); }
+    if (len == 0) return -T_E_NOENT;             // degenerate empty target
+    return (long)len;
+}
+
 // 9P renameat is within one session). Names are NUL-terminated by the handler.
 static int dev9p_rename(struct Spoor *olddir, const char *oldname,
                         struct Spoor *newdir, const char *newname) {
@@ -2166,6 +2207,8 @@ void dev9p_init(void) {
 // =============================================================================
 
 struct Dev dev9p = {
+    // #217 F1: serves real file content -- may back executable pages.
+    .may_back_exec = true,
     .dc       = DEV9P_DC,
     .name     = "9p",
     // A-3b: rwx enforcement ACTIVE. The reconciliation A-2d deferred is in place
@@ -2204,6 +2247,7 @@ struct Dev dev9p = {
     .readdir  = dev9p_readdir,
     .rename   = dev9p_rename,
     .unlink   = dev9p_unlink,
+    .readlink = dev9p_readlink,   // D-1: Treadlink (the resolver's expansion RPC)
 
     .remove   = dev9p_remove,
     .wstat    = dev9p_wstat,

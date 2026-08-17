@@ -302,12 +302,20 @@ pub const T_WSTAT_MODE_MASK: u32      = 0o777;
 // SYS_WALK_OPEN omode bits — must mirror SYS_WALK_OPEN_OMODE_VALID in
 // kernel/include/thylacine/syscall.h. Plan 9 OREAD/OWRITE/ORDWR/OEXEC
 // in the low two bits; OTRUNC (truncate-on-open for write-shaped opens)
-// in bit 4. Bits outside 0x13 are rejected by the kernel.
+// in bit 4. Bits outside SYS_WALK_OPEN_OMODE_VALID are rejected by the kernel.
 pub const T_OREAD: u32                = 0;
 pub const T_OWRITE: u32               = 1;
 pub const T_ORDWR: u32                = 2;
 pub const T_OEXEC: u32                = 3;
 pub const T_OTRUNC: u32               = 0x10;
+// DISTRO D-1: do not expand a symlink FINAL component. What that yields depends
+// on the rest of the omode, which is why it is a flag and not an access mode:
+// with T_OPATH the returned handle IS the link (the v1.0 lstat spelling --
+// fstat it for the link's own record); without it the open answers T_E_LOOP,
+// Linux O_NOFOLLOW. Non-final components expand regardless -- the flag scopes to
+// the quarry. A trailing '/' OVERRIDES it (POSIX 4.13: the path asserts a
+// directory, so the link must be followed to check).
+pub const T_ONOFOLLOW: u32            = 0x20;
 // FS-delta (IDENTITY-DESIGN.md §9.4): walk-without-open (Linux O_PATH / Plan 9
 // walk). SYS_WALK_OPEN with T_OPATH returns a NON-OPENED, walkable KObj_Spoor --
 // the valid base for creating/walking/renaming/unlinking children + a valid
@@ -347,12 +355,16 @@ pub const T_SEEK_END: u32             = 2;
 
 // POSIX-shaped mode bits returned in struct t_stat.mode — must mirror
 // kernel/include/thylacine/syscall.h. Subset that v1.0 Devs populate
-// (regular file / directory / character device). T_S_IFMT is the mask
-// for extracting the type.
+// (regular file / directory / character device / symlink). T_S_IFMT is
+// the mask for extracting the type.
 pub const T_S_IFMT:  u32              = 0o170000;
 pub const T_S_IFREG: u32              = 0o100000;
 pub const T_S_IFDIR: u32              = 0o040000;
 pub const T_S_IFCHR: u32              = 0o020000;
+// DISTRO D-1. Only ever observed through a NON-EXPANDING stat -- an ordinary
+// stat of a link reports the TARGET's type, so a caller that sees this asked
+// not to follow (T_ONOFOLLOW + T_OPATH, then fstat).
+pub const T_S_IFLNK: u32              = 0o120000;
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
@@ -567,6 +579,9 @@ pub const T_MREPL:   u32              = 0x0001;
 pub const T_MBEFORE: u32              = 0x0002;
 pub const T_MAFTER:  u32              = 0x0004;
 pub const T_MCREATE: u32              = 0x0008;
+// #217: the mounted device instance may not back an executable mapping --
+// refuses exec resolution AND the file-backed PROT_EXEC phenotype mmap arm.
+pub const T_MNOEXEC: u32              = 0x0010;
 
 // path_id_t — abstract path token used by the mount/unmount/bind
 // surface at v1.0. The kernel comment is the canonical reference:
@@ -594,12 +609,25 @@ pub const T_NOTE_BIT_KILL:       u8 = 1;
 pub const T_NOTE_BIT_PIPE:       u8 = 2;
 pub const T_NOTE_BIT_CHILD_EXIT: u8 = 3;
 pub const T_NOTE_BIT_SNARE:      u8 = 4;
+// The tty:* family -- ONE bit for winch / susp / cont / quit / hup. Unlike
+// SNARE (bit 4, reserved for v1.x) this one is LOAD-BEARING at v1.0: the
+// tty:* names are in the kernel's g_known_notes, so masking the bit really
+// does defer a ^Z, and the kernel routes an all-masked pgrp's tty:susp to a
+// note POST whose stop is applied later at the EL0-return tail.
+pub const T_NOTE_BIT_TTY:        u8 = 5;
 
 // NOTE_MASK_SUPPORTED — the union of every NOTE_BIT_* the kernel knows
 // about today. Setting bits outside this is tolerated (no-op) so future
 // note additions don't break old userspace; SYS_POSTNOTE with an
 // unsupported note NAME returns -1.
-pub const T_NOTE_MASK_SUPPORTED: u64 = 0x1f;
+//
+// MIRROR of NOTE_MASK_SUPPORTED in <thylacine/notes.h>. It sat at 0x1f from
+// before PTY-1b through every chunk that made the tty bit live -- nothing
+// consumed it, so nothing could notice. The const assertion in notes.rs now
+// ties it to the NoteClass set at compile time, which catches a variant added
+// without the bit; it CANNOT catch the kernel growing a bit this file never
+// hears about, because both sides of that check live here.
+pub const T_NOTE_MASK_SUPPORTED: u64 = 0x3f;
 
 // SYS_POSTNOTE sentinel for "send to my own Proc" (kernel maps pid == 0
 // to the calling Proc's pid; matches POSIX kill(0, sig) "send to my
@@ -1262,7 +1290,7 @@ pub unsafe fn t_note_mask(new_mask: u64, old_mask_out_va: *mut u64) -> i64 {
 // by the absolute `path` (`path_len` bytes) in the calling Proc's territory
 // (stalk-2: path-keyed; was an abstract target_path_id). The kernel `stalk`s
 // `path` to the mount point's (dc, devno, qid.path) identity. `flags` is a
-// bitmask of T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE; bits outside that union
+// bitmask of T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE / T_MNOEXEC; bits outside that union
 // are rejected. The mount point MUST EXIST as a walkable directory.
 //
 // Returns 0 on success, -1 on:

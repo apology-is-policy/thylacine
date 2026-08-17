@@ -64,6 +64,13 @@ _Static_assert(sizeof(struct Qid) == 16,
 #define QTEXCL    0x20      // exclusive use (only one open allowed)
 #define QTAUTH    0x08      // authentication file
 #define QTTMP     0x04      // not-backed-up temporary file
+#define QTSYMLINK 0x02      // is a symbolic link (DISTRO D-1). Matches the wire's
+                            // P9_QTSYMLINK bit value; carried through
+                            // qid_type_p9_to_kernel so the resolver can expand
+                            // (docs/DISTRO.md section 4). Only dev9p mints it at
+                            // v1.0 -- native Devs have no symlink surface, so
+                            // native behavior changes only on dev9p trees that
+                            // actually contain symlinks.
 #define QTPOLL    0x01      // Thylacine ext (net-6b-2b): pollable file -- dev9p.poll
                             // probes it (a netd `ready` file); P9_QTPOLL on the wire
 #define QTFILE    0x00      // plain file
@@ -254,6 +261,11 @@ void            walkqid_free(struct Walkqid *w);
 // open) and the stalk resolver (the per-component X-search stat fetch).
 struct t_stat;
 int spoor_stat_native(struct Spoor *c, struct t_stat *out);
+
+// #194: the backing file's size in bytes, or BURROW_FILE_LIMIT_UNKNOWN when
+// the Dev cannot answer (no stat_native / stat error). The caller owns the
+// failure policy -- see image.h's file_limit contract.
+u64 spoor_file_size(struct Spoor *c);
 
 // =============================================================================
 // Namespace name retention (#66 -- the Plan 9 Chan.path; I-33). The bridge

@@ -248,6 +248,15 @@ struct Thread {
     u64                note_saved_sp_el0;
     u64                note_saved_elr;
     u64                note_saved_spsr;
+    // The PRE-handler note_mask, saved by the phenotype delivery path beside
+    // the register block and restored by the phenotype's rt_sigreturn -- the
+    // kernel-side twin of the frame's uc_sigmask (the frame is written for
+    // reading; this is what the restore reads). Meaningful only while
+    // in_handler is true AND the delivery was the Linux path; the native
+    // path neither writes nor restores it (a native handler's mask change
+    // persists past noted). Part of the handler-execution snapshot a fork
+    // from inside a handler copies to the child.
+    u64                note_saved_mask;
     // SYS_NOTED(NDFLT) needs to know the note name to apply the default
     // action (`exits(name)` for the v1.0 supported set). Captured at
     // EL0-return-tail delivery; cleared when in_handler returns to false.
@@ -489,6 +498,11 @@ struct Thread {
 };
 
 _Static_assert(sizeof(struct Thread) == 1760,
+               "aux item 7 (2026-08-17) inserted note_saved_mask (u64) after "
+               "note_saved_spsr: every later field moves +8 and the 8-byte "
+               "alignment pad before the _Alignas(16) note_saved_fp absorbs it "
+               "(fp stays at 1232; measured with -fdump-record-layouts, not "
+               "derived) -- NO size change. "
                "task #96 appended note_saved_fp[520] (_Alignas(16)) -- the "
                "FP/SIMD half of the note-delivery context save: 1232 -> 1760 "
                "(520 payload + 8 trailing pad to the struct's 16-byte "

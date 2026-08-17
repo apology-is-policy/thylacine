@@ -700,6 +700,13 @@ the silent half-service the argument-domain rule exists to forbid. Reproducing
 Linux needs a refcounted entry, a real change to a table V-5 audited, and that
 belongs in a chunk about it; the cost is bounded and named (the inetd
 `dup2(connfd,0); dup2(connfd,1)` idiom), published in VIVARIUM §9's DEGRADED tier.
+**The fork half of the same class is OPEN** (the d3a11c8e round, 2026-08-17): `rfork_internal`
+copies the handle table but not the socktab, so a forked child holding an inherited socket
+fd is in the *omitting* case above by construction -- the fork-per-connection server shape.
+Enqueued (`memory/bug_socktab_not_cloned_at_fork.md`, AUX-ROADMAP Stream 4 #6): a per-Proc
+clone next to the sigtab clone -- but a plain COPY has the *copying* problem above (two
+state machines over one connection), so it needs the same refcounted entry the dup3 case
+names; one chunk for both halves, with a probe leg.
 
 **The fd-freeing obligation is paid in a different arm from `close`'s, and that
 is the rule a future promotion follows.** `close` pays in the entry hook, which is
@@ -1583,7 +1590,14 @@ all-`SIG_DFL`, while POSIX `fork(2)` inherits both caught handlers and `SIG_IGN`
 It is not fixed here, and the comment itself says why: `execve(2)` needs the
 *opposite* rule (reset caught dispositions to `SIG_DFL`, preserve ignored ones),
 so this is two behaviours and a design decision rather than a copy — and the
-sigtab sits on the V-6 audit surface. The v1.0 exposure is also narrow: the only
+sigtab sits on the V-6 audit surface.
+
+*Resolved 2026-08-17 (operator-voted, the aux track):* both behaviours are
+now specified as POSIX for the phenotype — `rfork`/`clone` copies the sigtab
+and the caller's `note_mask` into the child; `execve` resets CAUGHT rows to
+`SIG_DFL` and keeps `SIG_IGN` rows and the mask (native keeps the Plan 9 clear).
+ARCH §7.6 carries the rule; the impl is the aux chunk that follows the
+scripture commit. The v1.0 exposure is also narrow: the only
 admitted clone shape is vfork-then-exec, and musl's `posix_spawn` child resets
 its own dispositions before exec'ing. It belongs with `execve` and `wait4` at
 L-6. The comment was corrected in this chunk to say *reachable but unfixed*

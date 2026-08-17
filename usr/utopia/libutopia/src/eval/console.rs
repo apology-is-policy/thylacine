@@ -106,7 +106,10 @@ const _: () = assert!(bytes_eq(CHILD_MODE, b"+icanon +echo +isig +icrnl +onlcr")
 const _: () = assert!(bytes_eq(RESTORE_SCREEN, b"\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l"));
 
 /// Write an absolute consctl mode command to `fd` (the kernel applies one write
-/// atomically -- the TCSAFLUSH discipline, `cons_set_mode_cmd`). Best-effort:
+/// atomically -- `cons_set_mode_cmd`; a write clearing ICANON DELIVERS the pending
+/// canonical line to the reader, PTY-DESIGN "Mode writes deliver, never
+/// discard" -- which is what makes type-ahead across a job's end survive the
+/// PROMPT_MODE re-arm). Best-effort:
 /// returns true iff the whole command was accepted (n == len). A bad fd / a
 /// pre-LS-8b kernel rejects the I/O -> false -> the caller proceeds without
 /// driving the discipline (no regression: the console keeps whatever mode it was

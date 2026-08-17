@@ -40,9 +40,19 @@ void vma_free(struct Vma *v);
 int  vma_insert(struct Proc *p, struct Vma *v);
 void vma_remove(struct Proc *p, struct Vma *v);
 struct Vma *vma_lookup(struct Proc *p, u64 vaddr);
+
+// #199 (D-3c): lowest-addressed VMA overlapping [lo, hi), or NULL; caller
+// holds as->lock. The range scan the point probe cannot express -- the
+// phenotype munmap row iterates through this to tell "nothing mapped here"
+// (Linux no-op success) from a boundary-straddling partial overlap (refused).
+struct Vma *vma_next_overlap_in(struct AddrSpace *as, u64 lo, u64 hi);
 int  vma_find_gap(struct Proc *p, u64 length,
                   u64 window_start, u64 window_end, u64 *out_vaddr);
 void vma_drain(struct Proc *p);
+
+int  vma_replace_range_in(struct AddrSpace *as, bool exempt,
+                          u64 vaddr, u64 length,
+                          struct Burrow *nb, u32 prot, u64 nb_offset);
 
 u64 vma_total_allocated(void);
 u64 vma_total_freed(void);
@@ -86,6 +96,54 @@ Adjacent ranges (touching at a single boundary) are NOT overlap — `[a, b)` and
 `vma_remove` unlinks; the caller owns the Vma and typically calls `vma_free` next.
 
 `vma_drain` walks the whole list, removing + freeing each — the lifecycle hook called from `proc_free`.
+
+### `vma_replace_range_in` — the MAP_FIXED surgery (DISTRO D-3b)
+
+Places a mapping at a CALLER-CHOSEN address, splitting whatever is already
+there around it. Two admitted shapes, and the second is not optional:
+
+- **(a) wholly inside one existing VMA** → split the survivor around the window.
+- **(b) an entirely free range** → plain insert, nothing to split.
+
+Anything else — spanning two VMAs, or partially overlapping one — is refused.
+Linux serves that third shape by unmapping the overlapped part; partial unmap is
+post-v1.0 (see Status), so the divergence is stated rather than faked.
+
+Shape (b) exists because Linux `MAP_FIXED` does **not** require the target to be
+mapped already. Omitting it made an unmapped-address request answer `ENOMEM` —
+a worse reply than the `ENOSYS` it replaced, since `ENOMEM` is indistinguishable
+from real memory pressure and an allocator reads it as OOM (task #196).
+
+**No hole can exist on any path.** The old `Vma` is REUSED as the surviving
+remainder — shrunk in place, never removed — so an insert failure restores a
+bound and frees an un-inserted piece rather than having to put back a mapping it
+already tore out. Only the exact-cover case (no remainder at all) removes the
+old VMA, and there the restoring re-insert is provably infallible: same
+`as->lock` hold, into the range it just vacated (so no overlap), with the VMA
+count strictly below its value at entry (so no cap refusal).
+
+**Survivor byte identity is the load-bearing property.** For any VA a remainder
+still covers, `burrow_offset + (va - vaddr_start)` is unchanged by the split —
+the left remainder keeps both fields, and the right remainder advances *both* by
+the same delta. That is what lets the caller uninstall only the REPLACED
+window's PTEs and leave the remainders' resident pages installed, and it is also
+what makes the file-fault arm's post-sleep geometry check
+(`arch/arm64/fault.c`, the #190 verify-and-bail) come out right against a
+concurrent split: the check passes exactly when the bytes read before the sleep
+still belong at that slot.
+
+A VMA carrying any flag is refused rather than handled: `VMA_FLAG_SHARED_IN` is
+another Proc's memory carrying a per-span budget charge, and `VMA_FLAG_COW`
+would need its per-page share counts reasoned across the cut.
+
+The caller must hold `as->lock` AND must already have uninstalled the leaf PTEs
+for the window — `burrow_map_fixed{,_in}` (`kernel/burrow.c`) is the wrapper
+that does both and is what callers outside `vma.c` should use. The teardown
+comes FIRST there, deliberately: hardware resolves a leaf PTE without taking
+`as->lock`, so a thread already in EL0 could read the window through a stale PTE
+at any instant. A refused surgery therefore costs one wasted teardown of an
+unmodified window — benign (every page refaults from backing that never changed)
+and the deliberate price of keeping the VMA-shape rules in one place.
 
 ## Implementation
 
@@ -192,6 +250,19 @@ Phase 5+ RB-tree converts insert/lookup to O(log N).
 - **Stubbed**: arch_fault_handle's user-mode dispatch path → vma_lookup → demand paging (P3-Dc).
 - **Stubbed**: partial unmap (sub-VMA range) — post-v1.0.
 - **P5-secondary-stack-guard**: `vma_alloc_guard` — the no-BURROW, `prot==0` reserved guard VMA. `exec_map_user_stack` installs one as the user-stack guard page; closes corvus-bringup-d audit F7. Regression: `exec.user_stack_guard` (test_exec.c).
+- **DISTRO D-3b**: `vma_replace_range_in` — the MAP_FIXED split/replace, and **the
+  first producer of a non-zero `vma->burrow_offset` in the tree** (every other
+  `vma_alloc` call site passes a literal 0, or copies one that can only be 0), so
+  the offset arithmetic these paths exercise had never run in production before.
+  Wrapped by `burrow_map_fixed{,_in}`. Eight regressions
+  (`burrow.map_fixed_split_left / _split_right / _split_three_way / _exact_cover
+  / _carries_offset / _refusals / _successive / _into_free_space`), each
+  asserting survivor BYTE IDENTITY rather than merely bounds — a split with right
+  bounds and a wrong offset yields a VMA that looks perfect and serves the wrong
+  page. Revert-probed with two sabotages reddening DIFFERENT legs. **The split
+  tests were structurally blind to #196** (each attaches a mapping first, so none
+  could reach the no-covering-VMA arm); the in-guest phenotype probe caught it,
+  which is why `_into_free_space` exists.
 - **P6-pouch-mem-a**: `vma_find_gap` — the first-fit free-range finder for `SYS_BURROW_ATTACH` (the v1.0 anonymous-memory syscall; see `docs/reference/79-sys-burrow.md`). A single forward pass over the sorted list advances a candidate base past every blocking VMA. New per-Proc `vma_lock` serializes the burrow-attach / detach VMA-list mutation. 4 new `vma.find_gap_*` tests.
 
 ## Known caveats / footguns

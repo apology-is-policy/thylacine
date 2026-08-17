@@ -302,6 +302,77 @@ through a pointer fetched by `SDL_GL_GetProcAddress`, never a direct
 `gl*` reference. The GL dependency arrives only with the driver hooks,
 and only weakly.
 
+### The headers are optional too (#239)
+
+Weak symbols made the **rasteriser** optional at *link* time. They did
+nothing for the **headers** at *compile* time, and that asymmetry broke
+the whole tree once.
+
+`SDL_thylacineopengl.c` includes `<GL/osmesa.h>`. That header is not
+vendored — it is fetched from the GCP builder into
+`build/sysroot/include/` (`usr/ports/mesa/README.md`, "Fetching the GL
+link artifacts"), and `build_sysroot` **recreates** `build/sysroot/`. So
+its absence is not an exotic state: it is the state of every fresh
+checkout, and the eventual state of every machine that ever rebuilds its
+sysroot. Absent it, `build_sdl2` died on a `fatal error: 'GL/osmesa.h'
+file not found` — and because SDL2 is built before the ramfs bake,
+*nothing downstream ran at all*. A missing optional GPU stage took out
+the kernel image.
+
+The fix mirrors the link-time arrangement at compile time.
+`usr/ports/sdl2/thylacine-nogl/SDL_thylacineopengl_nogl.c` implements the
+same nine hooks plus `THYLACINE_GL_Available()`, names no GL type, and
+reports the absence through `SDL_SetError` exactly as the weak path does.
+`build_sdl2` selects **one of the two** by testing for
+`$sysroot/include/GL/osmesa.h`: it copies the port's `thylacine/*.c` into
+the throwaway source tree as before, then — when the header is absent —
+deletes `SDL_thylacineopengl.c` from that copy and drops the nogl TU in
+its place. The glob over the copied tree stays the compile list, so
+exactly one GL backend is ever compiled and the two can never both
+define the hooks.
+
+Three things that are easy to get wrong here, and were:
+
+- **A stub is not enough on its own.** `SDL_thylacinevideo.c` installs all
+  nine `GL_*` hooks unconditionally (deliberately — see the comment
+  there: a NULL `GL_CreateContext` makes SDL report a missing *driver*
+  when the truth is a missing *library*). Simply *omitting* the GL TU
+  therefore leaves nine undefined symbols and breaks the `sdl-probe`
+  link. The nogl TU exists precisely so the vtable stays complete.
+- **The mode is a cache-key input, and no timestamp can see it.**
+  Fetching the headers into an otherwise up-to-date tree moves no file
+  `build_sdl2`'s `find` stats, so the guard would have reported `REUSED`
+  and kept serving the GL-less archive — and a later `gl-sdl-prove` would
+  have linked the real `libOSMesa.a` against it. `build_sdl2` therefore
+  records the mode in `$sysroot/lib/.libSDL2.gl-mode` and treats a
+  mismatch as stale. It is written **last**, after `build_gl_sdl_prove`,
+  so a build that dies midway leaves no sentinel and the next run
+  rebuilds — the #138 output-half lesson applied to a third axis. The
+  sentinel lives beside the archive in `$sysroot/lib` on purpose: both
+  die together when `build_sysroot` recreates the sysroot, so they cannot
+  disagree.
+- **The skip is announced, never silent.** A build that quietly drops GL
+  reads exactly like a build that has it. `build_sdl2` prints a `NO GL:`
+  block naming the missing header and the fetch instructions, and the
+  ledger line carries the mode (`libSDL2.a: BUILT (nogl, + sdl-probe)` /
+  `REUSED (cached + up-to-date, gl)`).
+
+Verified by a four-step ladder rather than by argument: (A) nogl → cache
+reports `REUSED`; (B) a `GL/osmesa.h` appears → **rebuilds** in `gl`
+mode, compiling `SDL_thylacineopengl.c`, with no other input changed; (C)
+the header is removed → **rebuilds** back to `nogl`; (D) the sabotage —
+the header present *and* the sentinel hand-forged to `gl` → reports
+`REUSED` and leaves the nogl object in place, which is what proves the
+sentinel, and not some incidental timestamp, is the thing that caused the
+rebuild in (B).
+
+The limit of that evidence, stated plainly: (B) used a hand-written
+stand-in `GL/osmesa.h`, because this tree has no Mesa headers to test
+with. It proves the **selection** flips and the real TU still compiles
+against a conforming header. It does **not** prove the real TU compiles
+against the real Mesa header — only a tree with the fetched headers can
+say that, and the `gl` path is unchanged from what already worked there.
+
 ### Swap interval
 
 `SDL_GL_SetSwapInterval` accepts 0 (present as fast as drawn) and 1 (wait

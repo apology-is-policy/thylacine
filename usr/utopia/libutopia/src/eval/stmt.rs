@@ -2289,11 +2289,23 @@ fn eval_mask_note(env: &mut Env, stmt: &MaskNoteStmt) -> EvalResult<StatementFlo
 /// rather than enqueue), and user-defined names return `None` -- a
 /// `mask note` over those is a body-only no-op (they either cannot be
 /// deferred or cannot arrive at a userspace queue).
-fn note_class_for_name(name: &str) -> Option<NoteClass> {
+///
+/// The `tty:*` family (`tty:susp`, `tty:winch`, `tty:hup`, `tty:quit`,
+/// `tty:cont`) is ONE kernel class (`NOTE_BIT_TTY`), so any `tty:`-prefixed
+/// name masks the whole family -- exactly what the kernel mask bit means, and
+/// the same class granularity `interrupt` already has. Matched by prefix, not
+/// by enumerating the five, so a sixth tty name cannot silently regress to
+/// the no-op this arm replaced: before it existed, `mask note 'tty:susp'`
+/// parsed, ran its body, and masked nothing.
+///
+/// `pub` so the boot probe can pin the mapping (u-job-test); the shell calls
+/// it only from `eval_mask_note`.
+pub fn note_class_for_name(name: &str) -> Option<NoteClass> {
     match name {
         "interrupt" => Some(NoteClass::Interrupt),
         "pipe" => Some(NoteClass::Pipe),
         "child_exit" => Some(NoteClass::ChildExit),
+        _ if name.starts_with("tty:") => Some(NoteClass::Tty),
         _ => None,
     }
 }

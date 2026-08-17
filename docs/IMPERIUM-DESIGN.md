@@ -258,9 +258,9 @@ conferral act). Don't force the rest.
 ## 10. The proof-of-concept (auxiliary track)
 
 This document is the design. **Still unbuilt** -- and the path below is stale
-(corrected 2026-08-16, aux#237: `usr/apps/**` no longer exists; a skeleton would
-land in the main tree like every other promoted aux artifact). A compile-only
-`imperium` skeleton (the
+(corrected 2026-08-16, aux#237: `usr/apps/**` no longer exists; a skeleton
+would land in the main tree like every other promoted aux artifact). A
+compile-only `imperium` skeleton (the
 CLI parse + the fasces renderer [pure computation: cap-set -> the bundle] + the
 corvus *lex curiata* / `cap::use_grant` flow behind a documented seam, modeled on
 `usr/legate-prover/`) is the natural next aux artifact -- the same pattern as the

@@ -680,6 +680,45 @@ struct Proc {
     // itself, but the child re-execs and re-stamps its own name at exec_setup.
     char               name[PROC_NAME_MAX];
 
+    // #240 (I-20; the freshness guard on #15's deferred stop): 1 while a
+    // STOP-disposition note (tty:susp) has armed a stop that has not yet been
+    // applied, 0 once any cont has superseded it. proc_job_stop_self applies
+    // the stop only while this reads 1.
+    //
+    // It exists because #15 turned "stop now" into "stop later". Pre-#15 the
+    // uncaught susp set job_stop_req under g_proc_table_lock in the same
+    // critical section that decided it, so no window existed. Post-#15 the
+    // decision is made at POST and applied at the handler's SYS_NOTED(NDFLT)
+    // -- a gap spanning a full EL0 handler execution, interruptible by
+    // preemption, page faults and syscalls. A cont landing inside that gap
+    // finds job_stop_req still 0, returns from proc_job_resume_one_locked
+    // without doing anything, and is then overwritten by the stop it was meant
+    // to prevent. That is a job nobody can resume: the pts teardown's
+    // hup-then-cont rescue (which the PTY-1 close named as the carrier-loss
+    // guarantee) fires exactly there.
+    //
+    // The guard is deliberately a FLAG and not a queued-note predicate: a
+    // "refuse while an unconsumed tty:cont is queued" test is satisfiable and
+    // was checked, but a notes-fd reader can consume the cont, a mask can
+    // defer it and a future coalescing change could drop it -- all of which
+    // silently re-open the window. Nothing but the stop machinery reads or
+    // writes this byte.
+    //
+    // SET (RELEASE) by notes_arm_susp_stop_locked, on the commit of any note
+    // whose g_known_notes `dfl` column is STOP -- inside notes_post, so every
+    // present and future poster is covered by construction rather than by
+    // remembering to stamp. CLEARED (RELEASE) at the TOP of
+    // proc_job_resume_one_locked, BEFORE its `job_stop_req == 0` early return
+    // -- the placement IS the fix, since the not-yet-stopped target is the
+    // whole case. READ (ACQUIRE) in proc_job_stop_self under
+    // g_proc_table_lock, which is also where the clear's own caller holds it,
+    // so the read cannot straddle a concurrent cont. Occupies the 4-byte pad
+    // between name[] and exe_path -- no struct growth. KP_ZERO-fresh 0 (a
+    // reused struct never carries a stale arm, and 0 means "do not stop",
+    // the fail-safe direction); NOT rfork-inherited (a fresh child has no
+    // pending susp).
+    u32                susp_stop_armed;
+
     // VIVARIUM V-4a-0: the namespace name of the executable this Proc is
     // running -- the #66 `Path` of the Spoor `exec_resolve_from_namespace`
     // resolved, ref-held for the Proc's life. The source for
@@ -756,10 +795,30 @@ struct Proc {
     // outside every lock (the 8a-2b debug_hw shape).
     //
     // LOCK-FREE ENTRY ACCESS, AND WHY (task #97 replaced a wrong paragraph
-    // here; task #158 replaced its REASON, which had expired the same way).
-    // Entries are read and written with no lock. That is sound because a
-    // PHENO_LINUX Proc **cannot obtain a peer thread**, so there is no peer to
-    // race and nothing to serialise.
+    // here; task #158 replaced its REASON, which had expired the same way;
+    // task #254 added the axis all three of them missed).
+    //
+    // Entries are read and written with no lock, and there are TWO independent
+    // axes of concurrency here. Every previous version of this paragraph
+    // answered only the first and read as though it had answered both.
+    //
+    //   INTRA-Proc (peer threads of `p`): excluded. A PHENO_LINUX Proc cannot
+    //   obtain a peer thread -- the mechanism is spelled out below -- so there
+    //   is no peer to race and nothing to serialise. This is what the writers
+    //   (rt_sigaction, SA_RESETHAND) rest on, and it is why they are safe.
+    //
+    //   CROSS-Proc (another Proc's CPU reading THIS table): NOT excluded, and
+    //   real. notes_post's SIG_IGN hook, notes_arm_intr_terminate_locked and
+    //   the ^Z fan's disposition gate each take an arbitrary Proc and read its
+    //   dispositions lock-free. Sound because the POINTER is stable for the
+    //   life of the Proc -- lazily CAS-installed once, reset IN PLACE at exec,
+    //   freed only at proc_free where the Proc itself is gone (#254; exec used
+    //   to free it here, which was a use-after-free read) -- and because the
+    //   VALUE a racing reader observes is covered by the POSIX latitude stated
+    //   at the end of this comment.
+    //
+    // Read the cross-Proc half before adding a reader, and do not narrow this
+    // back to a claim about threads: the reader set has grown three times.
     //
     // THE MECHANISM, stated precisely because the previous one stopped being
     // true without anything failing. It is NOT that `clone` is unserved -- it
@@ -788,7 +847,9 @@ struct Proc {
 
     // VIVARIUM V-5: the per-Proc Linux socket table, or NULL.
     //
-    // The sigtab's exact shape and lifetime: lazily allocated on the Proc's
+    // The socktab's exact shape and lifetime (this paragraph said "sigtab" and
+    // described socket() -- a copy-paste that pointed anyone grepping for the
+    // sigtab's lifetime at the wrong field): lazily allocated on the Proc's
     // first translated socket(), CAS-installed outside every lock, freed at
     // proc_free, NOT rfork-inherited. It holds the (proto, N, state) tuple a
     // translated socket needs and that neither the fd nor any path can carry
@@ -938,6 +999,13 @@ _Static_assert(__builtin_offsetof(struct Proc, exe_path) == 352,
  "the /proc/<pid>/exe source) appends after prowl-1's name[]+32 "
  "= 384, itself 8-aligned. Every pre-existing offset stays stable; "
  "KP_ZERO-fresh NULL == 'unknown name' (I-33).");
+_Static_assert(__builtin_offsetof(struct Proc, susp_stop_armed) == 348,
+ "#240 susp_stop_armed (the freshness guard on #15's deferred NDFLT "
+ "stop, I-20) occupies the 4-byte pad between prowl-1's "
+ "name[PROC_NAME_MAX=32] (@316, ending @348) and the 8-aligned "
+ "exe_path -- no struct growth, every existing offset stable. The "
+ "exe_path == 352 assert below is the control: if this pad were not "
+ "free, inserting the field would push exe_path and fail there.");
 _Static_assert(__builtin_offsetof(struct Proc, phenotype) == 315,
  "VIVARIUM phenotype (the per-Proc ABI mode, I-43) occupies the "
  "LAST tail pad byte, between debug_exitkill and "
@@ -1415,43 +1483,12 @@ bool proc_exec_alone(struct Proc *p);
 // corruption, not a runtime error.
 void proc_exec_replace(struct Proc *p, struct AddrSpace *nas);
 
-// proc_exec_reset_dispositions -- POSIX's "exec resets caught signals to
-// default", as proc_exec_replace performs it. Split out to be testable.
-//
-// It RESETS the sigtab in place and never frees it: the table has lockless
-// readers on other CPUs (notes_post's SIG_IGN hook, notes_proc_has_live_handler)
-// and notes_post targets another Proc, so freeing it here would be a UAF.
-// proc_exec_alone bounds this Proc's THREADS, not other PROCS.
-//
-// Why reset rather than take a lock or refcount the table -- the reason is
-// evidence, not taste. A lock only holds if every FUTURE reader remembers to
-// take it, and the reader set grows for the most ordinary reason there is: a
-// new disposition predicate needs the dispositions, so it reaches for
-// ->sigtab and nothing objects. That is not hypothetical. The aux tree grew a
-// third cross-Proc reader (a shared predicate on the ^Z fan, reached with an
-// arbitrary pgrp member) in the very session that filed this bug -- written as
-// a bare atomic load by the author who was holding the finding at the time.
-// This tree is one predicate away from the same thing: the cross-Proc call
-// site already exists at proc_tty_susp_would_stop_locked; only the sigtab read
-// is missing. Resetting removes the dangling pointer outright, so MEMORY safety
-// under reader-set growth is unconditional rather than remembered.
-//
-// Be precise about what that does and does not buy, because the first version
-// of this comment overclaimed it. Unconditional: no dangling pointer, ever, and
-// per-FIELD integrity (viv_sigtab_reset writes 8-byte fields; a byte loop there
-// compiled to halfword stores and could publish a handler nobody wrote). NOT
-// bought: a snapshot. A lock-free reader can see a mix of pre- and post-reset
-// entries, which is the POSIX exec-vs-signal race and is sound, but a new
-// reader must not assume the table is self-consistent across entries.
-//
-// PRECONDITION, unenforced here and therefore stated: the caller must be the
-// only live thread of `p` -- proc_exec_alone(p), which exec establishes and
-// re-checks under g_proc_table_lock at the swap. This function writes the table
-// without any lock, so calling it on a Proc that is running would interleave a
-// 448-byte reset with that Proc's own viv_sigtab_set. proc_exec_replace
-// extincts on a non-self target; this helper does not, because the kernel test
-// drives it directly on a Proc it built and never scheduled.
-void proc_exec_reset_dispositions(struct Proc *p);
+// The note-side half of that reset (handler_va, the sigtab rows -- IN PLACE,
+// never freed: the table has lockless cross-Proc readers -- the mask, and the
+// in-handler latch) lives in proc.c's proc_exec_drop_image_state, kept static
+// on purpose so it stays the ONE place; the kernel test reaches it through the
+// *_for_test hook. Its precondition is proc_exec_replace's: the caller is the
+// only live thread of `p`.
 
 // EL0-return-tail die-check (ARCH §7.9.1, invariant I-24). Called at every
 // return-to-EL0 (the sync-from-EL0 SVC + fault-handled tails in
@@ -1576,6 +1613,29 @@ static inline bool proc_stop_requested(const struct Proc *p) {
 // members affected (posted or stopped). Lock-free callers only (takes
 // g_proc_table_lock itself; the pts seam calls it with g_pts_lock RELEASED).
 int proc_job_stop_pgrp(u32 pgid);
+
+// #15: proc_job_stop_self -- the SELF job-stop, the STOP disposition of
+// SYS_NOTED(NDFLT). A Proc whose handler received tty:susp and then asked the
+// kernel for the note's default action stops HERE, having already consumed the
+// note at delivery.
+//
+// It is proc_job_stop_pgrp's uncaught arm narrowed to one Proc: the ORPHAN
+// rule still applies (an orphaned group's stop is DISCARDED -- nobody could
+// resume it, so applying it would hang the Proc forever), but the CATCHABILITY
+// gate does NOT (it already ran, and answering it again would refuse the stop
+// on the grounds that a handler exists -- the handler that just asked for it).
+// Idempotent: an already-job-stopped Proc answers false and re-latches nothing.
+//
+// Returns true iff it stopped `m`. FALSE IS NOT AN ERROR -- it means the stop
+// was correctly discarded (orphaned group) or already in effect, and the
+// caller's syscall still succeeds. The stop takes EFFECT at the caller's own
+// EL0-return tail (el0_return_stop_check), which runs AFTER
+// el0_return_die_check, so a group-terminate racing this one dies rather than
+// parking (DeathWinsOverStop; pty_stop.tla's StopJob, whose `~gflag` guard the
+// tail enforces at the park rather than at the set).
+//
+// Lock-free callers only -- takes g_proc_table_lock itself.
+bool proc_job_stop_self(struct Proc *m);
 
 // proc_job_cont_pgrp: the tty:cont fan-out -- SYS_TTY_CONT (the shell's
 // `fg`/`bg`), the F8 pts-teardown resume, and the orphan rule's cont half.

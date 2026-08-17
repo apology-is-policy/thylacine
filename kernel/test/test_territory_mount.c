@@ -18,8 +18,15 @@
 //     unmount; verify nmounts back to 0 + source ref dropped.
 //
 //   territory_mount.idempotent_same_source
-//     mount (mp, source); mount (mp, source) again; verify second call is
-//     no-op success (returns 0, no second ref bump).
+//     mount (mp, source); mount (mp, source) again with the SAME flags; verify
+//     the second call adds no entry and takes no second ref. (Differing flags
+//     converge -- that is idempotent_converges_flags below.)
+//
+//   territory_mount.idempotent_converges_flags                          (#219)
+//     mount (mp, source) with flags 0; re-mount the same pair with MNOEXEC;
+//     verify the restriction is now APPLIED (the fail-open regression), then
+//     re-mount without it and verify it is dropped (the deliberate symmetry).
+//     Entry count + source ref must be untouched by both converges.
 //
 //   territory_mount.mrepl_replaces
 //     mount A at mp; mount B at mp with MREPL; verify A's ref dropped,
@@ -53,12 +60,14 @@ extern struct Dev devnone;
 
 void test_territory_mount_smoke(void);
 void test_territory_mount_idempotent_same_source(void);
+void test_territory_mount_idempotent_converges_flags(void);  // #219
 void test_territory_mount_mrepl_replaces(void);
 void test_territory_mount_unmount_missing_returns_error(void);
 void test_territory_mount_table_full(void);
 void test_territory_mount_clone_bumps_refs(void);
 void test_territory_mount_destroy_drops_all_refs(void);
 void test_territory_mount_devno_disambiguates(void);
+void test_territory_mount_noexec_covers(void);       // #217
 void test_territory_mount_rejects_cycle(void);
 void test_territory_mount_mp_path_lifecycle(void);   // #66
 void test_territory_mount_format_ns(void);           // #66
@@ -142,6 +151,78 @@ void test_territory_mount_idempotent_same_source(void) {
     spoor_unref(mp);
     spoor_unref(s);
     territory_unref(p);
+}
+
+// #219. The idempotent arm used to return 0 without ever looking at `flags`,
+// so a re-mount that ADDED MNOEXEC reported success and left the pair
+// unrestricted -- fail-OPEN, which is the dangerous direction for a flag that
+// carries an enforcement decision. Both directions are asserted: the tighten is
+// the regression, the loosen pins the deliberate symmetry (a mount flag is not
+// a lock; see the noexec_covers unmount leg).
+//
+// Every observation is MEASURED first and ASSERTED after the teardown, because
+// TEST_ASSERT returns -- asserting inline would skip the unrefs below and leak
+// a Territory + four Spoors on exactly the run where the test is telling you
+// something.
+void test_territory_mount_idempotent_converges_flags(void) {
+    struct Territory *p     = territory_alloc();
+    struct Spoor     *s     = p ? spoor_alloc(&devnone) : NULL;
+    // Three DISTINCT Spoor objects sharing one mount-point identity: the arm
+    // keys on (dc, devno, qid.path) for the point and on POINTER equality for
+    // the source, so this is the shape that reaches it.
+    struct Spoor     *mp_a  = s ? mkmp(219u) : NULL;
+    struct Spoor     *mp_b  = mp_a ? mkmp(219u) : NULL;
+    struct Spoor     *mp_c  = mp_b ? mkmp(219u) : NULL;
+    if (!p || !s || !mp_a || !mp_b || !mp_c) {
+        if (mp_c) spoor_unref(mp_c);
+        if (mp_b) spoor_unref(mp_b);
+        if (mp_a) spoor_unref(mp_a);
+        if (s)    spoor_unref(s);
+        if (p)    territory_unref(p);
+        test_fail("territory_alloc / spoor_alloc / mkmp returned NULL");
+        return;
+    }
+    s->devno = 21;
+
+    int  rc_first = mount(p, s, mp_a, 0);
+    bool cov_none = mount_noexec_covers(p, '-', 21);
+
+    int  rc_tight = mount(p, s, mp_b, MNOEXEC);
+    bool cov_on   = mount_noexec_covers(p, '-', 21);
+    int  nmounts1 = territory_nmounts(p);
+    int  ref1     = s->ref;
+
+    int  rc_loose = mount(p, s, mp_c, 0);
+    bool cov_off  = mount_noexec_covers(p, '-', 21);
+    int  nmounts2 = territory_nmounts(p);
+
+    int rc_unmount = unmount(p, mp_a);
+    territory_unref(p);
+    spoor_unref(mp_c);
+    spoor_unref(mp_b);
+    spoor_unref(mp_a);
+    spoor_unref(s);
+
+    TEST_EXPECT_EQ(rc_first, 0, "first mount succeeds");
+    TEST_ASSERT(cov_none == false,
+        "CONTROL: mounted with flags 0 -> no restriction (an always-true "
+        "predicate fails here, so cov_on below means something)");
+
+    TEST_EXPECT_EQ(rc_tight, 0, "re-mount adding MNOEXEC still returns 0");
+    TEST_ASSERT(cov_on == true,
+        "#219: a re-mount that ADDS MNOEXEC must APPLY it -- returning 0 with "
+        "the pair still unrestricted is a success satisfied by the broken state");
+    TEST_EXPECT_EQ(nmounts1, 1,
+        "converge must not add a second entry (the idempotency contract)");
+    TEST_EXPECT_EQ(ref1, 2,
+        "converge must not bump the source ref (test + entry, unchanged)");
+
+    TEST_EXPECT_EQ(rc_loose, 0, "re-mount dropping MNOEXEC returns 0");
+    TEST_ASSERT(cov_off == false,
+        "converge is SYMMETRIC by design: 0 means the table says what you "
+        "asked for, in both directions");
+    TEST_EXPECT_EQ(nmounts2, 1, "still exactly one entry after both converges");
+    TEST_EXPECT_EQ(rc_unmount, 0, "unmount finds the converged entry");
 }
 
 void test_territory_mount_mrepl_replaces(void) {
@@ -314,6 +395,73 @@ void test_territory_mount_destroy_drops_all_refs(void) {
 // the same (dc, qid.path) but different devno -- the dev9p two-session case
 // (every 9P session shares dc='9' and every attach root has qid.path 0, so
 // without devno their mount points would collide). Also exercises mount_lookup.
+// #217: MNOEXEC. The point of this test is DISCRIMINATION, not detection -- a
+// predicate that returned true unconditionally would satisfy any deny-only
+// test, so every deny below is paired with a control that must come back false
+// on the same call in the same Territory.
+void test_territory_mount_noexec_covers(void) {
+    struct Territory *p = territory_alloc();
+    TEST_ASSERT(p != NULL, "territory_alloc returned NULL");
+
+    struct Spoor *noexec_src = spoor_alloc(&devnone);
+    struct Spoor *exec_src   = spoor_alloc(&devnone);
+    struct Spoor *otherdc    = spoor_alloc(&devnone);
+    TEST_ASSERT(noexec_src && exec_src && otherdc, "spoor_alloc");
+    noexec_src->devno = 7;
+    exec_src->devno   = 8;
+    // Same devno as the flagged source, DIFFERENT dc: if the predicate ignored
+    // dc and keyed on devno alone, this would come back true and the container
+    // case would be over-restricted at best and mis-scoped at worst.
+    otherdc->devno = 7;
+    otherdc->dc    = 'X';
+
+    struct Spoor *mp1 = mkmp(101u);
+    struct Spoor *mp2 = mkmp(102u);
+    struct Spoor *mp3 = mkmp(103u);
+    TEST_ASSERT(mp1 && mp2 && mp3, "mkmp");
+
+    TEST_EXPECT_EQ(mount(p, noexec_src, mp1, MNOEXEC), 0, "mount noexec source");
+    TEST_EXPECT_EQ(mount(p, exec_src, mp2, 0), 0, "mount plain source");
+    TEST_EXPECT_EQ(mount(p, otherdc, mp3, 0), 0, "mount other-dc source");
+
+    TEST_ASSERT(mount_noexec_covers(p, '-', 7) == true,
+        "DENY: the MNOEXEC-mounted device instance is covered");
+    TEST_ASSERT(mount_noexec_covers(p, '-', 8) == false,
+        "CONTROL: an unflagged mount in the SAME table is NOT covered "
+        "(an always-true predicate fails here)");
+    TEST_ASSERT(mount_noexec_covers(p, 'X', 7) == false,
+        "CONTROL: same devno, different dc -> NOT covered (the dc axis is live)");
+    TEST_ASSERT(mount_noexec_covers(p, '-', 9) == false,
+        "CONTROL: a device instance with no mount entry at all is not covered");
+    TEST_ASSERT(mount_noexec_covers(NULL, '-', 7) == false,
+        "a Proc with no Territory has no mount that could confer the "
+        "restriction -- fail-open is the contract, and kernel boot exec needs it");
+
+    // The flag must survive a fork, or a child escapes it for free. This is the
+    // hardware-allowance / I-2 shape: a clone inherits an equally-narrow copy.
+    struct Territory *child = territory_clone(p);
+    TEST_ASSERT(child != NULL, "territory_clone");
+    TEST_ASSERT(mount_noexec_covers(child, '-', 7) == true,
+        "a cloned Territory INHERITS MNOEXEC (a child cannot escape by forking)");
+    TEST_ASSERT(mount_noexec_covers(child, '-', 8) == false,
+        "CONTROL: the clone did not gain the flag on the unflagged entry");
+    territory_unref(child);
+
+    // And it must not outlive the mount that conferred it: authority conferred
+    // by a namespace edit is revoked by the inverse edit, not sticky per-device.
+    TEST_EXPECT_EQ(unmount(p, mp1), 0, "unmount the noexec entry");
+    TEST_ASSERT(mount_noexec_covers(p, '-', 7) == false,
+        "REVOKED: unmount drops the restriction with the entry");
+
+    territory_unref(p);
+    spoor_unref(noexec_src);
+    spoor_unref(exec_src);
+    spoor_unref(otherdc);
+    spoor_unref(mp1);
+    spoor_unref(mp2);
+    spoor_unref(mp3);
+}
+
 void test_territory_mount_devno_disambiguates(void) {
     struct Territory *p = territory_alloc();
     TEST_ASSERT(p != NULL, "territory_alloc returned NULL");
@@ -536,15 +684,18 @@ void test_territory_mount_format_ns(void) {
     mproc->path = mkname("proc");
     sb->path    = mkname("realsrc");
     TEST_ASSERT(mproc->path && sb->path, "mkname proc/realsrc");
-    TEST_EXPECT_EQ(mount(p, sb, mproc, 0), 0, "mount /proc");
+    // #217: mounted MNOEXEC, so this entry must render the suffix and the OTHER
+    // one must not -- the rendering is only useful if it discriminates.
+    TEST_EXPECT_EQ(mount(p, sb, mproc, MNOEXEC), 0, "mount /proc noexec");
 
     char buf[256];
     u64 n = territory_format_ns(p, buf, sizeof(buf));
     TEST_ASSERT(n > 0 && n < sizeof(buf), "format_ns produced bounded output");
     buf[n] = '\0';
     TEST_ASSERT(mnt_streq(buf,
-                "mount /srv #-\nmount /proc /realsrc\nbinds: 0\n"),
-                "ns renders both mounts (name + #dc / source-path) + bind count");
+                "mount /srv #-\nmount /proc /realsrc noexec\nbinds: 0\n"),
+                "ns renders both mounts (name + #dc / source-path), the #217 "
+                "noexec suffix on the flagged entry ONLY, + the bind count");
 
     // F2 (audit): truncation discards a partial line at a whole-line boundary --
     // a cap that fits line 1 ("mount /srv #-\n" = 14 B) but not line 2 yields

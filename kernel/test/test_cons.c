@@ -33,6 +33,8 @@
 
 #include <thylacine/cons.h>
 #include "../../arch/arm64/uart.h"   // #129-audit F2: the RX holdback test hooks
+#include "../../arch/arm64/gic.h"    // tx_unit_smp_no_tear: IPI_RESCHED to the secondaries
+#include <thylacine/smp.h>           // tx_unit_smp_no_tear: smp_cpu_count
 #include <thylacine/dev.h>
 #include <thylacine/handle.h>   // A-5a: struct Handle / handle_get / KOBJ_SPOOR / RIGHT_*
 #include <thylacine/notes.h>
@@ -91,7 +93,8 @@ void test_cons_cook_onlcr_output(void);               // LS-8b (output NL -> CR 
 void test_cons_consctl_parse(void);                   // LS-8b (+/-flag parse + malformed)
 void test_cons_consctl_render(void);                  // LS-8b (read-back render)
 void test_cons_cook_line_overflow(void);              // LS-8b (bounded line buffer)
-void test_cons_cook_mode_flip_fresh_line(void);       // LS-8b audit F1 (consctl flip discards the fragment)
+void test_cons_cook_mode_flip_delivers(void);         // PTY-DESIGN: a mode write delivers, never discards
+void test_cons_cook_isig_discards_pending_line(void); // PTY-DESIGN: an ISIG char discards the pending line (F5)
 void test_cons_cook_canonical_poll_edge(void);        // LS-8b audit F2a (whole-line poll edge)
 
 // cons.c test hooks + the extern Dev (read slot ignores the Spoor arg, so the
@@ -688,6 +691,53 @@ void test_cons_rx_drop_counters(void) {
     n = cons_drain(cbuf, (long)sizeof(cbuf));
     TEST_EXPECT_EQ(n, 11L, "the whole 10-char line and its newline survived the refusal");
     TEST_EXPECT_EQ((long)cbuf[10], (long)'\n', "terminator last -- nothing was truncated");
+
+    // (d) The fifth site: a mode write clearing ICANON delivers the pending
+    //     line into a FULL ring. A mode write cannot back-pressure (no producer
+    //     holds the bytes), so every byte that does not fit is a real drop under
+    //     rx_drop_modeflush -- and ONLY there: rx_drop_ring must stay zero (the
+    //     #129 witness), the flush/line/raw sites must not move. This is the
+    //     positive control the ccb597b8 round (F1) found missing: without it a
+    //     misattribution to rx_drop_ring, or not counting at all, read green.
+    //     Fill exactly 512 raw (no refusals), switch to ICANON (raw->canonical
+    //     has nothing pending), assemble 10, then -icanon.
+    cons_test_reset();
+    for (u32 i = 0; i < 512u; i++) cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+icanon", 7, true), 7L, "(d) +icanon accepted");
+    for (int i = 0; i < 10; i++) cons_rx_input((u8)('a' + i), false);
+    TEST_EXPECT_EQ(cons_rx_drop_modeflush(), 0u, "(d) nothing counted before the mode write");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("-icanon", 7, true), 7L, "(d) -icanon accepted");
+    TEST_EXPECT_EQ(cons_rx_drop_modeflush(), 10u,
+                   "(d) modeflush counts exactly the 10 bytes the full ring could not take");
+    cons_rx_counters(&bp_raw, &bp_flush, &d_line, &d_ring);
+    TEST_EXPECT_EQ((long)d_ring,   0L, "(d) a mode-flush drop is NOT attributed to rx_drop_ring");
+    TEST_EXPECT_EQ((long)bp_flush, 0L, "(d) nor to the flush site");
+    TEST_EXPECT_EQ((long)d_line,   0L, "(d) nor to the line site");
+    TEST_EXPECT_EQ((long)bp_raw,   0L, "(d) 512 offers into 512 slots refused nothing");
+    n = cons_drain(cbuf, (long)sizeof(cbuf));
+    TEST_EXPECT_EQ(n, 512L, "(d) the ring held exactly the filler -- no delivered byte overwrote it");
+    bool filler_ok = true;
+    for (u32 i = 0; i < 512u; i++)
+        if (cbuf[i] != (u8)(0x80u | (i & 0x7fu))) filler_ok = false;
+    TEST_ASSERT(filler_ok, "(d) the 512 filler bytes are intact and in order");
+
+    // (e) Partial fit: 507 filler + a 10-byte fragment -> the PREFIX (5 bytes)
+    //     is delivered in order, the tail (5) is counted, and the delivered
+    //     bytes follow the filler in the ring.
+    cons_test_reset();
+    for (u32 i = 0; i < 507u; i++) cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+icanon", 7, true), 7L, "(e) +icanon accepted");
+    for (int i = 0; i < 10; i++) cons_rx_input((u8)('a' + i), false);
+    TEST_EXPECT_EQ(cons_set_mode_cmd("-icanon", 7, true), 7L, "(e) -icanon accepted");
+    TEST_EXPECT_EQ(cons_rx_drop_modeflush(), 5u, "(e) the 5 that did not fit are counted");
+    cons_rx_counters(&bp_raw, &bp_flush, &d_line, &d_ring);
+    TEST_EXPECT_EQ((long)d_ring, 0L, "(e) rx_drop_ring untouched");
+    n = cons_drain(cbuf, (long)sizeof(cbuf));
+    TEST_EXPECT_EQ(n, 512L, "(e) 507 filler + 5 delivered = a full ring");
+    bool prefix_delivered = true;
+    for (u32 i = 0; i < 5u; i++)
+        if (cbuf[507u + i] != (u8)('a' + i)) prefix_delivered = false;
+    TEST_ASSERT(prefix_delivered, "(e) the delivered bytes are the fragment's PREFIX, in order, after the filler");
 
     cons_test_reset();
     cons_settle_mgr();
@@ -1638,36 +1688,195 @@ void test_cons_cook_line_overflow(void) {
     cons_settle_mgr();
 }
 
-// LS-8b audit F1: a consctl mode change starts a FRESH canonical line (the
-// TCSAFLUSH discipline) -- a half-assembled line[] is DISCARDED by any
-// cons_set_mode_cmd write, so a flip can never strand a fragment that then
-// prepends the next line. Drives the PRODUCTION cons_set_mode_cmd (NOT the
-// cons_test_set_termios hook), the path the cooking tests otherwise never take:
-// pre-fix the fragment survived (this delivered "abc\n", n == 4); post-fix only
-// the post-flip line delivers (n == 1).
-void test_cons_cook_mode_flip_fresh_line(void) {
+// PTY-DESIGN "Mode writes deliver, never discard" (2026-08-17; supersedes the
+// LS-8b audit-F1 remedy this test used to pin). A consctl mode write that
+// CLEARS ICANON delivers the half-assembled line[] to the ring as raw bytes; a
+// write that leaves ICANON as it was leaves the assembly alone; raw->canonical
+// has nothing pending. The old posture zeroed line[] on ANY write ("TCSAFLUSH")
+// and lost the head of a type-ahead line that landed between a foreground
+// job's last output and the shell's raw re-arm (LS-CI pty-4: `sle` echoed and
+// dropped, `ep 30` executed). Drives the PRODUCTION cons_set_mode_cmd for each
+// transition; the F1 hazard (a fragment prepending the NEXT line across
+// canonical->raw->canonical) is re-asserted in leg C -- closed by delivery.
+// PTY-DESIGN "ISIG characters DISCARD the pending line" (the ccb597b8 round's F5,
+// operator-voted 2026-08-17): an ISIG-consumed Ctrl-C in canonical mode
+// discards the pending assembly (POSIX NOFLSH-clear; Linux n_tty flushes) --
+// a disposition like an erase, not a counted drop; committed lines in the ring
+// stay. Three legs, each with the byte value held constant so the discard is
+// shown gated on ISIG-CONSUMPTION, not on 0x03:
+//   A canonical +isig: "ab" ^C "cd\n" -> the ring gets exactly "cd\n"; the
+//     interrupt is pending; no drop counter moved (rx_drop_* all unchanged).
+//   B canonical -isig (the CONTROL, one variable away): 0x03 is a data byte and
+//     is BUFFERED -- "ab" 0x03 "cd\n" -> "ab\x03cd\n" (6 bytes): the same
+//     bytes without ISIG lose nothing.
+//   C a committed line survives: "x\n" (in the ring) then "ab" ^C "y\n" ->
+//     the ring holds "x\n" + "y\n" -- the ^C discarded ONLY the pending
+//     assembly, never the ring.
+// Observe -> tear down -> assert (TEST_ASSERT returns; the drains are guarded
+// by the non-blocking depth so a regression reads red, not as a hang).
+void test_cons_cook_isig_discards_pending_line(void) {
+    cons_test_reset();
+    sched();
+    u8 a_buf[16] = {0}, b_buf[16] = {0}, c_buf[16] = {0};
+    u32 bp_raw0 = 1, bp_flush0 = 1, d_line0 = 1, d_ring0 = 1;
+    u32 bp_raw1 = 0, bp_flush1 = 0, d_line1 = 0, d_ring1 = 0;
+
+    // ---- LEG A: canonical + ISIG: ^C discards "ab". ----------------------
+    cons_test_set_termios(CONS_ICANON | CONS_ISIG);
+    cons_rx_counters(&bp_raw0, &bp_flush0, &d_line0, &d_ring0);
+    u32 mf0 = cons_rx_drop_modeflush();
+    cons_rx_input((u8)'a', false);
+    cons_rx_input((u8)'b', false);
+    cons_rx_input(0x03u, false);                      // ISIG-consumed: discard the assembly
+    bool a_intr = cons_test_intr_pending();
+    u32 a_depth_after_ctrlc = cons_test_rx_count();  // nothing reached the ring yet
+    cons_rx_input((u8)'c', false);
+    cons_rx_input((u8)'d', false);
+    cons_rx_input((u8)'\n', false);
+    u32  a_cnt = cons_test_rx_count();
+    long a_n   = (a_cnt > 0u) ? cons_drain(a_buf, (long)sizeof(a_buf)) : -1;
+    cons_rx_counters(&bp_raw1, &bp_flush1, &d_line1, &d_ring1);
+    u32 mf1 = cons_rx_drop_modeflush();
+
+    // ---- LEG B: the CONTROL -- canonical, ISIG CLEAR: 0x03 is data. -----
+    cons_test_reset();
+    sched();
+    cons_test_set_termios(CONS_ICANON);
+    cons_rx_input((u8)'a', false);
+    cons_rx_input((u8)'b', false);
+    cons_rx_input(0x03u, false);                      // a data byte, buffered
+    cons_rx_input((u8)'c', false);
+    cons_rx_input((u8)'d', false);
+    cons_rx_input((u8)'\n', false);
+    u32  b_cnt = cons_test_rx_count();
+    long b_n   = (b_cnt > 0u) ? cons_drain(b_buf, (long)sizeof(b_buf)) : -1;
+
+    // ---- LEG C: a COMMITTED line in the ring survives the ^C. -----------
+    cons_test_reset();
+    sched();
+    cons_test_set_termios(CONS_ICANON | CONS_ISIG);
+    cons_rx_input((u8)'x', false);
+    cons_rx_input((u8)'\n', false);                   // committed: in the ring
+    cons_rx_input((u8)'a', false);
+    cons_rx_input((u8)'b', false);
+    cons_rx_input(0x03u, false);                      // discards only "ab"
+    cons_rx_input((u8)'y', false);
+    cons_rx_input((u8)'\n', false);
+    u32  c_cnt = cons_test_rx_count();
+    long c_n   = (c_cnt > 0u) ? cons_drain(c_buf, (long)sizeof(c_buf)) : -1;
+
+    // ---- TEAR DOWN, then ASSERT. ------------------------------------------
+    cons_settle_mgr();
+
+    TEST_ASSERT(a_intr, "A: the Ctrl-C was ISIG-consumed (interrupt pending)");
+    TEST_EXPECT_EQ((long)a_depth_after_ctrlc, 0L, "A: nothing reached the ring at the ^C");
+    TEST_EXPECT_EQ((long)a_cnt, 3L, "A: the ring holds exactly cd + NL");
+    TEST_EXPECT_EQ(a_n, 3L, "A: drained 3 bytes");
+    TEST_ASSERT(a_buf[0] == 'c' && a_buf[1] == 'd' && a_buf[2] == '\n',
+                "A: the delivered line is cd + NL -- ab was DISCARDED by the ^C");
+    TEST_ASSERT(bp_raw1 == bp_raw0 && bp_flush1 == bp_flush0 && d_line1 == d_line0
+                && d_ring1 == d_ring0 && mf1 == mf0,
+                "A: a disposition, not a drop -- no counter moved");
+
+    TEST_EXPECT_EQ((long)b_cnt, 6L, "B (control, ISIG clear): 0x03 is data -- ab,03,cd,NL all delivered");
+    TEST_EXPECT_EQ(b_n, 6L, "B: drained 6 bytes");
+    TEST_ASSERT(b_buf[0] == 'a' && b_buf[1] == 'b' && b_buf[2] == 0x03u
+                && b_buf[3] == 'c' && b_buf[4] == 'd' && b_buf[5] == '\n',
+                "B: ab 03 cd NL in order -- the discard is gated on ISIG-consumption, not on the byte");
+
+    TEST_EXPECT_EQ((long)c_cnt, 4L, "C: the committed x+NL and the later y+NL are both in the ring");
+    TEST_EXPECT_EQ(c_n, 4L, "C: drained 4 bytes");
+    TEST_ASSERT(c_buf[0] == 'x' && c_buf[1] == '\n' && c_buf[2] == 'y' && c_buf[3] == '\n',
+                "C: x NL y NL -- the ^C discarded only the pending ab, never the ring");
+}
+
+void test_cons_cook_mode_flip_delivers(void) {
     cons_test_reset();
     sched();
     cons_test_set_termios(CONS_ICANON | CONS_ISIG);   // cooked
     cons_test_echo_capture(true);                     // swallow the +echo NL echo (no stray UART byte)
+    u8 a_buf[16] = {0}, b_buf[16] = {0}, b2_buf[16] = {0}, c_buf[16] = {0}, c2_buf[16] = {0};
 
-    // Buffer a partial line (no Enter): "abc" sits in line[], the ring is empty.
+    // OBSERVE FIRST, TEAR DOWN, ASSERT LAST: TEST_ASSERT returns, and this test
+    // arms echo capture + drives the production consctl path, so an assertion
+    // that returned early would leave that state armed for the next test (the
+    // #133 sweep names it "LEAKED-STATE(echo-capture)"). Every drain below is
+    // ALSO gated on the non-blocking depth: devcons.read parks on an empty
+    // ring, and a regression must read as a red line, not a hang.
+
+    // ---- LEG A: canonical->canonical (+echo) KEEPS the fragment. -----------
     cons_rx_input((u8)'a', false);
     cons_rx_input((u8)'b', false);
     cons_rx_input((u8)'c', false);
-
-    // A production consctl write (turns ECHO on + stays canonical) MUST discard
-    // the fragment -- the flip itself is what resets the line, regardless of flags.
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5, true), 5L, "consctl +echo accepted");
-
-    // Deliver: only the bare NL arrives -- the "abc" fragment was discarded by
-    // the mode change (pre-fix it would prepend, delivering "abc\n").
+    long a_rc    = cons_set_mode_cmd("+echo", 5, true);
+    u32  a_mid   = cons_test_rx_count();              // still assembling: 0
     cons_rx_input((u8)'\n', false);
-    u8 buf[8];
-    long n = cons_drain(buf, sizeof(buf));
-    TEST_EXPECT_EQ(n, 1L, "mode flip discarded the fragment: only the NL delivered");
-    TEST_EXPECT_EQ((long)buf[0], (long)'\n', "the delivered byte is the bare NL");
+    u32  a_cnt   = cons_test_rx_count();              // abc + NL: 4
+    long a_n     = (a_cnt > 0u) ? cons_drain(a_buf, sizeof(a_buf)) : -1;
+
+    // ---- LEG B: canonical->raw (-icanon) DELIVERS the fragment at once. ----
+    cons_rx_input((u8)'d', false);
+    cons_rx_input((u8)'e', false);
+    u32  b_pre   = cons_test_rx_count();              // assembling: 0
+    u32  b_mf0   = cons_rx_drop_modeflush();
+    long b_rc    = cons_set_mode_cmd("-icanon", 7, true);
+    u32  b_cnt   = cons_test_rx_count();              // de delivered: 2 (pre-fix 0)
+    long b_n     = (b_cnt > 0u) ? cons_drain(b_buf, sizeof(b_buf)) : -1;
+    u32  b_mf1   = cons_rx_drop_modeflush();
+    cons_rx_input((u8)'f', false);                    // the next raw byte follows
+    u32  b2_cnt  = cons_test_rx_count();
+    long b2_n    = (b2_cnt > 0u) ? cons_drain(b2_buf, sizeof(b2_buf)) : -1;
+
+    // ---- LEG C: the F1 shape -- gh -> raw -> canonical -> ij + NL. --------
+    long c_rc1   = cons_set_mode_cmd("+icanon", 7, true);
+    cons_rx_input((u8)'g', false);
+    cons_rx_input((u8)'h', false);
+    long c_rc2   = cons_set_mode_cmd("-icanon", 7, true);
+    u32  c_cnt   = cons_test_rx_count();              // gh delivered on the flip: 2
+    long c_n     = (c_cnt > 0u) ? cons_drain(c_buf, sizeof(c_buf)) : -1;
+    long c_rc3   = cons_set_mode_cmd("+icanon", 7, true);
+    u32  c_pend  = cons_test_rx_count();              // nothing pending: 0
+    cons_rx_input((u8)'i', false);
+    cons_rx_input((u8)'j', false);
+    cons_rx_input((u8)'\n', false);
+    u32  c2_cnt  = cons_test_rx_count();              // exactly ij + NL: 3
+    long c2_n    = (c2_cnt > 0u) ? cons_drain(c2_buf, sizeof(c2_buf)) : -1;
+
+    // ---- TEARDOWN, unconditionally, before the first assertion. ---------
     cons_settle_mgr();
+
+    // ---- LEG A -----------------------------------------------------------
+    TEST_EXPECT_EQ(a_rc, 5L, "A: consctl +echo accepted");
+    TEST_EXPECT_EQ(a_mid, 0u,
+                   "A: still assembling -- nothing reached the ring on a canonical->canonical write");
+    TEST_EXPECT_EQ(a_cnt, 4u, "A: Enter delivered abc + NL to the ring -- the write did not eat abc");
+    TEST_EXPECT_EQ(a_n, 4L, "A: the WHOLE line drains");
+    TEST_ASSERT(a_buf[0] == 'a' && a_buf[1] == 'b' && a_buf[2] == 'c' && a_buf[3] == '\n',
+                "A: and it is abc + NL");
+
+    // ---- LEG B -----------------------------------------------------------
+    TEST_EXPECT_EQ(b_pre, 0u, "B precondition: de is assembling, ring empty");
+    TEST_EXPECT_EQ(b_rc, 7L, "B: consctl -icanon accepted");
+    TEST_EXPECT_EQ(b_cnt, 2u,
+                   "B: the mode write put de in the ring (pre-fix: 0, the fragment was zeroed)");
+    TEST_EXPECT_EQ(b_n, 2L, "B: the pending de DRAINS -- no newline appended");
+    TEST_ASSERT(b_buf[0] == 'd' && b_buf[1] == 'e', "B: and it is de");
+    TEST_EXPECT_EQ(b_mf1, b_mf0, "B: it fit -- no drop counted");
+    TEST_EXPECT_EQ(b2_cnt, 1u, "B: the next raw byte is in the ring");
+    TEST_EXPECT_EQ(b2_n, 1L, "B: and drains after de");
+    TEST_ASSERT(b2_buf[0] == 'f', "B: and it is f");
+
+    // ---- LEG C -----------------------------------------------------------
+    TEST_EXPECT_EQ(c_rc1, 7L, "C: back to canonical");
+    TEST_EXPECT_EQ(c_rc2, 7L, "C: canonical->raw accepted");
+    TEST_EXPECT_EQ(c_cnt, 2u, "C: gh delivered on the flip");
+    TEST_EXPECT_EQ(c_n, 2L, "C: gh drains");
+    TEST_EXPECT_EQ(c_rc3, 7L, "C: raw->canonical accepted");
+    TEST_EXPECT_EQ(c_pend, 0u, "C: nothing pending after raw->canonical");
+    TEST_EXPECT_EQ(c2_cnt, 3u, "C: exactly ij + NL reached the ring -- no stranded prefix");
+    TEST_EXPECT_EQ(c2_n, 3L, "C: the next line drains whole");
+    TEST_ASSERT(c2_buf[0] == 'i' && c2_buf[1] == 'j' && c2_buf[2] == '\n',
+                "C: and it is ij + NL");
 }
 
 // LS-8b audit F2a: the canonical WHOLE-LINE poll edge. Ordinary chars buffer in
@@ -2353,4 +2562,319 @@ void test_cons_kernel_writer_bracket(void) {
     TEST_ASSERT(cons_kernel_writer_begin(), "the role is re-claimable");
     cons_kernel_writer_end();
     TEST_ASSERT(!cons_test_tx_role_held(), "and released again");
+}
+
+// ---------------------------------------------------------------------------
+// cons.tx_unit_diag_line_atomic -- a kernel diagnostic LINE is one push unit
+// ---------------------------------------------------------------------------
+//
+// The byte-atomic tear (thyla-pi, 2026-08-17): `proc: orphan` and a userspace
+// posture line came out as `ttaappeessttrryydd` because every byte of a
+// diagnostic took its own ring-lock hold. ARCH 23.5.2 "UNIT ATOMICITY" makes a
+// line ONE hold and ALL-OR-NOTHING. This pins both halves deterministically on
+// one CPU:
+//   (a) a line lands contiguous, byte-exact (peek == the staged bytes);
+//   (b) with room = len - 1 the line is dropped WHOLE: the count does not move,
+//       nothing partial lands, and `dropped` grows by exactly len;
+//   (c) with room = len it lands whole again (the boundary is exact).
+// The ring is stalled so the bytes stay where the push put them, and the
+// filler is DISCARDED, never flushed (the #85/#87 harness-blindness rule).
+// Sabotage S1 (per-byte pushes in cons_diag_line_emit) -> (b) fails on the
+// count, (a)/(c) still pass -- the discriminator is the boundary leg.
+
+static u32 tud_build(struct cons_diag_line *l) {
+    cons_diag_line_init(l);
+    cons_diag_line_puts(l, "diag-unit pid=");
+    cons_diag_line_putdec(l, 4242u);
+    cons_diag_line_puts(l, " addr=");
+    cons_diag_line_puthex64(l, 0xdeadull);
+    cons_diag_line_puts(l, " -- one unit\n");
+    return l->len;
+}
+
+static bool tud_bytes_eq(const u8 *a, const u8 *b, u32 n) {
+    for (u32 i = 0; i < n; i++) if (a[i] != b[i]) return false;
+    return true;
+}
+
+static u8 g_tu_filler[8192];
+static u8 g_tu_peek[8192];
+
+void test_cons_tx_unit_diag_line_atomic(void) {
+    static const u8 want[] =
+        "diag-unit pid=4242 addr=0x000000000000dead -- one unit\r\n";
+    const u32 wl  = (u32)(sizeof(want) - 1u);
+    const u32 cap = cons_test_tx_ring_capacity();
+    TEST_ASSERT(cons_test_tx_armed(), "TX ring must be armed or this test is vacuous");
+    TEST_ASSERT(cap <= sizeof(g_tu_filler), "filler must cover the ring -- grow g_tu_filler");
+    for (u32 i = 0; i < sizeof(g_tu_filler); i++) g_tu_filler[i] = (u8)' ';
+
+    struct cons_diag_line l;
+    u32 built = tud_build(&l);
+    TEST_EXPECT_EQ(built, wl, "the staged line has the expected length");
+    TEST_ASSERT(tud_bytes_eq(l.buf, want, wl), "the staged line is byte-exact (ONLCR applied)");
+
+    uart_test_tx_stall(true);
+    cons_test_tx_ring_free(cap, true);
+
+    // (a) empty ring: the line lands whole and contiguous.
+    u32 d0 = cons_test_tx_dropped();
+    cons_diag_line_emit(&l);
+    u32  a_cnt = cons_test_tx_ring_count();
+    u32  a_got = cons_test_tx_ring_peek(g_tu_peek, sizeof(g_tu_peek));
+    bool a_eq  = (a_got == wl) && tud_bytes_eq(g_tu_peek, want, wl);
+    u32  a_drop = cons_test_tx_dropped();
+    cons_test_tx_ring_free(cap, true);
+
+    // (b) room = wl - 1: dropped WHOLE. Fill with a role write that fits
+    // exactly (no park), then emit.
+    long b_fill   = cons_output_write(g_tu_filler, (long)(cap - (wl - 1u)));
+    u32  b_before = cons_test_tx_ring_count();
+    tud_build(&l);
+    cons_diag_line_emit(&l);
+    u32  b_after = cons_test_tx_ring_count();
+    u32  b_drop  = cons_test_tx_dropped();
+    u32  b_got   = cons_test_tx_ring_peek(g_tu_peek, sizeof(g_tu_peek));
+    bool b_only_filler = true;
+    for (u32 i = 0; i < b_got; i++) if (g_tu_peek[i] != (u8)' ') { b_only_filler = false; break; }
+    cons_test_tx_ring_free(cap, true);
+
+    // (c) room = wl exactly: lands whole; the tail of the ring is the line.
+    long c_fill = cons_output_write(g_tu_filler, (long)(cap - wl));
+    tud_build(&l);
+    cons_diag_line_emit(&l);
+    u32  c_after = cons_test_tx_ring_count();
+    u32  c_got   = cons_test_tx_ring_peek(g_tu_peek, sizeof(g_tu_peek));
+    bool c_tail  = (c_got == cap) && tud_bytes_eq(g_tu_peek + (cap - wl), want, wl);
+    u32  c_drop  = cons_test_tx_dropped();
+    cons_test_tx_ring_free(cap, true);
+    u32 end_cnt = cons_test_tx_ring_count();
+    uart_test_tx_stall(false);
+
+    TEST_EXPECT_EQ(a_cnt, wl, "(a) the whole line is in the ring");
+    TEST_ASSERT(a_eq, "(a) the line landed contiguous and byte-exact");
+    TEST_EXPECT_EQ(a_drop, d0, "(a) nothing dropped");
+    TEST_EXPECT_EQ((u32)b_fill, cap - (wl - 1u), "(b) filler write fit without parking");
+    TEST_EXPECT_EQ(b_before, cap - (wl - 1u), "(b) room is exactly len - 1");
+    TEST_EXPECT_EQ(b_after, b_before,
+                   "(b) a line that does not fit moves the count by ZERO (dropped whole)");
+    TEST_ASSERT(b_only_filler, "(b) nothing partial landed -- the ring holds filler only");
+    TEST_EXPECT_EQ(b_drop, d0 + wl, "(b) the drop is counted in bytes, once, for the whole line");
+    TEST_EXPECT_EQ((u32)c_fill, cap - wl, "(c) filler write fit");
+    TEST_EXPECT_EQ(c_after, cap, "(c) room = len: the line fits exactly");
+    TEST_ASSERT(c_tail, "(c) the line is the contiguous tail of the ring");
+    TEST_EXPECT_EQ(c_drop, d0 + wl, "(c) no further drop");
+    TEST_EXPECT_EQ(end_cnt, 0u, "filler discarded -- nothing reached the console");
+}
+
+// ---------------------------------------------------------------------------
+// cons.tx_unit_echo_atomic -- the IRQ-context echo unit is all-or-nothing
+// ---------------------------------------------------------------------------
+//
+// A cooked-mode erase echoes "\b \b" as one unit (cons_rx_input stages it,
+// then emits once). Per-byte pushes let a full ring keep "\b " and drop the
+// second "\b" -- the cursor visibly walks left over the prompt. The unit
+// either lands whole or not at all. Capture is OFF (the real ring path);
+// the TX ring is stalled; the RX ring is a different ring (unaffected).
+// Sabotage S3 (per-byte pushes in cons_emit_bulk) -> the "room = 3" leg lands
+// two of the three bytes.
+
+void test_cons_tx_unit_echo_atomic(void) {
+    const u32 cap = cons_test_tx_ring_capacity();
+    TEST_ASSERT(cons_test_tx_armed(), "TX ring must be armed or this test is vacuous");
+    for (u32 i = 0; i < sizeof(g_tu_filler); i++) g_tu_filler[i] = (u8)' ';
+
+    cons_test_reset();
+    cons_test_echo_capture(false);
+    cons_test_set_termios(CONS_ICANON | CONS_ECHO);
+    uart_test_tx_stall(true);
+    cons_test_tx_ring_free(cap, true);
+
+    // Positive control: room = 4 -> 'a' echoes (1), the erase unit (3) fits.
+    (void)cons_output_write(g_tu_filler, (long)(cap - 4u));
+    u32 d0 = cons_test_tx_dropped();
+    (void)cons_rx_input((u8)'a', false);
+    u32 p_after_a = cons_test_tx_ring_count();
+    (void)cons_rx_input(0x7fu, false);
+    u32 p_after_del = cons_test_tx_ring_count();
+    u32 p_got = cons_test_tx_ring_peek(g_tu_peek, sizeof(g_tu_peek));
+    bool p_tail = (p_got == cap) && g_tu_peek[cap - 4u] == (u8)'a'
+                  && g_tu_peek[cap - 3u] == (u8)'\b' && g_tu_peek[cap - 2u] == (u8)' '
+                  && g_tu_peek[cap - 1u] == (u8)'\b';
+    u32 p_drop = cons_test_tx_dropped();
+    cons_test_tx_ring_free(cap, true);
+    cons_test_reset();                                   // line[] back to empty
+    cons_test_set_termios(CONS_ICANON | CONS_ECHO);
+
+    // The leg: room = 3 -> 'a' echoes (room 2), the 3-byte erase unit does NOT
+    // fit -> dropped WHOLE.
+    (void)cons_output_write(g_tu_filler, (long)(cap - 3u));
+    (void)cons_rx_input((u8)'a', false);
+    u32 n_after_a = cons_test_tx_ring_count();
+    (void)cons_rx_input(0x7fu, false);
+    u32 n_after_del = cons_test_tx_ring_count();
+    u32 n_got = cons_test_tx_ring_peek(g_tu_peek, sizeof(g_tu_peek));
+    bool n_tail = (n_got == cap - 2u) && g_tu_peek[cap - 3u] == (u8)'a';
+    u32 n_drop = cons_test_tx_dropped();
+    cons_test_tx_ring_free(cap, true);
+    u32 end_cnt = cons_test_tx_ring_count();
+    uart_test_tx_stall(false);
+    cons_test_reset();
+
+    TEST_EXPECT_EQ(p_after_a, cap - 3u, "control: 'a' echoed (room 4 -> 3)");
+    TEST_EXPECT_EQ(p_after_del, cap, "control: the 3-byte erase unit landed whole");
+    TEST_ASSERT(p_tail, "control: the ring tail is a \\b \\b");
+    TEST_EXPECT_EQ(p_drop, d0, "control: nothing dropped");
+    TEST_EXPECT_EQ(n_after_a, cap - 2u, "leg: 'a' echoed (room 3 -> 2)");
+    TEST_EXPECT_EQ(n_after_del, cap - 2u,
+                   "leg: the erase unit that does not fit moves the count by ZERO");
+    TEST_ASSERT(n_tail, "leg: nothing partial landed after the 'a'");
+    TEST_EXPECT_EQ(n_drop, d0 + 3u, "leg: the whole unit is counted dropped (3 bytes)");
+    TEST_EXPECT_EQ(end_cnt, 0u, "filler discarded");
+}
+
+// ---------------------------------------------------------------------------
+// cons.tx_unit_smp_no_tear -- two producers on two CPUs never tear a unit
+// ---------------------------------------------------------------------------
+//
+// The system-level witness for the byte-atomic tear: a kernel-diagnostic
+// emitter and a role writer (SYS_PUTS's path) hammer the ring from two
+// kthreads with 64-byte units, the UART stalled so nothing drains; afterwards
+// the ring is read back and parsed as 64-byte frames -- every frame must be
+// entirely one producer's unit with a valid sequence number, and each
+// producer's sequence must ascend. Under per-byte pushes the frames mix within
+// a few units. The overlap witness (each side samples the other's in-emit flag
+// before each unit) says whether the interleave was actually exercised this
+// boot; with < 2 CPUs the test prints a SKIP note and returns (one CPU cannot
+// interleave two pushers). Sabotage S1/S2 (per-byte pushes on either side)
+// -> torn frames whenever the emits overlapped.
+
+#define TUS_UNITS   60u
+#define TUS_UNIT    64u
+
+static volatile u32  g_tus_a_done, g_tus_b_done;
+static volatile bool g_tus_a_busy, g_tus_b_busy;
+static volatile u32  g_tus_overlap;
+static volatile bool g_tus_a_exited, g_tus_b_exited;
+
+static void tus_fill_unit(u8 *u, u8 tag, u32 seq, u8 pad) {
+    u[0] = tag;
+    u[1] = (u8)('0' + (seq / 1000u) % 10u);
+    u[2] = (u8)('0' + (seq / 100u) % 10u);
+    u[3] = (u8)('0' + (seq / 10u) % 10u);
+    u[4] = (u8)('0' + seq % 10u);
+    for (u32 i = 5; i < TUS_UNIT - 2u; i++) u[i] = pad;
+    u[TUS_UNIT - 2u] = (u8)'\r';
+    u[TUS_UNIT - 1u] = (u8)'\n';
+}
+
+static void tus_diag_thread(void) {
+    for (u32 s = 0; s < TUS_UNITS; s++) {
+        struct cons_diag_line l;
+        cons_diag_line_init(&l);
+        char seq[5] = { (char)('0' + (s / 1000u) % 10u), (char)('0' + (s / 100u) % 10u),
+                        (char)('0' + (s / 10u) % 10u),   (char)('0' + s % 10u), 0 };
+        cons_diag_line_puts(&l, "D");
+        cons_diag_line_puts(&l, seq);
+        for (u32 i = 5; i < TUS_UNIT - 2u; i++) cons_diag_line_puts(&l, "d");
+        cons_diag_line_puts(&l, "\n");             // -> "\r\n": 64 on the wire
+        if (g_tus_b_busy) g_tus_overlap++;
+        g_tus_a_busy = true;
+        cons_diag_line_emit(&l);
+        g_tus_a_busy = false;
+        g_tus_a_done++;
+    }
+    test_kthread_park_terminal(&g_tus_a_exited);
+}
+
+static void tus_writer_thread(void) {
+    for (u32 s = 0; s < TUS_UNITS; s++) {
+        u8 u[TUS_UNIT];
+        tus_fill_unit(u, (u8)'W', s, (u8)'w');
+        // The input is 63 bytes ending in a bare NL; ONLCR (set for the test)
+        // makes it 64 on the wire, the same frame as the diag line.
+        u[TUS_UNIT - 2u] = (u8)'\n';
+        if (g_tus_a_busy) g_tus_overlap++;
+        g_tus_b_busy = true;
+        (void)cons_output_write(u, (long)(TUS_UNIT - 1u));
+        g_tus_b_busy = false;
+        g_tus_b_done++;
+    }
+    test_kthread_park_terminal(&g_tus_b_exited);
+}
+
+void test_cons_tx_unit_smp_no_tear(void) {
+    const u32 cap = cons_test_tx_ring_capacity();
+    TEST_ASSERT(cons_test_tx_armed(), "TX ring must be armed or this test is vacuous");
+    TEST_ASSERT(2u * TUS_UNITS * TUS_UNIT < cap, "the two producers must fit the ring together");
+    unsigned cpus = smp_cpu_count();
+    if (cpus < 2) {
+        uart_puts(" (SKIP: one CPU -- two pushers cannot interleave) ");
+        return;
+    }
+
+    g_tus_a_done = g_tus_b_done = 0;
+    g_tus_a_busy = g_tus_b_busy = false;
+    g_tus_overlap = 0;
+    g_tus_a_exited = g_tus_b_exited = false;
+
+    cons_test_reset();
+    cons_test_echo_capture(false);
+    cons_test_set_termios(CONS_ONLCR);
+    uart_test_tx_stall(true);
+    cons_test_tx_ring_free(cap, true);
+    u32 d0 = cons_test_tx_dropped();
+
+    struct Thread *ta = thread_create(kproc(), tus_diag_thread);
+    struct Thread *tb = thread_create(kproc(), tus_writer_thread);
+    if (ta) ready(ta);
+    if (tb) ready(tb);
+    // Wake the secondaries so they steal (the work-stealing smoke's method).
+    for (unsigned i = 1; i < cpus; i++) (void)gic_send_ipi(i, IPI_RESCHED);
+    TEST_YIELD_UNTIL_SOFT(g_tus_a_done >= TUS_UNITS && g_tus_b_done >= TUS_UNITS);
+    u32 a_done = g_tus_a_done, b_done = g_tus_b_done, overlap = g_tus_overlap;
+
+    u32 cnt  = cons_test_tx_ring_count();
+    u32 got  = cons_test_tx_ring_peek(g_tu_peek, sizeof(g_tu_peek));
+    u32 drop = cons_test_tx_dropped();
+    cons_test_tx_ring_free(cap, true);
+    u32 end_cnt = cons_test_tx_ring_count();
+    uart_test_tx_stall(false);
+    cons_test_reset();
+
+    // Parse (touching nothing global), join, THEN assert.
+    u32 frames = got / TUS_UNIT;
+    u32 next_a = 0, next_b = 0, torn = 0;
+    for (u32 f = 0; f < frames; f++) {
+        const u8 *u = g_tu_peek + f * TUS_UNIT;
+        u8 want[TUS_UNIT];
+        bool ok = false;
+        if (u[0] == (u8)'D') {
+            tus_fill_unit(want, (u8)'D', next_a, (u8)'d');
+            ok = tud_bytes_eq(u, want, TUS_UNIT);
+            if (ok) next_a++;
+        } else if (u[0] == (u8)'W') {
+            tus_fill_unit(want, (u8)'W', next_b, (u8)'w');
+            ok = tud_bytes_eq(u, want, TUS_UNIT);
+            if (ok) next_b++;
+        }
+        if (!ok) torn++;
+    }
+
+    if (ta) test_kthread_join_free(ta, &g_tus_a_exited);
+    if (tb) test_kthread_join_free(tb, &g_tus_b_exited);
+    cons_settle_mgr();
+
+    TEST_ASSERT(ta != NULL && tb != NULL, "thread_create");
+    TEST_EXPECT_EQ(a_done, TUS_UNITS, "the diag producer finished");
+    TEST_EXPECT_EQ(b_done, TUS_UNITS, "the writer producer finished");
+    TEST_EXPECT_EQ(drop, d0, "nothing dropped (the ring had room for both)");
+    TEST_EXPECT_EQ(cnt, 2u * TUS_UNITS * TUS_UNIT, "every unit is in the ring");
+    TEST_EXPECT_EQ(got % TUS_UNIT, 0u, "the ring holds whole frames");
+    TEST_EXPECT_EQ(torn, 0u, "no frame is torn -- every 64-byte frame is one producer's unit");
+    TEST_EXPECT_EQ(next_a, TUS_UNITS, "every diag unit present, in order");
+    TEST_EXPECT_EQ(next_b, TUS_UNITS, "every writer unit present, in order");
+    TEST_EXPECT_EQ(end_cnt, 0u, "filler discarded");
+    if (overlap == 0u)
+        uart_puts(" (note: no emit overlap observed -- the interleave was not exercised this boot) ");
 }
