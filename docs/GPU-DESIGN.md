@@ -981,6 +981,60 @@ exists to make fast, and it was not in the comparison either.
 **Do not implement C-2d until this is settled** — every option changes what
 C-2c attaches and what C-3 blits from.
 
+##### 4.5.8b RATIFIED: buffer age, delivered client-side (operator vote 2026-08-16)
+
+**Option 4 chosen.** Per-slot host resources stand as voted; an accumulator
+repaints the union of damage since the slot it is about to draw into was last
+presented. First use of a slot, and any invalidation, means a full repaint.
+
+**The correctness argument, by induction on a slot's resource.** Resource
+*R(S)* holds exactly what has been transferred into it. If every present of
+slot *S* transfers the union of damage since *S* was last presented, then
+*R(S)* = *R(S)*<sub>last cycle</sub> ∪ (everything that changed since), which
+is the whole current frame provided *R(S)* was correct last cycle. The base
+case is the full-surface transfer on first use. Nothing else is required of the
+compositor **for the guest-slot content**, because the staleness is entirely a
+property of what the client itself wrote.
+
+**Where the age comes from, and why not the CQE.** The vote's sketch put it on
+the present completion. That is not available: a present is a 9P write over the
+Loom ring, so its CQE is **kernel-owned** — `result` is the write's byte count
+and `flags` carries `LOOM_CQE_*` semantics, with `struct loom_cqe`
+`_Static_assert`-pinned at 16 bytes (`kernel/include/thylacine/loom.h:177-186`).
+Putting a compositor payload there is a kernel ABI break, which is out of all
+proportion to the need. Two alternatives were considered and rejected: a new
+`TEV_AGE` event races the client's rotation (events are async to the present),
+and a control word inside the weave is a client-visible layout change for
+something the client can already compute.
+
+**So the age is derived in `libtapestry`, which owns the rotation** —
+`cur_slot` advances only in `submit_present` after that present's own CQE, so
+the library knows exactly when each slot was last presented, and a failed
+present does not rotate.
+
+**The obligation this creates on the compositor, stated because leaving it
+emergent is the mistake §4.5.8a is about.** A derived age is correct only if
+the client learns of every event that invalidates a slot's host resource. So:
+
+> **Invariant (C-2d):** tapestryd MUST NOT skip, drop, or filter a present's
+> transfer without the client subsequently receiving a redraw request, and a
+> redraw request invalidates **every** slot — the client repaints full for
+> `nslots` consecutive presents, not one.
+
+Both halves already have machinery — hidden surfaces skip their transfer
+(`server.rs`, the composed arm) and regaining visibility emits the redraw
+`CONFIGURE` fan (`reconcile`, the structural arm) — and a reweave resets
+`cur_slot` to 0 with all slots undefined (`lib.rs:392`). What is new is that
+these are now **load-bearing for correctness rather than for freshness**, and
+therefore get a named invariant, a test, and a line in the reference. The
+"repaint full for `nslots` presents, not one" half is the easy thing to get
+wrong: one full repaint after unhide fixes one slot and leaves the other two
+stale.
+
+**Sequencing.** The age plumbing lands with C-2d, in one chunk with the per-slot
+resources, because either alone is a regression: per-slot resources without age
+break accumulators, and age without per-slot resources is inert.
+
 #### 4.5.9 The composed path is CAPABILITY-GATED, and the CPU path is PERMANENT (measured 2026-08-16, before C-2 wrote a line)
 
 **Measured, not inferred.** The primary dev loop reports, in the boot log of the
