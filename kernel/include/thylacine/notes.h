@@ -414,6 +414,16 @@ int notes_peek_for_fd_locked(struct Proc *p, struct Thread *t,
 // past its end.
 int notes_name_is_kill(const char *name);
 
+// The install-time discard (POSIX 2.4.3 / Linux flush_sigqueue_mask): remove
+// every queued note named `name` from p's queue regardless of any thread's
+// mask, draining the class latch per removal; returns the count removed. Never
+// removes `kill` (N-4). Takes p->notes->lock itself -- call with NO note lock
+// held. The phenotype rt_sigaction shell calls it AFTER storing a disposition
+// that ignores (SIG_IGN, or SIG_DFL whose Linux default is ignore); the store-
+// then-lock order against notes_post's under-lock disposition read is what
+// makes "no stale ignored note survives" hold. See kernel/notes.c.
+u32 notes_discard_name(struct Proc *p, const char *name);
+
 // F5 + F6 audit close (sub-chunk 13a): re-enqueue a previously-dequeued
 // note at the HEAD of the queue. Used by devnotes_read on uaccess failure
 // and by notes_deliver_at_el0_return on user-stack-push failure to

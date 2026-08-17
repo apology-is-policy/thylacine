@@ -558,6 +558,7 @@ void test_notes_susp_gate_reads_phenotype_sigtab(void); // #251
 void test_notes_masked_susp_stops_at_delivery(void);   // #252
 void test_notes_stop_dequeue_picks_its_own_note(void);  // the class-blind pop
 void test_notes_class_scans_read_phenotype_sigtab(void); // c8ab2744 F1
+void test_notes_discard_name_purges_pending(void);      // the install-time SIG_IGN discard
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
@@ -2146,6 +2147,7 @@ struct test_case g_tests[] = {
     { "notes.masked_susp_stops_at_delivery", test_notes_masked_susp_stops_at_delivery, false, NULL },
     { "notes.stop_dequeue_picks_its_own_note", test_notes_stop_dequeue_picks_its_own_note, false, NULL },
     { "notes.class_scans_read_phenotype_sigtab", test_notes_class_scans_read_phenotype_sigtab, false, NULL },
+    { "notes.discard_name_purges_pending",     test_notes_discard_name_purges_pending,     false, NULL },
     { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
     { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },

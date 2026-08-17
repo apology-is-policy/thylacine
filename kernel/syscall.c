@@ -10776,12 +10776,30 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // merely RESETS dispositions (the common post-fork cleanup) from
         // allocating anything at all.
         struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
-        if (act.handler == VIV_SIG_DFL && !tab) return 0;
-        if (!tab) {
-            tab = viv_sigtab_of(p);
-            if (!tab) return -(s64)T_E_NOMEM;
+        if (!(act.handler == VIV_SIG_DFL && !tab)) {
+            if (!tab) {
+                tab = viv_sigtab_of(p);
+                if (!tab) return -(s64)T_E_NOMEM;
+            }
+            (void)viv_sigtab_set(tab, note, &act);
         }
-        (void)viv_sigtab_set(tab, note, &act);
+
+        // POSIX 2.4.3 / Linux do_sigaction: a disposition that IGNORES --
+        // SIG_IGN, or SIG_DFL for a signal whose default is ignore -- discards
+        // every instance already pending, blocked or not. AFTER the store, so
+        // notes_post's under-lock disposition read and this discard are one
+        // step (see notes_discard_name): a poster that saw SIG_DFL enqueued in
+        // a lock hold this one follows, and is removed here; one that takes
+        // the lock after this sees the new value and drops. Without it the
+        // pending note waited for the EL0 tail's discard arm, and a guest that
+        // re-installed a HANDLER before unblocking had it delivered -- a
+        // signal POSIX says died at the SIG_IGN. Nothing to discard is the
+        // common case and costs one locked scan of an empty ring.
+        if (act.handler == VIV_SIG_IGN ||
+            (act.handler == VIV_SIG_DFL && viv_signote_default_is_ignore(note))) {
+            const char *nm = viv_signote_note_name(note);
+            if (nm) (void)notes_discard_name(p, nm);
+        }
         return 0;
     }
 

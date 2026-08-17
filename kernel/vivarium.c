@@ -1737,6 +1737,21 @@ enum viv_signote viv_signote_from_note_name(const char *name) {
     return VIV_SIGNOTE_NONE;
 }
 
+const char *viv_signote_note_name(enum viv_signote note) {
+    switch (note) {
+    case VIV_SIGNOTE_INTERRUPT:  return NOTE_NAME_INTERRUPT;
+    case VIV_SIGNOTE_KILL:       return NOTE_NAME_KILL;
+    case VIV_SIGNOTE_PIPE:       return NOTE_NAME_PIPE;
+    case VIV_SIGNOTE_CHILD_EXIT: return NOTE_NAME_CHILD_EXIT;
+    case VIV_SIGNOTE_TTY_HUP:    return NOTE_NAME_TTY_HUP;
+    case VIV_SIGNOTE_TTY_QUIT:   return NOTE_NAME_TTY_QUIT;
+    case VIV_SIGNOTE_TTY_WINCH:  return NOTE_NAME_TTY_WINCH;
+    case VIV_SIGNOTE_TTY_SUSP:   return NOTE_NAME_TTY_SUSP;
+    case VIV_SIGNOTE_TTY_CONT:   return NOTE_NAME_TTY_CONT;
+    default:                     return NULL;
+    }
+}
+
 // THE canonical NOTE_BIT_* map (vivarium.h says why there is exactly one).
 // This file already includes notes.h for the canonical note-name literals, so
 // the numbering is taken from its defining header rather than retyped.

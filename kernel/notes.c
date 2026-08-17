@@ -474,6 +474,12 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // Validate name is in the v1.0 supported set.
     if (notes_name_to_bit(name) < 0) return -1;
 
+    u32 sender_pid = sender ? (u32)sender->pid : 0u;
+    u64 ts = timer_now_ns();
+
+    struct NoteQueue *q = p->notes;
+    spin_lock(&q->lock);
+
     // VIVARIUM V-6b: a Linux-phenotype Proc that has set SIG_IGN for the signal
     // this note carries DISCARDS it here, at generation, exactly as Linux does
     // -- and returns SUCCESS, because on Linux `kill()` to a process ignoring
@@ -487,21 +493,27 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // blocked thread unwinding *_INTR until the tail got round to discarding
     // it. Never posting means none of that machinery is touched at all.
     //
+    // UNDER q->lock, not before it, so that this read and the enqueue below
+    // are one step against the installer: rt_sigaction stores the new
+    // disposition and THEN takes q->lock to discard what is already queued
+    // (notes_discard_name). A poster that read SIG_DFL here enqueues in the
+    // same lock hold, and the discard that follows removes it; a poster that
+    // takes the lock after the discard sees SIG_IGN and drops. Read before
+    // the lock, the check could see SIG_DFL, lose the lock to the discard,
+    // and then enqueue a note the discard had already run for -- the stale
+    // note the EL0 tail's discard arm used to be the only answer to.
+    //
     // `kill` is deliberately NOT exempted here: SIGKILL cannot reach this
     // point, because vivarium_sigaction_decide refuses SIGKILL outright, so no
     // guest can put VIV_SIGNOTE_KILL in its table. The uncatchable note stays
     // uncatchable by construction rather than by a special case (I-19 N-4).
     if (p->phenotype == PHENO_LINUX) {
         struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
-        if (tab && viv_sigtab_note_ignored(tab, viv_signote_from_note_name(name)))
+        if (tab && viv_sigtab_note_ignored(tab, viv_signote_from_note_name(name))) {
+            spin_unlock(&q->lock);
             return 0;
+        }
     }
-
-    u32 sender_pid = sender ? (u32)sender->pid : 0u;
-    u64 ts = timer_now_ns();
-
-    struct NoteQueue *q = p->notes;
-    spin_lock(&q->lock);
 
     // Coalesce path: kernel-synthetic + queue full or near-full + an
     // entry of the same (name, sender) is already present. Overwrite its
@@ -750,6 +762,61 @@ int notes_dequeue_locked(struct Proc *p, struct Thread *t, struct Note *out) {
         }
     }
     return 0;
+}
+
+// The install-time discard: remove EVERY queued note named `name` from p's
+// queue, whatever any thread's mask says, and return how many went. This is
+// POSIX 2.4.3 / Linux do_sigaction's flush_sigqueue_mask -- "setting a signal
+// action to SIG_IGN for a signal that is pending shall cause the pending
+// signal to be discarded, whether or not it is blocked" -- and the phenotype
+// rt_sigaction shell calls it whenever the NEW disposition ignores (SIG_IGN,
+// or SIG_DFL for a signal whose Linux default is ignore).
+//
+// It exists because notes_post's SIG_IGN hook only sees notes that arrive
+// AFTER the install; a note that arrived first (blocked, or queued in the
+// window) sat in the queue and was consumed at the next EL0 return by the
+// tail's delivery-time discard arm -- correct for SIG_IGN alone, but visibly
+// wrong the moment the guest re-installs a HANDLER before unblocking: Linux
+// delivers nothing (the pending instance died at the SIG_IGN), the deferred
+// discard ran the handler for a signal POSIX says was gone.
+//
+// Ordering with the poster: the caller stores the disposition FIRST and takes
+// q->lock second; the poster reads the disposition UNDER q->lock. Either the
+// poster's read sees the new value (and drops), or it enqueued in a lock hold
+// that precedes this one (and is removed here). No stale note survives, so the
+// tail's SIG_IGN discard arm is defense-in-depth from here on, not the
+// mechanism.
+//
+// `kill` is never removed (I-19 N-4: nothing can put it in a sigtab, and a
+// caller that asks anyway must not be able to erase it). Each removal drains
+// the class latch exactly as a dequeue does (an `interrupt` armed under
+// SIG_DFL, then ignored while blocked, must not leave the latch set -- that is
+// a Proc whose every sleep returns *_INTR for no reason). No poll wake: a
+// removal only makes the queue LESS ready, and a poller re-samples on wake.
+u32 notes_discard_name(struct Proc *p, const char *name) {
+    if (!p || !p->notes || !name) return 0;
+    if (notes_name_is_kill(name)) return 0;
+    struct NoteQueue *q = p->notes;
+    u32 removed = 0;
+
+    spin_lock(&q->lock);
+    // Restart from head after each pop: notes_pop_at_locked shifts the tail
+    // down, so indices past the popped one moved. Bounded by the ring depth.
+    for (;;) {
+        int found = -1;
+        u32 idx = q->head;
+        for (u32 n = 0; n < q->count; n++) {
+            if (notes_name_eq(q->ring[idx].name, name)) { found = (int)idx; break; }
+            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        }
+        if (found < 0) break;
+        struct Note gone = q->ring[found];
+        notes_pop_at_locked(q, (u32)found);
+        notes_drain_intr_locked(p, q, &gone);
+        removed++;
+    }
+    spin_unlock(&q->lock);
+    return removed;
 }
 
 // ---------------------------------------------------------------------------
@@ -1356,13 +1423,22 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
         bool have_handler = viv_sigtab_note_handler(tab, sn, &act);
 
         // DISCARD, two causes and one action:
-        //   SIG_IGN -- notes_post already drops these at generation, but a note
-        //     queued BEFORE the install is still sitting here. Linux discards
-        //     pending signals when a disposition becomes SIG_IGN, and this is
-        //     the only place that can happen.
+        //   SIG_IGN -- DEFENSE-IN-DEPTH, not the mechanism. notes_post drops an
+        //     ignored note at generation (its disposition read is under
+        //     q->lock), and the rt_sigaction shell discards what was already
+        //     queued when the disposition became SIG_IGN (notes_discard_name,
+        //     after the store; POSIX 2.4.3). Store-then-lock against read-under-
+        //     lock leaves no ordering in which an ignored note survives to
+        //     reach this line -- it used to be "the only place that can happen",
+        //     and a guest that re-installed a handler before unblocking then had
+        //     a discarded signal delivered. Kept because the cost is one
+        //     comparison and the cost of its absence, should the argument ever
+        //     acquire a hole, is the SIG_DFL-terminate arm below killing a guest
+        //     for a signal it ignores.
         //   SIG_DFL whose Linux default is "ignore" (SIGCHLD/SIGWINCH/SIGCONT).
         //     Nothing will ever consume it -- a Linux guest has no notes fd --
         //     so leaving it queued would fill the ring and start failing posts.
+        //     THIS cause is live: a child_exit lands under SIG_DFL constantly.
         if (!have_handler && (viv_sigtab_note_ignored(tab, sn) ||
                               viv_signote_default_is_ignore(sn))) {
             struct Note drop;

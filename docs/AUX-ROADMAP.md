@@ -443,6 +443,18 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
 
 **Landed (newest first, 2026-08-17 back to aux#240):**
 
+- `*(pending)*` -- SIG_IGN discards a PENDING signal at the INSTALL (POSIX
+  2.4.3 / Linux `flush_sigqueue_mask`): `notes_discard_name` (mask-blind,
+  per-class latch drain, `kill` refused) called by the phenotype `rt_sigaction`
+  shell after the store whenever the new disposition ignores; `notes_post`'s
+  disposition read moved under `q->lock` so no stale ignored note survives --
+  the EL0 tail's delivery-time SIG_IGN arm (the open item below, "reached by
+  nothing") is now defense-in-depth by construction rather than an
+  unconstructed mechanism. Found while designing it: the deferred discard was
+  observably WRONG for `pending -> SIG_IGN -> handler -> unblock` (Linux fires
+  nothing; the tail ran the handler). Unit `notes.discard_name_purges_pending`
+  + viv-pheno-probe L205-L216 (in-guest, deterministic via the reader-less
+  fd 0; L215 is the install-vs-delivery leg, RED before).
 - `c62eb738` + `ccb597b8` -- pty-4's burned retry ROOT-CAUSED by the 11173762
   probe on its first miss and FIXED: both ldiscs zeroed the canonical assembly
   on every mode write (LS-8b F1 "TCSAFLUSH"), so type-ahead between a job's
@@ -485,14 +497,19 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
 
 **Open, in order:**
 
-1. **The tail's delivery-time SIG_IGN discard arm is reached by nothing** --
-   the second unconstructed state found by sweeping for the class
-   (`bug_delivery_time_sigign_discard_uncovered.md`); its own chunk (same
-   file as the close above).
-2. **AUDIT ROUND OWED on `ccb597b8`** (kernel cons.c + ptyfs are on the LS-8 +
-   ptyfs audit rows; agent spawning needs the operator's yes -- ask, as for
-   c8ab2744). Also owed at some point: an explicit flush verb (POSIX TCSAFLUSH
-   / tcflush) -- pouch's TCSETS/SW/SF now all behave like TCSANOW.
+1. **AUDIT ROUNDS OWED**: on `ccb597b8` (kernel cons.c + ptyfs; the LS-8 +
+   ptyfs audit rows) -- RUNNING 2026-08-17 with the operator's yes; and on the
+   SIG_IGN install-time discard chunk above (`kernel/notes.c` + the
+   `rt_sigaction` shell; the Notes + VIVARIUM rows) -- ask. Also owed at some
+   point: an explicit flush verb (POSIX TCSAFLUSH / tcflush) -- pouch's
+   TCSETS/SW/SF now all behave like TCSANOW.
+2. **exec RESETS a phenotyped Proc's SIG_IGN rows + blocked mask** -- POSIX/
+   Linux keep both across `execve` (`nohup`, `sh -c 'cmd &'`, `trap '' INT;
+   exec`); `proc_exec_drop_image_state`'s "Zeroing is exact POSIX" is true of
+   CAUGHT handlers only. A phenotype-conditional exec rule = a scripture
+   decision (ARCH 7.6 names the clear as the native rule): options in
+   `memory/bug_exec_resets_sigign_and_mask_phenotype.md`; recommend "phenotype
+   keeps SIG_IGN + mask". Signoff, then a small LINEAGE change + a probe leg.
 3. **#237 stays open and is now sharper**: the phenotype answers SIG_DFL
    SIGPIPE for its own Procs; the NATIVE `pipe` note still carries no latch,
    so a native program that writes to a closed pipe with no handler and no fd

@@ -307,6 +307,30 @@ latch (an ignoring Proc has no handler and is not self-managing, so it passes
 every arm gate), and would leave blocked threads unwinding `*_INTR` until the
 EL0-return tail got round to dropping it. Never posting touches none of that.
 
+**And the other half of POSIX 2.4.3 is done at the INSTALL (2026-08-17).**
+Generation-time covers a note that arrives after `SIG_IGN`; a note that arrived
+*before* -- blocked, or in the window -- was left for the EL0 tail's
+delivery-time discard arm, which is correct for `SIG_IGN` alone and visibly
+wrong the moment a guest re-installs a handler before unblocking (Linux delivers
+nothing: the pending instance died at the `SIG_IGN`; the deferred discard ran the
+handler for it). So `rt_sigaction` now stores the disposition and then calls
+`notes_discard_name(p, name)` whenever the new disposition IGNORES (`SIG_IGN`, or
+`SIG_DFL` for a default-ignore signal -- Linux `do_sigaction`'s
+`flush_sigqueue_mask`): every queued note of that name is removed under
+`q->lock`, mask-blind, each removal draining the class latch as a dequeue does;
+`kill` is never removed. `notes_post`'s disposition read moved UNDER `q->lock` so
+the two are one step: a poster that read `SIG_DFL` enqueued in a lock hold the
+discard follows; one that takes the lock after the discard reads `SIG_IGN` and
+drops. No ordering leaves a stale ignored note, so the tail's `SIG_IGN` arm is
+now defense-in-depth (kept: its absence would hand such a note to the
+`SIG_DFL`-terminate arm). Pinned by `notes.discard_name_purges_pending` (the
+primitive: mask-blind, per-class latch drain, order preserved, `kill` refused, a
+purged full ring is really empty) and by viv-pheno-probe L205-L216 (the shell,
+in-guest: pending -> `SIG_IGN` -> unblock survives with nothing fired and no
+stale note at the head; pending -> `SIG_IGN` -> handler -> unblock fires NOTHING
+-- the leg that separates install-time from delivery-time; each round ends with
+a fresh SIGPIPE delivered exactly once).
+
 **A real handler still declines**, and that is deliberate rather than
 unfinished: the Tier-1 frame that would call it is V-6c, and accepting an install
 we would never honour is the silent mistranslation §4 forbids — worse than
@@ -460,11 +484,15 @@ there.
 
 **Three deliberate delivery behaviours beyond "call the handler".** A `SIG_IGN`
 disposition drops a note that was already queued when the disposition changed
-(Linux discards pending signals on `SIG_IGN`; the V-6b post-time hook cannot
-catch one that arrived first), and a `SIG_DFL` whose Linux default is *ignore*
+(defense-in-depth since 2026-08-17: `rt_sigaction`'s install-time
+`notes_discard_name` plus `notes_post`'s under-lock disposition read leave no
+ordering in which such a note reaches the tail -- see "the other half of POSIX
+2.4.3" above -- and the arm stays because its absence would hand a stale note
+to the terminate arm), and a `SIG_DFL` whose Linux default is *ignore*
 (SIGCHLD/SIGWINCH/SIGCONT) is dropped rather than left in the ring -- a Linux
 guest has no notes fd, so nothing would ever consume it and the queue would
-fill. `SA_RESETHAND` is honoured: the disposition returns to `SIG_DFL` before
+fill; this cause is live (a `child_exit` lands under `SIG_DFL` constantly).
+`SA_RESETHAND` is honoured: the disposition returns to `SIG_DFL` before
 the handler is entered. And a `SIG_DFL` whose Linux default is *terminate*
 (SIGPIPE / SIGINT / SIGHUP / SIGQUIT -- `viv_signote_default_is_terminate`)
 `exits()` the Proc **from the phenotype branch itself**, on the candidate, with

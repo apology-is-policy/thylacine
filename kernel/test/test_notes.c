@@ -86,6 +86,7 @@ void test_notes_susp_gate_reads_phenotype_sigtab(void);   // #251
 void test_notes_masked_susp_stops_at_delivery(void);      // #252
 void test_notes_stop_dequeue_picks_its_own_note(void);     // the class-blind pop
 void test_notes_class_scans_read_phenotype_sigtab(void);   // c8ab2744 F1
+void test_notes_discard_name_purges_pending(void);        // the install-time SIG_IGN discard
 void test_notes_self_kill_through_full_ring(void);        // aux#253
 
 // ---------------------------------------------------------------------------
@@ -943,11 +944,11 @@ void test_notes_fstat_reports_chr(void) {
 // note AT GENERATION, exactly as Linux does -- and reports SUCCESS, because on
 // Linux `kill()` to a process ignoring the signal succeeds.
 //
-// This is the ONE V-6b path with no in-guest leg: proving it from inside a
-// container would need the guest to make something post it a note, and the two
-// generators (write-to-closed-pipe, console Ctrl-C) are both out of a
-// vivarium's reach. So the proof lives here, where the queue is directly
-// observable.
+// The queue is directly observable here, which no in-guest leg can manage (a
+// Linux guest has no notes fd and rt_sigpending is ENOSYS). The guest-side
+// generator DOES exist since V-6c -- fd 0 is a reader-less pipe write end, so
+// viv-pheno-probe raises SIGPIPE at will; its L205-L216 legs drive the
+// install-time twin of this hook (notes_discard_name) through rt_sigaction.
 //
 // Post-time and NOT delivery-time is the property under test. An ignored note
 // that reached the queue would occupy a slot, arm the LS-5c terminate latch,
@@ -1006,6 +1007,109 @@ void test_notes_linux_sigign_discard(void) {
     // proc_free releases the table; a leak here would show up as a slab
     // imbalance rather than a failed assertion, which is why the alloc is real
     // rather than a stack struct.
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// notes_discard_name -- the INSTALL-time discard (POSIX 2.4.3 / Linux
+// do_sigaction's flush_sigqueue_mask), the half of "SIG_IGN discards pending
+// signals" that notes_post's generation-time hook cannot do: a note that was
+// queued BEFORE the disposition became SIG_IGN. The phenotype rt_sigaction
+// shell calls it after the store; the in-guest legs (viv-pheno-probe L205-L216)
+// drive that shell. This pins the primitive where the queue is observable:
+// every note of ONE name goes, whatever any mask says; the class latch drains
+// per removal and only when the class is empty; the survivors keep their
+// order; `kill` is untouchable; an absent name removes nothing.
+// ---------------------------------------------------------------------------
+void test_notes_discard_name_purges_pending(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    struct Note got;
+
+    // [child_exit, interrupt, pipe, interrupt]: two interrupts under SIG_DFL
+    // (no handler, not self-managing) arm the interrupt terminate latch.
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_CHILD_EXIT, 1u, NULL, true), 0, "post child_exit");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 2u, NULL, true), 0, "post interrupt 1");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_PIPE, 3u, NULL, true), 0, "post pipe");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 4u, NULL, true), 0, "post interrupt 2");
+    TEST_EXPECT_EQ(p->notes->count, 4u, "four queued");
+    TEST_ASSERT(proc_intr_terminate_pending(p), "the interrupts armed the latch");
+
+    // An absent name changes nothing.
+    TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_TTY_HUP), 0u,
+                   "absent name: nothing removed");
+    TEST_EXPECT_EQ(p->notes->count, 4u, "absent name: count unchanged");
+
+    // kill is never discardable (N-4): queue one, ask, and it must stay.
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_KILL, 0u, NULL, true), 0, "post kill");
+    TEST_EXPECT_EQ(p->notes->count, 5u, "kill queued");
+    TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_KILL), 0u,
+                   "kill: refused, nothing removed");
+    TEST_EXPECT_EQ(p->notes->count, 5u, "kill: count unchanged");
+
+    // The purge: BOTH interrupts go (masks are not consulted -- there is no
+    // thread to consult), the latch drains with the class, the rest keep order.
+    TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_INTERRUPT), 2u,
+                   "both interrupts removed");
+    TEST_EXPECT_EQ(p->notes->count, 3u, "three remain");
+    TEST_ASSERT(!proc_intr_terminate_pending(p),
+                "removing the last interrupt drained the latch");
+    // The fd-read pop skips kill, so it walks the survivors in FIFO order.
+    spin_lock(&p->notes->lock);
+    int r1 = notes_dequeue_for_fd_locked(p, NULL, &got);
+    u32 a1 = got.arg;
+    int r2 = notes_dequeue_for_fd_locked(p, NULL, &got);
+    u32 a2 = got.arg;
+    int r3 = notes_dequeue_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(r1 == 1 && a1 == 1u, "survivor 1 is the child_exit (arg 1)");
+    TEST_ASSERT(r2 == 1 && a2 == 3u, "survivor 2 is the pipe (arg 3)");
+    TEST_EXPECT_EQ(r3, 0, "only the kill is left for the fd path (it skips kill)");
+    spin_lock(&p->notes->lock);
+    int rk = notes_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(rk == 1 && notes_name_is_kill(got.name), "the kill survived the purge");
+    TEST_EXPECT_EQ(p->notes->count, 0u, "queue empty");
+
+    // Per-CLASS drain: tty:hup and tty:quit share the TTY terminate latch.
+    // Discarding one name leaves the latch armed for the other; discarding
+    // the other clears it.
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_TTY_HUP, 0u, NULL, true), 0, "post tty:hup");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_TTY_QUIT, 0u, NULL, true), 0, "post tty:quit");
+    TEST_ASSERT((__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE)
+                 & PROC_FLAG_TTY_TERMINATE_PENDING) != 0u,
+                "the tty pair armed the TTY latch");
+    TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_TTY_HUP), 1u, "tty:hup removed");
+    TEST_ASSERT((__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE)
+                 & PROC_FLAG_TTY_TERMINATE_PENDING) != 0u,
+                "TTY latch stays while tty:quit remains (per-class drain)");
+    TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_TTY_QUIT), 1u, "tty:quit removed");
+    TEST_ASSERT((__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE)
+                 & PROC_FLAG_TTY_TERMINATE_PENDING) == 0u,
+                "removing the last of the class drained the TTY latch");
+    TEST_EXPECT_EQ(p->notes->count, 0u, "queue empty again");
+
+    // Every removal is a real dequeue: a full ring purged of one name has room
+    // for that many new posts (a purge that only hid entries would still be
+    // full). Sixteen pipes, purge, sixteen more posts land.
+    for (u32 i = 0; i < NOTE_QUEUE_DEPTH; i++)
+        TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_PIPE, i, NULL, false), 0, "fill");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_CHILD_EXIT, 0u, NULL, false), -1,
+                   "full: a userspace post is refused");
+    TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_PIPE), (u32)NOTE_QUEUE_DEPTH,
+                   "all sixteen removed");
+    TEST_EXPECT_EQ(p->notes->count, 0u, "purged ring is empty");
+    for (u32 i = 0; i < NOTE_QUEUE_DEPTH; i++)
+        TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_CHILD_EXIT, i, NULL, false), 0,
+                       "refill lands");
+    TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_CHILD_EXIT), (u32)NOTE_QUEUE_DEPTH,
+                   "refill purged");
+
+    // A NULL / table-less Proc and a NULL name are no-ops, not faults.
+    TEST_EXPECT_EQ(notes_discard_name(NULL, NOTE_NAME_PIPE), 0u, "NULL proc");
+    TEST_EXPECT_EQ(notes_discard_name(p, NULL), 0u, "NULL name");
+
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 }

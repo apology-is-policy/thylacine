@@ -154,3 +154,75 @@ FIRST miss, and the reason it could is that it asked the guest in a fixed order
 with a control at the end (`channel alive?`); (2) a "posture" chosen as an audit
 remedy is still a claim about consumers, and consumers change — the sentence
 "no current consumer flips mid-line" was true when written and had no test.
+
+## 2026-08-17 (aux) — the "reached by nothing" discard arm, and why the right fix moved the mechanism instead of reaching it
+
+Resumed from aux's **second** self-compaction (`05708496`). The resume note's
+first item was to ask the operator for the owed prosecutor round on `ccb597b8`;
+the ready-to-paste prompt was written first
+(`memory/audit_ccb597b8_prosecutor_prompt.md`), my own self-audit of the
+mode-write delivery found nothing, the operator said yes, and the round is
+running in the background while this chunk lands (its files — `cons.c`,
+ptyfs — are disjoint from this one's).
+
+### The chunk: Stream 4's "delivery-time SIG_IGN discard arm is reached by nothing"
+
+The open item was the second member of the unconstructed-state class found by
+sweeping after the maskstop one: `notes_deliver_at_el0_return`'s phenotype
+branch discards a candidate whose disposition is `SIG_IGN`, and its own comment
+named the only way in — "a note queued BEFORE the install is still sitting
+here … this is the only place that can happen." The post-time hook prevents the
+state in every ordinary ordering, so the arm needed a CONSTRUCTED one.
+
+Constructing it in-guest turned out to be easy — `viv-pheno-probe` has raised
+SIGPIPE at will since V-6c (fd 0 is a reader-less pipe write end), so
+`block → write → SIG_IGN → unblock` is deterministic. But writing the legs
+forced the question the arm's comment had skated over: **what does POSIX say
+happens to a pending, blocked signal when its disposition becomes `SIG_IGN`?**
+It is discarded AT THE INSTALL, "whether or not it is blocked" (2.4.3; Linux
+`do_sigaction` → `flush_sigqueue_mask`). Thylacine discarded at the next
+delivery instead. Same answer for `pending → SIG_IGN → unblock`; a DIFFERENT
+answer for `pending → SIG_IGN → handler → unblock` — Linux fires nothing, the
+tail ran the handler for a signal POSIX says had died. So the arm was not merely
+uncovered; the mechanism it implemented was wrong on the ordering nobody had
+tested, and the honest fix is not to reach the arm but to move the discard.
+
+What landed: `notes_discard_name(p, name)` — under `q->lock`, remove every
+queued note of one name, mask-blind, each removal draining the class latch as a
+dequeue does (an `interrupt` armed under `SIG_DFL`, then ignored while blocked,
+must not leave a Proc whose every sleep is `*_INTR`), `kill` refused; the
+phenotype `rt_sigaction` shell calls it after the store whenever the new
+disposition ignores (`SIG_IGN`, or `SIG_DFL` for a default-ignore signal — the
+no-table `SIG_DFL` shortcut now skips only the store); and `notes_post`'s
+disposition read moved UNDER `q->lock`, so store-then-lock against
+read-under-lock leaves no interleaving with a stale ignored note. The tail's
+arm stays as defense-in-depth — its absence would hand a stale note to the
+`SIG_DFL`-terminate arm — with its comment rewritten to say exactly that.
+
+The proof: `notes.discard_name_purges_pending` (mask-blind, per-CLASS latch
+drain — tty:hup out leaves the TTY latch armed for tty:quit — survivor order,
+`kill` refused, a purged FULL ring really empty: 16 out, 16 in) and probe legs
+L205–L216. Round A: pending → `SIG_IGN` → unblock survives with nothing fired
+(L209 is PRE-STAMPED and rewound so a death names its leg instead of leaving
+joey's `??` — the marker channel is fail-only by design, and this is the one
+place a marker is written before the verdict is known), then a handler
+installed after is not handed a stale note (L210). Round B: pending →
+`SIG_IGN` → handler → unblock fires NOTHING (L215 — the install-vs-delivery
+leg; red on the tree before this chunk). Each round ends with a fresh SIGPIPE
+delivered exactly once, so a queue wedged by the experiment cannot read as
+"nothing fired".
+
+### Found on the way, enqueued not fixed
+
+Reading `proc_exec_drop_image_state` for the exec-time sigtab reset: it zeroes
+every row and the mask, and its comment says "Zeroing is exact POSIX". True of
+CAUGHT handlers; false of `SIG_IGN` and of the blocked mask, both of which POSIX
+and Linux keep across `execve` (`nohup`, `sh -c 'cmd &'`, `trap '' INT; exec`
+all depend on it). ARCH §7.6 names the clear as the NATIVE rule, so the fix is
+phenotype-conditional and a scripture decision — surfaced with options in
+`memory/bug_exec_resets_sigign_and_mask_phenotype.md`; recommendation:
+phenotype keeps `SIG_IGN` + mask.
+
+### The bar
+
+BAR-PENDING

@@ -1341,6 +1341,11 @@ bool vivarium_pollfds_to_fdset(const struct pollfd *pfds, u32 count,
 // treated as a signal.
 enum viv_signote viv_signote_from_note_name(const char *name);
 
+// The inverse: the canonical notes.h name literal (program-lifetime .rodata)
+// for a decodable note, NULL for VIV_SIGNOTE_NONE. PURE. The rt_sigaction
+// shell hands it to notes_discard_name when a new disposition ignores.
+const char *viv_signote_note_name(enum viv_signote note);
+
 // Is the note carrying `note` currently ignored by this Proc? PURE + NULL-safe
 // (a Proc that never called rt_sigaction has no table and ignores nothing).
 bool viv_sigtab_note_ignored(const struct viv_sigtab *tab, enum viv_signote note);

@@ -519,6 +519,25 @@ macro_rules! leg {
     };
 }
 
+/// Pre-stamp a leg whose NEXT step can kill this process outright (a signal
+/// whose broken disposition terminates): write the marker at offset 0 and
+/// rewind, so a death leaves the leg's name where joey would otherwise read
+/// the "??" sentinel. The marker channel is fail-only by design, so this is
+/// the one place a marker is written before the verdict is known.
+unsafe fn stamp_armed(rep: i64, mark: &[u8]) {
+    let _ = svc3(NR_WRITE, rep as u64, mark.as_ptr() as u64, mark.len() as u64);
+    let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+}
+
+/// Survived: put the sentinel shape back (five bytes, so a five-byte stamp is
+/// fully overwritten and a later marker or the OK lands on a clean head) and
+/// rewind again.
+unsafe fn stamp_disarm(rep: i64) {
+    let m: &[u8] = b"??\n\n\n";
+    let _ = svc3(NR_WRITE, rep as u64, m.as_ptr() as u64, m.len() as u64);
+    let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+}
+
 /// The linux-mode body: raw Linux numbers only, no allocation, never returns.
 unsafe fn run_linux() -> ! {
     // The report channel comes FIRST, because a verdict we cannot deliver is
@@ -990,6 +1009,104 @@ unsafe fn run_linux() -> ! {
         rep,
         unsafe { (0..512).all(|i| FP_SEEN[i] == FP_SENT[i]) },
         b"L157\n"
+    );
+
+    // --- L205-L216: SIG_IGN discards a PENDING signal (POSIX 2.4.3) ---------
+    //
+    // The state the kernel's discard paths exist for -- a note queued BEFORE
+    // its disposition became SIG_IGN -- constructed deterministically: block
+    // SIGPIPE, raise it (the reader-less fd 0 again), THEN install SIG_IGN.
+    // Linux discards the pending instance AT THE INSTALL, blocked or not, and
+    // that is observable: a handler installed afterwards, still blocked, must
+    // see nothing on unblock. A discard deferred to delivery time runs that
+    // handler for a signal POSIX says died at the SIG_IGN -- which is exactly
+    // what the EL0 tail's arm did before notes_discard_name.
+    //
+    // Two rounds. Round A (L205-L211): pending -> SIG_IGN -> unblock. We
+    // SURVIVE (a broken discard falls into the SIG_DFL-terminate arm and kills
+    // us, so L209 is pre-stamped: that death names its leg instead of leaving
+    // joey's "??"), nothing fired, and a handler installed AFTER the unblock is
+    // not handed a stale note (a discard that merely SKIPPED the note would
+    // deliver it at that very rt_sigaction's return -- L210). Round B
+    // (L212-L216): pending -> SIG_IGN -> handler -> unblock: install-time, not
+    // delivery-time -- nothing fires. Each round ends with a fresh SIGPIPE
+    // delivered exactly once, so a queue wedged by the experiment cannot read
+    // as "nothing fired".
+
+    // Round A.
+    ksa = [SIG_DFL, 0, 0, 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L205\n"
+    );
+    set = bit(SIGPIPE);
+    leg!(
+        rep,
+        svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64, 0, 8) == 0,
+        b"L206\n"
+    );
+    let fired_a = sig_fired();
+    let wrc_a = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    // Queued, blocked, under SIG_DFL: nothing fired -- and we are alive, which
+    // a delivered SIG_DFL SIGPIPE would have ended right here.
+    leg!(rep, wrc_a < 0 && sig_fired() == fired_a, b"L207\n");
+    ksa = [SIG_IGN, 0, 0, 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L208\n"
+    );
+    // The unblock is the moment a broken discard kills us. Stamp the leg
+    // FIRST and rewind, so joey reads "L209" off a corpse; on survival the
+    // stamp is put back to the sentinel shape before the next assertion.
+    stamp_armed(rep, b"L209\n");
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8);
+    stamp_disarm(rep);
+    leg!(rep, sig_fired() == fired_a, b"L209\n");
+    // Nothing stale at the head: installing the handler now must not deliver.
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0
+            && sig_fired() == fired_a,
+        b"L210\n"
+    );
+    // The queue still works: a fresh SIGPIPE reaches the handler exactly once.
+    let wrc_a2 = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    leg!(
+        rep,
+        wrc_a2 < 0 && sig_fired() == fired_a + 1 && sig_signo() == SIGPIPE,
+        b"L211\n"
+    );
+
+    // Round B: the install-time proof.
+    let fired_b = sig_fired();
+    leg!(
+        rep,
+        svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64, 0, 8) == 0,
+        b"L212\n"
+    );
+    let wrc_b = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    // Pending, blocked, with the handler installed: not delivered yet.
+    leg!(rep, wrc_b < 0 && sig_fired() == fired_b, b"L213\n");
+    ksa = [SIG_IGN, 0, 0, 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L214\n"
+    );
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8);
+    // Nothing fired: the pending instance died at the SIG_IGN, not at the
+    // unblock. (Delivery-time discard alone reads fired_b + 1 here.)
+    leg!(rep, sig_fired() == fired_b, b"L215\n");
+    let wrc_b2 = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    leg!(
+        rep,
+        wrc_b2 < 0 && sig_fired() == fired_b + 1 && sig_signo() == SIGPIPE,
+        b"L216\n"
     );
 
     // --- V-5a: sockets -----------------------------------------------------
