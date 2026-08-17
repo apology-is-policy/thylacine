@@ -1104,6 +1104,35 @@ correct in every slot only because age 0 routes that slot's first use through
 the full-frame branch, which BG-fills the whole surface. Remove the age-0 route
 and margins rot in slots 1..n-1.
 
+**C-2d-b contains a design sub-problem that is NOT a mechanical edit: HOLD ×
+per-slot × the scanout rebind.** Found by starting the refactor and stopping at
+it (2026-08-17); recorded rather than decided in a hurry, because it changes a
+surface the battery's hold legs cover.
+
+`TPRESENT_HOLD` defers a present's device-visible flush until `release`, and
+`Held::Direct(Rect)` accumulates the deferred region as a **rect union**
+(`server.rs:6918`). That union is well-defined only while every held present
+lands on **one** host resource. It does not survive per-slot resources: each
+present rotates the slot, so two held presents sit on *different* resources,
+and there is no single resource for the union to be flushed against.
+
+It compounds with the scanout rebind. In Direct mode the scanout must name the
+presented slot's resource, so a present now implies a `SET_SCANOUT` — but a
+*held* present's whole contract is that nothing becomes device-visible yet, so
+the rebind has to defer too, and then "which resource is bound" and "which
+resources have unflushed regions" come apart.
+
+Shape that looks right, for whoever picks this up: replace the single
+`Held::Direct(Rect)` with **at most `WEAVE_SLOTS` (slot, rect) entries** —
+bounded by construction, since a client cannot hold more presents than it has
+slots — and flush each on release, rebinding the scanout last to the most
+recent slot. Rejected on sight: keeping one union and flushing "the current
+slot", which silently drops the other slots' held regions; and superseding an
+older hold with a newer one, which loses a flush the client was promised.
+
+Note the composed arm is unaffected — `Held::Composed` is a SCREEN-space
+region, and the screen is one resource regardless.
+
 **C-2d-b also owes a decision on `res_stale`.** Today it means "this client
 resource has no valid content" and forces a full-surface transfer of the current
 slot on a direct switch — which pushes an accumulator's *stale slot memory* to
