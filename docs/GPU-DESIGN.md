@@ -987,6 +987,25 @@ C-2c attaches and what C-3 blits from.
 repaints the union of damage since the slot it is about to draw into was last
 presented. First use of a slot, and any invalidation, means a full repaint.
 
+**Which path actually needs this, sharpened — it is DIRECT, not composed.**
+Worth stating because §4.5.8 solves a *composed*-path problem (the blit/fill
+collision) and the breakage it causes is a *direct*-path one, and conflating
+them will mislead C-3.
+
+- **Direct** scans out the whole resource (`set_scanout(R_S)`), so `R(S)` must
+  be correct **everywhere**. Today one accumulating resource per generation
+  supplies that; per-slot resources remove it, and the client must supply it
+  instead. This is what buffer age is for.
+- **Composed** blits only the damage rect out of the client and into the
+  **screen**, which is itself the accumulator and retains everything outside
+  that rect. So the client's resource only has to be correct *inside the damage
+  rect* — which it trivially is, having just been painted and transferred.
+  Composition therefore needs no age at all, before or after C-3.
+
+The conclusion is unchanged, because aurora is a Direct client on every boot —
+but the scope matters: **C-3 keeps the screen as the composed accumulator**, and
+the age contract exists to protect the scanout path.
+
 **The correctness argument, by induction on a slot's resource.** Resource
 *R(S)* holds exactly what has been transferred into it. If every present of
 slot *S* transfers the union of damage since *S* was last presented, then
@@ -1045,12 +1064,45 @@ effect is invisible until C-2d-b removes the accumulator, so its gate is the
 `ls-gfx*` pixel asserts staying green, plus the reasoning above. Claiming more
 would be claiming a green boot proves a gate is wired.
 
-**C-2d-b's prerequisite list, from a sweep rather than from memory: every
-libtapestry client that presents partial damage must consult `age`.** There are
-three (`grep 'present(Some\|present_rects'`): `usr/aurora` (done, C-2d-a),
-`usr/tapestry-demo:140`, and `usr/tapestry-battery:480`. The battery is the one
-with teeth — `ls-gfx-panes` asserts exact pane-centre pixels, so if it is left
-un-updated the server half fails that gate rather than shipping quietly broken.
+**C-2d-b's prerequisite list — corrected, and the correction is the
+instructive part.** The first pass grepped `present(Some\|present_rects` and
+reported three clients. That is a match on **API shape**, not on the property
+that matters, which is *damage smaller than the full surface*. Checked
+properly:
+
+- **`usr/aurora`** — a genuine accumulator. Done, C-2d-a.
+- **`usr/tapestry-demo`** — a genuine accumulator, and the sharpest example in
+  the tree: it paints the quadrant background **into slot 0 only**, at frame 0
+  (`main.rs:107-113`), then every later frame draws just the plasma box into a
+  *rotating* slot and presents only that rect. Slots 1 and 2 therefore never
+  receive the background at all — they hold the alloc-time zeros. Today that is
+  invisible because the one host resource retains frame 0. Under per-slot
+  resources two frames in three would show black around the plasma. **Owed.**
+- **`usr/tapestry-battery`** — **needs nothing.** Every present is
+  `present(None)`, and the one `present_rects` (`main.rs:480`) tiles the whole
+  surface with two rects after writing every pixel, so its damage union is
+  full-frame. Its own header says so: *"The battery presents FULL-FRAME only
+  … so it never trips the #56 patchwork latch."*
+
+So the list is one client, not two — and the over-count came from the exact
+failure mode this project keeps re-learning: *a pattern that matches the wrong
+thing returns a confident wrong answer, never an error.* `present_rects`
+covering the full surface is not partial damage.
+
+**Also owed at C-2d-b, from self-auditing C-2d-a: aurora has a `CONFIGURE` path
+that bypasses `handle_configure`, and therefore bypasses invalidation.** The
+sub-floor arm (`main.rs:800`) declines a degenerate resize offer by marking
+every row dirty *without* calling `handle_configure`, so `invalidate_slots`
+never runs on it. It is benign today — that arm corresponds to the compositor
+cropping rather than skipping transfers, and each slot's margins were painted on
+its own age-0 first use — but it is the wrong shape: **invalidation lives inside
+a library call the client is free to route around.** Either invalidate on that
+arm too, or expose invalidation independently of `handle_configure`. Worth
+noting *why* it is benign, because the reasoning is the load-bearing part: a
+damage-only present spans rows, never the surface margins, so margins are
+correct in every slot only because age 0 routes that slot's first use through
+the full-frame branch, which BG-fills the whole surface. Remove the age-0 route
+and margins rot in slots 1..n-1.
 
 **C-2d-b also owes a decision on `res_stale`.** Today it means "this client
 resource has no valid content" and forces a full-surface transfer of the current

@@ -392,6 +392,68 @@ exposes the same, and it keeps the per-slot vote intact at no VRAM cost while
 retiring the latent hazard instead of routing around it. C-2c and C-3 both wait
 on the answer: every option changes what gets attached and what gets blitted.
 
+### The vote, and C-2d-a (`0a0e0fbb`, `931bf15a`)
+
+The operator picked buffer age. Implementing it immediately hit a constraint the
+option sketch had assumed away: I had written "present CQE now carries: age",
+and it cannot. A present is a 9P write over the Loom ring, so its CQE is
+**kernel-owned** — `result` is the write's byte count, `flags` is `LOOM_CQE_*`,
+and `struct loom_cqe` is `_Static_assert`-pinned at 16 bytes. Putting a
+compositor payload there is a kernel ABI break for a compositor convenience.
+
+The way out was to notice who already owns the information. `libtapestry` owns
+the rotation — `cur_slot` advances only after a present's own CQE — so it knows
+exactly when each slot was last presented and can derive the age itself. A
+`TEV_AGE` event was rejected (async to the present, so it races the rotation) and
+a control word in the weave was rejected (a client-visible layout change for
+something the client can compute).
+
+**The interesting part is what the derivation costs, because it is the same
+trap again.** A derived age is correct only if the client hears about every
+server-side invalidation — which is exactly the kind of undeclared dependency
+that produced §4.5.8a two hours earlier. So it is written down as a named
+invariant this time rather than left to be rediscovered: tapestryd must not skip
+a transfer without the client subsequently getting a redraw request, and a
+redraw invalidates **every** slot, so the client repaints full for `nslots`
+presents, not one. Both arms are wired in `libtapestry`.
+
+Then aurora handed back independent corroboration of §4.5.8a. `main.rs:988`
+already routes any OSD pass through the full-frame branch, with the comment
+*"a partial rect could transfer stale panel pixels from an older slot"*. The
+symptom had been understood locally, for one widget, and worked around — the
+general statement just never got made. That is what an emergent load-bearing
+property looks like from the inside: not unknown, merely un-generalized.
+
+I split the chunk, because the halves are not symmetric: per-slot resources
+without age break every accumulator, but age without per-slot resources is inert
+and harmless. So the client half went first — and **its honest gate is that
+nothing changed.** `ls-gfx` PASS, `ls-gfx-panes` PASS (exact pane-centre
+pixels), suite 1367/1367. Its actual effect is unobservable until C-2d-b removes
+the accumulator, and the commit says so rather than dressing a green boot up as
+verification.
+
+**Then I got the prerequisite list wrong, in the commit message, within twenty
+minutes of writing the lesson that prevents it.** I swept for clients that
+present partial damage with `grep 'present(Some\|present_rects'` and reported
+three. That greps **API shape**, not the property that matters — *damage
+smaller than the full surface*. Checked properly, it is one:
+
+- `tapestry-battery` needs **nothing**. Every present is `present(None)`, and
+  its one `present_rects` tiles the whole surface with two rects after writing
+  every pixel. Its own header says so: *"presents FULL-FRAME only."* I had
+  called it "the one with teeth."
+- `tapestry-demo` is the real one, and is the sharpest example in the tree: it
+  paints the quadrant background **into slot 0 only**, at frame 0, then draws
+  just the plasma box into *rotating* slots forever after. Slots 1 and 2 never
+  receive the background at all — they hold alloc-time zeros. Under per-slot
+  resources, two frames in three would show black around the plasma.
+
+"A pattern that matches the wrong thing returns a confident wrong answer, never
+an error" is pinned at the top of my own memory index. It still went into a
+commit message, a scripture section and the handoff, because a grep that
+*returns results* feels like a sweep that *finished*. Corrected in §4.5.8b and
+the handoff; the commit body stands as written, with this as its correction.
+
 ### Found in passing: `docs/REFERENCE.md`'s snapshot block died in Phase 5
 
 The doc-update step sent me to `docs/REFERENCE.md` to refresh its Snapshot
