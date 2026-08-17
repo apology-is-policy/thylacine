@@ -164,10 +164,14 @@ sync_pool() {
 sync_all() {
     # git archive HEAD: exactly the committed tree (no build/, no .git, no
     # local junk). Uncommitted script changes ride separately below so a
-    # dirty iteration loop still tests what you edited.
+    # dirty iteration loop still tests what you edited. `tools/interactive/
+    # lib.exp` is in the list because EVERY warp .exp sources it: it was
+    # missing until the C-0d Fable close added a proc to it, and the Pi
+    # would have run the new scenario against HEAD's lib -- an "invalid
+    # command name" whose cause is a list that claimed to carry your edits.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-reject.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/composed-screen.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
+    for f in tools/run-vm.sh tools/interactive/lib.exp tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-reject.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/composed-screen.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -342,6 +346,14 @@ reject)
     # about hang location, not a property of the gate. `lc_pass`'s prefix
     # can only be produced by the success path, and it is what `prove`,
     # `tri` and `quake` already require.
+    #
+    # C-0d FABLE ROUND F6: the scenario is SELF-GATING now -- warp-prove
+    # prints `C0-REJECT DONE` only when every C0 arm passed and
+    # `C0-REJECT INCOMPLETE(<arm>)` otherwise, which warp-reject.exp
+    # hard-fails on -- so a blind detector no longer reaches lc_pass at all.
+    # The five terms stay as the belt to that brace: they name each arm, and
+    # a scenario that passed for a reason this list does not know about
+    # should still fail here.
     grep -E "C0-REJECT|C0-DETECT|C0-F1" "$out" || true
     ok=1
     for pat in "C0-REJECT ANSWER=" "C0-DETECT PASS" "C0-DETECT STICKY PASS" "C0-F1 DEFENDED" "LS-CI PASS: warp-prove reject"; do

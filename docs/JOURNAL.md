@@ -22,6 +22,165 @@ needed the operator.
 
 ---
 
+## 2026-08-18 — the C-0d Fable close: C-4's lesson had been applied to one pair and not the other, and the readback arm's remedy is not what it looked like
+
+Resumed from the self-compaction at `401d4b27` (the merge pushed; the C-0d
+Fable verdict in hand: 0 P0 / 2 P1 / 1 P2 / 2 P3, nothing fixed). The mac was
+aux's for the first ~1.5 h of the run (its viv-run LS-CI legs), so this run
+did all its reading, editing and design with no cores and queued on the lease
+for the build — which is what the leases are for.
+
+### The close (F1 / F5 / F6 fixed, F3 recorded)
+
+**F1 was C-4's own residue.** §4.5.12 had measured that a texture transfer
+or readback on a tiled renderer is a blit job behind everything the *device*
+has queued, and moved the compositor's health pair to buffers — and left the
+per-ctx #240 probe (`warp_probe_build`) a texture pair, because the
+compositor's helpers (`health_upload` / `health_readback` /
+`comp_copy_region`) had `COMPOSITOR_CTX` hardcoded and the client verify kept
+its own texture-only transfers. So every client `verify` was still the drain
+C-4 had just priced, and — the part the round added — one client's verify
+paid for *another* client's queue, which the verify admission gate (F7's
+`fences-in-flight`/`poisoned`, reading only the caller's gauges) cannot see.
+The fix is structural rather than local: `CtxProbe.buffer`, the buffer mint
+first for every ctx (`warp_hprobe_build`), the texture pair only where that
+mint fails and counted (`probe-texture` on the global ctl — a say line at
+ctx-create rate would be a storm), and ONE helper set for both pairs
+(`probe_upload` / `probe_readback` / `probe_copy_region`) so the compositor
+and the clients cannot drift again. The prover's C0-F1 leg had to change with
+it: it attacked from a TEXTURE BO, and a texture->buffer
+`RESOURCE_COPY_REGION` is not a legal copy — the renderer would have dropped
+it and the leg would have printed DEFENDED for the wrong reason (a control
+the operation erases). The attack source is a buffer of the probe's own
+shape now (`mint_buffer_bo`, `rcr_stream` with a width).
+
+**F5** (`present-to N bo`/`off`/`N bo` re-running the whole import witness on
+the SHARED compositor context at 9P-write rate): the `verify_tick` shape,
+one witness per ctx per compositor tick — but DEFERRED, never dropped: a
+same-tick second consent sets `import_pending` and `frame_tick` replays the
+import of whatever `present_to` names by then. The winsys re-consents only
+when its front buffer changes, so the only legitimate second write in one
+frame is a resize storm, and coalescing those onto ticks costs it one tick of
+the readback arm.
+
+**F6** (warp-prove printed `C0-REJECT DONE` unconditionally, so a blind
+detector passed the scenario and only the host-side 5-term grep gated it):
+DONE is a verdict now — every C0 arm records pass/fail and the token prints
+iff all three passed, else `C0-REJECT INCOMPLETE(<arm>)`, which
+`warp-reject.exp` hard-fails on through a new `lc_run_expect_hardfail_re`
+(a regexp fail arm, so the prover's own `FAIL --` shares it). The 5 terms
+stay as the belt: a scenario that passed for a reason the list does not know
+about should still fail there.
+
+**F3** recorded on #171 with a comment at `warp_probe_res_kind`: the probe's
+two page mappings ride the never-rewound `weave_va_next` bump — a ctx-churn
+driver on the same monotonic-VA class. Also noticed while writing it: the
+detach names `size` while the bump rounds it up to pages — equal today (both
+PAGE), and written down so a differently-sized probe cannot silently leak.
+
+**Also found: the #240 detector's four rounds were never in
+`AUDIT-TRIGGERS.md`.** r1–r3 lived in phase7-status rows and memory files
+only. The tapestryd row now carries the addendum (all four rounds, this
+close's fixes, five prosecute-on-change items).
+
+### F2, and the design that came out of reading QEMU before writing it
+
+F2 [P1] is the composed-GL present's readback fallback: `transfer_from_3d_
+sync(g.dev_ctx, ...)` of the whole frame on the compositor's SYNC slot, so
+the console's dispatch waits for the frame — for everything the client has
+queued ahead of it, a length the client picks — and `fence_poisoned` cannot
+guard it (the poison comes from `reap_abandoned` on the loop that is
+blocked). The pickup note prescribed "the fenced / bounded readback". Reading
+QEMU's `virtio-gpu-virgl.c` + vrend before designing it (the §4.5.4c habit)
+changed what "fenced" buys: **vrend executes `TRANSFER_FROM_HOST_3D`
+synchronously at DECODE time on QEMU's serial main loop** — `glReadPixels`
+into the guest iov, returning only when every job writing the resource has
+completed, which on V3D's in-order queue is every job queued before it — and
+`FLAG_FENCE` changes only when the *response* is written. So a readback of a
+busy resource stalls the DEVICE (every other client's commands, the
+compositor's own sync steps, QEMU's display refresh) for the resource's GPU
+backlog; fencing it frees the *guest* thread and nothing else; and a sync
+step queued behind it inherits the stall — which makes `submit_and_wait`'s
+"pending fences ahead cannot delay this chain" comment (true for fenced
+SUBMITs, a decode) false for fenced readbacks (a GL wait), and its 500 ms
+`SUBMIT_DEADLINE_MS` a false-`dead` hazard on a merely busy device.
+
+That reframed the goal from "make the readback free" (impossible under
+QEMU/virgl by construction) to three narrower things: the console's dispatch
+never blocks on a client-chosen duration; the compositor never latches
+`dead` because a device was busy; the compositor's OWN contribution to
+device stalls is bounded and coalesced. GPU-DESIGN 4.5.13 (C-6, RESERVED) is
+that design: the fenced readback with DEFERRED present completion, one in
+flight per surface / latest wins, a reserved fenced slot (compositor-wide
+bound of one, which loses nothing against a device that executes them
+serially anyway), counted in the owning ctx's `fences_in_flight` for retire
+safety but subtracted from admission so the client's share and its #210
+ledger are untouched, and the sync-slot deadline widened to
+`FENCE_ABANDON_MS` while any readback — ours or a client's — is in flight.
+Two forms rejected on the record: a bounded sync wait (the command is already
+in the device's queue; the next sync step waits behind it — bounds the wrong
+thing) and gating on quiescence (a single-buffered client at its throttle
+depth never quiesces; the §4.5.9 safety net would compose it once and never
+again). The spec extension is named (`ComposeReadbackIssue`/`Complete`
+behind `ALLOW_COMPOSE`, the retire guard generalized from `DrainedOfBlits`,
+a `buggy_readback_free` cfg) and the Pi gate legs with it.
+
+**And a new finding fell out — F2b.** Consequence 3 of the reading: *any*
+client already holds the device-stall lever through its own `transfer_from`
+of its own busy BO (the fenced verb every winsys has), repeatedly. F2 was the
+compositor doing to itself what a client can do to it. Filed
+(`memory/bug_f2b_readback_stalls_the_device.md`; GPU-DESIGN 4.5.13's F2b
+paragraph): guest-side it can be not-added-to (C-6), not-mistaken-for-death
+(the deadline half), and MEASURED (a warp-prove leg — client A reads back its
+busy BO while surface B presents — owed with C-6's gate); it is removed for
+real only by Venus (transfers become VkCommandBuffer copies the client
+fences) or v3d-native (the queue is ours). Recorded under §9.2's host-side
+exposures precisely so "trusted host" never reads as "no client can reach
+it".
+
+### Two things the bar found before it passed
+
+**The C0-F1 leg's DEFENDED was a negative assertion with no positive
+control** — "verify-ok still advanced after the attack" is satisfied by an
+attack that never landed (the aux#215 class), and the texture-era leg had
+leaned on a one-time host-log measurement for that; the buffer form did not
+inherit it. Added in-guest before the first Pi run was trusted: after the
+attack the client copies the mark BACK into its own buffer (the same command
+the other way), reads its buffer back through the fenced verb, and requires
+its own green. It printed `C0-F1 ATTACK LANDED -- the mark read back through
+our own buffer as 0xff00ff00` — so the leg now proves a client can WRITE and
+READ the probe's resources (the finding, re-measured on the buffer pair)
+before it claims the repaint held; an unlanded attack is INSTRUMENT and F1
+counts as not-defended.
+
+**`warp-host.sh sync`'s uncommitted-scripts list omitted
+`tools/interactive/lib.exp`** — the library every warp `.exp` sources. The
+first sync shipped the new `warp-reject.exp` (in the list) against HEAD's
+`lib.exp` (not in it), so the scenario would have died on `invalid command
+name lc_run_expect_hardfail_re` — a list that claims to carry your edits and
+does not carry the one file they all depend on. Caught by checking the Pi's
+copy for the new proc before running (`grep -c` on both files, 1 vs 0);
+`lib.exp` is in the list now.
+
+### The bar
+
+Local (mac): `cargo build -p tapestryd -p warp-prove --release`; ramfs
+rebaked with `THYLACINE_BAKE_CLADE=1 THYLACINE_MKFS_PRESERVE=1`, verified by
+CONTENT (`C0-REJECT INCOMPLETE` ×3, `probe-texture` ×1, `ATTACK LANDED` ×1
+in `build/ramfs.cpio`); `tools/test.sh`: 1424/1424, arc gates L-6c/D-5 PASS,
+clade 3/3, the G-4 console gate `CONSOLE VERIFY OK`. The kernel is
+byte-unchanged (userspace + tools + docs only), so the SMP gate 40/40 at
+`401d4b27` carries. thyla-pi (KVM, V3D, virglrenderer 1.1.0): `reject` →
+`C-0d DETECTOR GATE: VERIFIED` (ANSWER=REPORTED-AS-SUCCESS as measured
+before; DETECT PASS; STICKY PASS; C0-F1 first res 83 → mark 81 (the buffer
+pair minted exactly two ids), ATTACK LANDED, DEFENDED; DONE; LS-CI PASS);
+`prove` → `WARP-2 GATE: VERIFIED`; `quake` → `WARP-4 GATE: VERIFIED` (969
+frames 21.7 s 44.7 fps on the egl-headless lane — 44.4/44.8 before;
+`comp-attach witnessed 5 refused 0`; `comp-health verify on buffer pair`;
+`probe-texture 0`). Both leases released the moment the resource freed;
+the mac was aux's for the first ~1.5 h and its LS-CI legs were never
+contended.
+
 ## 2026-08-17 — the aux-2 merge: two tracks fixed one UAF, and 23 conflicts said which one to keep
 
 Resumed from the self-compaction at `a9a4a4fe` (Warp-C closed). The note said

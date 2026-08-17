@@ -739,6 +739,61 @@ exempt from the BO count/byte caps by design, but the argument that made
 that safe assumed they were reclaimed like BOs, and they were not — the
 wedge path leaked them permanently until the probe graveyard landed.
 
+**RE-PROSECUTED ON FABLE (2026-08-17, the first non-Opus read after three
+Opus rounds; `memory/audit_c0d_fable_closed_list.md`): 0 P0 / 2 P1 / 1 P2 /
+2 P3, dirty.** What it found, and what changed:
+
+- **F1 [P1] — the client probe was still a TEXTURE pair after C-4.** C-4
+  (§4.5.12) measured that on a tiled renderer every texture transfer and
+  readback is a blit job behind everything the *device* has queued, and
+  moved the *compositor's* health pair to buffers — the *client* detector
+  kept the texture pair. So client A's `verify` blocked the console for as
+  long as client B's queue was deep, while the `verify` admission gate
+  (`fences-in-flight`/`poisoned`, audit F7) reads only A's own gauges and
+  could not see it. **Fixed:** every ctx's probe is now minted with
+  `warp_hprobe_build` (buffers), the texture pair only where that mint
+  fails (counted as `probe-texture` on the global ctl); the verify's
+  transfers and copy width follow the pair's kind through one set of
+  helpers shared with the compositor's health pair (`probe_upload` /
+  `probe_readback` / `probe_copy_region`); the C0-F1 prover leg attacks the
+  buffer pair from a BUFFER source of the probe's own shape (a
+  texture->buffer copy is not a legal copy and would defend for the wrong
+  reason). The gate's contract, stated exactly now: it bounds waits on the
+  caller's OWN queue — which on the buffer pair is the whole exposure.
+- **F2 [P1] — the composed READBACK arm** (`transfer_from_3d_sync` of the
+  frame under the client's ctx, the `!done` fallback of the composed-GL
+  present) is a synchronous full-frame readback whose wait is the client's
+  own queue, on the console's dispatch thread, taken for every BO the blit
+  arm cannot compose; `fence_poisoned` structurally cannot guard it (the
+  poison comes from `reap_abandoned` on the serve loop — the loop that is
+  blocked). Only readbacks carry this: a blit's SUBMIT_3D response is
+  written at decode time. Gating the arm on `fences-in-flight == 0` was
+  rejected (it would collapse the §4.5.9 CPU safety net to stale frames for
+  every continuously-rendering client). **OPEN, stated exactly in
+  `149-warp.md` and at the arm; the fix is Warp-C C-6, the fenced / bounded
+  readback (§4.5.13), the pipelined form §4.5.12 already cut for.**
+- **F3 [P2] — the probe's 2 pages per ctx mint ride the never-reclaimed
+  `weave_va_next` bump** (a ctx-churn driver on the #171 class). Recorded on
+  #171 (its reclaim must cover the probe pages); the ~186-day bound stands,
+  composed with #171's. Comment at `warp_probe_res_kind`.
+- **F5 [P3] — the `present-to` import witness had no rate limit**: `N bo` /
+  `off` / `N bo` re-ran the attach + health copy + two witness rounds on the
+  SHARED compositor context at 9P-write rate. **Fixed:** one witness per
+  ctx per compositor tick (`WarpCtx.import_tick`, the `verify_tick` shape);
+  a second consent in the same tick is deferred to the next tick's replay
+  (`comp_replay_deferred_imports` in `frame_tick`), never dropped.
+- **F6 [P3] — the reject scenario passed on a blind detector**: warp-prove
+  printed `C0-REJECT DONE` unconditionally and only `warp-host.sh reject`'s
+  5-term grep gated it. **Fixed:** DONE iff every C0 arm passed, else
+  `C0-REJECT INCOMPLETE(<arm>)`, which `warp-reject.exp` hard-fails on
+  (`lc_run_expect_hardfail_re`); the 5 terms stay as the belt.
+
+The verified-sound list of the round (repaint containment, the three-valued
+verdict on every client-facing surface, probe teardown in I-7 order, slot
+poison / dev_ctx aliasing, the REQ_REGION bound, the `composable` gate,
+present-to cross-conn safety) is in the closed list. Dirty close: a
+follow-up round on these fixes + C-6 is owed after C-6 lands.
+
 **P2 — cross-context ordering: does the blit observe the client's finished
 frame?** The client renders on its context, the compositor blits on its own;
 virglrenderer maps each guest context to a host GL context, and in-order
@@ -2075,6 +2130,217 @@ job in the queue behind everything else, so a "tiny" transfer is not tiny —
 it is a barrier. And "once per frame" cadences must be priced against the
 mechanism they ride: free on a fence already waited for, a full drain on a
 sync slot.
+
+**What the C-0d Fable round added to this section (2026-08-17; §4.5.4b's
+tail has the findings).** Two of them are C-4's own residue. (1) The lesson
+above was applied to the *compositor's* pair and not to the *client's*: the
+per-ctx #240 probe stayed a texture pair, so every client `verify` was still
+the drain C-4 had just measured — and one client's verify paid for another
+client's queue, which no per-ctx admission gate can see. Every ctx's probe
+is a buffer pair now, minted before the texture fallback, through the same
+helpers as the health pair (F1). (2) The readback fallback this section
+"retired in the only sense §4.5.9 permits" is exactly the sync full-frame
+readback whose wait is the client's own queue length, on the console's
+dispatch thread, and it is taken for every BO the blit arm cannot compose
+(F2). Its remedy is the pipelined form the paragraph above declined to
+build for the *blit* — the readback needs it first, bounded: **Warp-C C-6,
+§4.5.13** (design note, then the impl, then the Pi gates; a follow-up round
+on the C-0d fixes + C-6 closes the dirty round). Until it lands the
+exposure is stated, not fixed, in `149-warp.md` and at the arm.
+
+#### 4.5.13 C-6 — the readback arm off the console's dispatch, and what a readback costs under QEMU/virgl (designed 2026-08-18; RESERVED, lands at C-6)
+
+**The finding this answers.** C-0d Fable F2 (§4.5.4b's tail): the composed-GL
+present's readback fallback issues `TRANSFER_FROM_HOST_3D` of the whole frame
+under the client's ctx on the compositor's **synchronous** slot, so the
+console's dispatch thread waits for the readback's response — and the
+response is written only after the bytes land, i.e. after the frame is
+rendered, i.e. after everything the client has queued ahead of it, a length
+the client chooses (its fence throttle admits `WARP_CTX_FENCE_MAX` = 8
+submits in flight, each a frame of arbitrary GPU cost). `fence_poisoned`
+cannot guard it (the poison is produced by `reap_abandoned` on the serve
+loop, which is the loop that is blocked), and `submit_and_wait`'s 500 ms
+`SUBMIT_DEADLINE_MS` — meant for a DEAD device — can trip on a merely BUSY one
+if event-ful stale wakes arrive during the stall, latching `dead` and losing
+the GPU for the console's lifetime (the #31 class). The arm runs for every BO
+the blit arm cannot compose: not `composable`, an unwitnessed import, a
+latched compositor context, no 3D screen.
+
+**What a readback costs, mechanically — read from QEMU v10.0.0
+`hw/display/virtio-gpu-virgl.c` and from virglrenderer 1.1.0
+`src/vrend_renderer.c` (the exact package thyla-pi runs,
+`libvirglrenderer1 1.1.0-2`; the Debian orig tarball, read on the Pi
+2026-08-18), the same kind of reading §4.5.4c rests on.** QEMU processes the
+controlq **inline, serially, on its main loop** — the file has no render
+thread; `virgl_cmd_transfer_from_host_3d` is `VIRTIO_GPU_FILL_CMD` + one
+call to `virgl_renderer_transfer_read_iov`, and the tail of
+`virtio_gpu_virgl_process_cmd` answers a non-fenced command with
+`virtio_gpu_ctrl_response_nodata` immediately and a fenced one only via
+`virgl_renderer_create_fence` — the `FLAG_FENCE` bit changes WHEN THE
+RESPONSE IS WRITTEN, never when the transfer runs. vrend executes the read
+**at decode time, synchronously**, on the resource's own context
+(`vrend_renderer_transfer_internal`: `vrend_hw_switch_context(ctx)`, then
+`vrend_renderer_transfer_send_iov`): a GL buffer is
+`glMapBufferRange(res->target, box->x, box->width, GL_MAP_READ_BIT)` +
+`vrend_write_to_iovec`; a texture is `vrend_transfer_send_readpixels`
+(`glReadPixels`) with `glGetTexImage` / the read-only path as fallbacks —
+and every one of those returns only when the jobs that write the resource
+have completed, which on V3D's single in-order hardware queue means every job
+queued before them (C-4 measured exactly this: `health-read` ~15 ms on a 1×1
+texture behind a client's queue). Three consequences, each load-bearing for
+the design:
+
+1. **A readback of a busy resource stalls the DEVICE, not just the caller.**
+   For its duration nothing behind it on the controlq is processed — every
+   other client's commands, the compositor's own sync steps, and QEMU's
+   display refresh (the main loop is blocked in GL). Fencing the readback
+   does not shorten that stall by a microsecond; it only frees the *guest*
+   thread that issued it.
+2. **A sync step queued behind a stalled readback inherits the stall.** So a
+   guest that fences its readbacks and then issues an unrelated sync command
+   has moved the wait, not removed it — and `submit_and_wait`'s deadline
+   commentary ("pending fences ahead of this chain cannot delay its
+   retirement, the device writes a non-fenced response at PROCESSING time")
+   was written for fenced SUBMITs, whose processing is a decode. A fenced
+   READBACK's processing is the GL wait. The claim is false for it.
+3. **Any client already holds this lever.** A client's own `transfer_from`
+   of its own busy BO (the fenced verb every winsys has) stalls the device
+   for its own queue length, and with it the console's next sync step and
+   the display. The compositor's arm is the SAME class on the console path
+   — F2 found the compositor doing to itself what a client can do to it.
+   This is filed as its own item, **F2b**, below.
+
+So the honest goal is not "make the readback free" — under QEMU/virgl a
+readback of an in-flight frame is a device stall of that frame's backlog by
+construction — but three narrower things: (a) the console's dispatch thread
+never blocks on a client-chosen duration; (b) the compositor never latches
+`dead` because a device was busy rather than dead; (c) the compositor's OWN
+contribution to device stalls is bounded and coalesced, never a queue.
+
+**The three forms weighed.**
+
+- *Bounded synchronous wait* (issue on the sync slot, give up after B ms):
+  REJECTED. The command is already in the device's queue; giving up on the
+  response leaves a sync chain unretired that `drain()` will attribute
+  later — the ring protocol has one sync slot and no notion of an abandoned
+  sync chain — and the very next sync step waits behind the stalled
+  readback anyway (consequence 2). Bounds the wrong thing.
+- *Gate the arm on quiescence* (`fences-in-flight == 0`, else compose from
+  stale pages): REJECTED at the Fable close and again here. A single-
+  buffered client (every OSMesa/SDL client presents its front buffer)
+  rendering at its throttle depth never quiesces; the readback arm would
+  compose it once and then never — the §4.5.9 CPU safety net collapsed to
+  a still image for exactly the clients it exists for. Deferring "until
+  in-flight ≤ 1" fails the same way for any client faster than the
+  compositor's tick.
+- **CHOSEN: the fenced readback with DEFERRED present completion, one in
+  flight, latest-wins.** The pipelined form §4.5.11/§4.5.12 already cut for
+  in `tapestry_present.tla` (`ComposeBlit` → `[inblit]` → `ComposeComplete`,
+  `DrainedOfBlits` on retire), applied to the readback arm first because it
+  is the arm that blocks.
+
+**As designed.**
+
+- **Issue.** The composed-GL present's `!done` arm issues `TRANSFER_FROM_
+  HOST_3D` of the frame on the FENCED lane (`gpu.transfer_3d(to_host =
+  false, ...)`, the client's `dev_ctx` in the header — the resource is
+  attached there), tagged **compositor-owned** (`FenceTag.ctx_pub = 0`,
+  the id `wctx_mint` never mints), records a per-surface pending readback
+  `{fence_id, ctx_pub, bo_pub, res_id, va, w, h, gen}`, replies to the
+  tpresent, and returns. The dispatch never waits. `Cost::Readback` now
+  times the ISSUE; a new `Cost::ReadbackWait` accumulates issue-to-retire
+  wall per completed readback, so the census can see the stall the device
+  paid without the console having paid it.
+- **Complete.** `warp_service_fences` routes compositor-owned completions
+  to `comp_readback_retired(tag)`: re-validate the surface (alive, same
+  `gen`, still hosted/visible, still adopted to the same ctx/BO), then
+  `blit_composed_pixels(n, …, Some(va))` + `screen_push` exactly as today.
+  A surface that moved on since (retired, resized, re-adopted) drops the
+  frame — a stale composition is worse than none. `composed_cpu` counts at
+  completion.
+- **One in flight per surface, latest wins.** A present arriving while the
+  surface's readback is pending sets `rb_again` and returns; on completion,
+  `rb_again` issues one fresh readback of whatever the BO holds now. So the
+  compositor never queues readbacks behind each other and a client's present
+  rate cannot pile device stalls: at most one compositor readback per
+  surface is ever outstanding, and the FRAME it reads is always the newest.
+- **One reserved fenced slot.** The lane keeps `FENCED_SLOTS` = 16 with the
+  per-ctx share `WARP_CTX_FENCE_MAX` = 8; two clients at their share fill
+  it, so the compositor's readback must not compete on the pool. One slot
+  is reserved for compositor-owned chains (clients see 15 in
+  `alloc_fenced_slot`; the shares are unchanged). If it is busy (another
+  surface's readback in flight), the present marks the surface `rb_wanted`
+  and the completion of the busy one issues the next in FIFO order — a
+  compositor-wide bound of ONE readback in flight, which loses nothing
+  against a device that would execute them serially anyway.
+- **Retire safety (I-7 / I-40).** The DMA target is the client's BO backing,
+  so the BO and its ctx must not free while the readback is in flight. The
+  readback is counted in the owning ctx's `fences_in_flight` (the counter
+  every quiesce predicate — `wctx_retire`, `warp_pump_retires`,
+  `wbo_destroy`'s leak posture — already reads) and additionally in a new
+  `WarpCtx.comp_rb_in_flight`, which the ADMISSION gate subtracts
+  (`warp_fenced_admit`: `fences_in_flight - comp_rb_in_flight >= share`),
+  so the client's share is not shortened by our readback and its
+  `fence_signaled` ledger (#210) never sees a fence it did not issue. A
+  compositor readback that never retires is abandoned by the same reaper at
+  `FENCE_ABANDON_MS`, poisons the client's ctx exactly like a client fence
+  would (the device may still write that backing — the leak posture is the
+  right one), and the pending record is dropped. `verify` while our
+  readback is in flight answers `E_AGAIN` (the ctx has device work
+  outstanding on its resources — true), which is the one client-visible
+  change and is documented.
+- **The deadline is made honest (consequence 2).** While ANY readback —
+  compositor-owned or a client's `transfer_from` — is in flight, the sync
+  slot's stale-wake deadline is `FENCE_ABANDON_MS` (30 s), not
+  `SUBMIT_DEADLINE_MS` (500 ms): a device stalled behind a legitimate
+  readback is busy, and a false `dead` latch is the #31 loss the deadline
+  exists to prevent, while 30 s is the same bound every fenced chain
+  already carries. `Controlq` learns which in-flight fenced slots are
+  readbacks (a bit set at `transfer_3d(to_host = false)`); the wait loop
+  reads it. This half is F2b's guest-side mitigation and lands with C-6.
+- **Spec.** `tapestry_present.tla` gains the readback shape behind the same
+  `ALLOW_COMPOSE` switch: `ComposeReadbackIssue(g)` (a fenced device WRITE
+  into the client BO's pages: `[inread]`) → `ComposeReadbackComplete(g)`
+  (the fence retires; the CPU compose reads those pages) with the retire
+  guard generalized from `DrainedOfBlits(g)` to "no in-flight device op
+  names g's pages" and a `buggy_readback_free` cfg (freeing the BO backing
+  under an in-flight readback) as the counterexample. Additive by
+  measurement, as C-1 was: with the switch off the existing cfgs must
+  reproduce their exact state counts.
+- **Gates.** `warp-host.sh decomp` and `quake` on thyla-pi (the blit arm
+  must be untouched: `composed gpu ≥ 1`, `readback` still 0 there); a
+  NEW `warp-prove` leg on the Pi that forces the readback arm (a
+  non-`composable` BO — a `Y_0_TOP`-minted 2D — presented through a GL
+  adoption while the same ctx keeps 8 heavy submits in flight) and asserts
+  (i) the console's OTHER surface keeps presenting inside its budget
+  (`present-other` latency, the compositor's dispatch not blocked), (ii)
+  `Cost::ReadbackWait` records the stall the device paid, (iii) exactly one
+  compositor readback in flight over the leg. `check-tapestry.sh` for the
+  spec.
+
+**F2b — filed, not fixed here: the QEMU/virgl serial-processing stall is a
+client-triggerable lever on the whole box.** A client's own `transfer_from`
+of its own busy resource stalls QEMU's main loop for its queue's GPU time —
+every other client's device work, the compositor's sync steps and the
+display refresh with it — and it can repeat that indefinitely. Nothing in
+the guest can shorten a stall the host executes synchronously; the guest can
+only (1) not add to it (this section), (2) not mistake it for death (the
+deadline half above), and (3) MEASURE it: a `warp-prove` leg that has client
+A read back its busy BO while surface B presents, reporting B's present
+latency — owed with C-6's gate. Where it stops being ours to accept: Venus
+(§12, Warp-6) moves transfers to VkCommandBuffer copies the client waits on
+its own fences for, and v3d-native (Warp-7) puts the queue in our hands.
+Until then it sits with the host-side exposures §9.2 documents as TRUSTED —
+recorded HERE because "trusted host" must not read as "no client can reach
+it".
+
+**What this does NOT change.** The blit arm (the composed path every
+composable client takes on the GL host) stays on the sync slot exactly as
+§4.5.11/§4.5.12 left it — its SUBMIT_3D response is written at decode time,
+so it never inherits a stall of its own making; the flush after it is the
+display backend's cost. The 2D software-surface path is untouched. The
+readback arm's PIXELS are unchanged (same transfer, same compose); only WHEN
+the console waits changes: never.
 
 ## 5. Placement — where the server lives, per backend
 

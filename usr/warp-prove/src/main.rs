@@ -72,6 +72,15 @@ const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
 // gallium p_defines.h values the virgl wire carries verbatim (vrend decodes
 // them against the same constants; frozen with the protocol).
 const PIPE_TEXTURE_2D: u32 = 2;
+/// A BUFFER resource, as the server mints its probe pairs (`PIPE_BUFFER`,
+/// one byte per texel in `R8_UNORM`, width = the byte length, a vertex-buffer
+/// bind): the C0-F1 attacker's source since the C-0d Fable round, because the
+/// probe under attack is a buffer pair now and a texture->buffer copy is not
+/// a legal copy -- the leg would "defend" for the wrong reason.
+const PIPE_BUFFER: u32 = 0;
+const VIRGL_FORMAT_R8_UNORM: u32 = 64;
+const VIRGL_BIND_VERTEX_BUFFER: u32 = 1 << 4;
+const PROBE_BUF_BYTES: u32 = 4096;
 const PIPE_CLEAR_COLOR0: u32 = 1 << 2;
 
 const W: u32 = 64;
@@ -196,7 +205,8 @@ pub extern "C" fn rs_main() -> i64 {
         unsafe { t_close(probe) };
         if !ctl.starts_with("virgl 1") {
             t_putstr("warp-prove: C0-REJECT SKIP -- no virgl on this device\n");
-            t_putstr("warp-prove: C0-REJECT DONE\n");
+            // Not a pass: the arms never ran (F6 -- DONE is a verdict).
+            t_putstr("warp-prove: C0-REJECT INCOMPLETE(no-virgl)\n");
             return 0;
         }
         observe_rejection();
@@ -463,10 +473,11 @@ fn fenced_free(root: i64) -> u64 {
 /// ABSENT, so the whole reject run aborted on the first read instead of
 /// reaching the INSTRUMENT arm written for exactly that case.
 ///
-/// Names the missing key, closes the scenario with its DONE marker so the
-/// harness is not left waiting, and exits 0. The host gate then fails on
-/// the ABSENT verdict terms -- which is the honest way for this to fail,
-/// and (since F8) a way that actually fails.
+/// Names the missing key, closes the scenario with its completion token so
+/// the harness is not left waiting -- INCOMPLETE, since the C-0d Fable round
+/// (F6) made DONE mean "every arm passed" -- and exits 0. The scenario
+/// hard-fails on the token wherever it runs; the host gate additionally
+/// fails on the ABSENT verdict terms.
 fn ctx_field_soft(root: i64, ctx: u32, key: &str) -> u64 {
     match parse_field(&open_read_string(root, &format!("ctx/{}/ctl", ctx)), key) {
         Some(v) => v,
@@ -477,7 +488,7 @@ fn ctx_field_soft(root: i64, ctx: u32, key: &str) -> u64 {
                  downstream could have meant anything.\n",
                 key
             ));
-            t_putstr("warp-prove: C0-REJECT DONE\n");
+            t_putstr(&format!("warp-prove: C0-REJECT INCOMPLETE(instrument:{})\n", key));
             unsafe { t_exits(0) }
         }
     }
@@ -1076,19 +1087,28 @@ fn observe_rejection() {
          stream-rejected(bad {} ok {}) rejected-at(bad {})\n",
         wrote_bad as u32, wrote_ok as u32, vs_bad_0, vs_bad, vs_ok_0, vs_ok, sr_bad, sr_ok, at_bad
     ));
-    let _ = if vs_bad <= vs_bad_0 || vs_ok <= vs_ok_0 {
+    // Every C0 arm records whether it PASSED (C-0d Fable round F6): the
+    // scenario's completion token used to print unconditionally, so a
+    // FAIL(vacuous) / FAIL(blind) arm reached the prompt with the same
+    // `C0-REJECT DONE` a green run prints, and only the host-side 5-term
+    // grep stood between a blind detector and a pass. Now DONE means every
+    // arm passed; anything else prints INCOMPLETE(<arm>) and the scenario
+    // hard-fails on it wherever it runs.
+    let detect_pass = if vs_bad <= vs_bad_0 || vs_ok <= vs_ok_0 {
         t_putstr(
             "warp-prove: C0-DETECT INSTRUMENT -- `verify-seq` did not advance on one or both \
              ctxs, so the probe did not run and neither reading below means anything. \
              (A pre-C-0d tapestryd cannot reach here at all: the field is ABSENT and \
              `ctx_field_soft` reports that separately.)\n",
-        )
+        );
+        false
     } else if sr_bad == 1 && sr_ok == 0 && vok_ok == 0 {
         t_putstr(
             "warp-prove: C0-DETECT FAIL(control unproven) -- the healthy ctx reports \
              stream-rejected 0 but `verify-ok` never advanced, so its probe returned \
              UNKNOWN rather than finding health. The control is vacuous (F2).\n",
-        )
+        );
+        false
     } else if sr_bad == 1 && sr_ok == 0 {
         t_putstr(&format!(
             "warp-prove: C0-DETECT PASS -- the REJECTED ctx reports stream-rejected 1 \
@@ -1096,23 +1116,27 @@ fn observe_rejection() {
              recorded a healthy verdict (verify-ok {}). The detector discriminates; \
              #240 is observable in-guest.\n",
             at_bad, vok_ok
-        ))
+        ));
+        true
     } else if sr_bad == 1 && sr_ok == 1 {
         t_putstr(
             "warp-prove: C0-DETECT FAIL(vacuous) -- BOTH ctxs report stream-rejected 1. \
              The detector latches on health too, so its positive reading proves nothing.\n",
-        )
+        );
+        false
     } else if sr_bad == 0 && sr_ok == 0 {
         t_putstr(
             "warp-prove: C0-DETECT FAIL(blind) -- the rejected ctx reports 0 after a verify \
              that DID run. The probe's copy reached the host on a ctx vrend had latched, \
              or the seed/readback is not landing where the compare reads.\n",
-        )
+        );
+        false
     } else {
         t_putstr(
             "warp-prove: C0-DETECT FAIL(inverted) -- the HEALTHY ctx reports rejected and the \
              refused one does not. The two arms are crossed.\n",
-        )
+        );
+        false
     };
     // Sticky is the contract (recreate, never retry): a second verify on the
     // healthy ctx must not drift, and on the rejected one must not clear.
@@ -1150,13 +1174,14 @@ fn observe_rejection() {
     let vok_bad = ctx_field_soft(bad, ctx_bad, "verify-ok");
     let vok_ok = ctx_field_soft(ok, ctx_ok, "verify-ok");
     let at_bad = ctx_field_soft(bad, ctx_bad, "rejected-at");
-    if rv_bad <= rv_bad_0 || rv_ok <= rv_ok_0 {
+    let sticky_pass = if rv_bad <= rv_bad_0 || rv_ok <= rv_ok_0 {
         t_putstr(&format!(
             "warp-prove: C0-DETECT STICKY NOT TESTED -- the re-verify was rate-limited \
              (verify-seq bad {}->{} ok {}->{}), so the second reading is the first one's \
              cache and proves nothing about stickiness.\n",
             rv_bad_0, rv_bad, rv_ok_0, rv_ok
         ));
+        false
     } else if sr2_bad == 1 && sr2_ok == 0 && vok_bad == vok_bad_0 && vok_ok > vok_ok_0 {
         t_putstr(&format!(
             "warp-prove: C0-DETECT STICKY PASS -- a SECOND real probe (verify-seq bad {} ok \
@@ -1165,12 +1190,14 @@ fn observe_rejection() {
              rejected-at pinned at {}.\n",
             rv_bad, rv_ok, vok_bad, vok_ok_0, vok_ok, at_bad
         ));
+        true
     } else if at_bad != at_bad_0 {
         t_putstr(&format!(
             "warp-prove: C0-DETECT STICKY FAIL(re-latched) -- `rejected-at` moved {}->{}, so \
              the ctx was re-detected rather than staying latched at first detection.\n",
             at_bad_0, at_bad
         ));
+        false
     } else if vok_bad > vok_bad_0 {
         t_putstr(&format!(
             "warp-prove: C0-DETECT STICKY FAIL(healed) -- a second real probe found the \
@@ -1178,13 +1205,15 @@ fn observe_rejection() {
              The flag is sticky but the probe is not: the two now disagree.\n",
             vok_bad_0, vok_bad, sr2_bad
         ));
+        false
     } else {
         t_putstr(&format!(
             "warp-prove: C0-DETECT STICKY FAIL -- a second real probe reads (bad {} ok {}), \
              want (1 0); verify-ok bad {}->{} ok {}->{} (want still / moved).\n",
             sr2_bad, sr2_ok, vok_bad_0, vok_bad, vok_ok_0, vok_ok
         ));
-    }
+        false
+    };
 
     // ===== F1: CAN A CLIENT BLIND ITS OWN DETECTOR? =====
     //
@@ -1204,17 +1233,27 @@ fn observe_rejection() {
     // F2 (UNKNOWN has no ctl representation) that reads as HEALTHY forever.
     //
     // Uses a THIRD connection so neither arm above is disturbed.
+    //
+    // THE SOURCE IS A BUFFER (C-0d Fable round F1). The probe pair under
+    // attack is minted as BUFFER resources now (`warp_hprobe_build`; the
+    // texture pair only where that mint fails), and a texture->buffer
+    // `RESOURCE_COPY_REGION` is not a legal copy: with a texture source the
+    // renderer would drop the copy on its own and this leg would read
+    // DEFENDED for the wrong reason -- a control the operation erases. So
+    // the attacker mints a buffer of the probe's own shape, fills its first
+    // 4 bytes with its own value, pushes them to the host, and copies 4
+    // BYTES over the guessed mark: the same command the server's own verify
+    // issues, exactly as the finding filed it.
     let f1 = warp_connect("f1/blind");
     let ctx_f1 = mint_ctx(f1, "f1/blind");
-    let (f1_bo, f1_res, _f1_va) = mint_sized_bo(f1, ctx_f1, "f1/blind");
-    let _ = f1_bo;
+    let (f1_bo, f1_res, f1_va) = mint_buffer_bo(f1, ctx_f1, "f1/blind");
     // Derive the probe ids from OUR OWN first resource id, exactly as an
     // attacker would -- do not hardcode, or the leg stops tracking the
     // server's allocation order and silently tests nothing.
     let guess_mark = f1_res.wrapping_sub(2);
     let guess_sent = f1_res.wrapping_sub(1);
     t_putstr(&format!(
-        "warp-prove: C0-F1 our first res {} -> guessing mark {} sentinel {}\n",
+        "warp-prove: C0-F1 our first res {} (a buffer) -> guessing mark {} sentinel {}\n",
         f1_res, guess_mark, guess_sent
     ));
     // Baseline: the ctx must be HEALTHY and the probe must WORK before the
@@ -1223,14 +1262,68 @@ fn observe_rejection() {
     let f1_sr0 = ctx_field_soft(f1, ctx_f1, "stream-rejected");
     let f1_vs0 = ctx_field_soft(f1, ctx_f1, "verify-seq");
     let f1_ok0 = ctx_field_soft(f1, ctx_f1, "verify-ok");
-    // Paint our own BO green, then copy IT over the guessed mark.
-    let mut sf: Vec<u32> = Vec::new();
-    subctx_preamble(&mut sf);
-    clear_stream(&mut sf, f1_res, 1, 0.0, 1.0, 0.0);
-    submit_stream(f1, ctx_f1, &sf, "f1 paint own bo");
+    // Fill our own buffer with the client's green, push it to the host
+    // (the fenced transfer verb; it decodes ahead of the submit that
+    // follows, one in-order controlq), then copy IT over the guessed mark.
+    unsafe { core::ptr::write_volatile(f1_va as *mut u32, 0xFF00_FF00) };
+    if !write_ctl(
+        f1,
+        &format!("ctx/{}/bo/{}/ctl", ctx_f1, f1_bo),
+        "transfer_to 0 0 0 0 4 1 1 0 0 0",
+    ) {
+        fail("f1: transfer_to of the attacker's 4 bytes");
+    }
     let mut sc2: Vec<u32> = Vec::new();
-    rcr_stream(&mut sc2, f1_res, guess_mark);
+    subctx_preamble(&mut sc2);
+    rcr_stream(&mut sc2, f1_res, guess_mark, 4);
     submit_stream(f1, ctx_f1, &sc2, "f1 overwrite the probe MARK");
+    // THE POSITIVE CONTROL (added when the source became a buffer): DEFENDED
+    // below is "verify-ok still advanced", which an attack that never landed
+    // satisfies just as well (aux#215 -- a negative assertion is satisfied
+    // by a broken fixture). The texture-era leg leaned on a one-time
+    // host-log measurement for that; the buffer form re-earns it IN-GUEST:
+    // copy the mark BACK into our own buffer (the same command the other
+    // way), read our buffer back, and require the client's green -- so the
+    // leg proves a client can WRITE the probe's mark AND READ it, exactly as
+    // the finding filed it, before it claims the repaint held. The
+    // readback rides the same in-order controlq behind both copies. If the
+    // mark reads PROBE_MARK the attack did not land and nothing after it is
+    // attributable; a stale SENTINEL means the readback itself never landed.
+    unsafe { core::ptr::write_volatile(f1_va as *mut u32, SENTINEL) };
+    let mut sc3: Vec<u32> = Vec::new();
+    rcr_stream(&mut sc3, guess_mark, f1_res, 4);
+    submit_stream(f1, ctx_f1, &sc3, "f1 read the probe MARK back into our buffer");
+    let f1_sig0 = ctx_field_soft(f1, ctx_f1, "fence-signaled");
+    if !write_ctl(
+        f1,
+        &format!("ctx/{}/bo/{}/ctl", ctx_f1, f1_bo),
+        "transfer_from 0 0 0 0 4 1 1 0 0 0",
+    ) {
+        fail("f1: transfer_from of our own buffer");
+    }
+    for _ in 0..200 {
+        if ctx_field_soft(f1, ctx_f1, "fence-signaled") > f1_sig0 {
+            break;
+        }
+    }
+    let f1_mark_seen = unsafe { core::ptr::read_volatile(f1_va as *const u32) };
+    let f1_landed = f1_mark_seen == 0xFF00_FF00;
+    if f1_landed {
+        t_putstr(&format!(
+            "warp-prove: C0-F1 ATTACK LANDED -- the mark read back through our own buffer as \
+             {:#010x}: a client can both WRITE and READ the probe's resources (the finding, \
+             re-measured in-guest on the buffer pair)\n",
+            f1_mark_seen
+        ));
+    } else {
+        t_putstr(&format!(
+            "warp-prove: C0-F1 INSTRUMENT -- the mark read back as {:#010x} through our own \
+             buffer (want the client's green {:#010x}; PROBE_MARK = the copy did not land, \
+             SENTINEL {:#010x} = the readback did not land), so a DEFENDED reading below would \
+             be vacuous.\n",
+            f1_mark_seen, 0xFF00_FF00u32, SENTINEL
+        ));
+    }
     let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(100));
     let _ = write_ctl(f1, &format!("ctx/{}/ctl", ctx_f1), "verify");
     let f1_sr = ctx_field_soft(f1, ctx_f1, "stream-rejected");
@@ -1244,17 +1337,22 @@ fn observe_rejection() {
     // the reading an UNKNOWN produces -- the round's own F2 lesson, not
     // applied here when it was learned. `verify-ok` is the only predicate
     // that means "asked and found healthy", so the baseline requires it.
-    let _ = if f1_vs0 == 0 || f1_sr0 != 0 || f1_ok0 == 0 {
+    let f1_defended = if f1_vs0 == 0 || f1_sr0 != 0 || f1_ok0 == 0 {
         t_putstr(
             "warp-prove: C0-F1 INSTRUMENT -- the ctx was not verifiably healthy BEFORE the \
              attack (needs verify-seq moved AND verify-ok moved AND stream-rejected 0), so \
              nothing after it is attributable.\n",
-        )
+        );
+        false
+    } else if !f1_landed {
+        // Reported above; an unlanded attack proves nothing about the defence.
+        false
     } else if f1_vs <= f1_vs0 {
         t_putstr(
             "warp-prove: C0-F1 INSTRUMENT -- the post-attack verify did not run (rate limit?), \
              so this says nothing.\n",
-        )
+        );
+        false
     } else {
         // Decided IN-GUEST off `verify-ok`, which advances ONLY on a healthy
         // verdict. Blinding shows up as verify-seq advancing while verify-ok
@@ -1267,17 +1365,35 @@ fn observe_rejection() {
                 "warp-prove: C0-F1 DEFENDED -- after a client wrote the probe's mark, the \
                  next verify still reached a HEALTHY verdict (verify-ok advanced). The \
                  per-verify repaint holds: corruption cannot outlive one verify.\n",
-            )
+            );
+            true
         } else {
             t_putstr(
                 "warp-prove: C0-F1 BLINDED -- verify-seq advanced but verify-ok did NOT, so \
                  the probe returned UNKNOWN after the client wrote its mark. The detector is \
                  blindable for the ctx's life and a dead ctx would read as healthy.\n",
-            )
+            );
+            false
         }
     };
 
-    t_putstr("warp-prove: C0-REJECT DONE\n");
+    // The completion token is a VERDICT now (F6): DONE iff every arm above
+    // passed; otherwise the first arm that did not, by name. The #240
+    // measurement (`ANSWER=`) is data, not an arm -- it has no pass/fail --
+    // and the host gate still requires it separately.
+    let incomplete = if !detect_pass {
+        Some("detect")
+    } else if !sticky_pass {
+        Some("sticky")
+    } else if !f1_defended {
+        Some("f1")
+    } else {
+        None
+    };
+    match incomplete {
+        None => t_putstr("warp-prove: C0-REJECT DONE\n"),
+        Some(arm) => t_putstr(&format!("warp-prove: C0-REJECT INCOMPLETE({})\n", arm)),
+    };
 
     unsafe {
         t_close(bad);
@@ -1286,11 +1402,12 @@ fn observe_rejection() {
     }
 }
 
-/// A stateless 1x1 `RESOURCE_COPY_REGION` (opcode 17, 13 payload dwords).
-/// Mirrors the server's own probe stream -- deliberately, since the F1
-/// question is whether a CLIENT can issue the same command against the
-/// server's resources.
-fn rcr_stream(st: &mut Vec<u32>, src_res: u32, dst_res: u32) {
+/// A stateless `RESOURCE_COPY_REGION` (opcode 17, 13 payload dwords) of a
+/// box `w` wide (BYTES on a buffer, texels on a texture), 1 high, 1 deep,
+/// origin to origin. Mirrors the server's own probe stream -- deliberately,
+/// since the F1 question is whether a CLIENT can issue the same command
+/// against the server's resources.
+fn rcr_stream(st: &mut Vec<u32>, src_res: u32, dst_res: u32, w: u32) {
     st.push(cmd0(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, VIRGL_CMD_RCR_SIZE));
     st.push(dst_res);
     st.push(0); // dst level
@@ -1302,9 +1419,39 @@ fn rcr_stream(st: &mut Vec<u32>, src_res: u32, dst_res: u32) {
     st.push(0); // src x
     st.push(0); // src y
     st.push(0); // src z
-    st.push(1); // src w
+    st.push(w); // src w
     st.push(1); // src h
     st.push(1); // src d
+}
+
+/// Mint a BUFFER BO of `PROBE_BUF_BYTES` -- the shape the server's probe
+/// pairs have -- and return `(bo_id, res_id, mapped_va)`.
+fn mint_buffer_bo(root: i64, ctx: u32, what: &str) -> (u32, u32, u64) {
+    let bo = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
+        Some(v) => v,
+        None => fail(&format!("{}: bo/new", what)),
+    };
+    let create = format!(
+        "create3d {} {} {} {} 1 1 1 0 0 0 {}",
+        PIPE_BUFFER, VIRGL_FORMAT_R8_UNORM, VIRGL_BIND_VERTEX_BUFFER, PROBE_BUF_BYTES, PROBE_BUF_BYTES
+    );
+    if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &create) {
+        fail(&format!("{}: buffer create3d", what));
+    }
+    let res = parse_field(&open_read_string(root, &format!("ctx/{}/bo/{}/info", ctx, bo)), "res")
+        .unwrap_or_else(|| fail(&format!("{}: info `res`", what))) as u32;
+    let map_fd = unsafe {
+        let p = format!("ctx/{}/bo/{}/map", ctx, bo);
+        t_open(root, p.as_ptr(), p.len(), T_OREAD)
+    };
+    if map_fd < 0 {
+        fail(&format!("{}: map open", what));
+    }
+    let va = unsafe { t_weft_map(map_fd as u64, 0) };
+    if va < 0 {
+        fail(&format!("{}: weft_map", what));
+    }
+    (bo, res, va as u64)
 }
 
 /// A readback that REPORTS instead of failing -- `resample` aborts the run

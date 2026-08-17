@@ -66,6 +66,12 @@ ctl                          # "virgl <0|1>\ncapsets N\ncapset <id> <ver> <len>\
                              #   (round-2 F9). The per-arm console lines are one-shot per ctx
                              #   [they were a ~480 line/s storm at the per-frame cadence], so this
                              #   is the only surviving evidence of the RATE)
+                             # + "probe-texture <n>\n"
+                             #   (C-0d Fable round F1: ctx mints whose #240 probe fell back to the
+                             #   TEXTURE pair because the BUFFER pair could not be minted, monotonic
+                             #   since boot. On such a ctx a verify's transfers and readback are
+                             #   blit jobs behind whatever the DEVICE has queued -- the exposure the
+                             #   buffer pair removes -- so nonzero here says some ctx carried it)
                              # test-mode ONLY adds: "abandoned <n>\nfenced-free <n>\n"
 caps                         # the RETAINED preferred capset blob, raw
 ctx/
@@ -89,9 +95,19 @@ ctx/
                              #     `stream-rejected 0` is equally satisfied by "healthy",
                              #     "never asked" and "asked, answer unknown" [#184, audit F2].
                              #     `verify` is REFUSED with EAGAIN while this ctx has fenced work
-                             #     outstanding: the probe rides the synchronous slot behind that
-                             #     work, and past SUBMIT_DEADLINE_MS the engine latches dead
-                             #     [audit F7])
+                             #     outstanding or the ctx is poisoned: the probe rides the
+                             #     synchronous slot, and past SUBMIT_DEADLINE_MS the engine latches
+                             #     dead [audit F7]. WHAT THAT GATE BOUNDS, exactly [C-0d Fable
+                             #     round F1]: it reads only this ctx's fence gauges, so it bounds
+                             #     waits on this ctx's OWN queue and nothing else. On the BUFFER
+                             #     probe pair every ctx gets when its mint succeeds, that is the
+                             #     whole exposure -- buffer transfers and copies are CPU-side on a
+                             #     tiled renderer, and the one way a GPU job lands on the probe's
+                             #     resources is this client copying over them itself [audit F1's
+                             #     measured attack], which its own gauges see. On the TEXTURE
+                             #     fallback [`probe-texture` on the global ctl] each step is a blit
+                             #     job behind whatever the DEVICE has queued, other clients' frames
+                             #     included, and no per-ctx gauge sees those)
                              #   + "fences-in-flight <n>\nfence-signaled <n>\n" (promoted at Warp-3)
                              #   + "bo-live <n>\nbo-peak <n>\nbo-bytes <n>\nbo-bytes-peak <n>\n"
                              #     (#204 census: backed now / high-water, count + bytes axes)
@@ -448,13 +464,28 @@ client cannot depend on a test-mode field — so `fences-in-flight` and
 submitted commands still executing? It has to be asked out-of-band, because
 the submit itself cannot fail — see the #240 caveat.
 
-Each ctx carries a `CtxProbe` of two 1x1 B8G8R8A8 resources minted at ctx
-create: `mark`, uploaded once with `PROBE_MARK`, and `sentinel`. One verify
-is seed / copy / read:
+Each ctx carries a `CtxProbe` of two server-owned resources minted at ctx
+create: `mark`, repainted with `PROBE_MARK` at the top of every verify, and
+`sentinel`. **The pair is minted as BUFFERS** (`warp_hprobe_build`:
+`PIPE_BUFFER`, `R8_UNORM`, one page each, the same mint as the compositor's
+C-4 health pair) **and falls back to two 1x1 B8G8R8A8 textures**
+(`warp_probe_build`) only where the buffer mint fails — counted on the global
+ctl as `probe-texture`. C-0d Fable round F1: the client probe stayed a
+texture pair after C-4 had measured that on a tiled renderer every texture
+transfer and readback is a blit job appended behind everything the *device*
+has queued, so client A's `verify` blocked the console for as long as client
+B's queue was deep — and the `verify` admission gate reads only A's own
+gauges, so it could not see it. Buffer transfers and copies are CPU-side
+there. One verify is seed / copy / read, in the form the pair's kind selects
+(`probe_upload` / `probe_copy_region` / `probe_readback` — one definition,
+shared with the compositor's health pair):
 
-1. write a per-verify token into `sentinel`'s backing, `TRANSFER_TO_HOST_3D`;
+1. write `PROBE_MARK` into `mark`'s backing and a per-verify token into
+   `sentinel`'s, `TRANSFER_TO_HOST_3D` each (a 4-byte box on a buffer, the
+   1x1 texel on a texture);
 2. `submit_3d_sync` one `VIRGL_CCMD_RESOURCE_COPY_REGION` (opcode **17**,
-   13 payload dwords) copying `mark` -> `sentinel`;
+   13 payload dwords) copying `mark` -> `sentinel` — 4 BYTES wide on a
+   buffer pair, 1 texel on a texture pair;
 3. `TRANSFER_FROM_HOST_3D` the sentinel and read the backing.
 
 Reading `PROBE_MARK` means the copy ran. Reading the token back means it did
@@ -486,9 +517,25 @@ hands those ids out from one shared counter, so a client computes
 client's own green. The defence is therefore not unreachability but the
 per-verify **repaint**: `mark` is re-uploaded at the top of every verify,
 inside the same dispatch as the copy and the readback, so corruption cannot
-outlive one probe. A probe that fails to mint leaves `probe: None`, and the
-ctx still serves — it just cannot be asked. Failing the ctx mint on a
-diagnostic's failure would hand clients a new way to be denied a context.
+outlive one probe. (The prover's `C0-F1` leg re-runs that attack against the
+buffer pair from a BUFFER source of the probe's own shape — a texture->buffer
+copy is not a legal copy, and the leg would have read DEFENDED for the wrong
+reason — and carries its own POSITIVE control: after the attack it copies the
+mark back into its own buffer and reads that back through the fenced verb,
+printing `C0-F1 ATTACK LANDED -- the mark read back … as 0xff00ff00` (a
+client can WRITE and READ the probe's resources) before DEFENDED may print;
+an unlanded attack is INSTRUMENT and the arm counts as not-defended, so
+`C0-REJECT DONE` cannot be reached on a vacuous defence.) A probe that fails to mint leaves `probe: None`, and the ctx still
+serves — it just cannot be asked. Failing the ctx mint on a diagnostic's
+failure would hand clients a new way to be denied a context.
+
+**Resource floor (C-0d Fable round F3).** The probe's two page mappings ride
+tapestryd's shared `weave_va_next` bump and are never rewound:
+`warp_probe_undo_guest` detaches the mapping (pages and handle freed) but the
+VA range stays consumed, so every ctx mint/destroy cycle burns 2 pages of the
+VA window on top of the weave allocations #171 tracks — the same
+monotonic-VA class, with a second, ctx-churn driver; #171's reclaim must
+cover these pages. The ~186-day bound stands, composed with #171's.
 
 Teardown follows the same leak posture as BOs, in both halves (audit F3
 found it matched in NEITHER): the **device** refs go on every path, exactly
@@ -624,7 +671,22 @@ becomes, by scanout mode:
   `blit_composed_pixels` composes from those pages (letterbox/crop
   shared with the weave path; `res_stale` stays TRUE -- the weave never
   saw GL frames). No orientation flip: the guest-visible transfer
-  contract is gallium top-down, same as a weave.
+  contract is gallium top-down, same as a weave. **THE EXPOSURE, stated
+  exactly (C-0d Fable round F2 [P1], OPEN until Warp-C C-6):** the
+  readback is issued on the CLIENT's dev_ctx and its response IS the
+  completion, so it waits for the frame -- i.e. for everything the
+  client has queued ahead of it, a length the client chooses -- on the
+  console's dispatch thread; it is taken for every BO the GPU arm cannot
+  compose (not `composable`, an unwitnessed import, a latched compositor
+  context, no 3D screen). `fence_poisoned` cannot guard it: the poison
+  is set from an `abandoned` tag that `reap_abandoned` produces on the
+  serve loop -- the loop that is blocked in the readback. Only READBACKS
+  carry this (a blit's SUBMIT_3D response is written at decode time,
+  before the GPU runs it; the egl-headless direct arm's flush is the
+  same class inside QEMU itself). Gating the arm on `fences-in-flight ==
+  0` was REJECTED: it would collapse the CPU safety net GPU-DESIGN 4.5.9
+  keeps to stale frames for every continuously-rendering client. The
+  fix is the fenced / bounded readback (C-6, GPU-DESIGN 4.5.13).
 - HOLD is refused in every GL arm (`E_OPNOTSUPP`): its contract is a
   DEFERRED device-visible flush and the GL arms have no deferral.
 
@@ -851,7 +913,7 @@ binary, ramfs md5 `207d2039…`).
 | malformed ctl verbs / non-UTF-8 | `E_INVAL` |
 | **stream the HOST refuses (vrend context error)** | **none on the write — it is reported as SUCCESS (#240).** The write returns the byte count, the fence retires, `fence-signaled` increments, `fences-in-flight` returns to 0, `poisoned` stays 0. Since C-0d it is DETECTABLE out-of-band: write `verify` to the ctx ctl, then read `stream-rejected`. See the caveat below |
 | `verify` on a ctx with no probe (its mint failed) | `Ok` on the write, but neither `verify-seq` nor `verify-ok` advances, `stream-rejected` is untouched, and the global `verify-unknown` does **not** move either (round-2 F9 — an unaskable question is not an unknown verdict, and counting it let a client drive that counter at 9P-write rate, since the per-ctx rate limit sits below this arm) |
-| `verify` while the ctx has fenced work outstanding **or is poisoned** | `E_AGAIN` (audit F7, corrected by round-2 F1). The probe rides the **synchronous** slot on the client's own ctx, so it queues behind that client's GL work, and past `SUBMIT_DEADLINE_MS` (500 ms) the engine latches `dead` — terminal, in the process that *is* the console. **Quiescent means `fences-in-flight 0` AND `poisoned 0`**: an abandoned fence takes its slot and zeroes *both* in-flight gauges while the GL work is by definition still unfinished after 30 s, so the poison flag is the only witness left — the same predicate `warp_fenced_admit` refuses on one lane over. **Caveat (round-3 F5): the gate reads the seam's own counter while the `fences-in-flight` key publishes the device-side one, and the seam's leads the ctl by up to one serve-loop pass** (a chain retiring inside the client's own dispatch empties the device slot immediately, but the per-ctx counter drops only when the serve loop next pumps fences). So the two can disagree briefly and a client can be refused while the published keys read quiescent. It fails safe — a spurious refusal, never a spurious admission — and `E_AGAIN` is retryable regardless |
+| `verify` while the ctx has fenced work outstanding **or is poisoned** | `E_AGAIN` (audit F7, corrected by round-2 F1). The probe rides the **synchronous** slot on the client's own ctx, and past `SUBMIT_DEADLINE_MS` (500 ms) the engine latches `dead` — terminal, in the process that *is* the console. **What the gate bounds (C-0d Fable round F1): waits on the caller's OWN queue, and only those** — it reads only the caller's gauges. On the **buffer** probe pair (`warp_hprobe_build`, every ctx whose mint succeeds) that is the whole exposure: buffer transfers and copies are CPU-side on a tiled renderer, so nothing in the verify waits for the GPU unless this client has put a job on the probe's own resources (audit F1's attack), which its gauges see. On the **texture** fallback (`probe-texture` on the global ctl) each step is a blit job behind whatever the *device* has queued — client B's frames included — which no per-ctx gauge can see; that is why the buffer pair is minted first. Before this round the client probe was a texture pair unconditionally, and this row's "queues behind that client's GL work" was false: it queued behind everyone's. **Quiescent means `fences-in-flight 0` AND `poisoned 0`**: an abandoned fence takes its slot and zeroes *both* in-flight gauges while the GL work is by definition still unfinished after 30 s, so the poison flag is the only witness left — the same predicate `warp_fenced_admit` refuses on one lane over. **Caveat (round-3 F5): the gate reads the seam's own counter while the `fences-in-flight` key publishes the device-side one, and the seam's leads the ctl by up to one serve-loop pass** (a chain retiring inside the client's own dispatch empties the device slot immediately, but the per-ctx counter drops only when the serve loop next pumps fences). So the two can disagree briefly and a client can be refused while the published keys read quiescent. It fails safe — a spurious refusal, never a spurious admission — and `E_AGAIN` is retryable regardless |
 | `verify` that runs but reaches no verdict (UNKNOWN) | `Ok`, `verify-seq` **advances**, `verify-ok` does **not**, `stream-rejected` untouched; the global `verify-unknown` increments. **`verify-seq` counts probes ADMITTED, not probes that concluded** (audit F2 — it is incremented before any device I/O). A reader tells "asked and healthy" from both "could not be asked" and "asked, no answer" only by requiring **`verify-ok`** to move; a bare `stream-rejected 0` is satisfied by all three (#184) |
 
 ## Known caveats / footguns
@@ -1279,7 +1341,17 @@ carries `comp-attach witnessed W refused R`. The GL adoption's consented BO
 is imported at `present-to` with a two-poison CHANGE witness (the BO's texel
 is the client's rendering, unknown to us) and revoked before its unref on
 every death path (`wbo_retire`, `present-to off`/replace, the surface's
-retire). Gate terms: GL leg — ≥ 2 per-surface `witnessed n/n` lines (the
+retire). **At most one import witness per ctx per compositor tick** (C-0d
+Fable round F5, the `verify_tick` shape on `WarpCtx.import_tick`): the
+witness is a dozen synchronous device ops on the SHARED compositor context
+(the attach, the health copy, up to two rounds of texture-sentinel
+readbacks), and a `present-to N bo` / `present-to off` / `present-to N bo`
+loop re-ran all of it at 9P-write rate. A second consent in the same tick is
+**deferred, never dropped** — `frame_tick` replays the import of whatever
+`present_to` names by then (`comp_replay_deferred_imports`); the winsys
+re-consents only when its front buffer changes, so the only legitimate
+second write in one frame is a resize storm, and coalescing those onto ticks
+costs it at most one tick of the readback arm. Gate terms: GL leg — ≥ 2 per-surface `witnessed n/n` lines (the
 battery's two surfaces) and none refused (the posture anchor carries no C-2c
 claim on GL); 2D leg — the import declared skipped and no per-surface line
 (the control); verb terms six/seven `WARP-COMPOSED ATTACH: witnessed K

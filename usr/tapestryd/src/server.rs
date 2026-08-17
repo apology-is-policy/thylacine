@@ -1171,6 +1171,14 @@ pub struct Comp {
     /// and without it silencing the storm would have destroyed the only
     /// evidence that UNKNOWN is happening at all.
     warp_verify_unknown: u32,
+    /// Client ctx mints whose #240 probe fell back to the TEXTURE pair
+    /// because the buffer pair could not be minted (C-0d Fable round F1),
+    /// monotonic since boot. On such a ctx a verify's transfers and readback
+    /// are GPU jobs behind whatever the DEVICE has queued -- the exposure the
+    /// buffer pair removes -- so a nonzero here says some ctx carried it.
+    /// Counted, not said per mint: a mint failure at ctx-create rate would
+    /// be a say storm. Read as `probe-texture` on the global ctl.
+    warp_probe_texture: u32,
     /// #210 custody mirror: parked reads + request-buffer residue across
     /// ALL conns, folded per tick by main's conns walk (the ctl reader's
     /// conn cannot see its siblings). fparked/rparked = pending fence /
@@ -1189,13 +1197,21 @@ pub struct Comp {
     pub w210_f_fid: u32,
 }
 
-/// A GPU-seam rendering context (Warp-2c). Owned by one conn; the DEVICE
-/// ctx id is its slot + 1 (reused only after the synchronous CTX_DESTROY).
 /// The #240 health probe's two server-owned resources (GPU-DESIGN 4.5.4b).
-/// `mark` is painted once at ctx create and never written again; `sentinel`
-/// is seeded per verify and then copied into. Both are 1x1 B8G8R8A8, so the
-/// whole probe moves 4 bytes each way.
+/// `mark` is repainted at the top of every verify; `sentinel` is seeded per
+/// verify and then copied into. Either a BUFFER pair (`buffer`: `PIPE_BUFFER`
+/// / `R8_UNORM`, 4 bytes copied by a byte-wide `RESOURCE_COPY_REGION`; the
+/// form every ctx gets when the mint succeeds -- Warp-C C-4 measured that a
+/// texture transfer or readback is a blit job on a tiled renderer, queued
+/// behind everything the DEVICE has in flight, while buffer transfers and
+/// copies are CPU-side there) or the 1x1 B8G8R8A8 TEXTURE pair (the
+/// fallback where a buffer pair cannot be minted, and the compositor's
+/// import-witness pair, whose sentinel must be a texture because slot and
+/// BO texels are copied into it). Either way the whole probe moves 4 bytes
+/// each way; the transfer form and the copy width follow `buffer`
+/// (`probe_upload` / `probe_readback` / `probe_copy_region`).
 struct CtxProbe {
+    buffer: bool,
     mark_res: u32,
     mark_fd: i64,
     mark_va: u64,
@@ -1205,6 +1221,8 @@ struct CtxProbe {
     size: u64,
 }
 
+/// A GPU-seam rendering context (Warp-2c). Owned by one conn; the DEVICE
+/// ctx id is its slot + 1 (reused only after the synchronous CTX_DESTROY).
 struct WarpCtx {
     owner_conn: u64,
     pub_id: u32,
@@ -1296,6 +1314,23 @@ struct WarpCtx {
     /// designs for, so it costs the intended use nothing, and it caps the
     /// whole box at MAX_WARP_CTXS probes per frame no matter what clients do.
     verify_tick: u64,
+    /// The compositor tick the last IMPORT WITNESS ran on for this ctx
+    /// (`comp_import_bo`: `comp_ctx_health` + `comp_witness_bo`, up to a
+    /// dozen synchronous device ops on the SHARED compositor context, the
+    /// witness readbacks on its texture sentinel among them). C-0d Fable
+    /// round F5: `present-to N bo` / `present-to off` / `present-to N bo`
+    /// re-ran the whole witness per cycle at 9P-write rate. The same shape
+    /// as `verify_tick`: one witness per ctx per tick; a second consent in
+    /// the same tick is DEFERRED to the next tick's replay (`frame_tick`),
+    /// never dropped -- the winsys re-consents only when its front buffer
+    /// changes, so a legitimate second write in one frame is a resize
+    /// storm, and coalescing those onto ticks costs it nothing.
+    /// `u64::MAX` = never (tick 0 is a real tick).
+    import_tick: u64,
+    /// A consent arrived while this tick's witness was already spent
+    /// (`import_tick == tick`); `frame_tick` replays the import of the
+    /// CURRENT `present_to` on the next tick and clears this.
+    import_pending: bool,
     /// One-shot latch per UNKNOWN arm (audit F5), the `build_diag_arms`
     /// shape. Both unknown arms used to `say!` unconditionally, and after
     /// F1 EVERY verify on a blinded ctx took one -- 8 ctxs at the per-frame
@@ -1470,6 +1505,7 @@ impl Comp {
             warp_ctl_wide_said: false,
             warp_gctl_wide_said: false,
             warp_verify_unknown: 0,
+            warp_probe_texture: 0,
             #[cfg(feature = "test-mode")]
             w210_fparked: 0,
             #[cfg(feature = "test-mode")]
@@ -1854,8 +1890,8 @@ impl Comp {
             return false;
         }
         // A buffer copy names BYTES: 4 of them (the texture form's 1x1
-        // texel is the same 4 bytes).
-        self.comp_copy_region(mark_res, sent_res, if buf { 4 } else { 1 }).is_ok()
+        // texel is the same 4 bytes) -- `probe_copy_region` keys the width.
+        self.probe_copy_region(COMPOSITOR_CTX, buf, mark_res, sent_res).is_ok()
     }
 
     /// The READ half: the sentinel back, true iff it holds the mark. On a
@@ -1878,11 +1914,50 @@ impl Comp {
 
     /// Read the first 4 bytes of a health resource back into its backing.
     fn health_readback(&mut self, buf: bool, res: u32) -> Result<(), Error> {
+        self.probe_readback(COMPOSITOR_CTX, buf, res)
+    }
+
+    /// The probe transfer + copy forms, keyed on the pair's kind and issued
+    /// on `dev_ctx` -- ONE definition for the compositor's health pair and
+    /// every client ctx's probe (C-0d Fable round F1: the compositor's
+    /// helpers hardcoded COMPOSITOR_CTX, so the client verify kept its own
+    /// texture-only transfers and stayed on the GPU queue after C-4 had
+    /// moved the compositor's off it). A 4-byte box at offset 0 on a
+    /// buffer; the 1x1 texel on a texture. All three ride the synchronous
+    /// slot, so they are ordered against each other and against every
+    /// client submit by construction (one controlq, one slot).
+    fn probe_upload(&mut self, dev_ctx: u32, buf: bool, res: u32) -> Result<(), Error> {
         if buf {
-            self.gpu.transfer_from_3d_box_sync(COMPOSITOR_CTX, res, 0, 0, 4, 1, 0, 0)
+            self.gpu.transfer_to_3d_box_sync(dev_ctx, res, 0, 0, 4, 1, 0, 0)
         } else {
-            self.gpu.transfer_from_3d_sync(COMPOSITOR_CTX, res, 1, 1, 4)
+            self.gpu.transfer_to_3d_sync(dev_ctx, res, 1, 1, 4)
         }
+    }
+
+    fn probe_readback(&mut self, dev_ctx: u32, buf: bool, res: u32) -> Result<(), Error> {
+        if buf {
+            self.gpu.transfer_from_3d_box_sync(dev_ctx, res, 0, 0, 4, 1, 0, 0)
+        } else {
+            self.gpu.transfer_from_3d_sync(dev_ctx, res, 1, 1, 4)
+        }
+    }
+
+    /// One `VIRGL_CCMD_RESOURCE_COPY_REGION` of the probe's 4 bytes, `src`
+    /// -> `dst`, submitted on `dev_ctx`'s synchronous slot: a box 4 BYTES
+    /// wide on a buffer pair, 1 texel on a texture pair (the same 4 bytes).
+    fn probe_copy_region(&mut self, dev_ctx: u32, buf: bool, src: u32, dst: u32) -> Result<(), Error> {
+        let mut st: [u32; 14] = [0; 14];
+        st[0] = (VIRGL_CCMD_RESOURCE_COPY_REGION & 0xff) | (VIRGL_CMD_RCR_SIZE << 16);
+        st[1] = dst; // dst handle; level, x, y, z = 0
+        st[6] = src; // src handle; level, x, y, z = 0
+        st[11] = if buf { 4 } else { 1 }; // src w
+        st[12] = 1; // src h
+        st[13] = 1; // src d
+        let mut bytes = [0u8; 56];
+        for (i, w) in st.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        self.gpu.submit_3d_sync(dev_ctx, &bytes)
     }
 
     /// The pair the health verify runs on: the buffer pair (`comp_hprobe`)
@@ -1900,37 +1975,17 @@ impl Comp {
     /// Upload the first 4 bytes of a health resource's backing to the host:
     /// a 4-byte box on a buffer, the 1x1 texel on a texture.
     fn health_upload(&mut self, buf: bool, res: u32) -> Result<(), Error> {
-        if buf {
-            self.gpu.transfer_to_3d_box_sync(COMPOSITOR_CTX, res, 0, 0, 4, 1, 0, 0)
-        } else {
-            self.gpu.transfer_to_3d_sync(COMPOSITOR_CTX, res, 1, 1, 4)
-        }
+        self.probe_upload(COMPOSITOR_CTX, buf, res)
     }
 
     /// One VIRGL_CCMD_RESOURCE_COPY_REGION of pixel (0,0) `src` -> (0,0)
-    /// `dst`, submitted on the compositor context's synchronous slot (the
-    /// #240 encoding, `warp_ctx_verify_probe`). Ordered after every earlier
+    /// `dst` (texture form), submitted on the compositor context's
+    /// synchronous slot -- the import witnesses' copy of a slot / BO texel
+    /// into the compositor's texture sentinel. Ordered after every earlier
     /// sync transfer and before every later one by construction: one
     /// controlq, one slot, each `.step` waits its response.
     fn comp_copy_px(&mut self, src: u32, dst: u32) -> Result<(), Error> {
-        self.comp_copy_region(src, dst, 1)
-    }
-
-    /// The same copy with a box `w` wide (texels on a texture, BYTES on a
-    /// buffer -- the compositor's health pair, Warp-C C-4), 1 high, 1 deep.
-    fn comp_copy_region(&mut self, src: u32, dst: u32, w: u32) -> Result<(), Error> {
-        let mut st: [u32; 14] = [0; 14];
-        st[0] = (VIRGL_CCMD_RESOURCE_COPY_REGION & 0xff) | (VIRGL_CMD_RCR_SIZE << 16);
-        st[1] = dst;
-        st[6] = src;
-        st[11] = w;
-        st[12] = 1;
-        st[13] = 1;
-        let mut bytes = [0u8; 56];
-        for (i, w) in st.iter().enumerate() {
-            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
-        }
-        self.gpu.submit_3d_sync(COMPOSITOR_CTX, &bytes)
+        self.probe_copy_region(COMPOSITOR_CTX, false, src, dst)
     }
 
     /// Witness one slot resource's import (C-2c's gate, 4.5.10, in the
@@ -2047,6 +2102,24 @@ impl Comp {
             );
             return;
         }
+        // One import witness per ctx per compositor tick (C-0d Fable round
+        // F5; the `verify_tick` shape): everything below is synchronous
+        // device work on the SHARED compositor context -- the attach, the
+        // health copy, up to two witness rounds with texture-sentinel
+        // readbacks -- and `present-to N bo` / `present-to off` in a loop
+        // drove all of it at 9P-write rate. A second consent in the same
+        // tick is DEFERRED, not dropped: `frame_tick` replays the import of
+        // whatever `present_to` names by then. Pinned BEFORE the device
+        // work, like `verify_tick`.
+        let tick = self.tick;
+        match self.wctx_mut(ctx_pub, conn) {
+            Some(c) if c.import_tick == tick => {
+                c.import_pending = true;
+                return;
+            }
+            Some(c) => c.import_tick = tick,
+            None => return,
+        }
         if self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res_id).is_err() {
             self.comp_attach_refused += 1;
             say!(
@@ -2141,6 +2214,35 @@ impl Comp {
             _ => return,
         };
         self.comp_detach_res(res_id);
+    }
+
+    /// Replay the import witnesses the per-tick bound deferred (C-0d Fable
+    /// round F5): for every ctx flagged `import_pending`, import whatever
+    /// its CURRENT consent names -- a consent replaced since the deferral is
+    /// the one that matters, and one withdrawn since leaves nothing to do.
+    /// Runs at the tick, so `import_tick != tick` holds again and one
+    /// witness per ctx runs; a consent that arrives later this same tick is
+    /// deferred once more. The flag is cleared unconditionally: a ctx that
+    /// died between the deferral and the tick is simply not here.
+    fn comp_replay_deferred_imports(&mut self) {
+        if !self.comp_ctx {
+            return;
+        }
+        let due: Vec<(u32, u64, Option<(usize, u32, u32)>)> = self
+            .warp_ctxs
+            .iter_mut()
+            .flatten()
+            .filter(|c| c.import_pending)
+            .map(|c| {
+                c.import_pending = false;
+                (c.pub_id, c.owner_conn, c.present_to)
+            })
+            .collect();
+        for (ctx_pub, conn, consent) in due {
+            if let Some((sn, _, bo)) = consent {
+                self.comp_import_bo(ctx_pub, conn, bo, sn);
+            }
+        }
     }
 
     /// Surface `n` (incarnation `gen`) is retiring: every ctx whose consent
@@ -4394,6 +4496,7 @@ impl Comp {
             self.geom_sig = self.geom_sig.wrapping_add(1);
             self.reconcile();
         }
+        self.comp_replay_deferred_imports();
         let vis: Vec<usize> = self.layout.visible_hosted().iter().map(|v| v.1).collect();
         for n in vis {
             let ev = Tevent {
@@ -5080,6 +5183,8 @@ impl Comp {
             verify_seq: 0,
             verify_ok: 0,
             verify_tick: 0,
+            import_tick: u64::MAX,
+            import_pending: false,
             verify_diag_arms: 0,
             verify_last: None,
             present_to: None,
@@ -5093,7 +5198,17 @@ impl Comp {
         // recoverable -- a ctx with no probe still serves, it just answers
         // "unknown" to every verify. Making a diagnostic's failure fail the
         // whole mint would hand a client a new way to be denied a context.
-        let probe = self.warp_probe_build(dev_ctx);
+        // The BUFFER pair first (C-0d Fable round F1 -- see
+        // `warp_hprobe_build`), the texture pair only where that mint fails,
+        // counted on the global ctl (`probe-texture`) rather than said: a
+        // per-mint line at ctx-create rate would be a say storm.
+        let mut probe = self.warp_hprobe_build(dev_ctx);
+        if probe.is_none() {
+            probe = self.warp_probe_build(dev_ctx);
+            if probe.is_some() {
+                self.warp_probe_texture = self.warp_probe_texture.saturating_add(1);
+            }
+        }
         if probe.is_none() {
             say!("tapestryd: warp ctx {} has no #240 health probe (mint failed)", pub_id);
         }
@@ -5115,6 +5230,17 @@ impl Comp {
 
     /// The same mint as a BUFFER resource of `size` bytes (`buffer` = true;
     /// Warp-C C-4, see `PIPE_BUFFER`) or the 1x1 render target (false).
+    ///
+    /// The mapping VA rides the shared `weave_va_next` bump and is NEVER
+    /// rewound: `warp_probe_undo_guest` detaches the mapping (the pages and
+    /// the handle are freed) but the VA range stays consumed, so every ctx
+    /// mint/destroy cycle burns 2 pages of tapestryd's VA window for its
+    /// probe pair on top of the weave allocations #171 already tracks (C-0d
+    /// Fable round F3, the same monotonic-VA class with a second, ctx-churn
+    /// driver; the reclaim #171 owes must cover these pages too). Note also
+    /// that the detach names `size` while the bump rounds it up to pages --
+    /// equal today (`size` is PAGE), and a probe of any other size would
+    /// need the detach to name the rounded length.
     fn warp_probe_res_kind(&mut self, dev_ctx: u32, size: u64, buffer: bool) -> Option<(u32, i64, u64)> {
         let fd = unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if fd < 0 {
@@ -5224,11 +5350,7 @@ impl Comp {
             }
         };
         unsafe { core::ptr::write_volatile(mark_va as *mut u32, PROBE_MARK) };
-        if self
-            .gpu
-            .transfer_to_3d_sync(dev_ctx, mark_res, 1, 1, 4)
-            .is_err()
-        {
+        if self.probe_upload(dev_ctx, false, mark_res).is_err() {
             // The mark never reached the host, so a verify could not tell
             // "the copy ran" from "the copy ran and copied garbage".
             // Better no probe than a probe that answers wrongly.
@@ -5245,6 +5367,7 @@ impl Comp {
             return None;
         }
         Some(CtxProbe {
+            buffer: false,
             mark_res,
             mark_fd,
             mark_va,
@@ -5255,13 +5378,19 @@ impl Comp {
         })
     }
 
-    /// The compositor's HEALTH-verify pair (Warp-C C-4): the same mark /
-    /// sentinel discipline as `warp_probe_build`, minted as BUFFER resources
-    /// (see `PIPE_BUFFER`) so that the per-period verify's uploads, copy and
-    /// readback never enqueue GPU work behind the client's frames. Distinct
-    /// from `comp_probe`, which stays a TEXTURE pair because the C-2c import
-    /// witnesses copy slot textures into it. `None` = could not be built;
-    /// the texture pair then carries the verify (correct, and slower).
+    /// The BUFFER-pair probe (Warp-C C-4): the same mark / sentinel
+    /// discipline as `warp_probe_build`, minted as BUFFER resources (see
+    /// `PIPE_BUFFER`) so that a verify's uploads, copy and readback never
+    /// enqueue GPU work behind anyone's frames. The compositor's HEALTH pair
+    /// (`comp_hprobe`; distinct from `comp_probe`, which stays a TEXTURE pair
+    /// because the C-2c import witnesses copy slot textures into it) and,
+    /// since the C-0d Fable round (F1), EVERY client ctx's #240 probe: on a
+    /// texture pair the client verify's transfers and readback ran on the
+    /// synchronous slot as blit jobs behind everything the DEVICE had queued
+    /// -- client A's verify blocked the console behind client B's frames,
+    /// while the `verify` admission gate reads only the CALLER's fence
+    /// gauges. `None` = could not be built; the caller falls back to the
+    /// texture pair (correct, and slower) and counts it.
     fn warp_hprobe_build(&mut self, dev_ctx: u32) -> Option<CtxProbe> {
         let size = PAGE;
         let (mark_res, mark_fd, mark_va) = self.warp_probe_res_kind(dev_ctx, size, true)?;
@@ -5273,16 +5402,13 @@ impl Comp {
             }
         };
         unsafe { core::ptr::write_volatile(mark_va as *mut u32, PROBE_MARK) };
-        if self
-            .gpu
-            .transfer_to_3d_box_sync(dev_ctx, mark_res, 0, 0, 4, 1, 0, 0)
-            .is_err()
-        {
+        if self.probe_upload(dev_ctx, true, mark_res).is_err() {
             self.warp_probe_res_undo(dev_ctx, sent_res, sent_va, sent_fd, size);
             self.warp_probe_res_undo(dev_ctx, mark_res, mark_va, mark_fd, size);
             return None;
         }
         Some(CtxProbe {
+            buffer: true,
             mark_res,
             mark_fd,
             mark_va,
@@ -5357,7 +5483,7 @@ impl Comp {
 
     fn warp_ctx_verify_probe(&mut self, ctx_pub: u32, conn: u64) -> Option<bool> {
         let tick = self.tick;
-        let (dev_ctx, mark_res, mark_va, sent_res, sent_va) = {
+        let (dev_ctx, buf, mark_res, mark_va, sent_res, sent_va) = {
             let c = self.wctx(ctx_pub, conn)?;
             // One probe per ctx per compositor tick (see `verify_tick`). A
             // second write in the same frame is answered from the state the
@@ -5394,7 +5520,7 @@ impl Comp {
                 }
             }
             let p = c.probe.as_ref()?;
-            (c.dev_ctx, p.mark_res, p.mark_va, p.sent_res, p.sent_va)
+            (c.dev_ctx, p.buffer, p.mark_res, p.mark_va, p.sent_res, p.sent_va)
         };
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
             c.verify_seq += 1;
@@ -5430,49 +5556,25 @@ impl Comp {
         // copy, and the readback all run inside a single dispatch, on one
         // in-order controlq, so no client submit can be published between
         // them. It is a virtio-gpu command, so it lands even on a latched ctx.
+        //
+        // The transfer form and the copy width follow the pair's kind
+        // (`probe_upload` / `probe_copy_region` / `probe_readback`): on the
+        // BUFFER pair every step is CPU-side on a tiled renderer; on the
+        // texture fallback each is a blit job behind whatever the device has
+        // queued (C-0d Fable round F1 -- the exposure the buffer pair
+        // removes, gauged by `probe-texture` on the global ctl).
         unsafe { core::ptr::write_volatile(mark_va as *mut u32, PROBE_MARK) };
-        if self
-            .gpu
-            .transfer_to_3d_sync(dev_ctx, mark_res, 1, 1, 4)
-            .is_err()
-        {
+        if self.probe_upload(dev_ctx, buf, mark_res).is_err() {
             return None;
         }
         unsafe { core::ptr::write_volatile(sent_va as *mut u32, token) };
-        if self
-            .gpu
-            .transfer_to_3d_sync(dev_ctx, sent_res, 1, 1, 4)
-            .is_err()
-        {
+        if self.probe_upload(dev_ctx, buf, sent_res).is_err() {
             return None;
         }
-        let mut st: [u32; 14] = [0; 14];
-        st[0] = (VIRGL_CCMD_RESOURCE_COPY_REGION & 0xff) | (VIRGL_CMD_RCR_SIZE << 16);
-        st[1] = sent_res; // dst handle
-        st[2] = 0; // dst level
-        st[3] = 0; // dst x
-        st[4] = 0; // dst y
-        st[5] = 0; // dst z
-        st[6] = mark_res; // src handle
-        st[7] = 0; // src level
-        st[8] = 0; // src x
-        st[9] = 0; // src y
-        st[10] = 0; // src z
-        st[11] = 1; // src w
-        st[12] = 1; // src h
-        st[13] = 1; // src d
-        let mut bytes = [0u8; 56];
-        for (i, w) in st.iter().enumerate() {
-            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
-        }
-        if self.gpu.submit_3d_sync(dev_ctx, &bytes).is_err() {
+        if self.probe_copy_region(dev_ctx, buf, mark_res, sent_res).is_err() {
             return None;
         }
-        if self
-            .gpu
-            .transfer_from_3d_sync(dev_ctx, sent_res, 1, 1, 4)
-            .is_err()
-        {
+        if self.probe_readback(dev_ctx, buf, sent_res).is_err() {
             return None;
         }
         let got = unsafe { core::ptr::read_volatile(sent_va as *const u32) };
@@ -5500,7 +5602,7 @@ impl Comp {
                 .map(|p| p.mark_va);
             match mv {
                 Some(va) => {
-                    if self.gpu.transfer_from_3d_sync(dev_ctx, mark_res, 1, 1, 4).is_err() {
+                    if self.probe_readback(dev_ctx, buf, mark_res).is_err() {
                         None
                     } else {
                         Some(unsafe { core::ptr::read_volatile(va as *const u32) })
@@ -7386,8 +7488,11 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "probe-parked {}\nprobe-freed {}\nverify-unknown {}\n",
-                    comp.warp_probe_parked, comp.warp_probe_freed, comp.warp_verify_unknown
+                    "probe-parked {}\nprobe-freed {}\nverify-unknown {}\nprobe-texture {}\n",
+                    comp.warp_probe_parked,
+                    comp.warp_probe_freed,
+                    comp.warp_verify_unknown,
+                    comp.warp_probe_texture
                 ),
             );
             // Round-3 F4: where the FIXED-size prefix ends. Re-set below in
@@ -8161,15 +8266,27 @@ impl Conn {
             //
             // Audit F7: refused while this ctx has fenced work outstanding.
             // The probe rides the SYNCHRONOUS `.step` slot on the client's
-            // own ctx, so it queues behind that client's GL work; past
-            // SUBMIT_DEADLINE_MS the engine latches `dead`, which is
-            // terminal for the whole compositor -- the process that IS the
-            // console. A client could reach that with nothing but a ctx and
-            // a deep queue. E_AGAIN (not E_IO) is the honest code: the ctx
-            // may be perfectly healthy, the question is merely unanswerable
-            // right now, and an ERROR on the write is what keeps that
-            // distinct from "asked and healthy" without the client having
-            // to infer it from an unmoved counter.
+            // own ctx; past SUBMIT_DEADLINE_MS the engine latches `dead`,
+            // which is terminal for the whole compositor -- the process that
+            // IS the console. A client could reach that with nothing but a
+            // ctx and a deep queue. E_AGAIN (not E_IO) is the honest code:
+            // the ctx may be perfectly healthy, the question is merely
+            // unanswerable right now, and an ERROR on the write is what
+            // keeps that distinct from "asked and healthy" without the
+            // client having to infer it from an unmoved counter.
+            //
+            // WHAT THIS GATE BOUNDS, exactly (C-0d Fable round F1). It reads
+            // only the CALLER's gauges, so it can only ever bound waits on
+            // the caller's OWN queue. On the BUFFER probe pair that is the
+            // whole exposure: every step is CPU-side on a tiled renderer,
+            // and the one way a job can sit on the probe's resources is the
+            // client copying over them itself (audit F1's measured attack)
+            // -- its own work, which this gate sees. On the TEXTURE fallback
+            // (`probe-texture` on the global ctl) each step is a blit job
+            // behind whatever the DEVICE has queued, client B's frames
+            // included, and no per-ctx gauge can see those: that is why the
+            // buffer pair is minted first and the texture pair only where
+            // it cannot be.
             //
             // ROUND-2 F1: `fences_in_flight` ALONE admitted the
             // maximum-hazard state. `reap_abandoned` takes the fenced slot
@@ -9021,6 +9138,23 @@ impl Conn {
                     }
                 }
                 if !done {
+                    // THE EXPOSURE, exactly (C-0d Fable round F2 [P1]; OPEN
+                    // until Warp-C C-6, GPU-DESIGN 4.5.13): this readback is
+                    // issued under the CLIENT's ctx and its response IS the
+                    // completion, so it waits for the frame -- for everything
+                    // the client has queued ahead of it, a length the client
+                    // chooses -- on the console's dispatch thread. It runs
+                    // for every BO the blit arm cannot compose (not
+                    // `composable`, unwitnessed import, latched compositor
+                    // ctx, no 3D screen). `fence_poisoned` cannot guard it:
+                    // the poison is set from an `abandoned` tag that
+                    // `reap_abandoned` produces on the serve loop -- the loop
+                    // blocked right here. Only READBACKS carry this (a blit's
+                    // SUBMIT_3D response is written at decode time, before
+                    // the GPU runs it). Gating this arm on `fences_in_flight
+                    // == 0` was REJECTED: it would turn the CPU safety net
+                    // 4.5.9 keeps into stale frames for every continuously-
+                    // rendering client. C-6 = the fenced / BOUNDED readback.
                     comp.cost_arm = Cost::PresentComposedCpu;
                     let t0 = Instant::now();
                     let pulled = comp

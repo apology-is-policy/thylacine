@@ -728,6 +728,24 @@ proc lc_run_expect_hardfail {cmd expected failpat} {
     }
 }
 
+# Like lc_run_expect_hardfail, but `failre` is a REGEXP, so several red lines
+# can share the one arm (a prover's own `FAIL --` token AND its scenario-level
+# `INCOMPLETE(<arm>)` verdict, C-0d Fable round F6). Same direction as the -ex
+# sibling: a spurious match turns a pass into a fail, never the reverse. The
+# matched text is reported, since the pattern alone no longer says which line.
+proc lc_run_expect_hardfail_re {cmd expected failre} {
+    global lc_cmd_timeout timeout
+    lc_send $cmd
+    set timeout $lc_cmd_timeout
+    expect {
+        -ex $expected     { lc_step "saw: output-of: $cmd" }
+        -re $failre       { lc_fail "hard-fail line \[$expect_out(0,string)\] during 'output-of: $cmd'" }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during 'output-of: $cmd'" }
+        timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$expected\] during 'output-of: $cmd'" }
+        eof               { lc_fail "unexpected EOF during 'output-of: $cmd'" }
+    }
+}
+
 # Log in over the console. Reaching the shell banner proves the kernel received
 # every keystroke (the LS-1 regression) and that login authenticated.
 proc lc_login {user pass} {
