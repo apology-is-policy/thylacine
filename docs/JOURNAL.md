@@ -142,8 +142,8 @@ canonical→raw→canonical prepends the next line"), copied per-pts by PTY-2c, 
 the stated premise that "no current consumer flips mid-line". The premise was
 falsified by the one consumer that flips around every foreground job. Both
 ldiscs now DELIVER on ICANON-clear and touch nothing otherwise
-(`c62eb738` scripture, PTY-DESIGN "Mode writes deliver, never discard"; then the
-impl): the F1 hazard stays closed because canonical→raw delivers, so nothing is
+(`c62eb738` scripture, PTY-DESIGN "Mode writes deliver, never discard"; the impl
+`ccb597b8`): the F1 hazard stays closed because canonical→raw delivers, so nothing is
 stranded, and I-20's byte conservation now holds across a mode write. A
 delivery into a full ring is a real drop under a new counter
 (`rx_drop_modeflush`, the #95 rule). Not built: an explicit flush verb — pouch's

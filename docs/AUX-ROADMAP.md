@@ -443,6 +443,14 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
 
 **Landed (newest first, 2026-08-17 back to aux#240):**
 
+- `c62eb738` + `ccb597b8` -- pty-4's burned retry ROOT-CAUSED by the 11173762
+  probe on its first miss and FIXED: both ldiscs zeroed the canonical assembly
+  on every mode write (LS-8b F1 "TCSAFLUSH"), so type-ahead between a job's
+  last output and ut's PROMPT-mode re-arm was cooked-echoed then dropped,
+  partially (`sle` gone, `ep 30` ran). Now a write clearing ICANON DELIVERS the
+  pending line (Plan 9 rawon / Linux n_tty); new `rx_drop_modeflush` counter;
+  `cons.cook_mode_flip_delivers`, ptyfs selftest e1-e3, and a DETERMINISTIC
+  type-ahead leg in pty-4 (3/3 red under the old posture).
 - `93a91c6c` -- the `c8ab2744` audit close (Fable 5 round: 0 P0 / 1 P1 / 1 P2 /
   2 P3, ALL pre-existing three lines above the audited arm). F1 [P1]: both
   class scans (terminate + STOP) now gate every hit per note on
@@ -481,8 +489,10 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    the second unconstructed state found by sweeping for the class
    (`bug_delivery_time_sigign_discard_uncovered.md`); its own chunk (same
    file as the close above).
-2. **pty-4's burned retry** -- instrumented, not diagnosed; wait for the next
-   miss and read `build/ls-ci-pty-4.attemptN.steps`.
+2. **AUDIT ROUND OWED on `ccb597b8`** (kernel cons.c + ptyfs are on the LS-8 +
+   ptyfs audit rows; agent spawning needs the operator's yes -- ask, as for
+   c8ab2744). Also owed at some point: an explicit flush verb (POSIX TCSAFLUSH
+   / tcflush) -- pouch's TCSETS/SW/SF now all behave like TCSANOW.
 3. **#237 stays open and is now sharper**: the phenotype answers SIG_DFL
    SIGPIPE for its own Procs; the NATIVE `pipe` note still carries no latch,
    so a native program that writes to a closed pipe with no handler and no fd
