@@ -57,9 +57,16 @@ LEDGER="${THYLA_SELFCOMPACT_DIR:-$HOME/.claude/thyla-selfcompact}/log.tsv"
 #
 # Never fatal, never noisy on stderr: a logging failure must not change the
 # decision, and this hook's whole contract is that it fails OPEN.
+# The pane IS the session id. The ledger is SHARED by main/aux/vault, and the
+# first real rows it produced were three stops in 24 seconds with incoherent
+# context jumps -- two of them another track's, indistinguishable from mine.
+# An interleaved log with no writer is not evidence, it is noise that looks
+# like evidence; the self-compaction side already stamps `pane=` for exactly
+# this reason, so this uses the same identity rather than inventing one.
 led() {
-    { printf '%s\tstop\t%s\t%s\t%s\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${2:-?}" "$1" "${3:-}" >> "$LEDGER"; } 2>/dev/null || true
+    { printf '%s\tstop%s\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${TMUX_PANE:+:$TMUX_PANE}" \
+        "${2:-?}" "$1" "${3:-}" >> "$LEDGER"; } 2>/dev/null || true
 }
 
 IN=$(cat 2>/dev/null) || { led silent-no-stdin; exit 0; }
