@@ -1128,6 +1128,7 @@ void test_exec_from_spoor_bss_only_text_icache_synced(void) {
 void test_execve_load_into_detached(void);
 void test_execve_load_into_rejects_dirty(void);
 void test_execve_failed_load_leaves_target_drainable(void);
+void test_exec_native_rejects_dynamic_linux(void);
 
 void test_execve_load_into_detached(void) {
     struct Proc *p = make_proc();
@@ -1261,6 +1262,76 @@ void test_execve_failed_load_leaves_target_drainable(void) {
 
     // And the partial target tears down cleanly (addrspace_unref extincts on a
     // live VMA list, so reaching the end of this test IS the assertion).
+    vma_drain_in(nas);
+    addrspace_unref(nas);
+    spoor_clunk(exe);
+    drop_proc(p);
+}
+
+// =============================================================================
+// A native exec of a dynamic Linux binary is refused, AND its diagnostic runs
+// =============================================================================
+
+// Closes the exec_say coverage gap the extinction round (5de6093f F2) named --
+// but the round's premise was half wrong. It claimed BOTH exec_report_fail and
+// exec_say were "compile-verified and never executed" because "no boot log
+// contains an exec: line". exec_report_fail is in fact covered: the drainable
+// test above drives a W+X-union failure and emits a real exec: line, and has
+// since 2026-08-01 (e47bfa31), 17 days before the round. exec_say alone was
+// genuinely never run -- the dynamic-Linux-binary / dynamic-PT_INTERP rejects
+// in exec_load_body had no test and appear in no boot log.
+//
+// The reject path: an ELF carrying PT_INTERP makes elf_load return
+// ELF_LOAD_HAS_INTERP, and when the interp names a Linux loader (brand_contains
+// "ld-musl") elf_brand_hint answers LINUX_LIKELY, so exec_load_body's native
+// arm calls exec_say and fails the load. The behaviour (dynamic binary -> -1)
+// is worth a regression on its own; running exec_say is the #244-class value --
+// a diagnostic whose only prior witness was that it compiled.
+//
+// A unit test cannot read the console ring, so this asserts the BEHAVIOUR (the
+// reject) and, by reaching the branch at all, proves exec_say executes without
+// faulting. It does not assert the emitted string.
+void test_exec_native_rejects_dynamic_linux(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // Two phdrs: a valid PT_LOAD, then a PT_INTERP naming a musl loader. The
+    // interp string sits at phdr[1].p_offset (build_elf packs it at 0x2000 --
+    // inside the EXEC_ELF_HEADER_MAX=16 KiB header read, so elf_brand_hint sees
+    // it).
+    u32 flags[2] = { PF_R | PF_X, PF_R };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+
+    static const char kInterp[] = "/lib/ld-musl-aarch64.so.1";
+    ph[1].p_type   = PT_INTERP;
+    ph[1].p_flags  = PF_R;
+    // p_offset was set to PAGE_SIZE*2 by build_elf; write the interp there.
+    for (size_t i = 0; i < sizeof(kInterp); i++)
+        g_elf_blob[ph[1].p_offset + i] = (u8)kInterp[i];
+    ph[1].p_filesz = sizeof(kInterp);   // includes the NUL
+    ph[1].p_memsz  = 0;                  // PT_INTERP is not loaded
+
+    g_blob_dev_size = size;
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x1D7A11ull;
+    exe->qid.vers = 1;
+
+    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    TEST_ASSERT(nas != NULL, "addrspace_alloc");
+
+    u64 entry = 0, sp = 0;
+    // The native exec rejects the dynamic binary (elf_load HAS_INTERP), and on
+    // the way out exec_say runs the LINUX_LIKELY diagnostic. Reaching this
+    // assertion means exec_say did not fault.
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
+                                  &entry, &sp),
+                   -1, "a dynamic Linux binary is refused by a native exec");
+    // Nothing was published into the address space.
+    TEST_EXPECT_EQ((u64)nas->vma_count, 0ull, "no segment mapped on the reject");
+
     vma_drain_in(nas);
     addrspace_unref(nas);
     spoor_clunk(exe);

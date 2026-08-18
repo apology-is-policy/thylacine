@@ -407,6 +407,7 @@ void test_exec_stack_is_sparse(void);
 void test_execve_load_into_detached(void);
 void test_execve_load_into_rejects_dirty(void);
 void test_execve_failed_load_leaves_target_drainable(void);
+void test_exec_native_rejects_dynamic_linux(void);
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
@@ -1954,6 +1955,9 @@ struct test_case g_tests[] = {
     { "execve.load_into_rejects_dirty", test_execve_load_into_rejects_dirty, false, NULL },
     { "execve.failed_load_leaves_target_drainable",
                                        test_execve_failed_load_leaves_target_drainable,
+                                                                           false, NULL },
+    { "exec.native_rejects_dynamic_linux",
+                                       test_exec_native_rejects_dynamic_linux,
                                                                            false, NULL },
     { "exec.setup_multi_segment",      test_exec_setup_multi_segment,      false, NULL },
     { "exec.setup_lifecycle_round_trip",
