@@ -8,6 +8,7 @@
 #   tools/warp-host.sh smoke     # boot to 'Thylacine boot OK' (2D device)
 #   tools/warp-host.sh bench     # llvmpipe GLQuake baseline (paced + unpaced x2)
 #   tools/warp-host.sh capset    # virtio-gpu-gl-pci + egl-headless capset probe
+#   tools/warp-host.sh venus     # Warp-6 V-0 gate: is capset id=4 (VENUS) reachable? (test + control leg)
 #   tools/warp-host.sh prove     # Warp-2 gate: /warp-prove on the virgl device
 #   tools/warp-host.sh composed  # Warp-C C-2b + C-2c + C-3 gate: the composed screen's arm + the witnessed imports + the composed pixels read back, GL vs 2D (both legs)
 #   tools/warp-host.sh reject    # #240: is a REJECTED command stream observable in-guest?
@@ -221,6 +222,59 @@ capset)
         echo "CAPSET GATE: VERIFIED"
     else
         echo "CAPSET GATE: UNVERIFIED (need BOOT-capset PASS + a GET_CAPSET line)"
+        exit 1
+    fi
+    ;;
+venus)
+    # Warp-6 V-0 (GPU-DESIGN section 12): is Venus REACHABLE on this host?
+    #
+    # Two legs differing in the DEVICE DECLARATION alone -- that difference IS
+    # the control, the `composed` verb's shape. A test-only leg would pass
+    # equally well against a host that advertises capset 4 unconditionally, or
+    # against a guest printing a line it did not derive from the device, so the
+    # control leg is not a bonus: it is what makes the test leg mean anything.
+    #
+    # Asserted in BOTH directions -- present WITH the declaration, ABSENT
+    # without. A one-directional check ("the test leg saw id=4") is satisfied
+    # by a host that always advertises it.
+    #
+    # venus requires blob AND hostmem together; QEMU refuses the device
+    # otherwise and names the requirement itself. Declaring less does not
+    # degrade to "no venus" -- it fails to REALISE, a different outcome that
+    # must not be read as a negative result.
+    ctl="$REPO_ROOT/build/warp-venus-control.log"
+    tst="$REPO_ROOT/build/warp-venus-test.log"
+    ssh "$HOST" "${RPOLLS}bash $RREPO/tools/warp/boot-probe.sh vencontrol virtio-gpu-gl-pci egl-headless" |
+        tee "$ctl" || true
+    ssh "$HOST" "${RPOLLS}bash $RREPO/tools/warp/boot-probe.sh venustest 'virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M' egl-headless" |
+        tee "$tst" || true
+    "$0" venus-verdict "$ctl" "$tst"
+    ;;
+venus-verdict)
+    # The venus gate's verdict, as its OWN verb so the discrimination can be
+    # sabotage-tested without booting anything. `venus` boots then calls this;
+    # tools/test-venus-verdict.sh drives it against crafted logs. One
+    # implementation, two callers -- a verdict that only ever runs inside a
+    # 8-minute two-boot leg is a verdict nothing can afford to test.
+    ctl="${2:?usage: warp-host.sh venus-verdict <control.log> <test.log>}"
+    tst="${3:?usage: warp-host.sh venus-verdict <control.log> <test.log>}"
+    echo "== venus verdict =="
+    vfail=0
+    grep -q "BOOT-vencontrol: PASS" "$ctl" || { echo "CONTROL leg did not boot -- no verdict"; vfail=1; }
+    grep -q "BOOT-venustest: PASS"  "$tst" || { echo "TEST leg did not boot -- no verdict"; vfail=1; }
+    if grep -qE "gpu capset\[[0-9]+\] id=4" "$ctl"; then
+        echo "CONTROL leg saw capset id=4 -- the declaration is NOT what produces it"
+        vfail=1
+    fi
+    grep -qE "gpu capset\[[0-9]+\] id=4" "$tst" || {
+        echo "TEST leg saw no capset id=4 -- Venus NOT reachable on this host"
+        vfail=1
+    }
+    if [ "$vfail" -eq 0 ]; then
+        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on, absent WITHOUT, both legs booting"
+        grep -hE "gpu capset\[|num_capsets" "$ctl" "$tst"
+    else
+        echo "VENUS GATE: UNVERIFIED"
         exit 1
     fi
     ;;

@@ -4,7 +4,7 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive test-classify check-arc-gates check-production smp-gate idle-gate check-floor test-a72 test-fault verify-kaslr run run-tcg gdb specs help
+.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive test-classify check-arc-gates check-production smp-gate idle-gate check-floor test-a72 test-fault verify-kaslr test-venus-verdict run run-tcg gdb specs help
 
 all:
 	@tools/build.sh all
@@ -105,6 +105,13 @@ test-fault:
 # structurally blind to a slide that never moves. N=10 boots.
 verify-kaslr:
 	@tools/verify-kaslr.sh
+
+# Warp-6 V-0: the venus gate's verdict, without booting. `warp-host.sh venus`
+# costs two ~220 s remote guest boots, which makes its verdict the least
+# affordable thing in the tree to test by running -- and #245 is the standing
+# lesson that a checker reachable only by hand is a checker that rots. Instant.
+test-venus-verdict:
+	@tools/test-venus-verdict.sh
 
 run:
 	@tools/run-vm.sh
@@ -210,6 +217,9 @@ help:
 	@echo "               the authoritative set (it was 'seven' against eight)."
 	@echo "  verify-kaslr — #245: I-16's only runtime witness -- the slide must vary"
 	@echo "               across N=10 boots; a single boot cannot see a fixed slide."
+	@echo "  test-venus-verdict — Warp-6 V-0: the venus gate discriminates (no boot)."
+	@echo "               Proves capset id=4 present WITH venus=on and ABSENT without,"
+	@echo "               plus the positive control -- the real verdict verb, sabotaged."
 	@echo "  run        — launch a dev VM (interactive UART)"
 	@echo "  gdb        — launch dev VM with GDB stub on :1234, halted at entry"
 	@echo "  specs      — run all TLA+ specs under specs/"

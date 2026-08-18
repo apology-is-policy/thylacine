@@ -1238,6 +1238,90 @@ configuration-invariant text, because Kaua's cell-diff renderer fragments
 changed strings across updates (the `prowl.exp` precedent — never assert
 on a diffed status line).
 
+## Warp-6 V-0 -- the Venus gating probe (as-built 2026-08-18)
+
+The Venus arc opens with a probe because `GPU-DESIGN.md` §9.1 makes it binding:
+everything up to "the winsys compiles" can be done locally, **nothing can be
+run** locally, and that must be settled *before* code. V-0 answers "is Venus
+reachable at all?" for a host, and nothing structural lands until it passes.
+
+### What the gate asserts
+
+`tools/warp-host.sh venus` boots the remote GL host **twice**, differing in the
+device declaration alone:
+
+| leg | device | expected |
+|---|---|---|
+| control | `virtio-gpu-gl-pci` | capsets `id=1`, `id=2`; **no `id=4`** |
+| test | `virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M` | additionally **`id=4`** (VENUS, `max_version=0`, `max_size=160`) |
+
+VERIFIED requires **both** legs to boot **and** the discrimination to hold in
+**both directions**. The control leg is not a courtesy: a one-directional check
+("the test leg saw `id=4`") is satisfied by a host that advertises the capset
+unconditionally, and by a guest printing a line it did not derive from the
+device. It is the `composed` verb's shape (§Warp-C C-2b), for the same reason.
+
+No guest code was needed. `probe_capsets` (`usr/tapestryd/src/gpu.rs`) already
+enumerates to `GPU_CAPSET_ENUM_MAX = 8` and emits one
+`tapestryd: gpu capset[N] id=.. max_version=.. max_size=..` line per index;
+V-0 only had to read them with a control beside them.
+
+### venus is not an independent switch
+
+QEMU refuses `venus=on` and `venus=on,blob=on` alike, and **names the
+requirement**:
+
+```
+qemu-system-aarch64: -device virtio-gpu-gl-pci,venus=on: venus requires enabled blob and hostmem options
+```
+
+Only `venus=on,blob=on,hostmem=<size>` realises (`max_hostmem` defaults to
+256 MiB). This is a **realise failure, not a degradation** -- a caller that
+declares less does not get "GL without Venus", it gets no device. Callers must
+not read that outcome as a negative Venus result.
+
+### The render server: named, absent, and not fatal to this rung
+
+`libvirglrenderer.so.1.9.0` on the Debian 13 hosts carries the Venus
+implementation (`VK_MESA_venus_protocol`, `vkr_ring_thread`,
+`vkr_dispatch_vkWaitVirtqueueSeqnoMESA`) and names
+`/usr/libexec/virgl_render_server` as `RENDER_SERVER_EXEC_PATH`. **That binary is
+in no Debian package** -- `apt-cache search virgl` offers `libvirglrenderer1`,
+`-dev`, and `virgl-server`, and the last is the unrelated *vtest* server.
+`GPU-DESIGN.md` §9.2 describes the render server as Venus-only-by-construction,
+which reads as "no server, no Venus".
+
+The capset is advertised regardless, so venus initialises **in-process** far
+enough to answer a capset query. **This does not prove a Venus context can be
+created** -- that is V-0b (`CTX_CREATE` with `capset_id=4`), which settles the
+question empirically rather than by inference from either direction.
+
+Instrument note: `nm -D --defined-only` reports **zero** venus/vkr symbols
+because they are internal to the library. An export census is the wrong
+instrument here and would have read as absence.
+
+### Hosts
+
+| host | Vulkan ICD | verified to | role |
+|---|---|---|---|
+| **thyla-pi** (RPi 400, KVM) | `V3D 4.2.14.0` / V3DV Mesa -- real hardware | **guest-observed `id=4`**, end to end | certification |
+| **thyla-gl** (Parallels on the Mac) | `llvmpipe` / lavapipe -- software | library + device properties only | *candidate* fast-iteration |
+
+thyla-gl is deliberately **not** claimed as working: it has the same QEMU
+10.0.11 and a venus-carrying virglrenderer, but has never booted a guest with
+`venus=on`. Promoting it is V-0's remaining half.
+
+### Testing the verdict without booting
+
+The verdict is its own verb -- `tools/warp-host.sh venus-verdict <ctl> <tst>` --
+so `tools/test-venus-verdict.sh` can drive **the real implementation** against
+crafted logs. Two boots at ~220 s each make this gate the least affordable thing
+in the tree to test by running it, and #245 is the standing lesson that a checker
+reachable only by hand rots. Five cases: the clean pair VERIFIES (the positive
+control, without which four negative cases are satisfied by a verdict that always
+fails), plus one-variable sabotages for each failure arm -- control-also-sees-4,
+test-sees-no-4, and either leg not booting. `make test-venus-verdict`.
+
 ## Tests
 
 Kernel: `pci.walk_caps_shm` (6 discriminating vectors incl. the

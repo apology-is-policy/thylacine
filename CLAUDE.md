@@ -955,6 +955,18 @@ tools/test-fault.sh canary_smash    # one variant       (-v for log dumps)
 tools/verify-kaslr.sh               # 10 boots          (or: make verify-kaslr)
 tools/verify-kaslr.sh -n 25 -v      # more boots, print each offset
 
+# Warp-6 V-0 (the Venus gate). `warp-host.sh venus` boots the remote GL host
+# TWICE -- once with `venus=on,blob=on,hostmem=256M` and once WITHOUT -- and
+# passes only if capset id=4 (VENUS) is present in the first and ABSENT in the
+# second. The control leg is not a bonus: a one-directional check is satisfied
+# by a host that advertises the capset unconditionally. venus needs blob AND
+# hostmem together, and QEMU refuses the device otherwise rather than degrading.
+# test-venus-verdict drives the SAME verdict verb against crafted logs, so the
+# discrimination is testable without paying two ~220 s boots (#245: a checker
+# reachable only by hand rots).
+WARP_HOST=thyla-pi WARP_ACCEL=kvm tools/warp-host.sh venus   # the gate (2 boots)
+tools/test-venus-verdict.sh         # its verdict, no boot  (or: make test-venus-verdict)
+
 # ARMv8.0 floor guard (#91). The SOURCE + BINARY checks run automatically at the
 # tail of every ramfs bake; these are the extras. `check-floor` adds the big pool
 # payloads (/clade, /goroot, ~6 min); `test-a72` is PORTABILITY.md section 3's

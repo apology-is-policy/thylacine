@@ -2593,6 +2593,29 @@ budgeted object — with MMIO pages behind it instead of RAM. **The seam carries
 shape now; the implementation lands in the Venus chunk.** Also required and
 currently broken: `PciDev::claim`'s eager map-every-BAR policy (§3).
 
+**The host requirement chain, MEASURED on thyla-pi 2026-08-18 (Warp-6 V-0), not
+derived.** QEMU 10.0.11 refuses `venus=on` and `venus=on,blob=on` alike, and
+**names the requirement itself**: `venus requires enabled blob and hostmem
+options`. Only `venus=on,blob=on,hostmem=256M` realises. So hostmem is not a
+late refinement of the Venus chunk — **the device will not come up without it**,
+which fixes V-2's position in the ladder rather than leaving it to judgement.
+`max_hostmem` defaults to 256 MiB.
+
+**The render-server finding, recorded because it read as a blocker and is not
+one.** The host's `libvirglrenderer.so.1.9.0` carries the Venus implementation
+(`VK_MESA_venus_protocol`, `vkr_ring_thread`,
+`vkr_dispatch_vkWaitVirtqueueSeqnoMESA`) and names
+`/usr/libexec/virgl_render_server` as `RENDER_SERVER_EXEC_PATH` — **and Debian
+ships that binary in no package at all** (`apt-cache search virgl` offers only
+`libvirglrenderer1`, `-dev`, and `virgl-server`, which is the unrelated *vtest*
+server). §9.2 says the render server "is Venus-only by construction", which
+reads as "no server, no Venus". The capset was advertised anyway, so venus
+initialised **in-process** far enough to answer a capset query. **That is not
+proof a context creates** — hence V-0b, which asks `CTX_CREATE` and settles it
+empirically instead of by inference. Note also that an export census is the
+wrong instrument here: `nm -D --defined-only` finds ZERO vkr/venus symbols
+because they are internal, and would have read as absence.
+
 ---
 
 ## 7. What we are NOT building
@@ -2666,6 +2689,21 @@ host outright.
 Everything up to and including "the guest driver is written and the winsys
 compiles" can be done locally. **Nothing can be *run* locally.** This must be
 settled before code starts, not discovered after — hence fork **F1**.
+
+**Settled for Venus too, 2026-08-18 (Warp-6 V-0), and better than this section
+feared.** "Venus additionally requires a Linux host outright" is true and we now
+have **two**, both on QEMU 10.0.11 with a venus-carrying virglrenderer:
+
+| host | Vulkan ICD | verified to | role |
+|---|---|---|---|
+| **thyla-pi** (RPi 400, KVM) | **`V3D 4.2.14.0` / V3DV Mesa** — real hardware | **guest-observed capset id=4**, end to end | the certification host |
+| **thyla-gl** (Parallels on the Mac) | `llvmpipe` / lavapipe — software | library + device properties only | *candidate* fast-iteration host |
+
+The pairing mirrors the GL arc: iterate where it is quick, certify where the
+silicon is real. **thyla-gl is deliberately NOT claimed as working** — it has
+been checked to the property/`strings` level and has never booted a guest with
+`venus=on`, so promoting it is V-0's remaining half, not an assumption to
+inherit.
 
 ### 9.2 virglrenderer's OpenGL path is not hardened against a hostile guest
 
@@ -2828,7 +2866,7 @@ scope shifts with them.
 | **Warp-4** | present integration: `SET_SCANOUT` of a 3D resource (Direct), readback fallback (Composed) — **LANDED** (4a+4b `ec2bd8ad` the mutual-adoption protocol, both halves + fork patch 0007; 4c the gate: the launcher auto-detect + `tools/warp-host.sh quake` — both arms in one run, the `scanout direct N GL res R` switch live on thyla-gl; as-built `docs/reference/149-warp.md` §Warp-4) | **GLQuake on virgl** — **measured: ~3 fps aggregate at 1280×800 (the mechanism gate is met). PREMISE CORRECTED 2026-08-10: the 192.8 anchor was macOS/HVF and does not transfer (its own Warp-1 row said so); the same-host llvmpipe band is 2.4–5.9 fps at 640×480, so ~3 fps at 3.3× the pixels sits INSIDE the software band — #196 now asks stall-vs-compute (the `decomp` verb: per-arm unpaced figures + qemu CPU attribution), not "why 20–25× under"**. Findings ledger: #195 (GL-host capture), #197 (console ^C owner-only), #198 (demo-end context break), #199 (caught notes never interrupt blocking syscalls) |
 | **Warp-5** | the focused audit; I-45 enumerated; reference docs | Fable-5-max round closed |
 | **Warp-C** | **GPU composition (§4.5; designed 2026-08-13, RESERVED)** — the compositor's own virgl context; the screen becomes a host-side 3D resource; per-frame `VIRGL_CCMD_BLIT` composition replacing the readback; chrome becomes a damage-uploaded texture; the I-40 drain. Sub-chunks: **C-0** the two gating probes (§4.5.4 P1 cross-context blit with a pixel-asserting positive control, P2 cross-context ordering) — *nothing structural lands until both pass* — plus **C-0d**, the #240 detector (§4.5.4b: the sentinel stamp behind a sticky `stream-rejected` on the ctx ctl), which is a PREREQUISITE of P1b rather than a parallel nicety: a WITH-attach retry that silently does nothing is unreadable while a refusal reports success; **C-1 LANDED 2026-08-16** the spec extension (async present + drain; `drain_skipped` + a P2 ordering counterexample **per direction**, since the exclusion is symmetric) BEFORE impl — TLC-green, additive by measurement (the six pre-existing cfgs reproduce 5413 exactly with `ALLOW_COMPOSE = FALSE`), and it surfaced a C-2/C-3 obligation the prose had not: **the D1 recycle gate does not survive the composed path unchanged**, because tapestryd runs ONE host resource per surface and a present's terminal CQE stops meaning "free" once the compositor is a second reader; **C-2** compositor ctx + 3D screen (**owes the attach verb — P1b's authority-conferral point — and the blit/fill exclusion C-1 named, whose mechanism is decided at §4.5.8: one host resource PER SLOT for software surfaces, a fence for GL ones**); **C-3** blit composition + chrome-as-texture; **C-4** retire the readback path **where GL is available** (never delete it -- 4.5.9: `virgl=0` on the default dev device and there is no virtio-gpu at all on bare metal, so the CPU path is the UNIVERSAL one and permanent); **C-5** focused audit (an I-40 surface + a new cross-context authority path). **LANDED C-2a/2b/2c/2d + C-3 + C-4 (2026-08-16/17; §4.5.9–4.5.12)**; **C-5 CLOSED `27207c78`** (2026-08-17, 0 P0 + 0 P1 + 1 P2 + 2 P3 + 1 self-audit P3, all fixed) -- this row read "C-5 owed" for a day after it closed, which is the arc-state marker a fresh session reads first; **C-6** (the fenced DEFERRED compositor readback, §4.5.13, added after this ladder was written) **LANDED `24e6753d`** with its round closed `c8c83348` (1 P0 + 3 P1 + 3 P2 + 3 P3, DIRTY) and the owed follow-up closed CLEAN `93f660ed` (0 P0 + 1 P1 + 1 P2 + 3 P3). **The Warp-C arc is therefore COMPLETE and Warp-6 is next.** | **the composed path reaches direct-path parity** — i.e. the #215 43% is gone at 1280×800, measured by the same two-method protocol, with `ls-gfx*` byte-identical and tearing-freedom held under P2 stress. **Standing at C-4 (thyla-pi, V3D, `decomp gl`)**: the 43% (1.75×) is gone — composed/direct **1.22× on the no-readback `dbus-gl` lane (93.1 vs 112.7 fps, 1.9 ms/frame; ~0.5 ms of it server-side)** and 1.19× on egl-headless (37.6 vs 44.8, the backend's readback drain); `ls-gfx*` byte-identical (LS-CI 36/36 through C-3 and C-4); P2 measured 0/500 (C-0), the fenced form unbuilt. Full parity is not claimed: the residual is the compose blit's own GPU time + vrend's blitter setup, outside the server |
-| **Warp-6** | Venus: hostmem mapping (§6.2), `vn_renderer_thylacine`, blobs — **now also owes the §4.5.5 generalization: the blob-mediated capset-neutral blit, extending Warp-C's mechanism without reshaping its model** | a Vulkan prover in-guest |
+| **Warp-6** | **Venus — OPENED 2026-08-18; the V-0 gating probe PASSED (§6.2, §9.1).** Hostmem mapping (§6.2), `vn_renderer_thylacine`, blobs — **also owes the §4.5.5 generalization: the blob-mediated capset-neutral blit, extending Warp-C's mechanism without reshaping its model**. Sub-chunks: **V-0** the gating probe — §9.1 is binding, so *nothing structural lands until a host is proven to RUN Venus*, the Warp-C C-0 precedent. **MEASURED on thyla-pi**: the guest enumerates **capset `id=4` (VENUS), max_size 160 B**, and the **control one variable away** — same tree, same fixtures, same boot path, device declared without `venus=on` — enumerates only `id=1` + `id=2`. Both arms `BOOT: PASS` (220 s / 225 s), so the third capset is attributable to the declaration and not to one arm failing differently. No guest change was needed: `probe_capsets` already enumerates to `GPU_CAPSET_ENUM_MAX=8` and logs each `id`. **REMAINING HALF: promote thyla-gl** (checked only to the library/property level — never booted with `venus=on`); **V-0b** `CTX_CREATE` with `capset_id=4` — the rung that settles the render-server question EMPIRICALLY rather than by inference (§6.2: the binary is absent from every Debian package, yet the capset was advertised, so venus initialised in-process far enough to *answer a capset query* — which is not the same as creating a context); **V-1** blobs (`RESOURCE_CREATE_BLOB` + the blob object model — F2 sequenced them here, and Venus's ring IS a blob); **V-2** hostmem (§6.2: the shmem capability `cfg_type=8` shmid 1; owner-minted, client-mappable, revocable, budgeted BAR-subrange maps at the host-dictated cache attribute) **+ the `PciDev::claim` eager-map-every-BAR policy §6.2 names as currently broken** — pulled forward as a dependency of this chunk, not deferred. **V-2 is not orderable later: QEMU refuses to realise the device without hostmem**; **V-3** `vn_renderer_thylacine` (~1–1.5 kLOC per §2.3) + the shmem ring (head/tail/status cachelines; §2.4 — no syncobj object model, no timeline primitive, no dma-fence graph is owed); **V-4** the §4.5.5 capset-neutral blit, whose obligation Warp-C was built to preserve; **V-5** the Vulkan prover in-guest (the gate); **V-6** the focused audit — **V-2 maps MMIO pages into a client VA, a NEW kernel memory-authority path**, so it is audit-bearing on I-45 and I-32 independently of the rest of the arc | a Vulkan prover in-guest |
 | **Warp-7+** | RPi: the v3d leaf driver on the MENAGERIE substrate — own charter, F3's posture built in | own gate |
 
 Parallel and independent (the charter says so explicitly): **lavapipe** —

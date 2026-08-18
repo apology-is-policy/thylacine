@@ -22,6 +22,94 @@ needed the operator.
 
 ---
 
+## 2026-08-18 — Warp-6 opens on a probe, and the blocker that wasn't
+
+Warp-C closed, so Warp-6 (Venus) is next. `GPU-DESIGN.md` §9.1 makes the first
+move non-negotiable: *"Nothing can be **run** locally. This must be settled
+before code starts, not discovered after."* So the arc opens with a gating
+probe, the Warp-C C-0 shape, and `vn_renderer_thylacine` waits.
+
+**The measurement, with its control.** Two boots on thyla-pi differing in the
+device declaration alone. Control (`virtio-gpu-gl-pci`): capsets `id=1`, `id=2`.
+Test (`+venus=on,blob=on,hostmem=256M`): additionally **`id=4` — VENUS,
+`max_version=0`, `max_size=160`**. Both legs `BOOT: PASS` (215–225 s under KVM),
+which is the part that makes it evidence: had the control merely failed to boot,
+the missing capset would have been attributable to that instead of to the
+declaration.
+
+**No guest change was needed, and I nearly bought a boot to learn that.**
+`probe_capsets` (`usr/tapestryd/src/gpu.rs`) already enumerates to
+`GPU_CAPSET_ENUM_MAX = 8` and prints one `gpu capset[N] id=..` line per index.
+My first grep filtered them out — the pattern was `GET_CAPSET`, and the lines
+say `gpu capset[`. The evidence was on disk in the logs I had already produced.
+A pattern that matches the wrong thing returns a confident partial answer, not
+an error; the tell was that a boot which *did* enumerate three capsets reported
+nothing about what the third one was.
+
+**QEMU documented its own requirement better than I would have.** `venus=on`
+alone is refused, and so is `venus=on,blob=on`, both with
+`venus requires enabled blob and hostmem options`. Only the triple realises.
+That is a **realise failure, not a degradation** — a caller declaring less does
+not get "GL without Venus", it gets no device, and must not read that as a
+negative Venus result. It also settles V-2's position in the ladder by
+measurement rather than judgement: hostmem cannot be a late refinement of a
+chunk whose device will not come up without it.
+
+**The blocker that wasn't, and why it is written down anyway.** The host's
+`libvirglrenderer.so.1.9.0` carries Venus (`VK_MESA_venus_protocol`,
+`vkr_ring_thread`, `vkr_dispatch_vkWaitVirtqueueSeqnoMESA`) and names
+`/usr/libexec/virgl_render_server` as `RENDER_SERVER_EXEC_PATH` — **and Debian
+ships that binary in no package**; `virgl-server` is the unrelated *vtest*
+server. §9.2 calls the render server Venus-only-by-construction, which reads as
+"no server, no Venus", and for about ten minutes I had a dead arc. The capset is
+advertised regardless, so venus initialises in-process at least far enough to
+answer a capset query.
+
+The discipline point is what I did **not** then write. "Venus works on
+thyla-pi" is not what was measured. What was measured is that venus init reaches
+capset reporting; whether a *context* creates is a different claim, and the
+render server could still bite there. That became V-0b (`CTX_CREATE` with
+`capset_id=4`) — a rung that settles it empirically instead of by inference in
+either direction.
+
+Instrument note worth keeping: `nm -D --defined-only` finds **zero** venus
+symbols in that library, because they are internal. Had I run the export census
+first and stopped there, I would have concluded Venus was absent from a library
+that plainly contains it.
+
+**The measurement was then made into a gate, because a hand-run measurement is
+not one.** `warp-host.sh venus` runs both legs and asserts the discrimination in
+**both directions** — present with the declaration, absent without. One
+direction is not enough: "the test leg saw `id=4`" is satisfied by a host that
+advertises the capset unconditionally, and by a guest printing a line it never
+derived from the device.
+
+Then the gate's own problem: it costs two ~220 s remote boots, which makes its
+verdict the least affordable thing in the tree to test by running it — and #245
+is three days old and says exactly what happens to a checker reachable only by
+hand. So the verdict is its own verb (`venus-verdict`), and
+`tools/test-venus-verdict.sh` drives **the real implementation** against crafted
+logs: five cases, four one-variable sabotages plus the clean pair. The clean
+case is not decoration — without it, four negative cases are satisfied by a
+verdict that always fails. `5/5, DISCRIMINATES`, wired to `make
+test-venus-verdict` and into CLAUDE.md's command block, which #245 measured to be
+the property that actually prevents rot.
+
+**Open, and named as open.** thyla-gl (Parallels, lavapipe) has the same QEMU
+10.0.11 and a venus-carrying virglrenderer but has **never booted with
+`venus=on`** — it is checked to the property level only, and promoting it is
+V-0's remaining half. It matters beyond tidiness: if it works, Venus has a fast
+local-ish iteration loop; if not, the whole arc iterates over the Pi's SD card.
+
+The V-0..V-6 ladder is now in GPU-DESIGN §12. V-2 carries the `PciDev::claim`
+eager-map-every-BAR fix that §6.2 has called "currently broken" since Warp-2 —
+pulled forward as a dependency of the chunk rather than deferred again — and is
+flagged audit-bearing on I-45 and I-32 *independently of the rest of the arc*,
+because mapping MMIO pages into a client VA is a new kernel memory-authority
+path and not a graphics detail.
+
+---
+
 ## 2026-08-18 — A reroute from a blocking primitive to a dropping one, and the budget I left behind
 
 The audit `extinction.c` owed — it is a declared trigger surface and #246 put a
