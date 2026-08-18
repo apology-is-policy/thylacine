@@ -35,7 +35,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-08-16
+updated: 2026-08-18
 ---
 ## The surface
 
@@ -108,6 +108,49 @@ rather than broken, so they are not mirrors. 14 + 2 = the 16 files under
 
 So the corrected four-file list still names one file that cannot break and
 misses fourteen that can. That is [[seam-boot-banner-coupdate-list]].
+
+### A fourth class the taxonomy above does not have: the mirror nothing runs
+
+The three failure classes enumerated above are *phantom* (named, never
+existed), *inert* (exists, matches nothing), and *document* (matches, but only
+goes stale). The implied fourth is the healthy one — the **program**, which
+"breaks silently and immediately".
+
+Measured 2026-08-18 (main#245): **two of the fifteen mirrors were programs that
+nothing invoked.** `tools/test-fault.sh` and `tools/verify-kaslr.sh` had no
+Makefile target, no gate, no CI step, and no caller anywhere in `tools/` — the
+only references to either were two *comments* in sibling scripts. Established
+by a census over `Makefile` + `tools/` + `.github` with a control at each end
+(`ci-smp-gate.sh` resolved to a target; `test-fault.sh` resolved to prose).
+
+So they hold a program's **update obligation** — reword a literal and they must
+be co-updated, exactly as `mirrors` says — while having **no failure behaviour
+at all**. They do not break loudly, and unlike a document they do not even
+become visibly wrong to a reader: nothing executes them, so the mismatch is
+never evaluated. That is strictly worse than the document class, which at least
+misleads someone who reads it.
+
+**Why this matters to THIS note specifically.** The mirror rule is sound and
+unaffected: it answers "who must be co-updated", and an unrun program must
+still be co-updated. But it is easy to read a fifteen-member derived mirror set
+as *defence in depth* — fifteen consumers that would catch a botched reword.
+For two of those fifteen that was false, and would have stayed false
+indefinitely. **A mirror set bounds the co-update obligation; it does not
+bound the detection latency, and only the members something actually runs
+contribute to detection at all.**
+
+This is the same shape as [[seam-extinction-line-unserialized]] one level up: a
+contract on a *value* is silent about its *delivery*, and here a contract on the
+*set of readers* is silent about whether any of them ever *reads*.
+
+Closed for these two on 2026-08-18 by main `55c5d2f8`, which gave each a
+Makefile target and — the load-bearing half — an entry in `CLAUDE.md`'s
+"Build + test commands" block. Both were *already* named in `CLAUDE.md`, twice
+each, the same count as `test-a72` and `check-v80-floor`, which did not rot; the
+difference was that the orphans appeared only in this surface's own prose,
+listed as things that would BREAK, never as commands to run. Presence in the
+auto-loaded file is not the anti-rot property; presence in its **command block**
+is.
 
 ### The mirror set is now DERIVED, not declared
 
