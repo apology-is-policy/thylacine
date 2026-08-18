@@ -556,3 +556,28 @@ gave up.
 [[chg-2026-08-02-console-sweep]]; [[chg-2026-08-16-cons-writer-set]] the
 kernel-emitter writer role, the mode-flip ordering rule, and the holdback
 strand.
+
+## `cons_diag_line_emit` returns whether the unit LANDED (2026-08-18)
+
+The push is **all-or-nothing**: a full ring drops the whole unit and folds it
+into `g_cons_tx.dropped`, indistinguishable from any other drop. The emit
+therefore reports success, and **any caller that spends a one-shot latch, a
+dedupe bit, or a bounded budget on the line MUST check it and spend only on a
+`true`**.
+
+This is not hypothetical tidiness. `viv_report_unserved` consumed its dedupe
+bit and its 96-line budget *before* the emit, and under back-pressure from a
+guest writing `/dev/cons` the drop is **deterministic, not racy** -- the
+room-wait wakes on ONE free byte and refills, so the ring sits at capacity and
+a 107-byte all-or-nothing unit never fits. Each dropped line was marked seen
+forever with the budget one lower, so the census silently under-reported while
+still reading as a measurement.
+
+**The general rule, because the trap is in the swap and not in either
+primitive:** a diagnostic rerouted from `uart_puts` (spins per byte, always
+emits) to `cons_diag_line` (never spins, may drop) changes the failure mode of
+every budget spent around it. Re-examine the accounting whenever the emit
+primitive changes, not just the call.
+
+`kernel/proc.c`'s callers were checked and are fine -- they spend no latch and
+no budget, so a drop there loses one line and marks nothing.

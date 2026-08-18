@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-03
-updated: 2026-08-15
+updated: 2026-08-18
 ---
 ## Purpose
 
@@ -341,3 +341,28 @@ synthetic file with no filesystem behind it.
 
 [[moc-kernel-execution]] · [[inv-i36]] · [[sub-kernel-elf]] ·
 [[sub-kernel-image]] · [[sub-kernel-fault]] · [[sub-kernel-proc]]
+
+## exec's failure diagnostics: one unit, and the cap is GLOBAL (2026-08-18)
+
+`exec_report_fail` / `exec_say` emit ONE `cons_diag_line` unit each, under a
+single global cap (`EXEC_FAIL_MAX_REPORTS`), spent only on a line that landed.
+
+Two things about that are load-bearing:
+
+- **Not raw `uart_*`.** They were five lock-free calls apiece, which takes
+  neither the console writer role nor the TX ring lock -- so they bypassed the
+  extinction ring claim and could land bytes inside a peer's `EXTINCTION:`
+  line. The old comment defended the raw loop as "non-blocking, must not
+  acquire the console role"; `cons_diag_line` satisfies both (it never spins
+  and takes no role), so that reason no longer selects `uart_puts`.
+- **The cap is GLOBAL, never per-Proc.** Every `SYS_SPAWN_*` thunk reaches exec
+  through here and spawn carries no capability gate, so an unprivileged Proc
+  can drive this path in a loop with a malformed ELF. A per-Proc bound is
+  re-armed by spawning again, which IS the attack. This was the worse of the
+  two EL0-triggerable console sites -- it had no dedupe and no cap at all while
+  the one that got fixed first had both.
+
+**Coverage caveat, stated because it is easy to assume otherwise**: no test
+drives this path. `test_exec.c` asserts the SUCCESS case (`rc == 0`) and no
+boot log in the tree contains an `exec: ` line. The conversion is
+compile-verified only.
