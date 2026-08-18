@@ -655,7 +655,15 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    its line-discard eats characters of the NEXT line. Aux's own line
    (notes/job control/PTY): reproduce, root-cause (ut's hosted-session poll set
    / notes-fd wake / ldisc post order), fix, adopt the scenario into LS-CI.
-   Likely the same mechanism as item 11 (a poll parked inside a dev9p wait).
+   CONFIRMED (read-only, 2026-08-18) the same mechanism as item 11: the hosted
+   ut's fd 0 is a non-QTPOLL pts slave, `dev9p_poll.c:288` returns POSIX
+   always-ready for it, so the hosted ut is functionally blocked in `read(fd0)`
+   = a dev9p Tread at idle (its poll returns instantly). The pts ISIG posts
+   `interrupt`; the dev9p read does not unwind (item 11) -> the ^C lands with
+   the next typed line and the deferred `editor.reset()` eats it. Item 11's
+   note-interruptible-wait fix (the #90 frame-atomic 9P reader) closes item 10;
+   do NOT fix it separately. NB: option B (pts/cons-ldisc-only unwind) does NOT
+   close this -- the wait to unwind is the dev9p CLIENT read of the pts slave.
 11. **A CAUGHT note does not wake a thread blocked in a syscall wait -- VOTE
    OWED (kernel notes design)** (`memory/design_caught_notes_do_not_interrupt_
    waits.md`; measured 3/3 + read in code): `thread_die_pending` is the only
@@ -671,6 +679,21 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    Pipe + 9P client rows + SMP gate); (B) a Dev-level unwind for pts/cons reads
    only; (C) v1.x. Retires the "late ^C eats the next line" family (items 8,
    10) in one move.
+12. **On the KERNEL CONSOLE a container never receives ^C after 5336c894 -- OPEN,
+   self-found 2026-08-18 before the 437213c4+5336c894 round** (`memory/
+   bug_console_ctrlc_swallowed_by_viv_mask.md`). The serial console has no job
+   control: `env.job_control` is None there, the console's ^C is OWNER-routed
+   (`proc_console_post_interrupt` -> the session `ut`), and `ut` FORWARDS the
+   `interrupt` by pid to its foreground children (`drain_fg_wait_notes`,
+   libutopia stmt.rs). `viv`'s new mask swallows that forward, so the container
+   sees nothing (before 5336c894 the forward KILLED viv and orphaned the
+   container -- destructively wrong; now silently wrong). The pgrp fan that makes
+   the mask right exists only on a pts. Fix candidates: viv self-manages (opens
+   its notes fd, parks on poll{notes} + WNOHANG reaps) and FORWARDS `interrupt`
+   to the container entrypoint when the note did not come from the kernel's pgrp
+   fan (docker's --sig-proxy) -- the mask then goes; or the console grows a
+   fg-pgrp fan (kernel, LS-5's owner routing generalized). Regression: an LS-CI
+   scenario on the CONSOLE (not ptyhost) with a `trap 'echo CAUGHT' INT` ash.
 
 ---
 
