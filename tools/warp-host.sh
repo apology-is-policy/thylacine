@@ -11,6 +11,7 @@
 #   tools/warp-host.sh prove     # Warp-2 gate: /warp-prove on the virgl device
 #   tools/warp-host.sh composed  # Warp-C C-2b + C-2c + C-3 gate: the composed screen's arm + the witnessed imports + the composed pixels read back, GL vs 2D (both legs)
 #   tools/warp-host.sh reject    # #240: is a REJECTED command stream observable in-guest?
+#   tools/warp-host.sh readback  # Warp-C C-6 gate: the compositor readback arm is fenced + deferred under a deep queue (+ the F2b measurement)
 #   tools/warp-host.sh p1b       # GPU-DESIGN 4.5.4: does ctx_attach permit a cross-context blit? (host-side, no guest)
 #   tools/warp-host.sh p2        # GPU-DESIGN 4.5.4: does the blit observe the client's FINISHED frame? (host-side)
 #   tools/warp-host.sh quake     # Warp-4 gate: GLQuake on virgl, both present arms
@@ -171,7 +172,7 @@ sync_all() {
     # command name" whose cause is a list that claimed to carry your edits.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/interactive/lib.exp tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-reject.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/composed-screen.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
+    for f in tools/run-vm.sh tools/interactive/lib.exp tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-reject.exp tools/warp/warp-readback.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/composed-screen.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -366,6 +367,29 @@ reject)
         exit 1
     fi
     echo "C-0d DETECTOR GATE: VERIFIED (discriminates + sticky + ran to completion)"
+    ;;
+readback)
+    out="$REPO_ROOT/build/warp-readback.log"
+    ssh "$HOST" "cd $RREPO && ${RENV}expect tools/warp/warp-readback.exp" | tee "$out" || true
+    echo "== Warp-C C-6: the compositor readback arm =="
+    # The scenario is self-gating (`C6-READBACK DONE` prints only when every
+    # verdict arm passed; INCOMPLETE(<arm>) hard-fails it), and the terms
+    # below are the belt: each names an arm, and the LS-CI line requires
+    # the SCENARIO to have completed (lc_pass's prefix, which only the
+    # success path prints -- never the DONE token, which the timeout text
+    # quotes; #186). F2B is a MEASUREMENT: printed, not required.
+    grep -E "C6-RB|C6-READBACK" "$out" || true
+    ok=1
+    for pat in "C6-RB ARM PASS" "C6-RB DEEP PASS" "C6-RB LIVE PASS" "C6-RB DEADLINE PASS" "LS-CI PASS: warp-prove readback"; do
+        if ! grep -q "$pat" "$out"; then
+            echo "C-6 GATE FAIL -- missing: $pat"
+            ok=0
+        fi
+    done
+    if [ "$ok" != 1 ]; then
+        exit 1
+    fi
+    echo "WARP-C C-6 GATE: VERIFIED (readback arm taken + deep queue paid by the device + dispatch answered inside budget + busy read as busy)"
     ;;
 tri)
     out="$REPO_ROOT/build/warp-tri.log"

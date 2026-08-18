@@ -72,7 +72,20 @@ ctl                          # "virgl <0|1>\ncapsets N\ncapset <id> <ver> <len>\
                              #   since boot. On such a ctx a verify's transfers and readback are
                              #   blit jobs behind whatever the DEVICE has queued -- the exposure the
                              #   buffer pair removes -- so nonzero here says some ctx carried it)
+                             # + "comp-rb issued <n> landed <n> dropped <n> coalesced <n> rb-abandoned <n> rb-slot <0|1|2>\n"
+                             #   (Warp-C C-6: the compositor readback arm's census -- readbacks
+                             #   issued on the reserved fenced slot; landed = composed at
+                             #   completion; dropped = the surface moved on between issue and
+                             #   retire, or the engine died; coalesced = presents that enqueued
+                             #   behind an in-flight / poisoned slot instead of issuing; abandoned
+                             #   = never retired in FENCE_ABANDON_MS [the client ctx poisoned];
+                             #   rb-slot = the reserved slot free / busy / poisoned. Keys prefixed
+                             #   because `abandoned` is already the test-mode key below and
+                             #   parse_field returns the first hit. The stall each readback paid is
+                             #   `cost readback-wait` on the TAPESTRY ctl)
                              # test-mode ONLY adds: "abandoned <n>\nfenced-free <n>\n"
+                             #   (fenced-free counts the CLIENT pool -- FENCED_SLOTS - 1 since C-6;
+                             #   the reserved compositor slot is never a client's)
 caps                         # the RETAINED preferred capset blob, raw
 ctx/
   new                        # open+read mints a ctx -> "<pub_id>\n" (ONE per conn; I-45)
@@ -108,7 +121,11 @@ ctx/
                              #     fallback [`probe-texture` on the global ctl] each step is a blit
                              #     job behind whatever the DEVICE has queued, other clients' frames
                              #     included, and no per-ctx gauge sees those)
-                             #   + "fences-in-flight <n>\nfence-signaled <n>\n" (promoted at Warp-3)
+                             #   + "fences-in-flight <n>\nfence-signaled <n>\n" (promoted at Warp-3;
+                             #     since C-6 `fences-in-flight` ALSO counts a compositor readback of
+                             #     this ctx's adopted BO while it is in flight -- device work IS
+                             #     outstanding on the ctx's resources -- while `fence-signaled`
+                             #     never counts it: the client counts fences it ISSUED)
                              #   + "bo-live <n>\nbo-peak <n>\nbo-bytes <n>\nbo-bytes-peak <n>\n"
                              #     (#204 census: backed now / high-water, count + bytes axes)
                              #   + "diag-arms <bits>\ncreate-refused <n>\n" (#198, appended LAST:
@@ -445,7 +462,12 @@ client cannot depend on a test-mode field — so `fences-in-flight` and
 - **`fences-in-flight`** (per-ctx ctl) — the only other way to watch a fence
   land is to read the fence fd, and that read *parks*. A regression in the
   per-ctx hold scope would then hang the prover and surface as a boot timeout,
-  which is the least diagnosable failure this harness can produce.
+  which is the least diagnosable failure this harness can produce. Since
+  Warp-C C-6 it also counts the COMPOSITOR's readback of the ctx's adopted
+  BO while that is in flight (the tag carries the client's ctx_pub); the
+  admission share subtracts it (`comp_rb_in_flight`), so a display-adopted
+  client's throttle is unaffected, but a reader asserting `== 0` at
+  quiescence must not have a present of its adopted BO in flight.
 - **`fence-signaled`** (per-ctx ctl) — the monotonic retire counter, and the
   one the held-lane leg actually asserts on. `fences-in-flight` is a *gauge*,
   and a gauge reading 0 is satisfied by "B's fence retired" and by "B never
@@ -664,29 +686,74 @@ becomes, by scanout mode:
   flush displays the completed frame. The client's swap downgrades
   glFinish to glFlush (the winsys's discovered fence throttle — depth 8
   since #204 — bounds run-ahead).
-- **Composed** (windowed, the ladder's readback fallback): a SYNCHRONOUS
-  `TRANSFER_FROM_HOST_3D` (the compositor's own sync step, NOT the
-  client fenced lane -- the present stays one dispatch, the I-40
-  premise) pulls the frame into the BO's own backing, and
-  `blit_composed_pixels` composes from those pages (letterbox/crop
-  shared with the weave path; `res_stale` stays TRUE -- the weave never
-  saw GL frames). No orientation flip: the guest-visible transfer
-  contract is gallium top-down, same as a weave. **THE EXPOSURE, stated
-  exactly (C-0d Fable round F2 [P1], OPEN until Warp-C C-6):** the
-  readback is issued on the CLIENT's dev_ctx and its response IS the
-  completion, so it waits for the frame -- i.e. for everything the
-  client has queued ahead of it, a length the client chooses -- on the
-  console's dispatch thread; it is taken for every BO the GPU arm cannot
-  compose (not `composable`, an unwitnessed import, a latched compositor
-  context, no 3D screen). `fence_poisoned` cannot guard it: the poison
-  is set from an `abandoned` tag that `reap_abandoned` produces on the
-  serve loop -- the loop that is blocked in the readback. Only READBACKS
-  carry this (a blit's SUBMIT_3D response is written at decode time,
-  before the GPU runs it; the egl-headless direct arm's flush is the
-  same class inside QEMU itself). Gating the arm on `fences-in-flight ==
-  0` was REJECTED: it would collapse the CPU safety net GPU-DESIGN 4.5.9
-  keeps to stale frames for every continuously-rendering client. The
-  fix is the fenced / bounded readback (C-6, GPU-DESIGN 4.5.13).
+- **Composed** (windowed, the ladder's readback fallback -- taken for
+  every adopted BO the GPU arm cannot compose: not `composable`, an
+  unwitnessed import, a latched compositor context, no 3D screen). Since
+  **Warp-C C-6** (GPU-DESIGN 4.5.13) a **FENCED `TRANSFER_FROM_HOST_3D`
+  with a DEFERRED completion**: the present ISSUES the readback on the
+  fenced lane's one **reserved slot** (`COMP_FSLOT` = FENCED_SLOTS - 1;
+  clients allocate first-fit over the other 15, the per-ctx share is
+  unchanged) under the CLIENT's dev_ctx (the resource is attached
+  there), tagged `FenceTag { comp: true, readback: true, ctx_pub: <the
+  client's> }`, records it (`Comp.comp_rb`: fence id + surface + gen +
+  ctx/BO/resource/backing/geometry), replies to the tpresent, and
+  returns -- the dispatch never waits for the frame. The fence pump
+  (`warp_service_fences`) routes the retire to `comp_readback_retired`,
+  which RE-VALIDATES the surface (alive, same gen, scanout still
+  Composed, `gl_adoption` still resolving to the SAME ctx/BO/res/va/w/h)
+  and only then `blit_composed_pixels(.., Some(va))` + `screen_push`,
+  exactly the compose the synchronous arm did (letterbox/crop shared
+  with the weave path; `res_stale` stays TRUE; no orientation flip --
+  the transfer contract is gallium top-down); a surface that moved on
+  drops the frame (`comp-rb dropped`), a stale composition being worse
+  than none. `composed cpu` counts at completion. **One in flight,
+  latest wins:** a present arriving while the readback is in flight (or
+  while the reserved slot is poisoned) enqueues the surface incarnation
+  on `rb_wanted` (FIFO, no duplicates, gen-pinned) and the completion /
+  vindication pump issues ONE fresh readback of whatever the BO holds
+  then -- so a client's present rate cannot pile readbacks. **Retire
+  safety:** the readback is counted in the client ctx's
+  `fences_in_flight` (every quiesce predicate -- `wctx_retire`,
+  `warp_pump_retires`, `wbo_destroy`'s leak posture -- reads it, so the
+  backing the device writes into cannot free under it; `gl_adoption`
+  refuses a retiring BO/ctx at completion, so a destroy in flight drops
+  the frame instead of reading a freed backing) AND in the new
+  `comp_rb_in_flight`, which `warp_fenced_admit` SUBTRACTS (the client's
+  share is not shortened by a fence it did not issue; its
+  `fence-signaled` ledger never counts ours). Abandonment at
+  `FENCE_ABANDON_MS` poisons the client's ctx exactly like a client
+  fence would (the tag carries the CLIENT's ctx_pub -- 0 is
+  `warp_ctx_vindicate`'s no-slot sentinel and would let a late retire
+  `ctx_destroy` an unrelated live context; and the client's own
+  vindication must wait for OUR slot too, round-4 F1) and the reserved
+  slot stays poisoned until the device's late retire vindicates it --
+  meanwhile every readback-arm surface parks on stale frames (the blit
+  and 2D paths are untouched). **What the console still pays under
+  QEMU/virgl (F2b):** the readback of a BUSY resource executes
+  synchronously at decode on QEMU's serial main loop, so a sync step the
+  console issues while it is in flight (any present's transfer/flush, a
+  health read) inherits that stall -- C-6 removes the wait from the
+  present that ISSUES it, the per-present multiplication (one in flight,
+  coalesced), and the false dead-latch (below); it cannot remove the
+  stall a host executes synchronously (Venus / v3d-native's to remove).
+  **The deadline made honest:** while ANY readback -- a client's
+  `transfer_from` or ours -- is in flight (`Controlq::readback_in_flight`,
+  the `readback` bit on the tag), the sync slot's stale-wake deadline is
+  `FENCE_ABANDON_MS` (30 s), not `SUBMIT_DEADLINE_MS` (500 ms), sticky
+  for the wait once observed: busy is not dead. `Cost::Readback` now
+  times the ISSUE; `Cost::ReadbackWait` (`cost readback-wait`) is the
+  issue-to-retire wall per completed readback = the stall the device
+  paid. `verify` while our readback is in flight answers `E_AGAIN` (the
+  ctx's `fences_in_flight` counts it -- device work IS outstanding on
+  its resources), the one client-visible change. Census: warp global
+  ctl `comp-rb issued N landed N dropped N coalesced N rb-abandoned N
+  rb-slot S` (S: 0 free / 1 in flight / 2 poisoned; the keys are
+  prefixed because `abandoned` is already the test-mode key). The
+  synchronous form was C-0d Fable F2 [P1] (the response IS the
+  completion, so the console waited on the client's queue length, and
+  `fence_poisoned` could not guard it -- produced by `reap_abandoned` on
+  the loop that was blocked). Gate: `tools/warp-host.sh readback`
+  (`warp-prove readback` -> `tools/warp/warp-readback.exp`).
 - HOLD is refused in every GL arm (`E_OPNOTSUPP`): its contract is a
   DEFERRED device-visible flush and the GL arms have no deferral.
 
@@ -913,7 +980,7 @@ binary, ramfs md5 `207d2039…`).
 | malformed ctl verbs / non-UTF-8 | `E_INVAL` |
 | **stream the HOST refuses (vrend context error)** | **none on the write — it is reported as SUCCESS (#240).** The write returns the byte count, the fence retires, `fence-signaled` increments, `fences-in-flight` returns to 0, `poisoned` stays 0. Since C-0d it is DETECTABLE out-of-band: write `verify` to the ctx ctl, then read `stream-rejected`. See the caveat below |
 | `verify` on a ctx with no probe (its mint failed) | `Ok` on the write, but neither `verify-seq` nor `verify-ok` advances, `stream-rejected` is untouched, and the global `verify-unknown` does **not** move either (round-2 F9 — an unaskable question is not an unknown verdict, and counting it let a client drive that counter at 9P-write rate, since the per-ctx rate limit sits below this arm) |
-| `verify` while the ctx has fenced work outstanding **or is poisoned** | `E_AGAIN` (audit F7, corrected by round-2 F1). The probe rides the **synchronous** slot on the client's own ctx, and past `SUBMIT_DEADLINE_MS` (500 ms) the engine latches `dead` — terminal, in the process that *is* the console. **What the gate bounds (C-0d Fable round F1): waits on the caller's OWN queue, and only those** — it reads only the caller's gauges. On the **buffer** probe pair (`warp_hprobe_build`, every ctx whose mint succeeds) that is the whole exposure: buffer transfers and copies are CPU-side on a tiled renderer, so nothing in the verify waits for the GPU unless this client has put a job on the probe's own resources (audit F1's attack), which its gauges see. On the **texture** fallback (`probe-texture` on the global ctl) each step is a blit job behind whatever the *device* has queued — client B's frames included — which no per-ctx gauge can see; that is why the buffer pair is minted first. Before this round the client probe was a texture pair unconditionally, and this row's "queues behind that client's GL work" was false: it queued behind everyone's. **Quiescent means `fences-in-flight 0` AND `poisoned 0`**: an abandoned fence takes its slot and zeroes *both* in-flight gauges while the GL work is by definition still unfinished after 30 s, so the poison flag is the only witness left — the same predicate `warp_fenced_admit` refuses on one lane over. **Caveat (round-3 F5): the gate reads the seam's own counter while the `fences-in-flight` key publishes the device-side one, and the seam's leads the ctl by up to one serve-loop pass** (a chain retiring inside the client's own dispatch empties the device slot immediately, but the per-ctx counter drops only when the serve loop next pumps fences). So the two can disagree briefly and a client can be refused while the published keys read quiescent. It fails safe — a spurious refusal, never a spurious admission — and `E_AGAIN` is retryable regardless |
+| `verify` while the ctx has fenced work outstanding **or is poisoned** — including a COMPOSITOR readback of its adopted BO in flight (Warp-C C-6) | `E_AGAIN` (audit F7, corrected by round-2 F1). The probe rides the **synchronous** slot on the client's own ctx, and past `SUBMIT_DEADLINE_MS` (500 ms) the engine latches `dead` — terminal, in the process that *is* the console. **What the gate bounds (C-0d Fable round F1): waits on the caller's OWN queue, and only those** — it reads only the caller's gauges. On the **buffer** probe pair (`warp_hprobe_build`, every ctx whose mint succeeds) that is the whole exposure: buffer transfers and copies are CPU-side on a tiled renderer, so nothing in the verify waits for the GPU unless this client has put a job on the probe's own resources (audit F1's attack), which its gauges see. On the **texture** fallback (`probe-texture` on the global ctl) each step is a blit job behind whatever the *device* has queued — client B's frames included — which no per-ctx gauge can see; that is why the buffer pair is minted first. Before this round the client probe was a texture pair unconditionally, and this row's "queues behind that client's GL work" was false: it queued behind everyone's. **Quiescent means `fences-in-flight 0` AND `poisoned 0`**: an abandoned fence takes its slot and zeroes *both* in-flight gauges while the GL work is by definition still unfinished after 30 s, so the poison flag is the only witness left — the same predicate `warp_fenced_admit` refuses on one lane over. **Caveat (round-3 F5): the gate reads the seam's own counter while the `fences-in-flight` key publishes the device-side one, and the seam's leads the ctl by up to one serve-loop pass** (a chain retiring inside the client's own dispatch empties the device slot immediately, but the per-ctx counter drops only when the serve loop next pumps fences). So the two can disagree briefly and a client can be refused while the published keys read quiescent. It fails safe — a spurious refusal, never a spurious admission — and `E_AGAIN` is retryable regardless |
 | `verify` that runs but reaches no verdict (UNKNOWN) | `Ok`, `verify-seq` **advances**, `verify-ok` does **not**, `stream-rejected` untouched; the global `verify-unknown` increments. **`verify-seq` counts probes ADMITTED, not probes that concluded** (audit F2 — it is incremented before any device I/O). A reader tells "asked and healthy" from both "could not be asked" and "asked, no answer" only by requiring **`verify-ok`** to move; a bare `stream-rejected 0` is satisfied by all three (#184) |
 
 ## Known caveats / footguns

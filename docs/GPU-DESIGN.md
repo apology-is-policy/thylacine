@@ -2348,7 +2348,123 @@ composable client takes on the GL host) stays on the sync slot exactly as
 so it never inherits a stall of its own making; the flush after it is the
 display backend's cost. The 2D software-surface path is untouched. The
 readback arm's PIXELS are unchanged (same transfer, same compose); only WHEN
-the console waits changes: never.
+the console waits changes: never inside the present that issues it.
+
+**AS-BUILT (C-6b, 2026-08-18; `usr/tapestryd/src/{server,gpu}.rs`,
+`usr/warp-prove` `readback`, `tools/warp/warp-readback.exp`,
+`tools/warp-host.sh readback`).** Three refinements the design's letter did
+not have, each found by starting the code and each recorded here so the
+next reader audits the tree, not the note:
+
+1. **The tag carries the CLIENT's `ctx_pub` plus explicit `readback` and
+   `comp` bits — not `ctx_pub = 0`.** The driver's abandonment bookkeeping
+   keys on the tag's ctx (`fslot_poison_ctx`, `FenceVindication.ctx_pub`,
+   `ctx_has_poisoned_slot`), and 0 is `warp_ctx_vindicate`'s no-slot
+   sentinel: a compositor readback abandoned under ctx 0 and later retired
+   would push a vindication for ctx 0, which `position(p == 0)` matches to
+   an arbitrary un-condemned slot → `ctx_destroy` of a live host context.
+   And the client's OWN vindication must wait for our abandoned readback of
+   its BO (round-4 F1: one late retire proves nothing about the rest), which
+   only holds if the slot is attributed to the client. So the marker is a
+   bit; the attribution is the client's; the pump routes on the bit and
+   still poisons / decrements the right ctx. Nothing else in the design
+   moves.
+2. **One in flight compositor-wide, not merely per surface.** The reserved
+   slot IS the bound (`COMP_FSLOT` = FENCED_SLOTS − 1; clients allocate
+   first-fit over the other 15, `lane_exhausted` and `fenced-free` read the
+   client pool), so `Comp.comp_rb` is a single record and `rb_wanted` is one
+   FIFO of surface incarnations (gen-pinned; no duplicates; latest wins at
+   issue time). Every event that can free the slot — a completion, a
+   vindication — ends in `comp_rb_pump`. A poisoned reserved slot parks
+   every readback-arm surface on stale frames until the late retire; the
+   blit arm and the 2D paths do not notice.
+3. **What (a) means under QEMU/virgl, exactly.** The dispatch never waits
+   *inside the present that issues the readback*, and the per-present
+   multiplication is gone (one in flight, coalesced). But consequence 2 is
+   not repealed by fencing: while the readback executes, QEMU's main loop is
+   inside GL, so the NEXT sync step the console issues — any surface's
+   transfer/flush, a health read, a chrome push — inherits the remaining
+   stall, and the serve loop is blocked in that step for its duration. What
+   the console keeps during the stall is everything that needs no device
+   step: the adopting client's own presents (coalesced), every ctl read and
+   write, input, events. That is why the deadline half is not optional and
+   why the gate below measures the adopting surface's presents and ctl
+   reads, not a bystander's presents — those are F2b's number.
+
+The gate as built (`warp-prove readback`, self-gating: `C6-READBACK DONE`
+iff every verdict arm passed, else `INCOMPLETE(<arm>)`; the host verb
+requires the four PASS terms + the scenario's own pass line): a hosted
+tapestry surface A adopts a `Y_0_TOP`-minted (non-`composable`) 512×512 BO;
+**ARM** — a present on an idle queue ISSUES a compositor readback and it
+LANDS (`comp-rb`; `composed gpu` moving instead is `INCOMPLETE(bo-composable)`);
+**DEEP** — with 8 heavy submits queued (80 clear PAIRS each: the BO to
+an index-encoded colour, then a 2× scratch partner, alternating
+framebuffers so mesa v3d cannot fold them — every clear a full-surface
+store on the CLIENT's GL context) `cost readback-wait max` ≥ 100 ms — the
+positive control that the queue was deep, without which LIVE is satisfied
+by a light one; the leg also prints the queue's own fence timeline and
+**which clear index the readback observed** (the BLUE byte of the pixel it
+landed), so "the readback waited for the queue" is a pixel, not a
+duration; **LIVE** — while that readback is in flight, A's own presents
+(every 5 ms, coalesced) and warp ctl reads are each answered inside 50 ms
+(under the pre-C-6 arm the FIRST present takes the whole wait); **DEADLINE**
+— 7 heavy submits + the CLIENT's own fenced `transfer_from` of its busy BO,
+then 10 presents of a bystander surface B queued behind that stall: every
+one SUCCEEDS and the engine is alive after (busy read as busy — the 500 ms
+deadline would latch `dead` on it, where stale wakes arrive during the
+stall); **F2B** — B's present latency behind that stall, max / mean,
+REPORTED (the number Venus / v3d remove and no guest change can); **CLEAN**
+— `poisoned 0`, `rb-slot` not poisoned after teardown.
+
+*Why the load is clears and not blits — two Pi runs' worth of finding,
+recorded because it changes what "a deep queue" means on this host.* Run 1
+queued 800 1:1 NEAREST full-frame blits (ping-pong BO ↔ scratch): they
+"retired" in 16 ms — `vrend_renderer_blit` takes the `glCopyImageSubData`
+shortcut for a 1:1 same-format RGBA NEAREST blit (1.1.0), and 1.6 GB of
+copies cannot finish in 16 ms on a Pi: not GPU work the readback waits on.
+Run 2 made them SCALED (512² ↔ 1024²): 8 submits retired in 1335 ms — real
+work — yet the compositor readback of the same BO waited **84 ms** and the
+client's own readback stalled the bystander by ≤ 149 ms. A scaled blit goes
+through `vrend_renderer_blit_int` → the BLITTER, which owns its **own GL
+context** (`vrend_blitter.c`); the client-context fences and a
+client-context `glReadPixels` are not ordered behind another context's
+work, so the queue was deep and the readback did not wait for it. The DEEP
+control (readback-wait ≥ 100 ms) failed both runs exactly as it should —
+LIVE would have passed on a light queue both times. A real client's draws
+land on its own context; so do these clears.
+
+**Measured on thyla-pi (KVM, V3D 4.2, virglrenderer 1.1.0, egl-headless
+lane), the final artifact — `WARP-C C-6 GATE: VERIFIED`.** ARM: idle-queue
+present → `comp-rb issued 0→1 landed 0→1`. DEEP/LIVE, three constructed
+rounds of 4 submits × 300 draws × 6 full-screen triangles (1200 draws,
+~1.06–1.08 s of V3D per queue; the four 24 KiB Twrites take 15–224 ms to
+send): the issuing present **0 / 0 / 0 ms**; the compositor readback waited
+**805 / 1005 / 1005 ms** and observed draw **1199 of 1200** every round (the
+BLUE byte of the pixel it landed); the fences retired as a burst at
+1053–1076 ms. FLIGHT REPORT (data): the adopting surface's *later* presents
+during the flight max **1012 ms** — every round's census showed
+`slot-presents +1`: the console renderer's cursor-blink present landed in
+the window, and on egl-headless its `RESOURCE_FLUSH` is the display
+backend's `glReadPixels` of the screen, queued behind the compositor's blit,
+behind the client's draws on V3D's one FIFO — so the single-threaded loop
+waited there for everyone (consequence 2 with the C-4 flush-readback lane
+cost on top; the same mechanism made two earlier rounds "unconstructed":
+the SENDS landed behind that flush and the readback met a drained queue —
+the leg now detects and retries those, never judges them). Warp ctl reads
+in the same windows max 20 ms. DEADLINE: 4 submits + the client's own
+`transfer_from` (~1.19 s to retire), 10 bystander presents behind it all
+succeeded, engine alive, `poisoned 0`. F2B REPORT: the bystander's present
+latency behind the client's readback max **267 ms** (run 7: 1034 ms) mean
+39 ms — the number Venus / v3d remove. Sabotage S1 (the issuing present made
+to WAIT for the readback — the pre-C-6 arm): DEEP PASS, **LIVE FAIL** with
+the issuing present at 269 / 969 / 1017 ms → `INCOMPLETE(live)`, gate FAIL —
+the arm discriminates exactly the defect. The blit arm untouched: `quake`
+44.2 fps with `comp-rb issued 0`; `decomp gl` composed gpu 1106 cpu 0 with
+`readback 0` and `readback-wait 0`. Untested here: the deadline half's
+discrimination against the 500 ms deadline (a sabotage not run — under
+egl-headless/KVM no stale wakes were observed during the stalls, so the old
+deadline may simply never have fired on this host; the widening is correct by
+construction and the DEADLINE arm is its regression net where wakes arrive).
 
 ## 5. Placement — where the server lives, per backend
 

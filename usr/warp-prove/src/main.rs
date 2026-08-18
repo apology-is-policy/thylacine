@@ -213,6 +213,27 @@ pub extern "C" fn rs_main() -> i64 {
         return 0;
     }
 
+    // Warp-C C-6 (GPU-DESIGN 4.5.13): the compositor readback arm under a
+    // deep client queue. Its own verb for the same reason as `reject`: it
+    // deliberately stalls the device for seconds, twice, and the Warp-2
+    // gate must stay cheap.
+    if libthyla_rs::env::args().get_str(1) == Some("readback") {
+        let probe = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+        if probe < 0 {
+            t_putstr("warp-prove: readback: open /srv/warp failed\n");
+            unsafe { t_exits(1) };
+        }
+        let ctl = open_read_string(probe, "ctl");
+        unsafe { t_close(probe) };
+        if !ctl.starts_with("virgl 1") {
+            t_putstr("warp-prove: C6-READBACK SKIP -- no virgl on this device\n");
+            t_putstr("warp-prove: C6-READBACK INCOMPLETE(no-virgl)\n");
+            return 0;
+        }
+        observe_readback();
+        return 0;
+    }
+
     t_putstr("warp-prove: starting (the Warp-2 gate)\n");
 
     let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
@@ -2217,4 +2238,874 @@ fn prove_corpse_reclaim(root: i64) {
         2 * (cap + 1),
         cap
     ));
+}
+
+// --- Warp-C C-6: the compositor readback arm (GPU-DESIGN 4.5.13) -----------
+//
+// `warp-prove readback`. The composed-GL present's READBACK arm -- taken for
+// every adopted BO the blit arm cannot compose -- used to pull the frame
+// host->guest SYNCHRONOUSLY on the console's dispatch thread, so the console
+// waited for everything the client had queued ahead of it (C-0d Fable F2).
+// C-6 makes it a fenced readback with a DEFERRED completion. This leg
+// constructs the state F2 named (a non-composable BO adopted by a hosted
+// surface; the owning ctx with a DEEP queue) and asserts what C-6 actually
+// changes, each arm named so INCOMPLETE(<arm>) can say which:
+//
+//   ARM       the arm is the one under test: a present of the adoption on an
+//             idle queue ISSUES a compositor readback and it LANDS (`comp-rb`
+//             on the warp ctl); a composable BO would take the blit arm and
+//             prove nothing (`composed gpu` moving instead is INCOMPLETE).
+//   DEEP      the positive control that the queue was deep, per round: the
+//             readback the device paid waited >= RB_DEEP_MS (`cost
+//             readback-wait`) AND observed the queue's LAST draw (the BLUE
+//             byte of the pixel it landed names the draw index). Without it
+//             LIVE below is satisfied by a light queue.
+//   LIVE      the console's dispatch did not wait for the readback: per
+//             round, the present that ISSUES the compositor readback of a
+//             deep queue returns inside RB_LIVE_MS. Under the pre-C-6 arm
+//             that present returns after the whole wait. The presents and
+//             ctl reads DURING the flight are REPORTED (FLIGHT REPORT), not
+//             judged: another client's sync step in that window inherits the
+//             device stall on QEMU/virgl and the single-threaded loop waits
+//             there for everyone (4.5.13 consequence 2 -- the console
+//             renderer's cursor blink is one such step; run 4 measured it).
+//   DEADLINE  F2b's guest-side half: with a client's OWN fenced readback of
+//             its busy BO in flight, the console's next sync steps inherit
+//             the device stall (QEMU processes the controlq inline; the
+//             readback is a synchronous GL wait) -- and that stall must be
+//             read as BUSY, never as dead: every present of the bystander
+//             surface B queued behind it SUCCEEDS, and the engine is alive
+//             after. Under the 500 ms deadline a stall past it latched
+//             `dead` and lost the console's GPU.
+//   F2B       REPORTED, not judged: B's present latency behind that stall
+//             (max / mean over the presents), the number that Venus / v3d
+//             will remove and that no guest-side change can (4.5.13).
+//
+// Prints `C6-READBACK DONE` iff every verdict arm passed, else
+// `C6-READBACK INCOMPLETE(<arm>)`; warp-readback.exp hard-fails on the
+// latter and on the prover's own `FAIL --`.
+
+const VIRGL_RESOURCE_Y_0_TOP: u32 = 1 << 0;
+const RB_W: u32 = 512;
+const RB_H: u32 = 512;
+/// Why the heavy load is DRAWS on the client's context -- three Pi runs'
+/// worth of finding. Run 1 queued 800 1:1 NEAREST full-frame blits: they
+/// "retired" in 16 ms -- vrend takes the `glCopyImageSubData` shortcut for
+/// that shape (1.1.0 `vrend_renderer_blit`), not GPU work the readback
+/// waits on. Run 2 made them SCALED: 8 submits retired in 1335 ms, real
+/// work -- and the compositor readback of the same BO waited 84 ms, because
+/// a scaled blit runs on vrend's separate BLITTER GL context
+/// (`vrend_blitter.c`) and neither the client-context fences nor a
+/// client-context `glReadPixels` are ordered behind another context. Run 3
+/// alternated full-surface CLEARS between two framebuffers: the readback
+/// observed the LAST clear (the mechanism is right) but 1280 clears retired
+/// in 122 ms -- mesa v3d keys jobs by framebuffer (`v3d_get_job`), an FBO
+/// switch does not flush, and the clears folded into two jobs. Only draws
+/// cannot be elided, folded, or moved off the context -- and a real
+/// client's queue IS draws.
+/// The deep-queue witness floor (ms): a compositor readback that waited less
+/// than this read a queue that was not deep, and LIVE proved nothing.
+const RB_DEEP_MS: u64 = 100;
+/// The dispatch budget (ms) while a readback is in flight: a present or a
+/// ctl read answered slower than this WAITED for the device.
+const RB_LIVE_MS: u64 = 50;
+/// Full-screen-triangle DRAWS per heavy submit (SET_CONSTANT_BUFFER + DRAW_VBO
+/// = 20 dwords each; 300 = 24 KiB, inside one Twrite) and the submits per
+/// phase. `WARP_CTX_FENCE_MAX` = 8 is the share, so LIVE queues 8 (the
+/// compositor readback rides the reserved slot, outside the share) and
+/// DEADLINE queues 7 + the client's own readback.
+const RB_DRAWS_PER_SUBMIT: usize = 300;
+/// Full-screen triangles per draw (see the vertex-buffer comment). Six, and
+/// FOUR submits rather than eight: the same GPU depth (~1.2 s on V3D) with
+/// half the Twrites -- the send phase is the leg's exposure to another
+/// client's present landing while the queue is deep (see `constructed`).
+const RB_TRIS: usize = 6;
+/// The draw-state object handles (surfaces 1 and 2 are the clear legs').
+const RB_H_VS: u32 = 10;
+const RB_H_FS: u32 = 11;
+const RB_H_VE: u32 = 12;
+const RB_H_BLEND: u32 = 13;
+const RB_H_DSA: u32 = 14;
+const RB_H_RS: u32 = 15;
+const VIRGL_CCMD_BIND_OBJECT: u32 = 2;
+const VIRGL_CCMD_SET_VIEWPORT_STATE: u32 = 4;
+const VIRGL_CCMD_SET_VERTEX_BUFFERS: u32 = 6;
+const VIRGL_CCMD_DRAW_VBO: u32 = 8;
+const VIRGL_CCMD_SET_CONSTANT_BUFFER: u32 = 12;
+const VIRGL_CCMD_BIND_SHADER: u32 = 31; // SET_SUB_CTX 28, CREATE 29, DESTROY 30, BIND_SHADER 31
+const VIRGL_OBJECT_BLEND: u32 = 1;
+const VIRGL_OBJECT_RASTERIZER: u32 = 2;
+const VIRGL_OBJECT_DSA: u32 = 3;
+const VIRGL_OBJECT_SHADER: u32 = 4;
+const VIRGL_OBJECT_VERTEX_ELEMENTS: u32 = 5;
+const VIRGL_SHADER_VERTEX: u32 = 0;
+const VIRGL_SHADER_FRAGMENT: u32 = 1;
+const VIRGL_FORMAT_R32G32B32A32_FLOAT: u32 = 31;
+const MESA_PRIM_TRIANGLES: u32 = 4;
+const RB_LIVE_SUBMITS: usize = 4;
+/// LIVE/DEEP rounds: one issuing present per deep queue, repeated; a round
+/// whose sends were blocked (the readback issued with less than the floor
+/// of queue left) is UNCONSTRUCTED and retried, up to RB_LIVE_ATTEMPTS.
+const RB_LIVE_ROUNDS: usize = 3;
+const RB_LIVE_ATTEMPTS: usize = 7;
+const RB_DEADLINE_SUBMITS: usize = 4;
+/// Bound on waiting for a readback to land: FENCE_ABANDON_MS is 30 s.
+const RB_LAND_BOUND_MS: u64 = 35_000;
+
+/// Read a ctl file whole (offset-continued): the tapestry ctl's cost census
+/// runs past the 512-byte single read the other legs take.
+fn open_read_all(root: i64, path: &str) -> String {
+    let fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OREAD) };
+    if fd < 0 {
+        fail(&format!("readback: open {} for read", path));
+    }
+    let mut out: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 512];
+    for _ in 0..16 {
+        let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
+        if n <= 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+        if (n as usize) < buf.len() {
+            break;
+        }
+    }
+    unsafe { t_close(fd) };
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `cost <kind> n sum_us max_us` off the tapestry ctl.
+fn cost_line(s: &str, kind: &str) -> Option<(u64, u64, u64)> {
+    let key = format!("cost {} ", kind);
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix(key.as_str()) {
+            let mut it = rest.split_ascii_whitespace();
+            let n = it.next()?.parse().ok()?;
+            let sum = it.next()?.parse().ok()?;
+            let max = it.next()?.parse().ok()?;
+            return Some((n, sum, max));
+        }
+    }
+    None
+}
+
+/// The two-token census `composed gpu N cpu M`.
+fn composed_census(s: &str) -> Option<(u64, u64)> {
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix("composed gpu ") {
+            let mut it = rest.split_ascii_whitespace();
+            let g = it.next()?.parse().ok()?;
+            if it.next()? != "cpu" {
+                return None;
+            }
+            let c = it.next()?.parse().ok()?;
+            return Some((g, c));
+        }
+    }
+    None
+}
+
+/// The tapestry cost census counts that name OTHER console work: presents
+/// by arm (slot / cpu / bo), transfers, pushes, flushes, health steps.
+fn others_census(s: &str) -> [u64; 7] {
+    let n = |k: &str| cost_line(s, k).map_or(0, |(n, _, _)| n);
+    [
+        n("present-composed-slot"),
+        n("present-composed-cpu"),
+        n("present-composed-bo"),
+        n("xfer"),
+        n("push"),
+        n("flush"),
+        n("health"),
+    ]
+}
+
+struct RbCensus {
+    issued: u64,
+    landed: u64,
+    coalesced: u64,
+    abandoned: u64,
+    slot: u64,
+}
+
+fn rb_census(warp: i64) -> Option<RbCensus> {
+    let s = open_read_all(warp, "ctl");
+    Some(RbCensus {
+        issued: parse_field(&s, "issued")?,
+        landed: parse_field(&s, "landed")?,
+        coalesced: parse_field(&s, "coalesced")?,
+        abandoned: parse_field(&s, "rb-abandoned")?,
+        slot: parse_field(&s, "rb-slot")?,
+    })
+}
+
+fn rb_incomplete(arm: &str) -> ! {
+    t_putstr(&format!("warp-prove: C6-READBACK INCOMPLETE({})\n", arm));
+    unsafe { t_exits(0) }
+}
+
+/// Mint a W x H B8G8R8A8 render-target BO with `flags` (Y_0_TOP makes it
+/// NON-composable -- the readback arm's shape) and return (bo, res, va).
+fn mint_bo_wh(root: i64, ctx: u32, w: u32, h: u32, flags: u32, what: &str) -> (u32, u32, u64) {
+    let bo = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
+        Some(v) => v,
+        None => fail(&format!("readback: bo/new for {}", what)),
+    };
+    let create = format!(
+        "create3d {} {} {} {} {} 1 1 0 0 {} {}",
+        PIPE_TEXTURE_2D,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+        VIRGL_BIND_RENDER_TARGET,
+        w,
+        h,
+        flags,
+        w * h * 4
+    );
+    if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &create) {
+        fail(&format!("readback: create3d for {}", what));
+    }
+    let res = parse_field(&open_read_string(root, &format!("ctx/{}/bo/{}/info", ctx, bo)), "res")
+        .unwrap_or_else(|| fail(&format!("readback: info `res` for {}", what))) as u32;
+    let map_fd = unsafe {
+        let p = format!("ctx/{}/bo/{}/map", ctx, bo);
+        t_open(root, p.as_ptr(), p.len(), T_OREAD)
+    };
+    if map_fd < 0 {
+        fail(&format!("readback: map open for {}", what));
+    }
+    let va = unsafe { t_weft_map(map_fd as u64, 0) };
+    if va < 0 {
+        fail(&format!("readback: weft_map for {}", what));
+    }
+    (bo, res, va as u64)
+}
+
+/// SET_FRAMEBUFFER_STATE(cbuf0 = `surf`) -- the surface object must exist.
+fn fb_state_stream(st: &mut Vec<u32>, surf: u32) {
+    st.push(cmd0(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, 3));
+    st.push(1); // nr_cbufs
+    st.push(0); // zsurf
+    st.push(surf);
+}
+
+/// CREATE_OBJECT(SHADER): the header + the TGSI text, encoded exactly as
+/// Mesa's `virgl_encode_shader_state` does for a shader that fits one
+/// packet (offset field = the whole text length incl. NUL, no CONT bit;
+/// zero stream-out outputs; the text zero-padded to dwords).
+fn shader_stream(st: &mut Vec<u32>, handle: u32, stage: u32, text: &str, num_tokens: u32) {
+    let bytes = text.len() + 1; // incl. NUL
+    let ndw = (bytes + 3) / 4;
+    st.push(cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_SHADER, (5 + ndw) as u32));
+    st.push(handle);
+    st.push(stage);
+    st.push(bytes as u32); // VIRGL_OBJ_SHADER_OFFSET_VAL(total len)
+    st.push(num_tokens);
+    st.push(0); // so num outputs
+    let mut buf: Vec<u8> = text.as_bytes().to_vec();
+    buf.push(0);
+    while buf.len() % 4 != 0 {
+        buf.push(0);
+    }
+    for c in buf.chunks(4) {
+        st.push(u32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+    }
+}
+
+/// The draw state, once per ctx: shaders + vertex elements + blend / dsa /
+/// rasterizer objects, bound; the vertex buffer (a full-screen triangle in
+/// clip space, uploaded by the caller); the viewport. Layouts per
+/// `virgl_protocol.h` and Mesa's `virgl_encode.c` (the tree at
+/// ../mesa-thylacine), field for field.
+fn draw_state_stream(st: &mut Vec<u32>, vbo_res: u32, w: u32, h: u32) {
+    shader_stream(
+        st,
+        RB_H_VS,
+        VIRGL_SHADER_VERTEX,
+        "VERT\nDCL IN[0]\nDCL OUT[0], POSITION\n  0: MOV OUT[0], IN[0]\n  1: END\n",
+        64,
+    );
+    shader_stream(
+        st,
+        RB_H_FS,
+        VIRGL_SHADER_FRAGMENT,
+        "FRAG\nDCL OUT[0], COLOR\nDCL CONST[0]\n  0: MOV OUT[0], CONST[0]\n  1: END\n",
+        64,
+    );
+    // vertex elements: one vec4 float attribute from buffer 0
+    st.push(cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_VERTEX_ELEMENTS, 5));
+    st.push(RB_H_VE);
+    st.push(0); // src_offset
+    st.push(0); // instance_divisor
+    st.push(0); // vertex_buffer_index
+    st.push(VIRGL_FORMAT_R32G32B32A32_FLOAT);
+    // blend: rt0 colormask RGBA, nothing else
+    st.push(cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_BLEND, 8 + 3));
+    st.push(RB_H_BLEND);
+    st.push(0); // S0
+    st.push(0); // S1
+    st.push(0xf << 27); // S2 rt0: colormask 0xf
+    for _ in 1..8 {
+        st.push(0);
+    }
+    // dsa: everything off
+    st.push(cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5));
+    st.push(RB_H_DSA);
+    st.push(0); // S0
+    st.push(0); // S1 stencil 0
+    st.push(0); // S1 stencil 1
+    st.push(0); // alpha ref
+    // rasterizer: fill, no cull, half-pixel-center + bottom-edge-rule (GL)
+    st.push(cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_RASTERIZER, 9));
+    st.push(RB_H_RS);
+    st.push((1 << 1) | (1 << 29) | (1 << 30)); // S0: depth_clip, half_pixel_center, bottom_edge_rule
+    st.push(1.0f32.to_bits()); // point size
+    st.push(0); // sprite coord enable
+    st.push(0); // S3
+    st.push(1.0f32.to_bits()); // line width
+    st.push(0); // offset units
+    st.push(0); // offset scale
+    st.push(0); // offset clamp
+    // bind
+    st.push(cmd0(VIRGL_CCMD_BIND_SHADER, 0, 2));
+    st.push(RB_H_VS);
+    st.push(VIRGL_SHADER_VERTEX);
+    st.push(cmd0(VIRGL_CCMD_BIND_SHADER, 0, 2));
+    st.push(RB_H_FS);
+    st.push(VIRGL_SHADER_FRAGMENT);
+    st.push(cmd0(VIRGL_CCMD_BIND_OBJECT, VIRGL_OBJECT_VERTEX_ELEMENTS, 1));
+    st.push(RB_H_VE);
+    st.push(cmd0(VIRGL_CCMD_BIND_OBJECT, VIRGL_OBJECT_BLEND, 1));
+    st.push(RB_H_BLEND);
+    st.push(cmd0(VIRGL_CCMD_BIND_OBJECT, VIRGL_OBJECT_DSA, 1));
+    st.push(RB_H_DSA);
+    st.push(cmd0(VIRGL_CCMD_BIND_OBJECT, VIRGL_OBJECT_RASTERIZER, 1));
+    st.push(RB_H_RS);
+    // vertex buffer 0: stride 16, offset 0, the raw device-global res id
+    st.push(cmd0(VIRGL_CCMD_SET_VERTEX_BUFFERS, 0, 3));
+    st.push(16);
+    st.push(0);
+    st.push(vbo_res);
+    // viewport 0: scale (w/2, h/2, 0.5) translate (w/2, h/2, 0.5)
+    st.push(cmd0(VIRGL_CCMD_SET_VIEWPORT_STATE, 0, 7));
+    st.push(0); // start slot
+    st.push((w as f32 / 2.0).to_bits());
+    st.push((h as f32 / 2.0).to_bits());
+    st.push(0.5f32.to_bits());
+    st.push((w as f32 / 2.0).to_bits());
+    st.push((h as f32 / 2.0).to_bits());
+    st.push(0.5f32.to_bits());
+}
+
+/// One full-screen draw: the FS colour from an inline constant buffer
+/// (SET_CONSTANT_BUFFER stage FS index 0, 4 floats), then DRAW_VBO of 3
+/// vertices, TRIANGLES.
+fn draw_stream(st: &mut Vec<u32>, r: f32, g: f32, b: f32) {
+    st.push(cmd0(VIRGL_CCMD_SET_CONSTANT_BUFFER, 0, 6));
+    st.push(VIRGL_SHADER_FRAGMENT);
+    st.push(0); // index
+    st.push(r.to_bits());
+    st.push(g.to_bits());
+    st.push(b.to_bits());
+    st.push(1.0f32.to_bits());
+    st.push(cmd0(VIRGL_CCMD_DRAW_VBO, 0, 12));
+    st.push(0); // start
+    st.push((RB_TRIS * 3) as u32); // count
+    st.push(MESA_PRIM_TRIANGLES);
+    st.push(0); // indexed
+    st.push(1); // instance count
+    st.push(0); // index bias
+    st.push(0); // start instance
+    st.push(0); // primitive restart
+    st.push(0); // restart index
+    st.push(0); // min index
+    st.push(0xffff_ffff); // max index
+    st.push(0); // count from so
+}
+
+/// The draw index encoded in the adopted BO's colour: draw `idx` of `total`
+/// paints A (0, 1, (idx+1)/total) -- so the BLUE byte of any later readback
+/// of A names the LAST draw that readback observed. `rb_index_of` decodes
+/// it (B8G8R8A8: blue is the low byte).
+fn rb_clear_color(idx: usize, total: usize) -> f32 {
+    ((idx + 1) as f32) / (total as f32)
+}
+fn rb_index_of(px: u32, total: usize) -> i64 {
+    let b = (px & 0xff) as f32 / 255.0;
+    (b * total as f32 + 0.5) as i64 - 1
+}
+
+/// Queue `n` heavy submits on `ctx`: each RB_DRAWS_PER_SUBMIT full-screen
+/// draws into the adopted BO (the framebuffer re-set at the head of each
+/// submit), the colour index-encoded -- real rasterization on the CLIENT's
+/// GL context that WRITES the adopted resource, ordered before any fence or
+/// readback on that context, and nothing the driver can fold. Returns
+/// (fence-signaled before the first submit, the Instant of the first).
+fn rb_queue_heavy(
+    root: i64,
+    ctx: u32,
+    n: usize,
+    what: &str,
+) -> (u64, libthyla_rs::time::Instant) {
+    let before = ctx_field(root, ctx, "fence-signaled");
+    let t0 = libthyla_rs::time::Instant::now();
+    let total = n * RB_DRAWS_PER_SUBMIT;
+    for i in 0..n {
+        let mut st: Vec<u32> = Vec::new();
+        fb_state_stream(&mut st, 1);
+        for k in 0..RB_DRAWS_PER_SUBMIT {
+            let idx = i * RB_DRAWS_PER_SUBMIT + k;
+            draw_stream(&mut st, 0.0, 1.0, rb_clear_color(idx, total));
+        }
+        submit_stream(root, ctx, &st, &format!("{} heavy submit {}", what, i));
+    }
+    guard_not_poisoned(root, what);
+    (before, t0)
+}
+
+/// Wait until this ctx's fence-signaled has advanced by `n` (bounded);
+/// returns the wall since `t0` when it did -- the queue's own retire time,
+/// the diagnostic that says whether a queue existed at all.
+fn rb_wait_signaled(
+    root: i64,
+    ctx: u32,
+    before: u64,
+    n: u64,
+    t0: libthyla_rs::time::Instant,
+    what: &str,
+) -> u64 {
+    let tw = libthyla_rs::time::Instant::now();
+    loop {
+        if ctx_field(root, ctx, "fence-signaled") >= before + n {
+            return t0.elapsed().as_millis() as u64;
+        }
+        if ctx_field(root, ctx, "poisoned") != 0 {
+            rb_incomplete(&format!("poisoned:{}", what));
+        }
+        if tw.elapsed().as_millis() as u64 > RB_LAND_BOUND_MS {
+            rb_incomplete(&format!("fences-never-landed:{}", what));
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
+    }
+}
+
+fn observe_readback() {
+    use tapestry::Surface;
+    t_putstr("warp-prove: C6-READBACK starting (the compositor readback arm under a deep queue)\n");
+
+    // The two console-side surfaces. A hosts the GL adoption (the readback
+    // arm's target); B is the plain 2D bystander whose presents queue behind
+    // the device. Both are ordinary tapestry clients of this process (one
+    // conn each -- libtapestry opens per surface).
+    let mut a = match Surface::open(RB_W, RB_H) {
+        Ok(s) => s,
+        Err(_) => rb_incomplete("instrument:surface-a"),
+    };
+    let mut b = match Surface::open(256, 256) {
+        Ok(s) => s,
+        Err(_) => rb_incomplete("instrument:surface-b"),
+    };
+    for px in b.pixels().iter_mut() {
+        *px = 0xFF20_4060;
+    }
+    if b.present(None).is_err() {
+        rb_incomplete("instrument:present-b");
+    }
+
+    // The warp side: one ctx, the adopted BO (Y_0_TOP: NOT composable, so
+    // the blit arm cannot take it -- `composable` in tapestryd) and a
+    // same-shape scratch partner for the heavy blits.
+    let warp = warp_connect("readback");
+    let ctx = mint_ctx(warp, "readback");
+    let (bo, res, va) = mint_bo_wh(warp, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, "adopted");
+    // The vertex buffer: one clip-space full-screen triangle, uploaded
+    // through the fenced transfer verb (the C0-F1 leg's buffer shape).
+    let (vbo, vbo_res, vbo_va) = mint_buffer_bo(warp, ctx, "readback vbo");
+    {
+        // RB_TRIS full-screen triangles per draw (the same clip-space
+        // triangle RB_TRIS times): RB_TRIS x the fill per DRAW_VBO at the
+        // same stream size, so the queue is deep enough that the stall
+        // remaining when the readback is issued -- after the ~130-290 ms
+        // the eight 24 KiB Twrites themselves take -- clears the DEEP floor
+        // with margin (run 5: a 415 ms queue left 88 ms once).
+        let tri: [f32; 12] = [-1.0, -1.0, 0.0, 1.0, 3.0, -1.0, 0.0, 1.0, -1.0, 3.0, 0.0, 1.0];
+        for t in 0..RB_TRIS {
+            for (i, v) in tri.iter().enumerate() {
+                unsafe {
+                    core::ptr::write_volatile((vbo_va + ((t * 12 + i) as u64) * 4) as *mut u32, v.to_bits())
+                };
+            }
+        }
+        let before = ctx_field(warp, ctx, "fence-signaled");
+        let up = format!("transfer_to 0 0 0 0 {} 1 1 0 0 0", RB_TRIS * 48);
+        if !write_ctl(warp, &format!("ctx/{}/bo/{}/ctl", ctx, vbo), &up) {
+            rb_incomplete("instrument:vbo-upload");
+        }
+        let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "vbo-upload");
+    }
+    let tap = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
+    if tap < 0 {
+        rb_incomplete("instrument:tapestry-ctl");
+    }
+    if rb_census(warp).is_none() {
+        // A pre-C-6 tapestryd carries no `comp-rb` line: ABSENT, not 0.
+        rb_incomplete("instrument:comp-rb");
+    }
+    if cost_line(&open_read_all(tap, "ctl"), "readback-wait").is_none() {
+        rb_incomplete("instrument:readback-wait");
+    }
+
+    // The mutual adoption: the surface names the ctx, the ctx consents
+    // naming the surface incarnation + BO back.
+    if a.surface_ctl(&format!("glsrc {}", ctx)).is_err() {
+        rb_incomplete("instrument:glsrc");
+    }
+    if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), &format!("present-to {} {}", a.id, bo)) {
+        rb_incomplete("instrument:present-to");
+    }
+
+    // Prime the stream (sub-ctx + a surface over the BO + one clear + the
+    // whole draw state), so the BO holds a frame and vrend's context state
+    // exists before the heavy draws. Then ask the #240 detector: a stream
+    // vrend REJECTS is accepted, its fences retire, and nothing runs -- so
+    // an illegal prime would read as a light queue three arms later
+    // instead of naming itself here.
+    {
+        let before = ctx_field(warp, ctx, "fence-signaled");
+        let mut st: Vec<u32> = Vec::new();
+        subctx_preamble(&mut st);
+        clear_stream(&mut st, res, 1, 1.0, 0.0, 0.0);
+        draw_state_stream(&mut st, vbo_res, RB_W, RB_H);
+        submit_stream(warp, ctx, &st, "readback prime");
+        guard_not_poisoned(warp, "readback prime");
+        let _ = rb_wait_signaled(warp, ctx, before, 1, libthyla_rs::time::Instant::now(), "prime");
+        if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), "verify") {
+            rb_incomplete("instrument:verify-refused");
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+        let c = open_read_string(warp, &format!("ctx/{}/ctl", ctx));
+        let rejected = parse_field(&c, "stream-rejected").unwrap_or(99);
+        let ok = parse_field(&c, "verify-ok").unwrap_or(0);
+        if rejected != 0 || ok == 0 {
+            t_putstr(&format!(
+                "warp-prove: C6-RB PRIME -- stream-rejected {} verify-ok {}: the draw-state stream was refused by vrend (illegal encoding), nothing downstream can run\n",
+                rejected, ok
+            ));
+            rb_incomplete("prime-rejected");
+        }
+    }
+    // Let the compositor settle: B's present may have issued a deferred
+    // health read (HEALTH_PERIOD ticks later); a sync step of the console's
+    // own during LIVE would inherit the stall and be read as the console
+    // waiting.
+    let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(2000));
+
+    let mut verdict_ok = true;
+    let mut first_bad: Option<&'static str> = None;
+    let mut record = |ok: bool, arm: &'static str| {
+        if !ok {
+            verdict_ok = false;
+            if first_bad.is_none() {
+                first_bad = Some(arm);
+            }
+        }
+    };
+
+    // ---- ARM: a present of the adoption on an IDLE queue issues + lands.
+    let c0 = rb_census(warp).unwrap();
+    let (g0, _cpu0) = composed_census(&open_read_all(tap, "ctl")).unwrap_or((0, 0));
+    if a.present(None).is_err() {
+        rb_incomplete("instrument:present-a");
+    }
+    let t0 = libthyla_rs::time::Instant::now();
+    let mut arm_ok = false;
+    let mut composable = false;
+    while t0.elapsed().as_millis() < 5000 {
+        let c = rb_census(warp).unwrap();
+        if c.landed > c0.landed {
+            arm_ok = true;
+            break;
+        }
+        let (g, _) = composed_census(&open_read_all(tap, "ctl")).unwrap_or((0, 0));
+        if g > g0 && c.issued == c0.issued {
+            composable = true;
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
+    }
+    if composable {
+        t_putstr("warp-prove: C6-RB ARM FAIL -- the adopted BO was GPU-composed (blit arm), not read back\n");
+        rb_incomplete("bo-composable");
+    }
+    let c1 = rb_census(warp).unwrap();
+    t_putstr(&format!(
+        "warp-prove: C6-RB ARM {} -- idle-queue present: comp-rb issued {}->{} landed {}->{}\n",
+        if arm_ok { "PASS" } else { "FAIL" },
+        c0.issued, c1.issued, c0.landed, c1.landed
+    ));
+    if !arm_ok {
+        rb_incomplete("arm-never-landed");
+    }
+    record(true, "arm");
+
+    // ---- LIVE + DEEP, RB_LIVE_ROUNDS times: a deep queue, then the present
+    // that ISSUES the compositor readback -- timed -- then the flight
+    // watched until the readback lands. LIVE is the issuing present's own
+    // latency: under the pre-C-6 arm it IS the wait (the whole queue);
+    // under C-6 it publishes a fenced command and returns. The presents and
+    // ctl reads DURING the flight are reported, not judged: any other
+    // client's sync step in that window (the console renderer's ~2 Hz
+    // cursor blink is one) inherits the device stall on QEMU/virgl and the
+    // single-threaded loop waits there for everyone -- consequence 2 of
+    // GPU-DESIGN 4.5.13, F2b's territory, and run 4 of this leg measured
+    // exactly that (a 140 ms second present inside a 168 ms flight).
+    let mut deep_ok = true;
+    let mut live_ok = true;
+    let mut flight_present_max = 0u64;
+    let mut flight_ctl_max = 0u64;
+    let mut rounds_done = 0usize;
+    let mut unconstructed = 0usize;
+    let total = RB_LIVE_SUBMITS * RB_DRAWS_PER_SUBMIT;
+    for attempt in 0..RB_LIVE_ATTEMPTS {
+        if rounds_done >= RB_LIVE_ROUNDS {
+            break;
+        }
+        let round = attempt;
+        // Sentinel the pixel the compositor readback will overwrite: after
+        // it lands, the BLUE byte names the last draw the readback observed.
+        unsafe { core::ptr::write_volatile(va as *mut u32, SENTINEL) };
+        let tap0 = open_read_all(tap, "ctl");
+        let (rw_n0, rw_sum0, _) = cost_line(&tap0, "readback-wait").unwrap();
+        let others0 = others_census(&tap0);
+        let (live_before, live_t0) = rb_queue_heavy(warp, ctx, RB_LIVE_SUBMITS, "live");
+        let cl = rb_census(warp).unwrap();
+        // The issue time is stamped BEFORE the present: the issue is the
+        // dispatch's first act, and a present that WAITS for the readback
+        // (the pre-C-6 arm; sabotage S1) must read as a slow issuing
+        // present, not as a readback issued late into a drained queue.
+        let issued_at_ms = live_t0.elapsed().as_millis() as u64;
+        let tp = libthyla_rs::time::Instant::now();
+        if a.present(None).is_err() {
+            rb_incomplete("instrument:present-a-live");
+        }
+        let first_ms = tp.elapsed().as_millis() as u64;
+        let mut max_present_ms = 0u64;
+        let mut max_ctl_ms = 0u64;
+        let mut presents = 0u64;
+        let mut slot_poisoned = false;
+        let tl = libthyla_rs::time::Instant::now();
+        let mut landed_seen = false;
+        let mut abandoned = false;
+        let mut fence_ms: [u64; RB_LIVE_SUBMITS] = [0; RB_LIVE_SUBMITS];
+        let mut fences_seen = 0usize;
+        let mut landed_at_ms = 0u64;
+        while (tl.elapsed().as_millis() as u64) < RB_LAND_BOUND_MS {
+            let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(5));
+            let t = libthyla_rs::time::Instant::now();
+            if a.present(None).is_err() {
+                rb_incomplete("instrument:present-a-loop");
+            }
+            let ms = t.elapsed().as_millis() as u64;
+            presents += 1;
+            if ms > max_present_ms {
+                max_present_ms = ms;
+            }
+            let t = libthyla_rs::time::Instant::now();
+            let c = rb_census(warp).unwrap();
+            let sig = ctx_field(warp, ctx, "fence-signaled");
+            let ms = t.elapsed().as_millis() as u64;
+            if ms > max_ctl_ms {
+                max_ctl_ms = ms;
+            }
+            let now_ms = live_t0.elapsed().as_millis() as u64;
+            while fences_seen < RB_LIVE_SUBMITS && sig >= live_before + fences_seen as u64 + 1 {
+                fence_ms[fences_seen] = now_ms;
+                fences_seen += 1;
+            }
+            if c.slot == 2 {
+                slot_poisoned = true;
+            }
+            if c.abandoned > cl.abandoned {
+                abandoned = true;
+                break;
+            }
+            if c.landed > cl.landed {
+                landed_seen = true;
+                landed_at_ms = now_ms;
+                break;
+            }
+        }
+        let observed_px = unsafe { core::ptr::read_volatile(va as *const u32) };
+        let observed_idx = if observed_px == SENTINEL { -2 } else { rb_index_of(observed_px, total) };
+        // The queue must be fully retired before the next round (and before
+        // any verdict that reads readback-wait, which is written at retire).
+        let queue_ms = rb_wait_signaled(warp, ctx, live_before, RB_LIVE_SUBMITS as u64, live_t0, "live");
+        let tap1 = open_read_all(tap, "ctl");
+        let (rw_n1, rw_sum1, _) = cost_line(&tap1, "readback-wait").unwrap();
+        let round_wait_ms = rw_sum1.saturating_sub(rw_sum0) / 1000;
+        let others1 = others_census(&tap1);
+        if abandoned {
+            t_putstr("warp-prove: C6-RB LIVE FAIL -- the compositor readback was ABANDONED (30 s)\n");
+            rb_incomplete("abandoned");
+        }
+        if !landed_seen {
+            t_putstr("warp-prove: C6-RB LIVE FAIL -- the compositor readback never landed inside the bound\n");
+            rb_incomplete("live-never-landed");
+        }
+        // CONSTRUCTED: the readback was issued while at least the floor of
+        // queue (plus slack) still lay ahead of it, by the queue's own
+        // retire clock. The sends can be blocked for the queue's remainder
+        // by another client's present landing behind it (its egl-headless
+        // flush is a screen readback queued behind the compositor's blit,
+        // behind the client's draws on V3D's one FIFO -- run 6 measured
+        // 478 / 794 / 1062 ms to send eight Twrites); a readback issued
+        // into a drained queue tests nothing and is retried, never judged.
+        let constructed = issued_at_ms + RB_DEEP_MS + 50 <= queue_ms;
+        if !constructed {
+            unconstructed += 1;
+            t_putstr(&format!(
+                "warp-prove: C6-RB ROUND {} UNCONSTRUCTED -- the readback was issued {} ms into a {} ms queue (sends blocked behind another client's present); retrying\n",
+                round, issued_at_ms, queue_ms
+            ));
+            continue;
+        }
+        rounds_done += 1;
+        let round_deep = rw_n1 > rw_n0 && round_wait_ms >= RB_DEEP_MS && observed_idx >= total as i64 - 2;
+        let round_live = first_ms < RB_LIVE_MS && !slot_poisoned;
+        deep_ok &= round_deep;
+        live_ok &= round_live;
+        if max_present_ms > flight_present_max {
+            flight_present_max = max_present_ms;
+        }
+        if max_ctl_ms > flight_ctl_max {
+            flight_ctl_max = max_ctl_ms;
+        }
+        t_putstr(&format!(
+            "warp-prove: C6-RB ROUND {} -- issuing present {} ms; readback issued at {} landed at {} (ms since the first heavy submit), observed draw {} of {} (pixel {:#010x}); readback-wait +{} ms; the {} heavy submits retired in {} ms, fences at {:?}; during the flight: {} presents max {} ms, ctl reads max {} ms; other console work this round: slot-presents +{} cpu-presents +{} bo-presents +{} xfers +{} pushes +{} flushes +{} health +{}; deep {} live {}\n",
+            round, first_ms, issued_at_ms, landed_at_ms, observed_idx, total, observed_px, round_wait_ms,
+            RB_LIVE_SUBMITS, queue_ms, fence_ms, presents, max_present_ms, max_ctl_ms,
+            others1[0] - others0[0], others1[1] - others0[1], others1[2] - others0[2],
+            others1[3] - others0[3], others1[4] - others0[4], others1[5] - others0[5], others1[6] - others0[6],
+            round_deep as u32, round_live as u32
+        ));
+    }
+    let (_, _, rw_max_all) = cost_line(&open_read_all(tap, "ctl"), "readback-wait").unwrap();
+    let c2 = rb_census(warp).unwrap();
+    if rounds_done < RB_LIVE_ROUNDS {
+        t_putstr(&format!(
+            "warp-prove: C6-RB DEEP INSTRUMENT -- only {} of {} rounds could be constructed in {} attempts ({} unconstructed: the sends kept landing behind another client's present)\n",
+            rounds_done, RB_LIVE_ROUNDS, RB_LIVE_ATTEMPTS, unconstructed
+        ));
+        rb_incomplete("deep-unconstructed");
+    }
+    t_putstr(&format!(
+        "warp-prove: C6-RB DEEP {} -- {} constructed rounds ({} unconstructed retried): every compositor readback waited >= {} ms for its queue (readback-wait max {} ms) and observed the queue's LAST draw: the device paid the queue\n",
+        if deep_ok { "PASS" } else { "FAIL" },
+        rounds_done, unconstructed, RB_DEEP_MS, rw_max_all / 1000
+    ));
+    if !deep_ok {
+        // Diagnose the light queue: did vrend latch the stream off (#240 --
+        // submits accepted, fences retiring, nothing running), or did the
+        // work simply cost nothing? The detector answers the first.
+        let _ = write_ctl(warp, &format!("ctx/{}/ctl", ctx), "verify");
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+        let c = open_read_string(warp, &format!("ctx/{}/ctl", ctx));
+        t_putstr(&format!(
+            "warp-prove: C6-RB DEEP diagnosis -- stream-rejected {} verify-seq {} verify-ok {} (a rejected stream retires its fences without running)\n",
+            parse_field(&c, "stream-rejected").unwrap_or(99),
+            parse_field(&c, "verify-seq").unwrap_or(99),
+            parse_field(&c, "verify-ok").unwrap_or(99)
+        ));
+    }
+    t_putstr(&format!(
+        "warp-prove: C6-RB LIVE {} -- {} constructed rounds: the present that ISSUES the compositor readback of a deep queue returned inside {} ms every time (the pre-C-6 arm returns after the whole wait); comp-rb coalesced {}->{} landed {}->{}\n",
+        if live_ok { "PASS" } else { "FAIL" },
+        rounds_done, RB_LIVE_MS, c1.coalesced, c2.coalesced, c1.landed, c2.landed
+    ));
+    t_putstr(&format!(
+        "warp-prove: C6-RB FLIGHT REPORT -- while a compositor readback of a deep queue was in flight: the adopting surface's later presents max {} ms, warp ctl reads max {} ms (data: another client's sync step in that window inherits the device stall on this host and the loop waits there -- 4.5.13 consequence 2)\n",
+        flight_present_max, flight_ctl_max
+    ));
+    record(deep_ok, "deep");
+    record(live_ok, "live");
+
+    // ---- DEADLINE + F2B: the CLIENT's own fenced readback of its busy BO,
+    // then B's presents behind it. Every present must succeed (busy is not
+    // dead); their latency is REPORTED.
+    let (dl_before, dl_t0) = rb_queue_heavy(warp, ctx, RB_DEADLINE_SUBMITS, "deadline");
+    let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", RB_W, RB_H);
+    if !write_ctl(warp, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &xfer) {
+        rb_incomplete("instrument:f2b-transfer-refused");
+    }
+    let mut b_ok = true;
+    let mut b_max_ms = 0u64;
+    let mut b_sum_ms = 0u64;
+    let b_n = 10u64;
+    for i in 0..b_n {
+        for px in b.pixels().iter_mut() {
+            *px = 0xFF00_0000 | (0x20 + 8 * i as u32);
+        }
+        let t = libthyla_rs::time::Instant::now();
+        let r = b.present(None);
+        let ms = t.elapsed().as_millis() as u64;
+        b_sum_ms += ms;
+        if ms > b_max_ms {
+            b_max_ms = ms;
+        }
+        if r.is_err() {
+            b_ok = false;
+            t_putstr(&format!("warp-prove: C6-RB DEADLINE -- B present {} FAILED after {} ms\n", i, ms));
+            break;
+        }
+    }
+    // The client's readback + the 7 submits retire; the engine must be alive.
+    let dl_queue_ms =
+        rb_wait_signaled(warp, ctx, dl_before, RB_DEADLINE_SUBMITS as u64 + 1, dl_t0, "deadline");
+    let landed_px = unsafe { core::ptr::read_volatile(va as *const u32) };
+    let landed_idx = rb_index_of(landed_px, RB_DEADLINE_SUBMITS * RB_DRAWS_PER_SUBMIT);
+    let alive = b.present(None).is_ok();
+    let poisoned_after = parse_field(&open_read_string(warp, "ctl"), "poisoned").unwrap_or(99);
+    let deadline_ok = b_ok && alive && poisoned_after == 0;
+    t_putstr(&format!(
+        "warp-prove: C6-RB DEADLINE {} -- {} B presents behind the client's own busy readback all succeeded: {}; engine alive after: {}; poisoned {}\n",
+        if deadline_ok { "PASS" } else { "FAIL" },
+        b_n, b_ok as u32, alive as u32, poisoned_after
+    ));
+    t_putstr(&format!(
+        "warp-prove: C6-RB F2B REPORT -- bystander present latency behind a client readback of a busy BO: max {} ms mean {} ms over {} presents; the {} heavy submits + the readback retired in {} ms (the client's readback observed draw index {} of {}, pixel {:#010x})\n",
+        b_max_ms, b_sum_ms / b_n, b_n, RB_DEADLINE_SUBMITS, dl_queue_ms, landed_idx, RB_DEADLINE_SUBMITS * RB_DRAWS_PER_SUBMIT, landed_px
+    ));
+    record(deadline_ok, "deadline");
+
+    // ---- Teardown: withdraw the adoption, destroy the ctx, drop the
+    // surfaces; the seam must be clean.
+    let _ = write_ctl(warp, &format!("ctx/{}/ctl", ctx), "present-to off");
+    let _ = a.surface_ctl("glsrc off");
+    if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), "destroy") {
+        fail("readback: ctx destroy");
+    }
+    let c_end = rb_census(warp).unwrap();
+    let poisoned_end = parse_field(&open_read_string(warp, "ctl"), "poisoned").unwrap_or(99);
+    drop(a);
+    drop(b);
+    unsafe {
+        t_close(tap);
+        t_close(warp);
+    }
+    if poisoned_end != 0 || c_end.slot == 2 {
+        t_putstr(&format!(
+            "warp-prove: C6-RB CLEAN FAIL -- poisoned {} rb-slot {} after teardown\n",
+            poisoned_end, c_end.slot
+        ));
+        record(false, "clean");
+    }
+    t_putstr(&format!(
+        "warp-prove: C6-RB census at end -- issued {} landed {} coalesced {} rb-abandoned {} rb-slot {}\n",
+        c_end.issued, c_end.landed, c_end.coalesced, c_end.abandoned, c_end.slot
+    ));
+    if verdict_ok {
+        t_putstr("warp-prove: C6-READBACK DONE\n");
+    } else {
+        rb_incomplete(first_bad.unwrap_or("unknown"));
+    }
 }

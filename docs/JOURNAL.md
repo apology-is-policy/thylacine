@@ -22,6 +22,140 @@ needed the operator.
 
 ---
 
+## 2026-08-18 — C-6b: the readback arm off the console's dispatch, and the load that measured which GL context a queue is on
+
+Resumed from the self-compaction at `64ded01d` (the C-0d Fable close + the
+C-6a spec pushed). The mac was aux's for the first hours (its SMP gate, then
+its round-B P1 fix), so this run did its reading, code and docs cold and
+queued on the lease for every build — three times, because the gate's
+positive control kept saying "the queue you built is not the queue you
+think", which is the finding worth writing down.
+
+### The implementation (`server.rs` / `gpu.rs`) — one refinement the design's letter did not have
+
+GPU-DESIGN 4.5.13 said the compositor-owned tag would carry `ctx_pub = 0`.
+Reading the driver's abandonment bookkeeping said no: `fslot_poison_ctx`,
+`FenceVindication.ctx_pub` and `ctx_has_poisoned_slot` all key on the tag's
+ctx, and 0 is `warp_ctx_vindicate`'s "no condemned slot" sentinel — an
+abandoned compositor readback under ctx 0 that the device later retired
+would push a vindication for ctx 0, `position(p == 0)` would match an
+arbitrary un-condemned slot, and `ctx_destroy(slot+1)` would hit a live host
+context. And the client's own vindication has to WAIT for our abandoned
+readback of its BO (round-4 F1: one late retire proves nothing about the
+rest), which only holds if the slot is attributed to the client. So the tag
+carries the CLIENT's `ctx_pub` plus explicit `readback` / `comp` bits; the
+pump routes on the bit and poisons / decrements the right ctx. Recorded as
+AS-BUILT 1 in 4.5.13. Everything else is the design as written: the
+reserved slot (`COMP_FSLOT` = 15; the client pool is 0..15 and
+`lane_exhausted` / `fenced-free` read only that), `Comp.comp_rb` +
+the gen-pinned `rb_wanted` FIFO (one in flight compositor-wide — the slot IS
+the bound), `comp_readback_retired` BEFORE `warp_pump_retires` in the pass
+(the pump's decrement can quiesce a retiring BO; the compose must read `va`
+first, and `gl_adoption` refuses a retiring BO/ctx so a destroy in flight
+drops the frame), `fences_in_flight` + `comp_rb_in_flight` symmetric on
+issue and retire, the admission subtraction, the sticky 30 s deadline while
+any readback is in flight, `Cost::ReadbackWait`, the `comp-rb` census (keys
+prefixed — `abandoned` was already the test-mode key and `parse_field` takes
+the first hit).
+
+### The gate, and the two loads that were not the load
+
+`warp-prove readback` (its own verb, like `reject`: it stalls the device on
+purpose) with named arms — ARM (a present on an idle queue issues and lands
+a compositor readback), DEEP (the readback the device paid waited ≥ 100 ms:
+the positive control that the queue existed), LIVE (while it is in flight,
+the adopting surface's own presents and warp ctl reads answer inside 50 ms —
+under the old arm the first present takes the whole wait), DEADLINE (a
+client's OWN fenced readback of its busy BO, then ten bystander presents
+behind it: all succeed, engine alive — busy read as busy), F2B (the
+bystander's latency, reported), CLEAN. `C6-READBACK DONE` is a verdict (the
+F6 shape); `warp-readback.exp` hard-fails on `INCOMPLETE(<arm>)`.
+
+**Run 1** (800 1:1 NEAREST full-frame blits, ping-pong BO ↔ scratch): ARM
+PASS, LIVE PASS, DEADLINE PASS — and DEEP FAIL: `readback-wait max 16 ms`.
+1.6 GB of copies do not finish in 16 ms on a Pi. `vrend_renderer_blit`
+(1.1.0) takes the `glCopyImageSubData` shortcut for a 1:1 same-format RGBA
+NEAREST blit; whatever those became, they were not GPU work the readback
+waited on. Without the control LIVE would have passed on a light queue —
+which is exactly why the control is there.
+
+**Run 2** (SCALED blits, 512² ↔ 1024²): the 8 submits retired in **1335 ms**
+— real work — and DEEP still FAILED: the compositor readback of the same BO
+waited **84 ms**, and the client's own readback stalled the bystander by at
+most 149 ms. LIVE FAILED too (94 ms), which turned out to be the same
+mechanism seen from the other side. A scaled blit goes through
+`vrend_renderer_blit_int` → the BLITTER, and vrend's blitter owns its **own
+GL context** (`vrend_blitter.c`); a client-context fence and a
+client-context `glReadPixels` are not ordered behind another context's
+work. The queue was deep; the readback was not behind it. **A claim about a
+lane must be re-derived per COMMAND CLASS** was C-0d's lesson; this is its
+sibling: **a queue is deep only on the GL context the wait is on.** A real
+client's draws land on its own context, so the honest load is client-context
+work: **run 3** queues clear PAIRS (the BO to an index-encoded colour, then a
+2× scratch, alternating framebuffers so mesa v3d cannot fold them — each a
+full-surface store), and the leg now prints the queue's fence timeline and
+**which clear index the compositor readback observed** (the BLUE byte of the
+pixel it landed): "the readback waited for the queue" is a pixel, not a
+duration.
+
+**Run 3** (alternating full-surface clears, BO ↔ a 2× scratch, index-encoded
+colour): the readback observed clear **639 of 640** — it DID wait for the
+whole queue, the mechanism is right — and the whole queue took 122 ms: mesa
+v3d keys jobs by framebuffer (`v3d_get_job`), an FBO switch does not flush,
+and 1280 clears folded into two jobs. **Run 4** (draws — hand-encoded from
+the Mesa tree's `virgl_encode.c` field for field, a `verify` after the prime
+so a rejected stream names itself): DEEP PASS at last (readback-wait 130 ms,
+draw 2399 of 2400 observed) — and LIVE FAIL on the SECOND present (140 ms
+inside a 168 ms flight; the issuing present 0 ms). **Run 5** made LIVE the
+issuing present over three rounds and reported the rest: LIVE 0/0/0 ms;
+DEEP failed one round at 88 ms because the eight 24 KiB Twrites
+themselves took 130–290 ms and the ~415 ms queue was nearly drained at
+issue. **Run 6** deepened the queue (3 triangles per draw) and added the
+census of OTHER console work per round: `slot-presents +1` in EVERY round —
+the console renderer's cursor-blink present — and the sends took 478 / 794 /
+1062 ms. That named the deterministic blocker: on egl-headless a present's
+`RESOURCE_FLUSH` is the display backend's `glReadPixels` of the screen (the
+C-4 lane cost), queued behind the compositor's blit, behind the client's
+draws on V3D's one hardware FIFO; the single-threaded loop waits there for
+everyone, and my own sends waited behind it too, so a readback issued after
+them met a drained queue. **Run 7** halved the send exposure (4 submits × 6
+triangles) and made a round self-validating — issued into a queue with less
+than the floor left = UNCONSTRUCTED, retried, never judged — and the gate
+went green: `WARP-C C-6 GATE: VERIFIED`, issuing present 0/0/0 ms,
+readback-wait 497/1001/1027 ms, draw 1199/1200 observed every round, two
+unconstructed rounds retried; DEADLINE 10/10 alive; F2B max 1034 ms mean
+119 ms. The final artifact re-ran green (805/1005/1005 ms, F2B max 267 ms).
+
+**Sabotage S1** — the issuing present made to WAIT for the readback (the
+pre-C-6 arm): first run read as `deep-unconstructed`, because the prover
+stamped the issue time AFTER the present returned; stamped before it, the
+sabotage fails LIVE with the issuing present at 269 / 969 / 1017 ms — the
+arm discriminates the defect and nothing else. Not run: a sabotage of the
+deadline widening — no stale wakes were observed during ~1 s stalls on this
+lane, so the old 500 ms deadline may never have fired here; the widening is
+correct by construction and the DEADLINE arm is its net where wakes arrive.
+
+What the run says about C-6 under QEMU/virgl, honestly (AS-BUILT 3 in
+4.5.13): the console never waits inside the present that issues the
+readback, and one readback is in flight at a time — but any sync step the
+console issues while a client's queue is deep inherits the stall, and on
+egl-headless every present is such a step. C-6 removes the per-present
+multiplication and the false dead-latch; the stall itself is the host's
+(F2b) until Venus / v3d.
+
+### The bar
+
+Local: suite 1424/1424 + arc gates 2/2 + clade 3/3 + G-4 CONSOLE VERIFY OK
+(kernel byte-unchanged; SMP 40/40 @401d4b27 carries). thyla-pi (KVM, V3D,
+virglrenderer 1.1.0): `readback` VERIFIED on the final artifact; `reject`
+C-0d DETECTOR VERIFIED; `prove` WARP-2 VERIFIED; `quake` WARP-4 VERIFIED
+(969 frames 44.2 fps; `comp-rb issued 0`); `decomp gl` PASS (composed gpu
+1106 cpu 0; `readback 0`, `readback-wait 0` — the blit arm untouched). LS-CI
+gfx subset (ls-ci + 15 ls-gfx-*) 16/16, 0 retries, run alongside the Pi's
+final gate (the mac idle otherwise). Every ramfs verified by content before
+each sync (`cpio` extract + `strings`), and the `cd usr` trap paid three
+more times before I split the build from the bake.
+
 ## 2026-08-18 — the C-0d Fable close: C-4's lesson had been applied to one pair and not the other, and the readback arm's remedy is not what it looked like
 
 Resumed from the self-compaction at `401d4b27` (the merge pushed; the C-0d

@@ -1864,6 +1864,7 @@ dependencies = [
 name = "warp-prove"
 version = "0.1.0"
 dependencies = [
+ "libtapestry",
  "libthyla-rs",
 ]
 

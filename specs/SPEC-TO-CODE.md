@@ -1839,43 +1839,59 @@ and the sites they will bind at C-2/C-3:
   by the synchronous present (blit response before the CQE that recycles
   the slot) — the GL-execution residual is P2, measured 0/500 (4.5.4).
 
-### The C-6 readback class (spec landed 2026-08-18, model-first; the impl binds at C-6)
+### The C-6 readback class (spec landed 2026-08-18, model-first; the impl BOUND at C-6b the same day)
 
 Behind the same `ALLOW_COMPOSE` switch (additive by measurement: the six
 direct-path cfgs reproduce **5413** distinct states exactly with the new
 variable never leaving FALSE; the composed clean cfgs grow to 94680):
 
-- **`ComposeReadbackIssue(g)` / `ComposeReadbackComplete(g)`** ↔ (WILL bind
-  at C-6, GPU-DESIGN §4.5.13) the composed-GL present's `!done` fallback arm
-  in `Conn::present`: today a synchronous `transfer_from_3d_sync(g.dev_ctx,
-  …)` of the whole frame into the BO's own backing (so the readback lives
-  inside one dispatch and needs no model — the I-40 by-construction shape);
-  at C-6 a **fenced** `Gpu::transfer_3d(to_host = false, …)` tagged
-  compositor-owned (`FenceTag.ctx_pub = 0`), the tpresent replied
-  immediately, and the fence retiring → `blit_composed_pixels` +
-  `screen_push` in the fence pump (`comp_readback_retired`). `~InRead(g)` on
-  Issue ↔ one in flight per surface, latest wins (`rb_again`). `filled[g]` ↔
-  the client presented a frame that exists. NO `attached[g]` (the readback
-  runs under the CLIENT's ctx — the arm for the un-imported BO) and NO
-  `FillLanded(g)` (the device serializes the read against the fill: the
-  in-order controlq + the synchronous host read, verified against
+- **`ComposeReadbackIssue(g)`** ↔ `Comp::rb_request` → `Comp::rb_issue`
+  (`usr/tapestryd/src/server.rs`), called from the composed-GL present's
+  `!done` arm in `Conn::present`: a **fenced** `Gpu::transfer_from_3d_comp`
+  (`gpu.rs`; the reserved slot `COMP_FSLOT`, `FenceTag { comp: true,
+  readback: true, ctx_pub: <the client's> }` — the client's id, NOT 0, see
+  GPU-DESIGN §4.5.13 AS-BUILT 1), the record `Comp.comp_rb` written, the
+  tpresent replied immediately. Before C-6b this was a synchronous
+  `transfer_from_3d_sync` inside one dispatch (the I-40 by-construction
+  shape that needed no model). `~InRead(g)` on Issue ↔ ONE in flight
+  compositor-wide (`comp_rb.is_some()` → `rb_enqueue`, the gen-pinned
+  `rb_wanted` FIFO; latest wins at issue time). `filled[g]` ↔ the client
+  presented a frame that exists (`gl_adoption` resolves). NO `attached[g]`
+  (the readback runs under the CLIENT's ctx — the arm for the un-imported
+  BO) and NO `FillLanded(g)` (the device serializes the read against the
+  fill: the in-order controlq + the synchronous host read, verified against
   virglrenderer 1.1.0 `vrend_renderer_transfer_send_iov`).
+- **`ComposeReadbackComplete(g)`** ↔ `Comp::comp_readback_retired`, reached
+  from `warp_service_fences` for every `tag.comp` retire BEFORE
+  `warp_pump_retires` in the same pass (the pump's decrement may have just
+  quiesced a retiring BO; the compose must read `va` before that free): the
+  re-validation (same surface gen, scanout still Composed, `gl_adoption`
+  still resolving to the same ctx/BO/res/va/w/h — a retiring BO/ctx fails
+  it) then `blit_composed_pixels(.., Some(va))` + `screen_push`; the frame
+  is DROPPED (`rb_dropped`) otherwise. `comp_rb_pump` at the end of the pass
+  issues the next wanted incarnation.
 - **`DrainedOfReadbacks(g)` on `ServerRelease` + `Free`** ↔ the readback is
-  counted in the owning ctx's `fences_in_flight` (every quiesce predicate —
-  `wctx_retire`, `warp_pump_retires`, `wbo_destroy`'s leak posture — reads
-  it) so a BO with a compositor readback landing in its backing is deferred
-  / leaked exactly like one with a client fence outstanding; abandonment at
-  `FENCE_ABANDON_MS` poisons the ctx like a client fence would (the device
-  may still write that backing). Modeled as an OMITTED CONJUNCT under
-  `BUGGY_READBACK_FREE` (`tapestry_present_buggy_readback_free.cfg`,
-  `NoTornReadback` violated in 11 states: … `ClunkMap` →
-  `ComposeReadbackIssue` → `Destroy` → `ServerRelease` → `Free` with the
-  readback still landing) — the graver twin of `drain_skipped`: a device
-  WRITING freed pages, not reading them.
+  counted in the owning ctx's `fences_in_flight` (`rb_issue` increments;
+  the pump's common arm decrements on the tag) so every quiesce predicate —
+  `wctx_retire`, `warp_pump_retires`, `wbo_destroy`'s leak posture — holds
+  the backing the device is writing into; abandonment at
+  `FENCE_ABANDON_MS` sets `fence_poisoned` on the client's ctx like a client
+  fence would (the device may still write that backing) — which is exactly
+  why the tag must carry the client's ctx_pub. Modeled as an OMITTED
+  CONJUNCT under `BUGGY_READBACK_FREE`
+  (`tapestry_present_buggy_readback_free.cfg`, `NoTornReadback` violated in
+  11 states: … `ClunkMap` → `ComposeReadbackIssue` → `Destroy` →
+  `ServerRelease` → `Free` with the readback still landing) — the graver
+  twin of `drain_skipped`: a device WRITING freed pages, not reading them.
 - **Below the model** (durations and bounds, not states): the reserved fenced
-  slot, `comp_rb_in_flight` subtracted from admission, the sync-slot deadline
-  widened to `FENCE_ABANDON_MS` while any readback is in flight (F2b), and
-  `Cost::ReadbackWait`.
+  slot (`Controlq::alloc_comp_slot`; the client pool is `0..COMP_FSLOT`),
+  `WarpCtx.comp_rb_in_flight` subtracted in `warp_fenced_admit`, the
+  sync-slot deadline widened to `FENCE_ABANDON_MS` in
+  `Controlq::submit_and_wait` while `readback_in_flight()` (any tag with the
+  `readback` bit — a client `transfer_3d(to_host = false)` or ours; sticky
+  for the wait once observed) (F2b), and `Cost::ReadbackWait`. Gate:
+  `warp-prove readback` / `tools/warp-host.sh readback` (ARM / DEEP / LIVE
+  / DEADLINE verdict arms + the F2B measurement).
 
 **A design obligation C-1 surfaced for C-2/C-3, before any code:** the D1
 recycle gate does not survive the composed path unchanged. tapestryd

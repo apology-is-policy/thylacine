@@ -247,6 +247,13 @@ const _: () = {
 // only matters to the Loom bulk path (GPU-DESIGN 4.1), which will carry
 // its own sizing.
 pub const FENCED_SLOTS: usize = 16;
+/// The one slot reserved for compositor-owned chains (Warp-C C-6, GPU-DESIGN
+/// 4.5.13): the composed-GL present's readback rides it, so it never
+/// competes with -- and can never be starved by -- the client pool, which is
+/// the other FENCED_SLOTS - 1. Clients see one fewer slot; the per-ctx share
+/// is unchanged. A compositor readback abandoned here poisons only this
+/// slot, never a client's.
+pub const COMP_FSLOT: usize = FENCED_SLOTS - 1;
 const FREQ_LEN: u64 = 0x9000;
 const FRESP_STRIDE: u64 = 0x100;
 const FRESP_OFF: u64 = (FENCED_SLOTS as u64) * FREQ_LEN;
@@ -256,6 +263,12 @@ const _: () = {
     assert!(2 + 2 * FENCED_SLOTS <= QUEUE_SIZE as usize);
     assert!((FENCED_SLOTS as u64) * FRESP_STRIDE <= PAGE_SIZE);
     assert!(FRESP_STRIDE >= GPU_CTRL_HDR_LEN as u64);
+    // The reserved slot must leave a client pool (C-6): a lane of one would
+    // give clients nothing, and the share below is derived from the WHOLE
+    // lane, so it must still fit the client pool with room for a second
+    // client (the round-5 F4 property).
+    assert!(COMP_FSLOT >= 2 && COMP_FSLOT < FENCED_SLOTS);
+    assert!(FENCED_SLOTS / 2 < COMP_FSLOT);
     // The lane is one PLAIN dma_create: stay under the kernel's 1 MiB
     // per-buffer cap (KOBJ_DMA_MAX_SIZE -- a literal here because the
     // kernel header is not visible to this crate; the runtime witness is
@@ -441,7 +454,28 @@ pub struct FenceVindication {
 #[derive(Clone, Copy)]
 pub struct FenceTag {
     pub fence_id: u64,
+    /// The seam ctx whose RESOURCES this chain touches -- always the
+    /// client's, even for a compositor-owned readback (`comp`): the
+    /// abandonment bookkeeping (`fslot_poison_ctx`, `ctx_has_poisoned_slot`,
+    /// the vindication) keys on this id, and a device write into a client
+    /// BO that never retired must poison THAT ctx and hold up THAT ctx's
+    /// vindication (round-4 F1: one late retire proves nothing about the
+    /// rest). 0 is `warp_ctx_vindicate`'s no-slot sentinel and is never
+    /// minted, so it can never be a marker here.
     pub ctx_pub: u32,
+    /// TRANSFER_FROM_HOST_3D: the device READS the resource synchronously at
+    /// processing time (Warp-C C-6, GPU-DESIGN 4.5.13), so while one is in
+    /// flight the sync slot's stale-wake deadline is the fence bound, not
+    /// the dead-device one -- a device stalled behind a legitimate readback
+    /// is busy, and a false `dead` latch is the #31 loss.
+    pub readback: bool,
+    /// Compositor-owned (the composed-GL present's readback arm, C-6): rode
+    /// the reserved slot; the fence pump routes it to
+    /// `comp_readback_retired`, it is counted in the ctx's `fences_in_flight`
+    /// (retire safety) but subtracted from admission, and its retire never
+    /// bumps the client's `fence_signaled` (#210: the client counts fences it
+    /// ISSUED).
+    pub comp: bool,
     /// The device never retired this chain within FENCE_ABANDON_MS: the
     /// slot's bookkeeping was reclaimed so the engine stops counting it,
     /// but the chain may still be live device-side. NOT a completion --
@@ -555,14 +589,44 @@ impl Controlq {
         self.fslots.iter().flatten().count() as u32
     }
 
+    /// A CLIENT chain's slot: first-fit over the client pool, which is every
+    /// slot but the reserved one (Warp-C C-6). Two clients at their share
+    /// (`WARP_CTX_FENCE_MAX` = FENCED_SLOTS / 2) fill the whole lane, so the
+    /// compositor's own readback must not compete here; the shares are
+    /// unchanged and the second client's last chain simply refuses Again.
     fn alloc_fenced_slot(&self) -> Option<usize> {
-        (0..FENCED_SLOTS).find(|&i| self.fslots[i].is_none() && !self.fslot_poisoned[i])
+        (0..COMP_FSLOT).find(|&i| self.fslots[i].is_none() && !self.fslot_poisoned[i])
     }
 
-    /// Every slot poisoned and none in flight: nothing will ever free one,
-    /// so a client must be told to STOP retrying (round-2 F6).
+    /// The reserved slot for compositor-owned chains (C-6): free and not
+    /// poisoned, or None. A poisoned reserved slot comes back through the
+    /// same late-retire vindication as any other; until then the readback
+    /// arm parks its surfaces on stale frames rather than borrowing a
+    /// client slot (a compositor chain abandoned in the client pool would
+    /// shrink the lane for every client).
+    fn alloc_comp_slot(&self) -> Option<usize> {
+        if self.fslots[COMP_FSLOT].is_none() && !self.fslot_poisoned[COMP_FSLOT] {
+            Some(COMP_FSLOT)
+        } else {
+            None
+        }
+    }
+
+    /// Every CLIENT slot poisoned and none in flight: nothing will ever free
+    /// one, so a client must be told to STOP retrying (round-2 F6). Over the
+    /// client pool only -- a healthy reserved slot is not one a client can
+    /// ever be handed, so counting it would keep clients retrying forever
+    /// against a pool that is in fact exhausted.
     fn lane_exhausted(&self) -> bool {
-        (0..FENCED_SLOTS).all(|i| self.fslot_poisoned[i] && self.fslots[i].is_none())
+        (0..COMP_FSLOT).all(|i| self.fslot_poisoned[i] && self.fslots[i].is_none())
+    }
+
+    /// Any in-flight fenced chain that is a READBACK (a client's
+    /// `transfer_3d(to_host = false)` or the compositor's own): the device
+    /// executes it synchronously at processing time and every sync step
+    /// queued behind it inherits that wait (C-6, consequence 2).
+    fn readback_in_flight(&self) -> bool {
+        self.fslots.iter().flatten().any(|t| t.readback)
     }
 
     /// Reclaim slots whose chains never retired (audit F6). Bounds the
@@ -842,13 +906,37 @@ impl Controlq {
     /// wall-clock deadline bounds EVENT-ful non-progress. The deadline
     /// applies to THIS chain only -- fenced chains have none (a fence
     /// legitimately takes as long as its GL work) -- and stays honest under
-    /// a fence backlog: the device writes a non-fenced response at
-    /// PROCESSING time, and controlq processing is in-order, so pending
-    /// fences ahead of this chain cannot delay its retirement.
+    /// a fence backlog of SUBMITs: the device writes a non-fenced response
+    /// at PROCESSING time, and controlq processing is in-order, so pending
+    /// fenced submits ahead of this chain cannot delay its retirement --
+    /// their processing is a decode.
+    ///
+    /// A pending fenced READBACK is the exception, and the claim above is
+    /// false for it (Warp-C C-6, GPU-DESIGN 4.5.13; F2b): QEMU processes the
+    /// controlq inline on its main loop and virglrenderer executes a
+    /// TRANSFER_FROM_HOST_3D synchronously at decode (`glMapBufferRange` /
+    /// `glReadPixels` on the resource's context -- a GL wait for every job
+    /// that writes the resource), so a sync step queued behind a readback of
+    /// a BUSY resource inherits that wait, for as long as the resource's
+    /// owner has queued ahead of it. That device is busy, not dead, and the
+    /// 500 ms deadline latching `dead` on it is exactly the #31 loss it
+    /// exists to prevent. So while ANY readback is in flight -- a client's
+    /// `transfer_3d(to_host = false)` or the compositor's own -- the deadline
+    /// is FENCE_ABANDON_MS, the bound every fenced chain already carries.
+    /// STICKY for this wait once observed: the readback that caused a stall
+    /// retires in the drain that finally moves used.idx, and this chain's own
+    /// entry follows it in the same drain or the next -- re-narrowing the
+    /// bound the instant the readback is gone would fail the very wait it
+    /// widened.
     fn submit_and_wait(&mut self, req_len: u32, resp_len: u32) -> Result<u32, ()> {
         if self.dead {
             return Err(());
         }
+        let mut deadline_ms = if self.readback_in_flight() {
+            FENCE_ABANDON_MS
+        } else {
+            SUBMIT_DEADLINE_MS
+        };
         for i in 0..(GPU_CTRL_HDR_LEN as u64) {
             unsafe { w8(self.ring_va + RESP_OFF + i, 0) };
         }
@@ -906,11 +994,14 @@ impl Controlq {
                 spins += 1;
             }
             wakes += 1;
+            if self.readback_in_flight() {
+                deadline_ms = FENCE_ABANDON_MS;
+            }
             let t0 = *stale_since.get_or_insert_with(Instant::now);
-            if t0.elapsed().as_millis() as u64 >= SUBMIT_DEADLINE_MS {
+            if t0.elapsed().as_millis() as u64 >= deadline_ms {
                 say!(
                     "tapestryd: gpu command never retired ({} stale wakes over {} ms)",
-                    wakes, SUBMIT_DEADLINE_MS
+                    wakes, deadline_ms
                 );
                 self.dead = true;
                 return Err(());
@@ -1549,8 +1640,9 @@ impl Gpu {
 
     // --- the fenced lane (Warp-2d) ---------------------------------------
 
-    /// Common fenced-lane admission: lane present + engine alive, the
-    /// request (header + `extra` payload bytes) fits a slot, a slot free.
+    /// Common CLIENT fenced-lane admission: lane present + engine alive, the
+    /// request (header + `extra` payload bytes) fits a slot, a client-pool
+    /// slot free (the reserved compositor slot is not in this pool, C-6).
     fn fenced_begin(&mut self, extra: u64) -> Result<usize, FencedErr> {
         if self.ctrl.flane_va == 0 || self.ctrl.dead {
             return Err(FencedErr::Dead);
@@ -1569,18 +1661,32 @@ impl Gpu {
         }
     }
 
+    /// The compositor-owned admission (Warp-C C-6): lane present + engine
+    /// alive, the reserved slot free. `Again` here means the reserved slot is
+    /// occupied or poisoned -- the caller keeps the request and retries at
+    /// the next completion / vindication -- never that the client pool is
+    /// full, which this path does not touch.
+    fn fenced_begin_comp(&mut self) -> Result<usize, FencedErr> {
+        if self.ctrl.flane_va == 0 || self.ctrl.dead {
+            return Err(FencedErr::Dead);
+        }
+        self.ctrl.alloc_comp_slot().ok_or(FencedErr::Again)
+    }
+
     fn fenced_commit(
         &mut self,
         slot: usize,
         req_len: u32,
         fence_id: u64,
         ctx_pub: u32,
+        readback: bool,
+        comp: bool,
     ) -> Result<u64, FencedErr> {
         self.ctrl
             .submit_fenced(
                 slot,
                 req_len,
-                FenceTag { fence_id, ctx_pub, abandoned: false },
+                FenceTag { fence_id, ctx_pub, readback, comp, abandoned: false },
             )
             .map_err(|_| FencedErr::Dead)?;
         self.fence_next = fence_id;
@@ -1611,6 +1717,8 @@ impl Gpu {
             GPU_CTRL_HDR_LEN + 8 + stream.len() as u32,
             fence_id,
             ctx_pub,
+            false,
+            false,
         )
     }
 
@@ -1730,6 +1838,62 @@ impl Gpu {
         layer_stride: u32,
     ) -> Result<u64, FencedErr> {
         let slot = self.fenced_begin(48)?;
+        self.stage_transfer_3d(
+            slot, to_host, ctx_id, res_id, level, x, y, z, w, h, d, offset, stride, layer_stride,
+        );
+        let fence_id = self.fence_next.wrapping_add(1);
+        // A readback marks the lane (the sync-slot deadline reads it, C-6):
+        // the device executes it synchronously at processing time.
+        self.fenced_commit(slot, GPU_CTRL_HDR_LEN + 48, fence_id, ctx_pub, !to_host, false)
+    }
+
+    /// The COMPOSITOR-OWNED fenced readback (Warp-C C-6, GPU-DESIGN 4.5.13):
+    /// a full-frame TRANSFER_FROM_HOST_3D of a client's BO into its own
+    /// backing, issued under the CLIENT's device ctx (the resource is
+    /// attached there), on the reserved slot, tagged `comp` + `readback`
+    /// against the client's seam ctx (`ctx_pub`, for the poison/vindication
+    /// bookkeeping -- see `FenceTag`). The caller never waits: the fence
+    /// pump routes the retire to `comp_readback_retired`. Level 0, origin
+    /// box, depth 1, tight stride -- the exact request the synchronous
+    /// `transfer_from_3d_sync` used to make on the console's dispatch, moved
+    /// to a lane the console does not wait on.
+    pub fn transfer_from_3d_comp(
+        &mut self,
+        ctx_id: u32,
+        ctx_pub: u32,
+        res_id: u32,
+        w: u32,
+        h: u32,
+        stride: u32,
+    ) -> Result<u64, FencedErr> {
+        let slot = self.fenced_begin_comp()?;
+        self.stage_transfer_3d(slot, false, ctx_id, res_id, 0, 0, 0, 0, w, h, 1, 0, stride, 0);
+        let fence_id = self.fence_next.wrapping_add(1);
+        self.fenced_commit(slot, GPU_CTRL_HDR_LEN + 48, fence_id, ctx_pub, true, true)
+    }
+
+    /// Stage a TRANSFER_TO/FROM_HOST_3D request in fenced slot `slot`'s
+    /// buffer (the fence id is written by `fenced_commit`'s caller order:
+    /// the header carries `fence_next + 1`, which is what `fenced_commit`
+    /// then records).
+    #[allow(clippy::too_many_arguments)]
+    fn stage_transfer_3d(
+        &mut self,
+        slot: usize,
+        to_host: bool,
+        ctx_id: u32,
+        res_id: u32,
+        level: u32,
+        x: u32,
+        y: u32,
+        z: u32,
+        w: u32,
+        h: u32,
+        d: u32,
+        offset: u64,
+        stride: u32,
+        layer_stride: u32,
+    ) {
         let req = self.ctrl.flane_va + (slot as u64) * FREQ_LEN;
         let fence_id = self.fence_next.wrapping_add(1);
         let cmd = if to_host {
@@ -1751,7 +1915,6 @@ impl Gpu {
             w32(req + 64, stride);
             w32(req + 68, layer_stride);
         };
-        self.fenced_commit(slot, GPU_CTRL_HDR_LEN + 48, fence_id, ctx_pub)
     }
 
     /// Synchronous full-frame TRANSFER_FROM_HOST_3D under the COMPOSITOR's
@@ -1922,9 +2085,26 @@ impl Gpu {
     /// identically there -- round-5 F5's trap, one level down.
     #[cfg(feature = "test-mode")]
     pub fn test_fenced_free(&self) -> u32 {
-        (0..FENCED_SLOTS)
+        // The CLIENT pool (C-6): the reserved slot is never a client's, so a
+        // compositor readback in flight must not read as a client's slot
+        // stranded -- the relative comparisons this feeds would go red on an
+        // unrelated surface's present.
+        (0..COMP_FSLOT)
             .filter(|&i| self.ctrl.fslots[i].is_none() && !self.ctrl.fslot_poisoned[i])
             .count() as u32
+    }
+
+    /// The reserved compositor slot's state (C-6 census): 0 free, 1 busy (a
+    /// compositor readback in flight), 2 poisoned (one was abandoned and the
+    /// device has not yet proved it finished).
+    pub fn comp_slot_state(&self) -> u32 {
+        if self.ctrl.fslots[COMP_FSLOT].is_some() {
+            1
+        } else if self.ctrl.fslot_poisoned[COMP_FSLOT] {
+            2
+        } else {
+            0
+        }
     }
 
     /// Fenced chains this ctx still has in flight. Exposed because the only

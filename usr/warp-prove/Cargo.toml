@@ -16,3 +16,8 @@ path = "src/main.rs"
 # file, and asserts the clear color in the client mapping. SKIPs (exit 2)
 # on a 2D device -- the gate run is the thyla-gl virgl boot.
 libthyla-rs = { path = "../lib/libthyla-rs" }
+# Warp-C C-6 (`warp-prove readback`): the compositor-readback leg needs a
+# HOSTED tapestry surface to adopt (the readback arm is a present path), so
+# the prover is a tapestry client too for that verb -- the same libtapestry
+# the battery and the demo use, no second protocol implementation.
+libtapestry = { path = "../lib/libtapestry" }

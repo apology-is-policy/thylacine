@@ -119,7 +119,7 @@ const PRESENT_BURST_WINDOW_MS: u64 = 250;
 const PRESENT_BURST_MIN: u32 = 4;
 
 use crate::chords::{ChordAction, Chords};
-use crate::gpu::{FencedErr, Gpu};
+use crate::gpu::{FenceTag, FencedErr, Gpu};
 use libdriver::Error;
 use crate::pane::{self, Dir, Layout, Mode, Rect, Role};
 
@@ -856,8 +856,14 @@ enum Cost {
     FlushDirect,
     /// SET_SCANOUT + its post-bind full flush (a direct rebind).
     Scanout,
-    /// The readback fallback's TRANSFER_FROM_HOST_3D of a GL frame.
+    /// The readback fallback's TRANSFER_FROM_HOST_3D of a GL frame -- since
+    /// Warp-C C-6 the ISSUE of the fenced readback (the console's own cost),
+    /// not the wait.
     Readback,
+    /// C-6: issue-to-retire wall per COMPLETED compositor readback -- the
+    /// stall the device paid for the frame's backlog, which the console no
+    /// longer pays but the census must still see (GPU-DESIGN 4.5.13).
+    ReadbackWait,
     /// The CPU compose pass (`blit_composed_pixels`, per rect).
     Cpu,
     /// A CPU-composed region's upload + flush (`screen_push`).
@@ -882,6 +888,7 @@ impl Cost {
         Cost::FlushDirect,
         Cost::Scanout,
         Cost::Readback,
+        Cost::ReadbackWait,
         Cost::Cpu,
         Cost::Push,
     ];
@@ -902,6 +909,7 @@ impl Cost {
             Cost::FlushDirect => "flush-direct",
             Cost::Scanout => "scanout",
             Cost::Readback => "readback",
+            Cost::ReadbackWait => "readback-wait",
             Cost::Cpu => "cpu",
             Cost::Push => "push",
         }
@@ -1019,6 +1027,34 @@ pub struct Comp {
     /// has to be countable, not inferred from a boot log.
     composed_gpu: u64,
     composed_cpu: u64,
+    /// Warp-C C-6 (GPU-DESIGN 4.5.13): the ONE compositor readback in
+    /// flight -- the composed-GL present's readback arm, issued on the fenced
+    /// lane's reserved slot and completed by the fence pump
+    /// (`comp_readback_retired`), so the console's dispatch never waits on
+    /// a length the client chooses. One in flight compositor-wide is the
+    /// reserved slot's bound, and it loses nothing against a device that
+    /// executes readbacks serially anyway.
+    comp_rb: Option<CompRb>,
+    /// Surface incarnations (slot, gen) owed a readback once the reserved
+    /// slot frees, FIFO, no duplicates (bounded by MAX_SURFACES): a present
+    /// that arrived while a readback was in flight, or found the slot
+    /// poisoned. Latest wins -- the issue reads whatever the BO holds THEN,
+    /// so a client's present rate cannot pile readbacks behind each other.
+    /// The gen pin keeps a slot's next tenant from inheriting the previous
+    /// one's request. ONE structure for the decision and its consumption (a
+    /// `wanted` flag beside a queue would be two predicates for one thing).
+    rb_wanted: VecDeque<(usize, u32)>,
+    /// The C-6 census (global ctl `comp-readback`): issued; landed (composed
+    /// at completion); dropped (the surface moved on -- retired, resized,
+    /// re-adopted -- between issue and completion, or the engine died);
+    /// coalesced (presents that enqueued instead of issuing); abandoned
+    /// (never retired in FENCE_ABANDON_MS -- the client's ctx poisoned, its
+    /// backing possibly still being written).
+    rb_issued: u64,
+    rb_landed: u64,
+    rb_dropped: u64,
+    rb_coalesced: u64,
+    rb_abandoned: u64,
     /// Warp-C C-4: the present-path cost census (see `Cost`).
     cost: [CostCell; Cost::COUNT],
     /// The arm the present being dispatched took -- set inside `present`,
@@ -1237,6 +1273,14 @@ struct WarpCtx {
     /// device-global fence id); the newest count the fence file has
     /// reported. signaled > reported = one unread record.
     fences_in_flight: u32,
+    /// Warp-C C-6: how many of `fences_in_flight` are the COMPOSITOR's own
+    /// readbacks of this ctx's BOs (at most one, the reserved slot). Counted
+    /// in `fences_in_flight` so every quiesce predicate (`wctx_retire`,
+    /// `warp_pump_retires`, `wbo_destroy`'s leak posture) holds the backing
+    /// the device is writing; SUBTRACTED at admission (`warp_fenced_admit`)
+    /// so the client's share is not shortened by a fence it did not issue,
+    /// and never counted in `fence_signaled` (the client's #210 ledger).
+    comp_rb_in_flight: u32,
     fence_signaled: u64,
     fence_reported: u64,
     /// #210 ledger reconciliation: every fenced write that REACHED the
@@ -1423,8 +1467,31 @@ struct WarpBo {
 /// device ctx + 3D resource + tapestryd's own mapping of its backing.
 /// A value is valid for the single dispatch that resolved it.
 #[derive(Clone, Copy)]
+/// The compositor readback in flight (Warp-C C-6): what was read, for whom,
+/// and where it lands -- everything the completion needs to re-validate that
+/// the surface still shows the SAME incarnation (gen) of the SAME adoption
+/// (ctx/BO/resource/backing/geometry) it read. A surface that moved on since
+/// drops the frame: a stale composition is worse than none.
+struct CompRb {
+    fence_id: u64,
+    surf: usize,
+    gen: u32,
+    ctx_pub: u32,
+    bo_pub: u32,
+    res_id: u32,
+    va: u64,
+    w: u32,
+    h: u32,
+    issued: Instant,
+}
+
 struct GlAdopt {
     dev_ctx: u32,
+    /// The seam identity of the adoption -- ctx pub id + BO pub id -- so a
+    /// deferred readback's completion (C-6) can re-validate that the surface
+    /// still shows the SAME ctx/BO it read, not merely some adoption.
+    ctx_pub: u32,
+    bo_pub: u32,
     res_id: u32,
     va: u64,
     w: u32,
@@ -1466,6 +1533,13 @@ impl Comp {
             comp_verify_issue_tick: u64::MAX,
             composed_gpu: 0,
             composed_cpu: 0,
+            comp_rb: None,
+            rb_wanted: VecDeque::new(),
+            rb_issued: 0,
+            rb_landed: 0,
+            rb_dropped: 0,
+            rb_coalesced: 0,
+            rb_abandoned: 0,
             cost: [CostCell::default(); Cost::COUNT],
             cost_arm: Cost::PresentOther,
             probe_tick: u64::MAX,
@@ -5057,6 +5131,8 @@ impl Comp {
         }
         Some(GlAdopt {
             dev_ctx: c.dev_ctx,
+            ctx_pub: c.pub_id,
+            bo_pub: b.pub_id,
             res_id: b.res_id,
             va: b.va,
             w: b.w,
@@ -5162,6 +5238,7 @@ impl Comp {
             capset: 0,
             rings: 1,
             fences_in_flight: 0,
+            comp_rb_in_flight: 0,
             fence_signaled: 0,
             fence_reported: 0,
             fenced_rx: 0,
@@ -6491,12 +6568,181 @@ impl Comp {
         self.warp_ctxs.iter().flatten().filter(|c| !c.retiring).count()
     }
 
+    // --- Warp-C C-6: the compositor readback (GPU-DESIGN 4.5.13) -----------
+
+    /// The composed-GL present's readback arm asks for surface `n`'s frame:
+    /// issue now if the reserved slot is ours to take, else queue `n` for
+    /// the next completion / vindication (latest wins: the issue then reads
+    /// whatever the BO holds at that moment). Never waits.
+    fn rb_request(&mut self, n: usize, g: &GlAdopt) {
+        if self.comp_rb.is_some() {
+            self.rb_enqueue(n);
+            return;
+        }
+        match self.rb_issue(n, g) {
+            Ok(()) => {}
+            // The engine is dead or the lane absent: nothing will ever
+            // retire, so nothing to wait for -- the frame is lost either
+            // way (the CPU arm had no readback to compose from before C-6
+            // either; `gl_adoption` keeps resolving, so the next present
+            // asks again and is refused just as cheaply).
+            Err(FencedErr::Dead) => self.rb_dropped += 1,
+            // The reserved slot is poisoned (an abandoned readback the
+            // device has not yet proved finished): park until the late
+            // retire vindicates it. `Again` with `comp_rb == None` can mean
+            // nothing else -- the slot is ours alone.
+            Err(_) => self.rb_enqueue(n),
+        }
+    }
+
+    fn rb_enqueue(&mut self, n: usize) {
+        let gen = match self.surf(n) {
+            Some(s) => s.gen,
+            None => return,
+        };
+        if !self.rb_wanted.contains(&(n, gen)) {
+            self.rb_wanted.push_back((n, gen));
+        }
+        self.rb_coalesced += 1;
+    }
+
+    /// Issue the fenced readback of `n`'s adopted BO on the reserved slot
+    /// and record it. Counted on the CLIENT's ctx as a fence in flight (the
+    /// retire-safety counter every quiesce predicate reads) AND as a
+    /// compositor readback (subtracted at admission).
+    fn rb_issue(&mut self, n: usize, g: &GlAdopt) -> Result<(), FencedErr> {
+        let gen = match self.surf(n) {
+            Some(s) => s.gen,
+            None => return Err(FencedErr::Dead), // no surface: nothing to read for
+        };
+        let t0 = Instant::now();
+        let r = self
+            .gpu
+            .transfer_from_3d_comp(g.dev_ctx, g.ctx_pub, g.res_id, g.w, g.h, g.w * 4);
+        self.cost_add(Cost::Readback, t0);
+        let fence_id = r?;
+        if let Some(c) = self.warp_ctxs.iter_mut().flatten().find(|c| c.pub_id == g.ctx_pub) {
+            c.fences_in_flight += 1;
+            c.comp_rb_in_flight += 1;
+        }
+        self.comp_rb = Some(CompRb {
+            fence_id,
+            surf: n,
+            gen,
+            ctx_pub: g.ctx_pub,
+            bo_pub: g.bo_pub,
+            res_id: g.res_id,
+            va: g.va,
+            w: g.w,
+            h: g.h,
+            issued: t0,
+        });
+        self.rb_issued += 1;
+        Ok(())
+    }
+
+    /// Issue the next wanted readback while the reserved slot is free. Run
+    /// by the fence pump after completions AND after vindications -- both
+    /// are the events that free the slot. A queued surface whose adoption
+    /// no longer resolves has moved on: nothing to read.
+    fn comp_rb_pump(&mut self) {
+        while self.comp_rb.is_none() {
+            let (n, gen) = match self.rb_wanted.pop_front() {
+                Some(e) => e,
+                None => return,
+            };
+            if self.surf(n).map_or(true, |s| s.gen != gen) {
+                continue; // that incarnation is gone
+            }
+            let g = match self.gl_adoption(n) {
+                Some(g) => g,
+                None => continue,
+            };
+            match self.rb_issue(n, &g) {
+                Ok(()) => return,
+                Err(FencedErr::Dead) => {
+                    self.rb_dropped += 1;
+                    continue;
+                }
+                Err(_) => {
+                    // Slot still poisoned: keep the head where it was and
+                    // try again at the next pump pass (bounded: one attempt
+                    // per pass, one refused admission per attempt).
+                    self.rb_wanted.push_front((n, gen));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The compositor readback retired (`FenceTag.comp`): the frame's pixels
+    /// are in the BO backing (or, abandoned, may still be landing there --
+    /// the ctx was poisoned in the pump's common arm, nothing is composed).
+    /// Re-validate the surface -- alive, same gen, the scanout still
+    /// composed, the adoption resolving to the SAME ctx/BO/resource/backing/
+    /// geometry that was read -- then compose those pages and push, exactly
+    /// as the synchronous arm did inside the present. Runs BEFORE
+    /// `warp_pump_retires` in the pass: the pump's decrement may have just
+    /// quiesced a retiring BO, and this must read `va` before that free.
+    /// (`gl_adoption` refuses a retiring BO or ctx, so a BO destroyed since
+    /// the issue drops the frame rather than reading its backing.)
+    fn comp_readback_retired(&mut self, tag: FenceTag) {
+        let rec = match self.comp_rb.take() {
+            Some(r) if r.fence_id == tag.fence_id => r,
+            Some(r) => {
+                // One in flight is the reserved slot's bound, so a comp tag
+                // that is not the record's is a lane inconsistency: say it,
+                // keep the record (its own retire is still owed).
+                say!(
+                    "tapestryd: comp readback fence {} retired but {} is in flight",
+                    tag.fence_id, r.fence_id
+                );
+                self.comp_rb = Some(r);
+                return;
+            }
+            None => {
+                say!("tapestryd: comp readback fence {} retired with none in flight", tag.fence_id);
+                return;
+            }
+        };
+        // The stall the device paid for this frame's backlog (F2b's
+        // measurement): `cost readback-wait` carries n / sum / max.
+        self.cost_add(Cost::ReadbackWait, rec.issued);
+        if tag.abandoned {
+            self.rb_abandoned += 1;
+            return;
+        }
+        let same_gen = self.surf(rec.surf).map_or(false, |s| s.gen == rec.gen);
+        let same_adoption = self.gl_adoption(rec.surf).map_or(false, |g| {
+            g.ctx_pub == rec.ctx_pub
+                && g.bo_pub == rec.bo_pub
+                && g.res_id == rec.res_id
+                && g.va == rec.va
+                && g.w == rec.w
+                && g.h == rec.h
+        });
+        if !same_gen || !same_adoption || self.scanout != Scanout::Composed {
+            self.rb_dropped += 1;
+            return;
+        }
+        let t1 = Instant::now();
+        let r = self.blit_composed_pixels(rec.surf, 0, 0, 0, rec.w, rec.h, Some(rec.va));
+        self.cost_add(Cost::Cpu, t1);
+        if let Some(r) = r {
+            self.screen_push(r);
+            self.composed_cpu += 1;
+            self.rb_landed += 1;
+        }
+    }
+
     // --- Warp-2d: the fenced lane at the seam -----------------------------
 
     /// The per-pass fence pump: drain retired fenced chains off the device
     /// and post each on its owning ctx (poll_fences delivers them). A tag
     /// whose ctx is gone is dropped -- every retire path drains first, so
-    /// only the wedge-leak path can orphan one.
+    /// only the wedge-leak path can orphan one. A compositor-owned tag
+    /// (C-6) is ALSO routed to `comp_readback_retired`, before the retire
+    /// pump below can free the backing it read into.
     pub fn warp_service_fences(&mut self) {
         self.gpu.poll_completions();
         for tag in self.gpu.take_completions() {
@@ -6505,13 +6751,18 @@ impl Comp {
                     continue;
                 }
                 c.fences_in_flight = c.fences_in_flight.saturating_sub(1);
+                if tag.comp {
+                    c.comp_rb_in_flight = c.comp_rb_in_flight.saturating_sub(1);
+                }
                 if tag.abandoned {
                     // NOT a completion: the chain may still be live
                     // device-side, so the ctx's backings can never be
                     // freed again (leak-on-wedge), and the fence must
-                    // NOT be reported as signaled.
+                    // NOT be reported as signaled. A compositor readback
+                    // poisons the client's ctx the same way -- the device
+                    // may still be writing that client's BO backing.
                     c.fence_poisoned = true;
-                } else {
+                } else if !tag.comp {
                     // #210 ROOT CAUSE FIX: count completions DENSELY per
                     // ctx instead of publishing the device-GLOBAL max
                     // fence id. The winsys counts fenced ops it ISSUED
@@ -6529,10 +6780,14 @@ impl Comp {
                     // decrement above. The fence-file record's CONTENT
                     // moves to count-space too -- the winsys never parses
                     // it (the read is a doorbell; the counter is the
-                    // authority).
+                    // authority). A compositor readback (C-6) is a fence
+                    // the client did NOT issue, so it is never counted here.
                     c.fence_signaled += 1;
                 }
                 break;
+            }
+            if tag.comp {
+                self.comp_readback_retired(tag);
             }
         }
         // A late retire proves the host finished an abandoned chain, so
@@ -6619,6 +6874,10 @@ impl Comp {
             say!("tapestryd: warp ctx slot {} recovered (device finished)", slot);
         }
         self.warp_pump_retires();
+        // C-6: a completion or a vindication may have freed the reserved
+        // slot; issue the next wanted readback (after the retires above, so
+        // a BO retired in this pass is not read for).
+        self.comp_rb_pump();
     }
 
     /// Does the serve loop need its 1 ms fence pace? A DEAD engine never
@@ -6644,12 +6903,19 @@ impl Comp {
     /// the lane is the share: it leaves room for a second client always, and
     /// still admits the submit+transfer pair a single client needs in
     /// flight together.
+    ///
+    /// **Warp-C C-6**: the compositor's own readback of this ctx's BO is
+    /// counted in `fences_in_flight` (retire safety) but is NOT the client's
+    /// to be throttled by -- it is subtracted here, so the share the winsys
+    /// discovered (`fence-lane`) is exactly what it can have in flight, and
+    /// its issued-minus-signaled model never sees a fence it did not issue.
     fn warp_fenced_admit(&mut self, ctx_pub: u32, conn: u64) -> Result<u32, u32> {
         let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
         if c.fence_poisoned {
             return Err(E_IO);
         }
-        if c.fences_in_flight as usize >= WARP_CTX_FENCE_MAX {
+        let own = c.fences_in_flight.saturating_sub(c.comp_rb_in_flight);
+        if own as usize >= WARP_CTX_FENCE_MAX {
             return Err(E_AGAIN);
         }
         Ok(c.dev_ctx)
@@ -7520,6 +7786,26 @@ impl Conn {
                     comp.comp_attach_witnessed, comp.comp_attach_refused
                 ),
             );
+            // Warp-C C-6 census: the compositor readback arm. Keys are
+            // prefixed/distinct on purpose -- `abandoned` is ALREADY the
+            // test-mode anti-vacuous key below and `parse_field` returns the
+            // first hit, so a plain `abandoned` here would silently feed the
+            // poisoned-path legs the wrong counter. `rb-slot`: 0 free, 1 a
+            // compositor readback in flight, 2 poisoned. The stall each
+            // readback paid is `cost readback-wait` (n / sum / max) on the
+            // tapestry ctl.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "comp-rb issued {} landed {} dropped {} coalesced {} rb-abandoned {} rb-slot {}\n",
+                    comp.rb_issued,
+                    comp.rb_landed,
+                    comp.rb_dropped,
+                    comp.rb_coalesced,
+                    comp.rb_abandoned,
+                    comp.gpu.comp_slot_state()
+                ),
+            );
             // #175: the anti-vacuous counter. A prover that submits and
             // then abandons is racing the drain; if the completion won,
             // nothing was in flight, the abandon was a no-op, and every
@@ -8287,6 +8573,13 @@ impl Conn {
             // included, and no per-ctx gauge can see those: that is why the
             // buffer pair is minted first and the texture pair only where
             // it cannot be.
+            //
+            // Warp-C C-6: `fences_in_flight` also counts the COMPOSITOR's
+            // own readback of this ctx's adopted BO while it is in flight,
+            // so a verify during it answers E_AGAIN -- device work IS
+            // outstanding on the ctx's resources (the readback reads them),
+            // the answer is true, and it is the one client-visible change
+            // C-6 makes (GPU-DESIGN 4.5.13; documented in 149-warp.md).
             //
             // ROUND-2 F1: `fences_in_flight` ALONE admitted the
             // maximum-hazard state. `reap_abandoned` takes the fenced slot
@@ -9138,39 +9431,31 @@ impl Conn {
                     }
                 }
                 if !done {
-                    // THE EXPOSURE, exactly (C-0d Fable round F2 [P1]; OPEN
-                    // until Warp-C C-6, GPU-DESIGN 4.5.13): this readback is
-                    // issued under the CLIENT's ctx and its response IS the
-                    // completion, so it waits for the frame -- for everything
-                    // the client has queued ahead of it, a length the client
-                    // chooses -- on the console's dispatch thread. It runs
-                    // for every BO the blit arm cannot compose (not
-                    // `composable`, unwitnessed import, latched compositor
-                    // ctx, no 3D screen). `fence_poisoned` cannot guard it:
-                    // the poison is set from an `abandoned` tag that
-                    // `reap_abandoned` produces on the serve loop -- the loop
-                    // blocked right here. Only READBACKS carry this (a blit's
-                    // SUBMIT_3D response is written at decode time, before
-                    // the GPU runs it). Gating this arm on `fences_in_flight
-                    // == 0` was REJECTED: it would turn the CPU safety net
-                    // 4.5.9 keeps into stale frames for every continuously-
-                    // rendering client. C-6 = the fenced / BOUNDED readback.
+                    // The readback arm (Warp-C C-6, GPU-DESIGN 4.5.13; was
+                    // C-0d Fable round F2 [P1]): runs for every BO the blit
+                    // arm cannot compose (not `composable`, unwitnessed
+                    // import, latched compositor ctx, no 3D screen). It used
+                    // to be a SYNCHRONOUS TRANSFER_FROM_HOST_3D of the frame
+                    // under the client's ctx on the console's dispatch thread
+                    // -- and a readback's response is written only after the
+                    // frame is rendered, i.e. after everything the client has
+                    // queued ahead of it, a length the client chooses; the
+                    // 500 ms sync deadline could latch `dead` on a merely busy
+                    // device. `fence_poisoned` structurally cannot guard it
+                    // (the poison is produced by `reap_abandoned` on the loop
+                    // that was blocked here), and gating the arm on
+                    // `fences_in_flight == 0` was REJECTED: it turns the CPU
+                    // safety net 4.5.9 keeps into a still image for every
+                    // single-buffered client. Now: the readback is ISSUED on
+                    // the fenced lane's reserved slot, tagged compositor-
+                    // owned, the present is answered, and the fence pump
+                    // completes it (`comp_readback_retired`: re-validate the
+                    // surface, compose those pages, push). One in flight;
+                    // latest wins. The dispatch never waits. The PIXELS are
+                    // unchanged -- same transfer, same compose -- only WHEN
+                    // the console waits: never.
                     comp.cost_arm = Cost::PresentComposedCpu;
-                    let t0 = Instant::now();
-                    let pulled = comp
-                        .gpu
-                        .transfer_from_3d_sync(g.dev_ctx, g.res_id, g.w, g.h, g.w * 4)
-                        .is_ok();
-                    comp.cost_add(Cost::Readback, t0);
-                    if pulled {
-                        let t1 = Instant::now();
-                        let r = comp.blit_composed_pixels(n, 0, 0, 0, w, h, Some(g.va));
-                        comp.cost_add(Cost::Cpu, t1);
-                        if let Some(r) = r {
-                            comp.screen_push(r);
-                            comp.composed_cpu += 1;
-                        }
-                    }
+                    comp.rb_request(n, &g);
                 }
                 if let Some(s) = comp.surf_mut(n) {
                     s.res_stale = [true; WEAVE_SLOTS as usize];
