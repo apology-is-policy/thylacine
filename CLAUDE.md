@@ -961,10 +961,13 @@ tools/verify-kaslr.sh -n 25 -v      # more boots, print each offset
 # second. The control leg is not a bonus: a one-directional check is satisfied
 # by a host that advertises the capset unconditionally. venus needs blob AND
 # hostmem together, and QEMU refuses the device otherwise rather than degrading.
-# test-venus-verdict drives the SAME verdict verb against crafted logs, so the
-# discrimination is testable without paying two ~220 s boots (#245: a checker
-# reachable only by hand rots).
-WARP_HOST=thyla-pi WARP_ACCEL=kvm tools/warp-host.sh venus   # the gate (2 boots)
+# BOTH GL hosts pass it: thyla-pi (KVM/V3D, ~220 s per boot) and thyla-gl
+# (Parallels/TCG/lavapipe, ~350 s), and they report byte-identical feature
+# words. test-venus-verdict drives the SAME verdict verb against crafted logs,
+# so the discrimination is testable without paying two boots at all (#245: a
+# checker reachable only by hand rots).
+WARP_HOST=thyla-pi WARP_ACCEL=kvm tools/warp-host.sh venus   # certify (2 boots)
+WARP_HOST=thyla-gl tools/warp-host.sh venus                  # iterate (2 boots)
 tools/test-venus-verdict.sh         # its verdict, no boot  (or: make test-venus-verdict)
 
 # ARMv8.0 floor guard (#91). The SOURCE + BINARY checks run automatically at the
