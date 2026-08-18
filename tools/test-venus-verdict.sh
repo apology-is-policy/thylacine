@@ -24,6 +24,8 @@ BOOT-vencontrol: PASS
 tapestryd: gpu virgl -- num_scanouts=1 num_capsets=2
 tapestryd: gpu capset[0] id=1 max_version=1 max_size=308
 tapestryd: gpu capset[1] id=2 max_version=2 max_size=1384
+tapestryd: gpu ctx-capset id=2 CREATED
+tapestryd: gpu ctx-capset id=4 skipped (capset not enumerated)
 EOF
 }
 mk_test() {
@@ -34,6 +36,8 @@ tapestryd: gpu virgl -- num_scanouts=1 num_capsets=3
 tapestryd: gpu capset[0] id=1 max_version=1 max_size=308
 tapestryd: gpu capset[1] id=2 max_version=2 max_size=1384
 tapestryd: gpu capset[2] id=4 max_version=0 max_size=160
+tapestryd: gpu ctx-capset id=2 CREATED
+tapestryd: gpu ctx-capset id=4 CREATED
 EOF
 }
 
@@ -83,6 +87,23 @@ check "control leg lost only baseline id=1 -> UNVERIFIED" 1 \
 # would "see id=4" on a device that never advertised Venus.
 check "test leg has id=40, not id=4 -> UNVERIFIED" 1 "" \
       'sed "s/id=4 /id=40 /" "$t" > "$t.x" && mv "$t.x" "$t"'
+
+# --- V-0b ctx-capset arms: a capset-selected context must actually create ---
+# The false-pass the whole rung exists to catch: a device that ignored
+# context_init would create a capset-4 context even without venus. If the
+# control leg shows id=4 CREATED, the test leg's id=4 CREATED proves nothing.
+check "control leg shows id=4 CREATED -> UNVERIFIED" 1 \
+      'printf "tapestryd: gpu ctx-capset id=4 CREATED\n" >> "$c"' ""
+# The Venus context must create on the test leg -- capset advertised but context
+# unreachable (the render-server question) is a real, distinct failure.
+check "test leg: Venus ctx did NOT create -> UNVERIFIED" 1 "" \
+      'grep -v "ctx-capset id=4 CREATED" "$t" > "$t.x" && mv "$t.x" "$t"'
+# The id=2 positive control anchors both legs: without it, "control lacks id=4
+# CREATED" is satisfied by a leg where context creation was broken outright.
+check "control leg: virgl id=2 control did NOT create -> UNVERIFIED" 1 \
+      'grep -v "ctx-capset id=2 CREATED" "$c" > "$c.x" && mv "$c.x" "$c"' ""
+check "test leg: virgl id=2 control did NOT create -> UNVERIFIED" 1 "" \
+      'grep -v "ctx-capset id=2 CREATED" "$t" > "$t.x" && mv "$t.x" "$t"'
 
 printf '\n%d pass, %d fail\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

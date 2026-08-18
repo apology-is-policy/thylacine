@@ -285,8 +285,30 @@ venus-verdict)
         echo "TEST leg saw no capset id=4 -- Venus NOT reachable on this host"
         vfail=1
     }
+    # V-0b: a capset-SELECTED context must actually create. The id=2 (virgl)
+    # create is the POSITIVE control and must succeed on BOTH legs -- without it,
+    # "the control leg lacks id=4 CREATED" is satisfied by a leg where context
+    # creation was broken outright. The id=4 create must succeed WITH venus and
+    # must NOT appear WITHOUT it (a device that ignored context_init would create
+    # a capset-4 context anyway -- the false pass this rung exists to catch).
+    grep -qF "gpu ctx-capset id=2 CREATED" "$ctl" || {
+        echo "CONTROL leg: the virgl (id=2) positive-control context did not create -- context creation is broken, so nothing about id=4 is meaningful"
+        vfail=1
+    }
+    grep -qF "gpu ctx-capset id=2 CREATED" "$tst" || {
+        echo "TEST leg: the virgl (id=2) positive-control context did not create"
+        vfail=1
+    }
+    grep -qF "gpu ctx-capset id=4 CREATED" "$tst" || {
+        echo "TEST leg: a Venus (id=4) context did NOT create -- capset advertised but the context is unreachable (render server? V-0b)"
+        vfail=1
+    }
+    if grep -qF "gpu ctx-capset id=4 CREATED" "$ctl"; then
+        echo "CONTROL leg: a Venus (id=4) context created WITHOUT venus -- the device is ignoring context_init, so the test leg's id=4 CREATED proves nothing"
+        vfail=1
+    fi
     if [ "$vfail" -eq 0 ]; then
-        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on, absent WITHOUT, both legs booting"
+        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, AND a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both)"
         grep -hE "gpu capset\[|num_capsets" "$ctl" "$tst"
     else
         echo "VENUS GATE: UNVERIFIED"

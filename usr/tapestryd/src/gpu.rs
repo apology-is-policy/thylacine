@@ -99,6 +99,19 @@ const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
 const VIRTIO_GPU_CMD_GET_CAPSET_INFO: u32 = 0x0108;
 const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109;
 
+// virtio-gpu capset ids: 1 = VIRGL, 2 = VIRGL2, 4 = VENUS. Named so the V-0b
+// probe reads without a magic 4 in three places.
+const VIRTIO_GPU_CAPSET_VIRGL2: u32 = 2;
+const VIRTIO_GPU_CAPSET_VENUS: u32 = 4;
+
+// Warp-6 V-0b: the ctx ids the reachability probe creates and destroys inside
+// init, BEFORE any client exists. Client contexts are `dev_ctx = slot + 1` over
+// a 128-slot seam (Warp-3a), so these sit ABOVE the client range -- the ids are
+// free at probe time by construction, not by racing a client that has not
+// spawned yet.
+const PROBE_CTX_ID_VIRGL: u32 = 200;
+const PROBE_CTX_ID_VENUS: u32 = 201;
+
 // 3D commands (VIRTIO 1.2 section 5.7.6.9; virgl-negotiated only). The seam's
 // context lifecycle + resource plumbing (Warp-2c); SUBMIT_3D + the transfers
 // ride the fenced lane (Warp-2d).
@@ -362,7 +375,7 @@ fn init_device(
     notify_mul: u64,
     notify_len: u64,
     ring_pa: u64,
-) -> Result<(u64, bool), Error> {
+) -> Result<(u64, bool, bool), Error> {
     unsafe {
         w8(common + CCFG_DEVICE_STATUS, 0);
         w8(common + CCFG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
@@ -395,11 +408,25 @@ fn init_device(
         );
 
         let virgl = dev_feat_lo & VIRTIO_GPU_F_VIRGL_BIT_LO != 0;
+        // Accepted on the same accept-if-offered footing as virgl, because it
+        // is the only way a context's capset can be selected -- the device
+        // ignores `context_init` entirely without it, so a capset written
+        // there would be silently discarded and the context would come back
+        // implicitly-virgl with an OK response.
+        //
+        // Deliberately NOT a second gate on "is 3D available": that stays
+        // `virgl` alone. The two are orthogonal, and a host could in principle
+        // offer either without the other.
+        let ctxinit = dev_feat_lo & VIRTIO_GPU_F_CONTEXT_INIT_BIT_LO != 0;
+        let mut want_lo = 0u32;
+        if virgl {
+            want_lo |= VIRTIO_GPU_F_VIRGL_BIT_LO;
+        }
+        if ctxinit {
+            want_lo |= VIRTIO_GPU_F_CONTEXT_INIT_BIT_LO;
+        }
         w32(common + CCFG_DRIVER_FEATURE_SELECT, 0);
-        w32(
-            common + CCFG_DRIVER_FEATURE,
-            if virgl { VIRTIO_GPU_F_VIRGL_BIT_LO } else { 0 },
-        );
+        w32(common + CCFG_DRIVER_FEATURE, want_lo);
         w32(common + CCFG_DRIVER_FEATURE_SELECT, 1);
         w32(common + CCFG_DRIVER_FEATURE, VIRTIO_F_VERSION_1_BIT_HI);
 
@@ -458,7 +485,7 @@ fn init_device(
             common + CCFG_DEVICE_STATUS,
             STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
         );
-        Ok((notify_base + u64::from(ctrl_off) * notify_mul, virgl))
+        Ok((notify_base + u64::from(ctrl_off) * notify_mul, virgl, ctxinit))
     }
 }
 
@@ -1176,6 +1203,11 @@ pub struct Gpu {
     /// VIRTIO_GPU_F_VIRGL negotiated (the -gl device models). Warp-1 keys
     /// the capset probe on it; Warp-2 keys the 3D context path.
     pub virgl: bool,
+    /// FEATURES_OK'd `VIRTIO_GPU_F_CONTEXT_INIT`. Gates capset-selected
+    /// context creation: without it the device ignores `context_init`, so
+    /// attempting a capset there yields a success response over a context
+    /// that is not the requested kind.
+    pub ctxinit: bool,
     pub num_capsets: u32,
     /// The fetched preferred capset (Warp-2c: served verbatim by the
     /// /dev/warp caps file; empty when no capset was fetchable). The id +
@@ -1244,7 +1276,7 @@ impl Gpu {
         prewarm(ring.base_va() as u64, RING_DMA_SIZE);
         let ring_pa = ring.paddr();
 
-        let (notify_va, virgl) =
+        let (notify_va, virgl, ctxinit) =
             init_device(common_va, notify_base, notify_mul, u64::from(notify_len), ring_pa)?;
 
         let flane = if virgl {
@@ -1289,6 +1321,7 @@ impl Gpu {
             width: DEFAULT_DISPLAY_W,
             height: DEFAULT_DISPLAY_H,
             virgl,
+            ctxinit,
             num_capsets: 0,
             capset_blob: alloc::vec::Vec::new(),
             capset_id: 0,
@@ -1361,6 +1394,7 @@ impl Gpu {
             }
         };
         let mut best: Option<(u32, u32, u32)> = None;
+        let mut saw_venus = false;
         for idx in 0..self.num_capsets.min(GPU_CAPSET_ENUM_MAX) {
             let (id, ver, size) = match self.get_capset_info(idx) {
                 Ok(t) => t,
@@ -1379,6 +1413,9 @@ impl Gpu {
                 ver,
                 size
             );
+            if id == VIRTIO_GPU_CAPSET_VENUS {
+                saw_venus = true;
+            }
             // An enumerated-but-empty capset is not fetchable (audit W1
             // F1: a VMM may list an id its renderer lacks with size 0;
             // rank-by-id alone would prefer it over a populated one).
@@ -1395,6 +1432,54 @@ impl Gpu {
                     return Err(e);
                 }
                 say!("tapestryd: gpu GET_CAPSET id={} refused (engine healthy); 2D only", id);
+            }
+        }
+
+        // Warp-6 V-0b: is a capset-SELECTED context actually creatable, or is
+        // the selection ignored? Those two questions share a success response,
+        // so this is only meaningful with the controls the venus gate asserts
+        // around it (a capset-2 positive control on both legs; a capset-4
+        // create that must FAIL on a no-venus boot). Same failure disposition
+        // as the rest of this function (audit W1 F1): a refusal with a healthy
+        // engine is a log line, only a real engine death propagates.
+        if !self.ctxinit {
+            // Not a failure -- the host does not offer the feature. Said out
+            // loud: silence here would read as "the probe passed", and a
+            // create attempted anyway returns OK over an implicitly-virgl
+            // context, the false pass this rung exists to avoid.
+            say!("tapestryd: gpu ctx-capset skipped (F_CONTEXT_INIT not offered)");
+        } else {
+            // The POSITIVE control first and deliberately first: if a plain
+            // virgl capset cannot be created either, a later id=4 refusal says
+            // nothing about Venus and everything about the engine. Distinct ctx
+            // ids per capset so a failed destroy cannot make the next create
+            // collide on a duplicate id and read as a Venus refusal.
+            for (want, label, ctx) in [
+                (VIRTIO_GPU_CAPSET_VIRGL2, "id=2", PROBE_CTX_ID_VIRGL),
+                (VIRTIO_GPU_CAPSET_VENUS, "id=4", PROBE_CTX_ID_VENUS),
+            ] {
+                if want == VIRTIO_GPU_CAPSET_VENUS && !saw_venus {
+                    say!("tapestryd: gpu ctx-capset id=4 skipped (capset not enumerated)");
+                    continue;
+                }
+                match self.ctx_create_capset(ctx, want, b"warp-v0b-probe") {
+                    Ok(()) => {
+                        say!("tapestryd: gpu ctx-capset {} CREATED", label);
+                        // The probe is evidence, not a resource: destroy at
+                        // once. A destroy refusal is logged and otherwise
+                        // ignored -- the id is never reused, so a leak costs one
+                        // host context and must not cost the console.
+                        if self.ctx_destroy(ctx).is_err() && !self.ctrl.dead {
+                            say!("tapestryd: gpu ctx-capset {} destroy refused", label);
+                        }
+                    }
+                    Err(e) => {
+                        if self.ctrl.dead {
+                            return Err(e);
+                        }
+                        say!("tapestryd: gpu ctx-capset {} REFUSED (engine healthy)", label);
+                    }
+                }
             }
         }
         Ok(())
@@ -1584,12 +1669,31 @@ impl Gpu {
     /// capset for the day the feature is negotiated. Virgl-gated by the
     /// caller (the warp tree answers E_OPNOTSUPP on a 2D device).
     pub fn ctx_create(&mut self, ctx_id: u32, debug_name: &[u8]) -> Result<(), Error> {
+        // capset 0 == the device's default, i.e. exactly what this call sent
+        // before the capset parameter existed. Every existing caller keeps
+        // byte-identical behaviour.
+        self.ctx_create_capset(ctx_id, 0, debug_name)
+    }
+
+    /// `CTX_CREATE` selecting a capset via `context_init` (bits 0-7).
+    ///
+    /// The field is honoured ONLY when `VIRTIO_GPU_F_CONTEXT_INIT` was
+    /// negotiated. Callers must not reach here with a non-zero capset unless
+    /// `self.ctxinit` -- otherwise the device discards the selection and
+    /// returns OK over a context of the wrong kind, which reads as success.
+    pub fn ctx_create_capset(
+        &mut self,
+        ctx_id: u32,
+        capset_id: u32,
+        debug_name: &[u8],
+    ) -> Result<(), Error> {
+        debug_assert!(capset_id == 0 || self.ctxinit);
         let req_va = self.ring_va + REQ_OFF;
         let nlen = debug_name.len().min(63);
         unsafe {
             write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_CREATE, ctx_id);
             w32(req_va + 24, nlen as u32);
-            w32(req_va + 28, 0); // context_init (F_CONTEXT_INIT not negotiated)
+            w32(req_va + 28, capset_id & 0xff);
             for i in 0..64u64 {
                 w8(req_va + 32 + i, 0);
             }
