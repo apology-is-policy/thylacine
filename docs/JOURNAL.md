@@ -22,6 +22,82 @@ needed the operator.
 
 ---
 
+## 2026-08-18 — The gate refused the host, and it was right to
+
+V-0's remaining half was to stop *assuming* thyla-gl and boot it. Both halves
+are now closed, and the interesting part is that the first attempt **failed**.
+
+**The gate said UNVERIFIED, and the reason was real.** On thyla-gl's own Aug-12
+artifacts, tapestryd **hung** under `venus=on,blob=on,hostmem=256M` — `warden:
+tapestryd gave no readiness/exit signal -> terminating`, three restarts, `gave
+up after 3 restart(s)` — while the control leg, same host, same build, came up
+clean. A hang, not a crash: `Readiness::Timeout` means neither signalled nor
+exited.
+
+Two explanations suggested themselves, and both died by measurement rather than
+by argument, which is the only reason I trust the third:
+
+- *"the Aug-12 build predates #166's oversized-BAR skip."* Refuted in one
+  command: `git show 534f3869:usr/lib/libthyla-rs/src/hardware.rs` carries the
+  identical `if bar.size > PCI_BAR_VA_STRIDE { continue; }`, comment and all,
+  and `git log -S` dates that code to 2026-06-15.
+- *"lavapipe is slow to enumerate, so venus init stalls the control queue."*
+  Weakened: `vulkaninfo --summary` returns in **248 ms** on that host, and
+  `SUBMIT_DEADLINE_MS = 500` already bounds our controlq wait — so whatever hung,
+  it was not our driver blocking forever on a device response.
+
+Syncing the current build and re-running the same host with the same declaration
+came up clean and VERIFIED. **So the attribution is the stale artifacts, not the
+host** — but one sample each way across two different builds is not an
+explanation, and I have written it down as unexplained rather than let "current
+build works" quietly become "we know what that was." There is nothing to fix in
+the tree, which is a different statement from knowing why.
+
+The gate behaving correctly under a real failure is worth as much as the pass:
+it refused to promote a host that could not show the capset, and it named the
+reason.
+
+**The driver was throwing away the answer to the arc's next question.**
+`gpu.rs` reads `dev_feat_lo` during feature negotiation, uses exactly one bit of
+it (VIRGL), and discards the rest. So "does this host offer `CONTEXT_INIT`?" —
+the question that decides whether a Venus context is reachable at all — had no
+answer short of writing a new build, about a value the driver already had in a
+register. One `say!` line fixed that, and it immediately changed what V-0b *is*:
+
+`CONTEXT_INIT` turns out to be offered on a **plain `-gl` device**, no venus and
+no blob required. Meanwhile `ctx_create` writes `context_init = 0` under the
+comment "F_CONTEXT_INIT not negotiated" — and the device honours that field only
+when the feature is negotiated, which this driver never offers back. So the
+obvious form of V-0b — pass capset 4 and see — would have written a 4 into a
+field the device ignores, collected `RESP_OK_NODATA`, created an
+implicitly-virgl context, and reported success. **A false pass, and a
+particularly convincing one.** V-0b is a feature-bit change.
+
+The same line settled V-1's host question for free: `RESOURCE_BLOB` appears only
+with `blob=on`, and the default dev device offers neither (it is `virgl=0`), so
+blob work cannot be exercised on the local dev loop at all. That is #166's
+inert-hostmem-under-HVF constraint wearing different clothes, and it is the
+concrete reason promoting thyla-gl was worth a morning.
+
+**And a hole in my own gate, found by prosecuting it rather than admiring it.**
+The gate asserted "the control leg does NOT see capset id=4". A control that
+measured *nothing* — virgl not negotiated, 2D fallback, no capset lines at all —
+satisfies that trivially, and the gate would read "venus absent" where the truth
+is "capsets absent". That is the standing lesson about negative assertions and
+broken fixtures, reappearing **inside the very gate I wrote to honour the
+discrimination rule**: I had put the control in the *boots* and forgotten to
+require that the control leg had measured anything. It now demands the baseline
+pair (`id=1` and `id=2`), with two sabotages for it. 5/5 became 7/7.
+
+Re-verified against the real thyla-pi logs from the passing run — still VERIFIED
+under the strengthened verdict, so no re-boot was owed for that.
+
+Both hosts, finally, return **byte-identical feature words** (`0x30000013`
+without venus, `0x3000001b` with) — a cross-host agreement the arc did not need
+but is better for having.
+
+---
+
 ## 2026-08-18 — Warp-6 opens on a probe, and the blocker that wasn't
 
 Warp-C closed, so Warp-6 (Venus) is next. `GPU-DESIGN.md` §9.1 makes the first

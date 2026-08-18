@@ -1304,12 +1304,66 @@ instrument here and would have read as absence.
 
 | host | Vulkan ICD | verified to | role |
 |---|---|---|---|
-| **thyla-pi** (RPi 400, KVM) | `V3D 4.2.14.0` / V3DV Mesa -- real hardware | **guest-observed `id=4`**, end to end | certification |
-| **thyla-gl** (Parallels on the Mac) | `llvmpipe` / lavapipe -- software | library + device properties only | *candidate* fast-iteration |
+| **thyla-pi** (RPi 400, KVM) | `V3D 4.2.14.0` / V3DV Mesa -- real hardware | **gate VERIFIED** | certification |
+| **thyla-gl** (Parallels on the Mac, TCG) | `llvmpipe` / lavapipe -- software | **gate VERIFIED** | fast iteration |
 
-thyla-gl is deliberately **not** claimed as working: it has the same QEMU
-10.0.11 and a venus-carrying virglrenderer, but has never booted a guest with
-`venus=on`. Promoting it is V-0's remaining half.
+Both hosts pass, and they return **byte-identical feature words**, so the arc has
+a quick loop and a silicon loop that agree.
+
+### The device's feature offer (measured; it used to be discarded)
+
+`dev_feat_lo` was read during negotiation, used for one bit (VIRGL), and thrown
+away -- so "does this host offer `CONTEXT_INIT`?" had no answer short of a new
+build, on a value already in a register. It is now a per-boot line:
+
+| device | `lo` | virgl | edid | uuid | blob | ctxinit |
+|---|---|---|---|---|---|---|
+| `virtio-gpu-pci` (the default 2D dev device) | `0x30000002` | 0 | 1 | 0 | 0 | 0 |
+| `virtio-gpu-gl-pci` | `0x30000013` | 1 | 1 | 0 | 0 | **1** |
+| `virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M` | `0x3000001b` | 1 | 1 | 0 | **1** | **1** |
+
+Identical on thyla-pi and thyla-gl. (`0x30000000` = `VIRTIO_RING_F_INDIRECT_DESC`
++ `VIRTIO_RING_F_EVENT_IDX`; `hi=0x00000101` = `VIRTIO_F_VERSION_1` +
+`VIRTIO_F_RING_RESET`.)
+
+Two consequences the arc plans around:
+
+- **`VIRTIO_GPU_F_CONTEXT_INIT` is offered on a plain `-gl` device**, with no
+  venus and no blob. `ctx_create` writes `context_init = 0` with the comment
+  "F_CONTEXT_INIT not negotiated", and the device honours that field ONLY when
+  the feature is negotiated -- which this driver never offers back. So **V-0b is
+  a feature-bit change, not a field change**, and its naive form is a *false
+  pass*: writing 4 into an ignored field returns `RESP_OK_NODATA` and yields an
+  implicitly-virgl context while reporting success.
+- **`VIRTIO_GPU_F_RESOURCE_BLOB` appears only with `blob=on`.** The default dev
+  device offers neither (`virgl=0`), so **V-1's blob work cannot be exercised on
+  the local dev loop at all** -- the same shape as #166's inert-hostmem-under-HVF
+  constraint, and the practical reason promoting thyla-gl mattered.
+
+### The stale-artifact hang (recorded; fixed is not the same as explained)
+
+thyla-gl's FIRST run used its own Aug-12 artifacts, and tapestryd **hung** under
+the venus declaration -- `warden: tapestryd gave no readiness/exit signal ->
+terminating`, three restarts, then `gave up`. A hang (`Readiness::Timeout`:
+neither signalled nor exited), not a crash, and the control leg on the same host
+and build came up cleanly.
+
+Two hypotheses died by measurement:
+
+- *"the Aug-12 build predates #166's oversized-BAR skip"* -- refuted:
+  `git show 534f3869:usr/lib/libthyla-rs/src/hardware.rs` carries the identical
+  `if bar.size > PCI_BAR_VA_STRIDE { continue; }` and the same #166 comment;
+  `git log -S` dates that code to 2026-06-15.
+- *"lavapipe is slow, so venus init stalls the controlq"* -- weakened:
+  `vulkaninfo --summary` returns in **248 ms** there, and `SUBMIT_DEADLINE_MS =
+  500` already bounds the controlq wait, so the driver does not block
+  indefinitely on a device response.
+
+The current build came up clean on that same host and declaration, so the
+attribution is the **stale artifacts, not the host**. One sample each way across
+two builds means the old hang is *unexplained* rather than *explained*; there is
+nothing to fix in the tree, and that distinction is recorded rather than
+smoothed over.
 
 ### Testing the verdict without booting
 
