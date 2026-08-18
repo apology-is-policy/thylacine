@@ -16,6 +16,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>                 // RW-11 SA-1b: sched_mark_interactive
+#include <thylacine/smp.h>                   // the extinction ring claim: per-CPU owner
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>               // #55: struct t_stat (cons_stat_native_fill)
@@ -460,24 +461,109 @@ void cons_tx_arm(void) {
     spin_unlock_irqrestore(&g_cons_tx.lock, s);
 }
 
-// #75: flush the ring synchronously, bounded. The extinction / Halls path calls
-// this before its own direct-DR dump so pre-crash ring output is not lost. It
-// runs on a dying, IRQ-masked machine, so it must NOT wait on the IRQ and must
-// NOT take the ring lock (a dying CPU may already hold it) -- it drains with a
-// bounded trylock, then gives up. HX-I discipline: bounded, never recursing.
-void cons_tx_flush_for_dump(void) {
-    if (!spin_trylock(&g_cons_tx.lock)) return;   // a peer holds it: skip, do not wedge
-    for (u32 i = 0; i < CONS_TX_RING_SIZE && tx_count_load() != 0u; i++) {
-        if (!uart_tx_try_putc((char)g_cons_tx.ring[g_cons_tx.head])) break;
-        g_cons_tx.head = (g_cons_tx.head + 1u) & (CONS_TX_RING_SIZE - 1u);
-        tx_count_store(tx_count_load() - 1u);
+// The extinction winner's claim of the TX ring (the second of the three
+// EXTINCTION-line tearing sources; the vault's seam-extinction-line-unserialized).
+//
+// Every steady-state console producer pushes its unit under g_cons_tx.lock
+// (cons_tx_push_bulk) and every ring->FIFO drain pops under it (the TX IRQ arm,
+// cons_tx_kick, cons_tx_flush) -- so a CPU that HOLDS this lock owns the wire:
+// no peer can put a byte into the FIFO between the winner's "\n" and its
+// "EXTINCTION: ...\n". The predecessor here (cons_tx_flush_for_dump) took the
+// lock by ONE trylock, drained, and RELEASED it -- so a peer mid-push made it
+// skip, and even when it did flush, the release let the next push land inside
+// the banner. The one case it declined to handle was precisely the tear.
+//
+// The lock, not the writer role. The role (g_cons_tx.writing) serializes whole
+// cons_output_write calls but the DRAIN never consults it (main#144): bytes a
+// peer already pushed would still pop into the FIFO from cpu0's TX IRQ or a
+// peer's kick. The ring lock covers both the push and the pop, and a healthy
+// peer holds it only for one bounded push or one FIFO-depth drain -- microseconds
+// -- where the role is held across a whole write, room-waits included.
+//
+// Three properties, each deliberate, each different from the console-word claim
+// one file over (extinction_claim_console): that word's holder is a dying peer
+// that never releases, so a spin there could only burn its bound -- TRY-ONCE is
+// right for it. This lock's holder is a HEALTHY peer that WILL release, so:
+//   - BOUNDED SPIN, not try-once: wall clock (the #67 shape) with an iteration
+//     backstop for a frozen or not-yet-running timer. Past the bound we give up
+//     and the caller emits unserialized -- torn beats silent, the same asymmetry
+//     the console claim chose -- and REPORTS the miss after the dump.
+//   - RAW, never counted (spin_trylock_raw): the counted variants read
+//     current_thread() through TPIDR_EL1, state a crash may have destroyed; a
+//     fault inside the claim would replace the banner with a recursion note.
+//   - IRQs are masked FIRST, and never restored: with the ring lock held on this
+//     CPU, its own TX IRQ arm (cons_tx_drain_from_irq -> spin_lock_irqsave)
+//     would self-deadlock -- a silent hang in place of the dump. The caller
+//     parks in _torpor, so nothing is owed back.
+//
+// HELD FOREVER on success. Peers that reach for the ring after this spin
+// IRQ-masked on a dead machine -- the intended effect (a poor man's IPI_HALT
+// for anyone touching the console; the real one is the third source, still a
+// reservation in smp.h). Hence the same interface split as the console word: the
+// core runs on a CALLER-SUPPLIED lock so a test can exercise the bound and the
+// return-holding contract, and nothing exports a claim of the LIVE ring -- a
+// test that took it would silence the console for every test after it.
+//
+// The flush on success is the FULL bounded ring (the healthy cons_tx_flush's
+// loop shape, drained through the non-spinning try_putc, no TXIM re-eval, no
+// nested lock): with the lock held forever, whatever the pre-crash ring still
+// holds when we stop draining is lost, where the predecessor's one-FIFO flush
+// let the rest trickle out after the dump. Bounded: each pass either empties
+// the ring, or moves >= 1 byte after a bounded FIFO wait, or moves nothing
+// (a stalled host consumer -- nobody is reading) and stops.
+#define CONS_TX_CLAIM_MAX_NS    (20ull * 1000ull * 1000ull)   // 20 ms wall clock, the #67 shape
+#define CONS_TX_CLAIM_MAX_ITERS (1u << 20)                     // backstop: frozen / pre-init timer
+
+static bool g_cons_tx_claimed_for_dump;
+
+// Which CPU holds the claim, so the owner re-entering (the classic seed:
+// extinction -> halls_dump faults -> ... -> exception.c's el1_sync_runaway on
+// the SAME CPU) is answered "held" at once instead of burning the bound on a
+// lock it already holds and then reporting a miss it did not have.
+static u8 g_cons_tx_claim_owner[DTB_MAX_CPUS];
+
+bool cons_tx_claim_core(spin_lock_t *l) {
+    u32 iters = 0;
+    u64 t0 = 0;   // anchored lazily on the FIRST miss (0 = unset / pre-init -> backstop governs)
+    for (;;) {
+        if (spin_trylock_raw(l)) return true;
+        if (++iters >= CONS_TX_CLAIM_MAX_ITERS) return false;
+        u64 now = timer_now_ns();                          // 0 before timer_init
+        if (t0 == 0) t0 = now;
+        else if (now - t0 >= CONS_TX_CLAIM_MAX_NS) return false;
+        __asm__ __volatile__("yield" ::: "memory");
     }
-    spin_unlock(&g_cons_tx.lock);
-    uart_tx_drain_sync();
+}
+
+bool cons_tx_claim_for_dump(void) {
+    __asm__ __volatile__("msr daifset, #2" ::: "memory");   // never restored: the caller parks
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    if (g_cons_tx_claim_owner[cpu]) return true;             // already ours (see above); nothing left to flush
+    if (!cons_tx_claim_core(&g_cons_tx.lock)) return false;
+    g_cons_tx_claim_owner[cpu] = 1u;
+    __atomic_store_n(&g_cons_tx_claimed_for_dump, true, __ATOMIC_RELAXED);
+    for (u32 pass = 0; pass <= CONS_TX_RING_SIZE; pass++) {
+        while (tx_count_load() != 0u) {
+            if (!uart_tx_try_putc((char)g_cons_tx.ring[g_cons_tx.head])) break;   // FIFO full
+            g_cons_tx.head = (g_cons_tx.head + 1u) & (CONS_TX_RING_SIZE - 1u);
+            tx_count_store(tx_count_load() - 1u);
+        }
+        uart_tx_drain_sync();                          // bounded: wait the FIFO out
+        if (tx_count_load() == 0u) break;              // ring empty and on the wire
+        if (!uart_tx_fifo_empty()) break;              // the bound fired with bytes still queued: nobody is reading; stop
+    }
+    return true;
+}
+
+// The clean-boot witness (see the test): FALSE unless an extinction claimed the
+// live ring, and it must STAY false -- a spurious claim is a dead console.
+bool cons_tx_claimed_for_dump(void) {
+    return __atomic_load_n(&g_cons_tx_claimed_for_dump, __ATOMIC_RELAXED);
 }
 
 // #75-audit F3: a bounded SYNCHRONOUS flush for a HEALTHY caller (unlike
-// cons_tx_flush_for_dump's trylock, which is for the dying machine). #75 buffers
+// cons_tx_claim_for_dump's raw try-spin, which is for the dying machine). #75 buffers
 // EL0 output that drains lazily via the TX IRQ, so a residual ring can drain
 // between the byte-by-byte uart_putc calls of the direct-path "Thylacine boot OK"
 // banner and TEAR that tooling-ABI line (TOOLING.md section 10; a torn banner =

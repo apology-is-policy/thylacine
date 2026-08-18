@@ -37,6 +37,13 @@ void extinction_with_addr(const char *msg, uintptr_t addr)
 // Guarded by the `extinction.console_unclaimed_on_clean_boot` test.
 int extinction_console_claimed(void);
 
+// For exception.c's el1_sync_runaway -- the one OTHER emitter of the ABI line.
+// Claims the console, or confirms this CPU already owns it (the runaway is
+// reached from a chain that may have claimed it at depth 1). Returns 0 iff a
+// PEER holds it: the caller must then park WITHOUT emitting (it is counted as a
+// suppressed peer). Not for any other caller.
+int extinction_console_claim_or_own(void);
+
 // The pure exactly-one-winner core, exported so a test can exercise it on its
 // OWN word. Deliberately not reachable against the live console word: a test
 // that claimed THAT would disable extinction reporting for the rest of the boot.

@@ -48,10 +48,18 @@ static volatile u8 g_extinction_depth[DTB_MAX_CPUS];
 // classified as a clean boot (fail-open), while a missing one leaves the guest
 // visibly hung or timed out (fail-visible). We take the loud failure.
 //
-// Still owed (the second half of the filed fix): IPI_HALT, so the winner stops
-// its peers rather than racing them to a lock they will lose. That needs the
-// IPI path wired -- IPI_HALT is currently a commented-out reservation in
-// smp.h -- and is tracked separately; this closes the garbling half.
+// The SECOND tearing source -- a peer's NORMAL console write landing inside the
+// banner -- is closed one step below by cons_tx_claim_for_dump: the winner takes
+// the console TX ring lock (every steady-state push and every ring->FIFO drain
+// runs under it), by a BOUNDED raw try-spin, and holds it forever. Different
+// primitive, different shape, on purpose: THIS word's holder is a dying peer
+// that never releases (try-once is right); the ring's holder is a healthy peer
+// mid-push that will release in microseconds (a bounded spin is right, and a
+// try-once would fail in exactly the case it exists for). Still owed: IPI_HALT,
+// so the winner STOPS its peers rather than out-racing them -- a commented-out
+// reservation in smp.h; it would also cover the residual this leaves, the few
+// kernel diagnostics that still write the UART directly instead of through the
+// ring (they are outside the ring lock's reach).
 static uint32_t g_extinction_console;
 
 // Best-effort count of peers whose banner we suppressed, printed by the winner
@@ -85,6 +93,20 @@ static int extinction_claim_console(void) {
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
     g_extinction_owner[cpu] = 1u;
     return 1;
+}
+
+// For the ONE other emitter of the ABI line -- exception.c's el1_sync_runaway,
+// reached from a fault chain that may already have claimed the console on THIS
+// CPU (extinction -> halls_dump faults -> ... -> runaway). Ownership is not a
+// loss: the owner may print. A PEER holding it means a peer is dumping, and the
+// caller parks silent like any loser (counted, so the winner reports it).
+int extinction_console_claim_or_own(void) {
+    if (extinction_claim_console()) return 1;
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    if (g_extinction_owner[cpu]) return 1;
+    __atomic_fetch_add(&g_extinction_suppressed, 1u, __ATOMIC_RELAXED);
+    return 0;
 }
 
 // A CPU that lost the claim. Counts itself so the winner can report that peers
@@ -126,20 +148,39 @@ static void extinction_reentry_guard(const char *msg) {
     _torpor();
 }
 
-// #75 / P1-F: console output now stages through a ring the TX interrupt drains,
-// and a dying machine runs IRQ-masked -- so anything still in the ring would be
-// lost. Flush it (bounded, trylock-only) BEFORE the "EXTINCTION: " line so the
-// output that led up to the crash is on the wire and in causal order. Bounded +
-// non-recursing per HX-I; if a peer CPU holds the ring lock we skip rather than
-// wedge the dump.
-static void extinction_flush_console(void) {
-    cons_tx_flush_for_dump();
+// #75 / P1-F: console output stages through a ring the TX interrupt drains, and
+// a dying machine runs IRQ-masked -- so anything still in the ring would be
+// lost. cons_tx_claim_for_dump takes the ring lock (bounded raw try-spin, never
+// a park), flushes the pre-crash ring to the wire under it, and RETURNS HOLDING
+// IT: from here to _torpor no peer can push or drain a byte, so the ABI line
+// below cannot be torn by a normal console write. Past its bound (a peer kept
+// the lock longer than any healthy holder does) we emit anyway -- torn beats
+// silent -- and say so after the dump. Recorded per-CPU by the owner so the
+// report cannot be faked by a loser (which never gets here).
+static u8 g_extinction_ring_held[DTB_MAX_CPUS];
+
+static void extinction_claim_ring(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    g_extinction_ring_held[cpu] = cons_tx_claim_for_dump() ? 1u : 0u;
+}
+
+// Printed by the winner AFTER halls_dump (the ABI line stays first). Same
+// wording rules as the peer report: no "EXTINCTION" token, nothing at column 0.
+static void extinction_report_ring(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    if (g_extinction_ring_held[cpu]) {
+        uart_puts("  console-ring: held by the dumping cpu (banner serialized against peers)\n");
+    } else {
+        uart_puts("  console-ring: NOT held (a peer kept it past the bound; the banner above may be torn)\n");
+    }
 }
 
 void extinction(const char *msg) {
     extinction_reentry_guard(msg);
     if (!extinction_claim_console()) extinction_park_suppressed();
-    extinction_flush_console();
+    extinction_claim_ring();
     uart_puts("\n");
     uart_puts("EXTINCTION: ");
     uart_puts(msg);
@@ -150,13 +191,14 @@ void extinction(const char *msg) {
     // back to capture-current for a bare assert.
     halls_dump((void *)0);
     extinction_report_suppressed();
+    extinction_report_ring();
     _torpor();
 }
 
 void extinction_with_addr(const char *msg, uintptr_t addr) {
     extinction_reentry_guard(msg);
     if (!extinction_claim_console()) extinction_park_suppressed();
-    extinction_flush_console();
+    extinction_claim_ring();
     uart_puts("\n");
     uart_puts("EXTINCTION: ");
     uart_puts(msg);
@@ -165,5 +207,6 @@ void extinction_with_addr(const char *msg, uintptr_t addr) {
     uart_puts("\n");
     halls_dump((void *)0);
     extinction_report_suppressed();
+    extinction_report_ring();
     _torpor();
 }

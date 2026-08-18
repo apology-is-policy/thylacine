@@ -650,6 +650,9 @@ void test_cons_tx_room_wait_and_deadline(void);
 void test_cons_tx_unit_diag_line_atomic(void);
 void test_cons_tx_unit_echo_atomic(void);
 void test_cons_tx_unit_smp_no_tear(void);
+void test_cons_ring_claim_core_returns_holding(void);
+void test_cons_ring_claim_core_bounded_when_held(void);
+void test_cons_ring_unclaimed_on_clean_boot(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_full_refuses(void);
 void test_cons_rx_can_accept_boundary(void);
@@ -2270,6 +2273,9 @@ struct test_case g_tests[] = {
     { "cons.tx_unit_diag_line_atomic", test_cons_tx_unit_diag_line_atomic, false, NULL },
     { "cons.tx_unit_echo_atomic",      test_cons_tx_unit_echo_atomic,      false, NULL },
     { "cons.tx_unit_smp_no_tear",      test_cons_tx_unit_smp_no_tear,      false, NULL },
+    { "cons.ring_claim_core_returns_holding",  test_cons_ring_claim_core_returns_holding,  false, NULL },
+    { "cons.ring_claim_core_bounded_when_held", test_cons_ring_claim_core_bounded_when_held, false, NULL },
+    { "cons.ring_unclaimed_on_clean_boot",     test_cons_ring_unclaimed_on_clean_boot,     false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_full_refuses",        test_cons_ring_full_refuses,        false, NULL },
     { "cons.rx_can_accept_boundary",   test_cons_rx_can_accept_boundary,   false, NULL },

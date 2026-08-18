@@ -59,6 +59,9 @@ void test_cons_feed_write_short_on_full(void);       // #129 defect (1)
 void test_cons_refused_byte_is_not_echoed(void);     // #129-audit F3
 void test_cons_rx_holdback_reoffer(void);            // #129-audit F2
 void test_cons_rx_holdback_not_stranded(void);       // #136-audit F1
+void test_cons_ring_claim_core_returns_holding(void);  // the extinction ring claim
+void test_cons_ring_claim_core_bounded_when_held(void);
+void test_cons_ring_unclaimed_on_clean_boot(void);
 
 // Defined with the LS-8b cooking tests further down; forward-declared so the
 // #129 tests above them can use the same two helpers rather than open-coding a
@@ -2877,4 +2880,82 @@ void test_cons_tx_unit_smp_no_tear(void) {
     TEST_EXPECT_EQ(end_cnt, 0u, "filler discarded");
     if (overlap == 0u)
         uart_puts(" (note: no emit overlap observed -- the interleave was not exercised this boot) ");
+}
+
+// ---------------------------------------------------------------------------
+// The extinction winner's ring claim (cons_tx_claim_for_dump; the second of the
+// three EXTINCTION-line tearing sources). Same interface split, same test shape
+// as the console word (test_extinction.c): the CORE runs on a caller-supplied
+// lock, and nothing here touches the live ring lock's holder state -- a test
+// that claimed the live ring would silence the console for every test after it.
+//
+//   cons.ring_claim_core_returns_holding
+//     a free lock is claimed, and the claimant HOLDS it (a second taker fails):
+//     the "return holding" half of the contract, which is what keeps a peer's
+//     next push out of the banner. A core that reported success without
+//     acquiring passes a bare "returned true" check and tears exactly as before.
+//   cons.ring_claim_core_bounded_when_held
+//     a HELD lock is not claimed, and the miss returns within its bound -- the
+//     never-park half. An unbounded spin here hangs the suite (loud, not silent).
+//   cons.ring_unclaimed_on_clean_boot
+//     the live ring has NOT been claimed by the time the suite runs; a claim
+//     would be a dead console for the rest of the boot (the fail-open the
+//     mechanism exists to close, arriving from the other side).
+//
+// What these do NOT cover, stated so the gap is not mistaken for coverage: the
+// property that matters is a RACE (a peer's push landing between the banner's
+// bytes), and these are sequential. They pin the bookkeeping -- held means held,
+// missed means returned. The concurrent regression needs the same multi-CPU
+// fault-injection arm with a FORCED interleaving that the console-word claim
+// still owes; without forcing, the pre-fix build tears only sometimes, and a
+// discriminator that fails only sometimes is not a regression test.
+
+void test_cons_ring_claim_core_returns_holding(void) {
+    spin_lock_t l = SPIN_LOCK_INIT;
+
+    bool got = cons_tx_claim_core(&l);
+    TEST_ASSERT(got, "a free lock must be claimed");
+    // Counted trylock on the raw-held lock: the word protocol is shared, so this
+    // is a fair second taker -- and it must lose, or "held" was a lie.
+    bool second = spin_trylock(&l);
+    if (second) spin_unlock(&l);
+    TEST_ASSERT(!second, "returns HOLDING: a second taker must fail while the claim is held");
+    // Raw release to match the raw acquire (a counted unlock would underflow this
+    // thread's preempt count -- the claim never touched it, by design).
+    spin_unlock_raw(&l);
+
+    // The state belongs to the LOCK, not to a latch in the core: released, it is
+    // claimable again -- and by a counted taker too, so the two protocols agree.
+    bool again = spin_trylock(&l);
+    TEST_ASSERT(again, "a released lock must be takeable again by a counted taker");
+    spin_unlock(&l);
+}
+
+void test_cons_ring_claim_core_bounded_when_held(void) {
+    spin_lock_t l = SPIN_LOCK_INIT;
+    spin_lock(&l);                       // this thread is the peer that "holds it past the bound"
+
+    u64 t0 = timer_now_ns();
+    bool got = cons_tx_claim_core(&l);
+    u64 dt = timer_now_ns() - t0;
+    spin_unlock(&l);
+
+    TEST_ASSERT(!got, "a held lock must NOT be claimed -- the miss is the caller's cue to emit unserialized");
+    // The bound is 20 ms wall clock with an iteration backstop; 5 s is the
+    // generous ceiling that says "it returned because of the bound", not "it
+    // returned because the host was fast". Returning at all is the load-bearing
+    // half: an unbounded spin here never reaches this line.
+    TEST_ASSERT(dt < 5000000000ull, "the miss must return within its bound (measured >= 5 s)");
+}
+
+void test_cons_ring_unclaimed_on_clean_boot(void) {
+    // If this fires, the console TX ring lock is held forever by an extinction
+    // that did not happen: every later push and drain spins IRQ-masked, and the
+    // suite output you are reading stops here.
+    TEST_ASSERT(!cons_tx_claimed_for_dump(),
+        "the live ring must be unclaimed on a healthy boot; a claim here is a dead console");
+    // Liveness of the live lock itself: a peek takes g_cons_tx.lock and returns.
+    // (A held-forever lock would hang this call -- loud, and correctly so.)
+    u8 scratch[4];
+    (void)cons_test_tx_ring_peek(scratch, 0u);
 }

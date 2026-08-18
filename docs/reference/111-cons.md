@@ -490,10 +490,17 @@ single-waiter `Rendez` sound here where the role itself needs a waiter list.
 - **The ring lock is a pure irqsave leaf.** The IRQ drain wakes *after* releasing
   it (the `cons_drain_tap` discipline), and `wakeup()` is the only IRQ-safe wake
   primitive (LS-8a).
-- **Halls / extinction bypass the ring** (`cons_tx_flush_for_dump`): a dying
-  machine runs IRQ-masked and cannot depend on an interrupt to drain, so the dump
-  flushes by **trylock only** (a dying CPU may already hold the lock) and then
-  falls back to the direct bounded `uart_putc`.
+- **Halls / extinction TAKE the ring lock and keep it** (`cons_tx_claim_for_dump`,
+  2026-08-18): a dying machine runs IRQ-masked and cannot depend on an interrupt
+  to drain, so the winner masks IRQs, acquires `g_cons_tx.lock` by a **bounded
+  raw try-spin** (20 ms / `1<<20` iterations; a healthy peer holds it only for one
+  push or one FIFO-depth drain), flushes the pre-crash ring to the wire under it,
+  and then emits the `EXTINCTION:` line and the dump through the direct bounded
+  `uart_putc` **while still holding the lock, forever** — so no peer's push or
+  drain can land inside the banner (every producer pushes and every drain pops
+  under that lock). Past the bound it emits unserialized and says so after the
+  dump. The predecessor flushed by one trylock and released. Full rationale +
+  the residual (direct-UART kernel diagnostics, main#243): `04-extinction.md`.
 - **Arming.** The ring arms at `cons_tx_arm()`, after `gic_attach` +
   `gic_enable_irq` for the UART SPI. Every pre-GIC print takes the direct path;
   the ring is empty at arm time so the transition cannot reorder output. The

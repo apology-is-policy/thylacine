@@ -22,6 +22,165 @@ needed the operator.
 
 ---
 
+## 2026-08-18 — The extinction line, source 2 of 3: the fix found a fault gate that had been printing nothing for a month
+
+Same run, after C-6b landed and pushed at `f525cea3`. Next on the resume note
+was the follow-up Fable round on the C-0d fixes + C-6b; it was spawned first
+(read-only, no cores), and this chunk ran alongside it.
+
+### What was owed
+
+The `EXTINCTION:` ABI line has **three** tearing sources and the names are
+close enough that I have conflated them before. Source 1 —
+extinction-vs-extinction — was closed 2026-08-16 by `extinction_claim_console`
+(one `__atomic_exchange_n`; losers park silent). Source 2 —
+**extinction vs a peer's ordinary console write** — is the vault's
+`seam-extinction-line-unserialized`, and it is the one that matters most by
+readership: the seam's own census found **fourteen of fifteen** declared
+mirrors match the crash prefix, against eight for the boot-success line that
+got the guarantee. Source 3 is `IPI_HALT`, still a commented-out reservation.
+
+### The prescribed remedy was a hypothesis, and it was wrong in one specific
+
+The seam prescribed a **try**-acquire of the *writer role* (never a park).
+Checking it against the drain path says no: the role (`g_cons_tx.writing`)
+serializes whole `cons_output_write` calls, but **the drain never consults the
+role** — that is main#144, already written down in `cons.h` — so bytes a peer
+had already pushed would still pop into the FIFO from cpu0's TX IRQ or from a
+peer's `cons_tx_kick`, landing inside the banner while the role sat held.
+
+What actually owns the wire is **the ring lock**: every steady-state producer
+pushes its unit under `g_cons_tx.lock` (`cons_tx_push_bulk` — SYS_PUTS through
+the role, the echo, `cons_diag_line`) and every ring→FIFO drain pops under the
+same lock. So the winner takes *that*, and never lets go
+(`cons_tx_claim_for_dump`, `kernel/cons.c`). The role is also the wrong
+primitive on a second axis: a healthy peer holds the ring lock for one bounded
+push or one FIFO-depth drain — microseconds — where the role is held across a
+whole write, room-waits included.
+
+Every property is deliberately the **opposite** of the console word one file
+over, and the reason is the same in each case — *who holds the thing you are
+waiting for*:
+
+| | console word (source 1) | ring lock (source 2) |
+|---|---|---|
+| holder you contend with | a **dying** peer that never releases | a **healthy** peer that will release in µs |
+| therefore | **try once**, never spin | **bounded spin**, because try-once fails exactly when it matters |
+| primitive | raw atomic (a spinlock could fault on a dying machine) | **raw** trylock, same reason — new `spin_trylock_raw` |
+| on failure | park silent (a missing line is visible; a torn one reads as a clean boot) | emit anyway, and **report the miss** after the dump |
+
+IRQs are masked before the acquire and never restored: with the ring lock held
+on this CPU, its own TX IRQ arm (`cons_tx_drain_from_irq` → `spin_lock_irqsave`)
+would self-deadlock — a silent hang in place of the dump. The caller parks in
+`_torpor`, so nothing is owed back. And the flush under the lock became the
+*full* bounded ring rather than one FIFO's worth, because holding forever means
+whatever is still queued when the flush stops is lost, where the predecessor's
+release let the rest trickle out behind the dump.
+
+### The compile found the emitter the census had missed
+
+`cons_tx_flush_for_dump` had a second caller: `arch/arm64/exception.c::
+el1_sync_runaway`, the #214 recursion guard's terminal banner — which prints
+`EXTINCTION: el1-sync recursion ...` **without going through `extinction()`**,
+and was therefore enrolled in *neither* serializer. Not in the 2026-08-16
+console-word fix, and not in the vault's `abi-boot-banner` mirror set either:
+`quaestor owner` flags it as matching the ABI literal *outside* the set. It now
+takes both, via a new `extinction_console_claim_or_own()` — claim the word, or
+confirm this CPU already owns it, since the runaway is reachable from a chain
+that claimed it at depth 1; a *peer* holding it means a peer is dumping, so it
+parks silent like any loser, counted.
+
+Worth noting how it surfaced: **not** by the census I ran, but by deleting the
+old symbol and letting the build fail. A rename is a census that cannot lie.
+
+It also reports a ring-claim miss after its own banner, which cost the SMP gate
+a restart: I noticed the asymmetry (only `extinction()` reported) five boots
+into the matrix. Killing it there and re-running cost ~10 minutes; letting it
+finish and re-gating afterwards would have cost ninety, and shipping the green
+from an ELF that no longer matched the source would have been a *misleading*
+green, which is worse than a red.
+
+**And that path is exercised by no test at all — this chunk just put three
+calls on it (main#246).** In a healthy kernel the #806 guard extincts at the
+*second* kernel fault, so `g_el1_sync_depth` never reaches 3; reaching the
+runaway needs the extinction/Halls path itself to fault — which is precisely
+the base-tree defect below, and precisely what this fix removed. The fix
+deleted the only thing that was reaching the path it also modified. "No current
+path drives it" is the latent-P1 trap, not a safety argument, so it is filed
+rather than glossed.
+
+### Then the base measurement, which is the actual finding
+
+`tools/test-fault.sh` passed 7/7 on the change. To be sure the pass meant
+something I stashed the work and ran the sharpest variant on the base tree:
+
+| tree | `recursive_kernel_fault` |
+|---|---|
+| base `f525cea3` | **TIMEOUT (60 s)** — last guest line is `fault-test: invoking recursive_kernel_fault...` |
+| this change (raw try-spin) | PASS — `EXTINCTION: recursive kernel fault (handler re-entered) 0xdead000000000000` |
+| this change, counted `spin_trylock` restored | TIMEOUT, symptom byte-identical to base |
+
+**The base tree printed nothing at all.** That variant installs
+`TPIDR_EL1 = 0xdead000000000000` deliberately — a wild `current_thread()` is
+its entire premise. `extinction()` flushes the ring *before* the banner (on
+purpose: causal order), the old flush took the lock with the **counted**
+`spin_trylock` → `spin_preempt_inc` → `current_thread()->magic` → **fault,
+inside the extinction path**; the nested EL1-sync faults climbed to depth 3 →
+`el1_sync_runaway` → which called the *same* flush → faulted again → depth 4 →
+the `depth > MAX` arm parks **silently**.
+
+So the one fault variant whose whole point is a destroyed `current_thread()`
+could not print its own banner — and failed by **silence**, not by a wrong
+message, which is the shape that reads as "the harness is slow" rather than
+"the protection did not fire". Broken since `ed56f21f` (#75 P1-F, 2026-07-20)
+met `ce7bd352` (#360's counted spinlocks, 2026-07-04): about a month, because
+**`test-fault.sh` is wired into no gate** — grep-proven over the Makefile,
+`ci-smp-gate.sh`, `test.sh`, `test-interactive.sh` and `.github`. It is the
+only runtime witness that W^X, BTI, the stack guards and the #806 guard
+actually fire, and it runs when someone remembers. Filed main#244 (the defect,
+closed here) and main#245 (the ungated harness, open).
+
+**The rule that generalizes, and the reason `spin_trylock_raw` exists:** a
+dying-machine path may not call a primitive that reads state the crash may have
+destroyed. #360 retrofitted that `current_thread()` deref under *every* existing
+`spin_trylock` caller — including one on the extinction path — without anyone
+re-asking whether that caller could survive it. The `spin_lock_raw` comment now
+enumerates its two legitimate holders instead of naming one and calling every
+other use a bug.
+
+### A defect I nearly fabricated, and what stopped it
+
+The sabotage run's failure lines came out as
+`[test] cons.ring_claim_core_returns_holding ...   [runnable-dump returns HOLDING: a second taker must fail while the claim is held]`
+and I read that as a live tear of exactly the residual class I had just filed
+(main#243: direct-`uart_puts` diagnostics outside the ring lock). It is not.
+`test_fail(msg)` calls `sched_dump_runnable(msg)`, which prints
+`"  [runnable-dump " + tag + "]"` — the tag **is** the failure message. Intended
+output, read as an interleave because I was primed for one. Withdrawn within
+the minute, by reading the caller instead of the line. *A fabricated defect
+outranks a missed one*: it would have eaten the budget a real one needs, and it
+would have "confirmed" a bug I had filed an hour earlier — the worst direction
+for a confirmation to arrive from.
+
+### Posture
+
+Suite **1427/1427** (was 1424 — three new legs), `test-fault.sh` **7/7**, both
+sabotage arms verified in one run (1427 → 1424/1427, each failure naming its
+own assertion; source restored byte-identical to the verified WIP and re-run
+green). The kernel changed, so the SMP gate is owed and running.
+
+**Still open, exactly:** source 3 (`IPI_HALT`) — untouched. And the ring lock
+reaches only writers that go *through* the ring: steady-state kernel
+diagnostics that still call `uart_puts` directly (`sched.c`'s runnable-dump,
+`syscall.c`'s vivarium unserved / `viv-trace`, `exec.c`'s exec-failure,
+`9p_client.c`'s ownerless-frame) sit outside it and can still land inside the
+banner from a peer CPU. `cons.h`'s contract already says those callers should
+use `cons_diag_line`; converting them is main#243, and they carry the #126
+20-ms-per-byte exposure too. **This closes one of three sources, and the third
+would subsume the residual of the second.**
+
+---
+
 ## 2026-08-18 — C-6b: the readback arm off the console's dispatch, and the load that measured which GL context a queue is on
 
 Resumed from the self-compaction at `64ded01d` (the C-0d Fable close + the

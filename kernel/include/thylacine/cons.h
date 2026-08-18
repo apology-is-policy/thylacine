@@ -17,6 +17,7 @@
 #ifndef THYLACINE_CONS_H
 #define THYLACINE_CONS_H
 
+#include <thylacine/spinlock.h>   // spin_lock_t (cons_tx_claim_core's caller-supplied lock)
 #include <thylacine/types.h>
 
 struct poll_waiter;   // <thylacine/poll.h> -- the cons_poll hook parameter
@@ -115,10 +116,24 @@ void cons_tx_drain_from_irq(void);
 // boot_main calls it after gic_attach + gic_enable_irq for the UART SPI.
 void cons_tx_arm(void);
 
-// Bounded synchronous ring flush for the extinction / Halls dump, so pre-crash
-// output is not stranded in the ring. Takes the ring lock by TRYLOCK only (a
-// dying CPU may already hold it) and never waits on the IRQ -- HX-I discipline.
-void cons_tx_flush_for_dump(void);
+// The extinction winner's claim of the TX ring (cons.c has the full rationale).
+// Masks IRQs, takes the ring lock by a BOUNDED raw try-spin (never a park; a
+// healthy peer holds it for one bounded push or drain), flushes the pre-crash
+// ring to the wire under it, and RETURNS HOLDING IT -- forever: every path
+// through extinction() ends in _torpor, and a release would let a peer's next
+// push land inside the "EXTINCTION: " line. Returns false past the bound (the
+// caller emits unserialized and reports the miss). Only extinction() calls it.
+bool cons_tx_claim_for_dump(void);
+
+// The pure bounded try-spin, exported to run on a CALLER-SUPPLIED lock so a test
+// can exercise the bound and the return-holding contract WITHOUT touching the
+// live ring (a test that claimed the live ring would silence the console for
+// every test after it). Returns holding on success.
+bool cons_tx_claim_core(spin_lock_t *l);
+
+// FALSE on a clean boot, and it must STAY false -- guarded by
+// `cons.ring_unclaimed_on_clean_boot`. A spurious claim is a dead console.
+bool cons_tx_claimed_for_dump(void);
 
 // #75-audit F3: bounded synchronous flush for a HEALTHY caller (blocking-lock,
 // waits the FIFO out). boot_mark_complete calls it before the direct-path
@@ -200,8 +215,9 @@ void cons_diag_line_emit(struct cons_diag_line *l);                  // one push
 // begin() returns false iff a #811 death interrupted the park; the caller then
 // emits WITHOUT serialization rather than dropping the line, and must not call
 // end(). NOT for the extinction / Halls path -- that runs on a dying machine and
-// must stay lock-free and bounded (HX-I1/HX-I2); it keeps the direct uart_putc
-// and cons_tx_flush_for_dump's trylock.
+// must never park (HX-I1/HX-I2); it takes the RING LOCK instead, by a bounded
+// raw try-spin, and holds it forever (cons_tx_claim_for_dump) -- which covers
+// the drain the role does not (main#144) as well as every push.
 bool cons_kernel_writer_begin(void);
 void cons_kernel_writer_end(void);
 
