@@ -257,7 +257,7 @@ venus-verdict)
     # The venus gate's verdict, as its OWN verb so the discrimination can be
     # sabotage-tested without booting anything. `venus` boots then calls this;
     # tools/test-venus-verdict.sh drives it against crafted logs. One
-    # implementation, two callers -- a verdict that only ever runs inside a
+    # implementation, two callers -- a verdict that only ever runs inside an
     # 8-minute two-boot leg is a verdict nothing can afford to test.
     ctl="${2:?usage: warp-host.sh venus-verdict <control.log> <test.log>}"
     tst="${3:?usage: warp-host.sh venus-verdict <control.log> <test.log>}"
