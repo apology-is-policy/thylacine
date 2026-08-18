@@ -779,8 +779,8 @@ carries a hypothesis all the way to `sched()`.
 
 Build OK. Suite **1414/1414** (the +1 is `pipe.cnbframe_atomic_nonblocking`,
 explicitly PASS), no FAIL, no EXTINCTION; the boot already drives the CNBFRAME
-path through the diorama channel's Tversion/Tattach/reads. SMP gate (default +
-UBSan × smp4/smp8, N=10) — *(the run over this tip)*. Round A's F1 comment
+path through the diorama channel's Tversion/Tattach/reads. SMP gate **40/40** (default +
+UBSan × smp4/smp8, N=10) -- 0 corruption across all configs. Round A's F1 comment
 reword lands alongside. A follow-up prosecutor round on this fix is owed — it
 changes a wait behavior, and the re-audit-on-dirty-close discipline says the fix
 gets its own round.
