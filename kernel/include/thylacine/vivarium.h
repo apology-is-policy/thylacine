@@ -1064,6 +1064,19 @@ struct viv_sock *viv_socktab_claim(struct viv_socktab *tab, s32 fd,
 // close hook run unconditionally for a phenotyped Proc.
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd);
 
+// Clear a specific entry in place -- the single source of truth for the field
+// clear (drop() is find()+drop_slot()). The execve close-on-exec sweep clears
+// BY SLOT rather than paying drop()'s re-find-by-fd: it already holds the entry
+// pointer. NULL-safe.
+void viv_socktab_drop_slot(struct viv_sock *e);
+
+// Drop the socktab entry of every close-on-exec socket in `p`. execve calls this
+// AFTER the commit and BEFORE handle_close_on_exec frees the fds, so a freed fd
+// number cannot carry a stale (proto, n) row into the new image. Reads cloexec
+// live from the handle table; runs single-threaded (proc_exec_alone). NULL-safe.
+struct Proc;
+void viv_socktab_drop_cloexec(struct Proc *p);
+
 // True when a claim would succeed. PURE. accept() asks BEFORE it blocks: it is
 // about to make a real inbound connection exist, and discovering afterwards
 // that the table is full means accepting a peer only to hang up on it. (claim()

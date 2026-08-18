@@ -188,13 +188,17 @@ static const struct viv_reject g_viv_rejects[] = {
     // handed to the next fd-creating call, so a later connect() writes its dial
     // verb to a STRANGER'S connection -- the sharpest bug this family can have.
     //
-    // TWO of them are now rows, and they pay the obligation in DIFFERENT PLACES
-    // (#157). `close` pays it in the ENTRY HOOK in viv_linux_dispatch, which is
-    // correct there because a close whose fd carries an entry always proceeds.
-    // `dup3` pays it INSIDE ITS SHELL, after every refusal and immediately
-    // before the install, because a dup3 can be REFUSED (bad flags, old == new,
-    // bad old) while `new` is a live socket -- an unconditional entry-time drop
-    // would destroy the guest's socket state on a call that failed.
+    // TWO of them are rows that pay the obligation in DIFFERENT PLACES (#157),
+    // and execve pays it a THIRD way (6b). `close` pays it in the ENTRY HOOK in
+    // viv_linux_dispatch, which is correct there because a close whose fd carries
+    // an entry always proceeds. `dup3` pays it INSIDE ITS SHELL, after every
+    // refusal and immediately before the install, because a dup3 can be REFUSED
+    // (bad flags, old == new, bad old) while `new` is a live socket -- an
+    // unconditional entry-time drop would destroy the guest's socket state on a
+    // call that failed. `execve` pays it in sys_execve_core via
+    // viv_socktab_drop_cloexec, after the commit and before handle_close_on_exec:
+    // the close-on-exec sweep frees cloexec fds through the handle_close
+    // PRIMITIVE, which never enters viv_linux_dispatch and so never runs the hook.
     //
     // So the rule for a future promotion is not "extend the hook" but "pay it
     // in the arm your refusal structure demands". `dup` and `close_range` still
@@ -1211,8 +1215,7 @@ bool viv_socktab_has_room(const struct viv_socktab *tab) {
     return false;
 }
 
-void viv_socktab_drop(struct viv_socktab *tab, s32 fd) {
-    struct viv_sock *e = viv_socktab_find(tab, fd);
+void viv_socktab_drop_slot(struct viv_sock *e) {
     if (!e) return;
     // Clear the WHOLE entry, not just the state. A stale field left in a freed
     // slot would be visible to any future claim that forgets to set it -- and
@@ -1225,6 +1228,32 @@ void viv_socktab_drop(struct viv_socktab *tab, s32 fd) {
     e->n          = 0;
     e->bound_addr = 0;
     e->bound_port = 0;
+}
+
+void viv_socktab_drop(struct viv_socktab *tab, s32 fd) {
+    viv_socktab_drop_slot(viv_socktab_find(tab, fd));
+}
+
+// execve's close-on-exec socktab sweep. A socket fd marked FD_CLOEXEC is about
+// to be closed by handle_close_on_exec, which knows nothing of this table; drop
+// its entry first, or the freed fd number would carry a stale (proto, n) row
+// into the new image (whose first fd-creating call is handed that number, then
+// viv_socktab_find returns the stale connection). Reads the cloexec bit LIVE
+// from the handle table -- the entry does not cache it, so two entries that
+// ever share an fd necessarily agree on it. Clears BY SLOT (the pointer is in
+// hand) rather than via viv_socktab_drop's re-find. The caller (sys_execve_core)
+// runs this in execve's sole-live-thread window (proc_exec_alone), so no lock is
+// taken. NULL-safe: a native Proc has no socktab.
+void viv_socktab_drop_cloexec(struct Proc *p) {
+    if (!p) return;
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    if (!tab) return;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        struct viv_sock *e = &tab->s[i];
+        if (e->state != VIV_SOCK_FREE &&
+            handle_get_cloexec(p, (hidx_t)e->fd) == 1)
+            viv_socktab_drop_slot(e);
+    }
 }
 
 bool vivarium_socket_decide(u64 domain, u64 type, u64 protocol,

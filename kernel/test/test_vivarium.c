@@ -3293,3 +3293,75 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
     TEST_EXPECT_EQ(c, -(s64)T_E_INVAL,
                    "C: a minimum at the table size is EINVAL, not EMFILE");
 }
+
+// 6b: execve drops the socktab entry of every close-on-exec socket, and ONLY
+// those. handle_close_on_exec frees a cloexec fd via the handle_close PRIMITIVE,
+// which -- unlike the close SYSCALL arm -- does not touch the socktab, so without
+// this sweep the freed fd number carries a stale (proto, n) row into the new
+// image. Drives viv_socktab_drop_cloexec directly on a fresh phenotype Proc.
+//
+// THREE entries, one per outcome, so a wrong predicate is caught:
+//   - a cloexec socket             -> DROPPED (the fix);
+//   - a plain (kept) socket        -> SURVIVES (a sweep that over-drops fails);
+//   - a stale entry at a CLOSED fd -> SURVIVES (handle_get_cloexec == -1; a sweep
+//     written `!= 0` instead of `== 1` would wrongly drop it).
+void test_vivarium_exec_drops_cloexec_sockets(void);
+void test_vivarium_exec_drops_cloexec_sockets(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    p->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(p->socktab != NULL, "socktab alloc");
+
+    // handle_alloc hands back the fd; the socktab entry is keyed on that same
+    // number, exactly as a phenotype socket() pairs the handle and the entry.
+    hidx_t cloexec_fd = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    hidx_t plain_fd   = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    hidx_t stale_fd   = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(cloexec_fd >= 0 && plain_fd >= 0 && stale_fd >= 0,
+                "three handles allocated");
+    handle_set_cloexec(p, cloexec_fd, true);
+
+    viv_socktab_claim(p->socktab, (s32)cloexec_fd, VIV_NET_TCP, 100);
+    viv_socktab_claim(p->socktab, (s32)plain_fd,   VIV_NET_TCP, 101);
+    viv_socktab_claim(p->socktab, (s32)stale_fd,   VIV_NET_TCP, 102);
+    // Close the stale fd's HANDLE via the primitive (not the close syscall), so
+    // its entry lingers at a now-closed fd -- the shape a pre-existing stale row
+    // has, and the case the sweep must NOT touch.
+    handle_close(p, stale_fd);
+
+    // ---- CONTROLS: the cloexec bits and the pre-drop entries are as set up. ----
+    int  cloexec_bit = handle_get_cloexec(p, cloexec_fd);   // expect 1
+    int  plain_bit   = handle_get_cloexec(p, plain_fd);     // expect 0
+    int  stale_bit   = handle_get_cloexec(p, stale_fd);     // expect -1 (closed)
+    bool pre_cloexec = viv_socktab_find(p->socktab, (s32)cloexec_fd) != NULL;
+    bool pre_plain   = viv_socktab_find(p->socktab, (s32)plain_fd)   != NULL;
+    bool pre_stale   = viv_socktab_find(p->socktab, (s32)stale_fd)   != NULL;
+
+    // ---- THE SWEEP. ----
+    viv_socktab_drop_cloexec(p);
+
+    bool post_cloexec = viv_socktab_find(p->socktab, (s32)cloexec_fd) != NULL;
+    bool post_plain   = viv_socktab_find(p->socktab, (s32)plain_fd)   != NULL;
+    bool post_stale   = viv_socktab_find(p->socktab, (s32)stale_fd)   != NULL;
+
+    // ---- TEARDOWN, then assert (TEST_ASSERT returns; proc_free frees socktab). --
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_EXPECT_EQ(cloexec_bit, 1, "control: the cloexec fd IS cloexec");
+    TEST_EXPECT_EQ(plain_bit,   0, "control: the plain fd is NOT cloexec");
+    TEST_EXPECT_EQ(stale_bit,  -1, "control: the stale fd is CLOSED");
+    TEST_ASSERT(pre_cloexec && pre_plain && pre_stale,
+                "control: all three entries exist before the sweep");
+
+    TEST_ASSERT(!post_cloexec,
+                "FIX: the cloexec socket's entry is DROPPED -- a sweep that skips "
+                "the drop leaves the stale (proto,n) row for the new image");
+    TEST_ASSERT(post_plain,
+                "the plain socket's entry SURVIVES -- a sweep that over-drops "
+                "every entry fails here");
+    TEST_ASSERT(post_stale,
+                "the closed-fd stale entry SURVIVES -- handle_get_cloexec == -1, "
+                "so a sweep written `!= 0` instead of `== 1` would wrongly drop it");
+}

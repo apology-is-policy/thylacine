@@ -742,6 +742,40 @@ socktab entry fails the close-hook regression; skipping the connect swap (while
 still reporting success) fails in-guest **L46** and only L46; removing the close
 hook fails in-guest **L50**.
 
+### The exec sweep -- close-on-exec bypasses the close hook (6b)
+
+The close **hook** above rides `viv_linux_dispatch`, so it only fires for a
+`close()` that reaches the syscall dispatch. `execve` closes its close-on-exec
+fds a different way: `handle_close_on_exec` walks the cloexec bitmap and calls
+the `handle_close` **primitive** directly, which never enters the dispatch and so
+never runs the hook. Left alone, every `socket(); fcntl(F_SETFD, FD_CLOEXEC);
+execve()` -- the shape real musl's `socket(SOCK_CLOEXEC)` falls back to -- strands
+a `(proto, N)` entry on the freed fd for the new image's first `socket()`/`open()`
+to collide with, and `connect()` then dials a dead `data` while `poll` opens a
+stale `ready`.
+
+`sys_execve_core` closes the gap with `viv_socktab_drop_cloexec(p)`, run after
+the commit (`proc_exec_replace`) and **before** `handle_close_on_exec`, so it
+reads each entry's cloexec bit while it is still set. It drops only the entries
+whose fd is close-on-exec (`handle_get_cloexec == 1`); a plain socket's entry and
+a pre-existing stale entry at a closed fd (`== -1`) both survive. It takes no
+lock: `execve` is single-threaded there (`proc_exec_replace` extincts if a live
+peer exists), the same window that lets `handle_close_on_exec` walk the handle
+table unlocked.
+
+`viv_socktab_drop_cloexec` clears **by slot** (it holds the entry pointer) rather
+than via `viv_socktab_drop`'s re-find-by-fd; the two are equivalent here because
+the cloexec bit lives on the handle, not the entry, so two entries that ever
+share an fd agree on it. Regression: `vivarium.exec_drops_cloexec_sockets` drives
+the sweep on a fresh phenotype Proc with three entries (cloexec -> dropped, plain
+-> survives, closed-fd stale -> survives), each leg failing under a distinct wrong
+predicate.
+
+**Still owed** (each its own chunk, all "the socktab across an image or fd
+transition"): the fork clone (an inherited socktab must be copied, not shared),
+`dup`/`close_range` (the FORWARD obligation the T2 header already tracks), and
+`fcntl(F_DUPFD)`'s entry-less alias.
+
 ---
 
 ## The server path -- a connection accepted, from one thread (V-5b)

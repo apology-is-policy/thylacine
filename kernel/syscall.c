@@ -8444,6 +8444,16 @@ static s64 sys_execve_core(struct exception_context *ctx,
 
     spoor_clunk(exe);
 
+    // 6b: drop the socktab entry of every close-on-exec socket BEFORE
+    // handle_close_on_exec frees its fd. Otherwise the freed number carries a
+    // stale (proto, n) row into the new image, whose first fd-creating call is
+    // handed that number and then misroutes through the stale connection
+    // (connect dials the right ctl but opens a dead /net/<proto>/<n>/data; poll
+    // opens a stale ready file). Runs in execve's sole-live-thread window
+    // (proc_exec_alone, re-checked in proc_exec_replace), so it needs no lock,
+    // exactly like the handle_close_on_exec below. NULL-safe (native = no tab).
+    viv_socktab_drop_cloexec(p);
+
     // #151: consume the close-on-exec flags. AFTER the commit, for two reasons
     // pulling the same way: a failed exec must leave the process unchanged, so
     // nothing that closes the caller's fds may run before the last thing that
