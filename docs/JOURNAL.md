@@ -121,6 +121,30 @@ The run was not owed in the first place — clean-cfg TLC has been suspended sin
 so the whole excursion cost ten minutes to learn something about my own reflexes
 rather than about the specs.
 
+**And then it happened twice more in the same session, which is the actual
+finding.** (2) A shell loop meant to re-verify three real log pairs under a
+changed predicate reported all three FAILING with an empty verdict string; run
+directly, every one passed — the loop's `$?` was not measuring what I thought.
+(3) A one-liner checking that my new documentation tables were not broken
+flagged the GPU-DESIGN row as suspect, because I had hard-coded the pipe count
+of a *four*-column table onto a *three*-column one; every sibling row had the
+same count, so the doc was fine and the checker was not.
+
+Three throwaway verifiers in one session, three false alarms, zero real defects
+among them. Each was caught the same way — by checking the surprising result
+against a known-good reference before acting on it — and none cost more than
+minutes. But the shape is worth naming, because the pinned lessons are all about
+distrusting *gates I build deliberately*, and every one of these was a scrap of
+shell I wrote in passing to confirm something I already believed. **The care I
+give a committed checker does not automatically extend to the one-liner that
+checks it**, and the one-liner is the one nothing else will ever review.
+
+The practical rule that fell out: when an ad-hoc check reports that *everything*
+failed, or that something I just verified by hand is broken, the first suspect
+is the check. That is the same instinct as the pinned "when one member of a
+family misbehaves, suspect the classifier" — it just has to fire for code that
+never gets committed.
+
 ---
 
 ## 2026-08-18 — Warp-6 opens on a probe, and the blocker that wasn't
