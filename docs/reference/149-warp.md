@@ -1316,13 +1316,15 @@ a quick loop and a silicon loop that agree.
 away -- so "does this host offer `CONTEXT_INIT`?" had no answer short of a new
 build, on a value already in a register. It is now a per-boot line:
 
-| device | `lo` | virgl | edid | uuid | blob | ctxinit |
-|---|---|---|---|---|---|---|
-| `virtio-gpu-pci` (the default 2D dev device) | `0x30000002` | 0 | 1 | 0 | 0 | 0 |
-| `virtio-gpu-gl-pci` | `0x30000013` | 1 | 1 | 0 | 0 | **1** |
-| `virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M` | `0x3000001b` | 1 | 1 | 0 | **1** | **1** |
+| device | measured on | `lo` | virgl | edid | uuid | blob | ctxinit |
+|---|---|---|---|---|---|---|---|
+| `virtio-gpu-pci` (the default 2D dev device) | the Mac, HVF | `0x30000002` | 0 | 1 | 0 | 0 | 0 |
+| `virtio-gpu-gl-pci` | thyla-pi **and** thyla-gl | `0x30000013` | 1 | 1 | 0 | 0 | **1** |
+| `virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M` | thyla-pi **and** thyla-gl | `0x3000001b` | 1 | 1 | 0 | **1** | **1** |
 
-Identical on thyla-pi and thyla-gl. (`0x30000000` = `VIRTIO_RING_F_INDIRECT_DESC`
+The two GL rows are byte-identical across both hosts. The 2D row is the Mac's
+dev device and has no GL-host twin -- it is the control that makes the GL rows
+mean something, not a third host's agreement. (`0x30000000` = `VIRTIO_RING_F_INDIRECT_DESC`
 + `VIRTIO_RING_F_EVENT_IDX`; `hi=0x00000101` = `VIRTIO_F_VERSION_1` +
 `VIRTIO_F_RING_RESET`.)
 
