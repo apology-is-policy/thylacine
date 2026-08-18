@@ -96,6 +96,31 @@ Both hosts, finally, return **byte-identical feature words** (`0x30000013`
 without venus, `0x3000001b` with) — a cross-host agreement the arc did not need
 but is better for having.
 
+**Postscript, because repeating a pinned lesson is worth more written down than
+quietly fixed.** Going into the pre-push bar I ran every TLA+ spec through a
+one-liner that declared a spec green iff `tail -3` of its output contained
+*"Model checking completed. No error has been found."* Every spec came back
+FAIL. The specs were fine: TLC prints that line about twelve lines in and
+finishes with state-graph statistics, so my verdict window could never contain
+the string it was looking for. **A guard on the reporting path fabricating the
+defect it reports — key on the exit code, never the prose** — is already an
+M-PIN in this project's memory, and I wrote the same bug anyway, in a checker I
+composed in one line because it felt too small to get wrong.
+
+Two things follow. The pinned lesson does not fire from *reading* it; it fires
+from noticing the shape "I am grepping prose for a verdict", and that shape is
+easiest to miss in throwaway code. And the tell was available immediately:
+*every* member of a large set failing at once is almost always the classifier,
+not the set — which is itself the other half of a pinned lesson ("when ONE
+member of a family misbehaves, suspect the classifier"; here it was all of them,
+which is even louder). Confirmed in one command: exit code 0, success line at
+line 12.
+
+The run was not owed in the first place — clean-cfg TLC has been suspended since
+2026-05-21, and a `say!` line in a virtio driver touches no modelled mechanism —
+so the whole excursion cost ten minutes to learn something about my own reflexes
+rather than about the specs.
+
 ---
 
 ## 2026-08-18 — Warp-6 opens on a probe, and the blocker that wasn't
