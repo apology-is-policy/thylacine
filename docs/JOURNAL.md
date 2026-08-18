@@ -22,6 +22,118 @@ needed the operator.
 
 ---
 
+## 2026-08-18 — Two gates nobody ran, and the count that refuted my first explanation
+
+Spawned the follow-up prosecutor round the dirty C-6b close owed (`c8c83348` +
+`2f3c0bcc` — a P0 returned and P1+P2 hit six, so CLAUDE.md's re-audit rule
+fires). Fable is out of credits, so it went straight to the Opus fallback per
+scripture. **Worth stating which way the diversity caveat points this time,
+because it flipped**: the previous round audited Fable-authored code, so Opus
+was genuinely cross-lineage; these fixes are Opus-authored, so this round is
+*same*-family and its whole contribution is context independence. The spawn
+says so explicitly and tells the prosecutor which reflex to fight — agreeing
+with a construction because it is the one it would also have written.
+
+While it ran, the audit-in-flight discipline: non-colliding work, then
+prosecute the same surface myself.
+
+### The non-colliding work turned out to be the more interesting half
+
+main#245 said `test-fault.sh` is wired into no gate. A census over `Makefile` +
+`tools/` + `.github`, with a control at each end (`ci-smp-gate.sh` must resolve
+to a target, `test-fault.sh` must not), found **two** orphans rather than one:
+`tools/verify-kaslr.sh` has no caller either. The only references to either are
+two *comments* in sibling scripts.
+
+Neither is decorative. `test-fault.sh` is the only witness that the seven
+hardening protections actually **fire** rather than merely being compiled in —
+the canary, kernel-image W^X, BTI, the two stack guards, the boot-CPU idle
+guard, the recursion arm. `verify-kaslr.sh` is I-16's only runtime witness:
+ROADMAP §4.2 requires the kernel base to differ across boots, and `make test`
+accepts any *single* boot, so it is structurally blind to a slide that never
+moves. This is how #244 hid for a month.
+
+**Then the interesting part: my first explanation was wrong, and its own
+measurement said so.** The obvious hypothesis is that the survivors are in
+CLAUDE.md and the orphans are not — CLAUDE.md is auto-loaded every session, so
+that would be a clean anti-rot story. The count refutes it: `test-fault` and
+`verify-kaslr` appear in CLAUDE.md **twice each**, exactly like `test-a72` and
+`check-v80-floor`, which did not rot.
+
+The difference is *where*. The survivors sit in the "Build + test commands"
+block, as commands. The orphans appear only in the boot-banner paragraph's
+prose, named as **consumers of the ABI literals** — things that would *break*
+if you reworded one, never things to run. Every session learned they existed
+and nothing about invoking them. Which is precisely the mention-versus-program
+distinction that same paragraph teaches about its own co-update list, applied
+to itself and not noticed.
+
+So the remedy is both halves, in the idiom this project already uses for the
+class (`check-production`/#228, `test-a72` and `check-floor`/#91): a named
+target with a WHY comment, **plus** an entry in the command block. `55c5d2f8`.
+
+**A wrong turn caught before it shipped.** The first draft of the help text put
+backticks around `make test` inside a Makefile `@echo "..."`. Backticks inside
+double quotes command-substitute — `make help` would have *run the full test
+suite*. Caught by rendering the target rather than trusting the diff.
+
+**What this does not close, stated rather than glossed:** neither script now
+runs *automatically*. They are named targets a human or agent invokes, exactly
+like `test-a72`. Whether test-fault joins the pre-push bar costs 7 builds + 7
+boots, and the gating evaluation is the operator's call, so it is surfaced.
+
+### The vault gains a fourth failure class
+
+`quaestor owner` routed the change to `abi-boot-banner`, whose taxonomy
+enumerates three ways a co-update list member fails — *phantom* (named, never
+existed), *inert* (exists, matches nothing), *document* (matches, only goes
+stale) — against an implied healthy fourth, the **program** that "breaks
+silently and immediately".
+
+Two of its fifteen derived mirrors were programs nothing ran. That class has a
+program's full co-update obligation and **no failure behaviour at all**: it does
+not break loudly, and unlike a document it never even becomes visibly wrong,
+because nothing evaluates the mismatch. Strictly worse than the document class.
+
+The mirror rule itself is unaffected — it answers "who must be co-updated", and
+an unrun program must still be co-updated. What the note now guards against is
+reading a fifteen-member derived set as *defence in depth*. **A mirror set
+bounds the co-update obligation; it says nothing about detection latency, and
+only the members something actually runs contribute to detection at all.** Same
+shape as the extinction seam one level up: a contract on a value is silent about
+its delivery; a contract on the set of readers is silent about whether any of
+them reads. Vault `60095c97`, lint 946/0/0.
+
+### Self-audit: seven fixes prosecuted, seven sound, one suspicion withdrawn
+
+Re-derived from the code rather than from each fix's own comment. The P0 repair
+is covered better than its comment claims: the pre-existing `b.w == s.w` check
+sits before the new size guard on the same path, so the guard's geometry *is*
+the reader's; and `comp_readback_retired` re-runs `gl_adoption` as
+`same_adoption` at retire, so the guard re-validates at **read** time and the
+issue→retire TOCTOU is closed by construction. The "sole `Some(va)` caller"
+claim was re-derived, not accepted: exactly two call sites, one `Some`, one
+`None`, and the Warp-4 synchronous arm that originated the P0 no longer exists.
+
+`FenceTag.ok` has one construction site, fail-closed at `false`, and two
+textually identical assignments. `FenceVindication.comp` takes its
+discriminator and its ctx from the same loop index at both sites, so they cannot
+disagree. The `COMP_FSLOT` exemption is conditional on scope and correct in
+*both* directions — the client-driven scoped lever cannot touch the reserved
+slot, the internal unscoped callers still can, because a wedge that is real is
+genuinely global.
+
+**One suspicion raised and withdrawn by measurement**: `rb_coalesced` looked
+mis-charged (the `+= 1` sits outside the match, so both arms reach it) — the F9
+class again. Two checks killed it: `git show 24e6753d` proves the unconditional
+increment is pre-existing and untouched by my fix, and `149-warp.md` defines the
+key as "presents that enqueued instead of issuing", which is exactly what
+`rb_enqueue`'s two callers are. Recorded as withdrawn rather than dropped
+silently, because a fabricated defect eats the budget a real one needs.
+
+Findings in `memory/audit_c6b_followup_selfaudit.md`, to be **merged** with the
+round's report when it lands, not segregated from it.
+
 ## 2026-08-18 — The owed C-6b round: a deviation is dangerous everywhere else that reads the same field
 
 Fable ran out of credits mid-spawn — the prosecutor died after loading the
