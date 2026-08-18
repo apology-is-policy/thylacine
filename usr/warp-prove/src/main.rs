@@ -1398,61 +1398,82 @@ fn observe_rejection() {
         }
     };
 
-    // ROUND F1 [P0] regression: a B8G8R8A8 BO whose DECLARED BACKING cannot
-    // hold its DECLARED GEOMETRY must be REFUSED at create3d. Before the fix
-    // `wbo_create` bounded `size` only from above, `gl_adoption` compared only
-    // w/h, and `compose_cpu` read `w * h * 4` from the backing -- so this exact
-    // request (512x512 declared, one page offered) made the compositor read
-    // 1 MiB out of a 4 KiB mapping: a neighbouring allocation (another
-    // client's pixels) or a fault in the process that IS the console.
+    // FOLLOW-UP ROUND F1 [P1] regression, and it is the INVERSE of what this
+    // leg asserted when it was written. The C-6b close added a create-time
+    // lower bound on a B8G8R8A8 backing and this leg proved it refused
+    // `512 512 ... 4096`. The follow-up round found that shape is what THIS
+    // PROJECT'S OWN Mesa winsys emits for a legitimate texture --
+    // `usr/ports/mesa/patches/0006-*.patch:1511`, at the line that picks the
+    // size: "the driver's staging-path textures legitimately ask for size 1".
+    // Mesa declares one byte on two paths that keep the real width/height
+    // (the staging path, and MSAA which asks for no guest backing at all),
+    // the winsys rounds it to one page, and the result is byte-for-byte the
+    // "attack" this leg demanded be refused. There was nothing to tell apart.
     //
-    // A POSITIVE CONTROL rides with it, one variable away: the SAME request
-    // with a correctly-sized backing must SUCCEED. Without it the leg passes
-    // just as well against a create3d that refuses everything -- and "the
-    // undersized one was refused" would then be true for the wrong reason.
-    let undersized_pass = {
+    // So the door must ADMIT it, and this leg now proves that -- the
+    // regression it guards is a compositor that refuses ordinary GL
+    // allocations. The MSAA arm needed no host capability, so before the
+    // removal every multisampled BGRA target above 32x32 was refused outright.
+    //
+    // The CONTROL is the other direction, one variable away: a genuinely
+    // malformed declaration (unaligned backing) must still be REFUSED, so
+    // "admitted" cannot pass against a create3d that admits everything.
+    //
+    // The P0's real guard is the READ gate in `gl_adoption`, which is exact,
+    // re-checked at retire, and on the only path that reads a backing with
+    // foreign geometry. Its runtime regression test is OWED, not landed here:
+    // it needs a surface + `glsrc` + `present-to` and an assertion that
+    // `rb-issued` does NOT move for an undersized adoption while it DOES for
+    // a correctly-sized twin -- machinery that lives in the C-6 readback
+    // scenario, and a thyla-pi run to certify. Tracked, not dropped.
+    let staging_pass = {
         let mut passed = false;
-        let bo = parse_u32_prefix(&open_read_string(ok, &format!("ctx/{}/bo/new", ctx_ok)));
-        let bo2 = parse_u32_prefix(&open_read_string(ok, &format!("ctx/{}/bo/new", ctx_ok)));
+        // try_open_read, not open_read_string: a starved mint refuses at the
+        // OPEN, and open_read_string fail()s the whole scenario there -- so the
+        // "bo/new failed; the arm never ran" INSTRUMENT arm below was
+        // unreachable for the one failure it names (follow-up round F5).
+        let bo = try_open_read(ok, &format!("ctx/{}/bo/new", ctx_ok)).and_then(|s| parse_u32_prefix(&s));
+        let bo2 = try_open_read(ok, &format!("ctx/{}/bo/new", ctx_ok)).and_then(|s| parse_u32_prefix(&s));
         match (bo, bo2) {
             (Some(a), Some(b)) => {
-                let short = format!(
+                // What Mesa actually emits for a staged / MSAA 512x512 BGRA
+                // texture: true geometry, one page of declared backing.
+                let staging = format!(
                     "create3d {} {} {} 512 512 1 1 0 0 0 4096",
                     PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET
                 );
-                let full = format!(
-                    "create3d {} {} {} 512 512 1 1 0 0 0 {}",
-                    PIPE_TEXTURE_2D,
-                    VIRGL_FORMAT_B8G8R8A8_UNORM,
-                    VIRGL_BIND_RENDER_TARGET,
-                    512u32 * 512 * 4
+                // Malformed for a reason the seam still owns: not page-aligned.
+                let malformed = format!(
+                    "create3d {} {} {} 512 512 1 1 0 0 0 4095",
+                    PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET
                 );
-                let took_short = write_ctl(ok, &format!("ctx/{}/bo/{}/ctl", ctx_ok, a), &short);
-                let took_full = write_ctl(ok, &format!("ctx/{}/bo/{}/ctl", ctx_ok, b), &full);
-                if took_short {
+                let took_staging = write_ctl(ok, &format!("ctx/{}/bo/{}/ctl", ctx_ok, a), &staging);
+                let took_malformed =
+                    write_ctl(ok, &format!("ctx/{}/bo/{}/ctl", ctx_ok, b), &malformed);
+                if !took_staging {
                     t_putstr(
-                        "warp-prove: C0-UNDERSIZED FAIL -- create3d ADMITTED a 512x512 \
-                         B8G8R8A8 BO backed by 4096 bytes; the compositor would read 1 MiB \
-                         out of a 4 KiB mapping (round F1)\n",
+                        "warp-prove: C0-STAGING FAIL -- create3d REFUSED a 512x512 B8G8R8A8 BO \
+                         declaring one page, which is exactly what Mesa's staging and MSAA \
+                         paths emit for a legitimate texture; GL allocation is broken\n",
                     );
-                } else if !took_full {
+                } else if took_malformed {
                     t_putstr(
-                        "warp-prove: C0-UNDERSIZED INSTRUMENT -- the CONTROL was refused too; \
-                         create3d is refusing this shape for some other reason, so the \
-                         refusal of the undersized one means nothing\n",
+                        "warp-prove: C0-STAGING INSTRUMENT -- the CONTROL was admitted too; \
+                         create3d is admitting an unaligned backing, so \"the staging shape \
+                         was admitted\" means nothing\n",
                     );
                 } else {
                     passed = true;
                     t_putstr(
-                        "warp-prove: C0-UNDERSIZED PASS -- 4096 B for 512x512 REFUSED, the \
-                         correctly-backed twin ADMITTED (the arm discriminates; it does not \
-                         merely refuse)\n",
+                        "warp-prove: C0-STAGING PASS -- one page for 512x512 ADMITTED (the \
+                         Mesa staging/MSAA shape), an unaligned backing still REFUSED (the \
+                         arm discriminates; it does not merely admit)\n",
                     );
                 }
             }
             _ => {
                 t_putstr(
-                    "warp-prove: C0-UNDERSIZED INSTRUMENT -- bo/new failed; the arm never ran\n",
+                    "warp-prove: C0-STAGING INSTRUMENT -- bo/new failed; the arm never ran\n",
                 );
             }
         }
@@ -1469,8 +1490,8 @@ fn observe_rejection() {
         Some("sticky")
     } else if !f1_defended {
         Some("f1")
-    } else if !undersized_pass {
-        Some("undersized")
+    } else if !staging_pass {
+        Some("staging")
     } else {
         None
     };
@@ -3083,7 +3104,7 @@ fn observe_readback() {
         rb_incomplete("deep-unconstructed");
     }
     t_putstr(&format!(
-        "warp-prove: C6-RB DEEP {} -- {} constructed rounds ({} unconstructed retried): every compositor readback waited >= {} ms for its queue (readback-wait max {} ms) and observed the queue's LAST draw: the device paid the queue\n",
+        "warp-prove: C6-RB DEEP {} -- {} constructed rounds ({} unconstructed retried): the round's MEAN readback wait was >= {} ms -- so at least one readback in each round waited that long for its queue (readback-wait max {} ms) and observed the queue's LAST draw: the device paid the queue\n",
         if deep_ok { "PASS" } else { "FAIL" },
         rounds_done, unconstructed, RB_DEEP_MS, rw_max_all / 1000
     ));

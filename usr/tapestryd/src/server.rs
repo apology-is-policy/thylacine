@@ -1386,6 +1386,15 @@ struct WarpCtx {
     /// comp-global `verify-unknown` count instead, so silencing the storm
     /// costs no information (#95: latch the REPORT, never the counting).
     verify_diag_arms: u32,
+    /// FOLLOW-UP ROUND F2 [P2]: the one-shot half of the same remedy, for the
+    /// `!composable` comp-attach skip. F5 rate-limited that arm to one `say!`
+    /// per ctx per TICK, which at `clock_hz` 60 x `MAX_WARP_CTXS` 8 is still
+    /// ~480 synchronous console lines a second from ordinary unprivileged
+    /// clients -- the exact magnitude, in this file, that `verify_diag_arms`
+    /// above exists to answer, where the fix was a rate limit AND a latch.
+    /// Only the rate limit landed here. `comp_attach_refused` already carries
+    /// the rate, so latching the REPORT costs no information (#95).
+    import_skip_said: bool,
     /// The last VERDICT this tick's probe reached, `None` for unknown
     /// (round-2 F2). The rate limit answers from this rather than from
     /// `!stream_rejected`, which cannot represent "asked, no answer".
@@ -2188,16 +2197,29 @@ impl Comp {
         // counter storm at 9P-write rate. Costs nothing on the composable
         // path, which `already` short-circuits before reaching here.
         let tick = self.tick;
+        let mut say_skip = false;
         match self.wctx_mut(ctx_pub, conn) {
             Some(c) if c.import_tick == tick => {
                 c.import_pending = true;
                 return;
             }
-            Some(c) => c.import_tick = tick,
+            Some(c) => {
+                c.import_tick = tick;
+                // ROUND F2 [P2]: latch the REPORT in the SAME borrow that
+                // takes the tick, so the first non-composable present per ctx
+                // still names itself and the rest are carried by the counter.
+                if !composable && !c.import_skip_said {
+                    c.import_skip_said = true;
+                    say_skip = true;
+                }
+            }
             None => return,
         }
         if !composable {
             self.comp_attach_refused += 1;
+            if !say_skip {
+                return;
+            }
             say!(
                 "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: SKIPPED (not a composable BO shape: target {} format {} flags {:#x})",
                 ctx_pub, bo_pub, res_id, sn, shape.0, shape.1, shape.2
@@ -5296,6 +5318,7 @@ impl Comp {
             import_tick: u64::MAX,
             import_pending: false,
             verify_diag_arms: 0,
+            import_skip_said: false,
             verify_last: None,
             present_to: None,
             bo_backed_peak: 0,
@@ -5807,9 +5830,6 @@ impl Comp {
     const WDIAG_CTL_NO_RECORD: u32 = 14;
     const WDIAG_CTL_NOT_VIRGL: u32 = 15;
     const WDIAG_RECORD_VANISHED: u32 = 16;
-    /// Round F1 [P0]: the declared backing cannot hold the declared base
-    /// level. Bit 17 -- the mask is a `u32`, so there is room to 31.
-    const WDIAG_UNDERSIZED: u32 = 17;
 
     /// #218 one-shot diagnostic: the FIRST refused build per ctx names the
     /// failing arm + its parameters. Gated on the ctx latch, never the
@@ -5921,26 +5941,36 @@ impl Comp {
             self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_GEOMETRY, "geometry", geom_max as i64, format, w, h, last_level, size);
             return false;
         }
-        // ROUND F1 [P0], the create-time brace: the two gates above are both
-        // upper bounds, and the compose path reads by GEOMETRY. Refuse a
-        // declaration whose base level cannot fit -- keyed on the ONE format
-        // whose bytes-per-texel we can assert (`B8G8R8A8_UNORM` is 4 by
-        // definition), because a general floor would reject legitimate
-        // COMPRESSED textures (BC1 is half a byte per texel) that this seam
-        // has no business refusing. Deliberately NOT keyed on `composable`:
-        // the attack shape is B8G8R8A8 + `Y_0_TOP`, which is precisely NOT
-        // composable -- that is how it reaches the readback arm at all.
-        if format == VIRGL_FORMAT_B8G8R8A8_UNORM {
-            let base = (w as u64)
-                .saturating_mul(h.max(1) as u64)
-                .saturating_mul(d.max(1) as u64)
-                .saturating_mul(array.max(1) as u64)
-                .saturating_mul(4);
-            if size < base {
-                self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_UNDERSIZED, "undersized", base as i64, format, w, h, last_level, size);
-                return false;
-            }
-        }
+        // NO create-time lower bound on the backing, and this is deliberate --
+        // a brace here was added with the F1 [P0] fix and REMOVED by the
+        // follow-up round, which found its premise contradicted by this
+        // project's OWN Mesa winsys, in a comment at the line that chooses
+        // the size (`usr/ports/mesa/patches/0006-*.patch:1511`):
+        //
+        //     /* The seam refuses unaligned or zero backings; the driver's
+        //      * staging-path textures legitimately ask for size 1. */
+        //     size = *size_inout ? *size_inout : 1;
+        //
+        // So a REAL 512x512 BGRA texture legitimately arrives declaring one
+        // page. Mesa's virgl driver does this on two paths that keep the true
+        // width/height: the staging path (`alloc_size = 1`) and MSAA (`don't
+        // create guest backing store for MSAA` -> total_size 0). The brace
+        // refused both, byte-for-byte indistinguishable from the attack shape
+        // -- because there is nothing to distinguish: the declaration IS
+        // identical. Only the READER can tell them apart, by whether it is
+        // about to read the backing.
+        //
+        // The MSAA arm needed no host capability, so every multisampled BGRA
+        // target above 32x32 was refused outright; the staging arm hung on a
+        // virglrenderer capset bit nothing in this tree measures, which is why
+        // the gates stayed green. A guard whose activation no gate can see is
+        // worse than the hole it closes.
+        //
+        // The lower bound lives at the READ gate (`gl_adoption`) instead, and
+        // that is the load-bearing half regardless: it is exact rather than
+        // conservative, it is re-evaluated at retire via `same_adoption`, and
+        // it sits on the only path that reads a BO backing with foreign
+        // geometry. A host-only resource simply never adopts.
         // The c-borrowing checks compute into locals first so the failure
         // arms can reach the (&mut self) one-shot diagnostic (#218).
         let (byte_fail, byte_live, count_fail, no_mint, already_built, dev_ctx) = {
@@ -7851,8 +7881,17 @@ impl Conn {
                     comp.warp_probe_texture
                 ),
             );
-            // Round-3 F4: where the FIXED-size prefix ends. Re-set below in
-            // the test-mode block, whose `w210` line is also fixed size.
+            // Round-3 F4: where the FIXED-size prefix ends. Re-set below --
+            // after the `rb-*` census (fixed size) on EVERY build, and again
+            // in the test-mode block whose `w210` line is also fixed size.
+            //
+            // FOLLOW-UP ROUND F3: it used to be taken ONLY here and re-set only
+            // inside `#[cfg(test-mode)]`, so on a production build the guard
+            // measured a prefix that excluded every line below -- including the
+            // census -- and could not report a truncation of the thing it was
+            // cited as protecting. A width guard that is blind on the shipping
+            // build is not a mitigation, and it was the stated reason for
+            // declining to move this line.
             let mut gcrit_end = s.len();
             // Audit F3/F4: the ctx-less refusal ledger + the comp-global
             // one-shot mask -- both are spendable/bumpable by ANY conn, so
@@ -7873,8 +7912,14 @@ impl Conn {
             // hit, so a bare `issued` anywhere else in this file would feed
             // the gate's verdict arms the wrong counter WITHOUT erroring: the
             // arms would simply decide differently. The claim is now true as
-            // written, and the redundant leading `comp-rb` token is gone, so
-            // the line is SHORTER than the version it replaces.
+            // written, and the redundant leading `comp-rb` token is gone.
+            //
+            // It is NOT shorter, and an earlier comment here claimed it was:
+            // dropping `comp-rb ` saves 8 bytes and prefixing four bare keys
+            // with `rb-` costs 12, so the line grew by 4 (67 -> 71 fixed
+            // bytes, measured). The disposition that rested on the shortening
+            // is corrected above -- the guard now measures this line on every
+            // build, which is the mitigation that was claimed and absent.
             //
             // Round F10 [P3] asked for this to sit after the `w210` custody
             // mirror. It stays here instead, deliberately: `w210` and the
@@ -7910,6 +7955,22 @@ impl Conn {
                     comp.comp_attach_witnessed, comp.comp_attach_refused
                 ),
             );
+            // Every line above is FIXED size, so this is where the guarded
+            // prefix genuinely ends on EVERY build -- follow-up round F3: it
+            // used to be taken far above and re-set only inside the test-mode
+            // block, so a production build measured a prefix that excluded the
+            // ctx-less ledgers, the `rb-*` census and `comp-attach`, and could
+            // not report a truncation of any of them. The test-mode block
+            // below re-sets it again past its own fixed `w210` line.
+            //
+            // `cfg(not(test-mode))` because the test-mode block below re-sets
+            // it past its own fixed `w210` line, and `default = ["test-mode"]`
+            // -- so without the gate this assignment is dead in every default
+            // build and warns. Production is exactly the build it exists for.
+            #[cfg(not(feature = "test-mode"))]
+            {
+                gcrit_end = s.len();
+            }
             // #175: the anti-vacuous counter. A prover that submits and
             // then abandons is racing the drain; if the completion won,
             // nothing was in flight, the abandon was a no-op, and every

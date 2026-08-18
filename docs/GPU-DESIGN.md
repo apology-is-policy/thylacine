@@ -2400,7 +2400,11 @@ LANDS (`comp-rb`; `composed gpu` moving instead is `INCOMPLETE(bo-composable)`);
 **DEEP** — with 8 heavy submits queued (80 clear PAIRS each: the BO to
 an index-encoded colour, then a 2× scratch partner, alternating
 framebuffers so mesa v3d cannot fold them — every clear a full-surface
-store on the CLIENT's GL context) `cost readback-wait max` ≥ 100 ms — the
+store on the CLIENT's GL context) the round's MEAN `readback-wait` ≥ 100 ms
+(which entails `max` ≥ 100 ms, so at least one readback in the round paid it;
+the gate cannot claim EVERY readback did, and since the F8 correction it no
+longer tries -- a per-round max is not derivable, because `Cost.max_ns` is a
+global running maximum that is never reset) — the
 positive control that the queue was deep, without which LIVE is satisfied
 by a light one; the leg also prints the queue's own fence timeline and
 **which clear index the readback observed** (the BLUE byte of the pixel it

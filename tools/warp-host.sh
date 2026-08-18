@@ -327,11 +327,18 @@ reject)
     # as the thing this gate exists to catch. It caught it once only because
     # a human was reading the output.
     #
-    # Four terms, each covering a different way to be wrong:
+    # SIX terms, each covering a different way to be wrong. Keep this
+    # enumeration equal to the loop below: it read "Four terms" and listed
+    # five for as long as the loop checked five, which is what a maintainer
+    # asking "does the gate cover arm X?" actually reads (follow-up round F5).
     #   ANSWER=       the #240 measurement ran at all
     #   DETECT PASS   the detector DISCRIMINATES (rejected 1, healthy 0)
     #   STICKY PASS   a SECOND REAL probe still reads (1 0)
     #   F1 DEFENDED   a client that WRITES the probe's mark cannot blind it
+    #   STAGING PASS  the create3d door ADMITS the Mesa staging/MSAA shape
+    #                 (one page declared for real geometry) while still
+    #                 refusing a malformed one -- the follow-up round's F1,
+    #                 where the C-6b close's lower bound broke real clients
     #   LS-CI PASS    the SCENARIO completed -- without a completion term an
     #                 aborted run (ctx_field's fail() path, F9) still shows
     #                 ANSWER= and would read as verified.
@@ -355,9 +362,9 @@ reject)
     # The six terms stay as the belt to that brace: they name each arm, and
     # a scenario that passed for a reason this list does not know about
     # should still fail here.
-    grep -E "C0-REJECT|C0-DETECT|C0-F1" "$out" || true
+    grep -E "C0-REJECT|C0-DETECT|C0-F1|C0-STAGING" "$out" || true
     ok=1
-    for pat in "C0-REJECT ANSWER=" "C0-DETECT PASS" "C0-DETECT STICKY PASS" "C0-F1 DEFENDED" "C0-UNDERSIZED PASS" "LS-CI PASS: warp-prove reject"; do
+    for pat in "C0-REJECT ANSWER=" "C0-DETECT PASS" "C0-DETECT STICKY PASS" "C0-F1 DEFENDED" "C0-STAGING PASS" "LS-CI PASS: warp-prove reject"; do
         if ! grep -q "$pat" "$out"; then
             echo "#240 GATE FAIL -- missing: $pat"
             ok=0

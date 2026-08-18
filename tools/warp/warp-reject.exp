@@ -5,7 +5,8 @@
 # Separate from warp-prove.exp because the leg spends 45 s waiting out a 30 s
 # timeout, and the Warp-2 gate's value is being cheap enough to run every time.
 # The #240 MEASUREMENT (the ANSWER= line) is data, and warp-host.sh reads it;
-# the three C-0d DETECTOR arms (DETECT / STICKY / F1) are verdicts, and since
+# the FOUR C-0d DETECTOR arms (DETECT / STICKY / F1 / STAGING) are verdicts,
+# and since
 # the C-0d Fable round (F6) the leg's completion token carries them: it prints
 # "C0-REJECT DONE" ONLY when every arm passed, else "C0-REJECT INCOMPLETE(<arm>)"
 # -- so this scenario is self-gating wherever it runs, instead of passing on a
