@@ -940,6 +940,25 @@ struct Proc {
 // it), NOT propagated by rfork. See the SPAWN_PERM_* comment in syscall.h.
 #define PROC_FLAG_MAY_RAISE_PAGE_BUDGET (1u << 10)
 
+// item 11 (ARCH §8.8.3): the CAUGHT-note-deliverable latch -- the non-death
+// sibling of the two terminate latches above. A 6-bit sub-field at bits
+// 11..16, one bit per note family ALIGNED TO NOTE_BIT_* (INTERRUPT=0 .. TTY=5),
+// so thread_caught_note_deliverable can gate it by the per-Thread note_mask
+// exactly as thread_die_pending gates the terminate latches. The per-family
+// pairing is REQUIRED for the same reason the PTY-1b comment above gives: a
+// single shared bit would make a thread that masked one family spuriously
+// EINTR-unwind for another family's queued caught note. A family bit is armed
+// when notes_post commits a CAUGHT note of that family (a live handler exists
+// OR the Proc is self-managing -- the exact COMPLEMENT of the terminate arm,
+// which refuses precisely then) and cleared when the last queued note of that
+// family drains. Same latch discipline as the terminate bits: set/cleared ONLY
+// under p->notes->lock; NOT propagated by rfork; never armed on kproc (the arm
+// inherits notes_post's kproc guard). The mask is a literal here because proc.h
+// does not include notes.h; notes.c static_asserts it equals
+// NOTE_MASK_SUPPORTED << PROC_CAUGHT_NOTE_SHIFT.
+#define PROC_CAUGHT_NOTE_SHIFT      11u
+#define PROC_FLAG_CAUGHT_NOTE_MASK  (0x3fu << PROC_CAUGHT_NOTE_SHIFT)  // bits 11..16
+
 // LINEAGE L-1 re-based EVERY offset below: extracting struct AddrSpace removed
 // seven fields from struct Proc and added one pointer, so the struct went
 // 408 -> 376 bytes. The ASSERT EXPRESSION is the authoritative number; the
@@ -2145,5 +2164,30 @@ bool proc_intr_terminate_pending(const struct Proc *p);
 // thread's interrupt-death -- it reaches its next sync-from-EL0 tail
 // regardless; the never-syscalling spinner gap is tracked as task #964).
 void proc_interrupt_terminate_wake(struct Proc *p);
+
+// item 11 (ARCH §8.8.3): the CAUGHT-note sibling of the two functions above.
+//
+// proc_caught_note_pending — true iff `p` carries any armed bit in the
+// PROC_FLAG_CAUGHT_NOTE_MASK sub-field (a caught, deliverable note of some
+// family is queued). Fail-closed on NULL/corrupt. Acquire load, pairing with
+// the release arm in notes_post so the lock-free reader
+// (thread_caught_note_deliverable at every sleep site) sees a published latch.
+bool proc_caught_note_pending(const struct Proc *p);
+
+// proc_caught_note_wake — wake every Thread of `p` blocked in a rendez sleep so
+// it unwinds (SLEEP_NOTEINTR) toward its EL0-return tail, where the queued
+// caught note is delivered WITHOUT terminating the Thread. The non-death twin
+// of proc_interrupt_terminate_wake: identical body + lock contract (CALLER MUST
+// HOLD g_proc_table_lock; per-peer wait_lock -> rendez_blocked_on -> wakeup),
+// internally gated on proc_caught_note_pending so a caller invokes it
+// unconditionally after posting. Interrupt-posting sites (which already hold
+// g_proc_table_lock for proc_interrupt_terminate_wake) call BOTH: the terminate
+// wake fires for an UNCAUGHT interrupt (latch armed), this one for a CAUGHT
+// interrupt (the latch was refused, this sub-field armed) -- exactly one is a
+// no-op per post. A caught note of a family posted from a site that does NOT
+// hold g_proc_table_lock (pipe / child_exit) is delivered at the blocked
+// thread's natural wake instead of promptly (today's behavior, no regression);
+// prompt delivery for those families is the item-11 completeness seam.
+void proc_caught_note_wake(struct Proc *p);
 
 #endif // THYLACINE_PROC_H

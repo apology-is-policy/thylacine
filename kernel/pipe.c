@@ -352,6 +352,14 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
         // #811 (ARCH §8.8.1): a death-interrupted sleep means the Proc is
         // group-terminating -- return so the Thread unwinds to its EL0-return
         // die-check (re-looping would re-register + re-INTR = livelock).
+        // item 11 note (ARCH §8.8.3): this read is NOT yet caught-note-
+        // interruptible. 11b-core lands the MECHANISM only; opting a read into
+        // sleep_noteintr (returning -T_E_INTR on a queued caught note) is
+        // deferred to 11c, which lands it TOGETHER with the native/phenotype
+        // EINTR handling -- a native reader (libthyla-rs) is not EINTR-aware, so
+        // returning EINTR here before that handling exists breaks it (e.g. the
+        // ut shell's `$(cmd)` capture read, interrupted by the captured child's
+        // own child_exit note). See design_caught_notes_do_not_interrupt_waits.
         if (sleep(&r->read_rendez, cond_can_read, r) == SLEEP_INTR)
             return -1;
         // Loop: re-check state with the lock held.

@@ -4267,7 +4267,10 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
     // wake the target's blocked threads so the LS-5b terminate fires at
     // their EL0-return tails. Internally gated on the latch; the walk's
     // g_proc_table_lock contract is satisfied (proc_for_each holds it).
-    if (rc == 0) proc_interrupt_terminate_wake(target);
+    if (rc == 0) {
+        proc_interrupt_terminate_wake(target);
+        proc_caught_note_wake(target);   // item 11: caught-note twin
+    }
     w->result = (rc == 0) ? 1 : -1;
     return 1;
 }
@@ -4315,9 +4318,10 @@ static s64 postnote_self(struct Proc *p, const char *name) {
     // take it only when the latch armed (the read is a benign pre-check -- the
     // wake re-validates under its own internal gate, and `p` is self, immune to
     // reap here).
-    if (rc == 0 && proc_intr_terminate_pending(p)) {
+    if (rc == 0 && (proc_intr_terminate_pending(p) || proc_caught_note_pending(p))) {
         irq_state_t ws = proc_table_lock_acquire();
         proc_interrupt_terminate_wake(p);
+        proc_caught_note_wake(p);   // item 11: caught-note twin
         proc_table_lock_release(ws);
     }
     return (rc == 0) ? 0 : (s64)-1;

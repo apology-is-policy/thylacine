@@ -407,6 +407,36 @@ static void notes_arm_intr_terminate_locked(struct Proc *p, const char *name) {
     __atomic_or_fetch(&p->proc_flags, latch, __ATOMIC_RELEASE);
 }
 
+// The caught-note sub-field (proc.h) carries a literal mask because proc.h does
+// not include notes.h; assert it equals NOTE_MASK_SUPPORTED shifted, so a new
+// NOTE_BIT_* family (widening NOTE_MASK_SUPPORTED) can never silently outgrow it.
+_Static_assert((NOTE_MASK_SUPPORTED << PROC_CAUGHT_NOTE_SHIFT) == PROC_FLAG_CAUGHT_NOTE_MASK,
+               "item 11: PROC_FLAG_CAUGHT_NOTE_MASK must equal NOTE_MASK_SUPPORTED << SHIFT");
+
+// item 11 (ARCH 8.8.3): the CAUGHT-note twin of the terminate arm above -- its
+// EXACT COMPLEMENT. The terminate arm REFUSES when a live handler exists OR the
+// Proc is self-managing; this one arms PRECISELY THEN. A committed note whose
+// family is caught (a handler will run it, or a self-managing notes fd will read
+// it) arms that family's bit in the PROC_FLAG_CAUGHT_NOTE_MASK sub-field, which
+// the lock-free sleep predicate thread_caught_note_deliverable reads. Per-family
+// (bit == NOTE_BIT_*) so the sleeper's ~note_mask gate stays precise (the PTY-1b
+// reason). KILL is excluded: it is non-catchable and routes through
+// group_exit_msg (death), never a caught-deliverable note. The wake of already-
+// blocked peers is the caller's duty (proc_caught_note_wake needs g_proc_table_-
+// lock); a not-yet-sleeping thread reads the latch at its own register-then-
+// observe. Same discipline as the terminate arm: caller holds q->lock; never
+// kproc; not rfork-propagated (proc_flags never are).
+static void notes_arm_caught_note_locked(struct Proc *p, const char *name) {
+    if (p == kproc()) return;
+    int bit = notes_name_to_bit(name);
+    if (bit < 0 || bit == (int)NOTE_BIT_KILL) return;
+    if (!notes_proc_has_live_handler(p, name) && !proc_is_self_managing_notes(p))
+        return;
+    __atomic_or_fetch(&p->proc_flags,
+                      (1u << (PROC_CAUGHT_NOTE_SHIFT + (u32)bit)),
+                      __ATOMIC_RELEASE);
+}
+
 // #240: the STOP twin of the terminate arm above. A committed STOP-disposition
 // note (tty:susp) arms the freshness flag proc_job_stop_self reads before it
 // applies #15's deferred stop; any cont clears it. See the susp_stop_armed
@@ -446,6 +476,27 @@ static void notes_drain_intr_locked(struct Proc *p, struct NoteQueue *q,
         idx = (idx + 1) % NOTE_QUEUE_DEPTH;
     }
     __atomic_and_fetch(&p->proc_flags, ~latch, __ATOMIC_RELEASE);
+}
+
+// item 11 (ARCH 8.8.3): the CAUGHT-note twin of notes_drain_intr_locked. When a
+// note of family F pops, clear F's caught bit iff no queued note of family F
+// remains -- mirroring the terminate drain per-family (the post-time caught
+// snapshot is kept while any same-family note is queued, exactly as the
+// terminate latch keeps its class). KILL excluded to match the arm. A bit that
+// was never armed (an uncaught family) just clears a zero -- harmless. Caller
+// MUST hold q->lock.
+static void notes_drain_caught_note_locked(struct Proc *p, struct NoteQueue *q,
+                                           const struct Note *popped) {
+    int bit = notes_name_to_bit(popped->name);
+    if (bit < 0 || bit == (int)NOTE_BIT_KILL) return;
+    u32 fambit = (1u << (PROC_CAUGHT_NOTE_SHIFT + (u32)bit));
+    u32 idx = q->head;
+    for (u32 n = 0; n < q->count; n++) {
+        if (notes_name_to_bit(q->ring[idx].name) == bit)
+            return;             // another same-family note remains queued
+        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+    }
+    __atomic_and_fetch(&p->proc_flags, ~fambit, __ATOMIC_RELEASE);
 }
 
 int notes_post(struct Proc *p, const char *name, u32 arg,
@@ -533,6 +584,10 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
             // #240: and the STOP twin -- a coalesced susp is still a susp
             // asking for a stop, so it re-arms exactly as a fresh one does.
             notes_arm_susp_stop_locked(p, name);
+            // item 11: the CAUGHT-note twin -- re-evaluate the caught
+            // disposition too (a handler may have been installed since the
+            // original post declined to arm it).
+            notes_arm_caught_note_locked(p, name);
             // Wake registered poll_waiters AND devnotes_read's pollers
             // (same list at F3 close).
             poll_waiter_list_wake(&q->poll_list);
@@ -569,6 +624,12 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // is never delivered, so arming for it would leave the flag set for an
     // NDFLT that a LATER note reaches.
     notes_arm_susp_stop_locked(p, name);
+    // item 11 (ARCH 8.8.3): the CAUGHT-note twin -- arms a family bit iff the
+    // committed note is caught (handler or self-managing). Same "arm on COMMIT"
+    // ordering as the STOP twin. The wake of ALREADY-blocked peers is likewise
+    // the caller's duty (proc_caught_note_wake, needs g_proc_table_lock); a
+    // not-yet-sleeping thread reads this latch at its own register-then-observe.
+    notes_arm_caught_note_locked(p, name);
 
     // Wake every registered poll_waiter (including any devnotes_read
     // parked on this list per F3 close) BEFORE we drop the queue lock.
@@ -714,6 +775,7 @@ int notes_dequeue_for_fd_locked(struct Proc *p, struct Thread *t,
             // LS-5c: draining the last queued interrupt un-arms the
             // terminate latch (an inherited-notes-fd reader consumed it).
             notes_drain_intr_locked(p, q, out);
+            notes_drain_caught_note_locked(p, q, out);  // item 11: the caught twin
             return 1;
         }
         idx = (idx + 1) % NOTE_QUEUE_DEPTH;
@@ -756,6 +818,7 @@ int notes_dequeue_locked(struct Proc *p, struct Thread *t, struct Note *out) {
                 // clear -- notes_set_handler cleared it at registration --
                 // so this is defense-in-depth for the dispatcher pop).
                 notes_drain_intr_locked(p, q, out);
+                notes_drain_caught_note_locked(p, q, out);  // item 11: caught twin
                 return 1;
             }
             idx = (idx + 1) % NOTE_QUEUE_DEPTH;
@@ -813,6 +876,7 @@ u32 notes_discard_name(struct Proc *p, const char *name) {
         struct Note gone = q->ring[found];
         notes_pop_at_locked(q, (u32)found);
         notes_drain_intr_locked(p, q, &gone);
+        notes_drain_caught_note_locked(p, q, &gone);  // item 11: caught twin
         removed++;
     }
     spin_unlock(&q->lock);
@@ -1040,6 +1104,17 @@ int notes_stop_dequeue_locked(struct Proc *p, struct Thread *t,
     // `dfl` is TERMINATE), so notes_drain_intr_locked would return at its first
     // line for any note this can ever pop -- present or future. The other pop
     // sites call it because THEY can pop a terminate-class note.
+    //
+    // The CAUGHT drain (item 11, round F1) is DIFFERENT and MUST run: the
+    // caught latch is per-FAMILY, and the TTY family bit is SHARED across
+    // tty:winch/susp/cont/quit/hup. A caught tty:winch (a SIGWINCH handler)
+    // arms the family bit; this pop removes a same-family sibling (an uncaught
+    // tty:susp), so the family bit must be re-evaluated -- else it stays
+    // STALE-ARMED with no tty note queued, and thread_caught_note_deliverable
+    // reads true forever -> an opted-in reader EINTR-livelocks. notes_drain_-
+    // caught_note_locked self-guards (a no-op unless the popped name's family
+    // has a caught bit and no same-family note remains).
+    notes_drain_caught_note_locked(p, q, out);
     return 1;
 }
 
@@ -1150,6 +1225,31 @@ bool thread_die_pending(struct Thread *t) {
             return true;
     }
     return false;
+}
+
+// item 11 (ARCH 8.8.3): the NON-death sibling of thread_die_pending. True iff a
+// CAUGHT, deliverable note of a family UNMASKED for THIS thread is queued -- so
+// a caught-note-interruptible sleep should unwind SLEEP_NOTEINTR, return
+// -T_E_INTR, and deliver the note at its EL0-return tail WITHOUT dying.
+//
+// LOCK-FREE, exactly as thread_die_pending: acquire-load proc_flags (pairs with
+// notes_arm_caught_note_locked's RELEASE arm), OWNER-read note_mask (written
+// only by the owning thread -- see the thread_die_pending contract). The
+// caught-note sub-field is per-family; `& ~note_mask` drops the families this
+// thread deferred. Gated off for kproc + the exit_close_active finalization
+// window (a closing thread must not EINTR-unwind its orderly handle close) --
+// the same two gates thread_die_pending applies. DISJOINT from thread_die_-
+// pending by construction: a caught bit is armed ONLY for a caught note, which
+// the terminate arm refuses -- so no note ever sets both a terminate latch and
+// a caught bit, and death (checked FIRST at every sleep site) always wins.
+bool thread_caught_note_deliverable(struct Thread *t) {
+    if (!t) return false;
+    if (t->exit_close_active) return false;
+    struct Proc *p = t->proc;
+    if (!p || p == kproc()) return false;
+    u32 flags  = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    u32 caught = (flags & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
+    return (caught & ~t->note_mask & NOTE_MASK_SUPPORTED) != 0;
 }
 
 // VIVARIUM V-6c: deliver the head note to a Linux-phenotype handler.
@@ -1578,6 +1678,11 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     u64 new_sp = (ctx->sp - NOTE_NAME_MAX) & ~(u64)0xf;
     if (new_sp == 0 || new_sp >= UACCESS_USER_VA_TOP) {
         (void)notes_reenqueue_head_locked(q, &popped);
+        // item 11 (round F2): the pop above drained the caught latch, but the
+        // note is back in the queue -- re-arm so a re-blocking sleep_noteintr
+        // stays interruptible for it. This native path runs only with a live
+        // handler, so the re-arm sets the bit (arm re-checks handler/self-mgmt).
+        notes_arm_caught_note_locked(p, popped.name);
         spin_unlock(&q->lock);
         return;
     }
@@ -1590,6 +1695,7 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     for (u32 i = 0; i < NOTE_NAME_MAX; i++) {
         if (uaccess_store_u8(new_sp + i, (u8)popped.name[i]) != 0) {
             (void)notes_reenqueue_head_locked(q, &popped);
+            notes_arm_caught_note_locked(p, popped.name);  // item 11 (round F2)
             spin_unlock(&q->lock);
             return;
         }

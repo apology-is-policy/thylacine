@@ -1838,6 +1838,7 @@ static int pgrp_post_cb(struct Proc *q, void *arg) {
         if (notes_post(q, c->name, c->arg, NULL, true) == 0)
             c->posted++;
         proc_interrupt_terminate_wake(q);
+        proc_caught_note_wake(q);   // item 11: the caught-note twin
     }
     return 0;   // keep walking -- every member gets its post
 }
@@ -1863,6 +1864,7 @@ int notes_post_pid(int pid, const char *name, u32 arg) {
     if (q && q->state == PROC_STATE_ALIVE) {
         if (notes_post(q, name, arg, NULL, true) == 0) posted = 1;
         proc_interrupt_terminate_wake(q);
+        proc_caught_note_wake(q);   // item 11: the caught-note twin
     }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return posted;
@@ -1915,11 +1917,21 @@ void proc_console_post_interrupt(void) {
     if (owner && owner->magic == PROC_MAGIC && owner->state == PROC_STATE_ALIVE) {
         notes_post(owner, "interrupt", 0u, NULL, true);
         // LS-5c (P3-terminate): if the post armed the terminate latch (the
-        // owner has no handler and is not self-managing -- never the session
-        // shell, which is self-managing), wake its blocked threads so the
-        // LS-5b terminate fires at their EL0-return tails. g_proc_table_lock
-        // is held (this function's lock), satisfying the wake's contract.
+        // owner has no handler and is not self-managing), wake its blocked
+        // threads so the LS-5b terminate fires at their EL0-return tails.
         proc_interrupt_terminate_wake(owner);
+        // item 11 (ARCH 8.8.3, P3-deliver): the CAUGHT twin -- the session
+        // shell IS self-managing, so its `interrupt` is caught (deliverable via
+        // its notes fd), NOT a terminate latch; the wake above is a no-op for
+        // it. THIS wake unwinds an owner blocked in an OPTED-IN caught-note-
+        // interruptible read (SLEEP_NOTEINTR -> -T_E_INTR) so it services the
+        // Ctrl-C promptly instead of a line late. As of 11b-core only the pipe
+        // read is opted in (sleep_noteintr); the shell's actual prompt read
+        // (dev9p pts / cons, cons.c uses plain sleep today) opts in at
+        // 11b-9p/later -- so for the console shell this wake is the wired-ahead
+        // infrastructure whose consumer lands with the reader opt-in (items
+        // 8/10). g_proc_table_lock is held, satisfying both wakes' contract.
+        proc_caught_note_wake(owner);
     }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
@@ -2134,6 +2146,18 @@ bool proc_intr_terminate_pending(const struct Proc *p) {
                PROC_FLAG_TTY_TERMINATE_PENDING)) != 0;
 }
 
+bool proc_caught_note_pending(const struct Proc *p) {
+    // item 11 (ARCH 8.8.3): the non-death twin of proc_intr_terminate_pending.
+    // Fail-closed. Acquire pairs with the release arm in notes_post so the
+    // lock-free reader (thread_caught_note_deliverable) sees a published latch.
+    // The wake gate; per-family mask precision lives in the reader's re-check,
+    // so a spurious wake costs one predicate re-eval, never a wrong unwind --
+    // exactly as the terminate-latch gate above.
+    if (!p || p->magic != PROC_MAGIC) return false;
+    return (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE)
+            & PROC_FLAG_CAUGHT_NOTE_MASK) != 0;
+}
+
 // LS-5c (P3-terminate, ARCH 8.8.2): wake every blocked Thread of `p` so it
 // unwinds (*_INTR) to its EL0-return tail, where the LS-5b uncaught-interrupt
 // default-terminate fires against the live queue. The walk is the #811
@@ -2158,6 +2182,29 @@ void proc_interrupt_terminate_wake(struct Proc *p) {
     if (p == g_kproc) return;            // belt: the arm never latches kproc
     if (p->state != PROC_STATE_ALIVE) return;
     if (!proc_intr_terminate_pending(p)) return;
+    for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
+        irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
+        struct Rendez *r = peer->rendez_blocked_on;
+        if (r) wakeup(r);
+        spin_unlock_irqrestore(&peer->wait_lock, ws);
+    }
+}
+
+// item 11 (ARCH 8.8.3): the CAUGHT-note twin of proc_interrupt_terminate_wake.
+// IDENTICAL body + lock contract (CALLER HOLDS g_proc_table_lock; see the
+// proc.h contract + the death-template rationale above), gated on the
+// caught-note sub-field instead of the terminate latch. A blocked peer it wakes
+// unwinds SLEEP_NOTEINTR (not SLEEP_INTR), returns -T_E_INTR, and delivers its
+// queued caught note at the EL0-return tail WITHOUT dying. Interrupt-posting
+// sites call this right after proc_interrupt_terminate_wake: for a given post
+// exactly one of the two latches is armed (uncaught -> terminate; caught -> this
+// sub-field -- the arms are mutually exclusive by notes_post's arm-refusal), so
+// the other wake is a no-op via its gate.
+void proc_caught_note_wake(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return;
+    if (p == g_kproc) return;            // belt: the arm never latches kproc
+    if (p->state != PROC_STATE_ALIVE) return;
+    if (!proc_caught_note_pending(p)) return;
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         struct Rendez *r = peer->rendez_blocked_on;
@@ -3877,6 +3924,7 @@ static int pgrp_hupcont_cb(struct Proc *q, void *arg) {
         return 0;
     (void)notes_post(q, NOTE_NAME_TTY_HUP, 0u, NULL, true);
     proc_interrupt_terminate_wake(q);
+    proc_caught_note_wake(q);   // item 11: caught SIGHUP handler wakes too
     (void)notes_post(q, NOTE_NAME_TTY_CONT, 0u, NULL, true);
     proc_job_resume_one_locked(q);
     return 0;

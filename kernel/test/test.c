@@ -563,6 +563,9 @@ void test_notes_phenotype_sigreturn_restores_mask(void); // the mask half of sig
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
+void test_notes_caught_note_latch_lifecycle(void);
+void test_notes_caught_note_deliverable_predicate(void);
+void test_notes_caught_note_stop_dequeue_drains(void);
 void test_notes_fstat_reports_chr(void);
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
@@ -2161,6 +2164,9 @@ struct test_case g_tests[] = {
     { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
     { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },
+    { "notes.caught_note_latch_lifecycle",     test_notes_caught_note_latch_lifecycle,     false, NULL },
+    { "notes.caught_note_deliverable_predicate", test_notes_caught_note_deliverable_predicate, false, NULL },
+    { "notes.caught_note_stop_dequeue_drains", test_notes_caught_note_stop_dequeue_drains, false, NULL },
     { "notes.fstat_reports_chr",               test_notes_fstat_reports_chr,               false, NULL },
     { "directmap.kva_round_trip",      test_directmap_kva_round_trip,      false, NULL },
     { "directmap.alloc_through_directmap",

@@ -77,6 +77,9 @@ void test_notes_interrupt_terminate_gate(void);
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
+void test_notes_caught_note_latch_lifecycle(void);
+void test_notes_caught_note_deliverable_predicate(void);
+void test_notes_caught_note_stop_dequeue_drains(void);
 void test_notes_fstat_reports_chr(void);
 void test_notes_linux_sigign_discard(void);
 void test_notes_default_action_table(void);
@@ -890,6 +893,192 @@ void test_notes_die_pending_predicate(void) {
                 "kproc latch leg guarded even when forced (RW-0 F3)");
     __atomic_and_fetch(&kproc()->proc_flags,
                        ~PROC_FLAG_INTR_TERMINATE_PENDING, __ATOMIC_RELEASE);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// caught_note_latch_lifecycle (item 11, ARCH §8.8.3)
+// ---------------------------------------------------------------------------
+//
+// The PROC_FLAG_CAUGHT_NOTE_MASK sub-field: armed by notes_post's caught arm
+// (a live handler OR self-managing -- the EXACT COMPLEMENT of the terminate
+// arm), cleared by draining the last queued note of that family. The two
+// latches are DISJOINT -- a given note arms exactly one.
+void test_notes_caught_note_latch_lifecycle(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->state = PROC_STATE_ALIVE;
+
+    // (a) An interrupt post to a HANDLER-BEARING Proc arms the CAUGHT latch and
+    // NOT the terminate latch -- the complement of test_notes_intr_latch (b).
+    notes_set_handler(p, 0x1000u);
+    TEST_EXPECT_EQ(notes_post(p, "interrupt", 0u, NULL, true), 0, "post 1");
+    TEST_ASSERT(proc_caught_note_pending(p),
+                "caught interrupt (handler) armed the caught latch");
+    TEST_ASSERT(!proc_intr_terminate_pending(p),
+                "a caught interrupt does NOT arm the terminate latch");
+
+    // (b) Draining the last interrupt clears the caught latch.
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    TEST_EXPECT_EQ(notes_dequeue_for_fd_locked(p, NULL, &got), 1, "pop 1");
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(!proc_caught_note_pending(p),
+                "draining the last caught note cleared the caught latch");
+
+    // (c) Self-managing is the OTHER caught path: a note to a self-managing
+    // Proc (no handler) arms the caught latch, and still refuses the terminate
+    // latch.
+    notes_set_handler(p, 0u);
+    proc_mark_self_managing_notes(p);
+    TEST_EXPECT_EQ(notes_post(p, "pipe", 0u, NULL, true), 0, "post pipe");
+    TEST_ASSERT(proc_caught_note_pending(p),
+                "a note to a self-managing Proc armed the caught latch");
+    TEST_ASSERT(!proc_intr_terminate_pending(p),
+                "self-managing suppresses the terminate latch (unchanged)");
+    spin_lock(&p->notes->lock);
+    (void)notes_dequeue_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(!proc_caught_note_pending(p), "pipe drained -> caught clear");
+
+    // (d) KILL is EXCLUDED: a kill note never arms the caught latch (it is
+    // non-catchable and routes through group_exit_msg, not caught delivery),
+    // even on a self-managing Proc.
+    struct Proc *pk = proc_alloc();
+    TEST_ASSERT(pk != NULL, "proc_alloc pk succeeded");
+    pk->state = PROC_STATE_ALIVE;
+    proc_mark_self_managing_notes(pk);
+    TEST_EXPECT_EQ(notes_post(pk, "kill", 0u, NULL, true), 0, "post kill");
+    TEST_ASSERT(!proc_caught_note_pending(pk),
+                "a kill note never arms the caught latch (KILL excluded)");
+
+    // (e) The kproc guard: a caught-family post to kproc's queue never arms
+    // (the arm inherits notes_post's kproc guard). Only when empty, so the
+    // drain leaves the boot queue exactly as found.
+    struct Proc *kp = kproc();
+    if (kp && kp->notes) {
+        spin_lock(&kp->notes->lock);
+        u32 pre = kp->notes->count;
+        spin_unlock(&kp->notes->lock);
+        if (pre == 0u) {
+            TEST_EXPECT_EQ(notes_post(kp, "interrupt", 0u, NULL, true), 0,
+                           "post to kproc queue accepted");
+            TEST_ASSERT(!proc_caught_note_pending(kp),
+                        "kproc never arms the caught latch (the guard)");
+            struct Note kgot;
+            spin_lock(&kp->notes->lock);
+            (void)notes_dequeue_for_fd_locked(kp, NULL, &kgot);
+            spin_unlock(&kp->notes->lock);
+        }
+    }
+
+    p->state  = PROC_STATE_ZOMBIE; proc_free(p);
+    pk->state = PROC_STATE_ZOMBIE; proc_free(pk);
+}
+
+// ---------------------------------------------------------------------------
+// caught_note_deliverable_predicate (item 11, ARCH §8.8.3)
+// ---------------------------------------------------------------------------
+//
+// thread_caught_note_deliverable -- the NON-death sleep predicate: a caught
+// note of a family unmasked for the thread. The mirror of die_pending, and
+// DISJOINT from it.
+void test_notes_caught_note_deliverable_predicate(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->state = PROC_STATE_ALIVE;
+
+    struct Thread fake_t;
+    fake_t.proc              = p;
+    fake_t.note_mask         = 0u;
+    fake_t.exit_close_active = false;
+
+    TEST_ASSERT(!thread_caught_note_deliverable(NULL), "NULL thread -> false");
+    TEST_ASSERT(!thread_caught_note_deliverable(&fake_t), "fresh Proc -> false");
+
+    // A caught (self-managing) note -> deliverable to an unmasked thread;
+    // masked -> false (the thread defers, exactly as the terminate latch).
+    proc_mark_self_managing_notes(p);
+    TEST_EXPECT_EQ(notes_post(p, "interrupt", 0u, NULL, true), 0, "post");
+    TEST_ASSERT(thread_caught_note_deliverable(&fake_t),
+                "caught + unmasked -> true");
+    fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
+    TEST_ASSERT(!thread_caught_note_deliverable(&fake_t),
+                "caught + MASKED -> false (the thread defers)");
+    fake_t.note_mask = 0u;
+
+    // DISJOINT from death: a caught note is deliverable but the terminate latch
+    // stayed clear (self-managing refused it), and there is no group_exit_msg.
+    TEST_ASSERT(!thread_die_pending(&fake_t),
+                "a caught note is not a death (terminate latch clear)");
+
+    // The exit-close window suppresses it, the same gate thread_die_pending
+    // applies (a closing thread must not EINTR-unwind its orderly close).
+    fake_t.exit_close_active = true;
+    TEST_ASSERT(!thread_caught_note_deliverable(&fake_t),
+                "exit-close window -> false");
+    fake_t.exit_close_active = false;
+
+    // Drain -> the family bit clears -> false again.
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    (void)notes_dequeue_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(!thread_caught_note_deliverable(&fake_t), "drained -> false");
+
+    // kproc guard: forced caught bits never make a kproc thread deliverable.
+    fake_t.proc = kproc();
+    __atomic_or_fetch(&kproc()->proc_flags, PROC_FLAG_CAUGHT_NOTE_MASK,
+                      __ATOMIC_RELEASE);
+    TEST_ASSERT(!thread_caught_note_deliverable(&fake_t),
+                "kproc guarded even when the caught sub-field is forced");
+    __atomic_and_fetch(&kproc()->proc_flags, ~PROC_FLAG_CAUGHT_NOTE_MASK,
+                       __ATOMIC_RELEASE);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// caught_note_stop_dequeue_drains (item 11, round F1 regression)
+// ---------------------------------------------------------------------------
+//
+// notes_stop_dequeue_locked popped a STOP note WITHOUT running the caught drain
+// pre-fix. Because the caught latch is per-FAMILY and the TTY family bit is
+// SHARED, a caught tty:winch (SIGWINCH handler) arms the bit, and popping an
+// uncaught tty:susp then STRANDED it -> thread_caught_note_deliverable read true
+// with no tty note queued -> an opted-in reader EINTR-livelocked.
+void test_notes_caught_note_stop_dequeue_drains(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->state = PROC_STATE_ALIVE;
+
+    // Simulate a caught tty:winch having armed the SHARED TTY family bit. (The
+    // realistic arm needs a phenotype per-signal sigtab; forcing the bit tests
+    // the FIX -- does the stop-dequeue drain it? -- with the same end state.)
+    __atomic_or_fetch(&p->proc_flags,
+                      (1u << (PROC_CAUGHT_NOTE_SHIFT + NOTE_BIT_TTY)),
+                      __ATOMIC_RELEASE);
+    TEST_ASSERT(proc_caught_note_pending(p),
+                "caught-TTY bit armed (simulated caught tty:winch sibling)");
+
+    // Queue an UNCAUGHT tty:susp: a fresh native Proc has no handler, so the
+    // STOP default applies and notes_stop_dequeue_locked will pop it.
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_TTY_SUSP, 0u, NULL, true), 0,
+                   "post tty:susp");
+
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    int r = notes_stop_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(r, 1, "stop-dequeue popped the tty:susp");
+
+    // The FIX: the pop drained the caught latch -> no tty note remains -> the
+    // stale caught-TTY bit clears. PRE-FIX this asserts FALSE (bit stranded).
+    TEST_ASSERT(!proc_caught_note_pending(p),
+                "F1: stop-dequeue drained the stale caught-TTY bit");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);

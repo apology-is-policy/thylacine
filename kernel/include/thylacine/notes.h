@@ -574,6 +574,16 @@ void notes_mark_self_managing(struct Proc *p);
 // those sites.
 bool thread_die_pending(struct Thread *t);
 
+// item 11 (ARCH §8.8.3): the NON-death sibling of thread_die_pending. True iff a
+// CAUGHT, deliverable note (a handler is installed OR the Proc self-manages its
+// notes fd) of a family UNMASKED for `t` is queued -- so `t`'s caught-note-
+// interruptible sleep should unwind SLEEP_NOTEINTR and return -T_E_INTR while
+// LIVING (the note delivers at the EL0-return tail). LOCK-FREE, same shape as
+// thread_die_pending; read only at the sleep sites' caught_ok arm, ALWAYS after
+// the die-check (death wins). Disjoint from thread_die_pending: the caught
+// latch and the terminate latch are never both set for one note.
+bool thread_caught_note_deliverable(struct Thread *t);
+
 // =============================================================================
 // Synthetic posters — kernel-internal callers (proc.c::exits, pipe.c write
 // path). These wrap notes_post with the appropriate canonical name + arg
