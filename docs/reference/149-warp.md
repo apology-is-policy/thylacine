@@ -1373,10 +1373,28 @@ The verdict is its own verb -- `tools/warp-host.sh venus-verdict <ctl> <tst>` --
 so `tools/test-venus-verdict.sh` can drive **the real implementation** against
 crafted logs. Two boots at ~220 s each make this gate the least affordable thing
 in the tree to test by running it, and #245 is the standing lesson that a checker
-reachable only by hand rots. Five cases: the clean pair VERIFIES (the positive
-control, without which four negative cases are satisfied by a verdict that always
-fails), plus one-variable sabotages for each failure arm -- control-also-sees-4,
-test-sees-no-4, and either leg not booting. `make test-venus-verdict`.
+reachable only by hand rots.
+
+The suite is **one positive control plus one one-variable sabotage per failure
+arm**, and it is described that way rather than by a count -- a count in prose is
+a status field whose flip is nobody's step, and this sentence said "Five cases"
+within an hour of the suite reaching eight. The arms, by class:
+
+- the **clean pair VERIFIES** -- the positive control, without which every
+  negative case is satisfied by a verdict that always fails;
+- the control leg **also** sees `id=4` (then the declaration is not what
+  produces it);
+- the test leg sees **no** `id=4`;
+- **either** leg did not boot (a leg with no verdict is distinct from a leg that
+  booted and disagreed);
+- the control leg enumerated **no capsets at all** -- 2D fallback, which lacks
+  `id=4` trivially, so "venus absent" would be read off a control that measured
+  nothing;
+- the control leg lost **only** the baseline `id=1`;
+- a capset numbered **40** must not satisfy the `id=4` check (both id checks
+  anchor on a trailing space for exactly this).
+
+Run it with `make test-venus-verdict`; the script prints its own pass count.
 
 ## Tests
 
