@@ -45,7 +45,9 @@ P1-I doesn't add new kernel API. The artifacts are:
 
 **CMake variables** (top-level `CMakeLists.txt`):
 - `THYLACINE_SANITIZE` — `""` (default) or `"undefined"` (UBSan trapping mode).
-- `THYLACINE_FAULT_TEST` — `""` (default) or `canary_smash` / `wxe_violation` / `bti_fault`.
+- `THYLACINE_FAULT_TEST` — `""` (default) or one deliberate-fault variant. The
+  set has grown to eight; **the authoritative set is tools/test-fault.sh::ALL_VARIANTS** rather than a copy here, because this list was
+  three-of-eight for as long as it was hand-maintained.
 
 ---
 
@@ -301,7 +303,7 @@ All artifacts comfortably fit within the existing test-harness budget.
 - Boot-time measurement (`_boot_start_cntpct` BSS slot + banner readout) (P1-I-AB).
 - `tools/verify-kaslr.sh` with 70% distinct-offset gate (P1-I-AB).
 - `THYLACINE_SANITIZE=undefined` UBSan trapping build + `tools/test.sh --sanitize=ubsan` plumbing (P1-I-AB).
-- `THYLACINE_FAULT_TEST=<canary_smash|wxe_violation|bti_fault>` deliberate-fault provokers in `kernel/fault_test.c` (P1-I-C).
+- `THYLACINE_FAULT_TEST=<variant>` deliberate-fault provokers in `kernel/fault_test.c` (P1-I-C); the authoritative set is tools/test-fault.sh::ALL_VARIANTS.
 - `tools/test-fault.sh` matrix runner (P1-I-C).
 - `arch/arm64/exception.c` `EC_BTI` (0x0D) case for clear BTI fault diagnostic (P1-I-C).
 

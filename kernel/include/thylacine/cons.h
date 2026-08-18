@@ -200,7 +200,9 @@ void cons_diag_line_init(struct cons_diag_line *l);
 void cons_diag_line_puts(struct cons_diag_line *l, const char *s);   // ONLCR-translating, NULL-safe
 void cons_diag_line_putdec(struct cons_diag_line *l, u64 v);
 void cons_diag_line_puthex64(struct cons_diag_line *l, u64 v);
-void cons_diag_line_emit(struct cons_diag_line *l);                  // one push; all-or-nothing
+bool cons_diag_line_emit(struct cons_diag_line *l);                  // one push; all-or-nothing.
+// Returns FALSE when the ring was too full and the unit was dropped whole. A
+// caller that spends a latch or a bounded budget on the line MUST check it.
 
 // #152: bracket a KERNEL diagnostic emission (a run of uart_puts/uart_putdec)
 // so a peer's cons_output_write on another CPU cannot interleave with it. The

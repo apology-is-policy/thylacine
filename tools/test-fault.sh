@@ -60,6 +60,16 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
 # against the EXTINCTION: line). Keep the case below in sync with this.
 ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault el1_sync_runaway"
 
+# A substring that must NOT appear for a variant to PASS. Empty = no such
+# requirement. Paired with expected_for: "the right line appeared" and "the
+# wrong line did not" are SEPARATE claims and need separate checks.
+forbid_for() {
+    case "$1" in
+        el1_sync_runaway) echo "console-ring: NOT held" ;;
+        *)                echo "" ;;
+    esac
+}
+
 expected_for() {
     case "$1" in
         canary_smash)    echo "EXTINCTION: stack canary mismatch" ;;
@@ -70,6 +80,13 @@ expected_for() {
         bootcpu_idle_guard)    echo "EXTINCTION: kernel stack overflow" ;;
         recursive_kernel_fault) echo "EXTINCTION: recursive kernel fault" ;;
         el1_sync_runaway)      echo "EXTINCTION: el1-sync recursion" ;;
+        # ROUND F6: the variant REACHES cons_tx_claim_for_dump's
+        # already-ours arm but could not FAIL if it were wrong -- delete that
+        # arm and the re-entrant claim burns its bound, returns false, and the
+        # banner still prints ("torn beats silent"), so the expected string is
+        # present and the variant passes ~20 ms slower. A control must prove
+        # discrimination, not detection. `forbid_for` closes it: on this
+        # variant the miss line must be ABSENT.
         *)               echo "" ;;
     esac
 }
@@ -187,9 +204,22 @@ for variant in $selected; do
 
     case "$result" in
         pass)
-            pass=$((pass + 1))
-            echo "==> [$variant] PASS (saw '$expect')"
-            (( verbose )) && grep "^EXTINCTION:" "$log_file" | head -3
+            # ROUND F6: the expected line appearing and the forbidden line
+            # being absent are SEPARATE claims. Check the second here, on the
+            # arm that otherwise reports success -- a variant that reached its
+            # banner the slow way (a broken re-entrant claim burning its bound
+            # and emitting unserialized) prints the expected string too.
+            forbid="$(forbid_for "$variant")"
+            if [[ -n "$forbid" ]] && grep -qF "$forbid" "$log_file"; then
+                fail=$((fail + 1))
+                echo "==> [$variant] FAIL: saw '$expect' but ALSO '$forbid'"
+                echo "    the banner printed, but not the way the variant exists to prove:"
+                grep -F "$forbid" "$log_file" | head -2 | sed 's/^/    /'
+            else
+                pass=$((pass + 1))
+                echo "==> [$variant] PASS (saw '$expect'${forbid:+; '"$forbid"' absent})"
+                (( verbose )) && grep "^EXTINCTION:" "$log_file" | head -3
+            fi
             ;;
         provoker_silent)
             fail=$((fail + 1))

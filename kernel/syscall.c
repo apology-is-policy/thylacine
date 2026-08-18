@@ -11171,14 +11171,23 @@ static void viv_report_unserved(u64 nr, const char *why) {
     }
 
     // Dedupe BEFORE charging the cap: a number asked for in a loop must not
-    // burn the budget that a never-yet-seen number needs.
+    // burn the budget that a never-yet-seen number needs. ROUND F1: this is a
+    // read-only TEST here; the bit is SET below, after the line lands.
+    u64 bit = 0ull;
     if (nr < VIV_UNSERVED_BITS) {
-        u64 bit  = 1ull << (nr & 63u);
-        u64 prev = __atomic_fetch_or(&g_viv_unserved_seen[nr >> 6], bit,
-                                     __ATOMIC_RELAXED);
-        if (prev & bit) return;
+        bit = 1ull << (nr & 63u);
+        if (__atomic_load_n(&g_viv_unserved_seen[nr >> 6], __ATOMIC_RELAXED) & bit)
+            return;
     }
-    if (__atomic_fetch_add(&g_viv_unserved_reports, 1u, __ATOMIC_RELAXED)
+    // ROUND F5: LOAD-then-check, never an unconditional fetch_add. The add ran
+    // on every call past the cap too, including the `nr >= VIV_UNSERVED_BITS`
+    // arm that skips the dedupe entirely -- so a plain u32 wrapped at 2^32 and
+    // re-armed the next 96 lines. Negligible as a channel; reported because
+    // the commit body and the status row both assert the cap as a HARD bound
+    // for the boot, and asserted bounds get inherited as premises. The
+    // load-then-add race can over-print by at most the CPU count, which is
+    // strictly better than wrapping.
+    if (__atomic_load_n(&g_viv_unserved_reports, __ATOMIC_RELAXED)
         >= VIV_UNSERVED_MAX_REPORTS)
         return;
     // #243: ONE unit under the ring lock, not seven lock-free uart_* calls.
@@ -11193,6 +11202,20 @@ static void viv_report_unserved(u64 nr, const char *why) {
     // FIFO by another road -- so these bytes could land inside an
     // `EXTINCTION:` line, which costs the multi-boot classifier a real
     // corruption verdict and can invert a test-fault.sh result.
+    // ROUND F1 [P1]: the budget is spent on a line that LANDED, never on one
+    // that was attempted. `cons_diag_line_emit` is all-or-nothing, so a full
+    // ring drops the whole 107-byte unit -- and under back-pressure from a
+    // guest writing /dev/cons that drop is DETERMINISTIC, not racy. The first
+    // shape of this fix consumed the dedupe bit and the report budget BEFORE
+    // the emit, so a dropped line was marked seen forever and the census
+    // silently under-reported: exactly the failure this function's own header
+    // says the per-Proc rework existed to kill ("worse than no diagnostic,
+    // because it reads as a measurement"). The old raw `uart_puts` could not
+    // do this -- it span per byte and always emitted.
+    //
+    // So: emit, and only then take the dedupe bit and charge the cap. A
+    // dropped line stays unreported and unspent, and is retried the next time
+    // that number is declined.
     struct cons_diag_line l;
     cons_diag_line_init(&l);
     cons_diag_line_puts(&l, "vivarium: unserved linux syscall nr=");
@@ -11202,7 +11225,11 @@ static void viv_report_unserved(u64 nr, const char *why) {
     cons_diag_line_puts(&l, ") pid=");
     cons_diag_line_putdec(&l, (u64)pid);
     cons_diag_line_puts(&l, "\n");
-    cons_diag_line_emit(&l);
+    if (!cons_diag_line_emit(&l))
+        return;   // dropped whole: spend nothing, so the next decline retries
+    if (bit)
+        __atomic_fetch_or(&g_viv_unserved_seen[nr >> 6], bit, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_viv_unserved_reports, 1u, __ATOMIC_RELAXED);
 }
 
 // VIV_TRACE: a bounded per-Proc trace of EVERY phenotyped syscall, not just

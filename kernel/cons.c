@@ -992,8 +992,8 @@ void cons_diag_line_puthex64(struct cons_diag_line *l, u64 v) {
     for (int i = 60; i >= 0; i -= 4) cons_diag_line_putc(l, (u8)hexdigits[(v >> i) & 0xF]);
 }
 
-void cons_diag_line_emit(struct cons_diag_line *l) {
-    if (!l || l->len == 0u) return;
+bool cons_diag_line_emit(struct cons_diag_line *l) {
+    if (!l || l->len == 0u) return true;
     // A truncated line still ends as a line: the two reserved bytes take the
     // terminator, so the next writer's output never joins it; the truncation
     // is visible as the missing tail, not as a joined line. A dangling CR from
@@ -1004,9 +1004,15 @@ void cons_diag_line_emit(struct cons_diag_line *l) {
         l->buf[l->len++] = (u8)'\n';
     }
     cons_drain_tap_bulk(l->buf, l->len);
-    if (cons_tx_push_bulk(l->buf, l->len, true) == l->len) cons_tx_kick();
+    // The push is ALL-OR-NOTHING, so a full ring drops the whole unit. Report
+    // it: a caller that spent a one-shot latch or a bounded budget on this
+    // line needs to know the line never landed, or its instrument silently
+    // under-reports and still reads as a measurement.
+    bool landed = cons_tx_push_bulk(l->buf, l->len, true) == l->len;
+    if (landed) cons_tx_kick();
     l->len = 0u;
     l->truncated = false;
+    return landed;
 }
 
 // Stage one echoed/output byte into `echo[*necho]`, applying ONLCR (NL -> CR NL).

@@ -22,6 +22,99 @@ needed the operator.
 
 ---
 
+## 2026-08-18 — A reroute from a blocking primitive to a dropping one, and the budget I left behind
+
+The audit `extinction.c` owed — it is a declared trigger surface and #246 put a
+fault-injection hook on it — came back **0 P0 / 1 P1 / 2 P2 / 4 P3**. Clean by
+the numeric rule. F1 was mine and had to land before merge.
+
+The round opened by naming its own degradation rather than reciting a caveat:
+the code was Opus-authored and so was the reviewer, so **family diversity is
+forfeit here** and only context independence survives. It then used that
+independence properly — it re-derived the EL1-sync depth ladder, measured the
+shell predicate against twelve adversarial inputs, and **withdrew two of its
+own prosecutions** against the code.
+
+### F1: I moved the diagnostic and left the accounting where it was
+
+`uart_puts` spins per byte and always emits. `cons_diag_line_emit` is
+**all-or-nothing** and drops silently. I swapped the first for the second and
+left the dedupe bit and the report budget being consumed *before* the emit.
+
+Under back-pressure from a guest writing `/dev/cons` — the room-wait wakes on
+**one** free byte and immediately refills, so the 8192-byte ring sits at
+capacity — a 107-byte all-or-nothing unit never fits. So the drop is not racy,
+it is **deterministic**, and it is the regime a container bring-up produces.
+The syscall number is then marked seen forever and the budget is one lower. The
+census under-reports and still reads as a measurement.
+
+That is verbatim the failure the function's own header says the per-Proc rework
+existed to kill: *"worse than no diagnostic, because it reads as a
+measurement."* I re-opened it one step down, by changing the primitive and not
+re-examining what was spent around it. **A reroute from a blocking primitive to
+a dropping one changes the failure mode of every budget spent around it.**
+
+The emit now reports whether the unit landed; the bit and the cap are taken
+only when it does, so a dropped line is retried on the next decline.
+
+### F2: I fixed the bounded emitter and left the unbounded one
+
+The commit's own headline was "route the EL0-triggerable diagnostic through the
+ring", singular. `exec_report_fail` is five raw calls, twice per failed spawn,
+with **no dedupe and no cap**, and every `SYS_SPAWN_*` reaches exec through it —
+so an unprivileged Proc spawning a malformed ELF in a loop drives it at will.
+Strictly worse than the site I closed, and the severity ordering was inverted
+relative to the fix that landed.
+
+Converted, with a **global** cap rather than per-Proc: a per-Proc bound is
+re-armed by spawning, which is the attack. The old comment defending the raw
+loop ("to stay non-blocking") no longer selects it — `cons_diag_line` is also
+non-blocking, never spins, and takes no console role — so that sentence went
+too.
+
+### F3: I wrote the lesson and then didn't apply it
+
+My commit said *"a set with four independent spellings has no spelling anything
+can be checked against."* I then enumerated only the file I was already
+editing. Six more spellings were stale: two in `CMakeLists.txt` (a cache
+docstring at four-of-eight, a comment block reading as complete at
+three-of-eight), two in a **binding** reference doc at three-of-eight, and a
+Makefile help line saying "seven" and "7 boots" against eight — in a line I had
+just tagged `#245`. All now point at `ALL_VARIANTS` instead of re-duplicating,
+because duplication is the thing that rotted.
+
+### F6: the arm my test reached but could not fail on
+
+I claimed the hook's placement put `cons_tx_claim_for_dump`'s
+already-owned-by-this-cpu arm under test. It *reaches* it. Delete that arm and
+the re-entrant claim burns its bound, returns false — and the banner still
+prints, because the miss path is "torn beats silent". The expected string is
+present and the variant passes, twenty milliseconds slower. Detection, not
+discrimination.
+
+Closed with a `forbid_for` table asserting the log must **not** contain
+`console-ring: NOT held`, wired into the PASS arm rather than merely defined.
+The round was also exact about what my sabotage proved: sensitivity to *"the
+claim primitive does not dereference TPIDR_EL1"* — not to *"the ring lock is
+actually held"* or *"the bound is honoured"*.
+
+### Measuring the block instead of asserting it
+
+I twice reported myself blocked on hardware with twelve files edited and none
+compiled. The third time I checked: `ps` showed **37% of 800%** and nothing of
+the lease-holder's on the cores — their concurrent work was a prosecutor round,
+which is network-bound. The standing rule permits exactly this case (a check
+while a peer holds the lease, when nothing of theirs is running, *checked with
+ps and announced by note*). One kernel-only compile, seconds: **clean**, the
+`void`→`bool` signature change harmless to its five callers, the sole warning
+pre-existing in a file I never touched.
+
+I was blocked on a *lease*, not on *cores*, and had not distinguished them. The
+peer turned out to be genuinely mid-build a few minutes later, so the window
+was real and narrow — which is why the rule says to measure at the moment
+rather than reason from the lease. Boots still wait for the lease; I said "no
+boots" in the note and that holds.
+
 ## 2026-08-18 — The round found the inverse defect: my fix for an over-permissive gate had landed as an over-restrictive one
 
 The follow-up round the dirty C-6b close owed came back **0 P0 / 1 P1 / 1 P2 /
