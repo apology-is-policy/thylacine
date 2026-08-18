@@ -105,12 +105,24 @@ const VIRTIO_GPU_CAPSET_VIRGL2: u32 = 2;
 const VIRTIO_GPU_CAPSET_VENUS: u32 = 4;
 
 // Warp-6 V-0b: the ctx ids the reachability probe creates and destroys inside
-// init, BEFORE any client exists. Client contexts are `dev_ctx = slot + 1` over
-// a 128-slot seam (Warp-3a), so these sit ABOVE the client range -- the ids are
-// free at probe time by construction, not by racing a client that has not
-// spawned yet.
+// init, BEFORE the server admits any client or creates COMPOSITOR_CTX, and are
+// destroyed before Gpu::probe returns. That TIMING is the collision-freedom
+// guarantee -- not the numeric window: no client (`dev_ctx = slot + 1`, server
+// side) or compositor context is live while the probe runs. The static_assert
+// below is belt-and-suspenders for the (today large) numeric margin, and ties
+// these magic ids to the real seam constants so a future lift of MAX_WARP_CTXS
+// past the probe ids fails the BUILD rather than silently narrowing the margin
+// (main audit F1 / [[bug-230-lifted-constant-voids-proofs]] -- the audit round
+// AND the author's self-audit both caught the old comment claiming a "128-slot
+// seam" when MAX_WARP_CTXS is 8, a conflation with the per-ctx BO cap).
 const PROBE_CTX_ID_VIRGL: u32 = 200;
 const PROBE_CTX_ID_VENUS: u32 = 201;
+const _: () = assert!(
+    PROBE_CTX_ID_VIRGL > crate::server::MAX_WARP_CTXS as u32
+        && PROBE_CTX_ID_VENUS < crate::server::COMPOSITOR_CTX
+        && PROBE_CTX_ID_VIRGL != PROBE_CTX_ID_VENUS,
+    "probe ctx ids must sit above the client seam and below COMPOSITOR_CTX, and be distinct"
+);
 
 // 3D commands (VIRTIO 1.2 section 5.7.6.9; virgl-negotiated only). The seam's
 // context lifecycle + resource plumbing (Warp-2c); SUBMIT_3D + the transfers
@@ -1678,16 +1690,22 @@ impl Gpu {
     /// `CTX_CREATE` selecting a capset via `context_init` (bits 0-7).
     ///
     /// The field is honoured ONLY when `VIRTIO_GPU_F_CONTEXT_INIT` was
-    /// negotiated. Callers must not reach here with a non-zero capset unless
-    /// `self.ctxinit` -- otherwise the device discards the selection and
-    /// returns OK over a context of the wrong kind, which reads as success.
+    /// negotiated. A non-zero capset without `self.ctxinit` is REFUSED at
+    /// runtime, not merely debug-asserted (main audit F2): the device would
+    /// otherwise discard the selection and return OK over a wrong-kind context
+    /// -- the exact false pass this whole path exists to prevent -- and a
+    /// `debug_assert` is a no-op in the shipping release build, so it is not
+    /// the guard the false-pass argument needs. This closes it in release for
+    /// V-3, where a client-influenced `capset_id` will reach here.
     pub fn ctx_create_capset(
         &mut self,
         ctx_id: u32,
         capset_id: u32,
         debug_name: &[u8],
     ) -> Result<(), Error> {
-        debug_assert!(capset_id == 0 || self.ctxinit);
+        if capset_id != 0 && !self.ctxinit {
+            return Err(Error::Hardware);
+        }
         let req_va = self.ring_va + REQ_OFF;
         let nlen = debug_name.len().min(63);
         unsafe {

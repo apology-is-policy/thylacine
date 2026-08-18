@@ -104,6 +104,10 @@ check "control leg: virgl id=2 control did NOT create -> UNVERIFIED" 1 \
       'grep -v "ctx-capset id=2 CREATED" "$c" > "$c.x" && mv "$c.x" "$c"' ""
 check "test leg: virgl id=2 control did NOT create -> UNVERIFIED" 1 "" \
       'grep -v "ctx-capset id=2 CREATED" "$t" > "$t.x" && mv "$t.x" "$t"'
+# main audit F3: the control leg must POSITIVELY show the id=4 skip, not merely
+# lack "id=4 CREATED". Strip the skipped line and the verdict must fail.
+check "control leg: no id=4 'skipped' line -> UNVERIFIED" 1 \
+      'grep -v "ctx-capset id=4 skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
 
 printf '\n%d pass, %d fail\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

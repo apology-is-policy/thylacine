@@ -153,7 +153,7 @@ const MAX_SURFACES_PER_CONN: usize = 4;
 /// one ctx per conn); BOs bounded per ctx (each is a kernel GPU-BO mint the
 /// client's shared-map budget also bounds -- this cap is the server's own
 /// bookkeeping bound, not the resource authority).
-const MAX_WARP_CTXS: usize = 8;
+pub(crate) const MAX_WARP_CTXS: usize = 8;
 /// Lifted 16 -> 128 at Warp-3 (st/mesa alone mints ~8 hw_res before the
 /// first draw; a GL app's textures are one hw_res each), then 128 -> 1024
 /// at #204: GLQuake's map load holds MORE than 128 textures live at once,
@@ -719,7 +719,7 @@ const SCREEN_RES: u32 = 0x40;
 /// composed GPU path is reachable ONLY on a GL host and the CPU path stays the
 /// universal one. A tapestryd that assumed GL here would take the console dark
 /// on the default device, which is what everything else boots under.
-const COMPOSITOR_CTX: u32 = 0x100;
+pub(crate) const COMPOSITOR_CTX: u32 = 0x100;
 
 /// Warp-C C-3: the throwaway contexts the bring-up CONVENTION PROBE runs on
 /// (`comp_measure_conventions`), one fresh id per attempt above the

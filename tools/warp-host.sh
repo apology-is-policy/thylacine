@@ -307,6 +307,14 @@ venus-verdict)
         echo "CONTROL leg: a Venus (id=4) context created WITHOUT venus -- the device is ignoring context_init, so the test leg's id=4 CREATED proves nothing"
         vfail=1
     fi
+    # Positive pair for the negative above (main audit F3): the control leg must
+    # POSITIVELY show it SKIPPED the id=4 create because the capset was not
+    # enumerated -- not merely lack "id=4 CREATED", which any outcome missing the
+    # string satisfies. Anchors the verdict on what only the intended path emits.
+    grep -qF "gpu ctx-capset id=4 skipped (capset not enumerated)" "$ctl" || {
+        echo "CONTROL leg: no 'id=4 skipped (capset not enumerated)' -- the id=4 create did not take the intended no-venus path; its absence of CREATED proves nothing"
+        vfail=1
+    }
     if [ "$vfail" -eq 0 ]; then
         echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, AND a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both)"
         grep -hE "gpu capset\[|num_capsets" "$ctl" "$tst"

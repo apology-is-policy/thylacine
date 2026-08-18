@@ -1396,6 +1396,66 @@ within an hour of the suite reaching eight. The arms, by class:
 
 Run it with `make test-venus-verdict`; the script prints its own pass count.
 
+## Warp-6 V-0b -- a Venus context creates (as-built `bf448929`)
+
+V-0 proved the host *advertises* capset id=4. V-0b answers the question that
+matters: can a Venus *context* be created? It was open because
+`/usr/libexec/virgl_render_server` is absent from every Debian package and
+GPU-DESIGN 9.2 calls the render server Venus-only-by-construction, so
+advertisement only proved venus init reached capset *reporting*.
+
+### The measurement (thyla-pi, KVM, real V3D)
+
+| leg | ctx-capset result |
+|---|---|
+| `venus=on` | `id=2 CREATED` (virgl control) + **`id=4 CREATED`** |
+| no venus | `id=2 CREATED` + `id=4 skipped (capset not enumerated)` |
+
+So **the absent render server does not block context creation** —
+virglrenderer's in-process venus init handles it. The `id=2` create is the
+positive control on both legs; `id=4` discriminates on venus, and the no-venus
+`skipped` (not `CREATED`) is the negative control that closes the false pass.
+
+### Why it is a feature-bit change, not a field change
+
+`ctx_create` wrote `context_init = 0` under the comment "F_CONTEXT_INIT not
+negotiated", and the device honours that field **only** when the feature is
+negotiated — which the driver never offered back. So writing a capset into it
+without negotiating the feature yields `RESP_OK_NODATA` over an implicitly-virgl
+context: a false pass. V-0b therefore:
+
+- negotiates `VIRTIO_GPU_F_CONTEXT_INIT` (LOW bit 4) when offered, on the same
+  accept-if-offered footing as virgl, carried as `Gpu.ctxinit`. It is **not** a
+  second gate on "is 3D available" — that stays `virgl` alone; the two are
+  orthogonal and a host could offer either without the other;
+- adds `ctx_create_capset(ctx, capset, name)` writing the capset into
+  `context_init` bits 0-7 (`ctx_create` is now `ctx_create_capset(.., 0, ..)`,
+  every caller byte-identical), with `debug_assert!(capset == 0 || ctxinit)`;
+- at the tail of `probe_capsets`, creates+destroys a capset-2 control and (if
+  capset 4 was enumerated) a capset-4 context. Distinct ctx ids **200 / 201** so
+  a failed destroy cannot make the next create collide on a duplicate id and
+  read as a Venus refusal; the ids sit above the client `dev_ctx` range (slot+1)
+  and below `COMPOSITOR_CTX` (0x100) and `CONV_PROBE_CTX_BASE` (0x101). Same
+  failure disposition as the rest of the function (audit W1 F1): an
+  engine-healthy refusal is a log line, only a real engine death propagates; a
+  skip (feature absent / capset not enumerated) is logged, never silent.
+
+### The gate
+
+`warp-host.sh venus` asserts the ctx-capset discrimination in **both**
+directions — `id=4 CREATED` with venus, absent without; the `id=2` control
+required on both legs so "control lacks id=4 CREATED" is not satisfied by a leg
+where creation was broken outright. `test-venus-verdict` grew four arms (8 →
+12), all discriminating without a boot.
+
+### Not covered / deferred
+
+The client-facing capset plumbing is **V-3**: `WarpCtx.capset` exists at the
+seam with a `capset <id>` ctl verb but nothing reads it. V-0b is driver-internal
+— the probe creates+destroys before any client exists and confers nothing. When
+V-3 makes the field live, rejecting a capset the device never enumerated belongs
+in that change (an unvalidated client `u32` would otherwise reach `CTX_CREATE`).
+
 ## Tests
 
 Kernel: `pci.walk_caps_shm` (6 discriminating vectors incl. the

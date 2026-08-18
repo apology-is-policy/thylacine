@@ -22,6 +22,76 @@ needed the operator.
 
 ---
 
+## 2026-08-18 — V-0b: a Venus context creates, and the seam size I recalled wrong
+
+I had classified V-0b as blocked this session — the arc's next step is
+audit-bearing `gpu.rs` work and I'd been treating the Agent tool as barred. The
+Stop hook pushed back: a checkpoint is not a stopping point, and the standing
+operator grant (`feedback_prosecutor_agents_permitted.md`) authorizes the
+`holotype-reviewer` for exactly this. So I opened it.
+
+The question V-0b answers is narrow and real: V-0 proved the host *advertises*
+capset id=4; it did not prove a Venus *context* can be created. That gap mattered
+because `/usr/libexec/virgl_render_server` is in no Debian package, and §9.2
+calls the render server Venus-only-by-construction — so "the capset is
+advertised" could have meant venus init reached capset reporting and no further.
+
+It creates. On thyla-pi (KVM, real V3D): `ctx-capset id=4 CREATED` with venus,
+`skipped` without, `id=2` virgl the positive control on both legs. The absent
+render server does not block it — virglrenderer's in-process venus init handles
+context creation. That is the empirical answer the inference could not give.
+
+The design point worth keeping: this is a **feature-bit** change, not a field
+change, and the naive version is a *convincing* false pass. `ctx_create` wrote
+`context_init = 0` under a comment saying the feature was not negotiated, and the
+device ignores that field unless `F_CONTEXT_INIT` is negotiated — which the
+driver never offered back. So "pass capset 4 and see" would have written into an
+ignored field, collected `RESP_OK_NODATA`, and produced an implicitly-virgl
+context reporting success. The negative control is what proves we avoid it: on a
+no-venus boot the id=4 create is *skipped* because the capset was not enumerated,
+never spuriously CREATED.
+
+Then my own self-audit, run beside the prosecutor, caught me doing the exact
+thing this whole run has been about. My commit message and code comment said the
+probe's ctx ids (200/201) sit "above the client range (slot+1, <=128)". The
+client range is not 1..128. `MAX_WARP_CTXS = 8` — one grep away — so it is 1..8.
+The collision-safety conclusion holds (200/201 are far above 8 and below
+`COMPOSITOR_CTX` at 0x100), but I cited a number I recalled instead of the one in
+the tree, and the "128" is a real but *different* limit from Warp-3a. A number
+recalled is a number unverified; the session's refrain, landing on me one more
+time. Folded the correction into the round's disposition rather than amend under
+a running reviewer.
+
+Committed at `bf448929`, **not pushed** — `gpu.rs` is an audit-trigger surface
+and this changes the device negotiation contract plus adds context creation, so
+the round runs before the push. Fable was out of credits, so the round is on the
+Opus fallback tier at max effort — context-independent even if same-family,
+which is what the fallback rule preserves.
+
+**The round closed CLEAN -- 0 P0 / 0 P1 / 1 P2 / 2 P3 -- and it converged with
+the self-audit.** F1 (the "128-slot seam" that is really 8) was my SF1; F2 (the
+debug_assert that vanishes in release) was my SF2. Two independent prosecutors,
+the same two findings -- the reassurance the discipline is designed to produce.
+The round added the part I had left as prose: F1 is not just a wrong comment, it
+is a *missing compile-time guard*, because collision-freedom was argued from a
+numeric window (liftable) instead of from timing (the probe runs before any
+client and destroys before returning, which cannot be lifted). Fixed both ways:
+the comment states the timing guarantee, and a `const _: () = assert!(...)` ties
+the probe ids to `MAX_WARP_CTXS`/`COMPOSITOR_CTX` so a future seam lift past 199
+fails the BUILD. Sabotaged it (probe id -> 5) to confirm it fires, then
+reverted. F2 I closed early rather than deferring to V-3: the debug_assert
+became a real `return Err` so a client-influenced capset in a release build
+cannot silently mint a wrong-kind context. F3 was the round's own -- the gate
+control leg asserted absence of "id=4 CREATED" without presence of "id=4
+skipped", a negative a broken fixture satisfies -- now paired.
+
+Honesty note the round pressed and I am keeping: it ran on **Opus 4.8**, a step
+below the intended Opus-5 fallback (the `model: opus` override resolved low),
+and it said so itself. A finished fallback round is closed per scripture, so no
+re-run is owed -- but the tier is on the record, and the convergence with an
+independent self-audit is what carries the confidence, not the tier alone.
+---
+
 ## 2026-08-18 — An owed test, and the audit premise that was wrong when written
 
 The extinction round (`5de6093f` F2) left an owed item: exec's failure
