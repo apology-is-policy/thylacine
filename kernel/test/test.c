@@ -714,6 +714,7 @@ void test_vivarium_writev_domain(void);                  // #150
 void test_vivarium_fcntl_domain(void);                   // #151
 void test_vivarium_fcntl_dupfd_errnos(void);            // c8ab2744 close: EBADF vs EMFILE
 void test_vivarium_exec_drops_cloexec_sockets(void);   // 6b: exec cloexec socktab sweep
+void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void); // 6b: fd-reuse misroute, runtime sequence
 void test_vivarium_sigtab_fork_exec_rule(void);          // #127: fork copies, exec keeps SIG_IGN
 void test_vivarium_pipe2_domain(void);
 void test_vivarium_dup3_domain(void);    // #157
@@ -2335,6 +2336,7 @@ struct test_case g_tests[] = {
     { "vivarium.fcntl_domain",           test_vivarium_fcntl_domain,           false, NULL },
     { "vivarium.fcntl_dupfd_errnos",     test_vivarium_fcntl_dupfd_errnos,     false, NULL },
     { "vivarium.exec_drops_cloexec_sockets", test_vivarium_exec_drops_cloexec_sockets, false, NULL },
+    { "vivarium.exec_sweep_prevents_fd_reuse_misroute", test_vivarium_exec_sweep_prevents_fd_reuse_misroute, false, NULL },
     { "vivarium.sigtab_fork_exec_rule",  test_vivarium_sigtab_fork_exec_rule,  false, NULL },
     { "vivarium.dup3_domain",          test_vivarium_dup3_domain,          false, NULL },
     { "vivarium.pipe2_domain",           test_vivarium_pipe2_domain,           false, NULL },

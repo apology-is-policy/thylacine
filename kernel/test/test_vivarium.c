@@ -3365,3 +3365,98 @@ void test_vivarium_exec_drops_cloexec_sockets(void) {
                 "the closed-fd stale entry SURVIVES -- handle_get_cloexec == -1, "
                 "so a sweep written `!= 0` instead of `== 1` would wrongly drop it");
 }
+
+// 6b ground-truth: reproduce the fd-reuse MISROUTE the exec sweep prevents, end
+// to end, through the REAL handle_alloc / handle_close_on_exec the exec path
+// runs -- not just the drop function in isolation. exec_drops_cloexec_sockets
+// above drives viv_socktab_drop_cloexec directly on hand-placed entries and
+// proves it drops the right ones; this proves the CONSEQUENCE the drop exists
+// for, by running the exact sequence sys_execve_core runs at its sweep site
+// (viv_socktab_drop_cloexec THEN handle_close_on_exec) and asking what a
+// post-exec socket() then sees through viv_socktab_find.
+//
+// The geometry a fresh-fork phenotype child actually has is clean: the socktab
+// starts NULL (it is never copied at fork; freed only at proc_free), so the
+// child's first socket() lands at socktab slot 0. The misroute, concretely: a
+// cloexec TCP socket at fd F, execve, then a fresh UDP socket that handle_alloc
+// hands the SAME F (the lowest free fd once the cloexec close frees it). WITHOUT
+// the sweep the stale TCP entry survives at slot 0 and SHADOWS the fresh UDP
+// entry that claim() is forced into slot 1, so viv_socktab_find(F) returns the
+// STALE TCP connection -- connect would dial /net/tcp/<n> for a number netd has
+// freed. WITH the sweep, slot 0 is cleared first, the fresh UDP entry claims it,
+// and find(F) returns UDP -- the correct one. Two Procs, identical up to the ONE
+// sweep line, so the observed delta is the sweep and nothing else.
+//
+// This is the runtime proof the guest different-proto probe was reaching for,
+// deterministic here because the socktab geometry is controlled rather than
+// inherited from a probe's prior socket history. It does NOT exercise the
+// sys_execve_core call site itself (it invokes the sweep helper directly), so it
+// is not the literal "delete line 8455 and watch a test go red" guard; it is the
+// proof that the sweep is load-bearing and that a real cloexec-exec+socket in a
+// fresh-fork child does surface the stale entry the fix removes.
+void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void);
+void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
+    // ---- ARM 1: WITH the sweep (the fix). ----
+    struct Proc *pf = proc_alloc();
+    TEST_ASSERT(pf != NULL, "proc_alloc (fix arm)");
+    pf->phenotype = PHENO_LINUX;
+    pf->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(pf->socktab != NULL, "socktab alloc (fix arm)");
+
+    hidx_t f_a = handle_alloc(pf, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(f_a >= 0, "socket_A handle (fix arm)");
+    viv_socktab_claim(pf->socktab, (s32)f_a, VIV_NET_TCP, 100);
+    handle_set_cloexec(pf, f_a, true);
+
+    // the exec sweep, exactly as sys_execve_core orders it (syscall.c:8455 then
+    // :8467): drop the cloexec entries while the fds are still open, THEN close.
+    viv_socktab_drop_cloexec(pf);
+    handle_close_on_exec(pf);            // frees f_a
+
+    hidx_t f_b = handle_alloc(pf, KOBJ_THREAD, RIGHT_READ, NULL);
+    viv_socktab_claim(pf->socktab, (s32)f_b, VIV_NET_UDP, 200);
+
+    bool fix_reused = (f_b == f_a);
+    struct viv_sock *ef = viv_socktab_find(pf->socktab, (s32)f_b);
+    int fix_proto = ef ? (int)ef->proto : -1;
+
+    pf->state = PROC_STATE_ZOMBIE;
+    proc_free(pf);
+
+    // ---- ARM 2: WITHOUT the sweep (the bug -- the deleted-8455 world). ----
+    // Identical to ARM 1 but for the single missing viv_socktab_drop_cloexec.
+    struct Proc *pb = proc_alloc();
+    TEST_ASSERT(pb != NULL, "proc_alloc (bug arm)");
+    pb->phenotype = PHENO_LINUX;
+    pb->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(pb->socktab != NULL, "socktab alloc (bug arm)");
+
+    hidx_t b_a = handle_alloc(pb, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(b_a >= 0, "socket_A handle (bug arm)");
+    viv_socktab_claim(pb->socktab, (s32)b_a, VIV_NET_TCP, 100);
+    handle_set_cloexec(pb, b_a, true);
+
+    // NO viv_socktab_drop_cloexec here -- this arm IS the missing-call world.
+    handle_close_on_exec(pb);            // frees b_a but leaves its stale entry
+
+    hidx_t b_b = handle_alloc(pb, KOBJ_THREAD, RIGHT_READ, NULL);
+    viv_socktab_claim(pb->socktab, (s32)b_b, VIV_NET_UDP, 200);
+
+    bool bug_reused = (b_b == b_a);
+    struct viv_sock *eb = viv_socktab_find(pb->socktab, (s32)b_b);
+    int bug_proto = eb ? (int)eb->proto : -1;
+
+    pb->state = PROC_STATE_ZOMBIE;
+    proc_free(pb);
+
+    // ---- assert after teardown (TEST_ASSERT returns; proc_free freed both). ----
+    TEST_ASSERT(fix_reused,
+                "control: the post-exec socket reuses the cloexec-freed fd (fix arm)");
+    TEST_ASSERT(bug_reused,
+                "control: the post-exec socket reuses the cloexec-freed fd (bug arm)");
+    TEST_EXPECT_EQ(fix_proto, (int)VIV_NET_UDP,
+                   "WITH the sweep: find(reused fd) returns the FRESH udp entry");
+    TEST_EXPECT_EQ(bug_proto, (int)VIV_NET_TCP,
+                   "WITHOUT the sweep: the STALE tcp entry shadows the reused fd -- "
+                   "the misroute the exec sweep prevents");
+}
