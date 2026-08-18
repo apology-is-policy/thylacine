@@ -437,6 +437,20 @@ so the compositor never grows a glyph path; the richer end state is Acme's
 
 ## Stream 4 — notes / job control / PTY (the kernel line)
 
+> **P1 PREEMPTS THIS STREAM (round B on 437213c4/5336c894, Fable 5, CONFIRMED
+> 2026-08-18):** the pipe (spoor) 9P transport BLOCKS inside `devpipe_write`
+> while `client_send_flow` holds `c->lock` -- an unprivileged multi-threaded
+> container can EXTINCT the box (a `#360` lock-across-sleep). `437213c4` made
+> `SYS_ATTACH_9P` over a pipe pair the diorama transport = the Phase-5 spoor
+> transport's FIRST production consumer under the shared `p9_client`, which was
+> written for a NON-BLOCKING (EAGAIN) transport. Fix: make `spoor_transport_send`
+> non-blocking (return `P9_TRANSPORT_EAGAIN` on a would-block) so the existing
+> pump/park drops `c->lock`. `memory/bug_spoor_transport_lock_across_sleep_
+> extinction.md`. AUDIT-BEARING + SMP gate + a follow-up round. **This outranks
+> every item below it (stewardship: a soundness threat outranks chunk
+> completion).**
+
+
 The line the header names: the EL0-return tail's note dispatch, the STOP
 class, the tty family, the pts job-control seam, and the tests that construct
 their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).

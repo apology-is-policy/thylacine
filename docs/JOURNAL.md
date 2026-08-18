@@ -711,3 +711,76 @@ PASS + 2 SKIP (GL not baked) over 36 scenarios, 0 retries** (TCG, sequential,
 ~55 min), the new `viv-run` among them. Pushed to both mirrors after the
 fixup; main ratified the channel design on the line (call 0025) and had merged
 aux-2 @13149152 into main (8a58112d) meanwhile.
+
+## 2026-08-18 (aux) — the first production use of the pipe transport could extinct the box
+
+The two Fable prosecutor rounds on the channel work came back. Round A
+(`01f076f2`, the handler-time mask) was clean — 0/0/0/1, one P3 that the mask
+mechanism was sound and the only finding was a comment: the owner-write
+enumeration justifying `thread_die_pending`'s lock-free `note_mask` read named
+only `SYS_NOTE_MASK`, and this very commit had added two more writers (the
+delivery store, the sigreturn restore) to a list that was already one short
+(the V-6b `rt_sigprocmask` row). The property holds — every writer runs on the
+owning thread, never inside a wait — so it is the #254 shape, a comment true
+about the wrong version of the system. A reword, deferred to this close because
+`notes.c` was in round B's read scope.
+
+Round B (`437213c4`+`5336c894`, the diorama channel + the ^C masks) found the
+one that mattered: **the pipe (spoor) 9P transport blocks under `c->lock`, and
+an unprivileged multi-threaded container can ride that into a box extinction.**
+`437213c4` had, without anyone naming it as such, made `SYS_ATTACH_9P` over a
+Plan-9 pipe pair the *first production consumer* of the Phase-5 spoor transport
+under the shared `p9_client`. That client was written for a non-blocking
+transport: `client_send_flow` holds `c->lock` across `p9_transport_send` (the
+header says, in as many words, "never held across a blocking wait"), and it
+recovers from a full transport by returning `P9_TRANSPORT_EAGAIN` — the srvconn
+ring backend does exactly that, and `client_pump_or_park_locked` drops the lock
+and retries. The pipe backend does not: `spoor_transport_send` loops until the
+whole frame is written, and `devpipe_write` on a full pipe **sleeps**. `sched()`
+extincts on `prev->preempt_count != 0`, and `c->lock` is a counted spinlock. So
+a full `c2s` under the held lock is `EXTINCTION: sched: plain spinlock held
+across sched()`.
+
+All four links re-read to ground truth before touching anything. Reachability is
+the soft part — the round was honest that it could not build a deterministic
+reproducer read-only — but the bound refuses to prove it safe: `c2s` is 4096
+bytes, up to 64 frames may be outstanding, and a single full-path `Twalkgetattr`
+is ~1100 bytes, so four concurrent container `/proc` opens (4400 > 4096) fill it
+if the single-threaded diorama is descheduled in the window. The single-threaded
+V-7 probe and the one interactive ash never fill 4096 with one in-flight frame —
+which is precisely why the gates were green and the box was not safe.
+
+The fix stays inside the machinery that already exists for the srvconn ring. A
+new `CNBFRAME` flag (`spoor.h` bit 6) on the transport's tx Spoor makes
+`devpipe_write` commit the whole frame or return `-T_E_AGAIN` having written
+nothing — never partial (a stranded fragment desyncs the shared stream, and
+`do_send` treats a mid-frame EAGAIN as fatal, `#349`), never `sleep()` (the
+blocking loop is bypassed entirely for the flag). `spoor_transport_send` maps
+`-T_E_AGAIN` to `P9_TRANSPORT_EAGAIN` — the two are both -11, but the map is
+explicit so a divergence of either constant cannot silently become -1 — and the
+client's existing EAGAIN arm drops `c->lock`, reads an `s2c` reply (freeing the
+diorama to drain `c2s`), and retries. Only tx is CNBFRAME: the recv on rx blocks
+but runs with `c->lock` dropped (`#841`), so it is sound. A frame is at most an
+msize, and msize ≤ `PIPE_BUF_SIZE`, so the frame always fits an empty pipe —
+progress is guaranteed once the reader drains, no deadlock.
+
+The regression, `pipe.cnbframe_atomic_nonblocking`, is the exact contrast to
+`pipe.write_short_when_partially_full` a few lines above it: the same
+ten-bytes-free pipe, a partial 10-byte write there, an atomic `-T_E_AGAIN` here
+— and it reads the ring back to prove exactly 4000 bytes buffered, not 4096, so
+a rejected frame left no byte behind. My own self-audit, run concurrently with
+the round, had confirmed the channel sound on fd-mapping, diagnostics,
+pid-monotonicity, and lifetime, and had flagged the deadlock axis as "leans on
+#841" — but I had not run that axis to the extinction. The round did. That is
+the two-prosecutor value in one sentence: family diversity plus a reviewer that
+carries a hypothesis all the way to `sched()`.
+
+### The bar over the tip (the F1 fix)
+
+Build OK. Suite **1414/1414** (the +1 is `pipe.cnbframe_atomic_nonblocking`,
+explicitly PASS), no FAIL, no EXTINCTION; the boot already drives the CNBFRAME
+path through the diorama channel's Tversion/Tattach/reads. SMP gate (default +
+UBSan × smp4/smp8, N=10) — *(the run over this tip)*. Round A's F1 comment
+reword lands alongside. A follow-up prosecutor round on this fix is owed — it
+changes a wait behavior, and the re-audit-on-dirty-close discipline says the fix
+gets its own round.

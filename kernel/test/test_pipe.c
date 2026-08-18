@@ -168,6 +168,55 @@ void test_pipe_write_short_when_partially_full(void) {
     spoor_clunk(wr);
 }
 
+// CNBFRAME (the byte-pipe 9P transport's tx end): frame-atomic + non-blocking.
+// The round-B F1 regression: without CNBFRAME the write above is PARTIAL when
+// the frame does not fit (returns space-available, 10L) and BLOCKS (sleeps)
+// when the pipe is exactly full -- and that sleep, taken under the 9P client's
+// held c->lock, is the #360 lock-across-sleep extinction. With CNBFRAME a write
+// commits the WHOLE frame or returns -T_E_AGAIN having written NOTHING, and
+// never sleeps. This is the exact contrast to
+// test_pipe_write_short_when_partially_full above (same 10-free pipe, atomic
+// EAGAIN here vs a 10-byte partial there).
+void test_pipe_cnbframe_atomic_nonblocking(void) {
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "create");
+    wr->flag |= CNBFRAME;
+
+    static u8 frame[1000];
+    for (size_t i = 0; i < sizeof(frame); i++) frame[i] = 0xA5;
+
+    // (1) A frame FITS in an empty pipe -> the whole frame commits.
+    TEST_EXPECT_EQ(dev_write(wr, frame, 1000L), 1000L,
+        "CNBFRAME: a fitting frame commits whole");
+    // (2) Three more -> 4000 buffered, 96 free (< 1000).
+    for (int k = 0; k < 3; k++)
+        TEST_EXPECT_EQ(dev_write(wr, frame, 1000L), 1000L,
+            "CNBFRAME: fitting frames commit whole");
+
+    // (3) The frame no longer fits (96 free < 1000) -> -T_E_AGAIN, ATOMIC.
+    //     The non-CNBFRAME path would partial-write the 96 free bytes (the
+    //     contrast test above); CNBFRAME writes NOTHING and never sleeps.
+    TEST_EXPECT_EQ(dev_write(wr, frame, 1000L), (long)(-T_E_AGAIN),
+        "CNBFRAME: a non-fitting frame -> -T_E_AGAIN, nothing written");
+
+    // (4) Prove atomicity: exactly 4000 readable, not 4096 (no partial byte).
+    static u8 drain[PIPE_BUF_SIZE];
+    TEST_EXPECT_EQ(dev_read(rd, drain, (long)PIPE_BUF_SIZE), 4000L,
+        "CNBFRAME: the rejected frame left the ring at 4000, no partial byte");
+
+    // (5) Drained -> the frame fits again (progress is guaranteed since a
+    //     frame <= PIPE_BUF_SIZE always fits an empty pipe).
+    TEST_EXPECT_EQ(dev_write(wr, frame, 1000L), 1000L,
+        "CNBFRAME: fits again once drained");
+
+    // (6) A read-closed pipe still yields -T_E_PIPE under CNBFRAME (unchanged).
+    spoor_clunk(rd);   // close the read end -> read_eof
+    TEST_EXPECT_EQ(dev_write(wr, frame, 1000L), (long)(-T_E_PIPE),
+        "CNBFRAME: a read-closed pipe -> -T_E_PIPE");
+
+    spoor_clunk(wr);
+}
+
 void test_pipe_wraparound(void) {
     struct Spoor *rd = NULL, *wr = NULL;
     TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "create");

@@ -245,6 +245,12 @@ storm's parallel jobs died silently. See `docs/LLVM-DESIGN.md` §7.2.
 
 ## Known caveats / footguns
 
+### `CNBFRAME` — the frame-atomic non-blocking write mode (round-B F1, 2026-08-18)
+
+A write whose tx Spoor carries `CNBFRAME` (`spoor.h` bit 6) takes an early arm in `devpipe_write` that is **atomic** and **non-blocking**: it commits the *whole* buffer iff it fits (`PIPE_BUF_SIZE - count >= n`) and otherwise returns `-T_E_AGAIN` having written **nothing** — never a partial write, never a `sleep()`. The default (unflagged) write is unchanged: partial when the pipe is nearly full, blocking (`sleep(write_rendez)`) when exactly full.
+
+It exists for **one** consumer: the tx end of the byte-pipe 9P transport (`p9_spoor_transport_init` sets the flag). The 9P client holds `c->lock` across `p9_transport_send`, so a **blocking** pipe write there is the `#360` lock-across-sleep extinction (an unprivileged multi-threaded container filling `c2s` with concurrent `/proc` opens kills the guest), and a **partial** write strands a 9P-frame fragment and desyncs the shared stream (`do_send` treats a mid-frame EAGAIN as fatal, `#349`). `-T_E_AGAIN` == `P9_TRANSPORT_EAGAIN` (-11) lets `client_send_flow` drop `c->lock` and retry. A `read_eof` still yields the `pipe` note + `-T_E_PIPE` under CNBFRAME. Regression: `pipe.cnbframe_atomic_nonblocking` (the exact contrast to `pipe.write_short_when_partially_full`). Nothing but the 9P transport tx should set this flag.
+
 ### Blocking semantics — read returning 0 means EOF
 
 `read` returning 0 unambiguously means "write end closed AND buffer drained" (EOF). Empty buffer with write end still open → reader sleeps. Symmetric for write: `-T_E_PIPE` means the read end closed. Both signals are

@@ -106,6 +106,21 @@ _Static_assert(sizeof(struct Qid) == 16,
                                // Set on the Spoor devsrv_open returns for a byte-
                                // mode connect; clear = server endpoint (from
                                // SYS_SRV_ACCEPT, read c2s / write s2c). stalk-3b-β.
+#define CNBFRAME  (1u << 6)    // frame-atomic NON-BLOCKING write: a write commits the
+                               // WHOLE buffer or returns -T_E_AGAIN having written
+                               // NOTHING -- never partial, never sleeps. Honored by the
+                               // pipe Dev (devpipe_write) only; set on the tx Spoor of
+                               // the byte-pipe 9P transport (p9_spoor_transport_init).
+                               // Why it exists: the 9P client holds c->lock across
+                               // p9_transport_send (9p_client.h "never held across a
+                               // blocking wait") and recovers from a full transport via
+                               // P9_TRANSPORT_EAGAIN (client_pump_or_park_locked drops
+                               // c->lock). A BLOCKING pipe write under that lock is the
+                               // #360 lock-across-sleep extinction, and a PARTIAL write
+                               // strands a 9P-frame fragment + desyncs the shared stream
+                               // (do_send treats a mid-frame EAGAIN as fatal, #349). A
+                               // frame <= msize <= PIPE_BUF_SIZE always fits an empty
+                               // pipe, so progress is guaranteed once the reader drains.
 
 // SPOOR_MAGIC — sentinel set at spoor_alloc; checked at spoor_ref /
 // spoor_unref / spoor_clunk. SLUB's freelist write at free clobbers

@@ -1331,6 +1331,7 @@ void test_pipe_write_on_read_end_rejected(void);
 void test_pipe_close_one_end_keeps_other_alive(void);
 void test_pipe_close_both_ends_frees_ring(void);
 void test_pipe_compose_with_spoor_transport(void);
+void test_pipe_cnbframe_atomic_nonblocking(void);
 void test_pipe_fstat_reports_fifo(void);
 void test_pipe_blocking_write_wakes_sleeping_reader(void);
 void test_pipe_blocking_read_wakes_sleeping_writer(void);
@@ -3097,6 +3098,7 @@ struct test_case g_tests[] = {
     { "pipe.close_one_end_keeps_other_alive",               test_pipe_close_one_end_keeps_other_alive,               false, NULL },
     { "pipe.close_both_ends_frees_ring",                    test_pipe_close_both_ends_frees_ring,                    false, NULL },
     { "pipe.compose_with_spoor_transport",                  test_pipe_compose_with_spoor_transport,                  false, NULL },
+    { "pipe.cnbframe_atomic_nonblocking",                   test_pipe_cnbframe_atomic_nonblocking,                   false, NULL },
     { "pipe.fstat_reports_fifo",                            test_pipe_fstat_reports_fifo,                            false, NULL },
     { "pipe_blocking.write_wakes_sleeping_reader",          test_pipe_blocking_write_wakes_sleeping_reader,          false, NULL },
     { "pipe_blocking.read_wakes_sleeping_writer",           test_pipe_blocking_read_wakes_sleeping_writer,           false, NULL },

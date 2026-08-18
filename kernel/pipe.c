@@ -371,6 +371,37 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
     if (!p->ring)                return -T_E_BADF;   // torn-down endpoint
     struct pipe_ring *r = p->ring;
 
+    // CNBFRAME (the byte-pipe 9P transport's tx end): frame-atomic + non-
+    // blocking. Commit the WHOLE buffer or return -T_E_AGAIN having written
+    // NOTHING -- never partial (a stranded 9P-frame fragment desyncs the
+    // shared stream; do_send treats a mid-frame EAGAIN as fatal, #349), never
+    // sleep (a blocking write under the 9P client's held c->lock is the #360
+    // lock-across-sleep extinction -- the round-B F1 defect). The caller
+    // (client_send_flow) recovers from -T_E_AGAIN == P9_TRANSPORT_EAGAIN by
+    // dropping c->lock in client_pump_or_park_locked; a frame <= msize <=
+    // PIPE_BUF_SIZE always fits an empty pipe, so progress is guaranteed once
+    // the reader drains. Same read_eof -> pipe-note + -T_E_PIPE as the loop.
+    if (c->flag & CNBFRAME) {
+        spin_lock(&r->lock);
+        if (r->read_eof) {
+            spin_unlock(&r->lock);
+            struct Thread *t = current_thread();
+            if (t && t->proc) notes_post_pipe(t->proc);
+            return -T_E_PIPE;
+        }
+        if ((long)(PIPE_BUF_SIZE - r->count) >= n) {
+            long put = ring_write(r, (const u8 *)buf, n);   // == n (it fits)
+            spin_unlock(&r->lock);
+            if (put > 0) {
+                wakeup(&r->read_rendez);
+                poll_waiter_list_wake(&r->poll_list);
+            }
+            return put;
+        }
+        spin_unlock(&r->lock);
+        return -T_E_AGAIN;                                  // whole frame won't fit
+    }
+
     // Blocking write. Loop:
     //   - take lock; if readEof → drop lock + return -T_E_PIPE.
     //   - if space → append + drop lock + wake reader + return.

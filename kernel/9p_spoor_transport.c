@@ -39,6 +39,13 @@ static int spoor_transport_send(void *ctx, const u8 *buf, size_t len) {
                                           buf + total,
                                           (long)(len - total),
                                           0);
+        // CNBFRAME (the tx pipe, set at init): a full pipe returns
+        // P9_TRANSPORT_EAGAIN ATOMICALLY (nothing written), so do_send's #349
+        // sent==0 flow control propagates it and client_send_flow drops c->lock
+        // in client_pump_or_park_locked and retries -- never blocking under the
+        // held lock (the round-B F1 lock-across-sleep extinction). Must precede
+        // the `n < 0` arm: P9_TRANSPORT_EAGAIN == -11 would otherwise map to -1.
+        if (n == P9_TRANSPORT_EAGAIN) return P9_TRANSPORT_EAGAIN;
         if (n < 0) return -1;
         if (n == 0) {
             // Pipe closed mid-write. Surface 0 if nothing was written;
@@ -103,6 +110,12 @@ int p9_spoor_transport_init(struct p9_spoor_transport *st,
     st->tx_spoor    = tx;
     st->rx_spoor    = rx;
     st->owns_spoors = owns_spoors;
+    // The tx end is written by the 9P client under c->lock; make it frame-
+    // atomic non-blocking (CNBFRAME) so a full pipe yields P9_TRANSPORT_EAGAIN
+    // instead of sleeping under the held lock (the round-B F1 #360 lock-across-
+    // sleep extinction). Only tx: the rx recv runs with c->lock DROPPED (#841),
+    // so a blocking read there is sound.
+    tx->flag |= CNBFRAME;
     return 0;
 }
 
