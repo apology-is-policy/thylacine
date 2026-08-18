@@ -101,12 +101,41 @@ the property that actually prevents rot.
 V-0's remaining half. It matters beyond tidiness: if it works, Venus has a fast
 local-ish iteration loop; if not, the whole arc iterates over the Pi's SD card.
 
-The V-0..V-6 ladder is now in GPU-DESIGN §12. V-2 carries the `PciDev::claim`
-eager-map-every-BAR fix that §6.2 has called "currently broken" since Warp-2 —
-pulled forward as a dependency of the chunk rather than deferred again — and is
-flagged audit-bearing on I-45 and I-32 *independently of the rest of the arc*,
-because mapping MMIO pages into a client VA is a new kernel memory-authority
-path and not a graphics detail.
+The V-0..V-6 ladder is now in GPU-DESIGN §12, and V-2 is flagged audit-bearing
+on I-45 and I-32 *independently of the rest of the arc*, because mapping MMIO
+pages into a client VA is a new kernel memory-authority path and not a graphics
+detail.
+
+**And then the wrong turn, caught about twenty minutes after it landed.** I
+wrote V-2 as carrying "the `PciDev::claim` eager-map-every-BAR fix, pulled
+forward as a dependency" — because §6.2 ends with *"Also required and currently
+broken: `PciDev::claim`'s eager map-every-BAR policy (§3)."* It is not broken.
+It was fixed at **Warp-2a (#166)**, and §3 — **the section §6.2 points at** —
+has said `[FIXED at Warp-2a (#166)]` in bold for weeks, along with the exact
+remaining delta: *"Mapping a subrange of the shm window remains the §6.2
+Venus-chunk delta."*
+
+What caught it was not re-reading the doc. It was going to look at the tree for
+an unrelated reason — how big is V-2, really? — and finding
+`kernel/pci_handle.c` already resolving `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG`, a
+`pci.walk_caps_shm` test passing in the boot log I already had open, and
+`hardware.rs` carrying a `#166` comment at the exact line that skips an
+oversized BAR.
+
+Two things worth keeping. First, **a cross-reference pointing AT the correction
+is not the same as being corrected** — §6.2 pointed straight at the section that
+refuted it, and the pointer kept its own verdict; a reader who follows the
+pointer has already believed the pointer. Second, **a "currently broken" note in
+a design doc is a claim about the tree, and it ages exactly like a status field:
+nobody's step flips it.** The fix's own commit updated §3 and did not think to
+hunt the other half of the sentence one section away.
+
+So V-2 is **smaller than I wrote it**: discovery is done, the claim policy is
+fixed, and what remains is the mapping half alone — an owner-minted,
+client-mappable, revocable, budgeted map of a *subrange* of the shm window at
+the host-dictated cache attribute. Corrected in §6.2, §12, and the status row;
+the original claim is left visible in §6.2 rather than quietly overwritten, so
+the next reader can see which half of a self-contradicting document was stale.
 
 ---
 
