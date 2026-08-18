@@ -9,6 +9,7 @@
 #   tools/warp-host.sh bench     # llvmpipe GLQuake baseline (paced + unpaced x2)
 #   tools/warp-host.sh capset    # virtio-gpu-gl-pci + egl-headless capset probe
 #   tools/warp-host.sh venus     # Warp-6 V-0 gate: is capset id=4 (VENUS) reachable? (test + control leg)
+#   tools/warp-host.sh venus-verdict <ctl.log> <tst.log>  # just the verdict (no boots) -- what tools/test-venus-verdict.sh sabotages
 #   tools/warp-host.sh prove     # Warp-2 gate: /warp-prove on the virgl device
 #   tools/warp-host.sh composed  # Warp-C C-2b + C-2c + C-3 gate: the composed screen's arm + the witnessed imports + the composed pixels read back, GL vs 2D (both legs)
 #   tools/warp-host.sh reject    # #240: is a REJECTED command stream observable in-guest?
@@ -276,11 +277,11 @@ venus-verdict)
             vfail=1
         }
     done
-    if grep -qE "gpu capset\[[0-9]+\] id=4" "$ctl"; then
+    if grep -qE "gpu capset\[[0-9]+\] id=4 " "$ctl"; then
         echo "CONTROL leg saw capset id=4 -- the declaration is NOT what produces it"
         vfail=1
     fi
-    grep -qE "gpu capset\[[0-9]+\] id=4" "$tst" || {
+    grep -qE "gpu capset\[[0-9]+\] id=4 " "$tst" || {
         echo "TEST leg saw no capset id=4 -- Venus NOT reachable on this host"
         vfail=1
     }
