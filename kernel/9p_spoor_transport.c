@@ -111,10 +111,15 @@ int p9_spoor_transport_init(struct p9_spoor_transport *st,
     st->rx_spoor    = rx;
     st->owns_spoors = owns_spoors;
     // The tx end is written by the 9P client under c->lock; make it frame-
-    // atomic non-blocking (CNBFRAME) so a full pipe yields P9_TRANSPORT_EAGAIN
+    // atomic non-blocking (CNBFRAME) so a pipe backend yields P9_TRANSPORT_EAGAIN
     // instead of sleeping under the held lock (the round-B F1 #360 lock-across-
-    // sleep extinction). Only tx: the rx recv runs with c->lock DROPPED (#841),
-    // so a blocking read there is sound.
+    // sleep extinction). Only tx: the rx recv runs with c->lock DROPPED (#841).
+    // NB: CNBFRAME is honored only by devpipe; a caller of THIS init must supply
+    // a NON-BLOCKING tx (a pipe, or the test's linear-buffer mock). The EL0
+    // attack surface -- SYS_ATTACH_9P -- enforces pipe-only at the handler (the
+    // follow-up round's F1); kernel-internal callers are trusted to pass a
+    // non-blocking tx, which is why this stays Dev-generic (the transport tests
+    // drive it over a non-blocking mock).
     tx->flag |= CNBFRAME;
     return 0;
 }

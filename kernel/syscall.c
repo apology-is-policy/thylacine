@@ -1858,6 +1858,16 @@ static inline s64 attach_err_to_ret(int aerr) {
     return (aerr <= -2 && aerr >= -4095) ? (s64)aerr : -1;
 }
 
+// The follow-up round's F1: SYS_ATTACH_9P's spoor transport is sound only over a
+// NON-BLOCKING tx (CNBFRAME is honored by devpipe alone; a /srv byte-conn or a
+// dev9p file BLOCKS under the 9P client's held c->lock -> the #360 extinction).
+// EL0's only sound tx is a real pipe, so the handler admits pipe pairs ONLY.
+// Non-static + declared in syscall.h so the regression exercises the ACTUAL
+// predicate the handler gates on, not a re-derivation.
+bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx) {
+    return tx && rx && tx->dev == &devpipe && rx->dev == &devpipe;
+}
+
 static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
                                  u64 aname_va, u64 aname_len, u64 n_uname) {
     struct Thread *t = current_thread();
@@ -1884,6 +1894,20 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     if (!tx)                                         return -1;
     struct Spoor *rx = sys_lookup_spoor(p, (hidx_t)rx_fd_raw, RIGHT_READ);
     if (!rx)                                       { spoor_clunk(tx); return -1; }
+    // The follow-up round's F1 (the round-B CNBFRAME fix left a hole). The spoor
+    // transport is sound only over a NON-BLOCKING tx -- CNBFRAME is honored by
+    // devpipe alone. EL0's only sound tx is a real pipe; a /srv byte-conn
+    // (devsrv_write -> srvconn_client_send_blocking tsleep) or a dev9p file
+    // (nested blocking RPC) driven under the 9P client's held c->lock is the #360
+    // lock-across-sleep extinction. Enforce pipe-only for BOTH ends at THIS EL0
+    // boundary (p9_spoor_transport_init stays Dev-generic -- kernel-internal
+    // callers, incl. the transport tests' non-blocking mock, are trusted). Both
+    // lookup refs are released on reject (each lookup ref'd, per #844).
+    if (!sys_attach_9p_ends_are_pipes(tx, rx)) {
+        spoor_clunk(tx);
+        spoor_clunk(rx);
+        return -1;
+    }
     // #844: tx + rx are REF-HELD (sys_lookup_spoor transferred a ref each). The
     // adapter takes its OWN independent ref below; we then release the two
     // lookup borrows here (UNCONDITIONAL -- each lookup ref'd, even when

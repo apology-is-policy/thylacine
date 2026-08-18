@@ -2975,4 +2975,13 @@ struct exception_context;
 // thread is left in EXITING state until wait_pid reaps it.
 void syscall_dispatch(struct exception_context *ctx);
 
+// The follow-up round's F1 gate predicate (defined in syscall.c): SYS_ATTACH_9P
+// admits pipe pairs ONLY -- the spoor transport is sound solely over a
+// non-blocking tx, and CNBFRAME is honored by devpipe alone (a /srv byte-conn or
+// a dev9p file tx BLOCKS under the 9P client's held c->lock, the #360 lock-
+// across-sleep extinction). Non-static so the regression (test_pipe.c) exercises
+// the ACTUAL predicate the handler gates on, not a re-derivation.
+struct Spoor;
+bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx);
+
 #endif // THYLACINE_SYSCALL_H

@@ -784,3 +784,48 @@ UBSan × smp4/smp8, N=10) -- 0 corruption across all configs. Round A's F1 comme
 reword lands alongside. A follow-up prosecutor round on this fix is owed — it
 changes a wait behavior, and the re-audit-on-dirty-close discipline says the fix
 gets its own round.
+
+## 2026-08-18 (aux) — the fix that closed only one door: SYS_ATTACH_9P now admits pipe pairs only
+
+The follow-up round on the CNBFRAME fix (`663d4b64`) came back dirty, and the P1
+it found was the sharp kind — the fix I had just shipped closed the extinction
+for the *pipe* backend and left the *class* open. CNBFRAME is honored by
+`devpipe_write` alone; `p9_spoor_transport_init` sets the flag unconditionally,
+but `sys_attach_9p_handler` accepts any writable Spoor as the transport tx with
+no Dev-type check. So a non-pipe blocking-write tx — a `/srv` byte-conn, whose
+`devsrv_write` tsleeps on a full ring; a dev9p file, whose write is a nested
+blocking RPC — silently ignores the flag and blocks under the 9P client's held
+`c->lock`, which is the same `#360` lock-across-sleep extinction, reached
+through a different Dev. Latent, because the two shipped callers (viv and
+joey's viv-channel) always pass `pipe_create` pairs — but the *syscall
+contract* admitted the vector, and a semi-trusted runner passing a non-pipe tx
+kills the box.
+
+The first instinct — gate the tx on `dev == &devpipe` inside
+`p9_spoor_transport_init` — was wrong, and the test suite said so within one
+build: eight `test_9p_spoor_transport.*` tests went red at "init returns 0".
+They drive the transport over a **non-blocking linear-buffer mock Dev**, which
+is a perfectly sound tx (it never sleeps), and the init-gate rejected it. That
+red was the design telling me where the constraint actually lives. The
+transport is genuinely Dev-generic — sound over *any* non-blocking tx — and the
+pipe-only rule is a property of the **EL0 boundary**, not the transport: EL0's
+only sound tx is a real pipe, and a kernel-internal caller is trusted to pass a
+non-blocking Dev. So the gate belongs at `sys_attach_9p_handler`, not the init.
+
+`sys_attach_9p_handler` now refuses unless `sys_attach_9p_ends_are_pipes(tx,
+rx)` — both ends `dev == &devpipe` — releasing both `#844` lookup refs on
+reject. The predicate is a non-static helper precisely so the regression,
+`pipe.attach_9p_admits_pipes_only`, exercises the *actual* gate rather than a
+re-derivation of it (a pipe pair admitted; a non-pipe tx, a non-pipe rx, and
+NULL ends all refused). A cleaner userspace regression — attach a non-pipe fd
+from EL0 and watch it fail — was tempting but wrong: without the gate the attach
+proceeds into its Tversion RPC and *hangs* on a tx that never replies, so it
+would freeze the boot rather than fail cleanly. The handler-predicate test is
+the deterministic one.
+
+### The bar over the tip (the pipe-only gate)
+
+Build OK. Suite **1415/1415** (+1 `pipe.attach_9p_admits_pipes_only`); the
+`spoor_transport.*` mock-fixture tests stayed green, which is the proof the gate
+did not move to the init. SMP gate — *(the run over this tip)*. The extinction
+class is now closed at the boundary that admits it.

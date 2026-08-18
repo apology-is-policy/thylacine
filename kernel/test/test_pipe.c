@@ -217,6 +217,37 @@ void test_pipe_cnbframe_atomic_nonblocking(void) {
     spoor_clunk(wr);
 }
 
+// The follow-up round's F1: SYS_ATTACH_9P admits pipe pairs ONLY. The spoor
+// transport is sound solely over a NON-BLOCKING tx -- CNBFRAME is honored by
+// devpipe alone, and a /srv byte-conn (devsrv_write tsleeps) or a dev9p file tx
+// driven under the 9P client's held c->lock is the #360 lock-across-sleep
+// extinction. This exercises the handler's ACTUAL gate predicate
+// (sys_attach_9p_ends_are_pipes): a pipe pair passes, any non-pipe / NULL end is
+// refused. p9_spoor_transport_init itself stays Dev-generic (the transport tests
+// drive it over a non-blocking mock), so the pipe-only constraint lives at the
+// EL0 boundary, which is what this checks.
+void test_pipe_attach_9p_admits_pipes_only(void) {
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe");
+    struct Spoor *nonpipe = spoor_alloc(&devnull);
+    TEST_ASSERT(nonpipe != NULL, "non-pipe Spoor (devnull)");
+
+    TEST_ASSERT(sys_attach_9p_ends_are_pipes(wr, rd),
+        "a pipe tx + pipe rx is admitted");
+    TEST_ASSERT(!sys_attach_9p_ends_are_pipes(nonpipe, rd),
+        "a non-pipe tx is refused -- the extinction vector");
+    TEST_ASSERT(!sys_attach_9p_ends_are_pipes(wr, nonpipe),
+        "a non-pipe rx is refused too");
+    TEST_ASSERT(!sys_attach_9p_ends_are_pipes(NULL, rd),
+        "a NULL tx is refused");
+    TEST_ASSERT(!sys_attach_9p_ends_are_pipes(wr, NULL),
+        "a NULL rx is refused");
+
+    spoor_clunk(nonpipe);
+    spoor_clunk(rd);
+    spoor_clunk(wr);
+}
+
 void test_pipe_wraparound(void) {
     struct Spoor *rd = NULL, *wr = NULL;
     TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "create");
