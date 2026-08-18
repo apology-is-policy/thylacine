@@ -14,6 +14,7 @@ Generated from note fields — do not edit between the markers
 |---|---|---|---|---|
 | [[seam-848-pivot-walk-race]] | closed | sub-kernel-ninep-attach | fnd-16c-r1-f6 | task #848 |
 | [[seam-90-death-half]] | closed | sub-kernel-ninep-client | fnd-8c3-r1-f1 | task #90 |
+| [[seam-extinction-line-unserialized]] | closed | abi-boot-banner | chg-2026-08-16-cons-writer-set | unfiled -- yip to main 2026-08-16 |
 | [[seam-loom-sqpoll-owner-unbackstopped]] | closed | sub-kernel-loom | chg-2026-08-16-loom-charge-ledger | unfiled -- yip to main 2026-08-16 |
 | [[seam-posix-pathname-form-gates]] | closed | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
 | [[seam-scripture-invariant-mirror-drift]] | closed | inv-i32 | chg-2026-08-16-i32-scope-correction | unfiled -- yip to main 2026-08-16 |
@@ -49,7 +50,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-el0-irq-tail-no-notes]] | open | sub-kernel-exception | chg-2026-08-02-entry-sweep | task #21 |
 | [[seam-exiting-tails-never-sleep]] | open | sub-kernel-death | chg-2026-07-14-68-last-thread-out-close | unfiled |
 | [[seam-expect-channel-close]] | open | sub-substrate-interactive | chg-2026-08-01-substrate-sweep | #78 residual |
-| [[seam-extinction-line-unserialized]] | open | abi-boot-banner | chg-2026-08-16-cons-writer-set | unfiled -- yip to main 2026-08-16 |
 | [[seam-f-notif-unwired]] | open | sub-kernel-weft, sub-kernel-loom | chg-2026-08-02-async-sweep |  |
 | [[seam-fid-monotonic-reclaim]] | open | sub-kernel-ninep-client | fnd-stalk2-r1-f2 | RW-4 R3-F2 register |
 | [[seam-fstat-errno-flattened-above-the-leaf]] | open | sub-kernel-ninep-dev9p | chg-2026-08-16-dev9p-errno-class | unfiled -- yip to main 2026-08-16 |

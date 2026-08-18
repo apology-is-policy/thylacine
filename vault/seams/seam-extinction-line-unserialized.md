@@ -2,12 +2,13 @@
 id: seam-extinction-line-unserialized
 type: seam
 title: "The fix protected the banner and left the string 14 of 15 consumers actually match"
-status: open
+status: closed
 surface: abi-boot-banner
 opened-by: chg-2026-08-16-cons-writer-set
 tracker: "unfiled -- yip to main 2026-08-16"
 created: 2026-08-16
 updated: 2026-08-16
+closed-by: chg-2026-08-18-extinction-ring-claim
 ---
 ## Owed
 
@@ -46,6 +47,47 @@ Or a deliberate record that a torn crash line is accepted, with the two costs
 below stated, so the next reader is not surprised by them.
 
 **Not a vault edit.** Both files are on the implementation branch.
+
+### CLOSED 2026-08-18 by `7dd5be19` — and the prescribed remedy was wrong in one specific
+
+**The prescription above named the wrong lock.** The writer role serializes
+whole `cons_output_write` calls, but the **drain never consults the role**
+(main#144, stated in `cons.h`): bytes a peer had already pushed still pop into
+the FIFO from cpu0's TX IRQ or a peer's `cons_tx_kick`, landing inside the
+banner while the role sits held. A prescribed remedy is a hypothesis.
+
+What owns the wire is the **ring lock** — every producer pushes its unit under
+`g_cons_tx.lock` and every ring→FIFO drain pops under it. So the winner takes
+that (`cons_tx_claim_for_dump`): IRQs masked first, a **bounded raw try-spin**
+(20 ms + a `1<<20` backstop), the whole pre-crash ring flushed under it, and
+then **held forever** — every path through `extinction()` ends in `_torpor`, and
+a release would let the next push land mid-banner. Past the bound it emits
+unserialized and reports the miss after the dump. Raw, not counted, because the
+counted variants deref `current_thread()`.
+
+**Two things this seam's own framing did not reach:**
+
+1. **A second emitter of the literal.** `arch/arm64/exception.c::
+   el1_sync_runaway` prints `EXTINCTION: el1-sync recursion …` without going
+   through `extinction()`, and was in *neither* serializer — nor in this
+   surface's `mirrors` set, which is why `quaestor owner` reports it as
+   matching the literal from outside the set. It now takes both. It surfaced
+   from deleting the old symbol and letting the build fail, not from a grep
+   census: **a rename is a census that cannot lie.**
+2. **The old flush was already breaking the crash path, silently.** Its
+   *counted* `spin_trylock` derefs `current_thread()`, and
+   `test-fault.sh recursive_kernel_fault` installs a wild `TPIDR_EL1` on
+   purpose — so on the base tree that variant emitted **nothing at all** for
+   about a month (fault inside the extinction path → nested EL1-sync faults →
+   the depth>MAX arm parks silently). Measured by stash, with a
+   counted-trylock control reproducing it byte-identically. main#244.
+
+**Residual, so the close is not read as total:** the ring lock reaches only
+writers that go *through* the ring. Steady-state kernel diagnostics that still
+call `uart_puts` directly (`sched.c`, `syscall.c`, `exec.c`, `9p_client.c`) sit
+outside it — main#243. Source 3 (`IPI_HALT`) would subsume them. And
+`test-fault.sh`, the gate that would have caught #244, is wired into no gate at
+all — main#245.
 
 ## Risk while open
 
