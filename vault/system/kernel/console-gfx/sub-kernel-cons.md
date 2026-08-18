@@ -20,7 +20,7 @@ design:
   - "docs/TAPESTRY.md section 18.7 (the renderer drain/feed)"
   - "docs/LIFE-SUPPORT.md LS-8"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-08-18
 ---
 ## Purpose
 
@@ -166,9 +166,46 @@ The kernel-emitter bracket has two deliberate edges:
   a death unwind interrupted the park; the caller then emits *without*
   serialization rather than losing the line, and must not call end.
 - **It is explicitly not for the extinction path.** That runs on a dying machine
-  and must stay lock-free and bounded, so the crash emitters keep the direct
-  byte-at-a-time put and the bounded try-lock flush. **A serialization primitive
-  that can park is exactly wrong where parking may never return.**
+  and must stay lock-free and bounded. **A serialization primitive that can park
+  is exactly wrong where parking may never return.**
+
+  What the crash path takes *instead* (2026-08-18, closing
+  `seam-extinction-line-unserialized`) is **the ring lock itself**, and the
+  reasoning is worth keeping because the seam prescribed the role and the role
+  would not have worked: **the drain never consults the role.** Bytes a peer has
+  already pushed still pop into the FIFO from cpu0's TX IRQ or a peer's kick, so
+  a role-holding crash emitter would still be interleaved. The ring lock covers
+  the push *and* the pop, and every steady-state producer is under it.
+
+  So the winner masks IRQs, takes `g_cons_tx.lock` by a **bounded raw try-spin**
+  (20 ms wall clock plus an iteration backstop), flushes the whole pre-crash ring
+  under it, and then **holds it forever** — every path through `extinction()`
+  ends in `_torpor`, and a release would let the next push land mid-banner. Past
+  the bound it emits unserialized and reports the miss after the dump.
+
+  Three properties, each the **inverse** of the console-word claim in
+  `extinction.c`, for one reason — *who holds the thing you are waiting for*.
+  That word's holder is a dying peer that never releases, so try-once is right
+  there. This lock's holder is a **healthy** peer that releases in microseconds,
+  so a bounded spin is right here and a try-once would fail in exactly the case
+  it exists for. And it is **raw** (`spin_trylock_raw`) because the counted
+  variants dereference `current_thread()` through TPIDR_EL1 — see below.
+
+- **A dying-machine path may not call a primitive that reads state the crash may
+  have destroyed.** The predecessor flush used the *counted* `spin_trylock`,
+  whose `spin_preempt_inc` dereferences `current_thread()`. The
+  `recursive_kernel_fault` fault variant installs a wild TPIDR **on purpose** —
+  so the flush faulted *inside* the extinction path, the nested faults reached
+  the EL1-sync runaway which called the same flush and faulted again, and the
+  depth-past-max arm parked silently. That variant emitted **nothing at all** for
+  about a month (main#244), measured by stash with a counted-trylock control.
+  The counted-spinlock retrofit inherited every existing `spin_trylock` caller
+  and nobody re-asked whether the one on the crash path could survive it.
+
+- **The guarantee reaches only writers that go through the ring.** Kernel
+  diagnostics that still call the direct emitters at steady state sit outside it
+  and can still interleave with the banner from a peer CPU (main#243); `IPI_HALT`
+  would subsume them.
 
 A write returns **short** on either a stalled consumer (the room wait is
 deadlined) or a dying thread. Short is POSIX-legal and is the inherited
@@ -438,8 +475,13 @@ gave up.
   not optional hardening; a path left out is a torn line that reports a healthy
   boot as a failure. And **flushing first is not a substitute** — it drains the
   past, not the interval.
-- **The extinction path stays out of the writer role.** It runs on a dying
-  machine and must never park.
+- **The extinction path stays out of the writer role** — it runs on a dying
+  machine and must never park — **but it is no longer outside the ring lock.**
+  Since 2026-08-18 the crash emitter *holds* `g_cons_tx.lock` from before the
+  banner to `_torpor`, taken by a bounded raw try-spin. Two consequences for
+  anything added here: a new ring-lock acquirer must be bounded or IRQ-safe and
+  must never be reachable from the crash path, and the claim must stay **raw** —
+  a counted variant reintroduces main#244 exactly.
 - **Every drain-loop exit must leave the holdback and the pause agreeing.**
   The exits do not share a post-condition, so a new one has to be argued on its
   own; a held byte is invisible to the hardware and therefore cannot be

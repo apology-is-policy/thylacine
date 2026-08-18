@@ -17,7 +17,7 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-08-18
 ---
 ## Purpose
 
@@ -193,6 +193,28 @@ reaches the scheduler at all, so its count survives to trip.
 **Depth alone conflates recursion with interleaving.** Adding "did we yield?"
 separates them, and it is the only signal available that distinguishes the two
 without knowing anything about what the handlers are doing.
+
+**The runaway's banner is the ABI line, and until 2026-08-18 it was serialized
+by nothing.** `el1_sync_runaway` prints `EXTINCTION: el1-sync recursion …`
+*without going through* `extinction()`, so the console-word claim added in
+2026-08-16 never covered it — and neither did `abi-boot-banner`'s own `mirrors`
+set, which is why `quaestor owner` reports this file as matching the literal
+from outside that set. It now takes both serializers: the console word (claim,
+or confirm this CPU already owns it — the runaway is reachable from a chain that
+claimed it at depth 1; a *peer* holding it means a peer is dumping, so this CPU
+parks silent and counted) and then the console ring lock, whose miss it reports
+after its own banner.
+
+It was found by **deleting the old flush symbol and letting the build fail**,
+not by the grep census that ran first and missed it. *A rename is a census that
+cannot lie.*
+
+**This path is exercised by no test at all**, and that is a consequence of its
+own fix: in a healthy kernel the #806 guard extincts at the *second* kernel
+fault, so the depth never reaches the threshold — reaching the runaway requires
+the extinction/Halls path itself to fault, which is precisely the defect
+(main#244) that was removed. Everything on it is static-audited only; a variant
+injecting a fault *inside* `halls_dump` would drive it (main#246).
 
 The reset-on-unwind is a separate mechanism from the reset-at-switch, and both
 are needed: unwinding resets to zero rather than decrementing so a handler that
