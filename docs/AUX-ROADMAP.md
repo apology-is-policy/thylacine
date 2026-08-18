@@ -437,8 +437,8 @@ so the compositor never grows a glyph path; the richer end state is Acme's
 
 ## Stream 4 — notes / job control / PTY (the kernel line)
 
-> **P1 PREEMPTS THIS STREAM (round B on 437213c4/5336c894, Fable 5, CONFIRMED
-> 2026-08-18):** the pipe (spoor) 9P transport BLOCKS inside `devpipe_write`
+> **P1 (round B on 437213c4/5336c894, Fable 5) -- FIXED @663d4b64, pushed
+> @790f6671; SMP 40/40, a follow-up Fable round on the fix running:** the pipe (spoor) 9P transport BLOCKS inside `devpipe_write`
 > while `client_send_flow` holds `c->lock` -- an unprivileged multi-threaded
 > container can EXTINCT the box (a `#360` lock-across-sleep). `437213c4` made
 > `SYS_ATTACH_9P` over a pipe pair the diorama transport = the Phase-5 spoor
