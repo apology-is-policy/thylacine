@@ -22,6 +22,42 @@ needed the operator.
 
 ---
 
+## 2026-08-18 — An owed test, and the audit premise that was wrong when written
+
+The extinction round (`5de6093f` F2) left an owed item: exec's failure
+diagnostics were "compile-verified and never executed", because "no boot log
+contains a single `exec:` line". I went to close it and found the premise was
+half wrong — which is worth more than the test.
+
+`exec_report_fail` was **already covered, and had been for seventeen days when
+the round ran**. `test_execve_failed_load_leaves_target_drainable` (2026-08-01,
+`e47bfa31`) drives a W+X-union failure and emits a real `exec:` line that sits in
+the current suite boot log. The round's measurement — "no `exec:` line" — was
+simply false when it was written. I know because I wrote it, and I did not
+re-check it before turning it into an owed item.
+
+`exec_say` was the actual gap: the dynamic-Linux-binary and dynamic-PT_INTERP
+rejects had no test and appeared in no log. Genuinely never executed — the #244
+class exactly, a diagnostic whose only witness was that it compiled.
+
+Closing it was small: an ELF with a PT_INTERP naming a musl loader makes
+`elf_load` return `HAS_INTERP` and `elf_brand_hint` answer `LINUX_LIKELY`, so
+`exec_load_body`'s native arm runs `exec_say` and rejects the load. The suite
+boot log now carries `exec: dynamic Linux binary rejected — ...` where before
+there was nothing, which is the direct witness that `exec_say` runs without
+faulting. Suite 1427 → 1428.
+
+The reusable part is not the test. It is that **an audit finding's premise is a
+claim about the tree, and it decays like any other.** This one asserted "never
+executed" on top of a measurement that was already wrong, and the owed item
+inherited the error. It is the same failure as the three throwaway verifiers
+earlier in the run and the "currently broken" cross-reference before them: a
+statement about what the tree does, trusted because someone once checked it,
+that nobody's step re-checks. The whole session kept landing on one lesson from
+different directions — a check is only worth the last time it actually ran.
+
+---
+
 ## 2026-08-18 — The gate refused the host, and it was right to
 
 V-0's remaining half was to stop *assuming* thyla-gl and boot it. Both halves
