@@ -442,8 +442,9 @@ so the compositor never grows a glyph path; the richer end state is Acme's
 > CNBFRAME is honored by devpipe_write ONLY, but SYS_ATTACH_9P accepts any
 > writable Spoor as tx, so a NON-PIPE tx (a /srv byte-conn) re-opens the
 > extinction. LATENT (callers pass pipes). OWED: gate tx/rx on dev==&devpipe
-> in p9_spoor_transport_init + build + SMP + a third round
-> (memory/audit_663d4b64_closed_list.md):** the pipe (spoor) 9P transport BLOCKS inside `devpipe_write`
+> (memory/audit_663d4b64_closed_list.md). CLOSED @c2dfbf0b: a SYSCALL pipe-only
+> gate (sys_attach_9p_ends_are_pipes; NOT at the init -- that broke the Dev-
+> generic mock tests). SMP 40/40; pushed @9f86e5e5; a fourth Fable round running:** the pipe (spoor) 9P transport BLOCKS inside `devpipe_write`
 > while `client_send_flow` holds `c->lock` -- an unprivileged multi-threaded
 > container can EXTINCT the box (a `#360` lock-across-sleep). `437213c4` made
 > `SYS_ATTACH_9P` over a pipe pair the diorama transport = the Phase-5 spoor
