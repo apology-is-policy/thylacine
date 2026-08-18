@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-08-15
+updated: 2026-08-18
 ---
 ## Purpose
 
@@ -483,3 +483,42 @@ production, and both variants compile.
 
 [[spec-tapestry-present]] · [[inv-i40]] · [[sub-ptyfs]] ·
 [[sub-kernel-weft]] · [[moc-userspace]].
+
+## The create-time door has NO lower bound on a client-declared backing (2026-08-18)
+
+Deliberate, and it was briefly otherwise. The C-6b audit close added a brace to
+`wbo_create` refusing a `B8G8R8A8_UNORM` declaration whose backing could not
+hold its base level. The follow-up round removed it: its premise is
+contradicted by this project's own Mesa winsys, in a comment at the line that
+picks the size (`usr/ports/mesa/patches/0006-*.patch:1511`) --
+
+> The seam refuses unaligned or zero backings; the driver's staging-path
+> textures legitimately ask for size 1.
+
+Mesa declares one byte on two paths that keep the true width/height (staging,
+`alloc_size = 1`; MSAA, `total_size = 0`) and the winsys rounds it to a page.
+So "512x512 declared, 4096 offered" is byte-for-byte BOTH the read-overrun
+attack shape and an ordinary staged or multisampled texture. **The declaration
+carries no information that separates them** -- only the reader can, by whether
+it is about to read the backing.
+
+The lower bound therefore lives at the READ gate, `gl_adoption`: exact
+(`b.size >= b.w * b.h * 4`, and adoption already pins `b.w == s.w && b.h ==
+s.h`, so it is the reader's geometry), re-evaluated at retire through
+`same_adoption`, and on the only path that reads a BO backing with foreign
+geometry. A host-only resource never adopts, so it never reaches the read.
+
+**Do not re-add a create-time floor.** The failure it caused was invisible to
+every gate: the staging arm depended on a virglrenderer capset bit nothing in
+this tree measures, and the MSAA arm refused every multisampled BGRA target
+above 32x32 outright. A gate proves what the system DOES; an over-refusal
+shows up only as something a client can no longer do.
+
+## `import_skip_said` -- the one-shot half of the import rate limit
+
+`comp_import_bo`'s `!composable` arm carries BOTH a per-tick rate limit
+(`WarpCtx.import_tick`) and a per-ctx one-shot latch (`import_skip_said`),
+because the tick limit alone still permits `clock_hz` 60 x `MAX_WARP_CTXS` 8 =
+~480 synchronous console lines a second from ordinary unprivileged clients --
+the same magnitude, in the same file, that `verify_diag_arms` exists to answer.
+`comp_attach_refused` carries the rate; the latch carries the report.

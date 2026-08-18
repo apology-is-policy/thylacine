@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-08-15
+updated: 2026-08-18
 ---
 ## Purpose
 
@@ -559,3 +559,32 @@ threshold so small transfers never pay the extra handle lookup.
 [[chg-2026-08-15-syscall-dispatch-lineage]] is the re-sweep after ~3500 lines
 moved: the phenotype prologue, the three frame-taking handlers, the core/front-end
 split, and the payer attribution.
+
+## A diagnostic on this path emits ONE unit, never a run of `uart_*` calls (2026-08-18)
+
+`uart_puts` is a bare per-character loop that takes **no lock**, so a direct
+emitter takes neither the console writer role nor the TX ring lock, and reaches
+the UART by a road neither serializer gates. Two consequences, both live:
+
+- It interleaves at BYTE granularity with any concurrent console writer. This
+  was observed, not theorised: #76 removed the same loop from `SYS_PUTS` after
+  a login prompt came out as `patapestrssyd: mworodd:e`.
+- It bypasses the extinction ring claim (`cons_tx_claim_for_dump`), whose hold
+  stops every ring producer and the drain but cannot stop a peer writing the
+  FIFO directly -- so those bytes can land inside an `EXTINCTION:` line, which
+  costs the multi-boot classifier a corruption verdict and can invert a
+  `test-fault.sh` result.
+
+`viv_report_unserved` was the second instance (main#243), and the worse one:
+an unprivileged EL0 program chooses when it fires by issuing a syscall the
+phenotype does not serve. It now builds one `cons_diag_line` and emits it in a
+single push. The volume is bounded independently -- deduped per syscall number,
+and `g_viv_unserved_reports` caps the total at 96 for the whole boot and is NOT
+reset when the census owner changes, so spawning cannot re-arm it.
+
+**The rule for any new diagnostic on the dispatch path**: build a
+`cons_diag_line` and emit once. The remaining direct `uart_*` emitters in
+`syscall.c`, `sched.c`, `exec.c`, `9p_client.c` and friends are the residual
+(main#243) and are NOT a mechanical sweep -- boot-time and crash-path emitters
+are deliberately raw, because the ring is unarmed or its lock may be held by a
+dying peer.
