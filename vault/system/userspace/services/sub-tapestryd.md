@@ -522,3 +522,48 @@ because the tick limit alone still permits `clock_hz` 60 x `MAX_WARP_CTXS` 8 =
 ~480 synchronous console lines a second from ordinary unprivileged clients --
 the same magnitude, in the same file, that `verify_diag_arms` exists to answer.
 `comp_attach_refused` carries the rate; the latch carries the report.
+
+## The device feature offer is reported, not discarded (2026-08-18, Warp-6 V-0)
+
+`Gpu::init` reads both feature dwords during negotiation, uses **one bit** of
+the low one (`VIRTIO_GPU_F_VIRGL`), and discarded the rest. The value was in a
+register and then gone.
+
+That mattered the moment Warp-6 opened. "Does this host offer
+`VIRTIO_GPU_F_CONTEXT_INIT`?" is the question that decides whether a **Venus
+context is reachable at all**, and it had no answer short of writing a new
+build.
+
+It is now one line per boot:
+
+```
+tapestryd: gpu features lo=0x3000001b (virgl=1 edid=1 uuid=0 blob=1 ctxinit=1) hi=0x00000101
+```
+
+Measured, and **identical on thyla-pi (KVM/V3D) and thyla-gl (TCG/lavapipe)**:
+
+| device | `lo` | virgl | edid | uuid | blob | ctxinit |
+|---|---|---|---|---|---|---|
+| `virtio-gpu-pci` (default 2D dev device) | `0x30000002` | 0 | 1 | 0 | 0 | 0 |
+| `virtio-gpu-gl-pci` | `0x30000013` | 1 | 1 | 0 | 0 | **1** |
+| `+venus=on,blob=on,hostmem=256M` | `0x3000001b` | 1 | 1 | 0 | **1** | **1** |
+
+`0x30000000` is `VIRTIO_RING_F_INDIRECT_DESC` + `VIRTIO_RING_F_EVENT_IDX`;
+`hi=0x00000101` is `VIRTIO_F_VERSION_1` + `VIRTIO_F_RING_RESET`.
+
+**The trap this closes.** `ctx_create` writes `context_init = 0` under the
+comment *"F_CONTEXT_INIT not negotiated"*, and the device honours that field
+**only** when the feature is negotiated -- which this driver never offers back.
+So selecting a capset by writing it into `context_init` today would write into
+an **ignored** field, collect `RESP_OK_NODATA`, produce an implicitly-virgl
+context, and report success. Any future capset-selection work is a
+**feature-bit** change first; the field-only version is a false pass.
+
+**The constraint it exposes.** `VIRTIO_GPU_F_RESOURCE_BLOB` appears only with
+`blob=on`, and the default dev device offers neither it nor virgl, so blob work
+cannot be exercised on the local dev loop at all -- the same shape as #166's
+inert-hostmem-under-HVF constraint.
+
+The line is emitted before the `virgl` gate, so it reports on **every** boot
+including 2D ones, and it prints before any hang in later init -- which is what
+made it useful on a host where tapestryd later gave up.
