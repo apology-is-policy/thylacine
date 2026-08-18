@@ -86,6 +86,19 @@
 // 1:1. POSIX: ESRCH.
 #define T_E_SRCH       3
 
+// A blocking wait was interrupted by a deliverable caught note before its
+// condition became true (item 11 / note-interruptible waits). Distinct from
+// death: the terminate latch (thread_die_pending) unwinds a wait to TERMINATE
+// the Thread; T_E_INTR unwinds a wait so a CAUGHT note (a Linux-phenotype
+// sigaction handler, or a native self-managing notes-fd reader) can be
+// delivered at the EL0-return tail without the Thread dying. The syscall then
+// returns -T_E_INTR: a native caller re-issues the wait after servicing the
+// note; a Linux-phenotype caller restarts the syscall iff the handler carried
+// SA_RESTART, else observes EINTR (ARCH 8.8.2, VIVARIUM 6.22). Slot 4 was the
+// last free low errno (3=ESRCH, 5=EIO); the operator ratified the ABI row.
+// POSIX: EINTR.
+#define T_E_INTR       4
+
 // I/O error. Use when a block-device read fails (Stratum/bdev), a
 // 9P transport returns Rerror, or a hardware operation reports
 // failure. POSIX: EIO.
@@ -321,6 +334,7 @@ _Static_assert(T_E_OK        == 0,   "T_E_OK ABI pin");
 _Static_assert(T_E_PERM      == 1,   "T_E_PERM ABI pin (POSIX EPERM)");
 _Static_assert(T_E_NOENT     == 2,   "T_E_NOENT ABI pin (POSIX ENOENT)");
 _Static_assert(T_E_SRCH      == 3,   "T_E_SRCH ABI pin (POSIX ESRCH)");
+_Static_assert(T_E_INTR      == 4,   "T_E_INTR ABI pin (POSIX EINTR)");
 _Static_assert(T_E_OPNOTSUPP == 95,  "T_E_OPNOTSUPP ABI pin (POSIX EOPNOTSUPP)");
 // The V-5 socket family. Values read from musl's generic bits/errno.h, which
 // is what a Linux guest's libc compares against.

@@ -2176,6 +2176,31 @@ are different facts. `SIGALRM`/`SIGUSR1`/`SIGUSR2` have no note to carry them;
 `SIGABRT` is reachable only via `raise`, which is `tkill` to self, so it
 terminates rather than running a handler.
 
+**`SA_RESTART` and the `EINTR` surface (item 11).** Until item 11 (ARCH §8.8.3,
+the caught-note-interruptible sleep) no phenotype syscall could return `EINTR` at
+all — a caught note never unwound a blocked wait, so the pouch boundary-line
+truthfully recorded "no EINTR retry surface to enable" (patch `0007`). Item 11
+*creates* that surface: a blocking syscall interrupted by a deliverable caught
+note unwinds and returns `-T_E_INTR` (4), and the tail delivers the handler.
+Where the restart-vs-`EINTR` decision is made is the pouch/unmodified split:
+- **Pouch guest** (our patched musl): the kernel returns `-EINTR` and delivers
+  the frame; musl's cancellation/`__eintr_valid_flag` machinery honours
+  `SA_RESTART` in *userspace* — `SA_RESTART` re-issues the syscall, else the
+  caller observes `EINTR`. This is the v1.0 path and it fully closes the
+  interactive-shell case (item 8): an interactive read's SIGINT handler is
+  typically not `SA_RESTART`, so the line is discarded and the prompt reprints.
+- **Unmodified Vivarium guest** (libc not ours to patch): a real Linux kernel
+  performs the `SA_RESTART` restart itself — rewinding `pc` by 4 and restoring
+  the original `x0` so the `svc` re-executes — because the guest libc expects it.
+  Thylacine does **not** rewind `pc` at v1.0; the `Thread` snapshot keeps the
+  interrupted regs, so the machinery *could*, but the restart-continuation is the
+  `restart_syscall` (128) ENOSYS row above. So an unmodified guest that installs
+  an `SA_RESTART` handler over a blocking syscall observes a spurious `EINTR`
+  rather than a transparent restart — a named DEGRADED-tier fidelity gap (§9),
+  costing correctness only for a guest that both runs unmodified *and* relies on
+  kernel-side restart, never authority. Kernel-side `SA_RESTART` is the natural
+  Tier-2 lift when an unmodified guest needs it.
+
 **AS BUILT (V-6c).** The frame is `siginfo_t` (128) + `ucontext_t` (4560) =
 4688 bytes, plus a 16-byte `{fp, lr}` frame record above it so a backtrace from
 inside a handler still walks into the interrupted code. Delivery sets the

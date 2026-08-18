@@ -1410,19 +1410,105 @@ LS-5 makes `interrupt` a **real Plan 9 note / Unix SIGINT** in three properties:
 Composed (P1 + P2 + P3-terminate): **Ctrl-C terminates any foreground command —
 CPU-bound, output-bound, or blocked in sleep / read — catchably.**
 
-**LS-5 / LS-8 boundary.** Deferred to LS-8 (U-PTY: pollable cons + termios ISIG):
-**P3-deliver** — promptly delivering a *caught* (handler-bearing / self-managing)
-`interrupt` to a *blocked* program via an interrupted-syscall (`-EINTR`) return
-WITHOUT terminating it. Its sole v1.0 consumer is idle-prompt-cancel (the shell's
-own blocked cons-read returning so the editor's `Cancel` fires) + the reactive
-mid-edit Ctrl-C — both inherently LS-8 (the editor never sees a `0x03` byte today;
-the kernel cooks it to the note).
+**LS-5 / LS-8 boundary → item 11.** **P3-deliver** — promptly delivering a
+*caught* (handler-bearing / self-managing) `interrupt` to a *blocked* program via
+an interrupted-syscall (`-EINTR`) return WITHOUT terminating it — was deferred
+here to LS-8. It is now its **own** chunk, **§8.8.3 (item 11)**, promoted by the
+2026-08-18 operator vote (Q3=A, which ratified the `T_E_INTR`=4 ABI): the general
+note-interruptible-wait mechanism turned out to be the load-bearing piece (its
+consumers reach past idle-prompt-cancel to every blocked interactive `read`), so
+it graduated from an LS-8 sub-property to the standalone caught-note-interruptible
+sleep leg of §8.8.
 
 **Invariants.** I-19 gains the `interrupt` default disposition (terminate-if-
 uncaught-and-not-self-managing); I-9 / §8.8.1's death-wake generalizes to
 death-or-terminate-`interrupt`. No new TLA+ module (spec-to-code suspension,
 2026-05-23); the focused LS-5 audit (the death-path + notes lineage) + the §8.8.1
 per-site re-validation + the LS-CI `ls-5` scenario are the rigor.
+
+#### 8.8.3 Caught-note-interruptible sleep — the deferred "P3-deliver" (item 11)
+
+**STATUS**: DESIGNED (scripture-first; implementation follows — item 11,
+operator-voted 2026-08-18 [Q3=A], which ratified the `T_E_INTR`=4 errno ABI row
+(`docs/ERRORS.md`, §7.6). This is the LS-5 "P3-deliver" leg (§8.8.2 boundary
+note) promoted from its LS-8 deferral. Builds on §8.8.1 + §8.8.2.
+
+§8.8.2 wakes-and-unwinds a blocked thread only when the `interrupt` disposition
+is **terminate** — i.e. the note is *uncaught* (no handler, not self-managing,
+unmasked), so `notes_arm_intr_terminate_locked` armed the latch and
+`thread_die_pending` reads it. A **caught** note is the exact complement:
+`notes_arm_intr_terminate_locked` *refuses* to arm when a live handler exists or
+the Proc is self-managing, so `thread_die_pending` stays false, the blocked
+wait does **not** unwind, and the note waits for the EL0-return tail of
+whatever syscall the thread eventually leaves on its own. For an interactive
+shell blocked in `read`, that tail arrives only with the *next* typed line —
+the note is serviced a line late (the item-8 phenotype-ash and item-10 hosted-ut
+symptoms). Item 11 closes the complement: a caught, deliverable note unwinds the
+wait **without** terminating the Thread, so it is serviced promptly at the tail.
+
+**Mechanism — a second predicate, a distinct unwind code, a parallel wake.**
+- **`thread_caught_note_deliverable(t)`** (notes.c, beside `thread_die_pending`):
+  true iff a QUEUED note this thread can act on **now** exists — its family is
+  unmasked (`note_mask`, the same lock-free acquire reads `thread_die_pending`
+  uses) AND either the Linux phenotype has a `sigaction` handler for it OR the
+  Proc is self-managing (any queued unmasked note makes its `devnotes` fd
+  readable). It **must not** double-count the terminate latches — those are
+  `thread_die_pending`'s sole province (death wins; a note that is *both* a
+  terminate-latch arm and a caught handler cannot be, by the arm-refusal above).
+  Plan 9's `up->notepending` is the shape.
+- **A NON-death unwind code `SLEEP_NOTEINTR` / `TSLEEP_NOTEINTR`** (rendez.h),
+  distinct from the death `SLEEP_INTR` / `TSLEEP_INTR`. `SLEEP_INTR`'s "the
+  caller unwinds and the Thread **dies** at its tail" contract is preserved
+  intact; `SLEEP_NOTEINTR` means "the caller unwinds and the Thread **lives**,
+  returning `-T_E_INTR`." The distinction is load-bearing, not cosmetic: a death
+  unwind may leave transient state the returning-to-die Thread never observes,
+  but a caught-note unwind returns to userspace and *continues*, so its cleanup
+  must **fully** restore invariants (no half-held lock, no leaked ref). Keeping
+  it a distinct code lets each blocking site opt in and have its cleanup
+  re-validated for EINTR-safety, rather than silently reinterpreting every
+  existing death-unwind as an EINTR-unwind.
+- **Wired alongside `thread_die_pending`** at both `sleep()` and `tsleep()`
+  register-then-observe checks + the post-`sched()` prompt path, **under the same
+  #90 frame-atomic guard** (`!thread_reader_blocks_death(t)`): a mid-frame
+  elected 9P reader (§8.8.1.1) **blocks through** a caught note exactly as it
+  blocks through death — an immediate unwind would discard the partial frame and
+  desync the shared stream. Death is still checked first (death wins).
+- **`proc_caught_note_wake(p)`** (proc.c, parallel to
+  `proc_interrupt_terminate_wake`): called from `notes_post`'s commit when a
+  deliverable caught note lands, it walks `p->threads` and `wakeup()`s each
+  blocked peer under its `wait_lock`, so an **already-sleeping** thread observes
+  the predicate on resume. (A not-yet-sleeping thread is covered without the
+  wake — its register-then-observe reads the predicate.) `notes_post`'s existing
+  `poll_waiter_list_wake` already covers a peer blocked in `poll` on its *own*
+  notes fd; the new wake covers a peer blocked in an *unrelated* wait — `read`,
+  9P RPC, `wait_pid`, `torpor`, `nanosleep`.
+
+**Disposition — the native/phenotype split (VIVARIUM §6.22).** A blocking site,
+on `SLEEP_NOTEINTR`, does an EINTR-safe unwind and returns `-T_E_INTR`; the
+queued note is delivered by the **existing** EL0-return-tail dispatch (the Linux
+sigframe is built, or the self-managing reader's notes fd is now readable).
+- **Native.** `-T_E_INTR` reaches the native self-managing reader, which
+  re-issues the wait after servicing the note (the item-10 native-`ut` close).
+- **Phenotype.** The kernel returns `-EINTR` (4) and delivers the sigframe; it
+  does **not** rewind PC. `SA_RESTART`-vs-`EINTR` is decided in **userspace** by
+  musl's existing cancellation/`__eintr_valid_flag` machinery (the pouch signals
+  boundary-line already sets the advisory): `SA_RESTART` re-issues the syscall,
+  else the caller observes `EINTR` — a shell's interactive-read SIGINT handler
+  is typically not `SA_RESTART`, so the line is discarded and the prompt
+  reprints (the item-8 phenotype-ash close). This is why item 11 *creates* the
+  EINTR surface the pouch layer described as "no EINTR retry surface to enable."
+
+**Invariant.** I-19 gains the caught-note-deliverable disposition beside the
+terminate default; I-9 / §8.8.1's wake generalizes once more, to
+death-**or**-terminate-`interrupt`-**or**-caught-deliverable-note, with the #90
+frame-atomic narrowing preserved for the reader recv. No new §28 invariant
+(composition of I-9 + I-19). No new TLA+ module (spec-to-code suspension,
+2026-05-23); the focused item-11 adversarial round (the wait/wake + unwind-safety
+lineage), a native probe (a self-managing reader blocked in `read`, a caught
+note → `-T_E_INTR` → re-poll → note serviced), the LS-CI phenotype-ash scenario
+(blocked in `read` + Ctrl-C → prompt within 2 s, no line lost), and the SMP gate
+are the rigor. Retires the LS-5 "P3-deliver" deferral and the item-8 / item-10
+"late Ctrl-C eats the next line" family in one move.
 
 ### 8.9 Open design questions
 
