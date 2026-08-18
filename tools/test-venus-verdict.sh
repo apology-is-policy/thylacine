@@ -26,6 +26,7 @@ tapestryd: gpu capset[0] id=1 max_version=1 max_size=308
 tapestryd: gpu capset[1] id=2 max_version=2 max_size=1384
 tapestryd: gpu ctx-capset id=2 CREATED
 tapestryd: gpu ctx-capset id=4 skipped (capset not enumerated)
+tapestryd: gpu blob-create skipped (F_RESOURCE_BLOB not offered)
 EOF
 }
 mk_test() {
@@ -38,6 +39,7 @@ tapestryd: gpu capset[1] id=2 max_version=2 max_size=1384
 tapestryd: gpu capset[2] id=4 max_version=0 max_size=160
 tapestryd: gpu ctx-capset id=2 CREATED
 tapestryd: gpu ctx-capset id=4 CREATED
+tapestryd: gpu blob-create guest CREATED
 EOF
 }
 
@@ -108,6 +110,22 @@ check "test leg: virgl id=2 control did NOT create -> UNVERIFIED" 1 "" \
 # lack "id=4 CREATED". Strip the skipped line and the verdict must fail.
 check "control leg: no id=4 'skipped' line -> UNVERIFIED" 1 \
       'grep -v "ctx-capset id=4 skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
+
+# --- V-1 guest-blob arms: a blob must create where the feature is negotiated ---
+# Test leg must CREATE; a device that refused RESOURCE_CREATE_BLOB (or a driver
+# that never negotiated the feature) fails the rung.
+check "test leg: guest blob did NOT create -> UNVERIFIED" 1 "" \
+      'grep -v "blob-create guest CREATED" "$t" > "$t.x" && mv "$t.x" "$t"'
+# The false-pass this arm exists for: a blob created on the control leg means
+# the driver put a blob command on a wire that never offered F_RESOURCE_BLOB,
+# so the test leg's CREATED proves nothing about the gate.
+check "control leg shows blob CREATED -> UNVERIFIED" 1 \
+      'printf "tapestryd: gpu blob-create guest CREATED\n" >> "$c"' ""
+# The positive skip (same F3 lesson): control must SHOW it took the no-feature
+# path, not merely lack CREATED -- an absent line is satisfied by a probe that
+# never ran at all.
+check "control leg: no blob 'skipped' line -> UNVERIFIED" 1 \
+      'grep -v "blob-create skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
 
 printf '\n%d pass, %d fail\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

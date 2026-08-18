@@ -81,6 +81,12 @@ use crate::server::{Comp, Conn, MAX_CONNS, MAX_WARP_CONNS, ROOT_TAPESTRY, ROOT_W
 const GPU_BAR_WINDOW_VA: u64 = 0x0080_0000;
 const KBD_BAR_WINDOW_VA: u64 = 0x00E0_0000;
 const GPU_RING_VA: u64 = 0x0150_0000;
+// Warp-6 V-1: the one-page backing for the guest-blob probe, in the gap
+// between the ring's end and the keyboard DMA. Mapped only transiently inside
+// Gpu::probe (created, the blob unref'd, the page unmapped, all before probe
+// returns), so it never coexists with a steady-state mapping -- but it still
+// gets a non-overlapping fixed VA, asserted below.
+const GPU_BLOB_PROBE_VA: u64 = 0x0151_0000;
 const KBD_DMA_VA: u64 = 0x0152_0000;
 // The tablet's windows (G-7c): its eventq page above the keyboard's, its
 // 6-BAR window above the whole DMA region (the KBD-window..GPU-ring gap
@@ -128,7 +134,8 @@ const IDLE_AFTER_MS: u64 = 250;
 const _: () = {
     assert!(GPU_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= KBD_BAR_WINDOW_VA);
     assert!(KBD_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= GPU_RING_VA);
-    assert!(GPU_RING_VA + (gpu::RING_DMA_SIZE as u64) <= KBD_DMA_VA);
+    assert!(GPU_RING_VA + (gpu::RING_DMA_SIZE as u64) <= GPU_BLOB_PROBE_VA);
+    assert!(GPU_BLOB_PROBE_VA + 0x1000 <= KBD_DMA_VA); // one page
     assert!(KBD_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_DMA_VA);
     assert!(TAB_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= MOUSE_DMA_VA);
     assert!(MOUSE_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_BAR_WINDOW_VA);
@@ -198,7 +205,7 @@ impl Driver for Tapestryd {
         );
 
         // The GPU function is mandatory.
-        let g = gpu::Gpu::probe(GPU_BAR_WINDOW_VA, GPU_RING_VA, GPU_FLANE_VA)?;
+        let g = gpu::Gpu::probe(GPU_BAR_WINDOW_VA, GPU_RING_VA, GPU_FLANE_VA, GPU_BLOB_PROBE_VA)?;
 
         // The input functions are best-effort: an environment without them
         // (or without their functions in the gathered allowance) yields an

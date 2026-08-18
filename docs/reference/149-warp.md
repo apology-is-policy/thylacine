@@ -1456,6 +1456,83 @@ seam with a `capset <id>` ctl verb but nothing reads it. V-0b is driver-internal
 V-3 makes the field live, rejecting a capset the device never enumerated belongs
 in that change (an unvalidated client `u32` would otherwise reach `CTX_CREATE`).
 
+## Warp-6 V-1 -- a guest blob creates (as-built *(pending)*)
+
+V-0b proved a Venus *context* is creatable; V-1 proves the next thing a Venus
+driver needs: a **guest blob**. Venus carries its command ring as a
+`RESOURCE_CREATE_BLOB` guest-memory blob (GPU-DESIGN section 2.4 -- the ring's
+head/tail/status cachelines are guest pages the host also reads), so the blob
+object model is Warp-6's real prerequisite, sequenced here by the F2 vote.
+
+### The measurement (thyla-pi, KVM, real V3D 4.2)
+
+| leg | blob result |
+|---|---|
+| `venus=on` (`blob=1`) | **`blob-create guest CREATED`** |
+| no venus (`blob=0`) | `blob-create skipped (F_RESOURCE_BLOB not offered)` |
+
+So **a guest-memory blob is accepted on real V3D** -- `RESOURCE_CREATE_BLOB`
+(`blob_mem = GUEST`, one guest-page `mem_entry`, `blob_flags = 0`) returns
+`RESP_OK_NODATA`. The create discriminates on the negotiated feature: the
+control leg does not offer `F_RESOURCE_BLOB`, so the probe self-skips (a
+positive `skipped` line, not an absent one). The venus leg also boots fully
+clean with the feature negotiated, so negotiating blob does not disturb the
+compositor path.
+
+### Guest blob, not host3d -- and why that is the whole V-1 scope
+
+A guest blob's storage **is** its guest `mem_entry` pages: the host registers a
+resource referencing them, no host allocation and no hostmem BAR. That is
+exactly Venus's ring. The host3d blob (host-allocated storage the guest reaches
+through the hostmem window via `RESOURCE_MAP_BLOB`, 0x0208) is the **V-2** delta
+and is deliberately not here -- it is also why the default 2D dev device
+(`virgl=0`, no `F_RESOURCE_BLOB`) cannot exercise V-1 at all; every iteration is
+a GL-host boot.
+
+V-1 is the create path, not the full object model: the probe creates+unrefs one
+device-global guest blob (id `0x2b`, below the server's first minted resource id
+`SCREEN_RES + 1`, and unref'd before any client exists -- the ctx-capset probe's
+timing guarantee, plus a compile-time guard on the numeric margin). The
+client-facing blob-BO type, mapping, and the coherent ring arrive with **V-3**.
+
+### The feature negotiation and the probe
+
+- negotiates `VIRTIO_GPU_F_RESOURCE_BLOB` (LOW bit 3) when offered, on the same
+  accept-if-offered footing as virgl and ctxinit, carried as `Gpu.blob`. A blob
+  command is illegal on the wire without it, so this both records the offer and
+  gates the probe. `init_device`'s feature bools now ride a named `DevInit`
+  struct rather than a positional tuple (the shape that let V-0b's `ctxinit` go
+  briefly unreturned).
+- adds `resource_create_blob(id, blob_mem, blob_flags, pa, len)` -- the wire
+  command `RESOURCE_CREATE_BLOB` (`0x010c`, still the 2D group; `GET_EDID` and
+  `RESOURCE_ASSIGN_UUID` sit unused between it and `GET_CAPSET`), a single guest
+  `mem_entry`, `RESP_OK_NODATA`.
+- `blob_probe(backing_va)` at the tail of `probe_capsets` (virgl-gated, so a 2D
+  boot pays nothing): a dedicated one-page DMA backs the blob -- its own buffer,
+  not the ring or fenced lane, so there is no question of residue over a live
+  transport region -- created then unref'd. Same failure disposition as the rest
+  of the function: an engine-healthy refusal is a log line, only a real engine
+  death propagates; a skip (feature absent) is logged, never silent. On a
+  *failed* unref (engine alive) the backing is **leaked, not unmapped** -- the
+  host may still reference the pages, and one leaked page at init beats unmapping
+  referenced memory (self-audit SF1).
+
+### The gate
+
+`warp-host.sh venus` grew a V-1 arm: `blob-create guest CREATED` required on the
+venus leg, the positive `skipped` line required on the control (not merely the
+absence of `CREATED`, which a probe that never ran would also satisfy), and no
+`CREATED` on the control (a blob on a wire that never negotiated the feature
+would mean the test leg's create proves nothing). `test-venus-verdict` grew
+three arms (13 -> 16), all discriminating without a boot.
+
+### Not covered / deferred
+
+Host3d blobs + the hostmem-BAR mapping are **V-2**; the coherent command ring,
+the client blob-BO type, and `vn_renderer_thylacine` are **V-3**. V-1 is
+driver-internal -- the probe creates+unrefs before any client exists and
+confers nothing.
+
 ## Tests
 
 Kernel: `pci.walk_caps_shm` (6 discriminating vectors incl. the

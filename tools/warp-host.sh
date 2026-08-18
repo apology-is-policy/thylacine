@@ -315,9 +315,30 @@ venus-verdict)
         echo "CONTROL leg: no 'id=4 skipped (capset not enumerated)' -- the id=4 create did not take the intended no-venus path; its absence of CREATED proves nothing"
         vfail=1
     }
+    # V-1: a GUEST blob must actually create where the feature is negotiated.
+    # The venus device offers F_RESOURCE_BLOB, the plain -gl control does not,
+    # so blob_probe self-skips there -- the driver gate is keyed on the
+    # feature bit, not on venus. Test leg must CREATE; control must POSITIVELY
+    # show the skip (not merely lack CREATED -- the same F3 lesson: an absent
+    # line is satisfied by a leg where the probe never ran); and control must
+    # NOT create (a create there would mean the driver put a blob command on a
+    # wire that never negotiated the feature, so the test leg's CREATED would
+    # prove nothing about the gate).
+    grep -qF "gpu blob-create guest CREATED" "$tst" || {
+        echo "TEST leg: a guest blob did NOT create -- F_RESOURCE_BLOB negotiated but RESOURCE_CREATE_BLOB refused (V-1)"
+        vfail=1
+    }
+    if grep -qF "gpu blob-create guest CREATED" "$ctl"; then
+        echo "CONTROL leg: a guest blob created WITHOUT F_RESOURCE_BLOB -- the driver sent a blob command it never negotiated, so the test leg's CREATED proves nothing"
+        vfail=1
+    fi
+    grep -qF "gpu blob-create skipped (F_RESOURCE_BLOB not offered)" "$ctl" || {
+        echo "CONTROL leg: no 'blob-create skipped (F_RESOURCE_BLOB not offered)' -- the probe did not take the intended no-feature path; its absence of CREATED proves nothing"
+        vfail=1
+    }
     if [ "$vfail" -eq 0 ]; then
-        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, AND a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both)"
-        grep -hE "gpu capset\[|num_capsets" "$ctl" "$tst"
+        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), AND a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1)"
+        grep -hE "gpu capset\[|num_capsets|blob-create" "$ctl" "$tst"
     else
         echo "VENUS GATE: UNVERIFIED"
         exit 1

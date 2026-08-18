@@ -98,6 +98,19 @@ const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
 const VIRTIO_GPU_CMD_GET_CAPSET_INFO: u32 = 0x0108;
 const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109;
+// Still the 2D command group, not the 3D one: GET_EDID (0x010a) and
+// RESOURCE_ASSIGN_UUID (0x010b) sit between GET_CAPSET and this, both unused
+// here, so the value is 0x010c and NOT contiguous with 0x0109 (VIRTIO 1.2
+// section 5.7.6.7). Venus's command ring is a guest blob (GPU-DESIGN section
+// 2.4), so this is Warp-6's real prerequisite -- the V-2 host3d/hostmem
+// mapping path (MAP_BLOB, 0x0208) is a later, separate rung.
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB: u32 = 0x010c;
+
+// blob_mem (section 5.7.6.7): GUEST = the blob's storage IS the guest
+// `mem_entry` pages, no host allocation and no hostmem BAR. That is the only
+// type V-1 creates; HOST3D (host-allocated, needs MAP_BLOB into the hostmem
+// window) is the V-2 delta.
+const VIRTIO_GPU_BLOB_MEM_GUEST: u32 = 0x0001;
 
 // virtio-gpu capset ids: 1 = VIRGL, 2 = VIRGL2, 4 = VENUS. Named so the V-0b
 // probe reads without a magic 4 in three places.
@@ -122,6 +135,20 @@ const _: () = assert!(
         && PROBE_CTX_ID_VENUS < crate::server::COMPOSITOR_CTX
         && PROBE_CTX_ID_VIRGL != PROBE_CTX_ID_VENUS,
     "probe ctx ids must sit above the client seam and below COMPOSITOR_CTX, and be distinct"
+);
+
+// Warp-6 V-1: the resource id the guest-blob probe creates and unrefs inside
+// init, BEFORE the Server exists (Gpu::probe returns the device; the Server is
+// built on it afterward), so no client resource is live when it runs -- the
+// same timing guarantee the ctx-capset probe rests on. The guard is the numeric
+// belt-and-suspenders: the server mints resource ids from SCREEN_RES+1 UPWARD
+// and never down (server.rs `next_res_id` pre-increments a counter seeded at
+// SCREEN_RES), so any id <= SCREEN_RES is unmintable forever; tying it to the
+// seam constant re-checks it if that seed ever changes.
+const BLOB_PROBE_RES_ID: u32 = 0x2b;
+const _: () = assert!(
+    BLOB_PROBE_RES_ID < crate::server::SCREEN_RES,
+    "blob probe resource id must sit below the server's first minted id"
 );
 
 // 3D commands (VIRTIO 1.2 section 5.7.6.9; virgl-negotiated only). The seam's
@@ -381,13 +408,29 @@ fn setup_queue(
     }
 }
 
+/// What `init_device` negotiated, named rather than positional: a growing
+/// tuple of bools is the shape that let V-0b's `ctxinit` go unreturned until
+/// a build error caught it, and V-2 adds more feature bits here.
+struct DevInit {
+    /// The controlq doorbell VA (`notify_base + ctrl_off * notify_mul`).
+    notify_va: u64,
+    /// VIRTIO_GPU_F_VIRGL: the 3D command path exists.
+    virgl: bool,
+    /// VIRTIO_GPU_F_CONTEXT_INIT: `context_init` selects a ctx capset.
+    ctxinit: bool,
+    /// VIRTIO_GPU_F_RESOURCE_BLOB: RESOURCE_CREATE_BLOB is legal. Only then
+    /// may a blob command go on the wire (the spec forbids it otherwise), so
+    /// this both records the offer and gates the V-1 probe.
+    blob: bool,
+}
+
 fn init_device(
     common: u64,
     notify_base: u64,
     notify_mul: u64,
     notify_len: u64,
     ring_pa: u64,
-) -> Result<(u64, bool, bool), Error> {
+) -> Result<DevInit, Error> {
     unsafe {
         w8(common + CCFG_DEVICE_STATUS, 0);
         w8(common + CCFG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
@@ -430,12 +473,20 @@ fn init_device(
         // `virgl` alone. The two are orthogonal, and a host could in principle
         // offer either without the other.
         let ctxinit = dev_feat_lo & VIRTIO_GPU_F_CONTEXT_INIT_BIT_LO != 0;
+        // Accepted on the same accept-if-offered footing: a blob command is
+        // illegal on the wire unless the feature is negotiated, so V-1's
+        // guest-blob create both needs this and self-skips without it. It is
+        // orthogonal to virgl and ctxinit -- a host may offer any subset.
+        let blob = dev_feat_lo & VIRTIO_GPU_F_RESOURCE_BLOB_BIT_LO != 0;
         let mut want_lo = 0u32;
         if virgl {
             want_lo |= VIRTIO_GPU_F_VIRGL_BIT_LO;
         }
         if ctxinit {
             want_lo |= VIRTIO_GPU_F_CONTEXT_INIT_BIT_LO;
+        }
+        if blob {
+            want_lo |= VIRTIO_GPU_F_RESOURCE_BLOB_BIT_LO;
         }
         w32(common + CCFG_DRIVER_FEATURE_SELECT, 0);
         w32(common + CCFG_DRIVER_FEATURE, want_lo);
@@ -497,7 +548,12 @@ fn init_device(
             common + CCFG_DEVICE_STATUS,
             STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
         );
-        Ok((notify_base + u64::from(ctrl_off) * notify_mul, virgl, ctxinit))
+        Ok(DevInit {
+            notify_va: notify_base + u64::from(ctrl_off) * notify_mul,
+            virgl,
+            ctxinit,
+            blob,
+        })
     }
 }
 
@@ -1220,6 +1276,9 @@ pub struct Gpu {
     /// attempting a capset there yields a success response over a context
     /// that is not the requested kind.
     pub ctxinit: bool,
+    /// FEATURES_OK'd `VIRTIO_GPU_F_RESOURCE_BLOB`. Gates the V-1 guest-blob
+    /// path -- a blob command is illegal on the wire without it.
+    pub blob: bool,
     pub num_capsets: u32,
     /// The fetched preferred capset (Warp-2c: served verbatim by the
     /// /dev/warp caps file; empty when no capset was fetchable). The id +
@@ -1243,7 +1302,12 @@ impl Gpu {
     /// `flane_va` is the fenced lane's mapping slot -- allocated only when
     /// VIRGL negotiates (a 2D device never sees a fence-bearing command;
     /// the seam answers E_OPNOTSUPP), so plain boots pay nothing (Warp-2d).
-    pub fn probe(bar_window_va: u64, ring_va: u64, flane_va: u64) -> Result<Gpu, Error> {
+    pub fn probe(
+        bar_window_va: u64,
+        ring_va: u64,
+        flane_va: u64,
+        blob_probe_va: u64,
+    ) -> Result<Gpu, Error> {
         let pci = unsafe { PciDev::claim(VIRTIO_DEVICE_ID_GPU, bar_window_va) }.map_err(|e| {
             say!("tapestryd: gpu PCI claim/map failed {:?}", e);
             Error::Hardware
@@ -1288,8 +1352,12 @@ impl Gpu {
         prewarm(ring.base_va() as u64, RING_DMA_SIZE);
         let ring_pa = ring.paddr();
 
-        let (notify_va, virgl, ctxinit) =
-            init_device(common_va, notify_base, notify_mul, u64::from(notify_len), ring_pa)?;
+        let DevInit {
+            notify_va,
+            virgl,
+            ctxinit,
+            blob,
+        } = init_device(common_va, notify_base, notify_mul, u64::from(notify_len), ring_pa)?;
 
         let flane = if virgl {
             let f = unsafe { Dma::new(FLANE_DMA_SIZE, rw_map, flane_va, prot) }.map_err(|_| {
@@ -1334,6 +1402,7 @@ impl Gpu {
             height: DEFAULT_DISPLAY_H,
             virgl,
             ctxinit,
+            blob,
             num_capsets: 0,
             capset_blob: alloc::vec::Vec::new(),
             capset_id: 0,
@@ -1347,6 +1416,7 @@ impl Gpu {
         gpu.read_display_info()?;
         if gpu.virgl {
             gpu.probe_capsets()?;
+            gpu.blob_probe(blob_probe_va)?;
         }
         say!(
             "tapestryd: gpu up -- {}x{}, pci intid={}, virgl={} capsets={}",
@@ -1492,6 +1562,82 @@ impl Gpu {
                         say!("tapestryd: gpu ctx-capset {} REFUSED (engine healthy)", label);
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Warp-6 V-1: is a GUEST blob creatable on this host? The rung after
+    /// V-0b, gated one feature further along. Like the ctx-capset probe it is
+    /// meaningful ONLY with the controls the venus gate asserts -- the same
+    /// discrimination shape: a blob CREATED on the venus (blob=on) leg and
+    /// `skipped` on the no-blob control, since a blob command is illegal on
+    /// the wire without F_RESOURCE_BLOB negotiated. Venus's command ring is a
+    /// guest blob (GPU-DESIGN section 2.4), so this is Warp-6's real
+    /// prerequisite -- but the object model, mapping and coherency are V-3.
+    ///
+    /// A dedicated one-page DMA backs the blob rather than borrowing the ring
+    /// or the fenced lane: the probe never transfers to it, but its own buffer
+    /// removes the question of whether creating a resource over a live
+    /// transport region leaves host-side residue, and it prefigures V-3's real
+    /// ring buffer. The buffer Drops (handle close + unmap) when this returns.
+    ///
+    /// Failure disposition matches probe_capsets exactly (audit W1 F1): a
+    /// backing alloc that fails, or a create the device merely REFUSES with a
+    /// healthy engine, is a log line; only a latched engine death propagates.
+    fn blob_probe(&mut self, backing_va: u64) -> Result<(), Error> {
+        if !self.blob {
+            // Not a failure -- the host does not offer the feature. Said out
+            // loud so the control leg's silence is a positive "skipped", not
+            // an absent line a broken fixture could equally produce.
+            say!("tapestryd: gpu blob-create skipped (F_RESOURCE_BLOB not offered)");
+            return Ok(());
+        }
+        let rw_map = Rights::READ | Rights::WRITE | Rights::MAP;
+        let prot = T_PROT_READ | T_PROT_WRITE;
+        let backing = match unsafe { Dma::new(PAGE_SIZE as usize, rw_map, backing_va, prot) } {
+            Ok(d) => d,
+            Err(_) => {
+                say!("tapestryd: gpu blob-create backing alloc failed; skipped");
+                return Ok(());
+            }
+        };
+        // A device-global guest blob over the single backing page. blob_flags
+        // 0: the bare object, no USE_MAPPABLE -- V-1 proves creation, the ring
+        // (V-3) exercises mapping.
+        match self.resource_create_blob(
+            BLOB_PROBE_RES_ID,
+            VIRTIO_GPU_BLOB_MEM_GUEST,
+            0,
+            backing.paddr(),
+            PAGE_SIZE as u32,
+        ) {
+            Ok(()) => {
+                say!("tapestryd: gpu blob-create guest CREATED");
+                // Evidence, not a resource: unref at once. On a CONFIRMED
+                // unref the host has released the backing, so `backing` may
+                // Drop (unmap + free) safely at scope end. On a FAILED unref
+                // (engine alive) the host may still reference these pages, so
+                // LEAK the buffer rather than unmap under a live reference -- a
+                // theoretical UAF (the probe issues no transfer, so the host
+                // never DMAs a bare blob), but one page leaked once at init is
+                // the correct trade against unmapping referenced memory. The
+                // id is never reused, so the host-side resource leak is bounded
+                // to one context's worth.
+                if self.resource_unref(BLOB_PROBE_RES_ID).is_err() {
+                    if !self.ctrl.dead {
+                        say!("tapestryd: gpu blob-create unref refused; backing leaked");
+                    }
+                    core::mem::forget(backing);
+                }
+            }
+            Err(e) => {
+                if self.ctrl.dead {
+                    return Err(e);
+                }
+                // The blob was never created; the host holds no backing
+                // reference, so `backing` Drops (unmap) safely below.
+                say!("tapestryd: gpu blob-create guest REFUSED (engine healthy)");
             }
         }
         Ok(())
@@ -1672,6 +1818,47 @@ impl Gpu {
         };
         self.ctrl
             .step("RESOURCE_UNREF", GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// RESOURCE_CREATE_BLOB for a GUEST-memory blob (Warp-6 V-1): the blob's
+    /// storage IS the single guest `mem_entry` at `pa`/`len` -- no host
+    /// allocation, no `blob_id`, no hostmem BAR. This is the substrate Venus's
+    /// command ring is built from (GPU-DESIGN section 2.4). The host3d path
+    /// (host-allocated storage mapped through the hostmem window via MAP_BLOB)
+    /// is the V-2 delta and is deliberately NOT here. The caller MUST have
+    /// negotiated `F_RESOURCE_BLOB` (`self.blob`); a blob command is illegal
+    /// on the wire otherwise. `blob_flags` is the caller's (0 for the bare
+    /// V-1 probe; the ring's USE_MAPPABLE arrives with the ring at V-3).
+    /// device-global (ctx_id 0): the transport ring is not context-scoped.
+    pub fn resource_create_blob(
+        &mut self,
+        resource_id: u32,
+        blob_mem: u32,
+        blob_flags: u32,
+        pa: u64,
+        len: u32,
+    ) -> Result<(), Error> {
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB);
+            w32(req_va + 24, resource_id);
+            w32(req_va + 28, blob_mem);
+            w32(req_va + 32, blob_flags);
+            w32(req_va + 36, 1); // nr_entries
+            w64(req_va + 40, 0); // blob_id: 0 for a guest blob (host mints none)
+            w64(req_va + 48, u64::from(len)); // size
+            // mem_entry[0]: the single guest-page backing.
+            w64(req_va + 56, pa);
+            w32(req_va + 64, len);
+            w32(req_va + 68, 0); // padding
+        };
+        // 24 (hdr) + 32 (fixed fields) + 16 (one mem_entry) = 72 = HDR + 48.
+        self.ctrl.step(
+            "RESOURCE_CREATE_BLOB",
+            GPU_CTRL_HDR_LEN + 48,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
     }
 
     /// CTX_CREATE: mint rendering context `ctx_id` host-side. context_init

@@ -706,7 +706,7 @@ struct Screen {
 
 /// The res_seq base: per-generation resource ids (surface weaves + the
 /// screen since cfg-3) mint strictly above this -- no id ever aliases.
-const SCREEN_RES: u32 = 0x40;
+pub(crate) const SCREEN_RES: u32 = 0x40;
 
 /// Warp-C C-2: the COMPOSITOR's own virgl context. Client warp ctxs take ids
 /// `slot + 1` over `0..MAX_WARP_CTXS`, so this sits far above that range and

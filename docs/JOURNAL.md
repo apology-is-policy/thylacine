@@ -22,6 +22,75 @@ needed the operator.
 
 ---
 
+## 2026-08-19 — V-1: a guest blob creates, and the scope hidden in "blobs"
+
+Resumed from my own self-compaction; the resume note ordered V-1 (blobs) next.
+The ladder names V-1 "blobs (`RESOURCE_CREATE_BLOB` + the blob object model)",
+which reads as a large chunk. Reading the design collapsed it to something
+smaller and sharper.
+
+The load-bearing fact is in GPU-DESIGN §2.4: **Venus's command ring is a guest
+blob** — its head/tail/status cachelines are guest pages the host also reads.
+That is why V-1 is Venus's real prerequisite. But "guest blob" is the whole
+point: a guest blob's storage *is* its own guest `mem_entry` pages — the host
+registers a resource referencing them, with no host allocation and no hostmem
+BAR. The host3d blob (host-allocated storage the guest reaches through the
+hostmem window via `MAP_BLOB`) is a *different* thing, and it is exactly the V-2
+delta the reference already flagged (149-warp "Mapping a subrange is the §6.2
+Venus-chunk delta"). So V-1 is the guest-blob *create* path — nothing maps,
+nothing is coherent yet — and it rides the existing venus gate's two legs
+unchanged: the venus device offers `F_RESOURCE_BLOB`, the plain `-gl` control
+does not. The whole chunk is a tapestryd-side device command; no kernel path
+(that arrives at V-2, which maps MMIO into a client VA).
+
+Two wrong turns, both caught before they cost anything.
+
+First, the opcode. I reached for `RESOURCE_CREATE_BLOB = 0x0212` from memory —
+and it is wrong. Counting the virtio-gpu 2D enum forward from the code's own
+anchor (`GET_CAPSET = 0x0109`, already in the tree) puts it at **0x010c**
+(`GET_EDID` 0x010a and `RESOURCE_ASSIGN_UUID` 0x010b sit unused between). 0x0212
+was a confabulation. The "a number recalled is a number unverified" rule earned
+its place again — I verified against the tree's anchors, not memory.
+
+Second, a lifetime bug in my own probe (self-audit SF1). `blob_probe` backs the
+blob with a dedicated one-page DMA and unref's it, then the buffer Drops
+(unmaps + frees the pages). If the *unref* fails while the engine is alive, the
+host may still reference those pages — and Drop would unmap them out from under
+a live reference. The probe issues no transfer so it is theoretical, but the
+correct discipline is to **leak, not unmap, under a live reference**: one page
+at init beats a UAF. `core::mem::forget(backing)` on the unref-fail path.
+
+I also heeded a prior lesson rather than re-learning it: `init_device` returned
+a positional `(u64, bool, bool)`, the exact shape that let V-0b's `ctxinit` go
+briefly unreturned. Adding a third bool to a positional tuple is how that bug
+happens again, so the three feature flags now ride a named `DevInit` struct.
+
+The probe's resource id (`0x2b`) is collision-free by the same timing argument
+the ctx-capset probe uses (it runs before the Server exists) plus a numeric
+guard: the server mints ids from `SCREEN_RES + 1` upward and never down, so any
+id `<= SCREEN_RES` is unmintable forever. I sabotaged the guard to prove it
+fires — `id = 0x40` fails the build with the guard's message, `0x2b` compiles.
+
+It creates. On thyla-pi (KVM, real V3D 4.2): `blob-create guest CREATED` with
+venus, `blob-create skipped (F_RESOURCE_BLOB not offered)` on the control, and
+the venus leg boots fully clean with the feature negotiated — so negotiating
+blob does not disturb the compositor path (a self-audit worry, answered by the
+boot). VENUS GATE VERIFIED, `test-venus-verdict` 13 → 16 arms, all discriminating
+without a boot.
+
+One measurement worth keeping for the next GL run: the control boot took **268s**,
+not the ~220s the notes cite. A combined `warp-host.sh venus` run (both legs in
+one call) would have been ~536s — close enough to the 600s foreground cap that a
+slightly slower host would have moved it to a background task and killed the
+second boot mid-run. Running each leg as its own sub-600s call was the right
+call, and the number says why.
+
+Still open at this point in the run: the `holotype-reviewer` round on the
+`gpu.rs` change (audit-bearing, tapestryd row) and LS-CI, both owed before push.
+The SMP gate stands — the kernel binary is byte-unchanged. Ahead: V-2 (host3d +
+the hostmem-BAR mapping, the first real kernel memory-authority path of the arc)
+→ V-3 (`vn_renderer_thylacine` + the coherent ring) → V-4/5/6.
+
 ## 2026-08-18 — V-0b: a Venus context creates, and the seam size I recalled wrong
 
 I had classified V-0b as blocked this session — the arc's next step is
