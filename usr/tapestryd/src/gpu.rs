@@ -51,6 +51,14 @@ const VIRTIO_F_VERSION_1_BIT_HI: u32 = 1 << 0;
 // command path; every 2D command this driver issues remains valid under it
 // (VIRTIO 1.2 section 5.7.6.8), so the compositor path is unchanged either way.
 const VIRTIO_GPU_F_VIRGL_BIT_LO: u32 = 1 << 0;
+// The rest of the LOW dword, named so a boot log can be read without a spec
+// beside it. Warp-6 needs two of them: CONTEXT_INIT carries a context's capset
+// id (a Venus context is unreachable without it -- `context_init` bits 0-7),
+// and RESOURCE_BLOB is what Venus's ring is built from.
+const VIRTIO_GPU_F_EDID_BIT_LO: u32 = 1 << 1;
+const VIRTIO_GPU_F_RESOURCE_UUID_BIT_LO: u32 = 1 << 2;
+const VIRTIO_GPU_F_RESOURCE_BLOB_BIT_LO: u32 = 1 << 3;
+const VIRTIO_GPU_F_CONTEXT_INIT_BIT_LO: u32 = 1 << 4;
 
 // ISR status (section 4.1.4.5): bit 0 = a virtqueue raised the IRQ; reading
 // the byte clears it.
@@ -370,6 +378,21 @@ fn init_device(
             w8(common + CCFG_DEVICE_STATUS, STATUS_FAILED);
             return Err(Error::Hardware);
         }
+
+        // The device's offer, reported rather than discarded: it was read here
+        // and dropped, so "does this host offer CONTEXT_INIT?" -- the question
+        // that decides whether a Venus context is reachable at all -- had no
+        // answer short of a new build. One line makes it a per-boot fact.
+        say!(
+            "tapestryd: gpu features lo=0x{:08x} (virgl={} edid={} uuid={} blob={} ctxinit={}) hi=0x{:08x}",
+            dev_feat_lo,
+            u32::from(dev_feat_lo & VIRTIO_GPU_F_VIRGL_BIT_LO != 0),
+            u32::from(dev_feat_lo & VIRTIO_GPU_F_EDID_BIT_LO != 0),
+            u32::from(dev_feat_lo & VIRTIO_GPU_F_RESOURCE_UUID_BIT_LO != 0),
+            u32::from(dev_feat_lo & VIRTIO_GPU_F_RESOURCE_BLOB_BIT_LO != 0),
+            u32::from(dev_feat_lo & VIRTIO_GPU_F_CONTEXT_INIT_BIT_LO != 0),
+            dev_feat_hi
+        );
 
         let virgl = dev_feat_lo & VIRTIO_GPU_F_VIRGL_BIT_LO != 0;
         w32(common + CCFG_DRIVER_FEATURE_SELECT, 0);

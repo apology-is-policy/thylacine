@@ -248,7 +248,9 @@ venus)
         tee "$ctl" || true
     ssh "$HOST" "${RPOLLS}bash $RREPO/tools/warp/boot-probe.sh venustest 'virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M' egl-headless" |
         tee "$tst" || true
-    "$0" venus-verdict "$ctl" "$tst"
+    # Absolute, not $0: REPO_ROOT is already resolved, and a relative $0 would
+    # bind the recursion to the caller's cwd.
+    "$REPO_ROOT/tools/warp-host.sh" venus-verdict "$ctl" "$tst"
     ;;
 venus-verdict)
     # The venus gate's verdict, as its OWN verb so the discrimination can be
@@ -262,6 +264,18 @@ venus-verdict)
     vfail=0
     grep -q "BOOT-vencontrol: PASS" "$ctl" || { echo "CONTROL leg did not boot -- no verdict"; vfail=1; }
     grep -q "BOOT-venustest: PASS"  "$tst" || { echo "TEST leg did not boot -- no verdict"; vfail=1; }
+    # The control must have MEASURED capsets, not merely failed to see id=4.
+    # Without this, a control that fell back to 2D (virgl not negotiated, no
+    # capset lines at all) satisfies the negative arm below while measuring
+    # nothing -- a negative assertion satisfied by a broken fixture. Requiring
+    # the baseline pair makes "id=4 absent" mean "venus absent" and not
+    # "capsets absent".
+    for base in 1 2; do
+        grep -qE "gpu capset\[[0-9]+\] id=$base " "$ctl" || {
+            echo "CONTROL leg never enumerated baseline capset id=$base -- it measured nothing, so its lack of id=4 proves nothing"
+            vfail=1
+        }
+    done
     if grep -qE "gpu capset\[[0-9]+\] id=4" "$ctl"; then
         echo "CONTROL leg saw capset id=4 -- the declaration is NOT what produces it"
         vfail=1

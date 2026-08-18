@@ -68,6 +68,14 @@ check "control leg did not boot -> UNVERIFIED"   1 \
       'grep -v "BOOT-vencontrol: PASS" "$c" > "$c.x" && mv "$c.x" "$c"' ""
 check "test leg did not boot -> UNVERIFIED"      1 "" \
       'grep -v "BOOT-venustest: PASS" "$t" > "$t.x" && mv "$t.x" "$t"'
+# A control that measured NOTHING (2D fallback: virgl not negotiated, no capset
+# lines at all) trivially lacks id=4. Without this arm the gate reads that as
+# "venus absent" when it means "capsets absent" -- a negative assertion
+# satisfied by a broken fixture.
+check "control leg enumerated NO capsets -> UNVERIFIED" 1 \
+      'grep -v "gpu capset\[" "$c" > "$c.x" && mv "$c.x" "$c"' ""
+check "control leg lost only baseline id=1 -> UNVERIFIED" 1 \
+      'grep -v "id=1 " "$c" > "$c.x" && mv "$c.x" "$c"' ""
 
 printf '\n%d pass, %d fail\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
