@@ -934,6 +934,27 @@ SMP_GATE_CONFIGS="default-smp4 ubsan-smp4" tools/ci-smp-gate.sh   # amplifier su
 # The gate's classifier, tested without booting (fast; sources the real ladder).
 tools/test-smp-classify.sh
 
+# Hardening witnesses (#245). Both of these were invoked by NOTHING until
+# 2026-08-18 -- and both were already named in this file, inside the boot-banner
+# paragraph below, purely as CONSUMERS of the ABI strings (things that would
+# break if you reworded one), never as gates to run. That is the entire
+# difference between a mention and a command, and it is why they rotted while
+# `test-a72` and `check-v80-floor` -- one screen down, in this block -- did not.
+# test-fault builds one kernel per provoker and PASSes iff each EXTINCTIONs with
+# its expected message: the ONLY proof that the canary / W^X / BTI / the two
+# stack guards / the idle guard / the recursion arm actually FIRE, as opposed to
+# merely being compiled in. Its absence from every gate is how #244 --
+# recursive_kernel_fault emitting nothing at all -- hid for about a month.
+tools/test-fault.sh                 # all 7 variants    (or: make test-fault)
+tools/test-fault.sh canary_smash    # one variant       (-v for log dumps)
+
+# verify-kaslr multi-boots and PASSes iff the slide varies across N: ROADMAP
+# section 4.2's exit criterion for I-16, and that invariant's ONLY runtime
+# witness. `make test` accepts any SINGLE boot, so it is structurally blind to a
+# slide that never moves -- the same shape as test.sh being blind to LSE above.
+tools/verify-kaslr.sh               # 10 boots          (or: make verify-kaslr)
+tools/verify-kaslr.sh -n 25 -v      # more boots, print each offset
+
 # ARMv8.0 floor guard (#91). The SOURCE + BINARY checks run automatically at the
 # tail of every ramfs bake; these are the extras. `check-floor` adds the big pool
 # payloads (/clade, /goroot, ~6 min); `test-a72` is PORTABILITY.md section 3's
