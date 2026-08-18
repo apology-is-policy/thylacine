@@ -40,8 +40,8 @@ prosecute the same surface myself.
 ### The non-colliding work turned out to be the more interesting half
 
 main#245 said `test-fault.sh` is wired into no gate. A census over `Makefile` +
-`tools/` + `.github`, with a control at each end (`ci-smp-gate.sh` must resolve
-to a target, `test-fault.sh` must not), found **two** orphans rather than one:
+`tools/`, with a control at each end (`ci-smp-gate.sh` must resolve to a target,
+`test-fault.sh` must not), found **two** orphans rather than one:
 `tools/verify-kaslr.sh` has no caller either. The only references to either are
 two *comments* in sibling scripts.
 
@@ -71,6 +71,14 @@ to itself and not noticed.
 So the remedy is both halves, in the idiom this project already uses for the
 class (`check-production`/#228, `test-a72` and `check-floor`/#91): a named
 target with a WHY comment, **plus** an entry in the command block. `55c5d2f8`.
+
+**A second wrong turn, caught after the commit.** The census as first run also
+grepped `.github` — which does not exist. There is no CI in this repo at all,
+so that arm searched nothing and contributed no evidence, while the commit
+message reports "no Makefile target, no gate, no CI step" in a list that reads
+as three findings. The claim is true; one third of it is *vacuous*. An empty
+arm of a census must not be reported as though it were a negative result, and
+the tell is that the arm was never given a control the way the other two were.
 
 **A wrong turn caught before it shipped.** The first draft of the help text put
 backticks around `make test` inside a Makefile `@echo "..."`. Backticks inside
