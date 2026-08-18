@@ -64,7 +64,14 @@ use libthyla_rs::{
 pub const MAX_CONNS: usize = 8;
 
 /// Per-connection fid-table size: one fid per open file/dir the client holds.
-const MAX_FIDS: usize = 32;
+/// joey's single /dev/pts mount is ONE kernel-client session, so this table caps
+/// the TOTAL fids across every Proc sharing the mount. A live pts holds four
+/// (master + slave + ctl + the item-10 ready file), so the ceiling must cover
+/// PTS_MAX pts at four fids each plus the attach root and transient walk fids --
+/// otherwise the fid table, not PTS_MAX, becomes the binding concurrent-pts limit
+/// and a ready-open failure would silently degrade a native poller back to
+/// blocking on fd 0 (the item-10 F1/F3 cluster). Scales with PTS_MAX.
+const MAX_FIDS: usize = PTS_MAX * 4 + 16;
 
 /// Max live pts pairs. A bound, not headroom: an unbounded pts table is a DoS
 /// vector (#65 resource floor), so clone-minting fails (ENFILE) past this.
@@ -213,6 +220,20 @@ const N_MASK: u64 = 0x00ff_ffff; // 24-bit pts number
 const FK_MASTER: u64 = 1;
 const FK_SLAVE: u64 = 2;
 const FK_CTL: u64 = 3;
+// The per-pts poll-readiness file /dev/pts/<n>ready (item 10; the netd
+// /net/<proto>/N/ready precedent, net-6b-2b). A QTPOLL node: dev9p.poll probes
+// it with a Tread(offset = the poll mask, count = 4) and it replies a 4-byte LE
+// revents bitmap (or defers until satisfiable). A native poller (ut) polls THIS
+// file for its SLAVE fd's readiness -- the slave DATA file stays non-QTPOLL
+// (its reads park server-side), so a data read is never misread as a probe. Not
+// an EOF-counted endpoint; a hidden companion (walkable, not in readdir).
+const FK_READY: u64 = 4;
+
+// The poll event bits the `<n>ready` file speaks (item 10; the kernel poll.h
+// values, so the 4-byte revents bitmap is what dev9p_poll_revents_of parses).
+const POLLIN: u16 = 0x001;
+const POLLOUT: u16 = 0x004;
+const POLLHUP: u16 = 0x010;
 
 fn is_pts(path: u64) -> bool {
     path & PTS_FLAG != 0
@@ -236,6 +257,10 @@ fn is_master_path(path: u64) -> bool {
 
 fn is_ctl_path(path: u64) -> bool {
     is_pts(path) && pts_filekind(path) == FK_CTL
+}
+
+fn is_ready_path(path: u64) -> bool {
+    is_pts(path) && pts_filekind(path) == FK_READY
 }
 
 /// A master/slave DATA endpoint -- the opened-fd EOF counts (n_master/n_slave)
@@ -870,6 +895,40 @@ impl Ptys {
         }
     }
 
+    /// The poll revents for a SLAVE poller of pts `n` (item 10; the netd
+    /// check_ready convention -- POLLIN/POLLOUT masked to the request, POLLHUP
+    /// always reported). Non-consuming: it only reads ring state. POLLIN mirrors
+    /// read_ready (a line queued OR the master gone => the slave read is
+    /// non-blocking, EOF-as-readable included); POLLOUT is s2m room; POLLHUP is
+    /// carrier loss (n_master == 0).
+    fn ready_revents(&self, n: u32, mask: u16) -> u16 {
+        let mut revents = 0u16;
+        if mask & POLLIN != 0 && self.read_ready(n, false) {
+            revents |= POLLIN;
+        }
+        if mask & POLLOUT != 0 && self.slave_writable(n) {
+            revents |= POLLOUT;
+        }
+        if self.master_gone(n) {
+            revents |= POLLHUP;
+        }
+        revents
+    }
+
+    fn slave_writable(&self, n: u32) -> bool {
+        match self.slot(n) {
+            Some(p) => p.s2m.len() < RING_CAP,
+            None => false, // slot gone: nothing to write into
+        }
+    }
+
+    fn master_gone(&self, n: u32) -> bool {
+        match self.slot(n) {
+            Some(p) => p.n_master == 0,
+            None => true, // slot gone: the peer is definitively gone
+        }
+    }
+
     fn ring_drain(ring: &mut VecDeque<u8>, buf: &mut [u8], other_open: u32) -> RecvOutcome {
         if !ring.is_empty() {
             let k = buf.len().min(ring.len());
@@ -902,6 +961,16 @@ impl Ptys {
             let n = parse_dec(&name[..name.len() - 3])?;
             return if self.live(n) {
                 Some(make_pts(n, FK_CTL))
+            } else {
+                None
+            };
+        }
+        // "<n>ready" resolves to the live per-pts poll-readiness file (item 10;
+        // the netd ready-sibling idiom). Disjoint from the "ctl" suffix.
+        if name.len() > 5 && name.ends_with(b"ready") {
+            let n = parse_dec(&name[..name.len() - 5])?;
+            return if self.live(n) {
+                Some(make_pts(n, FK_READY))
             } else {
                 None
             };
@@ -1006,6 +1075,13 @@ struct PendingRead {
     master: bool, // reading the master endpoint (drain s2m) vs the slave (m2s)
     tag: u16,
     cap: usize,
+    // A NON-consuming poll-readiness probe (item 10), not a data read. When true,
+    // poll_reads recomputes the revents bitmap (never drains) and delivers a
+    // 4-byte reply once (revents & effective_mask) != 0; `mask` is the requested
+    // poll events (POLLIN|POLLOUT) from the probe Tread's offset. Sharing the one
+    // Vec means the clunk/Tflush/teardown cancel sites cover a parked probe too.
+    probe: bool,
+    mask: u16,
 }
 
 pub struct Conn {
@@ -1239,11 +1315,17 @@ impl Conn {
     }
 
     fn qid_of(&self, ptys: &Ptys, path: u64) -> p9::Qid {
-        let kind = if ptys.is_dir(path) {
+        let mut kind = if ptys.is_dir(path) {
             p9::P9_QTDIR
         } else {
             p9::P9_QTFILE
         };
+        // The poll-readiness file carries P9_QTPOLL so dev9p caches QTPOLL on the
+        // Spoor -> dev9p.poll probes it (item 10). Single source for walk +
+        // getattr qids, so both agree.
+        if is_ready_path(path) {
+            kind |= p9::P9_QTPOLL;
+        }
         p9::Qid {
             kind,
             version: 0,
@@ -1413,10 +1495,12 @@ impl Conn {
                     Err(())
                 }
             }
-        } else if is_ctl_path(f.path) {
-            // The per-pts ctl (/pts/<n>ctl): opens plainly -- no registration,
-            // no EOF count (a ctl fid is not an endpoint); the bound fid
-            // already holds the slot ref.
+        } else if is_ctl_path(f.path) || is_ready_path(f.path) {
+            // The per-pts ctl (/pts/<n>ctl) and the poll-readiness file
+            // (/pts/<n>ready, item 10): both open plainly -- no registration, no
+            // EOF count (neither is a data endpoint); the bound fid already holds
+            // the slot ref. Must precede the slave branch (a ready path is
+            // is_pts && !master, which would otherwise register as a slave).
             let q = self.qid_of(ptys, f.path);
             let mut nf = f;
             nf.opened = true;
@@ -1479,6 +1563,34 @@ impl Conn {
             let k = (len - off).min(a.count as usize);
             return p9::build_rread(&mut self.out_buf, tag, &lb[off..off + k]);
         }
+        if is_ready_path(f.path) {
+            // The NON-consuming poll-readiness probe (item 10; the netd ready-file
+            // shape). dev9p.poll encodes the wanted poll mask in the Tread OFFSET
+            // (count = 4). Reply the 4-byte LE revents once satisfiable; else park
+            // (poll_reads re-evaluates -- level-triggered, so a native poller that
+            // requested POLLIN wakes exactly when the slave becomes readable, and
+            // a ^C -- which posts a NOTE, not data -- never spuriously wakes it).
+            let n = pts_n(f.path);
+            let mask = a.offset as u16;
+            let revents = ptys.ready_revents(n, mask);
+            if revents != 0 {
+                return p9::build_rread(&mut self.out_buf, tag, &(revents as u32).to_le_bytes());
+            }
+            if self.pending_reads.len() >= MAX_FIDS {
+                return self.err(tag, p9::E_PROTO);
+            }
+            self.pending_reads.push(PendingRead {
+                fid: a.fid,
+                slot_n: n,
+                master: false, // a ready file reports SLAVE readiness (item 10)
+                tag,
+                cap: 4,
+                probe: true,
+                mask,
+            });
+            self.defer = true;
+            return Ok(0); // ignored: dispatch returns Disp::Deferred
+        }
         if !is_pts(f.path) {
             return self.err(tag, p9::E_INVAL); // no readable static file (ptmx is open-only)
         }
@@ -1513,6 +1625,8 @@ impl Conn {
                     master,
                     tag,
                     cap,
+                    probe: false,
+                    mask: 0,
                 });
                 self.defer = true;
                 Ok(0) // ignored: dispatch returns Disp::Deferred
@@ -1701,6 +1815,22 @@ impl Conn {
         let mut i = 0;
         while i < self.pending_reads.len() {
             let pr = self.pending_reads[i];
+            if pr.probe {
+                // A poll-readiness probe (item 10): recompute revents (no drain,
+                // no consume) and deliver the 4-byte reply once satisfiable.
+                // ready_revents already masks to the request + always-report HUP,
+                // so a non-zero value is exactly "deliver now" (else keep parked).
+                let revents = ptys.ready_revents(pr.slot_n, pr.mask);
+                if revents != 0 {
+                    self.pending_reads.remove(i);
+                    if !self.deliver_read(pr.tag, &(revents as u32).to_le_bytes()) {
+                        return false;
+                    }
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
             if !ptys.read_ready(pr.slot_n, pr.master) {
                 i += 1;
                 continue; // still WouldBlock -- do not allocate a drain buffer
@@ -2386,6 +2516,56 @@ pub fn selftest() -> Result<(), &'static str> {
     }
     if ptys.live(n) {
         return Err("slot-not-freed");
+    }
+
+    // ---- The poll-readiness battery (item 10; ready_revents = read_ready +
+    // request-masking + the always-reported POLLHUP, non-consuming). A fresh
+    // raw pts so the accumulated state above cannot color it.
+    {
+        let r = ptys.mint().ok_or("ready-mint")? as u32;
+        ptys.open_inc(r, true); // master open (n_master 0 -> 1)
+        ptys.open_inc(r, false); // slave open
+        ptys.set_tio(r, 0); // raw: a byte lands in m2s without cooking
+
+        // Empty + both open: a POLLIN poller sees no POLLIN (it would park).
+        if ptys.ready_revents(r, POLLIN) & POLLIN != 0 {
+            return Err("ready-empty-pollin-set");
+        }
+        // A master write makes the slave readable -> POLLIN.
+        if ptys.master_write(r, b"x") != 1 {
+            return Err("ready-mw");
+        }
+        if ptys.ready_revents(r, POLLIN) & POLLIN == 0 {
+            return Err("ready-data-pollin-clear");
+        }
+        // POLLIN is masked to the request: a POLLOUT-only poll never reports it.
+        if ptys.ready_revents(r, POLLOUT) & POLLIN != 0 {
+            return Err("ready-pollin-not-masked");
+        }
+        // Drain -> POLLIN clears (level-triggered; a re-poll re-parks).
+        let mut d = [0u8; 8];
+        match ptys.slave_read(r, &mut d) {
+            RecvOutcome::Data(1) => {}
+            _ => return Err("ready-drain"),
+        }
+        if ptys.ready_revents(r, POLLIN) & POLLIN != 0 {
+            return Err("ready-drained-pollin-set");
+        }
+        // POLLOUT: s2m has room -> set when requested.
+        if ptys.ready_revents(r, POLLOUT) & POLLOUT == 0 {
+            return Err("ready-pollout-clear");
+        }
+        // Master gone: POLLHUP always reported, and the slave read is then
+        // EOF-readable (POLLIN set even on an empty ring). This is the ^C-idle
+        // teardown edge -- ut wakes on the ready file and its fd-0 read EOFs.
+        ptys.open_dec(r, true); // n_master 1 -> 0
+        let rv = ptys.ready_revents(r, POLLIN);
+        if rv & POLLHUP == 0 {
+            return Err("ready-hup-clear-on-master-gone");
+        }
+        if rv & POLLIN == 0 {
+            return Err("ready-eof-not-readable");
+        }
     }
 
     Ok(())

@@ -80,6 +80,11 @@ pub struct JobControlState {
     /// The pts index `N` (from the fd-0 qid decode) -- diagnostic only;
     /// every tty syscall goes through fd 0 itself.
     pub pts_n: u32,
+    /// The `/dev/pts/<n>ready` fd ut POLLS for fd-0 input readiness (item 10;
+    /// the pts slave is not directly pollable -- dev9p.poll is always-ready for
+    /// it). None if the ready open failed (poll degrades to fd 0, today's
+    /// behavior). ut reads fd 0 (the slave); it only POLLS this.
+    pub poll_in_fd: Option<i32>,
 }
 
 /// The evaluator's runtime state. One Env per shell process / per

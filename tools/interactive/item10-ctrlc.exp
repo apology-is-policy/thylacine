@@ -1,0 +1,78 @@
+#!/usr/bin/expect -f
+# item10-ctrlc.exp -- item 10 GATE (aux, the pts poll-readiness bridge). A
+# NATIVE ut hosted on a pts (ptyhost) must service a ^C at its IDLE prompt
+# PROMPTLY -- so the NEXT typed command EXECUTES, not eaten/delayed. Pre-item-10
+# the hosted ut polls fd 0 (the pts slave, which dev9p.poll reports
+# always-ready), so it blocks in read(fd0) where the caught `interrupt` note
+# cannot wake it; the note lands a line late and the next command is swallowed
+# ("echoed but never executed", the 2026-08-17 ctrlc-idle reproduction).
+# Post-item-10 ut polls /dev/pts/<n>ready (the QTPOLL sibling), so the ^C note
+# wakes its poll via notes_fd and the command runs.
+#
+# DISCRIMINATION: each command is `echo <tok> | tr a-z A-Z`, so the assertion
+# looks for the UPPERCASED token -- the editor's echo (lowercase) can NEVER
+# satisfy it, only actual execution. The OUTER (console) ut is the control: it
+# polls /dev/cons (pollable via LS-8a), so ^C-at-idle already works there --
+# outer PASS + inner PASS proves the fix; outer PASS + inner FAIL is the
+# pre-item-10 bug (pts-specific).
+
+source [file join [file dirname [info script]] lib.exp]
+
+proc it_look {pat phase secs} {
+    global timeout
+    set timeout $secs
+    expect {
+        -re $pat { lc_step "saw (executed): $phase" ; return 1 }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        eof     { lc_fail "unexpected EOF during '$phase'" }
+        timeout { lc_step "NOT executed within ${secs}s: $phase <-- the witness" ; return 0 }
+    }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# CONTROL (outer console ut): ^C ^C at idle, then a command must execute. This
+# already worked pre-item-10 (the console is pollable) -- if it fails, the ^C
+# harness or the boot is broken, not the pts bridge.
+send "\x03"; sleep 1
+send "\x03"; sleep 1
+lc_send "echo outer-cc | tr a-z A-Z"
+set o1 [it_look {OUTER-CC} "outer console ut after ^C ^C at idle" 15]
+
+# Host a NATIVE ut on a pts.
+lc_send "ptyhost"
+lc_expect "job control active" "the hosted ut's pts session dance"
+sleep 1
+lc_run_expect "echo inner-up | tr a-z A-Z" "INNER-UP"
+
+# A: ONE ^C at the hosted ut's idle prompt, then a command must EXECUTE promptly.
+send "\x03"; sleep 1
+lc_send "echo inner-a | tr a-z A-Z"
+set a1 [it_look {INNER-A} "hosted ut after ONE ^C at idle" 12]
+
+# B: TWO ^C at the hosted ut's idle prompt, then a command must EXECUTE promptly
+# (the seen shape from the reproduction).
+send "\x03"; sleep 1
+send "\x03"; sleep 1
+lc_send "echo inner-b | tr a-z A-Z"
+set b1 [it_look {INNER-B} "hosted ut after TWO ^C at idle" 12]
+
+# C: a foreground job + ^C still interrupts and reprompts (a sanity leg -- the
+# fg-job path is wait_pids_interruptible, unchanged, but proves the bridge did
+# not regress fg interrupt).
+lc_send "sleep 20"; sleep 1
+send "\x03"; sleep 1
+lc_send "echo inner-c | tr a-z A-Z"
+set c1 [it_look {INNER-C} "hosted ut after ^C on a foreground sleep" 12]
+
+lc_step "RESULT: outer-cc=$o1 inner-1c=$a1 inner-2c=$b1 fg-c=$c1  (1 = executed, 0 = not within the window)"
+if {!$o1} { lc_fail "the console ^C control failed -- harness/boot broken, not the pts bridge" }
+if {!$a1} { lc_fail "item 10 REGRESSED: hosted ut did not run the command after ONE ^C at idle (the note landed a line late -- the poll-readiness bridge is not waking it)" }
+if {!$b1} { lc_fail "item 10 REGRESSED: hosted ut did not run the command after TWO ^C at idle" }
+if {!$c1} { lc_fail "item 10: hosted ut did not recover after ^C on a foreground job" }
+
+lc_send "exit"
+sleep 1
+lc_run_expect "echo cc-outer | tr a-z A-Z" "CC-OUTER"
+lc_pass "ITEM10-CTRLC: the pts poll-readiness bridge -- ^C at a hosted ut's idle prompt is serviced promptly (1x + 2x), fg interrupt intact"

@@ -197,8 +197,38 @@ impl Repl {
             t_putstr("ut: pts session: ctl open failed\n");
             return false;
         }
+        // Open the poll-readiness sibling (item 10): ut POLLS this for fd-0 input
+        // readiness because the pts slave itself is not pollable (dev9p.poll is
+        // always-ready for it, so a poll on fd 0 returns at once and the shell
+        // blocks in read() -- where a caught `interrupt` note cannot wake it). A
+        // ready open failure degrades to polling fd 0 (today's behavior); it does
+        // NOT fail the dance (job control is unaffected).
+        let mut rpath = String::new();
+        {
+            use core::fmt::Write as _;
+            let _ = write!(&mut rpath, "/dev/pts/{}ready", n);
+        }
+        // SAFETY: t_open SVC wrapper; rpath is a valid NUL-free byte slice.
+        let ready = unsafe {
+            libthyla_rs::t_open(
+                libthyla_rs::T_WALK_OPEN_FROM_ROOT,
+                rpath.as_ptr(),
+                rpath.len(),
+                libthyla_rs::T_OREAD,
+            )
+        };
+        let poll_in_fd = if ready >= 0 {
+            Some(ready as i32)
+        } else {
+            t_putstr("ut: pts session: ready open failed (poll degrades to fd 0)\n");
+            None
+        };
         self.env.consctl_fd = Some(ctl as i32);
-        self.env.job_control = Some(crate::eval::env::JobControlState { own_pgid, pts_n: n });
+        self.env.job_control = Some(crate::eval::env::JobControlState {
+            own_pgid,
+            pts_n: n,
+            poll_in_fd,
+        });
         true
     }
 
@@ -646,6 +676,14 @@ impl Repl {
     pub fn notes_fd(&self) -> Option<i32> {
         use libthyla_rs::poll::AsFd;
         self.env.notes().map(|n| n.as_raw_fd())
+    }
+
+    /// The fd the shell's idle loop should POLL for fd-0 input readiness
+    /// (item 10). Some(`/dev/pts/<n>ready`) when pts-hosted -- the pts slave is
+    /// not directly pollable; None otherwise, so the caller polls fd 0 itself
+    /// (the console, made pollable by LS-8a). ut always READS fd 0 regardless.
+    pub fn poll_in_fd(&self) -> Option<i32> {
+        self.env.job_control.as_ref().and_then(|jc| jc.poll_in_fd)
     }
 
     /// Service an async wake of the shell's note fd while idle at the prompt
