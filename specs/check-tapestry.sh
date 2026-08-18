@@ -36,7 +36,8 @@ tapestry_present_buggy_reweave_without_quiesce:NoTornScanout
 tapestry_present_buggy_map_after_retire:NoStaleMap
 tapestry_present_buggy_drain_skipped:NoTornCompose
 tapestry_present_buggy_blit_during_fill:NoStaleCompose
-tapestry_present_buggy_fill_during_blit:NoStaleCompose"
+tapestry_present_buggy_fill_during_blit:NoStaleCompose
+tapestry_present_buggy_readback_free:NoTornReadback"
 
 run() {  # $1 = cfg basename -> sets RC and LOG
     LOG="$TMP/$1.log"

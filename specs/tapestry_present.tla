@@ -255,6 +255,43 @@
 (*     compositor is a SECOND reader of the same host resource, that CQE no *)
 (*     longer means the resource is free -> NoStaleCompose counterexample.  *)
 (*                                                                         *)
+(* THE READBACK ARM -- Warp-C C-6 (GPU-DESIGN section 4.5.13). Where the    *)
+(* GPU cannot compose a client's frame by blit (a BO of a shape the         *)
+(* compositor does not blit, an unwitnessed import, a latched compositor    *)
+(* context, no 3D screen) the compositor READS THE FRAME BACK -- a          *)
+(* TRANSFER_FROM_HOST_3D that DMA-WRITES the host resource's pixels into    *)
+(* g's guest pages -- and composes from those pages the CPU way. C-3..C-5   *)
+(* issued that readback SYNCHRONOUSLY on the present dispatch, so it lived   *)
+(* inside one dispatch and needed no model of its own (I-40 by             *)
+(* construction: nothing outlived the dispatch). C-0d Fable F2 found that   *)
+(* wait to be the CLIENT's queue length on the console's thread; C-6 makes  *)
+(* the readback FENCED with DEFERRED present completion, at most one in     *)
+(* flight per generation -- and so, exactly as C-1 did for the blit, adds a *)
+(* class of in-flight host work that a retire must drain:                   *)
+(*                                                                         *)
+(*   host res --ComposeReadbackIssue--> [inread] --ComposeReadbackComplete  *)
+(*            --> g's pages hold the frame -> CPU compose -> screen          *)
+(*                                                                         *)
+(* The readback is a DMA WRITE into g's pages (the blit READ the host       *)
+(* resource and never touched guest memory), so freeing those pages under   *)
+(* an in-flight readback is a device writing freed memory -- the graver of  *)
+(* the two UAFs. NoTornReadback is the LIFETIME leg; there is no CONTENT     *)
+(* leg to model because the device serializes the readback against the     *)
+(* client's fill of the same resource itself (in-order controlq + the       *)
+(* synchronous host read is exactly the side effect P2 credits              *)
+(* transfer_from_3d_sync with) -- so ComposeReadbackIssue carries no        *)
+(* FillLanded guard, deliberately. Attach is NOT required: the readback     *)
+(* runs under the CLIENT's own context, which is why it is the arm for the *)
+(* un-imported BO. The F2b DEVICE stall the readback costs (GPU-DESIGN       *)
+(* 4.5.13) is a duration, not a state, and is not modeled.                  *)
+(*                                                                         *)
+(*   BUGGY_READBACK_FREE (C-6) -- the retire path drains blits (C-1) and    *)
+(*     the direct-path class and is BLIND to in-flight readbacks:            *)
+(*     ServerRelease + Free lose exactly the DrainedOfReadbacks conjunct    *)
+(*     -> NoTornReadback counterexample (the pages freed with a host DMA-   *)
+(*     WRITE landing in them). The same omitted-conjunct style as           *)
+(*     BUGGY_DRAIN_SKIPPED, for the same reason.                            *)
+(*                                                                         *)
 (* CONFIGS                                                                 *)
 (*                                                                         *)
 (*   tapestry_present.cfg            all BUGGY_* FALSE; ALLOW_DESTROY +    *)
@@ -282,6 +319,8 @@
 (*                                   expected VIOLATED (P2 proper).        *)
 (*   tapestry_present_buggy_fill_during_blit.cfg    NoStaleCompose --      *)
 (*                                   expected VIOLATED (the other end).    *)
+(*   tapestry_present_buggy_readback_free.cfg      NoTornReadback --      *)
+(*                                   expected VIOLATED (C-6).             *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -303,7 +342,8 @@ CONSTANTS
     BUGGY_STALE_MAP,           \* BOOLEAN -- let a stale claim token resolve.
     BUGGY_DRAIN_SKIPPED,       \* BOOLEAN -- retire drains only the direct-path class.
     BUGGY_BLIT_DURING_FILL,    \* BOOLEAN -- blit a resource whose fill is still in flight.
-    BUGGY_FILL_DURING_BLIT     \* BOOLEAN -- fill a resource a blit is still reading.
+    BUGGY_FILL_DURING_BLIT,    \* BOOLEAN -- fill a resource a blit is still reading.
+    BUGGY_READBACK_FREE        \* BOOLEAN -- retire is blind to an in-flight readback (C-6).
 
 ASSUME ALLOW_DESTROY            \in BOOLEAN
 ASSUME ALLOW_REWEAVE            \in BOOLEAN
@@ -316,6 +356,7 @@ ASSUME BUGGY_STALE_MAP          \in BOOLEAN
 ASSUME BUGGY_DRAIN_SKIPPED      \in BOOLEAN
 ASSUME BUGGY_BLIT_DURING_FILL   \in BOOLEAN
 ASSUME BUGGY_FILL_DURING_BLIT   \in BOOLEAN
+ASSUME BUGGY_READBACK_FREE      \in BOOLEAN
 
 VARIABLES
     wstate,      \* [Gens -> {"none","woven","live","retiring","gone"}]
@@ -342,11 +383,15 @@ VARIABLES
                  \*   true of "the fill completed" and "no fill was ever issued" -- the
                  \*   compositor must not blit an unpopulated resource on the strength of
                  \*   a counter reading zero.
+    inread,      \* [Gens -> BOOLEAN] -- C-6: a compositor READBACK is in flight: a host
+                 \*   DMA-WRITE of g's host resource into g's guest pages (the fenced
+                 \*   TRANSFER_FROM_HOST_3D of the composed-GL present's fallback arm), at
+                 \*   most one per generation. Never leaves FALSE with ALLOW_COMPOSE off.
     staleMapped, \* BOOLEAN -- history: a claim resolved against a retiring/gone weave
     destroyReq   \* BOOLEAN -- the surface destroy was requested
 
 vars == <<wstate, backed, serverRef, mapped, armed, slot, intransfer, displayed,
-          attached, inblit, filled, staleMapped, destroyReq>>
+          attached, inblit, filled, inread, staleMapped, destroyReq>>
 
 TypeOK ==
     /\ wstate      \in [Gens -> {"none", "woven", "live", "retiring", "gone"}]
@@ -360,6 +405,7 @@ TypeOK ==
     /\ attached    \in [Gens -> BOOLEAN]
     /\ inblit      \in [Gens -> BOOLEAN]
     /\ filled      \in [Gens -> BOOLEAN]
+    /\ inread      \in [Gens -> BOOLEAN]
     /\ staleMapped \in BOOLEAN
     /\ destroyReq  \in BOOLEAN
 
@@ -375,6 +421,7 @@ Init ==
     /\ attached    = [g \in Gens |-> FALSE]
     /\ inblit      = [g \in Gens |-> FALSE]
     /\ filled      = [g \in Gens |-> FALSE]
+    /\ inread      = [g \in Gens |-> FALSE]
     /\ staleMapped = FALSE
     /\ destroyReq  = FALSE
 
@@ -405,6 +452,14 @@ ComposeIdle(g) == BUGGY_FILL_DURING_BLIT \/ ~InBlit(g)
 \* conjunct whose absence is the defect.
 DrainedOfBlits(g) == BUGGY_DRAIN_SKIPPED \/ ~InBlit(g)
 
+\* C-6: a compositor readback (a host DMA-WRITE into g's pages) is in flight.
+InRead(g) == inread[g]
+
+\* The C-6 drain conjunct: no readback is landing in g's pages. Under
+\* BUGGY_READBACK_FREE this degrades to TRUE -- the retire path that drains
+\* transfers (#898) and blits (C-1) and is blind to the third in-flight class.
+DrainedOfReadbacks(g) == BUGGY_READBACK_FREE \/ ~InRead(g)
+
 (***************************************************************************)
 (* Server: weave allocation (create-surface / the reweave CONFIGURE ack).  *)
 (***************************************************************************)
@@ -416,7 +471,7 @@ WeaveFirst ==
     /\ backed'    = [backed    EXCEPT !["g1"] = TRUE]
     /\ serverRef' = [serverRef EXCEPT !["g1"] = TRUE]
     /\ armed'     = [armed     EXCEPT !["g1"] = TRUE]
-    /\ UNCHANGED <<mapped, slot, intransfer, displayed, attached, inblit, filled,
+    /\ UNCHANGED <<mapped, slot, intransfer, displayed, attached, inblit, filled, inread,
                    staleMapped, destroyReq>>
 
 Reweave ==
@@ -428,7 +483,7 @@ Reweave ==
     /\ backed'    = [backed    EXCEPT !["g2"] = TRUE]
     /\ serverRef' = [serverRef EXCEPT !["g2"] = TRUE]
     /\ armed'     = [armed     EXCEPT !["g2"] = TRUE]
-    /\ UNCHANGED <<mapped, slot, intransfer, displayed, attached, inblit, filled,
+    /\ UNCHANGED <<mapped, slot, intransfer, displayed, attached, inblit, filled, inread,
                    staleMapped, destroyReq>>
 
 (***************************************************************************)
@@ -442,7 +497,7 @@ Map(g) ==
     /\ armed'  = [armed  EXCEPT ![g] = FALSE]
     /\ wstate' = [wstate EXCEPT ![g] = "live"]
     /\ UNCHANGED <<backed, serverRef, slot, intransfer, displayed, attached,
-                   inblit, filled, staleMapped, destroyReq>>
+                   inblit, filled, inread, staleMapped, destroyReq>>
 
 MapStale(g) ==
     /\ BUGGY_STALE_MAP
@@ -452,13 +507,13 @@ MapStale(g) ==
     /\ armed'       = [armed  EXCEPT ![g] = FALSE]
     /\ staleMapped' = TRUE
     /\ UNCHANGED <<wstate, backed, serverRef, slot, intransfer, displayed,
-                   attached, inblit, filled, destroyReq>>
+                   attached, inblit, filled, inread, destroyReq>>
 
 ClunkMap(g) ==
     /\ mapped[g]
     /\ mapped' = [mapped EXCEPT ![g] = FALSE]
     /\ UNCHANGED <<wstate, backed, serverRef, armed, slot, intransfer, displayed,
-                   attached, inblit, filled, staleMapped, destroyReq>>
+                   attached, inblit, filled, inread, staleMapped, destroyReq>>
 
 (***************************************************************************)
 (* Client: draw + present. Server/host: the transfer completion.           *)
@@ -471,7 +526,7 @@ Draw(g, s) ==
     /\ slot[g][s] = "free"
     /\ slot' = [slot EXCEPT ![g][s] = "drawn"]
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, intransfer,
-                   displayed, attached, inblit, filled, staleMapped, destroyReq>>
+                   displayed, attached, inblit, filled, inread, staleMapped, destroyReq>>
 
 Submit(g, s) ==
     /\ ~destroyReq
@@ -483,7 +538,7 @@ Submit(g, s) ==
     /\ slot'       = [slot       EXCEPT ![g][s] = "pending"]
     /\ intransfer' = [intransfer EXCEPT ![g][s] = 1]
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, displayed,
-                   attached, inblit, filled, staleMapped, destroyReq>>
+                   attached, inblit, filled, inread, staleMapped, destroyReq>>
 
 SubmitEarlyFree(g, s) ==
     /\ BUGGY_EARLY_FREE
@@ -495,7 +550,7 @@ SubmitEarlyFree(g, s) ==
     /\ slot'       = [slot       EXCEPT ![g][s] = "free"]
     /\ intransfer' = [intransfer EXCEPT ![g][s] = @ + 1]
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, displayed,
-                   attached, inblit, filled, staleMapped, destroyReq>>
+                   attached, inblit, filled, inread, staleMapped, destroyReq>>
 
 Complete(g, s) ==
     /\ intransfer[g][s] > 0
@@ -519,7 +574,7 @@ Complete(g, s) ==
     \* -> 10413 states on the direct path and broke that check.
     /\ filled' = IF ALLOW_COMPOSE THEN [filled EXCEPT ![g] = TRUE] ELSE filled
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, attached, inblit,
-                   staleMapped, destroyReq>>
+                   inread, staleMapped, destroyReq>>
 
 (***************************************************************************)
 (* C-1: the composed present (Warp-C, GPU-DESIGN section 4.5).             *)
@@ -539,7 +594,7 @@ Attach(g) ==
     /\ wstate[g] \in {"woven", "live"}
     /\ attached' = [attached EXCEPT ![g] = TRUE]
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, slot, intransfer,
-                   displayed, inblit, filled, staleMapped, destroyReq>>
+                   displayed, inblit, filled, inread, staleMapped, destroyReq>>
 
 \* ctx_detach_resource. Never under an in-flight blit: the host would be
 \* reading a resource it no longer has a reference to through this context.
@@ -548,7 +603,7 @@ Detach(g) ==
     /\ ~InBlit(g)
     /\ attached' = [attached EXCEPT ![g] = FALSE]
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, slot, intransfer,
-                   displayed, inblit, filled, staleMapped, destroyReq>>
+                   displayed, inblit, filled, inread, staleMapped, destroyReq>>
 
 \* The correct composition blit: the fill of g's host resource has LANDED --
 \* the cross-context sync that transfer_from_3d_sync used to supply as a side
@@ -565,7 +620,7 @@ ComposeBlit(g) ==
     /\ FillLanded(g)
     /\ inblit' = [inblit EXCEPT ![g] = TRUE]
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, slot, intransfer,
-                   displayed, attached, filled, staleMapped, destroyReq>>
+                   displayed, attached, filled, inread, staleMapped, destroyReq>>
 
 \* The composition fence retires -> SET_SCANOUT(screen) + RESOURCE_FLUSH. The
 \* displayed update mirrors Complete's exactly (a retiring generation never
@@ -582,7 +637,49 @@ ComposeComplete(g) ==
                               THEN g
                               ELSE displayed
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, slot, intransfer,
-                   attached, filled, staleMapped, destroyReq>>
+                   attached, filled, inread, staleMapped, destroyReq>>
+
+(***************************************************************************)
+(* C-6: the readback arm of the composed present (GPU-DESIGN 4.5.13).      *)
+(*                                                                         *)
+(* Issue = the fenced TRANSFER_FROM_HOST_3D of g's host resource INTO g's  *)
+(* guest pages, at most one in flight per generation (a present arriving   *)
+(* while one is pending is coalesced -- latest wins -- so a second Issue   *)
+(* is not an action). Requires a populated resource (filled), like the     *)
+(* blit; requires NEITHER attached (it runs under the client's own ctx --  *)
+(* it is the arm for the un-imported BO) NOR FillLanded (the device        *)
+(* serializes the read against the client's fill: the in-order controlq    *)
+(* plus the synchronous host read, the very side effect P2 credits the     *)
+(* sync readback with -- so no content leg exists to model). No new        *)
+(* readback once retiring, which is what lets the drain terminate.         *)
+(* Complete = the fence retiring: g's pages now hold the frame, the CPU    *)
+(* compose runs, the screen shows g (the displayed update mirrors          *)
+(* ComposeComplete's).                                                     *)
+(***************************************************************************)
+
+ComposeReadbackIssue(g) ==
+    /\ ALLOW_COMPOSE
+    /\ ~destroyReq
+    /\ wstate[g] = "live"
+    /\ ~InRead(g)
+    /\ filled[g]
+    /\ inread' = [inread EXCEPT ![g] = TRUE]
+    /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, slot, intransfer,
+                   displayed, attached, inblit, filled, staleMapped, destroyReq>>
+
+ComposeReadbackComplete(g) ==
+    /\ InRead(g)
+    /\ backed[g]
+    /\ inread' = [inread EXCEPT ![g] = FALSE]
+    /\ displayed' = IF wstate[g] # "live"
+                    THEN displayed
+                    ELSE IF displayed = "nothing"
+                         THEN g
+                         ELSE IF GenNo(g) > GenNo(displayed)
+                              THEN g
+                              ELSE displayed
+    /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, slot, intransfer,
+                   attached, inblit, filled, staleMapped, destroyReq>>
 
 (***************************************************************************)
 (* Teardown: destroy / the reweave displacement / the free edge.           *)
@@ -603,14 +700,14 @@ Destroy ==
                     IF wstate[g] \in {"woven", "live"} THEN "retiring"
                                                        ELSE wstate[g]]
     /\ UNCHANGED <<backed, serverRef, mapped, armed, slot, intransfer,
-                   displayed, attached, inblit, filled, staleMapped>>
+                   displayed, attached, inblit, filled, inread, staleMapped>>
 
 RetireDisplaced ==
     /\ wstate["g1"] = "live"
     /\ displayed = "g2"
     /\ wstate' = [wstate EXCEPT !["g1"] = "retiring"]
     /\ UNCHANGED <<backed, serverRef, mapped, armed, slot, intransfer,
-                   displayed, attached, inblit, filled, staleMapped, destroyReq>>
+                   displayed, attached, inblit, filled, inread, staleMapped, destroyReq>>
 
 \* The graceful server-side ref drop: tapestryd finishes quiescing a retiring
 \* weave's in-flight presents (#898) AND its in-flight composition blits (C-1),
@@ -623,9 +720,10 @@ ServerRelease(g) ==
     /\ serverRef[g]
     /\ \A s \in Slots : intransfer[g][s] = 0
     /\ DrainedOfBlits(g)
+    /\ DrainedOfReadbacks(g)
     /\ serverRef' = [serverRef EXCEPT ![g] = FALSE]
     /\ UNCHANGED <<wstate, backed, mapped, armed, slot, intransfer, displayed,
-                   attached, inblit, filled, staleMapped, destroyReq>>
+                   attached, inblit, filled, inread, staleMapped, destroyReq>>
 
 \* F4: a tapestryd crash. Every live/woven generation snaps to "retiring", the
 \* registry's claim tokens die (armed -> FALSE -- weft_share_release_owner), AND
@@ -642,6 +740,8 @@ ServerRelease(g) ==
 \* may still be executing a composition blit when the guest Proc is reaped, so
 \* the crash must reach inblit = TRUE with the server gone. Clearing it here
 \* would make NoTornCompose vacuous across exactly the path that most needs it.
+\* C-6: inread likewise -- a readback the device is still landing outlives the
+\* reaped server, and NoTornReadback must be checked across that state.
 ServerDeath ==
     /\ ALLOW_SERVER_DEATH
     /\ ~destroyReq
@@ -655,7 +755,7 @@ ServerDeath ==
                                                        ELSE serverRef[g]]
     /\ armed'  = [g \in Gens |-> FALSE]
     /\ UNCHANGED <<backed, mapped, slot, intransfer, displayed, attached,
-                   inblit, filled, staleMapped>>
+                   inblit, filled, inread, staleMapped>>
 
 Free(g) ==
     /\ wstate[g] = "retiring"
@@ -663,11 +763,12 @@ Free(g) ==
     /\ ~mapped[g]
     /\ \A s \in Slots : intransfer[g][s] = 0
     /\ DrainedOfBlits(g)
+    /\ DrainedOfReadbacks(g)
     /\ wstate'    = [wstate EXCEPT ![g] = "gone"]
     /\ backed'    = [backed EXCEPT ![g] = FALSE]
     /\ attached'  = [attached EXCEPT ![g] = FALSE]
     /\ displayed' = IF displayed = g THEN "nothing" ELSE displayed
-    /\ UNCHANGED <<serverRef, mapped, armed, slot, intransfer, inblit, filled,
+    /\ UNCHANGED <<serverRef, mapped, armed, slot, intransfer, inblit, filled, inread,
                    staleMapped, destroyReq>>
 
 FreeNoQuiesce(g) ==
@@ -676,7 +777,7 @@ FreeNoQuiesce(g) ==
     /\ wstate' = [wstate EXCEPT ![g] = "gone"]
     /\ backed' = [backed EXCEPT ![g] = FALSE]
     /\ UNCHANGED <<serverRef, mapped, armed, slot, intransfer, displayed,
-                   attached, inblit, filled, staleMapped, destroyReq>>
+                   attached, inblit, filled, inread, staleMapped, destroyReq>>
 
 ReweaveEagerFree ==
     /\ BUGGY_REWEAVE_NO_QUIESCE
@@ -685,7 +786,7 @@ ReweaveEagerFree ==
     /\ wstate' = [wstate EXCEPT !["g1"] = "gone"]
     /\ backed' = [backed EXCEPT !["g1"] = FALSE]
     /\ UNCHANGED <<serverRef, mapped, armed, slot, intransfer, displayed,
-                   attached, inblit, filled, staleMapped, destroyReq>>
+                   attached, inblit, filled, inread, staleMapped, destroyReq>>
 
 (***************************************************************************)
 (* The next-state relation.                                                *)
@@ -703,6 +804,7 @@ Next ==
          \/ ServerRelease(g) \/ Free(g) \/ FreeNoQuiesce(g)
          \/ Attach(g) \/ Detach(g)
          \/ ComposeBlit(g) \/ ComposeComplete(g)
+         \/ ComposeReadbackIssue(g) \/ ComposeReadbackComplete(g)
     \/ \E g \in Gens, s \in Slots :
          \/ Draw(g, s) \/ Submit(g, s) \/ SubmitEarlyFree(g, s)
          \/ Complete(g, s)
@@ -779,6 +881,14 @@ NoStaleCompose ==
 ComposeNeedsAttach ==
     \A g \in Gens : InBlit(g) => attached[g]
 
+\* C-6 LIFETIME leg: a generation's pages stay backed while a compositor
+\* readback is landing in them. The readback is a host DMA WRITE into guest
+\* memory, so this is the graver twin of NoTornCompose (a blit only READ the
+\* host resource); BUGGY_READBACK_FREE breaks it -- retiring on the transfer +
+\* blit drains alone frees the pages the device is still writing.
+NoTornReadback ==
+    \A g \in Gens : InRead(g) => backed[g]
+
 Invariants ==
     /\ TypeOK
     /\ NoTornScanout
@@ -792,6 +902,7 @@ Invariants ==
     /\ NoTornCompose
     /\ NoStaleCompose
     /\ ComposeNeedsAttach
+    /\ NoTornReadback
 
 (***************************************************************************)
 (* Liveness: a destroy always drains to full teardown (no stranded weave). *)
@@ -802,6 +913,7 @@ Fairness ==
     /\ \A g \in Gens : WF_vars(ServerRelease(g))
     /\ \A g \in Gens : WF_vars(Free(g))
     /\ \A g \in Gens : WF_vars(ComposeComplete(g))
+    /\ \A g \in Gens : WF_vars(ComposeReadbackComplete(g))
     /\ \A g \in Gens : \A s \in Slots : WF_vars(Complete(g, s))
 
 Spec_Live == Spec /\ Fairness

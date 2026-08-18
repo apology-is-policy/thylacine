@@ -2298,15 +2298,23 @@ contribution to device stalls is bounded and coalesced, never a queue.
   already carries. `Controlq` learns which in-flight fenced slots are
   readbacks (a bit set at `transfer_3d(to_host = false)`); the wait loop
   reads it. This half is F2b's guest-side mitigation and lands with C-6.
-- **Spec.** `tapestry_present.tla` gains the readback shape behind the same
+- **Spec — LANDED FIRST (2026-08-18, before any C-6 code).**
+  `tapestry_present.tla` carries the readback shape behind the same
   `ALLOW_COMPOSE` switch: `ComposeReadbackIssue(g)` (a fenced device WRITE
-  into the client BO's pages: `[inread]`) → `ComposeReadbackComplete(g)`
-  (the fence retires; the CPU compose reads those pages) with the retire
-  guard generalized from `DrainedOfBlits(g)` to "no in-flight device op
-  names g's pages" and a `buggy_readback_free` cfg (freeing the BO backing
-  under an in-flight readback) as the counterexample. Additive by
-  measurement, as C-1 was: with the switch off the existing cfgs must
-  reproduce their exact state counts.
+  into the client BO's pages: `inread[g]`, at most one per generation) →
+  `ComposeReadbackComplete(g)` (the fence retires; the CPU compose reads
+  those pages), `NoTornReadback` (`InRead(g) => backed[g]`, the graver twin
+  of `NoTornCompose`: a device WRITING freed pages), and
+  `DrainedOfReadbacks(g)` on `ServerRelease` + `Free`, omitted under
+  `BUGGY_READBACK_FREE` (`tapestry_present_buggy_readback_free.cfg`: TLC
+  violates `NoTornReadback` in 11 states — … `ClunkMap` →
+  `ComposeReadbackIssue` → `Destroy` → `ServerRelease` → `Free`). Additive
+  by measurement, as C-1 was: with the switch off the six direct-path cfgs
+  reproduce **5413** distinct states exactly; the composed clean cfgs grow to
+  94680 and stay green with liveness. `check-tapestry.sh`: ALL 12 CFGS AS
+  CLAIMED. No `FillLanded` guard on Issue (the device serializes the read —
+  verified in vrend 1.1.0) and no `attached` (the client's own ctx), both
+  deliberate and recorded in the module header.
 - **Gates.** `warp-host.sh decomp` and `quake` on thyla-pi (the blit arm
   must be untouched: `composed gpu ≥ 1`, `readback` still 0 there); a
   NEW `warp-prove` leg on the Pi that forces the readback arm (a

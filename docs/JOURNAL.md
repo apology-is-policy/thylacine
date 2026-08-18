@@ -162,6 +162,29 @@ does not carry the one file they all depend on. Caught by checking the Pi's
 copy for the new proc before running (`grep -c` on both files, 1 vs 0);
 `lib.exp` is in the list now.
 
+### C-6a — the spec first (`tapestry_present.tla`, same run, after the push)
+
+With the close pushed and ~100k of context left before the checkpoint line,
+the next chunk was opened at its spec-first step rather than its code, so
+that a compaction lands on a boundary and C-6's code has a model to be
+audited against. `ComposeReadbackIssue`/`ComposeReadbackComplete` (a fenced
+host DMA-WRITE into the client BO's pages, one in flight per generation),
+`NoTornReadback`, `DrainedOfReadbacks` on `ServerRelease` + `Free`, and
+`BUGGY_READBACK_FREE` as an omitted conjunct — the C-1 house style, for the
+C-1 reason (a twin action drifts in more ways than the one under test). Two
+deliberate absences, argued in the header: no `FillLanded` guard on Issue
+(the device serializes the read against the fill — the very side effect P2
+credits the sync readback with, now read in vrend 1.1.0 rather than
+assumed) and no `attached` (the readback runs under the CLIENT's ctx; it is
+the arm for the un-imported BO). `check-tapestry.sh`: ALL 12 CFGS AS
+CLAIMED — the six direct-path cfgs at **5413** states exactly (the
+additivity control, held twice now), the composed clean cfgs at 94680 with
+liveness, and `buggy_readback_free` violating `NoTornReadback` in 11 states
+(… `ClunkMap` → `ComposeReadbackIssue` → `Destroy` → `ServerRelease` →
+`Free`: the pages freed with the device still writing them). SPEC-TO-CODE
+names the sites the impl binds at; ARCH §28 I-40 / CLAUDE.md say 8 buggy
+cfgs now.
+
 ### The bar
 
 Local (mac): `cargo build -p tapestryd -p warp-prove --release`; ramfs
