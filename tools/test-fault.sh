@@ -19,6 +19,18 @@
 #   secondary_stack_guard — secondary-CPU boot-stack guard page fires
 #                     (P5-secondary-stack-guard) →
 #                     "EXTINCTION: kernel stack overflow"
+#   bootcpu_idle_guard — boot-CPU idle-stack guard page fires →
+#                     "EXTINCTION: kernel stack overflow"
+#   recursive_kernel_fault — the #806 handler re-entrancy guard fires →
+#                     "EXTINCTION: recursive kernel fault"
+#   el1_sync_runaway — a fault taken from INSIDE the extinction path drives
+#                     the EL1-sync depth to EL1_SYNC_DEPTH_MAX (#246) →
+#                     "EXTINCTION: el1-sync recursion"
+#
+# This list is the one place a reader learns what exists, so keep it equal to
+# ALL_VARIANTS below. It was short by two (bootcpu_idle_guard,
+# recursive_kernel_fault) until 2026-08-18 -- the same rot #245 fixed one
+# level up, where a thing exists and its only description does not say so.
 #
 # Deferred at v1.0 (post-v1.0 hardening pass):
 #   pac_mismatch — needs forged-LR inline asm; the resulting fault
@@ -46,7 +58,7 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
 
 # variant → expected extinction substring (case-sensitive prefix match
 # against the EXTINCTION: line). Keep the case below in sync with this.
-ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault"
+ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault el1_sync_runaway"
 
 expected_for() {
     case "$1" in
@@ -57,6 +69,7 @@ expected_for() {
         secondary_stack_guard) echo "EXTINCTION: kernel stack overflow" ;;
         bootcpu_idle_guard)    echo "EXTINCTION: kernel stack overflow" ;;
         recursive_kernel_fault) echo "EXTINCTION: recursive kernel fault" ;;
+        el1_sync_runaway)      echo "EXTINCTION: el1-sync recursion" ;;
         *)               echo "" ;;
     esac
 }
@@ -67,14 +80,25 @@ selected=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -v|--verbose) verbose=1; shift ;;
-        canary_smash|wxe_violation|bti_fault|kstack_overflow|secondary_stack_guard|bootcpu_idle_guard|recursive_kernel_fault)
-            selected="$selected $1"; shift ;;
         -h|--help)
             echo "Usage: $0 [-v] [variant...]"
-            echo "Variants: canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault"
+            echo "Variants: $ALL_VARIANTS"
             exit 0
             ;;
-        *) echo "Unknown arg: $1" >&2; exit 2 ;;
+        # DERIVED from ALL_VARIANTS, never a second hand-written list. There
+        # were FOUR enumerations of this set (ALL_VARIANTS, expected_for, this
+        # arm, and --help); adding a variant updated two of them and the other
+        # two silently refused it. A set with four independent spellings has no
+        # spelling anything can be checked against.
+        *)
+            if [[ " $ALL_VARIANTS " == *" $1 "* ]]; then
+                selected="$selected $1"; shift
+            else
+                echo "Unknown arg: $1" >&2
+                echo "Variants: $ALL_VARIANTS" >&2
+                exit 2
+            fi
+            ;;
     esac
 done
 

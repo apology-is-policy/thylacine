@@ -11181,13 +11181,28 @@ static void viv_report_unserved(u64 nr, const char *why) {
     if (__atomic_fetch_add(&g_viv_unserved_reports, 1u, __ATOMIC_RELAXED)
         >= VIV_UNSERVED_MAX_REPORTS)
         return;
-    uart_puts("vivarium: unserved linux syscall nr=");
-    uart_putdec(nr);
-    uart_puts(" (");
-    uart_puts(why);
-    uart_puts(") pid=");
-    uart_putdec((u64)pid);
-    uart_puts("\n");
+    // #243: ONE unit under the ring lock, not seven lock-free uart_* calls.
+    // The raw loop is the pre-P1-F shape #75 exists to eliminate, and #76
+    // removed it from SYS_PUTS one file above after it was observed LIVE
+    // shredding a login prompt byte-for-byte against a peer writer. This
+    // path arrived later and reached for it again -- and it is the worse
+    // site of the two, because an unprivileged EL0 program CHOOSES when it
+    // fires by issuing a syscall the phenotype does not serve. A direct
+    // uart_puts also bypasses the extinction ring claim, whose hold stops
+    // every ring producer and the drain but cannot stop a peer writing the
+    // FIFO by another road -- so these bytes could land inside an
+    // `EXTINCTION:` line, which costs the multi-boot classifier a real
+    // corruption verdict and can invert a test-fault.sh result.
+    struct cons_diag_line l;
+    cons_diag_line_init(&l);
+    cons_diag_line_puts(&l, "vivarium: unserved linux syscall nr=");
+    cons_diag_line_putdec(&l, nr);
+    cons_diag_line_puts(&l, " (");
+    cons_diag_line_puts(&l, why);
+    cons_diag_line_puts(&l, ") pid=");
+    cons_diag_line_putdec(&l, (u64)pid);
+    cons_diag_line_puts(&l, "\n");
+    cons_diag_line_emit(&l);
 }
 
 // VIV_TRACE: a bounded per-Proc trace of EVERY phenotyped syscall, not just

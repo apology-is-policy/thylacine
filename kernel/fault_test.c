@@ -255,6 +255,39 @@ static void provoke_recursive_kernel_fault(void) {
 #endif
 
 // ---------------------------------------------------------------------------
+// el1_sync_runaway -- #246. The EL1-sync depth ladder tops out at
+// EL1_SYNC_DEPTH_MAX == 3 and el1_sync_runaway fires at EXACTLY that depth, so
+// nothing in the suite or in any other variant can reach it: the #806 guard
+// extincts at depth 2, and a healthy extinction path then prints and parks.
+// The ONLY route to depth 3 is a fault taken from INSIDE the extinction path,
+// which is precisely the shape #244 had by accident -- and #244 went unseen for
+// a month because no harness drove this arm.
+//
+// So: the same entry as recursive_kernel_fault (a wild current_thread makes the
+// first kernel abort's handler re-fault, taking EL1-sync depth to 2, where the
+// #806 guard calls extinction_with_addr), plus a compile-time-guarded fault
+// inside extinction_with_addr itself, which takes depth to 3.
+//
+// This FAILS on the pre-7dd5be19 code and PASSES on the fix, which is the point:
+// there, el1_sync_runaway's own pre-emit flush used the COUNTED spin_trylock,
+// whose spin_preempt_inc dereferences the wild current_thread -- so it faulted
+// to depth 4, hit the depth > MAX arm, and parked SILENTLY, emitting nothing at
+// all. A test that would have caught the bug, rather than one written to agree
+// with the fix.
+// ---------------------------------------------------------------------------
+
+#ifdef THYLACINE_FAULT_TEST_el1_sync_runaway
+__attribute__((noinline))
+__attribute__((no_stack_protector))
+static void provoke_el1_sync_runaway(void) {
+    __asm__ __volatile__("msr tpidr_el1, %0" :: "r"((u64)0xdead000000000000ULL));
+    volatile u64 *p = (volatile u64 *)0xffff999900000000ULL;
+    __asm__ __volatile__("" : "+r"(p));
+    *p = 0xbadu;
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Public entry point. Called from boot_main before the success line.
 //
 // In a production build, evaluates to a single return.
@@ -289,6 +322,10 @@ void fault_test_run(void) {
     uart_puts("  fault-test: invoking recursive_kernel_fault...\n");
     provoke_recursive_kernel_fault();
     uart_puts("FAIL: provoke_recursive_kernel_fault returned (no fault fired)\n");
+#elif defined(THYLACINE_FAULT_TEST_el1_sync_runaway)
+    uart_puts("  fault-test: invoking el1_sync_runaway...\n");
+    provoke_el1_sync_runaway();
+    uart_puts("FAIL: provoke_el1_sync_runaway returned (no fault fired)\n");
 #else
     // No fault test selected — production build.
 #endif

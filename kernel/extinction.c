@@ -205,6 +205,23 @@ void extinction_with_addr(const char *msg, uintptr_t addr) {
     uart_puts(" ");          // uart_puthex64 emits its own "0x" prefix
     uart_puthex64((uint64_t)addr);
     uart_puts("\n");
+#ifdef THYLACINE_FAULT_TEST_el1_sync_runaway
+    // #246: the ONLY reachable route to el1_sync_runaway -- take EL1-sync depth
+    // from 2 (where the #806 guard called us) to EL1_SYNC_DEPTH_MAX. Placed
+    // HERE, after the ring claim and the ABI line and BEFORE halls_dump,
+    // deliberately: a regression test wants ONE determined fault site, and
+    // letting halls_dump fault first would reach the same arm from a place that
+    // varies with the dump's contents. It also puts the runaway's claim-or-own
+    // and cons_tx_claim_for_dump on their ALREADY-OWNED-BY-THIS-CPU arms, which
+    // no other test constructs. Absent from every build that does not define
+    // this variant -- verify the production ELF is byte-identical, do not
+    // assume it.
+    {
+        volatile uint64_t *q = (volatile uint64_t *)0xffff999911000000ULL;
+        __asm__ __volatile__("" : "+r"(q));
+        *q = 0xdeadu;
+    }
+#endif
     halls_dump((void *)0);
     extinction_report_suppressed();
     extinction_report_ring();
