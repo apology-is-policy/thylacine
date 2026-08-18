@@ -2531,6 +2531,34 @@ fn rb_incomplete(arm: &str) -> ! {
 
 /// Mint a W x H B8G8R8A8 render-target BO with `flags` (Y_0_TOP makes it
 /// NON-composable -- the readback arm's shape) and return (bo, res, va).
+/// Mint a BO declaring `w`x`h` but backed by `size` bytes -- the shape the
+/// follow-up round's F1 turned on. The create-time door has NO lower bound
+/// (deliberately: Mesa's staging and MSAA paths declare one page for a real
+/// texture), so this SUCCEEDS at create3d. The refusal that matters happens
+/// later, at the READ gate in `gl_adoption`.
+///
+/// Deliberately does NOT open `map`: `b.dma_fd` is set SERVER-side inside
+/// `wbo_create`, not by the client's map, so this BO still passes
+/// `gl_adoption`'s `dma_fd >= 0` arm and the ONLY difference from the control
+/// is `b.size`. If it refused on `dma_fd` instead, the leg would pass for the
+/// wrong reason. (`gl_adoption` also pins `b.w == s.w && b.h == s.h`; if the
+/// surface geometry ever diverges from RB_W/RB_H the CONTROL fails too and the
+/// leg reports INSTRUMENT rather than a false PASS.)
+fn mint_bo_wh_sized(root: i64, ctx: u32, w: u32, h: u32, flags: u32, size: u32, what: &str) -> u32 {
+    let bo = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
+        Some(v) => v,
+        None => fail(&format!("readback: bo/new for {}", what)),
+    };
+    let create = format!(
+        "create3d {} {} {} {} {} 1 1 0 0 {} {}",
+        PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET, w, h, flags, size
+    );
+    if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &create) {
+        fail(&format!("readback: create3d for {} (the door must ADMIT this)", what));
+    }
+    bo
+}
+
 fn mint_bo_wh(root: i64, ctx: u32, w: u32, h: u32, flags: u32, what: &str) -> (u32, u32, u64) {
     let bo = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
         Some(v) => v,
@@ -2846,6 +2874,93 @@ fn observe_readback() {
     }
     if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), &format!("present-to {} {}", a.id, bo)) {
         rb_incomplete("instrument:present-to");
+    }
+
+    // FOLLOW-UP ROUND F1's owed regression, at the gate that actually carries
+    // it. The C-6b close guarded the read-overrun at the create-time DOOR and
+    // that brace was removed -- it refused legitimate Mesa staging/MSAA
+    // resources, which declare one page for a real texture. The bound lives at
+    // the READ gate (`gl_adoption`: `b.size >= b.w * b.h * 4`), so that is
+    // where the test has to look.
+    //
+    // Asserting the door would prove nothing now, and asserting "it did not
+    // crash" proves nothing ever. The observable is `rb-issued`: an adoption
+    // the read gate refuses issues NO compositor readback. The CONTROL is the
+    // correctly-backed BO one variable away -- without it this leg passes just
+    // as well against a compositor that never issues a readback at all, and
+    // "the undersized one was refused" would be true for the wrong reason.
+    let guard_pass = {
+        let short_bo = mint_bo_wh_sized(
+            warp, ctx, RB_W, RB_H, VIRGL_RESOURCE_Y_0_TOP, 4096, "undersized",
+        );
+        let i0 = match rb_census(warp) { Some(c) => c.issued, None => rb_incomplete("instrument:guard-census") };
+        if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), &format!("present-to {} {}", a.id, short_bo)) {
+            rb_incomplete("instrument:guard-present-to");
+        }
+        if a.present(None).is_err() {
+            rb_incomplete("instrument:guard-present");
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(200));
+        let i1 = match rb_census(warp) { Some(c) => c.issued, None => rb_incomplete("instrument:guard-census") };
+
+        // Restore the correctly-backed adoption and prove the SAME sequence
+        // does move it -- so the negative above is about the SIZE and not
+        // about presents being inert here.
+        if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), &format!("present-to {} {}", a.id, bo)) {
+            rb_incomplete("instrument:guard-restore");
+        }
+        if a.present(None).is_err() {
+            rb_incomplete("instrument:guard-present2");
+        }
+        let mut i2 = i1;
+        for _ in 0..40 {
+            let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+            i2 = match rb_census(warp) { Some(c) => c.issued, None => rb_incomplete("instrument:guard-census") };
+            if i2 > i1 { break; }
+        }
+        if i1 != i0 {
+            t_putstr(&format!(
+                "warp-prove: C6-RB GUARD FAIL -- the compositor issued a readback ({}->{}) of a \
+                 BO declaring {}x{} backed by 4096 bytes; the read gate did not refuse it and \
+                 the compose would read {} bytes out of one page (round F1)\n",
+                i0, i1, RB_W, RB_H, RB_W * RB_H * 4
+            ));
+            false
+        } else if i2 <= i1 {
+            t_putstr(
+                "warp-prove: C6-RB GUARD INSTRUMENT -- the CONTROL never issued either; presents \
+                 are not reaching the readback arm at all, so the refusal above means nothing\n",
+            );
+            false
+        } else {
+            // QUIESCE before returning. The control above leaves a readback IN
+            // FLIGHT, and the ARM leg that runs next asserts `landed >
+            // c0.landed` after its own present -- which OUR readback landing
+            // would satisfy. A leg that leaves work in flight makes the next
+            // leg pass for the wrong reason; drain it here rather than hope
+            // the ordering holds.
+            for _ in 0..40 {
+                let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+                // `rb-slot` IS the in-flight signal (0 free / 1 busy / 2
+                // poisoned) -- a terminal-count comparison would need
+                // `rb-dropped`, which this census struct does not carry.
+                match rb_census(warp) {
+                    Some(c) if c.slot == 0 => break,
+                    Some(_) => {}
+                    None => rb_incomplete("instrument:guard-census"),
+                }
+            }
+            t_putstr(&format!(
+                "warp-prove: C6-RB GUARD PASS -- an undersized adoption issued NO readback \
+                 (rb-issued {} unchanged) while the correctly-backed twin issued one ({}->{}) \
+                 through the SAME present: the read gate discriminates on SIZE\n",
+                i0, i1, i2
+            ));
+            true
+        }
+    };
+    if !guard_pass {
+        rb_incomplete("guard");
     }
 
     // Prime the stream (sub-ctx + a surface over the BO + one clear + the
