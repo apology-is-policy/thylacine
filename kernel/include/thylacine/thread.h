@@ -222,8 +222,11 @@ struct Thread {
     // `note_mask`  — bit per NOTE_BIT_* (see <thylacine/notes.h>). Bit set
     //                means this Thread defers delivery of that note (queue
     //                entry is left in place; another Thread of the Proc, or
-    //                a future unmask, picks it up). Set / cleared by
-    //                SYS_NOTE_MASK.
+    //                a future unmask, picks it up). Written ONLY by the owning
+    //                thread: SYS_NOTE_MASK, the phenotype rt_sigprocmask row,
+    //                the Linux delivery store, and the sigreturn restore --
+    //                never while that thread is inside a sleep/tsleep/torpor
+    //                (the lock-free read in thread_die_pending relies on this).
     //
     // `in_handler` — true while an async note handler is RUNNING on this
     //                Thread (between the EL0-return-tail dispatch and the

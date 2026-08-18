@@ -1095,8 +1095,10 @@ void notes_mark_self_managing(struct Proc *p) {
 // loads of group_exit_msg + proc_flags, and the OWNER-read note_mask (`t` is
 // always the calling thread at every site -- sleep/tsleep's register-then-
 // observe, torpor's post-register check, the 9P reader's unwind decision --
-// and a thread's mask only changes by its own SYS_NOTE_MASK, never while it
-// is inside one of those calls). A masked thread reads false from the latch
+// and note_mask is written ONLY by the owning thread: SYS_NOTE_MASK, the
+// phenotype's rt_sigprocmask row, the Linux delivery store, and the phenotype
+// sigreturn restore -- never while that thread is inside one of those waits).
+// A masked thread reads false from the latch
 // leg: it neither unwinds nor terminates until it unmasks (masking defers --
 // matching the EL0-return tail, which also applies the observing thread's
 // mask, so a latch-woken thread never unwinds into a tail that refuses to
