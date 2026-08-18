@@ -584,6 +584,16 @@ bool thread_die_pending(struct Thread *t);
 // latch and the terminate latch are never both set for one note.
 bool thread_caught_note_deliverable(struct Thread *t);
 
+// 11b-9p (item 11): does `p`'s reader handle -T_E_INTR? A caught-note wait unwind
+// returns EINTR to userspace, and a reader that does not expect it breaks (the
+// native ut $(cmd) capture, 11b-core's build bug). PHENO_LINUX programs go through
+// musl, which is EINTR-aware by construction (POSIX); native (libthyla-rs) readers
+// are NOT until they retry -T_E_INTR (11c). So the caught-note sleep unwind is gated
+// on this in the sched caught branch: only an EINTR-ready Proc unwinds; a native
+// reader's opted-in sleep degrades to death-only (the note delivers late, the
+// pre-item-11 behavior -- no regression). Widens to native per-reader at 11c.
+bool proc_caught_note_eintr_ready(struct Proc *p);
+
 // =============================================================================
 // Synthetic posters — kernel-internal callers (proc.c::exits, pipe.c write
 // path). These wrap notes_post with the appropriate canonical name + arg

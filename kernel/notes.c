@@ -1252,6 +1252,15 @@ bool thread_caught_note_deliverable(struct Thread *t) {
     return (caught & ~t->note_mask & NOTE_MASK_SUPPORTED) != 0;
 }
 
+// 11b-9p (item 11): the caught-note sleep unwind returns -T_E_INTR to userspace;
+// gate it on a reader that expects EINTR. A PHENO_LINUX Proc goes through musl
+// (EINTR-aware by POSIX); a native (libthyla-rs) reader is not until 11c teaches
+// it to retry. phenotype is the proxy: exact and unforgeable (I-43 stamps it at
+// spawn/exec). See the notes.h contract for the 11c widening path.
+bool proc_caught_note_eintr_ready(struct Proc *p) {
+    return p && p->phenotype == PHENO_LINUX;
+}
+
 // VIVARIUM V-6c: deliver the head note to a Linux-phenotype handler.
 //
 // Enters with q->lock HELD and the note still queued; ALWAYS releases it. The

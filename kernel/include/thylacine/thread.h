@@ -404,6 +404,22 @@ struct Thread {
     // rfork-propagated.
     bool               stop_unwound;
 
+    // 11b-9p (item 11, ARCH 8.8.3): the caught-note twin of stop_unwound. SET by
+    // the sched caught branch when it unwinds a thread that is inside a
+    // frame-atomic reader recv (stop_no_park set) at a boundary; READ+cleared by
+    // the SAME reader thread at the client_wait classifier. A caught note must
+    // unwind the elected 9P reader with a role HANDOFF (not re-block like a stop),
+    // so the classifier needs a stable signal disjoint from stop_unwound. Reset
+    // false at reader_recv_frame entry; owner-only; not rfork-propagated.
+    bool               note_unwound;
+
+    // 11b-9p: scopes the caught-note recv interrupt to the WAIT path. reader_recv_frame
+    // sets this from its caught_ok param around do_reader_recv_frame; srvconn_client_recv
+    // reads it to pick tsleep_noteintr (WAIT-path election) vs tsleep (the send-path
+    // self-pump / drain / SQPOLL callers, which must NOT caught-unwind -- a drained-nothing
+    // unwind there would livelock the send retry). Owner-only; cleared at recv exit.
+    bool               recv_caught_ok;
+
     u64                debug_stepover_va;
 
     // prowl-1 (docs/PROWL-DESIGN.md section 3.1; I-8/I-17 untouched): cumulative
@@ -526,6 +542,9 @@ _Static_assert(sizeof(struct Thread) == 1760,
                "the debug_ss_armed padding -- no size change (#89 reader-role-release "
                "+ the F1 frame-atomic block-through + the F1-re-audit stop-unwound "
                "classifier latch). "
+               "11b-9p (item 11) appended note_unwound + recv_caught_ok (2 bools) in "
+               "the stop_unwound -> debug_stepover_va padding -- no size change "
+               "(the caught-note reader unwind classifier + the WAIT-path recv gate). "
                "8a-2b-2 appended debug_ss_armed (bool) + debug_stepover_va (u64) "
                "for the single-step machine: 1168 -> 1184. "
                "8a-1c appended debug_trapframe (8-byte struct exception_context* "

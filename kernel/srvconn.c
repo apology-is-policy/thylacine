@@ -14,6 +14,7 @@
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/srvconn.h>
+#include <thylacine/thread.h>   // 11b-9p: current_thread() -> recv_caught_ok gate
 #include <thylacine/types.h>
 #include <atomic_lse.h>   // t_atomic_fetch_{add_relaxed,sub_acqrel}_int (W1.5 LSE-patchable refcount)
 
@@ -602,8 +603,16 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
         // condition under rendez->lock; a wakeup that arrives between
         // the unlock above and the sleep transition is not lost
         // (specs/scheduler.tla NoMissedWakeup, specs/tsleep.tla).
-        int ts = tsleep(&ch->rendez, chan_cond_readable, ch,
-                        cn->client_deadline_ns);
+        // 11b-9p: the WAIT-path election reader (recv_caught_ok set by
+        // reader_recv_frame) is caught-note-interruptible; the server side is a
+        // different function and the SQPOLL/send-path pumps pass caught_ok=false,
+        // so they keep the plain death/stop-only tsleep.
+        struct Thread *self = current_thread();
+        int ts = (self && self->recv_caught_ok)
+                     ? tsleep_noteintr(&ch->rendez, chan_cond_readable, ch,
+                                       cn->client_deadline_ns)
+                     : tsleep(&ch->rendez, chan_cond_readable, ch,
+                              cn->client_deadline_ns);
         if (ts == TSLEEP_TIMEDOUT) {
             cn->client_timed_out = true;
             ret = -1;                         // corvus hung past the deadline
@@ -612,6 +621,16 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
         // #811 (ARCH §8.8.1): death-interrupted -> Proc group-terminating;
         // return so the Thread unwinds to its EL0-return die-check.
         if (ts == TSLEEP_INTR) {
+            ret = -1;
+            break;
+        }
+        // 11b-9p: a CAUGHT note unwound this recv at a frame boundary (the sched
+        // caught branch set note_unwound for the client_wait classifier). Map to
+        // -1 exactly as the death-interrupt -- reader_recv_frame returns, the
+        // client reads note_unwound + hands off the reader role + returns
+        // CLIENT_WAIT_NOTEINTR. No bytes consumed at a boundary -> the stream
+        // stays synced, the transport reusable.
+        if (ts == TSLEEP_NOTEINTR) {
             ret = -1;
             break;
         }
