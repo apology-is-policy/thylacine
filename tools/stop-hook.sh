@@ -83,6 +83,22 @@ except Exception: print("E")' 2>/dev/null) || { led silent-active-parse-failed; 
 # exactly where the ambiguity lives is the thing it was supposed to replace.
 [ "$ACTIVE" = "E" ] && { led silent-stdin-unparsable; exit 0; }
 
+# 1.5. Per-project opt-out. An ignore dotfile in the project's .claude silences
+# the nudge for that project outright -- a checked-in (or local) "this repo does
+# not want the stop-nudge" switch. Checked HERE, before the window logic, so it
+# wins unconditionally; and FAIL-OPEN like everything else -- if the project
+# root cannot be determined the check simply does not fire (the nudge still
+# works) rather than erroring. CLAUDE_PROJECT_DIR is the hook-runtime project
+# root (set by Claude Code for every hook); the stdin `cwd` is the fallback.
+# Logged like every other exit, so a dotfile-silenced stop is visible in the
+# ledger rather than indistinguishable from a crash.
+IGNORE_DOTFILE="${STOP_IGNORE_DOTFILE:-.no-stop-nudge}"
+PROJ="${CLAUDE_PROJECT_DIR:-}"
+[ -z "$PROJ" ] && PROJ=$(printf '%s' "$IN" | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("cwd",""))
+except Exception: print("")' 2>/dev/null)
+[ -n "$PROJ" ] && [ -e "$PROJ/.claude/$IGNORE_DOTFILE" ] && { led silent-ignore-dotfile; exit 0; }
+
 # THE FLAG IS NO LONGER A VETO, and that is the fix (2026-08-17, with aux).
 #
 # `stop_hook_active` means "this hook already triggered a continuation" -- it is
