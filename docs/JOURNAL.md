@@ -22,6 +22,132 @@ needed the operator.
 
 ---
 
+## 2026-08-18 — The round found the inverse defect: my fix for an over-permissive gate had landed as an over-restrictive one
+
+The follow-up round the dirty C-6b close owed came back **0 P0 / 1 P1 / 1 P2 /
+3 P3** — clean on both triggers. `MODEL(start) == MODEL(end)`, Opus fallback,
+no mid-run drop. Worth saying which way the diversity caveat pointed, because
+it **flipped**: the previous round audited Fable-authored code, so Opus was
+genuinely cross-lineage; these fixes are Opus-authored, so this round was
+same-family and its entire contribution was context independence. The spawn
+said so and named the reflex to fight. The round named it back:
+
+> I would have written that brace too, keyed on the same format, thinking
+> about compressed textures and not about a driver that declares one byte on
+> purpose.
+
+### F1: the guard that refused what it had to admit
+
+The P0 I closed last chunk was real — a 512×512 BO declaring 4096 bytes made
+the compositor read 1 MiB out of a 4 KiB mapping. I fixed it in two places:
+an exact bound at the **read** gate, and a "belt" brace at the **create**
+door keyed on B8G8R8A8.
+
+The brace refuses ordinary Mesa resources, and the proof was already in this
+repo — in a comment, written by this project, at the exact line that chooses
+the size (`usr/ports/mesa/patches/0006-*.patch:1511`):
+
+> The seam refuses unaligned or zero backings; the driver's staging-path
+> textures legitimately ask for size 1.
+
+Mesa's virgl driver declares one byte on two paths that keep the real
+width/height — the staging path (`alloc_size = 1`) and MSAA (*"don't create
+guest backing store for MSAA"* → `total_size = 0`) — and our winsys rounds
+that to one page. So `create3d … 512 512 … 4096` is **byte-for-byte both the
+attack shape and a perfectly ordinary staged or multisampled BGRA texture**.
+There is nothing to tell apart. Only the reader can distinguish them, by
+whether it is about to read the backing — which is exactly what the read gate
+does, and why it was the load-bearing half all along.
+
+**The part worth carrying is why every gate stayed green.** The staging arm
+hangs on a virglrenderer capset bit that *nothing in this tree measures*, and
+thyla-pi's 1.1.0 evidently does not set it. The MSAA arm needed no host bit at
+all: every multisampled BGRA render target above 32×32 was refused outright,
+and no gate we have would notice, because a gate proves what the system *does*
+and an over-refusal shows up only as something a client can no longer do.
+**A guard whose activation no gate can see is worse than the hole it closes.**
+
+And the prover leg I'd added to guard the P0 was asserting that a legitimate
+allocation must fail. It is re-targeted as `C0-STAGING`: the door must *admit*
+the one-page shape, with an unaligned backing as the control so "admitted"
+cannot pass against a door that admits everything. The read gate's own runtime
+regression test is **owed and tracked**, not quietly dropped.
+
+**My parallel self-audit did not find this**, and the reason generalizes: I
+prosecuted seven fixes and asked of each "is this gate sound?" — never "does
+this gate refuse what it must admit?" Only the second question reaches a
+client the tree does not contain. The round confirmed all seven of my
+soundness findings and then found the one I had no question for.
+
+### Rejecting the round's suggested fix (F4)
+
+The DEEP arm's bar was stated three different ways and the code matched none.
+The round proposed asserting the round's **max** via a census delta. I
+re-derived it and **rejected it**: `Cost.max_ns` is a *global running maximum
+that is never reset*, so a per-round max is not derivable — after round one a
+delta detects only a new global record. But `mean ≥ T` does entail `max ≥ T`,
+so the code was already a sound lower-bound witness and only the *prose*
+overstated it. Fixed as prose, reconciled across three documents.
+
+That it mattered showed up on silicon an hour later: round 3 measured a mean
+of 128 ms over 2 retires, so the old "every compositor readback waited ≥ 100
+ms" would have been false on that round.
+
+### The deterministic failure that was my own fixture
+
+`decomp gl` then failed twice, deterministically, at
+`rp6 never confirmed the /env write (60s)`. I had just changed the compositor,
+so it read as my regression.
+
+It was my **pool**. `tools/test-fault.sh` re-bakes `pool.img` with `CLADE=0`
+on every variant — and I had just run it ten times — so `/clade` was gone, and
+`glq-decomp.exp` builds its `rp6` wrapper on-device with `/clade/bin/clang`.
+The scenario's `echo rp6-ready` runs *whether or not clang succeeded*, so the
+harness reported "rp6 built" and then failed 60 s later naming `/env`, a
+subsystem with nothing to do with the cause. **A step that confirms the next
+command instead of the one under test will always misattribute the failure.**
+
+My own failure inside that: I verified the **ramfs** by content before syncing,
+exactly as the discipline demands, and did not verify the **pool**. Verifying
+one paired artifact by content and trusting the other is not verifying by
+content. The build's output had said so plainly — `bake config CLADE=0`,
+`payloads verified PRESENT: GOROOT GOCACHE GO4C QUAKE`, no CLADE — and I read
+past it. A one-command check settles it: 917M with clade, 449M without.
+
+Also recorded because it cost real context: **do not `grep` the pool image.**
+It is an encrypted Stratum image; grepping it dumped megabytes of binary into
+the transcript and told me nothing.
+
+Re-baked both paired artifacts with `PRESERVE=0`, re-synced, and the same code
+passed: **GLQ-DECOMP PASS gl**, 969 frames at 37.9 fps composed on real V3D.
+Same code, different fixture — the attribution is settled, not assumed.
+`test-fault.sh` mutating a shared fixture other gates depend on is filed
+(main#250); it should restore the operator's bake config or refuse, the same
+shape as `test-interactive.sh` refusing when a VM is already running.
+
+### #243 and #246, from the extinction work
+
+`uart_puts` takes no lock, so the ring claim serializes against ring traffic
+only. The class was **observed live and fixed once already** — #76 removed the
+same raw loop from `SYS_PUTS` after it shredded a login prompt byte-for-byte —
+and `viv_report_unserved` reached for it again, on a path an unprivileged EL0
+program triggers by choosing an unserved syscall. Now one `cons_diag_line`
+unit; verified live in the boot log.
+
+`el1_sync_runaway` had no test and `7dd5be19` had just put three calls on it.
+Confirmed by reading why: the depth ladder tops at 3, the #806 guard extincts
+at 2, so only a fault from *inside* the extinction path reaches it — #244's
+shape, on purpose. **Discrimination proven** by sabotaging the claim back to
+the counted trylock and watching the variant fail. Stated exactly: that
+sabotage does *not* reproduce #244's silent park — the counted trylock trips
+`lock-across-sleep` first — so what it proves is sensitivity to the claim
+path's correctness, not reproduction of the original bug.
+
+And `test-fault.sh` enumerated its variant set **four times**; adding one
+updated two of them, so `test-fault.sh el1_sync_runaway` answered "Unknown
+arg" while `make test-fault` ran it happily. The arg arm and `--help` now
+derive from the one list.
+
 ## 2026-08-18 — Two gates nobody ran, and the count that refuted my first explanation
 
 Spawned the follow-up prosecutor round the dirty C-6b close owed (`c8c83348` +
