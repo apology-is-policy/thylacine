@@ -1398,6 +1398,67 @@ fn observe_rejection() {
         }
     };
 
+    // ROUND F1 [P0] regression: a B8G8R8A8 BO whose DECLARED BACKING cannot
+    // hold its DECLARED GEOMETRY must be REFUSED at create3d. Before the fix
+    // `wbo_create` bounded `size` only from above, `gl_adoption` compared only
+    // w/h, and `compose_cpu` read `w * h * 4` from the backing -- so this exact
+    // request (512x512 declared, one page offered) made the compositor read
+    // 1 MiB out of a 4 KiB mapping: a neighbouring allocation (another
+    // client's pixels) or a fault in the process that IS the console.
+    //
+    // A POSITIVE CONTROL rides with it, one variable away: the SAME request
+    // with a correctly-sized backing must SUCCEED. Without it the leg passes
+    // just as well against a create3d that refuses everything -- and "the
+    // undersized one was refused" would then be true for the wrong reason.
+    let undersized_pass = {
+        let mut passed = false;
+        let bo = parse_u32_prefix(&open_read_string(ok, &format!("ctx/{}/bo/new", ctx_ok)));
+        let bo2 = parse_u32_prefix(&open_read_string(ok, &format!("ctx/{}/bo/new", ctx_ok)));
+        match (bo, bo2) {
+            (Some(a), Some(b)) => {
+                let short = format!(
+                    "create3d {} {} {} 512 512 1 1 0 0 0 4096",
+                    PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET
+                );
+                let full = format!(
+                    "create3d {} {} {} 512 512 1 1 0 0 0 {}",
+                    PIPE_TEXTURE_2D,
+                    VIRGL_FORMAT_B8G8R8A8_UNORM,
+                    VIRGL_BIND_RENDER_TARGET,
+                    512u32 * 512 * 4
+                );
+                let took_short = write_ctl(ok, &format!("ctx/{}/bo/{}/ctl", ctx_ok, a), &short);
+                let took_full = write_ctl(ok, &format!("ctx/{}/bo/{}/ctl", ctx_ok, b), &full);
+                if took_short {
+                    t_putstr(
+                        "warp-prove: C0-UNDERSIZED FAIL -- create3d ADMITTED a 512x512 \
+                         B8G8R8A8 BO backed by 4096 bytes; the compositor would read 1 MiB \
+                         out of a 4 KiB mapping (round F1)\n",
+                    );
+                } else if !took_full {
+                    t_putstr(
+                        "warp-prove: C0-UNDERSIZED INSTRUMENT -- the CONTROL was refused too; \
+                         create3d is refusing this shape for some other reason, so the \
+                         refusal of the undersized one means nothing\n",
+                    );
+                } else {
+                    passed = true;
+                    t_putstr(
+                        "warp-prove: C0-UNDERSIZED PASS -- 4096 B for 512x512 REFUSED, the \
+                         correctly-backed twin ADMITTED (the arm discriminates; it does not \
+                         merely refuse)\n",
+                    );
+                }
+            }
+            _ => {
+                t_putstr(
+                    "warp-prove: C0-UNDERSIZED INSTRUMENT -- bo/new failed; the arm never ran\n",
+                );
+            }
+        }
+        passed
+    };
+
     // The completion token is a VERDICT now (F6): DONE iff every arm above
     // passed; otherwise the first arm that did not, by name. The #240
     // measurement (`ANSWER=`) is data, not an arm -- it has no pass/fail --
@@ -1408,6 +1469,8 @@ fn observe_rejection() {
         Some("sticky")
     } else if !f1_defended {
         Some("f1")
+    } else if !undersized_pass {
+        Some("undersized")
     } else {
         None
     };
@@ -2432,9 +2495,9 @@ struct RbCensus {
 fn rb_census(warp: i64) -> Option<RbCensus> {
     let s = open_read_all(warp, "ctl");
     Some(RbCensus {
-        issued: parse_field(&s, "issued")?,
-        landed: parse_field(&s, "landed")?,
-        coalesced: parse_field(&s, "coalesced")?,
+        issued: parse_field(&s, "rb-issued")?,
+        landed: parse_field(&s, "rb-landed")?,
+        coalesced: parse_field(&s, "rb-coalesced")?,
         abandoned: parse_field(&s, "rb-abandoned")?,
         slot: parse_field(&s, "rb-slot")?,
     })
@@ -2748,7 +2811,7 @@ fn observe_readback() {
         rb_incomplete("instrument:tapestry-ctl");
     }
     if rb_census(warp).is_none() {
-        // A pre-C-6 tapestryd carries no `comp-rb` line: ABSENT, not 0.
+        // A pre-C-6 tapestryd carries no `rb-*` census: ABSENT, not 0.
         rb_incomplete("instrument:comp-rb");
     }
     if cost_line(&open_read_all(tap, "ctl"), "readback-wait").is_none() {
@@ -2970,7 +3033,16 @@ fn observe_readback() {
             continue;
         }
         rounds_done += 1;
-        let round_deep = rw_n1 > rw_n0 && round_wait_ms >= RB_DEEP_MS && observed_idx >= total as i64 - 2;
+        // ROUND F8 [P3]: `round_wait_ms` is a SUM over `rw_n1 - rw_n0`
+        // retires, and that delta can exceed 1 (the flight loop's presents
+        // coalesce one request, the pump issues it the moment the first
+        // lands, and the census is sampled only after the queue drains). A
+        // sum no single readback earned would satisfy the threshold. Require
+        // exactly one retire in the round, so the figure asserted on is the
+        // figure one readback waited. The pixel witness (`observed_idx`)
+        // stays -- it is what proves the wait was on the LAST draw rather
+        // than merely long.
+        let round_deep = rw_n1 == rw_n0 + 1 && round_wait_ms >= RB_DEEP_MS && observed_idx >= total as i64 - 2;
         let round_live = first_ms < RB_LIVE_MS && !slot_poisoned;
         deep_ok &= round_deep;
         live_ok &= round_live;

@@ -1036,7 +1036,9 @@ pub struct Comp {
     /// executes readbacks serially anyway.
     comp_rb: Option<CompRb>,
     /// Surface incarnations (slot, gen) owed a readback once the reserved
-    /// slot frees, FIFO, no duplicates (bounded by MAX_SURFACES): a present
+    /// slot frees, FIFO, at most ONE entry per surface slot with the latest
+    /// generation overwriting in place -- genuinely bounded by MAX_SURFACES
+    /// (round F6 corrected the dedup key, which had included `gen`): a present
     /// that arrived while a readback was in flight, or found the slot
     /// poisoned. Latest wins -- the issue reads whatever the BO holds THEN,
     /// so a client's present rate cannot pile readbacks behind each other.
@@ -2168,14 +2170,6 @@ impl Comp {
         // client's composition to the CPU path. Such a BO was never going
         // to be blitted (`compose_gpu_bo_words` refuses it), so skipping the
         // import loses nothing: it composes through the readback arm.
-        if !composable {
-            self.comp_attach_refused += 1;
-            say!(
-                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: SKIPPED (not a composable BO shape: target {} format {} flags {:#x})",
-                ctx_pub, bo_pub, res_id, sn, shape.0, shape.1, shape.2
-            );
-            return;
-        }
         // One import witness per ctx per compositor tick (C-0d Fable round
         // F5; the `verify_tick` shape): everything below is synchronous
         // device work on the SHARED compositor context -- the attach, the
@@ -2185,6 +2179,14 @@ impl Comp {
         // tick is DEFERRED, not dropped: `frame_tick` replays the import of
         // whatever `present_to` names by then. Pinned BEFORE the device
         // work, like `verify_tick`.
+        //
+        // ROUND F5 [P2]: and ABOVE the `!composable` skip below, not under
+        // it. The skip was added later, so the limit landed one arm DOWN
+        // from where it protects: `comp_imported` is never set for a
+        // non-composable BO, so the `already` short-circuit above can never
+        // damp it, and `present-to` in a loop was an unrate-limited `say!` +
+        // counter storm at 9P-write rate. Costs nothing on the composable
+        // path, which `already` short-circuits before reaching here.
         let tick = self.tick;
         match self.wctx_mut(ctx_pub, conn) {
             Some(c) if c.import_tick == tick => {
@@ -2193,6 +2195,14 @@ impl Comp {
             }
             Some(c) => c.import_tick = tick,
             None => return,
+        }
+        if !composable {
+            self.comp_attach_refused += 1;
+            say!(
+                "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: SKIPPED (not a composable BO shape: target {} format {} flags {:#x})",
+                ctx_pub, bo_pub, res_id, sn, shape.0, shape.1, shape.2
+            );
+            return;
         }
         if self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res_id).is_err() {
             self.comp_attach_refused += 1;
@@ -5129,6 +5139,29 @@ impl Comp {
         if b.w != s.w || b.h != s.h {
             return None;
         }
+        // ROUND F1 [P0]: the client DECLARES its backing size and `wbo_create`
+        // bounds it only from ABOVE (`geom_max` refuses "a 1x1 texture asking
+        // for 64 MiB"); nothing tied it to the geometry from BELOW. The
+        // compose reads `sw * sh_full * 4` from this `va` with sw/sh taken
+        // from the SURFACE -- so a 512x512 BO declared with size 4096 (page
+        // aligned, under both caps, admitted) made the compositor read 1 MiB
+        // out of a 4 KiB mapping. `weave_va_next` is a bump allocator, so the
+        // overrun is a neighbouring allocation (another client's pixels,
+        // painted onto the attacker's own pane) or unmapped VA -- a fault in
+        // the process that IS the console.
+        //
+        // This is the EXACT bound for the read that happens: adoption already
+        // pins `b.w == s.w && b.h == s.h`, and both compose arms walk rows of
+        // `sw * 4`. A legitimate B8G8R8A8 target needs exactly this at level 0
+        // and is page-rounded up, so nothing real is refused. Belt to the
+        // create-time brace below; this one is the load-bearing half, because
+        // it sits on the only path that reads the backing with foreign
+        // geometry (`comp_readback_retired` -- the sole `Some(va)` caller of
+        // `blit_composed_pixels`).
+        let need = (b.w as u64).saturating_mul(b.h as u64).saturating_mul(4);
+        if b.size < need {
+            return None;
+        }
         Some(GlAdopt {
             dev_ctx: c.dev_ctx,
             ctx_pub: c.pub_id,
@@ -5774,6 +5807,9 @@ impl Comp {
     const WDIAG_CTL_NO_RECORD: u32 = 14;
     const WDIAG_CTL_NOT_VIRGL: u32 = 15;
     const WDIAG_RECORD_VANISHED: u32 = 16;
+    /// Round F1 [P0]: the declared backing cannot hold the declared base
+    /// level. Bit 17 -- the mask is a `u32`, so there is room to 31.
+    const WDIAG_UNDERSIZED: u32 = 17;
 
     /// #218 one-shot diagnostic: the FIRST refused build per ctx names the
     /// failing arm + its parameters. Gated on the ctx latch, never the
@@ -5884,6 +5920,26 @@ impl Comp {
         if size > geom_max {
             self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_GEOMETRY, "geometry", geom_max as i64, format, w, h, last_level, size);
             return false;
+        }
+        // ROUND F1 [P0], the create-time brace: the two gates above are both
+        // upper bounds, and the compose path reads by GEOMETRY. Refuse a
+        // declaration whose base level cannot fit -- keyed on the ONE format
+        // whose bytes-per-texel we can assert (`B8G8R8A8_UNORM` is 4 by
+        // definition), because a general floor would reject legitimate
+        // COMPRESSED textures (BC1 is half a byte per texel) that this seam
+        // has no business refusing. Deliberately NOT keyed on `composable`:
+        // the attack shape is B8G8R8A8 + `Y_0_TOP`, which is precisely NOT
+        // composable -- that is how it reaches the readback arm at all.
+        if format == VIRGL_FORMAT_B8G8R8A8_UNORM {
+            let base = (w as u64)
+                .saturating_mul(h.max(1) as u64)
+                .saturating_mul(d.max(1) as u64)
+                .saturating_mul(array.max(1) as u64)
+                .saturating_mul(4);
+            if size < base {
+                self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_UNDERSIZED, "undersized", base as i64, format, w, h, last_level, size);
+                return false;
+            }
         }
         // The c-borrowing checks compute into locals first so the failure
         // arms can reach the (&mut self) one-shot diagnostic (#218).
@@ -6595,13 +6651,24 @@ impl Comp {
         }
     }
 
+    /// ROUND F6 [P2]: keyed on the SLOT, with the latest generation
+    /// overwriting in place. The predecessor deduped on `(n, gen)` and
+    /// claimed "bounded by MAX_SURFACES" -- but `gen` comes from the
+    /// monotonic `gen_seq`, so MAX_SURFACES bounds `n` and NOT the pair: a
+    /// create/glsrc/present/destroy loop appended a fresh entry per cycle,
+    /// `contains()` is a linear scan, and the console's per-present cost grew
+    /// quadratically while the reserved slot was held or poisoned (the pump
+    /// only runs `while comp_rb.is_none()`, so nothing drained it). Keying on
+    /// the slot IS what "latest wins" already meant, and it makes the stated
+    /// bound true: at most one entry per surface slot, ever.
     fn rb_enqueue(&mut self, n: usize) {
         let gen = match self.surf(n) {
             Some(s) => s.gen,
             None => return,
         };
-        if !self.rb_wanted.contains(&(n, gen)) {
-            self.rb_wanted.push_back((n, gen));
+        match self.rb_wanted.iter_mut().find(|(sl, _)| *sl == n) {
+            Some(e) => e.1 = gen,
+            None => self.rb_wanted.push_back((n, gen)),
         }
         self.rb_coalesced += 1;
     }
@@ -6705,11 +6772,25 @@ impl Comp {
                 return;
             }
         };
+        // ROUND F9 [P3]: charge the stall only for a readback that ACTUALLY
+        // retired. This ran before the early return, so every abandonment
+        // added ~30 s to a metric both the enum doc and 149-warp.md define as
+        // "per COMPLETED readback" -- an abandoned one measured a stall that
+        // never ended, which is a different quantity wearing the same units.
+        if tag.abandoned {
+            self.rb_abandoned += 1;
+            return;
+        }
         // The stall the device paid for this frame's backlog (F2b's
         // measurement): `cost readback-wait` carries n / sum / max.
         self.cost_add(Cost::ReadbackWait, rec.issued);
-        if tag.abandoned {
-            self.rb_abandoned += 1;
+        // ROUND F2 [P1]: the device REFUSED this transfer. The pre-C-6b
+        // synchronous arm gated its compose on `.is_ok()`; the fenced form
+        // dropped that gate because the tag carried no verdict. Composing
+        // here paints whatever the backing happens to hold -- zeros on a
+        // fresh BO, so the pane BLANKS -- and counts it as landed.
+        if !tag.ok {
+            self.rb_dropped += 1;
             return;
         }
         let same_gen = self.surf(rec.surf).map_or(false, |s| s.gen == rec.gen);
@@ -6805,13 +6886,22 @@ impl Comp {
             // SIBLING slot is still poisoned would otherwise lose its
             // count permanently. The gate guards only the RECLAMATION
             // (un-poison + free), not the arithmetic.
-            if let Some(c) = self
-                .warp_ctxs
-                .iter_mut()
-                .flatten()
-                .find(|c| c.pub_id == v.ctx_pub)
-            {
-                c.fence_signaled += 1;
+            // ROUND F3 [P1] / main#242: NOT for the compositor's own readback.
+            // The completion arm guards its bump on `!tag.comp`; a vindication
+            // is produced after the tag was taken by abandonment, so the bit
+            // has to ride the vindication or the CLIENT (whose ctx the tag
+            // names, AS-BUILT 1) is credited with a fence it never issued.
+            // `warp_fence_wait` returns on `signaled >= seq`, so one ahead
+            // means every wait returns ONE FENCE EARLY for the ctx's life.
+            if !v.comp {
+                if let Some(c) = self
+                    .warp_ctxs
+                    .iter_mut()
+                    .flatten()
+                    .find(|c| c.pub_id == v.ctx_pub)
+                {
+                    c.fence_signaled += 1;
+                }
             }
             // ONE retired chain is not proof for a ctx that abandoned
             // SEVERAL (round-4 F1): a ctx can hold every fenced slot, and
@@ -7775,6 +7865,40 @@ impl Conn {
                     comp.warp_create_refused_noctx, comp.warp_diag_noctx_arms
                 ),
             );
+            // Warp-C C-6 census: the compositor readback arm. EVERY key is
+            // `rb-`-prefixed (main#247): the first cut shipped four of six
+            // BARE while its comment claimed all were "prefixed/distinct on
+            // purpose" -- true of the two it was thinking about, false of the
+            // four it was not. `parse_field` returns the FIRST whole-token
+            // hit, so a bare `issued` anywhere else in this file would feed
+            // the gate's verdict arms the wrong counter WITHOUT erroring: the
+            // arms would simply decide differently. The claim is now true as
+            // written, and the redundant leading `comp-rb` token is gone, so
+            // the line is SHORTER than the version it replaces.
+            //
+            // Round F10 [P3] asked for this to sit after the `w210` custody
+            // mirror. It stays here instead, deliberately: `w210` and the
+            // unbounded per-ctx tail are BOTH inside the `test-mode` block,
+            // so moving down would drop the census out of a production
+            // tapestryd entirely -- trading a bounded-prefix risk the runtime
+            // guard already reports for a diagnostic that simply is not there
+            // when the console misbehaves in the field. Shortening was F10's
+            // own second option and it is the one that costs nothing.
+            // `rb-slot`: 0 free, 1 a compositor readback in flight, 2
+            // poisoned. The stall each readback paid is `cost readback-wait`
+            // (n / sum / max) on the tapestry ctl.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "rb-issued {} rb-landed {} rb-dropped {} rb-coalesced {} rb-abandoned {} rb-slot {}\n",
+                    comp.rb_issued,
+                    comp.rb_landed,
+                    comp.rb_dropped,
+                    comp.rb_coalesced,
+                    comp.rb_abandoned,
+                    comp.gpu.comp_slot_state()
+                ),
+            );
             // C-2c census: imports witnessed vs refused/skipped. A silent
             // degradation to the CPU composition path -- every import
             // REFUSED after a latched compositor ctx -- must be countable,
@@ -7784,26 +7908,6 @@ impl Conn {
                 format_args!(
                     "comp-attach witnessed {} refused {}\n",
                     comp.comp_attach_witnessed, comp.comp_attach_refused
-                ),
-            );
-            // Warp-C C-6 census: the compositor readback arm. Keys are
-            // prefixed/distinct on purpose -- `abandoned` is ALREADY the
-            // test-mode anti-vacuous key below and `parse_field` returns the
-            // first hit, so a plain `abandoned` here would silently feed the
-            // poisoned-path legs the wrong counter. `rb-slot`: 0 free, 1 a
-            // compositor readback in flight, 2 poisoned. The stall each
-            // readback paid is `cost readback-wait` (n / sum / max) on the
-            // tapestry ctl.
-            let _ = core::fmt::write(
-                &mut s,
-                format_args!(
-                    "comp-rb issued {} landed {} dropped {} coalesced {} rb-abandoned {} rb-slot {}\n",
-                    comp.rb_issued,
-                    comp.rb_landed,
-                    comp.rb_dropped,
-                    comp.rb_coalesced,
-                    comp.rb_abandoned,
-                    comp.gpu.comp_slot_state()
                 ),
             );
             // #175: the anti-vacuous counter. A prover that submits and

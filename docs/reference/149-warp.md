@@ -72,17 +72,23 @@ ctl                          # "virgl <0|1>\ncapsets N\ncapset <id> <ver> <len>\
                              #   since boot. On such a ctx a verify's transfers and readback are
                              #   blit jobs behind whatever the DEVICE has queued -- the exposure the
                              #   buffer pair removes -- so nonzero here says some ctx carried it)
-                             # + "comp-rb issued <n> landed <n> dropped <n> coalesced <n> rb-abandoned <n> rb-slot <0|1|2>\n"
+                             # + "rb-issued <n> rb-landed <n> rb-dropped <n> rb-coalesced <n> rb-abandoned <n> rb-slot <0|1|2>\n"
                              #   (Warp-C C-6: the compositor readback arm's census -- readbacks
-                             #   issued on the reserved fenced slot; landed = composed at
-                             #   completion; dropped = the surface moved on between issue and
-                             #   retire, or the engine died; coalesced = presents that enqueued
-                             #   behind an in-flight / poisoned slot instead of issuing; abandoned
-                             #   = never retired in FENCE_ABANDON_MS [the client ctx poisoned];
-                             #   rb-slot = the reserved slot free / busy / poisoned. Keys prefixed
-                             #   because `abandoned` is already the test-mode key below and
-                             #   parse_field returns the first hit. The stall each readback paid is
-                             #   `cost readback-wait` on the TAPESTRY ctl)
+                             #   issued on the reserved fenced slot; rb-landed = composed at
+                             #   completion; rb-dropped = the surface moved on between issue and
+                             #   retire, the engine died, OR the device REFUSED the transfer
+                             #   (round F2 -- the tag carries the response verdict, so an errored
+                             #   readback is never composed from); rb-coalesced = presents that
+                             #   enqueued behind an in-flight / poisoned slot instead of issuing;
+                             #   rb-abandoned = never retired in FENCE_ABANDON_MS [the client ctx
+                             #   poisoned]; rb-slot = the reserved slot free / busy / poisoned.
+                             #   EVERY key is `rb-`-prefixed since main#247: the first cut shipped
+                             #   four of six bare while claiming all were prefixed, and parse_field
+                             #   returns the first whole-token hit -- a bare `issued` elsewhere in
+                             #   the file would feed the gate's verdict arms the wrong counter
+                             #   without erroring. The stall each COMPLETED readback paid is
+                             #   `cost readback-wait` on the TAPESTRY ctl -- abandoned ones are no
+                             #   longer charged to it, round F9)
                              # test-mode ONLY adds: "abandoned <n>\nfenced-free <n>\n"
                              #   (fenced-free counts the CLIENT pool -- FENCED_SLOTS - 1 since C-6;
                              #   the reserved compositor slot is never a client's)
@@ -125,7 +131,16 @@ ctx/
                              #     since C-6 `fences-in-flight` ALSO counts a compositor readback of
                              #     this ctx's adopted BO while it is in flight -- device work IS
                              #     outstanding on the ctx's resources -- while `fence-signaled`
-                             #     never counts it: the client counts fences it ISSUED)
+                             #     never counts it: the client counts fences it ISSUED. That was
+                             #     stated here BEFORE it was true on every path: the completion arm
+                             #     guarded on `!tag.comp`, but a VINDICATION is produced after
+                             #     abandonment has taken the tag, so a late-retiring compositor
+                             #     readback credited the client -- whose ctx the tag names -- with a
+                             #     fence it never issued. `warp_fence_wait` returns on
+                             #     `signaled >= seq`, so one ahead means every wait returns ONE
+                             #     FENCE EARLY for the ctx's life: the client may reuse a buffer the
+                             #     GPU is still writing. Round F3 / main#242 put the bit on
+                             #     `FenceVindication` too, sourced from the slot index)
                              #   + "bo-live <n>\nbo-peak <n>\nbo-bytes <n>\nbo-bytes-peak <n>\n"
                              #     (#204 census: backed now / high-water, count + bytes axes)
                              #   + "diag-arms <bits>\ncreate-refused <n>\n" (#198, appended LAST:
@@ -705,11 +720,18 @@ becomes, by scanout mode:
   exactly the compose the synchronous arm did (letterbox/crop shared
   with the weave path; `res_stale` stays TRUE; no orientation flip --
   the transfer contract is gallium top-down); a surface that moved on
-  drops the frame (`comp-rb dropped`), a stale composition being worse
-  than none. `composed cpu` counts at completion. **One in flight,
+  drops the frame (`rb-dropped`), a stale composition being worse than
+  none -- as does a readback the device REFUSED (round F2: `FenceTag.ok`
+  carries the response verdict, which the fenced form had dropped when
+  it left the synchronous `.is_ok()` gate behind; composing on an error
+  paints whatever the backing held, and zeros on a fresh BO mean the
+  pane BLANKS while the census records a landed frame). `composed cpu` counts at completion. **One in flight,
   latest wins:** a present arriving while the readback is in flight (or
   while the reserved slot is poisoned) enqueues the surface incarnation
-  on `rb_wanted` (FIFO, no duplicates, gen-pinned) and the completion /
+  on `rb_wanted` (FIFO, **at most one entry per surface SLOT** with the
+  latest generation overwriting in place -- round F6: the first cut
+  deduped on `(slot, gen)` and claimed a MAX_SURFACES bound that `gen`,
+  drawn from a monotonic counter, made false) and the completion /
   vindication pump issues ONE fresh readback of whatever the BO holds
   then -- so a client's present rate cannot pile readbacks. **Retire
   safety:** the readback is counted in the client ctx's
@@ -743,12 +765,14 @@ becomes, by scanout mode:
   for the wait once observed: busy is not dead. `Cost::Readback` now
   times the ISSUE; `Cost::ReadbackWait` (`cost readback-wait`) is the
   issue-to-retire wall per completed readback = the stall the device
-  paid. `verify` while our readback is in flight answers `E_AGAIN` (the
-  ctx's `fences_in_flight` counts it -- device work IS outstanding on
-  its resources), the one client-visible change. Census: warp global
-  ctl `comp-rb issued N landed N dropped N coalesced N rb-abandoned N
-  rb-slot S` (S: 0 free / 1 in flight / 2 poisoned; the keys are
-  prefixed because `abandoned` is already the test-mode key). The
+  paid -- **an abandoned readback is not charged to it** (round F9: it
+  measured a stall that never ended, a different quantity in the same
+  units). `verify` while our readback is in flight answers `E_AGAIN`
+  (the ctx's `fences_in_flight` counts it -- device work IS outstanding
+  on its resources), the one client-visible change. Census: warp global
+  ctl `rb-issued N rb-landed N rb-dropped N rb-coalesced N rb-abandoned
+  N rb-slot S` (S: 0 free / 1 in flight / 2 poisoned; **every** key is
+  `rb-`-prefixed since main#247). The
   synchronous form was C-0d Fable F2 [P1] (the response IS the
   completion, so the console waited on the client's queue length, and
   `fence_poisoned` could not guard it -- produced by `reap_abandoned` on

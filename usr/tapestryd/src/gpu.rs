@@ -445,6 +445,19 @@ fn init_device(
 #[derive(Clone, Copy)]
 pub struct FenceVindication {
     pub ctx_pub: u32,
+    /// ROUND F3 [P1] / main#242: TRUE when the late-retiring chain was the
+    /// COMPOSITOR's own readback on the reserved slot. The completion arm
+    /// already guards its dense `fence_signaled` bump on `!tag.comp`, but a
+    /// vindication is produced AFTER the tag was taken by abandonment, so
+    /// without this bit the seam credited the CLIENT with a fence it never
+    /// issued -- and the tag carries the client's ctx (AS-BUILT 1), so the
+    /// credit lands squarely on it. The winsys computes `issued - signaled`
+    /// on unsigned counters and `warp_fence_wait` returns on
+    /// `signaled >= seq`: one ahead, permanently, means every wait returns
+    /// ONE FENCE EARLY for the ctx's life -- the client may reuse a buffer
+    /// the GPU is still writing. Sourced structurally from the slot index,
+    /// which is the only thing that survives the abandonment.
+    pub comp: bool,
 }
 
 /// A retired fenced chain: the fence id + the owning seam context (pub id),
@@ -482,6 +495,16 @@ pub struct FenceTag {
     /// the owning ctx is poisoned (every later BO retire leaks rather
     /// than frees, since the device may still DMA the backing).
     pub abandoned: bool,
+    /// ROUND F2 [P1]: the device's verdict on this chain. The pre-C-6b
+    /// composed readback was SYNCHRONOUS and gated its compose on
+    /// `transfer_from_3d_sync(...).is_ok()`; moving to the fenced lane
+    /// dropped that gate on the floor, because `drain` logged a non-OK
+    /// response type and pushed the tag anyway and the tag carried no
+    /// status. `comp_readback_retired` then composed on an ERROR retire --
+    /// painting whatever the backing held (zeros on a fresh BO: the pane
+    /// blanks) and counting it `rb_landed`. False for an abandoned tag too:
+    /// nothing was verified about a chain that never retired.
+    pub ok: bool,
 }
 
 /// Why a fenced submission was refused (mapped to a 9P errno at the seam).
@@ -721,17 +744,24 @@ impl Controlq {
             } else {
                 FENCED_SLOTS // odd / resp-desc id: never a chain head
             };
-            if slot < FENCED_SLOTS {
-                self.fslot_since[slot] = None;
-            }
             // #177/#178: while THIS slot's ctx is held, swallow the retire
             // -- that is exactly what models "the device has not proved it
             // finished". The used entry is still consumed above, so the
             // sync chain behind it retires normally and other clients are
             // untouched; the tag is deliberately NOT taken, so the fence
             // stays in flight and `abandon` can still find it.
+            // ROUND F4 [P1]: the reserved compositor slot is EXEMPT from the
+            // harness hold. The lever matches on the tag's ctx, and our
+            // readback's tag carries the CLIENT's ctx (AS-BUILT 1) -- so a
+            // client holding its OWN ctx used to pin `COMP_FSLOT` too, which
+            // freezes readback composition for EVERY client, pins
+            // `readback_in_flight()` (disabling the 500 ms sync deadline
+            // process-wide) and pins `warp_fences_pending()` (a ~1 kHz spin in
+            // the console). #178's bound -- "the worst a client can do is wedge
+            // its own ctx" -- was written when "your ctx's fences" meant only
+            // your own; C-6b made that false one resource over.
             #[cfg(feature = "test-mode")]
-            if slot < FENCED_SLOTS && self.hold_ctx.is_some() {
+            if slot < FENCED_SLOTS && slot != COMP_FSLOT && self.hold_ctx.is_some() {
                 let held = self.fslots[slot]
                     .as_ref()
                     .map(|t| t.ctx_pub)
@@ -741,7 +771,16 @@ impl Controlq {
                     continue;
                 }
             }
-            let tag = match self.fslots.get_mut(slot).and_then(|s| s.take()) {
+            // ROUND F4, the second half: clear the staleness anchor only AFTER
+            // the hold branch. It used to be cleared one line above it, so a
+            // held slot had `fslot_since == None` and `reap_abandoned`'s
+            // `(Some(_), Some(t0))` test could never fire on it -- the pin was
+            // INDEFINITE rather than bounded by the 30 s deadline. A swallowed
+            // retire must leave the slot exactly as it was.
+            if slot < FENCED_SLOTS {
+                self.fslot_since[slot] = None;
+            }
+            let mut tag = match self.fslots.get_mut(slot).and_then(|s| s.take()) {
                 Some(t) => t,
                 None => {
                     // A poisoned slot retiring LATE is expected, not
@@ -763,6 +802,7 @@ impl Controlq {
                         // not stay condemned.
                         self.vindicated.push(FenceVindication {
                             ctx_pub: self.fslot_poison_ctx[slot],
+                            comp: slot == COMP_FSLOT,
                         });
                         continue;
                     }
@@ -781,7 +821,13 @@ impl Controlq {
             // wedge this avoids. Logged, not withheld.
             let resp_va = self.flane_va + FRESP_OFF + (slot as u64) * FRESP_STRIDE;
             let rt = unsafe { r32(resp_va) };
-            if rt != VIRTIO_GPU_RESP_OK_NODATA {
+            // ROUND F2 [P1]: record the verdict, do not merely narrate it.
+            // A compositor readback that the device REFUSED must not be
+            // composed from (see `FenceTag.ok`); a client's own chain still
+            // retires either way -- withholding the completion would wedge a
+            // client waiting on a fence that can never signal.
+            tag.ok = rt == VIRTIO_GPU_RESP_OK_NODATA;
+            if !tag.ok {
                 say!(
                     "tapestryd: gpu fenced cmd (fence {}) resp_type={:#x}",
                     tag.fence_id, rt
@@ -840,6 +886,14 @@ impl Controlq {
     /// client can only abandon chains it owns.
     fn abandon_matching(&mut self, why: &str, only_ctx: Option<u32>) {
         for i in 0..FENCED_SLOTS {
+            // ROUND F4 [P1]: a SCOPED abandon is a client-driven lever, and our
+            // readback's tag carries the client's ctx -- so without this the
+            // caller could poison the shared reserved slot on demand. The
+            // UNSCOPED callers (the deadline, a dead engine) still reach it:
+            // a wedge that real is genuinely global.
+            if only_ctx.is_some() && i == COMP_FSLOT {
+                continue;
+            }
             if let Some(want) = only_ctx {
                 if self.fslots[i].as_ref().map(|t| t.ctx_pub) != Some(want) {
                     continue;
@@ -1686,7 +1740,7 @@ impl Gpu {
             .submit_fenced(
                 slot,
                 req_len,
-                FenceTag { fence_id, ctx_pub, readback, comp, abandoned: false },
+                FenceTag { fence_id, ctx_pub, readback, comp, abandoned: false, ok: false },
             )
             .map_err(|_| FencedErr::Dead)?;
         self.fence_next = fence_id;
@@ -2021,11 +2075,15 @@ impl Gpu {
         // a taken one leaves the slot poisoned and owes a vindication.
         for slot in core::mem::take(&mut self.ctrl.held_retires) {
             match self.ctrl.fslots[slot].take() {
-                Some(tag) => {
+                Some(mut tag) => {
                     let resp_va =
                         self.ctrl.flane_va + FRESP_OFF + (slot as u64) * FRESP_STRIDE;
                     let rt = unsafe { r32(resp_va) };
-                    if rt != VIRTIO_GPU_RESP_OK_NODATA {
+                    // Mirror `drain`'s arm EXACTLY -- including the round-F2
+                    // verdict. A replay that composed where the real path
+                    // would not is a test lever that proves the wrong thing.
+                    tag.ok = rt == VIRTIO_GPU_RESP_OK_NODATA;
+                    if !tag.ok {
                         say!(
                             "tapestryd: gpu fenced cmd (fence {}) resp_type={:#x}",
                             tag.fence_id, rt
@@ -2037,6 +2095,7 @@ impl Gpu {
                     self.ctrl.fslot_poisoned[slot] = false;
                     self.ctrl.vindicated.push(FenceVindication {
                         ctx_pub: self.ctrl.fslot_poison_ctx[slot],
+                        comp: slot == COMP_FSLOT,
                     });
                 }
                 None => {}

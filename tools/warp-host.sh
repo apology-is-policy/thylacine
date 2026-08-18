@@ -352,12 +352,12 @@ reject)
     # prints `C0-REJECT DONE` only when every C0 arm passed and
     # `C0-REJECT INCOMPLETE(<arm>)` otherwise, which warp-reject.exp
     # hard-fails on -- so a blind detector no longer reaches lc_pass at all.
-    # The five terms stay as the belt to that brace: they name each arm, and
+    # The six terms stay as the belt to that brace: they name each arm, and
     # a scenario that passed for a reason this list does not know about
     # should still fail here.
     grep -E "C0-REJECT|C0-DETECT|C0-F1" "$out" || true
     ok=1
-    for pat in "C0-REJECT ANSWER=" "C0-DETECT PASS" "C0-DETECT STICKY PASS" "C0-F1 DEFENDED" "LS-CI PASS: warp-prove reject"; do
+    for pat in "C0-REJECT ANSWER=" "C0-DETECT PASS" "C0-DETECT STICKY PASS" "C0-F1 DEFENDED" "C0-UNDERSIZED PASS" "LS-CI PASS: warp-prove reject"; do
         if ! grep -q "$pat" "$out"; then
             echo "#240 GATE FAIL -- missing: $pat"
             ok=0

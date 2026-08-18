@@ -2460,11 +2460,66 @@ to WAIT for the readback — the pre-C-6 arm): DEEP PASS, **LIVE FAIL** with
 the issuing present at 269 / 969 / 1017 ms → `INCOMPLETE(live)`, gate FAIL —
 the arm discriminates exactly the defect. The blit arm untouched: `quake`
 44.2 fps with `comp-rb issued 0`; `decomp gl` composed gpu 1106 cpu 0 with
-`readback 0` and `readback-wait 0`. Untested here: the deadline half's
-discrimination against the 500 ms deadline (a sabotage not run — under
-egl-headless/KVM no stale wakes were observed during the stalls, so the old
-deadline may simply never have fired on this host; the widening is correct by
-construction and the DEADLINE arm is its regression net where wakes arrive).
+`readback 0` and `readback-wait 0`.
+
+**The deadline half is NOT discriminated by this gate, and the honest reading
+is stronger than "untested" (round F7 [P2] / main#253).** The certifying run
+measured `F2B max 267 ms` against `SUBMIT_DEADLINE_MS = 500`, so **a build with
+the widening deleted would have produced an identical PASS**: no
+`submit_and_wait` accumulated 500 ms of stale-wake time, so nothing could have
+latched `dead` either way. A control that cannot fail proves nothing, and this
+one was recorded as "a sabotage not run" when it is really "the arm never
+reached the threshold it would discriminate at".
+
+Worse for the mechanism's own premise: the deadline is evaluated **only at a
+stale wake**, and the stall it exists for — a synchronous host
+`TRANSFER_FROM_HOST_3D` on QEMU's serial main loop — writes no used entries
+and therefore raises no interrupts. So whether the widening is load-bearing
+**at all** depends on INTx sharing with the other virtio-pci functions, which
+has never been measured or stated. The widening is still the right shape (a
+busy device must not be latched dead), but "correct by construction" is doing
+work here that a measurement should do.
+
+What closes it, in order: (a) deepen `RB_DEADLINE_SUBMITS` until the bystander
+latency exceeds `2 * SUBMIT_DEADLINE_MS`, so the threshold is genuinely
+crossed; (b) run the widening sabotage (pin `deadline_ms = SUBMIT_DEADLINE_MS`)
+and require the gate to go RED; (c) state here what raises the stale wakes
+during the stall — and if nothing does on this host, say that the widening is
+INERT here and name the lane where it is not.
+
+### 4.5.14 The owed round on C-6b (2026-08-18, OPUS fallback): 1 P0 / 3 P1 / 3 P2 / 3 P3
+
+The C-0d Fable close was dirty, so a follow-up was owed on its fixes plus C-6b.
+Fable was out of credits (the spawn died mid-run), so it ran on Opus 5 — and
+family diversity is **inverted, not forfeited** here: C-6b was Fable-authored,
+so an Opus prosecutor is genuinely cross-lineage against it. Full findings +
+dispositions: `memory/audit_c6b_opus_closed_list.md`.
+
+**The lesson, and it is about AS-BUILT 1 specifically.** The deviation was
+recorded, argued, and correct for the reason it was taken — the tag must carry
+the CLIENT's `ctx_pub` because 0 is the vindication sentinel and the client's
+own vindication must wait for our poisoned slot. What was never enumerated is
+its **cost**: *every* mechanism keyed on a tag's ctx now reaches the
+compositor's reserved slot. Two of them are shipped, client-drivable levers
+(`warp-hold` / `warp-abandon`) whose safety argument (#178: "the worst a client
+can do is wedge its own ctx") was written when "your ctx's fences" meant only
+your own. **A deviation is sound for the reason it was taken and dangerous
+everywhere else that reads the same field.** Prosecuting a documented deviation
+as a design change — not as a footnote — is what found it.
+
+Three findings are corrections to claims this document or the code asserts:
+the composed readback's "the PIXELS are unchanged — same transfer, same
+compose" (F2: the fenced form dropped the synchronous arm's `.is_ok()` gate and
+composed on an ERROR retire), "`fence-signaled` never counts it" (F3: true on
+the completion arm, false on the vindication arm), and `rb_wanted`'s "bounded
+by MAX_SURFACES" (F6: the dedup key included a monotonic `gen`). And one — F1
+[P0] — is **pre-existing** from the Warp-4 synchronous arm and in none of the
+five preambles: a client-declared BO backing has no lower bound against its
+declared geometry, so a 512x512 BO declared with 4096 bytes made the compositor
+read 1 MiB out of a 4 KiB mapping. Attribution is not ownership; it is fixed
+here, at the read gate (`gl_adoption`, the exact bound) and at the door
+(`wbo_create`, keyed on the one format whose bytes-per-texel can be asserted —
+a general floor would reject legitimate compressed textures).
 
 ## 5. Placement — where the server lives, per backend
 
