@@ -54,8 +54,10 @@ check() {
 }
 
 echo "== venus-verdict discrimination =="
-# The positive control. Without it the four negatives below are satisfied by a
-# verdict that refuses everything.
+# The positive control, and it goes first deliberately: without it EVERY
+# negative below is satisfied by a verdict that refuses everything. Stated
+# without a count -- a count in a comment is a status field whose flip is
+# nobody's step, and this one already said "four" while seven followed it.
 check "clean pair VERIFIES"                 0 "" ""
 # One variable away, each direction of the discrimination the gate claims.
 check "control leg ALSO sees id=4 -> UNVERIFIED" 1 \
