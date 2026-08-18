@@ -22,6 +22,130 @@ needed the operator.
 
 ---
 
+## 2026-08-18 — The owed C-6b round: a deviation is dangerous everywhere else that reads the same field
+
+Fable ran out of credits mid-spawn — the prosecutor died after loading the
+preamble and before producing findings, which is an **absent** round, not a
+clean one. Per CLAUDE.md that goes straight to the fallback tier rather than
+retrying Fable, so it ran on Opus 5.
+
+**The family-diversity caveat is INVERTED here, and reciting it would have been
+wrong.** The standing rule assumes an Opus prosecutor shares the author's
+priors because Opus is this project's implementation agent. But `ef58d639` and
+`24e6753d` were written by **Fable 5** earlier the same session — so an Opus
+prosecutor is genuinely cross-lineage against *this* author. I said so in the
+spawn, told it its contribution was context independence, and warned it that
+the code's own justifications (dense comments, the AS-BUILT paragraphs, the
+audit row's prosecute-on-change list, five closed lists of "VERIFIED SOUND"
+arms) are the author's argument and not evidence. It came back with **1 P0 /
+3 P1 / 3 P2 / 3 P3**, and three of the findings are corrections to claims the
+tree makes about itself.
+
+### The lesson, and it is specifically about AS-BUILT 1
+
+C-6b deviated from the design's letter in one recorded place: the compositor
+readback's fence tag carries the **client's** `ctx_pub` rather than 0. That was
+argued carefully and it is right — 0 is `warp_ctx_vindicate`'s no-slot
+sentinel, and the client's own vindication has to wait for our poisoned slot.
+
+What was never enumerated is the deviation's **cost**. Every mechanism keyed on
+a tag's ctx now reaches the compositor's reserved slot, and two of those are
+*shipped, client-drivable levers* (`warp-hold` / `warp-abandon`, since
+`default = ["test-mode"]` and nothing passes `--no-default-features`). Their
+safety argument is #178's: "the worst a client can do is wedge its own ctx,
+which it could already do." C-6b made that false one resource over, silently,
+and the round found it (F4) by prosecuting the documented deviation **as a
+design change rather than as a footnote**. Worse, `drain` cleared
+`fslot_since` one line *before* the hold check, so a held slot could never
+reach `reap_abandoned`'s staleness test — the pin was indefinite, not bounded
+by 30 s. Compositor-wide: every other client's readback frozen, the 500 ms sync
+deadline disabled process-wide, and a ~1 kHz spin in the console for the life
+of the box.
+
+**A deviation is sound for the reason it was taken and dangerous everywhere
+else that reads the same field.**
+
+### The P0 was pre-existing, and its guard was a comment about the wrong subject
+
+F1: `wbo_create` validated the client-declared backing with two gates and
+**both are upper bounds** — its comment states the one-directionality outright
+("a 1x1 texture cannot ask for 64 MiB"). `gl_adoption` compared `w`/`h` for
+*equality*, never capacity. And `compose_cpu` reads `sw * sh_full * 4` from the
+BO's `va` with the dims taken from the **surface**. So a 512×512 BO declared
+with 4096 bytes — page-aligned, under both caps, `Y_0_TOP` so it takes the
+readback arm — was admitted, adopted, and composed by reading **1 MiB out of a
+4 KiB mapping**: a bump-allocated neighbour (another client's pixels, painted
+onto the attacker's own pane) or a fault in the process that *is* the console.
+
+`compose_cpu` carries a `SAFETY` comment asserting the rows are in range
+"because damage was validated against the surface geometry". True of the
+**weave**, whose size derives from that geometry. False of a client-declared BO
+backing. The same function reads both.
+
+Pre-existing from the Warp-4 synchronous arm and in none of the five
+preambles — attribution, not ownership. Fixed at the read gate (exact:
+`b.size >= b.w * b.h * 4`, exact because adoption already pins the dims, and
+`comp_readback_retired` is the only `Some(va)` caller — enumerated by enclosing
+function, not by grep hit) and at the door (keyed on `B8G8R8A8_UNORM` alone: a
+general per-texel floor would refuse legitimate *compressed* textures, and it
+must not key on `composable` because the attack shape is precisely
+non-composable — that is how it reaches the readback arm).
+
+### Converging with my own pass, and the one I sharpened afterwards
+
+I ran the self-audit in parallel per the audit-in-flight discipline and found
+F3 independently (a vindicated compositor readback bumps the **client's**
+`fence_signaled`, so `warp_fence_wait` — which returns on `signaled >= seq` —
+returns one fence early for the ctx's life). Filing it before the round
+reported is the useful part: two prosecutors reaching the same defect from
+different directions is the strongest signal either one produces.
+
+The round also sharpened something I had noticed and under-read: `rb_wanted`'s
+growth. I saw it was unbounded in principle; the round pinned *why the comment
+was wrong* — the dedup key included `gen`, drawn from a monotonic counter, so
+"bounded by MAX_SURFACES" bounded `n` and not the pair.
+
+### The fix that broke the gate, and what that is worth
+
+My fix to F8 (DEEP asserted a **sum** over an unknown retire count against a
+per-readback threshold) required *exactly one* retire per round. The gate went
+**red on a healthy build**: `comp-rb landed 1->7` across three rounds — **two**
+retires each, because the flight loop's later presents each request a readback
+and the pump issues the next the moment the first lands.
+
+Every round satisfied the substance (waits 794 / 1007 / 260 ms, each observing
+draw 1199 of 1200 by its pixel witness) and failed my arithmetic. **I had
+replaced a wrong statistic with a claim about the mechanism's scheduling**, and
+the claim was false. The round had offered the right alternative in the same
+breath and I took the wrong half of it. Now it asserts the round's **mean**:
+robust to any retire count, still rejects the case the sum admitted (one long
+readback plus one instant one averages below threshold), and the pixel witness
+still carries which draw was observed. The per-round line prints the count and
+the mean so the next red is diagnosable without a re-run.
+
+Worth recording plainly: the gate caught my own fix, on real silicon, one
+commit after I wrote it. That is the system working — and it is the second time
+this run that a control earned its keep by going red for a reason that was not
+a defect.
+
+### What is NOT closed
+
+F7 [P2] is a **measurement debt**, not a code change, and saying otherwise
+would be the worse outcome. The readback gate cannot *discriminate* a sabotage
+that removes the deadline widening: the certifying run measured `F2B max
+267 ms` against a `SUBMIT_DEADLINE_MS` of 500, so a build without the widening
+passes identically. Sharper still — the deadline is evaluated **only at a stale
+wake**, and the stall it exists for (a synchronous host
+`TRANSFER_FROM_HOST_3D` on QEMU's serial main loop) raises no interrupts. So
+whether the widening is load-bearing *at all* depends on INTx sharing nobody
+has measured. GPU-DESIGN 4.5.13 now says that instead of "correct by
+construction", and names what closes it. Tracked as main#253.
+
+The close is **dirty** (a P0 returned; P1+P2 = 6) and several fixes are
+structurally invasive, so **a follow-up round is owed on the fixes themselves**.
+
+---
+
 ## 2026-08-18 — The extinction line, source 2 of 3: the fix found a fault gate that had been printing nothing for a month
 
 Same run, after C-6b landed and pushed at `f525cea3`. Next on the resume note

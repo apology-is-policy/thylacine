@@ -3033,16 +3033,27 @@ fn observe_readback() {
             continue;
         }
         rounds_done += 1;
-        // ROUND F8 [P3]: `round_wait_ms` is a SUM over `rw_n1 - rw_n0`
-        // retires, and that delta can exceed 1 (the flight loop's presents
-        // coalesce one request, the pump issues it the moment the first
-        // lands, and the census is sampled only after the queue drains). A
-        // sum no single readback earned would satisfy the threshold. Require
-        // exactly one retire in the round, so the figure asserted on is the
-        // figure one readback waited. The pixel witness (`observed_idx`)
-        // stays -- it is what proves the wait was on the LAST draw rather
-        // than merely long.
-        let round_deep = rw_n1 == rw_n0 + 1 && round_wait_ms >= RB_DEEP_MS && observed_idx >= total as i64 - 2;
+        // ROUND F8 [P3]: `round_wait_ms` was a SUM over `rw_n1 - rw_n0`
+        // retires asserted against a per-readback threshold -- a figure no
+        // single readback earned could satisfy it.
+        //
+        // The first cut of this fix required EXACTLY ONE retire per round and
+        // the gate went RED on a healthy build: measured here, every round
+        // retires TWO (`comp-rb landed 1->7` across three rounds). The flight
+        // loop's later presents each request a readback, and the pump issues
+        // the next the moment the first lands, so a second lands inside the
+        // same window. Requiring one was a claim about the mechanism's
+        // scheduling, not about the property under test -- and it was wrong.
+        //
+        // The MEAN is the honest statistic: a mean at or above the threshold
+        // implies at least one readback reached it, whatever the count, and
+        // it correctly rejects the case the sum admitted (one long readback
+        // plus one instant one averages below). The pixel witness stays --
+        // it is what proves the wait was on the queue's LAST draw rather than
+        // merely long.
+        let round_n = rw_n1.saturating_sub(rw_n0);
+        let round_mean_ms = if round_n > 0 { round_wait_ms / round_n } else { 0 };
+        let round_deep = round_n > 0 && round_mean_ms >= RB_DEEP_MS && observed_idx >= total as i64 - 2;
         let round_live = first_ms < RB_LIVE_MS && !slot_poisoned;
         deep_ok &= round_deep;
         live_ok &= round_live;
@@ -3053,8 +3064,9 @@ fn observe_readback() {
             flight_ctl_max = max_ctl_ms;
         }
         t_putstr(&format!(
-            "warp-prove: C6-RB ROUND {} -- issuing present {} ms; readback issued at {} landed at {} (ms since the first heavy submit), observed draw {} of {} (pixel {:#010x}); readback-wait +{} ms; the {} heavy submits retired in {} ms, fences at {:?}; during the flight: {} presents max {} ms, ctl reads max {} ms; other console work this round: slot-presents +{} cpu-presents +{} bo-presents +{} xfers +{} pushes +{} flushes +{} health +{}; deep {} live {}\n",
+            "warp-prove: C6-RB ROUND {} -- issuing present {} ms; readback issued at {} landed at {} (ms since the first heavy submit), observed draw {} of {} (pixel {:#010x}); readback-wait +{} ms over {} retires (mean {} ms); the {} heavy submits retired in {} ms, fences at {:?}; during the flight: {} presents max {} ms, ctl reads max {} ms; other console work this round: slot-presents +{} cpu-presents +{} bo-presents +{} xfers +{} pushes +{} flushes +{} health +{}; deep {} live {}\n",
             round, first_ms, issued_at_ms, landed_at_ms, observed_idx, total, observed_px, round_wait_ms,
+            round_n, round_mean_ms,
             RB_LIVE_SUBMITS, queue_ms, fence_ms, presents, max_present_ms, max_ctl_ms,
             others1[0] - others0[0], others1[1] - others0[1], others1[2] - others0[2],
             others1[3] - others0[3], others1[4] - others0[4], others1[5] - others0[5], others1[6] - others0[6],
