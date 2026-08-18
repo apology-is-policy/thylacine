@@ -438,7 +438,12 @@ so the compositor never grows a glyph path; the richer end state is Acme's
 ## Stream 4 — notes / job control / PTY (the kernel line)
 
 > **P1 (round B on 437213c4/5336c894, Fable 5) -- FIXED @663d4b64, pushed
-> @790f6671; SMP 40/40, a follow-up Fable round on the fix running:** the pipe (spoor) 9P transport BLOCKS inside `devpipe_write`
+> @790f6671; SMP 40/40. The follow-up round found the fix INCOMPLETE (a P1):
+> CNBFRAME is honored by devpipe_write ONLY, but SYS_ATTACH_9P accepts any
+> writable Spoor as tx, so a NON-PIPE tx (a /srv byte-conn) re-opens the
+> extinction. LATENT (callers pass pipes). OWED: gate tx/rx on dev==&devpipe
+> in p9_spoor_transport_init + build + SMP + a third round
+> (memory/audit_663d4b64_closed_list.md):** the pipe (spoor) 9P transport BLOCKS inside `devpipe_write`
 > while `client_send_flow` holds `c->lock` -- an unprivileged multi-threaded
 > container can EXTINCT the box (a `#360` lock-across-sleep). `437213c4` made
 > `SYS_ATTACH_9P` over a pipe pair the diorama transport = the Phase-5 spoor
