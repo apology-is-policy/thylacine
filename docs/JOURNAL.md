@@ -85,11 +85,45 @@ slightly slower host would have moved it to a background task and killed the
 second boot mid-run. Running each leg as its own sub-600s call was the right
 call, and the number says why.
 
-Still open at this point in the run: the `holotype-reviewer` round on the
-`gpu.rs` change (audit-bearing, tapestryd row) and LS-CI, both owed before push.
-The SMP gate stands — the kernel binary is byte-unchanged. Ahead: V-2 (host3d +
-the hostmem-BAR mapping, the first real kernel memory-authority path of the arc)
-→ V-3 (`vn_renderer_thylacine` + the coherent ring) → V-4/5/6.
+The prosecutor round closed **CLEAN (0 P0 / 0 P1 / 0 P2 / 3 P3)** on the Opus
+4.8 fallback (Fable was out of credits — the round is a real degradation on the
+independence axis, family-shared with the author, and it said so; a Fable re-run
+is not owed because it finished). It caught one thing worth the round on its own:
+**F1**, an inconsistency in my *own* SF1 fix. SF1 leaks the backing on a failed
+unref (the host may still hold the pages); but the sibling branch — a create
+that fails because the *engine died* — Dropped the backing, and a deadline-dead
+create was already *published* (the doorbell rings before the wait), so the
+device may equally hold that PA. Two branches, opposite dispositions, one
+principle. Fixed to leak on both. Inert today (the probe issues no transfer, and
+the dead path triggers a proc-death device reset), but it is exactly the kind of
+disagreement that reuses the wrong disposition at V-3, where transfers exist. The
+round also filed two forward notes: **F2** (V-3 must validate a client's
+`pa`/`len` before they become a host `mem_entry` — an I-45/I-32 boundary) and
+**F3** (when V-2 adds host3d, the gate should assert the blob mem-type from
+evidence, not the hardcoded "guest" string).
+
+The operational miss, recorded because the catch is the reusable part: partway
+through the run the **host went to sleep**. It killed the prosecutor mid-response
+("your computer went to sleep") and hung an LS-CI chunk into a 590s timeout doing
+nothing — and I had forgotten `caffeinate`, the exact trap
+`feedback_caffeinate_long_tasks.md` names. The tell was two failures at once with
+one cause; the fix was a background `caffeinate -dis` plus `caffeinate -i` on
+every LS-CI chunk, after which the heavies ran to 468s clean. The prosecutor's
+partial output before it died was already a real finding (the missing runtime
+guard on `resource_create_blob`), so the sleep cost time, not correctness.
+
+A note on what "37/37 on the shipped binary" actually rests on: the guard and F1
+are provably **unreachable** on the 2D device LS-CI boots (`blob_probe` is
+virgl-gated, so `resource_create_blob` is never called there), so the 26
+scenarios I ran before the fixes are byte-identical to the final binary, and I
+re-ran only the remaining 11 on it. The venus gate I *did* re-boot on the final
+binary directly — the test leg exercises the guard (which falls through, since
+`self.blob == true`) — rather than lean on the same unreachability argument for
+the load-bearing claim.
+
+SMP stands (kernel byte-unchanged). Ahead: V-2 (host3d + the hostmem-BAR mapping,
+the first real kernel memory-authority path of the arc) → V-3
+(`vn_renderer_thylacine` + the coherent ring) → V-4/5/6.
 
 ## 2026-08-18 — V-0b: a Venus context creates, and the seam size I recalled wrong
 

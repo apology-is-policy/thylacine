@@ -1456,7 +1456,7 @@ seam with a `capset <id>` ctl verb but nothing reads it. V-0b is driver-internal
 V-3 makes the field live, rejecting a capset the device never enumerated belongs
 in that change (an unvalidated client `u32` would otherwise reach `CTX_CREATE`).
 
-## Warp-6 V-1 -- a guest blob creates (as-built *(pending)*)
+## Warp-6 V-1 -- a guest blob creates (as-built `3a98f902` + the audit-close commit)
 
 V-0b proved a Venus *context* is creatable; V-1 proves the next thing a Venus
 driver needs: a **guest blob**. Venus carries its command ring as a
@@ -1526,12 +1526,41 @@ absence of `CREATED`, which a probe that never ran would also satisfy), and no
 would mean the test leg's create proves nothing). `test-venus-verdict` grew
 three arms (13 -> 16), all discriminating without a boot.
 
+### The round (CLEAN, 0 P0 / 0 P1 / 0 P2 / 3 P3)
+
+Opus 4.8 fallback (Fable out of credits; tier noted, a finished fallback owes no
+Fable re-run). Two fixes it verified sound, both defense-in-depth for V-3:
+
+- **The `!self.blob` runtime guard** on `resource_create_blob` -- a blob command
+  is illegal on the wire without `F_RESOURCE_BLOB`, and this refuses it in the
+  function rather than trusting the caller. `blob_probe` also checks `self.blob`,
+  so the guard is redundant for the V-1 probe and load-bearing for V-3 (the
+  V-0b F2 lesson: a caller-side-only guard is a no-op the moment a future caller
+  forgets it). It is unconditional (unlike the sibling `ctx_create_capset`'s
+  `capset != 0` exemption) because there is no feature-free blob command.
+- **F1**: SF1 leaks the backing on a failed unref (host may still reference the
+  pages), but the sibling dead-engine create-Err branch DROPPED it -- and a
+  deadline-dead create is already published (the doorbell rings before the wait),
+  so the device may equally hold the PA. Fixed to `forget` on both branches; the
+  two must agree or V-3 (where transfers exist) reuses the wrong one.
+
+Two forward notes, owed at their chunks, not V-1:
+
+- **F2 -> V-3**: `resource_create_blob` trusts caller-supplied `pa`/`len`. For
+  V-1 the caller is `blob_probe` with a driver-owned page; when V-3's
+  client-influenced caller reaches here, `pa`/`len` must be validated to
+  reference DMA the *client* owns (an I-45/I-32 boundary).
+- **F3 -> V-2**: the gate greps the literal `guest` in the log line, not the
+  `blob_mem` actually sent. Sound while V-1 hardcodes GUEST; when V-2 adds
+  HOST3D, assert the mem-type from evidence or a mem-type regression passes
+  silently.
+
 ### Not covered / deferred
 
-Host3d blobs + the hostmem-BAR mapping are **V-2**; the coherent command ring,
-the client blob-BO type, and `vn_renderer_thylacine` are **V-3**. V-1 is
-driver-internal -- the probe creates+unrefs before any client exists and
-confers nothing.
+Host3d blobs + the hostmem-BAR mapping are **V-2** (with F3's mem-type assertion);
+the coherent command ring, the client blob-BO type, `vn_renderer_thylacine`, and
+F2's client `pa`/`len` validation are **V-3**. V-1 is driver-internal -- the
+probe creates+unrefs before any client exists and confers nothing.
 
 ## Tests
 

@@ -1633,10 +1633,20 @@ impl Gpu {
             }
             Err(e) => {
                 if self.ctrl.dead {
+                    // The engine died with the create PUBLISHED but unretired
+                    // (submit_and_wait rings the doorbell before it waits): the
+                    // device MAY already have recorded the guest mem_entry PA
+                    // into a live host resource. So leak the backing rather than
+                    // unmap under a possibly-live reference -- SF1's principle,
+                    // its create-Err sibling. Leaving the two branches to
+                    // disagree is the trap that reuses the wrong disposition at
+                    // V-3, where transfers exist (round F1).
+                    core::mem::forget(backing);
                     return Err(e);
                 }
-                // The blob was never created; the host holds no backing
-                // reference, so `backing` Drops (unmap) safely below.
+                // A HEALTHY refusal means the device processed-and-rejected the
+                // create, holding no backing reference, so `backing` Drops
+                // (unmap) safely below.
                 say!("tapestryd: gpu blob-create guest REFUSED (engine healthy)");
             }
         }
@@ -1825,11 +1835,17 @@ impl Gpu {
     /// allocation, no `blob_id`, no hostmem BAR. This is the substrate Venus's
     /// command ring is built from (GPU-DESIGN section 2.4). The host3d path
     /// (host-allocated storage mapped through the hostmem window via MAP_BLOB)
-    /// is the V-2 delta and is deliberately NOT here. The caller MUST have
-    /// negotiated `F_RESOURCE_BLOB` (`self.blob`); a blob command is illegal
-    /// on the wire otherwise. `blob_flags` is the caller's (0 for the bare
-    /// V-1 probe; the ring's USE_MAPPABLE arrives with the ring at V-3).
-    /// device-global (ctx_id 0): the transport ring is not context-scoped.
+    /// is the V-2 delta and is deliberately NOT here. `blob_flags` is the
+    /// caller's (0 for the bare V-1 probe; the ring's USE_MAPPABLE arrives with
+    /// the ring at V-3). device-global (ctx_id 0): the transport ring is not
+    /// context-scoped.
+    ///
+    /// A blob command is illegal on the wire without `F_RESOURCE_BLOB`
+    /// negotiated, and this REFUSES it at runtime rather than trusting the
+    /// caller -- the V-0b F2 lesson (a caller-side-only guard is a no-op the
+    /// moment a future caller forgets it; V-3 will reach here with a
+    /// client-influenced request). `blob_probe` also checks `self.blob`, so the
+    /// guard is redundant for the V-1 probe and load-bearing for V-3.
     pub fn resource_create_blob(
         &mut self,
         resource_id: u32,
@@ -1838,6 +1854,9 @@ impl Gpu {
         pa: u64,
         len: u32,
     ) -> Result<(), Error> {
+        if !self.blob {
+            return Err(Error::Hardware);
+        }
         let req_va = self.ring_va + REQ_OFF;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB);
