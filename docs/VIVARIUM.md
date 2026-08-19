@@ -2267,6 +2267,110 @@ still differs, and it only defers.
 
 ---
 
+### 6.23 Signals — handler escape, detected (bug-2, the arm-2 root)
+
+§6.22's `in_handler` guard has a failure mode the frame shape does not, and it
+assumes the thing that fails: that every handler which *starts* eventually calls
+`rt_sigreturn`. A handler that **escapes** — `siglongjmp` to a `sigsetjmp` point
+in the main loop, the canonical way an interactive shell abandons a half-typed
+line on Ctrl-C — never returns through the kernel, so `in_handler` (set at
+delivery, cleared *only* by `notes_noted_restore` and `exec`) is left **stuck
+true**. The N-3 re-entrancy guard (§7.6.7) then refuses every future non-`kill`
+caught note: the guest is **permanently signal-deaf** — a second Ctrl-C does
+nothing — and undeliverable notes pile up until the queue reaches
+`NOTE_QUEUE_DEPTH` and `notes_post` begins to fail. What §6.22 records as a
+bounded imprecision (`in_handler` blocks all delivery *for the duration* of a
+handler) becomes unbounded: the duration is forever. This is not a fidelity
+gap; it is a correctness bug, and it fires on the single most common interactive
+idiom a real shell uses.
+
+Linux does not have this failure because it has no `in_handler` flag: it tracks
+the blocked **mask**, and `siglongjmp` (via `sigsetjmp(env, savesigs=1)`)
+restores the mask that was saved *before* the signal blocked it, so the handled
+signal is live again the instant the jump lands. Thylacine's kernel-side
+re-entrancy guard is precisely the state that needs an escape signal Linux gets
+for free — so we synthesize one.
+
+**The detector (sp-comparison).** The escape is observable from the one fact the
+frame layout already pins. At delivery, `note_saved_sp_el0` is the
+**pre-handler** `sp` (`notes.c:1404`), and the handler is launched with
+`ctx->sp = sigframe`, which is strictly **below** it
+(`notes.c:1461`; `sigframe = next_frame − VIV_SIGFRAME_SIZE < next_frame < sp0`).
+The ARM64 stack grows down, so:
+
+- while a handler genuinely runs (including any syscall it makes),
+  `sp < note_saved_sp_el0`;
+- after a normal `rt_sigreturn`, `in_handler` is already clear — nothing to
+  detect;
+- after a `siglongjmp` escape, `sp` is the `sigsetjmp` point in the main loop —
+  an **older, higher** frame — so `sp ≥ note_saved_sp_el0`.
+
+The predicate is therefore exact for the case it names:
+
+```
+in_handler ∧ proc.phenotype == PHENO_LINUX ∧ ctx.sp ≥ note_saved_sp_el0
+    ⟹ the handler has unwound above its own frame ⟹ clear in_handler
+```
+
+This is **total discrimination, not a heuristic**. A live handler's `sp` is
+strictly below the saved value on *every* path — a nested or recursed handler
+only pushes lower, a deep-stack handler is lower still — so no running handler
+is ever mis-flagged. And a `siglongjmp` target *must* be an **ancestor** frame
+on the current stack: jumping to a `sigsetjmp` env whose function has already
+returned is undefined behaviour, so a surviving `sigsetjmp` point is necessarily
+older than the handler and therefore at a higher address. The escape thus
+*always* trips `sp ≥ note_saved_sp_el0` and a live handler *never* does — the two
+cases do not overlap. (Both operands are the saved SP_EL0 bank —
+`exception_context.sp` is filled by `KERNEL_ENTRY`'s `mrs x10, sp_el0` and the
+kernel itself runs EL1h/SP_EL1, so the comparison is never across register
+banks.) Clearing `in_handler` re-arms delivery exactly as Linux's mask-restore
+does.
+
+**Two sites, and why EL0-entry is *required*, not merely preferred.** The clear
+fires at **EL0-entry** (`viv_linux_dispatch`, after the `rt_sigreturn` intercept)
+as the primary, and at **EL0-return** (`notes_deliver_at_el0_return`, immediately
+before the N-3 guard) as defense-in-depth. EL0-return *alone* is **insufficient**,
+and the reason is the interaction with the bug-1 sleep-predicate fix (§7.6.7). After
+the escape, the main loop's next syscall is typically a blocking read. If the clear
+waited for EL0-return, that read would *enter* with `in_handler` still stuck → it
+parks → the sleep-interrupt predicate `thread_caught_note_deliverable` returns false
+for a stuck handler (bug-1's gate) → a second caught signal cannot interrupt the
+parked read → the thread never returns to EL0 → the EL0-return check never runs. A
+deaf deadlock. EL0-entry breaks it: the escaped main loop's *first* syscall clears
+`in_handler` **before** the read parks, so the park is interruptible again and a
+second Ctrl-C lands. EL0-return remains as belt-and-suspenders — it self-heals the
+guard at the exact point it would otherwise refuse, and covers a
+fault-return-before-next-syscall window. Both sites call one pure predicate,
+`thread_note_handler_escaped(t, sp)`, so the logic exists once.
+
+**The load-bearing dependency: `sigaltstack` (132) stays `ENOSYS`.** The detector
+compares `sp` against a saved `sp` *on the same stack*. If a handler could run on
+an alternate stack (`SA_ONSTACK`), its `sp` would be an unrelated address and the
+comparison would produce both false negatives (a live alt-stack handler read as
+escaped) and false positives. `sigaltstack` is an explicit `ENOSYS` row
+(`vivarium.c:256`) and `SA_ONSTACK` is a §9 residual; a `_Static_assert`/comment
+at the detector ties it to that row, so anyone who later serves `sigaltstack`
+must revisit this subsection. This is the design's single sharpest risk, and it
+is enforced at build time rather than trusted to memory.
+
+**What it does not fix (deliberately, and no worse than today).** A
+`setcontext`/`swapcontext` to a context *below* `sp0` is not detected — rare, and
+identical to a handler that legitimately never returns (`sp` stays low,
+`in_handler` stays set, exactly as before this change). A handler that spins deep
+and never unwinds is likewise undetected and, correctly, indistinguishable from
+one still running. The detector adds a **third** clear edge (beside `rt_sigreturn`
+and `exec`); it removes neither, and it never clears `in_handler` for a native
+(`PHENO_NATIVE`) Proc — a native handler's longjmp discipline is a separate
+question this does not touch (recorded as a residual for the audit).
+
+The result moves the escape case out of §9's DEGRADED tier: a phenotyped handler
+may `siglongjmp` out of itself, as real shells do, and the guest stays
+signal-live. What remains degraded is only §6.22's genuine imprecision — a
+*running* handler briefly defers other signals — which is now the bounded thing
+it always claimed to be.
+
+---
+
 ## 7. The vivarium — the container runner
 
 `thylacine-run` from `ROADMAP §9.1`, named `viv` (§11). Userspace; no new kernel
@@ -2501,7 +2605,7 @@ caller reaches. (`I-42` is Clade's; `I-43` is the next free number.)
 | The syscall entry phenotype branch | The privilege boundary: a mis-branded Proc decodes numbers wrong. Prosecute I-43 completeness — *no* translated path may bypass a gate. |
 | Brand detection at exec | Mis-branding is the attack: a native binary branded Linux (or vice versa) decodes every syscall wrong. Fail-closed. |
 | The supervisor forward channel (B/C) | **New wait/wake on the death lineage** — I-9 register-then-observe, death-interruptibility (#811), no lost/double reply, supervisor death unwinds every parked guest. Spec-first. |
-| Signal delivery + `rt_sigreturn` (§6.22) | **RESTATED at V-6.** The original hazard — "restores `pstate`/`pc` from user memory, a classic privilege-escalation shape; must reject any frame that would elevate" — describes Linux's mechanism, and §6.22 does not build it: the restore reads the kernel-side `Thread` snapshot, so no user-frame field reaches `pstate`/`pc`/`sp` and there is no validator to get wrong. The obligation becomes proving that structural property holds on every path, plus: delivery is on the **death/notes lineage** (I-9/I-19, #809/#811/LS-5), so prosecute no-lost/no-double delivery, `kill` staying non-catchable through the phenotype, and the frame push failing *closed* (an unwritable user stack must re-enqueue, never half-deliver). `kill`/`tkill`/`tgkill` must not widen I-26's two-axis gate. |
+| Signal delivery + `rt_sigreturn` (§6.22) | **RESTATED at V-6.** The original hazard — "restores `pstate`/`pc` from user memory, a classic privilege-escalation shape; must reject any frame that would elevate" — describes Linux's mechanism, and §6.22 does not build it: the restore reads the kernel-side `Thread` snapshot, so no user-frame field reaches `pstate`/`pc`/`sp` and there is no validator to get wrong. The obligation becomes proving that structural property holds on every path, plus: delivery is on the **death/notes lineage** (I-9/I-19, #809/#811/LS-5), so prosecute no-lost/no-double delivery, `kill` staying non-catchable through the phenotype, and the frame push failing *closed* (an unwritable user stack must re-enqueue, never half-deliver). `kill`/`tkill`/`tgkill` must not widen I-26's two-axis gate. **The §6.23 handler-escape detector rides this same surface** (V-6d / bug-2): prosecute that the `sp`-comparison never clears `in_handler` for a live handler (no false-clear that would drop the N-3 guard mid-handler and admit a re-entrant delivery), that both operands are the SP_EL0 bank (no cross-bank compare), that clearing `in_handler` cannot itself lose or double a delivery, that the `PHENO_LINUX` gate keeps it off the native path, and that the `sigaltstack`==`ENOSYS` precondition (its load-bearing coupling) holds. |
 | Socket translation | Every `/net` op must run with the *guest's* authority, never the supervisor's (I-43 + I-1). |
 | The diorama servers | `/proc/<pid>` cross-Proc reads are the #57a-F2 class (UAF/lifetime under `g_proc_table_lock`) and an info-leak surface (KASLR, other principals' data). |
 
@@ -2584,6 +2688,7 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | **A handler's `ucontext` carries no FPSIMD record** (§6.22, task #96) | **NARROWED at V-8 -- the register corruption it used to describe is FIXED.** Note delivery now saves and restores Q0-Q31 + FPSR + FPCR around a handler (`fp_save_area`/`fp_restore_area`, a 520-byte block on `struct Thread`), so a handler may use floating point and autovectorised routines freely and the interrupted computation resumes intact. This was never an authority question -- the registers are the Proc's own -- but it was silent data corruption, PRE-EXISTING on the native note path and made reachable by ordinary compiled C once the phenotype landed. What REMAINS degraded is only the *reporting*: the frame's `_aarch64_ctx` chain is still terminated immediately rather than carrying an `fpsimd_context`, so a guest that walks `__reserved` looking for its FP state is told the record is absent rather than being handed one. Absent-and-honest, not present-and-wrong; and the state itself is now genuinely preserved underneath |
 | **`siginfo` carries the signal number only** (§6.22) | `si_signo`/`si_errno`/`si_code` are filled and the `_sifields` union is zeroed, with `si_code = SI_KERNEL` -- the one value that claims nothing about the union. A note carries a 16-byte name and one u32 arg, so `si_pid`, `si_uid`, `si_status` and `si_addr` have no source. Queued `siginfo` is the Tier-2 item §5.4 already names |
 | **A signal handler's `ucontext` is read-only** (§6.22) | The frame is written to the user stack and is accurate to read, but `rt_sigreturn` restores from the kernel-side `Thread` snapshot, so *writing* `uc_mcontext` does not change where execution resumes. Breaks signal-driven control transfer (Go's `sigpanic`, JIT deoptimisation); neither reaches this path at v1.0. Bought deliberately: it is what makes the `rt_sigreturn` escalation surface structurally absent rather than merely guarded |
+| **`SA_ONSTACK` / `sigaltstack` answer `ENOSYS`, and that is now load-bearing** (§6.23) | A phenotyped handler always runs on the main stack: `sigaltstack(2)` is an explicit `ENOSYS` row (`vivarium.c:256`) and `SA_ONSTACK` in `rt_sigaction` changes nothing. Beyond the ordinary fidelity cost, this `ENOSYS` is a **precondition of the §6.23 handler-escape detector** — it tells a live handler from a `siglongjmp`'d escape by comparing the interrupted `sp` against the pre-handler `sp` *on the same stack*, which is sound only while a handler cannot run on an alternate one. What *used* to be the unbounded failure here — a handler escaping without `rt_sigreturn` left `in_handler` stuck forever, so the guest went permanently signal-deaf — is now **ENFORCED-correct** (§6.23), not degraded. Serving `sigaltstack` later requires revisiting §6.23; a `_Static_assert` at the detector pins the coupling at build time |
 | **`bind` reports address collisions late** (§5.5.3, V-5b) | netd has no `bind` ctl verb — a local endpoint reaches it only as the argument of `announce` — so `bind()` is *remembered* and `listen()` spends it. A port already in use therefore succeeds at `bind` and fails at `listen` with `EADDRINUSE`. The error moves; it does not vanish. A server that reports "cannot bind" one line later is the whole visible effect |
 | **`listen` will not auto-bind** (§5.5.3, V-5b) | Linux binds an ephemeral port when `listen()` is called on an unbound socket; netd's announce parser rejects port 0, and inventing a port would be a translation the guest did not ask for, so this answers `EOPNOTSUPP`. Harmless in practice because discovering an auto-bound port needs `getsockname`, which is not a row yet — a server that cannot learn its own port cannot use one |
 | **`connect` after a *constrained* `bind` is refused** (§5.5.3, V-5b) | netd's dial verb carries the REMOTE endpoint only (its `!local` suffix is parsed and ignored), so a client that bound a specific source port cannot be honoured and gets `EOPNOTSUPP` rather than a silent ephemeral port. An *unconstrained* bind (`0.0.0.0:0`) asks for nothing netd is not already doing and proceeds normally |
