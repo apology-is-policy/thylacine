@@ -1064,6 +1064,7 @@ void test_notes_caught_note_deliverable_predicate(void) {
     fake_t.proc              = p;
     fake_t.note_mask         = 0u;
     fake_t.exit_close_active = false;
+    fake_t.in_handler        = false;
 
     TEST_ASSERT(!thread_caught_note_deliverable(NULL), "NULL thread -> false");
     TEST_ASSERT(!thread_caught_note_deliverable(&fake_t), "fresh Proc -> false");
@@ -1078,6 +1079,21 @@ void test_notes_caught_note_deliverable_predicate(void) {
     TEST_ASSERT(!thread_caught_note_deliverable(&fake_t),
                 "caught + MASKED -> false (the thread defers)");
     fake_t.note_mask = 0u;
+
+    // arm-2 regression: a caught + unmasked note is NOT deliverable while a
+    // handler is running (in_handler), because notes_deliver_at_el0_return's
+    // N-3 re-entrancy guard refuses non-kill delivery then. Reporting it
+    // deliverable is a read-interrupt LIVELOCK -- the sleep unwinds to EL0 to
+    // deliver, the guard re-queues the note, the next read unwinds again, with
+    // zero progress (measured: a child_exit stormed a pts read after a pouch
+    // shell's SIGINT handler escaped its frame without rt_sigreturn, leaving
+    // in_handler stuck). The predicate must agree with the delivery site.
+    fake_t.in_handler = true;
+    TEST_ASSERT(!thread_caught_note_deliverable(&fake_t),
+                "caught + unmasked but in_handler -> false (N-3 would refuse)");
+    fake_t.in_handler = false;
+    TEST_ASSERT(thread_caught_note_deliverable(&fake_t),
+                "in_handler cleared -> deliverable again");
 
     // DISJOINT from death: a caught note is deliverable but the terminate latch
     // stayed clear (self-managing refused it), and there is no group_exit_msg.

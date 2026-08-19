@@ -1280,6 +1280,20 @@ bool thread_die_pending(struct Thread *t) {
 bool thread_caught_note_deliverable(struct Thread *t) {
     if (!t) return false;
     if (t->exit_close_active) return false;
+    // A note that the N-3 re-entrancy guard will refuse to deliver is NOT
+    // deliverable, and treating it as such is a read-interrupt LIVELOCK: the
+    // sleep-interrupt predicate returns SLEEP_NOTEINTR, the op unwinds to EL0
+    // to deliver -- where notes_deliver_at_el0_return hits `if (t->in_handler)
+    // return` and re-queues the note -- so the very next blocking read is
+    // interrupted again, and again, with zero forward progress (measured: a
+    // pouch shell whose SIGINT handler escaped its frame without rt_sigreturn
+    // left in_handler stuck, and the child_exit from a finished `uname | tr`
+    // stormed its pts read ~40% of runs). Gate the sleep interrupt on the SAME
+    // condition the delivery site does: a note is deliverable only when no
+    // handler is running. When in_handler later clears (rt_sigreturn) the note
+    // delivers at the next EL0-return; the sleeping read meanwhile parks and
+    // wakes on data, exactly as a no-caught-note read would.
+    if (t->in_handler) return false;
     struct Proc *p = t->proc;
     if (!p || p == kproc()) return false;
     u32 flags  = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);

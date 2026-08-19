@@ -22,6 +22,67 @@ needed the operator.
 
 ---
 
+## 2026-08-19 (evening, aux) — arm-2: the viv-run flake was a caught-note livelock, not input loss
+
+**The task.** `tools/interactive/viv-run.exp` timed out ~40% of runs at the
+`^C -> exit -> resume` leg of an interactive `viv run` of an alpine-ash
+container. The prior session had it half-diagnosed and mis-framed.
+
+**The wrong turn, which is the point.** The inherited hypothesis (memory
+`bug_viv_run_pts_resume_flake.md`) was that the container shell's pts read
+returned **Eof** (`n_master==0`, the master seen closed mid-read) and busybox
+ash re-prompted on it. Plausible, and wrong. Rather than theorize further I
+instrumented ptyfs `slave_read` with a latched spin-detector (emit only after
+50 consecutive same-outcome reads on one pts). First reproducing run:
+`ptyfs SPIN[read] pts=0 out=WB run=50 nm=1 ns=3 m2s=0`. **`out=WB`, `nm=1`** —
+the master was *alive* and the read returned **WouldBlock**, which is supposed
+to *park* (no CPU), not spin. The Eof hypothesis was falsified by one
+measurement. The reusable lesson: a spin whose outcome you have *named* beats
+any amount of reasoning about which of three arms it "should" be — the topology
+argued against every arm I could construct, and the topology was not the thing
+that was wrong.
+
+**Following WouldBlock to ground.** A WB that spins means the read is being
+*abandoned and retried*, not parked. ptyfs `h_flush` names the cause: the 9p
+client sends `Tflush` when a note interrupts a blocked read. A Tflush probe
+stormed — `count=1..200 oldtag=<constant>` — one reader (slave, `fid=61`,
+data read), interrupted ~200×. A kernel probe at the N-3 re-entrancy guard
+(`notes_deliver_at_el0_return`, notes.c ~1550) named the note:
+`arm2 N3-BLOCK note=child_exit cc=1..200`. The full chain: alpine-ash's SIGINT
+handler (after `^C`) escapes via longjmp to its main loop and **never calls
+rt_sigreturn** — the only clear of `in_handler` (notes.c ~1827) — so
+`in_handler` is stuck; the finished `uname | tr` posts **child_exit** (SIGCHLD),
+caught; the shell's next pts read hits the sleep predicate
+`thread_caught_note_deliverable` (sched.c ~2015), which said *deliverable*, but
+the N-3 guard is *guaranteed* to refuse delivery while `in_handler` is set. The
+predicate and the delivery site disagreed → `SLEEP_NOTEINTR` → Tflush+EINTR →
+EL0 → N-3 re-queues → next read → **livelock**.
+
+**Bug 1 (fixed).** `if (t->in_handler) return false;` at the top of
+`thread_caught_note_deliverable` — gate the sleep interrupt on the same
+condition the delivery site uses. The read now parks and wakes on data; the
+note delivers at the next EL0-return once `in_handler` clears. Verified
+**viv-run 10/10** (was ~6/10), `maxtflush 0` on every run; `test.sh` PASS with a
+new regression in `test_notes.c` (which also exposed that the existing test left
+`fake_t.in_handler` uninitialized — the fix now reads it). Same class as the
+round-F1 `caught_note_stop_dequeue_drains` regression (a stranded caught bit →
+deliverable-true → EINTR livelock).
+
+**Bug 2 (open, the deeper root).** `in_handler` is stuck because a Linux handler
+can escape via siglongjmp without rt_sigreturn and nothing clears it → the
+process is signal-deaf until it clears (an I-43 vivarium-fidelity gap; broad:
+any Linux program that siglongjmps out of a handler then gets another caught
+signal). With bug 1 that is a deferred/dropped signal, not a hang. It is on the
+shared notes/vivarium surface (posted to main, yip 0027); the fix approach
+(escape-detection via sp / mask-based re-entrancy with user-stack frames /
+accept+document) is a design fork surfaced to the operator.
+
+**Process note.** The formal audit spawned on Fable 5 and died on credit
+exhaustion producing no report; per CLAUDE.md that goes straight to the highest
+Opus at max effort (never skip a round), re-spawned with the context-independence
+framing since it shares my lineage. All ptyfs + kernel probes were reverted; the
+committed diff is the one-line predicate fix + the regression test only.
+
 ## 2026-08-19 — V-2: host-visible memory, and the death path a shared BAR opened
 
 Two threads. First, a stray `/compact`: the operator saw two `/compact` lines
