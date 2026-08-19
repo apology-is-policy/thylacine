@@ -553,7 +553,19 @@ int proc_quiesce_owned_devices(struct Proc *p) {
                 // whose addrspace_unref frees the KObj_DMA pages BEFORE
                 // handle_table_free reaches the KObj_PCI release quiesce.
                 // Idempotent with `pci_release_bars_and_claim`.
-                reset += kobj_pci_quiesce((struct KObj_PCI *)h->obj) ? 1 : 0;
+                // V-2 (audit F1): a claim with a live BURROW_TYPE_HOSTMEM
+                // mapping gets a DMA-only quiesce -- BUS_MASTER cleared (the
+                // dead device cannot DMA) but MEM_SPACE KEPT, so a client's live
+                // mapping never observes a MEM-decode-disabled BAR. MEM_SPACE
+                // clears at the last kobj_pci_unref, once every hostmem burrow
+                // (thus every client mapping) is gone. A concurrent last-burrow
+                // free racing this read is benign: whichever path is last clears
+                // MEM_SPACE, and the client is unmapped exactly when it does.
+                struct KObj_PCI *kp = (struct KObj_PCI *)h->obj;
+                if (__atomic_load_n(&kp->hostmem_burrows, __ATOMIC_ACQUIRE) > 0)
+                    reset += kobj_pci_quiesce_dma_only(kp) ? 1 : 0;
+                else
+                    reset += kobj_pci_quiesce(kp) ? 1 : 0;
                 continue;
             }
             if (h->kind != KOBJ_MMIO || !h->obj) continue;

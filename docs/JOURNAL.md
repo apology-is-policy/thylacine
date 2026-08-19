@@ -22,6 +22,59 @@ needed the operator.
 
 ---
 
+## 2026-08-19 — V-2: host-visible memory, and the death path a shared BAR opened
+
+Two threads. First, a stray `/compact`: the operator saw two `/compact` lines
+after a self-compaction and asked which agent issued the second. Ground truth
+(the selfcompact ledger + both scripts) showed it was neither an agent nor the
+nudge watcher — it was a *premature* self-compact cancelled earlier at 560k,
+whose Enter-queued `/compact` a `tmux send-keys C-u` never actually retracted; it
+rode the input queue ~4 hours and fired against the already-compacted session (a
+harmless "Not enough messages"). Landed as contract (`19103efe`): a queued
+self-compaction is NOT yours to cancel — only the operator's (raise a blocking
+question); invoke the script only on the real 600k signal. While in the ledger I
+found the belay gate keyed on the mutable `@thyla-role` tag — main's compacts
+logged as `aux`, colliding with aux's state and silently defeating the governor;
+rekeyed it on the git toplevel (`83c7f56d`).
+
+Then **V-2** — the first kernel memory-authority path of the Warp-6 arc: map a
+subrange of a PCI hostmem BAR (Venus HOST_VISIBLE memory) into a client VA. The
+ratified design (6.2.1) was wrong about the tree in two places:
+- It said "add the NORMAL_NC MAIR index." The recon measured it: NC has been in
+  the MAIR since P1-C (index 1). V-2 *plumbs* it — widening the fault path's
+  `bool device_memory` to a MAIR index — and adds no byte. A design claim wrong
+  about the tree, caught by ground truth, not by re-reading its prose.
+- It said the client map "rides the existing SYS_WEFT_SHARE." The code showed the
+  weft path fail-closes on unknown burrow types AND carries a duplicate admission
+  gate that "MUST widen together" (its own comment, from the Warp-2b bug).
+  Delivering a client mapping meant wiring the I-37 weft kind-machinery — more
+  than "one syscall." Surfaced as a scope fork; the operator chose to complete it
+  in V-2 (both gates widened in lockstep, `WEFT_BIND_HOSTMEM`).
+
+The widening carried a footgun: `false == 0 == MAIR_IDX_DEVICE`, so a naive
+bool->index widen would silently map every existing `false` caller as Device.
+Handled by keeping `mmu_install_user_pte(bool)` as a semantics-preserving wrapper
+over the new `_attr(u32)` — zero churn on the ~13 callers, no inversion.
+
+The Opus holotype round (Fable out of credits) closed **0 P0 / 1 P1 / 1 P2 / 3
+P3**, verifying the whole bounds/lifetime/W^X/charge/lockstep core sound. The P1
+(F1) is worth recording: V-2 introduces the first cross-Proc-shareable
+*PCI-BAR-backed* Burrow, and on the owning server's DEATH the unconditional
+device quiesce clears the BAR's MEM decode under a client's live mapping. The
+prosecutor refused to guess the terminal severity — an EL0 access to a quiesced
+RAM-backed BAR is either benign garbage or a box-fatal external abort — and said
+measure it, not reason it away. Surfaced as a design fork; the operator chose the
+partial-quiesce fix: on death, for a claim with a live hostmem burrow, clear
+BUS_MASTER (stop the dead device's DMA) but KEEP MEM_SPACE, deferring its clear
+to the last unref — so the client never observes a decode-disabled BAR and the
+measurement is moot. F2 (the handler's bounds had no test) was closed by
+extracting a pure `hostmem_resolve_subrange` + testing it; F3/F4/F5 tracked P3.
+Re-audit of the fixes: *(pending)*. Suite 1431/1431; commit *(pending)*.
+
+What V-2 does NOT ship: a real client. The weft delivery is exercised only by
+unit tests — V-3 (vn_renderer) drives it E2E on real hardware, where the residual
+P3s land with a driver to exercise them.
+
 ## 2026-08-19 — V-1: a guest blob creates, and the scope hidden in "blobs"
 
 Resumed from my own self-compaction; the resume note ordered V-1 (blobs) next.

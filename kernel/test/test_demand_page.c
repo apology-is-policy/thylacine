@@ -192,6 +192,57 @@ void test_pgtable_install_user_pte_smoke(void) {
     drop_proc(p);
 }
 
+// V-2: the attr-index widening. mmu_install_user_pte_attr selects the MAIR
+// index directly, so a mapping can be Normal-NC (write-combining host memory),
+// which the old bool device-flag could not express. The bool wrapper must
+// preserve the old semantics EXACTLY -- false -> WB, true -> Device -- which is
+// the guard against the false==0==MAIR_IDX_DEVICE inversion.
+void test_pgtable_install_user_pte_attr_index(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    // _attr with NORMAL_NC: the new capability -- an AttrIndx == 1 (NC) PTE.
+    paddr_t nc_pa = page_to_pa(alloc_pages(0, KP_ZERO));
+    TEST_ASSERT(nc_pa != 0, "alloc NC backing");
+    TEST_EXPECT_EQ(mmu_install_user_pte_attr(p->as->pgtable_root, 0, USER_VA,
+                       nc_pa, VMA_PROT_RW, MAIR_IDX_NORMAL_NC), 0,
+        "install NC PTE via _attr");
+    u64 nc = walk_to_l3_entry(p->as->pgtable_root, USER_VA);
+    TEST_ASSERT(nc != 0, "walk to NC L3 entry");
+    TEST_EXPECT_EQ((nc >> 2) & 0x7u, (u64)MAIR_IDX_NORMAL_NC,
+        "AttrIndx == NORMAL_NC (the write-combining index the bool could not reach)");
+
+    // _attr with NORMAL_WB.
+    paddr_t wb_pa = page_to_pa(alloc_pages(0, KP_ZERO));
+    TEST_ASSERT(wb_pa != 0, "alloc WB backing");
+    TEST_EXPECT_EQ(mmu_install_user_pte_attr(p->as->pgtable_root, 0,
+                       USER_VA + ONE_PAGE, wb_pa, VMA_PROT_RW, MAIR_IDX_NORMAL_WB), 0,
+        "install WB PTE via _attr");
+    u64 wb = walk_to_l3_entry(p->as->pgtable_root, USER_VA + ONE_PAGE);
+    TEST_EXPECT_EQ((wb >> 2) & 0x7u, (u64)MAIR_IDX_NORMAL_WB, "AttrIndx == NORMAL_WB");
+
+    // The bool wrapper preserves the old semantics -- the inversion guard:
+    // false is NOT MAIR_IDX_DEVICE (== 0), it maps to NORMAL_WB.
+    paddr_t w2_pa = page_to_pa(alloc_pages(0, KP_ZERO));
+    TEST_ASSERT(w2_pa != 0, "alloc wrapper-WB backing");
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
+                       USER_VA + 2u * ONE_PAGE, w2_pa, VMA_PROT_RW, false), 0,
+        "install via bool wrapper (false)");
+    u64 w2 = walk_to_l3_entry(p->as->pgtable_root, USER_VA + 2u * ONE_PAGE);
+    TEST_EXPECT_EQ((w2 >> 2) & 0x7u, (u64)MAIR_IDX_NORMAL_WB,
+        "bool false -> NORMAL_WB (NOT Device -- the inversion guard)");
+
+    paddr_t dev_pa = page_to_pa(alloc_pages(0, KP_ZERO));
+    TEST_ASSERT(dev_pa != 0, "alloc Device backing");
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
+                       USER_VA + 3u * ONE_PAGE, dev_pa, VMA_PROT_RW, true), 0,
+        "install via bool wrapper (true)");
+    u64 dv = walk_to_l3_entry(p->as->pgtable_root, USER_VA + 3u * ONE_PAGE);
+    TEST_EXPECT_EQ((dv >> 2) & 0x7u, (u64)MAIR_IDX_DEVICE, "bool true -> DEVICE");
+
+    drop_proc(p);
+}
+
 void test_pgtable_install_user_pte_constraints(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");

@@ -340,6 +340,8 @@ void test_weft_notif_copied_immediate(void);
 void test_weft_share_register_claim(void);
 void test_weft_share_full(void);
 void test_weft_share_owner_gc(void);
+void test_weft_hostmem_share(void);
+void test_weft_hostmem_resolve(void);
 void test_weft_syscall_share(void);
 void test_weft_map_binding_lifetime(void);
 void test_weft_share_cap_gate(void);
@@ -356,6 +358,7 @@ void test_weft_reap_live_session_untouched(void);
 void test_weft_reap_close_unregisters(void);
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
+void test_pgtable_install_user_pte_attr_index(void);
 void test_pgtable_install_user_pte_idempotent(void);
 void test_demand_page_smoke(void);
 void test_demand_page_no_vma(void);
@@ -1872,6 +1875,8 @@ struct test_case g_tests[] = {
     { "weft.share_register_claim",        test_weft_share_register_claim,     false, NULL },
     { "weft.share_full",                  test_weft_share_full,               false, NULL },
     { "weft.share_owner_gc",              test_weft_share_owner_gc,           false, NULL },
+    { "weft.hostmem_share",               test_weft_hostmem_share,            false, NULL },
+    { "weft.hostmem_resolve",             test_weft_hostmem_resolve,          false, NULL },
     { "weft.syscall_share",               test_weft_syscall_share,            false, NULL },
     { "weft.map_binding_lifetime",        test_weft_map_binding_lifetime,     false, NULL },
     { "weft.share_cap_gate",              test_weft_share_cap_gate,           false, NULL },
@@ -1891,6 +1896,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "pgtable.install_user_pte_constraints",
                                        test_pgtable_install_user_pte_constraints,
+                                                                           false, NULL },
+    { "pgtable.install_user_pte_attr_index",
+                                       test_pgtable_install_user_pte_attr_index,
                                                                            false, NULL },
     { "pgtable.install_user_pte_idempotent",
                                        test_pgtable_install_user_pte_idempotent,

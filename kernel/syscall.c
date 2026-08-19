@@ -35,6 +35,7 @@
 #include <thylacine/path.h>    // struct Path (SYS_FD2PATH reads ->s/->len; #66)
 #include <thylacine/pts.h>     // the pts registry (SYS_PTY_REGISTER; PTY-1c)
 #include <thylacine/pci_handle.h>   // KObj_PCI (SYS_PCI_CLAIM/MAP_BAR/INFO; pci-1c)
+#include "../arch/arm64/mmu.h"      // V-2: MAIR_IDX_* for SYS_BURROW_FROM_HOSTMEM
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
 #include <thylacine/perm.h>
@@ -631,6 +632,113 @@ static s64 sys_dma_create_gpu_bo_handler(u64 size, u64 rights) {
         return -1;
     }
     return (s64)h;
+}
+
+// V-2 (audit F2): resolve + bounds-check a hostmem BAR subrange. Pure (no Proc /
+// handle state) so the security-load-bearing shm-scan + OOB rejects + base_pa
+// arithmetic are unit-testable directly (test_weft_hostmem_resolve). Returns 0 +
+// *base_pa_out on success; -1 on a bad shmid, a zero/unaligned length, a miss, or
+// an OOB subrange. Non-wrapping bounds: offset <= shm.length and length <=
+// shm.length - offset, and discovery pins shm.offset + shm.length <= bar.size,
+// so base_pa + length never escapes the BAR (I-45).
+int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
+                             u64 length, u64 *base_pa_out);
+int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
+                             u64 length, u64 *base_pa_out) {
+    if (!k || !base_pa_out)                          return -1;
+    if (length == 0)                                 return -1;
+    if (shmid > 0xffu)                               return -1;   // shmid is a u8
+    if ((offset & (PAGE_SIZE - 1)) || (length & (PAGE_SIZE - 1))) return -1;
+    for (u32 s = 0; s < PCI_SHM_COUNT; s++) {
+        if (!k->shm[s].present || k->shm[s].shmid != (u8)shmid) continue;
+        u8 bar = k->shm[s].bar;
+        if (bar >= PCI_BAR_COUNT || !k->bars[bar].present)      return -1;  // malformed
+        if (offset > k->shm[s].length)                          return -1;  // OOB start
+        if (length > k->shm[s].length - offset)                 return -1;  // OOB extent
+        *base_pa_out = k->bars[bar].pa + k->shm[s].offset + offset;
+        return 0;
+    }
+    return -1;   // no window with this shmid
+}
+
+// =============================================================================
+// SYS_BURROW_FROM_HOSTMEM — mint a Burrow over a PCI hostmem BAR subrange and
+// map it into the caller (Warp-6 V-2; GPU-DESIGN §6.2.1).
+// =============================================================================
+//
+// Authority is owning the pci_handle claim: KOBJ_PCI is in KOBJ_KIND_HW_MASK
+// (I-5 non-transferable), so a KOBJ_PCI handle in p's table IS proof p owns the
+// claim -- no CAP_HW_CREATE (unlike the *_CREATE mints, which forge a NEW hw
+// object; this only re-exposes memory the claim already owns). I-45: the map
+// reaches only the named BAR subrange of the caller's own claim, at a
+// cacheable/NC attribute conveying zero hardware authority. I-32: the caller's
+// page-budget is NOT charged (BAR pages, not RAM); a CLIENT that later maps this
+// via burrow_share_into is charged its own shared_map_pages.
+static s64 sys_burrow_from_hostmem_handler(u64 pci_hraw, u64 shmid, u64 offset,
+                                           u64 length, u64 cache_policy) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // ABI cache policy -> kernel MAIR index (the boundary translation).
+    u8 mair_idx;
+    switch (cache_policy) {
+    case T_CACHE_CACHED:                mair_idx = MAIR_IDX_NORMAL_WB; break;
+    case T_CACHE_WC:
+    case T_CACHE_UNCACHED:              mair_idx = MAIR_IDX_NORMAL_NC; break;
+    default:                            return -1;
+    }
+
+    // Resolve + validate ownership of the PCI claim (the sys_pci_map_bar_handler
+    // block). The held handle keeps k alive across burrow_create_hostmem (which
+    // takes its OWN kobj_pci ref); handle_put balances every exit.
+    struct Handle hh;
+    if (handle_get(p, (hidx_t)pci_hraw, &hh) < 0)    return -1;
+    if (hh.kind != KOBJ_PCI)            { handle_put(&hh); return -1; }
+    if ((hh.rights & RIGHT_MAP) == 0)   { handle_put(&hh); return -1; }
+    struct KObj_PCI *k = (struct KObj_PCI *)hh.obj;
+    if (!k)                             { handle_put(&hh); return -1; }
+    if (k->magic != KOBJ_PCI_MAGIC)     { handle_put(&hh); return -1; }
+
+    // Resolve + bounds-check the subrange (F2: the pure, unit-tested core --
+    // shmid select, page-align + OOB rejects, base_pa = bar.pa + window offset +
+    // caller offset, bounded within the BAR).
+    u64 base_pa;
+    if (hostmem_resolve_subrange(k, shmid, offset, length, &base_pa) != 0) {
+        handle_put(&hh);
+        return -1;
+    }
+
+    // Mint the hostmem Burrow (handle_count=1 construction ref). base_pa must be
+    // page-aligned (bars[].pa is; offset is; a non-page-aligned window offset is
+    // rejected inside create).
+    struct Burrow *b = burrow_create_hostmem(k, base_pa, (size_t)length, mair_idx);
+    if (!b)                             { handle_put(&hh); return -1; }
+
+    // Place + map into the caller's burrow-attach window (auto VA, the weft-map
+    // shape). burrow_map takes the mapping ref; drop the construction ref so the
+    // VMA owns the Burrow (mapping_count=1 keeps it alive). The whole
+    // find-gap -> map runs under p->as->lock (the #713 vmas-mutator rule).
+    spin_lock(&p->as->lock);
+    u64 va;
+    if (vma_find_gap(p, (size_t)length, EXEC_USER_BURROW_BASE,
+                     EXEC_USER_BURROW_TOP, &va) != 0) {
+        spin_unlock(&p->as->lock);
+        burrow_unref(b);
+        handle_put(&hh);
+        return -1;
+    }
+    if (burrow_map(p, b, va, (size_t)length, VMA_PROT_RW) != 0) {
+        spin_unlock(&p->as->lock);
+        burrow_unref(b);
+        handle_put(&hh);
+        return -1;
+    }
+    burrow_unref(b);                    // drop construction ref; VMA owns it
+    spin_unlock(&p->as->lock);
+    handle_put(&hh);
+    return (s64)va;
 }
 
 // =============================================================================
@@ -5890,7 +5998,12 @@ s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
     // (ring_size == the Burrow size).
     bool share_admissible = (v->type == BURROW_TYPE_DMA &&
                              v->kobj_dma != NULL &&
-                             (v->kobj_dma->weave || v->kobj_dma->gpu_bo));
+                             (v->kobj_dma->weave || v->kobj_dma->gpu_bo)) ||
+                            (v->type == BURROW_TYPE_HOSTMEM &&
+                             v->kobj_pci != NULL);
+    // V-2: BURROW_TYPE_HOSTMEM joins the register-side gate IN LOCKSTEP with the
+    // claim side (burrow_share_into). The two MUST widen together -- a hostmem
+    // Burrow admitted at claim but rejected here is the Warp-2b half-widen bug.
     if (v->type != BURROW_TYPE_ANON && !share_admissible) {
         spin_unlock(&p->as->lock);
         return -1;
@@ -11810,6 +11923,12 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_DMA_CREATE_GPU_BO:
         ctx->regs[0] = (u64)sys_dma_create_gpu_bo_handler(ctx->regs[0],
                                                           ctx->regs[1]);
+        return;
+
+    case SYS_BURROW_FROM_HOSTMEM:
+        ctx->regs[0] = (u64)sys_burrow_from_hostmem_handler(
+            ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3],
+            ctx->regs[4]);
         return;
 
     // I-42 / CL-7k: the JIT capability.

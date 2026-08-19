@@ -405,6 +405,20 @@ bool kobj_pci_quiesce(struct KObj_PCI *k) {
     return true;
 }
 
+// V-2 (audit F1): clear only BUS_MASTER, leaving MEM_SPACE decoding. On owner
+// death this stops the dead device's DMA immediately while a client's live
+// BURROW_TYPE_HOSTMEM mapping keeps a valid, decoding BAR. MEM_SPACE is cleared
+// later by pci_release_bars_and_claim at the last kobj_pci_unref, once the last
+// hostmem burrow (hence the last client mapping) is gone.
+bool kobj_pci_quiesce_dma_only(struct KObj_PCI *k) {
+    if (!k || k->magic != KOBJ_PCI_MAGIC || !k->vpd) return false;
+    u16 cmd = virtio_pci_cfg_read16(k->vpd, PCI_CFG_COMMAND);
+    if (!(cmd & PCI_CMD_BUS_MASTER)) return false;
+    cmd &= ~(u16)PCI_CMD_BUS_MASTER;
+    virtio_pci_cfg_write16(k->vpd, PCI_CFG_COMMAND, cmd);
+    return true;
+}
+
 static void pci_release_bars_and_claim(struct KObj_PCI *k) {
     // Quiesce: disable MEM-decode + bus-master before releasing the BAR PA
     // claims (which may be re-handed-out). Config space is kernel-owned, so the

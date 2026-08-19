@@ -1562,6 +1562,70 @@ the coherent command ring, the client blob-BO type, `vn_renderer_thylacine`, and
 F2's client `pa`/`len` validation are **V-3**. V-1 is driver-internal -- the
 probe creates+unrefs before any client exists and confers nothing.
 
+## Warp-6 V-2 -- host-visible BAR mapping (as-built, uncommitted)
+
+V-2 maps a subrange of a PCI hostmem BAR (Venus `HOST_VISIBLE` memory) into a
+client VA. GPU-DESIGN 6.2 / 6.2.1. Unlike V-0/V-0b/V-1 (tapestryd device
+commands, no kernel change), V-2 is a kernel memory-authority path -- I-45 +
+I-32 + I-37.
+
+**The ABI.** `SYS_BURROW_FROM_HOSTMEM(pci_handle, shmid, offset, length,
+cache_policy) -> mapped VA / -1` (syscall 107). Mints a `BURROW_TYPE_HOSTMEM`
+Burrow over `bars[shm.bar].pa + shm.offset + offset` (length bytes), gated by
+owning the `pci_handle` claim (KOBJ_PCI is I-5 non-transferable, so holding the
+handle IS the authority -- no CAP_HW_CREATE, unlike the *_CREATE mints), and maps
+it RW into the caller's burrow-attach window at the host-dictated cache
+attribute. The returned VA feeds the existing `SYS_WEFT_SHARE` -> client
+`SYS_WEFT_MAP` -> `burrow_share_into` (the audited share/budget/reaper path).
+`enum t_cache_policy` {CACHED=0->NORMAL_WB, WC=1->NORMAL_NC, UNCACHED=2->NORMAL_NC}.
+
+**The mmu attr-index widening.** The fault path's `bool device_memory` (WB-or-
+Device only) is widened to a MAIR index: `mmu_install_user_pte_attr(...,u32
+mair_idx)` is the general form, and `mmu_install_user_pte(...bool)` is a
+semantics-preserving wrapper (false->WB, true->Device) so none of the ~13 bool
+callers hit the `false==0==MAIR_IDX_DEVICE` inversion. `make_user_pte_l3` takes
+the index, range-checks it (`<= MAIR_IDX_NORMAL_WT`), and confines EXEC to
+NORMAL_WB (W^X/I-12; stricter than the old device-only reject). **NORMAL_NC
+already existed in the MAIR since P1-C** -- V-2 plumbs it and adds no byte
+(6.2.1's "add a MAIR byte" premise was stale; corrected).
+
+**The Burrow + share.** `BURROW_TYPE_HOSTMEM`: pages==NULL, pa = the BAR
+subrange, pins a `KObj_PCI` ref, `hostmem_mair` = the create-time index;
+`burrow_create_hostmem` mirrors `burrow_create_mmio`, with three type arms (the
+fault switch, `burrow_free_internal`, `burrow_acquire_mapping`). Share admission
+is widened at BOTH `burrow_share_into` and `sys_weft_share_for_proc` in LOCKSTEP
+(the Warp-2b half-widen bug); `weft_claimed_kind` classifies HOSTMEM map-only
+(entries==0) as `WEFT_BIND_HOSTMEM`, a fourth map-only kind. I-45: a hostmem BAR
+is device-PASSIVE shared memory (cfg_type=8), not a command/register surface, so
+the client's cacheable/NC RW mapping conveys zero hardware authority.
+
+**F1 (server-death liveness).** On the owning server's death,
+`proc_quiesce_owned_devices` does a DMA-ONLY quiesce (`kobj_pci_quiesce_dma_only`:
+BUS_MASTER cleared, MEM_SPACE KEPT) for a claim with `hostmem_burrows > 0`, so a
+client's live mapping never observes a MEM-decode-disabled BAR; MEM_SPACE clears
+at the last `kobj_pci_unref` (`pci_release_bars_and_claim`), after the mapping is
+gone. `hostmem_burrows` is atomic, bumped in `burrow_create_hostmem`, dropped in
+the HOSTMEM free arm.
+
+**Bounds (I-45).** `hostmem_resolve_subrange` (the pure, unit-tested core) bounds
+the subrange within the named window (`offset <= shm.length`, `length <=
+shm.length - offset`; discovery pins `shm.offset + shm.length <= bar.size`), so
+`base_pa + length` never escapes the BAR. The type is create-immutable + settable
+only by the ownership-gated mint. **I-32**: the mint's VMA is bounded by
+PROC_VMA_MAX; the client's shared-in pages by `shared_map_pages`; BAR pages are
+not RAM, so no `page_budget` charge.
+
+**Audit.** Opus holotype round: 0 P0 / 1 P1 (F1, server-death quiesce) / 1 P2
+(F2, no handler-bounds test) / 3 P3 (F3 weft-lockstep test, F4 shm/regions
+disjointness, F5 cache-policy footgun doc). F1 fixed (the DMA-only quiesce), F2
+fixed (the extracted `hostmem_resolve_subrange` + its test); F3/F4/F5 tracked
+P3. Re-audit of the fixes: *(pending)*. Tests: `weft.hostmem_share`,
+`weft.hostmem_resolve`, `pgtable.install_user_pte_attr_index`; suite 1431/1431.
+
+**Status.** As-built, uncommitted. The weft client-delivery is wired but
+exercised only by unit tests -- V-3 (`vn_renderer`) drives it E2E on a real
+device. The libthyla-rs ABI mirror (107) + the GL regression boot ride the merge.
+
 ## Tests
 
 Kernel: `pci.walk_caps_shm` (6 discriminating vectors incl. the

@@ -395,6 +395,11 @@ int weft_claimed_kind(const struct Burrow *v, u32 ring_entries) {
         return (ring_entries == 0u) ? WEFT_BIND_WEAVE : -1;
     if (v->type == BURROW_TYPE_DMA && v->kobj_dma != NULL && v->kobj_dma->gpu_bo)
         return (ring_entries == 0u) ? WEFT_BIND_GPU_BO : -1;
+    // V-2: a Venus host-visible BAR subrange. Map-only like weave/gpu_bo (no
+    // ring view); entries == 0 is the whole-region contract. kobj_pci non-NULL
+    // is the type's liveness witness (create-immutable, coherent lock-free).
+    if (v->type == BURROW_TYPE_HOSTMEM && v->kobj_pci != NULL)
+        return (ring_entries == 0u) ? WEFT_BIND_HOSTMEM : -1;
     // Anything else in the registry would be a register-gate breach; the
     // claim-side re-check keeps it unmappable regardless (defense-in-depth).
     return -1;

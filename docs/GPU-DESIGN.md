@@ -2635,15 +2635,23 @@ signed off:
   its own claim, and the client's cacheable RW mapping conveys zero hardware
   authority (§2.1). **I-32**: the client's `shared_map_pages` axis.
 
-- **Cache attribute: add the NORMAL_NC / write-combining MAIR index in V-2** (the
-  user chose full host-attribute honoring over the minimal WB-only start). The
-  kernel MAIR carries only NORMAL_WB + DEVICE-nGnRnE today; V-2 adds a NORMAL_NC
-  index so the host-dictated attribute (CACHED → NORMAL_WB / WC → NORMAL_NC /
-  UNCACHED → NORMAL_NC or DEVICE) is honored exactly rather than pinned to WB.
-  The stage-2 still forces the weaker of the guest/host pair (the field-agreement
-  note below), so this makes the guest able to *request* the host's attribute.
-  A new memory-type index carries its own TLB/coherency implications and is
-  audit-bearing at impl.
+- **Cache attribute: honor NORMAL_NC / write-combining in V-2** (the user chose
+  full host-attribute honoring over the minimal WB-only start). **Correction,
+  measured at impl (2026-08-19):** the kernel MAIR *already* carries NORMAL_NC
+  (index 1, `0x44`) beside NORMAL_WB (2), DEVICE-nGnRnE (0) and NORMAL_WT (3) --
+  it has since P1-C (`arch/arm64/mmu.h`); the premise that "the MAIR carries only
+  NORMAL_WB + DEVICE today" was stale (a design claim wrong about the tree, the
+  recurring class this project keeps catching by ground truth). So V-2 adds NO
+  MAIR byte. It *plumbs the existing NC index*: the fault path carried a `bool
+  device_memory` that could select only WB-or-Device, so it is widened to a MAIR
+  attribute index (`mmu_install_user_pte_attr`) and a HOSTMEM Burrow requests NC.
+  cache_policy maps CACHED → NORMAL_WB / WC → NORMAL_NC / UNCACHED → NORMAL_NC (on
+  ARM64 there is no distinct write-combining memory type; Normal-NC provides the
+  gathering Device-nGnRnE forbids). The stage-2 attribute still forces the weaker
+  of the guest/host pair (the field-agreement note below), so this makes the guest
+  able to *request* the host's attribute. The widening touches the user-PTE
+  encoder and is audit-bearing (W^X-adjacent: the encoder confines EXEC to
+  NORMAL_WB, hard-rejecting EXEC on Device/NC).
 
 **Then implement** (a subsequent commit references this scripture SHA), **then the
 V-6 audit** — a new kernel memory-authority path, audit-bearing on I-45 + I-32

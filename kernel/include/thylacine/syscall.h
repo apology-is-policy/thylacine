@@ -2064,6 +2064,31 @@ enum {
     //   DISTINCT from the weave's -- device-WRITTEN, bounded by owner-programmed
     //   GPU translation -- and is recorded on KObj_DMA.gpu_bo.
     SYS_DMA_CREATE_GPU_BO = 106,   // arg: size (x0), rights (x1)
+    // SYS_BURROW_FROM_HOSTMEM(pci_handle, shmid, offset, length, cache_policy)
+    //   -> mapped VA / -1  (Warp-6 V-2; GPU-DESIGN.md §6.2.1). Mints a Burrow
+    //   over a subrange of a PCI hostmem BAR (host-visible shared memory,
+    //   VIRTIO_PCI_CAP_SHARED_MEMORY_CFG / cfg_type=8) owned by the caller's
+    //   pci_handle claim, and maps it into the caller's burrow-attach window at
+    //   the host-dictated cache attribute (t_cache_policy -> MAIR index). The
+    //   returned VA feeds SYS_WEFT_SHARE, delivering the mapping to a client via
+    //   the audited share/budget/reaper path. Gated by owning the claim (KOBJ_PCI
+    //   is I-5 non-transferable, so holding the handle IS the authority). A
+    //   separate number so a garbage x2..x4 from a shorter-arg caller cannot be
+    //   misread as a valid subrange (the #112 missed-caller class).
+    SYS_BURROW_FROM_HOSTMEM = 107,   // arg: pci_handle(x0) shmid(x1) offset(x2) length(x3) cache_policy(x4)
+};
+
+// V-2 (GPU-DESIGN §6.2.1): the host-dictated cache attribute a
+// SYS_BURROW_FROM_HOSTMEM mapping is created with. The kernel maps each to a
+// MAIR attribute index at the syscall boundary. On ARM64 write-combining and
+// uncached both realize as Normal Non-Cacheable (there is no distinct WC memory
+// type; Normal-NC permits gathering, unlike Device); CACHED is Normal Write-Back.
+// The stage-2 attribute forces the weaker of the guest/host pair (GPU-DESIGN
+// §6.2), so this is a REQUEST for the host's attribute, honored where they agree.
+enum t_cache_policy {
+    T_CACHE_CACHED   = 0,   // Normal Write-Back (host-coherent)
+    T_CACHE_WC       = 1,   // Normal Non-Cacheable (write-combining)
+    T_CACHE_UNCACHED = 2,   // Normal Non-Cacheable (host non-coherent)
 };
 
 // SYS_JIT_CREATE out-parameter: the two aliases of one code region.

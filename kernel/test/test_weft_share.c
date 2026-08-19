@@ -38,10 +38,14 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/weft.h>
+#include <thylacine/pci_handle.h>   // V-2: synthetic KObj_PCI for the hostmem test
+#include "../../arch/arm64/mmu.h"   // V-2: MAIR_IDX_* for burrow_create_hostmem
+#include "../../mm/slub.h"          // V-2: kmalloc/kfree/KP_ZERO
 
 void test_weft_share_register_claim(void);
 void test_weft_share_full(void);
 void test_weft_share_owner_gc(void);
+void test_weft_hostmem_share(void);
 void test_weft_syscall_share(void);
 void test_weft_map_binding_lifetime(void);
 void test_weft_share_cap_gate(void);
@@ -1045,4 +1049,112 @@ void test_weft_sharer_charge_released_at_detach(void) {
 
     drop_proc(client);
     drop_proc(sharer);
+}
+
+// V-2: BURROW_TYPE_HOSTMEM -- the mint primitive, the weft claim-kind, and the
+// share admission. Constructs a synthetic KObj_PCI (ref=1, one BAR + one shm
+// window) as test_pci_handle does, and frees it with kfree -- never
+// kobj_pci_unref, which would quiesce a device that does not exist -- by keeping
+// its ref >= 1 across the Burrow's own ref/unref.
+void test_weft_hostmem_share(void) {
+    struct KObj_PCI *k = kmalloc(sizeof(*k), KP_ZERO);
+    TEST_ASSERT(k != NULL, "kmalloc KObj_PCI");
+    k->magic = KOBJ_PCI_MAGIC;
+    k->ref   = 1;                          // a claimed KObj_PCI starts at 1
+    k->bars[0].present = true;
+    k->bars[0].pa      = 0x80000000ull;    // page-aligned synthetic BAR PA
+    k->bars[0].size    = 0x10000;
+    k->shm[0].present  = true;
+    k->shm[0].shmid    = 1;
+    k->shm[0].bar      = 0;
+    k->shm[0].offset   = 0x1000;           // window at +4 KiB in the BAR
+    k->shm[0].length   = 0x4000;           // 16 KiB window
+
+    u64 pa = k->bars[0].pa + k->shm[0].offset;   // 0x80001000, page-aligned
+    struct Burrow *v = burrow_create_hostmem(k, pa, 2u * PAGE_SIZE, MAIR_IDX_NORMAL_NC);
+    TEST_ASSERT(v != NULL, "burrow_create_hostmem");
+    TEST_EXPECT_EQ((u64)burrow_get_size(v), (u64)(2u * PAGE_SIZE), "size");
+    TEST_EXPECT_EQ((u64)k->ref, 2u, "the Burrow took its own kobj_pci ref");
+    TEST_EXPECT_EQ((u64)k->hostmem_burrows, 1u,
+        "F1: the live hostmem mapping is counted (drives DMA-only quiesce on death)");
+
+    // Weft claim-kind: HOSTMEM is a map-only kind, whole-region (entries == 0).
+    TEST_EXPECT_EQ(weft_claimed_kind(v, 0), (int)WEFT_BIND_HOSTMEM,
+        "hostmem + entries==0 -> the hostmem kind");
+    TEST_EXPECT_EQ(weft_claimed_kind(v, 8), -1,
+        "hostmem + a declared ring geometry -> mismatch, fail closed");
+    TEST_ASSERT(weft_kind_maponly(WEFT_BIND_HOSTMEM), "hostmem is map-only");
+
+    // Share admission: burrow_share_into ADMITS hostmem into a second Proc.
+    struct Proc *client = make_proc();
+    TEST_ASSERT(client != NULL, "proc_alloc client");
+    spin_lock(&client->as->lock);
+    TEST_EXPECT_EQ(burrow_share_into(client, v, WEFT_TEST_VA, VMA_PROT_RW), 0,
+        "burrow_share_into admits BURROW_TYPE_HOSTMEM");
+    spin_unlock(&client->as->lock);
+
+    vma_drain(client);                     // release the client mapping (m -> 0)
+    drop_proc(client);
+    burrow_unref(v);                       // {h:1,m:0} -> free; kobj_pci 2 -> 1
+    TEST_EXPECT_EQ((u64)k->ref, 1u, "the Burrow's kobj_pci ref was released at free");
+    TEST_EXPECT_EQ((u64)k->hostmem_burrows, 0u,
+        "F1: the count drops at free -- the last unref would then clear MEM_SPACE");
+    kfree(k);                              // ref stays 1: never kobj_pci_free_internal
+
+    // Reject paths (each returns NULL, taking no kobj_pci ref).
+    struct KObj_PCI *k2 = kmalloc(sizeof(*k2), KP_ZERO);
+    TEST_ASSERT(k2 != NULL, "kmalloc k2");
+    k2->magic = KOBJ_PCI_MAGIC;
+    k2->ref   = 1;
+    TEST_ASSERT(burrow_create_hostmem(k2, 0x80001000ull, 2u * PAGE_SIZE, MAIR_IDX_DEVICE) == NULL,
+        "reject Device MAIR (host memory is Normal WB/NC)");
+    TEST_ASSERT(burrow_create_hostmem(k2, 0x80001000ull, 0, MAIR_IDX_NORMAL_WB) == NULL,
+        "reject zero length");
+    TEST_ASSERT(burrow_create_hostmem(k2, 0x80001800ull, 2u * PAGE_SIZE, MAIR_IDX_NORMAL_WB) == NULL,
+        "reject non-page-aligned base PA");
+    TEST_EXPECT_EQ((u64)k2->ref, 1u, "rejected creates took no kobj_pci ref");
+    kfree(k2);
+}
+
+// V-2 (audit F2): the pure subrange resolver behind SYS_BURROW_FROM_HOSTMEM --
+// the security-load-bearing shm-scan + OOB rejects + base_pa arithmetic, tested
+// without the syscall's Proc/handle setup.
+int hostmem_resolve_subrange(const struct KObj_PCI *k, u64 shmid, u64 offset,
+                             u64 length, u64 *base_pa_out);
+void test_weft_hostmem_resolve(void) {
+    struct KObj_PCI *k = kmalloc(sizeof(*k), KP_ZERO);
+    TEST_ASSERT(k != NULL, "kmalloc KObj_PCI");
+    k->magic = KOBJ_PCI_MAGIC;
+    k->ref   = 1;
+    k->bars[0].present = true;
+    k->bars[0].pa      = 0x80000000ull;
+    k->bars[0].size    = 0x10000;
+    k->shm[0].present  = true;
+    k->shm[0].shmid    = 1;
+    k->shm[0].bar      = 0;
+    k->shm[0].offset   = 0x1000;
+    k->shm[0].length   = 0x4000;   // window [bar.pa+0x1000, +0x5000)
+
+    u64 pa = 0;
+    // In-bounds: base_pa = bar.pa + window offset + caller offset.
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0x1000, PAGE_SIZE, &pa), 0,
+        "in-bounds subrange resolves");
+    TEST_EXPECT_EQ(pa, 0x80000000ull + 0x1000 + 0x1000,
+        "base_pa = bar.pa + window offset + caller offset");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0, 0x4000, &pa), 0, "whole window");
+    TEST_EXPECT_EQ(pa, 0x80001000ull, "base_pa at the window base");
+    // Rejects (the I-45 bounds + the ABI guards).
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 2, 0, PAGE_SIZE, &pa), -1, "wrong shmid misses");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0x4000, PAGE_SIZE, &pa), -1,
+        "offset == window length (no room) rejects");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0x3000, 0x2000, &pa), -1,
+        "offset+length past the window rejects (no wrap)");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0x800, PAGE_SIZE, &pa), -1,
+        "non-page-aligned offset rejects");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0, 0x800, &pa), -1,
+        "non-page-aligned length rejects");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 1, 0, 0, &pa), -1, "zero length rejects");
+    TEST_EXPECT_EQ(hostmem_resolve_subrange(k, 0x100, 0, PAGE_SIZE, &pa), -1,
+        "shmid > 0xff rejects (the u8 truncation guard)");
+    kfree(k);
 }
