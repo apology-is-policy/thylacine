@@ -553,6 +553,8 @@ For Thylacine: kernel panic during ramfs → Stratum transition; driver process 
 - Spending significant compute or external budget.
 - Halcyon-related decisions that might change the v1.0-vs-v1.1 ship calculus (per ROADMAP §11.5 — Halcyon is final phase; v1.0-rc.1 is the shippable fallback).
 
+**Surface an escalation or decision as a BLOCKING question, not a passive summary (autonomous mode; user-directed 2026-08-19).** When autonomy is active (no `.claude/.no-stop-nudge` dotfile), put any escalation above, any genuine decision you need from the user, any *accumulated* pending votes, or any vote that is *blocking your intended path*, via **`AskUserQuestion`** — never buried in a closing summary a user who may be away for hours never reads. `AskUserQuestion` is a tool call, not a turn-end: it blocks for the answer and keeps you IN-TURN, which is *more* aligned with the no-unearned-yield rule, not less. Pure waits (a running gate, quota, hardware — nothing to decide) and already-answered questions stay clean stops, not blocking questions. This is enforced at turn-end by `tools/stop-hook.sh`; the `.no-stop-nudge` dotfile suppresses the hook and this directive together.
+
 **Deviation tracking**: If implementation diverges from ARCH / ROADMAP, surface it explicitly:
 
 - In the commit message (the WHY of the deviation).
