@@ -1270,6 +1270,23 @@ performing by hand at every boundary. Three things follow from that:
   with what was attempted and what it needs. Do not clear the state file to get
   moving again; that is disabling the one guard standing between a long run and
   an expensive one.
+- **A queued self-compaction is NOT yours to cancel — only the operator's.**
+  The script types `/compact` + Enter into the pane the instant you invoke it,
+  so the submission is queued in the client immediately. You CANNOT retract it
+  from inside your own turn: `tmux send-keys C-u` clears only the *live input
+  box*, never an already-Enter-queued command — a `/compact` you "cancel" that
+  way survives and fires later against whatever session is up. (Worked failure,
+  2026-08-19: a self-compact invoked early at 560k, then countermanded by the
+  Stop hook, was "cancelled" with `C-u`; the stray `/compact` rode the input
+  queue for ~4 hours and submitted right after the *real* compaction — harmless
+  only by luck, because a spurious `/compact` no-ops with "Not enough messages
+  to compact.") Two rules follow. **(1) Invoke `thyla-selfcompact.sh` only on
+  the real 600k signal, never in anticipation of it** — that is the one moment
+  nothing will countermand you, so there is nothing to cancel. **(2) If you must
+  abort a queued self-compaction anyway, you cannot do it yourself: raise a
+  blocking question to the operator** (`AskUserQuestion` — it interrupts the
+  turn without ending it) asking them to cancel it. The operator is the only
+  actor who can clear the client's input queue; your keystrokes cannot.
 
 Where the script is absent (a worktree that has not merged it), the hook says
 "recommend `/compact`" instead and the old behaviour stands — the two arms are
