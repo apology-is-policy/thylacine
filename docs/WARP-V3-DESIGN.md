@@ -224,6 +224,14 @@ prosecuting I-45 / I-9 / I-32 / F2 on the ring.
   `coherent` flag flips to 1. New Mesa patch 0010+ under `src/virtio/vulkan/`;
   built on `thyla-keep` via `tools/clade-mesa-cross.sh` with
   `-Dvulkan-drivers=virtio`.
+  - **OWED at V-3b (audit round-3 F1, [[design-v3b-ring-kick-rescue-owed]]):** the
+    V-3a drain cap (`WARP_RING_MAX_DRAIN_PER_KICK`) breaks WITHOUT the post-drain
+    re-scan, so it relies on a documented guest obligation (a client blocking on
+    the fence MUST re-check idle + re-kick) that the pipelined Venus ring MUST
+    honor. Build the robust HOST-SIDE rescue here -- a follow-up drain the serve
+    loop runs after other conns, bounded per pass (DoS-safe) -- against V-3b's
+    `gpu.submit_3d` drain (which replaces the V-3a echo), since it needs a
+    self-reschedule the V-3a single-RPC serve loop lacks.
 - **V-3c**: `WarpCtx.capset` (written unvalidated at `server.rs:8687`, read
   nowhere today) goes live; the ctl `capset <n>` verb **rejects a capset the
   device never enumerated** (the I-45 obligation that rides V-3, not V-6); the

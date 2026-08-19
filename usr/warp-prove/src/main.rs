@@ -642,8 +642,14 @@ fn ring_prove() -> i64 {
     //    advances. The single-threaded prover cannot build real client
     //    concurrency, so the multi-advance inject stands in for it -- same
     //    drain loop, same bound.
-    let big: u64 = 512 * 1024; // room for far more than the cap's worth of advances
-    let flood: u64 = 5000; // > the server's drain cap (WARP_RING_MAX_DRAIN_PER_KICK)
+    // COUPLING (round-3 F2): big + flood are tied to the server-private cap
+    // WARP_RING_MAX_DRAIN_PER_KICK (4096, not visible here). Discrimination needs
+    // flood > cap (one capped kick drains < flood) AND big/WARP_RING_HDR(64) >
+    // flood (so the min(tail+HDR, size) clamp never truncates the advance count).
+    // If the server cap changes, raise both here or the leg fails misleadingly
+    // ("not bounded"); server.rs pins this assumption at the const.
+    let big: u64 = 512 * 1024; // 8192 advance-slots, > flood
+    let flood: u64 = 5000; // > the server drain cap (WARP_RING_MAX_DRAIN_PER_KICK = 4096)
     if !write_ctl(root, &format!("ctx/{}/ring/new", ctx), &format!("{} 1", big)) {
         ring_fail("F1: large ring/1 mint");
     }

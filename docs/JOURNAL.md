@@ -22,6 +22,92 @@ needed the operator.
 
 ---
 
+## 2026-08-19 — V-3a green on virgl, and the DoS one thread couldn't show
+
+Resumed from a self-compact with the `1<<43` encoding fix committed (`2fb542c6`)
+but its ramfs never rebuilt or re-verified on virgl. This run took it green --
+and a dirty-close re-audit found a box-wide DoS that round 1, and the
+single-threaded prover, were both structurally blind to.
+
+**Green on virgl.** Rebuilt with `1<<43`, synced to thyla-pi, ran the ring gate
+under KVM on real V3D: `WARP-6 V-3a GATE: VERIFIED` -- the full round-trip (map +
+doorbell + feedback + fence), F2 geometry, the two-conn I-45 ownership gate, and
+the I-9 re-scan discrimination all pass on virgl. The encoding is now
+build-enforced disjoint (the `const _: () = assert!` over all six qid tags
+compiles, which is the proof), so the class that took two GL boots to catch last
+run cannot recur silently.
+
+**The DoS the prover couldn't build (round-2 F1 [P1]).** With the encoding sound,
+the owed dirty-close re-audit (Opus 4.8 fallback, MODEL start==end) re-derived the
+round-1 dispositions instead of trusting them -- and F6 ("the per-kick drain
+bound is V-3b's; at V-3a the guest is blocked on the kick RPC, so head is fixed
+and the loop is one pass") fell. The premise conflated two actors. The KICK RPC's
+caller is blocked, yes -- but `head` is not the caller's to hold still: it is
+CLIENT-WRITABLE shared memory (the ring maps RW into the client via weft; the
+prover itself writes `head` at `warp-prove/src/main.rs:534`), and tapestryd is
+single-threaded (`main.rs`, zero thread spawns). So a client with a SECOND thread
+spins `head += 64` while the first kicks: `wring_kick`'s `loop` re-reads `head`
+fresh every pass, always sees `head > tail`, sets `tail := head`, and never
+terminates -- one unprivileged client freezes the compositor for every other
+conn. It is reachable at V-3a, not V-3b; V-3b's real submit only makes each spin
+iteration costlier. The single-threaded prover cannot construct the
+concurrent-advance window, which is exactly why round 1 read green -- the textbook
+latent-P1.
+
+**The fix, and a regression the prover CAN run.** Cap one kick's drain at
+`WARP_RING_MAX_DRAIN_PER_KICK` (4096) passes: on the cap, publish `idle=1` and
+return, and the guest re-kicks for the rest, so no one kick monopolizes the serve
+thread (a legit V-3a kick drains in ONE pass, so the cap is never hit in normal
+use). The regression is the interesting part: the prover is single-threaded, so
+it cannot reproduce the concurrency -- so I generalized the `ring-inject` lever
+from a one-shot bool to a COUNT (`ring-inject <ridx> [count]`, one advance
+consumed per re-scan pass; `count==1` preserves the I-9 witness exactly). A
+512 KiB ring + `count=5000` (> the 4096 cap) drives ONE kick's drain past the cap;
+the leg asserts `0 < delta < 5000` (bounded), then re-kicks to stable and asserts
+the full 5000 eventually drain (the cap DEFERS work, it must not DROP it). It
+fails on the pre-fix code (one kick drains all 5000) and passes on the fix -- and
+it passed on virgl in the gate above. Also fixed F2 [P3]: the inject arm's
+`tail + WARP_RING_HDR` -> `saturating_add` (a client can set `tail` near
+`u64::MAX`; an overflow-checked build would abort). Everything else round 2
+re-derived sound (encoding, SeqCst, per-ring noscan, I-45 end-to-end, F5 rewind,
+`PendingRingFence` lifetime, I-32, I-7).
+
+The lesson worth keeping: a "defer to a later phase" disposition is only as good
+as the actor model it rests on. "The guest is blocked so the shared word is
+fixed" was true of the WRONG actor -- the caller, not the client's other threads
+-- and a shared-memory word has no single writer to be blocked. When a deferral's
+safety argument names one actor for a resource that several can touch, re-derive
+it.
+
+Committed the round-2 close at `07767462` (on the stop-hook synchronous-await
+enforcement `76975050`, an orthogonal ratified-feedback re-land recovered this
+run from a self-compact clean-tree revert).
+
+**Round 3 (the dirty close a P1 owes) found the fix's SECONDARY claim was
+overstated (F1 [P2]).** The cap-break publishes `idle=1` and breaks WITHOUT the
+post-drain re-scan below it -- so it silently drops the host's half of the I-9
+register-then-observe promise for any advance still pending at the cap. My fix
+comment claimed "the guest re-kicks for the rest, so no work lost"; the
+documented doorbell protocol never obliged the guest to re-kick. A doc-conformant
+multi-threaded client that advanced head while `idle==0` (eliding its kick,
+relying on the host re-scan) would strand its own advance and park on the fence
+forever. It is LATENT -- the only V-3a ring client is the single-threaded prover,
+which re-kicks explicitly, and a malicious client only strands itself (the DoS
+bound, the fix's PRIMARY goal, is sound and effective). It materializes at V-3b's
+Venus (a doc-conformant pipelined ring). Two lessons stack here: round 2 was "a
+deferral premised on the wrong actor"; round 3 is "a fix that solved its primary
+job and quietly shifted an unstated obligation onto a future consumer to claim
+the secondary one." Fixed correct-by-CONTRACT now (the guest obligation is a
+documented term at the cap-break + the const + the `wring_kick` doc, and the
+prover honors it); the robust host-side rescue -- a follow-up drain the serve
+loop runs after other conns -- is OWED at V-3b, where the pipelined drain
+replaces this echo and a self-reschedule primitive (absent at V-3a) exists
+([[design-v3b-ring-kick-rescue-owed]]). F2 [P3]: warp-prove leg 8's `flood`/`big`
+were silently coupled to the server-private cap const -- pinned with a comment
+both sides. Both round-3 fixes are pure comments (no binary change), so the green
+gate above still holds byte-for-byte. Round-3 close: `<pending>`. Everything else
+re-derived sound across three rounds.
+
 ## 2026-08-19 — V-3a: the coherent ring, and the "local" premise that wasn't
 
 Built the Warp-6 V-3a coherent-ring mechanism whole in one pass (the design

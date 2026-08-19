@@ -466,8 +466,11 @@ const WARP_RINGS_PER_CTX: usize = 64; // ring_idx 0-63 (Venus: one per VkQueue)
 // a multi-threaded client can advance head faster than the single serve thread
 // drains it -- without a cap the drain loop spins forever and freezes every
 // conn (a box-wide DoS). A legitimate V-3a kick drains in ONE pass, so this cap
-// is the adversarial backstop only: on hitting it we publish idle and yield,
-// and the guest re-kicks for the remainder.
+// is the adversarial backstop only: on hitting it we publish idle and yield (a
+// doc-conformant client MUST then re-kick -- round-3 F1's I-9 contract term,
+// documented at the cap-break in wring_kick). NOTE (round-3 F2): warp-prove
+// leg 8's F1 regression assumes flood(5000) > this AND big/WARP_RING_HDR(8192)
+// > flood; raise all three together or the test's discrimination breaks.
 const WARP_RING_MAX_DRAIN_PER_KICK: u32 = 4096;
 
 // A warp path packs three disjoint fields: the fk byte (FK_MASK), the id field
@@ -6543,11 +6546,13 @@ impl Comp {
     /// In V-3a's single-threaded server the guest is blocked on this RPC, so
     /// the window is empty; the re-scan is exercised only by `ring-inject`,
     /// which fills it deterministically. V-3b replaces the echo drain with
-    /// gpu.submit_3d(dev_ctx, ctx_pub, cs) carrying ridx -- and MUST bound the
-    /// per-kick drain then (audit F6): with a concurrent V-3b guest advancing
-    /// head, an unbounded drain lets one client monopolize the single serve
-    /// thread. At V-3a the guest is blocked on the kick RPC, so head is fixed
-    /// and the loop is one pass. The warp_ring_seq/res_seq u32 wrap (2^32 mints
+    /// gpu.submit_3d(dev_ctx, ctx_pub, cs) carrying ridx. The per-kick drain is
+    /// bounded HERE (round-2 F1), NOT deferred to V-3b: WARP_RING_OFF_HEAD is
+    /// client-writable shared memory, so a multi-threaded client can advance it
+    /// faster than we drain and pin this single serve thread -- reachable at
+    /// V-3a (the earlier "guest blocked on the kick RPC so head is fixed"
+    /// premise was wrong: the KICK caller is blocked, but the CLIENT's other
+    /// threads own the head mapping). The warp_ring_seq/res_seq u32 wrap (2^32 mints
     /// -> a stale fid resolving a reused id) is the SAME shared class as
     /// warp_ctx_seq/warp_bo_seq, not ring-specific; unreachable in a compositor
     /// lifetime.
@@ -6565,10 +6570,25 @@ impl Comp {
                 if drained >= WARP_RING_MAX_DRAIN_PER_KICK {
                     // audit round-2 F1: the client can advance head (shared RW
                     // memory) faster than we drain, so cap the passes -- no one
-                    // kick may pin this serve thread. Publish idle and yield;
-                    // the guest re-kicks for the rest. Both the direct drain and
+                    // kick may pin this serve thread. Both the direct drain and
                     // the re-scan `continue` re-enter here, so this one gate
                     // bounds every path.
+                    //
+                    // audit round-3 F1 (the I-9 contract term this cap adds):
+                    // breaking HERE skips the post-drain re-scan below, so it
+                    // drops the host's half of the register-then-observe promise
+                    // for any advance still pending (head>tail) at the cap. A
+                    // ring client that blocks on `ring/<ridx>/fence` therefore
+                    // MUST re-check idle after its last head advance and re-kick
+                    // if idle==1 -- the host does NOT rescue a capped-out
+                    // advance (the fence read/poll deliver on completed_seq,
+                    // frozen at the cap). The V-3a prover honors this (its
+                    // drain-to-stable loop, warp-prove leg 8). The robust
+                    // host-side rescue -- a follow-up drain the serve loop runs
+                    // after other conns -- is OWED at V-3b, where the Venus ring
+                    // is doc-conformant + pipelined and this echo drain is
+                    // replaced by gpu.submit_3d anyway; it needs a
+                    // self-reschedule the V-3a serve loop does not have.
                     ring_store(va, WARP_RING_OFF_IDLE, 1);
                     break;
                 }
