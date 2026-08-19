@@ -161,6 +161,11 @@ bool dtb_pci_intx_route(u8 pci_dev, u8 pin, u32 *out_gic_intid);
 // `ranges` is absent or has no 32-bit-MMIO entry.
 bool dtb_pci_mem_window(u64 *out_base, u64 *out_size);
 
+// The 64-bit MMIO window (phys.hi[25:24] == 0b11), where a BAR too large
+// for the 32-bit window is placed (#166: a hostmem-enabled virtio-gpu
+// presents a multi-GiB BAR).
+bool dtb_pci_mem_window64(u64 *out_base, u64 *out_size);
+
 // Read /chosen/kaslr-seed as 64 bits (the property is two u32 cells in
 // the DTB; we concatenate them in the FDT-cell order). Returns 0 if the
 // node or property is absent.

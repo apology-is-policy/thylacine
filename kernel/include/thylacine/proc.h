@@ -815,7 +815,12 @@ struct Proc {
     //   freed only at proc_free where the Proc itself is gone (#254; exec used
     //   to free it here, which was a use-after-free read) -- and because the
     //   VALUE a racing reader observes is covered by the POSIX latitude stated
-    //   at the end of this comment.
+    //   at the end of this comment, at the granularity of one FIELD: every
+    //   entry field is accessed as one atomic u64 (`handler` published last
+    //   on install, zeroed first on reset -- vivarium.c, "the access
+    //   discipline"), so a reader sees a word some writer stored, never a
+    //   torn one; entry-to-entry consistency is NOT promised, and every
+    //   cross-Proc reader acts on `handler` alone (main#243 F2/F6).
     //
     // Read the cross-Proc half before adding a reader, and do not narrow this
     // back to a claim about threads: the reader set has grown three times.
@@ -861,6 +866,20 @@ struct Proc {
     // argument domain (which exists) rather than about the row's absence
     // (which was the stated reason, and stopped being true at L-3d; #158).
     struct viv_socktab *socktab;
+
+    // SQPOLL kernel threads this Proc has MINTED (SYS_LOOM_SETUP with
+    // LOOM_SETUP_SQPOLL). They run under kproc (immortal, TCB-exempt), so
+    // nothing counted them -- and each pins a 32 KiB kernel stack, so the
+    // handle table was the only bound and the fid-lift audit (F1) showed a
+    // non-TCB Proc could mint 4x its own thread cap's worth of unswappable
+    // kstacks. They are this Proc's workers in every meaningful sense, so
+    // they SHARE the PROC_THREAD_MAX budget: proc_thread_cap_ok and
+    // proc_sqpoll_charge both gate on thread_count + loom_sqpoll_count.
+    // A SEPARATE field (not thread_count) because exit/teardown logic
+    // drains thread_count and must never wait on a kthread the Proc does
+    // not own; the kthreads are reaped by loom_free's join at handle close.
+    // Guarded by g_proc_table_lock like its siblings.
+    int loom_sqpoll_count;
 };
 
 // VIVARIUM: the phenotype values (Proc.phenotype; docs/VIVARIUM.md §5.1).
@@ -1000,7 +1019,7 @@ _Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) =
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 384,
+_Static_assert(sizeof(struct Proc) == 392,
  "struct Proc size pinned at 376 bytes. LINEAGE L-1 took it 408 -> 376: "
  "seven fields left for struct AddrSpace and one pointer replaced them. "
  "The growth history below is the PRE-L-1 layout's, kept because its "
@@ -1257,12 +1276,22 @@ void proc_set_name(struct Proc *p, const char *path, size_t len);
 u64 proc_cpu_ns(const struct Proc *p);
 
 // proc_thread_cap_ok -- the thread-spawn gate. Returns true if the Proc is
-//   exempt OR thread_count < PROC_THREAD_MAX. Takes g_proc_table_lock for the
-//   read (the thread_count write domain). The check and the later
+//   exempt OR thread_count + loom_sqpoll_count < PROC_THREAD_MAX (SQPOLL
+//   kthreads share the budget -- fid-lift audit F1). Takes g_proc_table_lock
+//   for the read (the thread_count write domain). The check and the later
 //   thread_link_into_proc ++ are at different lock holds, so a bounded TOCTOU
 //   overshoot (<= ncpus-1 concurrent spawners) is possible -- acceptable for a
 //   floor.
 bool proc_thread_cap_ok(struct Proc *p);
+
+// proc_sqpoll_charge / _uncharge -- the SQPOLL-kthread half of the shared
+//   thread budget (fid-lift audit F1). Charge is check-AND-increment under one
+//   g_proc_table_lock hold (a Loom setup has no other serialization point);
+//   false = at the cap, the setup must refuse. Counts even for exempt Procs
+//   (they skip only the cap), so the uncharge -- loom_free's join path, keyed
+//   on Loom.sqpoll_charged -- is unconditional.
+bool proc_sqpoll_charge(struct Proc *p);
+void proc_sqpoll_uncharge(struct Proc *p);
 
 // proc_child_cap_ok -- the rfork/spawn gate. Returns true if the Proc is exempt
 //   OR child_count < PROC_CHILD_MAX. Takes g_proc_table_lock for the read (the
@@ -1512,6 +1541,13 @@ bool proc_exec_alone(struct Proc *p);
 // thread can reach. Each is re-checked or extincts -- a violation is structural
 // corruption, not a runtime error.
 void proc_exec_replace(struct Proc *p, struct AddrSpace *nas);
+
+// The note-side half of that reset (handler_va, the sigtab rows -- IN PLACE,
+// never freed: the table has lockless cross-Proc readers -- the mask, and the
+// in-handler latch) lives in proc.c's proc_exec_drop_image_state, kept static
+// on purpose so it stays the ONE place; the kernel test reaches it through the
+// *_for_test hook. Its precondition is proc_exec_replace's: the caller is the
+// only live thread of `p`.
 
 // EL0-return-tail die-check (ARCH §7.9.1, invariant I-24). Called at every
 // return-to-EL0 (the sync-from-EL0 SVC + fault-handled tails in

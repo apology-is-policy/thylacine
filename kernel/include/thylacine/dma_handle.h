@@ -70,6 +70,16 @@ struct page;
 // v1.0 (tapestryd allocates its weaves early; QEMU media carry ≥ 2 GiB).
 #define KOBJ_DMA_WEAVE_MAX_SIZE  (64ull * 1024 * 1024)
 
+// Maximum GPU-BO-subtype DMA buffer size (Warp-2; GPU-DESIGN.md §6.1). A
+// render target / texture / vertex buffer the GPU service allocates per
+// client request. Same envelope as the weave (a 4K RGBA target with mips is
+// ~44 MiB); larger scenes split across BOs. Runtime-allocated (unlike weaves,
+// which the compositor mints early), so long-uptime buddy fragmentation is a
+// real caveat for the big end of the envelope — scatter-gather backing
+// (virtio ATTACH_BACKING takes an entry list; the contiguity is OUR object's
+// constraint, not the device's) is the recorded follow-on if it bites.
+#define KOBJ_DMA_GPU_BO_MAX_SIZE (64ull * 1024 * 1024)
+
 struct KObj_DMA {
     u64           magic;       // KOBJ_DMA_MAGIC
     u64           pa;          // physical address (page-aligned)
@@ -89,6 +99,17 @@ struct KObj_DMA {
     // its own: a weave is pinned Normal-WB RAM the device only DMA-reads
     // (pixels); what it changes is share-ADMISSIBILITY, not device reach.
     bool          weave;
+    // Warp-2 (GPU-DESIGN.md §6.1): the KERNEL-MINTED GPU-BO subtype bit — the
+    // second share-admissible kind, with a DIFFERENT safety argument than the
+    // weave's. A weave is device-READ only (pixels out); a GPU BO is
+    // device-WRITTEN (a render target, a readback destination), which breaks
+    // the weave's "device-passive" argument. The GPU-BO argument is §2.1's:
+    // what the GPU may write is bounded by the GPU's own address translation,
+    // which only the trusted device owner programs — the client's cacheable
+    // RW mapping still conveys zero hardware authority. Set ONLY by
+    // kobj_dma_create_gpu_bo (SYS_DMA_CREATE_GPU_BO); create-immutable;
+    // mutually exclusive with `weave` by construction (each mint sets one).
+    bool          gpu_bo;
 };
 
 // Bring up the DMA-handle subsystem. Atomic init guard extincts on
@@ -119,6 +140,14 @@ struct KObj_DMA *kobj_dma_create(size_t size);
 // the create-immutable `weave` bit that admits it into the cross-Proc share
 // gate. Same NULL cases as kobj_dma_create (plus size > the weave bound).
 struct KObj_DMA *kobj_dma_create_weave(size_t size);
+
+// Warp-2 (GPU-DESIGN.md §6.1): mint a GPU-BO-subtype KObj_DMA (the
+// SYS_DMA_CREATE_GPU_BO body). Identical to kobj_dma_create except: the size
+// envelope is KOBJ_DMA_GPU_BO_MAX_SIZE, and the returned object carries the
+// create-immutable `gpu_bo` bit — the second share-admissible kind (see the
+// struct field for its distinct device-WRITTEN safety argument). Same NULL
+// cases as kobj_dma_create (plus size > the GPU-BO bound).
+struct KObj_DMA *kobj_dma_create_gpu_bo(size_t size);
 
 // Refcount ops. Mirror kobj_mmio_ref / kobj_irq_ref.
 void kobj_dma_ref(struct KObj_DMA *k);

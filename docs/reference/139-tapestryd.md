@@ -90,7 +90,13 @@ v1.x) — the display stays blank until reboot.
   is the standing G-6 obligation. The retire ordering is UNAFFECTED:
   `t_weft_unshare` and the backing free are kernel syscalls, not
   controlq commands, so a dead controlq can never cause a
-  free-without-unshare (R2-F5 holds unconditionally). The trigger
+  free-without-unshare (R2-F5 holds unconditionally). **Warp-2d
+  rebuilt this engine around used-ENTRY attribution** (fixed
+  descriptor pairs; a fenced 3D lane beside the sync chain; presents
+  stay wait-for-mine so everything above still holds; the deadline is
+  sync-only) — the as-built fenced-lane reference, including the
+  fence-id model, the drain-first retire order, and the leak-on-wedge
+  posture, is `docs/reference/149-warp.md`. The trigger
   needs a real display backend's thread topology:
   three escalating headless repro attempts (a 66/s screendump hammer at
   2x cocoa's refresh; a live VNC backend on the gpu0 console at real
@@ -119,6 +125,40 @@ v1.x) — the display stays blank until reboot.
   Residual: the `set_scanout(0)` disable arms have no resource to
   flush, so an Off transition keeps the stale frame under cocoa —
   edge-path cosmetic (the boot session never goes Off).
+
+  **Warp-1 — VIRGL negotiation + the capset probe (`GPU-DESIGN.md` §12).**
+  `init_device` now captures the LOW feature dword and acks
+  `VIRTIO_GPU_F_VIRGL` (bit 0) when offered — only the `-gl` device models
+  offer it, so a plain `virtio-gpu-pci` boot negotiates byte-identically to
+  before. Every 2D command this driver issues remains valid under virgl
+  (VIRTIO 1.2 §5.7.6.8); the compositor path is unchanged either way, which
+  the normal suite's pattern-persists gate re-proves per boot. When VIRGL
+  was negotiated, `probe_capsets()` runs once at `Gpu::probe`: it reads
+  `num_scanouts`/`num_capsets` from the Device region
+  (`virtio_gpu_config`, absent/short region degrades to "capsets unknown"
+  — not an engine fault), issues `GET_CAPSET_INFO` per index (enumeration
+  bounded by `GPU_CAPSET_ENUM_MAX` = 8 against a hostile count), and
+  fetches ONE blob via `GET_CAPSET` — ranked VIRGL2 (2) > VIRGL (1) >
+  others, matching Mesa's own preference — logging its size + first four
+  words as the in-guest gate evidence. A blob shorter than 16 bytes is not
+  quoted, and the info words are pre-zeroed for the same reason
+  (`submit_and_wait` zeroes only the response header, so short reads
+  would quote a prior response's residue — audit W1 F2). Failure
+  disposition (audit W1 F1): a capset command the device merely REFUSES
+  (resp-type mismatch — the engine is healthy, `Controlq.dead` UNSET)
+  degrades to 2D with a log line, because a probe-fatal tapestryd would
+  warden-restart-loop with no renderer on a device whose 2D path works;
+  only a real engine death (`dead` latched) propagates `Err` — there
+  every later 2D command would fail anyway. Size-0 capset entries are
+  logged but never ranked (a VMM may enumerate an id its renderer
+  lacks). The ring
+  grew to TWO pages (`RING_DMA_SIZE` 0x2000): page 1 keeps the audited
+  queue/request layout verbatim; the response region moved to its own page
+  (`RESP_OFF` 0x1000, 4 KiB) because virgl_caps_v2 (~1.2 KiB, growing
+  upstream) outgrew the old 0x300 slice — the Warp-3 winsys `get_caps`
+  slot reads the same blob, so the headroom has a named next consumer.
+  Only `virgl: bool` + `num_capsets: u32` persist on `Gpu`; the 3D object
+  model is Warp-2's.
 - `input.rs` — the virtio-input-PCI eventq (`InputDev`, generalized from
   the G-3 keyboard-only claim at G-7c): the P4-K probe's audited
   populate/drain/recycle discipline over the same PCI transport,
@@ -793,14 +833,53 @@ aurora 60×/sec — and under HVF each wake pays a deep-park vCPU resume, so the
 resident compositor cost the guest ~27% idle %cpu vs an ~11% no-GPU floor (the
 measured `ci-idle-gate` regression class).
 
-**Throttle** (`main.rs` `IDLE_HZ` / `IDLE_AFTER_MS`): when no keyboard/tablet/
-mouse INPUT has arrived for `IDLE_AFTER_MS` (250 ms), the effective tick drops
-to `IDLE_HZ` (15); the next input event snaps it back to the ctl rate. Activity
-is **INPUT ONLY, never client presents** — aurora presents its cursor blink
-~2×/sec, so counting presents would let the blink pin the clock active forever.
-Disabled under test-mode (the frozen clock is ctl-driven). Measured: idle %cpu
-27% → **10.8%** (the full compositor cost cut; the remainder is the base + the
-residual-1 debuggee leak).
+**Throttle** (`main.rs` `IDLE_HZ` / `IDLE_AFTER_MS`): when neither
+keyboard/tablet/mouse INPUT nor **sustained present pressure** has been seen
+for `IDLE_AFTER_MS` (250 ms), the effective tick drops to `IDLE_HZ` (15); the
+next input event snaps it back to the ctl rate. Activity is input OR
+`Comp::animating()` (#164) — ≥ `PRESENT_BURST_MIN` (4) well-formed,
+**screen-changing** presents summed across two buckets of
+`PRESENT_BURST_WINDOW_MS` (250 ms) each (~500 ms total), i.e. sustained
+≥ ~8 Hz. Three qualifiers, each load-bearing:
+
+- **Screen-changing** (audit F1): `note_present` filters hidden-surface
+  presents (a hidden pane's paced client still presents ~20/s via the SDL
+  pacer's 50 ms timeout, doing zero visible work — counting those would let a
+  game tabbed to the background pin 60 Hz on an idle console). The predicate
+  is the compositor's own: completing a direct-scanout switch, being the
+  scanned-out surface, or layout-visible.
+- **Summed globally, not per-client** (audit F2): N sub-threshold *visible*
+  presenters compose (the blink + a visible ~5 fps client in a split hold the
+  clock together) — acceptable, since jointly they are visible animation. The
+  blink-margin arithmetic below assumes aurora is the only idle-state
+  presenter, which holds at a settled prompt.
+- **Bare presents still don't count** — aurora's cursor blink (~2×/sec) sums
+  to ≤ 2 per window pair, margin 2 under the threshold, so a truly idle
+  console throttles exactly as before.
+
+Disabled under test-mode (the frozen clock is ctl-driven). Measured: idle
+%cpu 27% → **10.8%** at residual-2; **re-measured on the #164 build: 7.2%
+mean** at a settled prompt. The gate's default 80% threshold catches spins,
+not throttle regressions (~27% unthrottled passes it identically — audit F4):
+the discriminating witness is **`THYLACINE_IDLE_STRICT=20
+tools/ci-idle-gate.sh`**, required by the tapestryd AUDIT-TRIGGERS row on any
+idle-throttle change.
+
+**Why the present axis exists (#164).** The original input-only rule assumed
+"no input ⇒ nothing changing", which is true for a text console and false for
+a game: holding a key emits no further input events, so a paced GLQuake went
+input-quiet mid-play and the clock flapped 60 ↔ 15 with the player's
+intermittent mouse motion — felt as a soft-envelope ~4 Hz stutter. At 15 Hz
+the tick period (66.7 ms) also exceeds the SDL pacer's 50 ms wait bound
+(`THYLACINE_PaceFrame`), so a throttled paced client settles into an
+alternating ~56/~11 ms stride ≈ **30 fps** — which is what every input-quiet
+paced measurement had been reading. A/B-isolated on one live boot (the only
+variable being QMP-injected rel-mouse events every 100 ms): paced timedemo
+**28.7 fps quiet vs 61.3 fps with input** — confirming input alone gated the
+rate. The burst threshold keeps the two designed properties: idle throttling
+(the blink margin above) and bounded worst-case (a present-spamming client
+pins the ctl rate — the pre-throttle baseline). Content presenting below
+~8 fps stays throttled; the 15 Hz idle tick displays it losslessly.
 
 **Floor rationale.** The floor is bounded by two poll-mode costs: the keyboard
 is drained once per loop pass (so first-key-after-idle latency is one idle

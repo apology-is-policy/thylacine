@@ -208,6 +208,281 @@ while llvmpipe is doing general per-fragment texture filtering through
 JIT-compiled shader variants. No budget is committed here; the number exists so
 a later change has something to be compared against.
 
+### Second measurement (#150): the rasteriser pool engages
+
+The 19.8 was measured with llvmpipe rasterising **inline on one thread** —
+`nr_cpus` was a hardcoded 1 on this platform (doc 142, the `LP_NUM_THREADS`
+default section). The #150 decomposition, boot-per-run on the same demo1
+gate command (HVF, -smp 4; a fresh guest per number):
+
+```
+inline (pre-fix shipped)      969 frames  44.8s  21.6 fps
+wrapper LP_NUM_THREADS=0      969 frames  45.9s  21.1 fps   (control == inline)
+wrapper LP_NUM_THREADS=3      969 frames  37.8s  25.6 fps
+wrapper LP_NUM_THREADS=4      969 frames  33.3s  29.1 fps
+post-fix shipped (no config)  969 frames  33.1s  29.3 fps   (and one 37.4s/25.9 outlier)
+```
+
+The shipped path now self-defaults the pool to the CPU count (pouch 0032
+sysconf + the SDL glue seed), so the plain gate command does **21.6 →
+29.3 fps (+36%) with zero configuration**. Sublinear vs 4 workers'
+theoretical ceiling because ~2/3 of frame time is serial on the calling
+thread. Threaded runs show wider single-run spread
+than inline ones (25.9–29.3 across two post-fix boots); quote the pair,
+not one number. fps remains REPORTED, not gated.
+
+### The host reference (2026-08-05): uncapped M2, same demo, same 640×400
+
+Host tyr-glquake (macOS arm64, same vendored tree, brew SDL2, Apple's GL
+2.1-on-Metal — i.e. the **M2 GPU**, not a software rasteriser):
+
+```
+host, vsync ON (default)      969 frames  16.3s    59.6 fps   (display cadence, NOT a perf number)
+host, swap interval forced 0  969 frames   0.5s  2061.8 fps
+```
+
+Two conclusions this pins:
+
+- **The vsync trap**: tyrquake applies `vid_vsync` only at video-mode set,
+  which happens before `+cvar` commands execute — so `+vid_vsync 0` on the
+  command line silently does nothing and the "benchmark" reports the
+  display's refresh rate. The uncapped number required forcing
+  `SDL_GL_SetSwapInterval(0)` at the call site (scratch build). Any host
+  number that sits at ~59.6 or ~120 is the compositor talking, not the GPU.
+- **The serial share is Mesa-side, not game logic**: the host does engine +
+  GL dispatch + GPU in ~0.5 ms/frame, and HVF guest CPU is near-native — so
+  the guest's ~31 ms/frame serial floor is ≥98% software-GL caller-side work
+  (immediate-mode dispatch through the state tracker + llvmpipe's
+  caller-thread vertex/setup/binning; `LP_NUM_THREADS` parallelises only the
+  fragment side). The earlier "the engine is the lever" reading is
+  **refuted**. #155 owns the decomposition (`LP_PERF=no_rast` partition);
+  the ~70× host-GPU gap is the price of software rasterisation itself,
+  closable only by a GPU-in-guest arc, not by tuning this stack.
+
+### Third measurement (#155): the serial share partitioned, flag-free
+
+Same demo1 gate command, all four boots same-day (2026-08-06, HVF -smp 4;
+threaded spread is wide, so comparisons are within-day only):
+
+```
+base            640x400  4t   969 frames  37.5s  25.8 fps   (38.8 ms/frame)
+LP_PERF=no_rast 640x400  4t   969 frames  36.9s  26.3 fps   (38.1)
+LP_PERF=no_rast 640x400  0t   969 frames  57.0s  17.0 fps   (58.8)
+base            320x200  4t   969 frames  32.6s  29.7 fps   (33.6)
+```
+
+- **`LP_PERF=no_rast` does NOT engage in this build.** The parse table is in
+  the binary (`strings` shows it) but the pool moved a no_rast run 26.3 →
+  17.0 fps — impossible if rasterisation were actually skipped, since
+  nothing else is pool-parallel. The env delivery itself was proven per-run
+  (`setrun ok`). Enable/verify LP_PERF at the next builder cycle (batched
+  with the owed `DETECT_OS_THYLACINE` sysconf arm).
+- **The resolution probe partitions without any flag**: removing 75% of the
+  pixels saved 5.2 ms/frame → pixel-proportional cost visible past the
+  4-worker overlap ≈ **7 ms (18%)**; the remaining ≈ **32 ms is
+  pixel-independent** — matching the host-GPU-derived ~31 ms caller-side
+  floor. Two independent instruments agree: the wall is per-draw/per-vertex
+  caller-side work (immediate-mode dispatch + llvmpipe caller-thread
+  vertex/setup/binning), not fragment rasterisation and not game logic.
+- Implied asymptote at 640×400 with pixels free: ~31 fps — more threads and
+  lower resolution are exhausted levers. The remaining lever with real
+  headroom is cutting per-call caller-side cost (vertex arrays in the port
+  — engine surgery, deliberately not done in #141; a scope decision).
+
+**CORRECTED one day later (#159, next section): the ~32 ms was a WAIT, not
+work** — the #51 frame-paced present blocking on the compositor's ~30 Hz
+frame clock. Both instruments above measure pixel-independence and cannot
+distinguish constant work from a constant wait; the "caller-side work"
+attribution was the error. The measurements stand; the conclusion inverts:
+threads/resolution were never exhausted — they were capped.
+
+### The full renderer table (2026-08-06) + the #159 scan facts
+
+All cells 640×400, timedemo demo1, uncapped unless noted:
+
+```
+guest  llvmpipe GL, 4 workers (shipped)   25.8-29.3 fps   (day spread; the #150 fix)
+guest  llvmpipe GL, inline 1 thread       21.1-21.6 fps
+host   M2 GPU (GL 2.1 Metal)            2061.8   fps     (59.6 vsync-capped)
+host   software tyr-quake (1996 span
+       rasteriser, SINGLE thread)          96.9   fps     (93.2 first run w/ PRESENTVSYNC
+                                                           flag -- barely differs)
+```
+
+Scan facts feeding the #156 builder-cycle batch:
+
+- **The Mesa fork ships with ASSERTIONS ON**: 763 `src/gallium` file-path
+  strings (each an `assert(__FILE__)`) in the shipped binary. Disassembly of
+  `cso_data_rehash` shows -O2-class codegen (register-allocated, csel, NEON
+  popcount) — so the buildtype is debugoptimized, NOT -O0. Realistic win
+  from `-Db_ndebug=true` at the next builder rebuild: 5–20%, not multiples.
+- `getauxval` is linked and functional (musl weak over the real auxv;
+  AT_HWCAP exists since CF-4) and `util_cpu_detect_once` is present; whether
+  the JIT target-machine features flow from real detection or a baseline is
+  a fork-source question — resolved at the builder cycle, not by binary
+  archaeology.
+- **The host-llvmpipe cell is DEFERRED with reasons**: upstream 26.1.6
+  deleted OSMesa (the fork's patches resurrect it), macOS has no GLX-style
+  override to slide llvmpipe under SDL's native GL, so the host reference
+  needs custom vid glue + a host Mesa build — and to be apples-to-apples it
+  must match the guest's assert configuration. One clean release-vs-release
+  comparison rides the #156 builder cycle instead.
+
+### Fourth measurement (#159, 2026-08-06): the 32 ms was the FRAME PACER — unpaced 157.6–181.7 fps
+
+The #155 attribution fell to a profiler. The chain, in order (each step's
+instrument validated before its verdict was believed):
+
+1. **A QMP PC-sampling profiler** (host-side, zero guest code; stop→`info
+   registers -a`→cont per tick — live reads LIE under HVF: the visible PC
+   is the last *vmexit* boundary, dominated by the idle-park WFI, so a busy
+   guest samples as 92% idle; the TCG TB-boundary lesson generalized). The
+   stop/cont variant was **proven by a positive control** (a pure userspace
+   spin sampled as exactly one vCPU pinned on the loop PC) and then showed
+   the truth: during the 29.x fps timedemo the guest is **~88–90% idle on
+   all four vCPUs** — ~13 ms/frame of total compute, ~20 ms/frame with
+   every vCPU parked. The wall was a wait.
+2. **`/proc/<pid>/kstack` of the main thread** (after fixing the #160
+   head-selection trap: the stock "head" is the *newest* thread — the
+   samples first returned the SDL pump thread's eternal event read, a
+   healthy by-design block that cost half a day as a phantom FS-stall
+   theory; the pool was exonerated by measurement — small pool preads cost
+   30–80 µs, the larder serves them). The true main thread: **11/12 samples
+   in `sys_torpor_wait_for_proc` via a timed cond wait — `PaceFrame`'s
+   `pthread_cond_timedwait(frame_cv, 50 ms)`**, in the 4-worker AND the
+   inline configs alike.
+3. **`SDL_THYLACINE_NOPACE=1`** (the unconditional short-circuit; written
+   via `/env` before spawn): **29.3 → 157.6 fps** (969 frames / 6.2 s),
+   181.7 on a second run — honest range **~160–180 fps** at 640×400,
+   shipped 4-worker config. `+set vid_vsync 0 +vid_restart` had provably
+   run and provably NOT released the pacer (fps and the wait unchanged) —
+   the cvar→swap-interval route is dead end-to-end, filed as **#161** (the
+   in-game vsync toggle rides the same route). The earlier "unpaced"
+   discriminator verified the gate *code*, not the *effect* — the #91
+   vacuous-control lesson.
+
+```
+guest  llvmpipe GL, 4 workers, UNPACED    157.6-181.7 fps  (5.3-6.2 s; 5.5-6.3 ms/frame)
+guest  llvmpipe GL, 4 workers, paced       25.8-29.3 fps   (attributed to a "~30 Hz headless
+                                                            frame clock" -- CORRECTED by #164,
+                                                            fifth measurement below)
+guest  llvmpipe GL, inline, paced          17.1-21.6 fps   (misses ticks)
+host   M2 GPU (GL 2.1 Metal)             2061.8   fps
+host   software tyr-quake (1996 span,
+       single thread)                       96.9   fps
+```
+
+**The guest's software GL path is ~1.6–1.9× faster than the host's own
+hand-written software renderer.** Consequences:
+
+- **Pacing is correct product behavior** (never render frames nobody can
+  see; on real hardware the frame clock is the display's vsync). ~~The
+  headless ~30 Hz clock is an artifact of `-nographic` boots~~ — WRONG,
+  corrected by #164 (fifth measurement): there never was a 30 Hz clock;
+  the base clock is 60 and the ~30 was the input-quiet idle throttle
+  beating against the pacer's 50 ms bound. **Benchmarks MUST set
+  `SDL_THYLACINE_NOPACE=1`** — every prior fps figure in this doc is a
+  paced (display-clock) number, not a capability number.
+- The #158 vertex-arrays premise ("kill the dispatch share of the 32 ms
+  wall") dissolves: the whole unpaced frame costs ~5.5–6.3 ms and the
+  profile shows raster/JIT dominating what compute there is. Vertex arrays
+  remain future-proofing (~1.2–1.4× here; more at higher resolutions and on
+  slower bare-metal CPUs), no longer the primary lever.
+- The unpaced profile's kernel+idle share says the pipeline still waits
+  ~half the frame at 180 fps (present round-trips + fence hand-offs at
+  5 ms scale) — the next real levers live there and in the #156 builder
+  batch (`-Db_ndebug`, NEON'd rast helpers), not in the engine.
+
+### Fifth measurement (#164, 2026-08-06): the "~30 Hz clock" was the idle throttle — paced now 61.4 fps
+
+The user's first live play session reported a soft-envelope ~4 Hz stutter
+(fluent segments sagging and recovering, "60, 60, 30, 10, 30, 60"). The
+mechanism, code-first then A/B-proven:
+
+1. tapestryd's idle throttle (residual-2) dropped the FRAME clock from the
+   60 Hz base (`server.rs::clock_hz`) to `IDLE_HZ` 15 after 250 ms with **no
+   input events** — and activity was input ONLY. A game player *holding* a
+   key emits no further input events, so a walking player reads as
+   input-quiet; every twitch of the mouse snapped the clock back. The felt
+   oscillation was the player's own intermittent input flapping the clock.
+2. At 15 Hz the tick period (66.7 ms) exceeds `THYLACINE_PaceFrame`'s 50 ms
+   wait bound, so a throttled paced client settles into an alternating
+   ~56/~11 ms stride — **~30 fps average**. That, not a "30 Hz headless
+   clock", is what every input-quiet paced measurement in this doc had been
+   reading (serial/expect harness typing generates no virtio-input events,
+   so every prior paced run was in the throttled condition; the E2E gates
+   run test-mode's frozen clock and could never see it).
+3. **A/B on one live boot** (`glq-throttle-ab.exp`, scratch): identical
+   paced timedemos, the only variable being one QMP-injected rel-mouse
+   event per 100 ms — **28.7 fps quiet vs 61.3 fps with input**.
+
+**The fix (#164, tapestryd)**: activity is now input OR sustained present
+pressure — `Comp::animating()`, ≥4 well-formed **screen-changing** presents
+across two 250 ms buckets (≥ ~8 Hz; hidden-surface presents are filtered, so
+a game tabbed to the background cannot pin the clock — audit F1). Aurora's
+~2 Hz cursor blink sums to ≤2 per pair (margin 2), preserving the residual-2
+idle win. Verified both ways on the fixed build:
+
+```
+paced timedemo, input-quiet   969 frames  15.8s  61.4 fps   (was 28.7)
+paced timedemo, input-spam    969 frames  15.8s  61.4 fps   (was 61.3)
+ci-idle-gate                  idle mean 7.2%                 (throttled band held)
+```
+
+Paced GLQuake now runs at the display rate with zero configuration and no
+input dependence. `SDL_THYLACINE_NOPACE=1` remains the benchmark rule —
+pacing still (correctly) caps at the 60 Hz clock.
+
+**CPU cost (#165, same build, measured host- and guest-side)**: while paced
+at 61.4 fps the whole VM costs ~110–122% of one host core — four vCPU
+threads at ~29% each + display/main ≤1.2%, **no pinned thread**; the guest
+stop/cont sampler agrees (per-vCPU busy 26/23/24/21% = **0.95 vCPUs
+summed**). Unpaced, the same demo reaches **192.8 fps** (a new best; prior
+157.6–181.7; **macOS/HVF — this number does not transfer to TCG hosts**:
+thyla-gl's own llvmpipe band is 2.4–5.9 fps, the Warp-1 row) at ~279%
+with vCPUs 65–74% each. Roughly proportional (0.42×
+CPU at 0.32× fps; the excess is per-frame park/wake + 60 Hz compositor
+service that back-to-back unpaced frames amortize). An Activity-Monitor
+"one core at 100%" during play is the process TOTAL — the sum of four
+~25%-busy vCPUs (llvmpipe's #150 four workers visibly sharing), not a spin.
+
+### The unpaced resolution ladder (2026-08-06) + the #158 close
+
+All shipped 4-worker config, `SDL_THYLACINE_NOPACE=1`, timedemo demo1:
+
+```
+ 640x400   157.6-181.7 fps
+ 800x600        151.4 fps    (2.3x the pixels, -6%)
+1024x768        113.9 fps    (3.1x the pixels, -35% -- still above the
+                              host's own software renderer at 640x400)
+```
+
+Pixel cost stays largely absorbed by the worker overlap up through XGA.
+
+**#158 (vertex-arrays surgery) closed as ALREADY-UPSTREAM.** The census
+that closed it: tyrquake 0.71's renderer draws via client vertex arrays
+everywhere that matters — `gl_rsurf.c` (world; interleaved `final_verts` +
+material chains, zero `glBegin`), `gl_warp.c` (water/sky), `r_part.c`
+(particles), and the alias-model path in `gl_rmain.c` (the profile showed
+Mesa's `vsplit` indexed-draw machinery engaged). Remaining immediate mode:
+9 `glBegin` sites in `gl_draw.c` (the 2D HUD/console layer, small quads)
+and two 4-vertex one-shots in `gl_rmain.c` (a sprite quad + the
+full-screen blend flash) — none performance-relevant. The GLQuake
+immediate-mode folklore is about the 1997 original, not this vendor
+generation.
+
+### Running it from the shell
+
+`tyr-glquake` typed bare at the `ut` prompt works exactly like
+`tyr-quake`: the ramfs carries a 47 KB launcher
+(`usr/ports/tyrquake/tyr-glquake-launcher.c`, built by `build_tyrquake`,
+staged via `pouch_bins`) that execs the pool binary at
+`/clade/bin/tyr-glquake` (spawn fallback; a clean 127 + message when the
+pool is absent). Superseded by a union bind of `/clade/bin` onto `/bin`
+when MAFTER walking lands (reserved v1.x, territory.h). Interactive play
+is frame-paced by design (the display clock); benchmarks opt out via
+`SDL_THYLACINE_NOPACE=1`.
+
 ## Known caveats / seams
 
 - Mouse-look (virtio-tablet → `TEV_PTR`) is G-7c — keyboard already plays

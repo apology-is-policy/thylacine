@@ -21,6 +21,16 @@
 #       terminate at the EL0-return tail). expect scans past the y-flood for the
 #       post-interrupt probe token.
 
+# G-3: HVF. MEASURED ~200s -> ~40s (this scenario is boot-dominated, and a
+# TCG boot is ~5x an HVF one). Coverage argument, because a green run under a
+# different accel is NOT the same as the same coverage: accel also picks the
+# CPU model and the GIC version (hvf -> -cpu host + GICv2; tcg -> -cpu max +
+# GICv3, tools/run-vm.sh), so a flip moves this scenario off those axes. It is
+# safe HERE because the interactive-interrupt (Ctrl-C) note path -- a kernel seam, not a GIC-version one, and because the GICv3 + `-cpu max` axes stay covered
+# by the TCG anchor set the wrapper enforces (freeze-172, flood-174, split173,
+# nora-demo, idle-probe, ls-7, pty-4). Set THYLACINE_ACCEL=tcg to A/B it.
+set ::env(THYLACINE_ACCEL) hvf
+
 source [file join [file dirname [info script]] lib.exp]
 
 lc_boot

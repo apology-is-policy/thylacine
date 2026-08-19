@@ -239,13 +239,19 @@ convention). kproc is already excluded at the handler top. The thread cap is the
 tightest of the three because each thread pins `THREAD_KSTACK_TOTAL_SIZE` (32
 KiB) of **unswappable** kernel kstack (256 → 8 MiB).
 
-The thread cap covers `SYS_THREAD_SPAWN` (the only EL0 thread-create path).
-**Kernel-side kthreads spawned on a Proc's behalf** — at v1.0 only the Loom
-SQPOLL poll-thread (`SYS_LOOM_SETUP | LOOM_SETUP_SQPOLL`, spawned against the
-exempt `kproc`) — are **not** counted by the thread cap (audit F4). They are
-bounded transitively: one per live SQPOLL Loom, and the number of Looms a Proc
-can hold is now bounded by the page cap (the F1 ring charge) and the handle
-table (`PROC_HANDLE_MAX` = 64), so the SQPOLL kstack footprint is bounded.
+The thread cap covers `SYS_THREAD_SPAWN` (the only EL0 thread-create path)
+**and** kernel-side kthreads spawned on a Proc's behalf — at v1.0 only the Loom
+SQPOLL poll-thread (`SYS_LOOM_SETUP | LOOM_SETUP_SQPOLL`, which runs under the
+exempt `kproc`). The SQPOLL kthread is charged to the **creator** via
+`proc_sqpoll_charge` (`Proc.loom_sqpoll_count`, settled exactly once by
+`loom_free` under the `Loom.sqpoll_charged` latch), and `proc_thread_cap_ok`
+sums `thread_count + loom_sqpoll_count` — the Proc's workers, wherever they
+run (fid-lift audit F1). History: the original F4 disposition left SQPOLL
+kthreads uncounted because they were *transitively* bounded by the handle
+table at `PROC_HANDLE_MAX` = 64; the #198 lift to 1024 quadrupled that
+transitive bound past the thread cap itself (1024 rings × 32 KiB kstack = 32
+MiB of unswappable kstack), which is what converted the disposition into a
+real charge. Regression: `loom.sqpoll_charges_thread_budget`.
 
 ### Child cap — `rfork_internal`
 (`kernel/proc.c`). `proc_child_cap_ok` is checked **early** — right after the

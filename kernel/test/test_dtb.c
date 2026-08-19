@@ -87,3 +87,50 @@ void test_dtb_pci_mem_window(void) {
     // NULL args -> false.
     TEST_ASSERT(!dtb_pci_mem_window(NULL, &size), "NULL base -> false");
 }
+
+// #166 / Warp-2 audit F3: the 64-bit MMIO window -- the arena a BAR too
+// large for the ~752 MiB 32-bit window must come from (a `hostmem=N`
+// virtio-gpu presents a multi-GiB one; without it the whole PCI claim
+// aborts, which is what #166's userspace half could never fix alone).
+//
+// MEASURED PLATFORM FACT (both dumped with `-machine virt,dumpdtb`):
+//   TCG  `-cpu cortex-a72` -> 3 ranges entries; the 0b11 window is
+//                             0x80_0000_0000 + 512 GiB.
+//   HVF  `-cpu host` (M2)  -> 2 entries ONLY (I/O + 32-bit MMIO). Apple
+//                             Silicon's IPA limit makes QEMU omit the high
+//                             window entirely.
+// So presence is host-dependent and this test must not assert it. What it
+// DOES assert unconditionally is the property a broken walker would break:
+// a 0b11 query must never ALIAS the 32-bit entry. That is the bug worth
+// catching -- a walker ignoring the space code returns true with the
+// 32-bit window, which fails the `base >= 4 GiB` assert on TCG and the
+// "must be absent, not aliased" assert on HVF.
+void test_dtb_pci_mem_window64(void) {
+    TEST_ASSERT(dtb_is_ready(), "DTB must be initialized post-phys_init");
+
+    u64 b32 = 0, s32 = 0;
+    TEST_ASSERT(dtb_pci_mem_window(&b32, &s32), "32-bit window must be found");
+    TEST_ASSERT(s32 < 0x100000000ull,
+                "the 32-bit window cannot hold a 4 GiB BAR (the #166 premise)");
+
+    u64 base = 0, size = 0;
+    if (dtb_pci_mem_window64(&base, &size)) {
+        // Present (TCG): it must be a DISTINCT, high, large arena.
+        TEST_ASSERT(base != b32, "the 64-bit window must not alias the 32-bit entry");
+        TEST_ASSERT(base >= 0x100000000ull, "the 64-bit window lives above 4 GiB");
+        TEST_ASSERT(size > s32, "the 64-bit window is the larger arena");
+        TEST_ASSERT(base + size > base, "64-bit window must not overflow");
+    } else {
+        // Absent (HVF): the ONLY honest reading is "this host has no high
+        // window", and a claim needing one fails honestly. Prove it was a
+        // real absence rather than a parse failure -- the same property
+        // read moments ago still works, and nothing was aliased into the
+        // out-params.
+        TEST_EXPECT_EQ(base, (u64)0, "absent window must not write out_base");
+        TEST_EXPECT_EQ(size, (u64)0, "absent window must not write out_size");
+        TEST_ASSERT(dtb_pci_mem_window(&b32, &s32),
+                    "the ranges property is still parseable (absence is real)");
+    }
+
+    TEST_ASSERT(!dtb_pci_mem_window64(NULL, &size), "NULL base -> false");
+}

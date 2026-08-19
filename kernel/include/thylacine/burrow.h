@@ -149,6 +149,17 @@ enum burrow_type {
     // the range — the D-cache-clean / I-cache-invalidate sequence the architecture
     // requires between a data write and an instruction fetch of the same address.
     BURROW_TYPE_CODE    = 6,
+    // V-2 (Warp-6 Venus / GPU-DESIGN 6.2.1): backing is a subrange of a PCI
+    // hostmem BAR -- host-visible shared memory (VIRTIO_PCI_CAP_SHARED_MEMORY_
+    // CFG, cfg_type 8), NOT device registers. `pages` is NULL (no alloc_pages
+    // backing); `kobj_pci` pins the owning claim for the Burrow's lifetime;
+    // `pa` is bars[shm.bar].pa + shm.offset + the caller's offset; `hostmem_mair`
+    // is the create-time MAIR index (host-dictated CACHED -> WB / WC -> NC).
+    // Unlike BURROW_TYPE_MMIO it is share-admissible (burrow_share_into): the
+    // client's cacheable/NC RW mapping conveys zero hardware authority (I-45) --
+    // a shared-memory window is device-passive DATA, not a command/register
+    // surface the device interprets.
+    BURROW_TYPE_HOSTMEM = 7,
 };
 
 struct page;
@@ -160,6 +171,7 @@ struct AddrSpace;      // <thylacine/addrspace.h> — LINEAGE L-1; burrow_lazy_p
                        //   real one). Pre-existing since L-4a; noticed at L-4b.
 struct KObj_MMIO;
 struct KObj_DMA;
+struct KObj_PCI;       // V-2: BURROW_TYPE_HOSTMEM pins the owning PCI claim
 struct Spoor;          // <thylacine/spoor.h> — REVENANT: the pinned backing Chan
 
 struct Burrow {
@@ -185,12 +197,16 @@ struct Burrow {
     // (page-aligned, matches kobj_mmio->pa). For BURROW_TYPE_DMA:
     // kobj_dma is the underlying KObj_DMA whose pinned page chunk this
     // Burrow wraps; pa is the buddy-chosen PA (matches kobj_dma->pa).
-    // Exactly one of kobj_mmio / kobj_dma is non-NULL for hw types; both
-    // are NULL for BURROW_TYPE_ANON. The non-NULL hw ref is released at
+    // For BURROW_TYPE_HOSTMEM (V-2): kobj_pci is the owning PCI claim whose
+    // hostmem BAR subrange this Burrow maps; pa is that subrange's absolute PA.
+    // Exactly one of kobj_mmio / kobj_dma / kobj_pci is non-NULL for hw types;
+    // all are NULL for BURROW_TYPE_ANON. The non-NULL hw ref is released at
     // burrow_free_internal via the type-dispatched switch.
     struct KObj_MMIO *kobj_mmio;   // NULL except for BURROW_TYPE_MMIO
     struct KObj_DMA  *kobj_dma;    // NULL except for BURROW_TYPE_DMA
+    struct KObj_PCI  *kobj_pci;    // NULL except for BURROW_TYPE_HOSTMEM (V-2)
     u64               pa;           // 0 except for hw-backed types
+    u8                hostmem_mair; // HOSTMEM only: create-time MAIR_IDX_* (V-2)
 
     // REVENANT / I-36: BURROW_TYPE_FILE fields. Zero/NULL for every other type.
     // The Burrow ADOPTS one ref on `spoor` at burrow_create_file (the I-30 pin:
@@ -319,6 +335,14 @@ struct Burrow *burrow_create_anon(size_t size);
 // arch/arm64/fault.c (handling the MMIO PA + device-memory PTE attrs)
 // lands at P4-Ic2.
 struct Burrow *burrow_create_mmio(struct KObj_MMIO *kobj_mmio);
+// V-2: wrap a subrange of a PCI hostmem BAR in a share-admissible Burrow.
+// `pa` is the absolute CPU PA of the subrange base (page-aligned), `len` its
+// byte length (page multiple, non-zero), `mair_idx` the host-dictated MAIR
+// attribute index (MAIR_IDX_NORMAL_WB / _NORMAL_NC). Takes one kobj_pci_ref
+// for the Burrow's lifetime (released in burrow_free_internal). Returns NULL
+// on OOM or bad args.
+struct Burrow *burrow_create_hostmem(struct KObj_PCI *kobj_pci, u64 pa,
+                                     size_t len, u8 mair_idx);
 
 // P4-Ic5b1b: burrow_create_dma — wrap a KObj_DMA in a Burrow so the
 // VMA + page-fault dispatch path can install user-VA mappings backed

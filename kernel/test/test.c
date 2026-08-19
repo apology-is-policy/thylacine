@@ -76,6 +76,7 @@ void test_kaslr_mix64_avalanche(void);
 void test_dtb_chosen_kaslr_seed_present(void);
 void test_dtb_pci_intx_route(void);
 void test_dtb_pci_mem_window(void);
+void test_dtb_pci_mem_window64(void);
 void test_phys_alloc_smoke(void);
 void test_phys_leak_10k(void);
 void test_slub_kmem_smoke(void);
@@ -87,6 +88,8 @@ void test_gic_cpu_irq_counter_geometry(void);  // V-4c-3 F5 (#73)
 void test_timer_tick_increments(void);
 void test_timer_oneshot_tval_clamps(void);
 void test_timer_arm_oneshot_restores(void);
+void test_extinction_claim_word_exactly_one_winner(void);
+void test_extinction_console_unclaimed_on_clean_boot(void);
 void test_clock_monotonic_advances(void);
 void test_clock_realtime_anchored(void);
 void test_clock_wallclock_offset_math(void);
@@ -227,6 +230,7 @@ void test_proc_job_stop_park_report_cont_live(void);
 void test_proc_job_stop_recycle(void);
 void test_proc_job_stop_preserves_torpor_wait(void);
 void test_proc_job_stop_orphan_rule(void);
+void test_proc_exec_reset_dispositions(void);      // #243 (main)
 void test_proc_exec_drops_image_note_state(void);   // #247
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
@@ -336,11 +340,14 @@ void test_weft_notif_copied_immediate(void);
 void test_weft_share_register_claim(void);
 void test_weft_share_full(void);
 void test_weft_share_owner_gc(void);
+void test_weft_hostmem_share(void);
+void test_weft_hostmem_resolve(void);
 void test_weft_syscall_share(void);
 void test_weft_map_binding_lifetime(void);
 void test_weft_share_cap_gate(void);
 void test_weft_share_rejects_plain_dma(void);
 void test_weft_weave_share_and_claim(void);
+void test_weft_gpu_bo_share_and_claim(void);
 void test_weft_unshare_disarm(void);
 void test_weft_shared_map_budget_cap(void);
 void test_weft_weave_clunk_unmap_guard(void);
@@ -351,6 +358,7 @@ void test_weft_reap_live_session_untouched(void);
 void test_weft_reap_close_unregisters(void);
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
+void test_pgtable_install_user_pte_attr_index(void);
 void test_pgtable_install_user_pte_idempotent(void);
 void test_demand_page_smoke(void);
 void test_demand_page_no_vma(void);
@@ -402,6 +410,7 @@ void test_exec_stack_is_sparse(void);
 void test_execve_load_into_detached(void);
 void test_execve_load_into_rejects_dirty(void);
 void test_execve_failed_load_leaves_target_drainable(void);
+void test_exec_native_rejects_dynamic_linux(void);
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
@@ -525,6 +534,7 @@ void test_loom_enter_min_complete_no_inflight(void);
 void test_loom_sqpoll_setup_and_teardown(void);
 void test_loom_sqpoll_drains_sq(void);
 void test_loom_sqpoll_parks_on_cq_full(void);
+void test_loom_sqpoll_charges_thread_budget(void);
 void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
@@ -648,6 +658,9 @@ void test_cons_tx_room_wait_and_deadline(void);
 void test_cons_tx_unit_diag_line_atomic(void);
 void test_cons_tx_unit_echo_atomic(void);
 void test_cons_tx_unit_smp_no_tear(void);
+void test_cons_ring_claim_core_returns_holding(void);
+void test_cons_ring_claim_core_bounded_when_held(void);
+void test_cons_ring_unclaimed_on_clean_boot(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_full_refuses(void);
 void test_cons_rx_can_accept_boundary(void);
@@ -677,6 +690,7 @@ void test_uart_rx_path_enabled(void);   // #943 console-RX guard
 void test_uart_putc_tx_bounded(void);   // #67 bounded TX spin (interrupt-dead hazard)
 void test_cons_poll_readiness(void);     // LS-8a
 void test_cons_poll_deferred_wake(void); // LS-8a
+void test_cons_mgr_hold_defers_consumption(void); // #187
 void test_cons_termios_default(void);            // LS-8b
 void test_cons_cook_canonical_line(void);        // LS-8b
 void test_cons_cook_echo_off_no_output(void);    // LS-8b
@@ -770,6 +784,7 @@ void test_devctl_cpu_sources_live(void);            // V-4c-2b: the /proc/stat +
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
 void test_devctl_stat_native_shapes(void);      // V-4b-5: /ctl stats as a dir; leaves as files
+void test_devctl_read_9p_sessions_format(void); // #210: the loss-discriminator ctl file
 void test_devdev_bestiary_smoke(void);
 void test_devdev_attach_returns_dir(void);
 void test_devdev_walk_to_each_leaf(void);
@@ -969,6 +984,7 @@ void test_srvconn_recv_deadline_timeout(void);
 void test_srvconn_teardown_eofs(void);
 void test_srvconn_teardown_wakes_blocked(void);
 void test_srvconn_server_send_blocks_then_drain_wakes(void);
+void test_srvconn_ctl_counters(void);           // #210: ring counters + ctl registry
 void test_srvconn_bulk_ring_class(void);
 void test_srvconn_role_park_second_writer(void);
 void test_srvconn_role_park_second_reader(void);
@@ -1019,6 +1035,7 @@ void test_virtio_pci_cfg_read_bounds(void);
 void test_virtio_pci_cfg_write_bounds(void);
 void test_pci_bar_decode_size(void);
 void test_pci_walk_caps_hostile(void);
+void test_pci_walk_caps_shm(void);
 void test_pci_claim_rng(void);
 void test_pci_claim_unknown(void);
 void test_pci_claim_exclusive(void);
@@ -1301,6 +1318,7 @@ void test_p9_attached_handshake_rlerror_ecode_overflow_clamped(void);
 void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
 void test_p9_attached_walked_outlives_root_no_uaf(void);
+void test_p9_attached_ctl_registry(void);       // #210: sessions registry + demux counters
 void test_sys_walk_open_max_length_name_nul_terminated(void);
 void test_spoor_transport_init_destroy(void);
 void test_spoor_transport_init_null_rejected(void);
@@ -1516,6 +1534,7 @@ struct test_case g_tests[] = {
     { "dtb.chosen_kaslr_seed_present", test_dtb_chosen_kaslr_seed_present, false, NULL },
     { "dtb.pci_intx_route",            test_dtb_pci_intx_route,            false, NULL },
     { "dtb.pci_mem_window",            test_dtb_pci_mem_window,            false, NULL },
+    { "dtb.pci_mem_window64",          test_dtb_pci_mem_window64,          false, NULL },
     { "phys.alloc_smoke",              test_phys_alloc_smoke,              false, NULL },
     { "phys.leak_10k",                 test_phys_leak_10k,                 false, NULL },
     { "slub.kmem_smoke",               test_slub_kmem_smoke,               false, NULL },
@@ -1527,6 +1546,8 @@ struct test_case g_tests[] = {
     { "timer.tick_increments",         test_timer_tick_increments,         false, NULL },
     { "timer.oneshot_tval_clamps",     test_timer_oneshot_tval_clamps,     false, NULL },
     { "timer.arm_oneshot_restores",    test_timer_arm_oneshot_restores,    false, NULL },
+    { "extinction.claim_word_exactly_one_winner", test_extinction_claim_word_exactly_one_winner, false, NULL },
+    { "extinction.console_unclaimed_on_clean_boot", test_extinction_console_unclaimed_on_clean_boot, false, NULL },
     { "clock.monotonic_advances",      test_clock_monotonic_advances,      false, NULL },
     { "clock.realtime_anchored",       test_clock_realtime_anchored,       false, NULL },
     { "clock.wallclock_offset_math",   test_clock_wallclock_offset_math,   false, NULL },
@@ -1692,6 +1713,7 @@ struct test_case g_tests[] = {
     { "proc.job_stop_preserves_torpor_wait",
                                        test_proc_job_stop_preserves_torpor_wait, false, NULL },
     { "proc.job_stop_orphan_rule",     test_proc_job_stop_orphan_rule,     false, NULL },
+    { "proc.exec_reset_dispositions",  test_proc_exec_reset_dispositions,  false, NULL },
     { "proc.exec_drops_image_note_state", test_proc_exec_drops_image_note_state, false, NULL },
     { "resource.exempt_only_system",   test_resource_exempt_only_system,   false, NULL },
     { "resource.page_charge_caps",     test_resource_page_charge_caps,     false, NULL },
@@ -1861,11 +1883,14 @@ struct test_case g_tests[] = {
     { "weft.share_register_claim",        test_weft_share_register_claim,     false, NULL },
     { "weft.share_full",                  test_weft_share_full,               false, NULL },
     { "weft.share_owner_gc",              test_weft_share_owner_gc,           false, NULL },
+    { "weft.hostmem_share",               test_weft_hostmem_share,            false, NULL },
+    { "weft.hostmem_resolve",             test_weft_hostmem_resolve,          false, NULL },
     { "weft.syscall_share",               test_weft_syscall_share,            false, NULL },
     { "weft.map_binding_lifetime",        test_weft_map_binding_lifetime,     false, NULL },
     { "weft.share_cap_gate",              test_weft_share_cap_gate,           false, NULL },
     { "weft.share_rejects_plain_dma",     test_weft_share_rejects_plain_dma,  false, NULL },
     { "weft.weave_share_and_claim",       test_weft_weave_share_and_claim,    false, NULL },
+    { "weft.gpu_bo_share_and_claim",      test_weft_gpu_bo_share_and_claim,   false, NULL },
     { "weft.unshare_disarm",              test_weft_unshare_disarm,           false, NULL },
     { "weft.shared_map_budget_cap",       test_weft_shared_map_budget_cap,    false, NULL },
     { "weft.weave_clunk_unmap_guard",     test_weft_weave_clunk_unmap_guard,  false, NULL },
@@ -1879,6 +1904,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "pgtable.install_user_pte_constraints",
                                        test_pgtable_install_user_pte_constraints,
+                                                                           false, NULL },
+    { "pgtable.install_user_pte_attr_index",
+                                       test_pgtable_install_user_pte_attr_index,
                                                                            false, NULL },
     { "pgtable.install_user_pte_idempotent",
                                        test_pgtable_install_user_pte_idempotent,
@@ -1943,6 +1971,9 @@ struct test_case g_tests[] = {
     { "execve.load_into_rejects_dirty", test_execve_load_into_rejects_dirty, false, NULL },
     { "execve.failed_load_leaves_target_drainable",
                                        test_execve_failed_load_leaves_target_drainable,
+                                                                           false, NULL },
+    { "exec.native_rejects_dynamic_linux",
+                                       test_exec_native_rejects_dynamic_linux,
                                                                            false, NULL },
     { "exec.setup_multi_segment",      test_exec_setup_multi_segment,      false, NULL },
     { "exec.setup_lifecycle_round_trip",
@@ -2129,6 +2160,7 @@ struct test_case g_tests[] = {
     { "loom.sqpoll_setup_and_teardown",  test_loom_sqpoll_setup_and_teardown,  false, NULL },
     { "loom.sqpoll_drains_sq",           test_loom_sqpoll_drains_sq,           false, NULL },
     { "loom.sqpoll_parks_on_cq_full",    test_loom_sqpoll_parks_on_cq_full,    false, NULL },
+    { "loom.sqpoll_charges_thread_budget", test_loom_sqpoll_charges_thread_budget, false, NULL },
     { "thread.create_user_ctx_layout",         test_thread_create_user_ctx_layout,         false, NULL },
     { "thread.exit_self_marks_exiting",        test_thread_exit_self_marks_exiting,        false, NULL },
     { "thread.exit_self_last_thread_zombies",  test_thread_exit_self_last_thread_zombies,  false, NULL },
@@ -2265,6 +2297,9 @@ struct test_case g_tests[] = {
     { "cons.tx_unit_diag_line_atomic", test_cons_tx_unit_diag_line_atomic, false, NULL },
     { "cons.tx_unit_echo_atomic",      test_cons_tx_unit_echo_atomic,      false, NULL },
     { "cons.tx_unit_smp_no_tear",      test_cons_tx_unit_smp_no_tear,      false, NULL },
+    { "cons.ring_claim_core_returns_holding",  test_cons_ring_claim_core_returns_holding,  false, NULL },
+    { "cons.ring_claim_core_bounded_when_held", test_cons_ring_claim_core_bounded_when_held, false, NULL },
+    { "cons.ring_unclaimed_on_clean_boot",     test_cons_ring_unclaimed_on_clean_boot,     false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_full_refuses",        test_cons_ring_full_refuses,        false, NULL },
     { "cons.rx_can_accept_boundary",   test_cons_rx_can_accept_boundary,   false, NULL },
@@ -2296,6 +2331,7 @@ struct test_case g_tests[] = {
     { "uart.putc_tx_bounded",          test_uart_putc_tx_bounded,          false, NULL },
     { "cons.poll_readiness",           test_cons_poll_readiness,           false, NULL },
     { "cons.poll_deferred_wake",       test_cons_poll_deferred_wake,       false, NULL },
+    { "cons.mgr_hold_defers_consumption", test_cons_mgr_hold_defers_consumption, false, NULL },
     { "cons.termios_default",          test_cons_termios_default,          false, NULL },
     { "cons.cook_canonical_line",      test_cons_cook_canonical_line,      false, NULL },
     { "cons.cook_echo_off_no_output",  test_cons_cook_echo_off_no_output,  false, NULL },
@@ -2394,6 +2430,8 @@ struct test_case g_tests[] = {
     { "devctl.write_rejected",         test_devctl_write_rejected,         false, NULL },
     { "devctl.read_dir_returns_neg1",  test_devctl_read_dir_returns_neg1,  false, NULL },
     { "devctl.stat_native_shapes",     test_devctl_stat_native_shapes,     false, NULL },
+    { "devctl.read_9p_sessions_format",
+                                       test_devctl_read_9p_sessions_format, false, NULL },
     { "devdev.bestiary_smoke",         test_devdev_bestiary_smoke,         false, NULL },
     { "devdev.attach_returns_dir",     test_devdev_attach_returns_dir,     false, NULL },
     { "devdev.walk_to_each_leaf",      test_devdev_walk_to_each_leaf,      false, NULL },
@@ -2534,6 +2572,7 @@ struct test_case g_tests[] = {
                                        test_srvconn_server_send_blocks_then_drain_wakes,
                                                                            false, NULL },
     { "srvconn.bulk_ring_class",       test_srvconn_bulk_ring_class,       false, NULL },
+    { "srvconn.ctl_counters",          test_srvconn_ctl_counters,          false, NULL },
     { "srvconn.role_park_second_writer",
                                        test_srvconn_role_park_second_writer,
                                                                            false, NULL },
@@ -2620,6 +2659,7 @@ struct test_case g_tests[] = {
     { "virtio_pci.cfg_write_bounds",   test_virtio_pci_cfg_write_bounds,   false, NULL },
     { "pci.bar_decode_size",           test_pci_bar_decode_size,           false, NULL },
     { "pci.walk_caps_hostile",         test_pci_walk_caps_hostile,         false, NULL },
+    { "pci.walk_caps_shm",             test_pci_walk_caps_shm,             false, NULL },
     { "pci.claim_rng",                 test_pci_claim_rng,                 false, NULL },
     { "pci.claim_unknown",             test_pci_claim_unknown,             false, NULL },
     { "pci.claim_exclusive",           test_pci_claim_exclusive,           false, NULL },
@@ -3078,6 +3118,7 @@ struct test_case g_tests[] = {
     { "p9_attached.walked_outlives_root_no_uaf",
                                        test_p9_attached_walked_outlives_root_no_uaf,
                                                                            false, NULL },
+    { "p9_attached.ctl_registry",      test_p9_attached_ctl_registry,      false, NULL },
     { "sys_walk_open.max_length_name_nul_terminated",
                                        test_sys_walk_open_max_length_name_nul_terminated,
                                                                            false, NULL },

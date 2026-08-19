@@ -194,6 +194,60 @@ had no surface at all -- you had to be writing a kernel unit test to see them.
 boot; this file is the running total afterwards. See
 `docs/reference/111-cons.md` for the mechanism.
 
+## `/ctl/9p-sessions` -- the reply-loss discriminator (#210)
+
+One `conn` row per live SrvConn (`srvconn_ctl_iterate`, registry in
+`kernel/srvconn.c`) and one `sess` row per live attached 9P session
+(`p9_attached_ctl_iterate`, registry in `kernel/9p_attach.c`; only
+`p9_attached` sessions register — the sole production `p9_client` funnel —
+so loopback test clients never appear). World-readable: counters and tag
+numbers only, no addresses, no payload bytes.
+
+```
+conn peer=2239 msize=32768 9p ka live c2s=18244/18244+0 s2c=99120/99120+0 sframes=214
+sess system id=- msize=131072 rx=48211 own=41190 orph=0 orphc=7018 orphf=2 orphl=1 wake=41190 ops=41211 err=12 - live sw=0 infl=1 t3w
+sess srv id=2239 msize=32768 rx=214 own=214 orph=0 orphc=0 orphf=0 orphl=0 wake=214 ops=215 err=0 rd - live sw=0 infl=1 t0w
+```
+
+`conn` fields: peer pid, ring class, `byte`/`9p` mode, `ka` when
+kernel-attached, state, then per-direction `produced/consumed+buffered`
+lifetime byte counters (`E` suffix = EOF latched) and `sframes` — whole
+server reply buffers delivered by `srvconn_server_send_blocking`. The ring
+conservation law `produced == consumed + buffered` holds per direction
+(`srvconn.ctl_counters` asserts it).
+
+`sess` fields: label (the attach aname; `srv` + the conn peer pid for /srv
+sessions), negotiated msize, then the demux counters — `rx` frames that
+reached the demux, `own` frames with a live `inflight[tag]` submitter,
+`wake` sync-owner wakeups issued, and the ownerless taxonomy: `orphc`
+(async-clunk Rclunks — fire-and-forget by design, constant FID-LIFECYCLE
+background), `orphf` (#845 abandon Rflushes — death-driven by design),
+`orphl` (#845 abandoned ops' late original replies — tag still
+`awaiting_flush`), and `orph` — a frame NO living mechanism accounts for.
+`orph` is ZERO on every healthy boot including death flows (the full suite
+is the witness); the kernel also logs the first 4 per client
+(`9p: ownerless frame tag=.. type=..`). Tail: `rd` = elected reader live,
+dead/live, `sw` parked senders, `infl` + per-tag
+`t<N><d|w>[a]:<kind>:<fid>` — done/waiting, async, then the sent T-type
+(the 9P message number, e.g. `116` = Tread) and the op's primary target
+fid from the session table, so a parked op names WHAT it waits on (e.g.
+`t0w:116:14` = tag 0, waiting, a Tread on fid 14 — the read that
+convicted #210's fence park).
+
+The three-way wedge read (the #210 discriminator, at wedge time):
+
+| Observation | Verdict |
+|---|---|
+| `s2c` produced > consumed (bytes parked in the ring) | reply undrained — election/reader wedge |
+| `orph` bumped while the submitter is parked | misdemux / tag corruption |
+| `own`/`wake` advanced + the in-flight tag reads `d` (done) with the submitter still parked | lost wake (I-9) |
+
+Caveat: the formatter re-runs per `read()` at each offset, so counters can
+advance between pages — read the whole file in ONE call (any `read` with
+`n` >= content size; the content cap is `DEVCTL_READ_BUF` = 4096) for a
+consistent snapshot. Registry locks are held across each iterate, so a row
+is never a torn or freed object.
+
 ## `stat_native` (VIVARIUM V-4b-5)
 
 `/ctl` had **no `stat_native` slot at all**, so `spoor_stat_native` returned `-1`

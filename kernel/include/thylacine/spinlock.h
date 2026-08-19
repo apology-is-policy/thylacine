@@ -117,14 +117,27 @@ static inline bool spin_trylock(spin_lock_t *l) {
     return false;
 }
 
-// #360 RAW (uncounted) variants -- EXCLUSIVELY for sched()'s cs->lock
-// pending-release handoff, the one lock acquired by one thread (prev, in
-// sched()) and released by ANOTHER (the resuming thread, or a fresh
-// thread's trampoline via sched_finish_task_switch). A per-thread count
-// cannot balance a cross-thread pair; the hold does not need it: sched()
-// runs fully IRQ-masked from its entry mask through cpu_switch_context to
-// the release, so the hold is non-preemptible by masking. Any OTHER use
-// is a bug -- it silently opts a lock out of the #360 discipline.
+// #360 RAW (uncounted) variants -- for exactly TWO holders, each of which
+// is non-preemptible by MASKING rather than by the count, so the count
+// would balance nothing:
+//
+//   1. sched()'s cs->lock pending-release handoff, the one lock acquired
+//      by one thread (prev, in sched()) and released by ANOTHER (the
+//      resuming thread, or a fresh thread's trampoline via
+//      sched_finish_task_switch). A per-thread count cannot balance a
+//      cross-thread pair; sched() runs fully IRQ-masked from its entry
+//      mask through cpu_switch_context to the release.
+//   2. The extinction winner's claim of the console TX ring lock
+//      (cons_tx_claim_for_dump): taken IRQ-masked on a dying CPU and
+//      NEVER released -- every path through extinction() ends in
+//      _torpor(), so the holder is never scheduled again and there is
+//      no hold to account for. Raw on purpose: the counted variants read
+//      current_thread() through TPIDR_EL1, which is exactly the kind of
+//      state a crash may have destroyed, and a fault inside the claim
+//      would turn a diagnosable crash into a recursion banner.
+//
+// Any OTHER use is a bug -- it silently opts a lock out of the #360
+// discipline.
 static inline void spin_lock_raw(spin_lock_t *l) {
     while (t_atomic_xchg_acq_u32(&l->value, 1u) != 0u) {
         while (__atomic_load_n(&l->value, __ATOMIC_RELAXED) != 0u) {
@@ -135,6 +148,12 @@ static inline void spin_lock_raw(spin_lock_t *l) {
 
 static inline void spin_unlock_raw(spin_lock_t *l) {
     __atomic_store_n(&l->value, 0u, __ATOMIC_RELEASE);
+}
+
+// One raw try (holder 2 above). Interoperates with the counted variants:
+// the lock word protocol is identical, only the hold accounting differs.
+static inline bool spin_trylock_raw(spin_lock_t *l) {
+    return t_atomic_xchg_acq_u32(&l->value, 1u) == 0u;
 }
 
 // IRQ-disabling variants — REAL implementation (P1-I audit F30 close).

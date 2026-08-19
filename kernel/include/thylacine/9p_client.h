@@ -201,6 +201,34 @@ struct p9_client {
     struct p9_rpc       *inflight[P9_SESSION_MAX_OUTSTANDING];
     bool                 reader_active;
     bool                 dead;
+    // #210 loss discriminator (all under c->lock; demux_frame_locked is the
+    // sole mutation site). frames_rx counts every steady-state frame that
+    // reached the demux; owned/orphan split it by whether inflight[tag]
+    // held a submitter; wakes counts sync-owner wakeups actually issued.
+    // Read by /ctl/9p-sessions via p9_client_ctl_snapshot. A bumped
+    // demux_orphan with a parked submitter is the misdemux/tag arm; an
+    // advanced demux_owned with the submitter still parked is the
+    // lost-wake arm (I-9).
+    //
+    // orphan_clunk / orphan_flush / orphan_late are the LEGITIMATE TWINS
+    // split out (the #214-F1 lesson: ask what else increments a pathology
+    // counter). p9_client_clunk_async is fire-and-forget — it never
+    // registers inflight[tag], so every async Rclunk arrives ownerless by
+    // design (constant FID-LIFECYCLE background). The #845 abandon path
+    // sends its Tflush ownerless, so every abandon's Rflush lands here by
+    // design (death-driven). An abandoned op's LATE ORIGINAL reply is the
+    // third: its tag is still active + awaiting_flush in the session
+    // table, which the demux checks to classify it. With all three split,
+    // demux_orphan == 0 holds on every healthy boot INCLUDING death
+    // flows — a nonzero value is a frame NO living mechanism accounts
+    // for (misroute / tag corruption / genuine loss surfacing).
+    u64                  frames_rx;
+    u64                  demux_owned;
+    u64                  demux_orphan;
+    u64                  demux_orphan_clunk;
+    u64                  demux_orphan_flush;
+    u64                  demux_orphan_late;
+    u64                  demux_wakes;
     // #349 send flow control. A send whose c2s ring is transiently FULL (under
     // #841 pipelining + concurrent large frames) is back-pressure, NOT a death:
     // the sender drains the reply path + retries (client_send_flow). A reader
@@ -307,6 +335,35 @@ void p9_client_destroy(struct p9_client *c);
 
 // Graceful close: closes the transport, then session.
 int  p9_client_close(struct p9_client *c);
+
+// =============================================================================
+// #210 /ctl/9p-sessions snapshot.
+// =============================================================================
+
+// At most this many in-flight tags are reported per snapshot (the live
+// table is P9_SESSION_MAX_OUTSTANDING wide; a wedge holds 1-2).
+#define P9_CTL_INFLIGHT_MAX 8
+
+struct p9_client_ctl {
+    u64  frames_rx, demux_owned, demux_orphan, demux_orphan_clunk,
+         demux_orphan_flush, demux_orphan_late, demux_wakes;
+    u32  total_ops, total_errors;
+    bool reader_active, dead;
+    u32  send_waiters;
+    u32  n_inflight;               // live tags found (may exceed the array)
+    struct {
+        u16  tag;
+        bool done;                 // reply delivered to the submitter's buf
+        bool async;                // Loom on_complete op (no parked submitter)
+        u8   kind;                 // the sent T-type (session outstanding[])
+        u32  fid;                  // the op's primary target fid
+    } tags[P9_CTL_INFLIGHT_MAX];
+};
+
+// Fill *out under c->lock — a consistent instant of the demux counters +
+// the in-flight table. Safe on any live client; must not be called with
+// c->lock already held.
+void p9_client_ctl_snapshot(struct p9_client *c, struct p9_client_ctl *out);
 
 // =============================================================================
 // Handshake.

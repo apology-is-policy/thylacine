@@ -232,6 +232,20 @@ proc lc_vm_infra_check {} {
 #
 # Range 32..95 -> TCP 5932..5995: below 32 is where humans and macOS Screen
 # Sharing live (5900), and 6000+ is X11.
+# The QMP control socket 14 gfx scenarios drive. It was `$repo/build/qmp.sock`
+# hardcoded in all 14, which is one fixed host resource shared by every
+# scenario -- a deterministic collision the moment two run at once (#127's
+# lesson, applied before it can bite rather than after). The wrapper points
+# THYLACINE_QMP_SOCK at the scenario's own slot; run-vm.sh reads the same
+# variable, so both ends agree by construction. Unset, this is exactly the old
+# path, so a hand-run scenario behaves as it always did.
+proc lc_qmp_sock {} {
+    if {[info exists ::env(THYLACINE_QMP_SOCK)] && $::env(THYLACINE_QMP_SOCK) ne ""} {
+        return $::env(THYLACINE_QMP_SOCK)
+    }
+    return "$::lc_repo/build/qmp.sock"
+}
+
 proc lc_vnc_probe_noop {args} {}
 
 proc lc_port_bindable {port} {
@@ -258,6 +272,17 @@ proc lc_pick_vnc_display {} {
         set h [expr {(($h * 33) + [scan $ch %c]) % 1000003}]
     }
     set base [expr {$h % $span}]
+    # G-2: a third separation, for scenarios of the SAME tree running at once.
+    # The tree hash separates trees and the probe steps over stragglers, but
+    # concurrent scenarios here all hash to one base and would then race each
+    # other through the probe's TOCTOU window -- the one gap the comment above
+    # says the base, not the probe, is supposed to cover. The wrapper hands each
+    # slot its index, so concurrent scenarios start at different displays and
+    # the probe goes back to being the backstop it was designed as.
+    if {[info exists ::env(LS_CI_VNC_BASE)]
+        && [string is integer -strict $::env(LS_CI_VNC_BASE)]} {
+        set base [expr {($base + $::env(LS_CI_VNC_BASE)) % $span}]
+    }
     for {set i 0} {$i < $span} {incr i} {
         set d [expr {$lo + (($base + $i) % $span)}]
         if {[lc_port_bindable [expr {5900 + $d}]]} {
@@ -683,6 +708,44 @@ proc lc_run_expect {cmd expected} {
     lc_expect $expected "output-of: $cmd"
 }
 
+# Like lc_run_expect, but a line matching `failpat` fails the scenario
+# IMMEDIATELY instead of waiting out the timeout. For provers that print
+# their own FAIL line and return to the prompt: without a fail arm their
+# red path reports only via the timeout arm (#218 close F2 -- the warp
+# battery's red latency was the full lc_cmd_timeout). Keying a RED verdict
+# on the failure string is the safe direction of #186: a spurious match
+# turns a pass into a fail, never the reverse.
+proc lc_run_expect_hardfail {cmd expected failpat} {
+    global lc_cmd_timeout timeout
+    lc_send $cmd
+    set timeout $lc_cmd_timeout
+    expect {
+        -ex $expected     { lc_step "saw: output-of: $cmd" }
+        -ex $failpat      { lc_fail "hard-fail line \[$failpat\] during 'output-of: $cmd'" }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during 'output-of: $cmd'" }
+        timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$expected\] during 'output-of: $cmd'" }
+        eof               { lc_fail "unexpected EOF during 'output-of: $cmd'" }
+    }
+}
+
+# Like lc_run_expect_hardfail, but `failre` is a REGEXP, so several red lines
+# can share the one arm (a prover's own `FAIL --` token AND its scenario-level
+# `INCOMPLETE(<arm>)` verdict, C-0d Fable round F6). Same direction as the -ex
+# sibling: a spurious match turns a pass into a fail, never the reverse. The
+# matched text is reported, since the pattern alone no longer says which line.
+proc lc_run_expect_hardfail_re {cmd expected failre} {
+    global lc_cmd_timeout timeout
+    lc_send $cmd
+    set timeout $lc_cmd_timeout
+    expect {
+        -ex $expected     { lc_step "saw: output-of: $cmd" }
+        -re $failre       { lc_fail "hard-fail line \[$expect_out(0,string)\] during 'output-of: $cmd'" }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during 'output-of: $cmd'" }
+        timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$expected\] during 'output-of: $cmd'" }
+        eof               { lc_fail "unexpected EOF during 'output-of: $cmd'" }
+    }
+}
+
 # Log in over the console. Reaching the shell banner proves the kernel received
 # every keystroke (the LS-1 regression) and that login authenticated.
 proc lc_login {user pass} {
@@ -706,7 +769,7 @@ proc lc_login {user pass} {
     lc_raw_send "$pass\r" "login password"
     expect {
         -ex "Thylacine textual shell" { lc_step "shell up -- login OK (LS-1)" }
-        -ex "login incorrect"         { lc_fail "auth rejected for $user" }
+        -ex "login incorrect"         { lc_fail "auth rejected for $user -- the credential is known-good, so suspect #233 FIRST: a byte that reaches the console between login's password prompt and its noecho consctl flip is echoed AND then discarded by the flip's TCSAFLUSH line-reset, truncating the passphrase. Look for an echoed character immediately after 'password: ' in the preserved log; that is the fingerprint. Fixed by ordering (mode set BEFORE the prompt) -- a recurrence means the window reopened." }
         -re {EXTINCTION:}             { lc_extinction_fail "extinction during login/provision" }
         timeout                       { lc_fail "shell never came up after auth (login/provision stall?)" }
         eof                           { lc_fail "qemu exited during login" }

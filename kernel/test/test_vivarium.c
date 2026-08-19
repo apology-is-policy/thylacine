@@ -1608,6 +1608,7 @@ void test_vivarium_sigtab(void) {
                 "no table -> nothing ignored");
     TEST_ASSERT(!viv_sigtab_set(NULL, VIV_SIGNOTE_PIPE, &ign),
                 "setting through a NULL table fails rather than faulting");
+    viv_sigtab_reset(NULL);   // #243: advertised NULL-safe; the battery's fourth arm
     TEST_ASSERT(!viv_sigtab_note_handler(NULL, VIV_SIGNOTE_PIPE, &got),
                 "no table -> no handler");
 
@@ -3174,6 +3175,40 @@ void test_vivarium_sigtab_fork_exec_rule(void) {
     TEST_ASSERT(!viv_sigtab_note_ignored(tab, VIV_SIGNOTE_CHILD_EXIT),
                 "exec: an untouched SIG_DFL row stays SIG_DFL");
     viv_sigtab_reset_caught(NULL);                             // NULL-safe
+
+    // ---- main#243 F5: the reset primitives at the TABLE level, with the LAST
+    // entry seeded in ALL FOUR fields. The exec-helper tests seed the middle of
+    // the table; a reset that stopped one entry short, or zeroed the gate
+    // field alone, passed everything above. Both arms: reset_caught must clear
+    // a caught COUNT-1 row completely; reset must leave NO byte standing.
+    _Static_assert(VIV_SIGNOTE_TTY_CONT + 1u == VIV_SIGNOTE_COUNT,
+                   "the last-entry seed must sit at COUNT-1");
+    struct viv_ksigaction lst = { .handler = 0x400200ull, .flags = 0x10000000ull,
+                                  .restorer = 0x400300ull, .mask = 0x4ull };
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_TTY_CONT, &lst);
+    TEST_ASSERT(viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_CONT, &got)
+                && got.flags == 0x10000000ull && got.restorer == 0x400300ull
+                && got.mask == 0x4ull,
+                "F5 pre: the COUNT-1 row is a live handler with every field set");
+    viv_sigtab_reset_caught(tab);
+    TEST_ASSERT(tab->act[(u32)VIV_SIGNOTE_TTY_CONT].handler == VIV_SIG_DFL
+                && tab->act[(u32)VIV_SIGNOTE_TTY_CONT].flags == 0
+                && tab->act[(u32)VIV_SIGNOTE_TTY_CONT].restorer == 0
+                && tab->act[(u32)VIV_SIGNOTE_TTY_CONT].mask == 0,
+                "F5: reset_caught reaches the LAST entry and clears all four fields");
+    TEST_ASSERT(viv_sigtab_note_ignored(tab, VIV_SIGNOTE_PIPE),
+                "F5: ...and still keeps SIG_IGN");
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_TTY_CONT, &lst);      // re-arm for the full reset
+    viv_sigtab_reset(tab);
+    {
+        const u8 *raw = (const u8 *)tab;
+        u32 nz = 0;
+        for (u32 i = 0; i < (u32)sizeof(*tab); i++) nz += (raw[i] != 0u);
+        TEST_EXPECT_EQ((long)nz, 0L,
+                       "F5: the full reset leaves no byte standing (SIG_IGN rows "
+                       "included -- the native rule)");
+    }
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_PIPE, &ign);   // the fork arm expects PIPE ignored
 
     // ---- fork: the child gets its OWN equal copy; a NULL parent table -> NULL.
     struct Proc *parent = proc_alloc();

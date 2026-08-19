@@ -1,0 +1,293 @@
+From 9b2fef7a5bc2989d93adf1bda611686bd715a4a7 Mon Sep 17 00:00:00 2001
+From: thylacine <thylacine@localhost>
+Date: Wed, 12 Aug 2026 18:56:58 +0000
+Subject: [PATCH] Thylacine #198 bundle: create diagnostics, cache pressure
+ valve, honest S3TC
+
+Four batched changes against the /srv/warp seam client and st, all
+driven by the #198 BO-exhaustion investigation on the V3D host:
+
+- warp_client.c gains warp_diag_once: one stderr line, once per
+  connection, at the FIRST refused BO create, naming the refusing arm
+  (bo-mint / create3d / bo-info / bo-res) and the request geometry.
+  The #198 log had ~2300 GL_OUT_OF_MEMORY lines with zero seam-side
+  evidence of WHICH stage refused; the census (bo-peak 26/1024, the
+  server one-shot never fired) proved the failures never reached the
+  seam admission gates, so the deciding instrument must sit client
+  side. One-shot because an exhaustion storm retries the path per
+  draw (#198 rode the synchronous console at ~900 lines/frame).
+
+- The bo-info/bo-res arms now destroy the BUILT backing before
+  returning failure (the #218 client half): a built-but-unreadable
+  record held real server pages until ctx death. The create3d arm
+  comment is reworded -- since the server-side #218 fix a refused
+  create3d CONSUMES the mint record, nothing lingers.
+
+- virgl_thylacine_winsys.c: on a failed create, flush the idle
+  resource cache and retry ONCE (then say so, once, and fail). The
+  idle cache holds real server BOs against the seam hard per-ctx
+  caps, so a load burst plus up to 1s of cached staging exhausts the
+  ctx while most of it is reclaimable -- and #198 showed a transient
+  burst then wedges the Mesa vbo dispatch for good. VERIFIED that
+  upstream 26.1.6 has NO such valve (drm and vtest flush only at
+  destroy); Thylacine-specific because only this seam has a hard cap.
+
+- st_extensions.c: on Thylacine, drop the two S3TC rows from the
+  compressed-FALLBACK advertisement table (#216). That table
+  advertises EXT_texture_compression_s3tc off mere RGBA8 support and
+  stores textures decompressed, which defeats the app memory intent
+  against the seam byte budget; quake-class engines trust the
+  extension string and select DXT internalformats the V3D host never
+  backs (1692 phantom upload OOMs per run). Screens with native DXT
+  (llvmpipe) still advertise via the sampler-support table.
+
+- The #204 audit F1/F3 riders: warp_transfer failures (previously
+  fully silent -- the fenced_write attempt-exhaustion and E_IO exits
+  return 0 with no report) now say so once per connection; the
+  resource_wait (void) cast of warp_fence_wait -1 is argued at the
+  cast; the head comment 64 KiB slot is corrected to the 36 KiB
+  FREQ_LEN.
+---
+ .../virgl/thylacine/virgl_thylacine_winsys.c  | 27 +++++++
+ .../winsys/virgl/thylacine/warp_client.c      | 73 +++++++++++++++++--
+ .../winsys/virgl/thylacine/warp_client.h      |  6 +-
+ src/mesa/state_tracker/st_extensions.c        | 11 +++
+ 4 files changed, 109 insertions(+), 8 deletions(-)
+
+diff --git a/src/gallium/winsys/virgl/thylacine/virgl_thylacine_winsys.c b/src/gallium/winsys/virgl/thylacine/virgl_thylacine_winsys.c
+index ff78e2f..0ff6224 100644
+--- a/src/gallium/winsys/virgl/thylacine/virgl_thylacine_winsys.c
++++ b/src/gallium/winsys/virgl/thylacine/virgl_thylacine_winsys.c
+@@ -75,6 +75,7 @@ struct virgl_thylacine_winsys {
+    struct warp_conn conn;
+    struct virgl_resource_cache cache;
+    mtx_t mutex;
++   bool create_fail_said; /* one-shot: create failed post flush-retry */
+ };
+ 
+ struct virgl_thylacine_cmd_buf {
+@@ -144,6 +145,9 @@ static bool thy_res_is_busy_unlocked(struct virgl_thylacine_winsys *tws,
+ static void thy_res_wait_unlocked(struct virgl_thylacine_winsys *tws,
+                                   struct virgl_hw_res *res)
+ {
++   /* A -1 here is the wedge (latched + loud at the latch site):
++    * nothing will ever retire, so the wait ends either way -- the
++    * same fail-fast arm as thy_res_is_busy_unlocked's wedged check. */
+    (void)warp_fence_wait(&tws->conn, res->last_use_seq);
+ }
+ 
+@@ -186,6 +190,29 @@ thy_resource_create_unlocked(struct virgl_thylacine_winsys *tws,
+                        width, height, depth, array_size, last_level,
+                        nr_samples, flags, &sz, &res_id);
+    if (bo == 0) {
++      /* The idle cache holds real server BOs against the seam's hard
++       * per-ctx caps (record count + byte envelope), so a load burst
++       * plus up to 1s of cached staging can exhaust the ctx while
++       * most of it is reclaimable -- and a transient burst then
++       * wedges GL for good (#198). Give the idle set back and retry
++       * once. No upstream analog: the drm/vtest winsyses flush only
++       * at destroy, their hosts having no comparably hard cap. The
++       * flush destroys through thy_cache_entry_release under the
++       * held mutex, the same pattern as winsys destroy. */
++      virgl_resource_cache_flush(&tws->cache);
++      bo = warp_bo_create(&tws->conn, (uint32_t)target,
++                          (uint32_t)pipe_to_virgl_format(format), bind,
++                          width, height, depth, array_size, last_level,
++                          nr_samples, flags, &sz, &res_id);
++   }
++   if (bo == 0) {
++      if (!tws->create_fail_said) {
++         tws->create_fail_said = true;
++         fprintf(stderr, "warp winsys: bo create failed after the cache "
++                         "flush-retry (format %u bind 0x%x %ux%u size %u); "
++                         "first failure only\n",
++                 format, bind, width, height, sz);
++      }
+       FREE(res);
+       return NULL;
+    }
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.c b/src/gallium/winsys/virgl/thylacine/warp_client.c
+index 356f965..dc2324c 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.c
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.c
+@@ -23,7 +23,8 @@
+  * rings); past the iounit the kernel 9P client would fragment a large
+  * write into several Twrites, each of which the server would decode as
+  * its own submission — splitting mid-command. 24 KiB leaves margin
+- * under both the iounit (msize - 23) and the server's 64 KiB slot. */
++ * under both the iounit (msize - 23) and the server's 36 KiB slot
++ * (FREQ_LEN, floored against SRV_MSIZE server-side). */
+ #define WARP_CHUNK_BYTES (24u * 1024u)
+ #define WARP_CHUNK_DWORDS (WARP_CHUNK_BYTES / 4u)
+ 
+@@ -278,6 +279,23 @@ uint64_t warp_submit(struct warp_conn *w, const uint32_t *dw, uint32_t ndw)
+    return seq;
+ }
+ 
++/* Transfers do not latch the wedge (the driver surfaces each failure
++ * per-call), but the FIRST failure still says so: fenced_write's
++ * attempt-exhaustion and E_IO exits are otherwise silent, and the
++ * #210 clamp deliberately degrades throttling to an E_AGAIN storm --
++ * exactly the world where a transfer burns its attempts and vanishes
++ * (#204 audit F1). */
++static void warp_xfer_diag_once(struct warp_conn *w, uint32_t bo,
++                                const char *stage)
++{
++   if (w->xfer_warned)
++      return;
++   w->xfer_warned = true;
++   fprintf(stderr, "warp: transfer %s failed on bo %u%s; first failure "
++                   "only\n",
++           stage, bo, w->wedged ? " (connection wedged)" : "");
++}
++
+ uint64_t warp_transfer(struct warp_conn *w, uint32_t bo, bool to_host,
+                        uint32_t level, int x, int y, int z,
+                        int width, int height, int depth,
+@@ -296,13 +314,36 @@ uint64_t warp_transfer(struct warp_conn *w, uint32_t bo, bool to_host,
+             level, x, y, z, width, height, depth,
+             offset, stride, layer_stride);
+    fd = open_at(w->root, path, T_OWRITE);
+-   if (fd < 0)
++   if (fd < 0) {
++      warp_xfer_diag_once(w, bo, "open");
+       return 0;
++   }
+    seq = fenced_write(w, fd, verb, strlen(verb));
+    t_close(fd);
++   if (seq == 0)
++      warp_xfer_diag_once(w, bo, "write");
+    return seq;
+ }
+ 
++/* One line, once per connection, at the FIRST refused BO create:
++ * which arm refused and what was asked. Post-#218 the server consumes
++ * the mint on a refused create3d, so `bo-mint` indicts fd/handle
++ * pressure or a dead ctx -- never corpse-starved slots. One-shot
++ * because under exhaustion every draw retries this path (#198's
++ * storm rode the synchronous console at ~900 lines/frame). */
++static void warp_diag_once(struct warp_conn *w, const char *arm,
++                           uint32_t target, uint32_t vformat,
++                           uint32_t width, uint32_t height,
++                           uint32_t last_level, uint32_t size)
++{
++   if (w->build_diag_said)
++      return;
++   w->build_diag_said = true;
++   fprintf(stderr, "warp: bo create refused at %s (target %u vformat %u "
++                   "%ux%u lvl %u size %u); first refusal only\n",
++           arm, target, vformat, width, height, last_level, size);
++}
++
+ uint32_t warp_bo_create(struct warp_conn *w,
+                         uint32_t target, uint32_t vformat, uint32_t vbind,
+                         uint32_t width, uint32_t height, uint32_t depth,
+@@ -326,23 +367,41 @@ uint32_t warp_bo_create(struct warp_conn *w,
+ 
+    snprintf(path, sizeof(path), "ctx/%u/bo/new", w->ctx);
+    bo = mint_id(w->root, path);
+-   if (bo == 0)
++   if (bo == 0) {
++      warp_diag_once(w, "bo-mint", target, vformat, width, height,
++                     last_level, size);
+       return 0;
++   }
+ 
+    snprintf(path, sizeof(path), "ctx/%u/bo/%u/ctl", w->ctx, bo);
+    snprintf(verb, sizeof(verb),
+             "create3d %u %u %u %u %u %u %u %u %u %u %u",
+             target, vformat, vbind, width, height, depth, array_size,
+             last_level, nr_samples, flags, size);
+-   if (write_verb(w->root, path, verb) != 0)
+-      return 0; /* the minted-but-unbuilt record dies with the ctx */
++   if (write_verb(w->root, path, verb) != 0) {
++      /* The server consumes the mint on a refused create3d (#218):
++       * nothing lingers in the ctx's bos[] to starve later mints. */
++      warp_diag_once(w, "create3d", target, vformat, width, height,
++                     last_level, size);
++      return 0;
++   }
+ 
+    snprintf(path, sizeof(path), "ctx/%u/bo/%u/info", w->ctx, bo);
+-   if (open_read_snapshot(w->root, path, info, sizeof(info)) <= 0)
++   if (open_read_snapshot(w->root, path, info, sizeof(info)) <= 0) {
++      /* Built but unreadable: real backing exists server-side, so
++       * hand it back rather than orphaning it until ctx death. */
++      warp_bo_destroy(w, bo, -1);
++      warp_diag_once(w, "bo-info", target, vformat, width, height,
++                     last_level, size);
+       return 0;
++   }
+    rid = parse_field(info, "res");
+-   if (rid <= 0)
++   if (rid <= 0) {
++      warp_bo_destroy(w, bo, -1);
++      warp_diag_once(w, "bo-res", target, vformat, width, height,
++                     last_level, size);
+       return 0;
++   }
+ 
+    *size_inout = size;
+    *res_id = (uint32_t)rid;
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.h b/src/gallium/winsys/virgl/thylacine/warp_client.h
+index 3b9f9f8..f579ef4 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.h
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.h
+@@ -56,6 +56,8 @@ struct warp_conn {
+    uint64_t signaled; /* last read of ctl `fence-signaled` */
+    bool wedged;       /* latched on transport failure / poison EOF */
+    bool ledger_warned; /* one-shot: the #210 conservation clamp fired */
++   bool build_diag_said; /* one-shot: first refused BO create named */
++   bool xfer_warned;  /* one-shot: first failed transfer named */
+ };
+ 
+ /* Connect + mint the context + open the hot fds. Returns 0, or -1 when
+@@ -92,7 +94,9 @@ void warp_bo_destroy(struct warp_conn *w, uint32_t bo, long map_fd);
+ /* Queue one fenced op. Each returns the op's issue seq (> 0) or 0 on
+  * failure (which latches the wedge for submits — a dropped command
+  * buffer corrupts all later state — but NOT for transfers, whose
+- * failure the driver surfaces per-call).
++ * failure the driver surfaces per-call; the first transfer failure
++ * still reports one stderr line, since fenced_write's exhaustion and
++ * E_IO exits are otherwise silent).
+  *
+  * warp_submit takes a dword stream and splits it into <= chunk-bound
+  * writes at CCMD boundaries (one write = one atomic submission; state
+diff --git a/src/mesa/state_tracker/st_extensions.c b/src/mesa/state_tracker/st_extensions.c
+index 7dde5cb..06b6261 100644
+--- a/src/mesa/state_tracker/st_extensions.c
++++ b/src/mesa/state_tracker/st_extensions.c
+@@ -39,6 +39,7 @@
+ #include "pipe/p_defines.h"
+ #include "pipe/p_screen.h"
+ #include "tgsi/tgsi_from_mesa.h"
++#include "util/detect_os.h"
+ #include "util/u_math.h"
+ #include "util/u_memory.h"
+ 
+@@ -992,12 +993,22 @@ void st_init_extensions(struct pipe_screen *screen,
+           PIPE_FORMAT_L8A8_UNORM,
+           PIPE_FORMAT_L8A8_SNORM } },
+ 
++#if !DETECT_OS_THYLACINE
++      /* Thylacine: never advertise S3TC a screen cannot store
++       * compressed. The decompress fallback quietly stores RGBA8,
++       * which defeats the app's memory intent against the warp seam's
++       * hard per-ctx byte budget, and quake-class engines trust the
++       * extension string to select DXT internalformats the host never
++       * backs (#216: 1692 phantom upload OOMs per run on a V3D host).
++       * Screens with native DXT (llvmpipe, virgl on a DXT-capable
++       * host) still advertise via the sampler-support table above. */
+       { { o(EXT_texture_compression_s3tc),
+           o(ANGLE_texture_compression_dxt) },
+         { PIPE_FORMAT_R8G8B8A8_UNORM } },
+ 
+       { { o(EXT_texture_compression_s3tc_srgb) },
+         { PIPE_FORMAT_R8G8B8A8_SRGB } },
++#endif
+ 
+       { { o(ARB_texture_compression_bptc) },
+         { PIPE_FORMAT_R8G8B8A8_UNORM,
+-- 
+2.43.0
+

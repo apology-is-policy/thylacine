@@ -22,15 +22,64 @@
 
 // Per-CPU online flag. Set by secondary's trampoline at the very
 // start of its execution (after PSCI bring-up); read by the primary
-// in smp_init's wait loop. `volatile` so the compiler doesn't hoist
-// the read out of the polling loop. Also published with dsb sy on the
-// secondary side; cache coherence on QEMU virt is automatic in the
-// inner-shareable domain.
+// in smp_init's timeout diagnostics. `volatile` so the compiler
+// doesn't hoist reads out of polling loops.
 //
-// Indexed by cpu index (0..N-1). Boot CPU sets g_cpu_online[0] to
-// true at smp_init entry; secondaries set their own slot in the asm
-// trampoline.
-extern volatile u8 g_cpu_online[DTB_MAX_CPUS];
+// #214 (real-silicon A72): the trampoline's strb runs with the MMU
+// OFF, so it is a Device-nGnRnE write that goes straight to PoC (DRAM)
+// and is NOT coherent with the primary's cacheable view — emulated
+// substrates (TCG/HVF) model no caches and hid this. The array is a
+// MISMATCHED-ATTRIBUTE MAILBOX and carries a maintenance protocol
+// (implemented in smp_init):
+//   - it owns its cache line exclusively (aligned(64), padded to
+//     SMP_MAILBOX_BYTES; indexes >= DTB_MAX_CPUS are padding, always 0);
+//   - the primary writes [0] once, then DC CIVACs the line (+ dsb sy)
+//     BEFORE the first PSCI CPU_ON, so DRAM is current and no CPU holds
+//     a cached copy whose later writeback would clobber a secondary's
+//     Device write;
+//   - the primary re-CIVACs the line before every diagnostic read, so a
+//     speculatively-pulled stale copy cannot mask a secondary's write;
+//   - the primary NEVER writes the line again (a cacheable write would
+//     recreate the clobber hazard);
+//   - secondaries write ONLY via the MMU-off trampoline strb + dsb sy.
+// g_cpu_alive needs none of this: it is written with the MMU on
+// (cacheable, coherent) and polled cacheably.
+//
+// Indexed by cpu index (0..N-1). Boot CPU sets g_cpu_online[0] at
+// smp_init entry; secondaries set their own slot in the asm trampoline.
+#define SMP_MAILBOX_BYTES 64u
+extern volatile u8 g_cpu_online[SMP_MAILBOX_BYTES];
+
+_Static_assert(SMP_MAILBOX_BYTES >= DTB_MAX_CPUS,
+               "the mailbox line must cover every per-CPU flag byte");
+_Static_assert(SMP_MAILBOX_BYTES == 64u,
+               "the 64-byte stride is hardcoded as `lsl #6` in "
+               "arch/arm64/start.S secondary_entry stage writes — keep in sync");
+
+// #214 bring-up stage trace: one cache line PER CPU — the stage byte
+// for cpu i is g_cpu_stage[i * SMP_MAILBOX_BYTES]. The secondary writes
+// it at each bring-up step so a timeout diagnostic names the step it
+// died at. Pre-MMU stores are Device writes (non-coherent, straight to
+// PoC); post-MMU stores are cacheable — which is why each CPU needs its
+// OWN line: a cacheable store to a line another CPU is still
+// Device-writing would fill from a stale cached copy, and its eventual
+// writeback would clobber the other CPU's bytes. Same-byte overwrites
+// within one CPU's line are benign (stages are monotonic). Read-side
+// protocol is g_cpu_online's (primary CIVACs before reading; never
+// writes — the array is BSS-zeroed by the MMU-off boot path, so DRAM
+// starts current).
+//
+// Stage codes are mirrored as literals in arch/arm64/start.S
+// secondary_entry (asm cannot include this header) — keep in sync.
+#define SMP_STAGE_NONE    0u  // BSS — trampoline never entered
+#define SMP_STAGE_ENTRY   1u  // trampoline entered; idx valid; SP set  [Device]
+#define SMP_STAGE_PAC     2u  // pac_apply_this_cpu returned            [Device]
+#define SMP_STAGE_MMU     3u  // mmu_program_this_cpu returned; MMU+C on
+#define SMP_STAGE_HIGHVA  4u  // SP re-anchored high; VBAR_EL1 installed
+#define SMP_STAGE_CMAIN   5u  // per_cpu_main entered
+#define SMP_STAGE_SCHED   6u  // idle thread + sched_init done
+#define SMP_STAGE_GIC     7u  // smp_cpu_ipi_init done; alive flip is next
+extern volatile u8 g_cpu_stage[DTB_MAX_CPUS * SMP_MAILBOX_BYTES];
 
 // P2-Cb: per-CPU "fully initialized" flag. Set by per_cpu_main at the
 // kernel's high VA AFTER PAC apply + MMU enable + VBAR install +

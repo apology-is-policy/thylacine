@@ -50,8 +50,12 @@ struct loom_chain_op;   // Loom-5b: one held LINK/DRAIN chain entry (defined in 
 // 2x cq default) -- well within burrow_create_anon's reach.
 #define LOOM_MAX_ENTRIES        4096u
 
-// Max registered handles per ring (the "fixed files" analog). Matches
-// PROC_HANDLE_MAX -- a ring need name no more handles than its Proc can hold.
+// Max registered handles per ring (the "fixed files" analog). DECOUPLED from
+// PROC_HANDLE_MAX: it once merely matched it (both 64), and the #198 lift to
+// 1024 voided that as a rationale. The real bound is per-RING cost -- a Proc
+// may hold many rings and each registered entry pins a Spoor ref, so this
+// table is charged per ring, not per Proc. 64 covers the v1.0 consumers; a
+// ring needing more is the growable-table chunk's companion (#355).
 #define LOOM_MAX_REG_HANDLES    64u
 
 // Max registered buffers per ring (the "fixed buffers" / zero-copy analog;
@@ -478,6 +482,24 @@ struct Loom {
     bool                    sqpoll_stopping; // loom_free sets (release); kthread reads (acquire)
     bool                    sqpoll_exited;   // kthread sets at terminal (release); joiner reads (acquire)
     struct Rendez           sqpoll_park;     // kthread parks here when idle; woken by ENTER / stop
+    // The fid-lift audit F1 charge: the kthread counts against the CREATING
+    // Proc's thread budget. `sqpoll_owner` is lifetime-safe without a ref:
+    // KObj_Loom is I-5 non-transferable, so the creator's handle is the only
+    // handle and loom_free runs at the latest during the creator's own
+    // handle-close-at-exit -- always before proc_free. `sqpoll_charged` keys
+    // the uncharge (set iff the charge succeeded, whether or not the kthread
+    // then started), so every unwind path settles the budget exactly once.
+    //
+    // That argument is still believed, and is no longer TRUSTED at the use --
+    // loom_free validates before the decrement, mirroring what #130 did for
+    // the page ledger. The two pointers below and `owner` above must stay
+    // SEPARATE: they bind at opposite ends of setup on purpose (`owner` last,
+    // after the final failure path, so rollbacks cannot be double-refunded;
+    // `sqpoll_owner` first, at the charge, because rollbacks deliberately do
+    // not settle it). Merging them to remove the duplication breaks one of the
+    // two ledgers; so does moving either binding toward the other.
+    struct Proc            *sqpoll_owner;
+    bool                    sqpoll_charged;
     // The registered-handle table.
     struct loom_reg_handle reg[LOOM_MAX_REG_HANDLES];
     // Loom-6: the registered-buffer table (zero-copy payload). `n_reg_buf` is

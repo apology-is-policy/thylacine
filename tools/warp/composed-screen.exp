@@ -1,0 +1,448 @@
+#!/usr/bin/expect -f
+# Warp-C C-2b/C-2c/C-3's verification driver: force the compositor into
+# COMPOSED scanout on a host that has virgl, assert the screen resource was
+# minted on the arm the host's capability implies, that the hosted surfaces
+# were imported into the compositor's context, and -- C-3 -- that the pixels
+# the compositor composed are the ones the clients painted, read back from
+# the screen itself.
+#
+# WHY THIS EXISTS AT ALL. C-2b makes the compositor's screen a 3D resource
+# in its own virgl context (GPU-DESIGN 4.5.2), but `alloc_screen` runs only
+# under `Scanout::Composed` -- and NOTHING that ran on either host entered
+# that state. The dev loop is virgl=0 (default virtio-gpu-pci) so it can
+# only ever mint the 2D fallback; and every pre-existing warp verb that
+# boots the GL device (`capset`, `prove`, `tri`) drives at most ONE
+# display-sized surface, which reconcile() resolves to Direct -- scanning
+# out the client's own resource and bypassing the screen entirely. So the
+# 3D arm shipped never having executed, and a green boot proved nothing
+# about it: an `if (false)` would have booted identically.
+#
+# The driver is /bin/tapestry-battery -- a ramfs-native client that brings
+# up TWO surfaces. Two visible leaves is the cheapest thing reconcile()
+# resolves to Composed (server.rs, the scanout mode machine), and the
+# battery needs neither GL nor the pool. That isolation is the point: the
+# ONLY GL object in play is the compositor's own screen, so a failure here
+# cannot be a client's GL problem wearing C-2b's clothes.
+#
+# THE CONTROL IS THE DEVICE, and it is the whole reason this file takes a
+# parameter instead of hardcoding the GL device. Run twice on ONE host with
+# ONE variable changed:
+#
+#   virtio-gpu-gl-pci  -> posture GPU -> screen res N 3D (compositor ctx)
+#   virtio-gpu-pci     -> posture CPU -> screen res N 2D
+#
+# Each arm asserts the OTHER arm's outcome is wrong, so a gate that had
+# stopped reading the capability (say a screen that is always 2D, or always
+# 3D) fails on one leg or the other. A single GL-only leg would pass just as
+# happily against a build that ignored `comp_ctx`, which is exactly the
+# not-discriminating shape this project keeps re-learning.
+#
+# Two independent claims, deliberately not collapsed into one:
+#   1. the POSTURE line matches the device      (feature negotiation works)
+#   2. the SCREEN arm matches the posture       (C-2b follows the capability)
+# Claim 2 is the one C-2b owns; claim 1 exists so a host that silently lost
+# its GL cannot satisfy claim 2 by making both sides equally wrong.
+#
+# WHAT THE "3D" WORD ATTESTS -- corrected 2026-08-17, and the correction is the
+# instructive part. This header used to say the arm was "the conjunction of
+# four response-checked round trips the host answered OK -- CTX_CREATE,
+# RESOURCE_CREATE_3D, CTX_ATTACH_RESOURCE, ATTACH_BACKING -- a claim about the
+# HOST accepting the object". That was FALSE. `Ctrl::step` does wait and check
+# the response type, but QEMU's virgl path (v10.0.0 hw/display/virtio-gpu-
+# virgl.c) answers RESP_OK_NODATA for all four of those commands whatever
+# virglrenderer returned -- their virgl_renderer_* returns are ignored -- so
+# the responses attested that QEMU PARSED the commands (nonzero, non-duplicate
+# ids), and nothing about the renderer. A screen the renderer had refused would
+# have printed "3D" here and failed silently at the composed bind, which is the
+# one command (SET_SCANOUT) whose response DOES consult the renderer, and whose
+# result tapestryd then dropped. #240 had already shown this for SUBMIT_3D; the
+# mistake was not checking the rest of the family.
+#
+# So now the 3D word is EARNED: `alloc_screen` writes a sentinel into the
+# fresh screen's backing, TRANSFER_TO_HOST_3Ds it through the compositor
+# context, clobbers the backing, TRANSFER_FROM_HOST_3Ds it back and compares
+# -- a pixel round trip that succeeds only if virglrenderer really holds the
+# resource, has it attached to COMPOSITOR_CTX, and moves pixels through it.
+# A refusal now falls back to 2D FOR REAL and the screen line says why
+# (`-- 3D refused: <step>`). And the composed-entry line is printed AFTER the
+# bind with its verdict (`res N bound` / `BIND FAILED`), so this scenario's
+# fifth term is that the resource the display was handed IS the minted screen.
+#
+# WHAT THE FIRST THREE CLAIMS DO NOT PROVE, stated so a later reader does not
+# over-read them. They prove the compositor MINTED the screen on the arm the
+# host's capability implies, that pixels round-trip through it, that the
+# display was bound to it, and that the hosted surfaces' slots are imported
+# into the compositor context. They say NOTHING about composed pixels. That
+# is claim 4 (Warp-C C-3, below): the pixel oracle. This header used to say
+# it would grow "a QMP arm" -- it cannot: QMP screendump reports no surface
+# under egl-headless (#195), so the oracle is IN-GUEST -- the compositor reads
+# its own screen resource back and says the texel.
+#
+# WARP-C C-2c (GPU-DESIGN 4.5.10) RIDES THE SAME TWO LEGS, as a third claim.
+# The compositor imports every hosted surface's slot resources into its own
+# context at import time (`alloc_weave`), and -- because CTX_ATTACH_RESOURCE's
+# OK attests nothing (4.5.4c) -- WITNESSES each import by a pixel copy: a
+# sentinel seeded into the slot's host copy, copied slot -> the compositor's
+# own 1x1 sentinel resource INSIDE COMPOSITOR_CTX, read back. tapestryd says
+# one line per generation:
+#   comp-attach surface N res A..B: witnessed 3/3          (every slot copied)
+#   comp-attach surface N res A..B: REFUSED (slot i ...)   (renderer refused)
+#   comp-attach surface N res A..B: SKIPPED (...)          (no probe / ctx dead)
+#   comp-attach surface N res A..B: attach failed (device, slot i)
+# and on a host with no compositor context the POSTURE line carries
+# `comp-attach: skipped (no compositor ctx)` and no per-surface line ever
+# prints (on a GL host the instrument reports separately: `comp-attach
+# witness armed (probe res M,S)`). So:
+#   GL leg : >= 2 per-surface lines (the battery's two surfaces -- the expect
+#            runs on past the composed pair until it has them; aurora's own
+#            line at boot is usually eaten by the login dance and is a bonus),
+#            ALL `witnessed n/n` with n > 0, and no REFUSED/SKIPPED/failed
+#            line (a witnessed line implies the instrument was armed);
+#   2D leg : the posture line says the import is skipped, and NO per-surface
+#            comp-attach line appears before the composed pair.
+# The 2D leg is again the control: a tapestryd that attached unconditionally
+# would print per-surface lines (or fail the CTX command) on the device that
+# has no context. Validated by sabotage: with the slot attach skipped in
+# `alloc_weave`, the GL leg's lines read REFUSED and this scenario fails.
+#
+# Verdict lines (printed by the success path only -- #186: never key a gate
+# on a token the harness's own timeout text can quote):
+#   WARP-COMPOSED POSTURE: <GPU|CPU>
+#   WARP-COMPOSED SCREEN: res N <arm> (WxH)
+#   WARP-COMPOSED BOUND: res N
+#   WARP-COMPOSED ATTACH: witnessed K surfaces | skipped (no compositor ctx)
+#   WARP-COMPOSED PIXELS: 9 probes via <readback|backing> ok (composed gpu G cpu C)
+#   WARP-COMPOSED PASS
+#
+# Runs ON the GL host (Linux; lib.exp takes the direct-pty transport).
+# env: WARP_REPO (default ~/projects/thylacine), WARP_WORK (default ~/warp),
+#      THYLACINE_GPU_DEV (default virtio-gpu-gl-pci -- the parameter).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+# tcg unless the caller pins an accel (KVM GL hosts ride warp-host.sh WARP_ACCEL)
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_QMP) 1
+set ::env(THYLACINE_NO_SHARE) 1
+if {![info exists ::env(THYLACINE_GPU_DEV)]} {
+    set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
+}
+set dev $::env(THYLACINE_GPU_DEV)
+# egl-headless is what makes virgl reachable on a headless GL host; the 2D
+# leg takes the same display so the two legs differ in the DEVICE alone.
+set ::env(THYLACINE_DISPLAY) egl-headless
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+# What this device is expected to produce. Derived, not passed: a caller
+# that could set the expectation independently of the device could set both
+# wrong and never know.
+if {$dev eq "virtio-gpu-gl-pci"} {
+    set want_posture GPU
+    set want_arm "3D (compositor ctx)"
+} else {
+    set want_posture CPU
+    set want_arm "2D"
+}
+
+file mkdir $work
+# Per-attempt fixture isolation (#78/#85): the synced images are never
+# booted directly, and a stale copy from a prior leg must never be booted
+# under this leg's tag.
+set tag [expr {$want_posture eq "GPU" ? "composed-gl" : "composed-2d"}]
+file delete -force $work/pool-$tag.img $work/disk-$tag.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-$tag.img
+exec cp $repo/build/disk.img $work/disk-$tag.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-$tag.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-$tag.img
+
+source $repo/tools/interactive/lib.exp
+
+lc_boot
+
+# Claim 1, taken BETWEEN boot and login while it is still in the buffer:
+# tapestryd reports the composed path at bringup (it is a property of the
+# host fixed at feature negotiation, so it is said where the host comes up,
+# not where a screen is allocated -- that placement was itself a bug this
+# arc paid for).
+set timeout 900
+set got_posture_tail ""
+expect {
+    -re {tapestryd: composed path = (GPU|CPU)([^\r\n]*)[\r\n]} {
+        set got_posture $expect_out(1,string)
+        set got_posture_tail $expect_out(2,string)
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction before the posture line" }
+    timeout { lc_fail "no 'composed path =' line within 900s on $dev" }
+    eof     { lc_fail "qemu exited before the posture line on $dev" }
+}
+if {$got_posture ne $want_posture} {
+    lc_fail "posture is $got_posture on $dev, want $want_posture -- the host's\
+             GL capability is not what this leg assumes, so the screen-arm\
+             claim below would be meaningless"
+}
+puts "\nWARP-COMPOSED POSTURE: $got_posture\n"
+lc_step "posture $got_posture matches $dev"
+# C-2c, the posture half: on the non-GL device the import must be declared
+# skipped -- the control leg's half of claim 3. On the GL device the witness
+# instrument reports on its OWN line (`comp-attach witness armed (probe res
+# M,S)`), deliberately not on the posture anchor: the probe mint costs
+# device round trips, and the first measured run showed the anchor torn
+# byte-wise by the kernel's `proc: orphan` burst at warden's exit once it
+# was printed after the mint. That line is not asserted here -- a witnessed
+# per-surface line below implies the instrument existed, and an anchor that
+# can be torn by an unrelated writer must not carry a second claim.
+if {$want_posture ne "GPU"} {
+    if {![string match "*comp-attach: skipped (no compositor ctx)*" $got_posture_tail]} {
+        lc_fail "CPU posture on $dev does not declare the import skipped:\
+                 '$got_posture_tail'"
+    }
+}
+
+lc_login michael correct-horse-battery-staple-v1
+
+# The driver. Foreground; its say! lines and the compositor's share the
+# serial tee. We need only its first two surfaces -- everything after the
+# structural stage is somebody else's gate (ls-gfx-panes owns the battery's
+# full acceptance run, locally, with QMP for the pixel legs).
+lc_send "tapestry-battery"
+
+# Both lines, in either order. The code emits `screen res` first
+# (ensure_screen runs before the entering say), but ordering that a future
+# refactor could flip is not something a gate should depend on -- and an
+# expect that waits for the second one first would silently discard the
+# first and then hang.
+set got_arm ""
+set got_res ""
+set got_why ""
+set got_w 0
+set got_h 0
+set got_composed 0
+set got_bound ""
+# C-2c: per-surface import verdicts. The GL leg must see the battery's two
+# surfaces witnessed (aurora's own line at boot is consumed by the login
+# dance and is a bonus if it lands here); the 2D leg must see none.
+set got_attach_ok 0
+set got_attach_bad ""
+set got_attach_rows {}
+set want_attach [expr {$want_posture eq "GPU" ? 2 : 0}]
+set timeout 300
+# ONE pattern for the three line kinds, dispatched inside. Expect matches the
+# earliest occurrence of a single pattern, so lines are consumed in ARRIVAL
+# order -- with three separate -re arms, pattern ORDER beats buffer position:
+# a comp-attach arm listed first would match a comp-attach line that arrived
+# AFTER the screen/composed pair already sitting in the buffer, and the match
+# discards everything before it, pair included. Measured: the first C-2c run
+# hung on exactly that and died on the battery's own later FAIL.
+expect {
+    -re {tapestryd: (comp-attach surface [^\r\n]*|screen res [^\r\n]*|scanout composed [^\r\n]*)[\r\n]} {
+        # The trailing [\r\n] is load-bearing: without it the alternation
+        # matches a PARTIAL line (serial output arrives in chunks), the inner
+        # regexps then fail on the truncated text, and the rest of that line
+        # is discarded unseen -- measured as the GL leg hanging until the
+        # battery's own later FAIL, three runs in a row, while an offline
+        # replay of the same log (whole file at once) passed.
+        set line $expect_out(1,string)
+        if {[regexp {^comp-attach surface (\d+) res (\d+)\.\.(\d+): (.*)$} $line -> csn cr0 cr1 verdict]} {
+            set verdict [string trim $verdict]
+            # `witnessed n/n (copy read texel row R)` -- the row is the
+            # renderer's measured answer to which texel a y=0 box names on a
+            # Y_0_TOP source (row h-1 on thyla-pi/V3D: the FBO copy path
+            # measures such boxes from the bottom); recorded, not gated.
+            if {[regexp {^witnessed (\d+)/(\d+)( \(copy read texel row (\d+)\))?$} $verdict -> wa wb _ wrow] && $wa == $wb && $wa > 0} {
+                incr got_attach_ok
+                if {$wrow ne ""} { lappend got_attach_rows $wrow }
+            } elseif {$got_attach_bad eq ""} {
+                set got_attach_bad "surface $csn res $cr0..$cr1: $verdict"
+            }
+        } elseif {[regexp {^screen res (\d+) (3D \(compositor ctx\)|2D) \((\d+)x(\d+)\)( -- 3D refused: .*)?$} $line -> sres sarm sw sh swhy]} {
+            set got_res $sres
+            set got_arm $sarm
+            set got_w $sw
+            set got_h $sh
+            set got_why [string trim $swhy]
+        } elseif {[regexp {^scanout composed \((\d+)x(\d+)\) res (\d+) (bound|BIND FAILED)$} $line -> cw ch cres cverdict]} {
+            set got_composed 1
+            if {$cverdict eq "bound"} { set got_bound $cres }
+        }
+        if {!$got_composed || $got_arm eq "" || $got_attach_ok < $want_attach} { exp_continue }
+    }
+    -ex "tapestry-battery: FAIL" {
+        lc_fail_detail "the battery failed before the compositor entered Composed"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction while forcing Composed" }
+    timeout {
+        lc_fail "no screen-mint + composed-entry pair (+ $want_attach witnessed\
+                 comp-attach lines) within 300s on $dev (screen='$got_arm'\
+                 composed=$got_composed witnessed=$got_attach_ok\
+                 bad='$got_attach_bad') -- if the battery came up but the\
+                 compositor stayed Direct, reconcile() no longer resolves two\
+                 leaves to Composed; if the pair came and the witnessed count\
+                 did not, the C-2c import lines are missing or not witnessed"
+    }
+    eof { lc_fail "qemu exited while forcing Composed on $dev" }
+}
+
+if {$got_arm ne $want_arm} {
+    lc_fail "screen minted '$got_arm' on $dev (posture $got_posture), want\
+             '$want_arm'$got_why -- the C-2b branch is not following the host's\
+             capability, or the renderer refused the 3D screen (a real 2D\
+             fallback now, where it used to be a silent broken bind)"
+}
+# The fifth term: the resource the DISPLAY was handed is the screen that was
+# minted. SET_SCANOUT is the one command whose OK consults the renderer, so
+# `bound` here is the host-side witness the mint responses cannot be.
+if {$got_bound eq ""} {
+    lc_fail "composed entry on $dev did not BIND the screen (res $got_res):\
+             the renderer does not hold the resource the mint reported"
+}
+if {$got_bound ne $got_res} {
+    lc_fail "composed entry bound res $got_bound but the screen minted was\
+             res $got_res on $dev"
+}
+# The screen is the DISPLAY-sized compositing target; a mint at some other
+# geometry would satisfy the arm check while being a different object.
+if {$got_w == 0 || $got_h == 0} {
+    lc_fail "screen minted at ${got_w}x${got_h} -- degenerate geometry"
+}
+puts "\nWARP-COMPOSED SCREEN: res $got_res $got_arm (${got_w}x${got_h})\n"
+puts "\nWARP-COMPOSED BOUND: res $got_bound\n"
+lc_step "screen arm '$got_arm' matches posture $got_posture"
+lc_step "composed entry observed (two visible leaves), screen res $got_bound bound"
+# Claim 3 (C-2c): the imports. Any non-witnessed line fails the GL leg
+# outright -- a REFUSED means the renderer does not hold a hosted surface's
+# slot in the compositor's context, which is the one thing C-2c exists to
+# establish; a SKIPPED means the instrument was not there to ask. On the 2D
+# leg any per-surface line at all is the failure (an import attempted with
+# no compositor context).
+if {$got_attach_bad ne ""} {
+    lc_fail "comp-attach not witnessed on $dev: $got_attach_bad"
+}
+if {$want_posture eq "GPU"} {
+    if {$got_attach_ok < $want_attach} {
+        lc_fail "only $got_attach_ok witnessed comp-attach line(s) on $dev, want >= $want_attach"
+    }
+    puts "\nWARP-COMPOSED ATTACH: witnessed $got_attach_ok surfaces (copy read texel rows: $got_attach_rows)\n"
+    lc_step "C-2c: $got_attach_ok surface generations imported into the compositor ctx, each witnessed by a slot->sentinel copy"
+} else {
+    if {$got_attach_ok != 0} {
+        lc_fail "$got_attach_ok comp-attach line(s) on $dev, which has no compositor ctx -- an import was attempted where none can exist"
+    }
+    puts "\nWARP-COMPOSED ATTACH: skipped (no compositor ctx)\n"
+    lc_step "C-2c: no import on the device without a compositor ctx (the control)"
+}
+
+# Claim 4 (Warp-C C-3, GPU-DESIGN 4.5.11): COMPOSED PIXELS. The battery
+# paints known colors and, at every pixel stage, asks the compositor to read
+# the sample texels back from the SCREEN through `probe-screen` (test-mode
+# ctl verb): on the GL device the value comes from the 3D screen RESOURCE by
+# TRANSFER_FROM_HOST_3D through the compositor context (`via readback`) --
+# the only place a GPU-composed pixel exists, so this is the composition
+# oracle where no display capture exists (#195); on the 2D device it is the
+# screen buffer (`via backing`), the CPU path's truth. Same coordinates, same
+# colors, both legs -- the two paths must look identical from outside (4.5.9),
+# and this is the first pixel witness of that. Every probe must read the
+# stage's color and come `via` the leg's mechanism; the GL leg must have
+# GPU-composed >= 1 present by the end (a build whose GPU path silently
+# routed everything to the CPU one composes CORRECT pixels, and only the
+# census tells that apart), the 2D leg none.
+#   stage1      : A red at its center (letterbox), B blue at its center;
+#   multirect   : B green (left quarter) / yellow (right quarter);
+#   multirect-v : B green (top quarter) / yellow (bottom quarter) -- the
+#                 vertical split a mirrored/displaced blit box cannot fake;
+#   tabbed      : the strip segments (border grey / focus blue) -- chrome,
+#                 CPU-painted and uploaded on BOTH paths;
+#   tab-cycled  : A red again after being hidden and revealed (the C-2d
+#                 redraw contract on the composed path).
+set want_via [expr {$want_posture eq "GPU" ? "readback" : "backing"}]
+set probes_ok 0
+set last_gpu -1
+set last_cpu -1
+proc want_probe {x y color stage} {
+    global want_via probes_ok last_gpu last_cpu dev
+    set timeout 60
+    expect {
+        -re {tapestryd: screen-probe \((\d+),(\d+)\) = #([0-9a-f]{6}) via (.+?) \[scanout ([^;]+); composed gpu (\d+) cpu (\d+)\][\r\n]} {
+            set px $expect_out(1,string)
+            set py $expect_out(2,string)
+            set got $expect_out(3,string)
+            set via $expect_out(4,string)
+            set sc  $expect_out(5,string)
+            set last_gpu $expect_out(6,string)
+            set last_cpu $expect_out(7,string)
+            if {$px != $x || $py != $y} {
+                lc_fail "$stage: probe answered for ($px,$py), asked ($x,$y) on $dev"
+            }
+            if {$via ne $want_via} {
+                lc_fail "$stage: probe ($x,$y) came via '$via' on $dev, want '$want_via'"
+            }
+            if {$sc ne "composed"} {
+                lc_fail "$stage: probe ($x,$y) taken while scanout is '$sc' on $dev -- the screen is not what the display shows"
+            }
+            if {$got ne $color} {
+                lc_fail "$stage: pixel ($x,$y) = #$got on $dev, want #$color (via $via; composed gpu $last_gpu cpu $last_cpu)"
+            }
+            incr probes_ok
+        }
+        -ex "tapestry-battery: FAIL" { lc_fail_detail "the battery failed at $stage" }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction at $stage" }
+        timeout { lc_fail "$stage: no screen-probe line for ($x,$y) within 60s on $dev" }
+        eof { lc_fail "qemu exited at $stage on $dev" }
+    }
+}
+proc want_stage {pattern nvars stage} {
+    upvar 1 out out
+    global dev
+    set timeout 120
+    expect {
+        -re $pattern {
+            set out {}
+            for {set i 1} {$i <= $nvars} {incr i} { lappend out $expect_out($i,string) }
+        }
+        -ex "tapestry-battery: FAIL" { lc_fail_detail "the battery failed before $stage" }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction before $stage" }
+        timeout { lc_fail "battery never reached $stage on $dev" }
+        eof { lc_fail "qemu exited before $stage on $dev" }
+    }
+}
+want_stage {battery: stage1 centers (\d+) (\d+) (\d+) (\d+)[\r\n]} 4 "stage1"
+lassign $out ax ay bx by
+want_probe $ax $ay ff0000 "stage1 A (letterbox, red)"
+want_probe $bx $by 0000ff "stage1 B (letterbox, blue)"
+want_stage {battery: multirect ready (\d+) (\d+) (\d+) (\d+)[\r\n]} 4 "multirect"
+lassign $out gx gy yx yy
+want_probe $gx $gy 00ff00 "multirect left (green)"
+want_probe $yx $yy ffff00 "multirect right (yellow)"
+want_stage {battery: multirect-v ready (\d+) (\d+) (\d+) (\d+)[\r\n]} 4 "multirect-v"
+lassign $out tx ty ux uy
+want_probe $tx $ty 00ff00 "multirect-v top (green)"
+want_probe $ux $uy ffff00 "multirect-v bottom (yellow)"
+want_stage {battery: tabbed ready (\d+) (\d+) (\d+)[\r\n]} 3 "tabbed"
+lassign $out sy sax sbx
+want_probe $sax $sy 3a3a44 "tab strip A (border)"
+want_probe $sbx $sy 7a9ecc "tab strip B (focus)"
+want_stage {battery: tab-cycled ready (\d+) (\d+)[\r\n]} 2 "tab-cycled"
+lassign $out cx cy
+want_probe $cx $cy ff0000 "tab-cycled A revealed (red)"
+if {$probes_ok != 9} {
+    lc_fail "only $probes_ok/9 pixel probes passed on $dev"
+}
+if {$want_posture eq "GPU"} {
+    if {$last_gpu < 1} {
+        lc_fail "GL leg: composed gpu $last_gpu -- no present was GPU-composed (the pixels came out right through the CPU path)"
+    }
+} else {
+    if {$last_gpu != 0} {
+        lc_fail "2D leg: composed gpu $last_gpu on a device with no compositor ctx"
+    }
+}
+puts "\nWARP-COMPOSED PIXELS: 9 probes via $want_via ok (composed gpu $last_gpu cpu $last_cpu)\n"
+lc_step "C-3: 9/9 pixel probes exact via $want_via; composed gpu $last_gpu cpu $last_cpu"
+
+puts "\nWARP-COMPOSED PASS\n"
+lc_pass "composed-screen: $dev -> posture $got_posture -> screen res $got_res\
+         $got_arm at ${got_w}x${got_h} (the C-2b arm, exercised; C-3 pixels via $want_via)"
+lc_vm_kill

@@ -76,6 +76,50 @@ If any angle blows past its estimate by 2×, it's a warning sign worth redesigni
 
 These are not v1.0 angles — they're recorded so a future direction isn't lost.
 
+- **Warp — a capability GPU seam that is ring-native and file-server-shaped**
+  (`docs/GPU-DESIGN.md`; captured 2026-08-07 at the #157 design signoff). Three
+  claims, none of which any shipping system makes together. (1) **Ring-native
+  submission from day one**: Fuchsia's Magma is the reference capability GPU
+  seam, and RFC-0198 names io_uring-style submission as *future work* — we
+  already have Loom, so submit/fence is a CQE rather than a channel round-trip.
+  (2) **The GPU service is a file server**: `/dev/warp` in the Plan 9 idiom, so
+  per-Proc namespace *is* the access control — a Proc that cannot see the tree
+  has no GPU authority, with no new capability bit. Magma routes a `/dev/class/
+  gpu` node plus a loader service; Genode opens a `Gpu::Session`. Ours needs
+  neither. (3) **Per-client GMP enforcement on Broadcom v3d**: upstream Linux has
+  carried *"To protect clients from each other, we should use the GMP … This is
+  not yet implemented"* since 2018, and ships one 4 GB GPU address space shared
+  by every client. Mesa's own simulator implements the per-client GMP table it
+  describes; nobody has put it in a kernel. Doing so makes I-45 a real claim on
+  hardware rather than a documented gap. (Name ratified 2026-08-07 — the
+  tensioned lengthwise threads the [[Weft]] is drawn through, and, independently,
+  the SIMT execution group every GPU programmer already knows by that word.)
+
+- **Composition without buffer sharing** (`docs/GPU-DESIGN.md` §4.5; captured
+  2026-08-13 at the #237 design pass). Every modern compositor spends a large
+  part of its protocol surface on **getting a buffer from a client into the
+  compositor**: Wayland negotiates `linux-dmabuf` with format modifiers and then
+  explicit sync via `drm_syncobj`; Fuchsia's sysmem does the sharper version,
+  negotiating format/alignment *constraints across participants before
+  allocation*. **That entire problem is an artifact of the two parties being
+  mutually distrusting processes holding separate GPU contexts.** In Thylacine
+  the compositor IS the GPU driver and the sole `/dev/warp` server, so a
+  client's render target and the screen already live behind one device owned by
+  one trusted process: composition is an **internal reference**, not a handover.
+  There is no import, no modifier negotiation, and no buffer-passing protocol —
+  the compositor simply names the client's resource as the source of a blit.
+  The access control is the warp context, which is already namespace-gated
+  (I-1/I-28), so the capability question is answered by the Plan 9 idiom rather
+  than by a new sharing protocol. The heritage reading is exact at the layer
+  that matters: **Plan 9's devdraw has the server own the images and clients
+  issue draw ops, which inverts Wayland's client-owned-buffer handover.** The
+  strong form does not survive contact with GL — a Mesa pipeline cannot be
+  expressed as devdraw ops, so a client must own the texture it renders into —
+  but the *composition* layer inverts exactly, and that is where the protocol
+  cost lives. Worth recording even though v1.0 exercises only the virgl half:
+  the claim is that a single-trusted-server GPU stack makes an entire category
+  of compositor protocol unnecessary rather than merely cheaper.
+
 - **Loom — a shared-memory ring transport for 9P** (`docs/LOOM.md`). The
   inversion of Linux's io_uring: rather than import io_uring's opcode zoo, expose
   the existing pipelined 9P client (Angle #3) to userspace via a Burrow-backed
@@ -123,9 +167,10 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   shared-memory ring (no safety) can claim. The kernel/transport half is the Loom
   arc; the graphics half (virtio-gpu scanout + `tapestryd` + an SDL backend that
   ports Quake/DOSBox) is a post-Loom graphics phase feeding Halcyon (Angle #4). A
-  native proof-of-concept RUNS in-tree (`usr/lib/libtapestry` +
-  `usr/tapestry-demo`; promoted off the auxiliary track, where it merely
-  compiled -- corrected 2026-08-16, aux#237). **Deepened 2026-06-08**: TAPESTRY.md §13-17 elevate
+  native proof-of-concept RUNS in-tree -- `usr/lib/libtapestry` +
+  `usr/tapestry-demo` + `usr/tapestryd`, all Cargo workspace members (promoted
+  off the auxiliary track, where it merely compiled; the aux `usr/apps/*` paths
+  this once named are stale -- corrected 2026-08-16, aux#237). **Deepened 2026-06-08**: TAPESTRY.md §13-17 elevate
   `tapestryd` to the compositor (placement-transparent surfaces + live promotion),
   give Halcyon its anti-window UX model + layout-as-9P, add the agentic-enablement
   ABI, and fix the graphics sequencing (fbcon = stage 0 -> compositor + SDL /

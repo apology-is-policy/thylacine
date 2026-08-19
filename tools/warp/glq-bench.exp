@@ -1,0 +1,141 @@
+#!/usr/bin/expect -f
+# Warp-1 llvmpipe baseline on the GL host (GPU-DESIGN.md section 12; the
+# measurement caveat in GPU-HOST-SETUP.md section 0.1). One boot, three
+# timedemos on the SAME binaries: paced (input-quiet is valid post-#164),
+# then unpaced x2 via the rp5 /env wrapper (#151: no interactive export).
+# Every figure this prints is a number FOR THIS HOST -- quote it with the
+# host attached, never against another host's anchor.
+#
+# Runs ON the GL host (Linux; lib.exp takes the direct-pty transport there).
+# env: WARP_REPO (default ~/projects/thylacine), WARP_WORK (default ~/warp).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+# tcg unless the caller pins an accel (KVM GL hosts ride warp-host.sh WARP_ACCEL)
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_QMP) 1
+set ::env(THYLACINE_NO_SHARE) 1
+# TCG-on-a-VM boot is minutes, not seconds; the LS-CI default (180 s) is
+# calibrated for the native M2. A REAL floor (audit W1 F3): an inherited
+# smaller env value (a shell that ran the LS-CI wrapper) must not win --
+# raise anything below 900, allow larger.
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+# Host-side swap sampling around the run: swap there is an OOM airbag, not
+# capacity -- a run that swapped is a measurement of swapping, and the
+# verdict line below lets the caller discard it (GPU-HOST-SETUP section 0.1).
+proc pswp {} {
+    set f [open /proc/vmstat r]
+    set d [read $f]
+    close $f
+    set in 0
+    set out 0
+    regexp {pswpin (\d+)} $d -> in
+    regexp {pswpout (\d+)} $d -> out
+    return [list $in $out]
+}
+
+file mkdir $work
+# Per-attempt fixture isolation (#78/#85), Linux cp: the shared images are
+# never booted directly.
+file delete -force $work/pool-bench.img $work/disk-bench.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-bench.img
+exec cp $repo/build/disk.img $work/disk-bench.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-bench.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-bench.img
+
+source $repo/tools/interactive/lib.exp
+
+set s0 [pswp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# PER-DEMO swap certification (bench runs 1+2 lesson): the guest's
+# host-side RSS grows monotonically toward -m as demos touch pages, so on
+# this 3.9 G host the THIRD demo crosses the memory wall (measured:
+# 5.0 -> 2.9 and 4.4 -> 2.6 fps) while demos 1-2 run clean. A per-RUN
+# guard therefore discards healthy figures alongside the poisoned one --
+# the guard's granularity must match the granularity of the figures it
+# certifies. Each demo now carries its own verdict; the run-level line
+# stays as the aggregate record.
+proc run_demo {tag cmd} {
+    global timeout
+    set d0 [pswp]
+    lc_send $cmd
+    set timeout 900
+    expect {
+        -re {GL_RENDERER: ([^\r\n]*)[\r\n]} { lc_step "$tag renderer: $expect_out(1,string)" }
+        "user fault" { lc_fail "$tag: segv during GL init" }
+        "Sys_Error"  { lc_fail "$tag: Sys_Error during GL init" }
+        timeout      { lc_fail "$tag: no GL_RENDERER within 900s" }
+    }
+    set timeout 1800
+    expect {
+        -re {([0-9]+) frames +([0-9.]+) seconds +([0-9.]+) fps} {
+            puts "\nWARP-BENCH $tag: $expect_out(1,string) frames $expect_out(2,string)s $expect_out(3,string) fps\n"
+        }
+        "user fault" { lc_fail "$tag: segv during timedemo" }
+        "Sys_Error"  { lc_fail "$tag: Sys_Error during timedemo" }
+        timeout      { lc_fail "$tag: no fps line within 1800s" }
+    }
+    send -- "\003"
+    sleep 2
+    set timeout 60
+    lc_send "echo ${tag}-done"
+    expect {
+        "${tag}-done" { lc_step "$tag: prompt back" }
+        timeout       { lc_fail "$tag: prompt never returned after ^C" }
+    }
+    set d1 [pswp]
+    set din [expr {[lindex $d1 0] - [lindex $d0 0]}]
+    set dout [expr {[lindex $d1 1] - [lindex $d0 1]}]
+    puts "WARP-BENCH $tag swap-delta: pswpin +$din pswpout +$dout"
+    if {$din != 0} {
+        puts "WARP-BENCH $tag SWAPPED -- this figure measures swapping, DISCARD IT"
+    }
+}
+
+# Paced first: the shipped-config number (the 60 Hz clock is the cap).
+run_demo paced "/clade/bin/tyr-glquake -window -nosound +timedemo demo1"
+
+# The rp5 /env wrapper (the glq-165/#159 pattern verbatim): compiled
+# in-guest because ut has no export (#151).
+lc_send "echo 'int open(const char*,int,int);long write(int,const void*,long);int close(int);long strlen(const char*);' > rp5.c"
+sleep 1
+lc_send "echo 'int posix_spawn(int*,const char*,void*,void*,char*const*,char*const*);int waitpid(int,int*,int);' >> rp5.c"
+sleep 1
+lc_send "echo 'int wf(const char*p,const char*s){int f=open(p,65,438);if(f<0)return 1;write(f,s,strlen(s));close(f);return 0;}' >> rp5.c"
+sleep 1
+lc_send "echo 'int main(int c,char**v){if(wf(\"/env/SDL_THYLACINE_NOPACE\",\"1\"))return 8;write(1,\"nopace set\\n\",11);' >> rp5.c"
+sleep 1
+lc_send "echo 'int p=0;if(posix_spawn(&p,v\[1\],0,0,v+1,0))return 9;int s=0;waitpid(p,&s,0);return 0;}' >> rp5.c"
+sleep 1
+# In-guest clang under TCG is slow; the sentinel echoes only once the
+# prompt returns (the glq-165 finish pattern), bounded at 600 s.
+lc_send "/clade/bin/clang -w -O1 --sysroot /clade/sysroot -o rp5 rp5.c"
+set timeout 600
+lc_send "echo rp5-ready"
+expect {
+    "rp5-ready" { lc_step "rp5 built" }
+    timeout     { lc_fail "clang on rp5.c never returned (600s)" }
+}
+
+run_demo unpaced-1 "./rp5 /clade/bin/tyr-glquake -window -nosound +timedemo demo1"
+run_demo unpaced-2 "./rp5 /clade/bin/tyr-glquake -window -nosound +timedemo demo1"
+
+set s1 [pswp]
+puts "WARP-BENCH swap: pswpin [lindex $s0 0]->[lindex $s1 0] pswpout [lindex $s0 1]->[lindex $s1 1]"
+if {[lindex $s1 0] != [lindex $s0 0]} {
+    puts "WARP-BENCH RUN-SWAPPED -- trust only demos whose OWN delta line is clean"
+}
+
+catch {send -- "\001x"}
+expect { eof {} timeout {} }
+lc_vm_kill
+puts "WARP-BENCH PASS"
+exit 0

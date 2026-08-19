@@ -536,9 +536,11 @@ field the guest reads 8 bytes out of place. The numbers were re-taken under
 The kernel writes the first **600** bytes plus an 8-byte `_aarch64_ctx`
 terminator, and leaves the rest of `__reserved` alone. That is not a shortcut:
 the region is the guest's own stack below its own sp, so nothing crosses a
-boundary, and an EMPTY record chain is the truthful report -- note delivery does
-not save Q0-Q31 (task #96), so an FPSIMD record would claim state that is not
-there.
+boundary, and an EMPTY record chain is the truthful report of what the GUEST
+may edit: since task #96 the kernel saves Q0-Q31 + FPSR/FPCR itself at delivery
+(`fp_save_area` into `note_saved_fp`) and restores that copy at `rt_sigreturn`,
+so a frame-side FPSIMD record would be a copy the guest could edit to no effect
+-- a record that claims an authority it does not have.
 
 **Three deliberate delivery behaviours beyond "call the handler".** A `SIG_IGN`
 disposition drops a note that was already queued when the disposition changed
@@ -610,20 +612,45 @@ stop consumer with a SIGTSTP handler (declines; takes it once the row is
 `SIG_DFL` again), and the native control with the same table (names the
 interrupt -- the phenotype is the gate, not the table).
 
-**Proving it in-guest needed the one signal a v1.0 guest can raise.** `kill`,
-`tkill` and `clone` are not table rows, so a Linux guest can signal neither
-another Proc nor itself through the obvious route -- and cannot spawn a thread
-to race its own disposition table either, which is what makes the lock-free
-`viv_sigtab` **writers** sound today. That argument covers the intra-Proc axis
-only, and this sentence used to stop there — it said the SIG_IGN hook in
-`notes_post` was "the only cross-thread reader", which was already false and
-became the premise under which exec's `kfree` looked safe (#254). The readers
-are a **set**, each taking an arbitrary `Proc`: `notes_post`'s `SIG_IGN` hook,
-`notes_arm_intr_terminate_locked`, and the `^Z` fan's disposition gate. They are
-sound because the pointer never dies under them (reset in place at exec, freed
-only at `proc_free`) and because a racing reader may observe either the old or
-the new disposition — the same latitude POSIX gives a `sigaction` racing a
-signal already in flight. What remains is
+**Proving it in-guest needed the one signal a v1.0 guest can raise.** `kill`
+and `tkill` are not table rows, so a Linux guest can signal neither another
+Proc nor itself through the obvious route -- and `clone` IS a row (LINEAGE
+L-3d, the fork shape only: `vivarium_clone_decide` admits no CLONE_THREAD
+word), so it still cannot spawn a thread
+to race its own disposition table either. **What makes the lock-free
+`viv_sigtab` sound is stated below rather than by that narrowness** -- this
+sentence used to claim "the only cross-thread reader is `notes_post`'s `SIG_IGN`
+hook, and it touches one naturally-aligned `u64`", and both halves were wrong
+(main#243, aux#254 -- found independently on the two tracks in the same week).
+The intra-Proc narrowness bounds only the *writers* (a v1.0 Linux guest has no
+peer thread; rt_sigaction, SA_RESETHAND and exec's reset all run on a thread of
+THIS Proc). The **readers are a set, each taking an arbitrary `Proc`**, and it
+grows for the most ordinary reason there is -- a new disposition predicate needs
+the dispositions: `notes_post`'s `SIG_IGN` hook (`notes.c`, one `u64`);
+`notes_proc_has_live_handler` (`notes.c`), which copies the **whole 32-byte**
+`viv_ksigaction` out (`*out = *a`) and is reached from
+`notes_arm_intr_terminate_locked` and from `notes_proc_default_applies`; and
+`notes_proc_default_applies` itself (the ignored gate), which the pgrp fans and
+the `^Z` fan (`proc_tty_susp_would_stop_locked`) call on any group member.
+The soundness argument is therefore not "nobody races it" but two facts: (1)
+the table is **never freed while reachable** -- reset in place at exec
+(`viv_sigtab_reset` / `viv_sigtab_reset_caught`), freed only at `proc_free`,
+one immortal object per Proc (a lock would protect only the readers who
+remember to take it; the third reader above was written as a bare atomic load
+by the author holding the finding); and (2) **every field is written at 8-byte
+granularity** (a struct assignment -> `stp` of X registers), so no reader can
+observe a value that was never stored -- the byte loop this replaced was
+measured to compile to halfword stores. Entry-to-entry consistency is explicitly
+NOT promised: a reader may see a mix of pre- and post-reset entries, which is
+the latitude POSIX gives a `sigaction` racing a signal already in flight.
+
+> This claim has now been wrong twice in the same place. `docs/VIVARIUM.md`
+> records the first: V-6c asserted byte-sized entries could not tear, true at
+> V-6b and false once entries widened to 32 bytes (task #97) -- corrected there
+> and not here. Whoever narrows this argument again should check the reader set
+> and the store width, in that order.
+
+What remains is
 self-infliction: the bundle declares `org.thylacine.sigpipe-selftest`, `viv`
 hands the entrypoint fd 0 as the write end of a reader-less pipe, and the
 guest's own `write()` makes the kernel post `pipe`. Synchronous, no second Proc
@@ -1456,9 +1483,13 @@ POSIX fork(2) inherits both, and execve(2) is the different rule again (reset
 caught, preserve ignored), so process creation needs two behaviours here rather
 than one.
 
-Unreachable rather than untested: no clone/fork/execve number is a table row, so
-a PHENO_LINUX Proc cannot create another Proc at all. Task #93 is what makes it
-reachable and where the copy belongs. Pinned in a comment beside the line whose
+(This paragraph said "no clone/fork/execve number is a table row, so a
+PHENO_LINUX Proc cannot create another Proc at all" and pointed at task #93.
+Both landed: `clone` (fork shape, L-3d) and `execve` (L-6a) are rows, and the
+copy exists -- `viv_sigtab_clone_into` at fork, `viv_sigtab_reset_caught` at
+exec, the POSIX rule voted 2026-08-17; `vivarium.sigtab_fork_exec_rule` is the
+test.) The rest of this note is kept as the record of the reasoning that
+opened the gap. Pinned in a comment beside the line whose
 own reasoning opens the gap -- the same single-threadedness notes.c leans on for
 its sigtab tearing argument.
 

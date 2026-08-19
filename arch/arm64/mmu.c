@@ -702,16 +702,29 @@ static void build_page_tables(u64 slide) {
 //      re-use the primary's tables (the kernel image is shared, the
 //      user-VA TTBR0 identity map covers the same low 4 GiB).
 //
-// SMP coherence: TTBR0 and TTBR1 point to tables in regular RAM that
-// the primary already clean+invalidated to PoC during build (write
-// back any dirty cache lines to PoC; secondaries re-read from PoC
-// when their MMU first walks the table). The primary's tlbi_vmalle1is
-// in mmu_enable below isn't needed on secondaries because their TLB
-// is empty post-PSCI bring-up. P2-Ca trip-hazard: secondaries must
-// clean their own dcache before reading the tables (handled by the
-// PoC clean done by build_page_tables which uses dc cvau + dsb ish;
-// the inner-shareable dsb makes the writeback visible to all CPUs).
+// SMP coherence: TTBR0 / TTBR1 point at tables the primary builds and
+// mutates through CACHEABLE mappings, with NO clean-to-PoC anywhere —
+// and that is sound for every walker, because TCR programs the walks
+// themselves cacheable + inner-shareable (IRGN/ORGN=WB, SH=Inner
+// above): a secondary's table walker participates in coherency and
+// observes the primary's dirty table lines directly. (#214: an earlier
+// revision of this comment claimed build_page_tables cleans the tables
+// "to PoC ... with dc cvau" — false twice over: no such clean exists,
+// and CVAU targets PoU, not PoC. Nothing was broken because the WBWA-IS
+// walker never needed it.) The genuinely non-coherent accesses on the
+// secondary bring-up path are its own MMU-off Device writes in the
+// trampoline — confined to the g_cpu_online / g_cpu_stage mailbox
+// lines, protocol in thylacine/smp.h.
+//
+// #214 leaf-ness constraint: this function runs on secondaries with the
+// MMU OFF and returns with it ON — a call frame would be PUSHED as a
+// non-coherent Device write and POPPED as a cacheable read of possibly
+// stale lines. It must remain a frameless register-only leaf: no calls
+// (asid_hw_bits below is a static-inline mrs — keep it that way), no
+// locals that spill. Verified by disassembly at #214; re-check if this
+// function grows.
 void mmu_program_this_cpu(void) {
+    u64 tcr = (u64)TCR_VALUE | (asid_hw_bits() == 16u ? TCR_AS_16BIT : 0ull);
     __asm__ __volatile__(
         "msr mair_el1, %0\n"
         "msr tcr_el1, %1\n"
@@ -726,19 +739,28 @@ void mmu_program_this_cpu(void) {
         // introduces NEW page tables (l1_directmap, l3_vmalloc) whose
         // surface a poisoned TLB could corrupt. tlbi vmalle1is +
         // dsb ish + isb removes the firmware-trust assumption.
+        //
+        // #214: ic iallu extends F120's no-firmware-trust to the I-side.
+        // Cold bring-up I-cache content is the same class of assumption
+        // on PSCI/KVM/EL3 as the TLB, and the v8.0 floor (A72 — no
+        // FEAT_DIC/IDC) makes a stale I-line a real hazard no emulated
+        // substrate (no cache model) could ever surface. The dsb ish +
+        // isb below complete both invalidates before SCTLR turns
+        // M|C|I on.
         "tlbi vmalle1is\n"
+        "ic iallu\n"
         "dsb ish\n"
         "isb\n"
         "mrs x9, sctlr_el1\n"
         "orr x9, x9, %4\n"
         "msr sctlr_el1, x9\n"
         "isb\n"
-        // RW-1 B-F1: TCR_EL1.AS = 1 (16-bit ASIDs) when the CPU reports
-        // ID_AA64MMFR0_EL1.ASIDBits == 0b0010, else 0 (8-bit). Each CPU reads
-        // its own register; ARM requires a uniform ASID width system-wide.
+        // RW-1 B-F1 (the tcr local above): TCR_EL1.AS = 1 (16-bit ASIDs)
+        // when the CPU reports ID_AA64MMFR0_EL1.ASIDBits == 0b0010, else
+        // 0 (8-bit). Each CPU reads its own register; ARM requires a
+        // uniform ASID width system-wide.
         :: "r" ((u64)MAIR_VALUE),
-           "r" ((u64)TCR_VALUE |
-                (asid_hw_bits() == 16u ? TCR_AS_16BIT : 0ull)),
+           "r" (tcr),
            "r" ((u64)(uintptr_t)l0_ttbr0),
            "r" ((u64)(uintptr_t)l0_ttbr1),
            "r" ((u64)(SCTLR_M | SCTLR_C | SCTLR_I))
@@ -1506,41 +1528,47 @@ paddr_t proc_pgtable_create(void) {
 //
 // W^X (I-12) holds by construction: only RX has UXN clear, and RX is
 // AP_RO_ANY (not writable). RW + EXEC is rejected at the VMA layer.
-static inline u64 make_user_pte_l3(paddr_t pa, u32 prot, bool device_memory) {
-    // R10 F157 (P3) close: EXEC + device-memory is architecturally
-    // meaningless (ARM ARM B2.7.2: instruction fetch from device-nGnRnE
-    // is implementation-defined). The syscall layer already rejects
-    // EXEC on MMIO mappings (sys_mmio_map_handler in kernel/syscall.c
-    // limits prot to R|W). This is defense-in-depth at the PTE
-    // encoder: a future kernel-internal caller that bypasses the
-    // syscall layer (e.g., direct burrow_map with VMA_PROT_RX on a
-    // MMIO Burrow) gets a hard extinction here rather than producing
-    // a UB device-EXEC PTE.
-    if (device_memory && (prot & VMA_PROT_EXEC)) {
-        extinction("make_user_pte_l3: EXEC + device_memory rejected "
-                   "(arch-meaningless per ARM ARM B2.7.2)");
+static inline u64 make_user_pte_l3(paddr_t pa, u32 prot, u32 mair_idx) {
+    // Defense-in-depth (SF1): mair_idx names the 3-bit AttrIndx field and must
+    // be a DEFINED MAIR byte (0..3). Every caller passes a validated index --
+    // the bool wrapper yields WB/Device, burrow_create_hostmem rejects anything
+    // but WB/NC, the fault arm reads a create-time-validated hostmem_mair -- but
+    // a future caller passing more would select an unimplemented attribute
+    // (4..7) or overflow the field (>=8). Reject loudly at the encoder rather
+    // than emit a corrupt PTE.
+    if (mair_idx > MAIR_IDX_NORMAL_WT) {
+        extinction("make_user_pte_l3: mair_idx out of the defined MAIR range");
     }
-    // P4-Ic2: device_memory selects the MAIR attribute index.
-    //   normal-WB (MAIR_IDX_NORMAL_WB) — cacheable RAM. Default for
-    //     anonymous Burrows (BURROW_TYPE_ANON).
-    //   device-nGnRnE (MAIR_IDX_DEVICE) — non-Gathering, non-Reordering,
-    //     non-Early-write-acknowledge. Required for MMIO device
-    //     registers so the CPU doesn't merge / reorder / coalesce
-    //     accesses. Used for BURROW_TYPE_MMIO mappings.
-    //
-    // For device memory, the SH (shareability) bits are architecturally
+    // W^X / I-12 defense-in-depth at the PTE encoder: an executable
+    // mapping is only ever legitimate on cacheable Normal-WB RAM (a code
+    // page). EXEC on Device-nGnRnE is architecturally meaningless (ARM ARM
+    // B2.7.2: instruction fetch from device memory is implementation-
+    // defined), and EXEC on Normal-NC (the write-combining host-visible
+    // index, V-2) is never wanted -- both indicate a caller that bypassed
+    // the VMA/share layer (which reject W^X and reject X on shares). The
+    // syscall layer already limits MMIO/HOSTMEM prot to R|W; this is the
+    // encoder-level backstop -- hard-reject rather than emit a UB or
+    // unintended-exec PTE. Widened from the old bool device-flag so the
+    // guard now confines EXEC to NORMAL_WB rather than just excluding
+    // Device.
+    if ((prot & VMA_PROT_EXEC) && mair_idx != MAIR_IDX_NORMAL_WB) {
+        extinction("make_user_pte_l3: EXEC requires Normal-WB (cacheable); "
+                   "Device/NC exec rejected (W^X/I-12; ARM ARM B2.7.2)");
+    }
+    // P4-Ic2 (widened at V-2): the caller passes the MAIR attribute index
+    // directly (mmu.h MAIR_IDX_*):
+    //   NORMAL_WB  — cacheable RAM (BURROW_TYPE_ANON/CODE/DMA; the default).
+    //   DEVICE     — device-nGnRnE (non-Gathering, non-Reordering, non-Early-
+    //                write-ack) for MMIO registers so the CPU never merges /
+    //                reorders / coalesces accesses (BURROW_TYPE_MMIO).
+    //   NORMAL_NC  — Normal non-cacheable / write-combining for host-visible
+    //                shared memory (BURROW_TYPE_HOSTMEM, V-2), so the guest can
+    //                request the host-dictated attribute exactly.
+    // For Device memory the SH (shareability) bits are architecturally
     // ignored by the MMU (ARM ARM D5.2.5) but we still set SH_INNER for
-    // consistency with the rest of our PTE encoding.
-    //
-    // Device memory pages are NEVER executable — drivers map MMIO
-    // for register access, not instruction fetch. We force UXN unless
-    // the caller explicitly requests EXEC, but VMA_PROT_EXEC on a
-    // device PTE is meaningless (instruction fetch from device-nGnRnE
-    // memory is implementation-defined per ARM ARM B2.7.2). The VMA
-    // layer should reject EXEC on MMIO mappings; this PTE encoder
-    // accepts it (UXN cleared) but the downstream behavior is
-    // undefined and shouldn't be relied on.
-    u32 attr_idx = device_memory ? MAIR_IDX_DEVICE : MAIR_IDX_NORMAL_WB;
+    // consistency with the rest of our PTE encoding. Executable PTEs are
+    // confined to NORMAL_WB by the EXEC guard above.
+    u32 attr_idx = mair_idx;
     u64 pte = (pa & ~(PAGE_SIZE - 1)) |
               PTE_VALID | PTE_TYPE_PAGE |
               PTE_ATTR_IDX(attr_idx) |
@@ -1559,9 +1587,23 @@ static inline u64 make_user_pte_l3(paddr_t pa, u32 prot, bool device_memory) {
     return pte;
 }
 
+// Convenience wrapper preserving the original bool device-flag API: false ->
+// Normal-WB (cacheable RAM), true -> Device-nGnRnE (MMIO registers). Kept as
+// the common entry so the bool->index mapping lives in ONE place and no caller
+// can fat-finger MAIR_IDX_DEVICE -- which is 0, the same bit pattern a bare
+// `false` would supply to an index parameter. The index-aware entry below
+// (mmu_install_user_pte_attr) is for the V-2 host-visible / write-combining
+// (NORMAL_NC) path, which the bool cannot express.
 int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
-                         u64 vaddr, paddr_t pa, u32 prot,
-                         bool device_memory) {
+                         u64 vaddr, paddr_t pa, u32 prot, bool device_memory) {
+    return mmu_install_user_pte_attr(pgtable_root, asid, vaddr, pa, prot,
+                                     device_memory ? MAIR_IDX_DEVICE
+                                                   : MAIR_IDX_NORMAL_WB);
+}
+
+int mmu_install_user_pte_attr(paddr_t pgtable_root, u16 asid,
+                              u64 vaddr, paddr_t pa, u32 prot,
+                              u32 mair_idx) {
     (void)asid;       // reserved for replace-PTE paths
 
     // Argument validation.
@@ -1637,7 +1679,7 @@ int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
 
     // L3 leaf install.
     u64 *l3 = (u64 *)pa_to_kva(l3_pa);
-    u64 want = make_user_pte_l3(pa, prot, device_memory);
+    u64 want = make_user_pte_l3(pa, prot, mair_idx);
     u64 existing = l3[idx3];
     if (existing & PTE_VALID) {
         // Already mapped. If matching, the install is idempotent (a

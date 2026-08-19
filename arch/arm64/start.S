@@ -215,6 +215,11 @@ _real_start:
     // P2-A audit R4 F44 + F45.
     msr     tpidr_el0, xzr
     msr     tpidr_el1, xzr
+    // #214: TPIDRRO_EL0 joins the set — never kernel-written, always
+    // EL0-readable, so a boot leftover (KVM poisons UNKNOWN-reset
+    // sysregs) would be EL0-visible forever. Secondary bring-up zeroes
+    // the same trio in secondary_entry.
+    msr     tpidrro_el0, xzr
 
     // 4.6. P5-el1h-kernel: assert the uniform-EL1h kernel mode.
     //
@@ -525,10 +530,22 @@ pac_apply_this_cpu:
 //   3. Flip g_cpu_online[idx] (early "trampoline reached" signal).
 //   4. bl pac_apply_this_cpu — load shared keys + enable PAC.
 //   5. bl mmu_program_this_cpu — enable MMU using primary's tables.
-//   6. Long-branch via kaslr_high_va_addr to per_cpu_main(idx) at
-//      the kernel's high VA. per_cpu_main sets VBAR_EL1, TPIDR_EL1,
-//      flips g_cpu_alive[idx] (the "fully initialized" signal), and
-//      enters an idle WFI loop.
+//   6. Install VBAR_EL1 (high VA) so any later bring-up fault prints
+//      through fault.c instead of vectoring into a reset-UNKNOWN VBAR
+//      (#214).
+//   7. Long-branch via kaslr_high_va_addr to per_cpu_main(idx) at
+//      the kernel's high VA. per_cpu_main sets TPIDR_EL1, flips
+//      g_cpu_alive[idx] (the "fully initialized" signal), and enters
+//      an idle WFI loop.
+//
+// #214 stage trace: the trampoline records its progress in
+// g_cpu_stage[idx*64] (codes in thylacine/smp.h) — Device writes while
+// the MMU is off, coherent stores after — so the primary's bring-up
+// timeout can name the exact step a dead secondary reached. All memory
+// this path writes MMU-off (the online flag + the stage byte) is
+// confined to the two dedicated mailbox lines covered by smp_init's
+// CIVAC protocol; the stack is NOT touched until the MMU is on (see
+// the note at the mmu_program_this_cpu call).
 //
 // PSCI bring-up is serialized by smp_init (one secondary at a time),
 // so the per-CPU stack assignment is race-free. PAC keys must be
@@ -567,6 +584,26 @@ secondary_entry:
     // pac_apply_this_cpu / bl mmu_program_this_cpu calls.
     mov     x19, x0
 
+    // #214 ROOT CAUSE FIX: TPIDR_EL1 / TPIDR_EL0 / TPIDRRO_EL0 are
+    // architecturally UNKNOWN at PSCI entry — exactly as at cold boot,
+    // where _real_start step 4.5 zeroes them (P2-A R4 F44/F45). This
+    // trampoline historically did NOT inherit that fix. QEMU TCG/HVF
+    // happen to reset them to 0, which made current_thread()'s NULL
+    // guard hold by accident; KVM deliberately poisons UNKNOWN-reset
+    // sysregs with 0x1de7ec7edbadc0de, so on real-silicon KVM the
+    // secondary's first current_thread() dereference — spin_preempt_inc's
+    // t->magic probe, reached via thread_init_per_cpu_idle's first
+    // allocation lock in per_cpu_main — read through the poison and
+    // died, and the fault path re-derefed the same poison and recursed
+    // (the #214 apocalypse; exception.c's EL1h-sync guard now bounds
+    // that class). Deterministic-NULL restores the intended pre-thread
+    // invariant. TPIDRRO_EL0 additionally: the kernel never writes it
+    // and EL0 can always read it, so a boot leftover would be
+    // EL0-visible forever — zeroed here and at _real_start for hygiene.
+    msr     tpidr_el1, xzr
+    msr     tpidr_el0, xzr
+    msr     tpidrro_el0, xzr
+
     // P5-el1h-kernel: set up this secondary's single kernel stack.
     // Mirror primary's _real_start: the kernel runs uniformly at EL1h
     // (SPSel=1), sp = SP_EL1 = this CPU's kernel stack. PSCI hands the
@@ -604,10 +641,26 @@ secondary_entry:
 
     // Flip g_cpu_online[idx] — early "trampoline reached" signal
     // (primary's smp_init also waits for g_cpu_alive set in per_cpu_main).
+    //
+    // #214: this is an MMU-off Device write straight to PoC — the
+    // primary reads it back only through the DC CIVAC mailbox protocol
+    // (smp.h). dsb sy publishes the Device write before we continue.
     adrp    x9, g_cpu_online
     add     x9, x9, :lo12:g_cpu_online
     add     x9, x9, x19
     mov     w10, #1
+    strb    w10, [x9]
+    dsb     sy
+
+    // #214 stage trace: the stage byte for cpu idx lives at
+    // g_cpu_stage + idx*64 (SMP_MAILBOX_BYTES stride — one cache line
+    // per CPU; codes mirror thylacine/smp.h). Pre-MMU stores are Device
+    // writes to PoC; dsb sy publishes each before the next step, so a
+    // silent death pins the exact stage in the primary's diagnostics.
+    adrp    x9, g_cpu_stage
+    add     x9, x9, :lo12:g_cpu_stage
+    add     x9, x9, x19, lsl #6             // + idx * SMP_MAILBOX_BYTES
+    mov     w10, #1                         // SMP_STAGE_ENTRY
     strb    w10, [x9]
     dsb     sy
 
@@ -616,10 +669,32 @@ secondary_entry:
     // PAC is enabled on this CPU.
     bl      pac_apply_this_cpu
 
+    adrp    x9, g_cpu_stage
+    add     x9, x9, :lo12:g_cpu_stage
+    add     x9, x9, x19, lsl #6
+    mov     w10, #2                         // SMP_STAGE_PAC
+    strb    w10, [x9]
+    dsb     sy
+
     // Enable MMU using primary's already-built page tables.
     // mmu_program_this_cpu is a C function; PAC is now enabled so
     // its paciasp/autiasp work correctly.
+    //
+    // #214: the call is safe MMU-off ONLY because the compiled function
+    // is a frameless register-only leaf (asid_hw_bits inlines to an mrs)
+    // — a stack-touching build would push its frame as a non-coherent
+    // Device write and pop it cacheable after the flip, reading stale
+    // lines. The hoisted local in mmu.c keeps the source honest; the
+    // holotype round should re-check the disassembly if this path grows.
     bl      mmu_program_this_cpu
+
+    // MMU + caches are ON from here — stores below are coherent.
+    adrp    x9, g_cpu_stage
+    add     x9, x9, :lo12:g_cpu_stage
+    add     x9, x9, x19, lsl #6
+    mov     w10, #3                         // SMP_STAGE_MMU
+    strb    w10, [x9]
+    dsb     sy
 
     // P5-el1h-kernel: re-anchor this CPU's kernel stack (SP_EL1) at the
     // post-KASLR HIGH VA of its g_secondary_boot_stacks slot top. See
@@ -639,6 +714,25 @@ secondary_entry:
     bl      kaslr_high_va_addr              // x0 = HIGH VA of slot top
     mov     sp, x0                          // SP_EL1 := HIGH VA kernel-stack top
     isb
+
+    // #214: install the exception vector table BEFORE any C runs on
+    // this CPU. Previously per_cpu_main did it — leaving every fault
+    // between MMU-on and per_cpu_main vectoring through a reset-UNKNOWN
+    // VBAR_EL1: a silent wedge on real silicon. With VBAR live, a
+    // bring-up fault reaches fault.c and prints. per_cpu_main's own
+    // install stays (idempotent re-set of the same value).
+    adrp    x0, _exception_vectors
+    add     x0, x0, :lo12:_exception_vectors
+    bl      kaslr_high_va_addr              // x0 = HIGH VA of the vectors
+    msr     vbar_el1, x0
+    isb
+
+    adrp    x9, g_cpu_stage
+    add     x9, x9, :lo12:g_cpu_stage
+    add     x9, x9, x19, lsl #6
+    mov     w10, #4                         // SMP_STAGE_HIGHVA
+    strb    w10, [x9]
+    dsb     sy
 
     // Long-branch to per_cpu_main(idx) at the kernel's high VA.
     //   1. Get PA of per_cpu_main via PC-relative adrp+add.

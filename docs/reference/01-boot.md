@@ -12,7 +12,7 @@ Reference: `ARCHITECTURE.md §5` (boot sequence design intent), `TOOLING.md §10
 
 Bring the kernel to a state where it has run its initial setup and printed a recognizable signal — the boot banner — that the host-side tooling can match against. At P1-A there is no scheduler, no MMU, no devices beyond the polled UART; the kernel halts in a `wfi` loop after the banner. This is the foundation every later phase composes on top of.
 
-The boot banner is **kernel ABI with the development tooling** (`TOOLING.md §10`). The strings `Thylacine boot OK` (success) and `PANIC:` (panic prefix; not yet emitted at P1-A — added at P1-C panic handler) are how `tools/run-vm.sh` and the agentic loop detect boot status. Their format does not change without coordinated updates to `tools/run-vm.sh`, `tools/agent-protocol.md`, `CLAUDE.md`, and `TOOLING.md`.
+The boot banner is **kernel ABI with the development tooling** (`TOOLING.md §10`). The strings `Thylacine boot OK` (success) and `PANIC:` (panic prefix; not yet emitted at P1-A — added at P1-C panic handler) are how `tools/run-vm.sh` and the agentic loop detect boot status. Their format does not change without coordinated updates to `tools/run-vm.sh`, `tools/test.sh`, `CLAUDE.md`, and `TOOLING.md` (whose §10 is the agent-side protocol). This list previously named `tools/agent-protocol.md`, which never existed — main#244.
 
 ---
 

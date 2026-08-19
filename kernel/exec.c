@@ -18,6 +18,7 @@
 // Caller (the future asm trampoline at P3-Ed) configures ERET state
 // and eret's to EL0.
 
+#include <thylacine/cons.h>
 #include <thylacine/exec.h>
 #include <thylacine/elf.h>
 #include <thylacine/env.h>      // #140: env_render_environ (the /env -> envp projection)
@@ -199,15 +200,55 @@ static bool seg_may_be_sparse(const struct elf_load_segment *seg) {
 // program that ran and chose to exit 1: no syscall, no fault, nothing in the
 // log naming that pid. That gap is what made this file's own PT_LOAD-alignment
 // reject cost a session to find at the L-6c gate. The loader knows exactly why
-// it refused; this is where it says so. uart_puts (not the console path) to
-// match the brand-mismatch diagnostic below and to stay non-blocking -- exec
-// runs on a fresh preemptible thread and must not acquire the console role.
+// it refused; this is where it says so. It must stay non-blocking and must not
+// acquire the console writer role -- exec runs on a fresh preemptible thread.
+// (That constraint used to select raw `uart_puts`; it no longer does. See the
+// round F2 note below.)
+//
+// #243 ROUND F2 [P2]: was five lock-free `uart_*` calls, which is the raw
+// per-character path -- it takes neither the console writer role NOR the TX
+// ring lock, so it bypasses the extinction ring claim and can land bytes
+// inside a peer's `EXTINCTION:` line. And it was the WORSE of the two
+// EL0-triggerable sites: every `SYS_SPAWN_*` thunk reaches exec through here,
+// so an unprivileged Proc spawning a malformed ELF in a loop drove it with NO
+// dedupe and NO cap, where `viv_report_unserved` at least had both. The fix
+// that landed first closed the bounded one and left this.
+//
+// The old comment's reason no longer selects `uart_puts`: `cons_diag_line` is
+// also non-blocking, never spins, and does NOT take the console writer role --
+// it pushes one unit under a leaf spinlock. So it satisfies the constraint
+// that picked the raw loop, and serializes.
+//
+// The cap is GLOBAL, not per-Proc, precisely because the driver is spawn: a
+// per-Proc bound is re-armed by spawning again, which is the attack. Spent
+// only on a line that LANDED (the all-or-nothing drop, round F1).
+#define EXEC_FAIL_MAX_REPORTS 64u
+static u32 g_exec_fail_reports;
+
+// The message-only twin, same cap and same reason (#243 round F2): these two
+// rejects are reached by the identical EL0-driven spawn path.
+static void exec_say(const char *msg) {
+    if (__atomic_load_n(&g_exec_fail_reports, __ATOMIC_RELAXED) >= EXEC_FAIL_MAX_REPORTS)
+        return;
+    struct cons_diag_line l;
+    cons_diag_line_init(&l);
+    cons_diag_line_puts(&l, msg);
+    if (cons_diag_line_emit(&l))
+        __atomic_fetch_add(&g_exec_fail_reports, 1u, __ATOMIC_RELAXED);
+}
+
 static void exec_report_fail(const char *why, u64 detail) {
-    uart_puts("exec: ");
-    uart_puts(why);
-    uart_puts(" ");
-    uart_puthex64(detail);      // emits its own "0x" prefix
-    uart_puts("\n");
+    if (__atomic_load_n(&g_exec_fail_reports, __ATOMIC_RELAXED) >= EXEC_FAIL_MAX_REPORTS)
+        return;
+    struct cons_diag_line l;
+    cons_diag_line_init(&l);
+    cons_diag_line_puts(&l, "exec: ");
+    cons_diag_line_puts(&l, why);
+    cons_diag_line_puts(&l, " ");
+    cons_diag_line_puthex64(&l, detail);   // emits its own "0x" prefix
+    cons_diag_line_puts(&l, "\n");
+    if (cons_diag_line_emit(&l))
+        __atomic_fetch_add(&g_exec_fail_reports, 1u, __ATOMIC_RELAXED);
 }
 
 // #149: the page-aligned mapping geometry of one PT_LOAD.
@@ -1357,12 +1398,12 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
     // rather than repeating the native refusal about it.
     if (r == ELF_LOAD_HAS_INTERP || r == ELF_LOAD_HAS_DYNAMIC) {
         if (*interp_out) {
-            uart_puts("exec: the PT_INTERP interpreter is itself dynamic -- "
-                      "one interpreter level only (DISTRO section 7.1)\n");
+            exec_say("exec: the PT_INTERP interpreter is itself dynamic -- "
+                     "one interpreter level only (DISTRO section 7.1)\n");
         } else if (elf_brand_hint(hdr, hdr_got) == ELF_BRAND_LINUX_LIKELY) {
-            uart_puts("exec: dynamic Linux binary rejected -- a NATIVE exec "
-                      "runs statically-linked ELF only; a dynamic one needs a "
-                      "PHENO_LINUX vivarium (DISTRO section 7.1)\n");
+            exec_say("exec: dynamic Linux binary rejected -- a NATIVE exec "
+                     "runs statically-linked ELF only; a dynamic one needs a "
+                     "PHENO_LINUX vivarium (DISTRO section 7.1)\n");
         }
     }
     kfree(hdr);

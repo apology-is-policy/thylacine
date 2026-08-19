@@ -276,6 +276,8 @@ pub const T_SYS_WEFT_SHARE: u64       = 81;     // Weft-6a-2: register a per-flo
 pub const T_SYS_WEFT_MAP: u64         = 82;     // Weft-6a-2: map a /net data fd's ring -> ring_va
 pub const T_SYS_DMA_CREATE_WEAVE: u64 = 99;     // G-2: mint a share-admissible DMA weave
 pub const T_SYS_WEFT_UNSHARE: u64     = 100;    // G-2: disarm an un-claimed share (retire/GC)
+pub const T_SYS_DMA_CREATE_GPU_BO: u64 = 106;   // Warp-2: mint a share-admissible GPU BO
+pub const T_SYS_BURROW_FROM_HOSTMEM: u64 = 107; // Warp-6 V-2: map a PCI hostmem BAR subrange -> client VA
 pub const T_SYS_EXECVE: u64           = 104;    // LINEAGE L-2: replace this Proc's image in place
 pub const T_SYS_RFORK: u64            = 105;    // LINEAGE L-3b: fork sharing the address space
 // SYS_RFORK flags (kernel/include/thylacine/proc.h). Only RFPROC|RFMEM is
@@ -835,6 +837,16 @@ pub struct TPciRegion {
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct TPciShm {
+    pub offset: u64,    // 0
+    pub length: u64,    // 8
+    pub bar: u8,        // 16
+    pub present: u8,    // 17
+    pub shmid: u8,      // 18 (gpu hostmem = 1, fs DAX = 0)
+    pub _pad: [u8; 5],  // 19
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct TPciInfo {
     pub bars: [TPciBar; 6],         // 0
     pub regions: [TPciRegion; 4],   // 144
@@ -846,6 +858,7 @@ pub struct TPciInfo {
     pub fn_: u8,                    // 203 ('fn' is a Rust keyword)
     pub virtio_device_id: u16,      // 204
     pub _pad: [u8; 2],              // 206
+    pub shm: [TPciShm; 2],          // 208 (cfg_type 8, discovery order)
 }
 // Pin EVERY field offset against the kernel header (syscall.h:1466-1509), not
 // just size + a sample -- a future kernel field reorder must fail this compile,
@@ -861,7 +874,13 @@ const _: () = assert!(core::mem::offset_of!(TPciRegion, offset) == 0);
 const _: () = assert!(core::mem::offset_of!(TPciRegion, length) == 4);
 const _: () = assert!(core::mem::offset_of!(TPciRegion, bar) == 8);
 const _: () = assert!(core::mem::offset_of!(TPciRegion, present) == 9);
-const _: () = assert!(core::mem::size_of::<TPciInfo>() == 208);
+const _: () = assert!(core::mem::size_of::<TPciShm>() == 24);
+const _: () = assert!(core::mem::offset_of!(TPciShm, offset) == 0);
+const _: () = assert!(core::mem::offset_of!(TPciShm, length) == 8);
+const _: () = assert!(core::mem::offset_of!(TPciShm, bar) == 16);
+const _: () = assert!(core::mem::offset_of!(TPciShm, present) == 17);
+const _: () = assert!(core::mem::offset_of!(TPciShm, shmid) == 18);
+const _: () = assert!(core::mem::size_of::<TPciInfo>() == 256);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, bars) == 0);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, regions) == 144);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, notify_off_multiplier) == 192);
@@ -871,6 +890,7 @@ const _: () = assert!(core::mem::offset_of!(TPciInfo, bus) == 201);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, dev) == 202);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, fn_) == 203);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, virtio_device_id) == 204);
+const _: () = assert!(core::mem::offset_of!(TPciInfo, shm) == 208);
 
 impl TPciInfo {
     /// An all-zero `TPciInfo` to hand to `t_pci_info` for fill. All fields are
@@ -888,6 +908,7 @@ impl TPciInfo {
             fn_: 0,
             virtio_device_id: 0,
             _pad: [0; 2],
+            shm: [TPciShm { offset: 0, length: 0, bar: 0, present: 0, shmid: 0, _pad: [0; 5] }; 2],
         }
     }
 }
@@ -1032,6 +1053,28 @@ pub unsafe fn t_dma_create_weave(size: u64, rights: u32) -> i64 {
         inlateout("x0") x0,
         in("x1") rights as u64,
         in("x8") T_SYS_DMA_CREATE_WEAVE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_dma_create_gpu_bo — mint a SHARE-ADMISSIBLE GPU buffer (Warp-2;
+// GPU-DESIGN.md section 6.1). Byte-for-byte the t_dma_create_weave contract
+// (CAP_HW_CREATE + the I-34 allowance gate; kernel-chosen PA; 64 MiB
+// envelope) with the kernel-minted immutable `gpu_bo` bit instead — the
+// SECOND admissible kind, whose safety argument is device-WRITTEN (a render
+// target / readback destination bounded by owner-programmed GPU translation),
+// not the weave's device-read passivity. The GPU service mints these per
+// client BO request, ATTACH_BACKINGs the PA, and shares the mapping to the
+// client via the bo map fid (the Tweft path).
+#[inline(always)]
+pub unsafe fn t_dma_create_gpu_bo(size: u64, rights: u32) -> i64 {
+    let mut x0: i64 = size as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") rights as u64,
+        in("x8") T_SYS_DMA_CREATE_GPU_BO,
         options(nostack)
     );
     x0

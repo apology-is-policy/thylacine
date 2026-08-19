@@ -304,18 +304,26 @@ fi
 # disables both.
 gpu_flags=()
 if [[ "${THYLACINE_NO_GPU:-0}" != "1" ]]; then
+    # THYLACINE_GPU_DEV overrides gpu0's device MODEL (default virtio-gpu-pci).
+    # The Warp arc boots virtio-gpu-gl-pci on a Linux GL host (paired with
+    # THYLACINE_DISPLAY=egl-headless -- the -gl models refuse to realise
+    # without a GL-capable display backend). Same virtio device id (16), same
+    # PCI function shape, so the guest driver claims it identically;
+    # disable-legacy=on is valid on both (the -gl models are modern-only).
+    gpu_dev="${THYLACINE_GPU_DEV:-virtio-gpu-pci}"
     gpu_flags=(
         -device "virtio-gpu-device,id=gpu-mmio0"
-        -device "virtio-gpu-pci,id=gpu0,disable-legacy=on"
+        -device "$gpu_dev,id=gpu0,disable-legacy=on"
     )
-    # vnc display mode drops the vestigial MMIO gpu: a display backend
-    # binds QemuConsole 0, and gpu-mmio0 (probe-only, driverless in the
-    # resident boot) would squat it -- the VNC client must land on gpu0's
+    # vnc/egl-headless display modes drop the vestigial MMIO gpu: a display
+    # backend binds QemuConsole 0, and gpu-mmio0 (probe-only, driverless in
+    # the resident boot) would squat it -- the client must land on gpu0's
     # head (the ls-gfx-live #31 leg). cocoa keeps the canonical device set
     # (its View menu switches consoles interactively).
-    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* ]]; then
+    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "egl-headless" \
+       || "${THYLACINE_DISPLAY:-none}" == "dbus-gl" ]]; then
         gpu_flags=(
-            -device "virtio-gpu-pci,id=gpu0,disable-legacy=on"
+            -device "$gpu_dev,id=gpu0,disable-legacy=on"
         )
     fi
 fi
@@ -386,6 +394,14 @@ detect_accel() {
        && "$(sysctl -n kern.hv_support 2>/dev/null)" == "1" ]] \
        && qemu-system-aarch64 -accel help 2>/dev/null | grep -qw hvf; then
         echo hvf
+    elif [[ "$(uname -sm)" == "Linux aarch64" && -r /dev/kvm && -w /dev/kvm ]] \
+       && qemu-system-aarch64 -accel help 2>/dev/null | grep -qw kvm; then
+        # ARM64 Linux hosts (thyla-pi): in-kernel GIC + -cpu host, same
+        # probe shape as HVF -- host capability AND the qemu build's. The
+        # arch match matters: -accel help lists COMPILED accels, so an x86
+        # host with nested virt would otherwise pass this probe and fail
+        # at qemu init (KVM cannot run a foreign-arch guest).
+        echo kvm
     else
         echo tcg
     fi
@@ -405,17 +421,35 @@ case "${THYLACINE_DISPLAY:-none}" in
     none)  display_flags=(-nographic) ;;
     cocoa) display_flags=(-display cocoa) ;;
     vnc:*) display_flags=(-display "vnc=127.0.0.1:${THYLACINE_DISPLAY#vnc:}") ;;
-    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|cocoa|vnc:N)" >&2
+    # Headless GL for the Warp arc: needs a Linux host with an openable DRM
+    # render node (docs/GPU-HOST-SETUP.md; tools/gl-host-probe.sh rung 6 is
+    # the substrate witness). Serial stays on -serial below -- only
+    # `none` implies -nographic.
+    egl-headless) display_flags=(-display egl-headless) ;;
+    # Headless GL WITHOUT the display readback (Warp-C C-4): the dbus display
+    # in peer-to-peer mode with no listener attached gives the -gl models the
+    # same render-node EGL context egl-headless does, but a RESOURCE_FLUSH
+    # then updates nobody -- egl-headless's flush is a full-frame
+    # glReadPixels into the console surface on every flush (measured 11-17 ms
+    # of every frame on thyla-pi/V3D, GPU-DESIGN 4.5.12), which is a cost of
+    # the INSTRUMENT, not of the guest. Nothing can look at this display
+    # (no screendump, no VNC): it is the lane for measuring the guest's own
+    # present costs, and only that.
+    dbus-gl) display_flags=(-display dbus,p2p=on,gl=on) ;;
+    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|cocoa|vnc:N|egl-headless|dbus-gl)" >&2
            exit 2 ;;
 esac
 
 # -cpu model + GIC version default off the chosen accel. HVF wants -cpu host +
 # GICv2: its emulated GICv3 distributor MMIO trips an `isv` data-abort assert,
-# and the GICv2 MMIO CPU interface is the HVF-on-Apple enabler (Lazarus W2). TCG
-# wants -cpu max (full ISA incl. RNDR) + GICv3 (QEMU virt's modern default; the
-# kernel autodetects v2-vs-v3 from DTB). THYLACINE_CPU / THYLACINE_GIC override.
+# and the GICv2 MMIO CPU interface is the HVF-on-Apple enabler (Lazarus W2). KVM
+# (Linux hosts, e.g. thyla-pi) wants -cpu host + gic-version=host so the guest
+# GIC is the in-kernel one matching the silicon (GIC-400 = v2 on BCM2711 -- the
+# kernel autodetects v2-vs-v3 from DTB either way). TCG wants -cpu max (full
+# ISA incl. RNDR) + GICv3. THYLACINE_CPU / THYLACINE_GIC override.
 case "$accel" in
     hvf) cpu="${THYLACINE_CPU:-host}"; gicv="${THYLACINE_GIC:-2}" ;;
+    kvm) cpu="${THYLACINE_CPU:-host}"; gicv="${THYLACINE_GIC:-host}" ;;
     *)   cpu="${THYLACINE_CPU:-max}";  gicv="${THYLACINE_GIC:-3}" ;;
 esac
 echo "==> qemu: accel=$accel cpu=$cpu gic=v$gicv smp=$cpus" >&2

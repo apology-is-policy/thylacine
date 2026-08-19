@@ -38,7 +38,7 @@ set ::env(THYLACINE_ACCEL) hvf
 source [file join [file dirname [info script]] lib.exp]
 
 set repo $lc_repo
-set qmp "$repo/build/qmp.sock"
+set qmp [lc_qmp_sock]
 set hostq "$repo/build/quake/host/tyr-quake"
 set basedir "$repo/build/quake/stage"
 set dedlog "$repo/build/ls-gfx-mp-server.log"

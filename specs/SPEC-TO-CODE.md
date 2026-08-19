@@ -1762,12 +1762,147 @@ distinct states); the KERNEL SHARE HALF landed at G-2** (the DMA-weave
 `burrow_share_into` admission + the Weft generalization; the ABI
 `SYS_DMA_CREATE_WEAVE`/`SYS_WEFT_UNSHARE` user-signed-off 2026-07-19); **the
 SERVER HALF landed at G-3** (tapestryd stage 0 + the R2-F3 reaper — the map
-below). Clean cfg GREEN 5413 distinct (unperturbed across G-2 and G-3 —
-neither impl half changed the model); liveness GREEN (`EventuallyRetired`
-incl. across `ServerDeath`); the 4 buggy cfgs each fire their named
-invariant (`premature_reuse` → RecycleGate,
+below); **the GPU-COMPOSED path landed model-first at Warp-C C-1**
+(2026-08-16, GPU-DESIGN §4.5.6 — model BEFORE impl); **its impl sites landed
+at C-2c (Attach/Detach) and C-3 (ComposeBlit/ComposeComplete, 2026-08-17)**
+— the binding paragraph below.
+Clean cfg GREEN 5413 distinct (unperturbed across G-2 and G-3 — neither impl
+half changed the model — and unperturbed across C-1, which is the measured
+control on that extension being additive rather than a rewrite); liveness
+GREEN (`EventuallyRetired` incl. across `ServerDeath`); the 7 buggy cfgs each
+fire their named invariant (`premature_reuse` → RecycleGate,
 `retire_during_transfer`/`reweave_without_quiesce` → NoTornScanout,
-`map_after_retire` → NoStaleMap).
+`map_after_retire` → NoStaleMap, `drain_skipped` → NoTornCompose,
+`blit_during_fill`/`fill_during_blit` → NoStaleCompose). Gate:
+`specs/check-tapestry.sh`.
+
+### The C-1 composed extension (model-first; no impl site yet)
+
+Behind `ALLOW_COMPOSE`, so the direct path is bit-recoverable. New actions
+and the sites they will bind at C-2/C-3:
+
+- **`Attach(g)` / `Detach(g)`** ↔ the compositor-context attach verb C-2
+  builds. `ctx_attach_resource` is the I-45 AUTHORITY-CONFERRAL point, not a
+  formality: P1b measured that without it vrend refuses the cross-context
+  blit by name (`Illegal resource 1080`) and with it the blit runs. `Detach`
+  requires `~InBlit(g)`.
+- **`ComposeBlit(g)` / `ComposeComplete(g)`** ↔ the per-frame
+  `VIRGL_CCMD_BLIT` list in one fenced `submit_3d`, and the fence retiring →
+  `SET_SCANOUT`(screen) + `RESOURCE_FLUSH`. `ComposeBlit` requires
+  `filled[g]` — the resource has been populated at least once — which is
+  deliberately NOT the same as `intransfer = 0`, a condition equally true of
+  "the fill landed" and "no fill was ever issued".
+- **`DrainedOfBlits(g)` on `ServerRelease` + `Free`** ↔ the real drain the
+  §28 I-40 row pre-recorded as owed. Modeled as an OMITTED CONJUNCT under
+  `BUGGY_DRAIN_SKIPPED` rather than as a twin buggy action, so the buggy arm
+  differs from the correct one in exactly the conjunct under test.
+
+### The C-2c/C-3 binding (landed 2026-08-17; the composed actions have impl sites)
+
+- **`Attach(g)`** ↔ `Comp::comp_import_slots` (every slot resource of a
+  generation, at `alloc_weave`, WITNESSED by a slot→sentinel copy inside
+  `COMPOSITOR_CTX`, C-2c) and `Comp::comp_import_bo` (the GL adoption's
+  consented BO at `present-to`). The recorded fact is `Surface.comp_attached`
+  / `WarpBo.comp_imported`, false = fail closed. **`Detach(g)`** ↔
+  `Comp::comp_detach_res` from `release_gen`, `retire` step (4),
+  `wbo_retire`, `comp_release_bo`, `comp_release_consents_for` — always
+  BEFORE the resource's unref.
+- **`ComposeBlit(g)` / `ComposeComplete(g)`** ↔ C-3's Composed present arm
+  (`Conn::present`): TRANSFER_TO_HOST_2D of the damage into the presented
+  slot's own resource, then `Comp::submit_blits(COMPOSITOR_CTX, …)` — one
+  `VIRGL_CCMD_BLIT` per compose op, box-corrected by the measured
+  `BlitConv` — on the compositor context's **SYNCHRONOUS slot**
+  (`Gpu::submit_3d_sync`), then `RESOURCE_FLUSH`. The C-1 paragraph above
+  bound these to "one fenced `submit_3d` … the fence retiring"; the landed
+  form is the synchronous REFINEMENT of that: the blit's response arrives
+  inside the present dispatch, so `ComposeBlit` and `ComposeComplete` close
+  in one dispatch and the in-flight blit set is empty at every retire point
+  — the same by-construction shape as `intransfer = 0`. `filled[g]` ↔ the
+  transfer that precedes the blit in the same dispatch (a blit never names a
+  slot the present did not just fill, and never a resource without
+  `comp_attached`).
+- **`DrainedOfBlits(g)` on `ServerRelease` + `Free`** ↔ holds by
+  construction at C-3 (nothing is in flight past a response; the GL object
+  lifetime rules cover the host side of an issued blit). The **fenced,
+  pipelined** form — flush riding fence completion, the drain as a real wait
+  — was named the C-4+ evolution; **C-4 (2026-08-17, GPU-DESIGN §4.5.12)
+  measured that the sync round trips were NOT the residual** (the health
+  verify's GPU drain was, and it is gone) and left the sync form in place,
+  so the fenced form is unscheduled. Whoever builds it must implement the
+  drain before touching retire; `drain_skipped` stays its counterexample.
+  The C-4 health-verify change (a buffer pair, issued per period and read a
+  period later) is below the model: the verify is a witness, not an
+  ordering step, and no spec action names it.
+- The **exclusion** the obligation below asked for landed at C-2d-b as ONE
+  HOST RESOURCE PER SLOT (GPU-DESIGN 4.5.8): a fill of slot j and a blit of
+  slot i (i≠j) touch different objects; same-slot fill-vs-blit is separated
+  by the synchronous present (blit response before the CQE that recycles
+  the slot) — the GL-execution residual is P2, measured 0/500 (4.5.4).
+
+### The C-6 readback class (spec landed 2026-08-18, model-first; the impl BOUND at C-6b the same day)
+
+Behind the same `ALLOW_COMPOSE` switch (additive by measurement: the six
+direct-path cfgs reproduce **5413** distinct states exactly with the new
+variable never leaving FALSE; the composed clean cfgs grow to 94680):
+
+- **`ComposeReadbackIssue(g)`** ↔ `Comp::rb_request` → `Comp::rb_issue`
+  (`usr/tapestryd/src/server.rs`), called from the composed-GL present's
+  `!done` arm in `Conn::present`: a **fenced** `Gpu::transfer_from_3d_comp`
+  (`gpu.rs`; the reserved slot `COMP_FSLOT`, `FenceTag { comp: true,
+  readback: true, ctx_pub: <the client's> }` — the client's id, NOT 0, see
+  GPU-DESIGN §4.5.13 AS-BUILT 1), the record `Comp.comp_rb` written, the
+  tpresent replied immediately. Before C-6b this was a synchronous
+  `transfer_from_3d_sync` inside one dispatch (the I-40 by-construction
+  shape that needed no model). `~InRead(g)` on Issue ↔ ONE in flight
+  compositor-wide (`comp_rb.is_some()` → `rb_enqueue`, the gen-pinned
+  `rb_wanted` FIFO; latest wins at issue time). `filled[g]` ↔ the client
+  presented a frame that exists (`gl_adoption` resolves). NO `attached[g]`
+  (the readback runs under the CLIENT's ctx — the arm for the un-imported
+  BO) and NO `FillLanded(g)` (the device serializes the read against the
+  fill: the in-order controlq + the synchronous host read, verified against
+  virglrenderer 1.1.0 `vrend_renderer_transfer_send_iov`).
+- **`ComposeReadbackComplete(g)`** ↔ `Comp::comp_readback_retired`, reached
+  from `warp_service_fences` for every `tag.comp` retire BEFORE
+  `warp_pump_retires` in the same pass (the pump's decrement may have just
+  quiesced a retiring BO; the compose must read `va` before that free): the
+  re-validation (same surface gen, scanout still Composed, `gl_adoption`
+  still resolving to the same ctx/BO/res/va/w/h — a retiring BO/ctx fails
+  it) then `blit_composed_pixels(.., Some(va))` + `screen_push`; the frame
+  is DROPPED (`rb_dropped`) otherwise. `comp_rb_pump` at the end of the pass
+  issues the next wanted incarnation.
+- **`DrainedOfReadbacks(g)` on `ServerRelease` + `Free`** ↔ the readback is
+  counted in the owning ctx's `fences_in_flight` (`rb_issue` increments;
+  the pump's common arm decrements on the tag) so every quiesce predicate —
+  `wctx_retire`, `warp_pump_retires`, `wbo_destroy`'s leak posture — holds
+  the backing the device is writing into; abandonment at
+  `FENCE_ABANDON_MS` sets `fence_poisoned` on the client's ctx like a client
+  fence would (the device may still write that backing) — which is exactly
+  why the tag must carry the client's ctx_pub. Modeled as an OMITTED
+  CONJUNCT under `BUGGY_READBACK_FREE`
+  (`tapestry_present_buggy_readback_free.cfg`, `NoTornReadback` violated in
+  11 states: … `ClunkMap` → `ComposeReadbackIssue` → `Destroy` →
+  `ServerRelease` → `Free` with the readback still landing) — the graver
+  twin of `drain_skipped`: a device WRITING freed pages, not reading them.
+- **Below the model** (durations and bounds, not states): the reserved fenced
+  slot (`Controlq::alloc_comp_slot`; the client pool is `0..COMP_FSLOT`),
+  `WarpCtx.comp_rb_in_flight` subtracted in `warp_fenced_admit`, the
+  sync-slot deadline widened to `FENCE_ABANDON_MS` in
+  `Controlq::submit_and_wait` while `readback_in_flight()` (any tag with the
+  `readback` bit — a client `transfer_3d(to_host = false)` or ours; sticky
+  for the wait once observed) (F2b), and `Cost::ReadbackWait`. Gate:
+  `warp-prove readback` / `tools/warp-host.sh readback` (ARM / DEEP / LIVE
+  / DEADLINE verdict arms + the F2B measurement).
+
+**A design obligation C-1 surfaced for C-2/C-3, before any code:** the D1
+recycle gate does not survive the composed path unchanged. tapestryd
+allocates ONE 2D resource per surface (whole-weave `ATTACH_BACKING`,
+per-present offset transfer — `usr/tapestryd/src/gpu.rs`), so guest-side
+slots buy no host-side concurrency and a fill of ANY slot collides with a
+blit. In the direct path a present's terminal CQE means the host has finished
+reading; once the compositor is a SECOND reader of that one resource, the CQE
+stops meaning the resource is free, and nothing in the old rule notices. The
+impl must supply the exclusion — fence ordering, or a double-buffered host
+resource.
 
 The G-3 action ↔ site map (the server half; `usr/tapestryd/src/server.rs`
 unless noted — a USERSPACE realization: the spec's server actions are

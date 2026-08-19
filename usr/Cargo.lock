@@ -1203,6 +1203,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "quarry"
+version = "0.1.0"
+dependencies = [
+ "kaua",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1849,6 +1857,14 @@ name = "warden"
 version = "0.1.0"
 dependencies = [
  "libdriver",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "warp-prove"
+version = "0.1.0"
+dependencies = [
+ "libtapestry",
  "libthyla-rs",
 ]
 

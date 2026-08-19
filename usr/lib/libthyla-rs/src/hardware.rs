@@ -652,16 +652,18 @@ pub enum PciError {
     Info,
     /// `SYS_PCI_MAP_BAR` failed for a present BAR (overlap / bad VA / prot).
     MapBar,
-    /// A present BAR's decoded size exceeds the per-BAR VA window stride
-    /// (`PCI_BAR_VA_STRIDE`). A virtio function's BARs are KiB-scale, so this
-    /// signals a misconfigured device, not a real virtio NIC.
-    BarTooLarge,
 }
 
 /// Per-BAR user-VA window stride: `PciDev::claim` maps BAR `i` at
-/// `bar_window + i * PCI_BAR_VA_STRIDE`. 1 MiB dwarfs any virtio function's
-/// BARs (common+notify+isr+device pack into a single <= 16 KiB BAR) while
+/// `bar_window + i * PCI_BAR_VA_STRIDE`. 1 MiB dwarfs every capability-region
+/// BAR (common+notify+isr+device pack into a single <= 16 KiB BAR) while
 /// keeping the six-BAR window (6 MiB) a trivial slice of the 48-bit user AS.
+/// A BAR larger than the stride -- the virtio-gpu hostmem shared-memory class
+/// (#166; GPU-DESIGN.md section 6.2) -- is claimed but NOT eagerly mapped:
+/// no capability region ever lives in one (the spec routes those through
+/// cfg_type 1..4 into KiB-scale BARs; `region()` fails closed regardless),
+/// and mapping a multi-hundred-MiB heap wholesale is exactly what the
+/// deferred per-allocation Venus path exists to avoid.
 pub const PCI_BAR_VA_STRIDE: u64 = 0x10_0000;
 
 /// A claimed VirtIO-PCI function with its memory BARs mapped into user VA.
@@ -679,7 +681,10 @@ pub struct PciDev {
 impl PciDev {
     /// Claim the first VirtIO-PCI function whose `virtio_device_id` matches
     /// (1 = net, 4 = rng, ...), read its topology, and map every present memory
-    /// BAR into user VA. BAR `i` lands at `bar_window + i * PCI_BAR_VA_STRIDE`.
+    /// BAR that fits the per-BAR stride into user VA. BAR `i` lands at
+    /// `bar_window + i * PCI_BAR_VA_STRIDE`; a larger BAR (the hostmem
+    /// shared-memory class) is claimed but left unmapped — see
+    /// [`PCI_BAR_VA_STRIDE`] and [`PciDev::shm_region`].
     ///
     /// Required capability: `CAP_HW_CREATE`. The minted handle carries the
     /// kernel-fixed `R | W | MAP` rights (no `TRANSFER`).
@@ -727,8 +732,13 @@ impl PciDev {
             if bar.present == 0 {
                 continue;
             }
+            // #166: a BAR past the stride (the hostmem shm class) is left
+            // unmapped, not a claim failure -- bar_va[i] stays None, so
+            // region() fails closed if a hostile cap layout ever routed a
+            // capability region into it. Its geometry still reaches the
+            // driver via shm_region().
             if bar.size > PCI_BAR_VA_STRIDE {
-                return Err(PciError::BarTooLarge);
+                continue;
             }
             let va = bar_window + (i as u64) * PCI_BAR_VA_STRIDE;
             if t_pci_map_bar(i64::from(handle.raw()), va, i as u64, prot) < 0 {
@@ -781,6 +791,27 @@ impl PciDev {
     #[must_use]
     pub fn notify_off_multiplier(&self) -> u32 {
         self.info.notify_off_multiplier
+    }
+
+    /// The discovered VIRTIO shared-memory region carrying `shmid` (cfg_type 8
+    /// -- virtio-gpu hostmem is shmid 1), as `(bar_pa + offset, length)`: the
+    /// region's device PA and byte length. Discovery only -- the backing BAR is
+    /// deliberately unmapped at claim (see [`PCI_BAR_VA_STRIDE`]); mapping a
+    /// subrange is the Venus-arc kernel delta. `None` when the device carries
+    /// no such region or the kernel rejected its layout.
+    #[must_use]
+    pub fn shm_region(&self, shmid: u8) -> Option<(u64, u64)> {
+        for s in self.info.shm.iter() {
+            if s.present == 0 || s.shmid != shmid {
+                continue;
+            }
+            let bar = self.info.bars.get(s.bar as usize)?;
+            if bar.present == 0 {
+                return None;
+            }
+            return Some((bar.pa + s.offset, s.length));
+        }
+        None
     }
 
     /// The VirtIO device id (1 = net, 4 = rng, ...).

@@ -92,7 +92,9 @@ in `ARCHITECTURE.md §25.2`): `scheduler` / `territory` / `handles` / `burrow`
 `loom_multishot` / `loom_order` / `cons_poll` / `loom_devgone` / `allowance` /
 `net_poll` / `net_poll_teardown` / `weft` / `weft_readiness` /
 `sched_tickless` / `sched_rebalance` / `fs_cache` / `debug_stop`, each with clean
-cfg(s) + buggy-cfg counterexamples (100 buggy cfgs total). Three of the Phase-0 planned nine
+cfg(s) + buggy-cfg counterexamples (121 buggy cfgs as of 2026-08-16 -- re-derive
+with `ls specs/*buggy*.cfg | wc -l` rather than trusting this; it read 100 for
+long enough to be off by 21). Three of the Phase-0 planned nine
 (`futex.tla`, `notes.tla`, `pty.tla`) were dropped per the 2026-05-23
 suspension — torpor + notes are prose-validated; PTY is unbuilt (LS-8, #952).
 
@@ -234,7 +236,7 @@ The index (one line per row; refresh with the table):
 - **Tickless idle (NO_HZ_IDLE; the TI arc)** -- `arch/arm64/timer.c` (`timer_arm_oneshot_cnt` + the pure `timer_oneshot_tval` -- the one-s ...
 - **Territory** -- `kernel/territory.c`
 - **Handle table** -- `kernel/handle.c`
-- **VMO / BURROW** -- `kernel/burrow.c`, `kernel/include/thylacine/burrow.h`, `mm/vmo_pages.c`
+- **VMO / BURROW** -- `kernel/burrow.c`, `kernel/include/thylacine/burrow.h`
 - **Weft cross-Proc Burrow-share (the I-37 dataplane substrate)** -- `kernel/burrow.c` (NEW `burrow_share_into(dst, v, vaddr, prot)` -- map an existing Burrow ...
 - **tapestryd: the compositor + the orphaned-weave reaper (Tapestry G-3; I-40 present half)** -- `usr/tapestryd/` (the warden gather-bound persistent compositor: `gpu.rs` the synchronous ...
 - **MMU user-PTE clear + TLBI** -- `arch/arm64/mmu.c::mmu_uninstall_user_pte / mmu_uninstall_user_range`, `kernel/burrow.c::b ...
@@ -301,7 +303,7 @@ The index (one line per row; refresh with the table):
 - **`/dev/cons` drain/feed renderer backend + `SPAWN_PERM_CONSOLE_RENDERER` (Tapestry G-4)** -- `kernel/cons.c` (the `cons_drain` mirror tap in `cons_emit` + the bounded drop-OLDEST ring ...
 - **`/env` per-Proc environment device (Go Stage 4a, G15)** -- NEW `kernel/env.{c,h}` (`struct Env` { atomic `ref` + `lock` + `entries[ENV_MAX_ENTRIES]` ...
 - **POUNCE: fused walk+getattr resolution (`Twalkgetattr` 140/141 + the stalk pounce + `SYS_STAT` = 88)** -- `kernel/9p_wire.{c,h}` + `kernel/9p_client.c` (`p9_client_walkgetattr`; NOFID query mode), ...
-- **The Larder: guest-side 9P FS cache (L1c substrate + attr sub-cache; L1d dentry sub-cache; L1e page sub-cache + cacheability gate)** -- NEW `kernel/include/thylacine/larder.{h,c}` (`struct larder` on `p9_client` -- a near-leaf ...
+- **The Larder: guest-side 9P FS cache (L1c substrate + attr sub-cache; L1d dentry sub-cache; L1e page sub-cache + cacheability gate)** -- NEW `kernel/larder.c` + `kernel/include/thylacine/larder.h` (`struct larder` on `p9_client` -- a near-leaf ...
 - **FID-LIFECYCLE: async-clunk + cached-open (the fidless close-to-open open)** -- **async-clunk**: `kernel/9p_client.c` (`p9_client_clunk_async` fire-and-forget + the owner ...
 - **Kernel debug surface: `/proc/<pid>` debug-fs (stop/resume + regs/mem/kregs/kstack/wait; I-39; Go IDE Stage 8a-1)** -- `kernel/devproc.c` (the debug files + `devproc_debug_authorized` [the I-39 two-axis gate] ...
 - **PTY / job control: sessions + process groups + the pts registry + the tty seam + the job-control stop (I-20 stop leg; PTY-1 kernel arc)** -- `kernel/proc.c` (`proc_setsid`/`setpgid`/`getpgid`/`getsid`; `notes_post_pgrp`/`notes_post ...
@@ -311,10 +313,12 @@ The index (one line per row; refresh with the table):
 - **Spawn-time page-budget (the Clade arc F4; I-32 composition, CL-5)** -- `kernel/include/thylacine/proc.h` (`Proc.page_budget` + `Proc.page_peak` + `PROC_PAGE_HARD ...
 - **Process creation: `execve` + shared address spaces + COW `fork` (the LINEAGE arc, L-1..L-7; I-44)** -- **L-1 through L-5 LANDED (stock `fork()` works); L-6 NEXT (the VIVARIUM clone/execve/wait4 ...
 - **VIVARIUM: the syscall-entry phenotype branch + the spawn-time declaration (V-1b; I-43)** -- `kernel/syscall.c` (`syscall_dispatch`'s phenotype branch -> `viv_linux_dispatch`; the TIE ...
+- **Warp: the GPU seam -- the GPU-BO subtype + the `/dev/warp` tree + the fenced controlq (Warp-2; I-45)** -- `kernel/dma_handle.{c,h}` (the subtype enum + the 64 MiB envelope), `kernel/syscall.c` (`SYS_DMA_CRE ...
 - **File-backed EL0 mmap: the phenotype FILE arm (DISTRO D-3; I-36 GENERALIZES, I-12 + I-32 on the line)** -- **D-3a + D-3b + D-3c AS-BUILT.** `kernel/include/thylacine/viv ...
 - **DISTRO D-4: the PT_INTERP rewrite to the interpreter (exec dispatch)** -- `kernel/exec.c` (NEW `exec_interp_argv` + the rewrite block ...
 - **Per-mount `MNOEXEC`: the executable-mapping vouching gate (#217; I-12 PROVENANCE half)** -- `kernel/include/thylacine/territory.h` (`MNOEXEC` 0x0010 in the existing ` ...
-- **Initial bringup** -- `kernel/main.c`, `init/init.c`
+- **Initial bringup** -- `kernel/main.c`, `usr/joey/joey.c`
+- **Warp-6 V-2: host-visible BAR mapping (`SYS_BURROW_FROM_HOSTMEM` + `BURROW_TYPE_HOSTMEM` + the mmu attr-index widening + the F1 death-quiesce; I-45/I-32/I-37)** -- `kernel/syscall.c` (`sys_burrow_from_hostmem_handler` + `hostmem_resolve_subrange` + the `sys_weft_share_for_proc` gate), `kernel/burrow.{c,h}` (`burrow_create_hostmem` + the 3 type arms + share admission), `arch/arm64/mmu.{c,h}` + `arch/arm64/fault.c` (`mmu_install_user_pte_attr`), `kernel/pci_handle.{c,h}` + `kernel/proc.c` (the `hostmem_burrows` counter + `kobj_pci_quiesce_dma_only` + the death-path branch), `kernel/weft.{c,h}` (`WEFT_BIND_HOSTMEM`) ...
 - **Boot banner** -- `kernel/main.c`
 
 The trigger list is *cumulative*: a chunk that adds an audit-bearing surface appends its full row to `docs/AUDIT-TRIGGERS.md` and a one-line entry to the index above, in the same PR that introduces it.
@@ -446,7 +450,7 @@ names).
 | I-29 | Loom completion integrity: exactly-one terminal CQE; no stale; CQ never overfilled | `loom.tla` + `loom_multishot.tla` + `loom_order.tla` |
 | I-30 | Loom submit-time capability pin; kernel never re-reads a shared-ring field post-check | `loom.tla` buggy cfgs |
 | I-31 | ASID rollover safety: no cross-generation ASID aliasing; rollover never yanks an active/reserved ASID | `asid.tla` (clean + 5 buggy cfgs) |
-| I-32 | Per-Proc resource floor (DoS bound): a non-TCB Proc's anon pages / threads / direct children are each capped (`PROC_PAGE_MAX`/`PROC_THREAD_MAX`/`PROC_CHILD_MAX`); on a bound, creation fails clean (-ENOMEM/-EAGAIN), never box-extincting; `PRINCIPAL_SYSTEM` (the TCB) is exempt + unforgeable; graceful-OOM on every creation path is the backstop (resource axis, not privilege -- orthogonal to I-22) | prose IDENTITY-DESIGN §3.8 + `docs/reference/110-resource.md` + the focused audit + tests |
+| I-32 | Resource floor (DoS bound), on **TWO granularities since LINEAGE L-1** -- this row said "per-Proc" until 2026-08-16 and that is wrong for the page axis. The **page axis is per-ADDRESS-SPACE**: a non-TCB `AddrSpace`'s live anon pages / VMAs / shared-in pages are bounded by the cap carried on that `AddrSpace` (`AddrSpace.page_budget`, seeded at `addrspace_alloc` from the creating Proc's authorization, default `PROC_PAGE_MAX`; `PROC_VMA_MAX`; `PROC_SHARED_MAP_MAX_PAGES`). The **thread + child axes stay per-Proc** (`PROC_THREAD_MAX`/`PROC_CHILD_MAX`). `Proc.page_budget` is the **authorization** -- what this Proc may seed or raise an AddrSpace to -- NOT the enforced bound. Sharing an address space shares the cap, and that is not escalation (RFMEM siblings can already write each other's memory). The inverse (counter on the AddrSpace, cap on the Proc) is REJECTED: two RFMEM siblings would return different verdicts on one counter, so the bound would depend on which sibling faulted -- hence `addrspace_charge_pages` reads the cap off the AddrSpace it charges and must NEVER take it as a caller-supplied parameter, which is that rejected shape in disguise. On a bound, creation fails clean (-ENOMEM/-EAGAIN), never box-extincting; `PRINCIPAL_SYSTEM` (the TCB) is exempt + unforgeable; graceful-OOM on every creation path is the backstop (resource axis, not privilege -- orthogonal to I-22) | ARCH §28 I-32 (authoritative) + prose IDENTITY-DESIGN §3.8 + `docs/reference/110-resource.md` + the focused audit + tests |
 | I-33 | Namespace name retention is non-load-bearing: every Spoor carries a refcounted copy-on-walk `Path` (its cleaned namespace name -- the Plan 9 `Chan.path`), but the resolver is WRITE-ONLY to it (stalk/walk/create append; nothing reads `->path` to resolve/perm-check/cross), so a wrong/stale/absent/failed Path changes only the cosmetic content of the introspection readers (`SYS_FD2PATH`/`/proc/fd`/`/proc/ns`), never a resolution/permission/syscall result; a path-alloc failure leaves Path NULL and the WALK SUCCEEDS. Path lifetime is subordinate to its Spoor's (one ref/Spoor, atomic, freed with the last Spoor); the string is immutable once built (only `path->ref` is concurrent) | prose ARCH §9.6.9 + `docs/reference/30-dev-spoor.md` + STALK-DESIGN + the focused audit + tests + the SMP gate |
 | I-34 | Driver authority bound (ENFORCED -- Menagerie build-arc 2): a driver's hardware authority is exactly its warden-granted **allowance** -- a per-Proc set of MMIO PA windows / IRQ INTIDs / a DMA per-buffer cap / **PCI `(bus,dev,fn)` functions** (the 4th axis, build-arc step 6a). NARROWED (`p->allowance != NULL`) bounds `SYS_MMIO/IRQ/DMA_CREATE` **+ `SYS_PCI_CLAIM`** (gated on the resolved `(bus,dev,fn)` via `kobj_pci_resolve_bdf` + `HW_RES_PCI`) to the conferred set; BROAD (`allowance == NULL` -- the warden + the existing trusted servers) is bounded only by the I-5 reservation (the as-built v1.0 path, unchanged). Never widened (windows immutable post-confer; a forked child inherits an equally-narrow copy via `allowance_clone_into` -- the I-2 hardware-axis analog); fully revoked on unbind/removal/crash (`proc_revoke_allowance` + `proc_group_terminate`). A narrowed driver also CANNOT spawn a child Proc (drivers are leaves -- MENAGERIE §13.2 "sources, not spawners; one auditable chokepoint"; `rfork_internal` fail-closed denies a narrowed parent a child, 5e-4 F2), so no hw-capable grandchild can inherit/be-conferred an allowance that survives the per-Proc revoke + thread-group-scoped terminate. The central hazard -- an in-flight `SYS_*_CREATE` racing a `DeviceRemoved` revoke -- is closed by the two-step create (the lock-free `allowance_permits` gate then the `allowance_handle_alloc` install under a `revoked` re-check under `allowance->lock`). The I-25 analog for hardware; generalizes pci-1b (a PCI device's allowance IS its claimed BARs -- the per-`(bus,dev,fn)` PCI axis enforced at `SYS_PCI_CLAIM` since step 6a); preserves I-5 (the bounded authority-to-create passed down, never pre-minted handles) | `specs/allowance.tla` (clean cfg TLC-green + the 4 buggy cfgs: revoke_race / revoke_leak / confer_widen / self_widen; the PCI axis is the runtime-tested per-kind predicate -- no spec change, the 4 cfgs re-run green) + prose `docs/MENAGERIE.md` §4 + `docs/reference/117-allowance.md` + the focused audit + the `allowance.*` tests (incl. `handle_alloc_revoked_aborts` + `narrowed_proc_cannot_spawn` + `pci_membership`) + the SMP gate |
 | I-35 | Mandate attenuation + revocation (persistent attenuated delegation, `docs/MANDATE-DESIGN.md`): a standing grant confers <= its issuer's held authority, never widened, revocable — RESERVED; OWED at the MA arc (Phase 8, after net) | `specs/mandate.tla` (reserved, spec-first re-enabled) + prose MANDATE-DESIGN.md |
@@ -454,6 +458,12 @@ names).
 | I-37 | Capability network dataplane integrity (Weft): the per-flow zero-copy shared-Burrow path is sound — registration-is-the-capability, no per-op mediation, the F_NOTIF buffer lifetime (no in-flight-page UAF), ring TOCTOU closed, the share bounded by the flow. AS-BUILT (the Weft arc COMPLETE at Weft-7) | `weft.tla` + `weft_readiness.tla` (clean + liveness + buggy cfgs) + the Weft-7 audit |
 | I-38 | Larder cache coherence (the guest-side FS cache): a hit returns exactly what a fresh RPC would under close-to-open — Open-revalidate + Read-serve + OwnWrite-invalidate; incl. the write-behind staged legs. AS-BUILT (the L1 arc COMPLETE at L1f + the F1 wb / term-4 addenda) | `fs_cache.tla` (clean + external + liveness + 5 buggy cfgs) + prose LARDER-DESIGN.md + the L1f audit |
 | I-39 | Debug authority bounded: debug = namespace-names-the-target + the two-axis gate (owner OR `CAP_HOSTOWNER`/`CAP_DEBUG`; `CAP_DAC_OVERRIDE` NOT an axis); user reads/writes + all execution control stopped-only (fully-stopped rejects a pending `group_exit_msg` — death wins); a read-only inspect of a SETTLED (`on_cpu==false`) thread's KERNEL stack (`/proc/<pid>/kstack`, the Linux `/proc/stack` tier, 8b) is I-39-authorized but NOT debug-stop-gated (memory-safe: bounded to the thread's own kstack + the `g_proc_table_lock` lifetime pin; best-effort-consistent; controls no execution) -- raw slid kernel addrs (which reveal the KASLR slide, an I-16 secret) go ONLY to the CAP_DEBUG/CAP_HOSTOWNER tier, the owner axis gets the KASLR-independent symbolic form (8b-1d F1); no debug op writes text (I-12/I-36 — breakpoints are hardware), escapes the target's `pgtable_root`, or strands the quarry (detach/close/debugger-death resumes an ATTACHED target — but a debugger-LAUNCHED `exitkill`-marked target is TERMINATED on debugger death, die-with-launcher / `PTRACE_O_EXITKILL`, the EXITKILL refinement [designed 2026-07-23, §5d + `debug_stop.tla::EventuallyLaunchedDies`]: `devproc_debug_release_cb` `proc_group_terminate`s a marked ALIVE target instead of `proc_debug_resume`, closing the debugger-launched-orphan leak — an explicit `detach` still resumes; AND a hardware fire racing a detach delivers only while owned — SA-1); kproc + NOTRACE refused. AS-BUILT at 8a-1 (software-checkpoint tier) + 8a-2 (the HW-breakpoint/single-step/watchpoint tier: DBGB*/DBGW* per-Proc install + `MDSCR.SS` + EC 0x30/0x32/0x34); 8b = the settled-thread inspect + the cross-boundary unified stitch (kernel DWARF deferred to 8c); 8c-2 = the stop-of-a-sleeper (a nested stop-detour inside `sleep()`/`tsleep()` so a multi-thread Go target -- whose idle futex-parked Ms never reach the tail -- becomes fully-stoppable; DEATH still wins [die-check-first]; #88 records a detour-parked thread's EL0-entry frame at the EL0-sync choke point so `/proc/regs` works for a syscall-blocked head; **8c-3** (#89) releases the elected-9P-reader role on a stop -- the reader's recv *primitive* is FRAME-ATOMIC [`reader_recv_frame` sets `Thread.stop_unwinds = (got==0)` per-chunk + holds `stop_no_park`: a stop UNWINDS only at a frame boundary -> the detour returns `SLEEP_INTR` and BLOCKS THROUGH mid-frame (else it would desync the shared stream -- the holotype F1 correction)] so `client_wait` can hand the role to a runnable survivor [the handoff skips debug-stopped owners] before parking role-free, while the *syscall* is still preserved [re-elect + re-block on resume] -- so a stop never freezes the shared FS client for survivor Procs; the identical death-path mid-frame unwind is task #90 -- the #90 block-through design [ARCH §8.8.1.1 + `specs/reader_frame.tla`, signed off 2026-07-19]) | `specs/debug_stop.tla` (clean + 6 buggy cfgs incl. `fault_stop_ungated` + `BUGGY_STOP_SKIPS_SLEEPER`, model-first; the `sleep` PC + `StopWakesSleeper` added at 8c-2; 8c-3 is below the model -- no change) + `specs/debug_step.tla` (the step machine) + `docs/reference/134-debug-fs.md` + the 8a-1c/8a-2c/8c-2/8c-3 holotypes + the in-guest `/debug-probe` + `/hwbp-verify` + `/ambush-probe` E2Es + the SMP gate |
+| I-40 | T-1 no torn scanout / surface-share integrity (TAPESTRY §18.8; STAGED per the I-20 RESERVED→ENFORCED precedent): every page of a weave stays backed + mapped-membership-immutable from first client map to retire; a present op's lifetime brackets its `TRANSFER_TO_HOST_2D`; a weave retires only after quiesce + scanout-composition release. **KERNEL SHARE HALF ENFORCED at G-2** (ABI user-signed-off) | `tapestry_present.tla` (model-first; 4 clean + 8 buggy cfgs, gated by `specs/check-tapestry.sh`). Since **Warp-C C-1** (2026-08-16) the module also carries the GPU-COMPOSED present behind `ALLOW_COMPOSE` -- `NoTornCompose` (the composed drain) + `NoStaleCompose` (the P2 cross-context ordering hazard) -- and since **C-6's spec (2026-08-18)** the compositor READBACK class behind the same switch: `ComposeReadbackIssue`/`Complete` (a fenced host DMA-WRITE into the client BO's pages) + `NoTornReadback` with `DrainedOfReadbacks` on retire (`buggy_readback_free`). Both extensions are ADDITIVE by measurement, not by assertion: with the switch off the six pre-existing cfgs reproduce 5413 distinct states exactly |
+| I-41 | **NOT ALLOCATED in §28.** `ADVANCED-GO-DESIGN.md` AG-2's software-breakpoint isolation reserves the number in its own doc and has never been promoted to a §28 row. Cite it as AG-2's, never as a §28 invariant | (reserved in ADVANCED-GO-DESIGN.md only) |
+| I-42 | JIT-as-a-capability: executable code emission is a capability (`CAP_JIT`), not an ambient power; W^X holds across the publish (`docs/LLVM-DESIGN.md` §8, the Clade arc). **ENFORCED at CL-7k** | prose + the CL-7k focused audit (W^X-adjacent — prosecute hard) |
+| I-43 | A phenotype confers ABI **SHAPE**, never **AUTHORITY** (`docs/VIVARIUM.md` §8/§12.1): a Linux-phenotype Proc gets Linux syscall *numbering/semantics* and not one bit of extra privilege | prose + the V-8 audit + `vivarium.*` tests + `sys_spawn_full_argv.validate_req_pheno_flags` + the two-vantage in-guest gate |
+| I-44 | Address-space integrity under sharing + COW (`docs/LINEAGE.md`): an AddrSpace's pages live until the last referencing Proc drops it AND the last mapping is gone; a COW break yields a PRIVATE page equal to the shared page at fault time, leaves every other sharer's view UNCHANGED, and no page is writable through one mapping and executable through another. **ENFORCED** (2026-08-16; this row said "RESERVED; ENFORCED at L-4/L-5" long after its own trigger fired -- vault caught the lag). Every stated precondition is in the tree: `struct AddrSpace` exists with the enforced per-AS `page_budget`; `SYS_RFORK` = 105 with `sys_rfork_core`/`sys_rfork_handler`; `kernel/cow.c` + the `VMA_FLAG_COW` break arm in `arch/arm64/fault.c` under the global COW lock; and the L-7 arc-close holotype `b647a6c4` closed 0 P0 / 0 P1, NOT dirty | **spec-first RE-ENABLED**: `specs/cow.tla` landed TLC-green BEFORE the L-4 impl, with the three named buggy cfgs (`cow_buggy_break` break-vs-break, `cow_buggy_teardown` break-vs-teardown, `cow_buggy_vfork` lost-VFORK-wake) + LINEAGE.md + the L-7 audit + the SMP gate |
+| I-45 | GPU authority is bounded by the context (`docs/GPU-DESIGN.md` §8, the Warp arc; **STAGED — the halves are DIFFERENT CLAIMS, so name the half you mean**): GPU work reaches only what its context owns; a submission executes only against buffers attached to the submitting context, bounded by address-translation hardware the trusted server programs, **never by inspecting the command stream**; buffers live until last client unmap AND last in-flight submission retires; teardown (incl. client death) quiesces without disturbing other contexts; a context's fault is fatal to that context alone. **GUEST-EXPOSURE HALF ENFORCED** (one ctx per client, no cross-ctx resource naming, submit-time capability pin; cross-ctx blit refusal measured @`7b1ff07f`). **HOST HALF on virgl/Venus RESERVED-NOT-ENFORCED — the host is documented TRUSTED** (GPU-DESIGN §9.2). **v3d is where it becomes ours to keep** (fork F3, unbuilt) | prose GPU-DESIGN §8 + the Warp-5 + C-0d audits + `warp-prove` on thyla-pi (KVM, real V3D); **no spec module** |
 
 ---
 
@@ -656,10 +666,15 @@ When token/time budget is low:
 
 ### The checkpoint contract (binding; every time you hand back)
 
-A **checkpoint** is any turn that returns control to the user at a resting point
-— a landed chunk, a closed audit, a surfaced fork, a stopping report. At every
-checkpoint, do these three WITHOUT BEING ASKED. They exist because the user
-cannot see what you can see, and the cost of them guessing is real.
+A **checkpoint** is any **resting point** in the work — a landed chunk, a closed
+audit, a surfaced fork, a stopping report. Note that a checkpoint is *not* by
+itself a decision to hand back: whether you yield or roll straight into the next
+chunk is governed by the 600k line in §"When to recommend `/compact`", and the
+default under granted autonomy is to **keep going**. What follows is owed at
+every checkpoint either way — including the ones you run straight through, where
+it is the only thing keeping the tree pickup-ready. Do these three WITHOUT BEING
+ASKED. They exist because the user cannot see what you can see, and the cost of
+them guessing is real.
 
 **1. Account for every attached shell, monitor, and background task.**
 
@@ -713,6 +728,35 @@ where the current chunk sits in the arc without opening the tracker.
 
 ---
 
+## The run journal (`docs/JOURNAL.md`) — binding, user-requested 2026-08-16
+
+After a long autonomous run the user has to reconstruct what happened, and doing
+that from `git log` + six status rows + a memory directory is work they should
+not have to do. **`docs/JOURNAL.md` is the single narrative thread**: what
+landed, in order, why, what it cost, what it left open.
+
+**Append an entry per autonomous run**, newest run first, as part of the run —
+not reconstructed at the end from memory, which is how the interesting parts get
+lost. A checkpoint you run *through* still earns its paragraph.
+
+What belongs there, and what does not:
+
+- **NOT a changelog.** `git log` owns the commits; duplicating them here rots.
+  **NOT a status doc** — `docs/phaseN-status.md` owns per-chunk rows.
+- **The reasoning, the wrong turns, and the findings nobody planned.** A wrong
+  turn that got caught is worth more than a win, because the catch is the
+  reusable part. Record what caught it — a control, a sabotage, a measurement —
+  not just that it was caught.
+- **Evidence on every claim**: a hash, a measured number, a file:line.
+- **Exactness about what "fixed" covers.** Half a defect closed is written as a
+  half, with the other halves named. A run that reads as uniformly successful is
+  usually a run that was written up carelessly.
+- **Decisions that needed the user**, and what they chose — so the next session
+  can tell a ratified decision from an assumed one.
+
+This is the operator's window into an unattended run. Treat a missing entry the
+same as a missing status row: the work is not finished without it.
+
 ## Reference documentation discipline (load-bearing)
 
 **Two parallel references, both maintained continuously, both binding for every PR**:
@@ -761,6 +805,18 @@ Like the technical reference, the user manual is **detailed and deep**. The bar:
 ### Maintenance discipline (per-chunk; non-negotiable)
 
 When a chunk lands (bug fix, refactor, new module, new feature), the author updates **both references** in the same PR:
+
+0. **Check the vault first.** Before writing or extending a `docs/reference/NN-*.md` section, run:
+
+   ```bash
+   cd ~/projects/thylacine-vault && vault/meta/quaestor/quaestor owner <changed paths>
+   ```
+
+   **Exit 0** — the vault carries that surface: the prose belongs there, so ring vault over yip rather than writing the section here. **Exit 1** — no dossier: write the reference section as today, and file the sweep. **With several paths the answer is usually MIXED and the exit status reports only half of it** — read the summary line, which names both sets; both actions are then owed.
+
+   Read any `ALSO named by` line in the output. A note that merely **pins** a file (an `abi-*` registry pins VALUES or STRINGS) cannot hold a description of a mechanism — so the reference section is still owed, AND that note may need the same change.
+
+   This step exists because the alternative is a protocol whose first move is remembering to tell someone. It rides the doc-update step precisely so it cannot be skipped separately from it.
 
 1. **Technical reference**: extend or update the relevant `docs/reference/NN-*.md` section. New module → new section. Bug fix that touches a documented invariant → update the section after the spec. New term / acronym → glossary entry.
 2. **User reference**: extend or update the relevant `docs/manual/NN-*.md` section if the change is user-visible (new syscall, new admin command, new error case, behavior change). Internal refactors typically don't touch the user manual; user-visible changes always do.
@@ -881,6 +937,42 @@ SMP_GATE_CONFIGS="default-smp4 ubsan-smp4" tools/ci-smp-gate.sh   # amplifier su
 # The gate's classifier, tested without booting (fast; sources the real ladder).
 tools/test-smp-classify.sh
 
+# Hardening witnesses (#245). Both of these were invoked by NOTHING until
+# 2026-08-18 -- and both were already named in this file, inside the boot-banner
+# paragraph below, purely as CONSUMERS of the ABI strings (things that would
+# break if you reworded one), never as gates to run. That is the entire
+# difference between a mention and a command, and it is why they rotted while
+# `test-a72` and `check-v80-floor` -- one screen down, in this block -- did not.
+# test-fault builds one kernel per provoker and PASSes iff each EXTINCTIONs with
+# its expected message: the ONLY proof that the canary / W^X / BTI / the two
+# stack guards / the idle guard / the recursion arm actually FIRE, as opposed to
+# merely being compiled in. Its absence from every gate is how #244 --
+# recursive_kernel_fault emitting nothing at all -- hid for about a month.
+tools/test-fault.sh                 # all 7 variants    (or: make test-fault)
+tools/test-fault.sh canary_smash    # one variant       (-v for log dumps)
+
+# verify-kaslr multi-boots and PASSes iff the slide varies across N: ROADMAP
+# section 4.2's exit criterion for I-16, and that invariant's ONLY runtime
+# witness. `make test` accepts any SINGLE boot, so it is structurally blind to a
+# slide that never moves -- the same shape as test.sh being blind to LSE above.
+tools/verify-kaslr.sh               # 10 boots          (or: make verify-kaslr)
+tools/verify-kaslr.sh -n 25 -v      # more boots, print each offset
+
+# Warp-6 V-0 (the Venus gate). `warp-host.sh venus` boots the remote GL host
+# TWICE -- once with `venus=on,blob=on,hostmem=256M` and once WITHOUT -- and
+# passes only if capset id=4 (VENUS) is present in the first and ABSENT in the
+# second. The control leg is not a bonus: a one-directional check is satisfied
+# by a host that advertises the capset unconditionally. venus needs blob AND
+# hostmem together, and QEMU refuses the device otherwise rather than degrading.
+# BOTH GL hosts pass it: thyla-pi (KVM/V3D, ~220 s per boot) and thyla-gl
+# (Parallels/TCG/lavapipe, ~350 s), and they report byte-identical feature
+# words. test-venus-verdict drives the SAME verdict verb against crafted logs,
+# so the discrimination is testable without paying two boots at all (#245: a
+# checker reachable only by hand rots).
+WARP_HOST=thyla-pi WARP_ACCEL=kvm tools/warp-host.sh venus   # certify (2 boots)
+WARP_HOST=thyla-gl tools/warp-host.sh venus                  # iterate (2 boots)
+tools/test-venus-verdict.sh         # its verdict, no boot  (or: make test-venus-verdict)
+
 # ARMv8.0 floor guard (#91). The SOURCE + BINARY checks run automatically at the
 # tail of every ramfs bake; these are the extras. `check-floor` adds the big pool
 # payloads (/clade, /goroot, ~6 min); `test-a72` is PORTABILITY.md section 3's
@@ -926,6 +1018,57 @@ The `Makefile` at the root provides `make kernel`, `make all`, `make test`, etc.
 
 ---
 
+## The thyla-pi host (permanent ARM64 / KVM / GPU box)
+
+A Raspberry Pi 400 — BCM2711 (4× Cortex-A72 @ 1.8 GHz), 4 GB RAM, VideoCore
+VI / V3D 4.2 GPU; Debian 13 arm64; QEMU 10.0.11 (distro) with
+`virtio-gpu-gl-pci` + `egl-headless`; `expect`; `/dev/kvm` and
+`/dev/dri/renderD128` accessible to user `cora` — is **permanently online**
+(user commitment 2026-08-12) and available to every instance for anything
+that benefits from real ARM64 silicon. No reservation protocol; keep QEMU
+single-flight (verify no stray: `ssh thyla-pi 'ps -eo pid,args | grep
+"[q]emu-system"'` — bracket-trick the pattern or it matches its own wrapper).
+
+**Access**: LAN `ssh thyla-pi` (thyla-pi.local, user `cora`, key
+`~/.ssh/thyla-pi`). From anywhere: `ssh thyla-pi-cf` (Cloudflare tunnel via
+`thyla-pi-ssh.treeso.net`; cloudflared ProxyCommand — both aliases live in
+`~/.ssh/config`; the Pi-side connector is a systemd service). After changing
+cora's groups, drop the control master: `ssh -O exit thyla-pi`.
+
+**Roles**:
+- **The KVM GL host** (Warp arc): `WARP_HOST=thyla-pi WARP_ACCEL=kvm
+  tools/warp-host.sh <sync|smoke|capset|prove|tri|bench|quake|decomp|wedge|wedge-gate>`.
+  Real-silicon KVM (`-cpu host -gic-version=host`, auto-detected by
+  run-vm.sh on Linux-aarch64 + rw /dev/kvm) boots the full gauntlet in
+  ~210 s where Pi-TCG never finishes. Real GPU: virgl on V3D 4.2.14 (first
+  Thylacine GL-on-silicon 2026-08-11; gl-host-probe rung 6 PASS) and a
+  Vulkan V3D ICD (the Warp-6/Venus prerequisite).
+- **Real-silicon SMP / memory-model witness**: the only non-Apple ARM
+  hardware in the loop (#214 was closed on it); A72 vs M2 diversity.
+- **General ARM64 Linux box**: native aarch64 builds, KVM guests, ad-hoc.
+
+**Layout**: repo sync at `~/projects/thylacine` (push with `WARP_HOST=thyla-pi
+tools/warp-host.sh sync` — git-archive of HEAD + boot artifacts + the pool via
+sparse gzip; uncommitted tool scripts ride separately, re-scp after editing).
+Working fixtures + logs in `~/warp/`.
+
+**Care**:
+- 4 GB RAM: ONE 2048 MiB guest at a time.
+- SD-card I/O is the bottleneck — FS-round-trip-heavy guest work (go builds)
+  dominates wall clock; budget bounds off the ~210 s banner, not TCG numbers.
+- The Pi's `build/` holds the **certified artifact set of the last sync**
+  (md5-stable). It has served as the bit-exact restore source after a local
+  bake clobbered the fixtures: reverse-sync (`ssh thyla-pi 'gzip -1 -c
+  .../pool.img' | gunzip | dd of=... conv=sparse bs=1m`) + md5 both sides.
+- Artifacts pair cryptographically: `pool.img` + the key-bearing `ramfs.cpio`
+  ship TOGETHER or the guest gets `STM_EBADTAG` (stratumd `rc=-201` ->
+  `EXTINCTION: joey exited non-zero`). **A reverse-sync recovery is only valid
+  if you sync BOTH and DO NOT rebuild** -- a rebuilt ramfs carries a fresh key
+  that no longer matches a reverse-synced pool. If a real code change forces a
+  rebuild, re-bake BOTH paired with `THYLACINE_MKFS_PRESERVE=0`, never `=1`.
+
+---
+
 ## Boot banner contract (kernel ABI with the development tooling)
 
 Per `TOOLING.md §10`. Non-negotiable for the agentic loop to work.
@@ -944,9 +1087,15 @@ Thylacine vX.Y-dev booting...
 Thylacine boot OK
 ```
 
-The `hardening:` / `features:` lines are informational (only `Thylacine boot OK` + the `EXTINCTION:` prefix are the binding tooling ABI). Since Lazarus W1 (`PORTABILITY.md §4`) the `hardening:` line lists the unconditional set and marks PAC/BTI/LSE runtime-conditional; the `features:` line reports what the running CPU implements.
+The `hardening:` / `features:` lines are informational. **`kernel base:` is NOT** — that claim stood here until 2026-08-16 and was false: `tools/verify-kaslr.sh` parses `kernel base: 0xVA (KASLR offset 0xN, ...)` and is the **ROADMAP §4.2 exit-criterion gate for I-16**, i.e. that invariant's only runtime witness, and `tools/stall-watch.py`'s `KASLR_RE` parses the same line to symbolize a stalled guest. Their failure modes differ in the way that decides how bad a reword is: verify-kaslr fails **loud** (an unparsed offset makes every boot's offset the empty string, the distinct set collapses to 1, and the run misses its `>=0.7N` bar), while stall-watch fails **SILENT** (`if m:` with no else leaves `syms.slide` NULL and the watcher keeps running, having quietly lost the symbolization it exists to provide, exactly when a guest has stalled). So the binding set is three surfaces, not two. Since Lazarus W1 (`PORTABILITY.md §4`) the `hardening:` line lists the unconditional set and marks PAC/BTI/LSE runtime-conditional; the `features:` line reports what the running CPU implements.
 
-A kernel **extinction** (ELE — Extinction Level Event; the thematic name for kernel panic) prints `EXTINCTION: <message>` as a recognizable prefix. Use `extinction(msg)` or `extinction_with_addr(msg, addr)` from `kernel/extinction.c`; `ASSERT_OR_DIE(expr, msg)` for assert-style checks. These two strings (boot banner success line + EXTINCTION prefix) are part of the kernel ABI with the development tooling. They do not change without updating `tools/run-vm.sh`, `tools/test.sh`, `tools/agent-protocol.md`, and this document in the same commit.
+A kernel **extinction** (ELE — Extinction Level Event; the thematic name for kernel panic) prints `EXTINCTION: <message>` as a recognizable prefix. Use `extinction(msg)` or `extinction_with_addr(msg, addr)` from `kernel/extinction.c`; `ASSERT_OR_DIE(expr, msg)` for assert-style checks. These strings are part of the kernel ABI with the development tooling, and changing one is a **format break** (§"Autonomy + escalation"): surface it, do not just sweep.
+
+**Do NOT trust a hand-written co-update list here — this one was wrong in three different ways at once, and the third is the instructive one.** It named `tools/agent-protocol.md`, which was planned in Phase 1 and never written (removed 2026-08-15, main#244: an unfollowable member teaches the reader the whole list is advisory). It named `tools/run-vm.sh`, which matches **neither literal — zero hits, structurally**, because it is a QEMU *launcher* that assembles a command line and hands over an interactive UART; it never reads boot output and cannot break. An **inert** member does the same damage as a **fictional** one: a reader dutifully opens it, finds nothing to change, and concludes the rest is advisory too. And it omitted **fourteen** files that do match (`test.sh`, `smp-multiboot.sh`, `test-cross-reboot.sh`, `test-fault.sh`, `ci-idle-gate.sh`, `np3-bench.sh`, `verify-kaslr.sh`, `warp/boot-probe.sh`, and six `interactive/*.exp`), plus two comment-only mentions.
+
+**Why it rotted, which generalizes past this list** (vault, 2026-08-16): it conflates two kinds of member. A **program** that matches the string breaks *silently and immediately*; a **document** that states it merely *becomes wrong*, and nothing fails. `CLAUDE.md` and `TOOLING.md §10` are the second kind. **A list whose members share no property has no property any member can be checked against** — which is exactly how a phantom and an inert member sat in it unremarked for the project's life. Note `tools/test-fault.sh` matches seven extinction MESSAGE bodies, not just the prefix, so rewording one for clarity makes a hardening gate report that the protection did not fire.
+
+The authority is the vault's `abi-boot-banner` note and its `mirrors` set (R6-enforced at change time), reached the usual way — `quaestor owner <changed paths>` in the mandatory doc-update step. Consult it rather than any list transcribed here, this one included.
 
 ---
 
@@ -991,7 +1140,7 @@ Boot path discipline (per Stratum OS-INTEGRATION.md §4):
 
 Admin surface coordination:
 - `/ctl/` is itself a synthetic 9P filesystem served by `stratumd` (typically on a second Unix socket). Topology is documented in `stratum/v2/docs/reference/22-ctl.md` (pools / datasets / snapshots / scrub / events / metrics / Prometheus).
-- Thylacine's `/ctl` (Phase 4 P4-D — `kernel/ctl.c`) is a *separate* kernel admin surface for OS-level introspection. The Stratum `/ctl/` is consumed BY Thylacine userspace as just another mounted 9P tree (typically at `/srv/stratum-ctl/`).
+- Thylacine's `/ctl` (Phase 4 P4-D — `kernel/devctl.c`) is a *separate* kernel admin surface for OS-level introspection. The Stratum `/ctl/` is consumed BY Thylacine userspace as just another mounted 9P tree (typically at `/srv/stratum-ctl/`).
 
 POSIX surface available from Stratum (Thylacine consumes via 9P; no per-feature work needed unless the kernel needs to mediate):
 - Live in v2.x: inodes + dirents + xattrs + file seals (`F_SEAL_*`) + advisory locks (`flock` / OFD locks) + `statx` + `name_to_handle_at` + `copy_file_range` (whole-file MVP) + `reflink` (single-dataset) + `rename` family (`RENAME_EXCHANGE` / `_WHITEOUT` / `_NOREPLACE`) + `fallocate` (PUNCH/COLLAPSE/INSERT/ZERO/UNSHARE) + symlinks + hard links + `O_TMPFILE` + `posix_fadvise` + inline-data optimization + snapshots (create/delete/hold/release/rollback).
@@ -1033,58 +1182,28 @@ Operational implications:
 
 ---
 
-## Parallel auxiliary track — a second full engineering track (worktree-isolated)
+## Parallel auxiliary track — the aux agent (worktree-isolated)
 
-A **parallel auxiliary agent** works a separate git worktree (sibling dir,
-typically `../thylacine-aux`) on branch **`aux-2`**, established 2026-06-07 to
-use spare quota alongside the main (kernel) track. Every session of both tracks
-reads this file, so the boundary is common knowledge.
+A **parallel auxiliary agent** works a separate git worktree (sibling dir, typically `../thylacine-aux`) on branch **`aux-2`**, established 2026-06-07 to use spare quota alongside the main (kernel) track. Every session of both tracks reads this file, so the boundary is common knowledge.
 
-**Rewritten 2026-08-16 (main#237 / aux side) after measurement found every
-operative claim here false.** The superseded text said the track ran on
-`aux/userspace-apps`, owned `usr/apps/**` ONLY, never touched
-`kernel/`/`arch/`/`mm/`/`specs/`/`tools/`, never edited `docs/reference/*`, and
-**never booted QEMU** — `cargo build` as its verification ceiling, "so it never
-contends with the main track's QEMU boots". Measured against `aux-2`: **zero**
-files changed under `usr/apps/`, 41 `kernel/` + 12 `tools/` + 1 `specs/` + 17
-`docs/reference/`, and the track boots HVF VMs and runs its own SMP + LS-CI
-gates. Do not restore any of it from memory of an older session. Note the
-shape, because it is the recurring one: the drift was invisible for two months
-precisely because the section reads as settled fact and nothing ever checked
-it.
+**Rewritten 2026-08-16 (aux#237) after measurement found EVERY operative claim here false** — and rewritten in aux's tree the same hour, because aux carried the identical paragraph and had therefore been loading a false description of *itself* for two months. The prior text claimed a 2026-06 charter ("owns `usr/apps/**` only", "never touches `kernel/`…`tools/`", "no edits to `docs/reference/*`", "never boots QEMU", plus a constitution / worklist / deliverable under `usr/apps/`) that the tree flatly contradicts: `aux-2` changes 41 `kernel/`, 17 `docs/reference/`, 12 `tools/`, 1 `specs/` and **zero** `usr/apps/` files, and aux boots HVF VMs and runs its own SMP gate + LS-CI.
 
-- **This is a full second engineering track, not a userspace-apps annex.** It
-  works the same surfaces main does. **Read the branch off the worktree, never
-  off a doc** — when this was measured, three sources gave three answers
-  (main's CLAUDE.md said `aux/userspace-apps`, `docs/AUX-ROADMAP.md`'s header
-  said `gfx-4 @ 45186b64`, the worktree was on `aux-2`; `gfx-4` is a separate
-  live branch, not a rename). The worklist + across-compaction memory is
-  `docs/AUX-ROADMAP.md` (which superseded the narrow `usr/apps/AUX-ROADMAP.md`
-  by moving and broadening — the old path is stale, the document is alive).
-- **The real shared surface is `kernel/` + `tools/` + `docs/reference/`.** The
-  old "don't edit `usr/apps/**`" guard guarded an empty room, and was worse
-  than useless: it aimed attention away from where the tracks actually meet.
-  Collisions there are routine and handled well by both sides landing findings
-  in each other's trees. Coordinate through yip — `presence` answers "is the
-  other track gating?" with no call placed; `busy` announces a long gate;
-  `call` for anything needing a reply.
-- **HOST CONTENTION IS REAL, AND IT MAY EXPLAIN NOTHING BUT WALL CLOCK.** The
-  contended resource is **CPU CORES, not QEMU-ness**: TCG is a pure CPU
-  emulator, an HVF guest runs real vCPU threads, and `cargo build -j` / a TLC
-  run / a sanitizer build each saturate every core — so builds, model checks
-  and guest boots are ONE contention class. The deleted clause ("it never
-  contends with the main track's QEMU boots, the host-oversubscription flake
-  source") was false in **both** halves: it pre-cleared a heavy host user that
-  does contend, and it called host oversubscription "the flake source" —
-  a pre-approved instance of the "host load" non-explanation this same file
-  forbids ~1000 lines above. It misled **both agents on one day**: main
-  reasoned from it, and aux told main "no need to hold your CPU work" minutes
-  before measuring java at 307% against its own starved TCG boot. Announce the
-  **RESOURCE and the UNCERTAINTY**, not the duration — "unknown, 6 cores" tells
-  the peer to serialize where "30 min" implies a bound. Slowness may be
-  attributed to contention; **a RED RESULT never may.** When a timing-thin gate
-  needs a quiet host, ASK for one.
-- **Kaua (LS-7) supersedes the aux `nora` (ratatui-fork) item (2026-06-13, user-directed).** MAIN now owns the console TUI substrate (`usr/lib/kaua`, `docs/KAUA.md`) + the runtime editor (`usr/nora`, native libthyla-rs *on Kaua*). The Phase-A "nora editor arc (ratatui forked native)" folds into Kaua: an editor needs ~10% of a general TUI framework, so a focused native Kaua core (immediate-mode cell-diff over cons/consctl) beats a full ratatui fork. The aux `nora`/`vendor` skeleton, if produced, is **reference-only** -- MAIN builds the runtime `nora` directly on Kaua and does NOT wait for the aux fork. The aux `libtapestry` (the **graphics** weave, `docs/TAPESTRY.md`) is unaffected -- a different layer. (Kaua = the **text** weave; named for the Kauaʻi ʻōʻō, the last of family Mohoidae; stands outside the Loom-woven names, `Weft` reserved -- KAUA.md §1.1.)
+**It was not describing a track that failed. It was describing a track whose output MOVED INTO THIS TREE, and whose charter was never rewritten to say so** — the coreutils became `usr/coreutils` (51 binaries), the Tapestry POC became `usr/lib/libtapestry` + `usr/tapestry-demo` + `usr/tapestryd`, and five documents you now depend on (`MENAGERIE.md`, `TRUSTED-PATH.md`, `INSTALLER.md`, `TAPESTRY.md`, `AURORA.md`) began life as `usr/apps/*-DESIGN.md`. **Promotion is the event that invalidates a description, and it never announces itself at the old location.**
+
+**Why this is a defect and not mere staleness:** on 2026-08-12 the deleted contention clause produced the *same wrong operational call in both readers within one day* — main reasoned from it, and aux reached the identical conclusion independently ("your specs are CPU-only and mine is one TCG VM, so we are genuinely not colliding"), about ninety minutes before measuring a TLC run at 307.5% CPU against aux's own starved boot. It misled the reader with most reason to trust it AND the reader with most reason to know better. **Neither noticing required new information — only a check that never ran.**
+
+**Method note, because two opposite probes both lie here.** A file-existence test at a cited path answers "is this PATH stale", never "does this DOCUMENT exist" — it reported the roadmap deleted when it had merely moved. And `git log --diff-filter=D` answers "was it deleted **in a commit**": a rebase drops a file leaving *no* deletion record, so empty output reads as "never deleted" = "still present". One over-reports absence, the other over-reports presence, and running both without noticing they disagree concludes a file is simultaneously gone and alive. Only a **tip scan across all refs** answers the real question.
+
+- **The aux track is a full second engineering track, not a userspace-apps annex.** In aux's own words (2026-08-16, landed verbatim on request): *the aux track owns the VIVARIUM arc (running unmodified Linux binaries; `docs/VIVARIUM.md`), the graphics arc G-6..G-9 and the Aurora environment, and the kernel surfaces those arcs land on — currently the notes/signals/job-control/PTY line. It runs its own full bar for that work: the suite, the SMP gate, the pty spec set, and LS-CI. Its worklist is `docs/AUX-ROADMAP.md`; its branch is whatever `git branch --show-current` says in `../thylacine-aux`.* **Read the branch off the worktree, never off a doc**: this file said `aux/userspace-apps`, the roadmap said `gfx-4`, the worktree is on `aux-2` — and `gfx-1`..`gfx-4` are all still live branches, so these are parallel refs, not a rename chain. Only the worktree is ever current.
+- **The real shared surface is `kernel/` + `tools/` + `docs/reference/`.** The old `usr/apps/**` guard was a guard on an empty room, and worse than useless: it aimed attention away from where the tracks actually meet. Collisions there are routine and handled well by both sides landing findings in each other's trees (worked example: the tree-wide-`pkill` / `mktemp` hazard sweep, yip call 0009). Coordinate through **yip** — `presence` answers "is the other track gating?" with no call placed; `busy` announces a long gate; `call` for anything needing a reply.
+- **HOST CONTENTION IS REAL, AND IT MAY EXPLAIN NOTHING BUT WALL CLOCK.** The contended resource is **CPU CORES**, not QEMU-ness: TCG is a pure CPU emulator, an HVF guest runs real vCPU threads, and `cargo build -j` / a TLC run / a sanitizer build each saturate every core — so builds, model checks and guest boots are **ONE contention class**. This host has 8 cores; the SMP gate's `smp8` configs alone ask for 8 vCPU threads, so a concurrent build is direct core-for-core competition. **Measured 2026-08-16, same tree and same commit** — contended: aux ran 5 LS-CI scenarios in 76 min, 4 of them burning attempt-1 retries; quiet host: **8 scenarios in 10 min, 0 retries, and all four of those scenarios pass.** Concurrently main's TLC went 307.5% -> 629.0% CPU when aux parked. Neither agent was getting the machine, and neither could see it.
+
+  **What that licenses, exactly.** Contention may explain a **wall-clock budget miss** — a timeout, a burned retry, a thin scenario overrunning. It may NEVER explain a corruption, a wrong value, a crash, or a nondeterministic assertion failure; those stay races to be hunted per §"Whole-system stewardship". And even for a timeout it is a conclusion you MEASURE, never one you reach for: aux's diagnosis rested on process-state evidence (`RN+` — running, not sleeping) taken while it was happening, and the quiet-host green is only CORROBORATION, because **passing later never proves why something failed earlier**. A retry count with no host conditions stamped on it is the same fiction as a benchmark with no lane named.
+
+  **Announce the RESOURCE and the UNCERTAINTY, not the duration** (aux's protocol, binding on both tracks): "unknown, 6 cores" tells the peer to serialize; "30 min" implies a bound nobody can honour. When a timing-thin gate needs a quiet host, ASK — the negotiation has been run cleanly twice (yip 0009 turns 7-11; 0014).
+
+  The deleted clause claimed aux "never contends with the main track's QEMU boots, the host-oversubscription flake source" — false in both halves, and its parenthetical licensed, in always-loaded scripture, the exact "host load" non-explanation that §"Whole-system stewardship" forbids ~1000 lines above.
+- **Kaua (LS-7) supersedes the `nora` ratatui-fork item (2026-06-13, user-directed).** MAIN owns the console TUI substrate (`usr/lib/kaua`, `docs/KAUA.md`) + the runtime editor (`usr/nora`, native libthyla-rs *on Kaua*): an editor needs ~10% of a general TUI framework, so a focused native Kaua core (immediate-mode cell-diff over cons/consctl) beats a full ratatui fork. `libtapestry` (the **graphics** weave, `docs/TAPESTRY.md`) is a different layer and unaffected. (Kaua = the **text** weave; named for the Kauaʻi ʻōʻō, the last of family Mohoidae; stands outside the Loom-woven names, `Weft` reserved -- KAUA.md §1.1.)
 
 ---
 
@@ -1109,6 +1228,102 @@ Implication for sessions in Phase 7+: treat the v1.0-rc as a real ship target. D
 ---
 
 ## When to recommend `/compact`
+
+### The 600k checkpoint line — run THROUGH checkpoints until it fires
+
+**A checkpoint is not a stopping point.** Under granted autonomy, land a chunk,
+report it, and **start the next one in the same run**. Do not yield after every
+chunk waiting to be told to continue; do not compact "to be safe" at 300k. The
+cost of stopping early is real and asymmetric — a fresh context has to re-derive
+the subsystem knowledge the current one already holds, and the re-derivation is
+where wrong turns come from.
+
+**The signal that ends the run is the `ctx-hook` CHECKPOINT WINDOW line at
+600k** (`~/.claude/ctx-hook.sh`, `CTX_CKPT`; ~66% of the 900k window, which is
+the "~60-70%" the bullets below already named). That hook fires on every tool
+call, so it sees the budget continuously — you do not have to estimate it, and
+you should not try. Three levels, three different meanings:
+
+| Level | Fires | Means |
+|---|---|---|
+| **600k CHECKPOINT WINDOW** | once per crossing | **The intended compaction point.** Carry to a clean boundary, write the resume note, then run `tools/thyla-selfcompact.sh "<reason>"`. |
+| **750k** | every call | Wind down. Finish the step; do not open a new arc. |
+| **880k** | every call | At the wrap line. Commit, hand off, yield. |
+
+**At 600k you compact yourself; you do not ask.** `tools/thyla-selfcompact.sh`
+types `/compact` into your own tmux pane, and `~/.claude/resume-note.py`
+re-injects your last message on the far side — the two steps the user was
+performing by hand at every boundary. Three things follow from that:
+
+- **Your final message before invoking it IS the resume note.** Not a report to
+  a reader who will answer — a note to yourself with no memory of writing it.
+  It must say what is in flight and, more importantly, **what must NOT be
+  redone**: gates already green, commits already pushed, measurements already
+  taken. A fresh context that re-runs a two-hour bar has been failed by that
+  message.
+- **Invoking it is a request, not a decision.** It refuses on a dirty tree or
+  outside tmux, and it **belays** — hands back to the user — when HEAD has not
+  moved across two consecutive self-compactions. That gate exists because the
+  dangerous failure is not a runaway but a *quiet loop*: hit a problem,
+  compact, return with less context, fail the same way. Every turn looks like
+  progress and none is, and an iteration cap cannot catch it because the
+  pathological case sits under the cap. Only landed work distinguishes stuck
+  from thinking, so only landed work re-arms the mechanism.
+- **A belay is a stop, and it is the good outcome.** When it fires, hand back
+  with what was attempted and what it needs. Do not clear the state file to get
+  moving again; that is disabling the one guard standing between a long run and
+  an expensive one.
+- **A queued self-compaction is NOT yours to cancel — only the operator's.**
+  The script types `/compact` + Enter into the pane the instant you invoke it,
+  so the submission is queued in the client immediately. You CANNOT retract it
+  from inside your own turn: `tmux send-keys C-u` clears only the *live input
+  box*, never an already-Enter-queued command — a `/compact` you "cancel" that
+  way survives and fires later against whatever session is up. (Worked failure,
+  2026-08-19: a self-compact invoked early at 560k, then countermanded by the
+  Stop hook, was "cancelled" with `C-u`; the stray `/compact` rode the input
+  queue for ~4 hours and submitted right after the *real* compaction — harmless
+  only by luck, because a spurious `/compact` no-ops with "Not enough messages
+  to compact.") Two rules follow. **(1) Invoke `thyla-selfcompact.sh` only on
+  the real 600k signal, never in anticipation of it** — that is the one moment
+  nothing will countermand you, so there is nothing to cancel. **(2) If you must
+  abort a queued self-compaction anyway, you cannot do it yourself: raise a
+  blocking question to the operator** (`AskUserQuestion` — it interrupts the
+  turn without ending it) asking them to cancel it. The operator is the only
+  actor who can clear the client's input queue; your keystrokes cannot.
+
+Where the script is absent (a worktree that has not merged it), the hook says
+"recommend `/compact`" instead and the old behaviour stands — the two arms are
+discrimination-tested, not assumed.
+
+So the rule is: **below 600k, keep working through as many checkpoints as the
+work takes; at 600k, finish to a clean boundary and self-compact.**
+The 600k line is advisory and deliberately fires ONCE — it is a "this is the
+right moment," not an alarm. Reaching it mid-chunk does not mean stopping
+mid-chunk: carry to the next clean boundary (committed, gates green, handoff
+current) and recommend from there. If that boundary is genuinely far away, say
+so and keep going — 750k is the level that means wind down.
+
+**What does NOT change: the checkpoint contract still fires at every
+checkpoint** (§"The checkpoint contract"). Account for running processes, keep
+the handoff current, say what is next — at each one, whether or not you yield.
+That is precisely what makes this rule safe: if the handoff is continuously
+current, then compaction is free at *any* moment, so choosing to run on costs
+nothing and the 600k line can be a recommendation rather than a scramble.
+
+**What also does NOT change: the escalation list.** Running through checkpoints
+is autonomy over *sequencing*, never over the items in §"Autonomy + escalation"
+— a format break, a destructive operation, an architectural deviation, a
+scripture-altering design fork still stops the run and asks, at 100k or 700k.
+
+**If the hook is not installed, this rule has no brake.** `ctx-hook.sh` lives in
+`~/.claude/`, outside this repo, so a fresh machine or a differently-configured
+session may not have it — and then "run until the signal fires" means running
+past the wrap line into a hard overflow, because a signal that never arrives is
+indistinguishable from one that has not arrived *yet*. So: an autonomous run
+that has passed roughly two thirds of its budget **without ever seeing a
+CONTEXT line** should treat the hook as absent and fall back to the judgement
+bullets below rather than keep waiting. Verify with
+`ls -l ~/.claude/ctx-hook.sh` if in doubt; one command settles it.
 
 When all of the following hold:
 
@@ -1316,6 +1531,46 @@ This protects against audit findings being lost across session boundaries. The n
 ---
 
 ## Operational summary patterns
+
+**FIRST, THE TRIGGER — because this section reads as "chunk done -> write this", and that instruction is what ends the run.** Emitting the full summary IS the yield: final text ends the turn, and in this harness nothing restarts you afterwards but the user. So a summary written at a completed chunk silently converts "running through checkpoints" into "handing back", no matter what §"The 600k checkpoint line" says. Measured 2026-08-16, on the first autonomous run: the chunk landed, the summary got written because scripture said to, and the run stopped at ~160k of a 600k budget. The concrete ritual beats the abstract rule every time.
+
+**So the full summary below belongs to STOPPING, not to finishing.** Write it when you are actually handing back: at the 600k line, on an item from §"Autonomy + escalation", when genuinely blocked, or when the user asks. At a checkpoint you are running THROUGH, the checkpoint contract is discharged in **three lines or fewer** — what landed (hash), what is running, what is next — and then you **open the next item in the same turn**, without final prose.
+
+**The tell:** if you are writing a `Key` table, an `Arc state` field, or an `Ahead` line, you are writing a hand-back. Stop and ask whether you actually intend to stop. If you do not, delete it and make the next tool call instead.
+
+**The `Stop` hook now exists** (`tools/stop-hook.sh`, user-requested
+2026-08-16 after a run stopped at a checkpoint it should have run through --
+having written the very `Ahead` line named above as the tell). This paragraph
+used to say the hook was "deliberately not built"; it was built precisely
+because behaviour that is only as good as remembering it was not good enough.
+
+What it does, so you recognize it rather than argue with it: on a stop it
+computes the same budget `ctx-hook.sh` does, and if you are **between 120k and
+the 600k checkpoint line** and have taken **>= 6 assistant turns since the user
+last spoke** -- i.e. an autonomous run, not a reply -- it blocks ONCE and asks
+which of four cases applies. Three of them (an §"Autonomy + escalation" item, a
+question you have now answered, a genuine block) make stopping CORRECT: name it
+in a clause and stop, and it will not ask again. The fourth is the one it exists
+for -- **open the chunk you just named on your own `Next` line instead of
+yielding.**
+
+It is a question, not a veto, because only you can tell an earned yield from an
+unearned one. It stays silent below 120k (conversational), at/above 600k
+(stopping is what scripture wants there, and a second voice contradicting
+`ctx-hook.sh` would be worse than silence), and whenever `stop_hook_active` is
+already set. **It fails OPEN on every error path** -- a Stop hook that failed
+closed could trap a session in a loop it cannot talk its way out of, which is
+far worse than a missed nudge. Discrimination-tested across all seven
+conditions, including the two legs most likely to be silently wrong: a
+tool-result and a system notification must NOT count as "the user spoke", or the
+counter resets constantly and the hook goes quiet during exactly the runs it is
+for.
+
+It lives IN THE REPO rather than in `~/.claude/` (where `ctx-hook.sh` sits, and
+whose absence §"The 600k checkpoint line" already flags as leaving that rule
+with no brake). One copy, no sync obligation, and it survives a fresh clone;
+`~/.claude/settings.json` points its `Stop` event at this path. Install on a new
+machine is that one settings entry.
 
 End-of-iteration summaries (the response to a completed audit / chunk) follow a consistent structure for fast review.
 

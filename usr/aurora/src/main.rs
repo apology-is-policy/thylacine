@@ -599,6 +599,14 @@ pub extern "C" fn rs_main() -> i64 {
     // Cleared only on a successful present (slots rotate per attempt, so a
     // retry must re-fill; the same discipline as the dirty rows).
     let mut full_fill = false;
+    // GPU-DESIGN 4.5.8b. Slots rotate and nothing copies content between them,
+    // so a damage-only present must repaint everything that changed since the
+    // slot it is about to draw into was last presented -- `surf.age()` says how
+    // far back that is. Ring of the row ranges already presented, newest last;
+    // a full-frame present records (0, rows), so any union reaching past one
+    // widens to the whole surface, which is conservative and correct.
+    let mut dmg_hist: [(usize, usize); tapestry::MAX_SLOTS] = [(0, 0); tapestry::MAX_SLOTS];
+    let mut dmg_seen: usize = 0;
 
     loop {
         // (0) #129: retry any input the console refused last pass. This must run
@@ -788,6 +796,17 @@ pub extern "C" fn rs_main() -> i64 {
                     let sub_floor =
                         ow / m.cell_w < 20 || oh / m.cell_h < 5;
                     if sub_floor && !(ow == w && oh == h) {
+                        // This arm declines the offer and keeps the current
+                        // generation, so it never reaches handle_configure --
+                        // and therefore would never reach the slot
+                        // invalidation living inside it (GPU-DESIGN 4.5.8b).
+                        // It IS an invalidation: this CONFIGURE can be the one
+                        // announcing a return to visibility, and while hidden
+                        // the compositor skips transfers. Marking rows dirty is
+                        // not enough on two counts -- it repaints ROWS, never
+                        // the margins outside the grid, and it repaints ONE
+                        // slot where every slot is suspect.
+                        surf.invalidate();
                         for d in term.dirty.iter_mut() {
                             *d = true;
                         }
@@ -989,7 +1008,12 @@ pub extern "C" fn rs_main() -> i64 {
         // could transfer stale panel pixels from an older slot), so an open
         // OSD routes every damaged pass through the full-frame branch.
         let osd_pass = ui.open && (ui.dirty || r0 < r1 || full_fill);
-        if full_fill || osd_pass {
+        // Age 0 = the slot we are about to draw into holds nothing usable
+        // (first use on this generation, or the compositor invalidated it).
+        // A damage-only present there would leave undefined pixels around the
+        // fresh rows, so it routes through the full-frame branch instead.
+        let stale_slot = r0 < r1 && surf.age() == 0;
+        if full_fill || osd_pass || stale_slot {
             // #55: the post-reweave full frame (the frame-0 pattern applied
             // through the single present site so the retry discipline holds).
             let (dw, dh) = (surf.w, surf.h);
@@ -1023,8 +1047,31 @@ pub extern "C" fn rs_main() -> i64 {
                     *d = false;
                 }
                 prev_cursor = cursor;
+                // A full frame covers every row (4.5.8b).
+                dmg_hist[dmg_seen % tapestry::MAX_SLOTS] = (0, rows);
+                dmg_seen += 1;
             }
         } else if r0 < r1 {
+            // Widen to everything this slot is missing (4.5.8b): its content
+            // is `age` presents old, so the union runs back over the `age - 1`
+            // presents that landed in the OTHER slots since. Row ranges union
+            // as (min, max) -- rows in the gap are repainted too, which costs
+            // a little redraw and cannot be wrong.
+            let (dirty0, dirty1) = (r0, r1);
+            let back = (surf.age() as usize).saturating_sub(1).min(dmg_seen).min(tapestry::MAX_SLOTS);
+            let (mut u0, mut u1) = (r0, r1);
+            for k in 0..back {
+                let (a, b) = dmg_hist[(dmg_seen - 1 - k) % tapestry::MAX_SLOTS];
+                if a < b {
+                    if a < u0 {
+                        u0 = a;
+                    }
+                    if b > u1 {
+                        u1 = b;
+                    }
+                }
+            }
+            let (r0, r1) = (u0, u1);
             {
                 let px = surf.pixels();
                 render_rows(&term, &m, px, w, r0, r1, cursor);
@@ -1052,6 +1099,18 @@ pub extern "C" fn rs_main() -> i64 {
                     *d = false;
                 }
                 prev_cursor = cursor;
+                // Record the DAMAGE (the originally-dirty span), not the
+                // widened repaint. The history answers "what changed since
+                // slot X was last presented", and what changed between two
+                // presents is exactly the dirty span -- the widening only
+                // says how much of it THIS slot had to catch up on. Recording
+                // the widened range instead is correct but never converges:
+                // one full-rows entry (any scroll) re-enters every later
+                // union, so every present after it repaints all rows forever
+                // and the damage path is dead. With the dirty span, a full
+                // entry falls out of the window after `nslots` presents.
+                dmg_hist[dmg_seen % tapestry::MAX_SLOTS] = (dirty0, dirty1);
+                dmg_seen += 1;
             }
         }
     }

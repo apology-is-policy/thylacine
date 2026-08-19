@@ -29,6 +29,7 @@
 #include <thylacine/mmio_handle.h>
 #include <thylacine/notes.h>
 #include <thylacine/page.h>
+#include <thylacine/pci_handle.h>  // audit F8: quiesce a PCI-transport driver at death
 #include <thylacine/path.h>        // VIVARIUM V-4a-0: Proc.exe_path (#66 Path)
 #include <thylacine/poll.h>        // child_waiters multi-waiter reap (#344)
 #include <thylacine/territory.h>
@@ -41,6 +42,7 @@
 #include <thylacine/torpor.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
+#include <thylacine/vivarium.h>  // viv_sigtab_reset -- exec resets dispositions in place
 #include <thylacine/vma.h>
 #include <thylacine/weft.h>
 
@@ -540,6 +542,32 @@ int proc_quiesce_owned_devices(struct Proc *p) {
         for (int i = 0; i < PROC_HANDLE_MAX; i++) {
             struct Handle *h = &t->slots[i];
             if (h->magic != HANDLE_MAGIC) continue;
+            if (h->kind == KOBJ_PCI && h->obj) {
+                // Warp-2 audit F8 (the #170 family): a PCI-transport
+                // driver's device is NOT reachable through the MMIO arm
+                // below -- its registers live in BARs the host bridge
+                // decodes, which `virtio_mmio_reset_in_range` does not
+                // cover. Without this every PCI driver (tapestryd's GPU +
+                // 3 input functions, netd's NIC) stayed BUS-MASTER-ENABLED
+                // across the fallback `state=ZOMBIE; proc_free()` path,
+                // whose addrspace_unref frees the KObj_DMA pages BEFORE
+                // handle_table_free reaches the KObj_PCI release quiesce.
+                // Idempotent with `pci_release_bars_and_claim`.
+                // V-2 (audit F1): a claim with a live BURROW_TYPE_HOSTMEM
+                // mapping gets a DMA-only quiesce -- BUS_MASTER cleared (the
+                // dead device cannot DMA) but MEM_SPACE KEPT, so a client's live
+                // mapping never observes a MEM-decode-disabled BAR. MEM_SPACE
+                // clears at the last kobj_pci_unref, once every hostmem burrow
+                // (thus every client mapping) is gone. A concurrent last-burrow
+                // free racing this read is benign: whichever path is last clears
+                // MEM_SPACE, and the client is unmapped exactly when it does.
+                struct KObj_PCI *kp = (struct KObj_PCI *)h->obj;
+                if (__atomic_load_n(&kp->hostmem_burrows, __ATOMIC_ACQUIRE) > 0)
+                    reset += kobj_pci_quiesce_dma_only(kp) ? 1 : 0;
+                else
+                    reset += kobj_pci_quiesce(kp) ? 1 : 0;
+                continue;
+            }
             if (h->kind != KOBJ_MMIO || !h->obj) continue;
             struct KObj_MMIO *k = (struct KObj_MMIO *)h->obj;
             reset += virtio_mmio_reset_in_range(k->pa, k->size);
@@ -1126,9 +1154,36 @@ bool proc_thread_cap_ok(struct Proc *p) {
     if (!p) return false;
     if (proc_resource_exempt(p)) return true;
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
-    bool ok = p->thread_count < PROC_THREAD_MAX;
+    // SQPOLL kthreads share the budget (fid-lift audit F1): the Proc's
+    // workers, whether they run under it or under kproc on its behalf.
+    bool ok = p->thread_count + p->loom_sqpoll_count < PROC_THREAD_MAX;
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return ok;
+}
+
+// Charge one SQPOLL kthread against the creating Proc's thread budget.
+// Check-and-increment under one lock hold (unlike the thread path's
+// check-then-create, a Loom setup has no other serialization point).
+// Always counts -- exempt Procs skip only the CAP, so the uncharge is
+// unconditional.
+bool proc_sqpoll_charge(struct Proc *p) {
+    if (!p) return false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (!proc_resource_exempt(p) &&
+        p->thread_count + p->loom_sqpoll_count >= PROC_THREAD_MAX) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        return false;
+    }
+    p->loom_sqpoll_count++;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return true;
+}
+
+void proc_sqpoll_uncharge(struct Proc *p) {
+    if (!p) return;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (p->loom_sqpoll_count > 0) p->loom_sqpoll_count--;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
 bool proc_child_cap_ok(struct Proc *p) {
@@ -3171,6 +3226,17 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self) {
     // sigaction racing a signal already in flight, which proc.h's sigtab
     // paragraph already states as the standing rule for this field.
     //
+    // The reset table is indistinguishable from the kzalloc'd one viv_sigtab_of
+    // hands out ONCE SETTLED. "Once settled" is load-bearing: the reset is NOT
+    // a snapshot -- a lock-free reader on another CPU can see an arbitrary mix
+    // of pre- and post-reset entries. That mix is sound (POSIX leaves the
+    // exec-vs-signal race undefined and every entry it sees was either
+    // genuinely installed or the default), but it is a per-FIELD guarantee,
+    // not a whole-table one, and it holds only because viv_sigtab_reset writes
+    // 8-byte fields rather than bytes -- see its comment: the earlier byte
+    // loop compiled to halfword stores and could publish a handler nobody
+    // wrote.
+    //
     // WHAT resets is phenotype-conditional (the fork/exec signal-state rule,
     // ARCH 7.6, 2026-08-17). POSIX execve(2): "signals set to be caught ...
     // shall be set to the default action; ... signals set to be ignored shall
@@ -3206,10 +3272,23 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self) {
     // invariant notes_noted_restore states when it deliberately leaves the name
     // buffer intact), so they need no separate scrub.
     self->in_handler = false;
+
+    // main#243 F8: the set_tid_address slot names a VA in the OLD image. Linux
+    // clears it in mm_release at exec; left alone, a new image that never calls
+    // set_tid_address (a native image, or anything not musl-shaped) would get a
+    // 4-byte zero stored at exit into whatever it mapped at that VA -- bounds-
+    // checked, so contained, but a write the image never asked for.
+    self->clear_child_tid = 0;
 }
 
 // Test hook (the *_for_test convention; deliberately absent from the header --
-// the harness extern-declares it and there is no production caller).
+// the harness extern-declares it and there is no production caller). The
+// precondition is unenforced here and therefore stated: `p` must have no live
+// thread but `t` -- exec establishes that (proc_exec_alone, re-checked under
+// g_proc_table_lock at the swap); the table is written without a lock, so
+// driving this on a RUNNING Proc would interleave a whole-table reset with that
+// Proc's own viv_sigtab_set. The test drives it on a Proc it built and never
+// scheduled.
 void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t);
 void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t) {
     proc_exec_drop_image_state(p, t);

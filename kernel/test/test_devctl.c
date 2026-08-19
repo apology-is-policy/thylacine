@@ -11,6 +11,7 @@
 #include <thylacine/sched.h>     // V-4c-2b: sched_cpu_ctxt
 #include <thylacine/smp.h>       // V-4c-2b: smp_cpu_count
 #include <thylacine/spoor.h>
+#include <thylacine/srvconn.h>   // #210: a live conn for the 9p-sessions read
 #include <thylacine/syscall.h>   // V-4b-5: struct t_stat + T_S_IF*
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
@@ -33,6 +34,7 @@ void test_devctl_read_cpu_format(void);
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
 void test_devctl_stat_native_shapes(void);
+void test_devctl_read_9p_sessions_format(void);
 
 // =============================================================================
 // Helpers.
@@ -102,6 +104,7 @@ void test_devctl_walk_to_each_leaf(void) {
     // that is not added here is simply not walk-covered -- add yours.
     static const char *leaf_names[] = {
         "procs", "memory", "devices", "kernel-base", "sched", "cpu", "cons",
+        "9p-sessions",
     };
     for (size_t i = 0; i < sizeof(leaf_names) / sizeof(leaf_names[0]); i++) {
         struct Spoor *root = devctl.attach("");
@@ -346,6 +349,44 @@ void test_devctl_read_cons_format(void) {
     TEST_ASSERT(contains(buf, (size_t)got, "tx_dropped:"),    "has tx_dropped:");
     TEST_ASSERT(contains(buf, (size_t)got, "tx_room_waits:"), "has tx_room_waits:");
 
+    spoor_clunk(c);
+}
+
+// #210: /ctl/9p-sessions end to end through the Dev vtable -- a live conn
+// with known counters must render as a `conn` row, and the row must be
+// gone after the last unref (nothing stale in the registry).
+void test_devctl_read_9p_sessions_format(void) {
+    struct SrvConn *cn = srvconn_create(0xBBBBu, 31337, false, 0,
+                                        SRVCONN_MSIZE);
+    TEST_ASSERT(cn != NULL, "srvconn_create");
+    const u8 bytes[3] = { 9, 9, 9 };
+    TEST_EXPECT_EQ(srvconn_client_send(cn, bytes, 3), (long)3, "3 bytes in");
+
+    struct Spoor *c = open_ctl_leaf("9p-sessions");
+    TEST_ASSERT(c != NULL, "open /ctl/9p-sessions");
+    char buf[2048];
+    long got = devctl.read(c, buf, sizeof buf, 0);
+    TEST_ASSERT(got > 0, "9p-sessions read positive with a live conn");
+    TEST_ASSERT(contains(buf, (size_t)got, "conn peer=31337"),
+                "the live conn renders by peer pid");
+    // Assert the WHOLE row through its TAIL, not a prefix: wedge run 1
+    // passed the prefix assertion while the formatter aborted mid-row
+    // (fmt_str("") returns 0 == the overflow sentinel), losing every
+    // field after c2s_buffered and every later row.
+    TEST_ASSERT(contains(buf, (size_t)got,
+                "c2s=3/0+3 s2c=0/0+0 sframes=0"),
+                "the full conn row renders through its tail");
+    spoor_clunk(c);
+
+    srvconn_teardown(cn);
+    srvconn_unref(cn);
+
+    c = open_ctl_leaf("9p-sessions");
+    TEST_ASSERT(c != NULL, "re-open /ctl/9p-sessions");
+    got = devctl.read(c, buf, sizeof buf, 0);
+    TEST_ASSERT(got >= 0, "9p-sessions read ok after teardown");
+    TEST_ASSERT(!contains(buf, (size_t)(got > 0 ? got : 0), "peer=31337"),
+                "the freed conn no longer renders");
     spoor_clunk(c);
 }
 

@@ -32,7 +32,6 @@ The `tools/` directory is a first-class part of the repository. It is not a coll
 tools/
   run-vm.sh           ← launch QEMU with the correct flags
   deploy.sh           ← update kernel/binary in running VM via 9P share
-  agent-protocol.md   ← the command/result convention for agentic interaction
   build.sh            ← full build wrapper around CMake + Cargo
   test.sh             ← run the test suite against a running VM
   snapshot.sh         ← save/restore QEMU VM state
@@ -121,6 +120,15 @@ launching terminal). `=vnc:N` serves the gpu0 console on
 (`tools/interactive/ls-gfx-live.exp` + `tools/rfb-refresh.py` drive it;
 in this mode the vestigial `gpu-mmio0` device is dropped so the gpu0
 console binds QemuConsole 0, which a VNC client attaches to).
+`=egl-headless` is the Warp arc's headless GL backend on a Linux GL host
+(the `-gl` device models need it; every `RESOURCE_FLUSH` there is a
+full-frame host readback into QEMU's console surface — measured 17 ms of
+every direct frame on thyla-pi/V3D, GPU-DESIGN §4.5.12). `=dbus-gl`
+(`-display dbus,p2p=on,gl=on`, Warp-C C-4) is the same render-node GL
+context with NO listener and no readback: nothing can look at it
+(no screendump, no VNC), so it is the measurement lane for the guest's
+own present costs and only that (`WARP_DISPLAY=dbus-gl
+tools/warp-host.sh decomp gl`). Both drop `gpu-mmio0` like `vnc:N`.
 
 **N is ALLOCATED, never hardcoded (#127).** `lc_pick_vnc_display`
 (`tools/interactive/lib.exp`) derives a per-tree base from the repo's
@@ -654,6 +662,74 @@ A top-level `Makefile` provides `make kernel`, `make all`, `make test`, `make pr
 
 **Gates.** `make smp-gate` (`tools/ci-smp-gate.sh`) multi-boots the SMP soundness matrix (single boots lie). `make idle-gate` (`tools/ci-idle-gate.sh`) boots hvf-headless, settles, and FAILS if the guest spins a core at idle (mean qemu %cpu over a no-core-pegged threshold) — the standing guard against a boot leaving a busy-loop running (e.g. a leaked debug fixture); host-load-robust because host contention can only *deflate* qemu's %cpu, never inflate an idle guest's. `make test-interactive` (`tools/test-interactive.sh`) drives a real PTY console (login + rendered output).
 
+**LS-CI cost and concurrency (the G arc).** `tools/test-interactive.sh` records
+per-scenario AND per-attempt wall time, prints a summary sorted by cost, and
+writes `build/ls-ci-timings.tsv` (`scenario / attempt / rc / verdict / seconds /
+accel`). Two spans are timed: the attempt (just the expect run) and the scenario
+TOTAL, which also carries the reap, the settle, and both fixture restores --
+overhead a parallel run pays per slot rather than once, so the two numbers are
+not interchangeable. The summary closes with a reconciliation line: serially the
+sum of scenario totals and the gate wall must be close, and a gap over 60 s is
+reported as the instrument missing work rather than left as a silent
+discrepancy. Every row carries its accel, because a tcg figure and an hvf figure
+are not comparable and calling their difference a regression is the obvious trap.
+
+`LS_CI_JOBS=N` runs N scenarios at once (default 1). What blocked this was not
+the scenarios but the FIXTURES: isolation was already per-attempt, yet every
+attempt restored the pristine pool into the same `$POOL` path, so two scenarios
+could never be in flight. Each scenario now gets a slot under
+`build/ls-ci-slots/<name>/` holding its own pool, disk, and QMP socket
+(`THYLACINE_POOL_IMG` / `THYLACINE_DISK_IMG` / `THYLACINE_QMP_SOCK`), and
+`LS_CI_VNC_BASE` spreads the VNC probe's starting point so concurrent scenarios
+do not race each other through its TOCTOU window. Semantics are unchanged: every
+scenario still starts from the same pristine snapshot, and a scenario's own
+multiple boots still share its pool (`ls-gfx-mode`/`-font`/`-osd-persist` persist
+state across boots by design). Concurrency is RAM-bound, not core-bound -- each
+VM takes `THYLACINE_MEM_MIB` -- so size N to memory, not to cores; overcommitting
+swaps, and a swapping host makes every timeout in the suite marginal.
+
+**Per-scenario accel and the TCG anchor set (G-3).** A scenario picks its accel
+in its own `.exp` (`set ::env(THYLACINE_ACCEL) hvf`) — a mechanism 14 gfx
+scenarios already used, and the reason LS-CI's cost distribution was bimodal
+before anyone measured it: HVF scenarios cost 31–77 s, TCG ones 185–270 s, a
+~5x ratio, because per-scenario cost is boot-dominated. 26 of 34 now run HVF.
+
+**Accel is not only a speed knob**, which is what makes this a coverage
+decision rather than a tuning one: `run-vm.sh` derives the CPU model *and* the
+GIC version from it — `hvf` gives `-cpu host` + GICv2, `tcg` gives `-cpu max` +
+GICv3 (HVF cannot do v3 here at all; its emulated GICv3 distributor trips an
+`isv` data-abort assert). Every flip therefore moves a scenario off those axes,
+and #166 is the standing proof that a scenario can go **inert** under HVF while
+still reporting PASS — a green test that quietly stopped testing.
+
+So eight scenarios stay on TCG, and the list is enforced rather than
+documented — `LS_CI_TCG_ANCHORS` in the wrapper, which **refuses to run** if an
+anchor's `.exp` carries an hvf directive. A coverage rule that depends on
+nobody editing the wrong file is not a rule. Four are pinned by necessity
+(`freeze-172`/`flood-174` need TCG's serialized vCPU as their *trigger* —
+"HVF wedges on a mere held key"; `split173` for a deterministic split;
+`nora-demo` breaks under HVF outright), and three by coverage: `idle-probe`
+(the tickless-idle guard is timer/interrupt-shaped, and `make idle-gate`
+covers the HVF side), `ls-7` (#70 was a TCG-only watchpoint livelock — moving
+it retires that regression's only coverage), and `pty-4` (#162 reproduces only
+under TCG gate load, so it is the sole place that open bug can still be seen).
+Together they keep GICv3 and `-cpu max` live in every run.
+
+Note that "passes under HVF" was necessary but not sufficient evidence: all 15
+steerable TCG scenarios passed a forced-HVF trial, and three of them were kept
+on TCG anyway, because the question is what a scenario *covers*, not whether
+it goes green.
+
+Two traps this cost, both worth knowing before touching it. **A forked scenario
+inherits the EXIT trap**: bash resets *signal* traps in a subshell but still runs
+an inherited EXIT trap when that subshell exits, so without re-arming, the first
+scenario to finish would run the tree-wide `reap_qemu` and kill every other
+scenario's live VM -- #59's cross-tree shootout reproduced inside one tree, and
+it would present as "qemu GONE, guest healthy" mid-scenario. Each slot re-arms to
+a slot-scoped reaper. **And `disk_restore` MINTS the shared `disk.img.pristine`
+when it is missing**, so the parent mints it once before forking; three workers
+entering that path together would tear the very twin they then clone from.
+
 **A background gate that dies with `Terminated: 15` (#128).** A long gate run as an agent background task can be stopped by the AGENT HARNESS itself — not by the guest, not by the sibling tree, not by any timeout. The 2026-08 forensics: kills at 41 s..5141 s elapsed with clean runs at 1905 s, no explicit stop call, the CLI process alive throughout, the machine awake, and five instants where BOTH trees' sessions lost their tasks within ~300 ms — a host-global session-management event, correlated with user-idle windows. Attribute a dead task from its completion NOTIFICATION, not from the log (the bash `Terminated: 15` line is identical either way): `killed` / "was stopped" = the harness stopped it — INFRA, the run says NOTHING about the guest, just re-run it; `failed` / "exit code 143" = a real external SIGTERM reached the process — a killer exists, investigate. Group-sizing does not protect (kills land at arbitrary elapsed); attribution + re-run is the mitigation.
 
 ### The production boot shape (`--production`, #61)
@@ -858,7 +934,9 @@ The `EXTINCTION:` prefix is the agent's catastrophic-failure-detection signal. A
 
 The function is `extinction(const char *msg)` / `extinction_with_addr(const char *msg, uintptr_t addr)` in `kernel/extinction.c` (header `kernel/include/thylacine/extinction.h`). Convenience macro `ASSERT_OR_DIE(expr, msg)` for assert-style checks.
 
-These two strings (the success banner and the EXTINCTION prefix) are part of the kernel ABI with the development tooling. They do not change without updating `tools/run-vm.sh`, `tools/test.sh`, `tools/agent-protocol.md`, and `CLAUDE.md` in the same commit.
+These two strings (the success banner and the EXTINCTION prefix) are part of the kernel ABI with the development tooling. They do not change without updating `tools/run-vm.sh`, `tools/test.sh`, and `CLAUDE.md` in the same commit — and **this section (§10) is the agent-side protocol**, so a change lands here too.
+
+> Until 2026-08-15 this list also named `tools/agent-protocol.md`. That file was planned in Phase 1 and never written (zero git history), so the requirement was unfollowable — and an unfollowable item in a mandatory list teaches the reader that the whole list is advisory, which is a worse failure than the missing file. The protocol lives here; the citation was removed rather than the doc invented (main#244).
 
 ---
 

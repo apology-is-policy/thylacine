@@ -1,0 +1,77 @@
+#!/usr/bin/expect -f
+# tools/interactive/quarry.exp -- quarry: the GPU demo-bench launcher (a Kaua
+# TUI + CLI over the renderer matrix), over a real PTY.
+#
+# The runnable coverage no host test can reach:
+#   1. The CLI face at a cooked prompt: `quarry list` probes every renderer row
+#      and prints the matrix -- the sw row is READY on every boot shape (the
+#      ramfs /tyr-quake always ships), and the Vulkan seam rows always report
+#      "awaits Warp-6". The GL rows' status varies with the boot config (pool
+#      staged? /srv/warp 3D?), so the assertions pin only the invariant rows.
+#   2. The TUI face: ut sees a raw command (console::is_raw_command("quarry")),
+#      flips the console RAW, quarry acquires the screen and renders the title
+#      + footer; Down navigates; q quits; ut restores the prompt (the prowl
+#      contract).
+#
+# Assertion discipline (the prowl.exp pattern): lc_send echoes the typed
+# command at the cooked prompt, so assertions match tokens only quarry's OUTPUT
+# produces ("awaits Warp-6", "software renderer", the TUI title), never the
+# word "quarry" itself.
+
+# Userspace-render scenario, boot-dominated: HVF for wall clock; the GICv3 +
+# -cpu max axes stay covered by the TCG anchor set (the prowl.exp argument).
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# --- The CLI face (cooked prompt) -------------------------------------------
+lc_send "quarry list"
+# The sw row is ready on every boot shape (ramfs-resident binary).
+lc_expect "software renderer" "quarry list: the sw row printed"
+# The Vulkan seam rows probe MISSING with the Warp-6 pointer, always.
+lc_expect "awaits Warp-6" "quarry list: the VK seam rows probe honestly"
+lc_pass "quarry: CLI probe matrix printed"
+
+# An unknown key prints usage (exit 2), proving the CLI arm parses + errors
+# clean rather than spawning garbage.
+lc_send "quarry no-such-renderer"
+lc_expect "usage:" "quarry: unknown key falls to usage"
+
+# --- The TUI face (the raw-mode dance) --------------------------------------
+lc_send "quarry"
+sleep 2
+lc_expect "the GPU demo bench" "quarry TUI title rendered"
+lc_expect "b bench all" "quarry TUI footer rendered"
+lc_pass "quarry: launch + raw-mode dance + matrix render"
+
+# Navigate (no assert -- prove no crash before the quit): Down twice, Up once.
+lc_step "quarry: move cursor (Down/Down/Up)"
+send "\x1b\[B"
+sleep 1
+send "\x1b\[B"
+sleep 1
+send "\x1b\[A"
+sleep 1
+
+# Re-probe (r) refreshes the matrix (no assert: the cell-diff renderer emits
+# only CHANGED cells, so the status text arrives fragmented -- the prowl.exp
+# tree-navigate precedent; the quit + restore below prove liveness).
+send "r"
+sleep 1
+
+# Quit with q; ut restores the prompt + screen.
+lc_step "quarry: quit (q)"
+send "q"
+sleep 2
+
+# The restore proof (the prowl idiom): the upper-cased token appears only in
+# the tr output, so the match proves quarry exited + ut restored the console.
+lc_run_expect "echo quarry-restored | tr a-z A-Z" "QUARRY-RESTORED"
+lc_pass "quarry: quit + ut console restore"
+
+lc_quit
+lc_pass "LS-CI quarry: the GPU demo-bench launcher verified end to end"
+exit 0

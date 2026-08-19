@@ -38,7 +38,7 @@ set ::env(THYLACINE_ACCEL) hvf
 source [file join [file dirname [info script]] lib.exp]
 
 set repo $lc_repo
-set qmp "$repo/build/qmp.sock"
+set qmp [lc_qmp_sock]
 
 proc gfx_fingerprint {png} {
     return [exec python3 [file join [file dirname [info script]] gfx_fp.py] $png]

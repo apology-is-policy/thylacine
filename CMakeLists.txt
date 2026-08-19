@@ -55,6 +55,14 @@ endif()
 # script gates pass on observing that message.
 #
 # Empty / unset (default): no fault-test code; production behavior.
+#
+# THREE WORKED EXAMPLES FOLLOW -- they are NOT the whole set. The set has
+# grown to eight (kstack_overflow, secondary_stack_guard, bootcpu_idle_guard,
+# recursive_kernel_fault, el1_sync_runaway) and the authoritative list is
+# tools/test-fault.sh::ALL_VARIANTS. Deliberately not duplicated here: this
+# block read as a complete enumeration while naming three of eight, which is
+# how a reader concludes a variant does not exist.
+#
 # "canary_smash":  function writes past stack-array bounds → canary
 #                  check at function epilogue → __stack_chk_fail →
 #                  extinction("stack canary mismatch (smashed stack)")
@@ -72,7 +80,7 @@ endif()
 # is set + APIA key is non-zero). Post-v1.0 hardening pass adds the
 # deliberate-fault test alongside the dedicated CSPRNG key derivation.
 set(THYLACINE_FAULT_TEST "" CACHE STRING
-    "Fault-test mode: '', 'canary_smash', 'wxe_violation', 'bti_fault', 'kstack_overflow'")
+    "Fault-test mode: '' or one variant -- the authoritative set is tools/test-fault.sh::ALL_VARIANTS (this string is what cmake-gui shows and nothing validates it)")
 if(THYLACINE_FAULT_TEST)
     add_compile_definitions(THYLACINE_FAULT_TEST_${THYLACINE_FAULT_TEST}=1)
 endif()

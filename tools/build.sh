@@ -305,7 +305,11 @@ build_kernel() {
     # fixture. Cheap (source copies + a generated Makefile) and derived from
     # the tree, so it must be re-staged on every clade-gate build rather than
     # left to a manual step like stage_clade's multi-hundred-MiB copy.
-    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" ]]; then
+    # Gated on the SAME clade-stage-exists condition as the /clade pool put:
+    # /storm without /clade is boot-fatal (joey's storm gate finds no
+    # compiler), so a toolchain-less tree must bake neither half (#154, the
+    # unannounced mirror of #101's staged-but-flag-unset case).
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -d "$BUILD_DIR/clade/stage/bin" ]]; then
         stage_storm
     fi
 
@@ -441,7 +445,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "jit-prover" "login" "ut" "nora" "prowl" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "susp-mask-child" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "symlink-probe" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "jit-prover" "login" "ut" "nora" "prowl" "quarry" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" "warp-prove" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -496,7 +500,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "make" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "tyr-glquake" "make" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -552,6 +556,18 @@ EOF
     echo "==> v8.0 floor check (task #91)"
     python3 "$REPO_ROOT/tools/check-v80-floor.py" \
         || { echo "==> v8.0 floor check FAILED -- see PORTABILITY.md section 3" >&2
+             exit 1; }
+
+    # #173: the invariant registries. CLAUDE.md instructs "keep the ROW SET in
+    # sync with ARCH section 28", records that the drift already happened once
+    # (RW-10), and had drifted again by four rows -- while I-45, enforced in
+    # code and prosecuted by name, had no row in either table. The repair left
+    # nothing that could fail, so it recurred. Same argument as the floor check
+    # above: fatal, no skip switch. Sub-second.
+    echo "==> invariant registry check (task #173)"
+    python3 "$REPO_ROOT/tools/check-invariants.py" \
+        || { echo "==> invariant registry check FAILED -- ARCH section 28 and" >&2
+             echo "    CLAUDE.md's condensed table must carry the same rows" >&2
              exit 1; }
 }
 
@@ -1511,6 +1527,46 @@ build_sysroot() {
     #    so it always runs after them.
     build_libsodium
 
+    # 8. the GL headers (#146, durable). A sysroot rebuild starts from pristine
+    #    musl, which wipes include/GL + include/KHR — but the SDL-GL compiles
+    #    need them and the GL staging gate only ever verified libOSMesa.a, so
+    #    the loss surfaced three steps later as a missing-header build break
+    #    (or, via the #148 blind-overlay workaround, as a silently REVERTED
+    #    libc.a). Install them HERE, at the same chokepoint that wipes them:
+    #    headers only, never lib/ — that directionality is the whole #148
+    #    lesson. Absent gl/ archives = a non-GL tree; skipping is legitimate.
+    #    Source of truth is the VENDORED copy (third_party/mesa-gl-headers),
+    #    present in every checkout — a clean worktree with no pulled clade
+    #    artifacts must still compile the SDL GL TU (#153); only the LINK
+    #    degrades without the pulled libOSMesa.a archives.
+    local glvendor="$REPO_ROOT/third_party/mesa-gl-headers"
+    if [[ ! -f "$glvendor/GL/osmesa.h" || ! -f "$glvendor/KHR/khrplatform.h" ]]; then
+        echo "==> sysroot: $glvendor is missing or incomplete -- broken" >&2
+        echo "    checkout; the SDL-GL compile will fail (#146/#153)." >&2
+        exit 1
+    fi
+    cp -R "$glvendor/GL" "$glvendor/KHR" "$sysroot/include/"
+    echo "    GL        include/GL + include/KHR installed from third_party (#146/#153)"
+    # Warp-3: the thyla syscall headers ride the same chokepoint, for the
+    # same reason. The Mesa warp winsys compiles <thyla/syscall.h> from
+    # INSIDE the pouch sysroot's -isystem (the exelist path meson cannot
+    # filter); the cross file's c_args -I is the belt, this is the braces --
+    # meson re-reads cross files only at setup, so a reconfigured builder
+    # tree would quietly keep the OLD c_args while the sysroot copy is
+    # refreshed by every sysroot rebuild. Source of truth is the in-repo
+    # libt include; headers only, never lib/ (#148).
+    cp -R "$REPO_ROOT/usr/lib/libt/include/thyla" "$sysroot/include/"
+    echo "    thyla     include/thyla installed from usr/lib/libt (Warp-3)"
+    # Drift check: if a pulled clade gl/ tree exists and its headers differ,
+    # the vendored copy needs a refresh commit (the builder cycle bumped
+    # Mesa). Warn — never silently prefer either copy.
+    if [[ -d "$BUILD_DIR/clade/gl/include/GL" ]] && \
+       ! diff -rq "$glvendor/GL" "$BUILD_DIR/clade/gl/include/GL" >/dev/null 2>&1; then
+        echo "==> sysroot: WARNING: third_party/mesa-gl-headers/GL differs from" >&2
+        echo "    the pulled build/clade/gl/include/GL -- refresh the vendored" >&2
+        echo "    copy in a commit when the builder's Mesa moves (#153)." >&2
+    fi
+
     echo "==> pouch sysroot ready:"
     echo "    libc.a    $(wc -c < "$sysroot/lib/libc.a" | tr -d ' ') bytes"
     echo "    runtime   libclang_rt.builtins.a $(wc -c < "$sysroot/lib/libclang_rt.builtins.a" | tr -d ' ') bytes"
@@ -2313,7 +2369,7 @@ build_stratum_pool_fixture() {
     # quiet again the moment a binary is added -- which tyr-glquake then was.
     if [[ "$bake_clade" == "1" ]]; then
         local staleb
-        for staleb in gl-sdl-prove osmesa-prove tyr-glquake; do
+        for staleb in gl-sdl-prove osmesa-prove virgl-prove tyr-glquake; do
             [[ -f "$BUILD_DIR/clade/gl/$staleb" ]] || continue
             if [[ "$BUILD_DIR/clade/gl/$staleb" -nt \
                   "$BUILD_DIR/clade/stage/bin/$staleb" ]]; then
@@ -2986,7 +3042,14 @@ build_sdl2() {
                       "$REPO_ROOT/usr/gl-sdl-prove" \
                       "$REPO_ROOT/usr/lib/thylajit" \
                       -type f -newer "$archive" -print -quit 2>/dev/null)"
-        if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$archive" ]]; then
+        # The FETCHED archive is a link input too (#204; the #139 class one
+        # input further out): a builder round that refreshes libOSMesa.a must
+        # invalidate gl-sdl-prove, or the GL gate tests a binary that predates
+        # the fetch. Rare enough that the full rebuild it forces is fine.
+        local gl_stale=""
+        [[ -n "$gl_needed" && "$BUILD_DIR/clade/gl/lib/libOSMesa.a" -nt "$gl_prove" ]] \
+            && gl_stale=1
+        if [[ -z "$stale" && -z "$gl_stale" && ! "$sysroot/lib/libc.a" -nt "$archive" ]]; then
             ledger "libSDL2.a: REUSED (cached + up-to-date, $gl_mode)"
             return 0
         fi
@@ -3154,8 +3217,9 @@ build_gl_sdl_prove() {
     "$clang" "${cflags[@]}" -Wall -Wextra -c "$src" -o "$obj"
 
     if ! gl_link_program "$out" "$obj"; then
-        echo "==> gl-sdl-prove: LINK FAILED -- the SDL GL driver does not" >&2
-        echo "    resolve against libOSMesa.a (#138)." >&2
+        echo "==> gl-sdl-prove: LINK FAILED -- read the ld.lld errors above:" >&2
+        echo "    unresolved GL symbols = the OSMesa archives (#138); an" >&2
+        echo "    unfound -lc++abi/-lunwind = the staged c++ runtime trio (#156)." >&2
         rm -f "$obj"
         exit 1
     fi
@@ -3226,6 +3290,7 @@ gl_link_program() {
         -Wl,--start-group \
         "$gl_lib/libOSMesa.a" "$gl_lib/libz.a" \
         -L"$llvm_lib" "${llvm_flags[@]}" \
+        -L"$BUILD_DIR/clade/stage/sysroot/lib" \
         -lc++ -lc++abi -lunwind -lm \
         -Wl,--end-group \
         -o "$out"
@@ -3338,6 +3403,24 @@ build_tyrquake() {
         echo "    pak0.pak staged ($(wc -c < "$stage/id1/pak0.pak" | tr -d ' ') bytes, shareware 1.06)"
     fi
 
+    # 1b. The ramfs launcher: the bare-name face of the pool GL binary
+    # (tyr-glquake-launcher.c -> $progs_out/tyr-glquake; staged into the
+    # ramfs by pouch_bins). Ahead of the staleness check so a cached
+    # tyr-quake still ships it; its own mtime skip keeps it near-free.
+    local launcher_src="$port_dir/tyr-glquake-launcher.c"
+    if [[ -f "$launcher_src" ]]; then
+        if [[ ! -f "$progs_out/tyr-glquake" || "$launcher_src" -nt "$progs_out/tyr-glquake" ]]; then
+            mkdir -p "$progs_out"
+            "$REPO_ROOT/tools/pouch-clang" -std=gnu11 -O2 -Wall -Wextra \
+                -nostdinc -isystem "$sysroot/include" -fno-pie \
+                -c "$launcher_src" -o "$progs_out/tyr-glquake.o"
+            POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+                "$REPO_ROOT/tools/pouch-ld" "$progs_out/tyr-glquake.o" \
+                -o "$progs_out/tyr-glquake"
+            echo "    tyr-glquake launcher: $(wc -c < "$progs_out/tyr-glquake" | tr -d ' ') bytes (ramfs bare-name face)"
+        fi
+    fi
+
     # 2. Staleness: reuse the binaries when newer than the tree + port +
     # libSDL2.a.
     #
@@ -3355,7 +3438,12 @@ build_tyrquake() {
        [[ -z "$glq_needed" || -f "$glq_out" ]]; then
         local stale
         stale="$(find "$tq_vendor" "$port_dir" -type f -newer "$progs_out/tyr-quake" -print -quit 2>/dev/null)"
-        if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$progs_out/tyr-quake" ]]; then
+        # The FETCHED archive is a link input of the glquake half (#204; the
+        # #139 class): a refreshed libOSMesa.a must invalidate tyr-glquake.
+        local glq_stale=""
+        [[ -n "$glq_needed" && "$BUILD_DIR/clade/gl/lib/libOSMesa.a" -nt "$glq_out" ]] \
+            && glq_stale=1
+        if [[ -z "$stale" && -z "$glq_stale" && ! "$sysroot/lib/libSDL2.a" -nt "$progs_out/tyr-quake" ]]; then
             ledger "tyr-quake + tyr-glquake: REUSED (cached + up-to-date)"
             return 0
         fi
@@ -4091,6 +4179,17 @@ stage_clade() {
     else
         echo "    clade stage: no osmesa-prove at $BUILD_DIR/clade/gl/ -- staging without it (CL-7b GL gate will skip)"
     fi
+    # Warp-3: the triangle-on-the-GPU gate binary, on the same optional +
+    # announced terms. It only ever PASSES on a virgl host (thyla-gl); on
+    # a 2D box it SKIPs itself, so staging it everywhere costs nothing
+    # but the bytes.
+    if [[ -f "$BUILD_DIR/clade/gl/virgl-prove" ]]; then
+        "$strip" -o "$stage/bin/virgl-prove" "$BUILD_DIR/clade/gl/virgl-prove" 2>/dev/null \
+            || cp "$BUILD_DIR/clade/gl/virgl-prove" "$stage/bin/virgl-prove"
+        chmod +x "$stage/bin/virgl-prove"
+    else
+        echo "    clade stage: no virgl-prove at $BUILD_DIR/clade/gl/ -- staging without it (the Warp-3 gate will skip)"
+    fi
     # Clade CL-7 step 2 (#138): the SDL GL prover, for the same reasons and on
     # the same terms as osmesa-prove above -- built by build_sdl2 against the
     # fetched GL archives, too big for the ramfs, optional, and ANNOUNCED when
@@ -4118,6 +4217,25 @@ stage_clade() {
     mkdir -p "$stage/sysroot"
     cp -R "$sysroot/lib" "$stage/sysroot/lib"
     cp -R "$sysroot/include" "$stage/sysroot/include"
+    # The C++ runtime trio is a BUILDER artifact riding with the toolchain,
+    # NOT pouch-sysroot content -- the pouch sysroot never builds it, so the
+    # cp -R above cannot supply it. Before #156 it survived only as overlay
+    # residue in $sysroot/lib, and a sysroot regeneration followed by a
+    # restage laundered the last local copies out of both trees (the GL/C++
+    # link then fails on -lc++abi). Canonical local home: the pulled
+    # llvm-build tree, which restaging never regenerates from local content.
+    local cxxrt="$BUILD_DIR/clade/llvm-build/cxx-rt"
+    local cxxa
+    for cxxa in libc++.a libc++abi.a libunwind.a; do
+        if [[ ! -f "$cxxrt/$cxxa" ]]; then
+            echo "==> stage_clade: $cxxrt/$cxxa is MISSING -- the GL/C++ link" >&2
+            echo "    will fail on -l${cxxa#lib}. Pull it from the builder's" >&2
+            echo "    stage2 sysroot (fetch-set gap, #156); refusing to stage" >&2
+            echo "    a toolchain that cannot link its own language." >&2
+            exit 1
+        fi
+        cp "$cxxrt/$cxxa" "$stage/sysroot/lib/$cxxa"
+    done
     echo "    clade stage: $(du -sh "$stage" | cut -f1) -- bin: $(ls "$stage/bin" | tr '\n' ' ')"
 }
 

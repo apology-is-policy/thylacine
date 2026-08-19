@@ -1,0 +1,193 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-age.exp -- the C-2d buffer-age gate
+# (GPU-DESIGN.md 4.5.8c): can a DIRECT-scanout client's stale slot reach
+# the screen?
+#
+# Since Warp-C C-2d-b every weave slot has its own host resource, so the
+# screen shows exactly what the client last drew INTO THAT SLOT. A client
+# that presents only its damage rect must therefore repaint the union of
+# everything that changed since that slot was last presented (the buffer
+# age, libtapestry `age()`), or the pixels around the damage are whatever
+# the slot held `nslots` presents ago. Aurora is the tree's Direct
+# accumulator, and this drives it:
+#
+#   fill      : three `yes ... | head` runs scroll glyph text through every
+#               row of every slot;
+#   positive  : the same instrument that will assert "no text" first
+#               asserts "text" -- N slot-rotated dumps each show glyphs in
+#               the region (proves the fill reached every slot AND that
+#               the region reads text; a negative assert with no positive
+#               twin is satisfied by a broken fixture);
+#   clear     : `clear` (ESC[2J) blanks every cell in ONE all-rows present
+#               into ONE slot -- the other slots still hold the fill;
+#   negative  : N rounds of one keystroke (a row-0-only present into the
+#               NEXT slot) + a dump; the region well below row 0 must be
+#               exactly the background in EVERY dump.
+#
+# WHY IT MUST BE DIRECT, AND WHY AURORA: composed scanout blits only the
+# damage rect into the screen, and the screen is itself an accumulator, so
+# a stale client slot is invisible there -- a battery-based leg would be
+# green against a completely broken client (4.5.8c). Direct scans out the
+# whole slot resource; only there is the client's staleness the screen's.
+#
+# THE DETECTOR IS SLOT-PHASED, AND THAT IS HANDLED, NOT DISCOVERED. The
+# screen shows whichever slot was presented LAST, so one dump samples one
+# slot, and a broken client has 1 or 2 stale slots out of `nslots` (3): no
+# age handling at all leaves 2 stale (the clear reached one slot); an
+# off-by-one in the union leaves exactly 1. A single dump therefore passes
+# a broken build 1/3 or 2/3 of the time. Each round advances the slot by
+# its own keystroke presents (a row-0 redraw each) plus however many blink
+# presents fell in the round (0 at the throttled 2 s blink, up to 2 at the
+# 60 Hz 0.5 s blink). Round k types 1,1,2,1,1,2,1,1 keys: for ANY constant
+# blink count per round the cumulative advance visits all three residues
+# mod 3 within the 8 rounds (b=0: 1,2,1,2,0,2,0,1; b=1: 2,1,1,0,2,2,1,0;
+# b=2: 0,0,1,1,1,2,2,2), so every slot is sampled and a broken build of
+# either class is caught. If the blink count varies mid-leg that
+# argument weakens to the independence bound -- (1/3)^8 = 1.5e-4 for the
+# no-age class, (2/3)^8 = 3.9% for the one-stale-slot class -- which is
+# why the constant-rate coverage, not the bound, is the load-bearing claim.
+# Validated the only way that counts: re-run with aurora sabotaged both
+# ways (`stale_slot = false` + `back = 0`; and `back` off by one) and this
+# MUST go red -- the measured rounds are in GPU-DESIGN.md 4.5.8c.
+#
+# Runs under HVF like its ls-gfx siblings; needs the QMP socket + python3.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+set scen [file dirname [info script]]
+
+proc gfx_dump {out args_} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp {*}$args_ $out} err]} {
+        return $err
+    }
+    return ""
+}
+
+# "<off> <total> <dom_r> <dom_g> <dom_b>" for the gate region of a PNG.
+proc age_region {png} {
+    global scen rx0 ry0 rx1 ry1
+    return [exec python3 $scen/gfx_region.py $png $rx0 $ry0 $rx1 $ry1]
+}
+
+# One line-editor redraw (`\r ESC[K prompt buffer`) -- the shell emits
+# exactly one per keystroke, so expecting it keeps the rounds in lockstep
+# with the guest instead of trusting a sleep.
+proc age_expect_redraw {phase} {
+    global timeout
+    set timeout 15
+    expect {
+        -ex "\x1b\[K"     {}
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
+        timeout           { lc_fail "no line-editor redraw within 15s during '$phase'" }
+        eof               { lc_fail "unexpected EOF during '$phase'" }
+    }
+}
+
+lc_boot
+
+# The console geometry, from aurora's own bringup line (prints before the
+# login prompt), so the region is in CELLS and survives a font/mode change.
+set timeout $lc_boot_timeout
+expect {
+    -re {aurora: console up (\d+)x(\d+) cells \((\d+)x(\d+) px, cell (\d+)x(\d+)\)} {
+        set cols $expect_out(1,string)
+        set rows $expect_out(2,string)
+        set cw   $expect_out(5,string)
+        set ch   $expect_out(6,string)
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before aurora came up" }
+    timeout { lc_fail "no 'aurora: console up' line within ${lc_boot_timeout}s" }
+    eof     { lc_fail "qemu exited before aurora came up" }
+}
+if {$rows < 12 || $cols < 40} { lc_fail "console grid ${cols}x${rows} too small for the region" }
+# Region: cell rows 6..rows-3, cell cols 2..cols/2 -- clear of row 0 (the
+# post-clear prompt + typed keys), of the bottom rows (the pre-clear prompt
+# + typed keys), and of every margin. The fill text is 36 glyphs wide, so it
+# spans the region's columns at any cell width >= 8.
+set rx0 [expr {2 * $cw}]
+set rx1 [expr {($cols / 2) * $cw}]
+set ry0 [expr {6 * $ch}]
+set ry1 [expr {($rows - 3) * $ch}]
+lc_step "age: grid ${cols}x${rows} cell ${cw}x${ch}; region x $rx0..$rx1 y $ry0..$ry1"
+
+lc_login michael correct-horse-battery-staple-v1
+
+# Anchor: the console renders (same -c retry as ls-gfx).
+set ok 0
+for {set i 0} {$i < 12} {incr i} {
+    if {[gfx_dump /tmp/ls-gfx-age-pre.png "-c"] eq ""} { set ok 1; break }
+    after 700
+}
+if {!$ok} { lc_fail "post-login console verify (-c) never passed" }
+lc_pass "age: the session console rendered (screendump -c)"
+
+# FILL. 200 lines per run scroll the whole grid several times over, so
+# every all-rows present carries glyphs through the region; three runs put
+# such a present into every slot even for a client that does not widen.
+# The sentinel is COMPUTED (tr) so it cannot match the typed line.
+for {set i 1} {$i <= 3} {incr i} {
+    lc_run_expect "yes ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 | head -n 200; echo age-fill-$i | tr a-z A-Z" "AGE-FILL-$i"
+}
+age_expect_redraw "prompt after the fill"
+
+# POSITIVE CONTROL: the region reads text on N slot-rotated dumps.
+set NPOS 4
+for {set k 1} {$k <= $NPOS} {incr k} {
+    lc_raw_send "x" "age positive round $k"
+    age_expect_redraw "positive round $k"
+    after 400
+    set png /tmp/ls-gfx-age-pos$k.png
+    if {[gfx_dump $png ""] ne ""} { lc_fail "positive round $k: capture failed" }
+    lassign [age_region $png] off total dr dg db
+    lc_step "age: positive dump $k: $off/$total non-bg px (dominant $dr $dg $db)"
+    if {$off * 20 < $total} {
+        lc_fail "positive control round $k: only $off/$total non-bg pixels in the region -- the fill did not reach this slot (or the region misses the text); the negative leg would be vacuous"
+    }
+}
+lc_pass "age: positive control -- fill text in the region on $NPOS/$NPOS slot-rotated dumps"
+
+# Cancel the typed keys (LS-5(A): a fresh-prompt Ctrl-C survives), then
+# blank the screen in one all-rows present.
+lc_ctrlc
+sleep 1
+lc_send "clear"
+set timeout $lc_cmd_timeout
+expect {
+    -ex "\x1b\[2J"    { lc_step "saw: clear's ESC\[2J" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during clear" }
+    timeout           { lc_fail "clear never emitted ESC\[2J" }
+    eof               { lc_fail "unexpected EOF during clear" }
+}
+age_expect_redraw "prompt after clear"
+
+# NEGATIVE LEG: N keystroke-rotated dumps, region exactly background. The
+# per-round key counts are the coverage pattern argued in the header.
+set NNEG 8
+set keys_per_round {1 1 2 1 1 2 1 1}
+set worst 0
+for {set k 1} {$k <= $NNEG} {incr k} {
+    set nk [lindex $keys_per_round [expr {$k - 1}]]
+    for {set j 0} {$j < $nk} {incr j} {
+        lc_raw_send "x" "age negative round $k key $j"
+        age_expect_redraw "negative round $k key $j"
+    }
+    after 400
+    set png /tmp/ls-gfx-age-neg$k.png
+    if {[gfx_dump $png ""] ne ""} { lc_fail "negative round $k: capture failed" }
+    lassign [age_region $png] off total dr dg db
+    lc_step "age: negative dump $k: $off/$total non-bg px (dominant $dr $dg $db)"
+    if {$off > $worst} { set worst $off }
+    if {$off != 0} {
+        lc_fail "STALE SLOT ON SCREEN: negative round $k shows $off/$total non-bg pixels well below the prompt row after clear -- the slot presented last still holds pre-clear content (the C-2d buffer-age contract is broken: client did not repaint the union, or the compositor skipped a transfer without a redraw)"
+    }
+}
+lc_pass "age: negative leg -- region exactly bg on $NNEG/$NNEG slot-rotated dumps after clear (worst $worst px; false-pass <= 3^-$NNEG)"
+
+lc_ctrlc
+sleep 1
+lc_quit

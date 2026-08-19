@@ -6,6 +6,7 @@
 #ifdef SDL_VIDEO_DRIVER_THYLACINE
 
 #include "SDL_video.h"
+#include "SDL_cpuinfo.h"   /* SDL_GetCPUCount, for the LP_NUM_THREADS default */
 #include "../SDL_sysvideo.h"
 
 #include "SDL_thylacinevideo.h"
@@ -40,6 +41,15 @@ OSMesaMakeCurrent(OSMesaContext ctx, void *buffer, GLenum type,
 extern __attribute__((weak)) void OSMesaPixelStore(GLint pname, GLint value);
 extern __attribute__((weak)) OSMESAproc OSMesaGetProcAddress(const char *fn);
 extern __attribute__((weak)) void glFinish(void);
+extern __attribute__((weak)) void glFlush(void);
+
+/* Warp-4 (fork patch 0007): negotiate/withdraw the direct present. Weak
+ * like the rest -- absent on a pre-0007 libOSMesa.a, and the negotiation
+ * simply never happens (the readback path is the shipping behavior). */
+extern __attribute__((weak)) int
+OSMesaThylacineDirect(OSMesaContext ctx, unsigned surface_id,
+                      unsigned *ctx_pub_out);
+extern __attribute__((weak)) void OSMesaThylacineDirectOff(OSMesaContext ctx);
 
 typedef struct THYLACINE_GLContext
 {
@@ -53,6 +63,12 @@ typedef struct THYLACINE_GLContext
     uint64_t bound_va;
     uint32_t bound_w, bound_h;
     SDL_Window *window;
+    /* Warp-4: the direct present is active -- the compositor displays
+     * the GL color resource itself (fullscreen: SET_SCANOUT of the 3D
+     * resource; windowed: server-side readback + compose), the OSMesa
+     * readback into the weave is suppressed, and the swap needs only a
+     * glFlush (ordering is the controlq's FIFO), not a glFinish. */
+    SDL_bool direct;
 } THYLACINE_GLContext;
 
 SDL_bool THYLACINE_GL_Available(void)
@@ -117,6 +133,29 @@ static int gl_bind(THYLACINE_GLContext *ctx, SDL_WindowData *wd)
     ctx->bound_va = wd->tap.map_va;
     ctx->bound_w = wd->tap.w;
     ctx->bound_h = wd->tap.h;
+
+    /* Warp-4: negotiate the direct present, on EVERY bind -- a reweave
+     * reallocates the framebuffer, and the standing consent names one
+     * BO, so it must be re-issued for the new one (both handshake
+     * halves are idempotent server-side). The fork's export refuses on
+     * llvmpipe (driver-name gate), so this costs a plain llvmpipe bind
+     * one cheap failed call. BOTH halves must land; a half-negotiated
+     * state suppresses the readback with no display source, which is a
+     * frozen pane -- so any failure explicitly restores the readback. */
+    ctx->direct = SDL_FALSE;
+    if (OSMesaThylacineDirect) {
+        unsigned ctx_pub = 0;
+        if (OSMesaThylacineDirect(ctx->osmesa, wd->tap.id, &ctx_pub) == 0) {
+            if (thyla_tap_glsrc(&wd->tap, ctx_pub) == 0) {
+                ctx->direct = SDL_TRUE;
+            } else {
+                if (OSMesaThylacineDirectOff) {
+                    OSMesaThylacineDirectOff(ctx->osmesa);
+                }
+                (void)thyla_tap_glsrc(&wd->tap, 0);
+            }
+        }
+    }
     return 0;
 }
 
@@ -164,6 +203,30 @@ SDL_GLContext THYLACINE_GL_CreateContext(_THIS, SDL_Window *window)
         SDL_SetError("thylacine: CAP_JIT refused — llvmpipe cannot JIT in "
                      "this process, so there is no rasteriser to bind");
         return NULL;
+    }
+
+    /* llvmpipe sizes its rasteriser worker pool from Mesa's
+     * util_get_cpu_caps()->nr_cpus, and on this platform that is a hardcoded
+     * 1: the POSIX_LITE tier of u_cpu_detect.c carries no sysconf arm (the
+     * shipped u_cpu_detect.c.o has no sysconf reference at all — #150), so
+     * the pool never spawned and an -smp 4 guest rasterised on one core.
+     * Until the Mesa port grows that arm, seed Mesa's own documented
+     * override with the real count — the same platform-fact-carrying this
+     * function already does for CAP_JIT, two paragraphs up. The user's own
+     * LP_NUM_THREADS always wins (overwrite=0), and a 1-CPU guest is left
+     * untouched (unset == llvmpipe's inline rasterisation, the same path).
+     * SDL_GetCPUCount is sysconf(_SC_NPROCESSORS_ONLN) on this port
+     * (HAVE_SYSCONF; honest since pouch 0032 reads /ctl/sched "cpus: N").
+     * Before the context create, because llvmpipe reads the variable once
+     * at screen creation inside OSMesaCreateContextExt. Measured on the
+     * GLQuake demo1 gate (640x400, -smp 4, HVF): 21.6 -> 29.1 fps. */
+    if (!SDL_getenv("LP_NUM_THREADS")) {
+        int ncpu = SDL_GetCPUCount();
+        if (ncpu > 1) {
+            char nbuf[16];
+            SDL_snprintf(nbuf, sizeof nbuf, "%d", ncpu);
+            SDL_setenv("LP_NUM_THREADS", nbuf, 0);
+        }
     }
 
     ctx = (THYLACINE_GLContext *)SDL_calloc(1, sizeof(*ctx));
@@ -278,8 +341,19 @@ int THYLACINE_GL_SwapWindow(_THIS, SDL_Window *window)
      * frame are not necessarily in the buffer yet. glFinish is what makes the
      * present a present rather than a race with the rasteriser — without it
      * the compositor reads partially-drawn tiles. This is the one GL call the
-     * backend itself makes. */
-    glFinish();
+     * backend itself makes.
+     *
+     * Warp-4 direct: the compositor displays the GL resource itself, and
+     * ordering to the display is structural (the winsys submits on flush;
+     * the server's SET_SCANOUT/RESOURCE_FLUSH queue behind it on the one
+     * controlq, FIFO) — so a glFlush suffices and a glFinish would
+     * serialize the whole GPU pipeline per frame for nothing. The winsys's
+     * own 2-in-flight fence throttle bounds the run-ahead. */
+    if (ctx->direct && glFlush) {
+        glFlush();
+    } else {
+        glFinish();
+    }
 
     if (vd->gl_swap_interval > 0) {
         THYLACINE_PaceFrame(wd);
@@ -302,6 +376,12 @@ void THYLACINE_GL_DeleteContext(_THIS, SDL_GLContext context)
         return;
     }
     if (ctx->osmesa && OSMesaDestroyContext) {
+        /* Withdraw a live direct consent first: the warp ctx (per-process,
+         * on the shared screen) outlives this GL context, so the consent
+         * would otherwise dangle until the surface's gen pin inerts it. */
+        if (ctx->direct && OSMesaThylacineDirectOff) {
+            OSMesaThylacineDirectOff(ctx->osmesa);
+        }
         OSMesaDestroyContext(ctx->osmesa);
     }
     SDL_free(ctx);

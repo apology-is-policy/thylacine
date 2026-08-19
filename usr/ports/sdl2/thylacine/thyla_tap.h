@@ -94,6 +94,12 @@ static inline uint32_t *thyla_tap_pixels(ThylaTap *t)
  * compositor has consumed the pixels. Returns 0 or -1. */
 int thyla_tap_present(ThylaTap *t, const ThylaRect *rects, int nrects);
 
+/* Warp-4, the adoption's surface half: accept warp ctx `ctx_pub` as this
+ * surface's display source (ctl "glsrc <ctx>"; 0 = "glsrc off"). The
+ * display activates only while that ctx's own consent names this surface
+ * back -- writing a wrong id is inert, not dangerous. Returns 0 or -1. */
+int thyla_tap_glsrc(ThylaTap *t, uint32_t ctx_pub);
+
 /* Blocking read of up to `max` events (parks when none pending; returns
  * on the first delivery). Returns the record count, 0 on stream EOF
  * (surface retired under us), -1 on error. */

@@ -439,7 +439,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
     //      (Phase 5+ real platforms) will introduce a flag at create
     //      time to select Device attrs.
     paddr_t page_pa;
-    bool    device_memory;
+    u32     mair_idx;   // MAIR_IDX_* per burrow type; NORMAL_NC for HOSTMEM (V-2)
     // LINEAGE L-4b: what step 5 actually installs. Defaults to the VMA's own prot
     // and is narrowed by exactly one arm -- a read fault on a COW-shared page,
     // which must land READ-ONLY so the next write comes back here to break. The
@@ -460,19 +460,29 @@ static enum fault_result demand_page_locked(struct Proc *p,
         if (!vma->burrow->pages)            return FAULT_UNHANDLED_USER;
         page_pa = page_to_pa(vma->burrow->pages) +
                   (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
-        device_memory = false;
+        mair_idx = MAIR_IDX_NORMAL_WB;
         break;
     case BURROW_TYPE_MMIO:
         if (!vma->burrow->kobj_mmio)        return FAULT_UNHANDLED_USER;
         page_pa = vma->burrow->pa +
                   (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
-        device_memory = true;
+        mair_idx = MAIR_IDX_DEVICE;
         break;
     case BURROW_TYPE_DMA:
         if (!vma->burrow->kobj_dma)         return FAULT_UNHANDLED_USER;
         page_pa = vma->burrow->pa +
                   (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
-        device_memory = false;
+        mair_idx = MAIR_IDX_NORMAL_WB;
+        break;
+    case BURROW_TYPE_HOSTMEM:
+        // V-2: a subrange of a PCI hostmem BAR. Physical backing like MMIO/DMA
+        // (pa + page offset), but the attribute is the create-time host-dictated
+        // MAIR index (NORMAL_WB for CACHED, NORMAL_NC for WC) rather than a fixed
+        // Device/WB choice. kobj_pci non-NULL is the liveness guard.
+        if (!vma->burrow->kobj_pci)         return FAULT_UNHANDLED_USER;
+        page_pa = vma->burrow->pa +
+                  (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
+        mair_idx = vma->burrow->hostmem_mair;
         break;
     case BURROW_TYPE_FILE: {
         // REVENANT R-2 / I-36: the page comes from the sparse filepages[] array,
@@ -488,7 +498,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
             // Fast path: resident hit. Each FILE slot is its own order-0 page,
             // so page_pa is the slot page's PA (no contiguous-chunk offset).
             page_pa = page_to_pa(resident);
-            device_memory = false;
+            mair_idx = MAIR_IDX_NORMAL_WB;
             break;                      // -> step-5 PTE install (R+X for text)
         }
         // Miss: pin the Burrow across the lockless read (so freq->burrow cannot
@@ -524,7 +534,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
         if (resident) {
             // Resident hit (a re-fault, or a sibling faulter filled it): the page was
             // charged when it was allocated -- do NOT charge again.
-            device_memory = false;
+            mair_idx = MAIR_IDX_NORMAL_WB;
 
             // LINEAGE L-4b: the copy-on-write break. Reached only through a VMA
             // addrspace_clone flagged, so a mapping that never forked runs the
@@ -664,7 +674,7 @@ if (cow_page_put(resident))
             proc_page_uncharge(p, 1);       // we double-charged; give it back
         }
         page_pa = page_to_pa(winner);
-        device_memory = false;
+        mair_idx = MAIR_IDX_NORMAL_WB;
         break;                              // -> step-5 PTE install (RW/XN, W^X-clean)
     }
     case BURROW_TYPE_INVALID:
@@ -675,9 +685,9 @@ if (cow_page_put(resident))
     // 5. Install the leaf PTE in the per-Proc TTBR0 tree. The asid arg is
     // vestigial (the install does an all-ASID `tlbi vaae1is`); pass 0 -- the
     // Proc's rolling ASID is resolved at context switch, not here (RW-1 B-F1).
-    int rc = mmu_install_user_pte(p->as->pgtable_root, 0,
-                                  page_va, page_pa, install_prot,
-                                  device_memory);
+    int rc = mmu_install_user_pte_attr(p->as->pgtable_root, 0,
+                                       page_va, page_pa, install_prot,
+                                       mair_idx);
     if (rc != 0)                         return FAULT_UNHANDLED_USER;
 
     return FAULT_HANDLED;

@@ -24,10 +24,13 @@
 #include "halls.h"                    // HX-1: per-CPU live-frame tracking for the crash dump
 #include "hwdebug.h"                  // 8a-2a: the EL0 hardware-breakpoint verify (EC 0x30 swallow)
 #include "uaccess.h"                  // R12-uaccess: kernel-mode user-VA fault-fixup
+#include "uart.h"                     // #214: raw banner in the recursion-guard runaway path
 
+#include <thylacine/cons.h>           // #214: cons_tx_claim_for_dump in the runaway path
 #include <thylacine/extinction.h>
 #include <thylacine/notes.h>          // P6 #3a: NOTE_NAME_SNARE_* constants for proc_fault_terminate
 #include <thylacine/proc.h>           // R12-uaccess: struct Proc for demand-page synth; P6 #3a: proc_fault_terminate
+#include <thylacine/smp.h>            // #214: smp_cpu_idx_self for the recursion guard
 #include <thylacine/syscall.h>        // P3-Ec: syscall_dispatch
 #include <thylacine/thread.h>         // R12-uaccess: current_thread()
 #include <thylacine/types.h>
@@ -99,10 +102,98 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx);
 __attribute__((noreturn))
 static void exception_unexpected_impl(struct exception_context *ctx, u64 vector_idx);
 
+// #214: EL1h-sync recursion guard. A fault whose HANDLER faults descends
+// forever: every re-entry runs KERNEL_ENTRY on the same stack, and with a
+// mapped SP each iteration lands a 288-byte frame and keeps going — past
+// the kstack guard (SP arithmetic never faults; stores resume wherever SP
+// re-enters mapped territory), scribbling exception frames across physical
+// RAM through the directmap until the page tables themselves are eaten.
+// Observed end-state on the Pi 400 (#214 autopsy): the TTBR1 L1 table
+// overwritten with 'THRD'-magic frames, every CPU's vector fetch then
+// faulting at level 1. The classic seed is fault -> extinction ->
+// halls_dump faults -> fault -> extinction (extinction.c carries the
+// matching re-entrancy guard).
+//
+// The counter measures SYNCHRONOUS recursion only. A legitimate EL1h-sync
+// handler can SLEEP (a kernel-uaccess of a cold demand-paged FILE page
+// blocks in 9P — the R12-uaccess → userland_demand_page slow path), and
+// independent threads time-sharing this CPU can each be asleep inside
+// such a handler — so the raw per-CPU count is NOT bounded by 1 under
+// legitimate load (#214 audit F1: three interleaved cold-file uaccess
+// sleepers would spuriously hit the cap). The scheduler therefore clears
+// this counter at EVERY context switch (exception_sync_depth_reset_this_
+// cpu from sched()): a switch proves forward progress, and a genuine
+// runaway — fault whose handler faults, synchronously, IRQ-masked —
+// never reaches sched(), so its count survives to trip at 3. The reset
+// to 0 on successful unwind (rather than decrement) additionally keeps a
+// cross-CPU-migrated handler's exit from stranding a foreign increment.
+// Residual: a hypothetical recursive chain that UNMASKS IRQs mid-chain
+// could be preempt-cleared and evade this guard — the extinction
+// re-entrancy guard below still bounds the observed #214 class (its loop
+// runs IRQ-masked), and the failure mode of any miss is a spin, not
+// corruption.
+//
+// The runaway path deliberately does NOT halls_dump (the dump machinery
+// is the likely faulting amplifier): print one raw banner with the frame
+// that killed the handler, and park THIS CPU with the stack corpse intact
+// for a debugger/QMP autopsy. The banner prints only at exactly DEPTH_MAX:
+// if the banner itself faults, the next entry parks silently instead of
+// looping through the print. It IS the "EXTINCTION: " ABI line, so it is
+// subject to the same two serializers as extinction()'s (extinction.c):
+// exactly one emitter per boot -- a PEER holding the console word is
+// already dumping, so this CPU parks silent like any loser, while the
+// classic seed (extinction -> halls_dump faults -> ... -> here, on the
+// SAME cpu) already OWNS the word and may print -- and the console TX
+// ring lock (cons_tx_claim_for_dump: bounded raw try-spin, flushes the
+// staged ring so stranded diagnostics reach the wire, then HELD FOREVER),
+// so a peer's normal write cannot land inside the banner. Both are
+// lock-free-or-bounded and never park, per HX-I.
+#define EL1_SYNC_DEPTH_MAX 3u
+static volatile u8 g_el1_sync_depth[DTB_MAX_CPUS];
+
+extern void _torpor(void) __attribute__((noreturn));
+
+void exception_sync_depth_reset_this_cpu(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu < DTB_MAX_CPUS) g_el1_sync_depth[cpu] = 0;
+}
+
+__attribute__((noreturn))
+static void el1_sync_runaway(unsigned cpu, const struct exception_context *ctx) {
+    if (!extinction_console_claim_or_own()) _torpor();   // a peer is dumping: park silent
+    // Held forever on success; on a miss emit anyway (torn beats silent) and
+    // say so AFTER the line, on extinction()'s exact terms -- the note must not
+    // precede the ABI line and must carry no EXTINCTION token at column 0.
+    bool ring = cons_tx_claim_for_dump();
+    uart_puts("\nEXTINCTION: el1-sync recursion, cpu ");
+    uart_putdec((u64)cpu);
+    uart_puts(" elr ");
+    uart_puthex64(ctx->elr);
+    uart_puts(" esr ");
+    uart_puthex64(ctx->esr);
+    uart_puts(" far ");
+    uart_puthex64(ctx->far);
+    uart_puts(" (parked; corpse intact)\n");
+    if (!ring)
+        uart_puts("  console-ring: NOT held (a peer kept it past the bound; the line above may be torn)\n");
+    _torpor();
+}
+
 void exception_sync_curr_el(struct exception_context *ctx) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    u8 depth = (u8)(g_el1_sync_depth[cpu] + 1u);
+    g_el1_sync_depth[cpu] = depth;
+    if (depth >= EL1_SYNC_DEPTH_MAX) {
+        if (depth == EL1_SYNC_DEPTH_MAX) el1_sync_runaway(cpu, ctx);
+        _torpor();
+    }
+
     const struct exception_context *prev = halls_enter_frame(ctx);
     exception_sync_curr_el_impl(ctx);
     halls_leave_frame(prev);
+
+    g_el1_sync_depth[cpu] = 0;
 }
 
 void exception_irq_curr_el(struct exception_context *ctx) {

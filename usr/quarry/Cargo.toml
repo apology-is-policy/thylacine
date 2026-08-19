@@ -1,0 +1,16 @@
+[package]
+name = "quarry"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "quarry"
+path = "src/main.rs"
+
+# quarry is a device-only native TUI (the prowl shape): kaua for the console
+# layer + libthyla-rs for spawn/env/poll. No host-tested lib half.
+[dependencies]
+kaua = { path = "../lib/kaua" }
+libthyla-rs = { path = "../lib/libthyla-rs" }

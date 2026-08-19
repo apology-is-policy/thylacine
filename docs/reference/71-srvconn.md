@@ -458,6 +458,27 @@ Neither machine has its own TLA+ module — see Spec cross-reference.
 
 ---
 
+## Ring counters + the /ctl registry (#210)
+
+Each `srvconn_chan` carries lifetime `produced` / `consumed` byte totals,
+mutated ONLY inside `chan_ring_write` / `chan_ring_read` (every caller
+holds `ch->lock`), so the conservation law `produced == consumed + count`
+holds under the lock by construction. `SrvConn.s2c_frames` counts whole
+server reply buffers delivered by `srvconn_server_send_blocking`
+(role-held — the #354 writer role serializes producers, so the plain
+increment has one writer at a time).
+
+Every live conn is linked into a registry (`g_srvconn_ctl_head`,
+`kernel/srvconn.c`): linked at create, unlinked on the last unref BEFORE
+teardown/free. `srvconn_ctl_iterate` walks it under the registry lock
+(order: registry -> `ch->lock`; the unlink path takes only the registry
+lock, so no inversion, and a walker can never reach a conn whose free has
+begun). Surfaced at `/ctl/9p-sessions` (`33-devctl.md`);
+`srvconn.ctl_counters` pins conservation, the frame count, and
+unlink-on-free.
+
+---
+
 ## Spec cross-reference
 
 This chunk adds **no new spec module** and changes none. The transport

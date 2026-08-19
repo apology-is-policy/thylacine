@@ -1,0 +1,51 @@
+#!/usr/bin/expect -f
+# Warp-2 gate run on the GL host (GPU-DESIGN.md section 12 row 2): boot the
+# virtio-gpu-gl device, log in, run /warp-prove -- "contexts create/destroy;
+# a hand-built command stream round-trips". The prover's own asserts carry
+# the verdict (sentinel-filled readback + the post-destroy ctx count); this
+# script only delivers it a virgl console and requires its PASS line.
+#
+# Runs ON the GL host (Linux; lib.exp takes the direct-pty transport there).
+# env: WARP_REPO (default ~/projects/thylacine), WARP_WORK (default ~/warp).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+# tcg unless the caller pins an accel (KVM GL hosts ride warp-host.sh WARP_ACCEL)
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_QMP) 1
+set ::env(THYLACINE_NO_SHARE) 1
+set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
+set ::env(THYLACINE_DISPLAY) egl-headless
+# TCG-on-a-VM boot is minutes; the LS-CI default (180 s) is for the native
+# M2. Raise anything below 900 (the glq-bench floor rule, audit W1 F3).
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+file mkdir $work
+# Per-attempt fixture isolation (#78/#85): the synced images are never
+# booted directly.
+file delete -force $work/pool-prove.img $work/disk-prove.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-prove.img
+exec cp $repo/build/disk.img $work/disk-prove.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-prove.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-prove.img
+
+source $repo/tools/interactive/lib.exp
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# The prover parks on the fence file until the device retires the clear +
+# readback, and the corpse-reclaim leg (#218) drives ~2*(cap+1) mint/refuse
+# round trips -- give the whole battery a real window. NOTE: `set timeout`
+# is DEAD here (lc_expect resets it from lc_cmd_timeout per call; the old
+# `set timeout 120` never took effect and the battery ran on the 30 s
+# default) -- the knob is lc_cmd_timeout. Floor, not stomp: a caller's
+# larger LS_CI_CMD_TIMEOUT (slow TCG hosts) passes through.
+if {$lc_cmd_timeout < 180} { set lc_cmd_timeout 180 }
+lc_run_expect_hardfail "warp-prove" "WARP-PROVE PASS" "warp-prove: FAIL"
+
+lc_pass "warp-prove: ctx create/destroy + a hand-built CCMD stream round-trips (the Warp-2 gate)"

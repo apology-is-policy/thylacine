@@ -142,7 +142,7 @@ size_t p9_session_n_bound_fids(const struct p9_session *s);
 | Constant | Value | Rationale |
 |---|---|---|
 | `P9_SESSION_MAX_OUTSTANDING` | 64 | Comfortably covers pipelined-32 workloads (VISION §4.5 throughput target) with margin. Tags allocated 0..63; tag value past MAX reserved. Tversion's NOTAG=0xFFFF lives out-of-band. Bumpable; sized conservatively at v1.0. |
-| `P9_SESSION_MAX_FIDS` | 256 | Client-side cap; Stratum's server caps at 4096. Most procs use few fids — 256 is comfortable. Bumpable. |
+| `P9_SESSION_MAX_FIDS` | 1024 | Client-side cap; Stratum's server caps at 4096. Lifted 256 → 1024 in the #198 fid-ceiling chain: a warp GL client holds one fid per live BO mapping, so a Quake-class texture set overflows 256 — and the refusal at `fid_alloc` (`9p_session.c`) is **silent** at both endpoints (the client sees `-ENFILE`-shaped failure, the server never sees a T-message), which is what made it the invisible middle layer of that hunt. Bumpable. |
 | `P9_SESSION_MAGIC` | `0x50395345` ("P9SE") | Magic for lifetime discipline (mirrors R9 F148 — see `39-hw-handles.md` caveat #2). Clobbered on destroy. |
 
 ## State variables (`struct p9_session`)

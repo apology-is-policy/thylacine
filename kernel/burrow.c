@@ -51,6 +51,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/mmio_handle.h>   // P4-Ic1: kobj_mmio_ref/unref for MMIO Burrows
 #include <thylacine/dma_handle.h>    // P4-Ic5b1b: kobj_dma_ref/unref for DMA Burrows
+#include <thylacine/pci_handle.h>    // V-2: kobj_pci_ref/unref for HOSTMEM Burrows
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>        // REVENANT: spoor_ref/clunk + SPOOR_MAGIC + qid for BURROW_TYPE_FILE
@@ -230,6 +231,52 @@ struct Burrow *burrow_create_dma(struct KObj_DMA *kobj_dma) {
     v->order         = 0;
     v->kobj_dma      = kobj_dma;
     v->pa            = kobj_dma->pa;
+    g_vmo_created++;
+    return v;
+}
+
+// V-2 (Warp-6 Venus / GPU-DESIGN 6.2.1): wrap a subrange of a PCI hostmem BAR
+// in a Burrow. Holds a reference on the owning KObj_PCI so the claim -- and
+// thus the BAR PA -- survives the server's own handle_close while a client
+// mapping is live (the #847 dual-lifetime, on KObj_PCI here). Mirrors
+// burrow_create_mmio's construction-reference pattern.
+struct Burrow *burrow_create_hostmem(struct KObj_PCI *kobj_pci, u64 pa,
+                                     size_t len, u8 mair_idx) {
+    if (!g_vmo_cache) extinction("burrow_create_hostmem before burrow_init");
+    if (!kobj_pci) return NULL;
+    if (kobj_pci->magic != KOBJ_PCI_MAGIC)
+        extinction("burrow_create_hostmem: kobj_pci has bad magic (UAF?)");
+    if (len == 0) return NULL;
+    // Page-aligned base + length: the fault arm adds page-aligned offsets.
+    if ((pa & (PAGE_SIZE - 1)) || (len & (PAGE_SIZE - 1))) return NULL;
+    // Host-visible memory is Normal -- cacheable WB or non-cacheable NC. Device
+    // and Write-Through are never correct here; reject rather than store a
+    // nonsense index the fault arm would then install.
+    if (mair_idx != MAIR_IDX_NORMAL_WB && mair_idx != MAIR_IDX_NORMAL_NC)
+        return NULL;
+
+    struct Burrow *v = kmem_cache_alloc(g_vmo_cache, KP_ZERO);
+    if (!v) return NULL;
+
+    // Hold a ref on the kobj_pci for the Burrow's lifetime. Released in
+    // burrow_free_internal when both counts reach 0.
+    kobj_pci_ref(kobj_pci);
+    // V-2 (audit F1): count this live hostmem mapping so owner-death does a
+    // DMA-only quiesce (BUS_MASTER cleared, MEM_SPACE kept) while any hostmem
+    // burrow over the claim lives -- the client never sees a decode-disabled BAR.
+    __atomic_fetch_add(&kobj_pci->hostmem_burrows, 1u, __ATOMIC_RELAXED);
+
+    v->magic         = VMO_MAGIC;
+    v->type          = BURROW_TYPE_HOSTMEM;
+    v->size          = len;
+    v->page_count    = len / PAGE_SIZE;
+    v->handle_count  = 1;            // construction reference
+    v->mapping_count = 0;
+    v->pages         = NULL;         // HOSTMEM: no struct page backing
+    v->order         = 0;
+    v->kobj_pci      = kobj_pci;
+    v->pa            = pa;
+    v->hostmem_mair  = mair_idx;
     g_vmo_created++;
     return v;
 }
@@ -597,6 +644,24 @@ static void burrow_free_internal(struct Burrow *v) {
         kobj_dma_unref(v->kobj_dma);
         v->kobj_dma = NULL;
         break;
+    case BURROW_TYPE_HOSTMEM:
+        if (!v->kobj_pci)
+            extinction("burrow_free_internal(HOSTMEM) with kobj_pci already NULL (double-free)");
+        // Drop this hostmem mapping from the claim's live count FIRST (F1). The
+        // server's KObj_PCI handle ref and this Burrow's ref are independent;
+        // whichever drops last quiesces the claim (the last kobj_pci_unref ->
+        // pci_release_bars_and_claim clears MEM_SPACE + releases each BAR's
+        // KObj_MMIO). A live client mapping holds this ref, so the claim stays
+        // alive across the server's handle_close.
+        // F1 (FIXED): owner-DEATH quiesces DMA-only while hostmem_burrows > 0
+        // (BUS_MASTER cleared, MEM_SPACE kept), so a client's live mapping never
+        // observes a MEM-decode-disabled BAR. MEM_SPACE clears HERE, at the last
+        // unref -- i.e. AFTER the mapping is gone. Decrement before the unref so
+        // a concurrent owner-death sees the true count.
+        __atomic_fetch_sub(&v->kobj_pci->hostmem_burrows, 1u, __ATOMIC_RELAXED);
+        kobj_pci_unref(v->kobj_pci);
+        v->kobj_pci = NULL;
+        break;
     case BURROW_TYPE_FILE:
         // REVENANT / I-36: free every resident demand-paged page (order 0
         // each), then the sparse array, then clunk the adopted backing Spoor.
@@ -752,6 +817,12 @@ void burrow_acquire_mapping(struct Burrow *v) {
         if (!v->kobj_dma) {
             spin_unlock(&v->lock);
             extinction("burrow_acquire_mapping of DMA BURROW with NULL kobj_dma (UAF)");
+        }
+        break;
+    case BURROW_TYPE_HOSTMEM:
+        if (!v->kobj_pci) {
+            spin_unlock(&v->lock);
+            extinction("burrow_acquire_mapping of HOSTMEM BURROW with NULL kobj_pci (UAF)");
         }
         break;
     case BURROW_TYPE_FILE:
@@ -1207,18 +1278,23 @@ u32 burrow_lazy_resident_count(struct Burrow *v) {
 // v->size via burrow_get_size (magic-checked: 0 on a NULL/corrupted v ->
 // reject).
 //
-// Admission (G-2 -- the owed I-5 analysis, TAPESTRY.md §18.1 + §18.12 R2-F1):
-// ANON (a dataplane ring), or a KERNEL-MINTED device-passive DMA WEAVE (a
-// framebuffer-class region whose KObj_DMA carries the create-immutable `weave`
-// bit, set only by SYS_DMA_CREATE_WEAVE / kobj_dma_create_weave). A plain DMA
+// Admission (G-2 -- the owed I-5 analysis, TAPESTRY.md §18.1 + §18.12 R2-F1;
+// widened at Warp-2 per GPU-DESIGN.md §6.1): ANON (a dataplane ring), or a
+// KERNEL-MINTED share-admissible DMA subtype -- the device-passive WEAVE (the
+// create-immutable `weave` bit, set only by SYS_DMA_CREATE_WEAVE) or the GPU
+// BO (the `gpu_bo` bit, set only by SYS_DMA_CREATE_GPU_BO). A plain DMA
 // region -- virtqueue, descriptor table, bounce buffer: the device-COMMAND
 // class -- and MMIO stay structurally unshareable: no creator-asserted flag
 // admits them, only the allocation-time kernel mint, so sharing a region the
-// device INTERPRETS is impossible by construction (MMIO parity). The weave bit
-// conveys no hardware authority of its own: the region is pinned Normal-WB RAM
-// the device only DMA-reads (pixels); the client's PTEs are the same cacheable
-// attrs an ANON share installs (the fault arm's BURROW_TYPE_DMA case -- never
-// Device-nGnRnE), and W^X holds (the share prot is RW; vma_alloc rejects X).
+// device INTERPRETS is impossible by construction (MMIO parity). Neither bit
+// conveys hardware authority of its own, but their safety arguments DIFFER
+// and each lives on its KObj_DMA field: a weave is pinned Normal-WB RAM the
+// device only DMA-READS (pixels); a GPU BO is device-WRITTEN (render target /
+// readback), and its argument is that what the GPU may reach is bounded by
+// the GPU-side translation only the trusted device owner programs. Either
+// way the client's PTEs are the same cacheable attrs an ANON share installs
+// (the fault arm's BURROW_TYPE_DMA case -- never Device-nGnRnE), and W^X
+// holds (the share prot is RW; vma_alloc rejects X).
 // The #847 dual-refcount proof below is TYPE-INDEPENDENT with one addition for
 // DMA: the freed Burrow's kobj_dma_unref is the SECOND refcount domain -- the
 // weave's page chunk lives on the KObj_DMA, which the Burrow's own ref keeps
@@ -1273,12 +1349,32 @@ int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot) {
     size_t length = burrow_get_size(v);
     if (length == 0) return -1;
 
-    // The G-2 admission gate (see the header comment): ANON, or the
-    // kernel-minted device-passive DMA weave. Types + the weave bit are
-    // create-immutable; lock-free reads are coherent.
-    bool weave = (v->type == BURROW_TYPE_DMA &&
-                  v->kobj_dma != NULL && v->kobj_dma->weave);
-    if (v->type != BURROW_TYPE_ANON && !weave) return -1;
+    // The G-2 (+Warp-2) admission gate (see the header comment): ANON, or a
+    // kernel-minted share-admissible DMA subtype -- the device-passive weave,
+    // or the GPU BO (whose distinct device-WRITTEN argument lives on
+    // KObj_DMA.gpu_bo: what the GPU may write is bounded by translation the
+    // trusted owner programs, so the client's RW mapping still conveys zero
+    // hardware authority). Types + the subtype bits are create-immutable;
+    // lock-free reads are coherent. Plain DMA (device-COMMAND class) and MMIO
+    // remain structurally unshareable.
+    bool admissible_dma = (v->type == BURROW_TYPE_DMA && v->kobj_dma != NULL &&
+                           (v->kobj_dma->weave || v->kobj_dma->gpu_bo));
+    // V-2 (GPU-DESIGN 6.2.1): BURROW_TYPE_HOSTMEM is share-admissible, on the
+    // SAME I-45 argument the weave/gpu_bo bits carry -- but for a distinct
+    // class. A hostmem BAR subrange is device-PASSIVE shared memory
+    // (VIRTIO_PCI_CAP_SHARED_MEMORY_CFG, cfg_type 8), NOT the command/register
+    // surface that keeps MMIO structurally unshareable: the device never
+    // INTERPRETS what the client writes here (commands ride virtqueues the
+    // client cannot reach). So the client's cacheable/NC RW mapping conveys
+    // zero hardware authority. The type is create-immutable and settable ONLY
+    // by SYS_BURROW_FROM_HOSTMEM, which proves the caller owns the PCI claim and
+    // resolves a real cfg_type=8 window -- a client cannot forge a hostmem
+    // Burrow over a device-register MMIO. And the client receives only this
+    // mapping, never the KObj_PCI handle (I-5, non-transferable).
+    bool admissible_hostmem = (v->type == BURROW_TYPE_HOSTMEM &&
+                               v->kobj_pci != NULL);
+    if (v->type != BURROW_TYPE_ANON && !admissible_dma && !admissible_hostmem)
+        return -1;
 
     // R2-F3: charge the CLIENT's shared-in budget (the I-32 fifth axis) BEFORE
     // mapping. The pages are the SHARER's commit (netd's page_count /

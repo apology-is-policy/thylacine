@@ -71,7 +71,7 @@ use crate::input::{
     REL_X, REL_Y,
 };
 use crate::keymap::Mods;
-use crate::server::{Comp, Conn, MAX_CONNS};
+use crate::server::{Comp, Conn, MAX_CONNS, MAX_WARP_CONNS, ROOT_TAPESTRY, ROOT_WARP};
 
 // =============================================================================
 // User-VA layout (driver-private): the BAR windows + the device rings; the
@@ -81,6 +81,12 @@ use crate::server::{Comp, Conn, MAX_CONNS};
 const GPU_BAR_WINDOW_VA: u64 = 0x0080_0000;
 const KBD_BAR_WINDOW_VA: u64 = 0x00E0_0000;
 const GPU_RING_VA: u64 = 0x0150_0000;
+// Warp-6 V-1: the one-page backing for the guest-blob probe, in the gap
+// between the ring's end and the keyboard DMA. Mapped only transiently inside
+// Gpu::probe (created, the blob unref'd, the page unmapped, all before probe
+// returns), so it never coexists with a steady-state mapping -- but it still
+// gets a non-overlapping fixed VA, asserted below.
+const GPU_BLOB_PROBE_VA: u64 = 0x0151_0000;
 const KBD_DMA_VA: u64 = 0x0152_0000;
 // The tablet's windows (G-7c): its eventq page above the keyboard's, its
 // 6-BAR window above the whole DMA region (the KBD-window..GPU-ring gap
@@ -92,33 +98,50 @@ const TAB_BAR_WINDOW_VA: u64 = 0x0160_0000;
 // the weave bump-allocator base to 0x0240_0000 (server.rs).
 const MOUSE_DMA_VA: u64 = 0x0154_0000;
 const MOUSE_BAR_WINDOW_VA: u64 = 0x01C0_0000;
+// The GPU fenced lane (Warp-2d): 4x64 KiB submit slots + a response page,
+// in the gap between the mouse BAR window's end and the weave base. Mapped
+// only on virgl devices (Gpu::probe).
+const GPU_FLANE_VA: u64 = 0x0220_0000;
 
 // Idle throttle (residual-2: the ~16% compositor idle cost). The FRAME clock
 // is a fixed-rate tick that wakes every visible surface -- at 60 Hz a wholly
 // idle console still wakes tapestryd AND aurora 60x/sec (each wake pays an HVF
-// deep-park vCPU resume). When no INPUT has arrived for IDLE_AFTER_MS, drop the
-// effective tick to IDLE_HZ; the next keyboard/tablet/mouse event snaps it back
-// to the ctl rate. Activity is INPUT ONLY, never client presents: aurora
-// presents its cursor blink ~2x/sec, so counting presents would let the blink
-// pin the clock active forever. The floor is bounded by two poll-mode costs --
-// the keyboard is drained once per pass (so first-key-after-idle latency is one
-// idle period) and aurora polls /dev/consdrain once per FRAME (so console-output
-// latency during idle is one idle period); IDLE_HZ = 15 keeps both <= ~67 ms
-// (imperceptible-to-mild for the FIRST event after true idle, then 60 Hz) while
-// cutting the steady idle wakes 4x. Disabled under test-mode (the frozen clock
-// is ctl-driven). See docs/reference/139-tapestryd.md "Idle throttle".
+// deep-park vCPU resume). When neither INPUT nor sustained PRESENT pressure has
+// been seen for IDLE_AFTER_MS, drop the effective tick to IDLE_HZ; the next
+// keyboard/tablet/mouse event snaps it back to the ctl rate. Activity is input
+// OR Comp::animating() -- >= ~8 Hz of well-formed presents over a two-bucket
+// sliding window (#164): a game holding a key emits no further input events,
+// so input-only throttling flapped a paced GLQuake between 60 and the 15 Hz
+// tick x the SDL pacer's 50 ms bound (~30 fps, A/B-measured 28.7 quiet vs 61.3
+// with one injected input per 100 ms). Bare presents still don't count -- only
+// SUSTAINED, SCREEN-CHANGING pressure (hidden-surface presents are filtered in
+// note_present -- audit F1): aurora's ~2 Hz cursor blink sums to <= 2 per
+// window pair, margin 2 under the threshold, so a quiet console throttles
+// exactly as before (re-measured on this build: idle mean 7.2%; the
+// DISCRIMINATING witness is `THYLACINE_IDLE_STRICT=20 tools/ci-idle-gate.sh` --
+// the gate's default 80% threshold catches spins, not throttle regressions,
+// audit F4). The floor
+// is bounded by two poll-mode costs -- the keyboard is drained once per pass
+// (so first-key-after-idle latency is one idle period) and aurora polls
+// /dev/consdrain once per FRAME (so console-output latency during idle is one
+// idle period); IDLE_HZ = 15 keeps both <= ~67 ms (imperceptible-to-mild for
+// the FIRST event after true idle, then 60 Hz) while cutting the steady idle
+// wakes 4x. Disabled under test-mode (the frozen clock is ctl-driven). See
+// docs/reference/139-tapestryd.md "Idle throttle".
 const IDLE_HZ: u32 = 15;
 const IDLE_AFTER_MS: u64 = 250;
 
 const _: () = {
     assert!(GPU_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= KBD_BAR_WINDOW_VA);
     assert!(KBD_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= GPU_RING_VA);
-    assert!(GPU_RING_VA + (gpu::RING_DMA_SIZE as u64) <= KBD_DMA_VA);
+    assert!(GPU_RING_VA + (gpu::RING_DMA_SIZE as u64) <= GPU_BLOB_PROBE_VA);
+    assert!(GPU_BLOB_PROBE_VA + 0x1000 <= KBD_DMA_VA); // one page
     assert!(KBD_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_DMA_VA);
     assert!(TAB_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= MOUSE_DMA_VA);
     assert!(MOUSE_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_BAR_WINDOW_VA);
     assert!(TAB_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= MOUSE_BAR_WINDOW_VA);
-    assert!(MOUSE_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= 0x0240_0000);
+    assert!(MOUSE_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= GPU_FLANE_VA);
+    assert!(GPU_FLANE_VA + (gpu::FLANE_DMA_SIZE as u64) <= 0x0240_0000);
 };
 
 /// Post /srv/tapestry (9P-mode; the ptyfs/netd post idiom). Requires the
@@ -129,6 +152,24 @@ fn post_srv_tapestry() -> Result<i64, ()> {
         return Err(());
     }
     let listener = unsafe { t_walk_create(srv, b"tapestry".as_ptr(), 8, T_OREAD, 0) };
+    unsafe { t_close(srv) };
+    if listener < 0 {
+        return Err(());
+    }
+    Ok(listener)
+}
+
+/// Post /srv/warp -- the GPU seam's own tree (Warp-2c; GPU-DESIGN section
+/// 5: tapestryd hosts the GPU service because warden binding is one
+/// exclusive claimant per virtio function). Two posts from one Proc are
+/// kernel-supported (no per-Proc service cap; both tombstone together at
+/// this Proc's death).
+fn post_srv_warp() -> Result<i64, ()> {
+    let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
+    if srv < 0 {
+        return Err(());
+    }
+    let listener = unsafe { t_walk_create(srv, b"warp".as_ptr(), 4, T_OREAD, 0) };
     unsafe { t_close(srv) };
     if listener < 0 {
         return Err(());
@@ -164,7 +205,7 @@ impl Driver for Tapestryd {
         );
 
         // The GPU function is mandatory.
-        let g = gpu::Gpu::probe(GPU_BAR_WINDOW_VA, GPU_RING_VA)?;
+        let g = gpu::Gpu::probe(GPU_BAR_WINDOW_VA, GPU_RING_VA, GPU_FLANE_VA, GPU_BLOB_PROBE_VA)?;
 
         // The input functions are best-effort: an environment without them
         // (or without their functions in the gathered allowance) yields an
@@ -239,12 +280,24 @@ impl Driver for Tapestryd {
                 return Err(Error::Hardware);
             }
         };
+        let warp_listener = match post_srv_warp() {
+            Ok(l) => l,
+            Err(()) => {
+                say!("tapestryd: /srv/warp post failed");
+                return Err(Error::Hardware);
+            }
+        };
 
         // READY last: all bring-up console output precedes it; the warden's
         // readiness pipe waits on exactly this line.
         let mut out = libthyla_rs::io::stdout();
         let _ = out.write_all(b"READY\n");
-        say!("tapestryd: serving /srv/tapestry ({}x{})", self.comp.gpu.width, self.comp.gpu.height);
+        self.comp.report_composed_posture();
+        say!(
+            "tapestryd: serving /srv/tapestry + /srv/warp ({}x{})",
+            self.comp.gpu.width,
+            self.comp.gpu.height
+        );
 
         let mut conns: Vec<Conn> = Vec::new();
         let mut raw_events: Vec<RawInputEvent> = Vec::new();
@@ -370,8 +423,8 @@ impl Driver for Tapestryd {
                 };
                 for ev in &raw_events {
                     match ev.etype {
-                        EV_REL if ev.code == REL_X => dx += ev.value as i32,
-                        EV_REL if ev.code == REL_Y => dy += ev.value as i32,
+                        EV_REL if ev.code == REL_X => dx = dx.saturating_add(ev.value as i32),
+                        EV_REL if ev.code == REL_Y => dy = dy.saturating_add(ev.value as i32),
                         EV_SYN => commit(&mut self.comp, &mut dx, &mut dy),
                         EV_KEY if ev.code >= BTN_LEFT => {
                             commit(&mut self.comp, &mut dx, &mut dy);
@@ -402,7 +455,10 @@ impl Driver for Tapestryd {
                 last_input = Instant::now();
             }
             let base_hz = self.comp.clock_hz;
-            let eff_hz = if frozen || (last_input.elapsed().as_millis() as u64) < IDLE_AFTER_MS {
+            let eff_hz = if frozen
+                || (last_input.elapsed().as_millis() as u64) < IDLE_AFTER_MS
+                || self.comp.animating()
+            {
                 base_hz
             } else {
                 IDLE_HZ.min(base_hz)
@@ -423,28 +479,80 @@ impl Driver for Tapestryd {
                 }
             }
 
-            // (3) Deferred event-read deliveries (backward, remove-safe).
+            // (3) The fence pump (W2d): drain retired fenced chains off the
+            // device and post each on its owning ctx -- then the deferred
+            // event-read + fence-read deliveries (backward, remove-safe).
+            self.comp.warp_service_fences();
             let mut i = conns.len();
             while i > 0 {
                 i -= 1;
-                if !conns[i].poll_events(&mut self.comp) {
+                let ok =
+                    conns[i].poll_events(&mut self.comp) && conns[i].poll_fences(&mut self.comp);
+                if !ok {
                     let mut c = conns.remove(i);
                     c.teardown(&mut self.comp);
                     unsafe { t_close(c.raw_fd()) };
                 }
             }
+            // #210 custody mirror: fold every conn's park/parse posture
+            // into Comp so the W_CTL reader (one conn) sees its siblings.
+            #[cfg(feature = "test-mode")]
+            {
+                let (mut fp, mut rp, mut ib) = (0u32, 0u32, 0u32);
+                let (mut fc, mut ff) = (0u32, 0u32);
+                for c in &conns {
+                    let (f, r, b, cx, fd) = c.w210_summary();
+                    if f > 0 && fp == 0 {
+                        fc = cx;
+                        ff = fd;
+                    }
+                    fp += f as u32;
+                    rp += r as u32;
+                    if (b as u32) > ib {
+                        ib = b as u32;
+                    }
+                }
+                self.comp.w210_fparked = fp;
+                self.comp.w210_rparked = rp;
+                self.comp.w210_inbuf_max = ib;
+                self.comp.w210_f_ctx = fc;
+                self.comp.w210_f_fid = ff;
+            }
 
-            // (4) Poll: the listener (while room) + every conn, bounded by
-            // the time to the next FRAME tick.
-            let has_room = conns.len() < MAX_CONNS;
+            // (4) Poll: both listeners (while room; tapestry then warp,
+            // Warp-2c) + every conn, bounded by the time to the next FRAME
+            // tick. The conns Vec mixes both trees -- Conn.root disjoins
+            // their qid spaces, everything else is shared machinery.
+            // Per-root budgets (audit F7): a warp client can never close
+            // the compositor's own door. Both listeners are still polled
+            // together so `conn_base` stays 2 whenever either is armed;
+            // each accept re-tests its own budget below.
+            // ARM ONLY WHAT WE WILL ACCEPT FROM (round-2 F2 [P1]): a
+            // pending connection keeps its listener permanently readable
+            // (devsrv's backlog -> POLLIN), and t_poll returns instantly
+            // when any fd is ready. Polling a listener whose accept the
+            // budget will decline therefore spins the serve loop at 100%
+            // -- in the console renderer, bypassing the whole idle
+            // throttle. Each listener is armed iff its own accept can run.
+            let warp_conns = conns.iter().filter(|c| c.root() == ROOT_WARP).count();
+            let arm_tapestry = conns.len() < MAX_CONNS;
+            let arm_warp = arm_tapestry && warp_conns < MAX_WARP_CONNS;
             let mut pollfds: Vec<TPollFd> = Vec::new();
-            if has_room {
+            if arm_tapestry {
                 pollfds.push(TPollFd {
                     fd: listener as i32,
                     events: T_POLLIN,
                     revents: 0,
                 });
             }
+            if arm_warp {
+                pollfds.push(TPollFd {
+                    fd: warp_listener as i32,
+                    events: T_POLLIN,
+                    revents: 0,
+                });
+            }
+            let conn_base = pollfds.len();
             for c in &conns {
                 pollfds.push(TPollFd {
                     fd: c.raw_fd() as i32,
@@ -458,18 +566,42 @@ impl Driver for Tapestryd {
             } else {
                 remain.clamp(1, period_ms.max(1)) as i32
             };
+            // W2d: the GPU IRQ is not pollable (the G-5 engine owns it;
+            // irq.wait only inside a sync submit), so while fenced chains
+            // are in flight the pass pace IS the fence-completion latency
+            // -- clamp to 1 ms (the input-drain precedent).
+            let timeout = if self.comp.warp_fences_pending() {
+                timeout.min(1)
+            } else {
+                timeout
+            };
             let rc = unsafe { t_poll(pollfds.as_mut_ptr(), pollfds.len(), timeout) };
             if rc < 0 {
                 continue;
             }
 
-            // (5) Accept (one per pass).
-            let conn_base = if has_room { 1 } else { 0 };
-            if has_room && pollfds[0].revents & T_POLLIN != 0 {
-                let h = unsafe { t_srv_accept(listener) };
+            // (5) Accept (one per listener per pass).
+            // Accept from each ARMED listener. The arming above already
+            // encodes both budgets, and `conn_base` is derived from how
+            // many were pushed -- never a hardcoded 2 (round-2 F2). The
+            // tapestry accept runs first and may fill the last slot, so
+            // the warp arm re-tests (round-1 F9's overshoot guard, kept).
+            let mut idx = 0usize;
+            if arm_tapestry {
+                if pollfds[idx].revents & T_POLLIN != 0 {
+                    let h = unsafe { t_srv_accept(listener) };
+                    if h >= 0 {
+                        let id = self.comp.next_conn_id();
+                        conns.push(Conn::new(h, id, ROOT_TAPESTRY));
+                    }
+                }
+                idx += 1;
+            }
+            if arm_warp && pollfds[idx].revents & T_POLLIN != 0 && conns.len() < MAX_CONNS {
+                let h = unsafe { t_srv_accept(warp_listener) };
                 if h >= 0 {
                     let id = self.comp.next_conn_id();
-                    conns.push(Conn::new(h, id));
+                    conns.push(Conn::new(h, id, ROOT_WARP));
                 }
             }
 

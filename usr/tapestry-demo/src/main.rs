@@ -133,16 +133,30 @@ pub extern "C" fn rs_main() -> i64 {
         match ev.kind {
             TEV_FRAME => {
                 phase = phase.wrapping_add(3);
+                // GPU-DESIGN 4.5.8b. Frame 0 painted the quadrant background
+                // into SLOT 0 only; every frame after draws just the plasma
+                // box into a ROTATING slot. So a slot on its first use (age 0)
+                // has never held the background at all -- it holds the
+                // alloc-time zeros -- and presenting only the box would leave
+                // black around it. This is invisible while one host resource
+                // per generation accumulates the frames; per-slot resources
+                // (C-2d-b) remove that, so the background is repainted per
+                // slot. Steady state is unchanged: the damage rect is constant,
+                // so at age >= 1 there is nothing extra to repaint.
+                let fresh = surf.age() == 0;
                 {
                     let px = surf.pixels();
+                    if fresh {
+                        draw_quadrants(px, w, h);
+                    }
                     draw_plasma(px, w, bx, by, bw, bh, phase);
                 }
-                if let Err(e) = surf.present(Some(Rect {
-                    x: bx,
-                    y: by,
-                    w: bw,
-                    h: bh,
-                })) {
+                let damage = if fresh {
+                    None
+                } else {
+                    Some(Rect { x: bx, y: by, w: bw, h: bh })
+                };
+                if let Err(e) = surf.present(damage) {
                     say!("tapestry-demo: FAIL present {:?}", e);
                     return 1;
                 }

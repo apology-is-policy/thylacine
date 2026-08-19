@@ -122,8 +122,9 @@ by writing the new TTBR0 (a *different* ASID) and `isb`-ing first.
 | | Why |
 |---|---|
 | note handler (`handler_va`) | an inherited handler is an address in an image that no longer exists |
-| Linux signal dispositions (`sigtab`) | same — but the table is reset **in place**, never freed (#254): cross-Proc readers hold `p->sigtab` without a lock, so freeing it here was a use-after-free read. Zeroing is exact POSIX because `SIG_DFL == 0`. The only free is `proc_free` |
-| the thread's note mask | per-image policy |
+| Linux signal dispositions (`sigtab`) | an inherited handler is an address in the old image. Reset **in place**, never freed (#254 / #243): cross-Proc readers (`notes_post`'s SIG_IGN hook, `notes_proc_has_live_handler`, the ^Z fan's gate) load `->sigtab` locklessly, and `notes_post` targets *another* Proc, so freeing here was a use-after-free read; `proc_exec_alone` bounds this Proc's *threads*, not other Procs. WHAT resets is the phenotype's rule (ARCH 7.6; POSIX execve(2)): a `PHENO_LINUX` image keeps its SIG_IGN rows and resets only the CAUGHT rows (`viv_sigtab_reset_caught`); a native image clears everything (`viv_sigtab_reset`, the Plan 9 rule). Stores are per 8-byte field, the granule the lock-free readers load. The only free is `proc_free` |
+| the thread's note mask | per-image policy for a native image (cleared); a `PHENO_LINUX` image INHERITS it (POSIX: "the signal mask ... shall be inherited") -- `nohup`, `trap '' INT; exec prog` depend on it |
+| the in-handler latch (`Thread.in_handler`) | #247: exec from inside a note handler (`execve` is async-signal-safe; "catch the hangup, re-exec myself" is the supervisor idiom) must drop the latch, or the new image is deaf to every note but `kill` |
 | `TPIDR_EL0` | musl's `__pthread_self` reads it; a stale value is a live pointer into the old image's TCB |
 | FP/SIMD (V0–V31, FPSR, **FPCR**) | FPCR carries rounding mode and trap enables, which a fresh image expects at defaults |
 
@@ -133,9 +134,11 @@ switch that may never come.
 
 **Kept** (and each is correct):
 
-- **the handle table** — POSIX keeps fds across exec (there is no `O_CLOEXEC` at
-  v1.0). The prover leans on this: its post-exec PASS line is written to an fd
-  inherited across the swap.
+- **the handle table** — POSIX keeps fds across exec, MINUS the close-on-exec
+  set: `O_CLOEXEC` landed (#151; the `cloexec` bitmap beside `fd[]` in
+  `handle.h`, honoured by `handle_close_on_exec` on the exec path). The prover
+  leans on the keep: its post-exec PASS line is written to an fd inherited
+  across the swap.
 - **the Territory**, the process tree, identity, capabilities, `/env`.
 - **the pid** — which is what distinguishes execve from spawn, and what the
   prover checks so a degradation to "spawn a child and exit" would fail.

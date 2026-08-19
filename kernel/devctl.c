@@ -14,6 +14,7 @@
 //   /ctl/kernel-base    — KASLR kernel high VA base + offset + seed source
 //   /ctl/sched          — scheduler stats (runnable count)
 //   /ctl/cons           — console byte-loss counters, RX + TX (#95)
+//   /ctl/9p-sessions    — live 9P sessions + srvconn ring counters (#210)
 //
 // dc='C' (uppercase to leave 'c' for cons + 'r' for random).
 //
@@ -21,6 +22,8 @@
 // per-leaf format generator, offset-aware read. The format generators
 // are static per-leaf functions producing into a 512-byte stack buffer.
 
+#include <thylacine/9p_attach.h>  // #210: p9_attached_ctl_iterate (/ctl/9p-sessions)
+#include <thylacine/9p_client.h>  // #210: struct p9_client_ctl
 #include <thylacine/caps.h>
 #include <thylacine/cons.h>      // #95: cons_rx_drops + cons_tx_drops (/ctl/cons)
 #include <thylacine/dev.h>
@@ -29,6 +32,7 @@
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/spoor.h>
+#include <thylacine/srvconn.h>   // #210: srvconn_ctl_iterate (/ctl/9p-sessions)
 #include <thylacine/syscall.h>   // V-4b-5: struct t_stat + T_S_IF* (devctl_stat_native)
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
@@ -54,6 +58,7 @@ enum {
     CTL_KIND_SCHED      = 5,
     CTL_KIND_CPU        = 6,
     CTL_KIND_CONS       = 7,   // #95: console byte-loss counters (RX + TX)
+    CTL_KIND_9P         = 8,   // #210: live 9P sessions + srvconn ring counters
 };
 
 #define CTL_QID_ROOT_PATH  0ULL
@@ -511,6 +516,95 @@ static size_t format_cons(char *buf, size_t cap) {
     return off;
 }
 
+// #210: /ctl/9p-sessions — the reply-loss discriminator. One `conn` row
+// per live SrvConn (ring byte conservation + the server's whole-frame
+// send count) and one `sess` row per live attached 9P session (the demux
+// counters + the in-flight tag table). Read AT WEDGE TIME by a sibling
+// proc, the three arms separate:
+//   s2c prod > cons (bytes parked in the ring)      -> reply undrained
+//   sess orphan bumped while the submitter is parked -> misdemux / tag
+//   sess owned advanced + inflight tag done=1 parked -> lost wake (I-9)
+// World-readable: counters + tags only — no addresses, no payload bytes.
+struct ctl_9p_fmt {
+    char  *buf;
+    size_t cap;
+    size_t off;
+    bool   full;
+};
+
+static bool format_9p_conn_cb(const struct srvconn_ctl_row *row, void *arg) {
+    struct ctl_9p_fmt *f = (struct ctl_9p_fmt *)arg;
+    size_t n;
+#define EMIT_STR(s) do { n = fmt_str(f->buf, f->cap, f->off, (s)); \
+        if (!n) { f->full = true; return false; } f->off += n; } while (0)
+#define EMIT_DEC(v) do { n = fmt_udec(f->buf, f->cap, f->off, (unsigned long)(v)); \
+        if (!n) { f->full = true; return false; } f->off += n; } while (0)
+    EMIT_STR("conn peer=");   EMIT_DEC(row->peer_pid);
+    EMIT_STR(" msize=");      EMIT_DEC(row->msize);
+    EMIT_STR(row->byte_mode ? " byte" : " 9p");
+    EMIT_STR(row->kernel_attached ? " ka" : " -");
+    EMIT_STR(row->state == 1 ? " live" : " torn");
+    EMIT_STR(" c2s=");        EMIT_DEC(row->c2s_produced);
+    EMIT_STR("/");            EMIT_DEC(row->c2s_consumed);
+    EMIT_STR("+");            EMIT_DEC(row->c2s_buffered);
+    // NEVER route "" through EMIT_STR: fmt_str returns bytes written, so
+    // an empty string returns 0 == the overflow sentinel and would abort
+    // the whole format at the first non-EOF chan (the wedge run 1 lesson:
+    // every read truncated deterministically right here).
+    if (row->c2s_eof) EMIT_STR("E");
+    EMIT_STR(" s2c=");        EMIT_DEC(row->s2c_produced);
+    EMIT_STR("/");            EMIT_DEC(row->s2c_consumed);
+    EMIT_STR("+");            EMIT_DEC(row->s2c_buffered);
+    if (row->s2c_eof) EMIT_STR("E");
+    EMIT_STR(" sframes=");    EMIT_DEC(row->s2c_frames);
+    EMIT_STR("\n");
+    return true;
+}
+
+static bool format_9p_sess_cb(const char *label, int id, u32 msize,
+                              const struct p9_client_ctl *snap, void *arg) {
+    struct ctl_9p_fmt *f = (struct ctl_9p_fmt *)arg;
+    size_t n;
+    // Belt to the F6 setter guard: a computed-empty label would read as
+    // the overflow sentinel and abort the remaining listing.
+    EMIT_STR("sess ");
+    if (label[0]) EMIT_STR(label); else EMIT_STR("-");
+    EMIT_STR(" id=");
+    if (id < 0) EMIT_STR("-"); else EMIT_DEC(id);
+    EMIT_STR(" msize=");      EMIT_DEC(msize);
+    EMIT_STR(" rx=");         EMIT_DEC(snap->frames_rx);
+    EMIT_STR(" own=");        EMIT_DEC(snap->demux_owned);
+    EMIT_STR(" orph=");       EMIT_DEC(snap->demux_orphan);
+    EMIT_STR(" orphc=");      EMIT_DEC(snap->demux_orphan_clunk);
+    EMIT_STR(" orphf=");      EMIT_DEC(snap->demux_orphan_flush);
+    EMIT_STR(" orphl=");      EMIT_DEC(snap->demux_orphan_late);
+    EMIT_STR(" wake=");       EMIT_DEC(snap->demux_wakes);
+    EMIT_STR(" ops=");        EMIT_DEC(snap->total_ops);
+    EMIT_STR(" err=");        EMIT_DEC(snap->total_errors);
+    EMIT_STR(snap->reader_active ? " rd" : " -");
+    EMIT_STR(snap->dead ? " dead" : " live");
+    EMIT_STR(" sw=");         EMIT_DEC(snap->send_waiters);
+    EMIT_STR(" infl=");       EMIT_DEC(snap->n_inflight);
+    for (u32 i = 0; i < snap->n_inflight && i < P9_CTL_INFLIGHT_MAX; i++) {
+        EMIT_STR(" t");       EMIT_DEC(snap->tags[i].tag);
+        EMIT_STR(snap->tags[i].done ? "d" : "w");
+        if (snap->tags[i].async) EMIT_STR("a");   // "" == overflow sentinel
+        EMIT_STR(":");        EMIT_DEC(snap->tags[i].kind);
+        EMIT_STR(":");        EMIT_DEC(snap->tags[i].fid);
+    }
+    EMIT_STR("\n");
+    return true;
+#undef EMIT_STR
+#undef EMIT_DEC
+}
+
+static size_t format_9p_sessions(char *buf, size_t cap) {
+    struct ctl_9p_fmt f = { buf, cap, 0, false };
+    srvconn_ctl_iterate(format_9p_conn_cb, &f);
+    if (!f.full) p9_attached_ctl_iterate(format_9p_sess_cb, &f);
+    return f.off;
+}
+
 // =============================================================================
 // Per-leaf table.
 // =============================================================================
@@ -529,6 +623,7 @@ static const struct ctl_leaf g_ctl_leaves[] = {
     { "sched",       CTL_KIND_SCHED,       format_sched       },
     { "cpu",         CTL_KIND_CPU,         format_cpu         },
     { "cons",        CTL_KIND_CONS,        format_cons        },
+    { "9p-sessions", CTL_KIND_9P,          format_9p_sessions },
 };
 
 #define CTL_LEAF_COUNT  (sizeof(g_ctl_leaves) / sizeof(g_ctl_leaves[0]))
@@ -720,7 +815,15 @@ static void devctl_close(struct Spoor *c) {
 // early-return) at ~9 procs -- fewer than a booted system runs. 2048 fits ~30
 // proc lines; a 2 KiB frame on the 16 KiB kstack is safe on the shallow Dev-read
 // path. Every /ctl leaf shares this cap (all fit comfortably).
-#define DEVCTL_READ_BUF 2048
+//
+// #210 bumped 2048 -> 4096: /ctl/9p-sessions emits ~120 bytes per live
+// conn + per session; a busy boot (fs + stratumd + corvus + ptyfs + warp
+// x2 + login sessions) runs ~15 rows ≈ 1.8 KiB and 2048 would truncate
+// under exactly the multi-session load the file exists to diagnose. The
+// caveat stands: the fmt re-runs per read() at each offset, so counters
+// may advance between pages — read the whole file in one call (any read
+// with n >= the content size) for a consistent snapshot.
+#define DEVCTL_READ_BUF 4096
 
 static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;

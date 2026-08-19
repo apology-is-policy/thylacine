@@ -231,28 +231,30 @@ Loom arc's obligation is to deliver item 1 shaped to fit (the §7 requirements).
 
 ---
 
-## 11. The proof-of-concept — PROMOTED, and it runs
+## 11. The proof-of-concept — LANDED; no longer a POC
 
-**Corrected 2026-08-16 (aux#237).** This section described the POC as "built +
-compiling on `aux/userspace-apps` (`cargo build`; never booted)" against paths
-under `usr/apps/`. Every operative word of that is now false, and it was false
-in the direction that matters: the demo is the **end-to-end liveness witness
-for the G-2/G-3 path**, verified by `tools/screendump.sh -v`, and the doc
-called it never-booted. Promotion is the event that invalidates a description,
-and it never announces itself at the old location.
+**Corrected 2026-08-16 (aux#237).** This section described an unbooted,
+`cargo build`-only POC living on the `aux/userspace-apps` branch. It was
+promoted into `main` (the aux-merge intermezzo, `docs/phase8-status.md`), grew a
+compositor, and now runs — so the text sent readers hunting a stale branch for
+code sitting in their own tree.
 
-- `usr/lib/libtapestry` (was `usr/apps/libtapestry`) — `Display` / `Tapestry` /
-  `Event` / `Rect`. The one-line handoff seam described here as pending is
-  **taken**: `lib.rs` imports the real ring directly
-  (`use libthyla_rs::loom::{Cqe, Ring, RegisteredBuffer, Sqe, ENTER_GETEVENTS}`),
-  so `MockLoom` is no longer the substrate. The prediction held — `Display` /
-  `Tapestry` were unchanged by the swap.
-- `usr/tapestry-demo` (was `usr/apps/tapestry-demo`) — the animated XOR-plasma
-  software renderer (pure integer, no FP/libm). It drives the model end to end
-  **on a real boot**, not offline against a mock.
+| Then (aux POC) | Now (`main`, in the `usr/` workspace) |
+|---|---|
+| `usr/apps/libtapestry` | `usr/lib/libtapestry` |
+| `usr/apps/tapestry-demo` | `usr/tapestry-demo` |
+| — | `usr/tapestryd` (the compositor) + `usr/tapestry-battery` |
+| `usr/apps/TAPESTRY-DESIGN.md` | folded into THIS document, the binding scripture |
 
-`usr/apps/TAPESTRY-DESIGN.md` no longer exists at that path; **this document is
-the binding scripture** it was folded into.
+All four are Cargo workspace members in `usr/Cargo.toml`. The `MockLoom` seam is
+gone — the real backend was wired at `5f2217f6` ("wire the real Loom backend
+(RingLoom) after merging main"): `lib.rs` imports the ring directly
+(`use libthyla_rs::loom::{Cqe, Ring, RegisteredBuffer, Sqe, ENTER_GETEVENTS}`),
+so the one-line handoff this section described as pending is done, and the
+prediction held — `Display` / `Tapestry` were unchanged by the swap. And `usr/tapestry-demo` is now the end-to-end liveness
+witness for the whole G-2/G-3 path (private `/srv/tapestry` session -> surface
+mint -> `SYS_WEFT_MAP` -> present), verified by `tools/screendump.sh -v`:
+"never booted" is exactly backwards.
 
 ---
 
@@ -1056,7 +1058,17 @@ ls-gfx / ls-gfx-live / the per-boot `-c` gate stay green. As-built:
 weave generations.** The §18.3 resize protocol is live. A surface's
 `weave`/`resource_id` name its CURRENT generation (GPU resource ids are
 per-generation, minted above SCREEN_RES so a fresh resource never
-aliases the old — closing the #317 stale-content class); `alloc_weave`
+aliases the old — closing the #317 stale-content class; **at Warp-C C-2
+a generation mints one resource PER SLOT rather than one per generation
+— GPU-DESIGN §4.5.8, user-voted 2026-08-16, RESERVED.** The guest weave
+is triple-buffered while the host side is single-buffered, which is
+invisible while the transfer is synchronous and becomes the blit/fill
+collision the moment the compositor is a second async reader; the fix
+restores the 1:1 slot↔resource correspondence the offset-transfer
+collapsed. Consequence worth carrying: **the D1 recycle gate does not
+survive the composed path unchanged** — a present's terminal CQE stops
+meaning the resource is free once a composition may still be reading
+it); `alloc_weave`
 (the shared body of `create` + `resize_ack`) allocates a full
 generation, `release_gen` tears one down in the R2-F5 order. A
 size-changing CONFIGURE offer records `offered = (serial, w, h)` (only

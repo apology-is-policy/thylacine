@@ -30,7 +30,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-sock="$REPO_ROOT/build/qmp.sock"
+sock="${THYLACINE_QMP_SOCK:-$REPO_ROOT/build/qmp.sock}"
 mode="text"
 
 while getopts "s:kph" opt; do

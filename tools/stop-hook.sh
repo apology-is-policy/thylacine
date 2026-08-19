@@ -15,6 +15,18 @@
 # blocks ONCE with a question and the legitimate exits listed; answering "yes,
 # because X" and stopping is a correct outcome, not a defeat.
 #
+# DECISIONS ROUTE TO AskUserQuestion, NOT A SUMMARY (added at the user's
+# request 2026-08-19). A stop that puts a DECISION to the user -- a case-1
+# escalation, a case-3 "needs a human decision", pending votes that have
+# accumulated, or a vote blocking the agent's intended path -- must be surfaced
+# as a BLOCKING AskUserQuestion, never a passive summary a user who is away may
+# not see for hours. AskUserQuestion is a tool call, not a turn-end, so it does
+# not even trigger this hook: asking keeps the agent IN-TURN, which is more
+# aligned with the no-unearned-yield rule, not less. Pure WAITS (a running
+# gate/quota/hardware, nothing to decide) and answered questions stay clean
+# stops. Gated by the same .no-stop-nudge dotfile below -- suppress the hook
+# and you suppress this too.
+#
 # FAIL-OPEN, EVERYWHERE. Every error path exits 0 (allow the stop). A Stop hook
 # that fails closed can trap a session in a loop it cannot talk its way out of,
 # which is far worse than a missed nudge -- so no parse failure, missing file,
@@ -222,17 +234,24 @@ Which of these is it?
 
   1. An item from "Autonomy + escalation" -- a format break, a destructive
      operation, an architectural deviation, a scripture-altering design fork,
-     or anything outward-facing. STOPPING IS CORRECT: say which, and stop.
+     or anything outward-facing. This is a DECISION FOR THE USER: do not bury
+     it in a summary they may not read for hours -- put it via AskUserQuestion.
   2. The user asked something you have now answered. STOPPING IS CORRECT.
-  3. You are genuinely blocked -- needs a human decision, quota, hardware, or
-     a long gate you cannot usefully wait on. STOPPING IS CORRECT: name what
-     unblocks it.
+  3. You are genuinely blocked. If it needs a HUMAN DECISION -- or a pending
+     vote is blocking the path you meant to take, or such votes have piled up
+     unanswered -- put it via AskUserQuestion. If it is a pure WAIT (quota,
+     hardware, a long gate you cannot usefully wait on) with nothing to decide,
+     STOPPING IS CORRECT: name what unblocks it.
   4. None of the above. Then the next chunk is the one you just named on your
      own "Next"/"Ahead" line -- OPEN IT in this turn instead of yielding.
 
-If 1-3, say which in a clause and stop; this will not ask again. If 4, drop
-the closing summary and make the next tool call -- per CLAUDE.md, writing an
-"Ahead" line or a "Key" table IS the tell that you are handing back.
+For a DECISION (case 1; case 3 when it needs a human decision, a vote blocks
+your intended path, or votes have accumulated): call AskUserQuestion. It blocks
+for the answer and keeps you IN-TURN -- a blocking question is not a yield, and
+it is what reaches a user who is away. For a pure WAIT or an ANSWERED question:
+say which in a clause and stop; this will not ask again. If 4: drop the closing
+summary and make the next tool call -- writing an "Ahead" line or a "Key" table
+IS the tell that you are handing back.
 EOF
 
 python3 -c 'import json,sys; print(json.dumps({"decision":"block","reason":sys.argv[1]}))' "$REASON" 2>/dev/null \

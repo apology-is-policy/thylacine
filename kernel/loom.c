@@ -326,6 +326,44 @@ static void loom_free(struct Loom *l) {
         thread_free(l->sqpoll);
         l->sqpoll = NULL;
     }
+    // Settle the F1 thread-budget charge (keyed on the flag, NOT on
+    // l->sqpoll: a charge whose kthread never started still owes the
+    // uncharge).
+    //
+    // BACKSTOPPED THE SAME WAY THE PAGE LEDGER IS, and for a sharper reason.
+    // Both ledgers rested on one lifetime argument -- KObj_Loom is I-5
+    // non-transferable and non-dup-able, so a Loom is reachable only through
+    // its creator's handle table and is torn down while the Proc is still
+    // allocated. #130 declined to TRUST that for the page ledger. This one
+    // trusted it, ~45 lines away, and its use is a WRITE
+    // (`p->loom_sqpoll_count--`), not a read: if the argument ever stopped
+    // holding, the page ledger degrades to a skipped refund (inert, as
+    // designed) while this decrements a RECYCLED Proc's counter -- an
+    // under-count on a Proc that never charged, inflating its thread budget.
+    // That is the I-32-breaking direction, the one every other tie in this
+    // mechanism is deliberately broken away from.
+    //
+    // The two arms are NOT interchangeable, which is why this is not simply
+    // loom_owner_live(l). `owner` binds LAST in setup (after the final failure
+    // path) and `sqpoll_owner` binds FIRST (at the charge), on purpose: the
+    // rollbacks uncharge pages explicitly and must not be double-refunded,
+    // while they deliberately do NOT settle the thread charge and leave it to
+    // this function. So on a rollback `owner` is still NULL and routing through
+    // loom_owner_live would return NULL, SKIP the uncharge, and leak a thread
+    // charge for the Proc's whole life -- turning a backstop into a defect on
+    // paths that are actually exercised (sqpoll start failure, handle_alloc
+    // failure).
+    //
+    // owner == NULL is instead PROOF the Proc is alive: it means setup never
+    // reached its last stanza, so no handle exists, so the only reference is
+    // the local one in sys_loom_setup -- we are executing inside the creator's
+    // own syscall. Validate when there is something to validate; rely on the
+    // synchronous path when there is not.
+    if (l->sqpoll_charged) {
+        struct Proc *so = l->owner ? loom_owner_live(l) : l->sqpoll_owner;
+        if (so) proc_sqpoll_uncharge(so);
+        l->sqpoll_charged = false;
+    }
 
     // specs/loom.tla Teardown-wakes-waiters (NoStrandedWaiter). VACUOUS in the
     // impl: a SYS_LOOM_ENTER caller sleeping on cq_waiters holds a loom ref for
