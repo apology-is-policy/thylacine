@@ -274,6 +274,7 @@ pub const T_SYS_WEFT_MAP: u64         = 82;     // Weft-6a-2: map a /net data fd
 pub const T_SYS_DMA_CREATE_WEAVE: u64 = 99;     // G-2: mint a share-admissible DMA weave
 pub const T_SYS_WEFT_UNSHARE: u64     = 100;    // G-2: disarm an un-claimed share (retire/GC)
 pub const T_SYS_DMA_CREATE_GPU_BO: u64 = 106;   // Warp-2: mint a share-admissible GPU BO
+pub const T_SYS_BURROW_FROM_HOSTMEM: u64 = 107; // Warp-6 V-2: map a PCI hostmem BAR subrange -> client VA
 pub const T_SYS_EXECVE: u64           = 104;    // LINEAGE L-2: replace this Proc's image in place
 pub const T_SYS_RFORK: u64            = 105;    // LINEAGE L-3b: fork sharing the address space
 // SYS_RFORK flags (kernel/include/thylacine/proc.h). Only RFPROC|RFMEM is

@@ -69,7 +69,7 @@ BUS_MASTER (stop the dead device's DMA) but KEEP MEM_SPACE, deferring its clear
 to the last unref — so the client never observes a decode-disabled BAR and the
 measurement is moot. F2 (the handler's bounds had no test) was closed by
 extracting a pure `hostmem_resolve_subrange` + testing it; F3/F4/F5 tracked P3.
-Re-audit of the fixes: CLEAN (0 P0 / 0 P1 / 0 P2 / 3 P3 cosmetic; Opus 4.8 fallback -- Fable out of credits). Suite 1431/1431; commit 7973f8dc.
+Re-audit of the fixes: CLEAN (0 P0 / 0 P1 / 0 P2 / 3 P3 cosmetic; Opus 4.8 fallback -- Fable out of credits). Suite 1431/1431; commit 7973f8dc. Merge follow-ons (71306b60 + the libthyla/gate close): P3-1 landed the /proc/maps hostmem arm; the SMP gate PASSED (40 boots, 0 corruption across default+UBSan x smp4/smp8), the burrow/weft buggy cfgs FIRED and the clean cfgs stayed green, LS-CI console PASSED; the libthyla-rs ABI mirror (107) landed. The GL venus regression was DEFERRED, not failed: the thyla-pi LAN mDNS name stopped resolving mid-run -- a sync ssh wedged 36 minutes on its first mkdir, a bounded probe returned nodename-nor-servname, and the Cloudflare tunnel then proved the pi healthy (up 7 days, idle). venus is not in the push-bar and V-2 new code is unexercised until V-3, so the push proceeds; venus reruns when the LAN name resolves (or via the CF tunnel).
 
 What V-2 does NOT ship: a real client. The weft delivery is exercised only by
 unit tests — V-3 (vn_renderer) drives it E2E on real hardware, where the residual

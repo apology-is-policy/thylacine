@@ -1624,7 +1624,7 @@ P3. Re-audit of the fixes: CLEAN (0 P0 / 0 P1 / 0 P2 / 3 P3 cosmetic; Opus 4.8 f
 
 **Status.** As-built, committed at `7973f8dc`. The weft client-delivery is wired but
 exercised only by unit tests -- V-3 (`vn_renderer`) drives it E2E on a real
-device. The libthyla-rs ABI mirror (107) + the GL regression boot ride the merge.
+device. The libthyla-rs ABI mirror (107) LANDED (usr/lib/libthyla-rs/src/lib.rs, matching kernel syscall.h=107); the GL venus regression is DEFERRED (thyla-pi LAN mDNS down; pi healthy via CF tunnel; not gating -- V-2 code unexercised until V-3).
 
 ## Tests
 
