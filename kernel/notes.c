@@ -1301,6 +1301,39 @@ bool thread_caught_note_deliverable(struct Thread *t) {
     return (caught & ~t->note_mask & NOTE_MASK_SUPPORTED) != 0;
 }
 
+// bug-2 (VIVARIUM.md §6.23): detect a PHENO_LINUX note handler that ESCAPED its
+// frame -- siglongjmp'd to an ancestor sigsetjmp point without rt_sigreturn --
+// so in_handler is stuck true (it is cleared ONLY by notes_noted_restore/exec)
+// and the N-3 re-entrancy guard would otherwise refuse EVERY future caught-note
+// delivery for the life of the guest (permanent signal-deafness + a
+// NOTE_QUEUE_DEPTH pile-up). The caller clears in_handler on a true return.
+//
+// note_saved_sp_el0 is the PRE-handler sp captured at delivery; the handler is
+// launched at ctx->sp = sigframe BELOW it, and nested/deep handlers only push
+// lower -- so a LIVE handler is ALWAYS below the saved sp. A siglongjmp target
+// must be an ANCESTOR frame (jumping to a returned env is UB) -- older, hence
+// higher -- so an escape is ALWAYS at or above it. Total discrimination, not a
+// heuristic. Both operands are the SP_EL0 bank (exception_context.sp is
+// KERNEL_ENTRY's mrs sp_el0; the kernel runs EL1h), so the compare is never
+// across banks.
+//
+// LOAD-BEARING: this soundness rests on the handler running on the SAME stack as
+// the pre-handler sp, which holds only while sigaltstack is unserved. The static
+// assert ties this detector to the sigaltstack row so a renumber trips the build;
+// the disposition (that 132 resolves to ENOSYS, not a served alt-stack) is pinned
+// by the runtime regression in test_notes.c -- a table-row VALUE cannot be
+// _Static_asserted. Anyone serving sigaltstack must revisit this and §6.23.
+_Static_assert(VIV_LINUX_SIGALTSTACK == 132,
+               "bug-2 escape-detector: sigaltstack must stay unserved (its "
+               "ENOSYS is load-bearing for the sp-comparison); revisit "
+               "thread_note_handler_escaped + VIVARIUM.md 6.23 before serving it");
+bool thread_note_handler_escaped(const struct Thread *t, u64 sp_el0) {
+    if (!t || !t->in_handler) return false;
+    struct Proc *p = t->proc;
+    if (!p || p->phenotype != PHENO_LINUX) return false;
+    return sp_el0 >= t->note_saved_sp_el0;
+}
+
 // 11b-9p (item 11): the caught-note sleep unwind returns -T_E_INTR to userspace;
 // gate it on a reader that expects EINTR. A PHENO_LINUX Proc goes through musl
 // (EINTR-aware by POSIX); a native (libthyla-rs) reader is not until 11c teaches
@@ -1558,6 +1591,16 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
         exits("killed");
         // unreachable
     }
+
+    // bug-2 (VIVARIUM.md §6.23): defense-in-depth handler-escape clear, placed
+    // at the exact point the N-3 guard below would otherwise refuse. The EL0-
+    // entry clear (viv_linux_dispatch) is the PRIMARY -- it fires before a
+    // blocking read can park, which the liveness argument requires; this copy
+    // covers a fault-return-before-next-syscall window and self-heals the guard
+    // here. ctx->sp was validated as a sane user SP_EL0 above (F1). in_handler is
+    // written only by the owning thread, and this tail runs on it, so the clear
+    // needs no extra lock; q->lock stays held for the delivery that follows.
+    if (thread_note_handler_escaped(t, ctx->sp)) t->in_handler = false;
 
     // N-3 re-entrancy guard: skip non-kill delivery while a handler is
     // running. (R2-F2: kill bypasses this check above.)

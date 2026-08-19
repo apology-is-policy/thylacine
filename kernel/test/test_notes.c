@@ -79,6 +79,7 @@ void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
 void test_notes_caught_note_latch_lifecycle(void);
 void test_notes_caught_note_deliverable_predicate(void);
+void test_notes_handler_escape_predicate(void);
 void test_notes_caught_note_stop_dequeue_drains(void);
 void test_notes_fstat_reports_chr(void);
 void test_notes_linux_sigign_discard(void);
@@ -1122,6 +1123,73 @@ void test_notes_caught_note_deliverable_predicate(void) {
                 "kproc guarded even when the caught sub-field is forced");
     __atomic_and_fetch(&kproc()->proc_flags, ~PROC_FLAG_CAUGHT_NOTE_MASK,
                        __ATOMIC_RELEASE);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// handler_escape_predicate (bug-2 / VIVARIUM.md §6.23 regression)
+// ---------------------------------------------------------------------------
+//
+// thread_note_handler_escaped detects a PHENO_LINUX note handler that escaped
+// its frame via siglongjmp (no rt_sigreturn), leaving in_handler stuck true --
+// which the N-3 re-entrancy guard would otherwise read as "a handler is still
+// running" and use to refuse EVERY future caught-note delivery for the life of
+// the guest (permanent signal-deafness). The discrimination is TOTAL, not a
+// heuristic: a LIVE handler always runs BELOW the pre-handler sp (its sigframe is
+// pushed below note_saved_sp_el0, and nested/deep handlers only go lower), while
+// a siglongjmp target must be an ANCESTOR frame (jumping to a returned env is UB)
+// -- older, hence at a HIGHER sp. So sp < saved <=> live and sp >= saved <=>
+// escaped, with no overlap. Gated to in_handler AND PHENO_LINUX.
+void test_notes_handler_escape_predicate(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    p->state = PROC_STATE_ALIVE;
+    p->phenotype = PHENO_LINUX;
+
+    struct Thread t;
+    t.proc              = p;
+    t.in_handler        = true;
+    t.note_saved_sp_el0 = 0x8000u;          // the pre-handler (interrupted) sp
+
+    TEST_ASSERT(!thread_note_handler_escaped(NULL, 0x9000u), "NULL thread -> false");
+
+    // A LIVE handler: sp strictly BELOW the saved sp. Never flagged, at any
+    // depth -- the sigframe is below note_saved_sp_el0 and recursion goes lower.
+    TEST_ASSERT(!thread_note_handler_escaped(&t, 0x7FFFu),
+                "live handler (sp just below saved) -> false");
+    TEST_ASSERT(!thread_note_handler_escaped(&t, 0x0001u),
+                "deeply-nested handler (sp far below saved) -> false");
+
+    // An ESCAPE: sp AT the boundary and ABOVE it both trip -- an ancestor
+    // sigsetjmp frame sits at or above the pre-handler sp.
+    TEST_ASSERT(thread_note_handler_escaped(&t, 0x8000u),
+                "escape at the boundary (sp == saved) -> true");
+    TEST_ASSERT(thread_note_handler_escaped(&t, 0x9000u),
+                "escape above (sp > saved) -> true");
+
+    // The in_handler gate: no handler running -> nothing could have escaped.
+    t.in_handler = false;
+    TEST_ASSERT(!thread_note_handler_escaped(&t, 0x9000u),
+                "in_handler clear -> false whatever the sp");
+    t.in_handler = true;
+
+    // The PHENO gate: a NATIVE Proc is off this path entirely (its longjmp
+    // discipline is a separate question §6.23 does not touch), even with the
+    // escape sp condition satisfied.
+    p->phenotype = PHENO_NATIVE;
+    TEST_ASSERT(!thread_note_handler_escaped(&t, 0x9000u),
+                "PHENO_NATIVE -> false even with sp >= saved");
+    p->phenotype = PHENO_LINUX;
+
+    // The clear the caller performs on a true return re-arms delivery: once
+    // in_handler is false, the escape is consumed and the predicate stops firing
+    // (so it cannot clear twice or fight a fresh delivery's in_handler set).
+    TEST_ASSERT(thread_note_handler_escaped(&t, 0x9000u), "escape still true pre-clear");
+    t.in_handler = false;                    // the caller's action on a true return
+    TEST_ASSERT(!thread_note_handler_escaped(&t, 0x9000u),
+                "after the caller clears in_handler -> false (escape consumed)");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);

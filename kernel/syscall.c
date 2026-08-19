@@ -11451,6 +11451,22 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
         return false;                   // ctx is already final; write no result
     }
 
+    // bug-2 (VIVARIUM.md §6.23): the PRIMARY handler-escape clear. A handler
+    // that siglongjmp'd out of itself (no rt_sigreturn -- the branch above) left
+    // in_handler stuck true, which the N-3 guard would read as "a handler is
+    // still running" and refuse all future caught-note delivery. This is the
+    // escaped main loop's FIRST syscall; ctx->sp is its (escaped, higher) SP_EL0,
+    // so thread_note_handler_escaped trips and we clear in_handler HERE -- before
+    // any blocking syscall below parks. That ordering is load-bearing, not an
+    // optimisation: an EL0-return-only clear deadlocks deaf (the parked read
+    // never returns to run it, and bug-1's sleep predicate won't wake it while
+    // in_handler is stuck). EL0-return keeps a defense-in-depth copy. rt_sigreturn
+    // is handled above and returns, so it never reaches this.
+    {
+        struct Thread *et = current_thread();
+        if (thread_note_handler_escaped(et, ctx->sp)) et->in_handler = false;
+    }
+
     u64 args[VIV_NARGS];
     for (u32 i = 0; i < VIV_NARGS; i++) args[i] = ctx->regs[i];
 

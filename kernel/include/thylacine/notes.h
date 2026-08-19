@@ -584,6 +584,21 @@ bool thread_die_pending(struct Thread *t);
 // latch and the terminate latch are never both set for one note.
 bool thread_caught_note_deliverable(struct Thread *t);
 
+// bug-2 (VIVARIUM 6.23): does `t` hold a PHENO_LINUX note handler that ESCAPED
+// its frame -- siglongjmp'd to an ancestor sigsetjmp point without rt_sigreturn,
+// so in_handler is stuck true and the N-3 re-entrancy guard would otherwise
+// refuse every future caught-note delivery for the life of the guest? True iff
+// in_handler is set, the Proc is PHENO_LINUX, and the current SP_EL0 (sp_el0,
+// the caller's ctx->sp) has unwound AT OR ABOVE the pre-handler sp captured at
+// delivery (note_saved_sp_el0). A live handler always runs BELOW that sp (the
+// sigframe is pushed below it; nested/deep handlers only go lower), and a
+// siglongjmp target must be an ANCESTOR frame (jumping to a returned env is UB)
+// -- older, hence higher -- so the discrimination is total, not a heuristic.
+// Both operands are the SP_EL0 bank. PURE: the caller clears in_handler on true.
+// LOAD-BEARING: sigaltstack(132) stays ENOSYS (else an alt-stack handler runs at
+// an unrelated sp and the compare is meaningless).
+bool thread_note_handler_escaped(const struct Thread *t, u64 sp_el0);
+
 // 11b-9p (item 11): does `p`'s reader handle -T_E_INTR? A caught-note wait unwind
 // returns EINTR to userspace, and a reader that does not expect it breaks (the
 // native ut $(cmd) capture, 11b-core's build bug). PHENO_LINUX programs go through

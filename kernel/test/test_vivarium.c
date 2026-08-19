@@ -175,6 +175,18 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_BRK, args, &out),
                    (int)VIV_ENOSYS, "brk is ENOSYS -- no counterpart, libc falls back");
 
+    // sigaltstack is ENOSYS -- and that ENOSYS is now LOAD-BEARING for the bug-2
+    // handler-escape detector (VIVARIUM.md 6.23 / notes.c
+    // thread_note_handler_escaped): it tells a live handler from a siglongjmp'd
+    // escape by comparing sp against the pre-handler sp ON THE SAME STACK, sound
+    // only while no handler can run on an alternate one. A _Static_assert at the
+    // detector pins the NUMBER (132); this pins the DISPOSITION (a table-row
+    // value cannot be _Static_asserted). If a future change serves sigaltstack,
+    // this fails and forces 6.23 to be revisited before it lands.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_SIGALTSTACK, args, &out),
+                   (int)VIV_ENOSYS,
+                   "sigaltstack stays ENOSYS -- load-bearing for the 6.23 escape detector");
+
     // V-5c. ppoll carries the whole poll family on aarch64 (no plain poll(2)),
     // so this is what musl's poll() becomes.
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_PPOLL, args, &out),
