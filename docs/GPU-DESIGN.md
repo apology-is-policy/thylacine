@@ -2608,6 +2608,47 @@ So the V-2 delta is precisely the one §3 already names, and no more:
 with `region()` failing closed on it, and **mapping a subrange of the shm window
 into a client VA is what remains**.
 
+#### 6.2.1 The mapping ABI — signed off 2026-08-19
+
+Surfaced as a design fork (§6.1's precedent: an owner-minted client-mappable
+kind is an ABI addition requiring user signoff), researched against the heritage
+(Plan 9's `segattach(SG_PHYSICAL)` / `Physseg`) and the SOTA (Fuchsia's
+`zx_vmo_create_physical` gated by a resource capability + `zx_vmar_map` with a
+cache policy; Genode `Io_mem_dataspace`; seL4 device untyped → frame), and
+signed off:
+
+- **Shape: a physical-backed Burrow minted from the server's PCI claim.** A new
+  syscall — `SYS_BURROW_FROM_HOSTMEM(pci_handle, shmid, offset, length,
+  cache_policy) -> burrow_handle` (number assigned at impl) — mints a Burrow
+  whose backing is the hostmem BAR PA subrange (`shm_region(shmid)` + the
+  server-chosen offset/length within the window), **gated by the caller owning
+  that PCI claim**. The EXISTING `SYS_WEFT_SHARE` / `burrow_share_into` then maps
+  it into the client VA, **budgeted by the client's `shared_map_pages`, revoked
+  by the same reaper**. This reuses the audited share/budget/reaper machinery —
+  one new mint syscall plus a cache axis — and is Fuchsia's VMO-from-physical +
+  cache-policy-map expressed in Thylacine's Burrow idiom; §6.1's "new kind
+  admitted by `SYS_WEFT_SHARE`" is the same lean. **Rejected**: a dedicated
+  `SYS_HOSTMEM_SHARE` that maps directly into the client (re-implements the
+  reaper revocation `burrow_share_into` already provides); and overloading
+  `SYS_WEFT_SHARE` with an MMIO mode (a second meaning on a stable ABI, ages
+  badly). **I-45**: the map reaches only the BAR subrange the server names from
+  its own claim, and the client's cacheable RW mapping conveys zero hardware
+  authority (§2.1). **I-32**: the client's `shared_map_pages` axis.
+
+- **Cache attribute: add the NORMAL_NC / write-combining MAIR index in V-2** (the
+  user chose full host-attribute honoring over the minimal WB-only start). The
+  kernel MAIR carries only NORMAL_WB + DEVICE-nGnRnE today; V-2 adds a NORMAL_NC
+  index so the host-dictated attribute (CACHED → NORMAL_WB / WC → NORMAL_NC /
+  UNCACHED → NORMAL_NC or DEVICE) is honored exactly rather than pinned to WB.
+  The stage-2 still forces the weaker of the guest/host pair (the field-agreement
+  note below), so this makes the guest able to *request* the host's attribute.
+  A new memory-type index carries its own TLB/coherency implications and is
+  audit-bearing at impl.
+
+**Then implement** (a subsequent commit references this scripture SHA), **then the
+V-6 audit** — a new kernel memory-authority path, audit-bearing on I-45 + I-32
+independently.
+
 **The host requirement chain, MEASURED on thyla-pi 2026-08-18 (Warp-6 V-0), not
 derived.** QEMU 10.0.11 refuses `venus=on` and `venus=on,blob=on` alike, and
 **names the requirement itself**: `venus requires enabled blob and hostmem
