@@ -1456,7 +1456,7 @@ seam with a `capset <id>` ctl verb but nothing reads it. V-0b is driver-internal
 V-3 makes the field live, rejecting a capset the device never enumerated belongs
 in that change (an unvalidated client `u32` would otherwise reach `CTX_CREATE`).
 
-## Warp-6 V-1 -- a guest blob creates (as-built `3a98f902` + the audit-close commit)
+## Warp-6 V-1 -- a guest blob creates (as-built `3a98f902` + `e49dac52`)
 
 V-0b proved a Venus *context* is creatable; V-1 proves the next thing a Venus
 driver needs: a **guest blob**. Venus carries its command ring as a
