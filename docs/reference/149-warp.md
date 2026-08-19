@@ -495,6 +495,51 @@ client cannot depend on a test-mode field — so `fences-in-flight` and
   sound there because the holder pins the slot, but B is deliberately unheld
   and retires promptly, so any in-flight snapshot of B would be a coin flip.
 
+### The coherent-ring prover (Warp-6 V-3a)
+
+`warp-prove ring` drives tapestryd's `ctx/<id>/ring/<ridx>/*` subtree — the
+V-3a coherent shared-memory ring — through five legs, virgl-only (a 2D
+device SKIPs `ctx/new`, so the local `make test` proves only
+non-regression; the mechanism verifies on the GL host, `tools/warp-host.sh
+ring`). It mints a ctx, mints ring 0, and maps its blob with `t_weft_map`:
+
+**Round-trip** — kicks the doorbell and asserts the completion lands in
+BOTH feedback channels: the blob's zero-syscall `seq` word and the blocking
+`ring/<ridx>/fence` file agree on seq 1.
+
+**F2 rejections** — a zero-byte, unaligned, over-`WARP_RING_MAX`,
+`ring_idx>=64`, or duplicate-index `ring/new` is refused, never clamped.
+
+**I-45 ownership** (not liveness) — a SECOND connection mints a LIVE ctx +
+ring; this connection must not resolve it (`owner_conn` gate), tested with
+the positive control one variable away (a live foreign ring), so a
+regression that ignored ownership is caught. A non-existent-ctx mint is
+retained as a weaker second check.
+
+**I-9 re-scan discrimination** — an armed mid-drain head advance
+(`ring-inject`) models a guest advancing head in the idle-publish window.
+With the re-scan (default) the injected advance produces an extra
+completion; with the `ring-noscan` buggy lever it is LOST; re-enabling the
+re-scan recovers the stranded advance. The three outcomes
+(delivered / lost / recovered) make the leg discriminate rather than pass
+by construction.
+
+**F1 drain-cap bound** (round-2 regression) — a 512 KiB ring armed with
+`ring-inject 1 5000` (past the server's 4096 per-kick cap) drives one kick's
+drain past the cap. The leg asserts ONE kick is bounded (`0 < delta <
+5000`), then that re-kicking to stable drains the full 5000 with no work
+lost. Without the cap one kick drains all 5000 — the box-wide DoS the cap
+closes, reachable because `head` is client-writable shared memory and
+tapestryd is single-threaded. The single-threaded prover cannot build real
+client concurrency, so the multi-advance inject stands in for it (same drain
+loop, same bound); the `big`/`flood` constants are coupled to the
+server-private cap, which `server.rs` pins at the const.
+
+The verb prints `WARP-RING PASS (transport + doorbell + feedback + fence +
+F2 + I-45 + I-9 re-scan + F1 drain-cap)`. The prover binary
+(`usr/warp-prove/src`) is UNOWNED by the vault; the mechanism it exercises
+is documented in the `sub-tapestryd` dossier's "coherent ring lane".
+
 ## The #240 health probe (C-0d)
 
 `warp_ctx_verify` (`server.rs`) answers one question: are this context's
