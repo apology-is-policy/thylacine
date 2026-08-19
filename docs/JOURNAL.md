@@ -111,6 +111,19 @@ non-regression on a byte-identical kernel; the ring is GL-verified + suite-green
 the interactive gate is the userspace boot confirmation). Everything else
 re-derived sound across three rounds.
 
+**The close (this run): green, documented, pushed.** The interactive gate
+(LS-CI, `brs0ccizd`) went 37/37 -- the last push-bar gate. The vault was rung:
+`sub-tapestryd` gained "The coherent ring lane" (the mechanism is vault-OWNED --
+server.rs/gpu.rs -- so the prose belongs there, not in the reference doc), plus
+`inv-i9` in guarded-by and a Tests pointer; the prover binary `usr/warp-prove/src`
+is UNOWNED, so its ring-verb reference went to `docs/reference/149-warp.md` and
+the coverage decision is filed as `seam-warp-prove-unowned` (vault commit
+`6da4b11e`, on the local-only `vault/bootstrap` branch). The whole stack pushed to
+both mirrors and was verified by ls-remote on each URL: `85526127`. The
+reference/vault split is the reusable part -- `quaestor owner` returns MIXED on a
+mechanism+prover diff, and BOTH actions are owed, not the one the exit status
+names.
+
 ## 2026-08-19 — V-3a: the coherent ring, and the "local" premise that wasn't
 
 Built the Warp-6 V-3a coherent-ring mechanism whole in one pass (the design
