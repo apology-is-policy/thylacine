@@ -632,13 +632,73 @@ fn ring_prove() -> i64 {
     }
     t_putstr("warp-prove: ring I-9 re-scan discrimination OK (delivered / lost / recovered)\n");
 
+    // 8. Audit round-2 F1: the per-kick drain is BOUNDED. `head` is client-
+    //    writable shared memory, so a multi-threaded client can advance it
+    //    faster than the single serve thread drains and pin it forever (a
+    //    box-wide DoS). A large ring + a multi-advance inject (count > the
+    //    server's per-kick cap) drives ONE kick's drain past the cap; the fix
+    //    caps it and yields (idle republished, the guest re-kicks), so no one
+    //    kick monopolizes. Without the cap, one kick drains all `flood`
+    //    advances. The single-threaded prover cannot build real client
+    //    concurrency, so the multi-advance inject stands in for it -- same
+    //    drain loop, same bound.
+    let big: u64 = 512 * 1024; // room for far more than the cap's worth of advances
+    let flood: u64 = 5000; // > the server's drain cap (WARP_RING_MAX_DRAIN_PER_KICK)
+    if !write_ctl(root, &format!("ctx/{}/ring/new", ctx), &format!("{} 1", big)) {
+        ring_fail("F1: large ring/1 mint");
+    }
+    let map_fd1 = unsafe {
+        let pth = format!("ctx/{}/ring/1/map", ctx);
+        t_open(root, pth.as_ptr(), pth.len(), T_OREAD)
+    };
+    if map_fd1 < 0 {
+        ring_fail("F1: ring/1/map open");
+    }
+    let va1 = unsafe { t_weft_map(map_fd1 as u64, 0) };
+    if va1 < 0 {
+        ring_fail("F1: ring/1 weft_map");
+    }
+    let va1 = va1 as u64;
+    let f1base = unsafe { rld(va1, R_SEQ) };
+    if !write_ctl(root, "ctl", &format!("ring-inject 1 {}", flood)) {
+        ring_fail("F1: ring-inject arm (count)");
+    }
+    if !write_ctl(root, &format!("ctx/{}/ring/1/kick", ctx), "1") {
+        ring_fail("F1: first kick");
+    }
+    let delta1 = unsafe { rld(va1, R_SEQ) } - f1base;
+    if delta1 == 0 || delta1 >= flood {
+        ring_fail("F1: one kick was NOT bounded (need 0 < delta < flood)");
+    }
+    // The cap DEFERS work, it must not DROP it: re-kick until stable, then
+    // assert the full `flood` eventually drained.
+    let mut guard = 0;
+    loop {
+        let before = unsafe { rld(va1, R_SEQ) };
+        if !write_ctl(root, &format!("ctx/{}/ring/1/kick", ctx), "1") {
+            ring_fail("F1: drain kick");
+        }
+        if unsafe { rld(va1, R_SEQ) } == before {
+            break; // stable -- all advances consumed
+        }
+        guard += 1;
+        if guard > 16 {
+            ring_fail("F1: drain did not converge in 16 kicks");
+        }
+    }
+    if unsafe { rld(va1, R_SEQ) } - f1base != flood {
+        ring_fail("F1: the cap dropped work (total drained != flood)");
+    }
+    unsafe { t_close(map_fd1) };
+    t_putstr("warp-prove: ring F1 drain-cap bound OK (one kick capped; no work lost)\n");
+
     // Cleanup: retire the ctx (its rings tear down with it).
     if !write_ctl(root, &format!("ctx/{}/ctl", ctx), "destroy") {
         ring_fail("ctx destroy");
     }
     unsafe { t_close(map_fd) };
     unsafe { t_close(root) };
-    t_putstr("WARP-RING PASS (transport + doorbell + feedback + fence + F2 + I-45 + I-9 re-scan)\n");
+    t_putstr("WARP-RING PASS (transport + doorbell + feedback + fence + F2 + I-45 + I-9 re-scan + F1 drain-cap)\n");
     0
 }
 

@@ -461,6 +461,14 @@ const WARP_RING_OFF_IDLE: u64 = 0x10; // host-written: 1 = pump parked; kick iff
 const WARP_RING_OFF_SEQ: u64 = 0x18; // host-written monotone completed-seq feedback
 const WARP_RING_MAX: u64 = 1 << 20; // 1 MiB single-ring cap (F2)
 const WARP_RINGS_PER_CTX: usize = 64; // ring_idx 0-63 (Venus: one per VkQueue)
+// Bound one kick's drain passes (audit round-2 F1). WARP_RING_OFF_HEAD is
+// client-writable shared memory (the ring maps RW into the client via weft), so
+// a multi-threaded client can advance head faster than the single serve thread
+// drains it -- without a cap the drain loop spins forever and freezes every
+// conn (a box-wide DoS). A legitimate V-3a kick drains in ONE pass, so this cap
+// is the adversarial backstop only: on hitting it we publish idle and yield,
+// and the guest re-kicks for the remainder.
+const WARP_RING_MAX_DRAIN_PER_KICK: u32 = 4096;
 
 // A warp path packs three disjoint fields: the fk byte (FK_MASK), the id field
 // (WARP_N_MASK << 8), and the tag bits (WARP_FLAG | WARP_CTX | WARP_BO |
@@ -1578,12 +1586,15 @@ struct WarpRing {
     /// Newest completed_seq the fence file reported (the coalesce watermark).
     reported_seq: u64,
     retiring: bool,
-    /// Test lever (test-mode `ring-inject`): a one-shot mid-drain head advance
-    /// on the next kick -- the I-9 re-scan witness (the single-threaded server
-    /// cannot produce the concurrent-advance window naturally).
-    inject_armed: bool,
+    /// Test lever (test-mode `ring-inject <ridx> [count]`): arm `count` mid-drain
+    /// head advances (default 1), one consumed per kick re-scan pass. count==1 is
+    /// the I-9 re-scan witness (the single-threaded server cannot produce the
+    /// concurrent-advance window naturally); count>WARP_RING_MAX_DRAIN_PER_KICK is
+    /// the audit round-2 F1 regression -- it drives one kick's drain past the cap
+    /// so the bound is witnessed (one-kick delta < count).
+    inject_count: u32,
     /// Test lever (test-mode `ring-noscan`): disable THIS ring's kick re-scan so
-    /// `inject_armed`'s advance is otherwise lost -- the discrimination proof
+    /// `inject_count`'s advance is otherwise lost -- the discrimination proof
     /// (M-PIN). Per-RING (audit F3): the global Comp flag was an unprivileged
     /// box-wide I-9 kill-switch, the #178 anti-pattern its sibling `ring-inject`
     /// was already bounded against.
@@ -6507,7 +6518,7 @@ impl Comp {
                     completed_seq: 0,
                     reported_seq: 0,
                     retiring: false,
-                    inject_armed: false,
+                    inject_count: 0,
                     noscan: false,
                 });
                 Ok(())
@@ -6546,28 +6557,42 @@ impl Comp {
             (r.va, r.size, r.noscan)
         };
         ring_store(va, WARP_RING_OFF_IDLE, 0);
+        let mut drained: u32 = 0;
         loop {
             let head = ring_load(va, WARP_RING_OFF_HEAD);
             let tail = ring_load(va, WARP_RING_OFF_TAIL);
             if head > tail {
+                if drained >= WARP_RING_MAX_DRAIN_PER_KICK {
+                    // audit round-2 F1: the client can advance head (shared RW
+                    // memory) faster than we drain, so cap the passes -- no one
+                    // kick may pin this serve thread. Publish idle and yield;
+                    // the guest re-kicks for the rest. Both the direct drain and
+                    // the re-scan `continue` re-enter here, so this one gate
+                    // bounds every path.
+                    ring_store(va, WARP_RING_OFF_IDLE, 1);
+                    break;
+                }
                 // Drain [tail, head): V-3a acknowledges (echo). Advance the
                 // consumer index and complete.
                 ring_store(va, WARP_RING_OFF_TAIL, head);
                 self.wring_complete(ring_pub, conn, head);
+                drained += 1;
                 continue;
             }
             // Nothing new: publish idle, then re-scan.
             ring_store(va, WARP_RING_OFF_IDLE, 1);
             let inject = match self.wring_mut(ring_pub, conn) {
-                Some(r) if r.inject_armed => {
-                    r.inject_armed = false;
+                Some(r) if r.inject_count > 0 => {
+                    r.inject_count -= 1;
                     true
                 }
                 _ => false,
             };
             if inject {
                 // Simulate a guest advancing head in the idle-publish window.
-                let h2 = core::cmp::min(tail + WARP_RING_HDR, size);
+                // saturating_add: head/tail are client-influenced (audit r2 F2);
+                // an overflow-checked build must not abort on tail near u64::MAX.
+                let h2 = core::cmp::min(tail.saturating_add(WARP_RING_HDR), size);
                 ring_store(va, WARP_RING_OFF_HEAD, h2);
             }
             if noscan {
@@ -6605,15 +6630,16 @@ impl Comp {
         }
     }
 
-    /// Test lever: arm a one-shot mid-drain head advance on the caller's ring.
-    fn wring_arm_inject(&mut self, ctx_pub: u32, conn: u64, ridx: u32) -> Result<(), u32> {
+    /// Test lever: arm `count` mid-drain head advances on the caller's ring
+    /// (one consumed per kick re-scan pass).
+    fn wring_arm_inject(&mut self, ctx_pub: u32, conn: u64, ridx: u32, count: u32) -> Result<(), u32> {
         if (ridx as usize) >= WARP_RINGS_PER_CTX {
             return Err(p9::E_INVAL);
         }
         let c = self.wctx_mut(ctx_pub, conn).ok_or(p9::E_NOENT)?;
         match c.ring_slots.get_mut(ridx as usize).and_then(|slot| slot.as_mut()) {
             Some(r) => {
-                r.inject_armed = true;
+                r.inject_count = count;
                 Ok(())
             }
             None => Err(p9::E_INVAL),
@@ -9106,23 +9132,25 @@ impl Conn {
         if f.path == W_CTL {
             let s = core::str::from_utf8(a.data).unwrap_or("").trim();
             if let Some(rest) = s.strip_prefix("ring-inject ") {
-                // Arm a one-shot mid-drain head advance on the caller's ring
-                // <ridx> for its next kick -- the I-9 re-scan witness
-                // (WARP-V3-DESIGN 3.5): a concurrent guest advance in the
-                // idle-publish window, which the single-threaded server cannot
-                // produce naturally. Caller-ctx-bounded (#178): acts only on
-                // the caller's own ring, so it is not a cross-client lever.
-                // wctx_of_conn is unambiguous (audit F7): wctx_mint enforces one
-                // ctx per conn, so a conn's "first" ctx is its only ctx.
+                // Arm `count` mid-drain head advances (default 1) on the caller's
+                // ring <ridx> -- one consumed per kick re-scan pass. count==1 is
+                // the I-9 re-scan witness (WARP-V3-DESIGN 3.5): a concurrent guest
+                // advance in the idle-publish window the single-threaded server
+                // cannot produce naturally. count>WARP_RING_MAX_DRAIN_PER_KICK
+                // drives the audit round-2 F1 regression (the drain-cap bound).
+                // Caller-ctx-bounded (#178): acts only on the caller's own ring.
+                // wctx_of_conn is unambiguous (audit F7): one ctx per conn.
                 let ctx_pub = match comp.wctx_of_conn(self.conn_id) {
                     Some(v) => v,
                     None => return self.err(tag, p9::E_INVAL),
                 };
-                let ridx: u32 = match rest.trim().parse() {
-                    Ok(v) => v,
-                    Err(_) => return self.err(tag, p9::E_INVAL),
+                let mut it = rest.split_ascii_whitespace();
+                let ridx: u32 = match it.next().and_then(|t| t.parse().ok()) {
+                    Some(v) => v,
+                    None => return self.err(tag, p9::E_INVAL),
                 };
-                return match comp.wring_arm_inject(ctx_pub, self.conn_id, ridx) {
+                let count: u32 = it.next().and_then(|t| t.parse().ok()).unwrap_or(1);
+                return match comp.wring_arm_inject(ctx_pub, self.conn_id, ridx, count) {
                     Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                     Err(e) => self.err(tag, e),
                 };
