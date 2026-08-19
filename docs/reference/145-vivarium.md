@@ -555,16 +555,20 @@ the handler is entered. And a `SIG_DFL` whose Linux default is *terminate*
 (SIGPIPE / SIGINT / SIGHUP / SIGQUIT -- `viv_signote_default_is_terminate`)
 `exits()` the Proc **from the phenotype branch itself**, on the candidate, with
 the note's canonical name, instead of falling through to the native uncaught
-arm. That arm scans for the *native* terminate latch, and the native `pipe`
-note has none (task #237, a Plan 9 ABI question this does not touch) -- so
-before the c8ab2744 round a `SIG_DFL` SIGPIPE was consumed by **no** arm: the
+arm. That arm scans for the *native* terminate latch. When this branch was
+written the native `pipe` note had none -- so before the c8ab2744 round a
+`SIG_DFL` SIGPIPE was consumed by **no** arm: the
 terminate scan skipped it, the stop consumer skipped it, and "leave it queued
 for the fd reader" stranded it at the head of a queue no fd will ever read.
 It became the dispatcher candidate for the life of the guest; every later
 caught signal was blocked behind it, every later default-ignore note was never
 dropped, and (F1 below) every later caught terminate-class note killed the
 guest. Linux's answer -- SIG_DFL SIGPIPE terminates -- is not in doubt, so the
-phenotype answers it for its own Procs. The phenotype `wait4` folds a
+phenotype answers it for its own Procs. (#237 has since given the native
+`pipe` note its own terminate latch, but the phenotype keeps answering
+SIG_DFL SIGPIPE from this branch -- exactly as it does for SIGINT / SIGHUP /
+SIGQUIT, whose native latches it likewise does not defer to -- because it must
+exits() on the candidate, with the Linux-canonical name and disposition.) The phenotype `wait4` folds a
 note-death into an EXITED status (#91), so `exits("pipe")` reads exactly as
 `exits("interrupt")` already did. Only the STOP default (`tty:susp`) still
 falls through, to the native branch's stop consumer. In-guest: the L-6c gate's

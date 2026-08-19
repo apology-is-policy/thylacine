@@ -2137,13 +2137,15 @@ bool proc_intr_terminate_pending(const struct Proc *p) {
     // LOCK-FREE by the #811 sleep predicate, thread_die_pending — see the
     // PROC_FLAG_INTR_TERMINATE_PENDING contract in proc.h).
     if (!p || p->magic != PROC_MAGIC) return false;
-    // PTY-1b: EITHER terminate-class latch (interrupt OR tty:quit/hup) --
-    // this is the wake gate; the per-family mask precision lives in
+    // PTY-1b + #237: ANY terminate-class latch (interrupt / tty:quit-hup /
+    // pipe) -- this is the wake gate; the per-family mask precision lives in
     // thread_die_pending's re-check, so a spurious wake here costs one
-    // predicate re-evaluation, never a wrong unwind.
+    // predicate re-evaluation, never a wrong unwind. The whole-class MASK, not
+    // the per-family bits: the gate only asks "is a terminate pending at all",
+    // and #237's pipe latch must fire it too or a pipe-terminate latched on a
+    // syscall-blocked thread would sleep until an unrelated wake.
     return (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE)
-            & (PROC_FLAG_INTR_TERMINATE_PENDING |
-               PROC_FLAG_TTY_TERMINATE_PENDING)) != 0;
+            & PROC_FLAG_TERMINATE_PENDING_MASK) != 0;
 }
 
 bool proc_caught_note_pending(const struct Proc *p) {

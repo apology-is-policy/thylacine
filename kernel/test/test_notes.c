@@ -542,6 +542,10 @@ void test_notes_post_pipe_helper(void) {
 
     notes_post_pipe(p);
     TEST_EXPECT_EQ(p->notes->count, 1u, "pipe note posted");
+    // #237: the pipe post arms the terminate latch (a fresh Proc has no handler
+    // + is not self-managing) -- pipe is now a terminate-class note.
+    TEST_ASSERT(proc_intr_terminate_pending(p),
+                "#237: pipe post arms the terminate latch");
 
     struct Note got;
     spin_lock(&p->notes->lock);
@@ -778,15 +782,18 @@ void test_notes_intr_latch_lifecycle(void) {
     TEST_ASSERT(!proc_intr_terminate_pending(p),
                 "self-managing Proc never arms");
 
-    // (g) Non-interrupt names never arm (fresh Proc -- p carries the
-    // self-managing mark from (f)).
+    // (g) Non-terminate names never arm (fresh Proc -- p carries the
+    // self-managing mark from (f)). #237 made `pipe` terminate-class (it now
+    // arms), so the non-arming stand-in here is tty:winch (IGNORE class); pipe's
+    // arming is covered by notes.pipe_die_pending + the latch-map test.
     struct Proc *p2 = proc_alloc();
     TEST_ASSERT(p2 != NULL, "proc_alloc p2 succeeded");
     TEST_EXPECT_EQ(notes_post(p2, "child_exit", 0u, NULL, true), 0,
                    "post child_exit");
-    TEST_EXPECT_EQ(notes_post(p2, "pipe", 0u, NULL, true), 0, "post pipe");
+    TEST_EXPECT_EQ(notes_post(p2, NOTE_NAME_TTY_WINCH, 0u, NULL, true), 0,
+                   "post tty:winch");
     TEST_ASSERT(!proc_intr_terminate_pending(p2),
-                "non-interrupt posts never arm");
+                "non-terminate posts never arm");
 
     // (h) The kproc guard: an interrupt post to kproc's queue never arms
     // (in-kernel tests post to kproc's queue via the boot thread; an armed
@@ -893,6 +900,69 @@ void test_notes_die_pending_predicate(void) {
                 "kproc latch leg guarded even when forced (RW-0 F3)");
     __atomic_and_fetch(&kproc()->proc_flags,
                        ~PROC_FLAG_INTR_TERMINATE_PENDING, __ATOMIC_RELEASE);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// pipe_die_pending (#237) -- the pipe terminate latch at the sleep predicate
+// ---------------------------------------------------------------------------
+//
+// The regression proof for #237: BEFORE the fix `pipe` carried no latch, so
+// thread_die_pending was FALSE for an armed pipe note -- this test's first live
+// assertion fails on pre-#237 code. It also pins the three properties the
+// native mask relies on: (a) masking NOTE_BIT_PIPE defers (the EPIPE-not-death
+// path libthyla-rs/libt/the Go rt0 take), (b) the mask is PER-FAMILY (an
+// interrupt mask does not defer a pipe note -- the reason thread_die_pending
+// keeps per-latch ifs rather than the whole-class MASK), and (c) the wake gate
+// (proc_intr_terminate_pending) fires on pipe, so a pipe-terminate latched on a
+// syscall-blocked thread is actually woken.
+void test_notes_pipe_die_pending(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    struct Thread fake_t;
+    fake_t.proc              = p;
+    fake_t.note_mask         = 0u;
+    fake_t.exit_close_active = false;
+
+    TEST_ASSERT(!thread_die_pending(&fake_t), "fresh Proc -> false");
+
+    // A write to a closed pipe posts exactly this note (kernel/notes.c pipe arm).
+    TEST_EXPECT_EQ(notes_post(p, "pipe", 0u, NULL, true), 0, "post pipe");
+    TEST_ASSERT(proc_intr_terminate_pending(p),
+                "pipe post fires the wake gate (#237: PIPE in the class mask)");
+    TEST_ASSERT(thread_die_pending(&fake_t),
+                "armed + unmasked -> true (the #237 behaviour; FALSE pre-fix)");
+
+    // Masking NOTE_BIT_PIPE defers -- the native-runtime EPIPE-not-death path.
+    fake_t.note_mask = (1u << NOTE_BIT_PIPE);
+    TEST_ASSERT(!thread_die_pending(&fake_t),
+                "armed + pipe MASKED -> false (libthyla-rs / libt / Go mask it)");
+
+    // Per-family precision: masking an UNRELATED family never defers pipe.
+    fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
+    TEST_ASSERT(thread_die_pending(&fake_t),
+                "interrupt masked, pipe unmasked -> true (per-family latch)");
+
+    // Death overrides the pipe mask (death is not deferrable).
+    fake_t.note_mask = (1u << NOTE_BIT_PIPE);
+    __atomic_store_n(&p->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    TEST_ASSERT(thread_die_pending(&fake_t),
+                "group exit -> true even with pipe masked");
+    __atomic_store_n(&p->group_exit_msg, (const char *)NULL, __ATOMIC_RELEASE);
+    fake_t.note_mask = 0u;
+
+    // The GENERIC drain clears the pipe latch: notes_drain_intr_locked is a
+    // per-class computed ~latch, so #237 added no drain code -- draining the
+    // last pipe note clears PROC_FLAG_PIPE_TERMINATE_PENDING for free.
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    (void)notes_dequeue_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(!thread_die_pending(&fake_t), "drained -> latch clears -> false");
+    TEST_ASSERT(!proc_intr_terminate_pending(p), "drained -> wake gate clears");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
@@ -1217,11 +1287,14 @@ void test_notes_discard_name_purges_pending(void) {
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
     struct Note got;
 
-    // [child_exit, interrupt, pipe, interrupt]: two interrupts under SIG_DFL
-    // (no handler, not self-managing) arm the interrupt terminate latch.
+    // [child_exit, interrupt, tty:winch, interrupt]: two interrupts under
+    // SIG_DFL (no handler, not self-managing) arm the interrupt terminate latch.
+    // tty:winch (IGNORE class) is the non-arming filler -- #237 made `pipe`
+    // terminate-class, so it can no longer stand in for "a queued note that does
+    // not arm the terminate latch" here.
     TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_CHILD_EXIT, 1u, NULL, true), 0, "post child_exit");
     TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 2u, NULL, true), 0, "post interrupt 1");
-    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_PIPE, 3u, NULL, true), 0, "post pipe");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_TTY_WINCH, 3u, NULL, true), 0, "post tty:winch");
     TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 4u, NULL, true), 0, "post interrupt 2");
     TEST_EXPECT_EQ(p->notes->count, 4u, "four queued");
     TEST_ASSERT(proc_intr_terminate_pending(p), "the interrupts armed the latch");
@@ -1254,7 +1327,7 @@ void test_notes_discard_name_purges_pending(void) {
     int r3 = notes_dequeue_for_fd_locked(p, NULL, &got);
     spin_unlock(&p->notes->lock);
     TEST_ASSERT(r1 == 1 && a1 == 1u, "survivor 1 is the child_exit (arg 1)");
-    TEST_ASSERT(r2 == 1 && a2 == 3u, "survivor 2 is the pipe (arg 3)");
+    TEST_ASSERT(r2 == 1 && a2 == 3u, "survivor 2 is the tty:winch (arg 3)");
     TEST_EXPECT_EQ(r3, 0, "only the kill is left for the fd path (it skips kill)");
     spin_lock(&p->notes->lock);
     int rk = notes_dequeue_locked(p, NULL, &got);
@@ -1350,10 +1423,11 @@ void test_notes_default_action_table(void) {
     // because the two used to be independent lists, and a future edit that
     // re-splits them would leave this pair disagreeing.
     //
-    // pipe's absence from the latch set is DELIBERATE and OPEN (task #237):
-    // its default action is TERMINATE, but it carries no latch, so the tail
-    // never default-terminates on it. Asserted as it stands so that whichever
-    // way #237 resolves, it has to come through this line.
+    // #237 resolved pipe's disposition: its default action is TERMINATE and it
+    // now carries PROC_FLAG_PIPE_TERMINATE_PENDING, so the EL0 tail default-
+    // terminates on an unmasked + unhandled pipe note. Native runtimes mask
+    // NOTE_BIT_PIPE at startup to keep EPIPE-not-death; this line is where that
+    // resolution lands (it flips the pre-#237 "pipe -> 0" this test asserted).
     TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_INTERRUPT),
                    (int)PROC_FLAG_INTR_TERMINATE_PENDING, "interrupt -> INTR latch");
     TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_TTY_QUIT),
@@ -1371,7 +1445,8 @@ void test_notes_default_action_table(void) {
     TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_KILL),
                    0, "kill -> no latch (N-4 terminates it before the latch)");
     TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_PIPE),
-                   0, "pipe -> no latch (task #237, preserved deliberately)");
+                   (int)PROC_FLAG_PIPE_TERMINATE_PENDING,
+                   "pipe -> PIPE latch (#237)");
 }
 
 // Drive notes_noted_default through its two RETURNING dispositions. The

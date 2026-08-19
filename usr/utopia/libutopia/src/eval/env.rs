@@ -272,7 +272,11 @@ impl Env {
             pending_exit: None,
             jobs: JobTable::new(),
             notes: None,
-            note_mask: libthyla_rs::notes::NoteMask::NONE,
+            // #237: the process default is pipe-masked (rt_start), and the
+            // shell's set_mask SWAPS the whole kernel mask, so the model must
+            // carry pipe -- otherwise the first `mask note` block clobbers it
+            // and a later shell pipe-write would terminate instead of EPIPE.
+            note_mask: libthyla_rs::notes::NoteMask::just(libthyla_rs::notes::NoteClass::Pipe),
             deferred_notes: Vec::new(),
             eval_depth: Cell::new(0),
             interrupt_pending: false,

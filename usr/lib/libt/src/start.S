@@ -23,6 +23,15 @@
 .type _start, %function
 _start:
     bti     c                       // landing pad for indirect entry (PAC/BTI)
+    // #237: mask the `pipe` note by default -- a native C program that writes to
+    // a closed pipe gets EPIPE, not death (the kernel's I-19 default is now
+    // TERMINATE; unmask NOTE_BIT_PIPE to opt into Plan 9 pipe-death). A native
+    // Proc resets note_mask to 0 at exec, so a plain SET is right; this covers
+    // C-native bins (joey), the twin of libthyla-rs's rt_start mask for Rust.
+    mov     x0, #4                  // 1u << T_NOTE_BIT_PIPE  (NOTE_BIT_PIPE == 2)
+    mov     x1, #0                  // old_mask_out = NULL (discard the prior mask)
+    mov     x8, #48                 // T_SYS_NOTE_MASK
+    svc     #0
     bl      main                    // x0 := main()
     mov     x8, #0                  // x8 = T_SYS_EXITS
     svc     #0                      // never returns

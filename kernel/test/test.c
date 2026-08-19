@@ -563,6 +563,7 @@ void test_notes_phenotype_sigreturn_restores_mask(void); // the mask half of sig
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
+void test_notes_pipe_die_pending(void);
 void test_notes_caught_note_latch_lifecycle(void);
 void test_notes_caught_note_deliverable_predicate(void);
 void test_notes_caught_note_stop_dequeue_drains(void);
@@ -2166,6 +2167,7 @@ struct test_case g_tests[] = {
     { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
     { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },
+    { "notes.pipe_die_pending",                test_notes_pipe_die_pending,                false, NULL },
     { "notes.caught_note_latch_lifecycle",     test_notes_caught_note_latch_lifecycle,     false, NULL },
     { "notes.caught_note_deliverable_predicate", test_notes_caught_note_deliverable_predicate, false, NULL },
     { "notes.caught_note_stop_dequeue_drains", test_notes_caught_note_stop_dequeue_drains, false, NULL },

@@ -55,7 +55,8 @@ mod json;
 use libthyla_rs::{
     t_attach_9p, t_chdir, t_chroot, t_close, t_fstat, t_getpid, t_mount, t_note_mask, t_open,
     t_pipe, t_putstr, t_read, t_spawn_full_argv, t_unlink, t_wait_pid_for, t_walk_create,
-    t_write, TSpawnArgs, T_MNOEXEC, T_MREPL, T_NOTE_BIT_INTERRUPT, T_OPATH, T_OREAD, T_OWRITE,
+    t_write, TSpawnArgs, T_MNOEXEC, T_MREPL, T_NOTE_BIT_INTERRUPT, T_NOTE_BIT_PIPE, T_OPATH,
+    T_OREAD, T_OWRITE,
     T_SPAWN_PHENO_LINUX, T_WALK_OPEN_FROM_ROOT,
 };
 
@@ -670,7 +671,15 @@ pub extern "C" fn rs_main() -> i64 {
     // PHENO_LINUX fork copies it), so nothing here reaches the entrypoint. The
     // tty family stays UNMASKED on purpose: ^Z must stop viv with the container
     // so the shell's job control sees the job stop; a hangup ends viv with it.
-    let _ = unsafe { t_note_mask(1u64 << T_NOTE_BIT_INTERRUPT, core::ptr::null_mut()) };
+    //
+    // PIPE stays masked too (#237): rt_start masked NOTE_BIT_PIPE, but this SWAP
+    // would clobber it -- and viv writes to the diorama channel whose reader may
+    // already have died, so an unmasked pipe would TERMINATE viv (the very
+    // orphaning this mask exists to prevent). OR it back in.
+    let _ = unsafe {
+        t_note_mask((1u64 << T_NOTE_BIT_INTERRUPT) | (1u64 << T_NOTE_BIT_PIPE),
+                    core::ptr::null_mut())
+    };
 
     if let Err(e) = json::selftest() {
         say("json selftest FAIL:");

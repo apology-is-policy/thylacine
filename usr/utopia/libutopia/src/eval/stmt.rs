@@ -2257,6 +2257,16 @@ fn eval_trace(env: &mut Env, stmt: &TraceStmt) -> EvalResult<StatementFlow> {
 
 fn eval_on_note(env: &mut Env, stmt: &OnNoteStmt) -> EvalResult<StatementFlow> {
     let name = eval_expr(env, &stmt.note_name)?.as_scalar();
+    // #237: registering a handler UNMASKS its note so the handler can actually
+    // receive it. `pipe` is masked by the process default (libthyla-rs rt_start:
+    // EPIPE-not-death), so without this an `on note 'pipe'` handler could never
+    // fire -- the note would sit masked in the queue. Mirrors pouch's
+    // sigaction(SIGPIPE, handler) clearing NOTE_BIT_PIPE. For a note that is not
+    // default-masked this leaves the model unchanged; the kernel re-sync (when
+    // the note fd is open) merely re-asserts the current mask.
+    if let Some(c) = note_class_for_name(&name) {
+        env.note_mask_remove(c);
+    }
     env.note_handler_set(name, stmt.body.clone());
     env.status_set(0);
     Ok(StatementFlow::Normal)

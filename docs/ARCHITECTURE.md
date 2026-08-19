@@ -878,7 +878,7 @@ Two delivery paths consume the same queue; **every posted non-`kill` note is con
 |---|---|---|---|---|
 | `interrupt` | 0 | `SYS_POSTNOTE`; future cons ^C | yes | `exits("interrupt")` |
 | `kill` | 1 | `SYS_POSTNOTE` | **no** | `exits("killed")` — handler/mask bypassed |
-| `pipe` | 2 | kernel-synthetic on write to closed pipe peer | yes | `exits("pipe")` (musl can `SIG_IGN` via mask) |
+| `pipe` | 2 | kernel-synthetic on write to closed pipe peer | yes | `exits("pipe")` if unmasked+unhandled (#237 as-built: `PROC_FLAG_PIPE_TERMINATE_PENDING`); the native runtimes (libthyla-rs / libt / Go rt0) **and** musl mask `NOTE_BIT_PIPE` at startup, so a program's observable default is EPIPE-not-death |
 | `child_exit` | 3 | kernel-synthetic on child `exits()` | yes | `exits("child_exit")` (most Procs handle it) |
 
 `alarm`, `hangup`, `usr1`, `usr2`, `stop`, `cont` — DEFERRED at v1.0; each needs an additional kernel hook (`SYS_ALARM`, cons close path, scheduler stop/cont). `sigaction` on a deferred signal returns `EINVAL`. The supported set can grow per chunk without ABI break.
@@ -886,7 +886,7 @@ Two delivery paths consume the same queue; **every posted non-`kill` note is con
 ### 7.6.6 Synthetic posting hooks (v1.0)
 
 - `kernel/proc.c::exits()` — posts `child_exit` to `p->parent->notes` with `arg = (child_pid << 16) | (exit_status & 0xffff)`. Tolerant of queue-full via coalesce.
-- `kernel/pipe.c` write-path — when writing to a pipe whose read end is closed, posts `pipe` to the writing Thread's Proc; the write itself still returns `-EPIPE`. Tolerant of queue-full via coalesce.
+- `kernel/pipe.c` write-path — when writing to a pipe whose read end is closed, posts `pipe` to the writing Thread's Proc; the write itself still returns `-EPIPE`. Tolerant of queue-full via coalesce. Since #237 an unmasked+unhandled `pipe` arms `PROC_FLAG_PIPE_TERMINATE_PENDING` (the third terminate family, after `interrupt` and `tty:quit`/`tty:hup`) and the EL0-tail default-terminates. Every native runtime therefore masks `NOTE_BIT_PIPE` at startup (`SYS_NOTE_MASK`; **per-M** in the Go runtime, because native thread-spawn does not inherit `note_mask`) to keep the POSIX EPIPE-not-death default. **Footgun:** `SYS_NOTE_MASK` SWAPS the whole mask, so a native program that later replaces its note mask without re-including `NOTE_BIT_PIPE` re-enables pipe-death; opt into Plan 9 pipe-death deliberately by clearing that bit.
 
 ### 7.6.7 Invariants
 

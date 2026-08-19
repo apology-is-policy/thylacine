@@ -2933,6 +2933,21 @@ unsafe extern "C" fn __libthyla_rt_start(argc: usize, argv: *const *const u8) ->
     RT_ARGC.store(argc, Ordering::Release);
     RT_ARGV.store(argv as *mut *const u8, Ordering::Release);
     capture_auxv(argc, argv);
+    // #237: mask the `pipe` note by default -- a native Rust program that writes
+    // to a closed pipe gets EPIPE, not death (the kernel's I-19 default is now
+    // TERMINATE; a program unmasks T_NOTE_BIT_PIPE to opt into Plan 9 pipe-death).
+    // A native Proc resets note_mask to 0 at exec, so a plain SET is correct. The
+    // libt (C) _start carries the identical mask for C-native bins.
+    //
+    // SCOPE: the MAIN thread only. note_mask is per-thread and native thread-spawn
+    // does NOT inherit it (the kernel rfork rule), so a thread started via
+    // thread::spawn_raw begins PIPE-unmasked and would take the proc-wide pipe
+    // latch on a closed-pipe write. No shipping multi-threaded libthyla-rs program
+    // writes a closed pipe on a spawned thread (the spawners are all benchmarks /
+    // torture tests over sockets or CPU/memory), so this is a latent limitation,
+    // not a regression -- the Go runtime, which IS such a writer, masks per-M in
+    // minit. A spawned thread that needs EPIPE-not-death masks NOTE_BIT_PIPE itself.
+    let _ = t_note_mask(1u64 << T_NOTE_BIT_PIPE, core::ptr::null_mut());
     rs_main()
 }
 

@@ -959,6 +959,41 @@ struct Proc {
 #define PROC_CAUGHT_NOTE_SHIFT      11u
 #define PROC_FLAG_CAUGHT_NOTE_MASK  (0x3fu << PROC_CAUGHT_NOTE_SHIFT)  // bits 11..16
 
+// #237: the PIPE terminate-disposition latch -- the THIRD terminate family
+// (interrupt, tty:quit/hup, now pipe). Armed when notes_post commits an
+// unhandled + unmasked `pipe` note (g_known_notes gives `pipe` NOTE_DFL_-
+// TERMINATE), so an EL0 program that writes to a closed pipe default-
+// terminates -- making the I-19 `pipe`=TERMINATE row TRUE (before #237 the
+// name had no terminate latch, so the note was retained forever, a fidelity
+// gap #15 named). Same latch discipline as the two above: set/cleared ONLY
+// under p->notes->lock (armed by notes_post's terminate-class arm; cleared by
+// handler registration, the self-managing mark, or draining the last queued
+// pipe note); NOT propagated by rfork; never armed on kproc.
+//
+// BIT 17, not the next literal gap: bits 11..16 are the caught-note sub-field
+// (dense, one bit per NOTE_BIT_* family), and NOTE_MASK_SUPPORTED grows per
+// chunk, so that field grows UPWARD from bit 11. 17 is the first bit above it
+// today; the static_assert makes a future widening (a 7th note family) that
+// grows the field into this bit a compile-time relocation rather than a silent
+// alias. (The design memo's "next free bit = 11" missed the sub-field: bit 11
+// is the INTERRUPT family's caught-note bit -- using it would have aliased two
+// unrelated latches, a collision no build would catch.)
+#define PROC_FLAG_PIPE_TERMINATE_PENDING (1u << 17)
+_Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
+               "#237: the pipe terminate latch must not overlap the caught-note "
+               "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
+               "relocate PROC_FLAG_PIPE_TERMINATE_PENDING above the field then");
+
+// The terminate-CLASS latch set (interrupt + tty:quit/hup + pipe). Used by the
+// whole-class clears -- handler registration, the self-managing mark, the
+// lock-free wake gate -- which suppress/observe EVERY terminate family at once.
+// NOT for thread_die_pending's per-family checks, which stay per-latch so a
+// thread that masked one family never unwinds for another's pending note.
+#define PROC_FLAG_TERMINATE_PENDING_MASK \
+    (PROC_FLAG_INTR_TERMINATE_PENDING | \
+     PROC_FLAG_TTY_TERMINATE_PENDING | \
+     PROC_FLAG_PIPE_TERMINATE_PENDING)
+
 // LINEAGE L-1 re-based EVERY offset below: extracting struct AddrSpace removed
 // seven fields from struct Proc and added one pointer, so the struct went
 // 408 -> 376 bytes. The ASSERT EXPRESSION is the authoritative number; the

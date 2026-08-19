@@ -306,32 +306,39 @@ static int notes_find_locked(struct NoteQueue *q, const char *name,
 // SLEEP_INTR so the Proc reaches the tail and dies), and a STOP has nothing
 // to say to a sleeper -- and tty:winch /
 // tty:cont are informational (queue for the fd-read path, no default
-// action -- the pipe/child_exit shape). Returns the class's LATCH flag
+// action -- the child_exit shape; #237 moved pipe OUT of this shape into
+// TERMINATE). Returns the class's LATCH flag
 // (PROC_FLAG_INTR_TERMINATE_PENDING for interrupt,
-// PROC_FLAG_TTY_TERMINATE_PENDING for the tty pair -- each latch pairs
+// PROC_FLAG_TTY_TERMINATE_PENDING for the tty pair, and #237's
+// PROC_FLAG_PIPE_TERMINATE_PENDING for pipe -- each latch pairs
 // with ITS OWN family mask bit in the lock-free die predicate), or 0 for a
 // non-terminate name.
-// #15 rewrote the CLASS test to read g_known_notes' `dfl` column instead of
-// re-listing tty:quit / tty:hup by literal here. Behaviour-identical on all
-// nine rows -- the literals it replaced were exactly the TTY-family rows whose
-// dfl is TERMINATE -- but a tenth terminate-class note now gets its latch from
-// its own table row rather than from someone remembering to extend this `if`.
+// #15 rewrote the CLASS test (is-this-terminate?) to read g_known_notes' `dfl`
+// column instead of re-listing tty:quit / tty:hup by literal here, so a new
+// terminate note in an EXISTING family needs no edit. The FAMILY->flag arm
+// below is separate: a new terminate FAMILY still adds a case (as #237's pipe
+// row did -- TERMINATE in the table catches its class for free, but NOTE_BIT_-
+// PIPE had no prior latch, so its bit->flag line was added).
 //
 // The family split stays: a latch is per-FAMILY (one flag for interrupt, one
 // for the tty family), not per-note, because notes_drain_intr_locked clears a
 // latch when the last note sharing it is consumed.
 //
-// TWO terminate-class notes deliberately yield NO latch, and both are load-
-// bearing omissions rather than oversights:
+// ONE terminate-class note deliberately yields NO latch, a load-bearing
+// omission rather than an oversight:
 //   `kill` -- non-catchable (N-4); the EL0-tail kill branch terminates it
-//     before the latch machinery is consulted at all.
-//   `pipe` -- the EL0-tail uncaught arm therefore never default-terminates on
-//     it, which contradicts docs/reference/83-pouch-signals.md:20 and
-//     ARCHITECTURE.md's `pipe` row. That disagreement is REAL and OPEN (task
-//     #237); #15 preserves the behaviour rather than changing it in passing,
-//     because giving `pipe` a latch newly kills native programs that write to
-//     a closed pipe. Named here so the tidier code does not read as though the
-//     gap were designed.
+//     before the latch machinery is consulted at all, so a latch would be
+//     dead weight.
+//
+// `pipe` USED to be a second such omission -- the EL0-tail uncaught arm never
+// default-terminated on it, contradicting docs/reference/83-pouch-signals.md
+// and ARCHITECTURE.md's `pipe` row (#15 named the gap but preserved it, since
+// giving `pipe` a latch newly kills native programs that write to a closed
+// pipe). #237 closes it: `pipe` now gets PROC_FLAG_PIPE_TERMINATE_PENDING
+// below, and the newly-exposed native runtimes (libthyla-rs / libt / the Go
+// rt0) mask NOTE_BIT_PIPE at startup so their default stays EPIPE-not-death;
+// an unmasked write-to-closed-pipe now default-terminates, making the I-19
+// `pipe`=TERMINATE claim finally true.
 static u32 notes_name_terminate_latch(const char *name) {
     if (notes_default_action(name) != NOTE_DFL_TERMINATE) return 0;
     int bit = notes_name_to_bit(name);
@@ -339,6 +346,8 @@ static u32 notes_name_terminate_latch(const char *name) {
         return PROC_FLAG_INTR_TERMINATE_PENDING;
     if (bit == (int)NOTE_BIT_TTY)
         return PROC_FLAG_TTY_TERMINATE_PENDING;
+    if (bit == (int)NOTE_BIT_PIPE)
+        return PROC_FLAG_PIPE_TERMINATE_PENDING;
     return 0;
 }
 
@@ -617,7 +626,8 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // g_proc_table_lock for the p->threads walk): every interrupt-posting
     // site calls proc_interrupt_terminate_wake after this returns. A
     // not-yet-sleeping thread is covered without the wake -- its sleep's
-    // register-then-observe reads the latch.
+    // register-then-observe reads the latch. (notes_post_pipe does NOT yet do
+    // this wake -- #237 F1 is open; see the note there.)
     notes_arm_intr_terminate_locked(p, name);
     // #240: and the STOP twin -- see notes_arm_susp_stop_locked. Armed on the
     // COMMIT, after the -EAGAIN return above: a susp that never made the queue
@@ -901,6 +911,13 @@ void notes_post_child_exit(struct Proc *parent, int child_pid, int status) {
 void notes_post_pipe(struct Proc *writer) {
     if (!writer) return;
     (void)notes_post(writer, "pipe", 0u, NULL, true);
+    // #237 F1 (the prosecutor's P2) is OPEN, not fixed here: the naive
+    // "mirror the self-post wake" (proc_interrupt_terminate_wake after this
+    // post) DETERMINISTICALLY breaks the boot at the L-6c Alpine SIGPIPE gate
+    // -- reverted 2026-08-19. The wake's mechanism vs the gate is not yet
+    // understood (single-threaded writers should make it a no-op, yet the boot
+    // dies), so F1 needs a proper investigation, not a checkpoint-line fix.
+    // See memory/audit_237_closed_list.md.
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,8 +1158,7 @@ void notes_set_handler(struct Proc *p, u64 handler_va) {
         // and a blocked peer is then covered by the death cascade exits()
         // triggers; see ARCH 8.8.2.)
         __atomic_and_fetch(&p->proc_flags,
-                           ~(PROC_FLAG_INTR_TERMINATE_PENDING |
-                             PROC_FLAG_TTY_TERMINATE_PENDING),
+                           ~PROC_FLAG_TERMINATE_PENDING_MASK,
                            __ATOMIC_RELEASE);
     }
     spin_unlock(&q->lock);
@@ -1160,8 +1176,7 @@ void notes_mark_self_managing(struct Proc *p) {
     spin_lock(&q->lock);
     proc_mark_self_managing_notes(p);
     __atomic_and_fetch(&p->proc_flags,
-                       ~(PROC_FLAG_INTR_TERMINATE_PENDING |
-                         PROC_FLAG_TTY_TERMINATE_PENDING),
+                       ~PROC_FLAG_TERMINATE_PENDING_MASK,
                        __ATOMIC_RELEASE);
     spin_unlock(&q->lock);
 }
@@ -1222,6 +1237,15 @@ bool thread_die_pending(struct Thread *t) {
             return true;
         if ((flags & PROC_FLAG_TTY_TERMINATE_PENDING) != 0 &&
             (t->note_mask & (1u << NOTE_BIT_TTY)) == 0)
+            return true;
+        // #237: the pipe terminate latch, PER-FAMILY like the two above -- a
+        // thread that masked NOTE_BIT_PIPE (libthyla-rs / libt / the Go rt0
+        // mask it at startup, so a native's default on a closed-pipe write is
+        // EPIPE-not-death) does NOT unwind here; an UNMASKED one terminates.
+        // This per-family precision -- not the whole-class MASK -- is exactly
+        // where "mask to opt out of Plan 9 pipe-death" lives.
+        if ((flags & PROC_FLAG_PIPE_TERMINATE_PENDING) != 0 &&
+            (t->note_mask & (1u << NOTE_BIT_PIPE)) == 0)
             return true;
     }
     return false;
