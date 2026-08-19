@@ -5,14 +5,14 @@ title: "tapestryd — the compositor: the weave lifecycle, the present engine, a
 parent: moc-userspace
 code: [usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs]
 audit: hard
-guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45]
+guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45, inv-i9]
 validated-by: [spec-tapestry-present, prose, gate-smp]
 locks: []
 hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-08-18
+updated: 2026-08-19
 ---
 ## Purpose
 
@@ -194,6 +194,91 @@ decrements the counter, so the count always reaches zero. A wedged
 context does not free its slot either, because `dev_ctx = slot + 1`:
 handing the slot on would hand a live device context id to the next
 client, and a stale stream would execute against a stranger's context.
+
+### The coherent ring lane
+
+Warp-6 V-3a adds a third client transport beside the synchronous ring and
+the fenced lane: a **coherent shared-memory ring**, one per `ring_idx`
+(0–63; Venus allocates one per VkQueue). It is a weft-shared GUEST blob —
+`t_dma_create_gpu_bo(GUEST)` + `t_weft_share`, the client claims it with
+`SYS_WEFT_MAP` — so both sides read and write the same pages with no
+per-op syscall. No new kernel primitive: it rides the BO + weft + blob
+machinery the earlier Warp arcs built.
+
+The blob opens with a control header at offset 0, four SeqCst words:
+
+| off | word | writer | meaning |
+|---|---|---|---|
+| `0x00` | `head` | **guest** | producer index |
+| `0x08` | `tail` | host | consumer index |
+| `0x10` | `idle` | host | 1 = pump parked; the guest kicks iff `idle==1` |
+| `0x18` | `seq`  | host | monotone completed-seq feedback |
+
+The CS ring proper lives past `WARP_RING_HDR` (`0x40`). A ring is capped
+at `WARP_RING_MAX` (1 MiB) and refused if zero, unaligned, over-max, at a
+`ring_idx >= 64`, or duplicating a live index (`wring_mint`). Mint zeroes
+`head/tail/seq` and parks `idle=1`. The Tweft share is lazy — minted at
+the first `Tweft` (the `weft_ensure` precedent) and disarmed at teardown
+BEFORE any backing free, so a client's live mapping survives via the #847
+dual count (`wring_teardown`). Rings issue no device fences at V-3a (no
+submit lands, the device never DMAs a ring blob), so no wedge posture
+applies to their retire.
+
+**The qid tag.** A ring node is tagged `WARP_RING = 1 << 43` in the qid
+`path`. This bit took two wrong picks first — `1 << 37` sat *inside* the
+30-bit id field (bits 8..37), so `warp_id` read the tag back as an id;
+`1 << 40` aliased `SURF_FLAG` — and the fix is now guarded by a
+`const _: () = assert!` proving all six Warp tags (`WARP_BO`=38,
+`WARP_CTX`=39, `SURF_FLAG`=40, `PANE_FLAG`=41, `WARP_FLAG`=42,
+`WARP_RING`=43) pairwise disjoint and clear of both the id field and the
+file-kind field. Two of the three encoding bugs were invisible to `make
+test` and surfaced only on virgl, because a 2D device SKIPs `ctx/new`.
+
+**The doorbell (`wring_kick`, [[inv-i9]]).** Writing `ring/<ridx>/kick`
+sets `idle=0` and drains `[tail, head)`, echo-acknowledging each slot
+(V-3a lands no device submit — the drain is a pure echo; V-3b's Venus
+path replaces it with `gpu.submit_3d`). Each drain advances `tail`, and
+`wring_complete` bumps `completed_seq` into the `seq` word. Two guards
+make the loop sound:
+
+- **The re-scan** is the register-then-observe half of [[inv-i9]]. After
+  the loop finds nothing new it publishes `idle=1`, then *re-reads* head;
+  if the guest advanced head in that idle-publish window (having elided
+  its own kick because it observed `idle==0`), the re-scan catches it,
+  re-clears `idle`, and continues. No advance is lost between the guest's
+  head-store and the host's park.
+
+- **The drain cap** (`WARP_RING_MAX_DRAIN_PER_KICK` = 4096) bounds one
+  kick's passes. `head` is client-writable shared memory and tapestryd is
+  single-threaded, so a multi-threaded client can advance head on one
+  thread faster than the serve thread drains and pin it forever — a
+  box-wide DoS, and tapestryd *is* the console. At the cap the kick
+  publishes `idle=1` and breaks; both the direct drain and the re-scan
+  `continue` re-enter the same gate, so it bounds every path. Found at
+  round 2 as a live [P1]: round 1 had deferred it on the premise "the
+  guest is blocked on the kick RPC so head is fixed", which names the
+  wrong actor — the *kick caller* blocks, but the client's *other threads*
+  own the head mapping.
+
+**The contract the cap adds** ([[inv-i9]] guest obligation, round 3).
+Breaking at the cap skips the post-drain re-scan, so for any advance still
+pending (`head > tail`) at the cap the host drops its half of register-
+then-observe. A ring client that blocks on `ring/<ridx>/fence` therefore
+MUST re-check `idle` after its last head advance and re-kick if
+`idle==1`; the host does NOT rescue a capped-out advance (fence
+read/poll deliver on `completed_seq`, frozen at the cap). LATENT at
+V-3a — the only client is the single-threaded prover, whose drain-to-
+stable loop honors it, and a malicious client only strands *itself*. The
+robust host-side rescue (a follow-up drain the serve loop runs after
+servicing other conns) is OWED at V-3b, where the Venus ring is
+doc-conformant and pipelined and this echo drain is gone anyway; it needs
+a self-reschedule the V-3a serve loop lacks (tracked in the V-3b ring-kick
+rescue design note + `docs/WARP-V3-DESIGN.md` section 4).
+
+**Feedback + fence.** `wring_complete` publishes `completed_seq` into the
+blob's `seq` word — the guest's zero-syscall poll fast-path — and the
+blocking `ring/<ridx>/fence` reader learns the same value via
+`poll_ring_fences` (coalesced at `reported_seq`).
 
 ## Data structures
 
@@ -478,6 +563,20 @@ leg; `ls-gfx-panes` (22 legs) covers the G-6 pane tree; `ls-gfx-mode`
 covers the display-mode verb and its authority gate. The `test-mode`
 cargo feature strips the determinism surface to `E_OPNOTSUPP` for
 production, and both variants compile.
+
+The V-3a coherent ring is proven on the GL host by `warp-prove ring`
+(`tools/warp-host.sh ring`), virgl-only — a 2D device SKIPs `ctx/new`, so
+`make test` proves only non-regression. Its legs: the round-trip (map +
+doorbell + feedback + fence); the F2 rejections (zero / unaligned /
+over-max / `ridx>=64` / duplicate index); the [[inv-i45]] ownership gate
+(a second conn's LIVE ring, one variable away from the negative — a
+regression that ignored `owner_conn` is caught); the [[inv-i9]] re-scan
+discrimination (delivered by default / lost under the `ring-noscan` buggy
+lever / recovered when re-enabled); and the round-2 F1 drain-cap bound (a
+512 KiB ring, `ring-inject 1 5000` past the 4096 cap, one kick bounded
+then all drained across re-kicks with no work lost). `usr/warp-prove/src`
+is UNOWNED — its reference lives in `docs/reference/149-warp.md`; the
+coverage sweep is [[seam-warp-prove-unowned]].
 
 ## Referenced by
 

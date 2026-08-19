@@ -103,5 +103,6 @@ Generated from note fields — do not edit between the markers
 | [[seam-torpor-lock-wake-spin]] | open | sub-kernel-torpor | chg-2026-05-23-torpor | torpor-8 audit F2 (P2, documented) |
 | [[seam-torpor-reclaim-uaccess]] | open | sub-kernel-torpor | chg-2026-07-04-torpor-lockfree | REVENANT R-5 F1 close; REVENANT section 9 |
 | [[seam-union-mount-walk]] | open | sub-kernel-territory, sub-kernel-stalk | chg-2026-05-13-p5-attach-mount | unfiled |
+| [[seam-warp-prove-unowned]] | open | sub-tapestryd | chg-2026-08-19-v3a-ring | V-3a coherent-ring doc pass, 2026-08-19 |
 | [[seam-wb-close-flush-slot]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-wb-staging |  |
 <!-- generated:end -->

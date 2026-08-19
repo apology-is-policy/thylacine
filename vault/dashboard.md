@@ -36,7 +36,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 86
+## Open seams: 87
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -123,10 +123,12 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-torpor-lock-wake-spin]] (sub-kernel-torpor)
 - [[seam-torpor-reclaim-uaccess]] (sub-kernel-torpor)
 - [[seam-union-mount-walk]] (sub-kernel-territory, sub-kernel-stalk)
+- [[seam-warp-prove-unowned]] (sub-tapestryd)
 - [[seam-wb-close-flush-slot]] (sub-kernel-ninep-dev9p)
 
 ## Recent changes
 
+- 2026-08-19 [[chg-2026-08-19-v3a-ring]] — V-3a coherent-ring vault ring: sub-tapestryd ring-lane section + inv-i9 edge
 - 2026-08-18 [[chg-2026-08-18-extinction-ring-claim]] — The prescription named the wrong lock, and the old one was already breaking the crash path
 - 2026-08-16 [[chg-2026-08-16-boot-banner-mirror-set]] — The boot-banner ABI note carried the phantom it was supposed to be the cure for
 - 2026-08-16 [[chg-2026-08-16-boot-cwg-parenthetical]] — Two comments in one commit disagree about a measured result
@@ -134,5 +136,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-16 [[chg-2026-08-16-burrow-attribution]] — The Burrow re-swept: the type says SHAPE, and that lesson has now arrived three times
 - 2026-08-16 [[chg-2026-08-16-cons-writer-set]] — A role serializes only against writers who take it
 - 2026-08-16 [[chg-2026-08-16-corvus-narrowing]] — corvus re-swept: the AUTH gate was a narrowing, and the expired premise had three dependents
-- 2026-08-16 [[chg-2026-08-16-dev9p-errno-class]] — The channel existed and the value was being discarded
 <!-- generated:end -->
