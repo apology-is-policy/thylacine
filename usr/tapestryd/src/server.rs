@@ -381,7 +381,16 @@ fn is_pane(path: u64) -> bool {
 const WARP_FLAG: u64 = 1 << 42;
 const WARP_CTX: u64 = 1 << 39; // a ctx/<id> node (below the tag bits)
 const WARP_BO: u64 = 1 << 38; // a ctx bo/<id> node
-const WARP_RING: u64 = 1 << 37; // a ctx ring/<ridx> node (V-3a)
+const WARP_RING: u64 = 1 << 43; // a ctx ring/<ridx> node (V-3a). Its bit must
+// be DISJOINT from every other qid tag AND from the id field. The id field is
+// (WARP_N_MASK << 8) = bits 8..37, so a tag must be bit >= 38; and bits 38..42
+// are ALL taken -- WARP_BO=38, WARP_CTX=39, SURF_FLAG=40, PANE_FLAG=41,
+// WARP_FLAG=42. Two earlier picks were wrong for this exact reason: 1<<37 sat
+// INSIDE the id field (leaked into warp_id -> no ring resolved), and 1<<40
+// aliased SURF_FLAG (is_surf(ring)=true -> the walk misrouted to the surface
+// arm). 1<<43 is the first free bit above the whole tag block. A ring path
+// still carries WARP_FLAG (is_warp), so is_warp/is_surf/is_pane/is_wctx/is_wbo
+// all read it correctly. The _Static_assert below now guards ALL of these.
 
 const W_ROOT: u64 = WARP_FLAG;
 /// The attach roots by listener (main.rs hands the accepting listener's
@@ -453,15 +462,40 @@ const WARP_RING_OFF_SEQ: u64 = 0x18; // host-written monotone completed-seq feed
 const WARP_RING_MAX: u64 = 1 << 20; // 1 MiB single-ring cap (F2)
 const WARP_RINGS_PER_CTX: usize = 64; // ring_idx 0-63 (Venus: one per VkQueue)
 
+// A warp path packs three disjoint fields: the fk byte (FK_MASK), the id field
+// (WARP_N_MASK << 8), and the tag bits (WARP_FLAG | WARP_CTX | WARP_BO |
+// WARP_RING). They MUST NOT overlap, or warp_id/warp_fk read a tag bit back as
+// id/fk -- exactly the bug that made WARP_RING = 1<<37 (bit 37, inside the
+// 30-bit id field's bits 8..37) corrupt every ring id so no ring resolved. This
+// fails the BUILD if any future tag/mask drift reintroduces it (audit F1).
+const _: () = assert!(
+    // every qid tag bit is distinct (a set bit-count check): WARP_BO 38,
+    // WARP_CTX 39, SURF_FLAG 40, PANE_FLAG 41, WARP_FLAG 42, WARP_RING 43.
+    (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | SURF_FLAG | PANE_FLAG).count_ones() == 6
+        // and no tag overlaps the id field or the fk byte.
+        && (WARP_N_MASK << 8) & FK_MASK == 0
+        && (WARP_N_MASK << 8) & (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | SURF_FLAG | PANE_FLAG) == 0
+        && (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | SURF_FLAG | PANE_FLAG) & FK_MASK == 0,
+    "qid tag bits (warp + surf + pane) must be mutually disjoint and clear of the id/fk fields",
+);
+
+// The ring control words are SeqCst (audit F2). The doorbell elision is the
+// store-buffer litmus: the host publishes idle=1 THEN re-reads head
+// (`wring_kick`), and the V-3b guest must publish head THEN read idle -- and
+// correctness requires NEITHER side to observe the other's stale value. Plain
+// Acquire/Release do NOT forbid that reordering in the abstract model (only
+// AArch64's STLR->LDAR happens to); SeqCst forbids it in-model, so the barrier
+// no longer leans on a target detail a maintainer or the V-3b guest author
+// could silently break. The cost is one kick -- negligible on a compositor ring.
 #[inline]
-fn ring_load_acq(va: u64, off: u64) -> u64 {
+fn ring_load(va: u64, off: u64) -> u64 {
     unsafe { &*((va + off) as *const core::sync::atomic::AtomicU64) }
-        .load(core::sync::atomic::Ordering::Acquire)
+        .load(core::sync::atomic::Ordering::SeqCst)
 }
 #[inline]
-fn ring_store_rel(va: u64, off: u64, v: u64) {
+fn ring_store(va: u64, off: u64, v: u64) {
     unsafe { &*((va + off) as *const core::sync::atomic::AtomicU64) }
-        .store(v, core::sync::atomic::Ordering::Release);
+        .store(v, core::sync::atomic::Ordering::SeqCst);
 }
 
 fn is_dir(path: u64) -> bool {
@@ -1226,9 +1260,6 @@ pub struct Comp {
     warp_ctx_seq: u32,
     warp_bo_seq: u32,
     warp_ring_seq: u32,
-    /// V-3a test lever (test-mode `ring-noscan`): disable the kick re-scan to
-    /// PROVE `ring-inject`'s advance is otherwise lost (M-PIN discrimination).
-    ring_noscan: bool,
     /// #204 census, the global half: max `bo_backed_peak` over every ctx
     /// that ever lived -- readable AFTER a workload's ctx is gone (the
     /// per-ctx field dies with the ctx). Read via global ctl `bo-peak`.
@@ -1551,6 +1582,12 @@ struct WarpRing {
     /// on the next kick -- the I-9 re-scan witness (the single-threaded server
     /// cannot produce the concurrent-advance window naturally).
     inject_armed: bool,
+    /// Test lever (test-mode `ring-noscan`): disable THIS ring's kick re-scan so
+    /// `inject_armed`'s advance is otherwise lost -- the discrimination proof
+    /// (M-PIN). Per-RING (audit F3): the global Comp flag was an unprivileged
+    /// box-wide I-9 kill-switch, the #178 anti-pattern its sibling `ring-inject`
+    /// was already bounded against.
+    noscan: bool,
 }
 
 /// Warp-4: a resolved ACTIVE GL adoption (see `gl_adoption`) -- the
@@ -1663,7 +1700,6 @@ impl Comp {
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
             warp_ring_seq: 0,
-            ring_noscan: false,
             warp_bo_peak: 0,
             warp_bo_bytes_peak: 0,
             warp_probe_parked: 0,
@@ -6428,21 +6464,23 @@ impl Comp {
         self.weave_va_next += (bytes + PAGE - 1) & !(PAGE - 1);
         let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
         if pa < 0 {
+            self.weave_va_next = va; // audit F5: nothing mapped here -- reclaim the VA
             unsafe { t_close(fd) };
             return Err(p9::E_NOMEM);
         }
         // Zero the control header; the host starts idle (the guest kicks on
         // its first submit). Release-ordered so a client that maps and polls
         // immediately observes the initialized header.
-        ring_store_rel(va, WARP_RING_OFF_HEAD, 0);
-        ring_store_rel(va, WARP_RING_OFF_TAIL, 0);
-        ring_store_rel(va, WARP_RING_OFF_SEQ, 0);
-        ring_store_rel(va, WARP_RING_OFF_IDLE, 1);
+        ring_store(va, WARP_RING_OFF_HEAD, 0);
+        ring_store(va, WARP_RING_OFF_TAIL, 0);
+        ring_store(va, WARP_RING_OFF_SEQ, 0);
+        ring_store(va, WARP_RING_OFF_IDLE, 1);
         let res_id = if self.gpu.blob {
             self.res_seq = self.res_seq.wrapping_add(1);
             let rid = self.res_seq;
             if self.gpu.create_ring_blob(rid, pa as u64, bytes as u32).is_err() {
                 unsafe { t_burrow_detach(va, bytes) };
+                self.weave_va_next = va; // audit F5: mapping detached -- reclaim the VA
                 unsafe { t_close(fd) };
                 return Err(E_IO);
             }
@@ -6470,6 +6508,7 @@ impl Comp {
                     reported_seq: 0,
                     retiring: false,
                     inject_armed: false,
+                    noscan: false,
                 });
                 Ok(())
             }
@@ -6493,26 +6532,32 @@ impl Comp {
     /// In V-3a's single-threaded server the guest is blocked on this RPC, so
     /// the window is empty; the re-scan is exercised only by `ring-inject`,
     /// which fills it deterministically. V-3b replaces the echo drain with
-    /// gpu.submit_3d(dev_ctx, ctx_pub, cs) carrying ridx.
+    /// gpu.submit_3d(dev_ctx, ctx_pub, cs) carrying ridx -- and MUST bound the
+    /// per-kick drain then (audit F6): with a concurrent V-3b guest advancing
+    /// head, an unbounded drain lets one client monopolize the single serve
+    /// thread. At V-3a the guest is blocked on the kick RPC, so head is fixed
+    /// and the loop is one pass. The warp_ring_seq/res_seq u32 wrap (2^32 mints
+    /// -> a stale fid resolving a reused id) is the SAME shared class as
+    /// warp_ctx_seq/warp_bo_seq, not ring-specific; unreachable in a compositor
+    /// lifetime.
     fn wring_kick(&mut self, ring_pub: u32, conn: u64) -> Result<(), u32> {
-        let va = {
+        let (va, size, noscan) = {
             let (_, r) = self.wring(ring_pub, conn).ok_or(p9::E_NOENT)?;
-            r.va
+            (r.va, r.size, r.noscan)
         };
-        let size = self.wring(ring_pub, conn).unwrap().1.size;
-        ring_store_rel(va, WARP_RING_OFF_IDLE, 0);
+        ring_store(va, WARP_RING_OFF_IDLE, 0);
         loop {
-            let head = ring_load_acq(va, WARP_RING_OFF_HEAD);
-            let tail = ring_load_acq(va, WARP_RING_OFF_TAIL);
+            let head = ring_load(va, WARP_RING_OFF_HEAD);
+            let tail = ring_load(va, WARP_RING_OFF_TAIL);
             if head > tail {
                 // Drain [tail, head): V-3a acknowledges (echo). Advance the
                 // consumer index and complete.
-                ring_store_rel(va, WARP_RING_OFF_TAIL, head);
+                ring_store(va, WARP_RING_OFF_TAIL, head);
                 self.wring_complete(ring_pub, conn, head);
                 continue;
             }
             // Nothing new: publish idle, then re-scan.
-            ring_store_rel(va, WARP_RING_OFF_IDLE, 1);
+            ring_store(va, WARP_RING_OFF_IDLE, 1);
             let inject = match self.wring_mut(ring_pub, conn) {
                 Some(r) if r.inject_armed => {
                     r.inject_armed = false;
@@ -6523,14 +6568,14 @@ impl Comp {
             if inject {
                 // Simulate a guest advancing head in the idle-publish window.
                 let h2 = core::cmp::min(tail + WARP_RING_HDR, size);
-                ring_store_rel(va, WARP_RING_OFF_HEAD, h2);
+                ring_store(va, WARP_RING_OFF_HEAD, h2);
             }
-            if self.ring_noscan {
+            if noscan {
                 break; // BUGGY ARM (test lever): skip the re-scan.
             }
-            let head2 = ring_load_acq(va, WARP_RING_OFF_HEAD);
+            let head2 = ring_load(va, WARP_RING_OFF_HEAD);
             if head2 > tail {
-                ring_store_rel(va, WARP_RING_OFF_IDLE, 0);
+                ring_store(va, WARP_RING_OFF_IDLE, 0);
                 continue; // the re-scan caught an advance
             }
             break;
@@ -6547,7 +6592,7 @@ impl Comp {
             r.tail = drained_to;
             r.completed_seq += 1;
             let (va, seq) = (r.va, r.completed_seq);
-            ring_store_rel(va, WARP_RING_OFF_SEQ, seq);
+            ring_store(va, WARP_RING_OFF_SEQ, seq);
         }
     }
 
@@ -6569,6 +6614,22 @@ impl Comp {
         match c.ring_slots.get_mut(ridx as usize).and_then(|slot| slot.as_mut()) {
             Some(r) => {
                 r.inject_armed = true;
+                Ok(())
+            }
+            None => Err(p9::E_INVAL),
+        }
+    }
+
+    /// Test lever: set the per-ring re-scan-disable flag (audit F3 -- per-ring,
+    /// not a global box-wide I-9 kill switch). Caller-ctx-bounded.
+    fn wring_set_noscan(&mut self, ctx_pub: u32, conn: u64, ridx: u32, on: bool) -> Result<(), u32> {
+        if (ridx as usize) >= WARP_RINGS_PER_CTX {
+            return Err(p9::E_INVAL);
+        }
+        let c = self.wctx_mut(ctx_pub, conn).ok_or(p9::E_NOENT)?;
+        match c.ring_slots.get_mut(ridx as usize).and_then(|slot| slot.as_mut()) {
+            Some(r) => {
+                r.noscan = on;
                 Ok(())
             }
             None => Err(p9::E_INVAL),
@@ -9051,6 +9112,8 @@ impl Conn {
                 // idle-publish window, which the single-threaded server cannot
                 // produce naturally. Caller-ctx-bounded (#178): acts only on
                 // the caller's own ring, so it is not a cross-client lever.
+                // wctx_of_conn is unambiguous (audit F7): wctx_mint enforces one
+                // ctx per conn, so a conn's "first" ctx is its only ctx.
                 let ctx_pub = match comp.wctx_of_conn(self.conn_id) {
                     Some(v) => v,
                     None => return self.err(tag, p9::E_INVAL),
@@ -9064,13 +9127,30 @@ impl Conn {
                     Err(e) => self.err(tag, e),
                 };
             }
-            if s == "ring-noscan on" || s == "ring-noscan off" {
-                // The BUGGY ARM: disable the kick re-scan so `ring-inject`'s
-                // advance is LOST -- proves the re-scan discriminates (M-PIN:
-                // a control must prove discrimination). Global, matching the
-                // single-drainer serve loop; test-mode only.
-                comp.ring_noscan = s.ends_with("on");
-                return p9::build_rwrite(&mut self.out_buf, tag, a.count);
+            if let Some(rest) = s.strip_prefix("ring-noscan ") {
+                // The BUGGY ARM: disable THIS ring's kick re-scan so
+                // `ring-inject`'s advance is LOST -- proves the re-scan
+                // discriminates (M-PIN). Per-RING + caller-ctx-bounded (audit
+                // F3 / #178): the old global Comp flag was an unprivileged
+                // box-wide I-9 kill switch. `ring-noscan <ridx> on|off`.
+                let ctx_pub = match comp.wctx_of_conn(self.conn_id) {
+                    Some(v) => v,
+                    None => return self.err(tag, p9::E_INVAL),
+                };
+                let mut it = rest.split_ascii_whitespace();
+                let ridx: u32 = match it.next().and_then(|t| t.parse().ok()) {
+                    Some(v) => v,
+                    None => return self.err(tag, p9::E_INVAL),
+                };
+                let on = match it.next() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => return self.err(tag, p9::E_INVAL),
+                };
+                return match comp.wring_set_noscan(ctx_pub, self.conn_id, ridx, on) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                };
             }
             if s == "warp-hold on" || s == "warp-hold off" || s == "warp-abandon" {
                 // #178: both levers act ONLY on the caller's own ctx. They

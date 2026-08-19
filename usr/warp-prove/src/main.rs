@@ -569,12 +569,28 @@ fn ring_prove() -> i64 {
     }
     t_putstr("warp-prove: ring F2 rejections OK\n");
 
-    // 6. I-45: a ctx id this conn does not own resolves nothing (open refused).
-    let alien = ctx.wrapping_add(1000);
-    if write_ctl(root, &format!("ctx/{}/ring/new", alien), "4096 0") {
-        ring_fail("I-45: ring mint under a non-owned ctx accepted");
+    // 6. I-45: OWNERSHIP, not liveness (audit F4). A SECOND conn mints a LIVE
+    // ctx + ring; this conn must not resolve it -- the ownership gate tested
+    // with the positive control (a live foreign ring) one variable away, so a
+    // regression that ignored owner_conn would be caught. The non-existent-ctx
+    // (liveness) leg is retained as a second, weaker check.
+    let conn2 = warp_connect("i45-owner");
+    let ctx2 = mint_ctx(conn2, "i45-owner");
+    if !write_ctl(conn2, &format!("ctx/{}/ring/new", ctx2), "4096 0") {
+        ring_fail("I-45 setup: conn2 ring/new mint");
     }
-    t_putstr("warp-prove: ring I-45 ctx gate OK\n");
+    if write_ctl(root, &format!("ctx/{}/ring/new", ctx2), "4096 1") {
+        ring_fail("I-45: minted a ring under a FOREIGN-owned ctx");
+    }
+    if try_open_read(root, &format!("ctx/{}/ring/0/info", ctx2)).is_some() {
+        ring_fail("I-45: read a FOREIGN-owned ring's info");
+    }
+    let alien = ctx2.wrapping_add(1000);
+    if write_ctl(root, &format!("ctx/{}/ring/new", alien), "4096 0") {
+        ring_fail("I-45: ring mint under a non-existent ctx accepted");
+    }
+    unsafe { t_close(conn2) };
+    t_putstr("warp-prove: ring I-45 ownership + liveness gate OK\n");
 
     // 7. I-9 re-scan discrimination (WARP-V3-DESIGN 3.5): an armed mid-drain
     // inject models a guest advancing head in the idle-publish window.
@@ -591,8 +607,8 @@ fn ring_prove() -> i64 {
         ring_fail("I-9: re-scan did not deliver the injected advance");
     }
     // Negative (buggy arm): with noscan, the same inject is LOST.
-    if !write_ctl(root, "ctl", "ring-noscan on") {
-        ring_fail("ring-noscan on");
+    if !write_ctl(root, "ctl", "ring-noscan 0 on") {
+        ring_fail("ring-noscan 0 on");
     }
     if !write_ctl(root, "ctl", "ring-inject 0") {
         ring_fail("ring-inject arm (noscan)");
@@ -605,8 +621,8 @@ fn ring_prove() -> i64 {
         ring_fail("I-9: noscan still delivered -- the test does NOT discriminate");
     }
     // Recovery: re-enable the re-scan; the stranded advance drains.
-    if !write_ctl(root, "ctl", "ring-noscan off") {
-        ring_fail("ring-noscan off");
+    if !write_ctl(root, "ctl", "ring-noscan 0 off") {
+        ring_fail("ring-noscan 0 off");
     }
     if !write_ctl(root, &format!("ctx/{}/ring/0/kick", ctx), "1") {
         ring_fail("ring kick (recover)");

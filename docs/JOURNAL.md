@@ -60,11 +60,35 @@ configuration production's 2D devices can never reach). The test moved to
 `tools/warp/warp-ring.exp` (GL host, via `tools/warp-host.sh ring`), mirroring
 `warp-prove`; the design doc + this journal record the correction.
 
-**Verified so far:** the mechanism COMPILES clean and the local 2D graceful-skip
-path is runtime-confirmed. **NOT yet verified:** the mechanism itself (round-trip
-+ F2 + I-45 + I-9) on virgl -- the operator chose (AskUserQuestion) to run the
-GL-host proof now. A focused holotype audit follows the verification. Nothing is
-pushed until it is green on virgl.
+**The GL-host loop, and two encoding traps only virgl could catch.** The
+prosecutor (Opus 4.8 fallback, MODEL start==end) INDEPENDENTLY found the headline
+P0 -- `WARP_RING = 1<<37` collides with the 30-bit id field, so `warp_id` can't
+round-trip a ring path and nothing resolves -- the same bug the first GL boot hit
+(`ring ctx minted` then `open-for-read` on `ring/0/info`). Its suggested fix
+(`1<<40`, "bits 40/41 are free") was ALSO wrong: `1<<40` is `SURF_FLAG`, so
+`is_surf(ring)` went true and the walk misrouted to the surface arm -- the second
+GL boot failed identically. Ground truth pinned it: `say!` diagnostics showed
+the ring minted + the ridx walk resolved, but the `info` walk arm never fired,
+because an EARLIER `is_surf` arm swallowed it. The real fix is `1<<43` -- bits
+38..42 are ALL taken (WARP_BO/WARP_CTX/SURF_FLAG/PANE_FLAG/WARP_FLAG) -- plus a
+`const _: () = assert!` that now checks all SIX qid tags mutually disjoint, the
+guard whose absence let both my `1<<40` and the reviewer's suggestion through.
+The lesson: a qid-tag-bit choice must be checked against the WHOLE tag namespace
+(surf + pane + warp), not just the `WARP_*` half; and 2D-local testing is
+STRUCTURALLY blind to it (2D SKIPs before a ring resolves). The other 6 findings
+were dispositioned: F2 (I-9 SeqCst doorbell + a documented store-buffer contract,
+replacing the AArch64-only Acquire/Release), F3 (per-ring `ring-noscan`, not a
+global box-wide I-9 kill switch -- the #178 shape), F4 (a two-conn I-45 OWNERSHIP
+test replacing the liveness-only one), F5 (VA rewind on the mint failure arms),
+F6/F7 (documented: the drain bound is V-3b's, the seq wrap is the shared class,
+`wctx_of_conn` is unambiguous by one-ctx-per-conn).
+
+**Verified so far:** the mechanism COMPILES clean, the local 2D graceful-skip
+path is runtime-confirmed, and the ring now MINTS + RESOLVES on virgl (the walk
+reaches `info`). **NOT yet green:** the full round-trip + F2 + I-45 + I-9 on
+virgl -- the `1<<43` rebuild was blocked mid-run by mac contention (aux's ~53m
+pts trace), so the re-verification is the immediate next step. Nothing is pushed
+until it is green on virgl.
 
 ## 2026-08-19 — V-2: host-visible memory, and the death path a shared BAR opened
 
