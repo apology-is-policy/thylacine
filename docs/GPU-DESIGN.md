@@ -125,6 +125,10 @@ doorbell is skipped entirely unless the host's ring thread has gone idle.
 *per timeline*, one waitable per submission. That is a Loom CQE. We need no
 syncobj object model, no timeline semaphore primitive, no dma-fence graph.
 
+> **Implementation design: `docs/WARP-V3-DESIGN.md`** -- the V-3 sub-chunks; the
+> coherent-ring `/srv/warp` ABI, the F2 client-geometry validation, and the I-9
+> kick idle-skip.
+
 ### 2.5 v3d has **no** inter-client isolation — and the hardware to fix it
 
 This overturned the optimistic assumption the design started from. Upstream
