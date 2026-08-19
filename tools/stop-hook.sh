@@ -22,9 +22,11 @@
 # as a BLOCKING AskUserQuestion, never a passive summary a user who is away may
 # not see for hours. AskUserQuestion is a tool call, not a turn-end, so it does
 # not even trigger this hook: asking keeps the agent IN-TURN, which is more
-# aligned with the no-unearned-yield rule, not less. Pure WAITS (a running
-# gate/quota/hardware, nothing to decide) and answered questions stay clean
-# stops. Gated by the same .no-stop-nudge dotfile below -- suppress the hook
+# aligned with the no-unearned-yield rule, not less. Pure WAITS with NO
+# synchronous await (an opaque gate/quota) and answered questions stay clean
+# stops -- but a wait you CAN block on synchronously (yip hold, a re-invoking
+# background task) is TRIGGERED and kept in-turn, not stopped. Gated by the
+# same .no-stop-nudge dotfile below -- suppress the hook
 # and you suppress this too.
 #
 # FAIL-OPEN, EVERYWHERE. Every error path exits 0 (allow the stop). A Stop hook
@@ -239,9 +241,14 @@ Which of these is it?
   2. The user asked something you have now answered. STOPPING IS CORRECT.
   3. You are genuinely blocked. If it needs a HUMAN DECISION -- or a pending
      vote is blocking the path you meant to take, or such votes have piled up
-     unanswered -- put it via AskUserQuestion. If it is a pure WAIT (quota,
-     hardware, a long gate you cannot usefully wait on) with nothing to decide,
-     STOPPING IS CORRECT: name what unblocks it.
+     unanswered -- put it via AskUserQuestion. Otherwise it is a WAIT, and
+     BEFORE stopping you MUST ask: does the awaited entity expose a SYNCHRONOUS
+     await -- a blocking acquire ("yip hold <res>" blocks until free), a
+     background task that re-invokes you on completion, a queue you can join?
+     If YES, TRIGGER it and stay in-turn: you are re-invoked when it fires, no
+     human round-trip. STOPPING IS CORRECT ONLY for a wait with NO synchronous
+     await -- a truly opaque gate you cannot usefully wait on; then name what
+     unblocks it.
   4. None of the above. Then the next chunk is the one you just named on your
      own "Next"/"Ahead" line -- OPEN IT in this turn instead of yielding.
 
