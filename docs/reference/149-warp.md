@@ -1619,10 +1619,10 @@ not RAM, so no `page_budget` charge.
 (F2, no handler-bounds test) / 3 P3 (F3 weft-lockstep test, F4 shm/regions
 disjointness, F5 cache-policy footgun doc). F1 fixed (the DMA-only quiesce), F2
 fixed (the extracted `hostmem_resolve_subrange` + its test); F3/F4/F5 tracked
-P3. Re-audit of the fixes: *(pending)*. Tests: `weft.hostmem_share`,
+P3. Re-audit of the fixes: CLEAN (0 P0 / 0 P1 / 0 P2 / 3 P3 cosmetic; Opus 4.8 fallback -- Fable out of credits). Tests: `weft.hostmem_share`,
 `weft.hostmem_resolve`, `pgtable.install_user_pte_attr_index`; suite 1431/1431.
 
-**Status.** As-built, uncommitted. The weft client-delivery is wired but
+**Status.** As-built, committed at `7973f8dc`. The weft client-delivery is wired but
 exercised only by unit tests -- V-3 (`vn_renderer`) drives it E2E on a real
 device. The libthyla-rs ABI mirror (107) + the GL regression boot ride the merge.
 

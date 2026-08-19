@@ -69,7 +69,7 @@ BUS_MASTER (stop the dead device's DMA) but KEEP MEM_SPACE, deferring its clear
 to the last unref — so the client never observes a decode-disabled BAR and the
 measurement is moot. F2 (the handler's bounds had no test) was closed by
 extracting a pure `hostmem_resolve_subrange` + testing it; F3/F4/F5 tracked P3.
-Re-audit of the fixes: *(pending)*. Suite 1431/1431; commit *(pending)*.
+Re-audit of the fixes: CLEAN (0 P0 / 0 P1 / 0 P2 / 3 P3 cosmetic; Opus 4.8 fallback -- Fable out of credits). Suite 1431/1431; commit 7973f8dc.
 
 What V-2 does NOT ship: a real client. The weft delivery is exercised only by
 unit tests — V-3 (vn_renderer) drives it E2E on real hardware, where the residual

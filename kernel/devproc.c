@@ -514,6 +514,7 @@ static const char *maps_type_name(const struct Vma *v) {
     // alias pair?". The perms column already distinguishes the two aliases
     // (rw-p vs r-xp).
     case BURROW_TYPE_CODE:      return "code";
+    case BURROW_TYPE_HOSTMEM:   return "hostmem";
     default:                    return "?";
     }
 }
