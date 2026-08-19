@@ -1880,6 +1880,16 @@ impl Gpu {
         )
     }
 
+    /// V-3a: register a coherent guest-blob ring backing (blob_mem=GUEST) as a
+    /// single contiguous mem_entry. A thin wrapper so the server mints ring
+    /// blobs without importing the wire constant. Err(Hardware) on a device
+    /// without the blob feature -- the caller treats that as an unregistered
+    /// pure-shmem ring (the ring transport does not depend on the device
+    /// knowing the blob at V-3a; that is Venus's, V-3b).
+    pub fn create_ring_blob(&mut self, resource_id: u32, pa: u64, len: u32) -> Result<(), Error> {
+        self.resource_create_blob(resource_id, VIRTIO_GPU_BLOB_MEM_GUEST, 0, pa, len)
+    }
+
     /// CTX_CREATE: mint rendering context `ctx_id` host-side. context_init
     /// stays 0 (VIRTIO_GPU_F_CONTEXT_INIT is not negotiated), so the host
     /// creates the default virgl context -- which serves both VIRGL and

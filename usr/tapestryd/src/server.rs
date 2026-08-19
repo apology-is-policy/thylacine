@@ -381,6 +381,7 @@ fn is_pane(path: u64) -> bool {
 const WARP_FLAG: u64 = 1 << 42;
 const WARP_CTX: u64 = 1 << 39; // a ctx/<id> node (below the tag bits)
 const WARP_BO: u64 = 1 << 38; // a ctx bo/<id> node
+const WARP_RING: u64 = 1 << 37; // a ctx ring/<ridx> node (V-3a)
 
 const W_ROOT: u64 = WARP_FLAG;
 /// The attach roots by listener (main.rs hands the accepting listener's
@@ -403,6 +404,14 @@ const WFK_BO_NEW: u64 = 5;
 const WFK_BO_CTL: u64 = 1;
 const WFK_BO_MAP: u64 = 2;
 const WFK_BO_INFO: u64 = 3;
+// Ctx-level ring kinds (ctx/<id>/ring/*), V-3a.
+const WFK_RING_DIR: u64 = 6;
+const WFK_RING_NEW: u64 = 7;
+// Ring-level file kinds (ctx/<id>/ring/<ridx>/*), under WARP_RING.
+const WFK_RING_MAP: u64 = 1;
+const WFK_RING_KICK: u64 = 2;
+const WFK_RING_FENCE: u64 = 3;
+const WFK_RING_INFO: u64 = 4;
 
 fn make_wctx(id: u32, fk: u64) -> u64 {
     WARP_FLAG | WARP_CTX | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
@@ -425,6 +434,35 @@ fn is_wctx(path: u64) -> bool {
 fn is_wbo(path: u64) -> bool {
     is_warp(path) && path & WARP_BO != 0
 }
+fn make_wring(id: u32, fk: u64) -> u64 {
+    WARP_FLAG | WARP_RING | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
+}
+fn is_wring(path: u64) -> bool {
+    is_warp(path) && path & WARP_RING != 0
+}
+
+// V-3a ring blob layout (the tapestryd<->client control-header contract; the
+// CS region past the header is Venus's to lay out, V-3b). Each control word
+// sits on its own 8-byte slot; the guest and host pair acquire/release on
+// head/idle/tail/seq (the I-9 register-then-observe, WARP-V3-DESIGN 3.5).
+const WARP_RING_HDR: u64 = 0x40; // CS region base
+const WARP_RING_OFF_HEAD: u64 = 0x00; // guest-written producer index
+const WARP_RING_OFF_TAIL: u64 = 0x08; // host-written consumer index
+const WARP_RING_OFF_IDLE: u64 = 0x10; // host-written: 1 = pump parked; kick iff 1
+const WARP_RING_OFF_SEQ: u64 = 0x18; // host-written monotone completed-seq feedback
+const WARP_RING_MAX: u64 = 1 << 20; // 1 MiB single-ring cap (F2)
+const WARP_RINGS_PER_CTX: usize = 64; // ring_idx 0-63 (Venus: one per VkQueue)
+
+#[inline]
+fn ring_load_acq(va: u64, off: u64) -> u64 {
+    unsafe { &*((va + off) as *const core::sync::atomic::AtomicU64) }
+        .load(core::sync::atomic::Ordering::Acquire)
+}
+#[inline]
+fn ring_store_rel(va: u64, off: u64, v: u64) {
+    unsafe { &*((va + off) as *const core::sync::atomic::AtomicU64) }
+        .store(v, core::sync::atomic::Ordering::Release);
+}
 
 fn is_dir(path: u64) -> bool {
     path == P_ROOT
@@ -435,7 +473,9 @@ fn is_dir(path: u64) -> bool {
         || path == W_ROOT
         || path == W_CTX_DIR
         || (is_wctx(path) && (warp_fk(path) == WFK_DIR || warp_fk(path) == WFK_BO_DIR))
+        || (is_wctx(path) && warp_fk(path) == WFK_RING_DIR)
         || (is_wbo(path) && warp_fk(path) == WFK_DIR)
+        || (is_wring(path) && warp_fk(path) == WFK_DIR)
 }
 
 // Mode constants (the ptyfs set).
@@ -1185,6 +1225,10 @@ pub struct Comp {
     warp_ctx_vindicate: [u32; MAX_WARP_CTXS],
     warp_ctx_seq: u32,
     warp_bo_seq: u32,
+    warp_ring_seq: u32,
+    /// V-3a test lever (test-mode `ring-noscan`): disable the kick re-scan to
+    /// PROVE `ring-inject`'s advance is otherwise lost (M-PIN discrimination).
+    ring_noscan: bool,
     /// #204 census, the global half: max `bo_backed_peak` over every ctx
     /// that ever lived -- readable AFTER a workload's ctx is gone (the
     /// per-ctx field dies with the ctx). Read via global ctl `bo-peak`.
@@ -1427,6 +1471,8 @@ struct WarpCtx {
     create_refused: u64,
     /// Heap row (#204): MAX_WARP_BOS_PER_CTX slots, allocated at mint.
     bos: alloc::boxed::Box<[Option<WarpBo>]>,
+    /// V-3a: per-ridx coherent ring slots (0-63), allocated at mint.
+    ring_slots: alloc::boxed::Box<[Option<WarpRing>]>,
 }
 
 /// A GPU buffer object: a kernel-minted GPU-BO DMA chunk attached as the
@@ -1472,6 +1518,39 @@ struct WarpBo {
     /// shape (the SKIPPED say line) instead of leaving it to be guessed.
     target: u32,
     flags: u32,
+}
+
+/// V-3a: a coherent shmem ring -- a weft-shared GUEST blob addressed per
+/// ring_idx (0-63, Venus allocates one per VkQueue). The control header
+/// (head/tail/idle/seq) lives at the blob start; Venus lays its CS ring in the
+/// region past WARP_RING_HDR. tapestryd keeps host-authoritative shadows of
+/// the drained tail + the completion seq.
+struct WarpRing {
+    pub_id: u32,
+    /// 0 = unregistered (a 2D device without the blob feature): the ring is a
+    /// pure coherent-shmem transport. The device never DMAs a ring blob at
+    /// V-3a, so an unregistered ring is fully valid; V-3b's Venus path is
+    /// where the registration becomes load-bearing.
+    res_id: u32,
+    ridx: u8,
+    dma_fd: i64,
+    va: u64,
+    size: u64,
+    /// The lazy Tweft mint (the weft_ensure precedent); disarmed at teardown
+    /// BEFORE any backing free (I-7 #847: a client's live mapping survives).
+    share_id: Option<u64>,
+    /// Host shadow of the drained-to index (mirrors the blob's tail word).
+    tail: u64,
+    /// Monotone ring completion count (host-authoritative; mirrored into the
+    /// blob's seq slot for the guest's poll fast-path).
+    completed_seq: u64,
+    /// Newest completed_seq the fence file reported (the coalesce watermark).
+    reported_seq: u64,
+    retiring: bool,
+    /// Test lever (test-mode `ring-inject`): a one-shot mid-drain head advance
+    /// on the next kick -- the I-9 re-scan witness (the single-threaded server
+    /// cannot produce the concurrent-advance window naturally).
+    inject_armed: bool,
 }
 
 /// Warp-4: a resolved ACTIVE GL adoption (see `gl_adoption`) -- the
@@ -1583,6 +1662,8 @@ impl Comp {
             warp_ctx_vindicate: [0; MAX_WARP_CTXS],
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
+            warp_ring_seq: 0,
+            ring_noscan: false,
             warp_bo_peak: 0,
             warp_bo_bytes_peak: 0,
             warp_probe_parked: 0,
@@ -5042,6 +5123,15 @@ struct PendingFence {
     tag: u16,
 }
 
+/// A parked ring-fence read (V-3a): delivered by poll_ring_fences when the
+/// ring's completed-seq advances past the reported one (or EOF on ring death).
+#[derive(Clone, Copy)]
+struct PendingRingFence {
+    fid: u32,
+    ring_pub: u32,
+    tag: u16,
+}
+
 /// The largest fence record ("<u64 max>\n" = 21 bytes): the park guard's
 /// floor, like FK_EVENT's TEVENT_LEN.
 const FENCE_REC_MAX: usize = 21;
@@ -5058,6 +5148,15 @@ fn warp_bo_row() -> Option<alloc::boxed::Box<[Option<WarpBo>]>> {
         return None;
     }
     v.resize_with(MAX_WARP_BOS_PER_CTX, || None);
+    Some(v.into_boxed_slice())
+}
+
+fn warp_ring_row() -> Option<alloc::boxed::Box<[Option<WarpRing>]>> {
+    let mut v: Vec<Option<WarpRing>> = Vec::new();
+    if v.try_reserve_exact(WARP_RINGS_PER_CTX).is_err() {
+        return None;
+    }
+    v.resize_with(WARP_RINGS_PER_CTX, || None);
     Some(v.into_boxed_slice())
 }
 
@@ -5258,6 +5357,7 @@ impl Comp {
         // mintable slot's row is empty (parked records exist only while
         // the slot is poisoned, and poisoned slots are skipped above).
         let bos = warp_bo_row()?;
+        let ring_slots = warp_ring_row()?;
         // The row is empty (len 0), so this guarantees capacity >= the
         // full cap -- a no-op when a reused slot's row kept its capacity.
         debug_assert!(self.warp_ctx_leaked[slot].is_empty());
@@ -5326,6 +5426,7 @@ impl Comp {
             build_diag_arms: 0,
             create_refused: 0,
             bos,
+            ring_slots,
         });
         // #240: the probe is built AFTER the row exists so its failure is
         // recoverable -- a ctx with no probe still serves, it just answers
@@ -6209,6 +6310,290 @@ impl Comp {
         None
     }
 
+    // === V-3a: the coherent shmem ring (ctx/<id>/ring/<ridx>) ===============
+    //
+    // A ring is a weft-shared, coherently-mapped GUEST blob addressed per
+    // ring_idx (0-63). It carries a control header (head/tail/idle/seq -- the
+    // tapestryd<->client contract) and a CS region Venus lays out. V-3a
+    // validates the transport + doorbell + fence signal + F2 without a Venus
+    // driver; the device submit of the drained CS is V-3b's (marked in
+    // `wring_kick`). res ids and pub ids are monotone, never reused.
+
+    /// Resolve a live ring the caller owns (its ctx + the ring). The I-45
+    /// gate: a foreign conn never resolves another client's ring.
+    fn wring(&self, ring_pub: u32, conn: u64) -> Option<(&WarpCtx, &WarpRing)> {
+        for c in self.warp_ctxs.iter().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for r in c.ring_slots.iter().flatten() {
+                if r.pub_id == ring_pub && !r.retiring {
+                    return Some((c, r));
+                }
+            }
+        }
+        None
+    }
+
+    fn wring_mut(&mut self, ring_pub: u32, conn: u64) -> Option<&mut WarpRing> {
+        for c in self.warp_ctxs.iter_mut().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for r in c.ring_slots.iter_mut().flatten() {
+                if r.pub_id == ring_pub && !r.retiring {
+                    return Some(r);
+                }
+            }
+        }
+        None
+    }
+
+    /// The ring Tweft mint (the weft_ensure precedent): share once, echo the
+    /// stored id thereafter. Lazy, exactly like `wbo_weft_ensure`.
+    fn wring_weft_ensure(&mut self, ring_pub: u32, conn: u64) -> Option<(u64, u32)> {
+        let (va, size, have) = {
+            let r = self.wring_mut(ring_pub, conn)?;
+            if r.dma_fd < 0 {
+                return None;
+            }
+            (r.va, r.size, r.share_id)
+        };
+        if let Some(id) = have {
+            return Some((id, size as u32));
+        }
+        let id = unsafe { t_weft_share(va, size) };
+        if id <= 0 {
+            say!("tapestryd: warp ring t_weft_share failed {}", id);
+            return None;
+        }
+        self.wring_mut(ring_pub, conn).unwrap().share_id = Some(id as u64);
+        Some((id as u64, size as u32))
+    }
+
+    /// The `ring/new` write verb: `"<bytes> <ring_idx>"` -> mint.
+    fn wring_mint_verb(&mut self, ctx_pub: u32, conn: u64, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        let mut it = s.split_ascii_whitespace();
+        let bytes: u64 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let ridx: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        self.wring_mint(ctx_pub, conn, bytes, ridx)
+    }
+
+    /// Mint a coherent ring blob of `bytes` for `ridx` under `ctx_pub`. F2:
+    /// the geometry is validated against the mint, refused-not-clamped. I-32:
+    /// charged to the ctx backing cap alongside bos + existing rings. I-45:
+    /// the caller must own the ctx (`wctx`).
+    fn wring_mint(&mut self, ctx_pub: u32, conn: u64, bytes: u64, ridx: u32) -> Result<(), u32> {
+        if bytes == 0 || bytes % PAGE != 0 || bytes > WARP_RING_MAX {
+            return Err(p9::E_INVAL);
+        }
+        if (ridx as usize) >= WARP_RINGS_PER_CTX {
+            return Err(p9::E_INVAL);
+        }
+        let (over, taken) = {
+            let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
+            let bo_bytes: u64 = c
+                .bos
+                .iter()
+                .flatten()
+                .map(|b| b.size)
+                .fold(0u64, u64::saturating_add);
+            let ring_bytes: u64 = c
+                .ring_slots
+                .iter()
+                .flatten()
+                .map(|r| r.size)
+                .fold(0u64, u64::saturating_add);
+            (
+                bo_bytes
+                    .saturating_add(ring_bytes)
+                    .saturating_add(c.leaked_bytes)
+                    .saturating_add(bytes)
+                    > WARP_CTX_BACKING_MAX,
+                c.ring_slots[ridx as usize].is_some(),
+            )
+        };
+        if over {
+            return Err(p9::E_NOMEM);
+        }
+        if taken {
+            return Err(p9::E_INVAL); // ring_idx already minted for this ctx
+        }
+        let fd = unsafe { t_dma_create_gpu_bo(bytes, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
+        if fd < 0 {
+            return Err(p9::E_NOMEM);
+        }
+        let va = self.weave_va_next;
+        self.weave_va_next += (bytes + PAGE - 1) & !(PAGE - 1);
+        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
+        if pa < 0 {
+            unsafe { t_close(fd) };
+            return Err(p9::E_NOMEM);
+        }
+        // Zero the control header; the host starts idle (the guest kicks on
+        // its first submit). Release-ordered so a client that maps and polls
+        // immediately observes the initialized header.
+        ring_store_rel(va, WARP_RING_OFF_HEAD, 0);
+        ring_store_rel(va, WARP_RING_OFF_TAIL, 0);
+        ring_store_rel(va, WARP_RING_OFF_SEQ, 0);
+        ring_store_rel(va, WARP_RING_OFF_IDLE, 1);
+        let res_id = if self.gpu.blob {
+            self.res_seq = self.res_seq.wrapping_add(1);
+            let rid = self.res_seq;
+            if self.gpu.create_ring_blob(rid, pa as u64, bytes as u32).is_err() {
+                unsafe { t_burrow_detach(va, bytes) };
+                unsafe { t_close(fd) };
+                return Err(E_IO);
+            }
+            rid
+        } else {
+            0
+        };
+        self.warp_ring_seq = self.warp_ring_seq.wrapping_add(1);
+        if self.warp_ring_seq == 0 {
+            self.warp_ring_seq = 1;
+        }
+        let pub_id = self.warp_ring_seq;
+        match self.wctx_mut(ctx_pub, conn) {
+            Some(c) => {
+                c.ring_slots[ridx as usize] = Some(WarpRing {
+                    pub_id,
+                    res_id,
+                    ridx: ridx as u8,
+                    dma_fd: fd,
+                    va,
+                    size: bytes,
+                    share_id: None,
+                    tail: 0,
+                    completed_seq: 0,
+                    reported_seq: 0,
+                    retiring: false,
+                    inject_armed: false,
+                });
+                Ok(())
+            }
+            None => {
+                // The ctx vanished between the checks and here (single-
+                // threaded -> unreachable) -- unwind rather than strand.
+                if res_id != 0 {
+                    let _ = self.gpu.resource_unref(res_id);
+                }
+                unsafe { t_burrow_detach(va, bytes) };
+                unsafe { t_close(fd) };
+                Err(p9::E_NOENT)
+            }
+        }
+    }
+
+    /// The doorbell (`ring/<ridx>/kick`). Host role (WARP-V3-DESIGN 3.5):
+    /// publish idle=0, drain to head; on exit publish idle=1 then RE-SCAN head
+    /// (the I-9 register-then-observe) -- a concurrent guest advance in the
+    /// idle-publish window is caught by the re-read, so no doorbell is lost.
+    /// In V-3a's single-threaded server the guest is blocked on this RPC, so
+    /// the window is empty; the re-scan is exercised only by `ring-inject`,
+    /// which fills it deterministically. V-3b replaces the echo drain with
+    /// gpu.submit_3d(dev_ctx, ctx_pub, cs) carrying ridx.
+    fn wring_kick(&mut self, ring_pub: u32, conn: u64) -> Result<(), u32> {
+        let va = {
+            let (_, r) = self.wring(ring_pub, conn).ok_or(p9::E_NOENT)?;
+            r.va
+        };
+        let size = self.wring(ring_pub, conn).unwrap().1.size;
+        ring_store_rel(va, WARP_RING_OFF_IDLE, 0);
+        loop {
+            let head = ring_load_acq(va, WARP_RING_OFF_HEAD);
+            let tail = ring_load_acq(va, WARP_RING_OFF_TAIL);
+            if head > tail {
+                // Drain [tail, head): V-3a acknowledges (echo). Advance the
+                // consumer index and complete.
+                ring_store_rel(va, WARP_RING_OFF_TAIL, head);
+                self.wring_complete(ring_pub, conn, head);
+                continue;
+            }
+            // Nothing new: publish idle, then re-scan.
+            ring_store_rel(va, WARP_RING_OFF_IDLE, 1);
+            let inject = match self.wring_mut(ring_pub, conn) {
+                Some(r) if r.inject_armed => {
+                    r.inject_armed = false;
+                    true
+                }
+                _ => false,
+            };
+            if inject {
+                // Simulate a guest advancing head in the idle-publish window.
+                let h2 = core::cmp::min(tail + WARP_RING_HDR, size);
+                ring_store_rel(va, WARP_RING_OFF_HEAD, h2);
+            }
+            if self.ring_noscan {
+                break; // BUGGY ARM (test lever): skip the re-scan.
+            }
+            let head2 = ring_load_acq(va, WARP_RING_OFF_HEAD);
+            if head2 > tail {
+                ring_store_rel(va, WARP_RING_OFF_IDLE, 0);
+                continue; // the re-scan caught an advance
+            }
+            break;
+        }
+        Ok(())
+    }
+
+    /// One ring completion: advance the host tail shadow, bump the monotone
+    /// completed-seq, and publish it into the blob's seq slot (the guest's
+    /// zero-syscall poll fast-path). The blocking `ring/<ridx>/fence` reader
+    /// learns the same value via `poll_ring_fences`.
+    fn wring_complete(&mut self, ring_pub: u32, conn: u64, drained_to: u64) {
+        if let Some(r) = self.wring_mut(ring_pub, conn) {
+            r.tail = drained_to;
+            r.completed_seq += 1;
+            let (va, seq) = (r.va, r.completed_seq);
+            ring_store_rel(va, WARP_RING_OFF_SEQ, seq);
+        }
+    }
+
+    /// Advance the fence-file report watermark (the coalesce point).
+    fn wring_report(&mut self, ring_pub: u32, conn: u64, v: u64) {
+        if let Some(r) = self.wring_mut(ring_pub, conn) {
+            if v > r.reported_seq {
+                r.reported_seq = v;
+            }
+        }
+    }
+
+    /// Test lever: arm a one-shot mid-drain head advance on the caller's ring.
+    fn wring_arm_inject(&mut self, ctx_pub: u32, conn: u64, ridx: u32) -> Result<(), u32> {
+        if (ridx as usize) >= WARP_RINGS_PER_CTX {
+            return Err(p9::E_INVAL);
+        }
+        let c = self.wctx_mut(ctx_pub, conn).ok_or(p9::E_NOENT)?;
+        match c.ring_slots.get_mut(ridx as usize).and_then(|slot| slot.as_mut()) {
+            Some(r) => {
+                r.inject_armed = true;
+                Ok(())
+            }
+            None => Err(p9::E_INVAL),
+        }
+    }
+
+    /// Retire one ring backing. Rings issue no device fences at V-3a (no
+    /// submit lands), so no wedge posture applies -- the device never DMAs a
+    /// ring blob, so freeing is safe. Disarm the weft share BEFORE the backing
+    /// free (I-7 #847 dual count: a client's live mapping survives past this
+    /// via its own ref until it unmaps).
+    fn wring_teardown(gpu: &mut Gpu, r: &mut WarpRing) {
+        if let Some(id) = r.share_id.take() {
+            let _ = unsafe { t_weft_unshare(id) };
+        }
+        if r.res_id != 0 {
+            let _ = gpu.resource_unref(r.res_id);
+        }
+        if r.dma_fd >= 0 {
+            unsafe { t_burrow_detach(r.va, r.size) };
+            unsafe { t_close(r.dma_fd) };
+            r.dma_fd = -1;
+        }
+    }
+
     /// Retire one BO: the I-40/R2-F5 order -- (1) disarm the un-claimed
     /// share BEFORE any backing free (a Tweft claim racing the retire fails
     /// closed; an already-claimed share is a harmless miss and the CLIENT's
@@ -6334,6 +6719,13 @@ impl Comp {
                 };
                 if Self::wbo_retire(&mut self.gpu, c.dev_ctx, &mut b, leak) > 0 {
                     self.warp_park_leaked(slot, b);
+                }
+            }
+            // V-3a: retire every ring backing (unconditional -- rings issue no
+            // device fences, so the `leak` wedge posture does not apply).
+            for j in 0..WARP_RINGS_PER_CTX {
+                if let Some(mut r) = c.ring_slots[j].take() {
+                    Self::wring_teardown(&mut self.gpu, &mut r);
                 }
             }
             // #240: the probe's two resources follow the SAME leak posture
@@ -7145,6 +7537,7 @@ pub struct Conn {
     defer: bool,
     pending_reads: Vec<PendingRead>,
     pending_fences: Vec<PendingFence>,
+    pending_ring_fences: Vec<PendingRingFence>,
 }
 
 const NO_FID: Option<Fid> = None;
@@ -7212,6 +7605,7 @@ impl Conn {
             defer: false,
             pending_reads: Vec::new(),
             pending_fences: Vec::new(),
+            pending_ring_fences: Vec::new(),
         }
     }
 
@@ -7264,6 +7658,7 @@ impl Conn {
         // Cancel site 2 (clunk): this fid's held replies die with it.
         self.pending_reads.retain(|pr| pr.fid != fid);
         self.pending_fences.retain(|pf| pf.fid != fid);
+        self.pending_ring_fences.retain(|pf| pf.fid != fid);
     }
 
     fn drop_all_fids(&mut self, comp: &mut Comp) {
@@ -7278,6 +7673,7 @@ impl Conn {
         self.fid_full_said = false;
         self.pending_reads.clear();
         self.pending_fences.clear();
+        self.pending_ring_fences.clear();
     }
 
     pub fn teardown(&mut self, comp: &mut Comp) {
@@ -7288,6 +7684,7 @@ impl Conn {
         comp.warp_retire_conn(self.conn_id);
         self.pending_reads.clear();
         self.pending_fences.clear();
+        self.pending_ring_fences.clear();
     }
 
     pub fn raw_fd(&self) -> i64 {
@@ -7567,6 +7964,7 @@ impl Conn {
                     b"submit" => WFK_SUBMIT,
                     b"fence" => WFK_FENCE,
                     b"bo" => WFK_BO_DIR,
+                    b"ring" => WFK_RING_DIR,
                     _ => return None,
                 };
                 Some((make_wctx(id, fk), 0))
@@ -7599,6 +7997,39 @@ impl Conn {
                     _ => return None,
                 };
                 Some((make_wbo(bid, fk), 0))
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_RING_DIR => {
+                let cid = warp_id(d);
+                let c = comp.wctx(cid, self.conn_id)?;
+                if name == b".." {
+                    return Some((make_wctx(cid, WFK_DIR), 0));
+                }
+                if name == b"new" {
+                    return Some((make_wctx(cid, WFK_RING_NEW), 0));
+                }
+                let ridx = parse_u32(name)?;
+                if ridx as usize >= WARP_RINGS_PER_CTX {
+                    return None;
+                }
+                let r = c.ring_slots[ridx as usize].as_ref()?;
+                if r.retiring {
+                    return None;
+                }
+                Some((make_wring(r.pub_id, WFK_DIR), 0))
+            }
+            d if is_wring(d) && warp_fk(d) == WFK_DIR => {
+                let rp = warp_id(d);
+                let (c, _) = comp.wring(rp, self.conn_id)?;
+                let parent = make_wctx(c.pub_id, WFK_RING_DIR);
+                let fk = match name {
+                    b".." => return Some((parent, 0)),
+                    b"info" => WFK_RING_INFO,
+                    b"map" => WFK_RING_MAP,
+                    b"kick" => WFK_RING_KICK,
+                    b"fence" => WFK_RING_FENCE,
+                    _ => return None,
+                };
+                Some((make_wring(rp, fk), 0))
             }
             _ => None,
         }
@@ -7730,6 +8161,9 @@ impl Conn {
             return self.err(tag, p9::E_NOENT);
         }
         if is_wbo(f.path) && comp.wbo(warp_id(f.path), self.conn_id).is_none() {
+            return self.err(tag, p9::E_NOENT);
+        }
+        if is_wring(f.path) && comp.wring(warp_id(f.path), self.conn_id).is_none() {
             return self.err(tag, p9::E_NOENT);
         }
 
@@ -8269,6 +8703,7 @@ impl Conn {
                     self.defer = true;
                     Ok(0)
                 }
+                WFK_RING_NEW => p9::build_rread(&mut self.out_buf, tag, &[]),
                 _ => self.err(tag, p9::E_INVAL),
             };
         }
@@ -8298,6 +8733,55 @@ impl Conn {
                         ),
                     );
                     self.read_str(tag, &s, a.offset, cap)
+                }
+                _ => self.err(tag, p9::E_INVAL),
+            };
+        }
+        if is_wring(f.path) {
+            let id = warp_id(f.path);
+            if comp.wring(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WFK_RING_INFO => {
+                    let (res, ridx, size) = comp
+                        .wring(id, self.conn_id)
+                        .map(|(_, r)| (r.res_id, r.ridx, r.size))
+                        .unwrap();
+                    let mut s = String::new();
+                    let _ = core::fmt::write(
+                        &mut s,
+                        format_args!("res {} ridx {} bytes {} hdr {}\n", res, ridx, size, WARP_RING_HDR),
+                    );
+                    self.read_str(tag, &s, a.offset, cap)
+                }
+                // The ring's completion count (coalescing, like ctx/<id>/fence);
+                // parks when nothing is unreported. The guest may instead poll
+                // the blob seq slot (zero-syscall); both carry the same value.
+                WFK_RING_FENCE => {
+                    if cap < FENCE_REC_MAX {
+                        return p9::build_rread(&mut self.out_buf, tag, &[]);
+                    }
+                    let (sig, rep) = comp
+                        .wring(id, self.conn_id)
+                        .map(|(_, r)| (r.completed_seq, r.reported_seq))
+                        .unwrap();
+                    if sig > rep {
+                        comp.wring_report(id, self.conn_id, sig);
+                        let mut s = String::new();
+                        let _ = core::fmt::write(&mut s, format_args!("{}\n", sig));
+                        return p9::build_rread(&mut self.out_buf, tag, s.as_bytes());
+                    }
+                    if self.pending_ring_fences.len() >= MAX_FIDS {
+                        return self.err(tag, p9::E_PROTO);
+                    }
+                    self.pending_ring_fences.push(PendingRingFence {
+                        fid: a.fid,
+                        ring_pub: id,
+                        tag,
+                    });
+                    self.defer = true;
+                    Ok(0)
                 }
                 _ => self.err(tag, p9::E_INVAL),
             };
@@ -8560,6 +9044,34 @@ impl Conn {
         #[cfg(feature = "test-mode")]
         if f.path == W_CTL {
             let s = core::str::from_utf8(a.data).unwrap_or("").trim();
+            if let Some(rest) = s.strip_prefix("ring-inject ") {
+                // Arm a one-shot mid-drain head advance on the caller's ring
+                // <ridx> for its next kick -- the I-9 re-scan witness
+                // (WARP-V3-DESIGN 3.5): a concurrent guest advance in the
+                // idle-publish window, which the single-threaded server cannot
+                // produce naturally. Caller-ctx-bounded (#178): acts only on
+                // the caller's own ring, so it is not a cross-client lever.
+                let ctx_pub = match comp.wctx_of_conn(self.conn_id) {
+                    Some(v) => v,
+                    None => return self.err(tag, p9::E_INVAL),
+                };
+                let ridx: u32 = match rest.trim().parse() {
+                    Ok(v) => v,
+                    Err(_) => return self.err(tag, p9::E_INVAL),
+                };
+                return match comp.wring_arm_inject(ctx_pub, self.conn_id, ridx) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                };
+            }
+            if s == "ring-noscan on" || s == "ring-noscan off" {
+                // The BUGGY ARM: disable the kick re-scan so `ring-inject`'s
+                // advance is LOST -- proves the re-scan discriminates (M-PIN:
+                // a control must prove discrimination). Global, matching the
+                // single-drainer serve loop; test-mode only.
+                comp.ring_noscan = s.ends_with("on");
+                return p9::build_rwrite(&mut self.out_buf, tag, a.count);
+            }
             if s == "warp-hold on" || s == "warp-hold off" || s == "warp-abandon" {
                 // #178: both levers act ONLY on the caller's own ctx. They
                 // ship (`default = ["test-mode"]`) and this ctl is mode
@@ -8629,6 +9141,10 @@ impl Conn {
                         Err(e) => self.err(tag, e),
                     }
                 }
+                WFK_RING_NEW => match comp.wring_mint_verb(id, self.conn_id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
                 _ => self.err(tag, p9::E_PERM),
             };
         }
@@ -8639,6 +9155,19 @@ impl Conn {
             }
             return match warp_fk(f.path) {
                 WFK_BO_CTL => match self.wbo_ctl(comp, id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
+                _ => self.err(tag, p9::E_PERM),
+            };
+        }
+        if is_wring(f.path) {
+            let id = warp_id(f.path);
+            if comp.wring(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WFK_RING_KICK => match comp.wring_kick(id, self.conn_id) {
                     Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                     Err(e) => self.err(tag, e),
                 },
@@ -9904,6 +10433,7 @@ impl Conn {
                         (&b"submit"[..], WFK_SUBMIT),
                         (&b"fence"[..], WFK_FENCE),
                         (&b"bo"[..], WFK_BO_DIR),
+                        (&b"ring"[..], WFK_RING_DIR),
                     ] {
                         names.push((nm.to_vec(), make_wctx(id, fk)));
                     }
@@ -9929,6 +10459,30 @@ impl Conn {
                         (&b"info"[..], WFK_BO_INFO),
                     ] {
                         names.push((nm.to_vec(), make_wbo(bid, fk)));
+                    }
+                }
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_RING_DIR => {
+                let cid = warp_id(d);
+                if let Some(c) = comp.wctx(cid, self.conn_id) {
+                    names.push((b"new".to_vec(), make_wctx(cid, WFK_RING_NEW)));
+                    for r in c.ring_slots.iter().flatten().filter(|r| !r.retiring) {
+                        let mut nm = String::new();
+                        let _ = core::fmt::write(&mut nm, format_args!("{}", r.ridx));
+                        names.push((nm.into_bytes(), make_wring(r.pub_id, WFK_DIR)));
+                    }
+                }
+            }
+            d if is_wring(d) && warp_fk(d) == WFK_DIR => {
+                let rp = warp_id(d);
+                if comp.wring(rp, self.conn_id).is_some() {
+                    for (nm, fk) in [
+                        (&b"info"[..], WFK_RING_INFO),
+                        (&b"map"[..], WFK_RING_MAP),
+                        (&b"kick"[..], WFK_RING_KICK),
+                        (&b"fence"[..], WFK_RING_FENCE),
+                    ] {
+                        names.push((nm.to_vec(), make_wring(rp, fk)));
                     }
                 }
             }
@@ -10018,6 +10572,7 @@ impl Conn {
         // the client reuses oldtag only after this Rflush.
         self.pending_reads.retain(|pr| pr.tag != a.oldtag);
         self.pending_fences.retain(|pf| pf.tag != a.oldtag);
+        self.pending_ring_fences.retain(|pf| pf.tag != a.oldtag);
         p9::build_rflush(&mut self.out_buf, tag)
     }
 
@@ -10037,6 +10592,15 @@ impl Conn {
         // Warp-2c: the BO map fid is the second Tweft anchor (the weave
         // shape verbatim: lazy share, ring_entries 0 = the map-only kind
         // the kernel cross-checks).
+        if f.opened && is_wring(f.path) && warp_fk(f.path) == WFK_RING_MAP {
+            let id = warp_id(f.path);
+            return match comp.wring_weft_ensure(id, self.conn_id) {
+                Some((share_id, size)) => {
+                    p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0)
+                }
+                None => self.err(tag, p9::E_NOMEM),
+            };
+        }
         if f.opened && is_wbo(f.path) && warp_fk(f.path) == WFK_BO_MAP {
             let id = warp_id(f.path);
             return match comp.wbo_weft_ensure(id, self.conn_id) {
@@ -10121,6 +10685,32 @@ impl Conn {
                 return false;
             }
             self.pending_fences.remove(i);
+        }
+        true
+    }
+
+    /// Deliver parked ring-fence reads whose rings advanced (or died: EOF).
+    pub fn poll_ring_fences(&mut self, comp: &mut Comp) -> bool {
+        let mut i = 0;
+        while i < self.pending_ring_fences.len() {
+            let pf = self.pending_ring_fences[i];
+            let rec = match comp.wring(pf.ring_pub, self.conn_id) {
+                None => None, // the ring died with this read parked: EOF
+                Some((_, r)) if r.completed_seq > r.reported_seq => Some(r.completed_seq),
+                Some(_) => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let mut s = String::new();
+            if let Some(v) = rec {
+                comp.wring_report(pf.ring_pub, self.conn_id, v);
+                let _ = core::fmt::write(&mut s, format_args!("{}\n", v));
+            }
+            if !self.deliver_read(pf.tag, s.as_bytes()) {
+                return false;
+            }
+            self.pending_ring_fences.remove(i);
         }
         true
     }

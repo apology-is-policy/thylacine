@@ -45,7 +45,7 @@ see section 4.
 
 | Sub-chunk | Scope | Build/validate locus | Kernel? |
 |---|---|---|---|
-| **V-3a** | the coherent shmem ring primitive: a server-minted, weft-shared, coherently-mapped guest blob + the submit doorbell (idle-skip) + the fence feedback-slot signal + **F2** (validate client pa/len). The `/srv/warp` ABI addition. | tapestryd (Rust, in-tree, local) + a `warp-prove` synthetic-ring round-trip. **No Venus driver needed.** | **No new syscall** (rides weft + the V-1 guest-blob path) |
+| **V-3a** | the coherent shmem ring primitive: a server-minted, weft-shared, coherently-mapped guest blob + the submit doorbell (idle-skip) + the fence feedback-slot signal + **F2** (validate client pa/len). The `/srv/warp` ABI addition. | tapestryd (Rust, in-tree) + a `warp-prove ring` round-trip on the **GL host** (a virgl device). **No Venus DRIVER needed** -- but a virgl DEVICE is: the ring lives under a warp ctx, and `ctx/new` returns `E_OPNOTSUPP` on a 2D device (a local 2D run SKIPs cleanly; the mechanism is unexercised). Impl-time correction to the original "local, no builder" plan. | **No new syscall** (rides weft + the V-1 guest-blob path) |
 | **V-3b** | `vn_renderer_thylacine.c` -- the ~1-1.5 kLOC Mesa Venus backend over the V-3a ring; the winsys `coherent=0->1` flip. | a new Mesa patch (0010+) under `src/virtio/vulkan/`; host cross-build on `thyla-keep`. | no |
 | **V-3c** | the I-45 capset-authority check (`WarpCtx.capset` goes live; reject a never-enumerated capset) + the Venus `CTX_CREATE` wiring. | tapestryd `server.rs` + `gpu.rs`. | no |
 | **V-3d** | E2E on thyla-pi (via `WARP_HOST=thyla-pi-cf`): a Vulkan smoke through the full stack; lands **F1's** terminal-severity measurement (the V-2 death-quiesce leg, finally exercised by a live client). | thyla-pi (KVM, real V3D + the Vulkan V3D ICD). | no |
@@ -189,10 +189,13 @@ single-cache-line poke.
   client unmaps. V-3d measures the real thing on hostmem (host3d blobs), where
   F1's partial-quiesce is exercised.
 
-### 3.7 Tests (V-3a, local, no Venus driver)
+### 3.7 Tests (V-3a, the GL host, no Venus driver)
 
-A `warp-prove` synthetic-ring scenario -- the ring mechanism validated without
-Mesa:
+A `warp-prove ring` scenario on a virgl device -- the ring mechanism validated
+without Mesa/Venus. **It runs on the GL host, not locally: minting the warp ctx
+the ring lives under requires virgl** (`ctx/new` is virgl-gated; a 2D device
+returns `E_OPNOTSUPP` and the prover prints `RING SKIP`). Driven by
+`tools/warp/warp-ring.exp` via `tools/warp-host.sh ring`. Steps:
 
 1. open `/srv/warp`, mint a ctx, `ring/new "<4096> 0"`, map the ring VA.
 2. write a sentinel command word at head; read `idle`; `kick` iff idle.
@@ -235,6 +238,16 @@ prosecuting I-45 / I-9 / I-32 / F2 on the ring.
 ---
 
 ## 5. Open questions (pin during impl, not forks for signoff)
+
+- **RESOLVED during impl (the "local, no builder" premise):** the ring is
+  addressed under a warp ctx (`ctx/<id>/ring/<ridx>`), and `ctx/new` is
+  virgl-gated (`server.rs`, the SUBMIT gate's twin) -- so a warp ctx, hence a
+  ring, cannot be minted on a 2D device. V-3a's mechanism test therefore runs
+  on the GL host, not locally. The local 2D path is graceful (the prover
+  prints `RING SKIP`; tapestryd does not hang -- `ctx/new` fails clean). A
+  local "deviceless ctx" test lever was considered and REJECTED: it would
+  exercise a configuration production can never reach (a 2D device rejects ctx
+  creation), the unconstructed-state anti-pattern.
 
 - **F2 enforcement split** -- kernel weft-map bound vs tapestryd geometry check:
   the design says both (mirroring V-2). Confirm the weft map already refuses an

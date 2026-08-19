@@ -234,6 +234,12 @@ pub extern "C" fn rs_main() -> i64 {
         return 0;
     }
 
+    // V-3a: the coherent-ring gate. Needs NO virgl (the ring is coherent
+    // shmem + a doorbell), so it runs on the local 2D device.
+    if libthyla_rs::env::args().get_str(1) == Some("ring") {
+        return ring_prove();
+    }
+
     t_putstr("warp-prove: starting (the Warp-2 gate)\n");
 
     let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
@@ -449,6 +455,177 @@ pub extern "C" fn rs_main() -> i64 {
 /// context ownership on `owner_conn`, so two roots in ONE process are two
 /// clients -- which is what makes this harness sequential and deterministic
 /// instead of a race between two spawned processes.
+// === V-3a: the coherent-ring gate (`warp-prove ring`) ======================
+// The ring blob control-header offsets (must match server.rs WARP_RING_OFF_*).
+const R_HEAD: u64 = 0x00;
+const R_IDLE: u64 = 0x10;
+const R_SEQ: u64 = 0x18;
+const R_HDR: u64 = 0x40;
+
+unsafe fn rld(va: u64, off: u64) -> u64 {
+    core::ptr::read_volatile((va + off) as *const u64)
+}
+unsafe fn rst(va: u64, off: u64, v: u64) {
+    core::ptr::write_volatile((va + off) as *mut u64, v);
+}
+
+fn ring_fail(msg: &str) -> ! {
+    t_putstr("WARP-RING FAIL -- ");
+    t_putstr(msg);
+    t_putstr("\n");
+    unsafe { t_exits(1) }
+}
+
+fn ring_prove() -> i64 {
+    t_putstr("warp-prove: ring gate (V-3a) starting\n");
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+    if root < 0 {
+        ring_fail("open /srv/warp (is tapestryd serving?)");
+    }
+    t_putstr("warp-prove: ring connected; minting ctx (needs a virgl device)\n");
+    let ctx = match try_open_read(root, "ctx/new").and_then(|s| parse_u32_prefix(&s)) {
+        Some(v) => v,
+        None => {
+            // No virgl on this device: ctx creation is not available, so the
+            // ring (which lives under a ctx) cannot be minted here. This is
+            // the 2D-local case; the gate runs on a virgl device (the GL host).
+            t_putstr("warp-prove: RING SKIP -- no virgl on this device (ctx mint unavailable)\n");
+            unsafe { t_exits(2) }
+        }
+    };
+    t_putstr("warp-prove: ring ctx minted\n");
+
+    // 1. Mint a 4096-byte ring for ring_idx 0; check its info.
+    if !write_ctl(root, &format!("ctx/{}/ring/new", ctx), "4096 0") {
+        ring_fail("ring/new mint (4096 0)");
+    }
+    let info = open_read_string(root, &format!("ctx/{}/ring/0/info", ctx));
+    if parse_field(&info, "bytes") != Some(4096) {
+        ring_fail("ring info bytes != 4096");
+    }
+    if parse_field(&info, "ridx") != Some(0) {
+        ring_fail("ring info ridx != 0");
+    }
+    if parse_field(&info, "hdr").is_none() {
+        ring_fail("ring info missing hdr");
+    }
+
+    // 2. Map the ring; the host starts idle, seq 0.
+    let map_fd = unsafe {
+        let pth = format!("ctx/{}/ring/0/map", ctx);
+        t_open(root, pth.as_ptr(), pth.len(), T_OREAD)
+    };
+    if map_fd < 0 {
+        ring_fail("ring/0/map open");
+    }
+    let va = unsafe { t_weft_map(map_fd as u64, 0) };
+    if va < 0 {
+        ring_fail("ring t_weft_map claim");
+    }
+    let va = va as u64;
+    if unsafe { rld(va, R_IDLE) } != 1 {
+        ring_fail("ring idle != 1 at mint (host should start parked)");
+    }
+    if unsafe { rld(va, R_SEQ) } != 0 {
+        ring_fail("ring seq != 0 at mint");
+    }
+
+    // 3. Doorbell: advance head (a CS marker), read idle, kick.
+    unsafe { rst(va, R_HEAD, R_HDR + 16) };
+    if unsafe { rld(va, R_IDLE) } != 1 {
+        ring_fail("ring idle flipped before kick");
+    }
+    if !write_ctl(root, &format!("ctx/{}/ring/0/kick", ctx), "1") {
+        ring_fail("ring/0/kick");
+    }
+    // 4a. Feedback-slot poll (zero-syscall). 4b. The blocking fence agrees.
+    if unsafe { rld(va, R_SEQ) } != 1 {
+        ring_fail("ring feedback seq != 1 after kick");
+    }
+    let fseq = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/ring/0/fence", ctx))) {
+        Some(v) => v,
+        None => ring_fail("ring/0/fence read"),
+    };
+    if fseq != 1 {
+        ring_fail("ring fence file seq != 1");
+    }
+    t_putstr("warp-prove: ring round-trip OK (map + doorbell + feedback + fence)\n");
+
+    // 5. F2 rejection legs -- refused, never clamped.
+    if write_ctl(root, &format!("ctx/{}/ring/new", ctx), "0 1") {
+        ring_fail("F2: zero-byte ring accepted");
+    }
+    if write_ctl(root, &format!("ctx/{}/ring/new", ctx), "5000 2") {
+        ring_fail("F2: unaligned ring accepted");
+    }
+    if write_ctl(root, &format!("ctx/{}/ring/new", ctx), "2097152 3") {
+        ring_fail("F2: over-max ring accepted (WARP_RING_MAX is 1 MiB)");
+    }
+    if write_ctl(root, &format!("ctx/{}/ring/new", ctx), "4096 64") {
+        ring_fail("F2: ring_idx 64 accepted (out of range)");
+    }
+    if write_ctl(root, &format!("ctx/{}/ring/new", ctx), "4096 0") {
+        ring_fail("F2: duplicate ring_idx 0 accepted");
+    }
+    t_putstr("warp-prove: ring F2 rejections OK\n");
+
+    // 6. I-45: a ctx id this conn does not own resolves nothing (open refused).
+    let alien = ctx.wrapping_add(1000);
+    if write_ctl(root, &format!("ctx/{}/ring/new", alien), "4096 0") {
+        ring_fail("I-45: ring mint under a non-owned ctx accepted");
+    }
+    t_putstr("warp-prove: ring I-45 ctx gate OK\n");
+
+    // 7. I-9 re-scan discrimination (WARP-V3-DESIGN 3.5): an armed mid-drain
+    // inject models a guest advancing head in the idle-publish window.
+    // Positive: with re-scan (default), it produces an extra completion.
+    let base = unsafe { rld(va, R_SEQ) };
+    if !write_ctl(root, "ctl", "ring-inject 0") {
+        ring_fail("ring-inject arm");
+    }
+    if !write_ctl(root, &format!("ctx/{}/ring/0/kick", ctx), "1") {
+        ring_fail("ring kick (inject, re-scan)");
+    }
+    let after_pos = unsafe { rld(va, R_SEQ) };
+    if after_pos != base + 1 {
+        ring_fail("I-9: re-scan did not deliver the injected advance");
+    }
+    // Negative (buggy arm): with noscan, the same inject is LOST.
+    if !write_ctl(root, "ctl", "ring-noscan on") {
+        ring_fail("ring-noscan on");
+    }
+    if !write_ctl(root, "ctl", "ring-inject 0") {
+        ring_fail("ring-inject arm (noscan)");
+    }
+    if !write_ctl(root, &format!("ctx/{}/ring/0/kick", ctx), "1") {
+        ring_fail("ring kick (inject, noscan)");
+    }
+    let after_neg = unsafe { rld(va, R_SEQ) };
+    if after_neg != after_pos {
+        ring_fail("I-9: noscan still delivered -- the test does NOT discriminate");
+    }
+    // Recovery: re-enable the re-scan; the stranded advance drains.
+    if !write_ctl(root, "ctl", "ring-noscan off") {
+        ring_fail("ring-noscan off");
+    }
+    if !write_ctl(root, &format!("ctx/{}/ring/0/kick", ctx), "1") {
+        ring_fail("ring kick (recover)");
+    }
+    if unsafe { rld(va, R_SEQ) } != after_neg + 1 {
+        ring_fail("I-9: re-enabled re-scan did not recover the stranded advance");
+    }
+    t_putstr("warp-prove: ring I-9 re-scan discrimination OK (delivered / lost / recovered)\n");
+
+    // Cleanup: retire the ctx (its rings tear down with it).
+    if !write_ctl(root, &format!("ctx/{}/ctl", ctx), "destroy") {
+        ring_fail("ctx destroy");
+    }
+    unsafe { t_close(map_fd) };
+    unsafe { t_close(root) };
+    t_putstr("WARP-RING PASS (transport + doorbell + feedback + fence + F2 + I-45 + I-9 re-scan)\n");
+    0
+}
+
 fn warp_connect(what: &str) -> i64 {
     let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
     if fd < 0 {

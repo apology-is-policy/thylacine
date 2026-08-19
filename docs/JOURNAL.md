@@ -22,6 +22,50 @@ needed the operator.
 
 ---
 
+## 2026-08-19 — V-3a: the coherent ring, and the "local" premise that wasn't
+
+Built the Warp-6 V-3a coherent-ring mechanism whole in one pass (the design
+`60f6c929` said it does not decompose into stubs, and it doesn't): the
+`ctx/<id>/ring/<ridx>/{info,map,kick,fence}` subtree in tapestryd
+(`usr/tapestryd/src/server.rs`) -- a weft-shared, coherently-mapped GUEST blob
+with a control header (head/tail/idle/seq), the doorbell with the I-9
+register-then-observe re-scan, the fence feedback slot + a blocking fence file,
+F2 geometry validation (refused-not-clamped), the I-32 backing charge, and the
+I-45 owner gate. Plus a `warp-prove ring` client exercising the round-trip + F2
++ I-45 + the I-9 discrimination (a `ring-inject`/`ring-noscan` test-lever pair:
+an injected mid-drain head advance is DELIVERED with the re-scan and LOST
+without it). Compiles clean, zero new warnings.
+
+**The wrong turn, and what caught it.** The design's sub-chunk table called
+V-3a "local, no builder." The first local run hung silently: `warp-prove ring`
+produced NO output for 90 s, three deterministic attempts. Ground-truth-first
+(no theorizing): a warmup `echo` proved ut runs commands, isolating the failure
+to `/warp-prove ring` specifically; stripping ANSI from the raw console showed
+the command ran and returned to a clean prompt having printed nothing. The
+decisive read was the device banner -- `virgl=0 blob=0` -- and `server.rs:8127`:
+`ctx/new` is virgl-gated (`E_OPNOTSUPP` on a 2D device), the twin of the SUBMIT
+gate. The ring lives UNDER a warp ctx, so **the mechanism cannot be minted on a
+2D device at all** -- the "local, no builder" premise was wrong. (The silent
+"hang" was actually a fast clean exit whose prover output never appeared,
+because I first ran it as `/warp-prove` -- an absolute path -- and the relative
+`warp-prove` form ut resolves via PATH worked and printed everything: a separate
+ut absolute-vs-relative exec oddity, enqueued, not chased.)
+
+**What that means, exactly.** V-3a's mechanism proof needs a virgl DEVICE (the
+GL host), not local 2D. The local 2D path is now proven-GRACEFUL: the prover
+prints `RING SKIP -- no virgl on this device (ctx mint unavailable)` and
+tapestryd does NOT hang (`ctx/new` fails clean). A local "deviceless ctx" test
+lever was considered and REJECTED -- it would green an unconstructed state (a
+configuration production's 2D devices can never reach). The test moved to
+`tools/warp/warp-ring.exp` (GL host, via `tools/warp-host.sh ring`), mirroring
+`warp-prove`; the design doc + this journal record the correction.
+
+**Verified so far:** the mechanism COMPILES clean and the local 2D graceful-skip
+path is runtime-confirmed. **NOT yet verified:** the mechanism itself (round-trip
++ F2 + I-45 + I-9) on virgl -- the operator chose (AskUserQuestion) to run the
+GL-host proof now. A focused holotype audit follows the verification. Nothing is
+pushed until it is green on virgl.
+
 ## 2026-08-19 — V-2: host-visible memory, and the death path a shared BAR opened
 
 Two threads. First, a stray `/compact`: the operator saw two `/compact` lines

@@ -174,7 +174,7 @@ sync_all() {
     # command name" whose cause is a list that claimed to carry your edits.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/interactive/lib.exp tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-reject.exp tools/warp/warp-readback.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/composed-screen.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
+    for f in tools/run-vm.sh tools/interactive/lib.exp tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-ring.exp tools/warp/warp-reject.exp tools/warp/warp-readback.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/composed-screen.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -433,6 +433,20 @@ prove)
         echo "WARP-2 GATE: VERIFIED"
     else
         echo "WARP-2 GATE: UNVERIFIED (need WARP-PROVE PASS + the scenario pass line)"
+        exit 1
+    fi
+    ;;
+ring)
+    out="$REPO_ROOT/build/warp-ring.log"
+    ssh "$HOST" "cd $RREPO && ${RENV}expect tools/warp/warp-ring.exp" | tee "$out" || true
+    echo "== ring verdict =="
+    # The Warp-6 V-3a gate: the prover's OWN pass line (the ring round-trip +
+    # F2 + I-45 + the I-9 re-scan discrimination are asserted in-guest) AND the
+    # scenario pass (the boot + login around it held). Either alone is not it.
+    if grep -q "WARP-RING PASS" "$out" && grep -q "PASS: warp-ring" "$out"; then
+        echo "WARP-6 V-3a GATE: VERIFIED"
+    else
+        echo "WARP-6 V-3a GATE: UNVERIFIED (need WARP-RING PASS + the scenario pass line)"
         exit 1
     fi
     ;;

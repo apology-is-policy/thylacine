@@ -486,8 +486,9 @@ impl Driver for Tapestryd {
             let mut i = conns.len();
             while i > 0 {
                 i -= 1;
-                let ok =
-                    conns[i].poll_events(&mut self.comp) && conns[i].poll_fences(&mut self.comp);
+                let ok = conns[i].poll_events(&mut self.comp)
+                    && conns[i].poll_fences(&mut self.comp)
+                    && conns[i].poll_ring_fences(&mut self.comp);
                 if !ok {
                     let mut c = conns.remove(i);
                     c.teardown(&mut self.comp);
