@@ -105,7 +105,10 @@ replaces this echo and a self-reschedule primitive (absent at V-3a) exists
 ([[design-v3b-ring-kick-rescue-owed]]). F2 [P3]: warp-prove leg 8's `flood`/`big`
 were silently coupled to the server-private cap const -- pinned with a comment
 both sides. Both round-3 fixes are pure comments (no binary change), so the green
-gate above still holds byte-for-byte. Round-3 close: `<pending>`. Everything else
+gate above still holds byte-for-byte. Round-3 close: `067849b6` (the arc is userspace + docs + tools ONLY -- zero
+kernel/arch/mm/specs from the pushed `60f6c929` -- so specs + the SMP gate are
+non-regression on a byte-identical kernel; the ring is GL-verified + suite-green;
+the interactive gate is the userspace boot confirmation). Everything else
 re-derived sound across three rounds.
 
 ## 2026-08-19 — V-3a: the coherent ring, and the "local" premise that wasn't
