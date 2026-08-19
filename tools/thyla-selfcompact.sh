@@ -46,9 +46,20 @@ say()  { printf '  %s\n' "$*"; }
 deny() { printf 'thyla-selfcompact: REFUSED -- %s\n' "$*" >&2; exit 1; }
 
 # --- who am I -------------------------------------------------------------
+# ROLE is a human-readable label for the report + ledger ONLY. The belay GATE
+# must NOT key on it: @thyla-role is a per-pane tmux annotation that can be
+# mis-set or drift, and the state dir is shared across every worktree. Observed
+# 2026-08-19: a main pane tagged `aux`, so main's belay state landed in the
+# shared aux.state; since two trees' HEADs always differ, the gate read "HEAD
+# moved" on every compaction and never belayed -- the one governor this script
+# exists for, silently defeated. The gate keys on the git TOPLEVEL instead,
+# which the process owns intrinsically and no tmux option can misroute -- the
+# SAME stable key the note slot below already uses.
 ROLE=$(tmux show-options -pv @thyla-role 2>/dev/null || true)
 [ -n "$ROLE" ] || ROLE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || echo unknown)")
-STATE="$STATE_DIR/$ROLE.state"
+TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+ENC=$(printf '%s' "$TOPLEVEL" | sed 's|/|-|g')
+STATE="$STATE_DIR/$ENC.state"
 
 # The note slot is keyed by the ENCODED PROJECT PATH. This comment used to add
 # that `basename(dirname(transcript))` IS this exact string on the consumer
@@ -66,8 +77,8 @@ STATE="$STATE_DIR/$ROLE.state"
 # default. The consumer now prefers `pane=` below -- an identity tmux hands to
 # both sides -- and keeps the path as a fallback; it also logs an `orphan-note`
 # row when a slot it did not match is left armed, so the silent case is over.
-TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
-ENC=$(printf '%s' "$TOPLEVEL" | sed 's|/|-|g')
+# (TOPLEVEL + ENC are computed once in "who am I" above -- the gate and the
+# note slot now share the one stable key.)
 NOTE="$STATE_DIR/$ENC.note"
 NOTE_PENDING="$STATE_DIR/$ENC.note.pending"
 NOTE_MAX_AGE=${THYLA_NOTE_MAX_AGE:-600}     # seconds; a note older than this is not about this compaction
