@@ -22,6 +22,94 @@ needed the operator.
 
 ---
 
+## 2026-08-20 (aux) — bug-2: the escape-detector, an audit that found the direction the self-audit missed, and an E2E "control" that wasn't one
+
+**The task.** bug-2, the deeper root of the arm-2 flake, which the operator
+voted "fix next" (escape-detection). arm-2's bug-1 (`0149d1e3`) fixed the
+livelock *symptom*; bug-2 is the *root*: a PHENO_LINUX signal handler that
+escapes via `siglongjmp` (no `rt_sigreturn`) leaves the kernel's `in_handler`
+re-entrancy flag stuck true, so the N-3 guard refuses every future caught-note
+delivery — the guest goes signal-deaf. Confirmed real by the arm-2 N-3-guard
+probe (`child_exit` blocked with `in_handler` stuck on a PHENO_LINUX ash).
+
+**Scripture-first, then code.** `233284a8` landed the VIVARIUM §6.23 design
+before a line of code: the sp-comparison detector (a live handler runs BELOW the
+pre-handler sp; a `siglongjmp` ancestor is at-or-above it), the two clear sites,
+and the `sigaltstack`-ENOSYS coupling. The site decision is load-bearing and NOT
+symmetric: EL0-entry is *required*, not merely preferred — an escaped main
+loop's next blocking read must find `in_handler` cleared BEFORE it parks, else
+bug-1's sleep predicate keeps it parked deaf forever (the read never returns to
+run an EL0-return clear). Main co-reviewed the design (yip 0028) and flagged the
+one axis worth checking cold — that both operands are the SP_EL0 bank, not a
+cross-bank compare — which I verified against `vectors.S` before writing code.
+`438cac78` landed the code + two deterministic unit tests.
+
+**The E2E "control" that wasn't a control (a measured wrong turn).** The plan
+wanted a runtime E2E "asserting delivery after a siglongjmp'd ^C — the positive
+control bug-1 lacks." `r5f9-ash.exp` looked perfect: its header names "the R5-F9
+longjmp wedge ... a second ^C would then do nothing," and it asserts exactly
+that (`if {!$a2} { lc_fail "R5-F9 wedge: ... in_handler stuck" }`). Post-fix it
+PASSED. But a control that passes proves nothing unless it FAILS without the fix
+— so I ran the negative control: r5f9-ash.exp x6, single-attempt, on the
+bug-1-only build (rebuilt during a stash A/B). Result: **6/6 PASS, 0
+wedge-fails**. r5f9 passes identically with and without bug-2 — a regression net,
+not a fails-without-fix control. Busybox ash's prompt/read/sleep-^C does not
+leave `in_handler` persistently stuck the way the arm-2 viv-run scenario (a
+^C-escape coinciding with a `uname | tr` child_exit storm) did; this also
+reconciles the old "R5-F9 wedge NOT exposed" note. The wedge's ground-truth
+evidence stays the arm-2 N-3 probe; a deterministic in-guest driver for the two
+clears (the A-PIN wiring gap) is tracked as the next E2E chunk. Caught by
+measurement, not assumption.
+
+**Contention, caught and not attributed away.** Mid-negative-control, `ps`
+showed main running a full `test-interactive.sh` on its own tree (30 min in)
+while presence showed it "idle" (it had compacted without setting busy). My
+negative control is timing-sensitive — under contention a HEALTHY reprompt can
+exceed the 10s leg timeout = a false FAIL, confounding wedge-deaf vs slow. I
+stopped the loop rather than record confounded data, coordinated the host (main
+freed it 37/37 GREEN), and re-ran clean. Contention threatens duration, never
+identity — a confounded control is worse than none.
+
+**The audit found the direction the self-audit missed (the independent
+prosecutor's whole value).** My self-audit reasoned the discrimination "total"
+via the ancestor-frame argument. The Opus holotype (Fable credit-exhausted;
+MODEL start==end==Opus 4.8) closed 0 P0 / 0 P1 / **1 P2** / 2 P3 and refuted the
+totality claim in the one direction I did not consider: **F1** — a guest that
+`swapcontext`s from a handler to a HIGHER-addressed *separate* stack (a
+suspended coroutine, not an abandonment) trips `sp >= saved` at that coroutine's
+first syscall, so the escape-check false-clears `in_handler` while the handler
+is still in flight → the N-3 guard admits a nested delivery → the single
+`note_saved_*` slot is overwritten → the original handler resumes on the wrong
+context. **Worse than pre-bug-2**, which safely deferred. Contained
+(guest-self-corruption, validated user VA, per-Thread, kill-immune) and exotic
+(no v1.0 target does signal-driven cross-stack coroutine switching), hence P2.
+The `sigaltstack`-ENOSYS coupling does not cover it — that governs where the
+*handler* runs, not where a *swap target* lives. My ancestor argument was true
+but *scoped to one stack*, and I asserted it for all stacks.
+
+**The operator's call on F1.** I surfaced F1 as a blocking question — it
+introduces a regression (not just documents a gap) on a feature the operator
+voted for. Options: document+correct-the-claim (DEGRADED), a VMA-same-stack code
+fix (`vma_lookup(sp)==vma_lookup(saved)` before clearing — closes it, +re-audit),
+or reconsider. Operator chose **document + correct**. `85655042` softened the
+§6.23 totality claim to "single-contiguous-stack," documented the above-sp0
+direction symmetric with the below-sp0 one (honestly worse-than-pre-fix), added
+a §9 DEGRADED row, and tracked the VMA-fix for v1.x. F2 (stale line cites
+1404/1461 → 1437/1494, shifted by my own predicate insertion) and F3 (the test
+drove an uninitialized `struct Thread`; the obvious `= {0}` then emitted an
+undefined `memset` on the large struct, caught at LINK time → `static` BSS-zero)
+fixed.
+
+**What it cost / what's open.** Three commits (`233284a8` scripture, `438cac78`
+code, `85655042` close). Suite GREEN (2 new deterministic tests + the bug-1
+regression). SMP gate 40/40 PASS (default+UBSan × smp4/smp8, N=10; 0 corruption).
+Pushed both mirrors. Open + tracked: the deterministic E2E driver (the two clears
+have no in-guest driver —
+the A-PIN gap r5f9 does not fill), and the VMA-same-stack hardening for the F1
+cross-stack corruption (v1.x).
+
+---
+
 ## 2026-08-19 (evening, aux) — arm-2: the viv-run flake was a caught-note livelock, not input loss
 
 **The task.** `tools/interactive/viv-run.exp` timed out ~40% of runs at the
