@@ -592,8 +592,10 @@ bool thread_caught_note_deliverable(struct Thread *t);
 // the caller's ctx->sp) has unwound AT OR ABOVE the pre-handler sp captured at
 // delivery (note_saved_sp_el0). A live handler always runs BELOW that sp (the
 // sigframe is pushed below it; nested/deep handlers only go lower), and a
-// siglongjmp target must be an ANCESTOR frame (jumping to a returned env is UB)
-// -- older, hence higher -- so the discrimination is total, not a heuristic.
+// siglongjmp target must be an ANCESTOR frame ON THAT STACK (returned env is UB)
+// -- older, hence higher -- so the discrimination is total for a single-stack
+// guest, not a heuristic (the cross-stack swapcontext-to-a-higher-stack case is
+// the documented F1 exception -- VIVARIUM 6.23 + the section-9 DEGRADED row).
 // Both operands are the SP_EL0 bank. PURE: the caller clears in_handler on true.
 // LOAD-BEARING: sigaltstack(132) stays ENOSYS (else an alt-stack handler runs at
 // an unrelated sp and the compare is meaningless).

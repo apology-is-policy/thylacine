@@ -1311,11 +1311,18 @@ bool thread_caught_note_deliverable(struct Thread *t) {
 // note_saved_sp_el0 is the PRE-handler sp captured at delivery; the handler is
 // launched at ctx->sp = sigframe BELOW it, and nested/deep handlers only push
 // lower -- so a LIVE handler is ALWAYS below the saved sp. A siglongjmp target
-// must be an ANCESTOR frame (jumping to a returned env is UB) -- older, hence
-// higher -- so an escape is ALWAYS at or above it. Total discrimination, not a
-// heuristic. Both operands are the SP_EL0 bank (exception_context.sp is
-// KERNEL_ENTRY's mrs sp_el0; the kernel runs EL1h), so the compare is never
-// across banks.
+// must be an ANCESTOR frame ON THAT STACK (jumping to a returned env is UB) --
+// older, hence higher -- so a same-stack escape is ALWAYS at or above it: total
+// discrimination for a single-contiguous-stack guest, not a heuristic. Both
+// operands are the SP_EL0 bank (exception_context.sp is KERNEL_ENTRY's mrs
+// sp_el0; the kernel runs EL1h), so the compare is never across banks.
+//   F1 (audit): the claim fails ACROSS stacks -- a swapcontext from a handler to
+//   a HIGHER-addressed separate stack (a suspended coroutine, not an
+//   abandonment) also trips >=, false-clearing in_handler -> a nested delivery
+//   overwrites the single note_saved_* slot. Contained (guest-self-corruption,
+//   validated user VA, per-Thread, kill-immune) + exotic (no v1.0 target does
+//   signal-driven cross-stack coroutine switching). Documented VIVARIUM 6.23 +
+//   the section-9 DEGRADED row; the VMA-same-stack hardening is tracked for v1.x.
 //
 // LOAD-BEARING: this soundness rests on the handler running on the SAME stack as
 // the pre-handler sp, which holds only while sigaltstack is unserved. The static

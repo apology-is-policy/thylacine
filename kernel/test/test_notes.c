@@ -1148,7 +1148,11 @@ void test_notes_handler_escape_predicate(void) {
     p->state = PROC_STATE_ALIVE;
     p->phenotype = PHENO_LINUX;
 
-    struct Thread t;
+    static struct Thread t;                 // F3: BSS-zeroed (like th below) so a
+                                            // future predicate reading a 4th field
+                                            // can't read garbage -- and no runtime
+                                            // memset (a stack `= {0}` on this large
+                                            // struct emits an undefined memset call)
     t.proc              = p;
     t.in_handler        = true;
     t.note_saved_sp_el0 = 0x8000u;          // the pre-handler (interrupted) sp
