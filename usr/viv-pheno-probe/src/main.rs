@@ -163,6 +163,18 @@ const NR_RT_SIGACTION: u64 = 134;
 const NR_RT_SIGRETURN: u64 = 139;
 const NR_RT_SIGPROCMASK: u64 = 135;
 
+// The time family. Their translators (kernel/vivarium.c) are what a libc's
+// timeout path needs; a native Proc issuing these same numbers gets -1 (they are
+// above the native ceiling), which is what run_native's brk discriminator proves.
+const NR_CLOCK_GETTIME: u64 = 113;
+const NR_GETTIMEOFDAY: u64 = 169;
+const CLOCK_REALTIME: u64 = 0;
+const CLOCK_MONOTONIC: u64 = 1;
+const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;   // no Thylacine clock -> EINVAL leg
+// A wall clock seeded from the RTC is past this (2023-11-14); a 1970 epoch (the
+// ENOSYS-with-no-write failure mode) is far below it. The threshold IS the leg.
+const WALL_CLOCK_FLOOR_SEC: u64 = 1_700_000_000;
+
 // ---------------------------------------------------------------------------
 // The V-6c signal handler, its trampoline, and the evidence it leaves behind.
 //
@@ -3093,6 +3105,65 @@ unsafe fn run_linux() -> ! {
         let byte2: u8 = b'E';
         let _ = svc3(NR_WRITE, 0, &byte2 as *const u8 as u64, 1);
         leg!(rep, esc_fired() == 2 && esc_phase() == 1, b"L248\n");
+    }
+
+    // --- the time family (clock_gettime 113 + gettimeofday 169) -------------
+    // Each leg is deterministic fail-without-fix: before the translators land,
+    // these numbers FORWARD -> -ENOSYS, so the `== 0` guard is false and the
+    // marker is written. curl/git/TLS all bound their waits with these.
+    {
+        // L249: clock_gettime(REALTIME) writes a wall clock seeded from the RTC.
+        // The 1970 epoch that a no-write ENOSYS leaves behind is far below the
+        // floor, and tv_nsec must be a real sub-second remainder.
+        let mut rt = [0u64; 2];
+        leg!(
+            rep,
+            svc3(NR_CLOCK_GETTIME, CLOCK_REALTIME, rt.as_mut_ptr() as u64, 0) == 0
+                && rt[0] >= WALL_CLOCK_FLOOR_SEC
+                && rt[1] < 1_000_000_000,
+            b"L249\n"
+        );
+
+        // L250: MONOTONIC is sane and never runs backward across two reads.
+        let mut m0 = [0u64; 2];
+        let mut m1 = [0u64; 2];
+        let mono_ok = svc3(NR_CLOCK_GETTIME, CLOCK_MONOTONIC, m0.as_mut_ptr() as u64, 0) == 0
+            && svc3(NR_CLOCK_GETTIME, CLOCK_MONOTONIC, m1.as_mut_ptr() as u64, 0) == 0
+            && m0[1] < 1_000_000_000
+            && m1[1] < 1_000_000_000
+            && (m1[0] > m0[0] || (m1[0] == m0[0] && m1[1] >= m0[1]));
+        leg!(rep, mono_ok, b"L250\n");
+
+        // L251: gettimeofday converts ns -> a MICROsecond timeval. tv_usec <
+        // 1e6 is the conversion's signature -- a shell that wrote nanoseconds
+        // would overflow it -- and the seconds track a real wall clock.
+        let mut tv = [0u64; 2];
+        leg!(
+            rep,
+            svc3(NR_GETTIMEOFDAY, tv.as_mut_ptr() as u64, 0, 0) == 0
+                && tv[0] >= WALL_CLOCK_FLOOR_SEC
+                && tv[1] < 1_000_000,
+            b"L251\n"
+        );
+
+        // L252: the validated writeback rejects a bad pointer with EFAULT on
+        // BOTH calls -- never a silent write into unmapped space, never a crash.
+        leg!(
+            rep,
+            svc3(NR_CLOCK_GETTIME, CLOCK_REALTIME, UNMAPPED_USER_VA, 0) == NEG_EFAULT
+                && svc3(NR_GETTIMEOFDAY, UNMAPPED_USER_VA, 0, 0) == NEG_EFAULT,
+            b"L252\n"
+        );
+
+        // L253: a clk_id with no Thylacine clock is a SERVED EINVAL (Linux's own
+        // answer), NOT a decline-to-ENOSYS and NOT a wrong value.
+        let mut junk = [0u64; 2];
+        leg!(
+            rep,
+            svc3(NR_CLOCK_GETTIME, CLOCK_PROCESS_CPUTIME_ID, junk.as_mut_ptr() as u64, 0)
+                == NEG_EINVAL,
+            b"L253\n"
+        );
     }
 
     // --- the verdict, which is also the write leg ---------------------------

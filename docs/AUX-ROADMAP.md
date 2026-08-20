@@ -30,7 +30,7 @@ whenever the arc changes, not whenever it is convenient.
 |---|---|
 | **Graphics G-0..G-7** | **COMPLETE.** G-0..G-5 + PTY are already ancestors of `main`; G-6 (compositor) + G-7 (SDL/Quake) are on `gfx-4` awaiting the merge. |
 | **Track B — Aurora config (cfg-1..cfg-5)** | **COMPLETE.** OSD + persistence + OSC session push + the apply-authority gate + runtime chords/gaps + baked font sizes, each audited. |
-| **VIVARIUM (V-0..V-8)** | **STARTED.** V-0 scripture + V-1a (phenotype ledger + brand hint) landed; V-4 specced build-ready. |
+| **VIVARIUM (V-0..V-8) + DISTRO (D-1..D-5)** | **CLOSED (arc close).** Runs unmodified Linux musl-static + stock dynamic-PIE Alpine binaries under `viv`; TCP sockets, real signals, `/proc`+`/sys`, interactive ash on pts+console. **curl/git mission ACTIVE** (real 3rd-party programs end-to-end): the phenotype network reaches the internet (busybox wget -> HTTP 403 through slirp); the `clock_gettime`/`gettimeofday` time translators landed (this chunk); next = DNS/UDP under a net-granted container -> stage a real curl -> curl->git bootstrap. |
 | **Halcyon G-8/G-9** | Not started. The graphics endgame. |
 | **Notes / job control / PTY (the kernel line, aux#240..)** | **ACTIVE.** See Stream 4 below. |
 

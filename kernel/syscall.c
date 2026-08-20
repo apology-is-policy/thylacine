@@ -3151,9 +3151,9 @@ s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
     u64 sec  = ns / 1000000000ull;
     u32 nsec = (u32)(ns % 1000000000ull);
     // struct t_timespec { s64 tv_sec @0; s64 tv_nsec @8 }. aarch64 is
-    // little-endian, so each i64 is [low u32, high u32]. tv_sec fits ~33 bits
-    // (epoch ~1.7e9 s) so its high word is small but nonzero; tv_nsec < 1e9
-    // fits a u32 (high word 0). Stored via the audited uaccess_store_u32 (no
+    // little-endian, so each i64 is [low u32, high u32]. tv_sec's high word is 0
+    // until year 2106 (sec < 2^32), computed dynamically so the value is exact
+    // past then; tv_nsec < 1e9 fits a u32 (high word 0). Stored via the audited uaccess_store_u32 (no
     // uaccess_store_u64 exists); any store fault -> -EFAULT, nothing else
     // touched.
     if (uaccess_store_u32(ts_va + 0,  (u32)(sec & 0xFFFFFFFFu)) != 0) return -T_E_FAULT;
@@ -10585,6 +10585,58 @@ static s64 viv_writev(u64 fd, u64 iov_va, u64 iovcnt_raw) {
     return (s64)written;
 }
 
+// gettimeofday(tv, tz): write the wall clock as a struct timeval. There is no
+// native syscall to dispatch to -- SYS_CLOCK_GETTIME writes a timespec, and a
+// timeval carries MICROseconds -- so this shell does the read + convert + write
+// itself, mirroring sys_clock_gettime_handler's uaccess discipline exactly
+// (4-byte-aligned target, one uaccess_store_u32 per word, any fault -> EFAULT
+// with nothing further touched).
+//
+// tv is mandatory. tz is the obsolete `struct timezone`, NULL in every modern
+// libc; Linux STILL zero-fills a non-NULL tz (the system timezone has read
+// {0,0} for decades), so a non-NULL tz is honoured rather than rejected.
+static s64 viv_gettimeofday_write(u64 tv_va, u64 tz_va) {
+    // Linux writes tv only when it is non-NULL and returns 0 either way (its
+    // handler guards `if (likely(tv != NULL))`), so gettimeofday(NULL, tz) is a
+    // rare-but-legal no-op for tv. Match that rather than answer EFAULT, since
+    // the phenotype's contract is Linux's shape (I-43).
+    if (tv_va != 0) {
+        // struct viv_linux_timeval pins the 16-byte size (vivarium.h, with a
+        // _Static_assert); the four stores below are its {tv_sec, tv_usec}
+        // layout, each s64 written as two u32. It has no native `struct t_*`
+        // twin because Thylacine has no gettimeofday syscall.
+        if (!sys_validate_user_buf(tv_va, sizeof(struct viv_linux_timeval)))
+            return -T_E_FAULT;
+        // uaccess_store_u32 requires a 4-byte-aligned target (an unaligned STR
+        // alignment-faults past the uaccess fixup table -> extinction once
+        // SCTLR_EL1.A is set); a conformant struct timeval is 8-aligned.
+        if (tv_va & 0x3u) return -T_E_FAULT;
+
+        u64 ns   = timer_realtime_ns();
+        u64 sec  = ns / 1000000000ull;
+        u32 usec = (u32)((ns % 1000000000ull) / 1000ull);   // ns -> us, < 1e6
+
+        // struct timeval { s64 tv_sec @0; s64 tv_usec @8 }. aarch64 little-endian,
+        // so each i64 is [low u32, high u32]. tv_sec's high word is 0 until year
+        // 2106 (sec < 2^32), but is computed dynamically so the 64-bit value is
+        // exact past then; tv_usec < 1e6 fits a u32 (high word always 0).
+        if (uaccess_store_u32(tv_va + 0,  (u32)(sec & 0xFFFFFFFFu)) != 0) return -T_E_FAULT;
+        if (uaccess_store_u32(tv_va + 4,  (u32)(sec >> 32))         != 0) return -T_E_FAULT;
+        if (uaccess_store_u32(tv_va + 8,  usec)                     != 0) return -T_E_FAULT;
+        if (uaccess_store_u32(tv_va + 12, 0u)                       != 0) return -T_E_FAULT;
+    }
+
+    if (tz_va != 0) {
+        // struct viv_linux_timezone { s32 tz_minuteswest; s32 tz_dsttime } -- both 0.
+        if (!sys_validate_user_buf(tz_va, sizeof(struct viv_linux_timezone)))
+            return -T_E_FAULT;
+        if (tz_va & 0x3u) return -T_E_FAULT;
+        if (uaccess_store_u32(tz_va + 0, 0u) != 0) return -T_E_FAULT;
+        if (uaccess_store_u32(tz_va + 4, 0u) != 0) return -T_E_FAULT;
+    }
+    return 0;
+}
+
 // The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
 // the uaccess + native-core work that translator deliberately refuses to do.
 // `ctx` is used by exactly one case (clone, LINEAGE L-3d) and ignored by the
@@ -11237,6 +11289,26 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         s64 rc = sys_set_tid_address_handler(args[0]);
         return (rc < 0) ? -(s64)T_E_INVAL : rc;
     }
+
+    case VIV_LINUX_CLOCK_GETTIME: {
+        // clock_gettime(clk_id, tp): x0 clk_id, x1 tp. The Linux timespec is
+        // byte-identical to the native one, so the ONLY translation is the
+        // clk_id map -- the native handler does the validated write. An unmapped
+        // clk_id is a SERVED -EINVAL (Linux's own answer for a clk_id it cannot
+        // serve), not a declined row: the number IS translated, this clock is
+        // not one we have. Returning -ENOSYS here would wrongly report the whole
+        // call as unserved to viv_report_unserved.
+        u64 clk;
+        if (!vivarium_clock_gettime_map(args[0], &clk))
+            return -(s64)T_E_INVAL;
+        return sys_clock_gettime_handler(clk, args[1], 0, 0);
+    }
+
+    case VIV_LINUX_GETTIMEOFDAY:
+        // gettimeofday(tv, tz): x0 tv, x1 tz. No native counterpart and a
+        // microsecond timeval, so the shell reads the clock and writes the
+        // converted struct itself. See viv_gettimeofday_write.
+        return viv_gettimeofday_write(args[0], args[1]);
 
     case VIV_LINUX_SETUID:
         // setuid(uid): x0. Identity is set once at spawn and immutable on a

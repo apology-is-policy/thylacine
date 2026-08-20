@@ -22,6 +22,64 @@ needed the operator.
 
 ---
 
+## 2026-08-20 (aux) — VIVARIUM time translators (clock_gettime + gettimeofday), and a ceiling that had gone stale a fifth time
+
+The curl/git mission's step 2: a Linux binary under viv could reach the network
+but not bound a timeout, because `clock_gettime` (113) and `gettimeofday` (169)
+had no phenotype translator — they FORWARDed to `-ENOSYS`, so busybox `date`
+reads 1970 and TLS/curl/git cannot time out. Added both as Tier-2 rows.
+
+**The interesting call was T2-vs-renumber, and it went the disciplined way.**
+`clock_gettime`'s Linux `struct timespec` is byte-identical to native
+`t_timespec`, and the native `SYS_CLOCK_GETTIME` clk_ids `REALTIME`/`MONOTONIC`
+are 0/1 exactly as Linux's are — so it *looks* like a pure T1 renumber
+(113→75), the way `lseek` is. It is not: a T1 row must be total over the
+argument domain, and the clk_id domain is not total — Linux has ids 2–7,
+Thylacine serves 0/1. That is precisely the lseek comment's own escape hatch
+("were the enumerations ever to diverge, this row drops to T2"), so it drops to
+T2: a pure `vivarium_clock_gettime_map` maps the clk_id (with a per-id
+justification for `MONOTONIC_RAW`/`_COARSE`/`REALTIME_COARSE`/`BOOTTIME` onto the
+two clocks Thylacine has, and a served `-EINVAL` for `CPUTIME`), and the shell
+calls the native handler for the validated write. `gettimeofday` is
+unambiguously T2 — no native counterpart, and a MICROsecond `timeval` where the
+native clock speaks nanoseconds.
+
+**The finding nobody planned: `VIV_NATIVE_CEILING` was stale at 105.** Adding
+rows above the ceiling means checking the ceiling, and it was pinned to
+`SYS_RFORK` (105) while the Warp arc had landed `SYS_DMA_CREATE_GPU_BO` (106) and
+`SYS_BURROW_FROM_HOSTMEM` (107) above it. The `_Static_assert` "caught" nothing
+because it is pinned to a *named* syscall (`== SYS_RFORK`), so it stays green
+while a *higher* number lands — the exact limitation the ceiling's own comment
+admits it cannot cover, and it bit. Latent, not live (no VIV_LINUX row sits at
+106/107 today — verified), but the next row added there would have been blessed
+as "collision-free by construction" while aliasing a real native. Reconciled to
+107, assert re-pinned to `SYS_BURROW_FROM_HOSTMEM`. Corroboration worth stating:
+the vault's own `syscall-abi-collision` census already recorded the allocated
+span at **107** back on 2026-08-15 — the code had drifted from the vault's
+measurement, and the vault's number, not my derivation, is what confirms 107 is
+the true top. Enqueued [[bug-viv-native-ceiling-stale]] before fixing.
+
+**Discrimination, measured both ways** (the M-PIN bar — boot OK proves a gate
+passed, only a deny-path proves it is wired). Five probe legs L249–L253 in
+`viv-pheno-probe` (realtime seed past `1.7e9`, monotonic non-decreasing, the µs
+`timeval` conversion, EFAULT on an unmapped pointer, EINVAL on a CPU clk_id).
+Good state → `joey: V-1b phenotype (native + containered linux) PASS`; sabotage
+(remove the two `g_viv_rejects` rows → the exact pre-chunk FORWARD→ENOSYS state,
+reverted with Edit not `git checkout`) → boot fails at exactly
+`marker=L249`. The native-vantage `brk` discriminator stays PASS throughout, so
+the linux legs pass *because* of the phenotype, not for another reason.
+
+**Self-audit catch before the formal round:** the first `gettimeofday` draft
+answered `EFAULT` for `tv==NULL`, but Linux guards `if (tv != NULL)` and returns
+0 (writing only `tz`). Obscure — no real program calls it — but the phenotype's
+contract is Linux's *shape* (I-43), so it was fixed to match rather than guess a
+binary never hits it.
+
+Cost/open: kernel builds clean (the static_asserts all pass), boot green. SMP
+gate + LS-CI + the holotype round were in flight at write time (results appended
+to the phase-status row). Next in the arc: DNS/UDP under a net-granted container,
+then stage a real curl, then the curl→git bootstrap.
+
 ## 2026-08-20 (aux) — probe: does a real Linux binary reach the network under viv? (yes)
 
 User asked to verify curl/git + other third-party Linux programs under VIVARIUM.

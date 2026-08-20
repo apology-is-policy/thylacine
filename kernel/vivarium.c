@@ -21,8 +21,13 @@
 //
 // This catches a RENUMBER of the current top. It cannot catch a NEW higher
 // number by itself, which is why the rows that lean on the ceiling assert
-// against VIV_NATIVE_CEILING individually below.
-_Static_assert(VIV_NATIVE_CEILING == SYS_RFORK,
+// against VIV_NATIVE_CEILING individually below. The very drift this admits it
+// cannot catch DID happen: the ceiling sat at SYS_RFORK (105) while the Warp arc
+// landed SYS_DMA_CREATE_GPU_BO (106) and SYS_BURROW_FROM_HOSTMEM (107) above it,
+// and this assert -- pinned to SYS_RFORK's identity -- passed the whole time. So
+// it is re-pinned to the current top; the lesson is that "add a syscall" must
+// include "move the ceiling", which no static_assert can force on a NEW number.
+_Static_assert(VIV_NATIVE_CEILING == SYS_BURROW_FROM_HOSTMEM,
                "VIV_NATIVE_CEILING must be the highest ASSIGNED native syscall "
                "number. Adding one above it silently voids the collision "
                "argument for every vivarium row at or below the new value -- "
@@ -43,6 +48,10 @@ _Static_assert(VIV_LINUX_EXECVE > VIV_NATIVE_CEILING,
                "execve's collision argument is the ceiling one (LINEAGE L-6a)");
 _Static_assert(VIV_LINUX_WAIT4 > VIV_NATIVE_CEILING,
                "wait4's collision argument is the ceiling one (LINEAGE L-6b)");
+_Static_assert(VIV_LINUX_CLOCK_GETTIME > VIV_NATIVE_CEILING,
+               "clock_gettime's collision argument is the ceiling one (time family)");
+_Static_assert(VIV_LINUX_GETTIMEOFDAY > VIV_NATIVE_CEILING,
+               "gettimeofday's collision argument is the ceiling one (time family)");
 
 // A T1 row: a Linux number, the Thylacine number it renumbers to, and the arity
 // that must carry across unchanged. `nargs` is not used to copy (the whole
@@ -346,6 +355,16 @@ static const struct viv_reject g_viv_rejects[] = {
     // renumber would read `10` as a set of capability bits and hand back a
     // descriptor with arbitrary authority -- silently, for a legal input.
     { VIV_LINUX_FCNTL,           VIV_TIER2 },
+
+    // The time family. TIER-2 rather than a renumber for two different reasons,
+    // one per row. clock_gettime's timespec IS byte-identical to the native one,
+    // so it LOOKS like a T1 renumber -- but its clk_id domain is not total (Linux
+    // has ids Thylacine cannot serve), so it drops to T2 (the lseek precedent)
+    // and the shell maps the id. gettimeofday has no native counterpart at all
+    // and its timeval carries MICROseconds where the native clock speaks
+    // nanoseconds -- a real struct conversion. Both shells land in this commit.
+    { VIV_LINUX_CLOCK_GETTIME,   VIV_TIER2 },  // clk_id map -> SYS_CLOCK_GETTIME
+    { VIV_LINUX_GETTIMEOFDAY,    VIV_TIER2 },  // realtime ns -> timeval {sec,usec}
 };
 
 #define VIV_REJECT_COUNT ((u32)(sizeof(g_viv_rejects) / sizeof(g_viv_rejects[0])))
@@ -2387,4 +2406,69 @@ bool vivarium_setid_is_noop(u32 requested, u32 current_mapped) {
     // let through. Comparing against the raw principal would refuse that call
     // for a PRINCIPAL_SYSTEM Proc -- the one case it most needs to serve.
     return requested == current_mapped;
+}
+
+// The Linux clockid_t VALUES clock_gettime's first argument carries. Argument
+// values, not syscall numbers, so they live here beside their translator exactly
+// as VIV_OMODE_* do -- not in the VIV_LINUX_* number enum in vivarium.h.
+enum {
+    VIV_CLOCK_REALTIME           = 0,
+    VIV_CLOCK_MONOTONIC          = 1,
+    VIV_CLOCK_PROCESS_CPUTIME_ID = 2,
+    VIV_CLOCK_THREAD_CPUTIME_ID  = 3,
+    VIV_CLOCK_MONOTONIC_RAW      = 4,
+    VIV_CLOCK_REALTIME_COARSE    = 5,
+    VIV_CLOCK_MONOTONIC_COARSE   = 6,
+    VIV_CLOCK_BOOTTIME           = 7,
+};
+
+// clock_gettime(clk_id, tp): the clk_id map. PURE -- it maps the Linux clock id
+// onto one of Thylacine's two clocks and nothing else; the shell in syscall.c
+// does the validated write through the native SYS_CLOCK_GETTIME handler, whose
+// timespec is byte-identical to Linux's, so the number map is the ONLY
+// translation. Returns false for a clk_id this kernel has no clock for; the
+// caller answers -EINVAL, which is also Linux's answer for a clk_id IT cannot
+// serve -- the error semantics coincide on the unknown case even though the
+// KNOWN sets differ (why this is T2, not a T1 renumber: a T1 row must be total
+// over the argument domain, and this one is not -- the lseek precedent).
+//
+// Thylacine has exactly two clocks: T_CLOCK_REALTIME (wall ns) and
+// T_CLOCK_MONOTONIC (ns since boot, raw CNTVCT, never backward). Each admitted
+// Linux id is an individual CLAIM that one of those two satisfies its contract:
+//
+//   CLOCK_REALTIME        (0) -> REALTIME. Identical.
+//   CLOCK_MONOTONIC       (1) -> MONOTONIC. Identical.
+//   CLOCK_MONOTONIC_RAW   (4) -> MONOTONIC. Linux's RAW is monotonic WITHOUT the
+//                                NTP slew; Thylacine performs no slewing, so its
+//                                monotonic already IS raw. Exact, not approximate.
+//   CLOCK_REALTIME_COARSE (5) -> REALTIME. COARSE requests a cheap last-tick
+//                                value; returning the precise one is a valid
+//                                refinement (more accurate, never wrong).
+//   CLOCK_MONOTONIC_COARSE(6) -> MONOTONIC. Same refinement.
+//   CLOCK_BOOTTIME        (7) -> MONOTONIC. BOOTTIME is monotonic INCLUDING
+//                                suspend; a QEMU guest does not suspend and
+//                                Thylacine's monotonic is ns-since-boot, so the
+//                                two coincide here.
+//
+// DECLINED (-> the caller's -EINVAL, a served answer, not a "declined row"):
+//   CLOCK_PROCESS_CPUTIME_ID (2), CLOCK_THREAD_CPUTIME_ID (3) -- per-process /
+//   per-thread CPU time, which Thylacine does not expose. EINVAL is honest, and
+//   a program that probes clock support tolerates it. Any other id is unknown
+//   to both sides and is EINVAL on both.
+bool vivarium_clock_gettime_map(u64 linux_clk_id, u64 *thyla_clk_id_out) {
+    if (!thyla_clk_id_out) return false;
+    switch (linux_clk_id) {
+    case VIV_CLOCK_REALTIME:
+    case VIV_CLOCK_REALTIME_COARSE:
+        *thyla_clk_id_out = T_CLOCK_REALTIME;
+        return true;
+    case VIV_CLOCK_MONOTONIC:
+    case VIV_CLOCK_MONOTONIC_RAW:
+    case VIV_CLOCK_MONOTONIC_COARSE:
+    case VIV_CLOCK_BOOTTIME:
+        *thyla_clk_id_out = T_CLOCK_MONOTONIC;
+        return true;
+    default:
+        return false;
+    }
 }

@@ -290,6 +290,15 @@ enum {
     VIV_LINUX_GETPPID         = 173,
     VIV_LINUX_GETUID          = 174,
     VIV_LINUX_GETGID          = 176,
+
+    // The time family. Both above the native ceiling (113, 169 > the highest
+    // native syscall), so collision-free by construction -- their collision
+    // re-check is the ceiling argument, discharged by the static_asserts in
+    // vivarium.c beside restart_syscall/socket/clone/execve/wait4, not a
+    // per-number one. These are the calls a libc's timeout path issues; without
+    // them curl/git/TLS cannot bound a wait, and busybox `date` reads 1970.
+    VIV_LINUX_CLOCK_GETTIME   = 113,
+    VIV_LINUX_GETTIMEOFDAY    = 169,
 };
 
 // The highest ASSIGNED native Thylacine syscall number. Every vivarium row
@@ -297,16 +306,18 @@ enum {
 // (pselect6 72, ppoll 73) carry their own per-number argument, above.
 //
 // THE OBLIGATION, and the reason this is a symbol: a new native syscall above
-// 102 makes the ceiling argument stop holding for every row at or below the new
-// value, SILENTLY. Bumping this constant is therefore part of adding a syscall,
-// and the `_Static_assert` in vivarium.c pins it to SYS_RFORK's identity so a
-// renumber of the current top cannot drift unnoticed. (It cannot catch a NEW
-// higher number on its own -- C has no max-over-an-enum -- so the rows that
+// the ceiling makes the ceiling argument stop holding for every row at or below
+// the new value, SILENTLY. Bumping this constant is therefore part of adding a
+// syscall, and the `_Static_assert` in vivarium.c pins it to the current top's
+// identity so a renumber of that number cannot drift unnoticed. (It cannot catch
+// a NEW higher number on its own -- C has no max-over-an-enum -- so the rows that
 // depend on the ceiling assert against it individually there.)
 //
 // Stated ONCE, deliberately. It was previously written out as a literal in four
-// places and was stale in all four.
-#define VIV_NATIVE_CEILING 105
+// places and was stale in all four -- and then went stale a fifth time HERE:
+// pinned to SYS_RFORK (105), it missed the Warp arc's SYS_DMA_CREATE_GPU_BO (106)
+// and SYS_BURROW_FROM_HOSTMEM (107) landing above it. Now 107, the true top.
+#define VIV_NATIVE_CEILING 107
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).
@@ -1915,6 +1926,28 @@ struct viv_linux_iovec {
 _Static_assert(sizeof(struct viv_linux_iovec) == 16,
                "Linux aarch64 struct iovec is two 64-bit words");
 
+// Linux `struct timeval` on aarch64: {s64 tv_sec; s64 tv_usec} (suseconds_t is
+// `long`, hence 64-bit). It has NO native `struct t_*` twin -- Thylacine has no
+// gettimeofday syscall -- so this is the only place its 16-byte size is pinned;
+// gettimeofday's shell validates its user buffer against `sizeof` this.
+struct viv_linux_timeval {
+    s64 tv_sec;
+    s64 tv_usec;
+};
+
+_Static_assert(sizeof(struct viv_linux_timeval) == 16,
+               "Linux aarch64 struct timeval is two 64-bit words");
+
+// Linux `struct timezone`: two `int`s, obsolete. gettimeofday zero-fills it when
+// the caller passes a non-NULL pointer; pinned so the bound moves with the size.
+struct viv_linux_timezone {
+    s32 tz_minuteswest;
+    s32 tz_dsttime;
+};
+
+_Static_assert(sizeof(struct viv_linux_timezone) == 8,
+               "Linux struct timezone is two 32-bit ints");
+
 // Bound the entry count. Split out as a pure decide because it carries the one
 // real judgement in the row -- everything else writev does is uaccess and a loop
 // over the existing byte-I/O core. Linux answers EINVAL for a count over
@@ -2090,6 +2123,12 @@ u32 vivarium_map_gid(u32 gid);
 //
 // Returns true when the call is the no-op (the shell answers 0).
 bool vivarium_setid_is_noop(u32 requested, u32 current_mapped);
+
+// clock_gettime(clk_id, tp): the PURE clk_id map. Maps a Linux clockid_t onto a
+// native T_CLOCK_* and nothing else -- the timespec is byte-identical, so the
+// number map is the whole translation. Returns false for a clk_id with no
+// Thylacine clock (the shell answers -EINVAL). See the impl for the per-id claims.
+bool vivarium_clock_gettime_map(u64 linux_clk_id, u64 *thyla_clk_id_out);
 
 // -----------------------------------------------------------------------------
 // pipe2 (#155, LINEAGE L-6c). A shell cannot build a pipeline without it, and on

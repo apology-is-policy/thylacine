@@ -138,9 +138,9 @@ Keeping the arms distinct makes V-3's change one line.
 
 ### The Tier-2 shells
 
-Three impure shells, one per translator, all in `kernel/syscall.c` (the pure
+The impure shells, one per translator, all in `kernel/syscall.c` (the pure
 halves stay in `kernel/vivarium.c` so they remain unit-testable with no kernel
-plumbing):
+plumbing). The file translators the V-2b/c arc built first:
 
 - **`openat`** — `vivarium_openat_decide` first, then `viv_measure_user_path`,
   then `vivarium_openat_build`, then `sys_open_handler`. **Decide before
@@ -154,6 +154,35 @@ plumbing):
   `sys_stat_for_proc`, convert, copy out. (There is no
   `vivarium_fstatat_build`, and its absence is structural — see §6.20 of the
   design doc.)
+
+The time translators (the phenotype-network → curl/git arc: a libc bounds every
+timeout with these, and busybox `date` reads 1970 without them):
+
+- **`clock_gettime`** (113) — `vivarium_clock_gettime_map` (pure clk_id map)
+  then the native `sys_clock_gettime_handler`, which does the validated timespec
+  writeback. The Linux `struct timespec` is byte-identical to `t_timespec`, so
+  the map is the whole translation. It is T2 rather than a renumber because the
+  clk_id domain is **not total** — Linux ids `CLOCK_PROCESS/THREAD_CPUTIME` (2/3)
+  have no Thylacine clock and answer a served `-EINVAL` (Linux's own answer),
+  while `MONOTONIC_RAW`/`_COARSE`/`REALTIME_COARSE`/`BOOTTIME` each map onto the
+  two clocks Thylacine has, per-id justified in the map. The lseek precedent:
+  a coincident-enumeration renumber drops to T2 the moment the domains diverge.
+  Consequence worth recording for a future port author: musl's ISO-C `clock()`
+  is built on `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)`, so it returns
+  `(clock_t)-1` (its documented error path) here rather than a CPU-time value.
+  The target binaries (curl/git/busybox) use only REALTIME/MONOTONIC and are
+  fully served; a per-process CPU clock is a v1.x capability, not a gap in
+  fidelity — `-EINVAL` is exactly Linux's answer for a clock it cannot serve.
+- **`gettimeofday`** (169) — no native counterpart, and a MICROsecond `timeval`
+  where the native clock speaks nanoseconds, so the shell
+  (`viv_gettimeofday_write`) reads the realtime clock and writes the converted
+  struct itself, mirroring `sys_clock_gettime_handler`'s uaccess discipline
+  (4-byte-aligned target, one `uaccess_store_u32` per word, any fault → EFAULT
+  with nothing further touched). `gettimeofday(NULL, tz)` matches Linux —
+  writes only `tz`, returns 0 — and a non-NULL `tz` is zero-filled, not rejected.
+
+(The socket, signal, `clone`, `wait4`, and startup-batch families are also T2
+shells; they are documented in their own arc sections, not re-listed here.)
 
 `viv_measure_user_path` is bounded by `SYS_OPEN_PATH_MAX` and validates each
 byte's VA before loading it, because the length is unknown up front and the
@@ -472,6 +501,7 @@ in-guest leg L26 asserts the divergence so it cannot go stale silently.
 | **the chain** — manifest → viv → declaration → branch → translated call | joey's V-1b leg B: `viv run /vivarium/pheno`, whose entrypoint speaks only raw Linux numbers |
 | the mmap argument domain, each admission and decline by name | `vivarium.mmap_domain` |
 | **the memory round trip** — map, write through it, read it back, unmap | leg B's L16–L23 |
+| **the time family** — realtime seed, monotonic advance, `timeval` µs conversion, the EFAULT + EINVAL paths | leg B's L249–L253 |
 
 The two layers are not redundant, and V-2d's revert probes show exactly why.
 Reverting the `mmap` table row *or* widening the prot allow-list to admit
@@ -497,6 +527,17 @@ refusal, asserted so a future "optimisation" cannot quietly delete it),
 `close`, `write`, `close`, and `exit_group` — the last of which is its own
 assertion, since an untranslated 94 would reach `SYS_TTY_SIGNAL` and joey's
 by-pid wait would never return.
+
+The time-family legs (L249–L253) are each deterministic fail-without-fix,
+because before the translators these numbers FORWARD → `-ENOSYS` and the `== 0`
+guard is false: **L249** `clock_gettime(REALTIME)` writes a wall clock past
+`1_700_000_000` (a 1970 epoch, the no-write failure mode, is far below);
+**L250** `clock_gettime(MONOTONIC)` is sub-second-bounded and never runs backward
+across two reads; **L251** `gettimeofday` writes a `timeval` whose `tv_usec` is
+`< 1e6` (the µs conversion's signature — a shell that wrote nanoseconds would
+overflow it); **L252** both calls answer `EFAULT` on an unmapped pointer; **L253**
+a CPU-time clk_id answers the served `EINVAL`. The discrimination was measured:
+reverting the two table rows fails the boot at exactly `marker=L249`.
 
 Iterating on this prover needs `THYLACINE_MKFS_PRESERVE=0`: the entrypoint lives
 in the **pool** (the bundle rootfs), and a preserved pool skips populate, so the
