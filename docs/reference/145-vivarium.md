@@ -3089,5 +3089,12 @@ idle.md`):** two ^C at a `ptyhost`ed `ut`'s IDLE prompt, then the next typed
 command is echoed but not executed until an extra Enter -- one ^C is fine, and
 the console `ut` is fine either way (`scratchpad/r5f9/ctrlc-idle.exp`,
 RESULT `outer-cc=1 inner-c=1 inner-cc=0 recover=1`). The R5-F9 question itself
-(does ash's `raise_interrupt` longjmp wedge `in_handler`) is still unanswered:
-its experiment could not get past the runner dying, and runs next.
+(does ash's `raise_interrupt` longjmp wedge `in_handler`) is **answered YES** by
+the arm-2 hunt: an escaping handler that never reaches `rt_sigreturn` leaves
+`in_handler` stuck, which is exactly `bug-2` (VIVARIUM 6.23). `bug-1`
+(`0149d1e3`) stopped the livelock *symptom*; `bug-2` (`438cac78`) clears the
+stuck latch at the next EL0 transition. The deterministic proof is
+`viv-pheno-probe` legs L245-L248: a `PHENO_LINUX` handler `siglongjmp`s out of
+itself, a second `SIGPIPE` is delivered across the escape, and the leg asserts
+the handler fired **twice** -- red (`joey: ... marker=L248`) on a kernel with the
+two clears disabled, green with them.

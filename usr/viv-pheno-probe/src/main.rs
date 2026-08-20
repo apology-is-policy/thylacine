@@ -342,6 +342,108 @@ fn mh_mask_in() -> u64 { unsafe { core::ptr::read_volatile(&raw const MH_MASK_IN
 fn mh_child() -> i64 { unsafe { core::ptr::read_volatile(&raw const MH_CHILD) } }
 fn mh_am_child() -> u64 { unsafe { core::ptr::read_volatile(&raw const MH_AM_CHILD) } }
 
+// ---------------------------------------------------------------------------
+// bug-2 (VIVARIUM.md 6.23): the deterministic handler-escape driver (L245-L248).
+// ---------------------------------------------------------------------------
+//
+// A PHENO_LINUX handler that leaves via siglongjmp -- a jump back to a
+// sigsetjmp point in the main loop, never reaching rt_sigreturn -- leaves the
+// kernel's per-Thread `in_handler` latch set, since notes_noted_restore is its
+// only clear. The N-3 re-entrancy guard then refuses EVERY future caught-note
+// delivery and the process goes signal-deaf. The bug-2 fix clears the stuck
+// latch once it observes the handler has demonstrably unwound above its frame
+// (sp >= note_saved_sp_el0) at the next EL0 transition.
+//
+// r5f9-ash.exp (busybox ash ^C) is a REGRESSION NET, not a control: it passes
+// 6/6 on a kernel WITHOUT the fix, because ash reprompts and never takes a
+// SECOND caught signal while the latch is stuck. This leg is the missing
+// fails-without-fix control -- it forces a second signal across the escape and
+// asserts the handler fires TWICE. Without the fix the second SIGPIPE is
+// N-3-refused and the handler fires only ONCE (L248 red). It exercises both
+// clears jointly (the EL0-entry clear on the unblock does the work here; the
+// EL0-return copy is idempotent behind it).
+//
+// setjmp/longjmp are hand-rolled: there is no libc here, and this is exactly
+// the pair a no_std guest would carry. The jmp_buf saves x19-x30, sp, and the
+// callee-saved d8-d15 -- a correct primitive, so nothing the compiler parks in
+// a callee-saved register across the escape is silently lost. The classic
+// returns-twice hazard does not bite: longjmp restores every callee-saved
+// register AND sp to the setjmp snapshot (exactly what the caller assumes is
+// preserved across the call), and nothing in run_linux's frame is mutated
+// between the setjmp return and the synchronous escape.
+static mut ESC_JMP: [u64; 22] = [0; 22];
+static mut ESC_FIRED: u64 = 0;
+static mut ESC_PHASE: u64 = 0; // 0 = escape on next delivery, 1 = count it
+
+core::arch::global_asm!(
+    ".globl esc_setjmp",
+    ".type  esc_setjmp, @function",
+    "esc_setjmp:",
+    "    bti     c",
+    "    stp     x19, x20, [x0, #0]",
+    "    stp     x21, x22, [x0, #16]",
+    "    stp     x23, x24, [x0, #32]",
+    "    stp     x25, x26, [x0, #48]",
+    "    stp     x27, x28, [x0, #64]",
+    "    stp     x29, x30, [x0, #80]",
+    "    mov     x1, sp",
+    "    str     x1, [x0, #96]",
+    "    stp     d8,  d9,  [x0, #104]",
+    "    stp     d10, d11, [x0, #120]",
+    "    stp     d12, d13, [x0, #136]",
+    "    stp     d14, d15, [x0, #152]",
+    "    mov     x0, #0",
+    "    ret",
+    ".size esc_setjmp, .-esc_setjmp",
+);
+
+core::arch::global_asm!(
+    ".globl esc_longjmp",
+    ".type  esc_longjmp, @function",
+    "esc_longjmp:",
+    "    bti     c",
+    "    ldp     x19, x20, [x0, #0]",
+    "    ldp     x21, x22, [x0, #16]",
+    "    ldp     x23, x24, [x0, #32]",
+    "    ldp     x25, x26, [x0, #48]",
+    "    ldp     x27, x28, [x0, #64]",
+    "    ldp     x29, x30, [x0, #80]",
+    "    ldr     x2, [x0, #96]",
+    "    mov     sp, x2",
+    "    ldp     d8,  d9,  [x0, #104]",
+    "    ldp     d10, d11, [x0, #120]",
+    "    ldp     d12, d13, [x0, #136]",
+    "    ldp     d14, d15, [x0, #152]",
+    "    cmp     x1, #0",
+    "    csinc   x0, x1, xzr, ne", // return val, or 1 when val == 0
+    "    ret",
+    ".size esc_longjmp, .-esc_longjmp",
+);
+
+extern "C" {
+    fn esc_setjmp(buf: *mut u64) -> u64;
+    fn esc_longjmp(buf: *mut u64, val: u64) -> !;
+}
+
+/// The escape handler: on its FIRST delivery it longjmps back to the main loop
+/// (the siglongjmp escape -- rt_sigreturn is never reached, so the kernel latch
+/// stays set); on any later delivery it just counts and returns normally, so the
+/// SECOND delivery -- the one the fix must let through -- unwinds through the
+/// restorer and rt_sigreturn as an ordinary handler would.
+extern "C" fn viv_escape_handler(_signo: i32, _info: *const u8, _uc: *const u8) {
+    unsafe {
+        ESC_FIRED += 1;
+        if core::ptr::read_volatile(&raw const ESC_PHASE) == 0 {
+            core::ptr::write_volatile(&raw mut ESC_PHASE, 1);
+            esc_longjmp(&raw mut ESC_JMP as *mut u64, 1); // never returns here
+        }
+        // phase 1: count only; fall off the end -> restorer -> rt_sigreturn.
+    }
+}
+fn esc_handler_addr() -> u64 { viv_escape_handler as usize as u64 }
+fn esc_fired() -> u64 { unsafe { core::ptr::read_volatile(&raw const ESC_FIRED) } }
+fn esc_phase() -> u64 { unsafe { core::ptr::read_volatile(&raw const ESC_PHASE) } }
+
 // Task #96 sentinel buffers for the phenotype-path FP check (L39-L41).
 static mut FP_SENT: [u8; 512] = [0; 512];
 static mut FP_SEEN: [u8; 512] = [0; 512];
@@ -2945,6 +3047,53 @@ unsafe fn run_linux() -> ! {
         b"L204\n"
     );
     let _ = svc3(NR_CLOSE, fd_mem as u64, 0, 0);
+
+    // === bug-2 (VIVARIUM.md 6.23): the deterministic handler-escape driver ===
+    // The fails-without-fix control r5f9-ash.exp could not be (it is a
+    // regression net -- 6/6 with OR without the fix). Force a siglongjmp escape
+    // out of a SIGPIPE handler, then deliver a SECOND SIGPIPE across it. With
+    // the fix the stuck in_handler latch is cleared at the escape's first EL0
+    // entry and the second delivery lands (the handler fires twice); without it
+    // the N-3 guard refuses the second (the handler fires once) -> L248 red.
+    {
+        // Self-contained: install the escape handler + unblock SIGPIPE here,
+        // whatever disposition the prior legs left it in.
+        let eksa: [u64; 4] =
+            [esc_handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+        leg!(
+            rep,
+            svc4(NR_RT_SIGACTION, SIGPIPE, eksa.as_ptr() as u64, 0, 8) == 0,
+            b"L245\n"
+        );
+        let pset = bit(SIGPIPE);
+        let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK,
+                     &pset as *const u64 as u64, 0, 8);
+
+        let jv = esc_setjmp(&raw mut ESC_JMP as *mut u64);
+        if jv == 0 {
+            // First pass: raise SIGPIPE (a one-byte write to the reader-less fd
+            // 0). The handler MUST escape via longjmp and never let this write
+            // return -- reaching the leg below means the escape did not happen
+            // (delivery broke, or the handler returned normally).
+            let byte: u8 = b'e';
+            let _ = svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1);
+            leg!(rep, false, b"L246\n");
+        }
+        // Escaped. The handler ran exactly once and jumped back here; the kernel
+        // latch is now stuck (no rt_sigreturn ran), and SIGPIPE is still blocked
+        // by the handler's auto-mask that no sigreturn will lift.
+        leg!(rep, esc_fired() == 1 && esc_phase() == 1, b"L247\n");
+        // This unblock is ALSO the EL0-entry syscall the fix uses to observe the
+        // escape (sp >= note_saved_sp_el0) and clear the stuck latch.
+        let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK,
+                     &pset as *const u64 as u64, 0, 8);
+        // The SECOND delivery -- the whole point. Fires iff the latch was
+        // cleared; the handler is now in phase 1, so it counts and returns
+        // normally through the restorer.
+        let byte2: u8 = b'E';
+        let _ = svc3(NR_WRITE, 0, &byte2 as *const u8 as u64, 1);
+        leg!(rep, esc_fired() == 2 && esc_phase() == 1, b"L248\n");
+    }
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

@@ -2394,6 +2394,26 @@ do, and the guest stays signal-live — while the **cross-stack** case above mov
 now the bounded thing it always claimed to be — plus that one exotic cross-stack
 corruption, until the tracked v1.x VMA-same-stack hardening closes it.
 
+**The proof — a fails-without-fix driver, not a regression net.** The
+interactive witness `r5f9-ash.exp` (busybox `ash` Ctrl-C) is a *regression net*,
+not a control: it passes 6/6 on a kernel **without** the fix, because `ash`
+reprompts and never takes a *second* caught signal while the latch is stuck — so
+it can only guard against a future regression, never demonstrate the fix. The
+deterministic control is legs L245-L248 of `viv-pheno-probe` (the boot-time
+`/vivarium/pheno` bundle). It hand-rolls a `setjmp`/`longjmp` pair (no libc), a
+`PHENO_LINUX` handler `siglongjmp`s out of itself on the first self-raised
+`SIGPIPE` (a one-byte write to the reader-less fd 0), the escaped main loop
+unblocks and delivers a **second** `SIGPIPE` across the escape, and L248 asserts
+the handler fired **twice**. Without the clears the stuck `in_handler` makes the
+N-3 guard refuse the second delivery — the handler fires once, L248 is red, and
+joey reports `V-1b linux-phenotype leg FAILED marker=L248` (boot-fatal).
+**Measured both ways** (both call-site clears disabled → `marker=L248`; restored
+→ `V-1b phenotype ... PASS`), so the two clears now have an in-guest driver that
+discriminates the fix from its absence. It exercises the two clears *jointly* —
+the EL0-entry clear on the post-escape unblock does the work here, the EL0-return
+copy is idempotent behind it; isolating EL0-entry alone would need a park-based
+driver (a deaf-deadlock hang rather than a clean marker) and is not built.
+
 ---
 
 ## 7. The vivarium — the container runner

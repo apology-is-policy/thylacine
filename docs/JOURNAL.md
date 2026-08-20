@@ -22,6 +22,69 @@ needed the operator.
 
 ---
 
+## 2026-08-20 (aux, cont.) — bug-2 E2E: turning the "control that wasn't one" into one
+
+The prior run closed bug-2 honest about a gap: `r5f9-ash.exp` is a REGRESSION
+NET, not a fails-without-fix control (measured 6/6 on the bug-1-only build too),
+so the two escape-clears had no in-guest driver — the A-PIN gap: *a gated path
+needs a driver that reaches it*. This run built that driver and proved it.
+
+**The driver.** Legs L245-L248 of `usr/viv-pheno-probe` (the boot-time
+`/vivarium/pheno` bundle, so it runs on every boot). No libc in a no_std guest,
+so `esc_setjmp`/`esc_longjmp` are hand-rolled aarch64 asm (save/restore
+x19-x30 + sp + d8-d15). A `viv_escape_handler` `siglongjmp`s on its first
+delivery and counts on later ones. The leg raises SIGPIPE via the one
+self-signal a phenotype proc can make — a one-byte write to the reader-less
+fd 0 — escapes the handler (never reaching `rt_sigreturn`, so `in_handler`
+sticks), unblocks SIGPIPE (which is also the EL0-entry syscall the fix uses to
+observe the escape), raises a SECOND SIGPIPE, and L248 asserts the handler fired
+TWICE.
+
+**The discrimination, measured both ways** (the whole point — a control must
+prove discrimination, not detection):
+
+- Fixed kernel: `joey: V-1b phenotype (native + containered linux) PASS`, boot
+  OK (`build/test-boot.log:2661`).
+- Bug-1-only kernel (both call-site clears disabled via Edit-sabotage,
+  `syscall.c:11467` + `notes.c:1610`, rebuilt): `joey: V-1b linux-phenotype leg
+  FAILED marker=L248 status=1`, boot-fatal (`build/test-boot.log:2662`). Then
+  reverted (git-verified the kernel returned byte-identical to HEAD) and rebuilt
+  → PASS again.
+
+`marker=L248` is exactly the witness leg. So the two clears now have a driver
+that fails without them — the r5f9 gap is closed.
+
+**What it does NOT isolate, stated honestly.** The leg exercises the two clears
+*jointly*: the EL0-entry clear (on the post-escape unblock) does the work, the
+EL0-return copy is idempotent behind it. Reverting only EL0-entry still passes
+(the EL0-return copy on the fire-#2 write catches it), so L248 red requires BOTH
+clears gone. Isolating the EL0-entry primary would need a park-based driver
+whose failure mode is a deaf-deadlock HANG rather than a clean marker — not
+built. The driver proves "the fix (both clears) works end-to-end," which is what
+the A-PIN gap asked for.
+
+**The sp arithmetic, grounded not assumed.** The detector fires only if the
+post-longjmp sp is >= the delivery-time `note_saved_sp_el0`. Read the code:
+`svc3`/`svc4` are `#[inline(always)]` `nostack`, so both the raise and the
+escape-clearing syscall execute in run_linux's own frame, and `esc_setjmp` (a
+`bl` target, sp unchanged) saves that same frame — so after longjmp
+`ctx->sp == note_saved_sp_el0`, the `==` boundary the bug-2 audit already
+confirmed conservative-correct. The classic setjmp returns-twice miscompile does
+not bite: `esc_longjmp` restores every callee-saved reg + sp to the setjmp
+snapshot (exactly what the caller assumes preserved), and nothing in the frame
+mutates between the setjmp return and the synchronous escape.
+
+**Cost + scope.** Test-only: no kernel file changed (git-verified identical to
+HEAD), so no prosecutor round is owed — the boot-both-ways proof is the
+validation. Docs: VIVARIUM §6.23 gained the fails-without-fix-driver paragraph;
+`145-vivarium.md`'s stale "R5-F9 still unanswered" note is now answered YES.
+
+**Still open (tracked, not this chunk):** the VMA-same-stack v1.x hardening
+closing the audit's F1 (the swapcontext-cross-stack false-clear); item 12 (viv
+console ^C forward).
+
+---
+
 ## 2026-08-20 (aux) — bug-2: the escape-detector, an audit that found the direction the self-audit missed, and an E2E "control" that wasn't one
 
 **The task.** bug-2, the deeper root of the arm-2 flake, which the operator
