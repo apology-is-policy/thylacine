@@ -22,6 +22,58 @@ needed the operator.
 
 ---
 
+## 2026-08-20 (aux) — item 12: viv forwards the owner-routed console ^C, and the regression that had to stop typing at the shell
+
+A container run from the BARE SERIAL CONSOLE never received ^C after 5336c894:
+the console has no job-control pgroup fan, so the ^C is owner-routed to `ut`,
+`ut` forwards it to viv by pid, but the entrypoint is viv's CHILD (ut can't reach
+it) and viv's #237 interrupt MASK swallowed the forwarded note. Fix: viv's
+INTERRUPT mask is conditional on `on_pts` — the CONSOLE arm self-manages a notes
+fd and poll-forwards `interrupt` to the entrypoint (`wait_entrypoint_interruptible`,
+mirroring ut's `wait_pids_interruptible`); the PTS arm is unchanged (the pgroup
+fan delivers). LANDED *(pending)*.
+
+**The wrong turn that got caught — the reusable part.** The first regression
+typed `trap … INT` into an interactive alpine-ash ON THE BARE CONSOLE. It FAILED
+deterministically: the typed trap line never reached the ash (no echo, no
+`gotint` anywhere in the transcript). What caught it was reading the transcript
+BYTES rather than trusting the red — a `~ •` ut-prompt flood appeared BEFORE
+`viv run` was even sent, so it could not be item 12; the real cause is that the
+bare console has no job-control arbitration, so `ut` and the ash both read it and
+the typed line does not cleanly arrive (the v1.0 "degraded terminal" posture).
+That is ORTHOGONAL to item 12, which delivers ^C as a NOTE needing no console
+input. The fix was to stop typing at the shell: a PRE-TRAPPED entrypoint — the
+`alpine-trap` bundle (`sh -c 'trap "echo GOTINT-CONSOLE; exit 0" INT; echo READY;
+sleep-loop'`).
+
+**Discrimination proven boot-both-ways.** WITH item 12: PASS 68s, `GOTINT-CONSOLE`
+= genuine trap output. Revert item 12: FAIL 3/3 — `READY-FOR-CTRLC` appears, then
+timeout on `GOTINT-CONSOLE`. The lone `GOTINT-CONSOLE` in the negctrl transcript
+is the HARNESS's own FAIL diagnostic (line 2847), not trap output — and the
+absence of any spawn-time argv echo of the token confirms the positive's was the
+trap, so there is no false-pass path.
+
+**Prosecutor (holotype, Opus 4.8 fallback — Fable unavailable; MODEL start==end).**
+0 P0 / 0 P1 / 1 P2 / 1 P3, both fixed pre-commit. F1 [P2]: the console
+open-failure degrade left `interrupt` UNMASKED (resurrecting #237 orphaning) with
+a comment miscalling it "pre-item-12 behaviour" — which actually MASKED it. Fix
+(subsumes F2's startup window): mask INTERRUPT through setup in both arms, unmask
+only inside `wait_entrypoint_interruptible` once self-managing, so an
+`open_self()` failure leaves it masked = the true safe swallow. The core
+mechanism was confirmed SOUND three independent ways (self-managing latch-clear,
+tail retains-never-consumes, poll/read skip-consistency). The F1 fix re-verified
+by re-running the positive control (still PASS, 68s).
+
+**Enqueued (surfaced here, NOT item-12 regressions).** (1) the aurora/ut
+console-idle prompt flood on the serial console (cosmetic, pre-existing); (2) on
+a pts viv's diorama dies of ^C, tearing down the container's /proc,/sys (#237's
+pts path — the diorama does not mask interrupt like viv does).
+
+**Gates.** build + suite (boot OK; L-6c/D-5) + SMP (0 corruption, default+UBSan ×
+smp4/smp8, N=10) + positive/negative discrimination all green. viv is
+userspace-only (kernel byte-identical; the SMP pass re-confirms soundness
+regardless).
+
 ## 2026-08-20 (aux, cont.) — bug-2 E2E: turning the "control that wasn't one" into one
 
 The prior run closed bug-2 honest about a gap: `r5f9-ash.exp` is a REGRESSION

@@ -57,8 +57,10 @@ use libthyla_rs::{
     t_pipe, t_putstr, t_read, t_spawn_full_argv, t_unlink, t_wait_pid_for, t_walk_create,
     t_write, TSpawnArgs, T_MNOEXEC, T_MREPL, T_NOTE_BIT_INTERRUPT, T_NOTE_BIT_PIPE, T_OPATH,
     T_OREAD, T_OWRITE,
-    T_SPAWN_PHENO_LINUX, T_WALK_OPEN_FROM_ROOT,
+    T_SPAWN_PHENO_LINUX, T_WAIT_WNOHANG, T_WALK_OPEN_FROM_ROOT,
 };
+use libthyla_rs::notes::{send, Notes, NoteTarget};
+use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 
 // Manifest bounds (fail closed past any of them; the kernel's own spawn/env
 // bounds sit behind these, so nothing here relies on downstream rejection).
@@ -174,6 +176,55 @@ fn wait_status(pid: i64) -> i64 {
         return -1;
     }
     st as i64
+}
+
+/// How long the console foreground wait blocks on the notes fd before a
+/// defensive WNOHANG re-reap. A note delivered between the reap and the poll
+/// arm (or a wake the fd somehow does not raise) still resolves within this
+/// bound, so the loop can never wedge on a child that has already exited.
+const WAIT_BACKSTOP_MS: u32 = 100;
+
+/// Console foreground wait (item 12): forward the owner-routed `interrupt` to
+/// the entrypoint. The serial console has no pgroup fan, so
+/// `proc_console_post_interrupt` routes `interrupt` to the session OWNER (ut),
+/// which forwards it to viv by pid -- but the container entrypoint is viv's
+/// CHILD, which ut cannot reach, so viv forwards the last hop (the docker
+/// `--sig-proxy` analog). Mirrors the shell's `wait_pids_interruptible`:
+/// WNOHANG-reap the child (the reap ground truth), block on the self-managing
+/// notes fd, then drain -- forward `interrupt`, swallow `child_exit` (consuming
+/// it clears POLLIN so the next poll genuinely blocks). viv runs no note
+/// handlers, so every other drained note is discarded here.
+fn wait_entrypoint_interruptible(notes: &Notes, child_pid: i64) -> i64 {
+    // Self-managing now (the caller opened the notes fd) and about to forward:
+    // UNMASK `interrupt` so the fd read returns it (a masked note is not).
+    // It was masked through container setup so a startup ^C could not terminate
+    // viv before it became self-managing (F1/F2); self-managing suppresses the
+    // terminate default, so unmasking here is safe, and a ^C that queued masked
+    // during setup forwards on the first drain below. PIPE stays masked (#237).
+    let _ = unsafe { t_note_mask(1u64 << T_NOTE_BIT_PIPE, core::ptr::null_mut()) };
+    loop {
+        let mut st: i32 = 0;
+        let rc = unsafe {
+            t_wait_pid_for(child_pid as i32, T_WAIT_WNOHANG, &mut st as *mut i32)
+        };
+        if rc != 0 {
+            // rc > 0: reaped -> st. rc < 0: vanished / not our child -> -1.
+            return if rc < 0 { -1 } else { st as i64 };
+        }
+        let mut set = PollSet::with_capacity(1);
+        set.add(notes, PollEvents::READ);
+        let _ = set.poll(PollTimeout::Millis(WAIT_BACKSTOP_MS));
+        while let Ok(Some(note)) = notes.try_read() {
+            if note.name.as_str() == "interrupt" {
+                // Parent-gated (child_pid IS viv's child). A native no-handler
+                // entrypoint DIES of the forwarded note (^C kills the foreground
+                // container, as the pts pgroup fan would); a pouch/musl
+                // entrypoint catches it (async SIGINT). Inert only in the narrow
+                // race where the child exited between the reap above and here.
+                let _ = send(NoteTarget::Pid(child_pid as i32), "interrupt");
+            }
+        }
+    }
 }
 
 fn extract_manifest(doc: &json::Json) -> Result<Manifest, &'static str> {
@@ -343,6 +394,26 @@ fn set_own_env(env: &[(String, String)]) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Is our stdin (fd 0) a ptyfs SLAVE -- an interactive `viv run` under a pts's
+/// job control -- rather than the bare serial console? The item-12 mask/forward
+/// split turns on this: a pts ldisc fans `interrupt` to the whole foreground
+/// pgroup so the container gets it directly (viv masks + waits blocking), while
+/// the console has no fan so viv forwards it (unmasked + self-managing +
+/// poll-forward). Same qid check `tty_bind_source` makes; bit 40 is nominally
+/// shared with netd's CONN flag, but viv's fd 0 is inherited console/pts stdio,
+/// never a network socket, so no S_ISCHR disambiguation is needed here.
+fn fd0_is_pts() -> bool {
+    let mut st = [0u8; 88];
+    if unsafe { t_fstat(0, st.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let qid = match st[8..16].try_into() {
+        Ok(b) => u64::from_le_bytes(b),
+        Err(_) => return false,
+    };
+    qid & PTS_QID_FLAG != 0
+}
+
 /// The pts-slave decode for the /dev/tty bind: when fd 0 is a ptyfs SLAVE,
 /// return an O_PATH fd of its /dev/pts/<n> path (the bind source; the OPEN
 /// fd 0 itself cannot be a source -- crossing clone-walks the source, and a
@@ -386,7 +457,7 @@ fn reap_diorama(dio_pid: i64, ctl_fd: i64) {
     let _ = wait_status(dio_pid);
 }
 
-fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
+fn run(bundle: &str, stdio_born: bool, notes: Option<&Notes>) -> Result<i64, String> {
     // --- the manifest ------------------------------------------------------
     let cfg_path = format!("{}/config.json", bundle);
     let cfg =
@@ -622,7 +693,13 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
             if oexec >= 0 { "passes" } else { "fails" }
         ));
     }
-    let status = wait_status(child_pid);
+    // On the console (notes is Some) forward the owner-routed interrupt to the
+    // entrypoint; on a pts (None) the pgrp fan already reaches the container, so
+    // wait blocking exactly as before.
+    let status = match notes {
+        Some(n) => wait_entrypoint_interruptible(n, child_pid),
+        None => wait_status(child_pid),
+    };
 
     reap_diorama(dio_pid, dio_ctl);
 
@@ -658,28 +735,45 @@ pub extern "C" fn rs_main() -> i64 {
         (0..3).all(|fd| unsafe { t_fstat(fd, st.as_mut_ptr()) } == 0)
     };
 
-    // ^C is the CONTAINER's to handle, not ours. An interactive `viv run` is
-    // the terminal's foreground job, so its pgrp -- viv, its diorama and every
-    // container Proc -- receives the pts's `interrupt`; the container's
-    // processes see it as SIGINT and do what they will, but a native Proc with
-    // no handler DIES of it (LS-5's uncaught-interrupt default), which is what
-    // happened here: the first ^C at an interactive ash's prompt killed viv,
-    // orphaned the shell and its diorama, and left the orphaned shell and the
-    // outer ut competing for the terminal. Masking is the runner's whole answer
-    // -- the container already gets the note directly (same pgrp; nothing to
-    // forward), and a spawned child starts with a ZERO mask (only a
-    // PHENO_LINUX fork copies it), so nothing here reaches the entrypoint. The
-    // tty family stays UNMASKED on purpose: ^Z must stop viv with the container
-    // so the shell's job control sees the job stop; a hangup ends viv with it.
+    // ^C handling splits by terminal, because the container reaches viv's
+    // `interrupt` two different ways.
     //
-    // PIPE stays masked too (#237): rt_start masked NOTE_BIT_PIPE, but this SWAP
-    // would clobber it -- and viv writes to the diorama channel whose reader may
-    // already have died, so an unmasked pipe would TERMINATE viv (the very
-    // orphaning this mask exists to prevent). OR it back in.
+    // PTS (interactive `viv run` under job control): the pts ldisc fans
+    // `interrupt` to the whole foreground pgrp -- viv, its diorama and every
+    // container Proc -- so the container already gets it directly; a native Proc
+    // with no handler DIES of it (LS-5's uncaught-interrupt default). viv MASKS
+    // it, else the first ^C would kill the runner, orphan the shell and its
+    // diorama, and leave the orphan and the outer ut competing for the terminal.
+    // Nothing to forward -- the pgrp fan already delivered it. The tty family
+    // stays UNMASKED on purpose here: ^Z must stop viv with the container so the
+    // shell's job control sees the job stop; a hangup ends viv with it.
+    //
+    // CONSOLE (bare serial, no job control): there is NO pgrp fan --
+    // `proc_console_post_interrupt` routes `interrupt` to the session OWNER (ut)
+    // only, which forwards it to viv by pid. But the entrypoint is viv's CHILD,
+    // which ut cannot reach, so masking `interrupt` for the whole run would
+    // SWALLOW the ^C. viv must FORWARD it (item 12): self-manage the notes fd
+    // (suppresses the terminate default) and, once self-managing, UNMASK
+    // `interrupt` so the fd read returns it (a masked note is not returned by
+    // the read), then poll-forward it to the entrypoint (the docker
+    // `--sig-proxy` analog; the unmask lives in wait_entrypoint_interruptible).
+    //
+    // `interrupt` is masked HERE in BOTH arms during container setup, and the
+    // CONSOLE arm unmasks it only once self-managing and about to forward -- so
+    // an `open_self` FAILURE leaves it MASKED (the true pre-item-12 safe swallow,
+    // NOT an orphaning unmask -- F1) and a startup ^C in the rt_start->wait
+    // window cannot terminate viv (F2). PIPE stays masked in BOTH throughout
+    // (#237): viv writes the diorama channel whose reader may have died, and an
+    // unmasked pipe would TERMINATE viv (the very orphaning this mask prevents).
+    let on_pts = fd0_is_pts();
     let _ = unsafe {
         t_note_mask((1u64 << T_NOTE_BIT_INTERRUPT) | (1u64 << T_NOTE_BIT_PIPE),
                     core::ptr::null_mut())
     };
+    // Console only: open a self-managing notes fd. None on a pts (mask + never
+    // forward) or on an open failure (interrupt stays MASKED above -> the
+    // pre-item-12 safe swallow, no orphaning).
+    let notes: Option<Notes> = if on_pts { None } else { Notes::open_self().ok() };
 
     if let Err(e) = json::selftest() {
         say("json selftest FAIL:");
@@ -699,7 +793,7 @@ pub extern "C" fn rs_main() -> i64 {
         return 2;
     }
 
-    match run(bundle, stdio_born) {
+    match run(bundle, stdio_born, notes.as_ref()) {
         Ok(code) => code,
         Err(e) => {
             say(&e);

@@ -1238,6 +1238,37 @@ VIVEOF
 }
 VIVEOF
                 echo "==> viv bundles: Alpine INTERACTIVE twin staged at $ib (args /bin/sh -i -- ioctl is unserved, so isatty() is false and ash needs the flag to be interactive)"
+                # The CONSOLE ^C twin (item 12): the same rootfs, a
+                # non-interactive entrypoint that PRE-INSTALLS a SIGINT trap and
+                # then blocks. This is the vehicle for the console-^C-forward
+                # regression (tools/interactive/viv-console-ctrlc.exp): the bare
+                # console has no job-control fan, so a container's ^C arrives as
+                # the OWNER-routed `interrupt` note that ut forwards to viv and
+                # viv forwards to this entrypoint -- a path that needs NO console
+                # input to the container (the interactive-ash-on-console input
+                # path is racy and is not what item 12 exercises). The trap fires
+                # GOTINT-CONSOLE only if viv forwarded the interrupt; without the
+                # fix viv masks it on the console and the trap never runs. `sh -c`
+                # inline (viv bounds the whole string at PATH_MAX=512; this is ~85).
+                local tb="$vstage/alpine-trap"
+                rm -rf "$tb"; mkdir -p "$tb"
+                cp -R "$ab/rootfs" "$tb/rootfs"
+                rm -rf "$tb/rootfs/gate"
+                cat > "$tb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "-c", "trap 'echo GOTINT-CONSOLE; exit 0' INT; echo READY-FOR-CTRLC; while :; do sleep 1; done"],
+        "env": [],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux"
+    }
+}
+VIVEOF
+                echo "==> viv bundles: Alpine CONSOLE-^C twin staged at $tb (args sh -c 'trap ... INT; echo READY; sleep-loop' -- the item-12 console-^C-forward regression vehicle)"
             else
                 rm -rf "$ab"
                 echo "==> viv bundles: Alpine bundle SKIPPED -- the minirootfs is present but no busybox-static apk is (every stock Alpine ELF is dynamic PIE, which the loader rejects; task #145). Drop busybox-static-*.apk in build/cache/ or set THYLACINE_BUSYBOX_STATIC_APK." >&2
@@ -1358,7 +1389,7 @@ VIVEOF
             echo "==> viv bundles: untar of $tarball into the stock bundle FAILED -- DISTRO ARC gate bundle skipped" >&2
         fi
     fi
-    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" )$( [[ -d "$vstage/alpine-ash" ]] && echo " + alpine-ash" )$( [[ -d "$vstage/alpine-stock" ]] && echo " + alpine-stock" ))"
+    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" )$( [[ -d "$vstage/alpine-ash" ]] && echo " + alpine-ash" )$( [[ -d "$vstage/alpine-trap" ]] && echo " + alpine-trap" )$( [[ -d "$vstage/alpine-stock" ]] && echo " + alpine-stock" ))"
 }
 
 build_sysroot() {
