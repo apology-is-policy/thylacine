@@ -22,6 +22,33 @@ needed the operator.
 
 ---
 
+## 2026-08-20 (aux) — probe: does a real Linux binary reach the network under viv? (yes)
+
+User asked to verify curl/git + other third-party Linux programs under VIVARIUM.
+Rather than theorize, probed with busybox (musl-static, has wget/nslookup) in an
+Alpine container. **The phenotype network reaches the internet**: `busybox wget
+http://<example.com-IP>/` in a net-granted container returned `HTTP/1.1 403
+Forbidden` — a real connect + HTTP round-trip through slirp over the phenotype
+socket path (403 = Cloudflare rejecting a bare-IP Host; the round-trip
+succeeded).
+
+**The blocker was a per-container capability, not a socket gap** — and a wrong
+turn caught by a second axis. First probe (no /net) showed `socket(AF_INET,2,0)
+ENOENT` and I wrote "UDP unsupported". The by-IP probe then showed
+`socket(AF_INET,1,0)` — *TCP* socket() ALSO ENOENT — so the root cause was
+`/net` absent, not a UDP-family gap. `/net` is bound only if the manifest sets
+`annotations.org.thylacine.net=granted` (viv/main.rs:304-308 + 595-623); the
+stock bundles don't. Added an `alpine-net` bundle that grants it.
+
+**Gaps left open toward a clean curl/git** (the mission, now opened): (1)
+`clock_gettime`/`gettimeofday` have no phenotype translator — no timeouts, so the
+probe hung on a dead peer (`wget -T 5` to the slirp-blackholed gateway); likely a
+small T2-routing chunk since the native vDSO already serves them. (2) DNS/UDP
+untested. (3) staging a real curl + git + deps. User chose "compact, then
+implement + demo"; full plan + findings in memory ([[project-phenotype-network-probe]]).
+Gotcha banked: `expect -n <script>` EXECUTES the script (spawned the strays I had
+to kill), it is NOT a parse check.
+
 ## 2026-08-20 (aux) — item 12: viv forwards the owner-routed console ^C, and the regression that had to stop typing at the shell
 
 A container run from the BARE SERIAL CONSOLE never received ^C after 5336c894:
