@@ -22,6 +22,47 @@ needed the operator.
 
 ---
 
+## 2026-08-20 — V-3b design pass: the ring Venus can't use, caught before the code
+
+The operator chose "V-3b Venus, design first" after V-3a pushed. The pass -- two
+prior-art research agents + a focused fork-resolution spike -- found the V-3
+arc's foundational premise was WRONG, and caught it before a line of the
+~1.2 kLOC Venus backend was written against it.
+
+**The premise that failed.** WARP-V3-DESIGN (section 2) had it that the V-3a
+coherent ring IS Venus's command ring. The spike proved otherwise, source-cited
+against Mesa 25.0.7 + virglrenderer main: (1) unpatched Venus creates its ring
+UNCONDITIONALLY (`vn_instance.c:320`, no gate, fatal on failure) and routes every
+real Vulkan command through it -- only 4 bookkeeping commands use SUBMIT_CMD; (2)
+the ring MUST be host-allocated shmem (`HOST3D`/`FD_SHM`) -- virglrenderer fatally
+rejects a non-FD_SHM ring (`vkr_transport.c:201`) and Venus's driver hard-codes
+`HOST3D`, refusing guest memory (`vn_renderer_virtgpu.c:1457`; host process
+isolation can't deref guest sglists). The V-3a ring shipped at `f12d7317` is a
+`blob_mem=GUEST`, tapestryd-consumed ring with head=producer/tail=consumer --
+wrong backing AND the opposite head/tail convention from Venus's
+virglrenderer-consumed HOST3D ring. It cannot be Venus's ring.
+
+**Why this is the design pass earning its keep.** The premise was about an
+EXTERNAL system's requirements (how Mesa's Venus + virglrenderer expect their
+ring), and it was never verified against their source before the V-3a substrate
+was designed, built, audited (three rounds), and shipped. The design pass -- not
+the implementation -- caught it, before the backend was written against a ring
+Venus would reject at instance creation. The reusable lesson: a design premise
+about an external system must be checked against that system's source before you
+build the substrate that depends on it; three green audit rounds on V-3a proved
+the ring SOUND, not that it was the RIGHT ring.
+
+**The resolution.** The fork was surfaced with the research attached; the
+operator ratified Model B (virglrenderer polls a HOST3D ring, minted by tapestryd
+via the V-2 hostmem path, tapestryd staying venus-agnostic -- the upstream model,
+with production precedent). WARP-V3-DESIGN section 0 now records the finding +
+Model B + the corrected premise. V-3a is not wasted: a valid coherent-ring
+primitive for a native (non-Venus) client, its /srv/warp ring ABI surface partly
+reusable -- but its tapestryd-consumer core is off the Venus path. Also settled
+in the pass (fork-independent): the OWED host-side rescue (a needs_drain
+serve-loop sweep) and `ops.wait` (t_poll on the fence fd -- the one backend risk,
+dissolved). No code landed; the next step is the Model B implementation.
+
 ## 2026-08-19 — V-3a green on virgl, and the DoS one thread couldn't show
 
 Resumed from a self-compact with the `1<<43` encoding fix committed (`2fb542c6`)

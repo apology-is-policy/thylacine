@@ -5,8 +5,90 @@ shmem ring). Elaborates `GPU-DESIGN.md` sections 2.3, 2.4, 6.2, and the section-
 V-3 ladder entry into an implementable design. Binding for the V-3 sub-chunks;
 where it and `GPU-DESIGN.md` disagree, GPU-DESIGN wins and this doc is corrected.
 
-Status: **DESIGN (V-3a detailed; V-3b/c/d sketched).** No code has landed against
-it yet. Tip context: V-2 (`SYS_BURROW_FROM_HOSTMEM=107`) shipped at `7973f8dc`.
+Status: **V-3a SHIPPED (`f12d7317`) -- but see section 0: it is NOT Venus's ring.
+V-3b architecture RESOLVED to Model B (operator vote 2026-08-20), detailed in
+section 0.** Tip context: V-2 (`SYS_BURROW_FROM_HOSTMEM=107`) shipped at
+`7973f8dc`; V-3a at `f12d7317`.
+
+---
+
+## 0. V-3b RESOLVED ARCHITECTURE + the V-3a premise correction (2026-08-20)
+
+**This section supersedes the section-2/3/4 premise that "the V-3a coherent
+ring is Venus's ring." A design-pass spike (source-cited against Mesa 25.0.7 +
+virglrenderer main) proved that premise WRONG, and the operator ratified
+Model B. Read this before the older sketch below.**
+
+### 0.1 The spike finding (source-cited)
+1. **Unpatched Venus creates its command ring UNCONDITIONALLY** and cannot run
+   ringless: `vn_instance.c:320` calls `vn_instance_init_ring` with no gate and
+   aborts instance creation on its failure; every real Vulkan command threads
+   through the ring; only 4 ring-bookkeeping commands (`vkCreateRingMESA` /
+   `Destroy` / `Notify` / `SubmitVirtqueueSeqno`) ever use the SUBMIT_CMD path.
+2. **virglrenderer executes venus commands from SUBMIT_CMD fully** -- its ring
+   dispatch is a copy of the context dispatch (`vkr_ring.c:103`), so SUBMIT_CMD
+   is a first-class path (it is how the ring is bootstrapped), not a gate.
+3. **Venus's ring MUST be host-allocated shmem** (`HOST3D` + `blob_id=0` +
+   `MAPPABLE` -> `FD_SHM`): virglrenderer FATALLY rejects any non-`FD_SHM` ring
+   (`vkr_transport.c:201-203`) and derefs it as a contiguous host VA; Venus's
+   driver hard-codes `HOST3D` and REFUSES guest memory
+   (`vn_renderer_virtgpu.c:1457` -- host process isolation cannot deref guest
+   sglists). Both guest and virglrenderer map the SAME host pages.
+
+### 0.2 The correction: the V-3a ring is NOT Venus's ring
+The shipped V-3a ring (`f12d7317`) is a `blob_mem=GUEST`, **tapestryd-consumed**
+ring (head=producer/tail=consumer; `wring_kick` drains). Venus's ring is
+`HOST3D`, **virglrenderer-consumed**, head=consumer/tail=producer (the opposite
+convention). So V-3a cannot be Venus's ring -- wrong backing AND opposite
+convention. **V-3a is not wasted**: it is a valid coherent-ring primitive for a
+NATIVE (non-Venus) GPU client, and its `/srv/warp` ring ABI surface
+(`ring/new|map|kick|fence`) + blob machinery are partly reusable. But its
+tapestryd-consumer core is off the Venus path.
+
+### 0.3 The resolved architecture: Model B (operator vote 2026-08-20)
+virglrenderer polls Venus's HOST3D ring; tapestryd owns the device + the
+resources but stays venus-agnostic:
+- **shmem_create** -> tapestryd mints the ring as a `HOST3D` blob
+  (`RESOURCE_CREATE_BLOB(blob_id=0, HOST3D, USE_MAPPABLE)` -> host anon-shmem),
+  maps it into the guest via the **V-2 hostmem path** (`SYS_BURROW_FROM_HOSTMEM`,
+  the host-shmem-fd -> guest-VA mapping), and registers it so virglrenderer maps
+  the same host pages by `res_id`.
+- **ops.submit** -> the venus command stream (incl. `vkCreateRingMESA` carrying
+  the ring `res_id`, `vkNotifyRingMESA` idle-kicks, fences) is forwarded via
+  `gpu.submit_3d` (the controlq SUBMIT_CMD) to virglrenderer. tapestryd forwards
+  RAW command bytes -- it never parses venus. Low-traffic (the ring carries the
+  bulk); the V-3a ring MAY serve as this transport, or a byte submit.
+- virglrenderer maps the HOST3D ring (via `vkCreateRingMESA`) and POLLS it; the
+  guest writes commands + advances tail; kicks (`vkNotifyRingMESA`) only when
+  virglrenderer sets the ring IDLE status.
+- **ops.wait** -> `t_poll` on the `ring/<ridx>/fence` fd(s) with the Vulkan ns
+  timeout -> `timeout_ms` (the fence file is the host->guest wakeup, delivered
+  by `poll_ring_fences` on retire); `wait_any` = poll multiple fds. No busy-spin.
+- **get_info** -> the `caps` file (the retained Venus capset blob).
+
+### 0.4 What V-3b builds (the deltas)
+- **tapestryd**: the `HOST3D`-ring-blob mint + guest-map + register path
+  (virglrenderer's `vkr_context_create_resource_from_shm` is the host-side
+  reference); the SUBMIT_CMD forward of the venus stream on the controlq; the
+  reply-shmem registration (`FD_SHM`). The OWED host-side rescue (round-3 F1)
+  applies to the fenced-submit drain. Audit-bearing (the section-25.4 Warp row).
+- **Mesa** (`vn_renderer_thylacine.c`, ~1.2 kLOC, patch 0010+ under
+  `src/virtio/vulkan/`): the 19-fn `vn_renderer` (16 mandatory), mapping above;
+  built with `-Dvulkan-drivers=virtio` on `thyla-keep`, a Vulkan ICD artifact +
+  a Vulkan prove-gate on thyla-pi (real V3D). Mesa base pin: `mesa-26.1.6`.
+- V-3c (capset authority, I-45) + V-3d (E2E) stay separate.
+
+### 0.5 Open questions RESOLVED by the spike
+- **Ring blob type**: `HOST3D` (host-allocated shmem), NOT `blob_mem=GUEST`.
+- **coherent=0 (ringless)**: not available unpatched; Model A rejected (it would
+  need a Venus source patch, violating "zero patches to the Venus driver").
+- **Who consumes the ring**: virglrenderer (Model B), not tapestryd.
+
+Full spike verdict + the 3-way analysis lived in the design-pass scratchpad
+(`scratchpad/v3b/SPIKE-VERDICT.md`); the settled sub-designs (the host-side
+rescue, `ops.wait`, the build) in the same dir. Sections 1-5 below are the
+PRE-correction design; where they say the V-3a guest ring is Venus's ring, this
+section 0 governs.
 
 ---
 
