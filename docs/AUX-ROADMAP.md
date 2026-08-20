@@ -699,7 +699,7 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    Pipe + 9P client rows + SMP gate); (B) a Dev-level unwind for pts/cons reads
    only; (C) v1.x. Retires the "late ^C eats the next line" family (items 8,
    10) in one move.
-12. **On the KERNEL CONSOLE a container never receives ^C after 5336c894 -- LANDED *(pending)* 2026-08-20**
+12. **On the KERNEL CONSOLE a container never receives ^C after 5336c894 -- LANDED a2870706 2026-08-20**
    (self-found 2026-08-18 before the 437213c4+5336c894 round; the fix + the
    discrimination-proven alpine-trap regression + the holotype round) (`memory/
    bug_console_ctrlc_swallowed_by_viv_mask.md`). The serial console has no job

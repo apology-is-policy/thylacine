@@ -31,7 +31,7 @@ it) and viv's #237 interrupt MASK swallowed the forwarded note. Fix: viv's
 INTERRUPT mask is conditional on `on_pts` — the CONSOLE arm self-manages a notes
 fd and poll-forwards `interrupt` to the entrypoint (`wait_entrypoint_interruptible`,
 mirroring ut's `wait_pids_interruptible`); the PTS arm is unchanged (the pgroup
-fan delivers). LANDED *(pending)*.
+fan delivers). LANDED a2870706.
 
 **The wrong turn that got caught — the reusable part.** The first regression
 typed `trap … INT` into an interactive alpine-ash ON THE BARE CONSOLE. It FAILED
