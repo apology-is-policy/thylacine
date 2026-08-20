@@ -79,9 +79,34 @@ HEAD), so no prosecutor round is owed — the boot-both-ways proof is the
 validation. Docs: VIVARIUM §6.23 gained the fails-without-fix-driver paragraph;
 `145-vivarium.md`'s stale "R5-F9 still unanswered" note is now answered YES.
 
+**Gates, and a pre-existing red the full LS-CI surfaced.** SMP gate 40/40 (0
+corruption, default+UBSan x smp4/smp8, N=10) -- the probe runs on every one of
+those boots. The full 40-scenario LS-CI (aux's first since the aux-2<->main
+merge) came back 37/40 PASS + 2 SKIP + **1 FAIL: `ls-gfx-age`**. Chased to
+ground rather than waved off: the guest boots fine (`boot OK` @24s) and reaches
+login, but the login prompt (correctly no trailing newline) gets tapestryd's
+async scanout diagnostic appended on one console line
+(`Thylacine login: tapestryd: scanout...`), so the harness's login-expect never
+matches -> 900s timeout. Deterministic 3/3. It is a console-TX ordering issue on
+**main's** console arc (the prompt-vs-peer-daemon-write family), conclusively
+NOT this test-only change: the kernel is git-verified byte-identical to HEAD and
+the probe exits in the boot pheno-bundle phase, before login + the graphics
+daemons; every notes/signals LS-CI scenario passed. Enqueued
+(`memory/bug_lsgfxage_login_tapestryd_interleave.md`) + noted to main. The
+operator ratified the push despite the pre-existing red. Landed `33cecf78`
+(driver) + `aab29f65` (status fixup), pushed both mirrors.
+
+**A side-task the operator injected mid-wait:** improve the stop-hook's Case 3
+(`tools/stop-hook.sh`) to steer toward the yip lease *proactively* -- before
+starting anything that uses a resource a parallel agent can contend (the shared
+host's cores for a build/gate/boot), take `yip hold <res>` FIRST, since it both
+blocks-until-free as the synchronous await AND signals ownership. Applied in
+main's tree (the firing copy per `~/.claude/settings.json`), bash -n clean,
+noted to main to commit separately from its V-3b gpu.rs work.
+
 **Still open (tracked, not this chunk):** the VMA-same-stack v1.x hardening
 closing the audit's F1 (the swapcontext-cross-stack false-clear); item 12 (viv
-console ^C forward).
+console ^C forward); ls-gfx-age (main's console arc).
 
 ---
 
