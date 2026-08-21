@@ -74,6 +74,21 @@ make all && make test
 make run                # launch an interactive dev VM (UART on the terminal)
 ```
 
+**Want a complete image with everything baked in that boots fast?** Use the
+all-in-one script — every bake chunk turned on, `--production` so there are no
+boot tests and the image goes straight to the login getty:
+
+```bash
+tools/build-everything.sh          # or: make everything
+SKIP_CLADE=1 make everything       # skip the one slow chunk (the LLVM device toolchain)
+```
+
+It turns on every chunk toggle, stages the ones `build.sh all` doesn't stage
+itself (`/clade`, `/storm`, `/quake`), and reports up front which optional chunks
+have their inputs present (an absent input skips that chunk with a warning rather
+than failing the build). See Section 5 for what each chunk is, and Section 8's
+speed note: this is the *slow build* that yields the *fast boot*.
+
 **Read the build summary.** Every `build.sh` run ends with a
 `==> [build.sh] SUMMARY for target '<t>'` block that lists exactly what was
 **BUILT / REUSED / REGENERATED / PRESERVED** this invocation. Caches are content-

@@ -4,7 +4,7 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive test-classify check-arc-gates check-production smp-gate idle-gate check-floor test-a72 test-fault verify-kaslr test-venus-verdict run run-tcg gdb specs help
+.PHONY: all kernel production everything sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive test-classify check-arc-gates check-production smp-gate idle-gate check-floor test-a72 test-fault verify-kaslr test-venus-verdict run run-tcg gdb specs help
 
 all:
 	@tools/build.sh all
@@ -16,6 +16,14 @@ kernel:
 # boot-test probe ladder. Boots straight to the login getty.
 production:
 	@tools/build.sh all --production
+
+# A COMPLETE, quick-to-boot image: every bake chunk ON (/goroot, /clade + /storm,
+# /chase-w2, the viv + Alpine bundles, /quake) + --production (no boot tests ->
+# straight to login). Optional chunks with an absent input skip with a warning.
+# SKIP_CLADE=1 skips the slow LLVM device-toolchain build. See
+# docs/BUILD-HARNESS.md and tools/build-everything.sh.
+everything:
+	@tools/build-everything.sh
 
 sysroot:
 	@tools/build.sh sysroot
@@ -195,6 +203,8 @@ help:
 	@echo "Thylacine OS — make targets:"
 	@echo "  kernel     — build the kernel ELF (build/kernel/thylacine.elf)"
 	@echo "  all        — kernel + sysroot + userspace + disk (as available per phase)"
+	@echo "  everything — COMPLETE + quick-to-boot: every bake chunk ON + --production"
+	@echo "               (no boot tests). SKIP_CLADE=1 skips the slow LLVM build."
 	@echo "  pool       — re-bake build/fixtures/pool.img (clean Stratum boot pool)"
 	@echo "  test       — run-vm + boot-banner verify (HVF on a capable host; W3.5)"
 	@echo "  test-tcg   — same, forced to full-emulation TCG (-cpu max + GICv3) compat run"
