@@ -22,6 +22,54 @@ needed the operator.
 
 ---
 
+## 2026-08-24 — V-3b-1b: the guest-map, and the Result alias the compiler caught
+
+Same autonomous run as the V-3b-1a entry below, continued past that chunk's push
+(the run-through rule -- a checkpoint is not a stopping point). V-3b-1b guest-maps
+the HOST3D ring blob: the client binding for SYS_BURROW_FROM_HOSTMEM (which V-2
+built kernel-side but never wrapped -- "client delivery exercised only by unit
+tests until V-3 drives it E2E") + a tapestryd hostmem-offset allocator + a probe
+that round-trips a sentinel through the guest VA.
+
+**The build earned its keep.** The compile-check caught a real error before the
+GL boot: `PciDev::burrow_from_hostmem` was declared `-> Result<u64, PciError>`,
+but hardware.rs has a 1-arg `Result` alias (`crate::err::Result<T>`) in scope, so
+the 2-arg form is E0107, and `Err(PciError::MapBar)` then mismatched (E0308). The
+existing PciError-returning methods (claim / claim_nth) spell it
+`core::result::Result<Self, PciError>` for exactly this reason; the fix matched
+them. Read by CONTENT, not by the wrapper script's exit code -- that was 0
+because a trailing `echo` masked build.sh's real status, a reminder to grep the
+log for `error[` rather than trust `$?` through a pipeline.
+
+**The sentinel proof, and its limit, stated.** `hostmem_sentinel` writes a u32 to
+the guest VA and reads it back at the same address. ARM same-address same-core
+coherency round-trips it with no barrier, so a MISMATCH means the VA does not
+alias the mapped BAR. It proves the guest can ACCESS the blob -- NOT that
+virglrenderer sees the guest's writes (host-visibility), which is deliberately a
+later rung (the ring poll, V-3b-1c/2) and is not claimed. The returned VA
+reaching the BAR is the kernel's V-2 guarantee; the sentinel confirms the mapping
+is live.
+
+**The audit caught a design bug I would have shipped.** Fable 5 (family diversity
+restored this round), 0 P0 / 0 P1 / 1 P2 / 3 P3. F1 [P2]: the probe hardcoded
+`T_CACHE_WC` and *discarded* `map_blob`'s `map_info` -- but the host dictated
+`map_info=0x1` (CACHED), and GPU-DESIGN 6.2 is signed-off that the guest maps the
+attribute "honored exactly". A guest-WC vs host-WB alias is the ARM64
+mismatched-attribute hazard the scripture's own field-agreement warning forbids;
+it would have surfaced TWO rungs later at V-3b-1c as a "host never sees the kick"
+coherency mystery on real-silicon KVM, with a comment on the FFI actively
+pointing the debugger at write-combining (the x86 intuition, wrong on ARM). I had
+written that comment myself. Fixed by consuming `map_info` -> `map_info_to_cache`
+-> passing the host-dictated attribute, and rewriting the comment to state the
+rule. The reusable lesson: an attribute you *choose* for a shared mapping is a
+claim about the other side's mapping -- derive it from what the other side
+dictated, never from what feels right for your access pattern. F2-F4 [P3] all
+fixed (zero-size alloc alias; the leaked offset-0 mapping now `t_burrow_detach`'d
+-- the "no detach primitive" comment was wrong, tapestryd already uses it; doc rot).
+
+**Cost**: two pi boots (the venus verb, re-run after the F1/F3 fixes changed the
+probe's behavior).
+
 ## 2026-08-20..24 — V-3b-1a: the HOST3D substrate, and the render server that wasn't there
 
 Model B's first rung: the tapestryd primitive that mints a HOST3D blob and maps

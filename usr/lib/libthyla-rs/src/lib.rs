@@ -275,6 +275,16 @@ pub const T_SYS_DMA_CREATE_WEAVE: u64 = 99;     // G-2: mint a share-admissible 
 pub const T_SYS_WEFT_UNSHARE: u64     = 100;    // G-2: disarm an un-claimed share (retire/GC)
 pub const T_SYS_DMA_CREATE_GPU_BO: u64 = 106;   // Warp-2: mint a share-admissible GPU BO
 pub const T_SYS_BURROW_FROM_HOSTMEM: u64 = 107; // Warp-6 V-2: map a PCI hostmem BAR subrange -> client VA
+// SYS_BURROW_FROM_HOSTMEM cache_policy -- mirrors the kernel enum t_cache_policy
+// (kernel/include/thylacine/syscall.h); ABI-pinned. The host DICTATES the
+// attribute (map_blob returns it as map_info); the guest must pass the MATCHING
+// T_CACHE_* -- GPU-DESIGN 6.2 "honored exactly". A guest attribute that disagrees
+// with the host's (e.g. guest NC vs host WB) is the ARM64 mismatched-alias hazard
+// and loses coherency; do NOT guess. On KVM the host maps a HOST3D ring CACHED,
+// so the guest ring is CACHED too.
+pub const T_CACHE_CACHED: u64   = 0; // Normal Write-Back (host-coherent)
+pub const T_CACHE_WC: u64       = 1; // Normal Non-Cacheable (write-combining)
+pub const T_CACHE_UNCACHED: u64 = 2; // Normal Non-Cacheable (host non-coherent)
 pub const T_SYS_EXECVE: u64           = 104;    // LINEAGE L-2: replace this Proc's image in place
 pub const T_SYS_RFORK: u64            = 105;    // LINEAGE L-3b: fork sharing the address space
 // SYS_RFORK flags (kernel/include/thylacine/proc.h). Only RFPROC|RFMEM is
@@ -948,6 +958,37 @@ pub unsafe fn t_pci_map_bar(handle: i64, vaddr: u64, bar_index: u64, prot: u32) 
         in("x2") bar_index,
         in("x3") prot as u64,
         in("x8") T_SYS_PCI_MAP_BAR,
+        options(nostack)
+    );
+    x0
+}
+
+// t_burrow_from_hostmem — Warp-6 V-3b: map a subrange of the PCI hostmem BAR
+// (device PA = bar.pa + shm-window offset + `offset`, `length` bytes) into this
+// Proc's burrow-attach window and return the guest VA. `handle` is the caller's
+// KObj_PCI claim (RIGHT_MAP required -- holding it IS the authority, I-5).
+// `cache_policy` is a T_CACHE_* value. Returns the VA, or < 0 on a bad
+// handle / missing right / OOB subrange / unknown cache policy.
+//
+// Safety: makes a raw syscall; the returned VA aliases device memory (the
+// hostmem BAR), so the caller owns its lifetime until proc exit / unmap.
+#[inline(always)]
+pub unsafe fn t_burrow_from_hostmem(
+    handle: i64,
+    shmid: u64,
+    offset: u64,
+    length: u64,
+    cache_policy: u64,
+) -> i64 {
+    let mut x0: i64 = handle;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") shmid,
+        in("x2") offset,
+        in("x3") length,
+        in("x4") cache_policy,
+        in("x8") T_SYS_BURROW_FROM_HOSTMEM,
         options(nostack)
     );
     x0

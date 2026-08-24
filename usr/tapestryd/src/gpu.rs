@@ -29,7 +29,9 @@ use libthyla_rs::hardware::{
 };
 use libthyla_rs::time::Instant;
 use libthyla_rs::virtio_rmb;
-use libthyla_rs::{T_PROT_READ, T_PROT_WRITE};
+use libthyla_rs::{
+    t_burrow_detach, T_CACHE_CACHED, T_CACHE_UNCACHED, T_CACHE_WC, T_PROT_READ, T_PROT_WRITE,
+};
 
 pub const PAGE_SIZE: u64 = 0x1000;
 
@@ -182,6 +184,90 @@ const _: () = assert!(
         && HOST3D_PROBE_CTX_ID != PROBE_CTX_ID_VENUS,
     "host3d probe ids must sit below SCREEN_RES / within the ctx window and be distinct"
 );
+
+// Warp-6 V-3b-1b: the hostmem guest-map probe's ids -- one HOST3D blob created
+// under a venus ctx, mapped, then guest-mapped via SYS_BURROW_FROM_HOSTMEM and
+// sentinel-round-tripped. Same pre-Server init timing as host3d_probe; distinct
+// from every other fixed probe id.
+const HOSTMEM_PROBE_RES: u32 = 0x2e;
+const HOSTMEM_PROBE_CTX_ID: u32 = 203;
+const _: () = assert!(
+    HOSTMEM_PROBE_RES < crate::server::SCREEN_RES
+        && HOSTMEM_PROBE_RES != BLOB_PROBE_RES_ID
+        && HOSTMEM_PROBE_RES != HOST3D_PROBE_RES_CTX
+        && HOSTMEM_PROBE_RES != HOST3D_PROBE_RES_GLOBAL
+        && HOSTMEM_PROBE_CTX_ID > crate::server::MAX_WARP_CTXS as u32
+        && HOSTMEM_PROBE_CTX_ID < crate::server::COMPOSITOR_CTX
+        && HOSTMEM_PROBE_CTX_ID != PROBE_CTX_ID_VIRGL
+        && HOSTMEM_PROBE_CTX_ID != PROBE_CTX_ID_VENUS
+        && HOSTMEM_PROBE_CTX_ID != HOST3D_PROBE_CTX_ID,
+    "hostmem probe ids must sit below SCREEN_RES / within the ctx window and be distinct"
+);
+
+/// V-3b-1b: a bump allocator over the hostmem BAR's shm region, handing out
+/// page-aligned, non-overlapping byte offsets (relative to the region window
+/// base -- the frame `map_blob` and `burrow_from_hostmem` both use) for HOST3D
+/// ring blobs. Bump-only: ring blobs live for the client's session; a free-list
+/// arrives with the ring lifecycle (V-3b-1c) only if rings are re-minted.
+struct HostmemAllocator {
+    next: u64,
+    len: u64,
+}
+
+impl HostmemAllocator {
+    fn new(region_len: u64) -> Self {
+        Self { next: 0, len: region_len }
+    }
+
+    /// Reserve `size` bytes (rounded up to a page); returns the offset, or None
+    /// when the region cannot fit it. Overflow-safe on every arithmetic step.
+    fn alloc(&mut self, size: u64) -> Option<u64> {
+        if size == 0 {
+            // A zero-size reservation would not advance `next`, so it would alias
+            // the next allocation -- refuse it rather than hand out a non-region.
+            return None;
+        }
+        let size = size.checked_add(PAGE_SIZE - 1)? & !(PAGE_SIZE - 1);
+        let off = self.next;
+        let end = off.checked_add(size)?;
+        if end > self.len {
+            return None;
+        }
+        self.next = end;
+        Some(off)
+    }
+}
+
+// V-3b-1b: virtio_gpu map_info cache types (VIRTIO_GPU_MAP_CACHE_*, section 5.7).
+// map_blob returns one; the guest PTE must map at the MATCHING attribute
+// (GPU-DESIGN 6.2 "honored exactly") or a mismatched host/guest alias loses
+// coherency on ARM64. CACHED is the host-coherent pair on KVM.
+const VIRTIO_GPU_MAP_CACHE_CACHED: u32 = 0x1;
+const VIRTIO_GPU_MAP_CACHE_UNCACHED: u32 = 0x2;
+const VIRTIO_GPU_MAP_CACHE_WC: u32 = 0x3;
+
+/// Translate a `map_blob` `map_info` cache type into the `T_CACHE_*` the guest
+/// PTE must use to MATCH the host's mapping. CACHED (0x1) and NONE/unknown map to
+/// the host-coherent write-back default; never guess WC (the ARM64 mismatched-
+/// alias hazard GPU-DESIGN 6.2 forbids). The `_CACHED` const names the 0x1 arm
+/// the default already covers.
+fn map_info_to_cache(map_info: u32) -> u64 {
+    match map_info {
+        VIRTIO_GPU_MAP_CACHE_CACHED => T_CACHE_CACHED,
+        VIRTIO_GPU_MAP_CACHE_UNCACHED => T_CACHE_UNCACHED,
+        VIRTIO_GPU_MAP_CACHE_WC => T_CACHE_WC,
+        _ => T_CACHE_CACHED, // NONE / unknown -> host-coherent write-back
+    }
+}
+
+/// A short name for a `T_CACHE_*` value, for the probe's log line.
+fn cache_name(cache: u64) -> &'static str {
+    match cache {
+        T_CACHE_WC => "WC",
+        T_CACHE_UNCACHED => "UNCACHED",
+        _ => "CACHED",
+    }
+}
 
 // 3D commands (VIRTIO 1.2 section 5.7.6.9; virgl-negotiated only). The seam's
 // context lifecycle + resource plumbing (Warp-2c); SUBMIT_3D + the transfers
@@ -1451,6 +1537,7 @@ impl Gpu {
             gpu.probe_capsets()?;
             gpu.blob_probe(blob_probe_va)?;
             gpu.host3d_probe()?;
+            gpu.hostmem_map_probe()?;
         }
         say!(
             "tapestryd: gpu up -- {}x{}, pci intid={}, virgl={} capsets={}",
@@ -1762,6 +1849,110 @@ impl Gpu {
             Err(_) => say!("tapestryd: gpu host3d-map {} create refused", tag),
         }
         let _ = self.resource_unref(res_id);
+    }
+
+    /// Warp-6 V-3b-1b: prove tapestryd can GUEST-MAP a HOST3D ring blob. After
+    /// V-3b-1a showed the host places the blob in the hostmem BAR (map_blob),
+    /// this answers: can the guest reach those bytes? Allocate a page-aligned
+    /// offset, create + map a HOST3D blob there under a venus ctx, then
+    /// SYS_BURROW_FROM_HOSTMEM the same subrange into a guest VA and round-trip a
+    /// sentinel through it. The returned VA reaching the BAR is the kernel's V-2
+    /// guarantee; the sentinel confirms the mapping is live + accessible.
+    /// Host-visibility (virglrenderer sees the guest's writes) is a later rung
+    /// (the ring poll, V-3b-1c/2). Init-time, pre-Server, like host3d_probe, and
+    /// swallows every outcome (Ok) for the same last-probe / optional-venus
+    /// reason -- a wedge here never fails the console.
+    fn hostmem_map_probe(&mut self) -> Result<(), Error> {
+        if !self.blob {
+            say!("tapestryd: gpu hostmem-map skipped (F_RESOURCE_BLOB not offered)");
+            return Ok(());
+        }
+        let region_len = match self.pci.shm_region(1) {
+            Some((_, len)) => len,
+            None => {
+                say!("tapestryd: gpu hostmem-map skipped (no hostmem shm region)");
+                return Ok(());
+            }
+        };
+        if !self.ctxinit {
+            say!("tapestryd: gpu hostmem-map skipped (no CONTEXT_INIT -- venus ctx unavailable)");
+            return Ok(());
+        }
+        if self
+            .ctx_create_capset(HOSTMEM_PROBE_CTX_ID, VIRTIO_GPU_CAPSET_VENUS, b"hostmem-probe")
+            .is_err()
+        {
+            say!("tapestryd: gpu hostmem-map venus ctx create failed; skipped");
+            return Ok(());
+        }
+        let mut alloc = HostmemAllocator::new(region_len);
+        let ring_len = PAGE_SIZE as u32;
+        match alloc.alloc(u64::from(ring_len)) {
+            None => say!("tapestryd: gpu hostmem-map skipped (hostmem region too small)"),
+            Some(off) => self.hostmem_map_probe_at(off, ring_len),
+        }
+        let _ = self.ctx_destroy(HOSTMEM_PROBE_CTX_ID);
+        Ok(())
+    }
+
+    /// One hostmem-map probe: create a HOST3D blob under the probe ctx, map it at
+    /// `off`, guest-map the subrange, round-trip a sentinel, then tear down. On a
+    /// map/burrow refusal it unmaps only what was mapped; unref is unconditional.
+    fn hostmem_map_probe_at(&mut self, off: u64, ring_len: u32) {
+        match self.create_host3d_blob(
+            HOSTMEM_PROBE_RES,
+            HOSTMEM_PROBE_CTX_ID,
+            VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE,
+            ring_len,
+        ) {
+            Ok(()) => match self.map_blob(HOSTMEM_PROBE_RES, off) {
+                // Map the guest PTE at the attribute the host DICTATED (map_info),
+                // never a hardcoded guess -- GPU-DESIGN 6.2 "honored exactly": a
+                // mismatched host/guest alias (guest NC vs host WB) loses
+                // coherency on ARM64, and a HOST3D ring the host polls needs the
+                // pair to agree (CACHED on KVM).
+                Ok(map_info) => {
+                    let cache = map_info_to_cache(map_info);
+                    match self.pci.burrow_from_hostmem(1, off, u64::from(ring_len), cache) {
+                        Ok(va) => self.hostmem_sentinel(va, off, cache),
+                        Err(_) => {
+                            say!("tapestryd: gpu hostmem-map create+map OK but BURROW_FROM_HOSTMEM refused");
+                            let _ = self.unmap_blob(HOSTMEM_PROBE_RES);
+                        }
+                    }
+                }
+                Err(_) => say!("tapestryd: gpu hostmem-map create OK but MAP refused"),
+            },
+            Err(_) => say!("tapestryd: gpu hostmem-map create refused"),
+        }
+        let _ = self.resource_unref(HOSTMEM_PROBE_RES);
+    }
+
+    /// Round-trip a sentinel through the guest-mapped hostmem VA, then DETACH it.
+    /// Same-address, same-core write-then-read: the architecture's coherency
+    /// returns the just-written value with no barrier, so a MISMATCH means the VA
+    /// does not alias the mapped BAR bytes. `cache` (the host-dictated attribute)
+    /// is logged so a V-3b-1c coherency bug is diagnosable from the boot line. The
+    /// mapping is detached (`t_burrow_detach`, the leg tapestryd already uses for
+    /// ring teardown) so the probe leaves no stale RW alias of shm offset 0 -- the
+    /// slot a persistent allocator hands the first real ring -- in the AS.
+    fn hostmem_sentinel(&mut self, va: u64, off: u64, cache: u64) {
+        let sentinel: u32 = 0x5657_3342; // "WV3B"
+        unsafe { w32(va, sentinel) };
+        let got = unsafe { r32(va) };
+        if got == sentinel {
+            say!(
+                "tapestryd: gpu hostmem-map MAPPED+ROUNDTRIP (va={:#x}, off={:#x}, cache={})",
+                va, off, cache_name(cache)
+            );
+        } else {
+            say!(
+                "tapestryd: gpu hostmem-map guest-mapped but sentinel MISMATCH (got={:#x})",
+                got
+            );
+        }
+        let _ = unsafe { t_burrow_detach(va, PAGE_SIZE) };
+        let _ = self.unmap_blob(HOSTMEM_PROBE_RES);
     }
 
     /// GET_CAPSET_INFO for one index -> (capset_id, max_version, max_size).

@@ -356,8 +356,23 @@ venus-verdict)
         echo "CONTROL leg: no 'host3d-map skipped (F_RESOURCE_BLOB not offered)' -- the probe did not take the intended no-feature skip; its absence of MAPPED proves nothing"
         vfail=1
     }
+    # V-3b-1b: the hostmem guest-map. The test leg guest-maps a HOST3D blob via
+    # SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel through the guest VA; the
+    # control leg (no F_RESOURCE_BLOB) self-skips.
+    grep -qF "gpu hostmem-map MAPPED+ROUNDTRIP" "$tst" || {
+        echo "TEST leg: the HOST3D blob did NOT guest-map + round-trip a sentinel -- the V-3b-1b guest-map (SYS_BURROW_FROM_HOSTMEM) path is broken"
+        vfail=1
+    }
+    if grep -qF "gpu hostmem-map MAPPED+ROUNDTRIP" "$ctl"; then
+        echo "CONTROL leg: a hostmem guest-map round-tripped WITHOUT F_RESOURCE_BLOB/hostmem -- impossible, the gate is wrong"
+        vfail=1
+    fi
+    grep -qF "gpu hostmem-map skipped (F_RESOURCE_BLOB not offered)" "$ctl" || {
+        echo "CONTROL leg: no 'hostmem-map skipped (F_RESOURCE_BLOB not offered)' -- the probe did not take the intended no-feature skip"
+        vfail=1
+    }
     if [ "$vfail" -eq 0 ]; then
-        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), AND a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a)"
+        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a), AND a HOST3D blob guest-maps via SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel (V-3b-1b)"
         grep -hE "gpu capset\[|num_capsets|blob-create" "$ctl" "$tst"
     else
         echo "VENUS GATE: UNVERIFIED"

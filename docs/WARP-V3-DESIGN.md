@@ -138,6 +138,34 @@ the device-global arm refused. The gate is folded into the `venus` verb's
 `venus-verdict` (a test-leg MAP + a device-global refusal + the control-leg
 skip), discrimination-tested by `tools/test-venus-verdict.sh` without a boot.
 
+### 0.7 V-3b-1b as-built: the guest-map (2026-08-24)
+V-3b-1a proved the host places a HOST3D blob in the hostmem BAR; V-3b-1b
+guest-maps it. Two pieces:
+- **libthyla-rs**: the `SYS_BURROW_FROM_HOSTMEM` client binding V-2 left unbuilt
+  (V-2 exercised the path in kernel unit tests only). `t_burrow_from_hostmem(handle,
+  shmid, offset, length, cache_policy)` (a 5-arg `svc`) + the `T_CACHE_*`
+  cache-policy constants (mirroring the kernel `enum t_cache_policy`) +
+  `PciDev::burrow_from_hostmem(shmid, offset, length, cache)`, which wraps the FFI
+  with the held KObj_PCI claim -- the authority (I-5-non-transferable). Returns
+  the guest VA.
+- **tapestryd**: `HostmemAllocator`, a page-aligned bump allocator over
+  `shm_region(1).length` handing out non-overlapping offsets; and
+  `hostmem_map_probe`, which allocates an offset, creates + maps a HOST3D blob
+  there under a venus ctx, guest-maps the subrange via the wrapper, and
+  round-trips a sentinel through the guest VA.
+
+The offset is one frame throughout: `map_blob(res, O)` and
+`burrow_from_hostmem(1, O, len, WC)` both take `O` relative to the region window
+base (device PA = `shm_region.0 + O`). The sentinel (a same-address
+write-then-read, no barrier -- ARM coherency round-trips it) proves the guest can
+ACCESS the mapped BAR; host-visibility (virglrenderer polling the ring) is a
+later rung (V-3b-1c/2), correctly not claimed here. The VA is mapped WC
+(`T_CACHE_WC` -> Normal Non-Cacheable) so guest ring stores drain without a
+cache flush. The allocator is bump-only at v1.0; a free-list arrives with the
+ring lifecycle (V-3b-1c) if rings are re-minted. Proven on GL (thyla-pi KVM/V3D):
+`tapestryd: gpu hostmem-map MAPPED+ROUNDTRIP`; the control leg (no F_RESOURCE_BLOB)
+self-skips. Folded into the `venus` verb's `venus-verdict`.
+
 ---
 
 ## 1. What V-3 is, and the seam it plugs into

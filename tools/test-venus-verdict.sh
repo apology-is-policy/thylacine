@@ -28,6 +28,7 @@ tapestryd: gpu ctx-capset id=2 CREATED
 tapestryd: gpu ctx-capset id=4 skipped (capset not enumerated)
 tapestryd: gpu blob-create skipped (F_RESOURCE_BLOB not offered)
 tapestryd: gpu host3d-map skipped (F_RESOURCE_BLOB not offered)
+tapestryd: gpu hostmem-map skipped (F_RESOURCE_BLOB not offered)
 EOF
 }
 mk_test() {
@@ -43,6 +44,7 @@ tapestryd: gpu ctx-capset id=4 CREATED
 tapestryd: gpu blob-create guest CREATED
 tapestryd: gpu host3d-map venus-ctx MAPPED (map_info=0x1)
 tapestryd: gpu host3d-map global create refused
+tapestryd: gpu hostmem-map MAPPED+ROUNDTRIP (va=0x100400000, off=0x0, cache=CACHED)
 EOF
 }
 
@@ -77,6 +79,13 @@ check "control leg lacks host3d skip -> UNVERIFIED"       1 \
       'grep -v "host3d-map skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
 check "control leg ALSO sees host3d MAPPED -> UNVERIFIED" 1 \
       'printf "tapestryd: gpu host3d-map venus-ctx MAPPED (map_info=0x1)\n" >> "$c"' ""
+# V-3b-1b: the hostmem guest-map legs, one variable away each.
+check "test leg lacks hostmem MAPPED+ROUNDTRIP -> UNVERIFIED" 1 "" \
+      'grep -v "hostmem-map MAPPED+ROUNDTRIP" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO sees hostmem MAPPED+ROUNDTRIP -> UNVERIFIED" 1 \
+      'printf "tapestryd: gpu hostmem-map MAPPED+ROUNDTRIP (va=0x100400000, off=0x0, cache=CACHED)\n" >> "$c"' ""
+check "control leg lacks hostmem skip -> UNVERIFIED"       1 \
+      'grep -v "hostmem-map skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
 # One variable away, each direction of the discrimination the gate claims.
 check "control leg ALSO sees id=4 -> UNVERIFIED" 1 \
       'printf "tapestryd: gpu capset[2] id=4 max_version=0 max_size=160\n" >> "$c"' ""
