@@ -248,6 +248,46 @@ pub extern "C" fn rs_main() -> i64 {
         t_putstr("u-repl-test: D4 menu completion OK\n");
     }
 
+    // 8. AND-OR list (scripture 8.6): short-circuit + final-status. The status
+    //    is the discriminator against "ran the RHS anyway": if `&&` did NOT
+    //    short-circuit, `false && true` would run `true` and leave 0; if `||`
+    //    did not, `true || false` would run `false` and leave 1.
+    {
+        let mut repl = Repl::new();
+        let mut sink: Vec<u8> = Vec::new();
+        repl.feed(b"false && true\n", &mut sink);
+        if repl.env().status() == 0 {
+            return fail("`false && true` ran the RHS -- && did not short-circuit");
+        }
+    }
+    {
+        let mut repl = Repl::new();
+        let mut sink: Vec<u8> = Vec::new();
+        repl.feed(b"true || false\n", &mut sink);
+        if repl.env().status() != 0 {
+            return fail("`true || false` ran the RHS -- || did not short-circuit");
+        }
+    }
+    {
+        let mut repl = Repl::new();
+        let mut sink: Vec<u8> = Vec::new();
+        // `||` runs the RHS when the LHS failed; the final status is the RHS's 0.
+        repl.feed(b"false || true\n", &mut sink);
+        if repl.env().status() != 0 {
+            return fail("`false || true` did not run the RHS to success");
+        }
+    }
+    {
+        let mut repl = Repl::new();
+        let mut sink: Vec<u8> = Vec::new();
+        // Left-associative: the chain reaches the final `true`.
+        repl.feed(b"false || false || true\n", &mut sink);
+        if repl.env().status() != 0 {
+            return fail("`false || false || true` did not reach the final true");
+        }
+    }
+    t_putstr("u-repl-test: AND-OR (&& / ||) short-circuit OK\n");
+
     t_putstr("u-repl-test: all OK\n");
     0
 }

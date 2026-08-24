@@ -135,7 +135,7 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use crate::parser::ast::{
-    AssignStmt, CaseStmt, Command, CommandKind, Expr, FnDecl, ForStmt, IfStmt, LetStmt,
+    AndOrList, AndOrOp, AssignStmt, CaseStmt, Command, CommandKind, Expr, FnDecl, ForStmt, IfStmt, LetStmt,
     MaskNoteStmt, OnNoteStmt, Pipeline, Redirect, RedirectKind, Script, Statement,
     StatementKind, TraceStmt, TryStmt, WhileStmt, Word,
 };
@@ -249,7 +249,40 @@ pub fn eval_statement(env: &mut Env, stmt: &Statement) -> EvalResult<StatementFl
         StatementKind::Trace(trace_stmt) => eval_trace(env, trace_stmt),
         StatementKind::OnNote(on_note) => eval_on_note(env, on_note),
         StatementKind::MaskNote(mask_note) => eval_mask_note(env, mask_note),
+        StatementKind::AndOr(list) => eval_and_or(env, list),
     }
+}
+
+// ---------------------------------------------------------------------
+// AND-OR list (scripture 8.6)
+// ---------------------------------------------------------------------
+
+/// Evaluate a short-circuit `&&` / `||` list. The first pipeline always
+/// runs; each later pipeline runs only if its connector is satisfied by
+/// the running $status (`&&` -> status == 0, `||` -> status != 0). An
+/// operand's non-zero exit is NOT propagated between links -- the connector
+/// consumes it -- so only the list's FINAL $status is left in `env` for the
+/// block loop's implicit-fail check. Hence `a || b` tolerates a's failure
+/// when b succeeds (scripture 8.6). A control-flow escape (return / break /
+/// continue) from any operand wins immediately.
+fn eval_and_or(env: &mut Env, list: &AndOrList) -> EvalResult<StatementFlow> {
+    let flow = eval_pipeline(env, &list.first)?;
+    if !matches!(flow, StatementFlow::Normal) {
+        return Ok(flow);
+    }
+    for (op, pipe) in &list.rest {
+        let run = match op {
+            AndOrOp::And => env.status() == 0,
+            AndOrOp::Or => env.status() != 0,
+        };
+        if run {
+            let flow = eval_pipeline(env, pipe)?;
+            if !matches!(flow, StatementFlow::Normal) {
+                return Ok(flow);
+            }
+        }
+    }
+    Ok(StatementFlow::Normal)
 }
 
 // ---------------------------------------------------------------------
@@ -264,11 +297,16 @@ pub fn eval_statement(env: &mut Env, stmt: &Statement) -> EvalResult<StatementFl
 ///     try-block (`implicit_fail_suppressed == 0`) (scripture 8.3 +
 ///     8.9 -- implicit-fail).
 fn should_propagate_failure(env: &Env, stmt: &Statement) -> bool {
-    let explicit = matches!(
-        &stmt.kind,
-        StatementKind::Pipeline(p)
-            if !p.elements.is_empty() && p.elements[0].command.fail_propagate
-    );
+    // A visible `?` postfix on the leading command forces propagation even at
+    // the interactive prompt (scripture 8.2) -- for a plain Pipeline OR for the
+    // first pipeline of an AndOr list (`a? && b`).
+    let leads_with_fail_propagate =
+        |p: &Pipeline| !p.elements.is_empty() && p.elements[0].command.fail_propagate;
+    let explicit = match &stmt.kind {
+        StatementKind::Pipeline(p) => leads_with_fail_propagate(p),
+        StatementKind::AndOr(list) => leads_with_fail_propagate(&list.first),
+        _ => false,
+    };
     let implicit = !env.interactive && env.implicit_fail_suppressed == 0;
     explicit || implicit
 }

@@ -123,6 +123,14 @@ pub enum StatementKind {
     /// runs; the registered handler (if any) fires immediately
     /// after the block exits.
     MaskNote(Box<MaskNoteStmt>),
+    /// A short-circuit AND-OR list: `pipeline (( && | || ) pipeline)+`
+    /// (scripture 8.6). `&&` runs the next pipeline iff the running
+    /// $status is 0; `||` runs it iff $status is non-zero. Left-
+    /// associative, `&&` and `||` at equal precedence. The list's final
+    /// $status is the last pipeline actually run -- so `a || b` TOLERATES
+    /// a's failure when b succeeds, and only that final status is subject
+    /// to implicit-fail propagation.
+    AndOr(Box<AndOrList>),
 }
 
 // ---------------------------------------------------------------------
@@ -154,6 +162,29 @@ pub struct PipelineElement {
     /// non-zero exit doesn't count toward pipefail per scripture
     /// section 8.4).
     pub tolerate_failure: bool,
+    pub span: Span,
+}
+
+// ---------------------------------------------------------------------
+// AND-OR list (scripture 8.6)
+// ---------------------------------------------------------------------
+
+/// The connector joining two pipelines in an AND-OR list.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AndOrOp {
+    /// `&&` -- run the following pipeline iff $status == 0.
+    And,
+    /// `||` -- run the following pipeline iff $status != 0.
+    Or,
+}
+
+/// A first pipeline followed by one or more `(op, pipeline)`
+/// continuations. Left-associative: each `op` gates its pipeline on the
+/// $status left by whatever ran most recently.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AndOrList {
+    pub first: Pipeline,
+    pub rest: Vec<(AndOrOp, Pipeline)>,
     pub span: Span,
 }
 

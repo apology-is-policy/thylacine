@@ -335,12 +335,39 @@ impl Parser {
     // -----------------------------------------------------------------
 
     fn parse_pipeline_statement(&mut self) -> ParseResult<Statement> {
-        let pipeline = self.parse_pipeline()?;
-        let span = pipeline.span;
-        Ok(Statement {
-            kind: StatementKind::Pipeline(pipeline),
-            span,
-        })
+        let first = self.parse_pipeline()?;
+        // AND-OR list (scripture 8.6): pipeline (( && | || ) pipeline)*.
+        // A lone pipeline stays a Pipeline statement (unchanged shape); an
+        // AndOr node is built only when at least one connector is present.
+        let mut rest = Vec::new();
+        loop {
+            let op = match self.peek_kind() {
+                Some(TokenKind::AndAnd) => AndOrOp::And,
+                Some(TokenKind::OrOr) => AndOrOp::Or,
+                _ => break,
+            };
+            self.pos += 1;
+            self.skip_newlines_only(); // allow a line break after `&&` / `||`
+            rest.push((op, self.parse_pipeline()?));
+        }
+        if rest.is_empty() {
+            let span = first.span;
+            Ok(Statement {
+                kind: StatementKind::Pipeline(first),
+                span,
+            })
+        } else {
+            let start = first.span.start;
+            let end = rest
+                .last()
+                .map(|(_, p)| p.span.end)
+                .unwrap_or(first.span.end);
+            let span = Span::new(start, end);
+            Ok(Statement {
+                kind: StatementKind::AndOr(Box::new(AndOrList { first, rest, span })),
+                span,
+            })
+        }
     }
 
     fn parse_pipeline(&mut self) -> ParseResult<Pipeline> {
