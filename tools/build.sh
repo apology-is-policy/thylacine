@@ -2693,10 +2693,17 @@ populate_stratum_pool() {
         kill -TERM "$stratumd_pid"; exit 1
     fi
     echo "==> populate pool: system recovery phrase (hostowner-c): $sys_recovery_phrase"
-    # Create /var/lib/corvus top-down (stratum-fs mkdir is single-level, no -p);
-    # joey's runtime mkdir_or_open of the same chain then no-ops (idempotent).
+    # Skeleton dirs (stratum-fs mkdir is single-level, no -p; joey's runtime
+    # mkdir_or_open of the same chain then no-ops, idempotent):
+    #   /tmp            -- ut MREPL-binds each user's private <home>/tmp over it
+    #                      at session start (bind_user_tmp, usr/utopia/shell); the
+    #                      MREPL needs the target to pre-exist, else the bind fails
+    #                      and a hardcoded-/tmp consumer (clang's mktemp) gets
+    #                      ENOENT. A 0755 SYSTEM stub suffices -- the bind replaces
+    #                      it, so the base mode never shows through on success.
+    #   /var/lib/corvus -- the system-identity wraps live here (baked just below).
     local d
-    for d in /var /var/lib /var/lib/corvus; do
+    for d in /tmp /var /var/lib /var/lib/corvus; do
         "$stratum_fs_bin" -s "$sock_path" mkdir "$d" \
             || { echo "==> populate pool: mkdir $d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     done
