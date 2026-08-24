@@ -159,12 +159,16 @@ The offset is one frame throughout: `map_blob(res, O)` and
 base (device PA = `shm_region.0 + O`). The sentinel (a same-address
 write-then-read, no barrier -- ARM coherency round-trips it) proves the guest can
 ACCESS the mapped BAR; host-visibility (virglrenderer polling the ring) is a
-later rung (V-3b-1c/2), correctly not claimed here. The VA is mapped WC
-(`T_CACHE_WC` -> Normal Non-Cacheable) so guest ring stores drain without a
-cache flush. The allocator is bump-only at V-3b-1b; a free-list arrives with the
-ring lifecycle (V-3b-1c, section 0.8). Proven on GL (thyla-pi KVM/V3D):
-`tapestryd: gpu hostmem-map MAPPED+ROUNDTRIP`; the control leg (no F_RESOURCE_BLOB)
-self-skips. Folded into the `venus` verb's `venus-verdict`.
+later rung (V-3b-1c/2), correctly not claimed here. The VA is mapped at the
+**host-dictated** cache attribute (`map_info_to_cache(map_info)`, CACHED on KVM),
+never a hardcoded WC -- the GPU-DESIGN 6.2 honored-exactly rule the V-3b-1b F1 fix
+established (a guest/host cache mismatch on ARM64 loses coherency; this sentence
+said "mapped WC" until the F1-fix sweep corrected the code-doc drift). The
+allocator is bump-only at V-3b-1b; a persistent free-list arrives with the ring
+engine (V-3b-1c-1, section 0.8). Proven on GL (thyla-pi KVM/V3D): the
+`hostmem-map MAPPED+ROUNDTRIP` line (renamed `hostmem-ring MAPPED+ROUNDTRIP x2` at
+V-3b-1c-1); the control leg (no F_RESOURCE_BLOB) self-skips. Folded into the
+`venus` verb's `venus-verdict`.
 
 ### 0.8 V-3b-1c-1 as-built: the persistent hostmem ring engine (2026-08-24)
 
