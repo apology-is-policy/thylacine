@@ -46,6 +46,7 @@ add_link_options(-T${USR_LINKER_SCRIPT})
 # init boots straight to the login getty with no argon2-bearing boot-test
 # probes in the boot-to-prompt window. joey/CMakeLists.txt consumes it.
 option(THYLA_BOOT_PROBES "Compile joey's boot-test probe ladder" ON)
+option(THYLA_DEV_ACCOUNTS "Provision the michael dev login account in a lean (no-boot-probes) image" OFF)
 
 add_subdirectory(lib/libt)
 add_subdirectory(hello)

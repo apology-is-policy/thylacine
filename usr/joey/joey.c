@@ -1681,6 +1681,98 @@ static size_t g_michael_phrase_len = 0;
 static int g_recover_armed = 0;
 #endif /* THYLA_BOOT_PROBES (recovery-phrase capture state) */
 
+#if defined(THYLA_DEV_ACCOUNTS) && !defined(THYLA_BOOT_PROBES)
+// provision_dev_accounts -- MINIMAL login provisioning for a lean image. In a
+// BOOT_PROBES-off build do_corvus_bringup's full auth/elevate/create ladder (and every
+// corvus wire helper it uses) is compiled out, yet the getty still runs /sbin/login --
+// so a fresh pool would have no one to authenticate (the finding-#1 bug). This creates
+// just the primary user `michael`: on a fresh pool the bootstrap USER_CREATE (corvus
+// allows it with no caller cap while the user table is empty; it provisions michael's
+// encrypted home + enrolls the A-5c recovery phrase), on a persistent pool michael
+// already exists and corvus returns already-provisioned -- both are success here.
+//
+// susan/cora/wheel and the AUTH/ADMIN_ELEVATE checks are TEST fixtures and stay
+// BOOT_PROBES-only. The corvus connect/exchange/payload below are a deliberately
+// trivial subset duplicated from the BOOT_PROBES helper block (joey.c ~176-375/1630),
+// which is gated out here; they are pure framing + byte-packing and a malformed frame
+// is rejected by corvus at boot (never a silent skip). The eventual home for account
+// provisioning is first-boot (INSTALLER.md), which retires this and the ladder copy.
+static int pda_write_all(long fd, const unsigned char *b, size_t n) {
+    size_t s = 0;
+    while (s < n) { long w = t_write(fd, &b[s], n - s); if (w <= 0) return -1; s += (size_t)w; }
+    return 0;
+}
+static int pda_read_exact(long fd, unsigned char *b, size_t n) {
+    size_t g = 0;
+    while (g < n) { long r = t_read(fd, &b[g], n - g); if (r <= 0) return -1; g += (size_t)r; }
+    return 0;
+}
+// Connect /srv/corvus/ctl, retrying while corvus finishes posting (the two-step open
+// + poll-yield pacing of connect_corvus). Returns the ctl fd or -1.
+static long pda_connect(void) {
+    long rd_y, wr_y;
+    if (t_pipe(&rd_y, &wr_y) != 0) return -1;
+    long ctl = -1;
+    for (int i = 0; i < 60; i++) {
+        long root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/corvus", 11, T_OREAD);
+        if (root >= 0) {
+            long c = t_open(root, "ctl", 3, T_ORDWR);
+            (void)t_close(root);
+            if (c >= 0) { ctl = c; break; }
+        }
+        struct pollfd pfd = { .fd = (int)rd_y, .events = POLLIN, .revents = 0 };
+        (void)t_poll(&pfd, 1, 1000);
+    }
+    (void)t_close(rd_y);
+    (void)t_close(wr_y);
+    return ctl;
+}
+static int provision_dev_accounts(void) {
+    long conn = pda_connect();
+    if (conn < 0) {
+        t_putstr("joey: provision_dev_accounts: connect /srv/corvus FAILED\n");
+        return -1;
+    }
+    // USER_CREATE michael (verb 5): user_len(1) + user + pass_len(2 LE) + pass + backend(1)=0
+    static const char user[] = "michael";
+    static const char pass[] = "correct-horse-battery-staple-v1";
+    const size_t ulen = sizeof(user) - 1;
+    const size_t plen = sizeof(pass) - 1;
+    unsigned char tx[64];
+    size_t o = 0;
+    tx[o++] = (unsigned char)ulen;
+    for (size_t i = 0; i < ulen; i++) tx[o++] = (unsigned char)user[i];
+    tx[o++] = (unsigned char)(plen & 0xff);
+    tx[o++] = (unsigned char)(plen >> 8);
+    for (size_t i = 0; i < plen; i++) tx[o++] = (unsigned char)pass[i];
+    tx[o++] = 0; // backend = passphrase
+    unsigned char hdr[4] = { 5, 1, (unsigned char)(o & 0xff), (unsigned char)(o >> 8) };
+    unsigned char rx[300];
+    if (pda_write_all(conn, hdr, 4) != 0 || pda_write_all(conn, tx, o) != 0
+        || pda_read_exact(conn, rx, 3) != 0) {
+        t_putstr("joey: provision_dev_accounts: USER_CREATE michael transport FAILED\n");
+        (void)t_close(conn);
+        return -1;
+    }
+    unsigned char st = rx[0];
+    size_t rlen = (size_t)rx[1] | ((size_t)rx[2] << 8);
+    if (rlen > 0 && 3 + rlen <= sizeof(rx)) {
+        (void)pda_read_exact(conn, &rx[3], rlen);   // drain the {id,gid,phrase} tail
+    }
+    (void)t_close(conn);
+    if (st == 0) {
+        t_putstr("joey: provision_dev_accounts: created michael (fresh pool)\n");
+        return 0;
+    }
+    if (st == 2) {   // already-provisioned / not-elevated on a persistent pool -> michael exists
+        t_putstr("joey: provision_dev_accounts: michael already provisioned (persistent pool)\n");
+        return 0;
+    }
+    t_putstr("joey: provision_dev_accounts: USER_CREATE michael unexpected status\n");
+    return -1;
+}
+#endif /* THYLA_DEV_ACCOUNTS && !THYLA_BOOT_PROBES */
+
 // A-1.7: corvus bringup -- spawn /sbin/corvus handing it `storage_dup_fd`
 // (a R|W-no-TRANSFER storage-root capability) at fd 0, then drive the
 // verb-protocol E2E over /srv/corvus. Moved out of main + called
@@ -9201,6 +9293,15 @@ int main(void) {
             return 1;
         }
         (void)t_close(corvus_storage);
+
+#if defined(THYLA_DEV_ACCOUNTS) && !defined(THYLA_BOOT_PROBES)
+        // Lean image: do_corvus_bringup spawned corvus but its provisioning ladder is
+        // compiled out, so create the login user here (the finding-#1 fix). A
+        // BOOT_PROBES build provisions via that ladder and skips this.
+        if (provision_dev_accounts() != 0) {
+            return 1;
+        }
+#endif
 
 #if THYLA_BOOT_PROBES
         // === A-4a-3: the legate E2E prover ===

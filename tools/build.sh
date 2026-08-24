@@ -905,6 +905,7 @@ build_userspace() {
         -DCMAKE_BUILD_TYPE="$build_type" \
         -DTHYLA_GENERATED_DIR="$GEN_DIR" \
         -DTHYLA_BOOT_PROBES="$boot_probes" \
+        -DTHYLA_DEV_ACCOUNTS="$dev_accounts" \
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$USR_BUILD" $verbose
     echo "==> Userspace C built under $USR_BUILD"

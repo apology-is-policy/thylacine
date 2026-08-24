@@ -47,8 +47,8 @@ bc_def compile BOOT_PROBES bool n "var:boot_probes" \
   "Boot-test probe ladder" \
   "joey's boot-time self-test E2Es (login, recover, on-device toolchain, ...). On for CI/regression; off for a normal image. Requires DEV_ACCOUNTS (the probes log in), so turning this on turns that on too."
 bc_def compile DEV_ACCOUNTS bool y "var:dev_accounts" \
-  "Bake dev login accounts" \
-  "Provisions the michael / susan / cora users + the wheel group at first boot so you can actually log in. Turn OFF only for a bare image whose accounts an installer/first-boot flow will create. (Before this axis existed, accounts rode BOOT_PROBES -- so --production had no logins.)"
+  "Bake a dev login account" \
+  "Provisions the primary login user (michael) at first boot so a lean image is loginnable -- without it, --production has no accounts and you cannot log in (the finding-#1 fix; before this axis, accounts rode BOOT_PROBES). The full michael/susan/cora/wheel fixture set is created only when the boot-probe ladder (BOOT_PROBES) also runs. Turn OFF only for a bare image an installer/first-boot flow will provision."
 bc_def compile HARDENING_FULL bool n "var:hardening_full" \
   "Full P1-H hardening" \
   "Enables the full hardening flag set (PAC/BTI where the CPU has them, plus extra guards). A small size/complexity cost; on for production-like images."
