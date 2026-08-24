@@ -6,10 +6,6 @@
 #
 #   "everything, every chunk"   -> every bake toggle ON: /goroot, /clade + /storm,
 #                                  /chase-w2, the viv + Alpine bundles, /quake.
-#   "no boot tests, quick boot" -> --production: NO in-kernel test suite AND NO
-#                                  joey boot-probe ladder -> straight to the getty.
-#                                  (This is the boot-speed lever; the probe ladder
-#                                  is what makes a dev/CI image slow to reach login.)
 #
 # Optional chunks need external inputs (a Go fork, an LLVM fork, an Alpine
 # rootfs). An ABSENT input SKIPS that chunk with a clear warning; the rest of the
@@ -75,7 +71,7 @@ fi
 # This single `all` run also stages /goroot + /storm + /vivarium internally and
 # bakes the pool ONCE with every staged chunk present. The final SUMMARY block
 # reports exactly what was baked vs skipped -- read it.
-log "the complete --production build (no boot tests) -- the long part"
+log "the complete --config everything build (no boot tests) -- the long part"
 export THYLACINE_BAKE_GOROOT=1
 export THYLACINE_CHASE_W2=1
 # Bake /clade + /storm IFF clade is genuinely staged THIS run. SKIP_CLADE, an
@@ -91,7 +87,7 @@ fi
 [[ -n "$alpine_tar" ]] && export THYLACINE_ALPINE_TARBALL="$alpine_tar"
 [[ -n "$bb_apk"     ]] && export THYLACINE_BUSYBOX_STATIC_APK="$bb_apk"
 
-tools/build.sh all --production "$@"
+tools/build.sh all --config everything "$@"
 
 log "DONE -- complete image built, boot tests OFF"
 echo "  Boot it:  tools/run-vm.sh        (or: make run)"

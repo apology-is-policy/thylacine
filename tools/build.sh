@@ -96,75 +96,67 @@ LLD_PREFIX="${LLD_PREFIX:-/opt/homebrew/opt/lld}"
 target="${1:-all}"
 shift || true
 
-build_type="Debug"
-hardening_full="OFF"
-kaslr="OFF"
-sanitize=""
-no_tickless="OFF"
-# #61 (RW-11 R4-F1/F2): production boot shape. ON (default) keeps the in-kernel
-# test suite + joey's boot-test probe ladder (dev/CI); --production flips both
-# OFF for the lean V1.0 boot-to-getty.
-kernel_tests="ON"
-boot_probes="ON"
+# --- build configuration (tools/build-config.sh: the typed config artifact) ----
+# docs/BUILD-CONFIG-DESIGN.md. The old flag-bundles + scattered THYLACINE_* env
+# vars are now orthogonal axes resolved here; bc_export threads them onto the knobs
+# this script reads (build_type/kernel_tests/boot_probes/dev_accounts/hardening_full/
+# kaslr/sanitize/no_tickless + the bake env vars). Legacy flags stay as sugar; a bare
+# invocation applies the `default` preset -- the historical dev/CI shape (in-kernel
+# tests + boot-probe ladder ON) that make/tools/test.sh/the SMP gate rely on.
+BC_DIR_CONFIGS="$REPO_ROOT/configs"
+# shellcheck disable=SC1090
+. "$REPO_ROOT/tools/build-config.sh"
+bc_reset
 build_dir_override=""
 verbose=""
 extra_cmake_args=()
+config_selected=0      # did a --config/--production/--dev/--set flag run?
+show_config=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --release)
-            build_type="Release"
-            shift
-            ;;
-        --hardening-full)
-            hardening_full="ON"
-            shift
-            ;;
-        --kaslr)
-            kaslr="ON"
-            shift
-            ;;
-        --production)
-            # #61 (RW-11 R4-F1/F2): the V1.0 production boot shape. Drops both
-            # the in-kernel test suite (KERNEL_TESTS=OFF) and joey's boot-test
-            # probe ladder (THYLA_BOOT_PROBES=OFF), so the lean image boots
-            # straight to the login getty.
-            kernel_tests="OFF"
-            boot_probes="OFF"
-            shift
-            ;;
-        --sanitize=*)
-            # P1-I: opt-in sanitizer build. Currently supports
-            # --sanitize=undefined (UBSan trapping). KASAN deferred.
-            sanitize="${1#--sanitize=}"
-            shift
-            ;;
-        --no-tickless)
-            # TI-4e tickful-baseline capture: force the old 1 kHz-always idle
-            # (sched_idle_park go_tickless=false). Diagnostic-only; uses its own
-            # build dir so it never clobbers the production tickless kernel.
-            no_tickless="ON"
-            shift
-            ;;
-        --build-dir=*)
-            build_dir_override="${1#--build-dir=}"
-            shift
-            ;;
-        --verbose)
-            verbose="--verbose"
-            shift
-            ;;
-        --)
-            shift
-            extra_cmake_args+=("$@")
-            break
-            ;;
-        *)
-            echo "Unknown option: $1" >&2
-            exit 1
-            ;;
+        # -- the configurator interface (docs/BUILD-CONFIG-DESIGN.md) --
+        --config=*)    bc_apply_preset "${1#--config=}"; config_selected=1; shift ;;
+        --config)      bc_apply_preset "$2"; config_selected=1; shift 2 ;;
+        --with=*)      bc_apply_fragment "${1#--with=}"; shift ;;
+        --with)        bc_apply_fragment "$2"; shift 2 ;;
+        --set=*)       bc_set "${1#--set=}"; config_selected=1; shift ;;
+        --set)         bc_set "$2"; config_selected=1; shift 2 ;;
+        --show-config) show_config=1; shift ;;
+        # -- legacy sugar; preserved behavior (BUILD-CONFIG-DESIGN.md 4.3) --
+        --release)         bc_set BUILD_TYPE=release; shift ;;
+        --hardening-full)  bc_set HARDENING_FULL=y;   shift ;;
+        --kaslr)           bc_set KASLR=y;            shift ;;
+        --no-tickless)     bc_set TICKLESS=n;         shift ;;
+        --sanitize=*)      bc_set "SANITIZE=$(bc__san_alias "${1#--sanitize=}")"; shift ;;
+        --production)      # exact old lean shape: tests + probes OFF. Accounts now
+                           # stay on (DEV_ACCOUNTS default y) -- the finding-#1 fix.
+                           # `--config production` is the separate hardened preset.
+                           bc_set TESTS=n; bc_set BOOT_PROBES=n; config_selected=1; shift ;;
+        --dev)             bc_apply_preset dev; config_selected=1; shift ;;
+        # -- non-config passthroughs (unchanged) --
+        --build-dir=*)     build_dir_override="${1#--build-dir=}"; shift ;;
+        --verbose)         verbose="--verbose"; shift ;;
+        --)                shift; extra_cmake_args+=("$@"); break ;;
+        *)                 echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+# A bare invocation (no config-selecting flag) keeps the historical dev/CI shape.
+if [[ "$config_selected" == 0 ]]; then bc_apply_preset default; fi
+bc_resolve
+bc_export                 # -> build_type/kernel_tests/boot_probes/dev_accounts/
+                          #    hardening_full/kaslr/sanitize/no_tickless + bake env vars
+mkdir -p "$BUILD_DIR"
+bc_emit_config "$BUILD_DIR/.config"
+if [[ "$show_config" == 1 ]]; then
+    echo "== resolved build config ($BUILD_DIR/.config) =="
+    bc_show
+    echo "== -> build.sh knobs =="
+    echo "build_type=$build_type kernel_tests=$kernel_tests boot_probes=$boot_probes dev_accounts=$dev_accounts hardening=$hardening_full kaslr=$kaslr sanitize='$sanitize' no_tickless=$no_tickless"
+    if [[ ${#extra_cmake_args[@]} -gt 0 ]]; then printf 'cmake extra:'; printf ' %s' "${extra_cmake_args[@]}"; echo; fi
+    exit 0
+fi
 
 # Translate user-friendly --sanitize values to the CMake variable.
 sanitize_cmake=""

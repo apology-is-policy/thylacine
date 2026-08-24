@@ -38,6 +38,12 @@ eq "prod HARDENING"     "$(bc_get HARDENING_FULL)" "y"
 eq "prod TESTS"         "$(bc_get TESTS)"         "n"
 eq "prod DEV_ACCOUNTS"  "$(bc_get DEV_ACCOUNTS)"  "y"
 
+echo "== preset: default (bare-build backward-compat: tests+probes ON) =="
+bc_reset; bc_apply_preset default
+eq "default preset TESTS"        "$(bc_get TESTS)"        "y"
+eq "default preset BOOT_PROBES"  "$(bc_get BOOT_PROBES)"  "y"
+eq "default preset DEV_ACCOUNTS" "$(bc_get DEV_ACCOUNTS)" "y"
+
 echo "== T-dev-orthogonal: accounts WITHOUT tests (finding #1) =="
 bc_reset; bc_apply_preset dev
 eq "dev DEV_ACCOUNTS"   "$(bc_get DEV_ACCOUNTS)"  "y"
@@ -63,9 +69,10 @@ bc_reset
 if bc_set KASLR=maybe 2>/dev/null; then bad "bad value accepted"; else ok "bad value rejected"; fi
 if bc_set_one BOGUS y 2>/dev/null; then bad "unknown symbol accepted"; else ok "unknown symbol rejected"; fi
 
-echo "== T-export: symbols -> build.sh knobs (incl. TICKLESS inversion + the def) =="
+echo "== T-export: symbols -> build.sh knobs (incl. TICKLESS inversion + DEV_ACCOUNTS) =="
 build_type=""; kernel_tests=""; boot_probes=""; hardening_full=""; kaslr=""
-sanitize="__unset__"; no_tickless=""; extra_cmake_args=()
+sanitize="__unset__"; no_tickless=""; dev_accounts=""; extra_cmake_args=()
+unset THYLACINE_BAKE_GOROOT THYLACINE_BAKE_CLADE 2>/dev/null || true
 bc_reset; bc_apply_preset production; bc_resolve 2>/dev/null; bc_export
 eq "export build_type"    "$build_type"    "Release"
 eq "export kernel_tests"  "$kernel_tests"  "OFF"
@@ -74,12 +81,15 @@ eq "export hardening_full" "$hardening_full" "ON"
 eq "export kaslr"         "$kaslr"         "ON"
 eq "export sanitize (none->empty)" "$sanitize" ""
 eq "export no_tickless (TICKLESS=y -> OFF)" "$no_tickless" "OFF"
+eq "export dev_accounts (DEV_ACCOUNTS=y -> ON)" "$dev_accounts" "ON"
 eq "export THYLACINE_BAKE_GOROOT" "${THYLACINE_BAKE_GOROOT:-}" "1"
 eq "export THYLACINE_BAKE_CLADE"  "${THYLACINE_BAKE_CLADE:-}"  "0"
-# the DEV_ACCOUNTS CMake define must be appended
-found_def="no"
-for a in "${extra_cmake_args[@]}"; do [[ "$a" == "-DTHYLA_DEV_ACCOUNTS=ON" ]] && found_def="yes"; done
-eq "export -DTHYLA_DEV_ACCOUNTS=ON" "$found_def" "yes"
+
+echo "== T-honor-env: a pre-set legacy env var is honored (D-b transition shim) =="
+export THYLACINE_BAKE_CLADE=1                       # production sets CLADE=n (-> 0)
+bc_reset; bc_apply_preset production; bc_export
+eq "honor pre-set THYLACINE_BAKE_CLADE" "${THYLACINE_BAKE_CLADE:-}" "1"
+unset THYLACINE_BAKE_CLADE
 
 echo "== emit: build/.config is written + grouped =="
 tmp="$(mktemp)"; bc_reset; bc_apply_preset dev; bc_resolve 2>/dev/null; bc_emit_config "$tmp"

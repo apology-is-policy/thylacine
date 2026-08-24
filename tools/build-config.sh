@@ -46,7 +46,7 @@ bc_def compile TESTS bool n "var:kernel_tests" \
 bc_def compile BOOT_PROBES bool n "var:boot_probes" \
   "Boot-test probe ladder" \
   "joey's boot-time self-test E2Es (login, recover, on-device toolchain, ...). On for CI/regression; off for a normal image. Requires DEV_ACCOUNTS (the probes log in), so turning this on turns that on too."
-bc_def compile DEV_ACCOUNTS bool y "def:THYLA_DEV_ACCOUNTS" \
+bc_def compile DEV_ACCOUNTS bool y "var:dev_accounts" \
   "Bake dev login accounts" \
   "Provisions the michael / susan / cora users + the wheel group at first boot so you can actually log in. Turn OFF only for a bare image whose accounts an installer/first-boot flow will create. (Before this axis existed, accounts rode BOOT_PROBES -- so --production had no logins.)"
 bc_def compile HARDENING_FULL bool n "var:hardening_full" \
@@ -219,7 +219,7 @@ bc_export() {
             buildtype) printf -v "$target" '%s' "$([[ "$val" == release ]] && echo Release || echo Debug)" ;;
             sanitize)  printf -v "$target" '%s' "$([[ "$val" == none ]] && echo "" || echo "$val")" ;;
             def)       extra_cmake_args+=("-D${target}=$(bc__onoff "$val")") ;;
-            env)       export "$target"="$(bc__envval "$val")" ;;
+            env)       bc__export_env "$target" "$(bc__envval "$val")" ;;
             want)      [[ "$val" == y ]] && export "$target"=1 || export "$target"=0 ;;
         esac
     done
@@ -229,6 +229,17 @@ bc__onoff()     { case "$1" in y) echo ON ;; n) echo OFF ;; *) echo "$1" ;; esac
 bc__onoff_inv() { case "$1" in y) echo OFF ;; n) echo ON ;; *) echo "$1" ;; esac; }
 # env bake vars use 1/0 for bools; a string (DISK_SIZE, MKFS_SEED) passes through.
 bc__envval()    { case "$1" in y) echo 1 ;; n) echo 0 ;; *) echo "$1" ;; esac; }
+# D-b transition shim: if the caller already set a legacy THYLACINE_* env var, HONOR
+# it (do not clobber); otherwise export the config's value. So build-everything.sh's
+# pre-set THYLACINE_BAKE_* (e.g. its clade-staged detection) still wins during the
+# transition. eval-based existence test for bash 3.2 (no ${!name+x} composition).
+bc__export_env() {
+    local name="$1" cfgval="$2" isset
+    eval "isset=\"\${$name+set}\""
+    [[ "$isset" == set ]] || eval "export $name=\"\$cfgval\""
+}
+# --sanitize=undefined is the legacy spelling of ubsan (both -> the schema's ubsan).
+bc__san_alias() { case "$1" in undefined) echo ubsan ;; *) echo "$1" ;; esac; }
 
 # bc_show -> print the resolved config to stdout (the --show-config form).
 bc_show() {
