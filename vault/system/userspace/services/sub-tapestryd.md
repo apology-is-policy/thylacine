@@ -347,21 +347,74 @@ bytes. `HostmemAllocator` is a page-aligned **bump** allocator over
 region window base — the SAME frame `map_blob(res, O)` uses, so a blob mapped at
 offset `O` is guest-reached at `O`. `hostmem_map_probe` allocates an offset,
 creates + maps a HOST3D blob under a venus ctx, then calls
-`PciDev::burrow_from_hostmem(1, O, len, T_CACHE_WC)` (the [[inv-i45]] hardware
-authority is the held KObj_PCI claim; the kernel resolves `bar.pa + window + O`
-and maps RW into tapestryd's burrow-attach window) and round-trips a `u32`
-sentinel through the returned VA. The sentinel is a **same-address, same-core**
+`PciDev::burrow_from_hostmem(1, O, len, cache)` — `cache` the **host-dictated**
+attribute (`map_info_to_cache(map_info)`, CACHED on KVM; never a guessed WC, the
+GPU-DESIGN 6.2 honored-exactly rule the V-3b-1b F1 fix established) — the
+[[inv-i45]] hardware authority is the held KObj_PCI claim; the kernel resolves
+`bar.pa + window + O` and maps RW into tapestryd's burrow-attach window, and
+round-trips a `u32` sentinel through the returned VA. The sentinel is a **same-address, same-core**
 write-then-read — ARM coherency round-trips it with no barrier — so a MISMATCH
 means the VA does not alias the BAR; it proves guest ACCESS only, not
 host-visibility (virglrenderer polling the ring is V-3b-1c/2, deliberately not
 claimed). Cleanup mirrors the probe discipline: `unmap_blob` exactly once per
 mapped path (skipped on a map/burrow refusal that left nothing mapped),
 `resource_unref` unconditional; the mapped guest VA leaks until proc exit
-(bounded, one page at init — a dedicated unmap is the V-3b-1c ring teardown). The
-allocator is bump-only at v1.0; a free-list arrives with the ring lifecycle if
-rings are re-minted. The `SYS_BURROW_FROM_HOSTMEM` client binding itself
+(bounded, one page at init — a dedicated unmap is the V-3b-1c-1 ring teardown,
+below). The allocator was bump-only at V-3b-1b; V-3b-1c-1 makes it persistent and
+reclaiming (the engine section below). The `SYS_BURROW_FROM_HOSTMEM` client binding itself
 (`t_burrow_from_hostmem` + `T_CACHE_*` + `PciDev::burrow_from_hostmem`) landed in
 libthyla-rs — V-2 built the syscall but left the wrapper to V-3.
+
+### The persistent ring engine (V-3b-1c-1)
+
+V-3b-1b's guest-map was a one-shot probe. V-3b-1c-1 makes it a reusable ENGINE —
+the substrate the client-claimable Model B ring (V-3b-1c-2) and the venus-stream
+forward (V-3b-2) build on. `HostmemAllocator` is hoisted into a persistent
+`Gpu.hostmem: Option<HostmemAllocator>` (sized once from `shm_region(1)`) and gains
+a **first-fit free-list**: `drop_host3d_ring` reclaims a retired ring's offset, so
+a persistent daemon minting/retiring rings across client sessions does not exhaust
+the 256 MiB region (bump-only would). No coalescing at v1.0 — ring blobs are
+uniform-ish (page-rounded, `<= WARP_RING_MAX`), so same-size frees exact-match
+without splitting and the list stays flat.
+
+The lifecycle is a reusable pair. `mint_host3d_ring(res, ctx, len) -> HostRing`
+composes alloc-offset → `create_host3d_blob` (under a venus ctx) → `map_blob` →
+`burrow_from_hostmem` (host-dictated cache), with **full error-path unwinding** at
+each of the three failure points (offset → resource → subregion), so no half-minted
+ring survives; a `u32::try_from(size)` guard fails a `len` that page-rounds past a
+u32 rather than truncating the wire size to a 0-byte create. `drop_host3d_ring`
+is the inverse (detach → unmap → unref → reclaim), and **logs** a device refusal
+because a swallowed one surfaces later as a bogus `reuse=false`, indicting the
+free-list for a teardown fault.
+
+**`HostRing` is deliberately NOT `Copy`, and `drop_host3d_ring` takes it BY VALUE**
+— the holotype F1 catch. A `Copy` handle + a by-ref drop + an unvalidated `free`
+compose into a silent double-free: two copies each drop the same ring, `free`
+pushes the offset twice, and two later mints hand ONE hostmem offset to two
+clients' rings — cross-client aliasing, no log line, live the day 1c-2 adds a
+second retire path (a death reaper AND a close verb, the shape tapestryd already
+has for BOs). The move-only handle makes the double-drop a compile error; a `free`
+oob/overlap guard (rejects an extent past the bump watermark or overlapping a freed
+one) is the belt to that suspenders. The reusable lesson: a resource handle that
+is `Copy` is a double-free waiting for a second caller.
+
+**The engine proof** (`hostmem_ring_probe`, init-time, single-threaded): mint TWO
+rings under one venus ctx (the allocator must hand DISTINCT offsets, `0x0`/`0x1000`),
+write an **offset-derived** sentinel through each guest VA, then **re-read BOTH** —
+if a host/kernel defect aliased the two backings onto one PA, one write clobbers the
+other and the re-read mismatches, so the probe witnesses PHYSICAL distinctness, not
+merely distinct allocator offsets (holotype F2 — the 1b probe proved only the
+latter). Tear both down, then re-mint and assert the freed offset is REUSED (the
+free-list). One verdict line, emitted only on the four-way conjunction:
+`hostmem-ring MAPPED+ROUNDTRIP x2 (off_a=.. off_b=.. cache=CACHED) teardown+remint-reuse OK`;
+else `hostmem-ring FAIL (...)`. The `venus-verdict` gate anchors on the `x2`
+success line (a FAIL line — any property false — is rejected), and
+`test-venus-verdict.sh` proves the discrimination without a boot, including a
+`reuse=false` FAIL-line leg so a lifecycle regression cannot ride an absent-token
+check. GL-VERIFIED on thyla-pi KVM/V3D 2026-08-24. What is NOT here: the ring is not
+yet a client-claimable `/srv/warp` file — the weft-share of the hostmem burrow
+(`WEFT_BIND_HOSTMEM`), the per-client venus device-ctx, and the `warp-prove`
+cross-Proc leg are V-3b-1c-2.
 
 ## Data structures
 
