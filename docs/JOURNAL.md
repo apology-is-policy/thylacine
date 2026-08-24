@@ -22,6 +22,71 @@ needed the operator.
 
 ---
 
+## 2026-08-24 — V-3b-1c-2b: the client-claimable host3d ring, and a reap predicate that watched the wrong count
+
+The operator voted **A** on the parked 1c-2b fork: design F2 now rather than build
+V-3b-2's thin plumbing over a blocked path. That vote was itself the fruit of a
+correction — my resume note claimed V-3b-2 was "self-test-provable," and recon
+showed that oversold it: V-3b-2's only honest witness is a real venus stream,
+which needs either the parked 1c-2b client-map or Mesa, both blocked on the same
+F2. So the productive move was to unblock F2, and the operator's own reason for
+parking (an un-rushed design pass, not a post-600k scramble) had become true — we
+were fresh past a compaction. I surfaced that, they chose A.
+
+**The design.** F2 is a lifetime split: a hostmem ring's HOST bytes (a QEMU
+subregion tapestryd owns) live OUTSIDE the kernel's #847 dual-count, so
+`drop_host3d_ring` reclaiming the offset while a client still maps the GPA
+re-hands it under live PTEs — a cross-client alias. The kernel side is already
+sound (the V-2 death-quiesce keeps the BAR decoded across a client mapping); the
+gap is purely tapestryd's offset reuse. Prior art settled the shape: Fuchsia VMO /
+Genode dataspace keep device-memory lifetime IN the kernel so no userspace free
+races the refcount; Thylacine can't (the unmap is a controlq op only tapestryd
+issues), so the next best is to make tapestryd OBSERVE the count before it frees —
+exactly `image.c`'s eviction check (`handle_count==1 && mapping_count==0`), lifted
+to userspace. That needs one new read-only syscall. Options (reaper+syscall vs
+leak-on-claim vs kernel-owns) went to the operator; (a) was ratified with a
+`SYS_HOSTMEM_MAPCOUNT` returning `mapping_count`. Landed as scripture first
+(`5f8cf9c2`), then the impl (`7696540a`).
+
+**The suite caught my first bug before the prosecutor did.** The F1 regression
+test I added called `weft_binding_release` — which drops the registration pin
+`weft_share_claim` holds in production — without providing that pin, so it ate the
+construction handle and the teardown's `burrow_unref` double-freed. EXTINCT, mid
+`weft.hostmem_share`. The gpu_bo sibling survives the identical call because it
+gets the pin from `sys_weft_share_for_proc` and drains mappings instead of a final
+unref. A `burrow_ref` to stand in for the claim's pin fixed it. A test's own
+refcount can carry the bug it exists to catch.
+
+**Then the prosecutor caught the one that mattered — and it was mine.** The Fable
+holotype (context-independent, same family) refused the ratified `mapping_count`
+predicate. `weft_share_claim` consumes the share and TRANSFERS the registration
+pin — a `handle_count` ref — to the client, and returns BEFORE `burrow_share_into`
+bumps `mapping_count` later in the same `SYS_WEFT_MAP`. In that window a client is
+irrevocably going to map GPA(off), yet `mapping_count` still reads 1. My reap
+would have freed the offset under the pending map — the exact cross-client alias
+the chunk exists to prevent. And the tell was in my own citation: `image.c`'s gate
+is `handle_count==1 && mapping_count==0`, and *the handle half is the mechanism
+that excludes the in-flight mapper* — I quoted the precedent and dropped the half
+that did the work. The fix makes the syscall return the SUM
+(`SYS_HOSTMEM_REFCOUNT` = handle + mapping): the transferred pin makes it >= 2, so
+the reap parks; the full image.c predicate folded to one value. Latent only
+because no in-tree program claims a host3d ring yet — but this chunk wires the
+claim path end to end, so it had to close before exercise. Two more: the reaper
+ran at mint, not the completion pump its own comment + the design claimed (fixed
+the comment + the design + added a per-pass cap); and the reap decision had zero
+coverage, so the redesigned `weft.hostmem_refcount` now asserts the F1 window
+directly — a pin-but-no-map burrow reads total 2 (PARK) though `mapping_count`
+alone is still 1. Audit-close `748be17e`.
+
+The reusable lesson is sharper than "cite carefully": a lifecycle predicate ported
+from one actor's vantage (the kernel cache holds a HANDLE) to another's (tapestryd
+holds a MAPPING) must re-derive which refcount half carries the safety, not
+transliterate the one that happened to be visible. Dirty close (a P1 back + the
+predicate changed), so a round-2 holotype prosecutes the fix; SMP re-run on the
+fix in flight (40/40 clean on the pre-fix baseline — the fix adds one count read
+under the same lock, no new concurrency). GL self-test on real V3D + the
+`warp-prove` cross-Proc E2E still owed.
+
 ## 2026-08-24 — V-3b-1c-2b-a: a green gate over a dead claim path (reverted, parked)
 
 Rolled straight into 1c-2b after 1c-2a landed: the client-claimable host3d ring.
