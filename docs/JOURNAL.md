@@ -22,6 +22,54 @@ needed the operator.
 
 ---
 
+## 2026-08-24 — V-3b-1c-2b-a: a green gate over a dead claim path (reverted, parked)
+
+Rolled straight into 1c-2b after 1c-2a landed: the client-claimable host3d ring.
+The tapestryd change was one line — `wring_weft_ensure`'s `if r.dma_fd < 0` bail
+became `&& r.host3d.is_none()`, so a host3d ring's hostmem burrow gets
+`t_weft_share`d and routes to the kernel's `WEFT_BIND_HOSTMEM` (weft.c:401). I
+extended the boot self-test to weft-share the ring, added a `WEFT_SHARE` gate leg,
+and it all went green: build clean, 29/29 discriminator, and — the part that
+should have been reassuring and was in fact the trap — **VENUS GATE: VERIFIED on
+real V3D**, `warp host3d-ring venus-ctx=512 MAPPED+ROUNDTRIP WEFT_SHARE teardown
+OK`.
+
+The Fable holotype refused the green. **F1 [P1]: the client CLAIM is structurally
+dead.** Four kernel sites must admit a kind for a weft share to be *claimable* —
+register, kind-decision, client-map, and the binding alloc. V-2 widened the first
+three for HOSTMEM; `weft_binding_alloc_maponly` (weft.c:472) still requires
+`BURROW_TYPE_DMA` and handles only weave/gpu_bo, so a hostmem burrow returns NULL
+and the client's `t_weft_map` unwinds to -1. My WEFT_SHARE gate certified the
+*register* half — `t_weft_share` succeeds — as "the client-claim substrate," and
+the self-test never once exercised the binding alloc, so it was green over a claim
+that cannot happen. This is the [[bug-240-new-gate-hollows-old-negative]] shape
+inverted: a widen that touches N-1 members of a property set the "must widen
+together" comment (syscall.c:6004) itself names, leaving the last a dead half — and
+a self-test written to prove the whole path that only ever drives the live part.
+
+**F2 [P2] is worse and masked by F1.** For guest-blob rings the #847 dual-count
+pins the guest-RAM *pages*, so a client's mapping survives teardown. A hostmem
+ring's backing lives behind the GPA (`map_blob`'s subregion) — the dual-count pins
+only the kernel Burrow *object*, and `drop_host3d_ring` yanks the host backing +
+re-hands the offset unconditionally. The instant F1 is fixed, tearing down a
+claimed ring exposes one client's live mapping to another's ring. The teardown
+comments asserting "the client's mapping survives via its own ref" were vacuous
+under 1c-2a and would have become load-bearing and false. tapestryd cannot even
+see the kernel `mapping_count`, so the fix is a real lifetime design (a reaper with
+a new syscall, or leak-on-claim, or a kernel primitive) — not a patch.
+
+**My self-audit missed both**, the same way as 1c-2a's F1: I verified ownership,
+extent, and teardown of the *unclaimed* (self-test) case exhaustively and never
+traced the client *claim* through all four kernel sites — I stopped at the surface
+I changed. And critically the delta *regressed* the client path (from a clean
+`E_NOMEM` to a half-broken map fid), so it could not land. Surfaced the F2 design
+fork to the operator (design-conversation pattern); they voted **park 1c-2b, do
+V-3b-2 next** — F2 deserves a design pass, not a rushed post-600k call. Reverted
+the delta (tree pristine at `3e12ef12`); findings enqueued in
+`memory/bug_v3b_1c2b_hostmem_weft_claim_gap.md`. The reusable lesson, twice this
+run: a green gate proves what its self-test *drives*, and a self-test that exits
+before the load-bearing call is green over a hole.
+
 ## 2026-08-24 — V-3b-1c-2a: the server host3d-ring path (three catches the local gates could not make)
 
 Same autonomous run, resumed past a second self-compaction. 1c-1 was the engine;
