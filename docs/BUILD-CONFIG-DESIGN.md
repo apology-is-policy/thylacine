@@ -342,20 +342,29 @@ rest is tooling.
 
 ## 7. Lane split / sequencing
 
-1. **This doc** as a scripture commit.
+**ALL LANES LANDED (aux-2, 2026-08-24); arc complete.** Commits noted per lane.
+
+1. **This doc** as a scripture commit. -- DONE `b671c2cb`.
 2. **The configurator core**: the KEY=value reader + the axis schema (with per-symbol
    help text, 4.2) + `configs/*.config` presets + fragment-merge +
    `--config`/`--with`/`--set` + the `--production`/`--dev`/`--release` migration +
-   `build/.config` emission.
+   `build/.config` emission. -- DONE `4e271a85` (core) + `81eca60e` (build.sh wiring).
 3. **The account decoupling** (`THYLA_DEV_ACCOUNTS` + the joey.c gate move + the
    `BOOT_PROBES implies DEV_ACCOUNTS` constraint) — folded into (2) per the vote;
-   carries the self-audit / prosecutor round.
+   carries the self-audit / prosecutor round. -- DONE `6726ac68` (michael) + `d982ee62`
+   (cora + 2-round audit close, 0 P0/0 P1); as-built option F (see 4.5).
 4. **The wizard** (`tools/configure.sh`, 4.6) — builds on the schema + presets from (2).
+   -- DONE `0d694b55` (+ `tools/test-configure.sh`, 21 discrimination checks).
 5. **The manifest + forage** (`tools/build-manifest.toml` + `build.sh`
-   detect-and-instruct + `tools/forage.sh`).
-6. Docs per the per-PR discipline: `docs/reference/NN-build-config.md` (technical) + a
-   `docs/manual/` entry (user-facing, incl. the wizard walkthrough), and fold the new
-   flow into `BUILD-HARNESS.md`.
+   detect-and-instruct + `tools/forage.sh`). -- DONE `3c1a9cb7` (manifest + forage +
+   `test-forage.sh`) + `ec4c1ccc` (build.sh detect-and-instruct + `test-detect-instruct.sh`).
+6. Docs per the per-PR discipline: `docs/reference/150-build-config.md` (technical) +
+   the full `--config`/preset fold into `BUILD-HARNESS.md` (section 4.3-4.5). -- DONE
+   this lane. The `docs/manual/` entry is intentionally SKIPPED: the configurator is
+   host-side developer tooling, and `docs/manual/` (the OS user manual) stays a
+   Phase-0 stub until v1.0-rc per the standing user-manual-deferred policy; the
+   developer-facing walkthrough lives in `BUILD-HARNESS.md`, which IS the build
+   harness's manual.
 
 The install disc stays roadmapped behind its deps (driver framework + Aurora),
 untouched by this arc. git-on-viv remains the active mission; this is the detour.

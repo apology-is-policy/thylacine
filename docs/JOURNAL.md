@@ -22,6 +22,83 @@ needed the operator.
 
 ---
 
+## 2026-08-24 (aux) — build-configurator docs + arc close (lane 6)
+
+The docs lane, and with it the whole build-configurator arc closes. Three deliverables:
+`docs/reference/150-build-config.md` (the deep maintainer reference for the schema
+core, the account decouple, the wizard, the manifest, forage, and detect-and-instruct);
+the full `--config`/preset model folded into `docs/BUILD-HARNESS.md` (a new sections
+4.3-4.5, expanding the lane-4 pointer into the config model + the forage workflow); and
+the design doc's lane checklist marked complete per commit.
+
+**One deliberate deviation from the design's lane-6 list, recorded rather than
+silently dropped:** design 7.6 named a `docs/manual/` entry. I skipped it. The
+configurator is host-side DEVELOPER tooling, and `docs/manual/` is the OS USER manual,
+which the standing user-manual-deferred policy keeps a Phase-0 stub until v1.0-rc. The
+developer-facing walkthrough belongs in `BUILD-HARNESS.md` -- which IS the build
+harness's manual -- so that is where it went. Noted in the design doc's section 7 so
+the skip is a decision, not an omission.
+
+**The vault check ran (mandatory doc-update step 0) and came back UNOWNED** for all
+four new tool paths -- but with a caveat worth recording: the vault worktree is 225
+commits behind main, so it "cannot see" aux-2's paths and returns UNKNOWN, not a clean
+"no dossier". I treated the reference section as owed (wrote it) and noted the owed
+vault sweep in 150's Vault section. Not fabricating a "no dossier" verdict from an
+out-of-sync tool is the point the vault's own tooling insists on.
+
+## 2026-08-24 (aux) — the input manifest + the forage collector (lanes 5a + 5b)
+
+Same run, straight on from the wizard. Lane 5 is the "collect everything" half of
+the arc: `tools/build-manifest.toml` (`3c1a9cb7`) pins every build input that does
+NOT travel in the repo -- the 6 sibling forks by commit, the 2 manual-drop Alpine
+cache inputs by URL + sha256, the quake network input, and the remotely-built
+Clade artifacts -- and `tools/forage.sh` reads it and gathers what it can, or
+instructs. `tools/build.sh` (`ec4c1ccc`) now names the forage remedy when a chunk
+input is absent, instead of skipping silently.
+
+**The hashes and commit pins were re-derived, not transcribed.** The resume note
+warned to re-verify figures; I pulled the three sha256s byte-exact out of build.sh
+(alpine `f31202c4…`, busybox `6fd7ea97…`, quake `ec6c9d34…`) and confirmed all six
+fork commits against the actual local trees (`git -C … rev-parse`): go `4bb69d2`,
+ambush `563bae9`, gopls `f65d347`, llvm `251b5b5`, mesa `b7f9ed2`. That check paid
+off in a structural way: the forks split into two classes the design prose had
+blurred. go/ambush/stratum have `apology-is-policy` remotes forage can clone;
+gopls has NO remote (operator-supplied); llvm/mesa point at UPSTREAM (llvm-project,
+mesa) and are clade-BUILD sources built remotely, not things forage fetches
+locally. So `forageable` became a six-valued verb (clone / download / remote-pull
+/ remote-source / manual / auto-at-build), and forage INSTRUCTS on the three it
+cannot automate rather than pretending it can.
+
+**The build.sh notice closed a real silent gap, not just a cosmetic one.** #101
+already warned when a clade toolchain was staged but the flag was unset (it would
+destroy a clade pool). Its SIBLING -- flag SET but nothing staged -- had no message
+at all: the pool minted without /clade silently, which is precisely the weekend the
+manifest exists to save. Lane 5b adds that missing arm (`forage clade`), plus the
+/goroot and Alpine skips.
+
+**A TOML parser in bash 3.2, kept deliberately small.** No toml tool is on the mac
+and macOS python3 predates tomllib, so forage carries a ~15-line awk reader for a
+controlled subset (`[section.sub]` tables + `key = "value"`/bareword + comments).
+The manifest header pins that subset so nobody adds an array the reader silently
+drops. The parser's subtlest property -- section scoping, that a namesake `commit`
+in another section must not leak -- is the one I most wanted proven, so a sabotage
+that bypasses `cur==sec` is in the test: without it the reader returns go's
+`4bb69d2` when asked for ambush's `563bae9`, and the test catches exactly that.
+
+**Testability seams, and a cross-consumer rot guard.** `forage.sh`'s dispatch is
+`BASH_SOURCE`-guarded so `test-forage.sh` sources it and calls the parser directly;
+`FORAGE_ROOT` + `MANIFEST` + `FORAGE_DRY` isolate the gather tests to a temp root
+with zero network/git/gcp. 19 checks, each proven fail-without-fix via sabotaged
+copies. And `test-detect-instruct.sh` guards the tooling->forage CONTRACT: it
+extracts every forage target named by EITHER consumer (build.sh's `forage_hint`
+and the wizard's step-4 remedy) and asserts each is real -- the anti-rot guard for
+a renamed target orphaning a hint. Both consumer arms discriminate (sabotaging
+build.sh's `clade`->`claded` and the wizard's `alpine`->`alpyne` each fail).
+
+Tooling, not soundness-bearing (design section 6) -- no prosecutor round. Open:
+lane 6 (the per-PR reference/manual docs + the full `--config`/preset fold into
+BUILD-HARNESS.md), then the arc closes and git-on-viv resumes.
+
 ## 2026-08-24 (aux) — the guided build wizard (build-configurator lane 4)
 
 Continuation of the build-configurator arc, same day, on a fresh context (I

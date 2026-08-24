@@ -124,23 +124,33 @@ The `Makefile` exposes the common ones as `make <target>` plus `make production`
 
 ### 4.2 Flags
 
+The **configurator** (§4.3) is the primary interface; the older flags are kept as sugar.
+
 | Flag | Effect |
 |---|---|
-| `--release` | Release build (`-O2`, no assertions). Default is `Debug` (assertions on). |
-| `--sanitize=ubsan` | UBSan kernel, in a separate build dir (`build/kernel-undefined`). |
-| `--hardening-full` | Enable the full P1-H hardening flag set. |
-| `--kaslr` | Enable kernel-base KASLR. |
-| `--production` | The lean **V1.0 boot shape**: drops the in-kernel test suite (`KERNEL_TESTS=OFF`) *and* joey's boot-test probe ladder (`THYLA_BOOT_PROBES=OFF`), so the image boots straight to the login getty. The default (dev/CI) shape keeps both. |
+| `--config <name>` | Start from the preset `configs/<name>.config` (`production` / `dev` / `everything` / `default` / `ci`, or one the wizard wrote). |
+| `--with <frag>` | Overlay a fragment from `configs/fragments/` (`ubsan`, `kaslr`, `chunk-clade`, …). Repeatable. |
+| `--set KEY=VALUE` | Override one symbol (e.g. `--set DEV_ACCOUNTS=n`). Repeatable; wins over presets/fragments. |
+| `--show-config` | Resolve + print the config (and the build.sh knobs it maps to), then exit without building. |
+| `--release` / `--kaslr` / `--hardening-full` / `--sanitize=ubsan` / `--no-tickless` | Legacy sugar for single symbols. |
+| `--production` | Legacy sugar: the lean **V1.0 boot shape** (in-kernel tests + boot-probe ladder OFF; login accounts stay ON since the account decouple). `--config production` is the separate hardened preset. |
+| `--dev` | Legacy sugar for `--config dev`. |
 | `--verbose` | Verbose CMake/Cargo output. |
 
-Example:
+Precedence is last-writer-wins: `default` (or the named `--config`) < `--with` fragments < `--set`. A bare `build.sh` (no config-selecting flag) applies the `default` preset — the historical dev/CI shape (in-kernel tests + boot-probe ladder ON) that `make`, `tools/test.sh`, and the SMP gate rely on.
 
 ```bash
-tools/build.sh all --release --production   # a lean, optimized ship image
-tools/build.sh kernel --sanitize=ubsan      # a UBSan kernel for the SMP gate
+tools/build.sh all --config production                 # the lean, hardened ship image
+tools/build.sh all --config dev --with chunk-clade     # dev + the on-device C/C++ toolchain
+tools/build.sh all --set DEV_ACCOUNTS=n                # a bare image a first-boot flow provisions
+tools/build.sh all --config production --show-config   # inspect the resolved config; don't build
 ```
 
-### 4.3 Guided setup — `tools/configure.sh`
+### 4.3 The config model
+
+Every image is one **typed config artifact** (`build/.config`) resolved from a small set of orthogonal axes, grouped as compile-shape (what the kernel *is*), bake-content (what ships *in* the image), and pool-control. `--show-config` prints it; a preset is just a `configs/*.config` file. One axis is worth calling out: **`DEV_ACCOUNTS`** (default `y`) bakes the `michael` + `cora` login accounts so a lean `--production` image is loginnable at all — turn it OFF only for a bare image a first-boot flow will provision. (Those baked passwords are **public in the repo**; `DEV_ACCOUNTS=y` is a dev convenience, not a deployable posture — see `docs/INSTALLER.md`.) The model is documented in full in `docs/reference/150-build-config.md`.
+
+### 4.4 Guided setup — `tools/configure.sh`
 
 Not sure which flags you want? Run the wizard. It is a linear, plain-English
 Q&A that starts from a base profile (`production` / `dev` / `everything` /
@@ -157,8 +167,26 @@ tools/configure.sh --edit myimage  # revisit an existing profile
 It writes `configs/<name>.config`, then tells you the one command to build it:
 `tools/build.sh --config <name>`. The wizard introduces no config semantics of
 its own — it is pure ergonomics over the typed config model (`--config` /
-`--with` / `--set`, presets under `configs/`), which the build configurator
-reference documents in full. `tools/test-configure.sh` covers it.
+`--with` / `--set`, presets under `configs/`), which `docs/reference/150-build-config.md`
+documents in full. `tools/test-configure.sh` covers it.
+
+### 4.5 Missing a build input? — `tools/forage.sh`
+
+Some chunks need inputs that do not live in this repo: the Go / ambush / stratum
+forks, the Alpine minirootfs + `busybox-static` apk, the Clade toolchain
+artifacts. `tools/build-manifest.toml` pins every one (repo + commit, or URL +
+sha256); `tools/forage.sh` reads it, gathers what it can, and instructs on the
+rest:
+
+```bash
+tools/forage.sh                    # what's present, what's ABSENT, how to get each
+tools/forage.sh alpine             # download + sha256-verify the Alpine inputs
+tools/forage.sh clade              # pull the on-device toolchain from the builder
+FORAGE_DRY=1 tools/forage.sh all   # preview every action; fetch nothing
+```
+
+When a build skips a chunk because its input is absent, `build.sh` now names the
+exact `forage` command to run instead of skipping silently.
 
 ---
 
