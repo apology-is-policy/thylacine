@@ -261,6 +261,18 @@ Unix, and this tool's whole purpose is a reader who does *not* know Thylacine's
 identity, where the naming discipline says the standard name wins. (Contrast
 `forage`, an internal collector where a thematic name is free — section 8.)
 
+**AS-BUILT (lane 4):** `tools/configure.sh` implements all five flow steps + the
+three non-interactive fallbacks, driving the schema core (bc_reset / bc_apply_preset
+/ bc_set_one / bc_resolve / bc_emit_config) with no config semantics of its own.
+Impl notes: `--defaults` requires a profile name (usage contract); the live
+constraint announces on `BOOT_PROBES=y` *selection* (its pin on `DEV_ACCOUNTS`
+reinforces it, bc_resolve remains authoritative); the chunk-input flag (step 4)
+probes the real GOROOT/CLADE/ALPINE inputs today and names the `forage` remedy
+(section 5, next lane) plus a working manual fallback; `BC_DIR_CONFIGS` is
+overridable so the test isolates reads+writes to a temp dir. `tools/test-configure.sh`
+is 21 discrimination checks (each proven to fail without its behavior via sabotaged
+copies), incl. the isolation guard that the real `configs/` is never touched.
+
 ---
 
 ## 5. The input manifest ("collect everything")

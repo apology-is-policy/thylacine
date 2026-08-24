@@ -140,6 +140,26 @@ tools/build.sh all --release --production   # a lean, optimized ship image
 tools/build.sh kernel --sanitize=ubsan      # a UBSan kernel for the SMP gate
 ```
 
+### 4.3 Guided setup — `tools/configure.sh`
+
+Not sure which flags you want? Run the wizard. It is a linear, plain-English
+Q&A that starts from a base profile (`production` / `dev` / `everything` /
+`custom`), walks every option one at a time — printing what each is and what it
+enables or costs — honors the constraints live, flags any bake chunk whose input
+is not staged on your host, and writes a named build profile:
+
+```bash
+tools/configure.sh                 # interactive; pick a base, tune, name it
+tools/configure.sh --from dev      # seed from a preset, then tune
+tools/configure.sh --edit myimage  # revisit an existing profile
+```
+
+It writes `configs/<name>.config`, then tells you the one command to build it:
+`tools/build.sh --config <name>`. The wizard introduces no config semantics of
+its own — it is pure ergonomics over the typed config model (`--config` /
+`--with` / `--set`, presets under `configs/`), which the build configurator
+reference documents in full. `tools/test-configure.sh` covers it.
+
 ---
 
 ## 5. Bake chunks — what goes *into* the image

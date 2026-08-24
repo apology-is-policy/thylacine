@@ -3,7 +3,8 @@
 # The single typed config artifact + orthogonal axes + preset/fragment merge that
 # replaces build.sh's overlapping flag-bundles and scattered THYLACINE_* env vars.
 # Design: docs/BUILD-CONFIG-DESIGN.md (Buildroot/Kconfig-lite). Sourced by build.sh;
-# also read by tools/configure.sh (the wizard) and tools/test-build-config.sh.
+# also read by tools/configure.sh (the wizard), tools/test-build-config.sh, and
+# tools/test-configure.sh.
 #
 # bash 3.2 SAFE (macOS /usr/bin/env bash is 3.2.57): no associative arrays, no
 # mapfile, no ${var,,}. The schema is parallel INDEXED arrays; config values are
@@ -48,7 +49,7 @@ bc_def compile BOOT_PROBES bool n "var:boot_probes" \
   "joey's boot-time self-test E2Es (login, recover, on-device toolchain, ...). On for CI/regression; off for a normal image. Requires DEV_ACCOUNTS (the probes log in), so turning this on turns that on too."
 bc_def compile DEV_ACCOUNTS bool y "var:dev_accounts" \
   "Bake a dev login account" \
-  "Provisions the primary login user (michael) at first boot so a lean image is loginnable -- without it, --production has no accounts and you cannot log in (the finding-#1 fix; before this axis, accounts rode BOOT_PROBES). The full michael/susan/cora/wheel fixture set is created only when the boot-probe ladder (BOOT_PROBES) also runs. Turn OFF only for a bare image an installer/first-boot flow will provision."
+  "Provisions the daily-use login accounts (michael + cora) at first boot so a lean image is loginnable -- without it, --production has no accounts and you cannot log in (the finding-#1 fix; before this axis, accounts rode BOOT_PROBES). The full michael/susan/cora/wheel fixture set is created only when the boot-probe ladder (BOOT_PROBES) also runs. Turn OFF only for a bare image an installer/first-boot flow will provision."
 bc_def compile HARDENING_FULL bool n "var:hardening_full" \
   "Full P1-H hardening" \
   "Enables the full hardening flag set (PAC/BTI where the CPU has them, plus extra guards). A small size/complexity cost; on for production-like images."
