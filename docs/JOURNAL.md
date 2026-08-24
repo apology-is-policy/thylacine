@@ -22,6 +22,100 @@ needed the operator.
 
 ---
 
+## 2026-08-24 (aux) -- ut batch: cd -- end-of-options + && / || short-circuit lists
+
+Operator queued a Utopia-fix batch after the /tmp+completion work and said "dive in."
+Landed two of the five, both verified; three still queued.
+
+**`cd -- -foo` failed "too many arguments" -- the `--` was counted, never consumed.**
+bi_cd now strips a leading standalone `--` (`012d3645`). The operator caught the exact
+semantics before I coded: match `--` EXACTLY, not as a prefix, else `--version` (a real
+long option) would be eaten as the terminator. And `--` interacts with cd's own `cd -`
+oldpwd shortcut -- a blanket pre-strip would misread `cd -- -` (enter dir "-") as oldpwd,
+so the `-` shortcut is gated on options NOT having ended. Verified: `mkdir ./-weird;
+cd -- -weird; pwd` -> /home/michael/-weird.
+
+**`clang x.c && ./run` did not parse -- ut had no AND-OR level.** The lexer tokenized
+&&/|| and the design (8.6) shows `cmd || echo failed`, but parse_pipeline only chained `|`
+/ `?|`; a trailing `&&` fell through to the script loop as "expected ; or newline". Added
+StatementKind::AndOr: parse `pipeline (( && | || ) pipeline)*`, eval with short-circuit so
+only the FINAL status feeds implicit-fail -- which is exactly the design's "|| tolerates
+non-zero exit" (`ea93d8b7`). The subtle part: an operand's non-zero exit must NOT propagate
+between links (the connector consumes it); should_propagate_failure gained an AndOr arm so
+a leading `a? && b` still honors a's visible `?` at the interactive prompt.
+
+Verification, two independent layers: u-repl-test gained 4 short-circuit STATUS guards
+(joey-gated every boot -- `false && true` must leave 1, `true || false` must leave 0; the
+status is the discriminator against "ran the RHS anyway"), and the interactive witness
+proved the RHS RUNS in the right condition (`true && echo RANAND`, `false || echo RANOR`).
+Both green; full suite (viv/pty/jc/aurora/clade CL-4/CL-5) unregressed.
+
+**Still queued (3 of 5).** The line-wrap cursor-duplication (line_editor.rs:778 redraw
+counts \n-buffer-lines, not visual wrapped rows -- needs terminal-width awareness, the
+heaviest remaining), `=` (operator-noted, no repro yet -- will ask), and the echo'd-C-source
+parse error (least-diagnosed; single-quote + `>` redirect both have handling, so it needs
+the exact failing input pinned on the booted image).
+
+---
+
+## 2026-08-24 (aux) -- /tmp bind target + /clade/bin completion (the flag wall's tail)
+
+Continuation of the PATH/clang work below: the operator drove the fixed clang interactively
+and hit the two things that STILL did not work, then queued more.
+
+**clang failed "unable to make temporary file: No such file or directory" -- and it was NOT
+the sysroot.** clang stages every build through temp files in /tmp; the session /tmp was
+unusable. Traced to ground: ut's `bind_user_tmp` (usr/utopia/shell/src/main.rs:214)
+MREPL-binds each user's private <home>/tmp over /tmp at session start, but the MREPL needs
+/tmp to PRE-EXIST as a namespace target -- and nothing baked one. The ramfs root carries only
+proc+ctl synth dirs (devramfs.c:99); the pool skeleton (populate_stratum_pool) made /var...
+but never /tmp (build.sh:2699). So the bind failed silently ("ut: tmp bind: mount over /tmp
+failed"), /tmp stayed absent, clang's mktemp got ENOENT. Fix (`8b840ee2`): add /tmp to the
+skeleton mkdir loop. ut's bind code was correct all along -- it just lacked a target. (I had
+mis-catalogued this as a "ut parser" finding; it is a build/image fix.)
+
+**clade/bin commands did not Tab-complete or color, though they executed fine -- a mirror MY
+own PATH commit missed.** `install_completion` (repl.rs:262) scanned only /bin + /goroot/bin
+into bin_commands -> set_known_commands, the set that drives BOTH Tab completion AND the
+command color (line_editor.rs known=fen / unknown=cinnabar). 1c571a62 added /clade/bin to the
+EXEC list (stmt.rs:549) but left this completion mirror behind -- exactly the "drift is a bug"
+which.rs warns of, and the scan's own doc says it must match resolve_command's list. One line
+fixes both symptoms (`14ed9bb5`). Trap checked, not assumed: /clade/bin/{clang,clang++,clangd,
+ld.lld} are multicall COPIES (real files -- build.sh:2353/4173), so is_file() picks them up
+like /goroot/bin.
+
+**The wrong turn, and what caught it: I re-baked the operator's LIVE VM's backing files.** To
+verify, I ran `build.sh all` -- not registering that the operator's `/clade` prompt was a live
+QEMU (pid 39751) holding build/disk.img + build/fixtures/pool.img. test.sh's boot then FAILED
+"Failed to get write lock" on disk.img -- a real surfaced problem, not a flake. I did not wave
+it off: I hunted the holder (ps + lsof), found the operator's VM, then answered the decisive
+question -- did I corrupt their session? -- by INODE, not by guessing. pool.img got a NEW
+inode (88899274) while their QEMU held the OLD (88879588) -> their FS untouched and safe;
+disk.img was overwritten IN-PLACE (same inode 88754310) but is the 16 MB secondary, not
+pool-resident data. The mac LEASE did not protect against this: the operator's own VM is not a
+yip peer. Lesson recorded ([[bug-rebuild-clobbers-live-vm-backing]]): never rebuild shared
+build/ artifacts while a live VM uses them -- verify on a copy or after it exits. The operator
+terminated the VM; I re-verified cleanly on the freed image.
+
+**Verification (freed clade image, scratchpad/verify-tmpfix.exp interactive login):** "ut: tmp
+bound (per-user /tmp from the home)" (the bind SUCCEEDS); `echo tmpok >/tmp/wtns; cat` ->
+"tmpok" (/tmp WRITABLE -- the exact thing that had been failing); bare clang -> "clang version
+22.1.8" (/clade/bin reachable). Regression: test.sh boot OK, clade CL-4/CL-5 PASS, 0 FAIL / 0
+EXTINCTION. Both commits pushed 14ed9bb5 (github + codeberg).
+
+**Left open.** (1) A cheap automated Tab/color witness -- the completion fix is verified by
+build + symmetry with /goroot/bin (operator-confirmed) + the traced mechanism, but expect
+cannot cheaply assert the ANSI redraw; operator confirms interactively. (2) test.sh exited 0
+on the disk.img write-lock boot FAIL -- a gate reporting success on a boot that never started;
+owed a look. (3) The operator's queued Utopia batch (memory `bug-ut-parser-findings`): `--`
+end-of-options (bi_cd fails `cd -- -folder` "too many arguments" -- no `--` handling exists
+anywhere in ut), the line-wrap cursor-duplication (line_editor.rs:778 redraw counts
+\n-buffer-lines, not visual wrapped rows), `=`, `cmd && cmd`, echo'd-C-source. (4) The
+operator's untracked docs/COMPILING-ON-THYLACINE.md still says --sysroot is mandatory (now
+stale; theirs to update).
+
+---
+
 ## 2026-08-24 (aux) — /clade/bin on PATH + clang works off the sysroot by default
 
 Operator ask, off the back of the configurator arc: the flag wall to compile a hello on
