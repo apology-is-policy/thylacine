@@ -72,6 +72,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$REPO_ROOT/build"
 KERNEL_BUILD="$BUILD_DIR/kernel"
+
+# Detect-and-instruct (docs/BUILD-CONFIG-DESIGN.md 5.3): when a bake chunk's
+# input is absent, NAME the remedy rather than leaving the user to guess why a
+# chunk silently did not land. The pinned details live in tools/build-manifest.toml;
+# tools/forage.sh reads it and gathers what it can. The <target> passed here must
+# be a real forage target -- tools/test-detect-instruct.sh enforces that contract.
+forage_hint() {   # <forage-target> <human-name> <absent-path>
+    echo "    -> $2 absent ($3);  fetch it:  tools/forage.sh $1   ('tools/forage.sh status' = all inputs)"
+}
 USR_BUILD="$BUILD_DIR/usr"
 USR_RS_BUILD="$BUILD_DIR/usr-rs"
 # Generated build artifacts (e.g. the A-5c-c system-recovery-phrase header that
@@ -669,6 +678,7 @@ build_go_goroot() {
     local go_bin="$GOFORK/bin/go"
     if [[ ! -x "$go_bin" ]]; then
         echo "==> Go GOROOT bake: fork toolchain not found at $go_bin -- skipping (set GOFORK)"
+        forage_hint go "the Go toolchain fork" "$go_bin"
         # Drop any stale stage from an earlier build: baking a tree the current
         # fork can no longer rebuild would ship outdated toolchain bytes.
         rm -rf "$BUILD_DIR/go/goroot"
@@ -1265,6 +1275,7 @@ VIVEOF
             else
                 rm -rf "$ab"
                 echo "==> viv bundles: Alpine bundle SKIPPED -- the minirootfs is present but no busybox-static apk is (every stock Alpine ELF is dynamic PIE, which the loader rejects; task #145). Drop busybox-static-*.apk in build/cache/ or set THYLACINE_BUSYBOX_STATIC_APK." >&2
+                forage_hint alpine "the Alpine busybox-static apk" "build/cache/busybox-static-*.apk" >&2
             fi
         else
             rm -rf "$ab"
@@ -1272,6 +1283,7 @@ VIVEOF
         fi
     else
         echo "==> viv bundles: no Alpine minirootfs tarball -- Alpine + stock bundles skipped (the L-6c and DISTRO ARC gate fixtures, not the V-7 probe gate's; set THYLACINE_ALPINE_TARBALL or drop one in build/cache/)"
+        forage_hint alpine "the Alpine minirootfs" "build/cache/alpine-minirootfs-*-aarch64.tar.gz"
     fi
 
     # DISTRO D-5, THE ARC GATE fixture: the SAME tarball, staged UNMODIFIED.
@@ -2346,6 +2358,14 @@ build_stratum_pool_fixture() {
     local bake_clade=0
     if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -d "$BUILD_DIR/clade/stage/bin" ]]; then
         bake_clade=1
+    fi
+    # #101's sibling (detect-and-instruct, BUILD-CONFIG-DESIGN.md 5.3): the flag
+    # is SET but no toolchain is staged, so this pool is being minted WITHOUT
+    # /clade -- exactly the silent gap that costs a weekend. Name the remedy.
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && "$bake_clade" != "1" ]]; then
+        echo "==> WARNING: THYLACINE_BAKE_CLADE=1 but no toolchain is staged --"
+        echo "    minting this pool WITHOUT /clade (the on-device C/C++ toolchain)."
+        forage_hint clade "the Clade toolchain" "$BUILD_DIR/clade/stage/bin"
     fi
     if [[ "${THYLACINE_BAKE_GOROOT:-1}" == "1" && -d "$BUILD_DIR/go/goroot" ]]; then
         # Sized against MEASURED consumption (2026-07-03, task #39): the bake
