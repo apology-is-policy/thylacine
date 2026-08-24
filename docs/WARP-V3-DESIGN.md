@@ -209,6 +209,77 @@ yet a client-claimable `/srv/warp` file, and no client Proc maps it -- that (the
 weft-share of the hostmem burrow via `WEFT_BIND_HOSTMEM`, the per-client venus
 device-ctx, the `warp-prove` cross-Proc leg) is V-3b-1c-2.
 
+### 0.9 V-3b-1c-2 design: the client-claimable HOST3D ring (design-first)
+
+The 1c-1 engine mints/retires a HOST3D ring tapestryd-internally. V-3b-1c-2 makes
+it a ring a **client Proc** claims and maps through `/srv/warp`, so a later Mesa
+Venus backend (V-3b-3) writes its command stream into it and virglrenderer polls
+the same host pages. It is invariant-bearing (I-45 GPU-authority, I-32 resource
+floor, I-7 lifetime, I-37 weft dataplane), so this design lands as scripture
+before the code. Every open question here is a section-5 "pin during impl", NOT a
+signoff fork: Model B (section 0.3) and `WEFT_BIND_HOSTMEM` (V-2) are ratified.
+
+**Four pieces.**
+
+1. **The per-client venus device-ctx.** `wctx_mint` (`server.rs:5393`) creates a
+   client's warp ctx as a VIRGL device-ctx (`dev_ctx = slot+1`, `ctx_create(dev_ctx,
+   "warp")`) -- that serves the V-3a guest-blob rings + BOs. A HOST3D ring needs a
+   VENUS (capset-4) device-ctx (V-3b-1a's proven requirement). Per section 0.6 the
+   ring is owned by "one host-side venus ctx tapestryd owns... the same context the
+   guest's venus stream runs in" -- i.e. ONE venus ctx per client warp ctx, owning
+   all that client's HOST3D rings. `WarpCtx` gains `venus_ctx: Option<u32>`,
+   **lazily created** on the first HOST3D ring mint (`ctx_create_capset(id, VENUS,
+   ...)`) and destroyed with the warp ctx in `wctx_retire`. The id must be
+   statically-asserted DISJOINT from the `dev_ctx` range (`1..=MAX_WARP_CTXS`),
+   `COMPOSITOR_CTX`, and the fixed probe ctx ids -- e.g. `dev_ctx + MAX_WARP_CTXS`
+   (the probe-id-disjointness assert is the precedent). Lazy so a client that mints
+   only guest-blob rings pays no venus ctx; per-client so V-3b-2's forward uses the
+   same ctx (no rework). A venus-ctx create failure fails the ring mint clean
+   (`E_IO`), never the warp ctx.
+
+2. **The HOST3D ring flavor in the `/srv/warp` ring subtree.** Section 0.2 keeps the
+   V-3a guest-blob ring (coherent non-venus clients + `warp-prove`); Model B ADDS a
+   HOST3D ring -- ADD, not replace. `ring/new` gains a flavor: `"<bytes> <ridx>
+   host3d"` mints via the 1c-1 `mint_host3d_ring` engine under `venus_ctx` (creating
+   it lazily) instead of the guest-blob `t_dma_create_gpu_bo` path; a bare
+   `"<bytes> <ridx>"` stays the V-3a guest-blob ring. `WarpRing` gains a
+   backing-kind (a `HostRing` for the host3d flavor, or `None` for guest-blob) so
+   `wring_teardown` (`server.rs:6690`) drives `drop_host3d_ring` (detach -> unmap ->
+   unref -> reclaim the offset) for a host3d ring vs the guest-blob `t_close` path.
+   Both share the ctx page budget (I-32) + the per-ring bounds.
+
+3. **The weft-share of the hostmem burrow.** A HOST3D ring's backing is a
+   `BURROW_TYPE_HOSTMEM` burrow (the 1c-1 `burrow_from_hostmem` result at
+   tapestryd's VA). `wring_weft_ensure` (`server.rs:6404`) already lazily
+   `t_weft_share(va, size)`s a ring's backing; for a hostmem burrow that call
+   routes to `WEFT_BIND_HOSTMEM` (`weft.c:401` admits `BURROW_TYPE_HOSTMEM &&
+   kobj_pci && ring_entries==0`) -- the V-2 surface never yet exercised by a real
+   client. The client opens `ring/<ridx>/map`, `t_weft_map`s the share, and gets
+   the ring VA at the **host-dictated** cache (I-37; the share carries the burrow's
+   attribute -- confirm the weft map preserves it, else that is a kernel-side pin).
+   No new kernel syscall.
+
+4. **The `warp-prove` cross-Proc leg.** A new `warp-prove ring-host3d` mode: mint a
+   HOST3D ring under a warp ctx, claim `ring/<ridx>/map` from the prover Proc (a
+   DIFFERENT Proc than tapestryd), and round-trip a sentinel -- the E2E proof of the
+   weft-hostmem client path (the V-2 `WEFT_BIND_HOSTMEM` finally exercised
+   cross-Proc). Venus-gated (a 2D device SKIPs, like the V-3a ring prover).
+
+**Invariants on the line.** I-45: the HOST3D ring lives under the client's OWN
+venus ctx (`wctx` enforces one ctx per conn + owner identity; a client cannot name
+another's ring). I-32: the ring's bytes count against the ctx's page/backing
+budget exactly as the guest-blob ring does. I-7: the ring backing lives until the
+last client unmap AND the retire -- `wring_teardown` disarms the weft share BEFORE
+`drop_host3d_ring` frees (the #847 dual count; the client's mapping survives via
+its own ref). I-37: registration-is-the-capability -- the weft share bounds the
+client to exactly the ring backing, no per-op mediation.
+
+**The split (fit).** 1c-2a = the venus device-ctx lifecycle + the HOST3D ring
+flavor in the subtree + `wring_teardown` (a test-lever mints a host3d ring under a
+real warp ctx, tapestryd-side sentinel, tears down -- provable without a client).
+1c-2b = the weft-share client claim + the `warp-prove` cross-Proc leg. Each lands
+independently, GL-gated, audited.
+
 ---
 
 ## 1. What V-3 is, and the seam it plugs into
