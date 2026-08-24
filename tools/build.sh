@@ -4076,6 +4076,22 @@ build_clade() {
             # rather than a second tree.
             -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra"
             -DLLVM_TOOL_LLVM_DRIVER_BUILD=ON
+            # On-device driver defaults so `clang++ hello.cpp -o hello` just works,
+            # retiring the mandatory --sysroot=/clade/sysroot. DEFAULT_SYSROOT is the
+            # LOAD-BEARING one: it sets Driver::SysRoot, which the CL-3 Thylacine
+            # ToolChain reads for the bare include/ + include/c++/v1 + lib search
+            # (an explicit --sysroot still overrides it, so existing callers are
+            # unaffected). The other four ALIGN with -- and are already hardcoded by
+            # -- the CL-3 driver (ld.lld / libc++ / compiler-rt / -lunwind for the
+            # aarch64-thylacine target), so they are belt-and-suspenders, mattering
+            # only if a non-Thylacine target were ever selected. This is the DEVICE
+            # clang; the host clang (clade-stage1.sh) must NEVER get an absolute
+            # /clade/sysroot default -- /clade does not exist on the build host.
+            -DDEFAULT_SYSROOT=/clade/sysroot
+            -DCLANG_DEFAULT_LINKER=lld
+            -DCLANG_DEFAULT_CXX_STDLIB=libc++
+            -DCLANG_DEFAULT_RTLIB=compiler-rt
+            -DCLANG_DEFAULT_UNWINDLIB=libunwind
             # clangd trim (CL-6). TIDY_CHECKS=OFF drops ALL_CLANG_TIDY_CHECKS --
             # a large slab of code the CL-6 gate (diagnostics/hover/definition)
             # does not use; clangd still links clangTidy/clangTidyUtils, which

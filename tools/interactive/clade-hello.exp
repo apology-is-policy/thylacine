@@ -1,0 +1,42 @@
+#!/usr/bin/expect -f
+# tools/interactive/clade-hello.exp -- prove the on-device clang works off the
+# Clade sysroot BY DEFAULT: `clang hello.c` / `clang++ hello.cpp` with NO flags.
+#
+# OPT-IN (not routine LS-CI): needs an image with BOTH /clade and login accounts.
+# Build one with:
+#   tools/build.sh all --config production --set CHUNK_CLADE=y --set CHUNK_GOROOT=n
+# (a prior `tools/build.sh stage-clade` must have staged build/clade/stage/bin).
+#
+# Before the DEFAULT_SYSROOT bake, --sysroot=/clade/sysroot was MANDATORY on-device
+# (COMPILING-ON-THYLACINE.md); the driver could not infer it. This scenario passes
+# NO --sysroot, no -isystem, no -l -- so a green run witnesses that DEFAULT_SYSROOT
+# is baked into the device clang AND that the CL-3 driver finds the bare-layout
+# sysroot (headers, libc++/libc++abi/libunwind, crt, libc) from it. Invoking `clang`
+# BARE (not /clade/bin/clang) also witnesses /clade/bin on the command $path.
+
+set ::env(THYLACINE_ACCEL) hvf
+# clang on a hello is a few seconds, but a cold FS cache + HVF can be slower --
+# give the compile-and-run commands generous headroom.
+set ::env(LS_CI_CMD_TIMEOUT) 90
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login cora kora
+
+# C: bare `clang`, no --sysroot. Proves DEFAULT_SYSROOT -> Driver::SysRoot finds
+# crt + libc and lld links. __builtin_puts avoids needing a header for the marker.
+lc_send "echo 'int main(){__builtin_puts(\"CLADE_C_OK\");return 0;}' > /tmp/hc.c"
+lc_run_expect_hardfail "clang /tmp/hc.c -o /tmp/hc && /tmp/hc" "CLADE_C_OK" "error:"
+lc_pass "clade-hello(C): bare `clang hc.c` compiles + links + runs with no flags"
+
+# C++: bare `clang++`. clang++ links libc++/libc++abi/libunwind BY DEFAULT (the
+# CL-3 driver hardcodes them), so the link succeeds only if DEFAULT_SYSROOT lets
+# the driver FIND them in /clade/sysroot/lib -- the full flag-wall collapse.
+lc_send "echo 'extern \"C\" int puts(const char*); int main(){puts(\"CLADE_CPP_OK\");return 0;}' > /tmp/hpp.cpp"
+lc_run_expect_hardfail "clang++ /tmp/hpp.cpp -o /tmp/hpp && /tmp/hpp" "CLADE_CPP_OK" "error:"
+lc_pass "clade-hello(C++): bare `clang++ hpp.cpp` compiles + links libc++ + runs with no flags"
+
+lc_quit
+lc_pass "clade-hello: DEFAULT_SYSROOT retires the mandatory --sysroot; clang/clang++ resolve bare on \$path"
+exit 0
