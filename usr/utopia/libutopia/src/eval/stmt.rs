@@ -530,13 +530,15 @@ fn out_stdio(inherit: bool) -> Stdio {
 /// resolves the spawn name through the caller's namespace (stalk + X-search),
 /// so the shell does the `$path` search. A name containing `/` is used as-is
 /// (absolute or relative). A bare command is searched on
-/// `$path = ["/bin", "/", "/goroot/bin"]`: `/bin` is the post-pivot installed
-/// location (joey binds the initrd binary tree there); `/` is the pre-pivot
-/// initrd root (where the boot-test shell runs); `/goroot/bin` is the Go
-/// toolchain shipped in the default image (Stage 6 -- `go` and `gofmt` resolve
-/// bare; last so `/bin` stays authoritative, and reachability remains
-/// namespace-governed: the probe only finds what the Territory already
-/// exposes). The first existing candidate wins; a miss defaults to
+/// `$path = ["/bin", "/", "/goroot/bin", "/clade/bin"]`: `/bin` is the
+/// post-pivot installed location (joey binds the initrd binary tree there); `/`
+/// is the pre-pivot initrd root (where the boot-test shell runs); `/goroot/bin`
+/// is the Go toolchain and `/clade/bin` the Clade C/C++ toolchain
+/// (`clang++`/`ld.lld`), both shipped in optional bake chunks (`go`/`gofmt`,
+/// `clang++`/`clang` resolve bare; the toolchain dirs come LAST so `/bin` stays
+/// authoritative, and reachability stays namespace-governed: the probe only
+/// finds what the Territory already exposes, so an absent chunk just misses).
+/// The first existing candidate wins; a miss defaults to
 /// `/bin/<name>` for a clean spawn error. (The Plan 9 / Unix split -- the
 /// kernel resolves a path, the shell does `$path`; a multi-entry user-settable
 /// `$path` is v1.x.)
@@ -544,7 +546,7 @@ fn resolve_command(name: &str) -> String {
     if name.contains('/') {
         return String::from(name);
     }
-    for dir in ["/bin/", "/", "/goroot/bin/"] {
+    for dir in ["/bin/", "/", "/goroot/bin/", "/clade/bin/"] {
         let mut cand = String::with_capacity(dir.len() + name.len());
         cand.push_str(dir);
         cand.push_str(name);

@@ -946,7 +946,10 @@ unsafe fn seed_session_env(user: &[u8]) {
     let mut home_val: Vec<u8> = Vec::with_capacity(6 + user.len());
     home_val.extend_from_slice(b"/home/");
     home_val.extend_from_slice(user);
-    let path_val: &[u8] = b"/bin:/goroot/bin";
+    // Mirrors the shell's static $path (eval/stmt.rs resolve_command) so `which`
+    // and POSIX/Go tools agree with what `ut` runs; drift is a bug. /clade/bin is
+    // the Clade C/C++ toolchain (absent when that chunk is off -- a harmless miss).
+    let path_val: &[u8] = b"/bin:/goroot/bin:/clade/bin";
     let pairs: [(&[u8], &[u8]); 3] = [
         (b"HOME", &home_val),
         (b"USER", user),

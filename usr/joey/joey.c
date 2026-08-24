@@ -7334,16 +7334,20 @@ int main(void) {
                                 // set PATH: gopls resolves `go` via exec.LookPath
                                 // ($PATH) to load a workspace view (else "no
                                 // views") + os.Executable() falls back to $PATH.
-                                // Login gives the real user env PATH=/bin:/goroot/
-                                // bin; joey's boot env has none. Mutated HERE (in
-                                // the will-spawn path) so it is symmetric with the
-                                // unlink below -- F3 (no PATH leak on a skip path).
+                                // Login gives the real user env a PATH (seeded in
+                                // login/main.rs); joey's boot env has none. Mutated
+                                // HERE (in the will-spawn path) so it is symmetric
+                                // with the unlink below -- F3 (no PATH leak on a skip
+                                // path).
                                 if (edir >= 0) {
                                     (void)t_unlink(edir, "GO111MODULE", 11, 0);
                                     long pv = t_walk_create(edir, "PATH", 4,
                                                             T_OWRITE, 0644);
                                     if (pv >= 0) {
-                                        const char pc[] = "/bin:/goroot/bin";
+                                        // Mirror the login PATH seed (login/main.rs)
+                                        // so this boot-test run matches an interactive
+                                        // session; drift is a bug.
+                                        const char pc[] = "/bin:/goroot/bin:/clade/bin";
                                         (void)t_write(pv, pc, sizeof(pc) - 1);
                                         (void)t_close(pv);
                                     }
@@ -7351,7 +7355,7 @@ int main(void) {
                                 // argv[0] ABSOLUTE so os.Executable() resolves
                                 // it (executable_path.go's absolute branch) even
                                 // with no PATH in joey's env -- matching the
-                                // login-env interactive run (PATH=/bin:/goroot/bin)
+                                // login-env interactive run (which has a $PATH)
                                 // where os.Executable succeeds + gopls starts its
                                 // telemetry sidecar.
                                 static const char argv_gp[] =
