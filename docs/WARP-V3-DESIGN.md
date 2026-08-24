@@ -161,10 +161,49 @@ write-then-read, no barrier -- ARM coherency round-trips it) proves the guest ca
 ACCESS the mapped BAR; host-visibility (virglrenderer polling the ring) is a
 later rung (V-3b-1c/2), correctly not claimed here. The VA is mapped WC
 (`T_CACHE_WC` -> Normal Non-Cacheable) so guest ring stores drain without a
-cache flush. The allocator is bump-only at v1.0; a free-list arrives with the
-ring lifecycle (V-3b-1c) if rings are re-minted. Proven on GL (thyla-pi KVM/V3D):
+cache flush. The allocator is bump-only at V-3b-1b; a free-list arrives with the
+ring lifecycle (V-3b-1c, section 0.8). Proven on GL (thyla-pi KVM/V3D):
 `tapestryd: gpu hostmem-map MAPPED+ROUNDTRIP`; the control leg (no F_RESOURCE_BLOB)
 self-skips. Folded into the `venus` verb's `venus-verdict`.
+
+### 0.8 V-3b-1c-1 as-built: the persistent hostmem ring engine (2026-08-24)
+
+V-3b-1b's guest-map was a one-shot probe: a local allocator, one ring, torn down
+in place. V-3b-1c-1 makes it a reusable, persistent ENGINE -- the substrate the
+client-claimable Model B ring (V-3b-1c-2) and the venus-stream forward (V-3b-2)
+build on. Three deltas, all in `usr/tapestryd/src/gpu.rs`:
+
+- **The allocator is persistent + reclaiming.** `HostmemAllocator` is hoisted
+  into a `Gpu.hostmem: Option<HostmemAllocator>` field, sized once from
+  `shm_region(1)` at probe, and gains a first-fit **free-list**: a torn-down
+  ring's offset is reclaimed, so a persistent daemon minting and retiring rings
+  across client sessions does not exhaust the 256 MiB region (bump-only would).
+  No coalescing at v1.0 -- ring blobs are uniform-ish (page-rounded, <=
+  `WARP_RING_MAX`), so same-size frees exact-match without splitting; a Vec-grow
+  failure leaks the extent (bump fallback) rather than aborting.
+- **The lifecycle is a reusable pair.** `mint_host3d_ring(res_id, ctx_id, len)
+  -> HostRing` composes the V-3b-1a/1b steps (alloc offset -> `create_host3d_blob`
+  under a venus ctx -> `map_blob` -> `burrow_from_hostmem` at the host-dictated
+  cache) with **full error unwinding** at every stage (offset -> resource ->
+  subregion), so no half-minted ring is ever left behind. `drop_host3d_ring(&HostRing)`
+  is the inverse (`t_burrow_detach` -> `unmap_blob` -> `resource_unref` ->
+  reclaim the offset). `HostRing` carries exactly what teardown needs; the caller
+  disarms any weft share first (I-7 #847, V-3b-1c-2's concern).
+- **The probe proves the engine, not a single map.** `hostmem_ring_probe` mints
+  TWO rings under one venus ctx (the allocator must hand DISTINCT offsets --
+  `off_a=0x0`, `off_b=0x1000`), round-trips a sentinel through each guest VA,
+  tears both down, then RE-MINTS and asserts the freed offset is REUSED (the
+  free-list). One verdict line:
+  `tapestryd: gpu hostmem-ring MAPPED+ROUNDTRIP x2 (off_a=.. off_b=.. cache=CACHED) teardown+remint-reuse OK`,
+  emitted only when all four properties hold (else `hostmem-ring FAIL (...)`).
+
+The `venus` verb's `venus-verdict` gate anchors on the `x2` success line (a FAIL
+line -- any property false -- is rejected); `tools/test-venus-verdict.sh` proves
+the discrimination without a boot, including a `reuse=false` FAIL-line leg so a
+lifecycle regression cannot pass. What is deliberately NOT here: the ring is not
+yet a client-claimable `/srv/warp` file, and no client Proc maps it -- that (the
+weft-share of the hostmem burrow via `WEFT_BIND_HOSTMEM`, the per-client venus
+device-ctx, the `warp-prove` cross-Proc leg) is V-3b-1c-2.
 
 ---
 

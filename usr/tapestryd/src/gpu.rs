@@ -190,12 +190,20 @@ const _: () = assert!(
 // sentinel-round-tripped. Same pre-Server init timing as host3d_probe; distinct
 // from every other fixed probe id.
 const HOSTMEM_PROBE_RES: u32 = 0x2e;
+// V-3b-1c: a second probe resource so hostmem_ring_probe can hold two live
+// HOST3D rings at once and prove the allocator hands DISTINCT offsets.
+const HOSTMEM_PROBE_RES_2: u32 = 0x2f;
 const HOSTMEM_PROBE_CTX_ID: u32 = 203;
 const _: () = assert!(
     HOSTMEM_PROBE_RES < crate::server::SCREEN_RES
+        && HOSTMEM_PROBE_RES_2 < crate::server::SCREEN_RES
+        && HOSTMEM_PROBE_RES != HOSTMEM_PROBE_RES_2
         && HOSTMEM_PROBE_RES != BLOB_PROBE_RES_ID
+        && HOSTMEM_PROBE_RES_2 != BLOB_PROBE_RES_ID
         && HOSTMEM_PROBE_RES != HOST3D_PROBE_RES_CTX
+        && HOSTMEM_PROBE_RES_2 != HOST3D_PROBE_RES_CTX
         && HOSTMEM_PROBE_RES != HOST3D_PROBE_RES_GLOBAL
+        && HOSTMEM_PROBE_RES_2 != HOST3D_PROBE_RES_GLOBAL
         && HOSTMEM_PROBE_CTX_ID > crate::server::MAX_WARP_CTXS as u32
         && HOSTMEM_PROBE_CTX_ID < crate::server::COMPOSITOR_CTX
         && HOSTMEM_PROBE_CTX_ID != PROBE_CTX_ID_VIRGL
@@ -204,23 +212,32 @@ const _: () = assert!(
     "hostmem probe ids must sit below SCREEN_RES / within the ctx window and be distinct"
 );
 
-/// V-3b-1b: a bump allocator over the hostmem BAR's shm region, handing out
-/// page-aligned, non-overlapping byte offsets (relative to the region window
-/// base -- the frame `map_blob` and `burrow_from_hostmem` both use) for HOST3D
-/// ring blobs. Bump-only: ring blobs live for the client's session; a free-list
-/// arrives with the ring lifecycle (V-3b-1c) only if rings are re-minted.
+/// V-3b-1b: a page-aligned allocator over the hostmem BAR's shm region, handing
+/// out non-overlapping byte offsets (relative to the region window base -- the
+/// frame `map_blob` and `burrow_from_hostmem` both use) for HOST3D ring blobs.
+/// V-3b-1c makes it persistent (a Gpu field) and adds a first-fit free-list so a
+/// retired ring's offset is reclaimed: a persistent daemon mints and tears down
+/// rings across client sessions, so bump-only would exhaust the region.
 struct HostmemAllocator {
     next: u64,
     len: u64,
+    /// Freed (offset, page-rounded size) extents, first-fit reuse. No coalescing
+    /// at v1.0: ring blobs are uniform-ish (page-rounded, <= WARP_RING_MAX), so
+    /// same-size frees exact-match without splitting and the list stays flat; a
+    /// split extent's remainder is retained. A push that cannot grow the Vec
+    /// leaks the extent (bump-only fallback) rather than aborting -- the offset
+    /// is lost, never double-handed.
+    free: alloc::vec::Vec<(u64, u64)>,
 }
 
 impl HostmemAllocator {
     fn new(region_len: u64) -> Self {
-        Self { next: 0, len: region_len }
+        Self { next: 0, len: region_len, free: alloc::vec::Vec::new() }
     }
 
     /// Reserve `size` bytes (rounded up to a page); returns the offset, or None
-    /// when the region cannot fit it. Overflow-safe on every arithmetic step.
+    /// when the region cannot fit it. Reuses a freed extent (first fit) before
+    /// growing the region. Overflow-safe on every arithmetic step.
     fn alloc(&mut self, size: u64) -> Option<u64> {
         if size == 0 {
             // A zero-size reservation would not advance `next`, so it would alias
@@ -228,6 +245,15 @@ impl HostmemAllocator {
             return None;
         }
         let size = size.checked_add(PAGE_SIZE - 1)? & !(PAGE_SIZE - 1);
+        if let Some(i) = self.free.iter().position(|&(_, sz)| sz >= size) {
+            let (off, sz) = self.free[i];
+            if sz == size {
+                self.free.swap_remove(i);
+            } else {
+                self.free[i] = (off + size, sz - size); // split: retain the remainder
+            }
+            return Some(off);
+        }
         let off = self.next;
         let end = off.checked_add(size)?;
         if end > self.len {
@@ -235,6 +261,29 @@ impl HostmemAllocator {
         }
         self.next = end;
         Some(off)
+    }
+
+    /// Return a page-aligned extent to the free-list. `size` MUST be the value
+    /// passed to the `alloc` that returned `offset` (the caller carries it in the
+    /// HostRing). Rejects (and logs) an extent that runs past the bump watermark
+    /// or overlaps an already-freed extent: a double-free would else sit twice in
+    /// the list and hand one offset to two live rings (holotype F1 defense-in-depth,
+    /// behind the non-Copy handle). A legitimate free is always within `[0,next)`
+    /// and disjoint from the list, so the guard never rejects one. A reserve
+    /// failure leaks the extent rather than aborting.
+    fn free(&mut self, offset: u64, size: u64) {
+        let size = (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let end = offset.saturating_add(size);
+        if end > self.next || self.free.iter().any(|&(o, s)| offset < o + s && o < end) {
+            say!(
+                "tapestryd: hostmem free rejected (offset={:#x} size={:#x}) -- oob/overlap, double-free?",
+                offset, size
+            );
+            return;
+        }
+        if self.free.try_reserve(1).is_ok() {
+            self.free.push((offset, size));
+        }
     }
 }
 
@@ -267,6 +316,36 @@ fn cache_name(cache: u64) -> &'static str {
         T_CACHE_UNCACHED => "UNCACHED",
         _ => "CACHED",
     }
+}
+
+/// V-3b-1c: a minted HOST3D ring -- the engine handle the Model B ring path
+/// (V-3b-1c-2) and the venus-stream forward (V-3b-2) will hold. Carries exactly
+/// what `drop_host3d_ring` needs to retire it: the host resource, the hostmem
+/// offset (to reclaim), tapestryd's guest VA + page-rounded size (to detach), and
+/// the host-dictated cache attribute (logged; a guest/host mismatch is the
+/// GPU-DESIGN 6.2 coherency hazard). Deliberately NOT `Copy` (holotype F1): a
+/// ring handle is a single-use teardown token -- `drop_host3d_ring` consumes it
+/// by value, so a double-drop (which would double-free the offset and alias two
+/// live rings at one hostmem slot) and a use-after-drop are compile errors.
+pub struct HostRing {
+    pub res_id: u32,
+    pub offset: u64,
+    pub va: u64,
+    pub size: u64,
+    pub cache: u64,
+}
+
+/// Write an offset-derived sentinel through a guest-mapped hostmem VA and return
+/// the written word. Offset-derived (holotype F2) so two rings carry DISTINCT
+/// sentinels: if a host/kernel defect aliased their backings onto one PA, one
+/// write clobbers the other, and the caller's re-read (after BOTH writes) then
+/// mismatches -- witnessing PHYSICAL distinctness, not merely distinct allocator
+/// offsets. The same-address, same-core write-then-read is barrier-free (ARM
+/// coherency); a re-read mismatch means the VA does not hold what THIS ring wrote.
+fn hostmem_sentinel(va: u64, off: u64) -> u32 {
+    let sentinel = 0x5657_3342u32 ^ (off as u32); // "WV3B" ^ offset
+    unsafe { w32(va, sentinel) };
+    sentinel
 }
 
 // 3D commands (VIRTIO 1.2 section 5.7.6.9; virgl-negotiated only). The seam's
@@ -1411,6 +1490,10 @@ pub struct Gpu {
     /// other's fences.
     fence_next: u64,
     pci: PciDev,
+    /// V-3b-1c: the persistent hostmem-BAR ring-offset allocator (None on a
+    /// device with no hostmem shm region). Outlives any single ring so the
+    /// Model B ring path can mint + retire across a client's session.
+    hostmem: Option<HostmemAllocator>,
     _ring: Dma,
     _flane: Option<Dma>,
 }
@@ -1489,6 +1572,9 @@ impl Gpu {
             None
         };
         let flane_pa = flane.as_ref().map_or(0, |f| f.paddr());
+        // V-3b-1c: the persistent hostmem ring-offset allocator, sized to the
+        // hostmem BAR's shm region (shm id 1). None on a device without it.
+        let hostmem = pci.shm_region(1).map(|(_, len)| HostmemAllocator::new(len));
 
         let mut gpu = Gpu {
             ctrl: Controlq {
@@ -1528,6 +1614,7 @@ impl Gpu {
             capset_ver: 0,
             fence_next: 0,
             pci,
+            hostmem,
             _ring: ring,
             _flane: flane,
         };
@@ -1851,108 +1938,96 @@ impl Gpu {
         let _ = self.resource_unref(res_id);
     }
 
-    /// Warp-6 V-3b-1b: prove tapestryd can GUEST-MAP a HOST3D ring blob. After
-    /// V-3b-1a showed the host places the blob in the hostmem BAR (map_blob),
-    /// this answers: can the guest reach those bytes? Allocate a page-aligned
-    /// offset, create + map a HOST3D blob there under a venus ctx, then
-    /// SYS_BURROW_FROM_HOSTMEM the same subrange into a guest VA and round-trip a
-    /// sentinel through it. The returned VA reaching the BAR is the kernel's V-2
-    /// guarantee; the sentinel confirms the mapping is live + accessible.
-    /// Host-visibility (virglrenderer sees the guest's writes) is a later rung
-    /// (the ring poll, V-3b-1c/2). Init-time, pre-Server, like host3d_probe, and
-    /// swallows every outcome (Ok) for the same last-probe / optional-venus
-    /// reason -- a wedge here never fails the console.
+    /// Warp-6 V-3b-1c: prove the persistent hostmem RING ENGINE. V-3b-1b proved a
+    /// single guest-mapped HOST3D blob; this exercises the reusable
+    /// mint_host3d_ring / drop_host3d_ring lifecycle the Model B ring path
+    /// (V-3b-1c-2) and the venus-stream forward (V-3b-2) build on. Init-time,
+    /// pre-Server, like host3d_probe, and swallows every outcome (Ok) for the same
+    /// last-probe / optional-venus reason -- a wedge here never fails the console.
     fn hostmem_map_probe(&mut self) -> Result<(), Error> {
         if !self.blob {
-            say!("tapestryd: gpu hostmem-map skipped (F_RESOURCE_BLOB not offered)");
+            say!("tapestryd: gpu hostmem-ring skipped (F_RESOURCE_BLOB not offered)");
             return Ok(());
         }
-        let region_len = match self.pci.shm_region(1) {
-            Some((_, len)) => len,
-            None => {
-                say!("tapestryd: gpu hostmem-map skipped (no hostmem shm region)");
-                return Ok(());
-            }
-        };
+        if self.hostmem.is_none() {
+            say!("tapestryd: gpu hostmem-ring skipped (no hostmem shm region)");
+            return Ok(());
+        }
         if !self.ctxinit {
-            say!("tapestryd: gpu hostmem-map skipped (no CONTEXT_INIT -- venus ctx unavailable)");
+            say!("tapestryd: gpu hostmem-ring skipped (no CONTEXT_INIT -- venus ctx unavailable)");
             return Ok(());
         }
         if self
             .ctx_create_capset(HOSTMEM_PROBE_CTX_ID, VIRTIO_GPU_CAPSET_VENUS, b"hostmem-probe")
             .is_err()
         {
-            say!("tapestryd: gpu hostmem-map venus ctx create failed; skipped");
+            say!("tapestryd: gpu hostmem-ring venus ctx create failed; skipped");
             return Ok(());
         }
-        let mut alloc = HostmemAllocator::new(region_len);
-        let ring_len = PAGE_SIZE as u32;
-        match alloc.alloc(u64::from(ring_len)) {
-            None => say!("tapestryd: gpu hostmem-map skipped (hostmem region too small)"),
-            Some(off) => self.hostmem_map_probe_at(off, ring_len),
-        }
+        self.hostmem_ring_probe();
         let _ = self.ctx_destroy(HOSTMEM_PROBE_CTX_ID);
         Ok(())
     }
 
-    /// One hostmem-map probe: create a HOST3D blob under the probe ctx, map it at
-    /// `off`, guest-map the subrange, round-trip a sentinel, then tear down. On a
-    /// map/burrow refusal it unmaps only what was mapped; unref is unconditional.
-    fn hostmem_map_probe_at(&mut self, off: u64, ring_len: u32) {
-        match self.create_host3d_blob(
-            HOSTMEM_PROBE_RES,
-            HOSTMEM_PROBE_CTX_ID,
-            VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE,
-            ring_len,
-        ) {
-            Ok(()) => match self.map_blob(HOSTMEM_PROBE_RES, off) {
-                // Map the guest PTE at the attribute the host DICTATED (map_info),
-                // never a hardcoded guess -- GPU-DESIGN 6.2 "honored exactly": a
-                // mismatched host/guest alias (guest NC vs host WB) loses
-                // coherency on ARM64, and a HOST3D ring the host polls needs the
-                // pair to agree (CACHED on KVM).
-                Ok(map_info) => {
-                    let cache = map_info_to_cache(map_info);
-                    match self.pci.burrow_from_hostmem(1, off, u64::from(ring_len), cache) {
-                        Ok(va) => self.hostmem_sentinel(va, off, cache),
-                        Err(_) => {
-                            say!("tapestryd: gpu hostmem-map create+map OK but BURROW_FROM_HOSTMEM refused");
-                            let _ = self.unmap_blob(HOSTMEM_PROBE_RES);
-                        }
-                    }
-                }
-                Err(_) => say!("tapestryd: gpu hostmem-map create OK but MAP refused"),
-            },
-            Err(_) => say!("tapestryd: gpu hostmem-map create refused"),
-        }
-        let _ = self.resource_unref(HOSTMEM_PROBE_RES);
-    }
-
-    /// Round-trip a sentinel through the guest-mapped hostmem VA, then DETACH it.
-    /// Same-address, same-core write-then-read: the architecture's coherency
-    /// returns the just-written value with no barrier, so a MISMATCH means the VA
-    /// does not alias the mapped BAR bytes. `cache` (the host-dictated attribute)
-    /// is logged so a V-3b-1c coherency bug is diagnosable from the boot line. The
-    /// mapping is detached (`t_burrow_detach`, the leg tapestryd already uses for
-    /// ring teardown) so the probe leaves no stale RW alias of shm offset 0 -- the
-    /// slot a persistent allocator hands the first real ring -- in the AS.
-    fn hostmem_sentinel(&mut self, va: u64, off: u64, cache: u64) {
-        let sentinel: u32 = 0x5657_3342; // "WV3B"
-        unsafe { w32(va, sentinel) };
-        let got = unsafe { r32(va) };
-        if got == sentinel {
+    /// The V-3b-1c engine proof: mint TWO HOST3D rings under one venus ctx (the
+    /// allocator must hand DISTINCT offsets), round-trip a sentinel through each
+    /// guest VA, tear both down, then RE-MINT (the free-list must reclaim a freed
+    /// offset -- else a persistent daemon would exhaust the region). Every ring
+    /// goes through the same mint_host3d_ring / drop_host3d_ring the Model B ring
+    /// path uses. One summary line carries the verdict so a coherency or lifecycle
+    /// regression is diagnosable from the boot log.
+    fn hostmem_ring_probe(&mut self) {
+        let len = PAGE_SIZE as u32;
+        let a = match self.mint_host3d_ring(HOSTMEM_PROBE_RES, HOSTMEM_PROBE_CTX_ID, len) {
+            Ok(r) => r,
+            Err(_) => {
+                say!("tapestryd: gpu hostmem-ring mint A refused");
+                return;
+            }
+        };
+        let b = match self.mint_host3d_ring(HOSTMEM_PROBE_RES_2, HOSTMEM_PROBE_CTX_ID, len) {
+            Ok(r) => r,
+            Err(_) => {
+                say!("tapestryd: gpu hostmem-ring mint B refused");
+                self.drop_host3d_ring(a);
+                return;
+            }
+        };
+        // Write BOTH offset-derived sentinels, THEN re-read each: if the two rings
+        // aliased one PA, B's write clobbers A's word and A's re-read mismatches --
+        // so a_ok/b_ok witness PHYSICAL distinctness, not just distinct allocator
+        // offsets (holotype F2). `distinct` still checks the handed offsets.
+        let a_want = hostmem_sentinel(a.va, a.offset);
+        let b_want = hostmem_sentinel(b.va, b.offset);
+        let a_ok = unsafe { r32(a.va) } == a_want;
+        let b_ok = unsafe { r32(b.va) } == b_want;
+        let distinct = b.offset != a.offset;
+        // Save what the summary + reuse check need BEFORE the by-value drops.
+        let (a_off, b_off, a_cache) = (a.offset, b.offset, a.cache);
+        // Retire both; each drop reclaims its offset into the free-list.
+        self.drop_host3d_ring(a);
+        self.drop_host3d_ring(b);
+        // Re-mint: the allocator must hand back a FREED offset (A's or B's), not a
+        // fresh bump past both -- proof the free-list reclaimed on teardown.
+        let reuse = match self.mint_host3d_ring(HOSTMEM_PROBE_RES, HOSTMEM_PROBE_CTX_ID, len) {
+            Ok(c) => {
+                let ok = c.offset == a_off || c.offset == b_off;
+                self.drop_host3d_ring(c);
+                ok
+            }
+            Err(_) => false,
+        };
+        if a_ok && b_ok && distinct && reuse {
             say!(
-                "tapestryd: gpu hostmem-map MAPPED+ROUNDTRIP (va={:#x}, off={:#x}, cache={})",
-                va, off, cache_name(cache)
+                "tapestryd: gpu hostmem-ring MAPPED+ROUNDTRIP x2 (off_a={:#x} off_b={:#x} cache={}) teardown+remint-reuse OK",
+                a_off, b_off, cache_name(a_cache)
             );
         } else {
             say!(
-                "tapestryd: gpu hostmem-map guest-mapped but sentinel MISMATCH (got={:#x})",
-                got
+                "tapestryd: gpu hostmem-ring FAIL (a_ok={} b_ok={} distinct={} reuse={})",
+                a_ok, b_ok, distinct, reuse
             );
         }
-        let _ = unsafe { t_burrow_detach(va, PAGE_SIZE) };
-        let _ = self.unmap_blob(HOSTMEM_PROBE_RES);
     }
 
     /// GET_CAPSET_INFO for one index -> (capset_id, max_version, max_size).
@@ -2283,6 +2358,91 @@ impl Gpu {
             GPU_CTRL_HDR_LEN,
             VIRTIO_GPU_RESP_OK_NODATA,
         )
+    }
+
+    /// V-3b-1c: mint a HOST3D ring -- the composed Model B ring lifecycle over
+    /// create_host3d_blob + map_blob + burrow_from_hostmem. Reserves a page-
+    /// aligned hostmem offset from the persistent allocator, creates the blob
+    /// under `ctx_id` (which MUST be a venus ctx -- V-3b-1a proved a non-venus
+    /// create is refused), maps it into the hostmem BAR, and guest-maps the
+    /// subrange at the HOST-DICTATED cache attribute (map_info; never a guess --
+    /// GPU-DESIGN 6.2). Returns the ring handle. Every early-error path unwinds
+    /// exactly what it acquired (offset -> resource -> subregion) so no half-minted
+    /// ring is left behind. `res_id` is the caller's, unique among LIVE rings (an
+    /// id may be reused once its ring is retired -- the probe's re-mint does).
+    /// Fails Hardware without a hostmem region, when the region is full, or when
+    /// `len` page-rounds past a u32 (holotype F3 -- the engine carries its own
+    /// size bound rather than inheriting the region size as an accidental guard).
+    pub fn mint_host3d_ring(
+        &mut self,
+        res_id: u32,
+        ctx_id: u32,
+        len: u32,
+    ) -> Result<HostRing, Error> {
+        let size = (u64::from(len) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        // The blob size crosses the wire as a u32; a len that page-rounds to 1<<32
+        // would truncate to a 0-size create over a full-size reservation. Guard
+        // BEFORE the alloc so nothing is unwound (holotype F3). Create at the page-
+        // rounded size so the host allocation covers the whole mapped page.
+        let size32 = u32::try_from(size).map_err(|_| Error::Hardware)?;
+        let off = match self.hostmem.as_mut().and_then(|a| a.alloc(size)) {
+            Some(o) => o,
+            None => return Err(Error::Hardware),
+        };
+        if let Err(e) =
+            self.create_host3d_blob(res_id, ctx_id, VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE, size32)
+        {
+            self.hostmem_free(off, size);
+            return Err(e);
+        }
+        let map_info = match self.map_blob(res_id, off) {
+            Ok(mi) => mi,
+            Err(e) => {
+                let _ = self.resource_unref(res_id);
+                self.hostmem_free(off, size);
+                return Err(e);
+            }
+        };
+        let cache = map_info_to_cache(map_info);
+        let va = match self.pci.burrow_from_hostmem(1, off, size, cache) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = self.unmap_blob(res_id);
+                let _ = self.resource_unref(res_id);
+                self.hostmem_free(off, size);
+                return Err(Error::Hardware);
+            }
+        };
+        Ok(HostRing { res_id, offset: off, va, size, cache })
+    }
+
+    /// V-3b-1c: retire a HOST3D ring minted by mint_host3d_ring, in the inverse
+    /// order: detach tapestryd's guest VA, release the hostmem subregion, drop the
+    /// host resource, reclaim the offset. Takes the handle BY VALUE (holotype F1):
+    /// consuming it makes a double-drop / use-after-drop a compile error. Best-
+    /// effort on each device step (a teardown never fails the caller), but a device
+    /// refusal is LOGGED (holotype F4) -- a swallowed unref/unmap would else surface
+    /// as a bogus `reuse=false` at the next re-mint, indicting the free-list for a
+    /// teardown fault. The CALLER disarms any weft share BEFORE calling this (I-7
+    /// #847: a client's own mapping survives via its own ref). The offset is always
+    /// reclaimed so a persistent daemon does not exhaust the region.
+    pub fn drop_host3d_ring(&mut self, ring: HostRing) {
+        let _ = unsafe { t_burrow_detach(ring.va, ring.size) };
+        if self.unmap_blob(ring.res_id).is_err() {
+            say!("tapestryd: hostmem ring res {} unmap refused at teardown", ring.res_id);
+        }
+        if self.resource_unref(ring.res_id).is_err() {
+            say!("tapestryd: hostmem ring res {} unref refused at teardown", ring.res_id);
+        }
+        self.hostmem_free(ring.offset, ring.size);
+    }
+
+    /// Return a hostmem extent to the persistent allocator (no-op when there is no
+    /// allocator -- only when the device had no hostmem region to allocate from).
+    fn hostmem_free(&mut self, offset: u64, size: u64) {
+        if let Some(a) = self.hostmem.as_mut() {
+            a.free(offset, size);
+        }
     }
 
     /// CTX_CREATE: mint rendering context `ctx_id` host-side. context_init

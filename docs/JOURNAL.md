@@ -22,6 +22,71 @@ needed the operator.
 
 ---
 
+## 2026-08-24 — V-3b-1c-1: the persistent hostmem ring engine (a deliberate split)
+
+Same autonomous run, resumed on the far side of a self-compaction at the 600k
+checkpoint (the run-through rule). The pickup named V-3b-1c as one chunk: hoist
+the allocator, build the client-claimable `/srv/warp` ring, drive teardown. On
+reading the ground I split it, and the reasoning is the interesting part.
+
+**Why the split.** The Model B ring, for a cross-Proc client, is a HOST3D blob
+weft-shared as a `BURROW_TYPE_HOSTMEM` burrow -- and `weft.c:401` already admits
+exactly that (`WEFT_BIND_HOSTMEM`, the V-2 surface built but never exercised by a
+real client), reached through the same `t_weft_share(va,size)` tapestryd already
+calls for the V-3a guest-blob ring. So the client path needs no kernel work --
+which means the whole thing is buildable, and pull-forward would say build it
+all. But it decomposes at a clean seam: the *engine* (a persistent allocator + a
+reusable mint/teardown lifecycle, provable by the probe alone) versus the *client
+surface* (a per-client tapestryd-owned venus device-ctx + the weft-share of a
+hostmem burrow + a `warp-prove` cross-Proc leg). The engine is a complete,
+non-forking, independently-auditable foundation; the client surface is a larger
+new kernel-exercised path that earns its own audit. 1c-1 is the engine; 1c-2 is
+the surface. This is a sub-chunk split, not a deferral of scope -- deliverables
+#1 (hoist) and #3 (teardown lifecycle) are 1c-1; #2 (client claim) is 1c-2.
+
+**What landed.** `HostmemAllocator` hoisted into `Gpu.hostmem`, sized once at
+probe, with a first-fit free-list so a persistent daemon reclaims a retired
+ring's offset (bump-only would exhaust the 256 MiB region). A reusable
+`mint_host3d_ring` / `drop_host3d_ring` pair with full error-path unwinding
+(offset -> resource -> subregion). The probe rewritten to PROVE the engine, not a
+single map: two rings at distinct offsets (`0x0`, `0x1000`), a sentinel through
+each guest VA, teardown of both, then a re-mint that must reuse a freed offset --
+one verdict line, emitted only when all four hold.
+
+**The gate got a real discrimination, not a token check.** The probe emits its
+success line only on `a_ok && b_ok && distinct && reuse`; a lifecycle regression
+(e.g. `reuse=false`) emits `hostmem-ring FAIL (...)` instead. `test-venus-verdict`
+gained a leg that REPLACES the success line with a `reuse=false` FAIL line and
+asserts the verdict rejects it -- so the free-list reclaim is a tested property,
+not one that rides an absent-token check (the M-PIN: anchor on what only success
+produces; sabotage the path under test). 24/24 discriminates, no boot.
+
+**The holotype's best catch was a type-system one (Fable 5, 0/0/1P2/3P3, all
+fixed).** F1 [P2]: `HostRing` was `#[derive(Copy)]`, `drop_host3d_ring` took it
+by `&ref`, and `free()` validated nothing -- three innocuous choices that
+COMPOSE into a silent double-free. The probe drops each ring exactly once, so
+1c-1 is correct today; but this rung's deliverable IS the reusable engine API,
+and the day 1c-2 lands a second retire path (a death reaper AND a close verb,
+the shape tapestryd already has for BOs), two `Copy` handles each drop the same
+ring, `free()` pushes the offset twice, and two later mints hand ONE hostmem
+offset to two clients' rings -- cross-client aliasing, no log line. The fix is
+the type system: drop `Copy`, take the handle BY VALUE, so a double-drop is a
+compile error; the `free()` oob/overlap guard is the belt to that suspenders.
+The reusable lesson: a resource handle that is `Copy` is a double-free waiting
+for a second caller -- make it a move-only single-use token and let the compiler
+hold the contract the doc comment cannot. F2 [P3] was the same instinct on the
+probe: it proved the ALLOCATOR handed distinct offsets, not that the two guest
+mappings were PHYSICALLY distinct (one sentinel constant, A never re-read after
+B) -- so a kernel aliasing bug would have passed it. Offset-derived sentinels +
+re-reading both after both writes makes it witness the physical fact. My own
+self-audit had F1 (as two P3s) and F3, and converged with the round on the rest;
+the round's upgrade of F1 to P2 (the API IS the deliverable) was the right call.
+
+**Cost/open.** userspace + tools + docs only; kernel byte-unchanged, so no
+specs/SMP delta. GL verification owed on thyla-pi (the two-ring distinct-offset +
+reuse line under a real venus ctx). V-3b-1c-2 (the client-claimable ring) is next
+and is where the weft-share-of-hostmem and per-client venus-ctx forks live.
+
 ## 2026-08-24 — V-3b-1b: the guest-map, and the Result alias the compiler caught
 
 Same autonomous run as the V-3b-1a entry below, continued past that chunk's push
