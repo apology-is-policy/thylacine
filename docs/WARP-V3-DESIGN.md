@@ -339,6 +339,154 @@ yet (`ring/<ridx>/map` -> `WEFT_BIND_HOSTMEM` -> the client's `t_weft_map`), and
 memory is Venus's format, so `wring_kick` must branch on `host3d` when a client
 kick path exists; both are V-3b-1c-2b (unreachable at 1c-2a: no client fid).
 
+### 0.11 V-3b-1c-2b design: the client-claim, and the F2 teardown-lifetime (design-first)
+
+The 1c-2b-a *attempt* (an uncommitted delta over `3e12ef12`) went fully green --
+build, 29/29 discriminator, and VENUS GATE VERIFIED on real V3D -- over a client
+claim path that is **structurally dead**, and it was reverted. A Fable holotype
+found two defects; F1 is a small bug, F2 is a lifetime design, and F1 must not
+land without F2. This section is the design for both (operator-directed
+2026-08-24: park was to give F2 an un-rushed pass, not to defer it).
+
+#### 0.11.1 F1 -- the claim binding has no HOSTMEM arm (a half-widen)
+
+FOUR kernel sites must admit a burrow kind for a weft share to be **claimable**;
+V-2 widened three for HOSTMEM and missed the fourth:
+
+- register gate (`syscall.c:6002`), kind decision (`weft.c:401`), client-map
+  admit (`burrow.c:1374`) -- all admit `BURROW_TYPE_HOSTMEM && kobj_pci`.
+- **`weft_binding_alloc_maponly` (`weft.c:472`)** gates on `burrow->type !=
+  BURROW_TYPE_DMA -> return NULL` and handles only `kobj_dma->weave` / `gpu_bo`,
+  else `return NULL`. A HOSTMEM burrow returns NULL, so the client's `t_weft_map`
+  unwinds to -1. This is the exact half-widen the code's own comment warns about
+  (`syscall.c:6004` "The two MUST widen together"), but the widen touched N-1 of
+  the property set's members.
+
+**Fix (no ABI):** add the `BURROW_TYPE_HOSTMEM && kobj_pci -> WEFT_BIND_HOSTMEM`
+arm, mirroring the `gpu_bo` arm (create-immutable re-check), plus a kernel-test
+leg that asserts the binding-kind (V-2's `test_weft_hostmem_share` asserts
+create+kind+maponly+share_into but never calls the binding alloc -- sibling
+symmetry without coverage symmetry, so the dead half was untested). Small, but it
+ARMS F2: the instant a hostmem share is claimable, the teardown hazard is live.
+
+#### 0.11.2 F2 -- the teardown-vs-live-mapping lifetime (the real work)
+
+**The kernel side is already sound; the split is host-backing ownership.** A
+hostmem ring's backing is a `BURROW_TYPE_HOSTMEM` burrow whose pages map a GPA in
+the hostmem BAR (`hostmem_base + offset`). The #847 dual-count keeps that burrow
+alive while a client maps it (`mapping_count > 0`), and the V-2 F1 death-quiesce
+(`burrow.c:656`) keeps the PCI claim + the BAR MEM_SPACE decode alive for exactly
+as long -- "a live client mapping holds this ref, so the claim stays alive across
+the server's handle_close ... MEM_SPACE clears at the last unref, AFTER the
+mapping is gone." So the client's PTEs stay valid as PTEs.
+
+What breaks is one layer below the kernel: the GPA's **host bytes** are a
+tapestryd-owned QEMU subregion (`map_blob` = `memory_region_add_subregion`,
+`gpu.rs:2313`), and `drop_host3d_ring` (`gpu.rs:2429`) does `unmap_blob`
+(`memory_region_del_subregion`) + `hostmem_free` (reclaim the offset)
+**unconditionally**. So: client A maps GPA(off); A closes its `/srv/warp` conn but
+keeps the VA (weft maps persist independent of the conn fid); `wctx_finish` ->
+`drop_host3d_ring` deletes the subregion behind A's live PTEs and re-hands `off`;
+client B's next `mint_host3d_ring` first-fits the SAME `off` -> `map_blob` places
+B's subregion at GPA(off) -> A reads/writes B's live venus ring. A cross-client
+I-37/I-45 breach. The teardown comment (`gpu.rs:2426`, "a client's own mapping
+survives via its own ref") is true of the kernel Burrow OBJECT and FALSE of the
+host bytes -- vacuous under 1c-2a, load-bearing-and-false the instant F1 lands.
+
+**Prior art.** Plan 9 refcounts a shared `Segment` (freed at last detach); Fuchsia
+refcounts a VMO and Genode a Dataspace -- pages live until the last handle AND
+last mapping drop, and crucially the *kernel* owns the device-memory lifetime, so
+there is no userspace free racing the refcount. Thylacine's #847 dual-count is the
+same kernel-side lifetime; F2 exists only because ONE actor in the chain
+(tapestryd, freeing the QEMU subregion) sits OUTSIDE that refcount -- a split the
+capability microkernels avoid by keeping the whole lifetime in the kernel. The
+tree's own nearest precedent is decisive: `image.c` reclaims a cached burrow only
+at `burrow_handle_count(b) == 1 && burrow_mapping_count(b) == 0` (`image.c:116`) --
+the exact "observe the mapping count before you reclaim" check, done kernel-side
+because the image cache lives in the kernel. F2 needs the SAME check tapestryd-side.
+
+**Options.**
+
+- **(a) observe-and-reap [RATIFIED -- operator signoff 2026-08-24].** Split
+  `drop_host3d_ring`: on teardown, detach tapestryd's own VA (drop its mapping) and
+  drop the virtio-gpu resource, but reclaim the offset (`unmap_blob` +
+  `hostmem_free`) ONLY when no client maps the GPA. In the common case (client
+  died/unmapped first -> `mapping_count == 0`) that is immediate. Otherwise PARK the
+  extent `(offset, size, res_id)` on a reaper list the existing serve/drain loop
+  re-checks (the G-3 fence-reaper's park-and-reap shape, `gpu.rs:reap_abandoned`),
+  freeing when the mapping finally drops. Correct, and **bounded**: a malicious
+  client pins at most its own I-32 page budget of offsets (it cannot mint past its
+  budget), never the whole region. This is `image.c`'s eviction check lifted to
+  tapestryd -- which needs tapestryd to OBSERVE a kernel-computed count it cannot
+  see today, via the ratified `SYS_HOSTMEM_MAPCOUNT` read-only syscall (0.11.3).
+
+- **(b) leak-on-claim [rejected].** Never reclaim a claimed offset (never
+  `unmap_blob`/`hostmem_free` a ring a client mapped). No ABI, trivially correct.
+  But the leak is MONOTONIC over the daemon's life -- ~1024 rings at 256 KiB in a
+  256 MiB region, ever -- and tapestryd is persistent (RW-7), so a desktop
+  exhausts it after a few hundred Venus app-lifetimes and new rings fail
+  `E_NOMEM`. The bounded version of (b) -- reclaim on the common path, leak only
+  on the race -- IS option (a) (it needs the same observation to tell the two
+  apart). So (b) as a standalone is inadequate for a persistent daemon.
+
+- **(c) kernel owns the free [rejected].** Move the host-backing free into the
+  kernel, gated by the burrow's own dual-count. Impossible here: `unmap_blob` is a
+  tapestryd -> device controlq op (`RESOURCE_UNMAP_BLOB`), NOT a kernel operation.
+  The kernel cannot issue it, so it cannot own the full lifetime -- the best it can
+  do is TELL tapestryd when it is safe, which is (a).
+
+#### 0.11.3 The ratified design (a)
+
+1. **The observation syscall (RATIFIED: `SYS_HOSTMEM_MAPCOUNT`, VA-keyed).**
+   tapestryd holds only a VA for a hostmem burrow (`burrow_from_hostmem` returns a
+   VA, not a handle). The read-only syscall resolves that VA to its burrow and
+   returns the burrow's `mapping_count` (the kernel already computes it; the
+   accessor `burrow_mapping_count` exists for `image.c`). Shape:
+   `SYS_HOSTMEM_MAPCOUNT(va, len) -> i64` (>= 0 the count, < 0 a `T_E_*` errno):
+   it requires the `[va, va+len)` range to resolve to a SINGLE `BURROW_TYPE_HOSTMEM`
+   VMA owned by the caller (else `-T_E_INVAL`) -- a caller can only count a hostmem
+   burrow it maps. tapestryd reads it BEFORE detaching its own VA; the count
+   includes tapestryd's own mapping, so "no client maps the GPA" is `count == 1`
+   (tapestryd's single map). Rejected alternatives (recorded, not built): a
+   handle-keyed form (would widen the V-2 return ABI to also hand out a KObj;
+   cleaner semantics, larger surface), and a pollable "fully unmapped" event fd
+   (the reaper would ride poll instead of a query, but it is a new pollable kernel
+   object). The VA-keyed form is the smallest ABI and reuses the VA tapestryd
+   already holds. **Non-goal:** it is NOT a general burrow-introspection syscall --
+   it answers exactly "how many mappings does the hostmem burrow under this VA
+   have," nothing about other burrow types, other Procs, or handle counts (the
+   KASLR/introspection-leak surface stays closed).
+2. **Teardown split** in `wring_teardown` / a new `drop_host3d_ring` two-phase:
+   disarm the weft share (already the top of `wring_teardown`), detach
+   tapestryd's VA + `resource_unref`, then EITHER reclaim now (count says
+   unmapped) OR park `(offset, size, res_id)` for the reaper. `unmap_blob` moves
+   to the reclaim phase so the subregion outlives any client mapping.
+3. **The reaper** re-checks parked extents in the serve/drain loop; a per-pass cap
+   keeps it DoS-safe (the #204/#210 backpressure precedent). A parked extent whose
+   client never unmaps is bounded by that client's I-32 budget and is freed at the
+   client's Proc death (address-space teardown drops the mapping -> count 0).
+
+#### 0.11.4 Invariants, tests, and the split
+
+- **I-7** (BURROW dual-count): the host bytes now outlive the last client mapping,
+  matching the kernel Burrow's own lifetime -- the split is closed.
+- **I-37 / I-45**: an offset is never re-handed while a client maps its GPA, so no
+  cross-context aliasing; the ring stays bounded to the ctx owner.
+- **I-32**: parked extents are charged to the pinning client's budget; the region
+  cannot be exhausted by one client past its cap.
+- **Tests**: the F1 binding-kind kernel leg (0.11.1); an `unmap_blob`-ordering
+  regression that mints, claims, maps, tears down WITH the mapping live, re-mints,
+  and asserts the second ring gets a DIFFERENT offset (or the reaper deferred the
+  reclaim) -- i.e. reproduces the cross-client alias on the pre-fix code; the
+  `warp-prove ring-host3d` cross-Proc leg (0.9 piece 4) once claim is live.
+- **Split**: F1 + F2 land together (F1 alone un-masks F2). The new syscall is
+  audit-bearing (kernel ABI + the section-25.4 Warp row).
+
+**Ratified 2026-08-24 (operator signoff):** option (a) observe-and-reap, with the
+VA-keyed `SYS_HOSTMEM_MAPCOUNT` read-only syscall (0.11.3). This section is the
+pin; the impl commit (F1 + syscall + F2 teardown/reaper + the client claim path,
+landed together and audited) references it.
+
 ## 1. What V-3 is, and the seam it plugs into
 
 Mesa's Venus (Vulkan) driver talks to a host renderer through **one designed
