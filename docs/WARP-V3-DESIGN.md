@@ -90,6 +90,54 @@ rescue, `ops.wait`, the build) in the same dir. Sections 1-5 below are the
 PRE-correction design; where they say the V-3a guest ring is Venus's ring, this
 section 0 governs.
 
+### 0.6 V-3b-1a as-built: the HOST3D + MAP_BLOB substrate, proven on GL (2026-08-24)
+The first Model B rung -- the tapestryd primitive that mints and maps a HOST3D
+blob -- is built and proven on real GL (thyla-pi KVM/V3D, virgl 1.1.0, QEMU
+10.0.11). It lands three methods in `usr/tapestryd/src/gpu.rs`:
+- `create_host3d_blob(res, ctx, flags, len)` -- `RESOURCE_CREATE_BLOB` with
+  `blob_mem=HOST3D`, `blob_id=0`, `nr_entries=0` (host-allocated, no guest
+  `mem_entry`, so HDR+32 not the GUEST HDR+48), the `ctx_id` in the header.
+- `map_blob(res, offset) -> map_info` -- `RESOURCE_MAP_BLOB` (HDR+16); the host
+  does `memory_region_add_subregion(&hostmem, offset, mr)`, so the blob's bytes
+  appear at `hostmem_base + offset` (the PA the guest then maps via the V-2
+  `SYS_BURROW_FROM_HOSTMEM`), and returns the `RESP_OK_MAP_INFO` cache word.
+- `unmap_blob(res)` -- `RESOURCE_UNMAP_BLOB` (HDR+8), the teardown inverse.
+
+**The empirical refinement to section 0.3 (the venus-context requirement).** A
+`HOST3D` `blob_id=0` `USE_MAPPABLE` blob is the **vkr (venus renderer) shm
+path** (`vkr_context.c`: `blob_id==0 && blob_flags==USE_MAPPABLE`), and it is
+reachable ONLY through a **capset-4 (venus) context**. A create under a virgl
+context or device-global (`ctx_id=0`) is refused (`RESP_ERR_UNSPEC` at the QEMU
+layer / `EINVAL` from `virgl_renderer_resource_create_blob`). So section 0.3's
+"tapestryd mints the ring as a HOST3D blob" is refined: **the mint runs under a
+venus context tapestryd owns.** This does not fork Model B -- tapestryd stays
+venus-agnostic (it forwards raw command bytes; the venus context is the host-side
+resource *scope*, not command parsing), and it is the same context the guest's
+venus stream runs in (one host-side venus ctx owns the ring). The `host3d_probe`
+init self-test carries the proof: Arm A (venus ctx) MAPs; Arm B (device-global)
+is the negative control whose refusal proves the requirement is real, not
+incidental.
+
+**The host prerequisite (provisioning note for any GL host).** virglrenderer's
+venus renderer needs the `virgl_render_server` binary
+(`/usr/libexec/virgl_render_server`) to service HOST3D shm resource ops -- the
+library is built in *process mode* and forks it per context. Debian's
+`libvirglrenderer1` ships **no such binary** (no package provides it), and
+without it `get_blob` returns a bare `EINVAL` (no fork-fail log -- the absence of
+a distinct error is what made this a multi-boot hunt). thyla-pi needed the binary
+built from virglrenderer 1.1.0 source and installed to `/usr/libexec/`
+(additive; it does not touch `libvirglrenderer.so`). Any fresh venus GL host must
+be provisioned with it.
+
+**Constant correction.** `RESP_OK_MAP_INFO = 0x1106` (this doc's and
+IMPL-PLAN's earlier `0x1105` is `RESOURCE_UUID` -- an off-by-one; the shipped
+code uses `0x1106`, verified against QEMU v10.0.2's verbatim enum).
+
+Proven line: `tapestryd: gpu host3d-map venus-ctx MAPPED (map_info=0x1)`, with
+the device-global arm refused. The gate is folded into the `venus` verb's
+`venus-verdict` (a test-leg MAP + a device-global refusal + the control-leg
+skip), discrimination-tested by `tools/test-venus-verdict.sh` without a boot.
+
 ---
 
 ## 1. What V-3 is, and the seam it plugs into

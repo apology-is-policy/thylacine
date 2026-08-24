@@ -43,7 +43,7 @@ env THYLACINE_POOL_IMG="$WORK/pool-$TAG.img" \
     THYLACINE_NOSTORM=1 THYLACINE_NO_QMP=1 THYLACINE_NO_SHARE=1 \
     ${GPU_DEV:+THYLACINE_GPU_DEV="$GPU_DEV"} \
     ${DISP:+THYLACINE_DISPLAY="$DISP"} \
-    tools/run-vm.sh </dev/null > "$LOG" 2>&1 &
+    tools/run-vm.sh ${WARP_QEMU_DBG:-} </dev/null > "$LOG" 2>&1 &
 VMPID=$!
 
 # Bounded poll (#134: deadline + named failure conventions), kill by PID.

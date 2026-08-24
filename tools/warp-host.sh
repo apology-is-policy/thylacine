@@ -336,8 +336,28 @@ venus-verdict)
         echo "CONTROL leg: no 'blob-create skipped (F_RESOURCE_BLOB not offered)' -- the probe did not take the intended no-feature path; its absence of CREATED proves nothing"
         vfail=1
     }
+    # V-3b-1a: the HOST3D ring substrate. A HOST3D blob_id=0 mappable blob is
+    # the vkr (venus renderer) shm path, reachable ONLY via a capset-4 context;
+    # the test leg MAPs it under a venus ctx, and a device-global create is
+    # refused -- the negative control that proves the venus-ctx requirement.
+    grep -qF "gpu host3d-map venus-ctx MAPPED" "$tst" || {
+        echo "TEST leg: HOST3D venus-ctx blob did NOT MAP_BLOB -- the Model B ring substrate is unreachable (V-3b-1a)"
+        vfail=1
+    }
+    grep -qF "gpu host3d-map global create refused" "$tst" || {
+        echo "TEST leg: a device-global HOST3D create did NOT refuse -- the negative control proving the venus-ctx requirement is missing; venus-ctx MAP alone could be incidental"
+        vfail=1
+    }
+    if grep -qF "gpu host3d-map venus-ctx MAPPED" "$ctl"; then
+        echo "CONTROL leg: a HOST3D blob MAPPED without F_RESOURCE_BLOB/hostmem -- impossible, the gate is wrong"
+        vfail=1
+    fi
+    grep -qF "gpu host3d-map skipped (F_RESOURCE_BLOB not offered)" "$ctl" || {
+        echo "CONTROL leg: no 'host3d-map skipped (F_RESOURCE_BLOB not offered)' -- the probe did not take the intended no-feature skip; its absence of MAPPED proves nothing"
+        vfail=1
+    }
     if [ "$vfail" -eq 0 ]; then
-        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), AND a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1)"
+        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), AND a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a)"
         grep -hE "gpu capset\[|num_capsets|blob-create" "$ctl" "$tst"
     else
         echo "VENUS GATE: UNVERIFIED"

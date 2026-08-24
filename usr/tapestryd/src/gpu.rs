@@ -112,6 +112,15 @@ const VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB: u32 = 0x010c;
 // window) is the V-2 delta.
 const VIRTIO_GPU_BLOB_MEM_GUEST: u32 = 0x0001;
 
+// V-3b (Model B): HOST3D = host-allocated storage, no guest mem_entry
+// (nr_entries=0). USE_MAPPABLE asks the host to place the blob in the hostmem
+// BAR so RESOURCE_MAP_BLOB (a 3D-group command, 0x0208) can expose it at a
+// chosen offset -- the substrate for Venus's host-consumed command ring.
+const VIRTIO_GPU_BLOB_MEM_HOST3D: u32 = 0x0002;
+const VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE: u32 = 0x0001;
+const VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB: u32 = 0x0208;
+const VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB: u32 = 0x0209;
+
 // virtio-gpu capset ids: 1 = VIRGL, 2 = VIRGL2, 4 = VENUS. Named so the V-0b
 // probe reads without a magic 4 in three places.
 const VIRTIO_GPU_CAPSET_VIRGL2: u32 = 2;
@@ -151,6 +160,29 @@ const _: () = assert!(
     "blob probe resource id must sit below the server's first minted id"
 );
 
+// Warp-6 V-3b-1a: the HOST3D+MAP_BLOB reachability probe's ids, created and
+// destroyed inside init alongside blob_probe (the same pre-Server timing
+// guarantee -- no client resource or context is live). Two resource ids settle
+// the open question of whether a HOST3D mappable blob needs a context: one is
+// mapped under a real virgl context, one device-global (ctx_id 0). All below
+// SCREEN_RES (unmintable by the server); the ctx above the client seam and
+// below COMPOSITOR_CTX, distinct from the capset-probe ctxs.
+const HOST3D_PROBE_RES_CTX: u32 = 0x2c;
+const HOST3D_PROBE_RES_GLOBAL: u32 = 0x2d;
+const HOST3D_PROBE_CTX_ID: u32 = 202;
+const _: () = assert!(
+    HOST3D_PROBE_RES_CTX < crate::server::SCREEN_RES
+        && HOST3D_PROBE_RES_GLOBAL < crate::server::SCREEN_RES
+        && HOST3D_PROBE_RES_CTX != HOST3D_PROBE_RES_GLOBAL
+        && HOST3D_PROBE_RES_CTX != BLOB_PROBE_RES_ID
+        && HOST3D_PROBE_RES_GLOBAL != BLOB_PROBE_RES_ID
+        && HOST3D_PROBE_CTX_ID > crate::server::MAX_WARP_CTXS as u32
+        && HOST3D_PROBE_CTX_ID < crate::server::COMPOSITOR_CTX
+        && HOST3D_PROBE_CTX_ID != PROBE_CTX_ID_VIRGL
+        && HOST3D_PROBE_CTX_ID != PROBE_CTX_ID_VENUS,
+    "host3d probe ids must sit below SCREEN_RES / within the ctx window and be distinct"
+);
+
 // 3D commands (VIRTIO 1.2 section 5.7.6.9; virgl-negotiated only). The seam's
 // context lifecycle + resource plumbing (Warp-2c); SUBMIT_3D + the transfers
 // ride the fenced lane (Warp-2d).
@@ -173,6 +205,7 @@ const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 const VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
 const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
+const VIRTIO_GPU_RESP_OK_MAP_INFO: u32 = 0x1106;
 
 // struct virtio_gpu_config field offsets in the Device region (section 5.7.4):
 // events_read @0x00, events_clear @0x04, num_scanouts @0x08, num_capsets @0x0C.
@@ -1417,6 +1450,7 @@ impl Gpu {
         if gpu.virgl {
             gpu.probe_capsets()?;
             gpu.blob_probe(blob_probe_va)?;
+            gpu.host3d_probe()?;
         }
         say!(
             "tapestryd: gpu up -- {}x{}, pci intid={}, virgl={} capsets={}",
@@ -1651,6 +1685,83 @@ impl Gpu {
             }
         }
         Ok(())
+    }
+
+    /// Warp-6 V-3b-1a: prove the HOST3D + MAP_BLOB path against the real host.
+    /// Model B's first risk retired -- does QEMU's virtio-gpu-gl answer
+    /// RESOURCE_MAP_BLOB for a HOST3D blob, and does it need a rendering
+    /// context? A HOST3D blob_id=0 mappable blob is the venus renderer's shm
+    /// path (vkr: blob_id==0 && flags==USE_MAPPABLE), reached only via a
+    /// capset-4 (venus) context -- a virgl ctx or device-global is refused
+    /// RESP_ERR_UNSPEC. Arm A (venus ctx) is the POSITIVE (the Model B ring
+    /// substrate); Arm B (device-global) is the NEGATIVE control whose refusal
+    /// confirms the venus-ctx requirement. Each says its verdict + the map_info cache
+    /// word out loud, so an absent line is a broken fixture, never a pass; a
+    /// device without hostmem (plain virgl, or the 2D dev device) is a positive
+    /// "skipped", not silence. Init-time, pre-Server, like blob_probe: each arm
+    /// unmaps + unrefs its evidence before any client exists.
+    ///
+    /// Deliberate deviation from probe_capsets/blob_probe: those propagate a
+    /// latched engine death (`self.ctrl.dead`) up to fail bringup fast; this
+    /// probe swallows every outcome (always returns Ok). It runs LAST and
+    /// venus/HOST3D is an optional path, so a wedge here must NOT fail the whole
+    /// compositor init -- tapestryd is the console, and a propagate would turn a
+    /// venus-only fault into a warden restart loop with no console at all. A
+    /// wedge instead surfaces as the absent MAPPED line, which the venus gate
+    /// flags loud. Do not "fix" this into a propagate.
+    fn host3d_probe(&mut self) -> Result<(), Error> {
+        if !self.blob {
+            say!("tapestryd: gpu host3d-map skipped (F_RESOURCE_BLOB not offered)");
+            return Ok(());
+        }
+        if self.pci.shm_region(1).is_none() {
+            say!("tapestryd: gpu host3d-map skipped (no hostmem shm region)");
+            return Ok(());
+        }
+        if !self.ctxinit {
+            say!("tapestryd: gpu host3d-map skipped (no CONTEXT_INIT -- venus ctx unavailable)");
+            return Ok(());
+        }
+        // Arm A (POSITIVE): a HOST3D blob_id=0 mappable blob under a VENUS
+        // (capset-4) context -- the vkr shm path, the Model B ring substrate.
+        if self
+            .ctx_create_capset(HOST3D_PROBE_CTX_ID, VIRTIO_GPU_CAPSET_VENUS, b"host3d-probe")
+            .is_err()
+        {
+            say!("tapestryd: gpu host3d-map venus ctx create failed; skipped");
+            return Ok(());
+        }
+        self.host3d_probe_arm("venus-ctx", HOST3D_PROBE_RES_CTX, HOST3D_PROBE_CTX_ID, 0);
+        let _ = self.ctx_destroy(HOST3D_PROBE_CTX_ID);
+
+        // Arm B (NEGATIVE control): device-global (ctx_id 0). A HOST3D blob_id=0
+        // create with no vkr context is EXPECTED to be refused; its refusal
+        // confirms the venus-ctx requirement is real, not incidental to Arm A.
+        // A distinct hostmem offset so it never aliases Arm A's subregion.
+        self.host3d_probe_arm("global", HOST3D_PROBE_RES_GLOBAL, 0, PAGE_SIZE as u64);
+        Ok(())
+    }
+
+    /// One arm of host3d_probe: create a HOST3D mappable blob under `ctx_id`,
+    /// MAP_BLOB it at `offset`, say the verdict, then unmap + unref. A failed
+    /// unref leaks the (never-reused) host resource id, per blob_probe.
+    fn host3d_probe_arm(&mut self, tag: &str, res_id: u32, ctx_id: u32, offset: u64) {
+        match self.create_host3d_blob(
+            res_id,
+            ctx_id,
+            VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE,
+            PAGE_SIZE as u32,
+        ) {
+            Ok(()) => match self.map_blob(res_id, offset) {
+                Ok(mi) => {
+                    say!("tapestryd: gpu host3d-map {} MAPPED (map_info={:#x})", tag, mi);
+                    let _ = self.unmap_blob(res_id);
+                }
+                Err(_) => say!("tapestryd: gpu host3d-map {} create OK but MAP refused", tag),
+            },
+            Err(_) => say!("tapestryd: gpu host3d-map {} create refused", tag),
+        }
+        let _ = self.resource_unref(res_id);
     }
 
     /// GET_CAPSET_INFO for one index -> (capset_id, max_version, max_size).
@@ -1888,6 +1999,99 @@ impl Gpu {
     /// knowing the blob at V-3a; that is Venus's, V-3b).
     pub fn create_ring_blob(&mut self, resource_id: u32, pa: u64, len: u32) -> Result<(), Error> {
         self.resource_create_blob(resource_id, VIRTIO_GPU_BLOB_MEM_GUEST, 0, pa, len)
+    }
+
+    /// V-3b (Model B): create a HOST3D-backed mappable blob. Unlike a GUEST
+    /// blob (`resource_create_blob`), the host allocates the storage: there is
+    /// no guest `mem_entry` (nr_entries=0), so the request is HDR+32 with no
+    /// trailing entry. The ctx_id rides the header -- QEMU passes
+    /// `cblob.hdr.ctx_id` straight to virglrenderer, which scopes a HOST3D blob
+    /// to a rendering context. `blob_flags` carries USE_MAPPABLE for a blob the
+    /// caller will MAP_BLOB. Refuses on a device without F_RESOURCE_BLOB (the
+    /// V-0b F2 runtime-guard rule, not a caller-side-only check).
+    pub fn create_host3d_blob(
+        &mut self,
+        resource_id: u32,
+        ctx_id: u32,
+        blob_flags: u32,
+        len: u32,
+    ) -> Result<(), Error> {
+        if !self.blob {
+            return Err(Error::Hardware);
+        }
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB, ctx_id);
+            w32(req_va + 24, resource_id);
+            w32(req_va + 28, VIRTIO_GPU_BLOB_MEM_HOST3D);
+            w32(req_va + 32, blob_flags);
+            w32(req_va + 36, 0); // nr_entries: 0 -- host-allocated, no guest backing
+            w64(req_va + 40, 0); // blob_id: 0
+            w64(req_va + 48, u64::from(len)); // size
+        };
+        // 24 (hdr) + 32 (fixed fields) = 56 = HDR + 32. No mem_entry for HOST3D.
+        self.ctrl.step(
+            "RESOURCE_CREATE_BLOB(HOST3D)",
+            GPU_CTRL_HDR_LEN + 32,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
+    }
+
+    /// V-3b (Model B): RESOURCE_MAP_BLOB -- ask the host to place a HOST3D blob
+    /// at `offset` within the hostmem BAR, and read back its `map_info` (the
+    /// VIRTIO_GPU_MAP_CACHE_* cache type). On the host this is
+    /// `memory_region_add_subregion(&hostmem, offset, mr)`, so the blob's bytes
+    /// become visible at `hostmem_base + offset` -- the PA the guest then maps
+    /// via SYS_BURROW_FROM_HOSTMEM (V-2). Returns the map_info cache word.
+    pub fn map_blob(&mut self, resource_id: u32, offset: u64) -> Result<u32, Error> {
+        if !self.blob {
+            return Err(Error::Hardware);
+        }
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB);
+            w32(req_va + 24, resource_id);
+            w32(req_va + 28, 0); // padding
+            w64(req_va + 32, offset);
+            // Residue guard (the get_capset_info rule): submit_and_wait zeroes
+            // only the response HEADER, and map_info is read with no used-len
+            // check, so pre-zero it -- a short-writing device reads as cache=0.
+            let resp = self.ring_va + RESP_OFF;
+            w32(resp + 24, 0);
+        };
+        // 24 (hdr) + 4 (resource_id) + 4 (padding) + 8 (offset) = 40 = HDR + 16.
+        self.ctrl.step(
+            "RESOURCE_MAP_BLOB",
+            GPU_CTRL_HDR_LEN + 16,
+            GPU_CTRL_HDR_LEN + 8,
+            VIRTIO_GPU_RESP_OK_MAP_INFO,
+        )?;
+        let r = self.ring_va + RESP_OFF + GPU_CTRL_HDR_LEN as u64;
+        Ok(unsafe { r32(r) })
+    }
+
+    /// V-3b (Model B): RESOURCE_UNMAP_BLOB -- release a HOST3D blob's hostmem
+    /// subregion (`memory_region_del_subregion` on the host). The inverse of
+    /// map_blob; a teardown unmaps before unref so no dangling subregion is
+    /// left in the hostmem BAR.
+    pub fn unmap_blob(&mut self, resource_id: u32) -> Result<(), Error> {
+        if !self.blob {
+            return Err(Error::Hardware);
+        }
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB);
+            w32(req_va + 24, resource_id);
+            w32(req_va + 28, 0); // padding
+        };
+        // 24 (hdr) + 8 (resource_id + padding) = 32 = HDR + 8.
+        self.ctrl.step(
+            "RESOURCE_UNMAP_BLOB",
+            GPU_CTRL_HDR_LEN + 8,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
     }
 
     /// CTX_CREATE: mint rendering context `ctx_id` host-side. context_init

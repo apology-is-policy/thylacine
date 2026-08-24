@@ -27,6 +27,7 @@ tapestryd: gpu capset[1] id=2 max_version=2 max_size=1384
 tapestryd: gpu ctx-capset id=2 CREATED
 tapestryd: gpu ctx-capset id=4 skipped (capset not enumerated)
 tapestryd: gpu blob-create skipped (F_RESOURCE_BLOB not offered)
+tapestryd: gpu host3d-map skipped (F_RESOURCE_BLOB not offered)
 EOF
 }
 mk_test() {
@@ -40,6 +41,8 @@ tapestryd: gpu capset[2] id=4 max_version=0 max_size=160
 tapestryd: gpu ctx-capset id=2 CREATED
 tapestryd: gpu ctx-capset id=4 CREATED
 tapestryd: gpu blob-create guest CREATED
+tapestryd: gpu host3d-map venus-ctx MAPPED (map_info=0x1)
+tapestryd: gpu host3d-map global create refused
 EOF
 }
 
@@ -65,6 +68,15 @@ echo "== venus-verdict discrimination =="
 # without a count -- a count in a comment is a status field whose flip is
 # nobody's step, and this one already said "four" while seven followed it.
 check "clean pair VERIFIES"                 0 "" ""
+# V-3b-1a: the HOST3D ring substrate legs, one variable away each.
+check "test leg lacks host3d venus-ctx MAP -> UNVERIFIED" 1 "" \
+      'grep -v "host3d-map venus-ctx MAPPED" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg lacks the device-global refusal control -> UNVERIFIED" 1 "" \
+      'grep -v "host3d-map global create refused" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg lacks host3d skip -> UNVERIFIED"       1 \
+      'grep -v "host3d-map skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
+check "control leg ALSO sees host3d MAPPED -> UNVERIFIED" 1 \
+      'printf "tapestryd: gpu host3d-map venus-ctx MAPPED (map_info=0x1)\n" >> "$c"' ""
 # One variable away, each direction of the discrimination the gate claims.
 check "control leg ALSO sees id=4 -> UNVERIFIED" 1 \
       'printf "tapestryd: gpu capset[2] id=4 max_version=0 max_size=160\n" >> "$c"' ""

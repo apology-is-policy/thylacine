@@ -22,6 +22,82 @@ needed the operator.
 
 ---
 
+## 2026-08-20..24 — V-3b-1a: the HOST3D substrate, and the render server that wasn't there
+
+Model B's first rung: the tapestryd primitive that mints a HOST3D blob and maps
+it through the hostmem window (`create_host3d_blob` / `map_blob` / `unmap_blob`
+in `usr/tapestryd/src/gpu.rs`), plus a two-arm `host3d_probe` init self-test that
+proves the path against the real host. Small code; the run's weight was in
+proving it on GL, and the proof took a four-boot hunt through a host-side blocker.
+
+**The wire-format groundwork paid off twice.** Before a line of code, the
+constants were re-derived against QEMU v10.0.2's verbatim `virtio_gpu.h` enum,
+not the plan. Two catches: `RESP_OK_MAP_INFO` is `0x1106`, not the plan's
+`0x1105` (that value is `RESOURCE_UUID` -- a silent off-by-one that would have
+made every MAP_BLOB read the wrong response type); and a WebFetch fast-model
+"summary" miscounted `CMD_RESOURCE_CREATE_BLOB` as `0x010d` -- refuted by the
+already-GL-proven shipped GUEST-blob code, which uses `0x010c`. Ground truth
+(the verbatim enum + working shipped code) beat both secondary sources.
+
+**The GL hunt (four pi boots + a source build).** Boot 1: HOST3D create refused
+`resp_type=0x1200` (RESP_ERR_UNSPEC) under both a virgl context and
+device-global, while a GUEST blob still created fine. Source-cited to the vkr
+(venus renderer) shm path -- a `blob_id=0` `USE_MAPPABLE` HOST3D blob is reached
+ONLY via a capset-4 context (`vkr_context.c:369-372`) -- so the fix was to mint
+Arm A under a venus context. Boot 2: STILL refused under the venus context. That
+refuted the venus-ctx-alone theory and pushed the hunt down into virglrenderer,
+where a `-d guest_errors` boot named the real error: `virgl blob create error:
+Invalid argument` = `EINVAL` from `virgl_renderer_resource_create_blob`, with NO
+fork-fail line anywhere.
+
+**The wrong turn, and what caught it.** That missing fork-fail line led me to
+write "the render server is likely irrelevant, in-process mode" and to tell the
+operator their earlier "build the render server" instinct was refuted by the
+errno. That was WRONG. The operator had ratified building the RS on my first
+(render-server-missing) diagnosis; I then talked myself out of it on an *absence*
+-- no fork-fail log -- which is not evidence. The catch was instrumented
+ground-truth, not more reasoning: a non-destructive LD_PRELOAD boot with an
+instrumented virglrenderer (my `libvirglrenderer.so.1.9.0` + my
+`virgl_render_server` via the `RENDER_SERVER_EXEC_PATH` getenv override) traced
+`ctx_lookup(202)=<registered> ... get_blob ret=0` and printed the substrate's own
+proof line -- `tapestryd: gpu host3d-map venus-ctx MAPPED (map_info=0x1)`. The
+render server WAS the root cause: Debian's `libvirglrenderer1` is process-mode
+and ships no `virgl_render_server` binary (no package provides it), and without
+it `get_blob` returns a bare `EINVAL` -- no distinct fork-fail log, which is
+exactly the absence that misled me. The operator's original instinct was right;
+my errno-based refutation was the wrong turn.
+
+**The reusable lesson**: an absent error log is not evidence of absence of a
+cause. Three rounds of reasoning (render-server-missing -> refuted-by-errno ->
+re-diagnose) chased their own tails; one instrumented boot that printed the
+actual `get_blob` return value ended it. When a mechanism has no distinct failure
+signature, instrument it -- do not infer its absence from silence.
+
+**The fix + the rigorous confirmation.** The RS binary was built from
+virglrenderer 1.1.0 source and installed to `/usr/libexec/virgl_render_server`
+(additive; does not touch `libvirglrenderer.so`). The proof was then re-run with
+the PURE SYSTEM library -- no LD_PRELOAD, no env override -- and still showed
+`host3d-map venus-ctx MAPPED`, with the device-global arm refused (the negative
+control). So the instrumented lib was never load-bearing; the RS binary alone is
+the fix, and thyla-pi venus is now functional for all HOST3D work.
+
+**Cost**: four pi boots (~220 s KVM each) + one ~30 min virglrenderer source
+build, ~1.9 h of pi lease.
+
+**Decisions that needed the operator** (three AskUserQuestion votes): confirm the
+errno then build the RS; instrument virglrenderer non-destructively; install the
+RS to `/usr/libexec/` permanently.
+
+**Still open**: this is rung 1a of Model B. Ahead: V-3b-1b (the hostmem-offset
+allocator + the guest map via `SYS_BURROW_FROM_HOSTMEM`), 1c (the Model B ring
+subtree), V-3b-2 (the SUBMIT_CMD forward of the raw venus stream + reply-shmem),
+V-3b-3 (the Mesa `vn_renderer_thylacine` backend -- the thyla-keep cross-build).
+A provisioning note now lives in WARP-V3-DESIGN section 0.6: any fresh venus GL
+host needs the `virgl_render_server` binary, or HOST3D resource ops fail with a
+bare EINVAL.
+
+---
+
 ## 2026-08-20 — V-3b design pass: the ring Venus can't use, caught before the code
 
 The operator chose "V-3b Venus, design first" after V-3a pushed. The pass -- two
