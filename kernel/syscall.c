@@ -742,6 +742,61 @@ static s64 sys_burrow_from_hostmem_handler(u64 pci_hraw, u64 shmid, u64 offset,
 }
 
 // =============================================================================
+// SYS_HOSTMEM_MAPCOUNT — read a hostmem Burrow's #847 mapping_count (Warp-6
+// V-3b-1c-2b F2; WARP-V3-DESIGN.md §0.11.3).
+// =============================================================================
+//
+// Read-only. Resolves [va, va+len) to a SINGLE BURROW_TYPE_HOSTMEM VMA the
+// CALLER owns (vma_lookup searches only p's own AddrSpace, so ownership is
+// structural -- a caller can only count a hostmem burrow it maps) and returns
+// that Burrow's mapping_count: how many live mappings (the caller's own PLUS
+// any weft-shared clients) the host-visible ring backing has. This is the
+// tapestryd-side twin of image.c's kernel-side mapping_count==0 eviction gate.
+//
+// It leaks nothing but the number: no kernel address, no other Proc, no handle
+// count. Refuses (-T_E_INVAL, never a plausible count) a va that does not
+// resolve, a VMA not fully covering [va, va+len), or a non-HOSTMEM burrow.
+//
+// The count is a racy ACQUIRE snapshot (burrow.c "Diagnostics"). It is a SAFE
+// basis for tapestryd's reclaim ONLY under tapestryd's ref-discipline, which
+// the kernel does not enforce and only reports the number for: the caller
+// disarms the weft share FIRST, so at count==1 (tapestryd's own sole map) the
+// client-map set is empty AND cannot grow -- no share remains to claim, and a
+// fork can only copy an EXISTING client mapping, of which there are none. Read
+// under p->as->lock so a concurrent same-Proc detach cannot splice the
+// VMA->Burrow link away mid-read.
+//
+// The core is separated from the current_thread() wrapper so the resolve +
+// type-gate + range logic is unit-testable with a synthetic Proc (the
+// hostmem_resolve_subrange precedent). NOT static: the test declares it.
+s64 hostmem_mapcount_query(struct Proc *p, u64 va, u64 len) {
+    if (!p || !p->as)       return -T_E_INVAL;
+    if (len == 0)           return -T_E_INVAL;
+    if (va + len < va)      return -T_E_INVAL;   // range wrap
+
+    spin_lock(&p->as->lock);
+    struct Vma *vma = vma_lookup(p, va);
+    if (!vma || va < vma->vaddr_start || va + len > vma->vaddr_end) {
+        spin_unlock(&p->as->lock);
+        return -T_E_INVAL;
+    }
+    struct Burrow *b = vma->burrow;
+    if (!b || b->type != BURROW_TYPE_HOSTMEM) {
+        spin_unlock(&p->as->lock);
+        return -T_E_INVAL;
+    }
+    s64 mc = (s64)burrow_mapping_count(b);   // ACQUIRE; magic-checked accessor
+    spin_unlock(&p->as->lock);
+    return mc;
+}
+
+static s64 sys_hostmem_mapcount_handler(u64 va, u64 len) {
+    struct Thread *t = current_thread();
+    if (!t) return -T_E_INVAL;
+    return hostmem_mapcount_query(t->proc, va, len);
+}
+
+// =============================================================================
 // SYS_DMA_MAP — install a user-VA mapping for a KObj_DMA handle (P4-Ic5b1b).
 // =============================================================================
 //
@@ -11929,6 +11984,11 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_burrow_from_hostmem_handler(
             ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3],
             ctx->regs[4]);
+        return;
+
+    case SYS_HOSTMEM_MAPCOUNT:
+        ctx->regs[0] = (u64)sys_hostmem_mapcount_handler(
+            ctx->regs[0], ctx->regs[1]);
         return;
 
     // I-42 / CL-7k: the JIT capability.

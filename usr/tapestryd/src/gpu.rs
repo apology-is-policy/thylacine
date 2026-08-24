@@ -30,7 +30,8 @@ use libthyla_rs::hardware::{
 use libthyla_rs::time::Instant;
 use libthyla_rs::virtio_rmb;
 use libthyla_rs::{
-    t_burrow_detach, T_CACHE_CACHED, T_CACHE_UNCACHED, T_CACHE_WC, T_PROT_READ, T_PROT_WRITE,
+    t_burrow_detach, t_hostmem_mapcount, T_CACHE_CACHED, T_CACHE_UNCACHED, T_CACHE_WC, T_PROT_READ,
+    T_PROT_WRITE,
 };
 
 pub const PAGE_SIZE: u64 = 0x1000;
@@ -1494,6 +1495,15 @@ pub struct Gpu {
     /// device with no hostmem shm region). Outlives any single ring so the
     /// Model B ring path can mint + retire across a client's session.
     hostmem: Option<HostmemAllocator>,
+    /// V-3b-1c-2b F2: HOST3D rings retired while a client still maps the GPA.
+    /// The host bytes (the QEMU subregion) live OUTSIDE the kernel #847 count,
+    /// so reclaiming the offset here while a client's weft map is live would
+    /// re-hand it under the client's PTEs (a cross-client alias). A ring whose
+    /// mapping_count is still > 1 (clients beyond tapestryd's own map) is parked
+    /// here -- tapestryd KEEPS its own VA mapped so `t_hostmem_mapcount` can
+    /// re-query it -- and reaped by `reap_hostmem_parked` once the count drops to
+    /// 1. Bounded: a client that never unmaps pins only its own I-32 budget.
+    hostmem_parked: alloc::vec::Vec<HostRing>,
     _ring: Dma,
     _flane: Option<Dma>,
 }
@@ -1615,6 +1625,7 @@ impl Gpu {
             fence_next: 0,
             pci,
             hostmem,
+            hostmem_parked: alloc::vec::Vec::new(),
             _ring: ring,
             _flane: flane,
         };
@@ -2385,6 +2396,12 @@ impl Gpu {
         // BEFORE the alloc so nothing is unwound (holotype F3). Create at the page-
         // rounded size so the host allocation covers the whole mapped page.
         let size32 = u32::try_from(size).map_err(|_| Error::Hardware)?;
+        // V-3b-1c-2b F2: reclaim-before-alloc. A parked ring (retired while a
+        // client still mapped it) is freed here once its client has unmapped, so
+        // offset pressure drives reclaim exactly when a new mint needs the space.
+        // Issuing the parked rings' controlq teardown here is safe -- mint runs
+        // in the serve-loop context, where controlq commands are normal.
+        self.reap_hostmem_parked();
         let off = match self.hostmem.as_mut().and_then(|a| a.alloc(size)) {
             Some(o) => o,
             None => return Err(Error::Hardware),
@@ -2416,16 +2433,75 @@ impl Gpu {
         Ok(HostRing { res_id, offset: off, va, size, cache })
     }
 
-    /// V-3b-1c: retire a HOST3D ring minted by mint_host3d_ring, in the inverse
-    /// order: detach tapestryd's guest VA, release the hostmem subregion, drop the
-    /// host resource, reclaim the offset. Takes the handle BY VALUE (holotype F1):
-    /// consuming it makes a double-drop / use-after-drop a compile error. Best-
-    /// effort on each device step (a teardown never fails the caller), but a device
-    /// refusal is LOGGED (holotype F4) -- a swallowed unref/unmap would else surface
-    /// as a bogus `reuse=false` at the next re-mint, indicting the free-list for a
-    /// teardown fault. The CALLER disarms any weft share BEFORE calling this (I-7
-    /// #847: a client's own mapping survives via its own ref). The offset is always
-    /// reclaimed so a persistent daemon does not exhaust the region.
+    /// V-3b-1c-2b F2: retire a HOST3D ring -- reap now if safe, else PARK. The
+    /// CALLER disarms any weft share BEFORE this (so no NEW client can claim the
+    /// backing). Then this reads the kernel #847 mapping_count of the ring's
+    /// hostmem burrow via tapestryd's still-live VA: at count == 1 (tapestryd's
+    /// own sole map) no client maps the GPA, so the offset is safe to reclaim NOW
+    /// (`drop_host3d_ring`). At count > 1 (a client kept its map past its conn) or
+    /// on an unexpected query error, tapestryd KEEPS its VA mapped and parks the
+    /// token for `reap_hostmem_parked`; freeing the QEMU subregion now would re-
+    /// hand the offset under the client's live PTEs (a cross-client alias). At
+    /// count == 1 the client set is provably empty AND cannot grow: the share is
+    /// disarmed (no claim) and a fork can only copy an EXISTING client map, of
+    /// which there are none (the burrow.c:1436 ref-discipline that makes the racy
+    /// ACQUIRE read a sound reclaim basis). Consumes the token by value (holotype
+    /// F1: no double-drop).
+    pub fn retire_host3d_ring(&mut self, ring: HostRing) {
+        let mc = unsafe { t_hostmem_mapcount(ring.va, ring.size) };
+        if mc == 1 {
+            self.drop_host3d_ring(ring);
+        } else {
+            if mc < 1 {
+                // Impossible while tapestryd still maps it (its own map is >= 1):
+                // a negative errno or 0 means the VA no longer resolves to this
+                // hostmem burrow. Park conservatively -- never reclaim on an
+                // uncertain count -- and log; the reaper will free it if/when the
+                // count reads 1, else it is bounded by the client's own budget.
+                say!(
+                    "tapestryd: hostmem ring res {} unexpected mapcount {} at retire -- parking",
+                    ring.res_id, mc
+                );
+            }
+            self.hostmem_parked.push(ring);
+        }
+    }
+
+    /// V-3b-1c-2b F2: re-check parked HOST3D rings and reclaim those whose clients
+    /// have finally unmapped (mapping_count back to 1 = tapestryd's own map). Runs
+    /// in the completion pump beside `reap_abandoned`. A parked ring's client that
+    /// never unmaps just keeps its own extent parked (bounded by that client's
+    /// I-32 budget); it can never pin the serve loop, and Proc death drops the
+    /// mapping (address-space teardown) so a crashed client's ring is reclaimed on
+    /// the next pass.
+    fn reap_hostmem_parked(&mut self) {
+        if self.hostmem_parked.is_empty() {
+            return;
+        }
+        let mut i = 0;
+        while i < self.hostmem_parked.len() {
+            let (va, size) = (self.hostmem_parked[i].va, self.hostmem_parked[i].size);
+            if unsafe { t_hostmem_mapcount(va, size) } == 1 {
+                let ring = self.hostmem_parked.swap_remove(i);
+                self.drop_host3d_ring(ring);
+                // swap_remove moved a not-yet-checked element to i; do not advance.
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// V-3b-1c: the unconditional inverse of mint_host3d_ring (detach tapestryd's
+    /// VA, release the hostmem subregion, drop the host resource, reclaim the
+    /// offset). Callers reach it through `retire_host3d_ring` (reap-if-safe) or
+    /// `reap_hostmem_parked` (a parked ring now unmapped) -- NEVER directly on a
+    /// client-shared ring, since it reclaims the offset without checking the
+    /// mapping_count. Takes the handle BY VALUE (holotype F1): consuming it makes a
+    /// double-drop / use-after-drop a compile error. Best-effort on each device
+    /// step (a teardown never fails the caller), but a device refusal is LOGGED
+    /// (holotype F4) -- a swallowed unref/unmap would else surface as a bogus
+    /// `reuse=false` at the next re-mint, indicting the free-list for a teardown
+    /// fault.
     pub fn drop_host3d_ring(&mut self, ring: HostRing) {
         let _ = unsafe { t_burrow_detach(ring.va, ring.size) };
         if self.unmap_blob(ring.res_id).is_err() {

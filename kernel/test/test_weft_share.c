@@ -1093,6 +1093,34 @@ void test_weft_hostmem_share(void) {
         "burrow_share_into admits BURROW_TYPE_HOSTMEM");
     spin_unlock(&client->as->lock);
 
+    // V-3b-1c-2b F1 regression: the map-only binding alloc records the ACTUAL
+    // kind. This is the leg the V-2 test was missing -- weft_binding_alloc_maponly
+    // had no HOSTMEM arm, so a REGISTERED + CLAIMED hostmem share fell through to
+    // NULL (the client's t_weft_map unwound to -1): a live-looking half-widen the
+    // create/kind/share asserts above could not see. It must now return a
+    // WEFT_BIND_HOSTMEM binding, and the Tweftio kind gate + the RING allocator
+    // both refuse it, exactly like the weave/gpu_bo siblings. Fails on pre-fix
+    // code (b == NULL).
+    //
+    // weft_binding_alloc_maponly is ref-NEUTRAL (it inherits the registration
+    // pin weft_share_claim holds in the real map path); weft_binding_release
+    // DROPS that pin. Take an explicit handle ref to stand in for the claim's
+    // pin, so the release balances it and leaves the construction handle for the
+    // burrow_unref below -- the gpu_bo sibling gets this pin from
+    // sys_weft_share_for_proc.
+    burrow_ref(v);
+    struct weft_binding *hb =
+        weft_binding_alloc_maponly(v, WEFT_TEST_VA, 2u * PAGE_SIZE, client->pid);
+    TEST_ASSERT(hb != NULL, "F1: map-only binding alloc over a hostmem burrow");
+    TEST_EXPECT_EQ((int)hb->kind, (int)WEFT_BIND_HOSTMEM,
+        "F1: the binding kind names the hostmem subtype");
+    u32 hoff = 0;
+    TEST_EXPECT_EQ(weft_binding_validate_rw(hb, WEFT_TEST_VA + 64, 128, &hoff), -1,
+        "a hostmem binding never validates a Tweftio drive (the kind gate)");
+    TEST_ASSERT(weft_binding_alloc(v, WEFT_TEST_VA, 2u * PAGE_SIZE, 8) == NULL,
+        "the RING allocator refuses a hostmem Burrow");
+    weft_binding_release(hb);   // drops the pin taken by burrow_ref above
+
     vma_drain(client);                     // release the client mapping (m -> 0)
     drop_proc(client);
     burrow_unref(v);                       // {h:1,m:0} -> free; kobj_pci 2 -> 1
@@ -1114,6 +1142,81 @@ void test_weft_hostmem_share(void) {
         "reject non-page-aligned base PA");
     TEST_EXPECT_EQ((u64)k2->ref, 1u, "rejected creates took no kobj_pci ref");
     kfree(k2);
+}
+
+// V-3b-1c-2b F2: SYS_HOSTMEM_MAPCOUNT's testable core -- resolve a hostmem VA to
+// its Burrow's #847 mapping_count, the observable tapestryd's reap-vs-park
+// decision reads. Exercises the count (1, then 2 as a second sharer joins -- the
+// PARK signal: a client still maps the GPA so the offset is NOT safe to reclaim)
+// and every reject path (-T_E_INVAL, never a plausible count).
+s64 hostmem_mapcount_query(struct Proc *p, u64 va, u64 len);
+void test_weft_hostmem_mapcount(void) {
+    struct KObj_PCI *k = kmalloc(sizeof(*k), KP_ZERO);
+    TEST_ASSERT(k != NULL, "kmalloc KObj_PCI");
+    k->magic = KOBJ_PCI_MAGIC;
+    k->ref   = 1;
+    k->bars[0].present = true;
+    k->bars[0].pa      = 0x80000000ull;
+    k->bars[0].size    = 0x10000;
+    k->shm[0].present  = true;
+    k->shm[0].shmid    = 1;
+    k->shm[0].bar      = 0;
+    k->shm[0].offset   = 0x1000;
+    k->shm[0].length   = 0x4000;
+    u64 pa = k->bars[0].pa + k->shm[0].offset;
+    struct Burrow *v = burrow_create_hostmem(k, pa, 2u * PAGE_SIZE, MAIR_IDX_NORMAL_NC);
+    TEST_ASSERT(v != NULL, "burrow_create_hostmem");
+
+    // Map into proc A: mapping_count 0 -> 1 (A is tapestryd's stand-in).
+    struct Proc *a = make_proc();
+    TEST_ASSERT(a != NULL, "make_proc A");
+    spin_lock(&a->as->lock);
+    TEST_EXPECT_EQ(burrow_share_into(a, v, WEFT_TEST_VA, VMA_PROT_RW), 0, "share hostmem into A");
+    spin_unlock(&a->as->lock);
+    TEST_EXPECT_EQ((int)burrow_mapping_count(v), 1, "one live mapping");
+
+    // The core: A's hostmem VA resolves to mapping_count 1 (sub-page and the
+    // whole-region len both name the same VMA -- count==1 is the reap-safe signal).
+    TEST_EXPECT_EQ(hostmem_mapcount_query(a, WEFT_TEST_VA, PAGE_SIZE), 1,
+        "query returns the live mapping count (reap-safe: only this map)");
+    TEST_EXPECT_EQ(hostmem_mapcount_query(a, WEFT_TEST_VA, 2u * PAGE_SIZE), 1,
+        "whole-region len resolves the same VMA");
+
+    // A second sharer bumps the count A observes -- the F2 park signal.
+    struct Proc *b = make_proc();
+    TEST_ASSERT(b != NULL, "make_proc B");
+    spin_lock(&b->as->lock);
+    TEST_EXPECT_EQ(burrow_share_into(b, v, WEFT_TEST_VA, VMA_PROT_RW), 0, "share hostmem into B");
+    spin_unlock(&b->as->lock);
+    TEST_EXPECT_EQ(hostmem_mapcount_query(a, WEFT_TEST_VA, PAGE_SIZE), 2,
+        "a second sharer bumps the count -- reap must PARK, not reclaim");
+
+    // Reject paths: -T_E_INVAL, never a plausible count.
+    TEST_EXPECT_EQ(hostmem_mapcount_query(a, WEFT_TEST_VA + 0x10000000ull, PAGE_SIZE),
+        (s64)(-T_E_INVAL), "an unmapped VA is refused");
+    TEST_EXPECT_EQ(hostmem_mapcount_query(a, WEFT_TEST_VA, 4u * PAGE_SIZE),
+        (s64)(-T_E_INVAL), "a len past the VMA is refused, not clamped");
+    TEST_EXPECT_EQ(hostmem_mapcount_query(a, WEFT_TEST_VA, 0),
+        (s64)(-T_E_INVAL), "zero len is refused");
+
+    // A non-hostmem VMA (an anon burrow) is refused -- no general introspection.
+    struct Burrow *anon = burrow_create_anon(PAGE_SIZE);
+    TEST_ASSERT(anon != NULL, "burrow_create_anon");
+    u64 anon_va = WEFT_TEST_VA + 0x1000000ull;
+    spin_lock(&a->as->lock);
+    TEST_EXPECT_EQ(burrow_share_into(a, anon, anon_va, VMA_PROT_RW), 0, "map anon into A");
+    spin_unlock(&a->as->lock);
+    TEST_EXPECT_EQ(hostmem_mapcount_query(a, anon_va, PAGE_SIZE), (s64)(-T_E_INVAL),
+        "a non-hostmem burrow is refused (the count is hostmem-only)");
+
+    vma_drain(a);              // drops A's hostmem map (2->1) + A's anon map (1->0)
+    vma_drain(b);              // drops B's hostmem map (1->0)
+    drop_proc(a);
+    drop_proc(b);
+    burrow_unref(v);           // {h:1, m:0} -> free; kobj_pci 2 -> 1
+    burrow_unref(anon);        // {h:1, m:0} -> free
+    TEST_EXPECT_EQ((u64)k->ref, 1u, "the hostmem Burrow's kobj_pci ref was released");
+    kfree(k);
 }
 
 // V-2 (audit F2): the pure subrange resolver behind SYS_BURROW_FROM_HOSTMEM --

@@ -275,6 +275,7 @@ pub const T_SYS_DMA_CREATE_WEAVE: u64 = 99;     // G-2: mint a share-admissible 
 pub const T_SYS_WEFT_UNSHARE: u64     = 100;    // G-2: disarm an un-claimed share (retire/GC)
 pub const T_SYS_DMA_CREATE_GPU_BO: u64 = 106;   // Warp-2: mint a share-admissible GPU BO
 pub const T_SYS_BURROW_FROM_HOSTMEM: u64 = 107; // Warp-6 V-2: map a PCI hostmem BAR subrange -> client VA
+pub const T_SYS_HOSTMEM_MAPCOUNT: u64 = 108;    // Warp-6 V-3b-1c-2b F2: read a hostmem burrow's mapping_count
 // SYS_BURROW_FROM_HOSTMEM cache_policy -- mirrors the kernel enum t_cache_policy
 // (kernel/include/thylacine/syscall.h); ABI-pinned. The host DICTATES the
 // attribute (map_blob returns it as map_info); the guest must pass the MATCHING
@@ -989,6 +990,27 @@ pub unsafe fn t_burrow_from_hostmem(
         in("x3") length,
         in("x4") cache_policy,
         in("x8") T_SYS_BURROW_FROM_HOSTMEM,
+        options(nostack)
+    );
+    x0
+}
+
+// t_hostmem_mapcount -- Warp-6 V-3b-1c-2b F2: read the #847 mapping_count of the
+// BURROW_TYPE_HOSTMEM burrow that backs `[va, va+len)` in THIS Proc's address
+// space (a hostmem ring minted by t_burrow_from_hostmem). Returns the count
+// (>= 0: the caller's own map plus any weft-shared clients), or < 0 (-errno) if
+// the range does not resolve to a single hostmem VMA the caller owns. Read-only,
+// leaks only the count. The reclaim discipline lives in the caller: disarm the
+// weft share FIRST, then a count of 1 means only this Proc maps the backing, so
+// the host-side offset is safe to reclaim (WARP-V3-DESIGN 0.11.3).
+#[inline(always)]
+pub unsafe fn t_hostmem_mapcount(va: u64, len: u64) -> i64 {
+    let mut x0: i64 = va as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") len,
+        in("x8") T_SYS_HOSTMEM_MAPCOUNT,
         options(nostack)
     );
     x0

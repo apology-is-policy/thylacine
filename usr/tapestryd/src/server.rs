@@ -100,8 +100,9 @@ use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
 use libthyla_rs::time::Instant;
 use libthyla_rs::{
-    t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map, t_srv_peer,
-    t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM, T_PRINCIPAL_SYSTEM,
+    t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map,
+    t_hostmem_mapcount, t_srv_peer, t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM,
+    T_PRINCIPAL_SYSTEM,
     T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
     T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
@@ -6444,7 +6445,13 @@ impl Comp {
     fn wring_weft_ensure(&mut self, ring_pub: u32, conn: u64) -> Option<(u64, u32)> {
         let (va, size, have) = {
             let r = self.wring_mut(ring_pub, conn)?;
-            if r.dma_fd < 0 {
+            // A guest-blob ring shares its DMA backing (dma_fd >= 0). A Model B
+            // HOST3D ring has dma_fd == -1 but a live `host3d` token, and its
+            // (va, size) name the hostmem burrow -- t_weft_share routes that to
+            // WEFT_BIND_HOSTMEM (weft.c, F1 arm), delivering the ring to the
+            // client at the host-dictated cache. A ring with neither is
+            // unshareable (nothing minted).
+            if r.dma_fd < 0 && r.host3d.is_none() {
                 return None;
             }
             (r.va, r.size, r.share_id)
@@ -6859,14 +6866,17 @@ impl Comp {
         if let Some(id) = r.share_id.take() {
             let _ = unsafe { t_weft_unshare(id) };
         }
-        // Model B (V-3b-1c-2): a HOST3D ring's backing is a hostmem burrow the
-        // persistent engine owns. drop_host3d_ring does the FULL teardown
-        // (detach -> unmap -> unref -> reclaim the free-list offset); take the
-        // token BY VALUE (non-Copy -> a double drop is a compile error) and
-        // RETURN so the guest-blob res_unref / dma_fd path below cannot
-        // double-free it. The share was already disarmed above (I-7 #847).
+        // Model B (V-3b-1c-2b F2): a HOST3D ring's backing is a hostmem burrow
+        // whose HOST bytes (the QEMU subregion) live OUTSIDE the kernel #847
+        // count. The share was disarmed above (I-7 #847), so no NEW client can
+        // claim -- retire_host3d_ring then reads the mapping_count and reclaims
+        // the offset only if no client still maps the GPA (count == 1 = our own
+        // map), else PARKS the ring for the reaper. Reclaiming unconditionally
+        // here would re-hand the offset under a client's live PTEs (a cross-
+        // client alias). Take the token BY VALUE (non-Copy -> a double drop is a
+        // compile error) and RETURN so the guest-blob path below cannot touch it.
         if let Some(hr) = r.host3d.take() {
-            gpu.drop_host3d_ring(hr);
+            gpu.retire_host3d_ring(hr);
             return;
         }
         if r.res_id != 0 {
@@ -7213,22 +7223,32 @@ impl Comp {
         let sentinel: u64 = 0x5657_3348_0000_0000 ^ va;
         ring_store(va, SENT_OFF, sentinel);
         let got = ring_load(va, SENT_OFF);
+        // V-3b-1c-2b F2: exercise SYS_HOSTMEM_MAPCOUNT on this ring's backing.
+        // No client has claimed it (the self-test shares nothing), so only
+        // tapestryd's own map exists -> the count MUST read exactly 1. That is
+        // the reap-if-safe precondition retire_host3d_ring checks below, so the
+        // wctx_finish that follows takes the immediate-reclaim arm (count==1),
+        // not the park arm -- the tapestryd-side witness of the syscall + the
+        // common teardown path. The claim + park + cross-client legs need a real
+        // client Proc and live in the warp-prove ring-host3d cross-Proc gate.
+        let mc = unsafe { t_hostmem_mapcount(va, PAGE) };
         self.wctx_finish(slot, false);
         // F4: "teardown OK" must be OBSERVED, not assumed. wctx_finish poisons
         // the slot iff a venus-ctx or dev-ctx CTX_DESTROY was refused (the
         // teardown's only failure signal on a clean finish), so a poisoned slot
         // means the teardown leg did NOT complete -- the gate must not read "OK".
         let teardown_ok = !self.warp_ctx_slot_poisoned[slot];
-        if got == sentinel && teardown_ok {
+        if got == sentinel && mc == 1 && teardown_ok {
             say!(
-                "tapestryd: warp host3d-ring venus-ctx={} MAPPED+ROUNDTRIP teardown OK",
+                "tapestryd: warp host3d-ring venus-ctx={} MAPPED+ROUNDTRIP mapcount=1 teardown OK",
                 venus
             );
         } else {
             say!(
-                "tapestryd: warp host3d-ring FAIL (sentinel wrote {:#x} read {:#x} teardown_ok={})",
+                "tapestryd: warp host3d-ring FAIL (sentinel wrote {:#x} read {:#x} mapcount={} teardown_ok={})",
                 sentinel,
                 got,
+                mc,
                 teardown_ok
             );
         }
