@@ -825,6 +825,9 @@ int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot);
 size_t burrow_get_size(const struct Burrow *v);
 int    burrow_handle_count(const struct Burrow *v);
 int    burrow_mapping_count(const struct Burrow *v);
+// handle_count + mapping_count read ATOMICALLY under v->lock (a coherent
+// snapshot, not two separately-ACQUIRE'd loads). Non-const: it locks.
+int    burrow_total_refs(struct Burrow *v);
 
 // Cumulative diagnostic counters. Tests use these to verify lifecycle
 // transitions:

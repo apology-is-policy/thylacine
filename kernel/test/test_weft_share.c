@@ -1150,8 +1150,8 @@ void test_weft_hostmem_share(void) {
 // window: a client that has CLAIMED the weft share holds the TRANSFERRED
 // registration pin (a handle ref) BEFORE burrow_share_into bumps mapping_count,
 // so a reclaim keyed on mapping_count ALONE would free the offset under a client
-// irrevocably about to map. The pin makes the SUM >= 2, so the reap parks. A sums the
-// tapestryd-shape burrow {handle:0, mapping:1}. Exercises: clean==1 (reap-safe),
+// irrevocably about to map. The pin makes the SUM >= 2, so the reap parks. Proc A
+// holds the tapestryd-shape burrow {handle:0, mapping:1}. Exercises: clean==1 (reap-safe),
 // pin-not-mapped==2 (PARK -- the F1 window), pin+map==3, back to 1 after both
 // drop, and every reject path (-T_E_INVAL).
 s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len);

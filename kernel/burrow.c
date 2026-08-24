@@ -1475,6 +1475,27 @@ int burrow_mapping_count(const struct Burrow *v) {
     return __atomic_load_n(&v->mapping_count, __ATOMIC_ACQUIRE);
 }
 
+// V-3b-1c-2b round-2 F1: the ATOMIC sum of both #847 counts, read under v->lock
+// so the pair is a COHERENT SNAPSHOT -- not two separately-ACQUIRE'd loads whose
+// relative order (unspecified for the operands of `+`, and IRQ-preemptible since
+// the caller's as->lock leaves IRQs open) would otherwise decide soundness: a
+// mapping-first read could see mapping==1 in the claim window, then handle==0
+// after the claimant maps + releases the pin, summing to 1 and reclaiming under a
+// live client map. Under v->lock every count mutation is excluded, so both reads
+// reflect one instant. The sole caller (SYS_HOSTMEM_REFCOUNT) holds the target
+// Proc's as->lock, and vma_lock/as->lock -> v->lock is the established nesting
+// (burrow_map -> vma_alloc -> burrow_acquire_mapping), so this cannot deadlock.
+// Takes v (non-const): it locks. Returns 0 for a NULL/dead Burrow (never a
+// reclaim-safe 1).
+int burrow_total_refs(struct Burrow *v) {
+    if (!v) return 0;
+    if (v->magic != VMO_MAGIC) return 0;
+    spin_lock(&v->lock);
+    int refs = v->handle_count + v->mapping_count;
+    spin_unlock(&v->lock);
+    return refs;
+}
+
 u64 burrow_total_created(void)    { return g_vmo_created; }
 u64 burrow_total_destroyed(void)  { return g_vmo_destroyed; }
 

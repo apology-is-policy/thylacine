@@ -2398,14 +2398,21 @@ impl Gpu {
         // rounded size so the host allocation covers the whole mapped page.
         let size32 = u32::try_from(size).map_err(|_| Error::Hardware)?;
         // V-3b-1c-2b F2: reclaim-before-alloc. A parked ring (retired while a
-        // client still mapped it) is freed here once its client has unmapped, so
-        // offset pressure drives reclaim exactly when a new mint needs the space.
-        // Issuing the parked rings' controlq teardown here is safe -- mint runs
-        // in the serve-loop context, where controlq commands are normal.
-        self.reap_hostmem_parked();
-        let off = match self.hostmem.as_mut().and_then(|a| a.alloc(size)) {
-            Some(o) => o,
-            None => return Err(Error::Hardware),
+        // client still referenced it) is freed here once its client has released
+        // it, so offset pressure drives reclaim exactly when a new mint needs the
+        // space. Issuing the parked rings' controlq teardown here is safe -- mint
+        // runs in the serve-loop context, where controlq commands are normal. Loop
+        // reap+alloc while the (per-pass-capped) reap makes progress (round-2 F2):
+        // a single capped pass may not free enough, but each pass that reclaims >0
+        // may free the offset the alloc needs; fail only when a pass frees nothing
+        // and the region is still full.
+        let off = loop {
+            let reclaimed = self.reap_hostmem_parked();
+            match self.hostmem.as_mut().and_then(|a| a.alloc(size)) {
+                Some(o) => break o,
+                None if reclaimed > 0 => continue,
+                None => return Err(Error::Hardware),
+            }
         };
         if let Err(e) =
             self.create_host3d_blob(res_id, ctx_id, VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE, size32)
@@ -2489,9 +2496,12 @@ impl Gpu {
     /// teardown) so a crashed client's ring is reclaimed at the next mint. Bounded
     /// per pass (`HOSTMEM_REAP_PER_PASS`) so one mint issues no unbounded burst of
     /// controlq teardowns; the remainder waits for the next mint (still bounded).
-    fn reap_hostmem_parked(&mut self) {
+    /// Returns the number reclaimed THIS pass (0 = none eligible in the scanned
+    /// prefix) so a caller under offset pressure (mint) can loop while progress is
+    /// made rather than fail an alloc that a second pass would satisfy (round-2 F2).
+    fn reap_hostmem_parked(&mut self) -> u32 {
         if self.hostmem_parked.is_empty() {
-            return;
+            return 0;
         }
         const HOSTMEM_REAP_PER_PASS: u32 = 8;
         let mut reclaimed: u32 = 0;
@@ -2507,6 +2517,7 @@ impl Gpu {
                 i += 1;
             }
         }
+        reclaimed
     }
 
     /// V-3b-1c: the unconditional inverse of mint_host3d_ring (detach tapestryd's

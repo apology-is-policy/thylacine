@@ -82,10 +82,26 @@ The reusable lesson is sharper than "cite carefully": a lifecycle predicate port
 from one actor's vantage (the kernel cache holds a HANDLE) to another's (tapestryd
 holds a MAPPING) must re-derive which refcount half carries the safety, not
 transliterate the one that happened to be visible. Dirty close (a P1 back + the
-predicate changed), so a round-2 holotype prosecutes the fix; SMP re-run on the
-fix in flight (40/40 clean on the pre-fix baseline — the fix adds one count read
-under the same lock, no new concurrency). GL self-test on real V3D + the
-`warp-prove` cross-Proc E2E still owed.
+predicate changed), so a round-2 holotype prosecuted the fix — and found the SUM
+itself unsound: `handle_count + mapping_count` is two SEPARATELY-ACQUIRE'd loads,
+and which is read first is *unspecified for the operands of `+`* and
+IRQ-preemptible (the `as->lock` in hand raises only the preempt count, IRQs stay
+open). A mapping-first read could see `mapping==1` in the claim window, take an
+interrupt while the claimant maps + forks + releases its pin, then read
+`handle==0` and sum to 1 — reclaiming under a live map. Today's binary is
+handle-first only because clang emits left-to-right; GCC routinely goes the other
+way. The very act of folding image.c's two-count gate into one observed value had
+reintroduced the non-atomicity the kernel's counts avoid by living under
+`v->lock`. Fix: `burrow_total_refs` reads both under `v->lock`. The reusable half:
+**a sum of two lock-free counters is not one read** — operand order is a
+correctness variable, and "under a lock" must mean under the lock that guards *the
+counters*, not merely *a* lock (the round-1 `as->lock` comment asserted exactly
+that false comfort). The round-2 fix is a 5-line locked accessor — the
+prosecutor's prescription, verified not transliterated — committed compiles-clean;
+the suite re-run (the mac was held by aux's boot-test), the GL self-test on real
+V3D, and the `warp-prove` cross-Proc E2E are owed before push. On the local 2D
+device the host3d self-test skips, so no local boot drives the new syscall — its
+runtime witness is the GL self-test, not an SMP re-run.
 
 ## 2026-08-24 — V-3b-1c-2b-a: a green gate over a dead claim path (reverted, parked)
 

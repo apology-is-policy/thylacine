@@ -797,9 +797,12 @@ s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len) {
         spin_unlock(&p->as->lock);
         return -T_E_INVAL;
     }
-    // Both counts are ACQUIRE + magic-checked; summed under as->lock so a
-    // same-Proc detach cannot drop the mapping between the two reads.
-    s64 refs = (s64)burrow_handle_count(b) + (s64)burrow_mapping_count(b);
+    // burrow_total_refs sums handle_count + mapping_count UNDER v->lock, so the
+    // pair is a coherent snapshot (round-2 F1): two separately-ACQUIRE'd loads
+    // would sum values from two instants, and a mapping-first read could reclaim
+    // under a client mapping the intervening claim installed. Holding as->lock
+    // here, the as->lock -> v->lock nesting is the established order.
+    s64 refs = (s64)burrow_total_refs(b);
     spin_unlock(&p->as->lock);
     return refs;
 }
