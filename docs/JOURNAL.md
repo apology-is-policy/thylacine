@@ -22,6 +22,71 @@ needed the operator.
 
 ---
 
+## 2026-08-24 (aux) — the guided build wizard (build-configurator lane 4)
+
+Continuation of the build-configurator arc, same day, on a fresh context (I
+self-compacted at the operator's direction after closing the account-decouple
+sub-chunk). Lane 4 is `tools/configure.sh` (`0d694b55`): the interactive wizard
+`docs/BUILD-CONFIG-DESIGN.md` 4.6 specs — a newcomer who knows nothing about
+Thylacine picks a base profile, walks every option one at a time with its
+description + what-it-enables help, and gets a named `configs/<name>.config` they
+build with `tools/build.sh --config <name>`. It is a pure front-end over the
+lane-2 schema core (it drives `bc_reset`/`bc_apply_preset`/`bc_set_one`/
+`bc_resolve`/`bc_emit_config` and reimplements no schema). Tooling, not
+soundness-bearing (design section 6) — so no prosecutor round, by the ratified
+call.
+
+**The interesting part was the test, and the bug the test caught was my own.**
+While smoke-testing I pointed `BC_DIR_CONFIGS` at a temp dir to isolate the runs
+— and the wizard wrote into the *real* `configs/` anyway (two stray files,
+`prod-smoke.config` + `custom.config`, both untracked so cleanly removed). Cause:
+a top-level `BC_DIR_CONFIGS="$REPO_ROOT/configs"` assignment (copied from
+build.sh, which has no need to override) clobbered the env override. Fixed to
+`${BC_DIR_CONFIGS:-...}`. That bug became test case 9: an *isolation guard* that
+snapshots the real `configs/` before/after the whole suite and asserts it is
+untouched — the regression guard for exactly the mistake I had just made.
+
+**Every control was proven to fail without its behavior** (M-PIN: a check that
+cannot fail proves nothing). `tools/test-configure.sh` is 21 discrimination
+checks; I verified the six load-bearing ones by running the suite against
+*sabotaged copies* of the wizard (placed in `tools/` so their `$0/..`
+self-location still resolves to the repo — a temp-dir copy mislocates
+`REPO_ROOT` and every case crashes uniformly, which proves nothing targeted).
+S2 (delete the live-constraint announcement) fails *only* "constraint: live
+announcement fires" while the other three case-3 asserts stay green; S4 (neuter
+chunk-flagging) fails *only* the remedy assert while its negative stays green —
+clean targeting, not a blanket crash. S5 (re-introduce the clobber) is caught by
+the isolation guard, and I cleaned the seven files it leaked.
+
+**A live-constraint subtlety, fixed.** The first cut announced "-> enables
+DEV_ACCOUNTS" only when DEV_ACCOUNTS was currently `n` — but its default is `y`,
+so in a from-defaults walk the announcement never fired and only the pin at the
+DEV_ACCOUNTS prompt showed. 4.6 step 3's example wants the announcement on
+*selection* of BOOT_PROBES=y, so I made it unconditional (the pin reinforces it;
+`bc_resolve` stays the authoritative enforcer). Verified with a negative control
+that a walk which never sets BOOT_PROBES=y stays silent.
+
+**Real end-to-end proven once, then cleaned up:** the wizard wrote
+`configs/wzroundtrip.config` (BUILD_TYPE=release + CHUNK_CLADE=y) and
+`tools/build.sh --config wzroundtrip --show-config` resolved `build_type=Release`
++ `CHUNK_CLADE y` — the full newcomer chain works, not just the unit assertions.
+
+**Small accuracy fix surfaced by the wizard reading help aloud:** the
+DEV_ACCOUNTS help string still said the lean image provisions "michael" only;
+the account-decouple sub-chunk (`d982ee62`, earlier this run) bakes michael +
+cora, so the help now says so. 4.6 says to enrich thin help in `build-config.sh`
+— the wizard is the reader that makes a stale help string visible.
+
+Docs touched proportionately: `BUILD-HARNESS.md` gets a short 4.3 "guided setup"
+pointer so the wizard is discoverable (the full configurator fold — the
+`--config`/presets model, a `docs/reference/NN` + a `docs/manual` entry — stays
+lane 6, as sequenced); `BUILD-CONFIG-DESIGN.md` 4.6 gets an AS-BUILT note.
+`tools/test-build-config.sh` (lane 2) still ALL PASS, guarding the build-config.sh
+edits. Open: lane 5 (the `tools/build-manifest.toml` input manifest + the
+`tools/forage.sh` collector + build.sh detect-and-instruct — the wizard already
+names `forage` as the step-4 remedy, forward-referencing it), then lane 6 docs,
+then the arc closes and git-on-viv resumes (chunk B, the timeout mechanism).
+
 ## 2026-08-24 (aux) — lean-image login accounts: audit the michael decouple, then add cora and re-audit
 
 A build-tooling detour (the build-configurator arc, ratified last session off the
