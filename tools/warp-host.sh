@@ -372,8 +372,29 @@ venus-verdict)
         echo "CONTROL leg: no 'hostmem-ring skipped (F_RESOURCE_BLOB not offered)' -- the probe did not take the intended no-feature skip"
         vfail=1
     }
+    # V-3b-1c-2a: the SERVER host3d-ring path (a per-client venus device-ctx +
+    # the HOST3D ring flavor in the /srv/warp ring subtree + wring_teardown's
+    # host3d arm). The test leg mints a HOST3D ring under a real warp ctx via the
+    # persistent engine, round-trips a sentinel at the mapped ring VA, and tears
+    # the ctx down (driving drop_host3d_ring + the venus-ctx destroy); the
+    # control leg (no F_RESOURCE_BLOB) self-skips. The "venus-ctx=" line is
+    # emitted ONLY on a successful round-trip -- its presence IS the proof (a
+    # FAIL or a skip emits a different line), so this is the tapestryd-side,
+    # no-client witness of the 1c-2a wiring (the client claim is 1c-2b's warp-prove).
+    grep -qF "warp host3d-ring venus-ctx=" "$tst" || {
+        echo "TEST leg: the SERVER HOST3D ring path did NOT create a venus ctx + map+round-trip a ring -- the V-3b-1c-2a venus-ctx / ring-flavor / teardown wiring is broken"
+        vfail=1
+    }
+    if grep -qF "warp host3d-ring venus-ctx=" "$ctl"; then
+        echo "CONTROL leg: a server host3d ring round-tripped under a venus ctx WITHOUT venus/blob -- impossible, the gate is wrong"
+        vfail=1
+    fi
+    grep -qF "warp host3d-ring skipped" "$ctl" || {
+        echo "CONTROL leg: no 'warp host3d-ring skipped' -- the server self-test did not take the intended no-feature skip"
+        vfail=1
+    }
     if [ "$vfail" -eq 0 ]; then
-        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a), a HOST3D blob guest-maps via SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel (V-3b-1b), AND the persistent ring engine mints two rings at distinct offsets, round-trips each guest VA, and reuses a freed offset on re-mint (V-3b-1c)"
+        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a), a HOST3D blob guest-maps via SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel (V-3b-1b), AND the persistent ring engine mints two rings at distinct offsets, round-trips each guest VA, and reuses a freed offset on re-mint (V-3b-1c), AND the SERVER host3d-ring path creates a per-client venus device-ctx, mints a HOST3D ring in /srv/warp, round-trips its VA, and tears it down through drop_host3d_ring + the venus-ctx destroy (V-3b-1c-2a)"
         grep -hE "gpu capset\[|num_capsets|blob-create" "$ctl" "$tst"
     else
         echo "VENUS GATE: UNVERIFIED"

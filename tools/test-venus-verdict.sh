@@ -29,6 +29,7 @@ tapestryd: gpu ctx-capset id=4 skipped (capset not enumerated)
 tapestryd: gpu blob-create skipped (F_RESOURCE_BLOB not offered)
 tapestryd: gpu host3d-map skipped (F_RESOURCE_BLOB not offered)
 tapestryd: gpu hostmem-ring skipped (F_RESOURCE_BLOB not offered)
+tapestryd: warp host3d-ring skipped (blob feature not offered)
 EOF
 }
 mk_test() {
@@ -45,6 +46,7 @@ tapestryd: gpu blob-create guest CREATED
 tapestryd: gpu host3d-map venus-ctx MAPPED (map_info=0x1)
 tapestryd: gpu host3d-map global create refused
 tapestryd: gpu hostmem-ring MAPPED+ROUNDTRIP x2 (off_a=0x0 off_b=0x1000 cache=CACHED) teardown+remint-reuse OK
+tapestryd: warp host3d-ring venus-ctx=512 MAPPED+ROUNDTRIP teardown OK
 EOF
 }
 
@@ -92,6 +94,18 @@ check "control leg ALSO sees hostmem-ring MAPPED+ROUNDTRIP x2 -> UNVERIFIED" 1 \
       'printf "tapestryd: gpu hostmem-ring MAPPED+ROUNDTRIP x2 (off_a=0x0 off_b=0x1000 cache=CACHED) teardown+remint-reuse OK\n" >> "$c"' ""
 check "control leg lacks hostmem-ring skip -> UNVERIFIED"       1 \
       'grep -v "hostmem-ring skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
+# V-3b-1c-2a: the SERVER host3d-ring path legs, one variable away each. The
+# "venus-ctx=" line is emitted ONLY on a successful round-trip; a sentinel
+# mismatch emits a FAIL line instead, which the gate must reject -- so replacing
+# the success line with FAIL proves the gate keys on the verdict, not the token.
+check "test leg lacks server host3d venus-ctx round-trip -> UNVERIFIED" 1 "" \
+      'grep -v "warp host3d-ring venus-ctx=" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg shows server host3d FAIL (sentinel mismatch) -> UNVERIFIED" 1 "" \
+      'sed "s/warp host3d-ring venus-ctx=.*/warp host3d-ring FAIL (sentinel wrote 0x1 read 0x2)/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO sees server host3d venus-ctx -> UNVERIFIED" 1 \
+      'printf "tapestryd: warp host3d-ring venus-ctx=512 MAPPED+ROUNDTRIP teardown OK\n" >> "$c"' ""
+check "control leg lacks server host3d skip -> UNVERIFIED"       1 \
+      'grep -v "warp host3d-ring skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
 # One variable away, each direction of the discrimination the gate claims.
 check "control leg ALSO sees id=4 -> UNVERIFIED" 1 \
       'printf "tapestryd: gpu capset[2] id=4 max_version=0 max_size=160\n" >> "$c"' ""

@@ -22,6 +22,75 @@ needed the operator.
 
 ---
 
+## 2026-08-24 — V-3b-1c-2a: the server host3d-ring path (three catches the local gates could not make)
+
+Same autonomous run, resumed past a second self-compaction. 1c-1 was the engine;
+1c-2a wires it into the `/srv/warp` server so a HOST3D ring is a client-mintable
+flavor under a per-client venus device-ctx. The plumbing was routine — the value
+of this entry is the three defects, each caught by a *different* instrument
+because the cheaper one was structurally blind to it.
+
+**The recon was wrong, and a grep caught it before a line was written.** The
+pickup pinned the venus ctx id as `COMPOSITOR_CTX + 1 + slot`. Before writing it
+I enumerated every `ctx_create*` id in the daemon (the enumerate-mirrors reflex)
+and found `CONV_PROBE_CTX_BASE = COMPOSITOR_CTX + 1` — the conv-probe throwaways
+occupy exactly that base. The two families were temporally separated (conv probes
+die before any client mints), so the alias was latent, not live — which is
+precisely how it would have survived review. Moved the band to a dedicated
+`0x200 + slot` with a `const _` gap assert. The lesson is old (a recon note is a
+hypothesis, not a fact) but the mechanism is worth naming: a pure-function id
+scheme (`base + slot`) collides silently with any *other* pure-function scheme
+sharing the base, and only a full enumeration — not a spot check — finds it.
+
+**F1 was mine to catch and I didn't; Fable did.** My self-audit reached the
+`wctx_finish` leak arm, saw it did not destroy the venus ctx, and reasoned:
+"consistent with dev_ctx (which the leak arm also leaves alive), and the slot is
+poisoned so the id can't be reused — fine." That is half the machinery. What I
+did not trace is the *vindication* path: when the device finishes the abandoned
+chain, it destroys dev_ctx, **un-poisons the slot**, and recycles it — destroying
+only dev_ctx, never venus. So a wedged-then-recovered slot leaks its venus ctx
+*and* the next client that lands there re-mints `WARP_VENUS_CTX_BASE + slot` into
+a still-live host context (EEXIST → that slot permanently loses host3d). The fix
+is the holotype's option (a): destroy venus in the leak arm too — it is quiesced
+by construction at 1c-2a (no submit path targets it, its rings were dropped
+unconditionally just above) — and on a refused destroy skip the vindicate stamp
+so the slot is permanently condemned rather than recycled into the collision.
+This is the exact shape of the whole-system-stewardship failure mode: I stopped
+tracing at the boundary of the function I changed; the bug lived one call away in
+the recovery path I did not open. A same-family reviewer with *context
+independence* (Fable had not watched me talk myself into "consistent with
+dev_ctx") is what closed it.
+
+**F2 is a disclosure armed one rung ahead.** The 1c-1 free-list hands back a
+reused hostmem extent verbatim — `drop_host3d_ring` reclaims the offset but does
+not scrub — and `wring_install_host3d` wrote nothing into the ring. At 1c-2a the
+client claim path fails closed (`wring_weft_ensure` returns None on `dma_fd < 0`),
+so it is latent; but this chunk is the substrate for the very next rung that makes
+the memory client-visible, and the next author greps for "claim", not "zero". Zero
+the ring at install. The 1c-1 probe's own physical-reread leg is built on the fact
+that freed bytes persist across re-mint, so this was not hypothetical.
+
+**The GL boot caught what the no-boot gate never could.** `test-venus-verdict.sh`
+is 28/28 and discriminates — against *crafted fixtures*. It tests the verdict
+logic, not the capture. The real venus boot on thyla-pi came back UNVERIFIED: the
+control leg emitted no `warp host3d-ring skipped` line at all. Ground truth (read
+the 13-line filtered log, don't theorize): `boot-probe.sh` captures only
+`grep "tapestryd: gpu"` — and my self-test lives in `server.rs` with a `warp`
+prefix, so the filter dropped it before the gate could see it. The 1c-1 line was
+`tapestryd: gpu hostmem-ring` (gpu.rs); mine is `tapestryd: warp host3d-ring`, and
+that one-word prefix difference is invisible to a fixtures-only test. Broadened
+the filter to `gpu|warp host3d-ring`. This is the `test.sh(HVF) != test-interactive(TCG)`
+class restated for capture: a discriminating gate can still be blind to whether
+its evidence line is ever *recorded*, and only a real boot exercises the record.
+
+Audit: holotype-reviewer Fable 5 (max, MODEL start==end, family diversity),
+**0 P0 / 1 P1 / 1 P2 / 3 P3, all fixed** (F3 = my pre-landed kick guard; F4
+"teardown OK" now reads the poisoned flag; F5 named the structural bound over the
+compiled-out `debug_assert`). Not dirty. Re-verified on real V3D after the fixes.
+Owed to 1c-2b/V-3b-2: when venus submits land, both the leak-arm
+"venus quiesced by construction" argument and the kick fail-closed graduate to
+real venus discipline — named in the code.
+
 ## 2026-08-24 — V-3b-1c-1: the persistent hostmem ring engine (a deliberate split)
 
 Same autonomous run, resumed on the far side of a self-compaction at the 600k

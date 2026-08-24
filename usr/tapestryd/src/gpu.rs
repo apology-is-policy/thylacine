@@ -2458,6 +2458,14 @@ impl Gpu {
         self.ctx_create_capset(ctx_id, 0, debug_name)
     }
 
+    /// Create a VENUS (capset-4) device context -- the Model B HOST3D-ring
+    /// owner (V-3b-1c-2). A thin wrapper so the venus capset id stays
+    /// gpu-internal; refuses (Error::Hardware) on a device that did not
+    /// negotiate context-init / the venus capset, exactly as `ctx_create_capset`.
+    pub fn ctx_create_venus(&mut self, ctx_id: u32) -> Result<(), Error> {
+        self.ctx_create_capset(ctx_id, VIRTIO_GPU_CAPSET_VENUS, b"warp-venus")
+    }
+
     /// `CTX_CREATE` selecting a capset via `context_init` (bits 0-7).
     ///
     /// The field is honoured ONLY when `VIRTIO_GPU_F_CONTEXT_INIT` was

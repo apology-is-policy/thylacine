@@ -189,10 +189,12 @@ build on. Three deltas, all in `usr/tapestryd/src/gpu.rs`:
   -> HostRing` composes the V-3b-1a/1b steps (alloc offset -> `create_host3d_blob`
   under a venus ctx -> `map_blob` -> `burrow_from_hostmem` at the host-dictated
   cache) with **full error unwinding** at every stage (offset -> resource ->
-  subregion), so no half-minted ring is ever left behind. `drop_host3d_ring(&HostRing)`
+  subregion), so no half-minted ring is ever left behind. `drop_host3d_ring(HostRing)`
   is the inverse (`t_burrow_detach` -> `unmap_blob` -> `resource_unref` ->
-  reclaim the offset). `HostRing` carries exactly what teardown needs; the caller
-  disarms any weft share first (I-7 #847, V-3b-1c-2's concern).
+  reclaim the offset), taken **by value** -- `HostRing` is a non-Copy single-use
+  token, so the type system forbids a second drop (the F1 fix). `HostRing`
+  carries exactly what teardown needs; the caller disarms any weft share first
+  (I-7 #847, V-3b-1c-2's concern).
 - **The probe proves the engine, not a single map.** `hostmem_ring_probe` mints
   TWO rings under one venus ctx (the allocator must hand DISTINCT offsets --
   `off_a=0x0`, `off_b=0x1000`), round-trips a sentinel through each guest VA,
@@ -281,6 +283,61 @@ real warp ctx, tapestryd-side sentinel, tears down -- provable without a client)
 independently, GL-gated, audited.
 
 ---
+
+### 0.10 V-3b-1c-2a as-built: the server host3d-ring path (2026-08-24)
+
+The 1c-1 engine minted rings tapestryd-internally (the probe). V-3b-1c-2a wires
+it into the `/srv/warp` SERVER so a HOST3D ring becomes a first-class ring flavor
+under a client's warp ctx -- the tapestryd half of the client-claimable ring.
+Per the 1c-2a/1c-2b split (section 0.9), this rung is the venus device-ctx
+lifecycle + the ring flavor + teardown, provable by a tapestryd-side self-test
+with NO client; the weft-share client claim + the `warp-prove` cross-Proc leg are
+1c-2b. All in `usr/tapestryd/src/server.rs` (+ a one-line `gpu.rs` wrapper and a
+`main.rs` call):
+
+- **The per-client venus device-ctx.** `WarpCtx` gains `venus_ctx: Option<u32>`,
+  **lazily** created on the first host3d ring mint (`wctx_venus_ensure`) via
+  `gpu.ctx_create_venus` (capset-4) and destroyed with the warp ctx in
+  `wctx_finish` (condemn-slot-on-refuse, before the dev_ctx destroy). A client
+  that mints only V-3a guest-blob rings pays no venus ctx. The id is a dedicated
+  band `WARP_VENUS_CTX_BASE (0x200) + slot` -- a `const _` gap assert + a
+  `conv_attempt` `debug_assert` pin it disjoint from dev_ctx (`1..=MAX_WARP_CTXS`),
+  the gpu probe ids (200-203), `COMPOSITOR_CTX` (0x100), AND the conv-probe
+  throwaways (`CONV_PROBE_CTX_BASE = COMPOSITOR_CTX+1`, which the original
+  `+slot` scheme would have aliased -- the enumerate-mirrors catch).
+- **The HOST3D ring flavor -- ADD, not replace.** `ring/new` accepts
+  `"<bytes> <ridx> host3d"` (a bare `"<bytes> <ridx>"` stays the V-3a guest-blob
+  ring; an unknown third token is rejected). `wring_mint` gains a `host3d: bool`
+  and, after the SHARED validation + I-32 backing-budget + ridx checks, branches
+  to `wring_install_host3d` -- mint via the 1c-1 `mint_host3d_ring` under the
+  venus ctx, install a `WarpRing { dma_fd: -1, host3d: Some(hr), .. }`. A
+  venus-ctx or engine failure fails the mint CLEAN (the engine unwinds its own
+  partial state; nothing installed).
+- **Teardown routes to the engine.** `WarpRing` gains
+  `host3d: Option<crate::gpu::HostRing>`; `wring_teardown` moves the non-Copy
+  token into `drop_host3d_ring` and `return`s BEFORE the guest-blob
+  res_unref/dma_fd path, so a host3d ring is never double-freed (the type system
+  enforces the single drop). The weft share, when 1c-2b adds it, is disarmed
+  first (already the top of `wring_teardown`).
+- **The boot self-test (no client).** `warp_host3d_selftest` (called from
+  `serve()` before READY, self-skipping like the gpu probes) mints a warp ctx
+  under a synthetic conn, mints a host3d ring, round-trips a sentinel at the ring
+  VA, and finishes the ctx -- exercising the venus-ctx create/destroy, the ring
+  install, and `wring_teardown`'s host3d arm end to end. One line:
+  `tapestryd: warp host3d-ring venus-ctx=<id> MAPPED+ROUNDTRIP teardown OK`
+  (emitted ONLY on a successful round-trip; a mismatch emits `FAIL`, a
+  2D/no-blob/no-venus device emits `skipped`). This asserts the SERVER WIRING,
+  not host distinctness -- 1c-1's `hostmem_ring_probe` already proves the
+  physical host-backing.
+
+The `venus-verdict` gate gains a server-path leg (the `venus-ctx=` success line
+on the test boot, its absence + a `skipped` line on the 2D control);
+`tools/test-venus-verdict.sh` proves the discrimination without a boot (28/28),
+including a `FAIL` sabotage. Deliberately NOT here: no client Proc maps the ring
+yet (`ring/<ridx>/map` -> `WEFT_BIND_HOSTMEM` -> the client's `t_weft_map`), and
+`wring_kick` still reads the V-3a `WARP_RING_OFF_*` header -- a host3d ring's
+memory is Venus's format, so `wring_kick` must branch on `host3d` when a client
+kick path exists; both are V-3b-1c-2b (unreachable at 1c-2a: no client fid).
 
 ## 1. What V-3 is, and the seam it plugs into
 

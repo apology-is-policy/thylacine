@@ -77,7 +77,10 @@ else
     echo "BOOT-$TAG: FAIL"
     tail -40 "$LOG"
 fi
-# The gpu driver's own evidence lines (capset probe etc.) -- emitted for the
-# caller to classify; grep -a because a serial log can carry binary bytes.
-grep -a "tapestryd: gpu" "$LOG" || true
+# The gpu driver's own evidence lines (capset probe etc.) + the warp server's
+# host3d-ring self-test line (V-3b-1c-2a lives in server.rs, prefix "warp", not
+# "gpu") -- emitted for the caller to classify; grep -a because a serial log can
+# carry binary bytes. The second alternative is scoped to `host3d-ring` so the
+# many routine `tapestryd: warp ...` ctx/ring diagnostics do not flood the log.
+grep -aE "tapestryd: gpu|tapestryd: warp host3d-ring" "$LOG" || true
 exit $((1 - ok))

@@ -815,6 +815,28 @@ pub(crate) const COMPOSITOR_CTX: u32 = 0x100;
 /// began. Destroyed after each attempt; never re-minted.
 const CONV_PROBE_CTX_BASE: u32 = COMPOSITOR_CTX + 1;
 
+/// V-3b-1c-2 (Model B): the per-client VENUS device-ctx ids -- `WARP_VENUS_CTX_BASE
+/// + slot`, one per warp slot (`0..MAX_WARP_CTXS`). A dedicated band chosen to
+/// clear, by construction, every other ctx id in this daemon: dev_ctx
+/// (`1..=MAX_WARP_CTXS`), the gpu probe ids (all `< COMPOSITOR_CTX`, i.e. <= 203),
+/// `COMPOSITOR_CTX` (0x100) itself, and the conv-probe throwaways
+/// (`CONV_PROBE_CTX_BASE + seq`). The GUARANTEE against the conv range is
+/// STRUCTURAL: `seq` is a function-local counter reset per `comp_measure_conventions`
+/// run and bumped once per bring-up blit attempt (~a dozen), so conv ids stay near
+/// `0x101..0x110` -- far below this 0x200 base, with the +64 gap in the assert as
+/// wide margin. (The `debug_assert` in `conv_attempt` is a DEBUG-build belt only --
+/// `[profile.release]` compiles it out of the shipped daemon, so it is not the
+/// witness in production; the structural bound is.) The venus ctxs are also lazily
+/// minted at client ring-mint time, long after the conv throwaways are destroyed,
+/// so the separation is temporal as well as numeric.
+const WARP_VENUS_CTX_BASE: u32 = 0x200;
+const _: () = assert!(
+    WARP_VENUS_CTX_BASE > COMPOSITOR_CTX
+        && (WARP_VENUS_CTX_BASE as usize) > (COMPOSITOR_CTX as usize) + 64
+        && MAX_WARP_CTXS < 0x100,
+    "venus ctx band must clear COMPOSITOR_CTX + the conv-probe range and not wrap"
+);
+
 /// The renderer's MEASURED blit-box conventions (Warp-C C-3, GPU-DESIGN
 /// 4.5.11): how a box named in guest rows must be issued so the rows land
 /// where the guest means -- PER SOURCE SHAPE (a Y_0_TOP slot, a flags-0 BO)
@@ -1351,6 +1373,12 @@ struct WarpCtx {
     owner_conn: u64,
     pub_id: u32,
     dev_ctx: u32,
+    /// V-3b-1c-2 (Model B): the per-client VENUS (capset-4) device-ctx that
+    /// owns this client's HOST3D command rings. Lazily created on the first
+    /// host3d ring mint (`wctx_venus_ensure`) so a client that mints only
+    /// V-3a guest-blob rings pays no venus ctx; destroyed with the warp ctx in
+    /// `wctx_finish`. Id = `WARP_VENUS_CTX_BASE + slot` (disjoint band).
+    venus_ctx: Option<u32>,
     /// The client's declared capset + ring count (`ctl` writes). Recorded
     /// at the seam from day one; the device sees them when
     /// F_CONTEXT_INIT / per-ring fencing are negotiated (Venus).
@@ -1602,6 +1630,13 @@ struct WarpRing {
     /// box-wide I-9 kill-switch, the #178 anti-pattern its sibling `ring-inject`
     /// was already bounded against.
     noscan: bool,
+    /// V-3b-1c-2 (Model B): the persistent-engine HOST3D ring backing, if this
+    /// is a host3d-flavored ring; `None` = the V-3a guest-blob ring. Non-Copy
+    /// single-use token -- `wring_teardown` MOVES it into `drop_host3d_ring`,
+    /// which does the ENTIRE teardown (detach -> unmap -> unref -> reclaim the
+    /// hostmem offset), so the guest-blob res_unref / dma_fd path must be
+    /// skipped for it; the type system forbids a second drop.
+    host3d: Option<crate::gpu::HostRing>,
 }
 
 /// Warp-4: a resolved ACTIVE GL adoption (see `gl_adoption`) -- the
@@ -2841,6 +2876,10 @@ impl Comp {
         F: FnOnce(&mut Self, u32) -> Result<(), Error>,
     {
         let ctx = CONV_PROBE_CTX_BASE + *seq;
+        // The conv throwaways must never climb into the venus ctx band
+        // (V-3b-1c-2); if this ever fires the WARP_VENUS_CTX_BASE gap is too
+        // small and the two families could alias.
+        debug_assert!(ctx < WARP_VENUS_CTX_BASE, "conv probe ctx climbed into the venus band");
         *seq += 1;
         if self.gpu.ctx_create(ctx, b"tapestry-conv").is_err() {
             return None;
@@ -5440,6 +5479,7 @@ impl Comp {
             owner_conn: conn,
             pub_id,
             dev_ctx,
+            venus_ctx: None,
             capset: 0,
             rings: 1,
             fences_in_flight: 0,
@@ -6421,20 +6461,132 @@ impl Comp {
         Some((id as u64, size as u32))
     }
 
-    /// The `ring/new` write verb: `"<bytes> <ring_idx>"` -> mint.
+    /// The `ring/new` write verb: `"<bytes> <ring_idx>"` (the V-3a guest-blob
+    /// ring) or `"<bytes> <ring_idx> host3d"` (the Model B HOST3D ring under the
+    /// client's venus device-ctx). ADD, not replace: a bare form stays the
+    /// coherent guest-blob ring; an unknown third token is rejected.
     fn wring_mint_verb(&mut self, ctx_pub: u32, conn: u64, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let mut it = s.split_ascii_whitespace();
         let bytes: u64 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
         let ridx: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
-        self.wring_mint(ctx_pub, conn, bytes, ridx)
+        let host3d = match it.next() {
+            None => false,
+            Some("host3d") => true,
+            Some(_) => return Err(p9::E_INVAL),
+        };
+        self.wring_mint(ctx_pub, conn, bytes, ridx, host3d)
+    }
+
+    /// Lazily create + return this warp ctx's VENUS device-ctx (Model B). The
+    /// id is `WARP_VENUS_CTX_BASE + slot` -- a band disjoint by construction
+    /// from dev_ctx, the gpu probe ids, COMPOSITOR_CTX, and the conv probes. A
+    /// venus-ctx create failure (a 2D / non-venus device) returns E_IO and
+    /// leaves `venus_ctx` None, so the host3d ring mint fails clean.
+    fn wctx_venus_ensure(&mut self, ctx_pub: u32, conn: u64) -> Result<u32, u32> {
+        // Ownership + liveness via wctx; the copy ends the borrow before the
+        // mutable device call below.
+        let existing = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?.venus_ctx;
+        if let Some(v) = existing {
+            return Ok(v);
+        }
+        let slot = self.wctx_slot(ctx_pub).ok_or(p9::E_NOENT)?;
+        let v = WARP_VENUS_CTX_BASE + slot as u32;
+        if self.gpu.ctx_create_venus(v).is_err() {
+            return Err(E_IO);
+        }
+        self.warp_ctxs[slot].as_mut().unwrap().venus_ctx = Some(v);
+        Ok(v)
+    }
+
+    /// Mint + install a Model B HOST3D ring (`bytes`/`ridx` already validated +
+    /// budget-checked by `wring_mint`). Lazily creates the ctx's venus
+    /// device-ctx, mints the hostmem-backed ring through the persistent engine
+    /// (`mint_host3d_ring`), and installs it with `host3d: Some` so teardown
+    /// routes through `drop_host3d_ring`. A venus-ctx or engine failure fails
+    /// the mint clean -- nothing is installed and the engine unwinds its own
+    /// partial state, so no offset / resource leaks.
+    fn wring_install_host3d(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        bytes: u64,
+        ridx: u32,
+    ) -> Result<(), u32> {
+        let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
+        // The engine's len is a u32 (the blob size crosses the wire as one);
+        // WARP_RING_MAX is 1 MiB so this never truncates, but guard at the
+        // boundary rather than rely on the cap.
+        let len = u32::try_from(bytes).map_err(|_| p9::E_INVAL)?;
+        self.res_seq = self.res_seq.wrapping_add(1);
+        if self.res_seq == 0 {
+            self.res_seq = 1;
+        }
+        let res_id = self.res_seq;
+        let hr = match self.gpu.mint_host3d_ring(res_id, venus_ctx, len) {
+            Ok(hr) => hr,
+            Err(_) => return Err(E_IO),
+        };
+        self.warp_ring_seq = self.warp_ring_seq.wrapping_add(1);
+        if self.warp_ring_seq == 0 {
+            self.warp_ring_seq = 1;
+        }
+        let pub_id = self.warp_ring_seq;
+        let (hva, hsize, hres) = (hr.va, hr.size, hr.res_id);
+        // V-3b-1c-2 F2: the hostmem free-list reclaims a retired ring's offset
+        // and hands it back VERBATIM (drop_host3d_ring reclaims but does not
+        // scrub), so a fresh ring can carry a prior client's leftover command
+        // stream. Zero it before install -- tapestryd holds the RW mapping --
+        // so the client that maps it (1c-2b) sees a defined, disclosure-free
+        // ring, the way the guest-blob path gets from kernel-zeroed DMA pages.
+        // Atomic stores (not write_bytes) so the compiler cannot elide writes
+        // tapestryd itself never reads back; hsize is a PAGE multiple (8-aligned).
+        let mut z = 0u64;
+        while z < hsize {
+            ring_store(hva, z, 0);
+            z += 8;
+        }
+        match self.wctx_mut(ctx_pub, conn) {
+            Some(c) => {
+                c.ring_slots[ridx as usize] = Some(WarpRing {
+                    pub_id,
+                    res_id: hres,
+                    ridx: ridx as u8,
+                    dma_fd: -1,
+                    va: hva,
+                    size: hsize,
+                    share_id: None,
+                    tail: 0,
+                    completed_seq: 0,
+                    reported_seq: 0,
+                    retiring: false,
+                    inject_count: 0,
+                    noscan: false,
+                    host3d: Some(hr),
+                });
+                Ok(())
+            }
+            None => {
+                // Single-threaded -> unreachable; unwind the engine's ring
+                // rather than strand a hostmem offset + host resource.
+                self.gpu.drop_host3d_ring(hr);
+                Err(p9::E_NOENT)
+            }
+        }
     }
 
     /// Mint a coherent ring blob of `bytes` for `ridx` under `ctx_pub`. F2:
     /// the geometry is validated against the mint, refused-not-clamped. I-32:
     /// charged to the ctx backing cap alongside bos + existing rings. I-45:
     /// the caller must own the ctx (`wctx`).
-    fn wring_mint(&mut self, ctx_pub: u32, conn: u64, bytes: u64, ridx: u32) -> Result<(), u32> {
+    fn wring_mint(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        bytes: u64,
+        ridx: u32,
+        host3d: bool,
+    ) -> Result<(), u32> {
         if bytes == 0 || bytes % PAGE != 0 || bytes > WARP_RING_MAX {
             return Err(p9::E_INVAL);
         }
@@ -6469,6 +6621,12 @@ impl Comp {
         }
         if taken {
             return Err(p9::E_INVAL); // ring_idx already minted for this ctx
+        }
+        // Model B (V-3b-1c-2): a host3d-flavored ring is hostmem-backed under
+        // the client's venus ctx via the persistent engine -- a different
+        // backing than the V-3a guest-blob path below, same budget + bounds.
+        if host3d {
+            return self.wring_install_host3d(ctx_pub, conn, bytes, ridx);
         }
         let fd = unsafe { t_dma_create_gpu_bo(bytes, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if fd < 0 {
@@ -6523,6 +6681,7 @@ impl Comp {
                     retiring: false,
                     inject_count: 0,
                     noscan: false,
+                    host3d: None,
                 });
                 Ok(())
             }
@@ -6557,10 +6716,19 @@ impl Comp {
     /// warp_ctx_seq/warp_bo_seq, not ring-specific; unreachable in a compositor
     /// lifetime.
     fn wring_kick(&mut self, ring_pub: u32, conn: u64) -> Result<(), u32> {
-        let (va, size, noscan) = {
+        let (va, size, noscan, is_host3d) = {
             let (_, r) = self.wring(ring_pub, conn).ok_or(p9::E_NOENT)?;
-            (r.va, r.size, r.noscan)
+            (r.va, r.size, r.noscan, r.host3d.is_some())
         };
+        // V-3b-1c-2a fail-closed: a HOST3D ring's memory is Venus's format, not
+        // the V-3a WARP_RING_OFF_* control header the echo-drain below reads, so
+        // driving it as a V-3a ring would write V-3a control words into a Venus
+        // page. A host3d kick becomes gpu.submit_3d(dev_ctx, ridx, cs) at V-3b-2;
+        // until then it is unimplemented, not a V-3a drain. (The ring flavor IS
+        // client-reachable via ring/new at 1c-2a, so this guard is load-bearing.)
+        if is_host3d {
+            return Err(p9::E_OPNOTSUPP);
+        }
         ring_store(va, WARP_RING_OFF_IDLE, 0);
         let mut drained: u32 = 0;
         loop {
@@ -6690,6 +6858,16 @@ impl Comp {
     fn wring_teardown(gpu: &mut Gpu, r: &mut WarpRing) {
         if let Some(id) = r.share_id.take() {
             let _ = unsafe { t_weft_unshare(id) };
+        }
+        // Model B (V-3b-1c-2): a HOST3D ring's backing is a hostmem burrow the
+        // persistent engine owns. drop_host3d_ring does the FULL teardown
+        // (detach -> unmap -> unref -> reclaim the free-list offset); take the
+        // token BY VALUE (non-Copy -> a double drop is a compile error) and
+        // RETURN so the guest-blob res_unref / dma_fd path below cannot
+        // double-free it. The share was already disarmed above (I-7 #847).
+        if let Some(hr) = r.host3d.take() {
+            gpu.drop_host3d_ring(hr);
+            return;
         }
         if r.res_id != 0 {
             let _ = gpu.resource_unref(r.res_id);
@@ -6904,8 +7082,35 @@ impl Comp {
                 // with live work (that is what makes the host's
                 // behaviour undefined in the first place).
                 self.warp_ctx_slot_poisoned[slot] = true;
-                self.warp_ctx_vindicate[slot] = c.pub_id;
-                say!("tapestryd: warp ctx slot {} POISONED (fence wedge)", slot);
+                // V-3b-1c-2 F1: the venus ctx is a SEPARATE context from dev_ctx
+                // and, at 1c-2a, is quiesced by construction -- no submit path
+                // targets it, and its rings were dropped unconditionally in the
+                // ring loop above -- so destroy it HERE even on the wedge path.
+                // The vindication recovers dev_ctx (destroy + un-poison) but knows
+                // nothing of venus, so a venus ctx left alive is re-minted
+                // (WARP_VENUS_CTX_BASE+slot) into a live host ctx by the next
+                // client to land on the recovered slot: EEXIST, and that slot
+                // permanently loses host3d. A REFUSED venus destroy means the host
+                // may still hold it, so do NOT stamp vindicate -- leave the slot
+                // permanently condemned rather than recycle it into the collision.
+                // FORWARD (V-3b-2): venus submits will give venus_ctx its own
+                // in-flight work; this unconditional destroy then becomes wrong and
+                // must move to the vindication path with a real quiesce, exactly as
+                // dev_ctx is deferred here.
+                let mut venus_dead = true;
+                if let Some(vc) = c.venus_ctx {
+                    if self.gpu.ctx_destroy(vc).is_err() {
+                        venus_dead = false;
+                        say!(
+                            "tapestryd: warp ctx slot {} venus-ctx destroy REFUSED on wedge -- permanently condemned (no recycle)",
+                            slot
+                        );
+                    }
+                }
+                if venus_dead {
+                    self.warp_ctx_vindicate[slot] = c.pub_id;
+                    say!("tapestryd: warp ctx slot {} POISONED (fence wedge)", slot);
+                }
                 return;
             }
             // A CLEAN finish is a stronger proof than a vindication: it
@@ -6924,6 +7129,22 @@ impl Comp {
             // ever dropped, so there is no condemnation left to clear and
             // no way for the ceiling to be re-armed.
             self.warp_free_leaked(slot);
+            // V-3b-1c-2: destroy the per-client venus device-ctx before the
+            // dev_ctx, SAME condemn-on-refuse pattern -- else its id
+            // (WARP_VENUS_CTX_BASE + slot) could be re-minted into a still-live
+            // host context when this slot is reused. At 1c-2a the venus ctx
+            // owns only HOST3D rings (no submits land yet), all torn down in the
+            // ring loop above, so a clean finish here is safe; a refused destroy
+            // condemns the slot exactly as dev_ctx does.
+            if let Some(v) = c.venus_ctx {
+                if self.gpu.ctx_destroy(v).is_err() {
+                    self.warp_ctx_slot_poisoned[slot] = true;
+                    say!(
+                        "tapestryd: warp ctx slot {} venus-ctx destroy REFUSED on clean retire -- condemned",
+                        slot
+                    );
+                }
+            }
             // Round-5 F3, the same shape at the clean-retire site: the ctx
             // was already taken above, so the slot -- and with it dev_ctx =
             // slot+1 -- is free the moment this returns. A refused destroy
@@ -6938,6 +7159,78 @@ impl Comp {
                     slot
                 );
             }
+        }
+    }
+
+    /// V-3b-1c-2a boot self-test (venus-gated, self-skipping like the gpu
+    /// probes; runs in the production image so the venus-verdict gate sees its
+    /// line -- no client, no test-mode build). Proves the SERVER host3d-ring
+    /// path end to end: mint a warp ctx, mint a HOST3D ring under it (lazily
+    /// creating the venus device-ctx via `wctx_venus_ensure` + the persistent
+    /// engine), round-trip a sentinel at the mapped ring VA, then finish the
+    /// ctx -- exercising `wring_teardown`'s host3d arm (`drop_host3d_ring`) and
+    /// the venus-ctx destroy. A 2D / no-blob / no-venus device skips cleanly.
+    /// (The 1c-1 `hostmem_ring_probe` already proves PHYSICAL host-backing at
+    /// the gpu level; this line asserts the server wiring, not host distinctness.)
+    pub fn warp_host3d_selftest(&mut self) {
+        if !self.gpu.blob {
+            say!("tapestryd: warp host3d-ring skipped (blob feature not offered)");
+            return;
+        }
+        // Synthetic owner: the accept loop has not run, so no real conn id
+        // exists; the ctx is minted and finished entirely within this call,
+        // before any client can resolve it, and its slot is freed on finish.
+        const SELFTEST_CONN: u64 = u64::MAX;
+        let ctx_pub = match self.wctx_mint(SELFTEST_CONN) {
+            Some(p) => p,
+            None => {
+                say!("tapestryd: warp host3d-ring skipped (no virgl ctx -- 2D device)");
+                return;
+            }
+        };
+        let slot = match self.wctx_slot(ctx_pub) {
+            Some(s) => s,
+            None => return, // just minted -> unreachable
+        };
+        if let Err(e) = self.wring_mint(ctx_pub, SELFTEST_CONN, PAGE, 0, true) {
+            self.wctx_finish(slot, false);
+            say!(
+                "tapestryd: warp host3d-ring skipped (host3d mint refused e={}) -- non-venus device",
+                e
+            );
+            return;
+        }
+        let (va, venus) = {
+            let c = self.wctx(ctx_pub, SELFTEST_CONN).unwrap();
+            let r = c.ring_slots[0].as_ref().unwrap();
+            (r.va, c.venus_ctx.unwrap_or(0))
+        };
+        // Round-trip a sentinel PAST the ring control header, at the host-
+        // dictated cache the engine mapped (CACHED on KVM): the guest-visible
+        // proof the hostmem-backed ring is mapped + writable. Read BEFORE the
+        // finish -- drop_host3d_ring detaches this VA.
+        const SENT_OFF: u64 = 0x800;
+        let sentinel: u64 = 0x5657_3348_0000_0000 ^ va;
+        ring_store(va, SENT_OFF, sentinel);
+        let got = ring_load(va, SENT_OFF);
+        self.wctx_finish(slot, false);
+        // F4: "teardown OK" must be OBSERVED, not assumed. wctx_finish poisons
+        // the slot iff a venus-ctx or dev-ctx CTX_DESTROY was refused (the
+        // teardown's only failure signal on a clean finish), so a poisoned slot
+        // means the teardown leg did NOT complete -- the gate must not read "OK".
+        let teardown_ok = !self.warp_ctx_slot_poisoned[slot];
+        if got == sentinel && teardown_ok {
+            say!(
+                "tapestryd: warp host3d-ring venus-ctx={} MAPPED+ROUNDTRIP teardown OK",
+                venus
+            );
+        } else {
+            say!(
+                "tapestryd: warp host3d-ring FAIL (sentinel wrote {:#x} read {:#x} teardown_ok={})",
+                sentinel,
+                got,
+                teardown_ok
+            );
         }
     }
 

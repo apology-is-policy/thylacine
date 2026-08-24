@@ -288,6 +288,10 @@ impl Driver for Tapestryd {
             }
         };
 
+        // V-3b-1c-2a: prove the server host3d-ring path (venus-gated,
+        // self-skipping) as bring-up evidence, before READY like the gpu probes.
+        self.comp.warp_host3d_selftest();
+
         // READY last: all bring-up console output precedes it; the warden's
         // readiness pipe waits on exactly this line.
         let mut out = libthyla_rs::io::stdout();
