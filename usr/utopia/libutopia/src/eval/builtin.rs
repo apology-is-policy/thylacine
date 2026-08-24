@@ -181,6 +181,15 @@ fn fail(env: &mut Env, msg: String, code: i32) -> EvalResult<StatementFlow> {
 // ---------------------------------------------------------------------
 
 fn bi_cd(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
+    // `--` ends option processing: a standalone `--` (matched EXACTLY -- `--foo`
+    // stays a literal operand) means everything after is a plain path, so a
+    // following `-` becomes a directory named "-", NOT the `cd -` oldpwd
+    // shortcut. This is the only way to enter a dir whose name begins with '-'.
+    let (args, opts_ended) = if !args.is_empty() && args[0] == "--" {
+        (&args[1..], true)
+    } else {
+        (args, false)
+    };
     if args.len() > 1 {
         return fail(env, "cd: too many arguments".to_string(), 1);
     }
@@ -190,7 +199,7 @@ fn bi_cd(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
         let home = env.get("home").as_scalar();
         let raw = if home.is_empty() { "/".to_string() } else { home };
         (normalize_abs(env.cwd(), &raw), false)
-    } else if args[0] == "-" {
+    } else if !opts_ended && args[0] == "-" {
         let old = env.get("oldpwd").as_scalar();
         if old.is_empty() {
             return fail(env, "cd: OLDPWD not set".to_string(), 1);
