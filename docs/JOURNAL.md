@@ -84,11 +84,10 @@ holds a MAPPING) must re-derive which refcount half carries the safety, not
 transliterate the one that happened to be visible. Dirty close (a P1 back + the
 predicate changed), so a round-2 holotype prosecuted the fix — and found the SUM
 itself unsound: `handle_count + mapping_count` is two SEPARATELY-ACQUIRE'd loads,
-and which is read first is *unspecified for the operands of `+`* and
-IRQ-preemptible (the `as->lock` in hand raises only the preempt count, IRQs stay
-open). A mapping-first read could see `mapping==1` in the claim window, take an
-interrupt while the claimant maps + forks + releases its pin, then read
-`handle==0` and sum to 1 — reclaiming under a live map. Today's binary is
+and which is read first is *unspecified for the operands of `+`*. A mapping-first
+read could see `mapping==1` in the claim window, then — while a peer CPU completes
+the claimant's map + fork + pin-release — read `handle==0` and sum to 1,
+reclaiming under a live map. Today's binary is
 handle-first only because clang emits left-to-right; GCC routinely goes the other
 way. The very act of folding image.c's two-count gate into one observed value had
 reintroduced the non-atomicity the kernel's counts avoid by living under
@@ -97,11 +96,37 @@ reintroduced the non-atomicity the kernel's counts avoid by living under
 correctness variable, and "under a lock" must mean under the lock that guards *the
 counters*, not merely *a* lock (the round-1 `as->lock` comment asserted exactly
 that false comfort). The round-2 fix is a 5-line locked accessor — the
-prosecutor's prescription, verified not transliterated — committed compiles-clean;
-the suite re-run (the mac was held by aux's boot-test), the GL self-test on real
-V3D, and the `warp-prove` cross-Proc E2E are owed before push. On the local 2D
-device the host3d self-test skips, so no local boot drives the new syscall — its
-runtime witness is the GL self-test, not an SMP re-run.
+prosecutor's prescription, verified not transliterated. Audit-close `f7021c7a`.
+
+Round-3 (the dirty-close discipline, a P1 having returned in round-2) came back
+**clean: 0/0/0/4 P3**, all mechanism-accuracy prose, no runtime change. It didn't
+just re-assert soundness — it PROVED it: a complete enumeration of all 22
+`v->lock` sites showed none takes an AddrSpace lock under a Burrow lock, so the
+`as->lock -> v->lock` order has no reverse edge and cannot ABBA; all five count
+writers mutate under `v->lock`, so the snapshot is genuinely coherent; the mint
+reap-loop strictly shrinks the parked list, so it terminates. The catch worth
+recording: F1 flagged that *my own round-2 rationale* had pinned the exploit window
+on IRQ-preemption ("`as->lock` leaves IRQs open") — wrong, because the production
+syscall caller runs IRQ-masked end-to-end; the hazard was always SMP cross-CPU and
+masking never entered into it, only `v->lock` does. I had corrected the fix and
+mis-explained it in the same breath; a context-independent reader caught the
+explanation the family-shared one would have read straight past. The other three:
+the reap doc's per-mint bound (a pressured mint loops several passes → per-PASS,
+list-length-bounded); server.rs's teardown comment still naming the pre-round-1
+`mapping_count` predicate; and a phantom `d9c...` hash this run committed for the
+round-2 close instead of `*(pending)*` + a fixup (→ f7021c7a). All fixed;
+round-3 close `*(pending)*`.
+
+**Runtime witnessed.** The suite is green on both `f7021c7a` and the
+round-3-close tip (`weft.hostmem_share` + `weft.hostmem_refcount` PASS, 1387/0,
+boot OK). The GL self-test on real V3D (thyla-pi KVM) printed `warp host3d-ring
+venus-ctx=512 MAPPED+ROUNDTRIP refcount=1 teardown OK` — the `refcount=1` is
+`burrow_total_refs` returning the coherent snapshot at runtime, `teardown OK` is
+`retire_host3d_ring` taking its ==1→drop path — with the 2D control correctly
+`skipped`. On the local 2D device the host3d self-test skips, so no local boot
+drives the new syscall; the GL boot is its only runtime witness, not an SMP
+re-run. The `warp-prove` cross-Proc E2E (a real client Proc claims + maps + the
+cross-client-alias reproduction) stays a tracked follow-on.
 
 ## 2026-08-24 — V-3b-1c-2b-a: a green gate over a dead claim path (reverted, parked)
 

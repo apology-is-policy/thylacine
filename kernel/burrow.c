@@ -1477,12 +1477,14 @@ int burrow_mapping_count(const struct Burrow *v) {
 
 // V-3b-1c-2b round-2 F1: the ATOMIC sum of both #847 counts, read under v->lock
 // so the pair is a COHERENT SNAPSHOT -- not two separately-ACQUIRE'd loads whose
-// relative order (unspecified for the operands of `+`, and IRQ-preemptible since
-// the caller's as->lock leaves IRQs open) would otherwise decide soundness: a
-// mapping-first read could see mapping==1 in the claim window, then handle==0
-// after the claimant maps + releases the pin, summing to 1 and reclaiming under a
-// live client map. Under v->lock every count mutation is excluded, so both reads
-// reflect one instant. The sole caller (SYS_HOSTMEM_REFCOUNT) holds the target
+// relative order (unspecified for the operands of `+`) would otherwise decide
+// soundness against a peer CPU mutating either count between them: a mapping-first
+// read could see mapping==1 in the claim window, then handle==0 after the claimant
+// (on another CPU) maps + releases the pin, summing to 1 and reclaiming under a
+// live client map. The hazard is SMP cross-CPU, not local IRQ preemption -- the
+// production caller (SYS_HOSTMEM_REFCOUNT) runs IRQ-masked end-to-end, and masking
+// cannot serialize two CPUs; only v->lock can. Under v->lock every count mutation
+// is excluded, so both reads reflect one instant. The sole caller holds the target
 // Proc's as->lock, and vma_lock/as->lock -> v->lock is the established nesting
 // (burrow_map -> vma_alloc -> burrow_acquire_mapping), so this cannot deadlock.
 // Takes v (non-const): it locks. Returns 0 for a NULL/dead Burrow (never a

@@ -771,12 +771,13 @@ static s64 sys_burrow_from_hostmem_handler(u64 pci_hraw, u64 shmid, u64 offset,
 // breakdown. Refuses (-T_E_INVAL) a va that does not resolve, a VMA not fully
 // covering [va, va+len), or a non-HOSTMEM burrow.
 //
-// Still a racy ACQUIRE snapshot (burrow.c "Diagnostics"); it is a SAFE reclaim
+// Still a racy snapshot: coherent at the instant it is read (both counts under
+// v->lock, round-2 F1), but a later claim could bump it. It is a SAFE reclaim
 // basis ONLY under tapestryd's ref-discipline: disarm the weft share FIRST (so no
 // NEW claim can consume it), then at sum==1 the only reference is the caller's
 // map, which cannot grow -- no share to claim, no existing client ref (map OR
-// pin) to fork. Read under p->as->lock so a concurrent same-Proc detach cannot
-// splice the VMA->Burrow link mid-read; both counts snapshot under it.
+// pin) to fork. as->lock here pins the VMA->Burrow link against a concurrent
+// same-Proc detach mid-read; the count PAIR itself snapshots under v->lock.
 //
 // The core is separated from the current_thread() wrapper so the resolve +
 // type-gate + range logic is unit-testable with a synthetic Proc (the

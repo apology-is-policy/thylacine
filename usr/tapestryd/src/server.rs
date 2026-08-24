@@ -6869,9 +6869,11 @@ impl Comp {
         // Model B (V-3b-1c-2b F2): a HOST3D ring's backing is a hostmem burrow
         // whose HOST bytes (the QEMU subregion) live OUTSIDE the kernel #847
         // count. The share was disarmed above (I-7 #847), so no NEW client can
-        // claim -- retire_host3d_ring then reads the mapping_count and reclaims
-        // the offset only if no client still maps the GPA (count == 1 = our own
-        // map), else PARKS the ring for the reaper. Reclaiming unconditionally
+        // claim -- retire_host3d_ring then reads the TOTAL ref count (handle +
+        // mapping, via SYS_HOSTMEM_REFCOUNT) and reclaims the offset only if no
+        // client still references the ring (count == 1 = our own map: no client
+        // map AND no claimed-but-unmapped pin), else PARKS the ring for the
+        // reaper. Reclaiming unconditionally
         // here would re-hand the offset under a client's live PTEs (a cross-
         // client alias). Take the token BY VALUE (non-Copy -> a double drop is a
         // compile error) and RETURN so the guest-blob path below cannot touch it.

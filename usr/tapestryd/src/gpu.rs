@@ -2494,8 +2494,11 @@ impl Gpu {
     /// needed. A parked ring whose client never unmaps stays parked, bounded by
     /// that client's own I-32 budget; Proc death drops the mapping (address-space
     /// teardown) so a crashed client's ring is reclaimed at the next mint. Bounded
-    /// per pass (`HOSTMEM_REAP_PER_PASS`) so one mint issues no unbounded burst of
-    /// controlq teardowns; the remainder waits for the next mint (still bounded).
+    /// per PASS (`HOSTMEM_REAP_PER_PASS`) so no single pass issues an unbounded
+    /// burst of controlq teardowns; a mint under offset pressure may run several
+    /// passes (the reap+alloc loop in mint_host3d_ring), draining up to the whole
+    /// parked list -- bounded by live clients' ring budgets, so a latency spike,
+    /// never unbounded.
     /// Returns the number reclaimed THIS pass (0 = none eligible in the scanned
     /// prefix) so a caller under offset pressure (mint) can loop while progress is
     /// made rather than fail an alloc that a second pass would satisfy (round-2 F2).
