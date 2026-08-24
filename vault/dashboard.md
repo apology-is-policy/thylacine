@@ -129,11 +129,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-08-24 [[chg-2026-08-24-v3b-1a]] — V-3b-1a HOST3D+MAP_BLOB substrate: sub-tapestryd mechanism section + the venus-ctx finding
+- 2026-08-24 [[chg-2026-08-24-v3b-1b]] — V-3b-1b hostmem guest-map: sub-tapestryd guest-map section + the SYS_BURROW_FROM_HOSTMEM client wrapper
 - 2026-08-19 [[chg-2026-08-19-v3a-ring]] — V-3a coherent-ring vault ring: sub-tapestryd ring-lane section + inv-i9 edge
 - 2026-08-18 [[chg-2026-08-18-extinction-ring-claim]] — The prescription named the wrong lock, and the old one was already breaking the crash path
 - 2026-08-16 [[chg-2026-08-16-boot-banner-mirror-set]] — The boot-banner ABI note carried the phantom it was supposed to be the cure for
 - 2026-08-16 [[chg-2026-08-16-boot-cwg-parenthetical]] — Two comments in one commit disagree about a measured result
 - 2026-08-16 [[chg-2026-08-16-boot-entry-trampoline]] — The guard held because the emulator supplied the value it checked for
 - 2026-08-16 [[chg-2026-08-16-burrow-attribution]] — The Burrow re-swept: the type says SHAPE, and that lesson has now arrived three times
-- 2026-08-16 [[chg-2026-08-16-cons-writer-set]] — A role serializes only against writers who take it
 <!-- generated:end -->

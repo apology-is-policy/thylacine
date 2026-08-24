@@ -338,6 +338,31 @@ was provisioned with it (built from virglrenderer 1.1.0 source, installed
 additively — it does not touch `libvirglrenderer.so`). Any fresh venus GL host
 needs the same.
 
+### The hostmem guest-map (V-3b-1b)
+
+V-3b-1a's `map_blob` places a HOST3D blob in the hostmem BAR host-side; V-3b-1b
+guest-maps it so tapestryd (and later, via weft, the client) can reach those
+bytes. `HostmemAllocator` is a page-aligned **bump** allocator over
+`shm_region(1).length`, handing out non-overlapping byte offsets relative to the
+region window base — the SAME frame `map_blob(res, O)` uses, so a blob mapped at
+offset `O` is guest-reached at `O`. `hostmem_map_probe` allocates an offset,
+creates + maps a HOST3D blob under a venus ctx, then calls
+`PciDev::burrow_from_hostmem(1, O, len, T_CACHE_WC)` (the [[inv-i45]] hardware
+authority is the held KObj_PCI claim; the kernel resolves `bar.pa + window + O`
+and maps RW into tapestryd's burrow-attach window) and round-trips a `u32`
+sentinel through the returned VA. The sentinel is a **same-address, same-core**
+write-then-read — ARM coherency round-trips it with no barrier — so a MISMATCH
+means the VA does not alias the BAR; it proves guest ACCESS only, not
+host-visibility (virglrenderer polling the ring is V-3b-1c/2, deliberately not
+claimed). Cleanup mirrors the probe discipline: `unmap_blob` exactly once per
+mapped path (skipped on a map/burrow refusal that left nothing mapped),
+`resource_unref` unconditional; the mapped guest VA leaks until proc exit
+(bounded, one page at init — a dedicated unmap is the V-3b-1c ring teardown). The
+allocator is bump-only at v1.0; a free-list arrives with the ring lifecycle if
+rings are re-minted. The `SYS_BURROW_FROM_HOSTMEM` client binding itself
+(`t_burrow_from_hostmem` + `T_CACHE_*` + `PciDev::burrow_from_hostmem`) landed in
+libthyla-rs — V-2 built the syscall but left the wrapper to V-3.
+
 ## Data structures
 
 `Surface`: the current `Weave` (handle, VA, size, optional share id),
