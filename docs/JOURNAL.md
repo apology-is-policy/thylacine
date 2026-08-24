@@ -115,7 +115,7 @@ the reap doc's per-mint bound (a pressured mint loops several passes → per-PAS
 list-length-bounded); server.rs's teardown comment still naming the pre-round-1
 `mapping_count` predicate; and a phantom `d9c...` hash this run committed for the
 round-2 close instead of `*(pending)*` + a fixup (→ f7021c7a). All fixed;
-round-3 close `*(pending)*`.
+round-3 close `3de39ad0`.
 
 **Runtime witnessed.** The suite is green on both `f7021c7a` and the
 round-3-close tip (`weft.hostmem_share` + `weft.hostmem_refcount` PASS, 1387/0,
