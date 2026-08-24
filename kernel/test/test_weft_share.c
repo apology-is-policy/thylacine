@@ -1144,13 +1144,18 @@ void test_weft_hostmem_share(void) {
     kfree(k2);
 }
 
-// V-3b-1c-2b F2: SYS_HOSTMEM_MAPCOUNT's testable core -- resolve a hostmem VA to
-// its Burrow's #847 mapping_count, the observable tapestryd's reap-vs-park
-// decision reads. Exercises the count (1, then 2 as a second sharer joins -- the
-// PARK signal: a client still maps the GPA so the offset is NOT safe to reclaim)
-// and every reject path (-T_E_INVAL, never a plausible count).
-s64 hostmem_mapcount_query(struct Proc *p, u64 va, u64 len);
-void test_weft_hostmem_mapcount(void) {
+// V-3b-1c-2b F2: SYS_HOSTMEM_REFCOUNT's testable core -- resolve a hostmem VA to
+// its Burrow's TOTAL #847 ref count (handle_count + mapping_count), the value
+// tapestryd's reap-vs-park decision reads. The load-bearing leg is the audit-F1
+// window: a client that has CLAIMED the weft share holds the TRANSFERRED
+// registration pin (a handle ref) BEFORE burrow_share_into bumps mapping_count,
+// so a reclaim keyed on mapping_count ALONE would free the offset under a client
+// irrevocably about to map. The pin makes the SUM >= 2, so the reap parks. A sums the
+// tapestryd-shape burrow {handle:0, mapping:1}. Exercises: clean==1 (reap-safe),
+// pin-not-mapped==2 (PARK -- the F1 window), pin+map==3, back to 1 after both
+// drop, and every reject path (-T_E_INVAL).
+s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len);
+void test_weft_hostmem_refcount(void) {
     struct KObj_PCI *k = kmalloc(sizeof(*k), KP_ZERO);
     TEST_ASSERT(k != NULL, "kmalloc KObj_PCI");
     k->magic = KOBJ_PCI_MAGIC;
@@ -1167,36 +1172,50 @@ void test_weft_hostmem_mapcount(void) {
     struct Burrow *v = burrow_create_hostmem(k, pa, 2u * PAGE_SIZE, MAIR_IDX_NORMAL_NC);
     TEST_ASSERT(v != NULL, "burrow_create_hostmem");
 
-    // Map into proc A: mapping_count 0 -> 1 (A is tapestryd's stand-in).
+    // A is tapestryd's stand-in: map the ring, then DROP the construction handle
+    // (the SYS_BURROW_FROM_HOSTMEM shape) so A holds exactly {handle:0, mapping:1}
+    // like a real host3d ring -- total ref count 1.
     struct Proc *a = make_proc();
     TEST_ASSERT(a != NULL, "make_proc A");
     spin_lock(&a->as->lock);
     TEST_EXPECT_EQ(burrow_share_into(a, v, WEFT_TEST_VA, VMA_PROT_RW), 0, "share hostmem into A");
     spin_unlock(&a->as->lock);
-    TEST_EXPECT_EQ((int)burrow_mapping_count(v), 1, "one live mapping");
-
-    // The core: A's hostmem VA resolves to mapping_count 1 (sub-page and the
-    // whole-region len both name the same VMA -- count==1 is the reap-safe signal).
-    TEST_EXPECT_EQ(hostmem_mapcount_query(a, WEFT_TEST_VA, PAGE_SIZE), 1,
-        "query returns the live mapping count (reap-safe: only this map)");
-    TEST_EXPECT_EQ(hostmem_mapcount_query(a, WEFT_TEST_VA, 2u * PAGE_SIZE), 1,
+    burrow_unref(v);                                  // drop construction -> {h:0, m:1}
+    TEST_EXPECT_EQ((int)burrow_handle_count(v), 0, "no construction handle (the ring shape)");
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, PAGE_SIZE), 1,
+        "clean ring: total ref count 1 -- REAP-SAFE");
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, 2u * PAGE_SIZE), 1,
         "whole-region len resolves the same VMA");
 
-    // A second sharer bumps the count A observes -- the F2 park signal.
+    // The audit-F1 window: a client has CLAIMED (holds the transferred pin) but
+    // not yet mapped. mapping_count is STILL 1, but the pin makes the total 2 --
+    // the reap MUST park, not reclaim. burrow_ref stands in for weft_share_claim's
+    // pin transfer.
+    burrow_ref(v);                                    // the transferred claim pin -> {h:1, m:1}
+    TEST_EXPECT_EQ((int)burrow_mapping_count(v), 1, "mapping_count alone is still 1 -- the trap");
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, PAGE_SIZE), 2,
+        "F1: claimed-not-yet-mapped -> total 2 -> PARK (mapping_count alone would miss it)");
+
+    // The client then maps (burrow_share_into into B): total 3.
     struct Proc *b = make_proc();
     TEST_ASSERT(b != NULL, "make_proc B");
     spin_lock(&b->as->lock);
-    TEST_EXPECT_EQ(burrow_share_into(b, v, WEFT_TEST_VA, VMA_PROT_RW), 0, "share hostmem into B");
+    TEST_EXPECT_EQ(burrow_share_into(b, v, WEFT_TEST_VA, VMA_PROT_RW), 0, "client B maps the ring");
     spin_unlock(&b->as->lock);
-    TEST_EXPECT_EQ(hostmem_mapcount_query(a, WEFT_TEST_VA, PAGE_SIZE), 2,
-        "a second sharer bumps the count -- reap must PARK, not reclaim");
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, PAGE_SIZE), 3,
+        "claimed + mapped -> total 3 -> PARK");
+
+    // The client releases its pin (weft_binding_release): still mapped, total 2.
+    burrow_unref(v);                                  // release the pin -> {h:0, m:2}
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, PAGE_SIZE), 2,
+        "pin released but B still maps -> total 2 -> PARK");
 
     // Reject paths: -T_E_INVAL, never a plausible count.
-    TEST_EXPECT_EQ(hostmem_mapcount_query(a, WEFT_TEST_VA + 0x10000000ull, PAGE_SIZE),
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA + 0x10000000ull, PAGE_SIZE),
         (s64)(-T_E_INVAL), "an unmapped VA is refused");
-    TEST_EXPECT_EQ(hostmem_mapcount_query(a, WEFT_TEST_VA, 4u * PAGE_SIZE),
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, 4u * PAGE_SIZE),
         (s64)(-T_E_INVAL), "a len past the VMA is refused, not clamped");
-    TEST_EXPECT_EQ(hostmem_mapcount_query(a, WEFT_TEST_VA, 0),
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, WEFT_TEST_VA, 0),
         (s64)(-T_E_INVAL), "zero len is refused");
 
     // A non-hostmem VMA (an anon burrow) is refused -- no general introspection.
@@ -1206,14 +1225,13 @@ void test_weft_hostmem_mapcount(void) {
     spin_lock(&a->as->lock);
     TEST_EXPECT_EQ(burrow_share_into(a, anon, anon_va, VMA_PROT_RW), 0, "map anon into A");
     spin_unlock(&a->as->lock);
-    TEST_EXPECT_EQ(hostmem_mapcount_query(a, anon_va, PAGE_SIZE), (s64)(-T_E_INVAL),
+    TEST_EXPECT_EQ(hostmem_refcount_query(a, anon_va, PAGE_SIZE), (s64)(-T_E_INVAL),
         "a non-hostmem burrow is refused (the count is hostmem-only)");
 
-    vma_drain(a);              // drops A's hostmem map (2->1) + A's anon map (1->0)
-    vma_drain(b);              // drops B's hostmem map (1->0)
+    vma_drain(a);              // drops A's hostmem map (m 2->1) + A's anon map (1->0)
+    vma_drain(b);              // drops B's hostmem map (m 1->0) -> v frees {h:0,m:0}
     drop_proc(a);
     drop_proc(b);
-    burrow_unref(v);           // {h:1, m:0} -> free; kobj_pci 2 -> 1
     burrow_unref(anon);        // {h:1, m:0} -> free
     TEST_EXPECT_EQ((u64)k->ref, 1u, "the hostmem Burrow's kobj_pci ref was released");
     kfree(k);

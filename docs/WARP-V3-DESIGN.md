@@ -407,18 +407,19 @@ because the image cache lives in the kernel. F2 needs the SAME check tapestryd-s
 
 **Options.**
 
-- **(a) observe-and-reap [RATIFIED -- operator signoff 2026-08-24].** Split
-  `drop_host3d_ring`: on teardown, detach tapestryd's own VA (drop its mapping) and
-  drop the virtio-gpu resource, but reclaim the offset (`unmap_blob` +
-  `hostmem_free`) ONLY when no client maps the GPA. In the common case (client
-  died/unmapped first -> `mapping_count == 0`) that is immediate. Otherwise PARK the
-  extent `(offset, size, res_id)` on a reaper list the existing serve/drain loop
-  re-checks (the G-3 fence-reaper's park-and-reap shape, `gpu.rs:reap_abandoned`),
-  freeing when the mapping finally drops. Correct, and **bounded**: a malicious
-  client pins at most its own I-32 page budget of offsets (it cannot mint past its
-  budget), never the whole region. This is `image.c`'s eviction check lifted to
-  tapestryd -- which needs tapestryd to OBSERVE a kernel-computed count it cannot
-  see today, via the ratified `SYS_HOSTMEM_MAPCOUNT` read-only syscall (0.11.3).
+- **(a) observe-and-reap [RATIFIED -- operator signoff 2026-08-24; syscall detail
+  corrected post-audit, see 0.11.3].** On teardown, reclaim the ring's offset
+  (`drop_host3d_ring`: detach VA + `unmap_blob` + `resource_unref` +
+  `hostmem_free`) ONLY when no client references the GPA. In the common case
+  (client died/unmapped first) the ref count is back to tapestryd's own map and
+  reclaim is immediate. Otherwise PARK the whole ring on a reaper list (tapestryd
+  keeps its VA mapped to re-query; the G-3 fence-reaper's park-and-reap shape),
+  freeing when the last client reference drops. Correct, and **bounded**: a
+  malicious client pins at most its own I-32 page budget of offsets (it cannot
+  mint past its budget), never the whole region. This is `image.c`'s eviction
+  check lifted to tapestryd -- which needs tapestryd to OBSERVE a kernel-computed
+  count it cannot see today, via the `SYS_HOSTMEM_REFCOUNT` read-only syscall
+  (0.11.3; it returns handle+mapping, not mapping alone -- the audit-F1 fix).
 
 - **(b) leak-on-claim [rejected].** Never reclaim a claimed offset (never
   `unmap_blob`/`hostmem_free` a ring a client mapped). No ABI, trivially correct.
@@ -437,34 +438,54 @@ because the image cache lives in the kernel. F2 needs the SAME check tapestryd-s
 
 #### 0.11.3 The ratified design (a)
 
-1. **The observation syscall (RATIFIED: `SYS_HOSTMEM_MAPCOUNT`, VA-keyed).**
-   tapestryd holds only a VA for a hostmem burrow (`burrow_from_hostmem` returns a
-   VA, not a handle). The read-only syscall resolves that VA to its burrow and
-   returns the burrow's `mapping_count` (the kernel already computes it; the
-   accessor `burrow_mapping_count` exists for `image.c`). Shape:
-   `SYS_HOSTMEM_MAPCOUNT(va, len) -> i64` (>= 0 the count, < 0 a `T_E_*` errno):
-   it requires the `[va, va+len)` range to resolve to a SINGLE `BURROW_TYPE_HOSTMEM`
-   VMA owned by the caller (else `-T_E_INVAL`) -- a caller can only count a hostmem
-   burrow it maps. tapestryd reads it BEFORE detaching its own VA; the count
-   includes tapestryd's own mapping, so "no client maps the GPA" is `count == 1`
-   (tapestryd's single map). Rejected alternatives (recorded, not built): a
-   handle-keyed form (would widen the V-2 return ABI to also hand out a KObj;
-   cleaner semantics, larger surface), and a pollable "fully unmapped" event fd
-   (the reaper would ride poll instead of a query, but it is a new pollable kernel
-   object). The VA-keyed form is the smallest ABI and reuses the VA tapestryd
-   already holds. **Non-goal:** it is NOT a general burrow-introspection syscall --
-   it answers exactly "how many mappings does the hostmem burrow under this VA
-   have," nothing about other burrow types, other Procs, or handle counts (the
-   KASLR/introspection-leak surface stays closed).
-2. **Teardown split** in `wring_teardown` / a new `drop_host3d_ring` two-phase:
-   disarm the weft share (already the top of `wring_teardown`), detach
-   tapestryd's VA + `resource_unref`, then EITHER reclaim now (count says
-   unmapped) OR park `(offset, size, res_id)` for the reaper. `unmap_blob` moves
-   to the reclaim phase so the subregion outlives any client mapping.
-3. **The reaper** re-checks parked extents in the serve/drain loop; a per-pass cap
-   keeps it DoS-safe (the #204/#210 backpressure precedent). A parked extent whose
-   client never unmaps is bounded by that client's I-32 budget and is freed at the
-   client's Proc death (address-space teardown drops the mapping -> count 0).
+1. **The observation syscall (`SYS_HOSTMEM_REFCOUNT`, VA-keyed).** tapestryd holds
+   only a VA for a hostmem burrow (`burrow_from_hostmem` returns a VA, not a
+   handle). The read-only syscall resolves that VA to its burrow and returns the
+   burrow's TOTAL #847 reference count -- `handle_count + mapping_count` -- under
+   `p->as->lock`. Shape: `SYS_HOSTMEM_REFCOUNT(va, len) -> i64` (>= 1 the count, <
+   0 a `T_E_*` errno): it requires `[va, va+len)` to resolve to a SINGLE
+   `BURROW_TYPE_HOSTMEM` VMA owned by the caller (else `-T_E_INVAL`) -- a caller
+   can only count a hostmem burrow it maps. Because the caller maps it the sum is
+   always >= 1, and `count == 1` iff the ONLY reference is the caller's single
+   map.
+
+   **The SUM, not `mapping_count` alone (audit F1 correction).** The design was
+   ratified with `mapping_count`; the V-3b-1c-2b holotype proved that UNSOUND. A
+   client's map is committed at `weft_share_claim` (`weft.c`), which consumes the
+   share and TRANSFERS the registration pin -- a `handle_count` ref -- to the
+   client, and returns BEFORE `burrow_share_into` bumps `mapping_count` later in
+   the same `SYS_WEFT_MAP`. In that window a client is irrevocably going to map
+   GPA(off) yet `mapping_count` still reads 1, so a reclaim keyed on it would free
+   the offset under the pending map (a cross-client alias). This is exactly why
+   `image.c`'s eviction gate is `handle_count==1 && mapping_count==0` -- the
+   `handle_count` half excludes the in-flight mapper. The SUM folds both halves to
+   one value for the tapestryd side (where the caller holds the mapping, not the
+   handle): the transferred pin makes the sum >= 2, closing the window.
+
+   Rejected alternatives (recorded): a handle-keyed form (would widen the V-2
+   return ABI to also hand out a KObj), and a pollable "fully unmapped" event fd
+   (a new pollable kernel object). The VA-keyed form is the smallest ABI and
+   reuses the VA tapestryd already holds. **Non-goal:** NOT general
+   burrow-introspection -- it answers only "the total ref count of the hostmem
+   burrow under this VA," no other burrow type, other Proc, per-kind breakdown, or
+   kernel address (the KASLR surface stays closed).
+2. **Teardown split** in `wring_teardown` -> `retire_host3d_ring`: disarm the weft
+   share (already the top of `wring_teardown`, so no NEW claim can consume it),
+   then read the ref count. At count==1 reclaim NOW (`drop_host3d_ring`: detach VA
+   + `unmap_blob` + `resource_unref` + reclaim the offset). At count > 1 PARK the
+   WHOLE `HostRing` (VA kept mapped, resource + offset held) so the VA-keyed syscall
+   can re-query it; `reap_hostmem_parked` runs `drop_host3d_ring` when the count
+   falls to 1. Nothing is freed while a client reference (map OR pending-claim pin)
+   is live, so the subregion always outlives any client mapping.
+3. **The reaper** re-checks parked extents at MINT-time (reclaim-before-alloc),
+   NOT the completion pump: reclaim issues controlq teardown (`drop_host3d_ring`),
+   established safe only from the serve-loop request context mint runs in -- moving
+   it into the pump would need a re-entrancy re-examination (audit F2). Mint is
+   also where offset pressure arises, so reclaim happens exactly when the space is
+   needed. A per-pass cap (`HOSTMEM_REAP_PER_PASS`) bounds the controlq teardowns
+   one mint issues. A parked extent whose client never unmaps is bounded by that
+   client's I-32 budget and is freed at the client's Proc death (address-space
+   teardown drops the mapping + releases the pin -> count 1).
 
 #### 0.11.4 Invariants, tests, and the split
 
@@ -474,18 +495,29 @@ because the image cache lives in the kernel. F2 needs the SAME check tapestryd-s
   cross-context aliasing; the ring stays bounded to the ctx owner.
 - **I-32**: parked extents are charged to the pinning client's budget; the region
   cannot be exhausted by one client past its cap.
-- **Tests**: the F1 binding-kind kernel leg (0.11.1); an `unmap_blob`-ordering
-  regression that mints, claims, maps, tears down WITH the mapping live, re-mints,
-  and asserts the second ring gets a DIFFERENT offset (or the reaper deferred the
-  reclaim) -- i.e. reproduces the cross-client alias on the pre-fix code; the
-  `warp-prove ring-host3d` cross-Proc leg (0.9 piece 4) once claim is live.
+- **Tests (as-built)**: `weft.hostmem_share` -- the F1 binding-kind kernel leg
+  (0.11.1), the `weft_binding_alloc_maponly` HOSTMEM arm returns a
+  `WEFT_BIND_HOSTMEM` binding. `weft.hostmem_refcount` -- the `SYS_HOSTMEM_REFCOUNT`
+  core, and critically the audit-F1 window: a burrow with the transferred claim
+  pin but NO mapping reads total 2 (PARK) though `mapping_count` alone is still 1,
+  so the reap predicate itself is now covered kernel-adjacent (the F3 gap). The
+  boot self-test witnesses `refcount=1` on the freshly-minted ring (the reap-safe
+  arm) on GL. **Deferred (tracked follow-on)**: the `warp-prove ring-host3d`
+  cross-Proc E2E (0.9 piece 4) -- a real client Proc claims + maps + the full
+  cross-client-alias reproduction; the kind-specific pieces are kernel-tested here
+  and the `SYS_WEFT_MAP` wrapper is kind-agnostic, so the claim path rides tested
+  machinery.
 - **Split**: F1 + F2 land together (F1 alone un-masks F2). The new syscall is
   audit-bearing (kernel ABI + the section-25.4 Warp row).
 
 **Ratified 2026-08-24 (operator signoff):** option (a) observe-and-reap, with the
-VA-keyed `SYS_HOSTMEM_MAPCOUNT` read-only syscall (0.11.3). This section is the
-pin; the impl commit (F1 + syscall + F2 teardown/reaper + the client claim path,
-landed together and audited) references it.
+VA-keyed `SYS_HOSTMEM_REFCOUNT` read-only syscall (0.11.3; ratified as
+`_MAPCOUNT` returning mapping_count, corrected to the handle+mapping SUM after the
+V-3b-1c-2b holotype proved mapping_count alone misses the in-flight claim -- the
+approach is unchanged, the count is the full image.c predicate). This section is
+the pin; the impl commit (F1 + syscall + F2 teardown/reaper + the client claim
+path, landed together and audited) references it. Impl: `7696540a` (initial) +
+the audit-close.
 
 ## 1. What V-3 is, and the seam it plugs into
 

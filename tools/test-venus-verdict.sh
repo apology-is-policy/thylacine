@@ -46,7 +46,7 @@ tapestryd: gpu blob-create guest CREATED
 tapestryd: gpu host3d-map venus-ctx MAPPED (map_info=0x1)
 tapestryd: gpu host3d-map global create refused
 tapestryd: gpu hostmem-ring MAPPED+ROUNDTRIP x2 (off_a=0x0 off_b=0x1000 cache=CACHED) teardown+remint-reuse OK
-tapestryd: warp host3d-ring venus-ctx=512 MAPPED+ROUNDTRIP teardown OK
+tapestryd: warp host3d-ring venus-ctx=512 MAPPED+ROUNDTRIP refcount=1 teardown OK
 EOF
 }
 
@@ -103,7 +103,7 @@ check "test leg lacks server host3d venus-ctx round-trip -> UNVERIFIED" 1 "" \
 check "test leg shows server host3d FAIL (sentinel mismatch) -> UNVERIFIED" 1 "" \
       'sed "s/warp host3d-ring venus-ctx=.*/warp host3d-ring FAIL (sentinel wrote 0x1 read 0x2)/" "$t" > "$t.x" && mv "$t.x" "$t"'
 check "control leg ALSO sees server host3d venus-ctx -> UNVERIFIED" 1 \
-      'printf "tapestryd: warp host3d-ring venus-ctx=512 MAPPED+ROUNDTRIP teardown OK\n" >> "$c"' ""
+      'printf "tapestryd: warp host3d-ring venus-ctx=512 MAPPED+ROUNDTRIP refcount=1 teardown OK\n" >> "$c"' ""
 check "control leg lacks server host3d skip -> UNVERIFIED"       1 \
       'grep -v "warp host3d-ring skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
 # One variable away, each direction of the discrimination the gate claims.

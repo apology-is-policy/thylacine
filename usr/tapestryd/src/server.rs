@@ -101,7 +101,7 @@ use libthyla_rs::ninep as p9;
 use libthyla_rs::time::Instant;
 use libthyla_rs::{
     t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map,
-    t_hostmem_mapcount, t_srv_peer, t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM,
+    t_hostmem_refcount, t_srv_peer, t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM,
     T_PRINCIPAL_SYSTEM,
     T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
     T_SRV_PEER_FLAG_CONSOLE_RENDERER,
@@ -7223,32 +7223,33 @@ impl Comp {
         let sentinel: u64 = 0x5657_3348_0000_0000 ^ va;
         ring_store(va, SENT_OFF, sentinel);
         let got = ring_load(va, SENT_OFF);
-        // V-3b-1c-2b F2: exercise SYS_HOSTMEM_MAPCOUNT on this ring's backing.
-        // No client has claimed it (the self-test shares nothing), so only
-        // tapestryd's own map exists -> the count MUST read exactly 1. That is
-        // the reap-if-safe precondition retire_host3d_ring checks below, so the
+        // V-3b-1c-2b F2: exercise SYS_HOSTMEM_REFCOUNT on this ring's backing.
+        // No client has claimed it (the self-test shares nothing), so the ONLY
+        // reference is tapestryd's own map (the ring burrow is {handle:0,
+        // mapping:1}) -> the total ref count MUST read exactly 1. That is the
+        // reap-if-safe precondition retire_host3d_ring checks below, so the
         // wctx_finish that follows takes the immediate-reclaim arm (count==1),
         // not the park arm -- the tapestryd-side witness of the syscall + the
         // common teardown path. The claim + park + cross-client legs need a real
         // client Proc and live in the warp-prove ring-host3d cross-Proc gate.
-        let mc = unsafe { t_hostmem_mapcount(va, PAGE) };
+        let refs = unsafe { t_hostmem_refcount(va, PAGE) };
         self.wctx_finish(slot, false);
         // F4: "teardown OK" must be OBSERVED, not assumed. wctx_finish poisons
         // the slot iff a venus-ctx or dev-ctx CTX_DESTROY was refused (the
         // teardown's only failure signal on a clean finish), so a poisoned slot
         // means the teardown leg did NOT complete -- the gate must not read "OK".
         let teardown_ok = !self.warp_ctx_slot_poisoned[slot];
-        if got == sentinel && mc == 1 && teardown_ok {
+        if got == sentinel && refs == 1 && teardown_ok {
             say!(
-                "tapestryd: warp host3d-ring venus-ctx={} MAPPED+ROUNDTRIP mapcount=1 teardown OK",
+                "tapestryd: warp host3d-ring venus-ctx={} MAPPED+ROUNDTRIP refcount=1 teardown OK",
                 venus
             );
         } else {
             say!(
-                "tapestryd: warp host3d-ring FAIL (sentinel wrote {:#x} read {:#x} mapcount={} teardown_ok={})",
+                "tapestryd: warp host3d-ring FAIL (sentinel wrote {:#x} read {:#x} refcount={} teardown_ok={})",
                 sentinel,
                 got,
-                mc,
+                refs,
                 teardown_ok
             );
         }

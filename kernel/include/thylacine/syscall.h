@@ -2076,21 +2076,25 @@ enum {
     //   separate number so a garbage x2..x4 from a shorter-arg caller cannot be
     //   misread as a valid subrange (the #112 missed-caller class).
     SYS_BURROW_FROM_HOSTMEM = 107,   // arg: pci_handle(x0) shmid(x1) offset(x2) length(x3) cache_policy(x4)
-    // SYS_HOSTMEM_MAPCOUNT(va, len) -> mapping_count (>=0) / -errno  (Warp-6
-    //   V-3b-1c-2b F2; WARP-V3-DESIGN.md §0.11.3). Read-only. Resolves [va,
-    //   va+len) to a SINGLE BURROW_TYPE_HOSTMEM VMA the CALLER owns and returns
-    //   that Burrow's #847 mapping_count -- how many live mappings (the caller's
-    //   own PLUS any weft-shared clients) the host-visible ring backing has. The
-    //   host-side reclaim (tapestryd's drop of a HOST3D ring's QEMU subregion +
-    //   offset) is a userspace op OUTSIDE the kernel's dual-count, so tapestryd
-    //   must OBSERVE this count -- after disarming the weft share -- and reclaim
-    //   only at count==1 (its own sole map), the tapestryd-side twin of image.c's
-    //   mapping_count==0 eviction gate. NOT general burrow introspection: it
-    //   answers only "how many maps does the hostmem burrow under MY va have" --
-    //   no other burrow type, no other Proc, no handle count, no kernel address
-    //   (the KASLR/introspection surface stays closed). A garbage/foreign/
-    //   non-hostmem va -> -T_E_INVAL, never a plausible count.
-    SYS_HOSTMEM_MAPCOUNT = 108,   // arg: va (x0), len (x1)
+    // SYS_HOSTMEM_REFCOUNT(va, len) -> handle_count+mapping_count (>=1) / -errno
+    //   (Warp-6 V-3b-1c-2b F2; WARP-V3-DESIGN.md 0.11.3). Read-only. Resolves
+    //   [va, va+len) to a SINGLE BURROW_TYPE_HOSTMEM VMA the CALLER owns and
+    //   returns its TOTAL #847 reference count (handle_count + mapping_count):
+    //   EVERY live reference on the host-visible ring backing -- the caller's own
+    //   mapping PLUS any weft-shared client's mapping AND its transferred
+    //   registration pin. The host-side reclaim (tapestryd's drop of a HOST3D
+    //   ring's QEMU subregion + offset) is a userspace op OUTSIDE the kernel's
+    //   dual-count, so tapestryd must OBSERVE this count -- after disarming the
+    //   weft share -- and reclaim only at count==1 (its own sole map, no client
+    //   ref of ANY kind). The SUM, not mapping_count alone, is what excludes a
+    //   client that has CLAIMED (holds the transferred pin) but not yet mapped
+    //   (audit F1): weft_share_claim transfers the pin BEFORE burrow_share_into
+    //   bumps mapping_count. image.c's handle_count==1 && mapping_count==0
+    //   eviction gate, folded to one value. NOT general introspection: no other
+    //   burrow type, no other Proc, no per-kind breakdown, no kernel address (the
+    //   KASLR surface stays closed). A garbage/foreign/non-hostmem va ->
+    //   -T_E_INVAL, never a plausible count.
+    SYS_HOSTMEM_REFCOUNT = 108,   // arg: va (x0), len (x1)
 };
 
 // V-2 (GPU-DESIGN §6.2.1): the host-dictated cache attribute a

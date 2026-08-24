@@ -30,7 +30,7 @@ use libthyla_rs::hardware::{
 use libthyla_rs::time::Instant;
 use libthyla_rs::virtio_rmb;
 use libthyla_rs::{
-    t_burrow_detach, t_hostmem_mapcount, T_CACHE_CACHED, T_CACHE_UNCACHED, T_CACHE_WC, T_PROT_READ,
+    t_burrow_detach, t_hostmem_refcount, T_CACHE_CACHED, T_CACHE_UNCACHED, T_CACHE_WC, T_PROT_READ,
     T_PROT_WRITE,
 };
 
@@ -1495,14 +1495,15 @@ pub struct Gpu {
     /// device with no hostmem shm region). Outlives any single ring so the
     /// Model B ring path can mint + retire across a client's session.
     hostmem: Option<HostmemAllocator>,
-    /// V-3b-1c-2b F2: HOST3D rings retired while a client still maps the GPA.
-    /// The host bytes (the QEMU subregion) live OUTSIDE the kernel #847 count,
-    /// so reclaiming the offset here while a client's weft map is live would
+    /// V-3b-1c-2b F2: HOST3D rings retired while a client still references the
+    /// GPA. The host bytes (the QEMU subregion) live OUTSIDE the kernel #847
+    /// count, so reclaiming the offset here while a client's weft map -- or a
+    /// claimed-but-not-yet-mapped client's transferred pin -- is live would
     /// re-hand it under the client's PTEs (a cross-client alias). A ring whose
-    /// mapping_count is still > 1 (clients beyond tapestryd's own map) is parked
-    /// here -- tapestryd KEEPS its own VA mapped so `t_hostmem_mapcount` can
-    /// re-query it -- and reaped by `reap_hostmem_parked` once the count drops to
-    /// 1. Bounded: a client that never unmaps pins only its own I-32 budget.
+    /// total ref count is still > 1 (any client ref beyond tapestryd's own map)
+    /// is parked here -- tapestryd KEEPS its own VA mapped so `t_hostmem_refcount`
+    /// can re-query it -- and reaped by `reap_hostmem_parked` once the count drops
+    /// to 1. Bounded: a client that never unmaps pins only its own I-32 budget.
     hostmem_parked: alloc::vec::Vec<HostRing>,
     _ring: Dma,
     _flane: Option<Dma>,
@@ -2435,55 +2436,72 @@ impl Gpu {
 
     /// V-3b-1c-2b F2: retire a HOST3D ring -- reap now if safe, else PARK. The
     /// CALLER disarms any weft share BEFORE this (so no NEW client can claim the
-    /// backing). Then this reads the kernel #847 mapping_count of the ring's
-    /// hostmem burrow via tapestryd's still-live VA: at count == 1 (tapestryd's
-    /// own sole map) no client maps the GPA, so the offset is safe to reclaim NOW
-    /// (`drop_host3d_ring`). At count > 1 (a client kept its map past its conn) or
-    /// on an unexpected query error, tapestryd KEEPS its VA mapped and parks the
-    /// token for `reap_hostmem_parked`; freeing the QEMU subregion now would re-
-    /// hand the offset under the client's live PTEs (a cross-client alias). At
-    /// count == 1 the client set is provably empty AND cannot grow: the share is
-    /// disarmed (no claim) and a fork can only copy an EXISTING client map, of
-    /// which there are none (the burrow.c:1436 ref-discipline that makes the racy
-    /// ACQUIRE read a sound reclaim basis). Consumes the token by value (holotype
-    /// F1: no double-drop).
+    /// backing). Then this reads the ring's hostmem burrow's TOTAL ref count
+    /// (handle_count + mapping_count) via tapestryd's still-live VA: at count == 1
+    /// the ONLY reference is tapestryd's own map -- no client map AND no client
+    /// that has CLAIMED but not yet mapped -- so the offset is safe to reclaim NOW
+    /// (`drop_host3d_ring`). At count > 1 (a client kept its map past its conn, OR
+    /// a client claimed the share and holds the transferred registration pin
+    /// pending its map) or on an unexpected query error, tapestryd KEEPS its VA
+    /// mapped and parks the token for `reap_hostmem_parked`; freeing the QEMU
+    /// subregion now would re-hand the offset under the client's live-or-pending
+    /// PTEs (a cross-client alias).
+    ///
+    /// Why the TOTAL ref count, not mapping_count (audit F1): weft_share_claim
+    /// consumes the share and TRANSFERS the registration pin (a handle_count ref)
+    /// to the claiming client BEFORE burrow_share_into bumps mapping_count later
+    /// in the same SYS_WEFT_MAP -- so a mapping_count==1 read would miss a client
+    /// irrevocably about to map, and reclaim under it. The transferred pin makes
+    /// the SUM >= 2, closing that window (the image.c handle_count half). At
+    /// sum==1 the reference set is empty of clients AND cannot grow: the share is
+    /// disarmed (no claim), and there is no client ref (map OR pin) to fork.
+    /// Consumes the token by value (no double-drop).
     pub fn retire_host3d_ring(&mut self, ring: HostRing) {
-        let mc = unsafe { t_hostmem_mapcount(ring.va, ring.size) };
-        if mc == 1 {
+        let refs = unsafe { t_hostmem_refcount(ring.va, ring.size) };
+        if refs == 1 {
             self.drop_host3d_ring(ring);
         } else {
-            if mc < 1 {
+            if refs < 1 {
                 // Impossible while tapestryd still maps it (its own map is >= 1):
-                // a negative errno or 0 means the VA no longer resolves to this
-                // hostmem burrow. Park conservatively -- never reclaim on an
-                // uncertain count -- and log; the reaper will free it if/when the
-                // count reads 1, else it is bounded by the client's own budget.
+                // a negative errno means the VA no longer resolves to this hostmem
+                // burrow. Park conservatively -- never reclaim on an uncertain
+                // count -- and log; the reaper frees it if/when the count reads 1,
+                // else it is bounded by the client's own I-32 budget.
                 say!(
-                    "tapestryd: hostmem ring res {} unexpected mapcount {} at retire -- parking",
-                    ring.res_id, mc
+                    "tapestryd: hostmem ring res {} unexpected refcount {} at retire -- parking",
+                    ring.res_id, refs
                 );
             }
             self.hostmem_parked.push(ring);
         }
     }
 
-    /// V-3b-1c-2b F2: re-check parked HOST3D rings and reclaim those whose clients
-    /// have finally unmapped (mapping_count back to 1 = tapestryd's own map). Runs
-    /// in the completion pump beside `reap_abandoned`. A parked ring's client that
-    /// never unmaps just keeps its own extent parked (bounded by that client's
-    /// I-32 budget); it can never pin the serve loop, and Proc death drops the
-    /// mapping (address-space teardown) so a crashed client's ring is reclaimed on
-    /// the next pass.
+    /// V-3b-1c-2b F2: re-check parked HOST3D rings and reclaim those whose only
+    /// remaining reference is tapestryd's own map (total ref count back to 1 --
+    /// the claiming client released BOTH its mapping and its transferred pin).
+    /// Runs at MINT-time (reclaim-before-alloc), NOT the completion pump: reclaim
+    /// issues controlq teardown (`drop_host3d_ring`), which is only established
+    /// safe from the serve-loop request context mint runs in; moving it into the
+    /// pump would need a re-entrancy re-examination (audit F2). Mint is also where
+    /// offset pressure arises, so the reclaim happens exactly when the space is
+    /// needed. A parked ring whose client never unmaps stays parked, bounded by
+    /// that client's own I-32 budget; Proc death drops the mapping (address-space
+    /// teardown) so a crashed client's ring is reclaimed at the next mint. Bounded
+    /// per pass (`HOSTMEM_REAP_PER_PASS`) so one mint issues no unbounded burst of
+    /// controlq teardowns; the remainder waits for the next mint (still bounded).
     fn reap_hostmem_parked(&mut self) {
         if self.hostmem_parked.is_empty() {
             return;
         }
+        const HOSTMEM_REAP_PER_PASS: u32 = 8;
+        let mut reclaimed: u32 = 0;
         let mut i = 0;
-        while i < self.hostmem_parked.len() {
+        while i < self.hostmem_parked.len() && reclaimed < HOSTMEM_REAP_PER_PASS {
             let (va, size) = (self.hostmem_parked[i].va, self.hostmem_parked[i].size);
-            if unsafe { t_hostmem_mapcount(va, size) } == 1 {
+            if unsafe { t_hostmem_refcount(va, size) } == 1 {
                 let ring = self.hostmem_parked.swap_remove(i);
                 self.drop_host3d_ring(ring);
+                reclaimed += 1;
                 // swap_remove moved a not-yet-checked element to i; do not advance.
             } else {
                 i += 1;

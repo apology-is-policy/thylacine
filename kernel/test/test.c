@@ -341,7 +341,7 @@ void test_weft_share_register_claim(void);
 void test_weft_share_full(void);
 void test_weft_share_owner_gc(void);
 void test_weft_hostmem_share(void);
-void test_weft_hostmem_mapcount(void);
+void test_weft_hostmem_refcount(void);
 void test_weft_hostmem_resolve(void);
 void test_weft_syscall_share(void);
 void test_weft_map_binding_lifetime(void);
@@ -1877,7 +1877,7 @@ struct test_case g_tests[] = {
     { "weft.share_full",                  test_weft_share_full,               false, NULL },
     { "weft.share_owner_gc",              test_weft_share_owner_gc,           false, NULL },
     { "weft.hostmem_share",               test_weft_hostmem_share,            false, NULL },
-    { "weft.hostmem_mapcount",            test_weft_hostmem_mapcount,         false, NULL },
+    { "weft.hostmem_refcount",            test_weft_hostmem_refcount,         false, NULL },
     { "weft.hostmem_resolve",             test_weft_hostmem_resolve,          false, NULL },
     { "weft.syscall_share",               test_weft_syscall_share,            false, NULL },
     { "weft.map_binding_lifetime",        test_weft_map_binding_lifetime,     false, NULL },

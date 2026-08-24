@@ -742,34 +742,46 @@ static s64 sys_burrow_from_hostmem_handler(u64 pci_hraw, u64 shmid, u64 offset,
 }
 
 // =============================================================================
-// SYS_HOSTMEM_MAPCOUNT — read a hostmem Burrow's #847 mapping_count (Warp-6
-// V-3b-1c-2b F2; WARP-V3-DESIGN.md §0.11.3).
+// SYS_HOSTMEM_REFCOUNT — read a hostmem Burrow's TOTAL #847 reference count
+// (handle_count + mapping_count) (Warp-6 V-3b-1c-2b F2; WARP-V3-DESIGN.md 0.11.3).
 // =============================================================================
 //
 // Read-only. Resolves [va, va+len) to a SINGLE BURROW_TYPE_HOSTMEM VMA the
 // CALLER owns (vma_lookup searches only p's own AddrSpace, so ownership is
 // structural -- a caller can only count a hostmem burrow it maps) and returns
-// that Burrow's mapping_count: how many live mappings (the caller's own PLUS
-// any weft-shared clients) the host-visible ring backing has. This is the
-// tapestryd-side twin of image.c's kernel-side mapping_count==0 eviction gate.
+// handle_count + mapping_count: EVERY live reference on the host-visible ring
+// backing -- the caller's own mapping PLUS any weft-shared client's mapping AND
+// its transferred registration pin (a handle_count ref). Because the caller maps
+// the burrow, the sum is always >= 1, and == 1 iff the ONLY reference is the
+// caller's single mapping. This is image.c's kernel-side eviction predicate
+// (handle_count==1 && mapping_count==0) folded to one value for the tapestryd
+// side, where the caller holds the mapping instead of the handle.
 //
-// It leaks nothing but the number: no kernel address, no other Proc, no handle
-// count. Refuses (-T_E_INVAL, never a plausible count) a va that does not
-// resolve, a VMA not fully covering [va, va+len), or a non-HOSTMEM burrow.
+// Why the SUM, not mapping_count alone (the audit F1 correction): a client's map
+// is COMMITTED at weft_share_claim (weft.c), which consumes the share and
+// TRANSFERS the registration pin to the client -- a handle_count ref -- and
+// returns BEFORE burrow_share_into bumps mapping_count later in the same
+// SYS_WEFT_MAP. In that window a client is irrevocably going to map GPA(off) yet
+// mapping_count still reads 1. A reclaim keyed on mapping_count==1 would free the
+// offset under that pending map (a cross-client alias). The transferred pin makes
+// the sum >= 2, so the SUM excludes the in-flight claimant exactly as image.c's
+// handle_count half does.
 //
-// The count is a racy ACQUIRE snapshot (burrow.c "Diagnostics"). It is a SAFE
-// basis for tapestryd's reclaim ONLY under tapestryd's ref-discipline, which
-// the kernel does not enforce and only reports the number for: the caller
-// disarms the weft share FIRST, so at count==1 (tapestryd's own sole map) the
-// client-map set is empty AND cannot grow -- no share remains to claim, and a
-// fork can only copy an EXISTING client mapping, of which there are none. Read
-// under p->as->lock so a concurrent same-Proc detach cannot splice the
-// VMA->Burrow link away mid-read.
+// It leaks nothing but the number: no kernel address, no other Proc, no per-kind
+// breakdown. Refuses (-T_E_INVAL) a va that does not resolve, a VMA not fully
+// covering [va, va+len), or a non-HOSTMEM burrow.
+//
+// Still a racy ACQUIRE snapshot (burrow.c "Diagnostics"); it is a SAFE reclaim
+// basis ONLY under tapestryd's ref-discipline: disarm the weft share FIRST (so no
+// NEW claim can consume it), then at sum==1 the only reference is the caller's
+// map, which cannot grow -- no share to claim, no existing client ref (map OR
+// pin) to fork. Read under p->as->lock so a concurrent same-Proc detach cannot
+// splice the VMA->Burrow link mid-read; both counts snapshot under it.
 //
 // The core is separated from the current_thread() wrapper so the resolve +
 // type-gate + range logic is unit-testable with a synthetic Proc (the
 // hostmem_resolve_subrange precedent). NOT static: the test declares it.
-s64 hostmem_mapcount_query(struct Proc *p, u64 va, u64 len) {
+s64 hostmem_refcount_query(struct Proc *p, u64 va, u64 len) {
     if (!p || !p->as)       return -T_E_INVAL;
     if (len == 0)           return -T_E_INVAL;
     if (va + len < va)      return -T_E_INVAL;   // range wrap
@@ -785,15 +797,17 @@ s64 hostmem_mapcount_query(struct Proc *p, u64 va, u64 len) {
         spin_unlock(&p->as->lock);
         return -T_E_INVAL;
     }
-    s64 mc = (s64)burrow_mapping_count(b);   // ACQUIRE; magic-checked accessor
+    // Both counts are ACQUIRE + magic-checked; summed under as->lock so a
+    // same-Proc detach cannot drop the mapping between the two reads.
+    s64 refs = (s64)burrow_handle_count(b) + (s64)burrow_mapping_count(b);
     spin_unlock(&p->as->lock);
-    return mc;
+    return refs;
 }
 
-static s64 sys_hostmem_mapcount_handler(u64 va, u64 len) {
+static s64 sys_hostmem_refcount_handler(u64 va, u64 len) {
     struct Thread *t = current_thread();
     if (!t) return -T_E_INVAL;
-    return hostmem_mapcount_query(t->proc, va, len);
+    return hostmem_refcount_query(t->proc, va, len);
 }
 
 // =============================================================================
@@ -11986,8 +12000,8 @@ void syscall_dispatch(struct exception_context *ctx) {
             ctx->regs[4]);
         return;
 
-    case SYS_HOSTMEM_MAPCOUNT:
-        ctx->regs[0] = (u64)sys_hostmem_mapcount_handler(
+    case SYS_HOSTMEM_REFCOUNT:
+        ctx->regs[0] = (u64)sys_hostmem_refcount_handler(
             ctx->regs[0], ctx->regs[1]);
         return;
 
