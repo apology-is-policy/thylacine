@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-08-15
+updated: 2026-08-24
 ---
 ## Purpose
 
@@ -71,6 +71,16 @@ is the current state, maintained by hand.
 The allocated span runs to **106** with **four holes** — 26, 30, 43 and 80 —
 unchanged in count and identity since the last sweep, which is the append-only
 rule visibly holding.
+
+Since that sweep the Warp host-visible-ring arc has appended two native numbers —
+**107** (`SYS_BURROW_FROM_HOSTMEM`, V-2) and **108** (`SYS_HOSTMEM_REFCOUNT`,
+V-3b-1c-2b; a read-only VA-keyed query returning [[sub-kernel-burrow]]'s
+`burrow_total_refs`) — each in the kernel enum and the Rust mirror, neither with a C
+consumer. They postdate the census above, so a refresh should read span → **108**,
+live → **105**, the four holes unchanged (the append-only rule still holding), and
+**re-derive** the mirror-subset and static-assert counts by the method stated below
+rather than incrementing them — the same "measure, don't guess" discipline that
+caught the Rust `T_SYS_` bounds-constant trap.
 
 ### The libraries are subsets, not copies
 

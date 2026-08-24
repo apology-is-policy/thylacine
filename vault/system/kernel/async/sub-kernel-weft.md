@@ -15,7 +15,7 @@ design:
   - "docs/NET-THROUGHPUT.md"
   - "docs/reference/125-weft.md"
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-08-24
 ---
 ## Purpose
 
@@ -58,19 +58,37 @@ reference to police.
 
 ### Admission is minted, never asserted
 
-A shareable region is one of exactly three kinds, and the kernel decides which by
+A shareable region is one of exactly four kinds, and the kernel decides which by
 reading the region's *type*, not a flag its creator set:
 
 - an ordinary anonymous region — a flow ring;
 - a device-passive framebuffer region, which the device **reads**;
-- a graphics buffer object, which the device **writes**.
+- a graphics buffer object, which the device **writes**;
+- a host-visible hostmem region — the Warp Model-B GPU command ring, which the
+  host GPU process **reads**.
 
-The last two are distinguished by immutable subtype bits set only by the
-allocation calls that mint them. Everything else — a plain device region holding
-a command queue or descriptor table, and all memory-mapped I/O — is structurally
+The middle two are distinguished by immutable subtype bits (`weave` / `gpu_bo`)
+set only by the allocation calls that mint them on a `kobj_dma`. The fourth is not
+a `kobj_dma` subtype at all: it is keyed on the burrow *type* being
+`BURROW_TYPE_HOSTMEM` carrying a `kobj_pci` — a PCI hostmem-BAR window whose bytes
+a guest maps and the host GPU process reads as a Venus command ring (see
+[[sub-tapestryd]]). Everything else — a plain device region holding a command
+queue or descriptor table, and all memory-mapped I/O — is structurally
 unshareable. There is no flag a caller can set to admit one. Sharing a region the
 device *interprets* is therefore impossible by construction, which is the point:
-the bits are minted at allocation by the kernel and are create-immutable.
+the discriminant is minted at allocation by the kernel (a subtype bit, or the
+burrow type) and is create-immutable.
+
+**The hostmem kind must be widened in lockstep at BOTH reading sites, and once it
+was not.** Admission is read twice — `weft_claimed_kind` (the claim-time
+cross-check) and `weft_binding_alloc_maponly` (the binding allocation) — and a kind
+the first admits but the second rejects is not half-shareable, it is a fid that
+claims clean then maps to nothing. V-2 added the `HOSTMEM` arm to
+`weft_claimed_kind` and missed `weft_binding_alloc_maponly`, so a claimed hostmem
+share fell through to a NULL binding (`t_weft_map` returned -1) — a latent
+half-widen closed by Warp V-3b-1c-2b's F1, which added the matching binding-alloc
+arm. The two sites widen together or the kind is broken; that lockstep is the
+invariant, and the half-widen was the bug.
 
 **The direction of device access is what separates the two device kinds, and
 neither direction weakens the admission argument.** What matters is that the
@@ -78,17 +96,22 @@ device treats the region as *data* — pixels in, pixels out — rather than as
 instructions to execute.
 
 The claim path re-derives the kind from the type and cross-checks it against the
-server's declared geometry — a ring must declare descriptor slots, and **both**
-map-only kinds must declare none, since neither has a descriptor ring and a
-declared geometry over one is a contradiction. A server whose declaration
-contradicts its own registered region fails closed and is never mapped.
+server's declared geometry — a ring must declare descriptor slots, and **every**
+map-only kind must declare none (framebuffer, graphics buffer, and the hostmem
+ring alike), since none has a descriptor ring and a declared geometry over one is
+a contradiction. A server whose declaration contradicts its own registered region
+fails closed and is never mapped.
 
-**The two device kinds are read by test order, in two places here**, and the
+**The two *DMA* device kinds are read by test order, in two places here**, and the
 ordering is unambiguous only because the allocator cannot mint a region that is
 both. That guarantee lives in [[sub-kernel-hwcap]]'s constructor — an enumerated
 argument, so the illegal combination cannot be written at the call — and nothing
 at either reading site says so. Verified: that constructor is the sole writer of
-either bit across the kernel. It holds, and it holds at a distance.
+either bit across the kernel. It holds, and it holds at a distance. The hostmem
+kind sidesteps this ambiguity entirely: it is keyed on `type ==
+BURROW_TYPE_HOSTMEM` (with a `kobj_pci`), a discriminant disjoint from the
+`kobj_dma` subtype bits, so its arm cannot collide with the weave/gpu_bo test
+order — it is a separate branch, admitted or refused on its own terms.
 
 ### The pin is the lifetime
 

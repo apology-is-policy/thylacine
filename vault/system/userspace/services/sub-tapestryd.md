@@ -478,7 +478,7 @@ ring VA, and finishes the ctx — exercising the venus-ctx create/destroy, the r
 install, and `wring_teardown`'s host3d arm end to end with NO client. One line:
 `warp host3d-ring venus-ctx=<id> MAPPED+ROUNDTRIP teardown OK` (only on a
 successful round-trip; a mismatch → `FAIL`, a 2D/no-blob/no-venus device →
-`skipped`). It asserts the SERVER WIRING, not host distinctness — 1c-1's
+`skipped`; 1c-2b inserts a `refcount=1` field before `teardown OK`, below). It asserts the SERVER WIRING, not host distinctness — 1c-1's
 `hostmem_ring_probe` already proves the physical host-backing. The `venus-verdict`
 gate gains a server-path leg (the `venus-ctx=` line present on the test boot,
 absent + a `skipped` line on the 2D control); `test-venus-verdict.sh` proves the
@@ -500,6 +500,64 @@ recycled-hostmem zero above. Two gate-instrument lessons this rung: the no-boot
 (broadened to `gpu|warp host3d-ring`); and F4, "teardown OK" was keyed on the
 sentinel alone until it was made to read the poisoned flag — an assertion is not
 an observation.
+
+### The client-claimable ring and observe-and-reap retire (V-3b-1c-2b)
+
+1c-2a left two things dead: a client could `ring/new` a host3d ring but not
+**claim** it (the weft-share fell through), and its teardown lifetime was unsolved.
+1c-2b closes both. The claim is the kernel's [[sub-kernel-weft]] F1 arm
+(`WEFT_BIND_HOSTMEM`); `wring_weft_ensure` now `t_weft_share`s the host3d ring's
+hostmem burrow instead of returning `None`, so a peer Proc can map the ring's GPA.
+
+The hard half is the retire, and the problem is structural: a host3d ring's host
+bytes are a QEMU subregion tapestryd owns, which lives **outside** the kernel's
+#847 dual count — so the kernel cannot keep tapestryd from freeing an offset a
+client still maps, the way it keeps a shared Burrow's pages alive. The prior art
+settles what tapestryd *can't* do: Fuchsia's VMO and Genode's dataspace keep
+device-memory lifetime in the kernel precisely so no userspace free races the
+refcount; Thylacine can't, because `unmap_blob` is a controlq op only tapestryd
+issues. So the next-best is to make tapestryd **observe** the count before it
+frees — `image.c`'s cache-eviction check (`handle==1 && mapping==0`) lifted to
+userspace across a new read-only syscall.
+
+`retire_host3d_ring` reads `t_hostmem_refcount` ([[sub-kernel-syscall-dispatch]]'s
+`SYS_HOSTMEM_REFCOUNT`, which returns [[sub-kernel-burrow]]'s `burrow_total_refs` —
+`handle + mapping` under `v->lock`) **after** the caller has disarmed the weft
+share, and reclaims the offset (`drop_host3d_ring`) only at count `== 1`: the only
+reference is tapestryd's own map, no client map AND no client holding the
+transferred claim pin. At count `> 1` it **parks** the ring on `Gpu.hostmem_parked`
+with its VA still mapped; `reap_hostmem_parked` reclaims parked rings whose count
+has dropped back to 1, run at **mint** (reclaim-before-alloc, so offset pressure
+drives reclaim exactly when a new mint needs the space) rather than the completion
+pump (mint runs in the serve-loop request context, where the controlq teardown
+`drop_host3d_ring` issues is established-safe; the pump is not). `drop_host3d_ring`
+is now reachable *only* through retire/reap, never directly on a client-shared
+ring.
+
+**Two audit rounds, both dirty, both on the reap predicate — the surface's whole
+difficulty is that predicate.** Round-1: the reap first keyed on `mapping_count==1`
+alone, which misses a client that has **claimed** but not yet mapped —
+`weft_share_claim` transfers the registration pin (a *handle* ref) before
+`burrow_share_into` bumps `mapping_count` in the same `SYS_WEFT_MAP`, so a
+mapping-only read frees the offset under a pending map (a cross-client alias). The
+citation named `image.c`'s gate but dropped its handle half — *the* half that
+excludes the in-flight mapper. Fix: return the **sum**, which the pin lifts to `>=2`
+during that window. The generalizable lesson: **a lifecycle predicate ported across
+actors** (the kernel cache holds a HANDLE; tapestryd holds a MAPPING) **must
+re-derive which refcount half carries the safety**, not transliterate the visible
+one. Round-2 caught that the sum was itself two lock-free loads (closed kernel-side
+by `burrow_total_refs` reading both under `v->lock` — see [[sub-kernel-burrow]]).
+Round-3 came back clean (4 P3, all prose). The reap loop is bounded (per-pass cap;
+the parked list strictly shrinks; a mint under pressure loops reap+alloc while a
+pass reclaims), and a crashed client's ring is reclaimed at the next mint because
+Proc death drops the mapping.
+
+GL-verified on thyla-pi KVM/V3D: the self-test line now reads `warp host3d-ring
+venus-ctx=<id> MAPPED+ROUNDTRIP refcount=1 teardown OK` — the `refcount=1` is
+`burrow_total_refs` observed at runtime, `teardown OK` is `retire_host3d_ring`
+taking its `==1 → drop` path. The client-claim cross-Proc reproduction
+(`warp-prove ring-host3d`) is a tracked follow-on; the SUBMIT_CMD forward is
+V-3b-2.
 
 ## Data structures
 

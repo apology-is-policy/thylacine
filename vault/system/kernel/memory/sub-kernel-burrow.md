@@ -9,7 +9,7 @@ guarded-by: [inv-i7, inv-i32]
 validated-by: [spec-burrow, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-08-16
+updated: 2026-08-24
 ---
 ## Purpose
 
@@ -256,6 +256,26 @@ The lock was pulled forward as the precursor to the handle-table lifetime pass,
 whose handle-put drops the Burrow ref *outside* the table lock — which is
 exactly the situation that requires the Burrow's own refcount to be
 independently safe.
+
+A third reader arrived with the Warp host-visible ring ([[sub-tapestryd]],
+V-3b-1c-2b): `burrow_total_refs` sums *both* counts under `lock` and returns them
+as one value. It exists because a caller reclaiming an **out-of-band** backing — a
+QEMU subregion tapestryd owns, whose host bytes live *outside* this dual count —
+needs a reclaim-safe `handle + mapping == 1` predicate, and summing the two
+individual ACQUIRE accessors (`burrow_handle_count` + `burrow_mapping_count`) is
+**not** that. Those are two separately-acquired lock-free loads whose operand order
+is unspecified, so a peer CPU mutating one count between them can make the sum read
+reclaim-safe while a reference is genuinely in flight — the first draft did exactly
+this and a Fable round-2 caught it. The lesson generalizes past the caller: *a sum
+of two lock-free counters is not one read* — a predicate over both counts must read
+them under the lock that guards **the counts**, not merely under *a* lock (the
+buggy draft held `as->lock`, which guards the VMA→Burrow link, not the counts). The
+sibling contrast is `image.c`'s cache eviction, which reads its own joint
+`handle==1 && mapping==0` predicate lock-free and is *still* sound — but only
+because of an external-stability proof (`g_image_lock` + ref-before-map), not
+because the read is atomic. A caller without that proof needs the locked sum. It
+takes a non-const `v` (it locks) and returns 0 for a NULL/dead Burrow — never a
+reclaim-safe 1.
 
 ## Invariants enforced
 
