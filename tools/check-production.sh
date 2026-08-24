@@ -25,7 +25,12 @@
 # probe helper defined outside the gate is now a build failure rather than a
 # warning nobody reads.
 #
-#   tools/check-production.sh          # joey at THYLA_BOOT_PROBES=OFF (~2 s)
+# Since the configurator (BUILD-CONFIG-DESIGN.md 4.5) it also builds the lean
+# LOGINNABLE shape (BOOT_PROBES=OFF + DEV_ACCOUNTS=ON) and asserts the joey binary
+# grows -- proof that provision_dev_accounts (the finding-#1 login fix) actually
+# compiled in, a shape nothing else in the routine loop builds.
+#
+#   tools/check-production.sh          # joey lean (both-off) + lean loginnable (~4 s)
 #   tools/check-production.sh --all    # + the KERNEL_TESTS=OFF kernel (~3 min)
 #
 # Exit: 0 builds, 1 does not, 2 usage/setup.
@@ -105,15 +110,104 @@ fi
 # stopped being able to fail (#212).
 echo "  ok -- joey builds lean; #229 tripwire armed (-Werror=unused-function)"
 
+# Config B: the lean LOGINNABLE image (BOOT_PROBES=OFF + DEV_ACCOUNTS=ON). This is
+# the shape provision_dev_accounts actually compiles into -- the finding-#1 fix, the
+# only path that creates a login user in a lean image -- and NOTHING in the routine
+# loop builds it either: it is the both-off shape's disease one axis over. Under
+# -Werror=unused-function it also proves pda_connect / pda_write_all / pda_read_exact
+# and provision_dev_accounts are all REACHED; an unreached one would fail the build.
+#
+# The size assertion is the discrimination (M-PIN: a check that cannot fail proves
+# nothing). Config A above compiles provision_dev_accounts OUT; config B compiles it
+# IN. If the two joey binaries come out the SAME size, the DEV_ACCOUNTS define did
+# nothing -- the -DTHYLA_DEV_ACCOUNTS wiring silently broke -- and "it built" would
+# be a green that means the opposite of what it claims. Same Debug build type in both
+# builds so DEV_ACCOUNTS is the only variable between them.
+OUT_DA="$OUT.devacct"
+echo "== check-production: joey at BOOT_PROBES=OFF + DEV_ACCOUNTS=ON (lean loginnable) =="
+rm -rf "$OUT_DA"
+if ! cmake -S "$REPO_ROOT/usr" -B "$OUT_DA" \
+        -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
+        -DCMAKE_BUILD_TYPE=Debug \
+        -DTHYLA_GENERATED_DIR="$GEN_DIR" \
+        -DTHYLA_BOOT_PROBES=OFF \
+        -DTHYLA_DEV_ACCOUNTS=ON > "$OUT_DA.cmake.log" 2>&1; then
+    echo "check-production: FAIL -- cmake configure (DEV_ACCOUNTS=ON) failed; see $OUT_DA.cmake.log" >&2
+    exit 1
+fi
+if ! cmake --build "$OUT_DA" --target joey > "$OUT_DA.build.log" 2>&1; then
+    echo "check-production: FAIL -- joey does not compile with DEV_ACCOUNTS=ON/BOOT_PROBES=OFF." >&2
+    if grep -q "unused function" "$OUT_DA.build.log"; then
+        # The tripwire fired on the loginnable shape. Either a DEV_ACCOUNTS-only
+        # helper (provision_dev_accounts / a pda_*) is never called, or a probe
+        # helper leaked into the shared region. Different remedy from a plain error.
+        echo "    The #229 tripwire fired: a helper reachable only under DEV_ACCOUNTS" >&2
+        echo "    is defined but not called, or a probe helper leaked out of its gate." >&2
+        echo "    Check the '#if defined(THYLA_DEV_ACCOUNTS) && !defined(THYLA_BOOT_PROBES)'" >&2
+        echo "    region in usr/joey/joey.c against its call site." >&2
+    fi
+    grep -E "error:" "$OUT_DA.build.log" | sed "s|$REPO_ROOT/||" | head -20 >&2
+    exit 1
+fi
+JOEY_A="$OUT/joey/joey"
+JOEY_B="$OUT_DA/joey/joey"
+if [[ ! -f "$JOEY_A" || ! -f "$JOEY_B" ]]; then
+    echo "check-production: FAIL -- a joey binary is missing; cannot size-discriminate." >&2
+    echo "    ($JOEY_A / $JOEY_B)" >&2
+    exit 1
+fi
+SIZE_A="$(wc -c < "$JOEY_A" | tr -d ' ')"
+SIZE_B="$(wc -c < "$JOEY_B" | tr -d ' ')"
+if [[ "$SIZE_B" -le "$SIZE_A" ]]; then
+    echo "check-production: FAIL -- the DEV_ACCOUNTS=ON joey ($SIZE_B B) is not larger than" >&2
+    echo "    the both-off joey ($SIZE_A B). provision_dev_accounts did not compile in --" >&2
+    echo "    the -DTHYLA_DEV_ACCOUNTS wiring is silently dead. This check cannot pass on a" >&2
+    echo "    broken gate; that is the point." >&2
+    exit 1
+fi
+echo "  ok -- joey builds lean+loginnable; provision_dev_accounts compiled in ($SIZE_A -> $SIZE_B B, +$((SIZE_B - SIZE_A)))"
+
 if (( do_all )); then
-    echo "== check-production: the full --production build =="
-    if ! THYLACINE_MKFS_PRESERVE=1 "$REPO_ROOT/tools/build.sh" all --production \
-            > "$OUT.full.log" 2>&1; then
-        echo "check-production: FAIL -- tools/build.sh all --production failed; see $OUT.full.log" >&2
+    echo "== check-production: the full lean image build (--config production) =="
+    if ! "$REPO_ROOT/tools/build.sh" all --config production > "$OUT.full.log" 2>&1; then
+        echo "check-production: FAIL -- build.sh all --config production failed; see $OUT.full.log" >&2
         tail -20 "$OUT.full.log" >&2
         exit 1
     fi
-    echo "  ok -- kernel (KERNEL_TESTS=OFF) + userspace + ramfs + disk built"
+    echo "  ok -- lean (release, KASLR, hardened) kernel + userspace + ramfs + fresh loginnable pool"
+
+    # The lean spine (provision_dev_accounts, the finding-#1 login fix) is boot-critical
+    # in this shape and compiled OUT of config C, so NOTHING in the routine loop boots
+    # it -- the size delta above proves it COMPILED IN, never that it SUCCEEDS. That is
+    # #245's "a checker reachable only by hand rots", one level up: the michael-only
+    # predecessor shipped for a session with only a compile gate. So boot the lean image
+    # and assert BOTH facts a build cannot see -- the spine RAN, and the accounts it
+    # created actually authenticate. Needs `expect`; SKIP (not FAIL) without it, exactly
+    # as test-interactive does, so a host lacking it stays green.
+    if command -v expect >/dev/null 2>&1; then
+        echo "== check-production: boot the lean image -- assert the spine provisioned + login =="
+        if ! "$REPO_ROOT/tools/test-interactive.sh" dev-accounts > "$OUT.boot.log" 2>&1; then
+            echo "check-production: FAIL -- lean-image login proof (dev-accounts) failed; see $OUT.boot.log" >&2
+            tail -30 "$OUT.boot.log" >&2
+            exit 1
+        fi
+        # The login alone is NOT enough: dev-accounts is image-agnostic, so a gate that
+        # booted config C by mistake would pass it on LADDER-provisioned accounts. This
+        # line is printed ONLY by the lean spine (the ladder never emits it), so it is
+        # the witness that config B -- and specifically provision_dev_accounts -- ran.
+        SPINE_LOG="$REPO_ROOT/build/ls-ci-dev-accounts.log"
+        if ! grep -aq "provision_dev_accounts: michael + cora ready" "$SPINE_LOG" 2>/dev/null; then
+            echo "check-production: FAIL -- booted + logged in, but the console never showed" >&2
+            echo "    'provision_dev_accounts: michael + cora ready'. Either the lean spine did NOT" >&2
+            echo "    run (a config-C image was booted -- the login passed on ladder accounts) or the" >&2
+            echo "    spine broke before completion. See $SPINE_LOG." >&2
+            exit 1
+        fi
+        echo "  ok -- lean spine provisioned michael+cora at boot; both authenticate (dev-accounts)"
+    else
+        echo "  SKIP boot proof -- 'expect' not found (install it to gate the lean spine at runtime)"
+    fi
+
     echo "  NOTE: the tree now holds PRODUCTION artifacts. Rebuild the default"
     echo "        shape before running tools/test.sh for anything else."
 fi

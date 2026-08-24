@@ -192,9 +192,41 @@ they are tests, not provisioning.
 without them. The resolver enforces this (MVP: if `BOOT_PROBES=y` and
 `DEV_ACCOUNTS=n`, auto-raise `DEV_ACCOUNTS` + warn).
 
-This is the smallest correct change: it does not alter provisioning *logic*, only
-*which flag compiles it in*. (The eventual, cleaner home for account provisioning is
-first-boot per `INSTALLER.md` — the install-disc arc, out of scope here.)
+**AS-BUILT (option F, ratified 2026-08-24; supersedes the wholesale "move" above).**
+The wholesale move proved infeasible: the provisioning in `do_corvus_bringup` is
+*interleaved* with test-assertions (AUTH-wrong->BadAuth, pre-elevate
+GROUP_CREATE->PermissionDenied, RECOVER, RESOLVE) and depends on ~8 corvus wire
+primitives (`corvus_exchange`, `build_user_create`, `build_auth`,
+`build_admin_elevate`, ...) that live in the probe-only helper block alongside ~25
+probe-only functions. Widening that block to `DEV_ACCOUNTS` would strand those 25
+under `-Werror=unused-function` (#229); relocating just the primitives would cut
+through the audited identity ladder.
+
+So the account gate did NOT move. Instead a **self-contained
+`provision_dev_accounts()`** lands under
+`#if defined(THYLA_DEV_ACCOUNTS) && !defined(THYLA_BOOT_PROBES)`, and the full ladder
+stays under `THYLA_BOOT_PROBES` untouched. It provisions **michael + cora** (the two
+daily-use accounts; susan/wheel + every assertion stay BOOT_PROBES test fixtures):
+`USER_CREATE michael` (bootstrap, cap-free while the table is empty) -> `AUTH michael`
+-> `ADMIN_ELEVATE(system passphrase)` -> `t_cap_use(HOSTOWNER)` -> `USER_CREATE cora`
+(cora needs the elevation because corvus's admin gate requires `CAP_HOSTOWNER` once any
+user exists). The elevation-enabling grant caps corvus is spawned with
+(`T_CAP_GRANT_HOSTOWNER | T_CAP_GRANT_CLEARANCE`) are stamped *before* the BOOT_PROBES
+gate, so the lean path has them. Idempotent on a persistent pool (each `USER_CREATE`
+tolerates st==2 = already-exists / admin-gated); any other status fails the boot loudly.
+
+This duplicates the trivial corvus framing (option F's cost) but touches the audited
+ladder's *logic* not at all. Only the credential DATA is shared, via `DEV_*` #defines
+hoisted above both gates (`DEV_MICHAEL_USER/PASS`, `DEV_CORA_USER/PASS`,
+`DEV_SYSTEM_PASS`, `CORVUS_PROTOCOL_VERSION`) so a cross-config persistent pool cannot
+drift; the provisioning CONTROL FLOW stays separate. cora carries a short memorable
+password by design (the daily login; michael's long password is the admin identity).
+(The eventual, cleaner home for account provisioning is first-boot per `INSTALLER.md` --
+the install-disc arc, out of scope here -- which retires both copies.)
+
+Landed: `6726ac68` (michael-only, self-contained) + the michael+cora expansion +
+shared-#define + F2-F7 audit fixes (this close). Audit-bearing (the elevation spine +
+the ladder's #define touch); prosecuted per D-e.
 
 ### 4.6 The wizard — guided profile creation (MVP; user-added)
 

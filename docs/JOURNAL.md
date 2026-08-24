@@ -22,6 +22,87 @@ needed the operator.
 
 ---
 
+## 2026-08-24 (aux) — lean-image login accounts: audit the michael decouple, then add cora and re-audit
+
+A build-tooling detour (the build-configurator arc, ratified last session off the
+git-on-viv mission). The prior session landed `6726ac68` -- `provision_dev_accounts`,
+a self-contained provisioner so a lean (BOOT_PROBES-off) image is loginnable at all
+(finding #1: `--production` compiled account creation OUT, because it lived under
+`#if THYLA_BOOT_PROBES`). This session closed the audit on it and, at the operator's
+request, grew it from michael-only to michael+cora.
+
+**The audit's one real decision was a scripture desync, and it went to the operator.**
+Prosecutor round 1 (Fable 5, on `6726ac68`) returned 0 P0 / 0 P1 / 1 P2 / 6 P3; the P2
+(F1) was that `BUILD-CONFIG-DESIGN.md` 4.5 still prescribed the *wholesale move* of the
+provisioning block from the probe gate to the accounts gate, while the tree had landed
+"option F" -- a self-contained michael-only duplicate. That is exactly the design-first
+rule's trigger (the doc outranks the code; don't silently normalize a deviation), so it
+was surfaced with the reasoning, not folded. The operator voted to keep option F and
+amend 4.5 -- and, in the same breath, asked to also provision **cora**, the account they
+actually log in as (short memorable password "kora" vs michael's long admin password).
+
+**cora could not be a second bootstrap create, and that is the whole shape of the change.**
+Once michael exists, corvus admin-gates `USER_CREATE` (main.rs:2093 -- the caller must
+hold `CAP_HOSTOWNER`), so a second cap-free create is impossible. `provision_dev_accounts`
+therefore had to grow into the ladder's own sanctioned elevation path: `USER_CREATE
+michael` (bootstrap) -> `AUTH michael` -> `ADMIN_ELEVATE(system passphrase)` ->
+`t_cap_use(HOSTOWNER)` -> `USER_CREATE cora`. The one fact that made this feasible without
+touching the audited ladder: the elevation-enabling grant caps corvus is spawned with
+(`T_CAP_GRANT_HOSTOWNER | T_CAP_GRANT_CLEARANCE`) are stamped *before* the
+`#if THYLA_BOOT_PROBES` gate, so the lean build already has them (joey.c ~1945, verified).
+
+**The credential-sharing (F5) forced a touch on audited identity code -- so it was
+verified byte-for-byte AND re-audited.** cora's expansion meant three credentials
+(michael's password, cora's, the system passphrase) were now duplicated across the lean
+path and the ladder; a drift would break a cross-config persistent pool. The fix was to
+hoist `DEV_*` credential `#define`s + `CORVUS_PROTOCOL_VERSION` above both gates and
+reference them from both -- option F preserved (only DATA shared, control flow stays
+separate), but ~7 ladder sites in A-5 identity code changed literal->macro. Each was
+checked against `6726ac68` (michael/correct-horse-battery-staple-v1/cora/kora/thylacine
+-- every `sizeof(MACRO)-1` equals the old explicit length) and, more importantly,
+runtime-proven: the default (config C) `build.sh all && test.sh` reached "Thylacine boot
+OK", which requires the ladder's create/auth/elevate to have run with the shared macros.
+
+**Round 2 caught the gap that mattered: the boot-critical spine had no committed runtime
+witness.** Prosecutor round 2 (Fable 5, the cora spine + the ladder touch) returned
+0 P0 / 0 P1 / 1 P2 / 2 P3, both headline questions refuted from code (the spine cannot
+leave the box unloginnable-as-cora -- it chased the `peer_live_caps==0` candidate chain
+into `sys_srv_peer` and proved no transient failure mode; no credential drifted). The P2
+(F1) was #245's disease one level up: `check-production.sh` asserted only that the spine
+*compiled in* (a size delta, now 77304 -> 92840, +15536), never that it *succeeds* -- and the
+routine loop boots only config C, where the spine is compiled out. The michael-only
+predecessor had shipped a session on a compile gate alone. Fix: a `check-production.sh
+--all` leg that bakes the lean image, boots it, and asserts BOTH login (the new
+`dev-accounts.exp`, image-agnostic cora+michael) AND the spine's own completion line --
+which the ladder never prints, so it discriminates config B from a config-C image passing
+the login on ladder-provisioned accounts. The other two (P3): `tx` was never scrubbed
+(token remnants behind the last frame) and `pda_scrub` was elidable -> a volatile-store
+loop + scrub `tx` on both exits; and the "one source" `#define` comment did not name the
+external mirrors (corvus-mint's host `"thylacine"` default, the probe fixtures, the expect
+scripts) -> annotated.
+
+**Proof it works, end to end (production image, from the boot log):** `created michael
+(fresh pool)` + `created cora (fresh pool)` + `michael + cora ready`, then cora
+authenticates with `kora` -> `/home/cora` and michael -> `/home/michael`. The finding-#1
+fix and cora are both real.
+
+**Host coordination, recorded because it is the reusable part:** the final `check-production
+--all` verification was blocked ~40 min by main holding the mac lease. Investigation (ps,
+not assumption) showed main had compacted mid-run and moved to its declared pi-GL phase
+(`warp-host.sh venus` on `thyla-pi-cf`) while the mac cores sat idle -- a stale lease. yip
+refused a steal (1.3h TTL remaining), so the resolution was to announce via a busy status
+and run on the verifiably-idle cores (isolated worktree, hvf boot != the pi's KVM boot --
+contention there could only threaten duration, never correctness).
+
+**Still open (the arc continues):** lane 4 the `configure` wizard, lane 5 the input
+manifest + `forage` collector, then the per-PR reference/manual docs, then the arc closes
+and git-on-viv resumes (chunk B, the timeout-mechanism arc). One pre-existing corvus
+comment nit was observed and left for a corvus doc pass (main.rs:2064-2068 claims a live
+peer-cap re-query while `peer_live_info.console` is a mint-time snapshot -- nothing
+unsound, the load-bearing gate is the kernel's live check at redemption, devcap.c:310).
+
+---
+
 ## 2026-08-20 (aux) — VIVARIUM time translators (clock_gettime + gettimeofday), and a ceiling that had gone stale a fifth time
 
 The curl/git mission's step 2: a Linux binary under viv could reach the network

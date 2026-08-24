@@ -131,6 +131,33 @@ static int joey_daemon_registry_selftest(void) {
 }
 #endif /* THYLA_BOOT_PROBES (#80 registry selftest) */
 
+// Dev-account credentials + the corvus wire-protocol version, hoisted to file
+// scope so BOTH the BOOT_PROBES ladder (below) and the lean provision_dev_accounts
+// (further down) build every USER_CREATE / AUTH / ADMIN_ELEVATE frame from ONE
+// source. The two are never compiled together, so the drift they must not suffer
+// is CROSS-CONFIG: a pool provisioned by the lean image and later booted by a probe
+// image (or the reverse) re-AUTHs michael/cora with the OTHER build's literals, so
+// both builds must anchor on the same macro or a persistent pool fails AUTH loudly.
+// Only the constant DATA is shared; the provisioning CONTROL FLOW stays separate
+// (option F). michael is the long-password admin (bootstrap user); cora is the
+// short daily login (created post-elevation); the system passphrase gates
+// ADMIN_ELEVATE. These are dev conveniences, PUBLIC in this repo -- INSTALLER.md
+// owns real first-boot credentials (see production.config).
+//
+// These macros anchor ONLY joey's own create/auth/elevate frames. The SAME strings
+// live in copies these macros do NOT reach -- editing a macro without them fails
+// LOUDLY (a probe-boot assert or a CI login), never as a silent pool drift, but sync
+// them together: corvus-mint's host-baked system passphrase (tools/build.sh, the
+// CORVUS_SYSTEM_PASSPHRASE default "thylacine"), the ladder's RESOLVE_NAME /
+// CLEARANCE_GRANT / login+recover E2E fixtures below, and the expect login scripts
+// (tools/interactive/*.exp, incl. dev-accounts.exp + lib.exp).
+#define CORVUS_PROTOCOL_VERSION 1
+#define DEV_MICHAEL_USER "michael"
+#define DEV_MICHAEL_PASS "correct-horse-battery-staple-v1"
+#define DEV_CORA_USER    "cora"
+#define DEV_CORA_PASS    "kora"
+#define DEV_SYSTEM_PASS  "thylacine"
+
 #if THYLA_BOOT_PROBES  /* #61: corvus-protocol + smoke-probe helpers (boot-test only) */
 // dirents_have_name — scan a t_readdir buffer (9P2000.L dirents: qid 13 +
 // offset 8 + type 1 + namelen 2 LE + name) for an EXACT name. A bare substring
@@ -226,8 +253,8 @@ static int mkt_file_eq(const char *path, size_t path_len,
 // frame, read a [status|len_lo|len_hi|payload] response frame. On
 // transport success returns 0 and fills *status + *resp_len; the
 // response payload lands in rx[3 .. 3+*resp_len]. -1 on transport
-// error.
-#define CORVUS_PROTOCOL_VERSION 1
+// error. CORVUS_PROTOCOL_VERSION is #defined above the gate (shared with the
+// lean provisioner).
 static int corvus_exchange(long conn_fd,
                            unsigned char verb,
                            const unsigned char *payload, size_t payload_len,
@@ -1682,21 +1709,28 @@ static int g_recover_armed = 0;
 #endif /* THYLA_BOOT_PROBES (recovery-phrase capture state) */
 
 #if defined(THYLA_DEV_ACCOUNTS) && !defined(THYLA_BOOT_PROBES)
-// provision_dev_accounts -- MINIMAL login provisioning for a lean image. In a
-// BOOT_PROBES-off build do_corvus_bringup's full auth/elevate/create ladder (and every
-// corvus wire helper it uses) is compiled out, yet the getty still runs /sbin/login --
-// so a fresh pool would have no one to authenticate (the finding-#1 bug). This creates
-// just the primary user `michael`: on a fresh pool the bootstrap USER_CREATE (corvus
-// allows it with no caller cap while the user table is empty; it provisions michael's
-// encrypted home + enrolls the A-5c recovery phrase), on a persistent pool michael
-// already exists and corvus returns already-provisioned -- both are success here.
+// provision_dev_accounts -- login provisioning for a lean image. In a BOOT_PROBES-off
+// build do_corvus_bringup's full auth/elevate/create ladder (and every corvus wire
+// helper it uses) is compiled out, yet the getty still runs /sbin/login -- so a fresh
+// pool would have no one to authenticate (the finding-#1 bug). This creates the two
+// daily-use accounts:
+//   - michael: the bootstrap user (table empty -> corvus admits USER_CREATE with no
+//     caller cap; it provisions michael's encrypted home + enrolls the A-5c recovery
+//     phrase). The long-password admin identity.
+//   - cora: the short daily login. Once michael exists corvus's admin gate requires
+//     the caller to hold CAP_HOSTOWNER, so cora can only be created AFTER joey elevates
+//     -- AUTH michael -> ADMIN_ELEVATE(system passphrase) -> t_cap_use(HOSTOWNER).
+// On a persistent pool each USER_CREATE returns st==2 (already-exists / admin-gated) --
+// also success. Any other outcome fails the boot loudly (return -1 -> joey exits) rather
+// than boot an unloginnable system.
 //
-// susan/cora/wheel and the AUTH/ADMIN_ELEVATE checks are TEST fixtures and stay
-// BOOT_PROBES-only. The corvus connect/exchange/payload below are a deliberately
-// trivial subset duplicated from the BOOT_PROBES helper block (joey.c ~176-375/1630),
-// which is gated out here; they are pure framing + byte-packing and a malformed frame
-// is rejected by corvus at boot (never a silent skip). The eventual home for account
-// provisioning is first-boot (INSTALLER.md), which retires this and the ladder copy.
+// susan/wheel + the ladder's E2E assertions stay BOOT_PROBES-only. Option F: the
+// CONTROL FLOW here is self-contained (a clean spine, no test assertions), duplicating
+// only the trivial corvus framing/byte-packing from the gated-out helper block; the
+// credential DATA is shared via the DEV_* #defines above the gate so the two paths
+// cannot drift on a cross-config pool. A malformed frame is rejected by corvus at boot
+// (never a silent skip). The eventual home for account provisioning is first-boot
+// (INSTALLER.md), which retires this and the ladder copy.
 static int pda_write_all(long fd, const unsigned char *b, size_t n) {
     size_t s = 0;
     while (s < n) { long w = t_write(fd, &b[s], n - s); if (w <= 0) return -1; s += (size_t)w; }
@@ -1705,6 +1739,26 @@ static int pda_write_all(long fd, const unsigned char *b, size_t n) {
 static int pda_read_exact(long fd, unsigned char *b, size_t n) {
     size_t g = 0;
     while (g < n) { long r = t_read(fd, &b[g], n - g); if (r <= 0) return -1; g += (size_t)r; }
+    return 0;
+}
+// pda_exchange -- one self-contained corvus request/response over `conn`, mirroring
+// the ladder's corvus_exchange (gated out here). A response that would overflow rx is
+// a transport error, never a silent truncation. On success rx[3 .. 3+*rlen_out] holds
+// the reply payload and *status the corvus status byte.
+static int pda_exchange(long conn, unsigned char verb,
+                        const unsigned char *payload, size_t plen,
+                        unsigned char *rx, size_t rx_cap,
+                        unsigned char *status, size_t *rlen_out) {
+    unsigned char hdr[4] = { verb, CORVUS_PROTOCOL_VERSION,
+                             (unsigned char)(plen & 0xff), (unsigned char)(plen >> 8) };
+    if (pda_write_all(conn, hdr, 4) != 0) return -1;
+    if (plen > 0 && pda_write_all(conn, payload, plen) != 0) return -1;
+    if (pda_read_exact(conn, rx, 3) != 0) return -1;
+    *status = rx[0];
+    size_t rlen = (size_t)rx[1] | ((size_t)rx[2] << 8);
+    if (3 + rlen > rx_cap) return -1;
+    if (rlen > 0 && pda_read_exact(conn, &rx[3], rlen) != 0) return -1;
+    *rlen_out = rlen;
     return 0;
 }
 // Connect /srv/corvus/ctl, retrying while corvus finishes posting (the two-step open
@@ -1727,48 +1781,132 @@ static long pda_connect(void) {
     (void)t_close(wr_y);
     return ctl;
 }
+// USER_CREATE payload (verb 5): user_len(1) + user + pass_len(2 LE) + pass + backend(1)=0.
+// Byte-identical to the ladder's build_user_create.
+static size_t pda_build_user_create(unsigned char *pl, const char *user, size_t ulen,
+                                    const char *pass, size_t plen) {
+    size_t o = 0;
+    pl[o++] = (unsigned char)ulen;
+    for (size_t i = 0; i < ulen; i++) pl[o++] = (unsigned char)user[i];
+    pl[o++] = (unsigned char)(plen & 0xff);
+    pl[o++] = (unsigned char)(plen >> 8);
+    for (size_t i = 0; i < plen; i++) pl[o++] = (unsigned char)pass[i];
+    pl[o++] = 0; // backend = passphrase
+    return o;
+}
+// Wipe a buffer: the USER_CREATE OK frame carries michael's one-time A-5c recovery
+// phrase, the AUTH OK frame the 33-byte session token, and tx the token + system
+// passphrase mid-spine; none is surfaced here (phrase display belongs to first-boot /
+// INSTALLER.md), so we do not leave a live credential in joey's stack frame. The
+// volatile pointer keeps a release-build optimizer from eliding the stores as dead
+// (the buffers die on return) -- the explicit-bzero property corvus relies on too.
+static void pda_scrub(unsigned char *b, size_t n) {
+    volatile unsigned char *v = b;
+    for (size_t i = 0; i < n; i++) v[i] = 0;
+}
 static int provision_dev_accounts(void) {
     long conn = pda_connect();
     if (conn < 0) {
         t_putstr("joey: provision_dev_accounts: connect /srv/corvus FAILED\n");
         return -1;
     }
-    // USER_CREATE michael (verb 5): user_len(1) + user + pass_len(2 LE) + pass + backend(1)=0
-    static const char user[] = "michael";
-    static const char pass[] = "correct-horse-battery-staple-v1";
-    const size_t ulen = sizeof(user) - 1;
-    const size_t plen = sizeof(pass) - 1;
-    unsigned char tx[64];
-    size_t o = 0;
-    tx[o++] = (unsigned char)ulen;
-    for (size_t i = 0; i < ulen; i++) tx[o++] = (unsigned char)user[i];
-    tx[o++] = (unsigned char)(plen & 0xff);
-    tx[o++] = (unsigned char)(plen >> 8);
-    for (size_t i = 0; i < plen; i++) tx[o++] = (unsigned char)pass[i];
-    tx[o++] = 0; // backend = passphrase
-    unsigned char hdr[4] = { 5, 1, (unsigned char)(o & 0xff), (unsigned char)(o >> 8) };
-    unsigned char rx[300];
-    if (pda_write_all(conn, hdr, 4) != 0 || pda_write_all(conn, tx, o) != 0
-        || pda_read_exact(conn, rx, 3) != 0) {
+    unsigned char tx[128];      // largest frame is ADMIN_ELEVATE: token(33) + 2 + sys_pass
+    unsigned char rx[300];      // largest reply is USER_CREATE OK: 3 + id + gid + phrase
+    unsigned char token[33];
+    unsigned char st;
+    size_t rlen, o;
+    // A future longer credential must not silently overflow tx -- refuse at build time.
+    _Static_assert(1 + (sizeof(DEV_MICHAEL_USER) - 1) + 2 + (sizeof(DEV_MICHAEL_PASS) - 1) + 1
+                       <= sizeof(tx), "USER_CREATE michael frame must fit tx");
+    _Static_assert(1 + (sizeof(DEV_CORA_USER) - 1) + 2 + (sizeof(DEV_CORA_PASS) - 1) + 1
+                       <= sizeof(tx), "USER_CREATE cora frame must fit tx");
+    _Static_assert(33 + 2 + (sizeof(DEV_SYSTEM_PASS) - 1) <= sizeof(tx),
+                   "ADMIN_ELEVATE frame must fit tx");
+
+    // 1. USER_CREATE michael -- the bootstrap user. st==0 fresh; st==2 an account
+    //    already exists (persistent pool: joey is not yet elevated, so corvus's admin
+    //    gate returns PermissionDenied BEFORE the exists check -- st==2 proves only
+    //    "some account exists"; AUTH below proves michael specifically). Either is ok.
+    o = pda_build_user_create(tx, DEV_MICHAEL_USER, sizeof(DEV_MICHAEL_USER) - 1,
+                              DEV_MICHAEL_PASS, sizeof(DEV_MICHAEL_PASS) - 1);
+    if (pda_exchange(conn, 5, tx, o, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: provision_dev_accounts: USER_CREATE michael transport FAILED\n");
-        (void)t_close(conn);
-        return -1;
+        goto fail;
     }
-    unsigned char st = rx[0];
-    size_t rlen = (size_t)rx[1] | ((size_t)rx[2] << 8);
-    if (rlen > 0 && 3 + rlen <= sizeof(rx)) {
-        (void)pda_read_exact(conn, &rx[3], rlen);   // drain the {id,gid,phrase} tail
+    pda_scrub(rx, sizeof(rx));   // the OK frame carried michael's recovery phrase
+    if (st != 0 && st != 2) {
+        t_putstr("joey: provision_dev_accounts: USER_CREATE michael unexpected status\n");
+        goto fail;
     }
+    t_putstr(st == 0 ? "joey: provision_dev_accounts: created michael (fresh pool)\n"
+                     : "joey: provision_dev_accounts: an account already exists (persistent pool)\n");
+
+    // 2. AUTH michael -> 33-byte session token (prefix 's'); proves michael's wrap is
+    //    loadable and the password matches.
+    o = 0;
+    tx[o++] = (unsigned char)(sizeof(DEV_MICHAEL_USER) - 1);
+    for (size_t i = 0; i < sizeof(DEV_MICHAEL_USER) - 1; i++) tx[o++] = (unsigned char)DEV_MICHAEL_USER[i];
+    tx[o++] = (unsigned char)((sizeof(DEV_MICHAEL_PASS) - 1) & 0xff);
+    tx[o++] = (unsigned char)((sizeof(DEV_MICHAEL_PASS) - 1) >> 8);
+    for (size_t i = 0; i < sizeof(DEV_MICHAEL_PASS) - 1; i++) tx[o++] = (unsigned char)DEV_MICHAEL_PASS[i];
+    if (pda_exchange(conn, 1, tx, o, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: provision_dev_accounts: AUTH michael transport FAILED\n");
+        goto fail;
+    }
+    if (st != 0 || rlen != 33 || rx[3] != 's') {
+        t_putstr("joey: provision_dev_accounts: AUTH michael FAILED\n");
+        pda_scrub(rx, sizeof(rx));
+        goto fail;
+    }
+    for (int i = 0; i < 33; i++) token[i] = rx[3 + i];
+    pda_scrub(rx, sizeof(rx));
+
+    // 3. ADMIN_ELEVATE(token + system passphrase) -> corvus writes joey's hostowner
+    //    grant; t_cap_use redeems it so the next USER_CREATE is admitted.
+    o = 0;
+    for (int i = 0; i < 33; i++) tx[o++] = token[i];
+    tx[o++] = (unsigned char)((sizeof(DEV_SYSTEM_PASS) - 1) & 0xff);
+    tx[o++] = (unsigned char)((sizeof(DEV_SYSTEM_PASS) - 1) >> 8);
+    for (size_t i = 0; i < sizeof(DEV_SYSTEM_PASS) - 1; i++) tx[o++] = (unsigned char)DEV_SYSTEM_PASS[i];
+    pda_scrub(token, sizeof(token));   // the token is consumed into the ELEVATE frame
+    if (pda_exchange(conn, 7, tx, o, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: provision_dev_accounts: ADMIN_ELEVATE transport FAILED\n");
+        goto fail;
+    }
+    if (st != 0) {
+        t_putstr("joey: provision_dev_accounts: ADMIN_ELEVATE FAILED\n");
+        goto fail;
+    }
+    if (t_cap_use(T_CAP_HOSTOWNER) != 0) {
+        t_putstr("joey: provision_dev_accounts: t_cap_use(HOSTOWNER) FAILED\n");
+        goto fail;
+    }
+
+    // 4. USER_CREATE cora -- joey now holds hostowner, so the admin gate admits it.
+    //    st==0 fresh; st==2 cora already exists (persistent pool). Either is ok.
+    o = pda_build_user_create(tx, DEV_CORA_USER, sizeof(DEV_CORA_USER) - 1,
+                              DEV_CORA_PASS, sizeof(DEV_CORA_PASS) - 1);
+    if (pda_exchange(conn, 5, tx, o, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: provision_dev_accounts: USER_CREATE cora transport FAILED\n");
+        goto fail;
+    }
+    pda_scrub(rx, sizeof(rx));
+    if (st != 0 && st != 2) {
+        t_putstr("joey: provision_dev_accounts: USER_CREATE cora unexpected status\n");
+        goto fail;
+    }
+    t_putstr(st == 0 ? "joey: provision_dev_accounts: created cora (fresh pool)\n"
+                     : "joey: provision_dev_accounts: cora already provisioned (persistent pool)\n");
+
+    pda_scrub(tx, sizeof(tx));       // tx still holds token bytes behind the last frame
     (void)t_close(conn);
-    if (st == 0) {
-        t_putstr("joey: provision_dev_accounts: created michael (fresh pool)\n");
-        return 0;
-    }
-    if (st == 2) {   // already-provisioned / not-elevated on a persistent pool -> michael exists
-        t_putstr("joey: provision_dev_accounts: michael already provisioned (persistent pool)\n");
-        return 0;
-    }
-    t_putstr("joey: provision_dev_accounts: USER_CREATE michael unexpected status\n");
+    t_putstr("joey: provision_dev_accounts: michael + cora ready\n");
+    return 0;
+fail:
+    pda_scrub(rx, sizeof(rx));       // symmetric hygiene: leave no credential on any exit
+    pda_scrub(tx, sizeof(tx));       // an ELEVATE-fail path can leave the full token in tx
+    pda_scrub(token, sizeof(token));
+    (void)t_close(conn);
     return -1;
 }
 #endif /* THYLA_DEV_ACCOUNTS && !THYLA_BOOT_PROBES */
@@ -1841,7 +1979,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // desync the baked phrase. On a fresh pool the host-baked wrap is intact.
     int fresh_pool = 0;
 
-    const char pass_michael[] = "correct-horse-battery-staple-v1";
+    const char pass_michael[] = DEV_MICHAEL_PASS;
     const char pass_susan[]   = "anatomy-trombone-glacier-velvet-42";
 
     // === USER_CREATE michael === (first user; bootstrap exception
@@ -1855,7 +1993,8 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // loaded from disk and joey is not yet elevated, so the admin gate returns
     // PermissionDenied -- accepted here; AUTH below proves the RELOADED wrap,
     // and RESOLVE_NAME proves the persisted id. Either path proceeds to AUTH.
-    pl = build_user_create(tx, "michael", 7, pass_michael, sizeof(pass_michael) - 1);
+    pl = build_user_create(tx, DEV_MICHAEL_USER, sizeof(DEV_MICHAEL_USER) - 1,
+                           pass_michael, sizeof(pass_michael) - 1);
     if (corvus_exchange(conn_fd, 5, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: USER_CREATE michael transport FAILED\n");
         return 1;
@@ -1898,7 +2037,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
     }
 
     // === AUTH michael (wrong passphrase) → BadAuth (1) ===
-    pl = build_auth(tx, "michael", 7, "wrong-passphrase", 16);
+    pl = build_auth(tx, DEV_MICHAEL_USER, sizeof(DEV_MICHAEL_USER) - 1, "wrong-passphrase", 16);
     if (corvus_exchange(conn_fd, 1, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: AUTH(wrong) transport FAILED\n");
         return 1;
@@ -1912,7 +2051,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
     t_putstr("joey: AUTH(wrong pass) returned BadAuth (expected)\n");
 
     // === AUTH michael (correct) → OK + 33-byte session token ===
-    pl = build_auth(tx, "michael", 7, pass_michael, sizeof(pass_michael) - 1);
+    pl = build_auth(tx, DEV_MICHAEL_USER, sizeof(DEV_MICHAEL_USER) - 1, pass_michael, sizeof(pass_michael) - 1);
     if (corvus_exchange(conn_fd, 1, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: AUTH transport FAILED\n");
         return 1;
@@ -1953,7 +2092,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // returns OK. Then joey redeems via t_cap_use → joey's Proc gets
     // CAP_HOSTOWNER. After this, joey can call admin-gated verbs
     // (USER_CREATE et al.).
-    pl = build_admin_elevate(tx, token, "thylacine", 9);
+    pl = build_admin_elevate(tx, token, DEV_SYSTEM_PASS, sizeof(DEV_SYSTEM_PASS) - 1);
     if (corvus_exchange(conn_fd, 7, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: ADMIN_ELEVATE transport FAILED\n");
         return 1;
@@ -2019,7 +2158,8 @@ static int do_corvus_bringup(long storage_dup_fd) {
     if (fresh_pool) {
         static const char sys_phrase[] = CORVUS_SYSTEM_RECOVERY_PHRASE;
         pl = build_recover_system(tx, (const unsigned char *)sys_phrase,
-                                  sizeof(sys_phrase) - 1, "thylacine", 9);
+                                  sizeof(sys_phrase) - 1,
+                                  DEV_SYSTEM_PASS, sizeof(DEV_SYSTEM_PASS) - 1);
         if (corvus_exchange(conn_fd, 8, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
             t_putstr("joey: RECOVER(system) transport FAILED\n");
             return 1;
@@ -2102,7 +2242,8 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // -- a local-VM affordance, NOT a security posture; cora joins michael/susan
     // in the baked test-identity set stripped for production builds (#880).
     // login provisions cora's encrypted home on her first interactive login.
-    pl = build_user_create(tx, "cora", 4, "kora", 4);
+    pl = build_user_create(tx, DEV_CORA_USER, sizeof(DEV_CORA_USER) - 1,
+                           DEV_CORA_PASS, sizeof(DEV_CORA_PASS) - 1);
     if (corvus_exchange(conn_fd, 5, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: USER_CREATE cora transport FAILED\n");
         return 1;
@@ -2507,7 +2648,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
         t_putstr("joey: reconnect t_srv_connect FAILED\n");
         return 1;
     }
-    pl = build_auth(tx, "michael", 7, pass_michael, sizeof(pass_michael) - 1);
+    pl = build_auth(tx, DEV_MICHAEL_USER, sizeof(DEV_MICHAEL_USER) - 1, pass_michael, sizeof(pass_michael) - 1);
     if (corvus_exchange(conn_fd3, 1, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: reconnect AUTH transport FAILED\n");
         return 1;
@@ -9295,8 +9436,9 @@ int main(void) {
         (void)t_close(corvus_storage);
 
 #if defined(THYLA_DEV_ACCOUNTS) && !defined(THYLA_BOOT_PROBES)
-        // Lean image: do_corvus_bringup spawned corvus but its provisioning ladder is
-        // compiled out, so create the login user here (the finding-#1 fix). A
+        // Lean image: do_corvus_bringup spawned corvus (with the elevation grant caps,
+        // stamped before the BOOT_PROBES gate) but its provisioning ladder is compiled
+        // out, so create the login users (michael + cora) here -- the finding-#1 fix. A
         // BOOT_PROBES build provisions via that ladder and skips this.
         if (provision_dev_accounts() != 0) {
             return 1;
