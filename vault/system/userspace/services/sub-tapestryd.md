@@ -416,6 +416,91 @@ yet a client-claimable `/srv/warp` file — the weft-share of the hostmem burrow
 (`WEFT_BIND_HOSTMEM`), the per-client venus device-ctx, and the `warp-prove`
 cross-Proc leg are V-3b-1c-2.
 
+### The server host3d-ring path (V-3b-1c-2a)
+
+The 1c-1 engine minted rings internally (the probe). V-3b-1c-2a wires it into the
+`/srv/warp` SERVER so a HOST3D ring is a first-class ring flavor under a client's
+warp ctx — the tapestryd half of the client-claimable ring (the weft-share client
+CLAIM + the `warp-prove` cross-Proc leg are 1c-2b). Four pieces, all in
+`server.rs` bar a one-line `gpu.rs` wrapper and a `main.rs` call:
+
+**The per-client venus device-ctx.** `WarpCtx` gains `venus_ctx: Option<u32>`,
+**lazily** created on the first host3d ring mint (`wctx_venus_ensure` →
+`gpu.ctx_create_venus`, capset-4) and destroyed with the warp ctx in
+`wctx_finish` (condemn-slot-on-refuse, before the `dev_ctx` destroy — else a
+reused slot could re-mint the venus id into a live host ctx). A client that mints
+only V-3a guest-blob rings pays no venus ctx. Section 0.6 ratifies one venus ctx
+per client (V-3b-2's forward reuses it, no rework). The id is a **dedicated band**
+`WARP_VENUS_CTX_BASE (0x200) + slot`, pinned disjoint by a `const _` gap assert +
+a `conv_attempt` `debug_assert`. The band matters because the recon's first
+choice — `COMPOSITOR_CTX + 1 + slot` — **aliases `CONV_PROBE_CTX_BASE`
+(`COMPOSITOR_CTX + 1`)**, the conv-probe throwaway ids: an enumerate-mirrors catch
+found by grepping every `ctx_create*` id before writing, not after a collision.
+Temporally the conv throwaways are destroyed before any client mints, so the
+alias was latent; the disjoint band + the assert make it structural.
+
+**The HOST3D ring flavor — ADD, not replace.** `ring/new` accepts
+`"<bytes> <ridx> host3d"` (a bare `"<bytes> <ridx>"` stays the coherent guest-blob
+ring; an unknown third token is rejected). `wring_mint` gains `host3d: bool` and,
+after the SHARED validation + the I-32 backing-budget + the ridx checks (so a
+host3d ring is bounded EXACTLY like a guest-blob ring), branches to
+`wring_install_host3d` — mint via the 1c-1 `mint_host3d_ring` under the venus ctx,
+install `WarpRing { dma_fd: -1, host3d: Some(hr), .. }`. A venus-ctx or engine
+failure fails the mint CLEAN (the engine unwinds its own partial state; a venus
+ctx created-then-mint-fails is cleaned at `wctx_finish`).
+
+**Teardown routes to the engine.** `WarpRing` gains `host3d: Option<HostRing>`;
+`wring_teardown` moves the non-`Copy` token into `drop_host3d_ring` and `return`s
+BEFORE the guest-blob `res_unref` / `dma_fd` path, so a host3d ring's resource is
+unref'd exactly once (by the engine) — the type system forbids a second drop, and
+the early `return` forbids a double-unref. `dma_fd: -1` is safe at every reader:
+`wring_weft_ensure` returns `None` for it (host3d weft-share is 1c-2b's
+`WEFT_BIND_HOSTMEM`, not the guest-blob `t_weft_share`), and the guest-blob detach
+is past the early `return`. `wring_teardown` is the SOLE ring-free path
+(`wctx_finish`'s loop), so no free bypasses the host3d arm.
+
+**The kick fail-closed guard** — the self-audit catch. Because the flavor is
+client-reachable via `ring/new` at 1c-2a (not only the self-test), a client can
+create a host3d ring AND `kick` it; `wring_kick` reads the V-3a `WARP_RING_OFF_*`
+control header, which a host3d ring does NOT carry (its memory is Venus's format).
+Un-guarded, a kick would write V-3a control words into a Venus page — bounded by
+the round-2 drain cap and contained to the client's own ring (no UAF, no
+cross-ctx), so not a soundness hole, but wrong. `wring_kick` now rejects a host3d
+ring `E_OPNOTSUPP`; the real host3d kick becomes `gpu.submit_3d(dev_ctx, ridx, cs)`
+at V-3b-2. (The `map` path already fails cleanly via `wring_weft_ensure`; the
+`fence` read blocks with no completions, which is the fence contract, not a bug.)
+
+**The boot self-test** (`warp_host3d_selftest`, called from `serve()` before
+READY, self-skipping like the gpu probes) mints a warp ctx under a synthetic conn
+(`u64::MAX` — unreachable by the `wrapping_add(1)`-from-0 conn counter, and torn
+down before the accept loop), mints a host3d ring, round-trips a sentinel at the
+ring VA, and finishes the ctx — exercising the venus-ctx create/destroy, the ring
+install, and `wring_teardown`'s host3d arm end to end with NO client. One line:
+`warp host3d-ring venus-ctx=<id> MAPPED+ROUNDTRIP teardown OK` (only on a
+successful round-trip; a mismatch → `FAIL`, a 2D/no-blob/no-venus device →
+`skipped`). It asserts the SERVER WIRING, not host distinctness — 1c-1's
+`hostmem_ring_probe` already proves the physical host-backing. The `venus-verdict`
+gate gains a server-path leg (the `venus-ctx=` line present on the test boot,
+absent + a `skipped` line on the 2D control); `test-venus-verdict.sh` proves the
+discrimination without a boot (28/28), including a `FAIL` sabotage.
+
+Audit (holotype-reviewer Fable 5 max, family diversity): 0 P0 / 1 P1 / 1 P2 / 3
+P3, all fixed; GL-verified on thyla-pi KVM/V3D. **F1 [P1] was the author's miss**:
+the venus destroy sat below the `wctx_finish` leak-arm return, and the vindication
+recovery un-poisons the slot destroying only dev_ctx — a wedged-then-recovered
+slot leaked its venus ctx AND permanently lost host3d (EEXIST on re-mint). The
+self-audit reasoned the leak arm was "consistent with dev_ctx" and stopped at the
+boundary of the changed function; the bug lived one call away in the vindication
+path it never opened — the whole-system-stewardship failure mode, closed by a
+context-independent reviewer. Fix: destroy venus in the leak arm too (quiesced by
+construction here), skip the vindicate stamp on a refused destroy. F2 [P2] the
+recycled-hostmem zero above. Two gate-instrument lessons this rung: the no-boot
+28/28 tests the VERDICT, not the CAPTURE — the real venus boot found
+`boot-probe.sh`'s `tapestryd: gpu`-only filter dropping the `warp` self-test line
+(broadened to `gpu|warp host3d-ring`); and F4, "teardown OK" was keyed on the
+sentinel alone until it was made to read the poisoned flag — an assertion is not
+an observation.
+
 ## Data structures
 
 `Surface`: the current `Weave` (handle, VA, size, optional share id),
