@@ -135,13 +135,19 @@ cmd_run() {
     # The WORKING COPY of build.sh, which may carry uncommitted recipe edits.
     # This is the whole anti-drift story: the VM runs this exact file.
     cp "$REPO_ROOT/tools/build.sh" "$payload/build.sh"
+    # build.sh sources build-config.sh + reads configs/ on EVERY invocation
+    # (docs/BUILD-CONFIG-DESIGN.md). Overlay the working copies so the VM's cloned
+    # tree (cloned from main below, which may predate the configurator arc) cannot
+    # shadow them -- else build.sh dies at "build-config.sh: No such file".
+    cp "$REPO_ROOT/tools/build-config.sh" "$payload/build-config.sh"
+    cp -R "$REPO_ROOT/configs"            "$payload/configs"
     # Stage 1's recipe, shared verbatim with clade-keep-build.sh. It used to be
     # inlined in the remote script below; two builder drivers now need it, and a
     # hand-copied second mirror is the #100 failure mode.
     cp "$REPO_ROOT/tools/clade-stage1.sh" "$payload/clade-stage1.sh"
     write_remote_script > "$payload/remote-build.sh"
 
-    tar -C "$payload" -czf "$payload/payload.tgz" patches build.sh clade-stage1.sh remote-build.sh
+    tar -C "$payload" -czf "$payload/payload.tgz" patches build.sh build-config.sh configs clade-stage1.sh remote-build.sh
     gc compute scp "$payload/payload.tgz" "$name:~/payload.tgz" --zone="$ZONE" >/dev/null
 
     say "launching the build (detached; it survives an ssh drop)"
@@ -275,6 +281,8 @@ if [[ ! -d ~/thylacine ]]; then
   git clone --depth 1 https://github.com/apology-is-policy/thylacine.git ~/thylacine
 fi
 cp ~/payload/build.sh ~/thylacine/tools/build.sh
+cp ~/payload/build-config.sh ~/thylacine/tools/build-config.sh
+rm -rf ~/thylacine/configs && cp -R ~/payload/configs ~/thylacine/configs
 chmod +x ~/thylacine/tools/build.sh
 
 phase "stage 2: sysroot + libcxx + clade (the REAL build.sh recipe)"
