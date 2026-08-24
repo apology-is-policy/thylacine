@@ -246,9 +246,14 @@ Which of these is it?
      await -- a blocking acquire ("yip hold <res>" blocks until free), a
      background task that re-invokes you on completion, a queue you can join?
      If YES, TRIGGER it and stay in-turn: you are re-invoked when it fires, no
-     human round-trip. STOPPING IS CORRECT ONLY for a wait with NO synchronous
-     await -- a truly opaque gate you cannot usefully wait on; then name what
-     unblocks it.
+     human round-trip. AND before you START anything that USES a resource a
+     parallel agent can contend -- the shared host's cores for a build, gate,
+     or boot -- do not run it bare: take the yip lease FIRST ("yip hold <res>"),
+     which both blocks-until-free as that synchronous await AND signals
+     ownership so the peer does not start competing work on it; release it the
+     moment the resource frees, not when your workflow ends. STOPPING IS CORRECT
+     ONLY for a wait with NO synchronous await -- a truly opaque gate you cannot
+     usefully wait on; then name what unblocks it.
   4. None of the above. Then the next chunk is the one you just named on your
      own "Next"/"Ahead" line -- OPEN IT in this turn instead of yielding.
 
