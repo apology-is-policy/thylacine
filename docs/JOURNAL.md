@@ -22,6 +22,59 @@ needed the operator.
 
 ---
 
+## 2026-08-24 (aux) — /clade/bin on PATH + clang works off the sysroot by default
+
+Operator ask, off the back of the configurator arc: the flag wall to compile a hello on
+Clade (`--sysroot=/clade/sysroot -nostdinc++ -isystem ... -lc++ -lc++abi -lunwind ...`) is
+tedious -- should we patch clang to default to the Clade sysroot, and put `/clade/bin` on
+a PATH (did Plan 9 even have PATH)? I researched before answering, per the design-fork rule.
+
+**The PATH question dissolved into "Thylacine already has one, hybrid."** Plan 9 essentially
+had no `$PATH` (it bound bin dirs into `/bin` via the namespace). But Thylacine already runs
+a hybrid: the shell resolves a bare command via a STATIC `$path` list
+(`eval/stmt.rs:547`, `["/bin/","/","/goroot/bin/"]`) MIRRORED by a login-seeded `$PATH`
+env var for POSIX/Go tools (`login/main.rs:949`; `which.rs` documents the pair and says
+"drift is a bug"). `/goroot/bin` was the exact precedent. So Part 2 (`1c571a62`) is just
+`/clade/bin` added to all FIVE mirror sites the drift rule demands -- not two. Boot-verified.
+
+**Part 1: configure clang, don't patch it.** The whole wall collapses to `clang++ hello.cpp`
+with five CMake driver defaults on the DEVICE clang build (`1750f505`), `DEFAULT_SYSROOT`
+the load-bearing one. A delegated map traced it through the CL-3 driver source: it reads
+`Driver::SysRoot` for the bare-layout search `/clade/sysroot` actually uses, so the default
+gives it everything; the other four are already hardcoded by the driver (belt-and-suspenders).
+Crucially the map caught the trap: the flags go on `build_clade` (the device clang), NEVER
+`clade-stage1.sh` (the host cross-clang) -- an absolute `/clade/sysroot` there would break
+every host build. It is purely additive (explicit `--sysroot` still overrides), so nothing
+existing regresses. Verified by REBUILDING the device clang on thyla-keep (~13 min, ~$0.60):
+STATUS OK and the produced CMakeCache confirms `DEFAULT_SYSROOT=/clade/sysroot` baked in.
+
+**Verifying Part 1 found a regression MY OWN arc introduced.** The configurator arc made
+`build.sh` source `build-config.sh` + read `configs/` on every invocation -- but both clade
+builder scripts sync only `build.sh`, so the first thyla-keep rebuild died at line 117,
+"build-config.sh: No such file". Fixed both (`1a899a31`); whole-system stewardship, my
+breakage to own. (A second wall was pure VM-state rot: thyla-keep's tree was missing the
+committed `third_party/mesa-gl-headers/`; re-scp'd.)
+
+**The end-to-end boot-test became a ut rabbit hole, and the operator called it.** I baked a
+lean `/clade` image and drove `clang` at the `ut` prompt. Four boots, each surfacing a new
+ut issue: (1) ut rejects an echo'd C-source one-liner; (2) ut rejects `cmd && cmd`
+(`UnexpectedTokenAfterFailPropagate` -- confirmed, split commands parse); (3) ut cannot bind
+a private `/tmp`, so clang can't make temp files (`-save-temps` sidesteps it). At that point
+the operator said "remember them and fix them after" -- recorded in `bug_ut_parser_findings.md`.
+**But the fourth boot was the payoff:** with `-save-temps` + split commands, bare `clang`
+RESOLVED via `/clade/bin` on `$path`, RAN, and REACHED cc1 -- erroring on a bug in my test
+SOURCE (`__builtin_puts` at col 18), NOT on a missing sysroot. **A missing sysroot fails
+completely differently** (`fatal error: 'stdio.h' file not found`), so reaching cc1 IS the
+evidence that DEFAULT_SYSROOT works on-device -- on top of the machine-confirmed CMakeCache
+bake. I removed the premature `clade-hello.exp` (it can't cleanly pass until the ut fixes,
+and `test-interactive.sh` runs every `*.exp` -- it would have broken routine LS-CI on the
+default no-`/clade` image). A proper self-skipping witness is owed after the ut fixes.
+
+**Still open:** the three ut findings (owed, operator-deferred); the operator's untracked
+`COMPILING-ON-THYLACINE.md` says `--sysroot` is mandatory and is now stale (flagged, not
+edited -- it's theirs); the `#156` clade fetch-set gap (fetch doesn't bring `cxx-rt`; a
+prior complete stage saved the bake).
+
 ## 2026-08-24 (aux) — build-configurator docs + arc close (lane 6)
 
 The docs lane, and with it the whole build-configurator arc closes. Three deliverables:
