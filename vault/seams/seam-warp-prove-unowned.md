@@ -1,13 +1,13 @@
 ---
 id: seam-warp-prove-unowned
 type: seam
-title: "usr/warp-prove/src is UNOWNED -- the Warp gate prover has no dossier"
+title: "the Warp gate test-infra (warp-prove + the venus verdict) is UNOWNED -- no dossier"
 status: open
 surface: [sub-tapestryd]
 opened-by: chg-2026-08-19-v3a-ring
 tracker: "V-3a coherent-ring doc pass, 2026-08-19"
 created: 2026-08-19
-updated: 2026-08-19
+updated: 2026-08-24
 ---
 ## Owed
 
@@ -21,6 +21,19 @@ names it in `code:`, so the doc-update cutover routes its prose to
 `docs/reference/149-warp.md` (the gate-prover section) rather than the
 vault. This seam records that routing decision so a future coverage sweep
 ratifies it rather than re-discovering it at each doc pass.
+
+**The venus gate tools join this class (V-3b-1a, 2026-08-24).**
+`tools/warp-host.sh` (the `venus` verb + its `venus-verdict` sub-verb, the
+GL-host boot driver + the two-leg discrimination) and
+`tools/test-venus-verdict.sh` (the crafted-log unit test that sabotage-checks
+the verdict without a boot) are ALSO `quaestor owner`-UNOWNED, and are the same
+kind of surface as the prover: test-infra whose discrimination logic documents
+itself at the point it runs. The V-3b-1a HOST3D-substrate gate lands its
+host3d assertions in exactly these two files. Same routing decision, same
+sweep — recorded here so the next doc pass does not re-litigate it. (`warp-host.sh`
+is separately PINNED by `abi-boot-banner` as a boot-output consumer; that pin
+is orthogonal to this ownership routing and is untouched by the venus-verdict
+gate, which reads no boot-banner string.)
 
 ## What closes it
 

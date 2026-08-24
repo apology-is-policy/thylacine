@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-08-19
+updated: 2026-08-24
 ---
 ## Purpose
 
@@ -279,6 +279,64 @@ rescue design note + `docs/WARP-V3-DESIGN.md` section 4).
 blob's `seq` word — the guest's zero-syscall poll fast-path — and the
 blocking `ring/<ridx>/fence` reader learns the same value via
 `poll_ring_fences` (coalesced at `reported_seq`).
+
+### The HOST3D map-blob substrate (V-3b-1a)
+
+Warp-6 V-3b (Model B) needs a ring that *virglrenderer* consumes, and that
+demands a **host-allocated** blob (the coherent ring above is `blob_mem=GUEST`,
+the opposite backing). Three `gpu.rs` methods build it — the substrate on which a
+later rung mints Venus's real command ring:
+
+| method | command | request | response |
+|---|---|---|---|
+| `create_host3d_blob(res, ctx, flags, len)` | `RESOURCE_CREATE_BLOB` `0x010c` | HDR+32 | `OK_NODATA` |
+| `map_blob(res, offset) -> map_info` | `RESOURCE_MAP_BLOB` `0x0208` | HDR+16 | `OK_MAP_INFO` `0x1106` |
+| `unmap_blob(res)` | `RESOURCE_UNMAP_BLOB` `0x0209` | HDR+8 | `OK_NODATA` |
+
+`create_host3d_blob` sets `blob_mem=HOST3D` (`0x0002`), `blob_id=0`, and
+`nr_entries=0` — the host allocates the storage, so there is **no guest
+`mem_entry`** and the request is HDR+32 (the GUEST `resource_create_blob` is
+HDR+48: same fixed fields at the same offsets, plus one 16-byte `mem_entry`). The
+`ctx_id` rides the header; QEMU passes it straight to virglrenderer. `map_blob`
+does `memory_region_add_subregion(&hostmem, offset, mr)` host-side, so the blob's
+bytes surface at `hostmem_base + offset` — the PA a guest then maps via the V-2
+`SYS_BURROW_FROM_HOSTMEM` — and returns the `virtio_gpu_resp_map_info` cache
+word. That word is read at `RESP + HDR` (`+24`), which `submit_and_wait`'s
+header-only zero (`0..24`) does not cover, so `map_blob` **pre-zeroes `RESP+24`
+before submit** (the `get_capset_info` residue rule): a short-writing device then
+reads as cache `0`, never a prior response's bytes.
+
+**The venus-context requirement ([[inv-i45]], proven on GL 2026-08-24).** A
+`HOST3D` `blob_id=0` `USE_MAPPABLE` blob is the **vkr (venus renderer) shm path**
+(`vkr_context.c`: `blob_id==0 && blob_flags==USE_MAPPABLE`), and virglrenderer
+serves it ONLY under a **capset-4 (venus) context**. A create under a virgl
+context or device-global is refused (`RESP_ERR_UNSPEC` / `EINVAL`). So the ring
+is minted under a venus context tapestryd owns — the [[inv-i45]] scope is the
+host-side resource context, and tapestryd still forwards raw venus command bytes
+without parsing them.
+
+**The init self-test (`host3d_probe`).** Runs pre-Server, after `blob_probe`, so
+no client resource or context is live. It skips *out loud* — a positive
+`host3d-map skipped (...)` line, never silence — when `F_RESOURCE_BLOB` is
+unoffered, when `shm_region(1)` is absent (no hostmem BAR), or when CONTEXT_INIT
+was not negotiated. Two arms settle the context question: **Arm A** (a venus
+capset-4 context, then torn down) creates + MAPs the blob — the positive, and the
+Model B substrate; **Arm B** (device-global, `ctx_id 0`, a distinct offset) is
+the **negative control** whose refusal proves the venus-ctx requirement is real,
+not incidental to Arm A. Each arm's order is create → map → unmap → unref, and
+the resource is unref'd before Arm A's ctx is destroyed. Because a HOST3D blob
+has no guest backing, there is no `Dma` to unmap under a live host reference (the
+`blob_probe` SF1 hazard does not arise here); a refused unref leaks only a
+never-reused host resource id, bounded to one context's worth.
+
+**Host prerequisite.** virglrenderer's venus renderer forks the
+`virgl_render_server` binary (`/usr/libexec/virgl_render_server`) to service
+HOST3D shm resource ops. Debian's process-mode `libvirglrenderer1` ships no such
+binary, and without it `get_blob` returns a bare `EINVAL` with no fork-fail log —
+the silent-failure signature that made the first proof a multi-boot hunt. thyla-pi
+was provisioned with it (built from virglrenderer 1.1.0 source, installed
+additively — it does not touch `libvirglrenderer.so`). Any fresh venus GL host
+needs the same.
 
 ## Data structures
 
