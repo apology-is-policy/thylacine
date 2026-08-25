@@ -22,6 +22,106 @@ needed the operator.
 
 ---
 
+## 2026-08-26 — V-3b-3c-1: the F1 full fix (a per-ring destroy verb), and why device-memory is the *next* chunk not this one
+
+V-3b-3c's operator-ratified milestone is device memory (`vkAllocateMemory` +
+`vkMapMemory`). Before touching it I split the arc: **3c-1 closes the V-3b-3b
+audit's owed P1 (F1); 3c-2 is the bo milestone.** The split is sequencing within
+a ratified arc, not a scripture fork — but it is load-bearing, because F1 is the
+exact hazard device-memory churn would trip, so it lands on a sound ring
+lifecycle rather than atop a known-open P1.
+
+**What F1 was.** V-3b-3b's backend allocated host3d command-ring slots (ridx
+0..63) and tapestryd retired a ring only at ctx death — there was no per-ring
+destroy. Freeing + reusing a ridx therefore collided with the still-installed
+server slot (`ring/new host3d <ridx>` -> E_INVAL), permanently wedging
+`shmem_create`. The interim dodged it by making ridx alloc **monotonic** (never
+freed): a bounded 64-slot/ctx leak, benign for a single bring-up, fatal under
+the ring churn a real driver does.
+
+**Reconnaissance corrected a load-bearing belief.** An Explore pass over the
+hostmem plumbing found the observe-and-reap engine (`retire_host3d_ring` /
+`reap_hostmem_parked` / `SYS_HOSTMEM_REFCOUNT`) *already built* at 1c-2b — F1
+was never missing machinery, only a client-invocable trigger wired to it. It
+also corrected the mechanism I had half-wrong for 3c-2: a Venus app client holds
+**no PCI handle**, so it cannot call `t_burrow_from_hostmem` (needs RIGHT_MAP on
+a KObj_PCI). The client maps hostmem via **weft** (`t_weft_map`), exactly like
+the command ring; tapestryd is the only actor that calls `burrow_from_hostmem`.
+The design op-table's "bo_ops -> SYS_BURROW_FROM_HOSTMEM" describes tapestryd's
+internal step, not the backend's — which would otherwise be an impossible client
+capability. That correction reshapes 3c-2 (device-memory bo ~= the command ring
+in substrate, differing in `blob_id=mem_id` + exposure) and is recorded here so
+3c-2 does not re-derive it.
+
+**The fix.** A `ring/<ridx>/ctl destroy` verb (`WFK_RING_CTL`) whose handler
+(`Comp::wring_destroy`) takes the WarpRing out of its ctx slot — freeing the
+slot — then runs the existing `wring_teardown` (disarm the weft share ->
+`retire_host3d_ring`: observe-and-reap the hostmem backing). Ownership-gated by
+the same conn scan as `wring_kick` (I-45). The backend
+(`thylacine_shmem_destroy_now`) now unmaps, then issues the destroy verb, then
+frees the guest ridx **only if the verb succeeded** — preserving the invariant
+"guest ridx free <=> server slot free", so a reused ridx can never collide with
+a still-installed slot; a refused destroy falls back to the interim's
+leak-until-ctx-death for that one slot (fails safe).
+
+**A subtlety worth the ink: the reap arm is decided by ordering.** The backend
+`t_close`s the map fid before the destroy RPC. `t_close` synchronously drops the
+client's kernel mapping (`dev9p_close` -> `weft_binding_release`), so by the time
+`retire_host3d_ring` reads `SYS_HOSTMEM_REFCOUNT` the count is back to 1
+(tapestryd's own map) and the ring reaps *immediately* rather than parking. If
+that ordering were reversed the ring would park and reap later — still correct,
+never a cross-client alias, because the observe-and-reap refuses to free an
+offset under any live-or-pending client reference. The self-test proves the
+immediate arm: it re-mints the freed offset in the same breath.
+
+**The witness the old one was blind to.** The V-3b-3b bring-up creates a handful
+of rings and never re-mints a ridx, so it could not see F1 at all. A tapestryd
+boot self-test (`warp_ring_recreate_selftest`) mints at ridx 0, destroys via the
+verb, asserts the slot freed, and re-mints at ridx 0 — the re-mint is the load-
+bearing assertion (E_INVAL "already minted" here *is* the F1 divergence).
+Witnessed on thyla-pi/KVM real V3D: `warp ring-recreate ridx-reuse OK (destroy
+-> re-mint ridx 0)` at boot-log line 2206, `THYLACINE-VENUS-PROVE PASS` at 2230
+(the backend's new destroy-on-teardown did not regress bring-up), `Thylacine
+boot OK` at 2862, no extinction. The mesa cross-build on thyla-keep was clean
+(2.7 s) and the new `ctx/%u/ring/%u/ctl` format string is baked into the binary
+(behavioral proof, not a build-chain inference).
+
+**What this does NOT cover.** F5 (the wait ns-timeout) stays a documented P3
+deferral: there is no live finite-timeout caller (teardown wants completion,
+`UINT64_MAX`), and a monotonic clock IS reachable (`t_clock_gettime` +
+`os_time_get_nano`), so it is buildable when a finite-timeout waiter exists — it
+is pulled into 3c-2 if one emerges, else it stays tracked. Bundling a new
+poll-loop + its timeout-expiry test into the F1 chunk would only dilute the
+focused audit.
+
+**Audit — 0 P0 / 0 P1 / 1 P2 / 2 P3, and the P2 was the reusable catch.** The
+holotype (Fable 5) re-derived the whole mechanism sound — the I-45 double gate,
+double-destroy-impossible (the non-Copy `HostRing`), the observe-and-reap
+ordering under the new caller (including the claim-race: share disarmed before
+the refcount read, so sum>=2 parks and sum==1 reclaims, never a cross-client
+alias), and the two-sided ridx invariant. Then it found F1 [P2], which my own
+self-audit missed: **the regression witness I was so pleased with was wired into
+no gate.** The boot-probe capture filter (`grep -aE "tapestryd: gpu|tapestryd:
+warp host3d-ring"`) does not match `warp ring-recreate`, so the line was dropped
+from the captured evidence, and no venus-gate leg or verdict-test sabotage
+covered it — I had read `ring-recreate ridx-reuse OK` by eye from a raw log and
+called it a witness. That is precisely the pinned #245 class ("a witness with no
+caller rots") and the exact half the 1c-2a precedent had shipped *with* its
+selftest. The catch is the context-independence dividend: a same-family reviewer
+that re-derives claims from the code rather than trusting the run. Fixed all
+three legs — the filter (capture reconfirmed against the real boot log), a
+warp-host.sh venus-gate test+control leg, and three test-venus-verdict sabotage
+arms (`DISCRIMINATES` 31/31). F2 [P3] (the mesa create-path error arms kept the
+interim leak under now-false "monotonic/reaps-at-ctx-death" comments) —
+comments corrected, the convergence code deferred to 3c-2's mesa rebuild
+(tracked, not dropped). F3 [P3] (the v3d-fork note prescribed vindication-defer,
+wrong for the mid-life `wring_destroy` caller whose shape is `wbo_destroy`'s
+`fences_in_flight` defer) — comment extended. Not dirty; no re-audit. None of
+the three touched a binary (tool + comment fixes), so the witnessed binaries
+stood — no rebuild, no re-boot. Closed list: `memory/audit_v3b3c1_closed_list.md`.
+
+---
+
 ## 2026-08-25 — V-3b-3b: real Venus vkCreateInstance on real V3D silicon (two root causes, both caught by the boot log)
 
 The V-3b-3b chunk: turn the V-3b-3a skeleton (stubs) into a working `vn_renderer`

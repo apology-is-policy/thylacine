@@ -439,6 +439,7 @@ const WFK_RING_MAP: u64 = 1;
 const WFK_RING_KICK: u64 = 2;
 const WFK_RING_FENCE: u64 = 3;
 const WFK_RING_INFO: u64 = 4;
+const WFK_RING_CTL: u64 = 5;
 
 fn make_wctx(id: u32, fk: u64) -> u64 {
     WARP_FLAG | WARP_CTX | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
@@ -6463,6 +6464,45 @@ impl Comp {
         None
     }
 
+    /// V-3b-3c (F1 full fix): retire ONE ring the caller owns and FREE its ctx
+    /// slot, so the ridx becomes re-mintable. The per-ring analog of the
+    /// wctx_finish ring loop: TAKE the WarpRing out of its slot (which frees the
+    /// slot -- a None slot re-mints via wring_mint's `taken` check), then
+    /// wring_teardown it (disarm the weft share + observe-and-reap the hostmem
+    /// backing). Taking the ring by value first makes self.gpu and warp_ctxs
+    /// borrow disjointly for the teardown (the wctx_finish borrow pattern). I-45:
+    /// only the ctx owner (conn) can name the ring -- the ownership scan is the
+    /// gate. The V-3b-3b interim left ridx alloc monotonic precisely because
+    /// there was no way to retire ONE ring short of ctx death; this closes it.
+    fn wring_destroy(&mut self, ring_pub: u32, conn: u64) -> Result<(), u32> {
+        let mut found: Option<(usize, usize)> = None;
+        for (si, slot) in self.warp_ctxs.iter().enumerate() {
+            let c = match slot.as_ref() {
+                Some(c) => c,
+                None => continue,
+            };
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            if let Some(ri) = c.ring_slots.iter().position(|r| {
+                r.as_ref().map_or(false, |r| r.pub_id == ring_pub && !r.retiring)
+            }) {
+                found = Some((si, ri));
+                break;
+            }
+        }
+        let (si, ri) = found.ok_or(p9::E_NOENT)?;
+        // take() frees the slot; the warp_ctxs borrow ends with this statement,
+        // so self.gpu is free to borrow for the teardown below.
+        let taken = self.warp_ctxs[si]
+            .as_mut()
+            .and_then(|c| c.ring_slots[ri].take());
+        if let Some(mut r) = taken {
+            Self::wring_teardown(&mut self.gpu, &mut r);
+        }
+        Ok(())
+    }
+
     /// The ring Tweft mint (the weft_ensure precedent): share once, echo the
     /// stored id thereafter. Lazy, exactly like `wbo_weft_ensure`.
     fn wring_weft_ensure(&mut self, ring_pub: u32, conn: u64) -> Option<(u64, u32)> {
@@ -6916,8 +6956,16 @@ impl Comp {
     /// row); (d) res_id is monotonic, never re-minted into the abandoned stream's
     /// view. WHEN THE RENDERER BECOMES OURS (the v3d fork, I-45 "where it becomes
     /// ours to keep"), chain (c) stops being someone else's guarantee: the
-    /// host3d-ring unref must then DEFER to the vindication (like venus_ctx --
-    /// F1) rather than free here. The client-mapping case is already deferred
+    /// host3d-ring unref must then defer to in-flight completion rather than free
+    /// here -- and the RIGHT deferral depends on the caller. From wctx_finish
+    /// (ctx death) that is the vindication (like venus_ctx -- F1), which exists
+    /// on that path. From wring_destroy (V-3b-3c-1, a client retiring ONE ring
+    /// mid-ctx-life) there is NO vindication to defer to; its v3d-era shape is
+    /// the wbo_destroy one (defer on `fences_in_flight != 0`, pump-finish on
+    /// quiesce), NOT a vindication. Today both are doc-only: legs (a),(b),(d)
+    /// hold identically for the verb path and a guest-blob ring's resource is
+    /// never ctx-attached (never CS-reachable), so the wedge chain above already
+    /// covers the mid-life caller. The client-mapping case is already deferred
     /// below: retire_host3d_ring PARKS (never frees) while any client still
     /// references the ring.
     fn wring_teardown(gpu: &mut Gpu, r: &mut WarpRing) {
@@ -7310,6 +7358,56 @@ impl Comp {
                 got,
                 refs,
                 teardown_ok
+            );
+        }
+    }
+
+    /// V-3b-3c (F1 full-fix regression): prove a host3d ring's ridx is
+    /// RE-MINTABLE after wring_destroy. The V-3b-3b interim made the backend's
+    /// ridx alloc monotonic because a retired ring's server slot stayed
+    /// installed until ctx death, so a re-mint at the same ridx collided
+    /// (wring_mint's `taken` check -> E_INVAL). This mints at ridx 0, destroys
+    /// via the per-ring verb (freeing the slot + observe-and-reaping the hostmem
+    /// backing), asserts the slot is free, then re-mints at ridx 0 -- which MUST
+    /// now succeed. The bring-up witness (a single alloc, no re-mint) is
+    /// structurally blind to this, so the guard lives here.
+    pub fn warp_ring_recreate_selftest(&mut self) {
+        if !self.gpu.blob {
+            return; // warp_host3d_selftest already reported no-blob
+        }
+        const SELFTEST_CONN: u64 = u64::MAX;
+        let ctx_pub = match self.wctx_mint(SELFTEST_CONN) {
+            Some(p) => p,
+            None => return, // 2D device -- warp_host3d_selftest reported it
+        };
+        let slot = match self.wctx_slot(ctx_pub) {
+            Some(s) => s,
+            None => return, // just minted -> unreachable
+        };
+        if self.wring_mint(ctx_pub, SELFTEST_CONN, PAGE, 0, true).is_err() {
+            self.wctx_finish(slot, false);
+            return; // non-venus device -- warp_host3d_selftest reported it
+        }
+        let ring_pub = self
+            .wctx(ctx_pub, SELFTEST_CONN)
+            .and_then(|c| c.ring_slots[0].as_ref())
+            .map_or(0, |r| r.pub_id);
+        let destroyed = self.wring_destroy(ring_pub, SELFTEST_CONN).is_ok();
+        let slot_freed = self
+            .wctx(ctx_pub, SELFTEST_CONN)
+            .map_or(false, |c| c.ring_slots[0].is_none());
+        // The load-bearing assertion: ridx 0 re-mints now that the slot is free
+        // (E_INVAL "already minted" here is the exact F1 divergence).
+        let remint_ok = self
+            .wring_mint(ctx_pub, SELFTEST_CONN, PAGE, 0, true)
+            .is_ok();
+        self.wctx_finish(slot, false);
+        if destroyed && slot_freed && remint_ok {
+            say!("tapestryd: warp ring-recreate ridx-reuse OK (destroy -> re-mint ridx 0)");
+        } else {
+            say!(
+                "tapestryd: warp ring-recreate FAIL (destroyed={} slot_freed={} remint_ok={})",
+                destroyed, slot_freed, remint_ok
             );
         }
     }
@@ -8594,6 +8692,7 @@ impl Conn {
                     b"map" => WFK_RING_MAP,
                     b"kick" => WFK_RING_KICK,
                     b"fence" => WFK_RING_FENCE,
+                    b"ctl" => WFK_RING_CTL,
                     _ => return None,
                 };
                 Some((make_wring(rp, fk), 0))
@@ -9789,6 +9888,10 @@ impl Conn {
                     Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                     Err(e) => self.err(tag, e),
                 },
+                WFK_RING_CTL => match self.wring_ctl(comp, id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
                 _ => self.err(tag, p9::E_PERM),
             };
         }
@@ -10065,6 +10168,18 @@ impl Conn {
                     Err(p9::E_NOENT)
                 }
             }
+            _ => Err(p9::E_INVAL),
+        }
+    }
+
+    /// V-3b-3c (F1 full fix): the ring ctl verb. Only `destroy` today -- a
+    /// client-invocable per-ring teardown so the backend can retire ONE ring
+    /// (and free its ridx) short of ctx death. Parsed, not "any write =
+    /// destroy", so an errant write can never silently reclaim a live ring.
+    fn wring_ctl(&mut self, comp: &mut Comp, id: u32, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        match s.split_ascii_whitespace().next() {
+            Some("destroy") => comp.wring_destroy(id, self.conn_id),
             _ => Err(p9::E_INVAL),
         }
     }
@@ -11100,6 +11215,7 @@ impl Conn {
                         (&b"map"[..], WFK_RING_MAP),
                         (&b"kick"[..], WFK_RING_KICK),
                         (&b"fence"[..], WFK_RING_FENCE),
+                        (&b"ctl"[..], WFK_RING_CTL),
                     ] {
                         names.push((nm.to_vec(), make_wring(rp, fk)));
                     }

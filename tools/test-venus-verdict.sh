@@ -47,6 +47,7 @@ tapestryd: gpu host3d-map venus-ctx MAPPED (map_info=0x1)
 tapestryd: gpu host3d-map global create refused
 tapestryd: gpu hostmem-ring MAPPED+ROUNDTRIP x2 (off_a=0x0 off_b=0x1000 cache=CACHED) teardown+remint-reuse OK
 tapestryd: warp host3d-ring venus-ctx=512 MAPPED+ROUNDTRIP refcount=1 teardown OK
+tapestryd: warp ring-recreate ridx-reuse OK (destroy -> re-mint ridx 0)
 EOF
 }
 
@@ -106,6 +107,18 @@ check "control leg ALSO sees server host3d venus-ctx -> UNVERIFIED" 1 \
       'printf "tapestryd: warp host3d-ring venus-ctx=512 MAPPED+ROUNDTRIP refcount=1 teardown OK\n" >> "$c"' ""
 check "control leg lacks server host3d skip -> UNVERIFIED"       1 \
       'grep -v "warp host3d-ring skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
+# V-3b-3c-1: the ring-recreate ridx-reuse regression witness (F1 full fix). The
+# "ring-recreate ridx-reuse OK" line is emitted ONLY when a destroyed host3d
+# ring's ridx re-mints; a regression (the destroy verb fails to free the slot)
+# emits the FAIL form. Two test-leg arms (absent, replaced-by-FAIL) prove the
+# gate keys on the verdict; the control-leg arm proves it stays venus-scoped
+# (the control device runs no venus ctx, so the line is absent there).
+check "test leg lacks ring-recreate ridx-reuse -> UNVERIFIED" 1 "" \
+      'grep -v "warp ring-recreate ridx-reuse OK" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg shows ring-recreate FAIL (slot not freed) -> UNVERIFIED" 1 "" \
+      'sed "s/warp ring-recreate ridx-reuse OK.*/warp ring-recreate FAIL (destroyed=true slot_freed=false remint_ok=false)/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO sees ring-recreate ridx-reuse -> UNVERIFIED" 1 \
+      'printf "tapestryd: warp ring-recreate ridx-reuse OK (destroy -> re-mint ridx 0)\n" >> "$c"' ""
 # One variable away, each direction of the discrimination the gate claims.
 check "control leg ALSO sees id=4 -> UNVERIFIED" 1 \
       'printf "tapestryd: gpu capset[2] id=4 max_version=0 max_size=160\n" >> "$c"' ""

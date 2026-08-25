@@ -292,6 +292,10 @@ impl Driver for Tapestryd {
         // self-skipping) as bring-up evidence, before READY like the gpu probes.
         self.comp.warp_host3d_selftest();
 
+        // V-3b-3c F1: prove a destroyed ring's ridx is re-mintable (the interim
+        // monotonic-ridx could not reuse). Venus-gated + self-skipping like above.
+        self.comp.warp_ring_recreate_selftest();
+
         // READY last: all bring-up console output precedes it; the warden's
         // readiness pipe waits on exactly this line.
         let mut out = libthyla_rs::io::stdout();

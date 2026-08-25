@@ -827,7 +827,37 @@ sketched; 20 pointers is the ground truth. Shared helpers reused verbatim:
   wait are on the TEARDOWN path only (vkDestroyRingMESA); bring-up's replies are
   pure guest-side ring-head polls (no `vn_renderer_wait`).
 - **V-3b-3c -- bo / device memory.** The HOST_VISIBLE bo path over the hostmem
-  BAR; milestone: `vkAllocateMemory` + `vkMapMemory`.
+  BAR; milestone: `vkAllocateMemory` + `vkMapMemory`. **Split into two
+  audit-bearing sub-chunks** (sequencing within this ratified arc): 3c-1 closes
+  the V-3b-3b audit's owed P1 (F1) so device-memory churn lands on a sound ring
+  lifecycle; 3c-2 is the bo milestone.
+  - **V-3b-3c-1 -- the F1 full fix (per-ring destroy verb). AS-BUILT.** The
+    V-3b-3b interim made the backend's host3d ring-slot (ridx) alloc MONOTONIC
+    because tapestryd retired a host3d ring only at ctx death; a reused ridx
+    collided with the still-installed server slot. 3c-1 adds a client-invocable
+    `ring/<ridx>/ctl destroy` verb (`WFK_RING_CTL`, tapestryd `wring_destroy`):
+    it TAKES the WarpRing out of its ctx slot (freeing the slot for re-mint) then
+    runs the existing `wring_teardown` (disarm the weft share ->
+    `retire_host3d_ring`: observe-and-reap the hostmem backing). Ownership-gated
+    by the same conn scan as `wring_kick` (I-45). The backend
+    (`thylacine_shmem_destroy_now`) unmaps -> issues the destroy verb -> frees
+    the guest ridx ONLY on the verb's success, preserving "guest ridx free <=>
+    server slot free" (a refused destroy falls back to the interim's
+    leak-until-ctx-death for that one slot -- fail-safe). Because the backend
+    `t_close`s the map fid before the destroy RPC, the client mapping is already
+    gone when `retire_host3d_ring` reads `SYS_HOSTMEM_REFCOUNT` == 1, so the ring
+    reaps immediately (not parked). Regression witness (the bring-up was blind to
+    it -- it never re-mints a ridx): a tapestryd boot self-test
+    (`warp_ring_recreate_selftest`) mints at ridx 0, destroys, asserts the slot
+    freed, re-mints at ridx 0 -- witnessed `warp ring-recreate ridx-reuse OK` +
+    `THYLACINE-VENUS-PROVE PASS` + `Thylacine boot OK` on thyla-pi/KVM real V3D.
+    **F5 (the wait ns-timeout) stays a documented P3 deferral** (no live
+    finite-timeout caller; teardown wants completion). Impl: tapestryd
+    `*(pending)*` + mesa `77fc80a` (patch 0012, round-trip `c317dd63`). Audit:
+    holotype Fable 5, 0 P0 / 0 P1 / 1 P2 / 2 P3, not dirty (F1 [P2] = the
+    ridx-reuse witness was gate-invisible -> wired into boot-probe + the venus
+    gate + test-venus-verdict; F2/F3 [P3] comment fixes, F2 convergence code
+    deferred to 3c-2). `memory/audit_v3b3c1_closed_list.md`.
 - **V-3b-3d -- the Vulkan prove-gate on thyla-pi (real V3D).** A headless
   compute/clear + fenced readback through the full stack; `virgl_prove.c` template
   + a new `warp-host.sh venus`/`vk` verb; renderer-identity discrimination (assert
