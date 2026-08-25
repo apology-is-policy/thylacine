@@ -555,13 +555,22 @@ the client to virglrenderer, so the host maps the same shmem and begins polling.
    encodes it into a 256-byte stack buffer before any instance exists.
 
 **The design.**
-- **New client interface `ctx/<id>/submit`** (a WARP_CTX file kind, sibling to
-  `info`): the client writes a raw venus SUBMIT_CMD (EXECBUFFER) byte stream;
-  tapestryd forwards it verbatim via the existing `gpu.submit_3d(ctx.dev_ctx,
-  ctx.pub, bytes)` on the fenced lane. tapestryd NEVER parses the stream (opaque
-  bytes; the venus ctx is the host-side resource SCOPE, not command parsing -- the
-  0.6 venus-agnostic principle). Bounded by `warp_fenced_admit` + a
-  `WARP_SUBMIT_MAX` byte cap (I-32).
+- **The forward plumbing ALREADY EXISTS** (Warp-2/C): `ctx/<id>/submit` (`WFK_SUBMIT`)
+  -> `warp_submit` -> `warp_fenced_admit` -> `gpu.submit_3d(dev_ctx, pub, stream)`
+  on the fenced lane, opaque bytes. **But it targets `c.dev_ctx` (the VIRGL ctx),
+  and the venus stream must target `c.venus_ctx`** -- a host3d ring's resource is
+  created under the venus ctx (`wring_install_host3d` mints via `wctx_venus_ensure`
+  -> `mint_host3d_ring(res, venus_ctx, ...)`), so `vkr_context_get_resource` resolves
+  its `res_id` ONLY on the venus context's decoder. So V-3b-2's forward delta is a
+  **venus-ctx-targeted submit** (`gpu.submit_3d(c.venus_ctx, c.pub, bytes)`, ensuring
+  `venus_ctx` first), reusing the SAME fenced lane + admission. Shape (impl call):
+  either a distinct `ctx/<id>/venus` verb, or `submit` routing to `venus_ctx` when the
+  ctx has one armed -- decided at impl (a Venus client uses only the venus path, so
+  the routing is unambiguous per-client; the distinct-verb option is the fallback if
+  a single ctx ever mixes virgl + venus streams). tapestryd NEVER parses the stream
+  (opaque; the venus ctx is the host-side resource SCOPE, not command parsing -- the
+  0.6 venus-agnostic principle). Bounded by `warp_fenced_admit` + a `WARP_SUBMIT_MAX`
+  byte cap (I-32).
 - **The bootstrap** is the client submitting `vkCreateRingMESA` (res_id = its
   host3d ring's) once; virglrenderer's `vkr_dispatch_vkCreateRingMESA` starts its
   poll thread (`vkr_ring.c:351`).
