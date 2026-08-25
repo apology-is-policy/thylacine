@@ -288,6 +288,21 @@ pub extern "C" fn rs_main() -> i64 {
     }
     t_putstr("u-repl-test: AND-OR (&& / ||) short-circuit OK\n");
 
+    // 9. `=` in a command ARGUMENT is a literal (was UnexpectedEqualInCommand):
+    //    `-std=c++20` / `--foo=bar` glue into single argv words. Test the parser
+    //    directly -- a parse error here is the exact pre-fix failure -- and
+    //    confirm a statement-start assignment (a different path) still parses.
+    {
+        use libutopia::parser::parse;
+        if parse("clang -std=c++20 -O2 main.cpp -o main.o").is_err() {
+            return fail("`clang -std=c++20 ...` still fails to parse a =-bearing arg");
+        }
+        if parse("let x = 5").is_err() {
+            return fail("`let x = 5` assignment regressed");
+        }
+    }
+    t_putstr("u-repl-test: = in argument position parses OK\n");
+
     t_putstr("u-repl-test: all OK\n");
     0
 }

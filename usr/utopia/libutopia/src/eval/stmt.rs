@@ -1731,6 +1731,8 @@ fn eval_word(env: &Env, word: &Word) -> EvalResult<Value> {
 fn eval_value_token(env: &Env, tok: &Token) -> EvalResult<Value> {
     match &tok.kind {
         TokenKind::Word(s) => Ok(Value::scalar(s.clone())),
+        // A `=` glued into a word (e.g. `-std=c++20`) is a literal character.
+        TokenKind::Equal => Ok(Value::scalar(String::from("="))),
         TokenKind::SingleQuoted(s) => Ok(Value::scalar(s.clone())),
         TokenKind::DoubleQuoted(parts) => eval_dq_in_word(env, parts, tok),
         TokenKind::Var(name) => Ok(env.get(name)),
