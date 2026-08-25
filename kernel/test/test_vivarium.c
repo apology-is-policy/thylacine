@@ -1926,6 +1926,76 @@ void test_vivarium_socket_domain(void) {
     TEST_ASSERT(vivarium_net_proto_dir(VIV_NET_UDP)[0] == 'u', "udp dir");
 }
 
+void test_vivarium_getsockopt_domain(void);
+void test_vivarium_getsockopt_domain(void) {
+    s32 err = -1;
+
+    // The one admitted point.
+    TEST_ASSERT(vivarium_getsockopt_decide(1, 4, &err) && err == 0,
+                "(SOL_SOCKET, SO_ERROR) is the served point");
+
+    // Every other option DECLINES to T_E_NOSYS -- the T2 "declined these
+    // arguments" path -- so the guest's fallback behaves exactly as it did
+    // under the blanket ENOSYS row. SO_REUSEADDR is the option a server
+    // actually issues; TCP_NODELAY (level 6) is the tuning knob curl issues.
+    TEST_ASSERT(!vivarium_getsockopt_decide(1, 2, &err), "SO_REUSEADDR declines");
+    TEST_ASSERT(err == T_E_NOSYS, "the decline errno is ENOSYS, not EINVAL");
+    TEST_ASSERT(!vivarium_getsockopt_decide(6, 1, &err), "IPPROTO_TCP level declines");
+    TEST_ASSERT(!vivarium_getsockopt_decide(0, 4, &err), "level 0 declines");
+
+    // Narrowed to 32 bits: both are C ints in the Linux ABI, so high-half
+    // garbage in the registers must not change the verdict (the openat
+    // narrowing precedent, not clone's full-width one).
+    TEST_ASSERT(vivarium_getsockopt_decide(0x100000001ull, 0xdead00000004ull, &err),
+                "high-half garbage is outside the int ABI and ignored");
+
+    // Fail closed on the NULL output.
+    TEST_ASSERT(!vivarium_getsockopt_decide(1, 4, NULL), "NULL err -> false");
+}
+
+void test_vivarium_sendrecv_domain(void);
+void test_vivarium_sendrecv_domain(void) {
+    s32 err = -1;
+    const u8 CONN = 2;   // VIV_SOCK_CONNECTED
+    const u8 FRESH = 1;  // VIV_SOCK_FRESH
+
+    // The served send() shape: connected, NULL addr, flags 0 or MSG_NOSIGNAL.
+    TEST_ASSERT(vivarium_sendto_decide(CONN, 0, 0, 0, &err) && err == 0,
+                "connected send(flags=0) is the served point");
+    TEST_ASSERT(vivarium_sendto_decide(CONN, 0x4000, 0, 0, &err) && err == 0,
+                "MSG_NOSIGNAL is admitted (truthful no-op -- no SIGPIPE exists here)");
+
+    // The datagram shape declines to ENOSYS -- undone work, not a wrong call.
+    TEST_ASSERT(!vivarium_sendto_decide(CONN, 0, 0x1000, 16, &err),
+                "sendto-with-address is the datagram shape, declined");
+    TEST_ASSERT(err == T_E_NOSYS, "the datagram decline is ENOSYS");
+    // Any other flag would lie about semantics.
+    TEST_ASSERT(!vivarium_sendto_decide(CONN, 0x40, 0, 0, &err),
+                "MSG_DONTWAIT declines (blocking-only sockets)");
+    TEST_ASSERT(err == T_E_NOSYS, "the flag decline is ENOSYS");
+    // An unconnected send is UNBUILT -> ENOSYS (census-visible), NOT a
+    // fabricated ENOTCONN (R2-F1: ENOTCONN mismatched Linux and hid the gap).
+    TEST_ASSERT(!vivarium_sendto_decide(FRESH, 0, 0, 0, &err),
+                "send on an unconnected socket declines");
+    TEST_ASSERT(err == T_E_NOSYS, "-> ENOSYS (unbuilt, census-visible)");
+
+    // The served recv() shape: connected, NULL src-addr, flags 0.
+    TEST_ASSERT(vivarium_recvfrom_decide(CONN, 0, 0, &err) && err == 0,
+                "connected recv(flags=0) is the served point");
+    TEST_ASSERT(!vivarium_recvfrom_decide(CONN, 2, 0, &err),
+                "MSG_PEEK declines (no non-consuming 9P read)");
+    TEST_ASSERT(!vivarium_recvfrom_decide(CONN, 0, 0x1000, &err),
+                "a source-address out-pointer declines (no peer state held)");
+    TEST_ASSERT(!vivarium_recvfrom_decide(FRESH, 0, 0, &err),
+                "recv on an unconnected socket declines");
+    TEST_ASSERT(err == T_E_NOSYS,
+                "-> ENOSYS (the bound-UDP-recv idiom is unbuilt, census-visible)");
+
+    // Fail closed on the NULL output.
+    TEST_ASSERT(!vivarium_sendto_decide(CONN, 0, 0, 0, NULL), "NULL err -> false");
+    TEST_ASSERT(!vivarium_recvfrom_decide(CONN, 0, 0, NULL), "NULL err -> false");
+}
+
 void test_vivarium_sockaddr(void);
 void test_vivarium_sockaddr(void) {
     u8  ip[4];
@@ -3411,6 +3481,73 @@ void test_vivarium_exec_drops_cloexec_sockets(void) {
     TEST_ASSERT(post_stale,
                 "the closed-fd stale entry SURVIVES -- handle_get_cloexec == -1, "
                 "so a sweep written `!= 0` instead of `== 1` would wrongly drop it");
+}
+
+// The getsockopt SHELL (not the pure decide): the F1 regression. The shell
+// marshals two EL0-controlled addresses through the byte-wise uaccess helpers,
+// which assume a validated user VA -- so it MUST reject a kernel-range address
+// before touching memory. This drives the real shell through the T2
+// dispatcher and proves the guard fires. (The SUCCESS path -- a valid user
+// buffer receiving 0/4 -- needs a live EL0 mapping the kernel unit harness
+// cannot stage; it is the curl-demo E2E's job, where verifyconnect reads a 0
+// and the fetch completes.)
+extern s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level,
+                                   u64 optname, u64 optval_va, u64 optlen_va);
+void test_vivarium_getsockopt_shell_guards_uaccess(void);
+void test_vivarium_getsockopt_shell_guards_uaccess(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    p->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(p->socktab != NULL, "socktab alloc");
+
+    hidx_t sockfd = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(sockfd >= 0, "a handle for the socket entry");
+    viv_socktab_claim(p->socktab, (s32)sockfd, VIV_NET_TCP, 100);
+
+    // A user-range address that PASSES sys_validate_user_buf (in range,
+    // non-NULL) without needing to be mapped -- the validate is pure, and it
+    // runs before any access. The kernel-range address is the first invalid
+    // VA (== UACCESS_USER_VA_TOP), which validate rejects.
+    const u64 user_ok = 0x40000ull;              // < USER_VA_TOP, non-NULL
+    const u64 kern_va = 0x0000800000000000ull;    // == 1<<47 == USER_VA_TOP, the
+                                                  // first rejected VA (the
+                                                  // test_syscall.c F210 literal)
+
+    // Control: the shell is REACHED and the socktab lookup works -- a fd with
+    // no entry is ENOTSOCK (returns before any uaccess).
+    s64 r_notsock = viv_getsockopt_for_test(p, (u64)(sockfd + 7), 1, 4,
+                                            user_ok, user_ok);
+    // F1 leg A: a kernel-range optlen_va is rejected -- the FIRST validate.
+    s64 r_klen = viv_getsockopt_for_test(p, (u64)sockfd, 1, 4, user_ok, kern_va);
+    // F1 leg B: a kernel-range optval_va is rejected EFAULT. NOTE (R2-F3):
+    // this leg does NOT isolate the SECOND validate -- with optlen_va unmapped,
+    // a mutant that deletes the optval validate would still EFAULT at the
+    // optlen LOAD's fault fixup, so the EFAULT merely moves. The discriminating
+    // construction (readable optlen + kernel optval, so control reaches the
+    // optval store) needs a live EL0 mapping the kthread harness cannot stage
+    // -- it is the E2E's job. What this asserts truthfully: a kernel optval
+    // never reaches an unguarded store (EFAULT, not a write or a crash).
+    s64 r_kval = viv_getsockopt_for_test(p, (u64)sockfd, 1, 4, kern_va, user_ok);
+    // A DECLINED option still declines cleanly (SO_REUSEADDR=2, not SO_ERROR)
+    // -- proves the guard did not swallow the domain check.
+    s64 r_decline = viv_getsockopt_for_test(p, (u64)sockfd, 1, 2, user_ok, user_ok);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_EXPECT_EQ(r_notsock, -(s64)T_E_NOTSOCK,
+                   "control: getsockopt on a non-socktab fd is ENOTSOCK -- the "
+                   "shell is reached and the lookup works");
+    TEST_EXPECT_EQ(r_klen, -(s64)T_E_FAULT,
+                   "F1: a kernel-range optlen_va is rejected EFAULT before any "
+                   "uaccess -- pre-fix this reached uaccess on a kernel VA");
+    TEST_EXPECT_EQ(r_kval, -(s64)T_E_FAULT,
+                   "F1: a kernel-range optval_va never reaches an unguarded "
+                   "store -- EFAULT, not a write (see leg-B note on isolation)");
+    TEST_EXPECT_EQ(r_decline, -(s64)T_E_NOSYS,
+                   "a non-SO_ERROR option still declines ENOSYS -- the guard did "
+                   "not disturb the domain screen");
 }
 
 // 6b ground-truth: reproduce the fd-reuse MISROUTE the exec sweep prevents, end

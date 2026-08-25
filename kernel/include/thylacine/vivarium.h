@@ -1127,6 +1127,90 @@ bool vivarium_socket_decide(u64 domain, u64 type, u64 protocol,
 // NULL for a value the decide function produced.
 const char *vivarium_net_proto_dir(enum viv_net_proto proto);
 
+// getsockopt's admitted domain: exactly (SOL_SOCKET, SO_ERROR). Linux uapi
+// values (asm-generic; aarch64 uses the generic numbering).
+enum {
+    VIV_SOL_SOCKET = 1,
+    VIV_SO_ERROR   = 4,
+};
+
+// Decide whether a `getsockopt(fd, level, optname, ...)` is inside the
+// translatable domain. PURE. Narrowed to 32 bits: both arguments are C `int`s
+// in the Linux ABI, so the narrowing IS the ABI (the openat precedent, not the
+// clone one).
+//
+// THE ARGUMENT DOMAIN is one point: (SOL_SOCKET, SO_ERROR) -- the connect
+// verification every libcurl consumer runs (`verifyconnect`: a getsockopt
+// failure is read as CONNECT failure, so a refused row here turns a
+// SUCCEEDED connect into "(7) Could not connect"). Everything else still
+// declines to ENOSYS so a guest's own fallback runs exactly as it did when
+// the whole number was refused -- widening this domain is a per-option
+// honesty argument, not a default.
+//
+// WHAT the shell answers, and the EXACT boundary of its honesty (holotype F2):
+// SO_ERROR is a socket's pending error, cleared by the read. The shell answers
+// the constant 0, and that is TRUE for every SYNCHRONOUSLY-delivered error --
+// which is the entire class a blocking-only phenotype socket produces on the
+// GUEST's own syscalls (SOCK_NONBLOCK is refused at socket(), F_SETFL is not
+// served), so a failure is always that op's own return value, never pending.
+// This is exactly what the row exists for: connect verification (curl's
+// verifyconnect branches on err==0 -> connected), where a failed connect
+// already returned its error and a successful one has no pending error.
+//
+// THE ONE GAP, deliberately shipped narrowed (operator-ratified 2026-08-25):
+// netd ALSO latches errors ASYNCHRONOUSLY -- a connected-UDP/ICMP send that
+// fails locally (server.rs data_send) or the connect-timeout reaper -- and
+// surfaces them as POLLERR via check_ready. The shell does not consult that
+// latch, so a guest that observes POLLERR on such a socket and then reads
+// SO_ERROR gets 0, contradicting the POLLERR. Consulting the latch honestly
+// needs a netd-errno-exposure protocol path + a blocking read-and-clear (its
+// own arc; filed). The gap is LATENT at v1.0 (no shipping guest reaches it --
+// UDP DNS is not yet live) and does not touch the connect-verification path
+// the row serves. REVISIT also pins the NONBLOCK case: a NONBLOCK row would
+// make a FRESH-state socket carry its in-flight connect outcome here.
+//
+// Returns true when admitted; false leaves the decline errno in *out_err
+// (T_E_NOSYS -- the T2 "declined these arguments" path).
+bool vivarium_getsockopt_decide(u64 level, u64 optname, s32 *out_err);
+
+// The one send flag the sendto row admits. Linux asm-generic value; a
+// TRUTHFUL no-op here (see vivarium_sendto_decide).
+enum { VIV_MSG_NOSIGNAL = 0x4000 };
+
+// Decide whether a `sendto(fd, buf, len, flags, addr, addrlen)` /
+// `recvfrom(fd, buf, len, flags, addr, addrlen)` is inside the translatable
+// domain. PURE (the caller resolves fd -> socktab state first).
+//
+// WHY THESE ROWS EXIST: aarch64 has no plain send/recv syscall -- musl's
+// send() IS sendto(fd, buf, len, flags, NULL, 0) and recv() IS
+// recvfrom(..., NULL, NULL) -- so any Linux binary that sends on a socket
+// through send() (curl does) reaches these numbers, and the FORWARD refusal
+// made every such send die ENOSYS mid-connection. The served shape is
+// EXACTLY the connected-socket send()/recv(): NULL address, flags 0 (plus
+// MSG_NOSIGNAL for send -- truthfully a no-op, because the phenotype socket
+// data path is a 9P Spoor write and the pipe EPIPE-note machinery never runs
+// there, so no SIGPIPE exists to suppress). The shells then delegate the
+// data movement to the NATIVE write/read handlers -- the same path a
+// T1-renumbered write()/read() on the socket fd takes -- so short
+// writes/reads, weft fast-paths, and the #844 fd lifecycle behave
+// identically to the native call.
+//
+// DECLINED, each to ENOSYS (the census-visible "unbuilt" answer), each
+// honestly: the with-address datagram shape (a per-datagram destination has
+// no /net verb yet), MSG_PEEK (no non-consuming 9P read), MSG_DONTWAIT (would
+// lie on a blocking-only socket), MSG_WAITALL (changes the return contract), a
+// non-NULL recvfrom source-address out-pointer (peer-address state the socktab
+// does not carry), AND an UNCONNECTED socket -- unconnected send/recv is
+// genuinely unbuilt (no per-datagram dial; the bound-UDP-server recv idiom
+// that Linux serves has no path here), so it declines to ENOSYS rather than a
+// fabricated ENOTCONN. (ENOTCONN would have been fake precision: Linux gives
+// EPIPE for unconnected stream send and EDESTADDRREQ for datagram, we serve
+// none, and answering an errno instead of declining would hide the missing
+// capability from viv_report_unserved -- R2-F1.)
+bool vivarium_sendto_decide(u8 state, u64 flags, u64 addr_va, u64 addrlen,
+                            s32 *out_err);
+bool vivarium_recvfrom_decide(u8 state, u64 flags, u64 addr_va, s32 *out_err);
+
 // Parse a Linux `struct sockaddr_in` (already copied into kernel memory) into
 // its four address octets + host-order port. PURE.
 //

@@ -775,12 +775,105 @@ errnos because a Linux program acts on them differently, and collapsing them to
 off**. A guest that asks for a non-blocking socket and silently receives a
 blocking one blocks where it expected `EAGAIN`.
 
-Landed as honest declines with their reasons in the table: `setsockopt`/
-`getsockopt` (`/net` exposes no option surface, and answering "success" to a
-`TCP_NODELAY` nothing honours is the silent lie this tier exists to prevent),
-`socketpair`, `sendmsg`/`recvmsg` (scatter-gather plus `SCM_RIGHTS`, which is
-I-4's domain). `bind`/`listen`/`accept` are V-5b; `shutdown`/`getsockname`/
-`getpeername`/`sendto`/`recvfrom` are V-5a's remainder.
+Landed as honest declines with their reasons in the table: `setsockopt`
+(`/net` exposes no option surface, and answering "success" to a `TCP_NODELAY`
+nothing honours is the silent lie this tier exists to prevent), `socketpair`,
+`sendmsg`/`recvmsg` (scatter-gather plus `SCM_RIGHTS`, which is I-4's domain).
+`bind`/`listen`/`accept` are V-5b; `shutdown`/`getsockname`/`getpeername`/
+`sendto`/`recvfrom` are V-5a's remainder.
+
+`getsockopt` left the blanket refusal in the curl-demo chunk and became a
+Tier-2 row serving **exactly one point: `(SOL_SOCKET, SO_ERROR)`**
+(`vivarium_getsockopt_decide` + `viv_sock_getsockopt`). The forcing case:
+curl's `verifyconnect` -- run by every libcurl consumer after every connect --
+reads `SO_ERROR` and treats a *getsockopt failure* as a *connect failure*, so
+the refused row turned a measured-successful connect (61 ms through slirp)
+into `(7) Could not connect`. Serving it is honest because `SO_ERROR` is a
+READ of pending-error state, not a tuning knob, and a phenotype socket carries
+no SYNCHRONOUSLY-pending error: `SOCK_NONBLOCK` is refused at `socket()` and
+`F_SETFL` is not served, so every guest socket op completes synchronously and
+its failure was already that op's own return value -- the constant 0 the shell
+writes is the true answer for every synchronously-delivered error, which is
+the connect-verification purpose the row serves (see the async-latch
+degradation below for the one state where it is stale). The revisit is pinned
+in the decide's header: a future NONBLOCK row must make `FRESH` carry the
+in-flight connect outcome. Every other `(level, optname)` still declines to `ENOSYS` through
+the same T2 "declined these arguments" path, so guest fallbacks behave
+byte-identically to the blanket era. One deliberate delta: `getsockopt` on a
+non-socket fd is now `ENOTSOCK` (the Linux answer) rather than `ENOSYS`.
+Covered by `vivarium.getsockopt_domain` (the pure domain + the 32-bit
+narrowing + fail-closed) and end-to-end by `tools/phenonet/curl-demo.exp`
+(fails without the row -- measured three times -- and passes with it).
+The shell validates BOTH the `optval` and `optlen` spans with
+`sys_validate_user_buf` before any access -- the byte-wise uaccess helpers
+assume a validated user VA, and the fault fixup only engages below
+`UACCESS_USER_VA_TOP`, so an unchecked kernel VA would silently write kernel
+memory or extinct the box (holotype F1, fixed before merge; regression
+`vivarium.getsockopt_shell_guards_uaccess` drives the real shell and proves a
+kernel-range address on either span is rejected `EFAULT` before any access).
+
+**Two documented degradations** (both narrower than the old blanket ENOSYS,
+neither a silent lie):
+- *The async-latch gap (F2, operator-ratified narrow).* The 0 answer is true
+  for every synchronously-delivered error -- the connect-verification purpose
+  the row serves -- but netd also latches errors ASYNCHRONOUSLY (a
+  connected-UDP/ICMP local send failure sets `slot.err` and surfaces POLLERR
+  via `check_ready`), and the shell does not consult that latch, so a guest
+  that observes POLLERR then reads `SO_ERROR` gets 0. Latent at v1.0 (no
+  shipping guest reaches it -- UDP DNS is not live). The honest fix is the
+  **netd-errno arc**: a netd protocol path exposing the per-connection errno
+  (the latch is a `&'static str` today, not an errno) + a blocking kernel
+  read-and-clear in the shell + the race-safe fd lifecycle + a fresh audit.
+  Tracked, not built.
+- *ENOTSOCK vs EBADF (F4).* `viv_socktab_find` returns NULL both for a
+  valid-but-non-socket fd (correct: `ENOTSOCK`) and for a closed/never-open fd
+  (Linux: `EBADF`); the shell answers `ENOTSOCK` for both. Strictly better
+  than the old blanket `ENOSYS`; the residual drift on the bad-fd axis is
+  benign (no distinguisher exists at this layer without a handle-table
+  lookup).
+- *F_DUPFD / dup of a socket loses the socktab entry (R2-F4).* `fcntl(sock,
+  F_DUPFD, n)` mints a second fd on the data Spoor with no socktab entry (the
+  OMIT-the-entry shape `dup3` already declines), so `send`/`recv` on the
+  alias is `ENOTSOCK` where Linux serves, while `write`/`read` on it work.
+  No soundness impact (no stale entry, no authority gain, I-43 holds); the
+  honest fix is socktab-entry duplication on dup, its own chunk (tracked).
+
+Coverage gap on the success path: the optval WRITEBACK value has no direct
+kernel-test witness (the harness cannot stage a live EL0 mapping for the
+uaccess; the E2E covers it -- verifyconnect reads a 0 and the fetch
+completes). A poisoned-buffer probe leg would need a net-granted probe bundle
+= a network-dependent boot gate -- declined, tracked.
+
+`sendto`/`recvfrom` became Tier-2 in the same chunk, because **aarch64 has no
+plain `send`/`recv` syscall**: musl's `send()` IS `sendto(fd, buf, len,
+flags, NULL, 0)` and `recv()` IS `recvfrom(..., NULL, NULL)`, so any Linux
+binary that moves socket data through `send()`/`recv()` -- curl does; busybox
+wget happens to use `write()`, which is why it never hit this -- died
+`ENOSYS` mid-connection (`curl: (55) Send failure`). The served shape is
+exactly the connected-socket `send()`/`recv()`: socktab state `CONNECTED`,
+NULL address, flags 0 (send also admits `MSG_NOSIGNAL` as a *truthful no-op*
+-- the socket data path is a 9P Spoor write and the pipe EPIPE-note machinery
+never runs there, so no SIGPIPE exists to suppress). After the screening
+(`vivarium_sendto_decide` / `vivarium_recvfrom_decide`, pure) the shells
+delegate the data movement to the NATIVE `sys_write_handler` /
+`sys_read_handler` -- the same staging tiers, weft fast-path, short-op
+semantics, and #844 fd lifecycle a T1-renumbered `write()`/`read()` on the
+same fd gets. Declines, each to `ENOSYS` (census-visible unbuilt), each honest: the
+with-address datagram shape (a per-datagram destination has no /net verb
+yet), `MSG_PEEK` (no non-consuming 9P read), `MSG_DONTWAIT` (blocking-only
+sockets), `MSG_WAITALL` (changes the return contract), a non-NULL `recvfrom`
+source address (peer-address state the socktab does not carry), AND an
+UNCONNECTED socket. That last is the R2-F1 correction: unconnected send/recv
+is genuinely unbuilt (no per-datagram dial; the bound-UDP-server `recv`
+idiom Linux serves has no path here), so it declines to `ENOSYS` -- which
+`viv_report_unserved` surfaces on the mission's work-list -- rather than a
+fabricated `ENOTCONN` (Linux answers `EPIPE`/`EDESTADDRREQ` on the send side,
+none of which we serve, so answering an errno would both mismatch Linux and
+hide the gap).
+Error-value fidelity on a dead connection is the data path's (an errno from
+the 9P write, not Linux's `EPIPE`) -- honest in kind, imperfect in value;
+noted rather than papered over. Covered by `vivarium.sendrecv_domain` and
+end-to-end by the curl demo (the fetch is a send + recv on the wire).
 
 ### The close hook -- the sharpest bug this chunk could have had
 

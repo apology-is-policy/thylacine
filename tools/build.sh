@@ -1272,6 +1272,80 @@ VIVEOF
 }
 VIVEOF
                 echo "==> viv bundles: Alpine CONSOLE-^C twin staged at $tb (args sh -c 'trap ... INT; echo READY; sleep-loop' -- the item-12 console-^C-forward regression vehicle)"
+                # The NET-GRANTED twin: the same rootfs, an interactive ash, but
+                # the manifest sets org.thylacine.net=granted so viv binds /net
+                # into the container -- without it socket() is ENOENT (network is
+                # an opt-in per-container capability). Plus /etc/resolv.conf
+                # (slirp DNS 10.0.2.3) and an /etc/hosts pin for example.com so a
+                # by-IP connect can be tested without depending on DNS. For
+                # probing whether a real Linux binary reaches the network under
+                # the phenotype (curl/wget/git).
+                local nb="$vstage/alpine-net"
+                rm -rf "$nb"; mkdir -p "$nb"
+                cp -R "$ab/rootfs" "$nb/rootfs"
+                rm -rf "$nb/rootfs/gate"
+                printf 'nameserver 10.0.2.3\n' > "$nb/rootfs/etc/resolv.conf"
+                printf '172.66.147.243 example.com\n' >> "$nb/rootfs/etc/hosts"
+                # A REAL curl (stunnel/static-curl release: musl static-PIE,
+                # aarch64 -- ET_DYN with no PT_INTERP, the D-2 direct-load
+                # shape). Same absent/matching/different trichotomy as the
+                # rootfs pins above: absent skips (bundle stays busybox-only),
+                # matching stages /usr/bin/curl, different is a LOUD failure --
+                # the demo gate's PASS strings were derived from these bytes.
+                local curltar="${THYLACINE_STATIC_CURL_TAR:-}"
+                if [[ -z "$curltar" ]]; then
+                    curltar="$(ls "$REPO_ROOT/build/cache"/curl-linux-aarch64-musl-*.tar.xz 2>/dev/null | head -1 || true)"
+                fi
+                local curltar_sha="4df5282b8ef0e336c64faa52b546272b421146d522733606ae5343b416b646b2"
+                if [[ -n "$curltar" && -f "$curltar" ]]; then
+                    got_sha="$(shasum -a 256 "$curltar" | awk '{print $1}')"
+                    if [[ "$got_sha" != "$curltar_sha" ]]; then
+                        echo "==> viv bundles: static-curl tarball sha256 MISMATCH -- refusing to stage" >&2
+                        echo "      file     $curltar" >&2
+                        echo "      got      $got_sha" >&2
+                        echo "      expected $curltar_sha (curl-linux-aarch64-musl-8.18.0)" >&2
+                        exit 1
+                    fi
+                    local cx="$vstage/.curlx"
+                    rm -rf "$cx"; mkdir -p "$cx"
+                    if tar -xJf "$curltar" -C "$cx" curl 2>/dev/null && [[ -f "$cx/curl" ]]; then
+                        mkdir -p "$nb/rootfs/usr/bin"
+                        cp "$cx/curl" "$nb/rootfs/usr/bin/curl"
+                        chmod 0755 "$nb/rootfs/usr/bin/curl"
+                        echo "==> viv bundles: static curl 8.18.0 staged at $nb/rootfs/usr/bin/curl (the ROADMAP 9.2 curl-fetches-a-URL vehicle)"
+                    else
+                        echo "==> viv bundles: static-curl tarball extract FAILED -- alpine-net stays busybox-only" >&2
+                    fi
+                    rm -rf "$cx"
+                else
+                    echo "==> viv bundles: no static-curl tarball -- alpine-net stages busybox-only (drop curl-linux-aarch64-musl-*.tar.xz in build/cache/ or set THYLACINE_STATIC_CURL_TAR)"
+                    forage_hint static-curl "the static-curl tarball" "build/cache/curl-linux-aarch64-musl-*.tar.xz"
+                fi
+                # OPENSSL_armcap=0: OpenSSL's aarch64 armcap init SIGILL-probes
+                # CPU features (sha512su0/eor3/sve/xar/sm3 + mrs MIDR_EL1) under
+                # a SIGILL handler it expects to catch. Thylacine's phenotype
+                # cannot deliver a catchable SIGILL (snare notes are terminal;
+                # sigaction(SIGILL) is honestly refused), so the probe is fatal
+                # -- curl died snare:ill at _armv8_sve_probe before any output.
+                # The env var is OpenSSL's own documented probe-skip. The
+                # underlying gap (Linux binaries that SIGILL-probe features die
+                # under viv) is tracked as mission work, not fixed by this.
+                cat > "$nb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "-i"],
+        "env": ["OPENSSL_armcap=0"],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux",
+        "org.thylacine.net": "granted"
+    }
+}
+VIVEOF
+                echo "==> viv bundles: Alpine NET-GRANTED twin staged at $nb (org.thylacine.net=granted + resolv.conf + hosts pin + OPENSSL_armcap=0 -- the phenotype-network probe vehicle)"
             else
                 rm -rf "$ab"
                 echo "==> viv bundles: Alpine bundle SKIPPED -- the minirootfs is present but no busybox-static apk is (every stock Alpine ELF is dynamic PIE, which the loader rejects; task #145). Drop busybox-static-*.apk in build/cache/ or set THYLACINE_BUSYBOX_STATIC_APK." >&2
@@ -1394,7 +1468,7 @@ VIVEOF
             echo "==> viv bundles: untar of $tarball into the stock bundle FAILED -- DISTRO ARC gate bundle skipped" >&2
         fi
     fi
-    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" )$( [[ -d "$vstage/alpine-ash" ]] && echo " + alpine-ash" )$( [[ -d "$vstage/alpine-trap" ]] && echo " + alpine-trap" )$( [[ -d "$vstage/alpine-stock" ]] && echo " + alpine-stock" ))"
+    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" )$( [[ -d "$vstage/alpine-ash" ]] && echo " + alpine-ash" )$( [[ -d "$vstage/alpine-trap" ]] && echo " + alpine-trap" )$( [[ -d "$vstage/alpine-net" ]] && echo " + alpine-net" )$( [[ -d "$vstage/alpine-stock" ]] && echo " + alpine-stock" ))"
 }
 
 build_sysroot() {

@@ -996,7 +996,7 @@ No new formal specs. Per the 2026-05-23 spec-to-code suspension (`CLAUDE.md`), t
 
 ### 9.2 Exit criteria
 
-- [ ] `curl` (pre-built Linux ARM64 static binary) runs and fetches a URL.
+- [x] `curl` (pre-built Linux ARM64 static binary) runs and fetches a URL. *(2026-08-25: stunnel/static-curl 8.18.0, musl static-PIE, in a net-granted Alpine container -- `curl http://example.com/` by name returns the real page through slirp; `tools/phenonet/curl-demo.exp`.)*
 - [ ] `python3` (pre-built musl-static Linux ARM64 binary) starts a REPL and runs a non-trivial script.
 - [ ] **Container runner**: an Alpine Linux container image starts and a shell runs inside it; commands within the container behave correctly.
 - [ ] **Network**: `ping 1.1.1.1` works from inside Thylacine (ICMP via VirtIO-net).

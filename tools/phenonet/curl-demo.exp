@@ -1,0 +1,80 @@
+#!/usr/bin/expect -f
+# tools/phenonet/curl-demo.exp -- ROADMAP 9.2's "curl fetches a URL", the
+# phenotype-network mission's headline demo: a REAL unmodified Linux curl
+# (stunnel/static-curl 8.18.0, musl static-PIE aarch64 -- an ET_DYN binary
+# with no PT_INTERP, the D-2 direct-load shape) runs inside a net-granted
+# Alpine container under VIVARIUM and fetches http://example.com/ BY NAME
+# (curl's own --resolve pin -> phenotype sockets -> slirp -> the real
+# internet; see the resolver-thread note at the fetch legs).
+#
+# Lives OUTSIDE tools/interactive/ deliberately: the fetch leg needs working
+# host internet (example.com reachable through slirp), which LS-CI must not
+# depend on. Run on demand:
+#
+#   caffeinate -i expect tools/phenonet/curl-demo.exp
+#
+# Deliberately ABSENT legs: anything that talks to a dead/blackholed peer.
+# busybox wget -T hangs there (setitimer/SO_RCVTIMEO untranslated -- the
+# separable timeout-mechanism arc); curl itself times out via poll deadlines,
+# but that behavior is the timeout arc's to gate, not this demo's.
+source [file join [file dirname [info script]] .. interactive lib.exp]
+set repo $lc_repo
+set net_bundle "$repo/build/vivarium/alpine-net/config.json"
+set net_curl   "$repo/build/vivarium/alpine-net/rootfs/usr/bin/curl"
+if {![file exists $net_bundle]} { puts "SKIP: no alpine-net bundle staged"; exit 77 }
+if {![file exists $net_curl]}   { puts "SKIP: alpine-net staged busybox-only (no static-curl tarball in build/cache)"; exit 77 }
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_send "ptyhost"
+lc_expect "job control active" "the hosted ut session"
+sleep 1
+lc_send "viv run /vivarium/alpine-net"
+lc_expect_re {/ [#$] } "the phenotype ash prompt on the pts (net-granted)"
+
+# Leg 1: the binary itself. curl --version proves the static-PIE ELF shape
+# loads and runs under the phenotype (self-relocation off AT_PHDR/AT_BASE) --
+# distinct from both busybox (ET_EXEC static) and alpine-stock (PT_INTERP).
+# The bundle's OPENSSL_armcap=0 env is load-bearing here: without it OpenSSL's
+# armcap init SIGILL-probes CPU features and dies snare:ill before any output.
+# NO file redirects anywhere in this script: `>/dev/null` fails in a viv
+# container (ash's redirect passes O_CREAT, which the vivarium openat honestly
+# refuses; the rootfs is readonly and its /dev/null is a plain file) -- run
+# curl bare so `$?` is curl's OWN rc, with the banner as the output witness.
+# The typed `VER-RC=$?` cannot match the expected `VER-RC=0`.
+lc_send "curl --version; echo VER-RC=$?"
+lc_expect "curl 8.18.0" "the version banner (static-PIE executes under viv)"
+lc_expect "VER-RC=0" "curl --version exited 0"
+sleep 1
+
+# The name pin is curl's own --resolve, NOT /etc/hosts: curl >= 8.16 resolves
+# A/AAAA on a SPAWNED THREAD (asyn-thrd), and pthread_create fails under the
+# phenotype (vivarium_clone_decide deliberately refuses the CLONE_THREAD
+# shape) -- 'curl: (2) getaddrinfo() thread failed to start'. --resolve
+# pre-populates curl's DNS cache so the resolver thread never spawns. The
+# bundle's /etc/hosts pin stays for busybox wget (single-threaded
+# getaddrinfo), which proved the hosts-file name path on 2026-08-20.
+set resolve "--resolve example.com:80:172.66.147.243"
+
+# Leg 2a: curl's OWN exit status + the server's verdict, with no output file
+# (see the no-redirect note above): a HEAD request prints only the response
+# headers, so the status line is the witness and `$?` is curl's rc. The typed
+# line carries `FETCH-RC=$?`, which cannot match the expected `FETCH-RC=0`.
+lc_send "curl -sS -m 30 $resolve -I http://example.com/; echo FETCH-RC=$?"
+lc_expect "HTTP/1.1 200" "the server answered 200 by name (HEAD status line)"
+lc_expect "FETCH-RC=0" "curl exited 0 fetching http://example.com/ by name"
+sleep 1
+
+# Leg 2b: THE HEADLINE -- served content. "Example Domain" is the real page
+# body; the grep pattern is bracket-immunized ('Example D[o]main') so the pts
+# echo of the typed command can NEVER satisfy the expect -- only grep's output
+# of the actual response body can (the never-key-on-your-own-diagnostics rule).
+lc_send "curl -sS -m 30 $resolve http://example.com/ 2>&1 | grep -o 'Example D\[o\]main'"
+lc_expect "Example Domain" "curl fetched the real page body (served content witness)"
+sleep 1
+
+lc_send "exit"
+sleep 1
+lc_run_expect "echo curl-demo-done | tr a-z A-Z" "CURL-DEMO-DONE"
+lc_pass "CURL-DEMO: a real Linux curl fetched a URL by name under VIVARIUM (ROADMAP 9.2)"
+lc_quit

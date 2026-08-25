@@ -9447,6 +9447,26 @@ static int viv_store_u64(u64 va, u64 v) {
     return 0;
 }
 
+// The 4-byte twins, for the socket-option shells (optval/optlen are C ints).
+// Same byte-wise little-endian idiom; no alignment assumption on the VA.
+static int viv_load_u32(u64 va, u32 *out) {
+    u32 v = 0;
+    for (u32 i = 0; i < 4; i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(va + i, &b) != 0) return -1;
+        v |= (u32)b << (8u * i);
+    }
+    *out = v;
+    return 0;
+}
+
+static int viv_store_u32(u64 va, u32 v) {
+    for (u32 i = 0; i < 4; i++) {
+        if (uaccess_store_u8(va + i, (u8)(v >> (8u * i))) != 0) return -1;
+    }
+    return 0;
+}
+
 // The NOTE_BIT_* numbering lives in `g_viv_notebits` (vivarium.c) -- V-6c moved
 // it there when delivery became a SECOND consumer. Two files each carrying a
 // `static` copy is the mirror-drift trap: each one's asserts would verify only
@@ -9768,6 +9788,91 @@ static s64 viv_sock_bind(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
 // no way to ask for another, so honouring the number is not possible; Linux
 // itself treats the value as a hint and silently clamps it to a system
 // maximum, so a caller cannot distinguish this from an ordinary clamp.
+// getsockopt(fd, level, optname, optval, optlen) -- the (SOL_SOCKET, SO_ERROR)
+// point only; the decide declines everything else back to the T2-ENOSYS path
+// so those options behave exactly as they did under the blanket refusal.
+//
+// The answer is the constant 0, TRUE for every SYNCHRONOUSLY-delivered error
+// -- the whole class a blocking-only phenotype socket produces on the guest's
+// own syscalls -- which is exactly the connect-verification purpose the row
+// exists for. The ONE gap (holotype F2, shipped narrowed per the header): an
+// error netd latches ASYNCHRONOUSLY (a connected-UDP/ICMP local send failure)
+// is not consulted, so a guest that sees POLLERR on such a socket then reads
+// SO_ERROR gets 0 -- latent at v1.0, filed as the netd-errno arc. The full
+// boundary + the NONBLOCK revisit: vivarium_getsockopt_decide's header.
+//
+// optlen is value-result (int): read it, require room for the int, write the
+// value + the 4 back. A caller passing less than 4 gets EINVAL rather than a
+// truncated write.
+static s64 viv_sock_getsockopt(struct Proc *p, u64 fd_raw, u64 level,
+                               u64 optname, u64 optval_va, u64 optlen_va) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
+    if (!e) return -(s64)T_E_NOTSOCK;
+
+    s32 err = 0;
+    if (!vivarium_getsockopt_decide(level, optname, &err))
+        return -(s64)err;
+
+    // The byte-wise uaccess helpers assume a validated user VA (uaccess.S:
+    // "the caller is responsible for VA-range validation") -- and the fault
+    // fixup only engages BELOW UACCESS_USER_VA_TOP, so an unchecked kernel VA
+    // here would silently write kernel memory (mapped) or extinct the box
+    // (unmapped), reachable by any phenotype Proc. Validate both spans first,
+    // exactly as every sibling shell does before its own load/store. This also
+    // rejects the top-of-address-space `va + 4` wrap.
+    if (!sys_validate_user_buf(optlen_va, 4)) return -(s64)T_E_FAULT;
+    if (!sys_validate_user_buf(optval_va, 4)) return -(s64)T_E_FAULT;
+
+    u32 olen = 0;
+    if (viv_load_u32(optlen_va, &olen) != 0) return -(s64)T_E_FAULT;
+    // optlen is a C `int`: Linux (sk_getsockopt) rejects a negative length
+    // with EINVAL before anything else. Match it (R2-F5) -- otherwise
+    // (socklen_t)-1 reads as 0xFFFFFFFF >= 4 and we would serve a length Linux
+    // refuses. The olen < 4 gate below then covers 0..3 (stricter than Linux's
+    // truncate-and-succeed there -- the deliberate delta named in the header).
+    if ((s32)olen < 0)                       return -(s64)T_E_INVAL;
+    if (olen < 4)                            return -(s64)T_E_INVAL;
+    if (viv_store_u32(optval_va, 0) != 0)    return -(s64)T_E_FAULT;
+    if (viv_store_u32(optlen_va, 4) != 0)    return -(s64)T_E_FAULT;
+    return 0;
+}
+
+// sendto(fd, buf, len, flags, addr, addrlen) / recvfrom(fd, buf, len, flags,
+// addr, addrlen) -- the connected-socket send()/recv() shape only (musl's
+// send/recv ARE these numbers on aarch64; the decide's header carries the
+// domain argument). After the socket-specific screening the data movement is
+// DELEGATED to the native write/read handlers -- the same staging, weft
+// fast-path, short-op semantics, and #844 fd lifecycle a T1-renumbered
+// write()/read() on this fd would get. `p` is only used for the socktab
+// screen; the native handlers re-derive it from current_thread, which is the
+// same Proc (this shell runs on the calling thread).
+static s64 viv_sock_sendto(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
+                           u64 flags, u64 addr_va, u64 addrlen) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
+    if (!e) return -(s64)T_E_NOTSOCK;
+
+    s32 err = 0;
+    if (!vivarium_sendto_decide(e->state, flags, addr_va, addrlen, &err))
+        return -(s64)err;
+
+    return sys_write_handler(fd_raw, buf_va, len);
+}
+
+static s64 viv_sock_recvfrom(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
+                             u64 flags, u64 addr_va) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
+    if (!e) return -(s64)T_E_NOTSOCK;
+
+    s32 err = 0;
+    if (!vivarium_recvfrom_decide(e->state, flags, addr_va, &err))
+        return -(s64)err;
+
+    return sys_read_handler(fd_raw, buf_va, len);
+}
+
 static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
     (void)backlog;
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
@@ -11145,6 +11250,25 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // accept4(fd, addr, addrlen, flags): x0..x3.
         return viv_sock_accept(p, args[0], args[1], args[2], args[3]);
 
+    case VIV_LINUX_GETSOCKOPT:
+        // getsockopt(fd, level, optname, optval, optlen): x0..x4.
+        return viv_sock_getsockopt(p, args[0], args[1], args[2], args[3],
+                                   args[4]);
+
+    case VIV_LINUX_SENDTO:
+        // sendto(fd, buf, len, flags, addr, addrlen): x0..x5.
+        return viv_sock_sendto(p, args[0], args[1], args[2], args[3],
+                               args[4], args[5]);
+
+    case VIV_LINUX_RECVFROM:
+        // recvfrom(fd, buf, len, flags, addr, addrlen): x0..x5. The addrlen
+        // out-pointer (x5) is deliberately unread: the decide refuses any
+        // non-NULL addr (x4), and with no address written back there is no
+        // length to report -- reading x5 would consult a register the served
+        // shape leaves as garbage (the clone garbage-register rule).
+        return viv_sock_recvfrom(p, args[0], args[1], args[2], args[3],
+                                 args[4]);
+
     case VIV_LINUX_PPOLL:
         // ppoll(fds, nfds, tmo_p, sigmask, sigsetsize): x0..x4. sigsetsize is
         // read only via the sigmask decline, which needs no size -- Linux itself
@@ -11495,6 +11619,17 @@ s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
 s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg) {
     u64 args[VIV_NARGS] = { fd, cmd, arg, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_FCNTL, args);
+}
+
+// Drives the REAL getsockopt shell through the T2 dispatcher, so a test can
+// prove the F1 uaccess guard (the shell validates BOTH spans before any
+// memory access, so a kernel-range VA is rejected -T_E_FAULT with no access).
+s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
+                            u64 optval_va, u64 optlen_va);
+s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
+                            u64 optval_va, u64 optlen_va) {
+    u64 args[VIV_NARGS] = { fd, level, optname, optval_va, optlen_va, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_GETSOCKOPT, args);
 }
 
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {

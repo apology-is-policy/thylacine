@@ -22,6 +22,92 @@ needed the operator.
 
 ---
 
+## 2026-08-25 (aux) -- the curl demo: five walls, two kernel rows, ROADMAP 9.2 ticked
+
+The operator chose "(A) curl demo first" over the timeout arc, premised on
+no-kernel-change. The premise broke -- instructively -- one syscall at a time.
+Every wall below was MEASURED in a failing boot before it was believed, and
+each fix went in at the honest layer, not the convenient one.
+
+**The vehicle.** A real unmodified Linux curl (stunnel/static-curl 8.18.0,
+musl static-PIE aarch64 -- ET_DYN, no PT_INTERP: the D-2 direct-load shape, a
+THIRD ELF shape the loader had never run) staged sha-pinned into the
+net-granted alpine-net bundle; `cache.static-curl` is a first-class forage
+input (a forage_hint naming an unknown target is the phantom-list-member rot,
+so the target + usage lines landed with it).
+
+**Wall 1 -- `snare:ill` before any output.** Disassembly at the fault vaddr
+(pc 0x2035f868 minus the 0x20000000 D-2 bias) landed in OpenSSL armcap's
+SIGILL-probe ladder (`sha512su0`/`eor3`/SVE `eor`/`xar`/`cntb`/`mrs
+MIDR_EL1`/`sm3partw1`): install a SIGILL handler, execute a candidate insn,
+catch the fault. Under Thylacine `sigaction(SIGILL)` is HONESTLY refused
+(snare notes are terminal) and the SVE probe traps -> death. Workaround:
+`OPENSSL_armcap=0` in the bundle env -- OpenSSL's own documented probe-skip.
+The class gap (any SIGILL-probing binary dies) is enqueued with its cheap
+next step (verify AT_HWCAP rides the viv exec auxv) and its deep one
+(catchable fault notes).
+
+**Wall 2 -- `curl: (27) Out of memory` at handle init.** nr=19 (`eventfd2`)
+untranslated. Verified in curl SOURCE per version, not recalled: under
+USE_EVENTFD there is NO runtime fallback (compile-time #elif), and 8.20.0
+made wakeup-init failure fatal ("rely on this to work... we ignore this in
+previous versions") while 8.14-8.18 set the pair BAD and continue -- and a
+CLI transfer never uses the wakeup. Pinned 8.18.0. The eventfd2 translator
+(honest counter semantics, not a pipe-shaped lie) is enqueued.
+
+**Wall 3 -- `getaddrinfo() thread failed to start`.** curl >= 8.16 resolves
+on a spawned thread; `vivarium_clone_decide` refuses CLONE_THREAD by design
+("the correct target is SYS_THREAD_SPAWN"). WHICH musl step failed first is
+recorded as UNMEASURED (the per-pid diag suppression can hide it; the
+decisive probe leg is named in the note). The demo pins by `--resolve` --
+curl's own flag, no resolver thread; /etc/hosts stays for busybox wget. The
+phenotype-threads arc is enqueued (git's index-pack threading will want
+`pack.threads=1` until then).
+
+**Wall 4 -- `(7) Could not connect` after a 61 ms connect that SUCCEEDED.**
+The wall that pulled a kernel row forward (operator ratified via blocking
+question). curl's `verifyconnect` reads `getsockopt(SO_ERROR)` after every
+connect and treats a getsockopt FAILURE as a CONNECT failure (`if
+(getsockopt(...)) err = SOCKERRNO` -- read in source). busybox wget never
+verifies, which is the only reason it worked. NEW T2 row serving exactly
+`(SOL_SOCKET, SO_ERROR)`: the constant-0 answer is TRUE because phenotype
+sockets are blocking-only (NONBLOCK refused at both doors -- both measured
+in these boots), so no error can be PENDING; the NONBLOCK revisit is pinned
+in the decide header. Everything else declines unchanged. Coverage gap
+documented, not hidden: the optval writeback has no direct witness (curl
+inits its local to 0; a poisoned-buffer probe leg needs a net-granted probe
+bundle = a network-dependent boot gate -- declined, tracked).
+
+**Wall 5 -- `(55) Send failure: Function not implemented`.** The quiet ABI
+fact: aarch64 HAS NO plain send/recv -- musl's `send()` IS
+`sendto(...,NULL,0)` and `recv()` IS `recvfrom(...,NULL,NULL)`; wget
+survived only because it uses `write()`. NEW T2 rows for the
+connected-socket send/recv shape (CONNECTED + NULL addr + flags 0;
+MSG_NOSIGNAL admitted as a truthful no-op -- no SIGPIPE exists on the 9P
+data path), DELEGATING to the native write/read handlers: same staging,
+weft fast-path, short-op semantics, #844 lifecycle -- zero duplicated data
+path. Wrong-state = ENOTCONN, never ENOSYS.
+
+**The run that passed:** `HTTP/1.1 200 OK` (live Cloudflare headers) +
+`FETCH-RC=0` + `Example Domain` twice through the bracket-immunized grep
+(`Example D[o]main` -- the pts echo of the typed command can never satisfy
+the expect). Suite 1445/1445 with the three new vivarium tests (two
+pure-domain + the getsockopt shell-guard).
+Fails-without-fix measured at BOTH kernel walls (runs 3 and 4 are the
+pre-fix arms). ROADMAP 9.2's first exit criterion is ticked with the
+evidence inline.
+
+**Also found by the legs themselves:** `>/dev/null` FAILS inside containers
+(ash's redirect passes O_CREAT; the vivarium openat honestly refuses; the
+staged /dev/null is a plain file) -- enqueued; git redirects there
+constantly. And two of my own witness drafts were the never-key-on-your-own-
+diagnostics trap (a grep pattern containing the success token; an rc marker
+reading head's rc) -- caught in self-review before any run believed them.
+
+**The census IS the mission's work-list now:** SIGILL probing, /dev/null,
+eventfd2, pthread_create, timeouts -- five enqueued arcs, each with a
+decisive next probe named. Next: git via viv curl.
+
 ## 2026-08-25 (aux) -- ut-parser batch close: item 5 was a misattribution, not a bug
 
 The 5th and last queued ut-parser item: an echo'd C-source one-liner

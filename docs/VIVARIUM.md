@@ -670,9 +670,11 @@ The fd `accept` returns is the one `sys_open_kpath_for_proc` already produced fo
 — netd re-arms it with a fresh socket during the swap — which is what lets a
 server accept more than one connection.
 
-**The whole round-trip is provable in ONE single-threaded process**, which is not
-a testing shortcut but the only shape available: a `PHENO_LINUX` Proc can neither
-`clone` nor `fork`. It works because TCP establishes in netd's *stack*, not in
+**The whole round-trip is provable in ONE single-threaded process** -- which is
+how the V-5b gate drives both ends, and was the only shape available when this
+landed (the fork-shape `clone`/`execve`/`wait4` rows arrived later at L-6a/L-6b;
+a `PHENO_LINUX` Proc can now fork, though a genuinely-concurrent `CLONE_THREAD`
+is still refused). It works because TCP establishes in netd's *stack*, not in
 `accept()`: the client's `connect()` completes the handshake against the
 announced listener, and the server's `accept()` then finds the connection already
 waiting. That is precisely what a listen backlog is, and it is why the in-guest

@@ -109,6 +109,14 @@ sha256     = "6fd7ea97062beb51fa785ba858f823e1dfe4daf6bfa91ff4d5359b1061988c69"
 feeds      = "CHUNK_ALPINE (the static busybox shell -- stock Alpine ELFs are dynamic-PIE)"
 forageable = "download"
 
+[cache.static-curl]
+file       = "curl-linux-aarch64-musl-8.18.0.tar.xz"
+dir        = "build/cache"
+url        = "https://github.com/stunnel/static-curl/releases/download/8.18.0/curl-linux-aarch64-musl-8.18.0.tar.xz"
+sha256     = "4df5282b8ef0e336c64faa52b546272b421146d522733606ae5343b416b646b2"
+feeds      = "the alpine-net bundle's /usr/bin/curl (the ROADMAP 9.2 curl-fetches-a-URL vehicle)"
+forageable = "download"
+
 # --- network: build.sh fetches it itself at build time -----------------------
 
 [network.quake]

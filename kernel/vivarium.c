@@ -52,6 +52,12 @@ _Static_assert(VIV_LINUX_CLOCK_GETTIME > VIV_NATIVE_CEILING,
                "clock_gettime's collision argument is the ceiling one (time family)");
 _Static_assert(VIV_LINUX_GETTIMEOFDAY > VIV_NATIVE_CEILING,
                "gettimeofday's collision argument is the ceiling one (time family)");
+_Static_assert(VIV_LINUX_GETSOCKOPT > VIV_NATIVE_CEILING,
+               "getsockopt's collision argument is the ceiling one (SO_ERROR row)");
+_Static_assert(VIV_LINUX_SENDTO > VIV_NATIVE_CEILING,
+               "sendto's collision argument is the ceiling one (send() shape)");
+_Static_assert(VIV_LINUX_RECVFROM > VIV_NATIVE_CEILING,
+               "recvfrom's collision argument is the ceiling one (recv() shape)");
 
 // A T1 row: a Linux number, the Thylacine number it renumbers to, and the arity
 // that must carry across unchanged. `nargs` is not used to copy (the whole
@@ -289,15 +295,25 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_SHUTDOWN,    VIV_FORWARD },
     { VIV_LINUX_GETSOCKNAME, VIV_FORWARD },
     { VIV_LINUX_GETPEERNAME, VIV_FORWARD },
-    { VIV_LINUX_SENDTO,      VIV_FORWARD },
-    { VIV_LINUX_RECVFROM,    VIV_FORWARD },
+    // sendto/recvfrom left the FORWARD block above (curl-demo chunk): aarch64
+    // has NO plain send/recv syscall -- musl's send() IS sendto(fd, buf, len,
+    // flags, NULL, 0) and recv() IS recvfrom(..., NULL, NULL) -- so every
+    // Linux binary that sends on a socket via send() (curl does; busybox wget
+    // happens to use write()) reaches these numbers. The T2 shells serve
+    // EXACTLY the connected-socket send()/recv() shape by delegating to the
+    // native write/read handlers (the same data path a T1-renumbered
+    // read/write takes), and decline everything else -- the with-address
+    // datagram shape, MSG_PEEK, MSG_DONTWAIT -- back to ENOSYS. The full
+    // per-argument argument: vivarium_sendto_decide / vivarium_recvfrom_decide.
+    { VIV_LINUX_SENDTO,      VIV_TIER2   },
+    { VIV_LINUX_RECVFROM,    VIV_TIER2   },
     //
     // Live decisions, not deferrals:
     //   socketpair    — AF_UNIX only in practice, and /srv has no
     //                   mint-a-connected-pair operation; a guest that wanted a
     //                   pipe should use pipe2.
-    //   setsockopt /  — /net exposes no option surface at all. Answering
-    //   getsockopt      "success" to a TCP_NODELAY the stack ignores is the
+    //   setsockopt    — /net exposes no option surface at all. Answering
+    //                   "success" to a TCP_NODELAY the stack ignores is the
     //                   silent lie this tier exists to prevent; ENOSYS lets the
     //                   guest's own fallback run. (Linux libcs routinely
     //                   tolerate a failing setsockopt for tuning options.)
@@ -305,7 +321,15 @@ static const struct viv_reject g_viv_rejects[] = {
     //   recvmsg         passing, which is I-4's domain, not a socket detail).
     { VIV_LINUX_SOCKETPAIR,  VIV_ENOSYS },
     { VIV_LINUX_SETSOCKOPT,  VIV_ENOSYS },
-    { VIV_LINUX_GETSOCKOPT,  VIV_ENOSYS },
+    // getsockopt LEFT the blanket refusal above (curl-demo chunk): its
+    // (SOL_SOCKET, SO_ERROR) point is a READ of connection state, not a tuning
+    // knob -- and refusing it turns every libcurl consumer's SUCCEEDED connect
+    // into a reported failure (verifyconnect treats a getsockopt error as a
+    // connect error). The T2 shell serves exactly that point and declines the
+    // rest to ENOSYS, so every other option behaves as it did under the
+    // blanket row. The full honesty argument: vivarium_getsockopt_decide's
+    // header comment.
+    { VIV_LINUX_GETSOCKOPT,  VIV_TIER2  },
     { VIV_LINUX_SENDMSG,     VIV_ENOSYS },
     { VIV_LINUX_RECVMSG,     VIV_ENOSYS },
 
@@ -1323,6 +1347,74 @@ bool vivarium_socket_decide(u64 domain, u64 type, u64 protocol,
 
     (void)err;
     *out_proto = proto;
+    return true;
+}
+
+bool vivarium_getsockopt_decide(u64 level, u64 optname, s32 *out_err) {
+    if (!out_err) return false;                  // fail closed
+    *out_err = T_E_NOSYS;
+    // Narrowed to 32 bits: both are C `int`s in the Linux ABI (the openat
+    // precedent -- the narrowing IS the ABI; contrast clone's full-width read,
+    // whose argument is an unsigned long).
+    if ((u32)level   != (u32)VIV_SOL_SOCKET) return false;
+    if ((u32)optname != (u32)VIV_SO_ERROR)   return false;
+    *out_err = 0;
+    return true;
+}
+
+bool vivarium_sendto_decide(u8 state, u64 flags, u64 addr_va, u64 addrlen,
+                            s32 *out_err) {
+    if (!out_err) return false;                  // fail closed
+    *out_err = T_E_NOSYS;
+
+    // The datagram shape -- a per-call destination -- is real undone work
+    // (a per-datagram dial has no /net verb), not a flag to wave through.
+    if (addr_va != 0 || addrlen != 0) return false;
+
+    // flags is a C int: narrowed (the openat precedent). MSG_NOSIGNAL is
+    // admitted as a TRUTHFUL no-op: it suppresses SIGPIPE, and the phenotype
+    // socket data path is a 9P Spoor write -- the pipe EPIPE-note machinery
+    // never runs there, so there is no SIGPIPE to suppress in the first
+    // place. Everything else would lie: MSG_DONTWAIT on a blocking-only
+    // socket, MSG_MORE on a stack that cannot coalesce.
+    if (((u32)flags & ~(u32)VIV_MSG_NOSIGNAL) != 0) return false;
+
+    // Only the CONNECTED shape is served. An UNCONNECTED send is genuinely
+    // UNBUILT here (there is no per-datagram dial and no unconnected-stream
+    // path), so it declines to ENOSYS -- the census-visible "unbuilt" answer,
+    // NOT a fabricated state errno. (An earlier draft answered ENOTCONN, which
+    // was fake precision: Linux would give EPIPE for stream / EDESTADDRREQ for
+    // datagram, we serve none of those, and ENOTCONN both mismatched Linux AND
+    // hid the missing capability from viv_report_unserved -- the R2-F1
+    // correction. The shell reports ENOSYS, so "build unconnected send" lands
+    // on the mission's work-list instead of masquerading as a state error.)
+    if (state != (u8)VIV_SOCK_CONNECTED) return false;   // *out_err == T_E_NOSYS
+
+    *out_err = 0;
+    return true;
+}
+
+bool vivarium_recvfrom_decide(u8 state, u64 flags, u64 addr_va, s32 *out_err) {
+    if (!out_err) return false;                  // fail closed
+    *out_err = T_E_NOSYS;
+
+    // A non-NULL source-address out-pointer asks for the peer's address
+    // written back -- state the socktab does not carry. Declined until a
+    // consumer needs it (recv() passes NULL).
+    if (addr_va != 0) return false;
+
+    // No recv flag is truthfully servable: MSG_PEEK needs a non-consuming
+    // read the 9P data path does not have, MSG_WAITALL changes the return
+    // contract, MSG_DONTWAIT lies on a blocking-only socket.
+    if ((u32)flags != 0) return false;
+
+    // Only CONNECTED is served (R2-F1, as sendto): a recv on an unconnected
+    // socket is UNBUILT -- notably the bound-UDP-server idiom (bind then recv)
+    // that Linux serves -- so it declines to ENOSYS, census-visible, rather
+    // than claiming a fake ENOTCONN over a state Linux considers valid.
+    if (state != (u8)VIV_SOCK_CONNECTED) return false;   // *out_err == T_E_NOSYS
+
+    *out_err = 0;
     return true;
 }
 

@@ -749,6 +749,9 @@ void test_vivarium_notemask_to_sigset(void);             // VIVARIUM V-6b
 void test_vivarium_signote_reverse(void);                 // VIVARIUM V-6c
 void test_vivarium_sigframe(void);
 void test_vivarium_socket_domain(void);
+void test_vivarium_getsockopt_domain(void);
+void test_vivarium_getsockopt_shell_guards_uaccess(void);
+void test_vivarium_sendrecv_domain(void);
 void test_vivarium_sockaddr(void);
 void test_vivarium_net_cmd(void);
 void test_vivarium_conn_n(void);
@@ -2397,6 +2400,9 @@ struct test_case g_tests[] = {
     { "vivarium.signote_reverse",       test_vivarium_signote_reverse,       false, NULL },
     { "vivarium.sigframe",              test_vivarium_sigframe,              false, NULL },
     { "vivarium.socket_domain",        test_vivarium_socket_domain,        false, NULL },
+    { "vivarium.getsockopt_domain",    test_vivarium_getsockopt_domain,    false, NULL },
+    { "vivarium.getsockopt_shell_guards_uaccess", test_vivarium_getsockopt_shell_guards_uaccess, false, NULL },
+    { "vivarium.sendrecv_domain",      test_vivarium_sendrecv_domain,      false, NULL },
     { "vivarium.sockaddr",             test_vivarium_sockaddr,             false, NULL },
     { "vivarium.net_cmd",              test_vivarium_net_cmd,              false, NULL },
     { "vivarium.conn_n",               test_vivarium_conn_n,               false, NULL },
