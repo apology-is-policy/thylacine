@@ -22,6 +22,65 @@ needed the operator.
 
 ---
 
+## 2026-08-25 (aux) -- ut line-wrap: render mechanism + the deployment-mode reframe
+
+The operator's 3rd queued ut item: "moving left/right when the executed command wraps at
+the end of the first line duplicates the line on every keystroke," to be done PROPERLY
+because they want tmux-style multiplexed shells later.
+
+**The render mechanism (landed dormant @0a7e4c18).** Root cause was clean: `render()` counted
+LOGICAL `\n` lines, not the visual PHYSICAL rows the terminal wraps a long line onto, so on a
+line that overflowed the width `\r\x1b[K` cleared only the cursor's current physical row and
+re-emitted, duplicating. `render_wrapped` counts physical rows (ceil over cols), moves up to
+the block top, `\x1b[J` clears the block, re-emits, forces `\r\n` on a tail that exactly fills
+a row (pending-wrap), then repositions -- linenoise-style relative moves. `cols: Option` --
+None keeps the pre-fix bytes verbatim; a wrong GUESSED width would emit wrong cursor-up counts
+and corrupt the display, strictly worse than not wrapping. Proven in-guest by u-repl-test's
+byte-level discriminator (a 2-row wrapped line's 2nd render must start `\x1b[1A\r\x1b[J`;
+fails-without-fix). This part was never in doubt.
+
+**The wrong turn, and what caught it.** I first wired the width source as kaua does: read
+`/dev/winsize` (fast path), else CPR. Built it, wrote an interactive witness asserting ut
+emits the CPR probe on serial -- and it FAILED: no `\x1b[6n` ever appeared. The witness (a
+control one variable away from my assumption) is what caught it: ut had read a NON-zero
+`/dev/winsize` and taken the fast path. The map showed why -- `/dev/winsize` is ONE global
+kernel size set by aurora to its framebuffer grid (128x36) EVEN under headless `-nographic`
+(aurora runs regardless, rendering to a virtual framebuffer nobody sees). So a serial ut reads
+the framebuffer's virtual width, not the operator's terminal. And aurora is a full VT emulator
+that also ANSWERS CPR (vt.rs:1157) -- so "ask the terminal" races two answerers. My fast-path
+design was backwards for the operator's default (headless serial) flow. Had the witness
+asserted only "session healthy" instead of the specific CPR byte, I'd have shipped the wrong
+width source green.
+
+**The reframe (operator).** I escalated the ambiguity rather than guess. The operator supplied
+the missing model: the serial console and aurora's framebuffer are not two simultaneous views
+fighting over geometry -- they are mutually-exclusive PRIMARY displays chosen per deployment
+(pure virtual console / +virtual GPU / bare-metal desktop / headless SSH). One primary per
+mode => exactly one CPR answerer => a client can just read `/dev/winsize` (0 0 <=> no primary
+renderer => CPR the sole terminal), which is EXACTLY the client rule ARCH 23.5.3 already
+documents. The deployment-mode model is what makes that rule correct. CPR-always was then
+rejected: needless in GPU mode, and it revives the two-answerer race in the testing posture.
+
+**The design (scripture @4512494c, `docs/DISPLAY-MODES.md`).** A `thylacine.display` bootarg
+(via `/hw/chosen/bootargs` + `bootarg_has`, the existing channel); console mode = drop the GPU
+(the existing THYLACINE_NO_GPU path -> joey already skips aurora); GPU mode = aurora primary +
+1b silences the EL0 serial at the kernel seam already NAMED at cons.c:207-210; default (no
+flag) unchanged so the whole test matrix keeps passing; ut width = the 23.5.3 rule made
+pts-aware. Operator ratified: lean console boot over aurora-yields-in-place, 1b in scope,
+default stays testing-hybrid with `THYLACINE_DISPLAY=console` as the opt-in (zero test churn).
+
+**A caught process trap.** An earlier `cd usr/` for a cargo-check persisted, so a "verification"
+build + test.sh silently did not run (`tools/build.sh: No such file or directory`, masked as
+exit 0 by a piped `tail`). Caught by noticing an empty boot-log grep + the "No such file"
+line before committing; re-ran from root with the real exit captured. Nothing was committed on
+the false green.
+
+**Landed:** foundation 0a7e4c18 (render mechanism, dormant, pushed) + scripture 4512494c
+(DISPLAY-MODES.md, pushed). **Next:** the impl (run-vm.sh + ut width + kernel 1b + aurora),
+scoped in the handoff. The render fix is real and proven; the width it consumes is now
+correctly modelled but not yet wired -- so the operator's bug is not user-visibly fixed until
+the impl chunk lands.
+
 ## 2026-08-25 (aux) -- ut: `=` in a command argument is a literal
 
 The operator's original clang wall included `-std=c++20` -- a flag with `=value`. ut
