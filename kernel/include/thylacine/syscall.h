@@ -2076,6 +2076,75 @@ enum {
     //   separate number so a garbage x2..x4 from a shorter-arg caller cannot be
     //   misread as a valid subrange (the #112 missed-caller class).
     SYS_BURROW_FROM_HOSTMEM = 107,   // arg: pci_handle(x0) shmid(x1) offset(x2) length(x3) cache_policy(x4)
+
+    // SYS_OPEN_CREATE(start_fd, path_va, path_len, omode, perm) -> opened_fd / -errno
+    //   The path-based open-or-create -- the create(name, mode, perm) row
+    //   ARCH section 11.2 has carried since Phase 0, minted for the #50
+    //   path-mutation family (VIVARIUM.md section 6.24; scripture commit
+    //   b417b307). Heritage: Plan 9's create(2) is path-based and its kernel
+    //   (namec Acreate) composes create-else-open internally; Linux v9fs does
+    //   the same as a bounded client loop. Both idioms agree: EXCLUSIVE
+    //   create is atomic at the server (Tlcreate); open-if-present is a
+    //   bounded retry loop. This syscall is that composition, kernel-side.
+    //
+    //   x0 = start_fd  (hidx_t KOBJ_SPOOR with RIGHT_READ -- a NAVIGATION
+    //                   base, exactly SYS_OPEN's gate; the write-side gate is
+    //                   the A-2d W|X check on the RESOLVED parent directory,
+    //                   identical to the two-step SYS_OPEN(OPATH) +
+    //                   SYS_WALK_CREATE envelope -- OR the FROM_ROOT sentinel
+    //                   (u64)-1: resolve at the Territory root, and a RELATIVE
+    //                   path first joins the LS-4 cwd EXACTLY as SYS_OPEN does.
+    //                   That join-parity is the point: SYS_WALK_CREATE's
+    //                   identical-looking sentinel resolves at the ROOT with no
+    //                   cwd join, which is the silent wrong-directory hazard
+    //                   [VIVARIUM.md 6.20 blocker 3] this syscall exists to
+    //                   close. Both call sites share one join helper so the
+    //                   parity is structural, not copied.)
+    //   x1 = path_va   (user-VA of the multi-component path; '/' allowed.)
+    //   x2 = path_len  (bytes; 1 .. SYS_OPEN_PATH_MAX; no embedded NUL.)
+    //   x3 = omode     (OREAD/OWRITE/ORDWR + optional OTRUNC + optional
+    //                   SYS_WALK_OPEN_NOFOLLOW + optional SYS_WALK_OPEN_OEXCL.
+    //                   OPATH is REJECTED -- a navigation handle cannot want
+    //                   creation. Mask: SYS_OPEN_CREATE_OMODE_VALID.)
+    //   x4 = perm      (u32 Plan 9 perm: low 9 mode bits, plus DMDIR to create
+    //                   a DIRECTORY -- the mkdir-by-path row, create-only.
+    //                   SYS_WALK_CREATE_PERM_VALID; the DMSRV* service-post
+    //                   bits are NOT admitted here -- a service post remains
+    //                   SYS_WALK_CREATE's fd-based shape, and a path-create
+    //                   whose parent resolves to a /srv registry answers
+    //                   -T_E_OPNOTSUPP.)
+    //
+    //   Semantics rows (the leaf is classified LEXICALLY before any RPC; the
+    //   split classifies, never resolves -- the parent PREFIX resolves through
+    //   stalk with full I-28 containment + symlink expansion + mount-cross):
+    //   - trailing-slash, ".", "..", or root leaf -> -T_E_ISDIR (the Linux
+    //     open_last_lookups rows: O_CREAT with a non-NORM last component).
+    //   - OEXCL or DMDIR: ONE create attempt on the resolved parent --
+    //     server-atomic; an existing leaf answers -T_E_EEXIST honestly.
+    //   - plain (no OEXCL, no DMDIR): open-first via the full-path stalk
+    //     (OTRUNC applies on this leg); -T_E_NOENT -> create on the parent
+    //     (OTRUNC stripped -- a fresh file is already empty); a create lost to
+    //     an exists-race -> retry the open; bounded at 2 rounds, then the last
+    //     real error. Two racing creators converge (the loser opens the
+    //     winner's file); racing OTRUNC writers may truncate each other
+    //     exactly as on Linux.
+    //   - NOFOLLOW composes: a final symlink answers -T_E_LOOP (live or
+    //     dangling), never creates through. WITHOUT NOFOLLOW a DANGLING final
+    //     symlink answers -T_E_EEXIST after the bounded loop (Linux would
+    //     create the TARGET; documented degradation, VIVARIUM.md 6.24).
+    //
+    //   Returns: opened KOBJ_SPOOR fd (rights_for_omode + RIGHT_TRANSFER; a
+    //   DMDIR create returns the dir opened OREAD per the SYS_WALK_CREATE
+    //   contract) or -errno: -T_E_INVAL (bad omode/perm/path shape),
+    //   -T_E_FAULT (path_va), -T_E_ISDIR (the leaf rows), -T_E_NOENT (parent
+    //   prefix missing), -T_E_NOTDIR (prefix component not a dir), -T_E_ACCES
+    //   (per-component X / parent W|X denial), -T_E_EEXIST (OEXCL/DMDIR loser,
+    //   or the bounded-loop exit), -T_E_LOOP (NOFOLLOW final symlink),
+    //   -T_E_OPNOTSUPP (parent Dev cannot create / /srv registry parent),
+    //   -T_E_NOMEM (clone/handle-table), server Rlerror passthrough.
+    //
+    //   Audit-bearing: the #50 path-mutation-family row (AUDIT-TRIGGERS.md).
+    SYS_OPEN_CREATE = 108,   // arg: start_fd(x0) path_va(x1) path_len(x2) omode(x3) perm(x4)
 };
 
 // V-2 (GPU-DESIGN §6.2.1): the host-dictated cache attribute a
@@ -2796,6 +2865,19 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // path, so no server and no Spoor.mode ever sees it.
 #define SYS_WALK_OPEN_NOFOLLOW     0x20u
 #define SYS_WALK_OPEN_OMODE_VALID  0xB3u
+
+// #50 (VIVARIUM.md section 6.24): the EXCLUSIVE-create modifier, at the value
+// the comment above pre-reserved for it. Meaningful ONLY to SYS_OPEN_CREATE
+// (create-first, once; an existing leaf answers -T_E_EEXIST -- atomic at the
+// server, the lockfile primitive). SYS_WALK_OPEN / SYS_OPEN / SYS_WALK_CREATE
+// do not admit it: their masks are unchanged, so the bit arrives there as an
+// invalid-omode reject, never a silent drop.
+#define SYS_WALK_OPEN_OEXCL        0x1000u
+// SYS_OPEN_CREATE's omode envelope: access bits + OTRUNC + NOFOLLOW + OEXCL.
+// OPATH is deliberately absent (a navigation handle cannot want creation) --
+// its bit here is a loud -T_E_INVAL.
+#define SYS_OPEN_CREATE_OMODE_VALID \
+    ((SYS_WALK_OPEN_OMODE_VALID & ~SYS_WALK_OPEN_OPATH) | SYS_WALK_OPEN_OEXCL)
 
 // SYS_WALK_CREATE perm: the Plan 9 perm word. Low 9 bits are the POSIX
 // rwxrwxrwx mode; the DMDIR bit selects directory creation. All other Plan 9

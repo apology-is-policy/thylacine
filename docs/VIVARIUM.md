@@ -1941,9 +1941,14 @@ not admissible at all. **Three independent blockers, any one fatal:**
    wrong for a legal class of inputs, with no error. That is the `munmap` failure
    mode precisely: *two sentinels that look identical and are not.*
 
-There is no create-by-path syscall in the tree (the only other cwd-joining site,
-`exec_resolve_from_namespace`, resolves a binary to exec). Task #50 tracks the
-userspace half; the kernel half wants a syscall that does not exist.
+There was no create-by-path syscall in the tree when this correction was
+written (the only other cwd-joining site, `exec_resolve_from_namespace`,
+resolves a binary to exec). **#50 built it** — `SYS_OPEN_CREATE` = 108 plus
+the path-mutation family, section 6.24: the verdict above stands against
+ROUTING to `SYS_WALK_CREATE`; the resolution is a new kernel core whose cwd
+join is SYS_OPEN's own helper (blocker 3 closed structurally) and whose
+create-else-open composition is kernel-side (blockers 1+2 dissolved the
+Plan 9 way).
 
 #### Correction 2 — a real dirfd is blocked by handle *state*, not by the path
 

@@ -1441,10 +1441,13 @@ VIVEOF
             #   E  the pool holds the PINNED image, asserted from inside the
             #      guest. This is the #126 stale-bake detector.
             #
-            # NO `>` REDIRECTION ANYWHERE, and it is not a style choice: #201,
-            # the vivarium's openat refuses O_CREAT unconditionally, and a plain
-            # `>` passes O_CREAT even onto a file that already exists. Every
-            # assertion is a $( ) capture (a pipe) or a 2>&1 dup.
+            # NO `>` REDIRECTION ANYWHERE. When this leg was written that was
+            # forced (#201: openat refused ALL O_CREAT until #50 landed the
+            # create arm); it STAYS by choice -- these legs assert loader/
+            # dispatch/symlink mechanisms, and a redirect would splice the
+            # unrelated create machinery (own gates: viv-run.exp's mutation
+            # legs) into every one of them. Every assertion is a $( ) capture
+            # (a pipe) or a 2>&1 dup.
             #
             # The RAW line is diagnostics, never the assertion, and it cannot
             # forge one (#186): os-release contains no "DISTRO-" string.
@@ -2744,6 +2747,22 @@ populate_stratum_pool() {
         echo "==> populate pool: baking viv bundles ($viv_stage -> /vivarium, $(du -sh "$viv_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$viv_stage" /vivarium \
             || { echo "==> populate pool: put /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        # #50: `put` preserves only the exec bit (dirs bake 0755), so the
+        # containers' /tmp loses its 1777 and a NON-system principal running
+        # `viv run` cannot write anywhere in the rootfs -- the A-2d W|X check
+        # denies the phenotype's openat(O_CREAT)/mkdirat legs (measured:
+        # "can't create /tmp/f50: Permission denied" from the viv-run
+        # scenario's user shell). Re-stamp each staged bundle's /tmp 0777
+        # after the put (stratum-fs chmod -> Tsetattr). Linux containers
+        # expect a writable /tmp; the sticky bit adds nothing the kernel
+        # enforces at v1.0. A bundle without a rootfs/tmp (the probe) skips.
+        local vb
+        for vb in "$viv_stage"/*/rootfs/tmp; do
+            [[ -d "$vb" ]] || continue
+            local vrel="/vivarium${vb#"$viv_stage"}"
+            "$stratum_fs_bin" -s "$sock_path" chmod 777 "$vrel" \
+                || { echo "==> populate pool: chmod $vrel FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        done
         "$stratum_fs_bin" -s "$sock_path" sync \
             || { echo "==> populate pool: sync after /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: viv bundles baked at /vivarium"

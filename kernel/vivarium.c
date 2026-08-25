@@ -27,7 +27,7 @@
 // and this assert -- pinned to SYS_RFORK's identity -- passed the whole time. So
 // it is re-pinned to the current top; the lesson is that "add a syscall" must
 // include "move the ceiling", which no static_assert can force on a NEW number.
-_Static_assert(VIV_NATIVE_CEILING == SYS_BURROW_FROM_HOSTMEM,
+_Static_assert(VIV_NATIVE_CEILING == SYS_OPEN_CREATE,
                "VIV_NATIVE_CEILING must be the highest ASSIGNED native syscall "
                "number. Adding one above it silently voids the collision "
                "argument for every vivarium row at or below the new value -- "
@@ -58,6 +58,10 @@ _Static_assert(VIV_LINUX_SENDTO > VIV_NATIVE_CEILING,
                "sendto's collision argument is the ceiling one (send() shape)");
 _Static_assert(VIV_LINUX_RECVFROM > VIV_NATIVE_CEILING,
                "recvfrom's collision argument is the ceiling one (recv() shape)");
+_Static_assert(VIV_LINUX_RENAMEAT2 > VIV_NATIVE_CEILING,
+               "renameat2's collision argument is the ceiling one (#50; its "
+               "three sub-ceiling siblings 34/35/38 carry per-number "
+               "paragraphs in vivarium.h instead)");
 
 // A T1 row: a Linux number, the Thylacine number it renumbers to, and the arity
 // that must carry across unchanged. `nargs` is not used to copy (the whole
@@ -231,6 +235,21 @@ static const struct viv_reject g_viv_rejects[] = {
     // socktab entry attached, which holds while close is the only freeing row.)
     { VIV_LINUX_PIPE2,      VIV_TIER2   },  // #155: vivarium_pipe2_decide
     { VIV_LINUX_OPENAT,     VIV_TIER2   },  // V-2b: vivarium_openat_decide/_build
+                                            //  + #50: the O_CREAT domain
+                                            //    (vivarium_openat_create_decide)
+
+    // The path-mutation family (#50; VIVARIUM.md section 6.24) -- the rows
+    // git's writes stand on (init alone needs all four: object dirs, the
+    // config lockfile, its unlink, its rename-into-place). Each shell splits
+    // the path lexically, stalks the parent, and runs the SAME extracted
+    // native mechanics (spoor_create_install / spoor_unlink_in_dir /
+    // spoor_rename_in_dirs) the fd-based syscalls run -- I-43 by
+    // construction. 34/35/38 sit below the native ceiling and carry
+    // per-number collision paragraphs in vivarium.h.
+    { VIV_LINUX_MKDIRAT,    VIV_TIER2   },  // #50: vivarium_mkdirat_decide
+    { VIV_LINUX_UNLINKAT,   VIV_TIER2   },  // #50: vivarium_unlinkat_decide
+    { VIV_LINUX_RENAMEAT,   VIV_TIER2   },  // #50: vivarium_renameat_decide
+    { VIV_LINUX_RENAMEAT2,  VIV_TIER2   },  // #50: same decide, flags==0 only
     { VIV_LINUX_FSTAT,      VIV_TIER2   },  // V-2b: vivarium_stat_to_linux
     { VIV_LINUX_NEWFSTATAT, VIV_TIER2   },  // V-2c: vivarium_fstatat_decide
     { VIV_LINUX_MMAP,       VIV_TIER2   },  // V-2d: vivarium_mmap_decide
@@ -513,9 +532,14 @@ enum {
 //                (syscall.c:2870). So the "obvious" AT_FDCWD mapping would create
 //                the file in the WRONG DIRECTORY whenever cwd != "/" -- wrong for
 //                a legal class of inputs with no error, which is exactly the
-//                munmap failure this tier exists to refuse. Task #50 tracks the
-//                userspace half; the kernel half wants a create-by-PATH syscall
-//                that does not exist.
+//                munmap failure this tier exists to refuse.
+//                #50 BUILT the resolution (VIVARIUM.md section 6.24): the
+//                verdict above stands against ROUTING to SYS_WALK_CREATE; the
+//                shell now routes O_CREAT-without-O_PATH to
+//                vivarium_openat_create_decide + SYS_OPEN_CREATE's kernel
+//                core, whose cwd join is SYS_OPEN's own helper (blocker 3
+//                closed structurally) and whose create-else-open composition
+//                is kernel-side (blockers 1+2 dissolved the Plan 9 way).
 //   O_DIRECTORY  Requires the target BE a directory (Linux: ENOTDIR otherwise).
 //                SYS_OPEN has no such check, so ignoring it turns an error into
 //                a successful open of a regular file. The worst kind of wrong.
@@ -612,6 +636,102 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
     // ignore, alongside O_DIRECTORY and O_NOFOLLOW), and the flag belongs to the
     // descriptor, which an O_PATH open produces like any other.
     *cloexec_out  = (fl & VIV_O_CLOEXEC) != 0;
+    return VIV_TRANSLATED;
+}
+
+// #50 (VIVARIUM.md section 6.24): the O_CREAT domain of openat. The header
+// carries the domain; this body is the map. The shell routes here when
+// O_CREAT is set WITHOUT O_PATH (Linux's O_PATH ignores O_CREAT, so that
+// combination stays on the plain decide -- the exact Linux contour).
+enum viv_verdict vivarium_openat_create_decide(u64 dirfd, u64 flags, u64 mode,
+                                               u32 *omode_out, u32 *perm_out,
+                                               bool *cloexec_out) {
+    // Fail toward the supervisor, never toward a dispatch.
+    if (!omode_out || !perm_out || !cloexec_out) return VIV_FORWARD;
+
+    // int-typed on the Linux side: only the low 32 bits are significant (the
+    // sibling decides' narrowing, for the same sign/zero-extension reason).
+    s32 dfd = (s32)(u32)dirfd;
+    u32 fl  = (u32)flags;
+    u32 md  = (u32)mode;
+
+    // AT_FDCWD only -- the plain row's gate, for the plain row's reason
+    // (a real dirfd is blocked by handle STATE; section 6.20 Correction 2).
+    if (dfd != VIV_AT_FDCWD) return VIV_FORWARD;
+
+    // The admitted set: the plain decide's, minus O_PATH (the shell already
+    // excluded it), plus O_CREAT + O_EXCL. Everything outside declines to the
+    // supervisor -- O_APPEND / O_DIRECTORY / O_TMPFILE keep their V-2b
+    // rejections through this arm too.
+    u32 admitted = (VIV_OPENAT_ADMITTED & ~(u32)VIV_O_PATH)
+                 | (u32)VIV_O_CREAT | (u32)VIV_O_EXCL;
+    if (fl & ~admitted) return VIV_FORWARD;
+
+    // mode: the low-9 permission bits only. A setuid/sgid/sticky request
+    // (07000) declines rather than being silently stripped -- the strip would
+    // create a file with LESS restrictive metadata than the caller asked to
+    // record, wrong with nothing to catch it; the decline is census-visible.
+    if (md & ~0777u) return VIV_FORWARD;
+
+    u32 omode;
+    switch (fl & VIV_O_ACCMODE) {
+    case VIV_O_RDONLY: omode = VIV_OMODE_READ;  break;
+    case VIV_O_WRONLY: omode = VIV_OMODE_WRITE; break;
+    case VIV_O_RDWR:   omode = VIV_OMODE_RDWR;  break;
+    default:           return VIV_FORWARD;   // (fl & ACCMODE) == 3: Linux EINVAL
+    }
+    if (fl & VIV_O_TRUNC)    omode |= VIV_OMODE_TRUNC;
+    if (fl & VIV_O_NOFOLLOW) omode |= SYS_WALK_OPEN_NOFOLLOW;
+    if (fl & VIV_O_EXCL)     omode |= SYS_WALK_OPEN_OEXCL;
+
+    // Belt-and-braces, as the plain decide: never emit an omode the target
+    // rejects -- a future admission that forgets the kernel mask fails HERE
+    // as a forward, not downstream as an unexplained error.
+    if (omode & ~(u32)SYS_OPEN_CREATE_OMODE_VALID) return VIV_FORWARD;
+
+    *omode_out   = omode;
+    *perm_out    = md;          // low-9 only, gated above
+    *cloexec_out = (fl & VIV_O_CLOEXEC) != 0;
+    return VIV_TRANSLATED;
+}
+
+// #50: mkdirat -- the exclusive arm with DMDIR (mkdir has no open-if-present).
+enum viv_verdict vivarium_mkdirat_decide(u64 dirfd, u64 mode, u32 *perm_out) {
+    if (!perm_out) return VIV_FORWARD;
+    s32 dfd = (s32)(u32)dirfd;
+    u32 md  = (u32)mode;
+    if (dfd != VIV_AT_FDCWD) return VIV_FORWARD;
+    // Low-9 only; 07000 declines for the openat-create reason (a silent strip
+    // records less restrictive metadata than asked; git's shared-repository
+    // setgid dirs are the real caller that would be silently wronged).
+    if (md & ~0777u)         return VIV_FORWARD;
+    *perm_out = md | SYS_WALK_CREATE_DMDIR;
+    return VIV_TRANSLATED;
+}
+
+// #50: unlinkat -- flags map 1:1 onto SYS_UNLINK's (0 <-> file,
+// AT_REMOVEDIR <-> SYS_UNLINK_REMOVEDIR); anything else declines.
+enum viv_verdict vivarium_unlinkat_decide(u64 dirfd, u64 flags,
+                                          u32 *tflags_out) {
+    if (!tflags_out) return VIV_FORWARD;
+    s32 dfd = (s32)(u32)dirfd;
+    u32 fl  = (u32)flags;
+    if (dfd != VIV_AT_FDCWD)               return VIV_FORWARD;
+    if (fl & ~(u32)VIV_AT_REMOVEDIR)       return VIV_FORWARD;
+    *tflags_out = (fl & VIV_AT_REMOVEDIR) ? SYS_UNLINK_REMOVEDIR : 0u;
+    return VIV_TRANSLATED;
+}
+
+// #50: renameat/renameat2 -- the domain gate alone (the map is 1:1: Linux's
+// replace-existing atomicity IS SYS_RENAME's documented contract). renameat
+// passes literal 0 for flags; renameat2 admits exactly 0 (NOREPLACE /
+// EXCHANGE / WHITEOUT decline, census-visible).
+enum viv_verdict vivarium_renameat_decide(u64 olddirfd, u64 newdirfd,
+                                          u64 flags) {
+    s32 odfd = (s32)(u32)olddirfd;
+    s32 ndfd = (s32)(u32)newdirfd;
+    if (odfd != VIV_AT_FDCWD || ndfd != VIV_AT_FDCWD) return VIV_FORWARD;
+    if ((u32)flags != 0)                              return VIV_FORWARD;
     return VIV_TRANSLATED;
 }
 

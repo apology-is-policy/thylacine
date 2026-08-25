@@ -105,6 +105,13 @@ void test_stalk_symlink_stat_vs_lstat(void);
 void test_stalk_symlink_pounce_split(void);
 void test_stalk_symlink_lifetime(void);
 
+// #50: SYS_OPEN_CREATE over the fixture (the create overlay).
+void test_stalk_open_create_cwd_parity(void);
+void test_stalk_open_create_open_if_present(void);
+void test_stalk_open_create_mkdir_and_nest(void);
+void test_stalk_open_create_leaf_rows(void);
+void test_stalk_open_create_containment_and_denials(void);
+
 // =============================================================================
 // The fixture Dev.
 // =============================================================================
@@ -173,6 +180,38 @@ static const struct fixnode *fix_node(u64 path) {
     return NULL;
 }
 
+// #50: the create overlay -- a small MUTABLE extension of the static tree so
+// SYS_OPEN_CREATE's core can be driven over the REAL resolver (cwd join,
+// containment, X-search, the leaf rows). fix_create records nodes here;
+// fix_walk_one / fix_stat_qid consult it after the static table. Reset
+// per-test. Overlay qids start at 0x100, clear of the static table's.
+#define FIXMADE_MAX  8
+#define FIXMADE_BASE 0x100u
+struct fixmade {
+    u64  parent;
+    char name[SYS_WALK_OPEN_NAME_MAX + 1];
+    u64  path;
+    u8   type;
+    u32  mode;
+};
+static struct fixmade g_fixmade[FIXMADE_MAX];
+static int g_fixmade_n;
+static u64 g_fix_create_last_parent;   // parent qid of the LAST create -- the
+                                       // cwd-parity witness reads this
+static int g_fix_create_calls;
+
+static void fixmade_reset(void) {
+    g_fixmade_n = 0;
+    g_fix_create_last_parent = (u64)-1;
+    g_fix_create_calls = 0;
+}
+
+static const struct fixmade *fixmade_node(u64 path) {
+    for (int i = 0; i < g_fixmade_n; i++)
+        if (g_fixmade[i].path == path) return &g_fixmade[i];
+    return NULL;
+}
+
 static bool fix_walk_one(u64 cur_path, const char *name, struct Qid *out) {
     out->path = 0; out->vers = 0; out->type = 0;
     out->pad[0] = out->pad[1] = out->pad[2] = 0;
@@ -188,6 +227,15 @@ static bool fix_walk_one(u64 cur_path, const char *name, struct Qid *out) {
         if (g_fix[i].parent == cur_path && fix_streq(name, g_fix[i].name)) {
             out->path = g_fix[i].path;
             out->type = g_fix[i].type;
+            return true;
+        }
+    }
+    // #50: the create overlay resolves like any other child.
+    for (int i = 0; i < g_fixmade_n; i++) {
+        if (g_fixmade[i].parent == cur_path &&
+            fix_streq(name, g_fixmade[i].name)) {
+            out->path = g_fixmade[i].path;
+            out->type = g_fixmade[i].type;
             return true;
         }
     }
@@ -225,13 +273,25 @@ static struct Walkqid *fix_walk(struct Spoor *c, struct Spoor *nc,
 
 static int fix_stat_qid(u64 qid_path, struct t_stat *out) {
     const struct fixnode *fn = fix_node(qid_path);
-    if (!fn) return -1;
+    u8  ntype;
+    u32 nmode;
+    if (fn) {
+        ntype = fn->type;
+        nmode = fn->mode;
+    } else {
+        // #50: overlay nodes stat like static ones (the A-2d parent check +
+        // the dot gates + X-search must see a created directory as a real dir).
+        const struct fixmade *m = fixmade_node(qid_path);
+        if (!m) return -1;
+        ntype = m->type;
+        nmode = m->mode;
+    }
     for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
-    out->mode     = ((fn->type & QTDIR)     ? T_S_IFDIR :
-                     (fn->type & QTSYMLINK) ? T_S_IFLNK : T_S_IFREG) | fn->mode;
+    out->mode     = ((ntype & QTDIR)     ? T_S_IFDIR :
+                     (ntype & QTSYMLINK) ? T_S_IFLNK : T_S_IFREG) | nmode;
     out->nlink    = 1;
-    out->qid_path = fn->path;
-    out->qid_type = fn->type;
+    out->qid_path = qid_path;
+    out->qid_type = ntype;
     out->blksize  = 4096;
     out->uid      = PRINCIPAL_SYSTEM;
     out->gid      = GID_SYSTEM;
@@ -292,6 +352,41 @@ static struct Spoor *fix_open(struct Spoor *c, int omode) {
     c->flag |= COPEN;
     c->mode  = omode;
     return c;
+}
+
+// #50: the fixture create -- the dev9p create CONTRACT over the overlay:
+// exclusive (an existing child answers NULL -- the errno-precision channel is
+// dev9p-private, so the fixture's failure surfaces as the generic -1; the
+// loopback tests in test_dev9p.c own the EEXIST-exact legs), transitions nc
+// onto the new node OPENED and returns nc (the reuse-nc contract
+// spoor_create_install enforces).
+static struct Spoor *fix_create(struct Spoor *nc, const char *name, int omode,
+                                u32 perm, u32 gid) {
+    (void)gid;
+    g_fix_create_calls++;
+    if (!nc) return NULL;
+    struct Qid q;
+    if (fix_walk_one(nc->qid.path, name, &q)) return NULL;   // exists
+    if (g_fixmade_n >= FIXMADE_MAX)           return NULL;
+    struct fixmade *m = &g_fixmade[g_fixmade_n];
+    m->parent = nc->qid.path;
+    size_t l = 0;
+    while (name[l] != '\0' && l < SYS_WALK_OPEN_NAME_MAX) {
+        m->name[l] = name[l];
+        l++;
+    }
+    m->name[l] = '\0';
+    m->path = FIXMADE_BASE + (u64)g_fixmade_n;
+    m->type = (perm & SYS_WALK_CREATE_DMDIR) ? QTDIR : QTFILE;
+    m->mode = perm & 0777u;
+    g_fixmade_n++;
+    g_fix_create_last_parent = nc->qid.path;
+    nc->qid.path = m->path;
+    nc->qid.vers = 0;
+    nc->qid.type = m->type;
+    nc->flag |= COPEN;
+    nc->mode  = omode;
+    return nc;
 }
 
 static void fix_close(struct Spoor *c) { (void)c; /* qid-based: no heap aux */ }
@@ -371,6 +466,7 @@ static struct Dev stalkfix = {
     .open          = fix_open,
     .close         = fix_close,
     .readlink      = fix_readlink,   // D-1: the expansion RPC
+    .create        = fix_create,     // #50: the SYS_OPEN_CREATE battery
 };
 
 // The A/B twin: the SAME tree with NO walk_attrs slot -- resolves through the
@@ -2242,4 +2338,200 @@ void test_stalk_symlink_lifetime(void) {
                    "expansion leaks no Spoor and double-frees none");
 
     spoor_unref(root);
+}
+
+// =============================================================================
+// #50: SYS_OPEN_CREATE over the fixture (VIVARIUM.md section 6.24; scripture
+// b417b307). These drive sys_open_create_kpath_for_proc -- the kernel core
+// under the native handler AND the phenotype openat/mkdirat shells -- over the
+// REAL resolver: the cwd join, containment, X-search/A-2d, and the lexical
+// leaf rows. The EEXIST-exact + bounded-retry legs live in test_dev9p.c (the
+// loopback's errno channel is dev9p-private; the fixture's create-fail is the
+// generic -1 by design).
+// =============================================================================
+
+extern s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+                                          const char *kpath, u64 klen,
+                                          u64 omode_raw, u64 perm_raw);
+
+// One heap Proc with a Territory rooted in the fixture + a cwd. proc_free
+// tears the whole thing down (handles -> clunks; territory_unref -> root).
+static struct Proc *ocp_proc(const char *dot) {
+    struct Proc *p = proc_alloc();
+    if (!p) return NULL;
+    p->principal_id = PRINCIPAL_SYSTEM;   // fixnode owner: A-2d owner bits
+    p->primary_gid  = GID_SYSTEM;
+    p->caps         = CAP_NONE;
+    p->territory    = territory_alloc();
+    if (!p->territory) { p->state = PROC_STATE_ZOMBIE; proc_free(p); return NULL; }
+    p->territory->root_spoor = fix_root();   // territory owns this ref
+    if (dot && territory_setdot(p->territory, dot) != 0) {
+        p->state = PROC_STATE_ZOMBIE; proc_free(p); return NULL;
+    }
+    return p;
+}
+
+static void ocp_teardown(struct Proc *p) {
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// THE blocker-3 regression (VIVARIUM.md 6.20 Correction 1, third blocker): a
+// RELATIVE create through FROM_ROOT must land in the CWD, not the Territory
+// root. SYS_WALK_CREATE's identical-looking sentinel resolves at the ROOT
+// with no join -- the silent wrong-directory hazard the shared join helper
+// closes. Non-vacuous: re-pointing the create core at a joinless resolve
+// lands the file at qid 0 and this fails.
+void test_stalk_open_create_cwd_parity(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/a");
+    TEST_ASSERT(p != NULL, "proc + territory + cwd=/a");
+
+    s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            "newfile", 7, 1 /*OWRITE*/, 0644);
+    TEST_ASSERT(fd >= 0, "relative create succeeds");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)1,
+                   "create landed in the CWD (/a, qid 1), NOT the root (qid 0)");
+
+    // The same call with an ABSOLUTE path ignores the cwd (SYS_OPEN parity).
+    s64 fd2 = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                             "/rootfile", 9, 1, 0644);
+    TEST_ASSERT(fd2 >= 0, "absolute create succeeds");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)0,
+                   "absolute create landed at the root, cwd ignored");
+    ocp_teardown(p);
+}
+
+// The open-if-present half + create-RPC economy: the second O_CREAT (no EXCL)
+// of an existing leaf OPENS it -- no second create call, no second overlay
+// entry. Then OEXCL on the same leaf fails and creates nothing (exclusivity;
+// the -T_E_EXIST-exact assertion is the loopback test's).
+void test_stalk_open_create_open_if_present(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc(NULL);
+    TEST_ASSERT(p != NULL, "proc");
+
+    s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            "/a/deep/fresh", 13, 1, 0644);
+    TEST_ASSERT(fd >= 0, "create the absent leaf");
+    TEST_EXPECT_EQ((u64)g_fix_create_calls, (u64)1, "one create call");
+
+    s64 fd2 = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                             "/a/deep/fresh", 13, 1, 0644);
+    TEST_ASSERT(fd2 >= 0, "O_CREAT on the existing leaf OPENS it");
+    TEST_EXPECT_EQ((u64)g_fix_create_calls, (u64)1,
+                   "open-first: the present case pays NO create call");
+    TEST_EXPECT_EQ((u64)g_fixmade_n, (u64)1, "no duplicate node");
+
+    s64 fd3 = sys_open_create_kpath_for_proc(
+        p, SYS_WALK_OPEN_FROM_ROOT, "/a/deep/fresh", 13,
+        1 | SYS_WALK_OPEN_OEXCL, 0644);
+    TEST_ASSERT(fd3 < 0, "OEXCL on an existing leaf fails");
+    TEST_EXPECT_EQ((u64)g_fixmade_n, (u64)1, "OEXCL created nothing");
+    ocp_teardown(p);
+}
+
+// mkdir-by-path (DMDIR = the exclusive arm) + the created dir is REAL to the
+// resolver: a file then creates INSIDE it (X-search + QTDIR + A-2d all read
+// the overlay node's stat).
+void test_stalk_open_create_mkdir_and_nest(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc(NULL);
+    TEST_ASSERT(p != NULL, "proc");
+
+    s64 dfd = sys_open_create_kpath_for_proc(
+        p, SYS_WALK_OPEN_FROM_ROOT, "/a/subdir", 9,
+        0 /*OREAD*/, (u64)SYS_WALK_CREATE_DMDIR | 0755);
+    TEST_ASSERT(dfd >= 0, "mkdir /a/subdir");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)1, "dir created under /a");
+
+    s64 ffd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                             "/a/subdir/inner", 15, 1, 0600);
+    TEST_ASSERT(ffd >= 0, "create a file INSIDE the created dir");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)FIXMADE_BASE,
+                   "the new dir (first overlay qid) is the parent");
+
+    s64 again = sys_open_create_kpath_for_proc(
+        p, SYS_WALK_OPEN_FROM_ROOT, "/a/subdir", 9,
+        0, (u64)SYS_WALK_CREATE_DMDIR | 0755);
+    TEST_ASSERT(again < 0, "mkdir of an existing dir fails (create-only)");
+    ocp_teardown(p);
+}
+
+// The lexical leaf rows (Linux open_last_lookups / filename_create parity) +
+// the omode envelope. All answered BEFORE any resolution -- no overlay entry
+// may appear.
+void test_stalk_open_create_leaf_rows(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc(NULL);
+    TEST_ASSERT(p != NULL, "proc");
+    struct { const char *path; u64 len; u64 omode; u64 perm; s64 want; const char *why; } rows[] = {
+        { "/a/f/",  5, 1, 0644, -(s64)T_E_ISDIR, "trailing slash on a FILE create" },
+        { "/a/.",   4, 1, 0644, -(s64)T_E_ISDIR, "dot leaf on a FILE create" },
+        { "/a/..",  5, 1, 0644, -(s64)T_E_ISDIR, "dotdot leaf on a FILE create" },
+        { "/",      1, 1, 0644, -(s64)T_E_ISDIR, "root leaf on a FILE create" },
+        { "/a/.",   4, 0, (u64)SYS_WALK_CREATE_DMDIR | 0755, -(s64)T_E_EXIST,
+          "mkdir(.) answers EEXIST (Linux filename_create)" },
+        { "/",      1, 0, (u64)SYS_WALK_CREATE_DMDIR | 0755, -(s64)T_E_EXIST,
+          "mkdir(/) answers EEXIST" },
+        { "/a/x",   4, 1 | 0x80 /*OPATH*/, 0644, -(s64)T_E_INVAL,
+          "OPATH is rejected (a navigation handle cannot want creation)" },
+        { "/a/x",   4, 1 | 0x8 /*stray bit*/, 0644, -(s64)T_E_INVAL,
+          "an omode bit outside the mask is rejected" },
+    };
+    for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        s64 rc = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                                rows[i].path, rows[i].len,
+                                                rows[i].omode, rows[i].perm);
+        TEST_EXPECT_EQ((u64)rc, (u64)rows[i].want, rows[i].why);
+    }
+    TEST_EXPECT_EQ((u64)g_fixmade_n, (u64)0, "no row created anything");
+    TEST_EXPECT_EQ((u64)g_fix_create_calls, (u64)0, "no row reached create");
+    ocp_teardown(p);
+}
+
+// Containment (I-28, inherited from stalk) + the denial rows: '..' clamps at
+// the Territory root; a no-X parent answers ACCES; a missing prefix NOENT;
+// mkdir("d/") strips the slash (legal); NOFOLLOW on a final symlink answers
+// LOOP and creates nothing; a DANGLING final symlink + O_CREAT fails loudly
+// and creates nothing (the documented degradation: Linux would create the
+// TARGET; we refuse rather than silently creating the wrong thing).
+void test_stalk_open_create_containment_and_denials(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/");
+    TEST_ASSERT(p != NULL, "proc");
+
+    s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            "../../esc", 9, 1, 0644);
+    TEST_ASSERT(fd >= 0, "'..' spam resolves (clamped), create succeeds");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)0,
+                   "clamped at the Territory root -- no escape (I-28)");
+
+    s64 rc = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            "/nox/inside", 11, 1, 0644);
+    TEST_EXPECT_EQ((u64)rc, (u64)(s64)-T_E_ACCES,
+                   "create into a no-X/no-W dir answers ACCES (A-2d)");
+
+    rc = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                        "/nosuch/f", 9, 1, 0644);
+    TEST_EXPECT_EQ((u64)rc, (u64)(s64)-T_E_NOENT,
+                   "a missing prefix answers NOENT");
+
+    s64 dfd = sys_open_create_kpath_for_proc(
+        p, SYS_WALK_OPEN_FROM_ROOT, "/a/dslash/", 10,
+        0, (u64)SYS_WALK_CREATE_DMDIR | 0755);
+    TEST_ASSERT(dfd >= 0, "mkdir('d/') strips the trailing slash (legal)");
+
+    int made_before = g_fixmade_n;
+    rc = sys_open_create_kpath_for_proc(
+        p, SYS_WALK_OPEN_FROM_ROOT, "/lnb", 4,
+        1 | SYS_WALK_OPEN_NOFOLLOW, 0644);
+    TEST_EXPECT_EQ((u64)rc, (u64)(s64)-T_E_LOOP,
+                   "NOFOLLOW + a final symlink answers LOOP, never creates");
+    rc = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                        "/lndead", 7, 1, 0644);
+    TEST_ASSERT(rc < 0, "O_CREAT through a DANGLING final symlink fails LOUDLY");
+    TEST_EXPECT_EQ((u64)g_fixmade_n, (u64)made_before,
+                   "neither symlink row created anything");
+    ocp_teardown(p);
 }

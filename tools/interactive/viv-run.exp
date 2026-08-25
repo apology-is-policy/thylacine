@@ -61,6 +61,21 @@ if {$have_ash} {
     # shell answered, not just that one did.
     lc_send "uname -s | tr a-z A-Z"
     lc_expect "LINUX" "ash answers through the pts (stdin in, stdout out; the phenotype's uname)"
+
+    # --- #50: the path-mutation family, end-to-end from EL0 (VIVARIUM.md
+    # 6.24). One pipeline per row, each witnessed by an UPPERCASE token only
+    # the pipeline can produce (the echo discipline above). /tmp is 1777 in
+    # the Alpine minirootfs, so the writes clear A-2d for any principal.
+    #   >file        = openat(O_CREAT|O_WRONLY|O_TRUNC) -- the keystone
+    #   mkdir        = mkdirat
+    #   mv           = renameat (busybox mv -> musl rename -> renameat(38))
+    #   rm / rmdir   = unlinkat (0 / AT_REMOVEDIR)
+    lc_send "echo mut-created > /tmp/f50 && cat /tmp/f50 | tr a-z A-Z"
+    lc_expect "MUT-CREATED" "openat(O_CREAT) created the file and wrote through it"
+    lc_send "mkdir /tmp/d50 && mv /tmp/f50 /tmp/d50/g50 && cat /tmp/d50/g50 | tr a-z A-Z"
+    lc_expect "MUT-CREATED" "mkdirat made the dir; renameat moved the file INTO it with content intact"
+    lc_send "rm /tmp/d50/g50 && rmdir /tmp/d50 && ls /tmp/d50 2>&1 | tr a-z A-Z"
+    lc_expect "NO SUCH FILE" "unlinkat removed the file and (AT_REMOVEDIR) the dir; the name is gone"
     # ^C at the ash prompt: the pts's `interrupt` reaches the whole foreground
     # pgrp -- viv, its diorama and ash. Before 2026-08-18 the two NATIVE members
     # died of it (LS-5's uncaught-interrupt default), orphaning ash into a

@@ -3644,3 +3644,113 @@ void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
                    "WITHOUT the sweep: the STALE tcp entry shadows the reused fd -- "
                    "the misroute the exec sweep prevents");
 }
+
+// =============================================================================
+// #50: the path-mutation family decides (VIVARIUM.md section 6.24). Pure
+// domain tests; the kernel-core semantics live in test_stalk.c (fixture) +
+// test_dev9p.c (loopback errno legs).
+// =============================================================================
+
+void test_vivarium_openat_create_domain(void);
+void test_vivarium_openat_create_domain(void) {
+    u32 omode = 0, perm = 0;
+    bool cx = false;
+    const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;   // sign-extended -100
+    const u64 FDCWD_ZX = 0x00000000FFFFFF9Cull;   // zero-extended -100
+
+    // The served shape git issues constantly: O_CREAT|O_WRONLY|O_TRUNC 0644.
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01 | 01000,
+                                              0644, &omode, &perm, &cx)
+                    == VIV_TRANSLATED,
+                "O_CREAT|O_WRONLY|O_TRUNC is served");
+    TEST_EXPECT_EQ((u64)omode, (u64)(1u | 0x10u), "OWRITE|OTRUNC");
+    TEST_EXPECT_EQ((u64)perm, (u64)0644, "mode passes as the low-9 perm");
+
+    // O_EXCL maps to the OEXCL omode bit (the lockfile shape:
+    // O_CREAT|O_EXCL|O_WRONLY 0600). Both AT_FDCWD encodings are one point.
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_ZX, 0100 | 0200 | 01,
+                                              0600, &omode, &perm, &cx)
+                    == VIV_TRANSLATED,
+                "the lockfile shape is served (zero-extended AT_FDCWD)");
+    TEST_ASSERT((omode & SYS_WALK_OPEN_OEXCL) != 0, "O_EXCL -> OEXCL");
+
+    // O_CLOEXEC reports through the third output, as the plain row.
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01 | 02000000,
+                                              0644, &omode, &perm, &cx)
+                    == VIV_TRANSLATED && cx,
+                "O_CLOEXEC reported for the shell to apply post-open");
+
+    // Declines: a real dirfd (handle state, 6.20 Correction 2); a mode with
+    // setuid bits (a silent strip would record less restrictive metadata);
+    // O_APPEND (no omode counterpart -- the V-2b reject survives this arm);
+    // accmode 3 (Linux EINVAL); an O_PATH bit that leaked past the shell's
+    // routing (defensive: the admitted set excludes it).
+    TEST_ASSERT(vivarium_openat_create_decide(3, 0100 | 01, 0644,
+                                              &omode, &perm, &cx) == VIV_FORWARD,
+                "a real dirfd declines");
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01, 04644,
+                                              &omode, &perm, &cx) == VIV_FORWARD,
+                "setuid mode bits decline (never silently stripped)");
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01 | 02000,
+                                              0644, &omode, &perm, &cx) == VIV_FORWARD,
+                "O_CREAT|O_APPEND declines");
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 03, 0644,
+                                              &omode, &perm, &cx) == VIV_FORWARD,
+                "accmode 3 declines");
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 010000000 | 01,
+                                              0644, &omode, &perm, &cx) == VIV_FORWARD,
+                "O_PATH in the flag word declines here (the shell routes it away)");
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01, 0644,
+                                              NULL, &perm, &cx) == VIV_FORWARD,
+                "NULL output fails toward the supervisor");
+}
+
+void test_vivarium_mkdirat_domain(void);
+void test_vivarium_mkdirat_domain(void) {
+    u32 perm = 0;
+    const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;
+
+    TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 0755, &perm) == VIV_TRANSLATED,
+                "mkdirat(AT_FDCWD, 0755) is served");
+    TEST_EXPECT_EQ((u64)perm, (u64)(SYS_WALK_CREATE_DMDIR | 0755u),
+                   "perm = mode | DMDIR");
+    TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 02755, &perm) == VIV_FORWARD,
+                "a setgid dir mode declines (git core.sharedRepository shape)");
+    TEST_ASSERT(vivarium_mkdirat_decide(5, 0755, &perm) == VIV_FORWARD,
+                "a real dirfd declines");
+    TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 0755, NULL) == VIV_FORWARD,
+                "NULL output fails toward the supervisor");
+}
+
+void test_vivarium_unlinkat_domain(void);
+void test_vivarium_unlinkat_domain(void) {
+    u32 tf = 0xdeadbeefu;
+    const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;
+
+    TEST_ASSERT(vivarium_unlinkat_decide(FDCWD_SX, 0, &tf) == VIV_TRANSLATED,
+                "unlinkat(file) is served");
+    TEST_EXPECT_EQ((u64)tf, (u64)0, "flags 0 -> SYS_UNLINK 0");
+    TEST_ASSERT(vivarium_unlinkat_decide(FDCWD_SX, 0x200, &tf) == VIV_TRANSLATED,
+                "AT_REMOVEDIR is served");
+    TEST_EXPECT_EQ((u64)tf, (u64)SYS_UNLINK_REMOVEDIR,
+                   "AT_REMOVEDIR -> SYS_UNLINK_REMOVEDIR");
+    TEST_ASSERT(vivarium_unlinkat_decide(FDCWD_SX, 0x400, &tf) == VIV_FORWARD,
+                "AT_SYMLINK_FOLLOW declines");
+    TEST_ASSERT(vivarium_unlinkat_decide(7, 0, &tf) == VIV_FORWARD,
+                "a real dirfd declines");
+}
+
+void test_vivarium_renameat_domain(void);
+void test_vivarium_renameat_domain(void) {
+    const u64 FDCWD_SX = 0xFFFFFFFFFFFFFF9Cull;
+    const u64 FDCWD_ZX = 0x00000000FFFFFF9Cull;
+
+    TEST_ASSERT(vivarium_renameat_decide(FDCWD_SX, FDCWD_ZX, 0) == VIV_TRANSLATED,
+                "renameat(AT_FDCWD, AT_FDCWD) is served (mixed encodings)");
+    TEST_ASSERT(vivarium_renameat_decide(FDCWD_SX, FDCWD_SX, 1) == VIV_FORWARD,
+                "renameat2 RENAME_NOREPLACE declines (census-visible)");
+    TEST_ASSERT(vivarium_renameat_decide(3, FDCWD_SX, 0) == VIV_FORWARD,
+                "a real old dirfd declines");
+    TEST_ASSERT(vivarium_renameat_decide(FDCWD_SX, 3, 0) == VIV_FORWARD,
+                "a real new dirfd declines");
+}

@@ -248,6 +248,13 @@ pub const T_SYS_READDIR: u64          = 56;
 // FS-gamma (IDENTITY-DESIGN.md section 9.3): atomic rename/move + remove.
 pub const T_SYS_RENAME: u64           = 57;
 pub const T_SYS_UNLINK: u64           = 58;
+// #50 (VIVARIUM.md section 6.24): path-based open-or-create -- the ARCH
+// section 11.2 create(name, mode, perm) row, minted. One syscall replaces the
+// userspace split + parent-T_OPATH + WALK_CREATE dance (and its cwd
+// handling): the kernel joins the cwd exactly as SYS_OPEN, stalks the parent,
+// and composes create-else-open bounded (T_OEXCL / DMDIR are the exclusive
+// arms, server-atomic).
+pub const T_SYS_OPEN_CREATE: u64      = 108;
 // A-2a (IDENTITY-DESIGN.md section 9.5): chmod/chown via Tsetattr.
 pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;
@@ -326,6 +333,11 @@ pub const T_ONOFOLLOW: u32            = 0x20;
 // SYS_CHROOT target (a normally-opened handle is not: 9P forbids Twalk from an
 // opened fid). Access bits are ignored when set.
 pub const T_OPATH: u32                = 0x80;
+// #50 (VIVARIUM.md section 6.24): EXCLUSIVE create, meaningful ONLY to
+// SYS_OPEN_CREATE (create-first, once; an existing leaf answers EEXIST --
+// atomic at the server, the lockfile primitive). The other omode-taking
+// syscalls reject the bit. Mirrors SYS_WALK_OPEN_OEXCL.
+pub const T_OEXCL: u32                = 0x1000;
 
 // SYS_WALK_CREATE perm: low 9 bits = POSIX mode; DMDIR selects a directory.
 // Must mirror SYS_WALK_CREATE_PERM_VALID / SYS_WALK_CREATE_DMDIR in the kernel.
@@ -2439,6 +2451,32 @@ pub unsafe fn t_walk_create(parent_fd: i64, name: *const u8, name_len: usize,
         in("x3") omode as u64,
         in("x4") perm as u64,
         in("x8") T_SYS_WALK_CREATE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_open_create — path-based open-or-create (#50; SYS_OPEN_CREATE = 108).
+// `start_fd` is a RIGHT_READ navigation base or T_WALK_OPEN_FROM_ROOT (a
+// relative path then joins the cwd EXACTLY as SYS_OPEN — the parity the
+// syscall exists for). `omode` admits access + T_OTRUNC + T_ONOFOLLOW +
+// T_OEXCL (T_OPATH rejected); `perm` is the low-9 mode, plus
+// T_WALK_CREATE_DMDIR for mkdir-by-path (create-only, opened OREAD).
+// Plain create is open-first / create-on-NOENT / bounded-retry in the
+// KERNEL; T_OEXCL and DMDIR are one server-atomic create. Returns the new
+// fd (>= 0) or -T_E_* (a real errno, not a bare -1).
+#[inline(always)]
+pub unsafe fn t_open_create(start_fd: i64, path: *const u8, path_len: usize,
+                            omode: u32, perm: u32) -> i64 {
+    let mut x0: i64 = start_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") path as u64,
+        in("x2") path_len as u64,
+        in("x3") omode as u64,
+        in("x4") perm as u64,
+        in("x8") T_SYS_OPEN_CREATE,
         options(nostack)
     );
     x0

@@ -3232,3 +3232,92 @@ stuck latch at the next EL0 transition. The deterministic proof is
 itself, a second `SIGPIPE` is delivered across the escape, and the leg asserts
 the handler fired **twice** -- red (`joey: ... marker=L248`) on a kernel with the
 two clears disabled, green with them.
+
+## The path-mutation family (#50; aux, 2026-08-25)
+
+Design: `VIVARIUM.md` section 6.24 (scripture `b417b307`). Four Tier-2 rows —
+`openat(O_CREAT)` + `mkdirat`(34) + `unlinkat`(35) + `renameat`(38)/
+`renameat2`(276, flags==0) — on ONE new kernel primitive, plus the native mint
+`SYS_OPEN_CREATE = 108` (the ARCH section 11.2 `create(name, mode, perm)` row,
+fulfilled). git's writes stand on all four (`git init` alone needs create +
+mkdir + unlink + rename-into-place).
+
+### The mechanism (extraction, not duplication — the I-43 rule)
+
+- `sys_join_cwd_if_relative` — the LS-4 cwd join, extracted from SYS_OPEN's
+  core and shared VERBATIM with the create core, so the FROM_ROOT-sentinel
+  parity (the 6.20 blocker-3 hazard) is structural.
+- `kpath_split_leaf` — the lexical last-component split (classify, never
+  resolve; the libthyla #87 rows kernel-side) + `sys_stalk_parent` (walk-only
+  stalk of the prefix; I-28 containment, symlink expansion, mount-cross all
+  inherited).
+- `spoor_create_install` — the create mechanics extracted from
+  `sys_walk_create_handler` (dev slots, QTDIR, the A-2d W|X parent gate,
+  clone-walk, `dev->create`, rights, install). The /srv service-post branch is
+  fd-based-only (`srv_post_ok=false` for every path caller answers
+  `-T_E_OPNOTSUPP` on a /srv-registry parent).
+- `spoor_unlink_in_dir` / `spoor_rename_in_dirs` — the unlink/rename
+  mechanics, same extraction; the phenotype shells run them on the split
+  parent via `viv_mutation_parent`.
+- `sys_open_create_kpath_for_proc` — the composition: OEXCL (0x1000, the
+  pre-reserved bit) and DMDIR are ONE server-atomic create (EEXIST honest —
+  the lockfile primitive); plain create is open-first (OTRUNC rides the open
+  leg only), create-on-NOENT, retry-open on a lost exists-race, bounded at 2
+  rounds — the Plan 9 `namec(Acreate)` / Linux v9fs idiom.
+
+### Degradations (documented, none silent-wrong)
+
+- A DANGLING final symlink + O_CREAT answers EEXIST after the bounded loop
+  where Linux creates the TARGET (loud; git never does this).
+- No umask: guest `umask` is ENOSYS and the kernel applies no mask, so modes
+  arrive unmasked (0666 where Linux yields 0644). Cosmetic under A-2d.
+- `mode`/`perm` admit the low-9 bits only: setuid/sgid/sticky requests
+  DECLINE census-visibly (a silent strip would record less restrictive
+  metadata than asked; git's `core.sharedRepository` setgid dirs are the real
+  caller that would be wronged).
+- Real (non-AT_FDCWD) dirfds stay out (the 6.20 Correction-2 handle-state
+  blocker, untouched). renameat2 flags != 0 (NOREPLACE/EXCHANGE/WHITEOUT)
+  decline. `O_APPEND`/`O_DIRECTORY` keep their V-2b rejections.
+- Sticky-dir deletion restriction is not enforced (A-2d checks W|X only) —
+  pre-existing SYS_UNLINK behavior, now reachable by path.
+
+### The errno registry gained `T_E_ISDIR` (21)
+
+User-signed-off (2026-08-25): the VALUE already crossed to EL0 through the
+`[-4095,-2]` Rlerror passthrough (Stratum answers EISDIR for write-opening a
+directory); the name lets the lexical leaf rows answer exactly what Linux
+answers. `docs/ERRORS.md` carries the row.
+
+### The bake gained the /tmp re-stamp
+
+`stratum-fs put` preserves only the exec bit (dirs bake 0755 SYSTEM-owned),
+so the containers' /tmp lost its 1777 and a user-principal `viv run` could
+not write ANYWHERE in the rootfs — measured as `can't create /tmp/f50:
+Permission denied` the first time the E2E ran the create leg as a user.
+`populate_stratum_pool` now re-stamps each bundle's `rootfs/tmp` 0777 after
+the put (`stratum-fs chmod` -> Tsetattr).
+
+### The loopback learned the async-clunk drain
+
+The create leg legitimately double-parks the parent dir fid (dirfid_put
+parks the first RPC-free, `p9_client_clunk_async`'s fire-and-forget clunks
+the second), leaving an ownerless Rclunk a later reader drains on a real
+transport (the demux #210 orphan-clunk arm). The single-slot test loopback
+REFUSED the next send over the unread reply — `client_mark_dead_locked`, the
+whole client dead, every later op EIO — killing a legitimate pattern no real
+backend fails. `loopback_send` now discards exactly a WHOLE staged Rclunk
+(counted in `dropped_rclunks`); every other unread-reply send still refuses.
+Cost of finding it: six instrumented boots (the step-tracker bisection).
+
+### Witnesses
+
+Kernel: `stalk.open_create_*` (5 — the cwd-parity blocker-3 regression,
+open-if-present + create-call economy, mkdir + nest-into-created-dir, the
+lexical leaf rows, containment + ACCES/NOENT/LOOP/dangling denials) +
+`dev9p.open_create_*` (3 — NOENT-then-create, the lost-race retry-open with
+exactly one Tlcreate, OEXCL EEXIST-exact) + `vivarium.*_domain` (4 decides).
+E2E: `tools/interactive/viv-run.exp` runs `>file`/`mkdir`/`mv`/`rm`+`rmdir`
+inside the phenotype ash as a PLAIN USER on a pts. Native: libthyla-rs
+`open_create_at_path` + `create_dir` rewired onto `t_open_create` (every
+`File::create` caller adopted through one function; the stale create-first
+rationale retired).

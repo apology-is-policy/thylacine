@@ -22,9 +22,10 @@ int p9_loopback_init(struct p9_loopback *lb,
     lb->response_len = 0;
     lb->response_pos = 0;
     lb->chunk_size     = 0;
-    lb->sends          = 0;
-    lb->recvs          = 0;
-    lb->closed         = false;
+    lb->sends           = 0;
+    lb->recvs           = 0;
+    lb->dropped_rclunks = 0;
+    lb->closed          = false;
     lb->deadline_armed = false;
     lb->timed_out      = false;
     return 0;
@@ -73,7 +74,27 @@ static int loopback_send(void *ctx, const u8 *buf, size_t len) {
     // test made a send without consuming the prior response, which
     // would lose data. (Real backends don't have this problem; this is
     // a test-side discipline check.)
-    if (lb->response_pos < lb->response_len) return -1;
+    //
+    // ONE modeled exception (#50): a whole, untouched staged RCLUNK is
+    // DISCARDED and the send proceeds. p9_client_clunk_async is
+    // fire-and-forget BY DESIGN — its ownerless Rclunk is drained by a later
+    // op's reader on a real transport (the demux's #210 orphan-clunk arm) —
+    // and the dirfid already-parked collision issues one mid-sequence (park
+    // the first dir fid RPC-free, async-clunk the second). A single-slot
+    // transport that refuses the next send over it models a transport
+    // failure that cannot happen on a real backend, killing the client for
+    // a legitimate pattern. Only a COMPLETE (pos == 0) Rclunk qualifies:
+    // a partially-drained frame of any type is still the discipline bug
+    // this guard exists to catch. Counted so a test can assert on it.
+    if (lb->response_pos < lb->response_len) {
+        if (lb->response_pos == 0 && lb->response_len >= 5 &&
+            lb->response[4] == 121 /* P9_RCLUNK */) {
+            lb->dropped_rclunks++;
+            lb->response_len = 0;
+        } else {
+            return -1;
+        }
+    }
     // Call the responder to produce the response.
     int n = lb->responder(lb->user_ctx, buf, len,
                            lb->response, lb->response_cap);

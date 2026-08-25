@@ -299,6 +299,36 @@ enum {
     // them curl/git/TLS cannot bound a wait, and busybox `date` reads 1970.
     VIV_LINUX_CLOCK_GETTIME   = 113,
     VIV_LINUX_GETTIMEOFDAY    = 169,
+
+    // The path-mutation family (#50; VIVARIUM.md section 6.24). Three of the
+    // four are BELOW the native ceiling, so each owes the per-number collision
+    // paragraph the startup-batch block above demands. The shared first half
+    // is unchanged: a PHENO_LINUX Proc cannot reach a native number at all.
+    // The second half -- what a NATIVE program MIS-DECLARED as PHENO_LINUX now
+    // reaches -- turns on one fact for all three: every shell's decide admits
+    // ONLY dirfd == AT_FDCWD (-100 as s32), and no legal native argument at
+    // these numbers has that shape.
+    //
+    //   34  vs SYS_WALK_OPEN(spoor_fd, ...). mkdirat reads args[0] as dirfd;
+    //       a native spoor_fd is a small non-negative index and the FROM_ROOT
+    //       sentinel is -1, neither -100 -> every legal native call FORWARDs
+    //       to ENOSYS. Nothing is reached.
+    //   35  vs SYS_CHROOT(spoor_fd). Same gate, same shapes, same ENOSYS.
+    //   38  vs SYS_BURROW_DETACH(vaddr, length). renameat requires BOTH
+    //       args[0] and args[2] == -100. args[0] is a mapped user VA (never
+    //       0x...FFFFFF9C-shaped in the attach window) and args[2] is a stale
+    //       register; if both somehow read -100 the shell resolves args[1] and
+    //       args[3] as path VAs in the caller's OWN memory and renames within
+    //       the caller's OWN namespace under its OWN A-2d identity -- the
+    //       pipe2-row damage envelope (the caller's own things), never
+    //       authority.
+    //
+    //   276 (renameat2) is above the ceiling: collision-free by construction,
+    //       asserted beside the socket/time rows in vivarium.c.
+    VIV_LINUX_MKDIRAT   = 34,
+    VIV_LINUX_UNLINKAT  = 35,
+    VIV_LINUX_RENAMEAT  = 38,
+    VIV_LINUX_RENAMEAT2 = 276,
 };
 
 // The highest ASSIGNED native Thylacine syscall number. Every vivarium row
@@ -316,8 +346,11 @@ enum {
 // Stated ONCE, deliberately. It was previously written out as a literal in four
 // places and was stale in all four -- and then went stale a fifth time HERE:
 // pinned to SYS_RFORK (105), it missed the Warp arc's SYS_DMA_CREATE_GPU_BO (106)
-// and SYS_BURROW_FROM_HOSTMEM (107) landing above it. Now 107, the true top.
-#define VIV_NATIVE_CEILING 107
+// and SYS_BURROW_FROM_HOSTMEM (107) landing above it. Re-pinned to 107; #50
+// then landed SYS_OPEN_CREATE (108) and moved the ceiling IN THE SAME COMMIT --
+// the "add a syscall includes move the ceiling" obligation discharged the way
+// the vivarium.c assert's own comment demands. Now 108, the true top.
+#define VIV_NATIVE_CEILING 108
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).
@@ -433,6 +466,42 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
 // exactly one place, and that place is covered by a test.
 void vivarium_openat_build(u64 start_fd, u64 path_va, u32 path_len, u32 omode,
                            struct viv_call *out);
+
+// #50 (VIVARIUM.md section 6.24): the O_CREAT domain of `openat`, routed by
+// the shell when O_CREAT is set WITHOUT O_PATH (Linux's O_PATH ignores every
+// flag but CLOEXEC/DIRECTORY/NOFOLLOW, O_CREAT included, so an O_PATH open
+// stays on the plain decide regardless of a CREAT bit). PURE. The admitted
+// domain is the plain decide's admitted set minus O_PATH, plus O_CREAT and
+// O_EXCL; `mode` admits the low-9 permission bits only (a setuid/sgid/sticky
+// bit declines to the supervisor, census-visible). Emits the SYS_OPEN_CREATE
+// omode (access + OTRUNC + NOFOLLOW + OEXCL-for-O_EXCL) and perm (mode&0777);
+// dirfd admits AT_FDCWD only, as the plain row. Never ENOSYS -- out-of-domain
+// is the supervisor's to serve.
+enum viv_verdict vivarium_openat_create_decide(u64 dirfd, u64 flags, u64 mode,
+                                               u32 *omode_out, u32 *perm_out,
+                                               bool *cloexec_out);
+
+// #50: `mkdirat` -- create-by-path with DMDIR, the exclusive arm of
+// SYS_OPEN_CREATE (mkdir has no open-if-present: an existing leaf is EEXIST).
+// PURE. dirfd admits AT_FDCWD only; `mode` admits the low-9 bits (07000
+// declines). Emits perm = (mode & 0777) | DMDIR. The shell closes the fd the
+// kernel core returns -- Linux mkdirat returns 0, not a descriptor.
+enum viv_verdict vivarium_mkdirat_decide(u64 dirfd, u64 mode, u32 *perm_out);
+
+// #50: `unlinkat` -- flags 0 <-> unlink a non-directory, AT_REMOVEDIR <->
+// SYS_UNLINK_REMOVEDIR (rmdir an empty directory): a 1:1 map onto the native
+// unlink mechanics run on the split parent. Any other flag bit declines.
+// dirfd admits AT_FDCWD only. PURE.
+enum viv_verdict vivarium_unlinkat_decide(u64 dirfd, u64 flags,
+                                          u32 *tflags_out);
+
+// #50: `renameat` / `renameat2` -- Linux's replace-existing atomicity IS
+// SYS_RENAME's documented contract, so the map is 1:1 with nothing computed;
+// the decide is the domain gate alone. Both dirfds admit AT_FDCWD only;
+// renameat2's `flags` admits exactly 0 (NOREPLACE/EXCHANGE/WHITEOUT decline,
+// census-visible -- renameat passes literal 0 here). PURE.
+enum viv_verdict vivarium_renameat_decide(u64 olddirfd, u64 newdirfd,
+                                          u64 flags);
 
 // The Linux aarch64 `struct stat` (128 bytes) — `include/uapi/asm-generic/stat.h`,
 // which `third_party/musl/arch/aarch64/bits/stat.h` reproduces field-for-field.

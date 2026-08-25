@@ -751,6 +751,10 @@ void test_vivarium_sigframe(void);
 void test_vivarium_socket_domain(void);
 void test_vivarium_getsockopt_domain(void);
 void test_vivarium_getsockopt_shell_guards_uaccess(void);
+void test_vivarium_openat_create_domain(void);
+void test_vivarium_mkdirat_domain(void);
+void test_vivarium_unlinkat_domain(void);
+void test_vivarium_renameat_domain(void);
 void test_vivarium_sendrecv_domain(void);
 void test_vivarium_sockaddr(void);
 void test_vivarium_net_cmd(void);
@@ -947,6 +951,11 @@ void test_stalk_symlink_nofollow(void);
 void test_stalk_symlink_stat_vs_lstat(void);
 void test_stalk_symlink_pounce_split(void);
 void test_stalk_symlink_lifetime(void);
+void test_stalk_open_create_cwd_parity(void);
+void test_stalk_open_create_open_if_present(void);
+void test_stalk_open_create_mkdir_and_nest(void);
+void test_stalk_open_create_leaf_rows(void);
+void test_stalk_open_create_containment_and_denials(void);
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);
@@ -1275,6 +1284,9 @@ void test_dev9p_create_file(void);
 void test_dev9p_create_errno_propagates_eexist(void);   // #99
 void test_dev9p_create_invalidates_reused_child(void);
 void test_dev9p_create_invalidates_reused_child_pages(void);
+void test_dev9p_open_create_noent_then_create(void);
+void test_dev9p_open_create_exists_race_retries_open(void);
+void test_dev9p_open_create_excl_eexist_exact(void);
 void test_dev9p_create_downgrades_parent_attr(void);
 void test_dev9p_dirfid_consume_and_recycle(void);
 void test_dev9p_dirfid_perm_only_leaf_consume(void);
@@ -2403,6 +2415,10 @@ struct test_case g_tests[] = {
     { "vivarium.getsockopt_domain",    test_vivarium_getsockopt_domain,    false, NULL },
     { "vivarium.getsockopt_shell_guards_uaccess", test_vivarium_getsockopt_shell_guards_uaccess, false, NULL },
     { "vivarium.sendrecv_domain",      test_vivarium_sendrecv_domain,      false, NULL },
+    { "vivarium.openat_create_domain", test_vivarium_openat_create_domain, false, NULL },
+    { "vivarium.mkdirat_domain",       test_vivarium_mkdirat_domain,       false, NULL },
+    { "vivarium.unlinkat_domain",      test_vivarium_unlinkat_domain,      false, NULL },
+    { "vivarium.renameat_domain",      test_vivarium_renameat_domain,      false, NULL },
     { "vivarium.sockaddr",             test_vivarium_sockaddr,             false, NULL },
     { "vivarium.net_cmd",              test_vivarium_net_cmd,              false, NULL },
     { "vivarium.conn_n",               test_vivarium_conn_n,               false, NULL },
@@ -3055,6 +3071,15 @@ struct test_case g_tests[] = {
     { "dev9p.create_invalidates_reused_child_pages",
                                        test_dev9p_create_invalidates_reused_child_pages,
                                                                            false, NULL },
+    { "dev9p.open_create_noent_then_create",
+                                       test_dev9p_open_create_noent_then_create,
+                                                                           false, NULL },
+    { "dev9p.open_create_exists_race_retries_open",
+                                       test_dev9p_open_create_exists_race_retries_open,
+                                                                           false, NULL },
+    { "dev9p.open_create_excl_eexist_exact",
+                                       test_dev9p_open_create_excl_eexist_exact,
+                                                                           false, NULL },
     { "dev9p.create_downgrades_parent_attr",
                                        test_dev9p_create_downgrades_parent_attr,
                                                                            false, NULL },
@@ -3461,6 +3486,11 @@ struct test_case g_tests[] = {
     { "stalk.symlink_stat_vs_lstat",   test_stalk_symlink_stat_vs_lstat,   false, NULL },
     { "stalk.symlink_pounce_split",    test_stalk_symlink_pounce_split,    false, NULL },
     { "stalk.symlink_lifetime",        test_stalk_symlink_lifetime,        false, NULL },
+    { "stalk.open_create_cwd_parity",  test_stalk_open_create_cwd_parity,  false, NULL },
+    { "stalk.open_create_open_if_present", test_stalk_open_create_open_if_present, false, NULL },
+    { "stalk.open_create_mkdir_and_nest", test_stalk_open_create_mkdir_and_nest, false, NULL },
+    { "stalk.open_create_leaf_rows",   test_stalk_open_create_leaf_rows,   false, NULL },
+    { "stalk.open_create_containment_and_denials", test_stalk_open_create_containment_and_denials, false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

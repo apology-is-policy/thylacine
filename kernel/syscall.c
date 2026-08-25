@@ -3228,6 +3228,33 @@ s64 sys_clock_settime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
 // the same stalk, the same per-component perm_check, and the same
 // omode-derived rights as any other open. A second copy would be a second
 // place for a gate to go missing.
+// LS-4 cwd join, shared VERBATIM by SYS_OPEN's core and the #50
+// SYS_OPEN_CREATE core so the FROM_ROOT-sentinel parity is structural, not
+// copied (VIVARIUM.md 6.20 blocker 3: two identical-looking sentinels
+// resolving differently -- SYS_WALK_CREATE's at the root, SYS_OPEN's through
+// the cwd -- is the silent wrong-directory hazard; one join helper makes the
+// divergence impossible to reintroduce in one caller only). A RELATIVE path
+// with the FROM_ROOT sentinel joins the Territory cwd; an absolute path or an
+// explicit start-fd passes through unchanged. #83: the join is VERBATIM --
+// "."/".."/trailing separators survive into the joined buffer so stalk gates
+// them exactly as it gates the absolute spelling. `joined` is caller-owned
+// scratch (SYS_OPEN_PATH_MAX + 1); on success *out_path/*out_len alias either
+// `path` or `joined`. Returns 0 on success, -1 on an overlong join.
+static int sys_join_cwd_if_relative(struct Proc *p, u64 start_fd_raw,
+                                    const char *path, u64 len,
+                                    char *joined, size_t joined_sz,
+                                    const char **out_path, u64 *out_len) {
+    *out_path = path;
+    *out_len  = len;
+    if (start_fd_raw == SYS_WALK_OPEN_FROM_ROOT && path[0] != '/') {
+        int jl = territory_join_cwd(p->territory, path, len, joined, joined_sz);
+        if (jl < 0) return -1;
+        *out_path = joined;
+        *out_len  = (u64)jl;
+    }
+    return 0;
+}
+
 static s64 sys_open_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
                                    const char *kpath, u64 klen, u64 omode_raw) {
     if (!p || !kpath)                                return -1;
@@ -3254,25 +3281,17 @@ static s64 sys_open_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
     const char *path_scratch = kpath;
 
     // LS-4: a RELATIVE path with the FROM_ROOT sentinel resolves against the
-    // Territory cwd (dot) -- POSIX openat(AT_FDCWD, ...). Join dot + path into
-    // an absolute path, then resolve from root (start is already root_spoor).
-    // An explicit start-fd (a dirfd) or an absolute path is unchanged. stalk
-    // still re-clamps ".." at root_spoor, so the join cannot escape containment
-    // (I-28 preserved; no new mechanism).
-    //
-    // #83: the join is VERBATIM -- "."/".."/a trailing separator survive into
-    // `joined` so stalk gates them exactly as it gates the absolute spelling.
-    // Collapsing them here popped never-walked components, so `f/..`, `f/.`,
-    // `f/` and even `nonexistent/..` opened successfully.
+    // Territory cwd (dot) -- POSIX openat(AT_FDCWD, ...). The join lives in
+    // sys_join_cwd_if_relative (shared with the #50 create core so the
+    // sentinel parity is structural); stalk still re-clamps ".." at
+    // root_spoor, so the join cannot escape containment (I-28 preserved).
     char joined[SYS_OPEN_PATH_MAX + 1];
-    const char *rpath = path_scratch;
-    u64 rlen = klen;
-    if (start_fd_raw == SYS_WALK_OPEN_FROM_ROOT && path_scratch[0] != '/') {
-        int jl = territory_join_cwd(p->territory, path_scratch, klen,
-                                    joined, sizeof(joined));
-        if (jl < 0) { spoor_clunk(start); return -1; }
-        rpath = joined;
-        rlen  = (u64)jl;
+    const char *rpath;
+    u64 rlen;
+    if (sys_join_cwd_if_relative(p, start_fd_raw, path_scratch, klen,
+                                 joined, sizeof(joined), &rpath, &rlen) != 0) {
+        spoor_clunk(start);
+        return -1;
     }
 
     int amode = (omode_raw & SYS_WALK_OPEN_OPATH) ? STALK_WALK : STALK_OPEN;
@@ -3370,6 +3389,24 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
 // is the create MECHANISM (I-22 holds — nothing enforces rwx yet to bypass).
 // =============================================================================
 
+// #50 (VIVARIUM.md section 6.24): the create MECHANICS, extracted from
+// sys_walk_create_handler so the path-based SYS_OPEN_CREATE core and the
+// phenotype shells run the SAME dev-slot checks, the SAME A-2d parent W|X
+// gate, and the SAME clone-walk + dev->create + rights + install sequence as
+// the fd-based syscall -- extraction, not duplication (the I-43 rule).
+//
+// `src` is a REF-HELD parent-directory Spoor and is CONSUMED: exactly one
+// spoor_clunk runs on every path through here (mirroring the pre-extraction
+// handler body, where src's borrow ended at the clone-walk). `name_scratch`
+// is a validated kernel-space component (NUL-terminated, no '/', not "." /
+// ".."), name_len_raw <= SYS_WALK_OPEN_NAME_MAX. `srv_post_ok`: only the
+// fd-based SYS_WALK_CREATE admits the /srv service-post branch (it mints a
+// KObj_Srv listener, a different handle kind); the path-based callers answer
+// -T_E_OPNOTSUPP there -- a service post remains the fd-based shape.
+static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
+                                const char *name_scratch, u64 name_len_raw,
+                                u64 omode_raw, u32 perm, bool srv_post_ok);
+
 static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
                                      u64 name_len_raw, u64 omode_raw,
                                      u64 perm_raw) {
@@ -3393,6 +3430,25 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     if (perm_raw & ~(u64)SYS_WALK_CREATE_PERM_VALID)  return -T_E_INVAL;
     u32 perm = (u32)perm_raw;
 
+    // Copy + validate the component name (same strict shape as SYS_WALK_OPEN:
+    // reject '/' '\0' "." ".."; NUL-terminate for dev9p's strlen scan).
+    // #50 note: the copy moved AHEAD of the parent dev-slot checks when the
+    // mechanics were extracted (they now live in spoor_create_install), so a
+    // doubly-bad call (bad name AND uncreatable parent) reports the name
+    // error first -- the conventional POSIX precedence.
+    char name_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
+    for (u64 i = 0; i < name_len_raw; i++) {
+        u8 b;
+        // #80: bad caller page -> EFAULT; forbidden component byte -> EINVAL.
+        if (uaccess_load_u8(name_va + i, &b) != 0)    return -T_E_FAULT;
+        if (b == '/' || b == '\0')                    return -T_E_INVAL;
+        name_scratch[i] = (char)b;
+    }
+    if (name_len_raw == 1 && name_scratch[0] == '.')  return -T_E_INVAL;
+    if (name_len_raw == 2 && name_scratch[0] == '.' &&
+                              name_scratch[1] == '.') return -T_E_INVAL;
+    name_scratch[name_len_raw] = '\0';
+
     // Resolve the parent directory Spoor. RIGHT_WRITE is the gate: create
     // mutates the directory's contents. (SYS_WALK_OPEN uses RIGHT_READ; create
     // is the write-side op.) The FROM_ROOT sentinel walks from the caller's
@@ -3408,6 +3464,14 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
         src = sys_lookup_spoor(p, (hidx_t)parent_fd_raw, RIGHT_WRITE);   // ref-held
         if (!src)                                     return -T_E_BADF;
     }
+
+    return spoor_create_install(p, src, name_scratch, name_len_raw,
+                                omode_raw, perm, /*srv_post_ok=*/true);
+}
+
+static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
+                                const char *name_scratch, u64 name_len_raw,
+                                u64 omode_raw, u32 perm, bool srv_post_ok) {
     // #80: split the flat reject, as on the open side. The .walk arm is
     // DEFENSIVE (all 18 Devs fill the slot); the .create arm is LIVE -- a Dev
     // with no create slot genuinely cannot create, and OPNOTSUPP says so.
@@ -3435,21 +3499,6 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
         if (perm_check(p, &parent_st, PERM_W | PERM_X) != 0)  { spoor_clunk(src); return -T_E_ACCES; }
     }
 
-    // Copy + validate the component name (same strict shape as SYS_WALK_OPEN:
-    // reject '/' '\0' "." ".."; NUL-terminate for dev9p's strlen scan).
-    char name_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
-    for (u64 i = 0; i < name_len_raw; i++) {
-        u8 b;
-        // #80: bad caller page -> EFAULT; forbidden component byte -> EINVAL.
-        if (uaccess_load_u8(name_va + i, &b) != 0)    { spoor_clunk(src); return -T_E_FAULT; }
-        if (b == '/' || b == '\0')                    { spoor_clunk(src); return -T_E_INVAL; }
-        name_scratch[i] = (char)b;
-    }
-    if (name_len_raw == 1 && name_scratch[0] == '.')  { spoor_clunk(src); return -T_E_INVAL; }
-    if (name_len_raw == 2 && name_scratch[0] == '.' &&
-                              name_scratch[1] == '.') { spoor_clunk(src); return -T_E_INVAL; }
-    name_scratch[name_len_raw] = '\0';
-
     // stalk-3b (STALK-DESIGN.md §5.3 / D2): a CREATE against a /srv directory
     // (a devsrv root Spoor: dc='s', aux = a SrvRegistry) is a service POST, not
     // a file create. It mints a KObj_Srv LISTENER -- a different handle kind
@@ -3459,6 +3508,11 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // 9P-mode; no other perm bit is meaningful for a service post.
     if (src->dc == 's' && src->aux &&
         *(const u64 *)src->aux == SRV_REGISTRY_MAGIC) {
+        // #50: only the fd-based SYS_WALK_CREATE may post a service. A
+        // path-based create whose parent resolved to a /srv registry answers
+        // OPNOTSUPP loudly -- the KObj_Srv listener is a different handle
+        // kind than the KOBJ_SPOOR contract the path callers install over.
+        if (!srv_post_ok)                               { spoor_clunk(src); return -T_E_OPNOTSUPP; }
         if (perm & ~(SYS_WALK_CREATE_DMSRVBYTE |
                      SYS_WALK_CREATE_DMSRVBULK))        { spoor_clunk(src); return -T_E_INVAL; }
         enum srv_mode mode = (perm & SYS_WALK_CREATE_DMSRVBYTE)
@@ -3593,6 +3647,220 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
         return -T_E_NOMEM;   // #80: full fd table (EMFILE unregistered)
     }
     return (s64)fd;
+}
+
+// =============================================================================
+// SYS_OPEN_CREATE — the path-based open-or-create (#50; VIVARIUM.md section
+// 6.24; scripture b417b307). Plan 9's create(2) restored on the stalk
+// resolver: the parent PREFIX resolves through stalk (I-28 containment,
+// symlink expansion, mount-cross — inherited whole), the LEAF is classified
+// lexically (the split classifies, never resolves — the libthyla #87 rows),
+// and the create mechanics are spoor_create_install — byte-for-byte the code
+// the fd-based SYS_WALK_CREATE runs.
+// =============================================================================
+
+// The lexical last-component split (#50; the libthyla #87 rows brought
+// kernel-side: the split CLASSIFIES, it never resolves). Strips the trailing
+// separator run (*trailing_out reports it -- POSIX 4.13, the path asserts a
+// directory), locates the final component, classifies the dot/root shapes so
+// each caller applies its OWN POSIX row (EISDIR / EEXIST / EINVAL differ per
+// operation). Pure: no resolution, no allocation, no Proc.
+enum kpath_leaf_class {
+    KPATH_LEAF_NAME,     // an ordinary final component [leaf_start, leaf_len)
+    KPATH_LEAF_DOT,      // "."
+    KPATH_LEAF_DOTDOT,   // ".."
+    KPATH_LEAF_ROOT,     // all separators (or empty): the path names the root
+};
+static enum kpath_leaf_class kpath_split_leaf(const char *rpath, u64 rlen,
+                                              u64 *leaf_start_out,
+                                              u64 *leaf_len_out,
+                                              bool *trailing_out) {
+    u64 body = rlen;
+    while (body > 0 && rpath[body - 1] == '/') body--;
+    *trailing_out = (body != rlen);
+    if (body == 0) { *leaf_start_out = 0; *leaf_len_out = 0; return KPATH_LEAF_ROOT; }
+
+    u64 leaf_start = body;
+    while (leaf_start > 0 && rpath[leaf_start - 1] != '/') leaf_start--;
+    u64 leaf_len = body - leaf_start;
+    *leaf_start_out = leaf_start;
+    *leaf_len_out   = leaf_len;
+    if (leaf_len == 1 && rpath[leaf_start] == '.')      return KPATH_LEAF_DOT;
+    if (leaf_len == 2 && rpath[leaf_start] == '.' &&
+                          rpath[leaf_start + 1] == '.') return KPATH_LEAF_DOTDOT;
+    return KPATH_LEAF_NAME;
+}
+
+// Resolve the PARENT of a split path: stalk the prefix walk-only from
+// `start` (BORROWED -- stalk never refs/clunks it). Per-component X-search,
+// I-28 containment, symlink expansion, and the #82 ENOTDIR gate for
+// non-directory prefix components are all stalk's -- no new resolution
+// mechanism exists here. A bare leaf (empty prefix -- an explicit start fd
+// with "f") resolves its parent as ".", which runs stalk's #81 dot gate: the
+// base must BE a directory, so a file base answers ENOTDIR instead of
+// skipping the check via a special case. Returns a REF-HELD parent Spoor or
+// NULL with *err_out set.
+static struct Spoor *sys_stalk_parent(struct Proc *p, struct Spoor *start,
+                                      const char *rpath, u64 prefix_len,
+                                      int *err_out) {
+    const char *pp = (prefix_len == 0) ? "." : rpath;
+    u64 pl         = (prefix_len == 0) ? 1   : prefix_len;
+    int serr = T_E_NOENT;
+    struct Spoor *parent = stalk_err(p, start, pp, pl, STALK_WALK, 0, &serr);
+    if (!parent) { *err_out = serr; return NULL; }
+    return parent;
+}
+
+// One create attempt: resolve the parent (sys_stalk_parent), then run the
+// shared mechanics on it. `start` is BORROWED; the parent ref is CONSUMED by
+// spoor_create_install.
+//
+// Authority envelope (the audit question, answered up front): an explicit
+// `start` handle is gated RIGHT_READ — a NAVIGATION base — and the resolved
+// parent has no handle to gate. That matches SYS_OPEN's established
+// envelope, where an R-only base already walks arbitrarily deep and OPENS
+// FOR WRITING below itself (rights_for_omode mints the W handle); the
+// write-side creation gates are the per-component X-search plus
+// spoor_create_install's A-2d W|X identity check on the parent — the same
+// two gates the two-step SYS_OPEN(OPATH) + SYS_WALK_CREATE composition ends
+// at. The fd-based SYS_WALK_CREATE's RIGHT_WRITE gate is the stricter
+// direct-use rule for handles PRESENTED as the parent; it is not part of the
+// walk envelope.
+static s64 open_create_try_create(struct Proc *p, struct Spoor *start,
+                                  const char *rpath, u64 prefix_len,
+                                  const char *leaf, u64 leaf_len,
+                                  u64 omode_raw, u32 perm) {
+    int serr = 0;
+    struct Spoor *parent = sys_stalk_parent(p, start, rpath, prefix_len, &serr);
+    if (!parent) return -(s64)serr;
+
+    return spoor_create_install(p, parent, leaf, leaf_len, omode_raw, perm,
+                                /*srv_post_ok=*/false);
+}
+
+// Inner — testable without a live EL0 thread (kernel path, no user buffer);
+// the handler thins to the path copy + this (the sys_wstat_for_proc pattern).
+s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+                                   const char *kpath, u64 klen,
+                                   u64 omode_raw, u64 perm_raw) {
+    if (!p || !kpath)                                   return -T_E_INVAL;
+    if (klen == 0 || klen > SYS_OPEN_PATH_MAX)          return -T_E_INVAL;
+    if (omode_raw & ~(u64)SYS_OPEN_CREATE_OMODE_VALID)  return -T_E_INVAL;
+    if (perm_raw & ~(u64)SYS_WALK_CREATE_PERM_VALID)    return -T_E_INVAL;
+    // The DMSRV* service-post bits are the fd-based SYS_WALK_CREATE's shape
+    // only (spoor_create_install re-refuses the /srv-registry parent too;
+    // this is the cheap loud reject before any resolution).
+    if (perm_raw & (SYS_WALK_CREATE_DMSRVBYTE |
+                    SYS_WALK_CREATE_DMSRVBULK))         return -T_E_INVAL;
+    u32  perm  = (u32)perm_raw;
+    bool excl  = (omode_raw & SYS_WALK_OPEN_OEXCL) != 0;
+    bool isdir = (perm & SYS_WALK_CREATE_DMDIR) != 0;
+
+    // ONE cwd read for both legs: join here, so every open attempt and the
+    // parent resolve see the same base. A concurrent chdir between bounded
+    // retries re-resolves — the same envelope as Linux's own retry loop.
+    char joined[SYS_OPEN_PATH_MAX + 1];
+    const char *rpath;
+    u64 rlen;
+    if (sys_join_cwd_if_relative(p, start_fd_raw, kpath, klen,
+                                 joined, sizeof(joined), &rpath, &rlen) != 0)
+        return -T_E_INVAL;
+
+    // Classify the leaf LEXICALLY (kpath_split_leaf). The create rows:
+    // - root / "." / ".." leaves name an existing directory by definition —
+    //   mkdir answers EEXIST (the Linux row), a FILE create answers EISDIR
+    //   (Linux open_last_lookups: O_CREAT with a non-NORM last component).
+    // - a trailing separator run asserts a directory (POSIX 4.13): EISDIR
+    //   for a FILE create existing-or-not; for DMDIR it is consistent and
+    //   simply strips — mkdir("d/") is legal everywhere.
+    u64 leaf_start, leaf_len;
+    bool trailing;
+    enum kpath_leaf_class lc = kpath_split_leaf(rpath, rlen,
+                                                &leaf_start, &leaf_len,
+                                                &trailing);
+    if (lc != KPATH_LEAF_NAME)
+        return isdir ? -T_E_EXIST : -T_E_ISDIR;
+    if (trailing && !isdir)                         return -T_E_ISDIR;
+    const char *leaf = rpath + leaf_start;
+    if (leaf_len > SYS_WALK_OPEN_NAME_MAX)          return -T_E_INVAL;
+
+    // NUL-terminated leaf copy (dev->create scans by strlen).
+    char leaf_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
+    for (u64 i = 0; i < leaf_len; i++) leaf_scratch[i] = leaf[i];
+    leaf_scratch[leaf_len] = '\0';
+
+    // Resolve the navigation base exactly as SYS_OPEN's core does (FROM_ROOT
+    // -> pivoted-root ref under ns_lock; else a KOBJ_SPOOR RIGHT_READ base —
+    // see open_create_try_create's envelope note for why READ is the gate).
+    struct Spoor *start;
+    if (start_fd_raw == SYS_WALK_OPEN_FROM_ROOT) {
+        if (!p->territory)                          return -T_E_INVAL;
+        start = territory_root_ref(p->territory);
+        if (!start)                                 return -T_E_INVAL;
+    } else {
+        start = sys_lookup_spoor(p, (hidx_t)start_fd_raw, RIGHT_READ);
+        if (!start)                                 return -T_E_BADF;
+    }
+
+    s64 rc;
+    if (excl || isdir) {
+        // Exclusive create (and mkdir, which IS the exclusive arm with
+        // DMDIR): ONE create attempt, atomic at the server. EEXIST is the
+        // honest answer — the lockfile primitive. OTRUNC is meaningless on a
+        // fresh object and OEXCL is not a Plan 9 dev bit; both stripped.
+        rc = open_create_try_create(p, start, rpath, leaf_start,
+                                    leaf_scratch, leaf_len,
+                                    omode_raw & ~(u64)(SYS_WALK_OPEN_OEXCL | 0x10u /*OTRUNC*/),
+                                    perm);
+        spoor_clunk(start);
+        return rc;
+    }
+
+    // Plain create: open-first (the common existing-file case pays one RPC;
+    // OTRUNC applies on THIS leg), create on NOENT, retry the open when the
+    // create loses an exists-race. Bounded at 2 rounds, then the last real
+    // error — the Plan 9 namec(Acreate) / Linux v9fs idiom.
+    for (int attempt = 0; ; attempt++) {
+        rc = sys_open_kpath_for_proc(p, start_fd_raw, rpath, rlen,
+                                     omode_raw & ~(u64)SYS_WALK_OPEN_OEXCL);
+        if (rc >= 0 || rc != -(s64)T_E_NOENT) break;
+
+        rc = open_create_try_create(p, start, rpath, leaf_start,
+                                    leaf_scratch, leaf_len,
+                                    omode_raw & ~(u64)(SYS_WALK_OPEN_OEXCL | 0x10u /*OTRUNC*/),
+                                    perm);
+        if (rc >= 0 || rc != -(s64)T_E_EXIST) break;
+        if (attempt >= 1) { rc = -(s64)T_E_EXIST; break; }
+    }
+    spoor_clunk(start);
+    return rc;
+}
+
+static s64 sys_open_create_handler(u64 start_fd_raw, u64 path_va,
+                                   u64 path_len_raw, u64 omode_raw,
+                                   u64 perm_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if (path_len_raw == 0)                           return -T_E_INVAL;
+    if (path_len_raw > SYS_OPEN_PATH_MAX)            return -T_E_INVAL;
+    if (!sys_validate_user_buf(path_va, path_len_raw)) return -T_E_FAULT;
+
+    // Copy + reject embedded NUL; '/' is allowed (multi-component), exactly
+    // the SYS_OPEN front.
+    char path_scratch[SYS_OPEN_PATH_MAX + 1];
+    for (u64 i = 0; i < path_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -T_E_FAULT;
+        if (b == '\0')                               return -T_E_INVAL;
+        path_scratch[i] = (char)b;
+    }
+    path_scratch[path_len_raw] = '\0';
+
+    return sys_open_create_kpath_for_proc(p, start_fd_raw, path_scratch,
+                                          path_len_raw, omode_raw, perm_raw);
 }
 
 // =============================================================================
@@ -3756,6 +4024,45 @@ static int sys_copy_component(u64 name_va, u64 name_len, char *scratch) {
     return 0;
 }
 
+// #50: the rename MECHANICS, extracted so the fd-based SYS_RENAME and the
+// phenotype renameat shell run the SAME dev-slot check, the SAME same-Dev
+// invariant, and the SAME A-2d W|X gates. `od`/`nd` are BORROWED (the caller
+// clunks); the names are validated kernel-space components.
+static s64 spoor_rename_in_dirs(struct Proc *p, struct Spoor *od,
+                                struct Spoor *nd, const char *old_name,
+                                const char *new_name) {
+    // #80: a Dev with no .rename slot cannot perform the operation at all --
+    // OPNOTSUPP, distinguishable from every verdict the slot itself can return
+    // (devramfs leaves it NULL, so `mv` inside the boot ramfs says so plainly
+    // instead of reporting a generic I/O error).
+    if (!od->dev || !od->dev->rename)                 return -T_E_OPNOTSUPP;
+    // Two-cursor + cross-Dev invariant: a 9P renameat is within ONE server, so
+    // both directories MUST be on the same Dev (dev9p_rename adds the same-
+    // session guard). Rejected here before any Dev op.
+    //
+    // #80 seam: POSIX names this case EXDEV (18), which a caller like `mv` reads
+    // as "fall back to copy+unlink". EXDEV is not in the errno registry, and
+    // adding it is an ERRORS.md append needing signoff -- so this stays EINVAL
+    // for now and the cross-Dev copy fallback remains the caller's own policy.
+    if (od->dev != nd->dev)                           return -T_E_INVAL;
+
+    // A-3b (closes A-2d audit F2): rwx enforcement on dir mutation. POSIX
+    // rename needs write + search (W|X) on BOTH parent dirs. Gated on the
+    // Dev's perm_enforced (devramfs leaves .rename NULL; dev9p enforces from
+    // A-3b). od->dev == nd->dev here, so one flag governs both.
+    if (od->dev->perm_enforced) {
+        struct t_stat ost, nst;
+        if (spoor_stat_native(od, &ost) != 0)             return -T_E_IO;
+        if (perm_check(p, &ost, PERM_W | PERM_X) != 0)    return -T_E_ACCES;
+        if (spoor_stat_native(nd, &nst) != 0)             return -T_E_IO;
+        if (perm_check(p, &nst, PERM_W | PERM_X) != 0)    return -T_E_ACCES;
+    }
+
+    // #80: the Dev now returns a specific -T_E_* (see the .rename contract in
+    // <thylacine/dev.h>); forward it verbatim rather than flattening to -1.
+    return od->dev->rename(od, old_name, nd, new_name);
+}
+
 static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len_raw,
                                u64 newdir_fd_raw, u64 newname_va, u64 newname_len_raw) {
     struct Thread *t = current_thread();
@@ -3777,39 +4084,37 @@ static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len
     if (!od)                                          return -T_E_BADF;
     struct Spoor *nd = sys_resolve_dir_wr(p, newdir_fd_raw);
     if (!nd)                                        { spoor_clunk(od); return -T_E_BADF; }
-    // #80: a Dev with no .rename slot cannot perform the operation at all --
-    // OPNOTSUPP, distinguishable from every verdict the slot itself can return
-    // (devramfs leaves it NULL, so `mv` inside the boot ramfs says so plainly
-    // instead of reporting a generic I/O error).
-    if (!od->dev || !od->dev->rename)              { spoor_clunk(od); spoor_clunk(nd); return -T_E_OPNOTSUPP; }
-    // Two-cursor + cross-Dev invariant: a 9P renameat is within ONE server, so
-    // both directories MUST be on the same Dev (dev9p_rename adds the same-
-    // session guard). Rejected here before any Dev op.
-    //
-    // #80 seam: POSIX names this case EXDEV (18), which a caller like `mv` reads
-    // as "fall back to copy+unlink". EXDEV is not in the errno registry, and
-    // adding it is an ERRORS.md append needing signoff -- so this stays EINVAL
-    // for now and the cross-Dev copy fallback remains the caller's own policy.
-    if (od->dev != nd->dev)                        { spoor_clunk(od); spoor_clunk(nd); return -T_E_INVAL; }
 
-    // A-3b (closes A-2d audit F2): rwx enforcement on dir mutation. POSIX
-    // rename needs write + search (W|X) on BOTH parent dirs. Gated on the
-    // Dev's perm_enforced (devramfs leaves .rename NULL; dev9p enforces from
-    // A-3b). od->dev == nd->dev here, so one flag governs both.
-    if (od->dev->perm_enforced) {
-        struct t_stat ost, nst;
-        if (spoor_stat_native(od, &ost) != 0)             { spoor_clunk(od); spoor_clunk(nd); return -T_E_IO; }
-        if (perm_check(p, &ost, PERM_W | PERM_X) != 0)    { spoor_clunk(od); spoor_clunk(nd); return -T_E_ACCES; }
-        if (spoor_stat_native(nd, &nst) != 0)             { spoor_clunk(od); spoor_clunk(nd); return -T_E_IO; }
-        if (perm_check(p, &nst, PERM_W | PERM_X) != 0)    { spoor_clunk(od); spoor_clunk(nd); return -T_E_ACCES; }
-    }
-
-    // #80: the Dev now returns a specific -T_E_* (see the .rename contract in
-    // <thylacine/dev.h>); forward it verbatim rather than flattening to -1.
-    int rc = od->dev->rename(od, old_scratch, nd, new_scratch);
+    s64 rc = spoor_rename_in_dirs(p, od, nd, old_scratch, new_scratch);
     spoor_clunk(od);
     spoor_clunk(nd);
     return rc;
+}
+
+// #50: the unlink MECHANICS, extracted so the fd-based SYS_UNLINK and the
+// phenotype unlinkat shell run the SAME dev-slot check and the SAME A-2d W|X
+// gate. `c` is BORROWED (the caller clunks); `name` is a validated
+// kernel-space component; `flags` is pre-validated (0 or REMOVEDIR).
+static s64 spoor_unlink_in_dir(struct Proc *p, struct Spoor *c,
+                               const char *name, u32 flags) {
+    // #80: no .unlink slot => this Dev cannot remove at all (devramfs) --
+    // OPNOTSUPP, distinct from any verdict the slot itself returns.
+    if (!c->dev || !c->dev->unlink)                   return -T_E_OPNOTSUPP;
+
+    // A-3b (closes A-2d audit F2): W|X on the parent dir to remove an entry
+    // (POSIX). Gated on perm_enforced (dev9p enforces from A-3b; devramfs
+    // leaves .unlink NULL).
+    if (c->dev->perm_enforced) {
+        struct t_stat cst;
+        if (spoor_stat_native(c, &cst) != 0)              return -T_E_IO;
+        if (perm_check(p, &cst, PERM_W | PERM_X) != 0)    return -T_E_ACCES;
+    }
+
+    // #80: the Dev now returns a specific -T_E_* (see the .unlink contract in
+    // <thylacine/dev.h>); forward it verbatim. This is what lets a caller
+    // distinguish "that is a directory" from "that directory is not empty" from
+    // "you may not write here" -- all three were one flat -1 before.
+    return c->dev->unlink(c, name, flags);
 }
 
 static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
@@ -3831,24 +4136,8 @@ static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
     // possibly-blocking stat + unlink 9P ops).
     struct Spoor *c = sys_resolve_dir_wr(p, parent_fd_raw);
     if (!c)                                          return -T_E_BADF;
-    // #80: no .unlink slot => this Dev cannot remove at all (devramfs) --
-    // OPNOTSUPP, distinct from any verdict the slot itself returns.
-    if (!c->dev || !c->dev->unlink)                { spoor_clunk(c); return -T_E_OPNOTSUPP; }
 
-    // A-3b (closes A-2d audit F2): W|X on the parent dir to remove an entry
-    // (POSIX). Gated on perm_enforced (dev9p enforces from A-3b; devramfs
-    // leaves .unlink NULL).
-    if (c->dev->perm_enforced) {
-        struct t_stat cst;
-        if (spoor_stat_native(c, &cst) != 0)              { spoor_clunk(c); return -T_E_IO; }
-        if (perm_check(p, &cst, PERM_W | PERM_X) != 0)    { spoor_clunk(c); return -T_E_ACCES; }
-    }
-
-    // #80: the Dev now returns a specific -T_E_* (see the .unlink contract in
-    // <thylacine/dev.h>); forward it verbatim. This is what lets a caller
-    // distinguish "that is a directory" from "that directory is not empty" from
-    // "you may not write here" -- all three were one flat -1 before.
-    int rc = c->dev->unlink(c, scratch, (u32)flags_raw);
+    s64 rc = spoor_unlink_in_dir(p, c, scratch, (u32)flags_raw);
     spoor_clunk(c);
     return rc;
 }
@@ -10742,6 +11031,61 @@ static s64 viv_gettimeofday_write(u64 tv_va, u64 tz_va) {
     return 0;
 }
 
+// #50: the shared front of the phenotype unlinkat/renameat shells (the
+// create arm has its own richer rows inside sys_open_create_kpath_for_proc):
+// copy the user path, cwd-join (FROM_ROOT -- the decides admit AT_FDCWD
+// only), split the leaf lexically (kpath_split_leaf), apply the mutation
+// rows, and stalk the parent. The rows: a dot/root leaf answers EINVAL
+// (Linux's rmdir(".") row; its unlink/rename shapes are the same EINVAL/
+// EBUSY class); a trailing separator run answers ENOTDIR unless the caller
+// is a directory op (Linux: unlink("f/") and rename("f/", ..) are ENOTDIR;
+// rmdir("d/") is legal). Returns a REF-HELD parent Spoor with the leaf
+// copied NUL-terminated into leaf_scratch (SYS_WALK_OPEN_NAME_MAX + 1), or
+// NULL with *err_out set to the full -T_E_* return value.
+static struct Spoor *viv_mutation_parent(struct Proc *p, u64 path_va,
+                                         bool allow_trailing,
+                                         char *leaf_scratch, s64 *err_out) {
+    u32 plen = 0;
+    s64 m = viv_measure_user_path(path_va, &plen);
+    if (m != 0) { *err_out = m; return NULL; }
+    char kpath[SYS_OPEN_PATH_MAX + 1];
+    for (u32 i = 0; i < plen; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)
+            { *err_out = -(s64)T_E_FAULT; return NULL; }
+        kpath[i] = (char)b;
+    }
+    kpath[plen] = '\0';
+
+    char joined[SYS_OPEN_PATH_MAX + 1];
+    const char *rpath;
+    u64 rlen;
+    if (sys_join_cwd_if_relative(p, SYS_WALK_OPEN_FROM_ROOT, kpath, plen,
+                                 joined, sizeof(joined), &rpath, &rlen) != 0)
+        { *err_out = -(s64)T_E_INVAL; return NULL; }
+
+    u64 leaf_start, leaf_len;
+    bool trailing;
+    enum kpath_leaf_class lc = kpath_split_leaf(rpath, rlen,
+                                                &leaf_start, &leaf_len,
+                                                &trailing);
+    if (lc != KPATH_LEAF_NAME)   { *err_out = -(s64)T_E_INVAL;  return NULL; }
+    if (trailing && !allow_trailing)
+                                 { *err_out = -(s64)T_E_NOTDIR; return NULL; }
+    if (leaf_len > SYS_WALK_OPEN_NAME_MAX)
+                                 { *err_out = -(s64)T_E_INVAL;  return NULL; }
+    for (u64 i = 0; i < leaf_len; i++) leaf_scratch[i] = rpath[leaf_start + i];
+    leaf_scratch[leaf_len] = '\0';
+
+    struct Spoor *root = territory_root_ref(p->territory);
+    if (!root)                   { *err_out = -(s64)T_E_INVAL;  return NULL; }
+    int serr = 0;
+    struct Spoor *parent = sys_stalk_parent(p, root, rpath, leaf_start, &serr);
+    spoor_clunk(root);
+    if (!parent)                 { *err_out = -(s64)serr;       return NULL; }
+    return parent;
+}
+
 // The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
 // the uaccess + native-core work that translator deliberately refuses to do.
 // `ctx` is used by exactly one case (clone, LINEAGE L-3d) and ignored by the
@@ -10760,7 +11104,44 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
     switch (linux_nr) {
     case VIV_LINUX_OPENAT: {
-        // openat(dirfd, path, flags, mode): x0 dirfd, x1 path, x2 flags.
+        // openat(dirfd, path, flags, mode): x0 dirfd, x1 path, x2 flags,
+        // x3 mode (read only by the O_CREAT arm).
+        //
+        // #50: O_CREAT WITHOUT O_PATH routes to the create arm (Linux's
+        // O_PATH ignores O_CREAT -- open(2): every flag but CLOEXEC/
+        // DIRECTORY/NOFOLLOW -- so that combination stays on the plain
+        // decide, the exact Linux contour). The routing reads only register
+        // bits; both decides stay pure and each owns its whole domain.
+        if (((u32)args[2] & (u32)VIV_O_CREAT) &&
+            !((u32)args[2] & (u32)VIV_O_PATH)) {
+            u32  omode   = 0;
+            u32  perm    = 0;
+            bool cloexec = false;
+            if (vivarium_openat_create_decide(args[0], args[2], args[3],
+                                              &omode, &perm, &cloexec)
+                    != VIV_TRANSLATED)
+                return -(s64)T_E_NOSYS;         // out of domain -> V-3 forwards
+            // DECIDE BEFORE MEASURE (vivarium.h): the measurement is a
+            // faultable user read the supervisor-bound path must not take.
+            u32 path_len = 0;
+            s64 m = viv_measure_user_path(args[1], &path_len);
+            if (m != 0)                          return m;
+            char kpath[SYS_OPEN_PATH_MAX + 1];
+            for (u32 i = 0; i < path_len; i++) {
+                u8 b;
+                if (uaccess_load_u8(args[1] + i, &b) != 0)
+                    return -(s64)T_E_FAULT;
+                kpath[i] = (char)b;
+            }
+            kpath[path_len] = '\0';
+            s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                                    kpath, path_len,
+                                                    (u64)omode, (u64)perm);
+            if (fd >= 0 && cloexec)
+                (void)handle_set_cloexec(p, (hidx_t)fd, true);
+            return fd;
+        }
+
         u64  start_fd = 0;
         u32  omode    = 0;
         bool cloexec  = false;
@@ -10785,6 +11166,84 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         if (fd >= 0 && cloexec)
             (void)handle_set_cloexec(p, (hidx_t)fd, true);
         return fd;
+    }
+
+    case VIV_LINUX_MKDIRAT: {
+        // mkdirat(dirfd, path, mode): x0 dirfd, x1 path, x2 mode. The kernel
+        // core's exclusive arm with DMDIR (perm carries the bit from the
+        // decide); omode 0 == OREAD -- the SYS_WALK_CREATE contract opens a
+        // DMDIR create OREAD regardless.
+        u32 perm = 0;
+        if (vivarium_mkdirat_decide(args[0], args[2], &perm) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+        u32 path_len = 0;
+        s64 m = viv_measure_user_path(args[1], &path_len);
+        if (m != 0)                                  return m;
+        char kpath[SYS_OPEN_PATH_MAX + 1];
+        for (u32 i = 0; i < path_len; i++) {
+            u8 b;
+            if (uaccess_load_u8(args[1] + i, &b) != 0) return -(s64)T_E_FAULT;
+            kpath[i] = (char)b;
+        }
+        kpath[path_len] = '\0';
+        s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                                kpath, path_len,
+                                                0 /*OREAD*/, (u64)perm);
+        if (fd < 0) return fd;
+        // Linux mkdirat returns 0, not a descriptor. Closing here is
+        // socktab-safe: this fd is a KOBJ_SPOOR the create core just minted,
+        // never a socket, so no socktab entry exists to strand -- the "close
+        // is the only freeing row" invariant (the dup3 block in vivarium.c)
+        // is about indices freed WITH an entry attached, and this one never
+        // had one.
+        (void)handle_close(p, (hidx_t)fd);
+        return 0;
+    }
+
+    case VIV_LINUX_UNLINKAT: {
+        // unlinkat(dirfd, path, flags): x0 dirfd, x1 path, x2 flags. The
+        // decide maps flags onto SYS_UNLINK's (0 <-> file, AT_REMOVEDIR <->
+        // REMOVEDIR); the shell splits the path and runs the SAME extracted
+        // mechanics (spoor_unlink_in_dir) the fd-based SYS_UNLINK runs.
+        u32 tflags = 0;
+        if (vivarium_unlinkat_decide(args[0], args[2], &tflags)
+                != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+        char leaf[SYS_WALK_OPEN_NAME_MAX + 1];
+        s64 err = 0;
+        struct Spoor *parent = viv_mutation_parent(
+            p, args[1], /*allow_trailing=*/tflags != 0, leaf, &err);
+        if (!parent) return err;
+        s64 rc = spoor_unlink_in_dir(p, parent, leaf, tflags);
+        spoor_clunk(parent);
+        return rc;
+    }
+
+    case VIV_LINUX_RENAMEAT:
+    case VIV_LINUX_RENAMEAT2: {
+        // renameat(olddirfd, oldpath, newdirfd, newpath): x0..x3;
+        // renameat2 adds flags in x4 (admitted: exactly 0). One decide, one
+        // shell -- the 1:1 map onto the extracted spoor_rename_in_dirs
+        // (Linux's replace-existing atomicity IS SYS_RENAME's contract).
+        u64 rflags = (linux_nr == VIV_LINUX_RENAMEAT2) ? args[4] : 0;
+        if (vivarium_renameat_decide(args[0], args[2], rflags)
+                != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+        char oldleaf[SYS_WALK_OPEN_NAME_MAX + 1];
+        char newleaf[SYS_WALK_OPEN_NAME_MAX + 1];
+        s64 err = 0;
+        struct Spoor *od = viv_mutation_parent(p, args[1],
+                                               /*allow_trailing=*/false,
+                                               oldleaf, &err);
+        if (!od) return err;
+        struct Spoor *nd = viv_mutation_parent(p, args[3],
+                                               /*allow_trailing=*/false,
+                                               newleaf, &err);
+        if (!nd) { spoor_clunk(od); return err; }
+        s64 rc = spoor_rename_in_dirs(p, od, nd, oldleaf, newleaf);
+        spoor_clunk(od);
+        spoor_clunk(nd);
+        return rc;
     }
 
     case VIV_LINUX_FCNTL: {
@@ -12188,6 +12647,13 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_BURROW_FROM_HOSTMEM:
         ctx->regs[0] = (u64)sys_burrow_from_hostmem_handler(
+            ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3],
+            ctx->regs[4]);
+        return;
+
+    // #50: the path-based open-or-create (VIVARIUM.md section 6.24).
+    case SYS_OPEN_CREATE:
+        ctx->regs[0] = (u64)sys_open_create_handler(
             ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3],
             ctx->regs[4]);
         return;

@@ -214,6 +214,16 @@
 // the X-search check (see kernel/stalk.c). POSIX: ENOTDIR.
 #define T_E_NOTDIR     20
 
+// Is a directory -- the operation names a directory where a non-directory
+// is required. Two producers: (a) the 9P server (Stratum answers EISDIR
+// for write-opening a directory; it reached EL0 through the [-4095,-2]
+// Rlerror passthrough long before this name existed -- the name was added
+// with user signoff at #50, 2026-08-25, and mints no new ABI value);
+// (b) SYS_OPEN_CREATE's lexical leaf rows (a create against a trailing-
+// slash / "." / ".." / root leaf -- the Linux open_last_lookups rows,
+// answered before any RPC). POSIX: EISDIR.
+#define T_E_ISDIR      21
+
 // Invalid argument. Use when a syscall argument is structurally
 // malformed (NULL where non-NULL required; out-of-range integer;
 // alignment violated; size exceeds bound). POSIX: EINVAL.
@@ -359,6 +369,7 @@ _Static_assert(T_E_FAULT     == 14,  "T_E_FAULT ABI pin (POSIX EFAULT)");
 _Static_assert(T_E_BUSY      == 16,  "T_E_BUSY ABI pin (POSIX EBUSY)");
 _Static_assert(T_E_EXIST     == 17,  "T_E_EXIST ABI pin (POSIX EEXIST)");
 _Static_assert(T_E_NOTDIR    == 20,  "T_E_NOTDIR ABI pin (POSIX ENOTDIR)");
+_Static_assert(T_E_ISDIR     == 21,  "T_E_ISDIR ABI pin (POSIX EISDIR)");
 _Static_assert(T_E_INVAL     == 22,  "T_E_INVAL ABI pin (POSIX EINVAL)");
 _Static_assert(T_E_PIPE      == 32,  "T_E_PIPE ABI pin (POSIX EPIPE)");
 _Static_assert(T_E_RANGE     == 34,  "T_E_RANGE ABI pin (POSIX ERANGE)");
