@@ -1,0 +1,58 @@
+#!/usr/bin/expect -f
+# DISPLAY-MODES.md mode 1a "1b": when a graphical renderer is the PRIMARY display
+# (thylacine.display=gpu), aurora silences EL0 program output on the serial UART
+# AFTER its surface is up. gpu-headless is that deployment on a -nographic
+# backend (QEMU still maintains the scanout surface), so the silence is
+# assertable on the serial the harness drives.
+#
+#   caffeinate -i expect tools/display-modes/verify-gpu-headless-1b.exp
+#
+# TIMING NOTE: aurora comes up LATE (its "console up" line follows the login
+# prompt even in the default boot), so early serial output -- including the first
+# login prompt -- legitimately reaches serial BEFORE aurora silences. The design
+# accepts that (silence-after-surface-up avoids a blind window). So the witness
+# is NOT "nothing leaks"; it is aurora's own deny-path pair:
+#   POSITIVE : "silencing EL0 serial output (1b)"  -- emitted just BEFORE the
+#              verb, proves the bootarg->verb wiring fired (reaches serial).
+#   DENY-PATH: "the framebuffer is the primary display" -- emitted just AFTER the
+#              verb (linear code, always reached once the positive printed), so
+#              its ABSENCE from serial proves the silence took effect at runtime
+#              (it still reaches the framebuffer via the drain tap).
+
+source [file join [file dirname [info script]] .. interactive lib.exp]
+
+set ::env(THYLACINE_ACCEL) hvf
+set ::env(THYLACINE_DISPLAY) gpu-headless
+
+lc_boot
+
+# The banner is direct uart_putc (the tooling ABI) -- it MUST survive 1b, and is
+# the boot-complete sync point.
+lc_expect "Thylacine boot OK" "gpu-headless: boot banner survives 1b (direct uart)"
+
+# POSITIVE: aurora came up (late), read the gpu bootarg, and is about to silence.
+# Generous timeout: aurora's first present lands a few seconds after login.
+set timeout 40
+expect {
+    -ex "silencing EL0 serial output (1b)" { lc_step "saw: aurora announced the 1b silence (wiring fired)" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction before aurora silenced" }
+    timeout { lc_fail "aurora never announced the 1b silence -- bootarg->verb wiring did not fire" }
+    eof     { lc_fail "unexpected EOF before aurora silenced" }
+}
+
+# DENY-PATH: the post-silence marker is emitted immediately after the verb (no
+# branch between), so aurora DEFINITELY reached it. It must NOT reach serial now
+# (it reaches the framebuffer via the drain tap instead). A generous window with
+# NONE means the silence took effect at runtime.
+set timeout 15
+expect {
+    -ex "the framebuffer is the primary display" {
+        lc_fail "post-silence marker LEAKED to serial -- 1b did NOT take effect at runtime"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction after aurora silenced" }
+    timeout { lc_step "post-silence marker absent from serial in 15s (silenced -- correct)" }
+    eof     { lc_fail "unexpected EOF after aurora silenced (VM died)" }
+}
+
+lc_pass "gpu-headless: banner survives, aurora issued the verb, post-silence EL0 output silenced on serial"
+lc_quit

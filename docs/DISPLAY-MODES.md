@@ -140,8 +140,18 @@ round-trip); reading `/dev/winsize` first sidesteps both.
 
 1. **`run-vm.sh`**: `THYLACINE_DISPLAY=console` → drop the GPU device (reuse the
    `THYLACINE_NO_GPU` device-omission) + append `thylacine.display=console`;
-   `THYLACINE_DISPLAY=gpu`/`cocoa`/`vnc` → append `thylacine.display=gpu`.
-   (`tools/run-vm.sh:278-323` GPU device block, `:481-494` append block.)
+   `THYLACINE_DISPLAY=gpu` (a new value; a real window -- cocoa on the mac
+   launcher, with `gpu0` bound to console 0 like the other real backends) →
+   append `thylacine.display=gpu`. **Only these two EXPLICIT values emit a
+   token.** The pre-existing display backends -- `cocoa` / `vnc:N` /
+   `egl-headless` / `dbus-gl` -- stay **testing-hybrid** (serial LIVE, no token),
+   and this is not a nicety but a correctness requirement: `ls-gfx-live.exp`
+   boots under `vnc:N` and then *logs in over serial, drives serial round-trips,
+   and sweeps the serial tee for controlq-desync diagnostics* -- so folding
+   `vnc`/`cocoa` into gpu-mode (silencing serial) would break it. (An earlier
+   draft of this plan listed `cocoa`/`vnc` as gpu-mode; that was wrong, caught at
+   impl by reading `tools/interactive/ls-gfx-live.exp`, and corrected here.)
+   (`tools/run-vm.sh:278-329` GPU device block, `:481-503` append block.)
 2. **ut width source** (`usr/utopia/libutopia/src/repl.rs` +
    `usr/utopia/shell/src/main.rs`): the §23.5.3 client rule, pts-aware — on a
    pts read the `/dev/pts/<n>ctl` winsize (ut already holds that fd); else read
@@ -156,19 +166,30 @@ round-trip); reading `/dev/winsize` first sidesteps both.
    `thylacine.display=gpu`; if present, issue the consctl silence verb after the
    surface is up.
 
-## 6. Verification
+## 6. Verification (as-run)
 
-- **Console-mode boot** (`THYLACINE_DISPLAY=console`): assert no aurora
-  (`joey: /srv/tapestry absent ... skipping`), `/dev/winsize` == `winsize 0 0`,
-  and a clean interactive serial session. (The expect harness's pty does not
-  answer CPR, so ut's width stays `None` → the no-wrap fallback there; the CPR
-  round-trip itself is proven in-guest by u-repl-test + on a real terminal.)
-- **GPU-mode boot** (`THYLACINE_DISPLAY=gpu`): assert 1b — EL0 program output
-  does NOT reach the serial (the harness sees the boot banner + kernel
-  diagnostics but not an EL0 `echo`), while aurora renders it (screendump), and
-  `/dev/winsize` == the aurora grid.
-- **Default boot** (no flag): unchanged — test.sh G-4 gate + SMP gate + the 9
-  `ls-gfx*` scenarios + the serial-driven ls-ci all pass as today.
+- **Kernel 1b mechanism** — `test_cons_serial_silent_gate` (kernel/test/test_cons.c):
+  deterministic, fails-without-fix. With the drain armed, proves the LOUD path
+  reaches both the serial sink (capture) and the tap, the SILENT path drops the
+  serial sink but STILL reaches the tap and reports a full write, un-silence
+  restores, a renderer-minted (`allow_flags=false`) consctl CAN set the verb, and
+  a malformed arg rejects. Runs every boot (1441/1441).
+- **ut width parse** — `u-repl-test`'s `winsize / line-wrap` block exercises
+  `parse_winsize` (both ctl formats + malformed rejection) + the CPR->set_cols
+  path in-guest (joey-gated, every boot).
+- **Console-mode boot** (`tools/display-modes/verify-console-mode.exp`,
+  `THYLACINE_DISPLAY=console`): asserts no aurora (`joey: /srv/tapestry absent`),
+  `/dev/winsize` == `winsize 0 0`, and a clean serial login. This is ALSO the
+  positive control for the silence test: the login prompt reaches serial here.
+- **GPU-mode 1b boot** (`tools/display-modes/verify-gpu-headless-1b.exp`,
+  `THYLACINE_DISPLAY=gpu-headless` -- the gpu DEPLOYMENT on a `-nographic`
+  backend, so it is headless-testable): asserts the boot banner survives on
+  serial (direct uart), the login prompt does NOT reach serial (silenced -- the
+  discriminator against console mode), and aurora announced the 1b silence (the
+  bootarg->verb wiring fired).
+- **Default boot** (no flag): unchanged -- test.sh (1441/1441 + G-4) + the
+  `aurora: console up` line still reaching serial (aurora did NOT spuriously
+  silence, the negative control) all pass as today.
 
 ## 7. Owed / v1.x
 

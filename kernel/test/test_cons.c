@@ -57,6 +57,8 @@ void test_cons_full_line_fits_ring(void);            // #129 (ring holds a max l
 void test_cons_full_ring_never_blocks_sak(void);     // #129 (I-27)
 void test_cons_feed_write_short_on_full(void);       // #129 defect (1)
 void test_cons_refused_byte_is_not_echoed(void);     // #129-audit F3
+void test_cons_serial_silent_gate(void);             // DISPLAY-MODES.md 1b
+void test_cons_serial_silent_sak_restores(void);     // DISPLAY-MODES.md 1b audit F2
 void test_cons_rx_holdback_reoffer(void);            // #129-audit F2
 void test_cons_rx_holdback_not_stranded(void);       // #136-audit F1
 void test_cons_ring_claim_core_returns_holding(void);  // the extinction ring claim
@@ -481,6 +483,116 @@ void test_cons_refused_byte_is_not_echoed(void) {
     TEST_ASSERT(accepted, "the re-offer is accepted");
     TEST_EXPECT_EQ((long)on_accept, 1L, "accepted once -> echoed once (not twice)");
     cons_settle_mgr();
+}
+
+// DISPLAY-MODES.md 1b: the serial-silence gate. When a graphical renderer owns
+// the display it silences EL0 OUTPUT on the serial UART while the drain tap
+// (aurora's mirror) still receives every byte. Proves: (1) the renderer-minted
+// consctl (allow_flags=false) CAN set the verb -- it is a display-routing
+// decision, not a termios flag; (2) with it set, cons_output_write's bytes are
+// DROPPED from the serial sink but STILL reach the drain tap, and the write
+// reports a FULL count; (3) clearing it restores serial output; (4) a malformed
+// arg rejects. FAILS-WITHOUT-FIX: the pre-1b emit pushes to the sink regardless,
+// so the silenced leg's capture would hold the bytes (silent_cap != 0).
+void test_cons_serial_silent_gate(void) {
+    u8 cap[16];
+    cons_test_reset();
+    // The drain tap only records bytes when the drain is armed + open (a bound
+    // renderer, e.g. aurora). Arm it so the "aurora STILL sees the output" leg
+    // is a DYNAMIC proof, not merely a code-structure claim -- cons_drain_open
+    // resets + arms the ring (returns 0; -1 only if already open).
+    TEST_EXPECT_EQ((long)cons_drain_open(), 0L, "drain armed for the tap-still-fires leg");
+
+    // Baseline: LOUD. Capture stands in for the UART sink; the tap is the drain.
+    TEST_ASSERT(!cons_test_serial_silent(), "reset leaves serial LOUD");
+    cons_test_echo_capture(true);
+    u32 drain0 = cons_test_drain_count();
+    (void)cons_output_write("HELLO", 5);
+    u32 loud_cap   = cons_test_echo_captured(cap, sizeof(cap));
+    u32 loud_drain = cons_test_drain_count() - drain0;
+
+    // Silence via the RENDERER grammar (allow_flags=false) -- like winsize, the
+    // verb is renderer-writable (a full-flag consctl is NOT required).
+    long r1 = cons_set_mode_cmd("serialsilent 1", 14, false);
+    bool set_ok = cons_test_serial_silent();
+
+    // SILENCED: the serial sink gets NOTHING; the tap still gets the 5 bytes;
+    // the write reports a FULL count (never a short write for dropped output).
+    cons_test_echo_capture(true);                // reset the capture buffer
+    u32 drain1 = cons_test_drain_count();
+    long acc = cons_output_write("WORLD", 5);
+    u32 silent_cap   = cons_test_echo_captured(cap, sizeof(cap));
+    u32 silent_drain = cons_test_drain_count() - drain1;
+
+    // UN-SILENCE: serial output returns.
+    long r0 = cons_set_mode_cmd("serialsilent 0", 14, false);
+    bool clr_ok = !cons_test_serial_silent();
+    cons_test_echo_capture(true);
+    (void)cons_output_write("BACK", 4);
+    u32 back_cap = cons_test_echo_captured(cap, sizeof(cap));
+
+    // A malformed arg (not 0|1) rejects the whole write and leaves LOUD.
+    long bad = cons_set_mode_cmd("serialsilent 2", 14, false);
+    bool still_loud = !cons_test_serial_silent();
+
+    // AUDIT F1: silence must never outlive the renderer that justifies it. Re-
+    // silence, then CLOSE the drain (the renderer-death / last-close path): the
+    // serial sink must RESUME (else a dead renderer strands the console with no
+    // output sink at all). Fails-without-fix: the pre-fix gate honored
+    // serial_silent unconditionally, so this capture would stay empty.
+    (void)cons_set_mode_cmd("serialsilent 1", 14, false);
+    cons_drain_close();                          // the renderer dies / last close
+    cons_test_echo_capture(true);
+    (void)cons_output_write("GONE", 4);
+    u32 after_death_cap = cons_test_echo_captured(cap, sizeof(cap));
+    bool cleared_on_death = !cons_test_serial_silent();
+
+    cons_test_echo_capture(false);
+
+    TEST_EXPECT_EQ(r1, 14L, "serialsilent 1 accepted on a renderer consctl");
+    TEST_ASSERT(set_ok, "the verb SET the flag");
+    TEST_EXPECT_EQ((long)loud_cap,   5L, "LOUD: serial sink got the 5 bytes");
+    TEST_EXPECT_EQ((long)loud_drain, 5L, "LOUD: drain tap got the 5 bytes");
+    TEST_EXPECT_EQ((long)silent_cap,   0L, "SILENT: serial sink got NOTHING (the 1b gate)");
+    TEST_EXPECT_EQ((long)silent_drain, 5L, "SILENT: drain tap STILL got the 5 bytes");
+    TEST_EXPECT_EQ(acc, 5L, "SILENT: cons_output_write reports a FULL write");
+    TEST_EXPECT_EQ(r0, 14L, "serialsilent 0 accepted");
+    TEST_ASSERT(clr_ok, "the verb CLEARED the flag");
+    TEST_EXPECT_EQ((long)back_cap, 4L, "UN-SILENCED: serial output restored");
+    TEST_EXPECT_EQ(bad, -1L, "a malformed serialsilent arg is rejected");
+    TEST_ASSERT(still_loud, "a rejected write does not change the flag");
+    TEST_EXPECT_EQ((long)after_death_cap, 4L,
+                   "F1: a dead renderer (drain closed) RESTORES serial output");
+    TEST_ASSERT(cleared_on_death, "F1: the flag is cleared on the renderer's last close");
+    cons_settle_mgr();
+}
+
+// DISPLAY-MODES.md 1b audit F2: a SAK (the operator's demand for the trusted
+// path on the emergency serial medium) must restore serial output even when the
+// renderer is ALIVE -- the gate's drain_armed condition (F1) does NOT lift the
+// silence here, so only the F2 clear in proc_console_sak does. On virtio-gpu
+// media the trusted path STAYS on serial (TRUSTED-PATH.md section 7), so a muted
+// serial there swallows the post-SAK trusted prompt. FAILS-WITHOUT-FIX: the
+// pre-fix SAK path left serial_silent set.
+void test_cons_serial_silent_sak_restores(void) {
+    cons_test_reset();
+    (void)cons_drain_open();                     // renderer up: the drain is ARMED
+
+    // Clean console-authority state, so the SAK is a fail-safe no-op that touches
+    // only the serial-silence flag (no stale owner/trusted from a prior test).
+    proc_set_console_owner(NULL);
+    proc_set_console_trusted(NULL);
+
+    (void)cons_set_mode_cmd("serialsilent 1", 14, false);
+    bool set_ok = cons_test_serial_silent();     // silenced, drain still armed
+
+    proc_console_sak();                          // the operator's SAK
+
+    bool cleared = !cons_test_serial_silent();
+    cons_settle_mgr();
+
+    TEST_ASSERT(set_ok, "renderer set serial_silent while alive (drain armed)");
+    TEST_ASSERT(cleared, "F2: SAK cleared serial_silent -- trusted serial path restored");
 }
 
 // #129-audit F2: the 1-byte UART holdback -- the mechanism that makes a refusal

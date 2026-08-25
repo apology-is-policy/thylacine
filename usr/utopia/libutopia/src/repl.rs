@@ -417,6 +417,76 @@ impl Repl {
         let _ = out.flush();
     }
 
+    /// DISPLAY-MODES.md section 3.4: learn the terminal width for the
+    /// visual-wrapped-row line editor. The per-deployment display authority
+    /// (one primary display per mode -> one CPR answerer) makes a single
+    /// deterministic rule correct:
+    ///   - On a pts (a job-control session), read THIS pts's own winsize from
+    ///     the ldisc ctl the session dance already opened -- tmux/ssh set it via
+    ///     TIOCSWINSZ. `/dev/winsize` is the CONSOLE leaf, not the pts geometry,
+    ///     so it must not be read here; and the pts owner is authoritative, so
+    ///     no CPR probe (a fresh, unset pts stays width-unknown -> no-wrap).
+    ///   - On the console, read `/dev/winsize`. A live renderer (aurora) reports
+    ///     its cell grid there; the serial posture is `winsize 0 0`, and only
+    ///     then do we ask the terminal directly with a CPR probe. The reply
+    ///     (`ESC[<rows>;<cols>R`) flows back through the normal input path and
+    ///     the editor's CSI parser calls `set_cols`.
+    /// A wrong width is strictly worse than none (wrong cursor-up counts corrupt
+    /// the display), so every parse/read failure leaves `cols` `None` -- the
+    /// byte-identical no-wrap fallback. Session-only: the caller gates on a live
+    /// stdout, exactly like `open_notes` / `install_completion`, so the
+    /// bare-spawn boot check + host tests never probe.
+    pub fn probe_winsize(&mut self, out: &mut dyn IoWrite) {
+        // pts: the ldisc ctl render carries "... winsize <cols> <rows>". Read
+        // the fd the dance opened (offset 0, never yet read); no CPR.
+        if self.env.job_control.is_some() {
+            if let Some(fd) = self.env.consctl_fd {
+                let mut buf = [0u8; 128];
+                let n = unsafe { libthyla_rs::t_read(fd as i64, buf.as_mut_ptr(), buf.len()) };
+                if n > 0 {
+                    if let Some((c, r)) = parse_winsize(&buf[..n as usize]) {
+                        if c > 0 && r > 0 {
+                            self.editor.set_cols(c as usize);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        // console: /dev/winsize, then CPR iff `winsize 0 0`.
+        let path = "/dev/winsize";
+        let mut cols_known = false;
+        let fd = unsafe {
+            libthyla_rs::t_open(
+                libthyla_rs::T_WALK_OPEN_FROM_ROOT,
+                path.as_ptr(),
+                path.len(),
+                libthyla_rs::T_OREAD,
+            )
+        };
+        if fd >= 0 {
+            let mut buf = [0u8; 64];
+            let n = unsafe { libthyla_rs::t_read(fd, buf.as_mut_ptr(), buf.len()) };
+            let _ = unsafe { libthyla_rs::t_close(fd) };
+            if n > 0 {
+                if let Some((c, r)) = parse_winsize(&buf[..n as usize]) {
+                    if c > 0 && r > 0 {
+                        self.editor.set_cols(c as usize);
+                        cols_known = true;
+                    }
+                }
+            }
+        }
+        if !cols_known {
+            // Ask the terminal: save cursor, jump to the far corner (clamps to
+            // the screen's bottom-right cell), request the position, restore.
+            // Emitted before the first prompt draw, so any residual cursor
+            // motion is undone by the prompt's own `\r` + clear.
+            let _ = out.write_all(b"\x1b[s\x1b[9999;9999H\x1b[6n\x1b[u");
+            let _ = out.flush();
+        }
+    }
+
     /// Feed one chunk of input bytes through the editor + evaluator.
     ///
     /// Returns `Some(exit_code)` iff the session should terminate: the user
@@ -778,6 +848,40 @@ fn render_menu_strip(cands: &[String], selected: usize) -> String {
     out
 }
 
+// DISPLAY-MODES.md section 3.4: pull the trailing `winsize <cols> <rows>` out
+// of a cons/ptyfs ctl render. Both surfaces share the token by design
+// (kernel/cons.c:2176 "parser parity, pouch 0021's strstr(buf, "winsize ")"),
+// so one parser serves the console `/dev/winsize` line ("winsize C R\n") and
+// the pts ctl line ("+icanon ... +onlcr winsize C R\n"). Returns the first
+// pair; None if the token or either decimal is absent/malformed. `pub` so the
+// in-guest /u-repl-test gate can exercise it (this crate's #[cfg(test)] cases
+// document but do not execute -- they are no_std).
+pub fn parse_winsize(buf: &[u8]) -> Option<(u32, u32)> {
+    let needle = b"winsize ";
+    let pos = buf.windows(needle.len()).position(|w| w == needle)?;
+    let rest = &buf[pos + needle.len()..];
+    let mut toks = rest.split(|&b| b == b' ' || b == b'\n' || b == b'\r');
+    let cols = scan_u32(toks.next()?)?;
+    let rows = scan_u32(toks.next()?)?;
+    Some((cols, rows))
+}
+
+// Decimal ASCII -> u32, rejecting empty / non-digit / overflow (a malformed
+// winsize must leave the width unknown, never guess).
+fn scan_u32(tok: &[u8]) -> Option<u32> {
+    if tok.is_empty() {
+        return None;
+    }
+    let mut v: u32 = 0;
+    for &b in tok {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        v = v.checked_mul(10)?.checked_add((b - b'0') as u32)?;
+    }
+    Some(v)
+}
+
 // core::fmt::Write adapter so run_line can format an EvalErrorKind (Debug)
 // into the diagnostic String without pulling alloc::format into every path.
 struct FmtSink<'a>(&'a mut String);
@@ -806,6 +910,29 @@ mod tests {
             }
         }
         (repl, exit, sink)
+    }
+
+    // DISPLAY-MODES.md section 3.4: parse_winsize serves BOTH ctl renders.
+    #[test]
+    fn parse_winsize_console_and_pts_and_malformed() {
+        // The console `/dev/winsize` line.
+        assert_eq!(parse_winsize(b"winsize 80 24\n"), Some((80, 24)));
+        // The serial posture -- 0 0 parses (the caller treats it as unknown).
+        assert_eq!(parse_winsize(b"winsize 0 0\n"), Some((0, 0)));
+        // The pts ldisc ctl render -- winsize is the TRAILING token.
+        assert_eq!(
+            parse_winsize(b"+icanon +echo +isig +icrnl +onlcr winsize 132 43\n"),
+            Some((132, 43))
+        );
+        // No token at all -> unknown.
+        assert_eq!(parse_winsize(b"+icanon +echo +isig +icrnl +onlcr\n"), None);
+        // A non-digit / empty second field -> unknown, never a guess.
+        assert_eq!(parse_winsize(b"winsize 80 x\n"), None);
+        assert_eq!(parse_winsize(b"winsize 80 \n"), None);
+        assert_eq!(parse_winsize(b"winsize  24\n"), None);
+        // u16 max fits; a value past u32 rejects rather than wrapping.
+        assert_eq!(parse_winsize(b"winsize 65535 65535\n"), Some((65535, 65535)));
+        assert_eq!(parse_winsize(b"winsize 99999999999 24\n"), None);
     }
 
     #[test]

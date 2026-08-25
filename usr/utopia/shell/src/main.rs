@@ -339,6 +339,18 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     let mut out = io::stdout();
+    // DISPLAY-MODES.md section 3.4: learn the terminal width so the line editor
+    // wraps at the real column count. Session-only (same live-stdout gate as
+    // open_notes / install_completion): reads the pts ctl winsize on a pts, else
+    // /dev/winsize, else a CPR probe whose reply arrives on the input path. Must
+    // run AFTER the pts/consctl dance (it keys on job_control / consctl_fd) and
+    // BEFORE the first prompt draw (a corner-probe's cursor motion is undone by
+    // the prompt's own \r+clear). A width that only resolves via the async CPR
+    // reply is applied on the next redraw -- the first prompt is correct on the
+    // /dev/winsize + pts fast paths and self-corrects on the probe path.
+    if io::stdout_is_live() {
+        repl.probe_winsize(&mut out);
+    }
     // Draw the first prompt (no-op to the UART if fd 1 is absent).
     repl.draw_prompt(&mut out);
 

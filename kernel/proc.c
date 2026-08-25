@@ -2016,6 +2016,12 @@ void proc_console_relinquish(struct Proc *p) {
 // g_proc_table_lock -> note q->lock edge is gone (revoke/mark/is-attached are
 // lock-free atomic RMWs), strictly simplifying the lock order.
 void proc_console_sak(void) {
+    // DISPLAY-MODES.md 1b (audit F2): a SAK is a demand for the trusted path on
+    // the EMERGENCY serial medium -- restore serial output regardless of any
+    // renderer's silence, before anything else and covering the idempotent
+    // repeat-SAK path below. Lockless relaxed store, so it takes no lock and
+    // introduces no g_proc_table_lock -> g_cons.lock edge.
+    cons_serial_silent_clear();
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     struct Proc *owner   = g_console_owner;
     struct Proc *trusted = g_console_trusted_proc;

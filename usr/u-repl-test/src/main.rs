@@ -378,6 +378,32 @@ pub extern "C" fn rs_main() -> i64 {
         if !s.starts_with("\x1b[1A\r\x1b[J") {
             return fail("winsize: wrapped re-render did not move up to the block top (the dup bug)");
         }
+
+        // (c) DISPLAY-MODES.md 3.4: parse_winsize -- the ONE parser that reads
+        //     both the console `/dev/winsize` line and the pts ldisc ctl line
+        //     (they share the "winsize C R" token by design). This is what the
+        //     shell's width source feeds set_cols; a wrong parse would silently
+        //     mis-wrap, so prove it total: both formats, and rejection of every
+        //     malformed shape rather than a guessed width.
+        use libutopia::repl::parse_winsize;
+        if parse_winsize(b"winsize 80 24\n") != Some((80, 24)) {
+            return fail("winsize: parse_winsize missed the console line");
+        }
+        if parse_winsize(b"+icanon +echo +isig +icrnl +onlcr winsize 132 43\n") != Some((132, 43)) {
+            return fail("winsize: parse_winsize missed the pts ctl line");
+        }
+        if parse_winsize(b"winsize 0 0\n") != Some((0, 0)) {
+            return fail("winsize: parse_winsize mishandled the serial 0 0 posture");
+        }
+        // Malformed -> None (never a guessed width): no token, non-digit,
+        // empty field, u32 overflow.
+        if parse_winsize(b"+icanon +echo\n").is_some()
+            || parse_winsize(b"winsize 80 x\n").is_some()
+            || parse_winsize(b"winsize  24\n").is_some()
+            || parse_winsize(b"winsize 99999999999 24\n").is_some()
+        {
+            return fail("winsize: parse_winsize guessed a width on malformed input");
+        }
     }
     t_putstr("u-repl-test: winsize / line-wrap OK\n");
 

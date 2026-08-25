@@ -22,6 +22,69 @@ needed the operator.
 
 ---
 
+## 2026-08-25 (aux) -- DISPLAY-MODES impl: the 4-piece chunk + a 2-P finding + two E2E wrong turns
+
+Continued straight from the render+scripture session below: built the impl the scripture
+scoped, so the operator's line-wrap bug is now user-visibly fixed (the render mechanism finally
+has a width to consume). Four pieces, then the audit, then two instructive E2E wrong turns.
+
+**The four pieces.** (1) `run-vm.sh`: `THYLACINE_DISPLAY=console` drops the GPU + appends
+`thylacine.display=console`; a new `gpu` value appends `thylacine.display=gpu`. (2) ut width
+(`repl.rs` `probe_winsize` + `shell/main.rs`): on a pts read the pts ctl winsize (no CPR --
+the owner sets it), else `/dev/winsize`, and only if `0 0` emit the CPR probe; a new
+`parse_winsize` reads the shared `winsize C R` token off both the console line and the ptyfs
+ctl line. (3) kernel 1b (`cons.c`): a `serial_silent` flag + a renderer-writable `serialsilent
+<0|1>` consctl verb + the UART-sink gate in both `cons_emit_bulk*` (tap fires FIRST, so aurora
+always sees the bytes). (4) aurora: read `/hw/chosen/bootargs`, and iff `thylacine.display=gpu`
+issue the verb after its surface is up.
+
+**A scripture bug caught at impl.** DISPLAY-MODES.md 5.1 listed `cocoa`/`vnc` as gpu-mode
+(silence serial). Reading `tools/interactive/ls-gfx-live.exp` before wiring it showed that leg
+boots under `vnc:N` and then LOGS IN OVER SERIAL and sweeps the serial tee for desync
+diagnostics -- so silencing serial there breaks it. Corrected the scripture: only the two
+explicit values (`console`/`gpu`) emit a token; every pre-existing backend stays
+testing-hybrid (serial live). The operator's overriding "zero test churn" constraint decided
+it, and the gate dependency was ground truth over the written 5.1.
+
+**The audit (Fable 5, 0 P0 / 1 P1 / 1 P2, both fixed).** Both findings shared ONE root cause:
+`serial_silent` had no REVOKE path, so it outlived the two events meant to RESTORE serial.
+F1 [P1]: aurora death -> `cons_drain_close` disarmed the tap but left the flag set, and aurora
+is never respawned, so a dead renderer = a permanently dark console (serial silenced AND
+framebuffer frozen) -- the serial mirror removed exactly in the failure it existed for. Fixed
+structurally: gate silence on `drain_armed` (serial resumes the instant the renderer's drain
+disarms) + clear the flag on close. F2 [P2]: a SAK regranted to corvus but did not clear the
+flag, so the operator's post-SAK trusted prompt was muted -- and on virtio-gpu media the
+trusted path STAYS serial (TRUSTED-PATH 7). Fixed: clear the flag at the top of
+`proc_console_sak`. Both got fails-without-fix regression tests. The reviewer re-derived the
+load-bearing bypass claim from code: banner + extinction + kernel diagnostics all use direct
+`uart_puts` and never touch the gated paths -- 1b cannot mute the trusted sink.
+
+**E2E wrong turn 1 (a hypothesis, measured false).** The gpu-headless silence E2E failed:
+aurora never announced the silence. First hypothesis -- my `gpu-headless` value had joined the
+mmio-drop condition, and I reasoned that dropping `gpu-mmio0` starved aurora's surface. Removed
+it, re-ran: STILL failed, and the `/virtio-gpu` probe (which needs gpu-mmio0) now ran -- so the
+device set was fine and the hypothesis was wrong. The lesson held: re-run before believing a
+fix, do not narrate it green.
+
+**E2E wrong turn 2 (the real cause -- a timing assumption).** The true cause: aurora comes up
+LATE. Even in the default boot, `aurora: console up` prints AFTER `Thylacine login:`. So the
+login prompt legitimately reaches serial BEFORE aurora silences (the design's silence-after-
+surface-up accepts that -- the alternative is a blind window). My E2E's "no login prompt ever"
+assertion was simply wrong, and it quit at the login prompt before aurora even came up. Rebuilt
+the witness as a deny-path PAIR from aurora's own linear code: a "silencing" line just BEFORE
+the verb (positive: the wiring fired, reaches serial) and a "framebuffer is the primary
+display" line just AFTER it (deny-path: always reached once the positive printed, so its
+ABSENCE from serial is the runtime proof the silence took effect). Both E2Es green after that;
+console mode is the positive control (its login prompt DOES reach serial).
+
+**Cost + verify.** test.sh 1442/1442 (2 new cons tests: the gate + the SAK-restore); u-repl-test
+winsize block green (parse_winsize both formats + rejection); default boot unchanged, with
+`aurora: console up` still reaching serial as the negative control (no spurious silence);
+console + gpu-headless E2Es green; SMP gate <run this session>. **Open:** ring the vault
+dossiers (sub-kernel-cons / sub-aurora / sub-utopia-interactive / sub-substrate-machine) --
+OWED, the vault worktree is 240 commits behind so it is a batched sync, not per-chunk. The
+pts-winsize live-reflow on a resize (`tty:winch`) stays v1.x per DISPLAY-MODES 7.
+
 ## 2026-08-25 (aux) -- ut line-wrap: render mechanism + the deployment-mode reframe
 
 The operator's 3rd queued ut item: "moving left/right when the executed command wraps at

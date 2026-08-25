@@ -52,7 +52,7 @@ use alloc::vec::Vec;
 use cornucopia::Atlas;
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{
-    t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN,
+    t_close, t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN,
     T_WALK_OPEN_FROM_ROOT,
 };
 use render::{render_rows, Metrics};
@@ -562,6 +562,25 @@ pub extern "C" fn rs_main() -> i64 {
     // the pgid-0 boot group, which notes_post_pgrp refuses -- the boot write
     // is silent by construction.
     write_winsize(consctl, cols, rows);
+
+    // DISPLAY-MODES.md 1b: when a graphical renderer is the PRIMARY display
+    // (run-vm.sh passed thylacine.display=gpu), silence EL0 program output on
+    // the serial UART now that the surface is up -- the framebuffer is the sole
+    // view and the sole CPR answerer. Done here, AFTER the first present, so no
+    // early EL0 output falls into a gap where neither serial nor framebuffer is
+    // showing. The default posture (no token -- the -nographic test harness, or
+    // a serial-primary console) leaves serial LOUD, so no existing gate churns.
+    // Say-then-silence: the announcement is the last EL0 line serial sees.
+    if bootarg_display_is_gpu() {
+        say!("aurora: display=gpu -- silencing EL0 serial output (1b)");
+        write_serialsilent(consctl, true);
+        // A state-transition log emitted immediately AFTER the silence. By the
+        // linear code above it is always reached once the "silencing" line
+        // printed, so its ABSENCE from serial (while it still reaches the
+        // framebuffer via the drain tap) is the runtime deny-path witness that
+        // 1b took effect -- the gpu-headless E2E keys on exactly that.
+        say!("aurora: serial silenced -- the framebuffer is the primary display");
+    }
 
     let mut frames: u64 = 0;
     let mut blink_on = true;
@@ -1136,6 +1155,43 @@ fn write_winsize(fd: i64, cols: usize, rows: usize) {
     let wr = unsafe { t_write(fd, buf.as_ptr(), n) };
     if wr < n as i64 {
         say!("aurora: consctl winsize write short/failed ({} of {})", wr, n);
+    }
+}
+
+// DISPLAY-MODES.md 1b: is thylacine.display=gpu on the kernel cmdline? Read
+// /hw/chosen/bootargs (the /hw FDT mount, the same channel joey's bootarg_has
+// and debug-probe use) and substring-search for the FULL key=value token, so
+// `gpu` never matches `console`. Absent / unreadable / unmatched -> false (the
+// default LOUD posture). devhw is `.seekable = false`, so this is a single
+// sequential read.
+fn bootarg_display_is_gpu() -> bool {
+    let fd = open_path("/hw/chosen/bootargs", T_OREAD);
+    if fd < 0 {
+        return false;
+    }
+    let mut buf = [0u8; 256];
+    let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
+    unsafe { t_close(fd) };
+    if n <= 0 {
+        return false;
+    }
+    let hay = &buf[..n as usize];
+    let needle = b"thylacine.display=gpu";
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+// DISPLAY-MODES.md 1b: set/clear the serial-silence flag via the consctl
+// `serialsilent <0|1>` verb (renderer-writable, like winsize). Best-effort --
+// a short/failed write only leaves serial in its prior state; the renderer must
+// never die over it.
+fn write_serialsilent(fd: i64, on: bool) {
+    if fd < 0 {
+        return;
+    }
+    let msg: &[u8] = if on { b"serialsilent 1" } else { b"serialsilent 0" };
+    let wr = unsafe { t_write(fd, msg.as_ptr(), msg.len()) };
+    if wr < msg.len() as i64 {
+        say!("aurora: consctl serialsilent write short/failed ({} of {})", wr, msg.len());
     }
 }
 

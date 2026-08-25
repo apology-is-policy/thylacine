@@ -669,6 +669,8 @@ void test_cons_full_line_fits_ring(void);
 void test_cons_full_ring_never_blocks_sak(void);
 void test_cons_feed_write_short_on_full(void);
 void test_cons_refused_byte_is_not_echoed(void);
+void test_cons_serial_silent_gate(void);
+void test_cons_serial_silent_sak_restores(void);
 void test_cons_rx_holdback_reoffer(void);
 void test_cons_rx_holdback_not_stranded(void);
 void test_cons_rx_drop_counters(void);
@@ -2309,6 +2311,8 @@ struct test_case g_tests[] = {
     { "cons.full_ring_never_blocks_sak", test_cons_full_ring_never_blocks_sak, false, NULL },
     { "cons.feed_write_short_on_full", test_cons_feed_write_short_on_full, false, NULL },
     { "cons.refused_byte_is_not_echoed", test_cons_refused_byte_is_not_echoed, false, NULL },
+    { "cons.serial_silent_gate",       test_cons_serial_silent_gate,       false, NULL },
+    { "cons.serial_silent_sak_restores", test_cons_serial_silent_sak_restores, false, NULL },
     { "cons.rx_holdback_reoffer",      test_cons_rx_holdback_reoffer,      false, NULL },
     { "cons.rx_holdback_not_stranded", test_cons_rx_holdback_not_stranded, false, NULL },
     { "cons.rx_drop_counters",         test_cons_rx_drop_counters,         false, NULL },
