@@ -1990,6 +1990,7 @@ impl Gpu {
             ctx_id,
             VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE,
             PAGE_SIZE as u32,
+            0, // blob_id 0: a probe blob binds no VkDeviceMemory
         ) {
             Ok(()) => match self.map_blob(res_id, offset) {
                 Ok(mi) => {
@@ -2043,14 +2044,14 @@ impl Gpu {
     /// regression is diagnosable from the boot log.
     fn hostmem_ring_probe(&mut self) {
         let len = PAGE_SIZE as u32;
-        let a = match self.mint_host3d_ring(HOSTMEM_PROBE_RES, HOSTMEM_PROBE_CTX_ID, len) {
+        let a = match self.mint_host3d_ring(HOSTMEM_PROBE_RES, HOSTMEM_PROBE_CTX_ID, len, 0) {
             Ok(r) => r,
             Err(_) => {
                 say!("tapestryd: gpu hostmem-ring mint A refused");
                 return;
             }
         };
-        let b = match self.mint_host3d_ring(HOSTMEM_PROBE_RES_2, HOSTMEM_PROBE_CTX_ID, len) {
+        let b = match self.mint_host3d_ring(HOSTMEM_PROBE_RES_2, HOSTMEM_PROBE_CTX_ID, len, 0) {
             Ok(r) => r,
             Err(_) => {
                 say!("tapestryd: gpu hostmem-ring mint B refused");
@@ -2074,7 +2075,7 @@ impl Gpu {
         self.drop_host3d_ring(b);
         // Re-mint: the allocator must hand back a FREED offset (A's or B's), not a
         // fresh bump past both -- proof the free-list reclaimed on teardown.
-        let reuse = match self.mint_host3d_ring(HOSTMEM_PROBE_RES, HOSTMEM_PROBE_CTX_ID, len) {
+        let reuse = match self.mint_host3d_ring(HOSTMEM_PROBE_RES, HOSTMEM_PROBE_CTX_ID, len, 0) {
             Ok(c) => {
                 let ok = c.offset == a_off || c.offset == b_off;
                 self.drop_host3d_ring(c);
@@ -2349,6 +2350,7 @@ impl Gpu {
         ctx_id: u32,
         blob_flags: u32,
         len: u32,
+        blob_id: u64,
     ) -> Result<(), Error> {
         if !self.blob {
             return Err(Error::Hardware);
@@ -2360,7 +2362,12 @@ impl Gpu {
             w32(req_va + 28, VIRTIO_GPU_BLOB_MEM_HOST3D);
             w32(req_va + 32, blob_flags);
             w32(req_va + 36, 0); // nr_entries: 0 -- host-allocated, no guest backing
-            w64(req_va + 40, 0); // blob_id: 0
+            // blob_id names the host resource the blob binds. A command ring
+            // uses 0 (Venus requires supports_blob_id_0, matching vtest's
+            // shmem); a HOST_VISIBLE VkDeviceMemory bo passes the Venus
+            // mem_id, so virglrenderer maps THAT allocation's host pages
+            // (V-3b-3c-2). The kernel/QEMU treat it as an opaque u64.
+            w64(req_va + 40, blob_id);
             w64(req_va + 48, u64::from(len)); // size
         };
         // 24 (hdr) + 32 (fixed fields) = 56 = HDR + 32. No mem_entry for HOST3D.
@@ -2446,6 +2453,7 @@ impl Gpu {
         res_id: u32,
         ctx_id: u32,
         len: u32,
+        blob_id: u64,
     ) -> Result<HostRing, Error> {
         let size = (u64::from(len) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         // The blob size crosses the wire as a u32; a len that page-rounds to 1<<32
@@ -2471,7 +2479,7 @@ impl Gpu {
             }
         };
         if let Err(e) =
-            self.create_host3d_blob(res_id, ctx_id, VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE, size32)
+            self.create_host3d_blob(res_id, ctx_id, VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE, size32, blob_id)
         {
             self.hostmem_free(off, size);
             return Err(e);

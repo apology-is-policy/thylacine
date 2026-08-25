@@ -6593,7 +6593,7 @@ impl Comp {
             self.res_seq = 1;
         }
         let res_id = self.res_seq;
-        let hr = match self.gpu.mint_host3d_ring(res_id, venus_ctx, len) {
+        let hr = match self.gpu.mint_host3d_ring(res_id, venus_ctx, len, 0) {
             Ok(hr) => hr,
             Err(_) => return Err(E_IO),
         };
