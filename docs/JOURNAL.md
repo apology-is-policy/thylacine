@@ -22,6 +22,61 @@ needed the operator.
 
 ---
 
+## 2026-08-25 — reply-shmem: the design pass that dissolved itself; then V-3b-3a builds on real silicon
+
+With both V-3b-2 chunks shipped (`b7b712dc`), the operator said "Let's open it" --
+the reply-shmem design pass. The interesting part is that **the research reversed
+its own premise.** The resume note framed reply-shmem as "a NEW FD_SHM ABI ->
+design-fork -> scripture-first." A Mesa deep-read (a subagent over
+`mesa-thylacine` + virglrenderer `7fcfce49`) traced `vkSetReplyCommandStreamMESA`
+end to end and found: it is a **RING command** Mesa writes into the command ring
+(cmd_type 178, tapestryd forwards nothing), the reply region is a **second host3d
+ring** (`ring/new host3d ... 1`, `WARP_RINGS_PER_CTX`=64 already), its res_id is
+exposed by the existing `ring/<ridx>/info`, and the host writes replies zero-copy
+while the guest polls the ring `head` (release/acquire). So reply-shmem needs
+**no new Thylacine substrate at all** -- it folds into V-3b-3 (Mesa), no separate
+V-3b-2b. Ratified + landed as scripture `cc1870fe` (WARP-V3-DESIGN 0.13). The
+lesson: "a new ABI" was a claim about the tree that the tree did not support --
+the design pass's job was to find that out, and its best outcome was to delete a
+chunk.
+
+Then the V-3b-3 design + a 4-sub-chunk plan (`b6435106`, WARP-V3-DESIGN 0.14). A
+fork-map subagent settled the shape: the backend is **vtest-shaped** (a userspace
+transport, not the DRM-ioctl virtgpu shape), the `vn_renderer` vtable is 20
+pointers (3 optional), and there are two build blockers -- a hard libdrm dep
+(from the cross-file's `system='linux'`) and a shared-library ICD (Thylacine is
+static/no-loader). Sections 4/3.4-3.6 were V-3a-framed (tapestryd in the ring hot
+path); Model B moved that out, so the section reconciles them.
+
+**V-3b-3a then built + linked clean on thyla-keep** (started the VM, built,
+stopped it). The Mesa Venus backend (`vn_renderer_thylacine.c`, written blind --
+compiled 0-error) + a loader-less ICD prove harness link into a 17 MB static
+aarch64-thylacine ET_EXEC. The build-system integration -- the novel 3a risk --
+worked: `system_has_kms_drm=false` for thylacine (blocker 1, the honest value --
+`dep_libdrm=null_dep`, virgl-on-thylacine uses the warp winsys not DRM), a static
+loader-less ICD (blocker 2), and a `renderdoc_app.h` platform port (the
+vk-runtime includes it). Six mesa-fork files, all applied to both trees.
+
+Wrong turns caught: (1) the first configure used the **system meson 1.3.2** and
+failed the `>=1.4.0` gate -- the builds use a **`/build/venv-meson`** (1.11.2);
+(2) my info-init had a `STATIC_ASSERT` comparing a `uint32_t[32]` to a single
+capset word -- the editor's field-size check caught it before the build (the
+capset copy is V-3c's job anyway, so it was dropped); (3) the **mesa fork has
+diverged** -- my local `b7f9ed2` (Warp-4) is NOT in the builder's `9b2fef7`
+(#198 bundle) history, and there is no shared Thylacine remote (origin = upstream
+freedesktop) -- caught by checking the builder HEAD before applying edits.
+`src/virtio/vulkan/` is pristine on both, so the edits apply either way, but
+where 3a commits is the operator's call (they chose: settle it at commit time).
+
+Open, and exact about it: the 3a **build+link half is proven**; the **runtime
+resolve half is not** -- `thylacine-venus-prove` is a pouch-ABI ET_EXEC, so
+`THYLACINE-VENUS-PROVE PASS` needs a Thylacine guest boot (not the builder's
+Linux), which needs a verified/fresh paired build + venus-prove staged into the
+ramfs. Deferred rather than rushed: the local `build/` ramfs (16:01) vs pool
+(10:41) are of uncertain pairing (bake-trap risk), and blind-booting a mispaired
+set EXTINCTs. Scripture pushed to both mirrors; the 6 mesa-fork files uncommitted
+pending the divergence decision.
+
 ## 2026-08-25 — V-3b-2 cross-Proc E2E: the audit that diagnosed the GL failure
 
 With V-3b-2 shipped, the operator chose the cross-Proc E2E witness (before the
