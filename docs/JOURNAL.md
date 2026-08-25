@@ -22,6 +22,34 @@ needed the operator.
 
 ---
 
+## 2026-08-25 (aux) -- ut: `=` in a command argument is a literal
+
+The operator's original clang wall included `-std=c++20` -- a flag with `=value`. ut
+rejected it: UnexpectedEqualInCommand. The lexer splits `-std=c++20` into Word("-std")
+Equal Word("c++20"), and parse_simple_command errored on the Equal in argument position.
+Every `=`-bearing flag (`-std=`, `--sysroot=`, `--color=`) was unusable -- a big gap for
+any real toolchain invocation.
+
+Diagnosis first, so I did not fix the wrong thing: I checked and `x=y` / `x = y` already
+parse as assignment (`=` is a word boundary; is_assignment_start catches them at statement
+start). So the gap was specifically `=` in ARGUMENT position. Fix (`fd4c59ae`): parse_word
+glues a span-adjacent `=` into one word (like `~` does once present); parse_simple_command's
+Equal arm parses a literal `=` for the non-adjacent case; eval_value_token renders Equal as
+"=". Assignment stays a separate path (parse_assign via the expression parser), untouched.
+
+Verified two layers: u-repl-test's parse() guard (joey-gated: parse("clang -std=c++20 ...")
+must be Ok, parse("let x = 5") still Ok) + an echo witness (`echo -std=c++20` -> "-std=c++20",
+no interior spaces = one argv word; three args would space-join). The clade CL-4/CL-5 gates'
+own `--sysroot=/clade/sysroot` invocations passed. So the operator's `clang++ -std=c++20
+-O2 ... main.cpp` -- with /tmp + the clang defaults + this -- now parses on-device.
+
+Next in the batch: the line-wrap cursor-duplication, which the operator wants done PROPERLY
+(winsize-aware) with a view to future tmux-style multiplexing. The #55 mechanism already
+exists (cons ws_cols + /dev/winsize + the consctl `winsize` verb + the tty:winch note); the
+open design question is the serial-console width source (no auto-winsize over serial).
+
+---
+
 ## 2026-08-24 (aux) -- ut batch: cd -- end-of-options + && / || short-circuit lists
 
 Operator queued a Utopia-fix batch after the /tmp+completion work and said "dive in."
