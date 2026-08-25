@@ -210,6 +210,13 @@ const _: () = {
 /// laundered through the TCB driver. 64 MiB/ctx (512 MiB total worst case)
 /// covers a 4K RGBA render target with room over.
 const WARP_CTX_BACKING_MAX: u64 = 64 * 1024 * 1024;
+
+/// V-3b-2 (WARP-V3-DESIGN 0.12): the byte cap on one venus SUBMIT_CMD stream
+/// (I-32). The venus ring-bootstrap commands are ~124 bytes; this bounds a
+/// client-supplied stream well under the fenced slot (`gpu::FREQ_LEN`), which
+/// `gpu.submit_3d`'s `fenced_begin` independently enforces -- this is the
+/// defense-in-depth client-facing bound.
+const WARP_SUBMIT_MAX: usize = 32 * 1024;
 /// The widest plausible bytes-per-pixel for the geometry sanity check
 /// (RGBA32F is 16); the host owns real format validity per section 2.1.
 const WARP_BO_MAX_BPP: u64 = 16;
@@ -7874,6 +7881,48 @@ impl Comp {
         r
     }
 
+    /// V-3b-2 (WARP-V3-DESIGN 0.12): forward a raw venus SUBMIT_CMD (EXECBUFFER)
+    /// stream on the ctx's VENUS device-ctx. Distinct from `warp_submit` (which
+    /// targets `dev_ctx`, the virgl ctx): a host3d ring's resource is created
+    /// under `venus_ctx` (`wring_install_host3d` -> `mint_host3d_ring`), so
+    /// `vkr_context_get_resource` resolves the ring's res_id -- named by the
+    /// `vkCreateRingMESA` in the stream -- only on the venus context's decoder.
+    /// tapestryd never parses the stream (opaque bytes; the venus ctx is the host
+    /// resource SCOPE, not command parsing). Reuses the fenced lane + admission +
+    /// accounting.
+    fn warp_venus_submit(&mut self, ctx_pub: u32, conn: u64, stream: &[u8]) -> Result<u64, u32> {
+        if stream.len() > WARP_SUBMIT_MAX {
+            return Err(p9::E_INVAL);
+        }
+        let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            c.fenced_rx += 1;
+        }
+        let r = (|| {
+            // The budget gate is ctx-scoped (fence_poisoned + the per-ctx fence
+            // share), identical for either device ctx; its returned dev_ctx is
+            // unused here -- the venus stream submits on venus_ctx instead.
+            let _ = self.warp_fenced_admit(ctx_pub, conn)?;
+            match self.gpu.submit_3d(venus_ctx, ctx_pub, stream) {
+                Ok(f) => {
+                    self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
+                    Ok(f)
+                }
+                Err(e) => Err(map_fenced_err(e)),
+            }
+        })();
+        self.warp_fenced_account(ctx_pub, conn, &r);
+        r
+    }
+
+    /// V-3b-2: a ctx has an armed venus device-ctx iff it minted a host3d ring
+    /// (`wctx_venus_ensure`) -- exactly a Venus client. The WFK_SUBMIT handler
+    /// routes on this: a Venus client's submit targets venus_ctx, a virgl
+    /// client's targets dev_ctx. A client is one or the other.
+    fn wctx_has_venus(&self, ctx_pub: u32, conn: u64) -> bool {
+        self.wctx(ctx_pub, conn).map_or(false, |c| c.venus_ctx.is_some())
+    }
+
     /// #210: classify one fenced-funnel outcome on the ctx ledger.
     fn warp_fenced_account(&mut self, ctx_pub: u32, conn: u64, r: &Result<u64, u32>) {
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
@@ -9580,7 +9629,15 @@ impl Conn {
                     if !comp.gpu.virgl {
                         return self.err(tag, p9::E_OPNOTSUPP);
                     }
-                    match comp.warp_submit(id, self.conn_id, a.data) {
+                    // V-3b-2: a Venus client (armed venus_ctx from minting a host3d
+                    // ring) submits its SUBMIT_CMD stream on venus_ctx; a virgl
+                    // client on dev_ctx. Per-client-unambiguous (0.12).
+                    let res = if comp.wctx_has_venus(id, self.conn_id) {
+                        comp.warp_venus_submit(id, self.conn_id, a.data)
+                    } else {
+                        comp.warp_submit(id, self.conn_id, a.data)
+                    };
+                    match res {
                         Ok(_fence) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                         Err(e) => self.err(tag, e),
                     }
