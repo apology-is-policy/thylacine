@@ -431,6 +431,29 @@ static unsigned int rd_u32_le(const unsigned char *rx, size_t off) {
 // because its children are third-party programs whose failure output is
 // unbounded; see the argument there. The two orders are both correct for their
 // own callers, and neither is copyable to the other without re-deriving why.
+// pouch_smoke_one_drain_first (below) takes the run_viv_bundle order for a
+// third-party child whose stdout is NOT bounded by us -- a Mesa-built prove
+// binary that grows across sub-chunks -- so a chatty failure path can never
+// deadlock the boot (drain-first keeps the ring empty; the child never blocks
+// in write() on a full pipe while joey waits).
+
+// smoke_drain -- read rd to EOF, echoing each chunk to the boot-log UART and
+// accumulating (bounded) into acc for the marker check. Returns 0 on clean EOF,
+// -1 on a read error; the caller owns rd on either return.
+static int smoke_drain(long rd, unsigned char *acc, size_t acc_cap,
+                       size_t *acc_len) {
+    *acc_len = 0;
+    for (;;) {
+        unsigned char buf[256];
+        long n = t_read(rd, buf, sizeof(buf));
+        if (n < 0) return -1;
+        if (n == 0) return 0;  // EOF -- write side fully closed
+        (void)t_puts((const char *)buf, (size_t)n);
+        for (long i = 0; i < n && *acc_len < acc_cap; i++)
+            acc[(*acc_len)++] = buf[i];
+    }
+}
+
 // pouch_smoke_core — pouch_smoke_one's body, parameterized by optional
 // cap_mask and optional perm_flags. If both are 0, uses t_spawn_with_fds
 // (no extra caps, no perm stamps). If cap_mask != 0 and perm_flags == 0,
@@ -448,7 +471,8 @@ static int pouch_smoke_core(const char *name, size_t name_len,
                             const char *expect, size_t expect_len,
                             unsigned long cap_mask,
                             unsigned long perm_flags,
-                            int expect_fault) {
+                            int expect_fault,
+                            int drain_first) {
     long rd = -1, wr = -1;
     if (t_pipe(&rd, &wr) < 0) {
         t_putstr("joey: pouch-smoke t_pipe FAILED\n");
@@ -476,38 +500,46 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         (void)t_close(rd);
         return -1;
     }
-    // Reap the child first (by pid: an adopted-orphan zombie must not be
-    // consumed here -- 2B-F3). The wait blocks until it zombies; proc_free
-    // then drains its handle table, closing the pipe write-end.
+    // 2048 B headroom -- pouch-hello-sockets prints ~850 B of test progress
+    // lines and the marker "<bin>: exit 0" must land inside the window. Earlier
+    // 512 B sized for the leaner pre-sub-chunk-12 pouch binaries; bumped so the
+    // marker is never truncated out (the failure mode looks like "expected
+    // marker absent" even when the child exited cleanly).
     int status = -1;
-    long reaped = t_wait_pid_for((int)pid, 0, &status);
-    if (reaped != pid) {
-        t_putstr("joey: pouch-smoke t_wait_pid wrong pid\n");
-        (void)t_close(rd);
-        return -1;
-    }
-    // The write-end is now fully closed: drain the buffered output to the
-    // boot-log UART, accumulating into `acc` for the content check.
-    // 2048 B headroom — pouch-hello-sockets prints ~850 B of test progress
-    // lines and the marker "<bin>: exit 0" must land inside the window.
-    // Earlier 512 B sized for the leaner pre-sub-chunk-12 pouch binaries;
-    // bumped here so the marker is never truncated out (the failure mode
-    // looks like "expected marker absent" even when the child exited
-    // cleanly).
     unsigned char acc[2048];
     size_t acc_len = 0;
-    for (;;) {
-        unsigned char buf[256];
-        long n = t_read(rd, buf, sizeof(buf));
-        if (n < 0) {
+    if (drain_first) {
+        // Third-party / unbounded-output child (the run_viv_bundle order): drain
+        // to EOF FIRST -- EOF arrives at the child's EXIT (#68/#926), so joey
+        // keeps the ring empty and the child can never block in write() on a
+        // full pipe -- THEN reap the already-exited child.
+        if (smoke_drain(rd, acc, sizeof(acc), &acc_len) < 0) {
             t_putstr("joey: pouch-smoke t_read FAILED\n");
             (void)t_close(rd);
             return -1;
         }
-        if (n == 0) break;  // EOF — write side closed at reap
-        (void)t_puts((const char *)buf, (size_t)n);
-        for (long i = 0; i < n && acc_len < sizeof(acc); i++)
-            acc[acc_len++] = buf[i];
+        long reaped = t_wait_pid_for((int)pid, 0, &status);
+        if (reaped != pid) {
+            t_putstr("joey: pouch-smoke t_wait_pid wrong pid\n");
+            (void)t_close(rd);
+            return -1;
+        }
+    } else {
+        // Bounded OUR-binary child (the historical order): reap first (by pid:
+        // an adopted-orphan zombie must not be consumed here -- 2B-F3), then
+        // drain. Sound ONLY because these children write < the 4 KiB ring before
+        // exit; see the ordering note above pouch_smoke_core.
+        long reaped = t_wait_pid_for((int)pid, 0, &status);
+        if (reaped != pid) {
+            t_putstr("joey: pouch-smoke t_wait_pid wrong pid\n");
+            (void)t_close(rd);
+            return -1;
+        }
+        if (smoke_drain(rd, acc, sizeof(acc), &acc_len) < 0) {
+            t_putstr("joey: pouch-smoke t_read FAILED\n");
+            (void)t_close(rd);
+            return -1;
+        }
     }
     if (t_close(rd) != 0) {
         t_putstr("joey: pouch-smoke t_close(rd) FAILED\n");
@@ -537,7 +569,17 @@ static int pouch_smoke_core(const char *name, size_t name_len,
 // caps variant is used). Pre-existing API; the pouch hellos use this.
 static int pouch_smoke_one(const char *name, size_t name_len,
                            const char *expect, size_t expect_len) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0);
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 0);
+}
+
+// pouch_smoke_one_drain_first — drain-then-reap variant for a THIRD-PARTY child
+// whose stdout is not bounded by us (a Mesa-built prove binary that grows across
+// sub-chunks). Same default perms as pouch_smoke_one; only the drain ORDER
+// differs -- see the ordering note above pouch_smoke_core for why a third-party
+// child must not use the reap-first order.
+static int pouch_smoke_one_drain_first(const char *name, size_t name_len,
+                                       const char *expect, size_t expect_len) {
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 1);
 }
 
 // pouch_smoke_one_expect_fault — variant for the durable P6 hardening
@@ -550,7 +592,7 @@ static int pouch_smoke_one(const char *name, size_t name_len,
 // `Thylacine boot OK`.
 static int pouch_smoke_one_expect_fault(const char *name, size_t name_len,
                                         const char *expect, size_t expect_len) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 1);
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 1, 0);
 }
 
 // pouch_smoke_one_caps — capability-granting variant. Spawns via
@@ -559,7 +601,7 @@ static int pouch_smoke_one_expect_fault(const char *name, size_t name_len,
 static int pouch_smoke_one_caps(const char *name, size_t name_len,
                                 const char *expect, size_t expect_len,
                                 unsigned long cap_mask) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, cap_mask, 0, 0);
+    return pouch_smoke_core(name, name_len, expect, expect_len, cap_mask, 0, 0, 0);
 }
 
 // pouch_smoke_one_perms — permission-granting variant. Spawns via
@@ -572,7 +614,7 @@ static int pouch_smoke_one_perms(const char *name, size_t name_len,
                                  unsigned long cap_mask,
                                  unsigned long perm_flags) {
     return pouch_smoke_core(name, name_len, expect, expect_len,
-                            cap_mask, perm_flags, 0);
+                            cap_mask, perm_flags, 0, 0);
 }
 
 // argv_marker — one substring expected to appear in the child's stdout.
@@ -5583,11 +5625,14 @@ int main(void) {
     // announced: the transport ops (submit/wait/bo) are 3b/3c, so a fault here
     // must not block the boot banner -- this is a proof lever, not yet a gate.
     // Placed pre-pivot, beside the pouch smokes, so it rides a pool-less boot.
+    // DRAIN-FIRST (not the reap-first pouch_smoke_one): venus-prove is a
+    // third-party Mesa binary whose stdout is not bounded by us and GROWS across
+    // 3b/3c -- reap-first would deadlock the boot on any >4 KiB failure path.
     {
         static const char vp_name[]   = "thylacine-venus-prove";
         static const char vp_expect[] = "THYLACINE-VENUS-PROVE PASS";
-        if (pouch_smoke_one(vp_name, sizeof(vp_name) - 1,
-                            vp_expect, sizeof(vp_expect) - 1) == 0)
+        if (pouch_smoke_one_drain_first(vp_name, sizeof(vp_name) - 1,
+                                        vp_expect, sizeof(vp_expect) - 1) == 0)
             t_putstr("joey: venus-prove OK (loader-less ICD dispatch verified; Warp V-3b-3a)\n");
         else
             t_putstr("joey: venus-prove FAILED or absent (V-3b-3a proof pending -- non-fatal)\n");

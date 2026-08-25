@@ -464,9 +464,25 @@ EOF
     # Optional + announced on the same terms as osmesa-prove: a tree without it
     # bakes fine and joey's venus smoke reports the binary absent.
     if [[ -f "$BUILD_DIR/clade/gl/thylacine-venus-prove" ]]; then
-        cp "$BUILD_DIR/clade/gl/thylacine-venus-prove" "$ramfs_src/thylacine-venus-prove"
+        local vp_src="$BUILD_DIR/clade/gl/thylacine-venus-prove"
+        # STRIP into the ramfs (16.5 MiB unstripped -> the cpio each boot re-reads
+        # + guest-resident RAM), keeping the unstripped source in build/clade/gl/
+        # for fault-PC resolution -- the exact osmesa-prove posture. Fall back to a
+        # raw copy if llvm-strip is absent: unlike the TLS bins, venus-prove needs
+        # no strip to SPAWN (REVENANT R-4 retired the blob cap; exec demand-pages),
+        # so this is pure economy, not correctness.
+        "$LLVM_PREFIX/bin/llvm-strip" -o "$ramfs_src/thylacine-venus-prove" "$vp_src" 2>/dev/null \
+            || cp "$vp_src" "$ramfs_src/thylacine-venus-prove"
         chmod 0755 "$ramfs_src/thylacine-venus-prove"
-        echo "    ramfs: staged thylacine-venus-prove (Warp V-3b-3a)"
+        # Witness the SOURCE artifact's identity (size + short sha) so a STALE
+        # stage is visible in the bake log: this binary is fetched from the
+        # in-flux mesa fork and is covered by NO freshness check (the #120/#139
+        # stale-fetch trap -- a re-fetch that did not happen stages old bytes and
+        # announces green).
+        local vp_sz vp_sha
+        vp_sz=$(wc -c < "$vp_src" | tr -d ' ')
+        vp_sha=$(shasum -a 256 "$vp_src" 2>/dev/null | cut -c1-12)
+        echo "    ramfs: staged thylacine-venus-prove (Warp V-3b-3a; src ${vp_sz} B sha256:${vp_sha})"
     else
         echo "    ramfs: no thylacine-venus-prove at $BUILD_DIR/clade/gl/ -- staging without it (V-3b-3a venus smoke will report absent)"
     fi
