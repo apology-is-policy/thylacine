@@ -5574,6 +5574,25 @@ int main(void) {
     // spawn-and-verify milestones sit together on the boot path.
     if (do_pouch_hello_smoke() != 0) return 1;
 
+    // === Warp V-3b-3a: the Venus vn_renderer backend loader-less ICD proof ===
+    // First runtime exercise of the Mesa Venus driver + the Thylacine
+    // vn_renderer backend ON Thylacine (WARP-V3-DESIGN section 0.14). The pouch
+    // static ET_EXEC resolves vk_icdGetInstanceProcAddr by symbol (no dynamic
+    // loader) and dispatches vkEnumerateInstanceVersion -- proof the backend
+    // links loader-less and the ICD entry dispatches at EL0. NON-FATAL +
+    // announced: the transport ops (submit/wait/bo) are 3b/3c, so a fault here
+    // must not block the boot banner -- this is a proof lever, not yet a gate.
+    // Placed pre-pivot, beside the pouch smokes, so it rides a pool-less boot.
+    {
+        static const char vp_name[]   = "thylacine-venus-prove";
+        static const char vp_expect[] = "THYLACINE-VENUS-PROVE PASS";
+        if (pouch_smoke_one(vp_name, sizeof(vp_name) - 1,
+                            vp_expect, sizeof(vp_expect) - 1) == 0)
+            t_putstr("joey: venus-prove OK (loader-less ICD dispatch verified; Warp V-3b-3a)\n");
+        else
+            t_putstr("joey: venus-prove FAILED or absent (V-3b-3a proof pending -- non-fatal)\n");
+    }
+
     // === native libthyla-rs argv + stdio milestone (U-6e-pre-a) ===
     // First runtime exercise of the native-argv path (env::args, G03) +
     // the std-stream handles (io::stdout, G05). Gates the boot.

@@ -77,6 +77,28 @@ ramfs. Deferred rather than rushed: the local `build/` ramfs (16:01) vs pool
 set EXTINCTs. Scripture pushed to both mirrors; the 6 mesa-fork files uncommitted
 pending the divergence decision.
 
+**Continuation (same run): the runtime resolve half is now PROVEN.** The deferred
+half above landed. Rather than chase the uncertain local pairing or pay a fresh
+clade bake, I took the cheaper true path: the ICD dispatch needs no pool/GL/FS,
+so I booted POOL-LESS (`THYLACINE_POOL_IMG=/nonexistent`, run-vm's supported
+no-pool branch) with venus-prove in the RAMFS, not the /clade pool tree. Staging
+is a guarded copy in `build_ramfs` (mirroring osmesa-prove) plus a NON-FATAL joey
+boot-test smoke right after `do_pouch_hello_smoke` (`usr/joey/joey.c`, pre-pivot
+6456 so it is pool-independent) spawning through the audited `pouch_smoke_one`.
+`build.sh userspace && build.sh ramfs` (the pool untouched), then
+`scratchpad/v3b3/boot-venus.sh`. The console (`venus-boot.log:2047`):
+`THYLACINE-VENUS-PROVE PASS (loader-less ICD: vk_icdGetInstanceProcAddr resolved
++ dispatched; vkEnumerateInstanceVersion -> 1.4.354)`. The Mesa Venus backend and
+the Thylacine vn_renderer ran at EL0 and dispatched a real Vulkan global call --
+the first Venus code to run on Thylacine. joey then ran GREEN through every ramfs
+boot-test past it. The boot's terminal EXTINCTION is the EXPECTED pool-less path
+(`stratumd: run failed rc=-2` = ENOENT, no pool device; run-vm even announced
+"no pool image ... booting without /srv/stratum-fs") -- and I read it to ground
+rather than wave it off (the stewardship reflex): it is orthogonal to venus,
+proven not asserted. The harness is committed local; the push is gated on a
+paired full-green boot (test.sh wants "Thylacine boot OK", which a pool-less boot
+never reaches), and the mesa-fork base is still the operator's call.
+
 ## 2026-08-25 — V-3b-2 cross-Proc E2E: the audit that diagnosed the GL failure
 
 With V-3b-2 shipped, the operator chose the cross-Proc E2E witness (before the

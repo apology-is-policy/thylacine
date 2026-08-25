@@ -455,6 +455,22 @@ EOF
         fi
     done
 
+    # Warp V-3b-3a (WARP-V3-DESIGN section 0.14): the Mesa Venus vn_renderer
+    # backend loader-less ICD proof. A pouch/musl static ET_EXEC cross-built by
+    # Mesa's meson (not a Thylacine crate, so it is not in the curated lists
+    # above); fetched to build/clade/gl/ like the other Mesa prove bins, but
+    # staged into the RAMFS ROOT (not the /clade pool tree) because the ICD
+    # dispatch it exercises needs no GL/pool/FS -- so it rides a pool-less boot.
+    # Optional + announced on the same terms as osmesa-prove: a tree without it
+    # bakes fine and joey's venus smoke reports the binary absent.
+    if [[ -f "$BUILD_DIR/clade/gl/thylacine-venus-prove" ]]; then
+        cp "$BUILD_DIR/clade/gl/thylacine-venus-prove" "$ramfs_src/thylacine-venus-prove"
+        chmod 0755 "$ramfs_src/thylacine-venus-prove"
+        echo "    ramfs: staged thylacine-venus-prove (Warp V-3b-3a)"
+    else
+        echo "    ramfs: no thylacine-venus-prove at $BUILD_DIR/clade/gl/ -- staging without it (V-3b-3a venus smoke will report absent)"
+    fi
+
     # GOOS=thylacine Stage 1: bake the Go boot probe (build_go_probes produced it
     # under $BUILD_DIR/go/). Shipped UNSTRIPPED (~1.5 MiB) -- the REVENANT
     # file-backed exec path carries it, like net-echo. Absent if the Go fork was
