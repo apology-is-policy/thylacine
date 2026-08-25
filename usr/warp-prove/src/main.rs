@@ -247,6 +247,12 @@ pub extern "C" fn rs_main() -> i64 {
         return ring_host3d_prove();
     }
 
+    // V-3b-2 cross-Proc E2E: the host3d-ring park->reclaim lifecycle + cross-conn
+    // ring-ownership isolation. Venus-gated (SKIPs on 2D / virgl-without-venus).
+    if libthyla_rs::env::args().get_str(1) == Some("ring-xproc") {
+        return ring_xproc_prove();
+    }
+
     t_putstr("warp-prove: starting (the Warp-2 gate)\n");
 
     let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
@@ -897,6 +903,196 @@ fn ring_host3d_prove() -> i64 {
     unsafe { t_close(root) };
     t_putstr(
         "WARP-RING-HOST3D PASS (host3d mint + vkCreateRingMESA submit + host status&IDLE -- virglrenderer polls, no Mesa)\n",
+    );
+    0
+}
+
+fn ring_xproc_fail(msg: &str) -> ! {
+    t_putstr("WARP-RING-XPROC FAIL: ");
+    t_putstr(msg);
+    t_putstr("\n");
+    unsafe { t_exits(1) }
+}
+
+fn xproc_sleep_ms(ms: u64) {
+    let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(ms));
+}
+
+/// Read the gpu-side host3d-ring reap ledger (park/reap) from the global warp ctl.
+fn xproc_ledger(root: i64) -> (u64, u64) {
+    // F4: a mid-poll ctl open failure must ride the WARP-RING-XPROC FAIL channel
+    // (fast, scenario-named), not open_read_string's generic `fail`.
+    let ctl = match try_open_read(root, "ctl") {
+        Some(s) => s,
+        None => ring_xproc_fail("ctl open refused mid-poll"),
+    };
+    let parked = parse_field(&ctl, "hostmem-ring-parked")
+        .unwrap_or_else(|| ring_xproc_fail("ctl `hostmem-ring-parked` field missing"));
+    let reaped = parse_field(&ctl, "hostmem-ring-reaped")
+        .unwrap_or_else(|| ring_xproc_fail("ctl `hostmem-ring-reaped` field missing"));
+    (parked, reaped)
+}
+
+/// Mint a fresh ctx + one HOST3D ring under it (ring index 0). Returns the ctx id,
+/// or None if the device lacks virgl (no ctx) or venus (the host3d mint refuses)
+/// -> the caller SKIPs. Minting a host3d ring runs `reap_hostmem_parked`
+/// (reclaim-before-alloc), so this is also the lever that drives a reap pass.
+fn xproc_mint_ring_ctx(root: i64) -> Option<u32> {
+    let ctx = try_open_read(root, "ctx/new").and_then(|s| parse_u32_prefix(&s))?;
+    let mint_bytes = (VN_RING_TOTAL + RING_PAGE - 1) & !(RING_PAGE - 1);
+    if !write_ctl(root, &format!("ctx/{}/ring/new", ctx), &format!("{} 0 host3d", mint_bytes)) {
+        return None;
+    }
+    Some(ctx)
+}
+
+/// V-3b-2 cross-Proc E2E: the host3d-ring park->reclaim LIFECYCLE (option d) plus
+/// the cross-conn ring-ownership ISOLATION (option b). This is the only leg that
+/// drives tapestryd's `retire_host3d_ring`/`reap_hostmem_parked` under a REAL
+/// cross-Proc refcount (warp-prove's weft map is a genuine second-Proc ref on the
+/// ring's hostmem burrow). Venus-gated: SKIPs on a 2D or virgl-without-venus
+/// device, like `ring_host3d_prove`. The literal "cross-client-alias" race is
+/// kernel-internal (t_weft_map claims+maps atomically) and is covered by the
+/// white-box kernel test `weft.hostmem_refcount`, not here.
+fn ring_xproc_prove() -> i64 {
+    t_putstr("warp-prove: ring-xproc gate (V-3b-2 park->reclaim + isolation) starting\n");
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+    if root < 0 {
+        ring_xproc_fail("open /srv/warp (is tapestryd serving?)");
+    }
+
+    // === Phase 1: park -> reclaim lifecycle (option d) ===
+    // Mint ctx A + ring R1 and MAP it: the map is a real cross-Proc ref that keeps
+    // the ring's hostmem refcount > 1 across the retire below.
+    let ctx_a = match xproc_mint_ring_ctx(root) {
+        Some(c) => c,
+        None => {
+            t_putstr("warp-prove: RING-XPROC SKIP -- no venus device (host3d ctx/ring mint unavailable)\n");
+            unsafe { t_exits(2) }
+        }
+    };
+    let map_fd = unsafe {
+        let p = format!("ctx/{}/ring/0/map", ctx_a);
+        t_open(root, p.as_ptr(), p.len(), T_OREAD)
+    };
+    if map_fd < 0 {
+        ring_xproc_fail("R1 ring/0/map open");
+    }
+    if unsafe { t_weft_map(map_fd as u64, 0) } < 0 {
+        ring_xproc_fail("R1 t_weft_map claim");
+    }
+    let (park0, reap0) = xproc_ledger(root);
+
+    // PARK: destroy ctx A while R1 is still mapped. tapestryd disarms the weft
+    // share then retires R1; the live client map keeps refcount > 1, so it must
+    // PARK (keep the offset), never free it under the client's PTEs.
+    if !write_ctl(root, &format!("ctx/{}/ctl", ctx_a), "destroy") {
+        ring_xproc_fail("ctx A destroy");
+    }
+    let mut parked = false;
+    for _ in 0..200 {
+        let (p, r) = xproc_ledger(root);
+        if r != reap0 {
+            ring_xproc_fail("ring RECLAIMED on a mapped retire -- reap fired under a live client map (I-45/I-7 alias)");
+        }
+        if p >= park0 + 1 {
+            parked = true;
+            break;
+        }
+        xproc_sleep_ms(10);
+    }
+    if !parked {
+        ring_xproc_fail("ring did not PARK on a mapped retire (park count never advanced)");
+    }
+
+    // PARK-HELD: a fresh mint runs reap_hostmem_parked, but R1 is still mapped
+    // (refcount > 1), so it must NOT be reclaimed -- the refcount GATES the reap.
+    // tapestryd allows ONE ctx per conn (wctx_mint, counting retiring ones), so
+    // capture this ctx: it must be destroyed before the reclaim mint below can
+    // install its own on the same conn (audit F1).
+    let ctx_b = match xproc_mint_ring_ctx(root) {
+        Some(c) => c,
+        None => ring_xproc_fail("park-held mint refused (no free ctx slot on this conn, or venus gone)"),
+    };
+    let (_, reap_mid) = xproc_ledger(root);
+    if reap_mid != reap0 {
+        ring_xproc_fail("parked ring RECLAIMED while still mapped -- the refcount did not gate the reap");
+    }
+    // Free the one-per-conn ctx slot. ctx B's ring is unmapped (refcount 1), so
+    // its retire is an immediate drop -- neither ledger counter moves, and the
+    // negative control just asserted stays valid.
+    if !write_ctl(root, &format!("ctx/{}/ctl", ctx_b), "destroy") {
+        ring_xproc_fail("park-held ctx B destroy");
+    }
+
+    // RELEASE: close R1's map fd. dev9p_close unmaps the client VA AND drops the
+    // transferred registration pin (weft_binding_release), so the ring's total
+    // refcount falls to 1 (tapestryd's own map alone).
+    unsafe { t_close(map_fd) };
+
+    // RECLAIM: the next mint's reap now finds R1 at refcount 1 -> reclaims it.
+    // The conn's ctx slot is free again (ctx B destroyed). KEEP this ctx: phase 2
+    // reuses it as the isolation target rather than minting a 4th on this conn.
+    let ctx_c = match xproc_mint_ring_ctx(root) {
+        Some(c) => c,
+        None => ring_xproc_fail("reclaim mint refused (no free ctx slot on this conn, or venus gone)"),
+    };
+    let mut reaped = false;
+    for _ in 0..200 {
+        let (_, r) = xproc_ledger(root);
+        if r >= reap0 + 1 {
+            reaped = true;
+            break;
+        }
+        xproc_sleep_ms(10);
+    }
+    if !reaped {
+        ring_xproc_fail("parked ring not RECLAIMED after the client released it (reap count never advanced)");
+    }
+
+    // === Phase 2: cross-conn ring-ownership isolation (option b) ===
+    // A hard tapestryd seam gate (wctx(id, conn) ownership), distinct from the
+    // trusted-host res-scope the BO cross-ctx-blit probe reports. Pub-ids are
+    // global + monotonic; a ctx is owned by its minting conn. ctx C is the still-
+    // live RECLAIM ctx, reused (one ctx per conn).
+    // Positive control (RESOURCE axis): the OWNER (conn A) reads its own ring
+    // info, so a conn-B refusal below is ISOLATION, not the resource being absent.
+    if try_open_read(root, &format!("ctx/{}/ring/0/info", ctx_c)).is_none() {
+        ring_xproc_fail("isolation control: owner conn A could not read its OWN ring info");
+    }
+    let conn_b = warp_connect("ring-isolation B");
+    // Positive control (CONN axis, audit F2): conn B can read the OWNERSHIP-FREE
+    // global ctl, so a refusal below is the ownership GATE, not a wholesale-dead
+    // second connection (aux#215: a negative satisfied by a broken fixture needs
+    // a positive control one variable -- here the CONN -- away).
+    let b_ctl = match try_open_read(conn_b, "ctl") {
+        Some(s) => s,
+        None => {
+            unsafe { t_close(conn_b) };
+            ring_xproc_fail("isolation control: conn B ctl open refused -- second conn is dead, not a gate test");
+        }
+    };
+    if parse_field(&b_ctl, "hostmem-ring-parked").is_none() {
+        unsafe { t_close(conn_b) };
+        ring_xproc_fail("isolation control: conn B read an unparseable global ctl -- second conn is broken, not a gate test");
+    }
+    if try_open_read(conn_b, &format!("ctx/{}/ring/0/info", ctx_c)).is_some() {
+        unsafe { t_close(conn_b) };
+        ring_xproc_fail("ISOLATION BREACH: conn B READ conn A's ring info (ownership gate did not refuse)");
+    }
+    let b_submit = unsafe {
+        let p = format!("ctx/{}/submit", ctx_c);
+        t_open(conn_b, p.as_ptr(), p.len(), T_OWRITE)
+    };
+    if b_submit >= 0 {
+        unsafe { t_close(b_submit) };
+        unsafe { t_close(conn_b) };
+        ring_xproc_fail("ISOLATION BREACH: conn B OPENED conn A's submit file (ownership gate did not refuse)");
+    }
+    unsafe { t_close(conn_b) };
+    unsafe { t_close(root) };
+    t_putstr(
+        "WARP-RING-XPROC PASS (park-on-mapped-retire + park-held-under-refcount + reclaim-on-release + cross-conn ring isolation)\n",
     );
     0
 }

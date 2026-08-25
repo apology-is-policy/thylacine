@@ -174,7 +174,7 @@ sync_all() {
     # command name" whose cause is a list that claimed to carry your edits.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/interactive/lib.exp tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-ring.exp tools/warp/warp-ring-host3d.exp tools/warp/warp-reject.exp tools/warp/warp-readback.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/composed-screen.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
+    for f in tools/run-vm.sh tools/interactive/lib.exp tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-ring.exp tools/warp/warp-ring-host3d.exp tools/warp/warp-ring-xproc.exp tools/warp/warp-reject.exp tools/warp/warp-readback.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/composed-screen.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -527,6 +527,26 @@ ring-host3d)
         echo "WARP-6 V-3b-2 GATE: VERIFIED"
     else
         echo "WARP-6 V-3b-2 GATE: UNVERIFIED (need WARP-RING-HOST3D PASS + the scenario pass line)"
+        exit 1
+    fi
+    ;;
+ring-xproc)
+    out="$REPO_ROOT/build/warp-ring-xproc.log"
+    # ServerAliveInterval: same as ring-host3d -- the exp STREAMS the guest pty,
+    # and the venus boot has a long QUIET clangd-index phase; keepalives keep the
+    # Cloudflare-tunnel stream from being dropped ("closed by remote host").
+    ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=20 "$HOST" "cd $RREPO && ${RENV}expect tools/warp/warp-ring-xproc.exp" | tee "$out" || true
+    echo "== ring-xproc verdict =="
+    # The V-3b-2 cross-Proc E2E gate: the prover's OWN pass line (park-on-mapped-
+    # retire + park-held-under-refcount + reclaim-on-release + cross-conn ring
+    # isolation, all asserted in-guest via the hostmem-ring ctl ledger) AND the
+    # scenario pass. Needs a VENUS device; a SKIP fails this gate loud.
+    # F3: anchor on the "PASS (" paren -- present only in the guest's genuine
+    # pass line, never in the harness timeout diagnostic's "[WARP-RING-XPROC PASS]".
+    if grep -q "WARP-RING-XPROC PASS (" "$out" && grep -q "PASS: warp-ring-xproc" "$out"; then
+        echo "WARP-6 V-3b-2 XPROC GATE: VERIFIED"
+    else
+        echo "WARP-6 V-3b-2 XPROC GATE: UNVERIFIED (need WARP-RING-XPROC PASS + the scenario pass line)"
         exit 1
     fi
     ;;

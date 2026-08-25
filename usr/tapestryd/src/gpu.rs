@@ -1505,6 +1505,16 @@ pub struct Gpu {
     /// can re-query it -- and reaped by `reap_hostmem_parked` once the count drops
     /// to 1. Bounded: a client that never unmaps pins only its own I-32 budget.
     hostmem_parked: alloc::vec::Vec<HostRing>,
+    /// V-3b-2 xproc-E2E: the host3d-ring reap ledger. `park` counts retires that
+    /// PARKED (a client ref beyond tapestryd's own map kept the offset live);
+    /// `reap` counts parked rings later RECLAIMED (the client released, so the
+    /// total ref count dropped to 1). The cross-Proc lifecycle E2E reads both via
+    /// the warp ctl to witness park-on-mapped-retire -> reclaim-on-release with a
+    /// REAL client refcount. A real leak-shape ledger like `warp_probe_parked`
+    /// (readable on production, not test-mode): a park that never reaps is the
+    /// shape of a client that never released, bounded by its I-32 budget.
+    hostmem_park_count: u64,
+    hostmem_reap_count: u64,
     _ring: Dma,
     _flane: Option<Dma>,
 }
@@ -1627,6 +1637,8 @@ impl Gpu {
             pci,
             hostmem,
             hostmem_parked: alloc::vec::Vec::new(),
+            hostmem_park_count: 0,
+            hostmem_reap_count: 0,
             _ring: ring,
             _flane: flane,
         };
@@ -2480,6 +2492,7 @@ impl Gpu {
                 );
             }
             self.hostmem_parked.push(ring);
+            self.hostmem_park_count = self.hostmem_park_count.saturating_add(1);
         }
     }
 
@@ -2515,12 +2528,23 @@ impl Gpu {
                 let ring = self.hostmem_parked.swap_remove(i);
                 self.drop_host3d_ring(ring);
                 reclaimed += 1;
+                self.hostmem_reap_count = self.hostmem_reap_count.saturating_add(1);
                 // swap_remove moved a not-yet-checked element to i; do not advance.
             } else {
                 i += 1;
             }
         }
         reclaimed
+    }
+
+    /// V-3b-2 xproc-E2E: the host3d-ring reap ledger, surfaced to the warp ctl
+    /// so the cross-Proc lifecycle E2E can witness park-on-retire and
+    /// reclaim-on-release with a real client refcount.
+    pub fn hostmem_park_count(&self) -> u64 {
+        self.hostmem_park_count
+    }
+    pub fn hostmem_reap_count(&self) -> u64 {
+        self.hostmem_reap_count
     }
 
     /// V-3b-1c: the unconditional inverse of mint_host3d_ring (detach tapestryd's

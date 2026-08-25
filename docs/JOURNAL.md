@@ -22,6 +22,63 @@ needed the operator.
 
 ---
 
+## 2026-08-25 — V-3b-2 cross-Proc E2E: the audit that diagnosed the GL failure
+
+With V-3b-2 shipped, the operator chose the cross-Proc E2E witness (before the
+reply-shmem design fork). Before writing it, a mapping agent + a kernel read
+refined the scope, and the refinement mattered: the literal deferred item -- "the
+full cross-client-alias reproduction" -- turns out to be a **kernel-internal SMP
+race**. `t_weft_map` claims the share and maps it in a single syscall
+(`weft_map_claimed`), so the pin-but-no-map window the alias would exploit is
+never visible to userspace; it is durably covered by the white-box kernel test
+`weft.hostmem_refcount`, which manufactures that exact state. Chasing it E2E would
+have been a flaky non-test. So two *achievable* witnesses landed instead: the
+host3d-ring **park->reclaim lifecycle** (the only leg that drives tapestryd's
+`retire_host3d_ring`/`reap_hostmem_parked` under a real cross-Proc refcount) and a
+cross-conn **ownership-isolation** probe, witnessed via a new gpu-side park/reap
+diagnostic counter in the warp ctl.
+
+The design had one correction worth recording. The mapping agent proposed
+releasing the ring via `t_burrow_detach`. Reading `weft_map_claimed` showed the
+transferred registration pin is owned by the *binding* (`priv->weft`), not the VA
+mapping -- so `t_burrow_detach` would drop the mapping but leave the pin, and the
+refcount would never fall to 1. The correct release is closing the map fd:
+`dev9p_close` runs `weft_binding_clunk_unmap` (the VA) *and* `weft_binding_release`
+(the pin) inline. The audit later re-derived this from the kernel and confirmed it
+-- and confirmed `t_close` is already imported, so the "correction" also removed a
+dependency.
+
+**The run's real lesson is procedural: I ran the Fable audit in PARALLEL with the
+slow GL boot, and the audit diagnosed the boot's failure.** The GL witness failed
+`WARP-RING-XPROC FAIL: r` -- the message truncated by the expect hard-fail match,
+so the boot log alone left the cause a guess (I spent a while reasoning it was the
+park phase; it wasn't). The audit, reading `wctx_mint`, named it exactly as F1
+[P1]: tapestryd enforces **one ctx per connection**, and my witness minted four
+ctxs on one `root` connection. The park->reclaim *mechanism* worked silently; the
+reclaim *mint* was refused because the park-held ctx was never destroyed -- the
+"r" was "reclaim mint refused". A structural false-red on a fully healthy system,
+in the safe direction (never false-green), but a reproducibly broken deliverable
+whose own error message blamed venus. Running the audit concurrently paid for
+itself in one round: it turned a truncated, mis-reasoned symptom into a named root
+cause before a second ~4-minute boot was burned.
+
+The audit found four, all fixed: F1 (the one-ctx-per-conn structural red --
+destroy the park-held ctx, whose unmapped ring immediate-drops without perturbing
+the ledger, and reuse the reclaim ctx as the isolation target); F2 [P2] (the
+isolation negative had no conn-B positive control -- the pinned aux#215 shape,
+where a wholesale-broken second connection satisfies both refusals vacuously;
+fixed by requiring conn B to first succeed on the ownership-free ctl read); F3/F4
+[P3] (a #186-hollow verdict conjunct the harness's own timeout text could match,
+and a mid-poll ctl failure on the wrong fail channel). Critically, the audit
+verified the **counters sound** -- exactly-once, pure observation, width-guarded,
+leak-free -- and re-derived every kernel/server assumption the lifecycle leans on.
+The re-witness on the fixed code passed: `WARP-6 V-3b-2 XPROC GATE: VERIFIED` on
+thyla-pi's real V3D. Two witnesses, one diagnostic counter, no tapestryd logic
+change, and a reusable lesson about where the slow gate and the fast reviewer
+belong: side by side.
+
+---
+
 ## 2026-08-25 — V-3b-2: the SUBMIT_CMD forward, and a "genuinely new mechanism" that already existed
 
 With 1c-2b closed (`1ab6245e`), the ring is minted, mapped, and lifetime-safe --

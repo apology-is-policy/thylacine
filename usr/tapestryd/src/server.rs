@@ -8878,6 +8878,19 @@ impl Conn {
                     comp.warp_probe_texture
                 ),
             );
+            // V-3b-2 xproc-E2E: the host3d-ring reap ledger (gpu-side). Like
+            // probe-parked above, a real leak-shape ledger -- readable on
+            // production, not test-mode: `parked` counts client-mapped retires
+            // that PARKED, `reaped` counts parked rings later RECLAIMED once the
+            // client released. Bounded-width u64s -> in the fixed-size prefix.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "hostmem-ring-parked {}\nhostmem-ring-reaped {}\n",
+                    comp.gpu.hostmem_park_count(),
+                    comp.gpu.hostmem_reap_count()
+                ),
+            );
             // Round-3 F4: where the FIXED-size prefix ends. Re-set below --
             // after the `rb-*` census (fixed size) on EVERY build, and again
             // in the test-mode block whose `w210` line is also fixed size.

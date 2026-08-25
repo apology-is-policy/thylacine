@@ -1,0 +1,53 @@
+#!/usr/bin/expect -f
+# Warp-6 V-3b-2 cross-Proc E2E gate on the GL host: boot the VENUS device, log
+# in, run `warp-prove ring-xproc` -- the host3d-ring park->reclaim LIFECYCLE
+# witness plus the cross-conn ring-ownership ISOLATION witness.
+#
+# Lifecycle (option d): warp-prove is a real second Proc, so its weft map of a
+# host3d ring is a genuine cross-Proc refcount on the ring's hostmem burrow.
+# Destroying the ctx while the map is live PARKS the ring (refcount > 1 -- the
+# offset must NOT be freed under the client's PTEs); a mint while still mapped
+# does NOT reclaim it (the refcount GATES the reap); closing the map fd drops the
+# client mapping AND the transferred pin, so the next mint RECLAIMS. Witnessed via
+# tapestryd's gpu-side hostmem-ring park/reap ledger in the warp ctl -- the only
+# leg that drives retire_host3d_ring/reap_hostmem_parked under a real cross-Proc
+# refcount. Isolation (option b): a second /srv/warp connection naming the first's
+# ctx id is refused by tapestryd's ownership gate (wctx(id, conn)).
+#
+# WHY venus + the GL host, not local: a host3d ring lives under a capset-4 (venus)
+# ctx, so the prover SKIPs on a 2D or virgl-without-venus device.
+#
+# Runs ON the GL host (Linux; lib.exp takes the direct-pty transport there).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_QMP) 1
+set ::env(THYLACINE_NO_SHARE) 1
+# venus needs blob AND hostmem together (QEMU refuses the device otherwise).
+set ::env(THYLACINE_GPU_DEV) "virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M"
+set ::env(THYLACINE_DISPLAY) egl-headless
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+file mkdir $work
+file delete -force $work/pool-ringxproc.img $work/disk-ringxproc.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-ringxproc.img
+exec cp $repo/build/disk.img $work/disk-ringxproc.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-ringxproc.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-ringxproc.img
+
+source $repo/tools/interactive/lib.exp
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# The prover polls the park ledger (~2 s) then the reclaim ledger (~2 s) plus the
+# isolation legs; give a real window. Floor, not stomp.
+if {$lc_cmd_timeout < 90} { set lc_cmd_timeout 90 }
+lc_run_expect_hardfail "warp-prove ring-xproc" "WARP-RING-XPROC PASS" "WARP-RING-XPROC FAIL"
+
+lc_pass "warp-ring-xproc: park->reclaim lifecycle + cross-conn ring isolation (the V-3b-2 cross-Proc E2E)"
