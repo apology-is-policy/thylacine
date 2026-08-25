@@ -72,10 +72,10 @@ resources but stays venus-agnostic:
   reference); the SUBMIT_CMD forward of the venus stream on the controlq (V-3b-2,
   section 0.12); the OWED host-side rescue (round-3 F1) applies to the
   fenced-submit drain. The reply-shmem (`vkSetReplyCommandStreamMESA` + a second
-  `FD_SHM`) is a SEPARATE mechanism the 2026-08-25 spike split OFF the forward
-  (section 0.12): the four bootstrap commands are void, so V-3b-2 needs no reply
-  plumbing; the reply-shmem lands with the ring commands that return synchronous
-  values (V-3b-2b/V-3b-3). Audit-bearing (the section-25.4 Warp row).
+  `FD_SHM`) needs NO new tapestryd substrate (the 2026-08-25 design pass, section
+  0.13): it is a second host3d ring the client mints + a RING command Mesa writes
+  into the command ring -- tapestryd forwards nothing. It folds into V-3b-3 (there
+  is no separate V-3b-2b chunk), audited there (the section-25.4 Warp row).
 - **Mesa** (`vn_renderer_thylacine.c`, ~1.2 kLOC, patch 0010+ under
   `src/virtio/vulkan/`): the 19-fn `vn_renderer` (16 mandatory), mapping above;
   built with `-Dvulkan-drivers=virtio` on `thyla-keep`, a Vulkan ICD artifact +
@@ -617,10 +617,10 @@ I-45, the ctx as the resource scope.) So V-3b-2's forward delta is a
 ring-executed BULK commands go to a SEPARATE client-registered reply shmem
 (`vkSetReplyCommandStreamMESA` + a second FD_SHM resource; `vn_ring.c:678-742`),
 NOT the ring buffer or the extra region. Since the four SUBMIT_CMD bootstrap
-commands return nothing, V-3b-2 needs NO reply plumbing. The reply-shmem is a
-follow-on (V-3b-2b or with Mesa), exercised only when a ring command returns a
-synchronous value (a V-3b-3 concern). Folding it in now would add an
-unwitnessable-until-Mesa surface to an otherwise cleanly testable chunk.
+commands return nothing, V-3b-2 needs NO reply plumbing. The 2026-08-25 design
+pass (section 0.13) then traced the reply mechanism end-to-end and found it needs
+no new Thylacine substrate at all -- it is a second host3d ring + a RING command,
+entirely Mesa-side -- so it folds into V-3b-3, not a separate V-3b-2b chunk.
 
 **Witness (standalone, GL-only).** A `warp-prove ring-host3d` verb: mint a host3d
 ring (0.9), hand-build a ~124-byte `vkCreateRingMESA`, submit it via
@@ -688,6 +688,62 @@ class as round 1's F1) -> rewritten to the real safety chain (host-memory backin
 FIFO controlq, trusted-host renderer, monotonic res_id) + the v3d-fork obligation
 to defer the host3d-ring unref once the renderer is ours. Full closed list:
 `[[audit-v3b2-r2-closed-list]]`.
+
+### 0.13 V-3b-2b reply-shmem design pass (2026-08-25): no new substrate; folds into V-3b-3
+
+"Open the reply-shmem design pass" (operator, 2026-08-25). The pass traced
+`vkSetReplyCommandStreamMESA` + the reply command stream end-to-end on both sides
+(Mesa working fork `mesa-26.1.6-7-gb7f9ed2` + virglrenderer `7fcfce49`). The
+conclusion is a FINDING, not a build: **the reply-shmem needs no new Thylacine
+substrate or ABI.** It reverses the earlier "new FD_SHM ABI -> design-fork"
+framing.
+
+Source-grounded, the reply path owes Thylacine exactly two things, both already
+in the tree:
+- **A reply region** = a second host3d mappable blob on the client's venus ctx,
+  weft-shared. That is the existing `ring/new host3d <bytes> 1` verb
+  (`WARP_RINGS_PER_CTX` = 64) + the existing `wring_weft_ensure`. Its virtio-gpu
+  `res_id` is exposed by the existing `ctx/<id>/ring/<ridx>/info` `res` field (the
+  V-3b-2 `warp-prove ring-host3d` witness already reads ring 0's this way).
+- **Nothing else.** `vkSetReplyCommandStreamMESA` (cmd_type 178, a 36-byte
+  `VkCommandStreamDescriptionMESA{resourceId, offset:u64, size:u64}` payload) is a
+  RING command Mesa writes INTO the command ring, consumed in-order by
+  virglrenderer's poll thread -- NOT a SUBMIT_CMD, so `warp_venus_submit` is not
+  involved and tapestryd forwards nothing. The host writes each command's reply
+  ZERO-COPY into the client's mapped reply pages; the guest learns a reply is
+  ready by polling the ring `head` index (release on the host store, acquire on
+  the guest load -- `vkr_ring.c:60-67` / `vn_ring.c:92-99`), NOT a fence or a
+  status word in the reply region. tapestryd is in neither the reply-write nor the
+  sync path.
+
+Mechanism specifics that pin the above: the reply region is ONE per-VkInstance
+bump-suballocated blob (1 MiB, grows by doubling), re-registered before every
+reply-bearing command; created at instance-create (before the ring) and destroyed
+at instance-destroy (after the ring); each reply refcounts the backing blob, and
+the head-seqno gate guarantees the host has finished writing before the guest
+reads/reuses (no mid-write UAF on teardown). 134 of ~325 commands are
+reply-bearing (`vn_call_*`), including ALL of bring-up (`vkCreateInstance`,
+`vkCreateDevice`, `vkEnumeratePhysicalDevices`,
+`vkGetPhysicalDeviceMemoryProperties`, `vkAllocateMemory`) -- so the reply stream
+is mandatory for bring-up, and there is no cheap pre-Mesa witness (the simplest
+reply-bearing command needs a live host Venus instance, i.e. Mesa).
+
+Invariant posture (all COVERED by "a second host3d ring", audited at V-3b-3): the
+reply region is a HOST3D blob on the client's own venus ctx (I-45 ctx-bounded),
+charged to `WARP_CTX_BACKING_MAX` alongside the command ring (I-32), parks/reclaims
+via the same dual-refcount path now cross-Proc-witnessed at `b7b712dc` (I-7),
+weft-shared over the F1 HOSTMEM binding (I-37). The one new behavior -- the HOST
+writes into it (the command ring is guest-written) -- is bounded by construction:
+virglrenderer bounds-checks `offset + size <= res->size` and fatals the ctx on
+overflow (`vkr_cs.c:23-29`), writing only into the client's OWN region at the
+client's OWN chosen offset; a hostile guest under-provisioning `reply_size` kills
+only its own ctx (I-45 fault isolation), never a cross-client breach.
+
+**Ratified 2026-08-25 (operator signoff):** reply-shmem folds into V-3b-3 (the
+Mesa `vn_renderer` backend), witnessed by real Venus bring-up; there is no
+separate V-3b-2b chunk. Full research record:
+`scratchpad/v3b2b/REPLY-SHMEM-RESEARCH.md` (the superseded pre-fork skeleton) +
+`[[design-v3b2-submit-forward]]`.
 
 ## 1. What V-3 is, and the seam it plugs into
 
