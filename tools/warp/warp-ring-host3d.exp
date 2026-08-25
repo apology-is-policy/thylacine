@@ -1,0 +1,50 @@
+#!/usr/bin/expect -f
+# Warp-6 V-3b-2 gate on the GL host: boot the VENUS device (venus=on,blob=on,
+# hostmem), log in, run `warp-prove ring-host3d` -- the SUBMIT_CMD-forward proof
+# (WARP-V3-DESIGN 0.12). The prover mints a HOST3D ring, submits a hand-built
+# vkCreateRingMESA (venus-protocol e94b12f3 bytes, byte-verified against Mesa's
+# own encoder) on the venus device-ctx, and observes virglrenderer set
+# status&IDLE on the empty ring -- proof the host mapped the shmem and runs its
+# poll thread, with NO Mesa. The prover's own asserts carry the verdict; this
+# script delivers a venus console and requires its PASS line.
+#
+# WHY venus and not plain virgl: a HOST3D ring lives under a capset-4 (venus)
+# ctx; a virgl-only device refuses the venus-ctx create and the prover SKIPs.
+# WHY the GL host and not local: the same reason -- the local 2D device has no
+# virgl at all, so `ctx/new` is unavailable and the prover SKIPs.
+#
+# Runs ON the GL host (Linux; lib.exp takes the direct-pty transport there).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_QMP) 1
+set ::env(THYLACINE_NO_SHARE) 1
+# venus needs blob AND hostmem together (QEMU refuses the device otherwise);
+# run-vm.sh passes THYLACINE_GPU_DEV verbatim as the -device model string.
+set ::env(THYLACINE_GPU_DEV) "virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M"
+set ::env(THYLACINE_DISPLAY) egl-headless
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+file mkdir $work
+file delete -force $work/pool-ringh3d.img $work/disk-ringh3d.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-ringh3d.img
+exec cp $repo/build/disk.img $work/disk-ringh3d.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-ringh3d.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-ringh3d.img
+
+source $repo/tools/interactive/lib.exp
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# The prover mints, submits, then polls the status word (bounded ~2 s); give a
+# real window. Floor, not stomp (a caller's larger value passes).
+if {$lc_cmd_timeout < 60} { set lc_cmd_timeout 60 }
+lc_run_expect_hardfail "warp-prove ring-host3d" "WARP-RING-HOST3D PASS" "WARP-RING-HOST3D FAIL"
+
+lc_pass "warp-ring-host3d: HOST3D mint + vkCreateRingMESA submit + host status&IDLE (the V-3b-2 gate)"

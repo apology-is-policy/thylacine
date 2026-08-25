@@ -561,7 +561,12 @@ the client to virglrenderer, so the host maps the same shmem and begins polling.
   and the venus stream must target `c.venus_ctx`** -- a host3d ring's resource is
   created under the venus ctx (`wring_install_host3d` mints via `wctx_venus_ensure`
   -> `mint_host3d_ring(res, venus_ctx, ...)`), so `vkr_context_get_resource` resolves
-  its `res_id` ONLY on the venus context's decoder. So V-3b-2's forward delta is a
+  its `res_id` ONLY on the venus context's decoder. (Spike-traced 2026-08-25: NO
+`CTX_ATTACH_RESOURCE` is needed -- for venus, RESOURCE_CREATE_BLOB dispatched on the
+venus ctx IS the attach, inserting the res_id into that ctx's `resource_table`, the
+same table `vkr_context_get_resource` reads; Mesa's real driver does the identical
+flow with zero attach. The res_id resolves by CO-LOCATION on one venus ctx -- exactly
+I-45, the ctx as the resource scope.) So V-3b-2's forward delta is a
   **venus-ctx-targeted submit** (`gpu.submit_3d(c.venus_ctx, c.pub, bytes)`, ensuring
   `venus_ctx` first), reusing the SAME fenced lane + admission. Shape (impl call):
   either a distinct `ctx/<id>/venus` verb, or `submit` routing to `venus_ctx` when the
@@ -631,11 +636,31 @@ register-then-observe, upheld by virglrenderer + the guest across the coherent
 shmem (our forward is transparent to it). I-32: `WARP_SUBMIT_MAX` bounds a
 submit; the fenced-lane admission bounds concurrency.
 
-**Verify-at-impl (spike-flagged, NOT design blockers):** the exact
-`vkCreateRingMESA` byte encoding (the venus-protocol headers are build-generated,
-not checked in -- dump from a Mesa build or a real capture) and the specific
-"trivial ring command" for the head-advance witness (the IDLE-bit witness needs
-no such validation).
+**RESOLVED at impl (sub-step C spike, 2026-08-25 -- byte-exact from Mesa's OWN
+generated encoder, compiled + run, not hand-derived).** venus-protocol
+`e94b12f3` (Mesa main's pin) + virglrenderer `7fcfce49`:
+- **`vkCreateRingMESA` = 124 bytes, bare (NULL-pNext) form ACCEPTED.** Framing:
+  `[cmd_type=188 u32][cmd_flags=0 u32][ring cookie u64][pCreateInfo present u64=1]`,
+  then `VkRingCreateInfoMESA{sType=1000384000, pNext=NULL(8B 0), flags, resourceId,
+  offset, size, idleTimeout, headOffset, tailOffset, statusOffset, bufferOffset,
+  bufferSize, extraOffset, extraSize}`. All words host-LE; every offset/size is a
+  size_t = 8 bytes on the wire. Corrections vs the pre-spike guess: `flags` comes
+  FIRST (before resourceId); there is an `idleTimeout` u64 between `size` and
+  `headOffset`; head/tail/status are OFFSET-only (no `*Size`); there is NO
+  `alignment`/`bufferChunkSize`/`numExtraOffsets`. Stock Mesa chains a
+  `VkRingMonitorInfoMESA` pNext (140 B) but virglrenderer's
+  `vkr_dispatch_vkCreateRingMESA` takes the bare form -- the monitor only starts
+  the separate ALIVE watchdog, unneeded here.
+- **Witness = status word (u32 @ statusOffset=128).** Bits (VK_MESA_venus_protocol.xml):
+  IDLE=0x1, FATAL=0x2, ALIVE=0x4. virglrenderer's poll thread (`vkr_ring.c:270-278`)
+  sets IDLE when it finds the ring idle; on a zeroed-then-created EMPTY ring with
+  `idleTimeout=0` it sets IDLE on its first poll iteration. Create REQUIRES
+  `*head==0 && *status==0` (`vkr_ring.c:53`) -- the install-time zeroing satisfies
+  it. So `(status & 0x1) && !(status & 0x2)` on a zeroed-then-created ring proves
+  the host mapped the resource AND ran its poll loop, with NO Mesa. FATAL=0x2 is a
+  decode/layout rejection (a distinct fail); `status != 0` is NOT the assertion
+  (FATAL is also nonzero). Head-advance is NOT needed -- the IDLE bit is the
+  single sound assertion. Byte table + citations: `[[design-v3b2-submit-forward]]`.
 
 **Ratified 2026-08-25 (operator signoff):** the SUBMIT_CMD forward + ring
 bootstrap + host-side rescue, standalone GL-witnessed, with the reply-shmem

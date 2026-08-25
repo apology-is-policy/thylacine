@@ -240,6 +240,13 @@ pub extern "C" fn rs_main() -> i64 {
         return ring_prove();
     }
 
+    // V-3b-2 (WARP-V3-DESIGN 0.12): the HOST3D ring witness. A host3d ring lives
+    // under a capset-4 (venus) ctx, so this needs a VENUS device; it SKIPs on 2D
+    // (no ctx) and on a virgl-without-venus device (the mint refuses).
+    if libthyla_rs::env::args().get_str(1) == Some("ring-host3d") {
+        return ring_host3d_prove();
+    }
+
     t_putstr("warp-prove: starting (the Warp-2 gate)\n");
 
     let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
@@ -705,6 +712,192 @@ fn ring_prove() -> i64 {
     unsafe { t_close(map_fd) };
     unsafe { t_close(root) };
     t_putstr("WARP-RING PASS (transport + doorbell + feedback + fence + F2 + I-45 + I-9 re-scan + F1 drain-cap)\n");
+    0
+}
+
+// === V-3b-2: the HOST3D ring witness (`warp-prove ring-host3d`) =============
+// The Venus SUBMIT_CMD forward proof (WARP-V3-DESIGN 0.12). Mint a HOST3D ring,
+// submit a hand-built vkCreateRingMESA naming the ring's virtio-gpu res_id, and
+// observe virglrenderer set status&IDLE -- proof the host mapped the shmem and
+// runs its poll thread, with NO Mesa. The bytes are venus-protocol e94b12f3
+// (Mesa main's pin), byte-verified against Mesa's generated
+// vn_encode_vkCreateRingMESA; the witness mechanism against virglrenderer
+// vkr_ring.c:270-278 (poll thread sets IDLE) + vkr_ring.c:53 (create requires
+// *head==0 && *status==0).
+
+// The Venus ring layout (vn_ring.c), DISTINCT from the V-3a WARP_RING_OFF_*:
+// head@0 / tail@64 / status@128 (each a bare u32 on its own 64-byte line),
+// buffer@192 (128 KiB pow2), extra@192+128KiB (4B). The tight region is 131268;
+// the mint page-aligns up from it. size (declared to the host) is the tight
+// region -- Mesa-consistent and <= the page-rounded blob resource.
+const VN_STATUS: u64 = 128;
+const VN_BUFFER: u64 = 192;
+const VN_BUFFER_SIZE: u64 = 128 * 1024;
+const VN_EXTRA_SIZE: u64 = 4;
+const VN_RING_TOTAL: u64 = VN_BUFFER + VN_BUFFER_SIZE + VN_EXTRA_SIZE; // 131268
+const RING_PAGE: u64 = 4096;
+
+// venus-protocol e94b12f3 (vn_protocol_driver_defines.h).
+const VK_CMD_CREATE_RING: u32 = 188;
+const VK_STYPE_RING_CREATE_INFO: u32 = 1000384000;
+// virglrenderer vkr_ring.c status bits (VK_MESA_venus_protocol.xml:138-142).
+const VK_RING_STATUS_IDLE: u32 = 0x1;
+const VK_RING_STATUS_FATAL: u32 = 0x2;
+
+unsafe fn rld32(va: u64, off: u64) -> u32 {
+    core::ptr::read_volatile((va + off) as *const u32)
+}
+
+// A fixed encode buffer for the 124-byte bare (NULL-pNext) command.
+struct RingCmd {
+    b: [u8; 128],
+    n: usize,
+}
+impl RingCmd {
+    fn new() -> Self {
+        RingCmd { b: [0u8; 128], n: 0 }
+    }
+    fn w32(&mut self, v: u32) {
+        self.b[self.n..self.n + 4].copy_from_slice(&v.to_le_bytes());
+        self.n += 4;
+    }
+    fn w64(&mut self, v: u64) {
+        self.b[self.n..self.n + 8].copy_from_slice(&v.to_le_bytes());
+        self.n += 8;
+    }
+}
+
+/// Encode a bare (NULL-pNext) vkCreateRingMESA SUBMIT_CMD for a ring at
+/// virtio-gpu `res_id`, whole-region `size`, `idle_ns` idleTimeout. Byte layout
+/// per Mesa's generated vn_encode_vkCreateRingMESA: framing [cmd_type=188]
+/// [cmd_flags=0][ring u64][pCreateInfo present u64=1], then VkRingCreateInfoMESA
+/// {sType, pNext=NULL(8B 0), flags, resourceId, offset, size, idleTimeout,
+/// headOffset, tailOffset, statusOffset, bufferOffset, bufferSize, extraOffset,
+/// extraSize}. All words host-LE; size_t fields are 8 bytes on the wire. The
+/// bare form is accepted by vkr_dispatch_vkCreateRingMESA (the monitor pNext
+/// only starts the separate ALIVE watchdog, unneeded here). Total = 124 bytes.
+fn encode_vk_create_ring(res_id: u32, size: u64, idle_ns: u64) -> RingCmd {
+    let mut c = RingCmd::new();
+    c.w32(VK_CMD_CREATE_RING); // cmd_type
+    c.w32(0); // cmd_flags (0 = async, no reply)
+    c.w64(0xDEAD_BEEF); // ring handle cookie (any unique u64)
+    c.w64(1); // pCreateInfo present marker
+    c.w32(VK_STYPE_RING_CREATE_INFO); // sType
+    c.w64(0); // pNext = NULL
+    c.w32(0); // flags
+    c.w32(res_id); // resourceId
+    c.w64(0); // offset
+    c.w64(size); // size (whole region)
+    c.w64(idle_ns); // idleTimeout (ns)
+    c.w64(0); // headOffset
+    c.w64(64); // tailOffset
+    c.w64(VN_STATUS); // statusOffset
+    c.w64(VN_BUFFER); // bufferOffset
+    c.w64(VN_BUFFER_SIZE); // bufferSize (pow2)
+    c.w64(VN_BUFFER + VN_BUFFER_SIZE); // extraOffset
+    c.w64(VN_EXTRA_SIZE); // extraSize
+    c
+}
+
+fn ring_host3d_fail(msg: &str) -> ! {
+    t_putstr("WARP-RING-HOST3D FAIL -- ");
+    t_putstr(msg);
+    t_putstr("\n");
+    unsafe { t_exits(1) }
+}
+
+fn ring_host3d_prove() -> i64 {
+    t_putstr("warp-prove: ring-host3d gate (V-3b-2) starting\n");
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+    if root < 0 {
+        ring_host3d_fail("open /srv/warp (is tapestryd serving?)");
+    }
+    // No virgl -> the ctx mint is unavailable (2D device) -> SKIP, like `ring`.
+    let ctx = match try_open_read(root, "ctx/new").and_then(|s| parse_u32_prefix(&s)) {
+        Some(v) => v,
+        None => {
+            t_putstr("warp-prove: RING-HOST3D SKIP -- no virgl on this device (ctx mint unavailable)\n");
+            unsafe { t_exits(2) }
+        }
+    };
+
+    // Mint the HOST3D ring: a venus-ctx-backed hostmem blob virglrenderer can
+    // poll. Page-align the mint up from the Venus tight layout. A virgl-without-
+    // venus device refuses the venus-ctx create (E_IO) -> the mint fails -> SKIP.
+    let mint_bytes = (VN_RING_TOTAL + RING_PAGE - 1) & !(RING_PAGE - 1);
+    if !write_ctl(root, &format!("ctx/{}/ring/new", ctx), &format!("{} 0 host3d", mint_bytes)) {
+        t_putstr("warp-prove: RING-HOST3D SKIP -- host3d mint refused (no venus device)\n");
+        unsafe { t_exits(2) }
+    }
+
+    // The res_id virglrenderer resolves vkCreateRingMESA.resourceId against.
+    let info = open_read_string(root, &format!("ctx/{}/ring/0/info", ctx));
+    let res_id = match parse_field(&info, "res") {
+        Some(v) if v != 0 => v as u32,
+        _ => ring_host3d_fail("host3d ring info missing/zero res_id"),
+    };
+
+    // Map the ring to read the status word. The ring is zeroed at install
+    // (wring_install_host3d), and the host REQUIRES *head==0 && *status==0 at
+    // create (vkr_ring.c:53); assert the zeroing holds before submitting.
+    let map_fd = unsafe {
+        let pth = format!("ctx/{}/ring/0/map", ctx);
+        t_open(root, pth.as_ptr(), pth.len(), T_OREAD)
+    };
+    if map_fd < 0 {
+        ring_host3d_fail("host3d ring/0/map open");
+    }
+    let va = unsafe { t_weft_map(map_fd as u64, 0) };
+    if va < 0 {
+        ring_host3d_fail("host3d ring t_weft_map claim");
+    }
+    let va = va as u64;
+    if unsafe { rld32(va, VN_STATUS) } != 0 {
+        ring_host3d_fail("host3d ring status != 0 at mint (host would reject the create)");
+    }
+
+    // Bootstrap: submit a bare vkCreateRingMESA. virglrenderer maps the same
+    // res_id shmem, vkr_ring_create + vkr_ring_start it, and its poll thread sets
+    // status&IDLE. idleTimeout=0 -> IDLE on the host's first poll iteration.
+    let cmd = encode_vk_create_ring(res_id, VN_RING_TOTAL, 0);
+    let submit_fd = unsafe {
+        let p = format!("ctx/{}/submit", ctx);
+        t_open(root, p.as_ptr(), p.len(), T_OWRITE)
+    };
+    if submit_fd < 0 {
+        ring_host3d_fail("submit open");
+    }
+    let n = unsafe { t_write(submit_fd, cmd.b.as_ptr(), cmd.n) };
+    unsafe { t_close(submit_fd) };
+    if n < 0 {
+        ring_host3d_fail("submit write (vkCreateRingMESA queue refused)");
+    }
+
+    // Witness: poll statusOffset for IDLE (0x1) set AND FATAL (0x2) clear. FATAL
+    // is the host's decode/layout rejection of the hand-built bytes -- fail LOUD
+    // + distinctly from a non-polling host. Bounded (~2 s): a host that never
+    // maps+polls the ring FAILS, it does not hang.
+    let mut idle = false;
+    for _ in 0..200 {
+        let st = unsafe { rld32(va, VN_STATUS) };
+        if st & VK_RING_STATUS_FATAL != 0 {
+            ring_host3d_fail("host set status&FATAL -- vkCreateRingMESA decode/layout rejected");
+        }
+        if st & VK_RING_STATUS_IDLE != 0 {
+            idle = true;
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(10));
+    }
+    if !idle {
+        ring_host3d_fail("host never set status&IDLE -- virglrenderer did not map+poll the ring");
+    }
+
+    unsafe { t_close(map_fd) };
+    unsafe { t_close(root) };
+    t_putstr(
+        "WARP-RING-HOST3D PASS (host3d mint + vkCreateRingMESA submit + host status&IDLE -- virglrenderer polls, no Mesa)\n",
+    );
     0
 }
 
