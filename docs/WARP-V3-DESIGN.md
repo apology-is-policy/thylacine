@@ -745,6 +745,93 @@ separate V-3b-2b chunk. Full research record:
 `scratchpad/v3b2b/REPLY-SHMEM-RESEARCH.md` (the superseded pre-fork skeleton) +
 `[[design-v3b2-submit-forward]]`.
 
+### 0.14 V-3b-3 design: the Mesa vn_renderer backend (design-first, 2026-08-25)
+
+Operator-ratified 2026-08-25 as the arc endpoint. `vn_renderer_thylacine.c`
+(~1-1.5 kLOC) implements `struct vn_renderer` over the shipped Model B substrate.
+A source read of `mesa-thylacine` @`b7f9ed2` (= mesa-26.1.6+7) + `virglrenderer`
+`7fcfce49` settled the shape.
+
+**Reconciliation (sections 4 + 3.4-3.6 are V-3a-framed; THIS governs).** Those
+sections put tapestryd in the ring hot path (a ring thread that echoes head..tail
+to `gpu.submit_3d` and writes the feedback slot). Model B (section 0) moved that
+OUT: virglrenderer POLLS the HOST3D ring directly; tapestryd runs NO ring thread,
+writes NO feedback slot, does NO echo-drain -- it only mints/maps the ring
+(coherent shmem), forwards the bootstrap SUBMIT_CMD (`warp_venus_submit`), and
+retires fences (`warp_service_fences`). The idle/kick/head/status protocol is
+virglrenderer <-> the Venus driver over the coherent shmem. So the backend
+implements `vn_renderer` over /srv/warp and re-implements NONE of that machinery.
+
+**The backend is vtest-shaped, not virtgpu-shaped.** Upstream has two backends:
+`vn_renderer_virtgpu.c` (DRM ioctls) and `vn_renderer_vtest.c` (a userspace
+socket transport, no kernel driver). A /srv/warp backend is the VTEST shape with
+9P file ops replacing the socket and `t_weft_map` replacing the SCM_RIGHTS-fd +
+mmap. It reuses `warp_client.c` (the Warp-3 transport, 417 LOC: `t_open` /
+`t_write` / `t_pread` / `t_weft_map` / the `issued`/`signaled` fence-counter model
+/ the wedge latch), reached through the cross-file's `-I$ROOT/usr/lib/libt/include`
+(`<thyla/syscall.h>`). `t_poll` (SYS_POLL=29) and `t_weft_map` (SYS_WEFT_MAP=82)
+both exist -- the `ops.wait` ns-timeout is buildable.
+
+**The `vn_renderer` contract = 20 function pointers** (`vn_renderer.h`), 4
+sub-vtables + the `info` struct (NOT a callback; a private `_init_renderer_info()`
+fills it from the caps blob): `ops`{destroy, submit, wait}, `shmem_ops`{create,
+destroy}, `bo_ops`{8}, `sync_ops`{7}. Exactly 3 are optional (the socket backend
+NULLs `bo.create_from_dma_buf`, `sync.create_from_syncobj`, `sync.export_syncobj`)
+-> 16 mandatory data-plane + the info-init = the "19-fn/16-mandatory" the doc
+sketched; 20 pointers is the ground truth. Shared helpers reused verbatim:
+`vn_renderer_shmem_cache_*`, `vn_renderer_bo_export_sync_file_internal`,
+`vn_renderer_submit_simple_sync`, `vn_renderer_shmem_pool_*`.
+
+**Op -> substrate (Model B):**
+| vn_renderer op | Thylacine primitive (BUILT unless noted) |
+|---|---|
+| shmem_ops.create/destroy | `ring/new host3d <bytes> <ridx>` -> HOST3D blob on venus_ctx + `t_weft_map`; res_id via `ring/<ridx>/info` `res` |
+| ops.submit (execbuffer) | `ctx/<id>/submit` -> `warp_venus_submit` (opaque bytes on venus_ctx, fenced lane) + the ring bootstrap (`vkCreateRingMESA`) |
+| ops.wait | `t_poll` on `ctx/<id>/fence` w/ the Vulkan ns timeout; the fast path polls the guest feedback slots |
+| sync_ops (u64 timeline) | the SIMULATE_SYNCOBJ feedback slots in the coherent shmem (guest-side) |
+| bo_ops (HOST_VISIBLE VkDeviceMemory) | the hostmem BAR: `MAP_BLOB` + `SYS_BURROW_FROM_HOSTMEM` (V-2/V-3b-1b) |
+| info (get_info) | the retained Venus capset blob (the `caps` file) |
+| reply stream | a 2nd `ring/new host3d ... 1` + the `vkSetReplyCommandStreamMESA` RING command (section 0.13) |
+
+**Two build blockers (new work, distinct from backend logic):**
+1. The cross-file sets `system='linux'` -> `system_has_kms_drm=true` -> the venus
+   meson pulls in `vn_renderer_virtgpu.c` + a hard `dep_libdrm` the pouch sysroot
+   cannot satisfy. Gate them out (build vtest + thylacine only) in
+   `src/virtio/vulkan/meson.build`.
+2. The ICD is upstream a `shared_library`, and Thylacine is static/no-loader
+   (`kernel/elf.c` requires ET_EXEC, no PT_DYNAMIC). Build a LOADER-LESS ICD entry
+   (named in the GPU-DESIGN Vulkan-adaptation note, unbuilt) -- the static
+   registration of the driver's `vk_icdGetInstanceProcAddr` without dlopen. This
+   is the novel piece + the highest risk; it lands in 3a.
+
+**Sub-chunk plan (operator-ratified 2026-08-25):**
+- **V-3b-3a -- build path + loader-less ICD + backend skeleton.** Clear the 2
+  blockers; add `vn_renderer_thylacine.c` (shmem_create + info-init + destroy +
+  the mandatory op stubs); wire `-Dvulkan-drivers=virtio` on thyla-keep. Milestone:
+  the ICD builds STATIC + loads loader-less + enumerates the Thylacine Venus
+  driver (a link+load proof, the `virgl_prove.c` analog). Highest risk.
+- **V-3b-3b -- shmem + submit + wait + sync (bring-up).** Milestone:
+  `vkCreateInstance` + `vkEnumeratePhysicalDevices` +
+  `vkGetPhysicalDeviceMemoryProperties` round-trip -- exercises the ring AND the
+  reply-shmem end to end.
+- **V-3b-3c -- bo / device memory.** The HOST_VISIBLE bo path over the hostmem
+  BAR; milestone: `vkAllocateMemory` + `vkMapMemory`.
+- **V-3b-3d -- the Vulkan prove-gate on thyla-pi (real V3D).** A headless
+  compute/clear + fenced readback through the full stack; `virgl_prove.c` template
+  + a new `warp-host.sh venus`/`vk` verb; renderer-identity discrimination (assert
+  the Venus ICD, not lavapipe). The E2E endpoint (subsumes the old V-3d).
+- **V-3c (capset authority, tapestryd-side)** is orthogonal (`WarpCtx.capset`
+  goes live; reject a never-enumerated capset); sequence with/before 3b if the
+  caps blob must validate for bring-up.
+
+**Invariants.** I-45 (each ring/bo minted under the client's venus ctx, named only
+through `ctx/<id>/`), I-9 (the idle-skip kick, upheld by virglrenderer + the guest
+over the coherent shmem -- the backend is transparent to it), I-32
+(`WARP_SUBMIT_MAX` + `WARP_CTX_BACKING_MAX` bound submits + backing), I-7/I-37 (the
+ring/reply/bo lifetimes ride the built dual-refcount + weft paths). Audit-bearing
+at each sub-chunk (the section-25.4 Warp row); a focused Fable round after 3b (the
+first sub-chunk with a client-writable bring-up path) + 3c.
+
 ## 1. What V-3 is, and the seam it plugs into
 
 Mesa's Venus (Vulkan) driver talks to a host renderer through **one designed
