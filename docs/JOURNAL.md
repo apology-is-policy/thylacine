@@ -101,7 +101,65 @@ at clangd again -- the diagnosis, not a retry, is what fixed it.
 docs -- zero kernel/arch/mm/specs, zero console/login. So the SMP gate, the specs,
 and LS-CI test surfaces this chunk provably does not touch; the venus-submit hazard
 is verified by the GL witness + the sub-step D audit + the compositor's
-non-regression in `test.sh` (PASS). Sub-step D (the Fable audit) is running.
+non-regression in `test.sh` (PASS).
+
+**Sub-step D, round 1 (Fable 5, `4e5a1a40`): 0 P0 / 1 P1 / 0 P2 / 3 P3.** The
+forward itself survived every lane the prosecutor tried -- ownership gate, cross-ctx
+escape, fence pairing, DoS bounds, witness honesty -- all sound. The one P1 was not
+in the new code but in what the new code was contractually obligated to change and
+did not: `wctx_finish`'s wedge (leak) arm destroyed the client's venus_ctx
+UNCONDITIONALLY, on a 1c-2a premise ("quiesced by construction -- no submit targets
+it"). The instructive part is that the SAME block carried a FORWARD comment naming
+V-3b-2 as the deadline to move it -- the author of 1c-2a had seen the future and
+written it down, and sub-step A (which landed venus submits onto exactly that
+venus_ctx, sharing `fences_in_flight`) had crossed the deadline without moving the
+code. So a wedge could now leave a venus chain live device-side while the arm
+destroyed its context -- the destroy-with-live-work breach the dev_ctx defer exists
+to avoid -- reachable in the SHIPPED build via the mode-0666 warp-abandon ctl. My
+own parallel self-audit confirmed the same sound lanes and found F3's accounting
+asymmetry, but MISSED F1: the classic self-audit blind spot is the recovery path the
+changed function never opens. The context-independent prosecutor caught it. FIXED by
+mirroring dev_ctx: a new `warp_ctx_venus_vindicate[slot]` flag; the leak arm records
+it; the vindication destroys `WARP_VENUS_CTX_BASE+slot` only once the poisoned-slot
+gate proves the device finished (that gate covers venus chains -- they tag with the
+same pub_id). F2/F3/F4 were comment/accounting P3s.
+
+**Round 1 was a dirty close** (a P1 returned + the fix restructures the
+teardown/vindication lifecycle), so a **round 2 re-audit on the fix itself** was
+owed. **Round 2 (Fable 5, scoped to the F1 restructure): 0 P0 / 0 P1 / 0 P2 / 2 P3
+-- CLEAN.** The prosecutor's null results on all five focus lanes -- partial-destroy
+re-fire, flag lifecycle, the device-finished-proof coverage over venus chains, the
+clean-arm premise, and the F3 accounting -- matched a second independent parallel
+self-audit exactly. My own initial "partial-destroy re-fire" worry (dev destroyed,
+venus refuses, retry re-destroys dev) DISSOLVED on tracing `take_vindications`: it
+drains once, so there is no second pass -- the failure mode is a permanently
+condemned slot (fail-closed, bounded at <=8), not a re-fire. The two P3s were both
+real and both fixed. F1: the vindication destroyed dev FIRST and `continue`d on a
+refuse, never reaching the venus attempt -- asymmetric with the clean arm, so a
+healthy-engine dev mismatch stranded venus_ctx too; fixed to attempt both and
+reclaim only when both are gone. F2 is the lesson of the run: the ring-teardown
+comment STILL stated the dead V-3a "no submit lands" premise -- the EXACT
+stale-premise shape that produced round 1's F1, now one function over. The ring free
+is guest-safe today, but via a chain the comment does not state (host-memory
+backing, not guest DMA; a fresh-blob re-mint; trusted-host renderer robustness;
+monotonic res_id), and on the v3d fork -- where the renderer becomes ours -- that
+comment would be an actively false safety argument at the first site the next
+implementer reads. Rewrote it to the real chain plus the v3d obligation. A comment
+is not a footnote when it is load-bearing for a future implementer's safety
+reasoning; the same rot caught twice in two rounds is the argument for saying so.
+
+**The F1 regression is the durable-reasoning form, and that is a decision, not a
+dodge.** The fully-discriminating test -- force a wedge on a venus chain, finish the
+ctx, observe that venus_ctx is NOT destroyed until the vindication -- is feasible
+(`gpu.test_abandon_ctx` gives a synchronous wedge) but needs a venus device
+(thyla-pi only, not the CI mac), new gpu `ctx_destroy` observability, and thyla-pi
+iteration to make the abandon->vindication timing deterministic (a `vkCreateRingMESA`
+create-fence completes -> a vindication, but the ring itself persists). Per the
+regression carve-out for hard-to-deterministically-trigger lifecycle findings (the
+Weft-arc precedent), the durable record is the R-1/R-2 audit trail + the in-code F1
+invariant comments; the thyla-pi wedge-leg is a tracked deferral, named in
+`memory/audit_v3b2_r2_closed_list.md`, not a silent drop. The fix is fail-closed,
+bounded, and now double-audited sound.
 
 ---
 

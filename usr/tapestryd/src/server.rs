@@ -6891,11 +6891,32 @@ impl Comp {
         }
     }
 
-    /// Retire one ring backing. Rings issue no device fences at V-3a (no
-    /// submit lands), so no wedge posture applies -- the device never DMAs a
-    /// ring blob, so freeing is safe. Disarm the weft share BEFORE the backing
-    /// free (I-7 #847 dual count: a client's live mapping survives past this
-    /// via its own ref until it unmaps).
+    /// Retire one ring backing. Disarm the weft share BEFORE the backing free
+    /// (I-7 #847 dual count: a client's live mapping survives past this via its
+    /// own ref until it unmaps).
+    ///
+    /// Wedge-path safety (V-3b-2, R-2 F2). This header used to claim "rings
+    /// issue no device fences -- the device never DMAs a ring blob, so freeing
+    /// is safe". Since 836855da that is FALSE for a HOST3D ring: warp_venus_submit
+    /// posts a fenced venus chain (`vkCreateRingMESA`) that NAMES this ring's
+    /// res_id, and the renderer polls/writes the ring memory on its behalf. So on
+    /// the wedge path this backing can be reclaimed while an abandoned chain may
+    /// still be device-live -- yet that reclaim stays guest-safe via a DIFFERENT
+    /// chain than the dead V-3a premise stated: (a) a HOST3D ring's backing is
+    /// HOST memory (the QEMU hostmem subregion), never guest DMA pages, so a late
+    /// renderer write cannot corrupt guest memory (contrast a BO, whose
+    /// leak-park in wbo_retire exists for exactly that); (b) an offset re-mint
+    /// maps a FRESH blob (new resource; controlq teardown is a synchronous
+    /// `step`, unmap-before-remap) -- no guest-visible cross-client alias;
+    /// (c) renderer-internal robustness against a vn_ring polling unref'd memory
+    /// is the documented-TRUSTED host half (GPU-DESIGN section 9.2 / the I-45
+    /// row); (d) res_id is monotonic, never re-minted into the abandoned stream's
+    /// view. WHEN THE RENDERER BECOMES OURS (the v3d fork, I-45 "where it becomes
+    /// ours to keep"), chain (c) stops being someone else's guarantee: the
+    /// host3d-ring unref must then DEFER to the vindication (like venus_ctx --
+    /// F1) rather than free here. The client-mapping case is already deferred
+    /// below: retire_host3d_ring PARKS (never frees) while any client still
+    /// references the ring.
     fn wring_teardown(gpu: &mut Gpu, r: &mut WarpRing) {
         if let Some(id) = r.share_id.take() {
             let _ = unsafe { t_weft_unshare(id) };
@@ -7052,8 +7073,14 @@ impl Comp {
                     self.warp_park_leaked(slot, b);
                 }
             }
-            // V-3a: retire every ring backing (unconditional -- rings issue no
-            // device fences, so the `leak` wedge posture does not apply).
+            // Retire every ring backing on BOTH postures (no `leak` branch here,
+            // unlike the BOs above). A HOST3D ring can carry live venus work on
+            // the wedge path since 836855da, but its reclaim stays guest-safe
+            // without the leak-park -- host-memory backing, fresh-blob re-mint,
+            // trusted-host renderer robustness, monotonic res_id; the full chain
+            // (and the v3d-fork obligation to defer it) is at wring_teardown. The
+            // client-mapping case is deferred inside retire_host3d_ring (park,
+            // not free).
             for j in 0..WARP_RINGS_PER_CTX {
                 if let Some(mut r) = c.ring_slots[j].take() {
                     Self::wring_teardown(&mut self.gpu, &mut r);
@@ -7822,34 +7849,50 @@ impl Comp {
             // HEALTHY engine (a resp-type mismatch does not latch `dead`),
             // and the un-poison ran regardless. A refused destroy leaves
             // the slot condemned instead.
-            if self.gpu.ctx_destroy((slot as u32) + 1).is_err() {
+            //
+            // R-2 F1: attempt BOTH destroys before deciding recovery, mirroring
+            // the CLEAN arm (7178/7194) -- the old code `continue`d on a dev
+            // refuse and never reached the venus arm, so a healthy-engine dev
+            // mismatch stranded venus_ctx too (both host ctxs leaked where the
+            // venus one could have been reclaimed). Each id is independently
+            // condemn-on-refuse; the slot recovers only when BOTH are gone.
+            let dev_ok = self.gpu.ctx_destroy((slot as u32) + 1).is_ok();
+            if !dev_ok {
                 say!(
-                    "tapestryd: warp ctx slot {} destroy REFUSED -- slot stays condemned",
+                    "tapestryd: warp ctx slot {} dev-ctx destroy REFUSED at vindication -- slot stays condemned",
                     slot
                 );
-                continue;
             }
             // V-3b-2 F1: destroy the venus_ctx the leak arm deferred, now that
-            // the device is provably finished (ctx_has_poisoned_slot false covers
-            // venus chains -- same pub_id). SAME condemn-on-refuse as dev_ctx: a
-            // refused destroy leaves the slot poisoned; it is never recycled, so
-            // its venus id (WARP_VENUS_CTX_BASE+slot) can never re-mint into a
-            // still-live host context. The flag clears on success, so this is
-            // idempotent under the multi-chain vindication that reaches here only
-            // once ctx_has_poisoned_slot is finally false.
+            // the device is provably finished (the poisoned-slot gate above
+            // covers venus chains -- same pub_id). The flag clears on success, so
+            // this is idempotent under the multi-chain vindication that reaches
+            // here only once no poisoned slot for this ctx remains; a refused
+            // venus destroy leaves the flag set for the next retry. dev_ctx =
+            // slot+1 needs no such flag -- the `warp_ctx_vindicate` stamp is its
+            // own "owed" marker, cleared only at the recovery below.
+            let mut venus_ok = true;
             if self.warp_ctx_venus_vindicate[slot] {
                 if self
                     .gpu
                     .ctx_destroy(WARP_VENUS_CTX_BASE + slot as u32)
-                    .is_err()
+                    .is_ok()
                 {
+                    self.warp_ctx_venus_vindicate[slot] = false;
+                } else {
+                    venus_ok = false;
                     say!(
                         "tapestryd: warp ctx slot {} venus-ctx destroy REFUSED at vindication -- slot stays condemned",
                         slot
                     );
-                    continue;
                 }
-                self.warp_ctx_venus_vindicate[slot] = false;
+            }
+            // A refused destroy on EITHER id leaves the slot poisoned (never
+            // recycled, so neither derived id can re-mint into a live host ctx);
+            // a later vindication retries whatever remains. Recover only when
+            // both host ctxs are provably gone.
+            if !dev_ok || !venus_ok {
+                continue;
             }
             // Only now are the parked backings provably free of the device.
             self.warp_free_leaked(slot);

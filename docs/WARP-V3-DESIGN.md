@@ -668,6 +668,27 @@ deferred. This section is the design pin; the impl commit (the `ctx/<id>/submit`
 interface + the rescue + the `warp-prove` witness, then the Fable audit round)
 references it.
 
+**AS-BUILT (2026-08-25):** A `836855da` (forward), B `c1477a91` (rescue
+DISCHARGED -- the "genuinely new" mechanism already existed as
+`warp_service_fences`), C `84ac8a27` (`warp-prove ring-host3d` GL witness
+VERIFIED on thyla-pi V3D). **Audit round 1** (Fable 5, `4e5a1a40`): 0 P0 / 1 P1 /
+0 P2 / 3 P3, all fixed -- the forward sound on every lane; F1 [P1] was the
+1c-2a wedge-arm venus_ctx destroy whose "quiesced by construction" premise THIS
+chunk voided (venus_ctx now carries live fenced chains), moved to the vindication
+path (`warp_ctx_venus_vindicate`), exactly as the 1c-2a code's own forward comment
+had named V-3b-2 to do. **Dirty close -> audit round 2** (Fable 5, scoped to the
+F1 restructure): 0 P0 / 0 P1 / 0 P2 / 2 P3, all fixed -- CLEAN. The restructure is
+sound on all five focus lanes (`take_vindications` single-drain -> no
+partial-destroy re-fire; both submit paths tag fences by `ctx_pub` so the
+poisoned-slot gate covers venus chains; the clean-arm quiesce premise verified).
+F1 [P3]: the vindication now attempts BOTH ctx destroys (was: `continue` on a dev
+refuse, skipping venus -- asymmetric with the clean arm). F2 [P3]: the
+ring-teardown comment stated the dead V-3a "no submit lands" premise (the same rot
+class as round 1's F1) -> rewritten to the real safety chain (host-memory backing,
+FIFO controlq, trusted-host renderer, monotonic res_id) + the v3d-fork obligation
+to defer the host3d-ring unref once the renderer is ours. Full closed list:
+`[[audit-v3b2-r2-closed-list]]`.
+
 ## 1. What V-3 is, and the seam it plugs into
 
 Mesa's Venus (Vulkan) driver talks to a host renderer through **one designed
