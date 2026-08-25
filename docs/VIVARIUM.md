@@ -2416,6 +2416,133 @@ the EL0-entry clear on the post-escape unblock does the work here, the EL0-retur
 copy is idempotent behind it; isolating EL0-entry alone would need a park-based
 driver (a deaf-deadlock hang rather than a clean marker) and is not built.
 
+### 6.24 Tier 2 — the path-mutation family: `openat(O_CREAT)` + `mkdirat` + `unlinkat` + `renameat`/`renameat2` (#50; design ratified 2026-08-25)
+
+**The problem.** §6.20's Correction 1 proved `O_CREAT` cannot be *routed* to
+`SYS_WALK_CREATE` — three independent blockers (shape / semantics / the silent
+cwd-sentinel divergence), any one fatal. That verdict stands, and it was a
+verdict about **routing**, not about the feature: the kernel half wants a
+create-by-**path** primitive that did not exist. This section designs it. The
+forcing consumer is git (the arc opened by the operator 2026-08-25): `git init`
+alone needs create + mkdir + unlink + rename (`config.lock` → rename-into-place),
+and every one of `mkdirat`(34) / `unlinkat`(35) / `renameat`(38) was an unnamed
+number → ENOSYS.
+
+**Prior art, which collapses the design space:**
+- **Plan 9 (heritage).** `create(2)` *is* path-based; the kernel's
+  `namec(Acreate)` walks to the parent, tries the create, and falls back to
+  open when the create loses an exists-race. The create-else-open composition
+  lives **in the kernel**. Thylacine dropped the path-create half at stalk-1
+  in favor of the 9P-shaped single-component `SYS_WALK_CREATE`; this chunk
+  restores it. `ARCH §11.2`'s core-syscall table has listed a path-based
+  `create(name, mode, perm)` since Phase 0 — the mint **fulfills** standing
+  scripture rather than deviating from it.
+- **Linux v9fs (SOTA for a 9P-backed FS).** `open(O_CREAT)` without `O_EXCL`
+  is a bounded client loop: try open → ENOENT → `Tlcreate` → EEXIST → retry
+  open. Close-to-open consistency; the loop is the accepted idiom.
+- **Fuchsia (capability SOTA).** Create is an operation on the parent
+  *directory connection*, atomic at the server — which is exactly our
+  `dev->create`/`Tlcreate` at Stratum.
+
+Both models agree: **exclusive create is atomic at the server; open-if-present
+is a bounded client loop.** There is no third idiom.
+
+**The ratified forks (operator, 2026-08-25, AskUserQuestion):**
+1. **Full family in one chunk** — `openat(O_CREAT)` + `mkdirat` + `unlinkat` +
+   `renameat` ride ONE new primitive and get ONE audit round, rather than
+   re-auditing the same helper across sequential chunks.
+2. **Mint the native syscall too** — `SYS_OPEN_CREATE = 108` joins the native
+   ABI on the same core. The witness adopter is `libthyla-rs`'s
+   `open_create_at_path` (`fs/file.rs`), which today hand-rolls the
+   split + parent-`T_OPATH` + `WALK_CREATE` dance in userspace — rewiring that
+   ONE function adopts every native `File::create` caller (coreutils, ut
+   redirects, corvus) at a stroke, and retires its stale create-first
+   rationale ("walk_open does not return a distinguishable not-found code" —
+   false since the errno rollout gave stalk `T_E_NOENT`).
+
+**The design — one new mechanism, five consumers:**
+
+1. `sys_split_parent_kpath(...)` (kernel/syscall.c) — the missing primitive:
+   cwd-join with **SYS_OPEN parity** (`territory_join_cwd`, killing blocker 3
+   — the join happens BEFORE the split, so the parent resolves exactly where
+   `SYS_OPEN` would resolve the whole path), then a **lexical split at the
+   last component only** (the libthyla `split_parent_leaf` rows, #87: the
+   split classifies, never resolves — `.`/`..`/root leaves reach the caller's
+   POSIX row), then `stalk` the parent prefix walk-only. Containment (I-28)
+   and symlink expansion in the prefix are inherited from stalk — no new
+   resolution mechanism exists for an audit to find holes in.
+2. `spoor_create_in_dir(...)` — the create mechanics **extracted from**
+   `sys_walk_create_handler` (dev-slot checks, QTDIR, the A-2d W|X parent
+   gate, clone-walk, `dev->create`, gid stamp), one implementation for the
+   native handler + the new core — the "extracted rather than duplicated"
+   rule the I-43 row already imposes on every T2 shell.
+3. `sys_open_create_kpath_for_proc(p, start_fd, path, len, omode, perm)` —
+   the loop. Semantics rows:
+   - `OEXCL` (the pre-reserved `0x1000` omode bit): create-first, once;
+     EEXIST is the honest answer (atomic at the server — git lockfiles get
+     real exclusivity).
+   - plain create: **open-first** (the common existing-file case pays one
+     RPC; `OTRUNC` composes on the open leg and is STRIPPED on the create
+     leg — a fresh file is already empty); on `T_E_NOENT` → create; on the
+     create losing an exists-race (`EEXIST`) → retry open; **bounded at 2
+     rounds** then the last real error, loud.
+   - `perm` carries `DMDIR` → mkdir semantics: create-only (EEXIST if
+     present), the `OEXCL` arm with a directory — `mkdirat` is this row.
+   - EISDIR rows (Linux `open_last_lookups` parity, already libthyla's):
+     trailing-slash, `.`/`..`, and root leaves answer EISDIR on any create.
+   - `NOFOLLOW` composes (live final symlink → ELOOP, absent → create);
+     `OPATH` is **rejected** (a navigation handle cannot want creation).
+4. The native `SYS_OPEN_CREATE = 108` handler — the user-buffer front of (3),
+   `(start_fd, path_va, path_len, omode, perm)`, mirroring `SYS_OPEN` + perm.
+   FROM_ROOT joins cwd; an explicit `O_PATH` dirfd start works as in
+   `SYS_OPEN`.
+5. The viv rows (decides pure, shells in the socket-row pattern):
+   - `openat` gains the `O_CREAT` domain: `AT_FDCWD` only (same narrowing,
+     same handle-state reason as the existing row), admitted flags +
+     `O_CREAT`/`O_EXCL`/`O_TRUNC`, mode = low-9 bits (07000 bits → decline,
+     census-visible).
+   - `mkdirat`(34): `AT_FDCWD` + low-9 mode → core with `DMDIR`.
+   - `unlinkat`(35): `AT_FDCWD`; flags 0 ↔ file, `AT_REMOVEDIR`(0x200) ↔
+     `SYS_UNLINK_REMOVEDIR` — a 1:1 map onto the native unlink mechanics run
+     on the split parent.
+   - `renameat`(38) + `renameat2`(276, flags==0 only): two parent splits →
+     the native rename mechanics (Linux replace-existing atomicity IS
+     `SYS_RENAME`'s documented contract — 1:1).
+
+**Documented degradations (loud or cosmetic, none silent-wrong):**
+- A **dangling** final symlink + `O_CREAT` answers EEXIST where Linux creates
+  the *target* (the open-first leg sees ENOENT, the create sees the link name
+  occupied). git never creates through dangling links; recorded, not built.
+- No umask: the guest's `umask` syscall is ENOSYS and the kernel applies no
+  mask, so modes arrive unmasked (0666 where Linux yields 0644). Cosmetic
+  under A-2d; passing through literally beats inventing kernel state.
+- `O_APPEND` stays rejected (milestone A runs git with reflogs off);
+  `O_DIRECTORY` stays rejected wholesale as today.
+- Real (non-`AT_FDCWD`) dirfds stay out — the §6.20 Correction 2 handle-state
+  blocker is untouched by this chunk.
+
+**Invariant framing:** I-28 inherited whole (stalk resolves the parent; the
+split is lexical-only). I-43 holds by construction (the family runs the SAME
+stalk, the SAME A-2d gates, the SAME create mechanics as native callers —
+extraction, not duplication; shape conferred, zero new authority). I-22/I-32
+untouched. The chunk is **audit-bearing** (a new native syscall + four
+phenotype rows on the FS-mutation surface); its row joins
+`docs/AUDIT-TRIGGERS.md` + the CLAUDE.md index with the impl commit, and the
+holotype round spawns AFTER the whole surface is complete (the curl-chunk
+lesson).
+
+**Race honesty:** two racing creators of one leaf converge (loser's EEXIST →
+open succeeds); two racing `O_EXCL` creators — exactly one wins (server-
+atomic); `O_CREAT|O_TRUNC` racers may truncate each other exactly as on
+Linux. The loop bound turns pathological churn into a loud error, never a
+spin. Prose-validated (spec-to-code suspension); no new wait/wake, no new
+lock — the only serialization is the 9P client's existing per-RPC order.
+
+**Deliberately next, not silent:** `getdents64`(61) (a self-contained
+9P-dirent → `linux_dirent64` format row) + `fsync`(82)/`fdatasync`(83)
+(trivial fd delegation) are the follow-on chunk; `faccessat`(48) is measured
+at git time before deciding.
+
 ---
 
 ## 7. The vivarium — the container runner
