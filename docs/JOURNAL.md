@@ -99,6 +99,30 @@ proven not asserted. The harness is committed local; the push is gated on a
 paired full-green boot (test.sh wants "Thylacine boot OK", which a pool-less boot
 never reaches), and the mesa-fork base is still the operator's call.
 
+**Close (same run): audit, then the fork question dissolved.** The harness went
+to a holotype round (Fable 5; joey.c is the "Initial bringup" audit trigger).
+Its one P2 is the run's best catch and pure context-independence: `pouch_smoke_core`'s
+OWN header declares a per-caller "check it before adding a caller" constraint --
+reap-before-drain deadlocks on any child writing > the 4 KiB pipe ring before
+exit -- and venus-prove is the FIRST out-of-tree, actively-GROWING third-party
+child wired to it. Safe today (three one-line outputs; Mesa logs to the absent
+fd 2), but 3b/3c grow it and a chatty failure would hang the boot with NO
+extinction -- the worst outcome, and "non-fatal" is only true of the return, not
+a hang. The author (me) glossed the header the reviewer re-derived. Fixed by a
+`drain_first` param routing venus to the `run_viv_bundle` drain-then-reap order;
+the 15 existing smokes stay reap-first and re-verified green. Two P3s (strip
+17->2.6 MiB; a size+sha freshness witness against the #120/#139 stale-fetch
+trap) landed too. Re-verified: full paired boot GREEN post-fix. Then the
+operator's reserved "fork at commit" question **dissolved on research**: the
+`usr/ports/mesa/README.md` makes the patch series canonical and the fork
+disposable, so the backend is simply **patch 0010** -- and its 6 files are
+disjoint from 0008/0009. Generated + round-trip-verified locally (no builder
+spend): `git am 0001..0010` on a fresh `mesa-26.1.6` reconstructed a tree equal
+to the venus commit's, exactly. V-3b-3a is complete at `4dc56542` (harness +
+audit + patch 0010, both mirrors). The lesson worth keeping: a same-family
+reviewer with no context still earned its round by reading a constraint the
+author wrote and then walked past.
+
 ## 2026-08-25 — V-3b-2 cross-Proc E2E: the audit that diagnosed the GL failure
 
 With V-3b-2 shipped, the operator chose the cross-Proc E2E witness (before the
