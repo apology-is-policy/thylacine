@@ -581,14 +581,32 @@ the client to virglrenderer, so the host maps the same shmem and begins polling.
   `vkr_ring.c:270-300`). Our side merely forwards -- the I-9 handshake is
   virglrenderer's + the guest's, over the cache-coherent shmem 0.7/0.8 already
   established.
-- **Fence/completion**: `gpu.submit_3d` returns a fence id; `poll_ring_fences`
-  (already in the serve loop) delivers it. The bootstrap commands are void, so a
-  client typically POLLS the ring `status` for the witness rather than waiting the
-  fence; the fence is the lane's ordering + the rescue's trigger.
-- **The host-side rescue (round-3 F1 OWED, [[design-v3b-ring-kick-rescue-owed]])**:
-  a bounded serve-loop follow-up drain for the fenced-submit path -- the
-  self-reschedule the single-RPC V-3a serve loop lacks, DoS-safe (bounded per
-  pass). The one genuinely new robustness mechanism; it lands here.
+- **Fence/completion**: `gpu.submit_3d` returns a CTX fence id, retired by
+  `warp_service_fences` and delivered by `poll_fences` on the SAME `ctx/<id>/fence`
+  surface a virgl submit uses -- NOT `poll_ring_fences` (`completed_seq`), which is
+  the V-3a echo-drain's RING-fence surface, unused by the host3d submit path (this
+  corrects an earlier draft of this bullet). The bootstrap commands are void, so a
+  client typically POLLS the ring `status` shmem for the witness (virglrenderer's
+  own poll thread sets it) rather than waiting the fence; the fence is the lane's
+  ordering.
+- **The host-side rescue (round-3 F1 OWED, [[design-v3b-ring-kick-rescue-owed]]) --
+  DISCHARGED for this path (sub-step B finding, impl 2026-08-25).** The mechanism
+  0.12 anticipated as "genuinely new" -- a bounded serve-loop follow-up drain for
+  the fenced-submit path -- already EXISTS as `warp_service_fences` (built at W2d):
+  it runs every serve-loop iteration (`main.rs`), is bounded per pass by
+  `FENCED_SLOTS` (16, the device fence-slot ring), and `warp_venus_submit` reuses
+  it byte-identically to `warp_submit` (admission caps in-flight at
+  `WARP_CTX_FENCE_MAX`=8/ctx; the drain retires <=16/pass; neither can pin the
+  serve thread). So NO new mechanism lands for the fenced-submit path -- the
+  verification IS the deliverable. The round-3 F1 note's LITERAL subject is a
+  DIFFERENT path: the V-3a echo drain in `wring_kick` (non-host3d rings), which
+  Model B does not route through `gpu.submit_3d` (a host3d kick returns
+  `E_OPNOTSUPP`; virglrenderer polls the ring). That path's cap-and-re-kick
+  contract is documented + prover-honored (warp-prove leg 8); its own robust rescue
+  is a robustness-NOT-soundness item (a misbehaving client strands only its OWN
+  ring's fence read -- no cross-client breach, no corruption, the cap bounds the
+  serve thread) on a superseded POC ring ("the V-3a ring is not Venus's ring",
+  `34dbe5d3`) -- TRACKED + deferred, not part of V-3b-2.
 
 **Scope: the reply-shmem SPLITS OFF (this corrects 0.4).** Replies from
 ring-executed BULK commands go to a SEPARATE client-registered reply shmem

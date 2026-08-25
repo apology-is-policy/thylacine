@@ -6765,12 +6765,23 @@ impl Comp {
                     // if idle==1 -- the host does NOT rescue a capped-out
                     // advance (the fence read/poll deliver on completed_seq,
                     // frozen at the cap). The V-3a prover honors this (its
-                    // drain-to-stable loop, warp-prove leg 8). The robust
-                    // host-side rescue -- a follow-up drain the serve loop runs
-                    // after other conns -- is OWED at V-3b, where the Venus ring
-                    // is doc-conformant + pipelined and this echo drain is
-                    // replaced by gpu.submit_3d anyway; it needs a
-                    // self-reschedule the V-3a serve loop does not have.
+                    // drain-to-stable loop, warp-prove leg 8).
+                    //
+                    // V-3b-2 resolution (WARP-V3-DESIGN 0.12 sub-step B): Model
+                    // B's real Venus ring is the HOST3D ring, which never enters
+                    // this echo drain (a host3d kick returns E_OPNOTSUPP above;
+                    // virglrenderer polls the ring). Its submits go via
+                    // warp_venus_submit -> gpu.submit_3d, whose completion IS
+                    // retired by a bounded self-rescheduling serve-loop drain --
+                    // warp_service_fences, every iteration, <=FENCED_SLOTS/pass.
+                    // So the "robust host-side rescue" the fenced-submit path
+                    // needs already exists. THIS echo drain is retained only for
+                    // the superseded V-3a WARP ring ("not Venus's ring",
+                    // 34dbe5d3); the re-kick contract above stands (prover-
+                    // honored), and a serve-loop rescue for IT is a
+                    // robustness-not-soundness item (self-inflicted client
+                    // liveness; the cap bounds the serve thread) -- tracked,
+                    // deferred, not owed by V-3b-2.
                     ring_store(va, WARP_RING_OFF_IDLE, 1);
                     break;
                 }
