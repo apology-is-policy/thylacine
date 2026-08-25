@@ -22,6 +22,104 @@ needed the operator.
 
 ---
 
+## 2026-08-25 (aux) -- #50 path-mutation family: git's write path opens
+
+**The chunk**: `b417b307` (scripture) + `c4f0e50e` (implementation) +
+`1dd1348e` (audit close). The operator ratified the git arc ("let us do git");
+reconnaissance had pinned the keystone as #50 -- a phenotype git could not
+write ONE file: openat refused all O_CREAT by the 6.20 3-blocker verdict, and
+mkdirat(34)/unlinkat(35)/renameat(38) were unnamed numbers. Three
+AskUserQuestion forks, all ratified: full family in one chunk/one audit; mint
+native `SYS_OPEN_CREATE=108` on the same core; `T_E_ISDIR=21` into the
+signoff-gated errno registry.
+
+**The design move worth keeping**: the 6.20 verdict ("O_CREAT cannot be ROUTED
+to SYS_WALK_CREATE") was not overturned -- it was dissolved by building what
+the verdict said was missing. Prior art collapsed the space (Plan 9 create(2)
+puts create-else-open IN the kernel; Linux v9fs runs the same as a bounded
+client loop; Fuchsia creates on the parent connection). Blocker 3 (the
+FROM_ROOT sentinel joining cwd in SYS_OPEN but not in SYS_WALK_CREATE -- the
+silent wrong-directory hazard) closed STRUCTURALLY: the LS-4 join extracted
+into `sys_join_cwd_if_relative`, one helper, both cores. The
+create/unlink/rename mechanics were EXTRACTED from the fd handlers
+(`spoor_create_install` / `spoor_unlink_in_dir` / `spoor_rename_in_dirs`), so
+the phenotype rows run byte-for-byte the gates the native syscalls run --
+I-43's shape-not-authority, enforced by code identity.
+
+**Find 1 -- the /tmp bake gap (nobody planned this).** The E2E's first run of
+the create leg as a PLAIN USER answered "can't create /tmp/f50: Permission
+denied". Not the new row failing -- the row fired and A-2d denied honestly:
+`stratum-fs put` preserves only the exec bit, so every container rootfs dir
+baked 0755 SYSTEM-owned and /tmp lost its 1777. A user-principal container
+could write NOWHERE, and no prior gate could see it -- every earlier witness
+either wrote nothing or ran privileged. Fixed at the bake
+(`populate_stratum_pool` re-stamps rootfs/tmp; 1777 since the close).
+Exactness: /tmp only, FRESH bakes only; other mode-bearing dirs a rootfs may
+carry still flatten -- the general `put`-preserves-modes fix is Stratum-side,
+open.
+
+**Find 2 -- the loopback was stricter than every real transport.** The two new
+dev9p tests EIO'd while the identical kernel path passed the boot fixture. Six
+instrumented boots walked it down (probe-asserts -> a step tracker -> deep-exit
+probes -> wire-sequence delta -> a stat-fail probe -> `g_client.dead == true`):
+the create leg legitimately DOUBLE-PARKS the parent dir fid (dirfid_put parks
+the first RPC-free; the second goes `p9_client_clunk_async`, fire-and-forget
+BY DESIGN -- its ownerless Rclunk is drained by a later reader on a real
+transport, the demux #210 orphan-clunk arm). The single-slot test loopback
+REFUSED the next send over the unread staged Rclunk ->
+`client_mark_dead_locked` -> every later op EIO. The kernel was CORRECT; the
+FIXTURE modeled a transport failure no real backend can have. Fixed narrowly:
+`loopback_send` discards exactly a WHOLE untouched staged Rclunk (counted);
+every other unread-reply send still refuses.
+
+**The close** (`1dd1348e`): the holotype (Fable 5, MODEL start==end, full
+family diversity) returned CLEAN -- 0 P0/P1/P2, 4 P3 -- re-deriving the
+authority envelope from code (an OPATH handle is born R|W, so the two-step
+composition's RIGHT_WRITE handle gate never bounded it: no escalation) and the
+#844 ref contract on all ~11 create-install exits. The parallel self-audit
+added 3 P3s (one shared). All seven landed: the OTRUNC literal got its define;
+O_CREAT|O_PATH is now SERVED by stripping (Linux ignores it -- before, the
+decide declined while the routing comment claimed "the exact Linux contour");
+a comment contradicting the verified join-once behavior was fixed; the /tmp
+re-stamp became 1777; the trailing-slash-dir renameat divergence is documented
+(strictly refuse-more); the loopback Rclunk-drop is exact-counted per leg.
+
+**A second measured-anchor lesson, from the close itself**: the drop counts
+were first pinned from a park-slot model (1/2/0) and all three failed -- one
+uart-instrumented boot measured 0/1/1, wrong in BOTH directions, because the
+choreography lives in the dirfid park/reuse pool (a successful create REUSES
+the parked fid: 0 drops; a FAILED create double-clunks the parent-qid pair:
+1). A pinned count must be a measured anchor, not a derivation.
+
+**Wrong turns, and what caught them**: (a) probe ORDER masked the bisection
+answer twice -- TEST_ASSERT returns on first failure, so a probe above the
+real divergence reported its own noise; the catch was the step tracker's
+last-reached number moving. (b) A leaked armed injection knob
+(`g_tlcreate_fail_ecode=17`) broke a pre-existing neighbor test -- the #85/#87
+family; knobs now clear unconditionally. (c) All instrumentation stripped
+before commit, verified by byte-empty diffs.
+
+**Harness note**: three attempts to run full LS-CI as a background task were
+externally SIGTERM'd (~7 min / ~2 min / promoted-then-killed) while the 35-min
+SMP gate survived the same launch shape; the operator voted one retry, then
+foreground chunking. The gate ran as 10 foreground calls (batches sized under
+the 10-minute tool cap; tcg-heavy scenarios singly at ~4-9 min each). A
+background kill is the bug_128 class -- the harness stopping its own tasks --
+and a retry budget is worthless against it; chunking is the workaround that
+held.
+
+**Witnesses on the close tip**: suite 1457/1457 (12 new tests); SMP gate PASS
+40/40, 0 corruption (default+UBSan x smp4/smp8, ~50 s/boot); full LS-CI 38
+PASS / 1 pre-existing documented red (ls-gfx-age, deterministic 3/3, predicted
+before the run) / 3 SKIP (optional GL artifacts); viv-run E2E green -- a real
+Alpine ash as a PLAIN USER ran `>file` (openat O_CREAT), `mkdir`+`mv`
+(mkdirat+renameat), `rm`+`rmdir` (unlinkat both arms) on a pts. git's
+write-path keystone is in; next: getdents64 + fsync rows (+ the O_DIRECTORY
+admission recon'd during the audit wait: musl opendir needs it or getdents64
+is unreachable), then the NO_CURL git build.
+
+---
+
 ## 2026-08-25 (aux) -- the curl demo: five walls, two kernel rows, ROADMAP 9.2 ticked
 
 The operator chose "(A) curl demo first" over the timeout arc, premised on
