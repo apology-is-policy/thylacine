@@ -853,7 +853,7 @@ sketched; 20 pointers is the ground truth. Shared helpers reused verbatim:
     `THYLACINE-VENUS-PROVE PASS` + `Thylacine boot OK` on thyla-pi/KVM real V3D.
     **F5 (the wait ns-timeout) stays a documented P3 deferral** (no live
     finite-timeout caller; teardown wants completion). Impl: tapestryd
-    `*(pending)*` + mesa `77fc80a` (patch 0012, round-trip `c317dd63`). Audit:
+    `d8d969b3` + mesa `77fc80a` (patch 0012, round-trip `c317dd63`). Audit:
     holotype Fable 5, 0 P0 / 0 P1 / 1 P2 / 2 P3, not dirty (F1 [P2] = the
     ridx-reuse witness was gate-invisible -> wired into boot-probe + the venus
     gate + test-venus-verdict; F2/F3 [P3] comment fixes, F2 convergence code
