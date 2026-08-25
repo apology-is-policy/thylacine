@@ -22,6 +22,65 @@ needed the operator.
 
 ---
 
+## 2026-08-25 — V-3b-2: the SUBMIT_CMD forward, and a "genuinely new mechanism" that already existed
+
+With 1c-2b closed (`1ab6245e`), the ring is minted, mapped, and lifetime-safe --
+but nothing yet tells virglrenderer to POLL it. V-3b-2 forwards the venus
+SUBMIT_CMD stream (chiefly the `vkCreateRingMESA` bootstrap) so the host maps the
+same shmem and begins polling. Operator chose this over the deferred cross-Proc
+warp-prove E2E, with a design pass first.
+
+**The design pass turned on one spike finding: it is standalone-witnessable.** A
+source spike (Mesa main `0cd184e9` + virglrenderer `7fcfce49` + venus-protocol
+`e94b12f3`) established that `vkCreateRingMESA` is a ~124-byte PURE-serialization
+encode Mesa builds on a stack buffer before any Vulkan instance exists, and that
+only four commands ride SUBMIT_CMD (the ring-bookkeeping quartet, all `void`) --
+everything else threads the polled ring. So V-3b-2 needs NO Mesa to witness: hand-
+build the bytes, submit, observe `status & IDLE` flip. That collapsed the scope --
+the reply-shmem (`vkSetReplyCommandStreamMESA` + a second FD_SHM) is a SEPARATE
+mechanism for synchronous ring-command replies, split off to V-3b-2b/3 rather than
+bundled (it corrected an earlier 0.4 draft that had them together). Landed as
+scripture first (WARP-V3-DESIGN 0.12, `f458bf12`).
+
+**Impl recon caught a load-bearing correction before any code.** The forward
+plumbing already existed (`ctx/<id>/submit` -> `warp_submit` -> `gpu.submit_3d`),
+but it targets `c.dev_ctx` (the VIRGL ctx) -- and a host3d ring's resource is
+created under `c.venus_ctx`, so `vkr_context_get_resource` resolves the ring's
+res_id ONLY on the venus decoder. The forward delta is therefore a venus-ctx-
+targeted submit, not a reuse of the existing verb. Corrected 0.12 (`6a1cdd21`)
+before writing the code. Sub-step A (`836855da`): `warp_venus_submit` (submits on
+`venus_ctx` via `wctx_venus_ensure`, reusing the fenced lane + admission +
+accounting byte-identically to `warp_submit`) + `wctx_has_venus` + the WFK_SUBMIT
+handler routing (a Venus client's submit -> venus_ctx, a virgl client's ->
+dev_ctx; per-client unambiguous) + a `WARP_SUBMIT_MAX`=32 KiB cap (I-32).
+
+**Sub-step B is the reusable lesson: a design's "one genuinely new robustness
+mechanism" already existed.** 0.12 scoped the round-3-F1 OWED host-side rescue as
+a bounded serve-loop follow-up drain for the fenced-submit path -- "the self-
+reschedule the single-RPC V-3a serve loop lacks." Ground-truth (server.rs +
+main.rs) showed it is `warp_service_fences`, built at W2d: it runs every serve-loop
+iteration, is bounded per pass by `FENCED_SLOTS` (16, the device fence-slot ring),
+and `warp_venus_submit` posts a CTX fence retired by it identically to a virgl
+submit (delivered by `poll_fences` on the same `ctx/<id>/fence` surface -- NOT
+`poll_ring_fences`, a mis-attribution in the 0.12 draft I also corrected). So no
+new mechanism lands; the verification IS the deliverable. What caught the over-
+build was the resume note I wrote at the compaction ("verify whether a genuinely
+new mechanism is needed or the OWED note is discharged") -- the note, not the
+design doc, carried the doubt. The round-3-F1 note's LITERAL subject is a
+DIFFERENT path (the V-3a echo drain in `wring_kick`, non-host3d rings, which Model
+B routes `E_OPNOTSUPP` -- virglrenderer polls); its cap-and-re-kick contract
+stands (prover-honored), and its own rescue is a robustness-NOT-soundness item on
+a superseded POC ring ("not Venus's ring", `34dbe5d3`) -- tracked, deferred, not
+owed by V-3b-2. Landed `c1477a91` (docs + comment; no functional code).
+
+**Open at this checkpoint.** Sub-step C (the `warp-prove ring-host3d` GL witness on
+thyla-pi -- blocked on the exact `vkCreateRingMESA` byte encoding, a source spike
+in flight; the res_id it needs is already exposed by `WFK_RING_INFO`, checked) and
+sub-step D (the Fable audit of the new client-writable command path, I-45/I-9/I-32,
+audit-bearing). A/B are LOCAL (`c1477a91`); the chunk pushes after D + all-green.
+
+---
+
 ## 2026-08-24 — V-3b-1c-2b: the client-claimable host3d ring, and a reap predicate that watched the wrong count
 
 The operator voted **A** on the parked 1c-2b fork: design F2 now rather than build
