@@ -161,6 +161,16 @@ invariant comments; the thyla-pi wedge-leg is a tracked deferral, named in
 `memory/audit_v3b2_r2_closed_list.md`, not a silent drop. The fix is fail-closed,
 bounded, and now double-audited sound.
 
+**Shipped.** The R-2 close (`b0978d6c`) + hash fixup (`c51568bc`) rebuilt with the
+R-2 tapestryd baked into a fresh ramfs (pool PRESERVED, key kept -- paired, no
+STM_EBADTAG); `test.sh` non-regression PASS (boot OK, arc 2/2, clade 3/3, 0
+FAIL/EXTINCTION -- the change is teardown-path only, so this confirms the shipped
+artifact boots + the base suite holds, exactly the by-construction bet). Pushed
+`6a1cdd21..c51568bc` to both mirrors; `ls-remote` verified codeberg == github ==
+HEAD. The whole V-3b-2 chunk -- the Venus SUBMIT_CMD forward, standalone
+GL-witnessed, double-audited -- is done. NEXT on the arc: warp-prove cross-Proc
+E2E (witness), or the reply-shmem / Mesa deferrals (design-forks).
+
 ---
 
 ## 2026-08-24 — V-3b-1c-2b: the client-claimable host3d ring, and a reap predicate that watched the wrong count
