@@ -22,6 +22,25 @@ needed the operator.
 
 ---
 
+## 2026-08-25 (aux) -- ut-parser batch close: item 5 was a misattribution, not a bug
+
+The 5th and last queued ut-parser item: an echo'd C-source one-liner
+(`echo 'int main(){__builtin_puts("CLADE_C_OK");return 0;}' > /tmp/hc.c`) that the
+2026-08-24 notes recorded as `parse error: Unexpected`. Read the parser end to end
+first -- and every path is sound by construction: scan_single_quoted consumes the
+whole body (interior `; ( ) { } "` literal), `.`/`/` are word chars so `/tmp/hc.c`
+is one Word, `>` is a redirect in parse_simple_command, the target parses. Rather
+than trust the reading, pinned it in-guest: u-repl-test's parse() on the exact
+input + 4 narrowing variants ALL return Ok. So the note was a MISATTRIBUTION --
+the input carries no `&&`/bare-`=` (the constructs that were genuinely buggy, both
+since fixed), and the concurrent /tmp-bind failure (item 2, since fixed) threw a
+RUNTIME `unable to make temporary file` on that same `> /tmp/...` command, read as
+a parse error amid the multi-failure clade-hello.exp debugging. No parser change;
+a regression test now pins the parse. That closes the whole ut-parser batch
+(=-in-arg, cd --, &&/||, line-wrap, and this one). The lesson: a recorded error
+string is a claim, not a diagnosis -- reproduce the EXACT input before spending a
+fix on it.
+
 ## 2026-08-25 (aux) -- DISPLAY-MODES impl: the 4-piece chunk + a 2-P finding + two E2E wrong turns
 
 Continued straight from the render+scripture session below: built the impl the scripture

@@ -303,6 +303,33 @@ pub extern "C" fn rs_main() -> i64 {
     }
     t_putstr("u-repl-test: = in argument position parses OK\n");
 
+    // 9b. An echo'd C-source one-liner (the 5th ut-parser-findings item): a
+    //     SINGLE-quoted body -- so its interior ; ( ) { } " are LITERAL -- then a
+    //     `>` redirect to a .c path. The whole thing is one simple command:
+    //     echo <SingleQuoted> > <path>. Each construct is exercised separately so
+    //     a failure pins the exact culprit rather than "the one-liner is bad".
+    {
+        use libutopia::parser::parse;
+        if parse("echo 'hi' > /tmp/hc.c").is_err() {
+            return fail("single-quote arg + `>` redirect to a .c path does not parse");
+        }
+        if parse("echo 'a;b(){}c'").is_err() {
+            return fail("shell metachars ; ( ) { } inside single-quotes do not parse");
+        }
+        if parse("echo 'a\"b\"c'").is_err() {
+            return fail("double-quotes inside single-quotes do not parse");
+        }
+        if parse("echo 'int main(){return 0;}'").is_err() {
+            return fail("C-ish single-quoted content (no redirect) does not parse");
+        }
+        if parse("echo 'int main(){__builtin_puts(\"CLADE_C_OK\");return 0;}' > /tmp/hc.c")
+            .is_err()
+        {
+            return fail("the echo'd-C-source one-liner does not parse");
+        }
+    }
+    t_putstr("u-repl-test: echo'd C-source one-liner parses OK\n");
+
     // 10. winsize / line-wrap: the CPR width handshake + the visual-wrapped-row
     //     render. The bug: a command that wraps past the terminal edge, when
     //     the cursor is moved, re-clears only ONE physical row and re-emits ->
