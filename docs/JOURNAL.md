@@ -73,11 +73,35 @@ stands (prover-honored), and its own rescue is a robustness-NOT-soundness item o
 a superseded POC ring ("not Venus's ring", `34dbe5d3`) -- tracked, deferred, not
 owed by V-3b-2. Landed `c1477a91` (docs + comment; no functional code).
 
-**Open at this checkpoint.** Sub-step C (the `warp-prove ring-host3d` GL witness on
-thyla-pi -- blocked on the exact `vkCreateRingMESA` byte encoding, a source spike
-in flight; the res_id it needs is already exposed by `WFK_RING_INFO`, checked) and
-sub-step D (the Fable audit of the new client-writable command path, I-45/I-9/I-32,
-audit-bearing). A/B are LOCAL (`c1477a91`); the chunk pushes after D + all-green.
+**Sub-step C: VERIFIED on thyla-pi V3D (`84ac8a27`).** The `warp-prove ring-host3d`
+client mints a host3d ring, submits a hand-built `vkCreateRingMESA`, and observes
+the host set `status & IDLE` -- proof virglrenderer mapped the ring's shmem and ran
+its poll thread, no Mesa. The encoding was not guessed: a source spike compiled +
+ran Mesa's OWN generated `vn_encode_vkCreateRingMESA` and dumped the bytes, and a
+host-side `enc_check.py` confirmed every offset before any GL boot -- which caught
+that my pre-spike field guess was wrong four ways (flags-first, a missed
+`idleTimeout` u64, offset-only head/tail/status, size_t=8B). A second spike traced
+that NO `CTX_ATTACH_RESOURCE` is needed (create-blob-on-the-venus-ctx IS the attach
+for venus; the res_id resolves by co-location), settling from source what would
+otherwise have been a failed 200s GL boot.
+
+**The reusable wrong turn: the first GL run came back UNVERIFIED, and it was NOT the
+witness.** Ground-truth on the log showed the boot never reached "Thylacine boot OK"
+-- the Cloudflare SSH tunnel dropped the STREAMING guest pty during the `go8e-2`
+clangd probe's quiet SD-card indexing phase. What caught the false attribution:
+grepping the log for the boot-OK banner (absent) and the actual last line (`clangd
+session starting` -> `closed by remote host`), then noticing `boot-probe.sh` boots
+the SAME venus image fine because it POLLS a log file (link stays busy) where the
+exp STREAMS (goes idle). The fix was one `ServerAliveInterval` on the streaming ssh
+leg; the re-run booted clean and passed. Had I retried blindly it would have dropped
+at clangd again -- the diagnosis, not a retry, is what fixed it.
+
+**Sub-step C's gate scope (verified, not assumed):** the whole arc
+(`6a1cdd21..84ac8a27`) changes only tapestryd + the warp-prove test tool + tools +
+docs -- zero kernel/arch/mm/specs, zero console/login. So the SMP gate, the specs,
+and LS-CI test surfaces this chunk provably does not touch; the venus-submit hazard
+is verified by the GL witness + the sub-step D audit + the compositor's
+non-regression in `test.sh` (PASS). Sub-step D (the Fable audit) is running.
 
 ---
 

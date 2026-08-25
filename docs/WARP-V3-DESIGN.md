@@ -631,7 +631,7 @@ observe `head` advance from 0 (`vkr_ring.c:302-317`). Local 2D devices skip (no
 venus ctx), like the existing self-test.
 
 **Invariants.** I-45: the submit is ctx-scoped -- opaque bytes to the ctx's own
-`dev_ctx`, one ctx per conn, no cross-ctx naming (the 0.9 pin). I-9: the idle/kick
+`venus_ctx`, one ctx per conn, no cross-ctx naming (the 0.9 pin). I-9: the idle/kick
 register-then-observe, upheld by virglrenderer + the guest across the coherent
 shmem (our forward is transparent to it). I-32: `WARP_SUBMIT_MAX` bounds a
 submit; the fenced-lane admission bounds concurrency.

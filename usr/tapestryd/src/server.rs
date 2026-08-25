@@ -217,6 +217,13 @@ const WARP_CTX_BACKING_MAX: u64 = 64 * 1024 * 1024;
 /// `gpu.submit_3d`'s `fenced_begin` independently enforces -- this is the
 /// defense-in-depth client-facing bound.
 const WARP_SUBMIT_MAX: usize = 32 * 1024;
+// F3: the cap is SUBSUMED today -- a Twrite payload is already bounded by
+// SRV_MSIZE (minus the p9 header), so the check never fires through the seam.
+// Kept as defense-in-depth; this assert makes a SRV_MSIZE lift ABOVE the cap a
+// compile error, so the cap becoming the binding venus-submit bound is a
+// deliberate decision, not a silent one (#230). The check itself lives inside
+// warp_venus_submit's accounted closure so if it ever arms it shows as fenced_err.
+const _: () = assert!(WARP_SUBMIT_MAX >= SRV_MSIZE_USIZE);
 /// The widest plausible bytes-per-pixel for the geometry sanity check
 /// (RGBA32F is 16); the host owns real format validity per section 2.1.
 const WARP_BO_MAX_BPP: u64 = 16;
@@ -1298,6 +1305,11 @@ pub struct Comp {
     /// The pub id whose poison condemned each slot, so a later
     /// vindication can release it (round-3 F2). 0 = none.
     warp_ctx_vindicate: [u32; MAX_WARP_CTXS],
+    /// V-3b-2 F1: for a poisoned (wedged) slot, whether the leak arm DEFERRED a
+    /// venus_ctx destroy -- the ctx had an armed venus_ctx that may carry a live
+    /// abandoned chain. The vindication destroys WARP_VENUS_CTX_BASE+slot once
+    /// the device is proven finished, exactly as dev_ctx is deferred.
+    warp_ctx_venus_vindicate: [bool; MAX_WARP_CTXS],
     warp_ctx_seq: u32,
     warp_bo_seq: u32,
     warp_ring_seq: u32,
@@ -1754,6 +1766,7 @@ impl Comp {
             warp_ctx_leaked: core::array::from_fn(|_| Vec::new()),
             warp_ctx_leaked_probe: core::array::from_fn(|_| None),
             warp_ctx_vindicate: [0; MAX_WARP_CTXS],
+            warp_ctx_venus_vindicate: [false; MAX_WARP_CTXS],
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
             warp_ring_seq: 0,
@@ -6737,9 +6750,12 @@ impl Comp {
         // V-3b-1c-2a fail-closed: a HOST3D ring's memory is Venus's format, not
         // the V-3a WARP_RING_OFF_* control header the echo-drain below reads, so
         // driving it as a V-3a ring would write V-3a control words into a Venus
-        // page. A host3d kick becomes gpu.submit_3d(dev_ctx, ridx, cs) at V-3b-2;
-        // until then it is unimplemented, not a V-3a drain. (The ring flavor IS
-        // client-reachable via ring/new at 1c-2a, so this guard is load-bearing.)
+        // page. Model B (V-3b-2): virglrenderer POLLS a host3d ring, so its kick
+        // verb is PERMANENTLY E_OPNOTSUPP -- the doorbell is `vkNotifyRingMESA`
+        // submitted via `ctx/<id>/submit` -> `warp_venus_submit` on venus_ctx
+        // (NOT dev_ctx; the res_id resolves only on the venus decoder, 0.12).
+        // (The ring flavor IS client-reachable via ring/new, so this guard is
+        // load-bearing.)
         if is_host3d {
             return Err(p9::E_OPNOTSUPP);
         }
@@ -7112,35 +7128,25 @@ impl Comp {
                 // with live work (that is what makes the host's
                 // behaviour undefined in the first place).
                 self.warp_ctx_slot_poisoned[slot] = true;
-                // V-3b-1c-2 F1: the venus ctx is a SEPARATE context from dev_ctx
-                // and, at 1c-2a, is quiesced by construction -- no submit path
-                // targets it, and its rings were dropped unconditionally in the
-                // ring loop above -- so destroy it HERE even on the wedge path.
-                // The vindication recovers dev_ctx (destroy + un-poison) but knows
-                // nothing of venus, so a venus ctx left alive is re-minted
-                // (WARP_VENUS_CTX_BASE+slot) into a live host ctx by the next
-                // client to land on the recovered slot: EEXIST, and that slot
-                // permanently loses host3d. A REFUSED venus destroy means the host
-                // may still hold it, so do NOT stamp vindicate -- leave the slot
-                // permanently condemned rather than recycle it into the collision.
-                // FORWARD (V-3b-2): venus submits will give venus_ctx its own
-                // in-flight work; this unconditional destroy then becomes wrong and
-                // must move to the vindication path with a real quiesce, exactly as
-                // dev_ctx is deferred here.
-                let mut venus_dead = true;
-                if let Some(vc) = c.venus_ctx {
-                    if self.gpu.ctx_destroy(vc).is_err() {
-                        venus_dead = false;
-                        say!(
-                            "tapestryd: warp ctx slot {} venus-ctx destroy REFUSED on wedge -- permanently condemned (no recycle)",
-                            slot
-                        );
-                    }
+                // V-3b-2 F1: DEFER the venus_ctx destroy to the vindication,
+                // exactly as dev_ctx is deferred here. Since 836855da,
+                // warp_venus_submit posts fenced chains on venus_ctx (counted in
+                // the SAME fences_in_flight), so a wedge may leave a venus chain
+                // "still live device-side" (the abandon tag's own warning) --
+                // destroying venus_ctx now would breach the very
+                // destroy-with-live-work contract dev_ctx is deferred to avoid
+                // (the 1c-2a "quiesced by construction" premise this replaces died
+                // the moment a submit path targeted venus_ctx). The vindication's
+                // `ctx_has_poisoned_slot` proof covers venus chains too -- they tag
+                // with the WarpCtx's pub_id, like dev_ctx -- so BOTH ctxs are
+                // provably finished before either is destroyed. Record the venus
+                // half; the vindication destroys WARP_VENUS_CTX_BASE+slot with the
+                // same condemn-on-refuse posture.
+                if c.venus_ctx.is_some() {
+                    self.warp_ctx_venus_vindicate[slot] = true;
                 }
-                if venus_dead {
-                    self.warp_ctx_vindicate[slot] = c.pub_id;
-                    say!("tapestryd: warp ctx slot {} POISONED (fence wedge)", slot);
-                }
+                self.warp_ctx_vindicate[slot] = c.pub_id;
+                say!("tapestryd: warp ctx slot {} POISONED (fence wedge)", slot);
                 return;
             }
             // A CLEAN finish is a stronger proof than a vindication: it
@@ -7162,10 +7168,13 @@ impl Comp {
             // V-3b-1c-2: destroy the per-client venus device-ctx before the
             // dev_ctx, SAME condemn-on-refuse pattern -- else its id
             // (WARP_VENUS_CTX_BASE + slot) could be re-minted into a still-live
-            // host context when this slot is reused. At 1c-2a the venus ctx
-            // owns only HOST3D rings (no submits land yet), all torn down in the
-            // ring loop above, so a clean finish here is safe; a refused destroy
-            // condemns the slot exactly as dev_ctx does.
+            // host context when this slot is reused. Eager destroy here is safe
+            // because THIS is the CLEAN arm: it is reached only on
+            // `fences_in_flight == 0 && !fence_poisoned`, which since 836855da
+            // covers venus chains too (they share the counter), so venus_ctx has
+            // no live device work. (The WEDGE arm above defers the venus destroy
+            // to the vindication -- F1.) A refused destroy condemns the slot
+            // exactly as dev_ctx does.
             if let Some(v) = c.venus_ctx {
                 if self.gpu.ctx_destroy(v).is_err() {
                     self.warp_ctx_slot_poisoned[slot] = true;
@@ -7820,6 +7829,28 @@ impl Comp {
                 );
                 continue;
             }
+            // V-3b-2 F1: destroy the venus_ctx the leak arm deferred, now that
+            // the device is provably finished (ctx_has_poisoned_slot false covers
+            // venus chains -- same pub_id). SAME condemn-on-refuse as dev_ctx: a
+            // refused destroy leaves the slot poisoned; it is never recycled, so
+            // its venus id (WARP_VENUS_CTX_BASE+slot) can never re-mint into a
+            // still-live host context. The flag clears on success, so this is
+            // idempotent under the multi-chain vindication that reaches here only
+            // once ctx_has_poisoned_slot is finally false.
+            if self.warp_ctx_venus_vindicate[slot] {
+                if self
+                    .gpu
+                    .ctx_destroy(WARP_VENUS_CTX_BASE + slot as u32)
+                    .is_err()
+                {
+                    say!(
+                        "tapestryd: warp ctx slot {} venus-ctx destroy REFUSED at vindication -- slot stays condemned",
+                        slot
+                    );
+                    continue;
+                }
+                self.warp_ctx_venus_vindicate[slot] = false;
+            }
             // Only now are the parked backings provably free of the device.
             self.warp_free_leaked(slot);
             self.warp_ctx_slot_poisoned[slot] = false;
@@ -7902,17 +7933,23 @@ impl Comp {
     /// resource SCOPE, not command parsing). Reuses the fenced lane + admission +
     /// accounting.
     fn warp_venus_submit(&mut self, ctx_pub: u32, conn: u64, stream: &[u8]) -> Result<u64, u32> {
-        if stream.len() > WARP_SUBMIT_MAX {
-            return Err(p9::E_INVAL);
-        }
-        let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
+        // F3: fenced_rx FIRST (matching warp_submit), and EVERY refusal
+        // (WARP_SUBMIT_MAX, venus_ensure, admit) inside the accounted closure --
+        // so no funnel outcome is invisible to the #210 ledger
+        // (rx - minted - again - err). The routing (wctx_has_venus) guarantees
+        // venus_ensure takes its existing fast path here, so its error arm is
+        // unreachable through the seam; it stays inside for accounting parity.
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
             c.fenced_rx += 1;
         }
         let r = (|| {
+            if stream.len() > WARP_SUBMIT_MAX {
+                return Err(p9::E_INVAL);
+            }
             // The budget gate is ctx-scoped (fence_poisoned + the per-ctx fence
             // share), identical for either device ctx; its returned dev_ctx is
             // unused here -- the venus stream submits on venus_ctx instead.
+            let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
             let _ = self.warp_fenced_admit(ctx_pub, conn)?;
             match self.gpu.submit_3d(venus_ctx, ctx_pub, stream) {
                 Ok(f) => {
