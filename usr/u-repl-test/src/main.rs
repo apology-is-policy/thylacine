@@ -303,6 +303,84 @@ pub extern "C" fn rs_main() -> i64 {
     }
     t_putstr("u-repl-test: = in argument position parses OK\n");
 
+    // 10. winsize / line-wrap: the CPR width handshake + the visual-wrapped-row
+    //     render. The bug: a command that wraps past the terminal edge, when
+    //     the cursor is moved, re-clears only ONE physical row and re-emits ->
+    //     the line duplicates on every keystroke. The fix needs (a) the editor
+    //     to learn the width and (b) render to move up to the block TOP before
+    //     clearing. Both are pure logic -- driven directly on the LineEditor.
+    {
+        use libutopia::line_editor::LineEditor;
+
+        // (a) A CPR reply ESC[<rows>;<cols>R sets the width (cols = 2nd param).
+        let mut le = LineEditor::new();
+        if le.cols().is_some() {
+            return fail("winsize: a fresh editor already claims a width");
+        }
+        let _ = le.feed_bytes(b"\x1b[24;80R");
+        if le.cols() != Some(80) {
+            return fail("winsize: a CPR reply did not set cols to 80");
+        }
+        // A CPR reply must NOT surface as a keystroke (buffer stays empty).
+        if !le.buffer().is_empty() {
+            return fail("winsize: the CPR reply leaked into the buffer as keys");
+        }
+
+        // (b) A reply dribbled across reads (the HVF serial split) reassembles
+        //     -- the byte-at-a-time CSI parser handles chunking for free.
+        let mut split = LineEditor::new();
+        let _ = split.feed_bytes(b"\x1b[40");
+        let _ = split.feed_bytes(b";132R");
+        if split.cols() != Some(132) {
+            return fail("winsize: a split CPR reply did not reassemble to 132");
+        }
+
+        // A non-CPR CSI final (one param) and a zero-size report leave cols
+        // unset -- never a spurious width.
+        let mut nope = LineEditor::new();
+        let _ = nope.feed_bytes(b"\x1b[80R"); // one param -> not a CPR
+        let _ = nope.feed_bytes(b"\x1b[0;0R"); // zero size -> rejected
+        if nope.cols().is_some() {
+            return fail("winsize: a non-CPR / zero-size report set a width");
+        }
+
+        // Width UNKNOWN: render is byte-preserved (the pre-fix newline-only
+        // path). It starts with the single-line clear "\r\x1b[K".
+        let mut unknown = LineEditor::new();
+        let _ = unknown.feed_bytes(b"hello");
+        let s = unknown.render("> ");
+        if !s.starts_with("\r\x1b[K") {
+            return fail("winsize: cols=None render regressed the byte-preserved fallback");
+        }
+
+        // Width known, short line (no wrap): the wrapped path erases to end of
+        // screen ("\r\x1b[J") and shows the buffer -- a single physical row.
+        let mut wide = LineEditor::new();
+        wide.set_cols(80);
+        let _ = wide.feed_bytes(b"hi");
+        let s = wide.render("> ");
+        if !s.starts_with("\r\x1b[J") || !s.contains("> hi") {
+            return fail("winsize: cols=Some single-row render has the wrong shape");
+        }
+
+        // THE DISCRIMINATOR. cols=20, prompt "> " (width 2) + 30 chars = 32
+        // cells -> 2 physical rows; the cursor ends on row 1. A first render
+        // records that row; after a cursor move, the SECOND render must move
+        // UP to the block top ("\x1b[1A") before clearing. The buggy
+        // newline-only render treats the wrapped line as ONE line and emits NO
+        // up-move -- so this assertion fails without the fix.
+        let mut wrap = LineEditor::new();
+        wrap.set_cols(20);
+        let _ = wrap.feed_bytes(&[b'a'; 30]);
+        let _ = wrap.render("> "); // establishes prev_cursor_row = 1
+        let _ = wrap.feed_byte(0x02); // Ctrl-B: cursor left, still on row 1
+        let s = wrap.render("> ");
+        if !s.starts_with("\x1b[1A\r\x1b[J") {
+            return fail("winsize: wrapped re-render did not move up to the block top (the dup bug)");
+        }
+    }
+    t_putstr("u-repl-test: winsize / line-wrap OK\n");
+
     t_putstr("u-repl-test: all OK\n");
     0
 }

@@ -539,6 +539,24 @@ pub struct LineEditor {
     /// default) disables coloring -- render emits the buffer verbatim, so
     /// host tests + the bare-spawn boot check stay byte-identical.
     known_commands: Vec<String>,
+    /// Terminal width in columns, once known -- from `/dev/winsize` (the
+    /// shell's fast path) or a Cursor-Position-Report the CSI parser
+    /// recognizes (`set_cols`). `None` == "width unknown": render falls back
+    /// to the newline-only geometry (today's behaviour, correct for a dumb
+    /// pipe or an unanswered probe) rather than GUESS a width -- a wrong width
+    /// emits wrong cursor-up counts and corrupts the display, strictly worse
+    /// than not wrapping. `Some(c)` enables visual-wrapped-row rendering.
+    cols: Option<usize>,
+    /// The physical row offset (from the rendered block's top) where the
+    /// previous wrapped render left the terminal cursor. The next wrapped
+    /// render moves UP this many rows to reach the block top before clearing
+    /// and re-emitting -- without it a redraw of a line that wrapped past the
+    /// terminal edge clears only the cursor's current physical row and
+    /// re-emits from there, duplicating the line on every keystroke (the
+    /// reported bug). Zeroed whenever the caller moves the cursor to a fresh
+    /// line (submit / cancel / clear-screen / `reset_render_position`).
+    /// Untouched while `cols` is `None`.
+    prev_cursor_row: usize,
 }
 
 impl Default for LineEditor {
@@ -561,7 +579,33 @@ impl LineEditor {
             desired_col: None,
             completion_source: None,
             known_commands: Vec::new(),
+            cols: None,
+            prev_cursor_row: 0,
         }
+    }
+
+    /// Record the terminal width (columns). The shell calls this from the
+    /// `/dev/winsize` fast path; the CSI parser calls it when a CPR reply
+    /// arrives. Floored at 1 so the wrapped-row division is always safe.
+    /// Setting a width enables visual-wrapped-row rendering; a resize just
+    /// re-calls this with the new width (the next redraw reflows).
+    pub fn set_cols(&mut self, cols: usize) {
+        self.cols = Some(cols.max(1));
+    }
+
+    /// The known terminal width, or `None` when unknown. Test/introspection
+    /// hook; the shell never needs to read it back.
+    pub fn cols(&self) -> Option<usize> {
+        self.cols
+    }
+
+    /// Forget where the previous render left the terminal cursor: the caller
+    /// has just moved it to a fresh line by an emission the editor did not
+    /// see (`\x1b[2J\x1b[H` on clear-screen, the `\r\n` before an async note
+    /// notification). The next render then draws from the current line as a
+    /// fresh block instead of trying to move up to a stale block top.
+    pub fn reset_render_position(&mut self) {
+        self.prev_cursor_row = 0;
     }
 
     /// Install a Tab completion source (U-4d). The shell main loop
@@ -600,8 +644,10 @@ impl LineEditor {
         self.parser = ParserState::Ground;
         self.mode = LineEditorMode::Normal;
         self.desired_col = None;
+        self.prev_cursor_row = 0;
         // kill_buffer survives Cancel/Accept -- yank can paste across
-        // a Cancel boundary (standard emacs behaviour).
+        // a Cancel boundary (standard emacs behaviour). cols persists --
+        // the terminal did not change size.
     }
 
     pub fn buffer(&self) -> &str {
@@ -721,7 +767,7 @@ impl LineEditor {
     /// clear "from cursor to end of screen" at start of render. For
     /// U-4b the boot probe only checks emitted bytes (not screen
     /// state) so this is invisible.
-    pub fn render(&self, prompt: &str) -> String {
+    pub fn render(&mut self, prompt: &str) -> String {
         // U-4c: in Search mode, render shows the readline-style
         // search prompt + the matched line (or empty if no match).
         // Cursor positions at the end of the query inside the
@@ -732,6 +778,23 @@ impl LineEditor {
         {
             return self.render_search(query, *match_index);
         }
+        // Width unknown -> the newline-only geometry (today's behaviour): a
+        // dumb pipe or an unanswered probe has no width to wrap against, and a
+        // GUESS would emit wrong cursor-up counts. Width known -> the
+        // visual-wrapped-row path that fixes the wrap-and-move duplication.
+        match self.cols {
+            None => self.render_unwrapped(prompt),
+            Some(cols) => self.render_wrapped(prompt, cols),
+        }
+    }
+
+    /// The newline-only render (the `cols == None` fallback). Positions the
+    /// cursor by counting LOGICAL '\n' lines, not visual wrapped rows -- so a
+    /// single logical line that overflows the terminal width is mis-positioned
+    /// (the pre-fix behaviour, kept verbatim for the width-unknown case where
+    /// nothing better is possible). Takes `&self`: it tracks no cross-render
+    /// state.
+    fn render_unwrapped(&self, prompt: &str) -> String {
         let prompt_w = crate::ansi::visible_width(prompt);
         let cont = continuation_prefix(prompt_w);
         let cont_w = crate::ansi::visible_width(&cont);
@@ -787,6 +850,114 @@ impl LineEditor {
         if target_col > 0 {
             out.push_str(&format!("\x1b[{}C", target_col));
         }
+
+        out
+    }
+
+    /// The visual-wrapped-row render (`cols == Some`). Counts the PHYSICAL
+    /// rows each logical line occupies once the terminal wraps it at `cols`,
+    /// so cursor motion on a line that overflowed the width no longer clears
+    /// only one physical row and re-emits from the wrong place (the reported
+    /// duplication bug).
+    ///
+    /// Sequence, all cursor moves RELATIVE (scroll-safe, linenoise-style):
+    ///   1. Up `prev_cursor_row` rows + CR -> the block's top-left. (The
+    ///      previous render left the cursor at its logical row within the
+    ///      block; `prev_cursor_row` records that row.)
+    ///   2. `\x1b[J` -- erase from here to end of screen (clears the whole old
+    ///      block, including rows a shrink left stale -- the U-6 caveat, now
+    ///      closed for the width-known path).
+    ///   3. Emit prompt + buffer; a `\r\n` + continuation prefix joins logical
+    ///      lines. Autowrap lays each logical line across its physical rows.
+    ///   4. If the last logical line exactly fills its final row, emit one
+    ///      `\r\n` so the terminal leaves "pending wrap" for a real row -- the
+    ///      cursor's end position is then unambiguous.
+    ///   5. Move from that end position UP to the cursor's physical row, CR,
+    ///      then right to its column.
+    ///   6. Record the cursor's physical row for the next render.
+    fn render_wrapped(&mut self, prompt: &str, cols: usize) -> String {
+        let cols = cols.max(1); // defensive: never divide by zero
+        let prompt_w = crate::ansi::visible_width(prompt);
+        let cont = continuation_prefix(prompt_w);
+        let cont_w = crate::ansi::visible_width(&cont);
+
+        // Physical rows a logical line of visible width `w` occupies when its
+        // on-screen prefix (prompt / continuation) is `p` wide: ceil over the
+        // width, but at least one row (an empty line still shows a row).
+        let line_rows = |p: usize, w: usize| -> usize {
+            let cells = p + w;
+            if cells == 0 {
+                1
+            } else {
+                (cells + cols - 1) / cols // ceil(cells / cols)
+            }
+        };
+
+        let lines: Vec<&str> = self.buffer.split('\n').collect();
+        let prefix_w = |i: usize| if i == 0 { prompt_w } else { cont_w };
+
+        // Cursor's logical line + its visible column within that line.
+        let bytes_up_to_cursor = &self.buffer[..self.cursor];
+        let cursor_line = bytes_up_to_cursor.matches('\n').count();
+        let cursor_line_start = bytes_up_to_cursor.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let col_in_line = crate::ansi::visible_width(&self.buffer[cursor_line_start..self.cursor]);
+
+        // Physical row where each logical line begins (running sum of rows).
+        // `content_rows` = rows the emitted block occupies before any forced
+        // trailing newline; `cursor_row`/`cursor_col` = the cursor's physical
+        // cell within it.
+        let mut start = 0usize;
+        let mut cursor_row = 0usize;
+        let mut cursor_col = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            let w = crate::ansi::visible_width(line);
+            if i == cursor_line {
+                let cells = prefix_w(i) + col_in_line;
+                cursor_row = start + cells / cols;
+                cursor_col = cells % cols;
+            }
+            start += line_rows(prefix_w(i), w);
+        }
+        let content_rows = start; // sum over all lines
+
+        // The last logical line exactly fills its final row -> the terminal
+        // parks in pending-wrap; a forced `\r\n` gives the cursor a real row.
+        let last = lines.len() - 1;
+        let last_cells = prefix_w(last) + crate::ansi::visible_width(lines[last]);
+        let forced = last_cells > 0 && last_cells % cols == 0;
+        // Row the terminal cursor sits on right after emission (+ forced NL).
+        let end_row = if forced { content_rows } else { content_rows - 1 };
+
+        let mut out = String::new();
+        // 1. Up to the block top, column 0.
+        if self.prev_cursor_row > 0 {
+            out.push_str(&format!("\x1b[{}A", self.prev_cursor_row));
+        }
+        out.push('\r');
+        // 2. Clear the whole old block (and anything a shrink left below).
+        out.push_str("\x1b[J");
+        // 3. Emit prompt + buffer. No per-line \x1b[K -- (2) cleared already.
+        out.push_str(prompt);
+        out.push_str(&self.colorize_line0(lines[0]));
+        for line in &lines[1..] {
+            out.push_str("\r\n");
+            out.push_str(&cont);
+            out.push_str(line);
+        }
+        // 4. Force the pending-wrap into a real row when the tail fills it.
+        if forced {
+            out.push_str("\r\n");
+        }
+        // 5. Move from the emission end up to the cursor's row, then across.
+        if end_row > cursor_row {
+            out.push_str(&format!("\x1b[{}A", end_row - cursor_row));
+        }
+        out.push('\r');
+        if cursor_col > 0 {
+            out.push_str(&format!("\x1b[{}C", cursor_col));
+        }
+        // 6. Remember where this render left the cursor.
+        self.prev_cursor_row = cursor_row;
 
         out
     }
@@ -1036,9 +1207,24 @@ impl LineEditor {
                     _ => Action::Ignore,
                 }
             }
+            b'R' => {
+                // Cursor-Position Report: ESC[<rows>;<cols>R. The terminal's
+                // reply to the width probe the shell emits (ESC[9999;9999H
+                // parks the cursor -> the terminal clamps to the bottom-right,
+                // so the reported position IS the screen size). Recognized
+                // here byte-at-a-time, so a reply dribbled across reads (the
+                // HVF serial round-trip) reassembles for free; absorbed as
+                // NoChange, never surfaced as a phantom key. Two non-zero
+                // params required (rows;cols); the width is params[1].
+                self.parser = ParserState::Ground;
+                if param_count >= 1 && current_has_digits && params[0] != 0 && params[1] != 0 {
+                    self.set_cols(params[1] as usize);
+                }
+                Action::Ignore
+            }
             _ => {
                 // Unknown CSI final -- reset; v1.x can add SGR (m),
-                // device-status (n), cursor-position (R), etc.
+                // device-status (n), etc.
                 self.parser = ParserState::Ground;
                 Action::Ignore
             }
@@ -1750,11 +1936,14 @@ impl LineEditor {
         if st.awaits_continuation() {
             return self.do_insert('\n');
         }
-        // Balanced: submit.
+        // Balanced: submit. The caller moves the terminal past the edited
+        // line (a `\r\n`) and draws a fresh prompt, so the next render starts
+        // a fresh block -- forget the accepted block's cursor row.
         let line = core::mem::take(&mut self.buffer);
         self.cursor = 0;
         self.history_pos = None;
         self.saved_current.clear();
+        self.prev_cursor_row = 0;
         EditorAction::Accept(line)
     }
 
@@ -1763,6 +1952,7 @@ impl LineEditor {
         self.cursor = 0;
         self.history_pos = None;
         self.saved_current.clear();
+        self.prev_cursor_row = 0;
         EditorAction::Cancel
     }
 
@@ -2098,7 +2288,7 @@ mod tests {
 
     #[test]
     fn render_at_column_zero_omits_cursor_motion() {
-        let le = LineEditor::new();
+        let mut le = LineEditor::new();
         let s = le.render("");
         // Empty prompt + empty buffer -> no \x1b[<n>C.
         assert!(!s.contains("\x1b["[..].trim_start_matches('\x1b')) || !s.ends_with('C'));
@@ -2804,5 +2994,64 @@ mod tests {
         let s = le.render("> ");
         assert!(!s.contains(FEN_SGR));
         assert!(!s.contains(CINNABAR_SGR));
+    }
+
+    // ---- winsize / line-wrap (the CPR width handshake + wrapped-row render).
+    // The runnable proof lives in /u-repl-test (this crate is no_std, so these
+    // #[cfg(test)] cases document the contract without executing).
+
+    #[test]
+    fn cpr_reply_sets_width_and_is_not_a_key() {
+        // A Cursor-Position-Report ESC[<rows>;<cols>R sets the width to its
+        // 2nd param and is absorbed (never a keystroke).
+        let mut le = LineEditor::new();
+        assert_eq!(le.cols(), None);
+        feed(&mut le, b"\x1b[24;80R");
+        assert_eq!(le.cols(), Some(80));
+        assert_eq!(le.buffer(), "");
+    }
+
+    #[test]
+    fn cpr_reply_reassembles_when_split() {
+        // The byte-at-a-time CSI parser reassembles a reply dribbled across
+        // reads (the HVF serial split) for free.
+        let mut le = LineEditor::new();
+        feed(&mut le, b"\x1b[40");
+        feed(&mut le, b";132R");
+        assert_eq!(le.cols(), Some(132));
+    }
+
+    #[test]
+    fn non_cpr_and_zero_size_leave_width_unset() {
+        let mut le = LineEditor::new();
+        feed(&mut le, b"\x1b[80R"); // one param -> not a CPR
+        feed(&mut le, b"\x1b[0;0R"); // zero size -> rejected
+        assert_eq!(le.cols(), None);
+    }
+
+    #[test]
+    fn width_unknown_render_is_byte_preserved() {
+        // cols == None keeps the pre-fix newline-only render: it opens with
+        // the single-line clear "\r\x1b[K".
+        let mut le = LineEditor::new();
+        feed(&mut le, b"hello");
+        let s = le.render("> ");
+        assert!(s.starts_with("\r\x1b[K"));
+    }
+
+    #[test]
+    fn wrapped_render_moves_up_to_the_block_top() {
+        // The discriminator. cols=20, prompt "> " (2) + 30 chars = 32 cells ->
+        // 2 physical rows; the cursor ends on row 1. After a cursor move the
+        // next render moves UP to the block top ("\x1b[1A") before clearing --
+        // the fix. A newline-only render would treat the wrapped line as ONE
+        // line and emit no up-move (the duplication bug).
+        let mut le = LineEditor::new();
+        le.set_cols(20);
+        feed(&mut le, &[b'a'; 30]);
+        let _ = le.render("> "); // records prev_cursor_row = 1
+        feed(&mut le, &[0x02]); // Ctrl-B: cursor left, still row 1
+        let s = le.render("> ");
+        assert!(s.starts_with("\x1b[1A\r\x1b[J"));
     }
 }

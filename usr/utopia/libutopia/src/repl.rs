@@ -409,8 +409,11 @@ impl Repl {
 
     /// Emit the current prompt + buffer to `out`. Call once before the first
     /// `feed` to draw the initial prompt.
-    pub fn draw_prompt(&self, out: &mut dyn IoWrite) {
-        let _ = out.write_all(self.editor.render(&self.prompt()).as_bytes());
+    pub fn draw_prompt(&mut self, out: &mut dyn IoWrite) {
+        // render() borrows the editor mutably (it tracks the wrapped-render
+        // cursor row), so compute the prompt string first.
+        let p = self.prompt();
+        let _ = out.write_all(self.editor.render(&p).as_bytes());
         let _ = out.flush();
     }
 
@@ -503,6 +506,10 @@ impl Repl {
                 }
                 EditorAction::ClearScreen => {
                     let _ = out.write_all(b"\x1b[2J\x1b[H");
+                    // The terminal cursor is now home (0,0); the editor did
+                    // not see that move, so drop its stale block-row before
+                    // the fresh redraw.
+                    self.editor.reset_render_position();
                     self.emit_prompt(out);
                 }
                 EditorAction::MenuShow {
@@ -591,8 +598,9 @@ impl Repl {
         self.env.let_set("*", Value::list(args.to_vec()));
     }
 
-    fn emit_prompt(&self, out: &mut dyn IoWrite) {
-        let _ = out.write_all(self.editor.render(&self.prompt()).as_bytes());
+    fn emit_prompt(&mut self, out: &mut dyn IoWrite) {
+        let p = self.prompt();
+        let _ = out.write_all(self.editor.render(&p).as_bytes());
         let _ = out.flush();
     }
 
@@ -708,6 +716,9 @@ impl Repl {
         if interrupted {
             self.editor.reset();
         }
+        // The leading `\r\n` + any notification moved the cursor to a fresh
+        // line the editor did not see -> redraw the prompt as a fresh block.
+        self.editor.reset_render_position();
         self.emit_prompt(out);
     }
 }
