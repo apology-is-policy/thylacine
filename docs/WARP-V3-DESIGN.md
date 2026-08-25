@@ -69,9 +69,13 @@ resources but stays venus-agnostic:
 ### 0.4 What V-3b builds (the deltas)
 - **tapestryd**: the `HOST3D`-ring-blob mint + guest-map + register path
   (virglrenderer's `vkr_context_create_resource_from_shm` is the host-side
-  reference); the SUBMIT_CMD forward of the venus stream on the controlq; the
-  reply-shmem registration (`FD_SHM`). The OWED host-side rescue (round-3 F1)
-  applies to the fenced-submit drain. Audit-bearing (the section-25.4 Warp row).
+  reference); the SUBMIT_CMD forward of the venus stream on the controlq (V-3b-2,
+  section 0.12); the OWED host-side rescue (round-3 F1) applies to the
+  fenced-submit drain. The reply-shmem (`vkSetReplyCommandStreamMESA` + a second
+  `FD_SHM`) is a SEPARATE mechanism the 2026-08-25 spike split OFF the forward
+  (section 0.12): the four bootstrap commands are void, so V-3b-2 needs no reply
+  plumbing; the reply-shmem lands with the ring commands that return synchronous
+  values (V-3b-2b/V-3b-3). Audit-bearing (the section-25.4 Warp row).
 - **Mesa** (`vn_renderer_thylacine.c`, ~1.2 kLOC, patch 0010+ under
   `src/virtio/vulkan/`): the 19-fn `vn_renderer` (16 mandatory), mapping above;
   built with `-Dvulkan-drivers=virtio` on `thyla-keep`, a Vulkan ICD artifact +
@@ -518,6 +522,99 @@ approach is unchanged, the count is the full image.c predicate). This section is
 the pin; the impl commit (F1 + syscall + F2 teardown/reaper + the client claim
 path, landed together and audited) references it. Impl: `7696540a` (initial) +
 the audit-close.
+
+### 0.12 V-3b-2 design: the SUBMIT_CMD forward + the ring bootstrap (design-first)
+
+The client-claimable HOST3D ring (0.9-0.11) is minted, mapped, and lifetime-safe,
+but nothing yet tells virglrenderer to POLL it. V-3b-2 forwards the venus
+SUBMIT_CMD stream -- chiefly the ring-bootstrap command `vkCreateRingMESA` -- from
+the client to virglrenderer, so the host maps the same shmem and begins polling.
+
+**Source-grounded (spike 2026-08-25: Mesa main @`0cd184e9` + virglrenderer main
+@`7fcfce49` + venus-protocol @`e94b12f3`, the revision Mesa's wrap pins):**
+
+1. **SUBMIT_CMD is `DRM_IOCTL_VIRTGPU_EXECBUFFER`**, dispatched host-side by
+   `vkr_context_submit_cmd` (`vkr_context.c:164-186`) against the CONTEXT decoder.
+   Only four commands ride it -- `vkCreateRingMESA` / `vkDestroyRingMESA` /
+   `vkNotifyRingMESA` / `vkSubmitVirtqueueSeqnoMESA` -- everything else threads
+   through the ring (polled). All four are `<proto>void`: fence-signaled, NO data
+   reply (`VK_MESA_venus_protocol.xml:165-211`; `vkr_transport.c:187-351` writes
+   none).
+2. **Ring layout** (`vn_ring.c:257-283`, host view `vkr_transport.c:110-175`):
+   five disjoint 4-byte-aligned regions in the HOST3D shmem -- head@0 (consumer,
+   host writes), tail@64 (producer, guest writes), status@128 (IDLE/FATAL/ALIVE
+   bits), buffer@192 (128 KiB power-of-two command stream), extra@192+128KiB (a
+   4-byte host->guest scratch, `vkWriteRingExtraMESA`). NO reply region lives in
+   the ring.
+3. **`vkCreateRingMESA` references the ring by its virtio-gpu `res_id`** (the
+   HOST3D mappable blob's, minted + registered by 0.8/0.10) via
+   `VkRingCreateInfoMESA{resourceId, offset=0, size=shmem_size, idleTimeout,
+   {head,tail,status,buffer,extra}Offset/Size}` (`vn_ring.c:359-379`); the host
+   requires FD_SHM (`vkr_transport.c:200-204`). A ~124-byte (140 w/ the monitor
+   pNext) PURE-serialization encode -- no Vulkan object, no live instance; Mesa
+   encodes it into a 256-byte stack buffer before any instance exists.
+
+**The design.**
+- **New client interface `ctx/<id>/submit`** (a WARP_CTX file kind, sibling to
+  `info`): the client writes a raw venus SUBMIT_CMD (EXECBUFFER) byte stream;
+  tapestryd forwards it verbatim via the existing `gpu.submit_3d(ctx.dev_ctx,
+  ctx.pub, bytes)` on the fenced lane. tapestryd NEVER parses the stream (opaque
+  bytes; the venus ctx is the host-side resource SCOPE, not command parsing -- the
+  0.6 venus-agnostic principle). Bounded by `warp_fenced_admit` + a
+  `WARP_SUBMIT_MAX` byte cap (I-32).
+- **The bootstrap** is the client submitting `vkCreateRingMESA` (res_id = its
+  host3d ring's) once; virglrenderer's `vkr_dispatch_vkCreateRingMESA` starts its
+  poll thread (`vkr_ring.c:351`).
+- **The doorbell** is `vkNotifyRingMESA` via the same `submit`, sent by the guest
+  ONLY when it observes `status & IDLE` after publishing tail (the seq_cst
+  register-then-observe, symmetric: guest stores tail seq_cst then loads status
+  seq_cst `vn_ring.c:446-491`; host sets IDLE seq_cst then re-reads tail
+  `vkr_ring.c:270-300`). Our side merely forwards -- the I-9 handshake is
+  virglrenderer's + the guest's, over the cache-coherent shmem 0.7/0.8 already
+  established.
+- **Fence/completion**: `gpu.submit_3d` returns a fence id; `poll_ring_fences`
+  (already in the serve loop) delivers it. The bootstrap commands are void, so a
+  client typically POLLS the ring `status` for the witness rather than waiting the
+  fence; the fence is the lane's ordering + the rescue's trigger.
+- **The host-side rescue (round-3 F1 OWED, [[design-v3b-ring-kick-rescue-owed]])**:
+  a bounded serve-loop follow-up drain for the fenced-submit path -- the
+  self-reschedule the single-RPC V-3a serve loop lacks, DoS-safe (bounded per
+  pass). The one genuinely new robustness mechanism; it lands here.
+
+**Scope: the reply-shmem SPLITS OFF (this corrects 0.4).** Replies from
+ring-executed BULK commands go to a SEPARATE client-registered reply shmem
+(`vkSetReplyCommandStreamMESA` + a second FD_SHM resource; `vn_ring.c:678-742`),
+NOT the ring buffer or the extra region. Since the four SUBMIT_CMD bootstrap
+commands return nothing, V-3b-2 needs NO reply plumbing. The reply-shmem is a
+follow-on (V-3b-2b or with Mesa), exercised only when a ring command returns a
+synchronous value (a V-3b-3 concern). Folding it in now would add an
+unwitnessable-until-Mesa surface to an otherwise cleanly testable chunk.
+
+**Witness (standalone, GL-only).** A `warp-prove ring-host3d` verb: mint a host3d
+ring (0.9), hand-build a ~124-byte `vkCreateRingMESA`, submit it via
+`ctx/<id>/submit`, and observe virglrenderer set `status & IDLE` after
+`idleTimeout` on the empty ring (`vkr_ring.c:270-278`) -- proof the host mapped
+the shmem and polls, with NO Mesa. Optionally write one command into the buffer +
+observe `head` advance from 0 (`vkr_ring.c:302-317`). Local 2D devices skip (no
+venus ctx), like the existing self-test.
+
+**Invariants.** I-45: the submit is ctx-scoped -- opaque bytes to the ctx's own
+`dev_ctx`, one ctx per conn, no cross-ctx naming (the 0.9 pin). I-9: the idle/kick
+register-then-observe, upheld by virglrenderer + the guest across the coherent
+shmem (our forward is transparent to it). I-32: `WARP_SUBMIT_MAX` bounds a
+submit; the fenced-lane admission bounds concurrency.
+
+**Verify-at-impl (spike-flagged, NOT design blockers):** the exact
+`vkCreateRingMESA` byte encoding (the venus-protocol headers are build-generated,
+not checked in -- dump from a Mesa build or a real capture) and the specific
+"trivial ring command" for the head-advance witness (the IDLE-bit witness needs
+no such validation).
+
+**Ratified 2026-08-25 (operator signoff):** the SUBMIT_CMD forward + ring
+bootstrap + host-side rescue, standalone GL-witnessed, with the reply-shmem
+deferred. This section is the design pin; the impl commit (the `ctx/<id>/submit`
+interface + the rescue + the `warp-prove` witness, then the Fable audit round)
+references it.
 
 ## 1. What V-3 is, and the seam it plugs into
 
