@@ -1485,6 +1485,16 @@ pub struct Gpu {
     pub capset_blob: alloc::vec::Vec<u8>,
     pub capset_id: u32,
     pub capset_ver: u32,
+    /// V-3b-3 (Model B): the VENUS capset (id=4), fetched + retained
+    /// SEPARATELY from the ranked virgl capset above -- the Mesa vn_renderer
+    /// backend's instance gate reads the venus wire-format / vk-xml versions
+    /// from it, and a virgl capset's bytes in those fields stub the instance
+    /// (device-less). Served by the `caps-venus` file; empty on a non-venus
+    /// host. The id is implicitly VIRTIO_GPU_CAPSET_VENUS; the version rides
+    /// the blob itself (the backend reads it from the wire), so it is not
+    /// separately retained -- V-3c adds a ver/id record if the authority half
+    /// needs one.
+    pub venus_capset_blob: alloc::vec::Vec<u8>,
     /// Global monotone fence ids (Warp-2d). Global, not per-ctx: QEMU's
     /// virgl fence walk retires every queued fence with id <= the signaled
     /// value, so independent per-ctx sequences would cross-release each
@@ -1633,6 +1643,7 @@ impl Gpu {
             capset_blob: alloc::vec::Vec::new(),
             capset_id: 0,
             capset_ver: 0,
+            venus_capset_blob: alloc::vec::Vec::new(),
             fence_next: 0,
             pci,
             hostmem,
@@ -1709,6 +1720,9 @@ impl Gpu {
         };
         let mut best: Option<(u32, u32, u32)> = None;
         let mut saw_venus = false;
+        // (ver, size) of the enumerated venus capset, for the separate
+        // caps-venus fetch below (Model B).
+        let mut venus_info: Option<(u32, u32)> = None;
         for idx in 0..self.num_capsets.min(GPU_CAPSET_ENUM_MAX) {
             let (id, ver, size) = match self.get_capset_info(idx) {
                 Ok(t) => t,
@@ -1729,6 +1743,7 @@ impl Gpu {
             );
             if id == VIRTIO_GPU_CAPSET_VENUS {
                 saw_venus = true;
+                venus_info = Some((ver, size));
             }
             // An enumerated-but-empty capset is not fetchable (audit W1
             // F1: a VMM may list an id its renderer lacks with size 0;
@@ -1741,11 +1756,37 @@ impl Gpu {
             }
         }
         if let Some((id, ver, size)) = best {
-            if let Err(e) = self.get_capset(id, ver, size) {
-                if self.ctrl.dead {
-                    return Err(e);
+            match self.get_capset(id, ver, size) {
+                Ok(blob) => {
+                    self.capset_blob = blob;
+                    self.capset_id = id;
+                    self.capset_ver = ver;
                 }
-                say!("tapestryd: gpu GET_CAPSET id={} refused (engine healthy); 2D only", id);
+                Err(e) => {
+                    if self.ctrl.dead {
+                        return Err(e);
+                    }
+                    say!("tapestryd: gpu GET_CAPSET id={} refused (engine healthy); 2D only", id);
+                }
+            }
+        }
+        // V-3b-3 (Model B): retain the VENUS capset separately (served by the
+        // caps-venus file) for the vn_renderer backend's instance gate -- the
+        // ranked virgl blob above is the wrong shape for it. Fetch only a
+        // populated enumerated venus capset (size 0 = a listed-but-absent id).
+        if let Some((vver, vsize)) = venus_info {
+            if vsize > 0 {
+                match self.get_capset(VIRTIO_GPU_CAPSET_VENUS, vver, vsize) {
+                    Ok(blob) => {
+                        self.venus_capset_blob = blob;
+                    }
+                    Err(e) => {
+                        if self.ctrl.dead {
+                            return Err(e);
+                        }
+                        say!("tapestryd: gpu GET_CAPSET id=4 (venus) refused (engine healthy)");
+                    }
+                }
             }
         }
 
@@ -2085,7 +2126,12 @@ impl Gpu {
     /// head -- the Warp-1 in-guest gate evidence. `size` (the device's own
     /// max_size) is clamped to the RESP region; the virgl v1/v2 blobs
     /// (308 / ~1.2K) fit whole, and a clamped fetch says so in the log.
-    fn get_capset(&mut self, id: u32, version: u32, size: u32) -> Result<(), Error> {
+    fn get_capset(
+        &mut self,
+        id: u32,
+        version: u32,
+        size: u32,
+    ) -> Result<alloc::vec::Vec<u8>, Error> {
         let take = size.min(RESP_REGION_LEN - GPU_CTRL_HDR_LEN);
         let req_va = self.ring_va + REQ_OFF;
         unsafe {
@@ -2110,7 +2156,7 @@ impl Gpu {
                 version,
                 take
             );
-            return Ok(());
+            return Ok(alloc::vec::Vec::new());
         }
         let blob = self.ring_va + RESP_OFF + GPU_CTRL_HDR_LEN as u64;
         say!(
@@ -2124,16 +2170,14 @@ impl Gpu {
             unsafe { r32(blob + 8) },
             unsafe { r32(blob + 12) }
         );
-        // Warp-2c: retain the blob for the /dev/warp caps file. Byte copy
-        // out of the RESP region NOW -- the next command overwrites it.
+        // Byte copy out of the RESP region NOW -- the next command overwrites
+        // it. The caller retains it (the ranked virgl capset -> capset_blob,
+        // the venus capset -> venus_capset_blob).
         let mut kept = alloc::vec![0u8; take as usize];
         for (i, b) in kept.iter_mut().enumerate() {
             *b = unsafe { r8(blob + i as u64) };
         }
-        self.capset_blob = kept;
-        self.capset_id = id;
-        self.capset_ver = version;
-        Ok(())
+        Ok(kept)
     }
 
     /// GET_DISPLAY_INFO: adopt scanout 0's enabled rect as the display

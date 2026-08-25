@@ -92,7 +92,15 @@ ctl                          # "virgl <0|1>\ncapsets N\ncapset <id> <ver> <len>\
                              # test-mode ONLY adds: "abandoned <n>\nfenced-free <n>\n"
                              #   (fenced-free counts the CLIENT pool -- FENCED_SLOTS - 1 since C-6;
                              #   the reserved compositor slot is never a client's)
-caps                         # the RETAINED preferred capset blob, raw
+caps                         # the RETAINED preferred (ranked virgl2) capset blob, raw
+caps-venus                   # V-3b-3b (Model B): the RETAINED VENUS capset (id=4), raw --
+                             #   served SEPARATELY because `caps` serves the ranked virgl
+                             #   capset the GL winsys reads (virgl_thylacine_winsys.c); the
+                             #   Mesa vn_renderer backend's instance gate reads the
+                             #   wire_format/vk_xml versions from here (a virgl capset in
+                             #   those bytes stubs the instance). Empty on a non-venus host.
+                             #   tapestryd fetches it via a 2nd GET_CAPSET (gpu.rs) whenever
+                             #   the device enumerates a populated capset id=4.
 ctx/
   new                        # open+read mints a ctx -> "<pub_id>\n" (ONE per conn; I-45)
   <id>/

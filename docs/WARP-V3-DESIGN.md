@@ -810,10 +810,22 @@ sketched; 20 pointers is the ground truth. Shared helpers reused verbatim:
   the mandatory op stubs); wire `-Dvulkan-drivers=virtio` on thyla-keep. Milestone:
   the ICD builds STATIC + loads loader-less + enumerates the Thylacine Venus
   driver (a link+load proof, the `virgl_prove.c` analog). Highest risk.
-- **V-3b-3b -- shmem + submit + wait + sync (bring-up).** Milestone:
-  `vkCreateInstance` + `vkEnumeratePhysicalDevices` +
-  `vkGetPhysicalDeviceMemoryProperties` round-trip -- exercises the ring AND the
-  reply-shmem end to end.
+- **V-3b-3b -- shmem + submit + wait + sync (bring-up). AS-BUILT (verified on
+  thyla-pi/KVM, real V3D).** `vkCreateInstance` + `vkEnumeratePhysicalDevices`
+  (2 Venus devices, `Virtio-GPU Venus (V3D 4.2.14.0)`) +
+  `vkGetPhysicalDeviceMemoryProperties` + `vkDestroyInstance` round-trip, boot
+  green. Two dependencies surfaced + pulled forward: **(a) the VENUS capset must
+  be SERVED** -- the existing `caps` file serves the RANKED virgl capset (the GL
+  winsys reads it, virgl_thylacine_winsys.c:529), so re-ranking was out;
+  tapestryd now fetches + serves the venus capset on a separate `caps-venus`
+  file (V-3c's SERVING half pulled forward; the enforcement half stays V-3c).
+  **(b) the smoke must run POST-WARDEN** (tapestryd serving /srv/warp), not in
+  joey's pre-warden boot-test suite where 3a placed it (3a needed no transport).
+  **Correction to the op table above:** `wait` is a BLOCKING Tread of
+  `ctx/<id>/fence` (via `warp_fence_wait`), NOT `t_poll` -- the seam's qids carry
+  no QTPOLL, so t_poll returns POLLIN immediately and would busy-spin. sync +
+  wait are on the TEARDOWN path only (vkDestroyRingMESA); bring-up's replies are
+  pure guest-side ring-head polls (no `vn_renderer_wait`).
 - **V-3b-3c -- bo / device memory.** The HOST_VISIBLE bo path over the hostmem
   BAR; milestone: `vkAllocateMemory` + `vkMapMemory`.
 - **V-3b-3d -- the Vulkan prove-gate on thyla-pi (real V3D).** A headless

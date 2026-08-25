@@ -416,6 +416,9 @@ const W_CTL: u64 = WARP_FLAG | 1;
 const W_CAPS: u64 = WARP_FLAG | 2;
 const W_CTX_DIR: u64 = WARP_FLAG | 3;
 const W_CTX_NEW: u64 = WARP_FLAG | 4;
+/// V-3b-3 (Model B): the VENUS capset, served separately from `caps` (which
+/// serves the ranked virgl capset the OpenGL winsys reads).
+const W_CAPS_VENUS: u64 = WARP_FLAG | 5;
 
 // Ctx-level file kinds (ctx/<id>/*).
 const WFK_DIR: u64 = 0;
@@ -8504,6 +8507,7 @@ impl Conn {
                 b".." => Some((W_ROOT, 0)),
                 b"ctl" => Some((W_CTL, 0)),
                 b"caps" => Some((W_CAPS, 0)),
+                b"caps-venus" => Some((W_CAPS_VENUS, 0)),
                 b"ctx" => Some((W_CTX_DIR, 0)),
                 _ => None,
             },
@@ -9075,6 +9079,15 @@ impl Conn {
         if f.path == W_CAPS {
             // The raw capset blob (decode with the ctl `capset` line).
             let b = &comp.gpu.capset_blob;
+            let off = (a.offset as usize).min(b.len());
+            let take = (b.len() - off).min(cap);
+            let slice = b[off..off + take].to_vec();
+            return p9::build_rread(&mut self.out_buf, tag, &slice);
+        }
+        if f.path == W_CAPS_VENUS {
+            // V-3b-3 (Model B): the raw VENUS capset blob for the vn_renderer
+            // backend's instance gate (empty on a non-venus host).
+            let b = &comp.gpu.venus_capset_blob;
             let off = (a.offset as usize).min(b.len());
             let take = (b.len() - off).min(cap);
             let slice = b[off..off + take].to_vec();
@@ -11015,6 +11028,7 @@ impl Conn {
             W_ROOT => {
                 names.push((b"ctl".to_vec(), W_CTL));
                 names.push((b"caps".to_vec(), W_CAPS));
+                names.push((b"caps-venus".to_vec(), W_CAPS_VENUS));
                 names.push((b"ctx".to_vec(), W_CTX_DIR));
             }
             W_CTX_DIR => {

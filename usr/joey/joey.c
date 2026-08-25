@@ -5616,27 +5616,13 @@ int main(void) {
     // spawn-and-verify milestones sit together on the boot path.
     if (do_pouch_hello_smoke() != 0) return 1;
 
-    // === Warp V-3b-3a: the Venus vn_renderer backend loader-less ICD proof ===
-    // First runtime exercise of the Mesa Venus driver + the Thylacine
-    // vn_renderer backend ON Thylacine (WARP-V3-DESIGN section 0.14). The pouch
-    // static ET_EXEC resolves vk_icdGetInstanceProcAddr by symbol (no dynamic
-    // loader) and dispatches vkEnumerateInstanceVersion -- proof the backend
-    // links loader-less and the ICD entry dispatches at EL0. NON-FATAL +
-    // announced: the transport ops (submit/wait/bo) are 3b/3c, so a fault here
-    // must not block the boot banner -- this is a proof lever, not yet a gate.
-    // Placed pre-pivot, beside the pouch smokes, so it rides a pool-less boot.
-    // DRAIN-FIRST (not the reap-first pouch_smoke_one): venus-prove is a
-    // third-party Mesa binary whose stdout is not bounded by us and GROWS across
-    // 3b/3c -- reap-first would deadlock the boot on any >4 KiB failure path.
-    {
-        static const char vp_name[]   = "thylacine-venus-prove";
-        static const char vp_expect[] = "THYLACINE-VENUS-PROVE PASS";
-        if (pouch_smoke_one_drain_first(vp_name, sizeof(vp_name) - 1,
-                                        vp_expect, sizeof(vp_expect) - 1) == 0)
-            t_putstr("joey: venus-prove OK (loader-less ICD dispatch verified; Warp V-3b-3a)\n");
-        else
-            t_putstr("joey: venus-prove FAILED or absent (V-3b-3a proof pending -- non-fatal)\n");
-    }
+    // === Warp V-3b-3: the Venus bring-up proof runs POST-WARDEN ===
+    // The venus-prove witness (V-3b-3b: vkCreateInstance + physical-device
+    // enumeration) needs tapestryd SERVING /srv/warp, which the warden starts
+    // further down -- so the smoke moved to AFTER the warden bring-up. It was
+    // pre-warden at V-3b-3a, which only dispatched the loader-less
+    // vkEnumerateInstanceVersion and needed no transport (a pool-less boot).
+    // See the post-warden block below.
 
     // === native libthyla-rs argv + stdio milestone (U-6e-pre-a) ===
     // First runtime exercise of the native-argv path (env::args, G03) +
@@ -5858,6 +5844,34 @@ int main(void) {
     }
 
 #if THYLA_BOOT_PROBES
+
+    // === Warp V-3b-3b: the Venus vkCreateInstance bring-up witness ===
+    // POST-WARDEN + PRE-PIVOT: tapestryd is now serving /srv/warp (the warden's
+    // readiness handshake above gates on it), and the ramfs root still resolves
+    // /thylacine-venus-prove by name. So the vn_renderer backend can connect,
+    // mint its venus ctx + host3d command/reply rings, read the venus capset
+    // (caps-venus), and drive a real vkCreateInstance + vkEnumeratePhysicalDevices
+    // + vkGetPhysicalDeviceMemoryProperties + vkDestroyInstance round-trip.
+    // NON-FATAL: on a 2D / venus-off host the backend gets a device-less stub
+    // and the binary reports ABSENT, which must not block the boot banner.
+    // NON-FATAL bounds the VERDICT, not the wall clock (V-3b-3b audit F6): the
+    // backend performs a fenced GPU round-trip whose teardown parks on the ctx
+    // fence file. That park is fillable in every healthy or cleanly-dead state
+    // (a retire, or the poison/teardown EOF that latches the wedge), a hung ring
+    // self-aborts via Mesa's watchdog, and the boot-probe timeout is the final
+    // backstop -- so a "boot timed out" sighting should indict this park first.
+    // DRAIN-FIRST (not the reap-first pouch_smoke_one): venus-prove is a
+    // third-party Mesa binary whose stdout is not bounded by us and GROWS across
+    // 3b/3c -- reap-first would deadlock the boot on any >4 KiB failure path.
+    {
+        static const char vp_name[]   = "thylacine-venus-prove";
+        static const char vp_expect[] = "THYLACINE-VENUS-PROVE PASS";
+        if (pouch_smoke_one_drain_first(vp_name, sizeof(vp_name) - 1,
+                                        vp_expect, sizeof(vp_expect) - 1) == 0)
+            t_putstr("joey: venus-prove OK (vkCreateInstance + enumerate over /srv/warp; Warp V-3b-3b)\n");
+        else
+            t_putstr("joey: venus-prove absent-or-failed (V-3b-3b; non-fatal -- a 2D/venus-off host, or a bring-up regression)\n");
+    }
 
     // === /sbin/corvus spawn + E2E ===
     // Moved to do_corvus_bringup() (defined above main) and called

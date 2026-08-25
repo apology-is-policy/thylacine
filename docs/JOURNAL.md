@@ -22,6 +22,85 @@ needed the operator.
 
 ---
 
+## 2026-08-25 — V-3b-3b: real Venus vkCreateInstance on real V3D silicon (two root causes, both caught by the boot log)
+
+The V-3b-3b chunk: turn the V-3b-3a skeleton (stubs) into a working `vn_renderer`
+backend and drive a real `vkCreateInstance` + physical-device enumeration over
+`/srv/warp`. Two subagents mapped the ground first: the tapestryd `/srv/warp`
+server ABI (exact verb strings, the fence surface, the connect handshake) and
+the Mesa Venus bring-up flow (when each op is called, what the capset gate
+demands, whether wait/sync are on the path). That reconnaissance was worth it --
+it turned the ops from guesses into a byte-exact spec, and it produced the single
+most useful finding of the run before a line of backend code ran: **only two
+capset fields are load-bearing gates** (`wire_format_version==1`,
+`vk_xml_version>=1.1`), and a zero capset does not crash -- it silently yields a
+device-less STUB instance. That fact is what let me READ the first two failures
+instead of guessing at them.
+
+**Impl.** The backend (`vn_renderer_thylacine.c`, mesa-thylacine): `shmem_create`
+mints a HOST3D ring on the client's venus ctx (`ring/new host3d`), reads its
+res_id from `ring/<ridx>/info`, weft-maps it; `submit` forwards opaque venus
+bytes to `ctx/<id>/submit` (the vkCreateRingMESA bootstrap + doorbells);
+`wait`/`sync` are a guest-side u64 timeline bound to the WARP ctx fence
+(needed only at teardown -- bring-up's replies are pure ring-head polls, no
+`vn_renderer_wait`); `info` reads the venus capset. The transport
+(`warp_client.c`) gained the host3d-ring verbs + a raw venus-submit + a
+venus-caps read, reusing `warp_open` + the issued/signaled fence model verbatim.
+It built + linked clean on thyla-keep, first try (the editor's clang can't see
+the cross-file includes, so the cross-build IS the check).
+
+**Wrong turn 1 -- the capset.** First witness on thyla-pi/KVM: `instance
+created`, then `ABSENT (device-less stub)`. Per the pre-computed gate fact, a
+stub means the capset gate failed. Ground truth (gpu.rs:1702): tapestryd's
+capset fetch ranks **VIRGL2 > VIRGL > anything**, keeps ONE blob, and serves it
+as `caps` -- so on a venus host it serves the VIRGL2 capset, and the OpenGL
+winsys reads exactly that (virgl_thylacine_winsys.c:529, so re-ranking was out).
+My backend read those virgl bytes as `virgl_renderer_capset_venus` -> a garbage
+`wire_format_version` -> stub. This is precisely the dependency WARP-V3-DESIGN
+0.14 flagged ("sequence V-3c before 3b if the caps blob must validate"): a
+genuine pull-forward of V-3c's SERVING half (the enforcement half stays V-3c).
+Fix: tapestryd fetches the venus capset SEPARATELY (`get_capset` refactored to
+return the blob) and serves it on a new `caps-venus` file; the backend reads
+that. A synthetic capset would have been the forbidden shortcut -- wrong
+versions/mask break the protocol encoding.
+
+**Wrong turn 2 -- the ordering, and why witness 2 still said ABSENT.** With the
+venus capset now fetched (`GET_CAPSET id=4 -> 160 bytes; caps[0] = 0x00000001`,
+a VALID capset), witness 2 STILL reported ABSENT. The capset was right; the
+timing was not. The boot log line numbers were decisive: **venus-prove ran at
+line 2046, but the warden did not bind tapestryd until 2184** (READY 2211). The
+venus smoke sat in joey's PRE-warden boot-test suite -- it was placed there at
+3a, correctly, because 3a needed no transport (`vkEnumerateInstanceVersion`
+only). So `warp_open` found no `/srv/warp`, failed, and stubbed. A retry inside
+that pre-warden suite would DEADLOCK (the suite runs before the warden that would
+start tapestryd). Fix: move the smoke to the POST-warden probe block (joey.c),
+where the warden's readiness handshake guarantees tapestryd is serving and the
+ramfs root still resolves the binary pre-pivot.
+
+**Result (witness 3, real V3D, boot green).** `THYLACINE-VENUS-PROVE PASS
+(bring-up over /srv/warp: instance created, 2 physical device(s), dev0
+'Virtio-GPU Venus (V3D 4.2.14.0)', 1 memory heap(s), instance destroyed)`.
+That is the full 3b scope end to end: shmem_create (command ring + the
+lazily-grown reply shmem, both host3d rings), submit (vkCreateRingMESA + the
+reply-stream `vkSetReplyCommandStreamMESA` + doorbells), the ring-head reply
+poll, the capset gate, and -- at DestroyInstance -- the fenced teardown that
+exercises sync + wait + vkDestroyRingMESA. `Thylacine boot OK`, no extinction,
+venus-prove at line 2229 (after tapestryd serving at 2205).
+
+**A design-doc correction it forced.** 0.14's op table says `wait -> t_poll on
+ctx/<id>/fence`. The server-ABI map proved that is wrong as literal: tapestryd's
+qids never carry QTPOLL, so `t_poll` returns POLLIN immediately and would
+busy-spin. The mechanism (wait on `ctx/<id>/fence`) is unchanged; the syscall is
+a BLOCKING Tread, which `warp_fence_wait` already implements -- the backend
+reuses it.
+
+**Open.** The bo / device-memory path is V-3b-3c (stubbed here; bring-up never
+allocates device memory). The backend documents a single-thread assumption on
+the unguarded `warp_conn` -- sound for the single-threaded bring-up (the prove
+harness is the only caller), owed a per-renderer mutex at 3c when VkQueues make
+it multi-threaded. The Fable holotype round (I-45-adjacent, the first
+client-writable bring-up path) is in flight at the time of writing.
+
 ## 2026-08-25 — reply-shmem: the design pass that dissolved itself; then V-3b-3a builds on real silicon
 
 With both V-3b-2 chunks shipped (`b7b712dc`), the operator said "Let's open it" --

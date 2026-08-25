@@ -1,0 +1,1076 @@
+From c80a6ef2e2c8f34c66467c6b8417effaf3efa9fa Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Tue, 25 Aug 2026 23:19:39 +0200
+Subject: [PATCH] Thylacine Warp V-3b-3b: the Venus vkCreateInstance bring-up
+ backend
+
+Turns the V-3b-3a vn_renderer skeleton into a working backend and drives a
+real vkCreateInstance + physical-device enumeration over /srv/warp (Model B).
+Verified on thyla-pi/KVM real V3D: 2 Venus devices ("Virtio-GPU Venus (V3D
+4.2.14.0)"), create + enumerate + memory-props + destroy, boot green.
+
+Backend (vn_renderer_thylacine.c): shmem_create mints a HOST3D ring on the
+client's venus ctx (ring/new host3d) + weft-maps it; submit forwards opaque
+venus bytes (vkCreateRingMESA bootstrap + doorbells) to ctx/<id>/submit;
+wait/sync are a guest-side u64 timeline bound to the WARP ctx fence (teardown
+only -- bring-up replies are pure ring-head polls); info reads the venus capset
+(caps-venus). Transport (warp_client.c): the host3d-ring verbs + a raw
+venus-submit + a venus-caps read, reusing warp_open + the issued/signaled fence
+model. meson: warp_client.c + the winsys include dir into the venus lib.
+
+wait is a BLOCKING Tread of ctx/<id>/fence (warp_fence_wait), NOT t_poll -- the
+seam's qids carry no QTPOLL so t_poll would busy-spin (corrects WARP-V3-DESIGN
+0.14's op table).
+
+Audit (holotype Fable 5, 0 P0 / 1 P1 / 1 P2 / 4 P3):
+  - F1 [P1]: ridx recycled a server slot the host retires only at ctx death ->
+    permanent shmem_create failure after the first destroy. Interim fix:
+    monotonic ridx (never freed) -> no reuse -> no deadlock; the per-ring
+    destroy verb + regression test are owed at 3c.
+  - F2 [P2]: the 8 MiB cs pool is dead against the 1 MiB ring ceiling ->
+    #ifdef __thylacine__ clamp to 1 MiB in vn_instance.c.
+  - F3 [P3]: timeline over-advertisement (submit drops ring_idx) -> report a
+    single timeline; F4 [P3]: empty-cs batch binds syncs to the last issued
+    seq; F5 [P3] wait ns-timeout tracked for 3c.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../winsys/virgl/thylacine/warp_client.c      | 113 ++++-
+ .../winsys/virgl/thylacine/warp_client.h      |  41 ++
+ src/virtio/vulkan/meson.build                 |   6 +
+ src/virtio/vulkan/thylacine_prove.c           | 142 +++++-
+ src/virtio/vulkan/vn_instance.c               |  11 +
+ src/virtio/vulkan/vn_renderer_thylacine.c     | 450 +++++++++++++++---
+ 6 files changed, 670 insertions(+), 93 deletions(-)
+
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.c b/src/gallium/winsys/virgl/thylacine/warp_client.c
+index dc2324c..98fe5aa 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.c
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.c
+@@ -434,9 +434,105 @@ void warp_bo_destroy(struct warp_conn *w, uint32_t bo, long map_fd)
+    (void)write_verb(w->root, path, "destroy");
+ }
+ 
+-long warp_read_caps(struct warp_conn *w, void *buf, unsigned long len)
++/* ---- Warp-6 V-3b-3 host3d ring path (Model B / Venus) ---- */
++
++int warp_ring_create_host3d(struct warp_conn *w, uint32_t ridx, uint32_t bytes,
++                            uint32_t *res_id_out)
++{
++   char path[64];
++   char verb[48];
++   char info[160];
++   long long rid;
++
++   if (w->wedged || w->ctx == 0)
++      return -1;
++
++   /* "<bytes> <ridx> host3d" -> ctx/<id>/ring/new. The third token arms the
++    * Model B path (host3d=true); minting the first host3d ring lazily arms
++    * the ctx's venus device-context server-side. bytes must be a nonzero
++    * multiple of the page and <= WARP_RING_MAX; the caller rounds up. */
++   snprintf(path, sizeof(path), "ctx/%u/ring/new", w->ctx);
++   snprintf(verb, sizeof(verb), "%u %u host3d", bytes, ridx);
++   if (write_verb(w->root, path, verb) != 0)
++      return -1;
++
++   /* The res_id the venus stream names (vkCreateRingMESA.resourceId) is read
++    * back from ring/<ridx>/info: "res <id> ridx <n> bytes <sz> hdr 64". */
++   snprintf(path, sizeof(path), "ctx/%u/ring/%u/info", w->ctx, ridx);
++   if (open_read_snapshot(w->root, path, info, sizeof(info)) <= 0)
++      return -1;
++   rid = parse_field(info, "res");
++   if (rid <= 0)
++      return -1;
++
++   *res_id_out = (uint32_t)rid;
++   return 0;
++}
++
++void *warp_ring_map(struct warp_conn *w, uint32_t ridx, long *map_fd_out)
++{
++   char path[64];
++   long fd, va;
++
++   if (w->ctx == 0)
++      return NULL;
++
++   snprintf(path, sizeof(path), "ctx/%u/ring/%u/map", w->ctx, ridx);
++   fd = open_at(w->root, path, T_OREAD);
++   if (fd < 0)
++      return NULL;
++   va = t_weft_map(fd, 0); /* RW + coherent regardless of the open mode */
++   if (va < 0) {
++      t_close(fd);
++      return NULL;
++   }
++   *map_fd_out = fd;
++   return (void *)(uintptr_t)va;
++}
++
++void warp_ring_unmap(long map_fd)
++{
++   if (map_fd >= 0)
++      t_close(map_fd); /* the clunk drops the mapping + pin -> ring reaps */
++}
++
++uint64_t warp_venus_submit(struct warp_conn *w, const void *bytes, uint32_t len)
++{
++   uint64_t seq;
++
++   if (w->wedged)
++      return 0;
++
++   /* One Twrite = one atomic submission. Past the chunk bound the kernel 9P
++    * client fragments the write into several Twrites, each of which the
++    * server decodes as its own submission -- splitting mid-command. The
++    * venus stream is opaque (the server never parses it), so unlike
++    * warp_submit there is no CCMD boundary to split at; the whole stream
++    * must ride one write. Bring-up's bootstrap commands are ~124 bytes, far
++    * under the bound. */
++   if (len == 0 || len > WARP_CHUNK_BYTES) {
++      fprintf(stderr, "warp: venus submit of %u bytes exceeds the %u-byte "
++                      "one-write bound -- the byte seam cannot carry it "
++                      "atomically (GPU-DESIGN 4.1 Loom is the successor); "
++                      "latching\n",
++              len, WARP_CHUNK_BYTES);
++      w->wedged = true;
++      return 0;
++   }
++
++   seq = fenced_write(w, w->submit_fd, bytes, len);
++   if (seq == 0 && !w->wedged) {
++      fprintf(stderr, "warp: venus submit failed -- a dropped command "
++                      "stream poisons the ring; latching\n");
++      w->wedged = true;
++   }
++   return seq;
++}
++
++static long read_caps_path(struct warp_conn *w, const char *path, void *buf,
++                           unsigned long len)
+ {
+-   long fd = open_at(w->root, "caps", T_OREAD);
++   long fd = open_at(w->root, path, T_OREAD);
+    long total = 0;
+    if (fd < 0)
+       return -1;
+@@ -454,6 +550,19 @@ long warp_read_caps(struct warp_conn *w, void *buf, unsigned long len)
+    return total;
+ }
+ 
++long warp_read_caps(struct warp_conn *w, void *buf, unsigned long len)
++{
++   return read_caps_path(w, "caps", buf, len);
++}
++
++long warp_read_venus_caps(struct warp_conn *w, void *buf, unsigned long len)
++{
++   /* The VENUS capset (id=4), served separately from `caps` (which serves the
++    * ranked virgl capset the OpenGL winsys reads). The Model B backend's
++    * instance gate needs the venus wire-format / vk-xml versions from here. */
++   return read_caps_path(w, "caps-venus", buf, len);
++}
++
+ int warp_open(struct warp_conn *w)
+ {
+    char buf[512];
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.h b/src/gallium/winsys/virgl/thylacine/warp_client.h
+index f579ef4..1b26a82 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.h
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.h
+@@ -70,6 +70,11 @@ void warp_close(struct warp_conn *w);
+  * count (>= 0) or -1. */
+ long warp_read_caps(struct warp_conn *w, void *buf, unsigned long len);
+ 
++/* Read the VENUS capset blob (Model B / V-3b-3), served by the `caps-venus`
++ * file separately from `caps` (which serves the ranked virgl capset the
++ * OpenGL winsys reads). Returns the byte count (>= 0) or -1. */
++long warp_read_venus_caps(struct warp_conn *w, void *buf, unsigned long len);
++
+ /* Mint + build a BO. Geometry/format/bind are raw virgl wire values (the
+  * server passes them through to RESOURCE_CREATE_3D); size is rounded up
+  * to the page here (the seam refuses unaligned backings). On success
+@@ -111,6 +116,42 @@ uint64_t warp_transfer(struct warp_conn *w, uint32_t bo, bool to_host,
+                        uint32_t offset, uint32_t stride,
+                        uint32_t layer_stride);
+ 
++/* ---- Warp-6 V-3b-3 host3d ring path (Model B / Venus) ---- */
++
++/* Mint a HOST3D ring at `ridx` on the connection's ctx and read back the
++ * virtio-gpu res_id the Venus command stream names (in vkCreateRingMESA).
++ * Minting the FIRST host3d ring lazily arms the ctx's venus device-context,
++ * after which warp_venus_submit routes to it (no separate arm verb).
++ * `bytes` must be a nonzero multiple of the page and <= WARP_RING_MAX
++ * (1 MiB, server-enforced). The caller owns ridx allocation (a duplicate
++ * index is refused server-side). Returns 0 + *res_id_out, or -1. */
++int warp_ring_create_host3d(struct warp_conn *w, uint32_t ridx, uint32_t bytes,
++                            uint32_t *res_id_out);
++
++/* Map a minted host3d ring's coherent backing: opens ring/<ridx>/map and
++ * t_weft_map's it (the same claim+map-atomic path as warp_bo_map). The
++ * mapping is RW and cache-coherent with the host; it lives until *map_fd_out
++ * is closed (the clunk drops the mapping AND the transferred pin, letting
++ * tapestryd reclaim the ring). NULL on failure. */
++void *warp_ring_map(struct warp_conn *w, uint32_t ridx, long *map_fd_out);
++
++/* Drop a host3d ring mapping: closes the map fid returned by warp_ring_map.
++ * The clunk drops the client's mapping AND the transferred pin, which lets
++ * tapestryd reclaim the ring slot server-side. Safe on a wedged connection. */
++void warp_ring_unmap(long map_fd);
++
++/* Submit one opaque Venus command stream (raw SUBMIT_CMD/execbuffer bytes) to
++ * the ctx's submit file. With a host3d ring armed the server routes this to
++ * warp_venus_submit on the venus device-ctx; tapestryd never parses the
++ * bytes. One write = one atomic fenced submission (completion observed on
++ * ctx/<id>/fence via warp_fence_wait); `len` must be <= the seam chunk bound
++ * (the opaque stream cannot be split at a CCMD boundary the way warp_submit
++ * splits, so it must ride one Twrite). Latches the wedge on a dropped submit
++ * (a lost command stream poisons the ring). Returns the issue seq (> 0)
++ * or 0. */
++uint64_t warp_venus_submit(struct warp_conn *w, const void *bytes,
++                           uint32_t len);
++
+ /* Warp-4, the adoption's ctx half: consent to displaying `bo_pub` on
+  * tapestry surface `surface_id` ("present-to <surface> <bo>" on the ctx
+  * ctl). Pure naming -- the display activates only when the surface's own
+diff --git a/src/virtio/vulkan/meson.build b/src/virtio/vulkan/meson.build
+index b6ea4b1..91ab7f1 100644
+--- a/src/virtio/vulkan/meson.build
++++ b/src/virtio/vulkan/meson.build
+@@ -113,7 +113,13 @@ if with_thylacine
+   # vn_renderer_virtgpu.c + no libdrm dep, which the cross-file's
+   # system='linux' would otherwise pull in), no vtest socket, no WSI
+   # platform. The backend speaks 9P file ops on /srv/warp via <thyla/*>.
++  # It reuses the Warp-3 transport (warp_client.c, shared with the virgl
++  # winsys): warp_open + the fence model, plus the V-3b-3 host3d-ring and
++  # venus-submit verbs. <thyla/syscall.h> rides the cross-file c_args;
++  # warp_client.h resolves via the winsys include dir added to vn_incs.
+   libvn_files += files('vn_renderer_thylacine.c')
++  libvn_files += files('../../gallium/winsys/virgl/thylacine/warp_client.c')
++  vn_incs += include_directories('../../gallium/winsys/virgl/thylacine')
+ else
+   if not with_platform_windows
+     libvn_files += files('vn_renderer_vtest.c')
+diff --git a/src/virtio/vulkan/thylacine_prove.c b/src/virtio/vulkan/thylacine_prove.c
+index f284f0c..d0c16b2 100644
+--- a/src/virtio/vulkan/thylacine_prove.c
++++ b/src/virtio/vulkan/thylacine_prove.c
+@@ -2,20 +2,32 @@
+  * Copyright 2026 The Thylacine Authors
+  * SPDX-License-Identifier: MIT
+  *
+- * V-3b-3a loader-less ICD proof (the virgl_prove.c analog for Venus).
++ * Venus loader-less bring-up proof (the virgl_prove.c analog for Venus).
+  *
+  * Thylacine has no dynamic loader (kernel/elf.c requires ET_EXEC with no
+  * PT_DYNAMIC), so there is no Vulkan loader to dlopen an ICD .so. This static
+  * ET_EXEC links libvulkan_virtio.a directly and resolves the ICD entry point
+- * -- vk_icdGetInstanceProcAddr -- by symbol, then dispatches one loader-less
+- * global command (vkEnumerateInstanceVersion, which needs no instance and no
+- * renderer transport). Proof that: (a) the static venus driver + the Thylacine
+- * backend link into a working ET_EXEC, and (b) the loader-less ICD entry
+- * resolves and dispatches. The renderer transport (V-3b-3b) is NOT exercised.
++ * -- vk_icdGetInstanceProcAddr -- by symbol.
++ *
++ * V-3b-3a (shipped): the loader-less link/load proof -- dispatch
++ * vkEnumerateInstanceVersion, a global command needing no instance and no
++ * renderer transport (step 1 below).
++ *
++ * V-3b-3b (this): the real bring-up over the /srv/warp transport --
++ * vkCreateInstance -> vkEnumeratePhysicalDevices ->
++ * vkGetPhysicalDeviceProperties + vkGetPhysicalDeviceMemoryProperties ->
++ * vkDestroyInstance. This drives the whole backend: the coherent HOST3D
++ * command ring + the lazily-allocated reply shmem, the vkCreateRingMESA
++ * bootstrap SUBMIT_CMD, the reply-stream head poll, the capset gate, and (at
++ * DestroyInstance) the fenced teardown wait. On a host with no venus device
++ * the instance comes back as a device-less stub (zero physical devices) --
++ * reported as ABSENT (non-fatal), not a failure: the joey smoke only asserts
++ * the PASS string, so an absent GL host degrades cleanly.
+  */
+ 
+ #include <stdint.h>
+ #include <stdio.h>
++#include <string.h>
+ 
+ #include <vulkan/vulkan.h>
+ 
+@@ -24,28 +36,124 @@
+ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+ vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
+ 
++static PFN_vkVoidFunction
++gipa(VkInstance instance, const char *name)
++{
++   return vk_icdGetInstanceProcAddr(instance, name);
++}
++
+ int
+ main(void)
+ {
+-   PFN_vkVoidFunction p =
+-      vk_icdGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion");
+-   if (!p) {
++   /* Step 1 (V-3b-3a): the loader-less global-command proof. */
++   PFN_vkEnumerateInstanceVersion enum_ver =
++      (PFN_vkEnumerateInstanceVersion)gipa(VK_NULL_HANDLE,
++                                           "vkEnumerateInstanceVersion");
++   if (!enum_ver) {
+       printf("THYLACINE-VENUS-PROVE FAIL: "
+              "vk_icdGetInstanceProcAddr(vkEnumerateInstanceVersion) = NULL\n");
+       return 1;
+    }
+-
+    uint32_t ver = 0;
+-   VkResult r = ((PFN_vkEnumerateInstanceVersion)p)(&ver);
+-   if (r != VK_SUCCESS) {
+-      printf("THYLACINE-VENUS-PROVE FAIL: vkEnumerateInstanceVersion rc=%d\n", r);
++   if (enum_ver(&ver) != VK_SUCCESS) {
++      printf("THYLACINE-VENUS-PROVE FAIL: vkEnumerateInstanceVersion failed\n");
+       return 1;
+    }
+-
+-   printf("THYLACINE-VENUS-PROVE PASS (loader-less ICD: "
+-          "vk_icdGetInstanceProcAddr resolved + dispatched; "
+-          "vkEnumerateInstanceVersion -> %u.%u.%u)\n",
++   printf("venus-prove: loader-less ICD ok, instance version %u.%u.%u\n",
+           VK_API_VERSION_MAJOR(ver), VK_API_VERSION_MINOR(ver),
+           VK_API_VERSION_PATCH(ver));
++
++   /* Step 2 (V-3b-3b): create an instance over /srv/warp. */
++   PFN_vkCreateInstance create_instance =
++      (PFN_vkCreateInstance)gipa(VK_NULL_HANDLE, "vkCreateInstance");
++   if (!create_instance) {
++      printf("THYLACINE-VENUS-PROVE FAIL: vkCreateInstance unresolved\n");
++      return 1;
++   }
++
++   const VkInstanceCreateInfo ci = {
++      .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
++      /* NULL pApplicationInfo => apiVersion 1.0: keeps bring-up off the
++       * loader-negotiated >=1.1 feature paths (no loader here to negotiate)
++       * while still driving the full ring + reply + capset path. */
++   };
++   VkInstance instance = VK_NULL_HANDLE;
++   VkResult r = create_instance(&ci, NULL, &instance);
++   if (r != VK_SUCCESS || instance == VK_NULL_HANDLE) {
++      printf("THYLACINE-VENUS-PROVE FAIL: vkCreateInstance rc=%d\n", r);
++      return 1;
++   }
++   printf("venus-prove: instance created\n");
++
++   PFN_vkEnumeratePhysicalDevices enum_pd =
++      (PFN_vkEnumeratePhysicalDevices)gipa(instance,
++                                           "vkEnumeratePhysicalDevices");
++   PFN_vkGetPhysicalDeviceProperties get_props =
++      (PFN_vkGetPhysicalDeviceProperties)gipa(instance,
++                                              "vkGetPhysicalDeviceProperties");
++   PFN_vkGetPhysicalDeviceMemoryProperties get_mem =
++      (PFN_vkGetPhysicalDeviceMemoryProperties)gipa(
++         instance, "vkGetPhysicalDeviceMemoryProperties");
++   PFN_vkDestroyInstance destroy_instance =
++      (PFN_vkDestroyInstance)gipa(instance, "vkDestroyInstance");
++   if (!enum_pd || !get_props || !get_mem || !destroy_instance) {
++      printf("THYLACINE-VENUS-PROVE FAIL: instance-level entries unresolved "
++             "(enum=%p props=%p mem=%p destroy=%p)\n",
++             (void *)enum_pd, (void *)get_props, (void *)get_mem,
++             (void *)destroy_instance);
++      return 1;
++   }
++
++   uint32_t pd_count = 0;
++   r = enum_pd(instance, &pd_count, NULL);
++   if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
++      printf("THYLACINE-VENUS-PROVE FAIL: vkEnumeratePhysicalDevices rc=%d\n",
++             r);
++      destroy_instance(instance, NULL);
++      return 1;
++   }
++
++   if (pd_count == 0) {
++      /* Device-less stub instance: no venus device on this host (the capset
++       * gate stubbed the renderer). Not a failure -- degrade to ABSENT. */
++      printf("THYLACINE-VENUS-PROVE ABSENT (instance is a device-less stub: "
++             "no venus device on /srv/warp -- 2D host or venus off)\n");
++      destroy_instance(instance, NULL);
++      return 0;
++   }
++
++   if (pd_count > 4)
++      pd_count = 4;
++   VkPhysicalDevice pds[4] = { VK_NULL_HANDLE };
++   r = enum_pd(instance, &pd_count, pds);
++   if ((r != VK_SUCCESS && r != VK_INCOMPLETE) || pds[0] == VK_NULL_HANDLE) {
++      printf("THYLACINE-VENUS-PROVE FAIL: vkEnumeratePhysicalDevices(list) "
++             "rc=%d\n", r);
++      destroy_instance(instance, NULL);
++      return 1;
++   }
++
++   VkPhysicalDeviceProperties props;
++   memset(&props, 0, sizeof(props));
++   get_props(pds[0], &props);
++
++   VkPhysicalDeviceMemoryProperties mem;
++   memset(&mem, 0, sizeof(mem));
++   get_mem(pds[0], &mem);
++
++   printf("venus-prove: %u device(s); dev0 '%s' type %u api %u.%u.%u; "
++          "%u memory type(s), %u heap(s)\n",
++          pd_count, props.deviceName, props.deviceType,
++          VK_API_VERSION_MAJOR(props.apiVersion),
++          VK_API_VERSION_MINOR(props.apiVersion),
++          VK_API_VERSION_PATCH(props.apiVersion),
++          mem.memoryTypeCount, mem.memoryHeapCount);
++
++   destroy_instance(instance, NULL);
++
++   printf("THYLACINE-VENUS-PROVE PASS (bring-up over /srv/warp: instance "
++          "created, %u physical device(s) enumerated, dev0 '%s', %u memory "
++          "heap(s), instance destroyed -- V-3b-3b)\n",
++          pd_count, props.deviceName, mem.memoryHeapCount);
+    return 0;
+ }
+diff --git a/src/virtio/vulkan/vn_instance.c b/src/virtio/vulkan/vn_instance.c
+index 8a3f9af..2567cfa 100644
+--- a/src/virtio/vulkan/vn_instance.c
++++ b/src/virtio/vulkan/vn_instance.c
+@@ -325,8 +325,19 @@ vn_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
+ 
+    vn_cs_renderer_protocol_info_init(instance);
+ 
++   /* Thylacine (Warp V-3b-3b audit F2): the /srv/warp host3d ring backing is
++    * capped at 1 MiB (WARP_RING_MAX), so an 8 MiB pool min-alloc can never be
++    * backed -- every indirect-CS grow would fail as an OOM far from the cause.
++    * Clamp the pool to grow in <= 1 MiB units; a single CS > 1 MiB still needs
++    * the Loom bulk path (owed at V-3b-3c). Bring-up never grows the pool (all
++    * commands emit direct, under the ring's direct_size), so this is latent. */
++#ifdef __thylacine__
++   vn_renderer_shmem_pool_init(instance->renderer, &instance->cs_shmem_pool,
++                               1u << 20);
++#else
+    vn_renderer_shmem_pool_init(instance->renderer, &instance->cs_shmem_pool,
+                                8u << 20);
++#endif
+ 
+    vn_renderer_shmem_pool_init(instance->renderer,
+                                &instance->reply_shmem_pool, 1u << 20);
+diff --git a/src/virtio/vulkan/vn_renderer_thylacine.c b/src/virtio/vulkan/vn_renderer_thylacine.c
+index 5546f55..c676b89 100644
+--- a/src/virtio/vulkan/vn_renderer_thylacine.c
++++ b/src/virtio/vulkan/vn_renderer_thylacine.c
+@@ -5,42 +5,86 @@
+  * based in part on vn_renderer_vtest.c which is:
+  * Copyright 2019 Google LLC
+  *
+- * The Thylacine vn_renderer backend (Warp V-3b-3). It is the VTEST shape --
+- * a userspace transport, no kernel DRM driver -- with Thylacine 9P file ops
+- * on the /srv/warp seam (tapestryd, the virtio-gpu owner) replacing vtest's
+- * socket, and t_weft_map replacing its SCM_RIGHTS-fd + mmap. It composes the
+- * shipped Model B substrate: shmem_create -> a HOST3D ring blob on the
+- * client's venus ctx (ring/new host3d) + weft-map; submit -> ctx/<id>/submit
+- * (warp_venus_submit, opaque bytes on venus_ctx); wait -> t_poll on the fence
+- * fd; bo -> the hostmem BAR (SYS_BURROW_FROM_HOSTMEM); info -> the caps file.
++ * The Thylacine vn_renderer backend (Warp V-3b-3). It is the VTEST shape in
++ * TRANSPORT -- a userspace 9P file seam, no kernel DRM driver -- but Model B
++ * in SEMANTICS: virglrenderer POLLS the coherent HOST3D ring directly (over
++ * the weft-mapped shmem) and tapestryd runs no ring thread. So this backend
++ * owes the Venus driver above it only (a) coherent shmem it lays its ring
++ * inside, (b) a submit that forwards the opaque bootstrap SUBMIT_CMD stream,
++ * (c) a wait/sync for the fenced teardown path. The command/reply traffic
++ * (vkCreateInstance, enumeration) threads the ring and is observed by the
++ * guest polling the ring HEAD in the mapped shmem -- it never reaches this
++ * backend at all. WARP-V3-DESIGN section 0.14 is the design pin.
+  *
+- * V-3b-3a scope: the build path (a static, loader-less ICD; virtgpu/libdrm
+- * gated out) + this skeleton wired into vn_renderer_create + the vtable. The
+- * data-plane ops are stubs here; V-3b-3b fills shmem/submit/wait/sync and
+- * V-3b-3c the bo path. WARP-V3-DESIGN section 0.14 is the design pin.
++ * Op -> substrate (Model B):
++ *   shmem_create  -> ring/new host3d <bytes> <ridx> on the venus ctx (arms
++ *                    venus_ctx lazily) + ring/<ridx>/info res_id + weft-map.
++ *   submit        -> ctx/<id>/submit (warp_venus_submit, opaque venus bytes
++ *                    on venus_ctx, fenced lane). Only vkCreateRingMESA +
++ *                    vkNotifyRingMESA (+ teardown's vkDestroyRingMESA) ride it.
++ *   wait/sync     -> the WARP ctx fence (blocking Tread of ctx/<id>/fence via
++ *                    warp_fence_wait): a sync binds to the submit's fence seq,
++ *                    signaled when that seq retires. Needed only at teardown.
++ *   info/capset   -> the retained Venus capset blob (the `caps` file). The
++ *                    V-3c authority-read pulled forward: bring-up's
++ *                    wire_format_version/vk_xml_version gate requires it.
++ *   bo            -> V-3b-3c (the hostmem BAR; still stubbed here).
++ *
++ * The wait syscall is a BLOCKING Tread of ctx/<id>/fence, NOT t_poll: the
++ * seam's qids never carry QTPOLL, so t_poll returns POLLIN immediately and
++ * would busy-spin (server-ABI verified 2026-08-25). This corrects the 0.14
++ * op-table's "t_poll" wording; the mechanism (wait on ctx/<id>/fence) is
++ * unchanged, and warp_fence_wait already implements the blocking read.
+  */
+ 
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
+ #include "virtio/virtio-gpu/venus_hw.h"
+ 
+ #include "util/sparse_array.h"
+ 
+ #include "vn_renderer_internal.h"
+ 
++#include "warp_client.h"
++
+ /* virtio-gpu PCI identity (the same virtio vendor the guest device presents);
+- * the info is cosmetic until V-3c wires the real capset authority. */
++ * cosmetic -- the real device authority is the venus ctx, not this word. */
+ #define THYLACINE_PCI_VENDOR_ID 0x1af4
+ #define THYLACINE_PCI_DEVICE_ID 0x1050
++#define THYLACINE_VENUS_CAPSET_ID 4 /* VIRTGPU_DRM_CAPSET_VENUS */
++
++#define THY_PAGE 4096u
++/* The server refuses a ring backing that is not a nonzero page multiple, and
++ * caps it at WARP_RING_MAX (1 MiB). shmem_create rounds up + rejects above. */
++#define THY_RING_MAX (1u << 20)
++#define THY_RING_SLOTS 64u /* WARP_RINGS_PER_CTX */
+ 
+ struct thylacine_shmem {
+    struct vn_renderer_shmem base;
++   uint32_t ridx;  /* the host3d ring slot backing this shmem */
++   long map_fd;    /* the weft map fid; closing it drops the mapping + pin */
+ };
+ 
+ struct thylacine_bo {
+    struct vn_renderer_bo base;
+ };
+ 
++/*
++ * A vn_renderer_sync is a u64 timeline counter. Model B has no renderer-side
++ * sync object (SIMULATE_SYNCOBJ): the counter lives guest-side here, advanced
++ * either by the CPU (write/reset) or by a submit's WARP fence retiring. When
++ * a submit carries this sync, we record the issue seq it is bound to and the
++ * value it reaches; the counter is "at" that value once the WARP fence for
++ * that seq retires (observed via warp_fence_*). Bring-up never waits a sync;
++ * only teardown's vkDestroyRingMESA does (a binary 0->1 timeline).
++ */
+ struct thylacine_sync {
+    struct vn_renderer_sync base;
++   uint64_t value;        /* current CPU-visible counter value */
++   uint64_t signal_seq;   /* WARP submit seq that advances it (0 = CPU-only) */
++   uint64_t signal_value; /* value reached once signal_seq retires */
+ };
+ 
+ struct thylacine {
+@@ -48,10 +92,25 @@ struct thylacine {
+ 
+    struct vn_instance *instance;
+ 
+-   /* the /srv/warp connection (open == connect). -1 until V-3b-3b wires the
+-    * transport; the connect + ctx mint land there. */
+-   long warp_root;
+-
++   /* the /srv/warp connection: embeds the root/ctx/submit/fence fds and the
++    * issued/signaled fence model reused for wait.
++    *
++    * SINGLE-THREAD ASSUMPTION (V-3b-3b): warp (its fds + fence counters +
++    * wedge) and ring_bitmap are unguarded. The bring-up path (vkCreateInstance
++    * -> enumerate -> vkDestroyInstance) is single-threaded and the prove
++    * harness is the only caller of this backend today, so no concurrency
++    * reaches here. Multi-threaded use arrives with VkQueues (V-3b-3c): the ops
++    * that touch warp (shmem_create/destroy, submit, wait, sync_read/write)
++    * must then serialize under a per-renderer mutex (the vtest sock_mutex
++    * analog). Tracked for V-3b-3c; do NOT ship a multi-queue driver on this
++    * backend without it. */
++   struct warp_conn warp;
++   bool connected;
++
++   /* allocated host3d ring slots (ridx 0..63); one bit per WarpRing. */
++   uint64_t ring_bitmap;
++
++   uint32_t next_sync_id;
+    uint32_t max_timeline_count;
+ 
+    struct {
+@@ -66,27 +125,106 @@ struct thylacine {
+    struct vn_renderer_shmem_cache shmem_cache;
+ };
+ 
+-/* ---- ops (V-3b-3a stubs; the real impl lands in 3b/3c) ---- */
++/* ---- host3d ring-slot (ridx) allocation ---- */
++
++/*
++ * ridx allocation is MONOTONIC (mark-only, never freed) on purpose. tapestryd
++ * retires a host3d ring ONLY at ctx death (there is no per-ring destroy verb
++ * yet, V-3b-3b audit F1) -- so a freed-then-reused ridx would collide with the
++ * still-installed server ring (`ring/new host3d <ridx>` returns E_INVAL for an
++ * occupied slot), permanently wedging shmem_create. Not freeing trades that
++ * deadlock for a bounded slot leak (<= 64 rings/ctx, reaped at ctx death),
++ * which is benign here: bring-up creates a handful of rings and the ctx dies
++ * right after teardown. OWED at V-3b-3c (where VkDeviceMemory + TLS-ring churn
++ * makes the 64-slot bound matter): a `ring/<ridx>/ctl destroy` verb that runs
++ * the existing per-ring `wring_teardown` + clears `ring_slots[ridx]`, called
++ * from shmem_destroy_now, freeing BOTH the guest ridx and the server ring.
++ */
++static int
++thylacine_ridx_alloc(struct thylacine *tly)
++{
++   for (uint32_t i = 0; i < THY_RING_SLOTS; i++) {
++      if (!(tly->ring_bitmap & (1ull << i))) {
++         tly->ring_bitmap |= (1ull << i);
++         return (int)i;
++      }
++   }
++   return -1; /* all 64 ring slots consumed on this ctx (monotonic; F1) */
++}
++
++/* ---- shmem: the coherent HOST3D ring the Venus driver lays its ring in ---- */
+ 
+ static void
+ thylacine_shmem_destroy_now(struct vn_renderer *renderer,
+                             struct vn_renderer_shmem *shmem)
+ {
+-   struct thylacine *tly = (struct thylacine *)renderer;
+    struct thylacine_shmem *ts = (struct thylacine_shmem *)shmem;
+-   (void)tly;
+-   (void)ts;
+-   /* V-3b-3b: t_close the map fd (drops mapping + pin) + retire the ring. */
++   (void)renderer;
++
++   /* Closing the map fid drops the client's mapping + the transferred pin
++    * (kernel-side). The server's host3d ring stays INSTALLED until ctx death
++    * (there is no per-ring destroy verb yet -- V-3b-3b audit F1); the ridx is
++    * deliberately NOT freed (monotonic alloc), so a later shmem_create can
++    * never collide with the still-installed slot. See thylacine_ridx_alloc. */
++   warp_ring_unmap(ts->map_fd);
+ }
+ 
+ static struct vn_renderer_shmem *
+ thylacine_shmem_create(struct vn_renderer *renderer, size_t size)
+ {
+-   (void)renderer;
+-   (void)size;
+-   /* V-3b-3b: ring/new host3d <size> <ridx> on the venus ctx, read res_id
+-    * from ring/<ridx>/info, t_weft_map the backing -> mmap_ptr. */
+-   return NULL;
++   struct thylacine *tly = (struct thylacine *)renderer;
++
++   struct vn_renderer_shmem *cached_shmem =
++      vn_renderer_shmem_cache_get(&tly->shmem_cache, size);
++   if (cached_shmem) {
++      cached_shmem->refcount = VN_REFCOUNT_INIT(1);
++      return cached_shmem;
++   }
++
++   /* The server backs a ring with page-multiple, <= 1 MiB pages. The Venus
++    * ring is 131268 B (128 KiB buffer + control lines) -- round up to the
++    * page; the reply pool is 1 MiB (exactly the ceiling). A request over
++    * 1 MiB (the cs pool, a huge reply) is refused: the byte seam's ring
++    * ceiling, the Loom bulk path is the successor (out of V-3b-3 scope). */
++   size_t rounded = (size + (THY_PAGE - 1)) & ~(size_t)(THY_PAGE - 1);
++   if (rounded == 0 || rounded > THY_RING_MAX)
++      return NULL;
++
++   int ridx = thylacine_ridx_alloc(tly);
++   if (ridx < 0)
++      return NULL;
++
++   uint32_t res_id = 0;
++   if (warp_ring_create_host3d(&tly->warp, (uint32_t)ridx, (uint32_t)rounded,
++                               &res_id) != 0) {
++      /* The mint may have installed the ring server-side before the info read
++       * failed, so the ridx is NOT freed -- reusing it would collide with the
++       * still-installed slot (F1). Monotonic; the ring reaps at ctx death. */
++      return NULL;
++   }
++
++   long map_fd = -1;
++   void *ptr = warp_ring_map(&tly->warp, (uint32_t)ridx, &map_fd);
++   if (!ptr) {
++      /* The ring is minted (installed server-side) but unmapped. The ridx is
++       * NOT freed -- the server retires the ring only at ctx death (F1). */
++      return NULL;
++   }
++
++   struct thylacine_shmem *shmem =
++      util_sparse_array_get(&tly->shmem_array, res_id);
++   *shmem = (struct thylacine_shmem){
++      .base = {
++         .refcount = VN_REFCOUNT_INIT(1),
++         .res_id = res_id,
++         .mmap_size = rounded,
++         .mmap_ptr = ptr,
++      },
++      .ridx = (uint32_t)ridx,
++      .map_fd = map_fd,
++   };
++
++   return &shmem->base;
+ }
+ 
+ static void
+@@ -101,6 +239,8 @@ thylacine_shmem_destroy(struct vn_renderer *renderer,
+    thylacine_shmem_destroy_now(&tly->base, shmem);
+ }
+ 
++/* ---- bo / device memory: V-3b-3c (the hostmem BAR path) ---- */
++
+ static VkResult
+ thylacine_bo_create_from_device_memory(
+    struct vn_renderer *renderer,
+@@ -117,7 +257,8 @@ thylacine_bo_create_from_device_memory(
+    (void)external_handles;
+    (void)out_bo;
+    /* V-3b-3c: HOST_VISIBLE VkDeviceMemory over the hostmem BAR (MAP_BLOB +
+-    * SYS_BURROW_FROM_HOSTMEM). */
++    * SYS_BURROW_FROM_HOSTMEM). Bring-up (create instance + enumerate) never
++    * allocates device memory, so this stays stubbed for the 3b milestone. */
+    return VK_ERROR_OUT_OF_HOST_MEMORY;
+ }
+ 
+@@ -156,8 +297,6 @@ thylacine_bo_flush(struct vn_renderer *renderer, struct vn_renderer_bo *bo,
+    (void)bo;
+    (void)offset;
+    (void)size;
+-   /* coherent hostmem BAR: no explicit flush (V-3b-3c confirms the cache
+-    * attribute the host dictates). */
+ }
+ 
+ static void
+@@ -171,17 +310,37 @@ thylacine_bo_invalidate(struct vn_renderer *renderer,
+    (void)size;
+ }
+ 
++/* ---- sync: guest-side u64 timeline bound to the WARP ctx fence ---- */
++
++static void
++thylacine_sync_refresh(struct thylacine *tly, struct thylacine_sync *s)
++{
++   if (s->signal_seq == 0)
++      return; /* CPU-only value (write/reset); no fence to observe */
++   if (warp_fence_refresh(&tly->warp) != 0)
++      return;
++   if (tly->warp.signaled >= s->signal_seq && s->value < s->signal_value)
++      s->value = s->signal_value;
++}
++
+ static VkResult
+ thylacine_sync_create(struct vn_renderer *renderer, uint64_t initial_val,
+                       uint32_t flags, struct vn_renderer_sync **out_sync)
+ {
+-   (void)renderer;
+-   (void)initial_val;
++   struct thylacine *tly = (struct thylacine *)renderer;
+    (void)flags;
+-   (void)out_sync;
+-   /* V-3b-3b: a u64 timeline over the coherent feedback slots
+-    * (SIMULATE_SYNCOBJ). */
+-   return VK_ERROR_OUT_OF_HOST_MEMORY;
++
++   struct thylacine_sync *sync = calloc(1, sizeof(*sync));
++   if (!sync)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++
++   sync->base.sync_id = tly->next_sync_id++;
++   sync->value = initial_val;
++   sync->signal_seq = 0;
++   sync->signal_value = initial_val;
++
++   *out_sync = &sync->base;
++   return VK_SUCCESS;
+ }
+ 
+ static void
+@@ -189,59 +348,162 @@ thylacine_sync_destroy(struct vn_renderer *renderer,
+                        struct vn_renderer_sync *sync)
+ {
+    (void)renderer;
+-   (void)sync;
++   free(sync);
+ }
+ 
+ static VkResult
+ thylacine_sync_reset(struct vn_renderer *renderer,
+-                     struct vn_renderer_sync *sync, uint64_t initial_val)
++                     struct vn_renderer_sync *_sync, uint64_t initial_val)
+ {
++   struct thylacine_sync *sync = (struct thylacine_sync *)_sync;
+    (void)renderer;
+-   (void)sync;
+-   (void)initial_val;
+-   return VK_ERROR_OUT_OF_HOST_MEMORY;
++   sync->value = initial_val;
++   sync->signal_seq = 0;
++   sync->signal_value = initial_val;
++   return VK_SUCCESS;
+ }
+ 
+ static VkResult
+ thylacine_sync_read(struct vn_renderer *renderer,
+-                    struct vn_renderer_sync *sync, uint64_t *val)
++                    struct vn_renderer_sync *_sync, uint64_t *val)
+ {
+-   (void)renderer;
+-   (void)sync;
+-   (void)val;
+-   return VK_ERROR_OUT_OF_HOST_MEMORY;
++   struct thylacine *tly = (struct thylacine *)renderer;
++   struct thylacine_sync *sync = (struct thylacine_sync *)_sync;
++   thylacine_sync_refresh(tly, sync);
++   *val = sync->value;
++   return VK_SUCCESS;
+ }
+ 
+ static VkResult
+ thylacine_sync_write(struct vn_renderer *renderer,
+-                     struct vn_renderer_sync *sync, uint64_t val)
++                     struct vn_renderer_sync *_sync, uint64_t val)
+ {
++   struct thylacine_sync *sync = (struct thylacine_sync *)_sync;
+    (void)renderer;
+-   (void)sync;
+-   (void)val;
+-   return VK_ERROR_OUT_OF_HOST_MEMORY;
++   /* CPU override: drop any fence binding -- a later value the GPU has not
++    * reached is now the truth the driver asserted. */
++   sync->value = val;
++   sync->signal_seq = 0;
++   sync->signal_value = val;
++   return VK_SUCCESS;
+ }
+ 
++/* ---- submit: forward the opaque bootstrap SUBMIT_CMD stream ---- */
++
+ static VkResult
+ thylacine_submit(struct vn_renderer *renderer,
+                  const struct vn_renderer_submit *submit)
+ {
+-   (void)renderer;
+-   (void)submit;
+-   /* V-3b-3b: ctx/<id>/submit -> warp_venus_submit (opaque venus bytes on
+-    * venus_ctx); the bootstrap vkCreateRingMESA + the doorbell kick. */
+-   return VK_ERROR_OUT_OF_HOST_MEMORY;
++   struct thylacine *tly = (struct thylacine *)renderer;
++
++   /* Bring-up submits carry one batch with one command (vkCreateRingMESA /
++    * vkNotifyRingMESA), no syncs. Teardown carries vkDestroyRingMESA with a
++    * single binary sync. Each batch is one atomic venus submission; its
++    * syncs bind to that submission's WARP fence seq. bos[] (submit-time pin)
++    * is empty on every bring-up path -- BO pinning lands with the bo path
++    * in V-3b-3c. */
++   for (uint32_t i = 0; i < submit->batch_count; i++) {
++      const struct vn_renderer_submit_batch *batch = &submit->batches[i];
++      uint64_t seq;
++
++      if (batch->cs_size == 0) {
++         /* A batch with syncs but no command. If work is in flight the syncs
++          * must NOT jump ahead of it (submission-order signaling, like
++          * vtest/virtgpu): bind them to the last issued seq so they signal
++          * when everything currently in flight retires. Only with nothing in
++          * flight do they signal immediately on the CPU timeline. (V-3b-3b
++          * audit F4.) */
++         const uint64_t issued = tly->warp.issued;
++         for (uint32_t j = 0; j < batch->sync_count; j++) {
++            struct thylacine_sync *s =
++               (struct thylacine_sync *)batch->syncs[j];
++            const uint64_t v = batch->sync_values[j];
++            if (issued > tly->warp.signaled) {
++               s->signal_seq = issued;
++               s->signal_value = v;
++            } else {
++               if (s->value < v)
++                  s->value = v;
++               s->signal_seq = 0;
++               s->signal_value = v;
++            }
++         }
++         continue;
++      }
++
++      if (batch->cs_size > UINT32_MAX) {
++         /* the seam's len type is u32; guard the cast so an implausibly
++          * large stream cannot truncate to a small value that slips the
++          * one-write bound (a stream this large needs the Loom bulk path). */
++         return VK_ERROR_DEVICE_LOST;
++      }
++
++      seq = warp_venus_submit(&tly->warp, batch->cs_data,
++                              (uint32_t)batch->cs_size);
++      if (seq == 0)
++         return VK_ERROR_DEVICE_LOST;
++
++      for (uint32_t j = 0; j < batch->sync_count; j++) {
++         struct thylacine_sync *s = (struct thylacine_sync *)batch->syncs[j];
++         s->signal_seq = seq;
++         s->signal_value = batch->sync_values[j];
++      }
++   }
++
++   return VK_SUCCESS;
+ }
+ 
++/* ---- wait: block on the bound WARP fence seq(s) ---- */
++
+ static VkResult
+ thylacine_wait(struct vn_renderer *renderer,
+                const struct vn_renderer_wait *wait)
+ {
+-   (void)renderer;
+-   (void)wait;
+-   /* V-3b-3b: t_poll on ctx/<id>/fence with the Vulkan ns timeout; the fast
+-    * path polls the coherent feedback slots. */
+-   return VK_ERROR_DEVICE_LOST;
++   struct thylacine *tly = (struct thylacine *)renderer;
++   bool any_satisfied = false;
++
++   /* Model B waits are only the teardown binary timeline (one sync). A sync
++    * is satisfied when its bound WARP fence seq retires; warp_fence_wait is
++    * the blocking Tread of ctx/<id>/fence (not t_poll -- see file header).
++    * A zero timeout polls without blocking; any non-zero timeout blocks
++    * until the fence retires (the ns bound is not honored precisely -- the
++    * only non-zero-timeout waiter today is teardown, which wants
++    * completion; finite-timeout precision via the coherent seqno slot is a
++    * refinement). */
++   for (uint32_t i = 0; i < wait->sync_count; i++) {
++      struct thylacine_sync *s = (struct thylacine_sync *)wait->syncs[i];
++      const uint64_t target = wait->sync_values[i];
++
++      thylacine_sync_refresh(tly, s);
++      if (s->value >= target) {
++         any_satisfied = true;
++         if (wait->wait_any)
++            return VK_SUCCESS;
++         continue;
++      }
++
++      if (wait->timeout != 0 && s->signal_seq != 0 &&
++          target <= s->signal_value) {
++         if (warp_fence_wait(&tly->warp, s->signal_seq) < 0)
++            return VK_ERROR_DEVICE_LOST;
++         thylacine_sync_refresh(tly, s);
++         if (s->value >= target) {
++            any_satisfied = true;
++            if (wait->wait_any)
++               return VK_SUCCESS;
++            continue;
++         }
++      }
++
++      /* Unmet: for wait_all one unmet sync means the whole wait times out;
++       * for wait_any keep scanning the rest. */
++      if (!wait->wait_any)
++         return VK_TIMEOUT;
++   }
++
++   if (wait->wait_any)
++      return any_satisfied ? VK_SUCCESS : VK_TIMEOUT;
++   return VK_SUCCESS;
+ }
+ 
+ static void
+@@ -250,12 +512,15 @@ thylacine_destroy(struct vn_renderer *renderer,
+ {
+    struct thylacine *tly = (struct thylacine *)renderer;
+ 
++   /* cache_fini drops any cached ring mappings (warp_ring_unmap) -- must run
++    * while the connection is still open, i.e. before warp_close. */
+    vn_renderer_shmem_cache_fini(&tly->shmem_cache);
+ 
+    util_sparse_array_finish(&tly->shmem_array);
+    util_sparse_array_finish(&tly->bo_array);
+ 
+-   /* V-3b-3b: warp_close(warp_root). */
++   if (tly->connected)
++      warp_close(&tly->warp);
+ 
+    vk_free(alloc, tly);
+ }
+@@ -273,30 +538,68 @@ thylacine_init_renderer_info(struct thylacine *tly)
+    info->has_implicit_fencing = false;
+    info->has_guest_vram = false;
+ 
+-   info->max_timeline_count = tly->max_timeline_count;
++   /* The two load-bearing gate fields (vn_instance_init_renderer):
++    * wire_format_version must equal 1 and vk_xml_version must be >= 1.1 or
++    * the driver produces a device-less stub instance. They come from the
++    * retained Venus capset (read in thylacine_init); a non-venus host serves
++    * a blob whose wire_format_version != 1, which correctly stubs. */
++   const struct virgl_renderer_capset_venus *capset = &tly->capset.data;
++   info->wire_format_version = capset->wire_format_version;
++   info->vk_xml_version = capset->vk_xml_version;
++   info->vk_ext_command_serialization_spec_version =
++      capset->vk_ext_command_serialization_spec_version;
++   info->vk_mesa_venus_protocol_spec_version =
++      capset->vk_mesa_venus_protocol_spec_version;
++
++   STATIC_ASSERT(sizeof(info->vk_extension_mask) >=
++                 sizeof(capset->vk_extension_mask1));
++   memcpy(info->vk_extension_mask, capset->vk_extension_mask1,
++          sizeof(capset->vk_extension_mask1));
+ 
+-   /* The capset (wire/xml/spec versions + the extension masks) is left zero
+-    * here; V-3c wires the real capset authority from the caps file. The 3a
+-    * link/load proof does not enumerate a physical device, so a zero capset
+-    * is correct -- not a stub that must be remembered. */
++   info->max_timeline_count = tly->max_timeline_count;
+ }
+ 
+ static VkResult
+ thylacine_init(struct thylacine *tly)
+ {
++   /* Init the non-fallible structures first so the failure path
++    * (thylacine_destroy on a warp_open failure) always finds valid arrays +
++    * cache to finish/fini. */
+    util_sparse_array_init(&tly->shmem_array, sizeof(struct thylacine_shmem),
+                           1024);
+    util_sparse_array_init(&tly->bo_array, sizeof(struct thylacine_bo), 1024);
+-
+-   /* V-3b-3b: warp_open(&conn) -> connect + mint the venus ctx; init the
+-    * capset from the caps file. At 3a the transport is unwired (the link/
+-    * load proof needs neither). */
+-   tly->warp_root = -1;
+-   tly->max_timeline_count = 64;
+-
+    vn_renderer_shmem_cache_init(&tly->shmem_cache, &tly->base,
+                                 thylacine_shmem_destroy_now);
+ 
++   /* Connect + mint the ctx + open the hot fds. Fails on no /srv/warp, a 2D
++    * (virgl 0) device, or a mint failure -- returning INITIALIZATION_FAILED,
++    * which vn_CreateInstance turns into a device-less stub instance (the
++    * graceful non-GL-host path; the harness reports "absent"). */
++   if (warp_open(&tly->warp) != 0)
++      return VK_ERROR_INITIALIZATION_FAILED;
++   tly->connected = true;
++
++   /* Read the retained Venus capset (the V-3c authority-read, pulled forward
++    * because bring-up's gate needs it). Best-effort: a short/absent blob
++    * leaves the gate fields low and Venus stubs the instance. */
++   memset(&tly->capset.data, 0, sizeof(tly->capset.data));
++   long n = warp_read_venus_caps(&tly->warp, &tly->capset.data,
++                                 sizeof(tly->capset.data));
++   if (n > 0 && (size_t)n < sizeof(tly->capset.data))
++      memset((char *)&tly->capset.data + n, 0, sizeof(tly->capset.data) - n);
++   tly->capset.id = THYLACINE_VENUS_CAPSET_ID;
++   tly->capset.version = 0;
++   /* V-3b-3b audit F3: the seam does not carry ring_idx (thylacine_submit
++    * ignores batch->ring_idx; tapestryd hardcodes the submit ring word to 0),
++    * so a VkQueue bound to a nonzero timeline would be silently mis-attributed
++    * + fenced on ring 0. Advertise a SINGLE timeline until the seam carries
++    * ring_idx (lift both in the same commit at V-3b-3c): mask the host's
++    * multi-timeline capability out of the retained capset and cap the count. */
++   tly->capset.data.supports_multiple_timelines = 0;
++
++   tly->next_sync_id = 1;
++   tly->max_timeline_count = 1;
++
+    thylacine_init_renderer_info(tly);
+ 
+    tly->base.ops.destroy = thylacine_destroy;
+@@ -339,7 +642,6 @@ vn_renderer_create_thylacine(struct vn_instance *instance,
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
+ 
+    tly->instance = instance;
+-   tly->warp_root = -1;
+ 
+    VkResult result = thylacine_init(tly);
+    if (result != VK_SUCCESS) {
+-- 
+2.43.0
+
