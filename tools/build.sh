@@ -2752,15 +2752,17 @@ populate_stratum_pool() {
         # `viv run` cannot write anywhere in the rootfs -- the A-2d W|X check
         # denies the phenotype's openat(O_CREAT)/mkdirat legs (measured:
         # "can't create /tmp/f50: Permission denied" from the viv-run
-        # scenario's user shell). Re-stamp each staged bundle's /tmp 0777
-        # after the put (stratum-fs chmod -> Tsetattr). Linux containers
-        # expect a writable /tmp; the sticky bit adds nothing the kernel
-        # enforces at v1.0. A bundle without a rootfs/tmp (the probe) skips.
+        # scenario's user shell). Re-stamp each staged bundle's /tmp 1777
+        # after the put (stratum-fs chmod -> Tsetattr; the parser admits
+        # 4-digit octal). The kernel enforces no sticky bit at v1.0, so
+        # today 1777 behaves as 0777 -- baking the REAL Linux mode now means
+        # the fixture needs no revisit on the day sticky enforcement lands
+        # (the #50 holotype's F4). A bundle without a rootfs/tmp skips.
         local vb
         for vb in "$viv_stage"/*/rootfs/tmp; do
             [[ -d "$vb" ]] || continue
             local vrel="/vivarium${vb#"$viv_stage"}"
-            "$stratum_fs_bin" -s "$sock_path" chmod 777 "$vrel" \
+            "$stratum_fs_bin" -s "$sock_path" chmod 1777 "$vrel" \
                 || { echo "==> populate pool: chmod $vrel FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         done
         "$stratum_fs_bin" -s "$sock_path" sync \

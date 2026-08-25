@@ -2866,6 +2866,10 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 #define SYS_WALK_OPEN_NOFOLLOW     0x20u
 #define SYS_WALK_OPEN_OMODE_VALID  0xB3u
 
+// The OTRUNC modifier the comment above names, given its symbol so the strips
+// in the create core reference the ABI value by meaning rather than literal
+// (the value is pinned inside SYS_WALK_OPEN_OMODE_VALID's bit 4 regardless).
+#define SYS_WALK_OPEN_OTRUNC       0x10u
 // #50 (VIVARIUM.md section 6.24): the EXCLUSIVE-create modifier, at the value
 // the comment above pre-reserved for it. Meaningful ONLY to SYS_OPEN_CREATE
 // (create-first, once; an existing leaf answers -T_E_EEXIST -- atomic at the

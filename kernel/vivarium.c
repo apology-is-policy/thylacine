@@ -540,6 +540,9 @@ enum {
 //                core, whose cwd join is SYS_OPEN's own helper (blocker 3
 //                closed structurally) and whose create-else-open composition
 //                is kernel-side (blockers 1+2 dissolved the Plan 9 way).
+//                O_CREAT WITH O_PATH stays on the plain decide, which STRIPS
+//                it (Linux's O_PATH ignores O_CREAT) -- served exactly, not
+//                declined; the in-body arm below carries the contour.
 //   O_DIRECTORY  Requires the target BE a directory (Linux: ENOTDIR otherwise).
 //                SYS_OPEN has no such check, so ignoring it turns an error into
 //                a successful open of a regular file. The worst kind of wrong.
@@ -587,6 +590,19 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
     // lost is small: musl compiles every open() to AT_FDCWD, and only the *at()
     // family passes a real fd.
     if (dfd != VIV_AT_FDCWD) return VIV_FORWARD;
+
+    // #50 close (SA-1): Linux's O_PATH IGNORES O_CREAT (open(2): an O_PATH
+    // open honours only CLOEXEC/DIRECTORY/NOFOLLOW), so O_CREAT composed WITH
+    // O_PATH is served HERE by stripping it -- the exact contour, and the
+    // reason the shell's routing sends only O_CREAT-without-O_PATH to the
+    // create decide. O_CREAT WITHOUT O_PATH remains out of THIS decide's
+    // domain: a direct call answers FORWARD, never a silent ENOENT-shaped
+    // ignore (the V-2b hazard the rejected-flag block below narrates) -- the
+    // decide owns its whole domain without leaning on the shell's routing.
+    if (fl & VIV_O_CREAT) {
+        if (!(fl & VIV_O_PATH)) return VIV_FORWARD;
+        fl &= ~(u32)VIV_O_CREAT;
+    }
 
     if (fl & ~VIV_OPENAT_ADMITTED) return VIV_FORWARD;
 

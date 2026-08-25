@@ -354,6 +354,18 @@ void test_vivarium_openat_domain(void) {
     viv_expect_open_cx(VIV_T_ATCWD, VIV_O_PATH | VIV_O_CLOEXEC,
                        SYS_WALK_OPEN_OPATH, true,
                        "O_PATH|O_CLOEXEC keeps the descriptor flag");
+    // #50 close (SA-1): Linux's O_PATH IGNORES O_CREAT, so the composition
+    // TRANSLATES here with the bit stripped (bare OPATH out) -- served
+    // exactly, not declined. The stand-alone O_CREAT reject below is
+    // unchanged: without O_PATH this decide still forwards it (the create
+    // domain belongs to vivarium_openat_create_decide via the shell).
+    viv_expect_open(VIV_T_ATCWD, VIV_O_PATH | VIV_O_CREAT,
+                    SYS_WALK_OPEN_OPATH,
+                    "O_PATH|O_CREAT translates with O_CREAT stripped (Linux "
+                    "ignores O_CREAT under O_PATH)");
+    viv_expect_open(VIV_T_ATCWD, VIV_O_PATH | VIV_O_CREAT | VIV_O_RDWR,
+                    SYS_WALK_OPEN_OPATH,
+                    "O_PATH|O_CREAT|access: both stripped, bare OPATH");
 
     // The rejects. Each of these, if silently ignored, is a WRONG ANSWER rather
     // than a harmless no-op -- that asymmetry is the whole admission rule, so

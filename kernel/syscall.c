@@ -3757,8 +3757,9 @@ s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
     bool isdir = (perm & SYS_WALK_CREATE_DMDIR) != 0;
 
     // ONE cwd read for both legs: join here, so every open attempt and the
-    // parent resolve see the same base. A concurrent chdir between bounded
-    // retries re-resolves — the same envelope as Linux's own retry loop.
+    // parent resolve see the same base. The joined path is absolute, so the
+    // open leg's own join no-ops — a concurrent chdir between the bounded
+    // retries CANNOT re-aim them (the cwd is pinned at this first join).
     char joined[SYS_OPEN_PATH_MAX + 1];
     const char *rpath;
     u64 rlen;
@@ -3810,7 +3811,8 @@ s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
         // fresh object and OEXCL is not a Plan 9 dev bit; both stripped.
         rc = open_create_try_create(p, start, rpath, leaf_start,
                                     leaf_scratch, leaf_len,
-                                    omode_raw & ~(u64)(SYS_WALK_OPEN_OEXCL | 0x10u /*OTRUNC*/),
+                                    omode_raw & ~(u64)(SYS_WALK_OPEN_OEXCL |
+                                                       SYS_WALK_OPEN_OTRUNC),
                                     perm);
         spoor_clunk(start);
         return rc;
@@ -3827,7 +3829,8 @@ s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
 
         rc = open_create_try_create(p, start, rpath, leaf_start,
                                     leaf_scratch, leaf_len,
-                                    omode_raw & ~(u64)(SYS_WALK_OPEN_OEXCL | 0x10u /*OTRUNC*/),
+                                    omode_raw & ~(u64)(SYS_WALK_OPEN_OEXCL |
+                                                       SYS_WALK_OPEN_OTRUNC),
                                     perm);
         if (rc >= 0 || rc != -(s64)T_E_EXIST) break;
         if (attempt >= 1) { rc = -(s64)T_E_EXIST; break; }

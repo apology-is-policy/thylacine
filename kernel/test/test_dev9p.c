@@ -3069,6 +3069,17 @@ void test_dev9p_open_create_noent_then_create(void) {
     g_dev9p_wga_partial_n = 0;   // fixture hygiene: never leak an armed knob
     TEST_ASSERT(fd >= 0, "open-NOENT -> create succeeded");
     TEST_EXPECT_EQ((u64)g_tlcreate_seen, (u64)1, "exactly one Tlcreate");
+    // #50 close F1: the Rclunk-drop exception is EXACT-COUNTED per leg, so a
+    // future SYNCHRONOUS clunk that leaks its reply -- the discipline bug the
+    // send guard exists for -- moves the count and fails here instead of
+    // passing as the modeled async-clunk. The value is a MEASURED anchor
+    // (uart-instrumented boot, 2026-08-25), not a derivation: the choreography
+    // lives in the dirfid park/reuse pool, and a first-principles park-slot
+    // model predicted it wrong. A change in EITHER direction means the clunk
+    // choreography changed -- re-measure before re-pinning. This leg
+    // (successful create; the parked dir fid is REUSED by the create): 0.
+    TEST_EXPECT_EQ((u64)g_loopback.dropped_rclunks, (u64)0,
+                   "async-clunk drop count (measured anchor)");
     struct Handle h;
     TEST_ASSERT(handle_get(p, (hidx_t)fd, &h) == 0 && h.kind == KOBJ_SPOOR,
                 "created fd resolves to a Spoor handle");
@@ -3102,6 +3113,12 @@ void test_dev9p_open_create_exists_race_retries_open(void) {
     TEST_ASSERT(fd >= 0, "the loser converged by OPENING the winner's file");
     TEST_EXPECT_EQ((u64)g_tlcreate_seen, (u64)1,
                    "exactly one Tlcreate -- the recovery was the retry-open");
+    // #50 close F1 (measured anchor, as above): the lost-race leg's failed
+    // create clunks its clone-walked dir fid AND the stalked parent (same
+    // qid) -- park + async-clunk -- and the retry-open's traffic drops the
+    // staged Rclunk: 1.
+    TEST_EXPECT_EQ((u64)g_loopback.dropped_rclunks, (u64)1,
+                   "async-clunk drop count (measured anchor)");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
@@ -3126,6 +3143,11 @@ void test_dev9p_open_create_excl_eexist_exact(void) {
                    "OEXCL loser answers EXACTLY -T_E_EXIST (lockfile contract)");
     TEST_EXPECT_EQ((u64)g_tlcreate_seen, (u64)1,
                    "one create, no open-first, no retry");
+    // #50 close F1 (measured anchor, as above): the OEXCL loser's failed
+    // create runs the same double-clunk of the parent-qid pair as the
+    // lost-race leg: 1.
+    TEST_EXPECT_EQ((u64)g_loopback.dropped_rclunks, (u64)1,
+                   "async-clunk drop count (measured anchor)");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);

@@ -3240,7 +3240,11 @@ Design: `VIVARIUM.md` section 6.24 (scripture `b417b307`). Four Tier-2 rows —
 `renameat2`(276, flags==0) — on ONE new kernel primitive, plus the native mint
 `SYS_OPEN_CREATE = 108` (the ARCH section 11.2 `create(name, mode, perm)` row,
 fulfilled). git's writes stand on all four (`git init` alone needs create +
-mkdir + unlink + rename-into-place).
+mkdir + unlink + rename-into-place). The openat routing reads register bits
+only: `O_CREAT` WITHOUT `O_PATH` goes to the create decide; WITH `O_PATH` it
+stays on the plain decide, which STRIPS it — Linux's `O_PATH` ignores
+`O_CREAT`, and the strip serves that contour exactly (the #50 close's SA-1;
+before it the composition declined while the comment claimed the contour).
 
 ### The mechanism (extraction, not duplication — the I-43 rule)
 
@@ -3278,6 +3282,12 @@ mkdir + unlink + rename-into-place).
 - Real (non-AT_FDCWD) dirfds stay out (the 6.20 Correction-2 handle-state
   blocker, untouched). renameat2 flags != 0 (NOREPLACE/EXCHANGE/WHITEOUT)
   decline. `O_APPEND`/`O_DIRECTORY` keep their V-2b rejections.
+- A trailing slash on a rename/unlink-file path answers ENOTDIR *lexically* —
+  including `rename("d1/", "d2")` on a REAL directory, which Linux resolves
+  and permits (the #50 holotype's F2). Strictly refuse-more: no mutation ever
+  proceeds that Linux would refuse; the inverse admission would need a
+  resolve-on-trailing probe, deferred until a consumer materializes (git
+  renames carry no trailing slashes).
 - Sticky-dir deletion restriction is not enforced (A-2d checks W|X only) —
   pre-existing SYS_UNLINK behavior, now reachable by path.
 
@@ -3294,8 +3304,13 @@ answers. `docs/ERRORS.md` carries the row.
 so the containers' /tmp lost its 1777 and a user-principal `viv run` could
 not write ANYWHERE in the rootfs — measured as `can't create /tmp/f50:
 Permission denied` the first time the E2E ran the create leg as a user.
-`populate_stratum_pool` now re-stamps each bundle's `rootfs/tmp` 0777 after
-the put (`stratum-fs chmod` -> Tsetattr).
+`populate_stratum_pool` now re-stamps each bundle's `rootfs/tmp` 1777 after
+the put (`stratum-fs chmod` -> Tsetattr; the parser admits 4-digit octal).
+The kernel enforces no sticky bit at v1.0 so 1777 behaves as 0777 today;
+baking the real Linux mode means the fixture needs no revisit when sticky
+enforcement lands (the #50 holotype's F4). The general gap — `put` flattens
+every OTHER non-exec mode bit a rootfs carries (e.g. /var/tmp's 1777, setgid
+dirs) — is Stratum-side and remains open.
 
 ### The loopback learned the async-clunk drain
 
@@ -3307,6 +3322,12 @@ REFUSED the next send over the unread reply — `client_mark_dead_locked`, the
 whole client dead, every later op EIO — killing a legitimate pattern no real
 backend fails. `loopback_send` now discards exactly a WHOLE staged Rclunk
 (counted in `dropped_rclunks`); every other unread-reply send still refuses.
+The three dev9p legs assert the count EXACTLY (0 / 1 / 1 — MEASURED anchors,
+uart-instrumented boot; a first-principles park-slot model predicted 1 / 2 / 0
+and was wrong, because the choreography lives in the dirfid park/reuse pool),
+so an unexpected drop — a real synchronous-clunk reply leak, the class the
+guard exists for — moves a count and fails loudly instead of passing as the
+modeled pattern (the holotype's F1).
 Cost of finding it: six instrumented boots (the step-tracker bisection).
 
 ### Witnesses
