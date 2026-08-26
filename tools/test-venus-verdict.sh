@@ -50,6 +50,13 @@ tapestryd: warp host3d-ring venus-ctx=512 MAPPED+ROUNDTRIP refcount=1 teardown O
 tapestryd: warp ring-recreate ridx-reuse OK (destroy -> re-mint ridx 0)
 tapestryd: warp mem-recreate handle-reuse OK (alloc -> sentinel -> destroy -> re-alloc handle 0)
 venus-prove: device-memory sentinel OK (type 0 size 4096, zero-at-map + c0deface round-tripped)
+venus-prove: placed-map de-advertised OK (76 device exts)
+venus-prove: GPU round-trip OK (vkCmdCopyBuffer 4 KiB, fenced submit, pattern survived FIRST map -- the F1 reify-at-alloc proof)
+venus-prove: second logical device + queue OK (timeline 2 acquired -- the multi-queue lift)
+venus-prove: two-timeline interleave OK (fenced copies on t1 then t2, waited t2 before t1, both patterns intact -- the F3 per-timeline retirement witness)
+venus-prove: cap-exhaustion cycle OK (refused at the 64 MiB ctx cap, freed, realloc'd -- the F2 no-burn proof)
+venus-prove: offscreen triangle OK (render pass + SPIR-V pipeline + draw + copy-out 64x64; center red, corner blue -- the W-1 pipeline-class witness)
+venus-prove: slot-exhaustion cycles OK (253/253/253 to refusal, steady-state equal -- the F2 discriminating no-burn proof)
 EOF
 }
 
@@ -147,6 +154,41 @@ check "test leg shows device-memory sentinel MISMATCH -> UNVERIFIED" 1 "" \
       'sed "s/venus-prove: device-memory sentinel OK.*/THYLACINE-VENUS-PROVE FAIL: device-memory sentinel mismatch (wrote c0deface\/3f210531 read 00000000\/00000000)/" "$t" > "$t.x" && mv "$t.x" "$t"'
 check "control leg ALSO sees device-memory sentinel OK -> UNVERIFIED" 1 \
       'printf "venus-prove: device-memory sentinel OK (type 0 size 4096, zero-at-map + c0deface round-tripped)\n" >> "$c"' ""
+# Multi-queue chunk + vkQuake-arc W-1: the remaining prove witness lines (the
+# multi-queue r2 note -- a witness line the gate never asserts can silently
+# vanish). Per line: the test leg must carry it, the control leg must not
+# (the control prove reports ABSENT, so every venus-prove witness is absent
+# there). Every step's failure mode emits a THYLACINE-VENUS-PROVE FAIL line
+# containing none of these keys, so the absent-arm also covers replaced-by-
+# FAIL.
+check "test leg lacks GPU round-trip OK -> UNVERIFIED" 1 "" \
+      'grep -v "GPU round-trip OK" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO sees GPU round-trip OK -> UNVERIFIED" 1 \
+      'printf "venus-prove: GPU round-trip OK (vkCmdCopyBuffer 4 KiB, fenced submit, pattern survived FIRST map -- the F1 reify-at-alloc proof)\n" >> "$c"' ""
+check "test leg lacks placed-map de-advertised OK -> UNVERIFIED" 1 "" \
+      'grep -v "placed-map de-advertised OK" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO sees placed-map de-advertised OK -> UNVERIFIED" 1 \
+      'printf "venus-prove: placed-map de-advertised OK (76 device exts)\n" >> "$c"' ""
+check "test leg lacks second logical device OK -> UNVERIFIED" 1 "" \
+      'grep -v "second logical device + queue OK" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO sees second logical device OK -> UNVERIFIED" 1 \
+      'printf "venus-prove: second logical device + queue OK (timeline 2 acquired -- the multi-queue lift)\n" >> "$c"' ""
+check "test leg lacks cap-exhaustion cycle OK -> UNVERIFIED" 1 "" \
+      'grep -v "cap-exhaustion cycle OK" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO sees cap-exhaustion cycle OK -> UNVERIFIED" 1 \
+      'grep "cap-exhaustion cycle OK" "$t" >> "$c"' ""
+check "test leg lacks two-timeline interleave OK -> UNVERIFIED" 1 "" \
+      'grep -v "two-timeline interleave OK" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO sees two-timeline interleave OK -> UNVERIFIED" 1 \
+      'grep "two-timeline interleave OK" "$t" >> "$c"' ""
+check "test leg lacks offscreen triangle OK -> UNVERIFIED" 1 "" \
+      'grep -v "offscreen triangle OK" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO sees offscreen triangle OK -> UNVERIFIED" 1 \
+      'grep "offscreen triangle OK" "$t" >> "$c"' ""
+check "test leg lacks slot-exhaustion cycles OK -> UNVERIFIED" 1 "" \
+      'grep -v "slot-exhaustion cycles OK" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO sees slot-exhaustion cycles OK -> UNVERIFIED" 1 \
+      'grep "slot-exhaustion cycles OK" "$t" >> "$c"' ""
 # One variable away, each direction of the discrimination the gate claims.
 check "control leg ALSO sees id=4 -> UNVERIFIED" 1 \
       'printf "tapestryd: gpu capset[2] id=4 max_version=0 max_size=160\n" >> "$c"' ""

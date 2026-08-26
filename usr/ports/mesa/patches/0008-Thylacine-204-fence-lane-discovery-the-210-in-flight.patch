@@ -1,8 +1,8 @@
-From 85f0b595f84fa2ca65db44212e8701b9e1cb15d8 Mon Sep 17 00:00:00 2001
+From 1135117fc6479774e1b4e26dd3c403a9fc403c64 Mon Sep 17 00:00:00 2001
 From: Thylacine Clade <clade@thylacine.invalid>
 Date: Wed, 12 Aug 2026 09:32:56 +0000
-Subject: [PATCH] Thylacine #204: fence-lane discovery + the #210 in-flight
- conservation clamp
+Subject: [PATCH 08/17] Thylacine #204: fence-lane discovery + the #210
+ in-flight conservation clamp
 
 The winsys throttle depth becomes a ctl discovery (fence-lane, the
 server per-ctx admission share) instead of a compile-time mirror: the

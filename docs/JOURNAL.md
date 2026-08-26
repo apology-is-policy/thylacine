@@ -22,6 +22,90 @@ needed the operator.
 
 ---
 
+## 2026-08-26 (run 3) — "can we test VkQuake?": the vkQuake arc opens; the first triangle renders
+
+Fresh context (self-compact at the 600k line). The run began at a resting point
+— the multi-queue chunk was closed and pushed (`3685cfd7`) — so the first act
+was surfacing the next arc to the operator. Their question reframed it: **"Are
+we in the state where we can test VkQuake?"** The honest answer was *not yet,
+and here are the three gaps* — no WSI/swapchain (mesa's WSI layer is unbuilt for
+Thylacine), no SDL2 Vulkan surface glue (the SDL port is GL-only), and — the one
+that matters for correctness — **every GPU submission witnessed so far was
+transfer-class**; vkQuake is the first thing that would push a render pass, a
+SPIR-V pipeline, and a draw through venus. The operator voted the **vkQuake
+arc**, with vkQuake itself as the eventual E2E exit criterion (the role tyr-quake
+played for the GL side). It decomposes W-1 (pipeline witness) → W-2 (WSI design)
+→ W-3 (mesa WSI + SDL glue) → W-4 (the port + gate).
+
+**W-1 landed this session, and it did the thing the arc exists to de-risk: the
+first render-pass/SPIR-V/draw traffic through the venus transport rendered a
+triangle correctly on real V3D.** The prove's step 8 clears a 64×64 attachment
+blue, rasterizes an embedded glslang triangle red, copies the image to a
+host-visible buffer, and asserts **both** pixel classes — center red *and*
+corner blue. The pair is the control, not decoration: an all-red readback means
+the clear was lost, all-blue means the draw was lost, and only a correct render
+passes both. It passed (`offscreen triangle OK ... center red, corner blue`).
+The shaders were generated + `spirv-val`-clean on thyla-keep and embedded as
+words; every graphics entrypoint the prove added is a defined `T` symbol in
+`libvulkan_virtio.a` (the nm census — the link is the census), so the
+loader-less direct-symbol link held and the build was clean first try.
+
+W-1 also closed two of the multi-queue chunk's tracked witness gaps, on the
+surface while it was fresh. The **F3** per-timeline retirement arithmetic was
+shipped sound-by-*policy* (the copy proof rode one timeline; the lift leg never
+submitted). Step 6b makes it sound-by-*witness*: fenced copies on two logical
+devices (V3D is one queue family × one queue, so the second timeline needs a
+second logical device), waited in **reverse** submit order — a misrouted
+retirement leaves the stranded lane's fence unsignaled and the 10 s wait fails.
+It passed. The **F2** no-burn proof was un-discriminating at 3/256 slots; step 9
+allocates to refusal across three cycles with full frees between and asserts
+cycles 2 and 3 refuse at **equal** counts — a burned handle or leaked slot
+shrinks the third. Measured `255/255/255`, steady.
+
+**The F9 convergence** is the run's only non-test code change. The multi-queue
+chunk tracked a wedge: `warp_mem_new`'s maybe-installed failure arms (an E_IO
+device fault under *global* hostmem exhaustion, an info-read failure) kept the
+guest handle marked — a bounded leak that a cross-client fault loop could drive
+to the 256-slot ceiling. W-1 converges them with a best-effort
+`mem/<handle>/ctl` destroy: `-ENOENT` asserts the slot was never installed, a
+full write confirms teardown, either freeing the handle; only a reclaim whose
+own transport fails keeps it. The **duplicate `-EINVAL` arm is deliberately not
+converged** — there the slot is a *live earlier mint*, and a destroy would tear
+down real memory under it (the ring-F1 wedge's data-loss twin). The reclaim is
+scoped to the connection's own ctx and keys "safe to free" on `-ENOENT`, which
+is pinned `== 2` at the kernel registry, `p9::E_NOENT`, and the musl sysroot.
+The F9 arm has no runtime witness — it needs cross-client global-pool pressure
+the single-client prove cannot produce — so it is code-verified + self-audited,
+and a focused Fable round on the reclaim path (I-45 device-memory surface) was
+spawned.
+
+**One wrong turn, caught by content-verification.** The first witness boot came
+back green — but reading the *banner* showed it was the **old** multi-queue
+prove, not W-1 (the banner ends "the multi-queue GPU-submit chunk", W-1's ends
+"the vkQuake-arc W-1 pipeline witness", and none of the three new witness lines
+were present). The cause: I shipped the new `ramfs.cpio` to `~/warp/` and
+sha-verified it there, but `boot-probe` boots `$REPO/build/ramfs.cpio` via
+`-initrd` (run-vm.sh:93) — a different path. **An md5 match on a sibling path is
+a match on a file nothing boots.** The fix was to ship to the path the consumer
+actually reads and content-verify *there* (`cpio -id` the prove out of the
+booted cpio, `strings` for the new witnesses). The re-boot was green. The lesson
+is filed in the pickup's HOW note: verify the artifact the consumer reads,
+established from the consumer's own path variable — not a plausible-looking
+sibling.
+
+**The hostile-park analysis** (the last tracked multi-queue item, I-45) was
+resolved against virglrenderer 1.1.0 source (the thyla-pi version), landed as
+`GPU-DESIGN.md` §8.1. A malicious guest can submit `vkWaitRingSeqnoMESA` for a
+seqno that never arrives; the finding is that virglrenderer already guards it —
+the per-ring thread detects `tail < wait_seqno` and sets the context fatal,
+waking the park, fatal to that context alone (`vkr_ring.c`). Our guest-exposure
+half is intact (the timeline is server-derived from the owner-gated file name; a
+client cannot name another's ring), and the residual shared surface (QEMU's
+serial controlq) is the documented-trusted host half, ours to enforce only at
+the v3d fork F3. No v1.0 code owed.
+
+---
+
 ## 2026-08-26 (run 2) — the multi-queue design ratified: four forks closed, two by operator vote
 
 Fresh context (self-compact at the 600k line); the run's charter is the

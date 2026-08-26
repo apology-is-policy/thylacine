@@ -2736,6 +2736,54 @@ this is deliberate, and follows the I-20/I-40 staged-enumeration precedent
 - **v3d (RPi):** this is where the invariant becomes ours to keep, and where the
   design makes a choice Linux did not (§2.5). See fork **F3**.
 
+### 8.1 The hostile `vkWaitRingSeqnoMESA` park (multi-queue follow-on, analyzed 2026-08-26)
+
+The multi-queue GPU-submit chunk tracked one cross-boundary I-45 question to
+this arc: a Venus guest can submit `vkWaitRingSeqnoMESA` — a renderer op on the
+sync-export path (ring_idx>0; `vn_queue.c:1918-1930`) that asks the host to
+BLOCK until a ring seqno arrives. A malicious guest can name a seqno that will
+never be produced. Does that park a *shared* host resource and starve other
+clients? Read against **virglrenderer 1.1.0** (the thyla-pi host version), the
+answer is no on our half, and bounded even on the host half:
+
+1. **The wait is per-context, not global.** `vkr_dispatch_vkWaitRingSeqnoMESA`
+   (`vkr_transport.c:374`) resolves the ring under the *submitting* context and
+   calls `vkr_context_wait_ring_seqno` (`vkr_context.c:436`), which blocks on
+   `ctx->wait_ring.{mutex,cond}` — a per-context condvar keyed to
+   `ctx->wait_ring.id`. One context's park touches no other context's
+   wait-state, ring thread, or object tables.
+
+2. **virglrenderer already guards the never-arriving seqno.** Each ring runs its
+   own thread (`vkr_ring_thread`, `vkr_ring.c`). On every idle iteration with an
+   active wait it re-reads the producer tail and, if
+   `ring_tail < wait_ring_seqno` (the seqno can never be produced), logs "ring
+   seqno unable to reach wait seqno", returns `-EINVAL`, sets
+   `VK_RING_STATUS_FATAL_BIT_MESA`, and calls `vkr_context_on_ring_fatal` —
+   which signals the wait condvar. So a hostile wait for an unproducible seqno
+   wakes within roughly one ring-thread iteration, fatal to that context alone.
+   A wait for a seqno that is merely *late* (producible but not yet produced)
+   blocks only until the guest's own ring advances or the ring dies; the guest
+   is waiting on itself.
+
+3. **Our (guest-exposure) half stays intact.** A client cannot name another
+   client's ring in a wait: tapestryd derives the timeline/ring from the
+   owner-gated file name, never from the opaque forwarded bytes (the
+   multi-queue r1 VERIFIED-SOUND "owner_conn gate, file-name-derived timeline,
+   hostile submit<t> self-scoped"). `warp_venus_submit` is non-parking on the
+   client side (the E.2 fix), so a guest that submits a wait does not park
+   tapestryd's serving thread either — the block, if any, lives entirely inside
+   QEMU/virglrenderer.
+
+4. **The residual shared surface is the host's, and it is the documented
+   reserved axis.** QEMU processes one controlq serially, so a genuinely-blocked
+   `vkWaitRingSeqnoMESA` dispatch would queue other contexts' SUBMIT_CMDs behind
+   it — but (2) bounds that block to ~one ring iteration even hostile, and this
+   is precisely the **host half of I-45, documented trusted** (§9.2). It becomes
+   ours to enforce (with a real timeout / a scheduler that cannot be parked by a
+   guest) at the **v3d fork F3**, where there is no virglrenderer between the
+   guest and the hardware. No change is owed at v1.0; the guest-exposure half
+   above is the enforced half.
+
 Composes I-1 (per-Proc namespace), I-5 (hardware handles non-transferable), I-7
 (#847 dual count), I-12 (W^X — GPU command buffers are never CPU-executable;
 note that hardware GL needs **no `CAP_JIT`**, since shaders compile to GPU ISA,

@@ -440,8 +440,34 @@ venus-verdict)
         echo "CONTROL leg: device-memory sentinel OK under a venus-less device -- impossible, the gate is wrong"
         vfail=1
     fi
+    # Multi-queue chunk + vkQuake-arc W-1: the remaining prove witness lines,
+    # each required on the test leg and impossible on the control leg (the
+    # control instance is a device-less stub -- the prove reports ABSENT there,
+    # so ANY of these appearing on the control leg means the gate is wrong).
+    # Each "... OK" line is emitted ONLY by its step's success path; every
+    # failure mode prints a THYLACINE-VENUS-PROVE FAIL line that contains none
+    # of these keys, so presence IS the verdict (the multi-queue r2 note: a
+    # witness line the gate never asserts is a witness that can silently
+    # vanish).
+    for wkey in \
+        "GPU round-trip OK" \
+        "placed-map de-advertised OK" \
+        "second logical device + queue OK" \
+        "cap-exhaustion cycle OK" \
+        "two-timeline interleave OK" \
+        "offscreen triangle OK" \
+        "slot-exhaustion cycles OK"; do
+        grep -qF "venus-prove: $wkey" "$tst" || {
+            echo "TEST leg: prove witness '$wkey' missing -- that step failed or silently vanished"
+            vfail=1
+        }
+        if grep -qF "venus-prove: $wkey" "$ctl"; then
+            echo "CONTROL leg: prove witness '$wkey' under a venus-less device -- impossible, the gate is wrong"
+            vfail=1
+        fi
+    done
     if [ "$vfail" -eq 0 ]; then
-        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a), a HOST3D blob guest-maps via SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel (V-3b-1b), AND the persistent ring engine mints two rings at distinct offsets, round-trips each guest VA, and reuses a freed offset on re-mint (V-3b-1c), AND the SERVER host3d-ring path creates a per-client venus device-ctx, mints a HOST3D ring in /srv/warp, round-trips its VA, and tears it down through drop_host3d_ring + the venus-ctx destroy (V-3b-1c-2a), AND a destroyed host3d ring's ridx is re-mintable via the ring/<ridx>/ctl destroy verb (V-3b-3c-1), AND a HOST_VISIBLE device-memory blob mints under a venus ctx, round-trips a sentinel through its hostmem backing, and its handle is re-mintable via the mem/<handle>/ctl destroy verb (V-3b-3c-2), AND the CLIENT vn_renderer device-memory bo_ops complete a full HOST_VISIBLE vkAllocateMemory+vkMapMemory E2E on real V3D -- zero-at-map + sentinel round-trip over the weft-mapped backing (V-3b-3c-2b)"
+        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a), a HOST3D blob guest-maps via SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel (V-3b-1b), AND the persistent ring engine mints two rings at distinct offsets, round-trips each guest VA, and reuses a freed offset on re-mint (V-3b-1c), AND the SERVER host3d-ring path creates a per-client venus device-ctx, mints a HOST3D ring in /srv/warp, round-trips its VA, and tears it down through drop_host3d_ring + the venus-ctx destroy (V-3b-1c-2a), AND a destroyed host3d ring's ridx is re-mintable via the ring/<ridx>/ctl destroy verb (V-3b-3c-1), AND a HOST_VISIBLE device-memory blob mints under a venus ctx, round-trips a sentinel through its hostmem backing, and its handle is re-mintable via the mem/<handle>/ctl destroy verb (V-3b-3c-2), AND the CLIENT vn_renderer device-memory bo_ops complete a full HOST_VISIBLE vkAllocateMemory+vkMapMemory E2E on real V3D -- zero-at-map + sentinel round-trip over the weft-mapped backing (V-3b-3c-2b), AND the prove's full witness set holds: fenced GPU copy with first-map survival (F1), placed-map de-advertised (F4), the timeline lift, the 64 MiB cap cycle (F2), the two-timeline interleave (F3), the offscreen SPIR-V triangle, and slot-exhaustion steady-state (the vkQuake-arc W-1 pipeline witness)"
         grep -hE "gpu capset\[|num_capsets|blob-create" "$ctl" "$tst"
     else
         echo "VENUS GATE: UNVERIFIED"

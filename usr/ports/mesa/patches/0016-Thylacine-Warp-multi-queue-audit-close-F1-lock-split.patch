@@ -1,7 +1,7 @@
 From 5f9d0ce226057e7ef17aa29e963fada67c9ed72f Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Wed, 26 Aug 2026 14:26:27 +0200
-Subject: [PATCH] Thylacine Warp multi-queue audit close (F1 lock-split +
+Subject: [PATCH 16/17] Thylacine Warp multi-queue audit close (F1 lock-split +
  F4/F6/F7; r2-F1)
 
 The holotype round-1 fixes on the multi-queue client half, plus round-2's

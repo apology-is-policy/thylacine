@@ -33,7 +33,10 @@ git am <thylacine-repo>/usr/ports/mesa/patches/*.patch
 
 This is **verified, not asserted**: applying the series with `git am` to a
 pristine `mesa-26.1.6` worktree reproduces the fork tip's tree hash exactly
-(`5f9d0ce226057e7ef17aa29e963fada67c9ed72f` at 0016, verified on the
+(`150990a` at 0017, verified on the vkQuake-arc W-1 close by `git am
+0001..0017` onto a fresh `mesa-26.1.6` worktree -- the reconstructed tree
+`9dd555ae986afc0afc9e94a135b3d0cc71a254f9` equalled the W-1 commit's tree
+exactly; `5f9d0ce226057e7ef17aa29e963fada67c9ed72f` at 0016, verified on the
 multi-queue audit close by `git am 0001..0016` onto a fresh `mesa-26.1.6`
 worktree -- the reconstructed tree `85031d88de67` equalled the audit-close
 commit's tree exactly; `deed314a45fa093b53e6f2008e11a70456ec8831` at 0015,

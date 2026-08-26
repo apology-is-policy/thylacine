@@ -1,8 +1,8 @@
 From 77fc80a756e663541c5a3d14edf63f30119b5d7d Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Wed, 26 Aug 2026 00:37:29 +0200
-Subject: [PATCH] Thylacine Warp V-3b-3c-1: the host3d ring-destroy verb (F1
- full fix)
+Subject: [PATCH 12/17] Thylacine Warp V-3b-3c-1: the host3d ring-destroy verb
+ (F1 full fix)
 
 The V-3b-3b audit's F1 [P1] interim made the backend's ridx alloc
 MONOTONIC because tapestryd retired a host3d ring only at ctx death, so a
