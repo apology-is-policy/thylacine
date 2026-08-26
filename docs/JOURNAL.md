@@ -94,7 +94,7 @@ intent, so the next chunk does not re-derive it by accident.
 `vkAllocateMemory`+`vkMapMemory` + the E2E on real V3D. Carried debt: the
 V-3b-3b F2 convergence code on the mesa shmem_create error arms, and the
 single-thread `warp_conn`/`ring_bitmap` mutex when VkQueues make the driver
-multi-threaded. Landed `&lt;PENDING&gt;` (tapestryd-only; mesa unchanged at `77fc80a`).
+multi-threaded. Landed `54e2f334` (tapestryd-only; mesa unchanged at `77fc80a`).
 
 ---
 

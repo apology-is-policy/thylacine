@@ -904,7 +904,7 @@ sketched; 20 pointers is the ground truth. Shared helpers reused verbatim:
     [P3]: the mint's zeroing bakes a client-ordering contract 3c-2b could violate
     (lazy-mint-after-GPU-write zeroes results) -> documented on wmem_mint/WarpMem
     ("mint at vkAllocateMemory time, before any device use of mem_id"). Impl:
-    tapestryd `<PENDING>`. `memory/audit_v3b3c2a_closed_list.md`. The mesa backend
+    tapestryd `54e2f334`. `memory/audit_v3b3c2a_closed_list.md`. The mesa backend
     bo_ops + the `vkAllocateMemory`+`vkMapMemory` E2E are V-3b-3c-2b (next).
 - **V-3b-3d -- the Vulkan prove-gate on thyla-pi (real V3D).** A headless
   compute/clear + fenced readback through the full stack; `virgl_prove.c` template
