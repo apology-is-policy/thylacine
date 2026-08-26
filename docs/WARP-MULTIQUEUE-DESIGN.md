@@ -177,8 +177,38 @@ exposure:
   parked readers are forbidden by construction (the single-cursor server would
   let them steal each other's wakes). Spurious wakes are bounded by
   cross-queue traffic (<= 3 queues at the ratified count).
-- **The submit verb carries the timeline index** (0 = the ctx-wide/CPU lane,
-  today's behavior).
+- **The submit carrier is the FILE, not an in-band index** (implementation
+  refinement, same day): the submit payload is opaque bytes (an in-band index
+  would change the byte format) and a Twrite offset cannot carry it (the
+  client's `t_write` implicit offset already arrives nonzero at this file) --
+  so nonzero timelines ride NEW per-timeline write-only files
+  `ctx/<id>/submit1..3` (venus-only; a GL client writing one is refused
+  E_OPNOTSUPP), and `submit` itself stays timeline 0, byte-identical for
+  every existing writer.
+
+### E.2 The two-parked-readers corner (found at implementation; closed both sides)
+
+The pre-code design said "one parker" but the transport's OWN throttle could
+park too: `fenced_write` waits for lane room by reading the fence file, and a
+venus submit runs under the transport mutex -- so a parker (mutex dropped) plus
+a throttling submitter (mutex HELD) made two parked readers. The server's
+first-match-consumes sweep then woke exactly one: if the submitter's own fence
+retired but the parker consumed the report, the submitter stayed parked HOLDING
+THE MUTEX with nothing left in flight -- a permanent instance wedge. Closed at
+both layers:
+
+- **Server:** `poll_fences` advances `fence_reported` AFTER the sweep, so one
+  retirement wakes EVERY parked reader of the ctx (deliver-to-all). The fence
+  file is a doorbell whose content is documented as coalesced-and-unparsed, so
+  waking all is exactly doorbell semantics -- and the seam is no longer one
+  client bug away from a self-strand (the constraint at the boundary that
+  admits the vector).
+- **Client:** `warp_venus_submit` is NON-PARKING -- a full throttle or lane
+  reports `again` and the renderer runs a one-parker cycle (mutex dropped) and
+  retries; with nothing of its own in flight (foreign contention) it yields
+  off-mutex instead, since no fence of ours could fill a park. The GL winsys
+  path keeps the parking `fenced_write` (single-reader by its own serializing
+  mutex).
 
 ## F. I-45 isolation delta -- NO weakening
 

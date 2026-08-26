@@ -366,6 +366,12 @@ const VIRTIO_GPU_CMD_SUBMIT_3D: u32 = 0x0207;
 // virtqueue used-buffer notification IS the fence completion (GPU-DESIGN
 // section 4.3: "we are labelling what we have", not building fence machinery).
 const VIRTIO_GPU_FLAG_FENCE: u32 = 1 << 0;
+// hdr.flags bit 1 (section 5.7.6.7): hdr.ring_idx (byte 20) is valid -- the
+// fence rides that per-context timeline (virglrenderer: virgl_renderer_context_
+// create_fence with ring_idx) instead of the device-global one. Venus binds a
+// VkQueue to a timeline at vkGetDeviceQueue2 (.ringIdx), so a queue-attributed
+// submission fences on the queue's own lane (the multi-queue F3 seam).
+const VIRTIO_GPU_FLAG_INFO_RING_IDX: u32 = 1 << 1;
 
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
@@ -775,6 +781,14 @@ pub struct FenceVindication {
     /// the GPU is still writing. Sourced structurally from the slot index,
     /// which is the only thing that survives the abandonment.
     pub comp: bool,
+    /// The venus timeline the abandoned chain rode (multi-queue F3). Same
+    /// production problem as `comp`: the vindication is minted AFTER the tag
+    /// was taken by abandonment, so the lane must be RETAINED per-slot
+    /// (`fslot_poison_ring`, exactly like the ctx id) or a vindicated fence
+    /// bumps the ctx total but never its timeline -- `timeline_signaled[t]`
+    /// one short forever, the per-timeline replay of the #210 silent
+    /// post-recovery park.
+    pub ring_idx: u8,
 }
 
 /// A retired fenced chain: the fence id + the owning seam context (pub id),
@@ -822,6 +836,13 @@ pub struct FenceTag {
     /// blanks) and counting it `rb_landed`. False for an abandoned tag too:
     /// nothing was verified about a chain that never retired.
     pub ok: bool,
+    /// The venus TIMELINE this fence rides (multi-queue F3): 0 = the
+    /// ctx-global lane (every pre-multi-queue submission, transfers, the
+    /// compositor readback); 1..=3 = a VkQueue's timeline (the submit
+    /// carried INFO_RING_IDX). The seam's per-timeline `timeline_signaled`
+    /// retires by this value -- server-minted, never client bytes, so it is
+    /// always < WARP_TIMELINES by construction.
+    pub ring_idx: u8,
 }
 
 /// Why a fenced submission was refused (mapped to a 9P errno at the seam).
@@ -868,6 +889,11 @@ struct Controlq {
     /// An abandoned slot's descriptors may still be written by the device,
     /// so the pair is never re-used -- retired from the pool, not freed.
     fslot_poisoned: [bool; FENCED_SLOTS],
+    /// The abandoned chain's venus timeline, retained per-slot like the ctx
+    /// id below: a late retire mints its `FenceVindication` after the tag is
+    /// gone, and the per-timeline count needs the lane (see
+    /// `FenceVindication.ring_idx`).
+    fslot_poison_ring: [u8; FENCED_SLOTS],
     /// Which ctx each poisoned slot belonged to, so its late retire can
     /// vindicate that ctx (round-3 F2).
     fslot_poison_ctx: [u32; FENCED_SLOTS],
@@ -987,6 +1013,7 @@ impl Controlq {
             self.fslot_since[i] = None;
             self.fslot_poisoned[i] = true;
             self.fslot_poison_ctx[i] = tag.ctx_pub;
+            self.fslot_poison_ring[i] = tag.ring_idx;
             tag.abandoned = true;
             say!(
                 "tapestryd: gpu fence {} never retired in {} ms -- slot {} retired, ctx {} poisoned",
@@ -1120,6 +1147,7 @@ impl Controlq {
                         self.vindicated.push(FenceVindication {
                             ctx_pub: self.fslot_poison_ctx[slot],
                             comp: slot == COMP_FSLOT,
+                            ring_idx: self.fslot_poison_ring[slot],
                         });
                         continue;
                     }
@@ -1223,6 +1251,7 @@ impl Controlq {
             self.fslot_since[i] = None;
             self.fslot_poisoned[i] = true;
             self.fslot_poison_ctx[i] = tag.ctx_pub;
+            self.fslot_poison_ring[i] = tag.ring_idx;
             tag.abandoned = true;
             #[cfg(feature = "test-mode")]
             {
@@ -1622,6 +1651,7 @@ impl Gpu {
                 fslots: [None; FENCED_SLOTS],
                 fslot_since: [None; FENCED_SLOTS],
                 fslot_poisoned: [false; FENCED_SLOTS],
+                fslot_poison_ring: [0; FENCED_SLOTS],
                 fslot_poison_ctx: [0; FENCED_SLOTS],
                 vindicated: alloc::vec::Vec::new(),
                 sync_pending: false,
@@ -2835,6 +2865,7 @@ impl Gpu {
         self.ctrl.alloc_comp_slot().ok_or(FencedErr::Again)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fenced_commit(
         &mut self,
         slot: usize,
@@ -2843,12 +2874,13 @@ impl Gpu {
         ctx_pub: u32,
         readback: bool,
         comp: bool,
+        ring_idx: u8,
     ) -> Result<u64, FencedErr> {
         self.ctrl
             .submit_fenced(
                 slot,
                 req_len,
-                FenceTag { fence_id, ctx_pub, readback, comp, abandoned: false, ok: false },
+                FenceTag { fence_id, ctx_pub, readback, comp, abandoned: false, ok: false, ring_idx },
             )
             .map_err(|_| FencedErr::Dead)?;
         self.fence_next = fence_id;
@@ -2858,18 +2890,27 @@ impl Gpu {
     /// SUBMIT_3D: queue `stream` (an opaque VIRGL_CCMD buffer -- the server
     /// does not parse it, GPU-DESIGN section 2.1) on the fenced lane for
     /// `ctx_id`, returning the fence id its completion will carry on the
-    /// owning seam ctx (`ctx_pub`).
+    /// owning seam ctx (`ctx_pub`). A nonzero `ring_idx` fences on that
+    /// venus TIMELINE (hdr byte 20 + INFO_RING_IDX -- the host signals it
+    /// when the bound VkQueue's work completes, not when the global lane
+    /// drains); 0 keeps today's device-global fence exactly (the flag is
+    /// not set, so the header is byte-identical to the pre-multi-queue one).
     pub fn submit_3d(
         &mut self,
         ctx_id: u32,
         ctx_pub: u32,
         stream: &[u8],
+        ring_idx: u8,
     ) -> Result<u64, FencedErr> {
         let slot = self.fenced_begin(8 + stream.len() as u64)?;
         let req = self.ctrl.flane_va + (slot as u64) * FREQ_LEN;
         let fence_id = self.fence_next.wrapping_add(1);
         unsafe {
             write_ctrl_hdr_fenced(req, VIRTIO_GPU_CMD_SUBMIT_3D, ctx_id, fence_id);
+            if ring_idx > 0 {
+                w32(req + 4, VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX);
+                w8(req + 20, ring_idx);
+            }
             w32(req + 24, stream.len() as u32);
             w32(req + 28, 0); // padding
         };
@@ -2881,6 +2922,7 @@ impl Gpu {
             ctx_pub,
             false,
             false,
+            ring_idx,
         )
     }
 
@@ -3006,7 +3048,7 @@ impl Gpu {
         let fence_id = self.fence_next.wrapping_add(1);
         // A readback marks the lane (the sync-slot deadline reads it, C-6):
         // the device executes it synchronously at processing time.
-        self.fenced_commit(slot, GPU_CTRL_HDR_LEN + 48, fence_id, ctx_pub, !to_host, false)
+        self.fenced_commit(slot, GPU_CTRL_HDR_LEN + 48, fence_id, ctx_pub, !to_host, false, 0)
     }
 
     /// The COMPOSITOR-OWNED fenced readback (Warp-C C-6, GPU-DESIGN 4.5.13):
@@ -3031,7 +3073,7 @@ impl Gpu {
         let slot = self.fenced_begin_comp()?;
         self.stage_transfer_3d(slot, false, ctx_id, res_id, 0, 0, 0, 0, w, h, 1, 0, stride, 0);
         let fence_id = self.fence_next.wrapping_add(1);
-        self.fenced_commit(slot, GPU_CTRL_HDR_LEN + 48, fence_id, ctx_pub, true, true)
+        self.fenced_commit(slot, GPU_CTRL_HDR_LEN + 48, fence_id, ctx_pub, true, true, 0)
     }
 
     /// Stage a TRANSFER_TO/FROM_HOST_3D request in fenced slot `slot`'s
@@ -3204,6 +3246,7 @@ impl Gpu {
                     self.ctrl.vindicated.push(FenceVindication {
                         ctx_pub: self.ctrl.fslot_poison_ctx[slot],
                         comp: slot == COMP_FSLOT,
+                        ring_idx: self.ctrl.fslot_poison_ring[slot],
                     });
                 }
                 None => {}

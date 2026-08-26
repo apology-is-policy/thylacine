@@ -457,6 +457,14 @@ const WFK_RING_CTL: u64 = 5;
 // Ctx-level mem kinds (ctx/<id>/mem/*), V-3b-3c-2 -- distinct ctx-FK values.
 const WFK_MEM_DIR: u64 = 8;
 const WFK_MEM_NEW: u64 = 9;
+// Multi-queue F3 (WARP-MULTIQUEUE-DESIGN): the read-only per-timeline
+// counters file + the per-timeline submit family. submit<t> carries the venus
+// timeline in the NAME because the submit payload is opaque bytes (an in-band
+// index would change the byte format) and a Twrite offset cannot carry it
+// (t_write's implicit offset already arrives nonzero at this file). fk =
+// WFK_SUBMIT_T_BASE + t for t in 1..WARP_TIMELINES; `submit` = timeline 0.
+const WFK_TIMELINES: u64 = 10;
+const WFK_SUBMIT_T_BASE: u64 = 10; // +1..=3 -> 11,12,13 = submit1..submit3
 // Mem-level file kinds (ctx/<id>/mem/<handle>/*), under WARP_MEM (WFK_DIR=0
 // is the dir node, shared with the other levels).
 const WMFK_MAP: u64 = 1;
@@ -507,7 +515,15 @@ const WARP_RING_OFF_TAIL: u64 = 0x08; // host-written consumer index
 const WARP_RING_OFF_IDLE: u64 = 0x10; // host-written: 1 = pump parked; kick iff 1
 const WARP_RING_OFF_SEQ: u64 = 0x18; // host-written monotone completed-seq feedback
 const WARP_RING_MAX: u64 = 1 << 20; // 1 MiB single-ring cap (F2)
-const WARP_RINGS_PER_CTX: usize = 64; // ring_idx 0-63 (Venus: one per VkQueue)
+// HOST3D ring slots (ridx 0-63): shmem command rings (the instance ring, the
+// reply/TLS pools). NOT VkQueue timelines -- a queue is a pure fence lane with
+// no memory ring behind it (WARP-MULTIQUEUE-DESIGN section E.1); the old
+// "(Venus: one per VkQueue)" note here was that exact conflation in a comment.
+const WARP_RINGS_PER_CTX: usize = 64;
+// Venus fence TIMELINES (multi-queue F3): 0 = the ctx-global lane, 1..=3 =
+// VkQueue lanes (mesa max_timeline_count = 4, the ratified v1.0 bound). Sizes
+// `timeline_signaled` and bounds the submit<t> file family + FenceTag.ring_idx.
+const WARP_TIMELINES: usize = 4;
 // Bound one kick's drain passes (audit round-2 F1). WARP_RING_OFF_HEAD is
 // client-writable shared memory (the ring maps RW into the client via weft), so
 // a multi-threaded client can advance head faster than the single serve thread
@@ -1455,6 +1471,16 @@ struct WarpCtx {
     comp_rb_in_flight: u32,
     fence_signaled: u64,
     fence_reported: u64,
+    /// Multi-queue F3: the dense per-TIMELINE completion counts. A
+    /// retirement bumps BOTH its `timeline_signaled[ring_idx]` and the
+    /// ctx-wide `fence_signaled` total above, so the park file and every
+    /// pre-multi-queue consumer are unbroken (additive). [0] is the
+    /// ctx-global lane (timeline-0 submits + transfers); [1..=3] are VkQueue
+    /// lanes. Served by the read-only `ctx/<id>/timelines` file; the park
+    /// primitive stays the single ctx fence file (the client runs ONE parker
+    /// -- the server's single reported cursor would let two parked readers
+    /// steal each other's wakes).
+    timeline_signaled: [u64; WARP_TIMELINES],
     /// #210 ledger reconciliation: every fenced write that REACHED the
     /// dispatch funnel (rx), split by outcome (minted / E_AGAIN refused /
     /// other error). The client's `issued` counts its successful fenced
@@ -5596,6 +5622,7 @@ impl Comp {
             comp_rb_in_flight: 0,
             fence_signaled: 0,
             fence_reported: 0,
+            timeline_signaled: [0; WARP_TIMELINES],
             fenced_rx: 0,
             fenced_minted: 0,
             fenced_again: 0,
@@ -8232,6 +8259,13 @@ impl Comp {
                     // authority). A compositor readback (C-6) is a fence
                     // the client did NOT issue, so it is never counted here.
                     c.fence_signaled += 1;
+                    // Multi-queue F3: the per-timeline dense count, bumped
+                    // ALONGSIDE the total (additive -- the park file rides
+                    // the total). ring_idx is server-minted at submit, so
+                    // the bound holds by construction; the min() is the
+                    // belt for a corrupted tag, never a real lane.
+                    let t = (tag.ring_idx as usize).min(WARP_TIMELINES - 1);
+                    c.timeline_signaled[t] += 1;
                 }
                 break;
             }
@@ -8269,6 +8303,14 @@ impl Comp {
                     .find(|c| c.pub_id == v.ctx_pub)
                 {
                     c.fence_signaled += 1;
+                    // Multi-queue F3: the vindication carries the lane
+                    // (FenceVindication.ring_idx, retained per-slot at
+                    // abandonment) for the same reason it carries `comp` --
+                    // the tag is gone, and without it this count is one
+                    // short forever on that timeline (the per-timeline
+                    // replay of the #210 silent post-recovery park).
+                    let t = (v.ring_idx as usize).min(WARP_TIMELINES - 1);
+                    c.timeline_signaled[t] += 1;
                 }
             }
             // ONE retired chain is not proof for a ctx that abandoned
@@ -8423,7 +8465,7 @@ impl Comp {
         }
         let r = (|| {
             let dev_ctx = self.warp_fenced_admit(ctx_pub, conn)?;
-            match self.gpu.submit_3d(dev_ctx, ctx_pub, stream) {
+            match self.gpu.submit_3d(dev_ctx, ctx_pub, stream, 0) {
                 Ok(f) => {
                     self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
                     Ok(f)
@@ -8444,13 +8486,23 @@ impl Comp {
     /// tapestryd never parses the stream (opaque bytes; the venus ctx is the host
     /// resource SCOPE, not command parsing). Reuses the fenced lane + admission +
     /// accounting.
-    fn warp_venus_submit(&mut self, ctx_pub: u32, conn: u64, stream: &[u8]) -> Result<u64, u32> {
+    fn warp_venus_submit(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        stream: &[u8],
+        timeline: u8,
+    ) -> Result<u64, u32> {
         // F3: fenced_rx FIRST (matching warp_submit), and EVERY refusal
         // (WARP_SUBMIT_MAX, venus_ensure, admit) inside the accounted closure --
         // so no funnel outcome is invisible to the #210 ledger
         // (rx - minted - again - err). The routing (wctx_has_venus) guarantees
         // venus_ensure takes its existing fast path here, so its error arm is
         // unreachable through the seam; it stays inside for accounting parity.
+        //
+        // `timeline` (multi-queue F3) is derived from the FILE the write
+        // arrived on (submit = 0, submit<t> = t), never from client bytes --
+        // the WFK dispatch bounds it below WARP_TIMELINES by construction.
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
             c.fenced_rx += 1;
         }
@@ -8463,7 +8515,7 @@ impl Comp {
             // unused here -- the venus stream submits on venus_ctx instead.
             let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
             let _ = self.warp_fenced_admit(ctx_pub, conn)?;
-            match self.gpu.submit_3d(venus_ctx, ctx_pub, stream) {
+            match self.gpu.submit_3d(venus_ctx, ctx_pub, stream, timeline) {
                 Ok(f) => {
                     self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
                     Ok(f)
@@ -9000,6 +9052,11 @@ impl Conn {
                     b".." => return Some((W_CTX_DIR, 0)),
                     b"ctl" => WFK_CTL,
                     b"submit" => WFK_SUBMIT,
+                    // multi-queue F3: the timeline rides the file name
+                    b"submit1" => WFK_SUBMIT_T_BASE + 1,
+                    b"submit2" => WFK_SUBMIT_T_BASE + 2,
+                    b"submit3" => WFK_SUBMIT_T_BASE + 3,
+                    b"timelines" => WFK_TIMELINES,
                     b"fence" => WFK_FENCE,
                     b"bo" => WFK_BO_DIR,
                     b"ring" => WFK_RING_DIR,
@@ -9771,6 +9828,24 @@ impl Conn {
                 // single ring, so count N retires everything <= N); parks
                 // when nothing is unreported (the FK_EVENT netd leg).
                 // Offset is ignored: a stream, not a file image.
+                WFK_TIMELINES => {
+                    // Multi-queue F3: the per-timeline dense completion
+                    // counts (timeline 0 = the ctx-global lane). Its own
+                    // file rather than ctl rows: the ctl's client-critical
+                    // prefix is a guarded 255-byte budget (F11) with no room
+                    // for four more parsed rows. The park primitive stays
+                    // the ctx fence file below; this is the counter the
+                    // woken parker re-reads.
+                    let c = comp.wctx(id, self.conn_id).unwrap();
+                    let mut s = String::new();
+                    for (t, n) in c.timeline_signaled.iter().enumerate() {
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!("timeline {} {}\n", t, n),
+                        );
+                    }
+                    self.read_str(tag, &s, a.offset, cap)
+                }
                 WFK_FENCE => {
                     if cap < FENCE_REC_MAX {
                         // Too small for a whole record: answer empty rather
@@ -10289,11 +10364,28 @@ impl Conn {
                     // ring) submits its SUBMIT_CMD stream on venus_ctx; a virgl
                     // client on dev_ctx. Per-client-unambiguous (0.12).
                     let res = if comp.wctx_has_venus(id, self.conn_id) {
-                        comp.warp_venus_submit(id, self.conn_id, a.data)
+                        comp.warp_venus_submit(id, self.conn_id, a.data, 0)
                     } else {
                         comp.warp_submit(id, self.conn_id, a.data)
                     };
                     match res {
+                        Ok(_fence) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                        Err(e) => self.err(tag, e),
+                    }
+                }
+                fk if fk > WFK_SUBMIT_T_BASE
+                    && fk < WFK_SUBMIT_T_BASE + WARP_TIMELINES as u64 =>
+                {
+                    // Multi-queue F3: submit<t> -- the venus timeline rides the
+                    // FILE NAME (the payload is opaque bytes; see the WFK
+                    // constants). Venus-only: a virgl stream has no timeline,
+                    // so a GL client writing here is refused rather than
+                    // silently mis-fenced on the global lane.
+                    if !comp.gpu.virgl || !comp.wctx_has_venus(id, self.conn_id) {
+                        return self.err(tag, p9::E_OPNOTSUPP);
+                    }
+                    let t = (fk - WFK_SUBMIT_T_BASE) as u8;
+                    match comp.warp_venus_submit(id, self.conn_id, a.data, t) {
                         Ok(_fence) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                         Err(e) => self.err(tag, e),
                     }
@@ -11633,6 +11725,10 @@ impl Conn {
                     for (nm, fk) in [
                         (&b"ctl"[..], WFK_CTL),
                         (&b"submit"[..], WFK_SUBMIT),
+                        (&b"submit1"[..], WFK_SUBMIT_T_BASE + 1),
+                        (&b"submit2"[..], WFK_SUBMIT_T_BASE + 2),
+                        (&b"submit3"[..], WFK_SUBMIT_T_BASE + 3),
+                        (&b"timelines"[..], WFK_TIMELINES),
                         (&b"fence"[..], WFK_FENCE),
                         (&b"bo"[..], WFK_BO_DIR),
                         (&b"ring"[..], WFK_RING_DIR),
@@ -11898,7 +11994,18 @@ impl Conn {
 
     /// Deliver held fence reads whose ctxs have unreported completions
     /// (or died: EOF the stream). False = the conn's transport failed.
+    ///
+    /// Multi-queue F3: `fence_reported` advances AFTER the sweep, so one
+    /// retirement wakes EVERY parked reader of the ctx, not just the first
+    /// in the list. The client's one-parker protocol makes a second parked
+    /// reader a client bug -- but the old first-match-consumes shape turned
+    /// that bug into a permanent strand (reader B parked past its own event
+    /// because reader A consumed the report), and the doorbell contract
+    /// ("content coalesced, never parsed") is exactly as satisfied by
+    /// waking all. The constraint belongs at the boundary that admits the
+    /// vector.
     pub fn poll_fences(&mut self, comp: &mut Comp) -> bool {
+        let mut advanced: Vec<(u32, u64)> = Vec::new();
         let mut i = 0;
         while i < self.pending_fences.len() {
             let pf = self.pending_fences[i];
@@ -11918,13 +12025,20 @@ impl Conn {
             };
             let mut s = String::new();
             if let Some(v) = rec {
-                comp.wctx_mut(pf.ctx_pub, self.conn_id).unwrap().fence_reported = v;
+                advanced.push((pf.ctx_pub, v));
                 let _ = core::fmt::write(&mut s, format_args!("{}\n", v));
             }
             if !self.deliver_read(pf.tag, s.as_bytes()) {
                 return false;
             }
             self.pending_fences.remove(i);
+        }
+        for (ctx, v) in advanced {
+            if let Some(c) = comp.wctx_mut(ctx, self.conn_id) {
+                if v > c.fence_reported {
+                    c.fence_reported = v;
+                }
+            }
         }
         true
     }

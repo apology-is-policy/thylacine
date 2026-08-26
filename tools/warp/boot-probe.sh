@@ -85,5 +85,5 @@ fi
 # grep -a because a serial log can carry binary bytes. The alternatives are
 # scoped to the specific self-test prefixes so the many routine
 # `tapestryd: warp ...` ctx/ring diagnostics do not flood the log.
-grep -aE "tapestryd: gpu|tapestryd: warp host3d-ring|tapestryd: warp ring-recreate|tapestryd: warp mem-recreate|THYLACINE-VENUS-PROVE|device-memory sentinel OK" "$LOG" || true
+grep -aE "tapestryd: gpu|tapestryd: warp host3d-ring|tapestryd: warp ring-recreate|tapestryd: warp mem-recreate|THYLACINE-VENUS-PROVE|venus-prove:" "$LOG" || true
 exit $((1 - ok))

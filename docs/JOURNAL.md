@@ -52,6 +52,37 @@ rings vault rather than growing a parallel reference section. The vault
 checkout is 264 commits behind main; its sweep is the vault track's queue, not
 this run's.
 
+**The implementation, and the first GPU round-trip ever executed on
+Thylacine.** The full stack landed in one pass — server (`FenceTag.ring_idx`
++ per-timeline `timeline_signaled[]` bumped alongside the ctx total, the
+`ctx/<id>/timelines` file, `submit1..3`, INFO_RING_IDX on the virtio-gpu
+header for nonzero timelines, the vindication carrying its lane per the #242
+pattern) and client (per-timeline ledgers, the transport mutex + one-parker
+condvar protocol, the non-parking venus submit, `max_timeline_count` 2→4
+gated on the host capset). Witnessed GREEN on thyla-pi/KVM real V3D 4.2.14
+in one boot: **`GPU round-trip OK (vkCmdCopyBuffer 4 KiB, fenced submit,
+pattern survived FIRST map)` — the F1 reify-at-alloc fix-proof the V-3b-3c-2b
+audit chain owed, and the first vkQueueSubmit ever completed on this OS** —
+plus the F4 de-advertisement check (76 exts, complete scan), the timeline-2
+lift (a second logical device, refused under the old count), and the F2
+cap-exhaustion recovery cycle. Zero hazards. mesa `deed314`/patch 0015,
+round-trip tree `0575a6189666` exact.
+
+**A second deadlock corner caught at self-audit, before any run.** The
+pre-code design said "one parker" but the transport's own throttle
+(`fenced_write`) parks the fence file too — and a venus submit runs under the
+transport mutex, so a parker (mutex dropped) plus a throttling submitter
+(mutex HELD) made two parked readers against a server whose pending-fence
+sweep woke exactly one (first-match consumed `fence_reported`,
+server.rs ~12009). The stranded reader could be the mutex HOLDER — a
+permanent instance wedge. What caught it: walking the park machinery
+server-side before trusting the client protocol (the I-9 reflex). Closed at
+both layers: `poll_fences` now advances `fence_reported` AFTER the sweep
+(deliver-to-all — the doorbell contract is exactly as satisfied, and the
+seam is no longer one client bug from a self-strand), and `warp_venus_submit`
+is non-parking (its throttle waits run through the renderer's one-parker
+cycle; foreign-contention waits yield off-mutex). Design doc §E.2 records it.
+
 **The wrong turn, caught within the hour (the reusable part of this run so
 far).** The ratified hybrid fence ABI — "expose per-queue fences through the
 queue's `ring/<ridx>/fence`" — rested on a premise the pre-implementation
