@@ -3281,7 +3281,8 @@ before it the composition declined while the comment claimed the contour).
   caller that would be wronged).
 - Real (non-AT_FDCWD) dirfds stay out (the 6.20 Correction-2 handle-state
   blocker, untouched). renameat2 flags != 0 (NOREPLACE/EXCHANGE/WHITEOUT)
-  decline. `O_APPEND`/`O_DIRECTORY` keep their V-2b rejections.
+  decline. `O_DIRECTORY` keeps its V-2b rejection on the create arm (`O_APPEND`
+  translates since §6.27 -- the FS-pass-through arm).
 - A trailing slash on a rename/unlink-file path answers ENOTDIR *lexically* —
   including `rename("d1/", "d2")` on a REAL directory, which Linux resolves
   and permits (the #50 holotype's F2). Strictly refuse-more: no mutation ever
@@ -3525,3 +3526,71 @@ SOFT-SKIPs without the static-git tarball, BOOT-FATAL when present.
 `openat` does not admit (no kernel append mode). A phenotype `O_APPEND`
 (open-at-EOF, sound single-threaded; for git's absent reflog the open need only
 RESOLVE->ENOENT instead of FORWARD->ENOSYS) is the next chunk.
+
+## O_APPEND (FS pass-through) + pread64/pwrite64: git commit + clone (§6.27; aux, 2026-08-26)
+
+Makes the FULL git chain run under the phenotype: init/add/commit/log/clone
+file:///verify, reflogs ON. Two small walls, neither the kernel-append-mode the
+§6.26 deferral feared.
+
+### O_APPEND is delegated to Stratum, not implemented in the kernel
+
+Stratum already enforces O_APPEND: its 9P server stores the fid's open flags at
+Tlopen and, on every Twrite to an O_APPEND fid, ignores the client offset and
+writes at the current size (`server.c` h_write; `_Static_assert(STM_9P_O_APPEND
+== O_APPEND)`). So the kernel PASSES the flag through:
+
+| Site | Change |
+|---|---|
+| `syscall.h` | NEW `SYS_WALK_OPEN_OAPPEND` 0x40 + `_Static_assert` it is inside the mask; `SYS_WALK_OPEN_OMODE_VALID` 0xB3->0xF3; the SYS_PWRITE append-stance note (kernel delegates; no append mode) |
+| `dev9p.c` | `omode & SYS_WALK_OPEN_OAPPEND -> flags |= 02000` in BOTH `dev9p_open` AND `dev9p_create` (the reflog is O_CREAT|O_APPEND, so the create path matters) |
+| `vivarium.c` | `VIV_OMODE_APPEND` 0x40; `VIV_OPENAT_ADMITTED += VIV_O_APPEND`; the O_APPEND arm in BOTH openat decides (plain drops it under dirreq -- append on a read-only dir is vacuous; create sets it unconditionally) |
+
+The kernel write path is UNCHANGED (SYS_PWRITE still writes exactly at `off`);
+the FS does the positioning. For an append fd `c->offset` is advisory (Stratum
+ignores it): correct for a write-only append (git's reflog). The divergence is
+NOT vague -- it is off by exactly the file's PRE-OPEN size S (R1-F4): open an
+existing size-S file O_APPEND (`c->offset`=0), write n bytes -> data lands at
+[S, S+n) but `lseek(SEEK_CUR)` returns n, where Linux returns S+n. Only a
+tell-after-append consumer (log rotation, offset indexing) or an O_RDWR|O_APPEND
+read sees it; git does not. Conversely `pwrite` on an O_APPEND fd APPENDS
+(ignoring its explicit offset) -- Stratum's per-fid override reproduces exactly
+Linux's documented `pwrite(2)` O_APPEND behavior.
+
+**The write-behind anchor EXCLUDES append fds (R1-F1).** `dev9p_create`/
+`dev9p_open` otherwise set the anchor (`wb_eligible`/`wb_base`) on create/OTRUNC,
+but an append fd is now excluded -- pure write-through -- so the kernel's wb
+"write at end" and Stratum's EOF-override do not co-exist on one fd. Without the
+exclusion, a CONCURRENT-append flush would install own-pages at `wb_base` offsets
+the server relocated to a different EOF, fabricating cached content (an I-38
+violation the prosecutor caught; single-writer git was correct either way,
+cursor==EOF on a fresh file). Write-through is larder-coherent for append: the
+per-write attr-invalidate kills a stale size, append only extends, and the
+extension range was never cached.
+
+### pread64/pwrite64 (67/68): the clone pack read
+
+git's `index-pack` reads the fetched pack via `pread`; untranslated, clone died
+with `error reading from ...pack: Function not implemented`. `pread64(67)`/
+`pwrite64(68)` have the exact `(fd, buf, count, offset)` shape of `SYS_PREAD(85)`/
+`SYS_PWRITE(86)`, so they are pure T1 renumbers (no shell). Sub-ceiling,
+colliding with the native LOOM pair (67=SYS_LOOM_REGISTER, 68=SYS_LOOM_ENTER);
+the collision argument is the read/write renumbers' damage-envelope -- a renumber
+runs the native handler with the caller's OWN args + rights, and a mis-declared
+LOOM caller's loom handle is not a RIGHT_WRITE Spoor so SYS_PWRITE fails clean.
+
+### Witnesses
+
+Kernel unit: `vivarium.openat_domain` (O_WRONLY|O_APPEND -> OWRITE|OAPPEND 0x41) +
+`vivarium.openat_create_domain` (O_CREAT|O_WRONLY|O_APPEND admitted -> the omode
+bit) + `vivarium.t1_renumbers` (pread64->SYS_PREAD, pwrite64->SYS_PWRITE). Boot
+gate: `do_git_probe_gate` now asserts the FULL chain (GITPROBE-INIT/ADD/COMMIT/
+LOG/CLONE/VERIFY/DONE), reflogs ON so the reflog append exercises the O_APPEND
+path end to end.
+
+### What this is NOT
+
+No kernel append mode, no new write-path mechanism, no ABI break (the omode bit
+is additive; a native open that does not set it is unaffected). The arm carries
+two flags/numbers to machinery that already exists (Stratum's server-side append
++ the native pread/pwrite handlers).

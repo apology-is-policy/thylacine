@@ -235,6 +235,9 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_ORDWR    2u
 #define T_OEXEC    3u
 #define T_OTRUNC   0x10u
+// The git 6.27 append bit: dev9p forwards it to the 9P Tlopen as O_APPEND and
+// Stratum positions each write at EOF server-side (the kernel has no append mode).
+#define T_OAPPEND  0x40u
 // DISTRO D-1: do not expand a symlink FINAL component. What that yields depends
 // on the rest of the omode, which is why it is a flag and not an access mode:
 // with T_OPATH the returned handle IS the link (the v1.0 lstat spelling --

@@ -22,6 +22,83 @@ needed the operator.
 
 ---
 
+## 2026-08-26 (aux) -- git commit + clone run under VIVARIUM (the O_APPEND + pread64 arm), and the wall that was the FS's job all along
+
+**What landed**: VIVARIUM 6.27 -- `git commit` + `git clone file://` now run under
+the phenotype. The full chain (`init`/`add`/`commit`/`log`/`clone`/`verify`,
+reflogs ON) passes as SYSTEM. Two walls, both smaller than the §6.26 deferral
+feared, and the first one dissolved on research.
+
+**The O_APPEND design fork -- surfaced, and the research collapsed it.** The
+§6.26 close deferred commit/clone on O_APPEND, framing it as "Thylacine has no
+kernel append mode." I surfaced the scope fork to the operator (full O_APPEND vs
+narrow git-unblock) WITH the research -- and the research found the fork was
+already decided: **Stratum implements O_APPEND end to end.** Its 9P server stores
+the fid's open flags at Tlopen and, on every Twrite to an O_APPEND fid, ignores
+the client offset and writes at the current size (`server.c` h_write;
+`_Static_assert(STM_9P_O_APPEND == O_APPEND)`). So the kernel needs no append
+MODE -- it PASSES the flag through, and the FS does the positioning ("the
+filesystem is the OS," the append face). The operator ratified full O_APPEND. The
+plumbing is one omode bit (`SYS_WALK_OPEN_OAPPEND` 0x40, additive; OMODE_VALID
+0xB3->0xF3), the map in dev9p_open + dev9p_create, and the admit in both openat
+decides. The kernel write path + cursor are UNCHANGED; for an append fd
+`c->offset` is advisory (Stratum ignores it), exactly right for a write-only
+append (git's reflog).
+
+**The second wall was pread, found by letting the gate fail forward.** With
+O_APPEND in, `commit` + `log` passed but `clone` died: `error reading from
+...pack: Function not implemented`. git's index-pack reads the pack via pread,
+and pread64(67)/pwrite64(68) were untranslated. Same `(fd, buf, count, offset)`
+shape as SYS_PREAD/SYS_PWRITE -> two pure T1 renumbers, no shell. The
+sub-ceiling LOOM collision (67/68) is the read/write renumbers' damage-envelope
+(a mis-declared LOOM caller's loom handle is not a RIGHT_WRITE Spoor, so
+SYS_PWRITE fails clean). Adding them, clone completed -- pread was the last wall.
+
+**A behavior-change regression, caught by the suite (the right way).** Admitting
+O_APPEND flipped two tests that PINNED the old reject (`openat_domain` "O_APPEND
+forwards", `openat_create_domain` "O_CREAT|O_APPEND declines") -- an EXTINCTION
+before the git gate even ran. That is the suite doing its job: a deliberate
+behavior change must update the tests that asserted the old behavior, and the
+updated assertions (O_APPEND now translates to OWRITE|OAPPEND) are the
+regression.
+
+**The write-behind interaction was a REAL bug -- I flagged it, my analysis
+under-called it, the prosecutor caught it.** git's reflog is O_CREAT|O_APPEND, so
+it rides dev9p_create, which set the write-behind anchor (`wb_eligible`,
+`wb_base=0`) for EVERY create -- so the kernel's wb staging and Stratum's
+O_APPEND EOF-override were BOTH live on the append fd. I reasoned "for a fresh
+single-writer file they agree, and the E2E proved it," and wrote a doc claiming
+the anchor was never set for append -- **but the code did not implement that
+gate, and single-writer was the only case I checked.** The holotype (F1, P1) ran
+the CONCURRENT case: two processes appending one log, the flush's
+`larder_page_install_own` installs this fd's bytes at `wb_base` offsets the
+server relocated to a DIFFERENT EOF -> a fabricated own-page serve, content that
+never existed at those offsets (I-38). Two lessons compounded: a doc that
+asserts a gate the code lacks is worse than no doc, and "the E2E proved it"
+proves only the path the E2E runs (single-writer). Fixed by making the code
+match the claim -- exclude append fds from the anchor (`!(omode &
+SYS_WALK_OPEN_OAPPEND)` at both sites); pure write-through is larder-coherent for
+append. And F2 (P2) caught the twin, and building its control found something WORSE than
+the finding named: adding the second-commit leg, the reflog assert failed with
+`.git/logs/HEAD` simply ABSENT -- the /etc/gitconfig still carried sub-chunk 1's
+`logAllRefUpdates = false`, so **the gate had never written a reflog at all, and
+O_APPEND had never once run in it.** The "O_APPEND proven end-to-end" green was
+commit/clone succeeding WITHOUT the append path (a ref update writes refs/heads
+via lockfile+rename, not the reflog). Enabling reflogs made the append actually
+execute; the second-commit control (reflog file == 2 lines, the nonempty-file
+append at cursor 0 != EOF) now both exercises AND witnesses the EOF positioning.
+The lesson under the lesson: a gate whose green never depended on the feature is
+not weak evidence, it is zero evidence.
+
+**Holotype** (Fable 5, MODEL start==end): 0 P0 / 1 P1 / 1 P2 / 2 P3, ALL FIXED
+(clean close; F1 the wb fight above, F2 the non-discriminating gate, F3 stale
+reference caveat + missing T_OAPPEND userspace mirrors, F4 the off-by-S cursor
+divergence stated precisely). Hard targets I-43 + the pread64/pwrite64
+damage-envelope + the Stratum-half of the design VERIFIED SOUND.
+**Verification**: `<SMP-gate pending>`. Tip `<pending>`.
+
+---
+
 ## 2026-08-26 (aux) -- git runs under VIVARIUM (milestone A: init+add), and the three walls it took to get there
 
 **What landed**: the VIVARIUM 6.26 chunk -- a **real static aarch64 musl

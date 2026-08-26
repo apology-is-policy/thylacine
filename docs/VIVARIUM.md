@@ -2759,6 +2759,55 @@ RESOLVE→`ENOENT` instead of FORWARD→`ENOSYS`) is the next chunk.
 
 ---
 
+### 6.27 Tier 2 — `O_APPEND` (via FS pass-through) + `pread64`/`pwrite64` (67/68): `git commit` + `clone` (as-built 2026-08-26)
+
+Milestone A stopped at `init` + `add`; this arm makes `git commit` + `git clone
+file://` run — the full chain (`init`/`add`/`commit`/`log`/`clone`/`verify`,
+reflogs ON) now passes under the phenotype as SYSTEM. Two walls, both small, both
+NOT the kernel-append-mode the §6.26 deferral feared.
+
+**Wall 1 — `O_APPEND`, delegated to the FS.** git's ref update creates + appends
+the reflog `.git/logs/HEAD` with `O_CREAT|O_WRONLY|O_APPEND`, and the phenotype
+`openat` was rejecting `O_APPEND`. The key finding: **Stratum already implements
+O_APPEND end-to-end** — its 9P server stores the fid's open flags at `Tlopen` and,
+on every `Twrite` to an `O_APPEND` fid, ignores the client offset and writes at
+the file's current size (`server.c` `h_write`; `_Static_assert(STM_9P_O_APPEND ==
+O_APPEND)`). So the kernel needs no append MODE of its own — it just **passes the
+flag through**. The plumbing: a new omode bit `SYS_WALK_OPEN_OAPPEND` (0x40,
+inside the widened `SYS_WALK_OPEN_OMODE_VALID` 0xB3→0xF3, pinned by a
+`_Static_assert`); `dev9p_open` AND `dev9p_create` map it → `O_APPEND` (02000) in
+the `Tlopen`/`Tlcreate` flags; both phenotype openat decides admit `O_APPEND`
+(`VIV_OPENAT_ADMITTED += VIV_O_APPEND`) and set the omode bit (the plain decide
+drops it under `O_DIRECTORY` — append on a read-only dir is vacuous). This is the
+append face of "the filesystem is the OS": **the kernel's write path and cursor
+are unchanged; the FS positions the write.** For an append fd the kernel's
+`c->offset` is advisory (Stratum ignores it) — exactly correct for a write-only
+append (git's reflog), and a mixed read+append on the same fd sees the tracked
+cursor, best-effort. The `syscall.h` `SYS_PWRITE` stance note is updated to record
+the delegation (the native `SYS_RW` path still carries no append bit, so pouch
+ports keep emulating it above that layer).
+
+**Wall 2 — `pread64`/`pwrite64` (67/68), the clone pack read.** With `O_APPEND`
+in, `commit` + `log` passed but `clone` failed reading the fetched pack:
+`error reading from ...pack: Function not implemented` (ENOSYS). git's
+`index-pack` reads the pack via `pread`, and `pread64`(67)/`pwrite64`(68) were
+untranslated. Their `(fd, buf, count, offset)` shape matches `SYS_PREAD`(85)/
+`SYS_PWRITE`(86) exactly, so they are pure **T1 renumbers** — no shell. They are
+sub-ceiling, colliding with the native LOOM pair (67=`SYS_LOOM_REGISTER`,
+68=`SYS_LOOM_ENTER`); the collision argument is the `read`/`write` renumbers'
+damage-envelope (a renumber runs the native handler with the caller's OWN args,
+and a mis-declared LOOM caller's loom handle is not a `RIGHT_WRITE` Spoor, so
+`SYS_PWRITE` fails clean — at worst it touches the caller's own file via its own
+fd rights). I-43 holds: a renumber confers no authority the native handler does
+not already gate.
+
+**What this is NOT:** no kernel append mode, no new write-path mechanism, no ABI
+break (the omode bit is additive; native opens that don't set it are unaffected).
+The whole arm is "carry two flags/numbers to machinery that already exists" —
+Stratum's server-side append and the native pread/pwrite handlers.
+
+---
+
 ## 7. The vivarium — the container runner
 
 `thylacine-run` from `ROADMAP §9.1`, named `viv` (§11). Userspace; no new kernel

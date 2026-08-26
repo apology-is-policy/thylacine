@@ -86,6 +86,11 @@ void test_vivarium_t1_renumbers(void) {
     viv_expect_renumber(VIV_LINUX_WRITE,      SYS_WRITE,      "write -> SYS_WRITE");
     viv_expect_renumber(VIV_LINUX_CLOSE,      SYS_CLOSE,      "close -> SYS_CLOSE");
     viv_expect_renumber(VIV_LINUX_LSEEK,      SYS_LSEEK,      "lseek -> SYS_LSEEK");
+    // pread64/pwrite64 (the git 6.27 clone arm): 4-arg renumbers -- git's
+    // index-pack reads the cloned pack via pread, and the (fd, buf, count,
+    // offset) shape matches SYS_PREAD/SYS_PWRITE exactly, so no shell.
+    viv_expect_renumber(VIV_LINUX_PREAD64,    SYS_PREAD,      "pread64 -> SYS_PREAD");
+    viv_expect_renumber(VIV_LINUX_PWRITE64,   SYS_PWRITE,     "pwrite64 -> SYS_PWRITE");
     viv_expect_renumber(VIV_LINUX_EXIT_GROUP, SYS_EXIT_GROUP, "exit_group -> SYS_EXIT_GROUP");
 
     // The lseek row's equivalence rests on the two enumerations coinciding. Pin
@@ -461,8 +466,13 @@ void test_vivarium_openat_domain(void) {
                          /*want_cloexec=*/false, /*want_dirreq=*/true,
                          "O_PATH|O_DIRECTORY keeps the requirement (one of "
                          "the three flags O_PATH does not ignore)");
-    viv_expect_open_forwards(VIV_O_WRONLY | VIV_O_APPEND,
-                             "O_APPEND forwards (no append mode in omode)");
+    // O_APPEND: the V-2b reject INVERTED at the git 6.27 arm -- it now
+    // TRANSLATES to SYS_WALK_OPEN_OAPPEND (OWRITE|OAPPEND == 0x41), which dev9p
+    // forwards to the 9P Tlopen so Stratum positions each write at EOF
+    // server-side (no kernel append mode). Mirrors the OTRUNC translate above.
+    viv_expect_open(VIV_T_ATCWD, VIV_O_WRONLY | VIV_O_APPEND,
+                    1u | SYS_WALK_OPEN_OAPPEND,
+                    "O_WRONLY|O_APPEND -> OWRITE|OAPPEND (git 6.27)");
     // D-1: the V-2b reject INVERTED on the day its own rationale predicted --
     // symlinks landed, so O_NOFOLLOW now TRANSLATES to the resolver's
     // no-follow omode bit (real semantics: ELOOP on a final link; with O_PATH
@@ -3785,18 +3795,23 @@ void test_vivarium_openat_create_domain(void) {
 
     // Declines: a real dirfd (handle state, 6.20 Correction 2); a mode with
     // setuid bits (a silent strip would record less restrictive metadata);
-    // O_APPEND (no omode counterpart -- the V-2b reject survives this arm);
     // accmode 3 (Linux EINVAL); an O_PATH bit that leaked past the shell's
-    // routing (defensive: the admitted set excludes it).
+    // routing (defensive: the admitted set excludes it). (O_APPEND MOVED to the
+    // admitted set at the git 6.27 arm -- asserted just below.)
     TEST_ASSERT(vivarium_openat_create_decide(3, 0100 | 01, 0644,
                                               &omode, &perm, &cx) == VIV_FORWARD,
                 "a real dirfd declines");
     TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01, 04644,
                                               &omode, &perm, &cx) == VIV_FORWARD,
                 "setuid mode bits decline (never silently stripped)");
+    // O_CREAT|O_WRONLY|O_APPEND: the git 6.27 arm -- a fresh reflog is exactly
+    // this shape (git's first ref update creates + appends .git/logs/HEAD), so
+    // it is ADMITTED and sets the OAPPEND omode bit (was a V-2b decline before).
     TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01 | 02000,
-                                              0644, &omode, &perm, &cx) == VIV_FORWARD,
-                "O_CREAT|O_APPEND declines");
+                                              0644, &omode, &perm, &cx) == VIV_TRANSLATED,
+                "O_CREAT|O_WRONLY|O_APPEND is admitted (git 6.27)");
+    TEST_EXPECT_EQ((u64)omode, (u64)(1u | SYS_WALK_OPEN_OAPPEND),
+                   "O_CREAT|O_APPEND -> OWRITE|OAPPEND omode");
     TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 03, 0644,
                                               &omode, &perm, &cx) == VIV_FORWARD,
                 "accmode 3 declines");

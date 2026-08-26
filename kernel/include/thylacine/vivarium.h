@@ -147,6 +147,17 @@ enum {
     VIV_LINUX_LSEEK      = 62,
     VIV_LINUX_READ       = 63,
     VIV_LINUX_WRITE      = 64,
+    // pread64/pwrite64 (the git 6.27 clone arm): git's index-pack reads the
+    // received pack via pread, so a clone FORWARDed here to ENOSYS. Same
+    // (fd, buf, count, offset) shape as SYS_PREAD/SYS_PWRITE -> pure T1
+    // renumbers (see g_viv_t1). Sub-ceiling, colliding with the native LOOM
+    // pair (67=SYS_LOOM_REGISTER, 68=SYS_LOOM_ENTER); the collision argument
+    // is the read/write renumbers' -- a renumber runs the native handler with
+    // the caller's OWN args, damage-envelope-bounded (a mis-declared LOOM
+    // caller's loom handle is not a RIGHT_WRITE Spoor, so SYS_PWRITE fails
+    // clean; at worst it touches the caller's own file via its own fd rights).
+    VIV_LINUX_PREAD64    = 67,
+    VIV_LINUX_PWRITE64   = 68,
     VIV_LINUX_NEWFSTATAT = 79,
     VIV_LINUX_FSTAT      = 80,
     VIV_LINUX_BRK        = 214,

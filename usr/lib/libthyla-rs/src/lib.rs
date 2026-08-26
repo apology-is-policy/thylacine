@@ -319,6 +319,9 @@ pub const T_OWRITE: u32               = 1;
 pub const T_ORDWR: u32                = 2;
 pub const T_OEXEC: u32                = 3;
 pub const T_OTRUNC: u32               = 0x10;
+/// The git 6.27 append bit: dev9p forwards it to the 9P Tlopen as O_APPEND and
+/// Stratum positions each write at EOF server-side (the kernel has no append mode).
+pub const T_OAPPEND: u32              = 0x40;
 // DISTRO D-1: do not expand a symlink FINAL component. What that yields depends
 // on the rest of the omode, which is why it is a flag and not an access mode:
 // with T_OPATH the returned handle IS the link (the v1.0 lstat spelling --

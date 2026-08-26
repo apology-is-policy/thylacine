@@ -178,6 +178,15 @@ static const struct viv_row g_viv_t1[] = {
     { VIV_LINUX_WRITE,      SYS_WRITE,      3 },
     { VIV_LINUX_CLOSE,      SYS_CLOSE,      1 },
     { VIV_LINUX_LSEEK,      SYS_LSEEK,      3 },
+    // pread64/pwrite64 (the git 6.27 clone arm): identical (fd, buf, count,
+    // offset) shape to SYS_PREAD/SYS_PWRITE, and the native handlers validate
+    // the buffer + gate on off>=0 / RIGHT_* exactly as read/write do -- so a
+    // bare renumber is correct where read/write's is. git's index-pack reads
+    // the cloned pack via pread; without this it FORWARDs to ENOSYS. The
+    // sub-ceiling collision with the LOOM pair is the read/write renumbers'
+    // damage-envelope argument (see vivarium.h).
+    { VIV_LINUX_PREAD64,    SYS_PREAD,      4 },
+    { VIV_LINUX_PWRITE64,   SYS_PWRITE,     4 },
     { VIV_LINUX_EXIT_GROUP, SYS_EXIT_GROUP, 1 },
 
     // #150. getpid is the ONLY member of the startup batch that is a clean
@@ -483,6 +492,7 @@ enum {
     VIV_OMODE_WRITE  = 1u,
     VIV_OMODE_RDWR   = 2u,
     VIV_OMODE_TRUNC  = 0x10u,   // == T_OTRUNC
+    VIV_OMODE_APPEND = 0x40u,   // == SYS_WALK_OPEN_OAPPEND (the git 6.27 arm)
 };
 
 // The `openat` flags whose effect SYS_OPEN can honour EXACTLY. Every bit outside
@@ -531,8 +541,8 @@ enum {
 //               land, with nothing to catch it"): the moment arrived, and the
 //               flag rode the same chunk that landed the feature.
 #define VIV_OPENAT_ADMITTED                                                  \
-    ((u32)(VIV_O_ACCMODE | VIV_O_TRUNC | VIV_O_PATH | VIV_O_NOFOLLOW |       \
-           VIV_O_CLOEXEC | VIV_O_NOCTTY | VIV_O_LARGEFILE))
+    ((u32)(VIV_O_ACCMODE | VIV_O_TRUNC | VIV_O_APPEND | VIV_O_PATH |         \
+           VIV_O_NOFOLLOW | VIV_O_CLOEXEC | VIV_O_NOCTTY | VIV_O_LARGEFILE))
 
 // Why each notable rejected flag is rejected -- i.e. why ignoring it would be a
 // SILENT WRONG ANSWER rather than a no-op:
@@ -581,8 +591,14 @@ enum {
 //                that can see the answer. The CREATE arm still declines it
 //                (not in its admitted set; open(O_CREAT|O_DIRECTORY) stays
 //                census-visible).
-//   O_APPEND     Every write must seek to end. SYS_OPEN's omode mask has no
-//                append bit; ignoring it silently corrupts a log writer.
+//   O_APPEND     ADMITTED AND TRANSLATED since the git chunk (VIVARIUM 6.27):
+//                maps 1:1 onto SYS_WALK_OPEN_OAPPEND, which dev9p forwards to
+//                the 9P Tlopen as O_APPEND so Stratum positions each write at
+//                EOF server-side. The kernel gains no append MODE (its write
+//                path is unchanged; the FS does the seek-to-end, the append
+//                face of "the filesystem is the OS"). This closes the V-2b trap
+//                the reject named ("silently corrupts a log writer"): the
+//                mechanism landed, so the flag rode the chunk that added it.
 //   O_EXCL, O_NONBLOCK, O_SYNC/O_DSYNC, O_DIRECT, O_NOATIME, O_TMPFILE, O_ASYNC
 //                each carry semantics with no SYS_OPEN counterpart.
 //                (O_NOFOLLOW moved to the ADMITTED list at DISTRO D-1 -- the
@@ -686,6 +702,16 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
         // incurs. Clearing it makes the open non-destructive so the ENOTDIR (or
         // the kernel's own EISDIR on a write-open of a dir) fires cleanly.
         if ((fl & VIV_O_TRUNC) && !dirreq) omode |= VIV_OMODE_TRUNC;
+        // O_APPEND (the git 6.27 arm) rides the same non-O_PATH arm as O_TRUNC:
+        // it is a WRITE modifier (an O_PATH handle cannot write, and Linux's
+        // O_PATH ignores O_APPEND), and it maps 1:1 onto SYS_WALK_OPEN_OAPPEND
+        // -- dev9p forwards it to the 9P Tlopen so Stratum positions each write
+        // at EOF. Dropped under O_DIRECTORY for the SAME structural reason but a
+        // DIFFERENT hazard than TRUNC: a directory is opened read-only, so
+        // append is simply vacuous there (no data-loss risk -- appending to a
+        // dir just fails the write); the drop keeps a nonsensical flag off the
+        // dir's Tlopen.
+        if ((fl & VIV_O_APPEND) && !dirreq) omode |= VIV_OMODE_APPEND;
     }
     // D-1: O_NOFOLLOW rides BOTH arms -- it is one of the three flags Linux's
     // O_PATH does NOT ignore (the #151 comment below lists them), and
@@ -740,9 +766,11 @@ enum viv_verdict vivarium_openat_create_decide(u64 dirfd, u64 flags, u64 mode,
     if (dfd != VIV_AT_FDCWD) return VIV_FORWARD;
 
     // The admitted set: the plain decide's, minus O_PATH (the shell already
-    // excluded it), plus O_CREAT + O_EXCL. Everything outside declines to the
-    // supervisor -- O_APPEND / O_DIRECTORY / O_TMPFILE keep their V-2b
-    // rejections through this arm too.
+    // excluded it), plus O_CREAT + O_EXCL. O_APPEND now rides through (the git
+    // 6.27 arm -- a fresh reflog is O_CREAT|O_WRONLY|O_APPEND, so the create
+    // path is exactly where git's first ref update lands). Everything else
+    // outside the set declines to the supervisor -- O_DIRECTORY / O_TMPFILE
+    // keep their V-2b rejections through this arm.
     u32 admitted = (VIV_OPENAT_ADMITTED & ~(u32)VIV_O_PATH)
                  | (u32)VIV_O_CREAT | (u32)VIV_O_EXCL;
     if (fl & ~admitted) return VIV_FORWARD;
@@ -761,6 +789,12 @@ enum viv_verdict vivarium_openat_create_decide(u64 dirfd, u64 flags, u64 mode,
     default:           return VIV_FORWARD;   // (fl & ACCMODE) == 3: Linux EINVAL
     }
     if (fl & VIV_O_TRUNC)    omode |= VIV_OMODE_TRUNC;
+    // O_APPEND (the git 6.27 arm) on the create path: a fresh reflog is
+    // O_CREAT|O_WRONLY|O_APPEND, so this arm is the one git's FIRST ref update
+    // exercises. No dirreq gate here (O_DIRECTORY is not admitted on create),
+    // so it maps unconditionally onto SYS_WALK_OPEN_OAPPEND -> the Tlcreate
+    // flags -> Stratum appends server-side.
+    if (fl & VIV_O_APPEND)   omode |= VIV_OMODE_APPEND;
     if (fl & VIV_O_NOFOLLOW) omode |= SYS_WALK_OPEN_NOFOLLOW;
     if (fl & VIV_O_EXCL)     omode |= SYS_WALK_OPEN_OEXCL;
 

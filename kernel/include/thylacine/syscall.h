@@ -1606,9 +1606,15 @@ enum {
 
     // SYS_PWRITE(fd, buf, len, off) -> bytes written / -1 / -errno
     //   The write twin: RIGHT_WRITE + the same off >= 0 / overflow /
-    //   dev->seekable gates; cursor untouched. No O_APPEND interaction
-    //   exists (Thylacine has no kernel append mode; ports emulate
-    //   O_APPEND above this layer).
+    //   dev->seekable gates; cursor untouched. The kernel still has no append
+    //   MODE of its own: SYS_PWRITE writes exactly at `off`. O_APPEND is
+    //   DELEGATED to the FS -- SYS_WALK_OPEN_OAPPEND rides to the 9P Tlopen and
+    //   Stratum positions each write at EOF server-side (the git chunk,
+    //   VIVARIUM.md 6.27). For an append fd the kernel cursor is advisory: the
+    //   server ignores the client offset, so a raw phenotype binary (git) gets
+    //   correct appends without the kernel or a libc emulating them. (Pouch
+    //   ports still emulate O_APPEND above this layer for the native SYS_RW
+    //   path, which carries no append bit.)
     SYS_PWRITE = 86,   // arg: fd (x0), buf (x1), len (x2), off (x3)
 
     // SYS_YIELD() -> 0 (#33)
@@ -2864,12 +2870,26 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // The bit is STRIPPED before the omode reaches Dev.open / Dev.create on every
 // path, so no server and no Spoor.mode ever sees it.
 #define SYS_WALK_OPEN_NOFOLLOW     0x20u
-#define SYS_WALK_OPEN_OMODE_VALID  0xB3u
+// The valid omode bit set: access(0x3) + OTRUNC(0x10) + NOFOLLOW(0x20) +
+// OAPPEND(0x40) + OPATH(0x80). Bit 0x40 (OAPPEND) joined at the git chunk
+// (VIVARIUM.md 6.27); the OAPPEND _Static_assert below pins it inside this mask.
+#define SYS_WALK_OPEN_OMODE_VALID  0xF3u
 
 // The OTRUNC modifier the comment above names, given its symbol so the strips
 // in the create core reference the ABI value by meaning rather than literal
 // (the value is pinned inside SYS_WALK_OPEN_OMODE_VALID's bit 4 regardless).
 #define SYS_WALK_OPEN_OTRUNC       0x10u
+// The git chunk (VIVARIUM.md section 6.27): the APPEND modifier. dev9p passes it
+// to the 9P Tlopen as O_APPEND, and Stratum enforces the append server-side --
+// each Twrite to an O_APPEND fid writes at the file's current EOF (server.c
+// h_write). The kernel gains NO append MODE: its write path and its cursor are
+// unchanged, and the FS does the positioning (the append face of "the
+// filesystem is the OS"). Bit 0x40 is Thylacine's own; Plan 9's 0x40 (ORCLOSE)
+// is not implemented here, so there is no collision of MEANING, only of value.
+#define SYS_WALK_OPEN_OAPPEND      0x40u
+_Static_assert(SYS_WALK_OPEN_OAPPEND == 0x40u &&
+               (SYS_WALK_OPEN_OMODE_VALID & SYS_WALK_OPEN_OAPPEND) != 0,
+               "SYS_WALK_OPEN_OAPPEND must be a bit inside SYS_WALK_OPEN_OMODE_VALID");
 // #50 (VIVARIUM.md section 6.24): the EXCLUSIVE-create modifier, at the value
 // the comment above pre-reserved for it. Meaningful ONLY to SYS_OPEN_CREATE
 // (create-first, once; an existing leaf answers -T_E_EEXIST -- atomic at the

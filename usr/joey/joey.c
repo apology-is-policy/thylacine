@@ -1652,13 +1652,21 @@ static int do_git_probe_gate(void) {
     (void)total;
 
 #define GP_MK(s) { (s), sizeof(s) - 1 }
-    // The milestone is git INIT + ADD under the phenotype as SYSTEM (every new
-    // kernel mechanism this sub-chunk added is on that path). COMMIT + CLONE
-    // need the reflog's O_APPEND, which the phenotype openat does not yet admit
-    // -- deferred to the next sub-chunk, so those markers are NOT asserted here.
+    // The full chain under the phenotype as SYSTEM: init + add + commit + log +
+    // clone file:// + verify, reflogs ON. Since the git 6.27 arm the phenotype
+    // openat ADMITS O_APPEND (Stratum positions the reflog writes at EOF), so
+    // COMMIT + CLONE -- which each append the reflog -- now run. Each is asserted
+    // in order, so the first-missing report distinguishes a commit failure from
+    // a clone failure from a verify failure.
     static const struct argv_marker legs[] = {
         GP_MK("GITPROBE-INIT"),
         GP_MK("GITPROBE-ADD"),
+        GP_MK("GITPROBE-COMMIT"),
+        GP_MK("GITPROBE-LOG"),
+        GP_MK("GITPROBE-COMMIT2"),   // R1-F2: the second commit...
+        GP_MK("GITPROBE-REFLOG2"),   // ...appends a NONEMPTY reflog (cursor != EOF)
+        GP_MK("GITPROBE-CLONE"),
+        GP_MK("GITPROBE-VERIFY"),
         GP_MK("GITPROBE-DONE"),
     };
 #undef GP_MK
@@ -1678,10 +1686,11 @@ static int do_git_probe_gate(void) {
         t_putstr("\n");
         return -1;
     }
-    t_putstr("joey: git-probe gate PASS (git init + add under the phenotype, as "
-             "SYSTEM -- proves faccessat/chdir/fchmodat/readlinkat/getrandom + "
-             "phenotype-fork-inherits-caps + chmod-on-own-files; commit/clone "
-             "await the reflog O_APPEND, next sub-chunk)\n");
+    t_putstr("joey: git-probe gate PASS (git init + add + commit + log + clone "
+             "file:// + verify under the phenotype, as SYSTEM, reflogs ON -- "
+             "proves the sub-chunk-1 syscalls + phenotype-fork-caps AND the git "
+             "6.27 O_APPEND arm: the reflog append rides the 9P Tlopen to "
+             "Stratum's server-side EOF positioning)\n");
     return 0;
 }
 

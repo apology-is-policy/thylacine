@@ -1415,23 +1415,38 @@ rm -rf /tmp/repo /tmp/clone1 2>/dev/null
 cd /tmp || { echo GITPROBE-FAIL-CD; exit 1; }
 git init repo >/dev/null && echo GITPROBE-INIT || { echo GITPROBE-FAIL-INIT; exit 1; }
 cd /tmp/repo || { echo GITPROBE-FAIL-CD2; exit 1; }
-# git init writes core.logallrefupdates=true into the REPO config for a
-# non-bare repo, overriding the system /etc/gitconfig -- and a reflog write
-# opens .git/logs/HEAD with O_APPEND, which the phenotype openat does not yet
-# translate (a tracked gap). Turn reflogs off in the repo so no ref update
-# needs O_APPEND (the milestone-A posture; O_APPEND is a separate arc).
-git config core.logallrefupdates false
+# Force reflogs ON in THIS repo (explicit, not relying on git init's non-bare
+# default -- which the system /etc/gitconfig can suppress). A ref update
+# (commit) then creates + appends the reflog .git/logs/HEAD with O_CREAT|O_APPEND
+# -> the git 6.27 O_APPEND path, positioned server-side by Stratum at EOF. This
+# is what makes the gate ACTUALLY exercise O_APPEND (R1-F2: without a written
+# reflog, commit/clone pass without the append path ever running).
+git config core.logallrefupdates true
 echo hello > f.txt
 git add f.txt && echo GITPROBE-ADD || { echo GITPROBE-FAIL-ADD; exit 1; }
-# The milestone this sub-chunk proves: git INIT + ADD under the phenotype as
-# SYSTEM -- which exercises every new kernel mechanism (faccessat/chdir/
-# fchmodat/readlinkat for init's config write, getrandom for add's temp object
-# file, the phenotype-fork-inherits-caps fix that lets the forked git hold the
-# CSPRNG cap, and chmod-on-own-files via the SYSTEM principal). COMMIT + CLONE
-# both update a ref, which opens the reflog .git/logs/HEAD with O_APPEND -- a
-# flag Thylacine's phenotype openat does not yet admit (the phenotype has no
-# libc to emulate O_APPEND the way a pouch port does). That is the next
-# sub-chunk; stop here at the proven milestone.
+# COMMIT: writes the commit object, updates refs/heads, and appends the reflog
+# (the O_APPEND path). The author/committer identity comes from /etc/gitconfig.
+git commit -m first >/dev/null 2>&1 && echo GITPROBE-COMMIT || { echo GITPROBE-FAIL-COMMIT; exit 1; }
+git log --oneline >/dev/null 2>&1 && echo GITPROBE-LOG || { echo GITPROBE-FAIL-LOG; exit 1; }
+# The append-at-EOF CONTROL (R1-F2): the FIRST commit created a fresh
+# .git/logs/HEAD (cursor 0 == EOF 0), so it lands correctly even if the O_APPEND
+# EOF-override chain is broken. A SECOND commit opens the now-NONEMPTY reflog
+# with cursor 0 != EOF, so its append fails (overwrites entry 1 at offset 0) iff
+# the override regressed. Assert the reflog carries BOTH entries in order.
+git commit --allow-empty -m second >/dev/null 2>&1 && echo GITPROBE-COMMIT2 || { echo GITPROBE-FAIL-COMMIT2; exit 1; }
+# The reflog FILE line count is the direct O_APPEND witness: one line per ref
+# update, so TWO commits == 2 lines iff the second append landed at EOF. A broken
+# EOF-override overwrites entry 1 at offset 0 -> 1 line (or corrupt) -> the gate
+# reddens. This is the control the single-commit chain lacked (R1-F2).
+[ "$(wc -l < .git/logs/HEAD 2>/dev/null | tr -d ' ')" = "2" ] && echo GITPROBE-REFLOG2 || { echo GITPROBE-FAIL-REFLOG2; exit 1; }
+# CLONE file:// -- a fresh repo built from the first (git spawns git-upload-pack
+# via the dashed symlink + sh), itself updating refs + reflog in the clone.
+cd /tmp || { echo GITPROBE-FAIL-CD3; exit 1; }
+git clone file:///tmp/repo clone1 >/dev/null 2>&1 && echo GITPROBE-CLONE || { echo GITPROBE-FAIL-CLONE; exit 1; }
+# VERIFY: the cloned working tree actually carries the committed file.
+test -f /tmp/clone1/f.txt && echo GITPROBE-VERIFY || { echo GITPROBE-FAIL-VERIFY; exit 1; }
+# Full chain proven under the phenotype: init + add + commit + log + clone +
+# verify, reflogs ON (the O_APPEND path live), as SYSTEM.
 echo GITPROBE-DONE
 VIVEOF
                         chmod 0755 "$gb/rootfs/gitprobe.sh"
@@ -1444,7 +1459,7 @@ VIVEOF
 [core]
 	fsync = none
 	createObject = rename
-	logAllRefUpdates = false
+	logAllRefUpdates = true
 [pack]
 	threads = 1
 [checkout]
