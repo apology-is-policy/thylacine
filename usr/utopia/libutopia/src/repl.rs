@@ -248,19 +248,20 @@ impl Repl {
     }
 
     /// #115a: install namespace-driven Tab completion. Scans the static `$path`
-    /// dirs ONCE (`/bin` + `/goroot/bin` + `/clade/bin` -- the #58 exec namespace, matching
-    /// `resolve_command`'s search list so a resolvable command is a completable
-    /// one; static for a session) and builds the initial command index, then
-    /// installs the production `ShellCompletionSource` into the editor. Called
-    /// by the consumer ON-TARGET (gated on a live console, like `open_notes`)
+    /// dirs ONCE (`/bin` + `/goroot/bin` + `/clade/bin` + `/viv/bin` -- the #58 exec
+    /// namespace, matching `resolve_command`'s search list so a resolvable command
+    /// is a completable one; static for a session) and builds the initial command
+    /// index, then installs the production `ShellCompletionSource` into the editor.
+    /// Called by the consumer ON-TARGET (gated on a live console, like `open_notes`)
     /// -- `new()` stays syscall-free so host tests + the bare-spawn boot check
     /// pay nothing. A failed scan degrades to builtins + aliases + funcs only
-    /// (Tab still completes those; `/goroot/bin` + `/clade/bin` are absent on a
-    /// non-bake / non-clade image); it never fails startup. Idempotent (a
-    /// re-call re-scans).
+    /// (Tab still completes those; `/goroot/bin` + `/clade/bin` + `/viv/bin` are
+    /// absent on a non-bake / non-clade / non-viv image); it never fails startup.
+    /// Idempotent (a re-call re-scans). `/viv/bin` is the shipped Linux binaries
+    /// (git), run under the Linux phenotype by the MPHENO_LINUX mount (section 13).
     pub fn install_completion(&mut self) {
         self.bin_commands.clear();
-        for dir in ["/bin", "/goroot/bin", "/clade/bin"] {
+        for dir in ["/bin", "/goroot/bin", "/clade/bin", "/viv/bin"] {
             if let Ok(rd) = libthyla_rs::fs::read_dir(dir) {
                 for ent in rd.flatten() {
                     if ent.is_file() {

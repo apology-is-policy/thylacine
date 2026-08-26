@@ -6992,16 +6992,21 @@ static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
 // drops the LAST reference.
 
 // MREPL / MBEFORE / MAFTER / MCREATE are 0x0001 / 0x0002 / 0x0004 /
-// 0x0008 per territory.h; MNOEXEC (#217) is 0x0010. Mask out everything
-// else — userspace supplying junk bits is rejected at the syscall layer
-// (mount() in territory.c is silent on extra bits, but we want a tight
-// contract at the boundary).
+// 0x0008 per territory.h; MNOEXEC (#217) is 0x0010; MPHENO_LINUX (section 13)
+// is 0x0020. Mask out everything else — userspace supplying junk bits is rejected
+// at the syscall layer (mount() in territory.c is silent on extra bits, but we
+// want a tight contract at the boundary).
 //
 // Adding a flag REQUIRES adding it here: this allowlist is why a new bit is
 // safe to introduce (an old caller's junk still fails) and equally why a new
 // bit that is not listed is silently unusable -- the mount would just fail
 // -1 with nothing naming the cause.
-#define SYS_MOUNT_VALID_FLAGS  ((u32)(MREPL | MBEFORE | MAFTER | MCREATE | MNOEXEC))
+//
+// MPHENO_LINUX is UNGATED here (like MNOEXEC): setting it is a namespace edit that
+// confers ABI shape, never authority (I-43; section 13.4) -- a user marking a mount
+// in their OWN namespace grants their own procs nothing `viv run` could not. The
+// phenotype it declares is bounded to binaries resolved THROUGH the mount.
+#define SYS_MOUNT_VALID_FLAGS  ((u32)(MREPL | MBEFORE | MAFTER | MCREATE | MNOEXEC | MPHENO_LINUX))
 
 // Inner — testable kernel-internally with a Proc handle + a RESOLVED
 // mount-point Spoor (stalk-2: the SVC wrapper stalk's the path; this inner

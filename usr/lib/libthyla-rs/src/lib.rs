@@ -601,6 +601,10 @@ pub const T_MCREATE: u32              = 0x0008;
 // #217: the mounted device instance may not back an executable mapping --
 // refuses exec resolution AND the file-backed PROT_EXEC phenotype mmap arm.
 pub const T_MNOEXEC: u32              = 0x0010;
+// VIVARIUM section 13: a binary whose exec resolution CROSSES this mount runs the
+// Linux phenotype (the /viv/bin subtree-scope declaration channel). Ungated: an
+// ABI-shape declaration, never authority (I-43).
+pub const T_MPHENO_LINUX: u32        = 0x0020;
 
 // path_id_t — abstract path token used by the mount/unmount/bind
 // surface at v1.0. The kernel comment is the canonical reference:

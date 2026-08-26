@@ -568,14 +568,17 @@ fn out_stdio(inherit: bool) -> Stdio {
 /// resolves the spawn name through the caller's namespace (stalk + X-search),
 /// so the shell does the `$path` search. A name containing `/` is used as-is
 /// (absolute or relative). A bare command is searched on
-/// `$path = ["/bin", "/", "/goroot/bin", "/clade/bin"]`: `/bin` is the
+/// `$path = ["/bin", "/", "/goroot/bin", "/clade/bin", "/viv/bin"]`: `/bin` is the
 /// post-pivot installed location (joey binds the initrd binary tree there); `/`
 /// is the pre-pivot initrd root (where the boot-test shell runs); `/goroot/bin`
 /// is the Go toolchain and `/clade/bin` the Clade C/C++ toolchain
-/// (`clang++`/`ld.lld`), both shipped in optional bake chunks (`go`/`gofmt`,
-/// `clang++`/`clang` resolve bare; the toolchain dirs come LAST so `/bin` stays
-/// authoritative, and reachability stays namespace-governed: the probe only
-/// finds what the Territory already exposes, so an absent chunk just misses).
+/// (`clang++`/`ld.lld`); `/viv/bin` is the shipped **Linux** binaries (git), which
+/// the kernel runs under the Linux phenotype because `/viv/bin` is an
+/// `MPHENO_LINUX` mount (VIVARIUM section 13 -- ut needs NO phenotype logic, the
+/// declaration is the mount, so `git ...` from ut is seamless). All shipped in
+/// optional bake chunks (`clang++` / `git` resolve bare; the extra dirs come LAST
+/// so `/bin` stays authoritative, and reachability stays namespace-governed: the
+/// probe only finds what the Territory already exposes, so an absent chunk misses).
 /// The first existing candidate wins; a miss defaults to
 /// `/bin/<name>` for a clean spawn error. (The Plan 9 / Unix split -- the
 /// kernel resolves a path, the shell does `$path`; a multi-entry user-settable
@@ -584,7 +587,7 @@ fn resolve_command(name: &str) -> String {
     if name.contains('/') {
         return String::from(name);
     }
-    for dir in ["/bin/", "/", "/goroot/bin/", "/clade/bin/"] {
+    for dir in ["/bin/", "/", "/goroot/bin/", "/clade/bin/", "/viv/bin/"] {
         let mut cand = String::with_capacity(dir.len() + name.len());
         cand.push_str(dir);
         cand.push_str(name);
