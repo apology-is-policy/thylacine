@@ -101,6 +101,66 @@ the witness is read by a gate, not only by hand. Mesa is 4 files
 (`vn_renderer_thylacine.c`, `warp_client.{c,h}`, `thylacine_prove.c`); the core
 Venus driver stays pristine (the probes were reverted).
 
+**The dirty-close re-audit (round 2), resumed after a self-compaction.** The
+round-1 close was dirty (2 P1); the re-audit on the fix state came back **0 P0 /
+1 P1 / 2 P2 / 1 P3** — not clean, and the two P2s were exactly what a dirty-close
+round exists to catch: hazards the *fixes* created.
+
+- **F5 [P2] was my own self-audit finding, and the independent prosecutor rated
+  it correctly higher than I had.** I had flagged (as a P3) that `warp_mem_new`
+  freed the handle whenever the write *failed*, not only when the server
+  *refused* — the rare "server committed, then the reply was lost" residual. I
+  reasoned the server's duplicate-handle refusal would degrade any collision to
+  one clean alloc failure. The prosecutor showed the degradation is not one
+  failure but an **instance-wide wedge**: `thylacine_mem_alloc`'s first-fit scan
+  keeps re-handing the same low bit, which keeps colliding — the exact F2
+  symptom, for the ctx's life. That is the value of two prosecutors on one
+  surface: same finding, but I under-read the blast radius.
+
+- **F4 [P1] was a round-1 escape neither of us caught the first time.** Venus
+  advertises `VK_EXT_map_memory_placed` unconditionally (`vn_physical_device.c`
+  :1253, `memoryMapPlaced=true` at :436, nothing renderer-gated), but
+  `thylacine_bo_map` **discarded** `pPlacedAddress` — the weft map picks the VA.
+  A legal app that enables the feature and requests a placed map gets a silent
+  `VK_SUCCESS` at the *wrong* address → app-side corruption. The old comment
+  argued only the `has_guest_vram` case produced a non-NULL `placed_addr`; the
+  *extension* is the other producer, and it was advertised. Fixed by
+  de-advertising (a `cannot_map_placed` renderer bit Thylacine sets) plus a
+  defensive refuse in `bo_map` — belt-and-suspenders for a corruption-class bug.
+
+- **F6 [P2] was the F2 fix biting itself.** `vkAllocateMemory` is not externally
+  synchronized, so two threads race `thylacine_mem_alloc`'s plain RMW and both
+  get the same handle. Pre-F2 the loser's refused mint kept the bit (a one-bit
+  leak). Post-F2 the loser's `E_INVAL` refusal *freed* the bit the winner owns →
+  the F5 wedge with no kernel change. The deferral comment blamed "multi-queue";
+  the real trigger is any two allocating threads, available now.
+
+**The reconciliation, and a divergence from the prosecutor's remedy worth
+recording.** The prosecutor suggested discriminating the errno and putting
+`-EINVAL` in the *free* set. That reproduces F6 — a duplicate `-EINVAL` means the
+slot **is** installed, so freeing frees the winner's slot. The reconciled fix
+frees **only** on provably-not-installed (an open failure, or the routine
+`-ENOMEM` holistic-cap refusal) and keeps the handle marked on everything else.
+This is one predicate that closes both F5 and F6's invariant-break; the
+prosecutor is authoritative about the smell, not the remedy
+([[audit-15-closed-list]]). The `-ENOMEM` comparison is load-bearing for F2, so
+it was ground-truthed both ways before trusting: the server returns `E_NOMEM` for
+the `WARP_CTX_BACKING_MAX` cap (`server.rs`), `kernel/dev9p.c` propagates the
+real Rlerror ecode (`t_write` returns the negative errno, "test with `< 0`, never
+`== -1`"), and `ENOMEM == 12` on both sides (kernel `errno.h` `_Static_assert` +
+the sysroot `bits/errno.h`). Get any one wrong and the routine refusal maps to
+"keep" and F2 silently regresses.
+
+**Fixed + re-witnessed GREEN** at mesa `d7f4ef1` (patch 0014): build rc=0
+(prove md5 `c0ccddda`→`e386bc27`), ramfs sha verified on the pi, the logical
+device created against the *de-advertised* placed-map extension, `device-memory
+sentinel OK` → `THYLACINE-VENUS-PROVE PASS`. The E2E confirms the happy path +
+device creation; the **fix proofs** (F4 placed-refusal, F5 EINTR-keep, F6
+concurrent-alloc, F2 ENOMEM-still-frees) all need error-path witnesses the
+allocate+map E2E structurally cannot provide — owed at the GPU-submit /
+cap-exhaustion chunk. By the convention that a returned P1 is a dirty close, a
+**round 3** on the round-2 fixes is in flight as of this writing.
+
 ---
 
 ## 2026-08-26 — V-3b-3c-2a: the device-memory substrate, the split the code sized for, and the two P3s that were real hazards

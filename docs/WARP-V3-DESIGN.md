@@ -918,8 +918,10 @@ sketched; 20 pointers is the ground truth. Shared helpers reused verbatim:
     mirroring the ring ridx -- a create-error handle stays marked, so a re-handed
     handle can never collide with a still-installed server slot, the ring-F1
     wedge class). Transport `warp_mem_{new,map,unmap,destroy}` mirror the ring
-    verbs. The F4 mint-eagerly contract is honored by construction: the driver
-    calls create_from_device_memory at vkAllocateMemory time for HOST_VISIBLE.
+    verbs. The F4 mint-eagerly contract is honored NOT by construction but by a
+    `vn_renderer_info.bo_must_init_at_alloc` bit (round-1 audit F1 below: the
+    driving Venus flow otherwise DEFERS the bo/mint to first vkMapMemory for a
+    plain HOST_VISIBLE type).
     **Two masking-bug layers under the first vkCreateDevice ever run on real V3D**
     (V-3b-3b stopped at instance): (1) `vk_icdGetInstanceProcAddr` returns mesa
     LOADER dispatch trampolines (`vk_tramp_CreateDevice`: `ldr x4,[x0,#0x1380];
@@ -968,6 +970,21 @@ sketched; 20 pointers is the ground truth. Shared helpers reused verbatim:
     `vn_device_memory.c` + `vn_renderer.h` -- otherwise the core Venus driver is
     untouched); impl mesa `2c742991` (patch 0013, round-trip `41ee6252`).
     `memory/audit_v3b3c2b_closed_list.md`.
+    **Re-audit (round 2, Fable 5): 0 P0 / 1 P1 / 2 P2 / 1 P3, all fixed at mesa
+    `d7f4ef1` (patch 0014); re-witnessed GREEN.** F4 [P1]: `VK_EXT_map_memory_
+    placed` was advertised but `thylacine_bo_map` DISCARDED `pPlacedAddress`
+    (weft picks the VA) -> a placed map succeeds silently at the WRONG address;
+    fixed by a `cannot_map_placed` bit that de-advertises the ext + a defensive
+    refuse in bo_map. F5/F6 [P2]: `warp_mem_new`'s "free the handle" arm keyed on
+    "the write failed" not "the server refused" -> an `-EINTR`-after-commit (F5,
+    latent until the 11c native-reader caught-interrupt) OR a concurrent-alloc
+    duplicate `-EINVAL` (F6) freed an INSTALLED slot -> the F2 wedge; fixed by
+    inspecting the real Rlerror ecode and freeing ONLY on provably-not-installed
+    (open-fail / routine `-ENOMEM`). The F6 torn-RMW residual owes the per-
+    renderer mutex (trigger = any concurrent vkAllocateMemory, not multi-queue).
+    F7 [P3]: binding-mechanism comment reworded. Round 3 on the R2 fixes in
+    flight. The fix proofs (placed-refusal, EINTR-keep, concurrent-alloc,
+    ENOMEM-still-frees) need error-path witnesses owed at the GPU-submit chunk.
 - **V-3b-3d -- the Vulkan prove-gate on thyla-pi (real V3D).** A headless
   compute/clear + fenced readback through the full stack; `virgl_prove.c` template
   + a new `warp-host.sh venus`/`vk` verb; renderer-identity discrimination (assert

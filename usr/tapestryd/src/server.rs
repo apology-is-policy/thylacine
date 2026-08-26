@@ -7189,11 +7189,21 @@ impl Comp {
                 c.mems[handle as usize].is_some(),
             )
         };
-        if over {
-            return Err(p9::E_NOMEM);
-        }
+        // Order matters (V-3b-3c-2b round-3 F8): a DUPLICATE handle must answer
+        // E_INVAL even when the ctx is ALSO over the holistic cap. The mesa
+        // client frees its guest handle on E_NOMEM (provably-not-installed) and
+        // keeps it on E_INVAL (installed). If `over` were checked first, a
+        // concurrent-alloc race loser (two threads race the unguarded mem_bitmap
+        // RMW -> same handle) landing on the winner's already-minted slot at a
+        // cap-adjacent ctx would get E_NOMEM and FREE the winner's live slot --
+        // the two-sided invariant break the client's errno discrimination exists
+        // to prevent. So: taken before over. E_NOMEM then provably implies the
+        // slot is empty, making the client's free-set claim exact.
         if taken {
             return Err(p9::E_INVAL); // handle already minted for this ctx
+        }
+        if over {
+            return Err(p9::E_NOMEM);
         }
         let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
         let len = u32::try_from(bytes).map_err(|_| p9::E_INVAL)?;
