@@ -127,8 +127,9 @@
 (* the composed path is added behind ALLOW_COMPOSE so the pre-Warp-C model *)
 (* is recoverable EXACTLY (with ALLOW_COMPOSE = FALSE the two new          *)
 (* variables never leave their initial values, so the six pre-existing     *)
-(* cfgs must reproduce their distinct-state counts to the state -- that    *)
-(* equality is the control proving the extension is additive).             *)
+(* cfgs must reproduce -- the two CLEAN ones their distinct-state counts   *)
+(* to the state, the buggy four their VERDICTS -- that equality is the     *)
+(* control proving the extension is additive).                             *)
 (*                                                                         *)
 (* THE ATTACH IS THE AUTHORITY (P1b, measured 2026-08-16). A blit can read *)
 (* a resource created by another context ONLY after an explicit            *)
@@ -292,6 +293,117 @@
 (*     WRITE landing in them). The same omitted-conjunct style as           *)
 (*     BUGGY_DRAIN_SKIPPED, for the same reason.                            *)
 (*                                                                         *)
+(* ===================================================================     *)
+(* THE PRESENTABLE PATH -- Warp WSI W-3b (docs/WARP-WSI-DESIGN.md)         *)
+(* ===================================================================     *)
+(*                                                                         *)
+(* A PRESENTABLE is a venus-created VkImage whose backing the server       *)
+(* minted as a shareable NON-mappable HOST3D blob, display shape declared  *)
+(* at registration (WSI-DESIGN 4.1). It has NO GUEST PAGES: unlike a       *)
+(* weave, the backing is host memory, so what its invariant protects is    *)
+(* the HOST resource's lifetime against the display's observers -- the     *)
+(* gl_evict_res class (an UNREF of a resource the scanout is still bound   *)
+(* to), which on the documented-trusted host is host-side UAF / display    *)
+(* corruption with cross-client blast radius. That is I-40's "the display  *)
+(* never observes a retired presentable" (WSI-DESIGN section 6), the       *)
+(* FOURTH in-flight class this module carries.                             *)
+(*                                                                         *)
+(* The two observer arms:                                                  *)
+(*                                                                         *)
+(*   pbound   -- the STANDING scanout binding (SET_SCANOUT_BLOB, the       *)
+(*               Direct arm, WSI-DESIGN 4.2). Per-frame RESOURCE_FLUSH     *)
+(*               rides the binding and is not separate state. PUnbind is   *)
+(*               the binding ENDING, whichever way it ends: an explicit    *)
+(*               disable, replacement by another source's bind, or the     *)
+(*               teardown's evict step.                                    *)
+(*   pinflight -- a TRANSIENT host compose READING the presentable's       *)
+(*               resource (WSI-DESIGN 4.3): the C-3 cross-ctx blit or the  *)
+(*               C-6 readback's source side. ONE class, because both arms  *)
+(*               only READ the presentable; the readback's WRITE side      *)
+(*               lands in the destination weave's guest pages and is the   *)
+(*               EXISTING inread class ("the C-6 bookkeeping carries over  *)
+(*               unchanged" -- 4.3), so the weave-side drain is already    *)
+(*               DrainedOfReadbacks and is not re-modeled here.            *)
+(*                                                                         *)
+(* The holder classes (I-7/I-37 extended by one class, WSI-DESIGN 6):      *)
+(* venusRef (the venus allocation's blob_id binding) + regRef (the         *)
+(* registration object) + the two observer arms. The blob's UNREF (PFree)  *)
+(* is legal only after ALL FOUR release. PClientRelease may fire at any    *)
+(* time -- a client destroying its VkImage while the display still scans   *)
+(* the blob out is exactly why the discipline is last-of-ALL, not          *)
+(* client-decides.                                                         *)
+(*                                                                         *)
+(* THE DISPLAY-SAFE TEARDOWN (WSI-DESIGN 6, "gap 7"). PServerRelease and   *)
+(* PFree -- the presentable's ServerRelease/Free -- carry TWO conjuncts:   *)
+(* PUnbound (unbind BEFORE unref: the gl_evict_res ordering, new to the    *)
+(* WarpMem side) and PDrained (no in-flight compose names it). Their       *)
+(* omissions are the two BUGGY flags below -- the per-direction sabotage   *)
+(* discipline, same as the fill/blit exclusion.                            *)
+(*                                                                         *)
+(* WHAT IS DELIBERATELY NOT MODELED:                                       *)
+(*                                                                         *)
+(*   - The CONTENT leg (render-vs-present ordering). Stage 0 discharges    *)
+(*     it CLIENT-side: the backend waits the frame's fence before the      *)
+(*     present RPC (4.4), and wsi_common's acquire serialization keeps a   *)
+(*     scanned-out image un-rendered-into. A client violating its own      *)
+(*     ordering tears its OWN frame inside its I-45-bounded display area   *)
+(*     -- a quality defect of that client, not a compositor lifetime       *)
+(*     hazard. The async evolution re-opens this WITH its own fence tag    *)
+(*     (4.4's recorded seam), and only then does a content leg enter this  *)
+(*     module.                                                             *)
+(*   - N>1 swapchain images. One presentable models the class: a           *)
+(*     swapchain's N images are N independent instances of this lifecycle  *)
+(*     whose rotation is wsi_common bookkeeping; a bind of image K+1 only  *)
+(*     ever ENDS image K's binding earlier (PUnbind covers it). The F6     *)
+(*     boundedness argument, one object over.                              *)
+(*   - The I-45 adoption gate (the mutual surface<->ctx naming). A verb-   *)
+(*     resolution guard with no lifetime edge; enforced by the impl's      *)
+(*     owner-scan and prosecuted at the W-3c audit. The ComposeNeedsAttach *)
+(*     reasoning applies: no modeled action could falsify it, so a line    *)
+(*     here would be structure, not evidence.                              *)
+(*   - The blit arm's cross-ctx IMPORT/DETACH lifecycle (the C-1 attach    *)
+(*     mechanism, spent again when the compositor imports a presentable    *)
+(*     in order to blit it). The lifetime observer is the in-flight        *)
+(*     compose itself -- pinflight + PDrained gate the unref -- and a      *)
+(*     detach under an in-flight read leaves pbacked TRUE, so no           *)
+(*     NoTornPresentable state exists through it (the trusted host's       *)
+(*     per-submission refcounts cover that half). The detach-ordering      *)
+(*     discipline transplants to W-3c with the C-1 Detach guard            *)
+(*     (~InBlit) as its precedent.                                         *)
+(*                                                                         *)
+(* SERVER DEATH IS ATOMIC TOTALITY FOR THIS CLASS -- deliberately unlike   *)
+(* the weave arms. A weave's guest pages have an observer that OUTLIVES    *)
+(* the reap window (the in-flight host DMA against client-held pages), so  *)
+(* ServerDeath leaves intransfer/inblit/inread standing and the no-UAF     *)
+(* checks run across the crash. The presentable's backing AND its          *)
+(* observers are all device-side: the reset that destroys the blob         *)
+(* resource kills the scanout binding and aborts the compose in the same   *)
+(* stroke, so no cross-window exists and there is no ordering to check     *)
+(* across the crash -- ServerDeath clears the whole class to "gone". The   *)
+(* host's internal reset ordering is the trusted host half (GPU-DESIGN     *)
+(* 9.2). The presentable-sourced readback's guest-page WRITE side stays    *)
+(* covered: it is inread, which ServerDeath leaves standing.               *)
+(*                                                                         *)
+(* Additive behind ALLOW_PRESENTABLE (the C-1/C-6 precedent): with the     *)
+(* switch off the six new variables never leave their initial values; the  *)
+(* FOUR pre-existing CLEAN cfgs must reproduce their distinct-state        *)
+(* counts exactly (5413 clean pair, 94680 composed pair) and the eight     *)
+(* buggy cfgs their VERDICTS -- a buggy run's state count is scheduler     *)
+(* noise (the gate's own header) and would be a claim about the            *)
+(* instrument, not the model. That equality is the control proving the     *)
+(* extension is additive.                                                  *)
+(*                                                                         *)
+(*   BUGGY_PUNBIND_SKIPPED (W-3b) -- the teardown unrefs the blob without  *)
+(*     first unbinding the display: PServerRelease + PFree lose exactly    *)
+(*     the PUnbound conjunct -> NoTornPresentable counterexample (the      *)
+(*     display left scanning a destroyed resource -- gap 7 proper, the     *)
+(*     ordering gl_evict_res exists to prevent).                           *)
+(*                                                                         *)
+(*   BUGGY_PDRAIN_SKIPPED (W-3b) -- the teardown is blind to the in-       *)
+(*     flight compose: PServerRelease + PFree lose exactly the PDrained    *)
+(*     conjunct -> NoTornPresentable counterexample (the compose reads a   *)
+(*     destroyed resource). The omitted-conjunct style throughout.         *)
+(*                                                                         *)
 (* CONFIGS                                                                 *)
 (*                                                                         *)
 (*   tapestry_present.cfg            all BUGGY_* FALSE; ALLOW_DESTROY +    *)
@@ -321,6 +433,17 @@
 (*                                   expected VIOLATED (the other end).    *)
 (*   tapestry_present_buggy_readback_free.cfg      NoTornReadback --      *)
 (*                                   expected VIOLATED (C-6).             *)
+(*   tapestry_present_presentable.cfg        ALLOW_PRESENTABLE on top of  *)
+(*                                   every other ALLOW_*; all BUGGY_*     *)
+(*                                   FALSE. Expected: green.              *)
+(*   tapestry_present_presentable_liveness.cfg  + Spec_Live;              *)
+(*                                   EventuallyRetired +                  *)
+(*                                   PresentableEventuallyRetired.        *)
+(*                                   Expected: green.                     *)
+(*   tapestry_present_buggy_punbind_skipped.cfg  NoTornPresentable --     *)
+(*                                   expected VIOLATED (W-3b gap 7).      *)
+(*   tapestry_present_buggy_pdrain_skipped.cfg   NoTornPresentable --     *)
+(*                                   expected VIOLATED (W-3b).            *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -343,7 +466,10 @@ CONSTANTS
     BUGGY_DRAIN_SKIPPED,       \* BOOLEAN -- retire drains only the direct-path class.
     BUGGY_BLIT_DURING_FILL,    \* BOOLEAN -- blit a resource whose fill is still in flight.
     BUGGY_FILL_DURING_BLIT,    \* BOOLEAN -- fill a resource a blit is still reading.
-    BUGGY_READBACK_FREE        \* BOOLEAN -- retire is blind to an in-flight readback (C-6).
+    BUGGY_READBACK_FREE,       \* BOOLEAN -- retire is blind to an in-flight readback (C-6).
+    ALLOW_PRESENTABLE,         \* BOOLEAN -- enable the W-3b presentable (venus WSI) path.
+    BUGGY_PUNBIND_SKIPPED,     \* BOOLEAN -- unref the presentable without unbinding (W-3b).
+    BUGGY_PDRAIN_SKIPPED       \* BOOLEAN -- presentable teardown blind to its compose (W-3b).
 
 ASSUME ALLOW_DESTROY            \in BOOLEAN
 ASSUME ALLOW_REWEAVE            \in BOOLEAN
@@ -357,6 +483,9 @@ ASSUME BUGGY_DRAIN_SKIPPED      \in BOOLEAN
 ASSUME BUGGY_BLIT_DURING_FILL   \in BOOLEAN
 ASSUME BUGGY_FILL_DURING_BLIT   \in BOOLEAN
 ASSUME BUGGY_READBACK_FREE      \in BOOLEAN
+ASSUME ALLOW_PRESENTABLE        \in BOOLEAN
+ASSUME BUGGY_PUNBIND_SKIPPED    \in BOOLEAN
+ASSUME BUGGY_PDRAIN_SKIPPED     \in BOOLEAN
 
 VARIABLES
     wstate,      \* [Gens -> {"none","woven","live","retiring","gone"}]
@@ -384,14 +513,44 @@ VARIABLES
                  \*   compositor must not blit an unpopulated resource on the strength of
                  \*   a counter reading zero.
     inread,      \* [Gens -> BOOLEAN] -- C-6: a compositor READBACK is in flight: a host
-                 \*   DMA-WRITE of g's host resource into g's guest pages (the fenced
-                 \*   TRANSFER_FROM_HOST_3D of the composed-GL present's fallback arm), at
-                 \*   most one per generation. Never leaves FALSE with ALLOW_COMPOSE off.
+                 \*   DMA-WRITE into g's guest pages (the fenced TRANSFER_FROM_HOST_3D of
+                 \*   the composed-GL present's fallback arm), at most one per generation.
+                 \*   The SOURCE is g's own host resource on the virgl arm; since W-3b a
+                 \*   presentable's blob can be the source too (WSI-DESIGN 4.3) -- the
+                 \*   source-side read is then pinflight, the dest-side write stays this
+                 \*   class. Never leaves FALSE with ALLOW_COMPOSE off.
     staleMapped, \* BOOLEAN -- history: a claim resolved against a retiring/gone weave
-    destroyReq   \* BOOLEAN -- the surface destroy was requested
+    destroyReq,  \* BOOLEAN -- the surface destroy was requested
+    pstate,      \* {"none","registered","retiring","gone"} -- W-3b: the presentable, a venus
+                 \*   VkImage whose backing is a server-minted shareable NON-mappable HOST3D
+                 \*   blob, display shape declared at registration (WSI-DESIGN 4.1).
+                 \*   PRegister collapses venus-alloc + img/new into one step: between the
+                 \*   two the blob is an ordinary venus resource nothing display-side can
+                 \*   name, so the window carries no checkable obligation.
+    pbacked,     \* BOOLEAN -- the HOST blob resource exists (not yet UNREF'd). No guest
+                 \*   pages back a presentable: what NoTornPresentable protects is the host
+                 \*   resource's lifetime against its display observers (gl_evict_res class).
+    venusRef,    \* BOOLEAN -- I-7/I-37 holder 1: the venus allocation's blob_id binding.
+    regRef,      \* BOOLEAN -- I-7/I-37 holder 2: tapestryd's registration object (img/<n>).
+    pbound,      \* BOOLEAN -- the display scanout is bound to the presentable
+                 \*   (SET_SCANOUT_BLOB, the Direct arm). STANDING until unbound; per-frame
+                 \*   RESOURCE_FLUSH rides the binding and is not separate state. Independent
+                 \*   of `displayed` (the weave content-reference): where both hold, both
+                 \*   resources must stay alive -- an over-approximation that only ever ADDS
+                 \*   states the invariants must survive, never removes real ones.
+    pinflight    \* BOOLEAN -- a host compose is READING the presentable's resource (the C-3
+                 \*   cross-ctx blit or the C-6 readback's source side; one class -- both
+                 \*   arms only read the presentable, and the readback's WRITE side is the
+                 \*   destination weave's existing inread class).
+
+wvars == <<wstate, backed, serverRef, mapped, armed, slot, intransfer, displayed,
+           attached, inblit, filled, inread, staleMapped, destroyReq>>
+
+pvars == <<pstate, pbacked, venusRef, regRef, pbound, pinflight>>
 
 vars == <<wstate, backed, serverRef, mapped, armed, slot, intransfer, displayed,
-          attached, inblit, filled, inread, staleMapped, destroyReq>>
+          attached, inblit, filled, inread, staleMapped, destroyReq,
+          pstate, pbacked, venusRef, regRef, pbound, pinflight>>
 
 TypeOK ==
     /\ wstate      \in [Gens -> {"none", "woven", "live", "retiring", "gone"}]
@@ -408,6 +567,12 @@ TypeOK ==
     /\ inread      \in [Gens -> BOOLEAN]
     /\ staleMapped \in BOOLEAN
     /\ destroyReq  \in BOOLEAN
+    /\ pstate      \in {"none", "registered", "retiring", "gone"}
+    /\ pbacked     \in BOOLEAN
+    /\ venusRef    \in BOOLEAN
+    /\ regRef      \in BOOLEAN
+    /\ pbound      \in BOOLEAN
+    /\ pinflight   \in BOOLEAN
 
 Init ==
     /\ wstate      = [g \in Gens |-> "none"]
@@ -424,6 +589,12 @@ Init ==
     /\ inread      = [g \in Gens |-> FALSE]
     /\ staleMapped = FALSE
     /\ destroyReq  = FALSE
+    /\ pstate      = "none"
+    /\ pbacked     = FALSE
+    /\ venusRef    = FALSE
+    /\ regRef      = FALSE
+    /\ pbound      = FALSE
+    /\ pinflight   = FALSE
 
 (***************************************************************************)
 (* C-1 helpers.                                                            *)
@@ -461,6 +632,21 @@ InRead(g) == inread[g]
 DrainedOfReadbacks(g) == BUGGY_READBACK_FREE \/ ~InRead(g)
 
 (***************************************************************************)
+(* W-3b helpers -- the display-safe teardown's two conjuncts (gap 7).      *)
+(***************************************************************************)
+
+\* The unbind-BEFORE-unref ordering (the gl_evict_res discipline, new to the
+\* presentable side). Under BUGGY_PUNBIND_SKIPPED this degrades to TRUE --
+\* which IS gap 7: the teardown unrefs a resource the display scanout is
+\* still bound to.
+PUnbound == BUGGY_PUNBIND_SKIPPED \/ ~pbound
+
+\* The presentable's drain conjunct: no host compose is reading its resource.
+\* Under BUGGY_PDRAIN_SKIPPED this degrades to TRUE -- the teardown that
+\* unbinds the scanout and is blind to the transient observer class.
+PDrained == BUGGY_PDRAIN_SKIPPED \/ ~pinflight
+
+(***************************************************************************)
 (* Server: weave allocation (create-surface / the reweave CONFIGURE ack).  *)
 (***************************************************************************)
 
@@ -473,6 +659,7 @@ WeaveFirst ==
     /\ armed'     = [armed     EXCEPT !["g1"] = TRUE]
     /\ UNCHANGED <<mapped, slot, intransfer, displayed, attached, inblit, filled, inread,
                    staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 Reweave ==
     /\ ALLOW_REWEAVE
@@ -485,6 +672,7 @@ Reweave ==
     /\ armed'     = [armed     EXCEPT !["g2"] = TRUE]
     /\ UNCHANGED <<mapped, slot, intransfer, displayed, attached, inblit, filled, inread,
                    staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 (***************************************************************************)
 (* Client: the map claim (V2 grant-is-the-share; consume-once).            *)
@@ -498,6 +686,7 @@ Map(g) ==
     /\ wstate' = [wstate EXCEPT ![g] = "live"]
     /\ UNCHANGED <<backed, serverRef, slot, intransfer, displayed, attached,
                    inblit, filled, inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 MapStale(g) ==
     /\ BUGGY_STALE_MAP
@@ -508,12 +697,14 @@ MapStale(g) ==
     /\ staleMapped' = TRUE
     /\ UNCHANGED <<wstate, backed, serverRef, slot, intransfer, displayed,
                    attached, inblit, filled, inread, destroyReq>>
+    /\ UNCHANGED pvars
 
 ClunkMap(g) ==
     /\ mapped[g]
     /\ mapped' = [mapped EXCEPT ![g] = FALSE]
     /\ UNCHANGED <<wstate, backed, serverRef, armed, slot, intransfer, displayed,
                    attached, inblit, filled, inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 (***************************************************************************)
 (* Client: draw + present. Server/host: the transfer completion.           *)
@@ -527,6 +718,7 @@ Draw(g, s) ==
     /\ slot' = [slot EXCEPT ![g][s] = "drawn"]
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, intransfer,
                    displayed, attached, inblit, filled, inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 Submit(g, s) ==
     /\ ~destroyReq
@@ -539,6 +731,7 @@ Submit(g, s) ==
     /\ intransfer' = [intransfer EXCEPT ![g][s] = 1]
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, displayed,
                    attached, inblit, filled, inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 SubmitEarlyFree(g, s) ==
     /\ BUGGY_EARLY_FREE
@@ -551,6 +744,7 @@ SubmitEarlyFree(g, s) ==
     /\ intransfer' = [intransfer EXCEPT ![g][s] = @ + 1]
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, displayed,
                    attached, inblit, filled, inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 Complete(g, s) ==
     /\ intransfer[g][s] > 0
@@ -575,6 +769,7 @@ Complete(g, s) ==
     /\ filled' = IF ALLOW_COMPOSE THEN [filled EXCEPT ![g] = TRUE] ELSE filled
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, attached, inblit,
                    inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 (***************************************************************************)
 (* C-1: the composed present (Warp-C, GPU-DESIGN section 4.5).             *)
@@ -595,6 +790,7 @@ Attach(g) ==
     /\ attached' = [attached EXCEPT ![g] = TRUE]
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, slot, intransfer,
                    displayed, inblit, filled, inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 \* ctx_detach_resource. Never under an in-flight blit: the host would be
 \* reading a resource it no longer has a reference to through this context.
@@ -604,6 +800,7 @@ Detach(g) ==
     /\ attached' = [attached EXCEPT ![g] = FALSE]
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, slot, intransfer,
                    displayed, inblit, filled, inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 \* The correct composition blit: the fill of g's host resource has LANDED --
 \* the cross-context sync that transfer_from_3d_sync used to supply as a side
@@ -621,6 +818,7 @@ ComposeBlit(g) ==
     /\ inblit' = [inblit EXCEPT ![g] = TRUE]
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, slot, intransfer,
                    displayed, attached, filled, inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 \* The composition fence retires -> SET_SCANOUT(screen) + RESOURCE_FLUSH. The
 \* displayed update mirrors Complete's exactly (a retiring generation never
@@ -638,6 +836,7 @@ ComposeComplete(g) ==
                               ELSE displayed
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, slot, intransfer,
                    attached, filled, inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 (***************************************************************************)
 (* C-6: the readback arm of the composed present (GPU-DESIGN 4.5.13).      *)
@@ -655,6 +854,16 @@ ComposeComplete(g) ==
 (* Complete = the fence retiring: g's pages now hold the frame, the CPU    *)
 (* compose runs, the screen shows g (the displayed update mirrors          *)
 (* ComposeComplete's).                                                     *)
+(*                                                                         *)
+(* W-3b note: a PRESENTABLE-sourced readback (WSI-DESIGN 4.3) rides this   *)
+(* same dest-side class -- its guest-page WRITE is inread[g]; its source   *)
+(* read is pinflight. The filled[g] guard below is then a virgl-arm        *)
+(* over-restriction (a vk-only client never fills the weave's own          *)
+(* resource): INERT for every checked property, because filled is read by  *)
+(* no invariant and no drain conjunct and every (inread, backed, wstate)   *)
+(* combination is already reachable with filled = TRUE -- so the model     *)
+(* keeps the tighter guard, and the W-3c binding revisits it with the      *)
+(* real trigger shape.                                                     *)
 (***************************************************************************)
 
 ComposeReadbackIssue(g) ==
@@ -666,6 +875,7 @@ ComposeReadbackIssue(g) ==
     /\ inread' = [inread EXCEPT ![g] = TRUE]
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, slot, intransfer,
                    displayed, attached, inblit, filled, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 ComposeReadbackComplete(g) ==
     /\ InRead(g)
@@ -680,6 +890,104 @@ ComposeReadbackComplete(g) ==
                               ELSE displayed
     /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, slot, intransfer,
                    attached, inblit, filled, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
+
+(***************************************************************************)
+(* W-3b: the presentable lifecycle (WSI-DESIGN 4.1/4.2/4.3 + section 6).   *)
+(*                                                                         *)
+(* PRegister = venus alloc + img/new collapsed (the pre-registration       *)
+(* window carries no display-side obligation). PPresentBind is the Direct  *)
+(* arm's SET_SCANOUT_BLOB; PUnbind is the binding ending however it ends.  *)
+(* PComposeIssue/PComposeComplete is the Composed arm reading the          *)
+(* presentable (blit or readback source -- one class). PDestroy is         *)
+(* img/<n>/ctl destroy, vkDestroySwapchainKHR, or the owning ctx's death   *)
+(* sweep -- all route through the same display-safe teardown.             *)
+(* PClientRelease (the venus allocation dropping) fires at ANY time --     *)
+(* including under a live scanout binding, which is exactly why PFree is   *)
+(* last-of-ALL-holders rather than client-decides. PServerRelease/PFree    *)
+(* carry the PUnbound + PDrained conjuncts; PPresentBind + PComposeIssue   *)
+(* require pstate = "registered", so a retiring presentable admits no NEW  *)
+(* observers, which is what lets the drain terminate.                      *)
+(***************************************************************************)
+
+PRegister ==
+    /\ ALLOW_PRESENTABLE
+    /\ pstate = "none"
+    /\ pstate'   = "registered"
+    /\ pbacked'  = TRUE
+    /\ venusRef' = TRUE
+    /\ regRef'   = TRUE
+    /\ UNCHANGED <<pbound, pinflight>>
+    /\ UNCHANGED wvars
+
+PPresentBind ==
+    /\ ~destroyReq
+    /\ pstate = "registered"
+    /\ ~pbound
+    /\ pbound' = TRUE
+    /\ UNCHANGED <<pstate, pbacked, venusRef, regRef, pinflight>>
+    /\ UNCHANGED wvars
+
+PUnbind ==
+    /\ pbound
+    /\ pbound' = FALSE
+    /\ UNCHANGED <<pstate, pbacked, venusRef, regRef, pinflight>>
+    /\ UNCHANGED wvars
+
+PComposeIssue ==
+    /\ ~destroyReq
+    /\ pstate = "registered"
+    /\ ~pinflight
+    /\ pinflight' = TRUE
+    /\ UNCHANGED <<pstate, pbacked, venusRef, regRef, pbound>>
+    /\ UNCHANGED wvars
+
+PComposeComplete ==
+    /\ pinflight
+    /\ pbacked
+    /\ pinflight' = FALSE
+    /\ UNCHANGED <<pstate, pbacked, venusRef, regRef, pbound>>
+    /\ UNCHANGED wvars
+
+PDestroy ==
+    /\ pstate = "registered"
+    /\ pstate' = "retiring"
+    /\ UNCHANGED <<pbacked, venusRef, regRef, pbound, pinflight>>
+    /\ UNCHANGED wvars
+
+PClientRelease ==
+    /\ venusRef
+    /\ venusRef' = FALSE
+    /\ UNCHANGED <<pstate, pbacked, regRef, pbound, pinflight>>
+    /\ UNCHANGED wvars
+
+\* The presentable's ServerRelease: the registration object releases its ref,
+\* strictly after the unbind step and the compose drain (WSI-DESIGN 6, the
+\* gl_evict_res ordering). The two conjuncts' omissions are the two BUGGY
+\* flags.
+PServerRelease ==
+    /\ pstate = "retiring"
+    /\ regRef
+    /\ PUnbound
+    /\ PDrained
+    /\ regRef' = FALSE
+    /\ UNCHANGED <<pstate, pbacked, venusRef, pbound, pinflight>>
+    /\ UNCHANGED wvars
+
+\* The presentable's Free: the blob's UNREF, legal only after ALL FOUR holder
+\* classes release (I-7/I-37 extended). Repeats the PUnbound/PDrained
+\* conjuncts the way Free repeats the drains -- defense in depth at the last
+\* edge.
+PFree ==
+    /\ pstate = "retiring"
+    /\ ~venusRef
+    /\ ~regRef
+    /\ PUnbound
+    /\ PDrained
+    /\ pstate'  = "gone"
+    /\ pbacked' = FALSE
+    /\ UNCHANGED <<venusRef, regRef, pbound, pinflight>>
+    /\ UNCHANGED wvars
 
 (***************************************************************************)
 (* Teardown: destroy / the reweave displacement / the free edge.           *)
@@ -701,6 +1009,7 @@ Destroy ==
                                                        ELSE wstate[g]]
     /\ UNCHANGED <<backed, serverRef, mapped, armed, slot, intransfer,
                    displayed, attached, inblit, filled, inread, staleMapped>>
+    /\ UNCHANGED pvars
 
 RetireDisplaced ==
     /\ wstate["g1"] = "live"
@@ -708,6 +1017,7 @@ RetireDisplaced ==
     /\ wstate' = [wstate EXCEPT !["g1"] = "retiring"]
     /\ UNCHANGED <<backed, serverRef, mapped, armed, slot, intransfer,
                    displayed, attached, inblit, filled, inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 \* The graceful server-side ref drop: tapestryd finishes quiescing a retiring
 \* weave's in-flight presents (#898) AND its in-flight composition blits (C-1),
@@ -724,6 +1034,7 @@ ServerRelease(g) ==
     /\ serverRef' = [serverRef EXCEPT ![g] = FALSE]
     /\ UNCHANGED <<wstate, backed, mapped, armed, slot, intransfer, displayed,
                    attached, inblit, filled, inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 \* F4: a tapestryd crash. Every live/woven generation snaps to "retiring", the
 \* registry's claim tokens die (armed -> FALSE -- weft_share_release_owner), AND
@@ -742,10 +1053,24 @@ ServerRelease(g) ==
 \* would make NoTornCompose vacuous across exactly the path that most needs it.
 \* C-6: inread likewise -- a readback the device is still landing outlives the
 \* reaped server, and NoTornReadback must be checked across that state.
+\*
+\* W-3b: the presentable class dies ATOMICALLY -- deliberately unlike the
+\* three weave arms above. Its backing (the host blob) and its observers (the
+\* scanout binding, the compose's read) are ALL device-side: the reset that
+\* destroys the resource kills the binding and aborts the compose in the same
+\* stroke, so no cross-window exists for an ordering check (the host's
+\* internal reset ordering is the trusted host half, GPU-DESIGN 9.2). The
+\* presentable-sourced readback's guest-page WRITE side stays covered by
+\* inread, which this action leaves standing. The guard's presentable
+\* disjunct makes the crash reachable when only the presentable is live
+\* (registration precedes any weave); with ALLOW_PRESENTABLE off, pstate is
+\* pinned to "none" and both the disjunct and every conditional below reduce
+\* to the pre-W-3b action exactly.
 ServerDeath ==
     /\ ALLOW_SERVER_DEATH
     /\ ~destroyReq
-    /\ \E g \in Gens : wstate[g] \in {"woven", "live"}
+    /\ \/ \E g \in Gens : wstate[g] \in {"woven", "live"}
+       \/ pstate \in {"registered", "retiring"}
     /\ destroyReq' = TRUE
     /\ wstate' = [g \in Gens |->
                     IF wstate[g] \in {"woven", "live"} THEN "retiring"
@@ -754,6 +1079,12 @@ ServerDeath ==
                     IF wstate[g] \in {"woven", "live"} THEN FALSE
                                                        ELSE serverRef[g]]
     /\ armed'  = [g \in Gens |-> FALSE]
+    /\ pstate'    = IF pstate \in {"registered", "retiring"} THEN "gone" ELSE pstate
+    /\ pbacked'   = IF pstate \in {"registered", "retiring"} THEN FALSE  ELSE pbacked
+    /\ venusRef'  = IF pstate \in {"registered", "retiring"} THEN FALSE  ELSE venusRef
+    /\ regRef'    = IF pstate \in {"registered", "retiring"} THEN FALSE  ELSE regRef
+    /\ pbound'    = IF pstate \in {"registered", "retiring"} THEN FALSE  ELSE pbound
+    /\ pinflight' = IF pstate \in {"registered", "retiring"} THEN FALSE  ELSE pinflight
     /\ UNCHANGED <<backed, mapped, slot, intransfer, displayed, attached,
                    inblit, filled, inread, staleMapped>>
 
@@ -770,6 +1101,7 @@ Free(g) ==
     /\ displayed' = IF displayed = g THEN "nothing" ELSE displayed
     /\ UNCHANGED <<serverRef, mapped, armed, slot, intransfer, inblit, filled, inread,
                    staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 FreeNoQuiesce(g) ==
     /\ BUGGY_RETIRE_NO_QUIESCE
@@ -778,6 +1110,7 @@ FreeNoQuiesce(g) ==
     /\ backed' = [backed EXCEPT ![g] = FALSE]
     /\ UNCHANGED <<serverRef, mapped, armed, slot, intransfer, displayed,
                    attached, inblit, filled, inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 ReweaveEagerFree ==
     /\ BUGGY_REWEAVE_NO_QUIESCE
@@ -787,6 +1120,7 @@ ReweaveEagerFree ==
     /\ backed' = [backed EXCEPT !["g1"] = FALSE]
     /\ UNCHANGED <<serverRef, mapped, armed, slot, intransfer, displayed,
                    attached, inblit, filled, inread, staleMapped, destroyReq>>
+    /\ UNCHANGED pvars
 
 (***************************************************************************)
 (* The next-state relation.                                                *)
@@ -799,6 +1133,9 @@ Next ==
     \/ ServerDeath
     \/ RetireDisplaced
     \/ ReweaveEagerFree
+    \/ PRegister \/ PPresentBind \/ PUnbind
+    \/ PComposeIssue \/ PComposeComplete
+    \/ PDestroy \/ PClientRelease \/ PServerRelease \/ PFree
     \/ \E g \in Gens :
          \/ Map(g) \/ MapStale(g) \/ ClunkMap(g)
          \/ ServerRelease(g) \/ Free(g) \/ FreeNoQuiesce(g)
@@ -889,6 +1226,35 @@ ComposeNeedsAttach ==
 NoTornReadback ==
     \A g \in Gens : InRead(g) => backed[g]
 
+\* ---------------------------------------------------------------------
+\* W-3b: the presentable path (the FOURTH in-flight class).
+\* ---------------------------------------------------------------------
+
+\* I-40's fourth class, LIFETIME leg: the display never observes a retired
+\* presentable -- neither through the STANDING scanout binding (pbound: an
+\* UNREF under it leaves the display scanning a destroyed resource, the
+\* gl_evict_res class) nor through the TRANSIENT compose read (pinflight).
+\* BUGGY_PUNBIND_SKIPPED breaks the first arm, BUGGY_PDRAIN_SKIPPED the
+\* second. There is no CONTENT leg at stage 0 -- render-vs-present ordering
+\* is discharged client-side (WSI-DESIGN 4.4) and a violation tears only the
+\* violator's own frame; the async evolution re-opens it with its own fence
+\* tag.
+NoTornPresentable ==
+    (pbound \/ pinflight) => pbacked
+
+\* GONE means every holder class released and the blob unref'd: the I-7/I-37
+\* dual-count discipline extended by the presentable's two observer arms.
+PGoneClean ==
+    pstate = "gone" =>
+        (~venusRef /\ ~regRef /\ ~pbacked /\ ~pbound /\ ~pinflight)
+
+\* The observers exist only inside the registration's lifetime: nothing can
+\* bind or compose a presentable that was never registered or is already
+\* gone. (The retiring window still admits DRAINING observers, so retiring
+\* is included.)
+PObserverScoped ==
+    (pbound \/ pinflight) => pstate \in {"registered", "retiring"}
+
 Invariants ==
     /\ TypeOK
     /\ NoTornScanout
@@ -903,6 +1269,9 @@ Invariants ==
     /\ NoStaleCompose
     /\ ComposeNeedsAttach
     /\ NoTornReadback
+    /\ NoTornPresentable
+    /\ PGoneClean
+    /\ PObserverScoped
 
 (***************************************************************************)
 (* Liveness: a destroy always drains to full teardown (no stranded weave). *)
@@ -915,10 +1284,30 @@ Fairness ==
     /\ \A g \in Gens : WF_vars(ComposeComplete(g))
     /\ \A g \in Gens : WF_vars(ComposeReadbackComplete(g))
     /\ \A g \in Gens : \A s \in Slots : WF_vars(Complete(g, s))
+    \* W-3b: the presentable's drain actors. PUnbind/PComposeComplete/
+    \* PClientRelease mirror ClunkMap's unconditional WF (the teardown sweep
+    \* eventually ends the binding and retires the fence; the client's refs
+    \* are reaped ONLY on the ctx-death sweep -- the ctl-destroy case relies
+    \* on the client's own eventual release, exactly as ClunkMap does, and
+    \* the server must never force the venus binding); with ALLOW_PRESENTABLE
+    \* off each is disabled forever and the WF is vacuous, so Spec_Live is
+    \* unchanged for the pre-W-3b cfgs.
+    /\ WF_vars(PUnbind)
+    /\ WF_vars(PComposeComplete)
+    /\ WF_vars(PClientRelease)
+    /\ WF_vars(PServerRelease)
+    /\ WF_vars(PFree)
 
 Spec_Live == Spec /\ Fairness
 
 EventuallyRetired ==
     destroyReq ~> (\A g \in Gens : wstate[g] \in {"none", "gone"})
+
+\* W-3b: a presentable teardown always drains to the unref -- the display-safe
+\* ordering does not deadlock it. Terminates because a retiring presentable
+\* admits no NEW observers (PPresentBind/PComposeIssue require "registered")
+\* and no holder re-arms (PRegister requires "none").
+PresentableEventuallyRetired ==
+    (pstate = "retiring") ~> (pstate = "gone")
 
 ====

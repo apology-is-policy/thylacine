@@ -26,8 +26,10 @@ fail=0
 # clean: cfg, expected distinct states ("-" = do not pin)
 CLEAN="tapestry_present:5413
 tapestry_present_liveness:5413
-tapestry_present_composed:-
-tapestry_present_composed_liveness:-"
+tapestry_present_composed:94680
+tapestry_present_composed_liveness:94680
+tapestry_present_presentable:1557073
+tapestry_present_presentable_liveness:1557073"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="tapestry_present_buggy_premature_reuse:RecycleGate
@@ -37,7 +39,9 @@ tapestry_present_buggy_map_after_retire:NoStaleMap
 tapestry_present_buggy_drain_skipped:NoTornCompose
 tapestry_present_buggy_blit_during_fill:NoStaleCompose
 tapestry_present_buggy_fill_during_blit:NoStaleCompose
-tapestry_present_buggy_readback_free:NoTornReadback"
+tapestry_present_buggy_readback_free:NoTornReadback
+tapestry_present_buggy_punbind_skipped:NoTornPresentable
+tapestry_present_buggy_pdrain_skipped:NoTornPresentable"
 
 run() {  # $1 = cfg basename -> sets RC and LOG
     LOG="$TMP/$1.log"

@@ -22,6 +22,80 @@ needed the operator.
 
 ---
 
+## 2026-08-26 (run 4) — W-3b: the presentable becomes a proved object before it becomes code
+
+Fresh context (self-compact at the 600k line, at the W-3a shipped boundary).
+One chunk, spec-only, exactly as the W-2 scripture ordered it: the
+`tapestry_present.tla` FOURTH in-flight class lands TLC-green **before** any
+W-3c server code exists to be wrong.
+
+**The shape of the model was the work.** The presentable is not a weave arm —
+it is a new object with no guest pages, so the thing its invariant protects is
+inverted from everything the module held so far: not "the host must not touch
+freed guest memory" but "the DISPLAY must not observe a destroyed host
+resource" (`gl_evict_res`'s unref-of-a-scanned-out-resource, host-side UAF,
+cross-client blast radius). Two observer arms (the standing `SET_SCANOUT_BLOB`
+binding; the transient compose read), two holder refs (venus allocation,
+registration), and the display-safe teardown as two omitted-conjunct sabotage
+flags — one per direction, the house discipline. Three modeling calls worth
+recording: the compose arms collapse to ONE read class (blit + readback source
+— the readback's guest-page WRITE side stays the existing `inread` class, per
+the design's own "the C-6 bookkeeping carries over unchanged"); `ServerDeath`
+is atomic totality for this class alone, because its backing AND its observers
+are all device-side and die in one reset — the weave arms deliberately keep
+their in-flight classes across the crash precisely because guest pages have an
+observer that outlives the reap window, and the asymmetry is the point; and
+`pbound` is independent of `displayed` as a directional over-approximation
+(both-held states only ADD enforced states).
+
+**Measured, in order** (`b6c1mqcj9`/`bjpggvhq1` gate logs): the pre-change
+baseline re-verified live (12/12, 5413/5413/94680/94680 — "re-verify any
+figure before quoting" held); the extension in, all four pre-existing clean
+counts reproduced EXACTLY; the all-features presentable pair explores
+**1,557,073** distinct states green including both liveness properties; both
+new buggy cfgs violate exactly `NoTornPresentable`, and the canonical 7-state
+traces were captured single-worker and match the cfg comments action-for-action.
+The composed pair is now PINNED at 94680 in `check-tapestry.sh` — the C-6
+close had left it unpinned, so the fingerprint the gate can enforce got
+stronger in the same stroke. Full gate: **6 clean + 10 buggy, 16/16 AS
+CLAIMED**, ~15 min wall (the liveness leg on 1.55M states dominates).
+
+**The audit round** (holotype Fable 5 max): **0/0/0/4 P3, all fixed, CLEAN in
+one round.** The catch worth keeping: F1 — the Fairness comment said the
+teardown sweep "reaps the client's refs", which is true for exactly one of
+three real firers, and the wrong reading is a license for a W-3c server-side
+venus-binding yank — the I-7 violation the whole holder discipline forbids. A
+comment can be a UAF license. F2 was the same M-PIN one row over: the
+additivity comment claimed count-reproduction for all twelve cfgs when the
+gate's own header proves buggy counts are scheduler noise (counts for the
+clean FOUR, verdicts for the buggy — the C-1 sibling sentence carried the same
+imprecision and was fixed with it). F3 (the blit arm's cross-ctx attach
+lifecycle off the record) was ALSO self-found in the parallel self-audit — the
+W-3a coverage lesson ("enumerate every object the instrument names") held this
+time. F4: `inread`'s comment still pinned the virgl-only source, and
+`filled[g]` is a virgl-arm over-restriction for a presentable-sourced readback
+— prosecuted to INERT (no invariant, no drain conjunct reads `filled`), kept
+tight, revisit at the W-3c binding. The self-audit's own wrong turn is worth a
+line: the proposed `~destroyReq` guard on `PRegister` was REFUTED by the
+independent read — registration is ctx-scoped, so post-surface-destroy
+registration is real behavior the guard would have deleted. Protocol miss
+recorded: the agent never emitted `MODEL(start)` (MODEL(end)=Fable 5; round
+accepted as finished per the standing rule).
+
+Also brought current while in there: the ARCH section 25.2 spec-table row was
+STALE at C-1 — it had never learned about C-6's readback class at all — and
+`SPEC-TO-CODE.md` still said "7 buggy cfgs". Two doc rots caught by walking
+the co-update surface instead of trusting it.
+
+**Open onward**: W-3c (tapestryd: the presentable `img/` ABI + the generalized
+adoption — a NEW AUDIT-TRIGGERS row, per the W-3a closer's explicit call) →
+W-3d (mesa `wsi_interface`) → W-3e (SDL Vulkan glue + the first Vulkan frame
+on the Thylacine display) → W-4 (vkQuake). The spec's not-modeled list is the
+W-3c prosecutor's checklist: the adoption gate, the attach lifecycle, the
+`filled` trigger shape.
+
+---
+
 ## 2026-08-26 (run 3) — "can we test VkQuake?": the vkQuake arc opens; the first triangle renders
 
 Fresh context (self-compact at the 600k line). The run began at a resting point

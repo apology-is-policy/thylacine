@@ -416,6 +416,29 @@ expects are restored for the build. vkQuake then runs unmodified through
    ordering.
 2. **W-3b — the spec extension** (the fourth class; TLC-green + the buggy
    cfg + measured additivity) — BEFORE the server code.
+   **LANDED (2026-08-26):** `tapestry_present.tla` grows the presentable
+   behind its own `ALLOW_PRESENTABLE` switch — 6 variables (a 4-state
+   `pstate` lifecycle, the host-resource liveness `pbacked`, the I-7/I-37
+   holders `venusRef`+`regRef`, the two observer arms `pbound` standing +
+   `pinflight` transient), 9 actions, and the §6 obligations exactly:
+   `NoTornPresentable` (the display never observes a retired presentable —
+   both observer arms), the `PUnbound`+`PDrained` conjuncts on
+   `PServerRelease`/`PFree` (the display-safe teardown; each omission its
+   own `BUGGY_*` cfg per the per-direction-sabotage discipline), `PGoneClean`
+   + `PObserverScoped`, and `PresentableEventuallyRetired` (the ordered
+   teardown terminates). Modeling decisions on the record IN the module: the
+   compose arm is ONE read class (blit + readback source — the readback's
+   write side stays the existing `inread` class per §4.3); no content leg at
+   stage 0 (client-side fence + wsi acquire; re-opens with the async seam);
+   one presentable models the N-image class; the I-45 adoption gate is
+   verb-resolution with no lifetime edge (prosecuted at W-3c);
+   `ServerDeath` is atomic totality for this class (device-side backing AND
+   observers die in one reset — unlike the weave arms, whose guest pages
+   have an observer that outlives the reap window). **Additivity measured**:
+   all four pre-existing clean cfgs reproduce exactly (5413/5413/94680/94680
+   — the composed pair now PINNED in `check-tapestry.sh`, which the C-6
+   close had left unpinned); the all-features presentable cfg explores
+   1557073 distinct states green.
 3. **W-3c — tapestryd**: the presentable object (`img/` subtree), the
    generalized adoption/eligibility model, the wire command(s), the
    display-safe teardown. Audit-bearing (I-40/I-45; a new AUDIT-TRIGGERS

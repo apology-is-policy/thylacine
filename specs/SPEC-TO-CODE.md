@@ -1767,14 +1767,16 @@ below); **the GPU-COMPOSED path landed model-first at Warp-C C-1**
 at C-2c (Attach/Detach) and C-3 (ComposeBlit/ComposeComplete, 2026-08-17)**
 — the binding paragraph below.
 Clean cfg GREEN 5413 distinct (unperturbed across G-2 and G-3 — neither impl
-half changed the model — and unperturbed across C-1, which is the measured
-control on that extension being additive rather than a rewrite); liveness
-GREEN (`EventuallyRetired` incl. across `ServerDeath`); the 7 buggy cfgs each
-fire their named invariant (`premature_reuse` → RecycleGate,
+half changed the model — and unperturbed across C-1, C-6 AND the W-3b
+presentable extension, each re-measured as its additivity control); liveness
+GREEN (`EventuallyRetired` incl. across `ServerDeath`); the 10 buggy cfgs
+each fire their named invariant (`premature_reuse` → RecycleGate,
 `retire_during_transfer`/`reweave_without_quiesce` → NoTornScanout,
 `map_after_retire` → NoStaleMap, `drain_skipped` → NoTornCompose,
-`blit_during_fill`/`fill_during_blit` → NoStaleCompose). Gate:
-`specs/check-tapestry.sh`.
+`blit_during_fill`/`fill_during_blit` → NoStaleCompose, `readback_free` →
+NoTornReadback, `punbind_skipped`/`pdrain_skipped` → NoTornPresentable).
+Gate: `specs/check-tapestry.sh` (6 clean + 10 buggy; the composed pair now
+pinned at 94680, the presentable pair at its first-measurement counts).
 
 ### The C-1 composed extension (model-first; no impl site yet)
 
@@ -1892,6 +1894,64 @@ variable never leaving FALSE; the composed clean cfgs grow to 94680):
   for the wait once observed) (F2b), and `Cost::ReadbackWait`. Gate:
   `warp-prove readback` / `tools/warp-host.sh readback` (ARM / DEEP / LIVE
   / DEADLINE verdict arms + the F2B measurement).
+
+### The W-3b presentable class (spec landed 2026-08-26, model-first; the impl sites land at W-3c)
+
+The Warp-WSI FOURTH in-flight class (`docs/WARP-WSI-DESIGN.md` §6): a venus
+swapchain image as a first-class **presentable** — a shareable NON-mappable
+HOST3D blob, display shape declared at registration. Behind its OWN switch,
+`ALLOW_PRESENTABLE` (C-1/C-6 shared `ALLOW_COMPOSE`; this is a new object,
+not a new arm of the weave), additive by measurement: with the switch off
+ALL FOUR pre-existing clean cfgs reproduce exactly (5413 / 5413 / 94680 /
+94680 — the composed pair is now PINNED in the gate, which the C-6 close
+left unpinned); with it on, the all-features clean cfg measures 1557073
+distinct states. The presentable has NO GUEST PAGES, so its invariant
+protects the HOST resource's lifetime against the display's observers — the
+`gl_evict_res` class, host-side UAF with cross-client blast radius on the
+documented-trusted host. Action ↔ site (all W-3c-owed unless noted):
+
+- **`PRegister`** ↔ `ctx/<id>/img/new` (venus alloc + registration
+  collapsed: between the two the blob is an ordinary venus resource nothing
+  display-side can name). **`PDestroy`** ↔ `img/<n>/ctl destroy`,
+  `vkDestroySwapchainKHR`, or the owning ctx's death sweep — one teardown
+  path.
+- **`PPresentBind` / `PUnbind`** ↔ the Direct arm's `SET_SCANOUT_BLOB` bind
+  and the binding ENDING however it ends (explicit disable, replaced by
+  another source's bind, the teardown's evict step). The standing observer.
+- **`PComposeIssue` / `PComposeComplete`** ↔ the Composed arm READING the
+  presentable: the C-3 cross-ctx blit or the C-6 readback's SOURCE side —
+  one class, because both only read it. The readback's WRITE side lands in
+  the destination weave's pages and is the EXISTING `inread` class ("the
+  C-6 bookkeeping carries over unchanged", WSI-DESIGN §4.3) — deliberately
+  NOT re-modeled as a coupling.
+- **`PClientRelease` / `PServerRelease` / `PFree`** ↔ the I-7/I-37 holder
+  discipline extended by one class: venus allocation + registration + the
+  two observer arms; the blob's UNREF only after ALL FOUR release. A client
+  destroying its VkImage under a live scanout binding is legal and is
+  exactly why the discipline is last-of-all, not client-decides.
+- **`PUnbound` + `PDrained` on `PServerRelease` + `PFree`** ↔ the
+  display-safe teardown ("gap 7"): unbind-BEFORE-unref + the compose drain.
+  OMITTED-CONJUNCT sabotage per direction: `BUGGY_PUNBIND_SKIPPED` →
+  `NoTornPresentable` (the display left scanning a destroyed resource),
+  `BUGGY_PDRAIN_SKIPPED` → `NoTornPresentable` (the compose reads one).
+- **`ServerDeath` is ATOMIC TOTALITY for this class** — deliberately unlike
+  the weave arms: the backing and its observers are all device-side, so the
+  reset that destroys the resource kills the binding and aborts the compose
+  in the same stroke; no cross-window exists (the host's internal reset
+  ordering is the trusted host half, GPU-DESIGN §9.2).
+- **NOT modeled, on the record**: the CONTENT leg (stage 0 discharges
+  render-vs-present ordering client-side — the backend fence-waits before
+  the present RPC + wsi_common acquire; a violation tears the violator's
+  own frame; the async evolution re-opens it WITH its own fence tag per
+  §4.4's seam); N>1 swapchain images (N independent instances of this
+  lifecycle; rotation is wsi_common bookkeeping; a bind of K+1 only ever
+  ENDS K's binding earlier); the I-45 adoption gate (a verb-resolution
+  guard with no lifetime edge — the ComposeNeedsAttach reasoning — enforced
+  by the impl's owner-scan, prosecuted at the W-3c audit).
+
+Liveness: `PresentableEventuallyRetired` (`retiring ~> gone`) — the ordered
+teardown does not deadlock; terminates because a retiring presentable
+admits no NEW observers and no holder re-arms.
 
 **A design obligation C-1 surfaced for C-2/C-3, before any code:** the D1
 recycle gate does not survive the composed path unchanged. tapestryd
