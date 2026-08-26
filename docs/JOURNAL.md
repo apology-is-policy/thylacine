@@ -22,6 +22,87 @@ needed the operator.
 
 ---
 
+## 2026-08-26 — V-3b-3c-2b: the mesa device-memory bo_ops, and a two-layer masking-bug stack under the first vkCreateDevice ever run on real V3D
+
+The chunk was "fill the three pre-wired mesa `vn_renderer` bo_ops over the `mem/`
+ABI and witness a `vkAllocateMemory`+`vkMapMemory` E2E on real V3D." The backend
+(`create_from_device_memory`/`bo_map`/`bo_destroy` + a 256-slot `mem_bitmap`) and
+the transport (`warp_mem_new`/`map`/`unmap`/`destroy`, a clean mirror of the ring
+verbs) went in and compiled first try. Then the E2E surfaced something nobody had
+planned for: **`vkCreateDevice` on real V3D Venus had never actually run.**
+V-3b-3b's prove stopped at `vkDestroyInstance` (its "PASS" is instance bring-up),
+so the entire device path was unexercised — and it hid a two-layer masking-bug
+stack, exactly the shape `DEBUGGING-PLAYBOOK.md` warns is disproportionately
+common in elusive bugs.
+
+**Layer 1 — the loader trampoline (`pc=0`).** The prove crashed
+`snare:segv addr=0x0 pc=0x0 lr=0x2c33a4`. `pc=0` with `lr` still in `main` is a
+*tail-branch to null*. Disassembling the crash `lr` named it: `create_device`
+(from `vk_icdGetInstanceProcAddr`) is `vk_tramp_CreateDevice`, a mesa runtime
+dispatch trampoline — `ldr x4,[x0,#0x1380]; br x4`. It loads the physical-device
+dispatch slot for CreateDevice and tail-branches to it, and that slot is
+**built for the Vulkan loader's object layout**: the ICD populates it only under
+a real loader, so loader-less it is null. `vn_physical_device_entrypoints` binds
+`.CreateDevice = vn_CreateDevice` *and* `.GetPhysicalDeviceProperties` in the
+same table, and the latter's trampoline worked — the tell that this is a
+loader-layout quirk, not a missing entrypoint. **Fix:** call the Venus
+entrypoints directly by symbol (`extern vn_CreateDevice` etc.), the same
+loader-less pattern the prove already used for `vk_icdGetInstanceProcAddr`. The
+flat `vn_MapMemory`/`vn_UnmapMemory` are not defined symbols (Venus implements
+the 1.4 `vn_MapMemory2`/`vn_UnmapMemory2`) — `nm` on the objects caught that
+before a wasted build. Host `vkCreateDevice` then returned `rc=0`.
+
+**Layer 2 — the timeline cap (a hang that was mine).** With the trampoline gone,
+the prove reached `vn_device_init_queues` and stopped — no crash, no return.
+`vn_queue_init` unconditionally calls `vn_instance_acquire_ring_idx`, which
+reserves ring 0 for the CPU timeline and hands a queue the first free index (1),
+then rejects it when `ring_idx >= info.max_timeline_count`. The backend
+advertised `max_timeline_count = 1` (a V-3b-3b F3 decision to avoid mis-fencing
+on the ring_idx-less seam) — so **every `vkCreateDevice` with a queue was
+impossible**, i.e. no device could ever be created. The cap-to-1 was a latent
+bug, not a safe conservative default. **Fix:** `max_timeline_count = 2` — one
+queue timeline (ring 0 CPU + ring 1 queue). A lone queue submits on ring 0
+regardless, so there is nothing to mis-attribute; the F3 seam-carries-ring_idx
+fix stays OWED and gates a *second* queue timeline (multi-queue submit), which
+this allocate+map path never exercises (it creates the queue, never submits).
+
+**Then it was green.** `device-memory sentinel OK (zero-at-map + c0deface
+round-tripped)` then `THYLACINE-VENUS-PROVE PASS ... V-3b-3c-2b` on thyla-pi/KVM
+real V3D 4.2.14 — `vkAllocateMemory` -> `create_from_device_memory` ->
+`warp_mem_new`, `vkMapMemory` -> `bo_map` -> `t_weft_map`, the backing observed
+**zero at map** (the server's disclosure floor, a genuine cross-boundary read
+through the weft mapping, not a self-write) before the sentinel. Re-witnessed
+green on the clean probe-free build (0 VNDBG residue).
+
+**The wrong turn worth recording: a build-system phantom.** Mid-hunt, VNDBG
+probes I added to `vn_device.c` appeared absent from the binary (`grep -a VNDBG`
+= 0) even after a forced re-archive + relink — I burned ~two cycles theorizing a
+thin-archive/`--gc-sections` link failure. They were in the binary the whole
+time. The reason they never *printed* earlier was simpler and upstream of the
+link: the crash was in the trampoline, *before* `vn_CreateDevice`'s body ran, so
+the probes never executed. Once the extern fix reached the body, all A–G + Q1–Q4
+probes printed and localized the hang in one shot. The catch: `grep` for the
+string is not the same question as "did this code run" — and I let a
+false-negative on the former send me hunting the linker. Ground truth (the
+probes firing once the path was reachable) ended it.
+
+**Decisions the operator made.** When the queue-init hang localized and the
+device-bring-up revealed itself as a multi-layer prerequisite larger than the
+chunk (each layer a ~10-min GCP build+witness cycle), I surfaced the scope fork
+— keep grinding vs land-the-backend-and-split. Operator chose **grind to
+completion**.
+
+**Cost + gates.** Eight thyla-keep builds, five real-V3D boots (the mesa cross
+only builds on thyla-keep; the LAN mDNS name wedged mid-run — the documented
+`thyla-pi.local` failure — and the Cloudflare tunnel carried the rest). #245:
+the client E2E witness `device-memory sentinel OK` joined `venus-verdict` +
+`test-venus-verdict` (DISCRIMINATES 37/37, +3 arms) + the boot-probe filter, so
+the witness is read by a gate, not only by hand. Mesa is 4 files
+(`vn_renderer_thylacine.c`, `warp_client.{c,h}`, `thylacine_prove.c`); the core
+Venus driver stays pristine (the probes were reverted).
+
+---
+
 ## 2026-08-26 — V-3b-3c-2a: the device-memory substrate, the split the code sized for, and the two P3s that were real hazards
 
 3c-2 is the device-memory milestone. This session built its server-side half —

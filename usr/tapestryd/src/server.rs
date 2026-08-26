@@ -7159,11 +7159,15 @@ impl Comp {
     /// zeroes the backing (the disclosure floor), so a lazy mint at first
     /// `vkMapMemory` -- after a GPU copy INTO the memory (the legal Vulkan
     /// allocate -> bind -> GPU-write -> map readback pattern) -- would zero away
-    /// the GPU-written results. Upstream Mesa Venus allocates the renderer bo at
-    /// allocation time for HOST_VISIBLE types, so the intended 3c-2b client is
-    /// naturally conformant; this term exists so that is not re-derived by
-    /// accident. (For blob_id 0, the self-test path, there is no bound
-    /// VkDeviceMemory and the point is moot.)
+    /// the GPU-written results. NOTE (V-3b-3c-2b F1, corrects a false premise
+    /// here): upstream Mesa Venus does NOT allocate the renderer bo at allocation
+    /// time for a plain HOST_VISIBLE type -- it defers bo creation to first
+    /// `vkMapMemory` (need_bo), which would let this zeroing destroy a GPU write.
+    /// The 3c-2b client is conformant only because its vn_renderer sets
+    /// `info.bo_must_init_at_alloc`, forcing vn_device_memory to reify the bo (and
+    /// so this mint) at allocate time. It is NOT naturally conformant. (For
+    /// blob_id 0, the self-test path, there is no bound VkDeviceMemory and the
+    /// point is moot.)
     fn wmem_mint(
         &mut self,
         ctx_pub: u32,

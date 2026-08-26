@@ -1,0 +1,799 @@
+From 2c742991466c06129a014171faaa7b7a9f121e3a Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Wed, 26 Aug 2026 09:51:20 +0200
+Subject: [PATCH] Thylacine Warp V-3b-3c-2b: the vn_renderer device-memory
+ bo_ops + the vkAllocateMemory E2E
+
+Fill the three pre-wired device-memory bo_ops over the 3c-2a mem/ ABI, so a
+HOST_VISIBLE vkAllocateMemory + vkMapMemory round-trips end-to-end on real V3D
+(thyla-pi/KVM, Virtio-GPU Venus V3D 4.2.14): device-memory sentinel OK
+(zero-at-map + c0deface round-tripped) -> THYLACINE-VENUS-PROVE PASS.
+
+- thylacine_bo_create_from_device_memory: page-round + guard <= 64 MiB, alloc a
+  client handle from a 256-slot mem_bitmap, warp_mem_new "<bytes> <handle>
+  <mem_id>" (blob_id = the Venus memory object id), store the bo in bo_array
+  keyed by res_id.
+- thylacine_bo_map: lazy warp_mem_map -> t_weft_map (the client holds no PCI
+  handle, so weft not SYS_BURROW_FROM_HOSTMEM), cached.
+- thylacine_bo_destroy: unmap -> warp_mem_destroy -> free the handle ONLY on a
+  confirmed server retire (the two-sided guest-handle-free <=> server-slot-free
+  invariant, mirroring the ring ridx).
+- Transport warp_mem_{new,map,unmap,destroy} mirror the ring verbs.
+
+Two masking-bug layers under the first vkCreateDevice ever run on real V3D
+(V-3b-3b stopped at instance):
+- The loader trampoline: vk_icdGetInstanceProcAddr returns mesa LOADER dispatch
+  trampolines built for the loader's object layout; loader-less the
+  physical-device CreateDevice slot is null -> tail-branch to pc=0. Fix: call the
+  Venus entrypoints directly by symbol (extern vn_CreateDevice / vn_AllocateMemory
+  / the 1.4 vn_MapMemory2 / vn_UnmapMemory2 / vn_FreeMemory / vn_DestroyDevice),
+  the loader-less pattern the prove already used for the ICD entry.
+- The timeline cap: vn_instance_acquire_ring_idx reserves ring 0 for the CPU
+  timeline and hands a queue index 1, rejected when >= max_timeline_count; the
+  V-3b-3b F3 cap of 1 made EVERY vkCreateDevice-with-a-queue impossible. Fix:
+  max_timeline_count = 2 (exactly one queue timeline, self-limiting).
+
+Audit (holotype-reviewer Fable 5 max, I-45 client surface): 0 P0 / 2 P1 / 0 P2
+/ 1 P3, all fixed -- DIRTY close, re-audit owed on the fixes.
+- F1 [P1]: the F4 mint-before-device-use ordering was NOT honored -- the driving
+  Venus flow defers renderer-bo creation to first vkMapMemory for a plain
+  HOST_VISIBLE type, so the server's mint-time zeroing would destroy a GPU write
+  landed between allocate and first map. Fix: a new vn_renderer_info bit
+  bo_must_init_at_alloc; vn_device_memory reifies the bo (and so the mint) at
+  vkAllocateMemory for HOST_VISIBLE when set (alloc_export's eager tail). The
+  black-box E2E cannot witness the ordering (needs a GPU write, i.e. a submit) --
+  the regression witness lands with the GPU-submit chunk.
+- F2 [P1]: every refused mint permanently burned a handle, and for mem the
+  dominant refusal is the routine E_NOMEM at the 64 MiB holistic cap -> <=256
+  refusals wedged vkAllocateMemory for the instance's life. Fix: warp_mem_new is
+  three-valued (1 = server slot provably NOT installed -> free the handle; -1 =
+  maybe installed -> keep marked); the backend frees on the not-installed arm.
+- F3 [P3]: the timeline comment overclaimed single-queue submit-fence soundness
+  (creation is sound; submit fencing is part of the owed F3 work) -> reworded.
+
+Gate-wired (#245): the client witness "device-memory sentinel OK" joins the
+venus gate + test-venus-verdict (DISCRIMINATES 37/37) + the boot-probe filter.
+The core Venus driver stays otherwise pristine (localization probes reverted;
+the only vn_device_memory / vn_renderer.h change is the F1 reify-at-alloc bit).
+
+OWED: the F1/F2 regression witnesses (both need a GPU submit / cap-exhaustion
+harness); the F2 rc<0 convergence; the F3 seam-carries-ring_idx + submit-fence
+analysis; the multi-thread warp_conn/bitmap mutex; the dirty-close re-audit.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ .../winsys/virgl/thylacine/warp_client.c      |  82 +++++++
+ .../winsys/virgl/thylacine/warp_client.h      |  49 ++++
+ src/virtio/vulkan/thylacine_prove.c           | 204 +++++++++++++++-
+ src/virtio/vulkan/vn_device_memory.c          |   8 +
+ src/virtio/vulkan/vn_renderer.h               |   8 +
+ src/virtio/vulkan/vn_renderer_thylacine.c     | 217 +++++++++++++++---
+ 6 files changed, 534 insertions(+), 34 deletions(-)
+
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.c b/src/gallium/winsys/virgl/thylacine/warp_client.c
+index 8d902c2..095919b 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.c
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.c
+@@ -518,6 +518,88 @@ int warp_ring_destroy(struct warp_conn *w, uint32_t ridx)
+    return write_verb(w->root, path, "destroy");
+ }
+ 
++/* ---- Warp-6 V-3b-3c device memory (HOST_VISIBLE VkDeviceMemory) ---- */
++
++int warp_mem_new(struct warp_conn *w, uint32_t handle, uint32_t bytes,
++                 uint64_t mem_id, uint32_t *res_id_out)
++{
++   char path[64];
++   char verb[64];
++   char info[160];
++   long long rid;
++
++   /* Three-valued failure so the caller frees the handle iff the server slot is
++    * provably NOT installed (F2): the server installs the mem slot ONLY on the
++    * Ok path of the mem/new Twrite, so a wedged/ctx-less conn OR a refused Twrite
++    * (the routine E_NOMEM at the holistic ctx cap is exactly this) leaves NO slot
++    * -> return 1 = not-installed, free the handle. A Twrite that SUCCEEDED but
++    * whose info read failed MAY have a live slot -> return -1 = maybe-installed,
++    * keep the handle marked (the bounded-leak posture; converging it with a
++    * destroy is the ring/mem F2 follow-on). 0 = success. */
++   if (w->wedged || w->ctx == 0)
++      return 1;
++
++   /* "<bytes> <handle> <mem_id>" -> ctx/<id>/mem/new. blob_id = mem_id binds
++    * the host allocation; the server parses bytes:u64 handle:u32 mem_id:u64.
++    * bytes is a nonzero page multiple <= WARP_CTX_BACKING_MAX; the caller
++    * rounds up. Minting the first host3d blob (ring or mem) lazily arms the
++    * ctx's venus device-context. */
++   snprintf(path, sizeof(path), "ctx/%u/mem/new", w->ctx);
++   snprintf(verb, sizeof(verb), "%u %u %llu", bytes, handle,
++            (unsigned long long)mem_id);
++   if (write_verb(w->root, path, verb) != 0)
++      return 1; /* refused Twrite -> no slot installed -> free the handle */
++
++   /* res_id (the value the vkAllocateMemory command names in resourceId) reads
++    * back from mem/<handle>/info: "res <id> size <sz>". */
++   snprintf(path, sizeof(path), "ctx/%u/mem/%u/info", w->ctx, handle);
++   if (open_read_snapshot(w->root, path, info, sizeof(info)) <= 0)
++      return -1; /* slot installed but unreadable -> keep the handle marked */
++   rid = parse_field(info, "res");
++   if (rid <= 0)
++      return -1;
++
++   *res_id_out = (uint32_t)rid;
++   return 0;
++}
++
++void *warp_mem_map(struct warp_conn *w, uint32_t handle, long *map_fd_out)
++{
++   char path[64];
++   long fd, va;
++
++   if (w->ctx == 0)
++      return NULL;
++
++   snprintf(path, sizeof(path), "ctx/%u/mem/%u/map", w->ctx, handle);
++   fd = open_at(w->root, path, T_OREAD);
++   if (fd < 0)
++      return NULL;
++   va = t_weft_map(fd, 0); /* RW + coherent regardless of the open mode */
++   if (va < 0) {
++      t_close(fd);
++      return NULL;
++   }
++   *map_fd_out = fd;
++   return (void *)(uintptr_t)va;
++}
++
++void warp_mem_unmap(long map_fd)
++{
++   if (map_fd >= 0)
++      t_close(map_fd); /* the clunk drops the client's MAPPING + pin; the server
++                        * slot is retired by warp_mem_destroy (or ctx death). */
++}
++
++int warp_mem_destroy(struct warp_conn *w, uint32_t handle)
++{
++   char path[64];
++   if (w->wedged || w->ctx == 0)
++      return -1;
++   snprintf(path, sizeof(path), "ctx/%u/mem/%u/ctl", w->ctx, handle);
++   return write_verb(w->root, path, "destroy");
++}
++
+ uint64_t warp_venus_submit(struct warp_conn *w, const void *bytes, uint32_t len)
+ {
+    uint64_t seq;
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.h b/src/gallium/winsys/virgl/thylacine/warp_client.h
+index 7ac8453..cd71a2c 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.h
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.h
+@@ -150,6 +150,55 @@ void warp_ring_unmap(long map_fd);
+  * regardless; a stale server slot is bounded by ctx death). */
+ int warp_ring_destroy(struct warp_conn *w, uint32_t ridx);
+ 
++/* ---- Warp-6 V-3b-3c device memory (HOST_VISIBLE VkDeviceMemory) ---- */
++
++/*
++ * A device-memory blob is a host3d backing exactly like a ring, but named by a
++ * CLIENT-OWNED handle (0..255, MAX_WARP_MEMS_PER_CTX) rather than a ridx, and
++ * bound to a Venus VkDeviceMemory: `blob_id = mem_id` (the memory's Venus
++ * object id), so the host's virglrenderer maps THAT allocation's pages into the
++ * shared backing. One write mints it -- there is no separate build step and no
++ * unbuilt corpse (unlike bo/create3d).
++ *
++ * Mint at `handle` on the connection's ctx: writes "<bytes> <handle> <mem_id>"
++ * to ctx/<id>/mem/new and reads the device-global res_id back from
++ * mem/<handle>/info ("res <id> size <sz>"). `bytes` must be a nonzero page
++ * multiple <= WARP_CTX_BACKING_MAX (64 MiB, server-enforced) and the caller
++ * owns handle allocation (a duplicate is refused server-side). The mint ZEROES
++ * the backing server-side (the disclosure floor), so the caller MUST mint at
++ * vkAllocateMemory time, before any device write to mem_id -- a lazy mint after
++ * a GPU copy INTO the memory would zero the results (server audit F4).
++ * Three-valued return (V-3b-3c-2b F2): 0 = success (+ *res_id_out); 1 = failed,
++ * server slot provably NOT installed (a wedged/ctx-less conn or a refused
++ * mem/new Twrite -- the routine E_NOMEM at the holistic cap) -> the caller
++ * SHOULD free its handle; -1 = failed, slot MAYBE installed (Twrite ok, info
++ * read failed) -> the caller MUST keep the handle marked, else a re-handed
++ * handle collides with the still-installed slot (the ring-F1 wedge). Freeing on
++ * 1 keeps a memory-pressure loop from burning the 256-slot space on routine cap
++ * refusals. */
++int warp_mem_new(struct warp_conn *w, uint32_t handle, uint32_t bytes,
++                 uint64_t mem_id, uint32_t *res_id_out);
++
++/* Map a minted device-memory blob's coherent backing: opens mem/<handle>/map
++ * and t_weft_map's it (the ring/bo map-atomic path). The client holds no PCI
++ * handle -- a Venus app is not the device owner -- so this is the weft map, not
++ * SYS_BURROW_FROM_HOSTMEM. RW + host-coherent; lives until *map_fd_out closes.
++ * NULL on failure. */
++void *warp_mem_map(struct warp_conn *w, uint32_t handle, long *map_fd_out);
++
++/* Drop a device-memory mapping: closes the map fid. Drops the client's MAPPING
++ * + the transferred pin, NOT the server slot (retired by warp_mem_destroy or
++ * ctx death). Safe on a wedged connection. */
++void warp_mem_unmap(long map_fd);
++
++/* Retire a device-memory blob server-side and free its handle slot. Writes
++ * "destroy" to mem/<handle>/ctl (disarm the share + observe-and-reap the
++ * hostmem backing). Call AFTER warp_mem_unmap so the server takes the
++ * immediate-reclaim arm. Returns 0 on success (the caller then frees its
++ * handle -- "guest handle free <=> server slot free"), -1 on refusal (leave the
++ * handle marked; a stale server slot is bounded by ctx death). */
++int warp_mem_destroy(struct warp_conn *w, uint32_t handle);
++
+ /* Submit one opaque Venus command stream (raw SUBMIT_CMD/execbuffer bytes) to
+  * the ctx's submit file. With a host3d ring armed the server routes this to
+  * warp_venus_submit on the venus device-ctx; tapestryd never parses the
+diff --git a/src/virtio/vulkan/thylacine_prove.c b/src/virtio/vulkan/thylacine_prove.c
+index d0c16b2..c86561e 100644
+--- a/src/virtio/vulkan/thylacine_prove.c
++++ b/src/virtio/vulkan/thylacine_prove.c
+@@ -42,9 +42,39 @@ gipa(VkInstance instance, const char *name)
+    return vk_icdGetInstanceProcAddr(instance, name);
+ }
+ 
++/* Loader-less direct entrypoints (V-3b-3c-2b). The mesa runtime dispatch
++ * trampolines (vk_tramp_*) that vk_icdGetInstanceProcAddr returns are built for
++ * the Vulkan LOADER's object layout: vk_tramp_CreateDevice loads a
++ * physical-device dispatch slot and tail-branches to it, but the ICD populates
++ * that slot only under a real loader, so via gipa it branches to NULL here
++ * (pc=0). We statically link the Venus driver, so -- exactly as this file
++ * already does for vk_icdGetInstanceProcAddr -- we call the post-instance
++ * entrypoints directly by symbol, bypassing the trampolines. */
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_CreateDevice(VkPhysicalDevice, const VkDeviceCreateInfo *,
++                const VkAllocationCallbacks *, VkDevice *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_DestroyDevice(VkDevice, const VkAllocationCallbacks *);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_AllocateMemory(VkDevice, const VkMemoryAllocateInfo *,
++                  const VkAllocationCallbacks *, VkDeviceMemory *);
++/* Venus implements the Vulkan 1.4 map/unmap forms; the flat vn_MapMemory /
++ * vn_UnmapMemory are not defined symbols, so use the 2 variants directly. */
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_MapMemory2(VkDevice, const VkMemoryMapInfo *, void **);
++extern VKAPI_ATTR VkResult VKAPI_CALL
++vn_UnmapMemory2(VkDevice, const VkMemoryUnmapInfo *);
++extern VKAPI_ATTR void VKAPI_CALL
++vn_FreeMemory(VkDevice, VkDeviceMemory, const VkAllocationCallbacks *);
++
+ int
+ main(void)
+ {
++   /* Unbuffered: the guest console is not a TTY, so musl fully-buffers stdout
++    * and a fault before exit loses the buffer -- which would hide exactly where
++    * a bring-up step dies. Every printf below must be immediately visible. */
++   setvbuf(stdout, NULL, _IONBF, 0);
++
+    /* Step 1 (V-3b-3a): the loader-less global-command proof. */
+    PFN_vkEnumerateInstanceVersion enum_ver =
+       (PFN_vkEnumerateInstanceVersion)gipa(VK_NULL_HANDLE,
+@@ -149,11 +179,177 @@ main(void)
+           VK_API_VERSION_PATCH(props.apiVersion),
+           mem.memoryTypeCount, mem.memoryHeapCount);
+ 
++   /* Step 3 (V-3b-3c-2b): create a logical device and allocate + map a
++    * HOST_VISIBLE VkDeviceMemory over the mem/ device-memory path. This drives
++    * the new renderer bo_ops: create_from_device_memory at vkAllocateMemory
++    * (mints the ctx/<id>/mem/<handle> host3d blob, blob_id = the memory's Venus
++    * object id) and bo_map at vkMapMemory (weft-maps the coherent backing). */
++   /* get_qf resolves fine via gipa (a physical-device query trampoline whose
++    * slot IS populated); the object-creating vkCreateDevice is the trampoline
++    * that branches to a null slot, so it + the device-memory calls go direct. */
++   PFN_vkGetPhysicalDeviceQueueFamilyProperties get_qf =
++      (PFN_vkGetPhysicalDeviceQueueFamilyProperties)gipa(
++         instance, "vkGetPhysicalDeviceQueueFamilyProperties");
++   if (!get_qf) {
++      printf("THYLACINE-VENUS-PROVE FAIL: vkGetPhysicalDeviceQueueFamilyProperties "
++             "unresolved\n");
++      destroy_instance(instance, NULL);
++      return 1;
++   }
++
++   uint32_t qf_count = 0;
++   get_qf(pds[0], &qf_count, NULL);
++   if (qf_count == 0) {
++      printf("THYLACINE-VENUS-PROVE FAIL: dev0 exposes no queue families\n");
++      destroy_instance(instance, NULL);
++      return 1;
++   }
++
++   const float prio = 1.0f;
++   const VkDeviceQueueCreateInfo qci = {
++      .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
++      .queueFamilyIndex = 0,
++      .queueCount = 1,
++      .pQueuePriorities = &prio,
++   };
++   const VkDeviceCreateInfo dci = {
++      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
++      .queueCreateInfoCount = 1,
++      .pQueueCreateInfos = &qci,
++   };
++   VkDevice device = VK_NULL_HANDLE;
++   printf("venus-prove: qf_count=%u; creating logical device (direct vn_CreateDevice)...\n",
++          qf_count);
++   r = vn_CreateDevice(pds[0], &dci, NULL, &device);
++   if (r != VK_SUCCESS || device == VK_NULL_HANDLE) {
++      printf("THYLACINE-VENUS-PROVE FAIL: vkCreateDevice rc=%d\n", r);
++      destroy_instance(instance, NULL);
++      return 1;
++   }
++   printf("venus-prove: logical device created\n");
++
++   /* Device-memory + destroy entrypoints: direct vn_ symbols (see the extern
++    * block -- the device-level trampolines share the loader-layout issue).
++    * map/unmap use the Vulkan 1.4 vn_MapMemory2/vn_UnmapMemory2 at the call
++    * sites below (the flat forms are not defined symbols). */
++   PFN_vkAllocateMemory alloc_mem = vn_AllocateMemory;
++   PFN_vkFreeMemory free_mem = vn_FreeMemory;
++   PFN_vkDestroyDevice destroy_device = vn_DestroyDevice;
++
++   /* Prefer HOST_VISIBLE | HOST_COHERENT (the weft backing is host-coherent, so
++    * bo_flush/invalidate are no-ops -- a non-coherent type would need real
++    * flushes the backend does not perform). Fall back to bare HOST_VISIBLE. */
++   int mt = -1;
++   for (uint32_t i = 0; i < mem.memoryTypeCount; i++) {
++      const VkMemoryPropertyFlags pf = mem.memoryTypes[i].propertyFlags;
++      if ((pf & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
++          (pf & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
++         mt = (int)i;
++         break;
++      }
++   }
++   if (mt < 0) {
++      for (uint32_t i = 0; i < mem.memoryTypeCount; i++)
++         if (mem.memoryTypes[i].propertyFlags &
++             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
++            mt = (int)i;
++            break;
++         }
++   }
++   if (mt < 0) {
++      /* A device with no HOST_VISIBLE type cannot exercise this path; degrade
++       * to ABSENT rather than FAIL (the milestone is host-visible memory). */
++      printf("THYLACINE-VENUS-PROVE ABSENT (dev0 exposes no HOST_VISIBLE memory "
++             "type -- cannot exercise device-memory map)\n");
++      destroy_device(device, NULL);
++      destroy_instance(instance, NULL);
++      return 0;
++   }
++
++   const VkDeviceSize memsize = 4096;
++   const VkMemoryAllocateInfo mai = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++      .allocationSize = memsize,
++      .memoryTypeIndex = (uint32_t)mt,
++   };
++   VkDeviceMemory memory = VK_NULL_HANDLE;
++   r = alloc_mem(device, &mai, NULL, &memory);
++   if (r != VK_SUCCESS || memory == VK_NULL_HANDLE) {
++      printf("THYLACINE-VENUS-PROVE FAIL: vkAllocateMemory(type %d, %llu B) "
++             "rc=%d\n", mt, (unsigned long long)memsize, r);
++      destroy_device(device, NULL);
++      destroy_instance(instance, NULL);
++      return 1;
++   }
++
++   const VkMemoryUnmapInfo umi = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO,
++      .memory = memory,
++   };
++   const VkMemoryMapInfo mmi = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO,
++      .memory = memory,
++      .offset = 0,
++      .size = memsize,
++   };
++   void *ptr = NULL;
++   r = vn_MapMemory2(device, &mmi, &ptr);
++   if (r != VK_SUCCESS || !ptr) {
++      printf("THYLACINE-VENUS-PROVE FAIL: vkMapMemory rc=%d ptr=%p\n", r, ptr);
++      free_mem(device, memory, NULL);
++      destroy_device(device, NULL);
++      destroy_instance(instance, NULL);
++      return 1;
++   }
++
++   /* The backend mints the backing ZEROED (the server's disclosure floor), so a
++    * fresh map reads zero before any write -- a cross-boundary observation of
++    * server-written state through the weft mapping. Then a CPU sentinel proves
++    * the mapping is writable + coherent. NOTE: this is the ALLOCATE+MAP
++    * milestone -- it proves the map is real, writable, weft-backed memory (a
++    * non-NULL map went through t_weft_map; there is no anonymous fallback). It
++    * does NOT claim GPU visibility of these bytes; a GPU round-trip is the next
++    * milestone (V-3b-3c-2c). */
++   volatile uint32_t *word = (volatile uint32_t *)ptr;
++   const uint32_t pre0 = word[0], pre1 = word[(memsize / 4) - 1];
++   const uint32_t sentinel = 0xC0DEFACEu;
++   word[0] = sentinel;
++   word[(memsize / 4) - 1] = ~sentinel;
++   const uint32_t got0 = word[0], got1 = word[(memsize / 4) - 1];
++   if (pre0 != 0 || pre1 != 0) {
++      printf("THYLACINE-VENUS-PROVE FAIL: device-memory not zero at map "
++             "(pre %08x/%08x -- disclosure-floor breach or disconnected map)\n",
++             pre0, pre1);
++      vn_UnmapMemory2(device, &umi);
++      free_mem(device, memory, NULL);
++      destroy_device(device, NULL);
++      destroy_instance(instance, NULL);
++      return 1;
++   }
++   if (got0 != sentinel || got1 != ~sentinel) {
++      printf("THYLACINE-VENUS-PROVE FAIL: device-memory sentinel mismatch "
++             "(wrote %08x/%08x read %08x/%08x)\n",
++             sentinel, ~sentinel, got0, got1);
++      vn_UnmapMemory2(device, &umi);
++      free_mem(device, memory, NULL);
++      destroy_device(device, NULL);
++      destroy_instance(instance, NULL);
++      return 1;
++   }
++   printf("venus-prove: device-memory sentinel OK (type %d size %llu, "
++          "zero-at-map + %08x round-tripped)\n",
++          mt, (unsigned long long)memsize, sentinel);
++
++   vn_UnmapMemory2(device, &umi);
++   free_mem(device, memory, NULL);
++   destroy_device(device, NULL);
++
+    destroy_instance(instance, NULL);
+ 
+-   printf("THYLACINE-VENUS-PROVE PASS (bring-up over /srv/warp: instance "
+-          "created, %u physical device(s) enumerated, dev0 '%s', %u memory "
+-          "heap(s), instance destroyed -- V-3b-3b)\n",
+-          pd_count, props.deviceName, mem.memoryHeapCount);
++   printf("THYLACINE-VENUS-PROVE PASS (bring-up + device-memory over /srv/warp: "
++          "instance + logical device created, %u physical device(s), dev0 '%s', "
++          "HOST_VISIBLE VkDeviceMemory allocated + mapped + sentinel "
++          "round-tripped + freed -- V-3b-3c-2b)\n",
++          pd_count, props.deviceName);
+    return 0;
+ }
+diff --git a/src/virtio/vulkan/vn_device_memory.c b/src/virtio/vulkan/vn_device_memory.c
+index 213830a..7274a63 100644
+--- a/src/virtio/vulkan/vn_device_memory.c
++++ b/src/virtio/vulkan/vn_device_memory.c
+@@ -312,6 +312,14 @@ vn_device_memory_alloc(struct vn_device *dev,
+       return vn_device_memory_alloc_guest_vram(dev, mem, alloc_info);
+    } else if (export_alloc) {
+       return vn_device_memory_alloc_export(dev, mem, alloc_info);
++   } else if (host_visible && dev->renderer->info.bo_must_init_at_alloc) {
++      /* Reify the renderer bo NOW (allocate), not lazily at first map: this
++       * renderer zeroes the shared blob backing at bo-init, so a GPU write
++       * between allocate and a deferred first-map bo-init would be zeroed
++       * (V-3b-3c-2b F1). alloc_export's tail (alloc_simple + bo_init + roundtrip)
++       * is exactly the eager path -- with no VkExportMemoryAllocateInfo present
++       * it does no export-specific work, just the ordered bo-init. */
++      return vn_device_memory_alloc_export(dev, mem, alloc_info);
+    } else {
+       return vn_device_memory_alloc_simple(dev, mem, alloc_info);
+    }
+diff --git a/src/virtio/vulkan/vn_renderer.h b/src/virtio/vulkan/vn_renderer.h
+index 83767cc..c4c97c9 100644
+--- a/src/virtio/vulkan/vn_renderer.h
++++ b/src/virtio/vulkan/vn_renderer.h
+@@ -64,6 +64,14 @@ struct vn_renderer_info {
+    bool has_implicit_fencing;
+    bool has_guest_vram;
+ 
++   /* Reify the renderer bo at vkAllocateMemory time for a HOST_VISIBLE type
++    * rather than lazily at first map. Set by a backend whose bo-init has a
++    * side effect that must precede any device write to the memory -- the
++    * Thylacine Model B renderer zeroes the shared blob backing at mint
++    * (the disclosure floor), so a GPU write landed between allocate and a
++    * deferred first-map mint would be zeroed (V-3b-3c-2b F1). */
++   bool bo_must_init_at_alloc;
++
+    uint32_t max_timeline_count;
+ 
+    /* hw capset */
+diff --git a/src/virtio/vulkan/vn_renderer_thylacine.c b/src/virtio/vulkan/vn_renderer_thylacine.c
+index 7422ebd..230553a 100644
+--- a/src/virtio/vulkan/vn_renderer_thylacine.c
++++ b/src/virtio/vulkan/vn_renderer_thylacine.c
+@@ -28,7 +28,11 @@
+  *   info/capset   -> the retained Venus capset blob (the `caps` file). The
+  *                    V-3c authority-read pulled forward: bring-up's
+  *                    wire_format_version/vk_xml_version gate requires it.
+- *   bo            -> V-3b-3c (the hostmem BAR; still stubbed here).
++ *   bo            -> ctx/<id>/mem/<handle> host3d blob for a HOST_VISIBLE
++ *                    VkDeviceMemory (V-3b-3c-2b): mem/new "<bytes> <handle>
++ *                    <mem_id>" (blob_id = mem_id) + mem/<h>/map weft + a
++ *                    per-conn mem_bitmap. NOT SYS_BURROW_FROM_HOSTMEM: a Venus
++ *                    app holds no PCI handle, so it maps via weft.
+  *
+  * The wait syscall is a BLOCKING Tread of ctx/<id>/fence, NOT t_poll: the
+  * seam's qids never carry QTPOLL, so t_poll returns POLLIN immediately and
+@@ -61,6 +65,16 @@
+ #define THY_RING_MAX (1u << 20)
+ #define THY_RING_SLOTS 64u /* WARP_RINGS_PER_CTX */
+ 
++/* Device-memory (mem/<handle>) slots: client-owned handles 0..255, matching the
++ * server's MAX_WARP_MEMS_PER_CTX. Wider than the 64 ring slots because a Venus
++ * app allocates many more VkDeviceMemory objects than command rings. The server
++ * caps each backing at WARP_CTX_BACKING_MAX (64 MiB) and the whole ctx at the
++ * same holistic total; the client rounds + rejects a per-alloc request above
++ * the cap early (a clean OUT_OF_DEVICE_MEMORY rather than a server E_NOMEM). */
++#define THY_MEM_SLOTS 256u /* MAX_WARP_MEMS_PER_CTX */
++#define THY_MEM_WORDS (THY_MEM_SLOTS / 64u)
++#define THY_MEM_MAX (64u * 1024u * 1024u) /* WARP_CTX_BACKING_MAX */
++
+ struct thylacine_shmem {
+    struct vn_renderer_shmem base;
+    uint32_t ridx;  /* the host3d ring slot backing this shmem */
+@@ -69,6 +83,8 @@ struct thylacine_shmem {
+ 
+ struct thylacine_bo {
+    struct vn_renderer_bo base;
++   uint32_t handle; /* the mem/<handle> slot (client-owned, the mem_bitmap idx) */
++   long map_fd;     /* the weft map fid; -1 until first bo_map, closed at destroy */
+ };
+ 
+ /*
+@@ -100,16 +116,21 @@ struct thylacine {
+     * -> enumerate -> vkDestroyInstance) is single-threaded and the prove
+     * harness is the only caller of this backend today, so no concurrency
+     * reaches here. Multi-threaded use arrives with VkQueues (V-3b-3c): the ops
+-    * that touch warp (shmem_create/destroy, submit, wait, sync_read/write)
+-    * must then serialize under a per-renderer mutex (the vtest sock_mutex
+-    * analog). Tracked for V-3b-3c; do NOT ship a multi-queue driver on this
+-    * backend without it. */
++    * that touch warp (shmem_create/destroy, bo_create/map/destroy, submit,
++    * wait, sync_read/write) and the two bitmaps must then serialize under a
++    * per-renderer mutex (the vtest sock_mutex analog). Tracked for V-3b-3c; do
++    * NOT ship a multi-queue driver on this backend without it. */
+    struct warp_conn warp;
+    bool connected;
+ 
+    /* allocated host3d ring slots (ridx 0..63); one bit per WarpRing. */
+    uint64_t ring_bitmap;
+ 
++   /* allocated device-memory slots (handle 0..255); one bit per mem/<handle>.
++    * Same SINGLE-THREAD assumption as ring_bitmap (see the warp field): the
++    * per-renderer mutex owed at multi-queue V-3b-3c covers this too. */
++   uint64_t mem_bitmap[THY_MEM_WORDS];
++
+    uint32_t next_sync_id;
+    uint32_t max_timeline_count;
+ 
+@@ -157,6 +178,40 @@ thylacine_ridx_free(struct thylacine *tly, uint32_t ridx)
+       tly->ring_bitmap &= ~(1ull << ridx);
+ }
+ 
++/* ---- device-memory (mem/<handle>) slot allocation ---- */
++
++/*
++ * Same free-on-destroy discipline as ridx (see thylacine_ridx_alloc's note):
++ * a handle is freed ONLY on a confirmed server retire (warp_mem_destroy == 0),
++ * never on a create error. A create-error handle stays MARKED -- the bit is
++ * never re-handed-out, so a leaked slot can never collide with a still-installed
++ * server slot (the ring-F1 wedge class). The leak is bounded (one slot, reaped
++ * at ctx death); converging it (retire the server slot on the info-read-fail
++ * create arm) is the shared ring/mem F2 follow-on.
++ */
++static int
++thylacine_mem_alloc(struct thylacine *tly)
++{
++   for (uint32_t w = 0; w < THY_MEM_WORDS; w++) {
++      if (tly->mem_bitmap[w] == ~0ull)
++         continue;
++      for (uint32_t b = 0; b < 64u; b++) {
++         if (!(tly->mem_bitmap[w] & (1ull << b))) {
++            tly->mem_bitmap[w] |= (1ull << b);
++            return (int)(w * 64u + b);
++         }
++      }
++   }
++   return -1; /* all 256 device-memory slots live on this ctx */
++}
++
++static void
++thylacine_mem_free(struct thylacine *tly, uint32_t handle)
++{
++   if (handle < THY_MEM_SLOTS)
++      tly->mem_bitmap[handle / 64u] &= ~(1ull << (handle % 64u));
++}
++
+ /* ---- shmem: the coherent HOST3D ring the Venus driver lays its ring in ---- */
+ 
+ static void
+@@ -263,6 +318,29 @@ thylacine_shmem_destroy(struct vn_renderer *renderer,
+ 
+ /* ---- bo / device memory: V-3b-3c (the hostmem BAR path) ---- */
+ 
++/*
++ * Mint a device-memory blob for a VkDeviceMemory (V-3b-3c-2b). The driver calls
++ * this at vkAllocateMemory time for a HOST_VISIBLE type (vn_device_memory.c:
++ * create_from_device_memory -> the VkImportMemoryResourceInfoMESA carries the
++ * res_id we return, so the host binds the allocation to our blob). `mem_id` is
++ * the memory's Venus object id; the server uses it as the blob_id, so the host's
++ * virglrenderer maps THAT allocation's pages into the shared backing.
++ *
++ * F4 (server audit, load-bearing): the mint zeroes the backing, so it must run
++ * BEFORE any device write to mem_id. The driving Venus flow (vn_device_memory.c)
++ * defers renderer-bo creation to FIRST MAP for a plain HOST_VISIBLE type
++ * (need_bo), which would let this mint's zero destroy a GPU write landed between
++ * allocate and first map (the legal allocate -> bind -> GPU-copy -> map-readback
++ * pattern). The backend sets `info.bo_must_init_at_alloc`, so vn_device_memory
++ * REIFIES the bo (this op) at vkAllocateMemory time instead -- the ordering is
++ * enforced there, NOT "by construction" here (audit V-3b-3c-2b F1). A black-box
++ * witness needs a GPU write between allocate and map, i.e. a queue submit, which
++ * this chunk does not ship -- the E2E cannot distinguish the orderings; the
++ * regression witness lands with the submit/GPU-round-trip chunk.
++ *
++ * On a warp_mem_new failure the handle is freed IFF the server slot is provably
++ * not installed (F2 -- see the rc handling below).
++ */
+ static VkResult
+ thylacine_bo_create_from_device_memory(
+    struct vn_renderer *renderer,
+@@ -272,24 +350,72 @@ thylacine_bo_create_from_device_memory(
+    VkExternalMemoryHandleTypeFlags external_handles,
+    struct vn_renderer_bo **out_bo)
+ {
+-   (void)renderer;
+-   (void)size;
+-   (void)mem_id;
+-   (void)flags;
+-   (void)external_handles;
+-   (void)out_bo;
+-   /* V-3b-3c: HOST_VISIBLE VkDeviceMemory over the hostmem BAR (MAP_BLOB +
+-    * SYS_BURROW_FROM_HOSTMEM). Bring-up (create instance + enumerate) never
+-    * allocates device memory, so this stays stubbed for the 3b milestone. */
+-   return VK_ERROR_OUT_OF_HOST_MEMORY;
++   struct thylacine *tly = (struct thylacine *)renderer;
++   (void)flags;            /* every mint is a RW coherent hostmem backing */
++   (void)external_handles; /* export is unsupported (export_dma_buf -> -1) */
++
++   size_t rounded = (size + (THY_PAGE - 1)) & ~(size_t)(THY_PAGE - 1);
++   if (rounded == 0 || rounded > THY_MEM_MAX)
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++
++   int handle = thylacine_mem_alloc(tly);
++   if (handle < 0)
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++
++   uint32_t res_id = 0;
++   int rc = warp_mem_new(&tly->warp, (uint32_t)handle, (uint32_t)rounded, mem_id,
++                         &res_id);
++   if (rc != 0) {
++      /* F2: free the handle IFF the server slot is provably not installed
++       * (rc > 0: a wedged/ctx-less conn or a refused mem/new Twrite -- the
++       * server installs the slot only on the Ok path, so a refused Twrite leaves
++       * none). The routine E_NOMEM at the holistic ctx cap is this arm, so a
++       * memory-pressure loop that refuses + retries does NOT burn the 256-slot
++       * handle space (the old unconditional leak wedged vkAllocateMemory for the
++       * instance's life). rc < 0 (Twrite ok, info read failed) MAY have a live
++       * slot -> keep the handle marked (bounded leak, ctx-death reaped; a
++       * re-handed handle would otherwise collide with the still-installed slot,
++       * the ring-F1 wedge class). Converging the rc<0 arm with a destroy is the
++       * ring/mem F2 follow-on. */
++      if (rc > 0)
++         thylacine_mem_free(tly, (uint32_t)handle);
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++   }
++
++   struct thylacine_bo *bo = util_sparse_array_get(&tly->bo_array, res_id);
++   *bo = (struct thylacine_bo){
++      .base = {
++         .refcount = VN_REFCOUNT_INIT(1),
++         .res_id = res_id,
++         .mmap_size = rounded, /* >= size: satisfies the create contract */
++         .mmap_ptr = NULL,     /* mapped lazily in bo_map */
++      },
++      .handle = (uint32_t)handle,
++      .map_fd = -1,
++   };
++
++   *out_bo = &bo->base;
++   return VK_SUCCESS;
+ }
+ 
+ static bool
+-thylacine_bo_destroy(struct vn_renderer *renderer, struct vn_renderer_bo *bo)
++thylacine_bo_destroy(struct vn_renderer *renderer, struct vn_renderer_bo *_bo)
+ {
+-   (void)renderer;
+-   (void)bo;
+-   return false;
++   struct thylacine *tly = (struct thylacine *)renderer;
++   struct thylacine_bo *bo = (struct thylacine_bo *)_bo;
++
++   /* Order (mirror shmem_destroy_now): (1) drop the client mapping + pin so the
++    * server observes it gone and takes the immediate-reclaim arm; (2) retire the
++    * server slot; (3) free the guest handle ONLY on a confirmed retire, keeping
++    * "guest handle free <=> server slot free" so a reused handle never collides.
++    * On a refused destroy (wedged / already-gone) leave the handle marked -- the
++    * bounded-leak posture, one slot, reaped at ctx death. */
++   warp_mem_unmap(bo->map_fd);
++   bo->map_fd = -1;
++   bo->base.mmap_ptr = NULL;
++   if (warp_mem_destroy(&tly->warp, bo->handle) == 0)
++      thylacine_mem_free(tly, bo->handle);
++   return true;
+ }
+ 
+ static int
+@@ -302,13 +428,27 @@ thylacine_bo_export_dma_buf(struct vn_renderer *renderer,
+ }
+ 
+ static void *
+-thylacine_bo_map(struct vn_renderer *renderer, struct vn_renderer_bo *bo,
++thylacine_bo_map(struct vn_renderer *renderer, struct vn_renderer_bo *_bo,
+                  void *placed_addr)
+ {
+-   (void)renderer;
+-   (void)bo;
++   struct thylacine *tly = (struct thylacine *)renderer;
++   struct thylacine_bo *bo = (struct thylacine_bo *)_bo;
++
++   /* placed_addr is the guest-vram fixed-VA path (has_guest_vram); this backend
++    * advertises has_guest_vram=false, so the driver never places -- weft picks
++    * the VA. Map lazily + cache, like vtest: vkMapMemory may be called more than
++    * once, and the second returns the cached ptr. Not thread-safe (the bo_ops
++    * map contract), covered by the owed multi-queue mutex. */
+    (void)placed_addr;
+-   return NULL;
++   if (!bo->base.mmap_ptr) {
++      long map_fd = -1;
++      void *ptr = warp_mem_map(&tly->warp, bo->handle, &map_fd);
++      if (ptr) {
++         bo->base.mmap_ptr = ptr;
++         bo->map_fd = map_fd;
++      }
++   }
++   return bo->base.mmap_ptr;
+ }
+ 
+ static void
+@@ -560,6 +700,11 @@ thylacine_init_renderer_info(struct thylacine *tly)
+    info->has_implicit_fencing = false;
+    info->has_guest_vram = false;
+ 
++   /* The renderer zeroes the shared blob backing at bo-init/mint (the disclosure
++    * floor), so the bo MUST exist before any device write -- reify it at
++    * vkAllocateMemory, not lazily at first map (V-3b-3c-2b F1). */
++   info->bo_must_init_at_alloc = true;
++
+    /* The two load-bearing gate fields (vn_instance_init_renderer):
+     * wire_format_version must equal 1 and vk_xml_version must be >= 1.1 or
+     * the driver produces a device-less stub instance. They come from the
+@@ -611,16 +756,28 @@ thylacine_init(struct thylacine *tly)
+       memset((char *)&tly->capset.data + n, 0, sizeof(tly->capset.data) - n);
+    tly->capset.id = THYLACINE_VENUS_CAPSET_ID;
+    tly->capset.version = 0;
+-   /* V-3b-3b audit F3: the seam does not carry ring_idx (thylacine_submit
+-    * ignores batch->ring_idx; tapestryd hardcodes the submit ring word to 0),
+-    * so a VkQueue bound to a nonzero timeline would be silently mis-attributed
+-    * + fenced on ring 0. Advertise a SINGLE timeline until the seam carries
+-    * ring_idx (lift both in the same commit at V-3b-3c): mask the host's
+-    * multi-timeline capability out of the retained capset and cap the count. */
++   /* Timelines (V-3b-3c-2b). The seam still does not carry ring_idx
++    * (thylacine_submit ignores batch->ring_idx; tapestryd hardcodes the submit
++    * ring word to 0), so multiple queues bound to distinct nonzero timelines
++    * would be mis-attributed + all fenced on ring 0 (V-3b-3b F3). But capping
++    * max_timeline_count to 1 is a LATENT BUG: vn_queue_init unconditionally
++    * calls vn_instance_acquire_ring_idx, which reserves ring 0 for the CPU
++    * timeline and hands a queue the first free index (1); with
++    * max_timeline_count==1 that index is rejected (>= count) and EVERY
++    * vkCreateDevice with a queue fails -- i.e. no device can be created at all.
++    * Allow exactly ONE queue timeline (ring 0 CPU + ring 1 queue): single-queue
++    * CREATION is sound (a 2nd queue's acquire returns -1 -> clean
++    * VK_ERROR_INITIALIZATION_FAILED, never a silent mis-fence). Single-queue
++    * SUBMIT fencing is NOT established here: GetDeviceQueue2 binds the queue to
++    * timeline 1 host-side while thylacine_submit drops ring_idx onto ring 0, and
++    * the ring-0 retirement semantics for a queue submission are unanalyzed. This
++    * allocate+map path creates the queue but never submits, so nothing here is
++    * reachable; the OWED F3 work is the full seam-carries-ring_idx fix AND that
++    * submit-fence analysis, landing with the GPU-submit chunk. */
+    tly->capset.data.supports_multiple_timelines = 0;
+ 
+    tly->next_sync_id = 1;
+-   tly->max_timeline_count = 1;
++   tly->max_timeline_count = 2;
+ 
+    thylacine_init_renderer_info(tly);
+ 
+-- 
+2.43.0
+

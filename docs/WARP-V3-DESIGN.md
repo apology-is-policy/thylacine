@@ -906,6 +906,68 @@ sketched; 20 pointers is the ground truth. Shared helpers reused verbatim:
     ("mint at vkAllocateMemory time, before any device use of mem_id"). Impl:
     tapestryd `54e2f334`. `memory/audit_v3b3c2a_closed_list.md`. The mesa backend
     bo_ops + the `vkAllocateMemory`+`vkMapMemory` E2E are V-3b-3c-2b (next).
+  - **V-3b-3c-2b -- the mesa vn_renderer device-memory bo_ops + the E2E.
+    AS-BUILT.** The three pre-wired bo_ops filled over the `mem/` ABI:
+    `create_from_device_memory` (page-rounds + guards <= 64 MiB, allocs a
+    client handle from a 256-slot `mem_bitmap`, `warp_mem_new`
+    "<bytes> <handle> <mem_id>" with blob_id = the Venus memory object id,
+    stores the bo in bo_array keyed by res_id); `bo_map` (lazy `warp_mem_map`
+    -> `t_weft_map`, cached -- the client holds no PCI handle, so weft not
+    SYS_BURROW_FROM_HOSTMEM); `bo_destroy` (unmap -> `warp_mem_destroy` -> free
+    the handle ONLY on a confirmed server retire, the two-sided invariant
+    mirroring the ring ridx -- a create-error handle stays marked, so a re-handed
+    handle can never collide with a still-installed server slot, the ring-F1
+    wedge class). Transport `warp_mem_{new,map,unmap,destroy}` mirror the ring
+    verbs. The F4 mint-eagerly contract is honored by construction: the driver
+    calls create_from_device_memory at vkAllocateMemory time for HOST_VISIBLE.
+    **Two masking-bug layers under the first vkCreateDevice ever run on real V3D**
+    (V-3b-3b stopped at instance): (1) `vk_icdGetInstanceProcAddr` returns mesa
+    LOADER dispatch trampolines (`vk_tramp_CreateDevice`: `ldr x4,[x0,#0x1380];
+    br x4`) built for the loader's object layout -- loader-less the
+    physical-device slot is null, so it tail-branches to `pc=0`. Fix: call the
+    Venus entrypoints directly by symbol (`extern vn_CreateDevice` /
+    `vn_AllocateMemory` / the 1.4 `vn_MapMemory2`/`vn_UnmapMemory2` /
+    `vn_FreeMemory` / `vn_DestroyDevice`), the loader-less pattern the prove
+    already used for the ICD entry. (2) `vn_instance_acquire_ring_idx` reserves
+    ring 0 for the CPU timeline and hands a queue index 1, rejected when
+    `>= max_timeline_count`; the V-3b-3b F3 cap of 1 made EVERY vkCreateDevice
+    with a queue impossible (a latent bug, not a safe default). Fix:
+    `max_timeline_count = 2` -- exactly one queue timeline; self-limiting (a 2nd
+    queue's acquire returns -1 -> clean VK_ERROR_INITIALIZATION_FAILED, never a
+    silent mis-fence). The F3 seam-carries-ring_idx fix stays OWED and gates a
+    second queue timeline (multi-queue SUBMIT), orthogonal to this allocate+map
+    path (creates the queue, never submits). Witnessed on thyla-pi/KVM real V3D
+    4.2.14 (probe-free clean build): `device-memory sentinel OK (zero-at-map +
+    c0deface round-tripped)` then `THYLACINE-VENUS-PROVE PASS ... V-3b-3c-2b` --
+    vkAllocateMemory -> create_from_device_memory -> warp_mem_new, vkMapMemory ->
+    bo_map -> t_weft_map, the backing observed ZERO at map (the server's
+    disclosure floor, a cross-boundary read through the weft mapping) before the
+    sentinel. Gate-wired (#245): the client witness `device-memory sentinel OK`
+    joined `venus-verdict` + `test-venus-verdict` (DISCRIMINATES 37/37) + the
+    boot-probe filter. **Audit** (holotype-reviewer Fable 5 max, MODEL(end)==Fable
+    5, I-45 client surface): **0 P0 / 2 P1 / 0 P2 / 1 P3, all fixed -- DIRTY,
+    re-audit owed on the fixes.** F1 [P1]: the F4 mint-before-device-use ordering
+    was NOT honored -- the driving Venus flow (`vn_device_memory.c`) defers
+    renderer-bo creation to first `vkMapMemory` for a plain HOST_VISIBLE type, so
+    the server's mint-time zeroing would destroy a GPU write landed between
+    allocate and first map; both the backend + server comments asserted the
+    opposite; the E2E is structurally blind (maps immediately, no GPU work). Fix:
+    a new `vn_renderer_info.bo_must_init_at_alloc` bit -> `vn_device_memory`
+    reifies the bo (and so the mint) at vkAllocateMemory for HOST_VISIBLE
+    (alloc_export's eager tail); the ordering witness needs a GPU submit and lands
+    with the GPU-submit chunk. F2 [P1]: every refused mint permanently burned a
+    handle, and for mem the dominant refusal is the routine E_NOMEM at the 64 MiB
+    holistic cap -> <=256 refusals wedged vkAllocateMemory for the instance's
+    life. Fix: `warp_mem_new` is three-valued (1 = slot provably NOT installed ->
+    free the handle; -1 = maybe installed -> keep marked); the backend frees on
+    the not-installed arm. F3 [P3]: the timeline comment overclaimed single-queue
+    submit-fence soundness (creation is sound; submit fencing is owed-F3) ->
+    reworded. 18 items verified sound (token order, mem_bitmap, forward two-sided
+    invariant, no anonymous-map masking, ...). Re-witnessed GREEN post-fix
+    (reify-at-alloc does not regress the E2E). Mesa 6 files (the F1 fix touches
+    `vn_device_memory.c` + `vn_renderer.h` -- otherwise the core Venus driver is
+    untouched); impl mesa `2c742991` (patch 0013, round-trip `41ee6252`).
+    `memory/audit_v3b3c2b_closed_list.md`.
 - **V-3b-3d -- the Vulkan prove-gate on thyla-pi (real V3D).** A headless
   compute/clear + fenced readback through the full stack; `virgl_prove.c` template
   + a new `warp-host.sh venus`/`vk` verb; renderer-identity discrimination (assert

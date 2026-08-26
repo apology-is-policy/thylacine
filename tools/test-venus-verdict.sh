@@ -49,6 +49,7 @@ tapestryd: gpu hostmem-ring MAPPED+ROUNDTRIP x2 (off_a=0x0 off_b=0x1000 cache=CA
 tapestryd: warp host3d-ring venus-ctx=512 MAPPED+ROUNDTRIP refcount=1 teardown OK
 tapestryd: warp ring-recreate ridx-reuse OK (destroy -> re-mint ridx 0)
 tapestryd: warp mem-recreate handle-reuse OK (alloc -> sentinel -> destroy -> re-alloc handle 0)
+venus-prove: device-memory sentinel OK (type 0 size 4096, zero-at-map + c0deface round-tripped)
 EOF
 }
 
@@ -132,6 +133,20 @@ check "test leg shows mem-recreate FAIL (slot not freed) -> UNVERIFIED" 1 "" \
       'sed "s/warp mem-recreate handle-reuse OK.*/warp mem-recreate FAIL (sentinel=true destroyed=true slot_freed=false remint_ok=false)/" "$t" > "$t.x" && mv "$t.x" "$t"'
 check "control leg ALSO sees mem-recreate handle-reuse -> UNVERIFIED" 1 \
       'printf "tapestryd: warp mem-recreate handle-reuse OK (alloc -> sentinel -> destroy -> re-alloc handle 0)\n" >> "$c"' ""
+# V-3b-3c-2b: the CLIENT device-memory E2E witness. "device-memory sentinel OK"
+# is emitted by thylacine-venus-prove ONLY when the full HOST_VISIBLE
+# vkAllocateMemory+vkMapMemory path succeeds (zero-at-map + sentinel round-trip)
+# over the mesa vn_renderer device-memory bo_ops; a sentinel mismatch or a
+# disclosure-floor breach emits the prove's FAIL form instead. Two test-leg arms
+# (absent, replaced-by-FAIL) prove the gate keys on the verdict, not the token;
+# the control-leg arm proves it stays venus-scoped (the control device stubs the
+# instance, so the prove reports ABSENT and the line is absent).
+check "test leg lacks device-memory sentinel OK -> UNVERIFIED" 1 "" \
+      'grep -v "device-memory sentinel OK" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg shows device-memory sentinel MISMATCH -> UNVERIFIED" 1 "" \
+      'sed "s/venus-prove: device-memory sentinel OK.*/THYLACINE-VENUS-PROVE FAIL: device-memory sentinel mismatch (wrote c0deface\/3f210531 read 00000000\/00000000)/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO sees device-memory sentinel OK -> UNVERIFIED" 1 \
+      'printf "venus-prove: device-memory sentinel OK (type 0 size 4096, zero-at-map + c0deface round-tripped)\n" >> "$c"' ""
 # One variable away, each direction of the discrimination the gate claims.
 check "control leg ALSO sees id=4 -> UNVERIFIED" 1 \
       'printf "tapestryd: gpu capset[2] id=4 max_version=0 max_size=160\n" >> "$c"' ""
