@@ -271,14 +271,16 @@ void test_vivarium_no_wide_alias(void) {
 // x0. The bare-u32 form is exercised separately -- both must be recognised.
 #define VIV_T_ATCWD ((u64)(s64)VIV_AT_FDCWD)
 
-static void viv_expect_open_cx(u64 dirfd, u64 flags, u32 want_omode,
-                               bool want_cloexec, const char *what) {
+static void viv_expect_open_full(u64 dirfd, u64 flags, u32 want_omode,
+                                 bool want_cloexec, bool want_dirreq,
+                                 const char *what) {
     u64  start_fd = 0xBADu;
     u32  omode    = 0xBADu;
     bool cloexec  = true;   // poison: every case below must OVERWRITE this
+    bool dirreq   = true;   // poison, same rule (the getdents64 chunk's output)
 
     TEST_EXPECT_EQ((int)vivarium_openat_decide(dirfd, flags, &start_fd, &omode,
-                                               &cloexec),
+                                               &cloexec, &dirreq),
                    (int)VIV_TRANSLATED, what);
     TEST_EXPECT_EQ(start_fd, SYS_WALK_OPEN_FROM_ROOT, "AT_FDCWD -> FROM_ROOT");
     TEST_EXPECT_EQ((u64)omode, (u64)want_omode, what);
@@ -287,12 +289,21 @@ static void viv_expect_open_cx(u64 dirfd, u64 flags, u32 want_omode,
     // of the resulting descriptor. Asserting it on every translated case is what
     // keeps a future flag admission from quietly turning the bit on or off.
     TEST_EXPECT_EQ((u64)(cloexec ? 1 : 0), (u64)(want_cloexec ? 1 : 0), what);
+    // The same per-case rule for O_DIRECTORY: every translated case pins the
+    // requirement bit, so an admission cannot quietly assert (or drop) it.
+    TEST_EXPECT_EQ((u64)(dirreq ? 1 : 0), (u64)(want_dirreq ? 1 : 0), what);
 
     // Whatever the map produces must be an omode SYS_OPEN will actually accept.
     // Asserting this for EVERY translated case (rather than eyeballing the
     // constants) is what makes a future flag admission safe to add.
     TEST_EXPECT_EQ((u64)(omode & ~SYS_WALK_OPEN_OMODE_VALID), (u64)0,
                    "the emitted omode is inside SYS_WALK_OPEN_OMODE_VALID");
+}
+
+static void viv_expect_open_cx(u64 dirfd, u64 flags, u32 want_omode,
+                               bool want_cloexec, const char *what) {
+    viv_expect_open_full(dirfd, flags, want_omode, want_cloexec,
+                         /*want_dirreq=*/false, what);
 }
 
 static void viv_expect_open(u64 dirfd, u64 flags, u32 want_omode,
@@ -304,9 +315,10 @@ static void viv_expect_open_forwards(u64 flags, const char *what) {
     u64  start_fd = 0xBADu;
     u32  omode    = 0xBADu;
     bool cloexec  = true;
+    bool dirreq   = true;
 
     TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, flags, &start_fd,
-                                               &omode, &cloexec),
+                                               &omode, &cloexec, &dirreq),
                    (int)VIV_FORWARD, what);
     // A declined call must leave the outputs alone: a caller that forwards but
     // reads them anyway must not find a plausible-looking omode waiting.
@@ -314,6 +326,8 @@ static void viv_expect_open_forwards(u64 flags, const char *what) {
     TEST_EXPECT_EQ((u64)omode, (u64)0xBADu, "a forwarded openat leaves omode alone");
     TEST_EXPECT_EQ((u64)(cloexec ? 1 : 0), (u64)1,
                    "a forwarded openat leaves cloexec alone");
+    TEST_EXPECT_EQ((u64)(dirreq ? 1 : 0), (u64)1,
+                   "a forwarded openat leaves dir_required alone");
 }
 
 void test_vivarium_openat_domain(void) {
@@ -372,8 +386,24 @@ void test_vivarium_openat_domain(void) {
     // each is pinned by name.
     viv_expect_open_forwards(VIV_O_WRONLY | VIV_O_CREAT,
                              "O_CREAT forwards (SYS_OPEN cannot create)");
-    viv_expect_open_forwards(VIV_O_RDONLY | VIV_O_DIRECTORY,
-                             "O_DIRECTORY forwards (no is-a-dir check to honour)");
+    // getdents64 chunk: O_DIRECTORY INVERTED from its V-2b reject (the
+    // O_NOFOLLOW precedent -- the blocker was real until the mechanism
+    // landed): it now TRANSLATES with dir_required reported for the SHELL's
+    // postcondition (ENOTDIR on a non-directory, checked on the minted
+    // handle's own qid). The bit itself must NOT reach the omode. musl
+    // opendir (O_RDONLY|O_CLOEXEC|O_DIRECTORY) is the forcing caller.
+    viv_expect_open_full(VIV_T_ATCWD, VIV_O_RDONLY | VIV_O_DIRECTORY, 0u,
+                         /*want_cloexec=*/false, /*want_dirreq=*/true,
+                         "O_DIRECTORY translates as the dir_required output");
+    viv_expect_open_full(VIV_T_ATCWD,
+                         VIV_O_RDONLY | VIV_O_CLOEXEC | VIV_O_DIRECTORY, 0u,
+                         /*want_cloexec=*/true, /*want_dirreq=*/true,
+                         "the exact musl-opendir flag set translates");
+    viv_expect_open_full(VIV_T_ATCWD, VIV_O_PATH | VIV_O_DIRECTORY,
+                         SYS_WALK_OPEN_OPATH,
+                         /*want_cloexec=*/false, /*want_dirreq=*/true,
+                         "O_PATH|O_DIRECTORY keeps the requirement (one of "
+                         "the three flags O_PATH does not ignore)");
     viv_expect_open_forwards(VIV_O_WRONLY | VIV_O_APPEND,
                              "O_APPEND forwards (no append mode in omode)");
     // D-1: the V-2b reject INVERTED on the day its own rationale predicted --
@@ -397,18 +427,21 @@ void test_vivarium_openat_domain(void) {
                              "accmode 3 forwards (Linux EINVAL; not ours to mint)");
 
     // Fail toward the supervisor on a bad call site, never toward a dispatch.
-    // Each output is nulled in turn, not just all three at once: a guard that
-    // checked only the first two would pass an all-NULL test and then write
-    // through a NULL cloexec_out for a caller that supplied the other two.
-    u64  s = 0; u32 o = 0; bool cx = false;
-    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, NULL, NULL, NULL),
+    // Each output is nulled in turn, not just all four at once: a guard that
+    // checked only the first three would pass an all-NULL test and then write
+    // through a NULL dir_required_out for a caller that supplied the others.
+    u64  s = 0; u32 o = 0; bool cx = false, dr = false;
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, NULL, NULL, NULL,
+                                               NULL),
                    (int)VIV_FORWARD, "NULL outputs -> FORWARD, never TRANSLATED");
-    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, NULL, &o, &cx),
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, NULL, &o, &cx, &dr),
                    (int)VIV_FORWARD, "NULL start_fd_out alone -> FORWARD");
-    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, &s, NULL, &cx),
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, &s, NULL, &cx, &dr),
                    (int)VIV_FORWARD, "NULL omode_out alone -> FORWARD");
-    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, &s, &o, NULL),
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, &s, &o, NULL, &dr),
                    (int)VIV_FORWARD, "NULL cloexec_out alone -> FORWARD");
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, &s, &o, &cx, NULL),
+                   (int)VIV_FORWARD, "NULL dir_required_out alone -> FORWARD");
 }
 
 void test_vivarium_openat_at_fdcwd(void) {
@@ -430,14 +463,15 @@ void test_vivarium_openat_at_fdcwd(void) {
     u64  start_fd = 0xBADu;
     u32  omode    = 0xBADu;
     bool cloexec  = false;
+    bool dirreq   = false;
     TEST_EXPECT_EQ((int)vivarium_openat_decide(3, VIV_O_RDONLY, &start_fd, &omode,
-                                               &cloexec),
+                                               &cloexec, &dirreq),
                    (int)VIV_FORWARD, "a real dirfd forwards (handle state, not a gap)");
 
     // Only the LOW 32 BITS are significant -- `dirfd` is an `int`. A high-half
     // value that is not AT_FDCWD in its low word must not be mistaken for one.
     TEST_EXPECT_EQ((int)vivarium_openat_decide(0x1234567800000003ull, VIV_O_RDONLY,
-                                               &start_fd, &omode, &cloexec),
+                                               &start_fd, &omode, &cloexec, &dirreq),
                    (int)VIV_FORWARD, "the high half of dirfd is not consulted");
 }
 
@@ -3765,4 +3799,77 @@ void test_vivarium_renameat_domain(void) {
                 "a real old dirfd declines");
     TEST_ASSERT(vivarium_renameat_decide(FDCWD_SX, 3, 0) == VIV_FORWARD,
                 "a real new dirfd declines");
+}
+
+// =============================================================================
+// The getdents64 chunk: the 9P-dirent -> linux_dirent64 re-encode, pinned as
+// a PURE byte transform (the format row a real busybox `ls` stands on; the
+// E2E witnesses the whole shell, this pins the layout math).
+// =============================================================================
+
+extern u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
+                                   u8 *dst, u64 dst_cap, u64 *last_cookie_out);
+
+// Append one 9P2000.L dirent (qid.type/qid.path + cookie + d_type + name) at
+// *pos; qid.version is zeroed (the encode never reads it).
+static void gd_put(u8 *b, u64 *pos, u8 qtype, u64 qpath, u64 cookie,
+                   u8 dtype, const char *name) {
+    u64 p = *pos;
+    u32 nlen = 0; while (name[nlen]) nlen++;
+    b[p] = qtype;
+    for (int i = 0; i < 4; i++) b[p + 1 + i] = 0;
+    for (int i = 0; i < 8; i++) b[p + 5 + i]  = (u8)(qpath  >> (8 * i));
+    for (int i = 0; i < 8; i++) b[p + 13 + i] = (u8)(cookie >> (8 * i));
+    b[p + 21] = dtype;
+    b[p + 22] = (u8)(nlen & 0xFF);
+    b[p + 23] = (u8)(nlen >> 8);
+    for (u32 i = 0; i < nlen; i++) b[p + 24 + i] = (u8)name[i];
+    *pos = p + 24 + nlen;
+}
+
+static u64 gd_rd64(const u8 *b) {
+    u64 v = 0;
+    for (int i = 0; i < 8; i++) v |= (u64)b[i] << (8 * i);
+    return v;
+}
+
+void test_vivarium_dirent64_encode(void);
+void test_vivarium_dirent64_encode(void) {
+    u8 src[256]; u64 sl = 0;
+    // "notes" (5 chars) exercises the WORST alignment case (align8(20+5)=32,
+    // pad 7); "a" the short case. qid.path values are distinct sentinels.
+    gd_put(src, &sl, 0x00, 0x1111, 101, 8 /*DT_REG*/, "notes");
+    gd_put(src, &sl, 0x80, 0x2222, 102, 4 /*DT_DIR*/, "a");
+
+    u8 dst[128]; u64 ck = 0;
+    u64 n = viv_dirent64_encode_run(src, sl, dst, sizeof(dst), &ck);
+    // reclen("notes") = align8(19+5+1) = 32; reclen("a") = align8(19+1+1) = 24.
+    TEST_EXPECT_EQ(n, (u64)(32 + 24), "two records, aligned sizes");
+    TEST_EXPECT_EQ(ck, (u64)102, "last cookie = the second entry's");
+    TEST_EXPECT_EQ(gd_rd64(dst + 0), (u64)0x1111, "d_ino <- qid.path");
+    TEST_EXPECT_EQ(gd_rd64(dst + 8), (u64)101, "d_off <- the entry's cookie");
+    TEST_EXPECT_EQ((u64)(dst[16] | (dst[17] << 8)), (u64)32, "d_reclen");
+    TEST_EXPECT_EQ((u64)dst[18], (u64)8, "d_type passes through");
+    TEST_ASSERT(dst[19] == 'n' && dst[23] == 's' && dst[24] == '\0',
+                "d_name + NUL");
+    TEST_ASSERT(dst[25] == 0 && dst[31] == 0, "alignment pad is zeroed");
+    TEST_EXPECT_EQ(gd_rd64(dst + 32), (u64)0x2222, "second record follows");
+    TEST_EXPECT_EQ((u64)dst[32 + 18], (u64)4, "second d_type (DT_DIR)");
+
+    // Partial fit: room for record 1 only -> stops there, cookie anchors the
+    // resume at the FIRST UNCONSUMED entry (the caller commits the cursor to
+    // exactly this, so nothing is skipped and nothing re-delivered).
+    ck = 0;
+    n = viv_dirent64_encode_run(src, sl, dst, 40, &ck);
+    TEST_EXPECT_EQ(n, (u64)32, "partial fit emits whole records only");
+    TEST_EXPECT_EQ(ck, (u64)101, "partial-fit cookie = last EMITTED entry's");
+
+    // First record does not fit -> 0 emitted (the shell's EINVAL row).
+    n = viv_dirent64_encode_run(src, sl, dst, 31, &ck);
+    TEST_EXPECT_EQ(n, (u64)0, "no room for one record emits nothing");
+
+    // A truncated source tail is not emitted (the run guard's twin).
+    n = viv_dirent64_encode_run(src, sl - 1, dst, sizeof(dst), &ck);
+    TEST_EXPECT_EQ(n, (u64)32, "a truncated trailing source entry is dropped");
+    TEST_EXPECT_EQ(ck, (u64)101, "its cookie is not consumed");
 }

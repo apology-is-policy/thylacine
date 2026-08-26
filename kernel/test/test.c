@@ -755,6 +755,7 @@ void test_vivarium_openat_create_domain(void);
 void test_vivarium_mkdirat_domain(void);
 void test_vivarium_unlinkat_domain(void);
 void test_vivarium_renameat_domain(void);
+void test_vivarium_dirent64_encode(void);
 void test_vivarium_sendrecv_domain(void);
 void test_vivarium_sockaddr(void);
 void test_vivarium_net_cmd(void);
@@ -2419,6 +2420,7 @@ struct test_case g_tests[] = {
     { "vivarium.mkdirat_domain",       test_vivarium_mkdirat_domain,       false, NULL },
     { "vivarium.unlinkat_domain",      test_vivarium_unlinkat_domain,      false, NULL },
     { "vivarium.renameat_domain",      test_vivarium_renameat_domain,      false, NULL },
+    { "vivarium.dirent64_encode",      test_vivarium_dirent64_encode,      false, NULL },
     { "vivarium.sockaddr",             test_vivarium_sockaddr,             false, NULL },
     { "vivarium.net_cmd",              test_vivarium_net_cmd,              false, NULL },
     { "vivarium.conn_n",               test_vivarium_conn_n,               false, NULL },

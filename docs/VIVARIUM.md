@@ -2548,6 +2548,77 @@ lock — the only serialization is the 9P client's existing per-RPC order.
 (trivial fd delegation) are the follow-on chunk; `faccessat`(48) is measured
 at git time before deciding.
 
+### 6.25 Tier 2 — `getdents64` (61) + `fsync`/`fdatasync` (82/83) + the `O_DIRECTORY` admission (the §6.24 follow-on; as-built 2026-08-26)
+
+The three rows §6.24 named "deliberately next". The forcing consumer is
+unchanged (git: `readdir` over `.git/objects`, `core.fsync` paths), and the
+first blocker is upstream of the rows themselves: **musl's `opendir` opens with
+`O_RDONLY|O_DIRECTORY|O_CLOEXEC`, so while `O_DIRECTORY` stayed on the V-2b
+reject list, `getdents64` was unreachable** — every `ls`/`readdir` died at the
+`openat` before the new row could matter.
+
+**`O_DIRECTORY` — admitted as a decide OUTPUT, enforced by the shell.** The
+plain-open decide gains a fourth output, `dir_required` (written only on
+TRANSLATED — the forwards-leave-outputs-alone contract; a NULL out-pointer is
+permitted). The openat shell enforces it as a **postcondition on the minted
+Spoor's own qid**: after the open lands, `sys_lookup_spoor` + `QTDIR` check →
+on a non-directory, `handle_close` + `ENOTDIR`. No extra RPC and no TOCTOU —
+the qid examined is the one the open itself returned, not a re-resolve. The
+create decide still declines the flag (`O_CREAT|O_DIRECTORY` is contradictory
+on Linux in exactly the way the decline reports), and the §6.20 rejected-flags
+narrative carries the row's RETIRED note (the `O_NOFOLLOW` pattern).
+
+**`getdents64` (61) — a pure format row on the existing readdir mechanics.**
+The native handler's core is extracted as `spoor_readdir_run` with a
+**no-offset-advance contract**: the helper reads raw 9P dirents into a caller
+buffer and reports the last cookie, and each caller commits `c->offset` only
+after its own copy-out succeeds — so a faulting user buffer cannot advance the
+cursor (the F3 fault property; the native `sys_readdir_handler` keeps identical
+behavior through the same helper). The phenotype arm then runs a pure
+transform, `viv_dirent64_encode_run`: 9P dirent → `linux_dirent64` with
+`d_ino ← qid.path`, `d_off ← the resume cookie`, `d_type` passed through
+verbatim (9P and Linux share the DT numbering), `d_reclen` 8-aligned
+`19 + namelen + 1`. Whole records only: the encoder stops at the first no-fit
+and reports the last **emitted** cookie, so the committed cursor never points
+past what the guest actually received. Buffer split 2048 raw → 2560 encoded;
+the worst-case growth ratio is `align8(20+n)/(24+n)` at `n == 5` (32/29), and
+`2048 × 32/29 = 2260 < 2560`, so the encode can never overrun. Contour rows:
+`count == 0 → EINVAL`, no-`RIGHT_READ` fd → `EBADF`, a non-QTDIR qid →
+`ENOTDIR`, and a first-record no-fit (`emitted == 0` with raw bytes in hand)
+→ `EINVAL` — each Linux's own answer.
+
+**`fsync` (82) / `fdatasync` (83) — T2 shells with an explicit datasync
+argument.** Both route to the native `sys_fsync_handler(fd, datasync)`; the
+shell passes the datasync bit **explicitly** because a T1 renumber would copy
+the six argument words verbatim and the native handler would read garbage in
+x1. Divergence, documented not silent: the native gate requires `RIGHT_WRITE`,
+so an `fsync` on an `O_RDONLY` fd answers `EBADF` where Linux syncs — git
+milestone A runs `core.fsync=none`, and the row is revisited if a consumer
+actually syncs read-only fds.
+
+**Errno rollouts on the shared native handlers** (the boundary rule: a bare
+`-1` crosses the viv boundary as a fabricated `EPERM`): `sys_readdir_handler`
+now answers `-T_E_BADF` (CWALKONLY fd), `-T_E_OPNOTSUPP` (no readdir slot),
+`-T_E_IO` (malformed server dirent), and passes dev errors verbatim;
+`sys_fsync_handler` answers `-T_E_BADF` / `-T_E_OPNOTSUPP` for its two
+formerly-bare rows.
+
+**The E2E gained the getdents64 leg — and the leg's ^C neighbor got its race
+fixed.** `viv-run.exp`'s pts block now runs `ls /tmp/d50 | tr a-z A-Z` → `G50`
+(busybox `ls` → musl `readdir` → the 61 row, as a plain user). Adding that 4th
+leg deterministically re-timed the following ^C leg into a failure that a
+counter-instrumented hunt (2026-08-26) ran to ground: the ^C was being sent
+the instant leg 4's output matched, landing inside busybox-ash's reap window
+where the shell still holds `SIGINT=SIG_IGN` — and the §6.19 V-6b ignore-drop
+then discards the note at post time, exactly as Linux discards a
+generated-while-ignored signal. The scenario now settles before the ^C
+(enforcing the leg's stated "^C at the ash prompt" precondition), and the hunt
+**measured the whole caught-note chain live** on the way: fan → arm → wake of
+the parked elected 9P reader → `SLEEP_NOTEINTR` → `CLIENT_WAIT_NOTEINTR` →
+`EINTR` → handler → prompt (the wake-of-a-parked-reader leg had never been
+exercised before). No kernel defect; the byte-level capture showed ash's read
+returning the post-^C line intact.
+
 ---
 
 ## 7. The vivarium — the container runner

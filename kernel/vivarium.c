@@ -250,6 +250,14 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_UNLINKAT,   VIV_TIER2   },  // #50: vivarium_unlinkat_decide
     { VIV_LINUX_RENAMEAT,   VIV_TIER2   },  // #50: vivarium_renameat_decide
     { VIV_LINUX_RENAMEAT2,  VIV_TIER2   },  // #50: same decide, flags==0 only
+    // The directory-read + durability rows (section 6.25). getdents64 is the
+    // 9P-dirent -> linux_dirent64 re-encode over the SAME spoor_readdir_run
+    // the native SYS_READDIR runs; fsync/fdatasync delegate to the native
+    // fsync core with an explicit datasync 0/1 (never a stale register).
+    // 61/82/83 sit below the ceiling; damage-envelope paragraphs in vivarium.h.
+    { VIV_LINUX_GETDENTS64, VIV_TIER2   },  // getdents64(fd, dirp, count)
+    { VIV_LINUX_FSYNC,      VIV_TIER2   },  // fsync(fd)     -> datasync=0
+    { VIV_LINUX_FDATASYNC,  VIV_TIER2   },  // fdatasync(fd) -> datasync=1
     { VIV_LINUX_FSTAT,      VIV_TIER2   },  // V-2b: vivarium_stat_to_linux
     { VIV_LINUX_NEWFSTATAT, VIV_TIER2   },  // V-2c: vivarium_fstatat_decide
     { VIV_LINUX_MMAP,       VIV_TIER2   },  // V-2d: vivarium_mmap_decide
@@ -546,6 +554,14 @@ enum {
 //   O_DIRECTORY  Requires the target BE a directory (Linux: ENOTDIR otherwise).
 //                SYS_OPEN has no such check, so ignoring it turns an error into
 //                a successful open of a regular file. The worst kind of wrong.
+//                RETIRED as a reject at the getdents64 chunk (the O_NOFOLLOW
+//                pattern: the blocker was real until the mechanism landed):
+//                the decide now TRANSLATES it as the dir_required output and
+//                the SHELL enforces the postcondition on the minted handle's
+//                own qid -- the error Linux promises, produced at the layer
+//                that can see the answer. The CREATE arm still declines it
+//                (not in its admitted set; open(O_CREAT|O_DIRECTORY) stays
+//                census-visible).
 //   O_APPEND     Every write must seek to end. SYS_OPEN's omode mask has no
 //                append bit; ignoring it silently corrupts a log writer.
 //   O_EXCL, O_NONBLOCK, O_SYNC/O_DSYNC, O_DIRECT, O_NOATIME, O_TMPFILE, O_ASYNC
@@ -555,9 +571,14 @@ enum {
 
 enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
                                         u64 *start_fd_out, u32 *omode_out,
-                                        bool *cloexec_out) {
+                                        bool *cloexec_out,
+                                        bool *dir_required_out) {
     // Fail toward the supervisor, never toward a dispatch (cf. vivarium_translate).
-    if (!start_fd_out || !omode_out || !cloexec_out) return VIV_FORWARD;
+    if (!start_fd_out || !omode_out || !cloexec_out ||
+        !dir_required_out)                           return VIV_FORWARD;
+    bool dirreq = false;   // written to *dir_required_out only on TRANSLATED
+                           // (a forwarded call leaves every output alone --
+                           // the contract the domain test enforces per-output)
 
     // Linux passes `dirfd` and `flags` as `int`, so ONLY the low 32 bits are
     // significant. This matters concretely for AT_FDCWD: a caller may leave x0
@@ -602,6 +623,19 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
     if (fl & VIV_O_CREAT) {
         if (!(fl & VIV_O_PATH)) return VIV_FORWARD;
         fl &= ~(u32)VIV_O_CREAT;
+    }
+
+    // getdents64 chunk: O_DIRECTORY translates as a SHELL-ENFORCED
+    // postcondition, not an ignore (ignoring it would turn Linux's ENOTDIR
+    // into a successful open of a regular file -- the exact V-2b hazard).
+    // The decide reports the requirement; the shell checks the minted
+    // handle's own qid (QTDIR) and answers ENOTDIR on a miss. One of the
+    // three flags Linux's O_PATH does NOT ignore, so it rides both arms.
+    // musl opendir (open O_RDONLY|O_CLOEXEC|O_DIRECTORY) is the forcing
+    // caller -- without this arm no phenotype ever reaches getdents64.
+    if (fl & VIV_O_DIRECTORY) {
+        dirreq = true;
+        fl &= ~(u32)VIV_O_DIRECTORY;
     }
 
     if (fl & ~VIV_OPENAT_ADMITTED) return VIV_FORWARD;
@@ -652,6 +686,10 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
     // ignore, alongside O_DIRECTORY and O_NOFOLLOW), and the flag belongs to the
     // descriptor, which an O_PATH open produces like any other.
     *cloexec_out  = (fl & VIV_O_CLOEXEC) != 0;
+    // getdents64 chunk: the O_DIRECTORY requirement, enforced by the SHELL as
+    // a postcondition on the minted handle (the decide cannot see the object;
+    // the arm above stripped the bit so the omode never carries it).
+    *dir_required_out = dirreq;
     return VIV_TRANSLATED;
 }
 

@@ -329,6 +329,31 @@ enum {
     VIV_LINUX_UNLINKAT  = 35,
     VIV_LINUX_RENAMEAT  = 38,
     VIV_LINUX_RENAMEAT2 = 276,
+
+    // The directory-read + durability rows (the getdents64/fsync chunk;
+    // VIVARIUM.md section 6.25). All three are BELOW the native ceiling and
+    // all three are FD-BASED -- no AT_FDCWD gate exists to refuse a
+    // mis-declared native caller on shape, so each per-number paragraph rests
+    // on the DAMAGE ENVELOPE instead (the pipe2-row standard: the caller's
+    // own things, never authority). The shared first half is unchanged: a
+    // PHENO_LINUX Proc cannot reach a native number at all.
+    //
+    //   61  vs SYS_CAP_GRANT_CLEARANCE. getdents64 reads args[0] as an fd:
+    //       the shell looks it up in the CALLER'S OWN handle table
+    //       (RIGHT_READ KOBJ_SPOOR) and either answers EBADF/ENOTDIR or
+    //       enumerates a directory the caller already holds open, writing
+    //       into the caller's OWN buffer VA. Enumeration of an already-held
+    //       handle mints nothing and crosses no boundary.
+    //   82  vs SYS_WEFT_MAP(data_fd, hint_va). fsync reads args[0] as an fd
+    //       and flushes a file the caller already holds RIGHT_WRITE on --
+    //       a durability barrier on the caller's own object; hint_va is
+    //       never read (the shell passes an explicit datasync=0).
+    //   83  vs SYS_BURROW_ATTACH_LAZY(length). fdatasync likewise: a length
+    //       that happens to collide with a small fd index at most flushes
+    //       the caller's own file; anything else is EBADF.
+    VIV_LINUX_GETDENTS64 = 61,
+    VIV_LINUX_FSYNC      = 82,
+    VIV_LINUX_FDATASYNC  = 83,
 };
 
 // The highest ASSIGNED native Thylacine syscall number. Every vivarium row
@@ -457,9 +482,21 @@ enum {
 // discarded, on a rationale ("Thylacine has nothing to opt out of") that was
 // true when written and was voided by LINEAGE: execve now preserves the handle
 // table and fork copies it, so an fd without the flag really does cross exec.
+//
+// getdents64 chunk: `dir_required_out` reports O_DIRECTORY -- the target MUST
+// be a directory (Linux: ENOTDIR otherwise; one of the three flags O_PATH
+// does not ignore). SYS_OPEN has no such check, so the flag is a FOURTH
+// output the SHELL enforces as a postcondition on the minted handle (its
+// Spoor's own qid answers QTDIR with no extra RPC; a non-directory closes the
+// fd and answers ENOTDIR). It cannot ride the omode (no SYS_OPEN bit exists)
+// and translating it as an ignore would turn Linux's error into a successful
+// open of a regular file -- the V-2b reject this output retires. musl's
+// opendir is the forcing caller: open(name, O_RDONLY|O_CLOEXEC|O_DIRECTORY)
+// gates every getdents64.
 enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
                                         u64 *start_fd_out, u32 *omode_out,
-                                        bool *cloexec_out);
+                                        bool *cloexec_out,
+                                        bool *dir_required_out);
 
 // Assemble the SYS_OPEN call from a decision plus a caller-measured path length.
 // Trivial by design — its value is that SYS_OPEN's argument ORDER is stated in

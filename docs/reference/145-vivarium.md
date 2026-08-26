@@ -3342,3 +3342,74 @@ inside the phenotype ash as a PLAIN USER on a pts. Native: libthyla-rs
 `open_create_at_path` + `create_dir` rewired onto `t_open_create` (every
 `File::create` caller adopted through one function; the stale create-first
 rationale retired).
+
+## getdents64 + fsync/fdatasync + O_DIRECTORY (the 6.24 follow-on; aux, 2026-08-26)
+
+Design: `VIVARIUM.md` section 6.25. Three Tier-2 rows — `getdents64`(61) +
+`fsync`(82)/`fdatasync`(83) — plus the `O_DIRECTORY` admission that unblocks
+them (musl's `opendir` opens `O_RDONLY|O_DIRECTORY|O_CLOEXEC`; while the flag
+sat on the V-2b reject list, `getdents64` was unreachable).
+
+### The mechanism
+
+- `spoor_readdir_run` (`kernel/syscall.c`) — the readdir core extracted from
+  `sys_readdir_handler` with a NO-offset-advance contract: the helper reads
+  raw 9P dirents + reports the last cookie; each caller commits `c->offset`
+  only after its own copy-out (a faulting user buffer never advances the
+  cursor — the F3 fault property). Errno rollout on the shared handler:
+  `-T_E_BADF` (CWALKONLY) / `-T_E_OPNOTSUPP` (no slot) / `-T_E_IO` (malformed
+  dirent) / dev errors verbatim.
+- `viv_dirent64_encode_run` (`kernel/syscall.c`, non-static: unit-tested) —
+  the pure 9P-dirent -> `linux_dirent64` transform: `d_ino <- qid.path`,
+  `d_off <- resume cookie`, `d_type` verbatim (shared DT numbering),
+  `d_reclen` = align8(19 + namelen + 1). Whole records only; stops at the
+  first no-fit; reports the last EMITTED cookie (the committed cursor never
+  passes what the guest received); returns 0 when the first record does not
+  fit (the caller's EINVAL row).
+- The `VIV_LINUX_GETDENTS64` arm — 2048-byte raw / 2560-byte encode stack
+  buffers (worst growth align8(20+n)/(24+n) at n==5 = 32/29; 2048*32/29 =
+  2260 < 2560, no overrun); `count==0 -> EINVAL`; no-RIGHT_READ -> EBADF;
+  non-QTDIR -> ENOTDIR; emitted==0 with raw bytes -> EINVAL.
+- `vivarium_openat_decide` gained `bool *dir_required_out` (NULL permitted;
+  written only on TRANSLATED). The openat shell enforces it as a
+  postcondition on the MINTED Spoor's own qid (`sys_lookup_spoor` -> QTDIR ->
+  on miss `handle_close` + `-T_E_NOTDIR`) — no extra RPC, no TOCTOU. The
+  create decide still declines `O_DIRECTORY`.
+- `VIV_LINUX_FSYNC`/`FDATASYNC` — T2 shells onto `sys_fsync_handler(fd,
+  datasync)` with the datasync bit passed EXPLICITLY (a T1 renumber would
+  read garbage x1). `sys_fsync_handler` errno rollout: `-T_E_BADF` /
+  `-T_E_OPNOTSUPP` (both formerly bare `-1` = fabricated EPERM across the
+  boundary).
+
+### Degradations (documented, none silent-wrong)
+
+- `fsync` on an `O_RDONLY` fd answers EBADF (the native RIGHT_WRITE gate)
+  where Linux syncs — git milestone A runs `core.fsync=none`; revisit on a
+  real rdonly-sync consumer.
+- The number rows carry damage-envelope collision paragraphs in `vivarium.h`
+  (61 vs SYS_CAP_GRANT_CLEARANCE, 82 vs SYS_WEFT_MAP, 83 vs
+  SYS_BURROW_ATTACH_LAZY — all fd-based, caller's-own-things envelope).
+
+### Witnesses
+
+Kernel: `vivarium.dirent64_encode` (two-record layout, partial-fit cookie,
+first-no-fit 0, truncated-tail drop) + the O_DIRECTORY domain assertions
+(plain, the musl-opendir flag set, `O_PATH|O_DIRECTORY`) + the 5-way NULL
+guard on the decide outputs. E2E: viv-run's 4th leg (`ls /tmp/d50` -> `G50`:
+busybox ls -> musl readdir -> the 61 row, as a plain user).
+
+### The E2E ^C leg — the settle is load-bearing (the 2026-08-26 hunt)
+
+Adding the 4th leg deterministically re-timed the following ^C leg into a
+failure whose counter-instrumented hunt exonerated the kernel at every link:
+a ^C sent the instant the prior leg's output matches lands inside
+busybox-ash's reap window (the shell still holds SIGINT=SIG_IGN), and the
+V-6b ignore-drop discards the note at post time — Linux's own semantics for
+a generated-while-ignored signal. The scenario now settles before the ^C.
+The hunt measured the full caught-note chain live (fan -> arm -> wake of the
+parked elected 9P reader -> SLEEP_NOTEINTR -> CLIENT_WAIT_NOTEINTR -> EINTR
+-> handler -> prompt), exercising the wake-of-a-parked-reader leg for the
+first time, and byte-captured ash's post-^C read returning the typed line
+intact (rc=22, hex-exact). Residue, busybox-internal and kernel-blameless:
+ash's own pending-interrupt latch can consume the first line completed after
+a delivery (its INT_OFF/INT_ON bracketing), alignment-dependent.

@@ -3878,9 +3878,13 @@ static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
     if (!p)                                          return -1;
 
     // #844: c is REF-HELD (borrow); spoor_clunk on every exit (fsync may block).
+    // Errno rollout (the getdents64/fsync chunk): the two rejects flattened to
+    // -1 until the phenotype rows arrived, and a bare -1 crossing the viv
+    // boundary reads as Linux EPERM -- the wrong claim twice over. BADF for a
+    // missing/underqualified handle; OPNOTSUPP for a Dev with no .fsync slot.
     struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_WRITE);
-    if (!c)                                          return -1;
-    if (!c->dev || !c->dev->fsync)                 { spoor_clunk(c); return -1; }
+    if (!c)                                          return -T_E_BADF;
+    if (!c->dev || !c->dev->fsync)                 { spoor_clunk(c); return -T_E_OPNOTSUPP; }
 
     // Normalize datasync to 0/1 (any non-zero is "data only").
     u32 datasync = (datasync_raw != 0) ? 1u : 0u;
@@ -3904,34 +3908,37 @@ static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
 // in c->offset for the next call (mirrors Linux v9fs).
 // =============================================================================
 
-static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
-    struct Thread *t = current_thread();
-    if (!t)                                          return -1;
-    struct Proc *p = t->proc;
-    if (!p)                                          return -1;
+// The readdir RUN, extracted from the handler so the phenotype getdents64
+// shell runs the SAME dev-op, malformed-stream guard and #955
+// non-advancing-cursor bound as the native SYS_READDIR -- extraction, not
+// duplication (the I-43 rule). `c` is BORROWED (the caller clunks) and its
+// offset is NOT advanced here: each caller commits
+// `c->offset = (s64)*last_cookie_out` only after ITS OWN copy-out succeeded
+// (the F3 property -- a faulted copy leaves the cursor unchanged so a retry
+// re-fetches, never skips). Returns the byte count of whole 9P dirents
+// written to `scratch` (> 0), 0 on end-of-directory (including the #955
+// stale-cursor bound), or a real -T_E_* (errno-rollout: the pre-extraction
+// handler flattened these to -1 -- BADF for the #81 O_PATH reject [Linux's
+// getdents answer for an fd that is not a data channel], OPNOTSUPP for a Dev
+// with no .readdir slot, IO for a malformed stream, and the Dev's own
+// negative propagated verbatim).
+static s64 spoor_readdir_run(struct Spoor *c, u8 *scratch, long want,
+                             u64 *last_cookie_out) {
+    // #81: a T_OPATH navigation handle is NOT a byte-I/O channel -- reject
+    // readdir too (listing a dir's entries is content the perm_check-exempt
+    // O_PATH open would otherwise leak for a non-readable dir).
+    if (c->flag & CWALKONLY)                        return -T_E_BADF;
+    if (!c->dev || !c->dev->readdir)                return -T_E_OPNOTSUPP;
 
-    if (buf_len_raw == 0 || buf_len_raw > SYS_RW_STACK) return -1;
-    if (!sys_validate_user_buf(buf_va, buf_len_raw))  return -1;
-
-    // #844: c is REF-HELD (borrow); spoor_clunk on every exit (readdir blocks).
-    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
-    if (!c)                                          return -1;
-    // #81: a T_OPATH navigation handle is NOT a byte-I/O channel -- reject readdir
-    // too (listing a dir's entries is content the perm_check-exempt O_PATH open
-    // would otherwise leak for a non-readable dir). IDENTITY-DESIGN 9.4 #81.
-    if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -1; }
-    if (!c->dev || !c->dev->readdir)               { spoor_clunk(c); return -1; }
-
-    u8 scratch[SYS_RW_STACK];
-    u64 in_cookie = (u64)c->offset;   // the opaque resume cookie we ask to resume FROM
-    long got = c->dev->readdir(c, scratch, (long)buf_len_raw, c->offset);
-    if (got < 0)                                   { spoor_clunk(c); return -1; }
-    if (got == 0)                                  { spoor_clunk(c); return 0; }   // EOD
+    u64 in_cookie = (u64)c->offset;   // the opaque resume cookie we resume FROM
+    long got = c->dev->readdir(c, scratch, want, c->offset);
+    if (got < 0)                                    return (s64)got;
+    if (got == 0)                                   return 0;      // EOD
 
     // Walk the returned dirents (bounded by `got`) to find the last complete
     // entry's offset cookie. The minimum entry is 24 bytes (qid+offset+type+
     // name_len) + a 0-length name. A run with no complete entry is a malformed
-    // stream -> -1 (also prevents a userspace re-read spin on a non-advancing
+    // stream (also prevents a userspace re-read spin on a non-advancing
     // offset).
     long pos = 0;
     u64 last_cookie = 0;
@@ -3947,7 +3954,7 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
         advanced = true;
         pos += entry;
     }
-    if (!advanced)                                 { spoor_clunk(c); return -1; }   // malformed run
+    if (!advanced)                                  return -T_E_IO;   // malformed run
 
     // Defense-in-depth (#955): a non-empty run whose last cookie == the cookie
     // we resumed from means the cursor did not advance -- a paginating reader
@@ -3967,13 +3974,35 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
     // (Stratum + devramfs both start at 1). A server that re-emits the resume
     // entry with an EQUAL cookie would have its listing truncated here -- that
     // is the untrusted-server seam, not a correct-server case.
-    if (last_cookie == in_cookie && in_cookie != 0) { spoor_clunk(c); return 0; }
+    if (last_cookie == in_cookie && in_cookie != 0)  return 0;
+
+    *last_cookie_out = last_cookie;
+    return (s64)got;
+}
+
+static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if (buf_len_raw == 0 || buf_len_raw > SYS_RW_STACK) return -1;
+    if (!sys_validate_user_buf(buf_va, buf_len_raw))  return -1;
+
+    // #844: c is REF-HELD (borrow); spoor_clunk on every exit (readdir blocks).
+    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    if (!c)                                          return -1;
+
+    u8 scratch[SYS_RW_STACK];
+    u64 last_cookie = 0;
+    s64 got = spoor_readdir_run(c, scratch, (long)buf_len_raw, &last_cookie);
+    if (got <= 0)                                   { spoor_clunk(c); return got; }
 
     // Copy the dirent bytes to user-VA FIRST, THEN advance the Spoor offset
     // (F3 audit). If a uaccess store faults, we return -1 with the offset
     // UNCHANGED, so the caller's retry re-fetches the same run rather than
     // silently skipping the entries it never received.
-    for (long i = 0; i < got; i++) {
+    for (s64 i = 0; i < got; i++) {
         if (uaccess_store_u8(buf_va + (u64)i, scratch[i]) != 0) { spoor_clunk(c); return -1; }
     }
     c->offset = (s64)last_cookie;
@@ -11034,6 +11063,54 @@ static s64 viv_gettimeofday_write(u64 tv_va, u64 tz_va) {
     return 0;
 }
 
+// The 9P-dirent -> linux_dirent64 re-encode (the getdents64 chunk; VIVARIUM.md
+// section 6.25). PURE kernel-buffer transform -- no uaccess, no Proc -- so the
+// format row is unit-testable with byte arrays. Source: the spoor_readdir_run
+// stream (per entry: qid[13] + offset[8 LE] + type[1] + name_len[2 LE] +
+// name). Destination: linux_dirent64 records (d_ino u64 <- qid.path; d_off
+// s64 <- the entry's own resume cookie, "seek here for the next entry" on
+// both sides; d_reclen u16 = 8-aligned 19 + name_len + 1; d_type u8 <- the
+// 9P2000.L type byte, which IS d_type encoding -- Linux v9fs forwards it the
+// same way; d_name NUL-terminated).
+//
+// Emits WHOLE records only. Stops at the first record that does not fit
+// dst_cap (or a truncated source tail) and reports the last EMITTED entry's
+// cookie -- the caller commits the directory cursor to exactly that, so the
+// next getdents64 resumes at the first unconsumed entry with no shell-side
+// state (the cookie is the 9P resume token). Returns bytes emitted (0 when
+// the first record does not fit -- the caller's EINVAL row).
+// Non-static: the format row is pinned by unit tests (the
+// sys_open_create_kpath_for_proc pattern -- testable without an EL0 thread).
+u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
+                            u8 *dst, u64 dst_cap,
+                            u64 *last_cookie_out) {
+    u64 spos = 0, dpos = 0;
+    while (spos + 24 <= src_len) {
+        u32 nlen = (u32)src[spos + 22] | ((u32)src[spos + 23] << 8);
+        if (spos + 24 + nlen > src_len) break;          // truncated tail
+        u64 reclen = (19 + (u64)nlen + 1 + 7) & ~7ull;
+        if (dpos + reclen > dst_cap) break;             // record does not fit
+
+        u64 ino = 0, cookie = 0;
+        for (int i = 0; i < 8; i++) {
+            ino    |= (u64)src[spos + 5  + i] << (8 * i);   // qid.path
+            cookie |= (u64)src[spos + 13 + i] << (8 * i);   // resume cookie
+        }
+        for (int i = 0; i < 8; i++) dst[dpos + i]     = (u8)(ino    >> (8 * i));
+        for (int i = 0; i < 8; i++) dst[dpos + 8 + i] = (u8)(cookie >> (8 * i));
+        dst[dpos + 16] = (u8)(reclen & 0xFF);
+        dst[dpos + 17] = (u8)(reclen >> 8);
+        dst[dpos + 18] = src[spos + 21];                    // d_type
+        for (u32 i = 0; i < nlen; i++) dst[dpos + 19 + i] = src[spos + 24 + i];
+        for (u64 i = 19 + nlen; i < reclen; i++) dst[dpos + i] = 0;  // NUL + pad
+
+        *last_cookie_out = cookie;
+        dpos += reclen;
+        spos += 24 + nlen;
+    }
+    return dpos;
+}
+
 // #50: the shared front of the phenotype unlinkat/renameat shells (the
 // create arm has its own richer rows inside sys_open_create_kpath_for_proc):
 // copy the user path, cwd-join (FROM_ROOT -- the decides admit AT_FDCWD
@@ -11148,7 +11225,9 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         u64  start_fd = 0;
         u32  omode    = 0;
         bool cloexec  = false;
-        if (vivarium_openat_decide(args[0], args[2], &start_fd, &omode, &cloexec)
+        bool dir_required = false;
+        if (vivarium_openat_decide(args[0], args[2], &start_fd, &omode,
+                                   &cloexec, &dir_required)
                 != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;             // out of domain -> V-3 forwards
         // DECIDE BEFORE MEASURE: the measurement is a faultable user read, and
@@ -11160,6 +11239,20 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         struct viv_call c;
         vivarium_openat_build(start_fd, args[1], path_len, omode, &c);
         s64 fd = sys_open_handler(c.args[0], c.args[1], c.args[2], c.args[3]);
+        // O_DIRECTORY (the getdents64 chunk): the decide reported the
+        // requirement; enforce it HERE, on the minted handle's own qid -- no
+        // extra RPC, no TOCTOU (the qid is the identity of the object this
+        // very open resolved). A non-directory closes the fd and answers
+        // ENOTDIR, the Linux row musl's opendir depends on.
+        if (fd >= 0 && dir_required) {
+            struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd, 0);
+            bool isdir = sp && (sp->qid.type & QTDIR);
+            if (sp) spoor_clunk(sp);
+            if (!isdir) {
+                (void)handle_close(p, (hidx_t)fd);
+                return -(s64)T_E_NOTDIR;
+            }
+        }
         // #151: O_CLOEXEC is a property of the DESCRIPTOR, so it is applied
         // after the open rather than carried in the omode. Only on success --
         // there is no descriptor to flag otherwise. The set cannot fail here
@@ -11247,6 +11340,68 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         spoor_clunk(od);
         spoor_clunk(nd);
         return rc;
+    }
+
+    case VIV_LINUX_GETDENTS64: {
+        // getdents64(fd, dirp, count): x0 fd, x1 dirp, x2 count. One raw
+        // fetch through the SAME spoor_readdir_run the native SYS_READDIR
+        // runs (dev-op + malformed guard + the #955 stale-cursor bound --
+        // extraction, not duplication), then the pure
+        // viv_dirent64_encode_run re-encode, then the copy-out, then the
+        // cursor commit. Order is load-bearing: the cursor advances to the
+        // last EMITTED entry's cookie only after the user copy succeeded
+        // (the F3 property both native and phenotype readers share), so a
+        // partial fit or a faulted copy re-fetches, never skips. A raw
+        // fetch the user buffer cannot hold ONE record of answers EINVAL
+        // (the Linux row), cursor unchanged.
+        //
+        // Frame note: 2048 raw + 2560 encoded. The encode's worst growth is
+        // align8(20+n)/(24+n), maximized at n==5 (32/29): 2048 * 32/29 =
+        // 2260 < 2560, so the cap never truncates what the fit-check would
+        // admit; the per-record fit-check enforces it regardless.
+        enum { VIV_GD_RAW = 2048, VIV_GD_ENC = 2560 };
+        u64 count = args[2];
+        if (count == 0)                          return -(s64)T_E_INVAL;
+        struct Spoor *c = sys_lookup_spoor(p, (hidx_t)args[0], RIGHT_READ);
+        if (!c)                                  return -(s64)T_E_BADF;
+        if (!(c->qid.type & QTDIR))            { spoor_clunk(c); return -(s64)T_E_NOTDIR; }
+
+        u8  raw[VIV_GD_RAW];
+        u64 run_cookie = 0;
+        s64 got = spoor_readdir_run(c, raw, (long)VIV_GD_RAW, &run_cookie);
+        if (got <= 0)                          { spoor_clunk(c); return got; }
+
+        u8  enc[VIV_GD_ENC];
+        u64 dst_cap = (count < (u64)VIV_GD_ENC) ? count : (u64)VIV_GD_ENC;
+        u64 emit_cookie = 0;
+        u64 emitted = viv_dirent64_encode_run(raw, (u64)got, enc, dst_cap,
+                                              &emit_cookie);
+        if (emitted == 0)                      { spoor_clunk(c); return -(s64)T_E_INVAL; }
+
+        for (u64 i = 0; i < emitted; i++) {
+            if (uaccess_store_u8(args[1] + i, enc[i]) != 0)
+                                               { spoor_clunk(c); return -(s64)T_E_FAULT; }
+        }
+        c->offset = (s64)emit_cookie;
+        spoor_clunk(c);
+        return (s64)emitted;
+    }
+
+    case VIV_LINUX_FSYNC:
+    case VIV_LINUX_FDATASYNC: {
+        // fsync(fd) / fdatasync(fd): the native durability core with an
+        // EXPLICIT datasync word. These are T2 shells and not T1 renumbers
+        // for one load-bearing reason: Linux passes ONE argument, so x1 is
+        // whatever the caller left there -- and SYS_FSYNC reads x1 as
+        // datasync, so a T1 verbatim copy would let register garbage flip a
+        // full fsync into data-only, a silent wrong answer. DEGRADATION
+        // (documented, loud): the native core gates RIGHT_WRITE, so fsync
+        // on an O_RDONLY fd answers EBADF where Linux permits it (git
+        // fsyncs directory fds when core.fsync is enabled; milestone A runs
+        // core.fsync=none). Relaxing the native gate is an ABI change --
+        // signoff-gated, not this chunk's call to make silently.
+        return sys_fsync_handler(args[0],
+                                 (linux_nr == VIV_LINUX_FDATASYNC) ? 1 : 0);
     }
 
     case VIV_LINUX_FCNTL: {
