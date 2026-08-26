@@ -10388,30 +10388,46 @@ int main(void) {
                         (void)t_close(gwr);
                         // Drain to EOF FIRST, then reap (run_viv_bundle's order,
                         // same deadlock argument: all three child fds are the one
-                        // write end, and nothing drains while joey waits).
+                        // write end, and nothing drains while joey waits). While
+                        // draining, roll a substring match for git's own success
+                        // line -- "Git repository" appears in both "Initialized
+                        // empty Git repository ..." (fresh) and "Reinitialized
+                        // existing ..." (a PRESERVEd pool). This corroboration is
+                        // THIS boot's output, so unlike a check of the persistent
+                        // .git dir it cannot be satisfied by a stale repo from a
+                        // prior boot (F2): status 0 is the discriminator a native
+                        // git cannot reach, and the output match is fresh proof
+                        // git actually did the work.
+                        static const char gneedle[] = "Git repository";
+                        unsigned int gmatch = 0;
+                        int gfound = 0;
                         for (;;) {
                             unsigned char gbuf[256];
                             long gn = t_read(grd, gbuf, sizeof(gbuf));
                             if (gn <= 0) break;
                             (void)t_puts((const char *)gbuf, (size_t)gn);
+                            for (long i = 0; i < gn; i++) {
+                                char c = (char)gbuf[i];
+                                if (c == gneedle[gmatch]) {
+                                    gmatch++;
+                                    if (gmatch == sizeof(gneedle) - 1) {
+                                        gfound = 1;
+                                        gmatch = 0;
+                                    }
+                                } else {
+                                    gmatch = (c == gneedle[0]) ? 1u : 0u;
+                                }
+                            }
                         }
                         (void)t_close(grd);
                         int  gist  = 0;
                         long gigot = t_wait_pid_for((int)gipid, 0, &gist);
-                        // Corroborate with the created repo: git init makes a
-                        // .git. status 0 is the discriminator (a native git could
-                        // not reach here); the .git check catches a git that
-                        // exits 0 without doing the work.
-                        long gchk = t_open(T_WALK_OPEN_FROM_ROOT,
-                                           "/tmp/vivgit-repo/.git", 21, T_OPATH);
-                        int gitok = (gchk >= 0);
-                        if (gchk >= 0) (void)t_close(gchk);
-                        if (gigot != gipid || gist != 0 || !gitok) {
+                        if (gigot != gipid || gist != 0 || !gfound) {
                             t_putstr("joey: section-13 git gate FAILED"
                                      " (git init via /viv/bin) status=");
                             t_putstr(itoa_dec(gist, pbuf, sizeof(pbuf)));
-                            t_putstr(gitok ? " (.git present)\n"
-                                           : " (.git absent)\n");
+                            t_putstr(gfound ? " (git output seen)\n"
+                                            : " (no git output)\n");
                             return 1;
                         }
                         t_putstr("joey: section-13 git via /viv/bin"

@@ -76,6 +76,7 @@ void test_stalk_cross_mount_xsearch_deny(void);
 void test_stalk_mount_amode_no_cross(void);
 void test_stalk_cross_mount_chain(void);
 void test_stalk_cross_mount_no_leak(void);
+void test_stalk_pheno_symlink_reanchor(void);   // VIVARIUM section 13 (F1)
 // #66: namespace-name accumulation through the real resolver.
 void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
@@ -161,6 +162,16 @@ static const struct fixnode g_fix[] = {
     { 17, 0, "lnnox",  QTSYMLINK, 0777u, "nox/sekret" },  // through a no-X dir
     { 18, 3, "lnleaf", QTSYMLINK, 0777u, "leaf" },     // MID-RUN link, so a
                                          // pounced run must split at it
+
+    // ---- VIVARIUM section 13 (F1): a fresh, isolated subtree for the
+    // pheno-mount symlink-re-anchor regression. `phx` is mounted MPHENO_LINUX in
+    // one test; `lnaway` is an ABSOLUTE symlink pointing OUT of phx (to /xfile at
+    // the root), so following it re-anchors the resolution out of the pheno
+    // mount; `preal` is the plain-file control reached THROUGH the mount. Nothing
+    // else in the fixture references phx, so it cannot perturb any other test.
+    { 19,  0, "phx",    QTDIR,     0755u, NULL },
+    { 20, 19, "lnaway", QTSYMLINK, 0777u, "/xfile" },
+    { 21, 19, "preal",  QTFILE,    0644u, NULL },
 };
 #define FIX_LOOP_PATH 7u
 // The first symlink qid -- the boundary the fixture walk uses to answer
@@ -1383,6 +1394,71 @@ void test_stalk_cross_mount_xsearch_deny(void) {
     spoor_clunk(src);
     spoor_clunk(mp);
     spoor_unref(root);
+}
+
+// VIVARIUM section 13 (F1, the holotype's P2): crossed_pheno is a SET-ONLY
+// accumulator, and the resolver's `restart:` (a symlink re-anchor / '..'-rebuild)
+// must reset it -- otherwise a resolution that crosses a pheno-mount and THEN
+// follows an absolute symlink OUT of it would stamp the NATIVE target
+// PHENO_LINUX, falsifying territory.h's "the SAME file reached by another path is
+// native." This drives the FULL resolver: phx is mounted MPHENO_LINUX at loop;
+// loop/lnaway crosses the pheno-mount then re-anchors to /xfile (a native file
+// OUT of the mount) -> crossed_pheno must be false; loop/preal reaches a plain
+// file THROUGH the mount with no re-anchor -> crossed_pheno stays true. Without
+// the restart: reset, loop/lnaway reports true (fails-without-fix).
+void test_stalk_pheno_symlink_reanchor(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    if (!root || !p.territory) return;
+    // The absolute symlink (lnaway -> /xfile) re-anchors at the caller's OWN
+    // Territory root (stalk.c:393, I-28), so the root must be established --
+    // cross_setup leaves it NULL, exactly as the lnabs leg of symlink_follow does.
+    TEST_EXPECT_EQ(territory_chroot(p.territory, root), 0, "chroot to fixture root");
+
+    struct Spoor *src = stalk(&p, root, "phx", 3, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    int mrc = (src && mp) ? mount(p.territory, src, mp, MPHENO_LINUX) : -1;
+
+    // Leg 1 (the fix): loop/lnaway -> cross loop (pheno) -> lnaway -> re-anchor
+    // to /xfile (OUT). Caller inits crossed_pheno false, as exec_resolve does.
+    int  e1 = 0;
+    bool pheno_link = false;
+    struct Spoor *q1 = (mrc == 0)
+        ? stalk_exec(&p, root, "loop/lnaway", 11, STALK_OPEN, 0, &e1, &pheno_link)
+        : NULL;
+    // Leg 2 (control): loop/preal -> a plain file UNDER the pheno-mount, no
+    // re-anchor -> crossed_pheno true.
+    int  e2 = 0;
+    bool pheno_plain = false;
+    struct Spoor *q2 = (mrc == 0)
+        ? stalk_exec(&p, root, "loop/preal", 10, STALK_OPEN, 0, &e2, &pheno_plain)
+        : NULL;
+
+    // Observe, THEN tear down, THEN assert (TEST_ASSERT returns).
+    bool q1ok = (q1 != NULL), q2ok = (q2 != NULL);
+    u64  q1qid = q1 ? (u64)q1->qid.path : (u64)-1;
+    u64  q2qid = q2 ? (u64)q2->qid.path : (u64)-1;
+    if (q1) spoor_clunk(q1);
+    if (q2) spoor_clunk(q2);
+    territory_unref(p.territory);
+    if (src) spoor_clunk(src);
+    if (mp)  spoor_clunk(mp);
+    spoor_unref(root);
+
+    TEST_EXPECT_EQ(mrc, 0, "mount phx at loop MPHENO_LINUX");
+    TEST_ASSERT(q1ok, "loop/lnaway resolves (re-anchored to /xfile)");
+    TEST_ASSERT(q2ok, "loop/preal resolves (through the pheno-mount)");
+    TEST_EXPECT_EQ(q1qid, (u64)9,
+        "loop/lnaway -> /xfile (qid 9, OUT of the pheno-mount)");
+    TEST_EXPECT_EQ(q2qid, (u64)21,
+        "loop/preal -> phx/preal (qid 21, via the pheno-mount)");
+    TEST_ASSERT(pheno_link == false,
+        "F1: a symlink re-anchor OUT of a pheno-mount RESETS crossed_pheno "
+        "(the native /xfile is not stamped PHENO_LINUX)");
+    TEST_ASSERT(pheno_plain == true,
+        "CONTROL: a plain file reached THROUGH the pheno-mount keeps "
+        "crossed_pheno (final-location, no re-anchor)");
 }
 
 void test_stalk_mount_amode_no_cross(void) {

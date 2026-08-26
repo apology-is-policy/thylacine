@@ -3546,7 +3546,24 @@ mount noexec only RESTRICTS). `MPHENO_LINUX` EXPANDS (declares Linux) — but I-
 it authority-neutral, so an unprivileged user marking a mount in their OWN namespace
 `MPHENO_LINUX` grants their own procs nothing they could not already get via `viv run`.
 The lean is therefore **ungated, matching `MNOEXEC`**, with the I-43 argument as the
-guard rather than a cap. The holotype prosecutes this explicitly.
+guard rather than a cap. **RESOLVED by the sub-chunk-B holotype (Opus fallback): ungated
+is sound.** The prosecutor re-derived from the code that the mount channel touches only
+`p->phenotype`; caps derive independently via the monotone `(parent & mask) &
+~CAP_ELEVATION_ONLY`, and no Linux-number translation reaches a native operation that
+skips a cap gate the native number enforces — so over-declaration degrades to
+malfunction, never escalation. The `pheno_flags` manifest bit was *already* ungated
+("any Proc may declare its child's decode mode"), so the mount is a second ungated route
+to the same no-authority state, not a new hole.
+
+**Caveat — the mount channel is spawn-only (F3, sub-chunk-B holotype).** The crossing is
+read at exactly one site: the `SYS_SPAWN_FULL_ARGV` resolution (the sole fresh-phenotype
+declarer). A process that **`execve`s** `/viv/bin/git` (rather than spawning it) keeps
+its *inherited* phenotype — the six non-declaring exec callers use the phenotype-agnostic
+resolver wrapper (NULL `pheno_out`). This is correct for the shipped path (`ut` spawns
+git via `t_spawn_full_argv`, so the mount phenotype applies) and is the same "rides ONLY
+`SYS_SPAWN_FULL_ARGV`, descendants inherit via rfork" scope the manifest channel has —
+but a future PATH-search-then-`execve` consumer would NOT pick up the mount phenotype by
+location, and that asymmetry is intended, not a bug.
 
 ### 13.5 Trust model + the file-ownership wall
 

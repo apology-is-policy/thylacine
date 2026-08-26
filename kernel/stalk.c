@@ -530,6 +530,19 @@ restart:
     nofollow_final  = nofollow_req && !trailing_slash;
     i               = 0;
 
+    // VIVARIUM section 13: the phenotype is a property of the FINAL resolved
+    // binary's location, not of any abandoned prefix. A symlink re-anchor (an
+    // absolute target, or a '..'-rebuild) jumps here having unwound the trail;
+    // the crossing accumulated by the DISCARDED prefix must be discarded with
+    // it, so the restarted resolution re-derives the crossing from scratch (the
+    // base-cross below + the per-component walk). Without this, an absolute
+    // symlink INSIDE a pheno-mount (`/viv/bin/helper -> /bin/ut`) would run the
+    // NATIVE target under the Linux phenotype -- I-43-safe (over-declaration
+    // degrades to malfunction, never escalation) but a violation of the stated
+    // contract "the SAME file reached by another path is native" (territory.h).
+    // On the FIRST pass this is a no-op (the caller inits it false).
+    if (crossed_pheno) *crossed_pheno = false;
+
     // Cross the BASE: `base` itself may be a mount point. If it crosses, the
     // owned crossed clone becomes trail[0] (so the first component searches the
     // mounted root, X-checked like any parent). If not, the base stays `base`
