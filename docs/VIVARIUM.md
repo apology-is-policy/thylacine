@@ -3677,9 +3677,18 @@ location, and that asymmetry is intended, not a bug.
   - **DEFERRED (the user-git arc):** the ut uniform benign-cap conferral (§13.6) — it
     does not unblock user-git without A-3 (per-principal 9P ownership, §13.5), so the two
     land together. git-as-SYSTEM is proven; seamless user-git is A-3-gated.
-  - **REMAINING before push:** the holotype (combined A+B surface) + SMP gate + the
-    batched vault-dossier sync (`sub-kernel-stalk` / `-territory` / `-syscall-dispatch`,
-    `sub-stratum-boot`, `sub-substrate-build`).
+  - **Holotype CLOSED** (`3beea52a`, Opus 4.8 fallback — Fable 5 hit credit exhaustion
+    mid-run, re-spawned on Opus per the never-skip rule): 0 P0 / 0 P1 / 1 P2 / 2 P3, all
+    fixed, NOT dirty. F1 [P2] `crossed_pheno` set-only survived a symlink `restart:`
+    re-anchor → reset at `restart:` (final-location) + regression
+    `stalk.pheno_symlink_reanchor`; F2 [P3] git-gate stale-fixture risk → fresh
+    drained-output match; F3 [P3] mount channel is spawn-only → §13.4 caveat.
+  - **SMP gate PASS:** default-smp8 + ubsan-smp8, N=8, BOOT_PROBES=y — 16/16 boots,
+    0 corruption / 0 external-kill; every boot ran the full 1463-test suite (incl. the F1
+    regression) + both boot gates. F1's fix is a per-resolution stack-bool reset (no
+    shared state), SMP-safe as predicted.
+  - **REMAINING:** push both mirrors + the batched vault-dossier sync (`sub-kernel-stalk`
+    / `-territory` / `-syscall-dispatch`, `sub-stratum-boot`, `sub-substrate-build`).
 
 ---
 

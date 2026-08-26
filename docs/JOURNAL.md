@@ -26,9 +26,13 @@ needed the operator.
 
 Continues the entry below (sub-chunk A landed the kernel mechanism; this run
 lands the half that proves the OR stamp *fires* -- a bare spawn through
-`/viv/bin` actually running Linux -- and then the real git deploy). Two commits:
-`df270378` (the E2E), `3e7c0301` (the git deploy). Holotype in flight; SMP + push
-still owed -- nothing ships before the audit closes.
+`/viv/bin` actually running Linux -- and then the real git deploy). The arc's
+substantive commits: `df270378` (the E2E), `3e7c0301` (the git deploy); the holotype
+then closed at `3beea52a` (0 P0 / 0 P1 / 1 P2 / 2 P3, all fixed, NOT dirty), and the
+SMP gate ran **16/16 boots clean** -- default-smp8 + ubsan-smp8, N=8, BOOT_PROBES=y,
+so every boot exercised the git-BY-LOCATION + V-1b-loc gates AND the full 1463-test
+suite (incl. the F1 regression); 0 corruption, 0 external-kill. Nothing shipped
+before the audit closed.
 
 **The mechanism is live (df270378).** A boot-probe leg in joey (`V-1b-loc`) spawns
 a binary through an MPHENO_LINUX mount with `pheno_flags = 0` -- the mount the SOLE
