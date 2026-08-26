@@ -354,6 +354,98 @@ enum {
     VIV_LINUX_GETDENTS64 = 61,
     VIV_LINUX_FSYNC      = 82,
     VIV_LINUX_FDATASYNC  = 83,
+
+    // faccessat (the git-under-VIVARIUM chunk; VIVARIUM.md section 6.26). The
+    // RAW 3-arg syscall -- faccessat(dirfd, pathname, mode) -- NOT the 4-arg
+    // faccessat2(439): musl's access() and its faccessat(...,flags=0) both
+    // issue this number with no flags word, so args[3] does not exist and is
+    // never read. git's git_config_system() calls access(R_OK) on
+    // /etc/gitconfig and treats any errno but ENOENT as FATAL, so an
+    // untranslated FORWARD->ENOSYS aborts `git version` before it prints --
+    // this is the row that makes git run at all.
+    //
+    // 48 is BELOW the native ceiling, so it owes the per-number collision
+    // paragraph. It carries the mkdirat family's gate, not the getdents64
+    // family's damage-envelope one, because it HAS an AT_FDCWD gate:
+    //   48  vs SYS_NOTE_MASK(new_mask, old_mask_out_va). faccessat's decide
+    //       admits ONLY dirfd == AT_FDCWD (-100 as s32). new_mask is a small
+    //       non-negative note bitfield -- never the -100 sentinel -- so a
+    //       native NOTE_MASK caller mis-declared PHENO_LINUX FORWARDs to
+    //       ENOSYS on shape, reaching nothing. Identical to 34/35's argument.
+    VIV_LINUX_FACCESSAT  = 48,
+
+    // chdir (the git chunk). `cd` in the container and git's own chdir into
+    // each repo it touches -- without it `git init repo` cannot enter the tree
+    // it just made. The native SYS_CHDIR reads + validates the path itself, so
+    // the shell only measures the length Linux leaves implicit and delegates.
+    //
+    // 49 is BELOW the ceiling and FD-less (no AT_FDCWD gate to refuse a
+    // mis-declared native caller on shape), so its collision argument is the
+    // getdents64 family's DAMAGE ENVELOPE, not a shape gate:
+    //   49  vs SYS_SPAWN_FULL_ARGV(args_va, ...). chdir reads args[0] as a
+    //       path VA in the CALLER'S OWN memory and, at most, moves the
+    //       CALLER'S OWN cwd (or fails) under its OWN A-2d identity. A native
+    //       spawn-args pointer read as a path resolves to garbage and fails;
+    //       nothing is spawned, no authority crosses -- the pipe2-row envelope
+    //       (the caller's own things, never authority).
+    VIV_LINUX_CHDIR      = 49,
+
+    // fchmodat (the git chunk). git's git_config_set copies the original
+    // config file's permission bits onto the lockfile before the rename, via
+    // chmod -- and treats that chmod FAILING as a config-write failure, so
+    // `git init` cannot write core.filemode without it. The shell opens the
+    // path O_PATH (chmod requires OWNERSHIP, never read, so the perm_check-
+    // exempt navigation handle is correct) and applies the mode through the
+    // audited sys_wstat_for_proc, whose perm_wstat_check IS the POSIX
+    // owner-or-CAP gate.
+    //
+    // 53 is BELOW the ceiling but HAS an AT_FDCWD gate (it shares
+    // vivarium_faccessat_decide), so its collision argument is the shape one,
+    // not the damage envelope:
+    //   53  vs SYS_PIVOT_ROOT(new_root_fd). fchmodat's decide admits ONLY
+    //       dirfd == AT_FDCWD (-100 as s32). new_root_fd is a small
+    //       non-negative Spoor fd, never the -100 sentinel, so a native
+    //       PIVOT_ROOT caller mis-declared PHENO_LINUX FORWARDs to ENOSYS on
+    //       shape. Identical to 48/34/35's argument.
+    VIV_LINUX_FCHMODAT   = 53,
+
+    // readlinkat (the git chunk). git's path canonicalization (real_path)
+    // readlinks components while resolving the repo path, and treats an
+    // untranslated FORWARD->ENOSYS as fatal -- `git init` dies at it before it
+    // ever reaches the config write. The shell resolves the path NOFOLLOW (the
+    // link itself is the quarry) and copies its target out via the Dev's
+    // .readlink slot; a non-symlink answers EINVAL, the POSIX contour that lets
+    // git's resolver treat the component as a plain file.
+    //
+    // 78 is BELOW the ceiling but shares faccessat's AT_FDCWD gate, so its
+    // collision argument is the shape one:
+    //   78  vs SYS_PCI_INFO(handle, info_va). readlinkat's decide admits ONLY
+    //       dirfd == AT_FDCWD (-100 as s32). A native PCI handle is a small
+    //       non-negative index, never -100, so a mis-declared PCI_INFO caller
+    //       FORWARDs to ENOSYS on shape. Identical to 48/53's argument.
+    VIV_LINUX_READLINKAT = 78,
+
+    // geteuid/getegid. Thylacine carries ONE principal per Proc (no real vs
+    // effective split -- I-22: authority is the capability set, not a uid), so
+    // each is the exact twin of its getuid/getgid sibling (174/176) and maps
+    // through the SAME vivarium_map_uid/gid. ash reads geteuid to choose its
+    // prompt char and git reads it for "am I root" checks; both were FORWARDing
+    // to ENOSYS. 175 and 177 are ABOVE the native ceiling -> collision-free by
+    // construction, asserted beside the time/socket rows in vivarium.c.
+    VIV_LINUX_GETEUID    = 175,
+    VIV_LINUX_GETEGID    = 177,
+
+    // getrandom (the git chunk). git draws random bytes to name its temporary
+    // object files; without it `git add` cannot create a temp file
+    // ("unable to get random bytes for temporary file"). The native
+    // SYS_GETRANDOM has the identical (buf, buflen, flags) shape and does its
+    // own buffer validation + copy-out. It gates on CAP_CSPRNG_READ, and that
+    // gate is KEPT under I-43: a phenotype confers Linux's numbering and
+    // semantics, never authority -- the CSPRNG capability stays required, so a
+    // container that draws entropy must be granted it (the git-probe gate does).
+    // 278 is ABOVE the native ceiling -> collision-free by construction,
+    // asserted beside the time/socket rows in vivarium.c.
+    VIV_LINUX_GETRANDOM  = 278,
 };
 
 // The highest ASSIGNED native Thylacine syscall number. Every vivarium row
@@ -628,6 +720,16 @@ void vivarium_stat_to_linux(const struct t_stat *in, struct viv_linux_stat *out)
 // forwards it to sys_stat_for_proc, which owns the resolver vocabulary.
 enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags,
                                          u32 *stalk_flags_out);
+
+// TIER 2 — `faccessat` (the git chunk; VIVARIUM.md §6.26). The whole decision is
+// the AT_FDCWD gate: it is both the "only the cwd form is TRANSLATED" contract
+// (a dirfd-relative access would need a real dirfd resolve this row does not do)
+// AND the native-48 collision defense (SYS_NOTE_MASK's new_mask is never -100).
+// PURE: no memory, no mode read -- the mode's EINVAL contour and the stat +
+// perm_check live in the shell, exactly as mmap judges `len` there. The raw
+// syscall carries no flags word (musl access()/faccessat(...,0) issue the 3-arg
+// form; the 4-arg faccessat2 is a different number), so there is nothing to map.
+enum viv_verdict vivarium_faccessat_decide(u64 dirfd);
 
 // -----------------------------------------------------------------------------
 // TIER 2 — `mmap` (V-2d). See VIVARIUM.md §6.21.

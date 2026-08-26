@@ -2621,6 +2621,144 @@ returning the post-^C line intact.
 
 ---
 
+### 6.26 Tier 2 — the git chunk: `faccessat`/`chdir`/`fchmodat`/`readlinkat` (48/49/53/78) + `geteuid`/`getegid` (175/177) + `getrandom` (278), and the three walls (milestone A: `init` + `add`, as-built 2026-08-26)
+
+The forcing consumer is **git** — a real static aarch64 musl `git 2.51.2` (built
+NO_CURL / NO_REGEX=NeedsStartEnd against a static zlib on the thyla-pi silicon
+host), driven under the phenotype. Milestone A is `git init` + `git add`
+end-to-end; `commit` + `clone` are §6.27 (they need the reflog's `O_APPEND`,
+which the phenotype `openat` does not yet admit). Getting `init` + `add` to run
+crossed **three walls**, and only the first is a syscall-translation problem.
+
+**Wall 1 — the seven missing numbers.** `git version` aborts before it prints
+unless `access(R_OK)` on `/etc/gitconfig` returns something other than `ENOSYS`;
+`git init` cannot enter the tree it just made without `chdir`, cannot write
+`core.filemode` without `fchmodat`, and dies in its path canonicalizer without
+`readlinkat`; `git add` cannot name a temp object without `getrandom`; and both
+git and ash read `geteuid`/`getegid` for their "am I root" checks. Each row was
+`FORWARD`ing to the supervisor (`ENOSYS`). The seven:
+
+- **`faccessat` (48)** — the raw 3-arg `faccessat(dirfd, path, mode)` (NOT the
+  4-arg `faccessat2`/439; musl's `access()` and `faccessat(...,0)` both issue
+  the 3-arg number, so there is no flags word). It is `newfstatat`'s front half
+  joined to a `perm_check`: resolve the path (follow symlinks — there is no
+  `AT_SYMLINK_NOFOLLOW` here), then answer the mode question. `R_OK`=4/`W_OK`=2/
+  `X_OK`=1 map 1:1 onto `PERM_R`/`PERM_W`/`PERM_X`; `F_OK`=0 asks only existence
+  (the stat succeeding IS the answer); any bit outside `0x7` is `EINVAL`, judged
+  in the shell (the mmap-judges-`len` precedent). A resolution failure IS the
+  answer — `ENOENT`/`ENOTDIR`/`EACCES` from the walk flow straight back.
+- **`chdir` (49)** — measures the length Linux leaves implicit, then delegates
+  to the native `SYS_CHDIR` (which reads + validates the path itself). The
+  native handler collapses every failure to a bare `-1`; the shell maps that to
+  `ENOENT` (the dominant cause; the `ENOTDIR`/`EACCES` collapse is a documented
+  fidelity gap for a richer native errno path, and the SUCCESS path — the only
+  one milestone A exercises — is exact).
+- **`fchmodat` (53)** — opens the path `O_PATH` (chmod needs OWNERSHIP, never
+  read, so the `perm_check`-exempt navigation handle is the correct base) and
+  applies the mode through the audited `sys_wstat_for_proc`, whose
+  `perm_wstat_check` IS the POSIX owner-or-CAP gate. Only the 9 rwx bits
+  (`& T_WSTAT_MODE_MASK`); setuid/setgid/sticky are dropped (T_WSTAT rejects
+  them at v1.0 — a documented, not silent, gap). The RAW syscall 53 is 3-arg
+  (`fchmodat(dirfd, path, mode)`; the flags-bearing variant is `fchmodat2`/452,
+  a distinct number), so there is no flags word — `args[3]` is undefined
+  register residue and is never read (the F1 audit correction: reading it
+  spuriously `EINVAL`'d a valid chmod on any binary that left x3 nonzero; the
+  sibling faccessat row makes the same point). The `O_PATH` fd is closed on
+  every return path.
+- **`readlinkat` (78)** — resolves the path `NOFOLLOW` (the link ITSELF is the
+  quarry), checks `QTSYMLINK` + a `.readlink` Dev slot (a non-symlink answers
+  `EINVAL`, the POSIX contour git's resolver relies on to treat a component as a
+  plain file), reads the target via the slot, and copies `min(target, bufsiz)`
+  out — `readlink(2)` does NOT NUL-terminate and returns the byte count. **The
+  copy-out validates the exact span with `sys_validate_user_buf(buf_va, n)`
+  BEFORE `uaccess_copy_out`** (the getdents64 P0 class: `uaccess_copy_out`'s
+  fault fixup engages only for user-half VAs — an unvalidated kernel-half `buf`
+  would extinct or corrupt kernel memory).
+- **`geteuid` (175) / `getegid` (177)** — the exact twins of `getuid`/`getgid`
+  through the same `vivarium_map_uid`/`gid`. Thylacine carries ONE principal per
+  Proc (no real-vs-effective split — I-22: authority is the capability set, not
+  a uid), so effective == real.
+- **`getrandom` (278)** — the native `SYS_GETRANDOM` is shape-identical (buf,
+  buflen, flags) and does its own validation + copy-out. It gates on
+  `CAP_CSPRNG_READ`, and **that gate is KEPT under I-43**: a phenotype confers
+  Linux's numbering and semantics, never authority — a container that draws
+  entropy must be granted the capability (see Wall 3).
+
+The **collision arguments**: 48/49/53/78 are below the `VIV_NATIVE_CEILING`
+(108), so each owes a per-number paragraph in `vivarium.h`. 48/53/78 collide
+with native `SYS_NOTE_MASK`/`SYS_PIVOT_ROOT`/`SYS_PCI_INFO`, and all three share
+the **AT_FDCWD gate** (`vivarium_faccessat_decide`, which admits ONLY
+`dirfd == -100` as a sign-extended `s32`): the colliding native arg (a note
+bitfield, a Spoor fd, a PCI handle) is a small non-negative value, never the
+`-100` sentinel, so a mis-declared native caller `FORWARD`s to `ENOSYS` on
+shape. 49 is FD-less (no gate), so it carries the getdents64 family's DAMAGE
+ENVELOPE instead: `chdir` reads `args[0]` as a path in the CALLER's OWN memory
+and at most moves the CALLER's OWN cwd under its OWN identity — a native
+`SPAWN_FULL_ARGV` pointer read as a path resolves to garbage and fails, nothing
+is spawned, no authority crosses. 175/177/278 are above the ceiling —
+collision-free by construction, `_Static_assert`ed in `vivarium.c`.
+
+**Wall 2 — the pool is SYSTEM-owned, so git runs as SYSTEM.** The pool 9P mount
+is served by the kernel's single shared connection to stratumd, and that FS is
+system-owned (`syscall.h`: "dev9p reports `PRINCIPAL_SYSTEM`"). So every file
+ANY container creates on the pool is stamped `PRINCIPAL_SYSTEM`, regardless of
+the creating principal — and git's config write chmods its own lockfile, which
+requires OWNERSHIP. A container running as a real user (e.g. uid 1000) is denied
+the chmod on its own file and `git init` dies. **Per-principal 9P ownership is
+A-3, unbuilt at v1.0** (tracked as a separate arc). Milestone A therefore runs
+git as a **SYSTEM-principal boot probe** (`do_git_probe_gate` in joey), which
+OWNS the SYSTEM-stamped files, so the chmod succeeds. This proves the phenotype
+mechanics (the seven rows + Wall 3) end-to-end; git-as-a-real-user waits on A-3.
+
+**Wall 3 — the phenotype fork must INHERIT caps.** With git running as SYSTEM,
+`git init` succeeds but `git add` fails at `getrandom` — the forked git has no
+`CAP_CSPRNG_READ`. Root cause: Thylacine's `rfork_forked` passes `CAP_NONE`, so
+a forked child's caps are `parent_caps & 0 = 0` — **fork zeros caps**. Caps are
+conferred only via explicit `rfork_with_caps` at spawn. But git is FORKED (via
+`clone`) from the entrypoint shell, so it lost every cap the container was
+granted. This is an I-43 fidelity gap: **Linux forks INHERIT the parent's
+capabilities; Thylacine's phenotype fork zeroed them.** The fix (new
+`rfork_forked_with_caps`, taken by the `PHENO_LINUX` arm of `sys_rfork_core`
+with `CAP_ALL` as the mask): a Linux fork inherits, so the phenotype path forks
+with a full mask, which `rfork_internal` still intersects with the parent's
+actually-held caps and still strips `~CAP_ELEVATION_ONLY` unconditionally —
+`child->caps = (parent_caps & CAP_ALL) & ~CAP_ELEVATION_ONLY`. So the child gets
+exactly `parent_caps` minus elevation: **I-2** holds (`child <= parent`, never
+grown), elevation (HOSTOWNER/DAC_OVERRIDE/CHOWN/KILL) never propagates by
+inheritance, and **I-43** is satisfied (the SHAPE is Linux's inherit; the child
+gets only authority the parent already held, which its launcher conferred
+explicitly). **NATIVE fork is unchanged** — `rfork_forked` keeps `CAP_NONE`
+(Thylacine's stronger fork-zeros-caps default; a native program confers caps at
+spawn, never by inheritance). This fixes every capability-using phenotype
+program forked by a shell, not just git.
+
+The **cap-conferral chain** carries `CAP_CSPRNG_READ` from the trusted boot down
+to the forked git, each hop intersecting (I-2, never growing): joey grants it to
+`viv` (the git-probe gate's `run_viv_bundle(..., T_CAP_CSPRNG_READ)`); `viv`
+confers it on the entrypoint when the bundle sets `org.thylacine.csprng:
+granted` (symmetric with the existing `org.thylacine.net` grant — `cap_mask`
+masks against viv's OWN caps, so viv can pass on only what its launcher granted
+it); the entrypoint git then FORKS children that inherit it (Wall 3). Absent the
+annotation the container's cap floor stays 0 (no ambient authority).
+
+**The gate.** `do_git_probe_gate` (joey, SYSTEM, boot-probe-gated) spawns
+`viv run /vivarium/git-probe`, whose `/gitprobe.sh` runs `git init` + `git add`
+and emits `GITPROBE-INIT` / `GITPROBE-ADD` / `GITPROBE-DONE`. The gate asserts
+the terminal `GITPROBE-DONE` and reports the first missing step (a container
+that dies at INIT and one that dies at ADD are different bugs). It SOFT-SKIPs
+when the static-git tarball is absent (the default build stays hermetic) and is
+BOOT-FATAL when present (a gate that cannot redden is a disabled test).
+`commit`/`clone` markers are deliberately NOT asserted — they await §6.27.
+
+**Deferred to §6.27 (sub-chunk 2):** `commit` + `clone file://` open the reflog
+`.git/logs/HEAD` with `O_APPEND`, which the phenotype `openat` does not admit
+(Thylacine has no kernel append mode; pouch ports emulate it in libc, a raw
+Linux binary cannot). A phenotype `O_APPEND` (open-at-EOF, sound for the
+single-threaded phenotype; for git's absent reflog the open need only
+RESOLVE→`ENOENT` instead of FORWARD→`ENOSYS`) is the next chunk.
+
+---
+
 ## 7. The vivarium — the container runner
 
 `thylacine-run` from `ROADMAP §9.1`, named `viv` (§11). Userspace; no new kernel

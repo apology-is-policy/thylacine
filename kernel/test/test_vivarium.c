@@ -229,6 +229,63 @@ void test_vivarium_unknown_forwards(void) {
                    (int)VIV_FORWARD, "Linux 0 (io_setup) is unclassified -> forward");
 }
 
+void test_vivarium_git_chunk_rows(void) {
+    u64 args[VIV_NARGS];
+    struct viv_call out;
+    viv_fill_args(args);
+
+    // The git-under-VIVARIUM chunk's seven rows all TRANSLATE (T2), never
+    // forward. A missing row would send the number to the supervisor (ENOSYS
+    // today) and the corresponding git step would die -- the exact failure each
+    // was added to remove.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_FACCESSAT, args, &out),
+                   (int)VIV_TIER2, "faccessat is T2 (stat + perm_check)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_CHDIR, args, &out),
+                   (int)VIV_TIER2, "chdir is T2 (measure len -> SYS_CHDIR)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_FCHMODAT, args, &out),
+                   (int)VIV_TIER2, "fchmodat is T2 (open O_PATH -> wstat)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_READLINKAT, args, &out),
+                   (int)VIV_TIER2, "readlinkat is T2 (NOFOLLOW stalk -> .readlink)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETEUID, args, &out),
+                   (int)VIV_TIER2, "geteuid is T2 (one-principal twin of getuid)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETEGID, args, &out),
+                   (int)VIV_TIER2, "getegid is T2 (one-principal twin of getgid)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETRANDOM, args, &out),
+                   (int)VIV_TIER2, "getrandom is T2 (-> SYS_GETRANDOM, CAP-gated)");
+
+    // The sub-ceiling rows (48/49/53/78) owe per-number collision paragraphs;
+    // their known native collisions, made executable (the pselect6/ppoll
+    // precedent). None is reachable by either side: a PHENO_LINUX Proc cannot
+    // issue a native number, and a mis-declared native caller is refused by the
+    // AT_FDCWD / damage-envelope arguments in vivarium.h.
+    TEST_ASSERT(VIV_LINUX_FACCESSAT == SYS_NOTE_MASK,
+                "faccessat(48) collides with SYS_NOTE_MASK -- AT_FDCWD gate refuses it");
+    TEST_ASSERT(VIV_LINUX_CHDIR == SYS_SPAWN_FULL_ARGV,
+                "chdir(49) collides with SYS_SPAWN_FULL_ARGV -- damage-envelope bound");
+    TEST_ASSERT(VIV_LINUX_FCHMODAT == SYS_PIVOT_ROOT,
+                "fchmodat(53) collides with SYS_PIVOT_ROOT -- AT_FDCWD gate refuses it");
+    TEST_ASSERT(VIV_LINUX_READLINKAT == SYS_PCI_INFO,
+                "readlinkat(78) collides with SYS_PCI_INFO -- AT_FDCWD gate refuses it");
+}
+
+void test_vivarium_faccessat_gate(void) {
+    // The shared AT_FDCWD gate (faccessat/fchmodat/readlinkat all route through
+    // vivarium_faccessat_decide). It is BOTH the "only the cwd form is
+    // translated" contract AND the native-collision defense: a mis-declared
+    // native caller at 48/53/78 supplies a dirfd that is a small non-negative
+    // index or a sentinel, never AT_FDCWD (-100), so it FORWARDs to ENOSYS.
+    TEST_EXPECT_EQ((int)vivarium_faccessat_decide((u64)(s64)VIV_AT_FDCWD),
+                   (int)VIV_TRANSLATED, "AT_FDCWD (sign-extended) translates");
+    TEST_EXPECT_EQ((int)vivarium_faccessat_decide((u64)(u32)(s32)VIV_AT_FDCWD),
+                   (int)VIV_TRANSLATED, "AT_FDCWD (bare u32) translates");
+    TEST_EXPECT_EQ((int)vivarium_faccessat_decide(0),
+                   (int)VIV_FORWARD, "dirfd 0 forwards (a real fd is not the cwd form)");
+    TEST_EXPECT_EQ((int)vivarium_faccessat_decide(5),
+                   (int)VIV_FORWARD, "a small non-negative fd forwards");
+    TEST_EXPECT_EQ((int)vivarium_faccessat_decide((u64)(s64)-1),
+                   (int)VIV_FORWARD, "-1 (the FROM_ROOT sentinel) is not AT_FDCWD -> forward");
+}
+
 void test_vivarium_fails_closed(void) {
     u64 args[VIV_NARGS];
     struct viv_call out;

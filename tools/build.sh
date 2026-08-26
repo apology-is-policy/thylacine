@@ -1346,6 +1346,136 @@ VIVEOF
 }
 VIVEOF
                 echo "==> viv bundles: Alpine NET-GRANTED twin staged at $nb (org.thylacine.net=granted + resolv.conf + hosts pin + OPENSSL_armcap=0 -- the phenotype-network probe vehicle)"
+                # The GIT twin (the git-under-VIVARIUM mission, milestone A):
+                # the same rootfs plus a REAL static git (built on thyla-pi:
+                # git 2.51.2, musl-gcc -static against static zlib 1.3.1,
+                # NO_CURL/NO_OPENSSL/NO_PTHREADS/NO_ICONV/NO_UNIX_SOCKETS/
+                # NO_REGEX=NeedsStartEnd; source tarballs sha-pinned in the
+                # commit message). Staged at /usr/bin/git with dashed
+                # upload/receive-pack SYMLINKS beside it: `clone file://`
+                # spawns `sh -c "git-upload-pack '<path>'"` (connect.c
+                # use_shell=1), so the dashed name must resolve on PATH --
+                # git's main() dispatches dashed argv[0] to the builtin.
+                # /etc/gitconfig (the system file; no HOME dependency)
+                # carries the milestone-A posture: single-threaded
+                # (pack.threads=1 + checkout.workers=1; the binary is also
+                # NO_PTHREADS so no code path can reach clone(CLONE_THREAD)),
+                # core.fsync=none (the native fsync gate wants RIGHT_WRITE
+                # while Linux allows rdonly-fsync), core.createObject=rename
+                # (no linkat), reflogs off (no O_APPEND). Local-only: NO net
+                # grant. Same absent/matching/different trichotomy as curl.
+                #
+                # It runs as a BOOT PROBE spawned by joey (PRINCIPAL_SYSTEM),
+                # NOT interactively: the pool 9P mount is system-owned, so a
+                # container's files are stamped PRINCIPAL_SYSTEM, and git's
+                # config write chmods its own lockfile (chmod requires
+                # ownership). A SYSTEM-principal container OWNS those files, so
+                # the chmod succeeds. Running git as a real non-SYSTEM USER
+                # needs per-principal 9P ownership (A-3, unbuilt at v1.0) --
+                # tracked as a separate arc; this bundle proves git init / add
+                # / commit / clone WORK under the phenotype. The entrypoint is
+                # a baked /gitprobe.sh emitting GITPROBE-* markers the joey gate
+                # asserts.
+                local gb="$vstage/git-probe"
+                local gittar="${THYLACINE_STATIC_GIT_TAR:-}"
+                if [[ -z "$gittar" ]]; then
+                    gittar="$(ls "$REPO_ROOT/build/cache"/git-static-*-aarch64-musl.tar.gz 2>/dev/null | head -1 || true)"
+                fi
+                local gittar_sha="b8c41cfd8ee999f4f978001c73494d20d7344eb39d0e741f205057b114615de9"
+                if [[ -n "$gittar" && -f "$gittar" ]]; then
+                    got_sha="$(shasum -a 256 "$gittar" | awk '{print $1}')"
+                    if [[ "$got_sha" != "$gittar_sha" ]]; then
+                        echo "==> viv bundles: static-git tarball sha256 MISMATCH -- refusing to stage" >&2
+                        echo "      file     $gittar" >&2
+                        echo "      got      $got_sha" >&2
+                        echo "      expected $gittar_sha (git-static-2.51.2-aarch64-musl)" >&2
+                        exit 1
+                    fi
+                    local gx="$vstage/.gitx"
+                    rm -rf "$gx"; mkdir -p "$gx"
+                    if tar -xzf "$gittar" -C "$gx" git 2>/dev/null && [[ -f "$gx/git" ]]; then
+                        rm -rf "$gb"; mkdir -p "$gb"
+                        cp -R "$ab/rootfs" "$gb/rootfs"
+                        rm -rf "$gb/rootfs/gate"
+                        mkdir -p "$gb/rootfs/usr/bin" \
+                                 "$gb/rootfs/usr/share/git-core/templates"
+                        cp "$gx/git" "$gb/rootfs/usr/bin/git"
+                        chmod 0755 "$gb/rootfs/usr/bin/git"
+                        ln -sf git "$gb/rootfs/usr/bin/git-upload-pack"
+                        ln -sf git "$gb/rootfs/usr/bin/git-receive-pack"
+                        # The boot-probe script. Each step emits a GITPROBE-*
+                        # marker the joey gate scans for; a failure emits
+                        # GITPROBE-FAIL-<step> and stops. rm -rf first for
+                        # fixture freshness (the pool is PRESERVEd across boots,
+                        # so a stale /tmp/repo would fail `git init`). git's own
+                        # stdout is quieted; stderr stays live for diagnosis.
+                        cat > "$gb/rootfs/gitprobe.sh" <<'VIVEOF'
+#!/bin/sh
+rm -rf /tmp/repo /tmp/clone1 2>/dev/null
+cd /tmp || { echo GITPROBE-FAIL-CD; exit 1; }
+git init repo >/dev/null && echo GITPROBE-INIT || { echo GITPROBE-FAIL-INIT; exit 1; }
+cd /tmp/repo || { echo GITPROBE-FAIL-CD2; exit 1; }
+# git init writes core.logallrefupdates=true into the REPO config for a
+# non-bare repo, overriding the system /etc/gitconfig -- and a reflog write
+# opens .git/logs/HEAD with O_APPEND, which the phenotype openat does not yet
+# translate (a tracked gap). Turn reflogs off in the repo so no ref update
+# needs O_APPEND (the milestone-A posture; O_APPEND is a separate arc).
+git config core.logallrefupdates false
+echo hello > f.txt
+git add f.txt && echo GITPROBE-ADD || { echo GITPROBE-FAIL-ADD; exit 1; }
+# The milestone this sub-chunk proves: git INIT + ADD under the phenotype as
+# SYSTEM -- which exercises every new kernel mechanism (faccessat/chdir/
+# fchmodat/readlinkat for init's config write, getrandom for add's temp object
+# file, the phenotype-fork-inherits-caps fix that lets the forked git hold the
+# CSPRNG cap, and chmod-on-own-files via the SYSTEM principal). COMMIT + CLONE
+# both update a ref, which opens the reflog .git/logs/HEAD with O_APPEND -- a
+# flag Thylacine's phenotype openat does not yet admit (the phenotype has no
+# libc to emulate O_APPEND the way a pouch port does). That is the next
+# sub-chunk; stop here at the proven milestone.
+echo GITPROBE-DONE
+VIVEOF
+                        chmod 0755 "$gb/rootfs/gitprobe.sh"
+                        cat > "$gb/rootfs/etc/gitconfig" <<'VIVEOF'
+[user]
+	name = Thylacine
+	email = thyla@extinct.local
+[init]
+	defaultBranch = main
+[core]
+	fsync = none
+	createObject = rename
+	logAllRefUpdates = false
+[pack]
+	threads = 1
+[checkout]
+	workers = 1
+[safe]
+	directory = *
+VIVEOF
+                        cat > "$gb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "/gitprobe.sh"],
+        "env": ["PATH=/usr/bin:/bin:/sbin:/usr/sbin", "HOME=/tmp", "GIT_EXEC_PATH=/usr/bin"],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux",
+        "org.thylacine.csprng": "granted"
+    }
+}
+VIVEOF
+                        echo "==> viv bundles: git-probe staged at $gb (static git 2.51.2 + /gitprobe.sh boot script -- joey spawns it as SYSTEM; the git-under-VIVARIUM milestone-A gate)"
+                    else
+                        echo "==> viv bundles: static-git tarball extract FAILED -- git-probe skipped" >&2
+                    fi
+                    rm -rf "$gx"
+                else
+                    echo "==> viv bundles: no static-git tarball -- git-probe skipped (drop git-static-*-aarch64-musl.tar.gz in build/cache/ or set THYLACINE_STATIC_GIT_TAR)"
+                    forage_hint static-git "the static-git tarball" "build/cache/git-static-*-aarch64-musl.tar.gz"
+                fi
             else
                 rm -rf "$ab"
                 echo "==> viv bundles: Alpine bundle SKIPPED -- the minirootfs is present but no busybox-static apk is (every stock Alpine ELF is dynamic PIE, which the loader rejects; task #145). Drop busybox-static-*.apk in build/cache/ or set THYLACINE_BUSYBOX_STATIC_APK." >&2
@@ -1471,7 +1601,7 @@ VIVEOF
             echo "==> viv bundles: untar of $tarball into the stock bundle FAILED -- DISTRO ARC gate bundle skipped" >&2
         fi
     fi
-    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" )$( [[ -d "$vstage/alpine-ash" ]] && echo " + alpine-ash" )$( [[ -d "$vstage/alpine-trap" ]] && echo " + alpine-trap" )$( [[ -d "$vstage/alpine-net" ]] && echo " + alpine-net" )$( [[ -d "$vstage/alpine-stock" ]] && echo " + alpine-stock" ))"
+    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" )$( [[ -d "$vstage/alpine-ash" ]] && echo " + alpine-ash" )$( [[ -d "$vstage/alpine-trap" ]] && echo " + alpine-trap" )$( [[ -d "$vstage/alpine-net" ]] && echo " + alpine-net" )$( [[ -d "$vstage/git-probe" ]] && echo " + git-probe" )$( [[ -d "$vstage/alpine-stock" ]] && echo " + alpine-stock" ))"
 }
 
 build_sysroot() {

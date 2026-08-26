@@ -22,6 +22,110 @@ needed the operator.
 
 ---
 
+## 2026-08-26 (aux) -- git runs under VIVARIUM (milestone A: init+add), and the three walls it took to get there
+
+**What landed**: the VIVARIUM 6.26 chunk -- a **real static aarch64 musl
+`git 2.51.2`** performs `git init` + `git add` under the Linux phenotype
+(`GITPROBE-INIT`/`ADD`/`DONE`, boot gate PASS). The syscall translation was the
+easy third of the work; the run's substance was the two *architectural* walls
+behind it, and the audit that found the shape defect the pinned binary was
+hiding.
+
+**The pi built the binary.** No static NO_CURL aarch64 git ships prebuilt, so it
+was cross-built on thyla-pi: git 2.51.2, `musl-gcc -static` against a static
+zlib 1.3.1, `NO_CURL/NO_OPENSSL/NO_PTHREADS/NO_ICONV/NO_REGEX=NeedsStartEnd`
+(musl's regex lacks `REG_STARTEND`; the bundled compat regex is the fix). Two
+wrong turns caught by checksum, not by trust: zlib.net served a 404 HTML page in
+place of the tarball (re-fetched from the madler GitHub release), and the git
+tarball is now sha256-pinned in `build.sh` with a refuse-to-stage mismatch arm
+so a corrupt download can never bake silently.
+
+**Wall 1 -- seven missing numbers.** `faccessat`(48)/`chdir`(49)/`fchmodat`(53)/
+`readlinkat`(78) for `git init`'s config write and path canonicalization,
+`getrandom`(278) for `git add`'s temp-object naming, `geteuid`(175)/`getegid`
+(177) for the "am I root" checks. All were `FORWARD`ing to `ENOSYS`. The four
+sub-ceiling numbers collide with native syscalls (48=NOTE_MASK, 49=
+SPAWN_FULL_ARGV, 53=PIVOT_ROOT, 78=PCI_INFO); the AT_FDCWD gate
+(`vivarium_faccessat_decide`, admits only dirfd==-100) is both the cwd-form
+contract and the collision defense for 48/53/78, and the FD-less 49 carries the
+damage-envelope argument.
+
+**Wall 2 -- the pool is SYSTEM-owned.** A container running as a real user
+(uid 1000) creates files stamped `PRINCIPAL_SYSTEM` (dev9p reports the boot FS
+as system-owned), and git's config write chmods its own lockfile -- which needs
+ownership -- so `git init` dies. Per-principal 9P ownership is A-3, unbuilt at
+v1.0. Milestone A therefore runs git as a **SYSTEM-principal boot probe**
+(`do_git_probe_gate`), which owns its files; git-as-a-real-user is a tracked A-3
+arc, escalated to the operator and ratified.
+
+**Wall 3 -- the phenotype fork zeroed caps.** With git as SYSTEM, `git init`
+works but `git add` fails at `getrandom`: the forked git holds no
+`CAP_CSPRNG_READ`. Root cause: `rfork_forked` passes `CAP_NONE`, so a fork's
+caps are `parent & 0 = 0` -- Thylacine zeros caps on fork, but **Linux forks
+INHERIT them** (an I-43 fidelity gap that hits every capability-using phenotype
+program forked by a shell, not just git). The fix (operator-ratified,
+soundness-sensitive): `rfork_forked_with_caps`, taken by `sys_rfork_core`'s
+`PHENO_LINUX` arm with `CAP_ALL`, so `rfork_internal` computes
+`child->caps = (parent_caps & CAP_ALL) & ~CAP_ELEVATION_ONLY` -- the child gets
+`parent minus elevation`: I-2 holds (`<= parent`, never grown), elevation never
+inherits, native fork keeps `CAP_NONE`. The CSPRNG cap rides a
+joey->viv->git conferral chain (`org.thylacine.csprng: granted`), each hop
+intersecting the parent's held set.
+
+**The audit found the defect the pin was hiding.** The holotype (Fable 5,
+`MODEL(start)==MODEL(end)`) verified the hard targets sound -- I-2 (single
+setter at `proc.c:1382`, acquire-load, one caller of the new entry point,
+monotonic chain), I-43, the readlinkat copy-out applying the getdents P0 lesson
+-- and returned **0 P0 / 1 P1 / 1 P2 / 1 P3**, all one-to-three-line fixes:
+- **F1 (P1)**: fchmodat's `if (args[3] != 0) return EINVAL` reads an
+  **undefined register**. Linux syscall 53 is 3-arg (the flags variant is
+  `fchmodat2`/452); musl's `chmod` issues syscall3, so x3 is dead residue. The
+  staged binary happens to leave x3==0 at its chmod sites -- the sha-pin froze
+  the luck. A rebuilt git, the commit/clone sites, or busybox's chmod re-rolls
+  the dice, and for an unlucky binary this is a deterministic P0 that kills
+  `git init`. My own faccessat row states the correct rule ("args[3] does not
+  exist and is never read") three screens up; the two arms disagreed. **The
+  wall this catch clears: a green E2E gate proved nothing about a register the
+  gate never varied.** Fixed by deleting the check.
+- **F2 (P2)**: `sys_readlink_for_proc` flattened `dev9p_readlink`'s real errnos
+  (INTR on a ^C unwind, IO on a transport drop) to EINVAL -- which is precisely
+  readlink(2)'s "not a symlink" signal, so git's `real_path` would treat an
+  *interrupted* component as a plain file (silent wrong resolution). Fixed by
+  preserving the negative errno (`if (tlen < 0) return tlen;`), the vtable
+  defense kept for the 0/overflow arms.
+- **F3 (P3)**: the readlink core used `stalk()` (flattens walk failures to
+  ENOENT) where its siblings use `stalk_err()` (preserves EACCES/ELOOP). Fixed
+  by the one-line swap. Plus a stale count in `caps.h` ("All five" -> six;
+  CAP_DEBUG + CAP_JIT joined `CAP_ELEVATION_ONLY` after the sentence was
+  written) -- the exact comment block the I-2 argument reads.
+
+Clean close (0 P0, P1+P2=2, all non-invasive). Post-fix re-verify: suite
+1461/1461, both new unit tests PASS, git gate PASS, banner, no extinction.
+
+**What is NOT done, exactly**: `git commit` + `clone file://` both open the
+reflog `.git/logs/HEAD` with `O_APPEND`, which the phenotype `openat` does not
+admit (no kernel append mode; a raw Linux binary cannot emulate it in libc as a
+pouch port does). That is sub-chunk 2 (VIVARIUM 6.27) -- a phenotype `O_APPEND`
+mode. So milestone A is `init` + `add`, and the gate asserts only those three
+markers; commit/clone are named, not silently absent.
+
+**Coverage honesty**: the seven T2 arms have no kernel-unit-test driver (the
+project convention -- arms are covered by the in-guest E2E gate; the pure
+decide/gate functions ARE unit-tested), so F1/F2/F3 landed as fixes + the
+happy-path gate, not as new unit regressions -- none is deterministically
+triggerable in the current infra (F1 needs controlled x3 residue, F2 an
+injected INTR, F3 a user-principal no-X dir under a SYSTEM-owned gate). Named
+here rather than papered over.
+
+**Verification**: SMP gate PASS -- 16/16 clean, 0 corruption (default-smp8 8/8 +
+ubsan-smp8 8/8, N=8; TESTS=y + BOOT_PROBES=y, so the 1461 unit suite AND the
+git-fork-under-SMP path ran under smp8 max concurrency on both sanitizer arms,
+~50s mean/boot). The fork-caps change adds no new concurrency primitive (it
+rides the already-audited `rfork_internal` acquire-load), and the gate confirms
+it at max concurrency. Tip `<pending>`.
+
+---
+
 ## 2026-08-26 (aux) -- getdents64+fsync lands; the viv-run ^C hunt ends in an exoneration
 
 **What landed**: the VIVARIUM 6.25 chunk (`8c72dcf7`) -- getdents64(61) +

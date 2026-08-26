@@ -55,7 +55,8 @@ mod json;
 use libthyla_rs::{
     t_attach_9p, t_chdir, t_chroot, t_close, t_fstat, t_getpid, t_mount, t_note_mask, t_open,
     t_pipe, t_putstr, t_read, t_spawn_full_argv, t_unlink, t_wait_pid_for, t_walk_create,
-    t_write, TSpawnArgs, T_MNOEXEC, T_MREPL, T_NOTE_BIT_INTERRUPT, T_NOTE_BIT_PIPE, T_OPATH,
+    t_write, TSpawnArgs, T_CAP_CSPRNG_READ, T_MNOEXEC, T_MREPL, T_NOTE_BIT_INTERRUPT,
+    T_NOTE_BIT_PIPE, T_OPATH,
     T_OREAD, T_OWRITE,
     T_SPAWN_PHENO_LINUX, T_WAIT_WNOHANG, T_WALK_OPEN_FROM_ROOT,
 };
@@ -81,6 +82,7 @@ struct Manifest {
     env: Vec<(String, String)>,
     cwd: String,
     net_granted: bool,
+    csprng_granted: bool,
     // VIVARIUM section 12.1 rule 1: the CONTAINER declares the phenotype, and
     // this manifest annotation is the only thing in the system that can. The
     // ELF byte is a hint that may never decide (the Q3 resolution).
@@ -133,7 +135,8 @@ fn read_file_bounded(path: &str, cap: usize) -> Option<Vec<u8>> {
 /// landing at the child's slots 0..n in order (a half-empty trio fails the
 /// whole spawn at the kernel's fd bump, so the caller decides the whole list
 /// from facts it holds -- see the entrypoint spawn). caps 0, no perms.
-fn spawn_raw(name: &str, args: &[String], fds: &[u32], pheno_flags: u32) -> i64 {
+fn spawn_raw(name: &str, args: &[String], fds: &[u32], pheno_flags: u32,
+             cap_mask: u64) -> i64 {
     let mut argv_buf: Vec<u8> = Vec::new();
     argv_buf.extend_from_slice(name.as_bytes());
     argv_buf.push(0);
@@ -153,7 +156,7 @@ fn spawn_raw(name: &str, args: &[String], fds: &[u32], pheno_flags: u32) -> i64 
         fd_count: fds.len() as u32,
         perm_flags: 0,
         _pad_envp: 0,
-        cap_mask: 0,
+        cap_mask,
         principal_id: 0,
         primary_gid: 0,
         supp_gids_va: 0,
@@ -307,6 +310,18 @@ fn extract_manifest(doc: &json::Json) -> Result<Manifest, &'static str> {
         .and_then(|v| v.as_str())
         == Some("granted");
 
+    // The entropy grant, symmetric with net above. When set, viv confers
+    // CAP_CSPRNG_READ on the entrypoint so the guest's getrandom(2) reaches the
+    // kernel CSPRNG -- git, for one, cannot name its temporary object files
+    // without it. I-43: the capability is real authority and stays required;
+    // the annotation is how a bundle declares it needs entropy, and viv can
+    // only pass on a cap its OWN launcher granted it (joey's git-probe gate).
+    let csprng_granted = doc
+        .get("annotations")
+        .and_then(|a| a.get("org.thylacine.csprng"))
+        .and_then(|v| v.as_str())
+        == Some("granted");
+
     // The phenotype declaration. Absent / anything but "linux" -> native, so a
     // bundle that predates V-1b, or one written by a tool that knows nothing
     // about phenotypes, gets the safe default (section 12.1 rule 3's spirit:
@@ -344,6 +359,7 @@ fn extract_manifest(doc: &json::Json) -> Result<Manifest, &'static str> {
         env,
         cwd,
         net_granted,
+        csprng_granted,
         pheno_linux,
         sigpipe_selftest,
     })
@@ -488,7 +504,8 @@ fn run(bundle: &str, stdio_born: bool, notes: Option<&Notes>) -> Result<i64, Str
     let my_pid = unsafe { t_getpid() };
     let dio_args = [String::from("--vivarium"), format!("{}", my_pid)];
     let dio_fds: [u32; 2] = [c2s_rd as u32, s2c_wr as u32];
-    let dio_pid = spawn_raw("/bin/diorama", &dio_args, &dio_fds, /*pheno_flags=*/0);
+    let dio_pid = spawn_raw("/bin/diorama", &dio_args, &dio_fds,
+                            /*pheno_flags=*/0, /*cap_mask=*/0);
     // Our copies of the SERVER ends go now, spawn or no spawn: while we hold
     // c2s_rd the diorama's death could never surface as EOF on our reads (a
     // ring with a live reader ref is not read_eof), and s2c_wr would keep the
@@ -673,7 +690,13 @@ fn run(bundle: &str, stdio_born: bool, notes: Option<&Notes>) -> Result<i64, Str
     } else {
         &[]
     };
-    let child_pid = spawn_raw(&m.args[0], &m.args[1..], child_fds, pheno);
+    // The container's cap floor is 0 (no ambient authority), with ONE
+    // declared exception: a bundle that set org.thylacine.csprng=granted gets
+    // CAP_CSPRNG_READ so its getrandom(2) works. cap_mask masks against viv's
+    // OWN caps, so this confers nothing viv's launcher did not first grant viv.
+    let child_caps: u64 = if m.csprng_granted { T_CAP_CSPRNG_READ } else { 0 };
+    let child_pid = spawn_raw(&m.args[0], &m.args[1..], child_fds, pheno,
+                              child_caps);
     if sp_w >= 0 {
         let _ = unsafe { t_close(sp_w) };
     }

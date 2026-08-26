@@ -714,6 +714,8 @@ void test_cons_sys_puts_uses_shared_console_path(void);  // #76
 void test_vivarium_t1_renumbers(void);                   // VIVARIUM V-2
 void test_vivarium_rejects_are_deliberate(void);
 void test_vivarium_unknown_forwards(void);
+void test_vivarium_git_chunk_rows(void);
+void test_vivarium_faccessat_gate(void);
 void test_vivarium_fails_closed(void);
 void test_vivarium_no_wide_alias(void);
 void test_vivarium_openat_domain(void);                  // VIVARIUM V-2b
@@ -2375,6 +2377,8 @@ struct test_case g_tests[] = {
     { "vivarium.t1_renumbers",           test_vivarium_t1_renumbers,           false, NULL },
     { "vivarium.rejects_are_deliberate", test_vivarium_rejects_are_deliberate, false, NULL },
     { "vivarium.unknown_forwards",       test_vivarium_unknown_forwards,       false, NULL },
+    { "vivarium.git_chunk_rows",         test_vivarium_git_chunk_rows,         false, NULL },
+    { "vivarium.faccessat_gate",         test_vivarium_faccessat_gate,         false, NULL },
     { "vivarium.fails_closed",           test_vivarium_fails_closed,           false, NULL },
     { "vivarium.no_wide_alias",          test_vivarium_no_wide_alias,          false, NULL },
     { "vivarium.openat_domain",          test_vivarium_openat_domain,          false, NULL },

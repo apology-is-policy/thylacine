@@ -3431,3 +3431,97 @@ first time, and byte-captured ash's post-^C read returning the typed line
 intact (rc=22, hex-exact). Residue, busybox-internal and kernel-blameless:
 ash's own pending-interrupt latch can consume the first line completed after
 a delivery (its INT_OFF/INT_ON bracketing), alignment-dependent.
+
+## The git chunk: faccessat/chdir/fchmodat/readlinkat + geteuid/getegid + getrandom, and the three walls (milestone A: init + add; aux, 2026-08-26)
+
+Forcing consumer: a real static aarch64 musl `git 2.51.2` under the phenotype.
+Milestone A is `git init` + `git add`; `commit`/`clone` are §6.27 (the reflog
+`O_APPEND`). Three walls; only the first is syscall translation.
+
+### The seven rows (VIVARIUM.md §6.26)
+
+| Linux # | Row | Kind | Mechanism |
+|---|---|---|---|
+| 48 | `faccessat(dirfd,path,mode)` | T2 | AT_FDCWD gate -> `sys_stat_for_proc` (follow) + `perm_check(mode&7)`; `mode & ~0x7` EINVAL; F_OK = existence |
+| 49 | `chdir(path)` | T2 | measure len -> `sys_chdir_handler`; bare -1 -> ENOENT (documented collapse; SUCCESS exact) |
+| 53 | `fchmodat(dirfd,path,mode)` | T2 | AT_FDCWD gate; RAW 3-arg (args[3] undefined residue, NOT read -- the F1 fix; flags is fchmodat2/452); open O_PATH -> `sys_wstat_for_proc(T_WSTAT_MODE, mode & T_WSTAT_MODE_MASK)`; fd closed on every path |
+| 78 | `readlinkat(dirfd,path,buf,bufsiz)` | T2 | AT_FDCWD gate; NOFOLLOW `stalk_err` (F3: preserves EACCES/ELOOP) -> QTSYMLINK + `.readlink`; negative dev errno (INTR/IO) PRESERVED (F2), non-symlink/malformed-len EINVAL; **`sys_validate_user_buf(buf_va, n)` before `uaccess_copy_out`** |
+| 175 | `geteuid()` | T2 | `vivarium_map_uid(principal_id)` -- effective == real (I-22, one principal) |
+| 177 | `getegid()` | T2 | `vivarium_map_gid(primary_gid)` |
+| 278 | `getrandom(buf,len,flags)` | T2 | `sys_getrandom_handler`; bare -1 -> EAGAIN; **CAP_CSPRNG_READ kept (I-43)** |
+
+`readlinkat`'s copy-out is the getdents64 P0 class made safe: `n = min(tlen,
+bufsiz)`, `tlen` bounded to `1..SYS_OPEN_PATH_MAX` by the `stalk.c` vtable
+contract, the target staged in a `SYS_OPEN_PATH_MAX+1` kernel buffer, and the
+EXACT `n` span validated before the write. `sys_readlink_for_proc` clunks its
+Spoors on every early return.
+
+### The AT_FDCWD gate is both the cwd-form contract and the collision defense
+
+`vivarium_faccessat_decide(dirfd)` returns `VIV_TRANSLATED` iff
+`(s32)(u32)dirfd == VIV_AT_FDCWD` (-100), else `VIV_FORWARD`. 48/53/78 all
+route through it. Below the ceiling (108), they collide with native
+`SYS_NOTE_MASK`(48) / `SYS_PIVOT_ROOT`(53) / `SYS_PCI_INFO`(78) -- each native
+arg (a note bitfield, a Spoor fd, a PCI handle) is a small non-negative value,
+never -100, so a mis-declared native caller FORWARDs to ENOSYS on shape.
+FD-less `chdir`(49) vs native `SYS_SPAWN_FULL_ARGV` carries the damage-envelope
+argument instead (caller's-own-cwd, never authority). 175/177/278 are above the
+ceiling -- collision-free, `_Static_assert`ed in `vivarium.c`.
+
+### The three walls
+
+1. **The seven numbers** (above) -- each `FORWARD`ed to ENOSYS and killed the
+   corresponding git step.
+2. **The pool is SYSTEM-owned.** dev9p reports `PRINCIPAL_SYSTEM` for the boot
+   FS, so a container's created files are SYSTEM-stamped regardless of the
+   creating principal; git's config write chmods its own lockfile (needs
+   OWNERSHIP), so a real-user container is denied and `init` dies. Per-principal
+   9P ownership is **A-3, unbuilt at v1.0**. Milestone A runs git as a
+   **SYSTEM-principal boot probe**, which owns the files.
+3. **Phenotype fork must inherit caps.** `rfork_forked` passes `CAP_NONE`, so a
+   forked child's caps = `parent & 0 = 0` -- fork zeros caps. git is FORKED from
+   the entrypoint shell, so it lost `CAP_CSPRNG_READ` and `getrandom` failed.
+   Fix: `rfork_forked_with_caps`, taken by `sys_rfork_core`'s `PHENO_LINUX` arm
+   with `CAP_ALL`; `rfork_internal` computes
+   `child->caps = (parent_caps & CAP_ALL) & ~CAP_ELEVATION_ONLY`, so the child
+   gets `parent minus elevation` -- **I-2** (`<= parent`, never grown), **I-43**
+   (Linux's inherit shape; no authority the parent lacked; elevation never
+   propagates). Native fork keeps `CAP_NONE` (unchanged).
+
+### The cap-conferral chain (I-2, each hop intersects)
+
+joey grants `CAP_CSPRNG_READ` to `viv` (`run_viv_bundle(..., T_CAP_CSPRNG_READ)`
+-- the new `extra_caps` param, 0 for every other gate); `viv` confers it on the
+entrypoint when the bundle sets `org.thylacine.csprng: granted` (symmetric with
+`org.thylacine.net`; `cap_mask` masks against viv's own caps, so viv passes on
+only what it was granted); the forked git inherits it (wall 3). No annotation ->
+container cap floor stays 0.
+
+### Degradations (documented, none silent-wrong)
+
+- `chdir`'s `ENOTDIR`/`EACCES` collapse to `ENOENT` (the native handler's bare
+  -1; SUCCESS path exact; revisit on a richer native chdir errno).
+- `fchmodat` drops setuid/setgid/sticky (T_WSTAT rejects them at v1.0; git's
+  config modes never carry them).
+- `getrandom`'s no-cap / not-seeded / fault all map to `EAGAIN` (a v1.0 backend
+  cannot distinguish; Linux's "entropy not available" is the closest analog).
+- git-as-a-real-user awaits A-3 (per-principal 9P ownership); milestone A is
+  SYSTEM-owned.
+
+### Witnesses
+
+Kernel unit: `vivarium.git_chunk_rows` (all seven rows are `VIV_TIER2`, never
+forward; the four sub-ceiling collision identities 48==NOTE_MASK / 49==
+SPAWN_FULL_ARGV / 53==PIVOT_ROOT / 78==PCI_INFO made executable) +
+`vivarium.faccessat_gate` (AT_FDCWD sign-extended AND bare-u32 -> TRANSLATED;
+0, 5, -1 -> FORWARD). Boot gate: `do_git_probe_gate` (joey, SYSTEM,
+boot-probe-gated) spawns `viv run /vivarium/git-probe` -> `GITPROBE-INIT` /
+`-ADD` / `-DONE`; asserts the terminal marker, reports the first missing step,
+SOFT-SKIPs without the static-git tarball, BOOT-FATAL when present.
+
+### Deferred to §6.27 (commit + clone)
+
+`commit`/`clone file://` open `.git/logs/HEAD` `O_APPEND`, which the phenotype
+`openat` does not admit (no kernel append mode). A phenotype `O_APPEND`
+(open-at-EOF, sound single-threaded; for git's absent reflog the open need only
+RESOLVE->ENOENT instead of FORWARD->ENOSYS) is the next chunk.

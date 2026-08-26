@@ -1060,7 +1060,7 @@ static int do_fork_probe(void) {
 static int run_viv_bundle(const char *vargv, unsigned int vargv_len,
                           unsigned int argc, const char *what, int *status_out,
                           unsigned char *acc, size_t acc_cap, size_t *acc_len,
-                          size_t *total_out) {
+                          size_t *total_out, unsigned long extra_caps) {
     *acc_len = 0;
     *status_out = -1;
     if (total_out) *total_out = 0;
@@ -1093,6 +1093,14 @@ static int run_viv_bundle(const char *vargv, unsigned int vargv_len,
         // private pipe pair, not a /srv name), and every boot `viv run` is
         // spawned the plain way a session shell spawns it -- so these gates
         // run the interactive path, not a privileged twin of it.
+        //
+        // extra_caps is the ONE exception, and it is 0 for every gate but the
+        // git one. cap_mask masks the child's caps to (parent & mask), so a
+        // non-zero value hands viv exactly the named subset of joey's caps for
+        // it to confer onward -- the git gate passes CAP_CSPRNG_READ so viv can
+        // grant the container's git the entropy it needs (I-43: the authority
+        // is real and must be conferred, only the ABI shape is Linux's).
+        .cap_mask      = extra_caps,
     };
     long pid = t_spawn_full_argv(&req);
     if (pid <= 0) {
@@ -1237,7 +1245,7 @@ static int do_alpine_shell_gate(void) {
     int    status  = -1;
     size_t total   = 0;
     int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "L-6c", &status,
-                                    acc, sizeof(acc), &acc_len, &total);
+                                    acc, sizeof(acc), &acc_len, &total, 0);
 
     // sizeof-derived, never hand-counted: a literal length that disagrees with
     // its string is a marker that silently never matches, which would read as
@@ -1557,7 +1565,7 @@ static int do_stock_distro_gate(void) {
     // mechanism inside the stock-distro claim, which is the one-mechanism-per-
     // leg rule this gate's own leg-C fix exists to enforce.
     int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "D-5", &status,
-                                    acc, sizeof(acc), &acc_len, NULL);
+                                    acc, sizeof(acc), &acc_len, NULL, 0);
 
     // sizeof-derived, never hand-counted: a literal length that disagrees with
     // its string is a marker that silently never matches, which would read as
@@ -1601,6 +1609,79 @@ static int do_stock_distro_gate(void) {
              "ran its own shell through its own symlink, loader and libc -- "
              "the DISTRO arc chain is live end to end)\n");
     g_arc_d5 = "PASS";
+    return 0;
+}
+
+// do_git_probe_gate -- the git-under-VIVARIUM milestone-A gate. joey (SYSTEM)
+// spawns `viv run /vivarium/git-probe`, which runs /gitprobe.sh: git init, add,
+// commit, log, clone file://, verify. Each step emits a GITPROBE-* marker; the
+// gate asserts the terminal GITPROBE-DONE and reports the first missing step (a
+// container that dies at COMMIT and one that dies at CLONE are different bugs).
+//
+// It runs as SYSTEM deliberately, and that is the whole reason it is a boot
+// probe rather than an interactive `viv run`. The pool 9P mount is
+// system-owned, so a container's files are stamped PRINCIPAL_SYSTEM; git's
+// config write chmods its own lockfile, and chmod requires OWNERSHIP. A
+// SYSTEM-principal container OWNS those files, so the chmod succeeds. Running
+// git as a real non-SYSTEM USER needs per-principal 9P ownership (A-3, unbuilt
+// at v1.0) -- tracked as a separate arc; this gate proves git init/add/commit/
+// clone WORK under the phenotype, which is milestone A.
+//
+// SOFT-SKIP when the bundle is absent: it needs a static-git tarball in
+// build/cache, and the default build stays hermetic. BOOT-FATAL when present,
+// for the L-6c reason -- a gate that cannot redden is a disabled test.
+static int do_git_probe_gate(void) {
+    static const char gb[] = "/vivarium/git-probe/config.json";
+    long gbfd = t_open(T_WALK_OPEN_FROM_ROOT, gb, sizeof(gb) - 1, T_OPATH);
+    if (gbfd < 0) {
+        t_putstr("joey: git-probe gate SKIPPED (no /vivarium/git-probe bundle "
+                 "-- drop a git-static-*-aarch64-musl.tar.gz in build/cache/ "
+                 "and rebuild with THYLACINE_MKFS_PRESERVE=0)\n");
+        return 0;
+    }
+    (void)t_close(gbfd);
+
+    static const char vargv[] = "/bin/viv\0run\0/vivarium/git-probe";
+    unsigned char acc[4096];
+    size_t acc_len = 0;
+    int    status  = -1;
+    size_t total   = 0;
+    int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "git-probe",
+                                    &status, acc, sizeof(acc), &acc_len, &total,
+                                    T_CAP_CSPRNG_READ);
+    (void)total;
+
+#define GP_MK(s) { (s), sizeof(s) - 1 }
+    // The milestone is git INIT + ADD under the phenotype as SYSTEM (every new
+    // kernel mechanism this sub-chunk added is on that path). COMMIT + CLONE
+    // need the reflog's O_APPEND, which the phenotype openat does not yet admit
+    // -- deferred to the next sub-chunk, so those markers are NOT asserted here.
+    static const struct argv_marker legs[] = {
+        GP_MK("GITPROBE-INIT"),
+        GP_MK("GITPROBE-ADD"),
+        GP_MK("GITPROBE-DONE"),
+    };
+#undef GP_MK
+    int missing = -1;
+    for (unsigned i = 0; i < sizeof(legs) / sizeof(legs[0]); i++) {
+        if (!mem_contains(acc, acc_len, legs[i].str, legs[i].len)) {
+            missing = (int)i;
+            break;
+        }
+    }
+    if (ran != 0 || status != 0 || missing >= 0) {
+        char nb[24];
+        t_putstr("joey: git-probe gate FAILED first-missing=");
+        t_putstr(missing >= 0 ? legs[missing].str : "<none>");
+        t_putstr(" status=");
+        t_putstr(itoa_dec(status, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: git-probe gate PASS (git init + add under the phenotype, as "
+             "SYSTEM -- proves faccessat/chdir/fchmodat/readlinkat/getrandom + "
+             "phenotype-fork-inherits-caps + chmod-on-own-files; commit/clone "
+             "await the reflog O_APPEND, next sub-chunk)\n");
     return 0;
 }
 
@@ -10058,6 +10139,13 @@ int main(void) {
                 // the stock-dynamic path. Ordering them the other way would
                 // lose that.
                 if (do_stock_distro_gate() != 0) return 1;
+
+                // === The git-under-VIVARIUM milestone-A gate. Runs after the
+                // DISTRO gate: it is the heaviest phenotype workload (a real
+                // static git driving init/add/commit/clone), so a failure here
+                // reads against a log where every narrower phenotype leg has
+                // already reported. SOFT-SKIPS without the static-git tarball.
+                if (do_git_probe_gate() != 0) return 1;
 
                 // #212: the one line the harness keys on. Both gates have run
                 // and recorded their disposition; say which, in a form an exit

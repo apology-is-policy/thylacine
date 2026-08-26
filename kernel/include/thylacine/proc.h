@@ -1383,6 +1383,15 @@ struct fork_context {
 // here at all -- it resumes at EL0 with x0 = 0.
 int rfork_forked(unsigned flags, const struct fork_context *fc);
 
+// The caps-bearing fork (I-43): rfork_forked with an explicit caps_mask rather
+// than the CAP_NONE default. The phenotype clone path passes CAP_ALL so a Linux
+// fork inherits the parent's caps (Linux's own semantics); rfork_internal still
+// intersects with the parent's held caps and strips CAP_ELEVATION_ONLY, so the
+// child never exceeds the parent (I-2) and elevation never propagates. Native
+// fork keeps CAP_NONE via rfork_forked.
+int rfork_forked_with_caps(unsigned flags, const struct fork_context *fc,
+                           caps_t caps_mask);
+
 // P4-Ic3: kernel-internal rfork that grants the child a capability subset.
 //
 // Identical to `rfork` except the child's caps field is set to

@@ -62,6 +62,14 @@ _Static_assert(VIV_LINUX_RENAMEAT2 > VIV_NATIVE_CEILING,
                "renameat2's collision argument is the ceiling one (#50; its "
                "three sub-ceiling siblings 34/35/38 carry per-number "
                "paragraphs in vivarium.h instead)");
+_Static_assert(VIV_LINUX_GETEUID > VIV_NATIVE_CEILING,
+               "geteuid's collision argument is the ceiling one (git chunk; "
+               "faccessat 48 is its sub-ceiling sibling with a per-number "
+               "paragraph in vivarium.h instead)");
+_Static_assert(VIV_LINUX_GETEGID > VIV_NATIVE_CEILING,
+               "getegid's collision argument is the ceiling one (git chunk)");
+_Static_assert(VIV_LINUX_GETRANDOM > VIV_NATIVE_CEILING,
+               "getrandom's collision argument is the ceiling one (git chunk)");
 
 // A T1 row: a Linux number, the Thylacine number it renumbers to, and the arity
 // that must carry across unchanged. `nargs` is not used to copy (the whole
@@ -416,6 +424,17 @@ static const struct viv_reject g_viv_rejects[] = {
     // nanoseconds -- a real struct conversion. Both shells land in this commit.
     { VIV_LINUX_CLOCK_GETTIME,   VIV_TIER2 },  // clk_id map -> SYS_CLOCK_GETTIME
     { VIV_LINUX_GETTIMEOFDAY,    VIV_TIER2 },  // realtime ns -> timeval {sec,usec}
+
+    // The git chunk (VIVARIUM.md section 6.26). faccessat is a real translation
+    // (stat + perm_check); geteuid/getegid are the one-principal twins of
+    // getuid/getgid.
+    { VIV_LINUX_FACCESSAT,       VIV_TIER2 },  // stat + perm_check(mode&7)
+    { VIV_LINUX_CHDIR,           VIV_TIER2 },  // measure len -> SYS_CHDIR
+    { VIV_LINUX_FCHMODAT,        VIV_TIER2 },  // open O_PATH -> wstat(MODE)
+    { VIV_LINUX_READLINKAT,      VIV_TIER2 },  // NOFOLLOW stalk -> .readlink
+    { VIV_LINUX_GETEUID,         VIV_TIER2 },  // == getuid (one principal)
+    { VIV_LINUX_GETEGID,         VIV_TIER2 },  // == getgid (one principal)
+    { VIV_LINUX_GETRANDOM,       VIV_TIER2 },  // -> SYS_GETRANDOM (CAP-gated)
 };
 
 #define VIV_REJECT_COUNT ((u32)(sizeof(g_viv_rejects) / sizeof(g_viv_rejects[0])))
@@ -1004,6 +1023,16 @@ enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags,
     if (fl & VIV_AT_SYMLINK_NOFOLLOW) *stalk_flags_out = 1;
 
     return VIV_TRANSLATED;
+}
+
+// faccessat -- the whole decision is the AT_FDCWD gate. See the header comment
+// for why this single check is both the cwd-form contract and the native-48
+// collision defense; the mode's EINVAL contour and the stat + perm_check are in
+// the shell (the mmap-judges-len precedent), so this stays pure and memoryless.
+enum viv_verdict vivarium_faccessat_decide(u64 dirfd) {
+    // Signed, for the AT_FDCWD sign-extension reason vivarium_openat_decide
+    // spells out: an `int` -100 arrives sign-extended and must compare equal.
+    return ((s32)(u32)dirfd == VIV_AT_FDCWD) ? VIV_TRANSLATED : VIV_FORWARD;
 }
 
 // =============================================================================

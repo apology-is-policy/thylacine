@@ -1932,6 +1932,79 @@ s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
     return 0;
 }
 
+// readlink core (the git chunk; VIVARIUM.md section 6.26). Resolves `path` (the
+// SYS_STAT resolution: cwd-join for a relative path, containment at root_spoor)
+// with STALK_WALK|STALK_NOFOLLOW so the LINK ITSELF is the quarry, then reads
+// its target via the Dev's .readlink slot and copies min(target, bufsiz) bytes
+// out -- readlink(2) does NOT NUL-terminate and returns the byte count. The
+// caller has already copied `path` into kernel memory (NUL-free); buf_va/bufsiz
+// are the still-user destination and are validated HERE, before the copy-out.
+static s64 sys_readlink_for_proc(struct Proc *p, const char *path, u64 path_len,
+                                 u64 buf_va, u64 bufsiz) {
+    if (!p || !path)                                 return -1;
+    if (path_len == 0 || path_len > SYS_OPEN_PATH_MAX) return -1;
+    if (!p->territory)                               return -1;
+    // POSIX readlink(2): a zero-size buffer is EINVAL.
+    if (bufsiz == 0)                                 return -(s64)T_E_INVAL;
+
+    struct Spoor *start = territory_root_ref(p->territory);
+    if (!start)                                      return -1;
+    char joined[SYS_OPEN_PATH_MAX + 1];
+    const char *rpath = path;
+    u64 rlen = path_len;
+    if (path[0] != '/') {
+        int jl = territory_join_cwd(p->territory, path, path_len,
+                                    joined, sizeof(joined));
+        if (jl < 0) { spoor_clunk(start); return -1; }
+        rpath = joined;
+        rlen  = (u64)jl;
+    }
+
+    // WALK|NOFOLLOW: stalk.h:70 -- the final symlink is NOT followed, so the
+    // returned Spoor IS the link (its qid carries QTSYMLINK). stalk_err (not
+    // stalk) so a walk failure keeps its CAUSE -- EACCES on a no-X-search
+    // component, ELOOP on an intermediate-link cycle -- rather than flattening
+    // to a bare ENOENT (the F3 note; the sibling faccessat/fchmodat resolvers
+    // already use the errno-aware form via sys_stat_for_proc / stalk_err).
+    int serr = T_E_NOENT;
+    struct Spoor *q = stalk_err(p, start, rpath, rlen,
+                                STALK_WALK | STALK_NOFOLLOW, 0, &serr);
+    spoor_clunk(start);
+    if (!q)                                          return -(s64)serr;
+
+    // EINVAL when the final component is not a symlink -- the POSIX contour git
+    // relies on to treat a path as a plain file. An opaque leaf (a Dev with no
+    // .readlink) is, from the caller's view, likewise not a readable link.
+    if (!(q->qid.type & QTSYMLINK) || !q->dev || !q->dev->readlink) {
+        spoor_clunk(q);
+        return -(s64)T_E_INVAL;
+    }
+
+    char tgt[SYS_OPEN_PATH_MAX + 1];
+    long tlen = q->dev->readlink(q, tgt, SYS_OPEN_PATH_MAX);
+    spoor_clunk(q);
+    // A NEGATIVE return is the Dev's REAL errno (dev9p_wire_errno bounds it:
+    // -T_E_INTR on a caught-note unwind, -T_E_IO on a transport drop, -T_E_NOENT
+    // on a degenerate empty target) -- preserve it. Flattening it to EINVAL (the
+    // F2 defect) would tell git's real_path "this component is NOT a symlink,
+    // treat it as a plain file" -- a silent wrong resolution on a merely
+    // interrupted RPC, since EINVAL is precisely readlink(2)'s not-a-symlink
+    // signal. The stalk.c:355 vtable-defense (a Dev must return 1..max) applies
+    // only to a NON-negative out-of-range length: 0 or > max is a malformed
+    // target, which IS EINVAL.
+    if (tlen < 0)                                    return (s64)tlen;
+    if (tlen == 0 || tlen > SYS_OPEN_PATH_MAX)       return -(s64)T_E_INVAL;
+
+    // THE COPY-OUT (the getdents64 P0 class): the destination is a raw user
+    // pointer, so validate the exact span before writing. uaccess_copy_out's
+    // fault fixup engages only for user-half VAs -- an unvalidated kernel-half
+    // buf would extinct or corrupt kernel memory.
+    u64 n = ((u64)tlen < bufsiz) ? (u64)tlen : bufsiz;
+    if (!sys_validate_user_buf(buf_va, n))           return -(s64)T_E_FAULT;
+    if (uaccess_copy_out(buf_va, tgt, n) != 0)       return -(s64)T_E_FAULT;
+    return (s64)n;
+}
+
 static s64 sys_stat_handler(u64 path_va, u64 path_len_raw, u64 stat_va) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
@@ -9150,7 +9223,20 @@ static s64 sys_rfork_core(struct exception_context *ctx, unsigned flags,
         .child_tls = child_tls,
     };
 
-    int pid = rfork_forked(flags, &fc);
+    // I-43 (VIVARIUM.md): a Linux fork INHERITS the parent's capabilities, so
+    // the PHENO_LINUX clone path forks with CAP_ALL as the mask -- which
+    // rfork_internal intersects with the parent's actually-held caps and then
+    // strips ~CAP_ELEVATION_ONLY, so the child gets exactly parent_caps minus
+    // elevation (I-2: <= parent, never grown; elevation never propagates by
+    // inheritance). Without this a shell-forked phenotype program (git,
+    // anything) loses every cap the container was granted -- getrandom(2), for
+    // one, would fail in a forked child that the entrypoint could call fine.
+    // NATIVE fork keeps CAP_NONE (Thylacine's stronger fork-zeros-caps default):
+    // a native program confers caps explicitly at spawn, never by inheritance.
+    struct Proc *p = t->proc;
+    int pid = (p && p->phenotype == PHENO_LINUX)
+                  ? rfork_forked_with_caps(flags, &fc, CAP_ALL)
+                  : rfork_forked(flags, &fc);
     if (pid < 0) return -(s64)T_E_AGAIN;
 
     // Only the PARENT reaches here. The child never returns from this call at
@@ -12015,6 +12101,174 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
     case VIV_LINUX_GETGID:
         // getgid(void). Same shape, same reason.
         return (s64)(u64)vivarium_map_gid(p->primary_gid);
+
+    case VIV_LINUX_GETEUID:
+        // geteuid(void). Thylacine has ONE principal per Proc -- no real vs
+        // effective split (I-22: authority is the capability set, not a uid),
+        // so effective == real and this is getuid's exact twin.
+        return (s64)(u64)vivarium_map_uid(p->principal_id);
+
+    case VIV_LINUX_GETEGID:
+        // getegid(void). Same, for the gid.
+        return (s64)(u64)vivarium_map_gid(p->primary_gid);
+
+    case VIV_LINUX_FACCESSAT: {
+        // faccessat(dirfd, pathname, mode): x0 dirfd, x1 path, x2 mode. The
+        // RAW 3-arg syscall -- args[3] is not part of this number's ABI and is
+        // never read (see vivarium.h). It is fstatat's front half joined to a
+        // perm_check: resolve the path exactly as newfstatat does, then answer
+        // the mode question against the resolved file's stat.
+        //
+        // No copy-OUT: the only user memory touched is the path READ (measured
+        // then re-read under fault fixup, identical to the newfstatat arm), so
+        // there is no dst buffer to validate -- the getdents64 P0's hazard
+        // (an unvalidated copy-out to a raw user ptr) does not exist here.
+        if (vivarium_faccessat_decide(args[0]) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+
+        // The mode's EINVAL contour, judged in the shell (the mmap-len
+        // precedent): Linux answers EINVAL for any bit outside R_OK|W_OK|X_OK.
+        // R_OK=4/W_OK=2/X_OK=1 map 1:1 onto PERM_R/PERM_W/PERM_X, and F_OK=0
+        // asks only existence.
+        u32 mode = (u32)args[2];
+        if (mode & ~0x7u) return -(s64)T_E_INVAL;
+
+        u32 path_len = 0;
+        s64 m = viv_measure_user_path(args[1], &path_len);
+        if (m != 0)                                  return m;
+        char path_scratch[SYS_OPEN_PATH_MAX + 1];
+        for (u32 i = 0; i < path_len; i++) {
+            u8 b = 0;
+            if (uaccess_load_u8(args[1] + i, &b) != 0) return -(s64)T_E_FAULT;
+            if (b == '\0')                             return -(s64)T_E_INVAL;
+            path_scratch[i] = (char)b;
+        }
+        path_scratch[path_len] = '\0';
+
+        // access(2) follows symlinks (there is no AT_SYMLINK_NOFOLLOW on the
+        // raw 3-arg number), so resolve with follow. A resolution failure IS
+        // the answer -- ENOENT/ENOTDIR/EACCES from the walk's own per-component
+        // gate flow straight back, exactly as git expects.
+        struct t_stat ks;
+        s64 rc = sys_stat_for_proc(p, path_scratch, path_len, 0u, &ks);
+        if (rc != 0)                                 return rc;
+
+        // F_OK: the file exists (the stat succeeded) and that is the whole
+        // answer. Otherwise the requested rwx bits are checked against the
+        // resolved file under the caller's OWN principal -- the same
+        // perm_check the open path runs, so access() and the subsequent open
+        // agree.
+        if (mode == 0)                               return 0;
+        if (perm_check(p, &ks, mode) != 0)           return -(s64)T_E_ACCES;
+        return 0;
+    }
+
+    case VIV_LINUX_CHDIR: {
+        // chdir(path): x0 = a NUL-terminated path pointer. The native
+        // SYS_CHDIR reads + validates the path itself (it takes path_va +
+        // path_len and runs its own sys_validate_user_buf + uaccess loop), so
+        // the only translation is measuring the length Linux leaves implicit.
+        u32 path_len = 0;
+        s64 m = viv_measure_user_path(args[0], &path_len);
+        if (m != 0)                                  return m;
+        s64 rc = sys_chdir_handler(args[0], (u64)path_len, 0, 0);
+        // sys_chdir_handler collapses every failure (target missing, not a
+        // directory, no search permission) to a bare -1. Passing that through
+        // would read as EPERM at the libc -- a code chdir never returns on
+        // Linux -- so map it to ENOENT, the dominant and least-wrong cause.
+        // The collapse of ENOTDIR/EACCES into ENOENT is a fidelity gap tracked
+        // for when a richer native chdir errno path exists; the SUCCESS path
+        // (the only one milestone A exercises) is exact.
+        return (rc == 0) ? 0 : -(s64)T_E_NOENT;
+    }
+
+    case VIV_LINUX_FCHMODAT: {
+        // fchmodat(dirfd, path, mode, flags): x0 dirfd, x1 path, x2 mode,
+        // x3 flags. git's git_config_set copies the config file's permission
+        // bits onto its lockfile via chmod before the rename and treats the
+        // chmod failing as a config-write failure, so `git init` needs this to
+        // write core.filemode.
+        //
+        // The AT_FDCWD gate is faccessat's exactly (dirfd == AT_FDCWD), which is
+        // also the native-53 (SYS_PIVOT_ROOT) collision defense -- see the
+        // header. A real dirfd forwards, as everywhere in this family.
+        if (vivarium_faccessat_decide(args[0]) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+
+        // The RAW 3-arg fchmodat(dirfd, path, mode) -- x0/x1/x2 only, exactly
+        // as musl's chmod()/fchmodat(...,0) issue it (SYS_fchmodat is DEFINE3;
+        // the flags-bearing variant is fchmodat2/452, a distinct number that
+        // FORWARDs). So args[3] is UNDEFINED register residue, not a flags word:
+        // reading it (the F1 defect) spuriously EINVAL'd a valid chmod whenever
+        // the caller left x3 nonzero, killing `git init`'s config write for an
+        // unlucky binary. Nothing to refuse -- the sibling faccessat row (48)
+        // makes the identical "args[3] does not exist and is never read" point.
+
+        // The 9 rwx bits only. Thylacine does not enforce setuid/setgid/sticky
+        // at v1.0 and T_WSTAT rejects them outright, so they are dropped here --
+        // a documented fidelity gap, not a silent one (git's config-file modes
+        // never carry them).
+        u32 mode = (u32)args[2] & T_WSTAT_MODE_MASK;
+
+        u32 path_len = 0;
+        s64 mrc = viv_measure_user_path(args[1], &path_len);
+        if (mrc != 0)                                return mrc;
+
+        // Open O_PATH: chmod requires OWNERSHIP, never read, so the
+        // perm_check-EXEMPT navigation handle is the correct base (an O_RDONLY
+        // open would wrongly fail for an owner who lacks read). FROM_ROOT is
+        // cwd-aware for a relative path (the openat AT_FDCWD correspondence).
+        // sys_open_handler returns the real errno (ER-1 rollout: ENOENT /
+        // ENOTDIR / EACCES from the walk), which IS the fchmodat answer.
+        s64 fd = sys_open_handler(SYS_WALK_OPEN_FROM_ROOT, args[1],
+                                  (u64)path_len, (u64)SYS_WALK_OPEN_OPATH);
+        if (fd < 0)                                  return fd;
+
+        // The mode change runs through the audited sys_wstat_for_proc, whose
+        // perm_wstat_check is the POSIX owner-or-CAP authority (the #47 note:
+        // the metadata axis is kind-gated, works on any-rights incl. O_PATH).
+        // Its bare -1 (perm denial / server refusal) maps to EPERM, chmod's
+        // permission-failure errno.
+        s64 rc = sys_wstat_for_proc(p, (hidx_t)fd, T_WSTAT_MODE, mode, 0, 0, 0);
+        (void)handle_close(p, (hidx_t)fd);
+        return (rc == 0) ? 0 : -(s64)T_E_PERM;
+    }
+
+    case VIV_LINUX_READLINKAT: {
+        // readlinkat(dirfd, path, buf, bufsiz): x0 dirfd, x1 path, x2 buf,
+        // x3 bufsiz. The AT_FDCWD gate is faccessat's exactly (also the
+        // native-78 SYS_PCI_INFO collision defense). The copy-OUT to buf is
+        // validated inside sys_readlink_for_proc, against the exact span.
+        if (vivarium_faccessat_decide(args[0]) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+        u32 path_len = 0;
+        s64 mrc = viv_measure_user_path(args[1], &path_len);
+        if (mrc != 0)                                return mrc;
+        char path_scratch[SYS_OPEN_PATH_MAX + 1];
+        for (u32 i = 0; i < path_len; i++) {
+            u8 b = 0;
+            if (uaccess_load_u8(args[1] + i, &b) != 0) return -(s64)T_E_FAULT;
+            if (b == '\0')                             return -(s64)T_E_INVAL;
+            path_scratch[i] = (char)b;
+        }
+        path_scratch[path_len] = '\0';
+        return sys_readlink_for_proc(p, path_scratch, path_len,
+                                     args[2], args[3]);
+    }
+
+    case VIV_LINUX_GETRANDOM: {
+        // getrandom(buf, buflen, flags): x0 buf, x1 buflen, x2 flags. The
+        // native SYS_GETRANDOM is shape-identical and does its own buffer
+        // validation + copy-out (the F237 partial-fault scrub included), and
+        // gates on CAP_CSPRNG_READ -- kept under I-43 (shape, not authority).
+        s64 rc = sys_getrandom_handler(args[0], args[1], args[2]);
+        // The native handler signals every failure (no cap / not seeded /
+        // fault) with a bare -1. -1 would read as EPERM at the libc; map it to
+        // EAGAIN, Linux getrandom's "entropy not available yet" errno and the
+        // closest analog for a v1.0 backend that cannot distinguish the causes.
+        // The success path returns the byte count verbatim (>= 0).
+        return (rc < 0) ? -(s64)T_E_AGAIN : rc;
+    }
 
     case VIV_LINUX_UNAME: {
         // uname(buf): x0 buf. A fabrication -- WHAT it claims is the decision,

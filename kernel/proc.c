@@ -1695,6 +1695,21 @@ int rfork_forked(unsigned flags, const struct fork_context *fc) {
     return rfork_internal(flags, NULL, NULL, CAP_NONE, fc);
 }
 
+// The caps-bearing fork: identical to rfork_forked but with an explicit
+// caps_mask instead of the CAP_NONE default. The ONLY caller is the phenotype
+// clone path (sys_rfork_core, PHENO_LINUX), which passes CAP_ALL so a Linux
+// fork INHERITS the parent's capabilities -- Linux's own semantics (I-43 shape
+// fidelity). rfork_internal still intersects with the parent's actual caps and
+// still strips ~CAP_ELEVATION_ONLY unconditionally, so the child never exceeds
+// the parent (I-2: child_caps == parent_caps & ~elevation <= parent_caps) and
+// elevation-only caps never propagate by inheritance. Native fork keeps
+// CAP_NONE (Thylacine's stronger fork-zeros-caps default) via rfork_forked.
+int rfork_forked_with_caps(unsigned flags, const struct fork_context *fc,
+                           caps_t caps_mask) {
+    if (!fc) extinction("rfork_forked_with_caps with NULL fork_context");
+    return rfork_internal(flags, NULL, NULL, caps_mask, fc);
+}
+
 int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
                     caps_t caps_mask) {
     return rfork_internal(flags, entry, arg, caps_mask, NULL);
