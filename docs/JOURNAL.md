@@ -161,6 +161,44 @@ allocate+map E2E structurally cannot provide — owed at the GPU-submit /
 cap-exhaustion chunk. By the convention that a returned P1 is a dirty close, a
 **round 3** on the round-2 fixes is in flight as of this writing.
 
+**Round 3 converged the chain, and found the F6-closure had a hole I'd have
+missed.** R3 (0 P0 / 0 P1 / 1 P2 / 1 P3) re-derived the errno chain at every link
+-- the conflation hazard I hunted hardest (a *kernel*-synthesized `-ENOMEM` after
+the Twrite committed) provably does not exist (kernel OOMs on this path are
+`-P9_E_IO` or a shortened write, never `-12`). But **F8 [P2]**: tapestryd's
+`wmem_mint` checked the holistic cap BEFORE the duplicate, so in the
+`over && taken` corner a concurrent-alloc race loser's *duplicate* handle at a
+cap-adjacent ctx got `-ENOMEM` (over wins the tiebreak) for a handle that IS
+installed -> my client's "free on `-ENOMEM`" freed the *winner's* live slot. My
+round-2 errno fix was defeated by the server's check *order* -- the two halves of
+the same predicate colliding in exactly the cap-adjacent corner where the F2
+memory-pressure loop lives. Two-line server swap (taken before over), re-witnessed
+GREEN. The whole chain closed + pushed at `e34760d8` (mesa `d7f4ef1`/patch 0014).
+Lesson, filed: an errno-keyed free/keep decision is only as exact as the
+*producer's* errno assignment, and a check-order bug at the producer defeats it in
+the collision corner.
+
+**Then: the GPU-submit chunk's design research, and the redesign that a fork
+proved.** Operator chose the GPU-submit milestone, then chose to pull MULTI-QUEUE
+forward (not single-queue-only). I verified the F1 proof is viable on the current
+path (the WARP ctx fence retires on GPU-work completion via VIRTIO_GPU_FLAG_FENCE
+-- not stream delivery), then researched the multi-queue fence model. The key
+finding, which a design-brief fork proved decisively: **multi-queue is a
+NEW-MECHANISM redesign, not a mapping.** Neither existing fence path carries a
+per-VkQueue GPU-completion signal -- the per-ring `ring/<ridx>/fence` is the V-3a
+echo-drain ACK and is *structurally disabled* for Venus rings (`wring_kick`
+returns E_OPNOTSUPP: "virglrenderer POLLS a host3d ring"), and the real
+GPU-completion fence is ctx-wide with no `ring_idx` in `FenceTag`. So per-queue
+fences require threading queue identity through the completion pump. Plus a trap
+worth the whole research: mesa's `ring_idx` (a *timeline* index) and tapestryd's
+`ridx` (a *host3d ring slot*) are two numerically-overlapping namespaces nothing
+documents. Captured as `docs/WARP-MULTIQUEUE-DESIGN.md` (the design foundation +
+the open forks: queue count, the fence-file ABI, pulling the F6/F8 mutex in as a
+now-dependency, the #210 per-ring-FIFO assumption to defuse). Operator directed
+the IMPLEMENTATION to a fresh session -- so this session lands the design
+foundation; the fresh session runs the design conversation (the forks) into
+scripture, then implements.
+
 ---
 
 ## 2026-08-26 — V-3b-3c-2a: the device-memory substrate, the split the code sized for, and the two P3s that were real hazards
