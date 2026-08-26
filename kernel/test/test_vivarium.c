@@ -3873,3 +3873,51 @@ void test_vivarium_dirent64_encode(void) {
     TEST_EXPECT_EQ(n, (u64)32, "a truncated trailing source entry is dropped");
     TEST_EXPECT_EQ(ck, (u64)101, "its cookie is not consumed");
 }
+
+// getdents64 holotype F1 [P0]: the shell must validate the user `dirp` BEFORE
+// any store -- the copy-out writes via uaccess_store_u8, whose fault fixup does
+// NOT engage for a kernel-half VA, so an unprivileged phenotype passing a
+// kernel dirp would extinct the kernel (or, at a writable kernel VA, corrupt
+// it). Driven through the REAL arm (viv_getdents64_for_test -> viv_tier2), the
+// same shape as the getsockopt uaccess-guard test. The guard runs before the
+// fd lookup, so this needs no live directory -- the FAULT is the buffer check.
+extern s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
+void test_vivarium_getdents64_guards_uaccess(void);
+void test_vivarium_getdents64_guards_uaccess(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+
+    // Same VAs as the getsockopt guard test: user_ok passes the pure validate
+    // (in range, non-NULL, need not be mapped); kern_va is the first rejected
+    // VA (== UACCESS_USER_VA_TOP).
+    const u64 user_ok = 0x40000ull;
+    const u64 kern_va = 0x0000800000000000ull;
+
+    // F1: a kernel-range dirp is rejected -T_E_FAULT because the buffer guard
+    // runs BEFORE the fd lookup. Fails-without-fix (MEASURED, guard disabled):
+    // pre-fix the arm reaches the lookup with this unhandled fd 3 and returns
+    // -T_E_BADF, so this EFAULT assertion fails cleanly (the harness survives --
+    // the destructive store-path extinction needs a VALID directory fd, which
+    // the kthread harness cannot stage; the viv-run E2E's live `ls` covers it).
+    // So this leg pins the guard's PRESENCE and its position-before-lookup; the
+    // control below confirms a user-ok buffer passes the guard to the lookup.
+    s64 r_fault = viv_getdents64_for_test(p, 3, kern_va, 4096);
+    TEST_EXPECT_EQ(r_fault, -(s64)T_E_FAULT,
+                   "kernel-range dirp rejected EFAULT before the fd lookup");
+
+    // Control: a user_ok dirp with a nonexistent fd reaches the lookup and
+    // answers EBADF -- proving the EFAULT above came from the BUFFER guard
+    // (validation passed for user_ok) and the arm is genuinely reached.
+    s64 r_badf = viv_getdents64_for_test(p, 3, user_ok, 4096);
+    TEST_EXPECT_EQ(r_badf, -(s64)T_E_BADF,
+                   "a user-ok dirp with a bad fd reaches the lookup (EBADF)");
+
+    // Ordering: count==0 is EINVAL, decided before the buffer guard -- a
+    // kern_va dirp with count 0 still answers EINVAL, not EFAULT.
+    s64 r_zero = viv_getdents64_for_test(p, 3, kern_va, 0);
+    TEST_EXPECT_EQ(r_zero, -(s64)T_E_INVAL, "count==0 is EINVAL before the guard");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}

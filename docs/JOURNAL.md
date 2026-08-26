@@ -22,6 +22,99 @@ needed the operator.
 
 ---
 
+## 2026-08-26 (aux) -- getdents64+fsync lands; the viv-run ^C hunt ends in an exoneration
+
+**What landed**: the VIVARIUM 6.25 chunk (`8c72dcf7`) -- getdents64(61) +
+fsync(82)/fdatasync(83) + the O_DIRECTORY admission that makes musl's
+`opendir` reachable. The implementation itself was quiet (the 6.24 follow-on,
+built to plan); the run's substance was the hunt that blocked its close.
+
+**The hunt.** Adding the E2E's 4th leg (`ls` -> G50, the getdents64 witness)
+made the following ^C leg fail 3/3 where the 3-leg shape "passed" -- and the
+committed shape's "~40% pts flake" was the same mechanism. The operator voted
+(AskUserQuestion) to pull the suspected caught-note wake fix forward. Three
+rounds of counter instrumentation later (tear-proof `cons_diag_line` units --
+raw `uart_puts` instruments TORE the guest stream in the prior session, the
+open #243 class, demonstrated), the verdict inverted: **there was no wake
+gap**. The measured chain, run to ground:
+
+- The pts INT fan reaches all three pgrp members (fm=3), ash's arm lands
+  (fg=1) WHEN ash's SIGINT disposition admits it -- and the failing
+  alignment's ^C, sent the instant leg 4's output matched, landed inside
+  busybox-ash's reap window where a job-control shell still holds
+  SIGINT=SIG_IGN. The V-6b ignore-drop then discards the note AT POST TIME
+  (fo=1 fg=0: posted-and-dropped), which is exactly Linux's semantics for a
+  signal generated while ignored. No kernel defect: the scenario raced its
+  own stated precondition ("^C at the ash PROMPT"). Fix: settle first;
+  5/5 instrumented, 3/3 on the final shape.
+- The hunt exercised the one leg of the 11b caught-note machinery nothing
+  had ever driven: the WAKE of a parked elected 9P reader. Measured live
+  (b=1 r=1 -> so=1 -> cr=1): fan -> arm -> proc_caught_note_wake ->
+  SLEEP_NOTEINTR post-wake unwind -> reader-role handoff ->
+  CLIENT_WAIT_NOTEINTR -> EINTR -> delivery -> handler -> prompt.
+- The byte capture (a syscall-exit hook dumping the read's return + hex)
+  proved ash's post-^C read returned the typed line INTACT (rc=22,
+  `756e616d65...` = "uname -s | tr a-z A-Z\n" exactly). The residual
+  line-eat is busybox-internal: ash's pending-interrupt latch (its
+  INT_OFF/INT_ON bracketing) can consume the first line completed after a
+  delivery, alignment-dependent. Documented in 145; not a kernel row.
+
+**Wrong turns, and what caught each**:
+- The first dump trigger ("dump at INT post #2") captured the BOOT LADDER's
+  pty-probe posts, not the scenario's ^C -- the openpty E2E spends the early
+  posts. Caught by the dump's own context lines sitting in the wrong
+  transcript region. Lesson: a trigger keyed to a global ordinal races every
+  other producer of the same event.
+- The fan snapshot first read fm=1 and I nearly concluded ash was outside
+  the pgrp; the session-membership dump (CNWS) showed all three members IN
+  it -- the fm=1 was a STALE snapshot of a prior boot-probe fan (the dump
+  ran before its own post's fan). Caught by dumping membership and fan in
+  the same breath and seeing them disagree. Restructured to dump-after-fan.
+- My own instrument had a cross-CPU visibility race (a plain u32 arm flag),
+  which ate the EINTR'd read's CNWB line and nearly re-opened a closed
+  question. Caught by an accounting hole: a return with no matching entry.
+- "The trace shows ash executing a pipeline" -- misread: the
+  fstatat/getcwd/openat run after a delivery is ash's PROMPT REDRAW; the
+  green run's trace names the real execution signature (pipe2 -> clone ->
+  the child's set_tid_address). Caught by diffing a green trace against the
+  failing one instead of reading the failing one alone.
+
+**The holotype earned its round -- a P0.** The Fable-5 prosecutor (family-
+diverse: the impl was Opus 4.8) returned 1 P0 + 1 P2 + 1 P3, and the P0 was
+the real thing: the getdents64 arm copied its encoded dirents straight to the
+user `dirp` via `uaccess_store_u8` with NO `sys_validate_user_buf` -- while its
+own native twin `sys_readdir_handler` validates up front. `uaccess_store_u8`'s
+fault fixup engages only for user-half VAs, so an unprivileged phenotype
+passing a kernel-half `dirp` (reachable precisely BECAUSE this chunk admits
+O_DIRECTORY, so `open("/", O_DIRECTORY)` now succeeds) gets a guaranteed kernel
+extinction, or -- at a writable kernel VA -- a `strb` of attacker-influenced
+dirent name bytes into chosen kernel memory: an arbitrary-write primitive. The
+reflex the prosecutor named fighting is the one worth recording: the arm READS
+like the audited #50 mutation shells (same lookup/clunk choreography), which
+invites waving it through -- but those shells never copy a variable-length
+kernel buffer to a raw user pointer, and that is the exact line this arm
+crossed without the guard its native twin carries. Caught before push (the
+chunk was local-only). Fix: one validation line before the lookup, plus a
+MEASURED fails-without-fix regression (guard disabled -> the arm reaches the
+lookup with the test's unhandled fd and returns BADF where EFAULT is asserted,
+failing cleanly with no panic -- the destructive store-path needs a live dir
+the E2E covers). Two more fell out of the same round: `dev9p_readdir`'s bare
+-1 (the one sibling not using `dev9p_wire_errno`) was flattening a caught-note
+EINTR -- the very ^C-during-`ls` path this chunk added an E2E leg for -- into a
+fabricated EPERM at the viv boundary; and O_DIRECTORY|O_TRUNC truncated a
+regular file before the ENOTDIR check (silent data loss). All three fixed +
+one self-audit P3 (a u16 d_reclen guard). Dirty close by the rule (a P0), but
+every fix is a one-liner the holotype pre-blessed, so a self-audit of the
+fixes stood in for a re-round. Lesson, pinned: a new copy-out arm that does not
+mirror its native twin's buffer guard is a kernel-write primitive -- the guard
+is not optional garnish, it is the whole reason the native handler validates.
+
+**Also this run**: yip 0027/0028 settled (byes exchanged); the mac held across
+both gate runs (the pre-fix SMP gate was KILLED as superseded the moment the
+P0 landed -- a gate on soon-to-be-changed source certifies nothing); the stale
+"caught-note wake OPEN" memory line corrected (it had already landed at
+86b4b714/6884f06c -- the hunt confirmed it works).
+
 ## 2026-08-25 (aux) -- #50 path-mutation family: git's write path opens
 
 **The chunk**: `b417b307` (scripture) + `c4f0e50e` (implementation) +

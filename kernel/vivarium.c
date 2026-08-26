@@ -659,7 +659,14 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
             // §4 forbids the table from minting new ones.
             return VIV_FORWARD;
         }
-        if (fl & VIV_O_TRUNC) omode |= VIV_OMODE_TRUNC;
+        // O_TRUNC is dropped when O_DIRECTORY is also set: a directory is never
+        // truncated on Linux, and O_DIRECTORY|O_TRUNC on a REGULAR file is
+        // ENOTDIR *before* any truncation. Carrying TRUNC here would truncate
+        // the regular file's contents and only THEN the shell's QTDIR
+        // postcondition answers ENOTDIR -- silent data loss the Linux row never
+        // incurs. Clearing it makes the open non-destructive so the ENOTDIR (or
+        // the kernel's own EISDIR on a write-open of a dir) fires cleanly.
+        if ((fl & VIV_O_TRUNC) && !dirreq) omode |= VIV_OMODE_TRUNC;
     }
     // D-1: O_NOFOLLOW rides BOTH arms -- it is one of the three flags Linux's
     // O_PATH does NOT ignore (the #151 comment below lists them), and

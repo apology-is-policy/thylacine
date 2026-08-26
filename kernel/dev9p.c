@@ -1955,7 +1955,15 @@ static long dev9p_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     u64 offset = (u64)off;
     u32 got = 0;
     int rc = p9_client_readdir(p->client, p->fid, offset, count, (u8 *)buf, &got);
-    if (rc != 0) return -1;
+    // Errno rollout (getdents64 chunk): the bare -1 crossed the viv boundary as
+    // a fabricated EPERM -- and, worse, flattened a caught-note EINTR (the ^C-
+    // during-ls path this chunk adds an E2E leg for) into a non-retryable error.
+    // Surface the real code exactly as dev9p_readlink/dev9p_fsync do: -P9_E_INTR
+    // -> EINTR (retryable), a transport drop -> EIO, a server Rlerror passed
+    // through. NOT fid_suspect: an interrupt/transport error does not indict the
+    // fid (the rename/fsync arms mark it because a mid-op failure there can
+    // desync the fid; a readdir cursor is re-read from c->offset, unchanged).
+    if (rc != 0) return dev9p_wire_errno(rc);
     return (long)got;
 }
 

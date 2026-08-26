@@ -3358,7 +3358,11 @@ sat on the V-2b reject list, `getdents64` was unreachable).
   only after its own copy-out (a faulting user buffer never advances the
   cursor — the F3 fault property). Errno rollout on the shared handler:
   `-T_E_BADF` (CWALKONLY) / `-T_E_OPNOTSUPP` (no slot) / `-T_E_IO` (malformed
-  dirent) / dev errors verbatim.
+  dirent) / dev errors verbatim. **`dev9p_readdir` itself now returns
+  `dev9p_wire_errno(rc)`** (it was the one dev9p op still flattening every RPC
+  failure to a bare `-1`, unlike its `readlink`/`fsync`/rename siblings) — so a
+  caught-note EINTR (the ^C-during-`ls` path) surfaces as retryable EINTR
+  rather than a fabricated EPERM at the viv boundary (the audit's F2).
 - `viv_dirent64_encode_run` (`kernel/syscall.c`, non-static: unit-tested) —
   the pure 9P-dirent -> `linux_dirent64` transform: `d_ino <- qid.path`,
   `d_off <- resume cookie`, `d_type` verbatim (shared DT numbering),
@@ -3368,8 +3372,13 @@ sat on the V-2b reject list, `getdents64` was unreachable).
   fit (the caller's EINVAL row).
 - The `VIV_LINUX_GETDENTS64` arm — 2048-byte raw / 2560-byte encode stack
   buffers (worst growth align8(20+n)/(24+n) at n==5 = 32/29; 2048*32/29 =
-  2260 < 2560, no overrun); `count==0 -> EINVAL`; no-RIGHT_READ -> EBADF;
-  non-QTDIR -> ENOTDIR; emitted==0 with raw bytes -> EINVAL.
+  2260 < 2560, no overrun); `count==0 -> EINVAL`; **`sys_validate_user_buf`
+  on the user `dirp` up front (before the fd lookup, mirroring the native
+  `sys_readdir_handler`)** — the copy-out writes via `uaccess_store_u8`, whose
+  fault fixup engages only for the user half, so an unvalidated kernel-half
+  `dirp` would extinct (or corrupt) rather than fault-gracefully; this was the
+  audit's F1 P0; no-RIGHT_READ -> EBADF; non-QTDIR -> ENOTDIR; emitted==0 with
+  raw bytes -> EINVAL.
 - `vivarium_openat_decide` gained `bool *dir_required_out` (NULL permitted;
   written only on TRANSLATED). The openat shell enforces it as a
   postcondition on the MINTED Spoor's own qid (`sys_lookup_spoor` -> QTDIR ->
@@ -3389,14 +3398,23 @@ sat on the V-2b reject list, `getdents64` was unreachable).
 - The number rows carry damage-envelope collision paragraphs in `vivarium.h`
   (61 vs SYS_CAP_GRANT_CLEARANCE, 82 vs SYS_WEFT_MAP, 83 vs
   SYS_BURROW_ATTACH_LAZY — all fd-based, caller's-own-things envelope).
+- `O_DIRECTORY|O_TRUNC` drops the TRUNC (`vivarium_openat_decide`): a directory
+  is never truncated on Linux, and this combination on a regular file is
+  ENOTDIR *before* truncation — carrying TRUNC would truncate the file and only
+  then answer ENOTDIR (the audit's F3, silent data loss). Dropping TRUNC makes
+  the open non-destructive so the ENOTDIR fires cleanly.
 
 ### Witnesses
 
 Kernel: `vivarium.dirent64_encode` (two-record layout, partial-fit cookie,
 first-no-fit 0, truncated-tail drop) + the O_DIRECTORY domain assertions
 (plain, the musl-opendir flag set, `O_PATH|O_DIRECTORY`) + the 5-way NULL
-guard on the decide outputs. E2E: viv-run's 4th leg (`ls /tmp/d50` -> `G50`:
-busybox ls -> musl readdir -> the 61 row, as a plain user).
+guard on the decide outputs + **`vivarium.getdents64_guards_uaccess`** (the F1
+regression: a kernel-range `dirp` -> EFAULT before the fd lookup; a user-ok
+`dirp` with a bad fd reaches the lookup -> EBADF; count==0 -> EINVAL first —
+MEASURED fails-without-fix, guard off gives BADF where EFAULT is asserted).
+E2E: viv-run's 4th leg (`ls /tmp/d50` -> `G50`: busybox ls -> musl readdir ->
+the 61 row, as a plain user).
 
 ### The E2E ^C leg — the settle is load-bearing (the 2026-08-26 hunt)
 

@@ -11089,6 +11089,12 @@ u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
         u32 nlen = (u32)src[spos + 22] | ((u32)src[spos + 23] << 8);
         if (spos + 24 + nlen > src_len) break;          // truncated tail
         u64 reclen = (19 + (u64)nlen + 1 + 7) & ~7ull;
+        // d_reclen is a u16 field; a reclen past 0xFFFF would store truncated
+        // and mislead the guest's record walk. Unreachable from the getdents64
+        // arm (VIV_GD_RAW=2048 bounds nlen), but this encoder is public + unit-
+        // tested, so its contract must not silently depend on the caller's
+        // buffer size. Defense-in-depth for any future caller.
+        if (reclen > 0xFFFF) break;
         if (dpos + reclen > dst_cap) break;             // record does not fit
 
         u64 ino = 0, cookie = 0;
@@ -11362,6 +11368,16 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         enum { VIV_GD_RAW = 2048, VIV_GD_ENC = 2560 };
         u64 count = args[2];
         if (count == 0)                          return -(s64)T_E_INVAL;
+        // Validate the user buffer BEFORE any access -- the getdents64 copy-out
+        // below writes straight to args[1] via uaccess_store_u8, whose fault
+        // fixup only engages for the USER half; a kernel-range dirp from an
+        // unprivileged phenotype would otherwise extinct (or, at a writable
+        // kernel VA, corrupt) rather than fault-gracefully. Mirror the native
+        // sys_readdir_handler, which validates its buffer up front. The write
+        // is bounded by dst_cap (<= VIV_GD_ENC), so validating that span covers
+        // every store the loop can make.
+        u64 dst_cap = (count < (u64)VIV_GD_ENC) ? count : (u64)VIV_GD_ENC;
+        if (!sys_validate_user_buf(args[1], dst_cap)) return -(s64)T_E_FAULT;
         struct Spoor *c = sys_lookup_spoor(p, (hidx_t)args[0], RIGHT_READ);
         if (!c)                                  return -(s64)T_E_BADF;
         if (!(c->qid.type & QTDIR))            { spoor_clunk(c); return -(s64)T_E_NOTDIR; }
@@ -11372,7 +11388,6 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         if (got <= 0)                          { spoor_clunk(c); return got; }
 
         u8  enc[VIV_GD_ENC];
-        u64 dst_cap = (count < (u64)VIV_GD_ENC) ? count : (u64)VIV_GD_ENC;
         u64 emit_cookie = 0;
         u64 emitted = viv_dirent64_encode_run(raw, (u64)got, enc, dst_cap,
                                               &emit_cookie);
@@ -12247,6 +12262,18 @@ s64 viv_getsockopt_for_test(struct Proc *p, u64 fd, u64 level, u64 optname,
                             u64 optval_va, u64 optlen_va) {
     u64 args[VIV_NARGS] = { fd, level, optname, optval_va, optlen_va, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_GETSOCKOPT, args);
+}
+
+// Drives the REAL getdents64 shell through the T2 dispatcher, so a test can
+// prove the F1 uaccess guard: the shell validates the user buffer BEFORE the
+// fd lookup, so a kernel-range dirp is rejected -T_E_FAULT with no store and no
+// extinction (the getdents64 copy-out writes via uaccess_store_u8, whose fault
+// fixup does not engage for a kernel-half VA). Same NULL-ctx safety as the
+// fcntl/getsockopt hooks: getdents64 reads `p` + `args` and never touches ctx.
+s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
+s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count) {
+    u64 args[VIV_NARGS] = { fd, dirp, count, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_GETDENTS64, args);
 }
 
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
