@@ -3380,15 +3380,22 @@ a pouch is part of the animal, a vivarium is built around it.
 
 Brand detection is **advisory input to a declaration**, never an inference:
 
-1. The **vivarium manifest** declares the container's phenotype. This is the only
-   thing that can *set* `PHENO_LINUX`.
+1. The **vivarium manifest** declares a container's phenotype (the `pheno_flags`
+   spawn-arg channel). Since the `/viv/bin` extension (§13), a **mount marked
+   `MPHENO_LINUX`** is the *second* — and, at v1.0, last — thing that can *set*
+   `PHENO_LINUX`: a binary resolved for exec through such a mount is stamped Linux
+   even outside any vivarium. Both channels are OR-combined at the single exec-time
+   phenotype stamp; no ELF byte, note, or interpreter path ever adds a third.
 2. Within a declared-Linux vivarium, every exec is `PHENO_LINUX` unless the binary is
    positively identified as native (a Thylacine-native brand, §12.2).
-3. Outside a vivarium, the phenotype is always `PHENO_NATIVE`. No ELF byte, note, or
-   interpreter path changes that.
+3. Outside a vivarium **and not resolved through an `MPHENO_LINUX` mount**, the
+   phenotype is always `PHENO_NATIVE`. Only a namespace-composed declaration (a
+   manifest, or a pheno-mount) ever sets it — never an ELF byte, note, or interpreter
+   path. The fail-safe direction is preserved on BOTH channels: a coverage gap in
+   either one leaves a binary NATIVE, never silently Linux (§13's fail-safe property).
 4. `PT_INTERP` / `EI_OSABI` / `NT_GNU_ABI_TAG` are used only to *warn* on an obvious
-   mismatch (a Linux-interp binary exec'd outside a vivarium gets a diagnostic and a
-   clean failure, not a silent mis-decode).
+   mismatch (a Linux-interp binary exec'd outside a vivarium AND off any pheno-mount
+   gets a diagnostic and a clean failure, not a silent mis-decode).
 
 **As-built (V-1b).** Rule 1 is `sys_spawn_args.pheno_flags & SPAWN_PHENO_LINUX`,
 set by `viv` from the manifest's `annotations["org.thylacine.phenotype"]` on the
@@ -3414,6 +3421,180 @@ should eventually carry a positive brand of their own (an `NT_GNU_ABI_TAG`-shape
 v1.0 — rule 3 above makes the default safe without it — but it is what would let
 rule 2 be exact instead of heuristic, and it is cheap to add while Clade is being
 built. Recorded for the main track.
+
+---
+
+## 13. The `/viv/bin` phenotype mount — bare Linux binaries on the PATH
+
+**Status: DESIGN (scripture-first). Operator-requested + operator-voted 2026-08-26,
+after the git-under-VIVARIUM arc (§6.26/§6.27) closed. No code yet; this section is
+the ratified design the implementation is built against.**
+
+### 13.0 Thesis
+
+git now runs end to end under a vivarium container (§6.27). The operator's next ask:
+**ship it as a first-class program** — "a separate bin directory for Linux programs
+run via viv, put that bin on the PATH, make it work with ut's autocomplete and path
+resolution, so the user has a seamless experience" — plus the question, *"is there a
+way to easily/quickly identify a Linux binary from ut?"*
+
+The answer to that question is the whole design. **There is no reliable INTRINSIC ELF
+marker for the v1.0 target (a musl-static binary)** — this is the settled Q3
+resolution (§12.1): `EI_OSABI` is non-discriminating in both directions and
+`PT_INTERP` is absent on a static binary. So a phenotype is never *sniffed*, only
+*declared*. The fast, unambiguous, and design-correct identifier is therefore **the
+binary's LOCATION**: a curated, trusted directory *is* an external declaration, in
+exactly the Q3 spirit. `/viv/bin` is that directory, and the mount it lives on
+carries the declaration.
+
+### 13.1 The decision (operator vote, 2026-08-26)
+
+Two votes, both to the recommended option:
+
+- **Declaration mechanism: a kernel mount-flag.** `/viv/bin` is a real bind mount
+  carrying a new `MPHENO_LINUX` territory flag; the *kernel* stamps `PHENO_LINUX` on
+  any binary exec'd through that mount. The declaration stays kernel-owned and
+  namespace-resident — where §12.1 says it belongs — rather than as a hardcoded
+  path-prefix string in userspace.
+- **Directory: `/viv/bin`** (matches the vivarium naming; system-owned, so only
+  trusted shipped binaries live there — which is what makes by-location sound).
+
+### 13.2 Prior art (why a mount flag is the design-correct form)
+
+- **Plan 9** has no binary-compat precedent, but *location-as-namespace-composition*
+  is its native idiom, and mounts already carry flags (`MREPL`/`MBEFORE`/`MAFTER`/
+  `MCREATE`, and our own `MNOEXEC`). **The phenotype as a mount property is the
+  Plan 9-shaped answer** — the same shape as `MNOEXEC` (#217), which is the direct
+  implementation template.
+- **FreeBSD Linuxulator** brands a binary Linux by its `/compat/linux` interpreter-
+  path prefix — literally "by location," system-curated. **Direct precedent for the
+  operator's idea**; `/viv/bin` is its Thylacine form.
+- **illumos LX brand zones / WSL1 pico processes / gVisor** all have the *zone/
+  sandbox/runtime* declare the ABI — which is our §12.1 *manifest* channel (as-built
+  V-1b). The SOTA splits into "the container declares it" (our first channel) vs "a
+  curated location declares it" (FreeBSD, this second channel).
+
+The synthesis — **the phenotype is a property of a trusted namespace mount, declared
+by whoever composes the namespace, never inferred from bytes** — fuses the Plan 9
+mount-flag idiom with FreeBSD's `/compat/linux`, at single-binary rather than whole-
+container granularity, while keeping the declare-don't-sniff invariant intact.
+
+### 13.3 Mechanism (the `MNOEXEC` sibling)
+
+1. **A new mount flag `MPHENO_LINUX = 0x0020`** in `kernel/include/thylacine/
+   territory.h`, the next bit after `MNOEXEC (0x0010)`. A mount marked with it
+   declares: binaries resolved for exec through this mount run under the Linux
+   phenotype.
+2. **A parallel coverage scan `mount_pheno_linux_covers(territory, dc, devno)`** in
+   `kernel/territory.c`, the ANY-scan twin of `mount_noexec_covers` — keyed on the
+   `(dc, devno)` device instance a file necessarily shares with its mount source
+   (`spoor_clone` propagates `devno` through every walk/cross), so one device instance
+   mounted twice cannot carry two verdicts.
+3. **One OR-combined stamp.** At the exec-time phenotype stamp (today
+   `if (pheno_linux) p->phenotype = PHENO_LINUX;`, `kernel/syscall.c` in the spawn
+   thunk, right where the resolved binary Spoor `exe` and the child `territory` are
+   both in hand), the child is stamped Linux iff the spawn-arg channel declared it
+   (`sa->pheno_flags & SPAWN_PHENO_LINUX`) **OR** the resolved binary's mount covers
+   it (`mount_pheno_linux_covers(p->territory, exe->dc, exe->devno)`). Two declaration
+   channels, one stamp site, no third path.
+4. **Observable.** The `/proc/<pid>/ns` and `/dev/ns` renderers print ` pheno-linux`
+   next to a covered mount exactly as they print ` noexec` (`kernel/territory.c`
+   render path) — a declaration that cannot be observed cannot be audited (the #217
+   lesson).
+
+**The fail-safe property — and why `MPHENO_LINUX` needs NO `may_back_exec`-style
+floor.** `MNOEXEC` is a RESTRICTION whose coverage gaps fail *open* (a Dev the
+`(dc,devno)` key cannot reach — `devenv` stamps the caller's env devno — escapes the
+noexec cover), which is precisely why `Dev.may_back_exec` exists as a hard floor
+beneath it. `MPHENO_LINUX` is a DECLARATION whose coverage gaps fail *safe*: if the
+key misses, the binary runs `PHENO_NATIVE` (rule 3's default) — a Linux binary that
+does not get the Linux phenotype merely makes Linux-numbered calls that hit native
+handlers and fails cleanly (rule 4's diagnostic path), never a silent privilege gain.
+So there is no fail-open class to floor against; the safe direction is structural.
+
+### 13.4 I-43 soundness (shape, never authority)
+
+The mount flag confers ABI **shape** through the namespace and not one bit of
+authority (I-43). A Proc stamped `PHENO_LINUX` via the mount gets Linux syscall
+numbering/semantics; its capabilities come *solely* from the spawn's `cap_mask` (the
+spawner's own held caps, minus `CAP_ELEVATION_ONLY` — the phenotype-fork-inherits-caps
+rule of §6.26). The core soundness argument carries over verbatim from the manifest
+channel: **every translated Linux number collides with a live native one, so a
+mis-declared Proc mis-decodes its own calls behind its own gates and reaches nothing
+new** (ARCH §28 I-43; `docs/reference/145-vivarium.md` §3). The mount channel is if
+anything *stronger* than the manifest channel (which `viv` sets ungated): composing a
+mount is itself a namespace edit, and `/viv/bin` is composed by `PRINCIPAL_SYSTEM` at
+boot.
+
+**Open question (for the sub-chunk-A audit, not the operator):** should *setting*
+`MPHENO_LINUX` on a mount be capability-gated? `MNOEXEC` is deliberately ungated
+(territory.c: "authority conferred by a namespace edit," and a user marking their own
+mount noexec only RESTRICTS). `MPHENO_LINUX` EXPANDS (declares Linux) — but I-43 makes
+it authority-neutral, so an unprivileged user marking a mount in their OWN namespace
+`MPHENO_LINUX` grants their own procs nothing they could not already get via `viv run`.
+The lean is therefore **ungated, matching `MNOEXEC`**, with the I-43 argument as the
+guard rather than a cap. The holotype prosecutes this explicitly.
+
+### 13.5 Trust model + the file-ownership wall
+
+- **Direct-spawn in the user's namespace, not a container.** ut spawns the `/viv/bin`
+  binary directly in the user's territory (the phenotype comes from the mount, not
+  from wrapping it in a diorama). That is what makes it *seamless* — git sees the
+  user's cwd and files, which an isolated container territory could not. Sound because
+  `/viv/bin` is system-owned: only trusted shipped binaries live behind the pheno-mount.
+- **The A-3 wall stands (noted, not blocking).** The pool 9P mount is `PRINCIPAL_
+  SYSTEM`-owned; git run as a real user hits the chmod wall on the system pool (the
+  §6.26 wall). git operating on **user-owned** files (a user's A-5 encrypted home) is
+  clean. This is the existing A-3 ownership model, not new debt.
+
+### 13.6 ut integration + cap conferral
+
+- **PATH:** add `/viv/bin` to `resolve_command`'s `$path`
+  (`usr/utopia/libutopia/src/eval/stmt.rs`) so `git` resolves bare.
+- **Tab completion:** add `/viv/bin` to `refresh_command_index`'s readdir set
+  (`usr/utopia/libutopia/src/repl.rs`) so `git` completes.
+- **NO phenotype logic in ut.** Because the kernel applies the phenotype at exec via
+  the mount flag, ut just spawns normally — the declaration never enters userspace.
+- **Caps:** ut already holds `CAP_CSPRNG_READ` (`SHELL_CAPS = LOCK_PAGES | CSPRNG_READ`,
+  `usr/login`), so git's `getrandom` works. ut confers its benign user caps to external
+  spawns (the sub-chunk-B mechanism decision — uniform conferral of the user's own
+  non-elevation caps, NOT location-gated, so no phenotype/location logic re-enters ut).
+
+### 13.7 Deploy
+
+- Stage the sha-pinned static git (2.51.2, `b8c41cfd…4615de9`) at `/viv/bin/git` +
+  the dashed `git-upload-pack`/`git-receive-pack` symlinks + `/etc/gitconfig`, in the
+  pool (or ramfs), **outside** the container bundle rootfs it currently lives in
+  (`tools/build.sh`). Keep the §6.27 git-probe container gate (the O_APPEND witness).
+- Compose `/viv/bin` as an `MPHENO_LINUX` bind mount at boot (`joey`/the boot path).
+
+### 13.8 Alternatives considered + rejected
+
+- **B1 — ut path-prefix (the fast form).** ut sets the phenotype when the resolved
+  path is under `/viv/bin/`. Rejected: puts the phenotype-declaration *policy* into
+  userspace as a hardcoded string (a second declarant that is not the kernel), and
+  opens a larger, userspace-shaped hole in rule 3's fail-safe. ~1 day vs the mount-flag
+  chunk's multi-day cost — but the standing "highest standard, design for the future"
+  bar picks the kernel-owned form.
+- **B3 — wrap each invocation in a vivarium.** No change to who declares, but a
+  container territory cannot see the user's cwd/files, so it is not seamless, and it
+  is heavyweight (a diorama per `git` call). Fails the operator's core requirement.
+- **Q3-by-bytes** (sniff `EI_OSABI` / `PT_INTERP` / `NT_GNU_ABI_TAG`). Rejected: the
+  settled §12.1 resolution — non-discriminating for the static target, and it violates
+  declare-don't-sniff.
+
+### 13.9 Sub-chunk plan
+
+- **A (kernel mechanism).** `MPHENO_LINUX` flag + `mount_pheno_linux_covers` + the
+  OR-combined exec stamp + the ns-introspection render + kernel unit tests (a synthetic
+  `MPHENO_LINUX` mount → resolved binary → phenotype stamped; and the fail-safe: an
+  uncovered binary stays native). Audit-bearing (the "Exec from the namespace" +
+  Territory + I-43 surfaces) → holotype. Updates the `sub-kernel-territory` vault note
+  (OWNED) + a new `docs/AUDIT-TRIGGERS.md` row + ARCH §28 I-43.
+- **B (integration + deploy).** ut `/viv/bin` PATH + completion + uniform benign-cap
+  conferral; `build.sh` git-at-`/viv/bin` + symlinks + `/etc/gitconfig` + the boot
+  `MPHENO_LINUX` bind; a boot-gate E2E proving **bare `git` from a shell (not a
+  container) runs Linux and works** — the end-to-end witness the whole arc exists for.
 
 ---
 
