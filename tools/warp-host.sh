@@ -466,6 +466,23 @@ venus-verdict)
             vfail=1
         fi
     done
+    # vkQuake-arc W-3a: the WSI host-capability probe must have REPORTED on
+    # the test leg (a MEASUREMENT, so any verdict -- dispatch=present/absent/
+    # BLIND/unknown -- is a valid boot; a MISSING line means the probe
+    # silently vanished, the #245 rot). The control leg (no blob) must have
+    # taken the positive skip, and must carry no verdict line.
+    grep -qE "warp scanout-blob probe: dispatch=|warp scanout-blob probe FAIL" "$tst" || {
+        echo "TEST leg: the scanout-blob probe never reported -- the W-3a capability measurement silently vanished"
+        vfail=1
+    }
+    grep -qF "warp scanout-blob probe skipped" "$ctl" || {
+        echo "CONTROL leg: no 'scanout-blob probe skipped' -- the probe did not take the intended no-feature skip"
+        vfail=1
+    }
+    if grep -qF "warp scanout-blob probe: dispatch=" "$ctl"; then
+        echo "CONTROL leg: a scanout-blob verdict WITHOUT the blob feature -- impossible, the gate is wrong"
+        vfail=1
+    fi
     if [ "$vfail" -eq 0 ]; then
         echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a), a HOST3D blob guest-maps via SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel (V-3b-1b), AND the persistent ring engine mints two rings at distinct offsets, round-trips each guest VA, and reuses a freed offset on re-mint (V-3b-1c), AND the SERVER host3d-ring path creates a per-client venus device-ctx, mints a HOST3D ring in /srv/warp, round-trips its VA, and tears it down through drop_host3d_ring + the venus-ctx destroy (V-3b-1c-2a), AND a destroyed host3d ring's ridx is re-mintable via the ring/<ridx>/ctl destroy verb (V-3b-3c-1), AND a HOST_VISIBLE device-memory blob mints under a venus ctx, round-trips a sentinel through its hostmem backing, and its handle is re-mintable via the mem/<handle>/ctl destroy verb (V-3b-3c-2), AND the CLIENT vn_renderer device-memory bo_ops complete a full HOST_VISIBLE vkAllocateMemory+vkMapMemory E2E on real V3D -- zero-at-map + sentinel round-trip over the weft-mapped backing (V-3b-3c-2b), AND the prove's full witness set holds: fenced GPU copy with first-map survival (F1), placed-map de-advertised (F4), the timeline lift, the 64 MiB cap cycle (F2), the two-timeline interleave (F3), the offscreen SPIR-V triangle, and slot-exhaustion steady-state (the vkQuake-arc W-1 pipeline witness)"
         grep -hE "gpu capset\[|num_capsets|blob-create" "$ctl" "$tst"

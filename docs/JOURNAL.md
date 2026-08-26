@@ -130,6 +130,44 @@ external unknown — host `SET_SCANOUT_BLOB` support on this QEMU/virglrenderer
 chain — is probe-gated (W-3a) with the no-guest-copy Composed fallback, so no
 architecture rests on an unverified host claim.
 
+**W-3a ran the same day, and its negative control earned its keep twice.** The
+probe (a boot-time tapestryd self-test: mint a shmem-class HOST3D blob, hit
+`SET_SCANOUT_BLOB` with a bogus id FIRST, then the real one, restore, then the
+cross-ctx attach pair) came back `dispatch=present neg=0x1203 pos=0x1100
+attach=0x1100 attach-neg=0x1100` on real V3D. The first half is the good news:
+the bogus id drew exactly `INVALID_RESOURCE_ID`, so the vocabulary exists and
+the probe can see a refusal — and the real blob's scanout was *accepted* (held
+as acceptance, not pixels, per the RESP_OK-is-not-a-verdict lesson). The second
+half is the negative control catching its own instrument: the attach leg's
+bogus id was ALSO accepted, so `attach=OK` proves nothing — the host defers
+resource resolution past attach, and the compose-arm capability question moves
+to the blit-use at W-3c/W-3e. Without the paired negative that blindness would
+have been recorded as a capability. Two smaller catches the same hour: the
+ramfs scp to the pi silently truncated mid-transfer ("lost connection") and the
+md5 mismatch caught it — while a content-grep of the truncated cpio PASSED
+(tapestryd sits early in the archive), which is exactly why the verifier is
+md5-of-the-whole-artifact, not a string probe; and the local curl was broken by
+a stale emsdk CA path (`env -u SSL_CERT_FILE` bypassed it) when fetching
+tla2tools. The W-3b baseline is pinned before any spec edit: 12/12 tapestry
+cfgs as claimed, clean pair 5413 distinct states, composed pair 94680.
+
+**The W-3a audit chain then caught the probe measuring a ghost.** Round 1's P1:
+the cross-ctx attach legs ran before `COMPOSITOR_CTX` exists (its only creator
+runs after READY), so `attach=OK` had measured the response's indifference to a
+*nonexistent context* — the unconstructed-state class applied to the instrument
+itself, and my parallel self-audit missed it (I checked the request-buffer
+margins and the scanout state machine but never asked whether the object my
+commands NAMED existed at probe time — the reusable lesson: an instrument's
+preconditions are part of the unconstructed-state checklist). The fix
+(`ensure_comp_ctx` first) re-measured byte-identical values against the real
+ctx, which upgraded the blindness claim from artifact to finding: even with the
+target present, a bogus resource draws OK — resource resolution is deferred
+past attach, so the compose-arm capability is only observable at the blit-use.
+Round 2 on the fixes came back clean (two P3s, landed: the BLIND-host
+negative-leg bind can also leave restore residue; the gate needed its
+replaced-by-SKIP sabotage — 55/55). W-3a closes with the Direct arm's
+vocabulary CONFIRMED present and discriminating on the real chain.
+
 ---
 
 ## 2026-08-26 (run 2) — the multi-queue design ratified: four forks closed, two by operator vote

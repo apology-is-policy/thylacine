@@ -124,6 +124,13 @@ const VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE: u32 = 0x0001;
 const VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB: u32 = 0x0208;
 const VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB: u32 = 0x0209;
 
+// W-3a (WARP-WSI-DESIGN section 4.2): the 2D-group command that binds a
+// scanout to a BLOB resource, carrying the shape a blob does not have
+// (format + width/height + strides/offsets -- VIRTIO 1.2 section 5.7.6.7,
+// struct virtio_gpu_set_scanout_blob). Contiguous after CREATE_BLOB. Probe-
+// only until the presentable object (W-3c) makes it a present-path command.
+const VIRTIO_GPU_CMD_SET_SCANOUT_BLOB: u32 = 0x010d;
+
 // virtio-gpu capset ids: 1 = VIRGL, 2 = VIRGL2, 4 = VENUS. Named so the V-0b
 // probe reads without a magic 4 in three places.
 const VIRTIO_GPU_CAPSET_VIRGL2: u32 = 2;
@@ -378,6 +385,14 @@ const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 const VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
 const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
 const VIRTIO_GPU_RESP_OK_MAP_INFO: u32 = 0x1106;
+// The W-3a probe's discriminator set, pub so the server-side probe can read
+// a raw resp_type verdict: INVALID_RESOURCE_ID on a bogus id proves the
+// command was DISPATCHED and resolved (the vocabulary exists host-side);
+// ERR_UNSPEC on the same leg is QEMU's unknown-command shape. Exported as
+// GPU_RESP_* to keep the private VIRTIO_ set's visibility unchanged.
+pub const GPU_RESP_OK_NODATA: u32 = VIRTIO_GPU_RESP_OK_NODATA;
+pub const GPU_RESP_ERR_UNSPEC: u32 = 0x1200;
+pub const GPU_RESP_ERR_INVALID_RESOURCE_ID: u32 = 0x1203;
 
 // struct virtio_gpu_config field offsets in the Device region (section 5.7.4):
 // events_read @0x00, events_clear @0x04, num_scanouts @0x08, num_capsets @0x0C.
@@ -2799,6 +2814,57 @@ impl Gpu {
         };
         self.ctrl
             .step("SET_SCANOUT", GPU_CTRL_HDR_LEN + 24, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// W-3a probe: SET_SCANOUT_BLOB, returning the RAW resp_type instead of
+    /// stepping against an expectation -- the probe's whole point is reading
+    /// which refusal (or acceptance) this host gives. Layout per VIRTIO 1.2
+    /// section 5.7.6.7 struct virtio_gpu_set_scanout_blob: hdr(24) + rect(16)
+    /// + scanout_id + resource_id + width + height + format + padding +
+    /// strides[4] + offsets[4] = 96 bytes. Err(()) = the submission itself
+    /// died (device wedged), distinct from any refusal code.
+    pub fn set_scanout_blob_probe(
+        &mut self,
+        resource_id: u32,
+        w: u32,
+        h: u32,
+        format: u32,
+        stride: u32,
+    ) -> Result<u32, ()> {
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_SET_SCANOUT_BLOB);
+            write_rect(req_va + 24, 0, 0, w, h);
+            w32(req_va + 40, 0); // scanout_id
+            w32(req_va + 44, resource_id);
+            w32(req_va + 48, w);
+            w32(req_va + 52, h);
+            w32(req_va + 56, format);
+            w32(req_va + 60, 0); // padding
+            w32(req_va + 64, stride); // strides[0]
+            w32(req_va + 68, 0);
+            w32(req_va + 72, 0);
+            w32(req_va + 76, 0);
+            w32(req_va + 80, 0); // offsets[0..4]
+            w32(req_va + 84, 0);
+            w32(req_va + 88, 0);
+            w32(req_va + 92, 0);
+        };
+        self.ctrl.submit_and_wait(GPU_CTRL_HDR_LEN + 72, GPU_CTRL_HDR_LEN)
+    }
+
+    /// W-3a probe: CTX_ATTACH_RESOURCE with the raw resp_type returned -- the
+    /// cross-ctx import acceptance leg (can the compositor's virgl ctx attach
+    /// a resource created under a DIFFERENT device ctx?). Same Err(()) split
+    /// as set_scanout_blob_probe.
+    pub fn ctx_attach_resource_probe(&mut self, ctx_id: u32, resource_id: u32) -> Result<u32, ()> {
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, ctx_id);
+            w32(req_va + 24, resource_id);
+            w32(req_va + 28, 0);
+        };
+        self.ctrl.submit_and_wait(GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN)
     }
 
     /// TRANSFER_TO_HOST_2D: host-DMA-read the backing at `offset` into the

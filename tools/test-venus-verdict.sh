@@ -30,6 +30,7 @@ tapestryd: gpu blob-create skipped (F_RESOURCE_BLOB not offered)
 tapestryd: gpu host3d-map skipped (F_RESOURCE_BLOB not offered)
 tapestryd: gpu hostmem-ring skipped (F_RESOURCE_BLOB not offered)
 tapestryd: warp host3d-ring skipped (blob feature not offered)
+tapestryd: warp scanout-blob probe skipped (blob feature not offered)
 EOF
 }
 mk_test() {
@@ -57,6 +58,7 @@ venus-prove: two-timeline interleave OK (fenced copies on t1 then t2, waited t2 
 venus-prove: cap-exhaustion cycle OK (refused at the 64 MiB ctx cap, freed, realloc'd -- the F2 no-burn proof)
 venus-prove: offscreen triangle OK (render pass + SPIR-V pipeline + draw + copy-out 64x64; center red, corner blue -- the W-1 pipeline-class witness)
 venus-prove: slot-exhaustion cycles OK (253/253/253 to refusal, steady-state equal -- the F2 discriminating no-burn proof)
+tapestryd: warp scanout-blob probe: dispatch=present neg=0x1203 pos=0x1100 attach=0x1100 attach-neg=0x1100 (shmem-class; the venus-image-class verdict lands at W-3e)
 EOF
 }
 
@@ -189,6 +191,21 @@ check "test leg lacks slot-exhaustion cycles OK -> UNVERIFIED" 1 "" \
       'grep -v "slot-exhaustion cycles OK" "$t" > "$t.x" && mv "$t.x" "$t"'
 check "control leg ALSO sees slot-exhaustion cycles OK -> UNVERIFIED" 1 \
       'grep "slot-exhaustion cycles OK" "$t" >> "$c"' ""
+# vkQuake-arc W-3a: the WSI probe is a MEASUREMENT (any verdict is a valid
+# boot) but it must have REPORTED -- the absent-line arm catches the #245
+# silent-vanish; the skip arms keep the control leg's positive-skip honest.
+check "test leg: scanout-blob probe never reported -> UNVERIFIED" 1 "" \
+      'grep -v "warp scanout-blob probe" "$t" > "$t.x" && mv "$t.x" "$t"'
+# r2-F2: the token-vs-verdict discriminator (the sibling replaced-by-FAIL
+# convention). A venus test leg whose probe took a SKIP is a failed leg; a
+# gate "simplified" to grep the bare token would accept it -- this sabotage
+# is what makes that hollowing visible.
+check "test leg: probe reports a SKIP not a verdict -> UNVERIFIED" 1 "" \
+      'sed "s/warp scanout-blob probe: dispatch=.*/warp scanout-blob probe skipped (host3d mint refused e=-5) -- non-venus device/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg lacks scanout-blob skip -> UNVERIFIED" 1 \
+      'grep -v "warp scanout-blob probe skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
+check "control leg ALSO carries a scanout-blob verdict -> UNVERIFIED" 1 \
+      'grep "warp scanout-blob probe: dispatch=" "$t" >> "$c"' ""
 # One variable away, each direction of the discrimination the gate claims.
 check "control leg ALSO sees id=4 -> UNVERIFIED" 1 \
       'printf "tapestryd: gpu capset[2] id=4 max_version=0 max_size=160\n" >> "$c"' ""

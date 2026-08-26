@@ -300,6 +300,12 @@ impl Driver for Tapestryd {
         // sentinel round-trip, destroy, handle-reuse. Venus-gated + self-skipping.
         self.comp.warp_mem_selftest();
 
+        // vkQuake-arc W-3a (WARP-WSI-DESIGN section 7): the WSI host-capability
+        // probe -- SET_SCANOUT_BLOB vocabulary + cross-ctx attach, shmem-class,
+        // paired negatives. Venus-gated + self-skipping like the siblings; a
+        // measurement, not a witness (either verdict is a valid boot).
+        self.comp.warp_scanout_blob_probe();
+
         // READY last: all bring-up console output precedes it; the warden's
         // readiness pipe waits on exactly this line.
         let mut out = libthyla_rs::io::stdout();

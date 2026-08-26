@@ -391,6 +391,29 @@ expects are restored for the build. vkQuake then runs unmodified through
    venus-bound HOST3D blob, and can the compositor ctx blit a venus-ctx
    resource? Paired positive/negative controls; the verdict selects §4.2
    Direct vs §4.3-only, recorded in this doc.
+   **MEASURED (thyla-pi/KVM, 2026-08-26):** `dispatch=present neg=0x1203
+   pos=0x1100 attach=0x1100 attach-neg=0x1100`. Meaning: (a) the
+   `SET_SCANOUT_BLOB` vocabulary EXISTS and discriminates — the bogus id drew
+   exactly `INVALID_RESOURCE_ID`, and the shmem-class positive was ACCEPTED
+   (`OK_NODATA`; acceptance, not pixels — the pixel truth stays with W-3e's
+   witness, and the venus-IMAGE class stays open per the probe's class
+   scoping). The §4.2 Direct arm proceeds. (b) The cross-ctx ATTACH leg is
+   **BLIND** — the bogus id was ALSO accepted, so attach-acceptance proves
+   nothing at this layer; the compose-arm capability question moves to the
+   blit-USE, observable at W-3c/W-3e. The paired negative catching its own
+   instrument is the probe working as designed. Control leg (no blob)
+   witnessed the positive skip on the local 2D suite the same day.
+   **Audit + re-measure (same day):** the round-1 holotype found the first
+   attach measurement itself unconstructed — `COMPOSITOR_CTX` did not exist
+   at probe time (its creator ran after READY), so the original values
+   measured indifference to a nonexistent context. Fixed
+   (`ensure_comp_ctx` before the attach legs) and RE-MEASURED: byte-identical
+   values against the now-existing ctx — so the blindness claim is valid as
+   stated: even with the target ctx present, a bogus RESOURCE id draws OK,
+   i.e. the host defers *resource* resolution past attach. On a future
+   validating host (the v3d fork re-run) the fixed probe measures attach
+   semantics rather than manufacturing `INVALID_CONTEXT_ID` from its own
+   ordering.
 2. **W-3b — the spec extension** (the fourth class; TLC-green + the buggy
    cfg + measured additivity) — BEFORE the server code.
 3. **W-3c — tapestryd**: the presentable object (`img/` subtree), the

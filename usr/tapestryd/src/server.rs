@@ -1115,7 +1115,11 @@ const WEAVE_MAX_SIZE: u64 = 64 * 1024 * 1024;
 
 /// What scanout 0 references (G-6). `Boot` = untouched since startup (the
 /// kernel test pattern stays until a first present -- the stage-0 look);
-/// `Off` = explicitly disabled after content went away.
+/// `Off` = explicitly disabled after content went away. NOTE (W-3a): on a
+/// blob-capable host the boot-time scanout-blob probe may have briefly bound
+/// and then DISABLED scanout 0, so `Boot` can mean "disabled placeholder"
+/// rather than the retained kernel pattern there -- behaviorally identical
+/// (both reconcile arms treat Boot as nothing-bound), cosmetically not.
 #[derive(Clone, Copy, PartialEq)]
 enum Scanout {
     Boot,
@@ -7805,6 +7809,149 @@ impl Comp {
                 sentinel_ok, destroyed, slot_freed, remint_ok
             );
         }
+    }
+
+    /// W-3a (WARP-WSI-DESIGN section 7): the host-capability probe for the
+    /// ratified WSI Direct arm. Measures -- never assumes -- whether THIS
+    /// host chain dispatches SET_SCANOUT_BLOB and accepts a cross-ctx
+    /// attach: the two capabilities the presentable's zero-copy scanout
+    /// (section 4.2) and GPU-blit compose (section 4.3) rest on.
+    ///
+    /// CLASS-SCOPED ON PURPOSE (the #212/#247 class-vs-property lesson): a
+    /// self-test can only mint a blob_id=0 vkr-SHMEM blob, so the positive
+    /// legs here are the SHMEM-class verdicts; the venus-IMAGE class (a blob
+    /// bound to a real VkDeviceMemory) needs a mesa client and its verdict
+    /// lands with W-3e's first present witness. What the NEGATIVE leg
+    /// answers unconditionally is VOCABULARY: a bogus resource id draws
+    /// INVALID_RESOURCE_ID from a host that dispatches the command, and
+    /// ERR_UNSPEC from one that does not know it. A host that ACCEPTS the
+    /// bogus id makes the probe BLIND -- reported as such, never as
+    /// supported (a probe that cannot see a refusal proves nothing by
+    /// succeeding).
+    pub fn warp_scanout_blob_probe(&mut self) {
+        if !self.gpu.blob {
+            say!("tapestryd: warp scanout-blob probe skipped (blob feature not offered)");
+            return;
+        }
+        const SELFTEST_CONN: u64 = u64::MAX;
+        const BOGUS_RES: u32 = 0x7fff_ffff;
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let ctx_pub = match self.wctx_mint(SELFTEST_CONN) {
+            Some(p) => p,
+            None => {
+                say!("tapestryd: warp scanout-blob probe skipped (no virgl ctx -- 2D device)");
+                return;
+            }
+        };
+        let slot = match self.wctx_slot(ctx_pub) {
+            Some(s) => s,
+            None => return, // just minted -> unreachable
+        };
+        // A 64x64 BGRA8-sized backing (16 KiB, page-multiple): the probe blob.
+        if let Err(e) = self.wring_mint(ctx_pub, SELFTEST_CONN, 4 * PAGE, 0, true) {
+            self.wctx_finish(slot, false);
+            say!(
+                "tapestryd: warp scanout-blob probe skipped (host3d mint refused e={}) -- non-venus device",
+                e
+            );
+            return;
+        }
+        let res_id = {
+            let c = self.wctx(ctx_pub, SELFTEST_CONN).unwrap();
+            c.ring_slots[0].as_ref().unwrap().res_id
+        };
+        let fmt = crate::gpu::VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
+        // Negative FIRST: the vocabulary discriminator needs no valid blob,
+        // and a device that dies here gets reported as dead rather than as
+        // any capability verdict.
+        let neg = match self.gpu.set_scanout_blob_probe(BOGUS_RES, 64, 64, fmt, 256) {
+            Ok(code) => code,
+            Err(()) => {
+                self.wctx_finish(slot, false);
+                say!("tapestryd: warp scanout-blob probe FAIL (negative-leg submission died -- device wedged)");
+                return;
+            }
+        };
+        let dispatch = if neg == crate::gpu::GPU_RESP_ERR_INVALID_RESOURCE_ID {
+            "present"
+        } else if neg == crate::gpu::GPU_RESP_OK_NODATA {
+            "BLIND"
+        } else if neg == crate::gpu::GPU_RESP_ERR_UNSPEC {
+            "absent" // QEMU's unknown-command shape
+        } else {
+            "unknown"
+        };
+        // The positive (shmem-class) leg, recorded verbatim, then an
+        // unconditional unbind -- an accepted probe bound scanout 0 to the
+        // probe blob, and the boot flow's reconcile expects to find the
+        // scanout its own state machine last set.
+        let pos = match self.gpu.set_scanout_blob_probe(res_id, 64, 64, fmt, 256) {
+            Ok(code) => code,
+            Err(()) => {
+                self.wctx_finish(slot, false);
+                say!("tapestryd: warp scanout-blob probe FAIL (positive-leg submission died -- device wedged)");
+                return;
+            }
+        };
+        // F2 (W-3a audit; widened r2-F1): a host that ACCEPTED either
+        // scanout-blob leg -- the POSITIVE, or the NEGATIVE on a BLIND host
+        // (accepting a bogus id may still bind) -- and then REFUSES the
+        // restore leaves scanout 0 in probe residue; for the positive case
+        // that residue is a blob this probe is about to unref, the order
+        // bound_res's own contract names as display-fatal. Bounded (needs a
+        // doubly-broken host; no client exists pre-READY; the first content
+        // reconcile rebinds unconditionally) but it must be LOUD, not a
+        // generic step line.
+        let restore_ok = self.gpu.set_scanout(0, dw, dh).is_ok();
+        if (pos == crate::gpu::GPU_RESP_OK_NODATA || neg == crate::gpu::GPU_RESP_OK_NODATA)
+            && !restore_ok
+        {
+            say!("tapestryd: warp scanout-blob probe: RESTORE REFUSED with probe state still bound -- scanout residue until the first reconcile rebind");
+        }
+        // F1 (W-3a audit, P1): COMPOSITOR_CTX does not exist yet at probe
+        // time -- its only bring-up creator is report_composed_posture,
+        // which runs AFTER READY. An attach probed against an ABSENT ctx
+        // measures the response's indifference to a nonexistent context,
+        // not attach semantics (the unconstructed-state class, applied to
+        // the instrument itself). Create it here -- idempotent;
+        // report_composed_posture finds comp_ctx already true -- and skip
+        // the attach legs (reported, not silent) when creation refuses.
+        if !self.ensure_comp_ctx() {
+            self.wctx_finish(slot, false);
+            say!(
+                "tapestryd: warp scanout-blob probe: dispatch={} neg={:#x} pos={:#x} attach=skipped (compositor ctx refused) (shmem-class; the venus-image-class verdict lands at W-3e)",
+                dispatch, neg, pos
+            );
+            return;
+        }
+        // The cross-ctx attach legs (the compose-arm capability): can the
+        // COMPOSITOR ctx attach a resource created under a different device
+        // ctx? Detach on acceptance so the probe leaves no residue; the
+        // bogus-id negative proves this leg too can see a refusal.
+        let att = match self.gpu.ctx_attach_resource_probe(COMPOSITOR_CTX, res_id) {
+            Ok(code) => code,
+            Err(()) => {
+                self.wctx_finish(slot, false);
+                say!("tapestryd: warp scanout-blob probe FAIL (attach-leg submission died -- device wedged)");
+                return;
+            }
+        };
+        if att == crate::gpu::GPU_RESP_OK_NODATA {
+            let _ = self.gpu.ctx_detach_resource(COMPOSITOR_CTX, res_id);
+        }
+        let att_neg = match self.gpu.ctx_attach_resource_probe(COMPOSITOR_CTX, BOGUS_RES) {
+            Ok(code) => code,
+            Err(()) => {
+                self.wctx_finish(slot, false);
+                say!("tapestryd: warp scanout-blob probe FAIL (attach-negative submission died -- device wedged)");
+                return;
+            }
+        };
+        self.wctx_finish(slot, false);
+        say!(
+            "tapestryd: warp scanout-blob probe: dispatch={} neg={:#x} pos={:#x} attach={:#x} attach-neg={:#x} (shmem-class; the venus-image-class verdict lands at W-3e)",
+            dispatch, neg, pos, att, att_neg
+        );
     }
 
     /// Retire one ctx. Quiesced (no fences in flight) -> finish NOW, the
