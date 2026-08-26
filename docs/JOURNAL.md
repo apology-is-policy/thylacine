@@ -22,6 +22,77 @@ needed the operator.
 
 ---
 
+## 2026-08-26 (aux) -- the /viv/bin phenotype mount: git on the PATH, run Linux BY LOCATION; and the granularity check that reverted a unit-green build
+
+**The ask.** After git ran end-to-end under a *container* (VIVARIUM 6.27), the
+operator wanted it as a first-class program: "a separate bin directory for Linux
+programs run via viv, on the PATH, working with ut's autocomplete," plus "is there
+a way to easily identify a Linux binary from ut?"
+
+**That question IS the design.** You can't identify a static Linux binary from its
+bytes -- EI_OSABI is non-discriminating both ways, PT_INTERP is absent on a static
+binary (the settled Q3 resolution, elf.c). A phenotype is *declared*, never
+sniffed. So the answer is BY LOCATION: a curated dir IS the declaration. Two
+operator votes (AskUserQuestion): the declaration mechanism = a **kernel
+mount-flag** (over a ut path-prefix), and the dir = `/viv/bin`.
+
+**The wrong turn, and what caught it.** I built the flag as the `MNOEXEC` sibling
+-- a `mount_pheno_linux_covers(dc, devno)` scan at the exec stamp -- and it went
+unit-green (suite 1462/1462, a real-cross test with a plain-mount control). Then a
+deployment check falsified the *scope*: `dev9p.c:558` mints one devno per 9P
+*attach session*, and `/clade/bin` + `/goroot/bin` prove the shipped bin dirs are
+plain subdirs of the shared pool session. A `(dc,devno)` key therefore scopes to a
+WHOLE session -- flagging a pool subdir would have declared every file in it Linux,
+native `/bin/ut` included. The check that caught it was not a test; it was asking
+"what device instance does `/viv/bin` actually get?" before wiring the deploy.
+`MNOEXEC` gets away with the coarse key because it is only ever used on per-`/env`
+mounts; `/viv/bin` is the first use that wants *subdirectory* scope.
+
+**Surfaced, not silently switched.** The (dc,devno) build was the faithful
+execution of the "kernel mount-flag" vote, so the choice between "give /viv/bin its
+own device instance (keep the coarse key)" and "scope by the resolver" was the
+operator's -- a real cost/correctness fork that emerged mid-implementation. They
+voted the resolver scope. I reverted the covers-scan and rebuilt (a707136f amends
+the scripture; the story -- granularity finding -> vote -> rebuild -- is in the two
+scripture commits so the design is auditable against its reasoning).
+
+**The mechanism as it stands (065008fb).** `MPHENO_LINUX = 0x0020`; `mount_lookup`
+hands back the crossed entry's flags under `ns_lock`; `stalk_cross_mounts` sets a
+SET-ONLY `crossed_pheno` (any mount-over-mount hop, recorded before the clone can
+fail); `stalk_core` threads it through the three cross sites; a thin `stalk_exec`
+wrapper exposes it and `exec_resolve_from_namespace_ex` writes it out -- so
+`stalk_err`'s other callers are untouched, minimal blast radius on the I-28
+resolver. SYS_SPAWN_FULL_ARGV ORs it into `sa->pheno_linux` beside the manifest
+channel; the phenotype stamp is unchanged and channel-agnostic. The SAME file is
+Linux reached through `/viv/bin` and native reached by any other path -- the
+declaration is a property of how you named it, never of the bytes. Fail-safe: no
+crossing leaves the binary native (rule 3), so no `may_back_exec`-style floor is
+needed (unlike MNOEXEC's fail-open restriction). I-43 holds: the mount confers ABI
+shape via the namespace and no authority.
+
+**Enablement (6eb0c7f7), and a test that did its job.** `MPHENO_LINUX` joined
+`SYS_MOUNT_VALID_FLAGS` (or joey could not compose /viv/bin from EL0), and
+`sys_mount.rejects_invalid_flags` -- which pinned 0x20 as "the lowest unassigned
+bit" -- caught it exactly as its own comment foretold ("the next flag to land
+should trip it again"). Re-pointed to 0x40 + MPHENO_LINUX added to the accepted
+half. ut gained `/viv/bin` on `resolve_command`'s $path + the completion readdir;
+no phenotype logic in ut (the declaration is the mount). suite 1462/1462.
+
+**What is NOT done, named plainly.** The half that proves the OR stamp *fires* --
+a bare `git`/probe spawned via `/viv/bin` actually running Linux -- is the owed
+sub-chunk B (the E2E, then the full git-at-/viv/bin deploy, then the holotype on
+the combined surface, then SMP + push). `viv-pheno-probe` is reusable for it (it
+opens `/pheno-scratch` + `/bin/viv-pheno-probe`, both resolvable in joey's
+namespace): bind the initrd tree at /viv/bin MPHENO_LINUX, spawn the probe with
+pheno_flags=0 via /viv/bin (-> Linux) and via /bin (-> native, the control). The
+4 commits are UNPUSHED + UNAUDITED -- nothing ships before the holotype.
+
+**Cost.** One design round (two operator votes), one unit-green build reverted, one
+rebuild to the ratified scope. The revert was not waste -- it is why the shipped
+mechanism has the scope the operator's mental model actually meant.
+
+---
+
 ## 2026-08-26 (aux) -- git commit + clone run under VIVARIUM (the O_APPEND + pread64 arm), and the wall that was the FS's job all along
 
 **What landed**: VIVARIUM 6.27 -- `git commit` + `git clone file://` now run under
