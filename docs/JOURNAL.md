@@ -122,7 +122,7 @@ ubsan-smp8 8/8, N=8; TESTS=y + BOOT_PROBES=y, so the 1461 unit suite AND the
 git-fork-under-SMP path ran under smp8 max concurrency on both sanitizer arms,
 ~50s mean/boot). The fork-caps change adds no new concurrency primitive (it
 rides the already-audited `rfork_internal` acquire-load), and the gate confirms
-it at max concurrency. Tip `<pending>`.
+it at max concurrency. Tip `830817c4`.
 
 ---
 
