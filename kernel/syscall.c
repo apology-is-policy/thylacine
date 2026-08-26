@@ -2539,7 +2539,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // src's identity (dc/devno/qid), not src->dev, so it precedes the dev-check.
     {
         struct Spoor *crossed = NULL;
-        if (stalk_cross_mounts(p, src, &crossed) < 0)    { spoor_clunk(src); return -T_E_IO; }
+        if (stalk_cross_mounts(p, src, &crossed, NULL) < 0)    { spoor_clunk(src); return -T_E_IO; }
         if (crossed) { spoor_clunk(src); src = crossed; }
     }
     // #80: split what was one flat reject, so a caller learns which end was at
@@ -2706,7 +2706,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // installed handle's rights are derived from it.
     {
         struct Spoor *crossed = NULL;
-        if (stalk_cross_mounts(p, nc, &crossed) < 0)  { spoor_clunk(nc); return -T_E_IO; }
+        if (stalk_cross_mounts(p, nc, &crossed, NULL) < 0)  { spoor_clunk(nc); return -T_E_IO; }
         if (crossed) { spoor_clunk(nc); nc = crossed; }
     }
 
@@ -7387,8 +7387,15 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
 // stat'd size). Runs in the parent's context (its Territory), like Unix exec.
 // Returns the pinned Spoor (caller spoor_clunks) + *size_out, or NULL on any
 // failure. Exported for the kernel-internal #58 tests.
-struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
-                                          size_t name_len, size_t *size_out) {
+// _ex variant (VIVARIUM section 13): reports, via *pheno_out (OPTIONAL), whether
+// the binary's resolution crossed an MPHENO_LINUX mount -- the /viv/bin subtree
+// phenotype channel. The plain exec_resolve_from_namespace wrapper below passes
+// NULL, so its six non-declaring callers are untouched; only the
+// SYS_SPAWN_FULL_ARGV path (the sole fresh-phenotype declarer, ARCH I-43) reads it.
+struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *name,
+                                             size_t name_len, size_t *size_out,
+                                             bool *pheno_out) {
+    if (pheno_out) *pheno_out = false;
     if (!p || !name || !size_out)                  return NULL;
     *size_out = 0;
     if (name_len == 0 || name_len > SYS_OPEN_PATH_MAX) return NULL;
@@ -7410,7 +7417,12 @@ struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
         rlen  = (u64)jl;
     }
 
-    struct Spoor *quarry = stalk(p, start, rpath, rlen, STALK_OPEN, 3u /* OEXEC */);
+    // section 13: stalk_exec reports whether resolving the binary crossed an
+    // MPHENO_LINUX mount (the /viv/bin subtree). Written to *pheno_out only on the
+    // successful return below, so a failed walk leaves the caller's init (native).
+    bool crossed_pheno = false;
+    struct Spoor *quarry = stalk_exec(p, start, rpath, rlen, STALK_OPEN,
+                                      3u /* OEXEC */, NULL, &crossed_pheno);
     spoor_clunk(start);   // borrowed by stalk; release the ref we took
     if (!quarry)                                   return NULL;
     if (!quarry->dev || !quarry->dev->read)        { spoor_clunk(quarry); return NULL; }
@@ -7432,7 +7444,15 @@ struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
     if (st.size == 0 || (u64)st.size > EXEC_FILE_MAX) { spoor_clunk(quarry); return NULL; }
 
     *size_out = (size_t)st.size;
+    if (pheno_out) *pheno_out = crossed_pheno;   // section 13: reported on success only
     return quarry;        // ref transferred to the caller (the spawn thunk clunks it)
+}
+
+// The plain resolver: identical, phenotype-agnostic. The six exec paths that do
+// not declare a fresh phenotype (they inherit it via rfork) call this.
+struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
+                                          size_t name_len, size_t *size_out) {
+    return exec_resolve_from_namespace_ex(p, name, name_len, size_out, NULL);
 }
 
 // Kernel-side body: takes a kernel-resident NUL-terminated name and the
@@ -8260,6 +8280,13 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     // exec can already read it for the section 12.1 rule-4 mismatch
     // diagnostic. Descendants inherit it via rfork (rule 2). No gate: a
     // phenotype confers ABI shape, never authority (I-43).
+    //
+    // `pheno_linux` already carries BOTH declaration channels (section 12.1
+    // rule 1): the spawn-arg manifest channel (sa->pheno_flags) OR'd, at the
+    // spawn-syscall resolution site, with the section-13 MPHENO_LINUX mount
+    // channel -- `exec_resolve_from_namespace` reports whether the binary's
+    // resolution crossed a pheno-mount (the /viv/bin subtree scope). So the
+    // stamp itself stays channel-agnostic.
     if (pheno_linux) p->phenotype = PHENO_LINUX;
 
     // A-1a: apply the parent-vetted identity override BEFORE any user-
@@ -8379,8 +8406,13 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         return -1;
 
     // #58 / REVENANT R-4: resolve + PIN the executable (was the whole-binary slurp).
+    // section 13: also learn whether resolving `name` crossed an MPHENO_LINUX
+    // mount -- the /viv/bin subtree phenotype channel, OR'd into sa->pheno_linux
+    // below alongside the manifest channel.
     size_t exe_size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    bool exe_pheno_linux = false;
+    struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len,
+                                                       &exe_size, &exe_pheno_linux);
     if (!exe) {
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
@@ -8424,7 +8456,10 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     sa->page_budget   = eff_budget;   // CL-5: parent-resolved; the thunk stamps it
     // V-1b: carry the phenotype declaration (0 -> KP_ZERO left it false ->
     // the child inherits via rfork).
-    sa->pheno_linux = (pheno_flags & SPAWN_PHENO_LINUX) != 0;
+    // Section 12.1 rule 1's TWO declaration channels, OR'd: the manifest
+    // (pheno_flags) OR the section-13 MPHENO_LINUX mount the binary resolved
+    // through (exe_pheno_linux). Either makes the child PHENO_LINUX.
+    sa->pheno_linux = ((pheno_flags & SPAWN_PHENO_LINUX) != 0) || exe_pheno_linux;
     // D-4: carry the caller's own name for the program. Bounded + NUL-checked
     // by this function's entry gate above, so the copy is a straight one.
     sa->name_len = (u32)name_len;

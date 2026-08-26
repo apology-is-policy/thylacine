@@ -539,6 +539,10 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
         // is not an answer about a RUNNING namespace. Rendered as a suffix so
         // every existing parse of the line's first two fields is unchanged.
         if (ok && (m->flags & MNOEXEC)) ok = ns_put_str(buf, cap, &off, " noexec");
+        // VIVARIUM section 13: render MPHENO_LINUX for the same reason -- a
+        // declaration that cannot be observed cannot be audited. An operator
+        // asking "is /viv/bin actually a pheno-linux mount?" reads it here.
+        if (ok && (m->flags & MPHENO_LINUX)) ok = ns_put_str(buf, cap, &off, " pheno-linux");
         if (ok) ok = ns_put_str(buf, cap, &off, "\n");
 
         if (!ok) { off = line_start; truncated = true; break; }   // discard partial
@@ -920,7 +924,9 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint) {
 // atomically under ns_lock so a concurrent unmount cannot free the source between
 // the lookup and the caller's use. THE CALLER MUST spoor_clunk the result
 // (stalk_cross_mounts clunks it after clone_walk_zero mints the crossed Spoor).
-struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe) {
+struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe,
+                           u32 *flags_out) {
+    if (flags_out) *flags_out = 0;
     if (!territory)                    return NULL;
     if (territory->magic != PGRP_MAGIC) extinction("mount_lookup on corrupted Territory");
     if (!probe)                        return NULL;
@@ -932,6 +938,10 @@ struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe) {
         if (mount_key_eq(&territory->mounts[i], probe)) {
             src = territory->mounts[i].source;
             spoor_ref(src);   // transfer a ref to the caller (atomic vs unmount)
+            // VIVARIUM section 13: hand back the entry's flags under the same
+            // lock, so the resolver can see MPHENO_LINUX on the mount it crosses
+            // without a second scan (and without racing an unmount).
+            if (flags_out) *flags_out = territory->mounts[i].flags;
             break;
         }
     }

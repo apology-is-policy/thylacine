@@ -172,6 +172,40 @@ struct PgrpMount {
 // FLOOR beneath this flag; do not re-derive the coverage claim from the key.
 #define MNOEXEC   0x0010
 
+// MPHENO_LINUX (VIVARIUM section 13) -- the phenotype-declaration mount flag: a
+// binary whose exec RESOLUTION CROSSES a mount carrying this flag is stamped
+// PHENO_LINUX, even outside any vivarium. The SECOND (and, at v1.0, last)
+// declaration channel besides the container manifest's pheno_flags spawn arg
+// (section 12.1 rule 1); the two are OR-combined at the single exec-time phenotype
+// stamp. This is how /viv/bin ships bare Linux binaries (git) on the user's PATH:
+// the location IS the declaration (the settled Q3 answer -- a static binary has no
+// reliable intrinsic ABI marker, so a phenotype is declared, never sniffed).
+// FreeBSD's /compat/linux path-prefix brand in a Plan 9 mount-flag form.
+//
+// SCOPE is per MOUNT POINT, detected by the RESOLVER, NOT the (dc, devno)
+// device-instance key MNOEXEC uses. This is deliberate and load-bearing: a devno
+// is minted per 9P SESSION (dev9p.c: "one devno == one session"), so a
+// device-instance key would scope to a WHOLE session -- flagging a subdir of the
+// shared pool would declare EVERY file in it, native /bin/ut included. Instead
+// stalk reports whether a resolution crossed a pheno-mount (stalk_cross_mounts ->
+// stalk_err's crossed_pheno out-param -> exec_resolve_from_namespace), giving the
+// exact "/viv/bin subtree" semantics with no coarseness footgun: the SAME file
+// reached through /viv/bin is Linux, reached by another path is native -- because
+// the phenotype is a property of HOW you named it, not of the bytes.
+//
+// FAIL-SAFE: a resolution that crosses no pheno-mount leaves the binary
+// PHENO_NATIVE (section 12.1 rule 3's default) -- a Linux binary that does not get
+// the phenotype makes Linux-numbered calls that hit native handlers and fails
+// cleanly (rule 4's diagnostic), never a silent privilege gain.
+//
+// I-43: confers ABI SHAPE via the namespace and NO authority -- caps come solely
+// from the spawn cap_mask. Every translated Linux number collides with a live
+// native one, so a mis-declared Proc mis-decodes its own calls behind its own
+// gates and reaches nothing new (ARCH section 28 I-43). Deliberately UNGATED like
+// MNOEXEC: composing a mount is a namespace edit that confers no authority, and
+// /viv/bin is composed by PRINCIPAL_SYSTEM at boot.
+#define MPHENO_LINUX 0x0020
+
 struct Territory {
     u64                  magic;      // PGRP_MAGIC
     int                  ref;        // refcount; rfork(RFNAMEG) shares (Phase 5+)
@@ -420,7 +454,8 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint);
 // the source between the lookup and the caller's use. THE CALLER MUST
 // spoor_clunk the returned Spoor when done (stalk_cross_mounts clunks it after
 // clone_walk_zero mints the independent crossed Spoor).
-struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe);
+struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe,
+                           u32 *flags_out);
 
 // mount_is_point_id: MEMBERSHIP-only mount-point test by raw (dc, devno,
 // qid_path) identity — no Spoor needed, no ref minted. The stalk POUNCE

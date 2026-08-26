@@ -485,6 +485,14 @@ char *exec_interp_argv(const char *interp, u32 interp_len,
 struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
                                           size_t name_len, size_t *size_out);
 
+// _ex variant (VIVARIUM section 13): also reports, via *pheno_out (OPTIONAL),
+// whether the resolution crossed an MPHENO_LINUX mount -- the /viv/bin subtree
+// phenotype declaration channel. Only the SYS_SPAWN_FULL_ARGV path (the sole
+// fresh-phenotype declarer) passes non-NULL; the plain wrapper above passes NULL.
+struct Spoor *exec_resolve_from_namespace_ex(struct Proc *p, const char *name,
+                                             size_t name_len, size_t *size_out,
+                                             bool *pheno_out);
+
 // exec_stage_env -- project `p`'s /env into the packed "NAME=VALUE\0" block
 // exec_load_into takes (#140). The one place a Proc's environment becomes an
 // exec argument, so the bound and the encoding live in one place rather than

@@ -486,19 +486,19 @@ void test_territory_mount_devno_disambiguates(void) {
 
     // mount_lookup resolves each mount point to its OWN source by devno. RW-4
     // SA-F1: mount_lookup now returns a REF-HELD source -- clunk each result.
-    struct Spoor *r1 = mount_lookup(p, mp1);
+    struct Spoor *r1 = mount_lookup(p, mp1, NULL);
     TEST_ASSERT(r1 == a, "lookup (-,1,0) -> a");
     if (r1) spoor_clunk(r1);
-    struct Spoor *r2 = mount_lookup(p, mp2);
+    struct Spoor *r2 = mount_lookup(p, mp2, NULL);
     TEST_ASSERT(r2 == b, "lookup (-,2,0) -> b");
     if (r2) spoor_clunk(r2);
-    TEST_ASSERT(mount_lookup(p, mp3) == NULL, "lookup unmounted devno -> NULL");
+    TEST_ASSERT(mount_lookup(p, mp3, NULL) == NULL, "lookup unmounted devno -> NULL");
 
     // unmount by mp1 removes ONLY a's entry; b's (same dc+qid, other devno) stays.
     TEST_EXPECT_EQ(unmount(p, mp1), 0, "unmount (-,1,0)");
     TEST_EXPECT_EQ(territory_nmounts(p), 1, "one entry left after unmount");
-    TEST_ASSERT(mount_lookup(p, mp1) == NULL, "(-,1,0) gone");
-    struct Spoor *r3 = mount_lookup(p, mp2);
+    TEST_ASSERT(mount_lookup(p, mp1, NULL) == NULL, "(-,1,0) gone");
+    struct Spoor *r3 = mount_lookup(p, mp2, NULL);
     TEST_ASSERT(r3 == b, "(-,2,0) still -> b");
     if (r3) spoor_clunk(r3);
 
@@ -528,7 +528,7 @@ void test_territory_mount_lookup_ref_survives_unmount(void) {
     TEST_EXPECT_EQ(mount(p, src, mp, 0), 0, "mount");   // src: table holds a ref
     spoor_unref(src);                                    // drop the test's ref -> table is the ONLY holder
 
-    struct Spoor *got = mount_lookup(p, mp);             // SA-F1: returns a REF-HELD source
+    struct Spoor *got = mount_lookup(p, mp, NULL);             // SA-F1: returns a REF-HELD source
     TEST_ASSERT(got == src, "mount_lookup -> src");
 
     TEST_EXPECT_EQ(unmount(p, mp), 0, "unmount drops the table ref");

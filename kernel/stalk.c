@@ -185,7 +185,11 @@ static struct Spoor *clone_walk_zero(struct Spoor *src) {
 //                            Spoor failed (OOM / walk error); *out == NULL and
 //                            probe is still owned -- the caller fails the walk.
 int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
-                       struct Spoor **out) {
+                       struct Spoor **out, bool *crossed_pheno) {
+    // VIVARIUM section 13: crossed_pheno is a SET-ONLY accumulator (the caller
+    // inits it false before the first cross and reads it after the last; NULL
+    // for callers that do not resolve for exec). We only ever set it true, so a
+    // mount-over-mount chain with a pheno-mount at ANY hop is detected.
     *out = NULL;
     if (!p || !p->territory || !probe) return 0;
 
@@ -202,8 +206,14 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
         // ref are atomic under the Territory ns_lock, so a concurrent unmount
         // cannot free it mid-cross). clone_walk_zero mints an INDEPENDENT crossed
         // Spoor from it; release the transferred ref immediately after.
-        struct Spoor *src = mount_lookup(p->territory, id);
+        u32 mflags = 0;
+        struct Spoor *src = mount_lookup(p->territory, id, &mflags);
         if (!src) break;                          // id is not a mount point
+        // VIVARIUM section 13: this cross went through a pheno-mount. Recorded
+        // BEFORE the clone can fail, so a pheno-mount is detected even if the
+        // subsequent clone_walk_zero errors (the walk then fails closed, but the
+        // fact that a pheno-mount was on the path is not silently lost).
+        if ((mflags & MPHENO_LINUX) && crossed_pheno) *crossed_pheno = true;
         struct Spoor *crossed = clone_walk_zero(src);
         spoor_clunk(src);                         // done with the looked-up source
         if (!crossed) {
@@ -438,7 +448,8 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
 static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                                 const char *path, u64 pathlen,
                                 int amode, u32 omode, int *errp,
-                                struct t_stat *stat_out, bool *stat_done) {
+                                struct t_stat *stat_out, bool *stat_done,
+                                bool *crossed_pheno) {
     if (!start || !path) { if (errp) *errp = T_E_INVAL; return NULL; }
     // Reject an unknown amode LOUDLY rather than silently degrading to walk-only
     // (stalk-1 audit F1). stalk-2 adds STALK_MOUNT; POUNCE adds STALK_STAT; D-1
@@ -526,7 +537,7 @@ restart:
     // we cannot cross it in place; the crossed clone goes on the trail instead.
     {
         struct Spoor *crossed = NULL;
-        if (stalk_cross_mounts(p, base, &crossed) < 0) goto fail;
+        if (stalk_cross_mounts(p, base, &crossed, crossed_pheno) < 0) goto fail;
         if (crossed) trail[depth++] = crossed;
     }
 
@@ -603,7 +614,7 @@ restart:
         struct Spoor *parent;
         if (depth > 0) {
             struct Spoor *crossed = NULL;
-            if (stalk_cross_mounts(p, trail[depth - 1], &crossed) < 0) goto fail;
+            if (stalk_cross_mounts(p, trail[depth - 1], &crossed, crossed_pheno) < 0) goto fail;
             if (crossed) {
                 spoor_clunk(trail[depth - 1]);
                 trail[depth - 1] = crossed;
@@ -1277,7 +1288,7 @@ per_component:
     // is still owned -> the fail path clunks it.
     if (amode != STALK_MOUNT) {
         struct Spoor *crossed = NULL;
-        if (stalk_cross_mounts(p, quarry, &crossed) < 0) goto fail;
+        if (stalk_cross_mounts(p, quarry, &crossed, crossed_pheno) < 0) goto fail;
         if (crossed) {
             spoor_clunk(quarry);
             quarry = crossed;
@@ -1386,7 +1397,20 @@ fail:
 struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
                         const char *path, u64 pathlen, int amode, u32 omode,
                         int *errp) {
-    return stalk_core(p, start, path, pathlen, amode, omode, errp, NULL, NULL);
+    return stalk_core(p, start, path, pathlen, amode, omode, errp, NULL, NULL, NULL);
+}
+
+// stalk_exec (VIVARIUM section 13) -- the exec-resolution variant: identical to
+// stalk_err but reports, via *crossed_pheno, whether the resolution crossed a
+// mount marked MPHENO_LINUX. The caller inits *crossed_pheno = false and reads
+// it only on success; a NULL start/path or a failed walk leaves it as the caller
+// set it (fail-safe: the spawn stays native). Only the exec path consumes this,
+// so stalk_err's own callers are untouched.
+struct Spoor *stalk_exec(struct Proc *p, struct Spoor *start,
+                         const char *path, u64 pathlen, int amode, u32 omode,
+                         int *errp, bool *crossed_pheno) {
+    return stalk_core(p, start, path, pathlen, amode, omode, errp, NULL, NULL,
+                      crossed_pheno);
 }
 
 int stalk_stat(struct Proc *p, struct Spoor *start,
@@ -1399,7 +1423,7 @@ int stalk_stat(struct Proc *p, struct Spoor *start,
     bool done = false;
     struct Spoor *q = stalk_core(p, start, path, pathlen,
                                  STALK_STAT | (int)flags, 0,
-                                 errp, out, &done);
+                                 errp, out, &done, NULL);
     if (done) return 0;   // the walk-query fast path filled *out; no Spoor existed
     if (!q)   return -1;  // *errp carries the cause
     // Fallback quarry (walk_attrs-less final Dev / leaf mount point crossed to

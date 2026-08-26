@@ -38,6 +38,7 @@
 #include <thylacine/page.h>        // #217: PAGE_SIZE
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/stalk.h>       // section 13: stalk_cross_mounts crossed_pheno
 #include <thylacine/syscall.h>
 #include <thylacine/territory.h>   // #217: mount / unmount / MNOEXEC
 #include <thylacine/thread.h>
@@ -60,6 +61,7 @@ void test_exec_ns_non_executable_denied(void);
 void test_exec_ns_noexec_mount_denied(void);      // #217
 void test_mmap_file_noexec_mount_denied(void);    // #217
 void test_mmap_file_devenv_never_exec_backs(void); // #217 F1
+void test_exec_ns_pheno_mount_crossing(void);      // VIVARIUM section 13
 
 void test_exec_ns_resolve_absolute_ok(void) {
     struct Thread *t = current_thread();
@@ -168,6 +170,79 @@ void test_exec_ns_noexec_mount_denied(void) {
     spoor_clunk(before);
     spoor_unref(src);
     spoor_unref(mp);
+}
+
+// VIVARIUM section 13: the phenotype-declaration mount channel. Unlike MNOEXEC
+// (a (dc,devno) predicate that a phantom mount can trip without ever being
+// crossed), MPHENO_LINUX is detected by an ACTUAL crossing during resolution --
+// so this drives stalk_cross_mounts through a real cross of a pheno-mounted
+// source and asserts the crossed_pheno report. Paired with a plain-mount control
+// through the SAME code path, so "the resolver reports pheno for everything"
+// cannot masquerade as detection. Mutates kproc's live Territory, so every mount
+// is torn down before the asserts (the noexec test's discipline).
+void test_exec_ns_pheno_mount_crossing(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc && t->proc->territory, "current thread has a Territory");
+    if (!t || !t->proc || !t->proc->territory) return;
+
+    struct Spoor *src   = spoor_alloc(&devnone);   // the mounted source (crossed)
+    struct Spoor *mp    = spoor_alloc(&devnone);   // a synthetic mount point
+    struct Spoor *probe = spoor_alloc(&devnone);   // an identity matching mp
+    TEST_ASSERT(src && mp && probe, "spoor_alloc for the pheno crossing");
+    if (!src || !mp || !probe) {
+        if (probe) spoor_unref(probe);
+        if (mp)    spoor_unref(mp);
+        if (src)   spoor_unref(src);
+        return;
+    }
+    mp->qid.path    = 0xF0F0DEC1A5Eull;   // an identity no real walk produces
+    probe->qid.path = mp->qid.path;        // same (dc, devno, qid) -> matches the mount
+
+    // Leg 1: cross an MPHENO_LINUX mount -> crossed_pheno set.
+    int mrc1 = mount(t->proc->territory, src, mp, MPHENO_LINUX);
+    struct Spoor *out1 = NULL;
+    bool pheno_on = false;
+    if (mrc1 == 0) (void)stalk_cross_mounts(t->proc, probe, &out1, &pheno_on);
+    if (out1) spoor_clunk(out1);
+    if (mrc1 == 0) (void)unmount(t->proc->territory, mp);
+
+    // Leg 2 (CONTROL): cross a PLAIN mount over the same point -> stays false.
+    int mrc2 = mount(t->proc->territory, src, mp, 0);
+    struct Spoor *out2 = NULL;
+    bool pheno_off = false;
+    if (mrc2 == 0) (void)stalk_cross_mounts(t->proc, probe, &out2, &pheno_off);
+    if (out2) spoor_clunk(out2);
+    if (mrc2 == 0) (void)unmount(t->proc->territory, mp);
+
+    // The primitive the detection reads: mount_lookup's flag report.
+    u32 mflags_pheno = 0xFFFFFFFF, mflags_plain = 0xFFFFFFFF;
+    int mrc3 = mount(t->proc->territory, src, mp, MPHENO_LINUX);
+    struct Spoor *ls1 = (mrc3 == 0)
+        ? mount_lookup(t->proc->territory, probe, &mflags_pheno) : NULL;
+    if (ls1) spoor_clunk(ls1);
+    if (mrc3 == 0) (void)unmount(t->proc->territory, mp);
+    int mrc4 = mount(t->proc->territory, src, mp, 0);
+    struct Spoor *ls2 = (mrc4 == 0)
+        ? mount_lookup(t->proc->territory, probe, &mflags_plain) : NULL;
+    if (ls2) spoor_clunk(ls2);
+    if (mrc4 == 0) (void)unmount(t->proc->territory, mp);
+
+    spoor_unref(probe);
+    spoor_unref(mp);
+    spoor_unref(src);
+
+    TEST_EXPECT_EQ(mrc1, 0, "mount MPHENO_LINUX source");
+    TEST_ASSERT(pheno_on == true,
+        "DECLARE: crossing an MPHENO_LINUX mount sets crossed_pheno");
+    TEST_EXPECT_EQ(mrc2, 0, "mount plain source");
+    TEST_ASSERT(pheno_off == false,
+        "CONTROL: crossing a PLAIN mount through the SAME path leaves "
+        "crossed_pheno false (the detection is not always-on)");
+    TEST_ASSERT((mflags_pheno & MPHENO_LINUX) != 0,
+        "mount_lookup reports MPHENO_LINUX on the flagged mount");
+    TEST_ASSERT((mflags_plain & MPHENO_LINUX) == 0,
+        "mount_lookup reports NO MPHENO_LINUX on the plain mount (flag "
+        "independence: the report is the entry's, not a constant)");
 }
 
 void test_mmap_file_noexec_mount_denied(void) {

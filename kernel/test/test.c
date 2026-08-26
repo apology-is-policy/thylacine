@@ -249,6 +249,7 @@ void test_territory_mount_destroy_drops_all_refs(void);
 void test_territory_mount_devno_disambiguates(void);
 void test_territory_mount_noexec_covers(void);
 void test_exec_ns_noexec_mount_denied(void);
+void test_exec_ns_pheno_mount_crossing(void);
 void test_mmap_file_noexec_mount_denied(void);
 void test_mmap_file_devenv_never_exec_backs(void);
 void test_territory_mount_rejects_cycle(void);
@@ -1753,6 +1754,7 @@ struct test_case g_tests[] = {
     { "exec_ns.miss_returns_null",     test_exec_ns_miss_returns_null,     false, NULL },
     { "exec_ns.non_executable_denied", test_exec_ns_non_executable_denied, false, NULL },
     { "exec_ns.noexec_mount_denied",   test_exec_ns_noexec_mount_denied,   false, NULL },
+    { "exec_ns.pheno_mount_crossing",                   test_exec_ns_pheno_mount_crossing,                    false, NULL },
     { "mmap_file.noexec_mount_denied", test_mmap_file_noexec_mount_denied, false, NULL },
     { "mmap_file.devenv_never_exec_backs", test_mmap_file_devenv_never_exec_backs, false, NULL },
     { "namespace_layout.proc_ctl_cross", test_namespace_layout_proc_ctl_cross, false, NULL },

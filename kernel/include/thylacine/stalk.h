@@ -120,6 +120,15 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
                         const char *path, u64 pathlen, int amode, u32 omode,
                         int *errp);
 
+// stalk_exec (VIVARIUM section 13) -- stalk_err plus a phenotype report: on
+// success *crossed_pheno is set true iff the resolution crossed an MPHENO_LINUX
+// mount (the /viv/bin subtree scope; the section-12.1 rule-1 second declaration
+// channel). The caller inits *crossed_pheno = false; a failed walk leaves it
+// untouched (fail-safe -> native). Only the exec resolver uses this.
+struct Spoor *stalk_exec(struct Proc *p, struct Spoor *start,
+                         const char *path, u64 pathlen, int amode, u32 omode,
+                         int *errp, bool *crossed_pheno);
+
 // stalk_stat -- resolve `path` and fill *out with the LEAF's metadata without
 // installing anything (POUNCE; the SYS_STAT core). The X-search is identical
 // to a STALK_WALK resolution (POSIX stat authority = the path X-search only;
@@ -150,6 +159,10 @@ int stalk_stat(struct Proc *p, struct Spoor *start,
 //   *out != NULL, return 0 : crossed; *out is OWNED (caller clunks it).
 //   return -1              : probe IS a mount point but minting the crossed
 //                            Spoor failed; *out == NULL; probe still owned.
-int stalk_cross_mounts(struct Proc *p, struct Spoor *probe, struct Spoor **out);
+// VIVARIUM section 13: `crossed_pheno` is a SET-ONLY accumulator -- true if this
+// cross (or any hop of a mount-over-mount chain) went through an MPHENO_LINUX
+// mount. The caller inits it false; NULL for callers that do not resolve for exec.
+int stalk_cross_mounts(struct Proc *p, struct Spoor *probe, struct Spoor **out,
+                       bool *crossed_pheno);
 
 #endif // THYLACINE_STALK_H
