@@ -1,16 +1,17 @@
 # Warp multi-queue submit-fence redesign (the F3 seam) -- design foundation
 
-**Status: RATIFIED (2026-08-26).** Operator greenlit "pull multi-queue forward"
-for the GPU-submit chunk and voted the two open ABI/scope forks (section G); the
-design is now binding for the implementation. Decisions: (1) 4 timelines / 3
-queues (max_timeline_count = 4); (2) the Option-1+2 HYBRID fence ABI (per-ring
-FenceTag -> per-ring fence_signaled, exposed through the EXISTING ring/<ridx>/fence
-file for host3d rings, sourced from the GPU pump, with a hard ring-flavor guard) --
-this is a client<->server ABI surface and was escalated + signed off; (3) the
-F6/F8 per-renderer mutex is PULLED IN (now a dependency of concurrent multi-queue
-submits); (4) #210's per-ring FIFO is a risk to BOUND at the I-45 audit, not a
-pre-code decision. Research: the design-brief fork + direct reads; every claim
-carries file:line -- re-verify before relying.
+**Status: RATIFIED (2026-08-26; the fence-ABI half re-voted the same day).**
+Operator greenlit "pull multi-queue forward" for the GPU-submit chunk and voted
+the two open ABI/scope forks (section G); the design is binding for the
+implementation. Decisions: (1) 4 timelines / 3 queues (max_timeline_count = 4);
+(2) fence ABI **v2 -- the timelines file + the shared park** (the first vote's
+ring/<ridx>/fence hybrid was REFUTED by the implementation code-read -- a queue
+timeline has no host3d ring -- and re-escalated the same day; section E.1 has
+the refutation + the ratified shape); (3) the F6/F8 per-renderer mutex is
+PULLED IN (now a dependency of concurrent multi-queue submits); (4) #210's
+per-ring FIFO is a risk to BOUND at the I-45 audit, not a pre-code decision.
+Research: the design-brief fork + direct reads; every claim carries file:line --
+re-verify before relying.
 
 Prerequisite context: `docs/WARP-V3-DESIGN.md` (the Warp arc), the V-3b-3c-2b
 close (`e34760d8` + mesa `d7f4ef1`/patch 0014), `memory/audit_v3b3c2b_closed_list.md`
@@ -75,26 +76,39 @@ explicit.
 
 ## D. The minimal redesign delta
 
+(Updated for the ratified-v2 exposure, section E.1.)
+
 **mesa (vn_renderer_thylacine.c + warp_client.{c,h}):**
-- `thylacine_submit` passes `batch->ring_idx` to `warp_venus_submit`.
-- The one ctx-wide `tly->warp.issued`/`signaled` pair becomes PER-RING
-  (`issued[ring]`/`signaled[ring]` on `warp_conn`); the sync-only "bind to last
-  issued" arm (~588-610) and `thylacine_sync.signal_seq` become per-ring.
-- `thylacine_wait` (~637) waits per-ring.
-- Lift `max_timeline_count` (see fork G.1).
-- The submit verb + the fence read carry ring_idx.
-- **The owed F6/F8 per-renderer mutex becomes REQUIRED** (multiple queues =
-  concurrent submit threads) -- now a DEPENDENCY of this chunk, not a seam.
+- `thylacine_submit` passes `batch->ring_idx` (the TIMELINE) to
+  `warp_venus_submit`.
+- The one ctx-wide `tly->warp.issued`/`signaled` pair becomes PER-TIMELINE
+  (`issued[t]`/`signaled[t]` on `warp_conn`); the sync-only "bind to last
+  issued" arm (~588-610) and `thylacine_sync` bind (timeline, seq), not a bare
+  seq.
+- `thylacine_wait` (~637) waits per-(timeline, seq) through the one-parker
+  fence-waiter protocol (E.1): a single thread parks the shared fence file
+  with the transport mutex dropped; wakers re-read `ctx/<id>/timelines`.
+- Lift `max_timeline_count` to 4 (G.1) + stop forcing
+  `supports_multiple_timelines` to 0 (the seam now carries timelines; the
+  field is only asserted by other backends, never branched on by the driver
+  core -- but the forced 0 is a false statement once this lands).
+- The submit verb carries the timeline index.
+- **The F6/F8 per-renderer mutex lands here as the TRANSPORT mutex** (short
+  ops only -- never held across the park), plus the fence-waiter condvar.
 
 **tapestryd (server.rs + gpu.rs):**
-- `warp_venus_submit` accepts ring_idx -> `gpu.submit_3d`.
+- `warp_venus_submit` accepts the timeline -> `gpu.submit_3d` (which sets the
+  virtio-gpu hdr `ring_idx` + `VIRTIO_GPU_FLAG_INFO_RING_IDX` for a nonzero
+  timeline -- the standard virtio-gpu per-context fence ring).
 - **Add ring_idx to `FenceTag`** + thread submit->completion.
-- `warp_service_fences` retires per-(ctx, ring) -> **`fence_signaled` becomes
-  per-ring** (array/map on WarpCtx); re-establish the #210 dense-count invariant
-  PER RING.
-- Expose per-ring signaled; map (venus_ctx, ring_idx) -> the queue's host3d ring.
-- **KEEP** the ctx-wide fence for ring_idx 0 (CPU timeline) + teardown -- the
-  change is ADDITIVE.
+- `warp_service_fences` retires per-(ctx, timeline): bump BOTH
+  `timeline_signaled[t]` and the existing ctx-wide `fence_signaled` total (the
+  park file + every existing consumer unbroken); re-establish the #210
+  dense-count invariant PER TIMELINE.
+- NEW read-only `ctx/<id>/timelines` file (one `timeline <t> <signaled>` row
+  per timeline).
+- **KEEP** the ctx-wide fence semantics for timeline 0 + teardown -- the
+  change is ADDITIVE; the V-3a ring/echo path untouched.
 
 ## E. Options for the per-queue fence + recommendation
 
@@ -113,13 +127,58 @@ explicit.
    multi-queue. REJECT for a real multi-queue milestone; acceptable only as a
    documented interim.
 
-**RATIFIED (G.2, operator vote 2026-08-26): Option 1 as the mechanism, exposed
-through the existing `ring/<ridx>/fence` file (Option 2's file+poll reuse) for
-host3d rings, sourced from the pump.** The new mechanism is narrow -- a ring_idx
-on FenceTag + a per-ring `fence_signaled` -- reusing the completion pump, the
-fence file, and the park/poll delivery. **HARD GUARD (part of the ABI):** a
-host3d ring's `completed_seq` comes from the GPU pump, NEVER the echo (which
-stays E_OPNOTSUPP); a runtime guard keyed on the ring flavor at the source.
+**SUPERSEDED (the first G.2 vote, 2026-08-26 morning):** Option 1's mechanism
+exposed through the existing `ring/<ridx>/fence` file for host3d rings. The
+implementation code-read REFUTED its premise the same day (see E.1 below): a
+queue timeline has NO host3d ring, so there is no ridx for its fence file to
+live at. Recorded, not deleted -- the refutation is the load-bearing part.
+
+### E.1 The refutation + the corrected surface (ratified same day)
+
+What the code actually says (re-verified 2026-08-26, mesa tip d7f4ef1):
+
+- **vkQueueSubmit never reaches the renderer submit op.** It is encoded into
+  the PRIMARY ring (`vn_submit_vkQueueSubmit(dev->primary_ring, ...)`,
+  vn_queue.c:1037) that virglrenderer polls; its GPU-completion wait is the
+  venus fence-feedback machinery, not `thylacine_wait`.
+- **The renderer op carries nonzero ring_idx only on the sync-export path**:
+  `vn_create_sync_file` builds a batch of `vkWaitRingSeqnoMESA` + syncs with
+  `.ring_idx = external_payload->ring_idx` (vn_queue.c:1918-1930) -- "signal
+  these syncs when the queue's timeline passes the ring seqno".
+- **A queue is a pure fence timeline.** `vn_device.c:83-92` acquires a
+  timeline index (`vn_instance_acquire_ring_idx`, a bitmask -- no memory) and
+  binds it host-side via the protocol (`.ringIdx` on the device-queue info);
+  no shmem / host3d ring is minted per queue, ever. Minting one purely as a
+  fence-file anchor would be the section-C conflation verbatim.
+- The server park machinery is a per-ctx single cursor
+  (`fence_signaled`/`fence_reported`, server.rs ~9798: a parked read consumes
+  the report) -- two concurrent parked readers would steal each other's wakes.
+- The ctx ctl's client-critical prefix is budgeted at 255 bytes and GUARDED
+  (server.rs ~9674, F11) -- per-timeline rows do not safely fit there.
+
+**RATIFIED v2 (operator vote 2026-08-26, superseding): the timelines file +
+the shared park.** The pump mechanism from the first vote is UNCHANGED --
+ring_idx (the TIMELINE) on `FenceTag`, retirement per-(ctx, timeline). The
+exposure:
+
+- **Server (additive only):** a retirement bumps BOTH the per-timeline
+  `timeline_signaled[t]` and the existing ctx-wide `fence_signaled` total (so
+  every existing consumer, the park file included, is unbroken). A NEW tiny
+  read-only `ctx/<id>/timelines` file serves one `timeline <t> <signaled>` row
+  per timeline -- its own file, its own budget, no interaction with the ctl's
+  255-byte prefix discipline. The `ctx/<id>/fence` park file is BYTE-IDENTICAL
+  server-side (the audited single-cursor machinery untouched). The V-3a
+  `ring/<ridx>/fence` + echo path: untouched entirely -- the flavor-guard
+  hazard from the superseded vote vanishes by construction.
+- **Client (mesa):** per-timeline `issued[t]`/`signaled[t]`; **one parker at a
+  time** -- a fence-waiter protocol (mutex + condvar) where a single thread
+  parks on the shared fence file with the TRANSPORT MUTEX DROPPED across the
+  park, re-reads `timelines` on wake, publishes to per-timeline waiters. Two
+  parked readers are forbidden by construction (the single-cursor server would
+  let them steal each other's wakes). Spurious wakes are bounded by
+  cross-queue traffic (<= 3 queues at the ratified count).
+- **The submit verb carries the timeline index** (0 = the ctx-wide/CPU lane,
+  today's behavior).
 
 ## F. I-45 isolation delta -- NO weakening
 
@@ -140,15 +199,15 @@ gate, like today's ridx) and cannot name another ctx's ring/timeline.
    Vulkan queue-family split. `max_timeline_count = 4` in mesa; the per-ring
    fence state in tapestryd sizes to the rings actually minted (server hard
    bound stays `WARP_RINGS_PER_CTX=64`).
-2. **Fence-file ABI: the Option 1+2 HYBRID** (operator-voted; this was the
-   escalation-worthy ABI fork). ring_idx lands on `FenceTag`;
-   `warp_service_fences` retires per-(ctx, ring) into a per-ring
-   `fence_signaled`; a host3d ring's EXISTING `ring/<ridx>/fence` file is fed
-   from the GPU pump (the V-3a blob-ring echo path is untouched). **The hard
-   flavor guard is part of the ABI**: the two `completed_seq` sources (echo vs
-   GPU pump) are keyed on ring flavor at the source and must never cross -- a
-   host3d ring's seq comes ONLY from the pump (its kick verb stays
-   E_OPNOTSUPP), a blob ring's ONLY from the echo.
+2. **Fence-file ABI: the TIMELINES FILE + SHARED PARK** (operator-voted TWICE
+   -- the first vote's hybrid was refuted by the implementation code-read the
+   same day and re-escalated; section E.1 carries the refutation + the full
+   ratified v2 shape). ring_idx (the timeline) lands on `FenceTag`;
+   retirement bumps per-timeline `timeline_signaled[t]` AND the ctx-wide
+   total; a NEW read-only `ctx/<id>/timelines` file exposes the per-timeline
+   counters; the `ctx/<id>/fence` park file and the whole V-3a
+   `ring/<ridx>/fence`/echo path are untouched. Client: one-parker + condvar
+   fan-out, transport mutex dropped across the park.
 3. **The F6/F8 per-renderer mutex is IN this chunk** (dependency pull-forward
    confirmed): concurrent multi-queue submits make the torn-RMW on
    `warp_conn`/`ring_bitmap`/`mem_bitmap`/the per-ring seq pairs a live defect,

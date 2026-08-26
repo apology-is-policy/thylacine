@@ -52,6 +52,29 @@ rings vault rather than growing a parallel reference section. The vault
 checkout is 264 commits behind main; its sweep is the vault track's queue, not
 this run's.
 
+**The wrong turn, caught within the hour (the reusable part of this run so
+far).** The ratified hybrid fence ABI — "expose per-queue fences through the
+queue's `ring/<ridx>/fence`" — rested on a premise the pre-implementation
+code-read refuted: **a queue timeline has no host3d ring.** `vn_device.c:83-92`
+acquires a bare bitmask index and binds it host-side via the protocol; no
+shmem is minted per queue; vkQueueSubmit rides the polled primary ring
+(`vn_queue.c:1037`, never the renderer op); the renderer op sees nonzero
+ring_idx only on sync-export batches (`vkWaitRingSeqnoMESA` + syncs,
+vn_queue.c:1918-1930). What caught it: the discipline of re-verifying the
+design doc's claims against the code before writing any — the doc itself
+warned "every claim carries file:line — re-verify before relying", and the §C
+namespace trap it documented (timeline vs host3d slot) turned out to be the
+exact conflation its own §D/§E had committed. Two further server facts shaped
+the correction: the fence park is a per-ctx SINGLE cursor
+(`fence_signaled`/`fence_reported`, server.rs ~9798 — two parked readers would
+steal each other's wakes), and the ctl's client-critical prefix is a guarded
+255-byte budget (~9674) with no room for per-timeline rows. Re-escalated with
+the evidence; operator ratified **v2: a new tiny read-only `ctx/<id>/timelines`
+file + the existing shared park file untouched + a one-parker/condvar client
+protocol with the transport mutex dropped across the park**. The superseded
+vote stays in the doc (§E) with its refutation — deleting it would delete the
+lesson.
+
 The chunk was "fill the three pre-wired mesa `vn_renderer` bo_ops over the `mem/`
 ABI and witness a `vkAllocateMemory`+`vkMapMemory` E2E on real V3D." The backend
 (`create_from_device_memory`/`bo_map`/`bo_destroy` + a 256-slot `mem_bitmap`) and
