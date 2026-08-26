@@ -68,6 +68,28 @@ lift (a second logical device, refused under the old count), and the F2
 cap-exhaustion recovery cycle. Zero hazards. mesa `deed314`/patch 0015,
 round-trip tree `0575a6189666` exact.
 
+**The audit chain: two rounds, one sharp catch, converged.** Round 1 (Fable
+5): 0/1/0/6 — the P1 was the shmem cache's *eviction* path
+(`cache_add → remove_expired_locked → the registered destroy callback`)
+mutating `ring_bitmap` and the warp connection under only the cache mutex; my
+"its other caller is cache_fini" comment had enumerated two of the three
+callers — the enumerate-callers-by-enclosing-function lesson (aux#254)
+replayed on the very mutex this chunk added. Fixed with a `_locked`/locking-
+wrapper split; round 2 (Fable 5, scoped to the fixes) verified the
+`cache→tly` lock order edge-by-edge — no reverse edge, no evict-on-get, no
+re-entrancy, teardown destroys the mutex after `cache_fini` — and returned
+0/0/0/1 (the F6 assert's 32-byte/row constant holds only for single-digit
+timeline indices; the assert now pins both). CLEAN. Of the six round-1 P3s:
+F5 (the `min()` clamp silently crediting timeline 3 on a corrupted tag —
+now drop-loud, and round 2 proved the arm dead-but-armed by closed producer
+enumeration), F6, F7 (a skip that could ride into the PASS banner — now a
+loud FAIL) fixed; F4 documented as the LEDGER-CLASS INVARIANT; F2/F3 are
+witness-strength gaps TRACKED to the owed two-timeline submit+wait harness
+(the copy proof cannot distinguish a stubbed fence from a real one — the
+per-timeline arithmetic is sound-by-policy on the trusted host, not
+sound-by-witness). Re-witnessed green on real V3D after the fixes; the
+round-2 additions are compile-time only.
+
 **A second deadlock corner caught at self-audit, before any run.** The
 pre-code design said "one parker" but the transport's own throttle
 (`fenced_write`) parks the fence file too — and a venus submit runs under the

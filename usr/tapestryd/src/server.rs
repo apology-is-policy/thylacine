@@ -8262,10 +8262,20 @@ impl Comp {
                     // Multi-queue F3: the per-timeline dense count, bumped
                     // ALONGSIDE the total (additive -- the park file rides
                     // the total). ring_idx is server-minted at submit, so
-                    // the bound holds by construction; the min() is the
-                    // belt for a corrupted tag, never a real lane.
-                    let t = (tag.ring_idx as usize).min(WARP_TIMELINES - 1);
-                    c.timeline_signaled[t] += 1;
+                    // the bound holds by construction; an out-of-range value
+                    // means a corrupted tag, and it is DROPPED LOUD (audit
+                    // F5) -- folding it into timeline 3 would return a
+                    // timeline-3 wait early, the silent wrong direction for
+                    // an integrity counter.
+                    let t = tag.ring_idx as usize;
+                    if t < WARP_TIMELINES {
+                        c.timeline_signaled[t] += 1;
+                    } else {
+                        say!(
+                            "tapestryd: warp fence tag ring_idx {} out of range (ctx {}) -- per-timeline count dropped",
+                            tag.ring_idx, tag.ctx_pub
+                        );
+                    }
                 }
                 break;
             }
@@ -8308,9 +8318,18 @@ impl Comp {
                     // abandonment) for the same reason it carries `comp` --
                     // the tag is gone, and without it this count is one
                     // short forever on that timeline (the per-timeline
-                    // replay of the #210 silent post-recovery park).
-                    let t = (v.ring_idx as usize).min(WARP_TIMELINES - 1);
-                    c.timeline_signaled[t] += 1;
+                    // replay of the #210 silent post-recovery park). An
+                    // out-of-range lane is dropped loud, never folded into
+                    // timeline 3 (audit F5).
+                    let t = v.ring_idx as usize;
+                    if t < WARP_TIMELINES {
+                        c.timeline_signaled[t] += 1;
+                    } else {
+                        say!(
+                            "tapestryd: warp vindication ring_idx {} out of range (ctx {}) -- per-timeline count dropped",
+                            v.ring_idx, v.ctx_pub
+                        );
+                    }
                 }
             }
             // ONE retired chain is not proof for a ctx that abandoned

@@ -936,9 +936,11 @@ sketched; 20 pointers is the ground truth. Shared helpers reused verbatim:
     with a queue impossible (a latent bug, not a safe default). Fix:
     `max_timeline_count = 2` -- exactly one queue timeline; self-limiting (a 2nd
     queue's acquire returns -1 -> clean VK_ERROR_INITIALIZATION_FAILED, never a
-    silent mis-fence). The F3 seam-carries-ring_idx fix stays OWED and gates a
-    second queue timeline (multi-queue SUBMIT), orthogonal to this allocate+map
-    path (creates the queue, never submits). Witnessed on thyla-pi/KVM real V3D
+    silent mis-fence). The F3 seam-carries-ring_idx fix stayed OWED here and
+    LANDED at the multi-queue GPU-submit chunk (75c8ccd1 + mesa patch 0015;
+    WARP-MULTIQUEUE-DESIGN is the design pin -- per-timeline fences via
+    FenceTag.ring_idx + the timelines file, max_timeline_count = 4), which
+    also carried this chunk's owed F1/F2 fix-proofs. Witnessed on thyla-pi/KVM real V3D
     4.2.14 (probe-free clean build): `device-memory sentinel OK (zero-at-map +
     c0deface round-tripped)` then `THYLACINE-VENUS-PROVE PASS ... V-3b-3c-2b` --
     vkAllocateMemory -> create_from_device_memory -> warp_mem_new, vkMapMemory ->
@@ -1018,9 +1020,13 @@ The backend owes the driver above it three things and no more:
   Our job is that the region is coherent: host writes to it become visible to a
   guest poll without an explicit syscall, and vice versa.
 - **submit** (`vn_renderer_submit`): hand a batch of the driver's CS to the host
-  renderer, carrying a `ring_idx` (u8, 0-63; Venus allocates one per `VkQueue`),
-  with in-order completion *per ring_idx* and exactly one waitable per submit.
-  GPU-DESIGN section 2.4: *"that is a Loom CQE."*
+  renderer, carrying a `ring_idx` -- a fence TIMELINE index (0 = the CPU lane;
+  Venus acquires one per `VkQueue`, bounded by `max_timeline_count` = 4 at the
+  ratified v1.0 count -- NOT the host3d ring-slot space 0-63, which this line
+  originally cited: a queue timeline has no memory ring behind it,
+  WARP-MULTIQUEUE-DESIGN E.1), with in-order completion *per ring_idx* and
+  exactly one waitable per submit. GPU-DESIGN section 2.4: *"that is a Loom
+  CQE."* AS-BUILT at the multi-queue chunk (75c8ccd1 + mesa patch 0015).
 - **wait / sync**: a submission's completion is observable. Venus **simulates
   syncobjs in userspace** (`SIMULATE_SYNCOBJ 1`): `VkFence`/`VkSemaphore` are
   *feedback slots in shared memory* the host writes and the guest polls. **There
