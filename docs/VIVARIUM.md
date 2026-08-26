@@ -3479,38 +3479,51 @@ by whoever composes the namespace, never inferred from bytes** — fuses the Pla
 mount-flag idiom with FreeBSD's `/compat/linux`, at single-binary rather than whole-
 container granularity, while keeping the declare-don't-sniff invariant intact.
 
-### 13.3 Mechanism (the `MNOEXEC` sibling)
+### 13.3 Mechanism — resolver subtree-scope (operator vote 2026-08-26)
 
-1. **A new mount flag `MPHENO_LINUX = 0x0020`** in `kernel/include/thylacine/
-   territory.h`, the next bit after `MNOEXEC (0x0010)`. A mount marked with it
-   declares: binaries resolved for exec through this mount run under the Linux
-   phenotype.
-2. **A parallel coverage scan `mount_pheno_linux_covers(territory, dc, devno)`** in
-   `kernel/territory.c`, the ANY-scan twin of `mount_noexec_covers` — keyed on the
-   `(dc, devno)` device instance a file necessarily shares with its mount source
-   (`spoor_clone` propagates `devno` through every walk/cross), so one device instance
-   mounted twice cannot carry two verdicts.
-3. **One OR-combined stamp.** At the exec-time phenotype stamp (today
-   `if (pheno_linux) p->phenotype = PHENO_LINUX;`, `kernel/syscall.c` in the spawn
-   thunk, right where the resolved binary Spoor `exe` and the child `territory` are
-   both in hand), the child is stamped Linux iff the spawn-arg channel declared it
-   (`sa->pheno_flags & SPAWN_PHENO_LINUX`) **OR** the resolved binary's mount covers
-   it (`mount_pheno_linux_covers(p->territory, exe->dc, exe->devno)`). Two declaration
-   channels, one stamp site, no third path.
-4. **Observable.** The `/proc/<pid>/ns` and `/dev/ns` renderers print ` pheno-linux`
-   next to a covered mount exactly as they print ` noexec` (`kernel/territory.c`
-   render path) — a declaration that cannot be observed cannot be audited (the #217
-   lesson).
+**The granularity finding that decided this.** The first design (a `mount_pheno_
+linux_covers(dc, devno)` scan, the `MNOEXEC` sibling) was built and unit-green
+before a deployment check falsified it: `dev9p` mints **one devno per 9P attach
+SESSION** (`dev9p.c`: "one devno == one session"), and `/clade/bin` / `/goroot/bin`
+prove the shipped bin dirs are plain subdirs of the **shared pool session**. A
+`(dc,devno)` key therefore scopes to a WHOLE session — flagging a subdir of the pool
+would declare EVERY file in it, native `/bin/ut` included. The operator was surfaced
+the two sound fixes (give `/viv/bin` its own device instance and keep the coarse key;
+or scope by the resolver) and **voted the resolver subtree-scope** — exact semantics,
+no coarseness footgun, and `git` ships as a plain pool file.
 
-**The fail-safe property — and why `MPHENO_LINUX` needs NO `may_back_exec`-style
-floor.** `MNOEXEC` is a RESTRICTION whose coverage gaps fail *open* (a Dev the
-`(dc,devno)` key cannot reach — `devenv` stamps the caller's env devno — escapes the
-noexec cover), which is precisely why `Dev.may_back_exec` exists as a hard floor
-beneath it. `MPHENO_LINUX` is a DECLARATION whose coverage gaps fail *safe*: if the
-key misses, the binary runs `PHENO_NATIVE` (rule 3's default) — a Linux binary that
-does not get the Linux phenotype merely makes Linux-numbered calls that hit native
-handlers and fails cleanly (rule 4's diagnostic path), never a silent privilege gain.
-So there is no fail-open class to floor against; the safe direction is structural.
+1. **A new mount flag `MPHENO_LINUX = 0x0020`** (`kernel/include/thylacine/
+   territory.h`, the next bit after `MNOEXEC 0x0010`). A mount marked with it declares:
+   a binary whose exec resolution CROSSES this mount runs the Linux phenotype.
+2. **The resolver reports the crossing.** `mount_lookup` hands back the matched entry's
+   flags under the `ns_lock`; `stalk_cross_mounts` sets a SET-ONLY `crossed_pheno`
+   accumulator when it crosses a pheno-mount (covering a mount-over-mount chain, at ANY
+   hop); `stalk_core` threads it through the three cross sites (base / trail / quarry);
+   the thin `stalk_exec` wrapper exposes it, and `exec_resolve_from_namespace_ex` writes
+   it out on a successful resolve. The exec path is the ONLY consumer — `stalk_err`'s
+   other callers are untouched.
+3. **One OR-combined stamp — unchanged.** At the exec-time phenotype stamp
+   (`if (pheno_linux) p->phenotype = PHENO_LINUX;`, the spawn thunk), `pheno_linux`
+   already carries BOTH channels: the manifest `sa->pheno_flags` OR'd, at the
+   SYS_SPAWN_FULL_ARGV resolution site, with the resolver's `exe_pheno_linux`. The stamp
+   itself stays channel-agnostic. Like the manifest channel, the mount channel rides
+   ONLY `SYS_SPAWN_FULL_ARGV` (the sole fresh-phenotype declarer, ARCH I-43); other
+   exec paths inherit via `rfork`.
+4. **The scope is the true one.** Because the declaration is a property of the RESOLUTION
+   (which mount you crossed), the SAME file is Linux reached through `/viv/bin` and
+   native reached by any other path — the phenotype is a property of HOW you named it,
+   never of the bytes. `git` lives as a plain file in the pool; a plain bind at `/viv/bin`
+   with `MPHENO_LINUX` is the whole deployment, no dedicated attach.
+5. **Observable.** The `/proc/<pid>/ns` and `/dev/ns` renderers print ` pheno-linux`
+   next to a flagged mount exactly as they print ` noexec` — a declaration that cannot
+   be observed cannot be audited (the #217 lesson).
+
+**Fail-safe.** A resolution that crosses no pheno-mount leaves the binary
+`PHENO_NATIVE` (rule 3's default). A Linux binary that does not get the phenotype makes
+Linux-numbered calls that hit native handlers and fails cleanly (rule 4's diagnostic),
+never a silent privilege gain. Unlike `MNOEXEC` (a RESTRICTION whose coverage gaps fail
+OPEN, hence its `may_back_exec` floor), `MPHENO_LINUX` is a DECLARATION whose gaps fail
+safe by construction, so it needs no floor.
 
 ### 13.4 I-43 soundness (shape, never authority)
 
@@ -3570,6 +3583,13 @@ guard rather than a cap. The holotype prosecutes this explicitly.
 
 ### 13.8 Alternatives considered + rejected
 
+- **The `(dc,devno)` covers-scan (the first mount-flag build).** `MPHENO_LINUX` +
+  `mount_pheno_linux_covers(territory, dc, devno)`, the exact `MNOEXEC` sibling, checked
+  at the exec stamp. Built + unit-green, then rejected on the §13.3 granularity finding:
+  a devno is per-9P-session, so scoping `/viv/bin` demands giving it its own device
+  instance (a dedicated attach — a deploy wart) AND it inherits `MNOEXEC`'s coarseness
+  footgun (a future subdir-bind over-declares a whole session). The operator chose the
+  resolver subtree-scope over it: exact semantics, no footgun, `git` as a plain pool file.
 - **B1 — ut path-prefix (the fast form).** ut sets the phenotype when the resolved
   path is under `/viv/bin/`. Rejected: puts the phenotype-declaration *policy* into
   userspace as a hardcoded string (a second declarant that is not the kernel), and
@@ -3585,12 +3605,15 @@ guard rather than a cap. The holotype prosecutes this explicitly.
 
 ### 13.9 Sub-chunk plan
 
-- **A (kernel mechanism).** `MPHENO_LINUX` flag + `mount_pheno_linux_covers` + the
-  OR-combined exec stamp + the ns-introspection render + kernel unit tests (a synthetic
-  `MPHENO_LINUX` mount → resolved binary → phenotype stamped; and the fail-safe: an
-  uncovered binary stays native). Audit-bearing (the "Exec from the namespace" +
-  Territory + I-43 surfaces) → holotype. Updates the `sub-kernel-territory` vault note
-  (OWNED) + a new `docs/AUDIT-TRIGGERS.md` row + ARCH §28 I-43.
+- **A (kernel mechanism) — LANDED, resolver subtree-scope.** `MPHENO_LINUX` flag +
+  `mount_lookup` flag report + `stalk_cross_mounts`/`stalk_core`/`stalk_exec` crossing
+  detection + `exec_resolve_from_namespace_ex` + the OR at the SYS_SPAWN_FULL_ARGV
+  resolution site + the ns-introspection render + a `stalk_cross_mounts` unit test (a
+  real cross of a pheno-mount sets `crossed_pheno`; a plain-mount control leaves it
+  false; the `mount_lookup` flag report). Suite 1462/1462. Audit-bearing (the
+  Pathname-resolution/`stalk` [I-28] + "Exec from the namespace" + I-43 surfaces) →
+  holotype. Updates the `sub-kernel-territory` vault note (OWNED) + a new
+  `docs/AUDIT-TRIGGERS.md` row + ARCH §28 I-43.
 - **B (integration + deploy).** ut `/viv/bin` PATH + completion + uniform benign-cap
   conferral; `build.sh` git-at-`/viv/bin` + symlinks + `/etc/gitconfig` + the boot
   `MPHENO_LINUX` bind; a boot-gate E2E proving **bare `git` from a shell (not a
