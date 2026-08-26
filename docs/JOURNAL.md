@@ -104,6 +104,32 @@ client cannot name another's ring), and the residual shared surface (QEMU's
 serial controlq) is the documented-trusted host half, ours to enforce only at
 the v3d fork F3. No v1.0 code owed.
 
+**W-2 — the operator's standard reset the recommendation, and the design was
+ratified the same day.** My first WSI fork recommended the CPU-blit-into-a-weave
+path (every mechanism proven, fastest to vkQuake). The operator's reply is now
+binding feedback (`feedback_highest_standard_no_workarounds.md`): highest
+standard, no workarounds, cost/speed not a factor, redoing built architecture is
+welcome — and Halcyon may run on Vulkan. Under that bar the recommendation
+inverts: the blit path's cheapness rests on vkQuake's tiny surface, exactly the
+property Halcyon-at-full-resolution does not have — a workaround wearing a
+"proven" badge. The dma-buf path fails for the opposite reason (paradigm: Linux
+ambient-authority import/export does not map onto per-Proc capabilities). The
+ratified design (`docs/WARP-WSI-DESIGN.md`) is the zero-copy unification: a
+"presentable" object (a venus VkImage whose shape is declared at registration —
+the Fuchsia sysmem lesson as one 9P verb), direct blob scanout fullscreen +
+host-side compose windowed (both arms zero guest copies), one adoption model
+absorbing the virgl-only `present-to` special case, the fourth
+`tapestry_present.tla` in-flight class specced before code, and the
+`gl_evict_res`-class display-safe teardown WarpMem never needed before. The
+mechanism research that grounded it (two Explore agents, file:line-cited) found
+every gap named and none architectural: the substrate (shared host pages,
+blob_id binding, the C-3/C-6 compose machinery, the I-40 bracket) already
+exists; what is missing is vocabulary (`SET_SCANOUT_BLOB`), typing
+(`present-to` reads `bos[]` only), and the spec's fourth class. The one
+external unknown — host `SET_SCANOUT_BLOB` support on this QEMU/virglrenderer
+chain — is probe-gated (W-3a) with the no-guest-copy Composed fallback, so no
+architecture rests on an unverified host claim.
+
 ---
 
 ## 2026-08-26 (run 2) — the multi-queue design ratified: four forks closed, two by operator vote

@@ -119,6 +119,19 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   cost lives. Worth recording even though v1.0 exercises only the virgl half:
   the claim is that a single-trusted-server GPU stack makes an entire category
   of compositor protocol unnecessary rather than merely cheaper.
+  **The Vulkan swapchain instantiation was ratified 2026-08-26**
+  (`docs/WARP-WSI-DESIGN.md`, the vkQuake-arc W-2): a full `VK_KHR_swapchain`
+  whose image is a shape-declared-at-registration "presentable" named to the
+  compositor over the same 9P service that scoped its creation — **no dma-buf,
+  no buffer-passing protocol, no format-modifier negotiation, zero guest
+  copies on both present arms** (direct blob scanout fullscreen; host-side
+  GPU blit / fenced readback windowed), under a formally-specified
+  no-torn-scanout invariant (the fourth `tapestry_present.tla` in-flight
+  class). Where Wayland's answer to "a Vulkan client presents" is
+  linux-dmabuf + drm_syncobj and Fuchsia's is sysmem + Flatland channels,
+  Thylacine's is one registration verb and one present verb on a namespace
+  the client already holds — designed as the Halcyon-on-Vulkan substrate,
+  proven first by vkQuake.
 
 - **Loom — a shared-memory ring transport for 9P** (`docs/LOOM.md`). The
   inversion of Linux's io_uring: rather than import io_uring's opcode zoo, expose
