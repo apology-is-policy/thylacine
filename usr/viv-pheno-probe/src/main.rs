@@ -3338,11 +3338,68 @@ unsafe fn run_maskexec_child() -> ! {
     linux_exit(1)
 }
 
+/// The BARE-SPAWN phenotype witness (VIVARIUM section 13, the /viv/bin
+/// resolver-subtree-scope channel). `linux` above is CONTAINER-shaped: its
+/// signal legs (L32-L36) require the spawner to hand fd 0 as a reader-less pipe
+/// for the SIGPIPE self-inflict, which viv sets up and a bare joey spawn does
+/// not. This mode assumes NOTHING from the spawner -- an empty handle table, so
+/// /pheno-scratch really is this process's fd 0 -- and proves the ONE claim the
+/// mount channel makes: a Proc spawned through an MPHENO_LINUX mount, carrying
+/// NO manifest and NO spawn-arg declaration, is PHENO_LINUX.
+///
+/// That is the brk discriminator (translated -> -ENOSYS; native 214 is unknown
+/// to the dispatcher -> -1) plus real byte movement through translated
+/// openat/read (our own ELF magic) and write (the verdict). The full Linux-ABI
+/// conformance chain stays in `linux`, driven by the container leg -- this
+/// witness is deliberately narrow, so a failure here names a broken MECHANISM,
+/// never an incidental bare-namespace ABI gap.
+unsafe fn run_linux_loc() -> ! {
+    let rep = svc4(NR_OPENAT, AT_FDCWD, SCRATCH_PATH.as_ptr() as u64, O_WRONLY, 0);
+    // >= 0, not > 0: a bare spawn hands an empty handle table, so this first
+    // open really is fd 0 (the same reasoning run_linux states).
+    if rep < 0 {
+        linux_exit(1);
+    }
+
+    // The discriminator. brk is the table's explicit ENOSYS row (the heap is
+    // Burrow-based; there is no break pointer). Natively 214 is unassigned and
+    // the dispatcher answers -1. -ENOSYS here <=> the mount stamped this Proc
+    // PHENO_LINUX -- the whole of the claim, in one comparison.
+    leg!(rep, svc3(NR_BRK, 0, 0, 0) == NEG_ENOSYS, b"L01\n");
+
+    // Real bytes through translated openat + read: open our own image and read
+    // its ELF magic. A translation that returned plausible values without
+    // moving bytes passes the discriminator and fails here.
+    let fd = svc4(NR_OPENAT, AT_FDCWD, SELF_PATH.as_ptr() as u64, O_RDONLY, 0);
+    leg!(rep, fd >= 0, b"L03\n");
+    let mut magic = [0u8; 4];
+    leg!(rep, svc3(NR_READ, fd as u64, magic.as_mut_ptr() as u64, 4) == 4, b"L04\n");
+    leg!(
+        rep,
+        magic[0] == 0x7f && magic[1] == b'E' && magic[2] == b'L' && magic[3] == b'F',
+        b"L05\n"
+    );
+    leg!(rep, svc3(NR_CLOSE, fd as u64, 0, 0) == 0, b"L14\n");
+
+    // The verdict, at offset 0 so it lands on the sentinel joey stamped (no
+    // passing leg wrote, so the offset is still 0; the lseek is defensive).
+    let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+    if svc3(NR_WRITE, rep as u64, PASS_MARK.as_ptr() as u64, PASS_MARK.len() as u64)
+        != PASS_MARK.len() as i64
+    {
+        linux_exit(1);
+    }
+    linux_exit(0)
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     let mode: &[u8] = env::args().nth(1).unwrap_or(&[]);
     if mode == b"linux".as_slice() {
         unsafe { run_linux() }
+    }
+    if mode == b"linux-loc".as_slice() {
+        unsafe { run_linux_loc() }
     }
     if mode == b"cloexec-child".as_slice() {
         unsafe { run_cloexec_child() }

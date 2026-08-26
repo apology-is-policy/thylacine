@@ -469,6 +469,13 @@ _Static_assert(__builtin_offsetof(struct t_allowance_desc, pci) == 180,
 #define T_MAFTER   0x0004u
 #define T_MCREATE  0x0008u
 
+// MPHENO_LINUX (mirror kernel/include/thylacine/territory.h): a per-mount-point
+// declaration that a binary whose exec RESOLUTION crosses this mount is a Linux
+// phenotype (VIVARIUM.md section 13, the resolver-subtree-scope channel). Rides
+// t_mount's flag word; settable since the SYS_MOUNT valid-flag widening. It
+// confers ABI SHAPE, never AUTHORITY (I-43).
+#define T_MPHENO_LINUX  0x0020u
+
 // VMA prot bits — MUST mirror kernel/include/thylacine/vma.h's
 // VMA_PROT_* values. Used as the 3rd argument to t_mmio_map.
 #define T_PROT_READ       (1u << 0)

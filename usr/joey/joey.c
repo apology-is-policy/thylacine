@@ -10133,6 +10133,148 @@ int main(void) {
                 }
                 t_putstr("joey: V-1b phenotype (native + containered linux) PASS\n");
 
+                // === VIVARIUM V-1b-loc: the /viv/bin phenotype MOUNT, bare
+                // spawned. The container leg above declared the phenotype
+                // through the MANIFEST (viv reads org.thylacine.phenotype).
+                // This leg declares it through the SECOND channel: a mount
+                // marked MPHENO_LINUX, so a binary whose exec RESOLUTION
+                // crosses it is stamped PHENO_LINUX with NO spawn-arg and NO
+                // manifest -- the resolver-subtree-scope mechanism, live.
+                //
+                // The claim is SUBTREE SCOPE: the SAME on-pool bytes
+                // (viv-pheno-probe) are native reached via /bin -- proven by
+                // leg A above (viv-pheno-probe native -> exit 0) -- and Linux
+                // reached via /viv/bin. Only the mount crossed differs, and it
+                // is the ONLY declaration (pheno_flags = 0, no manifest).
+                //
+                // PROOF SHORTCUT, stated so it is not mistaken for the product:
+                // this binds the WHOLE initrd /bin at /viv/bin, so every native
+                // tool is (harmlessly, here) reachable as Linux. Production
+                // /viv/bin holds ONLY Linux binaries (git); same mount, other
+                // contents. Runs after the container leg, so its narrower proof
+                // has already reported if the phenotype itself is broken.
+                {
+                    // (a) A writable verdict file at joey's OWN root: the bare
+                    // probe resolves "/pheno-scratch" in joey's namespace (no
+                    // container rootfs), so it lands here. Stamp a sentinel
+                    // first -- a stale "OK" from a prior PRESERVEd boot must not
+                    // pass a broken run (the fixture-freshness rule).
+                    long scfd = t_walk_create(T_WALK_OPEN_FROM_ROOT,
+                                              "pheno-scratch", 13,
+                                              T_OWRITE | T_OTRUNC, 0644u);
+                    if (scfd < 0) {
+                        scfd = t_open(T_WALK_OPEN_FROM_ROOT, "/pheno-scratch", 14,
+                                      T_OWRITE | T_OTRUNC);
+                    }
+                    if (scfd < 0) {
+                        t_putstr("joey: V-1b-loc /pheno-scratch unopenable\n");
+                        return 1;
+                    }
+                    if (t_write(scfd, "??\n", 3) != 3) {
+                        t_putstr("joey: V-1b-loc scratch stamp FAILED\n");
+                        (void)t_close(scfd);
+                        return 1;
+                    }
+                    (void)t_close(scfd);
+
+                    // (b) Build the pheno mount: mkdir /viv, mkdir /viv/bin,
+                    // then graft the initrd binary tree onto /viv/bin with
+                    // MPHENO_LINUX. The source is a fresh O_PATH handle to /bin
+                    // (the #58 bind above already resolves it to the devramfs
+                    // bin root); t_mount takes its own ref, so it closes after.
+                    long vivd = mkdir_or_open(T_WALK_OPEN_FROM_ROOT, "viv", 3);
+                    if (vivd < 0) {
+                        t_putstr("joey: V-1b-loc mkdir /viv FAILED\n");
+                        return 1;
+                    }
+                    long vbd = mkdir_or_open(vivd, "bin", 3);
+                    (void)t_close(vivd);
+                    if (vbd < 0) {
+                        t_putstr("joey: V-1b-loc mkdir /viv/bin FAILED\n");
+                        return 1;
+                    }
+                    (void)t_close(vbd);
+                    long bin_src2 = t_open(T_WALK_OPEN_FROM_ROOT, "/bin", 4,
+                                           T_OPATH);
+                    if (bin_src2 < 0) {
+                        t_putstr("joey: V-1b-loc /bin source unopenable\n");
+                        return 1;
+                    }
+                    if (t_mount("/viv/bin", 8, bin_src2,
+                                T_MREPL | T_MPHENO_LINUX) != 0) {
+                        t_putstr("joey: V-1b-loc t_mount(/viv/bin,"
+                                 " MPHENO_LINUX) FAILED\n");
+                        (void)t_close(bin_src2);
+                        return 1;
+                    }
+                    (void)t_close(bin_src2);
+
+                    // (c) The bare spawn -- pheno_flags = 0. The MOUNT is the
+                    // sole declaration; the exec resolver crosses /viv/bin and
+                    // stamps PHENO_LINUX. The probe's "linux-loc" mode is the
+                    // BARE witness (the container's full "linux" mode needs viv
+                    // to hand it fd 0 as a reader-less pipe for its SIGPIPE
+                    // legs; a bare spawn hands nothing): it proves ONLY the
+                    // claim -- brk == -ENOSYS (the translation discriminator; a
+                    // native Proc gets -1) plus real openat/read/write bytes.
+                    // Were the mechanism dead the probe would run native, the
+                    // discriminator could not hold, and the verdict file would
+                    // name L01, not OK. The "same bytes, native via /bin"
+                    // half of the subtree-scope claim is leg A above; that the
+                    // MOUNT and not the arg decides is the kernel unit test
+                    // exec_ns.pheno_mount_crossing (mount cross sets it, a plain
+                    // mount does not).
+                    const char lname[] = "/viv/bin/viv-pheno-probe";
+                    const char largv[] = "/viv/bin/viv-pheno-probe\0linux-loc";
+                    struct t_sys_spawn_args lreq = {
+                        .name_va       = (unsigned long)lname,
+                        .argv_data_va  = (unsigned long)largv,
+                        .name_len      = sizeof(lname) - 1,
+                        .argv_data_len = sizeof(largv),
+                        .argc          = 2,
+                    };
+                    long lpid = t_spawn_full_argv(&lreq);
+                    if (lpid <= 0) {
+                        t_putstr("joey: V-1b-loc spawn /viv/bin/viv-pheno-probe"
+                                 " FAILED\n");
+                        return 1;
+                    }
+                    int  lst  = 0;
+                    long lgot = t_wait_pid_for((int)lpid, 0, &lst);
+
+                    char lmark[8];
+                    for (unsigned i = 0; i < sizeof(lmark); i++) lmark[i] = 0;
+                    long lrfd = t_open(T_WALK_OPEN_FROM_ROOT, "/pheno-scratch",
+                                       14, T_OREAD);
+                    long ln = (lrfd < 0) ? -1
+                                         : t_read(lrfd, lmark, sizeof(lmark) - 1);
+                    if (lrfd >= 0) (void)t_close(lrfd);
+
+                    int lmarked_ok = (ln >= 3 && lmark[0] == 'O'
+                                              && lmark[1] == 'K');
+                    if (lgot != lpid || lst != 0 || !lmarked_ok) {
+                        t_putstr("joey: V-1b-loc /viv/bin phenotype leg FAILED"
+                                 " marker=");
+                        if (ln > 0) {
+                            for (long i = 0; i < ln; i++)
+                                if (lmark[i] == '\n') lmark[i] = 0;
+                            t_putstr(lmark);
+                        } else {
+                            t_putstr("<unreadable>");
+                        }
+                        t_putstr(" status=");
+                        t_putstr(itoa_dec(lst, pbuf, sizeof(pbuf)));
+                        t_putstr("\n");
+                        return 1;
+                    }
+                    // Remove the proof mount so nothing later resolves through a
+                    // whole-/bin-declared-Linux /viv/bin. Probe-only residue
+                    // otherwise, but tidy and it exercises the mount teardown.
+                    (void)t_unmount("/viv/bin", 8);
+                    t_putstr("joey: V-1b-loc /viv/bin"
+                             " resolver-subtree-scope PASS\n");
+                }
+
                 // === LINEAGE L-6c: the ARC gate. Runs LAST among the
                 // phenotype legs, because it is the only one whose caller is
                 // a real third-party Linux program -- if it fails, every
