@@ -3555,10 +3555,20 @@ guard rather than a cap. The holotype prosecutes this explicitly.
   from wrapping it in a diorama). That is what makes it *seamless* — git sees the
   user's cwd and files, which an isolated container territory could not. Sound because
   `/viv/bin` is system-owned: only trusted shipped binaries live behind the pheno-mount.
-- **The A-3 wall stands (noted, not blocking).** The pool 9P mount is `PRINCIPAL_
-  SYSTEM`-owned; git run as a real user hits the chmod wall on the system pool (the
-  §6.26 wall). git operating on **user-owned** files (a user's A-5 encrypted home) is
-  clean. This is the existing A-3 ownership model, not new debt.
+- **The A-3 wall stands, and it bounds the *user* story (AS-BUILT correction,
+  sub-chunk B).** Per-principal 9P ownership (A-3) is **unbuilt at v1.0**
+  (`tools/build.sh` states this at the git-probe staging): the pool 9P layer stamps
+  every file `PRINCIPAL_SYSTEM`, so there are no user-owned files yet — **not even a
+  user's A-5 encrypted home** (A-5 gives the user an encrypted subvolume, but its
+  files are still SYSTEM-stamped until A-3). So git run as a **real non-SYSTEM user**
+  hits the chmod-ownership wall (git chmods its own lockfiles) regardless of *where*
+  it writes. git run **as SYSTEM** owns the pool files it touches and works — which is
+  what the sub-chunk-B boot gate PROVES (`git init` via `/viv/bin`, phenotype BY
+  LOCATION). Therefore *seamless user-git from a login shell* — the operator's literal
+  ask — is **not fully deliverable at v1.0**; it awaits A-3 (per-principal ownership)
+  plus the §13.6 ut cap-conferral, together, as the **user-git arc**. (An earlier draft
+  of this line claimed user-owned home files were already clean; the build.sh reality
+  is that A-3 is unbuilt, so that claim was corrected here.)
 
 ### 13.6 ut integration + cap conferral
 
@@ -3568,18 +3578,43 @@ guard rather than a cap. The holotype prosecutes this explicitly.
   (`usr/utopia/libutopia/src/repl.rs`) so `git` completes.
 - **NO phenotype logic in ut.** Because the kernel applies the phenotype at exec via
   the mount flag, ut just spawns normally — the declaration never enters userspace.
-- **Caps:** ut already holds `CAP_CSPRNG_READ` (`SHELL_CAPS = LOCK_PAGES | CSPRNG_READ`,
-  `usr/login`), so git's `getrandom` works. ut confers its benign user caps to external
-  spawns (the sub-chunk-B mechanism decision — uniform conferral of the user's own
-  non-elevation caps, NOT location-gated, so no phenotype/location logic re-enters ut).
+- **PATH + completion: LANDED** (enablement `6eb0c7f7`). The cap-conferral below is
+  **DEFERRED** (the user-git arc).
+- **Caps (DEFERRED, part of the user-git arc):** ut already holds `CAP_CSPRNG_READ`
+  (`SHELL_CAPS = LOCK_PAGES | CSPRNG_READ`, `usr/login`), but `exec_external` currently
+  spawns with `cap_mask 0`, so a bare `git` from a login shell fails at `getrandom`
+  before it even reaches the §13.5 A-3 file-ownership wall. The intended fix is a
+  **uniform** conferral of ut's own benign non-elevation caps (`LOCK_PAGES |
+  CSPRNG_READ`) to external spawns — NOT location-gated, so no phenotype/location logic
+  re-enters ut (I-2-monotone: a subset of ut's held caps). It is deferred with A-3
+  rather than shipped alone because it alone does not make user-git work — A-3 is the
+  hard wall behind it, and shipping caps-without-A-3 only moves the user's failure from
+  a `getrandom` crash to a file-permission error. The sub-chunk-B **boot gate confers
+  `CAP_CSPRNG_READ` directly** (joey → git, as SYSTEM), which is why the E2E runs git
+  without this ut change.
 
-### 13.7 Deploy
+### 13.7 Deploy — AS-BUILT (sub-chunk B step 2, `3e7c0301`)
 
-- Stage the sha-pinned static git (2.51.2, `b8c41cfd…4615de9`) at `/viv/bin/git` +
-  the dashed `git-upload-pack`/`git-receive-pack` symlinks + `/etc/gitconfig`, in the
-  pool (or ramfs), **outside** the container bundle rootfs it currently lives in
-  (`tools/build.sh`). Keep the §6.27 git-probe container gate (the O_APPEND witness).
-- Compose `/viv/bin` as an `MPHENO_LINUX` bind mount at boot (`joey`/the boot path).
+- **The pool tree.** `tools/build.sh` stages the sha-pinned static git (2.51.2,
+  `b8c41cfd…4615de9`) as a PLAIN tree `/vivarium/viv-bin/` — `git` + the dashed
+  `git-upload-pack`/`git-receive-pack` symlinks + a `gitconfig` — riding the existing
+  `/vivarium` pool bake. Deliberately **outside** the §6.27 git-probe *container*
+  bundle: that bundle is a test (config.json + gitprobe.sh), this is the product mount
+  source. The §6.27 git-probe container gate (the O_APPEND witness) is kept, untouched.
+- **The mount.** `joey` composes `/viv/bin` <- `/vivarium/viv-bin` as an `MREPL |
+  MPHENO_LINUX` bind at the post-pivot mount block — **ungated** (real logins inherit
+  it) and **soft**: no static-git tarball -> no `/vivarium/viv-bin` -> no `/viv/bin`,
+  and a mount hiccup degrades to "no git on PATH" rather than bricking the boot (unlike
+  the core `/bin` mount). The BOOT_PROBES git gate is what turns a broken mount RED.
+- **The proof.** A BOOT_PROBES gate spawns a bare `/viv/bin/git init` with
+  `pheno_flags = 0` (the mount the sole declaration), a drained-pipe stdio trio, and
+  `CAP_CSPRNG_READ`; it PASSES on `Initialized empty Git repository …` + status 0 + a
+  real `.git`. A native git could not reach a repo (it mis-decodes its first libc-init
+  syscall), so success IS the proof the mount stamped the REAL third-party binary
+  PHENO_LINUX. `git init` needed nothing else — no env, no `/etc/gitconfig`. The
+  `gitconfig` staged beside `git` is a placeholder for the user-git arc (git reads
+  `/etc/gitconfig` by default; pointing it here needs a `GIT_CONFIG_SYSTEM` env, which
+  a bare spawn has no channel for — deferred with the ut work).
 
 ### 13.8 Alternatives considered + rejected
 
@@ -3614,10 +3649,20 @@ guard rather than a cap. The holotype prosecutes this explicitly.
   Pathname-resolution/`stalk` [I-28] + "Exec from the namespace" + I-43 surfaces) →
   holotype. Updates the `sub-kernel-territory` vault note (OWNED) + a new
   `docs/AUDIT-TRIGGERS.md` row + ARCH §28 I-43.
-- **B (integration + deploy).** ut `/viv/bin` PATH + completion + uniform benign-cap
-  conferral; `build.sh` git-at-`/viv/bin` + symlinks + `/etc/gitconfig` + the boot
-  `MPHENO_LINUX` bind; a boot-gate E2E proving **bare `git` from a shell (not a
-  container) runs Linux and works** — the end-to-end witness the whole arc exists for.
+- **B (integration + deploy) — LANDED, except the A-3-gated ut cap-conferral.**
+  - Enablement (`6eb0c7f7`): ut `/viv/bin` PATH + completion; `MPHENO_LINUX` in
+    `SYS_MOUNT_VALID_FLAGS`; `T_MPHENO_LINUX` mirrors.
+  - Step 1 (`df270378`): the bare-spawn mechanism E2E (the `linux-loc` lean witness at
+    `/viv/probe-bin`) — proves the OR stamp fires live.
+  - Step 2 (`3e7c0301`): `build.sh` stages `/vivarium/viv-bin`; joey composes the
+    ungated `/viv/bin` `MPHENO_LINUX` mount; a boot gate proves **bare `git init` via
+    `/viv/bin` runs Linux BY LOCATION** — the end-to-end witness the arc exists for.
+  - **DEFERRED (the user-git arc):** the ut uniform benign-cap conferral (§13.6) — it
+    does not unblock user-git without A-3 (per-principal 9P ownership, §13.5), so the two
+    land together. git-as-SYSTEM is proven; seamless user-git is A-3-gated.
+  - **REMAINING before push:** the holotype (combined A+B surface) + SMP gate + the
+    batched vault-dossier sync (`sub-kernel-stalk` / `-territory` / `-syscall-dispatch`,
+    `sub-stratum-boot`, `sub-substrate-build`).
 
 ---
 

@@ -22,6 +22,83 @@ needed the operator.
 
 ---
 
+## 2026-08-26 (aux) -- /viv/bin sub-chunk B: the mechanism proven LIVE, then real git shipped at /viv/bin; the full probe is container-shaped, and A-3 bounds the user story
+
+Continues the entry below (sub-chunk A landed the kernel mechanism; this run
+lands the half that proves the OR stamp *fires* -- a bare spawn through
+`/viv/bin` actually running Linux -- and then the real git deploy). Two commits:
+`df270378` (the E2E), `3e7c0301` (the git deploy). Holotype in flight; SMP + push
+still owed -- nothing ships before the audit closes.
+
+**The mechanism is live (df270378).** A boot-probe leg in joey (`V-1b-loc`) spawns
+a binary through an MPHENO_LINUX mount with `pheno_flags = 0` -- the mount the SOLE
+declaration -- and proves the exec resolver crossed it and stamped the child
+PHENO_LINUX. The kernel unit test proved the resolver in isolation; this proves the
+whole path. Marker `joey: V-1b-loc /viv/probe-bin resolver-subtree-scope PASS`,
+boot OK.
+
+**The wrong turn, and what caught it: the full probe is CONTAINER-shaped.** The
+first cut reused `viv-pheno-probe`'s full `linux` mode (the same the container leg
+drives). It got through L01-L32 bare -- L01 is the brk translation discriminator,
+so the mount HAD stamped it Linux and a large swath of the Linux ABI worked -- then
+failed at **L33** with the marker `xL33`. That `x` is the finding: L32-L36 are the
+signal legs, and their comment says outright "viv hands this process fd 0 as the
+write end of a pipe with NO READER" for a SIGPIPE self-inflict. A bare joey spawn
+hands an EMPTY handle table, so the probe's `/pheno-scratch` open BECAME fd 0, L33's
+one-byte write of `'x'` to "fd 0" (the reader-less pipe, it assumed) landed in the
+report file itself, and the write SUCCEEDED where an EPIPE was expected. Not a
+kernel bug -- a probe-harness contract the container satisfies and a bare spawn
+cannot. What caught it: the marker channel self-diagnosed (`xL33`), and reading the
+probe's OWN comment named the fd-0 dependency. The fix is a lean `linux-loc` mode
+(brk discriminator + real openat/read/write, nothing needing spawner-provided fds)
+-- the narrow witness a bare-spawn phenotype proof actually wants; the full ABI
+conformance stays the container leg's job. **Reusable lesson: a test binary written
+to run INSIDE a container carries the container's fd contract as an invisible
+premise; a bare-spawn reuse must drop to the sub-witness that shares none of it.**
+
+**The git deploy (3e7c0301), and a collision caught by reasoning.** build.sh stages
+a PLAIN `/vivarium/viv-bin` pool tree (the same sha-pinned static git 2.51.2 +
+dashed pack symlinks + gitconfig), separate from the git-probe *container* bundle;
+joey mounts `/viv/bin` <- it MPHENO_LINUX, ungated + soft (no tarball -> no
+/viv/bin, a hiccup degrades to "no git on PATH" rather than bricking the boot). A
+bare `git init` via /viv/bin (`pheno_flags = 0`) produced `Initialized empty Git
+repository in /tmp/vivgit-repo/.git/` + `section-13 git via /viv/bin (phenotype BY
+LOCATION) PASS` -- the REAL third-party binary runs Linux BY LOCATION (a native git
+mis-decodes its first libc-init syscall and dies before a repo, so success IS the
+proof). git init needed only CAP_CSPRNG_READ + a drained-pipe stdio trio; no env,
+no /etc config. The collision I caught before booting: the step-1 mechanism E2E
+bound the whole /bin at `/viv/bin` and MREPL+unmounted that point -- left there, it
+would have torn the shipped git mount out from under every later leg. Relocated the
+mechanism proof to a DISTINCT point `/viv/probe-bin` (the mechanism is
+mount-point-agnostic); the product `/viv/bin` git mount is untouched.
+
+**A-3 bounds the user story -- surfaced, not papered over.** git runs as SYSTEM,
+which owns the pool files it touches, and the E2E proves it there. A real
+non-SYSTEM USER cannot yet chmod its own repo files: per-principal 9P ownership
+(A-3) is unbuilt at v1.0. So "seamless user git from ut" -- the operator's literal
+phrasing -- is NOT fully deliverable at v1.0; it awaits A-3 + a ut cap-conferral
+(the user-git arc). What IS delivered: the binary ships at /viv/bin, discoverable on
+ut's PATH/completion (enablement), and PROVEN to run under the phenotype as SYSTEM.
+The ut cap-conferral was deferred deliberately -- it alone does not unblock user-git
+(A-3 is the hard wall behind it), so both land together when A-3 does. The in-code
+comments and the phase7 row state the boundary; this is the decision the operator
+should know about.
+
+**The reviewer fell back to Opus.** The holotype's first spawn (highest Fable, the
+family-diverse primary) died mid-run of credit exhaustion, producing no report. Per
+the binding rule -- never skip a round for want of Fable, and on credit exhaustion
+go straight to the fallback -- it was re-spawned on the highest Opus at max effort,
+told in its prompt that context independence (not family diversity) is what it
+brings and to re-derive I-43 and the SET-ONLY correctness from the code. That round
+is what gates the push.
+
+**Cost.** Two build+boot cycles for the E2E (one to discover the container-shape
+contract, one for the lean witness), one for the git deploy. The `xL33` detour was
+not waste: it is why the bare witness is a lean sub-mode instead of a fragile reuse
+of a container-shaped chain.
+
+---
+
 ## 2026-08-26 (aux) -- the /viv/bin phenotype mount: git on the PATH, run Linux BY LOCATION; and the granularity check that reverted a unit-green build
 
 **The ask.** After git ran end-to-end under a *container* (VIVARIUM 6.27), the
