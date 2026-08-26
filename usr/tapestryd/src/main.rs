@@ -296,6 +296,10 @@ impl Driver for Tapestryd {
         // monotonic-ridx could not reuse). Venus-gated + self-skipping like above.
         self.comp.warp_ring_recreate_selftest();
 
+        // V-3b-3c-2: prove the device-memory (mem/<handle>) lifecycle -- alloc,
+        // sentinel round-trip, destroy, handle-reuse. Venus-gated + self-skipping.
+        self.comp.warp_mem_selftest();
+
         // READY last: all bring-up console output precedes it; the warden's
         // readiness pipe waits on exactly this line.
         let mut out = libthyla_rs::io::stdout();

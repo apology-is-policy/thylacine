@@ -408,8 +408,22 @@ venus-verdict)
         echo "CONTROL leg: ring-recreate ridx-reuse OK under a venus-less device -- impossible, the gate is wrong"
         vfail=1
     fi
+    # V-3b-3c-2: the device-memory (mem/<handle>) lifecycle witness. "mem-recreate
+    # handle-reuse OK" is emitted ONLY when a HOST_VISIBLE device-memory blob is
+    # minted under a venus ctx, its hostmem backing round-trips a sentinel, it is
+    # destroyed via mem/<handle>/ctl (freeing the slot), and re-minted at the SAME
+    # handle. A regression (slot not freed, or backing not writable) emits the FAIL
+    # form. Venus-only: the control device has no venus ctx, so the line is absent.
+    grep -qF "warp mem-recreate handle-reuse OK" "$tst" || {
+        echo "TEST leg: the mem-recreate handle-reuse witness did NOT pass -- a device-memory blob's handle is not re-mintable or its backing is not writable (V-3b-3c-2 regressed)"
+        vfail=1
+    }
+    if grep -qF "warp mem-recreate handle-reuse OK" "$ctl"; then
+        echo "CONTROL leg: mem-recreate handle-reuse OK under a venus-less device -- impossible, the gate is wrong"
+        vfail=1
+    fi
     if [ "$vfail" -eq 0 ]; then
-        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a), a HOST3D blob guest-maps via SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel (V-3b-1b), AND the persistent ring engine mints two rings at distinct offsets, round-trips each guest VA, and reuses a freed offset on re-mint (V-3b-1c), AND the SERVER host3d-ring path creates a per-client venus device-ctx, mints a HOST3D ring in /srv/warp, round-trips its VA, and tears it down through drop_host3d_ring + the venus-ctx destroy (V-3b-1c-2a), AND a destroyed host3d ring's ridx is re-mintable via the ring/<ridx>/ctl destroy verb (V-3b-3c-1)"
+        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a), a HOST3D blob guest-maps via SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel (V-3b-1b), AND the persistent ring engine mints two rings at distinct offsets, round-trips each guest VA, and reuses a freed offset on re-mint (V-3b-1c), AND the SERVER host3d-ring path creates a per-client venus device-ctx, mints a HOST3D ring in /srv/warp, round-trips its VA, and tears it down through drop_host3d_ring + the venus-ctx destroy (V-3b-1c-2a), AND a destroyed host3d ring's ridx is re-mintable via the ring/<ridx>/ctl destroy verb (V-3b-3c-1), AND a HOST_VISIBLE device-memory blob mints under a venus ctx, round-trips a sentinel through its hostmem backing, and its handle is re-mintable via the mem/<handle>/ctl destroy verb (V-3b-3c-2)"
         grep -hE "gpu capset\[|num_capsets|blob-create" "$ctl" "$tst"
     else
         echo "VENUS GATE: UNVERIFIED"

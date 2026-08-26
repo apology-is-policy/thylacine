@@ -22,6 +22,82 @@ needed the operator.
 
 ---
 
+## 2026-08-26 — V-3b-3c-2a: the device-memory substrate, the split the code sized for, and the two P3s that were real hazards
+
+3c-2 is the device-memory milestone. This session built its server-side half —
+the tapestryd `mem/` substrate — and stopped before the mesa backend (3c-2b), on
+a deliberate split.
+
+**The ABI fork, and why the pickup's lean was only half-right.** The prior
+session left a fork: expose device memory as (a) a lean new `mem/` subtree or (b)
+a host3d flavor on the existing `bo/` tree. I took (a) — a `bo` is built for
+textures (create3d geometry + the C-2c compositor-import + the #240 leak-park
+graveyard), none of which a flat device-memory blob wants, and this is
+audit-bearing (I-45) where isolation beats ABI economy. But the deeper read
+corrected the pickup on two axes it had guessed. (1) *Addressing*: the pickup
+leaned bo-style (server-assigned pub_id, create-on-open). Reading the paths,
+ring-style is cleaner — a one-step `mem/new` write-verb "&lt;bytes&gt; &lt;handle&gt;
+&lt;mem_id&gt;" (the client owns the handle, like a ring's ridx) has no empty-slot
+corpse between open and build, so the #218 minted-but-unbuilt starvation hazard
+has no analog. Device memory is a lean hostmem+weft blob — structurally a ring,
+not a bo. (2) *The split*: the pickup offered "one E2E chunk OR split." I started
+toward one chunk, then measured the edit — ~200 LOC threaded through ~24 sites in
+an 11.6k-line audit-bearing file — and split, so the substrate lands + audits as
+its own reviewable unit and gives a known-good base before the remote mesa/E2E
+loop. The reusable lesson: **size the chunk by reading its code, not by trusting
+the plan's estimate.**
+
+**A pre-existing I-32 hole surfaced while composing the cap.** Making
+`WARP_CTX_BACKING_MAX` count the new mems axis meant touching the cap sum — and
+that exposed that `wbo_create` summed bos + leaked ONLY, never the existing
+rings, while `wring_mint` counted both. A bo mint therefore did not charge live
+rings against the 64 MiB ctx cap: bounded (rings are ≤1 MiB each) but a real
+accounting hole. Rather than extend the asymmetric sum, I factored a
+`ctx_backing_total` = bos+rings+mems+leaked used by all three mint paths —
+holistic by construction, closing the pre-existing hole as a consequence.
+
+**Witnessed green on real V3D, then audited.** The boot self-test
+(`warp_mem_selftest` — alloc a blob, round-trip a sentinel through tapestryd's
+own map, destroy, re-mint the freed handle) printed `warp mem-recreate
+handle-reuse OK` on thyla-pi/KVM (V3D 4.2.14), boot exit 0, beside the
+ring-recreate + host3d-ring markers. The Fable prosecutor (context-independent,
+`cargo check` run so the non-Copy/ownership claims are compiler-witnessed)
+returned **0/0/0/4 P3, CLEAN** — "a faithful transplant of the closed ring
+pattern; every mem-specific deviation STRENGTHENS the ring properties."
+
+**The four P3s — two drift, two real hazards.** F1/F2 were comments I falsified:
+the holistic cap left two ctl comments claiming `bo-bytes` "is what the cap
+gates" (now only the BO share), and `wmem_mint` arming the venus ctx falsified
+`wctx_has_venus`'s "iff it minted a ring" contract. Fixed both; added a
+`backing-bytes` ctl key so the holistic quantity the cap actually compares is
+observable (the #184 gauge rule). But **F3 and F4 were the findings worth the
+round.** F3: I had copied the ring's disclosure-zeroing — per-8-byte SeqCst
+stores — into the mem path without re-deriving it for the size. The ring tops out
+at 1 MiB; a 64 MiB device-memory blob is ~8.4M *barriered* stores on the single
+serve thread the console shares — CACHED it is weave-create league, but UNCACHED
+(host-dictatable) ~1 s/mint, a client-repeatable console-freeze lever. The
+codebase already zeroes client-mappable memory with `write_bytes` in three
+shipped sites (alloc_weave et al.); the SeqCst loop's own "atomics prevent
+elision" comment was refuted by those sites — the backing escapes through a
+syscall and cannot be proven dead. Fixed at BOTH host3d sites. F4 is the subtle
+one: the disclosure zero, added for *security*, bakes a client-ordering
+*contract*. A `blob_id=mem_id` blob exports the live VkDeviceMemory's host pages;
+the mint zeroes them, correct only if the client mints at `vkAllocateMemory`
+time, before any GPU use. A 3c-2b client minting lazily at first `vkMapMemory` —
+after a legal Vulkan GPU-copy-into-then-readback — would have the server zero
+away the GPU's results, a data-corruption bug every current gate passes.
+Documented the contract on `wmem_mint`/`WarpMem` and carried it into the 3c-2b
+intent, so the next chunk does not re-derive it by accident.
+
+**Open:** 3c-2b — the mesa `vn_renderer` bo_ops (`create_from_device_memory` /
+`bo_map` via weft / `bo_destroy`) + extending the prove to
+`vkAllocateMemory`+`vkMapMemory` + the E2E on real V3D. Carried debt: the
+V-3b-3b F2 convergence code on the mesa shmem_create error arms, and the
+single-thread `warp_conn`/`ring_bitmap` mutex when VkQueues make the driver
+multi-threaded. Landed `&lt;PENDING&gt;` (tapestryd-only; mesa unchanged at `77fc80a`).
+
+---
+
 ## 2026-08-26 — V-3b-3c-1: the F1 full fix (a per-ring destroy verb), and why device-memory is the *next* chunk not this one
 
 V-3b-3c's operator-ratified milestone is device memory (`vkAllocateMemory` +

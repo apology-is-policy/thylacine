@@ -176,6 +176,15 @@ pub(crate) const MAX_WARP_CTXS: usize = 8;
 /// than hardcoding).
 const MAX_WARP_BOS_PER_CTX: usize = 1024;
 
+/// V-3b-3c-2: per-ctx live HOST_VISIBLE device-memory (`mem/<handle>`) slots.
+/// A Venus app allocates a VkDeviceMemory per HOST_VISIBLE mapping (staging /
+/// uniform buffers), far fewer than textures -- 256 covers a bring-up and
+/// typical apps with headroom, and the real authority is the shared byte cap
+/// (WARP_CTX_BACKING_MAX, holistic across bos+rings+mems), so overflow is a
+/// clean E_NOMEM (-> the app's VK_ERROR_OUT_OF_DEVICE_MEMORY), never a crash
+/// (I-32). Raisable; the row is a HEAP allocation per minted ctx.
+const MAX_WARP_MEMS_PER_CTX: usize = 256;
+
 /// The read width a client is entitled to assume covers the WHOLE per-ctx
 /// `ctl` (audit F11). Not a server buffer bound -- the file is composed at
 /// full length and `read_str` honours any offset; it is the CONTRACT the
@@ -407,6 +416,11 @@ const WARP_RING: u64 = 1 << 43; // a ctx ring/<ridx> node (V-3a). Its bit must
 // still carries WARP_FLAG (is_warp), so is_warp/is_surf/is_pane/is_wctx/is_wbo
 // all read it correctly. The _Static_assert below now guards ALL of these.
 
+const WARP_MEM: u64 = 1 << 44; // a ctx mem/<handle> node (V-3b-3c-2, a
+// HOST_VISIBLE VkDeviceMemory blob). The first free bit above WARP_RING=43 --
+// same disjointness rule: a tag bit >= 44, clear of the id field (bits 8..37)
+// and of every other tag; the _Static_assert below guards it with the rest.
+
 const W_ROOT: u64 = WARP_FLAG;
 /// The attach roots by listener (main.rs hands the accepting listener's
 /// root to Conn::new).
@@ -440,6 +454,14 @@ const WFK_RING_KICK: u64 = 2;
 const WFK_RING_FENCE: u64 = 3;
 const WFK_RING_INFO: u64 = 4;
 const WFK_RING_CTL: u64 = 5;
+// Ctx-level mem kinds (ctx/<id>/mem/*), V-3b-3c-2 -- distinct ctx-FK values.
+const WFK_MEM_DIR: u64 = 8;
+const WFK_MEM_NEW: u64 = 9;
+// Mem-level file kinds (ctx/<id>/mem/<handle>/*), under WARP_MEM (WFK_DIR=0
+// is the dir node, shared with the other levels).
+const WMFK_MAP: u64 = 1;
+const WMFK_INFO: u64 = 2;
+const WMFK_CTL: u64 = 3;
 
 fn make_wctx(id: u32, fk: u64) -> u64 {
     WARP_FLAG | WARP_CTX | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
@@ -467,6 +489,12 @@ fn make_wring(id: u32, fk: u64) -> u64 {
 }
 fn is_wring(path: u64) -> bool {
     is_warp(path) && path & WARP_RING != 0
+}
+fn make_wmem(id: u32, fk: u64) -> u64 {
+    WARP_FLAG | WARP_MEM | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
+}
+fn is_wmem(path: u64) -> bool {
+    is_warp(path) && path & WARP_MEM != 0
 }
 
 // V-3a ring blob layout (the tapestryd<->client control-header contract; the
@@ -500,12 +528,13 @@ const WARP_RING_MAX_DRAIN_PER_KICK: u32 = 4096;
 // fails the BUILD if any future tag/mask drift reintroduces it (audit F1).
 const _: () = assert!(
     // every qid tag bit is distinct (a set bit-count check): WARP_BO 38,
-    // WARP_CTX 39, SURF_FLAG 40, PANE_FLAG 41, WARP_FLAG 42, WARP_RING 43.
-    (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | SURF_FLAG | PANE_FLAG).count_ones() == 6
+    // WARP_CTX 39, SURF_FLAG 40, PANE_FLAG 41, WARP_FLAG 42, WARP_RING 43,
+    // WARP_MEM 44.
+    (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | WARP_MEM | SURF_FLAG | PANE_FLAG).count_ones() == 7
         // and no tag overlaps the id field or the fk byte.
         && (WARP_N_MASK << 8) & FK_MASK == 0
-        && (WARP_N_MASK << 8) & (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | SURF_FLAG | PANE_FLAG) == 0
-        && (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | SURF_FLAG | PANE_FLAG) & FK_MASK == 0,
+        && (WARP_N_MASK << 8) & (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | WARP_MEM | SURF_FLAG | PANE_FLAG) == 0
+        && (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | WARP_MEM | SURF_FLAG | PANE_FLAG) & FK_MASK == 0,
     "qid tag bits (warp + surf + pane) must be mutually disjoint and clear of the id/fk fields",
 );
 
@@ -538,8 +567,10 @@ fn is_dir(path: u64) -> bool {
         || path == W_CTX_DIR
         || (is_wctx(path) && (warp_fk(path) == WFK_DIR || warp_fk(path) == WFK_BO_DIR))
         || (is_wctx(path) && warp_fk(path) == WFK_RING_DIR)
+        || (is_wctx(path) && warp_fk(path) == WFK_MEM_DIR)
         || (is_wbo(path) && warp_fk(path) == WFK_DIR)
         || (is_wring(path) && warp_fk(path) == WFK_DIR)
+        || (is_wmem(path) && warp_fk(path) == WFK_DIR)
 }
 
 // Mode constants (the ptyfs set).
@@ -1317,6 +1348,7 @@ pub struct Comp {
     warp_ctx_seq: u32,
     warp_bo_seq: u32,
     warp_ring_seq: u32,
+    warp_mem_seq: u32,
     /// #204 census, the global half: max `bo_backed_peak` over every ctx
     /// that ever lived -- readable AFTER a workload's ctx is gone (the
     /// per-ctx field dies with the ctx). Read via global ctl `bo-peak`.
@@ -1567,6 +1599,9 @@ struct WarpCtx {
     bos: alloc::boxed::Box<[Option<WarpBo>]>,
     /// V-3a: per-ridx coherent ring slots (0-63), allocated at mint.
     ring_slots: alloc::boxed::Box<[Option<WarpRing>]>,
+    /// V-3b-3c-2: per-handle HOST_VISIBLE device-memory slots
+    /// (0..MAX_WARP_MEMS_PER_CTX), allocated at mint.
+    mems: alloc::boxed::Box<[Option<WarpMem>]>,
 }
 
 /// A GPU buffer object: a kernel-minted GPU-BO DMA chunk attached as the
@@ -1661,6 +1696,29 @@ struct WarpRing {
     /// hostmem offset), so the guest-blob res_unref / dma_fd path must be
     /// skipped for it; the type system forbids a second drop.
     host3d: Option<crate::gpu::HostRing>,
+}
+
+/// V-3b-3c-2 (Model B): a HOST_VISIBLE VkDeviceMemory allocation -- a lean
+/// hostmem-backed blob (blob_id = the Venus mem_id) mapped to the client by
+/// Tweft. Addressed per client-chosen `handle` (0..MAX_WARP_MEMS_PER_CTX, the
+/// ring/<ridx> discipline: the backend owns the handle space) and carrying a
+/// monotonic `pub_id` in its qid (resolve scans by pub_id, so a stale fid
+/// resolves to nothing). Unlike a ring it has no control header / doorbell /
+/// fence -- the device memory is the client's to write; unlike a bo it has no
+/// geometry. The `host3d` backing is minted in ONE step at `mem/new` (there is
+/// no unbuilt state), so it is OWNED, not Option: teardown TAKES the WarpMem
+/// out of its slot by value and MOVES `host3d` into `retire_host3d_ring`
+/// (non-Copy -> a double-drop is a compile error). The mint zeroes the backing,
+/// which imposes a client-ordering contract -- see `wmem_mint` (audit F4).
+struct WarpMem {
+    pub_id: u32,
+    /// The persistent-engine hostmem backing (res_id / va / size / cache live
+    /// inside the HostRing).
+    host3d: crate::gpu::HostRing,
+    /// The lazy Tweft mint (the weft_ensure precedent); disarmed at teardown
+    /// BEFORE the backing reclaim (I-7 #847: a client's live map survives via
+    /// the retire_host3d_ring park).
+    share_id: Option<u64>,
 }
 
 /// Warp-4: a resolved ACTIVE GL adoption (see `gl_adoption`) -- the
@@ -1774,6 +1832,7 @@ impl Comp {
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
             warp_ring_seq: 0,
+            warp_mem_seq: 0,
             warp_bo_peak: 0,
             warp_bo_bytes_peak: 0,
             warp_probe_parked: 0,
@@ -5274,6 +5333,31 @@ fn warp_ring_row() -> Option<alloc::boxed::Box<[Option<WarpRing>]>> {
     Some(v.into_boxed_slice())
 }
 
+fn warp_mem_row() -> Option<alloc::boxed::Box<[Option<WarpMem>]>> {
+    let mut v: Vec<Option<WarpMem>> = Vec::new();
+    if v.try_reserve_exact(MAX_WARP_MEMS_PER_CTX).is_err() {
+        return None;
+    }
+    v.resize_with(MAX_WARP_MEMS_PER_CTX, || None);
+    Some(v.into_boxed_slice())
+}
+
+/// The holistic per-ctx live GPU backing (I-32): every bo, ring, and
+/// device-memory blob, plus the wedge-leaked bytes still charged. WARP_CTX_
+/// BACKING_MAX bounds this SUM, so every backing-allocating path (wbo_create,
+/// wring_mint, wmem_mint) must gate on it. V-3b-3c-2 makes it holistic:
+/// wbo_create previously summed bos + leaked ONLY, so a bo mint did not count
+/// existing rings against the cap -- a pre-existing I-32 accounting hole
+/// (bounded, since rings are small, but real) that composing mems in is the
+/// occasion to close. Saturating: the sum is over client-chosen sizes and must
+/// never panic (the round-2 F1 rule).
+fn ctx_backing_total(c: &WarpCtx) -> u64 {
+    let bo: u64 = c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
+    let ring: u64 = c.ring_slots.iter().flatten().map(|r| r.size).fold(0u64, u64::saturating_add);
+    let mem: u64 = c.mems.iter().flatten().map(|m| m.host3d.size).fold(0u64, u64::saturating_add);
+    bo.saturating_add(ring).saturating_add(mem).saturating_add(c.leaked_bytes)
+}
+
 // --- Warp-2c: the GPU-seam object lifecycle -------------------------------
 impl Comp {
     fn wctx_slot(&self, pub_id: u32) -> Option<usize> {
@@ -5472,6 +5556,7 @@ impl Comp {
         // the slot is poisoned, and poisoned slots are skipped above).
         let bos = warp_bo_row()?;
         let ring_slots = warp_ring_row()?;
+        let mems = warp_mem_row()?;
         // The row is empty (len 0), so this guarantees capacity >= the
         // full cap -- a no-op when a reused slot's row kept its capacity.
         debug_assert!(self.warp_ctx_leaked[slot].is_empty());
@@ -5542,6 +5627,7 @@ impl Comp {
             create_refused: 0,
             bos,
             ring_slots,
+            mems,
         });
         // #240: the probe is built AFTER the row exists so its failure is
         // recoverable -- a ctx with no probe still serves, it just answers
@@ -6197,11 +6283,13 @@ impl Comp {
                     return false;
                 }
             };
-            // Saturating, not `+` (round-2 F1's second witness): `live` sums
-            // client-chosen sizes and the sum itself must never panic.
-            let live: u64 =
-                c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
-            let leaked = c.leaked_bytes;
+            // I-32 holistic cap (bos + rings + mems + leaked; see
+            // ctx_backing_total): V-3b-3c-2 closes the pre-existing hole where a
+            // bo mint summed bos + leaked ONLY and did not count existing rings
+            // against WARP_CTX_BACKING_MAX. Saturating: the sum is over
+            // client-chosen sizes and must never panic (round-2 F1). The bo-only
+            // high-water census below stays bo-scoped (bo_bytes_peak).
+            let total: u64 = ctx_backing_total(c);
         // Round-6 F1: the byte cap does NOT bound the leak COUNT. The
         // minimum accepted size is PAGE, so 16384 backings fit inside the
         // 64 MiB budget -- and since `bos[]` slots are reused across
@@ -6220,8 +6308,8 @@ impl Comp {
         // counted here.
             let live_backed = c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count();
             (
-                live.saturating_add(leaked).saturating_add(size) > WARP_CTX_BACKING_MAX,
-                live,
+                total.saturating_add(size) > WARP_CTX_BACKING_MAX,
+                total,
                 c.leaked_count as usize + live_backed >= MAX_WARP_BOS_PER_CTX,
                 !c.bos.iter().flatten().any(|b| b.pub_id == bo_pub),
                 c.bos
@@ -6609,13 +6697,14 @@ impl Comp {
         // stream. Zero it before install -- tapestryd holds the RW mapping --
         // so the client that maps it (1c-2b) sees a defined, disclosure-free
         // ring, the way the guest-blob path gets from kernel-zeroed DMA pages.
-        // Atomic stores (not write_bytes) so the compiler cannot elide writes
-        // tapestryd itself never reads back; hsize is a PAGE multiple (8-aligned).
-        let mut z = 0u64;
-        while z < hsize {
-            ring_store(hva, z, 0);
-            z += 8;
-        }
+        // One memset, not a per-word SeqCst loop (audit V-3b-3c-2a F3): the
+        // codebase's disclosure-zero method (alloc_weave et al., which zero
+        // client-mappable weave memory the same way). Not elided -- the backing
+        // escaped through burrow_from_hostmem, so the compiler cannot prove it
+        // dead; per-word SeqCst bought nothing the path needs (the install below,
+        // and the client's LATER Tweft syscall, are the barrier to client
+        // visibility) while its cost scaled with the size.
+        unsafe { core::ptr::write_bytes(hva as *mut u8, 0, hsize as usize) };
         match self.wctx_mut(ctx_pub, conn) {
             Some(c) => {
                 c.ring_slots[ridx as usize] = Some(WarpRing {
@@ -6665,24 +6754,9 @@ impl Comp {
         }
         let (over, taken) = {
             let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
-            let bo_bytes: u64 = c
-                .bos
-                .iter()
-                .flatten()
-                .map(|b| b.size)
-                .fold(0u64, u64::saturating_add);
-            let ring_bytes: u64 = c
-                .ring_slots
-                .iter()
-                .flatten()
-                .map(|r| r.size)
-                .fold(0u64, u64::saturating_add);
+            // I-32 holistic cap (bos + rings + mems + leaked); see ctx_backing_total.
             (
-                bo_bytes
-                    .saturating_add(ring_bytes)
-                    .saturating_add(c.leaked_bytes)
-                    .saturating_add(bytes)
-                    > WARP_CTX_BACKING_MAX,
+                ctx_backing_total(c).saturating_add(bytes) > WARP_CTX_BACKING_MAX,
                 c.ring_slots[ridx as usize].is_some(),
             )
         };
@@ -6997,6 +7071,215 @@ impl Comp {
         }
     }
 
+    // === V-3b-3c-2: HOST_VISIBLE device memory (ctx/<id>/mem/<handle>) =========
+    //
+    // A device-memory blob is a lean hostmem-backed blob mapped to the client by
+    // Tweft -- the persistent HOST3D engine (mint_host3d_ring / retire_host3d_ring)
+    // with blob_id = the Venus mem_id, so virglrenderer binds the VkDeviceMemory's
+    // host pages. Ring-shaped addressing (the backend owns a client-chosen handle
+    // 0..MAX_WARP_MEMS_PER_CTX; the qid carries a monotonic pub_id) but with no
+    // control header / doorbell / fence -- it is memory, not a command ring.
+
+    /// Resolve a live device-memory blob the caller owns (its ctx + the mem).
+    /// The I-45 gate: a foreign conn never resolves another client's mem.
+    fn wmem(&self, mem_pub: u32, conn: u64) -> Option<(&WarpCtx, &WarpMem)> {
+        for c in self.warp_ctxs.iter().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for m in c.mems.iter().flatten() {
+                if m.pub_id == mem_pub {
+                    return Some((c, m));
+                }
+            }
+        }
+        None
+    }
+
+    fn wmem_mut(&mut self, mem_pub: u32, conn: u64) -> Option<&mut WarpMem> {
+        for c in self.warp_ctxs.iter_mut().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for m in c.mems.iter_mut().flatten() {
+                if m.pub_id == mem_pub {
+                    return Some(m);
+                }
+            }
+        }
+        None
+    }
+
+    /// The mem Tweft mint (the weft_ensure precedent): share once, echo the
+    /// stored id thereafter. A device-memory blob is ALWAYS hostmem-backed, so
+    /// t_weft_share routes it to WEFT_BIND_HOSTMEM (weft.c F1 arm), delivering
+    /// it to the client at the host-dictated cache.
+    fn wmem_weft_ensure(&mut self, mem_pub: u32, conn: u64) -> Option<(u64, u32)> {
+        let (va, size, have) = {
+            let m = self.wmem_mut(mem_pub, conn)?;
+            (m.host3d.va, m.host3d.size, m.share_id)
+        };
+        if let Some(id) = have {
+            return Some((id, size as u32));
+        }
+        let id = unsafe { t_weft_share(va, size) };
+        if id <= 0 {
+            say!("tapestryd: warp mem t_weft_share failed {}", id);
+            return None;
+        }
+        self.wmem_mut(mem_pub, conn).unwrap().share_id = Some(id as u64);
+        Some((id as u64, size as u32))
+    }
+
+    /// The `mem/new` write verb: `"<bytes> <handle> <mem_id>"`. One-step mint
+    /// (ring-shaped: the client owns the handle, so no id is returned).
+    fn wmem_mint_verb(&mut self, ctx_pub: u32, conn: u64, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        let mut it = s.split_ascii_whitespace();
+        let bytes: u64 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let handle: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let mem_id: u64 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        if it.next().is_some() {
+            return Err(p9::E_INVAL);
+        }
+        self.wmem_mint(ctx_pub, conn, bytes, handle, mem_id)
+    }
+
+    /// Mint a HOST_VISIBLE device-memory blob at `handle` under `ctx_pub`,
+    /// backed by the persistent hostmem engine with blob_id = `mem_id` (the
+    /// Venus VkDeviceMemory the host binds). I-45: the caller must own the ctx.
+    /// I-32: charged to the holistic ctx backing cap. ONE step (unlike
+    /// bo/create3d): the backing is minted here and the WarpMem is inserted only
+    /// on success, so there is no unbuilt corpse to starve the slot row -- the
+    /// #218 minted-but-unbuilt hazard has no analog here. Arms the ctx's venus
+    /// device-ctx (a device-memory blob is a Venus object -- see wctx_has_venus).
+    ///
+    /// CLIENT CONTRACT (audit V-3b-3c-2a F4): the client MUST mint at
+    /// `vkAllocateMemory` time, BEFORE any device use of `mem_id`. The mint
+    /// zeroes the backing (the disclosure floor), so a lazy mint at first
+    /// `vkMapMemory` -- after a GPU copy INTO the memory (the legal Vulkan
+    /// allocate -> bind -> GPU-write -> map readback pattern) -- would zero away
+    /// the GPU-written results. Upstream Mesa Venus allocates the renderer bo at
+    /// allocation time for HOST_VISIBLE types, so the intended 3c-2b client is
+    /// naturally conformant; this term exists so that is not re-derived by
+    /// accident. (For blob_id 0, the self-test path, there is no bound
+    /// VkDeviceMemory and the point is moot.)
+    fn wmem_mint(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        bytes: u64,
+        handle: u32,
+        mem_id: u64,
+    ) -> Result<(), u32> {
+        if bytes == 0 || bytes % PAGE != 0 || bytes > WARP_CTX_BACKING_MAX {
+            return Err(p9::E_INVAL);
+        }
+        if (handle as usize) >= MAX_WARP_MEMS_PER_CTX {
+            return Err(p9::E_INVAL);
+        }
+        let (over, taken) = {
+            let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
+            (
+                ctx_backing_total(c).saturating_add(bytes) > WARP_CTX_BACKING_MAX,
+                c.mems[handle as usize].is_some(),
+            )
+        };
+        if over {
+            return Err(p9::E_NOMEM);
+        }
+        if taken {
+            return Err(p9::E_INVAL); // handle already minted for this ctx
+        }
+        let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
+        let len = u32::try_from(bytes).map_err(|_| p9::E_INVAL)?;
+        self.res_seq = self.res_seq.wrapping_add(1);
+        if self.res_seq == 0 {
+            self.res_seq = 1;
+        }
+        let res_id = self.res_seq;
+        let hr = match self.gpu.mint_host3d_ring(res_id, venus_ctx, len, mem_id) {
+            Ok(hr) => hr,
+            Err(_) => return Err(E_IO),
+        };
+        // Disclosure floor (the alloc_weave rule): the hostmem free-list hands a
+        // reclaimed offset back VERBATIM, so a fresh blob can carry a prior
+        // client's bytes. Zero it -- tapestryd holds the RW map -- before the
+        // client can map it. ONE memset, not a per-word SeqCst loop (audit
+        // V-3b-3c-2a F3): at up to WARP_CTX_BACKING_MAX (64 MiB) the loop's ~8.4M
+        // barriered stores on the single serve thread were a client-repeatable
+        // latency lever. write_bytes is the codebase's disclosure-zero method
+        // (alloc_weave, which zeroes client-mappable memory identically) and is
+        // not elided -- the backing escaped through burrow_from_hostmem, so the
+        // compiler cannot prove it dead. The install below + the client's LATER
+        // Tweft syscall are the barrier to visibility, so no per-word ordering is
+        // needed. NOTE (audit F4): this zeroing bakes a client-ordering contract
+        // -- see wmem_mint's doc: mint at vkAllocateMemory time, before any device
+        // use of mem_id, or the mint zeroes GPU-written results.
+        let (hva, hsize) = (hr.va, hr.size);
+        unsafe { core::ptr::write_bytes(hva as *mut u8, 0, hsize as usize) };
+        self.warp_mem_seq = self.warp_mem_seq.wrapping_add(1);
+        if self.warp_mem_seq == 0 {
+            self.warp_mem_seq = 1;
+        }
+        let pub_id = self.warp_mem_seq;
+        match self.wctx_mut(ctx_pub, conn) {
+            Some(c) => {
+                c.mems[handle as usize] = Some(WarpMem { pub_id, host3d: hr, share_id: None });
+                Ok(())
+            }
+            None => {
+                // Single-threaded -> unreachable; unwind the engine's blob
+                // rather than strand a hostmem offset + host resource.
+                self.gpu.drop_host3d_ring(hr);
+                Err(p9::E_NOENT)
+            }
+        }
+    }
+
+    /// Retire ONE device-memory blob the caller owns and FREE its slot (the
+    /// handle becomes re-mintable). TAKE the WarpMem out of its slot (freeing
+    /// it), then wmem_teardown it. Taking by value first makes self.gpu and
+    /// warp_ctxs borrow disjointly for the teardown (the wring_destroy pattern).
+    /// I-45: only the ctx owner (conn) can name the mem -- the scan is the gate.
+    fn wmem_destroy(&mut self, mem_pub: u32, conn: u64) -> Result<(), u32> {
+        let mut found: Option<(usize, usize)> = None;
+        for (si, slot) in self.warp_ctxs.iter().enumerate() {
+            let c = match slot.as_ref() {
+                Some(c) => c,
+                None => continue,
+            };
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            if let Some(mi) =
+                c.mems.iter().position(|m| m.as_ref().map_or(false, |m| m.pub_id == mem_pub))
+            {
+                found = Some((si, mi));
+                break;
+            }
+        }
+        let (si, mi) = found.ok_or(p9::E_NOENT)?;
+        let taken = self.warp_ctxs[si].as_mut().and_then(|c| c.mems[mi].take());
+        if let Some(m) = taken {
+            Self::wmem_teardown(&mut self.gpu, m);
+        }
+        Ok(())
+    }
+
+    /// Tear down one device-memory blob: disarm the weft share BEFORE the
+    /// backing reclaim (I-7 #847: a live client map survives via the retire
+    /// park), then retire the hostmem backing (reap-if-safe-else-park). Consumes
+    /// the WarpMem by value -- the non-Copy HostRing moves into
+    /// retire_host3d_ring exactly once (a double-drop is a compile error).
+    fn wmem_teardown(gpu: &mut Gpu, m: WarpMem) {
+        let WarpMem { host3d, share_id, .. } = m;
+        if let Some(id) = share_id {
+            let _ = unsafe { t_weft_unshare(id) };
+        }
+        gpu.retire_host3d_ring(host3d);
+    }
+
     /// Retire one BO: the I-40/R2-F5 order -- (1) disarm the un-claimed
     /// share BEFORE any backing free (a Tweft claim racing the retire fails
     /// closed; an already-claimed share is a harmless miss and the CLIENT's
@@ -7135,6 +7418,17 @@ impl Comp {
             for j in 0..WARP_RINGS_PER_CTX {
                 if let Some(mut r) = c.ring_slots[j].take() {
                     Self::wring_teardown(&mut self.gpu, &mut r);
+                }
+            }
+            // V-3b-3c-2: retire every device-memory backing, the SAME guest-safe
+            // posture as the rings above (host-memory backing, fresh-blob re-mint,
+            // trusted-host renderer, monotonic res_id; the client-map case deferred
+            // inside retire_host3d_ring's park). No `leak` branch: device memory
+            // carries no tapestryd-tracked fence (the client frees it under Vulkan
+            // valid-usage, i.e. after its GPU work is idle).
+            for j in 0..MAX_WARP_MEMS_PER_CTX {
+                if let Some(m) = c.mems[j].take() {
+                    Self::wmem_teardown(&mut self.gpu, m);
                 }
             }
             // #240: the probe's two resources follow the SAME leak posture
@@ -7408,6 +7702,66 @@ impl Comp {
             say!(
                 "tapestryd: warp ring-recreate FAIL (destroyed={} slot_freed={} remint_ok={})",
                 destroyed, slot_freed, remint_ok
+            );
+        }
+    }
+
+    /// V-3b-3c-2: witness the device-memory (mem/<handle>) lifecycle -- mint a
+    /// blob at handle 0 (blob_id 0, so no VkDeviceMemory binds, like the ring
+    /// self-test), write+read a sentinel through tapestryd's own RW map (proving
+    /// the hostmem BAR backing is live + writable, not merely bookkept), destroy
+    /// it, assert the slot freed, and re-mint at handle 0 (the "guest handle free
+    /// <=> server slot free" property, the ridx-reuse analog). Gate-wired
+    /// (boot-probe + venus gate + test-venus-verdict, #245) -- a witness no gate
+    /// reads rots. The client device-memory MAP path is the E2E's to prove
+    /// (3c-2b: vkAllocateMemory + vkMapMemory).
+    pub fn warp_mem_selftest(&mut self) {
+        if !self.gpu.blob {
+            return; // warp_host3d_selftest already reported no-blob
+        }
+        const SELFTEST_CONN: u64 = u64::MAX;
+        let ctx_pub = match self.wctx_mint(SELFTEST_CONN) {
+            Some(p) => p,
+            None => return, // 2D device -- warp_host3d_selftest reported it
+        };
+        let slot = match self.wctx_slot(ctx_pub) {
+            Some(s) => s,
+            None => return, // just minted -> unreachable
+        };
+        if self.wmem_mint(ctx_pub, SELFTEST_CONN, PAGE, 0, 0).is_err() {
+            self.wctx_finish(slot, false);
+            return; // non-venus device -- warp_host3d_selftest reported it
+        }
+        // Sentinel round-trip through tapestryd's own RW map of the hostmem
+        // backing (zeroed at mint): proves it is mapped + writable, so a pass is
+        // a real backing, not bookkeeping-only.
+        const SENTINEL: u64 = 0x00C0_FFEE_5EED_5EED;
+        let va = self
+            .wctx(ctx_pub, SELFTEST_CONN)
+            .and_then(|c| c.mems[0].as_ref())
+            .map_or(0, |m| m.host3d.va);
+        let sentinel_ok = va != 0 && {
+            ring_store(va, 0, SENTINEL);
+            ring_load(va, 0) == SENTINEL
+        };
+        let mem_pub = self
+            .wctx(ctx_pub, SELFTEST_CONN)
+            .and_then(|c| c.mems[0].as_ref())
+            .map_or(0, |m| m.pub_id);
+        let destroyed = self.wmem_destroy(mem_pub, SELFTEST_CONN).is_ok();
+        let slot_freed = self
+            .wctx(ctx_pub, SELFTEST_CONN)
+            .map_or(false, |c| c.mems[0].is_none());
+        // The load-bearing assertion: handle 0 re-mints now that the slot is
+        // free (E_INVAL "already minted" here would be the divergence).
+        let remint_ok = self.wmem_mint(ctx_pub, SELFTEST_CONN, PAGE, 0, 0).is_ok();
+        self.wctx_finish(slot, false);
+        if sentinel_ok && destroyed && slot_freed && remint_ok {
+            say!("tapestryd: warp mem-recreate handle-reuse OK (alloc -> sentinel -> destroy -> re-alloc handle 0)");
+        } else {
+            say!(
+                "tapestryd: warp mem-recreate FAIL (sentinel={} destroyed={} slot_freed={} remint_ok={})",
+                sentinel_ok, destroyed, slot_freed, remint_ok
             );
         }
     }
@@ -8108,9 +8462,14 @@ impl Comp {
     }
 
     /// V-3b-2: a ctx has an armed venus device-ctx iff it minted a host3d ring
-    /// (`wctx_venus_ensure`) -- exactly a Venus client. The WFK_SUBMIT handler
-    /// routes on this: a Venus client's submit targets venus_ctx, a virgl
-    /// client's targets dev_ctx. A client is one or the other.
+    /// OR a device-memory blob (both go through `wctx_venus_ensure`; V-3b-3c-2
+    /// added the second armer) -- either mint marks the client Venus, which is
+    /// correct: a HOST_VISIBLE VkDeviceMemory blob IS a Venus object. The
+    /// WFK_SUBMIT handler routes on this: a Venus client's submit targets
+    /// venus_ctx, a virgl client's targets dev_ctx. A client is one or the other;
+    /// a virgl client that errantly pokes `mem/new` would route its GL stream to
+    /// the venus decoder -- self-harm only (own ctx, trusted-host refusal), no
+    /// authority change.
     fn wctx_has_venus(&self, ctx_pub: u32, conn: u64) -> bool {
         self.wctx(ctx_pub, conn).map_or(false, |c| c.venus_ctx.is_some())
     }
@@ -8630,6 +8989,7 @@ impl Conn {
                     b"fence" => WFK_FENCE,
                     b"bo" => WFK_BO_DIR,
                     b"ring" => WFK_RING_DIR,
+                    b"mem" => WFK_MEM_DIR,
                     _ => return None,
                 };
                 Some((make_wctx(id, fk), 0))
@@ -8696,6 +9056,35 @@ impl Conn {
                     _ => return None,
                 };
                 Some((make_wring(rp, fk), 0))
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_MEM_DIR => {
+                let cid = warp_id(d);
+                let c = comp.wctx(cid, self.conn_id)?;
+                if name == b".." {
+                    return Some((make_wctx(cid, WFK_DIR), 0));
+                }
+                if name == b"new" {
+                    return Some((make_wctx(cid, WFK_MEM_NEW), 0));
+                }
+                let handle = parse_u32(name)?;
+                if handle as usize >= MAX_WARP_MEMS_PER_CTX {
+                    return None;
+                }
+                let m = c.mems[handle as usize].as_ref()?;
+                Some((make_wmem(m.pub_id, WFK_DIR), 0))
+            }
+            d if is_wmem(d) && warp_fk(d) == WFK_DIR => {
+                let mp = warp_id(d);
+                let (c, _) = comp.wmem(mp, self.conn_id)?;
+                let parent = make_wctx(c.pub_id, WFK_MEM_DIR);
+                let fk = match name {
+                    b".." => return Some((parent, 0)),
+                    b"info" => WMFK_INFO,
+                    b"map" => WMFK_MAP,
+                    b"ctl" => WMFK_CTL,
+                    _ => return None,
+                };
+                Some((make_wmem(mp, fk), 0))
             }
             _ => None,
         }
@@ -8832,6 +9221,9 @@ impl Conn {
         if is_wring(f.path) && comp.wring(warp_id(f.path), self.conn_id).is_none() {
             return self.err(tag, p9::E_NOENT);
         }
+        if is_wmem(f.path) && comp.wmem(warp_id(f.path), self.conn_id).is_none() {
+            return self.err(tag, p9::E_NOENT);
+        }
 
         // Surface files: re-validate liveness + ownership + generation (a
         // walk could have raced a retire).
@@ -8962,7 +9354,10 @@ impl Conn {
                     comp.warp_bo_peak
                 ),
             );
-            // The BYTES axis (what WARP_CTX_BACKING_MAX actually gates).
+            // The BYTES axis -- the BO SHARE of the holistic backing cap. Since
+            // V-3b-3c-2 WARP_CTX_BACKING_MAX gates bos + rings + mems + leaked
+            // (ctx_backing_total); this global peak stays bo-scoped, and the live
+            // holistic total is the per-ctx `backing-bytes` key (audit F1).
             let _ = core::fmt::write(
                 &mut s,
                 format_args!("bo-bytes-peak {}\n", comp.warp_bo_bytes_peak),
@@ -9275,8 +9670,11 @@ impl Conn {
                         crit_end = s.len();
                         // #204 census (per-ctx): live = backed right now
                         // (what the creation cap counts); peak = the
-                        // high-water the cap width must be sized against;
-                        // the bytes twins gate WARP_CTX_BACKING_MAX.
+                        // high-water the cap width must be sized against.
+                        // The bo-bytes twins are the BO SHARE; the holistic
+                        // quantity WARP_CTX_BACKING_MAX actually gates
+                        // (bos + rings + mems + leaked) is `backing-bytes`,
+                        // emitted just below (audit V-3b-3c-2a F1).
                         let (live, peak, live_b, peak_b) =
                             comp.wctx(id, self.conn_id).map_or((0, 0, 0, 0), |c| {
                                 (
@@ -9300,6 +9698,16 @@ impl Conn {
                                 "bo-live {}\nbo-peak {}\nbo-bytes {}\nbo-bytes-peak {}\n",
                                 live, peak, live_b, peak_b
                             ),
+                        );
+                        // The holistic backing WARP_CTX_BACKING_MAX actually gates
+                        // (ctx_backing_total: bos + rings + mems + leaked) -- the
+                        // number a byte-cap refusal compares, made observable when
+                        // the cap became holistic (audit V-3b-3c-2a F1). A census
+                        // key (after the client-critical fence-signaled prefix).
+                        let backing = comp.wctx(id, self.conn_id).map_or(0, ctx_backing_total);
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!("backing-bytes {}\n", backing),
                         );
                         // The #198-hunt storm scale: the one-shots name only
                         // the FIRST refusal per family; this counts them all.
@@ -9392,6 +9800,7 @@ impl Conn {
                     Ok(0)
                 }
                 WFK_RING_NEW => p9::build_rread(&mut self.out_buf, tag, &[]),
+                WFK_MEM_NEW => p9::build_rread(&mut self.out_buf, tag, &[]),
                 _ => self.err(tag, p9::E_INVAL),
             };
         }
@@ -9470,6 +9879,23 @@ impl Conn {
                     });
                     self.defer = true;
                     Ok(0)
+                }
+                _ => self.err(tag, p9::E_INVAL),
+            };
+        }
+        if is_wmem(f.path) {
+            let id = warp_id(f.path);
+            let (res, size) = match comp.wmem(id, self.conn_id) {
+                Some((_, m)) => (m.host3d.res_id, m.host3d.size),
+                None => return self.err(tag, p9::E_NOENT),
+            };
+            return match warp_fk(f.path) {
+                WMFK_INFO => {
+                    // `res` is the device-global blob resource id; `size` the
+                    // page-rounded backing (the client sized the request).
+                    let mut s = String::new();
+                    let _ = core::fmt::write(&mut s, format_args!("res {} size {}\n", res, size));
+                    self.read_str(tag, &s, a.offset, cap)
                 }
                 _ => self.err(tag, p9::E_INVAL),
             };
@@ -9862,6 +10288,10 @@ impl Conn {
                     Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                     Err(e) => self.err(tag, e),
                 },
+                WFK_MEM_NEW => match comp.wmem_mint_verb(id, self.conn_id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
                 _ => self.err(tag, p9::E_PERM),
             };
         }
@@ -9889,6 +10319,19 @@ impl Conn {
                     Err(e) => self.err(tag, e),
                 },
                 WFK_RING_CTL => match self.wring_ctl(comp, id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
+                _ => self.err(tag, p9::E_PERM),
+            };
+        }
+        if is_wmem(f.path) {
+            let id = warp_id(f.path);
+            if comp.wmem(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WMFK_CTL => match self.wmem_ctl(comp, id, a.data) {
                     Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                     Err(e) => self.err(tag, e),
                 },
@@ -10180,6 +10623,17 @@ impl Conn {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         match s.split_ascii_whitespace().next() {
             Some("destroy") => comp.wring_destroy(id, self.conn_id),
+            _ => Err(p9::E_INVAL),
+        }
+    }
+
+    /// V-3b-3c-2: the mem ctl verb. `destroy` only -- a client-invocable
+    /// per-mem teardown (the backend's vkFreeMemory). Parsed, not "any write =
+    /// destroy", so an errant write can never silently reclaim a live blob.
+    fn wmem_ctl(&mut self, comp: &mut Comp, id: u32, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        match s.split_ascii_whitespace().next() {
+            Some("destroy") => comp.wmem_destroy(id, self.conn_id),
             _ => Err(p9::E_INVAL),
         }
     }
@@ -11168,6 +11622,7 @@ impl Conn {
                         (&b"fence"[..], WFK_FENCE),
                         (&b"bo"[..], WFK_BO_DIR),
                         (&b"ring"[..], WFK_RING_DIR),
+                        (&b"mem"[..], WFK_MEM_DIR),
                     ] {
                         names.push((nm.to_vec(), make_wctx(id, fk)));
                     }
@@ -11218,6 +11673,33 @@ impl Conn {
                         (&b"ctl"[..], WFK_RING_CTL),
                     ] {
                         names.push((nm.to_vec(), make_wring(rp, fk)));
+                    }
+                }
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_MEM_DIR => {
+                let cid = warp_id(d);
+                if let Some(c) = comp.wctx(cid, self.conn_id) {
+                    names.push((b"new".to_vec(), make_wctx(cid, WFK_MEM_NEW)));
+                    // The handle is the array INDEX (WarpMem does not store it);
+                    // the mem-dir walk parses this name back to that index.
+                    for (handle, slot) in c.mems.iter().enumerate() {
+                        if let Some(m) = slot {
+                            let mut nm = String::new();
+                            let _ = core::fmt::write(&mut nm, format_args!("{}", handle));
+                            names.push((nm.into_bytes(), make_wmem(m.pub_id, WFK_DIR)));
+                        }
+                    }
+                }
+            }
+            d if is_wmem(d) && warp_fk(d) == WFK_DIR => {
+                let mp = warp_id(d);
+                if comp.wmem(mp, self.conn_id).is_some() {
+                    for (nm, fk) in [
+                        (&b"info"[..], WMFK_INFO),
+                        (&b"map"[..], WMFK_MAP),
+                        (&b"ctl"[..], WMFK_CTL),
+                    ] {
+                        names.push((nm.to_vec(), make_wmem(mp, fk)));
                     }
                 }
             }
@@ -11339,6 +11821,15 @@ impl Conn {
         if f.opened && is_wbo(f.path) && warp_fk(f.path) == WFK_BO_MAP {
             let id = warp_id(f.path);
             return match comp.wbo_weft_ensure(id, self.conn_id) {
+                Some((share_id, size)) => {
+                    p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0)
+                }
+                None => self.err(tag, p9::E_NOMEM),
+            };
+        }
+        if f.opened && is_wmem(f.path) && warp_fk(f.path) == WMFK_MAP {
+            let id = warp_id(f.path);
+            return match comp.wmem_weft_ensure(id, self.conn_id) {
                 Some((share_id, size)) => {
                     p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0)
                 }

@@ -48,6 +48,7 @@ tapestryd: gpu host3d-map global create refused
 tapestryd: gpu hostmem-ring MAPPED+ROUNDTRIP x2 (off_a=0x0 off_b=0x1000 cache=CACHED) teardown+remint-reuse OK
 tapestryd: warp host3d-ring venus-ctx=512 MAPPED+ROUNDTRIP refcount=1 teardown OK
 tapestryd: warp ring-recreate ridx-reuse OK (destroy -> re-mint ridx 0)
+tapestryd: warp mem-recreate handle-reuse OK (alloc -> sentinel -> destroy -> re-alloc handle 0)
 EOF
 }
 
@@ -119,6 +120,18 @@ check "test leg shows ring-recreate FAIL (slot not freed) -> UNVERIFIED" 1 "" \
       'sed "s/warp ring-recreate ridx-reuse OK.*/warp ring-recreate FAIL (destroyed=true slot_freed=false remint_ok=false)/" "$t" > "$t.x" && mv "$t.x" "$t"'
 check "control leg ALSO sees ring-recreate ridx-reuse -> UNVERIFIED" 1 \
       'printf "tapestryd: warp ring-recreate ridx-reuse OK (destroy -> re-mint ridx 0)\n" >> "$c"' ""
+# V-3b-3c-2: the device-memory handle-reuse witness. "mem-recreate handle-reuse
+# OK" is emitted ONLY when a device-memory blob mints, round-trips a sentinel,
+# destroys (freeing its slot), and re-mints at the same handle; a regression
+# (slot not freed, or the sentinel round-trip fails) emits the FAIL form. Two
+# test-leg arms (absent, replaced-by-FAIL) prove the gate keys on the verdict;
+# the control-leg arm proves it stays venus-scoped.
+check "test leg lacks mem-recreate handle-reuse -> UNVERIFIED" 1 "" \
+      'grep -v "warp mem-recreate handle-reuse OK" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg shows mem-recreate FAIL (slot not freed) -> UNVERIFIED" 1 "" \
+      'sed "s/warp mem-recreate handle-reuse OK.*/warp mem-recreate FAIL (sentinel=true destroyed=true slot_freed=false remint_ok=false)/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO sees mem-recreate handle-reuse -> UNVERIFIED" 1 \
+      'printf "tapestryd: warp mem-recreate handle-reuse OK (alloc -> sentinel -> destroy -> re-alloc handle 0)\n" >> "$c"' ""
 # One variable away, each direction of the discrimination the gate claims.
 check "control leg ALSO sees id=4 -> UNVERIFIED" 1 \
       'printf "tapestryd: gpu capset[2] id=4 max_version=0 max_size=160\n" >> "$c"' ""

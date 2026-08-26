@@ -827,10 +827,16 @@ sketched; 20 pointers is the ground truth. Shared helpers reused verbatim:
   wait are on the TEARDOWN path only (vkDestroyRingMESA); bring-up's replies are
   pure guest-side ring-head polls (no `vn_renderer_wait`).
 - **V-3b-3c -- bo / device memory.** The HOST_VISIBLE bo path over the hostmem
-  BAR; milestone: `vkAllocateMemory` + `vkMapMemory`. **Split into two
+  BAR; milestone: `vkAllocateMemory` + `vkMapMemory`. **Split into
   audit-bearing sub-chunks** (sequencing within this ratified arc): 3c-1 closes
   the V-3b-3b audit's owed P1 (F1) so device-memory churn lands on a sound ring
-  lifecycle; 3c-2 is the bo milestone.
+  lifecycle; 3c-2 is the bo milestone, itself split into 3c-2a (the tapestryd
+  server-side `mem/` substrate + a gate-wired boot self-test, a Mac+pi loop, no
+  mesa rebuild) and 3c-2b (the mesa `vn_renderer` bo_ops + the vkAllocateMemory
+  E2E on real V3D). The split reflects that the substrate is a ~200-LOC change
+  across ~24 sites in the 11.6k-line audit-bearing server.rs -- a substantial
+  independently-reviewable unit, whose tight audit gives a known-good base before
+  the remote E2E work.
   - **V-3b-3c-1 -- the F1 full fix (per-ring destroy verb). AS-BUILT.** The
     V-3b-3b interim made the backend's host3d ring-slot (ridx) alloc MONOTONIC
     because tapestryd retired a host3d ring only at ctx death; a reused ridx
@@ -858,6 +864,48 @@ sketched; 20 pointers is the ground truth. Shared helpers reused verbatim:
     ridx-reuse witness was gate-invisible -> wired into boot-probe + the venus
     gate + test-venus-verdict; F2/F3 [P3] comment fixes, F2 convergence code
     deferred to 3c-2). `memory/audit_v3b3c1_closed_list.md`.
+  - **V-3b-3c-2a -- the server-side device-memory substrate. AS-BUILT.** A lean
+    new `mem/` subtree on /srv/warp (`ctx/<id>/mem/new` write-verb
+    "<bytes> <handle> <mem_id>"; `mem/<handle>/{info,map,ctl}`) exposing a
+    HOST_VISIBLE device-memory blob -- the persistent HOST3D engine
+    (`mint_host3d_ring`) with blob_id = the Venus mem_id, weft-shared to the
+    client (WEFT_BIND_HOSTMEM). DESIGN FORK (decided this session, within the
+    ratified milestone; not scripture-altering -- it follows the established Warp
+    exposure precedent, where the ring tree was designed as-built + audited, not
+    via a separate scripture-first conversation): a lean `mem/` subtree (new qid
+    tag `WARP_MEM`=1<<44, `struct WarpMem`, a `mems[]` row) OVER a host3d flavor
+    on the compositor/leak-park-complex `bo/` tree -- isolation-safety beats ABI
+    economy on an I-45 surface. Ring-shaped, NOT bo-shaped: a one-step write-verb
+    mint (client-owned handle 0..MAX_WARP_MEMS_PER_CTX=256, monotonic pub_id in
+    the qid) with no control header / doorbell / fence / geometry -- device
+    memory is the client's to write, so there is no unbuilt-corpse state (the
+    bo/create3d #218 hazard has no analog). The I-32 cap is made HOLISTIC
+    (`ctx_backing_total` = bos + rings + mems + leaked, on all three mint paths),
+    closing a pre-existing hole where `wbo_create` summed bos + leaked ONLY
+    (ignored rings). The backing is zeroed at mint (the 1c-2b disclosure floor:
+    the hostmem free-list hands reclaimed offsets back verbatim). Teardown
+    (`wmem_teardown`, by-value consume) disarms the weft share BEFORE
+    `retire_host3d_ring` (reap-if-safe-else-PARK on the client-map refcount), the
+    I-7 #847 order; no `retiring`/fence field (device memory carries no
+    tapestryd-tracked fence -- the client frees it under Vulkan valid-usage).
+    Gate-wired boot self-test (`warp_mem_selftest`: alloc -> sentinel round-trip
+    through tapestryd's own RW map -> destroy -> handle-reuse; boot-probe filter +
+    venus gate + test-venus-verdict, 34/34). Witnessed on thyla-pi/KVM real V3D:
+    `warp mem-recreate handle-reuse OK`. **Audit** (holotype Fable 5 max,
+    MODEL(start)==MODEL(end)): **0 P0 / 0 P1 / 0 P2 / 4 P3, all fixed, CLEAN.** The
+    chunk is a faithful transplant of the closed ring pattern; every mem-specific
+    deviation was checked and found to STRENGTHEN the ring properties. F1 [P3]: the
+    ctl cap comments were falsified by the holistic cap + the enforced quantity was
+    unobservable -> comments fixed + a `backing-bytes` ctl key emits
+    ctx_backing_total. F2 [P3]: `wctx_has_venus`'s "iff it minted a host3d ring"
+    comment falsified by wmem_mint (the 2nd venus armer) -> extended. F3 [P3]: the
+    64 MiB per-word-SeqCst disclosure zeroing was a client-repeatable latency lever
+    -> `write_bytes` at both host3d sites (the codebase's alloc_weave method). F4
+    [P3]: the mint's zeroing bakes a client-ordering contract 3c-2b could violate
+    (lazy-mint-after-GPU-write zeroes results) -> documented on wmem_mint/WarpMem
+    ("mint at vkAllocateMemory time, before any device use of mem_id"). Impl:
+    tapestryd `<PENDING>`. `memory/audit_v3b3c2a_closed_list.md`. The mesa backend
+    bo_ops + the `vkAllocateMemory`+`vkMapMemory` E2E are V-3b-3c-2b (next).
 - **V-3b-3d -- the Vulkan prove-gate on thyla-pi (real V3D).** A headless
   compute/clear + fenced readback through the full stack; `virgl_prove.c` template
   + a new `warp-host.sh venus`/`vk` verb; renderer-identity discrimination (assert
