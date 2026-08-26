@@ -6896,6 +6896,49 @@ int main(void) {
                 t_putstr("joey: Go-4b post-pivot /env re-graft OK\n");
             }
 
+            // VIVARIUM section 13: the /viv/bin PRODUCTION phenotype mount --
+            // ship git on the user's PATH, run under the Linux phenotype BY
+            // LOCATION (docs/VIVARIUM.md 13). Bind the pool's /vivarium/viv-bin
+            // tree (static git + dashed pack symlinks + gitconfig, staged by
+            // build.sh) onto /viv/bin with MPHENO_LINUX, so /viv/bin/git
+            // resolves and its exec CROSSES a pheno-mount -> the child is
+            // PHENO_LINUX (the second declaration channel; no manifest, no
+            // spawn-arg). Ungated so real logins inherit it. SOFT, unlike the
+            // core /bin mount: a build with no static-git tarball simply has no
+            // /vivarium/viv-bin and thus no /viv/bin, and a mount hiccup degrades
+            // to "no git on PATH" rather than bricking the boot -- the
+            // BOOT_PROBES git gate below is what turns a broken mount RED.
+            // NOTE the A-3 boundary (per-principal 9P ownership, unbuilt at
+            // v1.0): git run as SYSTEM owns the pool files it touches and works;
+            // a real non-SYSTEM USER cannot yet chmod its own repo files, so
+            // seamless user-git awaits A-3 + the ut cap-conferral (the user-git
+            // arc). This mount SHIPS the binary and proves it as SYSTEM.
+            {
+                long gsrc = t_open(T_WALK_OPEN_FROM_ROOT, "/vivarium/viv-bin", 17,
+                                   T_OPATH);
+                if (gsrc < 0) {
+                    t_putstr("joey: section-13 /viv/bin SKIPPED (no"
+                             " /vivarium/viv-bin -- no static-git tarball)\n");
+                } else {
+                    long vd  = mkdir_or_open(T_WALK_OPEN_FROM_ROOT, "viv", 3);
+                    long vbd = (vd >= 0) ? mkdir_or_open(vd, "bin", 3) : -1;
+                    if (vd  >= 0) (void)t_close(vd);
+                    if (vbd >= 0) (void)t_close(vbd);
+                    if (vbd < 0) {
+                        t_putstr("joey: section-13 /viv + /viv/bin mkdir FAILED"
+                                 " (degraded: no git on PATH)\n");
+                    } else if (t_mount("/viv/bin", 8, gsrc,
+                                       T_MREPL | T_MPHENO_LINUX) != 0) {
+                        t_putstr("joey: section-13 /viv/bin t_mount FAILED"
+                                 " (degraded: no git on PATH)\n");
+                    } else {
+                        t_putstr("joey: section-13 /viv/bin git mount OK"
+                                 " (pheno-linux)\n");
+                    }
+                    (void)t_close(gsrc);
+                }
+            }
+
 /* #228: the Clade + Go on-device toolchain probes. Ungated until now, so the
    lean production shape compiled them (the make gate calls mkt_file_eq, which
    only exists inside this gate -- one of the 11 errors that made
@@ -10133,7 +10176,7 @@ int main(void) {
                 }
                 t_putstr("joey: V-1b phenotype (native + containered linux) PASS\n");
 
-                // === VIVARIUM V-1b-loc: the /viv/bin phenotype MOUNT, bare
+                // === VIVARIUM V-1b-loc: the phenotype MOUNT mechanism, bare
                 // spawned. The container leg above declared the phenotype
                 // through the MANIFEST (viv reads org.thylacine.phenotype).
                 // This leg declares it through the SECOND channel: a mount
@@ -10144,15 +10187,21 @@ int main(void) {
                 // The claim is SUBTREE SCOPE: the SAME on-pool bytes
                 // (viv-pheno-probe) are native reached via /bin -- proven by
                 // leg A above (viv-pheno-probe native -> exit 0) -- and Linux
-                // reached via /viv/bin. Only the mount crossed differs, and it
-                // is the ONLY declaration (pheno_flags = 0, no manifest).
+                // reached via a pheno-mount. Only the mount crossed differs, and
+                // it is the ONLY declaration (pheno_flags = 0, no manifest).
                 //
+                // This proof mounts at a DISTINCT point, /viv/probe-bin, NOT the
+                // product /viv/bin: the section-13 production mount above already
+                // grafted git at /viv/bin (MPHENO_LINUX), and a proof that
+                // MREPL-rebound + t_unmounted /viv/bin would tear the shipped git
+                // mount out from under every later leg. The mechanism is
+                // mount-point-agnostic, so /viv/probe-bin proves it identically.
                 // PROOF SHORTCUT, stated so it is not mistaken for the product:
-                // this binds the WHOLE initrd /bin at /viv/bin, so every native
-                // tool is (harmlessly, here) reachable as Linux. Production
-                // /viv/bin holds ONLY Linux binaries (git); same mount, other
-                // contents. Runs after the container leg, so its narrower proof
-                // has already reported if the phenotype itself is broken.
+                // this binds the WHOLE initrd /bin at /viv/probe-bin, so every
+                // native tool is (harmlessly, here) reachable as Linux; the
+                // product /viv/bin holds ONLY the git tree. Runs after the
+                // container leg, so its narrower proof has already reported if
+                // the phenotype itself is broken.
                 {
                     // (a) A writable verdict file at joey's OWN root: the bare
                     // probe resolves "/pheno-scratch" in joey's namespace (no
@@ -10177,8 +10226,9 @@ int main(void) {
                     }
                     (void)t_close(scfd);
 
-                    // (b) Build the pheno mount: mkdir /viv, mkdir /viv/bin,
-                    // then graft the initrd binary tree onto /viv/bin with
+                    // (b) Build the pheno mount: mkdir /viv (idempotent -- the
+                    // production mount may already own it), mkdir /viv/probe-bin,
+                    // then graft the initrd binary tree onto /viv/probe-bin with
                     // MPHENO_LINUX. The source is a fresh O_PATH handle to /bin
                     // (the #58 bind above already resolves it to the devramfs
                     // bin root); t_mount takes its own ref, so it closes after.
@@ -10187,10 +10237,10 @@ int main(void) {
                         t_putstr("joey: V-1b-loc mkdir /viv FAILED\n");
                         return 1;
                     }
-                    long vbd = mkdir_or_open(vivd, "bin", 3);
+                    long vbd = mkdir_or_open(vivd, "probe-bin", 9);
                     (void)t_close(vivd);
                     if (vbd < 0) {
-                        t_putstr("joey: V-1b-loc mkdir /viv/bin FAILED\n");
+                        t_putstr("joey: V-1b-loc mkdir /viv/probe-bin FAILED\n");
                         return 1;
                     }
                     (void)t_close(vbd);
@@ -10200,9 +10250,9 @@ int main(void) {
                         t_putstr("joey: V-1b-loc /bin source unopenable\n");
                         return 1;
                     }
-                    if (t_mount("/viv/bin", 8, bin_src2,
+                    if (t_mount("/viv/probe-bin", 14, bin_src2,
                                 T_MREPL | T_MPHENO_LINUX) != 0) {
-                        t_putstr("joey: V-1b-loc t_mount(/viv/bin,"
+                        t_putstr("joey: V-1b-loc t_mount(/viv/probe-bin,"
                                  " MPHENO_LINUX) FAILED\n");
                         (void)t_close(bin_src2);
                         return 1;
@@ -10210,8 +10260,8 @@ int main(void) {
                     (void)t_close(bin_src2);
 
                     // (c) The bare spawn -- pheno_flags = 0. The MOUNT is the
-                    // sole declaration; the exec resolver crosses /viv/bin and
-                    // stamps PHENO_LINUX. The probe's "linux-loc" mode is the
+                    // sole declaration; the exec resolver crosses /viv/probe-bin
+                    // and stamps PHENO_LINUX. The probe's "linux-loc" mode is the
                     // BARE witness (the container's full "linux" mode needs viv
                     // to hand it fd 0 as a reader-less pipe for its SIGPIPE
                     // legs; a bare spawn hands nothing): it proves ONLY the
@@ -10224,8 +10274,9 @@ int main(void) {
                     // MOUNT and not the arg decides is the kernel unit test
                     // exec_ns.pheno_mount_crossing (mount cross sets it, a plain
                     // mount does not).
-                    const char lname[] = "/viv/bin/viv-pheno-probe";
-                    const char largv[] = "/viv/bin/viv-pheno-probe\0linux-loc";
+                    const char lname[] = "/viv/probe-bin/viv-pheno-probe";
+                    const char largv[] =
+                        "/viv/probe-bin/viv-pheno-probe\0linux-loc";
                     struct t_sys_spawn_args lreq = {
                         .name_va       = (unsigned long)lname,
                         .argv_data_va  = (unsigned long)largv,
@@ -10235,8 +10286,8 @@ int main(void) {
                     };
                     long lpid = t_spawn_full_argv(&lreq);
                     if (lpid <= 0) {
-                        t_putstr("joey: V-1b-loc spawn /viv/bin/viv-pheno-probe"
-                                 " FAILED\n");
+                        t_putstr("joey: V-1b-loc spawn"
+                                 " /viv/probe-bin/viv-pheno-probe FAILED\n");
                         return 1;
                     }
                     int  lst  = 0;
@@ -10253,8 +10304,8 @@ int main(void) {
                     int lmarked_ok = (ln >= 3 && lmark[0] == 'O'
                                               && lmark[1] == 'K');
                     if (lgot != lpid || lst != 0 || !lmarked_ok) {
-                        t_putstr("joey: V-1b-loc /viv/bin phenotype leg FAILED"
-                                 " marker=");
+                        t_putstr("joey: V-1b-loc /viv/probe-bin phenotype leg"
+                                 " FAILED marker=");
                         if (ln > 0) {
                             for (long i = 0; i < ln; i++)
                                 if (lmark[i] == '\n') lmark[i] = 0;
@@ -10268,11 +10319,104 @@ int main(void) {
                         return 1;
                     }
                     // Remove the proof mount so nothing later resolves through a
-                    // whole-/bin-declared-Linux /viv/bin. Probe-only residue
-                    // otherwise, but tidy and it exercises the mount teardown.
-                    (void)t_unmount("/viv/bin", 8);
-                    t_putstr("joey: V-1b-loc /viv/bin"
+                    // whole-/bin-declared-Linux /viv/probe-bin. Probe-only
+                    // residue otherwise, but tidy and it exercises the teardown.
+                    // (The product /viv/bin git mount is a different point and
+                    // untouched.)
+                    (void)t_unmount("/viv/probe-bin", 14);
+                    t_putstr("joey: V-1b-loc /viv/probe-bin"
                              " resolver-subtree-scope PASS\n");
+                }
+
+                // === VIVARIUM section 13 git deployment gate: the REAL git,
+                // via the product /viv/bin mount. The V-1b-loc leg above proved
+                // the MECHANISM with a synthetic probe on a scratch mount; this
+                // proves the DELIVERABLE -- the actual static git binary the
+                // section-13 mount grafted at /viv/bin runs under the Linux
+                // phenotype BY LOCATION. Bare spawn, pheno_flags = 0: the ONLY
+                // thing that can make a Linux ELF's syscalls decode is the
+                // /viv/bin mount stamping the child PHENO_LINUX. A native git
+                // mis-decodes its first libc-init syscall and dies before it
+                // creates a repo, so `git init` completing (status 0 + a real
+                // .git) is itself the proof the mount channel is live for a
+                // third-party binary. SOFT-SKIPS if the product mount is absent
+                // (no static-git tarball) -- the deliverable simply is not built.
+                //
+                // git gets a real stdio trio (the fd-less-spawn reason the probe
+                // above self-opens its report file -- git writes to fd 1) via a
+                // drained pipe, exactly like run_viv_bundle, and CAP_CSPRNG_READ
+                // for its getrandom (I-43: the ABI is Linux's, the entropy
+                // authority is real and must be conferred). Runs as SYSTEM, which
+                // owns the pool files git touches -- the A-3 boundary a real user
+                // would hit (per-principal 9P ownership, unbuilt) does not apply.
+                {
+                    long gprobe = t_open(T_WALK_OPEN_FROM_ROOT, "/viv/bin/git", 12,
+                                         T_OPATH);
+                    if (gprobe < 0) {
+                        t_putstr("joey: section-13 git gate SKIPPED (no"
+                                 " /viv/bin/git -- deliverable not built)\n");
+                    } else {
+                        (void)t_close(gprobe);
+                        long grd = -1, gwr = -1;
+                        if (t_pipe(&grd, &gwr) < 0) {
+                            t_putstr("joey: section-13 git gate t_pipe FAILED\n");
+                            return 1;
+                        }
+                        unsigned int gfds[3] = { (unsigned int)gwr,
+                                                 (unsigned int)gwr,
+                                                 (unsigned int)gwr };
+                        const char giname[] = "/viv/bin/git";
+                        const char giargv[] =
+                            "/viv/bin/git\0init\0/tmp/vivgit-repo";
+                        struct t_sys_spawn_args gireq = {
+                            .name_va       = (unsigned long)giname,
+                            .argv_data_va  = (unsigned long)giargv,
+                            .name_len      = sizeof(giname) - 1,
+                            .argv_data_len = sizeof(giargv),
+                            .argc          = 3,
+                            .fd_list_va    = (unsigned long)gfds,
+                            .fd_count      = 3,
+                            .cap_mask      = T_CAP_CSPRNG_READ,
+                        };
+                        long gipid = t_spawn_full_argv(&gireq);
+                        if (gipid <= 0) {
+                            t_putstr("joey: section-13 git gate spawn"
+                                     " /viv/bin/git FAILED\n");
+                            (void)t_close(grd); (void)t_close(gwr);
+                            return 1;
+                        }
+                        (void)t_close(gwr);
+                        // Drain to EOF FIRST, then reap (run_viv_bundle's order,
+                        // same deadlock argument: all three child fds are the one
+                        // write end, and nothing drains while joey waits).
+                        for (;;) {
+                            unsigned char gbuf[256];
+                            long gn = t_read(grd, gbuf, sizeof(gbuf));
+                            if (gn <= 0) break;
+                            (void)t_puts((const char *)gbuf, (size_t)gn);
+                        }
+                        (void)t_close(grd);
+                        int  gist  = 0;
+                        long gigot = t_wait_pid_for((int)gipid, 0, &gist);
+                        // Corroborate with the created repo: git init makes a
+                        // .git. status 0 is the discriminator (a native git could
+                        // not reach here); the .git check catches a git that
+                        // exits 0 without doing the work.
+                        long gchk = t_open(T_WALK_OPEN_FROM_ROOT,
+                                           "/tmp/vivgit-repo/.git", 21, T_OPATH);
+                        int gitok = (gchk >= 0);
+                        if (gchk >= 0) (void)t_close(gchk);
+                        if (gigot != gipid || gist != 0 || !gitok) {
+                            t_putstr("joey: section-13 git gate FAILED"
+                                     " (git init via /viv/bin) status=");
+                            t_putstr(itoa_dec(gist, pbuf, sizeof(pbuf)));
+                            t_putstr(gitok ? " (.git present)\n"
+                                           : " (.git absent)\n");
+                            return 1;
+                        }
+                        t_putstr("joey: section-13 git via /viv/bin"
+                                 " (phenotype BY LOCATION) PASS\n");
+                    }
                 }
 
                 // === LINEAGE L-6c: the ARC gate. Runs LAST among the

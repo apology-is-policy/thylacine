@@ -1483,6 +1483,39 @@ VIVEOF
 }
 VIVEOF
                         echo "==> viv bundles: git-probe staged at $gb (static git 2.51.2 + /gitprobe.sh boot script -- joey spawns it as SYSTEM; the git-under-VIVARIUM milestone-A gate)"
+
+                        # The /viv/bin PRODUCTION git tree (VIVARIUM section 13,
+                        # the resolver-subtree-scope channel). The SAME static
+                        # git, staged as a PLAIN pool tree -- NOT a container
+                        # bundle -- for joey to bind at /viv/bin with
+                        # MPHENO_LINUX: ship git on ut's PATH, run under the
+                        # Linux phenotype BY LOCATION (docs/VIVARIUM.md 13). The
+                        # dashed upload/receive-pack symlinks ride beside it (git
+                        # spawns `git-upload-pack` on PATH for clone). A gitconfig
+                        # sits alongside; the joey gate points GIT_CONFIG_SYSTEM
+                        # here (no dependency on an /etc in the pool root). It is
+                        # deliberately separate from the git-probe BUNDLE above:
+                        # that is a test container (config.json + gitprobe.sh),
+                        # this is the product mount source.
+                        local vbin="$vstage/viv-bin"
+                        rm -rf "$vbin"; mkdir -p "$vbin"
+                        cp "$gx/git" "$vbin/git"
+                        chmod 0755 "$vbin/git"
+                        ln -sf git "$vbin/git-upload-pack"
+                        ln -sf git "$vbin/git-receive-pack"
+                        cat > "$vbin/gitconfig" <<'VIVEOF'
+[user]
+	name = Thylacine
+	email = thyla@extinct.local
+[init]
+	defaultBranch = main
+[core]
+	fsync = none
+	createObject = rename
+[safe]
+	directory = *
+VIVEOF
+                        echo "==> viv bundles: /viv-bin production git tree staged at $vbin (static git 2.51.2 + dashed symlinks + gitconfig -- joey binds it at /viv/bin MPHENO_LINUX; the phenotype-BY-LOCATION product mount)"
                     else
                         echo "==> viv bundles: static-git tarball extract FAILED -- git-probe skipped" >&2
                     fi
