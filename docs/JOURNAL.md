@@ -95,7 +95,9 @@ not weak evidence, it is zero evidence.
 reference caveat + missing T_OAPPEND userspace mirrors, F4 the off-by-S cursor
 divergence stated precisely). Hard targets I-43 + the pread64/pwrite64
 damage-envelope + the Stratum-half of the design VERIFIED SOUND.
-**Verification**: `<SMP-gate pending>`. Tip `<pending>`.
+**Verification**: SMP gate PASS -- 16/16 clean, 0 corruption (default-smp8 8/8 +
+ubsan-smp8 8/8, N=8, both sanitizer arms; TESTS=y + BOOT_PROBES=y so the suite +
+the reflog-append write path under the git gate ran under smp8). Tip `4afe31c4`.
 
 ---
 
