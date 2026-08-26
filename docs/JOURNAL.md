@@ -22,7 +22,35 @@ needed the operator.
 
 ---
 
-## 2026-08-26 — V-3b-3c-2b: the mesa device-memory bo_ops, and a two-layer masking-bug stack under the first vkCreateDevice ever run on real V3D
+## 2026-08-26 (run 2) — the multi-queue design ratified: four forks closed, two by operator vote
+
+Fresh context (self-compact at the 600k line); the run's charter is the
+GPU-submit chunk with multi-queue pulled forward, implementing against
+`docs/WARP-MULTIQUEUE-DESIGN.md`. Scripture before code: the first act was the
+design conversation on the doc's four open forks, not the implementation.
+
+Two forks were mine to dispose of and were disposed inline: the F6/F8
+per-renderer mutex is **pulled into the chunk** (concurrent multi-queue submits
+make the torn-RMW live — the "pull dependencies forward" default, noted not
+asked), and #210's per-ring FIFO assumption is **bounded at the I-45 audit**
+(it is a risk to verify, not a decision to take). The other two went to the
+operator, the second because a mesa<->tapestryd fence surface is an ABI fork
+(escalation list): **queue count = 4 timelines / 3 queues** (CPU + gfx +
+async-compute + async-transfer; `max_timeline_count = 4`), and **the fence ABI
+= the Option-1+2 hybrid** — ring_idx on `FenceTag`, per-(ctx,ring) retirement
+into a per-ring `fence_signaled`, exposed through the EXISTING
+`ring/<ridx>/fence` file for host3d rings sourced from the GPU pump, with the
+hard ring-flavor guard (echo vs pump must never cross) ratified as part of the
+ABI, not an implementation nicety. Both votes matched the doc's
+recommendations. The doc is flipped DESIGN FOUNDATION -> RATIFIED and section G
+now records decisions, not questions.
+
+Vault check on the surfaces (the step-0 discipline): the design doc is UNOWNED
+(kept in-tree as today); `usr/tapestryd/src/{server,gpu}.rs` are OWNED by the
+`sub-tapestryd` dossier (audit:hard) — so the implementation's mechanism prose
+rings vault rather than growing a parallel reference section. The vault
+checkout is 264 commits behind main; its sweep is the vault track's queue, not
+this run's.
 
 The chunk was "fill the three pre-wired mesa `vn_renderer` bo_ops over the `mem/`
 ABI and witness a `vkAllocateMemory`+`vkMapMemory` E2E on real V3D." The backend

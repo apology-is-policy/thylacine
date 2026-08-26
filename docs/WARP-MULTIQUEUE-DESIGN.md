@@ -1,12 +1,16 @@
 # Warp multi-queue submit-fence redesign (the F3 seam) -- design foundation
 
-**Status: DESIGN FOUNDATION (not yet scripture-ratified).** Operator greenlit
-"pull multi-queue forward" for the GPU-submit chunk (2026-08-26) and directed the
-IMPLEMENTATION to a fresh session. This doc is the design foundation that session
-implements against; the open forks in section G still need the operator's
-decision (they are the design conversation to run BEFORE code -- scripture before
-code). Research: the design-brief fork this session + my direct reads; every
-claim carries file:line -- re-verify before relying.
+**Status: RATIFIED (2026-08-26).** Operator greenlit "pull multi-queue forward"
+for the GPU-submit chunk and voted the two open ABI/scope forks (section G); the
+design is now binding for the implementation. Decisions: (1) 4 timelines / 3
+queues (max_timeline_count = 4); (2) the Option-1+2 HYBRID fence ABI (per-ring
+FenceTag -> per-ring fence_signaled, exposed through the EXISTING ring/<ridx>/fence
+file for host3d rings, sourced from the GPU pump, with a hard ring-flavor guard) --
+this is a client<->server ABI surface and was escalated + signed off; (3) the
+F6/F8 per-renderer mutex is PULLED IN (now a dependency of concurrent multi-queue
+submits); (4) #210's per-ring FIFO is a risk to BOUND at the I-45 audit, not a
+pre-code decision. Research: the design-brief fork + direct reads; every claim
+carries file:line -- re-verify before relying.
 
 Prerequisite context: `docs/WARP-V3-DESIGN.md` (the Warp arc), the V-3b-3c-2b
 close (`e34760d8` + mesa `d7f4ef1`/patch 0014), `memory/audit_v3b3c2b_closed_list.md`
@@ -109,14 +113,13 @@ explicit.
    multi-queue. REJECT for a real multi-queue milestone; acceptable only as a
    documented interim.
 
-**RECOMMENDATION: Option 1 as the mechanism, exposed through the existing
-`ring/<ridx>/fence` file (Option 2's file+poll reuse) for host3d rings, sourced
-from the pump.** The new mechanism is narrow -- a ring_idx on FenceTag + a
-per-ring `fence_signaled` -- reusing the completion pump, the fence file, and the
-park/poll delivery. **HARD GUARD:** a host3d ring's `completed_seq` comes from the
-GPU pump, NEVER the echo (which stays E_OPNOTSUPP); a `_Static_assert`/runtime
-guard keyed on the ring flavor at the source. (This fork is G.2 -- operator's ABI
-call.)
+**RATIFIED (G.2, operator vote 2026-08-26): Option 1 as the mechanism, exposed
+through the existing `ring/<ridx>/fence` file (Option 2's file+poll reuse) for
+host3d rings, sourced from the pump.** The new mechanism is narrow -- a ring_idx
+on FenceTag + a per-ring `fence_signaled` -- reusing the completion pump, the
+fence file, and the park/poll delivery. **HARD GUARD (part of the ABI):** a
+host3d ring's `completed_seq` comes from the GPU pump, NEVER the echo (which
+stays E_OPNOTSUPP); a runtime guard keyed on the ring flavor at the source.
 
 ## F. I-45 isolation delta -- NO weakening
 
@@ -130,23 +133,31 @@ context") are UNCHANGED -- ring_idx selects a timeline WITHIN the ctx. **The aud
 must confirm:** ring_idx stays ctx-local (resolved under the existing `owner_conn`
 gate, like today's ridx) and cannot name another ctx's ring/timeline.
 
-## G. Open forks -- the design conversation to run BEFORE code (operator's call)
+## G. The forks -- RESOLVED (operator vote 2026-08-26; binding)
 
-1. **How many queues for v1.0?** Bounds `max_timeline_count` (e.g.
-   graphics+compute+transfer = 3 queues -> count 4, since ring 0 = CPU). Server
-   bound is `WARP_RINGS_PER_CTX=64`. My default rec: 4 (3 queues), tunable.
-2. **Fence-file ABI (ESCALATION-WORTHY -- ABI surface).** Option 1+2 hybrid
-   (recommended, section E) vs a NEW per-ring venus-fence file vs a ring_idx ARG
-   on `ctx/<id>/fence`. Overloading `completed_seq` (Option 2) needs the hard
-   flavor guard.
-3. **Pull the F6/F8 per-renderer mutex into this chunk?** It is now a DEPENDENCY
-   (concurrent multi-queue submits), not a separable seam -> my rec: YES, pull it
-   forward (the "pull dependencies forward" default). Confirm.
-4. **Does #210's per-ring FIFO hold when the host interleaves queues?** Needs
-   per-queue FIFO retirement -- virglrenderer-internal; verify or bound at the
-   audit. The comment "FIFO within the single ring" (server.rs ~8227) is true
-   today but becomes a load-bearing multi-queue assumption the redesign must
-   defuse.
+1. **Queue count for v1.0: 4 timelines / 3 queues** (operator-voted). CPU
+   timeline (ring 0) + graphics + async-compute + async-transfer -- the standard
+   Vulkan queue-family split. `max_timeline_count = 4` in mesa; the per-ring
+   fence state in tapestryd sizes to the rings actually minted (server hard
+   bound stays `WARP_RINGS_PER_CTX=64`).
+2. **Fence-file ABI: the Option 1+2 HYBRID** (operator-voted; this was the
+   escalation-worthy ABI fork). ring_idx lands on `FenceTag`;
+   `warp_service_fences` retires per-(ctx, ring) into a per-ring
+   `fence_signaled`; a host3d ring's EXISTING `ring/<ridx>/fence` file is fed
+   from the GPU pump (the V-3a blob-ring echo path is untouched). **The hard
+   flavor guard is part of the ABI**: the two `completed_seq` sources (echo vs
+   GPU pump) are keyed on ring flavor at the source and must never cross -- a
+   host3d ring's seq comes ONLY from the pump (its kick verb stays
+   E_OPNOTSUPP), a blob ring's ONLY from the echo.
+3. **The F6/F8 per-renderer mutex is IN this chunk** (dependency pull-forward
+   confirmed): concurrent multi-queue submits make the torn-RMW on
+   `warp_conn`/`ring_bitmap`/`mem_bitmap`/the per-ring seq pairs a live defect,
+   not a latent one. It lands with the mesa-side per-ring state.
+4. **#210's per-ring FIFO under host interleave: bound at the I-45 audit.** Not
+   a pre-code decision. The redesign re-establishes the dense-count invariant
+   PER RING (section D); the audit must verify the per-ring FIFO assumption
+   against virglrenderer's actual retirement order or replace dense counting
+   with explicit seq matching where it cannot be proven.
 
 ## H. Comment-vs-code flags (from the research)
 
