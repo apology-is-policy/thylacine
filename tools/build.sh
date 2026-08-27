@@ -1656,6 +1656,205 @@ VIVEOF
 VIVEOF
                             echo "==> viv bundles: git-net staged at $gnb (THYLACINE_BAKE_GITNET=1: net-granted clone-https boot vehicle -- the B3 gate; default bakes OMIT it, so the hermetic suite stays internet-free)"
                         fi
+
+                        # The git-WORKFLOW bundle (milestone C1): the SAME static
+                        # git, HERMETIC (no net), running the non-interactive
+                        # developer workflow a real self-hosting user hits --
+                        # branch / checkout / diff / status / merge (fast-forward
+                        # AND a 3-way with a real CONFLICT resolved by editing the
+                        # marked file, no editor spawned) / rebase (non-interactive)
+                        # / reset / stash / worktree / manual gc. Every verb rides
+                        # ALREADY-PROVEN primitives (O_CREAT|O_EXCL, rename,
+                        # O_APPEND, fork+exec, stat/readdir), so this is the C1
+                        # "verify" half: it should be GREEN today, and whatever
+                        # reddens is the precise "fill" work. It is deliberately
+                        # INSENSITIVE to #91 (the exit(N) boolean collapse): every
+                        # leg branches on 0-vs-nonzero (which the collapse
+                        # preserves) or on file content, never on a specific exit
+                        # code -- exit-code FIDELITY stays owned by the L-6c leg-I
+                        # measurement, and its fix promotes THAT leg to an assertion.
+                        #
+                        # HERMETICITY: staged ONLY under THYLACINE_BAKE_GITWF=1 while
+                        # the arc is in flight, so it does not redden the default
+                        # suite / SMP gate before it is proven green; once green it
+                        # promotes to always-stage (a pure local git test belongs in
+                        # every boot, like git-probe). Driven by
+                        # tools/test-git-workflow.sh -- no network preflight (unlike
+                        # git-net); it is the git-probe SKIP-if-absent / FATAL-if-
+                        # present idiom on a hermetic local fixture.
+                        if [[ "${THYLACINE_BAKE_GITWF:-0}" == "1" ]]; then
+                            local gwb="$vstage/git-workflow"
+                            rm -rf "$gwb"; mkdir -p "$gwb"
+                            cp -R "$ab/rootfs" "$gwb/rootfs"
+                            rm -rf "$gwb/rootfs/gate"
+                            mkdir -p "$gwb/rootfs/usr/bin" \
+                                     "$gwb/rootfs/usr/share/git-core"
+                            # The flat git tree (git + the dashed pack symlinks +
+                            # templates). No network is exercised, but the whole
+                            # tree is harmless and keeps this identical to the other
+                            # git bundles; GIT_EXEC_PATH points at /usr/bin. The
+                            # templates ride at the compiled default so `git init`
+                            # installs hooks with no "templates not found" noise.
+                            cp -R "$gx/viv-bin/"* "$gwb/rootfs/usr/bin/"
+                            mv "$gwb/rootfs/usr/bin/templates" \
+                               "$gwb/rootfs/usr/share/git-core/templates"
+                            chmod 0755 "$gwb/rootfs/usr/bin/git"
+                            # gc.auto=0: correctness FIRST (no automatic self-fork
+                            # gc mid-script surprising the many commits below); the
+                            # gate then exercises MANUAL `git gc` explicitly, which
+                            # drives the same machinery (fork-self -> repack/prune,
+                            # opendir/readdir on the object fanout, the gc.pid lock).
+                            # If manual gc is green, auto-gc is a config flip.
+                            cat > "$gwb/rootfs/etc/gitconfig" <<'VIVEOF'
+[user]
+	name = Thylacine
+	email = thyla@extinct.local
+[init]
+	defaultBranch = main
+[core]
+	fsync = none
+	createObject = rename
+	pager = cat
+	symlinks = false
+[gc]
+	auto = 0
+[pack]
+	threads = 1
+[checkout]
+	workers = 1
+[safe]
+	directory = *
+VIVEOF
+                            cat > "$gwb/rootfs/gitworkflow.sh" <<'VIVEOF'
+#!/bin/sh
+# C1 git-workflow gate: verify the NON-INTERACTIVE developer workflow under the
+# VIVARIUM phenotype. ALL git output is quieted -- the joey gate keeps only the
+# FIRST 4 KiB of stdout, so ONLY the GITWF-* markers may reach it. Each verb test
+# is self-contained + NON-FATAL: one boot surfaces the COMPLETE gap picture
+# (verify-then-fill). Only the structural prerequisites (cd/init/base) are fatal.
+# A leg emits GITWF-<STEP> on success or GITWF-FAIL-<STEP> on failure; the joey
+# gate scans for the positive markers in order and reports the first missing one.
+# No scanned marker is a substring of another (the substring-pollution trap).
+rm -rf /tmp/wf 2>/dev/null
+mkdir -p /tmp/wf && cd /tmp/wf || { echo GITWF-FAIL-CD; exit 1; }
+
+# exit(N) fidelity DIAGNOSTIC (#91) -- NOT a scanned marker (WF-DIAG-* prefix so
+# it can never collide with a GITWF-* scan). Linux prints 42; the #91 collapse
+# prints 1. Owned as an ASSERTION by L-6c leg I; here it is a context readout.
+sh -c 'exit 42'; ec=$?
+echo WF-DIAG-exit=$ec
+
+# Reliable multi-line file writer. busybox `printf` is a shell BUILTIN that writes
+# via musl stdio, whose fully-buffered output to a redirected file is NEVER
+# flushed under the phenotype (busybox ash _exit()s without an atexit flush, and
+# its per-builtin flush does not reach the file) -- so `printf ... > f` produces
+# an EMPTY file. `echo` is a direct write() and works. This gate tests GIT verbs,
+# not printf, and git's own file I/O is direct write() (unaffected); the printf/
+# stdio gap is tracked separately. wl f a b c -> "a\nb\nc\n" (first '>' truncates,
+# rest append; both direct/write-through and reliable).
+wl() { _f="$1"; shift; _fst=1; for _ln in "$@"; do
+         if [ "$_fst" = 1 ]; then echo "$_ln" > "$_f"; _fst=0;
+         else echo "$_ln" >> "$_f"; fi; done; }
+
+# --- structural spine (FATAL) ---
+git init -q repo && echo GITWF-INIT || { echo GITWF-FAIL-INIT; exit 1; }
+cd repo || { echo GITWF-FAIL-CD2; exit 1; }
+git config core.logallrefupdates true
+wl f.txt a b c
+git add f.txt && git commit -qm base && echo GITWF-BASE || { echo GITWF-FAIL-BASE; exit 1; }
+
+# --- branch + checkout ---
+git branch feat 2>/dev/null && git checkout -q feat 2>/dev/null && echo GITWF-BRANCH || echo GITWF-FAIL-BRANCH
+
+# --- diff (piped, non-interactive): same-size line edit (b -> B) ---
+wl f.txt a B c
+git diff > /tmp/wf/d 2>/dev/null
+grep -q '^+B$' /tmp/wf/d && echo GITWF-DIFF || echo GITWF-FAIL-DIFF
+
+# --- status --porcelain ---
+git status --porcelain > /tmp/wf/s 2>/dev/null
+grep -q 'f.txt' /tmp/wf/s && echo GITWF-STATUS || echo GITWF-FAIL-STATUS
+
+# commit the feat edit (so merge has divergence)
+git commit -qam featedit 2>/dev/null && echo GITWF-FCOMMIT || echo GITWF-FAIL-FCOMMIT
+
+# --- log --oneline --graph ---
+git log --oneline --graph > /tmp/wf/l 2>/dev/null && [ -s /tmp/wf/l ] && echo GITWF-LOG || echo GITWF-FAIL-LOG
+
+# --- merge fast-forward (main <- feat) ---
+git checkout -q main 2>/dev/null
+git merge -q feat 2>/dev/null && grep -q '^B$' f.txt && echo GITWF-MERGEFF || echo GITWF-FAIL-MERGEFF
+
+# --- 3-way merge WITH conflict (git writes markers, spawns NOTHING; the user
+#     edits the marked file + git add -- no editor is ever needed) ---
+git checkout -q -b ca main 2>/dev/null
+echo x > g.txt; git add g.txt; git commit -qm ca 2>/dev/null
+git checkout -q -b cb main 2>/dev/null
+echo y > g.txt; git add g.txt; git commit -qm cb 2>/dev/null
+git merge ca > /tmp/wf/m 2>&1
+grep -q '^<<<<<<<' g.txt && grep -q '^>>>>>>>' g.txt && echo GITWF-CONFLICT || echo GITWF-FAIL-CONFLICT
+echo z > g.txt; git add g.txt; git commit -qm resolved 2>/dev/null && echo GITWF-RESOLVE || echo GITWF-FAIL-RESOLVE
+
+# --- rebase (non-interactive): rt(q) onto rb(p,r) ---
+git checkout -q -b rb main 2>/dev/null
+echo p > p.txt; git add p.txt; git commit -qm p 2>/dev/null
+git checkout -q -b rt rb 2>/dev/null
+echo q > q.txt; git add q.txt; git commit -qm q 2>/dev/null
+git checkout -q rb 2>/dev/null
+echo r > r.txt; git add r.txt; git commit -qm r 2>/dev/null
+git checkout -q rt 2>/dev/null
+git rebase rb > /tmp/wf/rb 2>&1 && [ -f p.txt ] && [ -f q.txt ] && [ -f r.txt ] && echo GITWF-REBASE || echo GITWF-FAIL-REBASE
+
+# --- reset --hard ---
+git checkout -q main 2>/dev/null
+echo dirt >> f.txt
+git reset -q --hard HEAD 2>/dev/null
+grep -q dirt f.txt && echo GITWF-FAIL-RESET || echo GITWF-RESET
+
+# --- stash: KNOWN GAP, tracked as a C1 fill (NOT a required gate marker) ---
+# `git stash` sets its subprocess pipe non-blocking via fcntl(F_SETFL,
+# O_NONBLOCK); the phenotype declines F_SETFL (vivarium_fcntl_decide -> ENOSYS)
+# and devpipe is blocking-only, so stash fails "unable to make pipe non-blocking".
+# Implementing non-blocking-pipe support (F_SETFL O_NONBLOCK) is an audit-bearing
+# chunk (kernel/pipe.c). Until then stash is a MEASUREMENT, not an assertion --
+# the gate verifies the 12 verbs that ride already-supported primitives. When the
+# fill lands, promote this to GITWF-STASHSV/STASHPOP in the joey legs[].
+echo stashline >> f.txt
+git stash > /tmp/wf/st 2>/tmp/wf/sterr; _sr=$?
+if [ "$_sr" = 0 ]; then
+    git stash pop > /tmp/wf/sp 2>/dev/null
+    echo "WF-DIAG-stash: UNEXPECTEDLY OK (rc=0) -- non-blocking-pipe fill may have landed; promote to a required marker"
+else
+    echo "WF-DIAG-stash-gap: rc=$_sr err=[$(cat /tmp/wf/sterr 2>/dev/null | tr '\n' '/')] (non-blocking-pipe/F_SETFL fill, C1)"
+fi
+git checkout -q -- f.txt 2>/dev/null; git stash clear 2>/dev/null
+
+# --- worktree (pointer FILES, no symlinks -> works) ---
+git worktree add /tmp/wf/wt feat > /tmp/wf/wtl 2>&1 && test -f /tmp/wf/wt/f.txt && echo GITWF-WORKTREE || echo GITWF-FAIL-WORKTREE
+
+# --- manual gc (fork-self -> repack/prune, opendir/readdir, gc.pid lock) ---
+git gc > /tmp/wf/gc 2>&1 && git log --oneline >/dev/null 2>&1 && echo GITWF-GC || echo GITWF-FAIL-GC
+
+echo GITWF-DONE
+VIVEOF
+                            chmod 0755 "$gwb/rootfs/gitworkflow.sh"
+                            cat > "$gwb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "/gitworkflow.sh"],
+        "env": ["PATH=/usr/bin:/bin:/sbin:/usr/sbin", "HOME=/tmp", "GIT_EXEC_PATH=/usr/bin"],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux",
+        "org.thylacine.csprng": "granted"
+    }
+}
+VIVEOF
+                            echo "==> viv bundles: git-workflow staged at $gwb (THYLACINE_BAKE_GITWF=1: HERMETIC C1 verify -- branch/checkout/diff/status/merge/conflict/rebase/reset/stash/worktree/gc; no net; the self-hosting-floor gate)"
+                        fi
                     else
                         echo "==> viv bundles: static-git tarball extract FAILED -- git-probe skipped" >&2
                     fi

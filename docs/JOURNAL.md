@@ -22,6 +22,69 @@ needed the operator.
 
 ---
 
+## 2026-08-27 (aux) -- milestone C1 (verify): 12 of 13 non-interactive git verbs work under the phenotype; a file-write that read back EMPTY sent me down a 9-bake root-cause that exonerated the kernel
+
+Picked up from a self-compact at `0bcbe3ac` (milestone B done). C1 is
+"verify-then-fill": the self-hosting-floor verbs (branch/merge/rebase/...) ride
+already-supported primitives, so the first move is a hermetic gate to find what
+actually breaks. Built the `git-workflow` bundle (echo... no -- see below) +
+`tools/test-git-workflow.sh` + `do_git_workflow_gate`.
+
+**The wrong turn, and what caught it.** First boot: the gate reddened on
+diff/status/commit/merge with git reporting `nothing to commit, working tree
+clean` -- after I had overwritten `f.txt` with a same-SIZE edit (`a\nb\nc` ->
+`a\nB\nc`, both 6 bytes). The obvious theory was **racy-git**: same-size + coarse
+mtime = git skips the content compare. I chased it hard -- read the whole mtime
+path (t_stat carries whole-second mtime, nsec dropped; the "v1.0 = 0" comment
+looked damning), built a probe expecting mtime=0. **Probe 2 killed the theory
+with ground truth**: the file read back with `wc=0` and `git cat-file` showed a
+0-byte blob -- the content was ABSENT, not a stale-stat mirage. The write itself
+was being lost. Six more probes narrowed it (create vs append vs trunc; git-add
+vs the write; big vs small; builtin vs subshell) until the split was undeniable:
+**`echo > file` WORKS, `printf > file` is EMPTY** -- both busybox builtins, same
+file, same fd. Probe 6 showed `echo BUSYWRITE > z.txt` producing a real 10-byte
+file with a real mtime (`Aug 27 09:40`) -- which incidentally **exonerated mtime
+entirely**: the pool clock is real, and racy-git works. The whole racy-git
+detour was chasing an artifact of the empty-file bug.
+
+**Root cause (a temporary 3-level kernel write trace, probe 9).** Gating a
+`~`-marker byte through `viv_writev` / `sys_write_handler` / `dev9p_write`: echo's
+`~ECHO` fired all three (SWTRACE hraw=1 len=6 -> DWTRACE-write -> flush rc=0 ->
+wc=6); printf's `~PRINTF` fired **none** -> wc=0. **No write syscall is ever made
+for printf's data.** It dies in musl's stdio buffer: busybox `printf` (a builtin)
+writes to a fully-buffered stdout and the buffer is never flushed to the file --
+busybox ash `_exit()`s without an atexit flush, and its per-builtin flush does
+not reach the file under the phenotype. **The kernel writes exactly what it is
+given.** Reverted every trace (`git diff --stat` clean-verified on dev9p.c +
+syscall.c). Enqueued as a userspace fidelity gap
+(`[[bug-phenotype-printf-stdio-never-flushed]]`); it does NOT block git-core
+because **git's own file I/O is direct `write()`**, never busybox printf. The
+lesson is [[M-PIN]]-shaped: a negative symptom (empty file) had TWO candidate
+causes (stat-stale vs write-lost) and only a second axis (`wc` read-length vs
+`stat` size) told them apart -- theory went in circles for two probes until
+ground truth cut it.
+
+**With `echo`, the verbs fell out green.** Switched the gate's file-writes to an
+`echo`-based writer (`wl()`); re-baked: 12 of 13 verbs PASS -- branch, checkout,
+**diff (the same-size `b`->`B` IS detected)**, status, commit, log, merge
+(fast-forward AND a 3-way conflict resolved by editing the marked file, no editor
+spawned), rebase (non-interactive), reset, worktree, manual gc (fork-self ->
+repack/prune). Only **`git stash`** fails, and its unbuffered stderr named the
+gap precisely: `unable to make pipe non-blocking: Function not implemented`.
+git stash sets its subprocess pipe non-blocking via `fcntl(F_SETFL, O_NONBLOCK)`,
+which `vivarium_fcntl_decide` declines (ENOSYS) and devpipe cannot serve.
+Non-blocking-pipe support is an audit-bearing fill (kernel/pipe.c, I-9 wait/wake);
+left stash as a MEASUREMENT (`WF-DIAG-stash-gap`, NOT a required marker) and
+tracked the fill (`[[design-nonblocking-pipe-fcntl-setfl]]`).
+
+**Cost + posture.** ~11 bakes (nine on the printf hunt). Gate PASS green,
+`test.sh` exit 0, boot OK. NO kernel change survived (the milestone-B SMP-green
+kernel is byte-unchanged), so no SMP re-run and no holotype round are owed -- the
+change is test infra + a soft-skipping boot gate that mirrors the two existing
+git gates. **Open for the operator to sequence**: the two C1 fills
+(non-blocking-pipes for stash; #91 exit codes) and the printf/stdio userspace
+gap. Committed at *(this run's tip)*.
+
 ## 2026-08-27 (aux) -- milestone B: `git clone` + `git fetch` over HTTPS work under the phenotype (the first external TLS on Thylacine), up a ladder of gaps each caught by the gate reddening
 
 Picked up from a self-compact at `da19918c` (B1 curl-git built, B2 staged). First

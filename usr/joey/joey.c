@@ -1769,6 +1769,102 @@ static int do_git_https_gate(void) {
     return 0;
 }
 
+// do_git_workflow_gate -- the git-under-VIVARIUM milestone-C1 gate (the
+// self-hosting FLOOR). joey (SYSTEM) spawns `viv run /vivarium/git-workflow`,
+// which runs /gitworkflow.sh: the NON-INTERACTIVE developer workflow a real
+// self-hosting user hits -- branch, checkout, diff, status, merge (fast-forward
+// AND a 3-way with a real conflict resolved by editing the marked file, no
+// editor), rebase (non-interactive), reset, stash, worktree, manual gc. Each
+// step emits a GITWF-* marker; the gate asserts the terminal GITWF-DONE and
+// reports the first missing step (a merge failure and a rebase failure are
+// different bugs).
+//
+// Every verb rides ALREADY-PROVEN primitives (O_CREAT|O_EXCL, rename, O_APPEND,
+// fork+exec, stat/readdir), so this is the C1 "verify" half: it should pass
+// today, and whatever reddens is the precise "fill" work. It is deliberately
+// INSENSITIVE to #91 (the exit(N) boolean collapse) -- every leg branches on
+// 0-vs-nonzero (which the collapse preserves) or on file content, never a
+// specific exit code, so it stays green regardless of the #91 fix. Exit-code
+// FIDELITY is owned by the L-6c leg-I measurement.
+//
+// HERMETIC (no net): staged ONLY under THYLACINE_BAKE_GITWF=1 while the arc is
+// in flight, so it does not redden the default suite / SMP gate before it is
+// proven; driven by tools/test-git-workflow.sh. SOFT-SKIP when the bundle is
+// absent (git-probe idiom), BOOT-FATAL when present (a gate that cannot redden
+// is a disabled test). Extra caps: CSPRNG only (git's entropy), as git-probe.
+static int do_git_workflow_gate(void) {
+    static const char gb[] = "/vivarium/git-workflow/config.json";
+    long gbfd = t_open(T_WALK_OPEN_FROM_ROOT, gb, sizeof(gb) - 1, T_OPATH);
+    if (gbfd < 0) {
+        t_putstr("joey: git-workflow gate SKIPPED (no /vivarium/git-workflow "
+                 "bundle -- rebuild THYLACINE_BAKE_GITWF=1, or run "
+                 "tools/test-git-workflow.sh)\n");
+        return 0;
+    }
+    (void)t_close(gbfd);
+
+    static const char vargv[] = "/bin/viv\0run\0/vivarium/git-workflow";
+    unsigned char acc[4096];
+    size_t acc_len = 0;
+    int    status  = -1;
+    size_t total   = 0;
+    int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "git-workflow",
+                                    &status, acc, sizeof(acc), &acc_len, &total,
+                                    T_CAP_CSPRNG_READ);
+    (void)total;
+
+#define GW_MK(s) { (s), sizeof(s) - 1 }
+    // The full non-interactive workflow, in order, so the first-missing report
+    // pinpoints the failing verb. No entry is a substring of another (STASHSV vs
+    // STASHPOP, RESET vs RESOLVE, MERGEFF standalone) -- the substring-pollution
+    // trap the gate's own marker scan would otherwise fall into.
+    static const struct argv_marker legs[] = {
+        GW_MK("GITWF-INIT"),
+        GW_MK("GITWF-BASE"),
+        GW_MK("GITWF-BRANCH"),
+        GW_MK("GITWF-DIFF"),
+        GW_MK("GITWF-STATUS"),
+        GW_MK("GITWF-FCOMMIT"),
+        GW_MK("GITWF-LOG"),
+        GW_MK("GITWF-MERGEFF"),
+        GW_MK("GITWF-CONFLICT"),
+        GW_MK("GITWF-RESOLVE"),
+        GW_MK("GITWF-REBASE"),
+        GW_MK("GITWF-RESET"),
+        // GITWF-STASH* is NOT here: `git stash` needs a non-blocking subprocess
+        // pipe (fcntl F_SETFL O_NONBLOCK), which the phenotype declines (ENOSYS)
+        // and devpipe cannot serve -- an audit-bearing C1 fill (kernel/pipe.c).
+        // The gate emits WF-DIAG-stash-gap as a MEASUREMENT; promote to required
+        // markers here when the non-blocking-pipe fill lands.
+        GW_MK("GITWF-WORKTREE"),
+        GW_MK("GITWF-GC"),
+        GW_MK("GITWF-DONE"),
+    };
+#undef GW_MK
+    int missing = -1;
+    for (unsigned i = 0; i < sizeof(legs) / sizeof(legs[0]); i++) {
+        if (!mem_contains(acc, acc_len, legs[i].str, legs[i].len)) {
+            missing = (int)i;
+            break;
+        }
+    }
+    if (ran != 0 || status != 0 || missing >= 0) {
+        char nb[24];
+        t_putstr("joey: git-workflow gate FAILED first-missing=");
+        t_putstr(missing >= 0 ? legs[missing].str : "<none>");
+        t_putstr(" status=");
+        t_putstr(itoa_dec(status, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: git-workflow gate PASS (branch + checkout + diff[same-size] "
+             "+ status + merge[ff+3-way-conflict] + rebase + reset + worktree + "
+             "gc under the phenotype, as SYSTEM -- the non-interactive developer "
+             "workflow: the self-hosting floor, milestone C1; stash is a tracked "
+             "non-blocking-pipe fill, see WF-DIAG-stash-gap)\n");
+    return 0;
+}
+
 // do_native_coreutil_smoke — U-6e-pre-b: the FIRST runtime exercise of the
 // adopted native coreutils (echo/cat/wc/head/tail/seq/sort/uniq/tr/cut/grep/
 // basename/dirname/pwd/true/false). coreutil-smoke is itself a native
@@ -10539,6 +10635,14 @@ int main(void) {
                 // normal boot; it runs only on a THYLACINE_BAKE_GITNET=1 bake
                 // (tools/test-git-https.sh) on a networked host.
                 if (do_git_https_gate() != 0) return 1;
+
+                // The git-under-VIVARIUM milestone-C1 gate (the non-interactive
+                // developer workflow -- the self-hosting floor). HERMETIC, but
+                // SOFT-SKIPS without the git-workflow bundle (staged only under
+                // THYLACINE_BAKE_GITWF=1 while the arc is in flight), so it too is
+                // a no-op on every normal boot; it runs only on a
+                // tools/test-git-workflow.sh bake.
+                if (do_git_workflow_gate() != 0) return 1;
 
                 // #212: the one line the harness keys on. Both gates have run
                 // and recorded their disposition; say which, in a form an exit

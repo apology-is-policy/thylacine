@@ -204,6 +204,27 @@ c-ares-or-`--disable-threaded-resolver` before trusting it under CLONE_THREAD).
 
 ### Milestone C1 -- the non-interactive complete workflow (the self-hosting floor)
 
+> **STATUS 2026-08-27 (aux): 12 of 13 verbs VERIFIED under the phenotype**
+> (`joey: git-workflow gate PASS`; the hermetic `git-workflow` bundle +
+> `tools/test-git-workflow.sh`, THYLACINE_BAKE_GITWF=1). PASS: branch, checkout,
+> **diff (a same-size line edit IS detected -- racy-git works; the pool mtime is a
+> real wall clock)**, status, commit, log, **merge (fast-forward AND a 3-way with
+> a real conflict resolved by editing the marked file -- git spawns NO editor)**,
+> **rebase (non-interactive)**, reset, worktree, **manual gc (fork-self ->
+> repack/prune)**. The verbs ride already-supported primitives; verify confirmed
+> them. TWO fills REMAIN, both surfaced with ground truth:
+> **(a) `git stash`** needs a non-blocking subprocess pipe -- `fcntl(F_SETFL,
+> O_NONBLOCK)` is declined (ENOSYS) and devpipe is blocking-only; an audit-bearing
+> fill (kernel/pipe.c). **(b) exit(N) boolean (#91)** -- unchanged, owned by the
+> L-6c leg-I measurement.
+>
+> A build-note the gate surfaced (NOT a git blocker): busybox `printf > file`
+> yields an EMPTY file -- the printf builtin's musl stdio buffer is never flushed
+> and NO write syscall is made (proven via a 3-level kernel write trace); `echo`
+> (direct write()) works, and **git's own file I/O is direct write()**, so
+> git-core is unaffected. The gate builds its test files with `echo`. Tracked as a
+> separate userspace fidelity gap.
+
 Everything here is built on **already-supported** primitives (O_CREAT|O_EXCL,
 rename, O_APPEND, fork+exec, stat/readdir) and is almost certainly working today
 -- but is **entirely UNTESTED by the current gate**. C1 is verify-then-fill.
