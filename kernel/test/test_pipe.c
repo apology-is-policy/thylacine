@@ -168,6 +168,59 @@ void test_pipe_write_short_when_partially_full(void) {
     spoor_clunk(wr);
 }
 
+void test_pipe_nonblock_returns_eagain(void) {
+    // CNONBLOCK (per-Spoor POSIX O_NONBLOCK, the git-stash fill): a would-block
+    // read/write returns -T_E_AGAIN instead of sleeping. The guard is a
+    // pre-sleep early return placed AFTER the data / EOF / space checks, so this
+    // test pins BOTH that the would-block case converts AND that a ready op,
+    // EPIPE, and EOF are all untouched -- the placement is the load-bearing
+    // half (a guard before the write_eof check would spin a reader forever at
+    // EOF). The blocking path never registers on the rendez for an EAGAIN
+    // caller, so I-9 (pipe.tla NoStuckReader/NoStuckWriter) is byte-unchanged.
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "create");
+    rd->flag |= CNONBLOCK;
+    wr->flag |= CNONBLOCK;
+
+    // (1) empty + both ends open: a blocking read would sleep -> EAGAIN.
+    static u8 got[PIPE_BUF_SIZE];
+    TEST_EXPECT_EQ(dev_read(rd, got, 64L), (long)(-T_E_AGAIN),
+        "non-blocking read on empty (not EOF) returns -T_E_AGAIN");
+
+    // (2) data present: the guard sits AFTER the drain, so a ready read serves.
+    const u8 payload[] = { 0xA1, 0xB2, 0xC3, 0xD4 };
+    TEST_EXPECT_EQ(dev_write(wr, payload, (long)sizeof(payload)),
+                   (long)sizeof(payload), "write payload (space available)");
+    TEST_EXPECT_EQ(dev_read(rd, got, 64L), (long)sizeof(payload),
+        "non-blocking read still drains available data");
+    for (size_t i = 0; i < sizeof(payload); i++)
+        TEST_ASSERT(got[i] == payload[i], "FIFO order preserved");
+
+    // (3) completely full: a blocking write would sleep -> EAGAIN.
+    static u8 fill[PIPE_BUF_SIZE];
+    for (size_t i = 0; i < PIPE_BUF_SIZE; i++) fill[i] = 0xEE;
+    TEST_EXPECT_EQ(dev_write(wr, fill, (long)PIPE_BUF_SIZE),
+                   (long)PIPE_BUF_SIZE, "fill the ring completely");
+    u8 one = 0x5A;
+    TEST_EXPECT_EQ(dev_write(wr, &one, 1L), (long)(-T_E_AGAIN),
+        "non-blocking write on full returns -T_E_AGAIN");
+
+    // (4) not stranded: draining frees space; the next write serves.
+    static u8 drain[PIPE_BUF_SIZE];
+    TEST_EXPECT_EQ(dev_read(rd, drain, 100L), 100L, "drain 100 bytes");
+    TEST_EXPECT_EQ(dev_write(wr, &one, 1L), 1L,
+        "non-blocking write serves once space frees");
+
+    // (5) the guard sits AFTER the write_eof check: a non-blocking read at EOF
+    // returns 0, NOT EAGAIN (else a reader would spin forever at EOF).
+    (void)dev_read(rd, drain, (long)PIPE_BUF_SIZE);   // fully drain the ring
+    spoor_clunk(wr);                                  // write_eof = true
+    TEST_EXPECT_EQ(dev_read(rd, drain, (long)PIPE_BUF_SIZE), 0L,
+        "non-blocking read at EOF returns 0 (not EAGAIN)");
+
+    spoor_clunk(rd);
+}
+
 // CNBFRAME (the byte-pipe 9P transport's tx end): frame-atomic + non-blocking.
 // The round-B F1 regression: without CNBFRAME the write above is PARTIAL when
 // the frame does not fit (returns space-available, 10L) and BLOCKS (sleeps)

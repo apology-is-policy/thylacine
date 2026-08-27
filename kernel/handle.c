@@ -900,6 +900,66 @@ int handle_get_cloexec(struct Proc *p, hidx_t h) {
     return on;
 }
 
+// #91-follow (git-stash / non-blocking pipes): O_NONBLOCK is a per-open-file
+// (per-Spoor) status flag -- CNONBLOCK on the Spoor -- unlike FD_CLOEXEC, which
+// is per-fd (the cloexec bitmap above). handle_set_nonblock sets/clears it on
+// the fd's Spoor. A NON-Spoor fd (a KObj) is a no-op SUCCESS: Linux permits
+// F_SETFL on any fd, and only the pipe Dev (devpipe_read/write) acts on the
+// bit. The table lock pins the slot -- and thus the Spoor ref -- across the
+// mutation, which is a LIFETIME guarantee only (a concurrent close needs the
+// same lock to clear the slot, so the Spoor cannot be freed under us). It does
+// NOT serialize the RMW against other writers: fork SHARES the Spoor with a peer
+// Proc (its table has a different lock), and CDEBUGOWNER is RMW'd from
+// g_proc_table_lock -- so the flag word is touched from multiple lock domains
+// and the mutation MUST be atomic (spoor_flag_set/clear), never a plain `|=`
+// under one domain's lock, or a concurrent set from another domain lost-updates.
+int handle_set_nonblock(struct Proc *p, hidx_t h, bool on) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
+
+    spin_lock(&t->lock);
+    if (t->slots[h].magic != HANDLE_MAGIC) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    if (t->slots[h].kind == KOBJ_SPOOR && t->slots[h].obj) {
+        struct Spoor *s = (struct Spoor *)t->slots[h].obj;
+        if (on) spoor_flag_set(s, CNONBLOCK);
+        else    spoor_flag_clear(s, CNONBLOCK);
+    }
+    spin_unlock(&t->lock);
+    return 0;
+}
+
+// #91-follow: read the fd's open-file status for F_GETFL. Writes the Spoor's
+// native omode masked to its access mode (s->mode & 3 -- OREAD/OWRITE/ORDWR,
+// which the Plan 9 encoding shares byte-for-byte with Linux O_RDONLY/WRONLY/
+// RDWR) to *omode_out, and the CNONBLOCK bit to *nonblock_out. A non-Spoor fd
+// reports omode 0 + nonblock false. Returns 0, or -1 for a bad/closed fd.
+int handle_get_status_flags(struct Proc *p, hidx_t h,
+                            int *omode_out, bool *nonblock_out) {
+    if (omode_out)    *omode_out    = 0;
+    if (nonblock_out) *nonblock_out = false;
+
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
+
+    spin_lock(&t->lock);
+    if (t->slots[h].magic != HANDLE_MAGIC) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    if (t->slots[h].kind == KOBJ_SPOOR && t->slots[h].obj) {
+        struct Spoor *s = (struct Spoor *)t->slots[h].obj;
+        if (omode_out)    *omode_out    = s->mode & 3;   // mode is open-time, plain
+        // flag is RMW'd from other lock domains (see handle_set_nonblock) --
+        // read it atomically even under this table's lock.
+        if (nonblock_out) *nonblock_out = (spoor_flag_get(s) & CNONBLOCK) != 0;
+    }
+    spin_unlock(&t->lock);
+    return 0;
+}
+
 int handle_close_on_exec(struct Proc *p) {
     struct HandleTable *t = proc_handles_or_extinct(p);
 

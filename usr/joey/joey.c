@@ -1858,11 +1858,12 @@ static int do_git_workflow_gate(void) {
         GW_MK("GITWF-RESOLVE"),
         GW_MK("GITWF-REBASE"),
         GW_MK("GITWF-RESET"),
-        // GITWF-STASH* is NOT here: `git stash` needs a non-blocking subprocess
-        // pipe (fcntl F_SETFL O_NONBLOCK), which the phenotype declines (ENOSYS)
-        // and devpipe cannot serve -- an audit-bearing C1 fill (kernel/pipe.c).
-        // The gate emits WF-DIAG-stash-gap as a MEASUREMENT; promote to required
-        // markers here when the non-blocking-pipe fill lands.
+        // stash save + pop: git's async pump sets its subprocess pipe non-blocking
+        // (fcntl F_SETFL O_NONBLOCK), served since the CNONBLOCK devpipe fill. The
+        // gate legs are a round-trip witness (save reverts the change -> clean
+        // tree; pop restores it), not a bare exit code.
+        GW_MK("GITWF-STASHSV"),
+        GW_MK("GITWF-STASHPOP"),
         GW_MK("GITWF-WORKTREE"),
         GW_MK("GITWF-GC"),
         GW_MK("GITWF-DONE"),
@@ -1885,10 +1886,10 @@ static int do_git_workflow_gate(void) {
         return -1;
     }
     t_putstr("joey: git-workflow gate PASS (branch + checkout + diff[same-size] "
-             "+ status + merge[ff+3-way-conflict] + rebase + reset + worktree + "
-             "gc under the phenotype, as SYSTEM -- the non-interactive developer "
-             "workflow: the self-hosting floor, milestone C1; stash is a tracked "
-             "non-blocking-pipe fill, see WF-DIAG-stash-gap)\n");
+             "+ status + merge[ff+3-way-conflict] + rebase + reset + stash[save+pop] "
+             "+ worktree + gc under the phenotype, as SYSTEM -- the non-interactive "
+             "developer workflow: the self-hosting floor, milestone C1, all 13 "
+             "verbs)\n");
     return 0;
 }
 

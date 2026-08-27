@@ -3203,11 +3203,30 @@ void test_vivarium_fcntl_domain(void) {
                    (int)VIV_TRANSLATED, "the high half of cmd is not consulted");
     TEST_EXPECT_EQ((int)op, (int)VIV_FCNTL_GETFD, "still GETFD");
 
+    // F_GETFL(3) / F_SETFL(4): served since the git-stash non-blocking-pipe fill
+    // (git's async pump sets its subprocess pipe O_NONBLOCK via F_SETFL). The
+    // decider only CLASSIFIES; the shell reads O_NONBLOCK out of arg itself, so
+    // cloexec/min_fd stay irrelevant here -- what this pins is that the two cmds
+    // no longer fall to the FORWARD default (the counterpart to their removal
+    // from declined[] below).
+    op = VIV_FCNTL_UNSERVED; cx = true; minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_GETFL, 0, &op, &cx, &minfd),
+                   (int)VIV_TRANSLATED, "F_GETFL is served");
+    TEST_EXPECT_EQ((int)op, (int)VIV_FCNTL_GETFL, "0x3 classifies as GETFL");
+
+    op = VIV_FCNTL_UNSERVED; cx = true; minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_SETFL, 04000, &op, &cx, &minfd),
+                   (int)VIV_TRANSLATED, "F_SETFL is served");
+    TEST_EXPECT_EQ((int)op, (int)VIV_FCNTL_SETFL, "0x4 classifies as SETFL");
+
     // The declines. Each is a cmd that EXISTS on Linux and is simply not here --
-    // F_GETFL/F_SETFL (access + status flags), the locking family. A declined
-    // call must leave the outputs at their unserved values, so a caller that
-    // ignores the verdict cannot act on a plausible-looking op.
-    static const u64 declined[] = { 3, 4, 5, 6, 7, 8, 9, 1024, 1033 };
+    // the locking family (F_GETLK=5 / F_SETLK=6 / F_SETLKW=7) + F_{SET,GET}OWN
+    // (8/9) + the notify/lease range. F_GETFL=3 / F_SETFL=4 are NO LONGER here:
+    // the git-stash non-blocking-pipe fill SERVES them (see the GETFL/SETFL arms
+    // in vivarium_fcntl_decide). A declined call must leave the outputs at their
+    // unserved values, so a caller that ignores the verdict cannot act on a
+    // plausible-looking op.
+    static const u64 declined[] = { 5, 6, 7, 8, 9, 1024, 1033 };
     for (u32 i = 0; i < (u32)(sizeof(declined) / sizeof(declined[0])); i++) {
         op = VIV_FCNTL_DUPFD; cx = true; minfd = 0xBADu;
         TEST_EXPECT_EQ((int)vivarium_fcntl_decide(declined[i], 0, &op, &cx, &minfd),
@@ -3538,6 +3557,49 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
                    "would fail here)");
     TEST_EXPECT_EQ(c, -(s64)T_E_INVAL,
                    "C: a minimum at the table size is EINVAL, not EMFILE");
+}
+
+// F_GETFL / F_SETFL round-trip through the REAL fcntl shell -> handle_set_nonblock
+// / handle_get_status_flags on a live pipe fd (the git-stash non-blocking-pipe
+// path). devpipe's EAGAIN behavior is covered by pipe.nonblock_returns_eagain
+// (which sets CNONBLOCK directly); THIS covers the fcntl -> handle-helper -> Spoor
+// leg, which otherwise only the SKIPpable git-workflow E2E exercises. Also pins F2
+// (a pipe write end reports OWRITE, not a misleading OREAD).
+extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
+void test_vivarium_fcntl_nonblock_roundtrip(void);
+void test_vivarium_fcntl_nonblock_roundtrip(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+
+    hidx_t rd = -1, wr = -1;
+    int pr = sys_pipe_for_proc(p, &rd, &wr);
+
+    // Round-trip on the READ end: GETFL(clear) -> SETFL(O_NONBLOCK) -> GETFL(set)
+    // -> SETFL(0) -> GETFL(clear). Then the WRITE end's access mode, and a bad fd.
+    s64 g0  = viv_fcntl_for_test(p, (u64)rd, VIV_F_GETFL, 0);
+    s64 s1  = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, VIV_O_NONBLOCK);
+    s64 g1  = viv_fcntl_for_test(p, (u64)rd, VIV_F_GETFL, 0);
+    s64 s2  = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, 0);
+    s64 g2  = viv_fcntl_for_test(p, (u64)rd, VIV_F_GETFL, 0);
+    s64 gw  = viv_fcntl_for_test(p, (u64)wr, VIV_F_GETFL, 0);
+    s64 bad = viv_fcntl_for_test(p, 5, VIV_F_SETFL, VIV_O_NONBLOCK);   // fd 5 is closed
+
+    // Observe -> teardown -> assert (TEST_* may early-return).
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_EXPECT_EQ(pr, 0, "pipe created");
+    TEST_ASSERT(g0 >= 0, "F_GETFL succeeds");
+    TEST_EXPECT_EQ((s64)(g0 & (s64)VIV_O_NONBLOCK), 0, "F_GETFL: O_NONBLOCK CLEAR initially");
+    TEST_EXPECT_EQ((s64)(g0 & 3), 0, "F_GETFL: read end reports OREAD (0)");
+    TEST_EXPECT_EQ(s1, 0, "F_SETFL O_NONBLOCK returns 0");
+    TEST_ASSERT((g1 & (s64)VIV_O_NONBLOCK) != 0,
+                "F_GETFL reads O_NONBLOCK back -- SETFL->handle_set_nonblock->GETFL round-trips");
+    TEST_EXPECT_EQ(s2, 0, "F_SETFL 0 returns 0");
+    TEST_EXPECT_EQ((s64)(g2 & (s64)VIV_O_NONBLOCK), 0, "F_SETFL 0 CLEARS O_NONBLOCK");
+    TEST_EXPECT_EQ((s64)(gw & 3), 1, "F_GETFL: write end reports OWRITE (1) -- the F2 mode fix");
+    TEST_EXPECT_EQ(bad, -(s64)T_E_BADF, "F_SETFL on a closed fd is EBADF, not silent success");
 }
 
 // The dup(2) arm (git-remote-https' helper pipe). Drives viv_dup_for_test on a

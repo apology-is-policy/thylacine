@@ -1105,6 +1105,13 @@ int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr) {
     struct Spoor *wr = NULL;
     if (pipe_create(&rd, &wr) < 0)                   return -1;
 
+    // Pipe endpoints never traverse open(), so `mode` (the F_GETFL access mode)
+    // stays 0 unless set here. Stamp each end's access mode (Plan 9 OREAD=0 /
+    // OWRITE=1, which share Linux's O_RDONLY/O_WRONLY encoding) so F_GETFL
+    // reports the write end as O_WRONLY rather than a misleading O_RDONLY.
+    rd->mode = 0;   // OREAD
+    wr->mode = 1;   // OWRITE
+
     rights_t r = RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER;
 
     hidx_t fd_rd = handle_alloc(p, KOBJ_SPOOR, r, rd);
@@ -11605,6 +11612,26 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             }
             return (s64)nfd;
         }
+        case VIV_FCNTL_GETFL: {
+            // The open-file status word: the access mode + O_NONBLOCK. Plan 9
+            // OREAD/OWRITE/ORDWR (0/1/2) share their encoding byte-for-byte with
+            // Linux O_RDONLY/WRONLY/RDWR, so `omode & 3` IS the Linux access
+            // mode. git's `F_GETFL` -> `F_SETFL(flags | O_NONBLOCK)` idiom
+            // round-trips the access mode through F_SETFL (which ignores it), so
+            // this is exact for that path and faithful for a reader of the mode.
+            int omode = 0;
+            bool nb = false;
+            if (handle_get_status_flags(p, fd, &omode, &nb) != 0)
+                return -(s64)T_E_BADF;
+            return (s64)((u64)(omode & 3) | (nb ? (u64)VIV_O_NONBLOCK : 0));
+        }
+        case VIV_FCNTL_SETFL:
+            // Serve O_NONBLOCK; ignore O_APPEND/O_ASYNC/O_DIRECT and the access
+            // mode, exactly as Linux's F_SETFL does (it silently drops every
+            // non-status bit rather than erroring). The arg is args[2].
+            if (handle_set_nonblock(p, fd, (args[2] & (u64)VIV_O_NONBLOCK) != 0) != 0)
+                return -(s64)T_E_BADF;
+            return 0;
         default:
             return -(s64)T_E_NOSYS;
         }

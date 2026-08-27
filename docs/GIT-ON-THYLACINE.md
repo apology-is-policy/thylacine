@@ -204,18 +204,28 @@ c-ares-or-`--disable-threaded-resolver` before trusting it under CLONE_THREAD).
 
 ### Milestone C1 -- the non-interactive complete workflow (the self-hosting floor)
 
-> **STATUS 2026-08-27 (aux): 12 of 13 verbs VERIFIED under the phenotype**
-> (`joey: git-workflow gate PASS`; the hermetic `git-workflow` bundle +
-> `tools/test-git-workflow.sh`, THYLACINE_BAKE_GITWF=1). PASS: branch, checkout,
-> **diff (a same-size line edit IS detected -- racy-git works; the pool mtime is a
-> real wall clock)**, status, commit, log, **merge (fast-forward AND a 3-way with
-> a real conflict resolved by editing the marked file -- git spawns NO editor)**,
-> **rebase (non-interactive)**, reset, worktree, **manual gc (fork-self ->
-> repack/prune)**. The verbs ride already-supported primitives; verify confirmed
-> them. ONE fill REMAINS:
-> **(a) `git stash`** needs a non-blocking subprocess pipe -- `fcntl(F_SETFL,
-> O_NONBLOCK)` is declined (ENOSYS) and devpipe is blocking-only; an audit-bearing
-> fill (kernel/pipe.c).
+> **STATUS 2026-08-27 (aux): COMPLETE -- all 13 of 13 verbs VERIFIED under the
+> phenotype** (`joey: git-workflow gate PASS`, 17 GITWF-* markers; the hermetic
+> `git-workflow` bundle + `tools/test-git-workflow.sh`, THYLACINE_BAKE_GITWF=1).
+> PASS: branch, checkout, **diff (a same-size line edit IS detected -- racy-git
+> works; the pool mtime is a real wall clock)**, status, commit, log, **merge
+> (fast-forward AND a 3-way with a real conflict resolved by editing the marked
+> file -- git spawns NO editor)**, **rebase (non-interactive)**, reset,
+> **stash (save + pop, a round-trip witness: save reverts the change, pop
+> restores it)**, worktree, **manual gc (fork-self -> repack/prune)**. Both fills
+> LANDED:
+>
+> **(a) `git stash` -- LANDED 2026-08-27.** git's async pump sets its subprocess
+> pipe non-blocking via `fcntl(F_SETFL, O_NONBLOCK)`; both were missing -- the
+> phenotype declined F_SETFL (ENOSYS) and devpipe was blocking-only. The fill adds
+> per-Spoor POSIX O_NONBLOCK (`CNONBLOCK`, a new Spoor flag) end to end:
+> `vivarium_fcntl_decide` now serves F_GETFL/F_SETFL; the shell reads/writes the
+> bit via `handle_get_status_flags`/`handle_set_nonblock`; and `devpipe_read`/
+> `devpipe_write` return `-EAGAIN` instead of sleeping when the op would fully
+> block. The EAGAIN guards are PRE-SLEEP early returns placed AFTER the data / EOF
+> / space checks, so a ready op, EPIPE, and EOF are untouched and the blocking
+> wait/wake path is byte-unchanged (I-9 holds trivially). Audit-bearing
+> (kernel/pipe.c); holotype + SMP gate on the death/wait surface.
 >
 > **(b) exit(N) boolean (#91) -- LANDED 2026-08-27.** The real exit byte now
 > reaches `$?` end-to-end: `sys_exits_handler`/`sys_exit_group_handler` pass

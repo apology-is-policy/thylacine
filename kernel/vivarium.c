@@ -941,9 +941,27 @@ enum viv_verdict vivarium_fcntl_decide(u64 cmd, u64 arg,
         *min_fd_out  = arg;
         return VIV_TRANSLATED;
 
+    case VIV_F_GETFL:
+        // Read the open-file status flags. The shell composes the access mode
+        // (from the fd's Spoor) with O_NONBLOCK (the CNONBLOCK flag); no payload
+        // is decoded here.
+        *op_out = VIV_FCNTL_GETFL;
+        return VIV_TRANSLATED;
+
+    case VIV_F_SETFL:
+        // Set the open-file status flags. Linux F_SETFL honors only
+        // O_NONBLOCK / O_APPEND / O_ASYNC / O_DIRECT and silently IGNORES the
+        // rest (including the access mode), so the classic
+        // `F_GETFL -> F_SETFL(flags | O_NONBLOCK)` round-trip works even though
+        // we serve only O_NONBLOCK. The shell reads `arg & O_NONBLOCK` itself
+        // (it has the arg), so nothing is decoded here -- unlike SETFD, which
+        // needs the decider only because the shell lacks a generic arg path.
+        *op_out = VIV_FCNTL_SETFL;
+        return VIV_TRANSLATED;
+
     default:
-        // F_GETFL / F_SETFL / the locking family / everything else. See the
-        // header on why this is ENOSYS at the shell rather than Linux's EINVAL.
+        // The locking family (F_GETLK / F_SETLK / ...) + everything else. See
+        // the header on why this is ENOSYS at the shell, not Linux's EINVAL.
         return VIV_FORWARD;
     }
 }

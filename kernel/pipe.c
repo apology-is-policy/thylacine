@@ -322,6 +322,11 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!p->ring)                return -T_E_BADF;   // torn-down endpoint
     struct pipe_ring *r = p->ring;
 
+    // A 0-length read is a no-op -> 0 (POSIX), BEFORE any block decision: an
+    // empty pipe must not sleep (blocking) or return EAGAIN (CNONBLOCK) for a
+    // read that wanted no bytes.
+    if (n == 0) return 0;
+
     // Blocking read. Loop:
     //   - take lock; if data → drain + drop lock + wake writer + return.
     //   - if writeEof + empty → drop lock + return 0 (EOF).
@@ -360,6 +365,16 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
         // returning EINTR here before that handling exists breaks it (e.g. the
         // ut shell's `$(cmd)` capture read, interrupted by the captured child's
         // own child_exit note). See design_caught_notes_do_not_interrupt_waits.
+        // O_NONBLOCK (CNONBLOCK): the pipe is empty and not at EOF -- a blocking
+        // read would sleep here, so a non-blocking read returns EAGAIN instead.
+        // Placed AFTER the count>0 and write_eof checks so a non-blocking read
+        // still drains available data and still returns 0 at EOF; it converts
+        // ONLY the would-block case. It never registers on read_rendez, so the
+        // I-9 wait/wake protocol (pipe.tla NoStuckReader) is untouched. The
+        // read is lockless (r->lock is dropped above), so `flag` is read
+        // atomically -- it is RMW'd from other lock domains (see spoor.h).
+        if (spoor_flag_get(c) & CNONBLOCK)
+            return -T_E_AGAIN;
         if (sleep(&r->read_rendez, cond_can_read, r) == SLEEP_INTR)
             return -1;
         // Loop: re-check state with the lock held.
@@ -379,6 +394,11 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
     if (!p->ring)                return -T_E_BADF;   // torn-down endpoint
     struct pipe_ring *r = p->ring;
 
+    // A 0-length write is a no-op -> 0 (POSIX), BEFORE any block/EPIPE decision.
+    // The 9P transport (CNBFRAME below) only ever writes whole frames (>= 7 B),
+    // so this never intercepts a transport write.
+    if (n == 0) return 0;
+
     // CNBFRAME (the byte-pipe 9P transport's tx end): frame-atomic + non-
     // blocking. Commit the WHOLE buffer or return -T_E_AGAIN having written
     // NOTHING -- never partial (a stranded 9P-frame fragment desyncs the
@@ -389,7 +409,9 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // dropping c->lock in client_pump_or_park_locked; a frame <= msize <=
     // PIPE_BUF_SIZE always fits an empty pipe, so progress is guaranteed once
     // the reader drains. Same read_eof -> pipe-note + -T_E_PIPE as the loop.
-    if (c->flag & CNBFRAME) {
+    // Lockless read of `flag` (a fork-shared write end can be fcntl'd O_NONBLOCK
+    // concurrently -- see spoor.h; CNBFRAME itself is transport-tx-only).
+    if (spoor_flag_get(c) & CNBFRAME) {
         spin_lock(&r->lock);
         if (r->read_eof) {
             spin_unlock(&r->lock);
@@ -459,6 +481,16 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
             return put;
         }
         spin_unlock(&r->lock);
+        // O_NONBLOCK (CNONBLOCK): the pipe is completely full (count ==
+        // PIPE_BUF_SIZE) with a live reader -- a blocking write would sleep, so
+        // a non-blocking write returns EAGAIN. Placed AFTER the read_eof (EPIPE)
+        // and space checks, so a non-blocking write still delivers EPIPE and
+        // still writes what fits (partial); it converts ONLY the full case. It
+        // never registers on write_rendez, so I-9 (pipe.tla NoStuckWriter) is
+        // untouched. Byte-oriented, unlike CNBFRAME's frame-atomic tx above.
+        // Lockless read of `flag` (RMW'd from other lock domains -- see spoor.h).
+        if (spoor_flag_get(c) & CNONBLOCK)
+            return -T_E_AGAIN;
         // #811 (ARCH §8.8.1): death-interrupted -> Proc group-terminating;
         // return so the Thread unwinds to its EL0-return die-check.
         if (sleep(&r->write_rendez, cond_can_write, r) == SLEEP_INTR)

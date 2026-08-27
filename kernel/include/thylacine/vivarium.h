@@ -2298,12 +2298,16 @@ enum viv_fcntl_op {
     VIV_FCNTL_GETFD,       // read the descriptor's close-on-exec flag
     VIV_FCNTL_SETFD,       // write it; *cloexec_out carries the new value
     VIV_FCNTL_DUPFD,       // dup >= *min_fd_out; *cloexec_out is the new fd's flag
+    VIV_FCNTL_GETFL,       // read the open-file status flags (access mode | O_NONBLOCK)
+    VIV_FCNTL_SETFL,       // write them; the shell decodes O_NONBLOCK from arg itself
 };
 
 enum {
     VIV_F_DUPFD         = 0,
     VIV_F_GETFD         = 1,
     VIV_F_SETFD         = 2,
+    VIV_F_GETFL         = 3,
+    VIV_F_SETFL         = 4,
     VIV_F_DUPFD_CLOEXEC = 1030,
     VIV_FD_CLOEXEC      = 1,
 };

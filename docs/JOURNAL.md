@@ -22,6 +22,124 @@ needed the operator.
 
 ---
 
+## 2026-08-27 (aux) -- git stash: the last C1 verb, a non-blocking subprocess pipe end to end, and C1 (the self-hosting floor) closes at all 13
+
+Picked up from the #91 self-compact at `719acb5a` -- the git-stash kernel side
+was already WIP-committed there (an audit-incomplete checkpoint, kept as a
+labeled recovery point rather than reset, so an interruption would not scatter
+the eight files as loose staged changes). This run added the rigor and closed
+the chunk.
+
+**The gap, in ground truth.** `git stash` was the ONE C1 verb the verify gate
+could not turn green: `error: unable to make pipe non-blocking: Function not
+implemented`. git's `run-command` async pump sets its subprocess pipe
+non-blocking with `fcntl(fd, F_SETFL, O_NONBLOCK)`, and BOTH halves of that were
+missing -- `vivarium_fcntl_decide` served only the FD-flag/dup family so F_SETFL
+fell through to `-ENOSYS`, and Thylacine's devpipe was blocking-only by design.
+So the fill is genuinely two things: teach the phenotype F_GETFL/F_SETFL, and
+give the pipe a non-blocking mode.
+
+**The mechanism (per-Spoor POSIX O_NONBLOCK, `CNONBLOCK = 1u<<7`).** The flag
+lives on the Spoor (the open-file description), distinct from the pre-existing
+`CNBFRAME` (1u<<6), which is the 9P transport's frame-atomic tx and a different
+concept. Four seams: (1) `vivarium_fcntl_decide` classifies F_GETFL(3)/F_SETFL(4)
+as two new `viv_fcntl_op`s; (2) the syscall shell reads the bit back
+(`handle_get_status_flags`: `(mode & 3) | (O_NONBLOCK?...)`) and sets/clears it
+(`handle_set_nonblock`), both mirroring the `handle_get/set_cloexec` lock
+discipline; (3) `devpipe_read`/`devpipe_write` return `-T_E_AGAIN` instead of
+sleeping when `CNONBLOCK` is set and the op would FULLY block.
+
+**Why I-9 holds trivially, and why the guard PLACEMENT is the load-bearing
+half.** Each EAGAIN guard is a pre-sleep early return placed AFTER the
+data-drain, the EOF/EPIPE check, and the space check, and BEFORE the `sleep()`
+on the rendez -- it never registers on `read_rendez`/`write_rendez`, so the
+blocking wait/wake protocol (`pipe.tla` NoStuckReader/NoStuckWriter) is
+byte-unchanged. The placement is where a subtle bug would live: a guard BEFORE
+the `write_eof` check would make a non-blocking read at EOF return EAGAIN instead
+of 0, spinning a reader forever; a guard before the space check would drop a
+partial write. The unit test (`pipe.nonblock_returns_eagain`) pins all of it --
+empty->EAGAIN, data-present->serves, full->EAGAIN, drain->serves-again, and
+EOF->0-not-EAGAIN -- so a mis-placed guard reddens a specific assertion.
+
+**Self-audit that mattered: the flag is written under one lock and read under
+none.** `handle_set_nonblock` writes `s->flag` under the handle-table lock
+(`t->lock`); `devpipe_read/write` read `c->flag & CNONBLOCK` with the ring lock
+dropped. Different locks, so they do not serialize against each other. The
+enumeration that clears it: the ONLY runtime writer of a live phenotype fd's
+`Spoor->flag` is `handle_set_nonblock` (every other flag write -- COPEN,
+CNBFRAME on the internal 9P tx, CWALKONLY, CSRVCLIENT, CDEBUGOWNER,
+CCONSWINSZONLY -- is a one-time open/setup write, complete before the fd reaches
+userspace); a PHENO_LINUX Proc is single-threaded (clone(CLONE_THREAD) refused),
+so SETFL and read are same-thread-ordered within a Proc; the flag is an aligned
+u32 (atomic read on ARM64, no torn value) so even a fork-shared Spoor observes
+old-or-new, never garbage, and a stale O_NONBLOCK read is within POSIX tolerance.
+`t->lock`'s real job here is lifetime: it pins the slot (and thus the Spoor)
+across the write, because a close needs the same lock to clear the slot.
+
+**The gate is a round-trip witness, not an exit code.** The verify gate had
+tracked stash as a MEASUREMENT (`WF-DIAG-stash-gap`); this run promotes it to two
+REQUIRED legs. `GITWF-STASHSV` asserts save REVERTED the change (`! grep stashline
+f.txt` -- a clean tree), `GITWF-STASHPOP` asserts pop RESTORED it (`grep stashline
+f.txt`). A bare `$?==0` would pass a stash that silently dropped the edit; the
+grep pair will not. The marker names dodge the substring-pollution trap
+(`GITWF-STASHSV` is not a substring of `GITWF-FAIL-STASHSV`, the `FAIL-` infix
+breaks it).
+
+**Cost + verification.** Suite **1466/1466 PASS** (the +1 is the new pipe unit;
+the fcntl positive assertions ride inside the existing `vivarium.fcntl_domain`).
+E2E **PASS** -- `joey: git-workflow gate PASS`, 17 GITWF-* markers, "all 13
+verbs" including `stash[save+pop]` (`THYLACINE_BAKE_GITWF=1
+tools/test-git-workflow.sh`, a fresh-pool bake).
+
+**The holotype earned its round: it refuted my own self-audit.** The Opus
+fallback prosecutor (Fable stayed credit-exhausted; MODEL start==end, no mid-run
+switch) verified the I-9 core sound (15 items re-derived line-by-line) but
+landed **F1 [P2]**, and F1 is the reason context-independent review exists. My
+self-audit had cleared the lockless `flag` read with two arguments; the
+prosecutor showed BOTH false. (1) "A single-threaded phenotype Proc has no
+concurrent mutator" addresses cross-*thread*, but `fork` shares the *same* Spoor
+object (`handle_table_copy_into` -> `spoor_ref`, not a copy), so two *Procs* on
+two CPUs RMW one `flag` word under *different* table locks -- a data race by
+construction. (2) "The only runtime writer of a live fd's `flag` is
+handle_set_nonblock" is simply false: `devproc.c:1894` RMWs `CDEBUGOWNER` at
+debug-attach under `g_proc_table_lock`. Before this chunk that was the *only*
+runtime RMW (a single writer, no race); my change added a *second* runtime RMW
+under a *different* lock, newly activating a lost-update in which a dropped
+`CDEBUGOWNER` leaks the debugger close-hook release gate. Rated P2, not P1, only
+because the corrupting path is exotic (an aligned u32 is single-copy-atomic on
+ARM64, so the common case is benign) -- but the *code's own safety comment was
+wrong*, which is the thing that rots. Fix: `flag` is now a small atomic-bitfield
+API (`spoor_flag_set/clear/get`, RELAXED -- independent bits, atomicity-not-
+ordering), applied to both runtime RMW sites (handle_set_nonblock + devproc) and
+every lockless read (the two devpipe CNONBLOCK guards, the CNBFRAME guard,
+handle_get_status_flags, the devproc release check); one-time open/setup writes
+stay plain, documented at the definition (they complete before the fd is
+shareable, so they cannot race a runtime RMW). The three P3s landed too: **F2**
+a pipe write end reported `O_RDONLY` (pipe Spoors never set `mode`) -> stamp
+`OREAD`/`OWRITE` at `sys_pipe_for_proc`; **F3** a 0-length read returned EAGAIN
+(and a blocking 0-read would sleep forever) -> `n == 0` returns 0 up front in
+both devpipe ops; **F4** the fcntl->handle-helper->Spoor leg was covered only by
+the SKIPpable E2E -> a `viv_fcntl_for_test`-driven round-trip unit
+(`vivarium.fcntl_nonblock_roundtrip`: SETFL sets, GETFL reads back, SETFL 0
+clears, the write end reads OWRITE, a closed fd is EBADF). The SMP gate ran on the
+F1-fixed tree -- **40/40 boots, 0 corruption / 0 external-kill / 0 inject-miss /
+0 timing / 0 other** (default+UBSan x smp4/smp8, N=10); the fork-shared-flag path
+is exactly the SMP surface, and every boot ran the 1467-test suite under smp8
+max concurrency, so the atomic-flag conversion is witnessed clean, not just
+argued.
+
+**A one-line blast the WIP had already absorbed:** serving F_GETFL/F_SETFL breaks
+the `vivarium.fcntl_domain` test's `declined[]` array, which asserted 3 and 4
+DECLINE -- the same class as #91 (serving a cmd voids the test that pinned its
+refusal). The WIP had already dropped 3,4 from the array; this run added the
+matching POSITIVE assertions (3->GETFL, 4->SETFL are VIV_TRANSLATED) so the two
+directions are both pinned.
+
+**Reference prose is vault-owned** (`quaestor owner` reports `sub-kernel-pipe`,
+`sub-kernel-handle`, `sub-kernel-vivarium`, `sub-kernel-syscall-dispatch`,
+`sub-kernel-spoor` all OWNED, plus three `chg-*` co-update PINs) -- so it rides a
+batched vault ring, not a local `docs/reference/` edit, same as #91.
+
 ## 2026-08-27 (aux) -- #91 exit(N): the real exit byte now reaches `$?`, and the fix announced itself by EXTINCTING the boot at the one probe that had hard-coded the old collapse
 
 Picked up from the C1-verify self-compact at `9ec271d6`. #91 is the first of the

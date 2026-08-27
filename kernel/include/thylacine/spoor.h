@@ -121,6 +121,14 @@ _Static_assert(sizeof(struct Qid) == 16,
                                // (do_send treats a mid-frame EAGAIN as fatal, #349). A
                                // frame <= msize <= PIPE_BUF_SIZE always fits an empty
                                // pipe, so progress is guaranteed once the reader drains.
+#define CNONBLOCK (1u << 7)    // #91-follow: POSIX O_NONBLOCK on this open-file. Set/
+                               // cleared by the phenotype fcntl(F_SETFL) shell; read by
+                               // devpipe_read/devpipe_write, which return -T_E_AGAIN
+                               // instead of sleeping when the op would block. Standard
+                               // BYTE semantics (partial read/write is fine; EAGAIN only
+                               // when FULLY would-block) -- distinct from CNBFRAME's
+                               // frame-atomic 9P-tx mode above. Per-fd (per-Spoor =
+                               // per-open-file-description), copied on the Spoor clone.
 
 // SPOOR_MAGIC — sentinel set at spoor_alloc; checked at spoor_ref /
 // spoor_unref / spoor_clunk. SLUB's freelist write at free clobbers
@@ -168,6 +176,29 @@ struct Spoor {
 _Static_assert(__builtin_offsetof(struct Spoor, magic) == 0,
                "magic must be at offset 0 — SLUB freelist write on free "
                "clobbers it (use-after-free defense)");
+
+// Spoor->flag carries independent bits mutated from DIFFERENT lock domains at
+// RUNTIME -- CNONBLOCK via the phenotype fcntl(F_SETFL) shell under the per-Proc
+// handle-table lock, CDEBUGOWNER via debug-attach under g_proc_table_lock -- on
+// a Spoor that fork SHARES between two Procs (fork refs the SAME object, it does
+// not copy it), so the two run concurrently on two CPUs. Two plain RMWs of one
+// word from two lock domains lost-update each other (a dropped CDEBUGOWNER leaks
+// the debug close-hook release gate), and the pipe fast path reads `flag`
+// locklessly. So every RUNTIME mutation and every LOCKLESS read of `flag` MUST
+// go through these atomics. One-time open/setup writes (COPEN/CSRVCLIENT/
+// CCONSWINSZONLY/CWALKONLY/CNBFRAME, set before the fd is installed and thus
+// before any peer Proc can reach the Spoor) may stay plain -- they cannot race a
+// runtime RMW. RELAXED is sufficient: the bits are independent and carry no
+// data-dependent ordering; atomicity, not ordering, is what a lost-update needs.
+static inline void spoor_flag_set(struct Spoor *c, u32 bits) {
+    __atomic_or_fetch(&c->flag, bits, __ATOMIC_RELAXED);
+}
+static inline void spoor_flag_clear(struct Spoor *c, u32 bits) {
+    __atomic_and_fetch(&c->flag, ~bits, __ATOMIC_RELAXED);
+}
+static inline u32 spoor_flag_get(const struct Spoor *c) {
+    return __atomic_load_n(&c->flag, __ATOMIC_RELAXED);
+}
 
 // Walkqid: the result of `dev->walk` — carries the Spoor positioned at
 // the deepest successful step plus the qids of every step that walked

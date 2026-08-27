@@ -452,6 +452,15 @@ hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec);
 int handle_set_cloexec(struct Proc *p, hidx_t h, bool on);
 int handle_get_cloexec(struct Proc *p, hidx_t h);
 
+// #91-follow (non-blocking pipes): O_NONBLOCK is a per-open-file (per-Spoor)
+// status flag (CNONBLOCK), not a per-fd one. set_nonblock sets/clears it on the
+// fd's Spoor (a non-Spoor fd is a no-op success); get_status_flags reads the
+// access mode (omode & 3) + the nonblock bit for F_GETFL. Both return -1 on a
+// bad/closed fd. See kernel/handle.c for the single-thread safety argument.
+int handle_set_nonblock(struct Proc *p, hidx_t h, bool on);
+int handle_get_status_flags(struct Proc *p, hidx_t h,
+                            int *omode_out, bool *nonblock_out);
+
 // #151: close every handle whose close-on-exec flag is set. Returns the number
 // closed. Called from execve AFTER the commit point, for two reasons that pull
 // in the same direction: the closes may SLEEP (a Spoor's Dev close hook sends a

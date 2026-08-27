@@ -1811,22 +1811,17 @@ echo dirt >> f.txt
 git reset -q --hard HEAD 2>/dev/null
 grep -q dirt f.txt && echo GITWF-FAIL-RESET || echo GITWF-RESET
 
-# --- stash: KNOWN GAP, tracked as a C1 fill (NOT a required gate marker) ---
-# `git stash` sets its subprocess pipe non-blocking via fcntl(F_SETFL,
-# O_NONBLOCK); the phenotype declines F_SETFL (vivarium_fcntl_decide -> ENOSYS)
-# and devpipe is blocking-only, so stash fails "unable to make pipe non-blocking".
-# Implementing non-blocking-pipe support (F_SETFL O_NONBLOCK) is an audit-bearing
-# chunk (kernel/pipe.c). Until then stash is a MEASUREMENT, not an assertion --
-# the gate verifies the 12 verbs that ride already-supported primitives. When the
-# fill lands, promote this to GITWF-STASHSV/STASHPOP in the joey legs[].
+# --- stash save + pop (the non-blocking-pipe fill, C1) ---
+# git stash's async pump sets its subprocess pipe non-blocking via fcntl(F_SETFL,
+# O_NONBLOCK), served since the CNONBLOCK devpipe fill (kernel/pipe.c). A round-
+# trip witness, not a bare exit code: save must REVERT the change (clean tree),
+# pop must RESTORE it -- an exit code alone would pass a stash that silently
+# dropped the edit.
 echo stashline >> f.txt
-git stash > /tmp/wf/st 2>/tmp/wf/sterr; _sr=$?
-if [ "$_sr" = 0 ]; then
-    git stash pop > /tmp/wf/sp 2>/dev/null
-    echo "WF-DIAG-stash: UNEXPECTEDLY OK (rc=0) -- non-blocking-pipe fill may have landed; promote to a required marker"
-else
-    echo "WF-DIAG-stash-gap: rc=$_sr err=[$(cat /tmp/wf/sterr 2>/dev/null | tr '\n' '/')] (non-blocking-pipe/F_SETFL fill, C1)"
-fi
+git stash > /tmp/wf/st 2>/tmp/wf/sterr && ! grep -q stashline f.txt \
+    && echo GITWF-STASHSV || echo GITWF-FAIL-STASHSV
+git stash pop > /tmp/wf/sp 2>/tmp/wf/sperr && grep -q stashline f.txt \
+    && echo GITWF-STASHPOP || echo GITWF-FAIL-STASHPOP
 git checkout -q -- f.txt 2>/dev/null; git stash clear 2>/dev/null
 
 # --- worktree (pointer FILES, no symlinks -> works) ---
