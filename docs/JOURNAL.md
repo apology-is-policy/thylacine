@@ -22,6 +22,20 @@ needed the operator.
 
 ---
 
+## 2026-08-27 (aux) -- C2 (interactive git) opens: the survey turned a feared design fork into a translation arc, and C2-k1a lands the pure terminal-ioctl decode
+
+With C1 closed, the operator said "continue", so C2 (the interactive tier: `commit`/`rebase -i`/`add -p` with nora as the editor) opened. I had flagged C2's kernel piece as a design fork needing a vote; a ground-truth survey (a subagent over `vivarium.c`, `pts.c`, `ptyfs`, `cons.c`, Kaua, nora, and the vendored musl) dissolved most of that.
+
+**The survey's decisive finding: it is a translation arc, not a design fork.** Every piece of *machinery* C2 needs already exists and is audited -- the session/pgrp core (`proc_setsid`/`setpgid`), the pts registry (`kernel/pts.c` + the native `SYS_TTY_*` syscalls), the cons/pts line-discipline grammar (`+icanon +echo +isig +icrnl +onlcr`, 1:1 with Linux termios lflags), the winsize plumbing, and even the tty signal-note mapping (`vivarium_signal_note` already maps SIGWINCH/TSTP/CONT/HUP/QUIT). What is *completely absent* is the Vivarium glue: **there is no ioctl decider at all** -- every phenotype `ioctl` gets a flat `-ENOSYS`, and traced through the actual vendored `third_party/musl/src/unistd/isatty.c`, that makes `isatty()` return false on *every* fd, even a real terminal, so git silently drops to non-interactive defaults. nora, notably, needs **zero** kernel work -- it is a raw fd-0/fd-1 client that never calls isatty/termios; once isatty stops lying, git launches it and it just runs.
+
+**C2-k1a landed: the pure decode** (`vivarium_ioctl_decide` + the TC*/TIOC* request constants + `enum viv_ioctl_op` + the `vivarium.ioctl_decide` unit test), following the V-6a precedent (land the pure decode, unit-tested, before the shell). It classifies `TCGETS`/`TCSETS{,W,F}`/`TIOCGWINSZ`/`TIOCSWINSZ`; the three TCSETS* forms collapse to one op (the cons/pts discipline has no drain/flush stage). A pure classifier -- no fd, no memory, no concurrency -- so its rigor is the unit test + suite (1468/1468, boot OK), not a holotype/SMP round; those ride C2-k1b (the shell), which is the audit-bearing surface that touches the tty seam. It is deliberately *not* wired into dispatch yet (the test is its only consumer), exactly as V-6a left its decode.
+
+**Two decisions surfaced for C2-k1b (the shell), both genuinely the operator's:**
+- **Architectural (the pts branch):** a pts's termios/winsize state lives in the *userspace* ptyfs server (the `<n>ctl` file); the kernel pts registry holds only `(session, fg_pgid, gen)`. So a phenotype `ioctl(pts_slave_fd, TCGETS)` cannot be served kernel-side without reaching ptyfs. Options: (A) the kernel ioctl shell bridges to ptyfs's ctl file for pts fds (keeps the PTY-DESIGN split; a novel in-kernel->server call), (B) move pts termios into the kernel pts registry (changes the I-20 split), (C) console-first -- serve only console fds now (kernel-resident cons termios), defer the pts branch. Recommended: C now (ratified, reusable, gives the isatty witness at the console), then A for pts (keep ptyfs authoritative). The console shell's skeleton is identical regardless, so C pre-shapes nothing.
+- **ABI:** `ENOTTY` (errno 25) is absent from the registry; minting `T_E_NOTTY` is ERRORS.md-signoff-bearing. C2-k1b works without it (a non-served ioctl returns the existing ENOSYS, which musl's isatty forces to ENOTTY anyway), so it is a faithfulness follow-on, not a blocker.
+
+**One integration wrinkle noted for C2-w (nora as editor):** nora relies on its parent `ut` to set raw mode via consctl before spawning it; a phenotype git that `execve`s nora directly will not, so nora will need to set its own raw mode (on its ldisc fd) when it is the editor. Kernel-independent; a C2-w sub-chunk.
+
 ## 2026-08-27 (aux) -- git stash: the last C1 verb, a non-blocking subprocess pipe end to end, and C1 (the self-hosting floor) closes at all 13
 
 Picked up from the #91 self-compact at `719acb5a` -- the git-stash kernel side

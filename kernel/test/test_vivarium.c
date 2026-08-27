@@ -3248,6 +3248,70 @@ void test_vivarium_fcntl_domain(void) {
 }
 
 // -----------------------------------------------------------------------------
+// vivarium.ioctl_decide (C2-k1a, interactive git: terminal control). The pure
+// request classifier -- the decode that lands before the shell (the V-6a
+// pattern). isatty()'s gate is TIOCGWINSZ, so its classification is the
+// load-bearing row; the three TCSETS* forms must collapse to one op.
+void test_vivarium_ioctl_decide(void);
+void test_vivarium_ioctl_decide(void) {
+    enum viv_ioctl_op op;
+
+    op = VIV_IOCTL_UNSERVED;
+    TEST_EXPECT_EQ((int)vivarium_ioctl_decide(VIV_TCGETS, &op),
+                   (int)VIV_TRANSLATED, "TCGETS translates");
+    TEST_EXPECT_EQ((int)op, (int)VIV_IOCTL_TCGETS, "TCGETS -> TCGETS op");
+
+    op = VIV_IOCTL_UNSERVED;
+    TEST_EXPECT_EQ((int)vivarium_ioctl_decide(VIV_TIOCGWINSZ, &op),
+                   (int)VIV_TRANSLATED, "TIOCGWINSZ translates -- isatty's probe");
+    TEST_EXPECT_EQ((int)op, (int)VIV_IOCTL_TIOCGWINSZ, "TIOCGWINSZ -> TIOCGWINSZ op");
+
+    op = VIV_IOCTL_UNSERVED;
+    TEST_EXPECT_EQ((int)vivarium_ioctl_decide(VIV_TIOCSWINSZ, &op),
+                   (int)VIV_TRANSLATED, "TIOCSWINSZ translates");
+    TEST_EXPECT_EQ((int)op, (int)VIV_IOCTL_TIOCSWINSZ, "TIOCSWINSZ -> TIOCSWINSZ op");
+
+    // All three TCSETS* forms collapse to the single VIV_IOCTL_TCSETS op.
+    static const u64 sets[] = { VIV_TCSETS, VIV_TCSETSW, VIV_TCSETSF };
+    for (u32 i = 0; i < 3; i++) {
+        op = VIV_IOCTL_UNSERVED;
+        TEST_EXPECT_EQ((int)vivarium_ioctl_decide(sets[i], &op),
+                       (int)VIV_TRANSLATED, "TCSETS* translates");
+        TEST_EXPECT_EQ((int)op, (int)VIV_IOCTL_TCSETS,
+                       "TCSETS/W/F all classify as the one TCSETS op (no drain/flush stage)");
+    }
+
+    // Only the low 32 bits are significant (Linux int request).
+    op = VIV_IOCTL_UNSERVED;
+    TEST_EXPECT_EQ((int)vivarium_ioctl_decide(0x1234567800005401ull, &op),
+                   (int)VIV_TRANSLATED, "the high half of request is not consulted");
+    TEST_EXPECT_EQ((int)op, (int)VIV_IOCTL_TCGETS, "still TCGETS");
+
+    // Unserved terminal requests forward, op left UNSERVED. TIOCGPGRP/TIOCSPGRP
+    // are the job-control ioctls deliberately deferred to C2-k3 -- they mark the
+    // current boundary; TCFLSH/TIOCEXCL are the long tail; 0 / ~0 are garbage.
+    static const u64 unserved[] = {
+        0x540F,  // TIOCGPGRP (C2-k3)
+        0x5410,  // TIOCSPGRP (C2-k3)
+        0x540B,  // TCFLSH
+        0x540C,  // TIOCEXCL
+        0x0,
+        0xFFFFFFFFu,
+    };
+    for (u32 i = 0; i < (u32)(sizeof(unserved) / sizeof(unserved[0])); i++) {
+        op = VIV_IOCTL_TCGETS;   // seed a served value to prove it is cleared
+        TEST_EXPECT_EQ((int)vivarium_ioctl_decide(unserved[i], &op),
+                       (int)VIV_FORWARD, "an unserved terminal request forwards");
+        TEST_EXPECT_EQ((int)op, (int)VIV_IOCTL_UNSERVED,
+                       "a forwarded request leaves op UNSERVED, never a stale one");
+    }
+
+    // NULL op_out fails toward the decline (the openat/fcntl shape).
+    TEST_EXPECT_EQ((int)vivarium_ioctl_decide(VIV_TCGETS, NULL),
+                   (int)VIV_FORWARD, "NULL op_out -> FORWARD, never a served verdict");
+}
+
+// -----------------------------------------------------------------------------
 // vivarium.pipe2_domain (#155). The two admitted values are not a conservative
 // guess -- they are what the gate's own busybox issues, measured off the binary:
 // four call sites through musl's pipe() with a hardcoded `mov x1, #0`, and two

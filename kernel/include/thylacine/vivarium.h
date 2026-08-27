@@ -2325,6 +2325,46 @@ enum viv_verdict vivarium_fcntl_decide(u64 cmd, u64 arg,
                                        bool *cloexec_out, u64 *min_fd_out);
 
 // -----------------------------------------------------------------------------
+// ioctl terminal control (C2-k1, interactive git). A phenotype binary running
+// an interactive git (commit / rebase -i / add -p) or any Linux TUI reaches the
+// terminal ONLY through ioctl -- there is no separate termios syscall. The
+// gate is isatty(), which musl implements as ioctl(fd, TIOCGWINSZ, &wsz) and
+// reads as "true iff that succeeds" (third_party/musl/src/unistd/isatty.c); a
+// flat ENOSYS makes isatty() false on EVERY fd, even a real terminal, so git
+// silently drops to non-interactive defaults. This surface serves the TC*/TIOC*
+// terminal family; the fd's tty-ness and the arg copy are the SHELL's job.
+//
+// The request codes are the asm-generic / aarch64 ioctl numbers (the whole
+// Linux world shares these constants for the TC/TIOC family).
+enum {
+    VIV_TCGETS      = 0x5401,   // tcgetattr: read termios
+    VIV_TCSETS      = 0x5402,   // tcsetattr TCSANOW: write termios now
+    VIV_TCSETSW     = 0x5403,   // tcsetattr TCSADRAIN: write after output drains
+    VIV_TCSETSF     = 0x5404,   // tcsetattr TCSAFLUSH: write after drain + input flush
+    VIV_TIOCGWINSZ  = 0x5413,   // read struct winsize (isatty's actual probe)
+    VIV_TIOCSWINSZ  = 0x5414,   // write struct winsize
+};
+
+// The classified op. The three TCSETS* forms COLLAPSE to VIV_IOCTL_TCSETS: the
+// cons/pts line discipline applies a mode change immediately and has no separate
+// termios output queue to drain or input queue to flush, so TCSANOW/DRAIN/FLUSH
+// are indistinguishable at this layer (a documented, faithful-enough divergence).
+enum viv_ioctl_op {
+    VIV_IOCTL_UNSERVED = 0,
+    VIV_IOCTL_TCGETS,       // fill *termios from the fd's line-discipline mode
+    VIV_IOCTL_TCSETS,       // apply *termios to the fd's line discipline (all 3 TCSETS* forms)
+    VIV_IOCTL_TIOCGWINSZ,   // fill *winsize from the fd's size
+    VIV_IOCTL_TIOCSWINSZ,   // apply *winsize to the fd
+};
+
+// Classify a terminal ioctl request. PURE -- request code only; no fd, no Proc,
+// no memory (the fd's tty-ness and the user-struct copy are the shell's job,
+// exactly as openat's decide refuses the path measurement). Returns
+// VIV_TRANSLATED with *op_out set, or VIV_FORWARD (op_out untouched) for a
+// request this surface does not serve.
+enum viv_verdict vivarium_ioctl_decide(u64 request, enum viv_ioctl_op *op_out);
+
+// -----------------------------------------------------------------------------
 // uname (#150). A fabrication -- there is no underlying Thylacine call -- so the
 // question is not HOW to translate but WHAT to claim, and a wrong answer here is
 // the mistranslation the argument-domain rule exists to prevent: a guest that

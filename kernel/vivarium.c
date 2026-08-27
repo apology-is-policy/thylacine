@@ -966,6 +966,45 @@ enum viv_verdict vivarium_fcntl_decide(u64 cmd, u64 arg,
     }
 }
 
+// C2-k1 (interactive git): classify a terminal ioctl request. PURE -- request
+// code only. The shell owns the fd's tty-ness and the user-struct copy.
+enum viv_verdict vivarium_ioctl_decide(u64 request, enum viv_ioctl_op *op_out) {
+    if (!op_out) return VIV_FORWARD;
+    *op_out = VIV_IOCTL_UNSERVED;
+
+    // Linux passes the ioctl request as an int (32-bit) -- narrow like fcntl,
+    // so a sign- or zero-extended register still classifies.
+    switch ((u32)request) {
+    case VIV_TCGETS:
+        *op_out = VIV_IOCTL_TCGETS;
+        return VIV_TRANSLATED;
+
+    case VIV_TCSETS:
+    case VIV_TCSETSW:
+    case VIV_TCSETSF:
+        // TCSANOW / TCSADRAIN / TCSAFLUSH all apply the mode. The cons/pts line
+        // discipline has no separate termios drain/flush stage, so the three are
+        // indistinguishable here -- one op (documented divergence).
+        *op_out = VIV_IOCTL_TCSETS;
+        return VIV_TRANSLATED;
+
+    case VIV_TIOCGWINSZ:
+        *op_out = VIV_IOCTL_TIOCGWINSZ;
+        return VIV_TRANSLATED;
+
+    case VIV_TIOCSWINSZ:
+        *op_out = VIV_IOCTL_TIOCSWINSZ;
+        return VIV_TRANSLATED;
+
+    default:
+        // Not a terminal request this surface serves. The shell (C2-k1b) turns
+        // this into the terminal errno -- a real tty answers ENOTTY for an
+        // unknown request on Linux; the T_E_NOTTY ABI decision owns that. The
+        // decode only reports "not one of ours".
+        return VIV_FORWARD;
+    }
+}
+
 void vivarium_openat_build(u64 start_fd, u64 path_va, u32 path_len, u32 omode,
                            struct viv_call *out) {
     if (!out) return;
