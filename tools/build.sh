@@ -1379,27 +1379,27 @@ VIVEOF
                 local gb="$vstage/git-probe"
                 local gittar="${THYLACINE_STATIC_GIT_TAR:-}"
                 if [[ -z "$gittar" ]]; then
-                    gittar="$(ls "$REPO_ROOT/build/cache"/git-static-*-aarch64-musl.tar.gz 2>/dev/null | head -1 || true)"
+                    gittar="$(ls "$REPO_ROOT/build/cache"/git-static-*-curl-aarch64-musl.tar.gz 2>/dev/null | head -1 || true)"
                 fi
-                local gittar_sha="b8c41cfd8ee999f4f978001c73494d20d7344eb39d0e741f205057b114615de9"
+                local gittar_sha="cea4a1d1712905f457509b0941108451d6b43576888aa9ca714f726eae374329"
                 if [[ -n "$gittar" && -f "$gittar" ]]; then
                     got_sha="$(shasum -a 256 "$gittar" | awk '{print $1}')"
                     if [[ "$got_sha" != "$gittar_sha" ]]; then
                         echo "==> viv bundles: static-git tarball sha256 MISMATCH -- refusing to stage" >&2
                         echo "      file     $gittar" >&2
                         echo "      got      $got_sha" >&2
-                        echo "      expected $gittar_sha (git-static-2.51.2-aarch64-musl)" >&2
+                        echo "      expected $gittar_sha (git-static-2.51.2-curl-aarch64-musl)" >&2
                         exit 1
                     fi
                     local gx="$vstage/.gitx"
                     rm -rf "$gx"; mkdir -p "$gx"
-                    if tar -xzf "$gittar" -C "$gx" git 2>/dev/null && [[ -f "$gx/git" ]]; then
+                    if tar -xzf "$gittar" -C "$gx" 2>/dev/null && [[ -f "$gx/viv-bin/git" ]]; then
                         rm -rf "$gb"; mkdir -p "$gb"
                         cp -R "$ab/rootfs" "$gb/rootfs"
                         rm -rf "$gb/rootfs/gate"
                         mkdir -p "$gb/rootfs/usr/bin" \
                                  "$gb/rootfs/usr/share/git-core/templates"
-                        cp "$gx/git" "$gb/rootfs/usr/bin/git"
+                        cp "$gx/viv-bin/git" "$gb/rootfs/usr/bin/git"
                         chmod 0755 "$gb/rootfs/usr/bin/git"
                         ln -sf git "$gb/rootfs/usr/bin/git-upload-pack"
                         ln -sf git "$gb/rootfs/usr/bin/git-receive-pack"
@@ -1499,23 +1499,25 @@ VIVEOF
                         # this is the product mount source.
                         local vbin="$vstage/viv-bin"
                         rm -rf "$vbin"; mkdir -p "$vbin"
-                        cp "$gx/git" "$vbin/git"
-                        chmod 0755 "$vbin/git"
-                        ln -sf git "$vbin/git-upload-pack"
-                        ln -sf git "$vbin/git-receive-pack"
+                        cp -R "$gx/viv-bin/"* "$vbin/"
+                        chmod 0755 "$vbin/git" "$vbin/git-remote-http"
                         cat > "$vbin/gitconfig" <<'VIVEOF'
 [user]
 	name = Thylacine
 	email = thyla@extinct.local
 [init]
 	defaultBranch = main
+	templateDir = /viv/bin/templates
 [core]
 	fsync = none
 	createObject = rename
+	pager = cat
+[http]
+	sslCAInfo = /etc/ssl/certs/ca-certificates.crt
 [safe]
 	directory = *
 VIVEOF
-                        echo "==> viv bundles: /viv-bin production git tree staged at $vbin (static git 2.51.2 + dashed symlinks + gitconfig -- joey binds it at /viv/bin MPHENO_LINUX; the phenotype-BY-LOCATION product mount)"
+                        echo "==> viv bundles: /viv-bin production git tree staged at $vbin (static git 2.51.2 WITH curl -- git + git-remote-http[s] + git-http-fetch + dashed pack symlinks + templates + gitconfig[http.sslCAInfo]; joey binds it at /viv/bin MPHENO_LINUX; the phenotype-BY-LOCATION product mount, now https-capable)"
                     else
                         echo "==> viv bundles: static-git tarball extract FAILED -- git-probe skipped" >&2
                     fi
