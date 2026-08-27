@@ -8,12 +8,11 @@
 //   0 -- read exactly EXPECT.
 //   1 -- anything else (read error / EOF-empty / mismatch / overflow).
 //
-// The kernel's sys_exits_handler normalizes any non-zero rs_main return
-// to exit_status = 1 (x0==0 -> "ok"/0; x0!=0 -> "fail"/1; richer u64
-// status is a Phase 5+ deferral per kernel/syscall.c). So a sink that
-// returned distinct codes (4/5/6) would still be reaped as 1 -- the
-// distinction is invisible to the pipeline's wait. We return 1 for
-// every failure to keep the fixture honest about what the waiter sees.
+// This sink returns just 0 (clean) or 1 (any failure) by design: the
+// pipeline's wait only needs pass/fail from it, so a richer code would add
+// nothing here. (#91 landed: sys_exits_handler now preserves a child's real
+// exit byte -- distinct codes WOULD survive -- but this fixture does not need
+// them, so it keeps the simple 0/1.)
 //
 // Two pipeline probes consume this:
 //   `pipe-src | pipe-sink`  -> 0  (data transfer + correct wiring)

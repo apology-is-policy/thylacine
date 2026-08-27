@@ -212,11 +212,18 @@ c-ares-or-`--disable-threaded-resolver` before trusting it under CLONE_THREAD).
 > a real conflict resolved by editing the marked file -- git spawns NO editor)**,
 > **rebase (non-interactive)**, reset, worktree, **manual gc (fork-self ->
 > repack/prune)**. The verbs ride already-supported primitives; verify confirmed
-> them. TWO fills REMAIN, both surfaced with ground truth:
+> them. ONE fill REMAINS:
 > **(a) `git stash`** needs a non-blocking subprocess pipe -- `fcntl(F_SETFL,
 > O_NONBLOCK)` is declined (ENOSYS) and devpipe is blocking-only; an audit-bearing
-> fill (kernel/pipe.c). **(b) exit(N) boolean (#91)** -- unchanged, owned by the
-> L-6c leg-I measurement.
+> fill (kernel/pipe.c).
+>
+> **(b) exit(N) boolean (#91) -- LANDED 2026-08-27.** The real exit byte now
+> reaches `$?` end-to-end: `sys_exits_handler`/`sys_exit_group_handler` pass
+> `status & 0xff`; `exits_code`/`proc_group_terminate_code` carry it; a new
+> `group_exit_code` on struct Proc feeds the last-thread-out ZOMBIE status.
+> Witnessed on three layers (native `SYS_EXIT_GROUP(42)`->42, pouch `return 3`->
+> `WEXITSTATUS 3`, viv `linux_exit(7)`->7). Audit-bearing (I-24); holotype + SMP
+> gate on the death/ZOMBIE surface.
 >
 > A build-note the gate surfaced (NOT a git blocker): busybox `printf > file`
 > yields an EMPTY file -- the printf builtin's musl stdio buffer is never flushed

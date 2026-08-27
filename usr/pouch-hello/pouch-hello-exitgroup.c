@@ -1,7 +1,7 @@
 // /pouch-hello-exitgroup -- exit_group(2) with LIVE peer threads.
 //
 // The behavioral proof of SYS_EXIT_GROUP's cross-thread shootdown (ARCH §7.9.1,
-// invariant I-24; task #809). A multi-thread pouch Proc calls _Exit(0) -- which
+// invariant I-24; task #809). A multi-thread pouch Proc calls _Exit(42) -- which
 // routes through __NR_exit_group -> SYS_EXIT_GROUP -- while two worker threads
 // are STILL ALIVE and UN-JOINED.
 //
@@ -10,7 +10,8 @@
 //     tools/test.sh flaky (stratumd's _Exit / abort / mallocng-assert at
 //     shutdown is exactly this shape).
 //   - Post-fix: SYS_EXIT_GROUP cascades termination to both workers, the Proc
-//     exits cleanly with status 0, and joey reaps rc == 0.
+//     exits with WEXITSTATUS 42 (the #91 cross-thread witness, below), and joey
+//     reaps exactly that 42.
 //
 // Two worker modes deliberately exercise BOTH kernel wake paths:
 //   - worker_cond: blocks in pthread_cond_wait  -> a torpor (futex) sleeper,
@@ -20,8 +21,9 @@
 //                  (smp_resched_others) + the new IRQ-from-EL0 die-check.
 //
 // The Proc only reaches ZOMBIE once BOTH workers have died, so joey's
-// t_wait_pid returning (rc == 0) is itself the proof that the full cascade
-// completed -- no peer is left orphaned.
+// t_wait_pid returning at all is itself the proof that the full cascade
+// completed (no peer orphaned); the reaped status being 42 is the #91 proof
+// that the exit CODE survived the cross-thread group_exit_code handoff.
 //
 // fd 1 is joey's pipe-relayed UART. The marker line is printed BEFORE
 // _Exit (nothing runs after it); joey content-checks that line + reaps rc == 0.
@@ -72,12 +74,18 @@ int main(void) {
         __asm__ __volatile__("yield" ::: "memory");
     }
 
-    printf("pouch-hello-exitgroup: 2 live un-joined workers (1 cond-wait, 1 spin); calling exit_group(0)\n");
+    printf("pouch-hello-exitgroup: 2 live un-joined workers (1 cond-wait, 1 spin); calling exit_group(42)\n");
     fflush(stdout);
 
     // _Exit -> __NR_exit_group -> SYS_EXIT_GROUP. The workers are live; the
-    // kernel cascades termination to them and the Proc exits clean (status 0).
-    // NEVER returns. (Pre-fix this extincted the kernel on the live peers.)
-    _Exit(0);
+    // kernel cascades termination to them and the Proc exits with WEXITSTATUS
+    // 42 (#91). This is the cross-thread group_exit_code witness: THIS (main)
+    // thread SETS group_exit_code via proc_group_terminate_code, but a WORKER
+    // is the last thread out and READS it in thread_exit_self -- so the parent
+    // reaping 42 (not 0/1) proves the code survives the cross-thread, cross-CPU
+    // handoff end-to-end, under whatever SMP the boot runs. NEVER returns.
+    // (Pre-#809 this extincted the kernel on the live peers; pre-#91 the 42
+    // collapsed to 1.)
+    _Exit(42);
     return 0;  // unreachable
 }

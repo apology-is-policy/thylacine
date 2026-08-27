@@ -1426,8 +1426,8 @@ unsafe fn run_linux() -> ! {
     // the interruption point off its copied user stack. Here: SIGPIPE raised
     // by the reader-less fd 0 write, the handler forks; BOTH processes return
     // from the handler and resume after the write; the child then exits 0 --
-    // the ONLY exit code that survives v1.0's status collapse (exit_group(N):
-    // N != 0 -> exits("fail") -> 1, kernel/syscall.c) -- and the parent reaps
+    // chosen because this leg needs clean-vs-failure, not a specific byte (#91
+    // now preserves non-zero codes verbatim too) -- and the parent reaps
     // exactly a clean 0. Every failure reads 1: a refused sigreturn (the child
     // dies at `brk #0` -- a `snare:brk` user-fault line names it), or a child
     // that resumed with its store lost (it runs the parent's L234 and exits 1
@@ -2606,17 +2606,18 @@ unsafe fn run_linux() -> ! {
 
     // THE PACKED-STATUS PROOF, which needs a child that exits NON-ZERO: the
     // kernel returns the RAW exit status unless a PTY-1e flag was passed, and
-    // this wait passes none, so the translator must pack. Raw 1 would fail
-    // WIFEXITED outright ((1 & 0x7f) != 0 reads as "killed by signal 1"), and
-    // packed 1 is 0x100. The two are distinguishable, which 0 was not.
+    // this wait passes none, so the translator must pack. Raw 7 would fail
+    // WIFEXITED outright ((7 & 0x7f) != 0 reads as "killed by signal 7"), and
+    // packed 7 is 0x700. The two are distinguishable, which 0 was not.
     //
-    // WEXITSTATUS is 1 rather than a richer code because Thylacine's exit
-    // status is boolean at v1.0 -- sys_exits_handler collapses every non-zero
-    // to "fail" (task #91). This leg asserts what the system can actually
-    // deliver; when #91 lands it should assert the real code.
+    // #91 (LANDED): this asserts a DISTINCTIVE non-1 code (7) -- a value the
+    // pre-#91 collapse could never deliver (sys_exits_handler / exit_group both
+    // turned every non-zero into "fail" -> 1). The child's real exit byte now
+    // survives end to end through exit_group(7) -> proc_group_terminate_code ->
+    // wait4, which asserting == 7 (not == 1) proves.
     let xpid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
     if xpid == 0 {
-        unsafe { linux_exit(1) }             // the child; never returns
+        unsafe { linux_exit(7) }             // the child; never returns
     }
     leg!(rep, xpid > 0, b"L172\n");
     st = -1;
@@ -2625,7 +2626,7 @@ unsafe fn run_linux() -> ! {
         svc4(NR_WAIT4, xpid as u64, &mut st as *mut i32 as u64, 0, 0) == xpid,
         b"L172b\n"
     );
-    leg!(rep, (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 1, b"L173\n");
+    leg!(rep, (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 7, b"L173\n");
 
     // ECHILD. Every child is now reaped, so this is the reap-loop termination
     // condition -- and the errno is the point: a bare -1 would reach a Linux

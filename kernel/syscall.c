@@ -65,16 +65,18 @@
 // SYS_EXITS — terminate calling process.
 // =============================================================================
 //
-// AArch64 ABI: x0 = exit status (0 → "ok"; non-zero → "fail").
+// AArch64 ABI: x0 = exit status. Since #91 the low byte (x0 & 0xff)
+// becomes p->exit_status VERBATIM, so a native t_exits(N) reaches the
+// parent's wait as WEXITSTATUS == N -- matching Linux's (status & 0xff)
+// exit semantics. The display exit_msg still tracks the CODE via the
+// Plan 9 string convention (0 -> "ok", non-zero -> "fail"), kept for
+// /proc and the await string:
 //
-// At v1.0 P3-Ec we map the integer status to the existing kernel
-// exits() string-based convention:
+//   x0 & 0xff == 0  → exits_code(0, "ok")    → p->exit_status = 0
+//   x0 & 0xff == N  → exits_code(N, "fail")  → p->exit_status = N
 //
-//   x0 == 0  → exits("ok")    → p->exit_status = 0
-//   x0 != 0  → exits("fail")  → p->exit_status = 1
-//
-// Phase 5+ extends to a richer per-Proc exit_status u64 carrying the
-// full integer payload.
+// exits_code carries the byte; exits(msg) is the string-only wrapper the
+// ~dozen in-kernel exits("...") callers use (msg=="ok" -> 0, else 1).
 //
 // exits() is __attribute__((noreturn)); this helper inherits the
 // no-return semantics. The user thread context is abandoned (its
@@ -82,12 +84,14 @@
 // wait_pid reaps via thread_free).
 __attribute__((noreturn))
 static void sys_exits_handler(u64 status) {
-    if (status == 0) {
-        exits("ok");
-    } else {
-        exits("fail");
-    }
-    // Unreachable — exits() is noreturn.
+    // #91: carry the real low byte (0..255) so a native t_exits(N) -- and a
+    // phenotype exit(N) that routes here -- reaches the parent's wait as
+    // WEXITSTATUS == N, instead of the pre-#91 collapse to exit_status 0/1. The
+    // display msg tracks the CODE, not the raw arg: a status whose low byte is 0
+    // is a success even with high bits set, matching Linux (status & 0xff).
+    int code = (int)(status & 0xff);
+    exits_code(code, code ? "fail" : "ok");
+    // Unreachable -- exits_code() is noreturn.
     extinction("sys_exits returned");
 }
 
@@ -103,7 +107,11 @@ __attribute__((noreturn))
 static void sys_exit_group_handler(u64 status) {
     struct Thread *t = current_thread();
     struct Proc   *p = (t && t->magic == THREAD_MAGIC) ? t->proc : NULL;
-    const char *msg = (status == 0) ? "ok" : "fail";
+    // #91: the real low byte reaches the parent's wait as WEXITSTATUS == N (the
+    // load-bearing path -- busybox / musl exit via exit_group). The display msg
+    // tracks the code, not the raw arg (see sys_exits_handler).
+    int code = (int)(status & 0xff);
+    const char *msg = code ? "fail" : "ok";
     if (p && p->magic == PROC_MAGIC) {
         // proc_group_terminate's universal death-wake walks p->threads, which
         // requires g_proc_table_lock (#811, ARCH §8.8.1). Acquire it around the
@@ -111,7 +119,7 @@ static void sys_exit_group_handler(u64 status) {
         // re-acquires it for the last-out ZOMBIE transition (spinlocks are not
         // recursive).
         irq_state_t s = proc_table_lock_acquire();
-        proc_group_terminate(p, msg);
+        proc_group_terminate_code(p, code, msg);
         proc_table_lock_release(s);
     }
     // Exit the caller (a Thread of p). thread_exit_self validates current /
@@ -4786,10 +4794,11 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
     // per-park: group_exit_msg is the ONE signal every park and sleep
     // predicate already honours, so this also covers a target merely blocked
     // (where the latchless kill previously waited for some unrelated wake).
-    // Not a semantics change -- thread_exit_self's become_zombie arm derives
-    // its status from group_exit_msg with the same `"ok" -> 0 / else -> 1`
-    // collapse exits() uses, so the observable outcome is exit_msg "killed" /
-    // status 1 either way. It also makes SYS_POSTNOTE agree with the /proc/
+    // Not a semantics change -- a kill routes through the proc_group_terminate
+    // STRING wrapper, which records group_exit_code 1 (msg "killed" != "ok")
+    // beside group_exit_msg; thread_exit_self's become_zombie arm reads that
+    // code (#91), so the observable outcome is exit_msg "killed" / status 1
+    // either way. It also makes SYS_POSTNOTE agree with the /proc/
     // <pid>/ctl `kill` verb, which has always dispatched via
     // proc_group_terminate uniformly (devproc.c).
     //

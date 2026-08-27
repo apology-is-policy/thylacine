@@ -45,6 +45,7 @@ void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
+void test_syscall_dispatch_exit_group_code(void);
 void test_syscall_dispatch_args_in_x0_to_x5(void);
 void test_syscall_dispatch_set_tid_address(void);
 void test_syscall_opath_walkonly_no_byte_io(void);
@@ -182,11 +183,14 @@ static void child_exits_fail(void *arg) {
     struct exception_context ctx;
     for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
     ctx.regs[8] = SYS_EXITS;
-    ctx.regs[0] = 42;            // non-zero status → "fail"
+    ctx.regs[0] = 42;            // status 42 → exit_status 42 (#91)
     syscall_dispatch(&ctx);
     extinction("syscall_dispatch(SYS_EXITS) returned (impossible)");
 }
 
+// #91 regression (single-thread exits_code path): a SYS_EXITS(42) child's
+// specific byte survives to the parent's wait_pid, instead of the pre-#91
+// collapse to exit_status 1. Fails on the old code (status == 1), passes now.
 void test_syscall_dispatch_exits_fail(void) {
     int pid = rfork(RFPROC, child_exits_fail, NULL);
     TEST_ASSERT(pid > 0, "rfork failed");
@@ -194,8 +198,36 @@ void test_syscall_dispatch_exits_fail(void) {
     int status = -1;
     int reaped = wait_pid(&status);
     TEST_EXPECT_EQ(reaped, pid, "wait_pid returned the rfork'd pid");
-    TEST_EXPECT_EQ(status, 1,
-        "SYS_EXITS(non-zero) → exit_status == 1 (v1.0 binary mapping)");
+    TEST_EXPECT_EQ(status, 42,
+        "SYS_EXITS(42) → exit_status == 42 (#91: the real byte, not 0/1)");
+}
+
+// Child for exit_group_code: calls SYS_EXIT_GROUP(42) via syscall_dispatch.
+// A single-thread Proc routes exit_group through proc_group_terminate_code
+// (which stashes group_exit_code) then thread_exit_self (which reads it) --
+// exercising the GROUP code path the exits_code test above does not.
+static void child_exit_group_code(void *arg) {
+    (void)arg;
+    struct exception_context ctx;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_EXIT_GROUP;
+    ctx.regs[0] = 42;            // status 42 → group_exit_code 42 → exit_status 42
+    syscall_dispatch(&ctx);
+    extinction("syscall_dispatch(SYS_EXIT_GROUP) returned (impossible)");
+}
+
+// #91 regression (group_exit_code path): SYS_EXIT_GROUP(42) reaches the
+// parent's wait as exit_status 42. Fails on the old code (thread_exit_self
+// collapsed group_exit_msg to 0/1 -> status 1), passes now.
+void test_syscall_dispatch_exit_group_code(void) {
+    int pid = rfork(RFPROC, child_exit_group_code, NULL);
+    TEST_ASSERT(pid > 0, "rfork failed");
+
+    int status = -1;
+    int reaped = wait_pid(&status);
+    TEST_EXPECT_EQ(reaped, pid, "wait_pid returned the rfork'd pid");
+    TEST_EXPECT_EQ(status, 42,
+        "SYS_EXIT_GROUP(42) → exit_status == 42 (#91: group_exit_code)");
 }
 
 void test_syscall_dispatch_args_in_x0_to_x5(void) {

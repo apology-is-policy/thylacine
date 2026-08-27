@@ -471,11 +471,16 @@ static unsigned int rd_u32_le(const unsigned char *rx, size_t off) {
 // expected to exit non-zero (e.g., terminated by an EL0 fault routed
 // through proc_fault_terminate at kernel/proc.c -- the snare:* family).
 // Used only by /pouch-hello-fault.
+// `want_status >= 0`: require the child's exit_status to equal it EXACTLY
+// (a native reap returns the raw status). Overrides expect_fault. Used by
+// /pouch-hello-exitgroup (#91): a specific non-1 code proves the exit byte
+// survived the cross-thread group_exit_code handoff. Pass -1 to disable.
 static int pouch_smoke_core(const char *name, size_t name_len,
                             const char *expect, size_t expect_len,
                             unsigned long cap_mask,
                             unsigned long perm_flags,
-                            int expect_fault) {
+                            int expect_fault,
+                            int want_status) {
     long rd = -1, wr = -1;
     if (t_pipe(&rd, &wr) < 0) {
         t_putstr("joey: pouch-smoke t_pipe FAILED\n");
@@ -540,10 +545,19 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         t_putstr("joey: pouch-smoke t_close(rd) FAILED\n");
         return -1;
     }
-    if (expect_fault) {
+    if (want_status >= 0) {
+        // #91 witness path: the child MUST exit with EXACTLY want_status. A
+        // native reap returns the raw exit_status, so a specific non-1 code
+        // (42 from /pouch-hello-exitgroup) proves the byte survived -- pre-#91
+        // every non-zero collapsed to 1, so this would have read 1.
+        if (status != want_status) {
+            t_putstr("joey: pouch-smoke child status != expected\n");
+            return -1;
+        }
+    } else if (expect_fault) {
         // /pouch-hello-fault path: child MUST exit non-zero (terminated
-        // by proc_fault_terminate via exits(NOTE_NAME_SNARE_*) at v1.0,
-        // collapsed to exit_status = 1 by sys_exits_handler).
+        // by proc_fault_terminate via exits(NOTE_NAME_SNARE_*) -> the string
+        // wrapper -> exit_status 1; the fault path is #91-unaffected).
         if (status == 0) {
             t_putstr("joey: pouch-smoke expected fault but child exited 0\n");
             return -1;
@@ -564,7 +578,17 @@ static int pouch_smoke_core(const char *name, size_t name_len,
 // caps variant is used). Pre-existing API; the pouch hellos use this.
 static int pouch_smoke_one(const char *name, size_t name_len,
                            const char *expect, size_t expect_len) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0);
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, -1);
+}
+
+// pouch_smoke_one_status — #91 variant. Like pouch_smoke_one but ALSO requires
+// the child's exit_status to equal `want_status` exactly. Used by /pouch-hello-
+// exitgroup to prove a specific non-1 code (42) survives the cross-thread
+// group_exit_code handoff end-to-end.
+static int pouch_smoke_one_status(const char *name, size_t name_len,
+                                  const char *expect, size_t expect_len,
+                                  int want_status) {
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, want_status);
 }
 
 // pouch_smoke_one_expect_fault — variant for the durable P6 hardening
@@ -577,7 +601,7 @@ static int pouch_smoke_one(const char *name, size_t name_len,
 // `Thylacine boot OK`.
 static int pouch_smoke_one_expect_fault(const char *name, size_t name_len,
                                         const char *expect, size_t expect_len) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 1);
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 1, -1);
 }
 
 // pouch_smoke_one_caps — capability-granting variant. Spawns via
@@ -586,7 +610,7 @@ static int pouch_smoke_one_expect_fault(const char *name, size_t name_len,
 static int pouch_smoke_one_caps(const char *name, size_t name_len,
                                 const char *expect, size_t expect_len,
                                 unsigned long cap_mask) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, cap_mask, 0, 0);
+    return pouch_smoke_core(name, name_len, expect, expect_len, cap_mask, 0, 0, -1);
 }
 
 // pouch_smoke_one_perms — permission-granting variant. Spawns via
@@ -599,7 +623,7 @@ static int pouch_smoke_one_perms(const char *name, size_t name_len,
                                  unsigned long cap_mask,
                                  unsigned long perm_flags) {
     return pouch_smoke_core(name, name_len, expect, expect_len,
-                            cap_mask, perm_flags, 0);
+                            cap_mask, perm_flags, 0, -1);
 }
 
 // argv_marker — one substring expected to appear in the child's stdout.
@@ -771,19 +795,22 @@ static int do_pouch_hello_smoke(void) {
     t_putstr("joey: pouch-hello-threads smoke ok (pthread + mutex over SYS_THREAD_* / SYS_TORPOR_*)\n");
 
     // SYS_EXIT_GROUP (#809; ARCH §7.9.1 / invariant I-24): the cross-thread-
-    // shootdown proving binary. A multi-thread Proc calls _Exit(0) ->
-    // __NR_exit_group -> SYS_EXIT_GROUP with TWO live, un-joined workers (one
-    // futex/cond-wait torpor sleeper, one userspace spinner). Pre-fix this
-    // extincted the kernel ("exits with live peer threads", the #808 audit F3
-    // hazard); post-fix the kernel cascades termination to both workers and the
-    // Proc exits status 0. joey's t_wait_pid returning rc == 0 IS the proof the
-    // full cascade completed -- the Proc only zombies once BOTH peers died.
+    // shootdown proving binary, doubling as the #91 cross-thread group_exit_code
+    // witness. A multi-thread Proc calls _Exit(42) -> __NR_exit_group ->
+    // SYS_EXIT_GROUP with TWO live, un-joined workers (one futex/cond-wait torpor
+    // sleeper, one userspace spinner). Pre-#809 this extincted the kernel ("exits
+    // with live peer threads"); post-fix the kernel cascades termination to both
+    // workers and the Proc exits WEXITSTATUS 42. joey's t_wait_pid returning IS
+    // the proof the cascade completed (the Proc only zombies once BOTH peers
+    // died); the reaped status being EXACTLY 42 is the #91 proof -- the main
+    // thread set group_exit_code but a WORKER was last out and read it, so a 42
+    // (not the pre-#91 collapse to 1) proves the cross-thread, cross-CPU handoff.
     static const char peg_name[]   = "pouch-hello-exitgroup";
     static const char peg_expect[] = "pouch-hello-exitgroup: 2 live un-joined workers";
-    if (pouch_smoke_one(peg_name, sizeof(peg_name) - 1,
-                        peg_expect, sizeof(peg_expect) - 1) != 0)
+    if (pouch_smoke_one_status(peg_name, sizeof(peg_name) - 1,
+                               peg_expect, sizeof(peg_expect) - 1, 42) != 0)
         return -1;
-    t_putstr("joey: pouch-hello-exitgroup smoke ok (exit_group with live peers cascades -- SYS_EXIT_GROUP)\n");
+    t_putstr("joey: pouch-hello-exitgroup smoke ok (exit_group live-peer cascade + #91 cross-thread exit code 42 -- SYS_EXIT_GROUP)\n");
 
     // P6-pouch-poll sub-chunk 10: the polling pouch hello. Exercises the
     // boundary-line patched src/select/{poll,ppoll,select,pselect}.c.

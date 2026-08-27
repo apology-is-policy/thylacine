@@ -880,6 +880,23 @@ struct Proc {
     // not own; the kthreads are reaped by loom_free's join at handle close.
     // Guarded by g_proc_table_lock like its siblings.
     int loom_sqpoll_count;
+
+    // #91 (I-24): the real integer exit code (low byte, 0..255) recorded for a
+    // GROUP-terminating Proc, so the last Thread out reconstructs the ZOMBIE
+    // exit_status without collapsing to 0/1. The parallel int stash to
+    // group_exit_msg: proc_group_terminate_code writes it EXACTLY ONCE, in the
+    // same set-once CAS-winner branch that publishes group_exit_msg, so the code
+    // always matches the winning msg. thread_exit_self reads it (the gmsg!=NULL
+    // arm) to seed proc_become_zombie_locked. A PLAIN int, not atomic: unlike
+    // group_exit_msg (which the LOCKLESS el0_return_die_check also reads), this
+    // field is read ONLY by thread_exit_self under g_proc_table_lock -- the same
+    // lock every proc_group_terminate caller holds (its p->threads walk requires
+    // it, #811) -- so the lock is the writer/reader ordering, exactly like the
+    // sibling exit_status / exit_msg. Fills the 4-byte tail pad after
+    // loom_sqpoll_count -- no struct growth. KP_ZERO-fresh 0 (never read unless a
+    // group-terminate set it; the single-thread exits() path passes its own code
+    // straight to proc_become_zombie_locked and never consults this).
+    int group_exit_code;
 };
 
 // VIVARIUM: the phenotype values (Proc.phenotype; docs/VIVARIUM.md §5.1).
@@ -1048,6 +1065,12 @@ _Static_assert(__builtin_offsetof(struct Proc, socktab) == 376,
  "VIVARIUM V-5 socktab (the per-Proc Linux socket state) appends "
  "after sigtab+8 = 400. KP_ZERO-fresh NULL == 'this Proc has "
  "no sockets', correct both initially and for every native Proc.");
+_Static_assert(__builtin_offsetof(struct Proc, group_exit_code) == 388,
+ "#91 group_exit_code (the real int exit code for a group-terminating "
+ "Proc, I-24) fills the 4-byte tail pad after loom_sqpoll_count (@384) "
+ "-- no struct growth, sizeof stays 392. The sizeof assert above is the "
+ "control: if this pad were not free the field would push sizeof and "
+ "fail there.");
 _Static_assert(__builtin_offsetof(struct Proc, sigtab) == 368,
  "VIVARIUM V-6b sigtab (the per-Proc Linux signal dispositions) "
  "appends after exe_path+8 = 392. KP_ZERO-fresh NULL == "
@@ -1459,6 +1482,13 @@ int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
 __attribute__((noreturn))
 void exits(const char *msg);
 
+// #91: the code-carrying core of exits(). Records `code` (low byte, 0..255) as
+// the Proc's exit_status verbatim instead of collapsing to 0/1 -- so a
+// phenotype exit(N) / native t_exits(N) reaches the parent's wait as WEXITSTATUS
+// == N. exits(msg) is the string-only wrapper (0 iff msg=="ok", else 1); the
+// SYS_EXITS entry point calls this directly with the real byte.
+void exits_code(int code, const char *msg);
+
 // P6 hardening #3a (scripture e45a571): terminate the calling Thread's
 // Proc on EL0 unhandled fault. Called from
 // arch/arm64/exception.c::exception_sync_lower_el for every EL0 sync
@@ -1524,6 +1554,14 @@ void thread_exit_self(void);
 // additionally takes torpor_lock + per-peer wait_lock + (via wakeup)
 // rendez/timerwait locks, all strictly BELOW g_proc_table_lock in the order.
 void proc_group_terminate(struct Proc *p, const char *msg);
+
+// #91: the code-carrying core of proc_group_terminate(). Stashes `code` (low
+// byte, 0..255) into p->group_exit_code in the SAME set-once CAS-winner branch
+// that publishes group_exit_msg, so the last Thread out (thread_exit_self)
+// seeds the ZOMBIE exit_status with the real code instead of msg-derived 0/1.
+// proc_group_terminate(p, msg) is the string-only wrapper (kept for the kill /
+// legate / debugger callers): code = 0 iff msg=="ok", else 1.
+void proc_group_terminate_code(struct Proc *p, int code, const char *msg);
 
 // LINEAGE L-2 (docs/LINEAGE.md section 5.2, I-44): execve's address-space swap.
 //

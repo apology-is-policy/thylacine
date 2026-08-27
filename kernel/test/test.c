@@ -416,6 +416,7 @@ void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
+void test_syscall_dispatch_exit_group_code(void);
 void test_syscall_dispatch_args_in_x0_to_x5(void);
 void test_syscall_dispatch_set_tid_address(void);
 void test_syscall_opath_walkonly_no_byte_io(void);
@@ -2028,6 +2029,7 @@ struct test_case g_tests[] = {
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
     { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },
     { "syscall.dispatch_exits_fail",   test_syscall_dispatch_exits_fail,   false, NULL },
+    { "syscall.dispatch_exit_group_code", test_syscall_dispatch_exit_group_code, false, NULL },
     { "syscall.dispatch_args_in_x0_to_x5",
                                        test_syscall_dispatch_args_in_x0_to_x5,
                                                                            false, NULL },

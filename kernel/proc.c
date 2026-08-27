@@ -2856,7 +2856,16 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
        thread_exit_self after the group cascade) */
 }
 
+// #91: the string-only wrapper preserving the native Plan 9 exits(string)
+// contract (msg=="ok" -> exit_status 0; every other string -> 1). The in-kernel
+// callers (exits("ok") / exits("boom") / ...) keep the boolean mapping; the
+// SYS_EXITS syscall entry calls exits_code directly with the real byte.
 void exits(const char *msg) {
+    exits_code((msg && msg[0] == 'o' && msg[1] == 'k' && msg[2] == 0) ? 0 : 1, msg);
+    extinction("exits: exits_code returned (impossible)");
+}
+
+void exits_code(int code, const char *msg) {
     struct Thread *t = current_thread();
     if (!t)                  extinction("exits with no current thread");
     if (t->magic != THREAD_MAGIC)
@@ -2944,7 +2953,7 @@ void exits(const char *msg) {
         // die-check; the last Thread out reaps the Proc with this msg's status
         // (thread_exit_self reads the recorded group_exit_msg). A well-formed
         // multi-thread program joins its peers first and never reaches here.
-        proc_group_terminate(p, msg);
+        proc_group_terminate_code(p, code, msg);
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         thread_exit_self();
         extinction("exits: thread_exit_self returned after group terminate");
@@ -2978,8 +2987,7 @@ void exits(const char *msg) {
             extinction("exits: peer appeared during handle close");
     }
 
-    int status = (msg && msg[0] == 'o' && msg[1] == 'k' && msg[2] == 0) ? 0 : 1;
-    proc_become_zombie_locked(p, status, msg);
+    proc_become_zombie_locked(p, code, msg);
 
     // Mark the executing thread EXITING so sched() leaves it out of the
     // run tree (it will be reaped by the parent's wait_pid).
@@ -3103,15 +3111,18 @@ void thread_exit_self(void) {
         // This Thread is the last live one. Proc transitions to ZOMBIE.
         // SYS_EXIT_GROUP / kill cross-thread shootdown (I-24): if a group
         // termination is in progress, use the recorded group_exit_msg + its
-        // derived status (the same "ok" -> 0 / else -> 1 collapse exits()
-        // uses); otherwise the SYS_THREAD_EXIT convention is status 0 / "ok"
-        // (no user-specified status; explicit-status program exit goes through
-        // exits()). The group_exit_msg read is under g_proc_table_lock here +
-        // set via release CAS in proc_group_terminate -- a coherent snapshot.
+        // companion group_exit_code (#91: the REAL exit byte, no longer the
+        // "ok" -> 0 / else -> 1 collapse -- a phenotype exit_group(N) reaches
+        // the parent's wait as WEXITSTATUS == N); otherwise the SYS_THREAD_EXIT
+        // convention is status 0 / "ok" (no user-specified status; explicit-
+        // status program exit goes through exits_code). The group_exit_msg read
+        // is under g_proc_table_lock here + set via release CAS in
+        // proc_group_terminate_code -- a coherent snapshot; group_exit_code is
+        // written in the SAME set-once CAS-winner branch and read plainly under
+        // this lock (the write side holds it too), so it matches the winning msg.
         const char *gmsg = __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE);
         if (gmsg) {
-            int gstatus = (gmsg[0] == 'o' && gmsg[1] == 'k' && gmsg[2] == 0) ? 0 : 1;
-            proc_become_zombie_locked(p, gstatus, gmsg);
+            proc_become_zombie_locked(p, p->group_exit_code, gmsg);
         } else {
             proc_become_zombie_locked(p, 0, "ok");
         }
@@ -3429,7 +3440,17 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     fp_restore_area(g_fp_zero_area);
 }
 
+// #91: the string-only wrapper. The kill / legate / debugger callers keep the
+// boolean status they always had (msg=="ok" -> 0, else 1; a NULL msg becomes
+// "killed" inside the core -> 1, correct for a kill). The two real-code callers
+// (SYS_EXIT_GROUP and exits_code's live-peers cascade) call the _code core
+// directly with the true exit byte.
 void proc_group_terminate(struct Proc *p, const char *msg) {
+    int code = (msg && msg[0] == 'o' && msg[1] == 'k' && msg[2] == 0) ? 0 : 1;
+    proc_group_terminate_code(p, code, msg);
+}
+
+void proc_group_terminate_code(struct Proc *p, int code, const char *msg) {
     if (!p || p->magic != PROC_MAGIC) return;   // fail-safe; caller validates
     if (p == g_kproc) return;   // #809 P3a: kproc runs at EL1 + never group-exits
     if (!msg) msg = "killed";
@@ -3452,8 +3473,17 @@ void proc_group_terminate(struct Proc *p, const char *msg) {
     // still re-runs the wake + kick below (idempotent). __ATOMIC_RELEASE so a
     // peer's __ATOMIC_ACQUIRE load at its die-check sees a fully-published msg.
     const char *expected = NULL;
-    __atomic_compare_exchange_n(&p->group_exit_msg, &expected, msg,
-                                false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    if (__atomic_compare_exchange_n(&p->group_exit_msg, &expected, msg,
+                                    false, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+        // #91: record the companion exit code EXACTLY ONCE, in the set-once
+        // winner branch, so group_exit_code always corresponds to the winning
+        // group_exit_msg. A plain store: this Proc's g_proc_table_lock (the
+        // caller's #811 precondition, held for the p->threads walk below) is the
+        // sole ordering vs thread_exit_self's read, which holds the same lock. A
+        // racing loser (a second exit_group, or a kill racing the exit) writes
+        // NEITHER field, so no torn (msg, code) pair can be observed.
+        p->group_exit_code = code;
+    }
 
     // Wake every futex (torpor) sleeper of p so it returns from torpor_wait to
     // its EL0-return die-check. MUST run AFTER the flag set: a peer that

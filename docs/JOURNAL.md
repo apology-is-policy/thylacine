@@ -22,6 +22,94 @@ needed the operator.
 
 ---
 
+## 2026-08-27 (aux) -- #91 exit(N): the real exit byte now reaches `$?`, and the fix announced itself by EXTINCTING the boot at the one probe that had hard-coded the old collapse
+
+Picked up from the C1-verify self-compact at `9ec271d6`. #91 is the first of the
+two C1 fills: before it, a process's integer exit status collapsed to 0/1 at two
+kernel points (`sys_exits_handler`, `sys_exit_group_handler`), so a phenotype
+`exit_group(42)` or a native `t_exits(42)` reached the parent's wait as
+`WEXITSTATUS == 1`, never 42. Load-bearing for every scripted workload -- a shell
+that branches on `$?`, `git diff --quiet`, a Makefile conditional -- and a hard
+dependency of C2's mergetool/difftool (they `eval` on tool exit codes).
+
+The mechanism was smaller than the blast radius. The int channel already existed
+end to end: `proc_become_zombie_locked(p, int status, msg)` stores `p->exit_status`
+verbatim, and the wait reap packs `WAIT_STATUS_EXITED(exit_status) = (code&0xff)<<8`
+which is exactly Linux `W_EXITCODE`. The status was only pinched to {0,1} at four
+points: the two syscall handlers (collapse to `"ok"`/`"fail"`) and two string->int
+reconstructions (`exits()` @2981 and `thread_exit_self` @3113 rebuilding 0/1 from
+the msg string). The fix: split `exits()` -> `exits_code(int,msg)` core + a
+string-only wrapper (so the ~dozen in-kernel `exits("...")` callers keep the 0/1
+mapping); split `proc_group_terminate()` -> `proc_group_terminate_code(int,msg)`
+core + a wrapper (so the 4 kill/legate/debugger callers stay byte-identical at
+code 1); add `int group_exit_code` at the END of `struct Proc` (it fills the
+4-byte tail pad after `loom_sqpoll_count`@384, so sizeof stays 392 -- the
+`_Static_assert` confirmed it at compile time); write it set-once in the same
+CAS-winner branch that publishes `group_exit_msg`, and read it in
+`thread_exit_self`. A plain int, lock-protected: its only reader is
+`thread_exit_self` under `g_proc_table_lock`, the same lock every
+`proc_group_terminate` caller holds, and the lockless `el0_return_die_check`
+reads only `group_exit_msg`, never the code.
+
+**The finding nobody planned: the fix EXTINCTED the boot, and that was the fix
+working.** First green build, boot died: `EXTINCTION: joey: /joey exited non-zero
+1`, at `pouch-hello-spawn: WEXITSTATUS(fail)!=1 FAIL (errno=38, x=3)`. Ground
+truth (`usr/pouch-hello/pouch-hello-spawn.c:46`): the "fail" child does
+`return 3;` with the comment `// -> WEXITSTATUS 1 (v1.0 non-zero collapse)`. The
+probe had HARD-CODED the collapse: it asserted `WEXITSTATUS == 1` for a child
+that really exits 3. Pre-#91 the kernel turned 3 into 1 and the assert passed;
+post-#91 the real 3 survives through the full musl / `posix_spawn` / `waitpid`
+stack and the assert (correctly) fails. Not a regression -- the #91 fix proving
+itself at the pouch layer.
+
+That reframed the task: the collapse was SYSTEMIC, so every consumer that
+hard-coded it would break the same way, one boot at a time. Rather than discover
+them serially I swept the tree for the assumption -- and the discipline paid: the
+boot had extincted at the FIRST probe, so three later probes (which never ran)
+could have hidden the same defect. The sweep found the full set and separated it
+by ground truth: `pouch-hello-spawn` (the one break, asserted 1, child exits 3
+-> fixed to assert 3); `viv-pheno-probe` L173 (child `linux_exit(1)` -> still 1,
+SAFE -- but its own comment invited "when #91 lands it should assert the real
+code", so PROMOTED to `linux_exit(7)`/assert 7, a distinctive-code witness the
+collapse could never have delivered); `coreutil-smoke` cmp-differ (a genuine 1,
+not the "cmp's 2" the stale comment claimed -- SAFE); the fault path
+(`proc_fault_terminate` -> `exits("snare:*")` -> the wrapper -> 1, UNCHANGED, so
+`pouch-hello-fault`'s "exit non-zero" check holds); the kill path (4 wrapper
+callers, all still 1); `joey`'s `exit_status=127` counterfactual (stratumd boots,
+never taken). Only ONE probe actually needed a code change; the rest were
+confirmed safe by reading the child's real exit code, not by assuming.
+
+**Witnessed on three layers**, so a future regression at any tier fails a gate:
+native kernel (`syscall.dispatch_exits_fail` SYS_EXITS(42)->42 + a NEW
+`syscall.dispatch_exit_group_code` SYS_EXIT_GROUP(42)->42, which exercises the
+`group_exit_code` path the single-thread test does not); pouch/musl
+(`pouch-hello-spawn` now proves `return 3` -> `WEXITSTATUS 3`); viv phenotype
+(L173 `linux_exit(7)` -> 7). Suite 1465/1465, `Thylacine boot OK`, 0 EXTINCTION.
+
+Reviewer note: the Fable 5 prosecutor died mid-round on credit exhaustion (no
+report), so per the reviewer-model discipline the round was re-spawned on the
+Opus fallback (context-independent, same family) rather than skipped. It closed
+CLEAN on soundness -- 0 P0 / 0 P1 / 0 P2 / 3 P3 -- and independently re-derived
+the load-bearing claim (the plain int `group_exit_code` is safe because its only
+reader, `thread_exit_self`, and all six `proc_group_terminate[_code]` writers
+hold `g_proc_table_lock`, while the lockless die-check reads only the msg). The
+three P3s were all addressed: F1/F2 were two stale comments still describing the
+pre-#91 collapse (the SYS_EXITS doc-block and the kill-cascade rationale), which
+my own self-audit had missed -- the value of a context-independent read. F3 was
+the interesting one: my new `dispatch_exit_group_code` test drove a SINGLE-thread
+child, so setter and reader are the same thread and the cross-thread handoff the
+lock exists to protect went unexercised. Rather than document-around it (the
+reviewer's fallback), I promoted `pouch-hello-exitgroup` -- an existing REAL
+2-worker pthread proc -- from `_Exit(0)` to `_Exit(42)` with a new joey
+`want_status` assertion: now the MAIN thread sets `group_exit_code` but a WORKER
+is the last thread out and reads it, so the parent reaping exactly 42 (not the
+pre-#91 collapse to 1) is the cross-thread, cross-CPU witness, run under the SMP
+matrix. Self-audit in parallel had surfaced one non-defect (SF1): the
+`test_notes`/`test_rendez` scaffolds direct-write `group_exit_msg="killed"`
+without a code, but they test the msg READERS with fake threads and never reach
+the `group_exit_code` read -- production's invariant (only
+`proc_group_terminate_code` writes the msg, and it sets both) is intact.
+
 ## 2026-08-27 (aux) -- milestone C1 (verify): 12 of 13 non-interactive git verbs work under the phenotype; a file-write that read back EMPTY sent me down a 9-bake root-cause that exonerated the kernel
 
 Picked up from a self-compact at `0bcbe3ac` (milestone B done). C1 is
