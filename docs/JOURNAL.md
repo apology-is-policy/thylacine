@@ -83,7 +83,7 @@ kernel is byte-unchanged), so no SMP re-run and no holotype round are owed -- th
 change is test infra + a soft-skipping boot gate that mirrors the two existing
 git gates. **Open for the operator to sequence**: the two C1 fills
 (non-blocking-pipes for stash; #91 exit codes) and the printf/stdio userspace
-gap. Committed at *(this run's tip)*.
+gap. Committed at `05e52c5c`.
 
 ## 2026-08-27 (aux) -- milestone B: `git clone` + `git fetch` over HTTPS work under the phenotype (the first external TLS on Thylacine), up a ladder of gaps each caught by the gate reddening
 
