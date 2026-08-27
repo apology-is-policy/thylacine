@@ -11601,6 +11601,47 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         }
     }
 
+    case VIV_LINUX_DUP: {
+        // dup(oldfd): x0 oldfd. aarch64 HAS the plain dup (23); musl's dup() is
+        // this number. git's transport-helper dup()s the helper's output fd to
+        // wrap it in a FILE*, so the external-helper transports (git-remote-https)
+        // need it -- FORWARD answered ENOSYS ("can't dup helper output fd:
+        // Function not implemented"), which stops every https clone. Semantics:
+        // lowest free fd, rights preserved VERBATIM (I-6-safe -- no widen),
+        // cloexec clear -- exactly handle_dup_posix(p, fd, 0, false), the F_DUPFD
+        // primitive with min 0. No flags word, so no decide function.
+        u32 oldfd = (u32)args[0];
+        if (oldfd >= (u32)PROC_HANDLE_MAX)  return -(s64)T_E_BADF;
+
+        // THE SOCKET-SOURCE DECLINE, as dup3's arm. A phenotype socket fd carries
+        // out-of-band socktab state keyed on its NUMBER; a dup that did not also
+        // register the new number would hand back an fd the socket path cannot
+        // recognize. ENOSYS is dup3's established answer, and git dups PIPE fds,
+        // never sockets. (dup CREATES an fd and frees none, so unlike dup3 it owes
+        // NO socktab drop -- there is no overwritten target number.)
+        //
+        // The lock-free socktab read here AND the dropped-lock EBADF/EMFILE
+        // re-check below are sound ONLY because a PHENO_LINUX Proc has no peer
+        // thread (clone(CLONE_THREAD) is refused), so nothing mutates socktab or
+        // the handle table under us -- the property dup3's drop states at its own
+        // arm, which must be re-derived if the clone domain ever admits threads.
+        struct viv_socktab *stab =
+            __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+        if (viv_socktab_find(stab, (s32)oldfd) != NULL)
+            return -(s64)T_E_NOSYS;
+
+        hidx_t nfd = handle_dup_posix(p, (hidx_t)oldfd, 0, false);
+        // Split EBADF (closed source) from EMFILE (table full / a non-dup-able
+        // kind), exactly as the F_DUPFD arm: the two errnos are load-bearing and
+        // not interchangeable. handle_dup_posix folds them into one -1, so the
+        // liveness re-check (the same lookup GETFD uses) disambiguates.
+        if (nfd < 0) {
+            if (handle_get_cloexec(p, (hidx_t)oldfd) < 0)  return -(s64)T_E_BADF;
+            return -(s64)T_E_MFILE;
+        }
+        return (s64)nfd;
+    }
+
     case VIV_LINUX_DUP3: {
         // dup3(old, new, flags): x0 old, x1 new, x2 flags. (#157 -- aarch64 has
         // no dup2 number, so musl compiles dup2() into this; a shell's
@@ -12545,6 +12586,15 @@ s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
 s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg) {
     u64 args[VIV_NARGS] = { fd, cmd, arg, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_FCNTL, args);
+}
+
+// Drives the REAL dup arm through the T2 dispatcher (the DUP case never reads
+// the exception frame, so NULL ctx is safe), so a test proves the arm is wired
+// to handle_dup_posix -- not merely that the verdict is TIER2.
+s64 viv_dup_for_test(struct Proc *p, u64 fd);
+s64 viv_dup_for_test(struct Proc *p, u64 fd) {
+    u64 args[VIV_NARGS] = { fd, 0, 0, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_DUP, args);
 }
 
 // Drives the REAL getsockopt shell through the T2 dispatcher, so a test can

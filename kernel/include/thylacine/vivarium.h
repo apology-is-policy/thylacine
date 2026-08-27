@@ -123,8 +123,12 @@ enum {
     //     live socket, and an unconditional entry-time drop would destroy the
     //     guest's socket state on a call that failed.
     // A future member must pick the arm its refusal structure demands rather
-    // than copying whichever is nearer; `dup` (23) and `close_range` (436) are
-    // still FORWARD and still owe it.
+    // than copying whichever is nearer; `close_range` (436) is still FORWARD and
+    // still owes it. `dup` (23) is now TIER2 (git-remote-https' helper pipe): it
+    // is fd-CREATING, not fd-freeing, so it owes no DROP -- but it declines a
+    // socket SOURCE (ENOSYS, as dup3 does), since a dup that did not register the
+    // new number would hand back an unrecognized socket fd. Its shell arm is
+    // beside dup3's.
     VIV_LINUX_DUP         = 23,
     // dup3 (#157) owes the below-the-ceiling paragraph -- 24's native occupant
     // is SYS_SPAWN_WITH_CAPS(name_va, name_len, cap_mask), whose arity matches

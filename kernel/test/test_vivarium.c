@@ -2836,9 +2836,12 @@ void test_vivarium_fd_freeing_rows_stay_unserved(void) {
     viv_fill_args(args);
 
     // STILL UNSERVED, and each still owes the socktab a drop of the entry keyed
-    // on the number it frees before it can be promoted.
+    // on the number it frees before it can be promoted. `dup` (23) LEFT this set:
+    // plain dup(oldfd) ALLOCATES the lowest free fd and frees NONE (only dup2/
+    // dup3 free their target), so it is fd-CREATING like pipe2, NOT fd-freeing --
+    // it owes no drop and is now served as TIER2 (asserted below). close_range
+    // (436) genuinely frees a RANGE and stays unserved until it pays the drop.
     static const struct { u64 nr; const char *what; } frees_an_fd[] = {
-        { VIV_LINUX_DUP,         "dup" },
         { VIV_LINUX_CLOSE_RANGE, "close_range" },
     };
 
@@ -2852,6 +2855,18 @@ void test_vivarium_fd_freeing_rows_stay_unserved(void) {
                        "a declined verdict leaves out untouched");
         (void)frees_an_fd[i].what;
     }
+
+    // dup (23) is SERVED as TIER2 -- fd-CREATING (lowest free fd, frees none), so
+    // unlike dup3 it owes no socktab drop; its shell declines a socket SOURCE,
+    // since a dup that did not register the new number would hand back an
+    // unrecognized socket fd. git's transport-helper dup()s the helper pipe, so
+    // the external-helper transports (git-remote-https) need it.
+    out.nr = 0xDEADu;
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_DUP, args, &out),
+                   (int)VIV_TIER2, "dup is served as TIER2 -- fd-creating, no drop owed");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu,
+                   "a TIER2 verdict leaves out untouched (no renumber): SYS_DUP's "
+                   "second arg is a RIGHTS MASK the shell supplies, not a guest fd");
 
     // THE TWO THAT ARE SERVED, and their CLASSIFICATION is the assertion --
     // because it is the classification that decides WHERE each pays the drop,
@@ -3449,6 +3464,7 @@ void test_vivarium_sigtab_fork_exec_rule(void) {
 }
 
 extern s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
+extern s64 viv_dup_for_test(struct Proc *p, u64 fd);
 // The T2 fcntl SHELL's F_DUPFD errnos (found by the c8ab2744 close's L-6c legs).
 //
 // The decide half above is pure; this drives the arm that turns a decision into
@@ -3522,6 +3538,53 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
                    "would fail here)");
     TEST_EXPECT_EQ(c, -(s64)T_E_INVAL,
                    "C: a minimum at the table size is EINVAL, not EMFILE");
+}
+
+// The dup(2) arm (git-remote-https' helper pipe). Drives viv_dup_for_test on a
+// fresh phenotype Proc, proving the ARM is reached (not merely that the verdict
+// is TIER2): a live non-socket fd dups to a fresh number, a closed fd is EBADF,
+// and a SOCKET source is DECLINED (-ENOSYS) so no unregistered socket fd is
+// minted. The EBADF/EMFILE split itself rides the identical handle_dup_posix
+// primitive proven in test_vivarium_fcntl_dupfd_errnos above.
+void test_vivarium_dup_arm(void);
+void test_vivarium_dup_arm(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+
+    // POSITIVE: a live, non-socket fd dups to a fresh number (slot 0 -> slot 1).
+    hidx_t live = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p);
+    s64 dup_ok = viv_dup_for_test(p, (u64)live);
+
+    // EBADF: fd 3 is closed in a fresh Proc (live took 0, its dup 1). Probed
+    // BEFORE the socket alloc below, which would otherwise take a low free slot.
+    int closed_bit = handle_get_cloexec(p, 3);
+    s64 dup_badf = viv_dup_for_test(p, 3);
+
+    // SOCKET DECLINE: an fd carrying a socktab entry is refused -ENOSYS, exactly
+    // as dup3 declines a socket source -- a dup that did not also register the new
+    // number would hand back an fd the socket path cannot recognize.
+    p->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(p->socktab != NULL, "socktab alloc");
+    hidx_t sockfd = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    viv_socktab_claim(p->socktab, (s32)sockfd, VIV_NET_TCP, 200);
+    bool sock_pre = viv_socktab_find(p->socktab, (s32)sockfd) != NULL;
+    s64 dup_sock = viv_dup_for_test(p, (u64)sockfd);
+
+    // TEARDOWN, then assert (TEST_ASSERT returns; proc_free frees the socktab).
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(live >= 0, "precondition: a live fd was allocated");
+    TEST_ASSERT(dup_ok >= 0 && dup_ok != live,
+                "POSITIVE: dup of a live fd yields a fresh fd -- the arm reaches "
+                "handle_dup_posix, it is not a no-op verdict");
+    TEST_EXPECT_EQ(closed_bit, -1, "precondition: fd 3 is CLOSED");
+    TEST_EXPECT_EQ(dup_badf, -(s64)T_E_BADF, "dup of a closed fd is EBADF");
+    TEST_ASSERT(sock_pre, "precondition: the socktab entry exists");
+    TEST_EXPECT_EQ(dup_sock, -(s64)T_E_NOSYS,
+                   "SOCKET DECLINE: dup of a socktab-tracked fd is ENOSYS -- no "
+                   "unregistered socket fd is minted (mirrors dup3's decline)");
 }
 
 // 6b: execve drops the socktab entry of every close-on-exec socket, and ONLY

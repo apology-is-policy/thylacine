@@ -237,10 +237,18 @@ static const struct viv_reject g_viv_rejects[] = {
     // PRIMITIVE, which never enters viv_linux_dispatch and so never runs the hook.
     //
     // So the rule for a future promotion is not "extend the hook" but "pay it
-    // in the arm your refusal structure demands". `dup` and `close_range` still
-    // owe it, and each still looks like a trivial renumber that would silently
-    // reintroduce the bug.
-    { VIV_LINUX_DUP,         VIV_FORWARD },
+    // in the arm your refusal structure demands". `close_range` still owes it,
+    // and still looks like a trivial renumber that would silently reintroduce
+    // the bug.
+    //
+    // `dup` (git-remote-https): git's transport-helper dup()s the helper's
+    // output fd to wrap it in a FILE*, so the external-helper transports need
+    // it -- FORWARD returned ENOSYS ("can't dup helper output fd"). It is an
+    // fd-CREATING row, not fd-freeing (like pipe2 below), so it owes no socktab
+    // DROP; but it DECLINES a socket SOURCE (ENOSYS, as dup3 does), because a
+    // dup that did not also register the new number would hand back a socket fd
+    // the socket path cannot recognize. Its shell arm lives beside dup3's.
+    { VIV_LINUX_DUP,         VIV_TIER2   },  // git-remote-https helper pipe
     { VIV_LINUX_DUP3,        VIV_TIER2   },  // #157: vivarium_dup3_decide
     { VIV_LINUX_CLOSE_RANGE, VIV_FORWARD },
 
