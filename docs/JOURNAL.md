@@ -22,6 +22,67 @@ needed the operator.
 
 ---
 
+## 2026-08-27 (aux) -- milestone B: `git clone` + `git fetch` over HTTPS work under the phenotype (the first external TLS on Thylacine), up a ladder of gaps each caught by the gate reddening
+
+Picked up from a self-compact at `da19918c` (B1 curl-git built, B2 staged). First
+lesson, relearned the hard way: **`tools/test.sh` builds only when the kernel ELF
+is MISSING** (`test.sh:132`), so both my "B2 boot-verify" and the first B3 bake had
+silently booted a STALE pre-session image -- my env vars (`PRESERVE=0`,
+`BAKE_GITNET=1`) reached no bake. A harness needing a fresh bake must FORCE it
+(`build.sh all`) and verify staging by CONTENT (`build/vivarium/git-net/config.json`),
+never by the build's exit code. B2's conclusion held only by luck (the stale image
+already carried the curl git).
+
+Built the B3 gate -- a net-granted `git-net` container + joey's `do_git_https_gate`
++ `tools/test-git-https.sh` -- staged ONLY under `THYLACINE_BAKE_GITNET=1`, so the
+default hermetic suite (test.sh / SMP gate / LS-CI) stays internet-free (the
+git-probe SKIP-if-absent idiom; the NP-3 precedent for keeping a real-NIC probe out
+of the ladder). Then walked the clone up a ladder, each rung a red gate:
+
+1. **`dup(2)` ENOSYS.** `fatal: can't dup helper output fd: Function not implemented`.
+   git-remote-https (the external https helper) `dup()`s its output pipe; `VIV_FORWARD`
+   is a placeholder returning ENOSYS (`syscall.c:~12658`). `file://` clone works (no
+   external helper), which is why this hid until https. FIXED: `dup(23)` is TIER2 ->
+   `handle_dup_posix` (rights verbatim I-6; the I-5 alias gate refuses hw/Srv). The old
+   test misclassified `dup` as fd-FREEING (it CREATES an fd, frees none) -- a finding,
+   corrected, + a new `vivarium.dup_arm` runtime test (positive / EBADF / socket-decline).
+   Opus audit (`70e19dd8`): CLEAN, 0 P0 / 0 P1 / 0 P2 / 3 P3 all dispositioned. Fable
+   was out of credits -> fell to the Opus fallback per scripture, never skipped;
+   `MODEL(start)==MODEL(end)`.
+
+2. **DNS-by-name.** `Could not resolve host`. musl's `getaddrinfo` needs UNCONNECTED
+   UDP + non-blocking; the phenotype serves only CONNECTED UDP (`vivarium.c:1667`). This
+   is GENERAL (the curl-demo hit it too, using `--resolve`), = net-4d "OWED", larger
+   than git. Worked around for the gate with a FRESH-resolved `/etc/hosts` pin (isolates
+   the transport proof from DNS; resolved at bake time so never a stale hardcode).
+
+3. **External TLS-over-netd: WORKS -- the first ever on Thylacine.** GIT_CURL_VERBOSE
+   showed a full TLS 1.3 handshake + "SSL certificate verified via OpenSSL" against the
+   baked Mozilla CA bundle + `HTTP/1.1 200 OK` + the git-upload-pack advertisement. Every
+   prior TLS proof in the tree was loopback.
+
+4. **The v2 wall.** git's DEFAULT protocol v2 reads the whole capability advertisement
+   and writes NOTHING back (no ls-refs, no POST), exiting rc=1 SILENTLY -- a
+   phenotype-induced bug (native git v2 is fine), tracked. `GIT_TRACE_PACKET` pinned it:
+   `git<` capabilities received, zero `git>`. **Forcing `protocol.version=0` -> the clone
+   SUCCEEDS end to end** (ref list -> `git> want` -> packfile -> checkout). Set in both
+   the gate and the `/viv/bin` production gitconfig so real git works now; v2 tracked.
+
+5. **The fetch quirk.** `git fetch --depth 1 origin` on the shallow clone: "Failed to
+   traverse parents ... remote did not send all necessary objects" -- git can't traverse
+   the tip's absent parents. A shallow-repo quirk, native too, NOT a phenotype gap.
+   `git fetch --unshallow` is the correct op AND downloads a real pack (the parent
+   history), so the gate now proves the fetch path in full.
+
+**Result: `joey: git-https gate PASS -- git clone + fetch over HTTPS ... network git
+works, milestone B`.** Boot OK, suite 1464/1464 (with the new dup test).
+
+**Open, surfaced to the operator:** (a) git protocol v2 aborts under the phenotype
+(forced v0; getsockname-ENOSYS during v2 connection-reuse is the leading hypothesis --
+no native handler exists); (b) DNS-by-name = net-4d (general phenotype unconnected-UDP;
+IP-pinned for the gate); (c) push-over-https awaits a writable remote. All are
+milestone-B completion items, more general than git.
+
 ## 2026-08-26 (aux) -- /viv/bin sub-chunk B: the mechanism proven LIVE, then real git shipped at /viv/bin; the full probe is container-shaped, and A-3 bounds the user story
 
 Continues the entry below (sub-chunk A landed the kernel mechanism; this run

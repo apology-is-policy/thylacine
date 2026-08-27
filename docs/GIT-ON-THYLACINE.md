@@ -133,6 +133,20 @@ dependency, separately tracked.
 
 ### Milestone B -- network git (clone / fetch / push over https)
 
+> **STATUS 2026-08-27 (aux): clone + fetch over HTTPS ACHIEVED under the phenotype**
+> (`joey: git-https gate PASS`; commits `70e19dd8` dup + the gate infra). The B3 gate
+> proved the full transport: external TLS-over-netd (the first on Thylacine) + HTTP +
+> smart-http + packfile + checkout + `--unshallow` fetch. Three items REMAIN, surfaced
+> as decisions: **(a)** git's DEFAULT protocol **v2** aborts silently under the phenotype
+> (reads the capability advertisement, writes nothing back -- a phenotype bug); forced
+> **`protocol.version=0`** (fully functional) in both gitconfigs; v2 root-cause tracked
+> (getsockname-ENOSYS during v2 connection-reuse is the leading hypothesis). **(b)**
+> **DNS-by-name** needs the phenotype's unconnected-UDP + non-blocking path (= **net-4d**,
+> general -- every networked Linux binary needs it); the gate IP-pins `/etc/hosts` fresh.
+> **(c)** **push** over https needs a writable/authenticated remote (deferred). The dup(2)
+> translation was the one kernel change; a phenotype-networking arc (v2 + net-4d) would
+> complete "network git" fully.
+
 A **build + staging** problem, precisely scoped by the research. Built on
 thyla-pi (the existing aarch64-musl cross-builder that produced the current git).
 

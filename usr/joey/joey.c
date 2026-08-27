@@ -1694,6 +1694,81 @@ static int do_git_probe_gate(void) {
     return 0;
 }
 
+// do_git_https_gate -- the git-under-VIVARIUM milestone-B gate (network git).
+// joey (SYSTEM) spawns `viv run /vivarium/git-net`, which runs /githttps.sh: a
+// real `git clone` + `git fetch` over HTTPS from an external remote, through
+// netd + slirp + the baked Mozilla CA bundle. Each step emits a GITHTTPS-* marker;
+// the gate asserts the terminal GITHTTPS-DONE and reports the first missing step
+// (a DNS failure, a TLS failure and a pack failure are different bugs).
+//
+// HERMETICITY: the git-net bundle is staged ONLY under THYLACINE_BAKE_GITNET=1
+// (tools/build.sh), so the DEFAULT image has no /vivarium/git-net and this gate
+// SOFT-SKIPS -- every hermetic boot (test.sh, the SMP gate, LS-CI) stays
+// internet-free. It is BOOT-FATAL only when the bundle is present, i.e. only on
+// an explicit tools/test-git-https.sh bake on a networked host, which owns that
+// network dependency. This is the git-probe SKIP-if-absent / FATAL-if-present
+// idiom carried to a network test (the NP-3 precedent: a real-NIC probe is never
+// a fatal member of the hermetic ladder).
+//
+// Net is a NAMESPACE bind (viv opens /net and binds it into the container when
+// the manifest says net=granted), NOT a capability -- so the extra_caps handed to
+// run_viv_bundle is CSPRNG only (git's entropy), exactly as the git-probe gate.
+static int do_git_https_gate(void) {
+    static const char gb[] = "/vivarium/git-net/config.json";
+    long gbfd = t_open(T_WALK_OPEN_FROM_ROOT, gb, sizeof(gb) - 1, T_OPATH);
+    if (gbfd < 0) {
+        t_putstr("joey: git-https gate SKIPPED (no /vivarium/git-net bundle -- "
+                 "the default image is hermetic; rebuild THYLACINE_BAKE_GITNET=1 "
+                 "on a networked host, or run tools/test-git-https.sh)\n");
+        return 0;
+    }
+    (void)t_close(gbfd);
+
+    static const char vargv[] = "/bin/viv\0run\0/vivarium/git-net";
+    unsigned char acc[4096];
+    size_t acc_len = 0;
+    int    status  = -1;
+    size_t total   = 0;
+    int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "git-net",
+                                    &status, acc, sizeof(acc), &acc_len, &total,
+                                    T_CAP_CSPRNG_READ);
+    (void)total;
+
+#define GH_MK(s) { (s), sizeof(s) - 1 }
+    // clone + fetch over HTTPS from a real remote, in order, so the first-missing
+    // report distinguishes a helper-spawn failure from a clone failure from a
+    // fetch failure.
+    static const struct argv_marker legs[] = {
+        GH_MK("GITHTTPS-GIT-OK"),
+        GH_MK("GITHTTPS-CLONE"),
+        GH_MK("GITHTTPS-VERIFY"),
+        GH_MK("GITHTTPS-FETCH"),
+        GH_MK("GITHTTPS-DONE"),
+    };
+#undef GH_MK
+    int missing = -1;
+    for (unsigned i = 0; i < sizeof(legs) / sizeof(legs[0]); i++) {
+        if (!mem_contains(acc, acc_len, legs[i].str, legs[i].len)) {
+            missing = (int)i;
+            break;
+        }
+    }
+    if (ran != 0 || status != 0 || missing >= 0) {
+        char nb[24];
+        t_putstr("joey: git-https gate FAILED first-missing=");
+        t_putstr(missing >= 0 ? legs[missing].str : "<none>");
+        t_putstr(" status=");
+        t_putstr(itoa_dec(status, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: git-https gate PASS (git clone + fetch over HTTPS from a real "
+             "remote under the phenotype, as SYSTEM -- DNS via netd+slirp, TLS "
+             "against the baked Mozilla CA bundle, smart-http + pack: network git "
+             "works, milestone B)\n");
+    return 0;
+}
+
 // do_native_coreutil_smoke — U-6e-pre-b: the FIRST runtime exercise of the
 // adopted native coreutils (echo/cat/wc/head/tail/seq/sort/uniq/tr/cut/grep/
 // basename/dirname/pwd/true/false). coreutil-smoke is itself a native
@@ -10457,6 +10532,13 @@ int main(void) {
                 // reads against a log where every narrower phenotype leg has
                 // already reported. SOFT-SKIPS without the static-git tarball.
                 if (do_git_probe_gate() != 0) return 1;
+
+                // The git-under-VIVARIUM milestone-B gate (network git over
+                // HTTPS). SOFT-SKIPS without the git-net bundle -- the default
+                // hermetic image never stages it -- so this is a no-op on every
+                // normal boot; it runs only on a THYLACINE_BAKE_GITNET=1 bake
+                // (tools/test-git-https.sh) on a networked host.
+                if (do_git_https_gate() != 0) return 1;
 
                 // #212: the one line the harness keys on. Both gates have run
                 // and recorded their disposition; say which, in a form an exit

@@ -1348,9 +1348,10 @@ VIVEOF
                 echo "==> viv bundles: Alpine NET-GRANTED twin staged at $nb (org.thylacine.net=granted + resolv.conf + hosts pin + OPENSSL_armcap=0 -- the phenotype-network probe vehicle)"
                 # The GIT twin (the git-under-VIVARIUM mission, milestone A):
                 # the same rootfs plus a REAL static git (built on thyla-pi:
-                # git 2.51.2, musl-gcc -static against static zlib 1.3.1,
-                # NO_CURL/NO_OPENSSL/NO_PTHREADS/NO_ICONV/NO_UNIX_SOCKETS/
-                # NO_REGEX=NeedsStartEnd; source tarballs sha-pinned in the
+                # git 2.51.2, musl-gcc -static, WITH curl [static OpenSSL +
+                # libcurl for milestone B https], keeping NO_OPENSSL [https via
+                # libcurl] / NO_PTHREADS / NO_EXPAT / NO_ICONV / NO_UNIX_SOCKETS
+                # / NO_REGEX=NeedsStartEnd; source tarballs sha-pinned in the
                 # commit message). Staged at /usr/bin/git with dashed
                 # upload/receive-pack SYMLINKS beside it: `clone file://`
                 # spawns `sh -c "git-upload-pack '<path>'"` (connect.c
@@ -1362,8 +1363,9 @@ VIVEOF
                 # NO_PTHREADS so no code path can reach clone(CLONE_THREAD)),
                 # core.fsync=none (the native fsync gate wants RIGHT_WRITE
                 # while Linux allows rdonly-fsync), core.createObject=rename
-                # (no linkat), reflogs off (no O_APPEND). Local-only: NO net
-                # grant. Same absent/matching/different trichotomy as curl.
+                # (no linkat). The probe FORCES reflogs ON (gitprobe.sh) so the
+                # git 6.27 O_APPEND path is exercised. Local-only: NO net grant.
+                # Same absent/matching/different trichotomy as curl.
                 #
                 # It runs as a BOOT PROBE spawned by joey (PRINCIPAL_SYSTEM),
                 # NOT interactively: the pool 9P mount is system-owned, so a
@@ -1514,10 +1516,146 @@ VIVEOF
 	pager = cat
 [http]
 	sslCAInfo = /etc/ssl/certs/ca-certificates.crt
+[protocol]
+	; v0 -- git's default v2 smart-http negotiation aborts silently under the
+	; phenotype (reads the capability advertisement, writes nothing back). v0
+	; (GET refs + POST want) clones/fetches/pushes fully. Drop when v2 is fixed.
+	version = 0
 [safe]
 	directory = *
 VIVEOF
-                        echo "==> viv bundles: /viv-bin production git tree staged at $vbin (static git 2.51.2 WITH curl -- git + git-remote-http[s] + git-http-fetch + dashed pack symlinks + templates + gitconfig[http.sslCAInfo]; joey binds it at /viv/bin MPHENO_LINUX; the phenotype-BY-LOCATION product mount, now https-capable)"
+                        echo "==> viv bundles: /viv-bin production git tree staged at $vbin (static git 2.51.2 WITH curl -- git + git-remote-http[s] + git-http-fetch + dashed pack symlinks + templates + gitconfig[http.sslCAInfo + protocol.version=0]; joey binds it at /viv/bin MPHENO_LINUX; the phenotype-BY-LOCATION product mount, now https-capable)"
+
+                        # The git-NET bundle (milestone B3): the SAME curl-git,
+                        # NET-GRANTED, running a clone-https boot script. It
+                        # proves `git clone https://` end to end under the
+                        # phenotype -- DNS (github.com via netd -> slirp 10.0.2.3;
+                        # git's libcurl uses the SYNCHRONOUS resolver because the
+                        # build set --disable-threaded-resolver, so a by-name
+                        # clone needs no --resolve pin the way curl-the-binary did
+                        # to dodge its resolver thread's CLONE_THREAD refusal) +
+                        # TLS (OpenSSL over the socket, the server cert validated
+                        # against the baked Mozilla CA bundle) + smart-http + pack.
+                        #
+                        # HERMETICITY: staged ONLY under THYLACINE_BAKE_GITNET=1.
+                        # The default image OMITS it, so joey's do_git_https_gate
+                        # SOFT-SKIPS the absent bundle and every hermetic boot
+                        # (test.sh, the SMP gate, LS-CI) stays internet-free. The
+                        # gate is BOOT-FATAL only when the bundle is present --
+                        # i.e. only on an explicit tools/test-git-https.sh bake on
+                        # a networked host, which OWNS that network dependency.
+                        # This is the git-probe SKIP-if-absent / FATAL-if-present
+                        # idiom carried to a network test (the NP-3 precedent for
+                        # keeping a real-NIC probe out of the hermetic ladder).
+                        if [[ "${THYLACINE_BAKE_GITNET:-0}" == "1" ]]; then
+                            local gnb="$vstage/git-net"
+                            rm -rf "$gnb"; mkdir -p "$gnb"
+                            cp -R "$ab/rootfs" "$gnb/rootfs"
+                            rm -rf "$gnb/rootfs/gate"
+                            mkdir -p "$gnb/rootfs/usr/bin" \
+                                     "$gnb/rootfs/usr/share/git-core"
+                            # The FLAT git tree (git + the real git-remote-http
+                            # ELF + the git-remote-https symlink + git-http-fetch +
+                            # the dashed pack symlinks) into /usr/bin, with
+                            # GIT_EXEC_PATH pointed there so git finds
+                            # git-remote-https (NOT a builtin, unlike the
+                            # upload/receive-pack symlinks). templates ride at the
+                            # compiled default (/usr/share/git-core/templates,
+                            # prefix=/usr) so a clone installs hooks with no
+                            # "templates not found" noise + no config.
+                            cp -R "$gx/viv-bin/"* "$gnb/rootfs/usr/bin/"
+                            mv "$gnb/rootfs/usr/bin/templates" \
+                               "$gnb/rootfs/usr/share/git-core/templates"
+                            chmod 0755 "$gnb/rootfs/usr/bin/git" \
+                                       "$gnb/rootfs/usr/bin/git-remote-http"
+                            # resolv.conf: the slirp DNS (10.0.2.3). musl's
+                            # getaddrinfo would query it over UNCONNECTED UDP +
+                            # non-blocking, which the phenotype does not yet serve
+                            # (vivarium.c: only CONNECTED UDP; net-4d "DNS E2E" is
+                            # OWED). So DNS-by-name does not work for a phenotype
+                            # container yet -- present for when net-4d lands.
+                            printf 'nameserver 10.0.2.3\n' \
+                                > "$gnb/rootfs/etc/resolv.conf"
+                            # /etc/hosts: a FRESH-resolved host->IP pin the harness
+                            # passes in THYLACINE_GITNET_HOSTS (getaddrinfo checks
+                            # /etc/hosts BEFORE any DNS query, so the clone needs no
+                            # resolver). This ISOLATES the git-transport proof (TLS
+                            # + netd TCP + smart-http + pack) from the orthogonal
+                            # DNS-by-name gap above -- exactly as the alpine-net
+                            # twin pins example.com, but resolved at bake time so it
+                            # is never a stale hardcode. Absent -> the clone would
+                            # attempt DNS and surface the net-4d gap.
+                            if [[ -n "${THYLACINE_GITNET_HOSTS:-}" ]]; then
+                                printf '%s\n' "$THYLACINE_GITNET_HOSTS" \
+                                    >> "$gnb/rootfs/etc/hosts"
+                                echo "==> viv bundles: git-net /etc/hosts pinned ($THYLACINE_GITNET_HOSTS -- fresh-resolved transport isolation; DNS-by-name is net-4d)"
+                            fi
+                            cat > "$gnb/rootfs/etc/gitconfig" <<'VIVEOF'
+[user]
+	name = Thylacine
+	email = thyla@extinct.local
+[core]
+	fsync = none
+	createObject = rename
+	pager = cat
+[http]
+	sslCAInfo = /etc/ssl/certs/ca-certificates.crt
+[protocol]
+	; v0. git's DEFAULT protocol v2 over smart-http aborts SILENTLY under the
+	; VIVARIUM phenotype: the client reads the whole v2 capability advertisement
+	; and then writes NOTHING back (no ls-refs, no POST) -- a phenotype-induced
+	; bug, tracked. v0 (GET /info/refs -> the ref list, then POST the "want")
+	; works end to end here: clone + fetch + the packfile + checkout. Drop this
+	; when the v2 path is root-caused.
+	version = 0
+[pack]
+	threads = 1
+[checkout]
+	workers = 1
+[safe]
+	directory = *
+VIVEOF
+                            cat > "$gnb/rootfs/githttps.sh" <<'VIVEOF'
+#!/bin/sh
+# B3: prove `git clone https://` under the Linux phenotype through netd + the
+# baked Mozilla CA bundle. NET-GRANTED + CSPRNG-GRANTED, run as SYSTEM. Each step
+# emits a GITHTTPS-* marker the joey gate scans; a failure emits
+# GITHTTPS-FAIL-<step> and stops, so a DNS failure, a TLS failure and a pack
+# failure are distinct diagnoses. stderr stays LIVE -- the resolver/TLS error is
+# the diagnostic when a step reddens.
+rm -rf /tmp/hw 2>/dev/null
+cd /tmp || { echo GITHTTPS-FAIL-CD; exit 1; }
+git version >/dev/null 2>&1 && echo GITHTTPS-GIT-OK || { echo GITHTTPS-FAIL-GIT; exit 1; }
+git clone --depth 1 https://github.com/octocat/Hello-World.git hw && echo GITHTTPS-CLONE || { echo GITHTTPS-FAIL-CLONE; exit 1; }
+test -d /tmp/hw/.git && echo GITHTTPS-VERIFY || { echo GITHTTPS-FAIL-VERIFY; exit 1; }
+cd /tmp/hw || { echo GITHTTPS-FAIL-CD2; exit 1; }
+# --unshallow, not --depth 1: the clone above is shallow (tip only), so a second
+# --depth 1 fetch would ask git to traverse the tip's absent parents and fail
+# ("remote did not send all necessary objects") -- a shallow-repo quirk, native
+# too, not a phenotype gap. --unshallow is the correct op AND it downloads a REAL
+# pack (the parent history) over https, so it proves the fetch path in full.
+git fetch --unshallow origin >/dev/null 2>&1 && echo GITHTTPS-FETCH || { echo GITHTTPS-FAIL-FETCH; exit 1; }
+echo GITHTTPS-DONE
+VIVEOF
+                            chmod 0755 "$gnb/rootfs/githttps.sh"
+                            cat > "$gnb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "/githttps.sh"],
+        "env": ["PATH=/usr/bin:/bin:/sbin:/usr/sbin", "HOME=/tmp", "GIT_EXEC_PATH=/usr/bin", "OPENSSL_armcap=0"],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux",
+        "org.thylacine.net": "granted",
+        "org.thylacine.csprng": "granted"
+    }
+}
+VIVEOF
+                            echo "==> viv bundles: git-net staged at $gnb (THYLACINE_BAKE_GITNET=1: net-granted clone-https boot vehicle -- the B3 gate; default bakes OMIT it, so the hermetic suite stays internet-free)"
+                        fi
                     else
                         echo "==> viv bundles: static-git tarball extract FAILED -- git-probe skipped" >&2
                     fi
