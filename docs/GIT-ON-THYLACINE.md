@@ -202,6 +202,78 @@ The one auditable shortcut is reusing **stunnel/static-curl's `-dev` tarball**
 for the libcurl half -- but verify its resolver mode (it bundles c-ares; confirm
 c-ares-or-`--disable-threaded-resolver` before trusting it under CLONE_THREAD).
 
+### Milestone B2 -- the phenotype networking + threading arc (the "make it literal" cluster)
+
+> **STATUS 2026-08-28 (aux): PLANNED.** Milestone B proved HTTPS clone + fetch,
+> but behind three asterisks -- `-c protocol.version=0`, an `/etc/hosts` IP-pin
+> (no DNS-by-name), SYSTEM-only -- and only for *single-threaded* programs. Those
+> asterisks plus the `pthread` wall are **one cluster** of VIVARIUM gaps, all
+> "unconnected-UDP / non-blocking-socket / thread" machinery that **most**
+> networked or concurrent Linux binaries need, not just git. This arc closes it.
+
+Two things fall out of closing this cluster: **(a)** `git clone
+https://github.com/apology-is-policy/thylacine.git` becomes *literal* -- by URL,
+default protocol, verified TLS, no hosts-pin -- and **(b)** real
+multithreaded/networked Linux programs run under `viv` (npxf, stock curl with
+its threaded resolver, git's parallel index-pack). This is a VIVARIUM arc that
+git's networking *depends on*; it is sequenced here because the git README is
+its most legible exit criterion.
+
+**The two headline unlocks:** DNS-by-name (**net-4d**) makes the clone URL
+literal; threads (**CLONE_THREAD**) run the multithreaded majority.
+
+**Sequence** (dependency + impact order; N-1 is the shared substrate):
+
+- **N-1 -- non-blocking sockets (`SOCK_NONBLOCK`).** The shared substrate: musl's
+  DNS resolver, npxf's connect-with-timeout, and curl all need it. Today
+  `socket(..., SOCK_NONBLOCK, ...)` is refused outright
+  (`kernel/vivarium.c:1628-1630`). Scope: admit the flag + give the socket Dev a
+  non-blocking mode -- the `CNONBLOCK` pipe fill from the git-stash chunk is the
+  near-template (same idea, the netd/weft socket layer instead of devpipe), plus
+  `fcntl(F_SETFL, O_NONBLOCK)` on a socket fd. Audit-bearing (I-9, the socket
+  readiness wait/wake).
+
+- **N-2 -- net-4d: unconnected UDP + DNS-by-name.** *The README unlock.* musl's
+  resolver `sendto`s a query to the nameserver on an **unconnected** UDP socket
+  and `recvfrom`s the reply under a poll timeout; the phenotype serves only the
+  **connected** datagram shape (`vivarium_sendto_decide`/`recvfrom_decide` report
+  ENOSYS for unconnected, `kernel/vivarium.c:1691-1698`). Scope: build the
+  unconnected `sendto(addr)`/`recvfrom(addr)` datagram path (a per-datagram dial
+  to the named address) on top of N-1. Exit: `getaddrinfo("github.com")` resolves
+  via `/etc/resolv.conf` -> slirp DNS (10.0.2.3), so the clone URL is literal.
+
+- **N-3 -- phenotype threads (`CLONE_THREAD`).** The npxf unlock + curl's threaded
+  resolver + git's parallel index-pack. **Already fully scoped:
+  `docs/PHENOTYPE-THREADS-GUIDE.md`** (mental model; the one genuinely-new core
+  `thread_create_forked_in_proc`; the `futex`/`gettid` rows; build order; the
+  test ladder). The largest single piece and the highest-leverage -- it unblocks
+  "most multithreaded Linux binaries," not just git.
+
+- **N-4 -- AF_UNIX sockets.** npxf's local transport (the phenotype admits
+  AF_INET only, `kernel/vivarium.c:1622`). Lower priority -- many programs run
+  fine over AF_INET loopback -- but real for anything that hard-codes AF_UNIX.
+
+- **N-5 -- protocol v2 root-cause.** Removes the `protocol.version=0` asterisk so
+  git's *default* protocol works. Leading hypothesis: `getsockname`-ENOSYS during
+  v2's connection-reuse (B status (a)). Scope: reproduce with `GIT_TRACE_PACKET`,
+  translate `getsockname` (+ whatever the reuse path needs), confirm a v2 clone.
+
+- **N-6 -- push over https.** Completes milestone B's *own* exit criteria (clone +
+  fetch + **push**; push is currently deferred). Needs a writable/authenticated
+  remote + the smart-push path (`git-remote-https` POST `git-receive-pack`) +
+  credential handling.
+
+**Exit criteria (the arc):** `git clone https://github.com/apology-is-policy/thylacine.git`
+succeeds by URL, default protocol, over verified TLS, in a net-granted bundle; a
+multithreaded musl binary (the pthread-guide probe, then npxf) runs; milestone
+B's push criterion is met. The README line becomes literally true, not asterisked.
+
+**Suggested first two:** **N-1 -> N-2** (the README unlock, small + high-visibility)
+and **N-3** (threads, the general unlock, guide already written) can proceed in
+parallel -- they share only N-1's non-blocking substrate. Cross-refs: the socket
+`*_decide` functions are `kernel/vivarium.c:1522-1710`; the gap census that
+surfaced this cluster is the curl/git mission record in `docs/AUX-ROADMAP.md`.
+
 ### Milestone C1 -- the non-interactive complete workflow (the self-hosting floor)
 
 > **STATUS 2026-08-27 (aux): COMPLETE -- all 13 of 13 verbs VERIFIED under the
