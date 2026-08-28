@@ -268,6 +268,20 @@ succeeds by URL, default protocol, over verified TLS, in a net-granted bundle; a
 multithreaded musl binary (the pthread-guide probe, then npxf) runs; milestone
 B's push criterion is met. The README line becomes literally true, not asterisked.
 
+**Build-system integration (an N-6 graduation step).** The git bundle's inputs
+(`static-curl`, `static-git`) are ALREADY first-class **forage** targets
+(`tools/forage.sh static-curl|static-git` -> `build/cache/`, with a `forage_hint`
+emitted on absence, exactly like `alpine`) -- so forage is done. What is NOT done
+is the **build-config** side: `GOROOT`/`CLADE`/`ALPINE` are first-class
+`bc_def bake CHUNK_*` symbols (togglable via `tools/configure.sh`, `docs/BUILD-CONFIG-DESIGN.md`),
+but the git bundles are still raw `THYLACINE_BAKE_GITNET=1` / `_GITWF=1` env
+flags, outside the configurator -- correct while they are in-flight *gates*, but
+the moment https-git is a shipped *feature* it should graduate to a
+`CHUNK_GITNET` symbol mirroring `CHUNK_ALPINE` (a one-line `bc_def bake`), so it
+is a configured option with the standard "needs the tarball foraged; absent ->
+skipped" note rather than an ad-hoc env flag. That promotion is the concrete
+"graduate into the shipped image" step §2.3/B allude to.
+
 **Suggested first two:** **N-1 -> N-2** (the README unlock, small + high-visibility)
 and **N-3** (threads, the general unlock, guide already written) can proceed in
 parallel -- they share only N-1's non-blocking substrate. Cross-refs: the socket
