@@ -102,8 +102,17 @@ LLVM_PREFIX="${LLVM_PREFIX:-/opt/homebrew/opt/llvm}"
 # lld as a package separate from llvm). Mirrors the cmake toolchains.
 LLD_PREFIX="${LLD_PREFIX:-/opt/homebrew/opt/lld}"
 
-target="${1:-all}"
-shift || true
+# The first positional is the build target; a LEADING option (e.g.
+# `build.sh --config <name>`, which the configurator prints) means "no explicit
+# target" -> default to `all` and leave the option for the loop below. Without
+# this, `--config` was consumed AS the target and its argument fell through to
+# "Unknown option: <name>".
+if [[ "${1:-}" == -* ]]; then
+    target="all"
+else
+    target="${1:-all}"
+    shift || true
+fi
 
 # --- build configuration (tools/build-config.sh: the typed config artifact) ----
 # docs/BUILD-CONFIG-DESIGN.md. The old flag-bundles + scattered THYLACINE_* env
