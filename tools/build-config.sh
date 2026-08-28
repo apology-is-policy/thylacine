@@ -76,6 +76,12 @@ bc_def bake CHUNK_CHASE_W2 bool n "env:THYLACINE_CHASE_W2" \
 bc_def bake CHUNK_ALPINE bool n "want:THYLACINE_WANT_ALPINE" \
   "Alpine bundle (VIVARIUM)" \
   "An Alpine minirootfs + busybox bundle for the VIVARIUM Linux-binary phenotype. Needs the two cache inputs (alpine rootfs + busybox apk); the manifest/forage step resolves their paths."
+bc_def bake CHUNK_GITNET bool n "env:THYLACINE_BAKE_GITNET" \
+  "Network-git bundle (VIVARIUM, https)" \
+  "The net-granted git-over-https bundle: clone/fetch a repo over HTTPS (verified TLS) under the Linux phenotype, via git-remote-https + libcurl. Needs the static-curl + static-git tarballs; absent -> skipped (run 'forage'). Net-granted + non-hermetic, so off by default; the B3 gate vehicle (see docs/GIT-ON-THYLACINE.md milestone B/B2)."
+bc_def bake CHUNK_GITWF bool n "env:THYLACINE_BAKE_GITWF" \
+  "Git-workflow gate bundle (VIVARIUM, C1)" \
+  "The HERMETIC non-interactive git-workflow verify bundle (branch/checkout/diff/status/merge/rebase/reset/stash/worktree/gc; no net). Needs the static-git tarball; absent -> skipped (run 'forage'). Off by default; the C1 self-hosting-floor gate vehicle."
 bc_def bake CHUNK_QUAKE bool n "want:THYLACINE_WANT_QUAKE" \
   "Quake (tyrquake, /quake)" \
   "Bakes the tyrquake port + the shareware pak (fetched from the network). A demo/fun chunk; the build runs the tyrquake stage when this is on."
