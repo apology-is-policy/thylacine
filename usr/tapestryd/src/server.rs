@@ -1141,12 +1141,14 @@ enum Cost {
     Cpu,
     /// A CPU-composed region's upload + flush (`screen_push`).
     Push,
-    /// The poke path's SET_SCANOUT-class rebind alone (both the promotion
-    /// switch and the steady-state per-poke flip -- a swapchain rotates
-    /// presentables, so every poke rebinds). Splits PresentPokeImg so the
-    /// census can attribute the present's cost to the flip vs the flush.
+    /// The poke path's rebind arm (both the promotion switch and the
+    /// steady-state per-poke flip -- a swapchain rotates presentables, so
+    /// every poke rebinds): SET_SCANOUT-class + the bind's own internal
+    /// flush, i.e. the whole paint for a rotated poke.
     PokeBind,
-    /// The poke path's RESOURCE_FLUSH alone (the host display update).
+    /// The same-image re-poke's RESOURCE_FLUSH (new content in the
+    /// already-bound res). The rotated arm does NOT run this -- its paint
+    /// rides the bind (the run-5 double-paint fix).
     PokeFlush,
 }
 
@@ -6046,10 +6048,17 @@ impl Comp {
                 );
             }
         } else if self.scanout == Scanout::Direct(n) {
-            // The steady state is bind + flush EVERY poke (a swapchain
-            // rotates presentables, so bound_res never matches), and each
-            // is a synchronous device step -- timed apart so the census
-            // can say which one carries the present's cost.
+            // The steady state is one PAINT per poke. A rotating swapchain
+            // makes bound_res never match, so the bind arm runs per frame
+            // -- and direct_bind_adopted already flushes internally on
+            // success (its switch-case contract), so an outer flush after
+            // it would paint the SAME res at the SAME geometry twice: the
+            // run-5 histogram measured each flush as a ~10 ms quantized
+            // display roundtrip, so the double-paint was ~half the whole
+            // display wall. The outer flush now runs ONLY on the
+            // same-image re-poke arm (new content in the bound res).
+            // PokeBind therefore brackets scanout+flush (the paint
+            // included); PokeFlush counts re-pokes alone.
             if self.bound_res != g.res_id {
                 let tb = Instant::now();
                 let ok = self.direct_bind_adopted(&g, w, h);
@@ -6062,14 +6071,15 @@ impl Comp {
                 if !ok {
                     return; // refused flip: keep the old frame on screen
                 }
-            }
-            let tf = Instant::now();
-            let _ = self.gpu.flush(g.res_id, 0, 0, w, h);
-            let fns = tf.elapsed().as_nanos() as u64;
-            self.cost_add_ns(Cost::PokeFlush, fns);
-            #[cfg(feature = "test-mode")]
-            {
-                self.poke_hist_flush[Self::poke_hist_slot(fns)] += 1;
+            } else {
+                let tf = Instant::now();
+                let _ = self.gpu.flush(g.res_id, 0, 0, w, h);
+                let fns = tf.elapsed().as_nanos() as u64;
+                self.cost_add_ns(Cost::PokeFlush, fns);
+                #[cfg(feature = "test-mode")]
+                {
+                    self.poke_hist_flush[Self::poke_hist_slot(fns)] += 1;
+                }
             }
             presented = true;
         }
