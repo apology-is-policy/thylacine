@@ -785,12 +785,20 @@ per-leg direct-scanout witness):
 | LINEAR direct (default) | yes | 32.1 (5th consistent sample: 32.1–32.7) | 31.2 |
 | BUFFER_BLIT | yes | **34.4** | 29.1 |
 | BUFFER_BLIT | no (unpromoted surface, run-2 accident) | **79.9** | 12.5 |
+| LINEAR direct, double-paint fixed (run 6) | yes | **47.6** | 21.0 |
+| BUFFER_BLIT, double-paint fixed (run 6) | yes | **51.3** | 19.5 |
 
-**The decision, per this section's own rule**: the blit variant does NOT
-close most of the gap (+7% vs the 44.7 same-day GL figure) → **no
-default flip**; LINEAR-direct stays the default and `-wsiblit` remains
-the A/B lever. The LINEAR-target hypothesis is REFUTED as the dominant
-cost.
+**The decision, per this section's own rule** (pre-fix): the blit variant
+did NOT close most of the gap (+7% vs the 44.7 GL figure) → **no default
+flip**; the LINEAR-target hypothesis REFUTED as the dominant cost.
+**Post-double-paint-fix (run 6)**: the tiling win holds proportionally
+(+7.8%, 51.3 vs 47.6) and both arms now clear the GL baseline. The flip
+question is re-framed by §8.2's resolution — the blit arm is simply the
+faster arm on this host — but the flip remains its OWN chunk: it must
+first resolve the eager-bo caveat (the blit chain's unmarked tiled-image
+allocs break venus-prove's no-eager-mint counter on UMA; the likely
+shape is an image-side chain-head marker symmetric with
+`blit_mem_pnext`). LINEAR stays the default until then.
 
 **What the accident measured**: the undisplayed leg ran the identical
 pipeline — render, blit, venus marshaling, the I-40 throttle-fence wait,
@@ -867,7 +875,25 @@ C composes with A/B later and is the cheapest test of the theory; the
 histogram gates C. All three leave I-40 intact structurally (the client
 throttle bracket is untouched; the display-safe teardown drains
 whatever queue exists — B/A add a drain obligation to `wimg_teardown`
-that their design must carry explicitly). (Instrument
+that their design must carry explicitly).
+
+**MEASURED (runs 5–6).** The histogram was decisive for pacing: **zero
+of 3,796 steps under 8 ms** (bind massed 8–14, flush 8–11) — a hard
+floor under an idle-menu-to-full-scene workload is quantization, not
+work. Reading the bind with that lens then surfaced what the census had
+been pointing at: `direct_bind_adopted` already flushes internally on
+success, so the rotated poke was paying the ~10 ms roundtrip TWICE (the
+once-per-switch bind arm having become the per-frame steady state). The
+double-paint fix alone removed ~10 ms/frame — run 6: linear 47.6, blit
+51.3, the pre-registered prediction (45–48 / 50–53) landing inside its
+bands, and the census confirming the mechanism exactly (poke sum
+41.8 s → 22.8 s; flush n 1958 → 144, re-pokes only; bind unchanged,
+carrying the paint at 11.6 ms avg). **The remaining wall is the single
+~10 ms quantized flush inside the bind** — that is what options C/B/A
+now target, with A (MAILBOX) still operator-gated. With the fresh
+same-day GL baseline (44.8 — the prior day's 44.7 reproducing to
+0.2%), the ratified comparison closed INVERTED: VK linear +6.3%, VK
+blit +14.5% over GL. The lag was never venus. (Instrument
 provenance, because it was earned twice: the census read is coherent
 only because the ctl pins a per-fid generation at the offset-0 read, and
 the census CAPTURE is coherent only because every cost-row expect is

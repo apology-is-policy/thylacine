@@ -389,7 +389,66 @@ composed-transition expect also matched the `BIND FAILED` form) fixed by
 anchoring to the success form; F2 (the staleness sweep is mtime-based; a
 content-changed archive with a preserved-older mtime slips it) tracked with
 the content-hash-stamp fix named. Close `4a0e7323`; suite exit-0 the fifth
-time this window; venus-verdict 94/94; the push follows.
+time this window; venus-verdict 94/94; the push followed (`445d8798`, both
+mirrors verified).
+
+### The display wall: §8.2, the histogram verdict, and the double-paint hiding inside the bind
+
+The residual arithmetic reframed the whole comparison — GL 44.7 fps is
+22.4 ms/frame ≈ the SAME ~22 ms display wall + ~0.4 ms of render, so **both
+engines were display-wall-bound** and the GL-vs-VK gap was mostly venus
+residual. §8.2 landed as the seam record (scripture-first): the pacing-
+quantization suspect, and the A/B/C mechanism fork pre-researched with
+MAILBOX (option A) marked operator-signoff — the WSI advertises FIFO ONLY,
+so vkQuake never had a choice. The discriminator (per-step latency
+histograms, test-mode) went to the Pi as run 5 and came back decisive:
+**zero of 3,796 steps under 8 ms** — bind massed at 8–14, flush at 8–11. A
+hard floor under an idle-menu-to-full-scene workload is pacing, not work.
+F2's content-hash stamp also landed en route, discrimination-proven three
+legs including the mtime-preserving sabotage `-newer` is structurally blind
+to (`528e4539`).
+
+Then reading the bind with the quantization lens surfaced the sharper fact
+the census had been pointing at: `direct_bind_adopted` **already flushes
+internally on success** — so the steady-state rotated poke paid
+set_scanout + flush + a SECOND redundant flush, a double paint of the same
+res at the same geometry with nothing intervening. The bind arm was written
+for the once-per-switch case; presentable rotation made it the steady state
+— two individually-correct pieces composing into paying the ~10 ms
+quantized roundtrip twice per frame, in the hot path (the recorded class,
+live). Fix `69ff4cdd`: the outer flush runs only on the same-image re-poke
+arm. **The prediction, stated before run 6 measures**: removing ~10 ms from
+the wall puts leg A (linear) near 45–48 fps and leg B (blit) near 50–53 —
+past the 44.7 GL baseline, whose Bo path never double-painted (single bo,
+no per-frame rebind) and is therefore unchanged. If the numbers land there,
+the pacing model holds and the residual single-flush ~10 ms floor becomes
+the remaining target (options C/B/A). If they do not move, the double-paint
+theory is wrong and the record will say so.
+
+### Run 6 + the fresh baseline: the prediction lands inside both bands, and the comparison inverts
+
+**Linear 47.6 (band 45–48). Blit 51.3 (band 50–53).** The census confirmed
+the mechanism exactly — poke sum 41.8 s → 22.8 s (the removed flushes),
+flush n 1958 → 144 (same-image re-pokes only), bind unchanged at 11.6 ms
+avg carrying the paint; gate VERIFIED, the resize driver passing again,
+restore 2 s. And because the headline now crossed a day boundary, the GL
+baseline re-ran fresh (#236): **44.8** — yesterday's 44.7 reproducing to
+0.2%, so the host is stable and the comparison is same-day honest:
+
+| Path | fps | vs GL |
+|---|---|---|
+| GL — tyrquake/virgl direct | 44.8 | — |
+| VK — vkQuake/venus, LINEAR direct | 47.6 | +6.3% |
+| VK — vkQuake/venus, BUFFER_BLIT | **51.3** | **+14.5%** |
+
+**The W-4 charter's question closes inverted**: the vk lag was never venus
+— it was the display path paying a ~10 ms quantized roundtrip twice per
+frame, plus FIFO-only pacing. One redundant-flush removal later, the first
+Vulkan game on the Thylacine display outruns the GL port on the same
+silicon. The remaining ~10 ms wall (the single quantized flush inside the
+bind) is §8.2's C/B/A fork — C mechanical, A (MAILBOX) operator-gated —
+and the compose gate's numbers-condition is now met, with the chunk itself
+still the operator's call.
 
 ## 2026-08-31 (run 8, Fable) — W-3e: the SDL Vulkan glue, and the bind that had no trigger
 
