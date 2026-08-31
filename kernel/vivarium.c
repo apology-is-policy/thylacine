@@ -1659,8 +1659,11 @@ enum {
     VIV_IPPROTO_UDP    = 17,
 };
 
-struct viv_sock *viv_socktab_find(struct viv_socktab *tab, s32 fd) {
-    if (!tab || fd < 0) return NULL;
+// The building block: find the entry for `fd`, or NULL. The caller MUST hold
+// tab->lock (or be in the exec-alone window). A returned pointer is valid only
+// while the lock is held -- the public readers snapshot through it and drop it.
+static struct viv_sock *socktab_find_locked(struct viv_socktab *tab, s32 fd) {
+    if (fd < 0) return NULL;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
         if (tab->s[i].state != VIV_SOCK_FREE && tab->s[i].fd == fd)
             return &tab->s[i];
@@ -1668,39 +1671,13 @@ struct viv_sock *viv_socktab_find(struct viv_socktab *tab, s32 fd) {
     return NULL;
 }
 
-struct viv_sock *viv_socktab_claim(struct viv_socktab *tab, s32 fd,
-                                   enum viv_net_proto proto, u32 n) {
-    if (!tab || fd < 0) return NULL;
-    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
-        if (tab->s[i].state == VIV_SOCK_FREE) {
-            tab->s[i].fd          = fd;
-            tab->s[i].proto       = (u8)proto;
-            tab->s[i].state       = VIV_SOCK_FRESH;
-            tab->s[i].n           = n;
-            tab->s[i].bound_addr  = 0;   // a fresh socket carries no bind
-            tab->s[i].bound_port  = 0;
-            tab->s[i].remote_addr = 0;   // and no unconnected-sendto destination
-            tab->s[i].remote_port = 0;
-            return &tab->s[i];
-        }
-    }
-    return NULL;   // full -> EMFILE
-}
-
-bool viv_socktab_has_room(const struct viv_socktab *tab) {
-    if (!tab) return false;
-    for (u32 i = 0; i < VIV_SOCK_MAX; i++)
-        if (tab->s[i].state == VIV_SOCK_FREE) return true;
-    return false;
-}
-
-void viv_socktab_drop_slot(struct viv_sock *e) {
+// Clear the WHOLE entry, not just the state -- the single source of truth for
+// the field clear. A stale field left in a freed slot would be visible to any
+// future claim that forgets to set it, and the bind fields make that concrete: a
+// recycled slot still carrying the previous socket's port would let a listen()
+// announce a port this socket never asked for. Lock-held (or exec-alone).
+static void socktab_clear_slot(struct viv_sock *e) {
     if (!e) return;
-    // Clear the WHOLE entry, not just the state. A stale field left in a freed
-    // slot would be visible to any future claim that forgets to set it -- and
-    // the bind fields make that concrete: a recycled slot still carrying the
-    // previous socket's port would let a listen() announce a port this socket
-    // never asked for.
     e->fd          = -1;
     e->proto       = 0;
     e->state       = VIV_SOCK_FREE;
@@ -1711,20 +1688,113 @@ void viv_socktab_drop_slot(struct viv_sock *e) {
     e->remote_port = 0;   // this socket's, exactly as a stale bound_port would
 }
 
+bool viv_socktab_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out) {
+    if (!tab) return false;
+    spin_lock(&tab->lock);
+    struct viv_sock *e = socktab_find_locked(tab, fd);
+    bool found = (e != NULL);
+    if (found && out) *out = *e;   // snapshot under the lock; safe past unlock
+    spin_unlock(&tab->lock);
+    return found;
+}
+
+bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
+                       enum viv_net_proto proto, u32 n, enum viv_sock_state born) {
+    if (!tab || fd < 0) return false;
+    spin_lock(&tab->lock);
+    // Scan + write are ONE critical section, so two peer claims cannot both see
+    // the same slot FREE and stomp it -- the allocation race N-3 introduced.
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        if (tab->s[i].state == VIV_SOCK_FREE) {
+            tab->s[i].fd          = fd;
+            tab->s[i].proto       = (u8)proto;
+            tab->s[i].state       = (u8)born;   // FRESH (socket) or CONNECTED (accept)
+            tab->s[i].n           = n;
+            tab->s[i].bound_addr  = 0;   // a fresh socket carries no bind
+            tab->s[i].bound_port  = 0;
+            tab->s[i].remote_addr = 0;   // and no unconnected-sendto destination
+            tab->s[i].remote_port = 0;
+            spin_unlock(&tab->lock);
+            return true;
+        }
+    }
+    spin_unlock(&tab->lock);
+    return false;   // full -> EMFILE
+}
+
+bool viv_socktab_has_room(struct viv_socktab *tab) {
+    if (!tab) return false;
+    spin_lock(&tab->lock);
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++)
+        if (tab->s[i].state == VIV_SOCK_FREE) {
+            spin_unlock(&tab->lock);
+            return true;
+        }
+    spin_unlock(&tab->lock);
+    return false;
+}
+
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd) {
-    viv_socktab_drop_slot(viv_socktab_find(tab, fd));
+    if (!tab) return;
+    spin_lock(&tab->lock);
+    socktab_clear_slot(socktab_find_locked(tab, fd));
+    spin_unlock(&tab->lock);
+}
+
+// The keyed, identity-guarded writers. Each re-finds `fd` under the lock and
+// writes only if the slot still names the same socket (present AND n ==
+// expect_n) -- so a stale write from an op that blocked while the guest closed
+// and recycled the fd lands nowhere, never on the socket that reused the slot.
+bool viv_socktab_set_state(struct viv_socktab *tab, s32 fd, u32 expect_n,
+                           enum viv_sock_state st) {
+    if (!tab) return false;
+    spin_lock(&tab->lock);
+    struct viv_sock *e = socktab_find_locked(tab, fd);
+    bool ok = (e && e->n == expect_n);
+    if (ok) e->state = (u8)st;
+    spin_unlock(&tab->lock);
+    return ok;
+}
+
+bool viv_socktab_set_bound(struct viv_socktab *tab, s32 fd, u32 expect_n,
+                           u32 addr, u16 port) {
+    if (!tab) return false;
+    spin_lock(&tab->lock);
+    struct viv_sock *e = socktab_find_locked(tab, fd);
+    bool ok = (e && e->n == expect_n);
+    if (ok) { e->bound_addr = addr; e->bound_port = port; }
+    spin_unlock(&tab->lock);
+    return ok;
+}
+
+bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u32 expect_n,
+                               u32 addr, u16 port, bool also_connect) {
+    if (!tab) return false;
+    spin_lock(&tab->lock);
+    struct viv_sock *e = socktab_find_locked(tab, fd);
+    bool ok = (e && e->n == expect_n);
+    if (ok) {
+        // remote first, THEN the state transition -- so a peer that observes
+        // CONNECTED (under this same lock) always sees the remote already set.
+        e->remote_addr = addr;
+        e->remote_port = port;
+        if (also_connect) e->state = (u8)VIV_SOCK_CONNECTED;
+    }
+    spin_unlock(&tab->lock);
+    return ok;
 }
 
 // execve's close-on-exec socktab sweep. A socket fd marked FD_CLOEXEC is about
 // to be closed by handle_close_on_exec, which knows nothing of this table; drop
 // its entry first, or the freed fd number would carry a stale (proto, n) row
-// into the new image (whose first fd-creating call is handed that number, then
-// viv_socktab_find returns the stale connection). Reads the cloexec bit LIVE
-// from the handle table -- the entry does not cache it, so two entries that
-// ever share an fd necessarily agree on it. Clears BY SLOT (the pointer is in
-// hand) rather than via viv_socktab_drop's re-find. The caller (sys_execve_core)
-// runs this in execve's sole-live-thread window (proc_exec_alone), so no lock is
-// taken. NULL-safe: a native Proc has no socktab.
+// into the new image (whose first fd-creating call is handed that number, then a
+// lookup returns the stale connection). Reads the cloexec bit LIVE from the
+// handle table -- the entry does not cache it, so two entries that ever share an
+// fd necessarily agree on it. Clears BY SLOT (the pointer is in hand). The
+// caller (sys_execve_core) runs this in execve's sole-live-thread window
+// (proc_exec_alone), so it takes NO socktab lock -- there is no peer thread to
+// race, and locking here would nest tab->lock under the handle table's t->lock
+// (handle_get_cloexec requires it). NULL-safe: a native Proc has no socktab.
 void viv_socktab_drop_cloexec(struct Proc *p) {
     if (!p) return;
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
@@ -1733,7 +1803,7 @@ void viv_socktab_drop_cloexec(struct Proc *p) {
         struct viv_sock *e = &tab->s[i];
         if (e->state != VIV_SOCK_FREE &&
             handle_get_cloexec(p, (hidx_t)e->fd) == 1)
-            viv_socktab_drop_slot(e);
+            socktab_clear_slot(e);
     }
 }
 

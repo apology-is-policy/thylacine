@@ -10264,7 +10264,7 @@ static s64 viv_sock_socket(struct Proc *p, u64 domain, u64 type, u64 protocol) {
         return -(s64)T_E_IO;       // a /net that does not speak the idiom
     }
 
-    if (!viv_socktab_claim(tab, (s32)fd, proto, n)) {
+    if (!viv_socktab_claim(tab, (s32)fd, proto, n, VIV_SOCK_FRESH)) {
         handle_close(p, (hidx_t)fd);   // drops the ctl ref -> netd frees the conn
         return -(s64)T_E_MFILE;
     }
@@ -10302,10 +10302,10 @@ static s64 viv_sock_socket(struct Proc *p, u64 domain, u64 type, u64 protocol) {
 // object first and releases the old one after.
 static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
-    if (!e)                       return -(s64)T_E_NOTSOCK;
-    if (e->state == VIV_SOCK_CONNECTED) return -(s64)T_E_ISCONN;
-    if (e->state == VIV_SOCK_LISTENING) return -(s64)T_E_ISCONN;
+    struct viv_sock     e;   // snapshot: proto/n are immutable, the rest read-once
+    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
+    if (e.state == VIV_SOCK_CONNECTED) return -(s64)T_E_ISCONN;
+    if (e.state == VIV_SOCK_LISTENING) return -(s64)T_E_ISCONN;
 
     // A CONSTRAINED bind cannot be honoured: netd's dial verb takes only the
     // REMOTE endpoint (its `!local` suffix is parsed and ignored), so a client
@@ -10315,7 +10315,7 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
     // An UNCONSTRAINED bind (0.0.0.0:0) asks for nothing netd is not already
     // doing, so it proceeds -- which is also why the table needs no `bound`
     // flag: "bound to anything" and "not bound" are the same request here.
-    if (e->bound_port != 0 || e->bound_addr != 0) return -(s64)T_E_OPNOTSUPP;
+    if (e.bound_port != 0 || e.bound_addr != 0) return -(s64)T_E_OPNOTSUPP;
 
     // Copy the sockaddr into kernel memory before looking at it -- the parse is
     // pure and must never read user memory twice (a peer thread rewriting it
@@ -10352,7 +10352,7 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
 
     char path[64];
     u32  plen = viv_net_path(path, sizeof(path),
-                             (enum viv_net_proto)e->proto, true, e->n, "data");
+                             (enum viv_net_proto)e.proto, true, e.n, "data");
     if (plen == 0)                return -(s64)T_E_INVAL;
 
     // BLOCKS for TCP until ESTABLISHED (netd's deferred Rlopen). That is the
@@ -10411,11 +10411,17 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
         (void)handle_set_nonblock(p, (hidx_t)fd_raw, true);
 
     // Record the peer so a recvmsg on this connected socket can synthesize
-    // msg_name (the same field the datagram sendto path records).
-    e->remote_addr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
-                   | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
-    e->remote_port = port;
-    e->state = VIV_SOCK_CONNECTED;
+    // msg_name (the same field the datagram sendto path records), and transition
+    // CONNECTED -- both under one lock hold, KEYED on the socket we snapshotted
+    // (e.n). If a peer thread closed and recycled this fd while we blocked in the
+    // data open, the write lands nowhere rather than marking a stranger's fresh
+    // socket connected-to-our-peer. connect() still returns success: the
+    // connection was made; a guest that closes an fd it is connecting on another
+    // thread has raced its own descriptor.
+    u32 raddr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
+              | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
+    (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e.n, raddr, port,
+                                    /*also_connect=*/true);
     return 0;
 }
 
@@ -10443,9 +10449,9 @@ static s64 viv_copy_sockaddr(u64 addr_va, u64 addrlen, u8 *out /* [128] */) {
 // it does not vanish -- and it is recorded as one in VIVARIUM.md section 9.
 static s64 viv_sock_bind(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
-    if (!e)                             return -(s64)T_E_NOTSOCK;
-    if (e->state != VIV_SOCK_FRESH)     return -(s64)T_E_INVAL;
+    struct viv_sock     e;
+    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
+    if (e.state != VIV_SOCK_FRESH)     return -(s64)T_E_INVAL;
 
     u8  sa[128];
     s64 rc = viv_copy_sockaddr(addr_va, addrlen, sa);
@@ -10461,9 +10467,12 @@ static s64 viv_sock_bind(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
         return (fam != 2) ? -(s64)T_E_AFNOSUPPORT : -(s64)T_E_INVAL;
     }
 
-    e->bound_addr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
-                  | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
-    e->bound_port = port;
+    u32 baddr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
+              | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
+    // Keyed on the snapshot (e.n): a bind that raced a peer close+reuse of this
+    // fd writes nowhere, and reports the fd is no longer the socket it named.
+    if (!viv_socktab_set_bound(tab, (s32)(s64)fd_raw, e.n, baddr, port))
+        return -(s64)T_E_NOTSOCK;
     return 0;
 }
 
@@ -10495,9 +10504,9 @@ static s64 viv_sock_bind(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
 // truncated write.
 static s64 viv_sock_getsockopt(struct Proc *p, u64 fd_raw, u64 level,
                                u64 optname, u64 optval_va, u64 optlen_va) {
+    // getsockopt reads no per-entry field: an existence test suffices.
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
-    if (!e) return -(s64)T_E_NOTSOCK;
+    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, NULL)) return -(s64)T_E_NOTSOCK;
 
     s32 err = 0;
     if (!vivarium_getsockopt_decide(level, optname, &err))
@@ -10535,10 +10544,9 @@ static s64 viv_sock_getsockopt(struct Proc *p, u64 fd_raw, u64 level,
 // length, for the same reason (a cached derived fd the guest could close would
 // name a stranger's object after the close). UDP data open is immediate (netd's
 // deferred Rlopen is TCP-only), so this does not block for the datagram path.
-static s64 viv_sock_open_data(struct Proc *p, struct viv_sock *e) {
+static s64 viv_sock_open_data(struct Proc *p, enum viv_net_proto proto, u32 n) {
     char path[64];
-    u32  plen = viv_net_path(path, sizeof(path),
-                             (enum viv_net_proto)e->proto, true, e->n, "data");
+    u32  plen = viv_net_path(path, sizeof(path), proto, true, n, "data");
     if (plen == 0) return -(s64)T_E_INVAL;
     return sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
                                    2u /* ORDWR */);
@@ -10549,7 +10557,8 @@ static s64 viv_sock_open_data(struct Proc *p, struct viv_sock *e) {
 // data fid. The guest fd stays `ctl`, so a subsequent sendto to a DIFFERENT peer
 // re-dials the same connection -- which is how res_msend queries several
 // nameservers on one socket. The recorded destination feeds recvmsg's msg_name.
-static s64 viv_sock_dgram_sendto(struct Proc *p, struct viv_sock *e, u64 fd_raw,
+static s64 viv_sock_dgram_sendto(struct Proc *p, struct viv_socktab *tab,
+                                 const struct viv_sock *e, u64 fd_raw,
                                  u64 buf_va, u64 len, u64 addr_va, u64 addrlen) {
     // A CONSTRAINED bind cannot be honoured -- netd's connect verb takes only the
     // remote and silently ignores any local endpoint, so a socket bound to a
@@ -10582,7 +10591,7 @@ static s64 viv_sock_dgram_sendto(struct Proc *p, struct viv_sock *e, u64 fd_raw,
 
     // Move the payload on a data fid opened for exactly this datagram. The native
     // write handler does the copy-in + staging; a UDP write is one datagram.
-    s64 dfd = viv_sock_open_data(p, e);
+    s64 dfd = viv_sock_open_data(p, (enum viv_net_proto)e->proto, e->n);
     if (dfd < 0) return dfd;
     s64 sent = sys_write_handler((u64)dfd, buf_va, len);
     handle_close(p, (hidx_t)dfd);
@@ -10590,10 +10599,12 @@ static s64 viv_sock_dgram_sendto(struct Proc *p, struct viv_sock *e, u64 fd_raw,
 
     // Record the destination AFTER the send succeeds -- a failed dial must not
     // overwrite a working remote (recvmsg would then report the wrong peer, which
-    // musl's res_msend rejects via memcmp).
-    e->remote_addr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
-                   | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
-    e->remote_port = port;
+    // musl's res_msend rejects via memcmp). Keyed on the snapshot (e->n): a
+    // datagram that raced a peer close+reuse of this fd records nowhere.
+    u32 raddr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
+              | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
+    (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e->n, raddr, port,
+                                    /*also_connect=*/false);
     return sent;
 }
 
@@ -10610,28 +10621,28 @@ static s64 viv_sock_dgram_sendto(struct Proc *p, struct viv_sock *e, u64 fd_raw,
 static s64 viv_sock_sendto(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
                            u64 flags, u64 addr_va, u64 addrlen) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
-    if (!e) return -(s64)T_E_NOTSOCK;
+    struct viv_sock     e;
+    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
 
     s32 err = 0;
-    if (!vivarium_sendto_decide((enum viv_net_proto)e->proto, e->state, flags,
+    if (!vivarium_sendto_decide((enum viv_net_proto)e.proto, e.state, flags,
                                 addr_va, addrlen, &err))
         return -(s64)err;
 
     if (addr_va == 0 && addrlen == 0)
         return sys_write_handler(fd_raw, buf_va, len);
 
-    return viv_sock_dgram_sendto(p, e, fd_raw, buf_va, len, addr_va, addrlen);
+    return viv_sock_dgram_sendto(p, tab, &e, fd_raw, buf_va, len, addr_va, addrlen);
 }
 
 static s64 viv_sock_recvfrom(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
                              u64 flags, u64 addr_va) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
-    if (!e) return -(s64)T_E_NOTSOCK;
+    struct viv_sock     e;
+    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
 
     s32 err = 0;
-    if (!vivarium_recvfrom_decide(e->state, flags, addr_va, &err))
+    if (!vivarium_recvfrom_decide(e.state, flags, addr_va, &err))
         return -(s64)err;
 
     return sys_read_handler(fd_raw, buf_va, len);
@@ -10647,11 +10658,11 @@ static s64 viv_sock_recvfrom(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
 // sys_validate_user_buf before it runs.
 static s64 viv_sock_recvmsg(struct Proc *p, u64 fd_raw, u64 msg_va, u64 flags) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
-    if (!e) return -(s64)T_E_NOTSOCK;
+    struct viv_sock     e;
+    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
 
     s32 derr = 0;
-    if (!vivarium_recvmsg_decide(e->state, flags, e->remote_port != 0, &derr))
+    if (!vivarium_recvmsg_decide(e.state, flags, e.remote_port != 0, &derr))
         return -(s64)derr;
 
     // Copy the whole msghdr in (validated). No uaccess_load_u64 exists, and one
@@ -10665,15 +10676,14 @@ static s64 viv_sock_recvmsg(struct Proc *p, u64 fd_raw, u64 msg_va, u64 flags) {
 
     if (mh.msg_iovlen > VIV_UIO_MAXIOV) return -(s64)T_E_INVAL;
 
-    // MULTI-THREAD NOTE, owed to N-3 (phenotype threads). The socktab this reads
-    // (e->state, e->remote_*) is LOCK-FREE, sound ONLY because a PHENO_LINUX Proc
-    // has no peer thread -- clone(CLONE_THREAD) is refused by exact-equality in
-    // vivarium_clone_decide, and fork gives a fresh socktab. When threading lands,
-    // a sendto/recvmsg pair on two threads races remote_* (wrong msg_name -> a
-    // dropped reply) and state (wrong data-fid branch), and the transient data fd
-    // below sits briefly in the guest fd-space where a peer could close it. That
-    // must be re-derived THEN (a socktab lock + a non-guest-fd data handle),
-    // exactly as dup3's header warns for the same table.
+    // The socktab fields this path reads (e.state, e.remote_*) came from ONE
+    // snapshot under the lock (viv_socktab_get above) -- N-3's socktab lock -- so
+    // a peer thread's concurrent sendto/connect on this fd cannot tear them
+    // between the decide here and the msg_name writeback below; both read the
+    // same coherent copy. The transient data fd opened below still sits briefly
+    // in the guest's OWN fd space where a peer could close it, but that is a
+    // guest racing its own descriptor (memory-safe -- each fd resolution is
+    // validated), not a kernel hazard the lock must close.
     //
     // F3: validate msg_name UP FRONT, before a datagram is consumed. Linux checks
     // the address buffer before the receive, so a bad msg_name must fail EFAULT
@@ -10709,10 +10719,10 @@ static s64 viv_sock_recvmsg(struct Proc *p, u64 fd_raw, u64 msg_va, u64 flags) {
     // socket's guest fd is `ctl`, so open a transient data fid (closed below).
     bool close_data = false;
     s64  dfd;
-    if (e->state == (u8)VIV_SOCK_CONNECTED) {
+    if (e.state == (u8)VIV_SOCK_CONNECTED) {
         dfd = (s64)fd_raw;
     } else {
-        dfd = viv_sock_open_data(p, e);
+        dfd = viv_sock_open_data(p, (enum viv_net_proto)e.proto, e.n);
         if (dfd < 0) return dfd;
         close_data = true;
     }
@@ -10769,11 +10779,11 @@ static s64 viv_sock_recvmsg(struct Proc *p, u64 fd_raw, u64 msg_va, u64 flags) {
     // remote (remote_port == 0) reports a zero-length name, which is Linux's
     // shape for a connected recvmsg the caller did not need the peer from.
     u32 out_namelen = 0;
-    if (mh.msg_name != 0 && mh.msg_namelen > 0 && e->remote_port != 0) {
-        u8  ip4[4] = { (u8)(e->remote_addr >> 24), (u8)(e->remote_addr >> 16),
-                       (u8)(e->remote_addr >> 8),  (u8)(e->remote_addr) };
+    if (mh.msg_name != 0 && mh.msg_namelen > 0 && e.remote_port != 0) {
+        u8  ip4[4] = { (u8)(e.remote_addr >> 24), (u8)(e.remote_addr >> 16),
+                       (u8)(e.remote_addr >> 8),  (u8)(e.remote_addr) };
         u8  sabuf[16];
-        u32 salen = vivarium_sockaddr_in_build(sabuf, sizeof(sabuf), ip4, e->remote_port);
+        u32 salen = vivarium_sockaddr_in_build(sabuf, sizeof(sabuf), ip4, e.remote_port);
         if (salen == 0) return -(s64)T_E_INVAL;           // unreachable (16-byte buf)
         u32 copy = (mh.msg_namelen < salen) ? mh.msg_namelen : salen;
         if (!sys_validate_user_buf(mh.msg_name, copy)) return -(s64)T_E_FAULT;
@@ -10799,20 +10809,20 @@ static s64 viv_sock_recvmsg(struct Proc *p, u64 fd_raw, u64 msg_va, u64 flags) {
 static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
     (void)backlog;
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
-    if (!e) return -(s64)T_E_NOTSOCK;
+    struct viv_sock     e;
+    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
 
     s32 err = 0;
-    if (!vivarium_listen_decide((enum viv_net_proto)e->proto,
-                                (enum viv_sock_state)e->state,
-                                e->bound_port, &err))
+    if (!vivarium_listen_decide((enum viv_net_proto)e.proto,
+                                (enum viv_sock_state)e.state,
+                                e.bound_port, &err))
         return -(s64)err;      // err == 0 is the already-LISTENING success
 
-    u8 ip4[4] = { (u8)(e->bound_addr >> 24), (u8)(e->bound_addr >> 16),
-                  (u8)(e->bound_addr >> 8),  (u8)(e->bound_addr) };
+    u8 ip4[4] = { (u8)(e.bound_addr >> 24), (u8)(e.bound_addr >> 16),
+                  (u8)(e.bound_addr >> 8),  (u8)(e.bound_addr) };
 
     char cmd[48];
-    u32  clen = vivarium_net_cmd_announce(cmd, sizeof(cmd), ip4, e->bound_port);
+    u32  clen = vivarium_net_cmd_announce(cmd, sizeof(cmd), ip4, e.bound_port);
     if (clen == 0) return -(s64)T_E_INVAL;
 
     // All-or-nothing, exactly as connect's dial verb -- see the note there.
@@ -10824,7 +10834,10 @@ static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
         return -(s64)T_E_ADDRINUSE;
     }
 
-    e->state = VIV_SOCK_LISTENING;
+    // Keyed on the snapshot (e.n): a listen that raced a peer close+reuse of this
+    // fd transitions nowhere -- the socket the guest announced is gone.
+    if (!viv_socktab_set_state(tab, (s32)(s64)fd_raw, e.n, VIV_SOCK_LISTENING))
+        return -(s64)T_E_NOTSOCK;
     return 0;
 }
 
@@ -10852,18 +10865,18 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
     if (flags != 0) return -(s64)T_E_INVAL;
 
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
-    if (!e)                                return -(s64)T_E_NOTSOCK;
-    if (e->state != VIV_SOCK_LISTENING)    return -(s64)T_E_INVAL;
+    struct viv_sock     e;
+    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
+    if (e.state != VIV_SOCK_LISTENING)    return -(s64)T_E_INVAL;
 
     // Ask BEFORE blocking. Past this point a real peer is connected, and
     // discovering a full table then would mean hanging up on it.
     if (!viv_socktab_has_room(tab))        return -(s64)T_E_MFILE;
 
-    enum viv_net_proto proto = (enum viv_net_proto)e->proto;
+    enum viv_net_proto proto = (enum viv_net_proto)e.proto;
 
     char path[64];
-    u32  plen = viv_net_path(path, sizeof(path), proto, true, e->n, "listen");
+    u32  plen = viv_net_path(path, sizeof(path), proto, true, e.n, "listen");
     if (plen == 0) return -(s64)T_E_INVAL;
 
     // THE BLOCK. Propagate the open's own errno rather than flattening it:
@@ -10924,12 +10937,13 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
     // Plan 9 connection is two files.
     handle_close(p, (hidx_t)lfd);
 
-    if (!viv_socktab_claim(tab, (s32)dfd, proto, m)) {
+    // Born CONNECTED in one lock hold -- the accepted fd IS `data`. Doing it in
+    // claim (rather than claim-then-set_state) closes the window in which a peer
+    // thread could observe the freshly-installed fd as FRESH.
+    if (!viv_socktab_claim(tab, (s32)dfd, proto, m, VIV_SOCK_CONNECTED)) {
         handle_close(p, (hidx_t)dfd);      // frees M
         return -(s64)T_E_MFILE;
     }
-    struct viv_sock *ne = viv_socktab_find(tab, (s32)dfd);
-    if (ne) ne->state = VIV_SOCK_CONNECTED;   // born connected; the fd IS data
 
     // The peer address is a value-result parameter: *addrlen in is the caller's
     // buffer size, out is the FULL size, and a short buffer truncates. Failing
@@ -11041,12 +11055,12 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
     if (tab) {
         for (u64 i = 0; i < nfds; i++) {
             if (kfds[i].fd < 0) continue;          // caller-disabled entry
-            struct viv_sock *e = viv_socktab_find(tab, kfds[i].fd);
-            if (!e) continue;                      // an ordinary file: as-is
+            struct viv_sock e;
+            if (!viv_socktab_get(tab, kfds[i].fd, &e)) continue;   // ordinary file: as-is
 
             char path[64];
             u32  plen = viv_net_path(path, sizeof(path),
-                                     (enum viv_net_proto)e->proto, true, e->n,
+                                     (enum viv_net_proto)e.proto, true, e.n,
                                      "ready");
             s64 rfd = (plen == 0)
                           ? -1
@@ -12116,14 +12130,16 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // never sockets. (dup CREATES an fd and frees none, so unlike dup3 it owes
         // NO socktab drop -- there is no overwritten target number.)
         //
-        // The lock-free socktab read here AND the dropped-lock EBADF/EMFILE
-        // re-check below are sound ONLY because a PHENO_LINUX Proc has no peer
-        // thread (clone(CLONE_THREAD) is refused), so nothing mutates socktab or
-        // the handle table under us -- the property dup3's drop states at its own
-        // arm, which must be re-derived if the clone domain ever admits threads.
+        // The socktab existence check is locked (viv_socktab_get) and the handle
+        // table is internally locked, so both are thread-safe under N-3's peer
+        // threads. The residual -- a peer turning oldfd into a socket between the
+        // check and the dup -- is a guest racing its OWN fd (dup vs close+socket
+        // on one number): memory-safe and the guest's own bug, not a kernel
+        // hazard. (Pre-N-3 this was sound because clone(CLONE_THREAD) was refused;
+        // the lock replaced that argument when the thread set was admitted.)
         struct viv_socktab *stab =
             __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-        if (viv_socktab_find(stab, (s32)oldfd) != NULL)
+        if (viv_socktab_get(stab, (s32)oldfd, NULL))
             return -(s64)T_E_NOSYS;
 
         hidx_t nfd = handle_dup_posix(p, (hidx_t)oldfd, 0, false);
@@ -12174,7 +12190,7 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // EBADF that Linux would have given for the same call.
         struct viv_socktab *stab =
             __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-        if (viv_socktab_find(stab, (s32)oldfd) != NULL)
+        if (viv_socktab_get(stab, (s32)oldfd, NULL))
             return -(s64)T_E_NOSYS;
 
         // The install. A -1 here is an empty `old` or a source the alias gate
@@ -12197,11 +12213,12 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // is never free -- handle_dup_to overwrites the slot in one lock hold --
         // so no such window exists, and dropping first would instead mean a
         // REFUSED dup3 (the -1 above) had already destroyed the guest's live
-        // socket state at `new`. Between the install and this drop nothing of
-        // the guest's runs; handle_dup_to's outgoing release may sleep, but a
-        // PHENO_LINUX Proc has no peer thread to observe the gap (the property
-        // named in struct viv_socktab's header, which must be re-derived if the
-        // clone domain ever admits the thread set).
+        // socket state at `new`. Between the install and this drop a peer thread
+        // could observe `new` naming old's object while its socktab entry is
+        // still the stale pre-dup3 one (viv_socktab_drop is locked, but runs
+        // after the install); that is a guest doing dup3 ONTO a number another of
+        // its threads is using -- a race on its own fd, memory-safe and the
+        // guest's own bug. The locked drop then clears the entry.
         viv_socktab_drop(stab, (s32)newfd);
 
         return (s64)newfd;

@@ -2321,6 +2321,9 @@ void test_vivarium_conn_n(void) {
     TEST_ASSERT(!vivarium_parse_conn_n(NULL, 1, &n), "NULL refused");
 }
 
+// The socktab is thread-safe since N-3 (peer threads share Proc.socktab). Its
+// API is snapshot-read (get) + identity-guarded keyed writes -- a returned entry
+// pointer no longer exists -- so these drive it through that surface.
 void test_vivarium_socktab(void);
 void test_vivarium_socktab(void) {
     static struct viv_socktab tab;
@@ -2329,39 +2332,44 @@ void test_vivarium_socktab(void) {
         tab.s[i].proto = 0; tab.s[i].n = 0;
     }
 
-    TEST_ASSERT(viv_socktab_find(&tab, 0) == NULL, "fd 0 does not match a free entry");
-    TEST_ASSERT(viv_socktab_find(NULL, 3) == NULL, "NULL table is safe");
+    struct viv_sock e;
+    TEST_ASSERT(!viv_socktab_get(&tab, 0, &e), "fd 0 does not match a free entry");
+    TEST_ASSERT(!viv_socktab_get(NULL, 3, &e), "NULL table is safe");
 
-    struct viv_sock *a = viv_socktab_claim(&tab, 0, VIV_NET_TCP, 5);
-    TEST_ASSERT(a != NULL && a->fd == 0 && a->n == 5, "fd 0 is a claimable socket");
-    TEST_ASSERT(a->state == VIV_SOCK_FRESH, "a new socket is FRESH, not CONNECTED");
-    TEST_ASSERT(viv_socktab_find(&tab, 0) == a, "found by fd");
-    TEST_ASSERT(viv_socktab_find(&tab, 1) == NULL, "a different fd does not match");
+    TEST_ASSERT(viv_socktab_claim(&tab, 0, VIV_NET_TCP, 5, VIV_SOCK_FRESH),
+                "fd 0 is a claimable socket");
+    TEST_ASSERT(viv_socktab_get(&tab, 0, &e) && e.fd == 0 && e.n == 5, "found by fd");
+    TEST_ASSERT(e.state == VIV_SOCK_FRESH, "a new socket is FRESH, not CONNECTED");
+    TEST_ASSERT(!viv_socktab_get(&tab, 1, NULL), "a different fd does not match");
 
-    struct viv_sock *b = viv_socktab_claim(&tab, 9, VIV_NET_UDP, 2);
-    TEST_ASSERT(b != NULL && b != a && b->proto == VIV_NET_UDP, "second, distinct");
+    TEST_ASSERT(viv_socktab_claim(&tab, 9, VIV_NET_UDP, 2, VIV_SOCK_FRESH),
+                "second, distinct");
+    TEST_ASSERT(viv_socktab_get(&tab, 9, &e) && e.proto == VIV_NET_UDP,
+                "the second is a distinct UDP entry");
 
     // Drop clears the WHOLE entry: a later claim must not inherit stale state.
     viv_socktab_drop(&tab, 0);
-    TEST_ASSERT(viv_socktab_find(&tab, 0) == NULL, "dropped");
-    TEST_ASSERT(viv_socktab_find(&tab, 9) == b, "the sibling survives the drop");
+    TEST_ASSERT(!viv_socktab_get(&tab, 0, NULL), "dropped");
+    TEST_ASSERT(viv_socktab_get(&tab, 9, &e) && e.n == 2,
+                "the sibling survives the drop");
     viv_socktab_drop(&tab, 0);              // idempotent
     viv_socktab_drop(&tab, 12345);          // an fd that was never a socket
     viv_socktab_drop(NULL, 9);              // NULL-safe
 
-    struct viv_sock *c = viv_socktab_claim(&tab, 0, VIV_NET_TCP, 77);
-    TEST_ASSERT(c != NULL && c->n == 77 && c->state == VIV_SOCK_FRESH,
+    TEST_ASSERT(viv_socktab_claim(&tab, 0, VIV_NET_TCP, 77, VIV_SOCK_FRESH),
+                "reclaim fd 0");
+    TEST_ASSERT(viv_socktab_get(&tab, 0, &e) && e.n == 77 && e.state == VIV_SOCK_FRESH,
                 "a reused slot carries no stale (proto, N) -- the close-hook "
                 "bug this table exists to prevent would show up here");
 
-    // Exhaustion is EMFILE-shaped (NULL), not a wrap or an overwrite.
-    u32 claimed = 2;
+    // Exhaustion is EMFILE-shaped (false), not a wrap or an overwrite.
+    u32 claimed = 2;   // fds 0 and 9 are live
     for (s32 fd = 100; claimed < VIV_SOCK_MAX; fd++) {
-        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1)) break;
+        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH)) break;
         claimed++;
     }
     TEST_ASSERT(claimed == VIV_SOCK_MAX, "the table fills to exactly VIV_SOCK_MAX");
-    TEST_ASSERT(viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1) == NULL,
+    TEST_ASSERT(!viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1, VIV_SOCK_FRESH),
                 "a full table refuses rather than overwriting");
 }
 
@@ -2382,25 +2390,28 @@ void test_vivarium_socktab_close_hook(void) {
         tab.s[i].proto = 0; tab.s[i].n = 0;
     }
 
-    // fd 4 is a TCP socket on connection 11, and gets connected.
-    struct viv_sock *s = viv_socktab_claim(&tab, 4, VIV_NET_TCP, 11);
-    TEST_ASSERT(s != NULL, "claim fd 4");
-    s->state = VIV_SOCK_CONNECTED;
+    // fd 4 is a TCP socket on connection 11, born CONNECTED (accept's shape).
+    struct viv_sock e;
+    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_TCP, 11, VIV_SOCK_CONNECTED),
+                "claim fd 4 connected");
+    TEST_ASSERT(viv_socktab_get(&tab, 4, &e) && e.state == VIV_SOCK_CONNECTED,
+                "an accepted fd is born CONNECTED, not FRESH");
 
     // close(4) -- the hook.
     viv_socktab_drop(&tab, 4);
 
     // The kernel hands index 4 back to an unrelated open(). A socket call on it
     // must now say "not a socket", NOT resolve to connection 11.
-    TEST_ASSERT(viv_socktab_find(&tab, 4) == NULL,
+    TEST_ASSERT(!viv_socktab_get(&tab, 4, NULL),
                 "a recycled fd index resolves to NO socket -- if this finds an "
                 "entry, connect() on an unrelated file would dial connection 11");
 
     // And when fd 4 legitimately becomes a socket again, it is a FRESH one.
-    struct viv_sock *s2 = viv_socktab_claim(&tab, 4, VIV_NET_UDP, 3);
-    TEST_ASSERT(s2 != NULL, "reclaim fd 4");
-    TEST_ASSERT(s2->state == VIV_SOCK_FRESH, "the new socket is FRESH, not CONNECTED");
-    TEST_ASSERT(s2->proto == VIV_NET_UDP && s2->n == 3,
+    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_UDP, 3, VIV_SOCK_FRESH),
+                "reclaim fd 4");
+    TEST_ASSERT(viv_socktab_get(&tab, 4, &e) && e.state == VIV_SOCK_FRESH,
+                "the new socket is FRESH, not CONNECTED");
+    TEST_ASSERT(e.proto == VIV_NET_UDP && e.n == 3,
                 "the new socket carries its OWN (proto, N) -- no bleed from the "
                 "previous tenant of this index");
 }
@@ -2420,36 +2431,90 @@ void test_vivarium_socktab_bind_fields(void) {
     TEST_ASSERT(viv_socktab_has_room(&tab), "an empty table has room");
     TEST_ASSERT(!viv_socktab_has_room(NULL), "NULL has no room (and does not fault)");
 
-    struct viv_sock *s = viv_socktab_claim(&tab, 7, VIV_NET_TCP, 3);
-    TEST_ASSERT(s != NULL, "claim fd 7");
-    TEST_ASSERT(s->bound_addr == 0 && s->bound_port == 0,
+    struct viv_sock e;
+    TEST_ASSERT(viv_socktab_claim(&tab, 7, VIV_NET_TCP, 3, VIV_SOCK_FRESH), "claim fd 7");
+    TEST_ASSERT(viv_socktab_get(&tab, 7, &e) && e.bound_addr == 0 && e.bound_port == 0,
                 "a fresh socket carries NO bind");
 
-    s->bound_addr = 0x7F000001u;   // 127.0.0.1
-    s->bound_port = 7789;
-    s->state      = VIV_SOCK_LISTENING;
+    // The keyed writers (bind + listen record through these), identity-guarded on n.
+    TEST_ASSERT(viv_socktab_set_bound(&tab, 7, /*expect_n=*/3, 0x7F000001u, 7789),
+                "set_bound applies to the current entry");   // 127.0.0.1!7789
+    TEST_ASSERT(viv_socktab_set_state(&tab, 7, /*expect_n=*/3, VIV_SOCK_LISTENING),
+                "set_state applies to the current entry");
 
     viv_socktab_drop(&tab, 7);
 
-    struct viv_sock *s2 = viv_socktab_claim(&tab, 7, VIV_NET_TCP, 4);
-    TEST_ASSERT(s2 != NULL, "reclaim fd 7");
-    TEST_ASSERT(s2->bound_port == 0 && s2->bound_addr == 0,
+    TEST_ASSERT(viv_socktab_claim(&tab, 7, VIV_NET_TCP, 4, VIV_SOCK_FRESH), "reclaim fd 7");
+    TEST_ASSERT(viv_socktab_get(&tab, 7, &e) && e.bound_port == 0 && e.bound_addr == 0,
                 "the recycled slot carries NO stale bind -- if it did, this "
                 "socket's listen() would announce 127.0.0.1!7789");
-    TEST_ASSERT(s2->state == VIV_SOCK_FRESH, "and it is FRESH, not LISTENING");
+    TEST_ASSERT(e.state == VIV_SOCK_FRESH, "and it is FRESH, not LISTENING");
 
     // has_room is the accept()-before-blocking check: it must go false exactly
     // when a claim would fail, or accept blocks, takes a real peer, and then
     // has to hang up on it.
     u32 claimed = 1;
     for (s32 fd = 200; claimed < VIV_SOCK_MAX; fd++) {
-        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1)) break;
+        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH)) break;
         claimed++;
     }
     TEST_ASSERT(claimed == VIV_SOCK_MAX, "filled to VIV_SOCK_MAX");
     TEST_ASSERT(!viv_socktab_has_room(&tab), "a full table reports no room");
-    TEST_ASSERT(viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1) == NULL,
+    TEST_ASSERT(!viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1, VIV_SOCK_FRESH),
                 "and a claim on it does fail -- has_room agrees with claim");
+}
+
+// N-3's concurrency-fix core invariant: a keyed write to a slot that was closed
+// and RECYCLED for a DIFFERENT socket lands nowhere. This is the deterministic
+// unit form of the race a blocked op runs when a peer thread close()s and
+// re-socket()s the fd underneath it -- the [[bug-254]] / lock-across-sleep
+// hazard the identity key (expect_n == the snapshotted n) closes. Before N-3
+// this table was lock-free and this write would corrupt the recycled socket.
+void test_vivarium_socktab_keyed_write_identity(void);
+void test_vivarium_socktab_keyed_write_identity(void) {
+    static struct viv_socktab tab;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        tab.s[i].fd = -1; tab.s[i].state = VIV_SOCK_FREE;
+        tab.s[i].proto = 0; tab.s[i].n = 0;
+        tab.s[i].bound_addr = 0; tab.s[i].bound_port = 0;
+        tab.s[i].remote_addr = 0; tab.s[i].remote_port = 0;
+    }
+
+    // fd 3 is connection n=5; a connect() on it snapshotted n=5, then blocked.
+    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 5, VIV_SOCK_FRESH),
+                "claim fd 3 n=5");
+
+    // While it blocked, a peer thread close()d fd 3 and socket()ed a new one that
+    // was handed the same fd number -- connection n=9.
+    viv_socktab_drop(&tab, 3);
+    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 9, VIV_SOCK_FRESH),
+                "reclaim fd 3 n=9");
+
+    // The stale connect's commit -- keyed on the n IT snapshotted (5) -- must be
+    // REFUSED: the slot now names n=9, a different socket.
+    struct viv_sock e;
+    TEST_ASSERT(!viv_socktab_record_remote(&tab, 3, /*expect_n=*/5, 0x0A000001u, 53, true),
+                "a keyed write on a stale n is refused");
+    TEST_ASSERT(viv_socktab_get(&tab, 3, &e) &&
+                e.n == 9 && e.state == VIV_SOCK_FRESH && e.remote_port == 0,
+                "the recycled socket is UNCORRUPTED -- still fresh n=9, no "
+                "stranger's peer written into it");
+
+    // set_state + set_bound honour the same guard.
+    TEST_ASSERT(!viv_socktab_set_state(&tab, 3, /*expect_n=*/5, VIV_SOCK_LISTENING),
+                "set_state on a stale n is refused");
+    TEST_ASSERT(!viv_socktab_set_bound(&tab, 3, /*expect_n=*/5, 0x7F000001u, 22),
+                "set_bound on a stale n is refused");
+    TEST_ASSERT(viv_socktab_get(&tab, 3, &e) && e.state == VIV_SOCK_FRESH &&
+                e.bound_port == 0, "the stale-n refusals changed nothing");
+
+    // The matching-n write (the non-raced common case) DOES apply.
+    TEST_ASSERT(viv_socktab_record_remote(&tab, 3, /*expect_n=*/9, 0x0A000002u, 80, true),
+                "a keyed write on the CURRENT n applies");
+    TEST_ASSERT(viv_socktab_get(&tab, 3, &e) &&
+                e.state == VIV_SOCK_CONNECTED && e.remote_port == 80 &&
+                e.remote_addr == 0x0A000002u,
+                "the current socket is now connected to its OWN peer");
 }
 
 // V-5b: the listen() decision table. Every arm is a REFUSAL a guest can
@@ -3832,8 +3897,8 @@ void test_vivarium_dup_arm(void) {
     p->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
     TEST_ASSERT(p->socktab != NULL, "socktab alloc");
     hidx_t sockfd = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
-    viv_socktab_claim(p->socktab, (s32)sockfd, VIV_NET_TCP, 200);
-    bool sock_pre = viv_socktab_find(p->socktab, (s32)sockfd) != NULL;
+    viv_socktab_claim(p->socktab, (s32)sockfd, VIV_NET_TCP, 200, VIV_SOCK_FRESH);
+    bool sock_pre = viv_socktab_get(p->socktab, (s32)sockfd, NULL);
     s64 dup_sock = viv_dup_for_test(p, (u64)sockfd);
 
     // TEARDOWN, then assert (TEST_ASSERT returns; proc_free frees the socktab).
@@ -3880,9 +3945,9 @@ void test_vivarium_exec_drops_cloexec_sockets(void) {
                 "three handles allocated");
     handle_set_cloexec(p, cloexec_fd, true);
 
-    viv_socktab_claim(p->socktab, (s32)cloexec_fd, VIV_NET_TCP, 100);
-    viv_socktab_claim(p->socktab, (s32)plain_fd,   VIV_NET_TCP, 101);
-    viv_socktab_claim(p->socktab, (s32)stale_fd,   VIV_NET_TCP, 102);
+    viv_socktab_claim(p->socktab, (s32)cloexec_fd, VIV_NET_TCP, 100, VIV_SOCK_FRESH);
+    viv_socktab_claim(p->socktab, (s32)plain_fd,   VIV_NET_TCP, 101, VIV_SOCK_FRESH);
+    viv_socktab_claim(p->socktab, (s32)stale_fd,   VIV_NET_TCP, 102, VIV_SOCK_FRESH);
     // Close the stale fd's HANDLE via the primitive (not the close syscall), so
     // its entry lingers at a now-closed fd -- the shape a pre-existing stale row
     // has, and the case the sweep must NOT touch.
@@ -3892,16 +3957,16 @@ void test_vivarium_exec_drops_cloexec_sockets(void) {
     int  cloexec_bit = handle_get_cloexec(p, cloexec_fd);   // expect 1
     int  plain_bit   = handle_get_cloexec(p, plain_fd);     // expect 0
     int  stale_bit   = handle_get_cloexec(p, stale_fd);     // expect -1 (closed)
-    bool pre_cloexec = viv_socktab_find(p->socktab, (s32)cloexec_fd) != NULL;
-    bool pre_plain   = viv_socktab_find(p->socktab, (s32)plain_fd)   != NULL;
-    bool pre_stale   = viv_socktab_find(p->socktab, (s32)stale_fd)   != NULL;
+    bool pre_cloexec = viv_socktab_get(p->socktab, (s32)cloexec_fd, NULL);
+    bool pre_plain   = viv_socktab_get(p->socktab, (s32)plain_fd,   NULL);
+    bool pre_stale   = viv_socktab_get(p->socktab, (s32)stale_fd,   NULL);
 
     // ---- THE SWEEP. ----
     viv_socktab_drop_cloexec(p);
 
-    bool post_cloexec = viv_socktab_find(p->socktab, (s32)cloexec_fd) != NULL;
-    bool post_plain   = viv_socktab_find(p->socktab, (s32)plain_fd)   != NULL;
-    bool post_stale   = viv_socktab_find(p->socktab, (s32)stale_fd)   != NULL;
+    bool post_cloexec = viv_socktab_get(p->socktab, (s32)cloexec_fd, NULL);
+    bool post_plain   = viv_socktab_get(p->socktab, (s32)plain_fd,   NULL);
+    bool post_stale   = viv_socktab_get(p->socktab, (s32)stale_fd,   NULL);
 
     // ---- TEARDOWN, then assert (TEST_ASSERT returns; proc_free frees socktab). --
     p->state = PROC_STATE_ZOMBIE;
@@ -3944,7 +4009,7 @@ void test_vivarium_getsockopt_shell_guards_uaccess(void) {
 
     hidx_t sockfd = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
     TEST_ASSERT(sockfd >= 0, "a handle for the socket entry");
-    viv_socktab_claim(p->socktab, (s32)sockfd, VIV_NET_TCP, 100);
+    viv_socktab_claim(p->socktab, (s32)sockfd, VIV_NET_TCP, 100, VIV_SOCK_FRESH);
 
     // A user-range address that PASSES sys_validate_user_buf (in range,
     // non-NULL) without needing to be mapped -- the validate is pure, and it
@@ -3998,7 +4063,7 @@ void test_vivarium_getsockopt_shell_guards_uaccess(void) {
 // proves it drops the right ones; this proves the CONSEQUENCE the drop exists
 // for, by running the exact sequence sys_execve_core runs at its sweep site
 // (viv_socktab_drop_cloexec THEN handle_close_on_exec) and asking what a
-// post-exec socket() then sees through viv_socktab_find.
+// post-exec socket() then sees through viv_socktab_get.
 //
 // The geometry a fresh-fork phenotype child actually has is clean: the socktab
 // starts NULL (it is never copied at fork; freed only at proc_free), so the
@@ -4006,7 +4071,7 @@ void test_vivarium_getsockopt_shell_guards_uaccess(void) {
 // cloexec TCP socket at fd F, execve, then a fresh UDP socket that handle_alloc
 // hands the SAME F (the lowest free fd once the cloexec close frees it). WITHOUT
 // the sweep the stale TCP entry survives at slot 0 and SHADOWS the fresh UDP
-// entry that claim() is forced into slot 1, so viv_socktab_find(F) returns the
+// entry that claim() is forced into slot 1, so viv_socktab_get(F) returns the
 // STALE TCP connection -- connect would dial /net/tcp/<n> for a number netd has
 // freed. WITH the sweep, slot 0 is cleared first, the fresh UDP entry claims it,
 // and find(F) returns UDP -- the correct one. Two Procs, identical up to the ONE
@@ -4030,7 +4095,7 @@ void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
 
     hidx_t f_a = handle_alloc(pf, KOBJ_THREAD, RIGHT_READ, NULL);
     TEST_ASSERT(f_a >= 0, "socket_A handle (fix arm)");
-    viv_socktab_claim(pf->socktab, (s32)f_a, VIV_NET_TCP, 100);
+    viv_socktab_claim(pf->socktab, (s32)f_a, VIV_NET_TCP, 100, VIV_SOCK_FRESH);
     handle_set_cloexec(pf, f_a, true);
 
     // the exec sweep, exactly as sys_execve_core orders it (syscall.c:8455 then
@@ -4039,11 +4104,11 @@ void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
     handle_close_on_exec(pf);            // frees f_a
 
     hidx_t f_b = handle_alloc(pf, KOBJ_THREAD, RIGHT_READ, NULL);
-    viv_socktab_claim(pf->socktab, (s32)f_b, VIV_NET_UDP, 200);
+    viv_socktab_claim(pf->socktab, (s32)f_b, VIV_NET_UDP, 200, VIV_SOCK_FRESH);
 
     bool fix_reused = (f_b == f_a);
-    struct viv_sock *ef = viv_socktab_find(pf->socktab, (s32)f_b);
-    int fix_proto = ef ? (int)ef->proto : -1;
+    struct viv_sock ef;
+    int fix_proto = viv_socktab_get(pf->socktab, (s32)f_b, &ef) ? (int)ef.proto : -1;
 
     pf->state = PROC_STATE_ZOMBIE;
     proc_free(pf);
@@ -4058,18 +4123,18 @@ void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
 
     hidx_t b_a = handle_alloc(pb, KOBJ_THREAD, RIGHT_READ, NULL);
     TEST_ASSERT(b_a >= 0, "socket_A handle (bug arm)");
-    viv_socktab_claim(pb->socktab, (s32)b_a, VIV_NET_TCP, 100);
+    viv_socktab_claim(pb->socktab, (s32)b_a, VIV_NET_TCP, 100, VIV_SOCK_FRESH);
     handle_set_cloexec(pb, b_a, true);
 
     // NO viv_socktab_drop_cloexec here -- this arm IS the missing-call world.
     handle_close_on_exec(pb);            // frees b_a but leaves its stale entry
 
     hidx_t b_b = handle_alloc(pb, KOBJ_THREAD, RIGHT_READ, NULL);
-    viv_socktab_claim(pb->socktab, (s32)b_b, VIV_NET_UDP, 200);
+    viv_socktab_claim(pb->socktab, (s32)b_b, VIV_NET_UDP, 200, VIV_SOCK_FRESH);
 
     bool bug_reused = (b_b == b_a);
-    struct viv_sock *eb = viv_socktab_find(pb->socktab, (s32)b_b);
-    int bug_proto = eb ? (int)eb->proto : -1;
+    struct viv_sock eb;
+    int bug_proto = viv_socktab_get(pb->socktab, (s32)b_b, &eb) ? (int)eb.proto : -1;
 
     pb->state = PROC_STATE_ZOMBIE;
     proc_free(pb);

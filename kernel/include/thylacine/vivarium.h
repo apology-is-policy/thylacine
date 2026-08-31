@@ -49,6 +49,9 @@
 // For `struct pollfd` + POLL_MAX_NFDS: the pselect6 translator's OUTPUT type is
 // the native pollfd, so the ABI it converts INTO belongs in this header's view.
 #include <thylacine/poll.h>
+// For `spin_lock_t`: struct viv_socktab embeds the leaf lock that makes the
+// per-Proc socket table thread-safe once N-3 admits peer threads.
+#include <thylacine/spinlock.h>
 
 // `struct t_stat` is forward-declared rather than pulled in from <syscall.h>.
 // A pointer parameter needs no definition, and V-1b will make syscall.c the
@@ -1294,63 +1297,103 @@ _Static_assert(sizeof(struct viv_sock) == 24, "viv_sock pinned at 24 bytes");
 // socket(), CAS-installed, freed at proc_free, NOT rfork-inherited -- the
 // viv_sigtab shape exactly.
 //
-// LOCK-FREE, AND WHY (the same argument sigtab carries, and the same warning).
-// Entries are read and written with no lock. That is sound because a
-// PHENO_LINUX Proc CANNOT OBTAIN A PEER THREAD, so there is no peer to race.
+// LOCKED SINCE N-3 (phenotype threads). Until clone(CLONE_THREAD) landed this
+// table was lock-free, sound because a PHENO_LINUX Proc could not obtain a peer
+// thread -- a property of the clone row's argument domain, which N-3 dissolved
+// by admitting the thread set. Peer threads now share this table, so the flat
+// free-list array races on three axes: slot ALLOCATION (two claim() scans
+// picking the same FREE slot), field TEARING (one thread writing remote_*/state
+// while another reads them), and slot REUSE (a blocked op holding a pointer into
+// a slot that a peer close()+socket() recycled for a different socket). The last
+// is the sharpest -- it is [[bug-254]] (a read/write correct when written
+// becomes a race as the reader set grows) and [[bug-spoor-transport-lock-across-sleep]]
+// (a pointer held across a sleep names a stranger's object on the far side).
 //
-// THE MECHANISM, corrected at #157 because the one this comment used to give
-// had expired without anything failing. It is NOT that clone/clone3 are absent
-// from the table -- `clone` has been a row since LINEAGE L-3d, and L-6a widened
-// it to the fork shape. It is that `vivarium_clone_decide` admits exactly two
-// words by EXACT EQUALITY (SIGCHLD, and CLONE_VM|CLONE_VFORK|SIGCHLD), neither
-// of which carries CLONE_THREAD; refusing the thread set is one of the three
-// things that equality is written to do. A `fork` yields a new PROC with its
-// own table, which races nothing here.
+// THE DISCIPLINE that closes all three without ever holding the lock across
+// I/O (which spinlock.h forbids: sleep-under-spinlock is a whole-guest wedge):
+//   * `lock` is a LEAF spinlock, held ONLY over pure array ops -- claim, drop,
+//     a field read snapshotted into the caller's stack, a keyed field write.
+//     Never across a walk/open/read/write. So a caller that must block does its
+//     I/O with the lock DROPPED.
+//   * READERS take a SNAPSHOT (viv_socktab_get copies the whole entry out under
+//     the lock); they never dereference a table pointer after the lock drops.
+//   * WRITERS are KEYED + IDENTITY-GUARDED: a set_* re-finds the fd under the
+//     lock and writes only if the slot still names the SAME socket (fd present
+//     AND n == the expect_n the caller snapshotted). A slot that a peer closed
+//     or recycled has a different n, so a stale write from a blocked op lands
+//     nowhere -- it cannot corrupt the socket that reused the slot.
+// The identity key is `n` (the /net connection number), which is immutable for a
+// socket's life and already snapshotted; no generation counter is needed.
 //
-// So this is a property of the clone row's ARGUMENT DOMAIN, and it evaporates
-// the moment that domain admits the thread set -- a one-line change with no
-// compiler consequence anywhere near this struct. Widening it means re-deriving
-// this; do not assume the comment still holds.
+// sigtab, the sibling per-Proc table, needs NO such lock: it is FIXED-INDEX (by
+// signote enum, never a free-list scan, so no allocation race) and publishes
+// each row with an atomic release store on the handler gate (viv_sigtab_set), a
+// discipline that already tolerates concurrent delivery-read vs sigaction-write.
+// socktab cannot borrow that trick: its entries are scanned, allocated/freed,
+// and multi-field with an identity that must be seen together -- hence the lock.
 struct viv_socktab {
+    spin_lock_t     lock;   // leaf; held only over array ops, never across I/O
     struct viv_sock s[VIV_SOCK_MAX];
 };
 
-// Find the entry for `fd`, or NULL. PURE + NULL-safe.
-struct viv_sock *viv_socktab_find(struct viv_socktab *tab, s32 fd);
+// Snapshot the entry for `fd` into `*out` (which may be NULL for an existence
+// test). Returns true iff `fd` has a live entry. Takes the lock; the copy makes
+// the result safe to read after the lock drops. Replaces the old pointer-
+// returning find() -- a table pointer must never outlive the lock now.
+bool viv_socktab_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out);
 
-// Claim a free entry for `fd` in state FRESH. Returns the entry, or NULL if the
-// table is full (-> EMFILE) or `tab` is NULL. Does NOT check for a duplicate
-// fd: the caller has just been handed that fd by handle_alloc, so it cannot
-// already be in the table -- an entry left behind by a closed fd would be the
-// close-hook bug this table's drop path exists to prevent, and a duplicate here
-// would be its symptom rather than its cause.
-struct viv_sock *viv_socktab_claim(struct viv_socktab *tab, s32 fd,
-                                   enum viv_net_proto proto, u32 n);
+// Claim a free entry for `fd` in state `born`. Returns true on success, false if
+// the table is full (-> EMFILE) or `tab` is NULL. Takes the lock; the scan +
+// write are one critical section, so two peer claims cannot pick one slot. Does
+// NOT check for a duplicate fd: the caller has just been handed that fd by
+// handle_alloc, so it cannot already be in the table -- an entry left behind by
+// a closed fd would be the close-hook bug this table's drop path prevents, and a
+// duplicate here would be its symptom rather than its cause. `born` is FRESH for
+// socket() and CONNECTED for accept() (an accepted fd IS data, born connected).
+bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
+                       enum viv_net_proto proto, u32 n, enum viv_sock_state born);
 
 // Release the entry for `fd`, if any. Idempotent -- an fd with no entry (a
 // plain file, or a socket already dropped) is a no-op, which is what lets the
-// close hook run unconditionally for a phenotyped Proc.
+// close hook run unconditionally for a phenotyped Proc. Takes the lock.
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd);
-
-// Clear a specific entry in place -- the single source of truth for the field
-// clear (drop() is find()+drop_slot()). The execve close-on-exec sweep clears
-// BY SLOT rather than paying drop()'s re-find-by-fd: it already holds the entry
-// pointer. NULL-safe.
-void viv_socktab_drop_slot(struct viv_sock *e);
 
 // Drop the socktab entry of every close-on-exec socket in `p`. execve calls this
 // AFTER the commit and BEFORE handle_close_on_exec frees the fds, so a freed fd
 // number cannot carry a stale (proto, n) row into the new image. Reads cloexec
-// live from the handle table; runs single-threaded (proc_exec_alone). NULL-safe.
+// live from the handle table; runs in execve's sole-live-thread window
+// (proc_exec_alone), so it takes NO socktab lock -- there is no peer thread to
+// race, and taking the lock would nest it under the handle table's own lock
+// (handle_get_cloexec requires t->lock) for no benefit. NULL-safe.
 struct Proc;
 void viv_socktab_drop_cloexec(struct Proc *p);
 
-// True when a claim would succeed. PURE. accept() asks BEFORE it blocks: it is
-// about to make a real inbound connection exist, and discovering afterwards
-// that the table is full means accepting a peer only to hang up on it. (claim()
-// still returns NULL on a full table -- this is the courtesy check, not the
-// safety one.)
-bool viv_socktab_has_room(const struct viv_socktab *tab);
+// True when a claim would succeed. Takes the lock for a coherent scan, but the
+// answer is ADVISORY: accept() asks BEFORE it blocks (making a real inbound
+// connection exist and discovering a full table afterwards means hanging up on a
+// peer), then a real peer claim() may consume the room before accept's own claim
+// -- which still returns false and yields EMFILE. This is the courtesy check,
+// not the safety one.
+bool viv_socktab_has_room(struct viv_socktab *tab);
+
+// Keyed, identity-guarded writers. Each re-finds `fd` UNDER THE LOCK and writes
+// only if the slot still names the same socket (present AND n == expect_n).
+// Returns true if written, false if the slot was closed or recycled while the
+// caller blocked -- a stale write from a blocked op is dropped, never applied to
+// the socket that reused the slot. `expect_n` is the `n` the caller snapshotted.
+//   set_state    -- listen(): FRESH -> LISTENING.
+//   set_bound    -- bind(): record the requested local endpoint.
+//   record_remote-- connect()/sendto(): record the peer; also_connect
+//                   additionally transitions FRESH -> CONNECTED in the same
+//                   lock hold (so a peer recvmsg never sees CONNECTED with an
+//                   unset remote), which connect() passes true and the
+//                   connectionless datagram sendto passes false.
+bool viv_socktab_set_state(struct viv_socktab *tab, s32 fd, u32 expect_n,
+                           enum viv_sock_state st);
+bool viv_socktab_set_bound(struct viv_socktab *tab, s32 fd, u32 expect_n,
+                           u32 addr, u16 port);
+bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u32 expect_n,
+                               u32 addr, u16 port, bool also_connect);
 
 // Decide whether a `socket(domain, type, protocol)` is inside the translatable
 // domain, and if so which /net protocol directory it names. PURE.
