@@ -244,10 +244,13 @@ extern "C" fn viv_sig_handler(signo: i32, info: *const u8, uc: *const u8) {
         // compiled C does the moment it uses a float or an autovectorised
         // memcpy. Explicit asm so the clobber is guaranteed -- a handler that
         // happened not to touch V registers would let the L40 check below pass
-        // on a kernel with no FP save at all. (Legs L155-L157, numbered at the END
-        // of the space rather than here: L39-L41 were already taken just below,
-        // and renumbering 100+ existing markers to keep these positional would
-        // be a far larger change than an out-of-order triple.)
+        // on a kernel with no FP save at all. (Legs L254-L256 -- the true END of
+        // the marker space, past L253. Numbered out of order because L39-L41 were
+        // already taken just below and renumbering 100+ positional markers would
+        // be a far larger change. They were briefly L155-L157, which COLLIDED
+        // with the L-3d clone block's own L155-L157 -- a boot failure printing
+        // "L156" could then have meant either the FP-save leg or the fork leg;
+        // moved to L254-L256 so every fail-marker names exactly one leg.)
         core::arch::asm!(
             "movi v0.16b,  #0x11", "movi v1.16b,  #0x11",
             "movi v2.16b,  #0x11", "movi v3.16b,  #0x11",
@@ -1151,7 +1154,7 @@ unsafe fn run_linux() -> ! {
     let wrc2 = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
     // Queued but blocked: the handler must NOT have run yet, or the sentinel
     // was never at risk and L40 would prove nothing.
-    leg!(rep, wrc2 < 0 && sig_fired() == fired_before, b"L155\n");
+    leg!(rep, wrc2 < 0 && sig_fired() == fired_before, b"L254\n");
 
     unsafe {
         let sp = &raw const FP_SENT as *const u8;
@@ -1193,12 +1196,12 @@ unsafe fn run_linux() -> ! {
     }
 
     // The handler ran (so the registers really were exposed to it) ...
-    leg!(rep, sig_fired() == fired_before + 1, b"L156\n");
+    leg!(rep, sig_fired() == fired_before + 1, b"L255\n");
     // ... and every V register came back exactly as it went in.
     leg!(
         rep,
         unsafe { (0..512).all(|i| FP_SEEN[i] == FP_SENT[i]) },
-        b"L157\n"
+        b"L256\n"
     );
 
     // --- L205-L216: SIG_IGN discards a PENDING signal (POSIX 2.4.3) ---------
@@ -2539,8 +2542,16 @@ unsafe fn run_linux() -> ! {
     // touches only vfpid, and cpid is not even created until L160 below.
     {
         let mut _vst: i32 = -1;
-        let _ = svc4(NR_WAIT4, vfpid as u64,
-                     &mut _vst as *mut i32 as u64, 0, 0);
+        // Assert the reap (F3): the ladder's "two zombies by construction"
+        // count below depends on this child being gone, and a by-pid wait
+        // returning anything but vfpid would otherwise surface as a baffling
+        // L171 miscount two legs downstream rather than here at the cause.
+        leg!(
+            rep,
+            svc4(NR_WAIT4, vfpid as u64,
+                 &mut _vst as *mut i32 as u64, 0, 0) == vfpid,
+            b"L159b\n"
+        );
     }
 
     // NOW THE REAL ONE. Through the musl-shaped shim, because the child returns

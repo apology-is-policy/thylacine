@@ -4288,10 +4288,13 @@ static int child_wait_ready_cond(void *arg) {
 // "The child is off my frame" means "the child no longer maps my address
 // space", and that is a fact already written down: `child->as`. At an RFMEM
 // fork the two are equal by construction; proc_exec_replace swaps the child's
-// to a freshly-allocated one; death removes the child from ALIVE. Nothing else
-// can change it, because the only other way a Proc acquires a private space is
-// a fork the child cannot perform (RFPROC alone is refused) and an exec the
-// parent cannot perform (it is parked here).
+// to a freshly-allocated one; death removes the child from ALIVE. Those two --
+// exec and death -- are the ONLY writers of the child's `->as` after the fork,
+// which is what makes the comparison exhaustive. A fork the child ITSELF issues
+// (RFPROC alone has been served since L-5, and a PHENO_LINUX vfork child forks
+// via option B) does not reassign `child->as`: it allocates the GRANDCHILD a
+// private space and leaves the child's own pointer untouched. So a busy child
+// spawning its own children cannot spuriously release the parked parent.
 //
 // A flag would have been the obvious design and is strictly worse: it records
 // the release somewhere other than where the release happens, so a third
