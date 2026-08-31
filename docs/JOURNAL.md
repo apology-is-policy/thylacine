@@ -117,6 +117,54 @@ prosecution, the F1 resize driver, and the run-6 instrument lessons. The FPS
 comparison has not begun: the number the charter wants is on the far side of
 the stall.
 
+**Post-checkpoint (the same day, across the self-compaction): the stall was
+never a stall.** The hunt resolved it as TWO stacked instrument illusions with
+zero GPU defects underneath — the paragraph above is preserved as the worked
+example of both:
+
+1. **The denominator phantom.** `fenced-free 15` was read as "one of 16 slots
+   held", but `test_fenced_free` counts `0..COMP_FSLOT` = the FIFTEEN client
+   slots (the reserved compositor slot reports via `rb-slot`): 15 IS the
+   healthy all-free reading. The `fenced-held` rows built to name the wedged
+   chain printed EMPTY — which is what exposed the premise (the #143 shape:
+   the detector supplied its own reference). The ctl now prints a
+   `fenced-pool` sibling row; a new key, not a `15/15` reformat, because
+   warp-prove parses the existing key numerically (#91 consumer sweep).
+2. **The real cause of zero fps: shareware content drops every `+command`.**
+   vkQuake's johnfitz-rewritten `Cmd_StuffCmds_f` reads the `cmdline` CVAR,
+   and `COM_CheckRegistered` sets that cvar ONLY on the registered arm — with
+   shareware pak0 the `+timedemo demo1` was silently discarded, and the
+   QuakeSpasm no-fitzmode `startdemos` path goes straight to `menu_main` (no
+   demo loop). The game sat at the MAIN MENU rendering ~17 fps for entire
+   runs. tyrquake parses `com_argv` and is immune — why the GL leg's
+   `+timedemo` works on the same pak. **Patch 0004** mirrors the cvar-set
+   onto the shareware arm.
+
+The instrument that broke the case: the **warp-watch ledger** (tapestryd,
+test-mode) — one say-line per live warp ctx per 30 s with the serve-loop pass
+counter, park counts, and the per-ctx fence ledger
+(`inflight/sig/rep/again/tl[0..3]/poisoned`). Its second sample
+(`sig=906 inflight=0 fparked=0 tl=[906,0,0,0]`) proved the whole venus path
+healthy and the game LIVE mid-"stall" — flipping the hunt from the GPU to the
+game's command pipeline in one line. Two generalizable catches along the way:
+serve-loop PASS COUNTS are not clocks (they meter pump activity — equal
+counts at different wall times misled a cross-run comparison), and the
+capture's chronology honesty differs by writer (tapestryd say-lines are
+real-time; the boot probe's stdout is joey-buffered; the game's stdout is
+line-buffered cons — 0029 made isatty true).
+
+**With patch 0004: `969 frames 29.7 seconds 32.6 fps`** — the first vkQuake
+timedemo figure through the whole stack (demo1, 1280x800, DIRECT scanout,
+thyla-pi KVM/V3D 4.2.14). Landed alongside: the GL `quake` verb got the same
+DETACHED transport as quake-vk (it was the last attached long-ssh
+measurement); the vkq restore leg became measure-then-bound (the hard 6-tick
+bound was GL-calibrated — the vk teardown additionally pays the venus
+double-ctx-destroy and completed unforced seconds past it; the tick count is
+now the reported datum with a 20-tick cap); and `warp-prove tctl` reads the
+TAPESTRY ctl so the poke census stops reading the wrong tree. The same-day GL
+baseline run was in flight as this was written; the comparison and round 7
+ride the close. Commit: `309dd209` (+ the instrument follow-ups).
+
 ## 2026-08-31 (run 8, Fable) — W-3e: the SDL Vulkan glue, and the bind that had no trigger
 
 Resumed from the run-7 self-compaction with W-3e fully designed and zero code.

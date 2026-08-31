@@ -192,6 +192,50 @@ pub extern "C" fn rs_main() -> i64 {
         return 0;
     }
 
+    // W-4: the TAPESTRY-side census twin. The C-4 cost rows (`cost
+    // present-poke-img` among them) live on the tapestry tree's ctl, not
+    // warp's -- the vkq gate's poke census read the wrong ctl for three
+    // runs and reported "unreadable" every time. Same two-step attach,
+    // other root.
+    //
+    // An optional second arg FILTERS to rows containing it, printed in one
+    // short write. The full dump streamed through the cons ring under
+    // console pressure (aurora repainting at ~50 presents/s) SPLICED once:
+    // the drop-OLDEST ring is unit-atomic per WRITE, so a mid-dump drop
+    // glues two distant fragments into one plausible-looking row -- the
+    // first poke census read back n=980 sum=20.45s max=318us, an
+    // arithmetically impossible triple through cost_add's shared-ns feed.
+    if libthyla_rs::env::args().get_str(1) == Some("tctl") {
+        let root = unsafe {
+            t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD)
+        };
+        if root < 0 {
+            t_putstr("warp-prove: tctl: open /srv/tapestry failed\n");
+            unsafe { t_exits(1) };
+        }
+        let ctl = open_read_string(root, "ctl");
+        unsafe { t_close(root) };
+        if let Some(key) = libthyla_rs::env::args().get_str(2) {
+            let mut out = String::new();
+            for line in ctl.lines() {
+                if line.contains(key) {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            if out.is_empty() {
+                out.push_str("tctl: no row matches\n");
+            }
+            t_putstr(&out);
+            return 0;
+        }
+        t_putstr(&ctl);
+        if !ctl.ends_with('\n') {
+            t_putstr("\n");
+        }
+        return 0;
+    }
+
     // #240 observation mode. Its own argv verb rather than a leg of the
     // battery: it spends 45 s waiting on a 30 s timeout, and the Warp-2
     // gate's whole value is being fast enough to run every time.

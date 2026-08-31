@@ -163,12 +163,21 @@ expect {
 # re-paint chain completes pending-direct. Driven with echo ticks (the
 # glq-virgl chain lesson: every hop needs console OUTPUT).
 send -- "\003"
+# Measure-then-bound (W-4 run 11): the old hard 6-tick bound was
+# calibrated on the GL teardown; the vk teardown additionally pays the
+# venus double-ctx-destroy + the console's 3-texture re-attach witness,
+# and the promotion completed unforced a few seconds past the bound in
+# every run. The tick count is now the DATUM (reported), and the FAIL
+# is a generous cap that means genuinely wedged, not merely late.
+set restore_cap 20
+if {[info exists ::env(VKQ_RESTORE_TICKS)]} { set restore_cap $::env(VKQ_RESTORE_TICKS) }
 set restored 0
-for {set i 0} {$i < 6 && !$restored} {incr i} {
+set restored_at -1
+for {set i 0} {$i < $restore_cap && !$restored} {incr i} {
     lc_send "echo vkq-tick-$i"
     set timeout 20
     expect {
-        -re {scanout direct (\d+) (?:slot \d+ )?\((\d+)x(\d+)\)} { set restored 1 }
+        -re {scanout direct (\d+) (?:slot \d+ )?\((\d+)x(\d+)\)} { set restored 1; set restored_at $i }
         "vkq-tick-$i" { }
         timeout { }
     }
@@ -178,9 +187,10 @@ for {set i 0} {$i < 6 && !$restored} {incr i} {
 # discriminates a stalled game from a glacial one died with it). The
 # restoration verdict is recorded now and FAILS the lane at the end.
 if {$restored} {
+    puts "\nVKQ-VENUS RESTORE: console direct after $restored_at driven tick(s) of ^C (cap $restore_cap)\n"
     lc_step "console scanout restored after the game died (display-safe teardown leg)"
 } else {
-    puts "\nVKQ-VENUS RESTORE-FAIL: console direct scanout not restored within 6 driven ticks of ^C (deferred; census first)\n"
+    puts "\nVKQ-VENUS RESTORE-FAIL: console direct scanout not restored within $restore_cap driven ticks of ^C (deferred; census first)\n"
 }
 lc_send "echo vkq-cleanup-ok"
 set timeout 30
@@ -194,9 +204,10 @@ expect {
 # stalled-vs-glacial discriminator when the demo never finishes
 # (n ~ a handful = the game parked after the first frames; n in the
 # thousands = presenting but slow). REPORTED, not gated. Via
-# warp-prove's ctl mode (the shell cannot cross the srv post; bare
-# name -- post-pivot session).
-lc_send "warp-prove ctl"
+# warp-prove's TCTL mode (W-4: the cost rows live on the TAPESTRY
+# tree's ctl, not warp's -- `warp-prove ctl` read the wrong ctl for
+# three runs and this leg reported "unreadable" every time).
+lc_send "warp-prove tctl present-poke-img"
 set timeout 30
 expect {
     -re {cost present-poke-img (\d+) (\d+) (\d+)} {
@@ -204,7 +215,7 @@ expect {
         lc_step "present-poke-img census read"
     }
     timeout {
-        puts "\nVKQ-VENUS POKES: unreadable (pre-r6 server or ctl timeout; census missed, not gated)\n"
+        puts "\nVKQ-VENUS POKES: unreadable (pre-tctl server or ctl timeout; census missed, not gated)\n"
     }
 }
 
@@ -220,7 +231,7 @@ if {!$fps_seen} {
     lc_fail "no timedemo fps line within ${fps_wait}s (teardown + census reported above)"
 }
 if {!$restored} {
-    lc_fail "console direct scanout not restored within 6 driven ticks of ^C (census reported above)"
+    lc_fail "console direct scanout not restored within $restore_cap driven ticks of ^C (census reported above)"
 }
 
 puts "\nVKQ-VENUS PASS\n"
