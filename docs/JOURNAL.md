@@ -76,7 +76,7 @@ crafted fixture and red on every real boot — the crafted-log-blindness class,
 caught at authoring time for once. Both directions now have sabotages
 (venus-verdict 83 → 89, incl. the REFUSED-form and ABSENT-form arms).
 
-Landed (thylacine *(pending close hash)* + mesa `997e371` = patch 0020): the
+Landed (thylacine `db855cbf` + mesa `997e371` = patch 0020): the
 glue + wiring, the poke-completion, the warp-ctx-pub getter, the witness
 (`thylacine-vk-sdl-prove`, linking the pouch `libSDL2.a` shipped to the keep
 — the mesa cross env is the pouch sysroot, same musl + outline-atomics), the
