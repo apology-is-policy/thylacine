@@ -373,6 +373,24 @@ direct arm pays two ~10 ms display roundtrips per frame — whether the
 SET_SCANOUT-class flip already implies the display update the flush then
 repeats, and what QEMU's scanout/flush contract actually promises.
 
+**Round 8 (the batched close: three commits + the mesa half): 0 P0 / 0 P1 /
+1 P2 / 2 P3, NOT dirty** — and the audit-in-flight discipline paid in both
+directions at once, which is the whole argument for it. The prosecutor found
+F1: `drop_all_fids` (the Tversion session reset) clears the three sibling
+cancel-lists and NOT the new `text_snaps` — the "die at clunk" contract false
+on a surviving Conn, the exact sibling-omission pattern the reader-set-growth
+lesson describes, sitting in the one fid-death path the self-audit didn't
+open (it stopped at `fid_clunk`, which was correct). The self-audit found
+SF-1, which the prosecutor read past: the new resize phase's failure arms
+`lc_fail` IMMEDIATELY, eating the poke census — the glq deferred-verdict
+lesson that the FPS and restore arms encode ONE SCREEN AWAY in the same
+file. Two independent readers, two disjoint catches, same file. F3 (the
+composed-transition expect also matched the `BIND FAILED` form) fixed by
+anchoring to the success form; F2 (the staleness sweep is mtime-based; a
+content-changed archive with a preserved-older mtime slips it) tracked with
+the content-hash-stamp fix named. Close `4a0e7323`; suite exit-0 the fifth
+time this window; venus-verdict 94/94; the push follows.
+
 ## 2026-08-31 (run 8, Fable) — W-3e: the SDL Vulkan glue, and the bind that had no trigger
 
 Resumed from the run-7 self-compaction with W-3e fully designed and zero code.
