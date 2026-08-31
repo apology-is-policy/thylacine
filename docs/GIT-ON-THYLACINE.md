@@ -253,10 +253,21 @@ literal; threads (**CLONE_THREAD**) run the multithreaded majority.
   AF_INET only, `kernel/vivarium.c:1622`). Lower priority -- many programs run
   fine over AF_INET loopback -- but real for anything that hard-codes AF_UNIX.
 
-- **N-5 -- protocol v2 root-cause.** Removes the `protocol.version=0` asterisk so
-  git's *default* protocol works. Leading hypothesis: `getsockname`-ENOSYS during
-  v2's connection-reuse (B status (a)). Scope: reproduce with `GIT_TRACE_PACKET`,
-  translate `getsockname` (+ whatever the reuse path needs), confirm a v2 clone.
+- **N-5 -- protocol v2 root-cause. DONE + AUDIT-CLOSED (`05616d9c` + the P0 close).**
+  Removed the `protocol.version=0` asterisk so git's *default* protocol works. The
+  leading `getsockname` hypothesis was **REFUTED** -- it is FORWARD->ENOSYS but
+  NON-FATAL, called at connect time on a path shared with the working v0 clone. ROOT
+  CAUSE (found via the always-on kernel census, not git-side traces): the phenotype
+  never served **readv(65)** while its twin **writev(66)** was served -- git v2's
+  stateless-connect path reads the helper response through readv -> ENOSYS -> silent
+  abort ("reads the caps, writes nothing back"); v0 reads the inline advertisement
+  with plain read(). FIX: served readv (the exact mirror of `viv_writev`); retired
+  forced v0 from both gitconfigs; the git-net gate now clones on git's default v2
+  (the E2E v2 regression net). The audit (self-audit + the Fable-5 holotype,
+  converged) found + fixed a **P0**: `viv_readv` AND `viv_writev` copy_in the iovec
+  ARRAY at an unvalidated `iov_va` -> a kernel-range array pointer extincts the
+  kernel (unprivileged DoS; the uaccess fault-fixup covers only the user half); both
+  twins guarded with one whole-span `sys_validate_user_buf`.
 
 - **N-6 -- push over https.** Completes milestone B's *own* exit criteria (clone +
   fetch + **push**; push is currently deferred). Needs a writable/authenticated

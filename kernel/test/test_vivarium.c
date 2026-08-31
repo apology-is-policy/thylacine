@@ -4454,3 +4454,61 @@ void test_vivarium_getdents64_guards_uaccess(void) {
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 }
+
+// N-5 F1: viv_readv AND viv_writev copy_in the iovec ARRAY at iov_va before
+// touching any entry, and the uaccess fault-fixup recovers ONLY a user-half
+// fault -- so an unvalidated kernel-range iov_va extincted the kernel (an
+// unprivileged DoS, the getdents64 P0 class on the array read). The fix is a
+// whole-span sys_validate_user_buf(iov_va, count*16) before pass 1, in BOTH
+// twins. Driven through the REAL arms (viv_readv_for_test / viv_writev_for_test
+// -> viv_tier2). Fails-without-fix is BOOT-FATAL: with the guard removed, the
+// count>=1 kern_va legs reach copy_in at 2^47 (unmapped, kernel-half) -> the
+// fixup gate (fi.vaddr < UACCESS_USER_VA_TOP) is false -> extinction, so the
+// harness dies rather than returning. The EFAULT here pins the guard's presence;
+// the count==0 control isolates it (same kern_va, EBADF not EFAULT).
+extern s64 viv_readv_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
+extern s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
+
+void test_vivarium_readv_writev_guard_iovec_array(void);
+void test_vivarium_readv_writev_guard_iovec_array(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+
+    // Same VAs as the getdents/getsockopt guard tests: user_ok passes the pure
+    // validate (in range, non-NULL, need not be mapped); kern_va is the first
+    // rejected VA (== UACCESS_USER_VA_TOP).
+    const u64 user_ok = 0x40000ull;
+    const u64 kern_va = 0x0000800000000000ull;
+
+    // count>=1 so pass 1 runs and reaches the array copy_in. Kernel-range array
+    // -> the span guard rejects it -EFAULT before any copy_in, in BOTH twins.
+    s64 rd_fault = viv_readv_for_test(p, 3, kern_va, 1);
+    TEST_EXPECT_EQ(rd_fault, -(s64)T_E_FAULT,
+                   "readv: kernel-range iovec array rejected EFAULT before copy_in");
+    s64 wr_fault = viv_writev_for_test(p, 3, kern_va, 1);
+    TEST_EXPECT_EQ(wr_fault, -(s64)T_E_FAULT,
+                   "writev: kernel-range iovec array rejected EFAULT before copy_in");
+
+    // Discriminating control: the SAME kern_va with count==0 never reads the
+    // array -- it validates the fd instead (EBADF on the unhandled fd 3). So a
+    // kern_va yields EFAULT ONLY when count>=1, i.e. ONLY via the span guard;
+    // the guard is the cause, not a blanket kern_va reject. (Pre-fix this same
+    // count==0 leg already returned EBADF -- the array was never touched -- so
+    // it is the invariant half of the pair.)
+    s64 rd_zero = viv_readv_for_test(p, 3, kern_va, 0);
+    TEST_EXPECT_EQ(rd_zero, -(s64)T_E_BADF,
+                   "readv: count==0 validates the fd (EBADF), never reads the array");
+
+    // Positive: a user-range array PASSES the span guard and reaches the
+    // per-entry copy_in, which faults on the unmapped page and lands cleanly in
+    // the fixup -> EFAULT. Same code as the guard reject, but the guard admitted
+    // it (proving the fix does not reject a legitimate user-range array up
+    // front); the git-net v2 clone E2E exercises the mapped-array happy path.
+    s64 rd_user = viv_readv_for_test(p, 3, user_ok, 1);
+    TEST_EXPECT_EQ(rd_user, -(s64)T_E_FAULT,
+                   "readv: user-range array passes the span guard, faults at copy_in");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}

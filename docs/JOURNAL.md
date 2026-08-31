@@ -22,6 +22,77 @@ needed the operator.
 
 ---
 
+## 2026-08-31 (aux) -- N-5 audit close: the readv serve was hiding a kernel-DoS twin
+
+The N-5 readv fix (`05616d9c`, the entry below) landed with the audit, SMP gate,
+and push explicitly OWED to a fresh context. This run discharged them -- and the
+audit was not a formality: it found a P0.
+
+**The setup: a self-audit running alongside the holotype.** Per the
+audit-in-flight discipline, while the Fable-5 holotype prosecuted `05616d9c` I ran
+an independent self-audit on the same surface (`viv_readv`). Both converged on
+ONE merge-blocking finding, with everything else sound -- the two-prosecutor
+discipline working exactly as intended (family-diverse: the impl was Opus 4.8, the
+reviewer Fable 5).
+
+**The finding: `viv_readv` AND `viv_writev` copy_in the iovec ARRAY at an
+unvalidated `iov_va`.** Both functions validate each iovec ENTRY's `.base`
+(the copy-out destination) -- but the pointer to the array itself
+(`ent = iov_va + i*16`) goes straight into `uaccess_copy_in` with no
+`sys_validate_user_buf`. `viv_writev`'s comment said "a bad VA lands in the
+fixup." That belief is the bug.
+
+**Ground truth beat the comment.** `uaccess_copy_in` reads with a plain EL1 `ldr`
+(`arch/arm64/uaccess.S:327`), and the kernel's uaccess fault-fixup is GATED on the
+faulting address being in the user half: `exception.c:280`,
+`!fi.from_user && fi.vaddr < UACCESS_USER_VA_TOP`, with the code's own comment
+(277-279) stating the user-half check "is the only thing distinguishing uaccess
+from a genuine kernel-pointer-corruption fault, which still extincts." So a `ldr`
+at an unmapped kernel-range `iov_va` (>= 2^47) faults, the fixup is SKIPPED,
+`arch_fault_handle` runs, and the kernel extincts. Any PHENO_LINUX process:
+`readv(0, (void*)0xFFFF000000000000, 1)` -> deterministic unprivileged DoS. This
+is the getdents64 P0 class (a uaccess op on an unvalidated pointer whose fixup
+covers only the user half), one surface over: there it was a copy-out
+destination, here the iovec-array read.
+
+**The sweep confirmed it and handed over the fix.** "Finding one guarded site is
+what stops you looking for the gap" -- so I swept every iovec-array reader.
+`viv_sock_recvmsg` (N-2b) ALREADY guards this exact class per-entry (its F1, at
+`syscall.c:10708`/`10766`), and its comment names the precise mechanism
+("uaccess_copy_in relies on the fault fixup, which does not fault an EL1 read of a
+mapped kernel VA"). So the fix pattern was proven in-tree; `readv` and `writev`
+were the two readers missing it (`sendmsg` is ENOSYS). Attribution: PRE-EXISTING
+in `viv_writev` (#150), PROPAGATED into `viv_readv` by N-5 -- which changes
+nothing about ownership or priority (stewardship), so both twins were fixed in the
+same change.
+
+**The fix + the disposition.** One whole-span
+`sys_validate_user_buf(iov_va, count*16)` before pass 1 in both twins (count <=
+1024 bounds the multiply; the validate rejects NULL/wrap/span-past-TOP; one check
+covers every `ent` in both passes -- what Linux `import_iovec` does). The holotype
+GAVE this exact fix, so per the sibling getdents64 P0 precedent (a
+holotype-pre-blessed one-liner) a self-audit of the fix REPLACED a full re-round
+rather than spending a round on a bounds check. The holotype rated it P1/
+P0-adjacent (latent -- git's own musl `readv` never passes a kernel array
+pointer), I rated it P0 (the kernel must be sound against ANY EL0 program, and the
+sibling class was P0); either way merge-blocking, and the disposition is identical.
+
+**Evidence.** New regression `vivarium.readv_writev_guard_iovec_array` (kern-VA
+`iov_va` -> EFAULT for both twins; the same kern_va with count==0 -> EBADF isolates
+the guard; fails-without-fix is boot-fatal). Suite 1471/1471, boot OK. The
+git-https v2 E2E is the happy-path witness: with forced-v0 retired, `git clone
+https://github.com/octocat/Hello-World` runs on git's DEFAULT protocol v2 and
+succeeds (6 GITHTTPS-* markers) -- the readv serve works AND the new guard admits
+git's user-range iovs (no false rejection). SMP gate: 40/40 boots PASS, 0
+corruption / 0 external-kill / 0 inject-miss / 0 timing / 0 other (default+UBSan x
+smp4/smp8, N=10).
+
+**What it leaves open.** The vivarium/syscall reference lives in the vault
+(`sub-kernel-vivarium` + `sub-kernel-syscall-dispatch`); its sync is the arc's
+batched debt, not per-chunk. Milestone B's "git protocol v2 (forced v0)" open item
+is now CLOSED; DNS-by-name (net-4d) landed earlier; **push-over-https (N-6)** is
+the last of milestone B's exit criteria and is next.
+
 ## 2026-08-31 (aux) -- N-5: git protocol v2 root-cause -- the phenotype never served readv
 
 git-over-https worked under the phenotype only with `protocol.version=0` FORCED

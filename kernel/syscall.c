@@ -11585,6 +11585,19 @@ static s64 viv_writev(u64 fd, u64 iov_va, u64 iovcnt_raw) {
     // rather than by re-deriving the handle check here.
     if (count == 0) return sys_write_handler(fd, 0, 0);
 
+    // The iovec ARRAY must lie wholly in the user half before any copy_in of
+    // it. The uaccess fault-fixup recovers ONLY a user-half fault
+    // (exception.c, the `fi.vaddr < UACCESS_USER_VA_TOP` gate), so a
+    // kernel-range iov_va does NOT "land in the fixup" -- an unmapped one
+    // extincts the kernel (an unprivileged DoS) and a mapped one reads kernel
+    // memory. One span check bounds every `ent` in both passes: count <=
+    // VIV_UIO_MAXIOV makes count*16 <= 16 KiB (no overflow), and
+    // sys_validate_user_buf rejects NULL, the wrap, and any span reaching
+    // UACCESS_USER_VA_TOP. viv_sock_recvmsg guards the same class per-entry;
+    // Linux import_iovec access_oks the whole array identically.
+    if (!sys_validate_user_buf(iov_va, (u64)count * sizeof(struct viv_linux_iovec)))
+        return -(s64)T_E_FAULT;
+
     // PASS 1 -- read and validate every entry, writing nothing.
     u64 total = 0;
     for (u32 i = 0; i < count; i++) {
@@ -11592,7 +11605,9 @@ static s64 viv_writev(u64 fd, u64 iov_va, u64 iovcnt_raw) {
         u64 ent = iov_va + (u64)i * sizeof(struct viv_linux_iovec);
         // copy_in rather than paired 32-bit loads: it handles an unaligned
         // iov_va (a hostile guest is not obliged to pass an 8-aligned array,
-        // and Linux reads one regardless), and a bad VA lands in the fixup.
+        // and Linux reads one regardless); the array's user-half range was
+        // validated just above, so a fault here is only an unmapped user page
+        // and lands cleanly in the fixup -> -EFAULT.
         if (uaccess_copy_in(&kiov, ent, sizeof(kiov)) != 0) return -(s64)T_E_FAULT;
         if (!vivarium_writev_accumulate(&total, kiov.len)) return -(s64)T_E_INVAL;
         // A zero-length entry names no memory, so it gets no range check --
@@ -11656,6 +11671,13 @@ static s64 viv_readv(u64 fd, u64 iov_va, u64 iovcnt_raw) {
     // A zero count still validates the fd (readv(badfd, x, 0) is EBADF, not 0):
     // sys_read_handler's len==0 fast-path resolves the descriptor, same as writev.
     if (count == 0) return sys_read_handler(fd, 0, 0);
+
+    // The iovec ARRAY must lie wholly in the user half before any copy_in of
+    // it -- see viv_writev: the uaccess fixup recovers only a user-half fault,
+    // so an unvalidated kernel-range iov_va extincts the kernel (an
+    // unprivileged DoS). One span check bounds every `ent` in both passes.
+    if (!sys_validate_user_buf(iov_va, (u64)count * sizeof(struct viv_linux_iovec)))
+        return -(s64)T_E_FAULT;
 
     // PASS 1 -- read and validate every entry, reading nothing.
     u64 total = 0;
@@ -13232,6 +13254,24 @@ s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count);
 s64 viv_getdents64_for_test(struct Proc *p, u64 fd, u64 dirp, u64 count) {
     u64 args[VIV_NARGS] = { fd, dirp, count, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_GETDENTS64, args);
+}
+
+// Drives the REAL readv/writev shells through the T2 dispatcher, so a test can
+// prove the iovec-ARRAY span guard: both shells validate [iov_va, iov_va +
+// count*16) BEFORE any copy_in, so a kernel-range iov_va is rejected -T_E_FAULT
+// with no copy_in and no extinction (uaccess_copy_in's fixup does not engage for
+// a kernel-half VA -- the getdents64 P0 class, on the array read). Same NULL-ctx
+// safety as the getdents64 hook: readv/writev read `p` + `args`, never ctx.
+s64 viv_readv_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
+s64 viv_readv_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt) {
+    u64 args[VIV_NARGS] = { fd, iov_va, iovcnt, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_READV, args);
+}
+
+s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
+s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt) {
+    u64 args[VIV_NARGS] = { fd, iov_va, iovcnt, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_WRITEV, args);
 }
 
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
