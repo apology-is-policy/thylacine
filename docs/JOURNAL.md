@@ -83,11 +83,37 @@ non-guest-fd data handle is the OWED pull-forward follow-on. `sigtab` is
 peer-shared now too, but its cross-Proc atomic-u64 access discipline plausibly
 already covers the intra-Proc case (verifying it is part of the follow-on).
 
-**Open at write time:** the holotype audit is running (crux + futex + E2E; I-24 /
-I-9 / I-32 / I-43); the SMP gate is not yet run; the socktab-lock follow-on is
-owed; the vault ring-debt on `sub-kernel-vivarium` + `sub-kernel-syscall-dispatch`
-(quaestor: both paths vault-carried, no `docs/reference` section owed) grows by
-N-3.
+**The audit found a real P0, and my self-audit had missed it.** Holotype round 1
+(Fable 5, `7e1619a4`) returned **1 P0 / 0 P1 / 0 P2 / 2 P3**. F1: `viv_futex`
+FUTEX_WAIT copied the relative timespec from the guest x3 pointer with NO
+`sys_validate_user_buf` -- the caller's half of `uaccess_copy_in`'s contract. A
+crafted `futex(FUTEX_WAIT, uaddr, val, <out-of-band ptr>)` faults on a non-user
+VA, which the EL1 fixup deliberately does not rescue -> `extinction("unhandled
+kernel translation fault")`: one unprivileged syscall, whole-system ELE (the
+getdents64 copy-out P0 class, applied to a copy-IN). My OWN self-audit checked the
+timeout CONVERSION for overflow and cleared it -- but never asked whether the
+POINTER was validated before the copy-in. The prosecutor caught it by re-deriving
+the callee's contract, not reading the happy path. That is the entire case for
+the independent second reader: I was looking at the arithmetic, it was looking at
+the memory access. Fixed by mirroring the native timespec readers; regression leg
+L169d (futex WAIT + `0xFFFFFFFFFFFFFFF0` -> -EFAULT) is discrimination-proven --
+a sabotage-revert boots EXTINCT at exactly `unhandled kernel translation fault
+0xfffffffffffffff0`, the post-fix returns -EFAULT. The 2 P3s: gettid double-call
+(fixed), exit(93) last-thread status drop (musl-correct, documented). Dirty close
+(a P0); the fix is a pure guard addition, discrimination-verified, so per the
+double-the-distance cadence the formal round-2 rides the socktab-lock sub-chunk's
+audit rather than a dedicated round. Self-re-check confirmed F1 was the ONLY
+unvalidated uaccess on the surface.
+
+**Verified + shipped.** SMP gate 40/40, 0 corruption across default/ubsan x
+smp4/smp8 (N=10) -- the thread-creation-across-CPUs rigor. Pushed both mirrors,
+`bcc7c8de..7e1619a4` (5 commits). **Still open:** the socktab-lock sub-chunk (the
+sprung F2 trap, P1, [[bug-n3-socktab-multithread-race]]) -- sized as a
+copy-out-under-lock restructure of ~8 callers (the per-call-open design means no
+held data fd to redesign, so it is mostly mechanical), sequencing is the
+operator's priority call; and the vault ring-debt on `sub-kernel-vivarium` +
+`sub-kernel-syscall-dispatch` (quaestor: both paths vault-carried, no
+`docs/reference` section owed) grows by N-3.
 
 ---
 
