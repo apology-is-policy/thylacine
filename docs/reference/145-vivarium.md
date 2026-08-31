@@ -3286,11 +3286,28 @@ before it the composition declined while the comment claimed the contour).
     and `openat` sees `S_IFREG|0644`. Before the mask both DECLINED, and
     `tar -x` failed on every entry with "Function not implemented" -- the
     gate below was catching S_IFMT as collateral.
-  - **setuid/sgid/sticky (07000) still DECLINES** census-visibly (a silent
-    strip would record less restrictive metadata than asked; git's
-    `core.sharedRepository` setgid dirs are the real caller that would be
-    wronged). The regression tests pin both halves, including the case that
-    proves the mask does not reach 07000 (`S_IFDIR|02755` still declines).
+  - **setuid/sgid/sticky (07000) still DECLINES** census-visibly. The strength
+    of that argument DIFFERS between the two arms, and the reference should not
+    flatten them:
+    - On **openat-create** it is a caller-protection argument: Linux keeps
+      07000 via `S_IALLUGO`, so `O_CREAT|04755` really does record setuid, and
+      a silent strip would record less authority than asked with nothing to
+      catch it. `git`'s shared-repository shapes are the real caller.
+    - On **mkdirat** it is only a stance-symmetry argument. Linux's own
+      `vfs_mkdir` masks `mode & (S_IRWXUGO|S_ISVTX)`, so a setgid bit passed to
+      `mkdirat` is stripped BY LINUX; setgid directories come from parent
+      inheritance or a later `chmod` (git's `adjust_shared_perm` chmods). No
+      caller is wronged by a strip here -- we decline to keep one rule ("refuse
+      what we will not record") rather than two.
+  - The regression tests pin both halves, including the cases proving the mask
+    does not reach 07000 (`S_IFDIR|02755` and `S_IFREG|04644` still decline)
+    and the sticky boundary (`S_IFDIR|01777`, the `/tmp` entry every real
+    rootfs tarball carries).
+- **Residue worth knowing before extracting a distro image**: because 07000
+  still declines, `tar -x` of a real rootfs still fails on its sticky `/tmp`
+  and any setuid binary. The S_IFMT mask narrows the failure set from *every*
+  entry to *07000-bearing* entries; it does not empty it. Widening that is a
+  deliberate decline-vs-strip-with-census design fork, not a quiet change.
 - Real (non-AT_FDCWD) dirfds stay out (the 6.20 Correction-2 handle-state
   blocker, untouched). renameat2 flags != 0 (NOREPLACE/EXCHANGE/WHITEOUT)
   decline. `O_DIRECTORY` keeps its V-2b rejection on the create arm (`O_APPEND`

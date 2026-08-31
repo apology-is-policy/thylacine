@@ -261,7 +261,7 @@ impl Repl {
     /// (git), run under the Linux phenotype by the MPHENO_LINUX mount (section 13).
     pub fn install_completion(&mut self) {
         self.bin_commands.clear();
-        for dir in ["/bin", "/goroot/bin", "/clade/bin", "/viv/bin"] {
+        for dir in ["/bin", "/goroot/bin", "/clade/bin", "/viv/bin", "/viv/abin"] {
             if let Ok(rd) = libthyla_rs::fs::read_dir(dir) {
                 for ent in rd.flatten() {
                     if ent.is_file() {

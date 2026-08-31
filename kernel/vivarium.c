@@ -832,9 +832,17 @@ enum viv_verdict vivarium_mkdirat_decide(u64 dirfd, u64 mode, u32 *perm_out) {
     // Low-9 only, after discarding the file-TYPE field -- the openat-create
     // arm's reasoning exactly (VIV_S_IFMT): S_IFMT is ignored here by
     // definition and busybox `tar` passes S_IFDIR|0755, so the un-masked gate
-    // refused every `tar` directory. 07000 still declines (a silent strip
-    // records less restrictive metadata than asked; git's shared-repository
-    // setgid dirs are the real caller that would be silently wronged).
+    // refused every `tar` directory. 07000 still declines -- but NOTE the
+    // justification differs from the openat-create arm's and is weaker here:
+    // Linux's own `vfs_mkdir` masks `mode & (S_IRWXUGO|S_ISVTX)`, so a setgid
+    // bit passed to mkdirat is stripped BY LINUX, and setgid dirs materialise
+    // from parent inheritance or a later chmod (git's `adjust_shared_perm`
+    // chmods). So no caller is wronged by a strip on THIS path; the decline is
+    // chosen for stance symmetry -- we refuse what we will not record, rather
+    // than recording something other than what was asked -- not to protect a
+    // caller. The wronged-caller argument is real on openat-create, where
+    // Linux keeps 07000 via S_IALLUGO and O_CREAT|04755 really does record
+    // setuid.
     md &= ~VIV_S_IFMT;
     if (md & ~0777u)         return VIV_FORWARD;
     *perm_out = md | SYS_WALK_CREATE_DMDIR;

@@ -1250,6 +1250,59 @@ VIVEOF
 }
 VIVEOF
                 echo "==> viv bundles: Alpine INTERACTIVE twin staged at $ib (args /bin/sh -i -- ioctl is unserved, so isatty() is false and ash needs the flag to be interactive)"
+
+                # X-2 (AUX-ROADMAP Stream 0): the /viv/abin PRODUCTION busybox
+                # tree -- the applet twin of the viv-bin git tree, staged as a
+                # PLAIN pool tree for joey to bind at /viv/abin with
+                # MPHENO_LINUX. Puts `tar`, `gzip`, `find`, `sed` and ~80 more
+                # on ut's PATH, running under the Linux phenotype BY LOCATION,
+                # usable anywhere in the Thylacine namespace rather than only
+                # inside a container rootfs.
+                #
+                # THE WHOLE POINT IS THAT THESE LINKS ARE **RELATIVE**. Alpine
+                # ships its applets as absolute `-> /bin/busybox`, and `stalk`
+                # re-anchors an absolute target at the CALLER's own root
+                # (kernel/stalk.c:383 -- I-28 working as designed, and exactly
+                # why they resolve inside a chroot'd container and dangle
+                # outside one). `-> busybox` resolves relative to the containing
+                # directory, so the same tree works from both sides. This is why
+                # the tree is BUILT here rather than copied from the rootfs.
+                #
+                # Deliberately NOT a mutation of $ab/rootfs: alpine-stock is a
+                # sha256-pinned image behind a boot-fatal DISTRO gate (D-5), and
+                # a fixture that a gate asserts is stock must stay stock.
+                if [[ "$bb_ok" == 1 ]]; then
+                    local vabin="$vstage/viv-abin"
+                    rm -rf "$vabin"; mkdir -p "$vabin"
+                    cp "$ab/rootfs/bin/busybox" "$vabin/busybox"
+                    chmod 0755 "$vabin/busybox"
+                    # The applet roster comes from what Alpine itself installed
+                    # -- every name in the stock tree that points at busybox --
+                    # so the set tracks the pinned image instead of a hand list
+                    # here that would rot the first time the pin moves.
+                    local abin_n=0 appdir app appname apptgt
+                    for appdir in bin sbin usr/bin usr/sbin; do
+                        [[ -d "$ab/rootfs/$appdir" ]] || continue
+                        for app in "$ab/rootfs/$appdir"/*; do
+                            [[ -L "$app" ]] || continue
+                            apptgt="$(readlink "$app")"
+                            [[ "$(basename "$apptgt")" == busybox ]] || continue
+                            appname="$(basename "$app")"
+                            [[ -e "$vabin/$appname" ]] && continue
+                            ln -s busybox "$vabin/$appname"
+                            abin_n=$((abin_n + 1))
+                        done
+                    done
+                    # `sh` is a real copy in the stock tree (not a link), so the
+                    # roster above misses it; it is the one name most worth
+                    # having, so add it explicitly as a relative link too.
+                    [[ -e "$vabin/sh" ]] || { ln -s busybox "$vabin/sh"; abin_n=$((abin_n + 1)); }
+                    if [[ "$abin_n" -lt 20 ]]; then
+                        echo "==> viv bundles: /viv/abin roster is only $abin_n applets -- the stock tree's layout changed; refusing to stage a crippled tree" >&2
+                        exit 1
+                    fi
+                    echo "==> viv bundles: /viv-abin production busybox tree staged at $vabin ($abin_n applets as RELATIVE links -> busybox, so they resolve from outside a container too; joey binds it at /viv/abin MPHENO_LINUX)"
+                fi
                 # The CONSOLE ^C twin (item 12): the same rootfs, a
                 # non-interactive entrypoint that PRE-INSTALLS a SIGINT trap and
                 # then blocks. This is the vehicle for the console-^C-forward

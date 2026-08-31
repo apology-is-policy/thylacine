@@ -4058,6 +4058,14 @@ void test_vivarium_mkdirat_domain(void) {
     // git's core.sharedRepository shape keeps its census-visible refusal.
     TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 042755, &perm) == VIV_FORWARD,
                 "S_IFDIR|setgid still declines -- the mask spares 07000");
+
+    // Sticky is the third 07000 bit and was the only one left to inference.
+    // It is worth pinning explicitly because S_IFDIR|01777 is the `/tmp` entry
+    // every real rootfs tarball carries -- i.e. the exact shape a tar-extract
+    // of a distro image still declines on. Pinned, that residue is documented
+    // behaviour rather than a surprise the next extraction discovers.
+    TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 041777, &perm) == VIV_FORWARD,
+                "S_IFDIR|sticky (the rootfs /tmp shape) still declines");
 }
 
 void test_vivarium_unlinkat_domain(void);

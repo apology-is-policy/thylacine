@@ -949,7 +949,11 @@ unsafe fn seed_session_env(user: &[u8]) {
     // Mirrors the shell's static $path (eval/stmt.rs resolve_command) so `which`
     // and POSIX/Go tools agree with what `ut` runs; drift is a bug. /clade/bin is
     // the Clade C/C++ toolchain (absent when that chunk is off -- a harmless miss).
-    let path_val: &[u8] = b"/bin:/goroot/bin:/clade/bin";
+    // The two /viv entries are the phenotype-BY-LOCATION mounts (git, then the
+    // busybox applets): they were the drift this comment warned about -- `git`
+    // ran because ut's static list had /viv/bin while `which git` failed because
+    // this one did not.
+    let path_val: &[u8] = b"/bin:/goroot/bin:/clade/bin:/viv/bin:/viv/abin";
     let pairs: [(&[u8], &[u8]); 3] = [
         (b"HOME", &home_val),
         (b"USER", user),

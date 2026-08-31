@@ -587,7 +587,7 @@ fn resolve_command(name: &str) -> String {
     if name.contains('/') {
         return String::from(name);
     }
-    for dir in ["/bin/", "/", "/goroot/bin/", "/clade/bin/", "/viv/bin/"] {
+    for dir in ["/bin/", "/", "/goroot/bin/", "/clade/bin/", "/viv/bin/", "/viv/abin/"] {
         let mut cand = String::with_capacity(dir.len() + name.len());
         cand.push_str(dir);
         cand.push_str(name);

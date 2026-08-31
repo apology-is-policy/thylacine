@@ -7138,6 +7138,42 @@ int main(void) {
                 }
             }
 
+            // X-2 (AUX-ROADMAP Stream 0): the /viv/abin busybox applet tree --
+            // the same section-13 phenotype-BY-LOCATION mount as /viv/bin
+            // above, carrying tar/gzip/find/sed/~80 more. Its links are
+            // RELATIVE (`-> busybox`, built that way by build.sh), which is the
+            // whole reason it works here at all: Alpine's own absolute
+            // `-> /bin/busybox` links re-anchor at the caller's root (I-28,
+            // kernel/stalk.c:383) and dangle for anyone outside a container.
+            // SOFT exactly like the git mount: no busybox tarball -> no
+            // /vivarium/viv-abin -> no /viv/abin, degrading to "no applets on
+            // PATH" rather than bricking the boot.
+            {
+                long asrc = t_open(T_WALK_OPEN_FROM_ROOT, "/vivarium/viv-abin", 18,
+                                   T_OPATH);
+                if (asrc < 0) {
+                    t_putstr("joey: section-13 /viv/abin SKIPPED (no"
+                             " /vivarium/viv-abin -- no busybox tarball)\n");
+                } else {
+                    long avd  = mkdir_or_open(T_WALK_OPEN_FROM_ROOT, "viv", 3);
+                    long avbd = (avd >= 0) ? mkdir_or_open(avd, "abin", 4) : -1;
+                    if (avd  >= 0) (void)t_close(avd);
+                    if (avbd >= 0) (void)t_close(avbd);
+                    if (avbd < 0) {
+                        t_putstr("joey: section-13 /viv/abin mkdir FAILED"
+                                 " (degraded: no applets on PATH)\n");
+                    } else if (t_mount("/viv/abin", 9, asrc,
+                                       T_MREPL | T_MPHENO_LINUX) != 0) {
+                        t_putstr("joey: section-13 /viv/abin t_mount FAILED"
+                                 " (degraded: no applets on PATH)\n");
+                    } else {
+                        t_putstr("joey: section-13 /viv/abin busybox mount OK"
+                                 " (pheno-linux)\n");
+                    }
+                    (void)t_close(asrc);
+                }
+            }
+
 /* #228: the Clade + Go on-device toolchain probes. Ungated until now, so the
    lean production shape compiled them (the make gate calls mkt_file_eq, which
    only exists inside this gate -- one of the 11 errors that made
@@ -7679,7 +7715,7 @@ int main(void) {
                                         // Mirror the login PATH seed (login/main.rs)
                                         // so this boot-test run matches an interactive
                                         // session; drift is a bug.
-                                        const char pc[] = "/bin:/goroot/bin:/clade/bin";
+                                        const char pc[] = "/bin:/goroot/bin:/clade/bin:/viv/bin:/viv/abin";
                                         (void)t_write(pv, pc, sizeof(pc) - 1);
                                         (void)t_close(pv);
                                     }
