@@ -22,6 +22,75 @@ needed the operator.
 
 ---
 
+## 2026-08-31 (aux) -- N-3 phenotype threads: `clone(CLONE_THREAD)` + futex + gettid, a real thread spawns and joins under `viv`
+
+The operator ratified N-3 as the next chunk ("the pthread issue will be next on
+our plate -- npxf also needs it") after the DNS chunk self-compacted. Read
+`docs/PHENOTYPE-THREADS-GUIDE.md` (a complete tree-anchored build plan a prior
+session left) and did the recon before writing a line.
+
+**The recon shrank the crux and grew the futex.** The guide's headline "one
+genuinely new kernel function, `thread_create_forked_in_proc`" was over-stated:
+`thread_create_forked` (kernel/thread.c:525) ALREADY takes a `proc` and links
+into it via `thread_link_into_proc` -- the "always mints a new Proc" is
+`rfork_internal`'s CALLER behaviour, not this function's. So the crux is one call
+`thread_create_forked(cur->proc, ctx, child_sp, child_tls)` with a comment on why
+`cur->proc` -- no new function, no wrapper (the style guide's indirection rule).
+Going the other way, a delegated subagent read `third_party/musl` 1.2.5 and found
+the futex subset is NOT the trivial WAIT/WAKE the guide sketched: **`FUTEX_REQUEUE`
+(op 3) is load-bearing.** For a DEFAULT mutex (`_m_type==0`) `pthread_cond`'s
+`unlock_requeue` (pthread_cond_timedwait.c:52-53) takes the plain-REQUEUE branch,
+so `pthread_cond_broadcast` with >=2 waiters DEADLOCKS if op 3 is unserved -- and
+a one-waiter smoke test passes and hides it. torpor has no requeue primitive, so
+`viv_futex` emulates REQUEUE as `torpor_wake(uaddr, val+val2)`: correct, not an
+approximation (FUTEX_WAIT is spurious-wake-tolerant, so a woken-not-requeued
+waiter re-checks and contends on the real lock exactly as a requeued one would);
+the cost is a bounded herd on broadcast, and `torpor_requeue` is the v1.x lever.
+
+**Landed in three commits, all green.** `c507b787` (the 3-way `clone_decide` +
+the crux + `exit`(93)->`SYS_THREAD_EXIT` + `gettid`(178)), `f388e9fb` (futex
+WAIT/WAKE/REQUEUE), `9227073d` (the E2E). Suite 1469/1469; boot OK. `exit`(93)
+and `futex`(98) are sub-ceiling (they alias native `PTY_REGISTER`/`TTY_CONT`) --
+proven harmless because the phenotype dispatch renumbers/answers before the
+native switch is ever reached (traced `viv_linux_dispatch`: `VIV_FORWARD` and the
+T2 arms `return false`, never falling through to the native `switch`).
+
+**The E2E is a driver, and it was proven to be one.** The unit tests
+(`clone_domain`, `futex_decide`) test the pure decides; boot OK does not prove a
+thread RUNS. So `viv-pheno-probe` got legs L164-L169c in its raw-`svc` linux path
+(no Linux libc -- a hand-rolled thread-shaped clone shim, since the fork shim
+poisons x2/x3/x4 and a thread NEEDS real ptid/tls/ctid, and its child exits via
+`SYS_exit`(93) not exit_group): spawn -> futex WAIT/WAKE round-trip proving it
+ran -> SETTLS -> gettid distinct from the parent -> ptid published -> JOIN via the
+`CLONE_CHILD_CLEARTID` futex handoff. `joey: V-1b phenotype PASS`. Then the
+discrimination test (the vivarium-arc lesson: a gate is not wired until a driver
+reaches it): sabotaged `viv_clone_thread` to pass `tls=0`, rebuilt, booted -->
+`joey: V-1b linux-phenotype leg FAILED marker=L166 status=1`, exactly the SETTLS
+leg, with L164/L165 still green (the thread spawns and runs). Reverted; clean tree
+green again. So the gate tests the crux, it does not merely coexist with it.
+
+**The finding nobody planned: N-3 sprang the DNS chunk's F2 trap.** N-3 admits the
+pthread word, so a `PHENO_LINUX` Proc can now hold peer Threads sharing
+`Proc.socktab` -- the DNS socket table (net-4d) that was left LOCK-FREE, sound
+ONLY while `CLONE_THREAD` was refused. That was the DNS chunk's audit F2, filed
+P3 and "fixed" with a NOTE, not a lock, deferred to "when threads land." Threads
+have landed. A multithreaded phenotype program with concurrent socket ops from
+peer threads (curl's threaded resolver + connection socket; npxf) now races the
+socktab's flat `find`/`claim`/`drop` array -- a P1 the SMP gate is BLIND to (the
+thread E2E does no socket ops, so no driver reaches it). Enqueued
+([[bug-n3-socktab-multithread-race]]); the focused socktab spinlock + a
+non-guest-fd data handle is the OWED pull-forward follow-on. `sigtab` is
+peer-shared now too, but its cross-Proc atomic-u64 access discipline plausibly
+already covers the intra-Proc case (verifying it is part of the follow-on).
+
+**Open at write time:** the holotype audit is running (crux + futex + E2E; I-24 /
+I-9 / I-32 / I-43); the SMP gate is not yet run; the socktab-lock follow-on is
+owed; the vault ring-debt on `sub-kernel-vivarium` + `sub-kernel-syscall-dispatch`
+(quaestor: both paths vault-carried, no `docs/reference` section owed) grows by
+N-3.
+
+---
+
 ## 2026-08-31 (aux) -- DNS by name for the Linux phenotype (net-4d): `git clone https://github.com` is now literal
 
 The operator, after the busybox-tar run and a self-compact, asked to "make the

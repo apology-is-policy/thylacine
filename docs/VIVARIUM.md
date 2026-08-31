@@ -592,10 +592,22 @@ below, this is a fact about the translation table that a future row can
 falsify — not an invariant of the code.)
 
 **A thread-safety property that is a property of the TABLE, not of the data.**
-`socktab` (like `sigtab`) is read and written without a lock. That is sound today
-only because **a `PHENO_LINUX` Proc cannot obtain a PEER THREAD**, so there is no
+`socktab` (like `sigtab`) is read and written without a lock. That WAS sound only
+because **a `PHENO_LINUX` Proc could not obtain a PEER THREAD**, so there was no
 peer to race. This is *not* a property of the entries being small or of any
-atomicity argument.
+atomicity argument. **N-3 (§5.6) admits the pthread word `0x007D0F00`, so a
+phenotype Proc CAN now hold peer Threads sharing this table — the no-peer
+property is GONE.** For `socktab` that is a real race (a flat array with `find`/
+`claim`/`drop` and no atomicity discipline), and a spinlock + caller
+entry-pointer discipline is the OWED follow-on
+([[bug-n3-socktab-multithread-race]]; the field comments' "when threads land"
+warning anticipated exactly this). For `sigtab` the same no-peer argument is
+gone, but its cross-Proc atomic-u64 access discipline (every field one atomic
+u64, `handler` published last / zeroed first) — added for the OTHER-CPU reader
+axis (aux#254/main#243) — plausibly already makes the intra-Proc peer-thread case
+kernel-safe (no torn read, no crash; a concurrent-`rt_sigaction`-on-one-signal
+program getting an undefined disposition is its own POSIX race, not a kernel
+defect). Confirming that is part of the socktab-lock follow-on's scope.
 
 **The MECHANISM, corrected at #157/#158.** This paragraph used to say the reason
 was that `clone`/`clone3` are not table rows — which was true when written and
@@ -607,11 +619,14 @@ carries `CLONE_THREAD` — refusing the thread set is one of the three things th
 equality is written to do. A `fork` yields a new *Proc* with its own tables,
 which races nothing here.
 
-So the property now **evaporates the moment the clone domain admits the thread
-set** — a one-line change with no compiler consequence anywhere near either
-table. Both must be re-derived then, and the field comments say so. (The general
-shape: a load-bearing sentence must name the mechanism that is *actually*
-holding, or nobody can re-check it when that mechanism moves.)
+So the property **evaporated the moment the clone domain admitted the thread
+set — which is exactly what N-3 did** (the THREAD arm of `vivarium_clone_decide`,
+§5.6): a change with no compiler consequence anywhere near either table, so
+nothing failed to announce it. Both were flagged for re-derivation and the field
+comments said so; `socktab` now owes its lock. (The general shape, and why the
+field comments were load-bearing: a sentence a future change will falsify must
+name the mechanism that is *actually* holding, or nobody can re-check it when
+that mechanism moves — here, "no peer thread", not "small entries".)
 (V-6c left the opposite claim on `sigtab` — that byte-sized entries could not tear
 — which was true at V-6b and false once entries widened to 32 bytes; corrected in
 the same commit as this section, task #97. And the intra-Proc argument above was
@@ -837,12 +852,98 @@ is non-blocking; a general blocking datagram consumer would see an empty-datagra
 shape. And `connect()` now **preserves** the socket's `CNONBLOCK` across its
 `ctl`→`data` swap, which N-1a's admission would otherwise silently drop.
 
-**What still gates `git clone https://` by name.** N-1a..N-2b make musl's
-*single-threaded* `getaddrinfo` (busybox's, and the `GITHTTPS-DNS` gate leg's)
-resolve by name. git's HTTPS transport reaches DNS through libcurl's **threaded**
-resolver, which spawns a thread — the orthogonal `CLONE_THREAD`/`pthread_create`
-gap — so the git-net gate keeps its `/etc/hosts` pin for the clone itself until
-that lands. The DNS *capability* is proven independently of it.
+**What N-3 unlocks.** N-1a..N-2b make musl's *single-threaded* `getaddrinfo`
+(busybox's, and the `GITHTTPS-DNS` gate leg's) resolve by name. libcurl's
+**threaded** resolver (git's HTTPS transport, standalone curl, npxf) reaches DNS
+through a `pthread_create` thread — the orthogonal `CLONE_THREAD` gap — which
+**N-3 (§5.6) closes**: a phenotype thread now spawns, runs, and joins, so the
+resolver's DNS thread runs like any other. (git's BUNDLED static curl is
+synchronous and already resolved by name; the threaded-resolver consumers are the
+ones N-3 serves.)
+
+---
+
+### 5.6 Threads (N-3) — `clone(CLONE_THREAD)` as a Thread in the caller's Proc
+
+**The one-sentence model.** A Linux `CLONE_THREAD` task *is* a Thylacine
+`Thread` inside a `Proc`. A `Proc` already owns an `AddrSpace`, a `HandleTable`,
+a `Territory`, and a `viv_sigtab`; every `Thread` of a Proc already **shares**
+all four. So the sharing every `CLONE_VM/FILES/FS/SIGHAND` bit asks for is
+*definitional* — N-3 is a **translator** from the Linux `clone` ABI onto that,
+not a threading engine.
+
+**The crux (`viv_clone_thread`, kernel/syscall.c).** The pure decide
+(`vivarium_clone_decide`) admits the EXACT pthread word
+`VIV_CLONE_FLAGS_THREAD == 0x007D0F00` (statically asserted; musl's
+`pthread_create` emits exactly it) as a THIRD mode beside FORK/VFORK. The shell
+then calls `thread_create_forked(cur->proc, ctx, child_sp, child_tls)`. The
+single load-bearing line is **`cur->proc`**: `thread_create_forked` already takes
+a `proc` and links into it, so passing the CALLER's Proc (not a fresh one — that
+is `rfork`'s path, and a fresh Proc means a fresh pid, wrong for a thread) is
+what makes the new Thread a peer. A clone hands the kernel NO entry function —
+the child resumes at the parent's trap frame with `x0=0` on `child_sp` — so the
+forked-frame shape (`fork_frame_init`) is correct where `SYS_THREAD_SPAWN`'s
+entry-va shape is not. The design guide (`docs/PHENOTYPE-THREADS-GUIDE.md`)
+speculated a new `thread_create_forked_in_proc`; it was unnecessary, the existing
+core was already parameterized on `proc`.
+
+**The syscall rows.**
+
+| Linux call | Row | Target |
+|---|---|---|
+| `clone(0x007D0F00, …)` | TIER2 (the THREAD arm) | `viv_clone_thread` -> `thread_create_forked(cur->proc,…)` |
+| `exit`(93) | T1 renumber | `SYS_THREAD_EXIT` -> `thread_exit_self` (a musl thread's exit; status 0) |
+| `gettid`(178) | TIER2 | `current_thread()->tid` (getpid stays per-Proc) |
+| `futex`(98) | TIER2 | `viv_futex` -> torpor |
+
+`exit`(93) and `futex`(98) are **sub-ceiling** (they collide with native
+`SYS_PTY_REGISTER`/`SYS_TTY_CONT`) — harmless because the phenotype dispatch
+renumbers/answers before the native switch is ever reached (per-number
+paragraphs at the rows, not ceiling asserts, which `< 108` would fail).
+
+**futex -> torpor.** `vivarium_futex_decide` strips `FUTEX_PRIVATE_FLAG`(0x80) +
+`FUTEX_CLOCK_REALTIME`(0x100) and admits only `WAIT(0)`/`WAKE(1)`/`REQUEUE(3)` —
+the subset musl's DEFAULT (non-robust, non-PI) mutex + cond + join emit, verified
+against `third_party/musl` 1.2.5. The private bit is *discarded*: all peers share
+one AddrSpace, so torpor's `(proc, addr)` key already scopes the wait. `WAIT`
+converts musl's RELATIVE `timespec` to torpor microseconds (clamped to the 1-hour
+ceiling before the multiply, so a huge `tv_sec` cannot overflow). **`REQUEUE` has
+no torpor primitive and is emulated as `torpor_wake(uaddr, val+val2)`** — a
+CORRECT implementation, not an approximation: `FUTEX_WAIT` is spurious-wake-
+tolerant by contract, so a woken-not-requeued waiter re-checks its word and
+contends on the real lock exactly as it would after a requeue+wake. It is
+**load-bearing, not optional**: for a default mutex (`_m_type==0`) musl's
+`pthread_cond` wake-chain (`unlock_requeue`) takes the plain-REQUEUE branch, so a
+`pthread_cond_broadcast` with ≥2 waiters DEADLOCKS if op 3 is unserved. The one
+cost is a bounded herd on broadcast (O(waiters) wakes, not a chain-requeue); a
+`torpor_requeue` is the v1.x optimization.
+
+**Invariants.** I-24 (the new Thread is in the caller's Proc, so
+`proc_group_terminate` covers it; the link-then-`ready()` order mirrors
+`sys_thread_spawn_handler`, and a mid-clone thread's EL0-return die-check fires
+before it reaches EL0); I-9 (the futex WAIT shells straight onto
+`sys_torpor_wait_for_proc`'s register-before-recheck — no pre-check is added);
+I-32 (`proc_thread_cap_ok` gates before the kstack alloc — a `pthread_create`
+storm fails clean `-EAGAIN`); I-43 (a thread inherits the Proc's caps — shared,
+not escalated; a phenotype confers shape, never authority); I-31 (one AddrSpace =
+one ASID, however many Threads).
+
+**Proof (viv-pheno-probe, `linux` path, L164-L169c).** A raw-`svc` thread ABI
+(no Linux libc): a thread-shaped clone shim spawns a Thread, and the parent
+verifies it RAN (a futex WAIT/WAKE round-trip), got the passed TLS (SETTLS), has
+its own tid distinct from the parent's (gettid), had its tid published to `*ptid`
+(PARENT_SETTID), and JOINS it via the `CLONE_CHILD_CLEARTID` futex handoff at its
+`SYS_exit`(93). Discrimination-proven: with `viv_clone_thread` sabotaged to pass
+`tls=0`, the gate goes red at exactly `marker=L166` (L164/L165 still pass — the
+thread spawns and runs — and L166 catches the broken SETTLS).
+
+**Honest ceilings.** PI (`LOCK_PI`/`UNLOCK_PI`), `WAKE_OP`, `CMP_REQUEUE`,
+`WAIT_BITSET` are the opt-in robust/PI paths — they ENOSYS (musl's default never
+touches them). **The socktab F2 trap is now SPRUNG:** `Proc.socktab` (the §5.5.2
+socket table) was lock-free ONLY while `CLONE_THREAD` was refused; a multithreaded
+phenotype program with concurrent socket ops from peer threads now races it. A
+focused socktab spinlock + a non-guest-fd data handle is the OWED pull-forward
+follow-on (the DNS chunk's F2 note anticipated exactly this "when threads land").
 
 ---
 
