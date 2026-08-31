@@ -22,6 +22,57 @@ needed the operator.
 
 ---
 
+## 2026-08-31 (aux) -- N-4/AF_UNIX deferred to the Mycelium NOVEL; per-model effort split
+
+Two things this session, neither a code chunk: an operator effort-config
+episode, and the decision to defer AF_UNIX in favour of a captured NOVEL.
+
+**Effort (per-model split).** The operator weighed dropping from max to xhigh to
+conserve the weekly budget. The session was pinned at max by a
+`CLAUDE_CODE_EFFORT_LEVEL=max` env var injected from main's
+`.claude/settings.local.json` `env` block -- which a child shell's `unset`
+cannot clear (a child cannot mutate the parent process's env; the var bakes in
+at launch and is re-injected from settings each start). The env var is
+model-agnostic, so it could not express the operator's actual want: **Fable on
+max (reviews + main's Fable implementor), Opus 4.8 on xhigh (implementors)**.
+Fix: delete the env var, and drive per-model effort from `~/.claude/settings.json`
+`modelSettings` -- added `claude-fable-5: max` beside the existing
+`claude-opus-4-8: xhigh`. Running processes need a full relaunch to pick it up
+(env bakes at start; modelSettings is a session-start default). Recorded because
+it recurs: effort pins are process-baked, not file-live.
+
+**N-4 recon -- AF_UNIX is a design fork with no near-term driver.** A grounded
+recon (subagent + my independent read, converging) established: AF_INET was a
+thin *translation* only because netd + the `/net` tree gave it a ready backend;
+**AF_UNIX is local -- no netd, no `/net` -- so that strategy does not carry**
+(the reject arm in `kernel/vivarium.c`: `domain != VIV_AF_INET -> EAFNOSUPPORT`).
+The decisive finding: **N-4 has no forcing near-term driver.** npxf (the named
+consumer -- the operator's own tool, not in-tree) runs over **AF_INET loopback**
+(`docs/PHENOTYPE-THREADS-GUIDE.md`); its real blocker was threads (N-3, landed
+`32eec7ca`). None of the four Stream-0 workflows need AF_UNIX except W4-5 (a
+Wayland shim), gated "only if the target set demands it" and bundling AF_UNIX
+with **SCM_RIGHTS fd-passing + a shared-memory object** -- a cluster, not a
+socket. A real AF_UNIX SOCK_STREAM backend already exists for the *pouch* path
+over `/srv` + SrvConn byte-mode (ARCH's "SrvConn-as-AF_UNIX").
+
+**Decision (operator).** Rather than hack AF_UNIX in four ways for no consumer,
+**capture the operator's own idea -- Mycelium, a native universal IPC that Linux
+local sockets are a view onto -- as a `NOVEL.md` post-v1.0 candidate with a
+design session OWED, park it, defer AF_UNIX to it, and continue with the chunks
+that have clients waiting.** Mycelium is the Fuchsia-zircon-channel (bytes +
+handle-passing) x Plan-9-`/srv` fusion; its handle-passing IS I-4's unbuilt
+positive path, which is exactly what SCM_RIGHTS/Wayland needs -- so the one real
+AF_UNIX driver falls out of it cleanly. Discipline recorded in the NOVEL entry:
+design it native-first (for `ut`/netd/tapestryd/corvus/ptyfs), AF_UNIX a
+validated consumer, not the driver. Scripture-only commit; no code.
+
+**Open / next.** N-4 deferred (not dropped -- it returns as a Mycelium view when
+W4-5 is greenlit). NEXT = **N-5** (protocol-v2 root-cause: retire the forced
+`protocol.version=0`; leading hypothesis is `getsockname` ENOSYS during v2
+connection-reuse) -> **N-6** (push-over-https) -- both close milestone B and
+serve W1 (clone a Go repo over https, build, run). Effort: max, riding the
+N-5/N-6 arc (operator-chosen), flip back to xhigh after N-6.
+
 ## 2026-08-31 (aux) -- socktab spinlock: closing the P1 that N-3 sprang (peer threads race the socket table)
 
 N-3 landed and self-compacted; the resume note named the next chunk as its own

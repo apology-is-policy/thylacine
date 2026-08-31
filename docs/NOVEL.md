@@ -271,6 +271,47 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   mission's exit bar (2026-07-05) — device `-p 4` builds execute at serial
   wall-clock because every FS op funnels through one serial server loop.
 
+- **Mycelium — a native universal IPC substrate that Linux local sockets are a
+  *view* onto** (**design session OWED — not yet specified**; captured
+  2026-08-31 at the N-4/AF_UNIX sequencing fork). Invert the "how do we implement
+  AF_UNIX" question: rather than translate Unix-domain sockets onto an ad-hoc
+  backend, build the *right* native IPC — a namespace-named, capability-scoped
+  channel carrying **bytes, framed messages, AND handles** — and make AF_UNIX
+  (and the rest of POSIX local IPC) one downstream view, the way Fuchsia's `fdio`
+  presents POSIX onto zircon channels. The prior-art anchor is exact: **Fuchsia's
+  zircon channel (bytes + handle-passing) + `fdio` on top** is almost precisely
+  this shape; seL4 endpoints / Genode sessions are the same capability-IPC
+  family; the heritage side is pure Plan 9 — `/srv` + pipes + 9P *is* "post a
+  channel to a name, a peer connects." The novel square is the fusion: a Plan 9
+  `/srv`-named, namespace-scoped channel with zircon-style message+handle
+  transport that *complements* 9P (a Mycelium channel can carry a 9P session)
+  rather than competing with it. **Honest delta**: the substrate is already
+  substantially in-tree — SrvConn byte-mode (`kernel/devsrv.c` + `kernel/srvconn.c`;
+  ARCH names it "SrvConn-as-AF_UNIX") gives a bidirectional byte stream with
+  listen/accept over `/srv`, and pouch's musl AF_UNIX SOCK_STREAM already rides
+  it. What is *new*, and where the value sits: message framing, a coherent native
+  API, arbitrary-pathname (not just `/srv/<name>`) naming via the per-Proc
+  namespace, and — the hard, valuable part — **handle-passing over the channel**,
+  i.e. building I-4's positive path (handles transfer between Procs only via 9P
+  sessions, "still future"). That handle-passing is exactly SCM_RIGHTS, so the
+  one real AF_UNIX driver — a Wayland client (ROADMAP W4-5: AF_UNIX + SCM_RIGHTS
+  fd-passing + a client shared-memory object) — falls out of Mycelium cleanly
+  instead of as a bespoke hack. **Design discipline (why it is owed, not sketched
+  here)**: design Mycelium **native-first** — for what Thylacine's own programs
+  (`ut`, netd, tapestryd, corvus, ptyfs) want from IPC — with AF_UNIX a
+  *validated consumer*, never the driver; letting `sockaddr_un`'s warts (108-byte
+  paths, the abstract namespace, exact SCM ordering) shape a native substrate
+  would overfit it. **Why parked**: neither Mycelium nor AF_UNIX has a forcing
+  near-term driver (npxf runs over AF_INET loopback; only the optional Wayland
+  W4-5 needs AF_UNIX, and it needs the whole cluster), so AF_UNIX/N-4 was deferred
+  *to* Mycelium here rather than hacked in — and Mycelium is a deliberate
+  architecture arc for a real design session, not a quick socket backend.
+  Composes I-1/I-28 (namespace-scoped access) + I-4 (the handle-transfer positive
+  path it would build) + I-5/I-6 (non-transferable, rights-attenuated channel
+  handles). Name: the mycelial network, the underground substrate connecting
+  everything (the "wood wide web") — fitting the bushland palette and the
+  universal-connective-tissue role.
+
 ---
 
 ## 3. Per-angle scope
