@@ -170,6 +170,7 @@ enum {
     VIV_LINUX_MPROTECT   = 226,
     VIV_LINUX_STATX      = 291,
     VIV_LINUX_EXIT_GROUP = 94,
+    VIV_LINUX_EXIT       = 93,   // N-3: a musl THREAD exits via SYS_exit(93)
 
     // The signal family (V-6, §6.22). Contiguous in Linux's aarch64 table.
     VIV_LINUX_RESTART_SYSCALL = 128,
@@ -305,6 +306,7 @@ enum {
     VIV_LINUX_GETPPID         = 173,
     VIV_LINUX_GETUID          = 174,
     VIV_LINUX_GETGID          = 176,
+    VIV_LINUX_GETTID          = 178,   // N-3: per-Thread tid (getpid stays per-Proc)
 
     // The time family. Both above the native ceiling (113, 169 > the highest
     // native syscall), so collision-free by construction -- their collision
@@ -2043,12 +2045,16 @@ void vivarium_build_sigframe(struct viv_sigframe_head *out, u64 signum,
 enum {
     VIV_CSIGNAL              = 0x000000ff,   // the low byte IS the exit signal
     VIV_CLONE_VM             = 0x00000100,
+    VIV_CLONE_FS             = 0x00000200,
     VIV_CLONE_FILES          = 0x00000400,
+    VIV_CLONE_SIGHAND        = 0x00000800,
     VIV_CLONE_VFORK          = 0x00004000,
     VIV_CLONE_THREAD         = 0x00010000,
+    VIV_CLONE_SYSVSEM        = 0x00040000,
     VIV_CLONE_SETTLS         = 0x00080000,
     VIV_CLONE_PARENT_SETTID  = 0x00100000,
     VIV_CLONE_CHILD_CLEARTID = 0x00200000,
+    VIV_CLONE_DETACHED       = 0x00400000,
     VIV_CLONE_CHILD_SETTID   = 0x01000000,
 };
 
@@ -2082,6 +2088,40 @@ enum {
 // mask could not express either correctly.
 #define VIV_CLONE_FLAGS_FORK ((u32)VIV_CLONE_SIGCHLD)
 
+// The THIRD admitted word (N-3): a pthread `clone(CLONE_THREAD)`. musl's
+// pthread_create emits EXACTLY this word (`__clone(func, stack, 0x007D0F00,
+// ...)`, pthread_create.c) -- the full CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|
+// SETTLS|PARENT_SETTID|CHILD_CLEARTID|DETACHED set. Unlike the fork/vfork words
+// this one is genuinely CONCURRENT: the child is a schedulable Thread in the
+// caller's OWN Proc, and every sharing bit (VM/FS/FILES/SIGHAND) is satisfied
+// BY CONSTRUCTION -- a Thread linked into that Proc inherits its AddrSpace /
+// Territory / HandleTable / sigtab. SYSVSEM/DETACHED are no-ops at v1.0 (no
+// SysV sems; detach state is a userspace word). Exact, for the FLAGS_ADMITTED
+// reason: a bit outside this set is one nobody has reasoned about.
+#define VIV_CLONE_FLAGS_THREAD                                                 \
+    ((u32)(VIV_CLONE_VM | VIV_CLONE_FS | VIV_CLONE_FILES | VIV_CLONE_SIGHAND | \
+           VIV_CLONE_THREAD | VIV_CLONE_SYSVSEM | VIV_CLONE_SETTLS |           \
+           VIV_CLONE_PARENT_SETTID | VIV_CLONE_CHILD_CLEARTID |               \
+           VIV_CLONE_DETACHED))
+
+// The cheapest possible guard against a vocabulary typo, and it pins the exact
+// ABI word being matched: if any bit constant above drifts, the build stops.
+_Static_assert(VIV_CLONE_FLAGS_THREAD == 0x007D0F00u,
+               "VIV_CLONE_FLAGS_THREAD must equal musl pthread_create's clone "
+               "flag word 0x007D0F00 -- a mismatch means a CLONE_* bit is wrong");
+
+// The clone shape the decide selects. FORK = a private copy-on-write child (a
+// fork, or a null-stack vfork served as one); VFORK = an RFMEM child + parent
+// suspend (posix_spawn's non-zero-stack shape); THREAD = a Thread in the
+// caller's OWN Proc (N-3). An enum rather than the older `bool share_mem` so a
+// third outcome is nameable -- the pure layer says WHICH shape without importing
+// proc.h's RFPROC/RFMEM, exactly as the bool did.
+enum viv_clone_mode {
+    VIV_CLONE_MODE_FORK,
+    VIV_CLONE_MODE_VFORK,
+    VIV_CLONE_MODE_THREAD,
+};
+
 // Decide whether a `clone` is inside the translatable domain. PURE -- no user
 // memory, no Proc, no locks.
 //
@@ -2101,9 +2141,14 @@ enum {
 // signalling through shared memory is the ordinary case). That is not
 // conservative; it is a hang with our name on it.
 //
-// So the domain is exact, and the caller gets an honest decline it can act on.
-// The genuinely concurrent shape has a correct target already -- CLONE_THREAD
-// onto SYS_THREAD_SPAWN -- and that row should arrive with its own reasoning.
+// So the CLONE_VM-without-VFORK domain is exact, and the caller gets an honest
+// decline it can act on. The genuinely concurrent shape -- the full pthread word
+// VIV_CLONE_FLAGS_THREAD -- is NOW served (N-3), as VIV_CLONE_MODE_THREAD: a
+// Thread in the caller's OWN Proc, NOT the old "route onto SYS_THREAD_SPAWN"
+// plan. The reason it is a Thread-in-this-Proc and not a spawn is that a Linux
+// clone hands the kernel no entry function -- the child resumes at the parent's
+// trap frame -- so the forked-frame core (thread_create_forked) is the correct
+// target, and SYS_THREAD_SPAWN's entry-va shape is the wrong one.
 //
 // A ZERO `stack` under the vfork shape is `vfork()` proper, and it is SERVED AS
 // A FORK (option B, 2026-08-31; LINEAGE.md 3.1). Linux reads stack==0 under
@@ -2124,19 +2169,23 @@ enum {
 // shapes outside the domain are ones a later chunk may serve rather than ones
 // to deny forever.
 //
-// On VIV_TRANSLATED, *share_mem_out says WHICH shape the shell must build:
-// true = RFMEM (the child shares the address space and the parent suspends --
-// a non-zero-stack vfork), false = a private copy-on-write child (a fork, OR a
-// null-stack vfork served as one per above). The shell turns that into a flag
-// word; the pure layer says share-or-copy without importing proc.h's
-// RFPROC/RFMEM, which do not belong on this side of the boundary.
+// On VIV_TRANSLATED, *mode_out says WHICH shape the shell must build:
+//   VIV_CLONE_MODE_VFORK  = RFMEM (child shares the address space and the parent
+//                           suspends -- a non-zero-stack vfork);
+//   VIV_CLONE_MODE_FORK   = a private copy-on-write child (a fork, OR a
+//                           null-stack vfork served as one per above);
+//   VIV_CLONE_MODE_THREAD = a Thread in the CALLER's OWN Proc (the pthread word).
+// The shell turns FORK/VFORK into an rfork flag word and THREAD into a
+// thread_create_forked into the caller's Proc; the pure layer names the shape
+// without importing proc.h's RFPROC/RFMEM, which do not belong on this side of
+// the boundary.
 //
 // It is an OUT-PARAM rather than something the shell re-derives from `flags`
 // (the vivarium_openat_decide shape) because re-deriving would put the same
-// decision in two places, and the two shapes differ in exactly the way a second
-// reader would get wrong.
+// decision in two places, and the three shapes differ in exactly the way a
+// second reader would get wrong.
 enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
-                                       bool *share_mem_out);
+                                       enum viv_clone_mode *mode_out);
 
 // -----------------------------------------------------------------------------
 // TIER 2 — `wait4` (LINEAGE L-6b). See docs/LINEAGE.md §5.5.

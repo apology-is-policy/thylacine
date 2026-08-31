@@ -70,6 +70,10 @@ _Static_assert(VIV_LINUX_GETEGID > VIV_NATIVE_CEILING,
                "getegid's collision argument is the ceiling one (git chunk)");
 _Static_assert(VIV_LINUX_GETRANDOM > VIV_NATIVE_CEILING,
                "getrandom's collision argument is the ceiling one (git chunk)");
+_Static_assert(VIV_LINUX_GETTID > VIV_NATIVE_CEILING,
+               "gettid's collision argument is the ceiling one (N-3). Its "
+               "threading siblings exit(93)/futex(98) are SUB-ceiling and carry "
+               "per-number paragraphs at their rows instead");
 
 // A T1 row: a Linux number, the Thylacine number it renumbers to, and the arity
 // that must carry across unchanged. `nargs` is not used to copy (the whole
@@ -188,6 +192,26 @@ static const struct viv_row g_viv_t1[] = {
     { VIV_LINUX_PREAD64,    SYS_PREAD,      4 },
     { VIV_LINUX_PWRITE64,   SYS_PWRITE,     4 },
     { VIV_LINUX_EXIT_GROUP, SYS_EXIT_GROUP, 1 },
+
+    // N-3: a musl THREAD (not the process) exits via SYS_exit(93), always with
+    // status 0 (pthread_create.c: `for(;;) __syscall(SYS_exit,0)`), NEVER
+    // exit_group. It renumbers to SYS_THREAD_EXIT, whose handler runs
+    // thread_exit_self: the LAST live Thread of the Proc becomes the zombie
+    // (status 0/"ok"), any earlier one just retires (THREAD_EXITING + sched),
+    // and the CLONE_CHILD_CLEARTID handoff (thread_clear_child_tid_handoff) fires
+    // at that retirement to wake a joiner. The status word is dropped, which is
+    // exactly right: musl threads pass 0, and process exit-status travels on
+    // exit_group above. SYS_THREAD_EXIT takes no args so nargs=0.
+    //
+    // SUB-CEILING COLLISION (93 == native SYS_PTY_REGISTER): harmless by the same
+    // structure as the read/write and pread/pwrite renumbers. A PHENO_LINUX Proc
+    // reaches the native switch ONLY through this table, which rewrites regs[8]
+    // to SYS_THREAD_EXIT (42) BEFORE the native dispatch sees it, so nr 93 never
+    // arrives as PTY_REGISTER for a phenotype caller; a native Proc never enters
+    // viv_linux_dispatch, so its 93 stays PTY_REGISTER. The two readings never
+    // meet. (Before this row, 93 FORWARDed to a clean ENOSYS -- no collision then
+    // either, since FORWARD returns -ENOSYS without touching the native switch.)
+    { VIV_LINUX_EXIT,       SYS_THREAD_EXIT, 0 },
 
     // #150. getpid is the ONLY member of the startup batch that is a clean
     // renumber, and stating why the others are not is the point of listing it
@@ -402,9 +426,10 @@ static const struct viv_reject g_viv_rejects[] = {
     // the same commit under this file's own rule -- a VIV_TIER2 row whose shell
     // is missing declares a capability the code does not have.
     //
-    { VIV_LINUX_CLONE,       VIV_TIER2   },  // L-3d: vivarium_clone_decide
+    { VIV_LINUX_CLONE,       VIV_TIER2   },  // L-3d + N-3: vivarium_clone_decide
     { VIV_LINUX_EXECVE,      VIV_TIER2   },  // L-6a: viv_execve
     { VIV_LINUX_WAIT4,       VIV_TIER2   },  // L-6b: vivarium_wait4_decide
+    { VIV_LINUX_GETTID,      VIV_TIER2   },  // N-3: current_thread()->tid
 
     // The startup batch (#150, LINEAGE L-6c). Every row here was MEASURED --
     // this is the census a running busybox printed, not a guess at what a libc
@@ -1350,9 +1375,9 @@ bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
 // =============================================================================
 
 enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
-                                       bool *share_mem_out) {
-    if (!share_mem_out) return VIV_FORWARD;     // fail closed
-    *share_mem_out = false;
+                                       enum viv_clone_mode *mode_out) {
+    if (!mode_out) return VIV_FORWARD;          // fail closed
+    *mode_out = VIV_CLONE_MODE_FORK;            // safe default; FORWARD arms leave it
     // THE COMPARISON IS FULL-WIDTH, and that is a deliberate difference from
     // vivarium_mmap_decide / vivarium_openat_decide, which narrow to 32 bits.
     // Those calls take `int` parameters in the Linux ABI, so the narrowing is
@@ -1380,14 +1405,20 @@ enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
     //     and serving it anyway turns a working program into a deadlock. The
     //     header carries the full argument for why L-3c-2's fail-safe reasoning
     //     does not extend here.
-    //   * CLONE_THREAD (and the rest of the thread set) -- a genuinely
-    //     concurrent child has a correct target already, SYS_THREAD_SPAWN, and
-    //     it is not this row.
-    //   * CLONE_SETTLS / CLONE_PARENT_SETTID / CLONE_CHILD_{SET,CLEAR}TID --
-    //     each makes one of x2/x3/x4 MEANINGFUL, and this translator's whole
-    //     safety argument is that it never reads them (the header's garbage-
-    //     register note). Excluding them is what makes "pass a literal 0 for
-    //     child_tls" correct rather than merely convenient.
+    //   * CLONE_THREAD as a stray bit on a NON-thread word -- refused here. The
+    //     FULL pthread word VIV_CLONE_FLAGS_THREAD is served, but as its own
+    //     exact arm below (VIV_CLONE_MODE_THREAD), not by admitting the bit into
+    //     the fork/vfork words. Fork-with-a-CLONE_THREAD-bit is a shape nobody
+    //     emits and nobody has reasoned about, so it declines.
+    //   * CLONE_SETTLS / CLONE_PARENT_SETTID / CLONE_CHILD_{SET,CLEAR}TID -- on
+    //     the FORK/VFORK arms each makes one of x2/x3/x4 MEANINGFUL, and those
+    //     arms' whole safety argument is that they never read them (the header's
+    //     garbage-register note): the shell passes a LITERAL 0 for child_tls.
+    //     The THREAD arm is the deliberate exception -- its word carries SETTLS +
+    //     PARENT_SETTID + CHILD_CLEARTID precisely because a thread NEEDS its TLS,
+    //     tid publish, and exit-clear, so the THREAD shell DOES read x2/x3/x4.
+    //     Keeping the arms separate is what lets the fork/vfork "never read the
+    //     garbage registers" claim stay literally true.
     //
     // An exit signal other than SIGCHLD is refused by the same equality, and
     // deliberately: `exits()` posts `child_exit` unconditionally (I-19), so a
@@ -1409,7 +1440,20 @@ enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
     // its own copy at that address, which is exactly what fork() means. So the
     // vfork arm rejects zero below and this one does not.
     if (flags == (u64)VIV_CLONE_FLAGS_FORK) {
-        *share_mem_out = false;
+        *mode_out = VIV_CLONE_MODE_FORK;
+        return VIV_TRANSLATED;
+    }
+
+    // N-3: the pthread word. Served as a Thread in the caller's OWN Proc. Checked
+    // between fork and vfork so the exact-equality ladder reads fork -> thread ->
+    // vfork -- three distinct words, none a mask of another. A thread MUST carry
+    // its own stack (two threads on one stack corrupt each other -- the RFMEM
+    // child_sp invariant, now load-bearing for a genuinely concurrent child), so
+    // a zero stack forwards (out of domain) rather than translating, exactly as
+    // the RFMEM vfork arm rejects a zero stack below.
+    if (flags == (u64)VIV_CLONE_FLAGS_THREAD) {
+        if (stack == 0) return VIV_FORWARD;
+        *mode_out = VIV_CLONE_MODE_THREAD;
         return VIV_TRANSLATED;
     }
 
@@ -1422,7 +1466,7 @@ enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
     //   while sharing the parent's memory, so it is a true RFMEM vfork: the
     //   parent suspends (vfork_await_release), the child execs/exits on its own
     //   stack, and the two never push a shared frame concurrently.
-    //   share_mem = true.
+    //   mode = VIV_CLONE_MODE_VFORK.
     //
     //   stack == 0 -- `vfork()` proper: "run on the parent's ONE stack, and
     //   trust me not to disturb it before exec/exit." Plan 9 has NO such shape.
@@ -1439,15 +1483,15 @@ enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
     //   fallback for: busybox's spawn aborts with "vfork: Function not
     //   implemented" and no tar/gzip pipeline runs.
     //
-    //   This arm is provably equivalent to the fork arm above: share_mem=false
-    //   + stack=0 reaches the shell as sys_rfork_core(RFPROC, 0, 0), the exact
+    //   This arm is provably equivalent to the fork arm above: MODE_FORK +
+    //   stack=0 reaches the shell as sys_rfork_core(RFPROC, 0, 0), the exact
     //   translation `clone(SIGCHLD, 0)` already produces. It is not a new path,
     //   it is the same path reached by a different flags word.
     if (stack == 0) {
-        *share_mem_out = false;
+        *mode_out = VIV_CLONE_MODE_FORK;
         return VIV_TRANSLATED;
     }
-    *share_mem_out = true;
+    *mode_out = VIV_CLONE_MODE_VFORK;
 
     // NOTE what is NOT checked: alignment, range, and overlap with the caller's
     // own stack. Those are SYS_RFORK's own gate, they are identical for a

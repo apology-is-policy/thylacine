@@ -4598,6 +4598,109 @@ static void sys_thread_exit_handler(void) {
     extinction("sys_thread_exit returned");
 }
 
+// VIVARIUM N-3: clone(CLONE_THREAD) -- a Thread in the CALLER's OWN Proc. The
+// crux of Linux-phenotype threading, and a TRANSLATOR onto machinery that
+// already works, not a new engine.
+//
+// The Linux thread contract, mapped:
+//   - the child resumes at the parent's trap frame with x0=0 on child_sp
+//     (fork_frame_init, inside thread_create_forked) -- a clone hands the kernel
+//     NO entry function, so this forked-frame shape is correct where
+//     SYS_THREAD_SPAWN's entry-va shape is wrong;
+//   - it shares the caller's AddrSpace / HandleTable / Territory / sigtab BY
+//     CONSTRUCTION, because thread_create_forked links it into the CALLER's Proc
+//     (cur->proc, NOT a fresh one). The fresh-Proc path is rfork's, and a new
+//     Proc means a new pid -- wrong: CLONE_THREAD peers share one pid;
+//   - it gets its own tid (the return value), publishes it into *ptid, and arms
+//     the CLONE_CHILD_CLEARTID exit-clear+wake so a joiner observes its death.
+//
+// The argument gates MIRROR sys_thread_spawn_handler (the native twin) exactly:
+// a misaligned child_sp/ptid extincts at the eret or the STR (the EL1 fixup
+// table catches translation faults, not alignment), so they become clean
+// -EINVAL here. The thread cap (I-32) is checked BEFORE the kstack alloc,
+// bounding a pthread_create storm to -EAGAIN.
+static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
+    u64 flags     = args[0];
+    u64 child_sp  = args[1];
+    u64 ptid_va   = args[2];
+    u64 child_tls = args[3];
+    u64 ctid_va   = args[4];
+
+    struct Thread *cur = current_thread();
+    if (!cur)                                        return -(s64)T_E_INVAL;
+    struct Proc *p = cur->proc;
+    if (!p)                                          return -(s64)T_E_INVAL;
+    if (p->magic != PROC_MAGIC)                      return -(s64)T_E_INVAL;
+    if (p == kproc())                                return -(s64)T_E_INVAL;
+    if (!p->as)                                      return -(s64)T_E_INVAL;
+
+    // child_sp: mandatory + 16-aligned + within user VA (AAPCS64 + the SP_EL0
+    // install at eret). The decide already refused a zero stack; re-gated here
+    // because the pure decide cannot see UACCESS_USER_VA_TOP.
+    if (child_sp == 0)                               return -(s64)T_E_INVAL;
+    if ((child_sp & 0xFu) != 0)                      return -(s64)T_E_INVAL;
+    if (child_sp >= UACCESS_USER_VA_TOP)             return -(s64)T_E_INVAL;
+
+    // child_tls: 0 permitted (no TLS); non-zero must be within user VA -- it is
+    // written to TPIDR_EL0 at the eret, so a TTBR1 value would fault the child's
+    // first thread-local access far from here.
+    if (child_tls != 0 && child_tls >= UACCESS_USER_VA_TOP)
+                                                     return -(s64)T_E_INVAL;
+
+    // ptid / ctid: 0 opts out; non-zero must be 4-aligned + user-VA, the
+    // SYS_SET_TID_ADDRESS gate, because each is consumed by uaccess_store_u32
+    // (an unaligned STR alignment-faults past the fixup table). Gated only when
+    // the corresponding CLONE_* flag is set -- musl's word sets both.
+    if ((flags & (u64)VIV_CLONE_PARENT_SETTID) && ptid_va != 0) {
+        if ((ptid_va & 0x3u) != 0)                   return -(s64)T_E_INVAL;
+        if (ptid_va >= UACCESS_USER_VA_TOP)          return -(s64)T_E_INVAL;
+    }
+    if ((flags & (u64)VIV_CLONE_CHILD_CLEARTID) && ctid_va != 0) {
+        if ((ctid_va & 0x3u) != 0)                   return -(s64)T_E_INVAL;
+        if (ctid_va >= UACCESS_USER_VA_TOP)          return -(s64)T_E_INVAL;
+    }
+
+    // I-32: the per-Proc thread cap, BEFORE the kstack alloc (mirrors
+    // sys_thread_spawn_handler). A pthread_create storm fails clean -EAGAIN.
+    if (!proc_thread_cap_ok(p))                      return -(s64)T_E_AGAIN;
+
+    // The crux. thread_create_forked copies `ctx` (the parent's trap frame) with
+    // x0=0 + sp=child_sp, sets tpidr_el0=child_tls, copies the parent's LIVE FP,
+    // and links the Thread into `p` -- the CALLER's Proc. Passing cur->proc (not
+    // a fresh Proc) is the single line that makes this a CLONE_THREAD rather than
+    // a fork: shared address space, one pid, one ASID (I-31).
+    struct Thread *nt = thread_create_forked(p, ctx, child_sp, child_tls);
+    if (!nt)                                         return -(s64)T_E_NOMEM;
+
+    // CLONE_PARENT_SETTID: publish the tid into the parent word BEFORE ready(),
+    // so the child can never observe a 0 tid, and read nt->tid HERE (pre-ready)
+    // so the load cannot race the child's first dispatch + eventual thread_free.
+    // Best-effort by contract (the sys_thread_spawn_handler rule): an
+    // align/bound-legal but unmapped ptid routes through the demand-page write,
+    // returns -1, and is SWALLOWED -- the tid is authoritative in x0, and a
+    // never-readied Thread must not be torn down on a transient uaccess fault.
+    if ((flags & (u64)VIV_CLONE_PARENT_SETTID) && ptid_va != 0)
+        (void)uaccess_store_u32(ptid_va, (u32)nt->tid);
+
+    // CLONE_CHILD_CLEARTID: arm the exit-time clear+wake. thread_clear_child_tid_
+    // handoff (fired from thread_exit_self at retirement) zeroes *ctid and
+    // torpor_wakes it -- musl points ctid at &__thread_list_lock, whose __tl_sync
+    // barrier a joiner blocks on. Armed AFTER create (nt exists) and BEFORE
+    // ready() (before the child can exit).
+    if ((flags & (u64)VIV_CLONE_CHILD_CLEARTID) && ctid_va != 0)
+        nt->clear_child_tid = ctid_va;
+
+    // ready() inserts the RUNNABLE Thread into the run tree. The link
+    // (thread_create_forked -> thread_link_into_proc, under g_proc_table_lock)
+    // already happened, so a proc_group_terminate racing this either saw the
+    // linked Thread (and marked it -- its EL0-return die-check fires before it
+    // reaches EL0) or has not run yet (and marks it when it does): the I-24
+    // shootdown covers every Thread linked into p, exactly as for a
+    // sys_thread_spawn_handler thread created the same way.
+    ready(nt);
+    return (s64)nt->tid;
+}
+
 // =============================================================================
 // P6-pouch-signals-impl (sub-chunk 13a): note delivery syscalls.
 // =============================================================================
@@ -12402,26 +12505,34 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // clone(flags, stack, parent_tid, tls, child_tid): x0..x4, in arm64's
         // CONFIG_CLONE_BACKWARDS order (tls BEFORE child_tid).
         //
-        // ONLY args[0] AND args[1] ARE READ, and that is a correctness
-        // requirement rather than an economy. posix_spawn calls
+        // On the FORK/VFORK arms ONLY args[0] AND args[1] ARE READ, and that is
+        // a correctness requirement rather than an economy. posix_spawn calls
         // `__clone(child, stack, flags, arg)` with four arguments, and musl's
         // clone.s then moves x4/x5/x6 into x2/x3/x4 -- three registers the
         // caller never initialised. Linux tolerates that because the
-        // corresponding CLONE_* bits are clear; so does this, by refusing every
-        // one of those bits in the admitted flags word and passing a LITERAL 0
-        // for child_tls. Reaching for args[3] here would hand the child a
-        // garbage TPIDR_EL0 and fault it at its first thread-local access, far
-        // from this line.
-        bool share_mem = false;
-        if (vivarium_clone_decide(args[0], args[1], &share_mem) != VIV_TRANSLATED)
+        // corresponding CLONE_* bits are clear; so do these arms, by refusing
+        // every one of those bits in the fork/vfork words and passing a LITERAL 0
+        // for child_tls. Reaching for args[3] on a FORK would hand the child a
+        // garbage TPIDR_EL0 and fault it at its first thread-local access.
+        //
+        // The THREAD arm is the deliberate exception: its exact word CARRIES
+        // SETTLS + PARENT_SETTID + CHILD_CLEARTID, so x2/x3/x4 are meaningful and
+        // viv_clone_thread reads them. The decide keeps the arms as separate
+        // exact words precisely so this "fork never reads the garbage registers"
+        // claim stays literally true.
+        enum viv_clone_mode mode;
+        if (vivarium_clone_decide(args[0], args[1], &mode) != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;             // out of domain -> V-3 forwards
 
-        // 0 = INHERIT the caller's TPIDR_EL0. That is what a vfork child needs
-        // (it runs the parent's C, thread-locals and all, until it execs) and
-        // equally what a fork child needs (it continues the parent outright).
+        if (mode == VIV_CLONE_MODE_THREAD)
+            return viv_clone_thread(ctx, args);  // N-3: a Thread in cur->proc
+
+        // FORK / VFORK. child_tls=0 = INHERIT the caller's TPIDR_EL0: what a vfork
+        // child needs (it runs the parent's C, thread-locals and all, until it
+        // execs) and equally what a fork child needs (it continues the parent).
         return sys_rfork_core(ctx,
-                              share_mem ? (unsigned)(RFPROC | RFMEM)
-                                        : (unsigned)RFPROC,
+                              mode == VIV_CLONE_MODE_VFORK ? (unsigned)(RFPROC | RFMEM)
+                                                          : (unsigned)RFPROC,
                               args[1], 0);
     }
 
@@ -12489,6 +12600,17 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // which is why the accessor lives in proc.c beside the tree it walks.
         return (s64)proc_parent_pid(p);
     }
+
+    case VIV_LINUX_GETTID:
+        // gettid(void) -> the per-Thread tid. getpid stays per-Proc (Proc.pid,
+        // shared by all CLONE_THREAD peers); gettid is the separate per-Thread
+        // counter (alloc_next_tid). No native twin exists and adding one would be
+        // a syscall-interface change for a Linux-only need, so it reads the field
+        // directly. current_thread() is never NULL on a phenotype dispatch (a
+        // syscall is executing on this Thread), but guard it -- a defensive NULL
+        // here is a clean -EINVAL, not a deref.
+        return current_thread() ? (s64)current_thread()->tid
+                                : -(s64)T_E_INVAL;
 
     case VIV_LINUX_GETUID:
         // getuid(void). The native twin is exact, the arity matches, and it is

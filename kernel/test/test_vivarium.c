@@ -92,6 +92,11 @@ void test_vivarium_t1_renumbers(void) {
     viv_expect_renumber(VIV_LINUX_PREAD64,    SYS_PREAD,      "pread64 -> SYS_PREAD");
     viv_expect_renumber(VIV_LINUX_PWRITE64,   SYS_PWRITE,     "pwrite64 -> SYS_PWRITE");
     viv_expect_renumber(VIV_LINUX_EXIT_GROUP, SYS_EXIT_GROUP, "exit_group -> SYS_EXIT_GROUP");
+    // N-3: a musl THREAD exits via SYS_exit(93) -> SYS_THREAD_EXIT (thread_exit_
+    // self: last-out zombies, else this Thread retires + the CLEARTID handoff
+    // wakes a joiner). SUB-CEILING (93 == native PTY_REGISTER) but harmless --
+    // the phenotype rewrites regs[8] here before the native switch ever sees 93.
+    viv_expect_renumber(VIV_LINUX_EXIT,       SYS_THREAD_EXIT, "exit(93) -> SYS_THREAD_EXIT");
 
     // The lseek row's equivalence rests on the two enumerations coinciding. Pin
     // it here rather than only in a comment: if T_SEEK_* ever moves, this fails
@@ -228,10 +233,19 @@ void test_vivarium_unknown_forwards(void) {
     // exist when we merely have not reached it is a lie the guest cannot tell
     // apart from a real one -- it would make a libc take a permanent fallback
     // path for a call the supervisor could have served.
-    TEST_EXPECT_EQ((int)vivarium_translate(178 /* gettid */, args, &out),
+    //
+    // This example was `178 /* gettid */` until N-3 classified gettid (a NEW row
+    // hollows any old test that used its number as the still-unclassified
+    // example) -- so it moves to perf_event_open (241), a real aarch64 syscall
+    // Thylacine does not translate and has no plan to.
+    TEST_EXPECT_EQ((int)vivarium_translate(241 /* perf_event_open */, args, &out),
                    (int)VIV_FORWARD, "an unclassified number forwards, never ENOSYS");
     TEST_EXPECT_EQ((int)vivarium_translate(0, args, &out),
                    (int)VIV_FORWARD, "Linux 0 (io_setup) is unclassified -> forward");
+    // gettid IS classified now (N-3) -- the positive half, so the move above is
+    // not a silent weakening: 178 is a TIER2 row, not still-unclassified.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETTID, args, &out),
+                   (int)VIV_TIER2, "gettid is classified (N-3) -- no longer a forward");
 }
 
 void test_vivarium_git_chunk_rows(void) {
@@ -1091,18 +1105,18 @@ void test_vivarium_clone_domain(void) {
     // just "a stack a caller might pass".
     const u64 sp = 0x0000004000010000ull;
 
-    // POISONED between uses. `share_mem` is only meaningful on VIV_TRANSLATED,
-    // so seeding it with the WRONG value before each admitted call is what makes
-    // the assertions below real rather than a reading of a leftover.
-    bool sm;
+    // POISONED between uses. `mode` is only meaningful on VIV_TRANSLATED, so
+    // seeding it with the WRONG mode before each admitted call is what makes the
+    // assertions below real rather than a reading of a leftover.
+    enum viv_clone_mode m;
 
     // The shape musl's posix_spawn sends. posix_spawn.c:198 --
     //   __clone(child, stack+sizeof stack, CLONE_VM|CLONE_VFORK|SIGCHLD, &args)
     const u64 ok = (u64)(VIV_CLONE_VM | VIV_CLONE_VFORK | VIV_CLONE_SIGCHLD);
-    sm = false;
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok, sp, &sm),
+    m = VIV_CLONE_MODE_FORK;
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok, sp, &m),
                    (int)VIV_TRANSLATED, "CLONE_VM|CLONE_VFORK|SIGCHLD is the admitted shape");
-    TEST_ASSERT(sm, "the vfork shape SHARES the address space (RFMEM)");
+    TEST_ASSERT(m == VIV_CLONE_MODE_VFORK, "the vfork shape SHARES the address space (RFMEM)");
 
     // THE FORK SHAPE (L-6a). musl's fork() -> _Fork() emits exactly
     // clone(SIGCHLD, 0), and L-4/L-5 built the private copy-on-write address
@@ -1110,19 +1124,19 @@ void test_vivarium_clone_domain(void) {
     // the second one wrong would hand a fork child a SHARED address space and
     // suspend its parent -- and the verdict alone cannot tell those apart.
     const u64 forkw = (u64)VIV_CLONE_FLAGS_FORK;
-    sm = true;
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(forkw, 0, &sm),
+    m = VIV_CLONE_MODE_VFORK;
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(forkw, 0, &m),
                    (int)VIV_TRANSLATED, "clone(SIGCHLD, 0) is fork() -- admitted since L-6a");
-    TEST_ASSERT(!sm, "the fork shape COPIES the address space (RFPROC alone)");
+    TEST_ASSERT(m == VIV_CLONE_MODE_FORK, "the fork shape COPIES the address space (RFPROC alone)");
 
     // The `stack` rule INVERTS between the shapes, so both arms are pinned:
     // zero is REQUIRED to decline under RFMEM (below) and REQUIRED to be served
     // here, because under RFPROC alone zero means INHERIT and that is what
     // fork() means. A single shared rule would have to be wrong for one of them.
-    sm = true;
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(forkw, sp, &sm),
+    m = VIV_CLONE_MODE_VFORK;
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(forkw, sp, &m),
                    (int)VIV_TRANSLATED, "fork with an explicit stack is still fork");
-    TEST_ASSERT(!sm, "an explicit stack does not make it a vfork");
+    TEST_ASSERT(m == VIV_CLONE_MODE_FORK, "an explicit stack does not make it a vfork");
 
     // THE DECISION THIS CHUNK HAD TO MAKE, and the reason it is not the same as
     // L-3c-2's. A caller that sets CLONE_VM and CLEARS CLONE_VFORK has said "do
@@ -1132,57 +1146,88 @@ void test_vivarium_clone_domain(void) {
     // neither execs nor exits promptly. So it declines, and the guest gets an
     // answer it can act on instead of a hang with our name on it.
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       (u64)(VIV_CLONE_VM | VIV_CLONE_SIGCHLD), sp, &sm),
+                       (u64)(VIV_CLONE_VM | VIV_CLONE_SIGCHLD), sp, &m),
                    (int)VIV_FORWARD,
                    "CLONE_VM without CLONE_VFORK declines -- never a suspend unasked");
 
-    // The thread set. A genuinely concurrent child has a correct target
-    // already -- SYS_THREAD_SPAWN -- and it is not this row.
+    // N-3: THE PTHREAD WORD is served now, as VIV_CLONE_MODE_THREAD. This is the
+    // exact word musl's pthread_create emits. Both the verdict AND the mode are
+    // pinned: a widening that returned FORK/VFORK here would route a thread
+    // through sys_rfork_core (a new Proc, a new pid) instead of a Thread in the
+    // caller's Proc, and the verdict alone cannot tell those apart.
+    m = VIV_CLONE_MODE_FORK;
+    TEST_EXPECT_EQ((int)vivarium_clone_decide((u64)VIV_CLONE_FLAGS_THREAD, sp, &m),
+                   (int)VIV_TRANSLATED, "the pthread word 0x007D0F00 is served (N-3)");
+    TEST_ASSERT(m == VIV_CLONE_MODE_THREAD, "the pthread word is a THREAD, not a fork/vfork");
+    TEST_ASSERT((u64)VIV_CLONE_FLAGS_THREAD == 0x007D0F00ull,
+                "and the word under test IS musl's clone flag word");
+
+    // A thread MUST carry its own stack -- two threads on one stack corrupt each
+    // other (the RFMEM child_sp invariant). A zero-stack thread word declines, so
+    // the crux never links a Thread with a null SP_EL0.
+    TEST_EXPECT_EQ((int)vivarium_clone_decide((u64)VIV_CLONE_FLAGS_THREAD, 0, &m),
+                   (int)VIV_FORWARD, "a thread with no stack declines -- SP_EL0 is mandatory");
+
+    // The thread word is EXACT too: one extra bit is a shape nobody has reasoned
+    // about. CLONE_CHILD_SETTID (which musl's word does NOT set) on top declines
+    // rather than riding along.
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       ok | (u64)VIV_CLONE_THREAD, sp, &sm),
-                   (int)VIV_FORWARD, "CLONE_THREAD declines -- that is SYS_THREAD_SPAWN");
+                       (u64)VIV_CLONE_FLAGS_THREAD | (u64)VIV_CLONE_CHILD_SETTID, sp, &m),
+                   (int)VIV_FORWARD, "thread|CHILD_SETTID declines -- the thread word is exact");
+
+    // A stray CLONE_THREAD bit on the VFORK word is NOT the thread word (it lacks
+    // FS/FILES/SIGHAND/SYSVSEM/SETTLS/PARENT_SETTID/CHILD_CLEARTID/DETACHED), so
+    // it declines by exact-equality -- a fork-with-a-concurrency-bit is a shape
+    // nobody emits. This is why THREAD is a separate exact word, not a bit
+    // admitted into the fork/vfork words.
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       ok | (u64)VIV_CLONE_FILES, sp, &sm),
-                   (int)VIV_FORWARD, "CLONE_FILES declines -- the table is COPIED, not shared");
+                       ok | (u64)VIV_CLONE_THREAD, sp, &m),
+                   (int)VIV_FORWARD, "vfork-word|CLONE_THREAD declines -- not the exact thread word");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(
+                       ok | (u64)VIV_CLONE_FILES, sp, &m),
+                   (int)VIV_FORWARD, "CLONE_FILES on the vfork word declines -- the table is COPIED");
 
     // The fork word is EXACT too -- L-6a widened the domain by one word, not
     // into a mask. CLONE_FILES on top of it would share the handle table, which
     // is a different Plan 9 flag (RFFDG) and still refused.
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       forkw | (u64)VIV_CLONE_FILES, 0, &sm),
+                       forkw | (u64)VIV_CLONE_FILES, 0, &m),
                    (int)VIV_FORWARD, "fork|CLONE_FILES declines -- the fork word is exact");
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       forkw | (u64)VIV_CLONE_SETTLS, 0, &sm),
+                       forkw | (u64)VIV_CLONE_SETTLS, 0, &m),
                    (int)VIV_FORWARD, "fork|CLONE_SETTLS declines -- x3 is not read either");
 
-    // THE GARBAGE-REGISTER GUARD, asserted from the domain side. Each of these
-    // three bits makes one of x2/x3/x4 MEANINGFUL, and the shell's safety
-    // argument is that it never reads them: it passes a literal 0 for
-    // child_tls and ignores parent_tid/child_tid entirely. Admitting any of
-    // these would silently make that a lie -- musl's __clone leaves all three
-    // registers holding whatever posix_spawn's caller happened to have there.
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_SETTLS, sp, &sm),
-                   (int)VIV_FORWARD, "CLONE_SETTLS declines -- x3 is not read");
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_PARENT_SETTID, sp, &sm),
-                   (int)VIV_FORWARD, "CLONE_PARENT_SETTID declines -- x2 is not read");
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_CHILD_SETTID, sp, &sm),
-                   (int)VIV_FORWARD, "CLONE_CHILD_SETTID declines -- x4 is not read");
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_CHILD_CLEARTID, sp, &sm),
-                   (int)VIV_FORWARD, "CLONE_CHILD_CLEARTID declines -- x4 is not read");
+    // THE GARBAGE-REGISTER GUARD, asserted from the domain side, and scoped to
+    // the FORK/VFORK arms. Each of these bits makes one of x2/x3/x4 MEANINGFUL,
+    // and those arms' safety argument is that they never read them: a literal 0
+    // for child_tls, parent_tid/child_tid ignored. Adding one to the VFORK word
+    // must decline -- musl's __clone leaves all three registers holding
+    // posix_spawn's caller garbage. (The THREAD word carries SETTLS +
+    // PARENT_SETTID + CHILD_CLEARTID DELIBERATELY and is the separate exact arm,
+    // served above, that DOES read them; keeping the words separate is exactly
+    // what makes this fork-arm claim literally true.)
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_SETTLS, sp, &m),
+                   (int)VIV_FORWARD, "vfork|CLONE_SETTLS declines -- x3 not read on this arm");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_PARENT_SETTID, sp, &m),
+                   (int)VIV_FORWARD, "vfork|CLONE_PARENT_SETTID declines -- x2 not read on this arm");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_CHILD_SETTID, sp, &m),
+                   (int)VIV_FORWARD, "vfork|CLONE_CHILD_SETTID declines -- x4 not read on this arm");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_CHILD_CLEARTID, sp, &m),
+                   (int)VIV_FORWARD, "vfork|CLONE_CHILD_CLEARTID declines -- x4 not read on this arm");
 
     // The exit signal is the LOW BYTE, not a flag, and only SIGCHLD is
     // admitted: `exits()` posts `child_exit` unconditionally (I-19), so any
     // other request -- including 0, "no signal", which is what a detached child
     // asks for -- would get a note it did not ask for.
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       (u64)(VIV_CLONE_VM | VIV_CLONE_VFORK), sp, &sm),
+                       (u64)(VIV_CLONE_VM | VIV_CLONE_VFORK), sp, &m),
                    (int)VIV_FORWARD, "exit signal 0 declines -- child_exit posts regardless");
     TEST_EXPECT_EQ((int)vivarium_clone_decide(
-                       (u64)(VIV_CLONE_VM | VIV_CLONE_VFORK | 15u), sp, &sm),
+                       (u64)(VIV_CLONE_VM | VIV_CLONE_VFORK | 15u), sp, &m),
                    (int)VIV_FORWARD, "a non-SIGCHLD exit signal declines");
     // The same rule on the fork word. clone(0, 0) is a detached child asking
     // for no exit signal at all, and `exits()` posts child_exit regardless.
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(0, 0, &sm),
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(0, 0, &m),
                    (int)VIV_FORWARD, "a bare clone(0) declines -- no exit signal is unservable");
 
     // A ZERO stack is `vfork()` proper, and option B SERVES it AS A FORK
@@ -1190,15 +1235,15 @@ void test_vivarium_clone_domain(void) {
     // rather than weaken SYS_RFORK's child_sp rule (option A, anti-lineage) the
     // null-stack vfork maps to a private copy-on-write child -- conformant,
     // since POSIX makes anything but _exit/exec after vfork undefined. The
-    // verdict AND share_mem are both pinned: a widening that returned RFMEM here
+    // verdict AND mode are both pinned: a widening that returned VFORK here
     // would hand a null child_sp to SYS_RFORK's RFMEM gate (which refuses it)
     // OR, worse, share the parent's stack -- the exact hazard the fork mapping
-    // avoids. share_mem MUST be false, i.e. the SAME shape clone(SIGCHLD,0)
-    // yields two assertions above.
-    sm = true;
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok, 0, &sm),
+    // avoids. mode MUST be FORK, i.e. the SAME shape clone(SIGCHLD,0) yields two
+    // assertions above.
+    m = VIV_CLONE_MODE_VFORK;
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok, 0, &m),
                    (int)VIV_TRANSLATED, "stack==0 vfork is SERVED (option B) -- not declined");
-    TEST_ASSERT(!sm, "null-stack vfork forks (private COW), never RFMEM -- the lineage rule");
+    TEST_ASSERT(m == VIV_CLONE_MODE_FORK, "null-stack vfork forks (private COW), never RFMEM");
 
     // THE HIGH HALF IS READ, unlike every other decide in this file -- and that
     // asymmetry is the point. mmap/openat narrow to 32 bits because their Linux
@@ -1207,17 +1252,21 @@ void test_vivarium_clone_domain(void) {
     // that uncertainty the stricter reading wins, and it costs nothing: musl's
     // clone.s zero-extends (`uxtw x0,w2`), so the high half is always 0 from the
     // real consumer. Reverting to a `(u32)` cast fails HERE.
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(0xDEADBEEF00000000ull | ok, sp, &sm),
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(0xDEADBEEF00000000ull | ok, sp, &m),
                    (int)VIV_FORWARD,
                    "a high-half bit declines -- clone's flags word is 64-bit");
-    TEST_EXPECT_EQ((int)vivarium_clone_decide(0xDEADBEEF00000000ull | forkw, 0, &sm),
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(0xDEADBEEF00000000ull | forkw, 0, &m),
                    (int)VIV_FORWARD,
                    "the fork word is full-width too -- a high-half bit declines");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(
+                       0xDEADBEEF00000000ull | (u64)VIV_CLONE_FLAGS_THREAD, sp, &m),
+                   (int)VIV_FORWARD,
+                   "the thread word is full-width too -- a high-half bit declines");
 
     // FAIL CLOSED on a NULL out-param. The shell cannot then read an
-    // uninitialised `share_mem` and choose RFMEM by accident.
+    // uninitialised `mode` and choose the wrong shape by accident.
     TEST_EXPECT_EQ((int)vivarium_clone_decide(ok, sp, NULL),
-                   (int)VIV_FORWARD, "a NULL share_mem_out declines");
+                   (int)VIV_FORWARD, "a NULL mode_out declines");
 
     // clone is a TIER-2 row -- it needs the exception frame, so it can never be
     // a renumber. Pinned here so a future edit cannot demote it to T1, which
