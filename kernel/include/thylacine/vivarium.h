@@ -561,6 +561,18 @@ enum {
 // zero-extended (0x00000000FFFFFF9C), and both must be recognised.
 #define VIV_AT_FDCWD (-100)
 
+// The file-TYPE field of a Linux `mode_t` (musl `sys/stat.h` S_IFMT). Distinct
+// in kind from the 07000 setuid/sgid/sticky field, and the distinction decides
+// the mode gates in the create decides: POSIX and Linux both define the file
+// type on `openat`/`mkdirat` as determined BY THE CALL, so these bits are
+// ignored on that argument -- Linux masks them and proceeds. Callers pass them
+// routinely: busybox `tar` hands `file_header->mode` straight through, so a
+// directory arrives as S_IFDIR|0755 and a regular file as S_IFREG|0644.
+// Stripping them is therefore EXACT (it discards a field with no meaning here),
+// where stripping 07000 would be a lie (it would record less authority than the
+// caller asked for) -- which is why one is masked and the other declines.
+#define VIV_S_IFMT 0170000u
+
 // The `flags` word the *at() family carries (musl `include/fcntl.h`). Distinct
 // from the O_* space above: these qualify the RESOLUTION, not the open.
 enum {

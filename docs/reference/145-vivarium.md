@@ -3275,10 +3275,22 @@ before it the composition declined while the comment claimed the contour).
   where Linux creates the TARGET (loud; git never does this).
 - No umask: guest `umask` is ENOSYS and the kernel applies no mask, so modes
   arrive unmasked (0666 where Linux yields 0644). Cosmetic under A-2d.
-- `mode`/`perm` admit the low-9 bits only: setuid/sgid/sticky requests
-  DECLINE census-visibly (a silent strip would record less restrictive
-  metadata than asked; git's `core.sharedRepository` setgid dirs are the real
-  caller that would be wronged).
+- `mode`/`perm` admit the low-9 bits only, and the two fields above them are
+  handled OPPOSITELY because they differ in kind:
+  - **S_IFMT (0170000) is MASKED** (`VIV_S_IFMT`). POSIX and Linux define the
+    file type on `openat`/`mkdirat` as determined by the CALL, so these bits
+    carry no meaning on this argument and Linux discards them. Discarding a
+    field with no meaning is exact, not a strip. Callers pass it routinely:
+    busybox `tar` selects its directory branch on `S_IFMT` and then hands
+    `file_header->mode` through unnarrowed, so `mkdirat` sees `S_IFDIR|0755`
+    and `openat` sees `S_IFREG|0644`. Before the mask both DECLINED, and
+    `tar -x` failed on every entry with "Function not implemented" -- the
+    gate below was catching S_IFMT as collateral.
+  - **setuid/sgid/sticky (07000) still DECLINES** census-visibly (a silent
+    strip would record less restrictive metadata than asked; git's
+    `core.sharedRepository` setgid dirs are the real caller that would be
+    wronged). The regression tests pin both halves, including the case that
+    proves the mask does not reach 07000 (`S_IFDIR|02755` still declines).
 - Real (non-AT_FDCWD) dirfds stay out (the 6.20 Correction-2 handle-state
   blocker, untouched). renameat2 flags != 0 (NOREPLACE/EXCHANGE/WHITEOUT)
   decline. `O_DIRECTORY` keeps its V-2b rejection on the create arm (`O_APPEND`

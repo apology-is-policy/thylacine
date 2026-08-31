@@ -783,10 +783,16 @@ enum viv_verdict vivarium_openat_create_decide(u64 dirfd, u64 flags, u64 mode,
                  | (u32)VIV_O_CREAT | (u32)VIV_O_EXCL;
     if (fl & ~admitted) return VIV_FORWARD;
 
-    // mode: the low-9 permission bits only. A setuid/sgid/sticky request
-    // (07000) declines rather than being silently stripped -- the strip would
-    // create a file with LESS restrictive metadata than the caller asked to
-    // record, wrong with nothing to catch it; the decline is census-visible.
+    // mode: the low-9 permission bits only, after discarding the file-TYPE
+    // field. S_IFMT is ignored on this argument by definition (the type comes
+    // from the call), and callers pass it routinely -- busybox `tar` hands
+    // `file_header->mode` straight through, so a regular file arrives as
+    // S_IFREG|0644 and the un-masked gate below refused every extraction.
+    // Masking it is exact; masking 07000 would not be, which is why a
+    // setuid/sgid/sticky request still DECLINES rather than being silently
+    // stripped -- that strip would record LESS restrictive metadata than the
+    // caller asked for, wrong with nothing to catch it. See VIV_S_IFMT.
+    md &= ~VIV_S_IFMT;
     if (md & ~0777u) return VIV_FORWARD;
 
     u32 omode;
@@ -823,9 +829,13 @@ enum viv_verdict vivarium_mkdirat_decide(u64 dirfd, u64 mode, u32 *perm_out) {
     s32 dfd = (s32)(u32)dirfd;
     u32 md  = (u32)mode;
     if (dfd != VIV_AT_FDCWD) return VIV_FORWARD;
-    // Low-9 only; 07000 declines for the openat-create reason (a silent strip
+    // Low-9 only, after discarding the file-TYPE field -- the openat-create
+    // arm's reasoning exactly (VIV_S_IFMT): S_IFMT is ignored here by
+    // definition and busybox `tar` passes S_IFDIR|0755, so the un-masked gate
+    // refused every `tar` directory. 07000 still declines (a silent strip
     // records less restrictive metadata than asked; git's shared-repository
     // setgid dirs are the real caller that would be silently wronged).
+    md &= ~VIV_S_IFMT;
     if (md & ~0777u)         return VIV_FORWARD;
     *perm_out = md | SYS_WALK_CREATE_DMDIR;
     return VIV_TRANSLATED;

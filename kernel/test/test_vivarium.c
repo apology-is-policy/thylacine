@@ -4010,6 +4010,23 @@ void test_vivarium_openat_create_domain(void) {
     TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01, 0644,
                                               NULL, &perm, &cx) == VIV_FORWARD,
                 "NULL output fails toward the supervisor");
+
+    // The file-TYPE field is masked, not refused. busybox `tar` passes
+    // `file_header->mode` unnarrowed, so a regular file arrives as
+    // S_IFREG|0644 -- which the pre-mask gate refused, failing every
+    // extraction with ENOSYS ("tar: can't open ...: Function not implemented").
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01 | 01000,
+                                              0100644, &omode, &perm, &cx)
+                    == VIV_TRANSLATED,
+                "S_IFREG in the mode is masked, not refused (busybox tar)");
+    TEST_EXPECT_EQ((u64)perm, (u64)0644, "S_IFREG masked off; low-9 survives");
+
+    // The mask must not reach the 07000 field. Same S_IFREG, setuid added:
+    // still declines. (Without this the mask could be written as `& 0777`,
+    // which would silently strip setuid instead of refusing it.)
+    TEST_ASSERT(vivarium_openat_create_decide(FDCWD_SX, 0100 | 01, 0104644,
+                                              &omode, &perm, &cx) == VIV_FORWARD,
+                "S_IFREG|setuid still declines -- the mask spares 07000");
 }
 
 void test_vivarium_mkdirat_domain(void);
@@ -4027,6 +4044,20 @@ void test_vivarium_mkdirat_domain(void) {
                 "a real dirfd declines");
     TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 0755, NULL) == VIV_FORWARD,
                 "NULL output fails toward the supervisor");
+
+    // The tar shape: busybox selects its directory branch on S_IFMT and then
+    // passes the mode word unnarrowed, so mkdir arrives as S_IFDIR|0755. The
+    // pre-mask gate refused it -- "tar: can't make dir X: Function not
+    // implemented" -- which is the whole reason `tar -x` could not extract.
+    TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 040755, &perm) == VIV_TRANSLATED,
+                "S_IFDIR in the mode is masked, not refused (busybox tar)");
+    TEST_EXPECT_EQ((u64)perm, (u64)(SYS_WALK_CREATE_DMDIR | 0755u),
+                   "S_IFDIR masked off; perm = low-9 | DMDIR");
+
+    // The mask spares 07000: the same S_IFDIR with setgid still declines, so
+    // git's core.sharedRepository shape keeps its census-visible refusal.
+    TEST_ASSERT(vivarium_mkdirat_decide(FDCWD_SX, 042755, &perm) == VIV_FORWARD,
+                "S_IFDIR|setgid still declines -- the mask spares 07000");
 }
 
 void test_vivarium_unlinkat_domain(void);
