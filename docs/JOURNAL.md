@@ -44,16 +44,29 @@ blocking I/O (`connect` opens `data`, `accept` blocks on `listen`), and a
 spinlock cannot be held across a sleep (`spinlock.h`: sleep-under-spinlock is a
 whole-guest wedge -- [[bug-spoor-transport-lock-across-sleep]]).
 
-**The design, and the one idea that made it clean.** A leaf spinlock on `struct
-viv_socktab`, held ONLY over pure array ops. Readers SNAPSHOT (`viv_socktab_get`
-copies the whole 24-byte entry out under the lock -- no table pointer outlives
-it). Writers are KEYED + IDENTITY-GUARDED: `set_state`/`set_bound`/`record_remote`
-re-find the fd under the lock and write only if the slot still names the SAME
-socket. The identity key is **`n`, the /net connection number** -- immutable for
-a socket's life and already in the snapshot -- so a slot a peer recycled has a
-different `n` and the stale write lands nowhere. That is what closes the REUSE
-race without a generation counter: the datum that survives the block (`n`) *is*
-the identity check. `claim` also gained a born-state so `accept` mints its fd
+**The design, and the wrong key the prosecutor caught.** A leaf spinlock on
+`struct viv_socktab`, held ONLY over pure array ops. Readers SNAPSHOT
+(`viv_socktab_get` copies the whole entry out under the lock -- no table pointer
+outlives it). Writers are KEYED + IDENTITY-GUARDED: `set_state`/`set_bound`/
+`record_remote` re-find the fd under the lock and write only if the slot still
+names the SAME socket. **My first cut keyed that check on `n`, the /net
+connection number, and I shipped the impl (`32eec7ca`) and docs (`c41b06db`)
+asserting "n is immutable for a socket's life, no generation counter needed."
+Both were wrong, and the holotype (Fable 5) caught it by re-deriving `n` from
+netd's allocator rather than my comment** ([[audit-n3-closed-list]] F1, P1):
+netd mints `n` as the LOWEST-FREE slot index (`usr/netd/src/server.rs`,
+`MAX_CONNS=8`) with no generation folded in, so a `close()`+`socket()` on one fd
+draws the SAME `n` by default -- and an `n`-keyed guard then PASSES the stale
+write (`5 == 5`) straight onto the recycled socket, the exact corruption the guard
+was built to stop. Immutability-for-life was the wrong property; the guard needs
+uniqueness ACROSS a recycle, the opposite lifetime. The self-audit missed it
+twice (once building it, once reviewing it) because I reasoned from what `n`
+*meant to me*, never from what netd *does with it* -- a detector-on-an-untested-
+premise failure ([[bug-222]]) in my own design. The fix is a MONOTONIC per-table
+`epoch` (`next_epoch++` on each claim, stamped under the lock, `u64` so it never
+wraps): a recycle always draws a strictly greater epoch, so the stale write's
+snapshotted epoch cannot match. That grew `viv_sock` 24->32 bytes (the assert
+tracks it). `claim` also gained a born-state so `accept` mints its fd
 born-CONNECTED in one lock hold (no claim-then-set window). `drop_cloexec` stayed
 lock-free -- it runs in execve's sole-live-thread window (`proc_exec_alone`), and
 locking there would nest the socktab lock under the handle table's `t->lock`
@@ -74,21 +87,32 @@ must be seen together* -- which is exactly the property that forces a lock. So
 the two tables diverge for a stateable reason, not by accident, and that is now
 CONFIRMED in scripture (VIVARIUM.md 5.5.2) rather than left as "plausibly fine".
 
-**The regression is the fix's whole point, made deterministic.** True thread
-races are hard to unit-test, so `vivarium.socktab_keyed_write_identity` drives
-the reuse sequence by hand: claim fd 3 (n=5), drop it, reclaim fd 3 (n=9), then
-the stale connect's `record_remote(fd=3, expect_n=5, ...)` -- and asserts it is
-REFUSED and the recycled n=9 socket is uncorrupted (still FRESH, no peer
-written), while the current-n write DOES apply. That is the identity guard's
-contract in one test; on the pre-lock code the write would have landed.
+**The regression is the fix's whole point, made deterministic -- and the F1 fix
+sharpened it.** True thread races are hard to unit-test, so
+`vivarium.socktab_keyed_write_identity` drives the reuse sequence by hand. The
+holotype's F2 finding was that my first version recycled to a DIFFERENT `n`
+(n=5 -> n=9) -- exactly the case an n-key CAN handle, so it proved nothing about
+the case that breaks. The fixed test recycles to the SAME `n=5` (netd's default),
+snapshots the pre-drop `epoch`, and asserts the stale write keyed on that epoch
+is REFUSED even though `n` is unchanged, the recycled socket stays uncorrupted,
+and the current-epoch write DOES apply (the positive control). Then I
+sabotage-proved it: stamping a CONSTANT epoch (modelling F1's non-unique key)
+turns the suite RED at exactly "SAME n but a STRICTLY GREATER epoch"
+(`1469/1470 FAIL`), and reverting restores green -- so the test catches F1 and
+the monotonic epoch is load-bearing, not decorative.
 
-**Cost + state.** Suite 1470/1470 (was 1469, +1 for the new test), default
-build, boot OK. Self-audit clean on the leaf/balance/teardown axes. The holotype
-prosecutor (Fable 5) is running, scoped to the lock AND N-3's carried-forward
-dirty-close residue (the F1 futex-guard confirmation) per the double-the-distance
-cadence. **Still open at write:** the holotype verdict and the SMP gate; the
-push rides both. Vault ring-debt on `sub-kernel-vivarium` + `sub-kernel-syscall-dispatch`
-stays batched (both vault-carried, no docs/reference section owed).
+**Cost + state.** Suite 1470/1470, default build, boot OK. **Audit CLOSED**
+(holotype, Fable 5, `MODEL(start)==MODEL(end)`): 0 P0 / 1 P1 / 1 P2 / 1 P3, all
+fixed -- F1 (the n-key, the story above), F2 (the blind test, now same-`n` +
+sabotage-proven), F3 (the header's non-sequitur rationale, rewritten). The
+carried-forward N-3 futex F1 guard was CONFIRMED correct + complete, and no other
+unvalidated `uaccess` was found on the surface. Per double-the-distance, the
+formal re-audit of the epoch fix itself is carried FORWARD into N-4's round (the
+fix is a focused monotonic-counter change, discrimination-proven here). **Still
+open:** the SMP gate (proves the lock did not break SMP boot; it is BLIND to the
+race itself -- the deterministic test is that proof) and the push. Vault ring-debt
+on `sub-kernel-vivarium` + `sub-kernel-syscall-dispatch` stays batched (both
+vault-carried, no docs/reference section owed).
 
 ## 2026-08-31 (aux) -- N-3 phenotype threads: `clone(CLONE_THREAD)` + futex + gettid, a real thread spawns and joins under `viv`
 

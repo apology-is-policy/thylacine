@@ -2436,10 +2436,11 @@ void test_vivarium_socktab_bind_fields(void) {
     TEST_ASSERT(viv_socktab_get(&tab, 7, &e) && e.bound_addr == 0 && e.bound_port == 0,
                 "a fresh socket carries NO bind");
 
-    // The keyed writers (bind + listen record through these), identity-guarded on n.
-    TEST_ASSERT(viv_socktab_set_bound(&tab, 7, /*expect_n=*/3, 0x7F000001u, 7789),
+    // The keyed writers (bind + listen record through these), identity-guarded on
+    // the snapshotted epoch.
+    TEST_ASSERT(viv_socktab_set_bound(&tab, 7, e.epoch, 0x7F000001u, 7789),
                 "set_bound applies to the current entry");   // 127.0.0.1!7789
-    TEST_ASSERT(viv_socktab_set_state(&tab, 7, /*expect_n=*/3, VIV_SOCK_LISTENING),
+    TEST_ASSERT(viv_socktab_set_state(&tab, 7, e.epoch, VIV_SOCK_LISTENING),
                 "set_state applies to the current entry");
 
     viv_socktab_drop(&tab, 7);
@@ -2465,52 +2466,68 @@ void test_vivarium_socktab_bind_fields(void) {
 }
 
 // N-3's concurrency-fix core invariant: a keyed write to a slot that was closed
-// and RECYCLED for a DIFFERENT socket lands nowhere. This is the deterministic
-// unit form of the race a blocked op runs when a peer thread close()s and
-// re-socket()s the fd underneath it -- the [[bug-254]] / lock-across-sleep
-// hazard the identity key (expect_n == the snapshotted n) closes. Before N-3
+// and RECYCLED lands nowhere. The deterministic unit form of the race a blocked
+// op runs when a peer thread close()s and re-socket()s the fd underneath it --
+// the [[bug-254]] / lock-across-sleep hazard the identity key closes. Before N-3
 // this table was lock-free and this write would corrupt the recycled socket.
+//
+// THE F1 DISCRIMINATOR (holotype, 2026-08-31): the recycle here reuses the SAME
+// netd connection number `n=5`, because netd mints `n` as the lowest-free slot
+// index -- a close()+socket() on one fd draws the same n by default. That is
+// exactly the case an n-keyed guard would silently PASS (5 == 5), corrupting the
+// recycled socket. The epoch key must refuse it: a fresh claim takes a strictly
+// greater monotonic epoch. A test that recycled to a DIFFERENT n would pass on
+// the broken n-key too, and prove nothing.
 void test_vivarium_socktab_keyed_write_identity(void);
 void test_vivarium_socktab_keyed_write_identity(void) {
     static struct viv_socktab tab;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
         tab.s[i].fd = -1; tab.s[i].state = VIV_SOCK_FREE;
-        tab.s[i].proto = 0; tab.s[i].n = 0;
+        tab.s[i].proto = 0; tab.s[i].n = 0; tab.s[i].epoch = 0;
         tab.s[i].bound_addr = 0; tab.s[i].bound_port = 0;
         tab.s[i].remote_addr = 0; tab.s[i].remote_port = 0;
     }
+    tab.next_epoch = 0;
 
-    // fd 3 is connection n=5; a connect() on it snapshotted n=5, then blocked.
+    struct viv_sock e;
+
+    // fd 3 is connection n=5; a connect() on it snapshotted its epoch, then blocked.
     TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 5, VIV_SOCK_FRESH),
                 "claim fd 3 n=5");
+    TEST_ASSERT(viv_socktab_get(&tab, 3, &e), "snapshot fd 3");
+    u64 stale_epoch = e.epoch;
+    TEST_ASSERT(stale_epoch != 0, "a claimed socket has a nonzero epoch");
 
-    // While it blocked, a peer thread close()d fd 3 and socket()ed a new one that
-    // was handed the same fd number -- connection n=9.
+    // While it blocked, a peer close()d fd 3 and socket()ed a new one that netd
+    // handed the SAME n=5 (its lowest-free default) at the SAME fd number.
     viv_socktab_drop(&tab, 3);
-    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 9, VIV_SOCK_FRESH),
-                "reclaim fd 3 n=9");
+    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 5, VIV_SOCK_FRESH),
+                "reclaim fd 3 with the SAME n=5 (netd's default recycle)");
+    TEST_ASSERT(viv_socktab_get(&tab, 3, &e), "snapshot the recycled fd 3");
+    TEST_ASSERT(e.n == 5 && e.epoch > stale_epoch,
+                "the recycled socket has the SAME n but a STRICTLY GREATER epoch "
+                "-- which is exactly why n cannot be the identity key (F1)");
+    u64 fresh_epoch = e.epoch;
 
-    // The stale connect's commit -- keyed on the n IT snapshotted (5) -- must be
-    // REFUSED: the slot now names n=9, a different socket.
-    struct viv_sock e;
-    TEST_ASSERT(!viv_socktab_record_remote(&tab, 3, /*expect_n=*/5, 0x0A000001u, 53, true),
-                "a keyed write on a stale n is refused");
+    // The stale connect's commit, keyed on the epoch IT snapshotted, must be
+    // REFUSED even though n is unchanged -- the corruption an n-key would allow.
+    TEST_ASSERT(!viv_socktab_record_remote(&tab, 3, stale_epoch, 0x0A000001u, 53, true),
+                "a keyed write on a stale epoch is refused -- EVEN WITH THE SAME n");
     TEST_ASSERT(viv_socktab_get(&tab, 3, &e) &&
-                e.n == 9 && e.state == VIV_SOCK_FRESH && e.remote_port == 0,
-                "the recycled socket is UNCORRUPTED -- still fresh n=9, no "
-                "stranger's peer written into it");
+                e.n == 5 && e.state == VIV_SOCK_FRESH && e.remote_port == 0,
+                "the recycled socket is UNCORRUPTED -- still fresh, no stranger's peer");
 
-    // set_state + set_bound honour the same guard.
-    TEST_ASSERT(!viv_socktab_set_state(&tab, 3, /*expect_n=*/5, VIV_SOCK_LISTENING),
-                "set_state on a stale n is refused");
-    TEST_ASSERT(!viv_socktab_set_bound(&tab, 3, /*expect_n=*/5, 0x7F000001u, 22),
-                "set_bound on a stale n is refused");
+    // set_state + set_bound honour the same epoch guard.
+    TEST_ASSERT(!viv_socktab_set_state(&tab, 3, stale_epoch, VIV_SOCK_LISTENING),
+                "set_state on a stale epoch is refused");
+    TEST_ASSERT(!viv_socktab_set_bound(&tab, 3, stale_epoch, 0x7F000001u, 22),
+                "set_bound on a stale epoch is refused");
     TEST_ASSERT(viv_socktab_get(&tab, 3, &e) && e.state == VIV_SOCK_FRESH &&
-                e.bound_port == 0, "the stale-n refusals changed nothing");
+                e.bound_port == 0, "the stale-epoch refusals changed nothing");
 
-    // The matching-n write (the non-raced common case) DOES apply.
-    TEST_ASSERT(viv_socktab_record_remote(&tab, 3, /*expect_n=*/9, 0x0A000002u, 80, true),
-                "a keyed write on the CURRENT n applies");
+    // The matching-epoch write (the non-raced common case) DOES apply.
+    TEST_ASSERT(viv_socktab_record_remote(&tab, 3, fresh_epoch, 0x0A000002u, 80, true),
+                "a keyed write on the CURRENT epoch applies");
     TEST_ASSERT(viv_socktab_get(&tab, 3, &e) &&
                 e.state == VIV_SOCK_CONNECTED && e.remote_port == 80 &&
                 e.remote_addr == 0x0A000002u,

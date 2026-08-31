@@ -609,13 +609,20 @@ moved from a pointer-returning `find` to (a) SNAPSHOT reads — `viv_socktab_get
 copies the whole entry out under the lock, so no table pointer outlives it; and
 (b) IDENTITY-GUARDED keyed writes — `set_state`/`set_bound`/`record_remote`
 re-find the fd under the lock and write only if the slot still names the SAME
-socket (present AND `n == expect_n`, the `n` the caller snapshotted). A slot a
-peer closed/recycled has a different `n`, so a stale write from a blocked op
-lands nowhere — it cannot corrupt the socket that reused the slot. `claim`
-scans+writes in one critical section (no double-claim) and takes a born state
-(`FRESH` for `socket()`, `CONNECTED` for `accept()`, born connected in one hold).
-The identity key is `n` (the /net connection number), immutable for a socket's
-life; no generation counter needed. `drop_cloexec` stays lock-free — it runs in
+socket (present AND `epoch == expect_epoch`, the `epoch` the caller snapshotted).
+A slot a peer closed/recycled carries a STRICTLY GREATER `epoch`, so a stale
+write from a blocked op lands nowhere — it cannot corrupt the socket that reused
+the slot. `claim` scans+writes in one critical section (no double-claim) and
+takes a born state (`FRESH` for `socket()`, `CONNECTED` for `accept()`, born
+connected in one hold). **The identity key is `epoch`, a MONOTONIC per-table
+stamp (`next_epoch++` on each claim), NOT `n`** — the holotype F1 finding
+(2026-08-31) refuted an earlier `n`-keyed design: netd mints the connection
+number `n` as the LOWEST-FREE slot index (`usr/netd` `server.rs`, `MAX_CONNS=8`)
+with no generation folded in, so a `close()`+`socket()` on one fd draws the SAME
+`n` by default, and an `n`-keyed guard would silently pass the stale write onto
+the recycled socket. A monotonic `u64` epoch is unique across every recycle
+(it does not wrap in any real runtime) — the "different lifetime" the guard needs;
+immutability-for-life was the wrong property. `drop_cloexec` stays lock-free — it runs in
 execve's sole-live-thread window (`proc_exec_alone`), and locking would nest the
 socktab lock under the handle table's `t->lock`
 ([[bug-n3-socktab-multithread-race]], RESOLVED).

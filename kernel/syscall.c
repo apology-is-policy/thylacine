@@ -10420,7 +10420,7 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
     // thread has raced its own descriptor.
     u32 raddr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
               | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
-    (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e.n, raddr, port,
+    (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e.epoch, raddr, port,
                                     /*also_connect=*/true);
     return 0;
 }
@@ -10471,7 +10471,7 @@ static s64 viv_sock_bind(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
               | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
     // Keyed on the snapshot (e.n): a bind that raced a peer close+reuse of this
     // fd writes nowhere, and reports the fd is no longer the socket it named.
-    if (!viv_socktab_set_bound(tab, (s32)(s64)fd_raw, e.n, baddr, port))
+    if (!viv_socktab_set_bound(tab, (s32)(s64)fd_raw, e.epoch, baddr, port))
         return -(s64)T_E_NOTSOCK;
     return 0;
 }
@@ -10603,7 +10603,7 @@ static s64 viv_sock_dgram_sendto(struct Proc *p, struct viv_socktab *tab,
     // datagram that raced a peer close+reuse of this fd records nowhere.
     u32 raddr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
               | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
-    (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e->n, raddr, port,
+    (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e->epoch, raddr, port,
                                     /*also_connect=*/false);
     return sent;
 }
@@ -10836,7 +10836,7 @@ static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
 
     // Keyed on the snapshot (e.n): a listen that raced a peer close+reuse of this
     // fd transitions nowhere -- the socket the guest announced is gone.
-    if (!viv_socktab_set_state(tab, (s32)(s64)fd_raw, e.n, VIV_SOCK_LISTENING))
+    if (!viv_socktab_set_state(tab, (s32)(s64)fd_raw, e.epoch, VIV_SOCK_LISTENING))
         return -(s64)T_E_NOTSOCK;
     return 0;
 }

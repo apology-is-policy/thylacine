@@ -1273,6 +1273,10 @@ enum {
 };
 
 struct viv_sock {
+    u64 epoch;       // the identity key: a monotonic per-TABLE stamp, unique to
+                     // THIS claim of the slot (0 = never claimed). See the keyed-
+                     // writer contract -- `n` alone cannot serve, because netd
+                     // recycles the connection number (lowest-free slot index).
     s32 fd;          // the guest's fd; < 0 when the entry is free
     u32 n;           // the /net connection number
     u32 bound_addr;  // bind(): the requested local address, host order (0 = any)
@@ -1291,7 +1295,8 @@ struct viv_sock {
 // A flag would therefore be state that no reader could ever branch on. If a
 // future row makes the two differ -- getsockname() on a bound-but-idle socket
 // is the candidate -- add it THEN, with the reader that needs it.
-_Static_assert(sizeof(struct viv_sock) == 24, "viv_sock pinned at 24 bytes");
+_Static_assert(sizeof(struct viv_sock) == 32, "viv_sock pinned at 32 bytes "
+               "(the u64 epoch identity key added 8; still 64*32 = 2 KiB, under a page)");
 
 // The per-Proc table (Proc.socktab). Lazily allocated on the first translated
 // socket(), CAS-installed, freed at proc_free, NOT rfork-inherited -- the
@@ -1319,11 +1324,20 @@ _Static_assert(sizeof(struct viv_sock) == 24, "viv_sock pinned at 24 bytes");
 //     the lock); they never dereference a table pointer after the lock drops.
 //   * WRITERS are KEYED + IDENTITY-GUARDED: a set_* re-finds the fd under the
 //     lock and writes only if the slot still names the SAME socket (fd present
-//     AND n == the expect_n the caller snapshotted). A slot that a peer closed
-//     or recycled has a different n, so a stale write from a blocked op lands
-//     nowhere -- it cannot corrupt the socket that reused the slot.
-// The identity key is `n` (the /net connection number), which is immutable for a
-// socket's life and already snapshotted; no generation counter is needed.
+//     AND epoch == the expect_epoch the caller snapshotted). A slot that a peer
+//     closed and recycled carries a STRICTLY GREATER epoch, so a stale write
+//     from a blocked op lands nowhere -- it cannot corrupt the socket that
+//     reused the slot.
+// The identity key is `epoch`, a MONOTONIC per-table stamp (`next_epoch++` on
+// each claim), NOT `n`. `n` -- the /net connection number -- cannot serve,
+// because netd mints it as the LOWEST-FREE slot index (usr/netd server.rs,
+// MAX_CONNS=8) with no generation folded in: a close()+socket() on one fd draws
+// the SAME n by default, so an n-keyed guard would silently pass a stale write
+// onto the recycled socket (the holotype F1 finding). A monotonic epoch is
+// unique across every recycle (u64: it does not wrap in any real runtime), which
+// is exactly the "different lifetime" the guard needs -- immutability-for-life
+// was the wrong property. `epoch` is captured by the same snapshot that reads
+// the other fields, so keying on it costs nothing extra.
 //
 // sigtab, the sibling per-Proc table, needs NO such lock: it is FIXED-INDEX (by
 // signote enum, never a free-list scan, so no allocation race) and publishes
@@ -1332,7 +1346,8 @@ _Static_assert(sizeof(struct viv_sock) == 24, "viv_sock pinned at 24 bytes");
 // socktab cannot borrow that trick: its entries are scanned, allocated/freed,
 // and multi-field with an identity that must be seen together -- hence the lock.
 struct viv_socktab {
-    spin_lock_t     lock;   // leaf; held only over array ops, never across I/O
+    spin_lock_t     lock;       // leaf; held only over array ops, never across I/O
+    u64             next_epoch; // monotonic; stamps each claim's viv_sock.epoch
     struct viv_sock s[VIV_SOCK_MAX];
 };
 
@@ -1377,10 +1392,11 @@ void viv_socktab_drop_cloexec(struct Proc *p);
 bool viv_socktab_has_room(struct viv_socktab *tab);
 
 // Keyed, identity-guarded writers. Each re-finds `fd` UNDER THE LOCK and writes
-// only if the slot still names the same socket (present AND n == expect_n).
+// only if the slot still names the same socket (present AND epoch == expect_epoch).
 // Returns true if written, false if the slot was closed or recycled while the
 // caller blocked -- a stale write from a blocked op is dropped, never applied to
-// the socket that reused the slot. `expect_n` is the `n` the caller snapshotted.
+// the socket that reused the slot. `expect_epoch` is the `epoch` the caller
+// snapshotted (a monotonic per-claim stamp; see the struct comment for why NOT n).
 //   set_state    -- listen(): FRESH -> LISTENING.
 //   set_bound    -- bind(): record the requested local endpoint.
 //   record_remote-- connect()/sendto(): record the peer; also_connect
@@ -1388,11 +1404,11 @@ bool viv_socktab_has_room(struct viv_socktab *tab);
 //                   lock hold (so a peer recvmsg never sees CONNECTED with an
 //                   unset remote), which connect() passes true and the
 //                   connectionless datagram sendto passes false.
-bool viv_socktab_set_state(struct viv_socktab *tab, s32 fd, u32 expect_n,
+bool viv_socktab_set_state(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                            enum viv_sock_state st);
-bool viv_socktab_set_bound(struct viv_socktab *tab, s32 fd, u32 expect_n,
+bool viv_socktab_set_bound(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                            u32 addr, u16 port);
-bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u32 expect_n,
+bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                                u32 addr, u16 port, bool also_connect);
 
 // Decide whether a `socket(domain, type, protocol)` is inside the translatable

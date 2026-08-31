@@ -1682,6 +1682,9 @@ static void socktab_clear_slot(struct viv_sock *e) {
     e->proto       = 0;
     e->state       = VIV_SOCK_FREE;
     e->n           = 0;
+    e->epoch       = 0;   // hygiene: a FREE slot is skipped by find_locked, and a
+                          // reclaim overwrites this -- but keep "clear the WHOLE
+                          // entry" honest (0 == never claimed)
     e->bound_addr  = 0;
     e->bound_port  = 0;
     e->remote_addr = 0;   // else a recycled slot reports a stranger's peer as
@@ -1710,6 +1713,11 @@ bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
             tab->s[i].proto       = (u8)proto;
             tab->s[i].state       = (u8)born;   // FRESH (socket) or CONNECTED (accept)
             tab->s[i].n           = n;
+            // The identity stamp: monotonic, never reused, so a later recycle of
+            // this slot (even to the same fd + same netd n) draws a greater epoch
+            // and a stale keyed write cannot match it. Pre-increment -> first
+            // claim is epoch 1 (0 stays reserved for "never claimed").
+            tab->s[i].epoch       = ++tab->next_epoch;
             tab->s[i].bound_addr  = 0;   // a fresh socket carries no bind
             tab->s[i].bound_port  = 0;
             tab->s[i].remote_addr = 0;   // and no unconnected-sendto destination
@@ -1742,37 +1750,39 @@ void viv_socktab_drop(struct viv_socktab *tab, s32 fd) {
 }
 
 // The keyed, identity-guarded writers. Each re-finds `fd` under the lock and
-// writes only if the slot still names the same socket (present AND n ==
-// expect_n) -- so a stale write from an op that blocked while the guest closed
-// and recycled the fd lands nowhere, never on the socket that reused the slot.
-bool viv_socktab_set_state(struct viv_socktab *tab, s32 fd, u32 expect_n,
+// writes only if the slot still names the same socket (present AND epoch ==
+// expect_epoch) -- so a stale write from an op that blocked while the guest
+// closed and recycled the fd lands nowhere, never on the socket that reused the
+// slot. `expect_epoch` is the monotonic stamp the caller snapshotted; `n` cannot
+// serve as the key because netd recycles it (the holotype F1 finding, struct hdr).
+bool viv_socktab_set_state(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                            enum viv_sock_state st) {
     if (!tab) return false;
     spin_lock(&tab->lock);
     struct viv_sock *e = socktab_find_locked(tab, fd);
-    bool ok = (e && e->n == expect_n);
+    bool ok = (e && e->epoch == expect_epoch);
     if (ok) e->state = (u8)st;
     spin_unlock(&tab->lock);
     return ok;
 }
 
-bool viv_socktab_set_bound(struct viv_socktab *tab, s32 fd, u32 expect_n,
+bool viv_socktab_set_bound(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                            u32 addr, u16 port) {
     if (!tab) return false;
     spin_lock(&tab->lock);
     struct viv_sock *e = socktab_find_locked(tab, fd);
-    bool ok = (e && e->n == expect_n);
+    bool ok = (e && e->epoch == expect_epoch);
     if (ok) { e->bound_addr = addr; e->bound_port = port; }
     spin_unlock(&tab->lock);
     return ok;
 }
 
-bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u32 expect_n,
+bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                                u32 addr, u16 port, bool also_connect) {
     if (!tab) return false;
     spin_lock(&tab->lock);
     struct viv_sock *e = socktab_find_locked(tab, fd);
-    bool ok = (e && e->n == expect_n);
+    bool ok = (e && e->epoch == expect_epoch);
     if (ok) {
         // remote first, THEN the state transition -- so a peer that observes
         // CONNECTED (under this same lock) always sees the remote already set.
