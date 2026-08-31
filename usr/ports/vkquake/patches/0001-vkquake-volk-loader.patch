@@ -1,0 +1,71 @@
+vkquake volk loader: loader-less Vulkan over the venus static ICD (W-4)
+
+Thylacine has no Vulkan loader and no dlopen. Every core vk* call in
+vkQuake becomes a volk global function pointer (quakedef.h now includes
+volk.h in place of vulkan_core.h, third_party/volk), initialized with
+the thy_vkloader.c filter: vkCreateDevice and vkGetDeviceProcAddr
+resolve DIRECTLY to the driver's vn_* entrypoints (mesa's vk_tramp_*
+for those two tail-branch through a dispatch slot only a real loader
+populates -- the W-1 measured trampoline caveat), everything else to
+vk_icdGetInstanceProcAddr. volkLoadDevice() then resolves ALL
+device-level globals through the real vn_GetDeviceProcAddr, and
+vkQuake's own fp* resolution (fpGetInstanceProcAddr) is pointed at the
+same filter -- one choke point, zero trampoline exposure.
+
+--- a/Quake/quakedef.h	2026-08-31 15:27:33
++++ b/Quake/quakedef.h	2026-08-31 15:27:57
+@@ -239,7 +239,10 @@
+ #include "SDL.h"
+ #endif
+ 
+-#include <vulkan/vulkan_core.h>
++/* Thylacine: loader-less Vulkan -- every core vk* symbol is a volk global
++ * function pointer, resolved through the thy_vkloader.c filter (no loader,
++ * no dlopen; the venus ICD is statically linked). */
++#include "volk.h"
+ 
+ #include "console.h"
+ #include "wad.h"
+--- a/Quake/gl_vidsdl.c	2026-08-31 15:27:33
++++ b/Quake/gl_vidsdl.c	2026-08-31 15:27:57
+@@ -31,6 +31,10 @@
+ #include "SDL.h"
+ #include "SDL_syswm.h"
+ #include "SDL_vulkan.h"
++
++/* Thylacine loader-less resolution (usr/ports/vkquake/thy_vkloader.c) */
++extern PFN_vkVoidFunction VKAPI_CALL THY_VkGetProcAddr(VkInstance instance, const char *name);
++extern void THY_InitVulkanLoader(void);
+ #ifdef _WIN32
+ #include <vulkan/vulkan_win32.h>
+ #endif
+@@ -675,11 +679,12 @@
+ 	err = vkCreateInstance(&instance_create_info, NULL, &vulkan_instance);
+ 	if (err != VK_SUCCESS)
+ 		Sys_Error("Couldn't create Vulkan instance");
++	volkLoadInstance(vulkan_instance);
+ 
+ 	if (!SDL_Vulkan_CreateSurface(draw_context, vulkan_instance, &vulkan_surface))
+ 		Sys_Error("Couldn't create Vulkan surface");
+ 
+-	fpGetInstanceProcAddr = SDL_Vulkan_GetVkGetInstanceProcAddr();
++	fpGetInstanceProcAddr = THY_VkGetProcAddr; /* the same filter volk resolves through */
+ 
+ 	GET_INSTANCE_PROC_ADDR(vulkan_instance, GetDeviceProcAddr);
+ 	GET_INSTANCE_PROC_ADDR(vulkan_instance, GetPhysicalDeviceSurfaceSupportKHR);
+@@ -881,6 +886,7 @@
+ 	err = vkCreateDevice(vulkan_physical_device, &device_create_info, NULL, &vulkan_globals.device);
+ 	if (err != VK_SUCCESS)
+ 		Sys_Error("Couldn't create Vulkan device");
++	volkLoadDevice(vulkan_globals.device);
+ 
+ 	GET_DEVICE_PROC_ADDR(vulkan_globals.device, CreateSwapchainKHR);
+ 	GET_DEVICE_PROC_ADDR(vulkan_globals.device, DestroySwapchainKHR);
+@@ -2475,6 +2481,7 @@
+ 
+ 	Con_Printf("\nVulkan Initialization\n");
+ 	SDL_Vulkan_LoadLibrary(NULL);
++	THY_InitVulkanLoader();
+ 	GL_InitInstance();
+ 	GL_InitDevice();
+ 	GL_InitCommandBuffers();

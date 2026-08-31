@@ -17,6 +17,7 @@
 #   tools/warp-host.sh p1b       # GPU-DESIGN 4.5.4: does ctx_attach permit a cross-context blit? (host-side, no guest)
 #   tools/warp-host.sh p2        # GPU-DESIGN 4.5.4: does the blit observe the client's FINISHED frame? (host-side)
 #   tools/warp-host.sh quake     # Warp-4 gate: GLQuake on virgl, both present arms
+#   tools/warp-host.sh quake-vk  # Warp W-4: vkQuake on venus, img Direct arm + FPS
 #   tools/warp-host.sh decomp gl|2d  # #196: unpaced per-arm figures + CPU attribution
 #   tools/warp-host.sh wedge     # #210: direct-arm wedge autopsy (paced vs unpaced)
 #   tools/warp-host.sh wedge-gate # #210 regression gate: BOTH legs must progress
@@ -41,7 +42,7 @@ HOST="${WARP_HOST:-thyla-gl}"
 # WARP_BOOT_TIMEOUT as LS_CI_BOOT_TIMEOUT (the .exp files floor it at 900;
 # a larger caller value passes through -- SD-backed pools boot slower than
 # that). boot-probe legs auto-detect accel; WARP_BOOT_POLLS is their bound.
-RENV="${WARP_ACCEL:+THYLACINE_ACCEL=$WARP_ACCEL }${WARP_BOOT_TIMEOUT:+LS_CI_BOOT_TIMEOUT=$WARP_BOOT_TIMEOUT }${GLQ_FPS_WAIT:+GLQ_FPS_WAIT=$GLQ_FPS_WAIT }${WARP_DISPLAY:+WARP_GL_DISPLAY=$WARP_DISPLAY }"
+RENV="${WARP_ACCEL:+THYLACINE_ACCEL=$WARP_ACCEL }${WARP_BOOT_TIMEOUT:+LS_CI_BOOT_TIMEOUT=$WARP_BOOT_TIMEOUT }${GLQ_FPS_WAIT:+GLQ_FPS_WAIT=$GLQ_FPS_WAIT }${VKQ_FPS_WAIT:+VKQ_FPS_WAIT=$VKQ_FPS_WAIT }${WARP_DISPLAY:+WARP_GL_DISPLAY=$WARP_DISPLAY }"
 RPOLLS="${WARP_BOOT_POLLS:+WARP_BOOT_POLLS=$WARP_BOOT_POLLS }"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RREPO='~/projects/thylacine'
@@ -561,7 +562,7 @@ venus-verdict)
         vfail=1
     fi
     if [ "$vfail" -eq 0 ]; then
-        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a), a HOST3D blob guest-maps via SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel (V-3b-1b), AND the persistent ring engine mints two rings at distinct offsets, round-trips each guest VA, and reuses a freed offset on re-mint (V-3b-1c), AND the SERVER host3d-ring path creates a per-client venus device-ctx, mints a HOST3D ring in /srv/warp, round-trips its VA, and tears it down through drop_host3d_ring + the venus-ctx destroy (V-3b-1c-2a), AND a destroyed host3d ring's ridx is re-mintable via the ring/<ridx>/ctl destroy verb (V-3b-3c-1), AND a HOST_VISIBLE device-memory blob mints under a venus ctx, round-trips a sentinel through its hostmem backing, and its handle is re-mintable via the mem/<handle>/ctl destroy verb (V-3b-3c-2), AND the CLIENT vn_renderer device-memory bo_ops complete a full HOST_VISIBLE vkAllocateMemory+vkMapMemory E2E on real V3D -- zero-at-map + sentinel round-trip over the weft-mapped backing (V-3b-3c-2b), AND the prove's full witness set holds: fenced GPU copy with first-map survival (F1), placed-map de-advertised (F4), the timeline lift, the 64 MiB cap cycle (F2), the two-timeline interleave (F3), the offscreen SPIR-V triangle, and slot-exhaustion steady-state (the vkQuake-arc W-1 pipeline witness), AND a headless-surface WSI swapchain of never-mapped presentables registers via img/new with ZERO renderer-bo mints (the W-3d no-eager-mint proof), lands a GPU clear in presentable memory read back pixel-exact, and rotates 3 presents through the async-present path (the vkQuake-arc W-3d WSI witness), AND an SDL2 window (SDL_WINDOW_VULKAN over the SDL_thylacinevulkan glue) renders the W-1 triangle INTO a display-sized presentable, reads it back pixel-exact, and its vkQueuePresentKHR pokes complete the two-sided consent to a DIRECT scanout bind of the presentable -- the compositor's 'scanout direct N img res R' line pairs with the app PASS as the first-Vulkan-frame-on-the-display witness (the vkQuake-arc W-3e)"
+        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a), a HOST3D blob guest-maps via SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel (V-3b-1b), AND the persistent ring engine mints two rings at distinct offsets, round-trips each guest VA, and reuses a freed offset on re-mint (V-3b-1c), AND the SERVER host3d-ring path creates a per-client venus device-ctx, mints a HOST3D ring in /srv/warp, round-trips its VA, and tears it down through drop_host3d_ring + the venus-ctx destroy (V-3b-1c-2a), AND a destroyed host3d ring's ridx is re-mintable via the ring/<ridx>/ctl destroy verb (V-3b-3c-1), AND a HOST_VISIBLE device-memory blob mints under a venus ctx, round-trips a sentinel through its hostmem backing, and its handle is re-mintable via the mem/<handle>/ctl destroy verb (V-3b-3c-2), AND the CLIENT vn_renderer device-memory bo_ops complete a full HOST_VISIBLE vkAllocateMemory+vkMapMemory E2E on real V3D -- zero-at-map + sentinel round-trip over the weft-mapped backing (V-3b-3c-2b), AND the prove's full witness set holds: fenced GPU copy with first-map survival (F1), placed-map de-advertised (F4), the timeline lift, the hostmem-budget cap cycle (F2), the two-timeline interleave (F3), the offscreen SPIR-V triangle, and slot-exhaustion steady-state (the vkQuake-arc W-1 pipeline witness), AND a headless-surface WSI swapchain of never-mapped presentables registers via img/new with ZERO renderer-bo mints (the W-3d no-eager-mint proof), lands a GPU clear in presentable memory read back pixel-exact, and rotates 3 presents through the async-present path (the vkQuake-arc W-3d WSI witness), AND an SDL2 window (SDL_WINDOW_VULKAN over the SDL_thylacinevulkan glue) renders the W-1 triangle INTO a display-sized presentable, reads it back pixel-exact, and its vkQueuePresentKHR pokes complete the two-sided consent to a DIRECT scanout bind of the presentable -- the compositor's 'scanout direct N img res R' line pairs with the app PASS as the first-Vulkan-frame-on-the-display witness (the vkQuake-arc W-3e)"
         grep -hE "gpu capset\[|num_capsets|blob-create" "$ctl" "$tst"
     else
         echo "VENUS GATE: UNVERIFIED"
@@ -893,6 +894,68 @@ quake)
     # against the real frames before any threshold gates on them.
     scp -q "$HOST:warp/glq-virgl-1.png" "$HOST:warp/glq-virgl-2.png" \
         "$REPO_ROOT/build/" 2>/dev/null || echo "(dump fetch failed -- non-fatal)"
+    ;;
+quake-vk)
+    # Warp W-4: vkQuake on venus -- the vk half of the ratified FPS
+    # comparison (the GL half is the `quake` verb re-run FRESH the same
+    # day; #236: a stale figure is a different number in the same units).
+    # Same gate shape as `quake`: the exp's own PASS + the scenario pass
+    # line, SWAPPED voids the figures regardless.
+    #
+    # DETACHED transport (W-4 run 4): the cloudflare tunnel dropped
+    # mid-stream 10 minutes into an attached run and took the ENTIRE
+    # record with it -- the expect ran on, played the whole demo, exited
+    # cleanly, and every line (the FPS figure included) had gone to a
+    # dead pipe; lc_step's file needs LS_CI_STEPS, which this path does
+    # not set. So the remote expect writes a REMOTE file and survives
+    # the ssh; this side polls the pid over fresh connections and
+    # fetches the log at the end. A lost poll connection costs a retry,
+    # never the run.
+    out="$REPO_ROOT/build/warp-quake-vk.log"
+    rlog="warp/quake-vk-remote.log"
+    rpid=$(ssh "$HOST" "cd $RREPO && rm -f ~/$rlog && ${RENV}nohup expect tools/warp/vkq-venus.exp > ~/$rlog 2>&1 < /dev/null & echo \$!")
+    echo "== quake-vk detached on $HOST (remote pid $rpid; log ~/$rlog) =="
+    # The poll prints a VALUE and treats empty output as NO INFORMATION,
+    # never as "the process died" -- a dropped tunnel connection returns
+    # nonzero exactly like a dead pid does, and the first version of this
+    # loop conflated them (the recorded watcher-discipline defect,
+    # rebuilt here and caught by the same tunnel drop it was built for:
+    # one drop killed the local wait while the remote run played on).
+    # GONE must be seen on two CONSECUTIVE polls to count.
+    tries=0
+    gone=0
+    while :; do
+        st=$(ssh -o ConnectTimeout=20 "$HOST" "ps -p $rpid > /dev/null 2>&1 && echo ALIVE || echo GONE" 2>/dev/null)
+        case "$st" in
+            ALIVE) gone=0 ;;
+            GONE)  gone=$((gone + 1)); [[ $gone -ge 2 ]] && break ;;
+            *)     ;; # ssh failed: no information, retry
+        esac
+        tries=$((tries + 1))
+        if [[ $tries -gt 90 ]]; then
+            echo "== quake-vk: still waiting after ~45 min -- giving up the wait (run may continue remotely)"
+            break
+        fi
+        sleep 30
+    done
+    fetched=""
+    for i in 1 2 3; do
+        if scp -q "$HOST:$rlog" "$out"; then fetched=1; break; fi
+        sleep 10
+    done
+    [[ -n "$fetched" ]] || { echo "== quake-vk: log fetch FAILED after 3 attempts"; exit 1; }
+    echo "== quake-vk verdict =="
+    if grep -q "VKQ-VENUS SWAPPED" "$out"; then
+        echo "W-4 VK GATE: SWAPPED -- figures measure swapping, DISCARD"
+        exit 1
+    fi
+    if grep -q "VKQ-VENUS PASS" "$out" && grep -q "LS-CI PASS: vkq-venus:" "$out"; then
+        grep "VKQ-VENUS" "$out"
+        echo "W-4 VK GATE: VERIFIED"
+    else
+        echo "W-4 VK GATE: UNVERIFIED (need VKQ-VENUS PASS + the scenario pass line)"
+        exit 1
+    fi
     ;;
 decomp)
     # #196: the throughput decomposition -- `decomp gl` (virgl, both

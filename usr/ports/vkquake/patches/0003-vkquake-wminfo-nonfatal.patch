@@ -1,0 +1,27 @@
+vkquake wm-info: non-fatal on a backend without native window handles
+
+vkQuake 1.05.3 fetches SDL_GetWindowWMInfo into a global at window
+creation and Sys_Errors on failure -- but the global is WRITE-ONLY on
+every platform (even the Win32 full-screen-exclusive path fetches its
+own local copy), so the error is the call's entire effect. Thylacine's
+SDL backend has no native WM handle to report and returns unsupported;
+hit live at the first W-4 local smoke, one line past the 0002 fix.
+Downgrade to a Con_Printf.
+
+--- a/Quake/gl_vidsdl.c	2026-08-31 16:02:15
++++ b/Quake/gl_vidsdl.c	2026-08-31 16:02:15
+@@ -420,9 +420,13 @@
+ 		if (!draw_context)
+ 			Sys_Error ("Couldn't create window: %s", SDL_GetError());
+ 
++		/* Non-fatal: sys_wm_info is write-only on every platform (the
++		 * Win32 full-screen-exclusive path fetches its own local copy),
++		 * and a backend without native WM handles -- Thylacine's -- has
++		 * nothing to report. */
+ 		SDL_VERSION(&sys_wm_info.version);
+ 		if(!SDL_GetWindowWMInfo(draw_context,&sys_wm_info))
+-			Sys_Error ("Couldn't get window wm info: %s", SDL_GetError());
++			Con_Printf ("SDL_GetWindowWMInfo not supported: %s\n", SDL_GetError());
+ 
+ 		previous_display = -1;
+ 	}

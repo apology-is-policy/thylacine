@@ -285,6 +285,9 @@ build_kernel() {
     # G-7b: cross-build TyrQuake + stage the shareware pak BEFORE the pool
     # fixture (populate_stratum_pool puts the stage at /quake).
     build_tyrquake
+    # Warp W-4: cross-build vkQuake over venus + the W-3e SDL Vulkan glue.
+    # Self-skips (announced) without the fetched venus link set.
+    build_vkquake
     # Clade CL-1c: cross-build GNU make (the first parallel-spawner port;
     # drives CL-1b's posix_spawn/wait4). Baked into the ramfs as /make.
     build_gnumake
@@ -503,6 +506,25 @@ EOF
         echo "    ramfs: staged thylacine-vk-sdl-prove (Warp W-3e; src ${vkp_sz} B sha256:${vkp_sha})"
     else
         echo "    ramfs: no thylacine-vk-sdl-prove at $BUILD_DIR/clade/gl/ -- staging without it (W-3e vk-sdl smoke will report absent)"
+    fi
+
+    # Warp W-4: the vkQuake binary itself. Ramfs-resident (stripped it is
+    # ~7 MB -- the venus ICD without any LLVM, so no /clade/bin launcher
+    # detour); its DATA comes from the /quake pool bake (pak0.pak +
+    # vkquake.pak), so a ramfs-only boot runs the engine to the "couldn't
+    # load pak" error and no further. Optional + announced on the same
+    # terms as the witnesses above.
+    if [[ -f "$BUILD_DIR/clade/gl/vkquake" ]]; then
+        local vkq_src="$BUILD_DIR/clade/gl/vkquake"
+        "$LLVM_PREFIX/bin/llvm-strip" -o "$ramfs_src/vkquake" "$vkq_src" 2>/dev/null \
+            || cp "$vkq_src" "$ramfs_src/vkquake"
+        chmod 0755 "$ramfs_src/vkquake"
+        local vkq_sz vkq_sha
+        vkq_sz=$(wc -c < "$vkq_src" | tr -d ' ')
+        vkq_sha=$(shasum -a 256 "$vkq_src" 2>/dev/null | cut -c1-12)
+        echo "    ramfs: staged vkquake (Warp W-4; src ${vkq_sz} B sha256:${vkq_sha})"
+    else
+        echo "    ramfs: no vkquake at $BUILD_DIR/clade/gl/ -- staging without it (the W-4 FPS gate will skip)"
     fi
 
     # GOOS=thylacine Stage 1: bake the Go boot probe (build_go_probes produced it
@@ -3613,6 +3635,186 @@ build_tyrquake() {
     ledger "tyr-glquake: BUILT (GL acceptance gate, section 9 step 3)"
 }
 
+build_vkquake() {
+    # Warp W-4 (the vkQuake FPS gate; docs/WARP-WSI-DESIGN.md section 7,
+    # GPU-DESIGN section 8) -- cross-build vkQuake 1.05.3 (QuakeSpasm
+    # lineage, the exact vintage v3dv validated its own bring-up against)
+    # over the pouch sysroot + libSDL2.a (the W-3e SDL_thylacinevulkan
+    # glue) + the venus static ICD archive set fetched from thyla-keep.
+    #
+    # The vendored tree (third_party/vkquake, pruned-pristine per its
+    # PRUNE-MANIFEST.md) compiles via a curated object list mirroring the
+    # upstream Quake/Makefile OBJS groups (IN=sdl, SND=sdl+wave-only
+    # codec, CDA upstream cd_sdl, VID=gl_vidsdl over Vulkan) -- the
+    # tyrquake idiom. The loader story is the port's whole difference:
+    # NO Vulkan loader and NO dlopen exist, so every core vk* call
+    # resolves through vendored volk (third_party/volk) initialized with
+    # usr/ports/vkquake/thy_vkloader.c's filter (patch 0001; the W-1
+    # trampoline caveat: vkCreateDevice + vkGetDeviceProcAddr go DIRECT
+    # to vn_* symbols, all device-level loads ride the real
+    # vkGetDeviceProcAddr), and the link carries
+    # -u vk_icdGetInstanceProcAddr -- a weak ref extracts NO archive
+    # member, and this link is the closure-from-u-alone proof point the
+    # r6-F5 record named.
+    #
+    # The venus link set (build/clade/venus/{include,lib,venus-libs.list})
+    # is FETCHED -- mesa 26.1.6 headers + the exact static archive closure
+    # of the mesa-fork witness link on thyla-keep. Optional and ANNOUNCED
+    # on tyr-glquake's terms: a checkout without it builds everything else
+    # fine and the W-4 gate skips.
+    local sysroot="$BUILD_DIR/sysroot"
+    local vq_vendor="$REPO_ROOT/third_party/vkquake"
+    local port_dir="$REPO_ROOT/usr/ports/vkquake"
+    local volk_dir="$REPO_ROOT/third_party/volk"
+    local vq_src="$BUILD_DIR/pouch/vkquake-src"
+    local vq_obj="$BUILD_DIR/pouch/vkquake-obj"
+    local venus="$BUILD_DIR/clade/venus"
+    local out="$BUILD_DIR/clade/gl/vkquake"
+    local clang="$LLVM_PREFIX/bin/clang"
+    local stage="$BUILD_DIR/quake/stage"
+
+    if [[ ! -f "$vq_vendor/Quake/host.c" ]]; then
+        echo "==> vkquake: vendored source missing at $vq_vendor" >&2
+        exit 1
+    fi
+    if [[ ! -f "$venus/venus-libs.list" || ! -f "$venus/venus-whole.list" || ! -f "$venus/include/vulkan/vulkan_core.h" ]]; then
+        echo "    vkquake: no venus link set at $venus -- skipping (W-4;"
+        echo "             fetch it per usr/ports/mesa/README.md 'The venus link set')"
+        return 0
+    fi
+    if [[ ! -f "$sysroot/lib/libSDL2.a" ]]; then
+        build_sdl2
+    fi
+    # The vk glue lives in the GL-mode SDL backend; a nogl-mode sysroot
+    # archive would leave THYLACINE_Vulkan_* undefined at link. Fail loud
+    # here, where the cause is nameable, not at the link.
+    # CAPTURE FIRST, then filter -- `llvm-nm | grep -q` is the SIGPIPE race
+    # gl_assert_resolved documents (grep -q exits at the first match, nm dies
+    # on SIGPIPE, pipefail reports a symbol MISSING that is present).
+    local sdl_syms
+    sdl_syms="$("$LLVM_PREFIX/bin/llvm-nm" "$sysroot/lib/libSDL2.a" 2>/dev/null || true)"
+    if ! grep -q "T THYLACINE_Vulkan_CreateSurface" <<< "$sdl_syms"; then
+        echo "==> vkquake: libSDL2.a lacks the W-3e Vulkan glue (nogl-mode SDL build?)" >&2
+        exit 1
+    fi
+
+    # The engine's own content pak rides the /quake bake beside id1/
+    # (common.c looks for <basedir>/vkquake.pak). The stage itself is
+    # build_tyrquake's; without it the pool bake skips /quake entirely.
+    if [[ -d "$stage" ]]; then
+        if [[ ! -f "$stage/vkquake.pak" || "$vq_vendor/Quake/vkquake.pak" -nt "$stage/vkquake.pak" ]]; then
+            cp "$vq_vendor/Quake/vkquake.pak" "$stage/vkquake.pak"
+            chmod 0644 "$stage/vkquake.pak"
+            echo "    vkquake.pak staged for the /quake bake"
+        fi
+    else
+        echo "    vkquake: no quake stage at $stage (run build_tyrquake) -- the game data half is absent"
+    fi
+
+    # Staleness: reuse when newer than the tree + port + volk + libSDL2.a +
+    # the fetched archive list (the #204/#139 class: a refreshed venus set
+    # must invalidate the binary).
+    if [[ -f "$out" ]]; then
+        local stale
+        stale="$(find "$vq_vendor" "$port_dir" "$volk_dir" -type f -newer "$out" -print -quit 2>/dev/null)"
+        if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$out" && ! "$venus/venus-libs.list" -nt "$out" ]]; then
+            ledger "vkquake: REUSED (cached + up-to-date)"
+            return 0
+        fi
+    fi
+
+    echo "==> building vkquake 1.05.3 (Vulkan renderer over venus, aarch64-thylacine)"
+    rm -rf "$vq_src" "$vq_obj"
+    mkdir -p "$vq_src" "$vq_obj" "$BUILD_DIR/clade/gl"
+    cp -R "$vq_vendor/Quake" "$vq_vendor/Shaders" "$vq_src/"
+    local qp
+    for qp in "$port_dir"/patches/*.patch; do
+        patch -s -p1 -t -d "$vq_src" -i "$qp"
+    done
+
+    # The curated object list (upstream Quake/Makefile OBJS; codecs
+    # wave-only so the disabled snd_* stay vendored-but-unbuilt).
+    local objs=(
+        # SHADER_OBJS (SPIR-V-as-C, upstream-committed under Shaders/Compiled)
+        alias_frag alias_alphatest_frag alias_vert basic_alphatest_frag
+        screen_warp_comp screen_warp_rgba8_comp cs_tex_warp_comp basic_frag
+        basic_notex_frag basic_vert sky_layer_frag sky_layer_vert
+        postprocess_frag postprocess_vert world_frag world_vert
+        showtris_frag showtris_vert
+        # GLOBJS
+        gl_refrag gl_rlight gl_rmain gl_fog gl_rmisc r_part r_world
+        gl_screen gl_sky gl_warp gl_vidsdl gl_draw image gl_texmgr gl_mesh
+        gl_heap r_sprite r_alias r_brush gl_model
+        # input + sound (SDL driver; wave codec only) + cd
+        in_sdl snd_dma snd_mix snd_mem bgmusic snd_codec snd_wave snd_sdl
+        cd_sdl
+        # net (unix)
+        net_bsd net_udp net_dgrm net_loop net_main
+        # client + common + server
+        strlcat strlcpy chase cl_demo cl_input cl_main cl_parse cl_tent
+        console keys menu sbar view wad cmd common crc cvar cfgfile host
+        host_cmd mathlib pr_cmds pr_edict pr_exec sv_main sv_move sv_phys
+        sv_user world zone
+        # platform
+        pl_linux sys_sdl_unix main_sdl
+    )
+
+    local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
+                   -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
+                   -fno-stack-protector -fcommon
+                   -nostdlibinc -isystem "$sysroot/include"
+                   -isystem "$sysroot/include/SDL2"
+                   -isystem "$venus/include"
+                   -iquote "$vq_src/Quake" -iquote "$volk_dir"
+                   -D_GNU_SOURCE=1 -D__thylacine__=1
+                   -DPLATFORM_UNIX=1 -DUSE_SDL2 -DUSE_CODEC_WAVE -DNDEBUG )
+
+    local n=0 f src
+    for f in "${objs[@]}"; do
+        if [[ -f "$vq_src/Quake/$f.c" ]]; then
+            src="$vq_src/Quake/$f.c"
+        elif [[ -f "$vq_src/Shaders/Compiled/$f.c" ]]; then
+            src="$vq_src/Shaders/Compiled/$f.c"
+        else
+            echo "==> vkquake: source for $f not found" >&2
+            exit 1
+        fi
+        "$clang" "${cflags[@]}" -c "$src" -o "$vq_obj/$f.o"
+        n=$((n + 1))
+    done
+    "$clang" "${cflags[@]}" -c "$volk_dir/volk.c" -o "$vq_obj/volk.o"
+    "$clang" "${cflags[@]}" -c "$port_dir/thy_vkloader.c" -o "$vq_obj/thy_vkloader.o"
+    echo "    compiled $((n + 2)) objects"
+
+    # The venus closure links exactly as mesa's own witness link does
+    # (the thylacine-vk-sdl-prove LINK_ARGS on thyla-keep, the recorded
+    # authority): the three runtime archives under --whole-archive (their
+    # entrypoint/dispatch tables must be fully present), the rest grouped,
+    # -u forcing the ICD member (a weak ref extracts NO archive member --
+    # this link is the closure-from-u-alone proof point, r6-F5). The lists
+    # are READ from what the keep fetch recorded, never typed here (the
+    # gl_link_program discipline: a hardcoded list can only drift from the
+    # one known to close).
+    local venus_whole=() venus_libs=()
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && venus_whole+=( "$venus/lib/$f" )
+    done < "$venus/venus-whole.list"
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && venus_libs+=( "$venus/lib/$f" )
+    done < "$venus/venus-libs.list"
+    POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+        "$REPO_ROOT/tools/pouch-ld" "$vq_obj"/*.o \
+        -Wl,-u,vk_icdGetInstanceProcAddr \
+        -Wl,--start-group \
+        -Wl,--whole-archive "${venus_whole[@]}" -Wl,--no-whole-archive \
+        "${venus_libs[@]}" \
+        -L"$sysroot/lib" -lSDL2 -lm \
+        -Wl,--end-group \
+        -o "$out"
+    echo "    vkquake: $(wc -c < "$out" | tr -d ' ') bytes (ET_EXEC, static, venus ICD linked)"
+    ledger "vkquake: BUILT (W-4; ramfs-staged, data from /quake)"
+}
+
 # --- the GNU make port's source-prep + object census, shared by the host
 # cross-build (build_gnumake) and the on-device build storm (stage_storm).
 # ONE definition: a Makefile generated from a hand-copied list would rot the
@@ -4495,6 +4697,7 @@ case "$target" in
     pouch-progs) build_pouch_progs ;;
     sdl2)        build_sdl2        ;;
     tyrquake)    build_tyrquake    ;;
+    vkquake)     build_vkquake     ;;
     gnumake)     build_gnumake     ;;
     libcxx)      build_libcxx      ;;
     quake-host)  build_quake_host  ;;

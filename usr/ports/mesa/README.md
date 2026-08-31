@@ -469,3 +469,66 @@ commits on `usr/ports/llvm` in the same arc.
 The cost of refreshing early is a patch file that gets superseded. The cost of
 refreshing late is measured in builder rounds, and once, nearly in the work
 itself.
+
+## The venus link set (`build/clade/venus/` — W-4's vkQuake link inputs)
+
+`build_vkquake()` links the venus static ICD locally and skips (announced)
+when this set is absent. It is FETCHED from thyla-keep's mesa-venus build,
+never built here:
+
+- `include/` — mesa's own `include/vulkan` + `include/vk_video`
+  (`vulkan_core.h` pulls the vk_video std headers), copied from the mesa
+  checkout AT THE SAME COMMIT the archives were built from. The headers must
+  be the driver's own: they define the structs the archives were compiled
+  against.
+- `lib/` + `venus-whole.list` + `venus-libs.list` — the archive closure of
+  the `thylacine-vk-sdl-prove` witness link (read its `LINK_ARGS` out of
+  `/build/mesa-venus/build.ninja`; the lists are recorded there so the
+  build script never hardcodes a set that can drift from the one known to
+  close).
+
+Fetch recipe (on keep; one ssh):
+
+```bash
+cd /build/mesa-venus
+# Meson emits THIN archives (pathnames into the build tree, meaningless
+# off-box). Repack each fat from its member list; only subproject zlib is
+# already fat.
+for a in <the LINK_ARGS archives>; do
+  b=$(basename $a)
+  [ "$(head -c7 $a)" = "!<thin>" ] && ar crs /build/venus-stage/lib/$b $(ar t $a) \
+                                   || cp $a /build/venus-stage/lib/$b
+done
+```
+
+**The whole-archive split is LOAD-BEARING and differs from the witness's own
+link.** `venus-whole.list` holds `libvulkan_virtio.a` ALONE; the seven
+support archives (`mesa_util`, `mesa_util_simd`, `z`, `blake3`,
+`mesa_util_c11`, `vulkan_util`, `xmlconfig`) go in `venus-libs.list`
+(grouped, normal extraction). Two measured facts force this shape:
+
+1. **The generated dispatch tables reference every `vn_*` entrypoint as a
+   WEAK undefined** (`vn_entrypoints.c.o`), and a weak undefined extracts
+   NO archive member — the same ELF rule the `-u vk_icdGetInstanceProcAddr`
+   line exists for. Without `--whole-archive`, any driver object nothing
+   else strongly references (first casualty: `vn_pipeline.o`) is silently
+   dropped; its table slots link as NULL, the COMMON runtime fallback fills
+   them, and common code misreads vn-native objects — hit live as
+   `vk_pipeline_layout_init: layout->push_descriptor_idx == UINT32_MAX`
+   asserting under vkQuake's first pipeline layout, while every witness
+   binary stayed green (their ~50 hand-declared strong externs covered
+   their own use sets; upstream never sees it because the normal build is a
+   DSO with no extraction semantics).
+2. **The fat repack FLATTENS meson's nesting**: the thin
+   `libvulkan_virtio.a` member list already includes the runtime + wsi
+   objects, so the fat repack is a strict superset of
+   `libvulkan_lite_runtime.a` + `libvulkan_lite_instance.a` +
+   `libvulkan_wsi.a` (80 members ⊇ 49+1+3, same objects, same build).
+   Whole-archiving it ALONGSIDE those three (the witness link's own split)
+   collides on every duplicated member; whole-archiving it ALONE both
+   avoids the collision and makes the three redundant — they are fetched
+   but unlisted.
+
+Cost of the whole-archive: ~100 KB on the stripped binary. The unimplemented
+extension slots (RT, CUDA, …) stay weak-NULL — that is the table's design,
+not a defect.
