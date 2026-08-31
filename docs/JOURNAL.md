@@ -236,6 +236,80 @@ auditing round 3's fixes on their own. The thing to watch is that a wider
 scope at the same effort reads each half less carefully — compensated by
 naming focus areas harder in the prompt, not by hoping.
 
+### W-3c-2a: the probe that earned its keep twice before producing an answer
+
+W-3c-2 needed one thing settled first, and reading the code rather than the
+design prose settled half of it immediately: `rb_issue` host-DMA-writes into a
+resource's guest *backing* and `comp_readback_retired` reads it back through
+`va`. A presentable has neither, by construction — that absence is what I-7
+rests on and what W-3c-1 exists to establish. So the C-6 readback fallback is
+not differently-parameterised for this class, it is **structurally
+impossible**, and the composed arm reduces to GPU-blit-only. Whether *that*
+works was unmeasured, so it got a probe rather than an assumption.
+
+**Earned its keep the first time before it ran.** Building it surfaced a
+constraint in the existing `BlitConv` probe: it runs on throwaway contexts and
+never on `COMPOSITOR_CTX`, because **a request the renderer refuses latches the
+context it ran on**. Acceptance is exactly what a capability probe measures —
+so such a probe must never run on a context anything else depends on. On the
+compositor context, the refusal this probe went on to measure would have taken
+the display down for the whole boot.
+
+**Earned it a second time on its first run**, which returned `noreadback` — the
+*scaffolding* failed, not a verdict about the blit. A boolean probe ("did the
+destination change? no → refused") would have reported a host capability as
+absent, and I might have narrowed ratified scripture on it. The three-way
+verdict refused to collapse that.
+
+The fix was two controls rather than a guess. The destination moved to the
+resource kind the conv probe demonstrably round-trips every boot — an unknown
+in the *instrument* must not read as an answer about the *subject*. And a
+no-blit **control one variable away** made the reading attributable at all:
+without it, `noreadback` covers both "my instrument is broken" and "the blit
+latched the context out from under the readback", which demand opposite
+responses.
+
+With both in place the discrimination was clean, on one host, one boot:
+
+| arm | result |
+|---|---|
+| no blit at all (control) | staged pattern round-trips |
+| blit from an ordinary resource | lands, rows readable (`blit-conv … CONFIRMED`) |
+| blit from a **presentable** | readback writes nothing; ctx poisoned |
+
+**A presentable is not blittable.** Likely mechanism — inferred, not measured
+— is that a blob bound by `blob_id` to a venus allocation has no virgl texture
+representation and is opaque to virgl's 3D pipeline.
+
+### The fork that stopped the run
+
+Both halves of `WARP-WSI-DESIGN` §4's composed arm are therefore unavailable
+for this class: the blit is refused, the readback is impossible. A presentable
+can be scanned out **Direct** (fullscreen — measured working every boot) but
+not **Composed** (windowed). That is a narrowing of ratified scripture, so it
+is the operator's call, not mine.
+
+Prior art was gathered before surfacing, per the fork rule: Wayland
+compositors import a **dmabuf** and sample it in their own API, which works
+because both APIs agree on a representation — and the dma-buf path was already
+**rejected at W-2** on paradigm grounds (Linux ambient authority does not map
+onto per-Proc capabilities). With no dmabuf, the structurally available answer
+is a compositor that speaks the client's API. Three options went to the
+operator: direct-only now (unblocks vkQuake fullscreen, the arc's actual
+target), composed-in-Venus (the Halcyon-on-vk substrate, a much larger arc), or
+one more bounded probe to prove rather than infer that no formulation works.
+
+The operator took the decision to **Fable**. Nothing was narrowed; the probe
+and its measurement are landed at `c1261dd7`, and
+`design_w3c2_composed_arm_fork.md` carries the options with the research
+attached.
+
+**Not lost in the handoff:** the `PDrained` landmine. `wimg_teardown`
+implements `PUnbound` but not `PDrained`, and is sound *only* because no
+submission path reads `imgs` — now enumerated four times independently. Any
+chunk that adds a compose reader must add the drain **in the same commit**.
+Option A creates no such reader; option B does.
+
 ### Left open, exactly
 
 - **Round 3 is owed** — round 2 is itself a dirty close (a returned P1, and
