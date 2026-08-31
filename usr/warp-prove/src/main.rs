@@ -259,6 +259,9 @@ pub extern "C" fn rs_main() -> i64 {
     if libthyla_rs::env::args().get_str(1) == Some("img") {
         return img_prove();
     }
+    if libthyla_rs::env::args().get_str(1) == Some("img-direct") {
+        return img_direct_prove();
+    }
 
     t_putstr("warp-prove: starting (the Warp-2 gate)\n");
 
@@ -927,6 +930,23 @@ fn img_prove() -> i64 {
         img_fail("re-registering a LIVE handle was accepted (the slot is not exclusive)");
     }
 
+    // The cross-conn I-45 leg (round-2 F10's one undriven property): a
+    // SECOND connection must not resolve this conn's img -- not its info,
+    // and not a consent naming it. Which layer refuses (the walk or the
+    // verb) is not the property; that NOTHING is granted is.
+    let alien = warp_connect("img-xproc");
+    if try_open_read(alien, &format!("ctx/{}/img/0/info", ctx)).is_some() {
+        img_fail("a FOREIGN conn read another client's img info (I-45)");
+    }
+    if write_ctl(alien, &format!("ctx/{}/ctl", ctx), "present-to 0 img 0") {
+        img_fail("a FOREIGN conn consented another client's img to display (I-45)");
+    }
+    // And the probe must not have DAMAGED the owner's object (the #250
+    // shape: a gate that mutates the fixture it shares).
+    if try_open_read(root, &format!("ctx/{}/img/0/info", ctx)).is_none() {
+        img_fail("the alien-conn probe damaged the owner's img");
+    }
+
     // TWO LIVE PRESENTABLES (round-2 F10). Every arm above drives handle 0
     // alone, so the multi-slot row, the per-handle namespace and the I-32
     // sum across imgs had no runtime witness at all -- the ABI supports 16
@@ -974,8 +994,119 @@ fn img_prove() -> i64 {
     let _ = write_ctl(root, &format!("ctx/{}/img/0/ctl", ctx), "destroy");
     let _ = write_ctl(root, &format!("ctx/{}/ctl", ctx), "destroy");
     t_putstr(&format!(
-        "warp-prove: IMG PASS (shape gate 4/4 refused; declared {}x{} stride {} fmt {} mem 0 echoed; two live imgs res {}/{} distinct + independent; res {} -> {} monotonic; handle freed on destroy)\n",
+        "warp-prove: IMG PASS (shape gate 4/4 refused; declared {}x{} stride {} fmt {} mem 0 echoed; xproc info+consent refused; two live imgs res {}/{} distinct + independent; res {} -> {} monotonic; handle freed on destroy)\n",
         W, H, STRIDE, FMT, res, res1, res, res2
+    ));
+    0
+}
+
+fn img_direct_fail(msg: &str) -> ! {
+    t_putstr(&format!("warp-prove: IMG-DIRECT FAIL: {}\n", msg));
+    unsafe { t_exits(1) }
+}
+
+/// W-3c-2: the presentable DIRECT arm, end-to-end over the wire -- the
+/// generalized `present-to <surface> img <n>` consent, the F16 pending
+/// switch completing on SET_SCANOUT_BLOB, and the display-safe
+/// destroy-while-bound. The zoom chord that makes the surface fullscreen
+/// comes from the expect harness (warp-img.exp), which also watches the
+/// compositor's say lines; this side drives presents and observes `bound`
+/// through `img/0/info` -- the guest-visible half of the same event.
+fn img_direct_prove() -> i64 {
+    use tapestry::Surface;
+    let args = libthyla_rs::env::args();
+    let dw: u32 = args.get_str(2).and_then(|s| s.parse().ok()).unwrap_or(1280);
+    let dh: u32 = args.get_str(3).and_then(|s| s.parse().ok()).unwrap_or(800);
+    t_putstr(&format!(
+        "warp-prove: img-direct gate (W-3c-2, the presentable Direct arm) starting ({}x{})\n",
+        dw, dh
+    ));
+
+    // The surface half of the mutual adoption, DISPLAY-sized: reconcile
+    // takes a surface Direct only when the one visible leaf matches the
+    // head, so the zoom can only complete on this shape.
+    let mut surf = match Surface::open(dw, dh) {
+        Ok(s) => s,
+        Err(_) => img_direct_fail("tapestry surface open"),
+    };
+    for px in surf.pixels().iter_mut() {
+        *px = 0xFF10_4020; // the weave content the restore leg falls back to
+    }
+    if surf.present(None).is_err() {
+        img_direct_fail("first 2D present");
+    }
+
+    let warp = warp_connect("img-direct");
+    let ctx = mint_ctx(warp, "img-direct");
+    let stride = dw * 4;
+    if !write_ctl(
+        warp,
+        &format!("ctx/{}/img/new", ctx),
+        &format!("0 {} {} {} {} 0", dw, dh, VIRGL_FORMAT_B8G8R8A8_UNORM, stride),
+    ) {
+        t_putstr("warp-prove: IMG-DIRECT SKIP -- presentable mint refused (no venus device)\n");
+        unsafe { t_exits(2) }
+    }
+    let info = open_read_string(warp, &format!("ctx/{}/img/0/info", ctx));
+    let res = parse_field(&info, "res").unwrap_or_else(|| img_direct_fail("img info missing res"));
+
+    if surf.surface_ctl(&format!("glsrc {}", ctx)).is_err() {
+        img_direct_fail("glsrc");
+    }
+    if !write_ctl(warp, &format!("ctx/{}/ctl", ctx), &format!("present-to {} img 0", surf.id)) {
+        img_direct_fail("present-to img refused");
+    }
+    t_putstr(&format!(
+        "warp-prove: IMG-DIRECT armed (ctx {} res {} surf {})\n",
+        ctx, res, surf.id
+    ));
+
+    // Present until the display binds the presentable. `bound` in info is
+    // `bound_res == res` -- the guest-visible witness of the standing
+    // SET_SCANOUT_BLOB binding (the spec's pbound). The zoom arrives from
+    // the harness; F16 completes the switch only at a present-COMPLETE, so
+    // keep presenting.
+    let t0 = libthyla_rs::time::Instant::now();
+    let mut bound = false;
+    while (t0.elapsed().as_millis() as u64) < 120_000 {
+        if surf.present(None).is_err() {
+            img_direct_fail("present during the bind wait");
+        }
+        let now = open_read_string(warp, &format!("ctx/{}/img/0/info", ctx));
+        if parse_field(&now, "bound") == Some(1) {
+            bound = true;
+            break;
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(100));
+    }
+    if !bound {
+        img_direct_fail("bound never reached 1 within 120s (zoom missing? head size mismatch?)");
+    }
+    t_putstr(&format!("warp-prove: IMG-DIRECT bound observed (res {})\n", res));
+
+    // Destroy WHILE BOUND -- the display-safe teardown's first client-driven
+    // execution: consent must clear server-side, the display must survive
+    // the unbind, and the surface's own weave arm takes the scanout back at
+    // a later present (the harness watches for `scanout direct N slot`).
+    if !write_ctl(warp, &format!("ctx/{}/img/0/ctl", ctx), "destroy") {
+        img_direct_fail("destroy-while-bound refused");
+    }
+    if try_open_read(warp, &format!("ctx/{}/img/0/info", ctx)).is_some() {
+        img_direct_fail("img info still resolves after destroy");
+    }
+    for _ in 0..20 {
+        if surf.present(None).is_err() {
+            img_direct_fail("present during the restore");
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
+    }
+    // The destroy cleared the consent server-side; `off` must now be a
+    // clean no-op, not an error.
+    let _ = write_ctl(warp, &format!("ctx/{}/ctl", ctx), "present-to off");
+    let _ = write_ctl(warp, &format!("ctx/{}/ctl", ctx), "destroy");
+    t_putstr(&format!(
+        "warp-prove: IMG-DIRECT PASS (armed -> bound -> destroyed-while-bound -> restored; ctx {} res {} {}x{})\n",
+        ctx, res, dw, dh
     ));
     0
 }

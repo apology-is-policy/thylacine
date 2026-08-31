@@ -1670,12 +1670,19 @@ struct WarpCtx {
     /// (round-2 F2). The rate limit answers from this rather than from
     /// `!stream_rejected`, which cannot represent "asked, no answer".
     verify_last: Option<bool>,
-    /// Warp-4: the GL adoption's CTX half -- `present-to <surface> <bo>`:
-    /// this ctx consents to displaying its BO `bo_pub` on surface
-    /// (slot, gen). The gen pin makes a consent die with the surface
-    /// incarnation it named -- slot reuse cannot re-arm it against a
-    /// future tenant.
-    present_to: Option<(usize, u32, u32)>,
+    /// Warp-4 + W-3c-2: the adoption's CTX half -- `present-to <surface>
+    /// <bo>` / `present-to <surface> img <n>`: this ctx consents to
+    /// displaying one of its sources on surface (slot, gen). The gen pin
+    /// makes a consent die with the surface incarnation it named -- slot
+    /// reuse cannot re-arm it against a future tenant. The source is
+    /// PUB-keyed for BOTH families (an img handle is resolved to its pub id
+    /// at the verb): pub ids are monotonic and never reused, so a consent
+    /// can never re-attach to a later tenant of a freed handle slot.
+    present_to: Option<(usize, u32, PresentSrc)>,
+    /// W-3c-2 one-shot: a composed-mode surface whose consent names a
+    /// presentable has no compose arm until W-3d -- said once per ctx, not
+    /// per frame.
+    img_composed_said: bool,
     /// #204 census: the most BACKED BOs this ctx ever held at once -- the
     /// quantity the creation-time cap gates, so it is the number the cap
     /// width must be sized against. Read via ctl `bo-peak`.
@@ -1866,6 +1873,25 @@ struct WarpImg {
     size: u64,
 }
 
+/// W-3c-2: the consented present source, by family (WARP-WSI-DESIGN 5.1's
+/// "one adoption model, two resource families"). Both variants carry the
+/// PUB id, never a handle index.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PresentSrc {
+    Bo(u32),
+    Img(u32),
+}
+
+/// W-3c-2: which family a resolved adoption is, plus what the Direct bind
+/// needs that only that family carries. A blob resource has no implicit
+/// shape, so the presentable's bind (SET_SCANOUT_BLOB) rides the
+/// registration's declared stride.
+#[derive(Clone, Copy)]
+enum AdoptSrc {
+    Bo,
+    Img { stride: u32 },
+}
+
 /// Warp-4: a resolved ACTIVE GL adoption (see `gl_adoption`) -- the
 /// device ctx + 3D resource + tapestryd's own mapping of its backing.
 /// A value is valid for the single dispatch that resolved it.
@@ -1889,6 +1915,11 @@ struct CompRb {
 }
 
 struct GlAdopt {
+    /// The family, and the family-specific bind argument (W-3c-2). Every
+    /// composed-arm consumer MUST gate on `Bo`: an Img adoption has no
+    /// guest mapping (`va` below is 0 -- I-7), no compositor import, and
+    /// takes no blit/readback until the W-3d compose arm.
+    kind: AdoptSrc,
     dev_ctx: u32,
     /// The seam identity of the adoption -- ctx pub id + BO pub id -- so a
     /// deferred readback's completion (C-6) can re-validate that the surface
@@ -2731,7 +2762,7 @@ impl Comp {
         if !self.comp_ctx {
             return;
         }
-        let due: Vec<(u32, u64, Option<(usize, u32, u32)>)> = self
+        let due: Vec<(u32, u64, Option<(usize, u32, PresentSrc)>)> = self
             .warp_ctxs
             .iter_mut()
             .flatten()
@@ -2742,7 +2773,9 @@ impl Comp {
             })
             .collect();
         for (ctx_pub, conn, consent) in due {
-            if let Some((sn, _, bo)) = consent {
+            // Bo only: the compositor import exists for the composed blit,
+            // which takes no presentable until W-3d.
+            if let Some((sn, _, PresentSrc::Bo(bo))) = consent {
                 self.comp_import_bo(ctx_pub, conn, bo, sn);
             }
         }
@@ -2757,7 +2790,7 @@ impl Comp {
         }
         let mut to_detach: Vec<u32> = Vec::new();
         for c in self.warp_ctxs.iter_mut().flatten() {
-            if let Some((sl, g, bp)) = c.present_to {
+            if let Some((sl, g, PresentSrc::Bo(bp))) = c.present_to {
                 if sl == n && g == gen {
                     if let Some(b) = c.bos.iter_mut().flatten().find(|b| b.pub_id == bp) {
                         if b.comp_imported {
@@ -4793,11 +4826,20 @@ impl Comp {
             // binding is ours.)
             let gl_bound = self.bound_res != 0
                 && self.warp_ctxs.iter().flatten().any(|c| match c.present_to {
-                    Some((sl, g, bp)) if sl == n && g == s.gen => c
-                        .bos
-                        .iter()
-                        .flatten()
-                        .any(|b| b.pub_id == bp && b.res_id == self.bound_res),
+                    Some((sl, g, src)) if sl == n && g == s.gen => match src {
+                        PresentSrc::Bo(bp) => c
+                            .bos
+                            .iter()
+                            .flatten()
+                            .any(|b| b.pub_id == bp && b.res_id == self.bound_res),
+                        // W-3c-2: a display-bound presentable dies with the
+                        // surface it was granted to, same as a BO.
+                        PresentSrc::Img(ip) => c
+                            .imgs
+                            .iter()
+                            .flatten()
+                            .any(|i| i.pub_id == ip && i.res_id == self.bound_res),
+                    },
                     _ => false,
                 });
             if gl_bound {
@@ -5603,10 +5645,42 @@ impl Comp {
         if c.fence_poisoned {
             return None;
         }
-        let (slot, gen, bo_pub) = c.present_to?;
+        let (slot, gen, src) = c.present_to?;
         if slot != n || gen != s.gen {
             return None;
         }
+        let bo_pub = match src {
+            PresentSrc::Bo(bp) => bp,
+            PresentSrc::Img(img_pub) => {
+                // W-3c-2, the presentable family. The display-MODE half of
+                // the accept set lands HERE (W-3c-1 round-2 F13):
+                // registration is structural only; the fit against the
+                // CURRENT surface incarnation is checked per use, where the
+                // bind is chosen, so a mode change under a live consent
+                // degrades to inactive instead of wedging either side.
+                // No dma_fd / va / size-vs-geometry bound has an img
+                // analogue: a presentable has no guest mapping at all --
+                // that absence is I-7, and `size >= stride*h >= w*h*4` is
+                // already pinned at registration (`wimg_mint`).
+                let i = c.imgs.iter().flatten().find(|i| i.pub_id == img_pub)?;
+                if i.w != s.w || i.h != s.h {
+                    return None;
+                }
+                return Some(GlAdopt {
+                    kind: AdoptSrc::Img { stride: i.stride },
+                    dev_ctx: c.dev_ctx,
+                    ctx_pub: c.pub_id,
+                    bo_pub: i.pub_id,
+                    res_id: i.res_id,
+                    va: 0,
+                    w: i.w,
+                    h: i.h,
+                    comp_imported: false,
+                    format: i.format,
+                    composable: false,
+                });
+            }
+        };
         let b = c
             .bos
             .iter()
@@ -5639,6 +5713,7 @@ impl Comp {
             return None;
         }
         Some(GlAdopt {
+            kind: AdoptSrc::Bo,
             dev_ctx: c.dev_ctx,
             ctx_pub: c.pub_id,
             bo_pub: b.pub_id,
@@ -5650,6 +5725,49 @@ impl Comp {
             format: b.format,
             composable: b.composable,
         })
+    }
+
+    /// W-3c-2: a composed-mode present whose consent names a presentable --
+    /// said once per ctx (the `import_skip_said` precedent: a per-frame say
+    /// at present rate is a console storm).
+    fn note_img_composed_deferred(&mut self, ctx_pub: u32) {
+        if let Some(c) = self
+            .warp_ctxs
+            .iter_mut()
+            .flatten()
+            .find(|c| c.pub_id == ctx_pub)
+        {
+            if !c.img_composed_said {
+                c.img_composed_said = true;
+                say!(
+                    "tapestryd: warp display img composed-arm deferred (ctx {}): the pane shows the 2D weave until the W-3d compose arm",
+                    ctx_pub
+                );
+            }
+        }
+    }
+
+    /// W-3c-2: bind the display to an adopted source, by family -- ONE copy
+    /// of the dispatch (the #230 by-meaning rule), used by the pending
+    /// switch and the steady-state defensive rebind. A BO scans out via
+    /// SET_SCANOUT (its resource carries an implicit shape); a presentable
+    /// via SET_SCANOUT_BLOB at the registration's declared shape -- the
+    /// spec's `PPresentBind` (specs/tapestry_present.tla). Post-bind full
+    /// flush per #57 on both: a flush issued before the bind is dropped by
+    /// spec, and cocoa's same-size surface replace renders nothing.
+    fn direct_bind_adopted(&mut self, g: &GlAdopt, w: u32, h: u32) -> bool {
+        let ok = match g.kind {
+            AdoptSrc::Bo => self.gpu.set_scanout(g.res_id, w, h).is_ok(),
+            AdoptSrc::Img { stride } => self
+                .gpu
+                .set_scanout_blob(g.res_id, w, h, g.format, stride)
+                .is_ok(),
+        };
+        if ok {
+            self.bound_res = g.res_id;
+            let _ = self.gpu.flush(g.res_id, 0, 0, w, h);
+        }
+        ok
     }
 
     /// Warp-4: an adoption half changed for surface `n` (glsrc write,
@@ -5836,6 +5954,7 @@ impl Comp {
             import_skip_said: false,
             verify_last: None,
             present_to: None,
+            img_composed_said: false,
             bo_backed_peak: 0,
             bo_bytes_peak: 0,
             build_diag_arms: 0,
@@ -7832,6 +7951,29 @@ impl Comp {
             }
         }
         let (si, ii) = found.ok_or(p9::E_NOENT)?;
+        // W-3c-2, the consent-clear arm (mirroring `wbo_destroy`): a consent
+        // naming the dying img must not survive it. The pub id is never
+        // reused, so a dangling consent could not re-attach -- but it would
+        // keep `gl_adoption` scanning for a source that cannot return and
+        // hold the surface's own switch un-re-armed. Clear + retarget FIRST;
+        // the display unbind itself rides `wimg_teardown` unconditionally.
+        let dying = self.warp_ctxs[si]
+            .as_ref()
+            .and_then(|c| c.imgs[ii].as_ref())
+            .map(|i| i.pub_id);
+        let consent_sl = self.warp_ctxs[si].as_ref().and_then(|c| match (c.present_to, dying) {
+            (Some((sl, _, PresentSrc::Img(ip))), Some(dp)) if ip == dp => Some(sl),
+            _ => None,
+        });
+        if let Some(sl) = consent_sl {
+            if let Some(c) = self.warp_ctxs[si].as_mut() {
+                c.present_to = None;
+            }
+            if let Some(s) = self.surf_mut(sl) {
+                s.res_stale = [true; WEAVE_SLOTS as usize];
+            }
+            self.gl_retarget(sl);
+        }
         let taken = self.warp_ctxs[si].as_mut().and_then(|c| c.imgs[ii].take());
         if let Some(i) = taken {
             self.wimg_teardown(i);
@@ -7858,10 +8000,14 @@ impl Comp {
     /// NoTornPresentable.
     ///
     /// The compose-drain half (the spec's PDrained) has no in-flight class to
-    /// drain YET: at W-3c-1 nothing composes FROM a presentable -- the only
-    /// observer is the scanout binding. W-3c-2, which adds the compose arm,
-    /// adds the drain here with it, and the spec already carries the conjunct
-    /// so the obligation cannot be forgotten.
+    /// drain YET. W-3c-2's Direct adoption reads `imgs` but creates no
+    /// pinflight member: the bind is a STANDING binding tracked by
+    /// `Comp.bound_res` (the spec's pbound, unbound below), completed inside
+    /// one dispatch -- no transient compose READ of the presentable exists
+    /// anywhere. The W-3d compose arm (the blit-import path) is the FIRST
+    /// pinflight producer and MUST add the drain here in the same commit;
+    /// the spec already carries the conjunct so the obligation cannot be
+    /// forgotten.
     ///
     /// A REFUSED unbind does not reach the unref: `gl_evict_res` condemns the
     /// resource and `Gpu::resource_unref` defers on it until an accepted
@@ -8997,7 +9143,7 @@ impl Comp {
                     .map(|b| b.res_id)
                     .filter(|&r| r != 0 && r == self.bound_res),
                 match c.present_to {
-                    Some((sl, _, bp)) if bp == bo_pub => Some(sl),
+                    Some((sl, _, PresentSrc::Bo(bp))) if bp == bo_pub => Some(sl),
                     _ => None,
                 },
             )
@@ -9172,8 +9318,11 @@ impl Comp {
                 continue; // that incarnation is gone
             }
             let g = match self.gl_adoption(n) {
-                Some(g) => g,
-                None => continue,
+                // Bo only (W-3c-2): `rb_issue` host-DMA-writes into `g.va`,
+                // which an Img adoption does not have (I-7). Presentables
+                // reach the composed machinery only at the W-3d compose arm.
+                Some(g) if matches!(g.kind, AdoptSrc::Bo) => g,
+                _ => continue,
             };
             match self.rb_issue(n, &g) {
                 Ok(()) => return,
@@ -9245,7 +9394,11 @@ impl Comp {
         }
         let same_gen = self.surf(rec.surf).map_or(false, |s| s.gen == rec.gen);
         let same_adoption = self.gl_adoption(rec.surf).map_or(false, |g| {
-            g.ctx_pub == rec.ctx_pub
+            // The kind pin (W-3c-2): img and bo pub ids are separate
+            // monotonic sequences, so a bare pub compare could false-match
+            // across families after the consent changed under the readback.
+            matches!(g.kind, AdoptSrc::Bo)
+                && g.ctx_pub == rec.ctx_pub
                 && g.bo_pub == rec.bo_pub
                 && g.res_id == rec.res_id
                 && g.va == rec.va
@@ -11750,9 +11903,10 @@ impl Conn {
                 if a1 == "off" {
                     let c = comp.wctx_mut(id, self.conn_id).ok_or(p9::E_NOENT)?;
                     let old = c.present_to.take();
-                    if let Some((_, _, old_bo)) = old {
+                    if let Some((_, _, PresentSrc::Bo(old_bo))) = old {
                         // C-2c: consent withdrawn -> the compositor's import
-                        // of the consented BO goes with it.
+                        // of the consented BO goes with it (Bo only: an img
+                        // consent imported nothing).
                         comp.comp_release_bo(id, self.conn_id, old_bo);
                     }
                     if let Some((sl, _, _)) = old {
@@ -11773,11 +11927,36 @@ impl Conn {
                     return Ok(());
                 }
                 let sn: usize = a1.parse().map_err(|_| p9::E_INVAL)?;
-                let bo: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
-                if it.next().is_some() {
-                    return Err(p9::E_INVAL);
-                }
-                {
+                // W-3c-2, the generalized arm (WARP-WSI-DESIGN 5.2):
+                // `present-to <surface> <bo>` names a BO by PUB id;
+                // `present-to <surface> img <n>` names a presentable by its
+                // HANDLE, resolved to the PUB id HERE so a freed handle's
+                // later tenant can never inherit the consent (pub ids are
+                // monotonic, never reused -- the same pin the gen gives the
+                // surface half).
+                let a2 = it.next().ok_or(p9::E_INVAL)?;
+                let src = if a2 == "img" {
+                    let handle: u32 =
+                        it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+                    if it.next().is_some() {
+                        return Err(p9::E_INVAL);
+                    }
+                    let c = comp.wctx(id, self.conn_id).ok_or(p9::E_NOENT)?;
+                    let ip = c
+                        .imgs
+                        .get(handle as usize)
+                        .and_then(|o| o.as_ref())
+                        .map(|i| i.pub_id)
+                        .ok_or(p9::E_NOENT)?;
+                    // The per-family "built" predicate (5.1): an img is
+                    // built by registration alone -- it has no dma_fd to
+                    // test, and that absence is I-7, not a gap.
+                    PresentSrc::Img(ip)
+                } else {
+                    let bo: u32 = a2.parse().map_err(|_| p9::E_INVAL)?;
+                    if it.next().is_some() {
+                        return Err(p9::E_INVAL);
+                    }
                     let c = comp.wctx(id, self.conn_id).ok_or(p9::E_NOENT)?;
                     if !c
                         .bos
@@ -11787,27 +11966,34 @@ impl Conn {
                     {
                         return Err(p9::E_NOENT);
                     }
-                }
+                    PresentSrc::Bo(bo)
+                };
                 let gen = match comp.surf(sn) {
                     Some(s) => s.gen,
                     None => return Err(p9::E_NOENT),
                 };
-                let prev_bo = comp
+                let prev = comp
                     .wctx(id, self.conn_id)
                     .and_then(|c| c.present_to)
-                    .map(|(_, _, b)| b);
+                    .map(|(_, _, s)| s);
                 if let Some(c) = comp.wctx_mut(id, self.conn_id) {
-                    c.present_to = Some((sn, gen, bo));
+                    c.present_to = Some((sn, gen, src));
                 }
-                // C-2c: the consent IS the grant (4.5.10) -- the compositor
-                // imports the consented BO into its own context here,
-                // witnessed, and releases the one a replaced consent named.
-                if let Some(pb) = prev_bo {
-                    if pb != bo {
+                // C-2c: the consent IS the grant (4.5.10) -- for the Bo
+                // family the compositor imports the consented BO into its
+                // own context here, witnessed, and releases the one a
+                // replaced consent named. The Img family imports NOTHING
+                // until the W-3d compose arm: there is no compositor-side
+                // representation to witness yet, and attaching one would be
+                // an unread grant.
+                if let Some(PresentSrc::Bo(pb)) = prev {
+                    if src != PresentSrc::Bo(pb) {
                         comp.comp_release_bo(id, self.conn_id, pb);
                     }
                 }
-                comp.comp_import_bo(id, self.conn_id, bo, sn);
+                if let PresentSrc::Bo(bo) = src {
+                    comp.comp_import_bo(id, self.conn_id, bo, sn);
+                }
                 // Re-arm the surface's direct switch only if it names THIS
                 // ctx (Warp-5 F1). If the surface has not yet glsrc'd us the
                 // pairing is not active anyway, and its own glsrc write will
@@ -12411,10 +12597,17 @@ impl Conn {
             // is forced TRUE -- the 2D machinery heals from it whenever
             // the adoption later ends.
             if let Some(g) = comp.gl_adoption(n) {
-                say!("tapestryd: scanout direct {} GL res {} ({}x{})", n, g.res_id, w, h);
-                if comp.gpu.set_scanout(g.res_id, w, h).is_ok() {
-                    comp.bound_res = g.res_id;
-                    let _ = comp.gpu.flush(g.res_id, 0, 0, w, h);
+                // The family rides the say line; the GL form is
+                // byte-identical to Warp-4's, so every consumer of
+                // `scanout direct N GL res R` still matches (a prefix
+                // change is a capture change -- the W-3c-1 round-3 F1
+                // lesson, third recurrence).
+                let fam = match g.kind {
+                    AdoptSrc::Bo => "GL",
+                    AdoptSrc::Img { .. } => "img",
+                };
+                say!("tapestryd: scanout direct {} {} res {} ({}x{})", n, fam, g.res_id, w, h);
+                if comp.direct_bind_adopted(&g, w, h) {
                     comp.scanout = Scanout::Direct(n);
                     comp.pending_direct = None;
                 }
@@ -12477,19 +12670,22 @@ impl Conn {
                 if hold {
                     return Err(p9::E_OPNOTSUPP);
                 }
+                // The img family shares this arm verbatim: same flush-only
+                // cost shape, so it rides the same census row rather than
+                // hollowing the battery's arm-name table with a twin.
                 comp.cost_arm = Cost::PresentDirectGl;
                 if comp.bound_res != g.res_id {
                     // Defensive (mode-machine-unreachable: every adoption
                     // change routes through the pending switch): rebind
                     // rather than flush a non-scanned-out resource, which
-                    // the spec drops silently.
-                    say!("tapestryd: GL direct rebind {} -> {}", comp.bound_res, g.res_id);
+                    // the spec drops silently. Family-dispatched (W-3c-2):
+                    // an img rebind must be SET_SCANOUT_BLOB.
+                    say!("tapestryd: direct rebind {} -> {}", comp.bound_res, g.res_id);
                     let t0 = Instant::now();
-                    if comp.gpu.set_scanout(g.res_id, w, h).is_err() {
+                    if !comp.direct_bind_adopted(&g, w, h) {
                         return Err(E_IO);
                     }
                     comp.cost_add(Cost::Scanout, t0);
-                    comp.bound_res = g.res_id;
                 }
                 let t0 = Instant::now();
                 if comp.gpu.flush(g.res_id, 0, 0, w, h).is_err() {
@@ -12609,7 +12805,25 @@ impl Conn {
             // so the present stays one dispatch (the I-40 premise) -- then
             // compose those pages like any weave. Full-frame always: GL
             // damage is whole-frame by nature.
-            if let Some(g) = comp.gl_adoption(n) {
+            //
+            // W-3c-2: BOTH arms are Bo-only. An Img adoption has no
+            // compositor import (no blit source) and no guest backing for
+            // the readback to DMA into (`va == 0` -- I-7), so a composed-
+            // mode surface whose consent names a presentable falls through
+            // to the software path below: the pane shows the surface's own
+            // 2D weave, LOUDLY once per ctx, until the W-3d compose arm
+            // (the blit-import path) lands. Silently composing nothing is
+            // not a real answer; neither is DMA into va 0.
+            if let Some(cp) = comp
+                .gl_adoption(n)
+                .and_then(|g| matches!(g.kind, AdoptSrc::Img { .. }).then_some(g.ctx_pub))
+            {
+                comp.note_img_composed_deferred(cp);
+            }
+            if let Some(g) = comp
+                .gl_adoption(n)
+                .filter(|g| matches!(g.kind, AdoptSrc::Bo))
+            {
                 if hold {
                     return Err(p9::E_OPNOTSUPP); // no GL deferral (see the direct arm)
                 }

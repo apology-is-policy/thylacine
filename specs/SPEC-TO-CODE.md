@@ -1908,7 +1908,7 @@ left unpinned); with it on, the all-features clean cfg measures 1557073
 distinct states. The presentable has NO GUEST PAGES, so its invariant
 protects the HOST resource's lifetime against the display's observers — the
 `gl_evict_res` class, host-side UAF with cross-client blast radius on the
-documented-trusted host. Action ↔ site (all W-3c-owed unless noted):
+documented-trusted host. Action ↔ site (registration/teardown landed at W-3c-1; the bind at W-3c-2; the compose class W-3d-owed):
 
 - **`PRegister`** ↔ `ctx/<id>/img/new` (venus alloc + registration
   collapsed: between the two the blob is an ordinary venus resource nothing
@@ -1918,6 +1918,14 @@ documented-trusted host. Action ↔ site (all W-3c-owed unless noted):
 - **`PPresentBind` / `PUnbind`** ↔ the Direct arm's `SET_SCANOUT_BLOB` bind
   and the binding ENDING however it ends (explicit disable, replaced by
   another source's bind, the teardown's evict step). The standing observer.
+  **AS BUILT at W-3c-2**: `PPresentBind` = `Comp::direct_bind_adopted`
+  (`usr/tapestryd/src/server.rs` — the one family-dispatch site, reached
+  from the F16 pending switch and the steady-state defensive rebind);
+  `PUnbind` = `gl_evict_res` however reached (`wimg_teardown`, surface
+  teardown, retarget). The compose read class (`PComposeIssue`/`Complete`)
+  is RESEQUENCED to W-3d slice 1 with the drain (the run-6 fork
+  resolution): W-3c-2's Direct adoption creates no `pinflight` member, so
+  `PDrained` stays vacuously discharged.
 - **`PComposeIssue` / `PComposeComplete`** ↔ the Composed arm READING the
   presentable: the C-3 cross-ctx blit or the C-6 readback's SOURCE side —
   one class, because both only read it. The readback's WRITE side lands in

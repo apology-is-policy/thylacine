@@ -110,6 +110,66 @@ probe's three-way verdict and controls were exactly right, and still the
 conclusion drawn from them quietly widened from "this blob" to "this class".
 The check that caught it cost one source read and zero boots.
 
+### W-3c-2 in the same run: the Direct arm, resequenced honestly
+
+With the fork dissolved, the chunk landed as DIRECT-only by design rather
+than by limitation: `present-to` generalized to two PUB-keyed families
+(`PresentSrc {Bo, Img}` — an img *handle* resolves to its pub id at the
+verb, so a freed handle's later tenant can never inherit a consent),
+`gl_adoption` grew the img arm (the display-MODE half of the accept set —
+round-2 F13 discharged where the bind is chosen, not at registration), and
+`direct_bind_adopted` became the one copy of the family dispatch
+(`SET_SCANOUT` | `SET_SCANOUT_BLOB` at the declared shape — the spec's
+`PPresentBind`).
+
+The load-bearing negative is sharper than the positive: **every
+composed-machinery consumer is hard-gated to the Bo family**, because
+`rb_issue` host-DMA-writes into `g.va` and an img adoption's `va` is 0 —
+the gate is memory safety wearing a sequencing hat. `same_adoption` gained
+a kind pin for the same reason a bare pub compare is unsound: img and bo
+pub ids are independent monotonic sequences. And the `PDrained` claim was
+re-derived rather than inherited: the Direct adoption reads `imgs` but
+creates no `pinflight` member (a standing binding tracked by
+`Comp.bound_res`, completed inside one dispatch), so the drain stays owed
+by the W-3d compose arm, in the same commit as that arm — stated now in
+the trigger row, the teardown comment, the WSI §7 record, and the spec
+map, so the obligation cannot be dropped by any single stale copy.
+
+Two drivers landed with the chunk, because a gated path with no driver is
+not a gate: `img_prove` gained the cross-conn I-45 leg (round-2 F10's one
+undriven property — a foreign conn resolves neither info nor a consent,
+and the probe must not damage the owner's object), and `warp-prove
+img-direct` + the extended `warp-img.exp` drive the whole Direct
+choreography — mutual adoption, the zoom chord, the bind observed from
+BOTH vantages (the compositor's `scanout direct N img res R` say line and
+the guest's `bound` field in `img/0/info` — two vantages, one fact),
+destroy-WHILE-BOUND (the display-safe teardown's first client-driven,
+repeatable execution — exactly the path round 3's F2 fix anticipated), and
+the weave arm re-taking the scanout. The `warp-host.sh img` verdict is a
+four-witness conjunction; any subset can be produced by a partial run, the
+conjunction cannot.
+
+**Witnessed on real V3D, first run, both gates `VERIFIED`**: armed → the
+composed-arm deferred one-shot (live, pre-zoom — a bonus witness nobody
+asserted) → `scanout direct 1 img res 896 (1280x800)` → `bound observed`
+(the guest vantage) → destroy-while-bound → `scanout direct 1 slot 1` → PASS
+→ console heal. Suite 1432/1432; `test-venus-verdict` 75/75.
+
+And the boot handed back an independent confirmation of the fork
+resolution: QEMU's display layer logs `Failed to get v3d handle for dmabuf
+N` + `eglCreateImageKHR failed` on **every** stand-in bind — including
+W-3c-1's selftest on every venus boot before today, unremarked. The
+stand-in is a *memfd*; the egl-headless scanout import wants a *dmabuf*;
+the virtio-level response is OK regardless (`RESP_OK` is not the renderer's
+verdict — the known pin, now witnessed one layer further out, at the
+display). At W-3d the real class's dmabuf imports cleanly, and the absence
+of these lines becomes a witness.
+
+One small operational lesson re-earned: the first sync of the day hung 14
+minutes on `ssh thyla-pi` — the LAN alias, wedged, exactly as the standing
+note says (`thyla-pi-cf` ONLY). The note was in the resume note; the
+muscle memory was not.
+
 ## 2026-08-31 (run 5) — W-3c-1 re-witnessed, then round 2 found the hole between two round-1 fixes
 
 Fresh context (self-compact at the 600k line, at the W-3c-1 committed

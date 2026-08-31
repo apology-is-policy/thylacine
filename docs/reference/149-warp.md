@@ -1679,6 +1679,56 @@ P3. Re-audit of the fixes: CLEAN (0 P0 / 0 P1 / 0 P2 / 3 P3 cosmetic; Opus 4.8 f
 exercised only by unit tests -- V-3 (`vn_renderer`) drives it E2E on a real
 device. The libthyla-rs ABI mirror (107) LANDED (usr/lib/libthyla-rs/src/lib.rs, matching kernel syscall.h=107); the GL venus regression is DEFERRED (thyla-pi LAN mDNS down; pi healthy via CF tunnel; not gating -- V-2 code unexercised until V-3).
 
+## Warp-WSI W-3c-2 -- the presentable Direct arm's drivers and gate (as-built 2026-08-31)
+
+The tapestryd mechanism prose for this chunk lives in the vault
+(`sub-tapestryd` owns `usr/tapestryd/**`); this section covers the UNOWNED
+halves -- the prover, the choreography, and the verdict.
+
+### `warp-prove img` additions (the cross-conn I-45 leg)
+
+While the first registration is live, `img_prove` opens a SECOND /srv/warp
+connection and asserts three things in order: the foreign conn cannot read
+`ctx/<A>/img/0/info`; the foreign conn's `present-to 0 img 0` against
+`ctx/<A>/ctl` is refused; and the owner's img is UNDAMAGED afterwards (the
+#250 shape -- a gate must not mutate the fixture it shares). Which layer
+refuses (walk vs verb) is deliberately not asserted: that NOTHING is granted
+is the property.
+
+### `warp-prove img-direct <W> <H>` (the E2E driver)
+
+The guest half of the Direct-arm proof. Opens a DISPLAY-sized tapestry
+surface (reconcile takes a surface Direct only when the one visible leaf
+matches the head, so the harness zoom can only complete on this shape),
+fills its weave, mints a warp ctx + a `blob_id=0` presentable at the same
+shape, then names the mutual adoption (`glsrc <ctx>` on the surface;
+`present-to <surf> img 0` on the ctx) and prints `IMG-DIRECT armed`. It then
+presents in a loop while polling `img/0/info`'s `bound` field -- the
+guest-visible vantage of `Comp.bound_res == res`, i.e. the same fact the
+compositor's `scanout direct N img res R` say line reports from the other
+side. Once bound: destroy WHILE BOUND (the display-safe teardown's first
+client-driven execution), assert the info is gone, keep presenting so the
+weave arm re-takes the scanout, and exit through `present-to off` (a no-op
+by then -- the destroy cleared the consent server-side) + ctx destroy.
+Failure prints `IMG-DIRECT FAIL: <why>`; a non-venus device SKIPs (exit 2).
+
+### `warp-img.exp` (the choreography) + the `warp-host.sh img` verdict
+
+The exp runs both provers on the venus device (QMP ON -- the zoom chord
+rides it, unlike the W-3c-1-only version, which set `THYLACINE_NO_QMP`).
+After the ABI leg it launches `img-direct 1280 800` (the glq-virgl head
+pair), waits for `armed`, sends Super+F over QMP, and asserts the say-line
+ORDER: `scanout direct N img res R` (the SET_SCANOUT_BLOB event) ->
+`IMG-DIRECT bound observed` -> `scanout direct N slot S` (the weave arm
+re-taking after the destroy) -> `IMG-DIRECT PASS` -> the driven-tick console
+heal (the glq-virgl restore lesson: every hop needs console output).
+
+`warp-host.sh img` then requires the W-3c-1 conjunction AND the W-3c-2
+four-witness conjunction: the compositor bind line, the guest bound line
+(two vantages, one fact), the driver's `IMG-DIRECT PASS (` (paren-anchored,
+the F11 rule), and the scenario pass. Any subset can be produced by a
+partial run; the conjunction cannot.
+
 ## Tests
 
 Kernel: `pci.walk_caps_shm` (6 discriminating vectors incl. the

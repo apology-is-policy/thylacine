@@ -527,12 +527,41 @@ expects are restored for the build. vkQuake then runs unmodified through
      binding dropped first. That last arm is the runtime twin of
      `tapestry_present_buggy_punbind_skipped.cfg`: it witnesses the modeled
      bug's absence, not a generic teardown success.
-   - **W-3c-2 — the CLIENT-FACING present path**: the generalized
+   - **W-3c-2 — the CLIENT-FACING present path.** The generalized
      adoption/eligibility model (`presentable = WarpBo | registered venus
-     image`, superseding the `bos[]`-only `present-to`), `present-to
-     <surface> img <n>`, and the Composed arm — which is where the spec's
-     `PDrained` conjunct becomes reachable code, since W-3c-1 has no
-     in-flight compose class to drain.
+     image`, superseding the `bos[]`-only `present-to`) and `present-to
+     <surface> img <n>`.
+     **LANDED (2026-08-31), with the Composed arm RESEQUENCED to W-3d
+     slice 1** per the run-6 fork resolution (`docs/JOURNAL.md` 2026-08-31):
+     the W-3c-2a probe's `noreadback` was the blob_id=0 STAND-IN being
+     categorically untypeable (SHM `fd_type`; virglrenderer's
+     `pipe_resource_set_type` takes DMABUF only), not a host refusal — the
+     REAL class (a `blob_id`-named VkDeviceMemory, which vkr force-exports
+     as a dmabuf on HOST_VISIBLE allocations) has the designed
+     attach→SET_TYPE→EGLImage→C-3-blit path, host conditions verified on
+     the Pi. So the compose arm is built where the first real-class blob
+     exists (W-3d), gated by re-running the compose probe against it — and
+     the `PDrained` drain lands in that same commit (the W-3c-2 Direct
+     adoption reads `imgs` but creates NO `pinflight` member: the bind is a
+     standing binding tracked by `Comp.bound_res`, completed inside one
+     dispatch, so the conjunct stays vacuously discharged exactly as at
+     W-3c-1).
+     As built: `PresentSrc {Bo, Img}` (both families PUB-keyed — an img
+     handle resolves to its pub id at the verb, so a freed handle's later
+     tenant can never inherit a consent); `gl_adoption`'s img arm carries
+     the display-MODE half of the accept set (geometry vs the CURRENT
+     surface incarnation — round-2 F13 discharged; no `dma_fd`/`va`/size
+     analogues, that absence being I-7); `direct_bind_adopted` is the ONE
+     copy of the family dispatch (`SET_SCANOUT` | `SET_SCANOUT_BLOB` at the
+     declared shape — the spec's `PPresentBind`); every composed-machinery
+     consumer is HARD-GATED to the Bo family (`rb_issue` DMA-writes into
+     `g.va`, and an img adoption's `va` is 0); `wimg_destroy` gains the
+     consent-clear arm; a composed-mode img consent says so once per ctx
+     and shows the surface's own 2D weave until W-3d. Driver: `warp-prove
+     img-direct` (mutual adoption → zoom → `scanout direct N img res R` →
+     `bound` observed through `img/0/info` → destroy-WHILE-BOUND → the
+     weave arm re-takes) + the img-xproc I-45 leg; gate: the four-witness
+     conjunction in `warp-host.sh img`.
 4. **W-3d — mesa**: the Thylacine `wsi_interface` + the swapchain image
    path + acquire/present. Audit-bearing (the Warp mesa row).
 5. **W-3e — SDL2 Vulkan glue** + a prove extension (an offscreen→present

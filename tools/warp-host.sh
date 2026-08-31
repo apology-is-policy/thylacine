@@ -654,6 +654,21 @@ img)
         echo "W-3c-1 PRESENTABLE ABI GATE: UNVERIFIED"
         exit 1
     fi
+    # The W-3c-2 gate: the Direct arm's four witnesses, conjoined -- the
+    # compositor's OWN bind line (`scanout direct N img res R`, the
+    # SET_SCANOUT_BLOB event), the guest's bound-observed line (the same
+    # event seen through img/0/info -- two vantages, one fact), the driver's
+    # pass line ("PASS (" anchored, per F11 above), and the scenario pass.
+    # Any subset can be produced by a partial run; the conjunction cannot.
+    if grep -qE "scanout direct [0-9]+ img res [0-9]+" "$out" \
+        && grep -q "IMG-DIRECT bound observed" "$out" \
+        && grep -q "IMG-DIRECT PASS (" "$out" \
+        && grep -q "PASS: warp-img-direct" "$out"; then
+        echo "W-3c-2 PRESENTABLE DIRECT-ARM GATE: VERIFIED"
+    else
+        echo "W-3c-2 PRESENTABLE DIRECT-ARM GATE: UNVERIFIED"
+        exit 1
+    fi
     ;;
 ring-host3d)
     out="$REPO_ROOT/build/warp-ring-host3d.log"
