@@ -49,7 +49,7 @@
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use libthyla_rs::{env, t_putstr};
 
 // ---------------------------------------------------------------------------
@@ -695,6 +695,149 @@ extern "C" fn clone_child_main(_arg: u64) -> ! {
     // the TPIDR -- the two stores are ordered by SeqCst and by this sequence.
     CLONE_CHILD_RAN.store(CLONE_RAN_TOKEN, Ordering::SeqCst);
     unsafe { linux_exit(0) }
+}
+
+// ---------------------------------------------------------------------------
+// N-3: the CLONE_THREAD path -- a genuinely concurrent Thread in the CALLER's
+// OWN Proc, the shape musl's pthread_create emits. This differs from the fork
+// shim in TWO ways that are the whole point:
+//   1. The clone word is the EXACT pthread word 0x007D0F00, and x2/x3/x4 are
+//      REAL (ptid, tls, ctid), not poison -- a thread NEEDS its TLS + tid
+//      publish + exit-clear, so this shim passes them through where __viv_clone
+//      poisons them.
+//   2. The child exits via SYS_exit(93) -> thread_exit_self (THIS thread only,
+//      the Proc lives on), NEVER exit_group(94) which would take the Proc down.
+// The child runs CONCURRENTLY (no vfork suspend), so parent/child synchronise
+// through futex, exactly as pthread_join does.
+const NR_GETTID: u64 = 178;
+const NR_FUTEX: u64 = 98;
+const NR_EXIT_THREAD: u64 = 93;             // SYS_exit -- a THREAD's exit
+const FUTEX_WAIT: u64 = 0;
+const FUTEX_WAKE: u64 = 1;
+const FUTEX_REQUEUE: u64 = 3;
+const FUTEX_PRIVATE: u64 = 0x80;
+const CLONE_FLAGS_THREAD: u64 = 0x007D0F00; // the musl pthread_create word
+
+// The child's own stack, disjoint from CLONE_STACK (which the fork/vfork legs
+// used). A concurrent thread must not share a live stack with anything.
+#[repr(align(16))]
+struct ThreadStack(#[allow(dead_code)] [u8; 16 * 1024]);
+static mut THREAD_STACK: ThreadStack = ThreadStack([0; 16 * 1024]);
+
+// The tls the parent hands the thread. A REAL mapped VA (the address of a
+// static) so that even if the compiler sneaks a thread-local access into the
+// child it does not fault -- but the child only READS tpidr_el0 into a register
+// (never derefs it), so the value's only job is to prove SETTLS passed x3
+// through instead of dropping it or handing over poison.
+static mut THREAD_TLS_AREA: [u64; 8] = [0; 8];
+static RAN_FUTEX: AtomicU32 = AtomicU32::new(0);      // child sets 1 + FUTEX_WAKE
+static THREAD_CHILD_TPIDR: AtomicU64 = AtomicU64::new(0);
+static THREAD_CHILD_TID: AtomicU64 = AtomicU64::new(0);
+// The CLONE_PARENT_SETTID + CLONE_CHILD_CLEARTID words. Statics (stable .bss
+// addresses) so the kernel's uaccess_store_u32 writes them and the parent reads
+// them atomically; the join waits on CTID reaching 0. Nonzero-sentinel constants
+// mirror musl (ctid starts nonzero, the kernel zeroes it at thread exit).
+static PTID_WORD: AtomicU32 = AtomicU32::new(0);
+static CTID_WORD: AtomicU32 = AtomicU32::new(0);
+const CTID_ARMED: u32 = 0xC71D;                       // ctid before the thread exits
+const THREAD_RAN_TOKEN: u32 = 0x5654_3031; // "VT01"-ish, nonzero
+
+#[inline(always)]
+unsafe fn linux_thread_exit(code: i64) -> ! {
+    asm!(
+        "svc #0",
+        in("x0") code,
+        in("x8") NR_EXIT_THREAD,
+        options(noreturn, nostack)
+    );
+}
+
+// The thread clone shim. Same different-stack discipline as __viv_clone, but the
+// clone REGISTERS carry real ptid/tls/ctid and the child backstop is SYS_exit
+// (93), not exit_group. Rust ABI: x0=entry, x1=stack_top, x2=flags, x3=arg,
+// x4=ptid, x5=tls, x6=ctid. Linux clone(flags, stack, ptid, tls, ctid) wants
+// x0=flags, x1=stack, x2=ptid, x3=tls, x4=ctid.
+core::arch::global_asm!(
+    ".section .text.__viv_clone_thread, \"ax\"",
+    ".globl __viv_clone_thread",
+    ".type   __viv_clone_thread, %function",
+    "__viv_clone_thread:",
+    "    bti     c",
+    // Seed the CHILD's stack with (entry, arg) and make x1 the child SP.
+    "    and     x1, x1, #-16",
+    "    stp     x0, x3, [x1, #-16]!",
+    // Marshal the clone args. Copy ptid/tls/ctid BEFORE overwriting the source
+    // registers: x0<-flags(x2), then x2<-ptid(x4), x3<-tls(x5), x4<-ctid(x6).
+    "    uxtw    x0, w2",
+    "    mov     x2, x4",
+    "    mov     x3, x5",
+    "    mov     x4, x6",
+    "    mov     x8, #220",                 // Linux SYS_clone
+    "    svc     #0",
+    "    cbz     x0, 1f",                   // x0 == 0 -> we are the CHILD
+    "    ret",                              // parent: tid, or -errno
+    // Child: SP is its own; x29/x30 still point into the parent, so establish a
+    // frame via blr before any compiled code runs.
+    "1:  ldp     x1, x0, [sp], #16",        // x1 := entry, x0 := arg
+    "    mov     x29, #0",
+    "    mov     x30, #0",
+    "    blr     x1",
+    "    mov     x8, #93",                  // SYS_exit backstop (thread, not group)
+    "    mov     x0, #1",
+    "    svc     #0",
+    "2:  wfe",
+    "    b       2b",
+    ".size __viv_clone_thread, .-__viv_clone_thread",
+);
+
+extern "C" {
+    fn __viv_clone_thread(entry: extern "C" fn(u64) -> !, stack_top: u64,
+                          flags: u64, arg: u64, ptid: u64, tls: u64,
+                          ctid: u64) -> i64;
+}
+
+extern "C" fn thread_child_main(_arg: u64) -> ! {
+    // Read our own thread pointer FIRST -- it must equal the tls the parent
+    // passed (SETTLS), not the parent's TPIDR and not any poison.
+    let tp: u64;
+    unsafe {
+        core::arch::asm!("mrs {}, tpidr_el0", out(reg) tp,
+                         options(nomem, nostack, preserves_flags));
+    }
+    THREAD_CHILD_TPIDR.store(tp, Ordering::SeqCst);
+    // gettid: our own per-Thread id (must differ from the Proc pid, and equal
+    // the tid the parent's clone returned).
+    let tid = unsafe { svc3(NR_GETTID, 0, 0, 0) };
+    THREAD_CHILD_TID.store(tid as u64, Ordering::SeqCst);
+    // Publish RAN, then FUTEX_WAKE the parent waiting on it. Store BEFORE the
+    // wake so a parent whose WAIT races sees the new value (I-9: no lost wake).
+    RAN_FUTEX.store(THREAD_RAN_TOKEN, Ordering::SeqCst);
+    unsafe {
+        let _ = svc3(NR_FUTEX, core::ptr::addr_of!(RAN_FUTEX) as u64,
+                     FUTEX_WAKE | FUTEX_PRIVATE, 1);
+    }
+    // Exit as a THREAD (93) -> thread_exit_self -> the CLONE_CHILD_CLEARTID
+    // handoff zeroes+wakes the ctid word the parent joins on.
+    unsafe { linux_thread_exit(0) }
+}
+
+// A bounded FUTEX_WAIT loop: block while *addr == expected, up to `spins`
+// timed waits (~2s each). Returns true if *addr changed to != expected, false
+// if it stayed put across every spin (so a broken wake/wire is a REPORTED leg
+// failure, never an unbounded hang that reads as a stuck boot).
+unsafe fn futex_wait_until_ne(addr: *const AtomicU32, expected: u32, spins: u32) -> bool {
+    // 2 seconds, RELATIVE -- exactly the timespec shape musl sends.
+    let ts: [i64; 2] = [2, 0];
+    let mut i = 0u32;
+    while i < spins {
+        if (*addr).load(Ordering::SeqCst) != expected {
+            return true;
+        }
+        let _ = svc6(NR_FUTEX, addr as u64, FUTEX_WAIT | FUTEX_PRIVATE,
+                     expected as u64, ts.as_ptr() as u64, 0, 0);
+        i += 1;
+    }
+    (*addr).load(Ordering::SeqCst) != expected
 }
 
 // Every leg is `cond or (report, exit)`. The marker goes into the report file
@@ -2499,8 +2642,12 @@ unsafe fn run_linux() -> ! {
         b"L156b\n"
     );
 
-    // CLONE_THREAD: a genuinely concurrent child has a correct target already,
-    // and it is SYS_THREAD_SPAWN, not this row.
+    // CLONE_THREAD as a stray bit on the VFORK word declines. Since N-3 the
+    // pure pthread word IS served (the L164+ legs below spawn a real thread), but
+    // this combo is NOT that word -- it carries CLONE_VFORK+SIGCHLD and lacks
+    // FS/FILES/SIGHAND/SYSVSEM/SETTLS/PARENT_SETTID/CHILD_CLEARTID/DETACHED -- so
+    // exact-equality declines it. The point it pins: the THREAD arm is a
+    // SEPARATE exact word, not a bit admitted into the fork/vfork words.
     leg!(
         rep,
         svc6(NR_CLONE, CLONE_VM | CLONE_VFORK | CLONE_THREAD | SIGCHLD,
@@ -2590,6 +2737,91 @@ unsafe fn run_linux() -> ! {
     let child_tp = CLONE_CHILD_TPIDR.load(Ordering::SeqCst);
     leg!(rep, child_tp != CLONE_POISON_TLS, b"L162\n");
     leg!(rep, child_tp == my_tp, b"L163\n");
+
+    // --- L164-L169 (N-3): a REAL CLONE_THREAD, spawned + run + joined --------
+    //
+    // The pure pthread word 0x007D0F00 spawns a Thread in THIS Proc (shared
+    // address space, one pid), the shape musl's pthread_create emits. These legs
+    // are the positive witness that the crux is WIRED: boot OK and the
+    // clone_decide unit test do not prove a thread actually runs, only this does.
+    // Sabotage viv_clone_thread or viv_futex and a marker vanishes. The child
+    // runs CONCURRENTLY (no vfork suspend), so every wait here is a BOUNDED
+    // futex loop that reports on timeout rather than hanging the boot.
+    let tls = core::ptr::addr_of!(THREAD_TLS_AREA) as u64;   // a real, mapped VA
+    CTID_WORD.store(CTID_ARMED, Ordering::SeqCst);           // nonzero BEFORE clone
+    PTID_WORD.store(0, Ordering::SeqCst);
+    let tstack = core::ptr::addr_of!(THREAD_STACK) as u64 + (16 * 1024);
+
+    // Spawn. The shim passes REAL ptid/tls/ctid (the fork shim poisons them).
+    let ttid = __viv_clone_thread(
+        thread_child_main,
+        tstack,
+        CLONE_FLAGS_THREAD,
+        0,
+        core::ptr::addr_of!(PTID_WORD) as u64,
+        tls,
+        core::ptr::addr_of!(CTID_WORD) as u64,
+    );
+    leg!(rep, ttid > 0, b"L164\n");
+
+    // The thread RAN, proven by a futex round-trip: the child stores RAN_FUTEX
+    // and FUTEX_WAKEs it, the parent FUTEX_WAITs until it changes. This drives
+    // futex WAIT (parent) + WAKE (child) -- the pthread mutex/cond primitive. A
+    // broken wire (or an unrun thread) times out across the spins and REPORTS
+    // rather than hanging.
+    leg!(
+        rep,
+        futex_wait_until_ne(core::ptr::addr_of!(RAN_FUTEX), 0, 8)
+            && RAN_FUTEX.load(Ordering::SeqCst) == THREAD_RAN_TOKEN,
+        b"L165\n"
+    );
+
+    // SETTLS worked: the thread's TPIDR_EL0 is the tls the parent passed, NOT
+    // the parent's own TPIDR and NOT poison. A thread whose TLS is wrong dies
+    // fast (musl derefs it for errno almost immediately), so a clean read of the
+    // exact value is a strong witness for the crux's tls arm.
+    leg!(rep, THREAD_CHILD_TPIDR.load(Ordering::SeqCst) == tls, b"L166\n");
+
+    // gettid: the thread's OWN tid equals the clone return value, and is DISTINCT
+    // from the parent thread's tid (getpid stays per-Proc; tid is per-Thread).
+    let parent_tid = svc3(NR_GETTID, 0, 0, 0);
+    leg!(rep, THREAD_CHILD_TID.load(Ordering::SeqCst) == ttid as u64, b"L167\n");
+    leg!(rep, THREAD_CHILD_TID.load(Ordering::SeqCst) != parent_tid as u64, b"L167b\n");
+
+    // CLONE_PARENT_SETTID: the kernel published the new tid into *ptid before the
+    // thread was made runnable (the parent sees it after the RAN handshake).
+    leg!(rep, PTID_WORD.load(Ordering::SeqCst) as i64 == ttid, b"L168\n");
+
+    // JOIN via CLONE_CHILD_CLEARTID. The thread exits with SYS_exit(93) ->
+    // thread_exit_self, whose handoff zeroes *ctid and FUTEX_WAKEs it -- exactly
+    // what musl's __tl_sync barrier joins on. A thread that never reached
+    // thread_exit_self (wrong exit routing -- e.g. 93 aliasing PTY_REGISTER) or a
+    // missing handoff leaves ctid at CTID_ARMED and this leg reports, not hangs.
+    leg!(
+        rep,
+        futex_wait_until_ne(core::ptr::addr_of!(CTID_WORD), CTID_ARMED, 8)
+            && CTID_WORD.load(Ordering::SeqCst) == 0,
+        b"L169\n"
+    );
+
+    // L169c: FUTEX_REQUEUE is SERVED (not ENOSYS). musl's pthread_cond wake-chain
+    // needs it -- op 3 unserved DEADLOCKS a broadcast with >=2 waiters on a
+    // default mutex. A no-waiter REQUEUE returns 0 woken (a served op) where an
+    // ENOSYS regression returns -38, so this pins the arm reached + served and
+    // exercises the val+val2 marshal. The full wake-a-cond-waiter integration is
+    // the real-musl follow-on: a standalone REQUEUE-wakes-a-waiter test carries
+    // an inherent register-before-wait race that only the cond barrier state
+    // closes, so it is NOT built here -- but the WAKE primitive REQUEUE dispatches
+    // onto is itself E2E-proven by L165.
+    let mut rq_src: u32 = 0;
+    let mut rq_dst: u32 = 0;
+    leg!(
+        rep,
+        svc6(NR_FUTEX, &mut rq_src as *mut u32 as u64,
+             FUTEX_REQUEUE | FUTEX_PRIVATE, 0, 1,
+             &mut rq_dst as *mut u32 as u64, 0) == 0,
+        b"L169c\n"
+    );
 
     // --- L170-L176 (LINEAGE L-6b): wait4 -------------------------------------
     //
