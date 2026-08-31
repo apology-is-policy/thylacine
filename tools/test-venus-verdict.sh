@@ -62,6 +62,7 @@ venus-prove: slot-exhaustion cycles OK (253/253/253 to refusal, steady-state equ
 tapestryd: warp scanout-blob probe: dispatch=present neg=0x1203 pos=0x1100 attach=0x1100 attach-neg=0x1100 (shmem-class; the venus-image-class verdict lands at W-3e)
 tapestryd: warp display unbind refusal INJECTED (self-test drill) for res 85 -- condemned, unref deferred, drain expected at the next accepted scanout
 tapestryd: warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok refuse=ok disable=1 flags=mappable compose=poisoned (64x64 BGRA8 stride 256)
+tapestryd: warp display real-class compose probe (first mem mint, res 903): settype=ok blit=landed (one-shot; throwaway ctx; read-only on the client resource)
 EOF
 }
 
@@ -284,6 +285,18 @@ check "test leg: compose probe reports refused (a real verdict) -> still VERIFIE
 # accept of a token no fixture carries rots unverified (#215 both directions).
 check "test leg: compose probe reports landed (the W-3d-class verdict) -> still VERIFIED" 0 "" \
       'sed "s/compose=poisoned/compose=landed/" "$t" > "$t.x" && mv "$t.x" "$t"'
+# W-3d 1a: the REAL-class compose measurement line (one-shot at the first
+# mem mint). The gate demands a two-token verdict; the instrument-failure
+# forms deliberately fail its grammar. Both directions + the control-leg
+# absence, each one variable away.
+check "test leg: real-class compose probe line MISSING -> UNVERIFIED" 1 "" \
+      'grep -v "real-class compose probe" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg: real-class probe instrument-failure form (settype=-) -> UNVERIFIED" 1 "" \
+      'sed "s/settype=ok blit=landed/settype=- blit=- (control noscaffold: instrument, not a verdict)/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg: real-class probe settype=latched blit=skipped (a real verdict) -> still VERIFIED" 0 "" \
+      'sed "s/settype=ok blit=landed/settype=latched blit=skipped/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg: a real-class probe line WITHOUT venus -> UNVERIFIED" 1 \
+      'printf "%s\n" "tapestryd: warp display real-class compose probe (first mem mint, res 9): settype=ok blit=landed (one-shot; throwaway ctx; read-only on the client resource)" >> "$c"' ""
 # F7 [P3]: the file's own rule is one sabotage per arm, and `disable=` was the
 # arm without one -- so nothing proved the verdict regex discriminated on it.
 check "test leg: presentable disable arm FAILED -> UNVERIFIED" 1 "" \

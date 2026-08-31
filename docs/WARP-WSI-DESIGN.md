@@ -562,6 +562,31 @@ expects are restored for the build. vkQuake then runs unmodified through
      `bound` observed through `img/0/info` → destroy-WHILE-BOUND → the
      weave arm re-takes) + the img-xproc I-45 leg; gate: the four-witness
      conjunction in `warp-host.sh img`.
+     **W-3d slice 1a (2026-08-31): the REAL-class compose capability
+     MEASURED — unavailable on this host, at the designed formulation.**
+     A one-shot server probe (first post-READY mem mint; the V-3b-3c-2b
+     prove drives it every venus boot) runs the three-leg compose probe
+     against a live client VkDeviceMemory blob with the SET_TYPE step:
+     control `ctlok`, then `settype=latched blit=skipped` — vrend logged
+     `failed to dispatch PIPE_RESOURCE_SET_TYPE: 22` with none of the
+     function's loud errors, which isolates the one silent EINVAL:
+     `fd_type != DMABUF`. Mechanism completed in vkr source: dma_buf
+     export is gated on `vkGetPhysicalDeviceExternalBufferProperties`
+     for a TRANSFER_SRC **buffer** (vkr_physical_device.c:188-228), which
+     v3dv answers exportable-as-OPAQUE-only — so every venus allocation's
+     blob is opaque-fd-typed, `pipe_resource_set_type` (DMABUF-only)
+     refuses, and no guest-side formulation escapes it (the gbm fallback
+     opens only when NEITHER export works; udmabuf is debug-gated;
+     CROSS_DEVICE mints refuse without dma_buf). **This is the §4.3
+     host-capability question answered NO for this host stack** — a
+     per-host verdict the probe re-measures every boot (on a
+     dmabuf-for-buffers host it reports `settype=ok blit=landed` and the
+     composed arm lights up), NOT a design narrowing. Windowed
+     presentables on this host wait for either a host-stack lift (the
+     v3d fork is where the export gap becomes ours to close — GPU-DESIGN
+     F3) or the Halcyon-era compositor-speaks-Vulkan route (option B).
+     The Direct arm is unaffected; W-3d proceeds as the mesa WSI DIRECT
+     path.
 4. **W-3d — mesa**: the Thylacine `wsi_interface` + the swapchain image
    path + acquire/present. Audit-bearing (the Warp mesa row).
 5. **W-3e — SDL2 Vulkan glue** + a prove extension (an offscreen→present

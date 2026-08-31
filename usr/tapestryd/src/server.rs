@@ -1216,6 +1216,9 @@ pub struct Comp {
     /// composed path stays the CPU one. Never torn down -- like `screen`, it is
     /// held for the process lifetime and reclaimed by the RW-7 crash contract.
     comp_ctx: bool,
+    /// W-3d 1a: the one-shot real-class compose measurement fired (armed at
+    /// the first post-READY mem mint).
+    real_compose_probed: bool,
     /// Warp-C C-2c: the compositor context's OWN #240 mark/sentinel pair,
     /// minted with the context. It is the instrument behind every
     /// `comp-attach` verdict: the health check copies mark -> sentinel to
@@ -1957,6 +1960,7 @@ impl Comp {
             warp_create_refused_noctx: 0,
             res_seq: SCREEN_RES,
             comp_ctx: false,
+            real_compose_probed: false,
             comp_probe: None,
             comp_hprobe: None,
             comp_probe_seq: 0,
@@ -3119,6 +3123,33 @@ impl Comp {
     /// `hs`) -> destination box (dx, dy, dw, dh) of `dst_res` (height `hd`),
     /// both in GUEST rows, under `conv`.
     #[allow(clippy::too_many_arguments)]
+    /// VIRGL_CCMD_PIPE_RESOURCE_SET_TYPE (cmd 49; 10 payload dwords at one
+    /// plane): type an UNTYPED fd-backed resource inside a vrend ctx --
+    /// format/bind/geometry/modifier/stride -- so the renderer imports its
+    /// dmabuf as an EGLImage texture (vrend_renderer.c
+    /// `pipe_resource_set_type`; the run-6 fork resolution's mechanism,
+    /// verified against the vendored 1.1.0 source). Modifier LINEAR (0),
+    /// one plane, plane offset 0. The bind asks for both faces a compose
+    /// source/destination can wear (SAMPLER_VIEW | RENDER_TARGET).
+    fn set_type_request(res: u32, format: u32, w: u32, h: u32, stride: u32) -> [u32; 11] {
+        const CCMD_PIPE_RESOURCE_SET_TYPE: u32 = 49;
+        const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
+        const VIRGL_BIND_SAMPLER_VIEW: u32 = 1 << 3;
+        [
+            (10 << 16) | CCMD_PIPE_RESOURCE_SET_TYPE,
+            res,
+            format,
+            VIRGL_BIND_SAMPLER_VIEW | VIRGL_BIND_RENDER_TARGET,
+            w,
+            h,
+            0, // usage
+            0, // modifier lo (LINEAR)
+            0, // modifier hi
+            stride,
+            0, // plane 0 offset
+        ]
+    }
+
     fn blit_request(dst_res: u32, hd: u32, dx: u32, dy: u32, dw: u32, dh: u32,
                     src_res: u32, src_fmt: u32, hs: u32, sx: u32, sy: u32, sw: u32, sh: u32,
                     conv: ClassConv) -> [u32; 22] {
@@ -7587,15 +7618,21 @@ impl Comp {
         match self.wctx_mut(ctx_pub, conn) {
             Some(c) => {
                 c.mems[handle as usize] = Some(WarpMem { pub_id, host3d: hr, share_id: None });
-                Ok(())
             }
             None => {
                 // Single-threaded -> unreachable; unwind the engine's blob
                 // rather than strand a hostmem offset + host resource.
                 self.gpu.drop_host3d_ring(hr);
-                Err(p9::E_NOENT)
+                return Err(p9::E_NOENT);
             }
         }
+        // W-3d slice 1a: the one-shot REAL-class measurement, AFTER the
+        // install and read-only -- a probe outcome must not affect the
+        // mint's verdict, and the mint-time disclosure-zero above makes the
+        // blit-landed discrimination deterministic (source bytes are
+        // guaranteed zeros, never the staged PAT).
+        self.real_class_compose_probe_maybe(res_id, bytes);
+        Ok(())
     }
 
     /// Retire ONE device-memory blob the caller owns and FREE its slot (the
@@ -7826,6 +7863,73 @@ impl Comp {
         }
     }
 
+    /// W-3d slice 1a: the REAL-class compose-capability measurement -- the
+    /// question the W-3c-2a probe could not answer, because its presentable
+    /// was the blob_id=0 SHM stand-in (categorically untypeable:
+    /// `pipe_resource_set_type` takes DMABUF only). A client DEVICE-MEMORY
+    /// blob (blob_id = a live VkDeviceMemory) is the real class: on a
+    /// dmabuf-exporting host vkr force-exports it
+    /// (vkr_device_memory.c:274-356), and vrend's designed path (untyped
+    /// attach -> PIPE_RESOURCE_SET_TYPE -> EGLImage) should make it
+    /// blittable -- the run-6 fork resolution's mechanism, measured
+    /// end-to-end here instead of inferred from source.
+    ///
+    /// ONE-SHOT on the first post-READY mem mint (a diagnostic, not a
+    /// per-alloc tax; the existing V-3b-3c-2b prove is the driver on every
+    /// venus boot, zero mesa changes). READ-ONLY on the client's resource:
+    /// the blit reads FROM it, and SET_TYPE creates a typed view inside the
+    /// THROWAWAY ctx only, destroyed with it -- the client's venus-side use
+    /// of the memory is untouched. Legs, interpreted HERE (the probe's
+    /// tokens are per-leg):
+    ///   1. control (no settype, no blit): ctlok, or the instrument failed.
+    ///   2. settype-only: ctlok = the renderer accepted the typing (its
+    ///      readback survived); noreadback = SET_TYPE latched the ctx.
+    ///   3. settype + blit: landed / refused / poisoned.
+    /// The W-3d-1b composed arm proceeds only on `settype=ok blit=landed`;
+    /// anything else lands us at direct-only-with-proof at zero wasted
+    /// work (the fork resolution's own contingency).
+    fn real_class_compose_probe_maybe(&mut self, src_res: u32, bytes: u64) {
+        if self.real_compose_probed {
+            return;
+        }
+        self.real_compose_probed = true;
+        const W: u32 = 64;
+        const H: u32 = CONV_ROWS as u32;
+        const STRIDE: u32 = W * 4;
+        if bytes < (STRIDE as u64) * (H as u64) {
+            say!(
+                "tapestryd: warp display real-class compose probe SKIPPED (first mem {} bytes < probe shape {})",
+                bytes,
+                (STRIDE as u64) * (H as u64)
+            );
+            return;
+        }
+        let shape = Some((W, H, VIRGL_FORMAT_B8G8R8A8_UNORM, STRIDE));
+        let c1 = self.warp_present_compose_probe(src_res, H, false, None);
+        if c1 != "ctlok" {
+            say!(
+                "tapestryd: warp display real-class compose probe: settype=- blit=- (control {}: instrument, not a verdict)",
+                c1
+            );
+            return;
+        }
+        let (st, blit) = match self.warp_present_compose_probe(src_res, H, false, shape) {
+            "ctlok" => ("ok", self.warp_present_compose_probe(src_res, H, true, shape)),
+            "noreadback" => ("latched", "skipped"),
+            other => {
+                say!(
+                    "tapestryd: warp display real-class compose probe: settype-leg {} (unclassified: instrument suspect, not a verdict)",
+                    other
+                );
+                return;
+            }
+        };
+        say!(
+            "tapestryd: warp display real-class compose probe (first mem mint, res {}): settype={} blit={} (one-shot; throwaway ctx; read-only on the client resource)",
+            src_res, st, blit
+        );
+    }
+
     /// W-3c-2a: CAN THE COMPOSITOR BLIT **FROM** A PRESENTABLE?
     ///
     /// WARP-WSI-DESIGN section 4 specifies the composed present arm as "the
@@ -7863,7 +7967,13 @@ impl Comp {
     /// removed. Without it a `noreadback` is unattributable -- it reads the
     /// same whether the instrument is broken or the blit latched the context
     /// out from under the readback, and those demand opposite responses.
-    fn warp_present_compose_probe(&mut self, src_res: u32, src_h: u32, do_blit: bool) -> &'static str {
+    fn warp_present_compose_probe(
+        &mut self,
+        src_res: u32,
+        src_h: u32,
+        do_blit: bool,
+        settype: Option<(u32, u32, u32, u32)>,
+    ) -> &'static str {
         const PAT: u32 = 0xA5A5_A5A5;
         // Destination kind 2 and CONV_ROWS, matching `conv_attempt`'s
         // `scr_res` EXACTLY. That is not decoration: kind 2 is the one this
@@ -7886,7 +7996,29 @@ impl Comp {
             // measurement -- the blit below is.
             let attached = self.gpu.ctx_attach_resource(ctx, src_res).is_ok()
                 && self.gpu.ctx_attach_resource(ctx, dst_res).is_ok();
-            if attached {
+            // W-3d 1a: the real-class typing step. Declare the untyped
+            // blob's shape (w, h, format, stride) in the THROWAWAY ctx so
+            // the renderer imports its dmabuf as a texture. The submit's
+            // response is NOT the renderer's verdict -- a rejected SET_TYPE
+            // latches this ctx, so the caller reads the outcome from the
+            // legs that follow (a settype-only leg's dead readback means
+            // "latched"). A transport-level submit failure is scaffolding.
+            let type_ok = if attached {
+                match settype {
+                    None => true,
+                    Some((tw, th, tf, ts)) => {
+                        let st = Self::set_type_request(src_res, tf, tw, th, ts);
+                        let mut bytes = [0u8; 44];
+                        for (i, w) in st.iter().enumerate() {
+                            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+                        }
+                        self.gpu.submit_3d_sync(ctx, &bytes).is_ok()
+                    }
+                }
+            } else {
+                false
+            };
+            if attached && type_ok {
                 for i in 0..ROWS {
                     unsafe { core::ptr::write_volatile((dst_va as *mut u32).add(i), PAT) };
                 }
@@ -7939,9 +8071,9 @@ impl Comp {
                         };
                     }
                 }
-            } else {
+            } else if !attached {
                 verdict = "noattach";
-            }
+            } // !type_ok: verdict stays noscaffold (a transport failure)
             let _ = self.gpu.ctx_destroy(ctx);
         }
         self.conv_probe_res_undo(dst_res, dst_va, dst_fd);
@@ -8894,8 +9026,8 @@ impl Comp {
             // staged pattern with NO blit in it, then nothing this instrument
             // says about a blit means anything, and the honest report is that
             // the instrument failed -- not a verdict about the host.
-            match self.warp_present_compose_probe(res_id, IH, false) {
-                "ctlok" => self.warp_present_compose_probe(res_id, IH, true),
+            match self.warp_present_compose_probe(res_id, IH, false, None) {
+                "ctlok" => self.warp_present_compose_probe(res_id, IH, true, None),
                 other => {
                     say!(
                         "tapestryd: warp presentable compose-probe CONTROL failed ({}) -- \

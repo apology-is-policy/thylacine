@@ -493,6 +493,20 @@ venus-verdict)
         echo "TEST leg: the W-3c-1 presentable self-test did not report all-arms-passing (shape/mint/bind/unbind/refuse) with a real compose= verdict (landed|refused|noattach|poisoned -- a scaffolding failure is not a verdict; poisoned IS a verdict, the round-4 F2 correction: control-gated, it means the blit latched the ctx, the measured stand-in-class outcome)"
         vfail=1
     }
+    # W-3d 1a: the REAL-class compose measurement (one-shot at the first mem
+    # mint; the V-3b-3c-2b prove is its driver on every venus boot). The
+    # TEST leg must carry a REAL two-token verdict -- the instrument-failure
+    # forms (settype=-, unclassified, SKIPPED) deliberately fail this
+    # grammar, because on the certified host an unanswered measurement is a
+    # broken instrument, not an acceptable outcome.
+    grep -qE "warp display real-class compose probe \(first mem mint, res [0-9]+\): settype=(ok|latched) blit=(landed|refused|poisoned|skipped)" "$tst" || {
+        echo "TEST leg: the W-3d real-class compose probe did not report a two-token verdict (settype=ok|latched blit=landed|refused|poisoned|skipped) -- the one-shot never fired or the instrument failed"
+        vfail=1
+    }
+    if grep -qF "real-class compose probe" "$ctl"; then
+        echo "CONTROL leg: a real-class compose probe WITHOUT venus -- no mem mint exists there, the gate is wrong"
+        vfail=1
+    fi
     # ...and the device must not have REFUSED the unbind (round-2 F1 [P1]).
     # The line's prefix is `tapestryd: warp display` (it is emitted by
     # `gl_evict_res`, which serves every family), and boot-probe.sh's capture

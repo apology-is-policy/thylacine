@@ -209,6 +209,46 @@ fork resolution's virglrenderer citations were all verified against the
 vendored source. Dirty (2 P1s) → the fix prosecution rides round 5 with
 W-3d slice 1.
 
+### W-3d slice 1a, same run: the real class measured — and the composed arm is off for this host, at the designed formulation
+
+The fork resolution ended with a contingency: if the SOTA formulation is
+refused on the real class, "we land at A-with-proof at zero wasted work."
+That arm was taken today, with the proof.
+
+The measurement needed zero mesa changes: the V-3b-3c-2b prove already
+performs a real `vkAllocateMemory` → mem mint on every venus boot, so a
+**one-shot server-side probe on the first post-READY mem mint** got the
+existing prove as its driver. Three legs against a live client
+VkDeviceMemory blob: control (`ctlok` — instrument proven), settype-only,
+settype+blit. The verdict on real V3D: **`settype=latched blit=skipped`**
+— and the host log named the exact branch:
+`failed to dispatch PIPE_RESOURCE_SET_TYPE: 22` with *none* of the
+function's loud error lines, which isolates the one silent EINVAL in
+`vrend_renderer_pipe_resource_set_type`: **`fd_type != DMABUF`**.
+
+The mechanism, completed in source: vkr gates dma_buf export on
+`vkGetPhysicalDeviceExternalBufferProperties` for a TRANSFER_SRC *buffer*
+(vkr_physical_device.c:188-228, its own "XXX ... workaround" comment), and
+v3dv answers exportable-as-OPAQUE-only — so every venus allocation's blob
+is opaque-fd-typed, `set_type` (DMABUF-only) refuses, and no guest-side
+formulation escapes: the gbm fallback opens only when *neither* export
+works, udmabuf is debug-gated, and a CROSS_DEVICE mint refuses outright
+without dma_buf. The run-6 fork resolution's source-read was right about
+the design and wrong about this host's traversal of it — the buffer-export
+query is the hop nobody's citation covered, and only the end-to-end probe
+found it.
+
+Dispositions, per the resolution's own contingency: **no scripture
+narrowing** — WSI §4.3 already framed the composed arm as a host
+capability, and the probe now *is* the per-host gate, re-measured every
+boot (on a dmabuf-for-buffers host it reports `settype=ok blit=landed`
+and the composed arm lights up). Windowed presentables on this host wait
+for the v3d fork (where the export gap becomes ours to close) or the
+Halcyon-era option B. The Direct arm is untouched; W-3d proceeds as the
+mesa WSI DIRECT path, and the `PDrained` landmine stays defused — no
+compose reader gets built, so the drain stays owed by whichever future
+chunk first builds one, on whichever host allows it.
+
 ## 2026-08-31 (run 5) — W-3c-1 re-witnessed, then round 2 found the hole between two round-1 fixes
 
 Fresh context (self-compact at the 600k line, at the W-3c-1 committed
