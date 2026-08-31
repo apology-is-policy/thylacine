@@ -66,7 +66,7 @@ tapestryd: warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok refuse=ok
 tapestryd: warp display real-class compose probe DEFERRED (stand-in mint, mem_id=0 -- waiting for a client blob)
 tapestryd: warp display real-class compose probe (first mem mint, res 903): settype=ok blit=landed (one-shot; throwaway ctx; read-only on the client resource)
 vk-sdl-prove: SDL window 1280x800 SDL_WINDOW_VULKAN; 2 instance ext(s) via SDL_Vulkan_GetInstanceExtensions
-vk-sdl-prove: surface created + display consent armed
+vk-sdl-prove: surface created (display consent attempted; the compositor's bind line is the witness)
 vk-sdl-prove: swapchain 3 presentables 1280x800 BGRA8
 vk-sdl-prove: triangle rendered into presentable 0 + read back (center red, corner blue)
 tapestryd: scanout direct 0 img res 907 (1280x800)

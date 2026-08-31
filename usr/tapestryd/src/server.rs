@@ -1072,6 +1072,13 @@ enum Cost {
     PresentComposedSlot,
     PresentComposedCpu,
     PresentOther,
+    /// The img family's poke-completion device work (round-6 F7): the
+    /// per-frame flip/bind + flush `img_poke_complete` performs inside a
+    /// ctl-write dispatch, which the FK_PRESENT frame cannot see -- and
+    /// which is the steady-state Vulkan present path, the census's whole
+    /// reason to exist. Its own row (not PresentDirectGl) so the n/sum
+    /// population stays one kind of event.
+    PresentPokeImg,
     /// TRANSFER_TO_HOST_2D of a present's damage (per present, all rects).
     Xfer,
     /// The composition blit run (`submit_blits`, per present).
@@ -1111,6 +1118,7 @@ impl Cost {
         Cost::PresentComposedSlot,
         Cost::PresentComposedCpu,
         Cost::PresentOther,
+        Cost::PresentPokeImg,
         Cost::Xfer,
         Cost::Blit,
         Cost::Health,
@@ -1132,6 +1140,7 @@ impl Cost {
             Cost::PresentComposedSlot => "present-composed-slot",
             Cost::PresentComposedCpu => "present-composed-cpu",
             Cost::PresentOther => "present-other",
+            Cost::PresentPokeImg => "present-poke-img",
             Cost::Xfer => "xfer",
             Cost::Blit => "blit",
             Cost::Health => "health",
@@ -2236,6 +2245,39 @@ impl Comp {
     /// scanout references `res` (the mode machine + force-away in retire;
     /// the present-tail old drop runs after the current generation's
     /// content took the display).
+    /// Release surface `n`'s displaced weave generation, if one is
+    /// parked -- the duty EVERY present-COMPLETE tail carries (round-6
+    /// F1: a reweave parks at most one displaced generation, and
+    /// `resize_ack` refuses a new offer while `old_weave` stands, so a
+    /// completion path that never drains it wedges the surface's resize
+    /// protocol permanently -- the poke path was exactly that).
+    ///
+    /// GUARDED rather than unconditional (round-6 F2): `release_gen`
+    /// unrefs resources, and an unref of the resource the display still
+    /// scans is the one order the display cannot survive. The reason the
+    /// unconditional tails were safe is a MODE-MACHINE argument, not a
+    /// local one -- every reachable resize transits Composed (Direct
+    /// implies display-sized implies same-size offers), where bound_res
+    /// is the screen resource -- so the guard carries the safety locally
+    /// against the day display-resize work changes the mode machine: a
+    /// displaced generation still naming bound_res stays parked
+    /// (pinned-but-safe) for a later completion to drain.
+    fn release_displaced_gen(&mut self, n: usize) {
+        let scanned = self.bound_res != 0
+            && self
+                .surf(n)
+                .and_then(|s| s.old_weave.as_ref())
+                .map_or(false, |(_, old_res)| old_res.contains(&self.bound_res));
+        if scanned {
+            return;
+        }
+        if let Some((oldw, old_res)) =
+            self.surf_mut(n).and_then(|s| s.old_weave.take())
+        {
+            self.release_gen(&oldw, &old_res);
+        }
+    }
+
     fn release_gen(&mut self, w: &Weave, res_ids: &[u32; WEAVE_SLOTS as usize]) {
         if let Some(id) = w.share_id {
             let rc = unsafe { t_weft_unshare(id) };
@@ -5855,6 +5897,16 @@ impl Comp {
     /// Bo consents never route here: the weave present remains that
     /// family's frame signal (GL clients present the weave every swap).
     fn img_poke_complete(&mut self, n: usize) {
+        // The displaced-generation drain comes FIRST, before the adoption
+        // gate (round-6 F1): the poke is the client's present signal in
+        // EVERY scanout mode, and the pinning arises precisely where the
+        // arms below do not run -- a resize transits Composed, and a
+        // post-reweave geometry mismatch makes gl_adoption return None
+        // until re-registration. Without this drain a pure-Vulkan
+        // resizable window pins its old generation forever and
+        // resize_ack's in-flight gate (E_AGAIN, read client-side as a
+        // stale serial) wedges every later resize of that window.
+        self.release_displaced_gen(n);
         let g = match self.gl_adoption(n) {
             Some(g) => g,
             None => return, // inactive pairing: reconcile/geometry gate it
@@ -5864,6 +5916,10 @@ impl Comp {
         }
         let (w, h) = (g.w, g.h); // == the surface's (gl_adoption pins it)
         let mut presented = false;
+        // Timed as its own census row (round-6 F7): this is the
+        // steady-state Vulkan present path's device work, invisible to
+        // the FK_PRESENT frame because it rides a ctl-write dispatch.
+        let t0 = Instant::now();
         if self.pending_direct == Some(n) {
             if self.direct_bind_adopted(&g, w, h) {
                 say!("tapestryd: scanout direct {} img res {} ({}x{})", n, g.res_id, w, h);
@@ -5886,6 +5942,7 @@ impl Comp {
             presented = true;
         }
         if presented {
+            self.cost_add(Cost::PresentPokeImg, t0);
             self.note_present(n);
             if let Some(s) = self.surf_mut(n) {
                 s.presents += 1;
@@ -13031,11 +13088,7 @@ impl Conn {
                         s.state = SurfState::Live;
                     }
                 }
-                if let Some((oldw, old_res)) =
-                    comp.surf_mut(n).and_then(|s| s.old_weave.take())
-                {
-                    comp.release_gen(&oldw, &old_res);
-                }
+                comp.release_displaced_gen(n);
                 return Ok(());
             }
             // The stage-0 direct path, byte-identical for the single-rect
@@ -13217,11 +13270,7 @@ impl Conn {
                         s.state = SurfState::Live;
                     }
                 }
-                if let Some((oldw, old_res)) =
-                    comp.surf_mut(n).and_then(|s| s.old_weave.take())
-                {
-                    comp.release_gen(&oldw, &old_res);
-                }
+                comp.release_displaced_gen(n);
                 return Ok(());
             }
             // Composed, a software surface. Warp-C C-3: where the screen is
@@ -13366,15 +13415,17 @@ impl Conn {
             }
         }
         // The first post-fence present retires the displaced generation
-        // (the spec's RetireDisplaced + ServerRelease): the display now
-        // shows current-generation content -- composed blits COPY (the
-        // screen resource references no client weave) and the direct arms
-        // target the current resource -- and quiesce holds by construction
-        // (presents complete inside one dispatch), so the old weave's
-        // server refs drop here. The client's own old mapping drains via
-        // its weave-fid clunk (ClunkMap; #847 keeps the pages until then).
-        if let Some((oldw, old_res)) = comp.surf_mut(n).and_then(|s| s.old_weave.take()) {
-            comp.release_gen(&oldw, &old_res);
+        // (the spec's RetireDisplaced + ServerRelease). The old claim
+        // that "the direct arms target the current resource" was true
+        // only by the mode-machine argument (round-6 F2: the 2D pending
+        // arm's REFUSED bind leaves bound_res on the OLD generation, and
+        // only Composed-transit reachability kept that state away from
+        // this release) -- the helper now carries the guard locally.
+        // Quiesce holds by construction (presents complete inside one
+        // dispatch); the client's own old mapping drains via its
+        // weave-fid clunk (ClunkMap; #847 keeps the pages until then).
+        {
+            comp.release_displaced_gen(n);
             // No diagnostic here (#55b): a generation retire is now ROUTINE
             // steady-state traffic -- the fbcon acks every pane resize, so
             // this fires per split/unsplit while the SESSION is printing,

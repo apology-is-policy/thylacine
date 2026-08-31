@@ -1813,8 +1813,14 @@ would `#error` under `SDL_LOADSO_DUMMY`).
   undefined does not extract archive members**, so an app that reaches
   Vulkan only through `SDL_Vulkan_*` (vkQuake's shape) must force the
   ICD member with `-u vk_icdGetInstanceProcAddr` on its link line; the
-  ICD dispatch table then drags the whole driver closure. Measured, not
-  theorized: the witness's own first link left the symbol `w`/NULL.
+  ICD dispatch table then drags the driver closure. What is MEASURED is
+  the necessity half (the witness's first link left the symbol `w`/NULL
+  until `-u` was added); the sufficiency half -- that `-u` alone drags
+  the WHOLE closure for a link with no other venus references -- is
+  structurally argued (vn_icd.o -> vn_CreateInstance -> the renderer
+  create chain) but not yet measured, because the witness carries strong
+  vn_* externs of its own; W-4's vkQuake link is the proof point
+  (round-6 F5).
 - `CreateSurface`: `vkCreateHeadlessSurfaceEXT` through the stored gipa
   (hand-declared 3-field create-info, sType 1000256000 -- the vendored
   khronos tree stays pruned), then THE ARMING MOVE, ordered:

@@ -101,6 +101,32 @@ the DIRECT witness could never fire, and the code (`pane.rs host()` splits;
 `server.rs:4865` clears pending silently on retire) plus the buffered-drain
 fact resolved it before the test leg reported.
 
+**Round 6** (Fable, start==end; batched r5-residue + W-3e): 0 P0 / 1 P1 /
+0 P2 / 6 P3, all fixed, not dirty; the r5 residues all came back clean. The
+P1 is the instructive one: my own concurrent self-audit had found the same
+seam — the poke path missing the displaced-generation retire — and filed it
+at P3 as a "bounded leak-until-close", having stopped at the geometry
+mismatch making pokes inert. The prosecutor carried the chain two steps
+further: the SDL events layer auto-acks resize offers for resizable
+windows, `resize_ack` refuses new offers while `old_weave` stands (E_AGAIN,
+which the client reads as a stale serial and drops), so the pin is also a
+**permanent resize wedge** — one split/unsplit and a resizable vk window is
+stuck at pane size, never Direct-eligible again, presents display-inert
+forever, precisely the vkQuake-under-pane-management scenario this arc
+exists for. Same facts, two more steps of chain, two severity classes
+apart: the concrete value of the second prosecutor, recorded as the run's
+second wrong-turn-caught. The fix is a shared guarded drain
+(`release_displaced_gen`) at the top of the poke path and in all three
+tpresent tails — the guard (skip while the displaced generation still
+names `bound_res`) also closing F2's comment-right-for-the-wrong-reason
+hazard. A regression driver for the resize path is owed at the next close
+(the witness is fixed-size by construction; the leg needs the split/resize
+choreography W-4 brings anyway). The mesa half: the present-poke dedup
+latch — correct when the poke named a standing consent, wrong the moment
+W-3e promoted the poke to the frame event — deleted, with a defensive
+minImageCount clamp; plus three claim-precision fixes (F4-F6) and a census
+row for the new present path (F7).
+
 ---
 
 ## 2026-08-31 (run 7, Fable) — W-3d: the mesa WSI DIRECT path, and the machinery that was already there
