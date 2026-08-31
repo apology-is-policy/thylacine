@@ -592,22 +592,44 @@ below, this is a fact about the translation table that a future row can
 falsify — not an invariant of the code.)
 
 **A thread-safety property that is a property of the TABLE, not of the data.**
-`socktab` (like `sigtab`) is read and written without a lock. That WAS sound only
-because **a `PHENO_LINUX` Proc could not obtain a PEER THREAD**, so there was no
-peer to race. This is *not* a property of the entries being small or of any
-atomicity argument. **N-3 (§5.6) admits the pthread word `0x007D0F00`, so a
-phenotype Proc CAN now hold peer Threads sharing this table — the no-peer
-property is GONE.** For `socktab` that is a real race (a flat array with `find`/
-`claim`/`drop` and no atomicity discipline), and a spinlock + caller
-entry-pointer discipline is the OWED follow-on
-([[bug-n3-socktab-multithread-race]]; the field comments' "when threads land"
-warning anticipated exactly this). For `sigtab` the same no-peer argument is
-gone, but its cross-Proc atomic-u64 access discipline (every field one atomic
-u64, `handler` published last / zeroed first) — added for the OTHER-CPU reader
-axis (aux#254/main#243) — plausibly already makes the intra-Proc peer-thread case
-kernel-safe (no torn read, no crash; a concurrent-`rt_sigaction`-on-one-signal
-program getting an undefined disposition is its own POSIX race, not a kernel
-defect). Confirming that is part of the socktab-lock follow-on's scope.
+`socktab` was read and written without a lock. That WAS sound only because **a
+`PHENO_LINUX` Proc could not obtain a PEER THREAD**, so there was no peer to race
+— *not* a property of the entries being small or of any atomicity argument.
+**N-3 (§5.6) admits the pthread word `0x007D0F00`, so a phenotype Proc CAN now
+hold peer Threads sharing this table — the no-peer property is GONE.** For
+`socktab` that is a real race on three axes: slot ALLOCATION (two `claim` scans
+picking one FREE slot), field TEARING (one thread writing `remote_*`/`state`
+while another reads), and slot REUSE (a blocked op holding a pointer into a slot
+a peer `close()`+`socket()` recycled — the sharpest, [[bug-254]] /
+lock-across-sleep: it would write a stranger's peer into a fresh socket).
+
+**LANDED — a leaf spinlock on `struct viv_socktab`, held ONLY over pure array
+ops, never across I/O** (`spinlock.h` forbids sleep-under-spinlock). The API
+moved from a pointer-returning `find` to (a) SNAPSHOT reads — `viv_socktab_get`
+copies the whole entry out under the lock, so no table pointer outlives it; and
+(b) IDENTITY-GUARDED keyed writes — `set_state`/`set_bound`/`record_remote`
+re-find the fd under the lock and write only if the slot still names the SAME
+socket (present AND `n == expect_n`, the `n` the caller snapshotted). A slot a
+peer closed/recycled has a different `n`, so a stale write from a blocked op
+lands nowhere — it cannot corrupt the socket that reused the slot. `claim`
+scans+writes in one critical section (no double-claim) and takes a born state
+(`FRESH` for `socket()`, `CONNECTED` for `accept()`, born connected in one hold).
+The identity key is `n` (the /net connection number), immutable for a socket's
+life; no generation counter needed. `drop_cloexec` stays lock-free — it runs in
+execve's sole-live-thread window (`proc_exec_alone`), and locking would nest the
+socktab lock under the handle table's `t->lock`
+([[bug-n3-socktab-multithread-race]], RESOLVED).
+
+**`sigtab` needs NO lock, and this is now CONFIRMED rather than conjectured.** It
+is FIXED-INDEX (by signote enum — no free-list scan, so no allocation race) and
+publishes each row with an atomic release store on the `handler` gate
+(`viv_sigtab_set`), a discipline added for the OTHER-CPU reader axis
+(aux#254/main#243) that already tolerates concurrent delivery-read vs
+`rt_sigaction`-write (no torn read, no crash; a program racing `rt_sigaction` on
+one signal gets an undefined disposition — its own POSIX race, not a kernel
+defect). `socktab` could not borrow that trick — its entries are scanned,
+allocated/freed, and multi-field with an identity that must be seen together —
+which is exactly why it took the lock and `sigtab` did not.
 
 **The MECHANISM, corrected at #157/#158.** This paragraph used to say the reason
 was that `clone`/`clone3` are not table rows — which was true when written and
@@ -721,10 +743,13 @@ for into the guest's *own* fd-number space — where the guest can close it,
 leaving a cached number that names whatever was allocated next, and where it
 breaks POSIX's lowest-available-fd guarantee. In pouch that hazard does not
 exist, because there the ready fd *is* a guest fd its own libc opened and
-tracks. Here the guest cannot see it, so it must not outlive the call. The
-transient fd is unobservable for exactly the reason the socktab needs no lock —
-a `PHENO_LINUX` Proc is single-threaded — and both properties evaporate together
-when process creation lands (task #93).
+tracks. Here the guest cannot see it, so it must not outlive the call. Since N-3 a
+`PHENO_LINUX` Proc CAN be multi-threaded, so a peer thread could in principle
+name this transient fd's number and close it mid-call — but only by guessing a
+number the guest was never told, and the handle table is internally locked, so
+that is a memory-safe guest-self-race, not a kernel hazard. (The socktab itself
+now takes a lock; §5.5.2. The stronger "wholly unobservable" guarantee held only
+while the Proc was single-threaded.)
 
 **Readiness is not knowable synchronously, and the fix for that is latency, not
 a guess.** netd's probe is asynchronous: `dev9p.poll` *submits* it and answers
@@ -939,11 +964,16 @@ thread spawns and runs — and L166 catches the broken SETTLS).
 
 **Honest ceilings.** PI (`LOCK_PI`/`UNLOCK_PI`), `WAKE_OP`, `CMP_REQUEUE`,
 `WAIT_BITSET` are the opt-in robust/PI paths — they ENOSYS (musl's default never
-touches them). **The socktab F2 trap is now SPRUNG:** `Proc.socktab` (the §5.5.2
-socket table) was lock-free ONLY while `CLONE_THREAD` was refused; a multithreaded
-phenotype program with concurrent socket ops from peer threads now races it. A
-focused socktab spinlock + a non-guest-fd data handle is the OWED pull-forward
-follow-on (the DNS chunk's F2 note anticipated exactly this "when threads land").
+touches them). **The socktab F2 trap SPRANG and is now CLOSED:** `Proc.socktab`
+(the §5.5.2 socket table) was lock-free ONLY while `CLONE_THREAD` was refused; a
+multithreaded phenotype program with concurrent socket ops from peer threads
+would have raced it. The focused socktab spinlock LANDED — snapshot reads +
+identity-guarded keyed writes, held only over pure array ops, never across I/O
+(§5.5.2). The DNS chunk's F2 note also asked for a "non-guest-fd data handle";
+that half proved unnecessary, because the data fid is opened PER CALL and is
+transient (never cached in the guest fd space), so a peer naming it is a
+memory-safe guest-self-race, not a kernel hazard — the lock alone closes the
+race the trap warned of ([[bug-n3-socktab-multithread-race]], RESOLVED).
 
 ---
 
