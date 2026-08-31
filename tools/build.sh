@@ -487,6 +487,24 @@ EOF
         echo "    ramfs: no thylacine-venus-prove at $BUILD_DIR/clade/gl/ -- staging without it (V-3b-3a venus smoke will report absent)"
     fi
 
+    # Warp W-3e: the SDL2 Vulkan first-frame witness (SDL_thylacinevulkan glue
+    # + the W-3d swapchain + presents that DIRECT-bind). Same terms as
+    # venus-prove above in every respect: mesa-fork-fetched, ramfs root,
+    # stripped, optional + announced, identity-witnessed against the stale-fetch
+    # trap.
+    if [[ -f "$BUILD_DIR/clade/gl/thylacine-vk-sdl-prove" ]]; then
+        local vkp_src="$BUILD_DIR/clade/gl/thylacine-vk-sdl-prove"
+        "$LLVM_PREFIX/bin/llvm-strip" -o "$ramfs_src/thylacine-vk-sdl-prove" "$vkp_src" 2>/dev/null \
+            || cp "$vkp_src" "$ramfs_src/thylacine-vk-sdl-prove"
+        chmod 0755 "$ramfs_src/thylacine-vk-sdl-prove"
+        local vkp_sz vkp_sha
+        vkp_sz=$(wc -c < "$vkp_src" | tr -d ' ')
+        vkp_sha=$(shasum -a 256 "$vkp_src" 2>/dev/null | cut -c1-12)
+        echo "    ramfs: staged thylacine-vk-sdl-prove (Warp W-3e; src ${vkp_sz} B sha256:${vkp_sha})"
+    else
+        echo "    ramfs: no thylacine-vk-sdl-prove at $BUILD_DIR/clade/gl/ -- staging without it (W-3e vk-sdl smoke will report absent)"
+    fi
+
     # GOOS=thylacine Stage 1: bake the Go boot probe (build_go_probes produced it
     # under $BUILD_DIR/go/). Shipped UNSTRIPPED (~1.5 MiB) -- the REVENANT
     # file-backed exec path carries it, like net-echo. Absent if the Go fork was

@@ -527,8 +527,41 @@ venus-verdict)
         echo "CONTROL leg: a presentable verdict WITHOUT the blob feature -- impossible, the gate is wrong"
         vfail=1
     fi
+    # W-3e: the SDL2 Vulkan first-frame witness, BOTH halves. The APP half
+    # is the vk-sdl-prove PASS line (SDL window -> SDL_Vulkan glue -> W-3d
+    # swapchain -> triangle rendered + read back -> presents); the DISPLAY
+    # half is tapestryd's `scanout direct N img res R` bind line -- produced
+    # ONLY by a real client's img present-to poke completing (the pre-READY
+    # presentable self-test binds via a raw set_scanout_blob and cannot emit
+    # it, so the line attributes to the SDL prove; #186). Each half alone is
+    # satisfiable without the other (the app can PASS with a consent the
+    # compositor never bound; the compositor could bind for a client whose
+    # readback then failed), so BOTH are required. Control leg: the prove
+    # reports ABSENT on the stub instance and no img bind can exist.
+    grep -qF "THYLACINE-VK-SDL-PROVE PASS" "$tst" || {
+        echo "TEST leg: the W-3e vk-sdl-prove app half did not PASS -- the SDL_Vulkan glue, the swapchain, the triangle readback, or a present failed"
+        vfail=1
+    }
+    # End-anchored: the REFUSED form shares this prefix ("... (WxH) bind
+    # REFUSED -- pending retried") and must not satisfy the bind witness
+    # (#240 -- an unanchored grep is hollowed by the failure form). The
+    # anchor tolerates trailing whitespace because the serial capture may
+    # end lines CRLF -- a bare $ would pass every crafted fixture and fail
+    # every real boot (the crafted-log-blindness class).
+    grep -qE "tapestryd: scanout direct [0-9]+ img res [0-9]+ \([0-9]+x[0-9]+\)[[:space:]]*$" "$tst" || {
+        echo "TEST leg: no 'scanout direct N img res R' bind line -- the display half of the W-3e witness is missing (consent never completed, the poke never bound, or the capture filter dropped it)"
+        vfail=1
+    }
+    if grep -qF "THYLACINE-VK-SDL-PROVE PASS" "$ctl"; then
+        echo "CONTROL leg: vk-sdl-prove PASS under a venus-less device -- impossible (stub instance has no devices), the gate is wrong"
+        vfail=1
+    fi
+    if grep -qE "tapestryd: scanout direct [0-9]+ img res " "$ctl"; then
+        echo "CONTROL leg: an img direct bind WITHOUT venus -- no presentable can exist there, the gate is wrong"
+        vfail=1
+    fi
     if [ "$vfail" -eq 0 ]; then
-        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a), a HOST3D blob guest-maps via SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel (V-3b-1b), AND the persistent ring engine mints two rings at distinct offsets, round-trips each guest VA, and reuses a freed offset on re-mint (V-3b-1c), AND the SERVER host3d-ring path creates a per-client venus device-ctx, mints a HOST3D ring in /srv/warp, round-trips its VA, and tears it down through drop_host3d_ring + the venus-ctx destroy (V-3b-1c-2a), AND a destroyed host3d ring's ridx is re-mintable via the ring/<ridx>/ctl destroy verb (V-3b-3c-1), AND a HOST_VISIBLE device-memory blob mints under a venus ctx, round-trips a sentinel through its hostmem backing, and its handle is re-mintable via the mem/<handle>/ctl destroy verb (V-3b-3c-2), AND the CLIENT vn_renderer device-memory bo_ops complete a full HOST_VISIBLE vkAllocateMemory+vkMapMemory E2E on real V3D -- zero-at-map + sentinel round-trip over the weft-mapped backing (V-3b-3c-2b), AND the prove's full witness set holds: fenced GPU copy with first-map survival (F1), placed-map de-advertised (F4), the timeline lift, the 64 MiB cap cycle (F2), the two-timeline interleave (F3), the offscreen SPIR-V triangle, and slot-exhaustion steady-state (the vkQuake-arc W-1 pipeline witness), AND a headless-surface WSI swapchain of never-mapped presentables registers via img/new with ZERO renderer-bo mints (the W-3d no-eager-mint proof), lands a GPU clear in presentable memory read back pixel-exact, and rotates 3 presents through the async-present path (the vkQuake-arc W-3d WSI witness)"
+        echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a), a HOST3D blob guest-maps via SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel (V-3b-1b), AND the persistent ring engine mints two rings at distinct offsets, round-trips each guest VA, and reuses a freed offset on re-mint (V-3b-1c), AND the SERVER host3d-ring path creates a per-client venus device-ctx, mints a HOST3D ring in /srv/warp, round-trips its VA, and tears it down through drop_host3d_ring + the venus-ctx destroy (V-3b-1c-2a), AND a destroyed host3d ring's ridx is re-mintable via the ring/<ridx>/ctl destroy verb (V-3b-3c-1), AND a HOST_VISIBLE device-memory blob mints under a venus ctx, round-trips a sentinel through its hostmem backing, and its handle is re-mintable via the mem/<handle>/ctl destroy verb (V-3b-3c-2), AND the CLIENT vn_renderer device-memory bo_ops complete a full HOST_VISIBLE vkAllocateMemory+vkMapMemory E2E on real V3D -- zero-at-map + sentinel round-trip over the weft-mapped backing (V-3b-3c-2b), AND the prove's full witness set holds: fenced GPU copy with first-map survival (F1), placed-map de-advertised (F4), the timeline lift, the 64 MiB cap cycle (F2), the two-timeline interleave (F3), the offscreen SPIR-V triangle, and slot-exhaustion steady-state (the vkQuake-arc W-1 pipeline witness), AND a headless-surface WSI swapchain of never-mapped presentables registers via img/new with ZERO renderer-bo mints (the W-3d no-eager-mint proof), lands a GPU clear in presentable memory read back pixel-exact, and rotates 3 presents through the async-present path (the vkQuake-arc W-3d WSI witness), AND an SDL2 window (SDL_WINDOW_VULKAN over the SDL_thylacinevulkan glue) renders the W-1 triangle INTO a display-sized presentable, reads it back pixel-exact, and its vkQueuePresentKHR pokes complete the two-sided consent to a DIRECT scanout bind of the presentable -- the compositor's 'scanout direct N img res R' line pairs with the app PASS as the first-Vulkan-frame-on-the-display witness (the vkQuake-arc W-3e)"
         grep -hE "gpu capset\[|num_capsets|blob-create" "$ctl" "$tst"
     else
         echo "VENUS GATE: UNVERIFIED"

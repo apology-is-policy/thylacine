@@ -654,6 +654,65 @@ expects are restored for the build. vkQuake then runs unmodified through
 5. **W-3e — SDL2 Vulkan glue** + a prove extension (an offscreen→present
    witness: render the W-1 triangle INTO a swapchain image and present it —
    the first Vulkan frame on the Thylacine display).
+
+   **LANDED (2026-08-31) — the as-built record.** Three pieces:
+
+   - **The SDL glue** (`usr/ports/sdl2/thylacine/SDL_thylacinevulkan.{c,h}`
+     + the vtable wiring): the five `Vulkan_*` hooks over stock
+     `VK_EXT_headless_surface`, no config or vendored-tree change —
+     SDL's public `SDL_Vulkan_*` entrypoints are unguarded and the vtable
+     slots + `vulkan_config` exist unconditionally via the stub typedefs,
+     so `SDL_VIDEO_VULKAN` stays OFF (it would `#error` under
+     `SDL_LOADSO_DUMMY`). Loader-less: `LoadLibrary` resolves
+     `vk_icdGetInstanceProcAddr` BY SYMBOL. All three venus externs are
+     WEAK so GL-only programs still link — and the flip side is the
+     archive-extraction rule: **a weak ref does not extract archive
+     members, so an SDL-only Vulkan app (vkQuake's shape) must link
+     `-u vk_icdGetInstanceProcAddr`** (the witness's own link exercises
+     exactly this after hitting exactly this — the ICD symbol resolved
+     `w`/NULL until the flag was added).
+   - **The arming CreateSurface** — the §5 two-sided consent, ordered so
+     no poke can ever name a surface that has not named the ctx back:
+     `thyla_tap_glsrc(tap, vn_renderer_thylacine_warp_ctx_pub())` (the
+     surface half; the new mesa getter carries the minted ctx pub as a
+     process-global, raw since the server never mints pub 0) and only on
+     its success `vn_renderer_thylacine_set_surface(tap.id)` (the ctx
+     half — this is what W-3d left dormant). A failed/skipped consent is
+     not a surface-creation failure: the vk surface is real and every vk
+     call works; the presents are display-inert and an `SDL_LogWarn`
+     names it.
+   - **The img poke-completion** (`img_poke_complete`, tapestryd): the
+     gap W-3c-2 left invisible — the Direct bind completes at the
+     surface's *next present-COMPLETE* (F16), and a pure-Vulkan client
+     never sends a weave tpresent, so nothing completed it. The poke IS
+     the img family's present-COMPLETE: mesa's `queue_present` issues it
+     after the per-image throttle-fence wait, so the §4.2 stage-0 bracket
+     orders it behind the frame's GPU work. The arm completes a pending
+     switch exactly as the weave arm does (same `scanout direct N img
+     res R` say line = the gate's bind witness; same once-per-episode
+     REFUSED line) and thereafter flips the scanout to each newly-poked
+     presentable silently (a say per swapchain frame would be the C-0d
+     storm) + flushes; the completion tail advances the surface
+     lifecycle (`note_present`, presents, Woven→Live) because the poke
+     is a real present. The handler-tail `flip_in_place` gate keeps
+     img→img-while-Direct out of the pending soft-Off route (which would
+     re-run the switch at frame rate); every other shape keeps the
+     uniform F16 pending route.
+
+   Witness (`thylacine-vk-sdl-prove`, mesa-side, linking the pouch
+   `libSDL2.a` — the mesa cross env IS the pouch sysroot): SDL window
+   sized to the display → the glue → instance through the SDL-handed
+   gipa → the W-3d swapchain → the W-1 SPIR-V triangle rendered INTO a
+   presentable through a real render pass → copy-out pixel-pair check
+   (center red / corner blue — the control pair) → 3 presents, each
+   poking. Pre-window failures degrade ABSENT (the probe rides every
+   `THYLA_BOOT_PROBES` boot); the venus TEST leg requires BOTH witness
+   halves — the app `THYLACINE-VK-SDL-PROVE PASS` line AND the
+   compositor's `scanout direct N img res R` bind line (attributable:
+   the pre-READY self-test binds via raw `set_scanout_blob` and cannot
+   emit it) — with the REFUSED form excluded by an end-anchored,
+   CR-tolerant grep and the ABSENT form a #212 sabotage (89 verdict
+   checks).
 6. **W-4 — vkQuake** (its own chunk; the E2E proof).
 
 ---

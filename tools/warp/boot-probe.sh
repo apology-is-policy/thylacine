@@ -104,5 +104,5 @@ fi
 # was verified BEFORE the move and the comment asserting it was left behind,
 # true about a line that no longer existed. **A prefix change is a capture
 # change.** When you move a say-line between functions, re-check this filter.
-grep -aE "tapestryd: gpu|tapestryd: warp host3d-ring|tapestryd: warp ring-recreate|tapestryd: warp mem-recreate|tapestryd: warp scanout-blob|tapestryd: warp presentable|tapestryd: warp display|THYLACINE-VENUS-PROVE|venus-prove:" "$LOG" || true
+grep -aE "tapestryd: gpu|tapestryd: warp host3d-ring|tapestryd: warp ring-recreate|tapestryd: warp mem-recreate|tapestryd: warp scanout-blob|tapestryd: warp presentable|tapestryd: warp display|tapestryd: scanout|THYLACINE-VENUS-PROVE|venus-prove:|THYLACINE-VK-SDL-PROVE|vk-sdl-prove:" "$LOG" || true
 exit $((1 - ok))

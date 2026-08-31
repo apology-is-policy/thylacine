@@ -22,6 +22,87 @@ needed the operator.
 
 ---
 
+## 2026-08-31 (run 8, Fable) — W-3e: the SDL Vulkan glue, and the bind that had no trigger
+
+Resumed from the run-7 self-compaction with W-3e fully designed and zero code.
+The design survived contact almost intact — the five hooks, the weak externs,
+the two-sided consent, the display-sized window — but the run's two real
+findings were things no design pass had seen, and both are the class of thing
+only building finds.
+
+**Finding 1: the Direct bind had no trigger for a pure-Vulkan client.** The
+W-3c-2 Direct arm completes the scanout switch at the surface's *next
+present-COMPLETE* (the F16 rule), which for every existing client means a weave
+tpresent — and `warp-prove img-direct` (the arm's only driver until now) binds
+because it *presents the weave in a loop* while waiting
+(`usr/warp-prove/src/main.rs:1072`). A pure-Vulkan SDL app never writes a
+tpresent, so the poke would arm the consent, reconcile would set
+`pending_direct`, and nothing would ever complete it — a dark pane with all
+machinery green. The design answer landed as `img_poke_complete` (tapestryd):
+**the `present-to … img` poke IS the img family's present-COMPLETE** — mesa's
+`queue_present` issues it after the per-image throttle-fence wait, so the I-40
+stage-0 bracket already orders it behind the frame's GPU work. The arm
+completes a pending switch with the same say line the weave arm emits (the
+gate's bind witness), then flips each newly-poked presentable silently — a say
+per swapchain frame would be the C-0d storm — and the `flip_in_place` gate in
+the verb handler keeps img→img-while-Direct out of the pending soft-Off route,
+which would have re-run the switch (and its say) at frame rate. The poke also
+advances the surface lifecycle (Woven→Live, presents, the #164 clock): it is a
+real present, and a vk window that stayed "Woven forever" would have been a
+lie waiting for a consumer.
+
+**Finding 2: the linking model bit its own author.** The SDL hooks reference
+venus through weak externs so GL-only programs still link — and the header
+comment I wrote for that file states the flip side: a weak ref does not
+extract archive members, so an SDL-only Vulkan app needs
+`-u vk_icdGetInstanceProcAddr`. The witness is exactly such an app (it reaches
+Vulkan through `SDL_Vulkan_GetVkGetInstanceProcAddr`, the honest shape), and
+its first keep link produced `w vk_icdGetInstanceProcAddr` — unresolved weak,
+NULL at run time, LoadLibrary would have reported no-ICD on every boot. The
+`nm` census caught it before any boot did (two sibling `vk_icd*` symbols were
+`T`, the one that matters was `w` — the census must read the SPECIFIC symbol,
+not the family). The fix is the documented recipe applied to our own link
+(`-Wl,-u,vk_icdGetInstanceProcAddr` in the witness's meson entry), which
+converts the vkQuake recipe from documented-untested to proven.
+
+Two smaller catches, both instrument-side: my patch-ASCII check read the rc of
+`head`, not `grep` (the pipe-rc trap from this session's own trap list —
+re-ran as `grep -c`); and the new display-half verdict grep was hollowed by
+its own failure form — `scanout direct N img res R (WxH) bind REFUSED …`
+shares the success line's prefix, so the unanchored pattern matched it (#240).
+The anchor that fixes it is `[[:space:]]*$` rather than bare `$`, because the
+serial capture may end lines CRLF and a bare `$` would be green on every
+crafted fixture and red on every real boot — the crafted-log-blindness class,
+caught at authoring time for once. Both directions now have sabotages
+(venus-verdict 83 → 89, incl. the REFUSED-form and ABSENT-form arms).
+
+Landed (thylacine *(pending close hash)* + mesa `997e371` = patch 0020): the
+glue + wiring, the poke-completion, the warp-ctx-pub getter, the witness
+(`thylacine-vk-sdl-prove`, linking the pouch `libSDL2.a` shipped to the keep
+— the mesa cross env is the pouch sysroot, same musl + outline-atomics), the
+joey probe + ramfs staging (venus-prove's twin, ABSENT-degrading on
+no-display boots), and the gates (capture alternatives + both witness halves
+required + 89 checks). Suite exit-0 local.
+
+**The verdict, first run, VENUS GATE VERIFIED exit 0 both legs**: on the test
+leg the vk window came up as the boot's sole surface (`pending-direct 0`),
+armed the consent, and the first poke completed the switch —
+`tapestryd: scanout direct 0 img res 893 (1280x800)` — **the first Vulkan
+frame on the Thylacine display**, followed by the display-safe teardown
+handing the screen back (`pending-direct 0` → `direct 0 slot 0`, the weave
+arm re-taking) when the app exited. The control leg proved the glue's degrade
+end-to-end on a 2D host (window created, extensions enumerated, stub
+instance, ABSENT before CreateSurface) and carried neither witness half. One
+chronology footnote worth keeping: the capture's line order LIES about
+pre-pivot timing — joey's `smoke_drain` buffers child stdout and prints it
+post-exit, while tapestryd's says are real-time; reading the control capture
+without knowing that briefly suggested a pane-split (Composed) world in which
+the DIRECT witness could never fire, and the code (`pane.rs host()` splits;
+`server.rs:4865` clears pending silently on retire) plus the buffered-drain
+fact resolved it before the test leg reported.
+
+---
+
 ## 2026-08-31 (run 7, Fable) — W-3d: the mesa WSI DIRECT path, and the machinery that was already there
 
 The self-compaction resume worked exactly as designed: the note said "CHECK

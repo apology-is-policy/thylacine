@@ -1787,6 +1787,114 @@ x3 through the async-present path. Witness line `venus-prove: wsi swapchain
 OK (...)`; gates: `warp-host.sh` venus TEST leg (required; CONTROL leg must
 lack it) + `test-venus-verdict.sh` (83 checks).
 
+## Warp-WSI W-3e -- the SDL2 Vulkan glue + the first-Vulkan-frame witness (as-built 2026-08-31)
+
+### The glue (`usr/ports/sdl2/thylacine/SDL_thylacinevulkan.{c,h}`)
+
+Five `Vulkan_*` vtable hooks over stock `VK_EXT_headless_surface`, wired
+unconditionally in `SDL_thylacinevideo.c` (SDL keys "driver supports
+Vulkan" on `Vulkan_CreateSurface` being non-NULL; the missing-LIBRARY case
+must fail at `Vulkan_LoadLibrary`'s specific message, not read as a driver
+gap). NO config or vendored-tree change: the public `SDL_Vulkan_*`
+entrypoints in `SDL_video.c` are unguarded, the vtable slots +
+`vulkan_config` exist unconditionally (`SDL_vulkan_internal.h`'s #else
+half supplies stub PFN typedefs), and `SDL_VIDEO_VULKAN` stays OFF (it
+would `#error` under `SDL_LOADSO_DUMMY`).
+
+- `LoadLibrary`: no dlopen exists -- resolve the WEAK
+  `vk_icdGetInstanceProcAddr` by symbol; NULL => the specific
+  "no venus ICD in this program (link ... -u vk_icdGetInstanceProcAddr)"
+  error. A non-NULL path argument is refused honestly.
+- **The linking model (load-bearing for W-4)**: the vtable wiring pulls
+  the hook object into EVERY SDL app, so the three venus externs
+  (`vk_icdGetInstanceProcAddr`, `vn_renderer_thylacine_set_surface`,
+  `vn_renderer_thylacine_warp_ctx_pub`) are `__attribute__((weak))` --
+  GL-only programs link with them NULL. The flip side: **a weak
+  undefined does not extract archive members**, so an app that reaches
+  Vulkan only through `SDL_Vulkan_*` (vkQuake's shape) must force the
+  ICD member with `-u vk_icdGetInstanceProcAddr` on its link line; the
+  ICD dispatch table then drags the whole driver closure. Measured, not
+  theorized: the witness's own first link left the symbol `w`/NULL.
+- `CreateSurface`: `vkCreateHeadlessSurfaceEXT` through the stored gipa
+  (hand-declared 3-field create-info, sType 1000256000 -- the vendored
+  khronos tree stays pruned), then THE ARMING MOVE, ordered:
+  `thyla_tap_glsrc(&wd->tap, vn_renderer_thylacine_warp_ctx_pub())`
+  first (the surface half), and only on its success
+  `vn_renderer_thylacine_set_surface(wd->tap.id)` (the ctx half -- the
+  poke W-3d left dormant), so no present poke can name a surface that
+  has not named the ctx back. A skipped/failed consent is NOT a
+  surface-creation failure (the vk surface is real; presents are
+  display-inert; `SDL_LogWarn` names it). The armed global survives
+  window destroy uncleaned -- harmless: a present needs a swapchain,
+  a swapchain needs a surface, and the next `CreateSurface` re-arms
+  before any such present exists (one window per process, sequential).
+- `GetInstanceExtensions` hand-rolls the helper (the real one compiles
+  only under `SDL_VIDEO_VULKAN`): `VK_KHR_surface` +
+  `VK_EXT_headless_surface`.
+- `GetDrawableSize` = the window size (one surface, no DPI scaling --
+  the GL path's argument, wired so the contract is explicit).
+
+### The img poke-completion (tapestryd `img_poke_complete`)
+
+The seam W-3c-2 left invisible: the Direct bind completes at the
+surface's next present-COMPLETE (the F16 rule), and a pure-Vulkan client
+never sends a weave tpresent -- `warp-prove img-direct` only ever bound
+because it drove weave presents in a loop. The `present-to ... img` poke
+is the img family's present-COMPLETE (mesa's `queue_present` issues it
+AFTER the per-image throttle-fence wait, so the I-40 stage-0 bracket
+orders it behind the frame's GPU work): the arm completes a pending
+switch with the same `scanout direct N img res R` say line (the gate's
+bind witness) + the once-per-episode REFUSED line, then flips the
+scanout to each newly-poked presentable silently (a say per swapchain
+frame would be the C-0d storm) and flushes; its completion tail advances
+the surface lifecycle (`note_present`, `presents`, Woven->Live) because
+the poke IS a present. The `present-to` handler's `flip_in_place` gate
+keeps img->img-while-Direct out of the pending soft-Off route (which
+would re-run the switch at frame rate); every other shape keeps the
+uniform F16 pending route. Deep mechanism prose: the vault's tapestryd
+dossier (this file deliberately does not duplicate it).
+
+### The mesa half (patch 0020)
+
+`vn_renderer_thylacine_warp_ctx_pub()` -- the minted warp ctx pub id as
+a process-global (set at `warp_open`, cleared at destroy only if still
+ours; RAW value, since the server never mints pub 0), the consent's
+surface-half input. Companion to `set_surface` (the ctx half), same
+one-renderer-per-process posture.
+
+### The witness (`thylacine-vk-sdl-prove`)
+
+An ordinary SDL2 Vulkan app: window sized to the display
+(`SDL_GetDesktopDisplayMode` = the compositor's `display W H`; the
+DIRECT accept set admits a display-sized presentable) ->
+`SDL_CreateWindow(SDL_WINDOW_VULKAN)` (runs `Vulkan_LoadLibrary`) ->
+instance through `SDL_Vulkan_GetVkGetInstanceProcAddr` ->
+`SDL_Vulkan_CreateSurface` (arms the consent) -> the W-3d swapchain at
+the display extent -> the W-1 SPIR-V triangle rendered INTO a
+presentable through a real render pass (finalLayout TRANSFER_SRC; an
+explicit barrier to PRESENT_SRC before each present) -> frame-0 copy-out
+pixel-pair check (center red / corner blue -- the control pair) -> 3
+presents, each poking. Pre-window failures degrade ABSENT (the probe
+rides every `THYLA_BOOT_PROBES` boot as venus-prove's twin in joey +
+`tools/build.sh` staging); the venus gate requires PASS on the leg with
+the capability. The link exercises `-u vk_icdGetInstanceProcAddr`; it
+finds the pouch `libSDL2.a` beside the keep build tree (`/build/sdl2`)
+-- the mesa cross env IS the pouch sysroot, same musl target, same
+`-moutline-atomics`.
+
+### The gate (both witness halves)
+
+The venus TEST leg requires the app half (`THYLACINE-VK-SDL-PROVE PASS`)
+AND the display half (`tapestryd: scanout direct N img res R (WxH)`,
+end-anchored + whitespace-tolerant so the `bind REFUSED` form cannot
+satisfy it [#240] and a CRLF serial capture cannot false-negative it) --
+attributable to the SDL prove because the pre-READY presentable
+self-test binds via raw `set_scanout_blob` and cannot emit that line
+(#186). The ABSENT form is a #212 sabotage; the CONTROL leg must carry
+neither half. Capture alternatives (`tapestryd: scanout`,
+`THYLACINE-VK-SDL-PROVE`, `vk-sdl-prove:`) ride `boot-probe.sh`'s
+filter in the same commit. `test-venus-verdict.sh`: 89 checks.
+
 ## Tests
 
 Kernel: `pci.walk_caps_shm` (6 discriminating vectors incl. the

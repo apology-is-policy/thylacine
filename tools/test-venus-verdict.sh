@@ -65,6 +65,12 @@ tapestryd: warp display unbind refusal INJECTED (self-test drill) for res 85 -- 
 tapestryd: warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok refuse=ok disable=1 flags=mappable compose=poisoned (64x64 BGRA8 stride 256)
 tapestryd: warp display real-class compose probe DEFERRED (stand-in mint, mem_id=0 -- waiting for a client blob)
 tapestryd: warp display real-class compose probe (first mem mint, res 903): settype=ok blit=landed (one-shot; throwaway ctx; read-only on the client resource)
+vk-sdl-prove: SDL window 1280x800 SDL_WINDOW_VULKAN; 2 instance ext(s) via SDL_Vulkan_GetInstanceExtensions
+vk-sdl-prove: surface created + display consent armed
+vk-sdl-prove: swapchain 3 presentables 1280x800 BGRA8
+vk-sdl-prove: triangle rendered into presentable 0 + read back (center red, corner blue)
+tapestryd: scanout direct 0 img res 907 (1280x800)
+THYLACINE-VK-SDL-PROVE PASS (SDL window 1280x800 SDL_WINDOW_VULKAN -> SDL_Vulkan glue -> headless surface + display consent armed, swapchain of 3 presentables, W-1 SPIR-V triangle rendered INTO presentable 0 + read back (center red corner blue), 3 presents through vkQueuePresentKHR each poking present-to -- the vkQuake-arc W-3e first-Vulkan-frame witness)
 EOF
 }
 
@@ -399,6 +405,26 @@ check "control leg shows blob CREATED -> UNVERIFIED" 1 \
 # never ran at all.
 check "control leg: no blob 'skipped' line -> UNVERIFIED" 1 \
       'grep -v "blob-create skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
+
+# --- vkQuake-arc W-3e: the SDL first-Vulkan-frame witness, BOTH halves ---
+# The APP half (the prove PASS) and the DISPLAY half (the compositor's img
+# direct-bind line) are each satisfiable without the other, so each gets its
+# own absence sabotage; the ABSENT form is the #212 arm (a no-display skip
+# must not read as a pass on the leg that requires the capability); the
+# REFUSED-form sabotage is the #240 arm (the failure line shares the success
+# line's prefix, so an unanchored gate would be hollowed by it).
+check "test leg: vk-sdl-prove never PASSed -> UNVERIFIED" 1 "" \
+      'grep -v "THYLACINE-VK-SDL-PROVE PASS" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg: vk-sdl-prove reports ABSENT not PASS -> UNVERIFIED" 1 "" \
+      'sed "s/THYLACINE-VK-SDL-PROVE PASS.*/THYLACINE-VK-SDL-PROVE ABSENT (SDL_CreateWindow: thylacine: \\/srv\\/tapestry unreachable)/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg: no img direct-bind line -> UNVERIFIED" 1 "" \
+      'grep -v "scanout direct 0 img res" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg: img bind line is the REFUSED form -> UNVERIFIED" 1 "" \
+      'sed "s/scanout direct 0 img res 907 (1280x800)/scanout direct 0 img res 907 (1280x800) bind REFUSED -- pending retried at each present/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO shows vk-sdl PASS -> UNVERIFIED" 1 \
+      'grep "THYLACINE-VK-SDL-PROVE PASS" "$t" >> "$c"' ""
+check "control leg ALSO shows an img direct bind -> UNVERIFIED" 1 \
+      'grep "tapestryd: scanout direct 0 img res" "$t" >> "$c"' ""
 
 printf '\n%d pass, %d fail\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

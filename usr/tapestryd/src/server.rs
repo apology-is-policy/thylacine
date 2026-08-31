@@ -5837,6 +5837,65 @@ impl Comp {
         }
     }
 
+    /// W-3e: the img family's present-COMPLETE. A pure-Vulkan client
+    /// presents through `present-to ... img` pokes alone -- its window's
+    /// weave never carries a tpresent -- so the poke IS the moment the
+    /// named presentable is a complete frame (the mesa queue_present
+    /// issues it after the per-image throttle-fence wait: the I-40
+    /// stage-0 bracket orders it behind the frame's GPU work). Completes
+    /// a pending direct switch exactly as the weave-present arm does
+    /// (same say line -- the venus gate's bind witness -- and the same
+    /// once-per-episode REFUSED line), and thereafter flips the scanout
+    /// to each newly-poked presentable SILENTLY (a say per swapchain
+    /// frame would be the C-0d storm; the flip is the steady state).
+    /// The completion tail mirrors the weave path's: the poke is a real
+    /// present, so the surface's lifecycle (Woven -> Live, presents
+    /// count, the #164 clock) advances the same way.
+    ///
+    /// Bo consents never route here: the weave present remains that
+    /// family's frame signal (GL clients present the weave every swap).
+    fn img_poke_complete(&mut self, n: usize) {
+        let g = match self.gl_adoption(n) {
+            Some(g) => g,
+            None => return, // inactive pairing: reconcile/geometry gate it
+        };
+        if !matches!(g.kind, AdoptSrc::Img { .. }) {
+            return;
+        }
+        let (w, h) = (g.w, g.h); // == the surface's (gl_adoption pins it)
+        let mut presented = false;
+        if self.pending_direct == Some(n) {
+            if self.direct_bind_adopted(&g, w, h) {
+                say!("tapestryd: scanout direct {} img res {} ({}x{})", n, g.res_id, w, h);
+                self.scanout = Scanout::Direct(n);
+                self.pending_direct = None;
+                self.pending_bind_refused_said = false;
+                presented = true;
+            } else if !self.pending_bind_refused_said {
+                self.pending_bind_refused_said = true;
+                say!(
+                    "tapestryd: scanout direct {} img res {} ({}x{}) bind REFUSED -- pending retried at each present",
+                    n, g.res_id, w, h
+                );
+            }
+        } else if self.scanout == Scanout::Direct(n) {
+            if self.bound_res != g.res_id && !self.direct_bind_adopted(&g, w, h) {
+                return; // refused flip: keep the old frame on screen
+            }
+            let _ = self.gpu.flush(g.res_id, 0, 0, w, h);
+            presented = true;
+        }
+        if presented {
+            self.note_present(n);
+            if let Some(s) = self.surf_mut(n) {
+                s.presents += 1;
+                if s.state == SurfState::Woven {
+                    s.state = SurfState::Live;
+                }
+            }
+        }
+    }
+
     /// Warp-4: a BO is dying (its own destroy, or its whole ctx's
     /// retire). If the DEVICE currently scans it out, rebind away FIRST
     /// -- an unref of the scanned-out resource is the one order the
@@ -12233,7 +12292,21 @@ impl Conn {
                 // retarget when it lands -- so a foreign surface is never
                 // touched by our present-to.
                 if comp.surf(sn).map_or(false, |s| s.gl_src == Some(id)) {
-                    comp.gl_retarget(sn);
+                    // W-3e: an img->img consent change on a surface this ctx
+                    // already direct-feeds is the swapchain FLIP, not an
+                    // adoption change -- the pending soft-Off route would
+                    // re-run the switch (and its say line) at frame rate.
+                    // Every other shape keeps the uniform F16 pending route.
+                    let flip_in_place = comp.scanout == Scanout::Direct(sn)
+                        && matches!(src, PresentSrc::Img(_))
+                        && matches!(prev, Some(PresentSrc::Img(_)));
+                    if !flip_in_place {
+                        comp.gl_retarget(sn);
+                    }
+                    // The img family's present-COMPLETE rides the poke
+                    // itself (a pure-vk client sends no tpresent): complete
+                    // a pending switch, or flip+flush the steady state.
+                    comp.img_poke_complete(sn);
                 }
                 Ok(())
             }

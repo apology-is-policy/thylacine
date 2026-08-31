@@ -5873,6 +5873,28 @@ int main(void) {
             t_putstr("joey: venus-prove absent-or-failed (V-3b-3b; non-fatal -- a 2D/venus-off host, or a bring-up regression)\n");
     }
 
+    // === Warp W-3e: the SDL2 Vulkan first-frame witness ===
+    // The SDL_Vulkan_* glue end-to-end: an SDL window over /srv/tapestry, a
+    // headless surface arming the two-sided display consent, the W-3d
+    // swapchain, a SPIR-V triangle rendered INTO a presentable + read back,
+    // and presents whose pokes DIRECT-bind the presentable to the scanout
+    // (tapestryd's "scanout direct ... img res" lines are the display half
+    // of the witness; the venus gate asserts both halves). NON-FATAL and
+    // ABSENT-degrading like venus-prove above: a no-compositor or 2D boot
+    // reports ABSENT, and only the venus gate requires the PASS. Same
+    // drain-first shape (an SDL + Mesa binary's stdout is not bounded by
+    // us). The display-safe teardown runs live here: the app's exit unbinds
+    // the direct source and the console composition returns.
+    {
+        static const char vk_name[]   = "thylacine-vk-sdl-prove";
+        static const char vk_expect[] = "THYLACINE-VK-SDL-PROVE PASS";
+        if (pouch_smoke_one_drain_first(vk_name, sizeof(vk_name) - 1,
+                                        vk_expect, sizeof(vk_expect) - 1) == 0)
+            t_putstr("joey: vk-sdl-prove OK (SDL_WINDOW_VULKAN -> swapchain -> presents DIRECT; Warp W-3e)\n");
+        else
+            t_putstr("joey: vk-sdl-prove absent-or-failed (W-3e; non-fatal -- no display/venus, or a glue regression)\n");
+    }
+
     // === /sbin/corvus spawn + E2E ===
     // Moved to do_corvus_bringup() (defined above main) and called
     // POST-PIVOT below, so corvus lands on the persistent Stratum root
