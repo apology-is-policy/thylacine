@@ -10369,7 +10369,8 @@ pub struct Conn {
     /// generations -- digit-length drift in EARLIER lines shifts every
     /// later row's offset window, and the assembled row can violate the
     /// writer's own invariants (measured: a cost row with avg > max).
-    /// Entries die at clunk; a fresh offset-0 read replaces the pin.
+    /// Entries die at clunk and at session reset (Tversion) and conn
+    /// death; a fresh offset-0 read replaces the pin.
     text_snaps: Vec<(u32, u64, Vec<u8>)>,
 }
 
@@ -10509,6 +10510,7 @@ impl Conn {
         self.pending_reads.clear();
         self.pending_fences.clear();
         self.pending_ring_fences.clear();
+        self.text_snaps.clear();
     }
 
     pub fn teardown(&mut self, comp: &mut Comp) {
@@ -10520,6 +10522,7 @@ impl Conn {
         self.pending_reads.clear();
         self.pending_fences.clear();
         self.pending_ring_fences.clear();
+        self.text_snaps.clear();
     }
 
     pub fn raw_fd(&self) -> i64 {

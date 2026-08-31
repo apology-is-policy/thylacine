@@ -206,30 +206,43 @@ foreach leg {linear blit} {
         # a later direct say is the OLD state, not a recovery); then
         # RE-ZOOM -> the recreated swapchain's presentable must be
         # promoted again. A wedged resize path fails the second half.
+        # DEFERRED verdict (the glq lesson the FPS/restore arms encode; a
+        # dying run still reports): a resize failure is RECORDED here and
+        # fails the lane at the end, after the teardown + census.
+        set resize_fail ""
         if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k meta_l+f} err]} {
-            lc_fail "qmp unzoom chord failed: $err (resize driver)"
+            set resize_fail "qmp unzoom chord failed: $err"
         }
-        set timeout 45
-        expect {
-            -re {scanout composed \((\d+)x(\d+)\)} {
-                lc_step "resize driver: left direct (composed entry after unzoom)"
+        if {$resize_fail eq ""} {
+            set timeout 45
+            expect {
+                -re {scanout composed \(\d+x\d+\) res \d+ bound} {
+                    lc_step "resize driver: left direct (composed entry after unzoom)"
+                }
+                "user fault" { set resize_fail "segv on the unzoom resize" }
+                -re {QUAKE ERROR|Sys_Error} { set resize_fail "engine error on the unzoom resize" }
+                timeout { set resize_fail "no composed BOUND transition within 45s of unzoom (chord dead, resize path dead, or the composed bind refused)" }
             }
-            "user fault" { lc_fail "segv on the unzoom resize (resize driver)" }
-            -re {QUAKE ERROR|Sys_Error} { lc_fail "engine error on the unzoom resize (resize driver)" }
-            timeout { lc_fail "no composed transition within 45s of unzoom -- the chord or the resize path is dead (resize driver)" }
         }
-        if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k meta_l+f} err]} {
-            lc_fail "qmp re-zoom chord failed: $err (resize driver)"
-        }
-        set timeout 90
-        expect {
-            -re {scanout direct (\d+) img res (\d+) \((\d+)x(\d+)\)} {
-                puts "\nVKQ-VENUS RESIZE: re-promoted after unzoom/re-zoom -- surface $expect_out(1,string) img res $expect_out(2,string) ($expect_out(3,string)x$expect_out(4,string))\n"
-                lc_step "resize driver: re-promoted (the r6-F1 wedge did not fire)"
+        if {$resize_fail eq ""} {
+            if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k meta_l+f} err]} {
+                set resize_fail "qmp re-zoom chord failed: $err"
             }
-            "user fault" { lc_fail "segv on the re-zoom resize (resize driver)" }
-            -re {QUAKE ERROR|Sys_Error} { lc_fail "engine error on the re-zoom resize (resize driver)" }
-            timeout { lc_fail "no direct re-promotion within 90s of re-zoom -- the r6-F1 resize-wedge class (resize driver)" }
+        }
+        if {$resize_fail eq ""} {
+            set timeout 90
+            expect {
+                -re {scanout direct (\d+) img res (\d+) \((\d+)x(\d+)\)} {
+                    puts "\nVKQ-VENUS RESIZE: re-promoted after unzoom/re-zoom -- surface $expect_out(1,string) img res $expect_out(2,string) ($expect_out(3,string)x$expect_out(4,string))\n"
+                    lc_step "resize driver: re-promoted (the r6-F1 wedge did not fire)"
+                }
+                "user fault" { set resize_fail "segv on the re-zoom resize" }
+                -re {QUAKE ERROR|Sys_Error} { set resize_fail "engine error on the re-zoom resize" }
+                timeout { set resize_fail "no direct re-promotion within 90s of re-zoom -- the r6-F1 resize-wedge class" }
+            }
+        }
+        if {$resize_fail ne ""} {
+            puts "\nVKQ-VENUS RESIZE-FAIL: $resize_fail (deferred; census first)\n"
         }
     }
 }
@@ -332,6 +345,9 @@ if {$fps_seen < 2} {
 }
 if {!$restored} {
     lc_fail "console direct scanout not restored within ${restore_secs}s of ^C (census reported above)"
+}
+if {[info exists resize_fail] && $resize_fail ne ""} {
+    lc_fail "resize driver: $resize_fail (census reported above)"
 }
 
 puts "\nVKQ-VENUS PASS\n"
