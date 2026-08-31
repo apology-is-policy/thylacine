@@ -1734,7 +1734,10 @@ partial run; the conjunction cannot.
 The guest half of the presentable model: venus swapchains whose images are
 the W-3c-1 presentables. All code lives in the mesa fork (the durable form is
 `usr/ports/mesa/patches/0018-*`); tapestryd needed NO changes -- `img/new`
-with a live `mem_id` exercises exactly the path the 1a probe measured.
+with a live `mem_id` exercises the real-class path the (round-5-corrected)
+1a probe measures at the first client mint (`settype=ok blit=landed` on
+thyla-pi -- the composed arm is host-available; its build is a future
+chunk).
 
 ### The shape
 

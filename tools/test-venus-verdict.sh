@@ -63,6 +63,7 @@ venus-prove: wsi swapchain OK (headless surface -> 3 presentables 640x400 BGRA8,
 tapestryd: warp scanout-blob probe: dispatch=present neg=0x1203 pos=0x1100 attach=0x1100 attach-neg=0x1100 (shmem-class; the venus-image-class verdict lands at W-3e)
 tapestryd: warp display unbind refusal INJECTED (self-test drill) for res 85 -- condemned, unref deferred, drain expected at the next accepted scanout
 tapestryd: warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok refuse=ok disable=1 flags=mappable compose=poisoned (64x64 BGRA8 stride 256)
+tapestryd: warp display real-class compose probe DEFERRED (stand-in mint, mem_id=0 -- waiting for a client blob)
 tapestryd: warp display real-class compose probe (first mem mint, res 903): settype=ok blit=landed (one-shot; throwaway ctx; read-only on the client resource)
 EOF
 }

@@ -99,6 +99,44 @@ on TEST, forbidden on CONTROL) and test-venus-verdict grew to 83 checks
 (missing / control-leak / replaced-by-FAIL). The venus verb re-ran on the
 Pi under the extended gate the same session.
 
+**Round 5 (batched: r4 fixes + the 1a probe + W-3d; Fable, start==end) came
+back 0 P0 / 1 P1 / 1 P2 / 6 P3 — and the P1 inverted the arc's standing
+capability verdict.** F1: the "real-class" compose probe had fired at the
+first `wmem_mint` of every boot, which is the pre-READY self-test's
+`mem_id=0` mint — the blob_id=0 SHM stand-in, the exact class the probe
+existed to escape — and its one-shot was consumed before any client blob
+existed. Run 6's `settype=latched` "measurement" (and the vkr-mechanism
+story inferred from it) was therefore about the stand-in, AGAIN — the #95
+disarmed-by-its-own-test class recurring on the stand-in lesson's own
+remediation, proven from the certified boot log itself (the probe line
+prints mid-self-test, res 74, 42 lines before the client exists). The
+prosecutor could not reach the vendored virglrenderer source; this session
+could, and confirmed its F7 suspicion with a sharper consequence: SET_TYPE
+types its subject GLOBALLY and one-shot (vrend_renderer.c:13452 installs
+`res->pipe_resource` on the global resource), which pinned the fix's shape
+— the probe's subject must be a client MEM blob (never legitimately typed
+again), never a presentable (whose future compose bind the bogus typing
+would poison).
+
+With the class gate landed (skip-without-consuming on `mem_id == 0` and on
+a too-small first client mint), the re-measured probe — genuinely against
+the first client VkDeviceMemory blob at last — reported
+**`settype=ok blit=landed`**: v3dv answers the TRANSFER_SRC-buffer dma_buf
+export query EXPORTABLE, vkr exports the blob as a dma_buf, vrend types
+it, and the compositor's blit from it LANDS. **The composed arm is
+host-AVAILABLE on thyla-pi** — the fork's contingency disposition
+("windowed presentables await the v3d fork or option B") is void, replaced
+by the fork's original resolution with its gate now green: the composed
+arm is buildable as its own audit-bearing chunk, with the PDrained drain
+in the same commit. F2 closed an app-reachable permanent wedge (WSI caps
+advertised extents whose registration drew the img keep-arm — the
+per-object bytes cap is now E_NOMEM-after-taken in both families, and the
+caps clamp to 4096x4096 = exactly the 64 MiB budget at 4 B/px). The six
+P3s: an episode-reset gap (F3), three record-precision defects on
+soundness arguments (F4/F5/F7 — each now states the verified mechanism
+instead of the convenient one), the settype attribution caveat pinned
+(F6), and an upstream-inherited maintenance1 race documented (F8).
+
 ---
 
 ## 2026-08-31 (run 6, Fable) — the composed-arm fork dissolved at the source level
@@ -293,6 +331,15 @@ W-3d slice 1.
 The fork resolution ended with a contingency: if the SOTA formulation is
 refused on the real class, "we land at A-with-proof at zero wasted work."
 That arm was taken today, with the proof.
+
+> **[SUPERSEDED — round-5 F1, run 7.]** Everything from here to the end of
+> this run's 1a account measured the STAND-IN, not the real class: the
+> probe fired at the first mint of the boot, which is the pre-READY
+> self-test's `mem_id=0` mint, and the one-shot was consumed before any
+> client blob existed. The corrected probe (run 7) measured
+> `settype=ok blit=landed` — the composed arm IS host-available here. The
+> paragraphs below stand as the record of a wrong turn, per this
+> journal's own conventions.
 
 The measurement needed zero mesa changes: the V-3b-3c-2b prove already
 performs a real `vkAllocateMemory` → mem mint on every venus boot, so a

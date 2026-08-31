@@ -562,31 +562,40 @@ expects are restored for the build. vkQuake then runs unmodified through
      `bound` observed through `img/0/info` → destroy-WHILE-BOUND → the
      weave arm re-takes) + the img-xproc I-45 leg; gate: the four-witness
      conjunction in `warp-host.sh img`.
-     **W-3d slice 1a (2026-08-31): the REAL-class compose capability
-     MEASURED — unavailable on this host, at the designed formulation.**
-     A one-shot server probe (first post-READY mem mint; the V-3b-3c-2b
-     prove drives it every venus boot) runs the three-leg compose probe
-     against a live client VkDeviceMemory blob with the SET_TYPE step:
-     control `ctlok`, then `settype=latched blit=skipped` — vrend logged
-     `failed to dispatch PIPE_RESOURCE_SET_TYPE: 22` with none of the
-     function's loud errors, which isolates the one silent EINVAL:
-     `fd_type != DMABUF`. Mechanism completed in vkr source: dma_buf
-     export is gated on `vkGetPhysicalDeviceExternalBufferProperties`
-     for a TRANSFER_SRC **buffer** (vkr_physical_device.c:188-228), which
-     v3dv answers exportable-as-OPAQUE-only — so every venus allocation's
-     blob is opaque-fd-typed, `pipe_resource_set_type` (DMABUF-only)
-     refuses, and no guest-side formulation escapes it (the gbm fallback
-     opens only when NEITHER export works; udmabuf is debug-gated;
-     CROSS_DEVICE mints refuse without dma_buf). **This is the §4.3
-     host-capability question answered NO for this host stack** — a
-     per-host verdict the probe re-measures every boot (on a
-     dmabuf-for-buffers host it reports `settype=ok blit=landed` and the
-     composed arm lights up), NOT a design narrowing. Windowed
-     presentables on this host wait for either a host-stack lift (the
-     v3d fork is where the export gap becomes ours to close — GPU-DESIGN
-     F3) or the Halcyon-era compositor-speaks-Vulkan route (option B).
-     The Direct arm is unaffected; W-3d proceeds as the mesa WSI DIRECT
-     path.
+     **W-3d slice 1a (2026-08-31), AS CORRECTED BY ROUND-5 F1 (same
+     day): the REAL-class compose capability is AVAILABLE on this host —
+     `settype=ok blit=landed`.** The slice's first verdict
+     (`settype=latched`, recorded here as a real-class measurement) was
+     of the WRONG SUBJECT: the probe fired unconditionally at the first
+     `wmem_mint` of the boot, which is the pre-READY self-test's
+     `mem_id=0` mint — the blob_id=0 SHM STAND-IN, the exact class the
+     probe existed to escape — and its one-shot was thereby consumed
+     before any client blob existed (the #95 disarmed-by-its-own-test
+     class, recurring on the stand-in lesson's own remediation; the
+     accompanying vkr-mechanism story about v3dv answering
+     exportable-as-opaque-only was inference stacked on that voided
+     measurement, and is wrong). Round-5 F1 added the class gate (skip
+     WITHOUT consuming on `mem_id == 0`, and on a too-small first client
+     mint) and the re-measured probe — now genuinely against the first
+     client VkDeviceMemory blob — reports **`settype=ok blit=landed`**:
+     vkr exports the allocation as a dma_buf (v3dv answers the
+     TRANSFER_SRC-buffer export query EXPORTABLE), vrend's SET_TYPE
+     types it, and the compositor's blit FROM it lands, measured with
+     the control legs green. **The §4.3 host-capability question is
+     answered YES for this host stack**: the designed composed path
+     (untyped attach → SET_TYPE → EGLImage → C-3 blit) works end-to-end
+     on thyla-pi, and the COMPOSED ARM IS BUILDABLE here — no v3d-fork
+     export lift and no Halcyon-era option B needed for windowed
+     presentables on this host. The probe remains the per-boot per-host
+     gate. The composed arm lands as its own audit-bearing chunk (the
+     SET_TYPE at the img's declared shape + the blit + THE PDrained
+     DRAIN IN THE SAME COMMIT — the landmine rule stands); the Direct
+     arm and the W-3d mesa path are unaffected. One caveat carried from
+     round-5 F7: SET_TYPE types its subject GLOBALLY and one-shot
+     (vrend_renderer.c:13452), which is why the probe's subject is a
+     client MEM blob (a class never legitimately typed again) and why
+     the composed arm must type each presentable at its OWN declared
+     shape, in the compositor's ctx, exactly once.
 4. **W-3d — mesa**: the Thylacine `wsi_interface` + the swapchain image
    path + acquire/present. Audit-bearing (the Warp mesa row).
 
@@ -612,8 +621,10 @@ expects are restored for the build. vkQuake then runs unmodified through
      with the LINEAR stride `vkGetImageSubresourceLayout` reported).
 
    The §4.2 stage-0 bracket lands twice over: venus's own vtest-class drain
-   (`vn_wsi_fence_wait` at the tail of every `vn_QueueSubmit*`, detecting
-   the async-present tid) AND the vtable `queue_present`'s own wait on the
+   (`vn_wsi_fence_wait` at the tail of `vn_QueueSubmit2` — the entrypoint
+   wsi_common's present submit uses via `wsi_queue_submit2_unordered`; the
+   v1 `vn_QueueSubmit` has no such tail, so the drain depends on that
+   routing — round-5 F5) AND the vtable `queue_present`'s own wait on the
    per-image throttle fence — so the bracket holds even under
    `VN_PERF=no_async_present`, where the drain never runs. The present
    poke (`present-to <surface> img <n>`, consent-dedup'd) stays DORMANT
@@ -632,6 +643,14 @@ expects are restored for the build. vkQuake then runs unmodified through
    memory and read back pixel-exact, 3 presents through the async path);
    gates in `tools/warp-host.sh` (venus TEST leg) +
    `tools/test-venus-verdict.sh` (83 checks, both directions).
+
+   Known caveat (round-5 F8, upstream-inherited): venus wraps acquire and
+   present in per-chain locks but has no wrapper for
+   `vkReleaseSwapchainImagesKHR` (swapchain_maintenance1), so a conformant
+   app calling Release concurrently with an in-flight async present would
+   race the busy flags lock-free — the identical composition exists in
+   stock headless + venus. No Thylacine client uses maintenance1; a fork
+   wrapper is owed if one ever does (W-4's vkQuake does not).
 5. **W-3e — SDL2 Vulkan glue** + a prove extension (an offscreen→present
    witness: render the W-1 triangle INTO a swapchain image and present it —
    the first Vulkan frame on the Thylacine display).

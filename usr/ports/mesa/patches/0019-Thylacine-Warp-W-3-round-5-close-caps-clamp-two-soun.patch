@@ -1,0 +1,90 @@
+From afef9fa7a8b42a8c5b1ec15857489937ea30187f Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Mon, 31 Aug 2026 13:11:04 +0200
+Subject: [PATCH] Thylacine Warp W-3 round-5 close: caps clamp + two
+ soundness-argument corrections
+
+F2 [P2]: the surface caps advertised maxImageExtent 8192x8192 while the
+compositor's per-object registration budget is 64 MiB -- a caps-conformant
+request (e.g. 8192x2049 BGRA8) drew the registration's keep-arm and leaked
+one img handle per attempt; a resize-loop app could wedge all 16 slots.
+maxImageExtent is now 4096x4096 = exactly the 64 MiB budget at 4 B/px, so
+every caps-conformant single-image request fits (the server side
+reclassifies the per-object cap refusal to E_NOMEM-after-taken in the same
+close, so even a non-conformant request frees its handle).
+
+F4 [P3]: the destroy-refused comment leaned on an unverified vkr
+blob-holds-its-own-ref property; the actual guarantee is structural (the
+only reachable refusal is a wedged transport, and the vkFreeMemory rides
+the same dead conn) -- restated.
+
+F5 [P3]: the stage-0 bracket header claimed the drain tails "every
+vn_QueueSubmit*"; only vn_QueueSubmit2 has the vn_wsi_fence_wait tail, and
+the drain holds because wsi_common's present submit routes through
+QueueSubmit2 (wsi_queue_submit2_unordered) -- the dependency is now named
+instead of overstated.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/virtio/vulkan/vn_wsi_thylacine.c | 29 +++++++++++++++++++++-------
+ 1 file changed, 22 insertions(+), 7 deletions(-)
+
+diff --git a/src/virtio/vulkan/vn_wsi_thylacine.c b/src/virtio/vulkan/vn_wsi_thylacine.c
+index 196c3f7..dfbf67d 100644
+--- a/src/virtio/vulkan/vn_wsi_thylacine.c
++++ b/src/virtio/vulkan/vn_wsi_thylacine.c
+@@ -35,9 +35,12 @@
+  *
+  * The I-40 stage-0 bracket: on the designed path venus itself drains the
+  * queue before the vtable queue_present runs (vn_wsi_fence_wait at the tail
+- * of every vn_QueueSubmit* detects the async-present tid and does the
+- * empty-submit + fence + wait -- the vtest-class flow; our renderer reports
+- * has_external_sync = has_implicit_fencing = false).  queue_present still
++ * of vn_QueueSubmit2 -- the entrypoint wsi_common's present submit uses,
++ * wsi_queue_submit2_unordered -> wsi->QueueSubmit2; the v1 vn_QueueSubmit
++ * has NO such tail, so the drain depends on that routing -- detects the
++ * async-present tid and does the empty-submit + fence + wait, the
++ * vtest-class flow; our renderer reports has_external_sync =
++ * has_implicit_fencing = false).  queue_present still
+  * waits the per-image throttle fence itself so the bracket also holds under
+  * VN_PERF=no_async_present, where that drain never runs.
+  *
+@@ -118,10 +121,17 @@ vn_thylacine_surface_get_capabilities(VkIcdSurfaceBase *surface,
+ 
+    /* No intrinsic extent -- the surface is sized by the swapchain (the SDL
+     * glue passes the tapestry surface geometry).  The compositor's
+-    * registration gate re-validates against its own structural limits. */
++    * registration gate re-validates against its own structural limits.
++    *
++    * The extent ceiling is the REGISTRATION budget, not the dimension cap:
++    * a presentable's bytes (stride x height, 4 B/px) must fit the
++    * compositor's 64 MiB per-object bound, and advertising extents whose
++    * conformant request the registration then refuses would leak an img
++    * handle per attempt (round-5 F2).  4096 x 4096 x 4 = exactly 64 MiB,
++    * so every caps-conformant single-image request fits. */
+    caps->currentExtent = (VkExtent2D){ -1, -1 };
+    caps->minImageExtent = (VkExtent2D){ 1, 1 };
+-   caps->maxImageExtent = (VkExtent2D){ 8192, 8192 };
++   caps->maxImageExtent = (VkExtent2D){ 4096, 4096 };
+ 
+    caps->supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    caps->currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+@@ -499,8 +509,13 @@ vn_thylacine_swapchain_destroy_image(struct vn_thylacine_swapchain *chain,
+     * the display-safe teardown (unbind-before-unref server-side), and the
+     * venus memory must outlive the presentable that names it.  A refused
+     * unregister keeps the img handle marked renderer-side (bounded,
+-    * ctx-death reaped) -- the memory free is still safe: the server's blob
+-    * holds its own reference. */
++    * ctx-death reaped) -- and the memory free that follows is safe
++    * STRUCTURALLY: the only reachable refusal is a wedged transport (a
++    * live registered handle from the owning conn cannot draw E_NOENT), and
++    * on a wedged conn the vkFreeMemory rides the same dead conn and never
++    * reaches the host either; conn death then reaps both sides in the
++    * server's own display-safe order (round-5 F4 -- do not lean on any
++    * vkr blob-holds-its-own-ref property here; it is unverified). */
+    if (image->registered) {
+       struct vn_device *dev = vn_device_from_handle(chain->base.device);
+       vn_renderer_thylacine_img_destroy(dev->renderer, image->img_handle);
+-- 
+2.43.0
+

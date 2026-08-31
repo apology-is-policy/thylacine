@@ -1219,6 +1219,10 @@ pub struct Comp {
     /// W-3d 1a: the one-shot real-class compose measurement fired (armed at
     /// the first post-READY mem mint).
     real_compose_probed: bool,
+    /// One-shot say guard for the probe's non-consuming skip arms (round-5
+    /// F1): the stand-in-class and too-small gates defer WITHOUT consuming
+    /// the probe, and say so once rather than per mint.
+    real_compose_skip_said: bool,
     /// Warp-C C-2c: the compositor context's OWN #240 mark/sentinel pair,
     /// minted with the context. It is the instrument behind every
     /// `comp-attach` verdict: the health check copies mark -> sentinel to
@@ -1961,6 +1965,7 @@ impl Comp {
             res_seq: SCREEN_RES,
             comp_ctx: false,
             real_compose_probed: false,
+            real_compose_skip_said: false,
             comp_probe: None,
             comp_hprobe: None,
             comp_probe_seq: 0,
@@ -3135,6 +3140,15 @@ impl Comp {
         const CCMD_PIPE_RESOURCE_SET_TYPE: u32 = 49;
         const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
         const VIRGL_BIND_SAMPLER_VIEW: u32 = 1 << 3;
+        // Round-5 F6: the header's word count is the one field vrend uses to
+        // slice the buffer -- a field added below without bumping it (or vice
+        // versa) would misparse EVERY later word and read as `settype=latched`
+        // (a renderer refusal and an encoder regression produce the same leg-2
+        // token; the discrimination lives only in the HOST log's error line).
+        // Pin the relation the compiler can see; the residue -- field ORDER --
+        // is attributable only jointly with the host log, stated at the probe.
+        const SET_TYPE_WORDS: usize = 11;
+        const _: () = assert!(SET_TYPE_WORDS == 1 + 10, "hdr count != payload");
         [
             (10 << 16) | CCMD_PIPE_RESOURCE_SET_TYPE,
             res,
@@ -3755,6 +3769,12 @@ impl Comp {
         if self.scanout == Scanout::Direct(n) {
             self.scanout = Scanout::Off;
             self.pending_direct = Some(n);
+            // Round-5 F3: a pending episode starts HERE too -- without the
+            // reset, a flag latched by a prior episode silences this one's
+            // refusal say (the round-4 F4 rule: reset at EVERY episode
+            // start). Mode-machine-unreachable today (display geometry is
+            // read once at gpu init); live the day display resize lands.
+            self.pending_bind_refused_said = false;
         }
         // The new size feeds the scanout-mode predicate (a letterboxed
         // single leaf acking up to display size becomes Direct-eligible).
@@ -7554,7 +7574,7 @@ impl Comp {
         handle: u32,
         mem_id: u64,
     ) -> Result<(), u32> {
-        if bytes == 0 || bytes % PAGE != 0 || bytes > WARP_CTX_BACKING_MAX {
+        if bytes == 0 || bytes % PAGE != 0 {
             return Err(p9::E_INVAL);
         }
         if (handle as usize) >= MAX_WARP_MEMS_PER_CTX {
@@ -7580,7 +7600,11 @@ impl Comp {
         if taken {
             return Err(p9::E_INVAL); // handle already minted for this ctx
         }
-        if over {
+        // Round-5 F2 (the img twin's rationale, applied here too): the
+        // per-object bytes cap is a RESOURCE verdict reachable from an
+        // ordinary large vkAllocateMemory -- E_INVAL would leak the client's
+        // handle (keep-arm); E_NOMEM after `taken` keeps the F8 rule.
+        if bytes > WARP_CTX_BACKING_MAX || over {
             return Err(p9::E_NOMEM);
         }
         let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
@@ -7631,7 +7655,7 @@ impl Comp {
         // mint's verdict, and the mint-time disclosure-zero above makes the
         // blit-landed discrimination deterministic (source bytes are
         // guaranteed zeros, never the staged PAT).
-        self.real_class_compose_probe_maybe(res_id, bytes);
+        self.real_class_compose_probe_maybe(res_id, bytes, mem_id);
         Ok(())
     }
 
@@ -7814,7 +7838,7 @@ impl Comp {
         }
         let bytes = (stride as u64).saturating_mul(h as u64);
         let len = u32::try_from(bytes).map_err(|_| p9::E_INVAL)?;
-        if bytes == 0 || bytes > WARP_CTX_BACKING_MAX {
+        if bytes == 0 {
             return Err(p9::E_INVAL);
         }
         let (over, taken) = {
@@ -7824,13 +7848,20 @@ impl Comp {
                 c.imgs[handle as usize].is_some(),
             )
         };
+        // Round-5 F2: the PER-OBJECT bytes cap is a RESOURCE verdict, not a
+        // malformed-request one, and it is reachable from caps-conformant
+        // client input (the WSI surface caps advertise extents whose 4 B/px
+        // bytes exceed 64 MiB). E_INVAL here would hit the client's keep-arm
+        // and leak one img slot per attempt -- a resize-loop app could wedge
+        // all 16. E_NOMEM after `taken` keeps the F8 rule (E_NOMEM =>
+        // provably nothing installed => the client frees its handle).
         // taken BEFORE over -- the V-3b-3c-2b round-3 F8 ordering: E_NOMEM must
         // provably imply "nothing was installed", so a client freeing its
         // guest-side handle on E_NOMEM can never free a live slot.
         if taken {
             return Err(p9::E_INVAL);
         }
-        if over {
+        if bytes > WARP_CTX_BACKING_MAX || over {
             return Err(p9::E_NOMEM);
         }
         let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
@@ -7888,22 +7919,65 @@ impl Comp {
     /// The W-3d-1b composed arm proceeds only on `settype=ok blit=landed`;
     /// anything else lands us at direct-only-with-proof at zero wasted
     /// work (the fork resolution's own contingency).
-    fn real_class_compose_probe_maybe(&mut self, src_res: u32, bytes: u64) {
+    ///
+    /// Round-5 F6/F7 caveats. `settype=latched` is attributable to the
+    /// renderer's refusal only JOINTLY with the host log's dispatch-error
+    /// line -- an encoder regression produces the same token (the header
+    /// word-count relation is compiler-pinned in `set_type_request`; field
+    /// order is not). And "read-only" is exact only on the REFUSING path:
+    /// on a capable host, SET_TYPE types the subject GLOBALLY
+    /// (vrend_renderer.c:13452 installs `res->pipe_resource` on the global
+    /// resource, one-shot; the per-ctx hash entry alone dies with the
+    /// throwaway ctx) -- which is why the subject is a client MEM blob,
+    /// never a presentable: mem blobs are never legitimately typed, so a
+    /// probe-shaped global typing costs a bounded host-side GL import and
+    /// nothing else, while typing a presentable would poison its future
+    /// compose bind.
+    fn real_class_compose_probe_maybe(&mut self, src_res: u32, bytes: u64, mem_id: u64) {
         if self.real_compose_probed {
             return;
         }
-        self.real_compose_probed = true;
+        // THE CLASS GATE (round-5 F1). The first mint of every boot is the
+        // pre-READY self-test's, whose mem_id=0 blob is the SHM STAND-IN --
+        // the exact class this probe exists to escape (its SET_TYPE draws
+        // the same silent fd_type EINVAL as the opaque-fd mechanism would,
+        // so measuring it says nothing about real client blobs). Probing it
+        // consumed the one-shot and wedged the per-host gate to the
+        // stand-in verdict on every boot -- the #95 class recurring on the
+        // stand-in lesson's own remediation. Skip WITHOUT consuming; the
+        // subject is the first REAL client VkDeviceMemory blob. (On a
+        // capable host the probe's SET_TYPE types that blob GLOBALLY at the
+        // probe shape, one-shot -- vrend_renderer.c:13452 installs
+        // res->pipe_resource on the global resource -- which is why the
+        // subject must stay a MEM blob: that class is never legitimately
+        // typed again, unlike a presentable, whose future compose bind the
+        // typing would poison.)
+        if mem_id == 0 {
+            if !self.real_compose_skip_said {
+                self.real_compose_skip_said = true;
+                say!(
+                    "tapestryd: warp display real-class compose probe DEFERRED (stand-in mint, mem_id=0 -- waiting for a client blob)"
+                );
+            }
+            return;
+        }
         const W: u32 = 64;
         const H: u32 = CONV_ROWS as u32;
         const STRIDE: u32 = W * 4;
         if bytes < (STRIDE as u64) * (H as u64) {
-            say!(
-                "tapestryd: warp display real-class compose probe SKIPPED (first mem {} bytes < probe shape {})",
-                bytes,
-                (STRIDE as u64) * (H as u64)
-            );
+            // Also non-consuming (round-5 F1's latch placement): a small
+            // first client mint must not burn the shot.
+            if !self.real_compose_skip_said {
+                self.real_compose_skip_said = true;
+                say!(
+                    "tapestryd: warp display real-class compose probe DEFERRED (first client mem {} bytes < probe shape {})",
+                    bytes,
+                    (STRIDE as u64) * (H as u64)
+                );
+            }
             return;
         }
+        self.real_compose_probed = true;
         let shape = Some((W, H, VIRGL_FORMAT_B8G8R8A8_UNORM, STRIDE));
         let c1 = self.warp_present_compose_probe(src_res, H, false, None);
         if c1 != "ctlok" {
