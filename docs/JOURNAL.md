@@ -22,6 +22,85 @@ needed the operator.
 
 ---
 
+## 2026-08-31 (run 7, Fable) — W-3d: the mesa WSI DIRECT path, and the machinery that was already there
+
+The self-compaction resume worked exactly as designed: the note said "CHECK
+FIRST: `vn_wsi_present_async` before assuming the vtable queue_present path",
+and that check reshaped the chunk before any code existed. The finding:
+**venus already implements our stage-0 present bracket, for exactly our
+backend class.** `vn_wsi_present_async` does not bypass the vtable — its
+thread calls `wsi_common_queue_present`, and for a renderer with
+`has_external_sync = has_implicit_fencing = false` (ours; the vtest class)
+every `vn_QueueSubmit*` ends with `vn_wsi_fence_wait` (vn_queue.c:1270),
+which detects the async-present tid and does the empty-submit + fence +
+synchronous wait. So the design's "queue_present stage-0 = wait the present
+semaphores (empty submit + fence + wait)" was already written by upstream —
+our vtable `queue_present` keeps a belt-and-suspenders wait on the per-image
+throttle fence only so the bracket survives `VN_PERF=no_async_present`.
+
+The second recon finding cut the chunk's size in half: `wsi_image_info` has
+`create_mem`/`finish_create` function-pointer hooks — the DESIGNED injection
+points — so image creation rides stock `wsi_create_image` (CreateImage →
+our marked alloc → BindImageMemory → our registration) instead of a
+hand-rolled image path. One flag (`wants_linear`, which exists precisely to
+force the CPU-config NO_BLIT LINEAR arm) makes the stock configure produce
+exactly the image our registration needs.
+
+The third finding was a live hazard, not a convenience:
+`vn_AcquireNextImage2KHR` dereferences `mem->dedicated_img` and calls
+`vn_renderer_bo_export_sync_file(renderer, mem->base_bo)` with our
+`base_bo == NULL`. Traced to ground: the no-libdrm build's
+`export_sync_file_internal` returns -1 without touching the bo, and fd = -1
+is an EXPLICIT venus contract ("already signaled", vn_queue.c:1956) that
+`vn_sync_valid_fd` admits — so the acquire semaphore/fence import degrades
+to pre-signaled, which is correct for a free-list acquire. No code needed;
+the dedicated-alloc requirement (which keeps `dedicated_img` non-NULL) was
+load-bearing and is now commented as such.
+
+One discovery flipped a build assumption: **the thylacine meson branch never
+compiled `vn_wsi.c`** — every prior build ran the `VN_USE_WSI_PLATFORM`
+stub inlines (vn_wsi.h), so all the machinery above was verified in source
+but DORMANT in our binaries. Turning the define on also flips
+`KHR_swapchain` and `can_sync2` onto `renderer_sync_fd.semaphore_importable`
+— a HOST property venus queries through the ring. vkr passes
+`KHR_external_semaphore_fd` through (vkr_common.c:98) and v3dv advertises
+it, so the Pi resolves TRUE — but the prove step PROBES and FAILS rather
+than skips on absence (#212), because a host without SYNC_FD semaphores
+would otherwise silently un-advertise swapchains.
+
+The chunk itself (mesa patch 0018, W-3d): `vn_wsi_thylacine.c` (the
+headless-slot interface), the `'THLW'` chain-head marker routing marked
+allocations to `alloc_simple` (no renderer bo — the ONE vkr export left for
+`img/new`; both wrong orders fail loudly, which makes swapchain-creation
+success itself the no-eager-mint proof), the `warp_img_*` client family
+(the mem family's three-valued contract, with the E_INVAL and E_IO arms
+re-derived rather than copied: E_INVAL covers duplicate AND validation for
+img — indistinguishable, so inputs stay client-valid and the arm keeps;
+E_IO includes the clean one-export refusal but is indistinguishable from a
+transport EIO after a commit, so it reclaims), and prove step 10 (the
+counter-delta no-mint proof with a nonzero-baseline positive control, a GPU
+clear INTO a presentable read back pixel-exact, three presents through the
+async path — the driver's first in-driver pthread on Thylacine).
+
+Wrong turn, caught by the self-audit before any prosecutor: the
+create-loop failure path destroyed the failed image TWICE (SA-1) —
+`wsi_create_image`'s own fail arm already runs `wsi_destroy_image`, which
+does not null the struct's handles, so the cleanup loop's `i <= image`
+re-destroyed stale handles. Fixed to `i < image`; the failed image can
+never be `registered` (finish_create is the last fallible step and sets the
+flag only on success). The build was already green when this was found —
+one rebuild folded it with the witness re-run, since a failure-path-only
+fix still changes the shipped binary and a witness on a different binary is
+a witness on a different binary.
+
+Gates extended before the first real run (the round-4 F2 lesson applied in
+advance): `wsi swapchain OK` joined the warp-host venus wkey loop (required
+on TEST, forbidden on CONTROL) and test-venus-verdict grew to 83 checks
+(missing / control-leak / replaced-by-FAIL). The venus verb re-ran on the
+Pi under the extended gate the same session.
+
+---
+
 ## 2026-08-31 (run 6, Fable) — the composed-arm fork dissolved at the source level
 
 The operator brought Fable onto the arc to decide the open fork (run 5's

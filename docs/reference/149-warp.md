@@ -1729,6 +1729,61 @@ four-witness conjunction: the compositor bind line, the guest bound line
 the F11 rule), and the scenario pass. Any subset can be produced by a
 partial run; the conjunction cannot.
 
+## Warp-WSI W-3d -- the mesa WSI DIRECT path (as-built 2026-08-31; mesa patch 0018)
+
+The guest half of the presentable model: venus swapchains whose images are
+the W-3c-1 presentables. All code lives in the mesa fork (the durable form is
+`usr/ports/mesa/patches/0018-*`); tapestryd needed NO changes -- `img/new`
+with a live `mem_id` exercises exactly the path the 1a probe measured.
+
+### The shape
+
+- Surface class: stock `VK_EXT_headless_surface`. `vn_wsi_init` replaces
+  `wsi[VK_ICD_WSI_PLATFORM_HEADLESS]` with the Thylacine `wsi_interface`
+  (`vn_wsi_thylacine.c`); `wsi_common` keeps the entire swapchain state
+  machine (`wsi_swapchain_init`, throttle fences, the present submit).
+- The image path is injected through the two designed `wsi_image_info`
+  hooks. `create_mem`: a MARKED dedicated `vkAllocateMemory` -- the
+  chain-head driver-internal pNext (`VN_STRUCTURE_TYPE_THYLACINE_WSI_MEMORY_INFO`,
+  `'THLW'`, stripped before encode) routes `vn_device_memory_alloc` to
+  `alloc_simple`: venus-side memory, NO renderer bo. The memory's ONE vkr
+  blob export is thereby left for `img/new`'s `create_presentable`
+  (one-export = the discriminator: both wrong orders fail loudly).
+  `finish_create`: `vn_device_memory_wait_alloc` (host-allocate before the
+  registration names `mem->base.id` -- the F7 ordering) then
+  `vn_renderer_thylacine_img_new` with the LINEAR stride from
+  `vkGetImageSubresourceLayout`.
+- Client families: `warp_img_new` / `warp_img_destroy` /
+  `warp_present_to_img` in `warp_client.{c,h}` mirror the mem family's
+  three-valued contract (`warp_img_reclaim` resolves maybe-committed
+  failures; E_INVAL keeps -- duplicate and validation are indistinguishable,
+  so the caller keeps its inputs client-valid; E_IO reclaims -- the clean
+  one-export refusal is indistinguishable from a transport EIO after a
+  commit). A 16-slot `img_bitmap` (= `MAX_WARP_IMGS_PER_CTX`) under the
+  renderer transport mutex.
+- The I-40 stage-0 bracket holds on BOTH present paths: venus's own
+  vtest-class drain (`vn_wsi_fence_wait` at every `vn_QueueSubmit*` tail,
+  async-present tid) and the vtable `queue_present`'s own wait on the
+  per-image throttle fence (`VN_PERF=no_async_present` keeps the bracket).
+- The present poke (`present-to <surface> img <handle>`, consent-dedup'd in
+  the renderer, surface named by the `vn_renderer_thylacine_set_surface`
+  +1-encoded process global) is DORMANT until the W-3e SDL glue.
+- `VN_USE_WSI_PLATFORM` now compiled for thylacine: `KHR_swapchain` and
+  `can_sync2` key on `renderer_sync_fd.semaphore_importable`, a HOST
+  property queried through the ring (v3dv: importable).
+
+### The witness
+
+`thylacine-venus-prove` step 10: probe KHR_swapchain (FAIL, never skip, on
+absence -- #212); headless surface; 3-image 640x400 BGRA8 FIFO swapchain;
+`vn_thylacine_bo_create_count` delta ZERO across creation (nonzero baseline
+from the earlier mem steps = the positive control, #215); a GPU
+clear-to-red into presentable 0 + `vkCmdCopyImageToBuffer` + pixel-exact
+readback (the registered memory is a real render target); acquire/present
+x3 through the async-present path. Witness line `venus-prove: wsi swapchain
+OK (...)`; gates: `warp-host.sh` venus TEST leg (required; CONTROL leg must
+lack it) + `test-venus-verdict.sh` (83 checks).
+
 ## Tests
 
 Kernel: `pci.walk_caps_shm` (6 discriminating vectors incl. the

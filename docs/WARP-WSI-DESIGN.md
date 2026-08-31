@@ -589,6 +589,49 @@ expects are restored for the build. vkQuake then runs unmodified through
      path.
 4. **W-3d — mesa**: the Thylacine `wsi_interface` + the swapchain image
    path + acquire/present. Audit-bearing (the Warp mesa row).
+
+   **LANDED (2026-08-31, mesa patch 0018) — the as-built record.** The
+   surface class is stock `VK_EXT_headless_surface`; `vn_wsi_init` replaces
+   `wsi[VK_ICD_WSI_PLATFORM_HEADLESS]` with the Thylacine interface
+   (`vn_wsi_thylacine.c`), so §5's registration model rides the standard
+   swapchain machinery unchanged — `wsi_swapchain_init` + the stock
+   `wsi_create_image` flow with only the two designed hooks replaced:
+
+   - **`create_mem`** — a MARKED dedicated `vkAllocateMemory`: a chain-head
+     driver-internal pNext (`'THLW'`, stripped before encode) routes
+     `vn_device_memory_alloc` to `alloc_simple`, so NO renderer bo is
+     minted and the memory's ONE vkr blob export (vkr `mem->exported` is
+     one-shot) is deliberately left for the compositor's `img/new`.
+     One-export makes both wrong orders fail loudly: an eager bo consumes
+     the export and registration refuses (swapchain creation fails); a
+     later `vkMapMemory` needs a bo whose mint the consumed export refuses
+     (the presentable is never-map, §4.1 as amended).
+   - **`finish_create`** — `vn_device_memory_wait_alloc` (the F7
+     host-allocate-before-naming ordering) then the registration
+     (`vn_renderer_thylacine_img_new` → `warp_img_new` → `ctx/<id>/img/new`
+     with the LINEAR stride `vkGetImageSubresourceLayout` reported).
+
+   The §4.2 stage-0 bracket lands twice over: venus's own vtest-class drain
+   (`vn_wsi_fence_wait` at the tail of every `vn_QueueSubmit*`, detecting
+   the async-present tid) AND the vtable `queue_present`'s own wait on the
+   per-image throttle fence — so the bracket holds even under
+   `VN_PERF=no_async_present`, where the drain never runs. The present
+   poke (`present-to <surface> img <n>`, consent-dedup'd) stays DORMANT
+   until the W-3e SDL glue names a tapestry surface via
+   `vn_renderer_thylacine_set_surface`; until then a swapchain is a pure
+   headless rotation, which is exactly what the prove witnesses.
+
+   Turning `VN_USE_WSI_PLATFORM` on for the thylacine build flips
+   `KHR_swapchain` + `can_sync2` onto
+   `renderer_sync_fd.semaphore_importable` — a HOST property (the guest
+   queries the host driver's SYNC_FD external-semaphore support through
+   the ring; v3dv answers importable). The prove FAILS rather than skips
+   when the gate is absent. Witness: `venus-prove: wsi swapchain OK`
+   (3 presentables, zero bo-mints across creation with a nonzero-baseline
+   counter as the positive control, a GPU clear landed in presentable
+   memory and read back pixel-exact, 3 presents through the async path);
+   gates in `tools/warp-host.sh` (venus TEST leg) +
+   `tools/test-venus-verdict.sh` (83 checks, both directions).
 5. **W-3e — SDL2 Vulkan glue** + a prove extension (an offscreen→present
    witness: render the W-1 triangle INTO a swapchain image and present it —
    the first Vulkan frame on the Thylacine display).

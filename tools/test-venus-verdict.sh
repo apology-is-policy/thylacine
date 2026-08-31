@@ -59,6 +59,7 @@ venus-prove: two-timeline interleave OK (fenced copies on t1 then t2, waited t2 
 venus-prove: cap-exhaustion cycle OK (refused at the 64 MiB ctx cap, freed, realloc'd -- the F2 no-burn proof)
 venus-prove: offscreen triangle OK (render pass + SPIR-V pipeline + draw + copy-out 64x64; center red, corner blue -- the W-1 pipeline-class witness)
 venus-prove: slot-exhaustion cycles OK (253/253/253 to refusal, steady-state equal -- the F2 discriminating no-burn proof)
+venus-prove: wsi swapchain OK (headless surface -> 3 presentables 640x400 BGRA8, clear-to-red GPU-landed in image 0 + read back, acquire/present x3 through the async-present path, bo-creates 271 -> 271 (swapchain minted 0 -- the W-3d no-eager-mint proof))
 tapestryd: warp scanout-blob probe: dispatch=present neg=0x1203 pos=0x1100 attach=0x1100 attach-neg=0x1100 (shmem-class; the venus-image-class verdict lands at W-3e)
 tapestryd: warp display unbind refusal INJECTED (self-test drill) for res 85 -- condemned, unref deferred, drain expected at the next accepted scanout
 tapestryd: warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok refuse=ok disable=1 flags=mappable compose=poisoned (64x64 BGRA8 stride 256)
@@ -195,6 +196,22 @@ check "test leg lacks slot-exhaustion cycles OK -> UNVERIFIED" 1 "" \
       'grep -v "slot-exhaustion cycles OK" "$t" > "$t.x" && mv "$t.x" "$t"'
 check "control leg ALSO sees slot-exhaustion cycles OK -> UNVERIFIED" 1 \
       'grep "slot-exhaustion cycles OK" "$t" >> "$c"' ""
+# vkQuake-arc W-3d: the WSI swapchain witness. "wsi swapchain OK" is emitted
+# ONLY when the full DIRECT-path substrate held: KHR_swapchain advertised
+# (the host semaphore-importable gate), every presentable registration
+# succeeded (one-export makes that a proof the no-eager-mint marker routed),
+# the bo-create counter moved ZERO across the creation, a GPU clear landed
+# in presentable memory and read back pixel-exact, and 3 presents completed
+# through the async-present path. Every failure mode (gate absent, refused
+# registration, a minted bo, wrong pixels, a failed present) prints a
+# THYLACINE-VENUS-PROVE FAIL line carrying none of the key. A replaced-by-
+# FAIL line is covered by the absent arm.
+check "test leg lacks wsi swapchain OK -> UNVERIFIED" 1 "" \
+      'grep -v "wsi swapchain OK" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg ALSO sees wsi swapchain OK -> UNVERIFIED" 1 \
+      'grep "wsi swapchain OK" "$t" >> "$c"' ""
+check "wsi witness replaced by its no-mint FAIL form -> UNVERIFIED" 1 "" \
+      'sed "s/venus-prove: wsi swapchain OK.*/THYLACINE-VENUS-PROVE FAIL: swapchain creation minted 3 renderer bo(s) (want 0 -- the no-eager-mint marker did not route)/" "$t" > "$t.x" && mv "$t.x" "$t"'
 # vkQuake-arc W-3a: the WSI probe is a MEASUREMENT (any verdict is a valid
 # boot) but it must have REPORTED -- the absent-line arm catches the #245
 # silent-vanish; the skip arms keep the control leg's positive-skip honest.
