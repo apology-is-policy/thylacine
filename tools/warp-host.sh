@@ -870,8 +870,38 @@ tri)
     fi
     ;;
 quake)
+    # DETACHED transport (W-4): same shape as quake-vk below, for the same
+    # reason -- this arm was the last attached long-ssh measurement, and the
+    # tunnel has eaten two of those mid-stream. The remote expect writes a
+    # remote file and survives the ssh; this side polls the pid with the
+    # VALUE discipline (empty = no information; GONE needs two consecutive
+    # polls) and fetches the log at the end.
     out="$REPO_ROOT/build/warp-quake.log"
-    ssh "$HOST" "cd $RREPO && ${RENV}expect tools/warp/glq-virgl.exp" | tee "$out" || true
+    rlog="warp/quake-remote.log"
+    rpid=$(ssh "$HOST" "cd $RREPO && rm -f ~/$rlog && ${RENV}nohup expect tools/warp/glq-virgl.exp > ~/$rlog 2>&1 < /dev/null & echo \$!")
+    echo "== quake detached on $HOST (remote pid $rpid; log ~/$rlog) =="
+    tries=0
+    gone=0
+    while :; do
+        st=$(ssh -o ConnectTimeout=20 "$HOST" "ps -p $rpid > /dev/null 2>&1 && echo ALIVE || echo GONE" 2>/dev/null)
+        case "$st" in
+            ALIVE) gone=0 ;;
+            GONE)  gone=$((gone + 1)); [[ $gone -ge 2 ]] && break ;;
+            *)     ;; # ssh failed: no information, retry
+        esac
+        tries=$((tries + 1))
+        if [[ $tries -gt 90 ]]; then
+            echo "== quake: still waiting after ~45 min -- giving up the wait (run may continue remotely)"
+            break
+        fi
+        sleep 30
+    done
+    fetched=""
+    for i in 1 2 3; do
+        if scp -q "$HOST:$rlog" "$out"; then fetched=1; break; fi
+        sleep 10
+    done
+    [[ -n "$fetched" ]] || { echo "== quake: log fetch FAILED after 3 attempts"; exit 1; }
     echo "== quake verdict =="
     # The Warp-4 gate: the tri two-line shape plus the swap certification.
     # GLQ-VIRGL PASS = every gated leg held in-script (virgl renderer +

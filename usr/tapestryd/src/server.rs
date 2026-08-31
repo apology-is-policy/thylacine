@@ -234,6 +234,12 @@ const W_CTL_SNAPSHOT: usize = 511;
 /// a second client can always make progress and no single client can drive
 /// every slot into the abandonment poison.
 const WARP_CTX_FENCE_MAX: usize = crate::gpu::FENCED_SLOTS / 2;
+
+/// W-4 stall-watch cadence: one ledger say-line per live warp ctx at this
+/// period. Matches `FENCE_ABANDON_MS` deliberately -- anything wedged has
+/// been named at least once before the abandonment machinery could touch it.
+#[cfg(feature = "test-mode")]
+const WARP_WATCH_MS: u64 = 30_000;
 const _: () = {
     // Round-6 F2: the share is a DIVISION, so it silently degenerates.
     // At FENCED_SLOTS = 1 the cap is 0 and `fences_in_flight >= 0` is
@@ -1522,6 +1528,17 @@ pub struct Comp {
     pub w210_f_ctx: u32,
     #[cfg(feature = "test-mode")]
     pub w210_f_fid: u32,
+    /// W-4 stall watch: while any warp ctx lives, one say-line per ctx every
+    /// `WARP_WATCH_MS` names the fence ledger MID-FLIGHT -- the park-side twin
+    /// of the `fenced-held` census rows, which a post-mortem read can never
+    /// supply because a wedged ctx's ledger dies with the ctx at teardown.
+    /// `watch_pass` counts serve-loop passes; its delta between prints is the
+    /// loop-liveness proof (a wedged loop prints nothing, and THAT absence is
+    /// only evidence because the cadence here is otherwise unconditional).
+    #[cfg(feature = "test-mode")]
+    watch_last: Option<Instant>,
+    #[cfg(feature = "test-mode")]
+    watch_pass: u64,
 }
 
 /// The #240 health probe's two server-owned resources (GPU-DESIGN 4.5.4b).
@@ -2066,6 +2083,10 @@ impl Comp {
             w210_f_ctx: 0,
             #[cfg(feature = "test-mode")]
             w210_f_fid: 0,
+            #[cfg(feature = "test-mode")]
+            watch_last: None,
+            #[cfg(feature = "test-mode")]
+            watch_pass: 0,
         }
     }
 
@@ -10019,6 +10040,53 @@ impl Comp {
         // slot; issue the next wanted readback (after the retires above, so
         // a BO retired in this pass is not read for).
         self.comp_rb_pump();
+        #[cfg(feature = "test-mode")]
+        self.warp_stall_watch();
+    }
+
+    /// The mid-stall observer (W-4): while any warp ctx is live, one
+    /// say-line per ctx names the fence ledger in flight -- first at ctx
+    /// appearance (the healthy-baseline control), then every
+    /// `WARP_WATCH_MS`. Silent with no warp ctx (the console's normal
+    /// state), so the log cost is bounded to active GPU sessions. The
+    /// triage this line exists for: `inflight` splits device-outstanding
+    /// from retired; `sig` vs `rep` splits delivered-to-ledger from
+    /// consumed-by-client; `fparked` says whether a wait is even parked
+    /// here; and a MISSING line while a run is stalled says the serve loop
+    /// itself stopped iterating.
+    #[cfg(feature = "test-mode")]
+    fn warp_stall_watch(&mut self) {
+        self.watch_pass = self.watch_pass.wrapping_add(1);
+        if self.warp_ctxs.iter().flatten().next().is_none() {
+            self.watch_last = None;
+            return;
+        }
+        let due = match self.watch_last {
+            None => true,
+            Some(t) => t.elapsed().as_millis() as u64 >= WARP_WATCH_MS,
+        };
+        if !due {
+            return;
+        }
+        self.watch_last = Some(Instant::now());
+        for c in self.warp_ctxs.iter().flatten() {
+            say!(
+                "tapestryd: warp-watch pass={} fparked={} rparked={} | ctx={} inflight={} sig={} rep={} again={} tl=[{},{},{},{}] poisoned={}",
+                self.watch_pass,
+                self.w210_fparked,
+                self.w210_rparked,
+                c.pub_id,
+                c.fences_in_flight,
+                c.fence_signaled,
+                c.fence_reported,
+                c.fenced_again,
+                c.timeline_signaled[0],
+                c.timeline_signaled[1],
+                c.timeline_signaled[2],
+                c.timeline_signaled[3],
+                c.fence_poisoned as u32
+            );
+        }
     }
 
     /// Does the serve loop need its 1 ms fence pace? A DEAD engine never
@@ -11211,6 +11279,16 @@ impl Conn {
                 let _ = core::fmt::write(
                     &mut s,
                     format_args!("fenced-free {}\n", comp.gpu.test_fenced_free()),
+                );
+                // The denominator `fenced-free` is against (the CLIENT pool;
+                // the reserved compositor slot reports through `rb-slot`).
+                // W-4: `fenced-free 15` read as one-slot-held for two runs
+                // because the gauge never named its own full-scale value --
+                // a NEW key rather than a `15/15` reformat, because
+                // warp-prove parses the existing key numerically (#91).
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!("fenced-pool {}\n", crate::gpu::COMP_FSLOT),
                 );
                 // W-4 stall observability: one row per HELD fenced slot, so a
                 // wedged chain is NAMED (op class + owner + age), not just a
