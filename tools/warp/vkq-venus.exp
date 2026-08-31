@@ -35,6 +35,12 @@
 #   VKQ-VENUS POKES: n sum_us max_us  the present-poke-img cost row
 #                                     (the r6-F7 census under a real
 #                                     game's present rate)
+#   VKQ-VENUS RESIZE: ...             the r6-F1 resize driver: the blit
+#                                     leg's menu is unzoomed (composed
+#                                     transition witnessed = we LEFT
+#                                     direct) then re-zoomed, and the
+#                                     recreated swapchain re-promotes
+#                                     (a resize_ack wedge fails here)
 #   VKQ-VENUS PASS                    all gated legs held
 #
 # Runs ON the GL host (Linux; lib.exp takes the direct-pty transport).
@@ -184,6 +190,47 @@ foreach leg {linear blit} {
             timeout       { lc_fail "prompt never returned between the legs" }
         }
     }
+
+    if {$leg eq "blit"} {
+        # The r6-F1 RESIZE DRIVER (the owed regression leg): the audit's
+        # target scenario was a resizable pure-vk window under pane
+        # management -- the displaced-generation pin + the resize_ack
+        # E_AGAIN wedge left the window stuck at pane size, never
+        # Direct-eligible again, with every present display-inert. Drive
+        # the round trip at the post-demo menu (it presents continuously,
+        # so promotions complete within a frame): UNZOOM -> the game's
+        # pane shrinks (a real resize: CONFIGURE -> OUT_OF_DATE ->
+        # swapchain recreate) and the scanout must LEAVE direct (the
+        # composed transition is the proof the chord landed -- without it
+        # a later direct say is the OLD state, not a recovery); then
+        # RE-ZOOM -> the recreated swapchain's presentable must be
+        # promoted again. A wedged resize path fails the second half.
+        if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k meta_l+f} err]} {
+            lc_fail "qmp unzoom chord failed: $err (resize driver)"
+        }
+        set timeout 45
+        expect {
+            -re {scanout composed \((\d+)x(\d+)\)} {
+                lc_step "resize driver: left direct (composed entry after unzoom)"
+            }
+            "user fault" { lc_fail "segv on the unzoom resize (resize driver)" }
+            -re {QUAKE ERROR|Sys_Error} { lc_fail "engine error on the unzoom resize (resize driver)" }
+            timeout { lc_fail "no composed transition within 45s of unzoom -- the chord or the resize path is dead (resize driver)" }
+        }
+        if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k meta_l+f} err]} {
+            lc_fail "qmp re-zoom chord failed: $err (resize driver)"
+        }
+        set timeout 90
+        expect {
+            -re {scanout direct (\d+) img res (\d+) \((\d+)x(\d+)\)} {
+                puts "\nVKQ-VENUS RESIZE: re-promoted after unzoom/re-zoom -- surface $expect_out(1,string) img res $expect_out(2,string) ($expect_out(3,string)x$expect_out(4,string))\n"
+                lc_step "resize driver: re-promoted (the r6-F1 wedge did not fire)"
+            }
+            "user fault" { lc_fail "segv on the re-zoom resize (resize driver)" }
+            -re {QUAKE ERROR|Sys_Error} { lc_fail "engine error on the re-zoom resize (resize driver)" }
+            timeout { lc_fail "no direct re-promotion within 90s of re-zoom -- the r6-F1 resize-wedge class (resize driver)" }
+        }
+    }
 }
 
 # Teardown leg: ^C kills the game mid-session -- the wimg display-safe
@@ -240,7 +287,7 @@ expect {
 # warp-prove's TCTL mode (W-4: the cost rows live on the TAPESTRY
 # tree's ctl, not warp's -- `warp-prove ctl` read the wrong ctl for
 # three runs and this leg reported "unreadable" every time).
-lc_send "warp-prove tctl present-poke-img"
+lc_send "warp-prove tctl poke"
 set timeout 30
 expect {
     -re {cost present-poke-img (\d+) (\d+) (\d+)} {
@@ -250,6 +297,25 @@ expect {
     timeout {
         puts "\nVKQ-VENUS POKES: unreadable (pre-tctl server or ctl timeout; census missed, not gated)\n"
     }
+}
+# The poke DECOMPOSITION (the display-present hunt's instrument): the
+# same substring read carries the bind/flush split rows -- which of the
+# two synchronous device steps holds the ~17 ms/frame the displayed
+# figure loses against the undisplayed one. REPORTED, not gated: a
+# pre-decomposition server simply has no rows.
+set timeout 10
+expect {
+    -re {cost poke-bind (\d+) (\d+) (\d+)} {
+        puts "\nVKQ-VENUS POKE-BIND: n=$expect_out(1,string) sum_us=$expect_out(2,string) max_us=$expect_out(3,string)\n"
+    }
+    timeout { puts "\nVKQ-VENUS POKE-BIND: no row (pre-decomposition server)\n" }
+}
+set timeout 10
+expect {
+    -re {cost poke-flush (\d+) (\d+) (\d+)} {
+        puts "\nVKQ-VENUS POKE-FLUSH: n=$expect_out(1,string) sum_us=$expect_out(2,string) max_us=$expect_out(3,string)\n"
+    }
+    timeout { puts "\nVKQ-VENUS POKE-FLUSH: no row (pre-decomposition server)\n" }
 }
 
 set s1 [pswp]

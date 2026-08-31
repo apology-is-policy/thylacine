@@ -426,6 +426,51 @@ check "control leg ALSO shows vk-sdl PASS -> UNVERIFIED" 1 \
 check "control leg ALSO shows an img direct bind -> UNVERIFIED" 1 \
       'grep "tapestryd: scanout direct 0 img res" "$t" >> "$c"' ""
 
+# --- W-4: the quake-vk gate's verdict (round-7 F9) --------------------------
+# Every string below is copied from run 3's REAL fetched log
+# (build/warp-quake-vk.log, gate VERIFIED live 2026-08-31) -- the capture
+# half is witnessed by that run; these fixtures own only the verdict half.
+mk_vkq() {
+    cat > "$1" <<'EOF'
+VKQ-VENUS DEVICE (linear): Virtio-GPU Venus (V3D 4.2.14.0)
+VKQ-VENUS DIRECT (linear): surface 1 img res 926 (1280x800)
+VKQ-VENUS FPS (linear): 969 frames 30.2s 32.1 fps (comparator: the SAME host's same-day glq-virgl figure)
+VKQ-VENUS DEVICE (blit): Virtio-GPU Venus (V3D 4.2.14.0)
+VKQ-VENUS DIRECT (blit): surface 1 img res 957 (1280x800)
+VKQ-VENUS FPS (blit): 969 frames 28.2s 34.4 fps (comparator: the SAME host's same-day glq-virgl figure)
+VKQ-VENUS RESTORE: console direct after 2s / 66 driven tick(s) of ^C (bound 90s)
+VKQ-VENUS POKES: n=1957 sum_us=41734792 max_us=3393
+VKQ-VENUS swap-delta: pswpin +1 pswpout +0
+VKQ-VENUS PASS
+LS-CI PASS: vkq-venus: vkQuake on venus through the img Direct arm (the W-4 vk half of the FPS comparison)
+EOF
+}
+
+# qcheck <name> <want-exit 0|1> <mutator>
+qcheck() {
+    local name="$1" want="$2" mut="$3"
+    local q="$WORK/q.log"
+    mk_vkq "$q"
+    [ -n "$mut" ] && eval "$mut"
+    local out; out=$(tools/warp-host.sh quake-vk-verdict "$q" 2>&1); local rc=$?
+    if [ "$rc" -eq "$want" ]; then
+        printf '  PASS  %s (rc=%d)\n' "$name" "$rc"; PASS=$((PASS+1))
+    else
+        printf '  FAIL  %s (rc=%d, wanted %d)\n%s\n' "$name" "$rc" "$want" "$out"
+        FAIL=$((FAIL+1))
+    fi
+}
+
+qcheck "vkq: clean run VERIFIES" 0 ""
+qcheck "vkq: no VKQ-VENUS PASS -> UNVERIFIED" 1 \
+       'grep -v "^VKQ-VENUS PASS" "$q" > "$q.x" && mv "$q.x" "$q"'
+qcheck "vkq: no scenario pass line -> UNVERIFIED" 1 \
+       'grep -v "LS-CI PASS: vkq-venus:" "$q" > "$q.x" && mv "$q.x" "$q"'
+qcheck "vkq: SWAPPED voids a passing run -> DISCARD" 1 \
+       'printf "VKQ-VENUS SWAPPED -- the fps figure measures swapping, DISCARD IT\n" >> "$q"'
+qcheck "vkq: an lc_fail run (one leg fps) -> UNVERIFIED" 1 \
+       'sed "s/^VKQ-VENUS PASS$/LS-CI FAIL: only 1 of 2 leg fps lines within 300s each (teardown + census reported above)/" "$q" > "$q.x" && grep -v "LS-CI PASS" "$q.x" > "$q" && rm "$q.x"'
+
 printf '\n%d pass, %d fail\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
 echo "venus-verdict: DISCRIMINATES"

@@ -1141,10 +1141,17 @@ enum Cost {
     Cpu,
     /// A CPU-composed region's upload + flush (`screen_push`).
     Push,
+    /// The poke path's SET_SCANOUT-class rebind alone (both the promotion
+    /// switch and the steady-state per-poke flip -- a swapchain rotates
+    /// presentables, so every poke rebinds). Splits PresentPokeImg so the
+    /// census can attribute the present's cost to the flip vs the flush.
+    PokeBind,
+    /// The poke path's RESOURCE_FLUSH alone (the host display update).
+    PokeFlush,
 }
 
 impl Cost {
-    const COUNT: usize = Cost::Push as usize + 1;
+    const COUNT: usize = Cost::PokeFlush as usize + 1;
     const ALL: [Cost; Cost::COUNT] = [
         Cost::PresentDirectGl,
         Cost::PresentDirect2d,
@@ -1165,6 +1172,8 @@ impl Cost {
         Cost::ReadbackWait,
         Cost::Cpu,
         Cost::Push,
+        Cost::PokeBind,
+        Cost::PokeFlush,
     ];
     fn name(self) -> &'static str {
         match self {
@@ -1187,6 +1196,8 @@ impl Cost {
             Cost::ReadbackWait => "readback-wait",
             Cost::Cpu => "cpu",
             Cost::Push => "push",
+            Cost::PokeBind => "poke-bind",
+            Cost::PokeFlush => "poke-flush",
         }
     }
 }
@@ -5986,7 +5997,10 @@ impl Comp {
         // the FK_PRESENT frame because it rides a ctl-write dispatch.
         let t0 = Instant::now();
         if self.pending_direct == Some(n) {
-            if self.direct_bind_adopted(&g, w, h) {
+            let tb = Instant::now();
+            let bound = self.direct_bind_adopted(&g, w, h);
+            self.cost_add(Cost::PokeBind, tb);
+            if bound {
                 say!("tapestryd: scanout direct {} img res {} ({}x{})", n, g.res_id, w, h);
                 self.scanout = Scanout::Direct(n);
                 self.pending_direct = None;
@@ -6000,10 +6014,21 @@ impl Comp {
                 );
             }
         } else if self.scanout == Scanout::Direct(n) {
-            if self.bound_res != g.res_id && !self.direct_bind_adopted(&g, w, h) {
-                return; // refused flip: keep the old frame on screen
+            // The steady state is bind + flush EVERY poke (a swapchain
+            // rotates presentables, so bound_res never matches), and each
+            // is a synchronous device step -- timed apart so the census
+            // can say which one carries the present's cost.
+            if self.bound_res != g.res_id {
+                let tb = Instant::now();
+                let ok = self.direct_bind_adopted(&g, w, h);
+                self.cost_add(Cost::PokeBind, tb);
+                if !ok {
+                    return; // refused flip: keep the old frame on screen
+                }
             }
+            let tf = Instant::now();
             let _ = self.gpu.flush(g.res_id, 0, 0, w, h);
+            self.cost_add(Cost::PokeFlush, tf);
             presented = true;
         }
         if presented {
@@ -6229,6 +6254,11 @@ impl Comp {
         if let Some(c) = self.wctx_mut(pub_id, conn) {
             c.probe = probe;
         }
+        // Identity for the watch's reader: which conn owns the ctx it is
+        // about to report on. Gated like the watch itself -- one line per
+        // client mint, test boots only.
+        #[cfg(feature = "test-mode")]
+        say!("tapestryd: warp ctx {} minted conn={} slot={}", pub_id, conn, slot);
         Some(pub_id)
     }
 
@@ -10088,12 +10118,22 @@ impl Comp {
         }
         self.watch_last = Some(Instant::now());
         for c in self.warp_ctxs.iter().flatten() {
+            // The ctx's adopted surface, if any pane names it back: the
+            // WHO of a churning ctx (an orphan reports surf=-).
+            let surf = self
+                .surfaces
+                .iter()
+                .position(|s| s.as_ref().map_or(false, |s| s.gl_src == Some(c.pub_id)))
+                .map(|i| i as i64)
+                .unwrap_or(-1);
             say!(
-                "tapestryd: warp-watch pass={} fparked={} rparked={} | ctx={} inflight={} sig={} rep={} again={} tl=[{},{},{},{}] poisoned={}",
+                "tapestryd: warp-watch pass={} fparked={} rparked={} | ctx={} conn={} surf={} inflight={} sig={} rep={} again={} tl=[{},{},{},{}] poisoned={}",
                 self.watch_pass,
                 self.w210_fparked,
                 self.w210_rparked,
                 c.pub_id,
+                c.owner_conn,
+                surf,
                 c.fences_in_flight,
                 c.fence_signaled,
                 c.fence_reported,

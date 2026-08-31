@@ -1011,13 +1011,23 @@ quake-vk)
         sleep 10
     done
     [[ -n "$fetched" ]] || { echo "== quake-vk: log fetch FAILED after 3 attempts"; exit 1; }
+    exec "$REPO_ROOT/tools/warp-host.sh" quake-vk-verdict "$out"
+    ;;
+quake-vk-verdict)
+    # The W-4 vk gate's verdict as its OWN verb (round-7 F9): `quake-vk`
+    # fetches then execs this; tools/test-venus-verdict.sh drives it
+    # against crafted logs. Same one-implementation-two-callers rule as
+    # venus-verdict -- for its first three lives this block ran only at
+    # the tail of a ~25-minute remote run, which is a verdict nothing
+    # can afford to sabotage-test.
+    qlog="${2:?usage: warp-host.sh quake-vk-verdict <run.log>}"
     echo "== quake-vk verdict =="
-    if grep -q "VKQ-VENUS SWAPPED" "$out"; then
+    if grep -q "VKQ-VENUS SWAPPED" "$qlog"; then
         echo "W-4 VK GATE: SWAPPED -- figures measure swapping, DISCARD"
         exit 1
     fi
-    if grep -q "VKQ-VENUS PASS" "$out" && grep -q "LS-CI PASS: vkq-venus:" "$out"; then
-        grep "VKQ-VENUS" "$out"
+    if grep -q "VKQ-VENUS PASS" "$qlog" && grep -q "LS-CI PASS: vkq-venus:" "$qlog"; then
+        grep "VKQ-VENUS" "$qlog"
         echo "W-4 VK GATE: VERIFIED"
     else
         echo "W-4 VK GATE: UNVERIFIED (need VKQ-VENUS PASS + the scenario pass line)"
