@@ -1572,12 +1572,38 @@ gets an honest decline, and the genuinely concurrent shape keeps the target it
 already has (`CLONE_THREAD` onto `SYS_THREAD_SPAWN`, whenever that row is
 written).
 
-**A zero `stack` declines**, which is what keeps `vfork()` proper out of scope
-(§9's fourth question, second half). Linux reads `stack == 0` under `CLONE_VM`
-as "share the parent's stack", safe there only because `CLONE_VFORK` suspends
-the parent so the two never push concurrently. `SYS_RFORK` refuses a zero
-`child_sp` by contract, and weakening a landed kernel gate to widen a phenotype
-row would be the wrong direction of change.
+**A zero `stack` is `vfork()` proper, and it is served AS A FORK** (option B,
+operator-voted 2026-08-31; supersedes the original "declines" stance recorded
+here). Linux reads `stack == 0` under `CLONE_VM` as "share the parent's stack",
+safe there only because `CLONE_VFORK` suspends the parent so the two never push
+concurrently. The lineage question decided it: **Plan 9 has no
+two-Procs-one-stack shape at all** — `rfork` always gives the child its own
+stack, which is why it takes no stack argument (§3.1), and `SYS_RFORK`'s RFMEM
+`child_sp` rule is that invariant wearing a Linux parameter. Two candidate
+answers were weighed:
+
+- **A — relax the kernel gate** so `child_sp == 0` under RFMEM means "inherit
+  the parent's SP", made safe by the unconditional vfork suspend. Rejected:
+  it pushes a shape Plan 9 deliberately never had *down into the native
+  contract*, and the `child_sp` rule it weakens is the faithful encoding of the
+  lineage's own choice.
+- **B — serve the null-stack vfork as a fork** — a private copy-on-write child,
+  in the phenotype layer, leaving `SYS_RFORK` untouched. POSIX makes anything
+  but `_exit`/`exec` after `vfork` UNDEFINED, so a copy is conformant (the
+  classic `#define vfork fork`), and the only observable differences — the
+  parent not suspending, the child's pre-exec writes not reaching the parent —
+  are exactly what POSIX leaves undefined. This is where Plan 9's own POSIX
+  layer had to put it: there was no vfork underneath to map onto.
+
+B won on lineage alignment, and it is nearly free to reason about: it maps to
+`share_mem=false` + `child_sp=0`, the **identical** downstream to the fork word
+`clone(SIGCHLD, 0)` already produces — one translation reached by two flags
+words, not a new path. A **non-zero** `stack` stays a true RFMEM vfork
+(`posix_spawn`'s shape), where the child has its own stack and the parent
+genuinely suspends. The impetus was concrete: busybox issues `vfork()` proper
+for its `tar`/`gzip` pipeline (`clone(CLONE_VM|CLONE_VFORK|SIGCHLD, 0)`,
+confirmed by disassembly), and the pre-B decline surfaced to the guest as
+`tar: vfork: Function not implemented` with no fallback.
 
 **What this row makes reachable and does NOT fix (task #127).**
 `rfork_internal` copies `phenotype` to the child but not `sigtab`, and the

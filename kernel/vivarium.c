@@ -1408,13 +1408,38 @@ enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
 
     if (flags != (u64)VIV_CLONE_FLAGS_ADMITTED) return VIV_FORWARD;
 
-    // A ZERO stack is Linux's "share the parent's stack", which is `vfork()`
-    // proper. SYS_RFORK refuses a zero child_sp by contract, so this declines
-    // one layer above the kernel rather than weakening a landed gate. It is a
-    // DOMAIN question, not a semantic one -- Linux serves stack==0 happily, so
-    // there is no errno of its own to reproduce (contrast mmap's `len`, which
-    // IS judged in the shell precisely because Linux gives it EINVAL/ENOMEM).
-    if (stack == 0) return VIV_FORWARD;
+    // The vfork shape splits on `stack`, and the split is option B (the
+    // 2026-08-31 vote; lineage-aligned per LINEAGE.md 3.1).
+    //
+    //   stack != 0 -- posix_spawn's shape. The child runs on its OWN stack
+    //   while sharing the parent's memory, so it is a true RFMEM vfork: the
+    //   parent suspends (vfork_await_release), the child execs/exits on its own
+    //   stack, and the two never push a shared frame concurrently.
+    //   share_mem = true.
+    //
+    //   stack == 0 -- `vfork()` proper: "run on the parent's ONE stack, and
+    //   trust me not to disturb it before exec/exit." Plan 9 has NO such shape.
+    //   rfork always gives the child its own stack -- it has no stack argument
+    //   precisely because two Procs never share one (LINEAGE.md 3.1) -- and our
+    //   RFMEM child_sp rule is that invariant wearing a Linux parameter.
+    //   Weakening it to serve this (option A) was rejected as anti-lineage.
+    //   Instead serve it as a FORK: a private copy-on-write child. POSIX makes
+    //   anything but _exit/exec after vfork UNDEFINED, so a copy is a
+    //   conformant implementation (the classic `#define vfork fork`), and the
+    //   only observable differences -- the parent not suspending, the child's
+    //   pre-exec writes not reaching the parent -- are exactly what POSIX
+    //   leaves undefined. The alternative is an ENOSYS the caller has no
+    //   fallback for: busybox's spawn aborts with "vfork: Function not
+    //   implemented" and no tar/gzip pipeline runs.
+    //
+    //   This arm is provably equivalent to the fork arm above: share_mem=false
+    //   + stack=0 reaches the shell as sys_rfork_core(RFPROC, 0, 0), the exact
+    //   translation `clone(SIGCHLD, 0)` already produces. It is not a new path,
+    //   it is the same path reached by a different flags word.
+    if (stack == 0) {
+        *share_mem_out = false;
+        return VIV_TRANSLATED;
+    }
     *share_mem_out = true;
 
     // NOTE what is NOT checked: alignment, range, and overlap with the caller's

@@ -2078,24 +2078,31 @@ enum {
 // The genuinely concurrent shape has a correct target already -- CLONE_THREAD
 // onto SYS_THREAD_SPAWN -- and that row should arrive with its own reasoning.
 //
-// A ZERO `stack` DECLINES, and that is what keeps `vfork()` proper out of scope
-// (LINEAGE.md §9's fourth question, second half). Linux reads stack==0 under
-// CLONE_VM as "share the parent's stack", which is safe there ONLY because
-// CLONE_VFORK suspends the parent so the two never push concurrently. SYS_RFORK
-// refuses a zero child_sp by contract (syscall.h), and weakening a landed
-// kernel gate to widen a phenotype row would be the wrong direction of change.
-// Declining one line above the kernel keeps the reason visible.
+// A ZERO `stack` under the vfork shape is `vfork()` proper, and it is SERVED AS
+// A FORK (option B, 2026-08-31; LINEAGE.md 3.1). Linux reads stack==0 under
+// CLONE_VM as "share the parent's stack", safe there ONLY because CLONE_VFORK
+// suspends the parent so the two never push concurrently. Plan 9 has no such
+// shape -- rfork always gives the child its own stack, which is why it has no
+// stack argument -- and SYS_RFORK's RFMEM child_sp rule is that invariant. Two
+// Procs on one stack is the one memory-sharing shape the lineage refused, so
+// rather than weaken that gate (option A, rejected as anti-lineage) the null
+// stack maps to a private copy-on-write child: POSIX makes anything but
+// _exit/exec after vfork undefined, so a copy is conformant, and the only
+// observable differences (no suspend, pre-exec writes not shared) are the
+// undefined ones. The result is share_mem=false -- the SAME translation the
+// fork arm produces -- so it is one path reached by two flags words, not a new
+// one. A NON-zero stack stays a true RFMEM vfork (posix_spawn's shape).
 //
 // Returns VIV_TRANSLATED or VIV_FORWARD. Never ENOSYS: `clone` exists, and the
 // shapes outside the domain are ones a later chunk may serve rather than ones
 // to deny forever.
 //
-// On VIV_TRANSLATED, *share_mem_out says WHICH of the two shapes was admitted:
-// true = the vfork shape (the child shares the address space and the parent
-// suspends -> RFMEM), false = the fork shape (the child gets a private
-// copy-on-write copy). The shell turns that into a flag word; the pure layer
-// says share-or-copy without importing proc.h's RFPROC/RFMEM, which do not
-// belong on this side of the boundary.
+// On VIV_TRANSLATED, *share_mem_out says WHICH shape the shell must build:
+// true = RFMEM (the child shares the address space and the parent suspends --
+// a non-zero-stack vfork), false = a private copy-on-write child (a fork, OR a
+// null-stack vfork served as one per above). The shell turns that into a flag
+// word; the pure layer says share-or-copy without importing proc.h's
+// RFPROC/RFMEM, which do not belong on this side of the boundary.
 //
 // It is an OUT-PARAM rather than something the shell re-derives from `flags`
 // (the vivarium_openat_decide shape) because re-deriving would put the same

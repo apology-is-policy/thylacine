@@ -1185,13 +1185,20 @@ void test_vivarium_clone_domain(void) {
     TEST_EXPECT_EQ((int)vivarium_clone_decide(0, 0, &sm),
                    (int)VIV_FORWARD, "a bare clone(0) declines -- no exit signal is unservable");
 
-    // A ZERO stack is Linux's `vfork()` proper -- "share the parent's stack",
-    // which is safe there only because CLONE_VFORK suspends the parent.
-    // SYS_RFORK refuses a zero child_sp by contract, so this declines one layer
-    // above rather than weakening a landed kernel gate. LINEAGE.md §9's fourth
-    // question, second half.
+    // A ZERO stack is `vfork()` proper, and option B SERVES it AS A FORK
+    // (2026-08-31; LINEAGE.md 3.1). Plan 9 has no two-Procs-one-stack shape, so
+    // rather than weaken SYS_RFORK's child_sp rule (option A, anti-lineage) the
+    // null-stack vfork maps to a private copy-on-write child -- conformant,
+    // since POSIX makes anything but _exit/exec after vfork undefined. The
+    // verdict AND share_mem are both pinned: a widening that returned RFMEM here
+    // would hand a null child_sp to SYS_RFORK's RFMEM gate (which refuses it)
+    // OR, worse, share the parent's stack -- the exact hazard the fork mapping
+    // avoids. share_mem MUST be false, i.e. the SAME shape clone(SIGCHLD,0)
+    // yields two assertions above.
+    sm = true;
     TEST_EXPECT_EQ((int)vivarium_clone_decide(ok, 0, &sm),
-                   (int)VIV_FORWARD, "stack==0 declines -- vfork() proper is out of scope");
+                   (int)VIV_TRANSLATED, "stack==0 vfork is SERVED (option B) -- not declined");
+    TEST_ASSERT(!sm, "null-stack vfork forks (private COW), never RFMEM -- the lineage rule");
 
     // THE HIGH HALF IS READ, unlike every other decide in this file -- and that
     // asymmetry is the point. mmap/openat narrow to 32 bits because their Linux

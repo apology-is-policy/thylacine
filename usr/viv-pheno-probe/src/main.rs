@@ -2515,14 +2515,33 @@ unsafe fn run_linux() -> ! {
     );
 
     // stack == 0 is Linux's vfork() proper -- "share the parent's stack".
-    // SYS_RFORK refuses a zero child_sp by contract, so the row declines one
-    // layer above rather than weakening a landed kernel gate.
-    leg!(
-        rep,
-        svc6(NR_CLONE, CLONE_VM | CLONE_VFORK | SIGCHLD, 0, 0, 0, 0, 0)
-            == NEG_ENOSYS,
-        b"L159\n"
-    );
+    // Option B (2026-08-31; LINEAGE.md 3.1) SERVES it as a FORK, a private
+    // copy-on-write child, rather than weakening SYS_RFORK's child_sp rule
+    // (Plan 9 has no two-Procs-one-stack shape; option A was rejected as
+    // anti-lineage). So this is now the L156 fork leg wearing the vfork flags
+    // word: it PRODUCES A CHILD, and the child must exit at once rather than
+    // fall through into the remaining legs (which would interleave a second,
+    // garbage verdict stream into the same file -- the exact failure the
+    // pre-B assertion caused when this became a served fork). Until 2026-08-31
+    // this asserted `== NEG_ENOSYS`; the leg number and its place in the ladder
+    // are kept so the marker sequence a boot gate greps for is stable.
+    let vfpid = svc6(NR_CLONE, CLONE_VM | CLONE_VFORK | SIGCHLD, 0, 0, 0, 0, 0);
+    if vfpid == 0 {
+        unsafe { linux_exit(0) }             // the fork child; never returns
+    }
+    leg!(rep, vfpid > 0, b"L159\n");
+    // Reap it AT ONCE, by pid, blocking. The wait4 accounting below (L170-L176)
+    // is written for EXACTLY the two zombies L156 (fork) and L160 (vfork)
+    // leave outstanding, and L174 asserts "every child reaped -> ECHILD".
+    // Option B makes this leg a real fork that leaves a THIRD zombie; reaping it
+    // here restores the by-construction count the ladder depends on and adds no
+    // new outstanding state. It cannot disturb fpid/cpid -- a by-pid wait
+    // touches only vfpid, and cpid is not even created until L160 below.
+    {
+        let mut _vst: i32 = -1;
+        let _ = svc4(NR_WAIT4, vfpid as u64,
+                     &mut _vst as *mut i32 as u64, 0, 0);
+    }
 
     // NOW THE REAL ONE. Through the musl-shaped shim, because the child returns
     // on a different stack; the shim also poisons x2/x3/x4, which is what makes

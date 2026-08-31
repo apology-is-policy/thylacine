@@ -79,5 +79,24 @@ lc_pass "abin-tar(e): the directory member extracted (mkdirat S_IFMT masked)"
 lc_run_expect "cat abin-t/sub/payload.txt" "tarpayload"
 lc_pass "abin-tar(f): the file member extracted with its content (openat S_IFMT masked)"
 
-lc_send "rm -rf abin-t abin-t.tar"
+# --- COMPRESSED: the vfork->fork proof (option B) ---------------------------
+# `-z` makes busybox spawn gzip via vfork() proper -- clone(CLONE_VM|CLONE_VFORK
+# |SIGCHLD, stack=0). Pre-B that declined ENOSYS ("tar: vfork: Function not
+# implemented") and no .tar.gz worked. Option B serves the null-stack vfork as a
+# private COW fork (LINEAGE.md 3.1), so the gzip child runs. This is the leg
+# that would have failed before the clone-decide change, and its create+extract
+# round trip is the end-to-end witness that busybox's vfork+pipe+exec+reap
+# pipeline works -- the pieces the census showed declining (pipe2/dup3/wait4)
+# are proven non-blocking BY THIS PASSING, since a real block would surface here.
+lc_send "tar czf abin-c.tar.gz abin-t"
+lc_run_expect "ls abin-c.tar.gz" "abin-c.tar.gz"
+lc_pass "abin-tar(g): busybox tar -z spawned gzip (vfork->fork, option B)"
+
+lc_send "rm -rf abin-t"
+lc_run_expect_hardfail "tar xzf abin-c.tar.gz && echo ABIN-GZ-RC0" \
+    "ABIN-GZ-RC0" "Function not implemented"
+lc_run_expect "cat abin-t/sub/payload.txt" "tarpayload"
+lc_pass "abin-tar(h): the .tar.gz round-trips through gzip (W2-a compressed)"
+
+lc_send "rm -rf abin-t abin-t.tar abin-c.tar.gz"
 lc_quit

@@ -1830,11 +1830,18 @@ So the domain is an exact equality and the caller gets an honest decline. The
 genuinely concurrent shape keeps the target it already has: `CLONE_THREAD` onto
 `SYS_THREAD_SPAWN`, whenever that row is written.
 
-A zero `stack` declines for the adjacent reason: it is Linux's `vfork()` proper,
-"share the parent's stack", safe there only because `CLONE_VFORK` suspends the
-parent so the two never push concurrently. `SYS_RFORK` refuses a zero `child_sp`
-by contract, and weakening a landed kernel gate to widen a phenotype row is the
-wrong direction of change.
+A zero `stack` is Linux's `vfork()` proper ("share the parent's stack"), and it
+is **served as a fork** (option B, operator-voted 2026-08-31). Plan 9 has no
+two-Procs-one-stack shape — `rfork` always gives the child its own stack — and
+`SYS_RFORK`'s RFMEM `child_sp` rule is that invariant, so rather than weaken it
+(option A, rejected as anti-lineage) the null-stack vfork maps to a private
+copy-on-write child. POSIX makes anything but `_exit`/`exec` after `vfork`
+undefined, so a copy is conformant, and the result is `share_mem=false` — the
+same translation `clone(SIGCHLD, 0)` produces, reached by a second flags word. A
+**non-zero** `stack` stays a true RFMEM vfork (`posix_spawn`'s shape). Full
+rationale: `docs/LINEAGE.md` §3.1 + the "A zero stack" paragraph. The concrete
+driver was busybox's `tar`/`gzip` pipeline, which issues `vfork()` proper and
+had no fallback for the pre-B `ENOSYS`.
 
 The exit signal is the **low byte**, not a flag, and only `SIGCHLD` is admitted:
 `exits()` posts `child_exit` unconditionally (I-19), so any other request —
