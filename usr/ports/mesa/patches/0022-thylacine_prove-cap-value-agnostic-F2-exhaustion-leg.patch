@@ -1,7 +1,7 @@
 From 6fde181227d567ec11dc83a711ad823489517c54 Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Mon, 31 Aug 2026 17:07:55 +0200
-Subject: [PATCH 22/22] thylacine_prove: cap-value-agnostic F2 exhaustion leg
+Subject: [PATCH 22/23] thylacine_prove: cap-value-agnostic F2 exhaustion leg
  (W-4)
 
 The F2 witness baked its premise into a constant: 3 x 24 MiB had to

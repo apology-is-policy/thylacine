@@ -1,7 +1,7 @@
 From deed314a45fa093b53e6f2008e11a70456ec8831 Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Wed, 26 Aug 2026 13:35:47 +0200
-Subject: [PATCH 15/22] Thylacine Warp multi-queue (F3): per-timeline fences +
+Subject: [PATCH 15/23] Thylacine Warp multi-queue (F3): per-timeline fences +
  transport mutex + witnesses
 
 The multi-queue submit-fence redesign, client half (WARP-MULTIQUEUE-DESIGN in

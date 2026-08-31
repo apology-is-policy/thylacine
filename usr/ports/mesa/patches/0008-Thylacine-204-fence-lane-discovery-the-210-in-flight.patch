@@ -1,7 +1,7 @@
 From 1135117fc6479774e1b4e26dd3c403a9fc403c64 Mon Sep 17 00:00:00 2001
 From: Thylacine Clade <clade@thylacine.invalid>
 Date: Wed, 12 Aug 2026 09:32:56 +0000
-Subject: [PATCH 08/22] Thylacine #204: fence-lane discovery + the #210
+Subject: [PATCH 08/23] Thylacine #204: fence-lane discovery + the #210
  in-flight conservation clamp
 
 The winsys throttle depth becomes a ctl discovery (fence-lane, the

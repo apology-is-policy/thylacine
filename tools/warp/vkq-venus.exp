@@ -89,72 +89,98 @@ lc_login michael correct-horse-battery-staple-v1
 
 set s0 [pswp]
 
-# The BARE name: vkquake is ramfs-resident (no launcher detour -- it
-# carries no LLVM, unlike the GL build); -basedir names the pool data.
-lc_send "vkquake -basedir /quake -window -width $DW -height $DH -nosound +timedemo demo1"
-
-# Device leg. vkQuake prints `Device: <VkPhysicalDevice deviceName>` in
-# GL_InitDevice; on this host it must name Venus (V3D behind it). A
-# lavapipe/llvmpipe name means the HOST fell back to software vulkan.
-set timeout 900
-expect {
-    -re {Device: ([^\r\n]*)[\r\n]} {
-        set dev $expect_out(1,string)
-        if {[string match "*lavapipe*" $dev] || [string match "*llvmpipe*" $dev]} {
-            lc_fail "software vulkan device: '$dev'"
-        }
-        if {![string match "*Venus*" $dev]} {
-            lc_fail "device names neither Venus nor a known fallback: '$dev'"
-        }
-        puts "\nVKQ-VENUS DEVICE: $dev\n"
-        lc_step "vulkan device is live on venus"
-    }
-    "user fault" { lc_fail "vkquake segv during vulkan init" }
-    -re {QUAKE ERROR|Sys_Error} { lc_fail "vkquake error during vulkan init" }
-    timeout      { lc_fail "no Device: line within 900s" }
-}
-
-expect {
-    "Quake Initialized" { lc_step "engine init complete" }
-    "user fault" { lc_fail "vkquake segv during engine init" }
-    -re {QUAKE ERROR|Sys_Error} { lc_fail "vkquake error during engine init" }
-    timeout      { lc_fail "no 'Quake Initialized' within 900s" }
-}
-
-# The zoom (Super+F, default chord; the game's pane holds focus from
-# host()). The img switch defers to the game's next present-COMPLETE --
-# the poke (img_poke_complete) -- so the running demo completes it
-# within a frame or two.
-if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k meta_l+f} err]} {
-    lc_fail "qmp zoom chord failed: $err"
-}
-set timeout 120
-expect {
-    -re {scanout direct (\d+) img res (\d+) \((\d+)x(\d+)\)} {
-        puts "\nVKQ-VENUS DIRECT: surface $expect_out(1,string) img res $expect_out(2,string) ($expect_out(3,string)x$expect_out(4,string))\n"
-        lc_step "direct switch fired -- SET_SCANOUT_BLOB of the presentable"
-    }
-    "user fault" { lc_fail "segv around the zoom/direct switch" }
-    timeout      { lc_fail "no img direct-switch say line within 120s of the zoom (surface not display-sized? head != ${DW}x${DH}?)" }
-}
-
-# The demo runs out under the Direct img arm; figures REPORTED, not
-# gated. A TIMEOUT falls through to teardown + census FIRST and fails at
-# the end (the glq lesson: a dying run still reports its census).
+# TWO LEGS (the W-4 section-8 tiling A/B, one boot): `linear` = the
+# default NO_BLIT chain (the image IS the presentable, LINEAR-tiled);
+# `blit` = -wsiblit (patch 0005 -> THY_WSI_BLIT in-process) = the
+# BUFFER_BLIT chain (tiled images + a per-present resolve-blit into the
+# linear presentable). Same demo, same boot, same host state -- the
+# cleanest form of the ratified comparison. The zoom fires once (a
+# HOST-window property); the teardown + census run once, after leg B.
 set fps_wait 1800
 if {[info exists ::env(VKQ_FPS_WAIT)]} { set fps_wait $::env(VKQ_FPS_WAIT) }
-set timeout $fps_wait
 set fps_seen 0
-expect {
-    -re {([0-9]+) frames +([0-9.]+) seconds +([0-9.]+) fps} {
-        puts "\nVKQ-VENUS FPS: $expect_out(1,string) frames $expect_out(2,string)s $expect_out(3,string) fps (comparator: the SAME host's same-day glq-virgl figure)\n"
-        lc_step "timedemo complete"
-        set fps_seen 1
+foreach leg {linear blit} {
+    set extra ""
+    if {$leg eq "blit"} { set extra " -wsiblit" }
+    # The BARE name: vkquake is ramfs-resident (no launcher detour -- it
+    # carries no LLVM, unlike the GL build); -basedir names the pool data.
+    lc_send "vkquake -basedir /quake -window -width $DW -height $DH -nosound$extra +timedemo demo1"
+
+    # Device leg. vkQuake prints `Device: <VkPhysicalDevice deviceName>` in
+    # GL_InitDevice; on this host it must name Venus (V3D behind it). A
+    # lavapipe/llvmpipe name means the HOST fell back to software vulkan.
+    set timeout 900
+    expect {
+        -re {Device: ([^\r\n]*)[\r\n]} {
+            set dev $expect_out(1,string)
+            if {[string match "*lavapipe*" $dev] || [string match "*llvmpipe*" $dev]} {
+                lc_fail "software vulkan device ($leg leg): '$dev'"
+            }
+            if {![string match "*Venus*" $dev]} {
+                lc_fail "device names neither Venus nor a known fallback ($leg leg): '$dev'"
+            }
+            puts "\nVKQ-VENUS DEVICE ($leg): $dev\n"
+            lc_step "vulkan device is live on venus ($leg leg)"
+        }
+        "user fault" { lc_fail "vkquake segv during vulkan init ($leg leg)" }
+        -re {QUAKE ERROR|Sys_Error} { lc_fail "vkquake error during vulkan init ($leg leg)" }
+        timeout      { lc_fail "no Device: line within 900s ($leg leg)" }
     }
-    "user fault" { lc_fail "segv during the timedemo" }
-    -re {QUAKE ERROR|Sys_Error} { lc_fail "engine error during the timedemo" }
-    timeout {
-        puts "\nVKQ-VENUS FPS-TIMEOUT after ${fps_wait}s -- proceeding to teardown + census, FAIL at the end\n"
+
+    expect {
+        "Quake Initialized" { lc_step "engine init complete ($leg leg)" }
+        "user fault" { lc_fail "vkquake segv during engine init ($leg leg)" }
+        -re {QUAKE ERROR|Sys_Error} { lc_fail "vkquake error during engine init ($leg leg)" }
+        timeout      { lc_fail "no 'Quake Initialized' within 900s ($leg leg)" }
+    }
+
+    if {$leg eq "linear"} {
+        # The zoom (Super+F, default chord; the game's pane holds focus
+        # from host()). The img switch defers to the game's next
+        # present-COMPLETE -- the poke (img_poke_complete) -- so the
+        # running demo completes it within a frame or two.
+        if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k meta_l+f} err]} {
+            lc_fail "qmp zoom chord failed: $err"
+        }
+    }
+    set timeout 120
+    expect {
+        -re {scanout direct (\d+) img res (\d+) \((\d+)x(\d+)\)} {
+            puts "\nVKQ-VENUS DIRECT ($leg): surface $expect_out(1,string) img res $expect_out(2,string) ($expect_out(3,string)x$expect_out(4,string))\n"
+            lc_step "direct switch fired ($leg leg) -- SET_SCANOUT_BLOB of the presentable"
+        }
+        "user fault" { lc_fail "segv around the direct switch ($leg leg)" }
+        timeout      { lc_fail "no img direct-switch say line within 120s ($leg leg; surface not display-sized? head != ${DW}x${DH}?)" }
+    }
+
+    # The demo runs out under the Direct img arm; figures REPORTED, not
+    # gated. A TIMEOUT falls through (leg B: to teardown + census FIRST)
+    # and fails at the end (the glq lesson: a dying run still reports).
+    set timeout $fps_wait
+    expect {
+        -re {([0-9]+) frames +([0-9.]+) seconds +([0-9.]+) fps} {
+            puts "\nVKQ-VENUS FPS ($leg): $expect_out(1,string) frames $expect_out(2,string)s $expect_out(3,string) fps (comparator: the SAME host's same-day glq-virgl figure)\n"
+            lc_step "timedemo complete ($leg leg)"
+            incr fps_seen
+        }
+        "user fault" { lc_fail "segv during the timedemo ($leg leg)" }
+        -re {QUAKE ERROR|Sys_Error} { lc_fail "engine error during the timedemo ($leg leg)" }
+        timeout {
+            puts "\nVKQ-VENUS FPS-TIMEOUT ($leg) after ${fps_wait}s -- proceeding, FAIL at the end\n"
+        }
+    }
+
+    if {$leg eq "linear"} {
+        # Between legs: kill leg A, wait the prompt (fast -- the serial
+        # prompt is independent of the display's slower re-promotion),
+        # launch leg B into the same session.
+        send -- "\003"
+        lc_send "echo vkq-legswap"
+        set timeout 60
+        expect {
+            "vkq-legswap" { lc_step "prompt back between legs" }
+            timeout       { lc_fail "prompt never returned between the legs" }
+        }
     }
 }
 
@@ -227,8 +253,8 @@ if {$din > 64} {
     puts "VKQ-VENUS SWAPPED -- the fps figure measures swapping, DISCARD IT"
 }
 
-if {!$fps_seen} {
-    lc_fail "no timedemo fps line within ${fps_wait}s (teardown + census reported above)"
+if {$fps_seen < 2} {
+    lc_fail "only $fps_seen of 2 leg fps lines within ${fps_wait}s each (teardown + census reported above)"
 }
 if {!$restored} {
     lc_fail "console direct scanout not restored within $restore_cap driven ticks of ^C (census reported above)"

@@ -1,7 +1,7 @@
 From afef9fa7a8b42a8c5b1ec15857489937ea30187f Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Mon, 31 Aug 2026 13:11:04 +0200
-Subject: [PATCH 19/22] Thylacine Warp W-3 round-5 close: caps clamp + two
+Subject: [PATCH 19/23] Thylacine Warp W-3 round-5 close: caps clamp + two
  soundness-argument corrections
 
 F2 [P2]: the surface caps advertised maxImageExtent 8192x8192 while the

@@ -1,7 +1,7 @@
 From 997e37142dbe1cc36f3c57b97803e5ed1bb4901d Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Mon, 31 Aug 2026 13:56:20 +0200
-Subject: [PATCH 20/22] Thylacine Warp vkQuake-arc W-3e: the warp-ctx-pub
+Subject: [PATCH 20/23] Thylacine Warp vkQuake-arc W-3e: the warp-ctx-pub
  getter + the SDL first-frame witness
 
 Two pieces of the SDL2 Vulkan glue chunk that live mesa-side:

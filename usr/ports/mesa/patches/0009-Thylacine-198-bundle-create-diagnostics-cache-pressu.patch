@@ -1,7 +1,7 @@
 From 2eabd4a9b9d4c734e435113132c5cef174e75562 Mon Sep 17 00:00:00 2001
 From: thylacine <thylacine@localhost>
 Date: Wed, 12 Aug 2026 18:56:58 +0000
-Subject: [PATCH 09/22] Thylacine #198 bundle: create diagnostics, cache
+Subject: [PATCH 09/23] Thylacine #198 bundle: create diagnostics, cache
  pressure valve, honest S3TC
 
 Four batched changes against the /srv/warp seam client and st, all

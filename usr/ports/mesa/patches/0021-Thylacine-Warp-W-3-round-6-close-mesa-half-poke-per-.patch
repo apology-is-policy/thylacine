@@ -1,7 +1,7 @@
 From 561b8ae431fed2fc930636f73dfeea66b3e1fd54 Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Mon, 31 Aug 2026 14:44:32 +0200
-Subject: [PATCH 21/22] Thylacine Warp W-3 round-6 close (mesa half):
+Subject: [PATCH 21/23] Thylacine Warp W-3 round-6 close (mesa half):
  poke-per-present + claim corrections
 
 F3 [P3]: the present-poke dedup latch removed. W-3d's latch was correct

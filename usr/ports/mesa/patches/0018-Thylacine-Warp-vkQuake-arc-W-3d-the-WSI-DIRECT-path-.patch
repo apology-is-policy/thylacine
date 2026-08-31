@@ -1,7 +1,7 @@
 From c1c5e9a36eae711528c3a1341f05ddd145007223 Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Mon, 31 Aug 2026 11:59:28 +0200
-Subject: [PATCH 18/22] Thylacine Warp vkQuake-arc W-3d: the WSI DIRECT path
+Subject: [PATCH 18/23] Thylacine Warp vkQuake-arc W-3d: the WSI DIRECT path
  (vn_wsi_thylacine)
 
 Venus swapchains whose images are Thylacine compositor PRESENTABLES

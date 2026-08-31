@@ -1,7 +1,7 @@
 From c80a6ef2e2c8f34c66467c6b8417effaf3efa9fa Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Tue, 25 Aug 2026 23:19:39 +0200
-Subject: [PATCH 11/22] Thylacine Warp V-3b-3b: the Venus vkCreateInstance
+Subject: [PATCH 11/23] Thylacine Warp V-3b-3b: the Venus vkCreateInstance
  bring-up backend
 
 Turns the V-3b-3a vn_renderer skeleton into a working backend and drives a
