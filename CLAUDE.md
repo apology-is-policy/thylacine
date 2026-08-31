@@ -1,5 +1,11 @@
 # CLAUDE.md
 
+> ## ⛔ THE EFFORT GATE — settle this BEFORE the first line of code
+>
+> **Is the chunk in front of you crypto, security-critical, load-bearing kernel (a §28 invariant or an audit-trigger surface), or complicated enough that MAX effort is advisable — and you are not CERTAIN you are already at max? STOP. Raise a direct `AskUserQuestion` offering `/effort max`, and do not touch the work until the user answers.** The user deliberately runs reduced effort to conserve the weekly budget, and will NOT have load-bearing work built at less than max. This is never a line in a closing summary — it is a blocking question you raise the instant such work comes into view.
+>
+> **Bias hard toward asking; false positives beat false negatives.** Asking when it turns out fine costs one keystroke. NOT asking ships a soundness bug at reduced effort — a corrupt kernel, a broken crypto path, a race a max prosecutor would have caught. So: **rather safe than sorry — issue the question WITHOUT HESITATION.** `AskUserQuestion` blocks in-turn and never ends the run: the cost of asking is a moment, the cost of guessing wrong is a chunk done wrong. **This gate fires REGARDLESS of `.no-stop-nudge` / autonomous mode — it is the one escalation autonomy never suppresses.** Already at max, or the work is genuinely routine (mechanical edits, docs, orchestration)? Proceed — asking there is noise. Everywhere near the load-bearing surfaces, the burden of proof is on NOT asking. (Full trigger list + mechanics: [When to recommend `/effort max`](#when-to-recommend-effort-max).)
+
 Operating notes for Claude Code instances working on Thylacine OS.
 
 This document is binding scripture for every implementation session. It encodes the operational framework, the discipline expected, the build commands, the audit-trigger surfaces, and the invariants that must hold. Read this before doing anything else; refer back to it often.
@@ -1420,15 +1426,47 @@ compactable and you are not recommending it, still say so in a clause
 
 ## When to recommend `/effort max`
 
-For sessions involving:
+This is the detail behind **THE EFFORT GATE** at the top of this file — the same
+rule, with the full trigger list. **The disposition is a BLOCKING
+`AskUserQuestion`, not a passive suggestion** (user-directed 2026-08-31): before
+starting a chunk in a category below, unless you can confirm you are already at
+max, raise a direct `AskUserQuestion` offering `/effort max` (the recommended
+option first), and do not proceed on the qualifying work without the go-ahead.
 
-- Multi-step audit roundtrips with triage + fixes + re-audit.
-- Composition-heavy chunks crossing 3+ modules.
-- Format-break work (on-disk version bumps, ABI changes, syscall interface changes).
-- Spec-first work where the spec needs careful invariant design.
-- Recovery from an audit P0/P1 that requires deep tracing.
+The categories where max is advisable — the judgment trigger:
 
-Suggest the user run `/effort max` if not already set. Quality over speed in these contexts is non-negotiable.
+- **Crypto / security-critical** — Stratum integrity, janus / key handling, the
+  kernel CSPRNG (`chacha20` / `random`), corvus, capability checks, any
+  AEAD / MAC / keyslot path.
+- **Load-bearing kernel** — anything touching a §28 invariant or an
+  `AUDIT-TRIGGERS.md` surface (concurrency, commit ordering, handle / VMO /
+  BURROW lifecycle, note delivery, W^X, ASID, the scheduler, ...).
+- **Composition-heavy** chunks crossing 3+ modules, where many constraints must
+  be held at once.
+- **Format-break** work (on-disk version bumps, ABI / wire changes, syscall
+  interface changes).
+- **Spec-first** work where the invariant design is the hard part.
+- **Deep tracing** — audit P0/P1 recovery, or an elusive-bug hunt.
+
+Mechanics:
+
+- **Fires regardless of `.no-stop-nudge` / autonomous mode.** It is a quality
+  gate on the *work*, not a turn-end yield nudge, and `AskUserQuestion` blocks
+  in-turn without ending the run. It is the one escalation `.no-stop-nudge` does
+  NOT suppress.
+- **Already at max → proceed**, no question. **Cannot confirm your effort → treat
+  it as reduced and ASK** — false positives beat false negatives, so when in
+  doubt, ask without hesitation.
+- **Ask once per qualifying arc, then carry the answer for the session** — do not
+  re-ask on every chunk; re-ask only when the work moves to a genuinely different
+  surface, or the user has changed effort.
+- **The routine majority does NOT trigger it** — mechanical edits, docs, status,
+  orchestration, well-scoped implementation against a clear spec are fine at
+  reduced effort; asking there is noise.
+
+Quality over speed on the qualifying surfaces is non-negotiable; the gate exists
+to make the effort choice *visible and deliberate* exactly where getting it wrong
+is expensive.
 
 ---
 
