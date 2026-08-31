@@ -4701,6 +4701,78 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
     return (s64)nt->tid;
 }
 
+// N-3: the futex shell -- FUTEX_WAIT/WAKE/REQUEUE onto torpor. `p` is the
+// caller's Proc (== current_thread()->proc, which torpor's user-VA load
+// requires -- viv_tier2 passes exactly that). vivarium_futex_decide classifies
+// the op; torpor validates uaddr (aligned, bound, load) so there is no pre-check
+// here -- one implementation of that gate, torpor's.
+//
+// futex(uaddr, op, val, timeout/val2, uaddr2, val3):
+//   x0 uaddr, x1 op, x2 val, x3 timeout-PTR (WAIT) or val2 (REQUEUE), x4 uaddr2.
+static s64 viv_futex(struct Proc *p, u64 uaddr, u64 op_raw, u64 val,
+                     u64 timeout_or_val2, u64 uaddr2) {
+    (void)uaddr2;   // REQUEUE's target -- see the wake-emulation note below
+
+    enum viv_futex_op op;
+    if (vivarium_futex_decide((u32)op_raw, &op) != VIV_TRANSLATED)
+        return -(s64)T_E_NOSYS;   // PI / WAKE_OP / WAIT_BITSET: not the musl path
+
+    switch (op) {
+    case VIV_FUTEX_OP_WAIT: {
+        // Block while *uaddr == val. x3 is a POINTER to a RELATIVE timespec, or 0
+        // = block indefinitely.
+        s64 timeout_us = -1;   // torpor: < 0 blocks with no deadline
+        if (timeout_or_val2 != 0) {
+            struct { s64 tv_sec; s64 tv_nsec; } ts;
+            if (uaccess_copy_in(&ts, timeout_or_val2, sizeof(ts)) != 0)
+                return -(s64)T_E_FAULT;
+            if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000)
+                return -(s64)T_E_INVAL;
+            // us = sec*1e6 + nsec/1e3, clamped to torpor's 1-hour ceiling. The
+            // seconds bound is checked BEFORE the multiply so a huge tv_sec
+            // cannot overflow the u64 arithmetic.
+            if ((u64)ts.tv_sec >= TORPOR_MAX_TIMEOUT_US / 1000000ull) {
+                timeout_us = (s64)TORPOR_MAX_TIMEOUT_US;
+            } else {
+                u64 us = (u64)ts.tv_sec * 1000000ull + (u64)ts.tv_nsec / 1000ull;
+                if (us > TORPOR_MAX_TIMEOUT_US) us = TORPOR_MAX_TIMEOUT_US;
+                timeout_us = (s64)us;
+            }
+        }
+        // torpor returns Linux-numbered errnos (torpor.h): OK(0) on wake OR on a
+        // value-mismatch at entry (Linux's EAGAIN collapsed onto 0 -- musl
+        // re-checks the predicate either way), else ETIMEDOUT/EFAULT/EINVAL.
+        // Passed straight through; already the values a Linux caller expects.
+        return sys_torpor_wait_for_proc(p, uaddr, (u32)val, timeout_us);
+    }
+
+    case VIV_FUTEX_OP_WAKE:
+        // Wake up to `val` waiters on uaddr (musl: 1, or INT_MAX for broadcast).
+        return sys_torpor_wake_for_proc(p, uaddr, (u32)val);
+
+    case VIV_FUTEX_OP_REQUEUE: {
+        // FUTEX_REQUEUE(uaddr, val, val2, uaddr2): Linux wakes `val` on uaddr and
+        // REQUEUES up to `val2` from uaddr to uaddr2. torpor has no requeue, so
+        // this WAKES up to (val + val2) on uaddr -- a CORRECT implementation, not
+        // an approximation: FUTEX_WAIT is spurious-wake-tolerant by contract, so
+        // a woken-not-requeued waiter re-checks its userspace word and proceeds
+        // to contend on the real lock, exactly as it would after being requeued
+        // to that lock and then woken. musl's cond wake-chain calls this val=0,
+        // val2=1 (unlock_requeue hands off ONE waiter at a time), so the
+        // emulation wakes precisely the one waiter the requeue would have moved.
+        // The only cost is a bounded herd on pthread_cond_broadcast (O(waiters)
+        // wakes, not a chain-requeue); no wakeup is lost (pure wait/wake under
+        // I-9). uaddr2 is intentionally ignored; a v1.x torpor_requeue closes the
+        // perf gap. Without REQUEUE at all, a >=2-waiter broadcast on a DEFAULT
+        // mutex deadlocks -- so this arm is load-bearing, not a nicety.
+        u64 total = (u64)(u32)val + (u64)(u32)timeout_or_val2;
+        if (total > 0xFFFFFFFFull) total = 0xFFFFFFFFull;   // saturate the count
+        return sys_torpor_wake_for_proc(p, uaddr, (u32)total);
+    }
+    }
+    return -(s64)T_E_NOSYS;   // unreachable: the decide gated the op set
+}
+
 // =============================================================================
 // P6-pouch-signals-impl (sub-chunk 13a): note delivery syscalls.
 // =============================================================================
@@ -12551,6 +12623,11 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
     case VIV_LINUX_WAIT4:
         // wait4(pid, wstatus, options, rusage): x0..x3. LINEAGE L-6b.
         return viv_wait4(args[0], args[1], args[2], args[3]);
+
+    case VIV_LINUX_FUTEX:
+        // futex(uaddr, op, val, timeout/val2, uaddr2, val3): x0..x5. N-3. The
+        // WAIT/WAKE/REQUEUE subset musl's pthread mutex + cond + join use.
+        return viv_futex(p, args[0], args[1], args[2], args[3], args[4]);
 
     // ---- the startup batch (#150, LINEAGE L-6c) --------------------------
 

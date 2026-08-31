@@ -171,6 +171,7 @@ enum {
     VIV_LINUX_STATX      = 291,
     VIV_LINUX_EXIT_GROUP = 94,
     VIV_LINUX_EXIT       = 93,   // N-3: a musl THREAD exits via SYS_exit(93)
+    VIV_LINUX_FUTEX      = 98,   // N-3: pthread mutex/cond/join wait+wake
 
     // The signal family (V-6, §6.22). Contiguous in Linux's aarch64 table.
     VIV_LINUX_RESTART_SYSCALL = 128,
@@ -2186,6 +2187,41 @@ enum viv_clone_mode {
 // second reader would get wrong.
 enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
                                        enum viv_clone_mode *mode_out);
+
+// -----------------------------------------------------------------------------
+// N-3: futex -- the pthread wait/wake substrate. musl's DEFAULT (private,
+// non-robust, non-PI) mutex + cond + join emit exactly three ops, verified
+// against third_party/musl 1.2.5:
+//   FUTEX_WAIT (0)     the block primitive (__timedwait -> pthread_mutex/cond,
+//                      pthread_join on detach_state, __tl_sync). RELATIVE
+//                      timespec (musl converts absolute deadlines itself; it
+//                      never uses FUTEX_WAIT_BITSET/absolute on this path).
+//   FUTEX_WAKE (1)     the wake, count 1 or INT_MAX (broadcast).
+//   FUTEX_REQUEUE (3)  the cond wake-chain hand-off. For a DEFAULT mutex
+//                      (_m_type==0) pthread_cond's unlock_requeue takes the
+//                      plain-REQUEUE branch, so a broadcast with >=2 waiters
+//                      DEADLOCKS if this op is unserved -- it is not optional.
+// PI (LOCK_PI/UNLOCK_PI), WAKE_OP, CMP_REQUEUE and WAIT_BITSET are the opt-in
+// robust/PI paths only; they FORWARD (a clean ENOSYS), not translate.
+enum viv_futex_op {
+    VIV_FUTEX_OP_WAIT,      // FUTEX_WAIT (base op 0)
+    VIV_FUTEX_OP_WAKE,      // FUTEX_WAKE (base op 1)
+    VIV_FUTEX_OP_REQUEUE,   // FUTEX_REQUEUE (base op 3)
+};
+
+// The flag bits stripped before the op switch. PRIVATE is irrelevant (all
+// CLONE_THREAD peers share one AddrSpace, so torpor's (proc, addr) key already
+// scopes the wait); CLOCK_REALTIME is stripped because the served WAIT treats
+// its timeout as relative, which is what musl sends.
+enum {
+    VIV_FUTEX_PRIVATE_FLAG   = 0x80,
+    VIV_FUTEX_CLOCK_REALTIME = 0x100,
+};
+
+// PURE. Strips the flag bits, classifies the base op. VIV_TRANSLATED with
+// *op_out set for WAIT/WAKE/REQUEUE; VIV_FORWARD (-> the shell answers ENOSYS)
+// for every other op. Fail-closed on a NULL out-param.
+enum viv_verdict vivarium_futex_decide(u32 op, enum viv_futex_op *op_out);
 
 // -----------------------------------------------------------------------------
 // TIER 2 — `wait4` (LINEAGE L-6b). See docs/LINEAGE.md §5.5.

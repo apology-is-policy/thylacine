@@ -729,7 +729,8 @@ void test_vivarium_mmap_domain(void);                    // VIVARIUM V-2d
 void test_vivarium_mmap_file_domain(void);               // DISTRO D-3
 void test_vivarium_mmap_fixed_domain(void);              // DISTRO D-3b
 void test_vivarium_mmap_arms_disjoint(void);             // DISTRO D-3
-void test_vivarium_clone_domain(void);                   // LINEAGE L-3d
+void test_vivarium_clone_domain(void);                   // LINEAGE L-3d + N-3
+void test_vivarium_futex_decide(void);                   // N-3
 void test_vivarium_wait4_domain(void);                   // LINEAGE L-6b
 void test_vivarium_startup_batch_rows(void);             // #150 (LINEAGE L-6c)
 void test_vivarium_writev_domain(void);                  // #150
@@ -2400,6 +2401,7 @@ struct test_case g_tests[] = {
     { "vivarium.mmap_fixed_domain",      test_vivarium_mmap_fixed_domain,      false, NULL },
     { "vivarium.mmap_arms_disjoint",     test_vivarium_mmap_arms_disjoint,     false, NULL },
     { "vivarium.clone_domain",           test_vivarium_clone_domain,           false, NULL },
+    { "vivarium.futex_decide",           test_vivarium_futex_decide,           false, NULL },
     { "vivarium.wait4_domain",           test_vivarium_wait4_domain,           false, NULL },
     // #150 -- the startup batch. One test per OBLIGATION rather than one per
     // syscall: the table classification (which rows are T1 vs T2 vs ENOSYS and

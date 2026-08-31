@@ -431,6 +431,19 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_WAIT4,       VIV_TIER2   },  // L-6b: vivarium_wait4_decide
     { VIV_LINUX_GETTID,      VIV_TIER2   },  // N-3: current_thread()->tid
 
+    // N-3: futex(uaddr, op, val, timeout/val2, uaddr2, val3) -> torpor. A T2
+    // shell (viv_futex + vivarium_futex_decide) for the WAIT/WAKE/REQUEUE subset.
+    //
+    // SUB-CEILING COLLISION (98 == native SYS_TTY_CONT): harmless by the T2
+    // structure, the same way exit(93) is harmless as a T1. A PHENO_LINUX Proc
+    // reaches viv_tier2 for 98, whose shell returns an s64 into regs[0] and
+    // `return false` -- the native switch is NEVER reached, so 98 never arrives
+    // as TTY_CONT for a phenotype caller; a native Proc never enters viv
+    // dispatch. (Before this row, 98 FORWARDed to a clean ENOSYS, no collision
+    // then either.) It is therefore a per-number paragraph, not a ceiling
+    // static_assert -- 98 < VIV_NATIVE_CEILING, so an assert would fail the build.
+    { VIV_LINUX_FUTEX,       VIV_TIER2   },  // N-3: viv_futex -> torpor
+
     // The startup batch (#150, LINEAGE L-6c). Every row here was MEASURED --
     // this is the census a running busybox printed, not a guess at what a libc
     // might want -- and each is a shell rather than a renumber for a reason
@@ -1500,6 +1513,24 @@ enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
     // the native handler does, which is the V-8 `sys_fstat_for_proc` discipline
     // -- one implementation, reached two ways.
     return VIV_TRANSLATED;
+}
+
+// N-3: futex op classifier. PURE. Strips FUTEX_PRIVATE_FLAG (0x80) and
+// FUTEX_CLOCK_REALTIME (0x100) -- exactly Linux's FUTEX_CMD_MASK -- then
+// classifies the base op. Only the three ops musl's default mutex/cond/join
+// path emits translate; everything else (PI, WAKE_OP, CMP_REQUEUE, WAIT_BITSET)
+// forwards to a clean ENOSYS, the honest answer for a robust/PI path we do not
+// serve. The private bit is discarded, not honored: all CLONE_THREAD peers share
+// one AddrSpace, so a shared and a private wait on the same VA are the same wait.
+enum viv_verdict vivarium_futex_decide(u32 op, enum viv_futex_op *op_out) {
+    if (!op_out) return VIV_FORWARD;   // fail closed
+    u32 base = op & ~(u32)(VIV_FUTEX_PRIVATE_FLAG | VIV_FUTEX_CLOCK_REALTIME);
+    switch (base) {
+    case 0: *op_out = VIV_FUTEX_OP_WAIT;    return VIV_TRANSLATED;
+    case 1: *op_out = VIV_FUTEX_OP_WAKE;    return VIV_TRANSLATED;
+    case 3: *op_out = VIV_FUTEX_OP_REQUEUE; return VIV_TRANSLATED;
+    default: return VIV_FORWARD;
+    }
 }
 
 // =============================================================================

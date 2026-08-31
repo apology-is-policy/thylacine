@@ -1284,6 +1284,66 @@ void test_vivarium_clone_domain(void) {
     }
 }
 
+// vivarium.futex_decide -- the op classifier (N-3). musl's default pthread path
+// emits exactly WAIT/WAKE/REQUEUE; every other op forwards to a clean ENOSYS.
+// Dropping REQUEUE is the one that ships a green single-waiter demo and then
+// deadlocks pthread_cond_broadcast (>=2 waiters on a default mutex), so it is
+// pinned SERVED here -- a regression to ENOSYS on op 3 fails this test.
+void test_vivarium_futex_decide(void) {
+    enum viv_futex_op op;
+
+    // The three served ops. Poisoned between uses (the mode is only meaningful
+    // on VIV_TRANSLATED), so each assertion reads a fresh classification.
+    op = VIV_FUTEX_OP_REQUEUE;
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(0, &op), (int)VIV_TRANSLATED, "op 0 is served");
+    TEST_ASSERT(op == VIV_FUTEX_OP_WAIT, "op 0 is FUTEX_WAIT");
+    op = VIV_FUTEX_OP_WAIT;
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(1, &op), (int)VIV_TRANSLATED, "op 1 is served");
+    TEST_ASSERT(op == VIV_FUTEX_OP_WAKE, "op 1 is FUTEX_WAKE");
+    op = VIV_FUTEX_OP_WAIT;
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(3, &op), (int)VIV_TRANSLATED, "op 3 is served");
+    TEST_ASSERT(op == VIV_FUTEX_OP_REQUEUE, "op 3 is FUTEX_REQUEUE -- broadcast needs it");
+
+    // The flag bits are STRIPPED: PRIVATE (0x80), CLOCK_REALTIME (0x100). musl's
+    // private mutex/cond set PRIVATE, so the base op must survive the mask.
+    op = VIV_FUTEX_OP_REQUEUE;
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(0 | VIV_FUTEX_PRIVATE_FLAG, &op),
+                   (int)VIV_TRANSLATED, "WAIT|PRIVATE is served");
+    TEST_ASSERT(op == VIV_FUTEX_OP_WAIT, "the PRIVATE bit is stripped, not classified");
+    op = VIV_FUTEX_OP_WAIT;
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(
+                       1 | VIV_FUTEX_PRIVATE_FLAG | VIV_FUTEX_CLOCK_REALTIME, &op),
+                   (int)VIV_TRANSLATED, "WAKE|PRIVATE|CLOCK_REALTIME is served");
+    TEST_ASSERT(op == VIV_FUTEX_OP_WAKE, "both flag bits are stripped");
+
+    // The opt-in robust/PI ops FORWARD (a clean ENOSYS), never a wrong translate.
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(2 /* FD, deprecated */, &op),
+                   (int)VIV_FORWARD, "op 2 (FD) forwards");
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(4 /* CMP_REQUEUE */, &op),
+                   (int)VIV_FORWARD, "CMP_REQUEUE forwards -- musl uses plain REQUEUE");
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(5 /* WAKE_OP */, &op),
+                   (int)VIV_FORWARD, "WAKE_OP forwards");
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(6 /* LOCK_PI */, &op),
+                   (int)VIV_FORWARD, "LOCK_PI forwards -- PI is opt-in");
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(9 /* WAIT_BITSET */, &op),
+                   (int)VIV_FORWARD, "WAIT_BITSET forwards");
+
+    // Fail closed on a NULL out-param.
+    TEST_EXPECT_EQ((int)vivarium_futex_decide(0, NULL),
+                   (int)VIV_FORWARD, "a NULL op_out forwards");
+
+    // The row is wired: 98 is TIER2. Sub-ceiling (98 == native TTY_CONT) but
+    // reached only through the phenotype dispatch, so the native twin is never
+    // dispatched for a phenotype caller.
+    {
+        u64 args[VIV_NARGS];
+        struct viv_call out;
+        viv_fill_args(args);
+        TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_FUTEX, args, &out),
+                       (int)VIV_TIER2, "futex is a TIER2 row (N-3)");
+    }
+}
+
 // -----------------------------------------------------------------------------
 // vivarium.wait4_domain — the option-word map (LINEAGE L-6b, §5.5).
 //
