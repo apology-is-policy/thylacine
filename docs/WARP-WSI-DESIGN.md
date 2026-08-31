@@ -810,7 +810,64 @@ full render pipeline; poke max 36.3 ms, avg 21.3 ms, both runs agreeing
 on the sum to 0.3%. The open design question is whether the flip already
 implies the display update the flush then repeats — QEMU's
 scanout/flush contract — and whether either step can be made
-asynchronous without breaking I-40's no-torn-scanout. (Instrument
+asynchronous without breaking I-40's no-torn-scanout.
+
+### 8.2 The display-wall seam: both games are display-bound, and the fork is a pacing question (seam record)
+
+The residual analysis reframes the whole comparison: **GL 44.7 fps =
+22.4 ms/frame ≈ the same ~22 ms display wall + ~0.4 ms render** (the GL
+direct arm pays the equivalent per-present pair — Xfer + FlushDirect —
+through the same synchronous `.step`s), and vk 34.4 = 29 ms ≈ 22 + ~7 ms
+of venus residual. **Both engines are display-wall-bound**; the GL-vs-VK
+gap is mostly the residual, and lifting the wall lifts both toward their
+render speeds (vk's measured render ceiling: 79.9 fps undisplayed).
+
+**The suspect for the wall itself**: ~10-11 ms per step is not a
+plausible cost for a scanout-source rebind (a pointer swap host-side),
+and QEMU's virgl processing is paced by main-loop machinery (the display
+refresh timer's ~30 ms default cadence and the ~10 ms virgl fence poll
+both live in that neighborhood). If the per-step wall is **pacing
+quantization** — the command completing at the next tick, not after real
+work — then two commands queued before one wait complete in ONE quantum,
+and the wall halves without touching any contract.
+
+**The discriminator, built before any mechanism** (measure, don't
+assume): a test-mode per-step latency histogram on `poke-bind` /
+`poke-flush` (8 buckets to ≥30 ms). Quantized (mass clustered at ~10 ms
+multiples with near-empty low buckets) → the pacing theory holds and the
+mechanism work is justified. Spread (mass across the low buckets scaling
+with scene weight) → the cost is real host-side work (the egl-headless
+update path) and the direction changes.
+
+**The mechanism fork, pre-researched for the operator** (the pacing arm):
+
+- **C — batch the pair under one wait** (no contract change): the
+  steady-state poke sends bind then flush before waiting either (virtio
+  ctrl-queue FIFO preserves order; the current bind-verdict gate is
+  preserved by checking both replies before completing — a refused bind
+  makes the already-sent flush a harmless no-op on a non-scanout
+  resource, and the refusal still latches). Requires a second in-flight
+  slot on the synchronous ctrl ring (today: single REQ/RESP + one
+  2-descriptor chain — a real but bounded layout change). Expected win
+  if quantized: the wall halves (~11 ms → both games near 60+ fps under
+  FIFO).
+- **B — async-under-FIFO** (server-side pacing, no WSI change): the poke
+  reply returns before the display steps; a server-side FIFO queue
+  displays in order at its own cadence. FIFO semantics hold; the client
+  pipelines to acquire-depth. Ceiling: display cadence + pipelining.
+- **A — advertise + implement MAILBOX** (the Halcyon-grade answer): the
+  WSI today advertises **FIFO only** (`vn_thylacine_present_modes`), so
+  vkQuake had no choice. A latest-wins pending-present slot server-side
+  + an immediate poke reply gives render-speed fps with the display
+  consuming the newest frame at its own pace; FIFO stays the synchronous
+  path. Spec-visible (a new advertised mode) and the pacing model is a
+  present-semantics amendment — **operator signoff before building**.
+
+C composes with A/B later and is the cheapest test of the theory; the
+histogram gates C. All three leave I-40 intact structurally (the client
+throttle bracket is untouched; the display-safe teardown drains
+whatever queue exists — B/A add a drain obligation to `wimg_teardown`
+that their design must carry explicitly). (Instrument
 provenance, because it was earned twice: the census read is coherent
 only because the ctl pins a per-fid generation at the offset-0 read, and
 the census CAPTURE is coherent only because every cost-row expect is

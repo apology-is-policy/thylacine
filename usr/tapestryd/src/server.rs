@@ -1298,6 +1298,14 @@ pub struct Comp {
     /// refused/skipped, so a silent degradation to the CPU path is visible.
     comp_attach_witnessed: u64,
     comp_attach_refused: u64,
+    /// W-4 section-8.2 discriminator: per-step latency histograms for the
+    /// poke path's two display roundtrips. Buckets (ms): <2, <5, <8, <11,
+    /// <14, <20, <30, >=30. Quantized mass at ~10 ms multiples = pacing;
+    /// spread across the low buckets = real host work. Test boots only.
+    #[cfg(feature = "test-mode")]
+    poke_hist_bind: [u32; 8],
+    #[cfg(feature = "test-mode")]
+    poke_hist_flush: [u32; 8],
     /// Warp-C C-3: the renderer's measured blit conventions (see BlitConv).
     /// `None` = GPU composition unavailable; every composed present takes
     /// the CPU path. Set once at bring-up by `comp_measure_conventions`.
@@ -2038,6 +2046,10 @@ impl Comp {
             comp_probe_seq: 0,
             comp_attach_witnessed: 0,
             comp_attach_refused: 0,
+            #[cfg(feature = "test-mode")]
+            poke_hist_bind: [0; 8],
+            #[cfg(feature = "test-mode")]
+            poke_hist_flush: [0; 8],
             comp_conv: None,
             comp_gpu_dead: false,
             comp_repaint_pending: false,
@@ -2998,6 +3010,21 @@ impl Comp {
         c.sum_ns = c.sum_ns.saturating_add(ns);
         if ns > c.max_ns {
             c.max_ns = ns;
+        }
+    }
+
+    #[cfg(feature = "test-mode")]
+    fn poke_hist_slot(ns: u64) -> usize {
+        const MS: u64 = 1_000_000;
+        match ns {
+            n if n < 2 * MS => 0,
+            n if n < 5 * MS => 1,
+            n if n < 8 * MS => 2,
+            n if n < 11 * MS => 3,
+            n if n < 14 * MS => 4,
+            n if n < 20 * MS => 5,
+            n if n < 30 * MS => 6,
+            _ => 7,
         }
     }
 
@@ -5999,7 +6026,12 @@ impl Comp {
         if self.pending_direct == Some(n) {
             let tb = Instant::now();
             let bound = self.direct_bind_adopted(&g, w, h);
-            self.cost_add(Cost::PokeBind, tb);
+            let bns = tb.elapsed().as_nanos() as u64;
+            self.cost_add_ns(Cost::PokeBind, bns);
+            #[cfg(feature = "test-mode")]
+            {
+                self.poke_hist_bind[Self::poke_hist_slot(bns)] += 1;
+            }
             if bound {
                 say!("tapestryd: scanout direct {} img res {} ({}x{})", n, g.res_id, w, h);
                 self.scanout = Scanout::Direct(n);
@@ -6021,14 +6053,24 @@ impl Comp {
             if self.bound_res != g.res_id {
                 let tb = Instant::now();
                 let ok = self.direct_bind_adopted(&g, w, h);
-                self.cost_add(Cost::PokeBind, tb);
+                let bns = tb.elapsed().as_nanos() as u64;
+                self.cost_add_ns(Cost::PokeBind, bns);
+                #[cfg(feature = "test-mode")]
+                {
+                    self.poke_hist_bind[Self::poke_hist_slot(bns)] += 1;
+                }
                 if !ok {
                     return; // refused flip: keep the old frame on screen
                 }
             }
             let tf = Instant::now();
             let _ = self.gpu.flush(g.res_id, 0, 0, w, h);
-            self.cost_add(Cost::PokeFlush, tf);
+            let fns = tf.elapsed().as_nanos() as u64;
+            self.cost_add_ns(Cost::PokeFlush, fns);
+            #[cfg(feature = "test-mode")]
+            {
+                self.poke_hist_flush[Self::poke_hist_slot(fns)] += 1;
+            }
             presented = true;
         }
         if presented {
@@ -11150,6 +11192,19 @@ impl Conn {
                         c.n,
                         c.sum_ns / 1000,
                         c.max_ns / 1000
+                    ),
+                );
+            }
+            #[cfg(feature = "test-mode")]
+            for (name, h) in [
+                ("poke-bind-hist", &comp.poke_hist_bind),
+                ("poke-flush-hist", &comp.poke_hist_flush),
+            ] {
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!(
+                        "{} {} {} {} {} {} {} {} {}\n",
+                        name, h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]
                     ),
                 );
             }

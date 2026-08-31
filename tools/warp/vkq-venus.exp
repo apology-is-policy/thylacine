@@ -331,6 +331,19 @@ expect {
     }
     timeout { puts "\nVKQ-VENUS POKE-FLUSH: no row (pre-decomposition server)\n" }
 }
+# The section-8.2 discriminator: the per-step latency histograms
+# (buckets ms: <2 <5 <8 <11 <14 <20 <30 >=30). Quantized mass at the
+# ~10 ms buckets = QEMU pacing (the batch/async mechanisms are
+# justified); spread across the low buckets = real host work.
+foreach hname {poke-bind-hist poke-flush-hist} {
+    set timeout 10
+    expect {
+        -re "$hname (\\d+) (\\d+) (\\d+) (\\d+) (\\d+) (\\d+) (\\d+) (\\d+)\[\r\n\]" {
+            puts "\nVKQ-VENUS [string toupper $hname]: $expect_out(1,string) $expect_out(2,string) $expect_out(3,string) $expect_out(4,string) $expect_out(5,string) $expect_out(6,string) $expect_out(7,string) $expect_out(8,string) (buckets ms: <2 <5 <8 <11 <14 <20 <30 >=30)\n"
+        }
+        timeout { puts "\nVKQ-VENUS [string toupper $hname]: no row (pre-hist server)\n" }
+    }
+}
 
 set s1 [pswp]
 set din  [expr {[lindex $s1 0] - [lindex $s0 0]}]
