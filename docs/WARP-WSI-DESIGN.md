@@ -799,12 +799,24 @@ ms/frame more. The dominant cost is therefore the **direct-arm
 per-present display work** (the server's bind/flush + the host display
 update behind `img_poke_complete`), not the render-target layout, not
 venus marshaling, and not the throttle bracket (all present in the 79.9
-run). That path is the next measurement target; the per-present cost
-census (`cost present-poke-img`) is the instrument, now trustworthy
-after the generation-splice fix (the ctl's offset-0 read pins a per-fid
-snapshot — `text_snaps` in tapestryd — so a multi-read reader can no
-longer assemble a row from two generations; the first read of it
-produced an arithmetically impossible avg > max).
+run).
+
+**The decomposition (run 4, the split census)**: the per-present cost is
+**poke-bind avg 11.6 ms + poke-flush avg 10.5 ms ≈ 22 ms/frame, split
+almost evenly** — two synchronous display roundtrips per present (the
+SET_SCANOUT-class flip, which a rotating swapchain pays every frame, and
+the RESOURCE_FLUSH display update), each alone larger than the 12.5 ms
+full render pipeline; poke max 36.3 ms, avg 21.3 ms, both runs agreeing
+on the sum to 0.3%. The open design question is whether the flip already
+implies the display update the flush then repeats — QEMU's
+scanout/flush contract — and whether either step can be made
+asynchronous without breaking I-40's no-torn-scanout. (Instrument
+provenance, because it was earned twice: the census read is coherent
+only because the ctl pins a per-fid generation at the offset-0 read, and
+the census CAPTURE is coherent only because every cost-row expect is
+anchored to a complete line — an unanchored `(\d+)` fires on a partial
+serial chunk and the exp's own output severs the row; both defects
+produced the same impossible-triple signature before being fixed.)
 
 ---
 

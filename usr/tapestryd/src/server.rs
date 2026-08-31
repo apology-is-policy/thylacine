@@ -6256,9 +6256,14 @@ impl Comp {
         }
         // Identity for the watch's reader: which conn owns the ctx it is
         // about to report on. Gated like the watch itself -- one line per
-        // client mint, test boots only.
+        // client mint, test boots only. u64::MAX is the self-test
+        // sentinel, named instead of printed raw.
         #[cfg(feature = "test-mode")]
-        say!("tapestryd: warp ctx {} minted conn={} slot={}", pub_id, conn, slot);
+        if conn == u64::MAX {
+            say!("tapestryd: warp ctx {} minted conn=selftest slot={}", pub_id, slot);
+        } else {
+            say!("tapestryd: warp ctx {} minted conn={} slot={}", pub_id, conn, slot);
+        }
         Some(pub_id)
     }
 

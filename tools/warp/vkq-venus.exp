@@ -100,8 +100,9 @@ set s0 [pswp]
 # `blit` = -wsiblit (patch 0005 -> THY_WSI_BLIT in-process) = the
 # BUFFER_BLIT chain (tiled images + a per-present resolve-blit into the
 # linear presentable). Same demo, same boot, same host state -- the
-# cleanest form of the ratified comparison. The zoom fires once (a
-# HOST-window property); the teardown + census run once, after leg B.
+# cleanest form of the ratified comparison. The zoom fires PER LEG (it
+# dies with the game's pane); the teardown + census run once, after
+# leg B.
 set fps_wait 1800
 if {[info exists ::env(VKQ_FPS_WAIT)]} { set fps_wait $::env(VKQ_FPS_WAIT) }
 set fps_seen 0
@@ -290,7 +291,7 @@ expect {
 lc_send "warp-prove tctl poke"
 set timeout 30
 expect {
-    -re {cost present-poke-img (\d+) (\d+) (\d+)} {
+    -re {cost present-poke-img (\d+) (\d+) (\d+)[\r\n]} {
         puts "\nVKQ-VENUS POKES: n=$expect_out(1,string) sum_us=$expect_out(2,string) max_us=$expect_out(3,string)\n"
         lc_step "present-poke-img census read"
     }
@@ -305,14 +306,14 @@ expect {
 # pre-decomposition server simply has no rows.
 set timeout 10
 expect {
-    -re {cost poke-bind (\d+) (\d+) (\d+)} {
+    -re {cost poke-bind (\d+) (\d+) (\d+)[\r\n]} {
         puts "\nVKQ-VENUS POKE-BIND: n=$expect_out(1,string) sum_us=$expect_out(2,string) max_us=$expect_out(3,string)\n"
     }
     timeout { puts "\nVKQ-VENUS POKE-BIND: no row (pre-decomposition server)\n" }
 }
 set timeout 10
 expect {
-    -re {cost poke-flush (\d+) (\d+) (\d+)} {
+    -re {cost poke-flush (\d+) (\d+) (\d+)[\r\n]} {
         puts "\nVKQ-VENUS POKE-FLUSH: n=$expect_out(1,string) sum_us=$expect_out(2,string) max_us=$expect_out(3,string)\n"
     }
     timeout { puts "\nVKQ-VENUS POKE-FLUSH: no row (pre-decomposition server)\n" }

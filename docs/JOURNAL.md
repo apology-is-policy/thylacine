@@ -315,6 +315,64 @@ say lines); the census re-measure rides the next Pi run, which the
 display-present hunt needs anyway. Suite exit-0 on the fixed state;
 venus-verdict 89/89.
 
+### The follow-through: four instruments, one run to witness them
+
+`97c79a7d` turned the two open hunts and two owed items into one Pi run's
+worth of instrumentation. The poke census split (`poke-bind` / `poke-flush` —
+the steady-state img poke is bind + flush EVERY frame, since a swapchain
+rotates presentables and `bound_res` never matches; whichever row carries the
+~17 ms/frame names the display-present bottleneck). The warp-watch line gained
+`conn=`/`surf=` and the mint a test-gated say — the restore-latency hunt's
+missing WHO; the boot's own self-test ctxs immediately witnessed the fields
+(and printed the u64::MAX selftest sentinel raw, fixed to `conn=selftest` the
+same hour). The r6-F1 resize driver landed as the exp's third phase — unzoom
+with the composed transition REQUIRED (proof the chord landed and the scanout
+actually left direct; without that witness a later direct say would be the old
+state, the #184 gauge rule), then re-zoom requiring the recreated swapchain to
+re-promote, which is exactly where the audited wedge would bite. And F9
+closed: the quake-vk verdict extracted to a file-driven verb
+(one-implementation-two-callers — it had only ever run at the tail of a
+~25-minute remote run) with five fixtures whose strings are copied from run
+3's real fetched log; venus-verdict 94/94. Second suite exit-0. Run 4
+launched to witness all four.
+
+### Run 4: everything witnesses — and the impossible triple's REAL cause surfaces
+
+**W-4 VK GATE: VERIFIED again** (linear 32.4 / blit 34.1 — sixth and fourth
+consistent samples), and the new instruments all reported: the watch line's
+`conn=`/`surf=` live from the boot's own self-test ctxs, **the resize driver
+PASSED** (`re-promoted after unzoom/re-zoom — surface 1 img res 959`, a fresh
+registration two generations past the demo's 957: the r6-F1 wedge did not
+fire, and its owed regression leg is now a standing gate), and the poke
+decomposition answered the display-present question: **poke-bind avg 11.6 ms
+(n=1837) + poke-flush avg 10.5 ms (n=1959) ≈ 22 ms/present, split almost
+evenly** — two synchronous display roundtrips per frame, each alone larger
+than the 12.5 ms full render pipeline. The populations cross-check (whole
+1963 = 1959 flushes + 4 promotion presents; 122 same-image pokes skipped the
+rebind; the parts' sums total the whole's to within ~12 ms over the boot).
+
+But the whole-row max printed `3` — impossible against the parts' 24943/16295
+— WITH the generation pin live, which killed the splice attribution and
+forced the byte-level read. `cat -e` on the fetched log settled it: the real
+row was `... 41848671 3` + `6322` THREE LINES LATER, severed by the exp's own
+tagged output — **the expect regex fired on a PARTIAL line** (serial output
+arrives in chunks; `(\d+)` with no trailing anchor happily matches a prefix,
+then the exp's `puts` interleaves into the capture mid-row). The
+composed-screen exp documents this exact trap and calls its trailing `[\r\n]`
+load-bearing; the cost-row captures lacked it, both runs. So the corrected
+history: run 3's `max=3393` was also a truncation (real max ≥ 33931, which
+makes that row arithmetically POSSIBLE), **the "impossible triple" was
+capture-side all along, and the generation-splice attribution was wrong** —
+though the pin it motivated stands on its own: the per-read regeneration is
+real (the layout file's old comment documented the tear), the multi-chunk
+read genuinely crosses generations without it, and run 4 ran with it live.
+Fix: all three cost-row captures anchored to a complete line. The corrected
+numbers: **poke max 36.3 ms; avg 21.3 ms — real, both runs agreeing on the
+sum to within 0.3%.** The next design question (not this run's): why the
+direct arm pays two ~10 ms display roundtrips per frame — whether the
+SET_SCANOUT-class flip already implies the display update the flush then
+repeats, and what QEMU's scanout/flush contract actually promises.
+
 ## 2026-08-31 (run 8, Fable) — W-3e: the SDL Vulkan glue, and the bind that had no trigger
 
 Resumed from the run-7 self-compaction with W-3e fully designed and zero code.
