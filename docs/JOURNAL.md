@@ -22,6 +22,101 @@ needed the operator.
 
 ---
 
+## 2026-08-31 (run 9, Fable) — W-4: the vkQuake port lands, and the first real game finds three walls
+
+**The charter** (operator-ratified at the run-8 boundary): port vkQuake
+fullscreen, measure FPS on thyla-pi against a FRESH glQuake baseline, hunt
+impediments if vk lags, and gate the composed arm on the numbers. Mid-run the
+operator added: register the proven port with aux's Forage/build-config system
+when done (tracked in the pickup), and THE EFFORT GATE landed in both trees'
+CLAUDE.md (main @454a01cb, aux @95529ac9, yip 0032/0033) with
+`~/.claude/effort-report.sh` as its "am I at max?" instrument — whose first
+honest reading exposed that `CLAUDE_CODE_EFFORT_LEVEL` in the env pins the
+effective effort while the transcript stamps the setting (the operator was
+experimenting; back at max now, and the util reports the override first).
+
+**The port** (`third_party/vkquake` 1.05.3 + `third_party/volk`,
+`usr/ports/vkquake`, `build_vkquake`): 1.05.3 chosen deliberately — the exact
+vintage v3dv used for its own bring-up validation on this same V3D, a
+single-threaded renderer (the FPS delta must measure the render+present path,
+not a task scheduler), and engine-generation parity with tyrquake 0.71. The
+loader story is the port's whole difference: no loader, no dlopen — volk over a
+2-name filter (`thy_vkloader.c`: vkCreateDevice + vkGetDeviceProcAddr direct to
+`vn_*`, the W-1 trampoline caveat; everything else to icd-gipa), and the
+venus link set fetched from keep (mesa 26.1.6 headers + the witness link's
+archive closure, thin archives repacked fat — `usr/ports/mesa/README.md`
+carries the recipe).
+
+**Three walls, each found at the cheapest layer that could have found it:**
+
+1. **Run 1 (Pi): the SDL_VERSIONNUM overflow.** The legacy encoding
+   (X*1000+Y*100+Z) overflows at minor >= 10: SDL 2.32.10 -> 5210 >=
+   "3.0.0"=3000, so stock vkQuake refused a current SDL2 as "SDL3". Patch 0002,
+   field-wise compares. A local 2D smoke was then built (~4 min/iteration vs
+   ~10 on the Pi) and caught patch 0003 the same hour
+   (`SDL_GetWindowWMInfo` Sys_Error on a backend with no native handle — the
+   fetched global is write-only on every platform).
+2. **Run 2 (Pi): the weak-dispatch-table extraction hole.** Mesa's GENERATED
+   entrypoint tables reference every `vn_*` as WEAK-undefined; a weak undefined
+   extracts no archive member; `vn_pipeline.o` linked as NULL table slots; the
+   common-runtime fallback then misread vn-native structs
+   (`vk_pipeline_layout_init`'s push_descriptor assert on layouts that never
+   named a push descriptor — the flags were GARBAGE past `vn_object_base`). The
+   witnesses never hit it: their ~50 hand-declared strong externs covered their
+   own use sets, and upstream never can (a DSO has no extraction semantics).
+   Fix: `--whole-archive libvulkan_virtio.a` ALONE — the fat repack is a
+   flattened superset of the three runtime archives (80 members >= 49+1+3), so
+   whole-archiving beside them collides. THE SAME ELF RULE, third strike this
+   arc (OSMesa weak externs -> `-u vk_icd...` -> the generated tables). The
+   `-u`-alone closure claim from r6-F5 is now MEASURED in passing.
+3. **Run 3 (Pi): the holistic backing cap.** vkQuake's first 32 MiB texture
+   heap hit `WARP_CTX_BACKING_MAX` = 64 MiB — the forward constraint the
+   `MAX_WARP_IMGS_PER_CTX` rationale had recorded in advance. The holistic
+   shape conflated two I-32 axes; split by PHYSICAL POOL: guest family
+   (bos+rings+leaked, pins guest kernel memory) keeps 64 MiB;
+   `WARP_CTX_HOSTMEM_MAX` = 192 MiB for mems+imgs (QEMU-window blobs, bounded
+   by the 256M window physically — the cap is per-ctx fairness inside it). The
+   prove's F2 leg was value-COUPLED (3x24 MiB had to refuse — a raise would
+   fail the witness on its own arithmetic, the #230 class): reworked
+   allocate-until-refusal, bound = 3x the window (mesa @6fde181, patch 0022).
+   ctl publishes `hostmem-bytes-cap` + per-ctx `hostmem-bytes` so no client
+   bakes the value in. venus-verdict 89/89; suite exit-0.
+
+**Runs 4-6: the transport, the watcher, and the stall.** Run 4's attached ssh
+died mid-stream (the cloudflare tunnel; "closed by remote host") and took the
+ENTIRE record with it — the detached expect played the whole demo into a dead
+pipe; `lc_step` writes only under LS_CI_STEPS. The `quake-vk` verb now runs the
+remote expect nohup-detached into a remote file, polls, fetches: a lost
+connection costs a retry, never the run. The first poll REBUILT the recorded
+watcher defect verbatim (`while ssh ... kill -0` — a dropped connection reads
+exactly like a dead pid) and the same tunnel drop caught it within the hour;
+the poll now prints a VALUE, treats empty as no-information, and requires two
+consecutive GONEs.
+
+**The open stall (the hunt in progress).** Runs 5+6, deterministic: the game
+inits fully, binds DIRECT (`scanout direct 1 img res 925` — vkQuake's menu on
+the display through the presentable path), then the timedemo NEVER produces a
+frame count: silence from `3 demo(s) in loop` (map-load territory: the first
+big staging/texture uploads) to the fps timeout. ^C kills the game cleanly;
+the console restore completes but ~40 s LATE (slow, not wedged). The one
+post-mortem number: **`fenced-free 15` of 16 — one fence slot permanently in
+flight after the ctx died.** Working hypothesis: a chain submitted around
+map-load whose fence never signals; the game parks forever in a fence/acquire
+wait. A candidate unconstructed state: the W-3d witness presented exactly 3
+frames on a 3-image swapchain — image RECYCLING (acquire of a released image)
+has never been exercised; vkQuake's 2-image chain needs it at frame 3. Also
+caught by run 6: the exp's census read targeted the WARP ctl but the C-4 cost
+rows live in the TAPESTRY ctl (P_CTL) — the poke-count discriminator is still
+unread. Landed for the next runs: `fenced-held` ctl rows (slot + fence id +
+ctx + ring + rb/comp + age_ms) so a wedged chain is NAMED, not inferred from a
+missing count.
+
+**State at this checkpoint** (the 600k line): everything above committed;
+round 7 rides the W-4 close as batched, now carrying the stall hunt, the split
+prosecution, the F1 resize driver, and the run-6 instrument lessons. The FPS
+comparison has not begun: the number the charter wants is on the far side of
+the stall.
+
 ## 2026-08-31 (run 8, Fable) — W-3e: the SDL Vulkan glue, and the bind that had no trigger
 
 Resumed from the run-7 self-compaction with W-3e fully designed and zero code.
