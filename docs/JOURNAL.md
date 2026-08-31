@@ -22,6 +22,94 @@ needed the operator.
 
 ---
 
+## 2026-08-31 (run 6, Fable) — the composed-arm fork dissolved at the source level
+
+The operator brought Fable onto the arc to decide the open fork (run 5's
+close: "a presentable is not blittable", three options). The fork did not
+survive its first ground-truth pass — not because the measurement was wrong,
+but because **it was a measurement of the stand-in class, and none of it
+transfers to the class the fork was about**.
+
+### The premise, prosecuted
+
+W-3c-1's presentable is class-scoped to `blob_id=0` (gpu.rs:3154 — "the real
+allocation case lands at W-3d"). Reading virglrenderer 1.1.0 — the exact
+source of the Pi's shipped `1.1.0-2` — every measured negative is explained
+*by the stand-in*:
+
+- `vkr_context_create_resource` (vkr_context.c:347-353) shm-paths only
+  `blob_id==0 && flags == USE_MAPPABLE`, **exact equality**. Any other flags
+  fall into the device-memory path, which looks up object id 0 and refuses.
+  W-3c-1's "SHAREABLE refused" was foreordained by the stand-in — it was
+  never host policy. (The 4.1 amendment's operational content — mint
+  MAPPABLE, never map — survives for both classes; vkr does not consult
+  SHAREABLE on real memory at all.)
+- vrend's attach parks any pipe-resource-less res in an **untyped list**
+  ("defer to vrend_renderer_pipe_resource_set_type",
+  vrend_renderer.c:13018) — which is also W-3a's attach-blindness,
+  explained. A blit naming an untyped res fails `ctx_res_lookup` →
+  `ILLEGAL_RESOURCE` → `ctx->in_error = true` (vrend_renderer.c:1131) →
+  every later command refused. That IS `compose=noreadback`, mechanism and
+  all.
+- `pipe_resource_set_type` refuses `fd_type != DMABUF` — an SHM blob is
+  categorically untypeable. The stand-in could never have passed.
+
+### What the real class has instead
+
+The designed path exists in-tree — the ChromeOS cross-context compositing
+route: vkr **forces dmabuf export onto every HOST_VISIBLE allocation** when
+the host driver supports it, even with no guest export info
+(vkr_device_memory.c:274-356, the "XXX Force dma_buf/opaque fd export"
+block) → the blob is a DMABUF-typed resource → attach to the compositor's
+vrend ctx (parks untyped) → `PIPE_RESOURCE_SET_TYPE{format,bind,w,h,
+modifier,strides}` → `virgl_egl_image_from_dmabuf` → EGLImage-backed
+texture → the C-3 blit is an ordinary texture blit (the blitter handles
+`egl_image` sources at 10696/11259).
+
+Host conditions verified on the target, by discrimination, no boot spent:
+`ENABLE_GBM = have_egl` (meson.build:283); the Pi's libvirglrenderer1 links
+libgbm, carries the GBM-branch string "failed to create egl image" (2) and
+lacks the disabled-branch "no EGL/GBM support" (0); v3dv 26.2.0 advertises
+`VK_EXT_external_memory_dma_buf`; `GBM_FORMAT_ARGB8888 ↔
+VIRGL_FORMAT_B8G8R8A8_UNORM` is in the conversion table
+(vrend_winsys_gbm.c:103) — our exact declared format. And the design clicks:
+**the img registration's declared shape (w/h/format/stride, built at
+W-3c-1) is the SET_TYPE payload, field for field.**
+
+### The disposition
+
+**No scripture change — WARP-WSI-DESIGN §4 stands as ratified, both arms.**
+Option B's *necessity* is refuted (no compositor-in-Vulkan re-architecture
+required for windowed presentables; B remains a Halcyon-era quality option).
+Option A's "composed has no implementation" framing is refuted. Option C's
+measurement is delivered by source + binary verification; the end-to-end
+conjunction gets its witness at W-3d slice 1 — re-run the landed compose
+probe against the **first real-class blob**, plus a `settype` witness arm.
+If a hop fails there, the outcome is A-with-proof at zero wasted work.
+
+The W-2 dma-buf paradigm rejection is untouched: the dmabuf is host-internal
+representation inside the trusted renderer (GPU-DESIGN §9.2); no fd or
+ambient authority crosses the guest ABI. On hosts without dmabuf export
+(lavapipe), composed-for-presentables fail-closes to DIRECT-only as a
+per-host capability verdict — the W-3a pattern, not a design narrowing.
+
+Two constraints recorded for W-3d: `mem->exported` is **one-shot** ("a
+memory can only be exported once", vkr_device_memory.c:487) — one mint per
+memory, registration adopts; and swapchain images should mint LINEAR first
+(the declared stride must match the dmabuf layout SET_TYPE imports).
+
+Sequencing: **W-3c-2 = `present-to img` DIRECT arm** + adoption
+generalization + display-MODE accept half + cross-conn I-45 leg — creates
+no compose reader, so the `PDrained` drain is not yet owed; **W-3d slice 1**
+= the first real blob + the decisive re-probe + the composed arm **with the
+drain in the same commit** (the landmine rule).
+
+The generalizable lesson, filed under the run-5 probe's own discipline: **a
+stand-in-class measurement does not transfer to the real class** — the
+probe's three-way verdict and controls were exactly right, and still the
+conclusion drawn from them quietly widened from "this blob" to "this class".
+The check that caught it cost one source read and zero boots.
+
 ## 2026-08-31 (run 5) — W-3c-1 re-witnessed, then round 2 found the hole between two round-1 fixes
 
 Fresh context (self-compact at the 600k line, at the W-3c-1 committed
