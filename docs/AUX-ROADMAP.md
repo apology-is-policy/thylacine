@@ -32,8 +32,179 @@ whenever the arc changes, not whenever it is convenient.
 | **Track B — Aurora config (cfg-1..cfg-5)** | **COMPLETE.** OSD + persistence + OSC session push + the apply-authority gate + runtime chords/gaps + baked font sizes, each audited. |
 | **VIVARIUM (V-0..V-8) + DISTRO (D-1..D-5)** | **CLOSED (arc close).** Runs unmodified Linux musl-static + stock dynamic-PIE Alpine binaries under `viv`; TCP sockets, real signals, `/proc`+`/sys`, interactive ash on pts+console. **curl/git mission ACTIVE** (real 3rd-party programs end-to-end): the phenotype network reaches the internet; the time translators landed; **a REAL Linux curl (static-PIE 8.18.0) fetches a URL by name under viv (ROADMAP 9.2 criterion TICKED)** -- forced three socket rows (`getsockopt` SO_ERROR + `sendto`/`recvfrom` send/recv shapes) and produced the gap census (SIGILL feature-probing fatal, /dev/null redirects, eventfd2, pthread_create, timeouts -- each enqueued). **git arc OPEN** (operator "let us do git" 2026-08-25) with the reconnaissance-verified keystone: **#50, the path-mutation family** (design ratified, `VIVARIUM.md` section 6.24 — `SYS_OPEN_CREATE`=108 fulfilling the ARCH section 11.2 `create` row + the four phenotype rows `openat(O_CREAT)`/`mkdirat`/`unlinkat`/`renameat`; git cannot write a single file until it lands). Then: getdents64+fsync rows; build a static aarch64 NO_CURL git via the musl cross env (no prebuilt exists — milestone A = local init/add/commit/`clone file://` with `pack.threads=1`); milestone B = full https git (+libcurl+openssl, `OPENSSL_armcap=0`); then weigh the pthread arc for compute-SMP. |
 | **Phenotype networking + threading (net-4d + CLONE_THREAD; the "make it literal" cluster)** | **PLANNED** (`docs/GIT-ON-THYLACINE.md` "Milestone B2"). The cluster of VIVARIUM gaps most networked/concurrent Linux binaries hit -- surfaced by curl (threaded resolver, DNS-by-name) and npxf (threads + AF_UNIX + non-blocking sockets). Sequenced N-1..N-6: **N-1** non-blocking sockets (`SOCK_NONBLOCK`; the git-stash `CNONBLOCK` pipe fill is the template) -> **N-2** net-4d unconnected-UDP DNS-by-name (the README unlock -- `git clone https://github.com/...` becomes literal, no `/etc/hosts` pin) -> **N-3** phenotype threads (`CLONE_THREAD`; fully scoped in `docs/PHENOTYPE-THREADS-GUIDE.md` -- the same-Proc `thread_create_forked_in_proc` core + `futex`/`gettid` rows) -> **N-4** AF_UNIX -> **N-5** protocol-v2 root-cause (retire the forced `protocol.version=0`) -> **N-6** push-over-https (completes milestone B's own exit criteria). N-1->N-2 (README) and N-3 (threads, general) run in parallel past the shared N-1 substrate. |
+| **Stream 0 — the workflow bar** | **ACTIVE, and it orders everything below it** (operator, 2026-08-31). Four end-to-end terminal workflows (W1 Go-over-https, W2 tarball-to-clang-TUI, W3 network 9P host mount, W4 vivarium graphics) plus six cross-cutting fixes. See Stream 0 immediately below. |
 | **Halcyon G-8/G-9** | Not started. The graphics endgame. |
 | **Notes / job control / PTY (the kernel line, aux#240..)** | **ACTIVE.** See Stream 4 below. |
+
+---
+
+## Stream 0 — the workflow bar (operator-set, 2026-08-31)
+
+**The organizing principle above every other stream in this file.** Ratified by
+the operator: *"someone sits with Utopia and wants to do something, finding
+things that impede them along the way -- the more impediments we remove, the
+more pleasant and complete will the system feel."*
+
+Streams 1-4 order work by subsystem. This one orders it by **what a person at
+the terminal is trying to finish**, and it wins ties: a small fix that unblocks a
+workflow outranks a large chunk that advances a subsystem nobody is standing in
+front of. Four workflows define the bar. Each is written as the literal command
+sequence, so "done" is observable rather than argued.
+
+The findings below were established 2026-08-31 by three parallel investigations
+plus direct verification; every load-bearing claim carries its `file:line`.
+
+### W1 — clone a Go repo over https, build it, run it
+
+```
+git clone https://github.com/<user>/<repo>.git && cd <repo> && go build && ./<repo>
+```
+
+**Works already:** on-device `go build` is a boot-fatal gate (`joey.c:7267`);
+`/net` is mounted into the login namespace *before* the getty loop
+(`joey.c:7865` vs `:11298`), so an interactively-spawned process inherits TCP
+reach with no capability grant -- **networking is namespace-derived, not a cap.**
+
+| Id | Blocker | Shape |
+|---|---|---|
+| **W1-a** | `GIT_EXEC_PATH` + `GIT_CONFIG_SYSTEM` are set only inside the three container bundles (`build.sh:1487,1656,1851`); nothing sets them for `/viv/bin/git` from a shell. Interactive git therefore cannot find `git-remote-https`, never reads `/viv/bin/gitconfig` (so no `templateDir`, no `sslCAInfo`, **and no `protocol.version=0`** -- which `build.sh:1529` records as required because v2 aborts silently under the phenotype), and cannot re-exec itself for `maintenance`. | seed both in the login environment. Small. |
+| **W1-b** | `$PATH` omits `/viv/bin` (`usr/login/src/main.rs:952`, `joey.c:7682`) while ut's static list includes it (`eval/stmt.rs:590`) -- so `git` runs but `which git` fails. `which.rs`'s own header predicted this drift. | one entry, both seeds. Trivial; do with W1-a. |
+| **W1-c** | DNS by name. The **native** resolver exists (`net::resolve` -> `/net/cs`, `net.rs:599`), but git is a *phenotype* process using musl's `getaddrinfo`, which wants unconnected non-blocking UDP -- unserved. **This is N-2 (net-4d)**, already sequenced in the B2 arc above. | arc, already planned. `/etc/hosts` pin is the interim. |
+
+**Exit:** the command sequence above, from a fresh login, with no `/etc/hosts`
+pin.
+
+### W2 — fetch a C/C++ source tarball, unpack it, build it with clang, run the TUI
+
+```
+curl -O https://.../src.tar.gz && tar xzf src.tar.gz && cd src && clang++ ... -o app && ./app
+```
+
+**Works already:** `curl`, `wget`, `https`, `make` are all on the base image;
+the clade sysroot is complete -- `libc.a libc++.a libc++abi.a libunwind.a
+libclang_rt.builtins.a libSDL2.a` (`build/clade/stage/sysroot/lib/`); and the
+clade clang is configured with `DEFAULT_SYSROOT=/clade/sysroot`,
+`CLANG_DEFAULT_CXX_STDLIB=libc++`, `CLANG_DEFAULT_LINKER=lld`,
+`CLANG_DEFAULT_RTLIB=compiler-rt`, `CLANG_DEFAULT_UNWINDLIB=libunwind`
+(`build.sh:4713-4717`).
+
+| Id | Blocker | Shape |
+|---|---|---|
+| **W2-a** | **There is no `tar` on the system at all** -- not in `usr/coreutils`, not on the base image. The only tar is busybox's, under `viv`, and it is broken (see W2-b'). No `gzip`/`unzip` either. | see the cross-cutting table: the `S_IFMT` fix plus the `/viv/abin` mount gives busybox tar everywhere. A native tar is the longer-term answer. |
+| **W2-b** | Despite the configured defaults above, `clang++ main.cpp -o app` does **not** work -- the operator needs a hand-written 13-line response file (`--ld-path`, `--sysroot`, `-nostdinc++`, `-isystem .../c++/v1`, `-nostdlib++`, `-lc++ -lc++abi -lunwind -lc -lm`) which *does* work. **Root cause not yet established.** Leading hypothesis: `aarch64-unknown-thylacine` has no ToolChain class in clang's driver, so the generic fallback emits neither the libc++ header search nor the default link line. | **investigate first.** Cheap fix: ship a `clang++.cfg` beside the binary (clang auto-loads it) carrying exactly the working flags. Proper fix: a Thylacine ToolChain in the clade LLVM patch set -- **that is an arc**, inserted below. |
+| **W2-c** | An interactive TUI needs `isatty()`, which is `ioctl(TIOCGWINSZ)`. There is no ioctl row at all, so it is false on every fd. | **C2-k1b** -- the decode landed (`vivarium.c:971`, `@112bd08f`) with **zero callers**; the shell is what is missing. |
+
+**Exit:** the sequence above with a plain `clang++ main.cpp -o app`, and the
+resulting TUI takes the terminal.
+
+### W3 — mount a host directory over the network and copy both ways
+
+```
+mount tcp!10.0.2.100!5640 /n/host     # spelling per UTOPIA-SHELL-DESIGN.md:521 + 9front
+cd /n/host && cp somefile ~/
+```
+
+**Zero kernel work is required.** Every mechanism exists and is proven: the
+transport vtable is already an abstract byte pipe (`9p_transport.h:87-124`), and
+`viv run` performs this exact dance today -- pipe pair, spawn the server on fds
+0/1, close our ends, `t_attach_9p`, `t_mount` (`usr/viv/src/main.rs:499-534`),
+which `docs/reference/145-vivarium.md:3049` names as Plan 9's own `mount(fd)`
+idiom. **Swap the spawned server for a TCP relay and the workflow is done.**
+
+The structural constraint that decides the shape: **mounts are per-Proc and
+`RFNAMEG` is unimplemented** (`kernel/proc.c:1528` -- "the parent ALWAYS gets a
+clone"), so a mount performed by a child dies with the child. `mount` therefore
+**cannot be an external command** -- it must be a shell builtin, exactly as
+`UTOPIA-SHELL-DESIGN.md:518` already states.
+
+| Id | Piece | Shape |
+|---|---|---|
+| **W3-a** | a slirp `guestfwd` rule for the 9P port | ~5 lines; the mechanism is already parameterized (`run-vm.sh:183-199`). |
+| **W3-b** | a native byte-relay daemon: dial with `TcpStream::connect`, poll `{fd 0, stream.ready_fd()}` (**never** the data fd -- it has no `QTPOLL` and reports always-ready, `dev9p_poll.c:284`), pump both directions. Parses nothing. | ~150 LOC; template is `coreutils/src/netpump.rs:80-126`. Name held for signoff -- `9pbridge` is plain, the thematic register would prefer something like `tether`. |
+| **W3-c** | `mount` / `unmount` builtins in ut = **U-8**, designed and unbuilt (`phase7-status.md:255`; dependency U-6 landed). Should recognize a `tcp!` dialstring and spawn the bridge itself, and should join a relative path against cwd (`SYS_MOUNT` requires absolute). | ~150 LOC. Builtin table: `eval/builtin.rs:114`. |
+| **W3-d** | *(perf, later)* msize is hard-capped at **4096** -- `SYS_ATTACH_DEFAULT_MSIZE` == `PIPE_BUF_SIZE`, and `CNBFRAME` is all-or-nothing, so a larger frame can never be sent. ~4 KiB per round trip. | audit-bearing (Pipe + SYS_ATTACH_9P rows). |
+
+**The `/srv` route is closed and should stay closed:** posting requires
+`PROC_FLAG_MAY_POST_SERVICE`, which nothing past login holds, and widening it
+was explicitly rejected (`docs/reference/145-vivarium.md:3023-3120`) because one
+shared boot registry lets any program squat a trusted name.
+
+**Security posture:** default `MNOEXEC` on a network mount -- `dev9p` sets
+`may_back_exec = true` (`dev9p.c:2252`), so without it a hostile server can back
+executable mappings (I-12 PROVENANCE / I-36). Hostile `Rlerror` is already
+bounded (I-14). The real residual gap is duplicate-reply / tag reuse, which
+`ARCHITECTURE.md:3558` records as needing wire-level tag generations, a v1.x ABI
+lift -- **acceptable for a trusted dev Mac, and it belongs in the manual page
+rather than being discovered later.**
+
+**On the server side:** the design is indifferent to what serves the directory,
+so the operator's own `npxf` is a legitimate Mac-side server rather than a
+kludge to replace. What this track owns is the guest half (W3-a..c).
+
+### W4 — run a graphical Linux binary under vivarium
+
+**Greenfield: `docs/VIVARIUM.md` contains no occurrence of graphics, GL,
+Wayland, DRM, framebuffer, mesa, vulkan, tapestry, weave, warp, GPU or surface.**
+No prior art, no TODO, no declined-with-a-reason. Inserted here as a new arc.
+
+How a Pouch program reaches the screen today: stock SDL2 2.32.10 plus a
+Thylacine video driver (`usr/ports/sdl2/thylacine/`, ~1360 lines) speaking the
+tapestry protocol -- which is **open/read/write/close on a 9P tree plus exactly
+one special syscall**. That syscall is `SYS_WEFT_MAP`, and the decisive fact is
+that it takes an **fd** and returns a **VA** with **no capability gate**
+(`kernel/syscall.c:6568-6602` -- verified: `handle_get` -> `KOBJ_SPOOR` ->
+`dev9p_priv` -> `Tweft` -> `weft_map_claimed`, no `CAP_` check). The *producer*
+side is gated on `CAP_HW_CREATE` (`:6404`), so only a trusted server can offer a
+share; a client merely claims one. **`SYS_WEFT_MAP` is already `mmap`'s shape.**
+
+| Id | Stage | New kernel primitive? |
+|---|---|---|
+| **W4-1** | translate `mmap(MAP_SHARED)` on a dev9p fd to `sys_weft_map_for_proc`. Domain: `prot == R\|W`, `flags == MAP_SHARED` exactly, `offset == 0`, length within the burrow. Add to `vivarium_mmap_arms_disjoint` (`vivarium.c:1309`). | **No.** One T2 row + shell, ~60 lines. |
+| **W4-2** | a `viv` manifest annotation (`org.thylacine.display`) binding `/srv/tapestry` into the container, mirroring `org.thylacine.net` (`usr/viv/src/main.rs:309`). | No. ~30 lines. |
+| **W4-3** | port the existing SDL2 Thylacine driver to the Linux ABI, shipped as `libSDL2.so` in the bundle. Two mechanical changes: `t_weft_map(fd,0)` -> `mmap(...MAP_SHARED,fd,0)`, and the two dirfd-relative opens -> absolute (phenotype `openat` takes `AT_FDCWD` only). | No -- but needs a Linux-musl cross lane. |
+| **W4-4** | hardware GL via the warp winsys -- the **same** mmap arm on `bo/<id>/map`. Needs no `CAP_JIT` (shaders compile to GPU ISA), unlike guest-side llvmpipe. | No. |
+| **W4-5** | *only if the target set demands it:* AF_UNIX (**N-4**) + fd passing + a client-allocatable shared-memory object, then a Wayland shim. | **Yes** -- the only stage needing real new machinery. |
+
+**Rejected, with reasons that still hold:** DRM/KMS ioctl emulation
+(`GPU-DESIGN.md:2696` -- a strictly larger surface than writing the winsys, and
+GEM/PRIME is a second redundant capability system under ours); X11
+(`VISION.md:509`); `/dev/fb0` (**SDL2 has no fbdev backend at all** -- it would
+serve only Qt-linuxfb / SDL1.2 / DOSBox).
+
+**Open risks to settle before W4-1 lands:** whether `SYS_BURROW_DETACH` is
+correct on a `VMA_FLAG_SHARED_IN` VMA (the documented teardown is the weave
+fid's clunk); session granularity -- a bind gives **one tapestryd conn per
+container**, so container processes co-own surfaces and container death retires
+them, which is coherent but must be *decided*, not discovered; and whether
+`dlopen` works under vivarium (it would widen W4-3's reach via
+`SDL_DYNAMIC_API`).
+
+### Cross-cutting — one fix, several workflows
+
+| Id | Item | Serves |
+|---|---|---|
+| **X-1** | **`S_IFMT` mask** before the `mode & ~0777` gate in `vivarium_mkdirat_decide:829` and `vivarium_openat_create_decide:790`. busybox passes the full mode (`S_IFDIR\|0755`, `S_IFREG\|0644`, established by disassembly); the gate was written to refuse setuid/sgid/sticky and catches `S_IFMT` as collateral. Linux defines those bits as ignored here, so masking is exact, and the deliberate `07000` refusal survives. | W2-a, every archive tool |
+| **X-2** | restage the alpine bundle with `/bin` links **relative** (`-> busybox`, currently 80 of 80 are absolute `-> /bin/busybox`), then mount it `MPHENO_LINUX` like `/viv/bin` (`joey.c:7115`, ~25 lines) and add to both path lists. Absolute targets re-anchor at the caller's root (`stalk.c:383-403`, I-28 working as designed), which is exactly why they resolve inside a container and ghost outside one. | W2-a, and the operator's standing "invoke alpine bins directly" ask |
+| **X-3** | raise `INITIAL_HEAP_SIZE` (`alloc.rs:77`) from 4 MiB to 64 MiB. **Costs zero committed pages**: `burrow_attach_lazy` charges nothing at attach (`syscall.c:5468`), the fault charges one page at a time (`fault.c:635`), and `HoleList::new` writes a single 16-byte header. Also fix the doc comment, which cites `BURROW_ATTACH_MAX` (256 MiB, the *eager* cap) where the real bound is `BURROW_RESERVE_MAX` (1 GiB). | nora, every native program |
+| **X-4** | **make panics say something.** `lib.rs:3269` is `fn panic(_info) -> ! { t_exits(1) }` -- info discarded, silent exit 1. Every OOM and panic in native userspace is currently indistinguishable from "the program did nothing". | all of them |
+| **X-5** | ut: stop the prompt render erasing a partial last row (`line_editor.rs:803` emits `\r` + `\x1b[K` first), which eats the last line of any output lacking a trailing newline. | all of them |
+| **X-6** | ut: print on spawn failure. `eval/stmt.rs:1490` sets `$errstr`, sets `$status=127`, and returns `Ok` -- nothing prints on the `Ok` path, so an unknown command is silent. | all of them |
+
+### Arcs inserted by this pass
+
+1. **Clang Thylacine ToolChain** (W2-b) -- if the `clang++.cfg` workaround is
+   not enough, teaching clang's driver about `aarch64-unknown-thylacine` is an
+   LLVM-patch arc, not a fix.
+2. **U-8 namespace builtins** (W3-c) -- designed in `UTOPIA-SHELL-DESIGN.md`,
+   never built; W3 cannot exist without it.
+3. **Vivarium graphics W4-1..W4-5** -- a new arc; nothing in scripture yet.
+4. **Native archive tooling** (`tar`, `gzip`) -- if we choose not to depend on
+   busybox for W2-a permanently.
+5. **Allocator reclaim** -- `SYS_BURROW_DECOMMIT` = 84 exists, is complete and
+   correct (the `MADV_DONTNEED` analog), is reachable as `t_burrow_decommit`,
+   and has **zero callers**. `linked_list_allocator` has `extend` and no
+   `shrink`, so a native program's peak stays resident and charged for its whole
+   lifetime. Go reclaims (`joey.c:5820`); pouch does not; native Rust does not.
 
 ---
 
