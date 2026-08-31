@@ -3717,11 +3717,18 @@ build_vkquake() {
     # just the list file: a keep cycle that changes only libvulkan_virtio.a
     # leaves the list's mtime alone, and this check once said REUSED for
     # exactly that -- the stale binary would have measured the OLD driver.
+    # The archives are ALSO gated by CONTENT (round-8 F2): -newer is mtime,
+    # and a fetch that preserves an older source mtime slips it; the stamp
+    # written at build time is compared by hash, which cannot.
+    local vstamp="$BUILD_DIR/pouch/vkquake-venus.sha"
+    local vcur=""
+    vcur="$(cd "$venus" && shasum -a 256 lib/* 2>/dev/null | shasum -a 256 | cut -d' ' -f1)"
     if [[ -f "$out" ]]; then
         local stale
         stale="$(find "$vq_vendor" "$port_dir" "$volk_dir" "$venus/lib" "$venus/include" -type f -newer "$out" -print -quit 2>/dev/null)"
-        if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$out" && ! "$venus/venus-libs.list" -nt "$out" ]]; then
-            ledger "vkquake: REUSED (cached + up-to-date)"
+        if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$out" && ! "$venus/venus-libs.list" -nt "$out" \
+              && -f "$vstamp" && "$vcur" == "$(cat "$vstamp")" ]]; then
+            ledger "vkquake: REUSED (cached + up-to-date; venus set hash-matched)"
             return 0
         fi
     fi
@@ -3815,6 +3822,7 @@ build_vkquake() {
         -Wl,--end-group \
         -o "$out"
     echo "    vkquake: $(wc -c < "$out" | tr -d ' ') bytes (ET_EXEC, static, venus ICD linked)"
+    printf '%s' "$vcur" > "$vstamp"
     ledger "vkquake: BUILT (W-4; ramfs-staged, data from /quake)"
 }
 
