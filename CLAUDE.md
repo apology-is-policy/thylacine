@@ -4,6 +4,8 @@
 >
 > **Is the chunk in front of you crypto, security-critical, load-bearing kernel (a §28 invariant or an audit-trigger surface), or complicated enough that MAX effort is advisable — and you are not CERTAIN you are already at max? STOP. Raise a direct `AskUserQuestion` offering `/effort max`, and do not touch the work until the user answers.** The user deliberately runs reduced effort to conserve the weekly budget, and will NOT have load-bearing work built at less than max. This is never a line in a closing summary — it is a blocking question you raise the instant such work comes into view.
 >
+> **Certainty is one command away — run `~/.claude/effort-report.sh` FIRST.** It prints this session's LIVE effort (the transcript-stamped value `/effort` actually set; `settings.json`'s `effortLevel` is only the new-session default, and the two drift). Reports `max` → proceed, no question. Anything else — a lower level, UNKNOWN, or a stale-transcript warning (or the script absent on a fresh machine) → you cannot confirm max, so the question fires.
+>
 > **Bias hard toward asking; false positives beat false negatives.** Asking when it turns out fine costs one keystroke. NOT asking ships a soundness bug at reduced effort — a corrupt kernel, a broken crypto path, a race a max prosecutor would have caught. So: **rather safe than sorry — issue the question WITHOUT HESITATION.** `AskUserQuestion` blocks in-turn and never ends the run: the cost of asking is a moment, the cost of guessing wrong is a chunk done wrong. **This gate fires REGARDLESS of `.no-stop-nudge` / autonomous mode — it is the one escalation autonomy never suppresses.** Already at max, or the work is genuinely routine (mechanical edits, docs, orchestration)? Proceed — asking there is noise. Everywhere near the load-bearing surfaces, the burden of proof is on NOT asking. (Full trigger list + mechanics: [When to recommend `/effort max`](#when-to-recommend-effort-max).)
 
 Operating notes for Claude Code instances working on Thylacine OS.
@@ -1449,9 +1451,14 @@ Mechanics:
   gate on the *work*, not a turn-end yield nudge, and `AskUserQuestion` blocks
   in-turn without ending the run. It is the one escalation `.no-stop-nudge` does
   NOT suppress.
-- **Already at max → proceed**, no question. **Cannot confirm your effort → treat
-  it as reduced and ASK** — false positives beat false negatives, so when in
-  doubt, ask without hesitation.
+- **Check before asking: `~/.claude/effort-report.sh`** prints the session's
+  live effort from the transcript tail (the same session-discovery + staleness
+  honesty as `ctx-report.sh`; `settings.json` is only what a NEW session starts
+  at — measured drift day one: settings `high`, session `max`). **Reports
+  `max` → proceed**, no question. **Anything else — a lower level, UNKNOWN, a
+  stale-transcript warning, or the script absent → treat it as reduced and
+  ASK** — false positives beat false negatives, so when in doubt, ask without
+  hesitation.
 - **Ask once per qualifying arc, then carry the answer for the session** — do not
   re-ask on every chunk; re-ask only when the work moves to a genuinely different
   surface, or the user has changed effort.
