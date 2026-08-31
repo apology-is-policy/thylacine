@@ -85,5 +85,13 @@ fi
 # grep -a because a serial log can carry binary bytes. The alternatives are
 # scoped to the specific self-test prefixes so the many routine
 # `tapestryd: warp ...` ctx/ring diagnostics do not flood the log.
-grep -aE "tapestryd: gpu|tapestryd: warp host3d-ring|tapestryd: warp ring-recreate|tapestryd: warp mem-recreate|tapestryd: warp scanout-blob|THYLACINE-VENUS-PROVE|venus-prove:" "$LOG" || true
+#
+# EVERY STRING A VERDICT ARM GREPS FOR MUST HAVE AN ALTERNATIVE HERE. This is
+# the CAPTURE half of the gate and it is the half a crafted-log suite cannot
+# test: `tools/test-venus-verdict.sh` writes the witness lines into its
+# fixtures by hand, so a line the verdict demands and this filter drops is
+# GREEN there and RED on every real boot (W-3c-1 audit F2 -- the presentable
+# arm was added to the verdict and not to this line, which would have made
+# `warp-host.sh venus` unpassable on a healthy host, deterministically).
+grep -aE "tapestryd: gpu|tapestryd: warp host3d-ring|tapestryd: warp ring-recreate|tapestryd: warp mem-recreate|tapestryd: warp scanout-blob|tapestryd: warp presentable|THYLACINE-VENUS-PROVE|venus-prove:" "$LOG" || true
 exit $((1 - ok))

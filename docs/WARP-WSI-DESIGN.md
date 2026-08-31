@@ -229,11 +229,49 @@ against what mesa's WSI negotiated. Three consequences:
   create, not re-derived per frame. (The sysmem "buffer collection
   constraint" idea, without a new protocol: the constraint set is the accept
   set of one registration verb.)
-- A **DEVICE_LOCAL** swapchain image never needs a guest mapping: the blob is
-  minted **without** `USE_MAPPABLE` — it exists to be *named* (scanout,
-  compose), not mapped. The mappable path (HOST_VISIBLE) stays what it is
-  today. This splits gap 1 correctly: scanout needs a nameable host resource
-  with a declared shape, not a guest-visible one.
+- A **DEVICE_LOCAL** swapchain image never needs a guest mapping: it exists
+  to be *named* (scanout, compose), not mapped. The mappable path
+  (HOST_VISIBLE) stays what it is today. This splits gap 1 correctly:
+  scanout needs a nameable host resource with a declared shape, not a
+  guest-visible one.
+
+  **AMENDED at W-3c-1 (2026-08-26, operator-ratified) — the mechanism, not
+  the property.** This bullet originally specified the mint as a *shareable*
+  blob created **without** `USE_MAPPABLE`, on the reasoning that omitting the
+  flag is what keeps the image out of the guest. The W-3c-1 self-test
+  measured that mint on the real chain (thyla-pi, QEMU 10.0.11 +
+  virglrenderer 1.1.0 + v3dv) and the host refused it. Isolated cleanly —
+  same size, same venus ctx, `blob_id` 0, only the flag varying:
+
+  | `blob_flags` | verdict |
+  |---|---|
+  | `USE_SHAREABLE` alone (as specified here) | **refused** (`RESP_ERR_UNSPEC`) |
+  | `USE_MAPPABLE \| USE_SHAREABLE` | **refused** |
+  | `USE_MAPPABLE` alone | **accepted** |
+
+  So `USE_SHAREABLE` is refused outright on a HOST3D blob by this
+  virglrenderer — it is not that `USE_MAPPABLE` is *additionally* required.
+
+  The correction is that the original text **conflated a FLAG with an
+  ACTION**. `USE_MAPPABLE` declares that the host *may* place the blob in the
+  hostmem BAR; it is `RESOURCE_MAP_BLOB` + `SYS_BURROW_FROM_HOSTMEM` that
+  actually expose bytes to the guest. The property this design wants — a
+  swapchain image the guest cannot touch — is therefore secured by **never
+  mapping it**, not by omitting the flag. So the as-built mint is
+  `create_host3d_blob(USE_MAPPABLE)` and the presentable path calls neither
+  `map_blob` nor `burrow_from_hostmem`: no hostmem offset, no weft share, no
+  guest VA, no reclaim park, no #847 dual count. Every consequence the
+  original bullet claimed still holds; only the mechanism that delivers them
+  changed.
+
+  **What this measurement does NOT establish** (the W-3a class-scoping rule):
+  it was taken with `blob_id = 0`, the self-test's stand-in for a venus
+  allocation, and virglrenderer's blob-id-0 path is its own plain-memory arm.
+  Whether `USE_SHAREABLE` is accepted for a **real** venus allocation
+  (`blob_id != 0`) is unmeasured and unmeasurable without a client; it lands
+  with W-3d. If it turns out to be accepted there, revisiting this bullet is
+  optional — the mapped-never property is delivered either way — so the
+  amendment is not contingent on that answer.
 - The presentable's lifetime is the swapchain's: `wsi_common` creates the
   `VkImage`s at `vkCreateSwapchainKHR`; the backend registers each once;
   `vkDestroySwapchainKHR` retires them. No per-frame create/destroy anywhere.
@@ -327,9 +365,15 @@ general model rather than the special case the venus arm bolts onto. The
 
 Under the client's own ctx (all I-45-scoped, all namespace-named):
 
-- `ctx/<id>/img/new` — register a presentable: names the venus image's
-  memory (`mem_id`), declares `w h format stride`, mints the shareable
-  (non-mappable) HOST3D blob, returns the presentable id.
+- `ctx/<id>/img/new` — register a presentable. **AS BUILT at W-3c-1**
+  (this bullet was labelled a sketch; W-3 has now landed the format):
+  write `"<handle> <w> <h> <format> <stride> <mem_id>"`. The handle space is
+  the CLIENT's (0..15, the `ring`/`mem` discipline), which is what removes
+  the need to return an id — the sketch's "returns the presentable id" is
+  superseded. `format` is the stage-0 accept set (BGRA8/XRGB8); `stride`
+  must cover `w*4`; the mint is `create_host3d_blob(USE_MAPPABLE)` and the
+  path never maps it (§4.1 as amended). A duplicate live handle is
+  `E_INVAL`; over the I-32 byte cap is `E_NOMEM`.
 - `ctx/<id>/img/<n>/info` — the accepted shape (the negotiation's record).
 - `ctx/<id>/img/<n>/ctl` — `destroy` (display-safe: the §6 unbind-first
   ordering).
@@ -442,7 +486,28 @@ expects are restored for the build. vkQuake then runs unmodified through
 3. **W-3c — tapestryd**: the presentable object (`img/` subtree), the
    generalized adoption/eligibility model, the wire command(s), the
    display-safe teardown. Audit-bearing (I-40/I-45; a new AUDIT-TRIGGERS
-   row).
+   row). **Split into two sub-chunks so each lands with its own witness:**
+   - **W-3c-1 — the OBJECT and its lifetime.** The `img/` ABI
+     (`new` / `info` / `ctl destroy`), the `WarpImg` slot row folded into
+     the I-32 holistic cap, the shareable **non-mappable** HOST3D mint
+     (`create_presentable`), the Direct bind (`set_scanout_blob`, the
+     verdict wrapper over W-3a's raw-resp probe — one wire implementation),
+     and the **display-safe teardown**: unbind before unref, reusing
+     `gl_evict_res` rather than re-implementing an ordering rule, and
+     issued *unconditionally* so a stale per-object flag cannot skip it.
+     Witness: `warp_img_selftest`, four arms — `shape=` (three refusals one
+     variable away, so the accept set is shown to be a gate rather than a
+     rubber stamp), `mint=`, `bind=`, and `unbind=`, which destroys the
+     presentable **while the display is bound to it** and observes the
+     binding dropped first. That last arm is the runtime twin of
+     `tapestry_present_buggy_punbind_skipped.cfg`: it witnesses the modeled
+     bug's absence, not a generic teardown success.
+   - **W-3c-2 — the CLIENT-FACING present path**: the generalized
+     adoption/eligibility model (`presentable = WarpBo | registered venus
+     image`, superseding the `bos[]`-only `present-to`), `present-to
+     <surface> img <n>`, and the Composed arm — which is where the spec's
+     `PDrained` conjunct becomes reachable code, since W-3c-1 has no
+     in-flight compose class to drain.
 4. **W-3d — mesa**: the Thylacine `wsi_interface` + the swapchain image
    path + acquire/present. Audit-bearing (the Warp mesa row).
 5. **W-3e — SDL2 Vulkan glue** + a prove extension (an offscreen→present

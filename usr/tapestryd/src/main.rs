@@ -306,6 +306,13 @@ impl Driver for Tapestryd {
         // measurement, not a witness (either verdict is a valid boot).
         self.comp.warp_scanout_blob_probe();
 
+        // vkQuake-arc W-3c-1 (WARP-WSI-DESIGN sections 4-6): the PRESENTABLE
+        // lifecycle -- registration accept-set discrimination, the shareable
+        // non-mappable HOST3D mint, the Direct bind, and the display-safe
+        // teardown's ordering witness (destroy WHILE BOUND). Unlike the W-3a
+        // probe above this is a WITNESS, not a measurement: its arms assert.
+        self.comp.warp_img_selftest();
+
         // READY last: all bring-up console output precedes it; the warden's
         // readiness pipe waits on exactly this line.
         let mut out = libthyla_rs::io::stdout();

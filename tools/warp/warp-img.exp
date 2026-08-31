@@ -1,0 +1,59 @@
+#!/usr/bin/expect -f
+# vkQuake-arc W-3c-1 gate on the GL host: boot the VENUS device
+# (venus=on,blob=on,hostmem), log in, run `warp-prove img` -- the PRESENTABLE
+# ABI proof (WARP-WSI-DESIGN sections 4-6).
+#
+# WHAT THIS COVERS THAT THE BOOT SELF-TEST DOES NOT. tapestryd's own
+# `warp_img_selftest` exercises the presentable's INTERNALS (mint, the Direct
+# bind, the display-safe teardown's ordering) but reaches none of them through
+# 9P. This prover is the ABI's only driver: it walks `ctx/<id>/img/`, refuses
+# four malformed registrations, registers a good one, reads the accepted shape
+# back out of `info`, is refused a duplicate handle, destroys through `ctl`,
+# and proves BOTH halves of what destroy means -- the object is gone from the
+# namespace AND its handle is re-registerable with a fresh (monotonic) res_id.
+# Without it the whole namespace surface has no caller until mesa arrives at
+# W-3d, and a gate with no driver is not a gate.
+#
+# WHY venus and not plain virgl: a presentable is a venus-ctx object, so a
+# virgl-only device refuses the mint and the prover SKIPs (exit 2). WHY the GL
+# host and not local: the local 2D device has no virgl at all, so `ctx/new` is
+# unavailable and the prover SKIPs earlier still. A SKIP is NOT a pass here --
+# this scenario runs on the device that can actually answer, so a skip means
+# the device was configured wrong (the #212 rule: an arm that could not run
+# has not succeeded).
+#
+# Runs ON the GL host (Linux; lib.exp takes the direct-pty transport there).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_QMP) 1
+set ::env(THYLACINE_NO_SHARE) 1
+# venus needs blob AND hostmem together (QEMU refuses the device otherwise);
+# run-vm.sh passes THYLACINE_GPU_DEV verbatim as the -device model string.
+set ::env(THYLACINE_GPU_DEV) "virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M"
+set ::env(THYLACINE_DISPLAY) egl-headless
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+file mkdir $work
+file delete -force $work/pool-img.img $work/disk-img.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-img.img
+exec cp $repo/build/disk.img $work/disk-img.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-img.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-img.img
+
+source $repo/tools/interactive/lib.exp
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Registration + four refusals + destroy + re-registration: all namespace round
+# trips, no device wait. Floor, not stomp (a caller's larger value passes).
+if {$lc_cmd_timeout < 60} { set lc_cmd_timeout 60 }
+lc_run_expect_hardfail "warp-prove img" "IMG PASS" "IMG FAIL"
+
+lc_pass "warp-img: presentable ABI over the wire -- shape gate, info echo, destroy, handle reuse (the W-3c-1 gate)"

@@ -31,6 +31,7 @@ tapestryd: gpu host3d-map skipped (F_RESOURCE_BLOB not offered)
 tapestryd: gpu hostmem-ring skipped (F_RESOURCE_BLOB not offered)
 tapestryd: warp host3d-ring skipped (blob feature not offered)
 tapestryd: warp scanout-blob probe skipped (blob feature not offered)
+tapestryd: warp presentable self-test skipped (blob feature not offered)
 EOF
 }
 mk_test() {
@@ -59,6 +60,7 @@ venus-prove: cap-exhaustion cycle OK (refused at the 64 MiB ctx cap, freed, real
 venus-prove: offscreen triangle OK (render pass + SPIR-V pipeline + draw + copy-out 64x64; center red, corner blue -- the W-1 pipeline-class witness)
 venus-prove: slot-exhaustion cycles OK (253/253/253 to refusal, steady-state equal -- the F2 discriminating no-burn proof)
 tapestryd: warp scanout-blob probe: dispatch=present neg=0x1203 pos=0x1100 attach=0x1100 attach-neg=0x1100 (shmem-class; the venus-image-class verdict lands at W-3e)
+tapestryd: warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok disable=1 flags=mappable (64x64 BGRA8 stride 256)
 EOF
 }
 
@@ -206,6 +208,37 @@ check "control leg lacks scanout-blob skip -> UNVERIFIED" 1 \
       'grep -v "warp scanout-blob probe skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
 check "control leg ALSO carries a scanout-blob verdict -> UNVERIFIED" 1 \
       'grep "warp scanout-blob probe: dispatch=" "$t" >> "$c"' ""
+# CAPTURE-HALF WARNING (W-3c-1 audit F2). Every string these fixtures
+# fabricate must ALSO have an alternative in `tools/warp/boot-probe.sh`'s
+# grep, or the arm is green here and red on every real boot: this suite
+# writes the line in by hand, so it is structurally blind to a capture-filter
+# gap. When you add an arm below, add its prefix there in the same edit.
+# vkQuake-arc W-3c-1: the presentable self-test is a WITNESS, so unlike the
+# probe above its arms have required VALUES -- one sabotage per arm, because
+# a gate keyed on the line's PRESENCE would accept a leg reporting failure
+# in any single arm (the one-sabotage-per-CLASS rule).
+check "test leg: presentable self-test never reported -> UNVERIFIED" 1 "" \
+      'grep -v "warp presentable self-test" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg: presentable shape arm FAILED -> UNVERIFIED" 1 "" \
+      'sed "s/presentable self-test: shape=1/presentable self-test: shape=0/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg: presentable mint arm FAILED -> UNVERIFIED" 1 "" \
+      'sed "s/mint=1 bind=1/mint=0 bind=1/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg: presentable bind arm FAILED -> UNVERIFIED" 1 "" \
+      'sed "s/bind=1 unbind=ok/bind=0 unbind=ok/" "$t" > "$t.x" && mv "$t.x" "$t"'
+# THE ORDERING ARM, sabotaged both ways it can fail to pass: an outright
+# FAIL, and the n/a a bind-refusing host reports. n/a is not a pass -- an
+# arm that could not run has not succeeded (#212), and a gate that accepted
+# it would go quiet on exactly the host where the ordering is unproven.
+check "test leg: presentable unbind arm FAILED -> UNVERIFIED" 1 "" \
+      'sed "s/unbind=ok/unbind=FAIL/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg: presentable unbind arm n/a (bind refused) -> UNVERIFIED" 1 "" \
+      'sed "s/unbind=ok/unbind=n\/a/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg: presentable self-test reports a SKIP not a verdict -> UNVERIFIED" 1 "" \
+      'sed "s/warp presentable self-test: shape=.*/warp presentable self-test skipped (mint refused e=-5) -- non-venus device; shape=1/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "control leg lacks presentable skip -> UNVERIFIED" 1 \
+      'grep -v "warp presentable self-test skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
+check "control leg ALSO carries a presentable verdict -> UNVERIFIED" 1 \
+      'grep "warp presentable self-test: shape=" "$t" >> "$c"' ""
 # One variable away, each direction of the discrimination the gate claims.
 check "control leg ALSO sees id=4 -> UNVERIFIED" 1 \
       'printf "tapestryd: gpu capset[2] id=4 max_version=0 max_size=160\n" >> "$c"' ""

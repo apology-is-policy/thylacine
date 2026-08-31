@@ -180,10 +180,45 @@ const MAX_WARP_BOS_PER_CTX: usize = 1024;
 /// A Venus app allocates a VkDeviceMemory per HOST_VISIBLE mapping (staging /
 /// uniform buffers), far fewer than textures -- 256 covers a bring-up and
 /// typical apps with headroom, and the real authority is the shared byte cap
-/// (WARP_CTX_BACKING_MAX, holistic across bos+rings+mems), so overflow is a
+/// (WARP_CTX_BACKING_MAX, holistic across bos+rings+mems+imgs), so overflow is a
 /// clean E_NOMEM (-> the app's VK_ERROR_OUT_OF_DEVICE_MEMORY), never a crash
 /// (I-32). Raisable; the row is a HEAP allocation per minted ctx.
 const MAX_WARP_MEMS_PER_CTX: usize = 256;
+
+/// W-3c: per-ctx live PRESENTABLE (`img/<handle>`) slots. A swapchain is
+/// 2-4 images (mesa's wsi_common asks for `minImageCount`, typically 2-3;
+/// MAILBOX wants 3-4), and a client may hold a second swapchain briefly
+/// across a resize/recreate -- so 16 covers every realistic composition with
+/// headroom while staying far below the byte cap's reach. The real authority
+/// is the shared WARP_CTX_BACKING_MAX (holistic across bos+rings+mems+imgs),
+/// and the BYTE cap binds long before this count does at any real
+/// resolution. Spelled out, because the numbers decide whether the arc's own
+/// target fits (audit F14): 1080p BGRA8 = 7.91 MiB, so 8 images meet the
+/// 64 MiB cap; 4K = 31.64 MiB, so only TWO fit -- a 3-image MAILBOX
+/// swapchain at 4K is refused E_NOMEM -> VK_ERROR_OUT_OF_DEVICE_MEMORY.
+/// The refusal is clean, but it is a real forward constraint: before W-3d
+/// ships a client that asks for one, decide whether presentables need their
+/// own budget line or a raised holistic cap. Recorded here rather than
+/// discovered there.
+/// Exhaustion is clean either way, never a crash (I-32) -- but the two axes
+/// answer DIFFERENT codes, and the difference is a client contract, not a
+/// nicety: the BYTE cap answers E_NOMEM ("provably not installed, free your
+/// guest handle") while a handle at or past this row answers E_INVAL
+/// ("installed, keep it") -- the wmem round-3 F8 convention. So a client that
+/// exhausts its SLOTS is told to keep a handle that was never installed.
+/// Inherited from the mem sibling and left deliberately symmetric with it
+/// (audit F13); if either is changed, change both, because the client's
+/// errno discrimination is shared. Raisable; the row is a HEAP allocation
+/// per ctx.
+const MAX_WARP_IMGS_PER_CTX: usize = 16;
+
+/// W-3c: the accepted presentable shape bound. A declared width/height must
+/// fit this, and `stride * h` must fit the blob -- the registration-time
+/// eligibility decision (WARP-WSI-DESIGN 4.1) rather than a per-frame check.
+/// 8192 is two 4K displays wide: past anything the stage-0 compositor scans
+/// out, and chosen so `stride * h` cannot overflow a u32 at the format's
+/// 4 bytes/pixel (8192*4 * 8192 = 2^28 -- computed in u64, checked into u32).
+const WARP_IMG_MAX_DIM: u32 = 8192;
 
 /// The read width a client is entitled to assume covers the WHOLE per-ctx
 /// `ctl` (audit F11). Not a server buffer bound -- the file is composed at
@@ -421,6 +456,10 @@ const WARP_MEM: u64 = 1 << 44; // a ctx mem/<handle> node (V-3b-3c-2, a
 // same disjointness rule: a tag bit >= 44, clear of the id field (bits 8..37)
 // and of every other tag; the _Static_assert below guards it with the rest.
 
+const WARP_IMG: u64 = 1 << 45; // a ctx img/<handle> node (W-3c: a PRESENTABLE
+// -- a venus swapchain image's shareable non-mappable HOST3D blob). Next free
+// bit above WARP_MEM=44, same disjointness rule, same assert.
+
 const W_ROOT: u64 = WARP_FLAG;
 /// The attach roots by listener (main.rs hands the accepting listener's
 /// root to Conn::new).
@@ -465,11 +504,20 @@ const WFK_MEM_NEW: u64 = 9;
 // WFK_SUBMIT_T_BASE + t for t in 1..WARP_TIMELINES; `submit` = timeline 0.
 const WFK_TIMELINES: u64 = 10;
 const WFK_SUBMIT_T_BASE: u64 = 10; // +1..=3 -> 11,12,13 = submit1..submit3
+// Ctx-level img kinds (ctx/<id>/img/*), W-3c. 14/15 are the first ctx-FK
+// values above the submit<t> family's 11..=13.
+const WFK_IMG_DIR: u64 = 14;
+const WFK_IMG_NEW: u64 = 15;
 // Mem-level file kinds (ctx/<id>/mem/<handle>/*), under WARP_MEM (WFK_DIR=0
 // is the dir node, shared with the other levels).
 const WMFK_MAP: u64 = 1;
 const WMFK_INFO: u64 = 2;
 const WMFK_CTL: u64 = 3;
+// Img-level file kinds (ctx/<id>/img/<handle>/*), under WARP_IMG. NO `map`
+// slot, and that absence is the design (WARP-WSI-DESIGN 4.1): a presentable
+// is never guest-mapped, so the namespace offers no way to ask.
+const WIFK_INFO: u64 = 1;
+const WIFK_CTL: u64 = 2;
 
 fn make_wctx(id: u32, fk: u64) -> u64 {
     WARP_FLAG | WARP_CTX | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
@@ -497,6 +545,12 @@ fn make_wring(id: u32, fk: u64) -> u64 {
 }
 fn is_wring(path: u64) -> bool {
     is_warp(path) && path & WARP_RING != 0
+}
+fn make_wimg(id: u32, fk: u64) -> u64 {
+    WARP_FLAG | WARP_IMG | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
+}
+fn is_wimg(path: u64) -> bool {
+    is_warp(path) && path & WARP_IMG != 0
 }
 fn make_wmem(id: u32, fk: u64) -> u64 {
     WARP_FLAG | WARP_MEM | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
@@ -545,12 +599,14 @@ const WARP_RING_MAX_DRAIN_PER_KICK: u32 = 4096;
 const _: () = assert!(
     // every qid tag bit is distinct (a set bit-count check): WARP_BO 38,
     // WARP_CTX 39, SURF_FLAG 40, PANE_FLAG 41, WARP_FLAG 42, WARP_RING 43,
-    // WARP_MEM 44.
-    (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | WARP_MEM | SURF_FLAG | PANE_FLAG).count_ones() == 7
+    // WARP_MEM 44, WARP_IMG 45.
+    (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | WARP_MEM | WARP_IMG | SURF_FLAG | PANE_FLAG).count_ones() == 8
         // and no tag overlaps the id field or the fk byte.
         && (WARP_N_MASK << 8) & FK_MASK == 0
-        && (WARP_N_MASK << 8) & (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | WARP_MEM | SURF_FLAG | PANE_FLAG) == 0
-        && (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | WARP_MEM | SURF_FLAG | PANE_FLAG) & FK_MASK == 0,
+        && (WARP_N_MASK << 8)
+            & (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | WARP_MEM | WARP_IMG | SURF_FLAG | PANE_FLAG)
+            == 0
+        && (WARP_FLAG | WARP_CTX | WARP_BO | WARP_RING | WARP_MEM | WARP_IMG | SURF_FLAG | PANE_FLAG) & FK_MASK == 0,
     "qid tag bits (warp + surf + pane) must be mutually disjoint and clear of the id/fk fields",
 );
 
@@ -584,9 +640,11 @@ fn is_dir(path: u64) -> bool {
         || (is_wctx(path) && (warp_fk(path) == WFK_DIR || warp_fk(path) == WFK_BO_DIR))
         || (is_wctx(path) && warp_fk(path) == WFK_RING_DIR)
         || (is_wctx(path) && warp_fk(path) == WFK_MEM_DIR)
+        || (is_wctx(path) && warp_fk(path) == WFK_IMG_DIR)
         || (is_wbo(path) && warp_fk(path) == WFK_DIR)
         || (is_wring(path) && warp_fk(path) == WFK_DIR)
         || (is_wmem(path) && warp_fk(path) == WFK_DIR)
+        || (is_wimg(path) && warp_fk(path) == WFK_DIR)
 }
 
 // Mode constants (the ptyfs set).
@@ -1115,11 +1173,15 @@ const WEAVE_MAX_SIZE: u64 = 64 * 1024 * 1024;
 
 /// What scanout 0 references (G-6). `Boot` = untouched since startup (the
 /// kernel test pattern stays until a first present -- the stage-0 look);
-/// `Off` = explicitly disabled after content went away. NOTE (W-3a): on a
-/// blob-capable host the boot-time scanout-blob probe may have briefly bound
-/// and then DISABLED scanout 0, so `Boot` can mean "disabled placeholder"
-/// rather than the retained kernel pattern there -- behaviorally identical
-/// (both reconcile arms treat Boot as nothing-bound), cosmetically not.
+/// `Off` = explicitly disabled after content went away. NOTE (W-3a, sharpened
+/// at W-3c-1): on a blob-capable host `Boot` DOES mean "disabled placeholder",
+/// not the retained kernel pattern -- the W-3a probe may bind-then-disable
+/// scanout 0, and the W-3c-1 presentable self-test disables it
+/// UNCONDITIONALLY on every blob+venus boot (twice: once inside its
+/// teardown's unbind, once on its own exit path). The tracking is restored to
+/// `Boot` afterwards while the device is disabled, which is the honest state:
+/// behaviorally identical (both reconcile arms treat Boot as nothing-bound,
+/// and `bound_res = 0` agrees with the device), cosmetically not.
 #[derive(Clone, Copy, PartialEq)]
 enum Scanout {
     Boot,
@@ -1369,6 +1431,7 @@ pub struct Comp {
     warp_bo_seq: u32,
     warp_ring_seq: u32,
     warp_mem_seq: u32,
+    warp_img_seq: u32,
     /// #204 census, the global half: max `bo_backed_peak` over every ctx
     /// that ever lived -- readable AFTER a workload's ctx is gone (the
     /// per-ctx field dies with the ctx). Read via global ctl `bo-peak`.
@@ -1632,6 +1695,9 @@ struct WarpCtx {
     /// V-3b-3c-2: per-handle HOST_VISIBLE device-memory slots
     /// (0..MAX_WARP_MEMS_PER_CTX), allocated at mint.
     mems: alloc::boxed::Box<[Option<WarpMem>]>,
+    /// W-3c: per-handle PRESENTABLE slots (0..MAX_WARP_IMGS_PER_CTX),
+    /// allocated at mint.
+    imgs: alloc::boxed::Box<[Option<WarpImg>]>,
 }
 
 /// A GPU buffer object: a kernel-minted GPU-BO DMA chunk attached as the
@@ -1751,6 +1817,43 @@ struct WarpMem {
     share_id: Option<u64>,
 }
 
+/// W-3c (WARP-WSI-DESIGN 4.1): a PRESENTABLE -- a venus swapchain image's
+/// backing, minted as a SHAREABLE, deliberately NON-MAPPABLE HOST3D blob
+/// whose `blob_id` names the venus allocation, with its DISPLAY SHAPE
+/// declared at registration and validated against what the compositor can
+/// actually scan out. Three consequences distinguish it from every other
+/// warp object, and each one deletes a hazard class rather than adding one:
+///
+/// - **No guest mapping.** No hostmem offset, no MAP_BLOB, no burrow, no
+///   weft share -- so no #847 dual count, no claim race, no reclaim park.
+///   The client never touches these bytes from the guest; the GPU writes
+///   them and the display reads them, both host-side.
+/// - **Shape is declared, not derived.** A blob carries no geometry (the
+///   gap SET_SCANOUT_BLOB exists to fill), and a `VkDeviceMemory` is
+///   correctly geometry-less -- so the shape arrives once, at registration,
+///   and eligibility is decided THERE rather than re-derived per frame (the
+///   Fuchsia sysmem constraint-negotiation, as one 9P verb).
+/// - **The display can hold a reference.** `bound` records that scanout 0
+///   currently names this resource. That is the whole reason the teardown is
+///   ordered: an unref under a live binding leaves the display scanning a
+///   destroyed resource (`gl_evict_res`'s "the one order the display cannot
+///   survive", now reachable for a venus object). The spec's `pbound` arm of
+///   `NoTornPresentable` is exactly this field.
+struct WarpImg {
+    pub_id: u32,
+    res_id: u32,
+    /// The venus allocation this blob binds (the client's `mem_id`; opaque
+    /// to us and to the kernel, meaningful to virglrenderer).
+    blob_id: u64,
+    /// The declared display shape, accepted at registration.
+    w: u32,
+    h: u32,
+    format: u32,
+    stride: u32,
+    /// Backing bytes charged to the ctx's I-32 holistic cap.
+    size: u64,
+}
+
 /// Warp-4: a resolved ACTIVE GL adoption (see `gl_adoption`) -- the
 /// device ctx + 3D resource + tapestryd's own mapping of its backing.
 /// A value is valid for the single dispatch that resolved it.
@@ -1863,6 +1966,7 @@ impl Comp {
             warp_bo_seq: 0,
             warp_ring_seq: 0,
             warp_mem_seq: 0,
+            warp_img_seq: 0,
             warp_bo_peak: 0,
             warp_bo_bytes_peak: 0,
             warp_probe_parked: 0,
@@ -5372,10 +5476,19 @@ fn warp_mem_row() -> Option<alloc::boxed::Box<[Option<WarpMem>]>> {
     Some(v.into_boxed_slice())
 }
 
-/// The holistic per-ctx live GPU backing (I-32): every bo, ring, and
-/// device-memory blob, plus the wedge-leaked bytes still charged. WARP_CTX_
-/// BACKING_MAX bounds this SUM, so every backing-allocating path (wbo_create,
-/// wring_mint, wmem_mint) must gate on it. V-3b-3c-2 makes it holistic:
+fn warp_img_row() -> Option<alloc::boxed::Box<[Option<WarpImg>]>> {
+    let mut v: Vec<Option<WarpImg>> = Vec::new();
+    if v.try_reserve_exact(MAX_WARP_IMGS_PER_CTX).is_err() {
+        return None;
+    }
+    v.resize_with(MAX_WARP_IMGS_PER_CTX, || None);
+    Some(v.into_boxed_slice())
+}
+
+/// The holistic per-ctx live GPU backing (I-32): every bo, ring,
+/// device-memory blob, and PRESENTABLE, plus the wedge-leaked bytes still
+/// charged. WARP_CTX_BACKING_MAX bounds this SUM, so every backing-allocating
+/// path (wbo_create, wring_mint, wmem_mint, wimg_mint) must gate on it. V-3b-3c-2 makes it holistic:
 /// wbo_create previously summed bos + leaked ONLY, so a bo mint did not count
 /// existing rings against the cap -- a pre-existing I-32 accounting hole
 /// (bounded, since rings are small, but real) that composing mems in is the
@@ -5385,7 +5498,8 @@ fn ctx_backing_total(c: &WarpCtx) -> u64 {
     let bo: u64 = c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
     let ring: u64 = c.ring_slots.iter().flatten().map(|r| r.size).fold(0u64, u64::saturating_add);
     let mem: u64 = c.mems.iter().flatten().map(|m| m.host3d.size).fold(0u64, u64::saturating_add);
-    bo.saturating_add(ring).saturating_add(mem).saturating_add(c.leaked_bytes)
+    let img: u64 = c.imgs.iter().flatten().map(|i| i.size).fold(0u64, u64::saturating_add);
+    bo.saturating_add(ring).saturating_add(mem).saturating_add(img).saturating_add(c.leaked_bytes)
 }
 
 // --- Warp-2c: the GPU-seam object lifecycle -------------------------------
@@ -5546,12 +5660,25 @@ impl Comp {
     /// display cannot survive -- then re-arm the owning surface's own
     /// switch through reconcile (its next present restores the display
     /// from the weave, stale but bounded).
-    fn gl_evict_res(&mut self, res_id: u32) {
+    ///
+    /// RETURNS whether the device actually accepted the unbind (W-3c-1 audit
+    /// F8). `Ctrl::step` answers Err on two different outcomes: a submission
+    /// death (which latches `dead`, so a following unref no-ops too) and a
+    /// PLAIN REFUSAL BY A LIVE DEVICE -- and the second is the reachable one.
+    /// On that path the display keeps scanning `res_id` while the caller's
+    /// unref succeeds, which is precisely the `punbind_skipped` outcome
+    /// reached with the unbind nominally "done". The result was discarded
+    /// here, so it was silent. Callers that are about to unref MUST report a
+    /// false; W-3a F2 already ruled that this residue deserves a loud line
+    /// rather than a generic step, and W-3c-1 removes that finding's
+    /// "no client exists pre-READY" mitigation -- the presentable path is
+    /// client-driven, post-READY, and repeatable.
+    fn gl_evict_res(&mut self, res_id: u32) -> bool {
         if res_id == 0 || self.bound_res != res_id {
-            return;
+            return true; // nothing bound to this resource: vacuously unbound
         }
         let (dw, dh) = (self.gpu.width, self.gpu.height);
-        let _ = self.gpu.set_scanout(0, dw, dh);
+        let unbound = self.gpu.set_scanout(0, dw, dh).is_ok();
         self.bound_res = 0;
         if let Scanout::Direct(n) = self.scanout {
             self.scanout = Scanout::Off;
@@ -5563,6 +5690,7 @@ impl Comp {
             self.scanout = Scanout::Off;
         }
         self.reconcile();
+        unbound
     }
 
     /// Mint a context for `conn` (one per client -- the I-45 exposure
@@ -5587,6 +5715,7 @@ impl Comp {
         let bos = warp_bo_row()?;
         let ring_slots = warp_ring_row()?;
         let mems = warp_mem_row()?;
+        let imgs = warp_img_row()?;
         // The row is empty (len 0), so this guarantees capacity >= the
         // full cap -- a no-op when a reused slot's row kept its capacity.
         debug_assert!(self.warp_ctx_leaked[slot].is_empty());
@@ -5659,6 +5788,7 @@ impl Comp {
             bos,
             ring_slots,
             mems,
+            imgs,
         });
         // #240: the probe is built AFTER the row exists so its failure is
         // recoverable -- a ctx with no probe still serves, it just answers
@@ -6785,7 +6915,7 @@ impl Comp {
         }
         let (over, taken) = {
             let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
-            // I-32 holistic cap (bos + rings + mems + leaked); see ctx_backing_total.
+            // I-32 holistic cap (bos + rings + mems + imgs + leaked); see ctx_backing_total.
             (
                 ctx_backing_total(c).saturating_add(bytes) > WARP_CTX_BACKING_MAX,
                 c.ring_slots[ridx as usize].is_some(),
@@ -7325,6 +7455,255 @@ impl Comp {
         gpu.retire_host3d_ring(host3d);
     }
 
+    // === W-3c: the PRESENTABLE (ctx/<id>/img/<handle>) ========================
+    //
+    // A venus swapchain image registered for display (WARP-WSI-DESIGN 4.1): a
+    // SHAREABLE, non-mappable HOST3D blob whose blob_id names the venus
+    // allocation, carrying the display shape DECLARED at registration. The
+    // handle space is the client's (the ring/mem discipline); the qid carries a
+    // monotonic pub_id, so a stale fid resolves to nothing.
+    //
+    // What makes this class different from its siblings is what it does NOT
+    // have: no guest mapping, hence no weft share, no hostmem offset, no
+    // reclaim park, no #847 dual count. Its whole lifetime hazard is the
+    // opposite direction -- the DISPLAY holds a reference, and an unref under
+    // that reference is `gl_evict_res`'s "the one order the display cannot
+    // survive". Hence `wimg_teardown`'s unbind-BEFORE-unref, which is the
+    // spec's PUnbound conjunct as code (specs/tapestry_present.tla, the
+    // W-3b presentable class).
+
+    /// Resolve a live presentable the caller owns. The I-45 gate: a foreign
+    /// conn never resolves another client's img.
+    fn wimg(&self, img_pub: u32, conn: u64) -> Option<(&WarpCtx, &WarpImg)> {
+        for c in self.warp_ctxs.iter().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for i in c.imgs.iter().flatten() {
+                if i.pub_id == img_pub {
+                    return Some((c, i));
+                }
+            }
+        }
+        None
+    }
+
+    /// The `img/new` write verb: `"<handle> <w> <h> <format> <stride> <mem_id>"`.
+    fn wimg_mint_verb(&mut self, ctx_pub: u32, conn: u64, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        let mut it = s.split_ascii_whitespace();
+        let handle: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let w: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let h: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let format: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let stride: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        let mem_id: u64 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+        if it.next().is_some() {
+            return Err(p9::E_INVAL);
+        }
+        self.wimg_mint(ctx_pub, conn, handle, w, h, format, stride, mem_id)
+    }
+
+    /// Register a presentable at `handle` under `ctx_pub`: validate the
+    /// DECLARED display shape against what this compositor can scan out, then
+    /// mint the shareable non-mappable HOST3D blob with blob_id = `mem_id`.
+    ///
+    /// THE DECLARATION IS THE NEGOTIATION (WARP-WSI-DESIGN 4.1). Eligibility
+    /// is decided HERE, once, rather than re-derived per frame: a shape this
+    /// compositor cannot scan out is refused at registration, so the present
+    /// path never has to ask. That is the Fuchsia sysmem constraint-negotiation
+    /// idea expressed as one verb's accept set, and it is why the per-frame
+    /// path can be RESOURCE_FLUSH alone.
+    ///
+    /// I-45: the caller must own the ctx. I-32: charged to the holistic ctx
+    /// backing cap. ONE step (the wmem_mint precedent): the backing is minted
+    /// here and the WarpImg is inserted only on success, so no unbuilt corpse
+    /// can strand a slot.
+    ///
+    /// WHAT BOUNDS `mem_id`, since it is client-supplied and opaque to us
+    /// (the I-45 question a reviewer should ask first): the blob is created
+    /// under the caller's OWN venus device-ctx (`wctx_venus_ensure`), so the
+    /// host resolves the name within THAT context's resource space -- the
+    /// same scoping the device-memory path already rests on. Guest-side we
+    /// cannot validate the value at all, and pretending otherwise would be
+    /// the worse posture; the honest statement is that cross-client naming
+    /// is refused by the host's per-context scope, which is the documented
+    /// trusted-host half (GPU-DESIGN 9.2) and becomes ours to keep at the
+    /// v3d fork.
+    #[allow(clippy::too_many_arguments)]
+    fn wimg_mint(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        handle: u32,
+        w: u32,
+        h: u32,
+        format: u32,
+        stride: u32,
+        mem_id: u64,
+    ) -> Result<(), u32> {
+        if (handle as usize) >= MAX_WARP_IMGS_PER_CTX {
+            return Err(p9::E_INVAL);
+        }
+        // The stage-0 accept set, verbatim from WARP-WSI-DESIGN 4.1: "BGRA8/
+        // XRGB8 -- the formats the console path composes today". Both are the
+        // same 4-byte layout differing only in whether alpha is meaningful,
+        // so every size/stride bound below is identical for them and the
+        // scanout takes either. W-3c-1 audit F7: an earlier draft admitted
+        // only BGRA8 -- a narrowing from ratified scripture that nothing
+        // recorded, and worse, one that both witnesses had already pinned as
+        // a REQUIRED REFUSAL, so widening the set to match the design would
+        // have turned two gates red and read as a regression.
+        if format != crate::gpu::VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM
+            && format != crate::gpu::VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM
+        {
+            return Err(p9::E_INVAL);
+        }
+        if w == 0 || h == 0 || w > WARP_IMG_MAX_DIM || h > WARP_IMG_MAX_DIM {
+            return Err(p9::E_INVAL);
+        }
+        // The stride must cover the row at the format's 4 bytes/pixel and is
+        // bounded from ABOVE by the same dimension cap, so `stride * h` cannot
+        // outrun a u32 (the #204 lesson: a declared size bounded only from one
+        // side is not bounded -- #248). Computed in u64, checked into u32.
+        let min_stride = (w as u64).saturating_mul(4);
+        if (stride as u64) < min_stride || stride > WARP_IMG_MAX_DIM.saturating_mul(4) {
+            return Err(p9::E_INVAL);
+        }
+        let bytes = (stride as u64).saturating_mul(h as u64);
+        let len = u32::try_from(bytes).map_err(|_| p9::E_INVAL)?;
+        if bytes == 0 || bytes > WARP_CTX_BACKING_MAX {
+            return Err(p9::E_INVAL);
+        }
+        let (over, taken) = {
+            let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
+            (
+                ctx_backing_total(c).saturating_add(bytes) > WARP_CTX_BACKING_MAX,
+                c.imgs[handle as usize].is_some(),
+            )
+        };
+        // taken BEFORE over -- the V-3b-3c-2b round-3 F8 ordering: E_NOMEM must
+        // provably imply "nothing was installed", so a client freeing its
+        // guest-side handle on E_NOMEM can never free a live slot.
+        if taken {
+            return Err(p9::E_INVAL);
+        }
+        if over {
+            return Err(p9::E_NOMEM);
+        }
+        let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
+        self.res_seq = self.res_seq.wrapping_add(1);
+        if self.res_seq == 0 {
+            self.res_seq = 1;
+        }
+        let res_id = self.res_seq;
+        if self.gpu.create_presentable(res_id, venus_ctx, len, mem_id).is_err() {
+            return Err(E_IO);
+        }
+        self.warp_img_seq = self.warp_img_seq.wrapping_add(1);
+        if self.warp_img_seq == 0 {
+            self.warp_img_seq = 1;
+        }
+        let pub_id = self.warp_img_seq;
+        match self.wctx_mut(ctx_pub, conn) {
+            Some(c) => {
+                c.imgs[handle as usize] =
+                    Some(WarpImg { pub_id, res_id, blob_id: mem_id, w, h, format, stride, size: bytes });
+                Ok(())
+            }
+            None => {
+                // Single-threaded -> unreachable; unref rather than strand a
+                // host resource. Nothing else was acquired (no offset, no
+                // mapping, no share -- the non-mappable lifecycle's payoff).
+                let _ = self.gpu.resource_unref(res_id);
+                Err(p9::E_NOENT)
+            }
+        }
+    }
+
+    /// Retire ONE presentable the caller owns and FREE its slot (the handle
+    /// becomes re-registerable). I-45: only the ctx owner can name it -- the
+    /// scan is the gate.
+    ///
+    /// TAKE-THEN-TEARDOWN, and the order is load-bearing rather than
+    /// stylistic: `wimg_teardown` reaches `gl_evict_res`, which calls
+    /// `reconcile` -- so the compositor re-derives what to display INSIDE
+    /// the teardown. Removing the presentable from its slot first makes it
+    /// unresolvable to that re-derivation, so nothing can re-bind the
+    /// display to a resource that is about to be unref'd. Today no path
+    /// could (nothing adopts a presentable until W-3c-2), which is exactly
+    /// why the ordering is worth establishing NOW, while it is free.
+    fn wimg_destroy(&mut self, img_pub: u32, conn: u64) -> Result<(), u32> {
+        let mut found: Option<(usize, usize)> = None;
+        for (si, slot) in self.warp_ctxs.iter().enumerate() {
+            let c = match slot.as_ref() {
+                Some(c) => c,
+                None => continue,
+            };
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            if let Some(ii) =
+                c.imgs.iter().position(|i| i.as_ref().map_or(false, |i| i.pub_id == img_pub))
+            {
+                found = Some((si, ii));
+                break;
+            }
+        }
+        let (si, ii) = found.ok_or(p9::E_NOENT)?;
+        let taken = self.warp_ctxs[si].as_mut().and_then(|c| c.imgs[ii].take());
+        if let Some(i) = taken {
+            self.wimg_teardown(i);
+        }
+        Ok(())
+    }
+
+    /// THE DISPLAY-SAFE TEARDOWN (WARP-WSI-DESIGN section 6 "gap 7"; the spec's
+    /// PUnbound conjunct as code). Order, and the order is the whole point:
+    ///
+    ///   (1) If the display currently names this resource, REBIND AWAY FIRST.
+    ///       `gl_evict_res` is the existing discipline for exactly this and
+    ///       already does the full job -- device rebind to the boot scanout,
+    ///       `bound_res` cleared, the owning surface re-armed through
+    ///       reconcile. Reusing it rather than open-coding a second unbind is
+    ///       deliberate: two copies of an ordering rule is how one of them
+    ///       rots (#230, by meaning).
+    ///   (2) THEN unref the blob.
+    ///
+    /// Inverting these leaves the display scanning a destroyed resource -- on
+    /// the documented-trusted host that is host-side UAF with cross-client
+    /// blast radius, and it is precisely what
+    /// `tapestry_present_buggy_punbind_skipped.cfg` proves violates
+    /// NoTornPresentable.
+    ///
+    /// The compose-drain half (the spec's PDrained) has no in-flight class to
+    /// drain YET: at W-3c-1 nothing composes FROM a presentable -- the only
+    /// observer is the scanout binding. W-3c-2, which adds the compose arm,
+    /// adds the drain here with it, and the spec already carries the conjunct
+    /// so the obligation cannot be forgotten.
+    ///
+    /// The unbind is issued UNCONDITIONALLY, never gated on the per-object
+    /// `bound` flag. `gl_evict_res` already self-guards on `Comp.bound_res`,
+    /// which is the AUTHORITATIVE record of what the device scans out, so the
+    /// call is a no-op when this resource is not bound -- while gating on the
+    /// per-object copy would make a stale FALSE (the one direction that
+    /// matters) skip the unbind and unref a live binding. A redundant no-op
+    /// costs nothing; trusting the second copy of a fact costs the display.
+    fn wimg_teardown(&mut self, i: WarpImg) {
+        // F8: the unbind can be REFUSED by a live device, and the unref below
+        // would then succeed against a resource the display is still scanning
+        // -- the punbind_skipped outcome with the unbind nominally done. We
+        // cannot fix the device's refusal, but the one thing that must never
+        // happen is that it passes unremarked.
+        if !self.gl_evict_res(i.res_id) {
+            say!(
+                "tapestryd: warp presentable res {} UNBIND REFUSED by the device --                  the unref below leaves the display naming a destroyed resource",
+                i.res_id
+            );
+        }
+        let _ = self.gpu.resource_unref(i.res_id);
+    }
+
     /// Retire one BO: the I-40/R2-F5 order -- (1) disarm the un-claimed
     /// share BEFORE any backing free (a Tweft claim racing the retire fails
     /// closed; an already-claimed share is a harmless miss and the CLIENT's
@@ -7474,6 +7853,20 @@ impl Comp {
             for j in 0..MAX_WARP_MEMS_PER_CTX {
                 if let Some(m) = c.mems[j].take() {
                     Self::wmem_teardown(&mut self.gpu, m);
+                }
+            }
+            // W-3c: retire every presentable through the SAME display-safe
+            // teardown the client-facing destroy uses -- unbind-before-unref,
+            // never a second open-coded ordering. A ctx dying while one of its
+            // presentables is the scanned-out source is the ordinary case (a
+            // client crashing mid-frame), not the exotic one, so this arm is
+            // where the ordering earns its keep. No `leak` branch, for the
+            // device-memory reason one loop up: a presentable carries no
+            // tapestryd-tracked fence, its backing is HOST memory (no guest
+            // pages to strand), and re-mint always takes a fresh res_id.
+            for j in 0..MAX_WARP_IMGS_PER_CTX {
+                if let Some(i) = c.imgs[j].take() {
+                    self.wimg_teardown(i);
                 }
             }
             // #240: the probe's two resources follow the SAME leak posture
@@ -7951,6 +8344,213 @@ impl Comp {
         say!(
             "tapestryd: warp scanout-blob probe: dispatch={} neg={:#x} pos={:#x} attach={:#x} attach-neg={:#x} (shmem-class; the venus-image-class verdict lands at W-3e)",
             dispatch, neg, pos, att, att_neg
+        );
+    }
+
+    /// W-3c-1: the PRESENTABLE self-test -- the object's whole lifecycle
+    /// driven server-side at boot, on the real device, with no client.
+    ///
+    /// SIX measurements, four of them reported as verdict arms. The two that
+    /// are not arms exist because the first draft could not read its own
+    /// result: `venus ctx` is established and reported SEPARATELY (a bare
+    /// `E_IO` from the mint named both a refused venus ctx and a refused
+    /// blob -- two causes behind one reading), and `flags=` measures WHICH
+    /// blob-flag combination this host accepts, which is what turned a mute
+    /// "mint refused" into the finding that corrected WARP-WSI-DESIGN 4.1.
+    /// The four arms, each answering a question the others cannot:
+    ///
+    ///   `shape=`   the registration accept set DISCRIMINATES: a declared
+    ///              shape the compositor cannot scan out is refused, and the
+    ///              one it can is accepted. Without the refusal arm, "accept"
+    ///              proves only that the verb ran (the negative-control rule
+    ///              -- an accept-everything gate passes a one-directional
+    ///              check).
+    ///   `mint=`    the HOST3D blob is created and its DERIVED size matches
+    ///              stride*h. (It does not read `info` -- that echo is
+    ///              `warp-prove img`'s job, over the wire where it means
+    ///              something. Comparing the struct's own `w`/`h` here would
+    ///              be a tautology: they are the mint's arguments.)
+    ///   `bind=`    the Direct arm binds the display to the presentable
+    ///              (SET_SCANOUT_BLOB at the declared shape). Acceptance is
+    ///              NOT a pixel claim -- what it establishes is that the
+    ///              display now REFERENCES the resource, which is the
+    ///              precondition the next arm needs to mean anything.
+    ///   `unbind=`  THE ORDERING WITNESS. Destroy the presentable WHILE THE
+    ///              DISPLAY IS BOUND TO IT and observe that the binding was
+    ///              dropped first (`bound_res` back to 0). This is exactly
+    ///              the state `tapestry_present_buggy_punbind_skipped.cfg`
+    ///              reaches when the PUnbound conjunct is omitted -- the
+    ///              display left naming a destroyed resource -- so the arm
+    ///              witnesses the modeled bug's ABSENCE, not a generic
+    ///              teardown success.
+    ///
+    /// Runs before READY like its siblings, on a self-test ctx no client can
+    /// name, and DISABLES scanout 0 on every exit path (not "restores": a
+    /// `set_scanout(0)` disables, and the kernel test pattern is gone from
+    /// that point on -- see `Scanout::Boot`'s note).
+    pub fn warp_img_selftest(&mut self) {
+        if !self.gpu.blob {
+            say!("tapestryd: warp presentable self-test skipped (blob feature not offered)");
+            return;
+        }
+        const SELFTEST_CONN: u64 = u64::MAX;
+        const IW: u32 = 64;
+        const IH: u32 = 64;
+        let fmt = crate::gpu::VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
+        let stride = IW * 4;
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        // SELF-AUDIT: unlike the W-3a probe -- which only ever issues raw
+        // device commands -- this self-test drives the REAL teardown, and
+        // `gl_evict_res` mutates the compositor's own scanout state machine
+        // (Boot -> Off) on its way through. Both resting states are stable
+        // (reconcile's no-surface arm is a no-op under either), so nothing
+        // breaks either way; but a witness that silently leaves the machine
+        // in a different state than it found is a witness that has changed
+        // its subject. Snapshot and restore, so the only thing this proves
+        // about the compositor is what its arms actually assert.
+        let scanout_before = self.scanout;
+        let ctx_pub = match self.wctx_mint(SELFTEST_CONN) {
+            Some(p) => p,
+            None => {
+                say!("tapestryd: warp presentable self-test skipped (no virgl ctx -- 2D device)");
+                return;
+            }
+        };
+        let slot = match self.wctx_slot(ctx_pub) {
+            Some(s) => s,
+            None => return, // just minted -> unreachable
+        };
+        // ARM 1, the DISCRIMINATOR, first: three refusals one variable away
+        // from the accepted registration -- a format outside the accept set,
+        // a stride too small for the declared width, and a zero dimension.
+        // Each must fail; if any is admitted the accept set is not a gate.
+        // The format negative uses a value outside EVERY plausible accept set,
+        // not `fmt + 1` (audit F7): the neighbouring virtio format is XRGB8,
+        // which 4.1's stage-0 set ADMITS -- so pinning its refusal made the
+        // discriminator go red the moment the code was corrected to match
+        // scripture. A control must not encode a decision the design is
+        // still free to make.
+        const BOGUS_FMT: u32 = u32::MAX;
+        let bad_fmt = self.wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, BOGUS_FMT, stride, 0).is_err();
+        let bad_stride = self.wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, fmt, stride - 4, 0).is_err();
+        let bad_dim = self.wimg_mint(ctx_pub, SELFTEST_CONN, 0, 0, IH, fmt, stride, 0).is_err();
+        let shape_ok = bad_fmt && bad_stride && bad_dim;
+        // ARM 2, on TWO axes, because the first version of this arm had one
+        // axis and could not read its own result. `wimg_mint` answers E_IO
+        // for BOTH a refused venus-ctx create and a refused blob create, so
+        // a bare "mint refused e=5" named two different worlds at once (the
+        // two-causes-one-reading trap). Split them: establish the venus ctx
+        // FIRST and report it, then measure the blob create separately.
+        let venus_ctx = match self.wctx_venus_ensure(ctx_pub, SELFTEST_CONN) {
+            Ok(v) => v,
+            Err(e) => {
+                self.wctx_finish(slot, false);
+                say!(
+                    "tapestryd: warp presentable self-test skipped (venus ctx refused e={}) -- non-venus device; shape={}",
+                    e, u32::from(shape_ok)
+                );
+                return;
+            }
+        };
+        // WHICH BLOB FLAGS DOES THIS HOST ACCEPT? The design's claim is that
+        // a presentable is SHAREABLE and NOT mappable (WARP-WSI-DESIGN 4.1):
+        // it exists to be named, never guest-mapped. That claim was never
+        // measured, and the V-0 discipline says a capability is measured,
+        // not assumed. Three combinations, most-desired first, each on its
+        // own res_id and unref'd immediately -- the answer feeds the design
+        // rather than being silently worked around.
+        //
+        // Read the result with the blob_id in mind: this probe passes
+        // blob_id 0 (no VkDeviceMemory exists at boot), and virglrenderer's
+        // blob-id-0 path is its plain-memory/shmem arm, which may itself
+        // require MAPPABLE regardless of what a REAL venus allocation would
+        // accept. So `shareable` refused here does NOT by itself refute the
+        // design -- it bounds what this self-test can establish, and the
+        // venus-allocation-backed answer lands with the first real client
+        // (W-3d). Reporting the distinction is the point; guessing it is not.
+        let mut flags_word = "none";
+        for (name, fl) in [
+            ("shareable", crate::gpu::BLOB_FLAG_SHAREABLE),
+            ("mappable+shareable", crate::gpu::BLOB_FLAG_MAPPABLE | crate::gpu::BLOB_FLAG_SHAREABLE),
+            ("mappable", crate::gpu::BLOB_FLAG_MAPPABLE),
+        ] {
+            self.res_seq = self.res_seq.wrapping_add(1);
+            if self.res_seq == 0 {
+                self.res_seq = 1;
+            }
+            let probe_res = self.res_seq;
+            if self.gpu.create_host3d_blob(probe_res, venus_ctx, fl, stride * IH, 0).is_ok() {
+                let _ = self.gpu.resource_unref(probe_res);
+                flags_word = name;
+                break;
+            }
+        }
+        // The accepted registration. blob_id 0 is the self-test's stand-in
+        // for a venus allocation; the flag measurement above is what says
+        // whether a refusal here is about the FLAGS or about that stand-in.
+        if let Err(e) = self.wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, fmt, stride, 0) {
+            self.wctx_finish(slot, false);
+            say!(
+                "tapestryd: warp presentable self-test skipped (mint refused e={}) -- venus ctx OK, host3d-blob flags accepted: {}; shape={}",
+                e, flags_word, u32::from(shape_ok)
+            );
+            return;
+        }
+        let (img_pub, res_id, got_size, got_res) = {
+            let c = self.wctx(ctx_pub, SELFTEST_CONN).unwrap();
+            let i = c.imgs[0].as_ref().unwrap();
+            (i.pub_id, i.res_id, i.size, i.res_id)
+        };
+        // DERIVED, not moved-in-verbatim (audit F9). Comparing `i.w == IW`
+        // was a tautology: field-init shorthand binds `w` from the same
+        // argument, so the check reduced to `IW == IW` and could not fail.
+        // `size` is COMPUTED from stride*h inside the mint, so this one can.
+        let mint_ok = got_size == (stride as u64) * (IH as u64) && got_res != 0;
+        // ARM 3: the Direct bind at the DECLARED shape.
+        let bind_ok = self.gpu.set_scanout_blob(res_id, IW, IH, fmt, stride).is_ok();
+        if bind_ok {
+            self.bound_res = res_id;
+        }
+        let seq_before = self.gpu.cmd_seq;
+        // ARM 4: destroy WHILE BOUND -- the ordering witness. On a host that
+        // refused the bind this degrades to a plain destroy and is reported
+        // as `unbind=n/a`, never as a pass: an arm that cannot run has not
+        // succeeded (the #212 class).
+        let destroy_ok = self.wimg_destroy(img_pub, SELFTEST_CONN).is_ok();
+        // THE ORDER ITSELF, not merely the end state (audit F5). Checking
+        // `bound_res == 0` alone catches an OMITTED unbind but passes an
+        // INVERTED one -- unref-then-unbind clears `bound_res` just the same,
+        // and inversion is the display-fatal arrangement. The device-command
+        // ticks make the relative order observable: the unbind must have been
+        // ISSUED BEFORE the unref, and both must have been issued by THIS
+        // teardown (a tick from an earlier boot step would pass vacuously).
+        let (sseq, useq) = (self.gpu.last_scanout_seq, self.gpu.last_unref_seq);
+        let ordered = sseq > seq_before && useq > sseq;
+        let unbind = if !bind_ok {
+            "n/a"
+        } else if destroy_ok && self.bound_res == 0 && ordered {
+            "ok"
+        } else {
+            "FAIL"
+        };
+        // DISABLE scanout 0 on every path (audit F10: this is not a
+        // "restore" -- `set_scanout` with resource_id 0 DISABLES the scanout,
+        // per its own contract; the kernel test pattern does not come back).
+        // gl_evict_res already issued the same disable during the teardown,
+        // so this covers the arms that never bound.
+        let unbind_ok = self.gpu.set_scanout(0, dw, dh).is_ok();
+        self.bound_res = 0;
+        self.scanout = scanout_before;
+        self.wctx_finish(slot, false);
+        say!(
+            "tapestryd: warp presentable self-test: shape={} mint={} bind={} unbind={} disable={} flags={} ({}x{} BGRA8 stride {})",
+            u32::from(shape_ok),
+            u32::from(mint_ok),
+            u32::from(bind_ok),
+            unbind,
+            u32::from(unbind_ok),
+            flags_word,
+            IW, IH, stride
         );
     }
 
@@ -9227,6 +9827,7 @@ impl Conn {
                     b"bo" => WFK_BO_DIR,
                     b"ring" => WFK_RING_DIR,
                     b"mem" => WFK_MEM_DIR,
+                    b"img" => WFK_IMG_DIR,
                     _ => return None,
                 };
                 Some((make_wctx(id, fk), 0))
@@ -9322,6 +9923,34 @@ impl Conn {
                     _ => return None,
                 };
                 Some((make_wmem(mp, fk), 0))
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_IMG_DIR => {
+                let cid = warp_id(d);
+                let c = comp.wctx(cid, self.conn_id)?;
+                if name == b".." {
+                    return Some((make_wctx(cid, WFK_DIR), 0));
+                }
+                if name == b"new" {
+                    return Some((make_wctx(cid, WFK_IMG_NEW), 0));
+                }
+                let handle = parse_u32(name)?;
+                if handle as usize >= MAX_WARP_IMGS_PER_CTX {
+                    return None;
+                }
+                let i = c.imgs[handle as usize].as_ref()?;
+                Some((make_wimg(i.pub_id, WFK_DIR), 0))
+            }
+            d if is_wimg(d) && warp_fk(d) == WFK_DIR => {
+                let ip = warp_id(d);
+                let (c, _) = comp.wimg(ip, self.conn_id)?;
+                let parent = make_wctx(c.pub_id, WFK_IMG_DIR);
+                let fk = match name {
+                    b".." => return Some((parent, 0)),
+                    b"info" => WIFK_INFO,
+                    b"ctl" => WIFK_CTL,
+                    _ => return None,
+                };
+                Some((make_wimg(ip, fk), 0))
             }
             _ => None,
         }
@@ -9459,6 +10088,9 @@ impl Conn {
             return self.err(tag, p9::E_NOENT);
         }
         if is_wmem(f.path) && comp.wmem(warp_id(f.path), self.conn_id).is_none() {
+            return self.err(tag, p9::E_NOENT);
+        }
+        if is_wimg(f.path) && comp.wimg(warp_id(f.path), self.conn_id).is_none() {
             return self.err(tag, p9::E_NOENT);
         }
 
@@ -10056,6 +10688,7 @@ impl Conn {
                 }
                 WFK_RING_NEW => p9::build_rread(&mut self.out_buf, tag, &[]),
                 WFK_MEM_NEW => p9::build_rread(&mut self.out_buf, tag, &[]),
+                WFK_IMG_NEW => p9::build_rread(&mut self.out_buf, tag, &[]),
                 _ => self.err(tag, p9::E_INVAL),
             };
         }
@@ -10150,6 +10783,55 @@ impl Conn {
                     // page-rounded backing (the client sized the request).
                     let mut s = String::new();
                     let _ = core::fmt::write(&mut s, format_args!("res {} size {}\n", res, size));
+                    self.read_str(tag, &s, a.offset, cap)
+                }
+                _ => self.err(tag, p9::E_INVAL),
+            };
+        }
+        if is_wimg(f.path) {
+            let id = warp_id(f.path);
+            // `bound` is DERIVED from `Comp.bound_res`, the authoritative
+            // record of what the device scans out -- never from a per-object
+            // copy. W-3c-1 audit F4: the field this replaced was written in
+            // exactly one place and cleared in none, so every route by which
+            // the display moves away (reconcile's Off arm, the composed
+            // rebind, a surface retire) left it latched stale-TRUE. A fact
+            // with one writer and no clearer is not a cache; it is a lie with
+            // a delay.
+            let info = match comp.wimg(id, self.conn_id) {
+                Some((_, i)) => (i.res_id, i.w, i.h, i.format, i.stride, i.size, i.blob_id),
+                None => return self.err(tag, p9::E_NOENT),
+            };
+            let bound_now = info.0 != 0 && comp.bound_res == info.0;
+            return match warp_fk(f.path) {
+                WIFK_INFO => {
+                    // The ACCEPTED shape -- the negotiation's record
+                    // (WARP-WSI-DESIGN 5.2). A client reads this back to
+                    // confirm what the compositor agreed to display, which is
+                    // the whole point of declaring at registration: the answer
+                    // is a fact from then on, not a per-frame maybe. `bound`
+                    // reports whether the display currently names it.
+                    // `mem` echoes the venus allocation this blob was bound
+                    // to -- the client's way to confirm the compositor bound
+                    // the allocation it MEANT, rather than inferring it from
+                    // the registration having succeeded.
+                    let (res, w, h, format, stride, size, mem) = info;
+                    let bound = bound_now;
+                    let mut s = String::new();
+                    let _ = core::fmt::write(
+                        &mut s,
+                        format_args!(
+                            "res {} w {} h {} format {} stride {} size {} bound {} mem {}\n",
+                            res, w, h, format, stride, size, u32::from(bound), mem
+                        ),
+                    );
+                    self.read_str(tag, &s, a.offset, cap)
+                }
+                WIFK_CTL => {
+                    // The netd clone idiom, as `bo`/`ctl` does: reading the
+                    // ctl names the object.
+                    let mut s = String::new();
+                    let _ = core::fmt::write(&mut s, format_args!("{}\n", id));
                     self.read_str(tag, &s, a.offset, cap)
                 }
                 _ => self.err(tag, p9::E_INVAL),
@@ -10564,6 +11246,10 @@ impl Conn {
                     Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                     Err(e) => self.err(tag, e),
                 },
+                WFK_IMG_NEW => match comp.wimg_mint_verb(id, self.conn_id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
                 _ => self.err(tag, p9::E_PERM),
             };
         }
@@ -10604,6 +11290,19 @@ impl Conn {
             }
             return match warp_fk(f.path) {
                 WMFK_CTL => match self.wmem_ctl(comp, id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
+                _ => self.err(tag, p9::E_PERM),
+            };
+        }
+        if is_wimg(f.path) {
+            let id = warp_id(f.path);
+            if comp.wimg(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WIFK_CTL => match self.wimg_ctl(comp, id, a.data) {
                     Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                     Err(e) => self.err(tag, e),
                 },
@@ -10906,6 +11605,58 @@ impl Conn {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         match s.split_ascii_whitespace().next() {
             Some("destroy") => comp.wmem_destroy(id, self.conn_id),
+            _ => Err(p9::E_INVAL),
+        }
+    }
+
+    /// W-3c: `img/<n>/ctl` -- `destroy` only. The teardown it reaches is the
+    /// display-safe one (unbind before unref); there is deliberately no verb
+    /// to mutate a registered shape, because the shape IS the negotiation
+    /// (WARP-WSI-DESIGN 4.1) -- a client wanting a different one registers a
+    /// different presentable, which is exactly what a swapchain recreate is.
+    ///
+    /// THE CLIENT-ORDERING CONTRACT, and why `PFree`'s `~venusRef` conjunct
+    /// has no server-side check (W-3c-1 audit F1; the W-3b closed list handed
+    /// this forward). The spec models FOUR holders -- the venus allocation,
+    /// the registration, and the two observer arms -- and forbids the blob's
+    /// unref until all four release. Three of them are ours and are enforced
+    /// here: `regRef` is the slot (taken before any device work), and the two
+    /// observers are `PUnbound`/`PDrained` in `wimg_teardown`. `venusRef` is
+    /// NOT ours to observe: it is the client's own `VkDeviceMemory`, live in
+    /// its address space, invisible to this server. So it is discharged the
+    /// only honest way -- as a CONTRACT the client must keep, stated here the
+    /// way `wmem_mint` states its own:
+    ///
+    ///   **Destroy the registration BEFORE freeing the venus allocation it
+    ///   names.** In wsi terms: `vkDestroySwapchainKHR` retires the images,
+    ///   and each one's `img/<n>/ctl destroy` must precede the `vkFreeMemory`
+    ///   of its backing.
+    ///
+    /// Both orderings are worth stating because they fail differently. Taking
+    /// them in turn:
+    ///
+    /// - **Destroy-then-free (the contract, correct).** The unref drops the
+    ///   BLOB -- the host-side object that BINDS the allocation -- not the
+    ///   allocation itself, which the client still owns and then frees. The
+    ///   spec's `PFree` state is reached with `venusRef` released a moment
+    ///   later, which is the order it models.
+    /// - **Free-then-destroy (the violation).** The client frees the venus
+    ///   allocation while our blob still names it, so the host holds a
+    ///   binding to freed memory. Nothing guest-side can detect this: the
+    ///   `mem_id` is opaque to us, and by the time the destroy arrives the
+    ///   damage is host-side. It is bounded by the same trusted-host posture
+    ///   as every other `blob_id` claim (GPU-DESIGN 9.2) and becomes ours to
+    ///   enforce at the v3d fork.
+    ///
+    /// What this server DOES guarantee, unconditionally and regardless of the
+    /// client's ordering, is the half that is ours: the display never keeps a
+    /// reference across the unref (`wimg_teardown`). A client that breaks the
+    /// contract above damages its own context's host state; it cannot reach
+    /// another client's, and it cannot reach the display.
+    fn wimg_ctl(&mut self, comp: &mut Comp, id: u32, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        match s.split_ascii_whitespace().next() {
+            Some("destroy") => comp.wimg_destroy(id, self.conn_id),
             _ => Err(p9::E_INVAL),
         }
     }
@@ -11899,6 +12650,7 @@ impl Conn {
                         (&b"bo"[..], WFK_BO_DIR),
                         (&b"ring"[..], WFK_RING_DIR),
                         (&b"mem"[..], WFK_MEM_DIR),
+                        (&b"img"[..], WFK_IMG_DIR),
                     ] {
                         names.push((nm.to_vec(), make_wctx(id, fk)));
                     }
@@ -11976,6 +12728,29 @@ impl Conn {
                         (&b"ctl"[..], WMFK_CTL),
                     ] {
                         names.push((nm.to_vec(), make_wmem(mp, fk)));
+                    }
+                }
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_IMG_DIR => {
+                let cid = warp_id(d);
+                if let Some(c) = comp.wctx(cid, self.conn_id) {
+                    names.push((b"new".to_vec(), make_wctx(cid, WFK_IMG_NEW)));
+                    // The handle is the array INDEX (WarpImg does not store
+                    // it); the img-dir walk parses this name back to it.
+                    for (handle, slot) in c.imgs.iter().enumerate() {
+                        if let Some(i) = slot {
+                            let mut nm = String::new();
+                            let _ = core::fmt::write(&mut nm, format_args!("{}", handle));
+                            names.push((nm.into_bytes(), make_wimg(i.pub_id, WFK_DIR)));
+                        }
+                    }
+                }
+            }
+            d if is_wimg(d) && warp_fk(d) == WFK_DIR => {
+                let ip = warp_id(d);
+                if comp.wimg(ip, self.conn_id).is_some() {
+                    for (nm, fk) in [(&b"info"[..], WIFK_INFO), (&b"ctl"[..], WIFK_CTL)] {
+                        names.push((nm.to_vec(), make_wimg(ip, fk)));
                     }
                 }
             }

@@ -121,6 +121,16 @@ const VIRTIO_GPU_BLOB_MEM_GUEST: u32 = 0x0001;
 // chosen offset -- the substrate for Venus's host-consumed command ring.
 const VIRTIO_GPU_BLOB_MEM_HOST3D: u32 = 0x0002;
 const VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE: u32 = 0x0001;
+// W-3c: USE_SHAREABLE marks a blob the host may hand to consumers OTHER than
+// the creating context -- the display's scanout engine, and (at W-3c-2) the
+// compositor context's blit. A presentable takes this WITHOUT
+// USE_MAPPABLE: it is named, never guest-mapped (WARP-WSI-DESIGN 4.1).
+const VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE: u32 = 0x0002;
+/// Re-exported for the W-3c-1 self-test's flag-capability measurement (which
+/// combination this host actually accepts for a HOST3D blob). Aliases, never
+/// fresh literals -- the #230 mirror-by-meaning rule.
+pub const BLOB_FLAG_MAPPABLE: u32 = VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE;
+pub const BLOB_FLAG_SHAREABLE: u32 = VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE;
 const VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB: u32 = 0x0208;
 const VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB: u32 = 0x0209;
 
@@ -406,6 +416,10 @@ const GPUCFG_MIN_LEN: u32 = 0x10;
 const GPU_CAPSET_ENUM_MAX: u32 = 8;
 
 pub const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
+/// The XRGB8 sibling (opaque alpha). W-3c-1: named because WARP-WSI-DESIGN
+/// 4.1's stage-0 accept set is "BGRA8/XRGB8 -- the formats the console path
+/// composes today", and the presentable registration must admit both.
+pub const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
 
 const GPU_MAX_SCANOUTS: u32 = 16;
 const GPU_DISPLAY_ONE_LEN: u32 = 24;
@@ -1522,6 +1536,21 @@ pub struct Gpu {
     /// FEATURES_OK'd `VIRTIO_GPU_F_RESOURCE_BLOB`. Gates the V-1 guest-blob
     /// path -- a blob command is illegal on the wire without it.
     pub blob: bool,
+    /// W-3c-1: a monotonic tick stamped by the two commands whose RELATIVE
+    /// ORDER is the display-safe teardown's whole invariant -- `set_scanout`
+    /// (the unbind) and `resource_unref`. It exists because the self-test's
+    /// "ordering witness" could not, in fact, witness an ordering (audit F5):
+    /// checking `bound_res == 0` after the destroy catches the unbind being
+    /// OMITTED, but an INVERTED teardown (unref, then unbind) clears
+    /// `bound_res` just the same and read as a pass -- and inversion is the
+    /// display-fatal arrangement the ordering exists to forbid. A per-command
+    /// tick makes the order itself observable, so the arm can assert what its
+    /// name claims. Counts commands ISSUED (before the response), which is
+    /// the order the device sees them in.
+    pub cmd_seq: u64,
+    /// The tick at which the last `set_scanout` / `resource_unref` was issued.
+    pub last_scanout_seq: u64,
+    pub last_unref_seq: u64,
     pub num_capsets: u32,
     /// The fetched preferred capset (Warp-2c: served verbatim by the
     /// /dev/warp caps file; empty when no capset was fetchable). The id +
@@ -1684,6 +1713,9 @@ impl Gpu {
             virgl,
             ctxinit,
             blob,
+            cmd_seq: 0,
+            last_scanout_seq: 0,
+            last_unref_seq: 0,
             num_capsets: 0,
             capset_blob: alloc::vec::Vec::new(),
             capset_id: 0,
@@ -2311,6 +2343,8 @@ impl Gpu {
     }
 
     pub fn resource_unref(&mut self, resource_id: u32) -> Result<(), Error> {
+        self.cmd_seq = self.cmd_seq.wrapping_add(1);
+        self.last_unref_seq = self.cmd_seq;
         let req_va = self.ring_va + REQ_OFF;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_UNREF);
@@ -2805,6 +2839,8 @@ impl Gpu {
 
     /// Bind scanout 0 to a resource (resource_id 0 = disable the scanout).
     pub fn set_scanout(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {
+        self.cmd_seq = self.cmd_seq.wrapping_add(1);
+        self.last_scanout_seq = self.cmd_seq;
         let req_va = self.ring_va + REQ_OFF;
         unsafe {
             write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_SET_SCANOUT);
@@ -2816,13 +2852,18 @@ impl Gpu {
             .step("SET_SCANOUT", GPU_CTRL_HDR_LEN + 24, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
     }
 
-    /// W-3a probe: SET_SCANOUT_BLOB, returning the RAW resp_type instead of
-    /// stepping against an expectation -- the probe's whole point is reading
-    /// which refusal (or acceptance) this host gives. Layout per VIRTIO 1.2
-    /// section 5.7.6.7 struct virtio_gpu_set_scanout_blob: hdr(24) + rect(16)
-    /// + scanout_id + resource_id + width + height + format + padding +
-    /// strides[4] + offsets[4] = 96 bytes. Err(()) = the submission itself
-    /// died (device wedged), distinct from any refusal code.
+    /// SET_SCANOUT_BLOB, returning the RAW resp_type rather than stepping
+    /// against an expectation. Layout per VIRTIO 1.2 section 5.7.6.7 struct
+    /// virtio_gpu_set_scanout_blob: hdr(24) + rect(16) + scanout_id +
+    /// resource_id + width + height + format + padding + strides[4] +
+    /// offsets[4] = 96 bytes. Err(()) = the submission itself died (device
+    /// wedged), distinct from any refusal code.
+    ///
+    /// ONE wire implementation for both callers (the #230 mirror-by-meaning
+    /// rule): the W-3a capability probe needs the raw code (reading WHICH
+    /// refusal this host gives IS its measurement), while the W-3c Direct
+    /// bind needs a verdict -- so the verdict arm is a thin wrapper below,
+    /// never a second copy of the 96-byte layout.
     pub fn set_scanout_blob_probe(
         &mut self,
         resource_id: u32,
@@ -2851,6 +2892,72 @@ impl Gpu {
             w32(req_va + 92, 0);
         };
         self.ctrl.submit_and_wait(GPU_CTRL_HDR_LEN + 72, GPU_CTRL_HDR_LEN)
+    }
+
+    /// W-3c: the Direct arm's bind -- scanout 0 shows the presentable's blob
+    /// resource at its DECLARED shape (WARP-WSI-DESIGN 4.2). The verdict form
+    /// of the probe above; `OK_NODATA` is the only acceptance (the W-3a
+    /// measurement: this host answers `INVALID_RESOURCE_ID` for a resource it
+    /// cannot fetch, so a refusal is legible). Acceptance is NOT a pixel
+    /// claim -- what it establishes is that the display now REFERENCES this
+    /// resource, which is precisely what makes the unbind-before-unref
+    /// ordering load-bearing.
+    pub fn set_scanout_blob(
+        &mut self,
+        resource_id: u32,
+        w: u32,
+        h: u32,
+        format: u32,
+        stride: u32,
+    ) -> Result<(), Error> {
+        match self.set_scanout_blob_probe(resource_id, w, h, format, stride) {
+            Ok(VIRTIO_GPU_RESP_OK_NODATA) => Ok(()),
+            Ok(_) => Err(Error::Hardware),
+            Err(()) => Err(Error::Hardware),
+        }
+    }
+
+    /// W-3c: mint a PRESENTABLE -- a HOST3D blob bound by `blob_id` to a venus
+    /// allocation, for a swapchain image that exists to be NAMED (scanned out,
+    /// composed from) and never guest-mapped.
+    ///
+    /// THE FLAG IS NOT THE PROPERTY (WARP-WSI-DESIGN 4.1, AMENDED at W-3c-1
+    /// after measurement; operator-ratified). The design originally specified
+    /// `USE_SHAREABLE` *without* `USE_MAPPABLE`, on the reasoning that omitting
+    /// the flag is what keeps the image out of the guest. The W-3c-1 self-test
+    /// measured that on the real chain and this host REFUSES it -- cleanly
+    /// isolated, same size, same ctx, blob_id 0, only the flag varying:
+    /// `USE_SHAREABLE` alone refused, `USE_MAPPABLE|USE_SHAREABLE` refused,
+    /// `USE_MAPPABLE` alone accepted. So virglrenderer 1.1.0 refuses
+    /// USE_SHAREABLE on a HOST3D blob outright.
+    ///
+    /// The correction: `USE_MAPPABLE` only declares that the host MAY place the
+    /// blob in the hostmem BAR. What actually exposes bytes to the guest is
+    /// `RESOURCE_MAP_BLOB` + `SYS_BURROW_FROM_HOSTMEM` -- so guest-invisibility
+    /// is secured by NEVER MAPPING IT, which is a property of this call's
+    /// CALLERS, not of its flags. Hence: mint with the flag the host accepts,
+    /// and let the presentable path call neither `map_blob` nor
+    /// `burrow_from_hostmem`. Every consequence the original design claimed
+    /// still holds -- no hostmem offset, no guest VA, no weft share, no reclaim
+    /// park, no #847 dual count -- because none of them followed from the flag.
+    ///
+    /// That is the ONE difference from `mint_host3d_ring`, which takes the same
+    /// flag and then goes on to map: this function stops here. Teardown is the
+    /// lone `resource_unref`, ordered AFTER the display unbind by the caller
+    /// (the `gl_evict_res` discipline).
+    ///
+    /// Class-scoped, per the W-3a rule: the measurement above used blob_id 0
+    /// (virglrenderer's own plain-memory arm). Whether USE_SHAREABLE is
+    /// accepted for a REAL venus allocation is unmeasured and needs a client
+    /// (W-3d) -- but the mapped-never property does not depend on the answer.
+    pub fn create_presentable(
+        &mut self,
+        res_id: u32,
+        ctx_id: u32,
+        len: u32,
+        blob_id: u64,
+    ) -> Result<(), Error> {
+        self.create_host3d_blob(res_id, ctx_id, VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE, len, blob_id)
     }
 
     /// W-3a probe: CTX_ATTACH_RESOURCE with the raw resp_type returned -- the

@@ -253,6 +253,13 @@ pub extern "C" fn rs_main() -> i64 {
         return ring_xproc_prove();
     }
 
+    // W-3c-1: the presentable ABI over the wire (walk/write/read/destroy/
+    // re-register). Venus-gated like ring-host3d; the shape gate runs even on
+    // the SKIP path, since it needs no venus.
+    if libthyla_rs::env::args().get_str(1) == Some("img") {
+        return img_prove();
+    }
+
     t_putstr("warp-prove: starting (the Warp-2 gate)\n");
 
     let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
@@ -810,6 +817,130 @@ fn ring_host3d_fail(msg: &str) -> ! {
     t_putstr(msg);
     t_putstr("\n");
     unsafe { t_exits(1) }
+}
+
+fn img_fail(msg: &str) -> ! {
+    t_putstr(&format!("warp-prove: IMG FAIL -- {}\n", msg));
+    unsafe { t_exits(1) }
+}
+
+/// W-3c-1: the PRESENTABLE gate -- drives the `img/` ABI over the WIRE.
+///
+/// The compositor's own boot self-test exercises the presentable's INTERNALS
+/// (mint, bind, the display-safe teardown) but reaches none of them through
+/// 9P. This leg is the ABI's driver: walk, write, read-back, destroy,
+/// re-register. Without it the whole namespace surface -- the img dir, the
+/// info file, the ctl verb, the handle-frees-on-destroy contract -- would
+/// have no caller until mesa arrives at W-3d, and a gate with no driver is
+/// not a gate (the "BOOT OK does not prove a gate is wired" rule).
+///
+/// Venus-gated: a presentable is a venus-ctx object, so this SKIPs on a 2D
+/// device (no ctx) and on virgl-without-venus (the mint refuses), exactly
+/// like its ring-host3d sibling.
+fn img_prove() -> i64 {
+    t_putstr("warp-prove: img gate (W-3c-1, the presentable ABI) starting\n");
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+    if root < 0 {
+        img_fail("open /srv/warp (is tapestryd serving?)");
+    }
+    let ctx = match try_open_read(root, "ctx/new").and_then(|s| parse_u32_prefix(&s)) {
+        Some(v) => v,
+        None => {
+            t_putstr("warp-prove: IMG SKIP -- no virgl on this device (ctx mint unavailable)\n");
+            unsafe { t_exits(2) }
+        }
+    };
+    const W: u32 = 64;
+    const H: u32 = 64;
+    const FMT: u32 = VIRGL_FORMAT_B8G8R8A8_UNORM; // == VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM
+    const STRIDE: u32 = W * 4;
+    let newp = format!("ctx/{}/img/new", ctx);
+    let good = format!("0 {} {} {} {} 0", W, H, FMT, STRIDE);
+
+    // NEGATIVES FIRST, and through the WIRE rather than the internals: three
+    // declarations one variable away from the accepted one. They must all be
+    // refused BEFORE the positive runs, so a device that refuses everything
+    // cannot read as a pass -- the positive below is what separates the two.
+    // u32::MAX, not FMT+1: the neighbouring virtio format is XRGB8, which the
+    // ratified stage-0 accept set ADMITS (audit F7). A negative control must
+    // sit outside every accept set the design may legitimately grow into, or
+    // it pins a decision rather than testing a gate.
+    let n_fmt = !write_ctl(root, &newp, &format!("0 {} {} {} {} 0", W, H, u32::MAX, STRIDE));
+    let n_stride = !write_ctl(root, &newp, &format!("0 {} {} {} {} 0", W, H, FMT, STRIDE - 4));
+    let n_dim = !write_ctl(root, &newp, &format!("0 0 {} {} {} 0", H, FMT, STRIDE));
+    // A handle past the row must be refused too -- the slot-bound gate, which
+    // no other arm touches.
+    let n_handle = !write_ctl(root, &newp, &format!("9999 {} {} {} {} 0", W, H, FMT, STRIDE));
+    if !(n_fmt && n_stride && n_dim && n_handle) {
+        img_fail(&format!(
+            "a malformed registration was ACCEPTED (fmt-refused={} stride-refused={} dim-refused={} handle-refused={})",
+            n_fmt, n_stride, n_dim, n_handle
+        ));
+    }
+
+    // The positive. A virgl-without-venus device refuses the venus-ctx create
+    // -> SKIP (the shape gate above already ran, so the skip still carries
+    // its result).
+    if !write_ctl(root, &newp, &good) {
+        t_putstr("warp-prove: IMG SKIP -- presentable mint refused (no venus device); shape gate PASSED\n");
+        unsafe { t_exits(2) }
+    }
+
+    // The registration's RECORD: info must echo the shape that was declared,
+    // which is what makes "the declaration is the negotiation" a checkable
+    // claim rather than a slogan.
+    let info = open_read_string(root, &format!("ctx/{}/img/0/info", ctx));
+    let res = parse_field(&info, "res").unwrap_or_else(|| img_fail("img info missing res"));
+    let gw = parse_field(&info, "w").unwrap_or_else(|| img_fail("img info missing w"));
+    let gh = parse_field(&info, "h").unwrap_or_else(|| img_fail("img info missing h"));
+    let gs = parse_field(&info, "stride").unwrap_or_else(|| img_fail("img info missing stride"));
+    let gsz = parse_field(&info, "size").unwrap_or_else(|| img_fail("img info missing size"));
+    let gb = parse_field(&info, "bound").unwrap_or_else(|| img_fail("img info missing bound"));
+    if res == 0 {
+        img_fail("img info res is 0 (no host resource)");
+    }
+    if gw != W as u64 || gh != H as u64 || gs != STRIDE as u64 {
+        img_fail(&format!("img info shape {}x{} stride {} != declared {}x{} stride {}", gw, gh, gs, W, H, STRIDE));
+    }
+    if gsz != (STRIDE as u64) * (H as u64) {
+        img_fail(&format!("img info size {} != stride*h {}", gsz, (STRIDE as u64) * (H as u64)));
+    }
+    if gb != 0 {
+        img_fail("a freshly-registered presentable reports bound != 0");
+    }
+
+    // A DUPLICATE handle must be refused while the slot is live -- and it must
+    // be refused for being taken, not for anything about the shape (the same
+    // declaration that just succeeded).
+    if write_ctl(root, &newp, &good) {
+        img_fail("re-registering a LIVE handle was accepted (the slot is not exclusive)");
+    }
+
+    // Destroy through the ctl verb, then prove BOTH halves of what destroy
+    // means: the object is gone from the namespace, AND its handle is free
+    // again. Checking only the first would pass on an implementation that
+    // leaks the slot forever.
+    if !write_ctl(root, &format!("ctx/{}/img/0/ctl", ctx), "destroy") {
+        img_fail("img ctl destroy refused");
+    }
+    if try_open_read(root, &format!("ctx/{}/img/0/info", ctx)).is_some() {
+        img_fail("img info still resolves AFTER destroy");
+    }
+    if !write_ctl(root, &newp, &good) {
+        img_fail("the handle did not free on destroy (re-registration refused)");
+    }
+    let info2 = open_read_string(root, &format!("ctx/{}/img/0/info", ctx));
+    let res2 = parse_field(&info2, "res").unwrap_or_else(|| img_fail("re-registered img info missing res"));
+    if res2 == res {
+        img_fail(&format!("re-registration reused res_id {} -- ids must be monotonic", res));
+    }
+    let _ = write_ctl(root, &format!("ctx/{}/img/0/ctl", ctx), "destroy");
+    let _ = write_ctl(root, &format!("ctx/{}/ctl", ctx), "destroy");
+    t_putstr(&format!(
+        "warp-prove: IMG PASS (shape gate 4/4 refused; declared {}x{} stride {} echoed; res {} -> {} monotonic; handle freed on destroy)\n",
+        W, H, STRIDE, res, res2
+    ));
+    0
 }
 
 fn ring_host3d_prove() -> i64 {

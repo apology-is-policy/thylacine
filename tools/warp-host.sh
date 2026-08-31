@@ -174,7 +174,7 @@ sync_all() {
     # command name" whose cause is a list that claimed to carry your edits.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/interactive/lib.exp tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-ring.exp tools/warp/warp-ring-host3d.exp tools/warp/warp-ring-xproc.exp tools/warp/warp-reject.exp tools/warp/warp-readback.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/composed-screen.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
+    for f in tools/run-vm.sh tools/interactive/lib.exp tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-ring.exp tools/warp/warp-ring-host3d.exp tools/warp/warp-img.exp tools/warp/warp-ring-xproc.exp tools/warp/warp-reject.exp tools/warp/warp-readback.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/composed-screen.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -483,6 +483,24 @@ venus-verdict)
         echo "CONTROL leg: a scanout-blob verdict WITHOUT the blob feature -- impossible, the gate is wrong"
         vfail=1
     fi
+    # W-3c-1: the presentable self-test is a WITNESS, not a measurement, so
+    # unlike the probe above its arms have required VALUES: shape/mint/bind
+    # must each be 1 and unbind must be ok. Keying on the bare token would
+    # accept the SKIP-shaped line (the #240 hollow shape), so the arm demands
+    # the passing verdict itself; a skip on the test leg is a FAILURE there,
+    # because the test leg is precisely the device that can run it.
+    grep -qE "warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok disable=1 flags=" "$tst" || {
+        echo "TEST leg: the W-3c-1 presentable self-test did not report all-arms-passing (shape/mint/bind/unbind)"
+        vfail=1
+    }
+    grep -qF "warp presentable self-test skipped" "$ctl" || {
+        echo "CONTROL leg: no 'presentable self-test skipped' -- the self-test did not take the intended no-feature skip"
+        vfail=1
+    }
+    if grep -qF "warp presentable self-test: shape=" "$ctl"; then
+        echo "CONTROL leg: a presentable verdict WITHOUT the blob feature -- impossible, the gate is wrong"
+        vfail=1
+    fi
     if [ "$vfail" -eq 0 ]; then
         echo "VENUS GATE: VERIFIED -- capset id=4 present WITH venus=on absent WITHOUT, a Venus context creates (id=4 CREATED with venus, skipped without; id=2 control creates on both), a guest blob creates WITH F_RESOURCE_BLOB and is skipped WITHOUT (V-1), a HOST3D blob_id=0 mappable blob MAPs under a venus ctx while a device-global create is refused (V-3b-1a), a HOST3D blob guest-maps via SYS_BURROW_FROM_HOSTMEM and round-trips a sentinel (V-3b-1b), AND the persistent ring engine mints two rings at distinct offsets, round-trips each guest VA, and reuses a freed offset on re-mint (V-3b-1c), AND the SERVER host3d-ring path creates a per-client venus device-ctx, mints a HOST3D ring in /srv/warp, round-trips its VA, and tears it down through drop_host3d_ring + the venus-ctx destroy (V-3b-1c-2a), AND a destroyed host3d ring's ridx is re-mintable via the ring/<ridx>/ctl destroy verb (V-3b-3c-1), AND a HOST_VISIBLE device-memory blob mints under a venus ctx, round-trips a sentinel through its hostmem backing, and its handle is re-mintable via the mem/<handle>/ctl destroy verb (V-3b-3c-2), AND the CLIENT vn_renderer device-memory bo_ops complete a full HOST_VISIBLE vkAllocateMemory+vkMapMemory E2E on real V3D -- zero-at-map + sentinel round-trip over the weft-mapped backing (V-3b-3c-2b), AND the prove's full witness set holds: fenced GPU copy with first-map survival (F1), placed-map de-advertised (F4), the timeline lift, the 64 MiB cap cycle (F2), the two-timeline interleave (F3), the offscreen SPIR-V triangle, and slot-exhaustion steady-state (the vkQuake-arc W-1 pipeline witness)"
         grep -hE "gpu capset\[|num_capsets|blob-create" "$ctl" "$tst"
@@ -594,6 +612,30 @@ ring)
         echo "WARP-6 V-3a GATE: VERIFIED"
     else
         echo "WARP-6 V-3a GATE: UNVERIFIED (need WARP-RING PASS + the scenario pass line)"
+        exit 1
+    fi
+    ;;
+img)
+    out="$REPO_ROOT/build/warp-img.log"
+    # Same ServerAliveInterval reasoning as ring-host3d below: the exp STREAMS
+    # the guest pty over this SSH and the venus boot has a long quiet phase, so
+    # keepalives keep the tunnel from dropping an idle stream.
+    ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=20 "$HOST" "cd $RREPO && ${RENV}expect tools/warp/warp-img.exp" | tee "$out" || true
+    echo "== img verdict =="
+    # The W-3c-1 gate: the prover's OWN pass line (the presentable ABI driven
+    # over 9P -- four malformed registrations refused, the accepted shape
+    # echoed by info, a duplicate handle refused, destroy freeing both the
+    # namespace entry and the handle, res_id monotonic) AND the scenario pass
+    # (the boot + login around it held). Either alone is not the gate.
+    #
+    # A SKIP fails this loud, deliberately: the prover skips on a non-venus
+    # device, and this scenario is only ever run on one that IS venus -- so a
+    # skip here means the device was configured wrong, not that the gate is
+    # inapplicable (#212: an arm that could not run has not succeeded).
+    if grep -q "IMG PASS" "$out" && grep -q "PASS: warp-img" "$out"; then
+        echo "W-3c-1 PRESENTABLE ABI GATE: VERIFIED"
+    else
+        echo "W-3c-1 PRESENTABLE ABI GATE: UNVERIFIED"
         exit 1
     fi
     ;;

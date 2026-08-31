@@ -87,12 +87,65 @@ STALE at C-1 — it had never learned about C-6's readback class at all — and
 `SPEC-TO-CODE.md` still said "7 buggy cfgs". Two doc rots caught by walking
 the co-update surface instead of trusting it.
 
-**Open onward**: W-3c (tapestryd: the presentable `img/` ABI + the generalized
-adoption — a NEW AUDIT-TRIGGERS row, per the W-3a closer's explicit call) →
-W-3d (mesa `wsi_interface`) → W-3e (SDL Vulkan glue + the first Vulkan frame
-on the Thylacine display) → W-4 (vkQuake). The spec's not-modeled list is the
-W-3c prosecutor's checklist: the adoption gate, the attach lifecycle, the
-`filled` trigger shape.
+**Then W-3c-1, in the same run: the presentable stopped being a modeled
+object and became a real one.** The chunk split cleanly in two, and the split
+is worth recording because it was chosen for *witnessability*, not size:
+**W-3c-1** is the object and its lifetime (the `img/` ABI, the shareable
+**non-mappable** HOST3D mint, the display-safe teardown), which a server-side
+boot self-test can witness end-to-end with no client at all; **W-3c-2** is the
+client-facing present path (the generalized adoption, `present-to … img`, the
+compose arm), which is also exactly where the spec's `PDrained` conjunct
+becomes reachable code. Splitting the other way would have left half the
+ordering rule with nothing to exercise it.
+
+The design's own framing turned out to be the useful one while writing it:
+this class is defined **as much by what it lacks** as by what it has. No guest
+mapping — so no weft share, no hostmem offset, no reclaim park, no #847 dual
+count. The entire mappable lifecycle its `WarpMem` sibling carries is absent,
+and with it every hazard that lifecycle brings. What replaces them is one
+hazard running the other way: the *display* holds a reference, so
+`wimg_teardown` unbinds before it unrefs — reusing the existing `gl_evict_res`
+rather than open-coding a second copy of an ordering rule, since two copies is
+how one of them rots.
+
+**Two self-audit catches, both before the prosecutor saw it, and both of the
+same family — trusting a second copy of a fact.** The unbind was first written
+gated on the per-object `bound` flag; that is the stale-flag direction, where a
+stale FALSE skips the unbind and unrefs a live binding. The authoritative
+record is `Comp.bound_res`, which `gl_evict_res` already self-guards on, so the
+call is now unconditional: a redundant no-op costs nothing, trusting the copy
+costs the display. Separately, the self-test drives the *real* teardown, so
+`gl_evict_res` mutates the compositor's own scanout state machine on the way
+through — both resting states are stable, but a witness that quietly leaves the
+machine in a different state than it found has changed its subject, so it now
+snapshots and restores.
+
+**The witness is four arms, and the fourth is the point**: `shape=` (three
+refusals one variable away, so the accept set is shown to be a gate rather than
+a rubber stamp), `mint=`, `bind=`, and `unbind=` — destroy the presentable
+**while the display is bound to it** and observe the binding dropped first.
+That is the runtime twin of `tapestry_present_buggy_punbind_skipped.cfg`: it
+witnesses the *modeled* bug's absence, not a generic teardown success. On a
+host that refused the bind it reports `n/a`, never a pass.
+
+**Two process notes.** The **Fable audit round died on credit exhaustion**
+without producing a report; policy is that a round is never skipped for want of
+Fable, so it re-spawned straight to the Opus fallback with the framing that
+matters there — family diversity is *not* what a same-family prosecutor brings,
+context independence is, so it must re-derive every load-bearing comment claim
+rather than accept it (this code is comment-dense and several comments make
+confident safety claims). And the **bake trap bit again, exactly as recorded**:
+`build.sh disk` does not re-bake `ramfs.cpio`, so the first local boot ran the
+*old* tapestryd — visible only because the W-3a probe's line was present while
+the new self-test's was absent. Content-verify the artifact the consumer reads;
+the md5 of the whole artifact is the honest check, and it caught the
+pre-fix/post-fix distinction on the Pi ship too.
+
+**Open onward**: W-3c-2 (the generalized adoption + `present-to … img` + the
+compose arm, which brings `PDrained` into code) → W-3d (mesa `wsi_interface`)
+→ W-3e (SDL Vulkan glue + the first Vulkan frame on the Thylacine display) →
+W-4 (vkQuake). The spec's not-modeled list remains the W-3c-2 prosecutor's
+checklist: the adoption gate, the attach lifecycle, the `filled` trigger shape.
 
 ---
 
