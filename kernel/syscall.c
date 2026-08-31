@@ -4724,6 +4724,16 @@ static s64 viv_futex(struct Proc *p, u64 uaddr, u64 op_raw, u64 val,
         s64 timeout_us = -1;   // torpor: < 0 blocks with no deadline
         if (timeout_or_val2 != 0) {
             struct { s64 tv_sec; s64 tv_nsec; } ts;
+            // VALIDATE THE POINTER before uaccess_copy_in reads it -- that is the
+            // caller's half of uaccess_copy_in's contract (uaccess.S), and the
+            // ONLY reason it is safe: a raw copy_in of a kernel/non-canonical
+            // timeout VA faults with from_user=false + vaddr >= UACCESS_USER_VA_
+            // TOP, which the EL1 fixup DELIBERATELY does not rescue -> the kernel
+            // extincts on unprivileged EL0 input (the getdents64 copy-out P0
+            // class). timeout_or_val2 is x3, wholly guest-controlled. Mirrors the
+            // native timespec readers (sys_torpor's callers + the ppoll tmo).
+            if (!sys_validate_user_buf(timeout_or_val2, sizeof(ts)))
+                return -(s64)T_E_FAULT;
             if (uaccess_copy_in(&ts, timeout_or_val2, sizeof(ts)) != 0)
                 return -(s64)T_E_FAULT;
             if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000)
@@ -12678,7 +12688,7 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         return (s64)proc_parent_pid(p);
     }
 
-    case VIV_LINUX_GETTID:
+    case VIV_LINUX_GETTID: {
         // gettid(void) -> the per-Thread tid. getpid stays per-Proc (Proc.pid,
         // shared by all CLONE_THREAD peers); gettid is the separate per-Thread
         // counter (alloc_next_tid). No native twin exists and adding one would be
@@ -12686,8 +12696,9 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // directly. current_thread() is never NULL on a phenotype dispatch (a
         // syscall is executing on this Thread), but guard it -- a defensive NULL
         // here is a clean -EINVAL, not a deref.
-        return current_thread() ? (s64)current_thread()->tid
-                                : -(s64)T_E_INVAL;
+        struct Thread *ct = current_thread();
+        return ct ? (s64)ct->tid : -(s64)T_E_INVAL;
+    }
 
     case VIV_LINUX_GETUID:
         // getuid(void). The native twin is exact, the arity matches, and it is

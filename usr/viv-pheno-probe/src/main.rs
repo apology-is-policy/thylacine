@@ -2823,6 +2823,26 @@ unsafe fn run_linux() -> ! {
         b"L169c\n"
     );
 
+    // L169d (audit F1 regression, P0): a FUTEX_WAIT with an OUT-OF-BAND timeout
+    // pointer must return -EFAULT, NOT extinct the kernel. `viv_futex` copies the
+    // relative timespec from x3; before the fix it did so with NO
+    // sys_validate_user_buf, so a kernel/non-canonical timeout VA faulted with
+    // `vaddr >= UACCESS_USER_VA_TOP` -- which the EL1 fixup deliberately does NOT
+    // rescue -> unprivileged EL0 input extincting the whole kernel. The validate
+    // closes it. THE POINTER MUST BE OUT-OF-BAND: an in-band unmapped VA (like
+    // UNMAPPED_USER_VA) routes through uaccess_copy_in's OWN fixup to -EFAULT and
+    // never reaches the F1 gate, so it is a kernel VA here. Fails-without-fix by
+    // EXTINCTION (the boot dies), which is exactly the defect; passes as -EFAULT.
+    // The uaddr (RAN_FUTEX) is valid -- only the timeout pointer is hostile, and
+    // the timeout copy-in is the FIRST thing WAIT does, before *uaddr/val matter.
+    let kernel_va: u64 = 0xFFFF_FFFF_FFFF_FFF0;   // >= UACCESS_USER_VA_TOP (2^47)
+    leg!(
+        rep,
+        svc6(NR_FUTEX, core::ptr::addr_of!(RAN_FUTEX) as u64,
+             FUTEX_WAIT | FUTEX_PRIVATE, 0xDEAD_BEEF, kernel_va, 0, 0) == NEG_EFAULT,
+        b"L169d\n"
+    );
+
     // --- L170-L176 (LINEAGE L-6b): wait4 -------------------------------------
     //
     // Two zombies are outstanding here by construction -- `fpid` from the L156
