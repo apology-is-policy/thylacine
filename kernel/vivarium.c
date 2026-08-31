@@ -448,6 +448,7 @@ static const struct viv_reject g_viv_rejects[] = {
     // this is the census a running busybox printed, not a guess at what a libc
     // might want -- and each is a shell rather than a renumber for a reason
     // named at its declaration in vivarium.h.
+    { VIV_LINUX_READV,           VIV_TIER2 },  // N-5: writev's twin, same iovec judgement (git protocol-v2)
     { VIV_LINUX_WRITEV,          VIV_TIER2 },  // the arity rule's sharpest case
     { VIV_LINUX_GETCWD,          VIV_TIER2 },  // +1 on the length, and ERANGE
     { VIV_LINUX_GETPPID,         VIV_TIER2 },  // no native twin exists

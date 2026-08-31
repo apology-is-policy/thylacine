@@ -3174,6 +3174,18 @@ void test_vivarium_startup_batch_rows(void) {
                    "writev is T2, never T1 -- arg1 is an array, arg2 a count");
     TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
 
+    // readv (N-5): writev's read twin, T2 for the identical arity reason. It
+    // landed because git protocol v2's stateless-connect path reads the helper
+    // response through readv -- with no row it FORWARDed to ENOSYS and the v2
+    // clone aborted silently after reading the capability advertisement. A
+    // FORWARD verdict here re-breaks git v2; this is the disposition half of the
+    // regression (the git-net gate on v2 is the end-to-end half).
+    out.nr = 0xDEADu;
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_READV, args, &out),
+                   (int)VIV_TIER2,
+                   "readv is T2 (served) -- a FORWARD here re-breaks git protocol v2");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
+
     // getcwd: arguments align exactly with SYS_GETCWD and it is still T2, for
     // two independent reasons (the return is off by one, the error is ERANGE
     // not a flat -1). Either alone disqualifies the renumber.

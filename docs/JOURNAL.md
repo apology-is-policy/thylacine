@@ -22,6 +22,63 @@ needed the operator.
 
 ---
 
+## 2026-08-31 (aux) -- N-5: git protocol v2 root-cause -- the phenotype never served readv
+
+git-over-https worked under the phenotype only with `protocol.version=0` FORCED
+in the shipped gitconfigs; with git's default (v2) the clone aborted silently
+("reads the whole capability advertisement, writes nothing back"). That forced
+v0 was a workaround masking a real defect, so N-5 root-caused it.
+
+**The recon refuted the inherited hypothesis.** A prior note guessed `getsockname`
+ENOSYS during "v2 connection-reuse" -- but that is the ssh/git:// model; v2 over
+HTTPS is HTTP POSTs via libcurl. The recon (subagent + my independent read,
+converging) established getsockname is a RED HERRING: it is FORWARD->ENOSYS, yes,
+but libcurl calls it non-fatally at connect time on a path SHARED with the
+working v0 clone. The real v2 delta is the extra `ls-refs` POST driven through
+the helper pipe via `stateless-connect`.
+
+**The wrong turn, and what caught it.** The decisive instrument is the always-on
+kernel census (`vivarium: unserved linux syscall nr=<N> pid=<P>`, `syscall.c`),
+which the prior session never consulted -- it read git-side traces only. First
+run of the census experiment came back with EXACTLY 96 census lines = the global
+cap (`VIV_UNSERVED_MAX_REPORTS`). Boot-time phenotype activity (pids 2304-2364)
+exhausted the instrument before the git clones (pid 2400+) ran, so their refusals
+were suppressed -- I was measuring the instrument, not the subject. Caught by
+counting the lines (exactly 96) rather than trusting the empty diff. Also: a
+`GIT_TRACE_PACKET=2` I added flooded ~7000 lines and spuriously failed the gate
+by overflowing joey's marker-scan drain (the smoke_drain buffering trap) -- dropped it.
+
+**Root cause (census cap raised to 8192, clean re-run).** The one syscall the v2
+clone refused that NO working process did: **readv (nr=65), FORWARD->ENOSYS**,
+on pid 2402 (the parent `git clone`), one line before it exits and orphans its
+child and the clone reports aborted. Its exact twin **writev (66) IS served**
+(`viv_writev`, #150, for busybox echo) -- readv was simply never added. git v2's
+stateless-connect path reads the helper response through musl's vectored read
+(readv); v0 reads the inline advertisement with plain read(). That asymmetry is
+the whole bug.
+
+**The fix: serve readv (65), the exact mirror of viv_writev.** New `viv_readv`
+(`kernel/syscall.c`) -- same two-pass iovec loop, same shared judgement
+(`vivarium_writev_decide` UIO_MAXIOV + `vivarium_writev_accumulate` SSIZE_MAX,
+which Linux applies to readv unchanged), each entry delegating to
+`sys_read_handler` whose own `sys_validate_user_buf` guards the COPY-OUT (readv
+WRITES into the user's iovecs -- the getdents64 P0 class). `VIV_LINUX_READV = 65`
++ the `VIV_TIER2` disposition row + the dispatch case. Then RETIRED the forced
+`protocol.version=0` from BOTH gitconfigs (`build.sh` -- the /viv/bin production
+mount and the git-net gate); the git-net gate now clones with git's default v2
+and is the end-to-end v2 regression net.
+
+**Verified.** With readv served, `git -c protocol.version=2 clone` SUCCEEDS
+(`GITHTTPS-V2-UNEXPECTED-OK`); readv is refused zero times; suite 1470/1470, no
+regression; no second wall (the v2 clone runs to completion past readv). Final
+re-bake confirms the clean-packaged state (forced-v0 retired, experiment removed)
+clones on v2 default. Regression: the `vivarium.startup_batch_rows` routing test
+now asserts readv is T2 (a FORWARD there re-breaks git v2).
+
+**Owed (next session, fresh context for the dense audit roundtrip):** the
+holotype (Fable, max) on the readv serve + the SMP gate + the deeper VIVARIUM.md
+reference section + push. Then N-6 (push-over-https) closes milestone B.
+
 ## 2026-08-31 (aux) -- N-4/AF_UNIX deferred to the Mycelium NOVEL; per-model effort split
 
 Two things this session, neither a code chunk: an operator effort-config

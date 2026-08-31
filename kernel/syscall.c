@@ -11627,6 +11627,72 @@ static s64 viv_writev(u64 fd, u64 iov_va, u64 iovcnt_raw) {
     return (s64)written;
 }
 
+// readv (65): the read twin of viv_writev above. git protocol v2 over smart-http
+// drives the transport through the helper's stateless-connect pipe, and the
+// parent reads that pipe with readv (musl's vectored read); with no translator
+// readv ENOSYSed and the v2 clone aborted SILENTLY right after it had read the
+// whole capability advertisement -- "reads the caps, writes nothing back" -- so
+// git could not issue ls-refs and fell over. v0's inline advertisement is read
+// with plain read(), which is why v0 clones and v2 did not.
+//
+// The mirror of writev is exact. readv and writev share the identical
+// iovec-array judgement -- Linux answers EINVAL for an iovcnt past UIO_MAXIOV or
+// negative, and for lengths summing past SSIZE_MAX, for BOTH -- so this reuses
+// vivarium_writev_decide / vivarium_writev_accumulate rather than cloning them
+// (the names carry writev only because it landed first, #150). Each entry
+// delegates to sys_read_handler, whose own sys_validate_user_buf guards the
+// COPY-OUT -- readv WRITES into the user's iovecs, so this is the getdents64 P0
+// class, and the guard lives in the callee exactly as writev's copy-IN validate
+// lives in sys_write_handler. Pass 1 range-checks every entry up front (Linux's
+// all-or-nothing EFAULT/EINVAL); pass 2 reads, and a short read ends the call --
+// the same first-short-op stop as writev, differing only in meaning (the source
+// is drained -- EOF or would-block -- where writev's sink was full), and POSIX's
+// bytes-transferred-win-over-a-later-error rule is identical.
+static s64 viv_readv(u64 fd, u64 iov_va, u64 iovcnt_raw) {
+    u32 count = 0;
+    if (vivarium_writev_decide(iovcnt_raw, &count) != VIV_TRANSLATED)
+        return -(s64)T_E_INVAL;
+
+    // A zero count still validates the fd (readv(badfd, x, 0) is EBADF, not 0):
+    // sys_read_handler's len==0 fast-path resolves the descriptor, same as writev.
+    if (count == 0) return sys_read_handler(fd, 0, 0);
+
+    // PASS 1 -- read and validate every entry, reading nothing.
+    u64 total = 0;
+    for (u32 i = 0; i < count; i++) {
+        struct viv_linux_iovec kiov;
+        u64 ent = iov_va + (u64)i * sizeof(struct viv_linux_iovec);
+        if (uaccess_copy_in(&kiov, ent, sizeof(kiov)) != 0) return -(s64)T_E_FAULT;
+        if (!vivarium_writev_accumulate(&total, kiov.len)) return -(s64)T_E_INVAL;
+        // A zero-length entry names no memory, so it gets no range check --
+        // Linux skips them, and sys_validate_user_buf would reject base==0.
+        if (kiov.len != 0 && !sys_validate_user_buf(kiov.base, kiov.len))
+            return -(s64)T_E_FAULT;
+    }
+
+    // PASS 2 -- read, stopping at the first short (drained) or failing entry.
+    u64 nread = 0;
+    for (u32 i = 0; i < count; i++) {
+        struct viv_linux_iovec kiov;
+        u64 ent = iov_va + (u64)i * sizeof(struct viv_linux_iovec);
+        if (uaccess_copy_in(&kiov, ent, sizeof(kiov)) != 0)
+            return (nread > 0) ? (s64)nread : -(s64)T_E_FAULT;
+
+        s64 rd = sys_read_handler(fd, kiov.base, kiov.len);
+
+        // POSIX: bytes already read WIN over a later error, same as writev.
+        if (rd < 0) return (nread > 0) ? (s64)nread : rd;
+
+        nread += (u64)rd;
+
+        // A short read (incl. rd==0 EOF) ends the call: the source had no more,
+        // and this also bounds a single entry larger than SYS_RW_MAX (the core
+        // clamps and the guest's libc reissues from where it stopped).
+        if ((u64)rd < kiov.len) break;
+    }
+    return (s64)nread;
+}
+
 // gettimeofday(tv, tz): write the wall clock as a struct timeval. There is no
 // native syscall to dispatch to -- SYS_CLOCK_GETTIME writes a timespec, and a
 // timeval carries MICROseconds -- so this shell does the read + convert + write
@@ -12657,6 +12723,10 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         return viv_futex(p, args[0], args[1], args[2], args[3], args[4]);
 
     // ---- the startup batch (#150, LINEAGE L-6c) --------------------------
+
+    case VIV_LINUX_READV:
+        // readv(fd, iov, iovcnt): x0..x2. N-5: writev's read twin.
+        return viv_readv(args[0], args[1], args[2]);
 
     case VIV_LINUX_WRITEV:
         // writev(fd, iov, iovcnt): x0..x2.

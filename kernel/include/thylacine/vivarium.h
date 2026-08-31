@@ -301,6 +301,7 @@ enum {
     // zero, so the copy-out faults, both freshly-made fds are closed, and the
     // answer is EFAULT. The caller's own address space and its own two fds.
     VIV_LINUX_PIPE2           = 59,
+    VIV_LINUX_READV           = 65,   // N-5: the served twin of WRITEV below (git protocol-v2 stateless-connect reads the helper response through readv)
     VIV_LINUX_WRITEV          = 66,
     VIV_LINUX_SET_TID_ADDRESS = 96,
     VIV_LINUX_SETGID          = 144,

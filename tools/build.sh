@@ -1578,15 +1578,10 @@ VIVEOF
 	pager = cat
 [http]
 	sslCAInfo = /etc/ssl/certs/ca-certificates.crt
-[protocol]
-	; v0 -- git's default v2 smart-http negotiation aborts silently under the
-	; phenotype (reads the capability advertisement, writes nothing back). v0
-	; (GET refs + POST want) clones/fetches/pushes fully. Drop when v2 is fixed.
-	version = 0
 [safe]
 	directory = *
 VIVEOF
-                        echo "==> viv bundles: /viv-bin production git tree staged at $vbin (static git 2.51.2 WITH curl -- git + git-remote-http[s] + git-http-fetch + dashed pack symlinks + templates + gitconfig[http.sslCAInfo + protocol.version=0]; joey binds it at /viv/bin MPHENO_LINUX; the phenotype-BY-LOCATION product mount, now https-capable)"
+                        echo "==> viv bundles: /viv-bin production git tree staged at $vbin (static git 2.51.2 WITH curl -- git + git-remote-http[s] + git-http-fetch + dashed pack symlinks + templates + gitconfig[http.sslCAInfo]; joey binds it at /viv/bin MPHENO_LINUX; the phenotype-BY-LOCATION product mount, https-capable on git's default protocol v2 -- N-5 served readv)"
 
                         # The git-NET bundle (milestone B3): the SAME curl-git,
                         # NET-GRANTED, running a clone-https boot script. It
@@ -1659,14 +1654,6 @@ VIVEOF
 	pager = cat
 [http]
 	sslCAInfo = /etc/ssl/certs/ca-certificates.crt
-[protocol]
-	; v0. git's DEFAULT protocol v2 over smart-http aborts SILENTLY under the
-	; VIVARIUM phenotype: the client reads the whole v2 capability advertisement
-	; and then writes NOTHING back (no ls-refs, no POST) -- a phenotype-induced
-	; bug, tracked. v0 (GET /info/refs -> the ref list, then POST the "want")
-	; works end to end here: clone + fetch + the packfile + checkout. Drop this
-	; when the v2 path is root-caused.
-	version = 0
 [pack]
 	threads = 1
 [checkout]
@@ -1692,6 +1679,11 @@ git version >/dev/null 2>&1 && echo GITHTTPS-GIT-OK || { echo GITHTTPS-FAIL-GIT;
 # the orthogonal pthread gap. example.com is NEVER in this bundle's /etc/hosts
 # (only github.com may be pinned), so a printed IPv4 is a real resolver round-trip.
 getent ahostsv4 example.com 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ' && echo GITHTTPS-DNS || { echo GITHTTPS-FAIL-DNS; exit 1; }
+# This clone runs git's DEFAULT protocol v2: the [protocol] version=0 force was
+# retired at N-5 once the kernel served readv (the syscall the v2 stateless-connect
+# path reads the helper response through). So this gate is now the end-to-end v2
+# regression net -- a readv regression re-breaks it here, while the hermetic
+# suite's phenotype routing test asserts readv is served (T2).
 git clone --depth 1 https://github.com/octocat/Hello-World.git hw && echo GITHTTPS-CLONE || { echo GITHTTPS-FAIL-CLONE; exit 1; }
 test -d /tmp/hw/.git && echo GITHTTPS-VERIFY || { echo GITHTTPS-FAIL-VERIFY; exit 1; }
 cd /tmp/hw || { echo GITHTTPS-FAIL-CD2; exit 1; }
