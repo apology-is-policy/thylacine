@@ -3712,11 +3712,14 @@ build_vkquake() {
     fi
 
     # Staleness: reuse when newer than the tree + port + volk + libSDL2.a +
-    # the fetched archive list (the #204/#139 class: a refreshed venus set
-    # must invalidate the binary).
+    # the fetched venus set (the #204/#139 class: a refreshed venus set must
+    # invalidate the binary). The ARCHIVES + HEADERS are in the sweep, not
+    # just the list file: a keep cycle that changes only libvulkan_virtio.a
+    # leaves the list's mtime alone, and this check once said REUSED for
+    # exactly that -- the stale binary would have measured the OLD driver.
     if [[ -f "$out" ]]; then
         local stale
-        stale="$(find "$vq_vendor" "$port_dir" "$volk_dir" -type f -newer "$out" -print -quit 2>/dev/null)"
+        stale="$(find "$vq_vendor" "$port_dir" "$volk_dir" "$venus/lib" "$venus/include" -type f -newer "$out" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$out" && ! "$venus/venus-libs.list" -nt "$out" ]]; then
             ledger "vkquake: REUSED (cached + up-to-date)"
             return 0

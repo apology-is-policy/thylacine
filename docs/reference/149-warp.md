@@ -1918,7 +1918,16 @@ watch prose is VAULT-owned -- `sub-tapestryd`, not this file):
   `t_putstr`: a full-ctl dump streamed through the cons drop-OLDEST
   ring under repaint pressure spliced once, gluing two fragments into
   an arithmetically impossible cost triple -- the ring is unit-atomic
-  per WRITE, not per stream.
+  per WRITE, not per stream. The read side has its own splice class,
+  found by the SAME impossible-triple signature one round later: the
+  ctl composes fresh on every read(), so a reader looping 512-byte
+  reads to EOF (the r7-F6 fix) assembled chunk N from generation N --
+  earlier lines' digit-length drift shifts every later row's offset
+  window. tapestryd's contract is now: ONE OPEN READS ONE GENERATION
+  regardless of read count (the offset-0 read pins the compose; the
+  mechanism is dossier material). A row that violates `sum <= n * max`
+  is a READ-coherence defect, never the writer -- that inequality is a
+  theorem of the census accumulator.
 - **`tools/warp-host.sh quake` / `quake-vk`** -- BOTH detached now: the
   remote expect runs nohup into a remote file; the local side polls the
   pid with the VALUE discipline (empty output = no information, never

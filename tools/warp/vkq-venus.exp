@@ -134,14 +134,16 @@ foreach leg {linear blit} {
         timeout      { lc_fail "no 'Quake Initialized' within 900s ($leg leg)" }
     }
 
-    if {$leg eq "linear"} {
-        # The zoom (Super+F, default chord; the game's pane holds focus
-        # from host()). The img switch defers to the game's next
-        # present-COMPLETE -- the poke (img_poke_complete) -- so the
-        # running demo completes it within a frame or two.
-        if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k meta_l+f} err]} {
-            lc_fail "qmp zoom chord failed: $err"
-        }
+    # The zoom (Super+F, default chord; the game's pane holds focus from
+    # host()). PER LEG, not once: the zoom belongs to the game's PANE and
+    # dies with it at the ^C between legs -- run 2 measured leg B sitting
+    # in a 2-pane COMPOSED layout for its whole demo (reconcile computes
+    # Direct only for a single visible display-sized leaf), so the
+    # direct-switch witness could never fire. The img switch defers to
+    # the game's next present-COMPLETE -- the poke (img_poke_complete) --
+    # so the running demo completes it within a frame or two.
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k meta_l+f} err]} {
+        lc_fail "qmp zoom chord failed: $err ($leg leg)"
     }
     set timeout 120
     expect {

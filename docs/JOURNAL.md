@@ -207,6 +207,114 @@ in-session; F2 blocked on the running gate, F9 (crafted-log fixtures for the
 quake-vk verdict) tracked for the next batch. The r6-F1 resize driver did NOT
 ride W-4 — its second deferral is on the record; it rots on a third.
 
+### The blit-arm iteration: the checkpoint's own fix was aimed at the wrong mechanism
+
+The resume note carried a diagnosis for leg B's mint refusal — wsi's default
+blit-dst memory selector picks HOST_COHERENT, the working linear arm registers
+device-local, so override the selector — and the note's next-action block said
+to build exactly that. **The log said otherwise, and reading it first saved the
+keep cycle**: the refusal line's neighbor was `vkr: mem has been exported`
+(`build/warp-quake-vk.log:3070` region), which is virglrenderer refusing a
+SECOND blob export of the same memory. The real chain: wsi's CPU create_mem
+(`wsi_create_cpu_buffer_image_mem`, wsi_common.c:3183) is the blit-context
+alloc PLUS a `vkMapMemory` of the blit buffer for its CPU-copy present — and
+under venus a first map lazily mints the memory's renderer bo, spending the
+memory's ONE export before the registration's mint. Two sharpeners: (1) the
+hypothesized fix would have made things WORSE twice over — device-local breaks
+the very map that was minting the bo, and the mappable presentable mint NEEDS a
+host-visible type, so the override attacked a requirement, not the defect; (2)
+**the design doc had already named this failure mode** — WSI-DESIGN's W-3d
+as-built record says "an eager bo consumes the export and registration refuses
+(swapchain creation fails)" — the A/B's first build violated its own documented
+one-export discipline, and the diagnosis was derivable from scripture without
+the log. Fix (mesa fork `5c2dcbd`, squashed into patch 0023): a blit-arm
+`create_mem` that is `wsi_create_buffer_blit_context` alone, no map — nothing
+CPU-reads the buffer (the blit CB is the only writer; the display consumes it
+host-side), and `cpu_map == NULL` is already destroy-guarded.
+
+Two harness defects surfaced en route, one per side of the same lesson.
+`build_vkquake`'s REUSED check swept sources + `venus-libs.list` but not the
+venus ARCHIVES — a keep cycle that changes only `libvulkan_virtio.a` leaves the
+list's mtime alone, and the check said REUSED on the first rebuild attempt (the
+comment above it even claimed "a refreshed venus set must invalidate the
+binary" — true about the intent, false about the test). Caught live because the
+rebake was watched; the stale binary would have measured the OLD driver on the
+Pi and returned a confident wrong experimental verdict. And twice in one window
+a pipeline laundered an exit code: `format-patch ... | tail` swallowed a bad
+flag's failure (regenerating nothing while printing nothing), and the A/B verb
+itself — which correctly printed UNVERIFIED and exited 1 — was invoked as
+`... | tail -25`, so the harness recorded exit 0. The verb was right; the
+wrapper lied.
+
+### Run 2 of the A/B: the fix is proven, the figure is loud, and the witness is missing
+
+Leg A reproduced (32.2 fps — fourth consistent linear sample, and the in-boot
+venus-prove/vk-sdl-prove controls passed on the new build). Leg B **ran**: the
+mint refusal is gone, the swapchain minted + registered + played the full
+969-frame demo — **12.1 s, 79.9 fps, 2.5x the linear arm and 1.8x the same-day
+GL baseline**. Then the gate failed it anyway: `no img direct-switch say line
+within 120s (blit leg)` — the demo ran UNDISPLAYED, so 79.9 is PROVISIONAL
+(a never-promoted surface skips whatever the live-scanout arm costs).
+
+The first theory — the console's `pending-direct 0` claim at legswap starving
+later claimants, the known 30–40 s restore latency turned queue-blocking — fell
+to leg A's own timeline within the hour: `pending-direct 1` fired only AFTER
+the exp's Super+F chord, one line before promotion. A freshly launched game
+pane sits in a TWO-pane composed layout, and `reconcile()` computes Direct only
+for a single visible display-sized leaf — so without a zoom, Direct is never
+even a candidate. The exp zoomed once, on the linear leg, on the design
+assumption that pane zoom persists across the legswap; it dies with the game's
+pane at ^C. Leg B never had a chord, so its surface could not be promoted no
+matter what the server did. Fix: the chord fires per leg, and the Composed
+arm's silent pending-clear got the same say-line the Off arm always had — the
+silence is what let two wrong theories survive one log. Run 3 relaunched with
+both. The restore-latency question itself stays open as its own item
+(`bug_pending_direct_claim_starves_claimants.md` records the theory's rise and
+fall; the r7 verified-list line "the promotion has NO time deferral" is now
+half-refuted for the legswap shape and must not be leaned on).
+
+### Run 3: the A/B answers — and the answer indicts a different suspect
+
+**W-4 VK GATE: VERIFIED** (both legs witnessed through the direct-scanout
+say; the restore leg came back in 2 s this time). Leg A 32.1 fps — the fifth
+consistent linear sample. Leg B, displayed, **34.4 fps: +7%**. Section 8's own
+rule says that does not close the gap → **no default flip**, and the
+LINEAR-target hypothesis is refuted as the dominant cost. The valuable number
+is the one run 2's accident produced: the SAME pipeline undisplayed ran
+**79.9 fps** — render, blit, venus marshaling, throttle bracket, poke send,
+all present — so the ~17 ms/frame separating 79.9 from 34.4 lives in the
+direct-arm per-present display work behind `img_poke_complete`. That also
+retro-explains §8's original suspects list: venus marshaling and
+throttle-bracket serialization are in the 79.9 run and therefore exonerated as
+dominant. The display-present path is the next measurement target. (A
+side-benefit catch: the default-flip contingency was pre-checked while the run
+booted, and would have broken venus-prove's no-eager-mint counter — the blit
+chain's tiled-image allocs are unmarked, and UMA V3D's device-local types are
+host-visible, so each image would eagerly mint a bo. Recorded in the pickup
+for whenever a flip is actually warranted.)
+
+### The poke census printed avg > max — and the instrument's fix was the bug
+
+The run's `cost present-poke-img 1957 41734792 3393` row is arithmetically
+impossible: `sum <= n * max` is a THEOREM of the one writer (`cost_add_ns`),
+and 41.7 s over 1957 pokes averages 21.3 ms against a 3.4 ms max. The row was
+real (raw in the log, no console splice), the print site divides both fields
+by the same 1000, and only one code path writes the cell — which forces the
+conclusion off the writer entirely: the READ is incoherent. The ctl file
+composes FRESH on every read() and serves `[offset..]` of the new string, so
+round 7's F6 fix (`read_string_all`, loop to EOF) reads chunk N from
+generation N — digit-length drift in EARLIER lines shifts every later row's
+offset window, and the assembled row splices two generations. **F6's fix
+traded truncation for splicing**; the in-tree 511-byte-snapshot idiom was
+never a quirk — one read can't cross a generation. Fix in tapestryd: the
+offset-0 read of a regenerating text file (ctl, layout, warp ctl) pins the
+composed bytes to the fid (`text_snaps`, cleared at clunk); later offsets
+serve the pinned generation — the classic synthetic-file discipline. The fps
+figures are untouched by this (game-side timedemo numbers relayed by tagged
+say lines); the census re-measure rides the next Pi run, which the
+display-present hunt needs anyway. Suite exit-0 on the fixed state;
+venus-verdict 89/89.
+
 ## 2026-08-31 (run 8, Fable) — W-3e: the SDL Vulkan glue, and the bind that had no trigger
 
 Resumed from the run-7 self-compaction with W-3e fully designed and zero code.

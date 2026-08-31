@@ -729,7 +729,7 @@ expects are restored for the build. vkQuake then runs unmodified through
    shareware `+command` drop, the fenced-free denominator phantom) live
    in the phase7-status W-4 row and `docs/JOURNAL.md` run 9.
 
-## 8. The W-4 lag question: LINEAR presentables on a tiled GPU (open)
+## 8. The W-4 lag question: LINEAR presentables on a tiled GPU (ANSWERED — see 8.1)
 
 The 8.3 ms/frame gap has a shaped structural suspect. §4.1's presentable
 is **LINEAR by design** (`wants_linear` unconditional; the registration's
@@ -762,6 +762,49 @@ seam record):
   registration still names a linear-stride HOST3D blob; only WHOSE
   memory it is changes), the display-safe teardown, and the I-40
   bracket.
+
+### 8.1 AS-BUILT + MEASURED (2026-08-31, mesa patch 0023; thyla-pi KVM/V3D, 1280x800, demo1 x969 frames)
+
+The variant landed as designed (one build, both arms; `THY_WSI_BLIT=1`
+selects BUFFER_BLIT) with one correction the first flight forced: wsi's
+CPU create_mem maps the blit buffer for its CPU-copy present, and under
+venus a first map lazily mints the memory's renderer bo — spending the
+memory's ONE blob export before the registration's mint, exactly the
+"eager bo consumes the export and registration refuses" failure mode §7's
+W-3d record documents. The blit arm therefore carries its own
+`create_mem`: `wsi_create_buffer_blit_context` alone, no map (nothing
+CPU-reads the buffer; `cpu_map == NULL` is destroy-guarded). The
+blit-dst memory-type default (`wsi_select_host_memory_type`) is KEPT —
+the mappable presentable mint requires a host-visible type.
+
+**The measured triple** (same boot, same demo, gate VERIFIED with the
+per-leg direct-scanout witness):
+
+| Arm | Displayed | fps | ms/frame |
+|---|---|---|---|
+| LINEAR direct (default) | yes | 32.1 (5th consistent sample: 32.1–32.7) | 31.2 |
+| BUFFER_BLIT | yes | **34.4** | 29.1 |
+| BUFFER_BLIT | no (unpromoted surface, run-2 accident) | **79.9** | 12.5 |
+
+**The decision, per this section's own rule**: the blit variant does NOT
+close most of the gap (+7% vs the 44.7 same-day GL figure) → **no
+default flip**; LINEAR-direct stays the default and `-wsiblit` remains
+the A/B lever. The LINEAR-target hypothesis is REFUTED as the dominant
+cost.
+
+**What the accident measured**: the undisplayed leg ran the identical
+pipeline — render, blit, venus marshaling, the I-40 throttle-fence wait,
+the poke send — at 79.9 fps; displaying the same pipeline costs ~17
+ms/frame more. The dominant cost is therefore the **direct-arm
+per-present display work** (the server's bind/flush + the host display
+update behind `img_poke_complete`), not the render-target layout, not
+venus marshaling, and not the throttle bracket (all present in the 79.9
+run). That path is the next measurement target; the per-present cost
+census (`cost present-poke-img`) is the instrument, now trustworthy
+after the generation-splice fix (the ctl's offset-0 read pins a per-fid
+snapshot — `text_snaps` in tapestryd — so a multi-read reader can no
+longer assemble a row from two generations; the first read of it
+produced an arithmetically impossible avg > max).
 
 ---
 

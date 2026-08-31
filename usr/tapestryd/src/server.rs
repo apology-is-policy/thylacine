@@ -4541,6 +4541,9 @@ impl Comp {
                 }
             }
             Scanout::Composed => {
+                if self.pending_direct.is_some() {
+                    say!("tapestryd: scanout composed clears pending-direct");
+                }
                 self.pending_direct = None;
                 if !self.ensure_screen() {
                     return; // degraded: keep the current scanout; retried
@@ -10313,6 +10316,16 @@ pub struct Conn {
     pending_reads: Vec<PendingRead>,
     pending_fences: Vec<PendingFence>,
     pending_ring_fences: Vec<PendingRingFence>,
+    /// Per-fid generation pins for the regenerating text files (ctl,
+    /// layout, warp ctl): the offset-0 read composes AND stores the
+    /// text; later offsets on the same fid serve the STORED bytes, so a
+    /// reader looping to EOF sees one coherent generation. Without the
+    /// pin each read() composes fresh and a multi-read consumer splices
+    /// generations -- digit-length drift in EARLIER lines shifts every
+    /// later row's offset window, and the assembled row can violate the
+    /// writer's own invariants (measured: a cost row with avg > max).
+    /// Entries die at clunk; a fresh offset-0 read replaces the pin.
+    text_snaps: Vec<(u32, u64, Vec<u8>)>,
 }
 
 const NO_FID: Option<Fid> = None;
@@ -10381,6 +10394,7 @@ impl Conn {
             pending_reads: Vec::new(),
             pending_fences: Vec::new(),
             pending_ring_fences: Vec::new(),
+            text_snaps: Vec::new(),
         }
     }
 
@@ -10434,6 +10448,7 @@ impl Conn {
         self.pending_reads.retain(|pr| pr.fid != fid);
         self.pending_fences.retain(|pf| pf.fid != fid);
         self.pending_ring_fences.retain(|pf| pf.fid != fid);
+        self.text_snaps.retain(|t| t.0 != fid);
     }
 
     fn drop_all_fids(&mut self, comp: &mut Comp) {
@@ -11097,15 +11112,14 @@ impl Conn {
                     format_args!("test-mode {}\n", if comp.test_mode { "on" } else { "off" }),
                 );
             }
-            return self.read_str(tag, &s, a.offset, cap);
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
         }
         if f.path == P_LAYOUT {
-            // The container tree as text (G-6). Reads regenerate the
-            // string; a multi-read straddling a mutation can tear -- the
-            // text fits one frame at every realistic size (the stage-0
-            // ctl posture).
+            // The container tree as text (G-6). The offset-0 read pins
+            // the composed string to the fid (text_snaps), so a
+            // multi-read cannot straddle a mutation.
             let s = comp.layout.render_text();
-            return self.read_str(tag, &s, a.offset, cap);
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
         }
         if is_pane(f.path) {
             return self.pane_read(comp, f.path, tag, a.offset, cap);
@@ -11391,7 +11405,7 @@ impl Conn {
                     W_CTL_SNAPSHOT
                 );
             }
-            return self.read_str(tag, &s, a.offset, cap);
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
         }
         if f.path == W_CAPS {
             // The raw capset blob (decode with the ctl `capset` line).
@@ -11903,6 +11917,41 @@ impl Conn {
         let off = (offset as usize).min(b.len());
         let take = (b.len() - off).min(cap);
         let slice = b[off..off + take].to_vec();
+        p9::build_rread(&mut self.out_buf, tag, &slice)
+    }
+
+    /// read_str for the REGENERATING text files (see `text_snaps`): the
+    /// offset-0 read pins the freshly-composed text to the fid; every
+    /// later offset serves the pinned generation. A mid-file first read
+    /// (no pin) serves the fresh compose -- 9P readers start at 0, so
+    /// that arm is reachable only by a client that seeked, which gets
+    /// exactly the old per-read-compose behavior.
+    fn read_text_snapped(
+        &mut self,
+        fid: u32,
+        path: u64,
+        tag: u16,
+        s: String,
+        offset: u64,
+        cap: usize,
+    ) -> Result<usize, ()> {
+        if offset == 0 {
+            self.text_snaps.retain(|t| !(t.0 == fid && t.1 == path));
+            self.text_snaps.push((fid, path, s.into_bytes()));
+        } else if !self.text_snaps.iter().any(|t| t.0 == fid && t.1 == path) {
+            return self.read_str(tag, &s, offset, cap);
+        }
+        let slice = {
+            let b = &self
+                .text_snaps
+                .iter()
+                .find(|t| t.0 == fid && t.1 == path)
+                .unwrap()
+                .2;
+            let off = (offset as usize).min(b.len());
+            let take = (b.len() - off).min(cap);
+            b[off..off + take].to_vec()
+        };
         p9::build_rread(&mut self.out_buf, tag, &slice)
     }
 
