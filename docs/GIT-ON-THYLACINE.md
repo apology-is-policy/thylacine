@@ -192,7 +192,11 @@ path), so it likely dodges it; verify, and if it bites, that becomes a small
 phenotype translation (a real eventfd2 -> a native poll/pipe wakeup).
 
 **Exit criteria:** clone + fetch + push over https succeed under the phenotype,
-proven by a boot gate; `git-remote-http` provably thread-free.
+proven by a boot gate; `git-remote-http` provably thread-free. **MET (2026-08-31):**
+clone + fetch gated by `tools/test-git-https.sh` (milestone B, `70e19dd8`/`cc0d1e68`);
+**push** gated by `tools/test-git-push.sh` (N-6 -- `GITHTTPS-PUSH` to a real writable
+github remote, first try; push rides clone's transport, `readv` [N-5] was the whole
+prerequisite, no new syscall). Milestone B is COMPLETE.
 
 **Build vs prebuilt (decided):** no reputable, current, sha-pinnable prebuilt
 fully-static aarch64-musl git-with-https + templates exists (minos-static /

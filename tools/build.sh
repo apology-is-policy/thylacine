@@ -1693,6 +1693,35 @@ cd /tmp/hw || { echo GITHTTPS-FAIL-CD2; exit 1; }
 # too, not a phenotype gap. --unshallow is the correct op AND it downloads a REAL
 # pack (the parent history) over https, so it proves the fetch path in full.
 git fetch --unshallow origin >/dev/null 2>&1 && echo GITHTTPS-FETCH || { echo GITHTTPS-FAIL-FETCH; exit 1; }
+# N-6: push over https. Runs ONLY when the bake provisioned a push target
+# (THYLACINE_GITNET_PUSH_URL + a PAT) -- absent by default, so the standard
+# git-net gate stays clone+fetch only and the hermetic suite never pushes. The
+# token reaches the guest as /tmp/.gitnet-push-token, a 0600 file the bake wrote
+# from the operator's env (a gitignored build artifact -- NEVER a tracked file).
+# The remote URL is CLEAN: the token is supplied by an inline credential helper
+# (git never echoes helper output), so it appears in NO git output and NO boot
+# log. The push proves the smart-push path (git-remote-https POST
+# git-receive-pack) end to end -- the helper-pipe I/O rides readv (served at
+# N-5) + writev, the SAME transport the clone above proved.
+if [ -f /tmp/.gitnet-push-url ] && [ -f /tmp/.gitnet-push-token ]; then
+	GITNET_PUSH_URL=$(cat /tmp/.gitnet-push-url)
+	GITNET_TOK=$(cat /tmp/.gitnet-push-token)
+	export GITNET_TOK
+	git config --global credential.helper \
+		'!f() { test "$1" = get && printf "username=x-access-token\npassword=%s\n" "$GITNET_TOK"; }; f' \
+		|| { echo GITHTTPS-FAIL-PUSHCRED; exit 1; }
+	rm -rf /tmp/pushrepo
+	mkdir -p /tmp/pushrepo && cd /tmp/pushrepo || { echo GITHTTPS-FAIL-PUSHDIR; exit 1; }
+	git init -q || { echo GITHTTPS-FAIL-PUSHINIT; exit 1; }
+	echo "pushed by the thylacine linux phenotype" > witness.txt
+	git add witness.txt || { echo GITHTTPS-FAIL-PUSHADD; exit 1; }
+	git commit -q -m "thylacine phenotype push witness" || { echo GITHTTPS-FAIL-PUSHCOMMIT; exit 1; }
+	# A unique branch per run: re-runs never collide (non-ff) and the sandbox
+	# stays tidy. $$ (shell pid) + a wall-clock second if the phenotype date works.
+	PUSHREF="thylacine-push-$$-$(date +%s 2>/dev/null || echo 0)"
+	git push "$GITNET_PUSH_URL" "HEAD:refs/heads/$PUSHREF" \
+		&& echo "GITHTTPS-PUSH $PUSHREF" || { echo GITHTTPS-FAIL-PUSH; exit 1; }
+fi
 echo GITHTTPS-DONE
 VIVEOF
                             chmod 0755 "$gnb/rootfs/githttps.sh"
@@ -1712,6 +1741,22 @@ VIVEOF
     }
 }
 VIVEOF
+                            # N-6 push witness: when a push target + PAT are in the
+                            # env, provision them into the guest as files (a gitignored
+                            # build artifact under build/, NEVER a tracked file). The
+                            # token is written in a subshell with trace OFF + umask 077
+                            # so it cannot reach a build log, and this (tracked) script
+                            # holds only the env var NAME, never the secret. Absent ->
+                            # the gate is clone+fetch only (the default).
+                            if [[ -n "${THYLACINE_GITNET_PUSH_URL:-}" && -n "${THYLACINE_GITNET_PAT:-}" ]]; then
+                                mkdir -p "$gnb/rootfs/tmp"
+                                printf '%s\n' "$THYLACINE_GITNET_PUSH_URL" \
+                                    > "$gnb/rootfs/tmp/.gitnet-push-url"
+                                ( set +x 2>/dev/null; umask 077
+                                  printf '%s\n' "$THYLACINE_GITNET_PAT" \
+                                      > "$gnb/rootfs/tmp/.gitnet-push-token" )
+                                echo "==> viv bundles: git-net PUSH target provisioned (URL ${THYLACINE_GITNET_PUSH_URL}; token in the gitignored guest artifact only, never a tracked file or log)"
+                            fi
                             echo "==> viv bundles: git-net staged at $gnb (THYLACINE_BAKE_GITNET=1: net-granted clone-https boot vehicle -- the B3 gate; default bakes OMIT it, so the hermetic suite stays internet-free)"
                         fi
 

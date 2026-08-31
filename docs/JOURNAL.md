@@ -22,6 +22,48 @@ needed the operator.
 
 ---
 
+## 2026-08-31 (aux) -- N-6: git push over https -- milestone B complete
+
+The last of milestone B's exit criteria. Clone and fetch were already gated
+(milestone B, `70e19dd8`/`cc0d1e68`); push was deferred for want of a writable
+remote. This closes it.
+
+**The approach was the operator's call.** Push needs a WRITABLE remote, which is
+test infra -- unlike the prior N-chunks, which were small syscall fills. I
+surfaced the choice (hermetic local HTTPS server vs external github+token vs
+defer) as a blocking question; the operator chose external, created a throwaway
+sandbox repo + a fine-grained PAT (Contents:write), and authorized the external
+push -- which is otherwise an escalation (a real external side-effect + a
+credential).
+
+**Credential hygiene.** The token never enters a tracked file, a commit, or a
+persisted log: build.sh writes it (from the operator's env, in a trace-off
+subshell with umask 077) only into a gitignored guest artifact, which the guest
+reads through an inline credential helper so the remote URL stays CLEAN -- git's
+output and the boot log see no token. Verified after the run: 0 occurrences in
+the boot log, 0 in every tracked file (a git grep for the PAT prefix). The guest
+artifact was deleted post-run; the baked pool/ramfs hold the token until the next
+default bake, moot once the operator revokes the PAT.
+
+**It worked first try, and that is the interesting part.** `git push
+https://github.com/.../sandbox.git` under the phenotype pushed a fresh commit to
+a new branch -- no auth fumble, no eventfd2 gap (the design doc flagged eventfd2
+as "likely dodged; verify" -- confirmed dodged), NO new syscall. The reason: push
+rides the exact same transport as clone -- git-remote-https POSTing
+git-receive-pack through the helper pipe, which reads via readv (served at N-5)
+and writes via writev. So N-5's readv serve WAS the whole prerequisite; N-6 is
+test infra only (build.sh's git-net gate gains a push leg + provisioning, plus a
+new tools/test-git-push.sh). No kernel change -> no audit/SMP round; the E2E push
+witness is the validation.
+
+**Evidence.** GITHTTPS-CLONE -> FETCH -> PUSH (branch
+thylacine-push-2382-1788199506) -> DONE + `joey: git-https gate PASS`; git push
+exit 0 (github accepted the pack + the ref update). git status: tools/build.sh +
+tools/test-git-push.sh only -- the N-5 SMP-green kernel is byte-unchanged.
+
+**Milestone B is complete**: clone + fetch + push over https all work under the
+Linux phenotype. The README's push asterisk is gone.
+
 ## 2026-08-31 (aux) -- N-5 audit close: the readv serve was hiding a kernel-DoS twin
 
 The N-5 readv fix (`05616d9c`, the entry below) landed with the audit, SMP gate,
