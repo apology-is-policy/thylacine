@@ -120,6 +120,27 @@ fn read_string(fd: i64) -> String {
     String::from_utf8_lossy(&buf[..n as usize]).into_owned()
 }
 
+/// Read to EOF (round-7 F6). The 512-byte single read above IS the warp
+/// ctl's documented snapshot contract; the TAPESTRY ctl has no such
+/// discipline -- its 19 ever-growing cost rows pass 512 bytes on a
+/// long-lived boot, and a row cut mid-number parses as a SMALLER,
+/// arithmetically possible value (strictly worse than the impossible
+/// splice this mode was built to fix).
+fn read_string_all(fd: i64) -> String {
+    let mut out = String::new();
+    loop {
+        let mut buf = [0u8; 512];
+        let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
+        if n <= 0 {
+            return out;
+        }
+        out.push_str(&String::from_utf8_lossy(&buf[..n as usize]));
+        if (n as usize) < buf.len() {
+            return out;
+        }
+    }
+}
+
 fn open_read_string(root: i64, path: &str) -> String {
     let fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OREAD) };
     if fd < 0 {
@@ -213,7 +234,13 @@ pub extern "C" fn rs_main() -> i64 {
             t_putstr("warp-prove: tctl: open /srv/tapestry failed\n");
             unsafe { t_exits(1) };
         }
-        let ctl = open_read_string(root, "ctl");
+        let cfd = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OREAD) };
+        if cfd < 0 {
+            t_putstr("warp-prove: tctl: open ctl failed\n");
+            unsafe { t_exits(1) };
+        }
+        let ctl = read_string_all(cfd);
+        unsafe { t_close(cfd) };
         unsafe { t_close(root) };
         if let Some(key) = libthyla_rs::env::args().get_str(2) {
             let mut out = String::new();

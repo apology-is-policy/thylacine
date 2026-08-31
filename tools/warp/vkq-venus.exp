@@ -189,34 +189,39 @@ foreach leg {linear blit} {
 # re-paint chain completes pending-direct. Driven with echo ticks (the
 # glq-virgl chain lesson: every hop needs console OUTPUT).
 send -- "\003"
-# Measure-then-bound (W-4 run 11): the old hard 6-tick bound was
-# calibrated on the GL teardown; the vk teardown additionally pays the
-# venus double-ctx-destroy + the console's 3-texture re-attach witness,
-# and the promotion completed unforced a few seconds past the bound in
-# every run. The tick count is now the DATUM (reported), and the FAIL
-# is a generous cap that means genuinely wedged, not merely late.
-set restore_cap 20
-if {[info exists ::env(VKQ_RESTORE_TICKS)]} { set restore_cap $::env(VKQ_RESTORE_TICKS) }
+# Measure-then-bound (W-4 run 11; UNITS fixed at round-7 F5): the old
+# hard 6-tick bound was GL-calibrated, and a TICK is an elastic unit --
+# each is one console round-trip (~0.5-2 s), so "20 ticks" was 10-40 s
+# of wall clock, straddling the measured 30-40 s restore latency: the
+# cap discriminated LOAD from wedge, not late from wedged. The bound is
+# now WALL CLOCK (VKQ_RESTORE_SECS, default 90 -- comfortably past the
+# known latency; a miss means genuinely wedged), ticks keep driving the
+# console, and BOTH figures are reported as the datum.
+set restore_secs 90
+if {[info exists ::env(VKQ_RESTORE_SECS)]} { set restore_secs $::env(VKQ_RESTORE_SECS) }
+set restore_t0 [clock seconds]
 set restored 0
-set restored_at -1
-for {set i 0} {$i < $restore_cap && !$restored} {incr i} {
+set i 0
+while {!$restored && [expr {[clock seconds] - $restore_t0}] < $restore_secs} {
     lc_send "echo vkq-tick-$i"
     set timeout 20
     expect {
-        -re {scanout direct (\d+) (?:slot \d+ )?\((\d+)x(\d+)\)} { set restored 1; set restored_at $i }
+        -re {scanout direct (\d+) (?:slot \d+ )?\((\d+)x(\d+)\)} { set restored 1 }
         "vkq-tick-$i" { }
         timeout { }
     }
+    incr i
 }
+set restore_dt [expr {[clock seconds] - $restore_t0}]
 # DEFERRED (the glq deferred-fps lesson, re-learned at run 5: this assert
 # used to lc_fail HERE, which ate the census below -- the one number that
 # discriminates a stalled game from a glacial one died with it). The
 # restoration verdict is recorded now and FAILS the lane at the end.
 if {$restored} {
-    puts "\nVKQ-VENUS RESTORE: console direct after $restored_at driven tick(s) of ^C (cap $restore_cap)\n"
+    puts "\nVKQ-VENUS RESTORE: console direct after ${restore_dt}s / $i driven tick(s) of ^C (bound ${restore_secs}s)\n"
     lc_step "console scanout restored after the game died (display-safe teardown leg)"
 } else {
-    puts "\nVKQ-VENUS RESTORE-FAIL: console direct scanout not restored within $restore_cap driven ticks of ^C (deferred; census first)\n"
+    puts "\nVKQ-VENUS RESTORE-FAIL: console direct scanout not restored within ${restore_secs}s (${i} driven ticks) of ^C (deferred; census first)\n"
 }
 lc_send "echo vkq-cleanup-ok"
 set timeout 30
@@ -257,7 +262,7 @@ if {$fps_seen < 2} {
     lc_fail "only $fps_seen of 2 leg fps lines within ${fps_wait}s each (teardown + census reported above)"
 }
 if {!$restored} {
-    lc_fail "console direct scanout not restored within $restore_cap driven ticks of ^C (census reported above)"
+    lc_fail "console direct scanout not restored within ${restore_secs}s of ^C (census reported above)"
 }
 
 puts "\nVKQ-VENUS PASS\n"

@@ -227,8 +227,12 @@ const WCTX_CTL_SNAPSHOT: usize = 255;
 
 /// The same contract for the GLOBAL warp `ctl` (round-3 F4). Its in-tree
 /// readers take a 512-byte snapshot; measured through the last fixed-size
-/// line, the current prefix is ~336 at type-max, so the headroom is real
-/// but unguarded until this check.
+/// line (`w210`), the W-4 prefix is ~380 at type-max (hostmem-bytes-cap +
+/// fenced-pool grew it from the ~336 this comment used to record), so the
+/// headroom is real but unguarded until this check. Growing content --
+/// the fenced-held rows and the per-ctx wctx rows -- sits BELOW `w210`
+/// (round-7 F1: two to three held rows above it pushed the custody mirror
+/// past the snapshot exactly when a wedge hunt would read it).
 const W_CTL_SNAPSHOT: usize = 511;
 /// One ctx's share of the process-wide fenced lane (round-5 F4). Half, so
 /// a second client can always make progress and no single client can drive
@@ -265,15 +269,24 @@ const WARP_CTX_BACKING_MAX: u64 = 64 * 1024 * 1024;
 /// MAX_WARP_IMGS_PER_CTX rationale recorded in advance). The two families
 /// charge DIFFERENT physical pools, which is why one holistic cap was the
 /// wrong shape: bos + rings pin GUEST kernel memory (the exposure I-32
-/// exists for -- their cap stays 64 MiB above), while mems + imgs are
-/// HOST3D blobs carved from QEMU's hostmem window (256 M), whose physical
-/// size bounds the worst case regardless of what this constant says --
-/// past it the host refuses the mint and the refusal is the same clean
-/// E_NOMEM. So this cap is per-ctx FAIRNESS inside the window (one game
-/// cannot starve a second client's swapchain), not the resource floor
-/// itself. 192 MiB = three quarters of the window: a real game's working
-/// set (vkQuake: ~35 MB fixed + 32 MiB texture heaps) with a second
-/// client's swapchain still admissible beside it.
+/// exists for -- their cap stays 64 MiB above). Round-7 F4 corrected this
+/// block's own mechanism claims: MEMS are HOST3D blobs mapped into QEMU's
+/// hostmem window (256 M), whose physical size bounds their worst case;
+/// IMGS stop at the blob (create_presentable takes no window offset -- no
+/// map, no guest VA), so the window does NOT bound the img half and this
+/// constant is the imgs' only bound (behind the trusted host). Past the
+/// window the host refuses a MEM mint and the seam surfaces E_IO (the
+/// maybe-installed arm; the client resolves it via warp_img_reclaim /
+/// the mem three-valued contract), NOT the clean E_NOMEM this comment
+/// used to claim. So this cap is per-ctx FAIRNESS inside the window (one
+/// game cannot starve a second client's swapchain -- though the PARKED
+/// hostage bound widens with it: a dead ctx's maps can pin up to this
+/// many window bytes against every client's HOST_VISIBLE staging until
+/// the holder Proc dies, was 64 MiB -- round-7 F8, weighed + accepted),
+/// not the resource floor itself. 192 MiB = three quarters of the
+/// window: a real game's working set (vkQuake: ~35 MB fixed + 32 MiB
+/// texture heaps) with a second client's swapchain still admissible
+/// beside it.
 const WARP_CTX_HOSTMEM_MAX: u64 = 192 * 1024 * 1024;
 
 /// V-3b-2 (WARP-V3-DESIGN 0.12): the byte cap on one venus SUBMIT_CMD stream
@@ -1920,7 +1933,9 @@ struct WarpImg {
     h: u32,
     format: u32,
     stride: u32,
-    /// Backing bytes charged to the ctx's I-32 guest-family cap.
+    /// Backing bytes charged to the ctx's I-32 HOSTMEM-family cap
+    /// (`WARP_CTX_HOSTMEM_MAX` via `ctx_hostmem_backing` -- round-7 F4:
+    /// this line named the guest family, introduced by the split itself).
     size: u64,
 }
 
@@ -11290,19 +11305,6 @@ impl Conn {
                     &mut s,
                     format_args!("fenced-pool {}\n", crate::gpu::COMP_FSLOT),
                 );
-                // W-4 stall observability: one row per HELD fenced slot, so a
-                // wedged chain is NAMED (op class + owner + age), not just a
-                // missing count. Empty when all slots are free -- the healthy
-                // read costs nothing extra.
-                for (i, fid, cpub, ridx, rb, cm, age) in comp.gpu.fenced_held() {
-                    let _ = core::fmt::write(
-                        &mut s,
-                        format_args!(
-                            "fenced-held slot={} fence={} ctx={} ring={} rb={} comp={} age_ms={}\n",
-                            i, fid, cpub, ridx, rb as u32, cm as u32, age
-                        ),
-                    );
-                }
                 // #210: the per-ctx fence ledger, readable from ANY conn. The
                 // signaled/reported pair splits a wedged fence wait three
                 // ways: reported == signaled == the id a parked client waits
@@ -11336,6 +11338,24 @@ impl Conn {
                 // The fixed-size prefix ends HERE; everything below grows
                 // with the live-ctx count and is deliberately non-critical.
                 gcrit_end = s.len();
+                // W-4 stall observability: one row per HELD fenced slot, so a
+                // wedged chain is NAMED (op class + owner + age), not just a
+                // missing count. Empty when all slots are free. BELOW the
+                // fixed prefix (round-7 F1): up to 16 growing rows exist
+                // exactly when a wedge hunt runs, and placing them above
+                // `w210` pushed the custody mirror past the in-tree readers'
+                // 512-byte snapshot -- the round-2 F6 blindness, reintroduced
+                // by rows built for the same hunt. The unbounded thing goes
+                // last.
+                for (i, fid, cpub, ridx, rb, cm, age) in comp.gpu.fenced_held() {
+                    let _ = core::fmt::write(
+                        &mut s,
+                        format_args!(
+                            "fenced-held slot={} fence={} ctx={} ring={} rb={} comp={} age_ms={}\n",
+                            i, fid, cpub, ridx, rb as u32, cm as u32, age
+                        ),
+                    );
+                }
                 for c in comp.warp_ctxs.iter().flatten() {
                     let _ = core::fmt::write(
                         &mut s,
@@ -13145,8 +13165,14 @@ impl Conn {
                         return Err(E_IO);
                     }
                 }
-                say!("tapestryd: scanout direct {} slot {} ({}x{})", n, slot, w, h);
                 if comp.gpu.set_scanout(res, w, h).is_ok() {
+                    // Verdict-gated (round-7 F3 -- the round-4 F4 shape at
+                    // its THIRD site; the img arms were fixed, this one
+                    // still attempt-reported): the line is the console
+                    // restore/retake WITNESS for three gated captures
+                    // (vkq-venus / glq-virgl / warp-img), so it reports the
+                    // EVENT, byte-identical on success.
+                    say!("tapestryd: scanout direct {} slot {} ({}x{})", n, slot, w, h);
                     // Post-bind full flush (#57): the per-rect flushes
                     // above targeted a not-yet-scanned-out resource
                     // (dropped by spec), and cocoa's same-size surface
@@ -13157,11 +13183,22 @@ impl Conn {
                     comp.bound_res = res;
                     comp.scanout = Scanout::Direct(n);
                     comp.pending_direct = None;
+                    comp.pending_bind_refused_said = false;
                     if let Some(s) = comp.surf_mut(n) {
                         // Only the slot just transferred is clean; the others
                         // still hold whatever the composed era left them.
                         s.res_stale[slot as usize] = false;
                     }
+                } else if !comp.pending_bind_refused_said {
+                    // Once per pending episode (the C-0d F5 storm rule --
+                    // absent here until round-7 F3: a refusing device drew
+                    // one false success line PER PRESENT, and silence on
+                    // the refusal itself).
+                    comp.pending_bind_refused_said = true;
+                    say!(
+                        "tapestryd: scanout direct {} slot {} ({}x{}) bind REFUSED -- pending retried at each present",
+                        n, slot, w, h
+                    );
                 }
             }
         } else if comp.scanout == Scanout::Direct(n) {

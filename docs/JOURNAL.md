@@ -165,6 +165,48 @@ TAPESTRY ctl so the poke census stops reading the wrong tree. The same-day GL
 baseline run was in flight as this was written; the comparison and round 7
 ride the close. Commit: `309dd209` (+ the instrument follow-ups).
 
+**The comparison + the A/B (the same night).** GL fresh baseline: **44.7 fps**
+(969 frames, 21.7 s, gate VERIFIED). vk reproduced at **32.5** — 73%, with the
+composed-stretch asymmetry biasing FOR vk, so the honest direct-vs-direct gap
+is wider. The lag hunt's designed experiment landed the same night as one
+build carrying both arms (mesa patch 0023 + vkquake patch 0005 + the two-leg
+exp): the LINEAR presentable (the postprocess pass writes ~4 MB/frame into a
+linear target on a tiled GPU) versus the BUFFER_BLIT chain (tiled images + a
+per-present resolve-blit into the linear presentable, the I-40 bracket
+covering the blit because it rides the present submit). The `-wsiblit` lever
+rides argv because ut has NO env machinery at v1.0 — an in-process setenv
+before Vulkan init is all mesa's getenv needs.
+
+**The A/B's first run**: leg A (linear) reproduced **32.7** — the third
+consistent sample (32.6/32.5/32.7: the measurement is solid). Leg B (blit)
+REFUSED at the presentable mint — `RESOURCE_CREATE_BLOB(HOST3D)
+resp_type=0x1200` — before the engine ever initialized. The shaped cause sat
+in my own design notes, written and then not done: wsi's default
+`select_blit_dst_memory_type` picks a HOST_COHERENT type for CPU chains,
+while the working linear arm registers device-local image memory; the
+override is two lines plus a keep cycle. The experiment is unresolved, not
+refuted — the harness (two legs, one boot) worked exactly as built, and leg
+B failing loud at init is the gate doing its job.
+
+**Round 7 (the batched audit): 0 P0 / 0 P1 / 3 P2 / 6 P3, NOT dirty.** The
+I-32 split's core mechanics survived prosecution intact (table-derived sums
+make half-charging structurally impossible). The findings clustered in the
+batch's own instruments, and two are the project's recurring classes caught
+red-handed: F1 — the fenced-held rows were inserted ABOVE the `w210` fixed
+prefix, reintroducing the round-2 F6 snapshot blindness one screen above the
+comment recording that lesson (rows that exist exactly when a wedge hunt runs
+pushed the custody mirror past the 512-byte reader); F3 — the slot-arm
+attempt-report we enqueued was confirmed with two additional gaps its fixed
+sibling closed (no REFUSED say, no storm guard). F2 (the detached transports
+trust the spawn's echo blindly) fired LIVE in a third flavor the same hour
+the report landed: the spawn ssh HUNG ~17 minutes on the tunnel — the local
+substitution never returned while the remote run proceeded healthily — a
+flavor even the finding's three scenarios didn't name (drop, garbage, and
+slow-run abandonment; not channel hang). Seven of nine findings fixed
+in-session; F2 blocked on the running gate, F9 (crafted-log fixtures for the
+quake-vk verdict) tracked for the next batch. The r6-F1 resize driver did NOT
+ride W-4 — its second deferral is on the record; it rots on a third.
+
 ## 2026-08-31 (run 8, Fable) — W-3e: the SDL Vulkan glue, and the bind that had no trigger
 
 Resumed from the run-7 self-compaction with W-3e fully designed and zero code.

@@ -878,20 +878,33 @@ quake)
     # polls) and fetches the log at the end.
     out="$REPO_ROOT/build/warp-quake.log"
     rlog="warp/quake-remote.log"
-    rpid=$(ssh "$HOST" "cd $RREPO && rm -f ~/$rlog && ${RENV}nohup expect tools/warp/glq-virgl.exp > ~/$rlog 2>&1 < /dev/null & echo \$!")
+    # Round-7 F2, same five arms as quake-vk below: single-flight refusal
+    # (#224), archive-not-delete (#223), ServerAlive on every channel (the
+    # hung-spawn flavor), numeric rpid validation, and a wait bound above
+    # the exp's own worst case.
+    if ssh -o ConnectTimeout=20 "$HOST" "ps -eo args | grep -q '[e]xpect tools/warp/' || ps -eo args | grep -q '[q]emu-system.*warp/pool'" 2>/dev/null; then
+        echo "== quake: REFUSED -- a prior warp run is alive on $HOST (its log is ~/warp/*.log; kill by PID or wait)"
+        exit 2
+    fi
+    rpid=$(ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$HOST" "cd $RREPO && ([ -f ~/$rlog ] && mv ~/$rlog ~/$rlog.prev.\$(date +%s) || true) && ${RENV}nohup expect tools/warp/glq-virgl.exp > ~/$rlog 2>&1 < /dev/null & echo \$!")
+    if ! [[ "$rpid" =~ ^[0-9]+$ ]]; then
+        echo "== quake: spawn echo invalid ('$rpid') -- the channel failed; check: ssh $HOST 'ps -eo pid,args | grep [e]xpect'"
+        exit 1
+    fi
     echo "== quake detached on $HOST (remote pid $rpid; log ~/$rlog) =="
+    wait_max=$(( ( ${GLQ_FPS_WAIT:-1800} + 3600 ) / 30 ))
     tries=0
     gone=0
     while :; do
-        st=$(ssh -o ConnectTimeout=20 "$HOST" "ps -p $rpid > /dev/null 2>&1 && echo ALIVE || echo GONE" 2>/dev/null)
+        st=$(ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$HOST" "ps -p $rpid > /dev/null 2>&1 && echo ALIVE || echo GONE" 2>/dev/null)
         case "$st" in
             ALIVE) gone=0 ;;
             GONE)  gone=$((gone + 1)); [[ $gone -ge 2 ]] && break ;;
             *)     ;; # ssh failed: no information, retry
         esac
         tries=$((tries + 1))
-        if [[ $tries -gt 90 ]]; then
-            echo "== quake: still waiting after ~45 min -- giving up the wait (run may continue remotely)"
+        if [[ $tries -gt $wait_max ]]; then
+            echo "== quake: still waiting after $((wait_max * 30 / 60)) min (past the exp's own worst case) -- giving up the wait (run may continue remotely)"
             break
         fi
         sleep 30
@@ -943,7 +956,27 @@ quake-vk)
     # never the run.
     out="$REPO_ROOT/build/warp-quake-vk.log"
     rlog="warp/quake-vk-remote.log"
-    rpid=$(ssh "$HOST" "cd $RREPO && rm -f ~/$rlog && ${RENV}nohup expect tools/warp/vkq-venus.exp > ~/$rlog 2>&1 < /dev/null & echo \$!")
+    # Round-7 F2: the spawn half gets the same distrust as the poll half.
+    # (a) Single-flight refusal (the #224 idiom): a live warp run on the
+    # host still OWNS the fixed-path fixtures -- spawning beside it would
+    # clobber its live VM's backing (the never-re-bake-under-a-live-VM
+    # class) and delete its log.
+    if ssh -o ConnectTimeout=20 "$HOST" "ps -eo args | grep -q '[e]xpect tools/warp/' || ps -eo args | grep -q '[q]emu-system.*warp/pool'" 2>/dev/null; then
+        echo "== quake-vk: REFUSED -- a prior warp run is alive on $HOST (its log is ~/warp/*.log; kill by PID or wait)"
+        exit 2
+    fi
+    # (b) Archive, never delete (#223) -- the prior log is evidence.
+    # (c) ServerAlive bounds a HUNG channel (the F2 third flavor, live
+    # 2026-08-31: the spawn substitution hung ~17 min on the tunnel while
+    # the remote run proceeded healthily).
+    rpid=$(ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$HOST" "cd $RREPO && ([ -f ~/$rlog ] && mv ~/$rlog ~/$rlog.prev.\$(date +%s) || true) && ${RENV}nohup expect tools/warp/vkq-venus.exp > ~/$rlog 2>&1 < /dev/null & echo \$!")
+    # (d) A non-numeric echo is a failed spawn CHANNEL, never a verdict
+    # about the run -- it may or may not exist remotely. Refuse to poll
+    # garbage (ps -p '' reads as GONE and abandons a live run).
+    if ! [[ "$rpid" =~ ^[0-9]+$ ]]; then
+        echo "== quake-vk: spawn echo invalid ('$rpid') -- the channel failed; check: ssh $HOST 'ps -eo pid,args | grep [e]xpect'"
+        exit 1
+    fi
     echo "== quake-vk detached on $HOST (remote pid $rpid; log ~/$rlog) =="
     # The poll prints a VALUE and treats empty output as NO INFORMATION,
     # never as "the process died" -- a dropped tunnel connection returns
@@ -952,18 +985,22 @@ quake-vk)
     # rebuilt here and caught by the same tunnel drop it was built for:
     # one drop killed the local wait while the remote run played on).
     # GONE must be seen on two CONSECUTIVE polls to count.
+    # Round-7 F2 (e): the wait bound sits ABOVE the exp's own worst case
+    # (two legs of fps_wait + boot/device/init/restore margins), so a
+    # worst-case-slow run is never abandoned by its own harness.
+    wait_max=$(( ( ${VKQ_FPS_WAIT:-1800} * 2 + 3600 ) / 30 ))
     tries=0
     gone=0
     while :; do
-        st=$(ssh -o ConnectTimeout=20 "$HOST" "ps -p $rpid > /dev/null 2>&1 && echo ALIVE || echo GONE" 2>/dev/null)
+        st=$(ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$HOST" "ps -p $rpid > /dev/null 2>&1 && echo ALIVE || echo GONE" 2>/dev/null)
         case "$st" in
             ALIVE) gone=0 ;;
             GONE)  gone=$((gone + 1)); [[ $gone -ge 2 ]] && break ;;
             *)     ;; # ssh failed: no information, retry
         esac
         tries=$((tries + 1))
-        if [[ $tries -gt 90 ]]; then
-            echo "== quake-vk: still waiting after ~45 min -- giving up the wait (run may continue remotely)"
+        if [[ $tries -gt $wait_max ]]; then
+            echo "== quake-vk: still waiting after $((wait_max * 30 / 60)) min (past the exp's own worst case) -- giving up the wait (run may continue remotely)"
             break
         fi
         sleep 30
