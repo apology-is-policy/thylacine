@@ -3717,18 +3717,24 @@ build_vkquake() {
     # just the list file: a keep cycle that changes only libvulkan_virtio.a
     # leaves the list's mtime alone, and this check once said REUSED for
     # exactly that -- the stale binary would have measured the OLD driver.
-    # The archives are ALSO gated by CONTENT (round-8 F2): -newer is mtime,
-    # and a fetch that preserves an older source mtime slips it; the stamp
-    # written at build time is compared by hash, which cannot.
+    # The venus INPUTS are ALSO gated by CONTENT (round-8 F2; widened at
+    # round-9 F2 to the headers + BOTH list files -- venus-whole.list was
+    # covered by no tier at all, and its whole/libs split is exactly the
+    # closure-correctness input): -newer is mtime, and a fetch that
+    # preserves an older source mtime slips it; the stamp written at build
+    # time is compared by hash, which cannot. `|| true` + the empty check
+    # (round-9 F1): an empty/partial lib/ must force the rebuild -- which
+    # then fails loud at the link -- not kill the whole invocation
+    # silently under set -e with the shasum error eaten by 2>/dev/null.
     local vstamp="$BUILD_DIR/pouch/vkquake-venus.sha"
     local vcur=""
-    vcur="$(cd "$venus" && shasum -a 256 lib/* 2>/dev/null | shasum -a 256 | cut -d' ' -f1)"
-    if [[ -f "$out" ]]; then
+    vcur="$(cd "$venus" && { find lib include -type f 2>/dev/null; ls venus-libs.list venus-whole.list 2>/dev/null; } | LC_ALL=C sort | xargs shasum -a 256 2>/dev/null | shasum -a 256 | cut -d' ' -f1)" || true
+    if [[ -f "$out" && -n "$vcur" ]]; then
         local stale
         stale="$(find "$vq_vendor" "$port_dir" "$volk_dir" "$venus/lib" "$venus/include" -type f -newer "$out" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$out" && ! "$venus/venus-libs.list" -nt "$out" \
               && -f "$vstamp" && "$vcur" == "$(cat "$vstamp")" ]]; then
-            ledger "vkquake: REUSED (cached + up-to-date; venus set hash-matched)"
+            ledger "vkquake: REUSED (cached + up-to-date; venus inputs hash-matched)"
             return 0
         fi
     fi
@@ -3820,7 +3826,10 @@ build_vkquake() {
         "${venus_libs[@]}" \
         -L"$sysroot/lib" -lSDL2 -lm \
         -Wl,--end-group \
-        -o "$out"
+        -o "$out.tmp"
+    # Atomic publish (round-9 F3): an interrupted link must never leave a
+    # fresh-mtime partial $out that every staleness tier then REUSES.
+    mv "$out.tmp" "$out"
     echo "    vkquake: $(wc -c < "$out" | tr -d ' ') bytes (ET_EXEC, static, venus ICD linked)"
     printf '%s' "$vcur" > "$vstamp"
     ledger "vkquake: BUILT (W-4; ramfs-staged, data from /quake)"
