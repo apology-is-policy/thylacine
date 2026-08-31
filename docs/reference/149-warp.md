@@ -1901,6 +1901,41 @@ neither half. Capture alternatives (`tapestryd: scanout`,
 `THYLACINE-VK-SDL-PROVE`, `vk-sdl-prove:`) ride `boot-probe.sh`'s
 filter in the same commit. `test-venus-verdict.sh`: 89 checks.
 
+## Warp-WSI W-4 -- the vkQuake gate + census tooling (as-built 2026-08-31)
+
+The E2E chunk's tooling surface (the port itself documents in-tree:
+`usr/ports/vkquake/PRUNE-MANIFEST.md`, `third_party/volk/`'s manifest,
+and `build_vkquake` in `tools/build.sh`; the tapestryd-side split and
+watch prose is VAULT-owned -- `sub-tapestryd`, not this file):
+
+- **`warp-prove ctl` / `warp-prove tctl [key]`** -- the two census
+  readers. `ctl` dumps the WARP global ctl; `tctl` dumps the TAPESTRY
+  ctl (`/srv/tapestry` root, same two-step attach -- the shell cannot
+  cross an srv post), which is where the Warp-C C-4 `cost <kind> <n>
+  <sum_us> <max_us>` rows live: the vkq gate's poke census read the
+  WARP ctl for three runs and reported "unreadable" every time. The
+  optional `key` argument filters to matching rows in ONE short
+  `t_putstr`: a full-ctl dump streamed through the cons drop-OLDEST
+  ring under repaint pressure spliced once, gluing two fragments into
+  an arithmetically impossible cost triple -- the ring is unit-atomic
+  per WRITE, not per stream.
+- **`tools/warp-host.sh quake` / `quake-vk`** -- BOTH detached now: the
+  remote expect runs nohup into a remote file; the local side polls the
+  pid with the VALUE discipline (empty output = no information, never
+  "died"; GONE counts only on two consecutive polls; 90x30 s bound) and
+  scp-fetches with 3 retries. An attached `ssh | tee` measurement died
+  twice to mid-stream tunnel drops.
+- **`tools/warp/vkq-venus.exp`** -- the vk gate: DEVICE-names-Venus,
+  the DIRECT bind witness, the fps line (REPORTED; `VKQ_FPS_WAIT`), the
+  measured restore leg (^C then driven ticks until the console's
+  `scanout direct` returns; the tick count is the datum, cap 20 via
+  `VKQ_RESTORE_TICKS` -- a hard 6-tick bound was GL-calibrated and the
+  vk teardown pays more), the filtered poke census, the swap-delta
+  SWAPPED voider, and census-before-asserts (deferred fails).
+- **Figures (2026-08-31, thyla-pi KVM/V3D, demo1 969 frames,
+  1280x800)**: GL 44.7 fps / VK 32.5-32.6 fps; the lag analysis and the
+  BUFFER_BLIT A/B seam live in `WARP-WSI-DESIGN.md` section 8.
+
 ## Tests
 
 Kernel: `pci.walk_caps_shm` (6 discriminating vectors incl. the

@@ -714,6 +714,54 @@ expects are restored for the build. vkQuake then runs unmodified through
    CR-tolerant grep and the ABSENT form a #212 sabotage (89 verdict
    checks).
 6. **W-4 — vkQuake** (its own chunk; the E2E proof).
+   **MEASURED (thyla-pi/KVM, 2026-08-31; commits `64db3f54`..`9bca8899`):**
+   the E2E proof holds — vkQuake 1.05.3 loader-less over the venus link
+   set, full init, DIRECT bind, and the ratified comparison on the same
+   host/day/demo (969 frames both): **GL (tyrquake/virgl) 44.7 fps; VK
+   (vkQuake/venus) 32.5–32.6 fps** (reproduced). vk = 73% of GL, and the
+   composed-stretch asymmetry biases FOR vk (the GL average includes its
+   slower composed phase), so the honest direct-vs-direct gap is wider.
+   Per the charter the composed arm stays GATED until the lag is hunted.
+   Server-side present cost is bounded cheap (the poke's census max
+   318 µs; the sum leg re-reads at the next boot — the full-ctl dump
+   spliced once in the cons drop-OLDEST ring, hence the filtered
+   `warp-prove tctl <key>` read). The chunk's non-graphics findings (the
+   shareware `+command` drop, the fenced-free denominator phantom) live
+   in the phase7-status W-4 row and `docs/JOURNAL.md` run 9.
+
+## 8. The W-4 lag question: LINEAR presentables on a tiled GPU (open)
+
+The 8.3 ms/frame gap has a shaped structural suspect. §4.1's presentable
+is **LINEAR by design** (`wants_linear` unconditional; the registration's
+linear-stride scanout contract — the display scans the blob directly, so
+the layout must be scanout-legal). vkQuake renders its scene into its OWN
+optimal-tiled color buffer, then its postprocess fullscreen pass writes
+the swapchain image — **~4 MB/frame into a LINEAR target on a tiled
+renderer (V3D)**, the one place our WSI differs materially from an
+upstream chain (whose swapchain images are tiled, with the
+scanout-side handling conversion).
+
+The designed A/B, NOT yet built (scripture-first; this section is the
+seam record):
+
+- **The BUFFER_BLIT chain variant**: `wsi_common`'s own second arm —
+  swapchain images OPTIMAL-tiled (the postprocess pass pays tiled-target
+  cost), plus a per-present resolve-blit into a LINEAR buffer, which is
+  what the compositor registers as the presentable. The blit rides the
+  present submit, so **the I-40 stage-0 bracket already covers it** (the
+  throttle fence waits the whole submit). Registration changes from the
+  image's memory to the blit buffer's — `finish_create` re-targets; the
+  one-export discipline moves with it.
+- **What decides**: the same ratified comparison re-run on the variant.
+  If the blit variant closes most of the gap, LINEAR-direct was the cost
+  and the variant becomes the default (with the direct-LINEAR form kept
+  for hosts where the blit is the greater cost). If it does not, the
+  remaining suspects are the per-frame venus marshaling and the
+  throttle-bracket serialization (measurable via `VN_PERF` toggles).
+- **What does NOT change either way**: the presentable ABI (the
+  registration still names a linear-stride HOST3D blob; only WHOSE
+  memory it is changes), the display-safe teardown, and the I-40
+  bracket.
 
 ---
 
