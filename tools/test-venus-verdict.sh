@@ -61,7 +61,7 @@ venus-prove: offscreen triangle OK (render pass + SPIR-V pipeline + draw + copy-
 venus-prove: slot-exhaustion cycles OK (253/253/253 to refusal, steady-state equal -- the F2 discriminating no-burn proof)
 tapestryd: warp scanout-blob probe: dispatch=present neg=0x1203 pos=0x1100 attach=0x1100 attach-neg=0x1100 (shmem-class; the venus-image-class verdict lands at W-3e)
 tapestryd: warp display unbind refusal INJECTED (self-test drill) for res 85 -- condemned, unref deferred, drain expected at the next accepted scanout
-tapestryd: warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok refuse=ok disable=1 flags=mappable compose=landed (64x64 BGRA8 stride 256)
+tapestryd: warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok refuse=ok disable=1 flags=mappable compose=poisoned (64x64 BGRA8 stride 256)
 EOF
 }
 
@@ -268,15 +268,22 @@ check "test leg: the injected drill worded as a REAL refusal -> UNVERIFIED" 1 ""
 # reporting a scaffolding failure as though it were an answer is the #212
 # class, and a probe whose broken state reads as a pass measures nothing.
 check "test leg: compose probe scaffolding failed (noscaffold) -> UNVERIFIED" 1 "" \
-      'sed "s/compose=landed/compose=noscaffold/" "$t" > "$t.x" && mv "$t.x" "$t"'
+      'sed "s/compose=poisoned/compose=noscaffold/" "$t" > "$t.x" && mv "$t.x" "$t"'
 check "test leg: compose probe readback never landed -> UNVERIFIED" 1 "" \
-      'sed "s/compose=landed/compose=noreadback/" "$t" > "$t.x" && mv "$t.x" "$t"'
+      'sed "s/compose=poisoned/compose=noreadback/" "$t" > "$t.x" && mv "$t.x" "$t"'
 check "test leg: compose probe not reported at all -> UNVERIFIED" 1 "" \
-      'sed "s/ compose=landed//" "$t" > "$t.x" && mv "$t.x" "$t"'
+      'sed "s/ compose=poisoned//" "$t" > "$t.x" && mv "$t.x" "$t"'
 # ...and the discrimination's other half: a REAL verdict must PASS, or the
 # arm above is satisfied by a gate that rejects everything (#215).
 check "test leg: compose probe reports refused (a real verdict) -> still VERIFIED" 0 "" \
-      'sed "s/compose=landed/compose=refused/" "$t" > "$t.x" && mv "$t.x" "$t"'
+      'sed "s/compose=poisoned/compose=refused/" "$t" > "$t.x" && mv "$t.x" "$t"'
+# Round-4 F2: `poisoned` is the MEASURED stand-in-class token (control-gated:
+# it can only print after ctlok, so it attributes the ctx latch to the blit,
+# not the instrument), and the fixture now carries it. `landed` stays in the
+# accept set for the W-3d real class -- witness that direction too, or the
+# accept of a token no fixture carries rots unverified (#215 both directions).
+check "test leg: compose probe reports landed (the W-3d-class verdict) -> still VERIFIED" 0 "" \
+      'sed "s/compose=poisoned/compose=landed/" "$t" > "$t.x" && mv "$t.x" "$t"'
 # F7 [P3]: the file's own rule is one sabotage per arm, and `disable=` was the
 # arm without one -- so nothing proved the verdict regex discriminated on it.
 check "test leg: presentable disable arm FAILED -> UNVERIFIED" 1 "" \

@@ -2406,17 +2406,11 @@ impl Gpu {
     /// `Ok(())` as "the host object is gone"; they may drop their record
     /// either way, which is exactly what makes the deferral safe.
     pub fn resource_unref(&mut self, resource_id: u32) -> Result<(), Error> {
-        // OVERFLOWED is sticky and defers EVERYTHING (round-3 F2 [P1]). The
-        // old shape keyed the deferral on list MEMBERSHIP alone, so an
-        // overflowed `condemn` -- which does not record the id -- let the
-        // unref through and FREED a resource the device had just refused to
-        // stop scanning. The comment said "leak it forever: the safe
-        // direction" while the code did the opposite: the mechanism inverted
-        // at exactly its boundary. Over-deferral IS the safe direction, so
-        // once the list has overflowed nothing frees until a drain clears it.
-        if self.condemned_overflowed {
-            return Ok(());
-        }
+        // Membership FIRST (round-4 F3): a PARKED entry's request must be
+        // recorded even during an overflow window, or the drain un-parks it
+        // without a free and its owner -- told Ok -- never retries. The
+        // round-3 F2 shape (overflow-first) silently DROPPED such requests
+        // while its say line claimed "defer until the next drain".
         if let Some(e) = self.condemned[..self.condemned_n]
             .iter_mut()
             .find(|e| e.res == resource_id)
@@ -2426,6 +2420,15 @@ impl Gpu {
             // an object whose owner will free it at its own quiesce-safe
             // moment, and the drain must not accelerate that.
             e.unref_requested = true;
+            return Ok(());
+        }
+        // OVERFLOWED is sticky (round-3 F2 [P1]): an overflowed `condemn`
+        // records no id, so nothing knows WHICH ids the display still names
+        // -- an unrecorded unref here is LEAKED, permanently and honestly
+        // (nothing re-issues it later). Over-deferral is the safe direction.
+        // Structurally unreachable while condemned_n <= 1; kept for the day
+        // the bound changes.
+        if self.condemned_overflowed {
             return Ok(());
         }
         self.resource_unref_raw(resource_id)
@@ -2458,7 +2461,8 @@ impl Gpu {
             self.condemned_overflowed = true;
             say!(
                 "tapestryd: gpu condemned list FULL ({} entries) -- res {} could not \
-                 be parked, so ALL unrefs now defer until the next accepted scanout \
+                 be parked, so PARKED entries still record their unref request; \
+                 UNRECORDED unrefs in this window are LEAKED, fail-safe, until drain \
                  ({} lost); the device has refused that many unbinds without \
                  accepting one",
                 GPU_CONDEMNED_MAX, res_id, self.condemned_lost

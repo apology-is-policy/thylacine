@@ -1327,6 +1327,9 @@ pub struct Comp {
     /// The F16 deferred direct switch: SET_SCANOUT to this surface's
     /// resource rides its next present-COMPLETE, never earlier.
     pending_direct: Option<usize>,
+    /// Round-4 F4: the pending-switch bind-REFUSED say fired once per
+    /// episode (retries run at present rate on a refusing device).
+    pending_bind_refused_said: bool,
     /// The layout epoch the chrome (bg + borders) was last painted at.
     chrome_epoch: u64,
     /// The visible-geometry signature at the last STRUCTURAL repaint: a
@@ -1984,6 +1987,7 @@ impl Comp {
             bound_res: 0,
             unbind_refused: 0,
             pending_direct: None,
+            pending_bind_refused_said: false,
             chrome_epoch: 0,
             geom_sig: 0,
             tick: 0,
@@ -4367,8 +4371,7 @@ impl Comp {
                 }
                 self.pending_direct = None;
                 if self.scanout != Scanout::Off && self.scanout != Scanout::Boot {
-                    let _ = self.gpu.set_scanout(0, dw, dh);
-                    self.bound_res = 0;
+                    self.display_disable(); // round-4 F1: condemn-on-refusal
                     self.scanout = Scanout::Off;
                 }
             }
@@ -4387,6 +4390,7 @@ impl Comp {
                     // requires the surface display-sized.
                     say!("tapestryd: scanout pending-direct {} ({}x{})", n, dw, dh);
                     self.pending_direct = Some(n);
+                    self.pending_bind_refused_said = false; // new episode
                     if !self.emit_configure_to(n, dw, dh) {
                         self.retire(n); // wedged; retire clears pending
                     }
@@ -4812,9 +4816,7 @@ impl Comp {
             }
             self.reconcile();
             if self.scanout == Scanout::Direct(n) {
-                let (dw, dh) = (self.gpu.width, self.gpu.height);
-                let _ = self.gpu.set_scanout(0, dw, dh);
-                self.bound_res = 0;
+                self.display_disable(); // round-4 F1: condemn-on-refusal
                 self.scanout = Scanout::Off;
             }
             // Warp-4: a GL-adopted scanout can survive the arms above --
@@ -4843,9 +4845,7 @@ impl Comp {
                     _ => false,
                 });
             if gl_bound {
-                let (dw, dh) = (self.gpu.width, self.gpu.height);
-                let _ = self.gpu.set_scanout(0, dw, dh);
-                self.bound_res = 0;
+                self.display_disable(); // round-4 F1: condemn-on-refusal
             }
             // (4) The GPU resources die before their backing -- all
             // WEAVE_SLOTS of them (C-2d-b), or a retire leaks every slot but
@@ -5782,6 +5782,7 @@ impl Comp {
         if self.scanout == Scanout::Direct(n) {
             self.scanout = Scanout::Off;
             self.pending_direct = Some(n);
+            self.pending_bind_refused_said = false; // new episode
         }
     }
 
@@ -5804,58 +5805,69 @@ impl Comp {
     /// rather than a generic step, and W-3c-1 removes that finding's
     /// "no client exists pre-READY" mitigation -- the presentable path is
     /// client-driven, post-READY, and repeatable.
-    fn gl_evict_res(&mut self, res_id: u32) -> bool {
-        if res_id == 0 || self.bound_res != res_id {
-            return true; // nothing bound to this resource: vacuously unbound
-        }
+    /// Round-4 F1: EVERY post-READY display DISABLE routes here, making the
+    /// condemn net's PRODUCER side as centralised as `resource_unref`'s
+    /// defer side. Before this, the refusal leg was wired at exactly ONE of
+    /// four disable sites; the three raw ones (reconcile's Off arm, both
+    /// `retire` arms) discarded the verdict and zeroed `bound_res` -- which
+    /// also BLINDED the guarded path behind them, because conn teardown
+    /// retires surfaces BEFORE warp ctxs, so the later eviction scans
+    /// compared against the already-zeroed field, and `wimg_teardown`'s
+    /// unref then went raw against a resource the display might still be
+    /// scanning: `punbind_skipped` reached silently on the most ordinary
+    /// teardown path in the system (a client dying with a bound source).
+    ///
+    /// A refused disable CONDEMNS the still-scanned resource BEFORE
+    /// `bound_res` is zeroed, so any later unref -- any owner, any path --
+    /// defers instead of handing the display freed memory. `bound_res` is
+    /// cleared either way: safety rests on the condemn, not the field, and
+    /// the stale scanout is harmless (old pixels until `reconcile`
+    /// establishes a new one). Reported HERE rather than at any caller
+    /// (round-2 F2's rule): a report the callee emits is one no caller can
+    /// forget.
+    fn display_disable(&mut self) -> bool {
+        let old = self.bound_res;
         let (dw, dh) = (self.gpu.width, self.gpu.height);
-        let unbound = self.gpu.set_scanout(0, dw, dh).is_ok();
-        if !unbound {
-            // The device still scans `res_id`. CONDEMN it: every unref path
-            // runs through `Gpu::resource_unref`, which now DEFERS on a
-            // condemned id, so no caller -- including one added later -- can
-            // hand the display freed memory. The next ACCEPTED scanout means
-            // the display has moved on, and drains the list for real.
-            //
-            // Reported HERE rather than at the caller (round-2 F2): round 1
-            // returned this verdict and fixed one of three call sites; the
-            // other two dropped it silently. A report the callee emits is one
-            // no caller can forget.
-            //
-            // `bound_res` is still cleared below even though the device has
-            // NOT moved: safety no longer rests on this field (the resource
-            // stays alive), and the stale scanout is harmless -- it shows old
-            // pixels until `reconcile` establishes a new one.
+        let ok = self.gpu.set_scanout(0, dw, dh).is_ok();
+        if !ok && old != 0 {
             self.unbind_refused = self.unbind_refused.saturating_add(1);
-            self.gpu.condemn(res_id);
+            self.gpu.condemn(old);
             // Distinguish the self-test's DRILL from a real device refusal.
-            // The code path above is identical for both -- that is what makes
-            // the drill worth running -- but the gate keys on a real refusal
-            // being ABSENT, and the self-test now produces one every venus
-            // boot. Without this the check would fail deterministically on a
-            // healthy host: the exact mirror of round-3 F1, where the check
-            // could never fire at all. A verdict string must be able to fire
-            // AND to not fire, or it measures nothing either way.
+            // The code path is identical for both -- that is what makes the
+            // drill worth running -- but the gate keys on a real refusal
+            // being ABSENT, and the self-test produces one every venus boot.
+            // The lever is armed only inside the pre-READY self-test, whose
+            // next disable is deterministic, so a consumed injection here IS
+            // the drill's own path.
             if self.gpu.take_injected_refusal() {
                 say!(
                     "tapestryd: warp display unbind refusal INJECTED (self-test drill) \
                      for res {} -- condemned, unref deferred, drain expected at the \
                      next accepted scanout",
-                    res_id
+                    old
                 );
             } else {
                 say!(
                     "tapestryd: warp display UNBIND REFUSED by the device for res {} -- \
                      condemned, unref deferred; the display keeps naming it until the \
                      next accepted scanout",
-                    res_id
+                    old
                 );
             }
         }
         self.bound_res = 0;
+        ok
+    }
+
+    fn gl_evict_res(&mut self, res_id: u32) -> bool {
+        if res_id == 0 || self.bound_res != res_id {
+            return true; // nothing bound to this resource: vacuously unbound
+        }
+        let unbound = self.display_disable();
         if let Scanout::Direct(n) = self.scanout {
             self.scanout = Scanout::Off;
             self.pending_direct = Some(n);
+            self.pending_bind_refused_said = false; // new episode
             if let Some(s) = self.surf_mut(n) {
                 s.res_stale = [true; WEAVE_SLOTS as usize];
             }
@@ -7838,11 +7850,15 @@ impl Comp {
     /// applies with more force here, because a latched compositor context
     /// would take the display down for the whole boot.
     ///
-    /// Verdict, three-way and never collapsed to a boolean: the destination
+    /// Verdict, four-way and never collapsed to a boolean: the destination
     /// is staged with a PATTERN host-side, then its guest page is clobbered
     /// with `0xDEAD_BEEF` before the readback, so "the readback never landed"
-    /// (scaffolding) is distinguishable from "the blit did not land"
-    /// (the measurement) is distinguishable from "it landed".
+    /// splits by LEG -- on the control it is `noreadback` (scaffolding, the
+    /// gates reject it), on the test it is `poisoned` (round-4 F2: the
+    /// control's ctlok already proved the readback machinery, so all-clobber
+    /// after a blit attributes the ctx latch to the blit -- a REAL verdict,
+    /// and the measured stand-in-class outcome) -- distinguishable from "the
+    /// blit did not land" (`refused`) and from "it landed" (`landed`).
     /// `do_blit == false` is the CONTROL: identical scaffolding, one variable
     /// removed. Without it a `noreadback` is unattributable -- it reads the
     /// same whether the instrument is broken or the blit latched the context
@@ -7898,7 +7914,18 @@ impl Comp {
                             *r = unsafe { core::ptr::read_volatile((dst_va as *const u32).add(i)) };
                         }
                         verdict = if rows.iter().all(|&r| r == 0xDEAD_BEEF) {
-                            "noreadback" // scaffolding, not a verdict about the blit
+                            // Round-4 F2: on the TEST leg this outcome is
+                            // ATTRIBUTABLE -- it can only print after the
+                            // control returned ctlok, so the readback
+                            // machinery is proven and the blit latched the
+                            // ctx out from under it (the run-6 mechanism:
+                            // ILLEGAL_RESOURCE -> ctx in_error). That is a
+                            // REAL verdict about the source class, and the
+                            // measured outcome for every blob_id=0 stand-in.
+                            // On the CONTROL leg the same bytes mean the
+                            // instrument itself failed -- scaffolding, and
+                            // the gates reject it.
+                            if do_blit { "poisoned" } else { "noreadback" }
                         } else if rows.iter().all(|&r| r == PAT) {
                             // The destination still holds what was staged: on
                             // the CONTROL that is the CORRECT outcome (nothing
@@ -12606,10 +12633,24 @@ impl Conn {
                     AdoptSrc::Bo => "GL",
                     AdoptSrc::Img { .. } => "img",
                 };
-                say!("tapestryd: scanout direct {} {} res {} ({}x{})", n, fam, g.res_id, w, h);
                 if comp.direct_bind_adopted(&g, w, h) {
+                    // Verdict-gated (round-4 F4): this line is the gate's
+                    // bind WITNESS, so it reports the EVENT -- SET_SCANOUT's
+                    // response consults the renderer, and a refusal used to
+                    // print it anyway (an attempt-report sold as an
+                    // event-report).
+                    say!("tapestryd: scanout direct {} {} res {} ({}x{})", n, fam, g.res_id, w, h);
                     comp.scanout = Scanout::Direct(n);
                     comp.pending_direct = None;
+                    comp.pending_bind_refused_said = false;
+                } else if !comp.pending_bind_refused_said {
+                    // Once per pending episode (the C-0d F5 storm rule): the
+                    // retry runs at present rate on a refusing device.
+                    comp.pending_bind_refused_said = true;
+                    say!(
+                        "tapestryd: scanout direct {} {} res {} ({}x{}) bind REFUSED -- pending retried at each present",
+                        n, fam, g.res_id, w, h
+                    );
                 }
                 if let Some(s) = comp.surf_mut(n) {
                     s.res_stale = [true; WEAVE_SLOTS as usize];

@@ -170,6 +170,45 @@ minutes on `ssh thyla-pi` — the LAN alias, wedged, exactly as the standing
 note says (`thyla-pi-cf` ONLY). The note was in the resume note; the
 muscle memory was not.
 
+### Round 4, batched: the condemn net had one wired producer
+
+The round (Fable, MODEL start==end, scope = r3 fixes + the W-3c-2a probe +
+W-3c-2) returned 0 P0 / 2 P1 / 0 P2 / 2 P3, all fixed same-day.
+
+**F1 is the kind of finding the batching exists to catch**: the
+condemn/defer/drain machinery — built across three audit rounds
+specifically to close `punbind_skipped` — had its producer wired at
+exactly ONE of four display-disable sites. The three raw sites (reconcile's
+Off arm, both `retire` arms) discarded the disable verdict and zeroed
+`bound_res`, and the conn-teardown ordering (surfaces before warp ctxs)
+then *blinded the guarded path behind them*: the later eviction scans
+compared against the already-zeroed field, so `wimg_teardown`'s unref went
+raw. A client dying with a bound presentable — the most ordinary teardown
+path in the system — could hand the display freed memory, silently, with
+all the machinery present in the tree. The fix is the machinery's own
+lesson applied to its other half: `display_disable()` centralizes the
+producer side exactly as round 2's F3 centralized the defer side. The
+drill now exercises it; witnessed on real V3D post-fix.
+
+**F2 is the fourth recurrence of the crafted-suite divergence, and this
+run's own making**: the fork resolution changed what `noreadback` *means*
+(attributable, control-gated ctx-latch — the expected stand-in outcome)
+and left the venus certification gate coded to the old meaning — so the
+gate was deterministically RED on the certified host, while the crafted
+fixture asserted `compose=landed`, a token no host has ever produced. The
+docs-only commit was a semantics change wearing a prose hat. Fixed by
+making the attributable outcome its own token (`poisoned`), re-keying both
+gate halves and the fixture, adding the landed-direction check (76/76),
+and re-running the actual venus verb on thyla-pi — green, both boots, the
+capset discrimination intact.
+
+Round 4 also *confirmed* the load-bearing negative claims by independent
+enumeration: the `PDrained` vacuity argument holds (every `imgs` reader
+walked), the va-0 DMA class is closed at every composed consumer, and the
+fork resolution's virglrenderer citations were all verified against the
+vendored source. Dirty (2 P1s) → the fix prosecution rides round 5 with
+W-3d slice 1.
+
 ## 2026-08-31 (run 5) — W-3c-1 re-witnessed, then round 2 found the hole between two round-1 fixes
 
 Fresh context (self-compact at the 600k line, at the W-3c-1 committed

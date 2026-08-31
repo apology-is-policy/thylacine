@@ -489,8 +489,8 @@ venus-verdict)
     # accept the SKIP-shaped line (the #240 hollow shape), so the arm demands
     # the passing verdict itself; a skip on the test leg is a FAILURE there,
     # because the test leg is precisely the device that can run it.
-    grep -qE "warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok refuse=ok disable=1 flags=[a-z+]+ compose=(landed|refused|noattach)" "$tst" || {
-        echo "TEST leg: the W-3c-1 presentable self-test did not report all-arms-passing (shape/mint/bind/unbind/refuse) with a real compose= verdict (landed|refused|noattach -- a scaffolding failure is not a verdict)"
+    grep -qE "warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok refuse=ok disable=1 flags=[a-z+]+ compose=(landed|refused|noattach|poisoned)" "$tst" || {
+        echo "TEST leg: the W-3c-1 presentable self-test did not report all-arms-passing (shape/mint/bind/unbind/refuse) with a real compose= verdict (landed|refused|noattach|poisoned -- a scaffolding failure is not a verdict; poisoned IS a verdict, the round-4 F2 correction: control-gated, it means the blit latched the ctx, the measured stand-in-class outcome)"
         vfail=1
     }
     # ...and the device must not have REFUSED the unbind (round-2 F1 [P1]).
