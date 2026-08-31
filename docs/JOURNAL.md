@@ -83,15 +83,21 @@ reader-set lesson recurred — stage_clade wanted `lib/clang/22/include`
 (243 headers, restored) and `cxx-rt/` (the #156 trio, restored from the
 keep's stage2 sysroot, md5-matched), gl_link_program wants
 `lib/libLLVM*.a`, the llvm-config shim wants `include/` + CMakeCache.txt
-(restored). **Open residue, enqueued as [[bug-llvm-build-jit-family-gap]]**:
-the keep's Aug-24 tree dropped the 8 ExecutionEngine/JIT archives that
-llvm-libs.list (an Aug-5 meson closure) names and llvmpipe needs — 65/73
-restored; the NEXT gl-prover relink fails at `-lLLVMMCJIT` until the
-list+libs pair is reconciled as one unit. Nothing today consumes them.
-The restored Aug-24 multicall is NOT byte-identical (post-strip) to the
-Aug-5 one the stage carried — same fork tip (Jul 31), divergence is
-rebuild-level; the re-staged tree + the storm gate below are its
-functional certification.
+(restored). The last gap — the keep's Aug-24 tree lacked the 8
+ExecutionEngine/JIT archives that llvm-libs.list (an Aug-5 meson closure)
+names and llvmpipe's shader JIT links — was enqueued, then **closed in
+the same run**: `ninja -n` on the keep's tree discriminated the two
+readings of "absent" (excluded by config vs never demanded by the built
+target list — it was the latter; the wrong reading would have re-closed
+the list and laundered the 8 out permanently), the 8 were built there
+(142 steps), pulled, 73/73 manifest closure, and the end-to-end witness
+ran: a forced tyrquake rebuild relinked tyr-glquake through
+gl_link_program against the full set (OSMesa entry points resolved),
+re-stage + re-bake (zero staleness warnings), suite with the gl gate
+certifying the reconciled-libs binary in-guest. The restored Aug-24
+multicall is NOT byte-identical (post-strip) to the Aug-5 one the stage
+carried — same fork tip (Jul 31), divergence is rebuild-level; the
+re-staged tree + the storm/gl gates are its functional certification.
 
 **The #250 recurrence, caught by baseline comparison.** The sentinel
 births forced a one-time sysroot cascade (`build.sh all` run 1: REBUILT
