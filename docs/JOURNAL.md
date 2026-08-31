@@ -450,6 +450,24 @@ bind) is §8.2's C/B/A fork — C mechanical, A (MAILBOX) operator-gated —
 and the compose gate's numbers-condition is now met, with the chunk itself
 still the operator's call.
 
+**Round 9 (the display-wall batch): 0 P0 / 0 P1 / 0 P2 / 3 P3, NOT dirty,
+all three fixed at the close** (`02b3b7ee`). The load-bearing commit — the
+double-paint fix — survived every prosecution arm: the prosecutor proved
+from the diff that the removed flush only ever ran after the bind's
+internal flush of the same res at the same geometry (pure repetition, no
+protective role), swept all four `direct_bind_adopted` callers, and walked
+the teardown chain to show nothing anywhere consumed a poke-time outer
+flush. All three findings were residue around the stamp commit, each its
+own small lesson: a hash guard added for soundness silently killed the
+whole build when `lib/` was empty (a guard's own failure mode needs the
+same fail-loud bar as what it guards); the stamp covered `lib/*` while
+`venus-whole.list` — the closure-correctness input — sat in NO tier (the
+category-vs-property class landing on the fix itself); and an interrupted
+link left a fresh-mtime partial binary every tier then REUSED (the atomic
+publish idiom, at last). Suite exit-0 the eighth time this window;
+venus-verdict 94/94; the push follows, and the arc hands the C/B/A pacing
+fork and the compose decision to the operator.
+
 ## 2026-08-31 (run 8, Fable) — W-3e: the SDL Vulkan glue, and the bind that had no trigger
 
 Resumed from the run-7 self-compaction with W-3e fully designed and zero code.
