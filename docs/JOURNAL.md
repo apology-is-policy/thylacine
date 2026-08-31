@@ -143,6 +143,99 @@ both covered the property. Cheapest form: grep each term separately and diff
 the hit sets — a term that finds a site the others miss is proof the sweep is
 not yet complete.
 
+### Round 3 on Fable: both P1s inverted a claim the code made about itself
+
+The reviewer-model rule prefers Fable for family diversity, and this surface
+had gone two consecutive rounds on the implementation agent's own lineage.
+Round 3 got Fable and immediately justified the preference — `0 P0 / 2 P1 /
+2 P2 / 3 P3`, and neither P1 was a thing the code failed to say. Both were
+things the code said *and got backwards*.
+
+**F1 — the refusal net was capture-dead.** Round 2 moved the refusal `say!`
+out of `wimg_teardown` and into `gl_evict_res`, which is correct: it now
+serves every family, not just presentables. That move changed its prefix from
+`tapestryd: warp presentable` to `tapestryd: warp display`, and boot-probe's
+capture filter carries the first and not the second. So the new verdict check
+could not fire on any real boot, while the crafted-log suite stayed green
+because its sabotage appends the line by hand.
+
+This is the **third** recurrence of the verdict/capture pairing defect on this
+one surface — and the galling part is that I had verified the pairing in this
+very session, *before* making the move, and left the comment asserting it
+afterwards. The comment was true about a line that no longer existed. The rule
+worth keeping: **a prefix change is a capture change.** Moving a say-line
+between functions silently re-scopes it against every filter matching on
+prefix. It now says so in boot-probe.sh, and the pairing is checked
+mechanically with a negative control rather than by reading — my first attempt
+at that check was itself broken (zsh has no `read -ra`), and reported "yes"
+for the wrong reason on all three inputs.
+
+**F2 — the overflow arm did not leak, it freed.** `resource_unref` deferred on
+list *membership*. An overflowed `condemn` does not record the id — so the
+unref went straight through, freeing a resource the device had just refused to
+stop scanning. The `punbind_skipped` UAF the entire mechanism exists to close,
+reached **at the mechanism's own boundary**, while its log line said "leaks
+for the life of the process" and its comment said "leak it forever: the safe
+direction." My own self-audit had graded this arm "real but ACCEPTED and
+correctly signed."
+
+Fable also did the work to show it was unreachable *today* (deriving
+`condemned_n <= 1` structurally) and reachable at **W-3c-2**, because
+`set_scanout_blob` was the one accepted bind that didn't drain, and W-3c-2 is
+exactly what makes blob binds client-driven and repeatable. That is the
+difference between "you have a bug" and "here is when it detonates."
+
+**F3** then found that the round-2 drain had introduced the first
+unref-before-quiesce path in tapestryd — freeing a retiring ctx's resource at
+a moment chosen by an unrelated scanout. The fix generalises nicely: the
+deferral now only ever **defers**, never **accelerates**. Each parked entry
+records whether its owner actually asked for a free, and the drain issues only
+those; anything parked at a pre-quiesce eviction is merely un-parked and freed
+later by its owner, at its own safe moment.
+
+### The sweep that would not finish
+
+Round 2's stale-prose sweep reported 13 sites and wrote a lesson about
+sweeping thoroughly. Round 3 found three it had missed — one of them *in the
+amended scripture itself*, naming the function to edit — plus prose the round-2
+batch had **newly written**, ten lines below its own sweep-lesson table. A
+fourth pass with a third vocabulary then turned up a fourteenth in a spec cfg
+that neither Fable nor I had reached.
+
+    4 -> 5 -> 6 -> 13 -> 14
+
+**A sweep is not done when it stops finding things. It is done when a
+differently-shaped probe also stops finding things.**
+
+### The mechanism nobody had ever run
+
+Not a prosecutor finding — the self-audit's. The entire condemn/defer/drain
+path had **no driver**. `condemn`, the deferral branch and `drain_condemned`
+had never executed anywhere; `unbind=REFUSED` was a token only a `sed` in the
+verdict suite had ever produced. A safety mechanism whose sole evidence is a
+crafted log has been *described*, not tested — and both of round 3's P1s lived
+on precisely that path.
+
+It has a driver now: a lever that fails the next display disable without
+issuing it, so the refusal is indistinguishable downstream from a real one.
+The arm asserts refusal-observed, resource parked, **the free NOT ISSUED** (the
+unref tick is the direct witness — checking the park alone would pass an
+implementation that parked and freed anyway), and drained-for-real at the next
+accepted scanout. It is deliberately not a client verb: the self-test runs
+pre-READY, so it needs no external surface and cannot become the box-wide
+kill-switch its `ring-inject` sibling is bounded against.
+
+### Cadence change, on operator direction
+
+Mid-run: *"this week let's focus more on progress — let's double the distance
+between long gates and audits."* Recorded as binding. It changes the
+**frequency**, not the bar: batch roughly twice the work per round, and carry
+a dirty close's residue **forward** into the next round rather than spending a
+whole round on the fixes alone. Round 4 therefore rides with W-3c-2 instead of
+auditing round 3's fixes on their own. The thing to watch is that a wider
+scope at the same effort reads each half less carefully — compensated by
+naming focus areas harder in the prompt, not by hoping.
+
 ### Left open, exactly
 
 - **Round 3 is owed** — round 2 is itself a dirty close (a returned P1, and
@@ -230,8 +323,10 @@ the co-update surface instead of trusting it.
 **Then W-3c-1, in the same run: the presentable stopped being a modeled
 object and became a real one.** The chunk split cleanly in two, and the split
 is worth recording because it was chosen for *witnessability*, not size:
-**W-3c-1** is the object and its lifetime (the `img/` ABI, the shareable
-**non-mappable** HOST3D mint, the display-safe teardown), which a server-side
+**W-3c-1** is the object and its lifetime (the `img/` ABI, the HOST3D mint
+— described as *shareable non-mappable* when this was written, amended to
+`USE_MAPPABLE`-and-never-mapped by the measurement recorded below — the
+display-safe teardown), which a server-side
 boot self-test can witness end-to-end with no client at all; **W-3c-2** is the
 client-facing present path (the generalized adoption, `present-to … img`, the
 compose arm), which is also exactly where the spec's `PDrained` conjunct

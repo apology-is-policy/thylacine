@@ -513,8 +513,9 @@ expects are restored for the build. vkQuake then runs unmodified through
    row). **Split into two sub-chunks so each lands with its own witness:**
    - **W-3c-1 — the OBJECT and its lifetime.** The `img/` ABI
      (`new` / `info` / `ctl destroy`), the `WarpImg` slot row folded into
-     the I-32 holistic cap, the shareable **non-mappable** HOST3D mint
-     (`create_presentable`), the Direct bind (`set_scanout_blob`, the
+     the I-32 holistic cap, the **`USE_MAPPABLE`, never-mapped** HOST3D mint
+     (`create_presentable`; §4.1 as AMENDED -- this line said *shareable
+     non-mappable* until measurement refuted it), the Direct bind (`set_scanout_blob`, the
      verdict wrapper over W-3a's raw-resp probe — one wire implementation),
      and the **display-safe teardown**: unbind before unref, reusing
      `gl_evict_res` rather than re-implementing an ordering rule, and

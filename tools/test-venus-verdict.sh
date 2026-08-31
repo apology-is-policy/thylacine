@@ -60,7 +60,8 @@ venus-prove: cap-exhaustion cycle OK (refused at the 64 MiB ctx cap, freed, real
 venus-prove: offscreen triangle OK (render pass + SPIR-V pipeline + draw + copy-out 64x64; center red, corner blue -- the W-1 pipeline-class witness)
 venus-prove: slot-exhaustion cycles OK (253/253/253 to refusal, steady-state equal -- the F2 discriminating no-burn proof)
 tapestryd: warp scanout-blob probe: dispatch=present neg=0x1203 pos=0x1100 attach=0x1100 attach-neg=0x1100 (shmem-class; the venus-image-class verdict lands at W-3e)
-tapestryd: warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok disable=1 flags=mappable (64x64 BGRA8 stride 256)
+tapestryd: warp display unbind refusal INJECTED (self-test drill) for res 85 -- condemned, unref deferred, drain expected at the next accepted scanout
+tapestryd: warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok refuse=ok disable=1 flags=mappable (64x64 BGRA8 stride 256)
 EOF
 }
 
@@ -240,15 +241,36 @@ check "test leg: presentable unbind arm n/a (bind refused) -> UNVERIFIED" 1 "" \
 # token, and the gate must reject it like any other non-pass.
 check "test leg: presentable unbind REFUSED by the device -> UNVERIFIED" 1 "" \
       'sed "s/unbind=ok/unbind=REFUSED/" "$t" > "$t.x" && mv "$t.x" "$t"'
-# ...and the loud line that accompanies it must never ride a passing leg. This
-# is the CAPTURE half of the same finding: boot-probe.sh captures the string
-# (prefix `tapestryd: warp presentable`), and before this arm NOTHING read it.
+# ...and the loud line that accompanies it must never ride a passing leg.
+# NOTE THE PREFIX -- `tapestryd: warp display`, not `warp presentable`: the
+# say-line lives in `gl_evict_res`, which serves every family, not in
+# `wimg_teardown`. Round 3 [P1] caught this comment asserting the OLD prefix
+# and boot-probe.sh's filter lacking the new one, so this arm was green here
+# and capture-dead on every real boot. That is THIS FILE'S standing blind
+# spot: the fixture below writes the line by hand, so the suite can never
+# tell you whether a real tapestryd's line survives capture.
 check "test leg: an UNBIND REFUSED line present at all -> UNVERIFIED" 1 "" \
       'printf "tapestryd: warp display UNBIND REFUSED by the device for res 7 -- condemned, unref deferred\n" >> "$t"'
+# ...and the DRILL must not read as a real refusal. The self-test injects one
+# every venus boot, so the arm above would fail deterministically on a healthy
+# host if the two wordings were not distinct -- the exact MIRROR of round-3 F1
+# (a check that could never fire; this would be one that always fires). A
+# verdict string has to be able to fire AND not fire, or it measures nothing.
+# So: rewording the drill into the real phrasing must turn the gate RED.
+check "test leg: the injected drill worded as a REAL refusal -> UNVERIFIED" 1 "" \
+      'sed "s/unbind refusal INJECTED (self-test drill)/UNBIND REFUSED by the device/" "$t" > "$t.x" && mv "$t.x" "$t"'
 # F7 [P3]: the file's own rule is one sabotage per arm, and `disable=` was the
 # arm without one -- so nothing proved the verdict regex discriminated on it.
 check "test leg: presentable disable arm FAILED -> UNVERIFIED" 1 "" \
       'sed "s/disable=1/disable=0/" "$t" > "$t.x" && mv "$t.x" "$t"'
+# ARM 5 (round-3 SA-6): the DRIVEN refusal path -- the condemn/defer/drain
+# chain, which until this arm had never executed anywhere. Both non-pass
+# states get a sabotage: an outright FAIL, and the n/a a bind-refusing host
+# reports (n/a is not a pass -- #212).
+check "test leg: presentable refuse arm FAILED -> UNVERIFIED" 1 "" \
+      'sed "s/refuse=ok/refuse=FAIL/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg: presentable refuse arm n/a (bind refused) -> UNVERIFIED" 1 "" \
+      'sed "s/refuse=ok/refuse=n\/a/" "$t" > "$t.x" && mv "$t.x" "$t"'
 check "test leg: presentable self-test reports a SKIP not a verdict -> UNVERIFIED" 1 "" \
       'sed "s/warp presentable self-test: shape=.*/warp presentable self-test skipped (mint refused e=-5) -- non-venus device; shape=1/" "$t" > "$t.x" && mv "$t.x" "$t"'
 # F12 [P3]: anchored on the REASON, not just the word "skipped". The control

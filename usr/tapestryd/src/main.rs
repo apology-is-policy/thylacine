@@ -307,8 +307,10 @@ impl Driver for Tapestryd {
         self.comp.warp_scanout_blob_probe();
 
         // vkQuake-arc W-3c-1 (WARP-WSI-DESIGN sections 4-6): the PRESENTABLE
-        // lifecycle -- registration accept-set discrimination, the shareable
-        // non-mappable HOST3D mint, the Direct bind, and the display-safe
+        // lifecycle -- registration accept-set discrimination, the
+        // `USE_MAPPABLE`-and-never-mapped HOST3D mint (4.1 as AMENDED: the
+        // host refuses USE_SHAREABLE, and guest-invisibility is the absence
+        // of any map, not the flag), the Direct bind, and the display-safe
         // teardown's ordering witness (destroy WHILE BOUND). Unlike the W-3a
         // probe above this is a WITNESS, not a measurement: its arms assert.
         self.comp.warp_img_selftest();

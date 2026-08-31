@@ -489,15 +489,17 @@ venus-verdict)
     # accept the SKIP-shaped line (the #240 hollow shape), so the arm demands
     # the passing verdict itself; a skip on the test leg is a FAILURE there,
     # because the test leg is precisely the device that can run it.
-    grep -qE "warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok disable=1 flags=" "$tst" || {
-        echo "TEST leg: the W-3c-1 presentable self-test did not report all-arms-passing (shape/mint/bind/unbind)"
+    grep -qE "warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok refuse=ok disable=1 flags=" "$tst" || {
+        echo "TEST leg: the W-3c-1 presentable self-test did not report all-arms-passing (shape/mint/bind/unbind/refuse)"
         vfail=1
     }
     # ...and the device must not have REFUSED the unbind (round-2 F1 [P1]).
-    # boot-probe.sh captures this line; before this arm NOTHING read it, so a
-    # host that refused every unbind produced a green gate and a log full of
-    # the evidence. A verdict with no consumer is the capture half of F2's
-    # defect wearing the other face.
+    # The line's prefix is `tapestryd: warp display` (it is emitted by
+    # `gl_evict_res`, which serves every family), and boot-probe.sh's capture
+    # filter carries that alternative -- added at round 3 [P1], which found
+    # this check greping for a line the filter dropped, i.e. a net that could
+    # not fire on any real boot. Verify the pairing whenever a say-line MOVES
+    # between functions: a prefix change is a capture change.
     if grep -qF "UNBIND REFUSED by the device" "$tst"; then
         echo "TEST leg: the device REFUSED a display unbind -- the resource is condemned and its free deferred; the presentable teardown is UNPROVEN on this host"
         vfail=1

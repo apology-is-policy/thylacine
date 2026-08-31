@@ -136,6 +136,17 @@ pub const BLOB_FLAG_SHAREABLE: u32 = VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE;
 /// unbind is a device-level anomaly, not a steady state, so this is sized to
 /// absorb a burst and no more; overflow is counted and leaks, never frees.
 const GPU_CONDEMNED_MAX: usize = 16;
+
+/// One display-condemned resource. `unref_requested` is what keeps the drain
+/// from ACCELERATING a free: an id parked at a pre-quiesce eviction whose
+/// owner has not yet asked to free it is simply un-parked by the drain, and
+/// its real unref still happens later at the owner's own quiesce-safe moment
+/// (round-3 F3).
+#[derive(Clone, Copy)]
+struct Condemned {
+    res: u32,
+    unref_requested: bool,
+}
 const VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB: u32 = 0x0208;
 const VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB: u32 = 0x0209;
 
@@ -1575,8 +1586,19 @@ pub struct Gpu {
     /// exposed the unbind verdict and round 2 found two of three callers
     /// still dropping it. A guard every unref path passes through cannot be
     /// forgotten by the next caller added.
-    condemned: [u32; GPU_CONDEMNED_MAX],
+    condemned: [Condemned; GPU_CONDEMNED_MAX],
     condemned_n: usize,
+    /// Sticky: the park list overflowed, so EVERY unref defers until the next
+    /// drain. Over-deferral is the safe direction (round-3 F2).
+    condemned_overflowed: bool,
+    /// Self-test lever: fail the next display disable without issuing it.
+    fail_next_scanout_disable: bool,
+    /// Set when the lever (not the device) produced the last refusal, so the
+    /// report can SAY it was injected. The code path stays identical -- that
+    /// is what makes the drill valid -- but the LOG must distinguish, because
+    /// the gate keys on a real refusal being absent and the self-test now
+    /// deliberately produces one every boot.
+    injected_refusal: bool,
     /// Condemnations dropped because the list was full. These leak for the
     /// process's life -- the safe direction (a leaked resource id costs
     /// memory; a freed one the display still scans is a UAF).
@@ -1746,8 +1768,11 @@ impl Gpu {
             cmd_seq: 0,
             last_scanout_seq: 0,
             last_unref_seq: 0,
-            condemned: [0; GPU_CONDEMNED_MAX],
+            condemned: [Condemned { res: 0, unref_requested: false }; GPU_CONDEMNED_MAX],
             condemned_n: 0,
+            condemned_overflowed: false,
+            fail_next_scanout_disable: false,
+            injected_refusal: false,
             condemned_lost: 0,
             num_capsets: 0,
             capset_blob: alloc::vec::Vec::new(),
@@ -2381,7 +2406,26 @@ impl Gpu {
     /// `Ok(())` as "the host object is gone"; they may drop their record
     /// either way, which is exactly what makes the deferral safe.
     pub fn resource_unref(&mut self, resource_id: u32) -> Result<(), Error> {
-        if self.condemned[..self.condemned_n].contains(&resource_id) {
+        // OVERFLOWED is sticky and defers EVERYTHING (round-3 F2 [P1]). The
+        // old shape keyed the deferral on list MEMBERSHIP alone, so an
+        // overflowed `condemn` -- which does not record the id -- let the
+        // unref through and FREED a resource the device had just refused to
+        // stop scanning. The comment said "leak it forever: the safe
+        // direction" while the code did the opposite: the mechanism inverted
+        // at exactly its boundary. Over-deferral IS the safe direction, so
+        // once the list has overflowed nothing frees until a drain clears it.
+        if self.condemned_overflowed {
+            return Ok(());
+        }
+        if let Some(e) = self.condemned[..self.condemned_n]
+            .iter_mut()
+            .find(|e| e.res == resource_id)
+        {
+            // Record that a free was ASKED FOR. The drain issues only these
+            // (round-3 F3): an id parked but never unref-requested belongs to
+            // an object whose owner will free it at its own quiesce-safe
+            // moment, and the drain must not accelerate that.
+            e.unref_requested = true;
             return Ok(());
         }
         self.resource_unref_raw(resource_id)
@@ -2391,44 +2435,91 @@ impl Gpu {
     ///
     /// THE ID-REUSE WINDOW, since a reviewer will ask: a parked id is matched
     /// by VALUE, so a `res_seq` wrap that reissued the same id before the
-    /// drain would defer the NEW resource's unref instead. The drain runs at
-    /// the very next ACCEPTED scanout -- in practice the `reconcile` inside
-    /// the same `gl_evict_res` call -- so the window is a handful of commands
-    /// wide and the wrap needs 2^32 resources to close it. Both unrefs still
-    /// happen exactly once either way; only their ORDER could differ, and the
-    /// display cannot be naming either by then.
+    /// drain would act on the NEW resource. How long the window can be:
+    /// **unbounded on a persistently-refusing device** (round-3 F7 corrected
+    /// an earlier claim of "a handful of commands" -- on the refused path
+    /// `reconcile` frequently issues no scanout at all, and if none is ever
+    /// accepted no drain runs). What actually bounds this is the OTHER end:
+    /// `res_seq` is monotonic and skips zero, and a create that reissued a
+    /// still-live device id FAILS AT THE DEVICE (the mint returns E_IO), so
+    /// the wrap is fail-closed rather than silently aliasing.
     pub fn condemn(&mut self, res_id: u32) {
-        if res_id == 0 || self.condemned[..self.condemned_n].contains(&res_id) {
+        if res_id == 0 || self.condemned[..self.condemned_n].iter().any(|e| e.res == res_id) {
             return;
         }
         if self.condemned_n == GPU_CONDEMNED_MAX {
-            // Say it rather than only counting it: a counter whose flip is
-            // nobody's read is indistinguishable from one that never flips.
+            // Cannot park it -- so switch the WHOLE unref path to deferring
+            // (round-3 F2). Leaking every pending free until the next drain is
+            // wasteful and safe; freeing one the display is scanning is a
+            // host-side UAF. Say it rather than only counting it: a counter
+            // whose flip is nobody's read is indistinguishable from one that
+            // never flips.
             self.condemned_lost = self.condemned_lost.saturating_add(1);
+            self.condemned_overflowed = true;
             say!(
-                "tapestryd: gpu condemned list FULL -- res {} leaks for the life of \
-                 the process ({} lost); the device has refused {} unbinds without \
+                "tapestryd: gpu condemned list FULL ({} entries) -- res {} could not \
+                 be parked, so ALL unrefs now defer until the next accepted scanout \
+                 ({} lost); the device has refused that many unbinds without \
                  accepting one",
-                res_id, self.condemned_lost, GPU_CONDEMNED_MAX
+                GPU_CONDEMNED_MAX, res_id, self.condemned_lost
             );
-            return; // leak it forever: the safe direction
+            return;
         }
-        self.condemned[self.condemned_n] = res_id;
+        self.condemned[self.condemned_n] = Condemned { res: res_id, unref_requested: false };
         self.condemned_n += 1;
     }
 
+    /// Test lever, self-test only: make the next display DISABLE
+    /// (`set_scanout(0, ..)`) report a device refusal without issuing it, so
+    /// the condemn/defer/drain chain has a real driver. Deliberately NOT a
+    /// client verb -- `warp_img_selftest` runs pre-READY, before any
+    /// connection exists, so this needs no external surface at all, and giving it one
+    /// "for symmetry" would be the #178 box-wide-kill-switch anti-pattern its
+    /// `ring-inject` sibling is already bounded against.
+    pub fn arm_scanout_disable_refusal(&mut self) {
+        self.fail_next_scanout_disable = true;
+    }
+
+    /// Consume the "that refusal was mine" marker. One-shot: a SECOND refusal
+    /// in the same boot is by definition not the injected one and reports as
+    /// a real device refusal, which is what the gate must catch.
+    pub fn take_injected_refusal(&mut self) -> bool {
+        core::mem::replace(&mut self.injected_refusal, false)
+    }
+
+    pub fn condemned_count(&self) -> usize {
+        self.condemned_n
+    }
+
     /// An accepted scanout means the display no longer names anything parked
-    /// before it, so every condemned resource is now genuinely free-able.
-    /// Calls the RAW unref -- routing through the checking one would re-read
-    /// a list this is in the middle of emptying.
-    fn drain_condemned(&mut self) {
+    /// BEFORE it -- with one exception: the resource that scanout just BOUND
+    /// (`keep`), which the display now names precisely because of it. Draining
+    /// that one would free what was just put on screen, i.e. the mechanism
+    /// producing the exact fault it exists to prevent.
+    ///
+    /// Only entries whose free was actually REQUESTED are unref'd (round-3
+    /// F3). The rest are merely un-parked: their owner will free them at its
+    /// own quiesce-safe moment, and issuing the unref here would be the first
+    /// unref-before-quiesce path in tapestryd.
+    ///
+    /// Calls the RAW unref -- routing through the checking one would re-read a
+    /// list this is in the middle of emptying.
+    fn drain_condemned(&mut self, keep: u32) {
         let n = core::mem::replace(&mut self.condemned_n, 0);
+        self.condemned_overflowed = false;
+        let mut kept = 0usize;
         for i in 0..n {
-            let r = core::mem::replace(&mut self.condemned[i], 0);
-            if r != 0 {
-                let _ = self.resource_unref_raw(r);
+            let e = self.condemned[i];
+            if e.res != 0 && e.res == keep {
+                self.condemned[kept] = e; // still on screen: stays parked
+                kept += 1;
+                continue;
+            }
+            if e.res != 0 && e.unref_requested {
+                let _ = self.resource_unref_raw(e.res);
             }
         }
+        self.condemned_n = kept;
     }
 
     fn resource_unref_raw(&mut self, resource_id: u32) -> Result<(), Error> {
@@ -2937,11 +3028,21 @@ impl Gpu {
             w32(req_va + 40, 0); // scanout_id
             w32(req_va + 44, resource_id);
         };
+        // The self-test lever, checked for the DISABLE only. It returns the
+        // same Err the wire path returns, WITHOUT issuing the command, so
+        // everything downstream is driven by a refusal indistinguishable from
+        // a real one -- a lever that took a different path would prove
+        // nothing about the path that matters.
+        if resource_id == 0 && self.fail_next_scanout_disable {
+            self.fail_next_scanout_disable = false;
+            self.injected_refusal = true;
+            return Err(Error::Hardware);
+        }
         let r = self
             .ctrl
             .step("SET_SCANOUT", GPU_CTRL_HDR_LEN + 24, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA);
         if r.is_ok() {
-            self.drain_condemned();
+            self.drain_condemned(resource_id);
         }
         r
     }
@@ -3005,7 +3106,17 @@ impl Gpu {
         stride: u32,
     ) -> Result<(), Error> {
         match self.set_scanout_blob_probe(resource_id, w, h, format, stride) {
-            Ok(VIRTIO_GPU_RESP_OK_NODATA) => Ok(()),
+            Ok(VIRTIO_GPU_RESP_OK_NODATA) => {
+                // Drain here too (round-3 F2). A blob bind changes what the
+                // display names exactly as a plain bind does, and this was
+                // the ONLY accepted bind that did not drain -- which is what
+                // let the park list grow past one and made the overflow arm
+                // reachable at W-3c-2, where `present-to <surface> img <n>`
+                // makes blob binds client-driven and repeatable. Draining on
+                // both keeps `condemned_n <= 1` structural.
+                self.drain_condemned(resource_id);
+                Ok(())
+            }
             Ok(_) => Err(Error::Hardware),
             Err(()) => Err(Error::Hardware),
         }

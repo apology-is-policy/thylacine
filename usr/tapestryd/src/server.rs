@@ -5710,12 +5710,29 @@ impl Comp {
             // pixels until `reconcile` establishes a new one.
             self.unbind_refused = self.unbind_refused.saturating_add(1);
             self.gpu.condemn(res_id);
-            say!(
-                "tapestryd: warp display UNBIND REFUSED by the device for res {} -- \
-                 condemned, unref deferred; the display keeps naming it until the \
-                 next accepted scanout",
-                res_id
-            );
+            // Distinguish the self-test's DRILL from a real device refusal.
+            // The code path above is identical for both -- that is what makes
+            // the drill worth running -- but the gate keys on a real refusal
+            // being ABSENT, and the self-test now produces one every venus
+            // boot. Without this the check would fail deterministically on a
+            // healthy host: the exact mirror of round-3 F1, where the check
+            // could never fire at all. A verdict string must be able to fire
+            // AND to not fire, or it measures nothing either way.
+            if self.gpu.take_injected_refusal() {
+                say!(
+                    "tapestryd: warp display unbind refusal INJECTED (self-test drill) \
+                     for res {} -- condemned, unref deferred, drain expected at the \
+                     next accepted scanout",
+                    res_id
+                );
+            } else {
+                say!(
+                    "tapestryd: warp display UNBIND REFUSED by the device for res {} -- \
+                     condemned, unref deferred; the display keeps naming it until the \
+                     next accepted scanout",
+                    res_id
+                );
+            }
         }
         self.bound_res = 0;
         if let Scanout::Direct(n) = self.scanout {
@@ -7555,8 +7572,11 @@ impl Comp {
     ///
     /// EXACTLY WHAT IS CHECKED, since the sentence above is broader than the
     /// code (round-2 F13): the format accept set, `stride >= w*4`, and both
-    /// dimensions plus the stride bounded above by `WARP_IMG_MAX_DIM` so
-    /// `stride*h` cannot outrun the u32 `len`, plus the I-32 byte cap. These
+    /// dimensions bounded above by `WARP_IMG_MAX_DIM` and the stride by
+    /// `WARP_IMG_MAX_DIM*4` (= 32768, round-3 F6 -- the first draft of this
+    /// very correction said `WARP_IMG_MAX_DIM`, 4x off, in the sentence
+    /// written to be exact) so `stride*h <= 2^28` cannot outrun the u32
+    /// `len`, plus the I-32 byte cap. These
     /// are STRUCTURAL limits, not the CURRENT display mode -- a 4096x4096
     /// presentable is accepted on a 1024x768 display today. That is deliberate
     /// rather than overlooked: a presentable is legitimately larger or smaller
@@ -8521,10 +8541,13 @@ impl Comp {
                 return;
             }
         };
-        // WHICH BLOB FLAGS DOES THIS HOST ACCEPT? The design's claim is that
-        // a presentable is SHAREABLE and NOT mappable (WARP-WSI-DESIGN 4.1):
-        // it exists to be named, never guest-mapped. That claim was never
-        // measured, and the V-0 discipline says a capability is measured,
+        // WHICH BLOB FLAGS DOES THIS HOST ACCEPT? 4.1 ORIGINALLY claimed a
+        // presentable is SHAREABLE and NOT mappable: it exists to be named,
+        // never guest-mapped. This probe MEASURED that claim and REFUTED it,
+        // and 4.1 now records the amendment -- so read the present tense
+        // carefully: the accept-set question below is still live on every
+        // boot, but the design no longer asserts the answer. The V-0
+        // discipline says a capability is measured,
         // not assumed. Three combinations, most-desired first, each on its
         // own res_id and unref'd immediately -- the answer feeds the design
         // rather than being silently worked around.
@@ -8618,6 +8641,68 @@ impl Comp {
         } else {
             "FAIL"
         };
+        // ARM 5: THE REFUSAL PATH, DRIVEN (round-3 SA-6). Everything above
+        // exercises the ACCEPTING device. The condemn/defer/drain machinery
+        // -- the round-2 F3 fix guarding an I-40 display UAF -- had NO driver
+        // at all: `condemn`, the deferral branch and `drain_condemned` had
+        // never executed anywhere, and `unbind=REFUSED` was a token only a
+        // `sed` in the verdict suite had ever produced. A safety mechanism
+        // whose sole evidence is a crafted log has been described, not
+        // tested; this chunk has already been bitten twice by exactly that
+        // (a prover with no caller, three undriven ABI arms).
+        //
+        // The lever fails the DISABLE without issuing it, so the refusal is
+        // indistinguishable downstream from a real one. It is reachable only
+        // from here -- pre-READY, before any connection exists -- so unlike
+        // its `ring-inject` sibling it needs no client verb and cannot become
+        // the #178 box-wide kill-switch.
+        //
+        // ONE STRUCTURAL DEPENDENCY, stated so a future change trips loudly:
+        // the `parked`/`deferred` conjuncts assume the `reconcile()` inside
+        // `gl_evict_res` issues NO accepted scanout in the self-test's
+        // configuration (no surfaces exist pre-READY, so the mode-machine's
+        // want is Off and `gl_evict_res` has already set it). If reconcile
+        // ever binds here, the entry is legitimately un-parked before this
+        // reads it and the arm reports FAIL -- a false alarm, but a LOUD one
+        // that lands on whoever changed reconcile, which is the right
+        // direction for a witness to fail in.
+        let refuse = if bind_ok {
+            let mut ok = false;
+            if self.wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, fmt, stride, 0).is_ok() {
+                let r2 = self.wctx(ctx_pub, SELFTEST_CONN).and_then(|c| c.imgs[0].as_ref()).map(|i| (i.pub_id, i.res_id));
+                if let Some((pub2, res2)) = r2 {
+                    if self.gpu.set_scanout_blob(res2, IW, IH, fmt, stride).is_ok() {
+                        self.bound_res = res2;
+                        let refused_at = self.unbind_refused;
+                        let unref_at = self.gpu.last_unref_seq;
+                        self.gpu.arm_scanout_disable_refusal();
+                        let d2 = self.wimg_destroy(pub2, SELFTEST_CONN).is_ok();
+                        // The refusal was OBSERVED, the resource PARKED, and
+                        // -- the conjunct that actually matters -- the free
+                        // was NOT ISSUED. Checking the park alone would pass
+                        // an implementation that parked and freed anyway; the
+                        // unref tick is the direct witness that no
+                        // RESOURCE_UNREF reached the device while it said it
+                        // was still scanning this resource.
+                        let observed = self.unbind_refused == refused_at + 1;
+                        let parked = self.gpu.condemned_count() == 1;
+                        let deferred = parked && self.gpu.last_unref_seq == unref_at;
+                        // ...and the next ACCEPTED scanout drains it FOR REAL
+                        // -- the list empties AND the free finally issues.
+                        // Both halves: an implementation that just forgot the
+                        // entry would empty the list without ever freeing.
+                        let drained = self.gpu.set_scanout(0, dw, dh).is_ok()
+                            && self.gpu.condemned_count() == 0
+                            && self.gpu.last_unref_seq > unref_at;
+                        ok = d2 && observed && deferred && drained;
+                    }
+                }
+            }
+            if ok { "ok" } else { "FAIL" }
+        } else {
+            "n/a"
+        };
+        self.bound_res = 0;
         // DISABLE scanout 0 on every path (audit F10: this is not a
         // "restore" -- `set_scanout` with resource_id 0 DISABLES the scanout,
         // per its own contract; the kernel test pattern does not come back).
@@ -8628,11 +8713,12 @@ impl Comp {
         self.scanout = scanout_before;
         self.wctx_finish(slot, false);
         say!(
-            "tapestryd: warp presentable self-test: shape={} mint={} bind={} unbind={} disable={} flags={} ({}x{} BGRA8 stride {})",
+            "tapestryd: warp presentable self-test: shape={} mint={} bind={} unbind={} refuse={} disable={} flags={} ({}x{} BGRA8 stride {})",
             u32::from(shape_ok),
             u32::from(mint_ok),
             u32::from(bind_ok),
             unbind,
+            refuse,
             u32::from(unbind_ok),
             flags_word,
             IW, IH, stride

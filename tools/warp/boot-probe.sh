@@ -93,5 +93,16 @@ fi
 # GREEN there and RED on every real boot (W-3c-1 audit F2 -- the presentable
 # arm was added to the verdict and not to this line, which would have made
 # `warp-host.sh venus` unpassable on a healthy host, deterministically).
-grep -aE "tapestryd: gpu|tapestryd: warp host3d-ring|tapestryd: warp ring-recreate|tapestryd: warp mem-recreate|tapestryd: warp scanout-blob|tapestryd: warp presentable|THYLACINE-VENUS-PROVE|venus-prove:" "$LOG" || true
+#
+# IT HAPPENED AGAIN AT ROUND 3, IN THE OTHER DIRECTION, WHICH IS WHY THIS
+# PARAGRAPH IS NOT ENOUGH ON ITS OWN. Round 2 added a verdict arm greping for
+# "UNBIND REFUSED by the device" and did not add an alternative here -- and
+# the reason it slipped is the instructive part: the refusal say-line was
+# MOVED from `wimg_teardown` (prefix `tapestryd: warp presentable`, already
+# captured) into `gl_evict_res`, where it correctly gained the prefix
+# `tapestryd: warp display` because it now serves every family. The pairing
+# was verified BEFORE the move and the comment asserting it was left behind,
+# true about a line that no longer existed. **A prefix change is a capture
+# change.** When you move a say-line between functions, re-check this filter.
+grep -aE "tapestryd: gpu|tapestryd: warp host3d-ring|tapestryd: warp ring-recreate|tapestryd: warp mem-recreate|tapestryd: warp scanout-blob|tapestryd: warp presentable|tapestryd: warp display|THYLACINE-VENUS-PROVE|venus-prove:" "$LOG" || true
 exit $((1 - ok))
