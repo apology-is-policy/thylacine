@@ -22,7 +22,97 @@ needed the operator.
 
 ---
 
-## 2026-08-31 (run 9, Fable) — W-4: the vkQuake port lands, and the first real game finds three walls
+## 2026-09-01 (run 10, Fable) — the r9-F3 sibling sweep: every reuse gate made interrupt-sound, and the sweep's own probe destroys what it was protecting
+
+**The charter**: the autonomous residue behind round 9's F3 — the "sibling
+build functions' partial-output class" that the close TRACKED rather than
+silently claimed fixed. The W-4 arc itself sits parked at its three
+operator forks (the C/B/A wall mechanism, compose, the blit default flip);
+none were touched.
+
+**The class has two faces, and the survey found both.** Face one is r9-F3
+as found: an interrupted final publish leaves a fresh-mtime partial `$out`
+every later mtime sweep trusts. Face two only appears in multi-output
+functions: an interrupt *between* outputs leaves a mixed old/new set, each
+file individually intact — and every gate staleness-checked only one
+representative, so the older sibling shipped as REUSED. tyrquake was the
+clean example: inputs were compared against `tyr-quake` alone, so a build
+killed between the two links served a stale `tyr-glquake` forever.
+
+**What landed (tools/build.sh, one commit):** completion sentinels with
+invalidate-first/commit-last discipline for the sysroot
+(`build/sysroot/.complete` — the predicate's libc.a+builtins proxy
+under-covered the artifact set: an interrupt after compiler-rt but before
+libsodium/GL/thyla headers read as fresh) and the stratum host tools
+(`build/host-stratum/.complete` — that one was a STUCK state: a truncated
+cmake-built binary stays "fresh" until someone hand-deletes it); the SDL2
+sentinel gained the missing invalidate-first half (it was written last —
+correctly — but never removed first, so on a REBUILD the old sentinel
+survived a killed `ar` and vouched for the partial archive); tyrquake got
+atomic publishes for both links plus staleness against BOTH outputs;
+gnumake an atomic publish; libcxx a publish-order fix (the gate keys on
+libc++.a, which was cp'd FIRST — it now lands last, atomically, after the
+completeness gate); clade's REUSED gate gained outd freshness terms and a
+structural verify. Discrimination proven by fixtures BEFORE the real tree:
+9/9 (both sentinels fire on absence, yield on presence, old logic intact
+both sides; the tyrquake leg detects exactly the mixed set and stays quiet
+on a coherent one).
+
+**The verify arm's own negative control refuted it.** The first clade
+verify used `readelf -h` — and the control showed a 1KB truncation of the
+126MB multicall PASSES it, because -h reads only the 64-byte header. A
+detector on an untested premise, caught by the fixture discipline before
+shipping. Replaced with `-S` (lld places the section header table at EOF,
+so any short-truncation fails — measured on 1KB and 60MB truncations),
+with the residual class stated honestly in the comment: a killed mmap
+writer can leave a full-size file with unflushed middles that -S cannot
+see; the guest storm is that class's backstop.
+
+**The wrong turn, in full, because the catch is the reusable part.** To
+exercise the clade REUSED arm I touched the binaries newer than build.sh —
+then edited build.sh again (the -S rewrite), invalidating my own setup —
+then ran `build.sh clade` with a 2-minute timeout as the only brake. The
+gate correctly fell through, hit the `build.sh -nt CMakeCache.txt` arm,
+and `rm -rf`'d the certified Aug-5 keep-pulled llvm-build tree before the
+timeout killed the configure. That is the recorded M-PIN — a capability
+probe on a context something depends on — recurred on the very sweep that
+was hardening against interrupted builds. Recovery: thyla-keep's
+`/build/src/thylacine/build/clade/llvm-build` (START → scp → STOP, twice),
+md5-verified both binaries; then the consumer set surfaced SERIALLY — the
+reader-set lesson recurred — stage_clade wanted `lib/clang/22/include`
+(243 headers, restored) and `cxx-rt/` (the #156 trio, restored from the
+keep's stage2 sysroot, md5-matched), gl_link_program wants
+`lib/libLLVM*.a`, the llvm-config shim wants `include/` + CMakeCache.txt
+(restored). **Open residue, enqueued as [[bug-llvm-build-jit-family-gap]]**:
+the keep's Aug-24 tree dropped the 8 ExecutionEngine/JIT archives that
+llvm-libs.list (an Aug-5 meson closure) names and llvmpipe needs — 65/73
+restored; the NEXT gl-prover relink fails at `-lLLVMMCJIT` until the
+list+libs pair is reconciled as one unit. Nothing today consumes them.
+The restored Aug-24 multicall is NOT byte-identical (post-strip) to the
+Aug-5 one the stage carried — same fork tip (Jul 31), divergence is
+rebuild-level; the re-staged tree + the storm gate below are its
+functional certification.
+
+**The #250 recurrence, caught by baseline comparison.** The sentinel
+births forced a one-time sysroot cascade (`build.sh all` run 1: REBUILT
+down the line; run 2: every gate REUSED — including vkquake's hash-match
+and clade's -S arm on the restored binaries). But the pool re-bake
+defaulted `THYLACINE_BAKE_CLADE` unset, and the suite came back green with
+`CLADE-GATES cl4=SKIPPED gl=SKIPPED storm=SKIPPED` — where every prior
+window's log says `PASS PASS PASS`. A green suite that silently downgraded
+three gates to skips is the fixture-mutation trap verbatim. Re-staged
+(which also cleared the bake's announced staleness warnings for the two
+GL provers rebuilt in the cascade), re-baked with CLADE=1 (payloads
+verified PRESENT: GOROOT GOCACHE GO4C CLADE STORM QUAKE), re-ran the
+suite.
+
+**Also this window**: MEMORY.md pruned 19.7→18.5KB (the closed W-4 line
+compressed to its inverted-comparison headline; three resolved lines
+archived); yip 0009 closed from my side (aux's prose bye stood; formal
+bye registered); the vault sweep material queued for the vault track
+(build.sh + server.rs prose are vault-owned — this sweep is the FOURTH
+instance of the sub-substrate-build dossier's "guard added after a stale
+artifact shipped" genesis).
 
 **The charter** (operator-ratified at the run-8 boundary): port vkQuake
 fullscreen, measure FPS on thyla-pi against a FRESH glQuake baseline, hunt

@@ -212,6 +212,11 @@ sysroot_is_stale() {
     local libc="$BUILD_DIR/sysroot/lib/libc.a"
     [[ -f "$libc" ]] || return 0
     [[ -f "$BUILD_DIR/sysroot/lib/libclang_rt.builtins.a" ]] || return 0
+    # The completion sentinel: build_sysroot rm -rf's the tree first and
+    # touches this LAST, so a build that died mid-way (after libc.a +
+    # builtins landed, before libsodium/GL/thyla headers) cannot read as
+    # fresh. libc.a + builtins alone under-cover the artifact set.
+    [[ -f "$BUILD_DIR/sysroot/.complete" ]] || return 0
     # Every in-tree SOURCE the sysroot is built from. `patches/` is the musl
     # boundary-line series; `compiler-rt/` is the Thylacine arm of the builtins
     # (W1u-b, #71) -- it was NOT watched when it landed, so a `build.sh all`
@@ -243,6 +248,11 @@ stratum_host_tools_stale() {
     [[ -x "$hb/src/cmd/stratum-mkfs/stratum-mkfs" ]] || return 0
     [[ -x "$sd" ]]                                   || return 0
     [[ -x "$hb/src/cmd/stratum-fs/stratum-fs" ]]     || return 0
+    # Completion sentinel: cmake --build writes binaries in place, so a
+    # killed link leaves a fresh-mtime truncated binary all three -x
+    # checks accept -- and with nothing newer in the source tree that
+    # state is otherwise STUCK as "fresh" until someone hand-deletes it.
+    [[ -f "$hb/.complete" ]] || return 0
     if [[ -n "$(find "$stratum_src/src" "$stratum_src/include" \
                      "$stratum_src/CMakeLists.txt" -newer "$sd" 2>/dev/null)" ]]; then
         return 0
@@ -1619,6 +1629,9 @@ build_sysroot() {
     echo "    CRT       crt1.o crti.o crtn.o"
     echo "    headers   $(find "$sysroot/include" -name '*.h' | wc -l | tr -d ' ') files"
     echo "    seam      syscall table retargeted to the Thylacine ABI"
+    # Completion sentinel, LAST: the rm -rf at step 1 removed it, so its
+    # presence certifies every install step above ran to the end.
+    touch "$sysroot/.complete"
     ledger "sysroot: REBUILT (pristine musl + pouch patch series + libc.a + compiler-rt + libsodium)"
 }
 
@@ -2244,6 +2257,7 @@ build_stratum_host_tools() {
     mkdir -p "$host_build"
     # No --toolchain — use the host's default compiler. The host tools
     # run on Darwin/Linux x86_64/arm64, not on Thylacine.
+    rm -f "$host_build/.complete"
     cmake -S "$stratum_src" -B "$host_build" \
         -DCMAKE_BUILD_TYPE=Release \
         -DSTM_ENABLE_PQ=OFF \
@@ -2267,6 +2281,7 @@ build_stratum_host_tools() {
         echo "==> stratum host tools: build did not produce:$missing" >&2
         exit 1
     fi
+    touch "$host_build/.complete"
     echo "==> stratum host tools built: $mkfs_bin, $stratumd_bin, $stratum_fs_bin"
 }
 
@@ -3101,6 +3116,11 @@ build_sdl2() {
     fi
 
     echo "==> building SDL2 2.32.10 (aarch64-thylacine)"
+    # Invalidate the sentinel BEFORE the first artifact write. Writing it
+    # last (below) only covers the fresh-checkout case; on a REBUILD the
+    # old sentinel would survive a build killed mid-ar and vouch for the
+    # partial archive.
+    rm -f "$gl_mode_file"
     rm -rf "$sdl_src" "$sdl_obj"
     mkdir -p "$sdl_src" "$sdl_obj"
     cp -R "$sdl_vendor/src" "$sdl_src/src"
@@ -3483,6 +3503,13 @@ build_tyrquake() {
        [[ -z "$glq_needed" || -f "$glq_out" ]]; then
         local stale
         stale="$(find "$tq_vendor" "$port_dir" -type f -newer "$progs_out/tyr-quake" -print -quit 2>/dev/null)"
+        # Staleness must hold against BOTH outputs, not one representative:
+        # tyr-quake publishes before tyr-glquake links, so a build killed
+        # between them leaves a fresh tyr-quake shadowing a glquake still
+        # built from the previous sources.
+        if [[ -z "$stale" && -n "$glq_needed" ]]; then
+            stale="$(find "$tq_vendor" "$port_dir" -type f -newer "$glq_out" -print -quit 2>/dev/null)"
+        fi
         # The FETCHED archive is a link input of the glquake half (#204; the
         # #139 class): a refreshed libOSMesa.a must invalidate tyr-glquake.
         local glq_stale=""
@@ -3595,10 +3622,13 @@ build_tyrquake() {
     }
 
     TQ_EXTRA_CFLAGS="" tq_compile "$tq_obj/sw" "${objs_common[@]}" "${objs_sw[@]}"
+    # Publish atomically: a killed link would otherwise leave a fresh-mtime
+    # partial binary the reuse gate above trusts.
     POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
         "$REPO_ROOT/tools/pouch-ld" "$tq_obj/sw"/*.o \
         -L"$sysroot/lib" -lSDL2 \
-        -o "$progs_out/tyr-quake"
+        -o "$progs_out/tyr-quake.tmp"
+    mv "$progs_out/tyr-quake.tmp" "$progs_out/tyr-quake"
     echo "    tyr-quake: $(wc -c < "$progs_out/tyr-quake" | tr -d ' ') bytes (ET_EXEC, static)"
     ledger "tyr-quake: BUILT (+ shareware pak staged for the pool)"
 
@@ -3625,11 +3655,14 @@ build_tyrquake() {
     TQ_EXTRA_CFLAGS="-DGLQUAKE" \
         tq_compile "$tq_obj/gl" "${objs_common[@]}" "${objs_gl[@]}"
     local glq="$BUILD_DIR/clade/gl/tyr-glquake"
-    if ! gl_link_program "$glq" "$tq_obj/gl"/*.o; then
+    # Link + verify on a temp name, publish by rename: only a binary that
+    # passed the resolution assert ever appears under the gated name.
+    if ! gl_link_program "$glq.tmp" "$tq_obj/gl"/*.o; then
         echo "==> tyr-glquake: LINK FAILED against libOSMesa.a" >&2
         exit 1
     fi
-    gl_assert_resolved "$glq" tyr-glquake
+    gl_assert_resolved "$glq.tmp" tyr-glquake
+    mv "$glq.tmp" "$glq"
     echo "    tyr-glquake: $(wc -c < "$glq" | tr -d ' ') bytes (ET_EXEC, static,"
     echo "                 OSMesa entry points resolved)"
     ledger "tyr-glquake: BUILT (GL acceptance gate, section 9 step 3)"
@@ -3946,7 +3979,8 @@ build_gnumake() {
 
     POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
         "$REPO_ROOT/tools/pouch-ld" "$mk_obj"/*.o \
-        -o "$progs_out/make"
+        -o "$progs_out/make.tmp"
+    mv "$progs_out/make.tmp" "$progs_out/make"
     echo "    make: $(wc -c < "$progs_out/make" | tr -d ' ') bytes (ET_EXEC, static)"
     ledger "make (GNU make 4.4.1): BUILT"
 }
@@ -4096,8 +4130,14 @@ build_libcxx() {
                 echo "    libcxx: expected archive $a not produced" >&2
                 exit 1
             fi
-            cp "$bdir/install/lib/$a" "$sysroot/lib/$a"
         done
+        # Publish order is the reuse contract: the gate above keys on
+        # libc++.a, so it lands LAST (atomically, after the completeness
+        # gate below). A staging pass killed part-way then leaves the old
+        # libc++.a, still older than whatever triggered this rebuild -- the
+        # next run rebuilds instead of serving a mixed or truncated set.
+        cp "$bdir/install/lib/libc++abi.a" "$sysroot/lib/libc++abi.a"
+        cp "$bdir/install/lib/libunwind.a" "$sysroot/lib/libunwind.a"
         # F4: clear the destination first -- cp -R MERGES, so a header removed or
         # renamed across a fork bump would survive as a stale ghost that could
         # shadow/misdirect a later include.
@@ -4119,6 +4159,8 @@ build_libcxx() {
         # is int64 -- identical to libc++/consumers. The CL-2 int32/int64 ODR
         # split is ELIMINATED (not merely inert), and the old atomic-wait-symbol
         # tripwire that pinned its inertness retires with it (LLVM-DESIGN 16.15).
+        cp "$bdir/install/lib/libc++.a" "$sysroot/lib/libc++.a.tmp"
+        mv "$sysroot/lib/libc++.a.tmp" "$sysroot/lib/libc++.a"
         ledger "libcxx (libunwind+libc++abi+libc++): BUILT"
     fi
 
@@ -4217,9 +4259,23 @@ build_clade() {
     local outd="$bdir/bin/clangd"
     if [[ -x "$out" && -x "$outd" \
           && "$out" -nt "${BASH_SOURCE[0]}" \
-          && "$out" -nt "$fork/llvm/lib/Support/Unix/Path.inc" ]]; then
-        ledger "clade (clang+lld multicall + clangd): REUSED (cached + up-to-date)"
-        return 0
+          && "$out" -nt "$fork/llvm/lib/Support/Unix/Path.inc" \
+          && "$outd" -nt "${BASH_SOURCE[0]}" \
+          && "$outd" -nt "$fork/llvm/lib/Support/Unix/Path.inc" ]]; then
+        # A killed ninja link leaves a fresh-mtime truncated ELF here, and
+        # nothing downstream stats it before the guest build storm. -S walks
+        # the section header table, which lld places at EOF, so it fails on
+        # any short-truncation (-h reads only the first 64 bytes and passes
+        # on a file 99% gone -- measured). NOT caught: a killed mmap writer
+        # leaving a full-size file with unflushed middles; the guest storm
+        # is the backstop for that class. A failure here falls through to
+        # the (incremental) rebuild, which relinks fast.
+        if "$readelf" -S "$out" >/dev/null 2>&1 \
+           && "$readelf" -S "$outd" >/dev/null 2>&1; then
+            ledger "clade (clang+lld multicall + clangd): REUSED (cached + up-to-date)"
+            return 0
+        fi
+        echo "==> clade: cached bin/llvm or bin/clangd fails ELF verify -- rebuilding"
     fi
 
     echo "==> building the device toolchain (clang+lld multicall, aarch64-thylacine)"
