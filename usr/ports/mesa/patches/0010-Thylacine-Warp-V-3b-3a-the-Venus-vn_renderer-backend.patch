@@ -1,7 +1,7 @@
 From 2a04a1fc05c144bf6fde23ceca30f4d8f76095f6 Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Tue, 25 Aug 2026 20:06:11 +0200
-Subject: [PATCH 10/17] Thylacine Warp V-3b-3a: the Venus vn_renderer backend +
+Subject: [PATCH 10/22] Thylacine Warp V-3b-3a: the Venus vn_renderer backend +
  loader-less ICD proof
 
 The Mesa Venus driver runs on Thylacine via a vn_renderer backend that speaks

@@ -1,7 +1,7 @@
 From 460407834c7bd3e6b30948e43d9ff22f336441ee Mon Sep 17 00:00:00 2001
 From: clade <clade@thylacine>
 Date: Thu, 30 Jul 2026 12:47:44 +0000
-Subject: [PATCH 02/17] CL-7a: static OSMesa target + orcjit on the link line
+Subject: [PATCH 02/22] CL-7a: static OSMesa target + orcjit on the link line
 
 The target is a rewrite, not a port: upstream builds a shared_library and
 Thylacine has no dynamic loader, and three names the 25.0.7 original used

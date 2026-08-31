@@ -1,0 +1,99 @@
+From 6fde181227d567ec11dc83a711ad823489517c54 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Mon, 31 Aug 2026 17:07:55 +0200
+Subject: [PATCH 22/22] thylacine_prove: cap-value-agnostic F2 exhaustion leg
+ (W-4)
+
+The F2 witness baked its premise into a constant: 3 x 24 MiB had to
+refuse against the server's old 64 MiB holistic backing cap, so the
+W-4 budget split (the hostmem family raised to 192 MiB when vkQuake's
+first 32 MiB texture heap hit the old cap) would have flipped the
+witness to FAIL on its own hardcoded arithmetic -- the lifted-constant
+class: a raised cap voids every proof that named the old value.
+
+Rework: allocate 24 MiB steps until the refusal arrives, bounded at 32
+(768 MiB -- three times the whole QEMU hostmem window, so hitting the
+bound IS the broken premise: the cap is not in force). The refusal rc,
+the at-least-one-success floor, and the free-one-realloc no-burn proof
+are unchanged. The witness line reports the measured count instead of
+naming the cap value.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/virtio/vulkan/thylacine_prove.c | 39 ++++++++++++++++++-----------
+ 1 file changed, 25 insertions(+), 14 deletions(-)
+
+diff --git a/src/virtio/vulkan/thylacine_prove.c b/src/virtio/vulkan/thylacine_prove.c
+index 0d09f18..fd9a711 100644
+--- a/src/virtio/vulkan/thylacine_prove.c
++++ b/src/virtio/vulkan/thylacine_prove.c
+@@ -1162,32 +1162,42 @@ main(void)
+    }
+ 
+    /* Step 7 (multi-queue chunk, the F2 witness): drive vkAllocateMemory past
+-    * the server's 64 MiB per-ctx holistic backing cap (3 x 24 MiB), require
+-    * the clean refusal, then free one and require a fresh 24 MiB to SUCCEED
+-    * -- the pre-F2 client burned its handle slot on every refusal, so the
+-    * recovery alloc is the proof the slot space survives memory pressure. */
++    * the server's per-ctx hostmem-family budget (24 MiB steps until the
++    * refusal), require the clean refusal, then free one and require a fresh
++    * 24 MiB to SUCCEED -- the pre-F2 client burned its handle slot on every
++    * refusal, so the recovery alloc is the proof the slot space survives
++    * memory pressure. Cap-value-AGNOSTIC by construction (the W-4 lesson,
++    * the #230 class): the original leg baked in 3 x 24 MiB against the old
++    * 64 MiB holistic cap, so raising the budget for the first real game
++    * would have flipped this witness to FAIL on its own hardcoded premise.
++    * The loop bound is the premise now: a budget past 768 MiB (32 x 24 MiB
++    * -- three times the whole QEMU hostmem window) means the cap is not in
++    * force, and THAT is the broken premise. */
+    {
++      enum { F2_MAX_ALLOCS = 32 };
+       const VkDeviceSize big = 24ull * 1024 * 1024;
+       const VkMemoryAllocateInfo big_mai = {
+          .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+          .allocationSize = big,
+          .memoryTypeIndex = (uint32_t)mt,
+       };
+-      VkDeviceMemory bigs[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE,
+-                                 VK_NULL_HANDLE };
++      VkDeviceMemory bigs[F2_MAX_ALLOCS];
+       uint32_t got = 0;
+       VkResult rr = VK_SUCCESS;
+-      for (uint32_t i = 0; i < 3; i++) {
++      for (uint32_t i = 0; i < F2_MAX_ALLOCS; i++)
++         bigs[i] = VK_NULL_HANDLE;
++      for (uint32_t i = 0; i < F2_MAX_ALLOCS; i++) {
+          rr = alloc_mem(device, &big_mai, NULL, &bigs[i]);
+          if (rr != VK_SUCCESS)
+             break;
+          got++;
+       }
+-      if (got == 3) {
+-         /* The cap admitted 72 MiB -- server cap not in force (unexpected);
+-          * clean up and treat as a failure of the witness's premise. */
+-         printf("THYLACINE-VENUS-PROVE FAIL: 3 x 24 MiB all admitted -- the "
+-                "64 MiB per-ctx cap did not refuse (premise broken)\n");
++      if (got == F2_MAX_ALLOCS) {
++         printf("THYLACINE-VENUS-PROVE FAIL: %u x 24 MiB all admitted -- the "
++                "per-ctx hostmem budget did not refuse (premise broken)\n",
++                (unsigned)F2_MAX_ALLOCS);
++         for (uint32_t i = 0; i < got; i++)
++            free_mem(device, bigs[i], NULL);
+          destroy_device(device, NULL);
+          destroy_instance(instance, NULL);
+          return 1;
+@@ -1222,8 +1232,9 @@ main(void)
+       for (uint32_t i = 0; i < got; i++)
+          if (bigs[i] != VK_NULL_HANDLE)
+             free_mem(device, bigs[i], NULL);
+-      printf("venus-prove: cap-exhaustion cycle OK (refused at the 64 MiB "
+-             "ctx cap, freed, realloc'd -- the F2 no-burn proof)\n");
++      printf("venus-prove: cap-exhaustion cycle OK (refused after %u x 24 MiB "
++             "at the hostmem ctx budget, freed, realloc'd -- the F2 no-burn "
++             "proof)\n", (unsigned)got);
+    }
+ 
+    /* Step 8 (vkQuake-arc W-1): the offscreen PIPELINE witness -- the first
+-- 
+2.43.0
+

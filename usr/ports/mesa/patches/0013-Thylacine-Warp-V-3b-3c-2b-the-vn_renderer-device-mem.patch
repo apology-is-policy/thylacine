@@ -1,7 +1,7 @@
 From 2c742991466c06129a014171faaa7b7a9f121e3a Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Wed, 26 Aug 2026 09:51:20 +0200
-Subject: [PATCH 13/17] Thylacine Warp V-3b-3c-2b: the vn_renderer
+Subject: [PATCH 13/22] Thylacine Warp V-3b-3c-2b: the vn_renderer
  device-memory bo_ops + the vkAllocateMemory E2E
 
 Fill the three pre-wired device-memory bo_ops over the 3c-2a mem/ ABI, so a

@@ -996,6 +996,26 @@ struct Controlq {
 }
 
 impl Controlq {
+    /// W-4 stall observability: every HELD fenced slot as
+    /// (slot, fence_id, ctx_pub, ring_idx, readback, comp, age_ms) -- the
+    /// ctl prints one row per entry so a post-mortem read NAMES the op
+    /// class a wedged chain belongs to (run 6's whole evidence was one
+    /// anonymous missing count: fenced-free 15).
+    fn fenced_held(&self) -> alloc::vec::Vec<(usize, u64, u32, u8, bool, bool, u64)> {
+        self.fslots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| {
+                t.as_ref().map(|t| {
+                    let age = self.fslot_since[i]
+                        .map(|s| s.elapsed().as_millis() as u64)
+                        .unwrap_or(0);
+                    (i, t.fence_id, t.ctx_pub, t.ring_idx, t.readback, t.comp, age)
+                })
+            })
+            .collect()
+    }
+
     fn fenced_in_flight(&self) -> u32 {
         self.fslots.iter().flatten().count() as u32
     }
@@ -3676,6 +3696,11 @@ impl Gpu {
     /// contexts, so a ctx wedged forever and a ctx that finished cleanly read
     /// identically there -- round-5 F5's trap, one level down.
     #[cfg(feature = "test-mode")]
+    /// W-4 stall observability (delegate; the slots live on Controlq).
+    pub fn fenced_held(&self) -> alloc::vec::Vec<(usize, u64, u32, u8, bool, bool, u64)> {
+        self.ctrl.fenced_held()
+    }
+
     pub fn test_fenced_free(&self) -> u32 {
         // The CLIENT pool (C-6): the reserved slot is never a client's, so a
         // compositor readback in flight must not read as a client's slot

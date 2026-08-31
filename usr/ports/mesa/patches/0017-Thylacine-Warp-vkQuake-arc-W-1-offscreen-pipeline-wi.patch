@@ -1,7 +1,7 @@
 From 150990af6e2cabf46f060250c2974f1b28269c0b Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Wed, 26 Aug 2026 15:45:22 +0200
-Subject: [PATCH 17/17] Thylacine Warp vkQuake-arc W-1: offscreen pipeline
+Subject: [PATCH 17/22] Thylacine Warp vkQuake-arc W-1: offscreen pipeline
  witness + F9 mem-reclaim convergence
 
 The multi-queue chunk left four items tracked to the vkQuake arc's first

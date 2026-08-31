@@ -1,7 +1,7 @@
 From b7f9ed20c329bc51bbda4f9186da3f7d2a1671a1 Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Mon, 10 Aug 2026 09:03:18 +0200
-Subject: [PATCH 07/17] Thylacine Warp-4: the direct-present client half
+Subject: [PATCH 07/22] Thylacine Warp-4: the direct-present client half
  (mutual adoption)
 
 The compositor (tapestryd) can now display a GL client's color resource

@@ -1,7 +1,7 @@
 From d7f4ef1071fe74705b168f72ced4c00ca7d8bd3a Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Wed, 26 Aug 2026 10:54:13 +0200
-Subject: [PATCH 14/17] Thylacine Warp V-3b-3c-2b re-audit (F4/F5/F6/F7):
+Subject: [PATCH 14/22] Thylacine Warp V-3b-3c-2b re-audit (F4/F5/F6/F7):
  placed-map + errno discrimination
 
 The dirty-close re-audit (holotype Fable 5, I-45 client, on the 2c742991 fix

@@ -190,16 +190,14 @@ const MAX_WARP_MEMS_PER_CTX: usize = 256;
 /// MAILBOX wants 3-4), and a client may hold a second swapchain briefly
 /// across a resize/recreate -- so 16 covers every realistic composition with
 /// headroom while staying far below the byte cap's reach. The real authority
-/// is the shared WARP_CTX_BACKING_MAX (holistic across bos+rings+mems+imgs),
-/// and the BYTE cap binds long before this count does at any real
-/// resolution. Spelled out, because the numbers decide whether the arc's own
-/// target fits (audit F14): 1080p BGRA8 = 7.91 MiB, so 8 images meet the
-/// 64 MiB cap; 4K = 31.64 MiB, so only TWO fit -- a 3-image MAILBOX
-/// swapchain at 4K is refused E_NOMEM -> VK_ERROR_OUT_OF_DEVICE_MEMORY.
-/// The refusal is clean, but it is a real forward constraint: before W-3d
-/// ships a client that asks for one, decide whether presentables need their
-/// own budget line or a raised holistic cap. Recorded here rather than
-/// discovered there.
+/// is WARP_CTX_HOSTMEM_MAX (mems + imgs, the W-4 family split -- this block's
+/// own forward constraint, discharged when vkQuake's first texture heap hit
+/// the old holistic 64 MiB), and the BYTE cap binds long before this count
+/// does at any real resolution. Spelled out, because the numbers decide
+/// whether the arc's own target fits (audit F14): 1080p BGRA8 = 7.91 MiB, so
+/// 24 images meet the 192 MiB budget; 4K = 31.64 MiB, so SIX fit -- the
+/// 3-image MAILBOX swapchain at 4K that the pre-split cap refused is now
+/// admissible, with the game's own working set beside it.
 /// Exhaustion is clean either way, never a crash (I-32) -- but the two axes
 /// answer DIFFERENT codes, and the difference is a client contract, not a
 /// nicety: the BYTE cap answers E_NOMEM ("provably not installed, free your
@@ -254,6 +252,23 @@ const _: () = {
 /// laundered through the TCB driver. 64 MiB/ctx (512 MiB total worst case)
 /// covers a 4K RGBA render target with room over.
 const WARP_CTX_BACKING_MAX: u64 = 64 * 1024 * 1024;
+
+/// W-4: the HOSTMEM-family budget (mems + imgs) -- split from the guest
+/// cap above when the first real game hit the old holistic 64 MiB at its
+/// first 32 MiB texture heap (vkQuake, run 3; the forward constraint the
+/// MAX_WARP_IMGS_PER_CTX rationale recorded in advance). The two families
+/// charge DIFFERENT physical pools, which is why one holistic cap was the
+/// wrong shape: bos + rings pin GUEST kernel memory (the exposure I-32
+/// exists for -- their cap stays 64 MiB above), while mems + imgs are
+/// HOST3D blobs carved from QEMU's hostmem window (256 M), whose physical
+/// size bounds the worst case regardless of what this constant says --
+/// past it the host refuses the mint and the refusal is the same clean
+/// E_NOMEM. So this cap is per-ctx FAIRNESS inside the window (one game
+/// cannot starve a second client's swapchain), not the resource floor
+/// itself. 192 MiB = three quarters of the window: a real game's working
+/// set (vkQuake: ~35 MB fixed + 32 MiB texture heaps) with a second
+/// client's swapchain still admissible beside it.
+const WARP_CTX_HOSTMEM_MAX: u64 = 192 * 1024 * 1024;
 
 /// V-3b-2 (WARP-V3-DESIGN 0.12): the byte cap on one venus SUBMIT_CMD stream
 /// (I-32). The venus ring-bootstrap commands are ~124 bytes; this bounds a
@@ -1888,7 +1903,7 @@ struct WarpImg {
     h: u32,
     format: u32,
     stride: u32,
-    /// Backing bytes charged to the ctx's I-32 holistic cap.
+    /// Backing bytes charged to the ctx's I-32 guest-family cap.
     size: u64,
 }
 
@@ -5633,21 +5648,32 @@ fn warp_img_row() -> Option<alloc::boxed::Box<[Option<WarpImg>]>> {
     Some(v.into_boxed_slice())
 }
 
-/// The holistic per-ctx live GPU backing (I-32): every bo, ring,
-/// device-memory blob, and PRESENTABLE, plus the wedge-leaked bytes still
-/// charged. WARP_CTX_BACKING_MAX bounds this SUM, so every backing-allocating
-/// path (wbo_create, wring_mint, wmem_mint, wimg_mint) must gate on it. V-3b-3c-2 makes it holistic:
-/// wbo_create previously summed bos + leaked ONLY, so a bo mint did not count
-/// existing rings against the cap -- a pre-existing I-32 accounting hole
-/// (bounded, since rings are small, but real) that composing mems in is the
-/// occasion to close. Saturating: the sum is over client-chosen sizes and must
-/// never panic (the round-2 F1 rule).
-fn ctx_backing_total(c: &WarpCtx) -> u64 {
+/// The per-ctx live GPU backing, split by PHYSICAL POOL since W-4 (one
+/// holistic sum until then; V-3b-3c-2 had made it holistic to close the
+/// bo-mint-ignores-rings accounting hole, and the holistic shape then
+/// conflated two different I-32 axes): the GUEST family (bos + rings +
+/// leaked -- pinned guest kernel memory, WARP_CTX_BACKING_MAX) and the
+/// HOSTMEM family (mems + imgs -- QEMU-window blobs, WARP_CTX_HOSTMEM_MAX).
+/// Every backing-allocating path (wbo_create, wring_mint, wmem_mint,
+/// wimg_mint) gates on its family's sum. Saturating: the sums are over
+/// client-chosen sizes and must never panic (the round-2 F1 rule).
+fn ctx_guest_backing(c: &WarpCtx) -> u64 {
+    // The GUEST family (WARP_CTX_BACKING_MAX): bos + rings pin guest kernel
+    // memory; leaked_bytes is bo-retire leakage, same pool. A host3d-flavored
+    // ring is physically hostmem, but rings are <= WARP_RING_MAX (1 MiB) each
+    // and charging them here is conservative in the direction that can never
+    // widen the guest exposure -- documented, not accidental (W-4 split).
     let bo: u64 = c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
     let ring: u64 = c.ring_slots.iter().flatten().map(|r| r.size).fold(0u64, u64::saturating_add);
+    bo.saturating_add(ring).saturating_add(c.leaked_bytes)
+}
+
+fn ctx_hostmem_backing(c: &WarpCtx) -> u64 {
+    // The HOSTMEM family (WARP_CTX_HOSTMEM_MAX): mems + imgs are HOST3D
+    // blobs in QEMU's hostmem window (W-4 split; see the const's rationale).
     let mem: u64 = c.mems.iter().flatten().map(|m| m.host3d.size).fold(0u64, u64::saturating_add);
     let img: u64 = c.imgs.iter().flatten().map(|i| i.size).fold(0u64, u64::saturating_add);
-    bo.saturating_add(ring).saturating_add(mem).saturating_add(img).saturating_add(c.leaked_bytes)
+    mem.saturating_add(img)
 }
 
 // --- Warp-2c: the GPU-seam object lifecycle -------------------------------
@@ -6797,13 +6823,14 @@ impl Comp {
                     return false;
                 }
             };
-            // I-32 holistic cap (bos + rings + mems + leaked; see
-            // ctx_backing_total): V-3b-3c-2 closes the pre-existing hole where a
+            // I-32 guest-family cap (bos + rings + leaked; see
+            // ctx_guest_backing -- the W-4 split moved mems + imgs to their own
+            // hostmem budget): V-3b-3c-2 closes the pre-existing hole where a
             // bo mint summed bos + leaked ONLY and did not count existing rings
             // against WARP_CTX_BACKING_MAX. Saturating: the sum is over
             // client-chosen sizes and must never panic (round-2 F1). The bo-only
             // high-water census below stays bo-scoped (bo_bytes_peak).
-            let total: u64 = ctx_backing_total(c);
+            let total: u64 = ctx_guest_backing(c);
         // Round-6 F1: the byte cap does NOT bound the leak COUNT. The
         // minimum accepted size is PAGE, so 16384 backings fit inside the
         // 64 MiB budget -- and since `bos[]` slots are reused across
@@ -7268,9 +7295,9 @@ impl Comp {
         }
         let (over, taken) = {
             let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
-            // I-32 holistic cap (bos + rings + mems + imgs + leaked); see ctx_backing_total.
+            // I-32 guest-family cap (bos + rings + leaked); see ctx_guest_backing.
             (
-                ctx_backing_total(c).saturating_add(bytes) > WARP_CTX_BACKING_MAX,
+                ctx_guest_backing(c).saturating_add(bytes) > WARP_CTX_BACKING_MAX,
                 c.ring_slots[ridx as usize].is_some(),
             )
         };
@@ -7662,8 +7689,8 @@ impl Comp {
     /// Mint a HOST_VISIBLE device-memory blob at `handle` under `ctx_pub`,
     /// backed by the persistent hostmem engine with blob_id = `mem_id` (the
     /// Venus VkDeviceMemory the host binds). I-45: the caller must own the ctx.
-    /// I-32: charged to the holistic ctx backing cap. ONE step (unlike
-    /// bo/create3d): the backing is minted here and the WarpMem is inserted only
+    /// I-32: charged to the hostmem-family ctx budget (W-4 split). ONE step
+    /// (unlike bo/create3d): the backing is minted here and the WarpMem is inserted only
     /// on success, so there is no unbuilt corpse to starve the slot row -- the
     /// #218 minted-but-unbuilt hazard has no analog here. Arms the ctx's venus
     /// device-ctx (a device-memory blob is a Venus object -- see wctx_has_venus).
@@ -7699,12 +7726,12 @@ impl Comp {
         let (over, taken) = {
             let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
             (
-                ctx_backing_total(c).saturating_add(bytes) > WARP_CTX_BACKING_MAX,
+                ctx_hostmem_backing(c).saturating_add(bytes) > WARP_CTX_HOSTMEM_MAX,
                 c.mems[handle as usize].is_some(),
             )
         };
         // Order matters (V-3b-3c-2b round-3 F8): a DUPLICATE handle must answer
-        // E_INVAL even when the ctx is ALSO over the holistic cap. The mesa
+        // E_INVAL even when the ctx is ALSO over the hostmem budget. The mesa
         // client frees its guest handle on E_NOMEM (provably-not-installed) and
         // keeps it on E_INVAL (installed). If `over` were checked first, a
         // concurrent-alloc race loser (two threads race the unguarded mem_bitmap
@@ -7720,7 +7747,7 @@ impl Comp {
         // per-object bytes cap is a RESOURCE verdict reachable from an
         // ordinary large vkAllocateMemory -- E_INVAL would leak the client's
         // handle (keep-arm); E_NOMEM after `taken` keeps the F8 rule.
-        if bytes > WARP_CTX_BACKING_MAX || over {
+        if bytes > WARP_CTX_HOSTMEM_MAX || over {
             return Err(p9::E_NOMEM);
         }
         let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
@@ -7738,7 +7765,7 @@ impl Comp {
         // reclaimed offset back VERBATIM, so a fresh blob can carry a prior
         // client's bytes. Zero it -- tapestryd holds the RW map -- before the
         // client can map it. ONE memset, not a per-word SeqCst loop (audit
-        // V-3b-3c-2a F3): at up to WARP_CTX_BACKING_MAX (64 MiB) the loop's ~8.4M
+        // V-3b-3c-2a F3): at up to WARP_CTX_HOSTMEM_MAX (192 MiB) the loop's ~25M
         // barriered stores on the single serve thread were a client-repeatable
         // latency lever. write_bytes is the codebase's disclosure-zero method
         // (alloc_weave, which zeroes client-mappable memory identically) and is
@@ -7897,8 +7924,8 @@ impl Comp {
     /// idea expressed as one verb's accept set, and it is why the per-frame
     /// path can be RESOURCE_FLUSH alone.
     ///
-    /// I-45: the caller must own the ctx. I-32: charged to the holistic ctx
-    /// backing cap. ONE step (the wmem_mint precedent): the backing is minted
+    /// I-45: the caller must own the ctx. I-32: charged to the hostmem-family
+    /// ctx budget (W-4 split). ONE step (the wmem_mint precedent): the backing is minted
     /// here and the WarpImg is inserted only on success, so no unbuilt corpse
     /// can strand a slot.
     ///
@@ -7960,7 +7987,7 @@ impl Comp {
         let (over, taken) = {
             let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
             (
-                ctx_backing_total(c).saturating_add(bytes) > WARP_CTX_BACKING_MAX,
+                ctx_hostmem_backing(c).saturating_add(bytes) > WARP_CTX_HOSTMEM_MAX,
                 c.imgs[handle as usize].is_some(),
             )
         };
@@ -7977,7 +8004,7 @@ impl Comp {
         if taken {
             return Err(p9::E_INVAL);
         }
-        if bytes > WARP_CTX_BACKING_MAX || over {
+        if bytes > WARP_CTX_HOSTMEM_MAX || over {
             return Err(p9::E_NOMEM);
         }
         let venus_ctx = self.wctx_venus_ensure(ctx_pub, conn)?;
@@ -11010,7 +11037,7 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "virgl {}\ncapsets {}\ncapset {} {} {}\nctxs {}\npoisoned {}\nbo-cap {}\nfence-lane {}\nbo-peak {}\n",
+                    "virgl {}\ncapsets {}\ncapset {} {} {}\nctxs {}\npoisoned {}\nbo-cap {}\nhostmem-bytes-cap {}\nfence-lane {}\nbo-peak {}\n",
                     comp.gpu.virgl as u32,
                     comp.gpu.num_capsets,
                     comp.gpu.capset_id,
@@ -11023,6 +11050,11 @@ impl Conn {
                     // the constant in (#187: a claimed cross-file sync needs
                     // a CHECK; reading it here IS the check).
                     MAX_WARP_BOS_PER_CTX,
+                    // W-4: the hostmem-family BYTE budget, published for the
+                    // same reason -- the prove's cap-exhaustion leg loops
+                    // until refusal instead of baking the value in (#230:
+                    // a lifted constant voids every proof that named it).
+                    WARP_CTX_HOSTMEM_MAX,
                     // #204: the per-ctx fenced-lane share, for the same
                     // reason -- the winsys throttles its in-flight depth to
                     // this, and a hardcoded client mirror is what held the
@@ -11033,10 +11065,11 @@ impl Conn {
                     comp.warp_bo_peak
                 ),
             );
-            // The BYTES axis -- the BO SHARE of the holistic backing cap. Since
-            // V-3b-3c-2 WARP_CTX_BACKING_MAX gates bos + rings + mems + leaked
-            // (ctx_backing_total); this global peak stays bo-scoped, and the live
-            // holistic total is the per-ctx `backing-bytes` key (audit F1).
+            // The BYTES axis -- the BO SHARE of the guest backing cap
+            // (WARP_CTX_BACKING_MAX gates bos + rings + leaked since the W-4
+            // family split); this global peak stays bo-scoped, and the live
+            // family totals are the per-ctx `backing-bytes` +
+            // `hostmem-bytes` keys (audit F1).
             let _ = core::fmt::write(
                 &mut s,
                 format_args!("bo-bytes-peak {}\n", comp.warp_bo_bytes_peak),
@@ -11179,6 +11212,19 @@ impl Conn {
                     &mut s,
                     format_args!("fenced-free {}\n", comp.gpu.test_fenced_free()),
                 );
+                // W-4 stall observability: one row per HELD fenced slot, so a
+                // wedged chain is NAMED (op class + owner + age), not just a
+                // missing count. Empty when all slots are free -- the healthy
+                // read costs nothing extra.
+                for (i, fid, cpub, ridx, rb, cm, age) in comp.gpu.fenced_held() {
+                    let _ = core::fmt::write(
+                        &mut s,
+                        format_args!(
+                            "fenced-held slot={} fence={} ctx={} ring={} rb={} comp={} age_ms={}\n",
+                            i, fid, cpub, ridx, rb as u32, cm as u32, age
+                        ),
+                    );
+                }
                 // #210: the per-ctx fence ledger, readable from ANY conn. The
                 // signaled/reported pair splits a wedged fence wait three
                 // ways: reported == signaled == the id a parked client waits
@@ -11378,15 +11424,23 @@ impl Conn {
                                 live, peak, live_b, peak_b
                             ),
                         );
-                        // The holistic backing WARP_CTX_BACKING_MAX actually gates
-                        // (ctx_backing_total: bos + rings + mems + leaked) -- the
-                        // number a byte-cap refusal compares, made observable when
-                        // the cap became holistic (audit V-3b-3c-2a F1). A census
-                        // key (after the client-critical fence-signaled prefix).
-                        let backing = comp.wctx(id, self.conn_id).map_or(0, ctx_backing_total);
+                        // The numbers the two byte-cap refusals compare, made
+                        // observable when the cap became holistic (audit
+                        // V-3b-3c-2a F1) and split by family at W-4:
+                        // backing-bytes = the guest sum WARP_CTX_BACKING_MAX
+                        // gates (bos + rings + leaked); hostmem-bytes = the
+                        // sum WARP_CTX_HOSTMEM_MAX gates (mems + imgs). Census
+                        // keys (after the client-critical fence-signaled
+                        // prefix).
+                        let (guest_b, host_b) = comp
+                            .wctx(id, self.conn_id)
+                            .map_or((0, 0), |c| (ctx_guest_backing(c), ctx_hostmem_backing(c)));
                         let _ = core::fmt::write(
                             &mut s,
-                            format_args!("backing-bytes {}\n", backing),
+                            format_args!(
+                                "backing-bytes {}\nhostmem-bytes {}\n",
+                                guest_b, host_b
+                            ),
                         );
                         // The #198-hunt storm scale: the one-shots name only
                         // the FIRST refusal per family; this counts them all.
