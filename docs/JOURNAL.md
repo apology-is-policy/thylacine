@@ -22,6 +22,146 @@ needed the operator.
 
 ---
 
+## 2026-08-31 (run 5) — W-3c-1 re-witnessed, then round 2 found the hole between two round-1 fixes
+
+Fresh context (self-compact at the 600k line, at the W-3c-1 committed
+boundary). One chunk carried to close: re-witness the presentable on real
+hardware under the corrected mint, run the owed round-2 audit, push. The
+middle item is the one worth reading.
+
+### The re-witness: the amendment measured a second time, by a second boot
+
+W-3c-1 landed committed-but-unpushed because its central arms had never run
+green. The boot that discovered the `USE_SHAREABLE` refusal *was* the boot
+meant to witness the feature, so `mint=` / `bind=` / `unbind=` had only ever
+been observed failing. A design amendment ratified on one measurement, with
+the corrected code never itself measured, is a claim.
+
+On thyla-pi (KVM, real V3D, `venus=on,blob=on,hostmem=256M`):
+
+    tapestryd: warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok
+               disable=1 flags=mappable (64x64 BGRA8 stride 256)
+    BOOT-smoke: PASS   THYLACINE-VENUS-PROVE PASS   EXIT=0
+
+The load-bearing lines are the two immediately above the verdict:
+
+    tapestryd: gpu RESOURCE_CREATE_BLOB(HOST3D) resp_type=0x1200 (expected 0x1100)
+    tapestryd: gpu RESOURCE_CREATE_BLOB(HOST3D) resp_type=0x1200 (expected 0x1100)
+
+— the flag probe's SHAREABLE and MAPPABLE|SHAREABLE arms being refused, with
+MAPPABLE accepted third. The amendment's evidence is **re-derived on this
+boot**, not inherited from the one that motivated it. The probe reports WHICH
+combination the host took rather than merely that one did, which is the whole
+reason a second measurement is worth having.
+
+### A wrong turn, and what caught it
+
+Verifying the re-baked ramfs carried the fixed tapestryd, a content probe said:
+
+    flags=mappable : ABSENT  <-- BAKE DID NOT PICK UP THE FIX
+
+It had not. `flags=mappable` is assembled at RUNTIME from a format string and
+a `&str`; **it is a literal in no binary of any vintage**, so the probe could
+not have succeeded against a correct artifact either. Its ABSENT verdict was
+byte-identical to a real staleness report while carrying zero information —
+a *fabricated* defect, the expensive direction, since acting on it means
+re-running a bake, a ship and a boot to fix nothing.
+
+What caught it was not care but **batch siblings**: two other probes in the
+same call returned PRESENT, one of them a string that exists only in the
+post-audit build. One odd member out of three is the tell — a stale artifact
+fails all three. Rule adopted: a content probe needs literals only (never a
+runtime composition), a positive sibling so all-absent is distinguishable from
+a broken probe, and a negative control. The whole-file md5 answers a different
+question — "is the far side the same bytes?" — and neither substitutes for the
+other. Both sides matched at `61b745f1`.
+
+### Round 2: the defect was in the space BETWEEN two correct fixes
+
+`0 P0 / 1 P1 / 5 P2 / 9 P3`, all fixed. The P1 is not a coding error, and that
+is what makes it worth recording.
+
+Round 1 had produced two fixes on the same teardown, each right:
+
+- **F5** rebuilt the unbind witness to observe the ISSUE ORDER, because an
+  end-state check cannot distinguish an OMITTED unbind from an INVERTED one.
+- **F8** exposed the device's SUCCESS verdict, because a live device can
+  refuse the unbind.
+
+Nothing wired the second into the first. `set_scanout` stamps its order tick
+at ISSUE (`gpu.rs:2842`, before the wire response) and `gl_evict_res` cleared
+`bound_res` either way — so on a REFUSED unbind all three conjuncts of
+`destroy_ok && bound_res == 0 && ordered` held, and the arm whose doc-comment
+says it "witnesses the modeled bug's ABSENCE" reported absence while
+`buggy_punbind_skipped` was live on the device.
+
+**When one round adds two mechanisms observing the same event, ask what each
+actually answers and whether the consumer reads both.** F5 answers *was it
+issued, in what order*. F8 answers *did it succeed*. The gate read only the
+first. Neither finding was wrong; neither owned the hole between them. Found
+independently by the concurrent self-audit and by the prosecutor, approaching
+from opposite ends — "what does the verdict consume" versus "what does a
+refusal satisfy".
+
+Round 2's F3 then caught the *philosophical* half round 1 got wrong: F8 made
+the refusal AUDIBLE, and audibility is not safety. The unref still ran, so the
+implementation deliberately took the buggy-cfg's transition and announced it.
+The refusal belongs to the device; **the unref was always ours to withhold.**
+It now is: a refusal CONDEMNS the resource and `Gpu::resource_unref` defers on
+it until an accepted scanout proves the display has moved on.
+
+That guard is deliberately centralised on `Gpu` rather than added at the call
+site, because round 2's F2 was precisely that the round-1 fix had been applied
+**to the site the finding named rather than to the class** — two of three
+`gl_evict_res` callers still dropped the verdict and then unref'd, both live
+by construction. A guard every unref path passes through cannot be forgotten
+by the next caller added; a fixed call site can.
+
+### The stale-prose sweep that kept growing
+
+Round 2's F4 — comments still asserting the superseded "SHAREABLE,
+deliberately NON-MAPPABLE" mint — is the run's best lesson about sweeps. Three
+passes, three different answers:
+
+| Pass | Method | Found |
+|---|---|---|
+| self-audit | grep `shareable` in `server.rs` | 4 |
+| self-audit again | grep `non-mappable` too | 5 (one site says only the second term) |
+| prosecutor | its own read, including docs | 6 |
+| tree-wide | both vocabularies, whole tree | **13** |
+
+The last pass found `specs/tapestry_present.tla` (×2), `SPEC-TO-CODE.md`,
+`ARCHITECTURE.md` — and **`CLAUDE.md` itself**, always-loaded binding
+scripture asserting the flag posture the hardware refuses. Dangerous
+specifically because it aims the next editor at the one change measurement
+rules out.
+
+**Sweep the PROPERTY through every vocabulary that can express it AND every
+location that can hold it.** My first pass covered one vocabulary in one file;
+my second covered two vocabularies in one file; only the tree-wide pass over
+both covered the property. Cheapest form: grep each term separately and diff
+the hit sets — a term that finds a site the others miss is proof the sweep is
+not yet complete.
+
+### Left open, exactly
+
+- **Round 3 is owed** — round 2 is itself a dirty close (a returned P1, and
+  P1+P2 = 6). The prosecutor also flagged, correctly, that this I-40/I-45
+  surface has now had **two consecutive rounds from the implementation agent's
+  own lineage**; round 3 should get Fable if Fable is available at all.
+- **A named landmine for W-3c-2**, from the self-audit rather than the
+  prosecutor: `wimg_teardown` has NO drain. The spec requires `PUnbound` AND
+  `PDrained`; only the first is implemented. It is sound today *only* because
+  no submission path reads `imgs` (all readers enumerated, twice,
+  independently). W-3c-2 adds the compose arm — the first such reader — and
+  **must add the drain in the same commit**, because a green suite between
+  them proves nothing: the only thing holding the invariant is an absence that
+  commit removes.
+- The cross-conn I-45 leg of the `img` ABI still has no runtime driver; the
+  `ring-xproc` machinery it would reuse exists.
+
+---
+
 ## 2026-08-26 (run 4) — W-3b: the presentable becomes a proved object before it becomes code
 
 Fresh context (self-compact at the 600k line, at the W-3a shipped boundary).

@@ -493,8 +493,17 @@ venus-verdict)
         echo "TEST leg: the W-3c-1 presentable self-test did not report all-arms-passing (shape/mint/bind/unbind)"
         vfail=1
     }
-    grep -qF "warp presentable self-test skipped" "$ctl" || {
-        echo "CONTROL leg: no 'presentable self-test skipped' -- the self-test did not take the intended no-feature skip"
+    # ...and the device must not have REFUSED the unbind (round-2 F1 [P1]).
+    # boot-probe.sh captures this line; before this arm NOTHING read it, so a
+    # host that refused every unbind produced a green gate and a log full of
+    # the evidence. A verdict with no consumer is the capture half of F2's
+    # defect wearing the other face.
+    if grep -qF "UNBIND REFUSED by the device" "$tst"; then
+        echo "TEST leg: the device REFUSED a display unbind -- the resource is condemned and its free deferred; the presentable teardown is UNPROVEN on this host"
+        vfail=1
+    fi
+    grep -qF "warp presentable self-test skipped (blob feature not offered)" "$ctl" || {
+        echo "CONTROL leg: no 'presentable self-test skipped (blob feature not offered)' -- the self-test did not take the intended no-feature skip (a skip for any OTHER reason proves nothing about the no-feature path)"
         vfail=1
     }
     if grep -qF "warp presentable self-test: shape=" "$ctl"; then
@@ -632,7 +641,12 @@ img)
     # device, and this scenario is only ever run on one that IS venus -- so a
     # skip here means the device was configured wrong, not that the gate is
     # inapplicable (#212: an arm that could not run has not succeeded).
-    if grep -q "IMG PASS" "$out" && grep -q "PASS: warp-img" "$out"; then
+    # F11: anchor on the "PASS (" paren -- present only in the guest's genuine
+    # pass line, never in a harness timeout diagnostic's bracketed echo. The
+    # ring-xproc sibling carries this exact fix; the conjunction below saved
+    # this verb today, but that reasoning is the fragile kind the lesson was
+    # recorded about.
+    if grep -q "IMG PASS (" "$out" && grep -q "PASS: warp-img" "$out"; then
         echo "W-3c-1 PRESENTABLE ABI GATE: VERIFIED"
     else
         echo "W-3c-1 PRESENTABLE ABI GATE: UNVERIFIED"

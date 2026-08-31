@@ -1898,7 +1898,7 @@ variable never leaving FALSE; the composed clean cfgs grow to 94680):
 ### The W-3b presentable class (spec landed 2026-08-26, model-first; the impl sites land at W-3c)
 
 The Warp-WSI FOURTH in-flight class (`docs/WARP-WSI-DESIGN.md` §6): a venus
-swapchain image as a first-class **presentable** — a shareable NON-mappable
+swapchain image as a first-class **presentable** — a never-mapped
 HOST3D blob, display shape declared at registration. Behind its OWN switch,
 `ALLOW_PRESENTABLE` (C-1/C-6 shared `ALLOW_COMPOSE`; this is a new object,
 not a new arm of the weave), additive by measurement: with the switch off

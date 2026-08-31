@@ -217,9 +217,12 @@ onto `WarpMem` (a `VkDeviceMemory` is correctly geometry-less — gap 4 is a
 feature of the memory model, not a bug). Instead:
 
 **A swapchain image is a first-class `presentable` object**: a venus-created
-`VkImage` whose backing the server minted as a **shareable HOST3D blob**
+`VkImage` whose backing the server minted as a **HOST3D blob it never maps**
 (bound by `blob_id` to the venus allocation, exactly the existing
-`mint_host3d_ring` binding — `gpu.rs:2481-2536`) and whose **display shape
+`mint_host3d_ring` binding — `gpu.rs:2481-2536`; this said *shareable* until
+§4.1 was amended by measurement — see §4.1 — and the correction matters here
+too: what withholds the image from the guest is the absence of any map, not a
+flag) and whose **display shape
 (width, height, format, stride) is declared at registration**, validated
 against what mesa's WSI negotiated. Three consequences:
 
@@ -377,6 +380,27 @@ Under the client's own ctx (all I-45-scoped, all namespace-named):
 - `ctx/<id>/img/<n>/info` — the accepted shape (the negotiation's record).
 - `ctx/<id>/img/<n>/ctl` — `destroy` (display-safe: the §6 unbind-first
   ordering).
+
+  > **THE CLIENT-ORDERING CONTRACT — binding on the WSI backend (W-3d).**
+  > **Destroy the registration BEFORE freeing the venus allocation it names.**
+  > In wsi terms: `vkDestroySwapchainKHR` retires the images, and each one's
+  > `img/<n>/ctl destroy` must precede the `vkFreeMemory` of its backing.
+  >
+  > This discharges the fourth holder in `tapestry_present.tla`'s `PFree`
+  > (`~venusRef`). Three holders are the server's and are enforced there — the
+  > registration slot, and the two observer arms (`PUnbound`/`PDrained` in
+  > `wimg_teardown`). The fourth is the client's own `VkDeviceMemory`, live in
+  > its address space and **invisible to the server**, so it can only be a
+  > contract, and it is stated here because the party bound by it reads this
+  > document and not `server.rs` (round-2 F9).
+  >
+  > Getting it backwards — free-then-destroy — leaves the host holding a
+  > binding to freed memory. Nothing guest-side can detect it: `mem_id` is
+  > opaque to the server, and by the time the destroy arrives the damage is
+  > host-side. It is bounded by the same trusted-host posture as every other
+  > `blob_id` claim (GPU-DESIGN §9.2) and becomes ours to enforce at the v3d
+  > fork. What the server guarantees regardless of client ordering is its own
+  > half: the display never keeps a reference across the unref.
 - `ctx/<id>/ctl` — `present-to <surface> img <n>` (the generalized arm).
 - The surface half (`surface/<id>/ctl glsrc <ctx>`) is unchanged — consent
   stays mutual and incarnation-pinned.

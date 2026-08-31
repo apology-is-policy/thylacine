@@ -457,7 +457,8 @@ const WARP_MEM: u64 = 1 << 44; // a ctx mem/<handle> node (V-3b-3c-2, a
 // and of every other tag; the _Static_assert below guards it with the rest.
 
 const WARP_IMG: u64 = 1 << 45; // a ctx img/<handle> node (W-3c: a PRESENTABLE
-// -- a venus swapchain image's shareable non-mappable HOST3D blob). Next free
+// -- a venus swapchain image's HOST3D blob, minted MAPPABLE and NEVER
+// mapped; see WARP-WSI-DESIGN 4.1 AS AMENDED). Next free
 // bit above WARP_MEM=44, same disjointness rule, same assert.
 
 const W_ROOT: u64 = WARP_FLAG;
@@ -1316,6 +1317,13 @@ pub struct Comp {
     /// scanned-out resource is the one order the display cannot survive,
     /// and only the device truth can name which resource that is.
     bound_res: u32,
+    /// How many times the DEVICE refused a display unbind (round-2 F1).
+    /// The self-test's `unbind=` arm consumes this: round-1 F5 rebuilt the
+    /// witness to observe the ISSUE ORDER and round-1 F8 exposed the
+    /// SUCCESS, and nothing read the second -- so a refused unbind, which
+    /// is the very state F8 exists to catch, satisfied all three of the
+    /// arm's conjuncts and reported `unbind=ok`.
+    unbind_refused: u32,
     /// The F16 deferred direct switch: SET_SCANOUT to this surface's
     /// resource rides its next present-COMPLETE, never earlier.
     pending_direct: Option<usize>,
@@ -1818,7 +1826,11 @@ struct WarpMem {
 }
 
 /// W-3c (WARP-WSI-DESIGN 4.1): a PRESENTABLE -- a venus swapchain image's
-/// backing, minted as a SHAREABLE, deliberately NON-MAPPABLE HOST3D blob
+/// backing, minted as a HOST3D blob the server NEVER MAPS (WARP-WSI-DESIGN
+/// 4.1 as AMENDED by measurement: virglrenderer REFUSES USE_SHAREABLE on a
+/// HOST3D blob, so the mint is USE_MAPPABLE and guest-invisibility comes from
+/// the ABSENCE of any map -- there is no `map` file, no weft share and no
+/// hostmem offset -- never from the flag)
 /// whose `blob_id` names the venus allocation, with its DISPLAY SHAPE
 /// declared at registration and validated against what the compositor can
 /// actually scan out. Three consequences distinguish it from every other
@@ -1939,6 +1951,7 @@ impl Comp {
             screen: None,
             scanout: Scanout::Boot,
             bound_res: 0,
+            unbind_refused: 0,
             pending_direct: None,
             chrome_epoch: 0,
             geom_sig: 0,
@@ -5679,6 +5692,31 @@ impl Comp {
         }
         let (dw, dh) = (self.gpu.width, self.gpu.height);
         let unbound = self.gpu.set_scanout(0, dw, dh).is_ok();
+        if !unbound {
+            // The device still scans `res_id`. CONDEMN it: every unref path
+            // runs through `Gpu::resource_unref`, which now DEFERS on a
+            // condemned id, so no caller -- including one added later -- can
+            // hand the display freed memory. The next ACCEPTED scanout means
+            // the display has moved on, and drains the list for real.
+            //
+            // Reported HERE rather than at the caller (round-2 F2): round 1
+            // returned this verdict and fixed one of three call sites; the
+            // other two dropped it silently. A report the callee emits is one
+            // no caller can forget.
+            //
+            // `bound_res` is still cleared below even though the device has
+            // NOT moved: safety no longer rests on this field (the resource
+            // stays alive), and the stale scanout is harmless -- it shows old
+            // pixels until `reconcile` establishes a new one.
+            self.unbind_refused = self.unbind_refused.saturating_add(1);
+            self.gpu.condemn(res_id);
+            say!(
+                "tapestryd: warp display UNBIND REFUSED by the device for res {} -- \
+                 condemned, unref deferred; the display keeps naming it until the \
+                 next accepted scanout",
+                res_id
+            );
+        }
         self.bound_res = 0;
         if let Scanout::Direct(n) = self.scanout {
             self.scanout = Scanout::Off;
@@ -7458,7 +7496,8 @@ impl Comp {
     // === W-3c: the PRESENTABLE (ctx/<id>/img/<handle>) ========================
     //
     // A venus swapchain image registered for display (WARP-WSI-DESIGN 4.1): a
-    // SHAREABLE, non-mappable HOST3D blob whose blob_id names the venus
+    // HOST3D blob -- minted USE_MAPPABLE and never mapped (4.1 as AMENDED;
+    // the flag is not what withholds it from the guest) -- whose blob_id names the venus
     // allocation, carrying the display shape DECLARED at registration. The
     // handle space is the client's (the ring/mem discipline); the qid carries a
     // monotonic pub_id, so a stale fid resolves to nothing.
@@ -7505,13 +7544,28 @@ impl Comp {
     }
 
     /// Register a presentable at `handle` under `ctx_pub`: validate the
-    /// DECLARED display shape against what this compositor can scan out, then
-    /// mint the shareable non-mappable HOST3D blob with blob_id = `mem_id`.
+    /// DECLARED display shape against the compositor's STRUCTURAL limits, then
+    /// mint the never-mapped HOST3D blob (USE_MAPPABLE per 4.1 as AMENDED)
+    /// with blob_id = `mem_id`.
     ///
     /// THE DECLARATION IS THE NEGOTIATION (WARP-WSI-DESIGN 4.1). Eligibility
     /// is decided HERE, once, rather than re-derived per frame: a shape this
     /// compositor cannot scan out is refused at registration, so the present
-    /// path never has to ask. That is the Fuchsia sysmem constraint-negotiation
+    /// path never has to ask.
+    ///
+    /// EXACTLY WHAT IS CHECKED, since the sentence above is broader than the
+    /// code (round-2 F13): the format accept set, `stride >= w*4`, and both
+    /// dimensions plus the stride bounded above by `WARP_IMG_MAX_DIM` so
+    /// `stride*h` cannot outrun the u32 `len`, plus the I-32 byte cap. These
+    /// are STRUCTURAL limits, not the CURRENT display mode -- a 4096x4096
+    /// presentable is accepted on a 1024x768 display today. That is deliberate
+    /// rather than overlooked: a presentable is legitimately larger or smaller
+    /// than the scanout for the COMPOSED arm, and the mode can change under a
+    /// live registration, so mode-matching belongs at the point Direct binding
+    /// is CHOSEN (W-3c-2's `present-to`), not at registration where it would
+    /// have to be re-validated on every mode set anyway. The design's "the
+    /// present path never has to ask" is therefore earned for the structural
+    /// half only, and W-3c-2 owes the mode half at the bind. That is the Fuchsia sysmem constraint-negotiation
     /// idea expressed as one verb's accept set, and it is why the per-frame
     /// path can be RESOURCE_FLUSH alone.
     ///
@@ -7614,7 +7668,7 @@ impl Comp {
             None => {
                 // Single-threaded -> unreachable; unref rather than strand a
                 // host resource. Nothing else was acquired (no offset, no
-                // mapping, no share -- the non-mappable lifecycle's payoff).
+                // mapping, no share -- the never-mapped lifecycle's payoff).
                 let _ = self.gpu.resource_unref(res_id);
                 Err(p9::E_NOENT)
             }
@@ -7682,6 +7736,10 @@ impl Comp {
     /// adds the drain here with it, and the spec already carries the conjunct
     /// so the obligation cannot be forgotten.
     ///
+    /// A REFUSED unbind does not reach the unref: `gl_evict_res` condemns the
+    /// resource and `Gpu::resource_unref` defers on it until an accepted
+    /// scanout proves the display has moved on (round-2 F3).
+    ///
     /// The unbind is issued UNCONDITIONALLY, never gated on the per-object
     /// `bound` flag. `gl_evict_res` already self-guards on `Comp.bound_res`,
     /// which is the AUTHORITATIVE record of what the device scans out, so the
@@ -7690,17 +7748,18 @@ impl Comp {
     /// matters) skip the unbind and unref a live binding. A redundant no-op
     /// costs nothing; trusting the second copy of a fact costs the display.
     fn wimg_teardown(&mut self, i: WarpImg) {
-        // F8: the unbind can be REFUSED by a live device, and the unref below
-        // would then succeed against a resource the display is still scanning
-        // -- the punbind_skipped outcome with the unbind nominally done. We
-        // cannot fix the device's refusal, but the one thing that must never
-        // happen is that it passes unremarked.
-        if !self.gl_evict_res(i.res_id) {
-            say!(
-                "tapestryd: warp presentable res {} UNBIND REFUSED by the device --                  the unref below leaves the display naming a destroyed resource",
-                i.res_id
-            );
-        }
+        // The unbind can be REFUSED by a LIVE device. Round 1 (F8) made that
+        // audible; round 2 (F3) observed that audibility is not safety -- the
+        // unref still ran, so the implementation deliberately TOOK the
+        // `buggy_punbind_skipped` transition and announced it.
+        //
+        // It no longer does. A refusal CONDEMNS the resource inside
+        // `gl_evict_res`, and `Gpu::resource_unref` defers on a condemned id,
+        // so the call below is a no-op exactly when freeing would hand the
+        // display released memory. Withholding the free is entirely ours to
+        // do, even though the refusal is not: one leaked resource id beats a
+        // host-side UAF with cross-client blast radius.
+        let _ = self.gl_evict_res(i.res_id);
         let _ = self.gpu.resource_unref(i.res_id);
     }
 
@@ -7860,10 +7919,20 @@ impl Comp {
             // never a second open-coded ordering. A ctx dying while one of its
             // presentables is the scanned-out source is the ordinary case (a
             // client crashing mid-frame), not the exotic one, so this arm is
-            // where the ordering earns its keep. No `leak` branch, for the
-            // device-memory reason one loop up: a presentable carries no
-            // tapestryd-tracked fence, its backing is HOST memory (no guest
-            // pages to strand), and re-mint always takes a fresh res_id.
+            // where the ordering earns its keep.
+            //
+            // No `leak` branch, and round-2 F14 corrected WHY. The old reason
+            // -- "a presentable carries no tapestryd-tracked fence" -- is a
+            // fact about `WarpImg`'s FIELDS, not about whether the device
+            // still references the resource, and on a wedge it is precisely
+            // an abandoned venus chain that might. The load-bearing reason is
+            // the one the `ctl` verb states: the unref drops the BLOB -- the
+            // host-side object BINDING the allocation -- not the venus
+            // allocation itself, which stays alive under the client's own
+            // VkDeviceMemory until it frees it. So there is no guest page to
+            // strand and nothing for a graveyard to reclaim later. A reader
+            // who checked the old reason would have found it insufficient;
+            // one who trusted it would have learned the wrong rule.
             for j in 0..MAX_WARP_IMGS_PER_CTX {
                 if let Some(i) = c.imgs[j].take() {
                     self.wimg_teardown(i);
@@ -8496,22 +8565,27 @@ impl Comp {
             );
             return;
         }
-        let (img_pub, res_id, got_size, got_res) = {
+        let (img_pub, res_id, got_size) = {
             let c = self.wctx(ctx_pub, SELFTEST_CONN).unwrap();
             let i = c.imgs[0].as_ref().unwrap();
-            (i.pub_id, i.res_id, i.size, i.res_id)
+            (i.pub_id, i.res_id, i.size)
         };
         // DERIVED, not moved-in-verbatim (audit F9). Comparing `i.w == IW`
         // was a tautology: field-init shorthand binds `w` from the same
         // argument, so the check reduced to `IW == IW` and could not fail.
         // `size` is COMPUTED from stride*h inside the mint, so this one can.
-        let mint_ok = got_size == (stride as u64) * (IH as u64) && got_res != 0;
+        // `res_id != 0` was the residue of the F9 de-tautologising and is
+        // ITSELF one (round-2 F8): res_seq skips zero on every increment, so
+        // it cannot fail. `size` is COMPUTED from stride*h inside the mint,
+        // so that conjunct can, and it is the whole arm.
+        let mint_ok = got_size == (stride as u64) * (IH as u64);
         // ARM 3: the Direct bind at the DECLARED shape.
         let bind_ok = self.gpu.set_scanout_blob(res_id, IW, IH, fmt, stride).is_ok();
         if bind_ok {
             self.bound_res = res_id;
         }
         let seq_before = self.gpu.cmd_seq;
+        let refused_before = self.unbind_refused;
         // ARM 4: destroy WHILE BOUND -- the ordering witness. On a host that
         // refused the bind this degrades to a plain destroy and is reported
         // as `unbind=n/a`, never as a pass: an arm that cannot run has not
@@ -8526,8 +8600,19 @@ impl Comp {
         // teardown (a tick from an earlier boot step would pass vacuously).
         let (sseq, useq) = (self.gpu.last_scanout_seq, self.gpu.last_unref_seq);
         let ordered = sseq > seq_before && useq > sseq;
+        // AND THE DEVICE MUST HAVE ACCEPTED IT (round-2 F1 [P1]). Order is not
+        // success: `set_scanout` stamps its tick at ISSUE, before the wire
+        // response, and `gl_evict_res` clears `bound_res` either way -- so on
+        // a REFUSED unbind `destroy_ok`, `bound_res == 0` and `ordered` were
+        // ALL satisfied and this arm reported `ok` for the exact state
+        // `buggy_punbind_skipped` models. Round 1 produced both halves of the
+        // observation (F5 the order, F8 the verdict) and wired only the first
+        // into the witness.
+        let refused = self.unbind_refused > refused_before;
         let unbind = if !bind_ok {
             "n/a"
+        } else if refused {
+            "REFUSED"
         } else if destroy_ok && self.bound_res == 0 && ordered {
             "ok"
         } else {
@@ -8586,12 +8671,20 @@ impl Comp {
         // chokepoint for the same reason the hold release does: every ctx
         // death passes through here, and the deferred finish only frees
         // what was already evicted now.
+        // EVERY display-bindable family of this dying ctx, not just BOs
+        // (round-2 F6). W-3c-1 added presentables -- a second family the
+        // scanout can name -- and this chokepoint kept scanning only the
+        // first, so a dead client's bound presentable stayed on the display
+        // for the whole deferred-finish window with nothing able to re-route.
+        // Chained rather than duplicated so a third family is one clause, and
+        // so the two lists cannot drift apart.
         let (evict_res, consent_sl) = self.warp_ctxs[slot].as_ref().map_or((None, None), |c| {
             (
                 c.bos
                     .iter()
                     .flatten()
                     .map(|b| b.res_id)
+                    .chain(c.imgs.iter().flatten().map(|i| i.res_id))
                     .find(|&r| r != 0 && r == self.bound_res),
                 c.present_to.map(|(sl, _, _)| sl),
             )

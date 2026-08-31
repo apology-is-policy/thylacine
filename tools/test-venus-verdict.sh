@@ -233,10 +233,31 @@ check "test leg: presentable unbind arm FAILED -> UNVERIFIED" 1 "" \
       'sed "s/unbind=ok/unbind=FAIL/" "$t" > "$t.x" && mv "$t.x" "$t"'
 check "test leg: presentable unbind arm n/a (bind refused) -> UNVERIFIED" 1 "" \
       'sed "s/unbind=ok/unbind=n\/a/" "$t" > "$t.x" && mv "$t.x" "$t"'
+# W-3c-1 round-2 F1 [P1]: the DEVICE REFUSED the unbind. Until that round the
+# arm could not express this at all -- `set_scanout` stamps its order tick at
+# ISSUE and `gl_evict_res` cleared `bound_res` either way, so a refusal
+# satisfied every conjunct and reported `unbind=ok`. The state now has its own
+# token, and the gate must reject it like any other non-pass.
+check "test leg: presentable unbind REFUSED by the device -> UNVERIFIED" 1 "" \
+      'sed "s/unbind=ok/unbind=REFUSED/" "$t" > "$t.x" && mv "$t.x" "$t"'
+# ...and the loud line that accompanies it must never ride a passing leg. This
+# is the CAPTURE half of the same finding: boot-probe.sh captures the string
+# (prefix `tapestryd: warp presentable`), and before this arm NOTHING read it.
+check "test leg: an UNBIND REFUSED line present at all -> UNVERIFIED" 1 "" \
+      'printf "tapestryd: warp display UNBIND REFUSED by the device for res 7 -- condemned, unref deferred\n" >> "$t"'
+# F7 [P3]: the file's own rule is one sabotage per arm, and `disable=` was the
+# arm without one -- so nothing proved the verdict regex discriminated on it.
+check "test leg: presentable disable arm FAILED -> UNVERIFIED" 1 "" \
+      'sed "s/disable=1/disable=0/" "$t" > "$t.x" && mv "$t.x" "$t"'
 check "test leg: presentable self-test reports a SKIP not a verdict -> UNVERIFIED" 1 "" \
       'sed "s/warp presentable self-test: shape=.*/warp presentable self-test skipped (mint refused e=-5) -- non-venus device; shape=1/" "$t" > "$t.x" && mv "$t.x" "$t"'
+# F12 [P3]: anchored on the REASON, not just the word "skipped". The control
+# leg exists to show the no-feature path; a leg that skipped because `ctx/new`
+# broke satisfies a bare "skipped" match while proving nothing about it.
 check "control leg lacks presentable skip -> UNVERIFIED" 1 \
       'grep -v "warp presentable self-test skipped" "$c" > "$c.x" && mv "$c.x" "$c"' ""
+check "control leg skipped for the WRONG reason -> UNVERIFIED" 1 \
+      'sed "s/self-test skipped (blob feature not offered)/self-test skipped (mint refused e=-5)/" "$c" > "$c.x" && mv "$c.x" "$c"' ""
 check "control leg ALSO carries a presentable verdict -> UNVERIFIED" 1 \
       'grep "warp presentable self-test: shape=" "$t" >> "$c"' ""
 # One variable away, each direction of the discrimination the gate claims.

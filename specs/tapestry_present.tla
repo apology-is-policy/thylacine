@@ -298,7 +298,7 @@
 (* ===================================================================     *)
 (*                                                                         *)
 (* A PRESENTABLE is a venus-created VkImage whose backing the server       *)
-(* minted as a shareable NON-mappable HOST3D blob, display shape declared  *)
+(* minted as a HOST3D blob the server NEVER MAPS, display shape declared   *)
 (* at registration (WSI-DESIGN 4.1). It has NO GUEST PAGES: unlike a       *)
 (* weave, the backing is host memory, so what its invariant protects is    *)
 (* the HOST resource's lifetime against the display's observers -- the     *)
@@ -522,7 +522,7 @@ VARIABLES
     staleMapped, \* BOOLEAN -- history: a claim resolved against a retiring/gone weave
     destroyReq,  \* BOOLEAN -- the surface destroy was requested
     pstate,      \* {"none","registered","retiring","gone"} -- W-3b: the presentable, a venus
-                 \*   VkImage whose backing is a server-minted shareable NON-mappable HOST3D
+                 \*   VkImage whose backing is a server-minted, never-mapped HOST3D
                  \*   blob, display shape declared at registration (WSI-DESIGN 4.1).
                  \*   PRegister collapses venus-alloc + img/new into one step: between the
                  \*   two the blob is an ordinary venus resource nothing display-side can

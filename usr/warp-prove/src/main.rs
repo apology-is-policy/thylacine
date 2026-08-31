@@ -896,6 +896,17 @@ fn img_prove() -> i64 {
     let gs = parse_field(&info, "stride").unwrap_or_else(|| img_fail("img info missing stride"));
     let gsz = parse_field(&info, "size").unwrap_or_else(|| img_fail("img info missing size"));
     let gb = parse_field(&info, "bound").unwrap_or_else(|| img_fail("img info missing bound"));
+    // round-2 F10: `format` and `mem` were reported and read by NOTHING.
+    // `mem` in particular is the client's only way to confirm the compositor
+    // bound the allocation it MEANT, which is the whole point of echoing it.
+    let gf = parse_field(&info, "format").unwrap_or_else(|| img_fail("img info missing format"));
+    let gm = parse_field(&info, "mem").unwrap_or_else(|| img_fail("img info missing mem"));
+    if gf != FMT as u64 {
+        img_fail(&format!("img info format {} != declared {}", gf, FMT));
+    }
+    if gm != 0 {
+        img_fail(&format!("img info mem {} != declared 0", gm));
+    }
     if res == 0 {
         img_fail("img info res is 0 (no host resource)");
     }
@@ -914,6 +925,32 @@ fn img_prove() -> i64 {
     // declaration that just succeeded).
     if write_ctl(root, &newp, &good) {
         img_fail("re-registering a LIVE handle was accepted (the slot is not exclusive)");
+    }
+
+    // TWO LIVE PRESENTABLES (round-2 F10). Every arm above drives handle 0
+    // alone, so the multi-slot row, the per-handle namespace and the I-32
+    // sum across imgs had no runtime witness at all -- the ABI supports 16
+    // and exactly one had ever been built.
+    let second = format!("1 {} {} {} {} 0", W, H, FMT, STRIDE);
+    if !write_ctl(root, &newp, &second) {
+        img_fail("a SECOND presentable was refused while the first was live");
+    }
+    let info1 = open_read_string(root, &format!("ctx/{}/img/1/info", ctx));
+    let res1 = parse_field(&info1, "res").unwrap_or_else(|| img_fail("second img info missing res"));
+    if res1 == res {
+        img_fail(&format!("two live presentables share res_id {}", res));
+    }
+    // The first must be UNDISTURBED by the second -- a slot row that aliased
+    // would show up here and nowhere else.
+    let info0b = open_read_string(root, &format!("ctx/{}/img/0/info", ctx));
+    if parse_field(&info0b, "res") != Some(res) {
+        img_fail("registering img 1 changed img 0's res_id");
+    }
+    if !write_ctl(root, &format!("ctx/{}/img/1/ctl", ctx), "destroy") {
+        img_fail("second img ctl destroy refused");
+    }
+    if try_open_read(root, &format!("ctx/{}/img/0/info", ctx)).is_none() {
+        img_fail("destroying img 1 also removed img 0");
     }
 
     // Destroy through the ctl verb, then prove BOTH halves of what destroy
@@ -937,8 +974,8 @@ fn img_prove() -> i64 {
     let _ = write_ctl(root, &format!("ctx/{}/img/0/ctl", ctx), "destroy");
     let _ = write_ctl(root, &format!("ctx/{}/ctl", ctx), "destroy");
     t_putstr(&format!(
-        "warp-prove: IMG PASS (shape gate 4/4 refused; declared {}x{} stride {} echoed; res {} -> {} monotonic; handle freed on destroy)\n",
-        W, H, STRIDE, res, res2
+        "warp-prove: IMG PASS (shape gate 4/4 refused; declared {}x{} stride {} fmt {} mem 0 echoed; two live imgs res {}/{} distinct + independent; res {} -> {} monotonic; handle freed on destroy)\n",
+        W, H, STRIDE, FMT, res, res1, res, res2
     ));
     0
 }
