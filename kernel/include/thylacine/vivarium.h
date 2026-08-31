@@ -1257,11 +1257,22 @@ enum viv_sock_state {
 // answer rather than an extinction.
 #define VIV_SOCK_MAX 64u
 
+// The SOCK_NONBLOCK / SOCK_CLOEXEC flag bits carried in socket()'s type word
+// (Linux aarch64 octal values). In the header because both the decide (which
+// masks them off before the base-type switch) and the socket shell (which
+// applies them to the ctl fd) need them.
+enum {
+    VIV_SOCK_NONBLOCK = 04000,
+    VIV_SOCK_CLOEXEC  = 02000000,
+};
+
 struct viv_sock {
     s32 fd;          // the guest's fd; < 0 when the entry is free
     u32 n;           // the /net connection number
     u32 bound_addr;  // bind(): the requested local address, host order (0 = any)
+    u32 remote_addr; // N-2a: the last unconnected sendto() destination, host order
     u16 bound_port;  // bind(): the requested local port,    host order (0 = any)
+    u16 remote_port; // N-2a: the last sendto() dest port (0 = never sent to)
     u8  proto;       // enum viv_net_proto
     u8  state;       // enum viv_sock_state
 };
@@ -1274,7 +1285,7 @@ struct viv_sock {
 // A flag would therefore be state that no reader could ever branch on. If a
 // future row makes the two differ -- getsockname() on a bound-but-idle socket
 // is the candidate -- add it THEN, with the reader that needs it.
-_Static_assert(sizeof(struct viv_sock) == 16, "viv_sock pinned at 16 bytes");
+_Static_assert(sizeof(struct viv_sock) == 24, "viv_sock pinned at 24 bytes");
 
 // The per-Proc table (Proc.socktab). Lazily allocated on the first translated
 // socket(), CAS-installed, freed at proc_free, NOT rfork-inherited -- the
@@ -1347,11 +1358,12 @@ bool viv_socktab_has_room(const struct viv_socktab *tab);
 // /net analogue. `protocol` must be 0 or the family default (IPPROTO_TCP/UDP);
 // anything else names a protocol netd does not speak.
 //
-// SOCK_NONBLOCK/SOCK_CLOEXEC in the type word are REFUSED rather than ignored:
-// a guest that asks for a non-blocking socket and silently gets a blocking one
-// hangs where it expected EAGAIN, which is the mistranslation this tier exists
-// to prevent. (Both are v1.x rows -- NONBLOCK needs a /net readiness story,
-// CLOEXEC needs an exec that preserves fds.)
+// SOCK_NONBLOCK/SOCK_CLOEXEC in the type word are ADMITTED (N-1a): the decide
+// masks them off before the base-type switch and the shell applies them --
+// NONBLOCK as the ctl open-file's CNONBLOCK (which the recv shells read to turn
+// netd's non-blocking empty-read into -EAGAIN), CLOEXEC as the fd's cloexec bit.
+// Any OTHER high bit in the type word is refused (T_E_INVAL): an unknown flag is
+// a request no honest translation exists for.
 //
 // Returns true + writes *out_proto when translatable; false leaves *out_proto
 // untouched and the caller answers the errno in *out_err.
@@ -1430,21 +1442,36 @@ enum { VIV_MSG_NOSIGNAL = 0x4000 };
 // writes/reads, weft fast-paths, and the #844 fd lifecycle behave
 // identically to the native call.
 //
+// SERVED (N-2a): the with-address UDP datagram shape -- sendto(fd, q, ql,
+// MSG_NOSIGNAL, dest, sl) on a FRESH udp socket. The shell dials `dest` on the
+// ctl fd (netd re-points conn N per call) and moves the bytes on a transient
+// data fid; recvmsg (212) reads the reply and synthesizes msg_name from the
+// recorded destination. This is the DNS path -- res_msend.c sends a query per
+// nameserver this way. (recvfrom with a non-NULL addr stays declined -- musl's
+// resolver receives via recvmsg, not recvfrom; the recvfrom addr writeback is
+// still unbuilt and honestly ENOSYS.)
+//
 // DECLINED, each to ENOSYS (the census-visible "unbuilt" answer), each
-// honestly: the with-address datagram shape (a per-datagram destination has
-// no /net verb yet), MSG_PEEK (no non-consuming 9P read), MSG_DONTWAIT (would
-// lie on a blocking-only socket), MSG_WAITALL (changes the return contract), a
-// non-NULL recvfrom source-address out-pointer (peer-address state the socktab
-// does not carry), AND an UNCONNECTED socket -- unconnected send/recv is
-// genuinely unbuilt (no per-datagram dial; the bound-UDP-server recv idiom
-// that Linux serves has no path here), so it declines to ENOSYS rather than a
-// fabricated ENOTCONN. (ENOTCONN would have been fake precision: Linux gives
-// EPIPE for unconnected stream send and EDESTADDRREQ for datagram, we serve
-// none, and answering an errno instead of declining would hide the missing
-// capability from viv_report_unserved -- R2-F1.)
-bool vivarium_sendto_decide(u8 state, u64 flags, u64 addr_va, u64 addrlen,
-                            s32 *out_err);
+// honestly: a with-address TCP send (no connectionless TCP), MSG_PEEK (no
+// non-consuming 9P read), MSG_DONTWAIT (would lie -- nonblock is the socket's
+// own CNONBLOCK, not a per-call flag), MSG_WAITALL (changes the return
+// contract), a non-NULL recvfrom source-address out-pointer (peer-address state
+// recvfrom does not carry -- recvmsg does), AND an unconnected send with NO
+// destination -- genuinely unbuilt (no dial without an addr), so it declines to
+// ENOSYS rather than a fabricated ENOTCONN (R2-F1: Linux gives EPIPE/
+// EDESTADDRREQ, we serve none, and an errno would hide the gap from the census).
+bool vivarium_sendto_decide(enum viv_net_proto proto, u8 state, u64 flags,
+                            u64 addr_va, u64 addrlen, s32 *out_err);
 bool vivarium_recvfrom_decide(u8 state, u64 flags, u64 addr_va, s32 *out_err);
+
+// recvmsg(212) decide (N-2b). flags must be 0 -- MSG_PEEK (no non-consuming 9P
+// read), MSG_WAITALL (changes the return contract), MSG_DONTWAIT (nonblock is
+// the socket's own CNONBLOCK, not a per-call flag) all decline to ENOSYS. The
+// socket must be able to produce a datagram: CONNECTED (its fd IS `data`) or a
+// FRESH socket with a recorded remote (has_remote = a prior unconnected sendto).
+// A never-sent FRESH socket or a LISTENING one has nothing to receive -> ENOSYS.
+// PURE (the caller resolves fd -> socktab state + remote first).
+bool vivarium_recvmsg_decide(u8 state, u64 flags, bool has_remote, s32 *out_err);
 
 // Parse a Linux `struct sockaddr_in` (already copied into kernel memory) into
 // its four address octets + host-order port. PURE.
@@ -2251,6 +2278,35 @@ struct viv_linux_iovec {
 
 _Static_assert(sizeof(struct viv_linux_iovec) == 16,
                "Linux aarch64 struct iovec is two 64-bit words");
+
+// Linux `struct msghdr` on aarch64 (LP64 fixed ABI). recvmsg(212) reads it to
+// find the scatter iovecs + the msg_name out-buffer, and writes back the three
+// value-result fields (namelen, controllen, flags). The two pad words are the
+// LP64 tail padding after socklen_t/int -- present in the on-wire struct, so the
+// 56-byte size is exact and MUST match what the guest's libc lays out.
+struct viv_linux_msghdr {
+    u64 msg_name;         // @0   void *          -- sockaddr out-buffer (may be 0)
+    u32 msg_namelen;      // @8   socklen_t       -- in: buf size; out: addr size
+    u32 _pad0;            // @12
+    u64 msg_iov;          // @16  struct iovec *
+    u64 msg_iovlen;       // @24  size_t
+    u64 msg_control;      // @32  void *          -- ancillary; ignored here
+    u64 msg_controllen;   // @40  size_t          -- out: 0 (no cmsg served)
+    s32 msg_flags;        // @48  int             -- out: 0 / MSG_TRUNC
+    u32 _pad1;            // @52
+};
+_Static_assert(sizeof(struct viv_linux_msghdr) == 56,
+               "Linux aarch64 struct msghdr is 56 bytes");
+
+// Linux MSG_TRUNC (the recvmsg out-flag: the datagram was longer than the
+// supplied buffer and the tail was discarded). arch-independent value.
+enum { VIV_MSG_TRUNC = 0x20 };
+
+// The largest datagram recvmsg reads in one call -- netd's per-connection UDP rx
+// buffer (UDP_RX_BUF, server.rs). A DNS reply (<= 512, or <= 4096 with EDNS0)
+// fits; a datagram past this is truncated + MSG_TRUNC. Bounds the recv bounce so
+// a guest cannot ask the kernel to stage an unbounded buffer.
+enum { VIV_RECV_DGRAM_MAX = 4096 };
 
 // Linux `struct timeval` on aarch64: {s64 tv_sec; s64 tv_usec} (suseconds_t is
 // `long`, hence 64-bit). It has NO native `struct t_*` twin -- Thylacine has no

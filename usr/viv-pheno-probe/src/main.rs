@@ -1621,14 +1621,15 @@ unsafe fn run_linux() -> ! {
         svc3(NR_SOCKET, AF_INET, SOCK_SEQPACKET, 0) == -EPROTONOSUPPORT,
         b"L40\n"
     );
-    // SOCK_NONBLOCK is REFUSED, not silently dropped. A guest that asked for a
-    // non-blocking socket and got a blocking one blocks where it expected
-    // EAGAIN -- the exact mistranslation the argument domain exists to prevent.
-    leg!(
-        rep,
-        svc3(NR_SOCKET, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0) == -22,
-        b"L41\n"
-    );
+    // N-1a: SOCK_NONBLOCK/SOCK_CLOEXEC are ADMITTED now (musl's DNS socket asks
+    // for both). The flags are applied to the ctl fd -- a nonblock socket gets
+    // EAGAIN, an un-cloexec'd one leaks across exec -- rather than refused.
+    // socket() with them succeeds; close the fd so the leg leaks nothing.
+    let nbfd = svc3(NR_SOCKET, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    leg!(rep, nbfd >= 0, b"L41\n");
+    if nbfd >= 0 {
+        svc3(NR_CLOSE, nbfd as u64, 0, 0);
+    }
 
     // A real UDP socket. UDP is the deterministic choice: netd's udp_connect
     // binds a local port and records the remote with NO handshake, so this

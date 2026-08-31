@@ -2021,14 +2021,20 @@ void test_vivarium_socket_domain(void) {
     TEST_ASSERT(!vivarium_socket_decide(1, 1, 0, &proto, &err), "AF_UNIX declines here");
     TEST_ASSERT(err == T_E_AFNOSUPPORT, "AF_UNIX -> EAFNOSUPPORT (the /srv path is pouch's)");
 
-    // The type-word flags are REFUSED, not masked off. This is the leg that
-    // matters: silently dropping SOCK_NONBLOCK gives the guest a blocking
-    // socket where it expected EAGAIN.
-    TEST_ASSERT(!vivarium_socket_decide(2, 1 | 04000, 0, &proto, &err),
-                "SOCK_NONBLOCK is refused, never ignored");
-    TEST_ASSERT(err == T_E_INVAL, "SOCK_NONBLOCK -> EINVAL");
-    TEST_ASSERT(!vivarium_socket_decide(2, 1 | 02000000, 0, &proto, &err),
-                "SOCK_CLOEXEC is refused, never ignored");
+    // N-1a: the SOCK_NONBLOCK/SOCK_CLOEXEC type-word flags are ADMITTED now
+    // (masked off before the base-type switch; the shell applies them to the ctl
+    // fd). musl's DNS socket -- socket(DGRAM|CLOEXEC|NONBLOCK) -- is the consumer
+    // that needs them; refusing them hung the resolver's recvmsg drain loop.
+    TEST_ASSERT(vivarium_socket_decide(2, 1 | 04000, 0, &proto, &err)
+                && proto == VIV_NET_TCP,
+                "SOCK_STREAM|SOCK_NONBLOCK is admitted (flag masked, base recognised)");
+    TEST_ASSERT(vivarium_socket_decide(2, 2 | 02000000 | 04000, 0, &proto, &err)
+                && proto == VIV_NET_UDP,
+                "SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK (the DNS socket) is admitted");
+    // An UNKNOWN high bit is still refused -- no honest translation exists.
+    TEST_ASSERT(!vivarium_socket_decide(2, 1 | 0x40000000, 0, &proto, &err),
+                "an unknown type-word flag is refused");
+    TEST_ASSERT(err == T_E_INVAL, "unknown type flag -> EINVAL");
 
     // No /net analogue.
     TEST_ASSERT(!vivarium_socket_decide(2, 5, 0, &proto, &err), "SOCK_SEQPACKET declines");
@@ -2079,41 +2085,58 @@ void test_vivarium_sendrecv_domain(void) {
     const u8 CONN = 2;   // VIV_SOCK_CONNECTED
     const u8 FRESH = 1;  // VIV_SOCK_FRESH
 
-    // The served send() shape: connected, NULL addr, flags 0 or MSG_NOSIGNAL.
-    TEST_ASSERT(vivarium_sendto_decide(CONN, 0, 0, 0, &err) && err == 0,
+    const enum viv_net_proto TCP = VIV_NET_TCP;
+    const enum viv_net_proto UDP = VIV_NET_UDP;
+
+    // The served connected send() shape: NULL addr, flags 0 or MSG_NOSIGNAL.
+    TEST_ASSERT(vivarium_sendto_decide(TCP, CONN, 0, 0, 0, &err) && err == 0,
                 "connected send(flags=0) is the served point");
-    TEST_ASSERT(vivarium_sendto_decide(CONN, 0x4000, 0, 0, &err) && err == 0,
+    TEST_ASSERT(vivarium_sendto_decide(TCP, CONN, 0x4000, 0, 0, &err) && err == 0,
                 "MSG_NOSIGNAL is admitted (truthful no-op -- no SIGPIPE exists here)");
 
-    // The datagram shape declines to ENOSYS -- undone work, not a wrong call.
-    TEST_ASSERT(!vivarium_sendto_decide(CONN, 0, 0x1000, 16, &err),
-                "sendto-with-address is the datagram shape, declined");
-    TEST_ASSERT(err == T_E_NOSYS, "the datagram decline is ENOSYS");
-    // Any other flag would lie about semantics.
-    TEST_ASSERT(!vivarium_sendto_decide(CONN, 0x40, 0, 0, &err),
-                "MSG_DONTWAIT declines (blocking-only sockets)");
-    TEST_ASSERT(err == T_E_NOSYS, "the flag decline is ENOSYS");
-    // An unconnected send is UNBUILT -> ENOSYS (census-visible), NOT a
-    // fabricated ENOTCONN (R2-F1: ENOTCONN mismatched Linux and hid the gap).
-    TEST_ASSERT(!vivarium_sendto_decide(FRESH, 0, 0, 0, &err),
-                "send on an unconnected socket declines");
-    TEST_ASSERT(err == T_E_NOSYS, "-> ENOSYS (unbuilt, census-visible)");
+    // N-2a: the UDP datagram sendto -- FRESH socket, non-NULL addr, MSG_NOSIGNAL
+    // -- is SERVED (this is the DNS path). The shell dials the addr on ctl.
+    TEST_ASSERT(vivarium_sendto_decide(UDP, FRESH, 0x4000, 0x1000, 16, &err) && err == 0,
+                "UDP sendto-with-address (the DNS datagram shape) is served");
+    // TCP has no connectionless send -> ENOSYS (census-visible unbuilt).
+    TEST_ASSERT(!vivarium_sendto_decide(TCP, FRESH, 0, 0x1000, 16, &err) && err == T_E_NOSYS,
+                "TCP sendto-with-address declines -> ENOSYS");
+    // A datagram send on an already-swapped fd has no ctl left to dial.
+    TEST_ASSERT(!vivarium_sendto_decide(UDP, CONN, 0, 0x1000, 16, &err) && err == T_E_ISCONN,
+                "UDP sendto-with-address on a CONNECTED fd -> EISCONN");
+    // Any non-NOSIGNAL flag would lie (checked before the address shape).
+    TEST_ASSERT(!vivarium_sendto_decide(UDP, FRESH, 0x40, 0x1000, 16, &err) && err == T_E_NOSYS,
+                "MSG_DONTWAIT declines -> ENOSYS");
+    // An unconnected send with NO addr is unbuilt -> ENOSYS, NOT a fabricated
+    // ENOTCONN (R2-F1: ENOTCONN mismatched Linux and hid the gap).
+    TEST_ASSERT(!vivarium_sendto_decide(UDP, FRESH, 0, 0, 0, &err) && err == T_E_NOSYS,
+                "send with no addr on an unconnected socket -> ENOSYS");
 
-    // The served recv() shape: connected, NULL src-addr, flags 0.
+    // recvfrom (unchanged): connected, NULL src-addr, flags 0.
     TEST_ASSERT(vivarium_recvfrom_decide(CONN, 0, 0, &err) && err == 0,
                 "connected recv(flags=0) is the served point");
     TEST_ASSERT(!vivarium_recvfrom_decide(CONN, 2, 0, &err),
                 "MSG_PEEK declines (no non-consuming 9P read)");
     TEST_ASSERT(!vivarium_recvfrom_decide(CONN, 0, 0x1000, &err),
-                "a source-address out-pointer declines (no peer state held)");
-    TEST_ASSERT(!vivarium_recvfrom_decide(FRESH, 0, 0, &err),
-                "recv on an unconnected socket declines");
-    TEST_ASSERT(err == T_E_NOSYS,
-                "-> ENOSYS (the bound-UDP-recv idiom is unbuilt, census-visible)");
+                "a source-address out-pointer declines (recvmsg carries it, not recvfrom)");
+    TEST_ASSERT(!vivarium_recvfrom_decide(FRESH, 0, 0, &err) && err == T_E_NOSYS,
+                "recv on an unconnected socket -> ENOSYS");
+
+    // N-2b: recvmsg. Served for CONNECTED, or a FRESH socket with a recorded
+    // remote (a prior unconnected sendto -- the DNS path). flags must be 0.
+    TEST_ASSERT(vivarium_recvmsg_decide(CONN, 0, false, &err) && err == 0,
+                "recvmsg on a CONNECTED socket is served");
+    TEST_ASSERT(vivarium_recvmsg_decide(FRESH, 0, true, &err) && err == 0,
+                "recvmsg on a FRESH socket that was sendto'd (has_remote) is served");
+    TEST_ASSERT(!vivarium_recvmsg_decide(FRESH, 0, false, &err) && err == T_E_NOSYS,
+                "recvmsg on a never-sent FRESH socket -> ENOSYS (nothing to receive)");
+    TEST_ASSERT(!vivarium_recvmsg_decide(CONN, 2, false, &err) && err == T_E_NOSYS,
+                "recvmsg MSG_PEEK declines -> ENOSYS");
 
     // Fail closed on the NULL output.
-    TEST_ASSERT(!vivarium_sendto_decide(CONN, 0, 0, 0, NULL), "NULL err -> false");
+    TEST_ASSERT(!vivarium_sendto_decide(TCP, CONN, 0, 0, 0, NULL), "NULL err -> false");
     TEST_ASSERT(!vivarium_recvfrom_decide(CONN, 0, 0, NULL), "NULL err -> false");
+    TEST_ASSERT(!vivarium_recvmsg_decide(CONN, 0, false, NULL), "NULL err -> false");
 }
 
 void test_vivarium_sockaddr(void);

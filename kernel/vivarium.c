@@ -382,8 +382,15 @@ static const struct viv_reject g_viv_rejects[] = {
     // blanket row. The full honesty argument: vivarium_getsockopt_decide's
     // header comment.
     { VIV_LINUX_GETSOCKOPT,  VIV_TIER2  },
+    // sendmsg LEFT at ENOSYS: musl's DNS resolver uses it only for the TCP
+    // fallback (start_tcp, on a truncated UDP reply), which is off the git-clone
+    // happy path (A records fit one UDP datagram). recvmsg is SERVED (N-2b): the
+    // T2 shell reads one datagram + synthesizes msg_name from the recorded
+    // remote, which is how res_msend RECEIVES every UDP reply. Control messages
+    // (SCM_RIGHTS fd-passing, I-4's domain) are NOT served -- msg_control is
+    // reported empty; a cmsg-bearing recvmsg gets no ancillary data, not a lie.
     { VIV_LINUX_SENDMSG,     VIV_ENOSYS },
-    { VIV_LINUX_RECVMSG,     VIV_ENOSYS },
+    { VIV_LINUX_RECVMSG,     VIV_TIER2  },  // N-2b: viv_sock_recvmsg
 
     // Readiness (V-5c, section 5.5.4). aarch64 has no plain poll/select, so
     // these two carry the whole family -- musl's poll() and select() are
@@ -1566,13 +1573,13 @@ bool viv_signote_is_deliverable(enum viv_signote note) {
 //   SOCK_STREAM / SOCK_DGRAM  arch/aarch64/bits/socket.h via include/sys/socket.h
 //   SOCK_NONBLOCK / SOCK_CLOEXEC  the type-word flag bits (04000 / 02000000)
 //   IPPROTO_TCP / IPPROTO_UDP  include/netinet/in.h (6 / 17)
+// VIV_SOCK_NONBLOCK / VIV_SOCK_CLOEXEC moved to vivarium.h (the socket shell in
+// syscall.c also needs them to apply the flags to the ctl fd).
 enum {
     VIV_AF_INET        = 2,
     VIV_AF_INET6       = 10,
     VIV_SOCK_STREAM    = 1,
     VIV_SOCK_DGRAM     = 2,
-    VIV_SOCK_NONBLOCK  = 04000,
-    VIV_SOCK_CLOEXEC   = 02000000,
     VIV_IPPROTO_TCP    = 6,
     VIV_IPPROTO_UDP    = 17,
 };
@@ -1591,12 +1598,14 @@ struct viv_sock *viv_socktab_claim(struct viv_socktab *tab, s32 fd,
     if (!tab || fd < 0) return NULL;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
         if (tab->s[i].state == VIV_SOCK_FREE) {
-            tab->s[i].fd         = fd;
-            tab->s[i].proto      = (u8)proto;
-            tab->s[i].state      = VIV_SOCK_FRESH;
-            tab->s[i].n          = n;
-            tab->s[i].bound_addr = 0;   // a fresh socket carries no bind
-            tab->s[i].bound_port = 0;
+            tab->s[i].fd          = fd;
+            tab->s[i].proto       = (u8)proto;
+            tab->s[i].state       = VIV_SOCK_FRESH;
+            tab->s[i].n           = n;
+            tab->s[i].bound_addr  = 0;   // a fresh socket carries no bind
+            tab->s[i].bound_port  = 0;
+            tab->s[i].remote_addr = 0;   // and no unconnected-sendto destination
+            tab->s[i].remote_port = 0;
             return &tab->s[i];
         }
     }
@@ -1617,12 +1626,14 @@ void viv_socktab_drop_slot(struct viv_sock *e) {
     // the bind fields make that concrete: a recycled slot still carrying the
     // previous socket's port would let a listen() announce a port this socket
     // never asked for.
-    e->fd         = -1;
-    e->proto      = 0;
-    e->state      = VIV_SOCK_FREE;
-    e->n          = 0;
-    e->bound_addr = 0;
-    e->bound_port = 0;
+    e->fd          = -1;
+    e->proto       = 0;
+    e->state       = VIV_SOCK_FREE;
+    e->n           = 0;
+    e->bound_addr  = 0;
+    e->bound_port  = 0;
+    e->remote_addr = 0;   // else a recycled slot reports a stranger's peer as
+    e->remote_port = 0;   // this socket's, exactly as a stale bound_port would
 }
 
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd) {
@@ -1667,16 +1678,23 @@ bool vivarium_socket_decide(u64 domain, u64 type, u64 protocol,
         return false;
     }
 
-    // The type word carries flags in its high bits. REFUSE them rather than
-    // masking them off -- a guest that asked for SOCK_NONBLOCK and silently
-    // received a blocking socket blocks where it expected EAGAIN.
-    if (type & (u64)(VIV_SOCK_NONBLOCK | VIV_SOCK_CLOEXEC)) {
+    // The type word carries SOCK_NONBLOCK/SOCK_CLOEXEC in its high bits. Mask
+    // them off before the base-type switch and ADMIT them: the shell applies
+    // NONBLOCK as the open-file's CNONBLOCK and CLOEXEC as the fd's cloexec bit,
+    // so the guest gets exactly the socket it asked for. (They were refused
+    // until N-1a, when musl's DNS resolver -- socket(DGRAM|CLOEXEC|NONBLOCK) at
+    // res_msend.c:123 -- became the consumer that needs them; a blocking socket
+    // there would hang the recvmsg drain loop, and an un-cloexec'd one would
+    // leak the resolver fd across the git exec.) Reject any OTHER high bit: a
+    // type word carrying an unknown flag is a request we cannot honour truthfully.
+    u64 base_type = type & ~(u64)(VIV_SOCK_NONBLOCK | VIV_SOCK_CLOEXEC);
+    if (base_type & ~(u64)0xFFu) {   // no base SOCK_* value exceeds a byte
         *out_err = T_E_INVAL;
         return false;
     }
 
     enum viv_net_proto proto;
-    switch (type) {
+    switch (base_type) {
     case VIV_SOCK_STREAM:
         proto = VIV_NET_TCP;
         if (protocol != 0 && protocol != VIV_IPPROTO_TCP) {
@@ -1714,14 +1732,10 @@ bool vivarium_getsockopt_decide(u64 level, u64 optname, s32 *out_err) {
     return true;
 }
 
-bool vivarium_sendto_decide(u8 state, u64 flags, u64 addr_va, u64 addrlen,
-                            s32 *out_err) {
+bool vivarium_sendto_decide(enum viv_net_proto proto, u8 state, u64 flags,
+                            u64 addr_va, u64 addrlen, s32 *out_err) {
     if (!out_err) return false;                  // fail closed
     *out_err = T_E_NOSYS;
-
-    // The datagram shape -- a per-call destination -- is real undone work
-    // (a per-datagram dial has no /net verb), not a flag to wave through.
-    if (addr_va != 0 || addrlen != 0) return false;
 
     // flags is a C int: narrowed (the openat precedent). MSG_NOSIGNAL is
     // admitted as a TRUTHFUL no-op: it suppresses SIGPIPE, and the phenotype
@@ -1731,15 +1745,28 @@ bool vivarium_sendto_decide(u8 state, u64 flags, u64 addr_va, u64 addrlen,
     // socket, MSG_MORE on a stack that cannot coalesce.
     if (((u32)flags & ~(u32)VIV_MSG_NOSIGNAL) != 0) return false;
 
-    // Only the CONNECTED shape is served. An UNCONNECTED send is genuinely
-    // UNBUILT here (there is no per-datagram dial and no unconnected-stream
-    // path), so it declines to ENOSYS -- the census-visible "unbuilt" answer,
-    // NOT a fabricated state errno. (An earlier draft answered ENOTCONN, which
-    // was fake precision: Linux would give EPIPE for stream / EDESTADDRREQ for
-    // datagram, we serve none of those, and ENOTCONN both mismatched Linux AND
-    // hid the missing capability from viv_report_unserved -- the R2-F1
-    // correction. The shell reports ENOSYS, so "build unconnected send" lands
-    // on the mission's work-list instead of masquerading as a state error.)
+    // sendto WITH a destination -- the connectionless datagram shape, which is
+    // exactly what musl's DNS resolver uses (res_msend.c:189: one bound UDP
+    // socket, a sendto per nameserver). SERVED FOR UDP (N-2a): the shell writes
+    // `connect ip!port` to the ctl fd per datagram (netd re-points conn N) and
+    // moves the bytes on a transient data fid. It requires a socket whose fd is
+    // still its `ctl` -- FRESH: a CONNECTED fd has already been swapped onto
+    // `data` (no ctl to dial), and a LISTENING one is a server. TCP has no
+    // connectionless send, so it stays ENOSYS -- census-visible unbuilt, not a
+    // fake state errno.
+    if (addr_va != 0 || addrlen != 0) {
+        if (proto != VIV_NET_UDP)             return false;   // ENOSYS
+        if (state == (u8)VIV_SOCK_CONNECTED) { *out_err = T_E_ISCONN; return false; }
+        if (state == (u8)VIV_SOCK_LISTENING) { *out_err = T_E_ISCONN; return false; }
+        *out_err = 0;
+        return true;                                          // state FRESH
+    }
+
+    // sendto with NO destination -- the connected send()/write() shape. Only the
+    // CONNECTED shape is served; an unconnected send with no addr is genuinely
+    // UNBUILT (there is no dial without a destination), so it declines to ENOSYS
+    // -- census-visible, NOT a fabricated ENOTCONN (the R2-F1 correction: that
+    // both mismatched Linux and hid the missing capability from the census).
     if (state != (u8)VIV_SOCK_CONNECTED) return false;   // *out_err == T_E_NOSYS
 
     *out_err = 0;
@@ -1768,6 +1795,25 @@ bool vivarium_recvfrom_decide(u8 state, u64 flags, u64 addr_va, s32 *out_err) {
 
     *out_err = 0;
     return true;
+}
+
+bool vivarium_recvmsg_decide(u8 state, u64 flags, bool has_remote, s32 *out_err) {
+    if (!out_err) return false;                  // fail closed
+    *out_err = T_E_NOSYS;
+
+    // Same flag stance as recvfrom: no recv flag is truthfully servable here
+    // (MSG_PEEK has no non-consuming 9P read, MSG_WAITALL changes the return
+    // contract, MSG_DONTWAIT is redundant with the socket's own CNONBLOCK).
+    if ((u32)flags != 0) return false;
+
+    // CONNECTED (the fd is `data`) OR a FRESH socket that has been sendto'd (a
+    // recorded remote -- the DNS datagram path) can produce a datagram. A FRESH
+    // socket that was never sent to has no connection to read, and a LISTENING
+    // one is a server; both decline to ENOSYS rather than fabricate a state error.
+    if (state == (u8)VIV_SOCK_CONNECTED)               { *out_err = 0; return true; }
+    if (state == (u8)VIV_SOCK_FRESH && has_remote)     { *out_err = 0; return true; }
+
+    return false;                                // *out_err == T_E_NOSYS
 }
 
 const char *vivarium_net_proto_dir(enum viv_net_proto proto) {

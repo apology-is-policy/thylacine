@@ -1767,6 +1767,7 @@ static int do_git_https_gate(void) {
     // fetch failure.
     static const struct argv_marker legs[] = {
         GH_MK("GITHTTPS-GIT-OK"),
+        GH_MK("GITHTTPS-DNS"),      // net-4d: getaddrinfo resolves a name (my path)
         GH_MK("GITHTTPS-CLONE"),
         GH_MK("GITHTTPS-VERIFY"),
         GH_MK("GITHTTPS-FETCH"),

@@ -10083,6 +10083,24 @@ static s64 viv_sock_socket(struct Proc *p, u64 domain, u64 type, u64 protocol) {
         handle_close(p, (hidx_t)fd);   // drops the ctl ref -> netd frees the conn
         return -(s64)T_E_MFILE;
     }
+
+    // N-1a: apply the SOCK_NONBLOCK/SOCK_CLOEXEC the decide admitted. NONBLOCK
+    // becomes the ctl open-file's CNONBLOCK -- the guest-visible O_NONBLOCK state
+    // that fcntl(F_GETFL/F_SETFL) reads/writes AND that the recv shells consult to
+    // turn netd's empty-read (0 bytes, non-blocking at net-2c-2) into -EAGAIN.
+    // CLOEXEC becomes the fd's cloexec bit, honoured by handle_close_on_exec +
+    // the socktab's own execve sweep. A failure here is unreachable (the fd was
+    // just handed back by the open), but unwind rather than leak a half-configured
+    // socket: the guest would see a valid fd whose flags silently disagree with
+    // what it asked for.
+    bool nonblock = (type & (u64)VIV_SOCK_NONBLOCK) != 0;
+    bool cloexec  = (type & (u64)VIV_SOCK_CLOEXEC)  != 0;
+    if ((nonblock && handle_set_nonblock(p, (hidx_t)fd, true) < 0) ||
+        (cloexec  && handle_set_cloexec(p, (hidx_t)fd, true) < 0)) {
+        viv_socktab_drop(tab, (s32)fd);
+        handle_close(p, (hidx_t)fd);
+        return -(s64)T_E_IO;
+    }
     return fd;
 }
 
@@ -10129,7 +10147,9 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
     if (!vivarium_sockaddr_in_parse(sa, addrlen, ip4, &port)) {
         // Wrong family is EAFNOSUPPORT; a short/degenerate address is EINVAL.
         // Telling them apart matters: a guest that gets EINVAL for an AF_INET6
-        // address retries it.
+        // address retries it. F6a: read sa[1] only when it was copied -- a 1-byte
+        // addr has no family word (viv_copy_sockaddr fills only sa[0..addrlen)).
+        if (addrlen < 2) return -(s64)T_E_INVAL;
         u16 fam = (u16)((u16)sa[0] | ((u16)sa[1] << 8));
         return (fam != 2) ? -(s64)T_E_AFNOSUPPORT : -(s64)T_E_INVAL;
     }
@@ -10185,11 +10205,31 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
     handle_put(&dh);                      // release the borrowed one
     handle_close(p, (hidx_t)dfd);         // retire the temporary fd
 
+    // Read the socket's nonblocking state off ctl BEFORE the swap. Since N-1a
+    // admits SOCK_NONBLOCK, a socket(NONBLOCK)+connect() must stay nonblocking --
+    // but CNONBLOCK is a per-Spoor flag, and handle_replace installs a fresh data
+    // Spoor that does not carry it. Capture it here, re-apply after the swap.
+    int  ctl_omode = 0;
+    bool ctl_nonblock = false;
+    (void)handle_get_status_flags(p, (hidx_t)fd_raw, &ctl_omode, &ctl_nonblock);
+
     if (handle_replace(p, (hidx_t)fd_raw, KOBJ_SPOOR, dr, dsp) < 0) {
         spoor_clunk(dsp);
         return -(s64)T_E_IO;
     }
+    // Re-apply to the fd, which now names data. A failure is unreachable (the fd
+    // was just installed by handle_replace) and DELIBERATELY tolerated rather than
+    // unwound: connect() has already committed the connection, and a socket that
+    // is connected-but-blocking is a lesser evil than tearing down an established
+    // connection because a flag re-apply we cannot actually reach failed (F5c).
+    if (ctl_nonblock)
+        (void)handle_set_nonblock(p, (hidx_t)fd_raw, true);
 
+    // Record the peer so a recvmsg on this connected socket can synthesize
+    // msg_name (the same field the datagram sendto path records).
+    e->remote_addr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
+                   | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
+    e->remote_port = port;
     e->state = VIV_SOCK_CONNECTED;
     return 0;
 }
@@ -10231,6 +10271,7 @@ static s64 viv_sock_bind(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
     u8  ip4[4];
     u16 port = 0;
     if (!vivarium_sockaddr_in_parse_any(sa, addrlen, ip4, &port)) {
+        if (addrlen < 2) return -(s64)T_E_INVAL;   // F6a: no family word to read
         u16 fam = (u16)((u16)sa[0] | ((u16)sa[1] << 8));
         return (fam != 2) ? -(s64)T_E_AFNOSUPPORT : -(s64)T_E_INVAL;
     }
@@ -10301,15 +10342,86 @@ static s64 viv_sock_getsockopt(struct Proc *p, u64 fd_raw, u64 level,
     return 0;
 }
 
+// Open /net/<proto>/<n>/data for a socket, returning a fresh transient fd the
+// caller closes. PER-CALL, not cached: netd's rx/tx buffers live on the per-conn
+// slot N (server.rs), not the fid, so a transient data fid moves bytes to/from
+// the same connection AND never lands in the guest's fd-number space -- the
+// exact "opened per call, not cached" discipline the poll shell documents at
+// length, for the same reason (a cached derived fd the guest could close would
+// name a stranger's object after the close). UDP data open is immediate (netd's
+// deferred Rlopen is TCP-only), so this does not block for the datagram path.
+static s64 viv_sock_open_data(struct Proc *p, struct viv_sock *e) {
+    char path[64];
+    u32  plen = viv_net_path(path, sizeof(path),
+                             (enum viv_net_proto)e->proto, true, e->n, "data");
+    if (plen == 0) return -(s64)T_E_INVAL;
+    return sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
+                                   2u /* ORDWR */);
+}
+
+// The connectionless UDP datagram send (N-2a): dial `addr` on the ctl fd (netd
+// re-points conn N per call, server.rs), then move the payload on a transient
+// data fid. The guest fd stays `ctl`, so a subsequent sendto to a DIFFERENT peer
+// re-dials the same connection -- which is how res_msend queries several
+// nameservers on one socket. The recorded destination feeds recvmsg's msg_name.
+static s64 viv_sock_dgram_sendto(struct Proc *p, struct viv_sock *e, u64 fd_raw,
+                                 u64 buf_va, u64 len, u64 addr_va, u64 addrlen) {
+    // A CONSTRAINED bind cannot be honoured -- netd's connect verb takes only the
+    // remote and silently ignores any local endpoint, so a socket bound to a
+    // specific source port would get an ephemeral one. Refuse it, exactly as
+    // connect() does (the same OPNOTSUPP). An UNCONSTRAINED bind (0.0.0.0:0 --
+    // what musl's resolver does) leaves both fields 0 and proceeds.
+    if (e->bound_port != 0 || e->bound_addr != 0) return -(s64)T_E_OPNOTSUPP;
+
+    // Copy the destination into kernel memory before parsing (viv_copy_sockaddr
+    // is the connect/bind TOCTOU-safe copy: a peer thread cannot rewrite the
+    // family between the check and the address read).
+    u8  sa[128];
+    s64 rc = viv_copy_sockaddr(addr_va, addrlen, sa);
+    if (rc < 0) return rc;
+    u8  ip4[4];
+    u16 port = 0;
+    if (!vivarium_sockaddr_in_parse(sa, addrlen, ip4, &port)) {
+        if (addrlen < 2) return -(s64)T_E_INVAL;   // F6a: no family word to read
+        u16 fam = (u16)((u16)sa[0] | ((u16)sa[1] << 8));
+        return (fam != 2) ? -(s64)T_E_AFNOSUPPORT : -(s64)T_E_INVAL;
+    }
+
+    // Re-dial: `connect ip!port` to ctl (the guest fd, still ctl for a FRESH
+    // socket). All-or-nothing, like connect's own verb write.
+    char cmd[48];
+    u32  clen = vivarium_net_cmd_ipport(cmd, sizeof(cmd), "connect", ip4, port);
+    if (clen == 0) return -(s64)T_E_INVAL;
+    s64 w = spoor_write_common(p, (hidx_t)fd_raw, (const u8 *)cmd, clen, false, 0);
+    if (w != (s64)clen) return -(s64)T_E_CONNREFUSED;
+
+    // Move the payload on a data fid opened for exactly this datagram. The native
+    // write handler does the copy-in + staging; a UDP write is one datagram.
+    s64 dfd = viv_sock_open_data(p, e);
+    if (dfd < 0) return dfd;
+    s64 sent = sys_write_handler((u64)dfd, buf_va, len);
+    handle_close(p, (hidx_t)dfd);
+    if (sent < 0) return sent;
+
+    // Record the destination AFTER the send succeeds -- a failed dial must not
+    // overwrite a working remote (recvmsg would then report the wrong peer, which
+    // musl's res_msend rejects via memcmp).
+    e->remote_addr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
+                   | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
+    e->remote_port = port;
+    return sent;
+}
+
 // sendto(fd, buf, len, flags, addr, addrlen) / recvfrom(fd, buf, len, flags,
-// addr, addrlen) -- the connected-socket send()/recv() shape only (musl's
-// send/recv ARE these numbers on aarch64; the decide's header carries the
-// domain argument). After the socket-specific screening the data movement is
-// DELEGATED to the native write/read handlers -- the same staging, weft
-// fast-path, short-op semantics, and #844 fd lifecycle a T1-renumbered
-// write()/read() on this fd would get. `p` is only used for the socktab
-// screen; the native handlers re-derive it from current_thread, which is the
-// same Proc (this shell runs on the calling thread).
+// addr, addrlen). Two served shapes:
+//   * NO addr -- the connected send()/recv() (musl's send/recv ARE these numbers
+//     on aarch64). The data movement DELEGATES to the native write/read handlers
+//     on the guest fd (for a CONNECTED socket that fd IS `data`) -- same staging,
+//     weft fast-path, short-op semantics, and #844 lifecycle a T1-renumbered
+//     write()/read() would get.
+//   * WITH addr -- the UDP datagram sendto (N-2a), handled above.
+// `p` is used for the socktab screen; the native handlers re-derive it from
+// current_thread, the same Proc (this shell runs on the calling thread).
 static s64 viv_sock_sendto(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
                            u64 flags, u64 addr_va, u64 addrlen) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
@@ -10317,10 +10429,14 @@ static s64 viv_sock_sendto(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
     if (!e) return -(s64)T_E_NOTSOCK;
 
     s32 err = 0;
-    if (!vivarium_sendto_decide(e->state, flags, addr_va, addrlen, &err))
+    if (!vivarium_sendto_decide((enum viv_net_proto)e->proto, e->state, flags,
+                                addr_va, addrlen, &err))
         return -(s64)err;
 
-    return sys_write_handler(fd_raw, buf_va, len);
+    if (addr_va == 0 && addrlen == 0)
+        return sys_write_handler(fd_raw, buf_va, len);
+
+    return viv_sock_dgram_sendto(p, e, fd_raw, buf_va, len, addr_va, addrlen);
 }
 
 static s64 viv_sock_recvfrom(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
@@ -10334,6 +10450,165 @@ static s64 viv_sock_recvfrom(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
         return -(s64)err;
 
     return sys_read_handler(fd_raw, buf_va, len);
+}
+
+// recvmsg(fd, msghdr, flags) (N-2b). Reads ONE datagram and, when msg_name is
+// non-NULL, writes back the recorded remote as a byte-exact sockaddr_in -- the
+// shape musl's res_msend memcmp's against the nameserver it queried
+// (res_msend.c:216), so any deviation makes DNS silently drop the reply. This is
+// the audit-critical copy-out surface (the getdents64 P0 class): EVERY user
+// access -- the msghdr read, each iovec read, each scatter write, and the
+// msg_name/namelen/controllen/flags writeback -- is bounded by
+// sys_validate_user_buf before it runs.
+static s64 viv_sock_recvmsg(struct Proc *p, u64 fd_raw, u64 msg_va, u64 flags) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
+    if (!e) return -(s64)T_E_NOTSOCK;
+
+    s32 derr = 0;
+    if (!vivarium_recvmsg_decide(e->state, flags, e->remote_port != 0, &derr))
+        return -(s64)derr;
+
+    // Copy the whole msghdr in (validated). No uaccess_load_u64 exists, and one
+    // staged copy is easier to reason about than seven field loads; the fault
+    // fixup makes a peer-unmapped read a clean -EFAULT (there is no peer thread
+    // for a PHENO_LINUX Proc, so this is belt-and-braces).
+    if (!sys_validate_user_buf(msg_va, sizeof(struct viv_linux_msghdr)))
+        return -(s64)T_E_FAULT;
+    struct viv_linux_msghdr mh;
+    if (uaccess_copy_in(&mh, msg_va, sizeof(mh)) != 0) return -(s64)T_E_FAULT;
+
+    if (mh.msg_iovlen > VIV_UIO_MAXIOV) return -(s64)T_E_INVAL;
+
+    // MULTI-THREAD NOTE, owed to N-3 (phenotype threads). The socktab this reads
+    // (e->state, e->remote_*) is LOCK-FREE, sound ONLY because a PHENO_LINUX Proc
+    // has no peer thread -- clone(CLONE_THREAD) is refused by exact-equality in
+    // vivarium_clone_decide, and fork gives a fresh socktab. When threading lands,
+    // a sendto/recvmsg pair on two threads races remote_* (wrong msg_name -> a
+    // dropped reply) and state (wrong data-fid branch), and the transient data fd
+    // below sits briefly in the guest fd-space where a peer could close it. That
+    // must be re-derived THEN (a socktab lock + a non-guest-fd data handle),
+    // exactly as dup3's header warns for the same table.
+    //
+    // F3: validate msg_name UP FRONT, before a datagram is consumed. Linux checks
+    // the address buffer before the receive, so a bad msg_name must fail EFAULT
+    // without eating a datagram (which the netd read below cannot un-consume).
+    if (mh.msg_name != 0 && mh.msg_namelen > 0) {
+        u32 want = (mh.msg_namelen < 16u) ? mh.msg_namelen : 16u;
+        if (!sys_validate_user_buf(mh.msg_name, want)) return -(s64)T_E_FAULT;
+    }
+
+    // Pass 1: read + validate every iovec, summing the scatter capacity capped at
+    // one datagram. A zero-length entry names no memory (no range check -- Linux
+    // skips them, and sys_validate_user_buf would reject base==0).
+    u64 cap = 0;
+    for (u64 i = 0; i < mh.msg_iovlen; i++) {
+        struct viv_linux_iovec kiov;
+        u64 ent = mh.msg_iov + i * sizeof(kiov);
+        // F1: the iovec-ARRAY pointer needs its own range check -- uaccess_copy_in
+        // relies on the fault fixup, which does not fault an EL1 read of a mapped
+        // kernel VA, so validate the entry span before reading it (memory-safe
+        // without this, since kiov.base is validated before any copy-out, but the
+        // uaccess contract wants the source bounded).
+        if (!sys_validate_user_buf(ent, sizeof(kiov))) return -(s64)T_E_FAULT;
+        if (uaccess_copy_in(&kiov, ent, sizeof(kiov)) != 0) return -(s64)T_E_FAULT;
+        if (kiov.len != 0 && !sys_validate_user_buf(kiov.base, kiov.len))
+            return -(s64)T_E_FAULT;
+        if (cap < (u64)VIV_RECV_DGRAM_MAX) {
+            u64 room = (u64)VIV_RECV_DGRAM_MAX - cap;
+            cap += (kiov.len < room) ? kiov.len : room;
+        }
+    }
+
+    // The data fid: a CONNECTED socket's guest fd IS `data`; a FRESH datagram
+    // socket's guest fd is `ctl`, so open a transient data fid (closed below).
+    bool close_data = false;
+    s64  dfd;
+    if (e->state == (u8)VIV_SOCK_CONNECTED) {
+        dfd = (s64)fd_raw;
+    } else {
+        dfd = viv_sock_open_data(p, e);
+        if (dfd < 0) return dfd;
+        close_data = true;
+    }
+
+    // Read ONE datagram into a zeroed kernel bounce (cap up to 4 KiB is too big
+    // for the kernel stack; zeroed so no uninitialised kernel byte can ever reach
+    // the guest). One netd read == one UDP datagram, so all scatter comes from
+    // this single read -- a second read would consume a second datagram.
+    s64 got     = 0;
+    u8 *bounce  = NULL;
+    if (cap > 0) {
+        bounce = (u8 *)kzalloc(cap, 0);
+        if (!bounce) {
+            if (close_data) handle_close(p, (hidx_t)dfd);
+            return -(s64)T_E_NOMEM;
+        }
+        got = spoor_read_common(p, (hidx_t)dfd, bounce, cap, false, 0);
+    }
+    if (close_data) handle_close(p, (hidx_t)dfd);
+    if (got < 0) { if (bounce) kfree(bounce); return got; }
+
+    // NONBLOCK: netd's `data` read is non-blocking (0 bytes on an empty socket,
+    // net-2c-2), so a 0-byte read on a nonblocking socket is EAGAIN, not EOF --
+    // res_msend's recvmsg drain loop needs the negative return to break. A
+    // blocking socket keeps the 0.
+    if (got == 0) {
+        int  omode = 0;
+        bool nb    = false;
+        (void)handle_get_status_flags(p, (hidx_t)fd_raw, &omode, &nb);
+        if (bounce) kfree(bounce);
+        return nb ? -(s64)T_E_AGAIN : 0;
+    }
+
+    // Pass 2: scatter the datagram across the iovecs (validated copy-out per
+    // entry -- the array is re-read, and a peer rewrite yields values that are
+    // themselves validated before use, degrading only to a short scatter).
+    u64 off = 0;
+    for (u64 i = 0; i < mh.msg_iovlen && off < (u64)got; i++) {
+        struct viv_linux_iovec kiov;
+        u64 ent = mh.msg_iov + i * sizeof(kiov);
+        if (!sys_validate_user_buf(ent, sizeof(kiov))) { kfree(bounce); return -(s64)T_E_FAULT; }   // F1
+        if (uaccess_copy_in(&kiov, ent, sizeof(kiov)) != 0) { kfree(bounce); return -(s64)T_E_FAULT; }
+        if (kiov.len == 0) continue;
+        u64 take = (u64)got - off;
+        if (take > kiov.len) take = kiov.len;
+        if (!sys_validate_user_buf(kiov.base, take)) { kfree(bounce); return -(s64)T_E_FAULT; }
+        if (uaccess_copy_out(kiov.base, bounce + off, take) != 0) { kfree(bounce); return -(s64)T_E_FAULT; }
+        off += take;
+    }
+    kfree(bounce);
+
+    // msg_name writeback: the recorded remote as a byte-exact sockaddr_in, but
+    // only when the guest supplied a buffer. A CONNECTED socket with no recorded
+    // remote (remote_port == 0) reports a zero-length name, which is Linux's
+    // shape for a connected recvmsg the caller did not need the peer from.
+    u32 out_namelen = 0;
+    if (mh.msg_name != 0 && mh.msg_namelen > 0 && e->remote_port != 0) {
+        u8  ip4[4] = { (u8)(e->remote_addr >> 24), (u8)(e->remote_addr >> 16),
+                       (u8)(e->remote_addr >> 8),  (u8)(e->remote_addr) };
+        u8  sabuf[16];
+        u32 salen = vivarium_sockaddr_in_build(sabuf, sizeof(sabuf), ip4, e->remote_port);
+        if (salen == 0) return -(s64)T_E_INVAL;           // unreachable (16-byte buf)
+        u32 copy = (mh.msg_namelen < salen) ? mh.msg_namelen : salen;
+        if (!sys_validate_user_buf(mh.msg_name, copy)) return -(s64)T_E_FAULT;
+        if (uaccess_copy_out(mh.msg_name, sabuf, copy) != 0) return -(s64)T_E_FAULT;
+        out_namelen = salen;   // Linux reports the FULL addr size, even on truncation
+    }
+    if (uaccess_copy_out(msg_va + offsetof(struct viv_linux_msghdr, msg_namelen),
+                         &out_namelen, sizeof(out_namelen)) != 0) return -(s64)T_E_FAULT;
+
+    // No ancillary data served; report an empty control buffer + clean flags.
+    // (MSG_TRUNC detection would need netd to report the discarded tail size,
+    // which it does not, so flags stay 0 -- a DNS reply fits VIV_RECV_DGRAM_MAX.)
+    u64 zero64  = 0;
+    if (uaccess_copy_out(msg_va + offsetof(struct viv_linux_msghdr, msg_controllen),
+                         &zero64, sizeof(zero64)) != 0) return -(s64)T_E_FAULT;
+    s32 outflags = 0;
+    if (uaccess_copy_out(msg_va + offsetof(struct viv_linux_msghdr, msg_flags),
+                         &outflags, sizeof(outflags)) != 0) return -(s64)T_E_FAULT;
+
+    return got;
 }
 
 static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
@@ -12103,6 +12378,12 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // shape leaves as garbage (the clone garbage-register rule).
         return viv_sock_recvfrom(p, args[0], args[1], args[2], args[3],
                                  args[4]);
+
+    case VIV_LINUX_RECVMSG:
+        // recvmsg(fd, msghdr, flags): x0 fd, x1 msghdr, x2 flags. The msghdr's
+        // iovecs + msg_name are read/written by the shell (N-2b); this is the
+        // receive half of the DNS datagram path.
+        return viv_sock_recvmsg(p, args[0], args[1], args[2]);
 
     case VIV_LINUX_PPOLL:
         // ppoll(fds, nfds, tmo_p, sigmask, sigsetsize): x0..x4. sigsetsize is

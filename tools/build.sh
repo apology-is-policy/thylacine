@@ -1630,27 +1630,24 @@ VIVEOF
                                "$gnb/rootfs/usr/share/git-core/templates"
                             chmod 0755 "$gnb/rootfs/usr/bin/git" \
                                        "$gnb/rootfs/usr/bin/git-remote-http"
-                            # resolv.conf: the slirp DNS (10.0.2.3). musl's
-                            # getaddrinfo would query it over UNCONNECTED UDP +
-                            # non-blocking, which the phenotype does not yet serve
-                            # (vivarium.c: only CONNECTED UDP; net-4d "DNS E2E" is
-                            # OWED). So DNS-by-name does not work for a phenotype
-                            # container yet -- present for when net-4d lands.
+                            # resolv.conf: the slirp DNS (10.0.2.3). Since net-4d
+                            # LANDED, musl's getaddrinfo queries it over the
+                            # phenotype UDP path (unconnected sendto + non-blocking
+                            # recvmsg) and the clone RESOLVES github.com by name --
+                            # no /etc/hosts pin needed (the git-https gate's default).
                             printf 'nameserver 10.0.2.3\n' \
                                 > "$gnb/rootfs/etc/resolv.conf"
-                            # /etc/hosts: a FRESH-resolved host->IP pin the harness
-                            # passes in THYLACINE_GITNET_HOSTS (getaddrinfo checks
-                            # /etc/hosts BEFORE any DNS query, so the clone needs no
-                            # resolver). This ISOLATES the git-transport proof (TLS
-                            # + netd TCP + smart-http + pack) from the orthogonal
-                            # DNS-by-name gap above -- exactly as the alpine-net
-                            # twin pins example.com, but resolved at bake time so it
-                            # is never a stale hardcode. Absent -> the clone would
-                            # attempt DNS and surface the net-4d gap.
+                            # /etc/hosts: an OPTIONAL host->IP pin, passed in
+                            # THYLACINE_GITNET_HOSTS (getaddrinfo checks /etc/hosts
+                            # BEFORE any DNS query). No longer the default -- it
+                            # exists only to RE-ISOLATE the transport proof (TLS +
+                            # netd TCP + smart-http + pack) from the resolver when
+                            # debugging one independently of the other. Absent (the
+                            # default) -> the clone resolves by name, as it should.
                             if [[ -n "${THYLACINE_GITNET_HOSTS:-}" ]]; then
                                 printf '%s\n' "$THYLACINE_GITNET_HOSTS" \
                                     >> "$gnb/rootfs/etc/hosts"
-                                echo "==> viv bundles: git-net /etc/hosts pinned ($THYLACINE_GITNET_HOSTS -- fresh-resolved transport isolation; DNS-by-name is net-4d)"
+                                echo "==> viv bundles: git-net /etc/hosts pinned ($THYLACINE_GITNET_HOSTS -- optional transport isolation; DNS-by-name works by default since net-4d)"
                             fi
                             cat > "$gnb/rootfs/etc/gitconfig" <<'VIVEOF'
 [user]
@@ -1688,6 +1685,13 @@ VIVEOF
 rm -rf /tmp/hw 2>/dev/null
 cd /tmp || { echo GITHTTPS-FAIL-CD; exit 1; }
 git version >/dev/null 2>&1 && echo GITHTTPS-GIT-OK || { echo GITHTTPS-FAIL-GIT; exit 1; }
+# net-4d DNS-by-name: prove musl's getaddrinfo resolves a name over the vivarium
+# UDP path (unconnected sendto + non-blocking recvmsg -> netd -> slirp 10.0.2.3).
+# getent ahostsv4 is single-threaded getaddrinfo (res_msend), the EXACT path git's
+# THREADED resolver cannot use -- so this isolates the kernel DNS capability from
+# the orthogonal pthread gap. example.com is NEVER in this bundle's /etc/hosts
+# (only github.com may be pinned), so a printed IPv4 is a real resolver round-trip.
+getent ahostsv4 example.com 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ' && echo GITHTTPS-DNS || { echo GITHTTPS-FAIL-DNS; exit 1; }
 git clone --depth 1 https://github.com/octocat/Hello-World.git hw && echo GITHTTPS-CLONE || { echo GITHTTPS-FAIL-CLONE; exit 1; }
 test -d /tmp/hw/.git && echo GITHTTPS-VERIFY || { echo GITHTTPS-FAIL-VERIFY; exit 1; }
 cd /tmp/hw || { echo GITHTTPS-FAIL-CD2; exit 1; }

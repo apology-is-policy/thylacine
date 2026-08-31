@@ -22,6 +22,73 @@ needed the operator.
 
 ---
 
+## 2026-08-31 (aux) -- DNS by name for the Linux phenotype (net-4d): `git clone https://github.com` is now literal
+
+The operator, after the busybox-tar run and a self-compact, asked to "make the
+dns resolve work in vivarium, so that git clone can accept https://github.com".
+Opened the chunk fresh and surfaced one question -- build all four pieces
+straight through, or pause after the socket layer -- operator chose **straight
+through** (one audit + one gate).
+
+**The recon changed the design before a line was written.** My own resume note
+prescribed the pouch model: hold both a `ctl` and a `data` fd in the socktab.
+Reading the ground truth flipped it:
+
+- `third_party/musl/src/network/res_msend.c` is the exact sequence:
+  `socket(DGRAM|CLOEXEC|NONBLOCK)` -> `bind(0.0.0.0:0)` -> a `sendto` per
+  nameserver on ONE socket -> `poll(POLLIN)` -> a `recvmsg` DRAIN loop that reads
+  until a negative return. Two surprises vs the old roadmap: it breaks at
+  `socket()` FIRST (the flags were refused), and it receives via **`recvmsg`
+  (212)**, not `recvfrom`.
+- `usr/netd/src/server.rs`: `data` I/O is **non-blocking at netd** (0 bytes on an
+  empty socket), and the rx/tx buffers live on the per-connection **slot N**, not
+  the fid. So the pouch "hold both fds" model does not translate: a cached data
+  fd would sit in the guest's own fd-number space where the guest could `close()`
+  it -- the exact footgun the `ppoll` readiness shell already refuses. The
+  kernel-correct design is **per-call-open** (re-open `data` per datagram, the
+  poll idiom), which also keeps the socktab **reference-free** so `proc_free`'s
+  `kfree` cannot orphan a connection (`proc.c:744`'s stated invariant). Recorded
+  the reversal in `memory/design_dns_vivarium_percall_open.md` before coding.
+
+Four pieces landed (`kernel/vivarium.c` + `kernel/syscall.c`): N-1a socket flags
+admitted + applied to the ctl fd; N-2a unconnected UDP `sendto` (dial-per-datagram
++ transient data fid + recorded remote, `viv_sock` 16->24); N-2b `recvmsg` (one
+datagram -> bounce -> iovec scatter -> byte-exact `msg_name`, every copy-out
+`sys_validate_user_buf`-guarded); N-1b the 0->EAGAIN nonblock map so the drain
+loop terminates. Plus connect now preserves `CNONBLOCK` across its ctl->data swap
+-- a regression N-1a would otherwise have introduced, caught by reasoning about
+the swap, not by a test.
+
+**The proof, and what it revealed.** Baked the git-https gate with **no
+/etc/hosts pin** (dropped `THYLACINE_GITNET_HOSTS`) and added a `GITHTTPS-DNS`
+`getent` leg. Boot passed every marker in order: `GITHTTPS-DNS` (single-threaded
+`getaddrinfo` resolved example.com by name -- my path) AND
+`GITHTTPS-CLONE`/`VERIFY`/`FETCH`/`DONE` (git clone github.com by name). So the
+literal goal is met. The finding the E2E surfaced, confirmed with the operator:
+git's BUNDLED static curl is synchronous (resolves by name today), but STANDALONE
+Alpine curl + npxf use the THREADED resolver -> they still need **N-3
+(CLONE_THREAD/pthread)**, the next chunk. That is why the git-net gate's pin was a
+transport-isolation tool, now retired.
+
+**Audit (holotype, Fable 5, MODEL start==end): 0 P0 / 0 P1 / 0 P2 / 6 P3 --
+clean.** The prosecutor verified the whole getdents64-class copy-out surface by
+line (20 load-bearing properties) -- every copy-out guarded, the bounce kzalloc'd
+so no uninitialised byte leaks, the socktab-holds-no-refs invariant preserved.
+The six P3s were contract-hardening, not defects: F1 (validate the iovec-ARRAY
+pointer, not just its `base` -- memory-safe without it, but a uaccess-contract
+gap it shares with `viv_writev`), F2 (the socktab grew cross-call state gated on
+the enforced `CLONE_THREAD`-refused invariant without carrying the dup3-style
+re-derivation note owed to N-3), F3 (a bad `msg_name` consumed a datagram before
+faulting), F6a (an uninitialised `sa[1]` read on a 1-byte address, errno-only,
+cloned across connect/bind too). Fixed F1/F2/F3/F6a in code, documented F4 (EDNS0
+<= 4 KiB) / F5 (blocking-datagram-returns-0 + the connect tolerate); tracked F6b
+(a hostile-msghdr regression probe) as a follow-on. The `viv_writev` F1 twin is
+pre-existing + memory-safe, deliberately left out of scope.
+
+Suite 1468/1468, boot OK; SMP gate on the final tree; both mirrors after all-green.
+
+---
+
 ## 2026-08-31 (aux) -- the "Found issues" triage: Stream 0 workflow bar, busybox tar (S_IFMT + /viv/abin), and vfork->fork by an operator lineage call
 
 The operator came back from a weekend of hands-on testing with a long list in

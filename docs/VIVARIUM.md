@@ -774,6 +774,76 @@ reachable, `sys_poll_for_proc`'s `nfds == 0` rejection is deliberately left alon
 (it is a native ABI a native caller may rely on), and the `ppoll` decline is
 retired.
 
+#### 5.5.5 DNS by name — the unconnected datagram path (net-4d, N-1a..N-2b)
+
+The socket family above served the **connected** shape only; a container's
+`getaddrinfo("github.com")` broke three layers down, so every net test pinned the
+host in `/etc/hosts` to dodge it. musl's resolver (`res_msend.c`) is a precise
+sequence: `socket(AF_INET, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK)` → `bind(0.0.0.0:0)`
+→ a `sendto(query, nameserver)` per configured server on **one** socket →
+`poll(POLLIN)` → a `recvmsg` drain loop whose `msg_name` it `memcmp`s against the
+nameserver it queried. Four kernel pieces close it:
+
+- **N-1a** — `socket()` now **admits** `SOCK_NONBLOCK`/`SOCK_CLOEXEC` (masked off
+  before the base-type switch; the shell applies them to the `ctl` fd as
+  `CNONBLOCK` + the cloexec bit). They were refused before; a resolver that asked
+  for a non-blocking socket and got a blocking one hangs the drain loop below.
+- **N-2a** — the **unconnected UDP `sendto(dest)`**. `vivarium_sendto_decide`
+  gained the `proto` argument and admits the datagram shape for a `FRESH` udp
+  socket; the shell dials `connect ip!port` on the `ctl` fd (netd re-points the
+  connection **per datagram**, `server.rs`) and moves the payload on a **transient
+  `data` fid opened for exactly that datagram**. The destination is recorded in
+  the socktab (`remote_addr`/`remote_port`, growing `viv_sock` 16→24).
+- **N-2b** — `recvmsg` (nr 212, previously blanket ENOSYS). Reads one datagram
+  into a kernel bounce, scatters it across the guest iovecs, and synthesizes
+  `msg_name` = the recorded remote as a **byte-exact `sockaddr_in`** (musl
+  `memcmp`s it, so any deviation silently drops the reply). Every copy-out is
+  bounded by `sys_validate_user_buf` — the same guard the native `getdents64` arm
+  carries, because this is the identical variable-length-copy-to-a-guest-pointer
+  surface.
+- **N-1b** — nonblocking recv. netd's `data` read is **non-blocking at the server**
+  (0 bytes on an empty socket, net-2c-2), so the shell maps a 0-byte read on a
+  nonblocking socket to `-EAGAIN`; without it res_msend's drain loop, which reads
+  until the negative return, never terminates.
+
+**Why per-call-open, not a held data fid.** The pouch boundary-line (userspace)
+holds both a `ctl` and a `data` fd, because there the fds are the guest's own and
+its libc tracks them. In the kernel a cached `data` fd would sit in the guest's
+own fd-number space, where the guest could `close()` it — the documented footgun
+the `ppoll` readiness shell already refuses (§5.5.4). Re-opening `data` per call
+is safe precisely because netd's rx/tx buffers live on the per-connection **slot
+`N`** (not the fid) and the guest's `ctl` fd keeps the slot alive; it is the same
+"opened per call, not cached" discipline, and it keeps the socktab entry
+**reference-free** so `proc_free`'s `kfree` can never orphan a connection. The
+held-Spoor closure (a poll/data core that caches Spoors outside fd-number space)
+stays the future unification for *both* readiness and data, tracked as one item.
+
+**Honest ceilings.** With one nameserver (the staged `/etc/resolv.conf` =
+`10.0.2.3`) this is exact. With **several**, netd's connected-UDP filters by peer
+and the per-datagram re-dial leaves the connection pointed at the *last* server,
+so it degrades to **last-nameserver-wins** — a lost redundancy, never a misroute
+(each `sendto`'s bytes go to its own destination). True multi-server parallelism
+needs netd's headers-mode, deliberately out of scope. The **TCP DNS fallback**
+(musl's `start_tcp`/`sendmsg`, taken only on a truncated `TC`-bit reply) stays
+ENOSYS — off the `git clone` happy path, where an A record fits one UDP datagram.
+A datagram larger than `VIV_RECV_DGRAM_MAX` (4 KiB, matching netd's `UDP_RX_BUF`)
+is truncated **without** `MSG_TRUNC` — so a guest that advertises an EDNS0 UDP
+buffer above 4 KiB could see a reply silently truncated; correct DNS therefore
+requires the guest's EDNS0 size ≤ `VIV_RECV_DGRAM_MAX` (revisit `MSG_TRUNC` when
+netd reports the discarded tail). A recvmsg on an **empty blocking** datagram
+socket returns 0 rather than blocking (netd's `data` read is non-blocking, and
+there is no readiness-gated block on this path) — correct for the resolver, which
+is non-blocking; a general blocking datagram consumer would see an empty-datagram
+shape. And `connect()` now **preserves** the socket's `CNONBLOCK` across its
+`ctl`→`data` swap, which N-1a's admission would otherwise silently drop.
+
+**What still gates `git clone https://` by name.** N-1a..N-2b make musl's
+*single-threaded* `getaddrinfo` (busybox's, and the `GITHTTPS-DNS` gate leg's)
+resolve by name. git's HTTPS transport reaches DNS through libcurl's **threaded**
+resolver, which spawns a thread — the orthogonal `CLONE_THREAD`/`pthread_create`
+gap — so the git-net gate keeps its `/etc/hosts` pin for the clone itself until
+that lands. The DNS *capability* is proven independently of it.
+
 ---
 
 ## 6. The diorama — the synthetic Linux world

@@ -31,21 +31,13 @@ if ! git ls-remote --heads https://github.com/octocat/Hello-World.git >/dev/null
 fi
 echo "==> git-https (B3): host reaches github OK"
 
-# Resolve github.com FRESH on the host and pin it into the container's /etc/hosts
-# (via build.sh). This isolates the git-TRANSPORT proof (TLS + netd TCP +
-# smart-http + pack) from DNS-by-name, which the phenotype does not yet serve for
-# a container (musl's getaddrinfo needs unconnected UDP + non-blocking -- net-4d,
-# OWED). getaddrinfo checks /etc/hosts before any resolver, so the clone uses the
-# pinned IP with SNI/Host github.com (the cert still validates). Fresh each run,
-# so never a stale hardcode. github's smart-http clone stays entirely on
-# github.com (no codeload redirect for the pack), so one pin suffices.
-ghip="$(python3 -c "import socket,sys; print(socket.gethostbyname('github.com'))" 2>/dev/null || true)"
-if [[ -z "$ghip" ]]; then
-    echo "==> git-https (B3): SKIP -- could not resolve github.com on the host"
-    exit 77
-fi
-export THYLACINE_GITNET_HOSTS="$ghip github.com"
-echo "==> git-https (B3): pinned github.com -> $ghip (transport isolation; DNS-by-name is net-4d)"
+# NO /etc/hosts pin: net-4d (unconnected-UDP DNS-by-name) LANDED, so the clone
+# RESOLVES github.com by name over musl's getaddrinfo -> the phenotype UDP path
+# (vivarium recvmsg + non-blocking sendto) -> netd -> slirp 10.0.2.3. The gate now
+# proves the FULL chain, DNS included; the GITHTTPS-DNS marker (a getent probe)
+# pinpoints a resolver regression distinctly from a transport one. To re-isolate
+# transport for debugging, set THYLACINE_GITNET_HOSTS="<ip> github.com" by hand --
+# build.sh still honours it -- but the default is name resolution, as it should be.
 
 # An EXPLICIT full bake -- NOT via test.sh, which builds only when the kernel ELF
 # is MISSING (test.sh:132) and would otherwise boot a stale image, ignoring the
