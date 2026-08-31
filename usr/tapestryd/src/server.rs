@@ -7695,6 +7695,113 @@ impl Comp {
         }
     }
 
+    /// W-3c-2a: CAN THE COMPOSITOR BLIT **FROM** A PRESENTABLE?
+    ///
+    /// WARP-WSI-DESIGN section 4 specifies the composed present arm as "the
+    /// Warp-C GPU blit falling back to the C-6 fenced readback". For a
+    /// PRESENTABLE the fallback is **structurally impossible**: `rb_issue`
+    /// host-DMA-writes into the resource's guest BACKING and
+    /// `comp_readback_retired` then reads it through `va` -- and a
+    /// presentable has neither, by construction (I-7, the absence W-3c-1
+    /// exists to establish). So for this class the composed arm reduces to
+    /// GPU-BLIT-ONLY, and whether this renderer ACCEPTS a blit whose source
+    /// is a venus-created HOST3D blob is a host capability nobody has
+    /// measured.
+    ///
+    /// Measured, not assumed. Twice now on this arc a probe has changed the
+    /// design rather than confirmed it (W-3a's attach blindness; W-3c-1's
+    /// flag refutation), and a composed arm built on an assumed capability
+    /// would be the third.
+    ///
+    /// RUNS ON A THROWAWAY CTX, NEVER `COMPOSITOR_CTX` -- a request the
+    /// renderer REFUSES latches the context it ran on, and acceptance is
+    /// exactly what this measures. That is `conv_attempt`'s rule and it
+    /// applies with more force here, because a latched compositor context
+    /// would take the display down for the whole boot.
+    ///
+    /// Verdict, three-way and never collapsed to a boolean: the destination
+    /// is staged with a PATTERN host-side, then its guest page is clobbered
+    /// with `0xDEAD_BEEF` before the readback, so "the readback never landed"
+    /// (scaffolding) is distinguishable from "the blit did not land"
+    /// (the measurement) is distinguishable from "it landed".
+    /// `do_blit == false` is the CONTROL: identical scaffolding, one variable
+    /// removed. Without it a `noreadback` is unattributable -- it reads the
+    /// same whether the instrument is broken or the blit latched the context
+    /// out from under the readback, and those demand opposite responses.
+    fn warp_present_compose_probe(&mut self, src_res: u32, src_h: u32, do_blit: bool) -> &'static str {
+        const PAT: u32 = 0xA5A5_A5A5;
+        // Destination kind 2 and CONV_ROWS, matching `conv_attempt`'s
+        // `scr_res` EXACTLY. That is not decoration: kind 2 is the one this
+        // renderer is already known to round-trip through
+        // `transfer_to/from_3d_box_sync` (the conv probe reads it back every
+        // boot), so copying the proven configuration keeps an unknown in the
+        // INSTRUMENT from being read as an answer about the SUBJECT. The
+        // first draft used kind 1 and returned `noreadback`.
+        const ROWS: usize = CONV_ROWS;
+        let (dst_res, dst_fd, dst_va) = match self.conv_probe_res(2) {
+            Some(t) => t,
+            None => return "noscaffold",
+        };
+        let ctx = CONV_PROBE_CTX_BASE + 900;
+        debug_assert!(ctx < WARP_VENUS_CTX_BASE, "compose probe ctx climbed into the venus band");
+        let mut verdict = "noscaffold";
+        if self.gpu.ctx_create(ctx, b"tapestry-cmp").is_ok() {
+            // The presentable must attach at all. W-3a measured this layer
+            // BLIND (a bogus id was accepted), so acceptance here is not the
+            // measurement -- the blit below is.
+            let attached = self.gpu.ctx_attach_resource(ctx, src_res).is_ok()
+                && self.gpu.ctx_attach_resource(ctx, dst_res).is_ok();
+            if attached {
+                for i in 0..ROWS {
+                    unsafe { core::ptr::write_volatile((dst_va as *mut u32).add(i), PAT) };
+                }
+                if self
+                    .gpu
+                    .transfer_to_3d_box_sync(ctx, dst_res, 0, 0, 1, ROWS as u32, 0, 4)
+                    .is_ok()
+                {
+                    let w = if do_blit { Self::blit_request(
+                        dst_res, ROWS as u32, 0, 0, 1, ROWS as u32,
+                        src_res, VIRGL_FORMAT_B8G8R8A8_UNORM, src_h, 0, 0, 1, ROWS as u32,
+                        ClassConv { variant: BlitVariant::Plain, src_flip: false, dst_flip: false },
+                    ) } else { [0u32; 22] };
+                    let submitted = if do_blit { self.submit_blits(ctx, &[w]).is_ok() } else { true };
+                    for i in 0..ROWS {
+                        unsafe { core::ptr::write_volatile((dst_va as *mut u32).add(i), 0xDEAD_BEEF) };
+                    }
+                    if self
+                        .gpu
+                        .transfer_from_3d_box_sync(ctx, dst_res, 0, 0, 1, ROWS as u32, 0, 4)
+                        .is_ok()
+                    {
+                        let mut rows = [0u32; ROWS];
+                        for (i, r) in rows.iter_mut().enumerate() {
+                            *r = unsafe { core::ptr::read_volatile((dst_va as *const u32).add(i)) };
+                        }
+                        verdict = if rows.iter().all(|&r| r == 0xDEAD_BEEF) {
+                            "noreadback" // scaffolding, not a verdict about the blit
+                        } else if rows.iter().all(|&r| r == PAT) {
+                            // The destination still holds what was staged: on
+                            // the CONTROL that is the CORRECT outcome (nothing
+                            // was asked to write it), on the TEST it means the
+                            // blit did not land.
+                            if do_blit { "refused" } else { "ctlok" }
+                        } else if submitted && do_blit {
+                            "landed"
+                        } else {
+                            "changed-unexpectedly"
+                        };
+                    }
+                }
+            } else {
+                verdict = "noattach";
+            }
+            let _ = self.gpu.ctx_destroy(ctx);
+        }
+        self.conv_probe_res_undo(dst_res, dst_va, dst_fd);
+        verdict
+    }
+
     /// Retire ONE presentable the caller owns and FREE its slot (the handle
     /// becomes re-registerable). I-45: only the ctx owner can name it -- the
     /// scan is the gate.
@@ -8607,6 +8714,27 @@ impl Comp {
         if bind_ok {
             self.bound_res = res_id;
         }
+        // W-3c-2a: measure the composed arm's ONLY possible implementation for
+        // this class while a presentable actually exists (see the helper).
+        let compose = if bind_ok {
+            // CONTROL FIRST. If the identical scaffolding cannot round-trip a
+            // staged pattern with NO blit in it, then nothing this instrument
+            // says about a blit means anything, and the honest report is that
+            // the instrument failed -- not a verdict about the host.
+            match self.warp_present_compose_probe(res_id, IH, false) {
+                "ctlok" => self.warp_present_compose_probe(res_id, IH, true),
+                other => {
+                    say!(
+                        "tapestryd: warp presentable compose-probe CONTROL failed ({}) -- \
+                         the blit arm is unattributable and is not reported as a verdict",
+                        other
+                    );
+                    "noscaffold"
+                }
+            }
+        } else {
+            "n/a"
+        };
         let seq_before = self.gpu.cmd_seq;
         let refused_before = self.unbind_refused;
         // ARM 4: destroy WHILE BOUND -- the ordering witness. On a host that
@@ -8713,7 +8841,7 @@ impl Comp {
         self.scanout = scanout_before;
         self.wctx_finish(slot, false);
         say!(
-            "tapestryd: warp presentable self-test: shape={} mint={} bind={} unbind={} refuse={} disable={} flags={} ({}x{} BGRA8 stride {})",
+            "tapestryd: warp presentable self-test: shape={} mint={} bind={} unbind={} refuse={} disable={} flags={} compose={} ({}x{} BGRA8 stride {})",
             u32::from(shape_ok),
             u32::from(mint_ok),
             u32::from(bind_ok),
@@ -8721,6 +8849,7 @@ impl Comp {
             refuse,
             u32::from(unbind_ok),
             flags_word,
+            compose,
             IW, IH, stride
         );
     }

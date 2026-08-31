@@ -61,7 +61,7 @@ venus-prove: offscreen triangle OK (render pass + SPIR-V pipeline + draw + copy-
 venus-prove: slot-exhaustion cycles OK (253/253/253 to refusal, steady-state equal -- the F2 discriminating no-burn proof)
 tapestryd: warp scanout-blob probe: dispatch=present neg=0x1203 pos=0x1100 attach=0x1100 attach-neg=0x1100 (shmem-class; the venus-image-class verdict lands at W-3e)
 tapestryd: warp display unbind refusal INJECTED (self-test drill) for res 85 -- condemned, unref deferred, drain expected at the next accepted scanout
-tapestryd: warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok refuse=ok disable=1 flags=mappable (64x64 BGRA8 stride 256)
+tapestryd: warp presentable self-test: shape=1 mint=1 bind=1 unbind=ok refuse=ok disable=1 flags=mappable compose=landed (64x64 BGRA8 stride 256)
 EOF
 }
 
@@ -259,6 +259,24 @@ check "test leg: an UNBIND REFUSED line present at all -> UNVERIFIED" 1 "" \
 # So: rewording the drill into the real phrasing must turn the gate RED.
 check "test leg: the injected drill worded as a REAL refusal -> UNVERIFIED" 1 "" \
       'sed "s/unbind refusal INJECTED (self-test drill)/UNBIND REFUSED by the device/" "$t" > "$t.x" && mv "$t.x" "$t"'
+# W-3c-2a `compose=` is a MEASUREMENT, not a pass/fail arm -- it answers
+# whether this renderer will blit FROM a presentable, which is the composed
+# arm's only possible implementation for the class (the C-6 readback needs
+# guest pages a presentable does not have). So the gate requires a real
+# VERDICT and does not dictate WHICH: `landed`, `refused` and `noattach` are
+# all measurements. What it must reject is the instrument failing to run --
+# reporting a scaffolding failure as though it were an answer is the #212
+# class, and a probe whose broken state reads as a pass measures nothing.
+check "test leg: compose probe scaffolding failed (noscaffold) -> UNVERIFIED" 1 "" \
+      'sed "s/compose=landed/compose=noscaffold/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg: compose probe readback never landed -> UNVERIFIED" 1 "" \
+      'sed "s/compose=landed/compose=noreadback/" "$t" > "$t.x" && mv "$t.x" "$t"'
+check "test leg: compose probe not reported at all -> UNVERIFIED" 1 "" \
+      'sed "s/ compose=landed//" "$t" > "$t.x" && mv "$t.x" "$t"'
+# ...and the discrimination's other half: a REAL verdict must PASS, or the
+# arm above is satisfied by a gate that rejects everything (#215).
+check "test leg: compose probe reports refused (a real verdict) -> still VERIFIED" 0 "" \
+      'sed "s/compose=landed/compose=refused/" "$t" > "$t.x" && mv "$t.x" "$t"'
 # F7 [P3]: the file's own rule is one sabotage per arm, and `disable=` was the
 # arm without one -- so nothing proved the verdict regex discriminated on it.
 check "test leg: presentable disable arm FAILED -> UNVERIFIED" 1 "" \
