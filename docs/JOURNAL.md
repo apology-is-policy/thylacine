@@ -22,6 +22,100 @@ needed the operator.
 
 ---
 
+## 2026-08-31 (aux) -- the "Found issues" triage: Stream 0 workflow bar, busybox tar (S_IFMT + /viv/abin), and vfork->fork by an operator lineage call
+
+The operator came back from a weekend of hands-on testing with a long list in
+`docs/Found issues.txt` and asked me to work it. Rather than answer from
+memory, I fanned three read-only investigations across the tree and worked from
+their ground truth. The run reframed the whole backlog around **four end-to-end
+terminal workflows** (`docs/AUX-ROADMAP.md` Stream 0, `52779527`) -- order work
+by what a person at the terminal is trying to finish, not by subsystem -- and
+then closed the tarball workflow (W2-a) end to end.
+
+**The busybox-tar cascade (X-1 + X-2 + X-8).** Three defects, each found by the
+one before it failing:
+
+- **X-1 `S_IFMT` mask** (`0a8c3400`). busybox `tar -x` failed on every entry
+  with "Function not implemented". Disassembling the shipped binary showed it
+  passes `file_header->mode` UNNARROWED, so mkdirat saw `S_IFDIR|0755` and
+  openat saw `S_IFREG|0644` -- and the create decides refused any bit outside
+  0777. The gate was written to refuse setuid/sgid/sticky and caught `S_IFMT`
+  as collateral. Linux defines those bits as ignored on that argument, so
+  masking is exact; the setuid refusal survives. One masking line in two
+  functions. Holotype (Fable 5) 0/0/0/3P3 -- and it CAUGHT me citing a caller
+  (git's setgid dirs on mkdirat) that Linux itself would not wrong, since
+  `vfs_mkdir` strips that bit; corrected per-arm.
+- **X-2 `/viv/abin`** (`1cfc9d27`). To run busybox applets from a session shell
+  I mounted a busybox tree at `/viv/abin` (MPHENO_LINUX). The KEYSTONE: the
+  links must be RELATIVE. Alpine ships them absolute (`-> /bin/busybox`, 80 of
+  80), which `stalk` re-anchors at the caller's OWN root (I-28 working as
+  designed) -- exactly why they resolve inside a container and ghost outside
+  one. `-> busybox` resolves from both sides. **The E2E I wrote to prove X-1
+  couldn't build its own fixture** -- `mkdir -p abin-t/sub` answered
+  "permission denied". Root cause (X-7): `mkdir -p` walks from `/` and tried to
+  create every ancestor, swallowing only `Error::Exists`; an existing ancestor
+  in a non-writable dir answers PermissionDenied, so `-p` was broken for
+  essentially every path outside `/`. A bigger everyday bug than the one I was
+  chasing, invisible until a test used it.
+- **X-8 vfork->fork (option B)** (`de6ca24e`). `.tar.gz` failed with "tar:
+  vfork: Function not implemented" -- busybox spawns gzip via `vfork()` proper
+  (`clone(CLONE_VM|CLONE_VFORK|SIGCHLD, stack=0)`, disassembled), which the
+  clone decide declined. **This was a lineage question the operator settled.**
+  Option A (relax SYS_RFORK's zero-child_sp rule) vs B (serve the null-stack
+  vfork as a fork in the phenotype layer). I first leaned A on Linux-fidelity;
+  the operator's question "is A aligned with our Plan 9 lineage?" flipped it.
+  Plan 9's rfork has NO two-Procs-one-stack shape -- it takes no stack argument
+  precisely because the child always gets its own stack -- and SYS_RFORK's
+  mandatory `child_sp` rule IS that invariant. A would push a shape the lineage
+  refused into the native contract; B keeps the vfork-ism in the phenotype
+  layer where Plan 9's own POSIX layer had to put it. B is also provably
+  equivalent to the existing fork arm (share_mem=false + stack=0 -> the same
+  `sys_rfork_core(RFPROC,0,0)`), one path reached by two flags words.
+
+**The vfork change tripped a BOOT EXTINCTION, not a red test** -- the instructive
+part of the run. `viv-pheno-probe`'s L159 leg had encoded the OLD "vfork
+declines" contract (`== NEG_ENOSYS`). Serving it made the parent's assertion
+fail AND -- because the leg expected no child -- the fork child it now creates
+fell through into later legs (two unnamed orphans). Fixing L159 surfaced a
+SECOND, downstream break: L174's "every child reaped -> ECHILD" leg found the
+extra zombie, because the wait4 ladder is written for exactly the two zombies
+L156/L160 create. Reaped the L159 child by-pid to restore the count. The lesson,
+now a closed-list line: a contract change voids every consumer, and the second
+consumer was only reachable once the first was fixed.
+
+**The four "plumbing rows" I predicted were NOT needed -- ground truth beat my
+hypothesis.** I had told the operator `.tar.gz` would also need
+pipe2/dup3/wait4/ppoll widened. Disassembly refuted it: busybox passes
+already-admitted arguments (flags=0/options=0/rusage=0); the census declines of
+those numbers came from `viv-pheno-probe`'s deliberate edge-case probing, not
+tar's pipeline. The passing compressed E2E (`abin-tar` legs g/h) is the proof --
+a real block would have surfaced there. No speculative widening landed. This is
+the "chase to ground, don't widen on spec" discipline paying for itself: I
+nearly made four no-op changes.
+
+**Cost + close.** vfork audit (Fable 5) 0/0/0/3P3, clean; the three P3s (a
+pre-existing duplicate-marker collision, a stale release-condition comment my
+change made MORE wrong, my own reap's unasserted return) fixed at `9e104e61`.
+SMP gate 40/40 (default+ubsan x smp4+smp8, N=10), 0 corruption. Suite
+1425/1425. `abin-tar` 8/8. Pushed both mirrors.
+
+**A model-behaviour correction the operator caught, recorded to memory**
+([[feedback-cannot-vs-havent-checked]]): I wrote "I cannot verify from this tree
+whether Plan 9's rfork shares the stack" -- dressing a choice-not-to-look as an
+inability and fencing the evidence to the local repo. Plan 9 is public; the
+honest move is "I haven't checked", then a self-checking structural argument
+(rfork has no stack argument, therefore the kernel always makes the child's
+stack) with the citation offered as a choice.
+
+**Still open** (the found-issues residue, in `docs/AUX-ROADMAP.md` Stream 0):
+X-3 (4MiB heap is a RESERVATION not a cost -> raise to 64MiB, a 1-liner), X-4
+(the panic handler prints NOTHING -- every native OOM is silent, `lib.rs:3269`),
+X-5 (the prompt-erase eats output with no trailing newline -- this was the
+operator's "cat drops the last line"), X-6 (silent unknown-command), W1-a (git
+env seed for interactive https clone). **Next chunk: DNS-by-name for vivarium**
+(operator-directed) -- recon done, four kernel pieces, pickup in
+`memory/project_next_session.md`.
+
 ## 2026-08-27 (aux) -- C2 (interactive git) opens: the survey turned a feared design fork into a translation arc, and C2-k1a lands the pure terminal-ioctl decode
 
 With C1 closed, the operator said "continue", so C2 (the interactive tier: `commit`/`rebase -i`/`add -p` with nora as the editor) opened. I had flagged C2's kernel piece as a design fork needing a vote; a ground-truth survey (a subagent over `vivarium.c`, `pts.c`, `ptyfs`, `cons.c`, Kaua, nora, and the vendored musl) dissolved most of that.
