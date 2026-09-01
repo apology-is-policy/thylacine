@@ -1,0 +1,454 @@
+/* ============================================================
+   HALCYON — Daylight
+   Visual specification v1, token source.
+
+   Light source is NNW. Every bevel value derives from that one
+   fact. If you change the light direction, regenerate all four
+   bevel values together; never adjust a single edge.
+   ============================================================ */
+
+:root {
+  /* ---- typefaces ---------------------------------------- */
+  --hal-prop: "DejaVu Sans Condensed", "Arial Narrow", sans-serif;
+  --hal-mono: "Cornucopia", "Iosevka Term", "Fira Code", monospace;
+
+  /* ---- metrics ------------------------------------------ */
+  --hal-bevel: 2px;   /* pane bevel width */
+  --hal-gap: 2px;     /* inter-pane gap and workspace padding */
+  --hal-hair: 1px;    /* structural hairline */
+  --hal-header-h: 20px;
+  --hal-status-h: 20px;
+
+  /* ---- ground ------------------------------------------- */
+  --hal-floor: #8a7660;      /* workspace floor; bevel midpoint */
+  --hal-surface: #f2ebe0;    /* pane surface, parchment */
+  --hal-header: #cec4b6;     /* tag bar */
+  --hal-raised: #bdb0a0;     /* pill background */
+  --hal-border: #a89880;     /* explicit strokes, cast shadow */
+  --hal-hairline: #cec4b6;   /* inner hairline — matches header */
+
+  /* ---- ink ---------------------------------------------- */
+  --hal-fg: #1a120a;
+  --hal-fg-dim: #3a2e22;
+  --hal-fg-muted: #6a5a48;
+  --hal-fg-subtle: #9a8878;
+
+  /* ---- bevel, NNW --------------------------------------- */
+  --hal-bevel-top: #f8f2e6;     /* key light, near-perpendicular */
+  --hal-bevel-left: #e2d6c0;    /* grazing */
+  --hal-bevel-right: #362410;   /* facing away, some bounce */
+  --hal-bevel-bottom: #221405;  /* fully shadowed */
+
+  /* ---- accent ------------------------------------------- */
+  --hal-ember: #e07840;
+  --hal-ember-dim: #b85f2a;
+  --hal-ember-deep: #c86030;
+
+  /* ---- live tile: sage (exit 0) ------------------------- */
+  --hal-sage: #1e5844;
+  --hal-sage-tint: #b8ccc4;
+  --hal-sage-raised: #a6bdb4;
+  --hal-sage-border: #86a096;
+  --hal-sage-fg: #0c2820;
+  --hal-sage-fg-dim: #14342a;
+  --hal-sage-fg-muted: #33604f;
+
+  /* ---- live tile: cinnabar (exit non-zero) -------------- */
+  --hal-cinnabar: #982818;
+  --hal-cinnabar-tint: #dcb8b0;
+  --hal-cinnabar-raised: #d0a89e;
+  --hal-cinnabar-border: #b88c80;
+  --hal-cinnabar-fg: #3c1008;
+  --hal-cinnabar-fg-dim: #521a10;
+  --hal-cinnabar-fg-muted: #7a4034;
+
+  /* ---- syntax, light-shifted from Bonfire --------------- */
+  --hal-slate: #3a4878;
+  --hal-sage-syn: #1e5844;
+  --hal-sand: #7a5020;
+  --hal-moss: #3a5818;
+  --hal-ash: #6a3828;
+  --hal-dusk: #4a3868;
+  --hal-smoke: #6a7060;
+  --hal-fen: #1e5828;
+
+  /* ---- embedded terminal (Bonfire, unchanged) ----------- */
+  --bf-bg: #0e0c0c;
+  --bf-surface: #2a1f1c;
+  --bf-fg: #e4ddd8;
+  --bf-fg-subtle: #5a4e48;
+  --bf-path: #9a8f8a;
+  --bf-ember: #e07840;
+  --bf-slate: #8a9ac8;
+  --bf-sage: #8ab8a8;
+  --bf-sand: #c8a882;
+  --bf-moss: #b8d098;
+  --bf-ash: #b07060;
+  --bf-fen: #6a9a6a;
+  --bf-cinnabar: #c06050;
+
+  /* ---- status bar --------------------------------------- */
+  --hal-status-bg: #1a120a;
+  --hal-status-fg: #f2ebe0;
+  --hal-status-muted: #c8b89a;
+  --hal-status-idle: #3a2e22;
+}
+
+/* ============================================================
+   WORKSPACE
+   ============================================================ */
+
+.hal-wm {
+  display: grid;
+  grid-template-rows: 1fr var(--hal-status-h);
+  font-family: var(--hal-prop);
+  overflow: hidden;
+}
+
+.hal-workspace {
+  display: grid;
+  gap: var(--hal-gap);
+  padding: var(--hal-gap);
+  box-sizing: border-box;
+  overflow: hidden;
+  background: var(--hal-floor);
+}
+
+.hal-col {
+  display: grid;
+  gap: var(--hal-gap);
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* ============================================================
+   PANE
+   Bevel is uniform across all panes. It says "this is a pane",
+   never "this pane is focused".
+   ============================================================ */
+
+.hal-pane {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+  background: var(--hal-surface);
+  border-style: solid;
+  border-width: var(--hal-bevel);
+  border-top-color: var(--hal-bevel-top);
+  border-left-color: var(--hal-bevel-left);
+  border-right-color: var(--hal-bevel-right);
+  border-bottom-color: var(--hal-bevel-bottom);
+}
+
+/* Inner hairline. Must be a border, not a shadow: opaque children
+   paint over inset shadows. Matches the header background, so it
+   vanishes alongside tag bars and reads only against content. */
+.hal-pane-inner {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border: var(--hal-hair) solid var(--hal-hairline);
+}
+
+/* ============================================================
+   TAG BAR
+   ============================================================ */
+
+.hal-tag {
+  display: flex;
+  align-items: center;
+  height: var(--hal-header-h);
+  padding: 0 6px;
+  gap: 5px;
+  flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--hal-header);
+  border-bottom: var(--hal-hair) solid var(--hal-border);
+}
+
+/* Header sitting below its content, Acme-style. */
+.hal-tag--below {
+  border-bottom: none;
+  border-top: var(--hal-hair) solid var(--hal-border);
+}
+
+/* The tile a resting pane would return to. */
+.hal-tag--active { border-bottom-color: var(--hal-ember-deep); }
+.hal-tag--active.hal-tag--below {
+  border-bottom: none;
+  border-top-color: var(--hal-ember-deep);
+}
+
+/* The live tile — the one holding input. Takes the status key. */
+.hal-tag--live-ok {
+  background: var(--hal-sage-tint);
+  border-bottom-color: var(--hal-sage);
+}
+.hal-tag--live-ok.hal-tag--below {
+  border-bottom: none;
+  border-top-color: var(--hal-sage);
+}
+.hal-tag--live-err {
+  background: var(--hal-cinnabar-tint);
+  border-bottom-color: var(--hal-cinnabar);
+}
+.hal-tag--live-err.hal-tag--below {
+  border-bottom: none;
+  border-top-color: var(--hal-cinnabar);
+}
+
+.hal-tag-name {
+  font-size: 10.5px;
+  font-weight: 500;
+  flex-shrink: 0;
+  color: var(--hal-fg-muted);
+}
+.hal-tag--active .hal-tag-name { color: var(--hal-fg); }
+.hal-tag--live-ok .hal-tag-name { color: var(--hal-sage-fg); }
+.hal-tag--live-err .hal-tag-name { color: var(--hal-cinnabar-fg); }
+
+.hal-tag-rule {
+  font-size: 10px;
+  flex-shrink: 0;
+  color: var(--hal-border);
+}
+.hal-tag--live-ok .hal-tag-rule { color: var(--hal-sage-border); }
+.hal-tag--live-err .hal-tag-rule { color: var(--hal-cinnabar-border); }
+
+.hal-tag-trail {
+  margin-left: auto;
+  font-family: var(--hal-mono);
+  font-size: 9.5px;
+  flex-shrink: 0;
+  padding-left: 4px;
+  white-space: nowrap;
+  color: var(--hal-fg-dim);
+}
+.hal-tag--live-ok .hal-tag-trail { color: var(--hal-sage-fg-dim); }
+.hal-tag--live-err .hal-tag-trail { color: var(--hal-cinnabar-fg-dim); }
+
+/* Command pills. Executable text, not labels. */
+.hal-pill {
+  font-family: var(--hal-mono);
+  font-size: 9.5px;
+  padding: 0 4px;
+  line-height: 14px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  color: var(--hal-fg-muted);
+  background: var(--hal-raised);
+  border: var(--hal-hair) solid var(--hal-border);
+}
+.hal-pill--fold {
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.hal-pill--on {
+  color: var(--hal-ember);
+  background: var(--hal-surface);
+  border-color: var(--hal-ember-dim);
+}
+.hal-tag--live-ok .hal-pill {
+  color: var(--hal-sage-fg-muted);
+  background: var(--hal-sage-raised);
+  border-color: var(--hal-sage-border);
+}
+.hal-tag--live-ok .hal-pill--on {
+  color: var(--hal-sage);
+  background: var(--hal-surface);
+  border-color: var(--hal-sage);
+}
+.hal-tag--live-err .hal-pill {
+  color: var(--hal-cinnabar-fg-muted);
+  background: var(--hal-cinnabar-raised);
+  border-color: var(--hal-cinnabar-border);
+}
+.hal-tag--live-err .hal-pill--on {
+  color: var(--hal-cinnabar);
+  background: var(--hal-surface);
+  border-color: var(--hal-cinnabar);
+}
+
+/* ============================================================
+   CONTENT REGION
+   ============================================================ */
+
+.hal-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Live content is bounded on three sides; the live tag bar's
+   own bottom edge closes the top. Header and content read as
+   one object. */
+.hal-body--lit-ok {
+  border-left: var(--hal-hair) solid var(--hal-sage);
+  border-right: var(--hal-hair) solid var(--hal-sage);
+  border-bottom: var(--hal-hair) solid var(--hal-sage);
+}
+.hal-body--lit-err {
+  border-left: var(--hal-hair) solid var(--hal-cinnabar);
+  border-right: var(--hal-hair) solid var(--hal-cinnabar);
+  border-bottom: var(--hal-hair) solid var(--hal-cinnabar);
+}
+
+/* When the tile's tag bar sits below its content, the unit does not
+   end at the content — the bar does. Leave the bottom open and let
+   the bar's top edge serve as the separator. */
+.hal-body--lit-ok-open {
+  border-left: var(--hal-hair) solid var(--hal-sage);
+  border-right: var(--hal-hair) solid var(--hal-sage);
+}
+.hal-body--lit-err-open {
+  border-left: var(--hal-hair) solid var(--hal-cinnabar);
+  border-right: var(--hal-hair) solid var(--hal-cinnabar);
+}
+
+/* Cast shadow. Owned by the live tile, never borrowed from a
+   neighbouring header — so it survives when the live tile is
+   last in the stack. NNW light means it falls below only. */
+.hal-cast {
+  height: var(--hal-hair);
+  background: var(--hal-border);
+  flex-shrink: 0;
+}
+
+/* ---- transcript ---------------------------------------- */
+
+.hal-transcript {
+  flex: 1;
+  padding: 5px 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--hal-surface);
+}
+
+.hal-block {
+  border-left: 2px solid var(--hal-raised);
+  padding: 3px 0 3px 8px;
+  margin-bottom: 6px;
+}
+.hal-block--current { border-left-color: var(--hal-ember); }
+
+.hal-prompt { display: flex; align-items: baseline; margin-bottom: 2px; }
+.hal-path {
+  font-family: var(--hal-mono);
+  font-size: 10px;
+  color: var(--hal-fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hal-turnstile {
+  font-family: var(--hal-mono);
+  font-size: 10px;
+  padding: 0 3px;
+  flex-shrink: 0;
+  color: var(--hal-ember);
+}
+.hal-cmd { font-family: var(--hal-mono); font-size: 10px; color: var(--hal-fg); }
+.hal-caret { border-right: 2px solid var(--hal-ember); padding-right: 1px; }
+
+.hal-out {
+  font-family: var(--hal-mono);
+  font-size: 10px;
+  line-height: 1.55;
+  padding: 2px 8px;
+  margin: 2px 0;
+  white-space: pre;
+  display: block;
+  border-left: 2px solid #7a6850;
+  background: var(--hal-header);
+  color: var(--hal-fg-dim);
+}
+.hal-prose {
+  font-family: var(--hal-prop);
+  font-size: 11.5px;
+  line-height: 1.5;
+  margin: 2px 0;
+  color: var(--hal-fg);
+}
+.hal-obj {
+  padding: 0 4px;
+  font-size: 10px;
+  border: var(--hal-hair) solid var(--hal-border);
+  background: var(--hal-header);
+  color: var(--hal-slate);
+}
+.hal-exit {
+  font-family: var(--hal-mono);
+  font-size: 9px;
+  padding: 0 3px;
+  display: inline-block;
+  border: var(--hal-hair) solid;
+  margin-top: 2px;
+}
+.hal-exit--ok { color: var(--hal-fen); border-color: var(--hal-fen); }
+.hal-exit--err { color: var(--hal-cinnabar); border-color: var(--hal-cinnabar); }
+
+/* ---- embedded terminal --------------------------------- */
+
+.hal-vt {
+  flex: 1;
+  padding: 5px 10px;
+  font-family: var(--hal-mono);
+  font-size: 10px;
+  line-height: 1.6;
+  overflow: hidden;
+  background: var(--bf-bg);
+  color: var(--bf-fg);
+}
+
+/* ============================================================
+   STATUS BAR
+   ============================================================ */
+
+.hal-status {
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  height: var(--hal-status-h);
+  font-family: var(--hal-mono);
+  font-size: 10px;
+  background: var(--hal-status-bg);
+}
+.hal-ws {
+  padding: 0 7px;
+  height: var(--hal-status-h);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--hal-status-idle);
+}
+.hal-ws--on {
+  background: var(--hal-ember);
+  color: var(--hal-status-bg);
+  font-weight: 500;
+}
+.hal-status-mid {
+  flex: 1;
+  text-align: center;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--hal-status-fg);
+}
+.hal-status-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  color: var(--hal-status-muted);
+}
+.hal-status-ok { color: var(--hal-ember); }
+.hal-status-err { color: var(--hal-cinnabar); }
