@@ -145,6 +145,112 @@ impl Cell {
     }
 }
 
+/// The SGR pen: the fg/bg/attrs state one `CSI ... m` sequence mutates.
+/// Extracted from the grid interpreter at H-2a+1 so halcyond's transcript
+/// drives the SAME machinery per block (HALCYON.md §13.4(b) -- one SGR
+/// implementation, two consumers; the grid's `sgr()` is now a thin shim
+/// over this). Behavior notes that are load-bearing and easy to lose:
+/// BOLD promotes a base-tier ANSI FG to the bright tier at application
+/// time (so `1;31` and `31;1` differ exactly as before); bg never
+/// promotes; truecolor passes through untouched; an empty parameter list
+/// is the full reset (`CSI m`).
+#[derive(Clone, Copy)]
+pub struct SgrPen {
+    pub fg: u32,
+    pub bg: u32,
+    pub attrs: u8,
+}
+
+impl SgrPen {
+    pub fn new(pal: &Palette) -> SgrPen {
+        SgrPen { fg: pal.fg, bg: pal.bg, attrs: 0 }
+    }
+
+    /// Apply one SGR parameter list (the numbers between `CSI` and `m`).
+    pub fn apply(&mut self, pal: &Palette, params: &[u32]) {
+        if params.is_empty() {
+            self.fg = pal.fg;
+            self.bg = pal.bg;
+            self.attrs = 0;
+            return;
+        }
+        let mut i = 0;
+        while i < params.len() {
+            let v = params[i];
+            match v {
+                0 => {
+                    self.fg = pal.fg;
+                    self.bg = pal.bg;
+                    self.attrs = 0;
+                }
+                1 => self.attrs |= ATTR_BOLD,
+                4 => self.attrs |= ATTR_UNDERLINE,
+                7 => self.attrs |= ATTR_REVERSE,
+                22 => self.attrs &= !ATTR_BOLD,
+                24 => self.attrs &= !ATTR_UNDERLINE,
+                27 => self.attrs &= !ATTR_REVERSE,
+                30..=37 => self.fg = self.ansi_fg(pal, (v - 30) as usize),
+                39 => self.fg = pal.fg,
+                40..=47 => self.bg = pal.ansi[(v - 40) as usize],
+                49 => self.bg = pal.bg,
+                90..=97 => self.fg = pal.ansi[(v - 90 + 8) as usize],
+                100..=107 => self.bg = pal.ansi[(v - 100 + 8) as usize],
+                38 | 48 => {
+                    let (color, used) = extended_color(pal, params, i);
+                    if let Some(c) = color {
+                        if v == 38 {
+                            self.fg = c;
+                        } else {
+                            self.bg = c;
+                        }
+                    }
+                    i += used;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
+    fn ansi_fg(&self, pal: &Palette, idx: usize) -> u32 {
+        // BOLD promotes the base tier to the bright tier (the classic
+        // bold-as-bright terminal convention; we bake one weight).
+        if self.attrs & ATTR_BOLD != 0 {
+            pal.ansi[idx + 8]
+        } else {
+            pal.ansi[idx]
+        }
+    }
+}
+
+/// SGR 38/48 extended color at params[i]: `;2;r;g;b` or `;5;n`.
+/// Returns (color, extra params consumed).
+fn extended_color(pal: &Palette, params: &[u32], i: usize) -> (Option<u32>, usize) {
+    if i + 1 >= params.len() {
+        return (None, 0);
+    }
+    match params[i + 1] {
+        2 => {
+            if i + 4 < params.len() {
+                let r = params[i + 2].min(255);
+                let g = params[i + 3].min(255);
+                let b = params[i + 4].min(255);
+                (Some(0xFF00_0000 | (r << 16) | (g << 8) | b), 4)
+            } else {
+                (None, params.len() - i - 1)
+            }
+        }
+        5 => {
+            if i + 2 < params.len() {
+                (Some(xterm256(pal, params[i + 2] as u8)), 2)
+            } else {
+                (None, 1)
+            }
+        }
+        _ => (None, 1),
+    }
+}
+
 enum State {
     Ground,
     Esc,
@@ -599,86 +705,14 @@ impl Vt {
     }
 
     fn sgr(&mut self) {
-        if self.nparams == 0 {
-            self.fg = self.pal.fg;
-            self.bg = self.pal.bg;
-            self.attrs = 0;
-            return;
-        }
-        let mut i = 0;
-        while i < self.nparams {
-            let v = self.params[i];
-            match v {
-                0 => {
-                    self.fg = self.pal.fg;
-                    self.bg = self.pal.bg;
-                    self.attrs = 0;
-                }
-                1 => self.attrs |= ATTR_BOLD,
-                4 => self.attrs |= ATTR_UNDERLINE,
-                7 => self.attrs |= ATTR_REVERSE,
-                22 => self.attrs &= !ATTR_BOLD,
-                24 => self.attrs &= !ATTR_UNDERLINE,
-                27 => self.attrs &= !ATTR_REVERSE,
-                30..=37 => self.fg = self.ansi_fg((v - 30) as usize),
-                39 => self.fg = self.pal.fg,
-                40..=47 => self.bg = self.pal.ansi[(v - 40) as usize],
-                49 => self.bg = self.pal.bg,
-                90..=97 => self.fg = self.pal.ansi[(v - 90 + 8) as usize],
-                100..=107 => self.bg = self.pal.ansi[(v - 100 + 8) as usize],
-                38 | 48 => {
-                    let (color, used) = self.extended_color(i);
-                    if let Some(c) = color {
-                        if v == 38 {
-                            self.fg = c;
-                        } else {
-                            self.bg = c;
-                        }
-                    }
-                    i += used;
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-    }
-
-    /// SGR 38/48 extended color at params[i]: `;2;r;g;b` or `;5;n`.
-    /// Returns (color, extra params consumed).
-    fn extended_color(&self, i: usize) -> (Option<u32>, usize) {
-        if i + 1 >= self.nparams {
-            return (None, 0);
-        }
-        match self.params[i + 1] {
-            2 => {
-                if i + 4 < self.nparams {
-                    let r = self.params[i + 2].min(255);
-                    let g = self.params[i + 3].min(255);
-                    let b = self.params[i + 4].min(255);
-                    (Some(0xFF00_0000 | (r << 16) | (g << 8) | b), 4)
-                } else {
-                    (None, self.nparams - i - 1)
-                }
-            }
-            5 => {
-                if i + 2 < self.nparams {
-                    (Some(xterm256(&self.pal, self.params[i + 2] as u8)), 2)
-                } else {
-                    (None, 1)
-                }
-            }
-            _ => (None, 1),
-        }
-    }
-
-    fn ansi_fg(&self, idx: usize) -> u32 {
-        // BOLD promotes the base tier to the bright tier (the classic
-        // bold-as-bright terminal convention; we bake one weight).
-        if self.attrs & ATTR_BOLD != 0 {
-            self.pal.ansi[idx + 8]
-        } else {
-            self.pal.ansi[idx]
-        }
+        // The shim over the extracted SgrPen (one SGR machinery, two
+        // consumers -- see SgrPen). Copy-in/apply/copy-out keeps the grid's
+        // field layout untouched.
+        let mut pen = SgrPen { fg: self.fg, bg: self.bg, attrs: self.attrs };
+        pen.apply(&self.pal, &self.params[..self.nparams]);
+        self.fg = pen.fg;
+        self.bg = pen.bg;
+        self.attrs = pen.attrs;
     }
 
     fn put_char(&mut self, ch: char) {

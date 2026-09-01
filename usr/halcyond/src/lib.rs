@@ -12,6 +12,7 @@
 extern crate alloc;
 
 pub mod raster;
+pub mod transcript;
 
 /// The vendored proportional faces (third_party/dejavu-fonts; HALCYON.md
 /// section 3 -- DejaVu Sans Condensed, operator-chosen). Oblique +
