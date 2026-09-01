@@ -8,10 +8,15 @@
 //! 12.8 P1 property, tested here).
 //!
 //! The parser is deliberately structural: it recognizes frames, enforces the
-//! byte caps, decodes args, and passes EVERYTHING else through as payload --
-//! foreign OSC (aurora's 7770 config channel), SGR, arbitrary escapes are
-//! text to this layer. Nesting legality and depth (12.1 rules 3 + 5) are the
-//! consumer's flattening concern, not the wire's.
+//! byte caps + the nesting-depth cap (12.1 rule 3 lists depth among the
+//! PARSER-enforced caps -- audit H-1 F3), decodes args, and passes
+//! EVERYTHING else through as payload -- foreign OSC (aurora's 7770 config
+//! channel), SGR, arbitrary escapes are text to this layer. A paired op
+//! opened past depth 8 is discarded as malformed along with its matching
+//! close (and any point op inside the suppressed region); the PAYLOAD bytes
+//! between them still flow -- frames are never payload, payload is never
+//! eaten. Nesting LEGALITY (which op may contain which) stays the
+//! tree-building consumer's concern.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -26,6 +31,9 @@ pub const FRAME_MAX: usize = 2048;
 pub const VALUE_MAX: usize = 1024;
 /// Args per frame.
 pub const ARGS_MAX: usize = 8;
+/// Maximum open-frame nesting; deeper frames are discarded as malformed
+/// (12.1 rule 3; the emitters never exceed 4 -- table > row > cell > obj).
+pub const DEPTH_MAX: usize = 8;
 
 /// The v1 op registry (BEACON.md 12.2). `Mark` and `Rule` are point ops (no
 /// close); everything else pairs.
@@ -123,10 +131,29 @@ fn push_escaped(out: &mut Vec<u8>, v: &str) {
     }
 }
 
+/// The on-wire length `push_escaped` would emit for `v` -- the guard the
+/// emit side must use where the SPEC cap applies to the encoded field
+/// (audit H-1 F4: the parser bounds the encoded value at VALUE_MAX, so a
+/// raw-length guard admits escape-heavy refs every conforming parser then
+/// discards).
+pub fn escaped_len(v: &str) -> usize {
+    v.as_bytes()
+        .iter()
+        .map(|&b| {
+            if b == b'%' || b == b';' || !(0x20..=0x7e).contains(&b) {
+                3
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
 fn push_args(out: &mut Vec<u8>, args: &[(&str, &str)]) {
     debug_assert!(args.len() <= ARGS_MAX);
     for (k, v) in args {
-        debug_assert!(v.len() <= VALUE_MAX);
+        // The cap applies to the ENCODED field (what the parser bounds).
+        debug_assert!(escaped_len(v) <= VALUE_MAX);
         out.push(b';');
         out.extend_from_slice(k.as_bytes());
         out.push(b'=');
@@ -262,6 +289,13 @@ fn parse_body(body: &[u8]) -> Option<Event> {
 pub fn parse(input: &[u8]) -> Vec<Event> {
     let mut events: Vec<Event> = Vec::new();
     let mut text: Vec<u8> = Vec::new();
+    // The depth cap (12.1 rule 3, parser-enforced): `depth` counts emitted
+    // opens; an open past DEPTH_MAX is suppressed together with its matching
+    // close (`suppressed` pairs them), and a point op inside a suppressed
+    // region drops too. O(1) state; payload between suppressed frames still
+    // flows into `text`.
+    let mut depth: usize = 0;
+    let mut suppressed: usize = 0;
     let mut i = 0;
     while i < input.len() {
         let b = input[i];
@@ -296,10 +330,36 @@ pub fn parse(input: &[u8]) -> Vec<Event> {
                     match parse_body(body) {
                         Some(Event::Text(_)) | None => {} // dropped
                         Some(ev) => {
-                            if !text.is_empty() {
-                                events.push(Event::Text(core::mem::take(&mut text)));
+                            let emit = match &ev {
+                                Event::Open(_, _) => {
+                                    if suppressed > 0 || depth == DEPTH_MAX {
+                                        suppressed += 1;
+                                        false
+                                    } else {
+                                        depth += 1;
+                                        true
+                                    }
+                                }
+                                Event::Close(_) => {
+                                    if suppressed > 0 {
+                                        suppressed -= 1;
+                                        false
+                                    } else {
+                                        // A stray close at depth 0 still
+                                        // emits (rule 4: renderers tolerate).
+                                        depth = depth.saturating_sub(1);
+                                        true
+                                    }
+                                }
+                                Event::Point(_, _) => suppressed == 0,
+                                Event::Text(_) => false, // unreachable: dropped above
+                            };
+                            if emit {
+                                if !text.is_empty() {
+                                    events.push(Event::Text(core::mem::take(&mut text)));
+                                }
+                                events.push(ev);
                             }
-                            events.push(ev);
                         }
                     }
                 }
@@ -379,6 +439,70 @@ mod tests {
         close(&mut v, Op::Em);
         v.extend_from_slice(b" tail");
         assert_eq!(strip(&v), b"plain bold tail".to_vec());
+    }
+
+    #[test]
+    fn depth_cap_enforced_at_eight(){
+        // Depth 8: every frame emitted. Depth 9: the 9th open + its close
+        // suppressed (discarded as malformed, 12.1 rule 3), the payload
+        // inside STILL flows, and the outer 8 pairs stay balanced.
+        let nest = |n: usize| -> Vec<u8> {
+            let mut v = Vec::new();
+            for _ in 0..n {
+                open(&mut v, Op::Zone, &[("k", "output")]);
+            }
+            v.extend_from_slice(b"deep");
+            for _ in 0..n {
+                close(&mut v, Op::Zone);
+            }
+            v
+        };
+        let at8 = parse(&nest(8));
+        assert_eq!(
+            at8.iter().filter(|e| matches!(e, Event::Open(_, _))).count(),
+            8
+        );
+        assert_eq!(
+            at8.iter().filter(|e| matches!(e, Event::Close(_))).count(),
+            8
+        );
+        let at9 = parse(&nest(9));
+        assert_eq!(
+            at9.iter().filter(|e| matches!(e, Event::Open(_, _))).count(),
+            8,
+            "the 9th open is suppressed"
+        );
+        assert_eq!(
+            at9.iter().filter(|e| matches!(e, Event::Close(_))).count(),
+            8,
+            "its matching close is suppressed with it"
+        );
+        assert_eq!(strip(&nest(9)), b"deep".to_vec(), "payload never eaten");
+        // A point op inside the suppressed region drops too; outside, kept.
+        let mut v = nest(9);
+        let cut = v.len();
+        point(&mut v, Op::Rule, &[]);
+        let _ = cut;
+        let evs = parse(&v);
+        assert_eq!(
+            evs.iter().filter(|e| matches!(e, Event::Point(Op::Rule, _))).count(),
+            1,
+            "a point AFTER the suppressed region closed is kept"
+        );
+        let mut inside = Vec::new();
+        for _ in 0..9 {
+            open(&mut inside, Op::Zone, &[("k", "output")]);
+        }
+        point(&mut inside, Op::Rule, &[]);
+        for _ in 0..9 {
+            close(&mut inside, Op::Zone);
+        }
+        let evs2 = parse(&inside);
+        assert_eq!(
+            evs2.iter().filter(|e| matches!(e, Event::Point(Op::Rule, _))).count(),
+            0,
+            "a point INSIDE the suppressed region drops"
+        );
     }
 
     #[test]

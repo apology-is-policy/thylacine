@@ -146,6 +146,8 @@ void test_devdev_walk_pts_dir(void) {
 //                      /dev/null makes `clang++ < /dev/null` die before it
 //                      emits anything. A -1 here is not cosmetic.
 //   - the dirs      -> S_IFDIR 0555 (world-searchable, so the resolver crosses).
+//   - winsize/beacon-> S_IFCHR 0444 (H-1: the ungated report-leaf pair; the
+//                      per-leaf tests own the assertions).
 //   - anything else -> -1, rather than inventing a shape.
 void test_devdev_stat_native_leaves(void) {
     struct t_stat st;
@@ -393,7 +395,9 @@ void test_devdev_consctl_renderer_mint(void) {
 
 // #55: the /dev/winsize leaf -- UNGATED (the trivial-leaf class: geometry is
 // not sensitive), read-only, renders the standalone `winsize <cols> <rows>\n`
-// line; stat_native stays cons-scoped (the leaf itself is statless).
+// line. Since H-1 (the /dev/beacon sibling) both report leaves fstat as
+// world-readable 0444 char files -- the earlier statless posture was the
+// switch's default, not a consumer contract.
 void test_devdev_winsize_leaf(void) {
     struct Thread *t = current_thread();
     TEST_ASSERT(t && t->proc, "current thread has Proc");
@@ -433,12 +437,15 @@ void test_devdev_winsize_leaf(void) {
     for (long i = 0; ok && i < n; i++) if (buf[i] != set[i]) ok = false;
     TEST_ASSERT(ok, "leaf reads winsize 132 50 after the verb");
 
-    // winsize has no shape of its own, so it falls to the switch's default arm
-    // and stays statless. (The cons leaf and the trivial leaves DO fill -- see
-    // devdev.stat_native_leaves; the CL-4 merge widened this beyond cons.)
+    // H-1: the report-leaf pair (winsize + beacon) now fstats as 0444 char
+    // files -- the old statless posture was the default arm, deliberately
+    // replaced when the beacon sibling landed (a leaf that opens + reads
+    // should stat; no consumer keyed on the failure).
     struct t_stat st;
-    TEST_EXPECT_EQ((long)devdev.stat_native(wsopen, &st), -1L,
-                   "winsize leaf is statless (no shape -> the default arm)");
+    TEST_EXPECT_EQ((long)devdev.stat_native(wsopen, &st), 0L,
+                   "winsize leaf fstats (the H-1 report-leaf shape)");
+    TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFCHR && (st.mode & 0777u) == 0444u,
+                "winsize is a 0444 char file");
     struct Spoor *cons = walk_to("cons");
     TEST_ASSERT(cons != NULL, "walk cons");
     TEST_EXPECT_EQ((long)devdev.stat_native(cons, &st), 0L, "cons leaf stat fills");
@@ -566,4 +573,62 @@ void test_devdev_fd_devclass(void) {
     TEST_ASSERT(direct != NULL, "devcons attach");
     TEST_EXPECT_EQ((long)direct->dc, (long)'c', "a devcons Spoor caches dc 'c'");
     spoor_unref(direct);
+}
+
+// H-1: byte-compare for the beacon-leaf renders (no libc memcmp in the
+// kernel; the test_cons tud_bytes_eq idiom).
+static bool bl_bytes_eq(const char *a, const char *b, long n) {
+    for (long i = 0; i < n; i++)
+        if (a[i] != b[i]) return false;
+    return true;
+}
+
+// H-1 audit F1: the ungated /dev/beacon leaf -- the session shell's tier
+// readback (a fresh open at offset 0; the winsize precedent). Round-trips
+// the consctl verb through the LEAF: the verb sets, the leaf reports, the
+// test reset restores. Also pins the leaf's fstat shape (the arm that
+// closed the winsize gap) and its read-only posture.
+void test_devdev_beacon_leaf(void) {
+    cons_test_reset();
+
+    struct Spoor *b = walk_to("beacon");
+    TEST_ASSERT(b != NULL, "walk to beacon");
+    struct Spoor *o = devdev.open(b, 0);
+    TEST_ASSERT(o != NULL, "ungated open (no attach, no renderer)");
+
+    char buf[32];
+    long n = devdev.read(o, buf, (long)sizeof(buf), 0);
+    TEST_ASSERT(n == 12, "default renders 'beacon none\\n' (12 bytes)");
+    TEST_ASSERT(n == 12 && bl_bytes_eq(buf, "beacon none\n", 12),
+                "default tier reads none");
+
+    // The verb flips it; the leaf reports the flip (success returns n).
+    TEST_ASSERT(cons_set_mode_cmd("beacon cells", 12, true) == 12,
+                "the consctl verb sets cells");
+    n = devdev.read(o, buf, (long)sizeof(buf), 0);
+    TEST_ASSERT(n == 13 && bl_bytes_eq(buf, "beacon cells\n", 13),
+                "the leaf reports cells");
+
+    // Positioned tail read (the fresh-open consumer never needs it, but the
+    // off semantics match winsize: serve [off..len), EOF past len).
+    n = devdev.read(o, buf, (long)sizeof(buf), 7);
+    TEST_ASSERT(n == 6 && bl_bytes_eq(buf, "cells\n", 6), "offset read serves the tail");
+    n = devdev.read(o, buf, (long)sizeof(buf), 13);
+    TEST_ASSERT(n == 0, "EOF past the line");
+
+    // Read-only: a write is refused.
+    TEST_ASSERT(devdev.write(o, "beacon rich", 11, 0) < 0, "the leaf is read-only");
+
+    // fstat: the world-readable character-file shape (the arm that also
+    // closed the pre-existing winsize default:-1 gap).
+    struct t_stat st;
+    TEST_ASSERT(devdev.stat_native(o, &st) == 0, "beacon leaf fstats");
+    TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFCHR && (st.mode & 0777u) == 0444u,
+                "beacon leaf is a 0444 char file");
+    // devdev_open is dev_simple_open: it returns the SAME Spoor (o == b),
+    // so exactly ONE unref -- the first fix attempt double-unref'd and the
+    // UAF guard extincted the suite (a correct catch).
+    devdev.close(o);
+    spoor_unref(b);
+    cons_test_reset();
 }

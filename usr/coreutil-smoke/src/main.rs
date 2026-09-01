@@ -277,12 +277,38 @@ pub extern "C" fn rs_main() -> i64 {
     // (file operands were SGR-wrapped too).
     beacon_clean(&mut c, "ls auto pipe clean", "ls", &["/version", "/welcome"]);
     beacon_clean(&mut c, "ls -l auto pipe clean", "ls", &["-l", "/version", "/welcome"]);
-    beacon_clean(&mut c, "ps auto pipe clean", "ps", &[]);
 
-    // `ps` piped = the verbatim /ctl/procs snapshot (parseable): the kernel
-    // header + this very process family are in it.
-    c.expect_contains("ps raw header", "ps", &[], b"", b"PID    PPID    NAME", 0);
-    c.expect_contains("ps raw joey", "ps", &[], b"", b"joey", 0);
+    // The ps legs' budget gate (audit H-1 F9): EVERY ps spawn pipes the full
+    // /ctl/procs snapshot, so the pipe-budget hazard is in the spawn itself
+    // -- a guard cannot measure by spawning. Measure by reading the SAME
+    // source directly (no pipe), then gate all four legs on it. The proc
+    // table grows with boot services; a skip is loud, a hang would not be.
+    let ps_raw_len = {
+        use libthyla_rs::io::Read as _;
+        let mut sz = 0usize;
+        if let Ok(mut f) = libthyla_rs::fs::File::open("/ctl/procs") {
+            let mut b = [0u8; 512];
+            while let Ok(n) = f.read(&mut b) {
+                if n == 0 {
+                    break;
+                }
+                sz += n;
+            }
+        }
+        sz
+    };
+    if ps_raw_len > 0 && ps_raw_len < 3500 {
+        beacon_clean(&mut c, "ps auto pipe clean", "ps", &[]);
+        // `ps` piped = the verbatim /ctl/procs snapshot (parseable): the
+        // kernel header + this very process family are in it.
+        c.expect_contains("ps raw header", "ps", &[], b"", b"PID    PPID    NAME", 0);
+        c.expect_contains("ps raw joey", "ps", &[], b"", b"joey", 0);
+    } else {
+        t_putstr(&format!(
+            "coreutil-smoke: ps raw legs SKIPPED (/ctl/procs {}B nears PIPE_BUF)\n",
+            ps_raw_len
+        ));
+    }
 
     // Force the rich tier down the REAL inheritance path: write our own
     // /env/BEACON (env_clone_into deep-copies it into every child we spawn),
@@ -321,35 +347,31 @@ pub extern "C" fn rs_main() -> i64 {
         );
         // ps at rich: the beacon table with obj pid cells. Its plain payload
         // is the STYLED aligned table (not the raw snapshot), so assert the
-        // frame + content, not equality with the pass-through. Budget-gated:
-        // frames multiply a raw row ~6x, so re-measure the raw size first
-        // and skip (loudly) rather than risk the pipe-full deadlock.
-        match run_tool("ps", &[], b"") {
-            Some((0, raw)) if raw.len() * 7 < 3500 => {
-                match run_tool("ps", &["--beacon=always"], b"") {
-                    Some((0, out)) => {
-                        if window_contains(&out, b"\x1b]1936;v1;obj;type=pid;ref=")
-                            && window_contains(&out, b"\x1b]1936;v1;table;cols=rrllrrrr")
-                            && window_contains(&beacon::wire::strip(&out), b"joey")
-                        {
-                            c.pass("ps rich table + obj pid");
-                        } else {
-                            c.fail("ps rich table + obj pid", "frames/payload missing");
-                        }
+        // frame + content, not equality with the pass-through. Budget-gated
+        // on the direct /ctl/procs measurement above (frames multiply a raw
+        // row ~6x): skip loudly rather than risk the pipe-full deadlock.
+        if ps_raw_len > 0 && ps_raw_len * 7 < 3500 {
+            match run_tool("ps", &["--beacon=always"], b"") {
+                Some((0, out)) => {
+                    if window_contains(&out, b"\x1b]1936;v1;obj;type=pid;ref=")
+                        && window_contains(&out, b"\x1b]1936;v1;table;cols=rrllrrrr")
+                        && window_contains(&beacon::wire::strip(&out), b"joey")
+                    {
+                        c.pass("ps rich table + obj pid");
+                    } else {
+                        c.fail("ps rich table + obj pid", "frames/payload missing");
                     }
-                    Some((code, _)) => c.fail("ps rich table + obj pid", &format!("exit {}", code)),
-                    None => c.fail("ps rich table + obj pid", "spawn/wait failed"),
                 }
+                Some((code, _)) => c.fail("ps rich table + obj pid", &format!("exit {}", code)),
+                None => c.fail("ps rich table + obj pid", "spawn/wait failed"),
             }
-            Some((0, raw)) => {
-                // NOT a pass: the leg was not exercised. Loud, greppable, and
-                // it should page whoever grew the boot's proc table this far.
-                t_putstr(&format!(
-                    "coreutil-smoke: ps rich leg SKIPPED (raw {}B; frame estimate would near PIPE_BUF)\n",
-                    raw.len()
-                ));
-            }
-            _ => c.fail("ps rich table + obj pid", "raw ps probe failed"),
+        } else {
+            // NOT a pass: the leg was not exercised. Loud, greppable, and
+            // it should page whoever grew the boot's proc table this far.
+            t_putstr(&format!(
+                "coreutil-smoke: ps rich leg SKIPPED (/ctl/procs {}B x7 nears PIPE_BUF)\n",
+                ps_raw_len
+            ));
         }
         // Reset our env so the tail checks (and anything after) see none.
         let _ = write_env_beacon(b"none");

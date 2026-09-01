@@ -59,8 +59,10 @@ ESC ] 1936 ; v1 ; /<op> ST                    — close
 ```
 
 - **OSC 1936** is the Beacon number — the thylacine's year, and unclaimed by any
-  terminal we can find (iTerm2 owns 1337, urxvt 777, ConEmu 9). *Proposal of
-  record; confirm-at-first-implementation.*
+  terminal we can find (iTerm2 owns 1337, urxvt 777, ConEmu 9). **ADOPTED
+  2026-09-01** (the 12.10-1 confirmation ran at the H-1 close: collision greps
+  over `third_party/` + `usr/ports/` + the tree clean — reviewer + author
+  independently).
 - **`v1`** is the vocabulary version. A renderer ignores frames whose version it
   does not speak (payload text still renders).
 - **The bracketing rule is load-bearing: the plain text is always the payload in
@@ -90,7 +92,7 @@ requires a version bump plus scripture amendment here.
 
 | Op | Args | Meaning |
 |---|---|---|
-| `zone` | `prompt \| command \| output \| exit=<code>` | The transcript structure (the OSC 133 analog): where a prompt, an entered command, and its output begin/end, and the exit status. Emitted by the *shell* (ut), not by programs. |
+| `zone` + `mark` | `zone k=prompt \| command \| output`; `mark k=exit;code=<i64>` | The transcript structure (the OSC 133 analog): where a prompt, an entered command, and its output begin/end, and the exit-status completion mark (§12.2 normative forms). Emitted by the *shell* (ut), not by programs. |
 | `table` | column spec: per-column `l\|r\|c` alignment, optional `hdr` first-row flag | A table. Cells... |
 | `row`, `cell` | — | ...delimited by `row`/`cell` frames wrapping the plain cell text. The plain-stream realization (the payload between frames) is the aligned, whitespace-separated form. |
 | `hdr` | `level=1..3` | A heading. |
@@ -159,8 +161,9 @@ The shell's role is deliberately minimal; **ut never parses, transforms, or
 re-emits child output**:
 
 1. **Propagate** the tier to children (the environment variable, §4).
-2. **Emit its own zones**: `zone prompt` / `zone command` / `zone output` /
-   `zone exit=<code>` around its REPL cycle. This is the entire data model the
+2. **Emit its own zones**: `zone k=prompt` / `zone k=output` (k=command
+   RESERVED) plus the `mark k=exit;code=<i64>` completion point (the 12.2
+   registry's normative forms) around its REPL cycle. This is the entire data model the
    Halcyon transcript needs — command blocks, "select a past command, tweak,
    resubmit," and per-entry exit badges all read off the zone stream. (Free side
    effect: OSC-133-speaking host terminals get native block marks from a
@@ -319,7 +322,7 @@ Normative rules, each load-bearing:
 | Op | Kind | Args | Notes |
 |---|---|---|---|
 | `zone` | paired | `k=prompt \| command \| output` | Emitted by the SHELL only (§12.6). `prompt` wraps prompt + line-editing echo (the OSC 133 A..C region); `output` wraps the command's whole output. `command` is RESERVED in v1 (ut echoes into the prompt zone; a shell that re-echoes the accepted line may wrap it later). |
-| `mark` | point | `k=exit;code=<i64>` | The command-completion mark (OSC 133 `D;exit` analog). Emitted between the `output` close and the next `prompt` open. |
+| `mark` | point | `k=exit;code=<i64>` | The command-completion mark (OSC 133 `D;exit` analog). Emitted as the LAST child of the `output` zone, immediately before its close (amended at H-1c-2, §12.5 deviation 8: containment beats a floating between-zones mark — the renderer needs no backward association). |
 | `table` | paired | `cols=<spec>;hdr=0\|1` | `<spec>` = one char per column, `l`/`r`/`c` alignment (e.g. `cols=lrrl`). `hdr=1` ⇒ the first `row` is a header row. |
 | `row` | paired | — | Direct child of `table`. The row's payload newline is ordinary stream bytes after the close. |
 | `cell` | paired | — | Direct child of `row`. The plain-stream realization between cells (spaces/padding) is payload OUTSIDE the cell frames — so stripping yields the aligned plain table. |
@@ -346,10 +349,21 @@ layout/typography ops is REFUSED on sight — that was the TermKit failure.
   the tier resets at BOTH the drain close and the test reset). Mint gate: the same
   attached-OR-renderer widening winsize uses (ARCH §23.5.3) — only the
   console renderer (aurora / Halcyon) or the attached owner may set it.
-- **No new leaf.** Winsize needed the ungated `/dev/winsize` leaf because
-  pouch's TIOCGWINSZ reads it; Beacon has no pouch consumer by construction
-  (native-first), so the consctl readback + the environment suffice. Decision
-  bound here; revisit only with a named consumer.
+- **The `/dev/beacon` leaf** (REVISED at the H-1 close — this bullet
+  originally bound "no new leaf; the consctl readback + the environment
+  suffice; revisit only with a named consumer," and the revisit condition
+  was met by the round-1 P1): **the consctl readback is structurally
+  unreachable for the session shell.** ut's consctl fd is ONE Spoor threaded
+  joey → login → ut whose offset every non-positioned mode write advances
+  past the ≤67-byte line; devdev is non-seekable (pread/lseek gate on
+  `dev->seekable`, the RW-4 R2-F2 narrowing), and a fresh consctl open
+  fails the I-27 attach gate (attach never propagates — that is why the fd
+  is inherited at all, #94-B). So the tier readback gets the winsize-leaf
+  precedent exactly: `/dev/beacon`, ungated read-only, serving
+  `beacon <tier>\n` (`cons_render_beacon`; a renderer self-description is
+  not a secret). The consctl RENDER-LINE token stays (the renderer's own
+  readback + parser parity); the leaf is the consumer-side surface. ut
+  fresh-opens it per session (and, at H-2, per prompt — the F10 re-read).
 - **The environment**: at session start (and after `tty:winch`-class renderer
   changes — cheap to re-read), ut reads the consctl render line, parses the
   `beacon` token, and exports **`BEACON=none|cells|rich`** to children
@@ -376,7 +390,11 @@ layout/typography ops is REFUSED on sight — that was the TermKit failure.
 ```
 effective_tier(env_tier, dc_of_stdout, flag) =
     flag == never              -> None
-    flag == always             -> env_tier (floor Cells)   // explicit user override
+    flag == always             -> env_tier                 // explicit user override
+                                  // (amended at the H-1 close, audit F5: the earlier
+                                  //  "floor Cells" clause is DROPPED -- an absent
+                                  //  advertisement means no renderer reads frames, so
+                                  //  always trusts the advertised tier, never invents one)
     else (auto, the default)   -> if dc_of_stdout == 'c' then env_tier else None
 ```
 
@@ -468,7 +486,14 @@ impl Table { pub fn realize(&self, s: &mut Sink); }
   ("both unify to `auto` once SYS_FD_DEVCLASS makes TTY detection real —
   the default is simply color iff a terminal"); (7) obj-ref
   canonicalization is `coreutils::path::abs` (cwd-anchored lexical clean,
-  shared with realpath) — a `None` (unreadable cwd) emits no frame.
+  shared with realpath) — a `None` (unreadable cwd) emits no frame; (8)
+  **the exit mark is the LAST CHILD of the `output` zone**, not a
+  between-zones point (§12.2's `mark` row said "between the output close
+  and the next prompt open") — containment beats the OSC-133-style
+  floating mark because the renderer needs no backward association to know
+  which output block the mark terminates, and the u-repl-test pins the
+  as-built order (`mark` → `/zone` → `zone prompt`). The §12.2 row is
+  amended to say so.
 
 ### 12.6 ut integration (the shell half of H-1)
 
@@ -550,7 +575,7 @@ hexdump/seq/echo never link the emitting half at any tier.
 
 ### 12.10 Open items (each named, none blocking H-1's start)
 
-1. OSC **1936** — confirm no collision at first implementation (one grep of
+1. DONE at the H-1 close (see §2: ADOPTED 2026-09-01). Was: OSC **1936** — confirm no collision at first implementation (one grep of
    the vendored terminal-adjacent sources + the SDL/mesa tree; then pin it in
    §2 as adopted).
 2. The env name **`BEACON`** — confirm (vs `TH_BEACON`) at implementation;

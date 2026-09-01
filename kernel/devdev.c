@@ -58,6 +58,8 @@ enum {
     DEV_KIND_WINSIZE   = 12, // #55: the UNGATED read-only console-geometry leaf
     DEV_KIND_WARP      = 13, // the /dev/warp mount POINT (Warp-2; PER-CLIENT --
                              // joey never mounts it globally, audit F1)
+    DEV_KIND_BEACON    = 14, // H-1 audit F1: the UNGATED read-only Beacon-tier
+                             // leaf (`beacon <tier>\n`; the winsize precedent)
 };
 
 #define DEV_QID_ROOT_PATH  0ULL
@@ -78,6 +80,7 @@ static const struct dev_leaf g_dev_leaves[] = {
     { "consdrain", DEV_KIND_CONSDRAIN },
     { "consfeed",  DEV_KIND_CONSFEED  },
     { "winsize",   DEV_KIND_WINSIZE   },   // #55: trivial-leaf class (ungated)
+    { "beacon",    DEV_KIND_BEACON    },   // H-1: trivial-leaf class (ungated)
 };
 
 #define DEV_LEAF_COUNT  (sizeof(g_dev_leaves) / sizeof(g_dev_leaves[0]))
@@ -356,6 +359,15 @@ static int devdev_stat_native(struct Spoor *c, struct t_stat *out) {
         out->qid_type = QTFILE;
         out->mode     = T_S_IFCHR | 0666u;
         return 0;
+    case DEV_KIND_WINSIZE:
+    case DEV_KIND_BEACON:
+        // #55 / H-1: the ungated read-only report leaves. Adding the beacon
+        // leaf surfaced that winsize was absent from this switch since #55
+        // (fstat on it fell to the -1 default) -- both now stat as the
+        // world-readable character files they are.
+        out->qid_type = QTFILE;
+        out->mode     = T_S_IFCHR | 0444u;
+        return 0;
     default:
         // An unknown kind means the qid decode and this switch disagree; fail
         // rather than invent a shape.
@@ -390,7 +402,8 @@ static struct Spoor *devdev_open(struct Spoor *c, int omode) {
         if (!((u32)c->qid.path == DEV_KIND_CONSCTL &&
               devdev_renderer_gate_ok()))
             return NULL;
-        // The renderer-minted (non-attached) consctl: winsize-verb-only.
+        // The renderer-minted (non-attached) consctl: winsize + beacon
+        // verbs only (both renderer self-descriptions; never termios flags).
         struct Spoor *o = dev_simple_open(c, omode);
         if (o) o->flag |= CCONSWINSZONLY;
         return o;
@@ -483,6 +496,16 @@ static long devdev_read(struct Spoor *c, void *buf, long n, s64 off) {
         for (long i = 0; i < cnt; i++) out[i] = (u8)tmp[(long)off + i];
         return cnt;
     }
+    case DEV_KIND_BEACON: {                      // H-1: `beacon <tier>\n`
+        char tmp[16];                            // max 13 incl. NL
+        long len = cons_render_beacon(tmp, (long)sizeof(tmp));
+        if (off < 0 || off >= len) return 0;
+        long avail = len - (long)off;
+        long cnt = (n < avail) ? n : avail;
+        u8 *out = (u8 *)buf;
+        for (long i = 0; i < cnt; i++) out[i] = (u8)tmp[(long)off + i];
+        return cnt;
+    }
     case DEV_KIND_CONSDRAIN:                     // G-4: the renderer's stream
         if (!devdev_renderer_gate_ok()) return -1;
         return cons_drain_read(buf, n);
@@ -523,14 +546,16 @@ static long devdev_write(struct Spoor *c, const void *buf, long n, s64 off) {
         return cons_output_write(buf, n);
     case DEV_KIND_CONSCTL:                      // LS-8b: stty-style +/-flag parse
         // #55 audit F2: a renderer-minted consctl (CCONSWINSZONLY) is
-        // restricted to the winsize verb; the attached chain gets full flags.
+        // restricted to the winsize + beacon verbs (allow_flags=false --
+        // never a termios flag); the attached chain gets the full grammar.
         return cons_set_mode_cmd(buf, n, !(c->flag & CCONSWINSZONLY));
     case DEV_KIND_CONSFEED:                     // G-4: renderer input injection
         if (!devdev_renderer_gate_ok()) return -1;
         return cons_feed_write(buf, n);
     case DEV_KIND_CONSDRAIN:                    // read-only
     case DEV_KIND_WINSIZE:                      // #55: read-only (the writer is
-        return -1;                              // the consctl verb, renderer-held)
+    case DEV_KIND_BEACON:                       // the consctl verb, renderer-held;
+        return -1;                              // H-1: the beacon leaf likewise
     case DEV_KIND_ROOT:
     default:
         return -1;

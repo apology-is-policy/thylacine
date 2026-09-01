@@ -792,6 +792,7 @@ void test_devdev_cons_gate(void);
 void test_devdev_consctl_renderer_mint(void);    // #55
 void test_devdev_winsize_leaf(void);             // #55
 void test_devdev_fd_devclass(void);              // H-1 (SYS_FD_DEVCLASS)
+void test_devdev_beacon_leaf(void);              // H-1 audit F1 (/dev/beacon)
 void test_devdev_renderer_gate(void);            // G-4
 void test_devhw_bestiary_smoke(void);
 void test_devhw_attach_returns_root(void);
@@ -2435,6 +2436,7 @@ struct test_case g_tests[] = {
     { "devdev.consctl_renderer_mint",  test_devdev_consctl_renderer_mint,  false, NULL },
     { "devdev.winsize_leaf",           test_devdev_winsize_leaf,           false, NULL },
     { "devdev.fd_devclass",            test_devdev_fd_devclass,            false, NULL },
+    { "devdev.beacon_leaf",            test_devdev_beacon_leaf,            false, NULL },
     { "devhw.bestiary_smoke",          test_devhw_bestiary_smoke,          false, NULL },
     { "devhw.attach_returns_root",     test_devhw_attach_returns_root,     false, NULL },
     { "devhw.walk_node_and_prop",      test_devhw_walk_node_and_prop,      false, NULL },

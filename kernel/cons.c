@@ -1842,21 +1842,26 @@ int cons_drain_open(void) {
 // hook list directly is legal (the console_mgr precedent). A reader parked
 // mid-close observes !armed via the sleep cond and returns EOF.
 void cons_drain_close(void) {
-    irq_state_t s = spin_lock_irqsave(&g_cons_drain.lock);
+    // H-1 (ARCH 23.5.4): the renderer's drain closing means the renderer is
+    // gone -- no renderer, no rich/cells sink, so the Beacon tier resets to
+    // NONE (a respawned renderer re-advertises, like it re-writes winsize).
+    // Reset BEFORE disarming the drain (audit H-1 F2): the instant `open`
+    // clears, a respawned renderer can win cons_drain_open and advertise;
+    // a reset ordered after the disarm could then wipe the SUCCESSOR's
+    // fresh advertisement for its whole life. Reset-first closes that
+    // window (the dying renderer's own tier going NONE a moment early is
+    // harmless -- it is closing). Locks stay strictly sequential:
+    // g_cons.lock and g_cons_drain.lock never nest anywhere.
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    g_cons.beacon_tier = CONS_BEACON_NONE;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+
+    s = spin_lock_irqsave(&g_cons_drain.lock);
     g_cons_drain.open = false;
     drain_armed_store(false);
     spin_unlock_irqrestore(&g_cons_drain.lock, s);
     wakeup(&g_cons_drain_rendez);
     poll_waiter_list_wake(&g_cons_drain.poll_list);
-
-    // H-1 (ARCH 23.5.4): the renderer's drain closing means the renderer is
-    // gone -- no renderer, no rich/cells sink, so the Beacon tier resets to
-    // NONE (a respawned renderer re-advertises, like it re-writes winsize).
-    // Separate lock acquisition AFTER the drain lock drops: g_cons.lock and
-    // g_cons_drain.lock never nest anywhere, and this keeps it that way.
-    s = spin_lock_irqsave(&g_cons.lock);
-    g_cons.beacon_tier = CONS_BEACON_NONE;
-    spin_unlock_irqrestore(&g_cons.lock, s);
 }
 
 // cond: drain data ready OR the drain was disarmed (EOF). Lockless RELAXED
@@ -2289,6 +2294,30 @@ long cons_render_winsize(void *buf, long n) {
     cons_render_dec_u16(out, &off, wc);
     out[off++] = (u8)' ';
     cons_render_dec_u16(out, &off, wr);
+    out[off++] = (u8)'\n';
+    return off;
+}
+
+// H-1 (audit F1): the standalone `beacon <tier>\n` line the UNGATED
+// /dev/beacon leaf serves -- the tier readback for the session shell, which
+// can neither seek its inherited consctl fd (devdev is non-seekable; the
+// shared Spoor offset sits past the mode line after login's writes) nor
+// mint a fresh consctl (the I-27 attach gate; attach never propagates).
+// The /dev/winsize precedent exactly: a renderer self-description is not a
+// secret, so the leaf is world-readable.
+long cons_render_beacon(void *buf, long n) {
+    if (!buf || n < 13) return 0;   // "beacon cells\n" = 13 bytes, the max
+    const char *word;
+    switch (cons_beacon_tier()) {
+    case CONS_BEACON_RICH:  word = "rich";  break;
+    case CONS_BEACON_CELLS: word = "cells"; break;
+    default:                word = "none";  break;
+    }
+    u8 *out = (u8 *)buf;
+    long off = 0;
+    const char pre[] = "beacon ";
+    for (long k = 0; pre[k]; k++) out[off++] = (u8)pre[k];
+    for (long k = 0; word[k]; k++) out[off++] = (u8)word[k];
     out[off++] = (u8)'\n';
     return off;
 }

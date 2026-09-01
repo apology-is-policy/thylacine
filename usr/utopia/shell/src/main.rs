@@ -82,18 +82,32 @@ fn print_banner() {
 /// `Command::inherit_fd` (so it lands at ut's fd 3) and passes its number here.
 /// A bare-spawned ut (the boot check) is given no such arg -> -1 -> ut runs
 /// unchanged. N is parsed generically (always 3 in the trusted login->ut chain).
-// H-1c: read the renderer's tier advertisement off the consctl mode line
-// (`... winsize C R beacon <tier>\n`, ARCH 23.5.4). Returns the tier word,
-// or None on a read failure / a pre-H-1 line with no token (both mean:
-// leave /env/BEACON alone -- an inherited value survives). The read advances
-// the fd offset; nothing else reads this fd (the LS-7 dance only writes).
-fn read_beacon_tier(fd: i64) -> Option<&'static str> {
-    let mut buf = [0u8; 96];
-    let n = unsafe { libthyla_rs::t_read(fd, buf.as_mut_ptr(), buf.len()) };
-    if n <= 0 {
+// H-1c: read the renderer's tier advertisement off the ungated /dev/beacon
+// leaf (`beacon <tier>\n`; ARCH 23.5.4). Returns the tier word, or None on
+// an open/read failure / a missing token (both mean: leave /env/BEACON
+// alone -- an inherited value survives).
+//
+// Why the LEAF and not the inherited consctl fd (audit H-1 F1): that fd is
+// ONE Spoor threaded joey -> login -> ut whose offset every non-positioned
+// mode WRITE advances -- by this point login's three writes + ut's own
+// PROMPT_MODE have pushed it past the <=67-byte line, so a plain t_read
+// returned EOF every session and the tier transport was dead on arrival
+// (the original comment here considered competing READS and missed the
+// writes). Nor can ut recover the offset: devdev is non-seekable (pread/
+// lseek gate on dev->seekable, the RW-4 R2-F2 narrowing) and a fresh
+// consctl open fails the I-27 attach gate (attach never propagates --
+// that is WHY the fd is inherited). The /dev/beacon leaf is the winsize-
+// leaf precedent: a fresh ungated open at offset 0, world-readable, since
+// a renderer self-description is not a secret.
+fn read_beacon_tier() -> Option<&'static str> {
+    use libthyla_rs::io::Read as _;
+    let mut f = libthyla_rs::fs::File::open("/dev/beacon").ok()?;
+    let mut buf = [0u8; 32];
+    let n = f.read(&mut buf).ok()?;
+    if n == 0 {
         return None;
     }
-    let line = &buf[..n as usize];
+    let line = &buf[..n];
     let needle = b"beacon ";
     let at = line
         .windows(needle.len())
@@ -370,14 +384,26 @@ pub extern "C" fn rs_main() -> i64 {
         // takes this branch never, so an INHERITED /env/BEACON from a parent
         // session is left alone. Zones arm iff the tier is rich AND ut's own
         // stdout is the console (a redirected session emits nothing).
-        let tier = read_beacon_tier(consctl_fd);
+        let tier = read_beacon_tier();
         if let Some(t) = tier {
             export_beacon(t);
+            // The transport canary (audit H-1 F1): fires EVERY session, any
+            // tier -- a regression back to the dead-read shape (which
+            // returned None) silences this line, so a scenario asserting it
+            // is the fix's standing witness.
+            t_putstr("ut: beacon ");
+            t_putstr(t);
+            t_putstr(" exported\n");
             let stdout_is_cons = unsafe { libthyla_rs::t_fd_devclass(1) } == b'c' as i64;
             if t == "rich" && stdout_is_cons {
                 repl.set_beacon_rich(true);
                 t_putstr("ut: beacon rich (transcript zones armed)\n");
             }
+        } else {
+            // Absent token / failed read: the inherited /env/BEACON (if any)
+            // survives; children resolve none. Loud so the chain never fails
+            // silently again.
+            t_putstr("ut: beacon tier unreadable (env untouched)\n");
         }
     }
 

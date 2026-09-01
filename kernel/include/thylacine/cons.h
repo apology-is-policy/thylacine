@@ -365,6 +365,11 @@ long cons_render_winsize(void *buf, long n);
 // Snapshot the current tier (one g_cons.lock hold internally).
 u32 cons_beacon_tier(void);
 
+// The standalone `beacon <tier>\n` line the ungated /dev/beacon leaf serves
+// (H-1 audit F1: the session shell cannot seek its inherited consctl fd nor
+// mint a fresh one -- the winsize-leaf precedent). Max 13 bytes.
+long cons_render_beacon(void *buf, long n);
+
 // Diagnostic: count of CHANGED winsize applies (each corresponds to one
 // tty:winch post attempt). The iff-changed regression reads it -- an unchanged
 // rewrite must NOT advance it.

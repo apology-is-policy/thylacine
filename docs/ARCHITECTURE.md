@@ -3876,11 +3876,20 @@ line, **reset to `none` at the renderer drain's teardown** —
 `cons_drain_close`, the real no-renderer event; the earlier "where winsize
 unsets" wording was corrected at implementation: winsize resets only in
 `cons_test_reset`, which the tier also joins). Aurora writes `cells`; the
-serial backend writes nothing (⇒ `none`); Halcyon writes `rich`. **No new leaf** — winsize's `/dev/winsize` existed for
-pouch TIOCGWINSZ, and Beacon has no pouch consumer by construction; the
-consctl readback + ut's `BEACON` environment export (name
-proposal-of-record) carry it. Consumers gate emission on tier AND
-`SYS_FD_DEVCLASS(1) == 'c'` (the two-condition gate, BEACON.md §12.4).
+serial backend writes nothing (⇒ `none`); Halcyon writes `rich`.
+**The `/dev/beacon` leaf** (REVISED at the H-1 close; this paragraph
+originally said "no new leaf" — the H-1 audit's P1 proved the consctl
+readback structurally unreachable for the session shell: the inherited
+consctl fd's shared offset sits past the mode line after login's writes,
+devdev is non-seekable, and a fresh consctl open fails the I-27 attach
+gate): the tier readback is the ungated read-only `/dev/beacon` leaf
+(`beacon <tier>\n`, `cons_render_beacon` — the `/dev/winsize` precedent;
+a renderer self-description is not a secret). The consctl render-line
+token stays for the renderer's own readback. ut fresh-opens the leaf per
+session, exports `BEACON`, and prints the `ut: beacon <tier> exported`
+canary — the transport's standing witness. Consumers gate emission on
+tier AND `SYS_FD_DEVCLASS(1) == 'c'` (the two-condition gate, BEACON.md
+§12.4).
 **Invariant status**: no new §28 row — composes I-27 (the existing mint
 gate) and adds pure per-console state + a data-transform verb; the tier
 confers no authority (a lying tier changes only how bytes look). Audit:

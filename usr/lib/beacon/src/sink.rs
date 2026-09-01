@@ -140,9 +140,12 @@ impl<'a> Sink<'a> {
     /// A presentation wrapping the shown text. A ref the emitter cannot fit
     /// (over VALUE_MAX) emits NO frame -- plain text only (12.2's obj rule):
     /// a truncated ref would be a WRONG ref, and a wrong ref is a lie the
-    /// verb menu would then act on.
+    /// verb menu would then act on. The guard is on the ENCODED length
+    /// (audit H-1 F4): the parser bounds the percent-escaped field, so an
+    /// escape-heavy ref under the raw cap would emit a frame every
+    /// conforming parser then discards -- withhold it here instead.
     pub fn obj(&mut self, ty: ObjType, obj_ref: &str, shown: &str) {
-        let frame = self.tier == Tier::Rich && obj_ref.len() <= VALUE_MAX;
+        let frame = self.tier == Tier::Rich && wire::escaped_len(obj_ref) <= VALUE_MAX;
         if frame {
             wire::open(
                 &mut self.buf,
@@ -426,6 +429,24 @@ mod tests {
             s.obj(ObjType::Path, &long_ref, "shown")
         });
         assert_eq!(rich, b"shown".to_vec()); // no frame at all
+    }
+
+    #[test]
+    fn obj_encoded_over_cap_degrades_to_plain() {
+        // Audit H-1 F4: the guard is on the ENCODED length. 400 raw '%'
+        // bytes (well under the raw cap) escape 3x to 1200 > VALUE_MAX --
+        // the frame must be withheld here, not emitted for the parser to
+        // discard.
+        let hairy = "%".repeat(400);
+        assert!(hairy.len() <= VALUE_MAX);
+        assert!(wire::escaped_len(&hairy) > VALUE_MAX);
+        let rich = realized(Tier::Rich, |s| s.obj(ObjType::Path, &hairy, "shown"));
+        assert_eq!(rich, b"shown".to_vec());
+        // And a hairy-but-fitting ref still frames + round-trips.
+        let fitting = "%".repeat(300); // encodes to 900 <= 1024
+        let rich2 = realized(Tier::Rich, |s| s.obj(ObjType::Path, &fitting, "shown"));
+        let evs = crate::wire::parse(&rich2);
+        assert!(matches!(&evs[0], crate::wire::Event::Open(Op::Obj, args) if args[1].value == fitting));
     }
 
     #[test]

@@ -103,6 +103,54 @@ banked real positives: grep/stat/ps rich legs ALL PASSED in-guest (the P1
 strip identity on real spawns, the obj-pid table, the `/env/BEACON`
 inheritance chain) — only the ls legs rode the bad subject.
 
+**The audit round (0 P0 / 1 P1 / 0 P2 / 10 P3, Fable 5 start==end — NOT
+dirty).** The P1 (F1) was the round's justification in one finding: **the
+production tier transport was dead on arrival.** ut read the consctl mode
+line through the INHERITED fd — one Spoor threaded joey→login→ut whose
+offset every non-positioned mode write advances; by ut's read the offset
+sat at ≥132 against a ≤67-byte line, so the read returned EOF every
+session, `/env/BEACON` was never written, and zones never armed. Masked
+because u-repl-test drives the rich arm directly (the wired-gate trap ONE
+LAYER UP from where H-1c-1 guarded it) and no witness printed on the
+silent path. The fix took three attempts to even be possible: `t_pread`
+at 0 — killed by the `dev->seekable` gate (the RW-4 R2-F2 narrowing;
+devdev is non-seekable, verified in `spoor_read_common` BEFORE shipping);
+a fresh consctl open — killed by the I-27 attach gate (attach never
+propagates; #94-B inherits the fd for exactly that reason); so the fix is
+the **ungated read-only `/dev/beacon` leaf** (the `/dev/winsize`
+precedent; BEACON.md §12.3's "no new leaf" bound revised by its own
+revisit clause — the named consumer arrived carrying a proof). ut
+fresh-opens it, exports ANY tier, and prints the
+`ut: beacon <tier> exported` canary every session; ls-3a greps the canary
+from its transcript (the regression); `devdev.beacon_leaf` pins the leaf.
+
+The P3 set: F2 (drain-close reset reordered before the disarm — the
+disarm is the successor renderer's open window), F3 (the depth-8 cap
+ENFORCED in `parse()` rather than amending three scripture sites —
+suppressed-pair counting, payload never eaten; converged with the
+parallel self-audit's finding), F4 (`Sink::obj` guards on the ENCODED
+ref length — the parser bounds the escaped field, so a raw-length guard
+admitted frames every conforming parser then discards), F5 (12.4's
+"(floor Cells)" dropped — always trusts the advertisement, never invents
+one), F6 (OSC 1936 pinned ADOPTED; §3/§6 zone/mark wording aligned with
+the normative registry), F8 (three stale comments), F9 (ALL ps smoke legs
+now gate on a DIRECT `/ctl/procs` read — the measurement cannot itself
+deadlock), F7/F10/F11 recorded → H-2 (the rich-forced E2E needs a rich
+advertiser; the per-prompt tier re-read; the idle-delivery zone
+attribution). Full dispositions: `memory/audit_h1_closed_list.md`.
+
+**Two catches during the fix run, both the guards working.** (1) My new
+kernel test double-unref'd the leaf Spoor (`devdev_open` is
+`dev_simple_open` — it returns the SAME Spoor, not a clone) and
+`spoor_unref`'s corruption check EXTINCTED the suite — a correct catch of
+a test bug. (2) The stat_native arm I added for the leaf pair (0444 char
+files, closing what the reviewer and I both read as the winsize fstat
+gap) FAILED `devdev.winsize_leaf`, which had deliberately PINNED the
+statless posture — not a gap but a pinned default (the #240 shape:
+know which tests pin the negative you are about to flip). Kept the new
+shape (a leaf that opens + reads should stat; no consumer keys on the
+failure) and updated the pinned test + its three comment sites.
+
 **Vault + close prep**: quaestor run on the changed paths — MIXED: the
 kernel/cons/ls/build.sh prose is vault-owned (and the vault's
 `sub-coreutils-presenters` dossier — "fifteen tools, and fifteen copies of

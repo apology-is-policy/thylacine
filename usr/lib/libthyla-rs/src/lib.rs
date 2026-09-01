@@ -269,7 +269,6 @@ pub const T_SYS_PCI_MAP_BAR: u64      = 77;     // pci-1c: map a KObj_PCI BAR
 pub const T_SYS_PCI_INFO: u64         = 78;     // pci-1c: read KObj_PCI topology
 pub const T_SYS_CLOCK_SETTIME: u64    = 79;     // net-7a: step CLOCK_REALTIME (CAP_HOSTOWNER)
 pub const T_SYS_FD_DEVCLASS: u64      = 80;     // H-1: fd -> Dev class char ('c' = console)
-// 80 reserved for SYS_FD_DEVCLASS (Menagerie; not yet built).
 pub const T_SYS_WEFT_SHARE: u64       = 81;     // Weft-6a-2: register a per-flow ring -> share_id
 pub const T_SYS_WEFT_MAP: u64         = 82;     // Weft-6a-2: map a /net data fd's ring -> ring_va
 pub const T_SYS_DMA_CREATE_WEAVE: u64 = 99;     // G-2: mint a share-admissible DMA weave

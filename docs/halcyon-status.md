@@ -9,7 +9,7 @@ tracker (the ROADMAP §9 phase) — the H-arc is arc-named the way its chunks ar
 
 **H-0 landed** (kickoff + same-day concretization: `HALCYON.md` + `BEACON.md`
 born implementation-grade; ARCH §17/§23.5.4 + ROADMAP §11 rewritten). **H-1 is
-LANDED in four sub-chunks** — the kernel fd-class syscall + consctl tier verb,
+LANDED in four sub-chunks + the audit close** — the kernel fd-class syscall + consctl tier verb,
 the beacon crate (wire/sink + the cells relocation), the tier plumbing (aurora
 advertisement → ut export → transcript zones), and the emitters
 (ls/grep/ps/stat + the `--color=auto` unification). The H-1 close (focused
@@ -25,7 +25,8 @@ the transcript MVP on the CPU floor (HALCYON.md §13).
 | `7cd1ab94` | **H-1a**: `SYS_FD_DEVCLASS` = 80 (rights=0 fd introspection; the `/dev/cons` leaf normalizes to `'c'` via `devdev_fd_devclass` keyed on `DEV_KIND_CONS`) + the consctl `beacon none\|cells\|rich` verb (winsize discipline verbatim: staged parse, atomic reject, render append ` beacon <tier>`, resets at `cons_drain_close` + `cons_test_reset`; allowed on the renderer-minted CCONSWINSZONLY consctl) + libt/libthyla-rs wrappers + the joey `probe H1` five-arm E2E. Trap banked: the 67-byte render floor's reader set includes the kernel's OWN consctl staging buffer (`devdev.c` `tmp[96]`, was 64 — every consctl read EOF'd; caught by the suite) | 1434/1434 (+`cons.beacon_roundtrip`, +`devdev.fd_devclass`, exact-line renders updated) + boot OK + `joey: probe H1 … OK` |
 | `5d638fec` | **H-1b**: the `usr/lib/beacon` crate — `wire` (OSC 1936 emit/parse/strip; caps FRAME_MAX 2048 / VALUE_MAX 1024 / ARGS_MAX 8 / depth 8; foreign-OSC passthrough; the P1 strip identity) + `sink` (Sink zones/em/obj/hdr/rule/mark + Table with padding-outside-frames) + `boxd`/`color`/`palette` relocated VERBATIM from the coreutils crate (git 100%-rename; the 15-test baseline reproduced). As-built deviations recorded in BEACON.md §12.5 | 27 host tests (`cargo test -p beacon`); coreutils lib baseline 4/4 preserved |
 | `04186229` | **H-1c-1**: the tier plumbing — aurora writes `beacon cells` at consctl bring-up; ut reads the render line → exports `/env/BEACON` (children inherit via `env_clone_into`) → arms Repl zones iff `rich` AND stdout dc=='c'; the Repl transcript zones (prompt/output brackets + the exit mark; redraws stay in-zone); the u-repl-test beacon leg (rich vs plain discrimination pair; `strip(rich) == plain` asserted in-guest) | 1434/1434 + `u-repl-test: beacon zones OK` in-guest every boot |
-| *(H-1c-2 pending — the emitters commit)* | **H-1c-2**: the four emitters — ls (rich short: `obj type=path` per name; rich `-l`: a beacon table, obj name cells; the `--color=auto` flip + `--beacon=WHEN`), grep (`obj path` prefix + `em strong` spans, byte-span wire emission), stat (`obj path` on the subject; the `table` op deferred — recorded), **ps built new** (one atomic `/ctl/procs` read; passthrough/boxed/rich table + `obj pid`); the unification sweep (18 stubs → the real probe; 17 defaults → Auto per COREUTILS-design's ordained end-state); `coreutils::path` + `coreutils::beacon_gate`; the coreutil-smoke Beacon E2E legs (the pipe-budget rule: file-operand subjects + the ps-rich loud-skip guard); BEACON.md §12.5 H-1c-2 deviations + the AUDIT-TRIGGERS.md `SYS_FD_DEVCLASS` row + LS-8 BEACON TIER addendum + the CLAUDE.md index line | *(suite re-run in flight; strip identities + flip proofs asserted in-guest on real spawns)* |
+| `8922ccd7` | **H-1c-2**: the four emitters — ls (rich short: `obj type=path` per name; rich `-l`: a beacon table, obj name cells; the `--color=auto` flip + `--beacon=WHEN`), grep (`obj path` prefix + `em strong` spans, byte-span wire emission), stat (`obj path` on the subject; the `table` op deferred — recorded), **ps built new** (one atomic `/ctl/procs` read; passthrough/boxed/rich table + `obj pid`); the unification sweep (18 stubs → the real probe; 17 defaults → Auto per COREUTILS-design's ordained end-state); `coreutils::path` + `coreutils::beacon_gate`; the coreutil-smoke Beacon E2E legs (the pipe-budget rule: file-operand subjects + the ps-rich loud-skip guard); BEACON.md §12.5 H-1c-2 deviations + the AUDIT-TRIGGERS.md `SYS_FD_DEVCLASS` row + LS-8 BEACON TIER addendum + the CLAUDE.md index line | suite 1434/1434 + smoke 55/55 (10 Beacon legs) + LS-CI 37/37 |
+| *(pending)* | **H-1 CLOSE — audit round 1** (Fable 5 start==end, 0 P0 / 1 P1 / 0 P2 / 10 P3, NOT dirty; `memory/audit_h1_closed_list.md`): the P1 = the tier transport dead on arrival (the inherited consctl fd's shared write-advanced offset vs the ≤67-byte line; devdev non-seekable; the attach gate never propagating) → the **ungated read-only `/dev/beacon` leaf** (`DEV_KIND_BEACON`, `cons_render_beacon`; §12.3's no-new-leaf bound revised by its own revisit clause) + ut fresh-opens/exports/prints the `ut: beacon <tier> exported` canary + the ls-3a transcript-grep regression. P3 fixes: drain-close reset reordered (F2), parser-side depth-8 enforcement + test (F3), encoded-length obj guard + test (F4), 12.4 Always-arm amended (F5), OSC 1936 pinned ADOPTED + registry wording aligned (F6), three stale comments (F8), ALL ps smoke legs gated on a direct `/ctl/procs` pre-measure (F9); F7/F10/F11 recorded → H-2. Riders: the winsize+beacon report-leaf fstat pair (0444; the pinned statless test deliberately updated), the exit-mark containment deviation (self-audit; 12.2 amended). | 1435/1435 (+`devdev.beacon_leaf`; `devdev.winsize_leaf` updated) + smoke 55/55 + beacon host 29/29 + canary ×2 in-guest + 0 EXTINCTION + boot OK |
 
 ## Remaining work
 
@@ -46,7 +47,7 @@ witness) + the focused audit round (in flight at the close).
 
 ```bash
 THYLACINE_BAKE_CLADE=1 tools/build.sh all && tools/test.sh   # the suite
-cd usr && cargo test -p beacon --target aarch64-apple-darwin  # 27 host tests
+cd usr && cargo test -p beacon --target aarch64-apple-darwin  # 29 host tests
 cd usr && cargo test -p coreutils --lib --no-default-features --target aarch64-apple-darwin
 ```
 
@@ -62,7 +63,23 @@ cd usr && cargo test -p coreutils --lib --no-default-features --target aarch64-a
   4096 bytes** (PIPE_BUF) — every new leg budgets its output; the ps-rich leg
   self-guards (measure raw, skip loudly).
 - The tier resets at `cons_drain_close` + `cons_test_reset` (NOT "where
-  winsize unsets" — winsize never reset on detach).
+  winsize unsets" — winsize never reset on detach). **The consctl fd's
+  offset is SHARED down the joey→login→ut chain and advanced by every mode
+  WRITE, devdev is NON-SEEKABLE (pread/lseek both refuse), and a fresh
+  consctl open fails the attach gate** — the render line is unreachable
+  through that fd for a session consumer; the tier readback is the ungated
+  `/dev/beacon` leaf (the round-1 P1's fix; fresh-open it, never the
+  inherited fd).
+- **H-2 obligations from the H-1 audit round**: (a) F10 — ut re-reads +
+  re-exports the tier mid-session (a per-prompt `t_pread` is the natural
+  shape) so a renderer swap cannot leave a stale `/env/BEACON` defeating
+  the kernel's drain-close reset — build it WITH the first rich advertiser,
+  where it is testable; (b) F11 — the transcript model decides deliberately
+  where async job-reap / idle note output belongs (today it lands inside
+  the open PROMPT zone); (c) F7's rich-forced-consctl E2E leg (zone frames
+  on the wire through a real advertisement) also needs the rich advertiser
+  — u-repl-test covers the zone emission until then, and the
+  `ut: beacon <tier> exported` canary covers the transport every session.
 - SGR never appears inside rich-structured output; the emitting bin forces
   `on = !rich && …`.
 - An obj ref is cleaned-absolute-or-no-frame (`coreutils::path::abs`).
