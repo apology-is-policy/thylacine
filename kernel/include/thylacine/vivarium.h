@@ -128,10 +128,12 @@ enum {
     // A future member must pick the arm its refusal structure demands rather
     // than copying whichever is nearer; `close_range` (436) is still FORWARD and
     // still owes it. `dup` (23) is now TIER2 (git-remote-https' helper pipe): it
-    // is fd-CREATING, not fd-freeing, so it owes no DROP -- but it declines a
-    // socket SOURCE (ENOSYS, as dup3 does), since a dup that did not register the
-    // new number would hand back an unrecognized socket fd. Its shell arm is
-    // beside dup3's.
+    // is fd-CREATING, not fd-freeing, so it owes no DROP -- it owes the ALIAS
+    // (viv_socktab_alias): a socket SOURCE gets its row COPIED onto the new
+    // number (fresh epoch), never declined and never left unregistered. dup3
+    // and F_DUPFD pay the same alias after their install; the dup3 shell still
+    // pays the DROP for the number it overwrote (the alias's replace-on-claim
+    // is that drop when the source is a socket).
     VIV_LINUX_DUP         = 23,
     // dup3 (#157) owes the below-the-ceiling paragraph -- 24's native occupant
     // is SYS_SPAWN_WITH_CAPS(name_va, name_len, cap_mask), whose arity matches
@@ -1396,6 +1398,26 @@ void viv_socktab_drop(struct viv_socktab *tab, s32 fd);
 // rows would otherwise outlive their fds and greet the next Linux image's
 // recycled fd numbers as live connections. NULL-safe. Mirrors viv_sigtab_reset.
 void viv_socktab_reset(struct viv_socktab *tab);
+
+// fork's copy (POSIX fork(2); operator-voted A, 2026-08-18 -- COPY at fork,
+// the Plan 9 APE per-process posture): the child gets its own table holding
+// every parent row whose fd the child actually holds (handle_table_copy_into
+// must have run first; a hole gets no row). Snapshots the parent under its
+// lock, builds the child's table lock-free (unpublished). 0, or -1 on OOM
+// with child->socktab NULL -- the caller fails the fork (the sigtab shape).
+struct Proc;
+int viv_socktab_clone_into(struct Proc *child, const struct Proc *parent);
+
+// The alias rule for dup / dup3 / F_DUPFD of a socket (the same vote): the
+// new number carries its OWN copy of the source's row with a FRESH epoch. A
+// state mutation through one alias -- connect/bind/listen, which also swaps
+// THAT handle ctl->data -- is not seen through another; Linux shares one
+// description and this does not (VIVARIUM 5.5.2 + the section-9 row record
+// the socket OBJECT as the faithful resolution). 1 = aliased, 0 = oldfd was
+// not a socket (nothing to do), -1 = no row free. Call AFTER the handle is
+// installed and only when viv_socktab_alias_fits said so before it.
+int  viv_socktab_alias(struct viv_socktab *tab, s32 oldfd, s32 newfd);
+bool viv_socktab_alias_fits(struct viv_socktab *tab, s32 oldfd, s32 newfd);
 
 // Drop the socktab entry of every close-on-exec socket in `p`. execve calls this
 // AFTER the commit and BEFORE handle_close_on_exec frees the fds, so a freed fd

@@ -12373,6 +12373,15 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             // is merely reached. The range lives here rather than in the pure
             // decide because PROC_HANDLE_MAX is a fact about the handle table.
             if (min_fd >= (u64)PROC_HANDLE_MAX)      return -(s64)T_E_INVAL;
+            // The alias rule (VIVARIUM 5.5.2): a socket source's row is copied
+            // onto the new number after the install; room checked first so a
+            // refused fcntl leaves the table untouched. Before this, F_DUPFD of
+            // a socket minted a second fd on the data Spoor with NO row -- the
+            // silent "omit" half-service (reads fine, getpeername EBADF).
+            struct viv_socktab *dstab =
+                __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+            if (!viv_socktab_alias_fits(dstab, (s32)fd, -1))
+                return -(s64)T_E_MFILE;
             hidx_t nfd = handle_dup_posix(p, fd, (hidx_t)min_fd, cloexec);
             // handle_dup_posix folds "no such fd" and "table full" into one -1;
             // split them here, because the two errnos are LOAD-BEARING to a
@@ -12391,6 +12400,10 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             // single-threaded phenotype Proc, and harmless if it were not.
             if (nfd < 0) {
                 if (handle_get_cloexec(p, fd) < 0)  return -(s64)T_E_BADF;
+                return -(s64)T_E_MFILE;
+            }
+            if (viv_socktab_alias(dstab, (s32)fd, (s32)nfd) < 0) {
+                handle_close(p, nfd);            // fresh number: exact unwind
                 return -(s64)T_E_MFILE;
             }
             return (s64)nfd;
@@ -12432,24 +12445,20 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         u32 oldfd = (u32)args[0];
         if (oldfd >= (u32)PROC_HANDLE_MAX)  return -(s64)T_E_BADF;
 
-        // THE SOCKET-SOURCE DECLINE, as dup3's arm. A phenotype socket fd carries
-        // out-of-band socktab state keyed on its NUMBER; a dup that did not also
-        // register the new number would hand back an fd the socket path cannot
-        // recognize. ENOSYS is dup3's established answer, and git dups PIPE fds,
-        // never sockets. (dup CREATES an fd and frees none, so unlike dup3 it owes
-        // NO socktab drop -- there is no overwritten target number.)
-        //
-        // The socktab existence check is locked (viv_socktab_get) and the handle
-        // table is internally locked, so both are thread-safe under N-3's peer
-        // threads. The residual -- a peer turning oldfd into a socket between the
-        // check and the dup -- is a guest racing its OWN fd (dup vs close+socket
-        // on one number): memory-safe and the guest's own bug, not a kernel
-        // hazard. (Pre-N-3 this was sound because clone(CLONE_THREAD) was refused;
-        // the lock replaced that argument when the thread set was admitted.)
+        // THE ALIAS RULE (operator-voted with the fork copy, VIVARIUM 5.5.2):
+        // a socket SOURCE is no longer declined -- the new number gets its OWN
+        // copy of the source's row (fresh epoch; viv_socktab_alias). Room is
+        // checked BEFORE the install so a refused dup never touches the table,
+        // and the alias runs AFTER it so a refused install never mints a row.
+        // The residual -- a peer thread claiming the last row between the two,
+        // or turning oldfd into a socket after the check -- is a guest racing
+        // its OWN table: the locked ops keep the kernel sound, and the guest's
+        // view is what races (the pre-N-3 argument was that no peer existed;
+        // the lock replaced it when the thread set was admitted).
         struct viv_socktab *stab =
             __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-        if (viv_socktab_get(stab, (s32)oldfd, NULL))
-            return -(s64)T_E_NOSYS;
+        if (!viv_socktab_alias_fits(stab, (s32)oldfd, -1))
+            return -(s64)T_E_MFILE;
 
         hidx_t nfd = handle_dup_posix(p, (hidx_t)oldfd, 0, false);
         // Split EBADF (closed source) from EMFILE (table full / a non-dup-able
@@ -12458,6 +12467,13 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // liveness re-check (the same lookup GETFD uses) disambiguates.
         if (nfd < 0) {
             if (handle_get_cloexec(p, (hidx_t)oldfd) < 0)  return -(s64)T_E_BADF;
+            return -(s64)T_E_MFILE;
+        }
+        if (viv_socktab_alias(stab, (s32)oldfd, (s32)nfd) < 0) {
+            // Lost the room to a peer. The number was fresh, so closing it
+            // restores the pre-call state exactly -- better than handing back a
+            // socket fd the socket arms would not recognize.
+            handle_close(p, nfd);
             return -(s64)T_E_MFILE;
         }
         return (s64)nfd;
@@ -12493,14 +12509,16 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         if (newfd >= (u32)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
         if (oldfd >= (u32)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
 
-        // THE SOCKET DECLINE (vivarium.h carries the three options and why the
-        // other two are wrong). It sits HERE -- after every argument error and
-        // before any mutation -- so that a decline can never mask an EINVAL or
-        // EBADF that Linux would have given for the same call.
+        // THE ALIAS RULE (operator-voted; VIVARIUM 5.5.2) replaces the socket
+        // DECLINE this arm carried since #157: `dup2(sockfd, 0)`, the inetd
+        // idiom, now works -- the target number gets its OWN copy of the
+        // source's row. The room check precedes every mutation (a refused dup3
+        // must leave the table untouched); when `new` already carries a row the
+        // alias reuses that slot (replace-on-claim), so it cannot run out.
         struct viv_socktab *stab =
             __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-        if (viv_socktab_get(stab, (s32)oldfd, NULL))
-            return -(s64)T_E_NOSYS;
+        if (!viv_socktab_alias_fits(stab, (s32)oldfd, (s32)newfd))
+            return -(s64)T_E_MFILE;
 
         // The install. A -1 here is an empty `old` or a source the alias gate
         // refuses (hardware / Srv / Loom / a devsrv connection Spoor). EBADF is
@@ -12522,13 +12540,20 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // is never free -- handle_dup_to overwrites the slot in one lock hold --
         // so no such window exists, and dropping first would instead mean a
         // REFUSED dup3 (the -1 above) had already destroyed the guest's live
-        // socket state at `new`. Between the install and this drop a peer thread
-        // could observe `new` naming old's object while its socktab entry is
-        // still the stale pre-dup3 one (viv_socktab_drop is locked, but runs
-        // after the install); that is a guest doing dup3 ONTO a number another of
-        // its threads is using -- a race on its own fd, memory-safe and the
-        // guest's own bug. The locked drop then clears the entry.
-        viv_socktab_drop(stab, (s32)newfd);
+        // socket state at `new`. Between the install and this point a peer
+        // thread could observe `new` naming old's object while its socktab
+        // entry is still the stale pre-dup3 one; that is a guest doing dup3
+        // ONTO a number another of its threads is using -- a race on its own
+        // fd, memory-safe and the guest's own bug.
+        //
+        // A socket source pays it INSIDE the alias (its replace-on-claim clears
+        // the stale row in the same lock hold that claims the copy); any other
+        // source pays it with the plain drop. An alias that lost its room to a
+        // peer (-1, the guest's own race) falls back to the drop: the number is
+        // already overwritten, so no unwind restores anything, and a dropped
+        // row beats a stale one.
+        if (viv_socktab_alias(stab, (s32)oldfd, (s32)newfd) != 1)
+            viv_socktab_drop(stab, (s32)newfd);
 
         return (s64)newfd;
     }
@@ -13477,6 +13502,16 @@ s64 viv_dup_for_test(struct Proc *p, u64 fd);
 s64 viv_dup_for_test(struct Proc *p, u64 fd) {
     u64 args[VIV_NARGS] = { fd, 0, 0, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_DUP, args);
+}
+
+// Drives the REAL dup3 arm (the DUP3 case reads `p` + `args` only, never the
+// frame), so a test proves the alias rule AT THE ARM: a socket source's row is
+// copied onto the target number, and a non-socket source onto a socket number
+// drops that number's row.
+s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
+s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags) {
+    u64 args[VIV_NARGS] = { oldfd, newfd, flags, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_DUP3, args);
 }
 
 // Drives the REAL getsockopt shell through the T2 dispatcher, so a test can

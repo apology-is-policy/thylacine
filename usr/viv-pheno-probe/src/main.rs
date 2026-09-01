@@ -1998,6 +1998,62 @@ unsafe fn run_linux() -> ! {
     leg!(rep, n2 == 2, b"L81\n");
     leg!(rep, got2[0] == b'o' && got2[1] == b'k', b"L82\n");
 
+    // --- the socktab across images (operator-voted A, 2026-08-18: COPY at
+    // fork, ALIAS on dup/dup3/F_DUPFD; VIVARIUM 5.5.2) ------------------------
+    // fork -> the CHILD serves the accepted connection. `afd` is a socket to
+    // the child only if fork COPIED its row: listen() on a tracked CONNECTED
+    // fd answers EINVAL (L83's idiom below), on an untracked one ENOTSOCK --
+    // and read/write cannot tell the two apart (T1 rows on a real Spoor),
+    // which is why the listen probe is the discriminator. The child then
+    // writes on it and the parent reads the bytes off `cli`: the
+    // accept-then-fork server shape, end to end. The child's exit status is
+    // the verdict; its own table dies with it.
+    let fk2 = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if fk2 == 0 {
+        let tracked = svc3(NR_LISTEN, afd as u64, 1, 0) == -22;
+        let m3 = b"fk";
+        let wrote = svc3(NR_WRITE, afd as u64, m3.as_ptr() as u64, m3.len() as u64) == 2;
+        linux_exit(if tracked && wrote { 0 } else { 1 })
+    }
+    leg!(rep, fk2 > 0, b"L257\n");
+    let mut fst: i32 = -1;
+    leg!(
+        rep,
+        svc4(NR_WAIT4, fk2 as u64, &mut fst as *mut i32 as u64, 0, 0) == fk2
+            && (fst & 0x7f) == 0 && ((fst >> 8) & 0xff) == 0,
+        b"L258\n"
+    );
+    let mut got3 = [0u8; 8];
+    leg!(
+        rep,
+        svc3(NR_READ, cli as u64, got3.as_mut_ptr() as u64, got3.len() as u64) == 2
+            && got3[0] == b'f' && got3[1] == b'k',
+        b"L259\n"
+    );
+    // The parent's own row survived the child's exit: the child's table was
+    // its own copy, so its death dropped ITS rows, not ours.
+    leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -22, b"L260\n");
+
+    // dup(): the alias is a tracked socket; closing it leaves the original
+    // (each alias carries its own row, so the close hook drops only its own).
+    const NR_DUP: u64 = 23;
+    let d1 = svc3(NR_DUP, afd as u64, 0, 0);
+    leg!(rep, d1 >= 0 && d1 != afd, b"L261\n");
+    leg!(rep, svc3(NR_LISTEN, d1 as u64, 1, 0) == -22, b"L262\n");
+    leg!(rep, svc3(NR_CLOSE, d1 as u64, 0, 0) == 0, b"L263\n");
+    leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -22, b"L264\n");
+    // dup3(): the inetd idiom, dup2(connfd, N) onto a fixed number (29: above
+    // every fd this probe holds).
+    leg!(rep, svc3(NR_DUP3, afd as u64, 29, 0) == 29, b"L265\n");
+    leg!(rep, svc3(NR_LISTEN, 29, 1, 0) == -22, b"L266\n");
+    leg!(rep, svc3(NR_CLOSE, 29, 0, 0) == 0, b"L267\n");
+    // F_DUPFD: the same rule through fcntl.
+    let d3 = svc3(NR_FCNTL, afd as u64, F_DUPFD, 30);
+    leg!(rep, d3 >= 30, b"L268\n");
+    leg!(rep, svc3(NR_LISTEN, d3 as u64, 1, 0) == -22, b"L269\n");
+    leg!(rep, svc3(NR_CLOSE, d3 as u64, 0, 0) == 0, b"L270\n");
+    leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -22, b"L271\n");
+
     // The accepted fd IS a tracked socket, in CONNECTED state. EINVAL (a
     // connected socket cannot listen) rather than ENOTSOCK (no entry at all)
     // is what distinguishes the two -- and it is the ONLY leg that would catch
@@ -3261,15 +3317,24 @@ unsafe fn run_linux() -> ! {
     let _ = svc3(NR_CLOSE, 32, 0, 0);
     let _ = svc3(NR_CLOSE, dup_at, 0, 0);
 
-    // THE SOCKET DECLINE. Thylacine's socktab keys (proto, N, state) on the fd
-    // NUMBER and is not refcounted, so two descriptors cannot share one socket's
-    // state -- copying the entry gives two diverging state machines, omitting it
-    // gives an fd that reads but cannot connect. Declining is the honest answer
-    // and this leg is what pins it as a DECISION rather than an oversight.
+    // THE ALIAS RULE (the socktab-across-images vote, operator A 2026-08-18;
+    // VIVARIUM 5.5.2): dup3 of a socket source no longer DECLINES -- the target
+    // number gets its OWN copy of the row (fresh epoch). This leg used to pin
+    // the #157 decline as a DECISION rather than an oversight; it now pins the
+    // replacement the same way. A UDP socket cannot listen (L57's EOPNOTSUPP),
+    // which is the discriminator: EOPNOTSUPP on 33 means the alias IS a
+    // tracked socket, ENOTSOCK would mean the number got no row. The source
+    // stays tracked, closing the alias drops only its own row (the source is
+    // still tracked afterwards, the closed number is not).
     let sd = svc3(NR_SOCKET, AF_INET, SOCK_DGRAM, 0);
     leg!(
         rep,
-        sd >= 0 && svc3(NR_DUP3, sd as u64, 33, 0) == NEG_ENOSYS,
+        sd >= 0 && svc3(NR_DUP3, sd as u64, 33, 0) == 33
+            && svc3(NR_LISTEN, 33, 1, 0) == -EOPNOTSUPP
+            && svc3(NR_LISTEN, sd as u64, 1, 0) == -EOPNOTSUPP
+            && svc3(NR_CLOSE, 33, 0, 0) == 0
+            && svc3(NR_LISTEN, sd as u64, 1, 0) == -EOPNOTSUPP
+            && svc3(NR_LISTEN, 33, 1, 0) == -ENOTSOCK,
         b"L198\n"
     );
 

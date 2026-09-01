@@ -786,6 +786,9 @@ void test_vivarium_socktab_close_hook(void);                        // VIVARIUM 
 void test_vivarium_socktab_bind_fields(void);                       // VIVARIUM V-5b
 void test_vivarium_socktab_keyed_write_identity(void);              // N-3 socktab lock
 void test_vivarium_socktab_reset(void);                             // Design D audit F2
+void test_vivarium_socktab_clone_into(void);                        // socktab across images: fork
+void test_vivarium_socktab_alias(void);                             // socktab across images: alias
+void test_vivarium_dup3_alias(void);                                // ...at the dup3 arm
 void test_vivarium_listen_decide(void);
 void test_vivarium_timespec_to_ms(void);
 void test_vivarium_ppoll_decide(void);
@@ -2475,6 +2478,9 @@ struct test_case g_tests[] = {
     { "vivarium.socktab_bind_fields",  test_vivarium_socktab_bind_fields,  false, NULL },
     { "vivarium.socktab_keyed_write_identity", test_vivarium_socktab_keyed_write_identity, false, NULL },
     { "vivarium.socktab_reset",        test_vivarium_socktab_reset,        false, NULL },
+    { "vivarium.socktab_clone_into",   test_vivarium_socktab_clone_into,   false, NULL },
+    { "vivarium.socktab_alias",        test_vivarium_socktab_alias,        false, NULL },
+    { "vivarium.dup3_alias",           test_vivarium_dup3_alias,           false, NULL },
     { "vivarium.listen_decide",        test_vivarium_listen_decide,        false, NULL },
     { "vivarium.timespec_to_ms",       test_vivarium_timespec_to_ms,       false, NULL },
     { "vivarium.ppoll_decide",         test_vivarium_ppoll_decide,         false, NULL },

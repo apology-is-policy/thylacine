@@ -3137,10 +3137,10 @@ void test_vivarium_fd_freeing_rows_stay_unserved(void) {
     }
 
     // dup (23) is SERVED as TIER2 -- fd-CREATING (lowest free fd, frees none), so
-    // unlike dup3 it owes no socktab drop; its shell declines a socket SOURCE,
-    // since a dup that did not register the new number would hand back an
-    // unrecognized socket fd. git's transport-helper dup()s the helper pipe, so
-    // the external-helper transports (git-remote-https) need it.
+    // unlike dup3 it owes no socktab drop; its shell ALIASES a socket SOURCE (the
+    // new number gets its own copy of the row -- the socktab-across-images vote),
+    // so no unregistered socket fd is ever minted. git's transport-helper dup()s
+    // the helper pipe, so the external-helper transports (git-remote-https) need it.
     out.nr = 0xDEADu;
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_DUP, args, &out),
                    (int)VIV_TIER2, "dup is served as TIER2 -- fd-creating, no drop owed");
@@ -3840,6 +3840,7 @@ void test_vivarium_sigtab_fork_exec_rule(void) {
 
 extern s64 viv_fcntl_for_test(struct Proc *p, u64 fd, u64 cmd, u64 arg);
 extern s64 viv_dup_for_test(struct Proc *p, u64 fd);
+extern s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
 // The T2 fcntl SHELL's F_DUPFD errnos (found by the c8ab2744 close's L-6c legs).
 //
 // The decide half above is pure; this drives the arm that turns a decision into
@@ -3961,9 +3962,11 @@ void test_vivarium_fcntl_nonblock_roundtrip(void) {
 // The dup(2) arm (git-remote-https' helper pipe). Drives viv_dup_for_test on a
 // fresh phenotype Proc, proving the ARM is reached (not merely that the verdict
 // is TIER2): a live non-socket fd dups to a fresh number, a closed fd is EBADF,
-// and a SOCKET source is DECLINED (-ENOSYS) so no unregistered socket fd is
-// minted. The EBADF/EMFILE split itself rides the identical handle_dup_posix
-// primitive proven in test_vivarium_fcntl_dupfd_errnos above.
+// and a SOCKET source is ALIASED (the socktab-across-images vote, VIVARIUM
+// 5.5.2): the new number carries its OWN copy of the row with a fresh epoch,
+// and the source row is untouched. (Until this vote landed the arm DECLINED a
+// socket source with ENOSYS.) The EBADF/EMFILE split itself rides the identical
+// handle_dup_posix primitive proven in test_vivarium_fcntl_dupfd_errnos above.
 void test_vivarium_dup_arm(void);
 void test_vivarium_dup_arm(void) {
     struct Proc *p = proc_alloc();
@@ -3979,15 +3982,23 @@ void test_vivarium_dup_arm(void) {
     int closed_bit = handle_get_cloexec(p, 3);
     s64 dup_badf = viv_dup_for_test(p, 3);
 
-    // SOCKET DECLINE: an fd carrying a socktab entry is refused -ENOSYS, exactly
-    // as dup3 declines a socket source -- a dup that did not also register the new
-    // number would hand back an fd the socket path cannot recognize.
+    // SOCKET ALIAS: an fd carrying a socktab row dups to a fresh number that
+    // carries its OWN copy of the row (same proto/n/state, a DIFFERENT epoch);
+    // the source row survives untouched.
     p->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
     TEST_ASSERT(p->socktab != NULL, "socktab alloc");
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) p->socktab->s[i].fd = -1;
     hidx_t sockfd = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
     viv_socktab_claim(p->socktab, (s32)sockfd, VIV_NET_TCP, 200, VIV_SOCK_FRESH);
-    bool sock_pre = viv_socktab_get(p->socktab, (s32)sockfd, NULL);
+    struct viv_sock eo_pre;
+    bool sock_pre = viv_socktab_get(p->socktab, (s32)sockfd, &eo_pre);
     s64 dup_sock = viv_dup_for_test(p, (u64)sockfd);
+    struct viv_sock ea, eo;
+    bool alias_row = dup_sock >= 0 && viv_socktab_get(p->socktab, (s32)dup_sock, &ea);
+    bool orig_row  = viv_socktab_get(p->socktab, (s32)sockfd, &eo);
+    u32 rows = 0;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++)
+        if (p->socktab->s[i].state != VIV_SOCK_FREE) rows++;
 
     // TEARDOWN, then assert (TEST_ASSERT returns; proc_free frees the socktab).
     p->state = PROC_STATE_ZOMBIE;
@@ -4000,9 +4011,165 @@ void test_vivarium_dup_arm(void) {
     TEST_EXPECT_EQ(closed_bit, -1, "precondition: fd 3 is CLOSED");
     TEST_EXPECT_EQ(dup_badf, -(s64)T_E_BADF, "dup of a closed fd is EBADF");
     TEST_ASSERT(sock_pre, "precondition: the socktab entry exists");
-    TEST_EXPECT_EQ(dup_sock, -(s64)T_E_NOSYS,
-                   "SOCKET DECLINE: dup of a socktab-tracked fd is ENOSYS -- no "
-                   "unregistered socket fd is minted (mirrors dup3's decline)");
+    TEST_ASSERT(dup_sock >= 0 && dup_sock != (s64)sockfd,
+                "SOCKET ALIAS: dup of a socktab-tracked fd yields a fresh fd");
+    TEST_ASSERT(alias_row && ea.proto == VIV_NET_TCP && ea.n == 200
+                && ea.state == VIV_SOCK_FRESH,
+                "the new number carries its OWN copy of the row (proto/n/state)");
+    TEST_ASSERT(orig_row && eo.epoch == eo_pre.epoch,
+                "the source row is untouched (same epoch)");
+    TEST_ASSERT(alias_row && orig_row && ea.epoch != eo.epoch,
+                "the alias has its OWN identity (fresh epoch) -- a keyed write "
+                "snapshotted on one cannot land on the other");
+    TEST_EXPECT_EQ((u64)rows, 2ull, "exactly two rows: the source and its alias");
+}
+
+// The socktab across images, the fork half (operator-voted A: COPY at fork).
+// Drives viv_socktab_clone_into on a child whose handle table was copied by
+// handle_table_copy_into, so the filter -- keep only rows whose fd the CHILD
+// holds -- is exercised against the REAL copy: fd 0 is a transferable handle
+// (copied), fd 7 is a row with NO handle behind it (a hole in the child: the
+// stale-row-in-a-hole case the filter exists to prevent), and the parent's
+// table is untouched by the clone. Each control one variable away: a parent
+// with no table leaves the child NULL; epochs and the counter carry over.
+void test_vivarium_socktab_clone_into(void);
+void test_vivarium_socktab_clone_into(void) {
+    struct Proc *parent = proc_alloc();
+    struct Proc *child  = proc_alloc();
+    TEST_ASSERT(parent != NULL && child != NULL, "proc_alloc x2");
+    parent->phenotype = PHENO_LINUX;
+    child->phenotype  = PHENO_LINUX;
+
+    // NULL parent table -> the child's stays NULL (a socket-less parent).
+    int rc_null = viv_socktab_clone_into(child, parent);
+    bool child_null = (__atomic_load_n(&child->socktab, __ATOMIC_ACQUIRE) == NULL);
+
+    parent->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(parent->socktab != NULL, "socktab alloc");
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) parent->socktab->s[i].fd = -1;
+    hidx_t h0 = handle_alloc(parent, KOBJ_THREAD, RIGHT_READ, NULL);   // fd 0
+    viv_socktab_claim(parent->socktab, (s32)h0, VIV_NET_TCP, 11, VIV_SOCK_CONNECTED);
+    viv_socktab_claim(parent->socktab, 7, VIV_NET_UDP, 12, VIV_SOCK_FRESH); // no handle
+    struct viv_sock p0;
+    viv_socktab_get(parent->socktab, (s32)h0, &p0);
+    u64 parent_next = parent->socktab->next_epoch;
+
+    handle_table_copy_into(child, parent);
+    int rc = viv_socktab_clone_into(child, parent);
+    struct viv_socktab *ct = __atomic_load_n(&child->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock c0;
+    bool child_has0 = ct && viv_socktab_get(ct, (s32)h0, &c0);
+    bool child_has7 = ct && viv_socktab_get(ct, 7, NULL);
+    u64  child_next = ct ? ct->next_epoch : 0;
+    bool child_lock_free = ct && (ct->lock.value == 0);
+    // The parent is untouched: both rows still there.
+    bool parent_has0 = viv_socktab_get(parent->socktab, (s32)h0, NULL);
+    bool parent_has7 = viv_socktab_get(parent->socktab, 7, NULL);
+    // The child's table is its own: a drop in the child leaves the parent's row.
+    if (ct) viv_socktab_drop(ct, (s32)h0);
+    bool parent_still0 = viv_socktab_get(parent->socktab, (s32)h0, NULL);
+
+    child->state  = PROC_STATE_ZOMBIE;  proc_free(child);
+    parent->state = PROC_STATE_ZOMBIE;  proc_free(parent);
+
+    TEST_EXPECT_EQ(rc_null, 0, "a parent with no table clones nothing");
+    TEST_ASSERT(child_null, "...and leaves the child's table NULL");
+    TEST_EXPECT_EQ(rc, 0, "the clone succeeds");
+    TEST_ASSERT(child_has0 && c0.proto == VIV_NET_TCP && c0.n == 11
+                && c0.state == VIV_SOCK_CONNECTED && c0.epoch == p0.epoch,
+                "a row whose fd the child HOLDS is copied whole, epoch included");
+    TEST_ASSERT(!child_has7, "a row whose fd the child does NOT hold is dropped "
+                             "(a hole must not carry a stale row)");
+    TEST_EXPECT_EQ(child_next, parent_next, "the epoch counter carries over");
+    TEST_ASSERT(child_lock_free, "the child's lock is fresh (not the parent's held word)");
+    TEST_ASSERT(parent_has0 && parent_has7, "CONTROL: the parent's rows are untouched");
+    TEST_ASSERT(parent_still0, "the child's table is its OWN: a child drop leaves the parent");
+}
+
+// The alias rule's table op, directly: copy-with-fresh-epoch, replace-on-claim
+// at the target, the non-socket no-op, and the full-table refusal.
+void test_vivarium_socktab_alias(void);
+void test_vivarium_socktab_alias(void) {
+    static struct viv_socktab tab;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        tab.s[i].fd = -1; tab.s[i].state = VIV_SOCK_FREE;
+        tab.s[i].proto = 0; tab.s[i].n = 0; tab.s[i].epoch = 0;
+    }
+    tab.next_epoch = 0;
+    tab.lock = SPIN_LOCK_INIT;
+    struct viv_sock e, a;
+
+    TEST_ASSERT(viv_socktab_claim(&tab, 3, VIV_NET_TCP, 40, VIV_SOCK_CONNECTED), "claim fd 3");
+    TEST_ASSERT(viv_socktab_set_bound(&tab, 3, 1, 0x7f000001u, 8080)
+                || viv_socktab_get(&tab, 3, &e), "bound fields (epoch 1) or readable");
+    viv_socktab_get(&tab, 3, &e);
+    TEST_EXPECT_EQ(viv_socktab_alias(&tab, 3, 9), 1, "alias fd 3 -> 9");
+    TEST_ASSERT(viv_socktab_get(&tab, 9, &a) && a.proto == VIV_NET_TCP && a.n == 40
+                && a.state == VIV_SOCK_CONNECTED && a.bound_port == e.bound_port,
+                "the alias carries the row's fields");
+    TEST_ASSERT(a.epoch != e.epoch, "...with a FRESH epoch");
+    TEST_ASSERT(!viv_socktab_set_state(&tab, 9, e.epoch, VIV_SOCK_FRESH),
+                "a keyed write with the source's epoch lands nowhere on the alias");
+    TEST_ASSERT(viv_socktab_get(&tab, 3, &e) && e.state == VIV_SOCK_CONNECTED,
+                "the source row is untouched");
+    TEST_EXPECT_EQ(viv_socktab_alias(&tab, 5, 10), 0, "a non-socket source is a no-op");
+    TEST_ASSERT(!viv_socktab_get(&tab, 10, NULL), "...and mints no row");
+    // Replace-on-claim at the target: a stale row keyed on 9 is REPLACED.
+    TEST_ASSERT(viv_socktab_claim(&tab, 4, VIV_NET_UDP, 41, VIV_SOCK_FRESH), "claim fd 4");
+    TEST_EXPECT_EQ(viv_socktab_alias(&tab, 4, 9), 1, "alias fd 4 -> 9 (over the old alias)");
+    u32 rows9 = 0;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++)
+        if (tab.s[i].state != VIV_SOCK_FREE && tab.s[i].fd == 9) rows9++;
+    TEST_EXPECT_EQ((u64)rows9, 1ull, "exactly one row keyed on 9");
+    TEST_ASSERT(viv_socktab_get(&tab, 9, &a) && a.proto == VIV_NET_UDP, "...the new one");
+    TEST_ASSERT(viv_socktab_alias_fits(&tab, 3, 9), "fits: the target has a row to reuse");
+    TEST_ASSERT(viv_socktab_alias_fits(&tab, 5, 12), "fits: a non-socket source needs no row");
+    // Fill the table; then an alias onto a FRESH number has no room.
+    for (s32 fd = 100; ; fd++) {
+        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1, VIV_SOCK_FRESH)) break;
+    }
+    TEST_ASSERT(!viv_socktab_alias_fits(&tab, 3, 200), "full: an alias onto a fresh number does not fit");
+    TEST_EXPECT_EQ(viv_socktab_alias(&tab, 3, 200), -1, "...and the alias refuses (-1)");
+    TEST_ASSERT(viv_socktab_alias_fits(&tab, 3, 9), "full: onto a number WITH a row still fits");
+    TEST_EXPECT_EQ(viv_socktab_alias(&tab, 3, 9), 1, "...and succeeds by reusing that slot");
+    TEST_EXPECT_EQ(viv_socktab_alias(NULL, 3, 9), 0, "NULL table: no-op");
+}
+
+// The alias rule AT THE dup3 ARM (the inetd idiom, dup2(connfd, 0)): a socket
+// source's row is copied onto the target number; a non-socket source onto a
+// socket number DROPS that number's row (the fd-freeing obligation).
+void test_vivarium_dup3_alias(void);
+void test_vivarium_dup3_alias(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    p->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    TEST_ASSERT(p->socktab != NULL, "socktab alloc");
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) p->socktab->s[i].fd = -1;
+
+    hidx_t sock = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);    // fd 0
+    hidx_t file = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p); // fd 1
+    viv_socktab_claim(p->socktab, (s32)sock, VIV_NET_TCP, 300, VIV_SOCK_CONNECTED);
+
+    s64 r1 = viv_dup3_for_test(p, (u64)sock, 9, 0);          // socket -> 9
+    struct viv_sock e9;
+    bool row9 = viv_socktab_get(p->socktab, 9, &e9);
+    bool row0 = viv_socktab_get(p->socktab, (s32)sock, NULL);
+    s64 r2 = viv_dup3_for_test(p, (u64)file, 9, 0);          // file -> 9 (a socket number)
+    bool row9_after = viv_socktab_get(p->socktab, 9, NULL);
+    bool row0_after = viv_socktab_get(p->socktab, (s32)sock, NULL);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(sock == 0 && file == 1, "precondition: fds 0 (socket) and 1 (file)");
+    TEST_EXPECT_EQ(r1, 9, "dup3(socket, 9) succeeds (no longer ENOSYS)");
+    TEST_ASSERT(row9 && e9.proto == VIV_NET_TCP && e9.n == 300 && e9.state == VIV_SOCK_CONNECTED,
+                "the target number carries its own copy of the row");
+    TEST_ASSERT(row0, "the source row survives");
+    TEST_EXPECT_EQ(r2, 9, "dup3(file, 9) onto the socket number succeeds");
+    TEST_ASSERT(!row9_after, "...and DROPS 9's row (the fd-freeing obligation)");
+    TEST_ASSERT(row0_after, "...while the original socket's row is untouched");
 }
 
 // 6b: execve drops the socktab entry of every close-on-exec socket, and ONLY

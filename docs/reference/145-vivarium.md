@@ -386,6 +386,23 @@ stale note at the head; pending -> `SIG_IGN` -> handler -> unblock fires NOTHING
 -- the leg that separates install-time from delivery-time; each round ends with
 a fresh SIGPIPE delivered exactly once).
 
+**Socket state across fork and dup (the socktab-across-images vote, operator A 2026-08-18;
+landed 2026-09-01).** `rfork_internal` copies `Proc.socktab` into the child right after the
+handle copy (`viv_socktab_clone_into`: the parent's rows snapshotted under its lock, the
+child's table built lock-free while unpublished, rows whose fd the child does not hold
+dropped so a hole never carries a stale row, the epoch counter carried over; OOM fails the
+fork like the sigtab clone). `dup` / `dup3` / `F_DUPFD` of a socket ALIAS the row onto the new
+number (`viv_socktab_alias`: a copy with a fresh epoch, replace-on-claim at the target,
+room-checked by `viv_socktab_alias_fits` BEFORE the handle install and run AFTER it, so a
+refused call never touches the table and a refused install never mints a row; the dup3 shell's
+drop of the overwritten number is paid inside the alias for a socket source and by the plain
+drop otherwise). Each alias is its own row, so the close hook drops only the closed number's
+row and the original survives. The kept divergence -- two aliases are two state machines --
+is the VIVARIUM section-9 row. Regressions: `vivarium.socktab_clone_into` (the real
+`handle_table_copy_into`, a held fd copied whole, a hole dropped, the parent untouched, the
+child's drop leaves the parent), `vivarium.socktab_alias`, `vivarium.dup3_alias` (at the arm),
+the flipped `vivarium.dup_arm` socket leg, and probe legs L257-L271.
+
 **Signal state across fork and exec (POSIX; operator-voted 2026-08-17).**
 Two halves of one recorded decision (task #127 named both when clone became a
 table row): (1) `rfork`/`clone` COPIES the parent's `viv_sigtab` -- every

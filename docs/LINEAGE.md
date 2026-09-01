@@ -700,13 +700,15 @@ the silent half-service the argument-domain rule exists to forbid. Reproducing
 Linux needs a refcounted entry, a real change to a table V-5 audited, and that
 belongs in a chunk about it; the cost is bounded and named (the inetd
 `dup2(connfd,0); dup2(connfd,1)` idiom), published in VIVARIUM §9's DEGRADED tier.
-**The fork half of the same class is OPEN** (the d3a11c8e round, 2026-08-17): `rfork_internal`
-copies the handle table but not the socktab, so a forked child holding an inherited socket
-fd is in the *omitting* case above by construction -- the fork-per-connection server shape.
-Enqueued (`memory/bug_socktab_not_cloned_at_fork.md`, AUX-ROADMAP Stream 4 #6): a per-Proc
-clone next to the sigtab clone -- but a plain COPY has the *copying* problem above (two
-state machines over one connection), so it needs the same refcounted entry the dup3 case
-names; one chunk for both halves, with a probe leg.
+**Both halves LANDED 2026-09-01 (the socktab-across-images vote, operator A 2026-08-18):**
+`rfork_internal` now calls `viv_socktab_clone_into` after the handle copy (only rows whose fd
+the child holds; a hole gets no row), and `dup`/`dup3`/`F_DUPFD` of a socket ALIAS the row onto
+the new number with a fresh epoch instead of declining -- the *copying* posture above, chosen
+deliberately: it is Plan 9 APE's per-process rock, and every fork/dup shape that occurs works
+under it; the divergence it keeps (a state change through one alias unseen through another)
+is stated in VIVARIUM section 9 with the socket OBJECT recorded as the faithful resolution.
+Probe legs L257-L271 (fork serves the accepted connection; dup/dup3/F_DUPFD aliases are
+tracked sockets; closing an alias leaves the original).
 
 **The fd-freeing obligation is paid in a different arm from `close`'s, and that
 is the rule a future promotion follows.** `close` pays in the entry hook, which is

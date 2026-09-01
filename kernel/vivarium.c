@@ -1804,6 +1804,115 @@ void viv_socktab_reset(struct viv_socktab *tab) {
     spin_unlock(&tab->lock);
 }
 
+// Copy one live entry's socket state into the slot `dst` for fd `newfd`,
+// stamping a FRESH epoch. The identity key is per-ROW: a keyed write that
+// snapshotted the source row's epoch must not land on the alias, and vice
+// versa -- two rows over one connection are two lifetimes (the APE posture,
+// VIVARIUM 5.5.2). Lock-held.
+static void socktab_copy_row_locked(struct viv_socktab *tab, struct viv_sock *dst,
+                                    const struct viv_sock *src, s32 newfd) {
+    dst->fd          = newfd;
+    dst->proto       = src->proto;
+    dst->state       = src->state;
+    dst->n           = src->n;
+    dst->epoch       = ++tab->next_epoch;
+    dst->bound_addr  = src->bound_addr;
+    dst->bound_port  = src->bound_port;
+    dst->remote_addr = src->remote_addr;
+    dst->remote_port = src->remote_port;
+}
+
+// fork's copy for the PHENOTYPE (POSIX fork(2); the socktab-across-images
+// design, operator-voted A 2026-08-18: COPY at fork, Plan 9 APE's per-process
+// rock). The child gets its OWN table holding every parent entry whose fd the
+// CHILD ACTUALLY HOLDS -- handle_table_copy_into ran first and may have left
+// holes (a non-aliasable handle is skipped), and a hole must never carry a
+// stale row for a number the child's next fd-creating call will be handed.
+// The parent's rows are SNAPSHOTTED under its lock (peer threads may be
+// claiming/dropping), then the child's table is built with NO lock: the
+// child is under construction and unpublished, so nothing can reach its
+// table, and taking its lock would nest the socktab lock under the handle
+// table's lock (the drop_cloexec ordering rule) for no benefit. The epoch
+// counter is copied too, so the child's future claims continue the
+// parent's monotonic sequence and every copied row keeps an epoch unique
+// within the child's table. A parent with no table is a parent with no
+// sockets: the child's stays NULL (and the native parent never gets here --
+// rfork_internal gates on PHENO_LINUX, the sigtab precedent). Returns 0, or
+// -1 on OOM with child->socktab left NULL (proc_free's kfree(NULL) is a
+// clean no-op); the caller fails the fork, as it does for the sigtab.
+int viv_socktab_clone_into(struct Proc *child, const struct Proc *parent) {
+    if (!child || !parent) return -1;
+    struct viv_socktab *src = __atomic_load_n(&parent->socktab, __ATOMIC_ACQUIRE);
+    if (!src) return 0;
+    struct viv_socktab *dst = (struct viv_socktab *)kzalloc(sizeof(*dst), 0);
+    if (!dst) return -1;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) dst->s[i].fd = -1;   // the FREE marker
+
+    // The snapshot: entries + the epoch counter, field-wise -- never the struct,
+    // whose lock word is HELD while we read it.
+    spin_lock(&src->lock);
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) dst->s[i] = src->s[i];
+    dst->next_epoch = src->next_epoch;
+    spin_unlock(&src->lock);
+
+    // The filter: keep only rows whose fd the child holds. handle_get_cloexec
+    // is the existence probe the dup arms use (-1 = no such handle).
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        struct viv_sock *e = &dst->s[i];
+        if (e->state == VIV_SOCK_FREE) continue;
+        if (handle_get_cloexec(child, (hidx_t)e->fd) < 0) socktab_clear_slot(e);
+    }
+    __atomic_store_n(&child->socktab, dst, __ATOMIC_RELEASE);
+    return 0;
+}
+
+// The alias rule (dup / dup3 / F_DUPFD of a socket; operator-voted with the
+// fork copy): the new number gets its OWN copy of the source's row, fresh
+// epoch. Returns 1 if `oldfd` was a socket and the alias row now exists, 0 if
+// `oldfd` carries no row (a plain dup: nothing to do), -1 if the table has no
+// room. Any row already keyed on `newfd` is cleared first (replace-on-claim:
+// the caller has just installed `newfd`, so a row there is stale -- dup3 onto
+// a live socket number closed that socket). The caller installs the HANDLE
+// before calling this, so a refused dup never touches the table; the room
+// check is the caller's (viv_socktab_alias_fits) because it must precede the
+// install. Lock-held for the whole find+clear+claim: one critical section.
+int viv_socktab_alias(struct viv_socktab *tab, s32 oldfd, s32 newfd) {
+    if (!tab || oldfd < 0 || newfd < 0 || oldfd == newfd) return 0;
+    spin_lock(&tab->lock);
+    struct viv_sock *src = socktab_find_locked(tab, oldfd);
+    if (!src) { spin_unlock(&tab->lock); return 0; }
+    struct viv_sock snap = *src;                      // the clear below may hit
+    socktab_clear_slot(socktab_find_locked(tab, newfd)); // a slot; snapshot first
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        if (tab->s[i].state == VIV_SOCK_FREE) {
+            socktab_copy_row_locked(tab, &tab->s[i], &snap, newfd);
+            spin_unlock(&tab->lock);
+            return 1;
+        }
+    }
+    spin_unlock(&tab->lock);
+    return -1;
+}
+
+// The pre-install room check for the alias rule: true iff aliasing `oldfd`
+// onto `newfd` cannot run out of rows -- `oldfd` is not a socket (no row
+// needed), or `newfd` already has a row (replace-on-claim reuses it), or a
+// FREE slot exists. Advisory in the has_room sense: a peer thread may claim
+// the slot between this and the alias, which is a guest racing its own
+// table; the alias then returns -1 and the caller unwinds what it can.
+bool viv_socktab_alias_fits(struct viv_socktab *tab, s32 oldfd, s32 newfd) {
+    if (!tab || oldfd < 0) return true;
+    spin_lock(&tab->lock);
+    bool fits = (socktab_find_locked(tab, oldfd) == NULL)
+             || (socktab_find_locked(tab, newfd) != NULL);
+    if (!fits) {
+        for (u32 i = 0; i < VIV_SOCK_MAX; i++)
+            if (tab->s[i].state == VIV_SOCK_FREE) { fits = true; break; }
+    }
+    spin_unlock(&tab->lock);
+    return fits;
+}
+
 // The keyed, identity-guarded writers. Each re-finds `fd` under the lock and
 // writes only if the slot still names the same socket (present AND epoch ==
 // expect_epoch) -- so a stale write from an op that blocked while the guest

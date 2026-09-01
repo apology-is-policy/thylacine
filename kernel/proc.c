@@ -1559,6 +1559,26 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // -- an L-3a-style extraction, not this.
     if (fc) handle_table_copy_into(child, parent);
 
+    // The socktab half of the same POSIX fork (the socktab-across-images
+    // design, operator-voted A 2026-08-18; VIVARIUM 5.5.2): a forked Linux
+    // child keeps every inherited socket's (proto, n, state) in a table of
+    // its OWN -- the Plan 9 APE per-process copy -- so an inherited socket fd
+    // is a SOCKET to the child (the accept-then-fork server, prefork workers),
+    // not a plain Spoor that answers ENOTSOCK to every socket arm. AFTER the
+    // handle copy on purpose: the clone keeps only rows whose fd the child
+    // holds, and only the copied table can say which those are. Fork-shape
+    // only (fc): a spawned child gets an explicit fd list at renumbered slots,
+    // which a number-keyed table cannot follow, so a native SYS_SPAWN endowing
+    // a socket fd to a Linux child stays the pre-existing omit posture (the
+    // fd reads and writes; the socket arms say ENOTSOCK) -- documented, not
+    // hidden. OOM fails the fork, the sigtab rule above.
+    if (fc && parent->phenotype == PHENO_LINUX &&
+        viv_socktab_clone_into(child, parent) != 0) {
+        child->state = PROC_STATE_ZOMBIE;
+        proc_free(child);
+        return -1;
+    }
+
     // LINEAGE L-3b: the other step that differs between the two child shapes.
     // Everything above -- caps, identity, phenotype, allowance, env, territory,
     // session/pgroup, the legate tag -- is shared deliberately: a forked child
