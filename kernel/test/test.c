@@ -235,6 +235,7 @@ void test_proc_exec_drops_image_note_state(void);   // #247
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
+void test_territory_clone_copies_root_pheno(void);   // Design D F2/SA-1
 void test_territory_cwd_lexical(void);
 void test_territory_cwd_join(void);
 void test_territory_cwd_dot(void);
@@ -412,6 +413,8 @@ void test_execve_load_into_detached(void);
 void test_execve_load_into_rejects_dirty(void);
 void test_execve_failed_load_leaves_target_drainable(void);
 void test_exec_native_rejects_dynamic_linux(void);
+void test_exec_load_failure_leaves_phenotype(void);    // Design D Leg B
+void test_exec_reset_follows_decided_phenotype(void);  // Design D Leg A
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
@@ -771,6 +774,7 @@ void test_vivarium_ioctl_grammar_roundtrip(void);
 void test_vivarium_ioctl_dispatch_ebadf(void);
 void test_vivarium_session_errno_remap(void);
 void test_vivarium_ioctl_cons_identity_and_gate(void);
+void test_vivarium_phenotype_decide(void);            // Design D 13.10.1
 void test_vivarium_sendrecv_domain(void);
 void test_vivarium_sockaddr(void);
 void test_vivarium_net_cmd(void);
@@ -1806,6 +1810,7 @@ struct test_case g_tests[] = {
     { "territory.bind_smoke",          test_namespace_bind_smoke,          false, NULL },
     { "territory.cycle_rejected",      test_namespace_cycle_rejected,      false, NULL },
     { "territory.fork_isolated",       test_namespace_fork_isolated,       false, NULL },
+    { "territory.clone_copies_root_pheno", test_territory_clone_copies_root_pheno, false, NULL },
     { "territory.cwd_lexical",         test_territory_cwd_lexical,         false, NULL },
     { "territory.cwd_join",            test_territory_cwd_join,            false, NULL },
     { "territory.cwd_dot",             test_territory_cwd_dot,             false, NULL },
@@ -2013,6 +2018,8 @@ struct test_case g_tests[] = {
     { "exec.native_rejects_dynamic_linux",
                                        test_exec_native_rejects_dynamic_linux,
                                                                            false, NULL },
+    { "exec.load_failure_leaves_phenotype", test_exec_load_failure_leaves_phenotype, false, NULL },
+    { "exec.reset_follows_decided_phenotype", test_exec_reset_follows_decided_phenotype, false, NULL },
     { "exec.setup_multi_segment",      test_exec_setup_multi_segment,      false, NULL },
     { "exec.setup_lifecycle_round_trip",
                                        test_exec_setup_lifecycle_round_trip,
@@ -2454,6 +2461,7 @@ struct test_case g_tests[] = {
     { "vivarium.ioctl_dispatch_ebadf", test_vivarium_ioctl_dispatch_ebadf, false, NULL },
     { "vivarium.session_errno_remap", test_vivarium_session_errno_remap, false, NULL },
     { "vivarium.ioctl_cons_identity_and_gate", test_vivarium_ioctl_cons_identity_and_gate, false, NULL },
+    { "vivarium.phenotype_decide", test_vivarium_phenotype_decide, false, NULL },
     { "vivarium.sockaddr",             test_vivarium_sockaddr,             false, NULL },
     { "vivarium.net_cmd",              test_vivarium_net_cmd,              false, NULL },
     { "vivarium.conn_n",               test_vivarium_conn_n,               false, NULL },

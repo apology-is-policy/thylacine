@@ -206,12 +206,26 @@ struct PgrpMount {
 // /viv/bin is composed by PRINCIPAL_SYSTEM at boot.
 #define MPHENO_LINUX 0x0020
 
+// Design D (VIVARIUM 13.10.3): the NAMESPACE-LEVEL phenotype declaration, a bit
+// in Territory.flags. Set => every image load (any spawn variant, execve) whose
+// resolution starts from this Territory decides PHENO_LINUX: stalk_core seeds
+// crossed_pheno from it at its restart: label, so the seed covers both the first
+// pass and every symlink re-anchor. The container's declaration -- chroot SWAPS
+// root_spoor (territory_chroot), so a container reaches its binaries from INSIDE
+// any rootfs mount and a crossing can never fire; the namespace object itself
+// must carry it. Set ONCE, on a CHILD's freshly cloned Territory in the
+// FULL_ARGV spawn thunk before EL0 (SPAWN_PHENO_LINUX); copied by
+// territory_clone under ns_lock next to root_spoor; KP_ZERO at alloc declares
+// nothing (fail-safe native). Ungated for I-43's reason: shape, never authority.
+#define TERRITORY_ROOT_PHENO_LINUX 0x1u
+
 struct Territory {
     u64                  magic;      // PGRP_MAGIC
     int                  ref;        // refcount; rfork(RFNAMEG) shares (Phase 5+)
     int                  nbinds;
     int                  nmounts;
-    u32                  _pad;       // 8-byte alignment for root_spoor + binds[]
+    u32                  flags;      // TERRITORY_* bits; occupies the old alignment pad
+                                     // (Design D) so the pinned size/offsets below hold
     // P5-stratumd-stub-bringup-e2: the pivoted root Spoor (NULL until the
     // first territory_chroot). When SYS_WALK_OPEN is called with the
     // spoor_fd == -1 sentinel, the handler uses this Spoor as the walk
@@ -266,7 +280,7 @@ _Static_assert(__builtin_offsetof(struct Territory, magic) == 0,
 // territory_chroot's ref discipline, and the mount-table iteration.
 _Static_assert(__builtin_offsetof(struct Territory, root_spoor) == 24,
                "root_spoor pinned at offset 24 (after 8B magic + "
-               "4B ref + 4B nbinds + 4B nmounts + 4B _pad)");
+               "4B ref + 4B nbinds + 4B nmounts + 4B flags [Design D: was _pad])");
 _Static_assert(__builtin_offsetof(struct Territory, binds) == 32,
                "binds[] pinned at offset 32 (after the 32B header)");
 _Static_assert(__builtin_offsetof(struct Territory, mounts)
@@ -498,6 +512,16 @@ bool mount_noexec_covers(struct Territory *territory, int dc, u32 devno);
 // a REF-HELD root Spoor (caller spoor_clunks it) or NULL if no root is set. This
 // is the ONLY sound way to obtain the FROM_ROOT walk base in a multi-thread Proc.
 struct Spoor *territory_root_ref(struct Territory *territory);
+
+// Design D (VIVARIUM 13.10.3): the namespace-level phenotype declaration.
+// territory_root_pheno: does this Territory declare Linux? NULL-safe (false).
+// A plain acquire load -- the flag is set once, before the declaring child's
+// EL0, so no lock is needed to read it (the set-once-before-EL0 discipline of
+// the identity / allowance / page-budget stamps).
+// territory_declare_linux: set it (idempotent; release-ordered). Precondition:
+// called in the spawn thunk on the CHILD's own cloned Territory before EL0.
+bool territory_root_pheno(const struct Territory *territory);
+void territory_declare_linux(struct Territory *territory);
 
 // =============================================================================
 // Chroot (root-Spoor pivot) — P5-stratumd-stub-bringup-e2.

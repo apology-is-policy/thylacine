@@ -1237,6 +1237,7 @@ char *exec_interp_argv(const char *interp, u32 interp_len,
 // than by a reviewer checking twelve paths (the F1/F5 lesson from D-3c, where a
 // cleanup that was right at three sites was missing at the fourth).
 static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
+                          u32 pheno,
                           struct Spoor *exe, size_t exe_size,
                           const char *prog_name, u32 prog_name_len,
                           const char *argv_data, u32 argv_data_len, u32 argc,
@@ -1245,6 +1246,7 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                           struct Spoor **interp_out, char **rw_argv_out);
 
 int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
+                   u32 pheno,
                    struct Spoor *exe, size_t exe_size,
                    const char *prog_name, u32 prog_name_len,
                    const char *argv_data, u32 argv_data_len, u32 argc,
@@ -1252,7 +1254,7 @@ int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                    u64 *entry_out, u64 *sp_out) {
     struct Spoor *interp = NULL;    // owned HERE once the body sets it; the
     char *rw_argv        = NULL;    // caller's own `exe` is untouched either way
-    int rc = exec_load_body(as, exempt, nsp, exe, exe_size,
+    int rc = exec_load_body(as, exempt, nsp, pheno, exe, exe_size,
                             prog_name, prog_name_len,
                             argv_data, argv_data_len, argc,
                             env_data, env_data_len, envc,
@@ -1266,6 +1268,7 @@ int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
 }
 
 static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
+                          u32 pheno,
                           struct Spoor *exe, size_t exe_size,
                           const char *prog_name, u32 prog_name_len,
                           const char *argv_data, u32 argv_data_len, u32 argc,
@@ -1320,7 +1323,13 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
     // ONE LEVEL, structurally: this is straight-line, not a loop, so the second
     // `elf_load` below sees the INTERPRETER's phdrs and an interpreter that
     // itself carries PT_INTERP falls through to the unchanged refusal.
-    if (r == ELF_LOAD_HAS_INTERP && nsp && nsp->phenotype == PHENO_LINUX) {
+    // Design D (VIVARIUM 13.10.4, review F1 Leg C): dispatch on the DECIDED
+    // phenotype threaded in as `pheno`, never on nsp->phenotype -- execve
+    // stores the field only at its commit, after this load, so for a native
+    // caller exec'ing a dynamic /viv/bin binary the field still reads native
+    // here while the resolve already decided Linux. `nsp` stays required: the
+    // interpreter is resolved in ITS namespace.
+    if (r == ELF_LOAD_HAS_INTERP && nsp && pheno == PHENO_LINUX) {
         if (!prog_name || prog_name_len == 0) {
             // Unreachable today: the one entry that can produce a PHENO_LINUX
             // image threads its name, and a PHENO_LINUX Proc cannot reach the
@@ -1341,6 +1350,14 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                 // interpreter path is container-relative and crosses its own
                 // symlink (which is why D-1 precedes D-4), and it must be
                 // executable from where the program is, not from anywhere else.
+                //
+                // Design D (VIVARIUM 13.10.5, review F8.1): this resolution
+                // stays PHENOTYPE-AGNOSTIC on purpose -- the plain wrapper,
+                // never _ex. The interpreter is a sub-step of the PROGRAM's
+                // exec: the program's decided phenotype (`pheno`) governs and
+                // the interpreter inherits it. Re-deciding by the interpreter's
+                // own location (a rootfs ld-musl crosses nothing) would flip
+                // native and break every dynamic Linux binary.
                 size_t isize = 0;
                 struct Spoor *ispoor =
                     exec_resolve_from_namespace(nsp, interp, ilen, &isize);
@@ -1532,7 +1549,11 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
         return -1;
     }
 
-    int rc = exec_load_into(p->as, proc_resource_exempt(p), p, exe, exe_size,
+    // Design D: the spawn thunks stamp p->phenotype (phenotype_decide) BEFORE
+    // calling here, so the field IS the decided value on this entry; execve's
+    // entry (sys_execve_core) threads a local instead, because there the field
+    // is written only at the commit.
+    int rc = exec_load_into(p->as, proc_resource_exempt(p), p, p->phenotype, exe, exe_size,
                             prog_name, prog_name_len,
                             argv_data, argv_data_len, argc,
                             env_data, env_len, envc, entry_out, sp_out);

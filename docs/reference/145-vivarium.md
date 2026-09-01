@@ -117,6 +117,24 @@ directly. `mprotect` dispatches nothing at all. Arity: `mmap` supplies six
 arguments and the shell reads exactly `args[0..5]`; `munmap` supplies two and the
 shell reads `args[0..1]`.
 
+**Design D (2026-09-01; VIVARIUM section 13.10; scripture `56085f83`).** The
+declaration's *timing* changed after this section was written, and the argument above
+survives unchanged: a phenotype is now the ABI of the LOADED IMAGE, decided at **every
+image load** -- every spawn variant AND `execve` -- by one function
+(`phenotype_decide`, `proc.h`): `PHENO_LINUX` iff the exec resolution crossed an
+`MPHENO_LINUX` mount OR the resolving Territory declares Linux (`Territory.root_pheno`,
+set on the child's clone by `SPAWN_PHENO_LINUX` before EL0, copied by
+`territory_clone`); else native. `rfork` preserves it (no new image); `execve`
+re-decides it and stores the field ONLY in `proc_exec_replace`'s infallible commit
+region, RELEASE-ordered before the phenotype-conditional signal reset, which branches on
+the decided value rather than the field (the three-legged ordering hazard the design
+review found, 13.10.4). Where this section or others in this file say the phenotype is
+"set once in the spawn thunk" or "inherited" across an exec, read: decided at every
+image load. The ONE place the field touches authority is the fork cap-inheritance
+policy (`rfork_forked_with_caps` under `PHENO_LINUX`); an `execve` that flips the
+phenotype changes that policy for the image's subsequent forks -- ABI shape, I-2-bounded
+(review F5), recorded in `ARCHITECTURE.md` section 28 I-43.
+
 ## 4. The dispatch path
 
 ```

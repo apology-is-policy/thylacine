@@ -98,6 +98,19 @@ struct Territory *territory_alloc(void) {
     return p;
 }
 
+// Design D (VIVARIUM 13.10.3): the namespace-level phenotype declaration.
+bool territory_root_pheno(const struct Territory *territory) {
+    if (!territory) return false;
+    return (__atomic_load_n(&territory->flags, __ATOMIC_ACQUIRE)
+            & TERRITORY_ROOT_PHENO_LINUX) != 0;
+}
+
+void territory_declare_linux(struct Territory *territory) {
+    if (!territory)                    extinction("territory_declare_linux(NULL)");
+    if (territory->magic != PGRP_MAGIC) extinction("territory_declare_linux on corrupted Territory");
+    __atomic_fetch_or(&territory->flags, TERRITORY_ROOT_PHENO_LINUX, __ATOMIC_RELEASE);
+}
+
 struct Territory *territory_clone(struct Territory *parent) {
     if (!parent)                  extinction("territory_clone(NULL)");
     if (parent->magic != PGRP_MAGIC)
@@ -156,6 +169,13 @@ struct Territory *territory_clone(struct Territory *parent) {
     if (child->root_spoor) {
         spoor_ref(child->root_spoor);
     }
+    // Design D (VIVARIUM 13.10.3; review F2 = self-audit SA-1): the namespace-
+    // level phenotype declaration is a namespace property -- copied WITH
+    // root_spoor, under the same lock. This clone copies fields one by one, so
+    // an omitted copy would let a container child LOOK Linux (the rfork
+    // phenotype inherit at proc.c) and then revert to native on its first
+    // execve, silently, for the whole descendant subtree.
+    child->flags = __atomic_load_n(&parent->flags, __ATOMIC_ACQUIRE);
     spin_unlock(&parent->ns_lock);
 
     // LS-4: copy the cwd snapshot (POSIX fork semantics -- the child inherits

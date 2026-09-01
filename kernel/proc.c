@@ -3261,7 +3261,8 @@ bool proc_exec_alone(struct Proc *p) {
 // Keep this the ONE place the note-side reset happens. Splitting it -- an
 // in_handler clear here and a mask clear at the call site, say -- is how the
 // next field gets missed, which is exactly how #247 happened.
-static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self) {
+static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
+                                       u32 pheno) {
     __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
 
     // VIVARIUM V-6b Linux dispositions, reset IN PLACE -- the table is NOT
@@ -3306,7 +3307,15 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self) {
     // resets only the caught rows. The sentence this used to carry -- "Zeroing
     // is exact POSIX" -- was true of the caught rows and false of the rest. A
     // native Proc keeps the Plan 9 rule: everything clears.
-    if (p->phenotype == PHENO_LINUX) {
+    //
+    // Design D (VIVARIUM 13.10.4, review F1 Leg A): the arm is chosen by the NEW
+    // image's phenotype -- the `pheno` PARAMETER, never `p->phenotype`. execve
+    // re-decides the phenotype at every image load, and this reset is the one
+    // consumer that runs after the address-space commit: read the field here
+    // and a Linux git exec'ing the native nora would take the Linux arm, keep
+    // git's blocked-note mask, and hand native nora notes it never masked
+    // (notes_peek_locked reads note_mask ungated by phenotype).
+    if (pheno == PHENO_LINUX) {
         viv_sigtab_reset_caught(p->sigtab);
     } else {
         viv_sigtab_reset(p->sigtab);
@@ -3348,12 +3357,12 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self) {
 // driving this on a RUNNING Proc would interleave a whole-table reset with that
 // Proc's own viv_sigtab_set. The test drives it on a Proc it built and never
 // scheduled.
-void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t);
-void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t) {
-    proc_exec_drop_image_state(p, t);
+void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 pheno);
+void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 pheno) {
+    proc_exec_drop_image_state(p, t, pheno);
 }
 
-void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
+void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
     if (!p || p->magic != PROC_MAGIC) extinction("proc_exec_replace: bad Proc");
     if (!nas)                         extinction("proc_exec_replace: NULL address space");
     struct Thread *self = current_thread();
@@ -3394,6 +3403,20 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
         spin_unlock_irqrestore(&g_proc_table_lock, s);
     }
 
+    // Design D (VIVARIUM 13.10.4): the ONE store of the new image's phenotype,
+    // here in the infallible commit region and nowhere earlier. Before the
+    // swap above the load could still fail and return the caller to its OLD
+    // image, which must keep decoding its own calls under its own ABI (review
+    // F1 Leg B); after it, the new image is committed. RELEASE-ordered ahead
+    // of the signal reset below: a cross-Proc note poster loads p->phenotype
+    // lock-free (notes.c), so it observes either the old (phenotype, mask)
+    // pair or the new one. The window between this store and the mask clear
+    // in the reset can show (new phenotype, old mask); a note masked under the
+    // old mask is DEFERRED there, not lost -- the clear that follows releases
+    // it -- which is the same latitude POSIX gives a sigaction racing a signal
+    // already in flight (the standing rule for this Proc's sigtab, above).
+    __atomic_store_n(&p->phenotype, new_pheno, __ATOMIC_RELEASE);
+
     // Every cross-Proc reader of `->as` -- /proc/<pid>/{maps,mem}, /ctl/procs,
     // the weft reaper -- resolves its target under g_proc_table_lock, so after
     // the section above none of them can still be holding `old`. That is what
@@ -3426,7 +3449,7 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     // freed here (#254: cross-Proc readers reach `p->sigtab` lock-free, so the
     // object is immortal per Proc; proc_free is the only free), and WHAT resets
     // is phenotype-conditional -- both live in proc_exec_drop_image_state.
-    proc_exec_drop_image_state(p, self);
+    proc_exec_drop_image_state(p, self, new_pheno);
 
     // L-7 F2: hardware breakpoints and watchpoints are addresses in the OLD
     // image, for exactly the reason the handler entry points above are. Nothing

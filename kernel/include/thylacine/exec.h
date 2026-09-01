@@ -435,7 +435,15 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
 // takes an AddrSpace is that the Proc-side mutations are the caller's.
 struct AddrSpace;
 struct Proc;
+// Design D (VIVARIUM 13.10.4): `pheno` is the phenotype the image being loaded
+// was DECIDED to have (phenotype_decide at the resolve). The loader consults
+// the parameter -- never nsp->phenotype -- wherever the phenotype shapes the
+// load (the PT_INTERP dispatch), because for execve the field is not updated
+// until the commit AFTER this returns: a native caller execve'ing a dynamic
+// /viv/bin binary decides Linux at the resolve while its field still says
+// native (review F1 Leg C). The loader never writes nsp->phenotype (Leg B).
 int exec_load_into(struct AddrSpace *as, bool exempt, struct Proc *nsp,
+                   u32 pheno,
                    struct Spoor *exe, size_t exe_size,
                    const char *prog_name, u32 prog_name_len,
                    const char *argv_data, u32 argv_data_len, u32 argc,

@@ -7510,6 +7510,7 @@ _Static_assert(EXEC_ARGV_DATA_MAX == SYS_SPAWN_ARGV_DATA_MAX,
 struct spawn_args {
     struct Spoor *exe;      // REVENANT R-4: the pinned executable; thunk clunks it
     size_t        exe_size; // stat'd file size (bounds the ELF segment-extent check)
+    bool          exe_pheno_linux; // Design D: the resolution decided Linux (13.10.6)
 };
 
 __attribute__((noreturn))
@@ -7517,12 +7518,18 @@ static void sys_spawn_thunk(void *arg) {
     struct spawn_args *sa = (struct spawn_args *)arg;
     struct Spoor *exe = sa->exe;
     size_t exe_size   = sa->exe_size;
+    bool exe_pheno_linux = sa->exe_pheno_linux;   // Design D: copy before kfree
     kfree(sa);
 
     struct Thread *t = current_thread();
     if (!t) extinction("sys_spawn_thunk: no current_thread");
     struct Proc *p = t->proc;
     if (!p) extinction("sys_spawn_thunk: no proc");
+
+    // Design D (VIVARIUM 13.10.1): the image-load decision, before exec and
+    // before EL0. This child's Territory is the parent's clone (root_pheno
+    // inherited); the register variant has no manifest bit to add.
+    p->phenotype = phenotype_decide(exe_pheno_linux, territory_root_pheno(p->territory));
 
     u64 entry = 0, sp = 0;
     // #359/#360: this thunk runs IRQ-ENABLED on a fresh thread (preemptible,
@@ -7680,7 +7687,14 @@ int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
     // namespace (was the flat devramfs_lookup + whole-binary slurp). The bytes
     // are read later (header in the child, text demand-paged) -- no size cap.
     size_t exe_size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    // Design D (VIVARIUM 13.10.6): every spawn variant resolves through the
+    // pheno-aware wrapper and decides by the same rule in its thunk. A register
+    // variant cannot DECLARE (no pheno_flags) but must not leave a hole: a
+    // /viv/bin binary spawned through one is Linux by location, and a child
+    // inside a declared Territory is Linux by the clone it inherits.
+    bool exe_pheno_linux = false;
+    struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
+                                                       &exe_pheno_linux);
     if (!exe)                                          return -1;
 
     struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
@@ -7690,6 +7704,7 @@ int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
     }
     sa->exe      = exe;
     sa->exe_size = exe_size;
+    sa->exe_pheno_linux = exe_pheno_linux;
 
     int pid = rfork(RFPROC, sys_spawn_thunk, sa);
     if (pid < 0) {
@@ -7755,6 +7770,7 @@ struct spawn_with_fds_args {
     // SYS_SPAWN_WITH_PERMS carries the parent's vetted permission flags
     // here. See SPAWN_PERM_* in <thylacine/syscall.h>.
     u32            perm_flags;
+    bool           exe_pheno_linux; // Design D: the resolution decided Linux (13.10.6)
 };
 
 // Both spawn thunks call apply_spawn_perms (defined below, next to the grant
@@ -7768,6 +7784,7 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     size_t  exe_size   = sa->exe_size;
     u32     fd_count   = sa->fd_count;
     u32     perm_flags = sa->perm_flags;
+    bool    exe_pheno_linux = sa->exe_pheno_linux;   // Design D: copy before kfree
     struct Spoor *spoors_local[SYS_SPAWN_MAX_FDS];
     rights_t      rights_local[SYS_SPAWN_MAX_FDS];
     for (u32 i = 0; i < fd_count; i++) {
@@ -7789,6 +7806,11 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     // every bit (sys_spawn_with_perms_for_proc); apply_spawn_perms maps each
     // surviving bit to its one-way kernel mark.
     apply_spawn_perms(p, perm_flags);
+
+    // Design D (VIVARIUM 13.10.1): the image-load decision, before anything
+    // user-observable. Register variant: no manifest bit; the Territory is the
+    // parent's clone.
+    p->phenotype = phenotype_decide(exe_pheno_linux, territory_root_pheno(p->territory));
 
     // Install each Spoor in the child's handle table at the lowest
     // free slot. Post-rfork, the table is empty, so the first install
@@ -7855,7 +7877,14 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
 
     // #58 / REVENANT R-4: resolve + PIN the executable (was the whole-binary slurp).
     size_t exe_size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    // Design D (VIVARIUM 13.10.6): every spawn variant resolves through the
+    // pheno-aware wrapper and decides by the same rule in its thunk. A register
+    // variant cannot DECLARE (no pheno_flags) but must not leave a hole: a
+    // /viv/bin binary spawned through one is Linux by location, and a child
+    // inside a declared Territory is Linux by the clone it inherits.
+    bool exe_pheno_linux = false;
+    struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
+                                                       &exe_pheno_linux);
     if (!exe) {
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
@@ -7869,6 +7898,7 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     }
     sa->exe      = exe;
     sa->exe_size = exe_size;
+    sa->exe_pheno_linux = exe_pheno_linux;
     sa->fd_count  = fd_count;
     for (u32 i = 0; i < fd_count; i++) {
         sa->spoors[i] = bumped[i];
@@ -7908,7 +7938,14 @@ int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_l
 
     // #58 / REVENANT R-4: resolve + PIN the executable (was the whole-binary slurp).
     size_t exe_size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    // Design D (VIVARIUM 13.10.6): every spawn variant resolves through the
+    // pheno-aware wrapper and decides by the same rule in its thunk. A register
+    // variant cannot DECLARE (no pheno_flags) but must not leave a hole: a
+    // /viv/bin binary spawned through one is Linux by location, and a child
+    // inside a declared Territory is Linux by the clone it inherits.
+    bool exe_pheno_linux = false;
+    struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
+                                                       &exe_pheno_linux);
     if (!exe)                                          return -1;
 
     struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
@@ -7918,6 +7955,7 @@ int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_l
     }
     sa->exe      = exe;
     sa->exe_size = exe_size;
+    sa->exe_pheno_linux = exe_pheno_linux;
 
     int pid = rfork_with_caps(RFPROC, sys_spawn_thunk, sa, cap_mask);
     if (pid < 0) {
@@ -7999,7 +8037,14 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
 
     // #58 / REVENANT R-4: resolve + PIN the executable (was the whole-binary slurp).
     size_t exe_size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    // Design D (VIVARIUM 13.10.6): every spawn variant resolves through the
+    // pheno-aware wrapper and decides by the same rule in its thunk. A register
+    // variant cannot DECLARE (no pheno_flags) but must not leave a hole: a
+    // /viv/bin binary spawned through one is Linux by location, and a child
+    // inside a declared Territory is Linux by the clone it inherits.
+    bool exe_pheno_linux = false;
+    struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len, &exe_size,
+                                                       &exe_pheno_linux);
     if (!exe) {
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
@@ -8013,6 +8058,7 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     }
     sa->exe        = exe;
     sa->exe_size   = exe_size;
+    sa->exe_pheno_linux = exe_pheno_linux;
     sa->fd_count   = fd_count;
     sa->perm_flags = perm_flags;
     for (u32 i = 0; i < fd_count; i++) {
@@ -8381,10 +8427,14 @@ struct spawn_full_argv_args {
     // returns the inherited budget when the caller asked for none, and a 0 from
     // it means REFUSE, which fails the spawn before we ever get here.
     u32            page_budget;
-    // VIVARIUM V-1b: stamp the child PHENO_LINUX in the thunk (section 12.1
-    // rule 1 -- the vivarium's declaration). false -> the child keeps the
-    // phenotype rfork inherited (a native parent's child stays native).
-    bool pheno_linux;
+    // VIVARIUM V-1b + Design D (section 13.10.3): the manifest declaration
+    // (SPAWN_PHENO_LINUX) -- the thunk sets it on the CHILD's Territory
+    // (territory_declare_linux) before EL0, and the child's image is then
+    // decided by the same rule as every image load.
+    bool pheno_manifest;
+    // The resolution's own verdict (an MPHENO_LINUX crossing, seeded by the
+    // PARENT Territory's declaration): the mount channel, section 13.
+    bool exe_pheno_linux;
     // DISTRO D-4: the name the caller spawned, carried into the child because
     // the PT_INTERP rewrite has to put it on the interpreter's command line and
     // the resolution that consumed it happened in the PARENT. Inline rather
@@ -8413,7 +8463,8 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     u32     page_budget   = sa->page_budget;         // CL-5: copy before kfree
     struct spawn_allowance allowance;                // step 5: copy before kfree
     spawn_allowance_copy(&allowance, &sa->allowance);
-    bool    pheno_linux   = sa->pheno_linux;         // V-1b: copy before kfree
+    bool    pheno_manifest  = sa->pheno_manifest;    // V-1b/D: copy before kfree
+    bool    exe_pheno_linux = sa->exe_pheno_linux;   // section 13: copy before kfree
     u32     name_len      = sa->name_len;            // D-4: copy before kfree
     if (name_len > SYS_SPAWN_NAME_MAX) name_len = SYS_SPAWN_NAME_MAX;
     char    name[SYS_SPAWN_NAME_MAX + 1];
@@ -8480,20 +8531,24 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     // been decided against the value being replaced.
     if (p->as && __atomic_load_n(&p->as->ref, __ATOMIC_ACQUIRE) == 1)
         __atomic_store_n(&p->as->page_budget, page_budget, __ATOMIC_RELEASE);
-    // VIVARIUM V-1b: stamp the declared phenotype BEFORE exec_setup and
-    // before EL0 -- the child has no peer thread yet, so a plain store is
-    // race-free (the identity/allowance set-once-before-EL0 contract), and
-    // exec can already read it for the section 12.1 rule-4 mismatch
-    // diagnostic. Descendants inherit it via rfork (rule 2). No gate: a
-    // phenotype confers ABI shape, never authority (I-43).
+    // VIVARIUM V-1b + Design D (section 13.10.3): the declaration, then the
+    // decision -- BEFORE exec_setup and before EL0, where a plain store is
+    // race-free (no peer thread yet; the identity/allowance set-once-before-
+    // EL0 contract), and where exec_setup can already read the field for the
+    // PT_INTERP dispatch + the rule-4 diagnostic.
     //
-    // `pheno_linux` already carries BOTH declaration channels (section 12.1
-    // rule 1): the spawn-arg manifest channel (sa->pheno_flags) OR'd, at the
-    // spawn-syscall resolution site, with the section-13 MPHENO_LINUX mount
-    // channel -- `exec_resolve_from_namespace` reports whether the binary's
-    // resolution crossed a pheno-mount (the /viv/bin subtree scope). So the
-    // stamp itself stays channel-agnostic.
-    if (pheno_linux) p->phenotype = PHENO_LINUX;
+    // The manifest bit declares the CHILD'S TERRITORY a Linux world (the
+    // container's namespace-level declaration, 13.10.3): from here every image
+    // load resolved from this Territory -- this entrypoint, its execve'd
+    // helpers, its rfork descendants (territory_clone copies the flag) --
+    // decides Linux. Set on the child's own clone, never on the parent's
+    // Territory (review F4): viv does not become a Linux world for having
+    // launched one. Then THE decision, by the rule every image load shares:
+    // the resolution's verdict (crossed a pheno-mount, seeded by the parent's
+    // declaration) OR this child's Territory declaration. No gate: a phenotype
+    // confers ABI shape, never authority (I-43).
+    if (pheno_manifest) territory_declare_linux(p->territory);
+    p->phenotype = phenotype_decide(exe_pheno_linux, territory_root_pheno(p->territory));
 
     // A-1a: apply the parent-vetted identity override BEFORE any user-
     // observable state (fd install / exec / userland_enter). The parent
@@ -8613,8 +8668,9 @@ static int sys_spawn_full_argv_with_perms_for_proc(
 
     // #58 / REVENANT R-4: resolve + PIN the executable (was the whole-binary slurp).
     // section 13: also learn whether resolving `name` crossed an MPHENO_LINUX
-    // mount -- the /viv/bin subtree phenotype channel, OR'd into sa->pheno_linux
-    // below alongside the manifest channel.
+    // mount -- the /viv/bin subtree phenotype channel (seeded, since Design D,
+    // by THIS Territory's own declaration), carried to the thunk as
+    // sa->exe_pheno_linux beside the manifest bit (sa->pheno_manifest).
     size_t exe_size = 0;
     bool exe_pheno_linux = false;
     struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len,
@@ -8660,12 +8716,14 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     // KP_ZERO left allowance.set false -> the child inherits via rfork).
     if (want_allowance) spawn_allowance_copy(&sa->allowance, want_allowance);
     sa->page_budget   = eff_budget;   // CL-5: parent-resolved; the thunk stamps it
-    // V-1b: carry the phenotype declaration (0 -> KP_ZERO left it false ->
-    // the child inherits via rfork).
-    // Section 12.1 rule 1's TWO declaration channels, OR'd: the manifest
-    // (pheno_flags) OR the section-13 MPHENO_LINUX mount the binary resolved
-    // through (exe_pheno_linux). Either makes the child PHENO_LINUX.
-    sa->pheno_linux = ((pheno_flags & SPAWN_PHENO_LINUX) != 0) || exe_pheno_linux;
+    // V-1b + Design D: carry the two channels SEPARATELY (13.10.3). The manifest
+    // bit becomes the child Territory's declaration in the thunk; the mount
+    // channel's verdict (exe_pheno_linux, seeded by THIS parent's Territory
+    // declaration at the resolve) feeds the child's phenotype_decide. KP_ZERO
+    // left both false -> a plain child decides native unless the clone it
+    // inherits already declares Linux.
+    sa->pheno_manifest  = (pheno_flags & SPAWN_PHENO_LINUX) != 0;
+    sa->exe_pheno_linux = exe_pheno_linux;
     // D-4: carry the caller's own name for the program. Bounded + NUL-checked
     // by this function's entry gate above, so the copy is a straight one.
     sa->name_len = (u32)name_len;
@@ -9192,8 +9250,16 @@ static s64 sys_execve_core(struct exception_context *ctx,
     //    SYS_SPAWN_* uses, so exec and spawn cannot diverge on what is
     //    executable. Pins the Spoor; we clunk it below on every path.
     size_t exe_size = 0;
-    struct Spoor *exe = exec_resolve_from_namespace(p, path, (size_t)path_len,
-                                                    &exe_size);
+    // Design D (VIVARIUM 13.10.4): execve RE-DECIDES the phenotype -- a new
+    // image is a new ABI -- through the pheno-aware resolver, into a LOCAL.
+    // p->phenotype is not touched here, nor by the load below: it is stored
+    // exactly once, in proc_exec_replace's infallible commit region, so a
+    // failed resolve or load returns the caller to its old image with its old
+    // ABI intact (review F1 Leg B). The loader and the signal reset both take
+    // the decided value as a parameter (Legs C and A).
+    bool crossed_pheno = false;
+    struct Spoor *exe = exec_resolve_from_namespace_ex(p, path, (size_t)path_len,
+                                                       &exe_size, &crossed_pheno);
     if (!exe) {
         // NOTE: argv_kbuf and env_kbuf are the CALLER's -- every front end frees
         // its own blobs on every path. The pre-L-6a body freed it here, when the
@@ -9217,8 +9283,11 @@ static s64 sys_execve_core(struct exception_context *ctx,
         return -(s64)T_E_NOMEM;
     }
 
+    const u32 new_pheno = phenotype_decide(crossed_pheno,
+                                           territory_root_pheno(p->territory));
+
     u64 entry = 0, sp = 0;
-    int rc = exec_load_into(nas, proc_resource_exempt(p), p, exe, exe_size,
+    int rc = exec_load_into(nas, proc_resource_exempt(p), p, new_pheno, exe, exe_size,
                             path, (u32)path_len,
                             argv_kbuf, (u32)argv_data_len, (u32)argc,
                             env_kbuf, (u32)env_data_len, (u32)envc,
@@ -9243,7 +9312,7 @@ static s64 sys_execve_core(struct exception_context *ctx,
 
     // 4. COMMIT. Infallible from here -- there is no path back to the caller's
     //    old image, and none is needed.
-    proc_exec_replace(p, nas);
+    proc_exec_replace(p, nas, new_pheno);
 
     // The Proc-side stamps the spawn path applies inside exec_setup_from_spoor.
     // They land HERE instead, after the commit, for the reason exec_load_into's

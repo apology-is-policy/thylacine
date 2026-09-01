@@ -35,6 +35,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/thread.h>   // Design D Leg A: a fake execing Thread
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
@@ -1148,7 +1149,7 @@ void test_execve_load_into_detached(void) {
     TEST_ASSERT(nas != p->as, "the target is a DIFFERENT address space");
 
     u64 entry = 0, sp = 0;
-    int rc = exec_load_into(nas, /*exempt=*/false, /*nsp=*/NULL, exe, size, NULL, 0,
+    int rc = exec_load_into(nas, /*exempt=*/false, /*nsp=*/NULL, PHENO_NATIVE, exe, size, NULL, 0,
                             NULL, 0, 0, NULL, 0, 0, &entry, &sp);
     TEST_EXPECT_EQ(rc, 0, "exec_load_into into a detached address space");
     TEST_EXPECT_EQ(entry, (u64)0x10000, "entry == e_entry");
@@ -1204,13 +1205,13 @@ void test_execve_load_into_rejects_dirty(void) {
 
     // Load once -- succeeds and leaves the target populated.
     u64 entry = 0, sp = 0;
-    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, PHENO_NATIVE, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    0, "first load into a clean target");
 
     // Loading again into the SAME (now dirty) target must refuse rather than
     // overlay a second image on top of the first.
-    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, PHENO_NATIVE, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    -1, "a second load into a dirty target is refused");
 
@@ -1250,7 +1251,7 @@ void test_execve_failed_load_leaves_target_drainable(void) {
     TEST_ASSERT(nas != NULL, "addrspace_alloc");
 
     u64 entry = 0, sp = 0;
-    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, PHENO_NATIVE, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    -1, "a mid-load failure is reported");
     TEST_ASSERT(nas->vmas != NULL, "the target really is partially populated");
@@ -1326,7 +1327,7 @@ void test_exec_native_rejects_dynamic_linux(void) {
     // The native exec rejects the dynamic binary (elf_load HAS_INTERP), and on
     // the way out exec_say runs the LINUX_LIKELY diagnostic. Reaching this
     // assertion means exec_say did not fault.
-    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
+    TEST_EXPECT_EQ(exec_load_into(nas, false, NULL, PHENO_NATIVE, exe, size, NULL, 0, NULL, 0, 0, NULL, 0, 0,
                                   &entry, &sp),
                    -1, "a dynamic Linux binary is refused by a native exec");
     // Nothing was published into the address space.
@@ -1336,6 +1337,125 @@ void test_exec_native_rejects_dynamic_linux(void) {
     addrspace_unref(nas);
     spoor_clunk(exe);
     drop_proc(p);
+}
+
+// =============================================================================
+// Design D (VIVARIUM 13.10.4): the execve re-decision's two testable legs.
+// =============================================================================
+
+// Leg B -- a FAILED load leaves the Proc's phenotype untouched. The loader is
+// handed the DECIDED phenotype as a parameter and must never write the field:
+// execve stores it only in proc_exec_replace's infallible commit region, so a
+// failed exec_load_into returns the caller to its old image with its old ABI.
+// Reuses the PT_INTERP fixture of the reject test: with the decided phenotype
+// LINUX and no program name the loader takes the Linux arm and refuses (the
+// "rewrite needs the program's own name" branch -- reachable from here, not
+// from any production entry), with NATIVE it takes the native reject; both
+// fail, and in both the field must still read what the Proc started with.
+extern void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t,
+                                                u32 pheno);
+void test_exec_load_failure_leaves_phenotype(void);
+void test_exec_load_failure_leaves_phenotype(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_ASSERT(p->phenotype == PHENO_NATIVE, "pre: a fresh Proc is native");
+
+    u32 flags[2] = { PF_R | PF_X, PF_R };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+    static const char kInterp[] = "/lib/ld-musl-aarch64.so.1";
+    ph[1].p_type   = PT_INTERP;
+    ph[1].p_flags  = PF_R;
+    for (size_t i = 0; i < sizeof(kInterp); i++)
+        g_elf_blob[ph[1].p_offset + i] = (u8)kInterp[i];
+    ph[1].p_filesz = sizeof(kInterp);
+    ph[1].p_memsz  = 0;
+    g_blob_dev_size = size;
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x1D7A12ull;
+    exe->qid.vers = 1;
+
+    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    TEST_ASSERT(nas != NULL, "addrspace_alloc");
+    u64 entry = 0, sp = 0;
+
+    // The decided phenotype says LINUX; the load fails (no program name for the
+    // PT_INTERP rewrite). The field must NOT have moved.
+    int rc_linux = exec_load_into(nas, false, p, PHENO_LINUX, exe, size, NULL, 0,
+                                  NULL, 0, 0, NULL, 0, 0, &entry, &sp);
+    u32 after_linux = p->phenotype;
+    u64 vmas_linux  = (u64)nas->vma_count;
+    // And the native arm, for symmetry: the same fixture, decided NATIVE.
+    int rc_native = exec_load_into(nas, false, p, PHENO_NATIVE, exe, size, NULL, 0,
+                                   NULL, 0, 0, NULL, 0, 0, &entry, &sp);
+    u32 after_native = p->phenotype;
+
+    vma_drain_in(nas);
+    addrspace_unref(nas);
+    spoor_clunk(exe);
+    drop_proc(p);
+
+    TEST_EXPECT_EQ(rc_linux, -1, "a nameless PT_INTERP load refuses under the Linux arm");
+    TEST_EXPECT_EQ(vmas_linux, 0ull, "no segment mapped on the refusal");
+    TEST_EXPECT_EQ(rc_native, -1, "a dynamic binary refuses under the native arm");
+    TEST_ASSERT(after_linux == PHENO_NATIVE,
+        "Leg B: a FAILED load with the decided phenotype LINUX leaves the field NATIVE");
+    TEST_ASSERT(after_native == PHENO_NATIVE,
+        "Leg B: a failed native-arm load leaves the field NATIVE");
+}
+
+// Leg A -- the phenotype-conditional exec signal reset follows the DECIDED
+// phenotype (the parameter), never the field. Set the FIELD to one ABI and
+// pass the OTHER: the arm that runs is the parameter's. The observable is the
+// note mask: the native arm clears it (Plan 9), the Linux arm keeps it (POSIX
+// "the signal mask is inherited"). Read the field instead and a Linux git
+// exec'ing the native nora keeps git's blocked-note mask across the exec.
+// The hook must also never write the field itself (only the commit does).
+void test_exec_reset_follows_decided_phenotype(void);
+void test_exec_reset_follows_decided_phenotype(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    static struct Thread th;            // BSS-zeroed; a fake execing thread
+    th.magic = THREAD_MAGIC;
+    th.proc  = p;
+
+    // (field LINUX, decided NATIVE): the Linux->native exec, the C2 editor path.
+    p->phenotype = PHENO_LINUX;
+    th.note_mask = 0xFu;
+    proc_exec_drop_image_state_for_test(p, &th, PHENO_NATIVE);
+    u32 mask_l2n  = th.note_mask;
+    u32 field_l2n = p->phenotype;
+
+    // (field NATIVE, decided LINUX): the native->Linux exec.
+    p->phenotype = PHENO_NATIVE;
+    th.note_mask = 0xFu;
+    proc_exec_drop_image_state_for_test(p, &th, PHENO_LINUX);
+    u32 mask_n2l  = th.note_mask;
+    u32 field_n2l = p->phenotype;
+
+    // Controls: field == decided, both ways.
+    p->phenotype = PHENO_NATIVE; th.note_mask = 0xFu;
+    proc_exec_drop_image_state_for_test(p, &th, PHENO_NATIVE);
+    u32 mask_nn = th.note_mask;
+    p->phenotype = PHENO_LINUX;  th.note_mask = 0xFu;
+    proc_exec_drop_image_state_for_test(p, &th, PHENO_LINUX);
+    u32 mask_ll = th.note_mask;
+
+    th.proc = NULL;                     // the static outlives proc_free
+    drop_proc(p);
+
+    TEST_EXPECT_EQ((u64)mask_l2n, 0ull,
+        "Leg A: field LINUX + decided NATIVE -> the NATIVE arm runs (mask cleared)");
+    TEST_ASSERT(field_l2n == PHENO_LINUX,
+        "the reset never writes the field (only the commit does)");
+    TEST_EXPECT_EQ((u64)mask_n2l, 0xFull,
+        "Leg A: field NATIVE + decided LINUX -> the LINUX arm runs (mask kept)");
+    TEST_ASSERT(field_n2l == PHENO_NATIVE,
+        "the reset never writes the field (only the commit does)");
+    TEST_EXPECT_EQ((u64)mask_nn, 0ull,  "CONTROL: native/native clears");
+    TEST_EXPECT_EQ((u64)mask_ll, 0xFull, "CONTROL: linux/linux keeps");
 }
 
 // =============================================================================

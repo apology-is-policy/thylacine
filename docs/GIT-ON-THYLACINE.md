@@ -396,6 +396,16 @@ The "complete practical" polish. Gated on a kernel chunk.
     (walk `/dev/pts/<N>ctl` + 9P I/O) is C2-k1c. Today a pts ioctl answers
     `ENOTTY` (no regression: it was `ENOSYS` before). The console half covers the
     stated goal (interactive git + `viv sh` on the console).
+- **C2-k3-kernel -- Design D, the prerequisite the wiring below did not know it had
+  (VIVARIUM 13.10; scripture `56085f83` + impl).** git launches its editor by `execve`,
+  and as-built `execve` PRESERVED the caller's phenotype -- so a bare `core.editor=nora`
+  would have run the NATIVE nora under Linux decode. Design D makes a phenotype the ABI
+  of the LOADED IMAGE, re-decided at every image load from the namespace (default
+  native): git (`/viv/bin`, Linux) exec'ing nora (`/bin`, no Linux declaration) lands
+  native, git's `/viv/bin` helpers stay Linux, and a container stays uniformly Linux via
+  `Territory.root_pheno`. Its one deployment constraint (review F3, 13.10.8): git's exec
+  closure must sit behind the pheno-mount -- **verify `GIT_EXEC_PATH` is within `/viv/bin`
+  in-guest, with a real fetch, as the first C2-k3 job.**
 - **C2-wiring: nora as the editor.** `core.editor=nora` + `sequence.editor=nora`
   -- **bare names, so git `execve`s nora directly with no `/bin/sh`** (git only
   invokes the shell when the editor string carries a metacharacter, space

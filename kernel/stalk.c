@@ -540,8 +540,19 @@ restart:
     // NATIVE target under the Linux phenotype -- I-43-safe (over-declaration
     // degrades to malfunction, never escalation) but a violation of the stated
     // contract "the SAME file reached by another path is native" (territory.h).
-    // On the FIRST pass this is a no-op (the caller inits it false).
-    if (crossed_pheno) *crossed_pheno = false;
+    //
+    // Design D (VIVARIUM 13.10.5): the reset is a SEED, not a false. The
+    // resolving Territory's own declaration (territory_root_pheno -- the
+    // container's, since chroot swaps root_spoor and no crossing can ever fire
+    // from inside) is the floor every pass starts from; walk crossings
+    // accumulate on top. Seeded HERE, at the shared restart: label, so one line
+    // covers the first pass AND every re-anchor -- and it must stay here: a
+    // seed hoisted above the label (first pass only) would let an absolute
+    // symlink inside a container drop the declaration and revert its target to
+    // native. Both outcomes are preserved: in the user namespace (seed false)
+    // the /viv/bin/helper -> /bin/ut case above still lands native; in a
+    // container (seed true) it stays Linux.
+    if (crossed_pheno) *crossed_pheno = territory_root_pheno(p ? p->territory : NULL);
 
     // Cross the BASE: `base` itself may be a mount point. If it crosses, the
     // owned crossed clone becomes trail[0] (so the first component searches the
@@ -1414,11 +1425,14 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
 }
 
 // stalk_exec (VIVARIUM section 13) -- the exec-resolution variant: identical to
-// stalk_err but reports, via *crossed_pheno, whether the resolution crossed a
-// mount marked MPHENO_LINUX. The caller inits *crossed_pheno = false and reads
-// it only on success; a NULL start/path or a failed walk leaves it as the caller
-// set it (fail-safe: the spawn stays native). Only the exec path consumes this,
-// so stalk_err's own callers are untouched.
+// stalk_err but reports, via *crossed_pheno, whether the resolution decided
+// Linux: SEEDED from the resolving Territory's declaration (territory_root_pheno,
+// Design D 13.10.5) at stalk_core's restart: label, then OR-accumulated with
+// every MPHENO_LINUX mount crossed. The caller inits *crossed_pheno = false and
+// reads it only on success; a NULL start/path or a failed walk leaves it as the
+// caller set it (fail-safe: the image load stays native). Every image-load
+// path -- all spawn variants and execve -- consumes this; stalk_err's own
+// callers are untouched.
 struct Spoor *stalk_exec(struct Proc *p, struct Spoor *start,
                          const char *path, u64 pathlen, int amode, u32 omode,
                          int *errp, bool *crossed_pheno) {

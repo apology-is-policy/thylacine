@@ -161,8 +161,34 @@ off. The post-impl audit runs on Fable 5.1 with F1's cross-Proc interleaving as
 a named focus area; a design-only Fable re-run was not owed (the fallback round
 finished).
 
-**Open at this commit:** the implementation (13.10.11's checklist), then C2-k3
-proper (`viv sh` + `core.editor=nora`), which D unblocks.
+**The implementation, landed the same evening** (Fable 5.1, `/effort max`), against
+13.10.11's checklist: `Territory.flags` in the old `_pad` (the size/offset asserts
+held untouched -- F7 was right that an append would have moved them), copied in
+`territory_clone` under `ns_lock` beside `root_spoor`; `phenotype_decide` as the ONE
+decision function shared by the three spawn thunks and execve; the four legacy
+resolve sites unified onto `_ex` (F6 done, not documented-around); the `restart:`
+seed; `exec_load_into`/`_body` taking the decided phenotype and the PT_INTERP dispatch
+reading it; and the F1 shape exactly as specified -- `sys_execve_core` decides into a
+local, `proc_exec_replace(p, nas, new_pheno)` makes the one RELEASE store after the
+`p->as` swap and passes the value into the reset, which branches on the parameter.
+`viv` needed no change: it already passes the flag on the entrypoint and 0 on the
+diorama. Five discriminating unit tests (the decision truth table; the clone copy with
+an undeclared control AND a post-clone-declaration independence check; the seed
+surviving a re-anchor, plus the seed's own no-crossing control before and after the
+declaration; Leg B on both arms; Leg A as field-X-decided-Y -> Y's arm, and the reset
+never writes the field). Leg C has no discriminating fixture in the tree -- every
+shipped pheno-mount binary is static, so no native->Linux execve of a DYNAMIC one
+exists to witness it; said so in the AUDIT-TRIGGERS row rather than writing a test
+that passes either way. Measured: suite **1480/1480**, 0 fail, 0 EXTINCTION, boot OK,
+arc gates L-6c + D-5 PASS (D-5 is the container's execve of dynamic binaries under
+`root_pheno` -- the container half of D, live). Quaestor: all nine kernel paths are
+vault-carried, so the deep prose rings the vault; `145-vivarium.md` got only its
+now-false claims corrected.
+
+**Open at this commit:** the SMP gate + the Fable 5.1 audit (F1's cross-Proc
+interleaving the named focus area), then C2-k3 proper (`viv sh` + `core.editor=nora`),
+which D unblocks -- and its first in-guest job is F3: `git --exec-path` + a real fetch
+from `/viv/bin`, then the editor witness itself.
 
 ## 2026-08-31 (aux) -- N-6: git push over https -- milestone B complete
 

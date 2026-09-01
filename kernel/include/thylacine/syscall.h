@@ -2398,12 +2398,21 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 #define SPAWN_ALLOWANCE_SET          (1u << 0)
 #define SPAWN_ALLOWANCE_FLAGS_ALL    (SPAWN_ALLOWANCE_SET)
 
-// VIVARIUM V-1b (docs/VIVARIUM.md section 12.1): sys_spawn_args.pheno_flags
-// bits. SPAWN_PHENO_LINUX stamps the child Proc PHENO_LINUX in the spawn thunk
-// (before exec / before EL0), so every syscall the child ever issues is decoded
-// through the Linux translation table (kernel/vivarium.c). Descendants inherit
-// the phenotype via rfork (proc.c), which is section 12.1 rule 2: within a
-// declared-Linux vivarium every exec is PHENO_LINUX.
+// VIVARIUM V-1b (docs/VIVARIUM.md section 12.1) + Design D (section 13.10):
+// sys_spawn_args.pheno_flags bits. SPAWN_PHENO_LINUX declares the child a
+// LINUX WORLD at the NAMESPACE level: in the spawn thunk, before EL0, it sets
+// TERRITORY_ROOT_PHENO_LINUX on the child's freshly cloned Territory
+// (territory_declare_linux), and the child's own image is then decided
+// PHENO_LINUX by the same rule every image load uses (phenotype_decide: an
+// MPHENO_LINUX crossing OR the resolving Territory's declaration). Because the
+// declaration rides the namespace and every image load -- every spawn variant
+// and execve -- re-decides from the namespace, the child's execve'd helpers and
+// its rfork descendants (territory_clone copies the flag) stay Linux without
+// any per-Proc inheritance across exec. This deepened the flag's meaning from
+// V-1b's per-Proc stamp (which execve used to carry forward); its value,
+// position, and every existing producer's intent ("this container is Linux")
+// are unchanged. A phenotype is the ABI of the LOADED IMAGE; rfork preserves
+// it (no new image), execve re-decides it.
 //
 // DELIBERATELY UNGATED -- and that is I-43 doing the work, not an oversight:
 // a phenotype confers ABI SHAPE, NEVER AUTHORITY. Every translated call lands
@@ -2415,10 +2424,13 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // DOES confer a role and is therefore gate-checked.
 //
 // Only SYS_SPAWN_FULL_ARGV carries the declaration (the struct has the field;
-// the register-argument spawn variants cannot declare and always spawn native
-// -- section 12.1 rule 3). The v1.0 producer is `viv`, which sets the bit on a
+// the register-argument spawn variants cannot DECLARE -- section 12.1 rule 3 --
+// though since Design D 13.10.6 they too resolve through the pheno-aware
+// resolver and decide by the same rule, so a child spawned through one from a
+// /viv/bin location, or inside a declared Territory, is Linux by location or by
+// inheritance of the clone). The v1.0 producer is `viv`, which sets the bit on a
 // container's ENTRYPOINT spawn when the bundle manifest's annotation
-// `org.thylacine.phenotype` says "linux".
+// `org.thylacine.phenotype` says "linux"; the diorama spawn passes 0.
 #define SPAWN_PHENO_LINUX            (1u << 0)
 #define SPAWN_PHENO_FLAGS_ALL        (SPAWN_PHENO_LINUX)
 

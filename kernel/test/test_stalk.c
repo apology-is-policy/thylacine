@@ -1435,8 +1435,36 @@ void test_stalk_pheno_symlink_reanchor(void) {
         ? stalk_exec(&p, root, "loop/preal", 10, STALK_OPEN, 0, &e2, &pheno_plain)
         : NULL;
 
+    // Design D (VIVARIUM 13.10.5, review F8.2 = self-audit SA-3): the restart:
+    // reset is a SEED from the resolving Territory's declaration. Leg 0 is the
+    // seed's own control BEFORE any declaration: a resolution that crosses NO
+    // mount (xfile) reports false. Then declare the Territory Linux (the
+    // container's namespace-level declaration) and re-run: leg 3 re-anchors OUT
+    // of the pheno-mount exactly as leg 1 did and must now report TRUE -- the
+    // seed survives the re-anchor because the reset IS the seed (a seed hoisted
+    // above restart: would drop it here); leg 4 crosses no mount and must report
+    // TRUE on the seed alone.
+    int  e0 = 0;
+    bool pheno_nomount_undecl = false;
+    struct Spoor *q0 = stalk_exec(&p, root, "xfile", 5, STALK_OPEN, 0, &e0,
+                                  &pheno_nomount_undecl);
+    territory_declare_linux(p.territory);
+    int  e3 = 0;
+    bool pheno_link_decl = false;
+    struct Spoor *q3 = (mrc == 0)
+        ? stalk_exec(&p, root, "loop/lnaway", 11, STALK_OPEN, 0, &e3, &pheno_link_decl)
+        : NULL;
+    int  e4 = 0;
+    bool pheno_nomount_decl = false;
+    struct Spoor *q4 = stalk_exec(&p, root, "xfile", 5, STALK_OPEN, 0, &e4,
+                                  &pheno_nomount_decl);
+
     // Observe, THEN tear down, THEN assert (TEST_ASSERT returns).
     bool q1ok = (q1 != NULL), q2ok = (q2 != NULL);
+    bool q0ok = (q0 != NULL), q3ok = (q3 != NULL), q4ok = (q4 != NULL);
+    if (q0) spoor_clunk(q0);
+    if (q3) spoor_clunk(q3);
+    if (q4) spoor_clunk(q4);
     u64  q1qid = q1 ? (u64)q1->qid.path : (u64)-1;
     u64  q2qid = q2 ? (u64)q2->qid.path : (u64)-1;
     if (q1) spoor_clunk(q1);
@@ -1459,6 +1487,14 @@ void test_stalk_pheno_symlink_reanchor(void) {
     TEST_ASSERT(pheno_plain == true,
         "CONTROL: a plain file reached THROUGH the pheno-mount keeps "
         "crossed_pheno (final-location, no re-anchor)");
+    TEST_ASSERT(q0ok && q3ok && q4ok, "the Design D legs resolve");
+    TEST_ASSERT(pheno_nomount_undecl == false,
+        "SEED CONTROL: no crossing + no declaration -> false (rule 3)");
+    TEST_ASSERT(pheno_link_decl == true,
+        "Design D: a declared Territory's seed SURVIVES the re-anchor OUT of the "
+        "pheno-mount (the restart: reset is the seed, not a false)");
+    TEST_ASSERT(pheno_nomount_decl == true,
+        "Design D: a declared Territory decides Linux with NO crossing at all");
 }
 
 void test_stalk_mount_amode_no_cross(void) {

@@ -4759,3 +4759,18 @@ void test_vivarium_ioctl_cons_identity_and_gate(void) {
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 }
+
+// Design D (VIVARIUM 13.10.1): THE phenotype decision, the one function the
+// three spawn thunks and execve's commit share. The full truth table, so a
+// future 'simplification' to either input alone fails here.
+void test_vivarium_phenotype_decide(void);
+void test_vivarium_phenotype_decide(void) {
+    TEST_EXPECT_EQ((u64)phenotype_decide(false, false), (u64)PHENO_NATIVE,
+                   "no crossing + no declaration -> native (rule 3, the fail-safe)");
+    TEST_EXPECT_EQ((u64)phenotype_decide(true,  false), (u64)PHENO_LINUX,
+                   "an MPHENO_LINUX crossing -> Linux (by location, /viv/bin)");
+    TEST_EXPECT_EQ((u64)phenotype_decide(false, true),  (u64)PHENO_LINUX,
+                   "a declared Territory -> Linux (the container, no crossing)");
+    TEST_EXPECT_EQ((u64)phenotype_decide(true,  true),  (u64)PHENO_LINUX,
+                   "both -> Linux");
+}

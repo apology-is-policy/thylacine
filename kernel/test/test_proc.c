@@ -79,7 +79,8 @@ extern void proc_test_legate_teardown(u32 scope_id, struct Proc *except);
 extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
 extern void proc_test_set_init(struct Proc *p);
 extern void proc_exec_drop_image_state_for_test(struct Proc *p,
-                                                struct Thread *t);   // #247
+                                                struct Thread *t,
+                                                u32 pheno);          // #247 + Design D
 
 static volatile u32 g_proc_test_ran;
 static volatile u64 g_cpu_run_count[DTB_MAX_CPUS];
@@ -1968,7 +1969,7 @@ void test_proc_exec_reset_dispositions(void) {
     rd_th.proc  = p;
     rd_th.clear_child_tid = 0x7000A000ull;      // main#243 F8: an OLD-image VA
     TEST_ASSERT(rd_th.clear_child_tid != 0, "pre: set_tid_address slot armed");
-    proc_exec_drop_image_state_for_test(p, &rd_th);
+    proc_exec_drop_image_state_for_test(p, &rd_th, p->phenotype);
     rd_th.proc  = NULL;                 // the static outlives proc_free
     TEST_ASSERT(rd_th.clear_child_tid == 0,
                 "exec must forget the old image's set_tid_address slot (F8)");
@@ -2170,7 +2171,7 @@ void test_proc_exec_drops_image_note_state(void) {
     TEST_ASSERT(viv_sigtab_note_handler(p->sigtab, VIV_SIGNOTE_TTY_WINCH, &probe),
                 "precondition: the sigtab carries a real HANDLER row");
 
-    proc_exec_drop_image_state_for_test(p, &th);
+    proc_exec_drop_image_state_for_test(p, &th, p->phenotype);
 
     TEST_ASSERT(p->handler_va == 0,
                 "exec dropped the handler entry point (an address in the old "

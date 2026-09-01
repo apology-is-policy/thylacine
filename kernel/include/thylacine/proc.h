@@ -905,6 +905,16 @@ struct Proc {
 #define PHENO_NATIVE  0u
 #define PHENO_LINUX   1u
 
+// Design D (VIVARIUM 13.10.1): THE phenotype decision, one function so the four
+// image-load sites (the three spawn thunks and execve's commit) cannot disagree.
+// PHENO_LINUX iff the exec resolution crossed an MPHENO_LINUX mount OR the
+// resolving Territory declares Linux (territory_root_pheno); else native -- the
+// section-12.1 rule-3 fail-safe. A phenotype is the ABI of the LOADED IMAGE:
+// decided at every image load, preserved by rfork (no new image).
+static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
+    return (crossed_pheno || territory_linux) ? PHENO_LINUX : PHENO_NATIVE;
+}
+
 #define PROC_FLAG_NODUMP            (1u << 0)
 #define PROC_FLAG_NOTRACE           (1u << 1)
 #define PROC_FLAG_MLOCKED           (1u << 2)
@@ -1587,7 +1597,13 @@ bool proc_exec_alone(struct Proc *p);
 // `p` (proc_exec_alone); `nas` is a completely built address space no other
 // thread can reach. Each is re-checked or extincts -- a violation is structural
 // corruption, not a runtime error.
-void proc_exec_replace(struct Proc *p, struct AddrSpace *nas);
+// Design D (VIVARIUM 13.10.4): `new_pheno` is the phenotype the NEW image was
+// decided to have (phenotype_decide at the resolve, BEFORE the load). It is
+// stored into p->phenotype only here, in the infallible commit region -- a
+// failed load must leave the surviving old image's ABI untouched -- with a
+// RELEASE store ordered before the phenotype-conditional signal reset, which
+// branches on this parameter and never on the field.
+void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno);
 
 // The note-side half of that reset (handler_va, the sigtab rows -- IN PLACE,
 // never freed: the table has lockless cross-Proc readers -- the mask, and the
