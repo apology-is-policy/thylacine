@@ -1227,12 +1227,14 @@ This is the last phase of v1.0 and the highest-risk angle (`NOVEL.md` Angle #4 �
 >   bullet above was insurance against a GPU stack that now exists, is audited,
 >   and is fastest. GL remains app-compat (its parity ledger is §8.3, after
 >   compose).
-> - **The §11.1 deliverables below are SUPERSEDED by `HALCYON.md` §8/§11** (they
->   are Phase-0 vintage in nearly every detail: bash-subset parser → **ut**;
->   fontdue → Cornucopia + DejaVu via the native TTF rasterizer; `/dev/fb/` →
->   `/dev/tapestry` + Loom; the custom video-player server → a decide-at-the-
->   chunk re-cut). The §11.2 exit criteria largely stand and gain Beacon
->   criteria at the H-7 pass.
+> - **The Phase-0 §11.1 deliverables were SUPERSEDED by `HALCYON.md` §8/§11**
+>   (they were Phase-0 vintage in nearly every detail: bash-subset parser →
+>   **ut**; fontdue-mono-only → Cornucopia + DejaVu via the native TTF
+>   rasterizer; `/dev/fb/` → `/dev/tapestry` + Loom; the custom video-player
+>   server → a decide-at-the-chunk re-cut) — and §11.1-§11.9 below were
+>   REWRITTEN the same day by the concretization pass (HALCYON.md §13 /
+>   BEACON.md §12) to the real phase plan, so the section body is current
+>   again rather than a patched relic.
 > - **New cross-environment scripture: `docs/BEACON.md`** — the semantic output
 >   markup (programs emit meaning; Halcyon renders it richly; Aurora/serial
 >   degrade gracefully). Its opening chunk (H-1) pulls `SYS_FD_DEVCLASS`
@@ -1242,102 +1244,136 @@ This is the last phase of v1.0 and the highest-risk angle (`NOVEL.md` Angle #4 �
 > v1.0-rc fallback stands. The Wayland-bridge arc (Linux GUI ecosystem / Wine
 > under Vivarium tiles) is explicitly **post-v1.0** (§12).
 
-### 11.1 Deliverables
+### 11.1 The build arc — H-0..H-7 (rewritten 2026-09-01; `HALCYON.md` §11/§13 authoritative)
 
-**VirtIO-GPU userspace driver (extend Phase 3)**:
-- `drivers/virtio-gpu/`: extend with BURROW-handle-based zero-copy framebuffer; expose `/dev/fb/` per `ARCHITECTURE.md §17.2`.
+One row per chunk, G-arc style: each lands with its own status row, gates, and
+(where marked) audit round. The resequencing rationale — the CPU floor before
+compose, the vk executor after it — is `HALCYON.md` §11's headnote.
 
-**Halcyon (Rust)** (`halcyon/`):
-- Scroll-buffer rendering (text + graphical regions in time order).
-- Monospace font rendering via fontdue (Iosevka or equivalent at v1.0).
-- Image display: `display image.png` decodes via `png` / `image` crate; renders inline.
-- Video display: mounts `/dev/video/player/`; polls `frame` (BURROW handle); blits to graphical region.
-- Bash-subset interactive parser; job control (`Ctrl-Z`, `bg`, `fg`); pipes; redirection.
-- 9P mount commands.
+| Chunk | What | Gate |
+|---|---|---|
+| H-0 | The kickoff + concretization scripture (HALCYON.md, BEACON.md, this rewrite) | landed 2026-09-01 |
+| H-1 | **Beacon foundations** (BEACON.md §12, implementation-grade): `SYS_FD_DEVCLASS` (syscall 80 per its spec; audit-bearing) + the consctl `beacon <tier>` verb (ARCH §23.5.4) + the `usr/lib/beacon` crate (cells realization relocated from the coreutils crate, behavior-preserving) + ut zones + emitters ls/grep/ps/stat + the `--color=auto` unparking | P1 strip-property + golden cells fixtures + the kernel fd-devclass tests + the `ls \| cat` byte-clean E2E + aurora ZERO-diff screendump; focused audit (syscall row + LS-8 addendum) |
+| H-2 | **halcyond + the transcript MVP on the CPU floor** (HALCYON.md §13.1-§13.5): the shared-VT-core extraction (behavior-preserving), the display-list module + CPU executor over `libtapestry`, fontdue+DejaVu vendored (no_std claim verified at vendor time), the paper-light theme, zones→blocks, Helix-modal selection | a usable rich shell pane end-to-end (login → ut in a Halcyon transcript, proportional body + mono islands, `ls` rendered as a rich table); `ls-gfx*` zero-diff for aurora; the reflow/resize E2E |
+| H-3 | **Presentations**: `obj` rendering, the verbs rules engine, context menus (compositor-placed ephemeral chrome; gated ctl verbs), the executable tag bar (renderer-drawn strip text) | click-a-path opens the verb menu with the resolved ref displayed; the security-clause self-audit; menu-dismiss-by-compositor proven against a wedged client |
+| H-4 | **Layouts**: save/reload/respawn-from-tags + `halcyon.rc` (HALCYON.md §13.7's format) | save → reboot → restore reproduces tree + tags + running leaves; the two-tier config durability discipline |
+| H-5 | **Compose** (the tapestryd composed-present arm; the W-3c-2 design + per-host fail-closed verdict) | the I-40 composed cfgs move clean→ENFORCED; **the PDrained drain lands in the same commit as the first compose reader**; windowed-vkQuake-in-a-split is the acceptance image; focused audit (the existing reserved rows) |
+| H-6 | **The vk executor** (`halcyon-gpu`, pouch-side, the certified venus link set; the display-list wire encoding) | pixel-parity vs the CPU executor on the render corpus; crash-respawn E2E (kill the executor, transcript survives); then the parked display-wall ledger (B/A + GL-parity §8.3 + the blit flip) queues here |
+| H-7 | **Integration + audit + release**: Aurora-as-panes polish, inline image display (PNG native decode), the video decision (ported/phenotype player vs bespoke — decided here, deliberately), the phase audit round, the manual chapter, v1.0 final tasks | the §11.2 exit criteria, all of them |
 
-**Video player** (`drivers/video/`):
-- Rust 9P server.
-- Software H.264 decode at v1.0 (via FFI to a software decoder library or pure-Rust decoder).
-- Exposes `/dev/video/player/` per `ARCHITECTURE.md §13`.
+**v1.0 final release** (unchanged in substance): the `v1.0` tag, release notes
+(v1.0-rc + Halcyon), the ready-to-boot QEMU image, reproducible build verified.
 
-**Halcyon as init**:
-- After Phase 8, `init` exec's Halcyon as the primary shell. UART debug shell becomes recovery only.
+### 11.2 Exit criteria — v1.0 final (amended 2026-09-01; deltas marked)
 
-**Halcyon-surface audit pass**:
-- Halcyon-introduced audit-trigger surfaces (scroll-buffer state machine, image decode, video player 9P client, framebuffer driver extensions, bash-subset parser) get their own focused audit round.
-- Findings closed before v1.0 final.
-
-**Documentation (Phase 8 portion)**:
-- `docs/HALCYON.md`: Halcyon usage, customization, scroll buffer model.
-
-**v1.0 final release**:
-- Git tag `v1.0`.
-- Release notes describing the complete v1.0 (Phase 7 v1.0-rc + Halcyon).
-- QEMU disk image (ready-to-boot Stratum volume + initramfs + kernel + Halcyon).
-- Reproducible build verified.
-
-### 11.2 Exit criteria — v1.0 final
-
-- [ ] Halcyon starts on boot; replaces UART debug shell as primary interface.
-- [ ] Text output renders correctly (Iosevka, correct metrics, scrollback works).
-- [ ] `display thylacine.png` renders a PNG inline in the scroll buffer.
-- [ ] Scroll buffer: image scrolls away naturally as new output is added.
+- [ ] Halcyon starts on boot as the primary interface in the graphical
+      deployment modes (the one-primary-display model; serial silent per 1b).
+- [ ] Text renders correctly — **Cornucopia + DejaVu Sans Condensed, mixed
+      metrics on a shared baseline**; scrollback works. *(was: Iosevka mono-only)*
+- [ ] **Beacon end-to-end**: interactive `ls` renders as a rich proportional
+      table; the SAME `ls` piped is byte-clean; Aurora renders the cells
+      realization unchanged. *(new)*
+- [ ] **Presentations live**: a path in output is clickable; its menu shows
+      the resolved ref; a verb runs only on user gesture. *(new)*
+- [ ] `display thylacine.png` renders inline; the image scrolls away
+      naturally.
 - [ ] `ls`, `cat`, `grep`, pipes — all work inside Halcyon.
-- [ ] **Frame time p99**: < 16ms (60Hz floor; VISION §4.5).
-- [ ] Halcyon resident memory: < 64 MiB with 100k-line scrollback.
-- [ ] **Video**: `play video.mp4` plays a short H.264 video in the scroll buffer; controlled via `/dev/video/player/ctl`.
-- [ ] User runs `vim` inside Halcyon; edits a Rust source file with syntax highlighting.
-- [ ] User runs `tmux` inside Halcyon; multi-pane workflows work via tmux's own model.
-- [ ] **Boot to Halcyon login** in < 3s (extends VISION §4.5 boot-to-login budget to include framebuffer init).
+- [ ] **Frame time p99 < 16ms** (60Hz floor; VISION §4.5) on the CPU floor
+      executor at 1280×800; measured again on the vk executor.
+- [ ] Halcyon resident memory < 64 MiB with 100k-line scrollback (the §13.3
+      content-budget accounting).
+- [ ] **Video plays inline** — vehicle decided at H-7 (ported/phenotype
+      player vs bespoke server; the criterion is the user experience, not the
+      implementation). *(reworded)*
+- [ ] `vim` inside Halcyon (a raw-VT pane) edits with syntax highlighting;
+      `tmux` works via its own model.
+- [ ] **A windowed vk client runs in a split** (the compose criterion). *(new)*
+- [ ] **Layouts**: save, reboot, restore — tree + tags + respawned leaves. *(new)*
+- [ ] Boot to Halcyon login < 3s.
 - [ ] No P0/P1 audit findings on Halcyon-introduced surfaces.
-- [ ] No regressions in Phase 7 v1.0-rc behavior.
-- [ ] `docs/REFERENCE.md` snapshot reflects v1.0 final state (including Halcyon).
-- [ ] `docs/HALCYON.md` complete.
+- [ ] No regressions in the v1.0-rc behavior; aurora screendump suite
+      zero-diff throughout the arc.
+- [ ] `docs/REFERENCE.md` snapshot + `docs/manual` Halcyon chapter complete.
 - [ ] **v1.0 final tag created**.
 
 ### 11.3 Specs landing this phase
 
-None mandatory. Halcyon is mostly UI; the underlying primitives (9P client, framebuffer, BURROW transfer, signals) are spec'd or prose-validated at earlier phases. PTY is the exception — not yet built (LS-8, task #952); its validation lands with it.
+- `tapestry_present.tla`'s **composed-class cfgs move clean → ENFORCED at
+  H-5** (they exist behind `ALLOW_COMPOSE` since Warp-C; the additivity
+  measurements are on record). The presentable-class arms likewise ride the
+  compose close.
+- **No new TLA+ module.** Beacon is a format, not a concurrency protocol —
+  its rigor is the strip-property + grammar round-trip + the robustness
+  corpus + fuzz (BEACON.md §12.8), the same class as the 9P wire's
+  static-assert + fuzz posture. The display list (in-process at H-2) gains
+  its wire bounds-checks at H-6 under the same discipline.
+- PTY (I-20) is BUILT (the PTY-1..3 arcs) — the Phase-0 note that it was the
+  exception is stale; `pty.tla` + `pty_stop.tla` already gate it.
 
-### 11.4 Audit-trigger surfaces introduced
+### 11.4 Audit-trigger surfaces introduced (rows land cumulatively at each chunk per the standing rule)
 
 | Surface | Files | Why |
 |---|---|---|
-| Halcyon shell parser | `halcyon/src/parser/` | Bash-subset semantics correctness |
-| Halcyon scroll buffer | `halcyon/src/buffer/` | State machine correctness |
-| Video player | `drivers/video/src/` | 9P server + decode correctness |
-| Framebuffer driver (extended) | `drivers/virtio-gpu/src/` | BURROW sharing correctness |
-| Image decode | `halcyon/src/image/` | Memory safety; format-fuzz coverage |
+| `SYS_FD_DEVCLASS` (H-1) | `kernel/syscall.c` + the spec doc | New syscall surface (introspection; no-authority claim to prosecute) |
+| consctl `beacon` verb (H-1) | `kernel/cons.c` | LS-8 row addendum (parse discipline; reset-on-detach) |
+| The Beacon parser in halcyond (H-2) | `usr/halcyond/` | Format-fuzz class (untrusted stream annotations; the caps + auto-close rules) |
+| Chrome/menu ctl verbs (H-3) | `usr/tapestryd/src/server.rs` | Gated-ctl surfaces (the cfg-3 default-deny pattern); compositor-owned dismiss |
+| The composed present arm (H-5) | `usr/tapestryd/src/{server,gpu}.rs` | The existing reserved I-40 composed rows, enforced |
+| The display-list wire + `halcyon-gpu` (H-6) | `usr/halcyond/` + `usr/ports/halcyon-gpu/` | A new parse surface pouch-side; I-45 client discipline |
+| Image decode (H-7) | `usr/halcyond/` | Memory safety; format-fuzz coverage |
 
-### 11.5 Risks
+### 11.5 Risks (refreshed 2026-09-01)
 
-- **Font rendering quality**: fontdue's quality must match `vim` in `iTerm2` for the experience to feel real. Mitigation: validate early; have a fallback (RustyType, swash). Iosevka must work.
-- **Scroll buffer model edge cases**: resize, reflowing text around images, history trimming need careful design. Mitigation: design pass before writing rendering code.
-- **Video performance**: software H.264 decode may not keep up at 1080p. Mitigation: profile; reduce target to 720p if needed; HW decode is post-v1.0.
-- **Bash compat coverage**: parser is a "subset"; some Bash features will not work. Mitigation: explicit subset documentation; any scripts that need full Bash run via `/bin/bash` directly.
-- **BURROW-based framebuffer race**: writer/reader race when Halcyon writes pixels and driver issues `flush`. Mitigation: simple double-buffering; documented protocol.
-- **Halcyon-as-final-phase risk**: if Halcyon hits any of the above, Phase 8 slips. Mitigation: **Phase 7 produced v1.0-rc.1 as the shippable fallback**. If Halcyon takes meaningfully longer than estimated, the project ships v1.0-rc as v1.0 and treats Halcyon as v1.1. This is deliberate insurance, not aspirational — the v1.0-rc tag exists at Phase 7 exit precisely so Halcyon can fail without dragging the rest of the OS.
+- **Proportional transcript edge cases** (the successor of the old
+  scroll-buffer risk): mixed-metric reflow, selection across metrics,
+  history trimming. Mitigation: the §13.3 store-semantics/derive-pixels
+  model makes layout a pure cached function — designed before rendering
+  code, as the old row demanded; the reflow E2E is an H-2 gate.
+- **Font rendering quality**: DejaVu + Cornucopia through the native
+  rasterizer must look right. Mitigation: fontdue-class with a named
+  fallback (ttf-parser + hand-raster); the no_std claim verified at vendor
+  time BEFORE dependence; quality eyeballed at H-2's first screendump.
+- **The markup ecosystem cost**: wide shallow sweep across emitters.
+  Mitigation: one shared crate + five emitters first + convert-as-touched;
+  the strip property keeps every emitter honest mechanically.
+- **Compose host variance**: the composed arm is a per-host capability
+  (fail-closed to DIRECT). Mitigation: already designed that way; the Pi is
+  the certified compose host; QEMU GL hosts verify the fail-closed arm.
+- **vk executor scope creep**: the display-list executor must stay dumb.
+  Mitigation: the op vocabulary is bound in §13.2; growth requires scripture
+  amendment.
+- **Halcyon-as-final-phase risk** (unchanged, re-affirmed): the v1.0-rc /
+  Aurora fallback ships regardless; every H-chunk lands independently
+  useful (H-1 serves the textual environment; H-2 is usable without
+  H-3..H-6).
 
 ### 11.6 Dependencies
 
-- Phase 7 complete (hardened, audited, v1.0-rc tagged substrate).
-- Phase 5 (musl, futex, poll, pty, signals — all Halcyon's runtime depends on).
-- Phase 4 (Stratum for image / video file loads).
-- Phase 3 (userspace virtio-gpu driver — extended here).
+- Phase 7 complete (hardened, audited, v1.0-rc tagged substrate) — and the
+  as-built graphics substrate the Phase-0 text could not know: tapestryd +
+  the G-6 pane tree, libtapestry, aurora + the shared-able VT core, the
+  Warp/venus stack (WSI-DESIGN §7-8), the W-3c-2 compose design.
+- `docs/SYS-FD-DEVCLASS-SPEC.md` (H-1 implements it).
+- Vendored: fontdue-class rasterizer + DejaVu Sans Condensed (third_party +
+  manifests + forage registration at landing).
 
 ### 11.7 Parallel opportunities
 
-- Halcyon's scroll buffer + parser + image display can be built in parallel.
-- Video player + Halcyon's video integration parallelize.
-- VirtIO-GPU driver extensions parallelize with Halcyon work.
-- Halcyon-surface audit and documentation work parallelize with implementation.
+- H-1 (Beacon) and H-2's VT-core extraction touch disjoint trees.
+- H-5 (compose, tapestryd-side) parallelizes with H-3/H-4 (halcyond-side).
+- The manual chapter + audit prep parallelize with H-7 integration.
+- Aux-track candidates: the emitter sweep beyond the first five; the
+  robustness corpus; DejaVu/fontdue vendoring.
 
 ### 11.8 Performance budget contribution
 
-- Halcyon frame time p99: < 16ms (60Hz floor).
-- Halcyon resident memory: < 64 MiB at typical workload.
+- Halcyon frame time p99: < 16ms on the CPU floor (1280×800); the vk
+  executor must beat the floor where it runs.
+- Halcyon resident memory: < 64 MiB at the 100k-line content budget.
 - Image decode + display p99: < 100ms for a 1024×768 PNG.
-- Boot to Halcyon login: < 3s (extends Phase 7's < 3s boot-to-Utopia-login budget).
+- Boot to Halcyon login: < 3s.
+- Beacon emission overhead: unmeasurable in `none`/piped paths (the gate
+  short-circuits before formatting).
 
 ### 11.9 Carry-overs / what doesn't ship at v1.0
 
@@ -1353,6 +1389,10 @@ Other v1.1+ candidates:
 - Apple Silicon bare metal.
 - ~~Multi-pane Halcyon (within scroll buffer; experiment)~~ — superseded: tiling splits/tabs are CORE (TAPESTRY §14; built at G-6).
 - **The Wayland bridge** (2026-09-01): a Wayland-protocol adapter service over tapestryd (core + shm/dmabuf + xdg-shell) opening the Linux GUI ecosystem — Wine included — to Vivarium tiles. Its own arc, netd-class weight. `HALCYON.md` §8.
+- Aurora's cells-tier realization of Beacon `table` frames (BEACON.md §10).
+- The guest-lavapipe investigation (CPU-3D; no longer load-bearing — the CPU
+  floor executor is the universal floor, HALCYON.md §11).
+- Complex text shaping (HarfBuzz-class CJK/ligatures/RTL).
 
 These are explicitly *not in v1.0*; they're tracked for post-v1.0 work.
 

@@ -2976,6 +2976,31 @@ musl port (Tier 1 native); Linux syscall shim (Tier 2 static); container-as-terr
 > installer run on either *unchanged*. When Halcyon lands it hosts Aurora terminals as
 > windows. Aurora adds **no new §28 invariant** (it inherits T-1 + the I-27 renderer
 > obligation).
+>
+> **The Halcyon kickoff + concretization (2026-09-01; `docs/HALCYON.md` +
+> `docs/BEACON.md`, both authoritative).** The phase opened with the
+> operator's three-source vision — i3 (tiling; largely as-built at G-6), acme
+> (stacking + executable text), **Symbolics Genera** (the pane-content layer:
+> a rich transcript mixing proportional + monospace type, semantic output
+> annotation, typed presentations with verbs). Foundational decisions at ARCH
+> altitude: **(1)** "Halcyon is pure 2D" is RETIRED — Halcyon renders Vulkan
+> on the measured venus substrate; **(2)** the process architecture is
+> **native `halcyond` (all parsing/state/layout, `no_std` Rust) + a display
+> list + two dumb executors** — a CPU floor over `libtapestry` (in-process;
+> runs wherever aurora runs) and a pouch-side vk executor (`halcyon-gpu`,
+> spawned per the native-spawns-ported doctrine) after the composed-present
+> arm lands (HALCYON.md §13.1 records the rejected alternatives); **(3)**
+> **Beacon** — the semantic output markup (OSC-framed, tiered
+> none/cells/rich, semantics-only vocabulary) — is cross-environment
+> scripture with its own doc; **(4)** the §17.2 claim below gains a
+> precision, not an exception: the kernel still grows **no graphics API**,
+> but the Beacon arc lands `SYS_FD_DEVCLASS` (an fd-introspection syscall,
+> `docs/SYS-FD-DEVCLASS-SPEC.md`) and a consctl `beacon <tier>` verb
+> (§23.5.4) — console-surface machinery, audit-bearing as a new syscall +
+> an LS-8 row addendum at their chunk; **(5)** no new §28 invariant — the
+> composed arm discharges I-40's existing composed-class obligations, and
+> Beacon's security clause (frames render, never act) is a design rule
+> enforced at the renderer, not a kernel invariant.
 
 ### 17.1 The compositor / client architecture
 
@@ -3838,6 +3863,27 @@ The console gains the pts winsize contract: §23.5.1's LS-8 line discipline carr
 **Consumers.** Kaua/native apps (nora, ut's Repl) poll their notes fd alongside stdin; on `tty:winch` → read `/dev/winsize` (CPR if `0 0`) → relayout. Pouch apps: SIGWINCH via the landed PTY-3 winch→NCONT mapping + TIOCGWINSZ per above — nothing new below the 0021 arm. Aurora's reweave (the G-6b client resize via libtapestry `handle_configure` — ack + generation swap + `Vt` resize) is AURORA.md §4.
 
 **Invariant status.** NO new §28 invariant: composes **I-27** (the mint-gate widening per the dominance argument above), **I-19** (the `tty:*` class + kernel-only-POST unchanged; the poster is cons.c), **I-9** (no new park/wake — the post is a plain notes post in process context). NO new spec (`cons_poll.tla` untouched: winsize is state + a post, not a wait/wake protocol; the verb parse is a data transform like the five flags). Audit-bearing per §25.4 (the LS-8 row's #55 addendum).
+
+#### 23.5.4 Console Beacon tier — the render-capability advertisement (adopted 2026-09-01; impl at H-1)
+
+The `#55` winsize contract's sibling, carrying the **Beacon** tier
+(`docs/BEACON.md` §12.3 is normative; this is the ARCH-altitude record). The
+renderer is the console's CAPABILITY AUTHORITY the same way it is the geometry
+authority: it writes **`beacon none|cells|rich`** to `/dev/consctl` (the same
+staged/atomic parse discipline as `winsize`, the same attached-OR-renderer
+mint gate, readback as a ` beacon <tier>` token on the `cons_render_mode`
+line, **reset to `none` on renderer detach** at the same site winsize
+unsets). Aurora writes `cells`; the serial backend writes nothing (⇒ `none`);
+Halcyon writes `rich`. **No new leaf** — winsize's `/dev/winsize` existed for
+pouch TIOCGWINSZ, and Beacon has no pouch consumer by construction; the
+consctl readback + ut's `BEACON` environment export (name
+proposal-of-record) carry it. Consumers gate emission on tier AND
+`SYS_FD_DEVCLASS(1) == 'c'` (the two-condition gate, BEACON.md §12.4).
+**Invariant status**: no new §28 row — composes I-27 (the existing mint
+gate) and adds pure per-console state + a data-transform verb; the tier
+confers no authority (a lying tier changes only how bytes look). Audit:
+rides the LS-8 cons row as an addendum + the new `SYS_FD_DEVCLASS` syscall
+row, both at the H-1 close.
 
 ### 23.6 Signal translation
 

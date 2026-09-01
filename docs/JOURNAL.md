@@ -22,6 +22,72 @@ needed the operator.
 
 ---
 
+## 2026-09-01 (run 13, Fable) — the Halcyon concretization pass: vision → implementation-grade
+
+**The charter** (operator, same day as the kickoff): "research and detail the
+architecture and implementation... in as much detail and rigor as you can, so
+that after Fable quota is reached this week, a lesser model could comfortably
+continue on it." The TAPESTRY §18 precedent applied deliberately: a
+ground-truthed design pass between vision and build.
+
+**The substrate survey** (every claim file:line-verified, none recalled) paid
+for itself four times over:
+
+1. **Aurora already swallows unknown OSC** (`vt.rs:332-352`, 256-byte cap,
+   oversize-discard) and already owns a private OSC channel (**7770**, the
+   config push) — so Beacon's degradation tier ships in code that exists, and
+   the private-OSC pattern has in-tree precedent.
+2. **The coreutils presentation layer is already a shared pure-no_std crate**
+   (`usr/coreutils/src/`: boxd/color/palette + the crate-doc discipline) —
+   the Beacon cells realization is a RELOCATION, not new code.
+3. **The consctl winsize verb** (`cons.c:2054-2177`, staged/atomic/readback/
+   reset-on-detach) is the exact template for the `beacon <tier>` verb.
+4. **The process-architecture fork COLLAPSED under research** (the
+   research-before-fork rule working as intended): no Rust-std-pouch lane
+   exists; native-links-ported is an explicit escalation by doctrine;
+   native-SPAWNS-ported is explicitly blessed — so **halcyond (native, all
+   parsing/state) + a display list + two dumb executors** (in-process CPU
+   floor over libtapestry; pouch `halcyon-gpu` vk executor later) is the
+   only shape that is doctrine-clean, vk-capable, and Rust-safe at once.
+   Made the call rather than asking; the rejected alternatives are recorded
+   in HALCYON.md §13.1 so no future session relitigates blind.
+
+**The finding that resequenced the arc**: the morning sketch put "vk pane
+renderer" at H-2 — but a vk client in a *pane* requires the composed present
+arm (only fullscreen binds DIRECT), while the CPU executor needs nothing
+new. So: H-2 = transcript MVP on the CPU floor (usable Halcyon before any
+compose), H-5 = compose (tapestryd-side, zero halcyond code), H-6 = the vk
+executor. A second consequence: **the CPU executor IS the universal floor**,
+so guest-lavapipe dropped off the critical path entirely (demoted to a
+post-v1.0 CPU-3D curiosity) — the H-6 investigation the kickoff scheduled
+became unnecessary within hours of being scheduled, which is what a
+concretization pass is for.
+
+**Landed (scripture only, no code)**: BEACON.md §12 (implementation-grade
+H-1: the normative wire grammar + op registry with the five rules, the tier
+mechanism bound [no new leaf; the decision recorded], the SYS_FD_DEVCLASS
+console-normalization decision BOUND ['c' both ways], the crate + relocation
+plan, the ut hook sites by file:line, the five emitters, the P1-P3 test plan
+[P1 = the strip property: strip(rich) == none byte-identical], audit
+obligations, four open items); HALCYON.md §13 (the ground-truth table, the
+§13.1 architecture verdict + rejections, the display-list v0 vocabulary, the
+store-semantics/derive-pixels transcript model, the VT-core extraction plan
+[vt.rs verified pure alloc], fonts/metrics-mixing/images, menus mechanics,
+the exact layout save format [render_text + the two missing fields],
+per-chunk audit obligations) + §11 resequenced; ARCH §17 update blockquote +
+NEW §23.5.4 (the Beacon tier as the winsize contract's sibling); ROADMAP
+§11.1-§11.9 REWRITTEN wholesale (the H-table with gates; exit criteria
+amended with Beacon/presentation/compose/layout criteria; the §11.3 stale
+PTY-exception note corrected — PTY is built and spec-gated; risks refreshed;
+§11.9 gains the lavapipe/shaping/cells-realization lines).
+
+**Open**: the §12.10/§13.9 named items (OSC number confirm, env name,
+devpipe dc, fontdue no_std verify-at-vendor, VT crate + binary names, menu
+verb grammar, layout read-side, JPEG vehicle) — all bounded, none blocking.
+H-1 is ready to open cold.
+
+---
+
 ## 2026-09-01 (run 12, Fable) — the Halcyon kickoff: the design conversation → scripture
 
 **Not an autonomous run** — the operator-directed design session the W-4 close

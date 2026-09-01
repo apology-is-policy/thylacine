@@ -75,15 +75,17 @@ standing "design for Halcyon-on-vk" directive is hereby cashed:
   reservation, carried "from day one" for exactly this), animation, and 3D
   within reach. None of it is v1.0 scope; the point of vk is that the door is
   open and the substrate is not a rewrite away.
-- **The universal-floor question (open, measurement-gated)**: the local macOS
-  dev loop and mode-1 "Thylacine ships with QEMU" deployments have **no venus**
-  (the host cannot offer blob+hostmem). The candidate answer is **lavapipe
-  inside the guest** — vk-on-CPU as a second ICD, one renderer code path, no
-  host GPU dependency; plausible now because llvmpipe needs LLVM JIT + threads
-  and the Clade arc landed both (CL-7k). This is an investigation chunk with a
-  measurement gate, not an assumption. Until it lands, Halcyon requires a
-  GPU-capable lane and **Aurora covers every other deployment** — the fallback
-  posture (VISION §3.3) is doing its job, not being violated.
+- **The universal floor (RESOLVED same-day by the §13 concretization pass)**:
+  the local macOS dev loop and mode-1 "Thylacine ships with QEMU" deployments
+  have **no venus** (the host cannot offer blob+hostmem) — and the answer is
+  not a second vk ICD but the **§13.1 architecture itself**: halcyond renders
+  through a display list with two executors, and the **CPU executor over the
+  proven `libtapestry` weave path IS the universal floor** — Halcyon runs
+  wherever aurora runs, GPU host or none, with the vk executor as the
+  accelerated path where venus exists. Guest-lavapipe (vk-on-CPU as a second
+  ICD, plausible since the Clade arc landed in-guest LLVM JIT) is thereby
+  demoted from load-bearing to a post-v1.0 curiosity for CPU-3D
+  (ROADMAP §11.9).
 
 ## 3. Typography and theme — the two lights, literally
 
@@ -211,7 +213,8 @@ inline (PNG/JPEG via a decode-to-surface path); the Halcyon-surface audit;
   Decide when reached — deliberately, not by inheriting the 2026-02 plan.
 - Aurora's cells-tier `table` realization (BEACON.md §10); complex shaping;
   the eye-candy pass (translucent chrome — the RGBA reservation cashes when
-  taken); guest-lavapipe (the §2 investigation, schedulable any time).
+  taken); guest-lavapipe (post-v1.0 CPU-3D curiosity — no longer
+  load-bearing, §2/§13.1).
 - The B/A display-wall mechanisms + the GL-parity ledger + the blit default
   flip — parked behind compose per the ROADMAP §11 addendum (2026-09-01).
 
@@ -246,27 +249,42 @@ real tiling for GPU clients — a windowed vkQuake in a split is the acceptance
 image. The parked display-wall work (B/A, GL-parity, blit flip) queues behind
 it, in that order, per the addendum.
 
-## 11. Sequencing (provisional chunk families — the operator sequences)
+## 11. Sequencing (RESEQUENCED same-day by the §13 concretization pass)
 
-- **H-0** — this scripture (+ BEACON.md; the ROADMAP/VISION/NOVEL/TAPESTRY
-  reconciliation).
-- **H-1 — Beacon foundations**: `SYS_FD_DEVCLASS` (pulled forward; unparks
-  `--color=auto` too) → the `libthyla-rs` beacon module (cells realization
-  relocated, verbatim behavior) → ut zones → first emitters (ls, grep, ps,
-  stat). Useful to Aurora/serial users immediately; no Halcyon binary needed
-  to land value.
-- **H-2 — the vk pane renderer**: glyph atlas + TTF rasterizer + DejaVu; the
-  rich transcript MVP (zones → blocks; plain VT fallback rendering); the
-  paper-light theme.
+> The adoption-morning sketch put "the vk pane renderer" at H-2 and compose at
+> H-5. The concretization pass (§13) found that ordering inverted a
+> dependency: **a vk client in a *pane* requires the composed present arm**
+> (only fullscreen surfaces bind DIRECT), while the CPU executor on the
+> proven weave path (§13.2) needs nothing new — so the transcript MVP comes
+> first on the floor executor, compose comes next (it is tapestryd-side work,
+> independent of Halcyon's own code), and the vk executor rides after both.
+> Guest-lavapipe drops off the critical path entirely: the CPU executor IS
+> the universal floor (§13.1).
+
+- **H-0** — this scripture + BEACON.md + the reconciliation + the §13 pass.
+- **H-1 — Beacon foundations** (BEACON.md §12, implementation-grade):
+  `SYS_FD_DEVCLASS` → the `beacon` crate (cells realization relocated) → ut
+  zones → emitters ls/grep/ps/stat. Lands value with no Halcyon binary.
+- **H-2 — halcyond + the transcript MVP on the CPU floor** (§13.2–§13.5):
+  the shared-VT-core extraction, the display-list module, the CPU executor
+  over `libtapestry`, fontdue+DejaVu glyph pipeline, the paper-light theme,
+  zones → blocks. **A usable rich Halcyon shell pane, end to end.**
 - **H-3 — presentations**: `obj` rendering, the verbs rules engine, context
-  menus (compositor-placed chrome), the executable tag bar.
-- **H-4 — layouts** (save/reload/respawn) + `halcyon.rc`.
-- **H-5 — compose** (§10) and, behind it, the parked display-wall ledger.
-- **H-6 — the guest-lavapipe investigation** (schedulable anywhere; gates the
-  universal floor claim, nothing else).
+  menus (compositor-placed chrome, §13.6), the executable tag bar.
+- **H-4 — layouts** (§13.7): save/reload/respawn + `halcyon.rc`.
+- **H-5 — compose** (§10): the tapestryd composed-present arm (the W-3c-2
+  design + the PDrained same-commit obligation). Unlocks windowed vk clients
+  generally — vkQuake-in-a-split is the acceptance image.
+- **H-6 — the vk executor** (`halcyon-gpu`, §13.1/§13.2): the pouch-side
+  display-list executor over the certified venus link set; per-pane composed
+  vk surfaces. Requires H-5. The GL-parity ledger + B/A + the blit flip
+  queue behind this per the ROADMAP addendum.
 - **H-7 — integration + audit**: Aurora-as-panes polish, image display, the
-  video decision, the Halcyon-surface audit round, `docs/HALCYON` manual
-  chapter, the ROADMAP §11.2 exit criteria pass.
+  video decision, the Halcyon-surface audit round, the manual chapter, the
+  ROADMAP §11.2 exit-criteria pass.
+- *(unscheduled, no longer load-bearing)* — the guest-lavapipe
+  investigation: still interesting for CPU-3D later; the universal floor no
+  longer depends on it.
 
 ## 12. Naming rationale + status
 
@@ -279,3 +297,224 @@ the palette, **Beacon** the signal (BEACON.md §11). The paper-light default
   (operator vision: i3 + acme + Genera; all forks resolved in-session; Beacon
   named). Supersedes the Phase-0 §11.1 deliverables and the pure-2D posture.
   No code. H-1 is the natural opening chunk.
+- **2026-09-01 (same day)**: §13 added — the concretization design pass
+  (ground-truthed; the process architecture bound; the arc resequenced in
+  §11). Implementation-grade for H-1/H-2; interface-grade beyond.
+
+---
+
+## 13. The concretization design pass (2026-09-01)
+
+> Same bar as BEACON.md §12: **a session on a lesser model must be able to
+> build H-2 from this section without re-deriving any decision**, and must
+> not be able to wander into the two dead-end architectures this pass closed.
+> Every "exists" claim is verified against the tree (file:line), not
+> recalled. TAPESTRY §18 is this section's precedent and altitude model.
+
+### 13.0 Ground truth (verified 2026-09-01)
+
+| Fact | Where | Consequence |
+|---|---|---|
+| `libtapestry` is a complete CPU-weave client API: `Surface::fullscreen()/open(w,h)`, `pixels() -> &mut [u32]`, `present(rect)/present_rects/present_hold`, `reweave` + `handle_configure` (the G-6b resize protocol), `poll_event/wait_event`, `surface_ctl/global_ctl`, `display_dims()` | `usr/lib/libtapestry/src/lib.rs:186-742` | The CPU executor's substrate exists whole; aurora is its proven consumer. H-2 writes no transport code. |
+| Aurora's `Vt` core is **pure `no_std + alloc`** (imports only `alloc::*`): `Vt::new/resize/feed/set_theme`, `Cell`, `Palette`, themes incl. the light `parchment` (held-proposal name) | `usr/aurora/src/vt.rs:13-15, 49, 125, 163, 224-320, 921` | Extractable to a shared crate verbatim (§13.4). The transcript's inline-SGR subset and the raw-VT pane class both come from this one core. |
+| Each new client surface splits into the pane tree automatically (`pane.rs host()`); panes carry `pub tag: String` (`pane.rs:162`) and the four modes (`pane.rs:72-90`); the `layout` file renders `epoch N focused N [zoomed N]` + depth-indented `<id>[*] leaf surface=N\|empty [x,y,w,h][ hidden]` / `<id>[*] <mode> n=N active=N [rect]` rows — **tags and leaf modes are NOT in `render_text` today** | `usr/tapestryd/src/pane.rs:1044-1100` | Halcyon-core opens one surface per transcript pane and the compositor places it. The layout SAVE format needs a tag-bearing extension (§13.7). |
+| The composed present arm is **tapestryd + host-side** work (SET_TYPE → EGLImage → the C-3 blit; per-host capability verdict, fail-closed to DIRECT), with the four structural changes and the PDrained same-commit rule already designed | `memory/design_w3c2_compose_arm.md` (verified against server.rs then); WSI-DESIGN §7; the I-40 spec's composed class | Compose (H-5) needs zero Halcyon-side code — it unlocks windowed vk for EVERY client. Hence the §11 resequencing. |
+| The certified guest-vk client shape is a **pouch/musl C binary**: the venus link set (`libvulkan_virtio.a` whole-archive, `-u vk_icdGetInstanceProcAddr`), device calls via gipa/gdpa; fullscreen binds DIRECT; windowed requires compose | `tools/build.sh::build_vkquake`, `usr/ports/mesa/README.md` "The venus link set", WSI-DESIGN §7 | The vk executor (H-6) is this shape minus the game. No Rust path into venus exists (no Rust-std-pouch lane — verified; and mesa is C). |
+| Native-spawns-ported is doctrine-blessed; native-LINKS-ported is an explicit escalation ("a meaningful new direction") | CLAUDE.md §"Native vs ported userspace programs" | The §13.1 architecture is the only shape that is simultaneously doctrine-clean, vk-capable, and Rust-safe where safety pays. |
+
+### 13.1 The process architecture (BOUND; the fork analysis recorded)
+
+**Halcyon is not one program.** It is a small family with one brain:
+
+- **`halcyond`** (native `libthyla-rs`, `no_std + alloc`) — **the
+  environment client, and the only place that thinks.** Owns: per-pane
+  transcript state, the Beacon parser, the VT core instances, the fontdue
+  glyph rasterizer + atlas cache, the stylesheet/theme, the verbs engine +
+  menu content, `halcyon.rc` execution and layout save/restore, and a
+  **display list** per pane per frame (§13.2).
+- **The CPU executor** (a module INSIDE halcyond, not a process) — executes
+  a display list into a `libtapestry::Surface`'s pixel weave and presents
+  damage rects. This is the **universal floor**: it runs wherever aurora
+  runs, GPU host or none. Its drawing vocabulary is exactly `render.rs`'s
+  proven idiom (fill, glyph-blit with fg-over-bg alpha, image blit).
+- **`halcyon-gpu`** (pouch/musl C; H-6) — the accelerated executor: a child
+  process halcyond SPAWNS, speaking the serialized display-list protocol on
+  its stdin plus shared image/atlas memory, executing via the certified
+  venus stack into per-pane composed vk surfaces. Crash isolation is real
+  and cheap: halcyond owns ALL state, so an executor death is respawn +
+  redraw, never data loss.
+
+**Why this and not the alternatives** (each rejected on scripture or
+substrate, recorded so no future session relitigates blind):
+
+1. *All-pouch Halcyon (C or C-with-a-little-Rust)* — violates the
+   authored-native doctrine, and abandons Rust exactly where the CVE classes
+   live (font parse, image decode, escape parsing, scrollback state — the
+   NOVEL #4 rationale).
+2. *Native halcyond linking the venus archives* — the explicitly
+   escalation-bearing "native links ported" direction; would need a
+   musl-re-export sysroot for the native target. Strictly worse than
+   spawning.
+3. *Rust-std-on-pouch* — no such lane exists (verified); porting Rust std to
+   the pouch target is its own arc with unknown depth. Named as a future
+   simplification, not a dependency.
+4. *Drop vk; CPU only* — contradicts the ratified direction and forfeits
+   compose-era headroom. The floor-executor design keeps CPU as the floor
+   without making it the ceiling.
+
+The two-executor cost is bounded by construction: executors are DUMB (a
+dozen ops, no layout, no text knowledge — §13.2); everything that could
+drift lives once, in halcyond, above the list.
+
+### 13.2 The display list (v0; in-process API now, wire at H-6)
+
+At H-2 the display list is a Rust type consumed by the in-process CPU
+executor — **no serialization exists yet**. H-6 adds the wire encoding
+(little-endian, versioned, length-prefixed) without changing the op set.
+Binding op vocabulary (v0):
+
+```
+Clear   { color }                         // whole-surface ground
+Rect    { x, y, w, h, color }             // fills; rules; selection bands; strip segments
+Glyphs  { atlas_gen, baseline_x, baseline_y, runs: [(glyph_id, x_advance)] , color }
+Image   { blob_id, x, y, w, h }           // decoded raster (blob = halcyond-owned pixel store)
+Embed   { surface_ref, x, y, w, h }       // an inline Tapestry surface's place in the flow
+                                          //   (CPU executor: reserved rect; the compositor
+                                          //   places the actual surface — §13.5)
+```
+
+Rules: coordinates are surface-local pixels; the executor never measures
+text (glyph positions arrive resolved); `atlas_gen` names an atlas page
+generation — the executor blits from the page it was HANDED (in-process: a
+slice; H-6: shared memory), so a stale generation is impossible by
+construction (pages are append-only within a gen; a full page bumps the
+gen). Damage: halcyond computes per-frame damage rects and calls
+`present_rects` — the executor does not diff.
+
+### 13.3 The transcript model (the data structure; H-2's core)
+
+**Store semantics, derive pixels.** The transcript is a bounded deque of
+**blocks** (one per Beacon `zone` cycle: prompt text, command-era bytes,
+output, exit mark; un-zoned foreign output coalesces into anonymous
+blocks). Each block stores its content as **runs**: plain text, SGR-attr
+spans (from the inline VT-subset interpreter, §13.4), Beacon spans
+(`em`/`obj`/`table`/`hdr` with their args), and `Embed` anchors. **Pixels
+are never stored; layout is a pure function** `layout(block, width_px,
+stylesheet_gen) -> line boxes`, cached per block and invalidated by width
+or stylesheet change — which makes reflow-on-resize correct by construction
+(re-run the function; cursor-anchored scroll like aurora's #55 posture) and
+makes the 100k-line budget a content budget: stored bytes + per-block
+overhead, with the layout cache LRU-bounded separately, sized against the
+< 64 MiB exit criterion. Selection (Helix-modal) addresses (block, run,
+byte) — glyph hit-testing maps pointer → that triple through the cached
+line boxes.
+
+### 13.4 The shared VT core (the extraction; H-2 opens with it)
+
+- `usr/aurora/src/vt.rs` MOVES to a shared crate (`usr/lib/` sibling of
+  kaua/libtapestry; name held — `vt` is acceptable, a thematic name may be
+  proposed at the chunk); aurora consumes it unchanged (its `render.rs`
+  already touches only the cell grid + palette API). The move is
+  behavior-preserving and gated by aurora's existing screendump scenarios
+  (`ls-gfx*` — a ZERO-diff bar).
+- Halcyon uses it twice: **(a)** the raw-VT pane class hosts a full `Vt`
+  grid per alt-screen program — literally an aurora-class pane, cashing the
+  "Aurora terminals as panes" continuity; **(b)** the transcript's inline
+  interpreter reuses the SGR/attr machinery on a per-block basis (a
+  VT-SUBSET: SGR + line discipline; cursor addressing inside a transcript
+  block is treated as foreign-fullscreen intent and flips the pane to the
+  raw-VT class — the alt-screen switch is the primary trigger, cursor-park
+  heuristics stay out of v1).
+
+### 13.5 Fonts, images, and inline surfaces (H-2/H-7 halves)
+
+- **Rasterizer**: fontdue-class (`no_std + alloc` advertised — VERIFY at
+  vendor time by building against the native target before any code depends
+  on it; ttf-parser+hand-raster is the named fallback if the claim fails).
+  Vendored under `third_party/` with manifest + forage registration, like
+  every remote input. All font PARSING stays in halcyond (Rust) — executors
+  only ever see finished atlas bitmaps.
+- **Metrics mixing rule** (the Genera look without ransom-note lines): the
+  transcript line-height is DejaVu's, per stylesheet size; Cornucopia
+  islands (code/`em code`/aligned content) set their baseline ON the DejaVu
+  baseline and may not stretch the line box; box-drawing glyphs appear only
+  in raw-VT panes and cells-tier content, never proportional flow.
+- **Images** (H-7): PNG decodes in halcyond — the bound recommendation is
+  miniz_oxide (`no_std` inflate) + a hand-rolled defilter/chunk walker
+  (PNG's spec surface is small; a bespoke decoder is fuzz-friendlier than a
+  ported one and keeps the parse in Rust). JPEG: decide at H-7
+  (port-vs-defer); not load-bearing for the exit criteria draft.
+- **Inline surfaces**: an `Embed` reserves flow space; the actual pixels are
+  a Tapestry surface the compositor places (the inline-live placement,
+  TAPESTRY §14). The H-2 MVP may land text-only transcripts first; `Embed`
+  arrives with image display.
+
+### 13.6 Chrome + menus (H-3 mechanics)
+
+- **Tag bar**: the compositor computes strip geometry today (Stacked/Tabbed
+  render colored segments); H-3 adds the ratified renderer-drawn text — a
+  thin surface per strip that halcyond paints (Cornucopia atlas first;
+  DejaVu once the pipeline exists) and the compositor places. New
+  compositor surface-role plumbing: a `chrome` surface class bound to a
+  pane's strip rect (a G-6 extension; the cfg-3 gated-ctl pattern for the
+  verbs).
+- **Menus**: ONE ephemeral chrome surface, summoned by halcyond via a gated
+  global-ctl verb (`menu place <x> <y> <w> <h>` / `menu dismiss` — names
+  provisional), compositor-placed at pointer, input-routed to halcyond
+  while open, dismissed on click-away/Esc BY THE COMPOSITOR (so a wedged
+  halcyond cannot strand a modal overlay). Content and verb dispatch are
+  halcyond's (BEACON.md §7's rules file; the security clause applies —
+  the menu always displays the resolved ref).
+
+### 13.7 Layouts (H-4; the exact format)
+
+- **Save** = the pane tree serialized with what `render_text`
+  (`pane.rs:1044`) prints today PLUS the two fields it omits: each leaf's
+  `tag` and each container's full mode/active. Format: a versioned header
+  (`halcyon-layout v1`), then the depth-indented rows extended with
+  `tag="<escaped>"`. The read side is a new gated tapestryd ctl surface OR
+  a halcyond-side walk of `/dev/tapestry` `pane/` files — DECIDE AT THE
+  CHUNK; bias to the file-walk (layout-as-9P purity; no new server verb
+  for reading what files already expose).
+- **Restore** = build the container skeleton via existing pane ctl verbs,
+  then respawn each leaf **from its tag** (the tag IS the command line —
+  acme; i3's `append_layout` precedent, minus the swallow hack). A leaf
+  with an empty tag restores as an empty pane. Geometry-only restore is the
+  degenerate case (skip the spawns).
+- Named layouts: `/lib/halcyon/layouts/` (device tier) +
+  `$home/lib/halcyon/layouts/` (session tier) — the aurora-config two-tier
+  precedent, including its hard-won durability discipline (fsync the same
+  OWRITE fd post-rename; `gfx-status.md` cfg-2a records the three-iteration
+  lesson — do not relearn it).
+
+### 13.8 Audit + scripture-sync obligations (the §18.10 pattern; owed at
+### each chunk's close)
+
+- **H-1**: BEACON.md §12.9's list (the syscall row; the cons-verb addendum;
+  the spec as-built addendum).
+- **H-2**: the VT-core extraction is behavior-preserving (zero-diff
+  screendump gate); halcyond's Beacon parser inherits the P3 robustness
+  corpus + joins the format-fuzz audit class; a `docs/reference` section
+  (or vault dossier per the owner check) for halcyond's architecture.
+- **H-3**: the menu/chrome compositor verbs are gated-ctl surfaces (the
+  cfg-3 SA-1 default-deny pattern); the verbs rules file is user-authority
+  parsing — self-audit the no-execution-without-gesture clause.
+- **H-5**: the composed arm's OWN obligations stand unchanged (the PDrained
+  drain in the same commit as the first compose reader; the I-40 composed
+  cfgs move clean→enforced; the AUDIT-TRIGGERS row extension).
+- **H-6**: `halcyon-gpu` joins the venus/WSI audit family (I-45 client-side
+  discipline; the display-list wire is a new parse surface on the pouch
+  side — bounds-check like the 9P wire).
+- **H-7**: the phase audit round (image decode format-fuzz; the transcript
+  state machine; the §11.2 exit-criteria pass).
+
+### 13.9 Open items (named; none blocks H-1/H-2's start)
+
+1. fontdue's `no_std` claim — verify at vendor time (§13.5's fallback named).
+2. The VT crate name; the halcyond binary name (thematic proposals at the
+   chunk, per the naming discipline).
+3. The menu ctl verb grammar (H-3; provisional names above).
+4. The layout-restore read side (file-walk vs verb; bias recorded).
+5. JPEG's vehicle (H-7).
+6. BEACON.md §12.10's items (OSC number, env name, devpipe dc, grep ref
+   form).
