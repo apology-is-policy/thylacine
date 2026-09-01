@@ -38,10 +38,27 @@ the transcript MVP on the CPU floor (HALCYON.md §13).
 
 ## Remaining work
 
-Per ROADMAP §11.1: the push (both mirrors, ls-remote verified), then
-H-2..H-7. The parked
-display-wall work (B/A wall mechanisms + the GL-parity ledger WSI-DESIGN §8.3 +
-the blit default flip) queues at H-6.
+**H-3 (Presentations + the Daylight chrome) — design ratified 2026-09-01**
+(the design pass; HALCYON.md §13.6 concretized + operator votes recorded;
+Daylight = `docs/HALCYON-VISUAL.md`, ratified binding scripture). Four
+sub-chunks (vote 2), strip painted whole by halcyond (vote 1):
+- **H-3a**: pane chrome — extend `paint_borders`/`paint_strips` to the
+  Daylight NNW 2px four-value bevel + the 1px inner hairline + the live-tile
+  cast shadow; factor the `libhalcyon::theme` crate; swap the H-2 transcript
+  `Sheet` (`parchment_sheet()`) for the Daylight §1 tokens. Geometric, not
+  audit-bearing. Screendump E2E.
+- **H-3b**: the executable tag bar — activate `Role::Chrome` (inert today);
+  the chrome-surface path (a surface halcyond paints, compositor-placed at a
+  strip rect, not auto-hosted); halcyond paints name/rule/pills/trail + the
+  sage/cinnabar status key; the gated `tag <id> status` verb (audit-bearing).
+- **H-3c** (THE GATE): obj rendering + the verbs rules engine (BEACON §7's
+  two-tier plumber rules file) + context menus (the gated `menu place/dismiss`
+  verb; input-redirect-to-halcyond + compositor-owned dismiss — the wedge-proof
+  security gate; audit-bearing). Keyboard-first obj interaction.
+- **H-3d**: the status bar — a screen-bottom chrome surface halcyond paints.
+
+Then H-4 (layouts) .. H-7. The parked display-wall work (B/A wall mechanisms +
+the GL-parity ledger WSI-DESIGN §8.3 + the blit default flip) queues at H-6.
 
 ## Exit criteria status
 

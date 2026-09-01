@@ -506,20 +506,100 @@ line boxes.
 
 ### 13.6 Chrome + menus (H-3 mechanics)
 
-- **Tag bar**: the compositor computes strip geometry today (Stacked/Tabbed
-  render colored segments); H-3 adds the ratified renderer-drawn text — a
-  thin surface per strip that halcyond paints (Cornucopia atlas first;
-  DejaVu once the pipeline exists) and the compositor places. New
-  compositor surface-role plumbing: a `chrome` surface class bound to a
-  pane's strip rect (a G-6 extension; the cfg-3 gated-ctl pattern for the
-  verbs).
-- **Menus**: ONE ephemeral chrome surface, summoned by halcyond via a gated
-  global-ctl verb (`menu place <x> <y> <w> <h>` / `menu dismiss` — names
-  provisional), compositor-placed at pointer, input-routed to halcyond
-  while open, dismissed on click-away/Esc BY THE COMPOSITOR (so a wedged
-  halcyond cannot strand a modal overlay). Content and verb dispatch are
-  halcyond's (BEACON.md §7's rules file; the security clause applies —
-  the menu always displays the resolved ref).
+**CONCRETIZED 2026-09-01 (the H-3 design pass; operator-ratified votes recorded
+inline).** The visual identity is `docs/HALCYON-VISUAL.md` (Daylight), ratified
+this pass as binding scripture for the H-3 chrome. This section is the
+mechanics; Daylight is the look.
+
+**Survey ground truth** (tapestryd, verified 2026-09-01 — so no future session
+re-derives it): the pane tree (`pane.rs`) already carries per-leaf `tag: String`
++ `role: Role{Content,Chrome,PinTarget}` + `focusable`, but **`Role` is inert**
+(stored + reported on the per-pane `role` file, no painter branches on it; only
+`focusable` gates directional focus). Strip geometry exists (`visible_strips()`
+-> per-strip rects; `TAB_STRIP_H`). A CPU chrome painter exists
+(`paint_chrome`->`paint_borders` [a 1px FLAT frame] + `paint_strips` [solid
+colored segments, "glyph-free per D7, never text"]) writing into the composed
+screen buffer. A **gated global-ctl** exists (`global_ctl` behind
+`peer_is_renderer()`, per-write + fail-closed; `is_ungated_ctl()` = default-DENY
+denylist) — the cfg-3 pattern, and the menu-verb hook. Client surface-create has
+NO role/placement param (a client picks only WxH / fullscreen; surfaces
+auto-host into the focused empty leaf). **Absent (H-3 builds):** any chrome
+text, bevels beyond 1px, a status bar, menus, input-grab/redirect,
+click-away/Esc dismiss, and any behavior keyed on `Role::Chrome`.
+
+**The load-bearing rule** (§5, D7): *the compositor places geometry; a renderer
+paints the text.* Applications never create floating surfaces.
+
+**RATIFIED VOTE 1 — the strip painter: halcyond paints the WHOLE strip.**
+halcyond paints the entire tag strip OPAQUE (Daylight bg + name/rule/pills/trail
+text + the sage/cinnabar live-tile status key, §4 anatomy) into a `Role::Chrome`
+surface; the compositor PLACES it at the strip rect (`visible_strips`) and draws
+the PANE-level bevel/hairline/cast-shadow around the pane. Opaque = no alpha
+overlay compositing. All of Daylight's strip anatomy lives in one place
+(halcyond's `Sheet`); the compositor's Daylight knowledge is only the four bevel
+constants + the per-tile status-key COLOR it is told. *Alternative B rejected*
+(compositor paints bg + status key, halcyond paints text into an alpha overlay):
+needs a new alpha-composite path and splits Daylight's strip look across two
+painters, for no gain.
+
+**The chrome-surface path (new; H-3b).** `Role::Chrome` is activated: a chrome
+surface is one halcyond creates and paints but the compositor PLACES at a strip
+rect (not auto-hosted, not focusable, excluded from the scanout-Direct count).
+New surface-create plumbing carries a role + a placement binding (a strip id, or
+a pane id + strip index). halcyond learns strip rects by reading the pane 9P
+tree (the existing per-pane geometry files; no new read verb — the §13.7
+file-walk bias). The pane-level status-colored hairline + cast shadow (§5.3/§5.4)
+are compositor-drawn and need the tile's status key, so halcyond signals it via a
+small gated ctl verb (`tag <pane-id> status ok|err|resting` — name provisional;
+rides the `peer_is_renderer` default-deny gate).
+
+**Pane chrome (H-3a).** Extend `paint_borders`/`paint_strips` from the flat 1px
+frame to Daylight §2: the NNW single-light-source 2px four-value bevel
+(top/left/right/bottom stored as the light direction + derived, never per-edge),
+the 1px inner hairline (§2.4), and the live-tile cast shadow (§5.4, owned by the
+live tile — never the neighbour's border). Pure compositor geometry, no text —
+the first Daylight landing. The `libhalcyon::theme` crate (the Daylight token
+source the scripture names) is factored here and shared by the transcript `Sheet`
+AND the chrome; the H-2 transcript palette (`parchment_sheet()` from
+`vt::THEMES[1]`) is swapped for the Daylight §1 tokens in the same chunk, so
+transcript and chrome match from the start.
+
+**Menus (H-3c — THE GATE).** ONE ephemeral `Role::Chrome` surface, summoned by
+halcyond via the gated global-ctl verb `menu place <x> <y> <w> <h>` /
+`menu dismiss` (names provisional; the default-deny gate). Compositor-placed at
+the pointer; **input redirected to halcyond's menu surface while open** (new — no
+grab exists today); **dismissed BY THE COMPOSITOR on click-away/Esc** (new — the
+compositor, not halcyond, tears it down, so a WEDGED halcyond cannot strand a
+modal). Content + verb dispatch are halcyond's (BEACON.md §7's plumber-style
+two-tier rules file, `type`->verbs; the security clause is binding — the menu
+always displays the RESOLVED ref, frames carry no authority). The
+input-redirect + compositor-owned dismiss are the security-critical properties;
+the H-3 exit gate is "menu-dismiss-by-compositor proven vs a wedged client."
+
+**Status bar (H-3d).** A screen-bottom `Role::Chrome` surface halcyond paints
+(Daylight §6): workspaces / focused context / the sage-cinnabar condition slot /
+clock. The dark bar that grounds the composition.
+
+**obj interaction (H-3c).** Keyboard-first (§6 makes the mouse secondary):
+Esc-normal -> select an obj run -> a key opens its verb menu. Click-to-focus +
+click-a-path added in the same chunk if cheap (the survey confirms neither
+exists today; pointer routing is under-the-pointer, no click-to-focus).
+
+**RATIFIED VOTE 2 — scope + sequencing: four sub-chunks, full Daylight.**
+H-3a (pane bevels + hairline + cast shadow + the `libhalcyon::theme` crate +
+the transcript-palette adoption) -> H-3b (the executable tag bar: the
+chrome-surface path + `Role::Chrome` activation + the `tag status` verb) ->
+H-3c (obj + verbs + menus — the gate) -> H-3d (the status bar). Each is a
+visible, testable landing; the whole Daylight chrome lands across H-3.
+*Alternative (roadmap-literal: tag bar + menus + obj/verbs only, defer bevels +
+status bar) not chosen* — the transcript would sit in un-beveled panes until a
+later chunk.
+
+**Audit-trigger** (ROADMAP §11.1 + AUDIT-TRIGGERS): the H-3b/c ctl verbs
+(`tag status`, `menu place/dismiss`) are gated-ctl surfaces on
+`usr/tapestryd/src/server.rs` — the cfg-3 default-deny pattern + compositor-owned
+dismiss; audit at each of H-3b/H-3c's close. H-3a (geometric painting, no new
+authority) is not audit-bearing on its own.
 
 ### 13.7 Layouts (H-4; the exact format)
 
