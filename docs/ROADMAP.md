@@ -1198,6 +1198,24 @@ This is the last phase of v1.0 and the highest-risk angle (`NOVEL.md` Angle #4 �
 > fbcon/Aurora claim], G-6..G-9 Phase 10); **`docs/TAPESTRY.md` §13-18 is
 > authoritative**.
 
+> **ADDENDUM 2026-09-01 (operator-directed, at the W-4 close).** Two
+> scheduling facts from the W-4 arc's close (the vkQuake comparison closed
+> INVERTED — `WARP-WSI-DESIGN.md` §8.1-8.2):
+>
+> - **Compose opens under the Halcyon phase**, which the operator intends
+>   to open soon — the W-3c-2 composed-arm design notes + the §8.2
+>   numbers-condition (MET) carry into it as inputs, not as a separate
+>   pre-Halcyon chunk.
+> - **The GL-parity arc is DEFERRED, not dropped**: the W-4 measurement
+>   established that the GL lane's present path still pays two quantized
+>   display waits per frame plus a double guest<->host pixel crossing that
+>   the vk lane no longer has — the inversion is a statement about our
+>   plumbing, not the APIs. The backport ledger (batch the GL pair on the
+>   fork-C primitive; the double-paint-class audit of the GL arms; a
+>   virgl-native zero-copy scanout path; the wall-mechanism analog) lives
+>   in `WARP-WSI-DESIGN.md` §8.3 and is picked up AFTER compose — not
+>   immediately, by explicit operator direction.
+
 ### 11.1 Deliverables
 
 **VirtIO-GPU userspace driver (extend Phase 3)**:

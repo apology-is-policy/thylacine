@@ -903,6 +903,67 @@ produced the same impossible-triple signature before being fixed.)
 
 ---
 
+### 8.3 The GL-parity ledger (deferred arc; operator-directed 2026-09-01)
+
+**The direction** (operator, 2026-09-01): document the GL/VK display-path
+asymmetry as its own later chunk/arc on the roadmap — "ensure all of the
+performance goodness is backported to GL as well" — and do NOT take it up
+now: compose etc. comes first, under the Halcyon phase. This section is
+that record; `ROADMAP.md` §11 carries the scheduling note. Nothing here
+blocks compose or Halcyon.
+
+**The asymmetry, precisely.** The W-4 inversion (§8.1) is a statement
+about the two lanes' PRESENT PATHS, not about the APIs: at Quake's scene
+complexity both engines' render legs are small against the display wall,
+and the lanes pay the wall differently. The vk lane pays ONE quantized
+wait per frame since the double-paint fix (`69ff4cdd`) — shortened
+further by the fork-C batch (`e31378bb`). The GL lane still pays TWO
+(`Cost::Xfer` ~11 ms + `Cost::FlushDirect` ~11 ms, sequential
+synchronous `.step`s in the weave-direct per-rect loop), plus a
+structural cost vk does not have: its pixels cross the guest<->host
+boundary twice (virgl renders host-side -> readback into the guest
+weave -> TRANSFER_TO_HOST_2D back up -> flush), where the vk presentable
+is rendered host-side into the very blob the display scans out —
+zero crossings. "vk beats GL" therefore reads: the lane whose present
+path we optimized beats the lane whose present path we have not touched.
+
+**The backport ledger** (the arc's work items, in dependency order):
+
+1. **Batch the GL pair** (`transfer` + `flush` in the weave-direct
+   per-rect loop) on the fork-C primitive (`submit_pair_and_wait`).
+   BLOCKED ON an instrumentation decision, which is why fork C
+   deliberately skipped it: the loop's census splits `Cost::Xfer` from
+   `Cost::FlushDirect`, and under a shared wait that attribution is
+   meaningless — the arc must either add a fused census row or retire
+   the split, and re-baseline the §8.2 analysis that consumed those
+   rows. Expected win: ~one quantum/frame (~10 ms), the double-paint-fix
+   class of saving.
+2. **The double-paint-class audit of the GL steady state**: re-read the
+   GL present arms (the #57 post-bind full flush, the per-rect flush
+   loop, the hold/release accumulation) with the `69ff4cdd` lens — does
+   any arm pay a paint the previous step already implied? Unaudited
+   with that lens; the vk instance hid for the arc's whole life.
+3. **Kill the double pixel-crossing** (the big one): a virgl-native
+   scanout path — scan out the client's virgl-rendered resource
+   directly, the Bo analog of the presentable's zero-copy path, removing
+   both the readback and the re-upload. REAL DESIGN WORK, I-40-bearing:
+   the weave's role changes for GL clients (today the weave IS the
+   guest-pixel truth the present brackets), so the no-torn-scanout
+   argument needs its GL restatement before code. Prior art: exactly the
+   PRESENTABLE class (§4) built for vk — the design question is what the
+   equivalent object is for a virgl context's framebuffer.
+4. **The wall-mechanism analog**: whatever the ~10 ms pacing fork
+   ultimately lands beyond C (async-under-FIFO / MAILBOX, §8.2, both
+   still operator-gated) gets its GL-side statement in the same arc, so
+   the lanes do not drift apart again.
+
+**The arc's measurement bar**: re-run the §8.1 comparison after parity.
+The expected honest outcome is NOT "GL wins" — it is that the lanes
+finally measure their engines and transports rather than our plumbing:
+the venus residual becomes vk's visible price, the zero-copy present its
+visible advantage, and the delta between them becomes a statement about
+venus-vs-virgl efficiency worth having.
+
 *Prior-art working notes: `scratchpad/w2-wsi-priorart.md`,
 `scratchpad/w2-wsi-synthesis.md` (session-local). The tree-fact research and
 the mechanism research are reproduced in the relevant sections above at
