@@ -88,22 +88,40 @@ proc age_expect_redraw {phase} {
     }
 }
 
+# The whole-session transcript (the ls-3a / ls-halcyon idiom; log_file -a is
+# the form that works on macOS expect 5.45): aurora's bring-up line is
+# parsed from this file after login, not from the live stream (see below).
+set transcript /tmp/ls-gfx-age-[pid].log
+catch {file delete -force $transcript}
+log_file -a $transcript
+
 lc_boot
 
-# The console geometry, from aurora's own bringup line (prints before the
-# login prompt), so the region is in CELLS and survives a font/mode change.
-set timeout $lc_boot_timeout
-expect {
-    -re {aurora: console up (\d+)x(\d+) cells \((\d+)x(\d+) px, cell (\d+)x(\d+)\)} {
-        set cols $expect_out(1,string)
-        set rows $expect_out(2,string)
-        set cw   $expect_out(5,string)
-        set ch   $expect_out(6,string)
-    }
-    -re {EXTINCTION:} { lc_extinction_fail "extinction before aurora came up" }
-    timeout { lc_fail "no 'aurora: console up' line within ${lc_boot_timeout}s" }
-    eof     { lc_fail "qemu exited before aurora came up" }
+# The console geometry comes from aurora's own bring-up line, so the region
+# is in CELLS and survives a font/mode change -- but it is read from the
+# whole-session TRANSCRIPT after login, never from the live stream: that
+# line and "Thylacine login:" print on the SAME serial from DIFFERENT procs
+# (aurora vs login), so their order is nondeterministic, and an inline
+# expect for it consumes the stream PAST the prompt whenever login races
+# ahead, hanging lc_login for the whole boot timeout ("no login prompt
+# within Ns" against a healthy guest). This scenario lost that race 2/2 on
+# 2026-09-01 (H-3b-1); ls-halcyon lost it at H-3a-2 and took the same cure.
+# An extinction before the prompt is lc_login's own arm.
+lc_login michael correct-horse-battery-staple-v1
+
+# By shell-up the line has printed; closing the log flushes what the pty has
+# delivered so far, and a short bounded poll covers a late flush.
+set cols 0; set rows 0; set cw 0; set ch 0
+for {set i 0} {$i < 10} {incr i} {
+    log_file
+    set f [open $transcript r]
+    set body [read $f]
+    close $f
+    log_file -a $transcript
+    if {[regexp {aurora: console up (\d+)x(\d+) cells \((\d+)x(\d+) px, cell (\d+)x(\d+)\)} $body -> cols rows _pw _ph cw ch]} { break }
+    after 500
 }
+if {$cols == 0} { lc_fail "no 'aurora: console up' line in the transcript after login" }
 if {$rows < 12 || $cols < 40} { lc_fail "console grid ${cols}x${rows} too small for the region" }
 # Region: cell rows 6..rows-3, cell cols 2..cols/2 -- clear of row 0 (the
 # post-clear prompt + typed keys), of the bottom rows (the pre-clear prompt
@@ -114,8 +132,6 @@ set rx1 [expr {($cols / 2) * $cw}]
 set ry0 [expr {6 * $ch}]
 set ry1 [expr {($rows - 3) * $ch}]
 lc_step "age: grid ${cols}x${rows} cell ${cw}x${ch}; region x $rx0..$rx1 y $ry0..$ry1"
-
-lc_login michael correct-horse-battery-staple-v1
 
 # Anchor: the console renders (same -c retry as ls-gfx).
 set ok 0

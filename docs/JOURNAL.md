@@ -265,22 +265,33 @@ centre; ls-gfx-panes samples the same point host-side. Both halves read
 ls-gfx-chords [36 s] passed untouched — their bevel/floor samples sit at
 x,y = 1,2 and mid-height, outside a content-top strip.
 
-**The stall I caused, read honestly.** Single-leaf scenarios cannot regress
-here: with one visible leaf `inset` is 0, the `else { content = r }` branch is
-byte-identical to before, `tagbar` stays ZERO, and the painter skips on
-`rect == content`. I ran the eight CPU single-leaf gfx scenarios anyway, as
-belt-and-suspenders — at `LS_CI_JOBS=3`, i.e. three 4-vCPU guests on 8 cores.
-Seven passed. ls-gfx-age sat 12 minutes with its log frozen at `age: grid ...
-region`, the step before its `yes | head` fill — the CPU-heaviest phase of the
-scenario — under a 3× oversubscription of my own making. That is the one shape
-contention IS licensed to explain (a wall-clock budget, never a wrong value),
-and it is still a hypothesis until measured: the solo re-run is the measurement,
-and the operator declined it once mid-run, so it is recorded here as OWED, not
-absorbed. What is not a hypothesis: the scenario is single-leaf, so no line of
-this chunk executes in it. The batch was stopped by task, the straggler's QEMU
-reaped by the harness trap (census clean), and the lesson is the one aux already
-banked — cores are the contended resource, and a verification batch that
-oversubscribes them manufactures its own timeouts. Verify at jobs=1.
+**The stall I caused — and what it actually was.** Single-leaf scenarios
+cannot regress here: with one visible leaf `inset` is 0, the `else { content =
+r }` branch is byte-identical to before, `tagbar` stays ZERO, and the painter
+skips on `rect == content`. I ran the eight CPU single-leaf gfx scenarios anyway
+at `LS_CI_JOBS=3` — three 4-vCPU guests on 8 cores. Seven passed; ls-gfx-age
+sat 12 minutes with its log frozen at `age: grid ... region`, and I read that as
+oversubscription starving its `yes | head` fill. That was the convenient
+reading, and the solo re-run the operator chose refuted it in 327 s: **at
+jobs=1 it failed identically — `no login prompt within 300s` against a healthy
+guest** (aurora up, scanout direct). The log carried the mechanism two lines
+apart: `Thylacine login:` at 2817, `aurora: console up` at 2819. The age exp
+parsed its console grid from an inline `expect` on the console-up line BEFORE
+`lc_login`, so whenever login raced ahead the expect consumed the prompt and
+`lc_login` waited out the budget — the exact race H-3a-2 fixed in
+ls-halcyon.exp, in a second file. The batch had merely stretched the
+jobs-scaled budget past my patience, so I killed it before it could report the
+same verdict. Two lessons, both already on the wall: a harness race is a
+PROPERTY and H-3a-2 fixed one LOCATION — a comment-filtered sweep of every exp
+for "console-up expected before lc_login" (run now; BSD grep has no `\s`, the
+first sweep's comment filter was silently broken) finds exactly this file and
+no other; and a stall under a batch I oversubscribed is not thereby explained —
+the cheap solo measurement is what separates duration from mechanism, and here
+it found a mechanism. The cure is ls-halcyon's: `log_file -a` records
+everything the pty delivers, consumed or not, so age logs in first and then
+parses the grid from the transcript (closed to flush, re-opened) — the same
+128x36 / 10x22 / region x 20..640 y 132..726 as before. PASS [40 s]: positive
+control 4/4, negative leg 8/8, worst 0 px.
 
 Vault: `sub-tapestryd` owns pane.rs + server.rs — the tagbar/PFK_TAGBAR/fallback
 delta rung via yip 0031; `theme.rs`, the battery, and the .exp are unowned
