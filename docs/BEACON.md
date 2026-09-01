@@ -364,6 +364,12 @@ layout/typography ops is REFUSED on sight — that was the TermKit failure.
   not a secret). The consctl RENDER-LINE token stays (the renderer's own
   readback + parser parity); the leaf is the consumer-side surface. ut
   fresh-opens it per session (and, at H-2, per prompt — the F10 re-read).
+  **F10 AS-BUILT (H-2d-4, `usr/utopia/shell/src/main.rs`)**: the re-read is
+  keyed on `Repl::prompt_cycles` (bumped at the accept arm), so it fires
+  once per accepted prompt, not per keystroke; on a CHANGED tier it
+  re-exports and prints the `ut: beacon <tier> re-exported (renderer
+  change)` canary — an unchanged tier is silent (the ls-halcyon E2E pins
+  the silence; the H-1 ls-3a leg pins the session-start export).
 - **The environment**: at session start (and after `tty:winch`-class renderer
   changes — cheap to re-read), ut reads the consctl render line, parses the
   `beacon` token, and exports **`BEACON=none|cells|rich`** to children

@@ -428,6 +428,31 @@ overhead, with the layout cache LRU-bounded separately, sized against the
 byte) — glyph hit-testing maps pointer → that triple through the cached
 line boxes.
 
+**AS-BUILT at H-2d-1/d-4 (2026-09-01, `usr/halcyond/src/transcript.rs` +
+`select.rs`) — three recorded deviations + one decided question:**
+
+- **Cells, not runs**: a block stores **column-addressed cells**
+  (`TCell{ch, style}`) under real line discipline (`\r` overwrite, tab
+  stops, BS, EL 0/1/2 — EL never moves the cursor), with per-block
+  interned styles + obj tables, because runs don't survive `\r`-rewriting
+  writers (progress bars, spinners) — the cell grid is the stable address
+  space the VT stream actually mutates. Beacon spans die at block edges;
+  the SGR pen persists across them.
+- **Selection addresses `(block, item, col)` over CELLS**, not
+  `(block, run, byte)`: the run/byte triple names a storage shape that no
+  longer exists after an overwrite; tables select per-row, and yank
+  re-derives cell text joined by two spaces.
+- **Un-zoned output is FOREIGN** (the H-1 F11 idle-delivery question,
+  decided here): bytes arriving outside any zone accumulate in a block of
+  the third kind, `Foreign` — never folded into the preceding output zone
+  nor the next prompt. A zone open/close freezes the current block at the
+  boundary; an EMPTY Foreign block leaves no trace (its id is reused; ids
+  stay dense + monotonic). One tolerance: an `exit` mark landing in an
+  empty Foreign block immediately after an output close is attributed to
+  the Output block it completed (the pre-deviation-8 floating order).
+- Zones do **not nest** in v0: a zone open inside an open zone freezes the
+  previous block (flat block sequence; `command` stays RESERVED).
+
 ### 13.4 The shared VT core (the extraction; H-2 opens with it)
 
 - `usr/aurora/src/vt.rs` MOVES to a shared crate (`usr/lib/` sibling of

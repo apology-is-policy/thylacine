@@ -80,6 +80,57 @@ transport+zone halves are now proven through a REAL advertisement; F11's
 decision (open-zone attribution, the ut-side refinement named) is recorded
 in the transcript module.
 
+### The H-2 close (same run, after the second self-compaction) — the audit found the two bugs the self-audit couldn't
+
+The batched round (Fable 5, start==end, one round for all seven H-2 commits
+per the doubled cadence) returned **0 P0 / 3 P1 / 2 P2 / 2 P3** against the
+threat model that matters here: halcyond parses arbitrary session output, so
+every OSC 1936 annotation is attacker-controlled, and halcyond IS the console
+— a panic or an OOM is the machine's face going dark. Under the shipped
+`overflow-checks = true` + `panic = "abort"` profile, an integer overflow is a
+hard process death.
+
+Two of the three P1s were **panics I did not find in my own parallel
+self-audit**, and the reason is the instructive part. My self-audit converged
+exactly with the prosecutor on the *resource-exhaustion* family (F3 unbounded
+growth, F5 the cost-accounting asymmetry, the obj u16 wrap) — I had SA-1..SA-5
+written before the round returned. But I biased entirely toward "what grows
+without bound" and never looked for "what single crafted value panics":
+**F1**, a ~10-digit CSI parameter (`\x1b[9999999999m`) whose accumulator did
+`saturating_mul(10) + digit` — the multiply saturated, the *add* did not, so
+the tenth digit overflowed u32 and killed the console to one escape sequence
+(and the identical line in the extracted `vt` crate kills aurora *today* —
+pre-existing, and ours); and **F2**, `mark k=exit code=-9223372036854775808`,
+where the exit badge negated the magnitude with `n = -n` and i64::MIN has no
+positive i64. Two prosecutors, two blind spots, one union — this is the whole
+argument for the second reader stated in a single round.
+
+The fixes: `saturating_add` in both scanners; `unsigned_abs()` for the badge;
+for F3 a set of incremental fail-safe ceilings (the budget machinery only ran
+at producer-chosen boundaries, which a hostile producer simply never emits) —
+an endless line soft-wraps into the eviction path, objs/styles/table-rows cap,
+and an in-progress table carries its own byte budget; for F4 (the wire depth
+cap resets every `feed()`, so nesting leaks across chunk boundaries) the
+em/obj stacks get suppressed-open counters that preserve LIFO balance exactly,
+mirroring the wire layer; for F5 the obj bytes now charge `stored_cost`
+symmetrically so eviction cannot drift the budget to zero. Seven regression
+tests, two of them the exact panic reproductions (they fail on the pre-fix
+code under overflow-checks, pass after). While in the files I swept two
+pre-existing `vt` and three `beacon` clippy lints (inherited verbatim from
+aurora at the H-2a extraction, surfaced now that the crates are linted
+independently) so the whole Halcyon userspace is clippy-clean.
+
+This is a **dirty close** (3 P1s + F3's incremental-cap restructure is
+structurally invasive). Per the doubled-cadence direction, the re-prosecution
+of the fixes themselves is carried FORWARD into the H-3 round rather than spent
+as a dedicated round-2 — the focus is recorded in
+`memory/audit_h2_closed_list.md`. Verification: host 91/91 across the four
+crates (+7 new), clippy-clean, the default production bake boots clean (0
+EXTINCTION, arc 2/2 + clade 3/3); LS-CI full + the lever ls-halcyon re-proof
+close the surface. The kernel 1435 unit suite was deliberately not re-run —
+the change is userspace-only (halcyond/vt/beacon compile into no kernel object)
+and the production boot already exercised the userspace end to end.
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon

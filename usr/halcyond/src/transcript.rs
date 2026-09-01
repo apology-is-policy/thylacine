@@ -138,6 +138,25 @@ enum ScanState {
 
 const MAX_PARAMS: usize = 16;
 
+// Hard per-block accumulation ceilings (the format-fuzz bounds). The budget
+// machinery (`enforce_budget`) evicts only FROZEN blocks; the OPEN block, an
+// in-progress table, and the nesting stacks all accumulate BETWEEN
+// producer-chosen boundaries (newline / zone close / table close), and a
+// hostile producer simply never emits one. Each of those therefore needs an
+// incremental ceiling that is checked as bytes/frames ARRIVE, not at a
+// boundary. All are fail-safe: at the cap, content is soft-wrapped or
+// dropped, never grown -- halcyond IS the console, and its own OOM is a
+// silent `t_exits(1)` (the fixed-heap no_std OOM), i.e. the machine's face
+// vanishing.
+const MAX_LINE_CELLS: usize = 4096; // == the CUF/CHA col clamps; a longer line soft-wraps
+const MAX_OBJS_PER_BLOCK: usize = 4096; // also keeps the idx+1 encoding inside u16
+const MAX_STYLES_PER_BLOCK: usize = 4096; // also bounds the style_idx scan (no O(n^2))
+const MAX_SPAN_NEST: usize = 64; // em/obj nesting (wire caps 8/parse; this bounds the cross-feed leak)
+const MAX_TABLE_ROWS: usize = 100_000;
+const MAX_TABLE_COLS: usize = 256; // cells per row
+const MAX_CELL_CHARS: usize = 4096;
+const MAX_TABLE_BYTES: usize = 16 << 20; // total in-progress table memory (content + Vec overhead)
+
 struct TableCap {
     cols: Vec<u8>,
     hdr: bool,
@@ -146,6 +165,9 @@ struct TableCap {
     cell: Vec<TCell>,
     in_row: bool,
     in_cell: bool,
+    /// Running memory estimate (content + Vec overhead) of the capture; the
+    /// incremental bound on a table the producer never closes.
+    bytes: usize,
 }
 
 /// The transcript: feed bytes in, read frozen blocks + the open tail out.
@@ -159,6 +181,11 @@ pub struct Transcript {
     pen: SgrPen,
     em_stack: Vec<u8>,
     obj_stack: Vec<u16>,
+    // Suppressed-open counters (mirroring the wire layer): opens beyond
+    // MAX_SPAN_NEST are counted, not pushed, so the matching close skips a
+    // pop -- LIFO balance is preserved exactly while the stacks stay bounded.
+    em_suppressed: u32,
+    obj_suppressed: u32,
     hdr: u8,
     table: Option<TableCap>,
     // Escape-scanner state (persists across feeds via `carry`, but the
@@ -207,6 +234,8 @@ impl Transcript {
             pal,
             em_stack: Vec::new(),
             obj_stack: Vec::new(),
+            em_suppressed: 0,
+            obj_suppressed: 0,
             hdr: 0,
             table: None,
             state: ScanState::Ground,
@@ -243,6 +272,12 @@ impl Transcript {
 
     pub fn pending_col(&self) -> usize {
         self.col
+    }
+
+    /// (em_stack, obj_stack) depths -- the nesting bound witness (F4).
+    #[cfg(test)]
+    pub(crate) fn nest_depths(&self) -> (usize, usize) {
+        (self.em_stack.len(), self.obj_stack.len())
     }
 
     // --- the stream entry ---------------------------------------------------
@@ -315,6 +350,7 @@ impl Transcript {
                     cell: Vec::new(),
                     in_row: false,
                     in_cell: false,
+                    bytes: 0,
                 });
             }
             Op::Row => {
@@ -341,19 +377,31 @@ impl Transcript {
                     Some("code") => EM_CODE,
                     _ => EM_NONE,
                 };
-                self.em_stack.push(class);
+                self.em_push(class);
             }
             Op::Obj => {
-                let ty = Self::arg(args, "type").unwrap_or("");
-                let refv = Self::arg(args, "ref").unwrap_or("");
-                let mut sty = String::new();
-                sty.push_str(ty);
-                let mut srf = String::new();
-                srf.push_str(refv);
-                self.open.cost += sty.len() + srf.len();
-                self.open.objs.push(Obj { ty: sty, refv: srf });
-                let idx = self.open.objs.len() as u16; // idx+1 encoding
-                self.obj_stack.push(idx);
+                // At the count cap, degrade to the no-obj sentinel (0): the
+                // block's obj table stops growing, the idx+1 encoding stays
+                // in u16, and the open/close still balance via obj_push/pop.
+                let idx = if self.open.objs.len() >= MAX_OBJS_PER_BLOCK {
+                    0
+                } else {
+                    let ty = Self::arg(args, "type").unwrap_or("");
+                    let refv = Self::arg(args, "ref").unwrap_or("");
+                    let mut sty = String::new();
+                    sty.push_str(ty);
+                    let mut srf = String::new();
+                    srf.push_str(refv);
+                    let bytes = sty.len() + srf.len();
+                    self.open.cost += bytes;
+                    // Symmetric with cells/tables/styles: charge stored_cost
+                    // too, so eviction's `sub(dead.cost)` cannot drift the
+                    // budget to zero (else max_cost never enforces).
+                    self.stored_cost += bytes;
+                    self.open.objs.push(Obj { ty: sty, refv: srf });
+                    self.open.objs.len() as u16 // idx+1 encoding, <= u16::MAX
+                };
+                self.obj_push(idx);
             }
             Op::Hdr => {
                 let level = match Self::arg(args, "level") {
@@ -374,11 +422,12 @@ impl Transcript {
             }
             Op::Table => {
                 if let Some(mut t) = self.table.take() {
-                    // Tolerate unclosed row/cell at table close.
+                    // Tolerate unclosed row/cell at table close (the final
+                    // row/cell -- bounded, one each -- still honors the caps).
                     if t.in_cell {
-                        t.row.push(core::mem::take(&mut t.cell));
+                        Self::table_push_cell(&mut t);
                     }
-                    if t.in_row {
+                    if t.in_row && t.rows.len() < MAX_TABLE_ROWS {
                         t.rows.push(core::mem::take(&mut t.row));
                     }
                     let mut cost = 0usize;
@@ -400,11 +449,21 @@ impl Transcript {
             Op::Row => {
                 if let Some(t) = self.table.as_mut() {
                     if t.in_cell {
-                        t.row.push(core::mem::take(&mut t.cell));
+                        Self::table_push_cell(t);
                         t.in_cell = false;
                     }
                     if t.in_row {
-                        t.rows.push(core::mem::take(&mut t.row));
+                        // At the row cap or byte budget, drop the row (never
+                        // grow the Vec-of-Vecs unboundedly on an unclosed
+                        // table); else charge its overhead + keep it.
+                        if t.rows.len() < MAX_TABLE_ROWS && t.bytes < MAX_TABLE_BYTES {
+                            t.bytes = t.bytes.saturating_add(
+                                core::mem::size_of::<Vec<TCell>>() * (t.row.len() + 1),
+                            );
+                            t.rows.push(core::mem::take(&mut t.row));
+                        } else {
+                            t.row.clear();
+                        }
                         t.in_row = false;
                     }
                 }
@@ -412,21 +471,68 @@ impl Transcript {
             Op::Cell => {
                 if let Some(t) = self.table.as_mut() {
                     if t.in_cell {
-                        t.row.push(core::mem::take(&mut t.cell));
+                        Self::table_push_cell(t);
                         t.in_cell = false;
                     }
                 }
             }
             Op::Em => {
-                self.em_stack.pop();
+                self.em_pop();
             }
             Op::Obj => {
-                self.obj_stack.pop();
+                self.obj_pop();
             }
             Op::Hdr => {
                 self.hdr = 0;
             }
             Op::Mark | Op::Rule => {}
+        }
+    }
+
+    // Nesting-stack push/pop with the suppressed-open discipline: an open
+    // beyond MAX_SPAN_NEST is counted, not pushed; the matching close skips a
+    // pop. LIFO balance is exact, memory is bounded, and well-formed input
+    // (wire-capped at depth 8/parse) never reaches the ceiling.
+    fn em_push(&mut self, class: u8) {
+        if self.em_stack.len() >= MAX_SPAN_NEST {
+            self.em_suppressed = self.em_suppressed.saturating_add(1);
+        } else {
+            self.em_stack.push(class);
+        }
+    }
+
+    fn em_pop(&mut self) {
+        if self.em_suppressed > 0 {
+            self.em_suppressed -= 1;
+        } else {
+            self.em_stack.pop();
+        }
+    }
+
+    fn obj_push(&mut self, idx: u16) {
+        if self.obj_stack.len() >= MAX_SPAN_NEST {
+            self.obj_suppressed = self.obj_suppressed.saturating_add(1);
+        } else {
+            self.obj_stack.push(idx);
+        }
+    }
+
+    fn obj_pop(&mut self) {
+        if self.obj_suppressed > 0 {
+            self.obj_suppressed -= 1;
+        } else {
+            self.obj_stack.pop();
+        }
+    }
+
+    /// Finalize the current cell into the row under the col cap + byte budget;
+    /// past either, the cell is dropped (never grow an unclosed table).
+    fn table_push_cell(t: &mut TableCap) {
+        if t.row.len() < MAX_TABLE_COLS && t.bytes < MAX_TABLE_BYTES {
+            t.bytes = t.bytes.saturating_add(core::mem::size_of::<Vec<TCell>>());
+            t.row.push(core::mem::take(&mut t.cell));
+        } else {
+            t.cell.clear();
         }
     }
 
@@ -487,6 +593,8 @@ impl Transcript {
         }
         self.em_stack.clear();
         self.obj_stack.clear();
+        self.em_suppressed = 0;
+        self.obj_suppressed = 0;
         self.hdr = 0;
     }
 
@@ -580,7 +688,8 @@ impl Transcript {
             ScanState::EscCharset => self.state = ScanState::Ground,
             ScanState::Csi => match b {
                 b'0'..=b'9' => {
-                    self.cur_param = self.cur_param.saturating_mul(10) + (b - b'0') as u32;
+                    self.cur_param =
+                        self.cur_param.saturating_mul(10).saturating_add((b - b'0') as u32);
                 }
                 b';' | b':' => self.push_param(),
                 b'?' => self.csi_private = true,
@@ -713,11 +822,21 @@ impl Transcript {
         let style = self.style_idx();
         if let Some(t) = self.table.as_mut() {
             // Inside a table: cell content appends (no column discipline);
-            // padding between cells is the plain realization -- dropped.
-            if t.in_cell && t.cell.len() < 4096 {
+            // padding between cells is the plain realization -- dropped. The
+            // per-cell char cap AND the whole-table byte budget both bound it.
+            if t.in_cell && t.cell.len() < MAX_CELL_CHARS && t.bytes < MAX_TABLE_BYTES {
                 t.cell.push(TCell { ch: if ch < ' ' { ' ' } else { ch }, style });
+                t.bytes = t.bytes.saturating_add(core::mem::size_of::<TCell>());
             }
             return;
+        }
+        // Soft-wrap a pathological single line (no newline): flushing it
+        // charges its cost + advances toward the per-block line cap, so the
+        // budget/eviction machinery can bound an endless line (else `self.line`
+        // grows until the heap dies). MAX_LINE_CELLS == the CUF/CHA clamps, so
+        // a cursor-positioned write never trips this early.
+        if self.col >= MAX_LINE_CELLS {
+            self.flush_line();
         }
         if self.col < self.line.len() {
             self.line[self.col] = TCell { ch, style };
@@ -760,6 +879,13 @@ impl Transcript {
             if *last == s {
                 return (self.open.styles.len() - 1) as u16;
             }
+        }
+        // At the cap: don't grow (bounds memory + keeps the index in u16) and
+        // don't full-scan (bounds CPU to O(1) post-cap -- a truecolor-gradient
+        // spam otherwise scans a growing table per char). Degrade to the last
+        // style; reaching thousands of distinct styles in one block is hostile.
+        if self.open.styles.len() >= MAX_STYLES_PER_BLOCK {
+            return (self.open.styles.len() - 1) as u16;
         }
         for (i, st) in self.open.styles.iter().enumerate() {
             if *st == s {
@@ -1137,5 +1263,117 @@ mod tests {
         b.feed(&corpus[mid..mid2]);
         b.feed(&corpus[mid2..]);
         assert_eq!(structure_fingerprint(&a), structure_fingerprint(&b));
+    }
+
+    // --- the format-fuzz bounds (the H-2 audit F1..F5) ---------------------
+
+    #[test]
+    fn csi_param_overflow_does_not_panic() {
+        // A ~10-digit CSI numeric parameter: `saturating_mul(10)` caps the
+        // multiply, but a plain `+ digit` add overflows u32 -> panic under
+        // the shipped overflow-checks profile -> the console dies (F1). One
+        // untrusted escape sequence; must be absorbed.
+        let mut t = Transcript::new(parchment());
+        t.feed(b"\x1b[9999999999mX\x1b[0m\n");
+        // The huge param is a no-op SGR; the text after it survives (the line
+        // is flushed into the still-open block -- no zone boundary froze it).
+        let Some(Item::Line(l)) = t.open_block().items.first() else { panic!("no line") };
+        assert_eq!(line_str(l), "X");
+    }
+
+    #[test]
+    fn unbounded_line_soft_wraps_and_stays_bounded() {
+        // An endless no-newline stream must not grow one line unboundedly
+        // (F3): the soft-wrap flushes it into MAX_LINE_CELLS-wide lines that
+        // the block cap + budget then bound.
+        let mut t = Transcript::new(parchment());
+        let blob = vec![b'a'; MAX_LINE_CELLS * 4 + 17];
+        t.feed(&blob);
+        assert!(t.pending_line().len() <= MAX_LINE_CELLS + 1, "the open line is bounded");
+        for b in t.frozen_blocks().iter() {
+            for it in b.items.iter() {
+                if let Item::Line(l) = it {
+                    assert!(l.cells.len() <= MAX_LINE_CELLS + 1, "each flushed line is bounded");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn balanced_obj_frames_stay_bounded() {
+        // open Obj / close Obj repeated grows `open.objs` (close only pops the
+        // stack) -- capped at MAX_OBJS_PER_BLOCK, degrading to no-obj (F3),
+        // which also keeps the idx+1 encoding inside u16 (P3).
+        let mut t = Transcript::new(parchment());
+        let mut buf = Vec::new();
+        for _ in 0..(MAX_OBJS_PER_BLOCK + 500) {
+            wire::open(&mut buf, Op::Obj, &[("type", "path"), ("ref", "/x")]);
+            wire::close(&mut buf, Op::Obj);
+        }
+        t.feed(&buf);
+        assert!(t.open_block().objs.len() <= MAX_OBJS_PER_BLOCK);
+        let (_, obj_depth) = t.nest_depths();
+        assert!(obj_depth <= MAX_SPAN_NEST);
+    }
+
+    #[test]
+    fn distinct_style_spam_stays_bounded() {
+        // A truecolor gradient (2^24 distinct fg) with a distinct style per
+        // char grows `open.styles` unboundedly and turns style_idx O(n^2)
+        // (F3) -- capped at MAX_STYLES_PER_BLOCK.
+        let mut t = Transcript::new(parchment());
+        let mut buf = Vec::new();
+        for i in 0..(MAX_STYLES_PER_BLOCK + 500) {
+            let (r, g, b) = ((i & 0xff) as u32, ((i >> 8) & 0xff) as u32, ((i >> 4) & 0xff) as u32);
+            buf.extend_from_slice(format!("\x1b[38;2;{};{};{}mZ", r, g, b).as_bytes());
+        }
+        t.feed(&buf);
+        assert!(t.open_block().styles.len() <= MAX_STYLES_PER_BLOCK);
+    }
+
+    #[test]
+    fn unbounded_table_rows_stay_bounded() {
+        // An unclosed table with endless empty rows grows the Vec-of-Vecs
+        // (F3) -- rows cap at MAX_TABLE_ROWS; the realized model proves it.
+        let mut t = Transcript::new(parchment());
+        let mut buf = Vec::new();
+        wire::open(&mut buf, Op::Table, &[("cols", "l"), ("hdr", "0")]);
+        for _ in 0..(MAX_TABLE_ROWS + 200) {
+            wire::open(&mut buf, Op::Row, &[]);
+            wire::open(&mut buf, Op::Cell, &[]);
+            buf.extend_from_slice(b"c");
+            wire::close(&mut buf, Op::Cell);
+            wire::close(&mut buf, Op::Row);
+        }
+        wire::close(&mut buf, Op::Table);
+        wire::open(&mut buf, Op::Zone, &[("k", "prompt")]); // force the table's block to freeze
+        t.feed(&buf);
+        let mut saw = false;
+        for b in t.frozen_blocks().iter() {
+            for it in b.items.iter() {
+                if let Item::Table(tb) = it {
+                    saw = true;
+                    assert!(tb.rows.len() <= MAX_TABLE_ROWS + 1, "table rows bounded");
+                }
+            }
+        }
+        assert!(saw, "the table realized");
+    }
+
+    #[test]
+    fn deep_nesting_across_feeds_stays_bounded() {
+        // The wire depth cap resets per feed() (F4): unbalanced opens paced
+        // across drains would grow the nesting stacks without bound. The
+        // transcript-side cap holds regardless of chunking.
+        let mut t = Transcript::new(parchment());
+        for _ in 0..64 {
+            let mut buf = Vec::new();
+            for _ in 0..8 {
+                wire::open(&mut buf, Op::Em, &[("class", "strong")]);
+            }
+            t.feed(&buf); // 8 opens per feed, never closed
+        }
+        let (em_depth, _) = t.nest_depths();
+        assert!(em_depth <= MAX_SPAN_NEST, "em nesting bounded across feeds: {}", em_depth);
     }
 }

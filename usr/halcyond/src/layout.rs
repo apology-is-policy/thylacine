@@ -500,7 +500,7 @@ fn lay_table(
     let mut x = sheet.pad_x;
     for c in 0..ncols {
         col_x[c] = x;
-        x += col_w[c] + sheet.table_col_gap;
+        x = x.saturating_add(col_w[c].saturating_add(sheet.table_col_gap));
     }
     // Lay rows: one visual line each (table cells are single-line by
     // construction -- the transcript capture maps controls to spaces).
@@ -555,11 +555,10 @@ fn lay_exit_badge(lb: &mut LineBuilder, code: i64, sheet: &Sheet, gs: &mut Glyph
     text.push_str("exit ");
     // Tiny itoa (i64, no_std).
     let mut buf = [0u8; 20];
-    let mut n = code;
-    let neg = n < 0;
-    if neg {
-        n = -n;
-    }
+    // The magnitude is taken UNSIGNED: `-code` panics on i64::MIN (no
+    // positive i64), and `code` is an untrusted `mark k=exit` frame value.
+    let neg = code < 0;
+    let mut n = code.unsigned_abs();
     let mut i = buf.len();
     loop {
         i -= 1;
@@ -826,6 +825,30 @@ mod tests {
                 .any(|s| s.color == sheet.err);
             assert_eq!(has_err_seg, expect_badge, "exit {}", code);
         }
+    }
+
+    #[test]
+    fn exit_badge_i64_min_does_not_panic() {
+        // `mark k=exit code=<i64::MIN>` is an untrusted frame; the badge's
+        // magnitude must come from unsigned_abs, not `-code` (which panics on
+        // i64::MIN under overflow-checks -> the console dies) (F2).
+        let sheet = parchment_sheet();
+        let mut g = gs();
+        let mut t = Transcript::new(parchment());
+        let mut buf = Vec::new();
+        wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
+        buf.extend_from_slice(b"did things\n");
+        wire::point(&mut buf, BOp::Mark, &[("k", "exit"), ("code", "-9223372036854775808")]);
+        wire::close(&mut buf, BOp::Zone);
+        t.feed(&buf);
+        // Must not panic; the failure badge renders (nonzero exit).
+        let laid = layout_block(&t.frozen_blocks()[0], 400, &sheet, &mut g);
+        let has_err_seg = laid
+            .lines
+            .iter()
+            .flat_map(|l| l.segs.iter())
+            .any(|s| s.color == sheet.err);
+        assert!(has_err_seg, "the i64::MIN exit still renders a failure badge");
     }
 
     #[test]

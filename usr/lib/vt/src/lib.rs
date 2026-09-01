@@ -406,7 +406,7 @@ impl Vt {
         self.alt_cells = alt;
         self.cols = ncols;
         self.rows = nrows;
-        self.cy = if self.cy >= shift { self.cy - shift } else { 0 };
+        self.cy = self.cy.saturating_sub(shift);
         if self.cy >= nrows {
             self.cy = nrows - 1;
         }
@@ -576,7 +576,10 @@ impl Vt {
     fn csi(&mut self, b: u8) {
         match b {
             b'0'..=b'9' => {
-                self.cur_param = self.cur_param.saturating_mul(10) + (b - b'0') as u32;
+                self.cur_param = self
+                    .cur_param
+                    .saturating_mul(10)
+                    .saturating_add((b - b'0') as u32);
                 self.param_seen = true;
             }
             b';' => {
@@ -642,22 +645,20 @@ impl Vt {
                 self.cy = self.saved.1.min(self.rows - 1);
             }
             b'r' => {} // DECSTBM: accepted, ignored (full-screen scroll; MVP seam)
-            b'n' => {
-                // DSR. 6 = CPR: answer with the cursor position -- kaua's
-                // size handshake (SAVE + park-far + [6n + RESTORE) reads the
-                // parked report to learn the real grid; an unanswered
-                // request strands every Kaua app at its 80x24 fallback. The
-                // reply goes out via `reply` (the main loop writes it into
-                // the consfeed fd -- the keyboard wire, like any terminal).
-                if self.p(0, 0) == 6 {
-                    let row = self.cy + 1;
-                    let col = self.cx.min(self.cols - 1) + 1;
-                    self.reply.extend_from_slice(b"\x1b[");
-                    push_dec(&mut self.reply, row);
-                    self.reply.push(b';');
-                    push_dec(&mut self.reply, col);
-                    self.reply.push(b'R');
-                }
+            // DSR. 6 = CPR: answer with the cursor position -- kaua's size
+            // handshake (SAVE + park-far + [6n + RESTORE) reads the parked
+            // report to learn the real grid; an unanswered request strands
+            // every Kaua app at its 80x24 fallback. The reply goes out via
+            // `reply` (the main loop writes it into the consfeed fd -- the
+            // keyboard wire, like any terminal).
+            b'n' if self.p(0, 0) == 6 => {
+                let row = self.cy + 1;
+                let col = self.cx.min(self.cols - 1) + 1;
+                self.reply.extend_from_slice(b"\x1b[");
+                push_dec(&mut self.reply, row);
+                self.reply.push(b';');
+                push_dec(&mut self.reply, col);
+                self.reply.push(b'R');
             }
             _ => {}
         }
@@ -1048,6 +1049,17 @@ mod tests {
         feed(&mut vt, b"\x1b[1K");
         // Survived without a panic; the grid is intact (the row was cleared).
         assert_eq!(vt.cells.len(), 32);
+    }
+
+    // A ~10-digit CSI numeric parameter: the accumulator's multiply
+    // saturates but a plain `+ digit` add overflows u32 -> panic under the
+    // shipped overflow-checks profile -> the console (aurora AND halcyond,
+    // which share this scanner) dies. One untrusted escape sequence.
+    #[test]
+    fn csi_param_overflow_does_not_panic() {
+        let mut vt = Vt::new(8, 2);
+        feed(&mut vt, b"\x1b[9999999999mX"); // huge SGR param, then a printable
+        assert_eq!(vt.cells[0].ch, 'X'); // absorbed; the text after survives
     }
 
     // The classic full-width type-past-the-edge deferred wrap: writing cols+1

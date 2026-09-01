@@ -247,7 +247,7 @@ fn parse_body(body: &[u8]) -> Option<Event> {
     let (closing, opname) = if opf.first() == Some(&b'/') {
         (true, &opf[1..])
     } else {
-        (false, &opf[..])
+        (false, opf)
     };
     let op = Op::parse(core::str::from_utf8(opname).ok()?)?;
     if closing {

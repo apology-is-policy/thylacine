@@ -216,7 +216,7 @@ impl<'a> Sink<'a> {
     }
 }
 
-fn fmt_i64<'b>(buf: &'b mut [u8; 24], v: i64) -> &'b str {
+fn fmt_i64(buf: &mut [u8; 24], v: i64) -> &str {
     let mut i = buf.len();
     let neg = v < 0;
     let mut u = v.unsigned_abs();
@@ -304,8 +304,7 @@ impl Table {
     pub fn realize(&self, s: &mut Sink) {
         // Column widths from content (visible chars, the boxd discipline).
         let ncols = self.cols.len();
-        let mut w: Vec<usize> = Vec::new();
-        w.resize(ncols, 0);
+        let mut w: Vec<usize> = alloc::vec![0usize; ncols];
         for row in &self.rows {
             for (i, c) in row.iter().enumerate().take(ncols) {
                 let cw = Self::width(&c.text);
