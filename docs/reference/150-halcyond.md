@@ -135,7 +135,7 @@ second `/srv/tapestry` root fd (the console `Surface` keeps its own
 private). `layout` gives the visible leaves (lines `<id>[*] leaf ...`; a
 trailing `hidden` is skipped; `*` marks the focused leaf); `pane/<id>/tagbar`
 gives the strip as `x y w h` (ZERO = bar-free: a single fullscreen leaf, or
-one too short to spare it); `pane/<id>/tag` gives the NAME; `pane/<id>/status`
+one too short to spare it); `pane/<id>/tag` gives the NAME (every file is read to EOF, never by one bounded read); `pane/<id>/status`
 gives the tile's RECORDED last-command status (`resting|ok|err`), read only for
 the focused leaf — the only tile a status can show on. halcyond names its own
 pane once through the `tag` file (`"halcyon"` — HALCYON-VISUAL §4.1: the name
@@ -161,16 +161,23 @@ on the CONSOLE surface's conn (the gate reads the conn's kernel-stamped peer,
 and this process holds the renderer role), then reconciles so the strip
 re-reads the record. Held while the console is not yet up or the own pane is
 not yet known; a newer exit replaces an unsent older one. Display-only: a
-refusal is said once (`halcyond: tag status refused`) and the feed stops —
-the bars stay resting-keyed, nothing else degrades.
+refusal drops that exit and is said once (`halcyond: tag status refused`);
+the next exit mark tries again (the round's F4: a one-shot latch had turned
+one transient refusal into a session-long loss of the live key).
 
 **The reconcile.** Diff the wanted set (every visible leaf with a non-ZERO
 strip) against the live tiles: gone or bar-free → drop (a dropped `Surface`
-closes its conn and the compositor retires the surface; pane ids are never
-reused, so a stale key can only mean gone); new → `Surface::chrome_on(id, w,
-h)` (a failure is said and skipped — the next relayout retries); kept →
-repaint (focus and names move; a same-size relayout also blanked the strip to
-the compositor's resting fill).
+closes its own files, the shared session stays, and the compositor retires
+the surface; pane ids are never reused, so a stale key can only mean gone);
+new → `Surface::chrome_on_shared(troot, id, w, h)` — minted on the pane-tree
+session, never on a session of its own (the H-3b round's R2-F2: a session per
+bar exhausted the compositor's conn pool at three windows and turned every
+further mint into a blocking connect inside this loop; the renderer's
+per-conn surface cap is widened by `MAX_PANES` server-side); a failure is
+said once per pane and retried on the next reconcile (it fails fast at the
+mint); kept → repaint (focus and names move; a same-size relayout also
+blanked the strip to the compositor's resting fill). A tile whose bound pane
+closed is told by the compositor (TEV_CLOSE) and dropped on the next pump.
 
 **When it runs.** Only after the console's first successful present — the
 scanout is first-present-wins and chrome must never precede it — and then on
@@ -199,7 +206,11 @@ stream marks the tile for the next reconcile.
 
 ## Tests
 
-- Host: 47 lib tests (the table above) — all `--offline` against the
+- Host: 48 lib tests (the table above; incl. the round's F1 regression
+  `open_block_freezes_on_bytes_so_the_budget_can_evict_it` — the OPEN block
+  now freezes on bytes, `max_open_cost` = budget/8, so the budget's
+  frozen-only eviction can reach a newline-free stream; before it 320 MiB
+  could accrue in one open block against a 64 MiB heap) — all `--offline` against the
   vendored registry.
 - In-guest: `tools/interactive/ls-halcyon.exp` — GATED on the baked lever
   (`THYLACINE_HALCYON=1` bakes `/lib/halcyon/renderer`; the scenario SKIPs

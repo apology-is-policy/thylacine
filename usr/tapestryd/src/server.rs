@@ -145,9 +145,31 @@ const MAX_FIDS: usize = 512;
 pub const SRV_MSIZE: u32 = 32768;
 const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 
-/// F9: the per-client surface-count cap + the global slot pool.
-const MAX_SURFACES: usize = 8;
+/// F9: the per-client surface-count cap + the global slot pool. The pool
+/// is sized so every conn can reach its cap at once -- the renderer's cap
+/// includes one chrome surface per pane (H-3b: the per-leaf tag bars ride
+/// the renderer's conn; the H-3b round R2-F2 found a conn-per-bar design
+/// exhausting an 8-slot pool at three windows).
 const MAX_SURFACES_PER_CONN: usize = 4;
+
+/// Who is driving a layout mutation (the pane tree's trust model,
+/// HALCYON.md 13.6): the console renderer is the environment and may act
+/// on any pane; any other conn acts only on what it OWNS -- rio's line (a
+/// client drives its own window's wctl; the window manager drives the
+/// rest). Resolved per write from the conn's kernel-stamped peer.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Actor {
+    Renderer,
+    Client(u64),
+}
+
+/// Layout mutations one conn may land per service pass (the H-3b round
+/// R2-F1 (d): every structural verb is a full repaint + flush, and a
+/// pipelined batch could land ~1000 in one pass). Beyond it: E_AGAIN --
+/// the next pass takes the rest.
+const LAYOUT_VERBS_PER_PASS: u32 = 4;
+const MAX_SURFACES_PER_RENDERER: usize = MAX_SURFACES_PER_CONN + pane::MAX_PANES;
+const MAX_SURFACES: usize = MAX_CONNS * MAX_SURFACES_PER_CONN + pane::MAX_PANES;
 
 /// Warp-2c: the GPU-seam slot pools. ONE context per client (the I-45
 /// exposure bound, GPU-DESIGN section 8: no cross-context resource naming,
@@ -440,19 +462,18 @@ fn is_surf(path: u64) -> bool {
 
 /// Pane qids name the pane's PUBLIC id (monotonic, never reused -- the
 /// net-3d discipline structurally: a stale pane fid resolves to nothing).
-/// PIN (G-6d F4): the qid carries only the low N_MASK (24) bits of the id,
-/// while the `layout` file parses the FULL u32 from its command string. The
-/// two agree for the first 2^24 pane allocations; past that the pane-ctl-file
-/// path (truncated qid) and the layout-file path (full id) would diverge for
-/// the same pane (a miss -> E_NOENT, never a crash or a cross-pane alias --
-/// ids stay unique). ~16.7M split+close cycles over the wire: unreachable.
-/// Widen the pane-id field (bits 8..40 are free below PANE_FLAG) before that
-/// assumption can bite.
+/// The FULL u32 id rides bits 8..40 (below SURF_FLAG at bit 40), so the
+/// pane-file path and the `layout`-file path name the same pane for every
+/// id the allocator can issue. (G-6d F4 pinned a 24-bit field here and
+/// claimed a past-2^24 miss could never alias; the H-3b round R2-F4 showed
+/// the truncated id DID alias a live pane -- the root, alive for the
+/// process lifetime -- so the field is now the id's own width.)
+const PANE_ID_MASK: u64 = 0xffff_ffff;
 fn make_pane(id: u32, fk: u64) -> u64 {
-    PANE_FLAG | ((id as u64 & N_MASK) << 8) | (fk & FK_MASK)
+    PANE_FLAG | ((id as u64 & PANE_ID_MASK) << 8) | (fk & FK_MASK)
 }
 fn pane_id(path: u64) -> u32 {
-    ((path >> 8) & N_MASK) as u32
+    ((path >> 8) & PANE_ID_MASK) as u32
 }
 fn pane_fk(path: u64) -> u64 {
     path & FK_MASK
@@ -689,6 +710,7 @@ const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 const DIR_MODE: u32 = S_IFDIR | 0o555;
 const FILE_RW: u32 = S_IFREG | 0o666;
+const FILE_RO: u32 = S_IFREG | 0o444;
 const P9_GETATTR_SIZE: u64 = 0x200;
 
 // =============================================================================
@@ -4714,7 +4736,31 @@ impl Comp {
     ///   - anything else visible (splits, letterbox, empty panes) ->
     ///     Composed (the screen resource scans out; presents blit);
     ///   - nothing at all -> Off (Boot stays untouched pre-first-content).
+    /// The H-3b round R2-F3: a chrome surface whose bound pane closed is
+    /// TOLD (TEV_CLOSE, the request a hosted surface gets) and unbound, so
+    /// its owner learns through the surface's own stream instead of the
+    /// compositor silently holding the fact; unbound, it composes nowhere.
+    fn reap_orphan_chrome(&mut self) {
+        let mut orphans: Vec<usize> = Vec::new();
+        for n in 0..MAX_SURFACES {
+            if let Some(s) = self.surf(n) {
+                if let Some(pid) = s.chrome_bind {
+                    if self.layout.slot_of_id(pid).is_none() {
+                        orphans.push(n);
+                    }
+                }
+            }
+        }
+        for n in orphans {
+            if let Some(s) = self.surf_mut(n) {
+                s.chrome_bind = None;
+            }
+            self.send_close(n);
+        }
+    }
+
     fn reconcile(&mut self) {
+        self.reap_orphan_chrome();
         let (dw, dh) = (self.gpu.width, self.gpu.height);
         self.layout.recompute(dw, dh, self.chords.gaps);
         let vis = self.layout.visible_hosted();
@@ -5054,7 +5100,47 @@ impl Comp {
     /// `split <id> h|v`, `close <id>`, `focus <id>`, `mode <id> <mode>`,
     /// `move <id> <dir>`, `zoom <id>` -- plus the id-less verbs acting on
     /// the focused leaf (G-6c): `focusdir <dir>`, `tab next|prev`.
-    pub fn layout_cmd(&mut self, s: &str) -> Result<(), u32> {
+    /// The pane tree's trust model (HALCYON.md 13.6; the H-3b round F2 /
+    /// R2-F1): the actor may MUTATE the subtree at `slot` iff every hosted
+    /// surface in it is its own -- empty leaves belong to nobody and never
+    /// block, an all-empty subtree is anyone's. The renderer is the
+    /// environment and may act anywhere.
+    fn actor_owns_subtree(&self, actor: Actor, slot: usize) -> bool {
+        match actor {
+            Actor::Renderer => true,
+            Actor::Client(c) => self
+                .layout
+                .subtree_surfaces(slot)
+                .iter()
+                .all(|&n| self.surf(n).map_or(false, |s| s.owner_conn == c)),
+        }
+    }
+
+    /// The actor may TAKE or NAME the tile at `slot`: a leaf hosting the
+    /// actor's own surface. Focus and identity are a hosted tile's; an
+    /// empty leaf is nobody's to focus (keystrokes to nowhere) or to name.
+    fn actor_hosts(&self, actor: Actor, slot: usize) -> bool {
+        match actor {
+            Actor::Renderer => true,
+            Actor::Client(c) => self
+                .layout
+                .leaf_surface(slot)
+                .and_then(|n| self.surf(n))
+                .map_or(false, |s| s.owner_conn == c),
+        }
+    }
+
+    /// `tag` / `role` on a pane: a leaf is named by its host, a container
+    /// by whoever owns its whole subtree.
+    fn actor_names(&self, actor: Actor, slot: usize) -> bool {
+        if self.layout.is_leaf(slot) {
+            self.actor_hosts(actor, slot)
+        } else {
+            self.actor_owns_subtree(actor, slot)
+        }
+    }
+
+    pub fn layout_cmd(&mut self, actor: Actor, s: &str) -> Result<(), u32> {
         let s = s.trim();
         let mut it = s.splitn(2, ' ');
         let verb = it.next().ok_or(p9::E_INVAL)?;
@@ -5063,9 +5149,15 @@ impl Comp {
             "focusdir" => {
                 let d = Dir::parse(rest).ok_or(p9::E_INVAL)?;
                 // A miss (screen edge; zoomed) is a no-op, not an error --
-                // the chord ergonomic.
-                if self.layout.focus_dir(d) {
-                    self.reconcile();
+                // the chord ergonomic. The destination must be the
+                // actor's own tile (a client walks focus only onto itself).
+                if let Some(dest) = self.layout.neighbor_dir(d) {
+                    if !self.actor_hosts(actor, dest) {
+                        return Err(p9::E_PERM);
+                    }
+                    if self.layout.focus(dest) {
+                        self.reconcile();
+                    }
                 }
                 return Ok(());
             }
@@ -5075,6 +5167,13 @@ impl Comp {
                     "prev" => false,
                     _ => return Err(p9::E_INVAL),
                 };
+                // Cycling reveals another child of the tab container: the
+                // actor must own that whole container.
+                if let Some(anc) = self.layout.tab_ancestor(self.layout.focused) {
+                    if !self.actor_owns_subtree(actor, anc) {
+                        return Err(p9::E_PERM);
+                    }
+                }
                 // Revealing another tab is meaningless zoomed: restore
                 // the layout first (the tmux rule).
                 self.layout.unzoom();
@@ -5106,16 +5205,19 @@ impl Comp {
             }
             _ => return Err(p9::E_INVAL),
         };
-        self.pane_cmd(id, &cmd)
+        self.pane_cmd(actor, id, &cmd)
     }
 
     /// One layout mutation targeting pane `id` (shared by the layout file
     /// and each pane's ctl). Every successful mutation reconciles.
     /// Structural verbs restore a zoomed layout first (the tmux rule);
     /// `focus` keeps zoom only when it names the zoomed pane itself.
-    pub fn pane_cmd(&mut self, id: u32, cmd: &str) -> Result<(), u32> {
+    pub fn pane_cmd(&mut self, actor: Actor, id: u32, cmd: &str) -> Result<(), u32> {
         let slot = self.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
         let cmd = cmd.trim();
+        // The trust model, per verb (syntax first, then authority): a
+        // subtree mutation needs the subtree; taking focus (focus, zoom)
+        // needs the tile itself.
         if let Some(rest) = cmd.strip_prefix("split ") {
             let mode = match rest.trim() {
                 "h" => Mode::SplitH,
@@ -5125,19 +5227,34 @@ impl Comp {
             if !self.layout.is_leaf(slot) {
                 return Err(p9::E_INVAL);
             }
+            if !self.actor_owns_subtree(actor, slot) {
+                return Err(p9::E_PERM);
+            }
             self.layout.unzoom();
             self.layout.split(slot, mode).ok_or(p9::E_NOMEM)?;
         } else if let Some(rest) = cmd.strip_prefix("move ") {
             let d = Dir::parse(rest.trim()).ok_or(p9::E_INVAL)?;
+            if !self.actor_owns_subtree(actor, slot) {
+                return Err(p9::E_PERM);
+            }
             self.layout.unzoom();
             if !self.layout.move_dir(slot, d) {
                 return Err(p9::E_INVAL);
             }
         } else if cmd == "zoom" {
+            if !self.layout.is_leaf(slot) {
+                return Err(p9::E_INVAL);
+            }
+            if !self.actor_hosts(actor, slot) {
+                return Err(p9::E_PERM);
+            }
             if !self.layout.zoom_toggle(slot) {
                 return Err(p9::E_INVAL);
             }
         } else if cmd == "close" {
+            if !self.actor_owns_subtree(actor, slot) {
+                return Err(p9::E_PERM);
+            }
             // Closing a pane strands its surfaces invisible BY DESIGN
             // (hosting is once-per-life, at create) and asks each
             // stranded client to exit via the queued TEV_CLOSE (G-6b).
@@ -5151,6 +5268,10 @@ impl Comp {
                 self.send_close(n);
             }
         } else if cmd == "focus" {
+            let leaf = self.layout.first_leaf(slot).ok_or(p9::E_INVAL)?;
+            if !self.actor_hosts(actor, leaf) {
+                return Err(p9::E_PERM);
+            }
             if self.layout.zoom_id() != Some(id) {
                 self.layout.unzoom();
             }
@@ -5159,6 +5280,10 @@ impl Comp {
             }
         } else if let Some(m) = cmd.strip_prefix("mode ") {
             let mode = Mode::parse(m.trim()).ok_or(p9::E_INVAL)?;
+            let target = self.layout.mode_target(slot).ok_or(p9::E_INVAL)?;
+            if !self.actor_owns_subtree(actor, target) {
+                return Err(p9::E_PERM);
+            }
             self.layout.unzoom();
             if !self.layout.set_mode(slot, mode) {
                 return Err(p9::E_INVAL);
@@ -5341,6 +5466,17 @@ impl Comp {
                 return true;
             }
             // Falls through to the non-droppable push below.
+        }
+        if ev.kind == TEV_FOCUS {
+            // Focus is a STATE, like CONFIGURE: an unread queued FOCUS is
+            // superseded by the newest wholesale (the H-3b round R2-F1: a
+            // focus flap storm within one service pass filled a victim's
+            // queue with non-droppable FOCUS records and wedge-retired it;
+            // a client that never read the transient gain lost nothing).
+            if let Some(c) = s.events.iter_mut().find(|e| e.kind == TEV_FOCUS) {
+                *c = ev;
+                return true;
+            }
         }
         if s.events.len() >= EVENT_QUEUE_CAP {
             // Evict one coalescible to make room for the non-droppable.
@@ -5832,7 +5968,7 @@ impl Comp {
             ChordAction::Close => {
                 let f = self.layout.focused;
                 if let Some(id) = self.layout.id_of(f) {
-                    let _ = self.pane_cmd(id, "close");
+                    let _ = self.pane_cmd(Actor::Renderer, id, "close");
                 }
             }
         }
@@ -10612,6 +10748,8 @@ fn map_fenced_err(e: FencedErr) -> u32 {
 pub struct Conn {
     handle: i64,
     pub conn_id: u64,
+    /// Layout mutations landed in the current service pass.
+    layout_verbs: u32,
     /// Which tree this conn serves: P_ROOT (/srv/tapestry) or W_ROOT
     /// (/srv/warp) -- set by which listener accepted it (Warp-2c). One Conn
     /// type for both; the qid spaces are disjoint, so a warp conn simply
@@ -10698,6 +10836,7 @@ impl Conn {
         Conn {
             handle,
             conn_id,
+            layout_verbs: 0,
             root,
             version_done: false,
             msize: SRV_MSIZE,
@@ -10826,6 +10965,7 @@ impl Conn {
     // --- frame pump (the ptyfs bodies, verbatim shape) -----------------------
 
     pub fn service(&mut self, comp: &mut Comp) -> bool {
+        self.layout_verbs = 0;
         let cur = self.in_buf.len();
         if cur >= SRV_MSIZE_USIZE {
             return false;
@@ -11274,8 +11414,17 @@ impl Conn {
         // The mint idiom (netd clone / ptyfs ptmx): opening surface/new
         // allocates a surface in THIS conn and rebinds the fid onto its ctl.
         if f.path == P_SURF_NEW {
-            if comp.owned_count(self.conn_id) >= MAX_SURFACES_PER_CONN {
-                return self.err(tag, p9::E_NOMEM); // F9 per-conn cap
+            // F9 per-conn cap. The renderer (the environment) owns one
+            // chrome surface per visible leaf on top of its own, so its cap
+            // is widened by MAX_PANES; the global pool is sized so every
+            // conn can reach its cap at once (nothing starves).
+            let cap = if self.peer_is_renderer() {
+                MAX_SURFACES_PER_RENDERER
+            } else {
+                MAX_SURFACES_PER_CONN
+            };
+            if comp.owned_count(self.conn_id) >= cap {
+                return self.err(tag, p9::E_NOMEM);
             }
             let conn_id = self.conn_id;
             let n = match comp.mint(conn_id) {
@@ -12367,11 +12516,20 @@ impl Conn {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
         let id = pane_id(path);
+        let actor = self.actor();
         match pane_fk(path) {
-            PFK_CTL => comp.pane_cmd(id, s),
+            PFK_CTL => {
+                self.layout_verb_budget()?;
+                comp.pane_cmd(actor, id, s)
+            }
             PFK_MODE => {
                 let mode = Mode::parse(s).ok_or(p9::E_INVAL)?;
                 let slot = comp.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
+                let target = comp.layout.mode_target(slot).ok_or(p9::E_INVAL)?;
+                if !comp.actor_owns_subtree(actor, target) {
+                    return Err(p9::E_PERM);
+                }
+                self.layout_verb_budget()?;
                 if !comp.layout.set_mode(slot, mode) {
                     return Err(p9::E_INVAL);
                 }
@@ -12380,11 +12538,19 @@ impl Conn {
             }
             PFK_TAG => {
                 let slot = comp.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
+                // The name is a RENDERED identity claim (the tag bar): only
+                // the tile's host or the environment may make it.
+                if !comp.actor_names(actor, slot) {
+                    return Err(p9::E_PERM);
+                }
                 comp.layout.get_mut(slot).unwrap().tag = String::from(s);
                 Ok(())
             }
             PFK_ROLE => {
                 let slot = comp.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
+                if !comp.actor_names(actor, slot) {
+                    return Err(p9::E_PERM);
+                }
                 let mut it = s.split_ascii_whitespace();
                 let role = Role::parse(it.next().ok_or(p9::E_INVAL)?).ok_or(p9::E_INVAL)?;
                 let focusable = match it.next() {
@@ -12426,9 +12592,11 @@ impl Conn {
             };
         }
         if f.path == P_LAYOUT {
+            let actor = self.actor();
             return match core::str::from_utf8(a.data)
                 .map_err(|_| p9::E_INVAL)
-                .and_then(|s| comp.layout_cmd(s))
+                .and_then(|s| self.layout_verb_budget().map(|_| s))
+                .and_then(|s| comp.layout_cmd(actor, s))
             {
                 Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                 Err(e) => self.err(tag, e),
@@ -13155,6 +13323,25 @@ impl Conn {
     /// CONSTRUCTION, realizing the scripture's "a new global verb defaults
     /// to GATED" (an allowlist would silently ungate a verb added without
     /// touching the gate line).
+    /// The pane-tree actor this conn is, for this write (per write:
+    /// revocation-correct, like the global-ctl gate).
+    fn actor(&self) -> Actor {
+        if self.peer_is_renderer() {
+            Actor::Renderer
+        } else {
+            Actor::Client(self.conn_id)
+        }
+    }
+
+    /// One layout mutation's per-pass budget (see LAYOUT_VERBS_PER_PASS).
+    fn layout_verb_budget(&mut self) -> Result<(), u32> {
+        if self.layout_verbs >= LAYOUT_VERBS_PER_PASS {
+            return Err(p9::E_AGAIN);
+        }
+        self.layout_verbs += 1;
+        Ok(())
+    }
+
     fn is_ungated_ctl(s: &str) -> bool {
         s == "test-mode on"
             || s == "test-mode off"
@@ -14310,8 +14497,15 @@ impl Conn {
         };
         let f = self.fids[i].unwrap();
         let _ = comp;
+        // The read-only pane leaves say so (the H-3b round R2-F6): the
+        // kernel's rwx layer reads the mode, so a write-open fails at the
+        // open, not only at the Twrite.
+        let ro = is_pane(f.path)
+            && matches!(pane_fk(f.path), PFK_SURFACE | PFK_GEOMETRY | PFK_TAGBAR | PFK_STATUS);
         let (mode, nlink) = if is_dir(f.path) {
             (DIR_MODE, 2u64)
+        } else if ro {
+            (FILE_RO, 1u64)
         } else {
             (FILE_RW, 1u64)
         };

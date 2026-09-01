@@ -27,18 +27,34 @@ fn say(s: &str) {
     let _ = libthyla_rs::t_putstr(&t);
 }
 
+/// Read a pane-tree file to EOF. Reads until a zero-length return (never
+/// one `t_read`: a `layout` past one read's worth would silently drop the
+/// leaves after the cut -- the H-3b round F3), bounded by `READ_MAX`
+/// (the tree's files are small by construction; the bound is a backstop
+/// against a runaway server, not a size the parse relies on).
 fn read_file(root: i64, path: &str) -> Option<String> {
+    const READ_MAX: usize = 1 << 20;
     let fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OREAD) };
     if fd < 0 {
         return None;
     }
-    let mut buf = alloc::vec![0u8; 4096];
-    let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
-    unsafe { t_close(fd) };
-    if n < 0 {
-        return None;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = alloc::vec![0u8; 4096];
+    loop {
+        let n = unsafe { t_read(fd, chunk.as_mut_ptr(), chunk.len()) };
+        if n < 0 {
+            unsafe { t_close(fd) };
+            return None;
+        }
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n as usize]);
+        if buf.len() >= READ_MAX {
+            break;
+        }
     }
-    buf.truncate(n as usize);
+    unsafe { t_close(fd) };
     String::from_utf8(buf).ok()
 }
 
@@ -68,11 +84,15 @@ pub struct ChromeSet {
     /// The leaf hosting the console surface, as the last layout read named
     /// it (the target of the status verb).
     own_pane: Option<u32>,
+    /// Panes whose chrome mint failed and was said (the retry is per
+    /// reconcile -- it fails fast at the mint now that no connect is
+    /// involved -- but the line is said once per pane).
+    failed_said: Vec<u32>,
 }
 
 impl ChromeSet {
     pub fn new() -> ChromeSet {
-        ChromeSet { tiles: BTreeMap::new(), own_named: false, own_pane: None }
+        ChromeSet { tiles: BTreeMap::new(), own_named: false, own_pane: None, failed_said: Vec::new() }
     }
 
     /// The public id of the leaf hosting the console surface, once a
@@ -139,13 +159,24 @@ impl ChromeSet {
                     // the strip to its resting fill.
                     t.dirty = true;
                 }
-                None => match Surface::chrome_on(id, w, h) {
+                // Minted on the pane-tree session (`troot`), never on a
+                // session of its own: the H-3b round R2-F2 -- a session per
+                // bar exhausted the compositor's conn pool at three windows,
+                // and every further mint became a 5 s blocking connect
+                // inside this single-threaded loop.
+                None => match Surface::chrome_on_shared(troot, id, w, h) {
                     Ok(surf) => {
                         let mut t = Tile { surf, key, name, dirty: true, dead: false };
                         paint(&mut t, gs);
+                        self.failed_said.retain(|&f| f != id);
                         self.tiles.insert(id, t);
                     }
-                    Err(e) => say(&format!("halcyond: chrome for pane {} failed {:?}", id, e)),
+                    Err(e) => {
+                        if !self.failed_said.contains(&id) {
+                            self.failed_said.push(id);
+                            say(&format!("halcyond: chrome for pane {} failed {:?}", id, e));
+                        }
+                    }
                 },
             }
         }

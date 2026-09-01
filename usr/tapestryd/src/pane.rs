@@ -253,9 +253,13 @@ impl Layout {
         if live >= MAX_PANES {
             return None;
         }
-        self.id_seq += 1;
+        // Ids are never reused, so exhaustion REFUSES rather than wraps (a
+        // wrap would alias a live id); 2^32 allocations away, but the
+        // counter is driven by a client verb, so it fails clean.
+        let id = self.id_seq.checked_add(1)?;
+        self.id_seq = id;
         let p = Pane {
-            id: self.id_seq,
+            id,
             parent,
             kind,
             role: Role::Content,
@@ -483,6 +487,15 @@ impl Layout {
         self.dissolve_if_single(parent);
     }
 
+    /// Every hosted surface in the subtree at `slot` (the pane-tree trust
+    /// model's ownership question: a client owns a subtree iff every one of
+    /// these is its own).
+    pub fn subtree_surfaces(&self, slot: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        self.collect_surfaces(slot, &mut out);
+        out
+    }
+
     fn collect_surfaces(&self, slot: usize, out: &mut Vec<usize>) {
         match self.get(slot).map(|p| &p.kind) {
             Some(Kind::Leaf { surface: Some(n) }) => out.push(*n),
@@ -596,14 +609,20 @@ impl Layout {
         }
     }
 
-    /// Set a container's mode (a leaf targets its parent container --
-    /// the i3 shape). False = no container to act on.
-    pub fn set_mode(&mut self, slot: usize, mode: Mode) -> bool {
-        let target = match self.get(slot).map(|p| &p.kind) {
+    /// The container a `mode` on `slot` acts on: the pane itself, or a
+    /// leaf's parent (the i3 shape). None = nothing to act on.
+    pub fn mode_target(&self, slot: usize) -> Option<usize> {
+        match self.get(slot).map(|p| &p.kind) {
             Some(Kind::Container { .. }) => Some(slot),
             Some(Kind::Leaf { .. }) => self.get(slot).and_then(|p| p.parent),
             None => None,
-        };
+        }
+    }
+
+    /// Set a container's mode (a leaf targets its parent container --
+    /// the i3 shape). False = no container to act on.
+    pub fn set_mode(&mut self, slot: usize, mode: Mode) -> bool {
+        let target = self.mode_target(slot);
         match target {
             Some(t) => {
                 if let Some(Kind::Container { mode: m, .. }) =
@@ -661,9 +680,18 @@ impl Layout {
     /// orthogonal overlap. False = no candidate (edge of the screen, or
     /// zoomed -- only one leaf is visible then).
     pub fn focus_dir(&mut self, dir: Dir) -> bool {
+        match self.neighbor_dir(dir) {
+            Some(s) => self.focus(s),
+            None => false,
+        }
+    }
+
+    /// The leaf `focus_dir` would move to, without moving (the pane-tree
+    /// gate asks before it lets a client walk focus onto a tile).
+    pub fn neighbor_dir(&self, dir: Dir) -> Option<usize> {
         let fr = match self.get(self.focused) {
             Some(p) => p.rect,
-            None => return false,
+            None => return None,
         };
         let overlap = |a1: u32, l1: u32, a2: u32, l2: u32| -> u32 {
             let lo = a1.max(a2);
@@ -701,9 +729,22 @@ impl Layout {
                 best = Some((slot, dist, ov));
             }
         }
-        match best {
-            Some((s, _, _)) => self.focus(s),
-            None => false,
+        best.map(|(s, _, _)| s)
+    }
+
+    /// The nearest tab/stack ancestor of `slot` (the container `tab_cycle`
+    /// acts on from there). None: no tabbed or stacked ancestor.
+    pub fn tab_ancestor(&self, slot: usize) -> Option<usize> {
+        let mut cur = slot;
+        loop {
+            let p = self.get(cur).and_then(|p| p.parent)?;
+            if matches!(
+                self.get(p).map(|q| &q.kind),
+                Some(Kind::Container { mode: Mode::Tabbed | Mode::Stacked, .. })
+            ) {
+                return Some(p);
+            }
+            cur = p;
         }
     }
 

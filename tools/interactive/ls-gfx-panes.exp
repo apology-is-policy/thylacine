@@ -152,6 +152,18 @@ expect {
     timeout { lc_fail "battery never reached the tag-status gate" }
 }
 
+# The pane tree's trust model (the H-3b round F2): a client acts only on
+# what it owns. From the battery, `close` / `focus` / a `tag` write on the
+# console renderer's pane are E_PERM and the pane is intact; `focus` on its
+# own pane succeeds. A headless SKIP line is a failure here: this image has
+# a console.
+expect {
+    -ex "battery: pane-tree gate OK" { lc_pass "panes: pane-tree gate refuses close/focus/tag on a foreign pane (E_PERM; tree intact); own pane ok" }
+    -ex "battery: pane-tree gate SKIPPED" { lc_fail "the pane-tree gate leg found no foreign pane on an image with a console" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the pane-tree gate leg failed" }
+    timeout { lc_fail "battery never reached the pane-tree gate" }
+}
+
 # Scenario 2 (G-6b): the resize protocol.
 expect {
     -ex "battery: resize rejects OK" { lc_pass "panes: resize-ack negative probes OK" }

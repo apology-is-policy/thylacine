@@ -563,8 +563,15 @@ impl Driver for Tapestryd {
             // -- in the console renderer, bypassing the whole idle
             // throttle. Each listener is armed iff its own accept can run.
             let warp_conns = conns.iter().filter(|c| c.root() == ROOT_WARP).count();
-            let arm_tapestry = conns.len() < MAX_CONNS;
-            let arm_warp = arm_tapestry && warp_conns < MAX_WARP_CONNS;
+            // Both listeners stay armed when the pool is FULL: the accept
+            // below then refuses the connect at once (accept + close), so
+            // the backlog entry is consumed (no spin) and the caller sees
+            // EOF immediately instead of blocking on the kernel handshake
+            // deadline (5 s) inside its own loop -- the H-3b round R2-F2's
+            // renderer stall. The warp arm still gates on ITS budget
+            // (audit F7: it must never starve the tapestry listener).
+            let arm_tapestry = true;
+            let arm_warp = warp_conns < MAX_WARP_CONNS;
             let mut pollfds: Vec<TPollFd> = Vec::new();
             if arm_tapestry {
                 pollfds.push(TPollFd {
@@ -619,17 +626,26 @@ impl Driver for Tapestryd {
                 if pollfds[idx].revents & T_POLLIN != 0 {
                     let h = unsafe { t_srv_accept(listener) };
                     if h >= 0 {
-                        let id = self.comp.next_conn_id();
-                        conns.push(Conn::new(h, id, ROOT_TAPESTRY));
+                        if conns.len() < MAX_CONNS {
+                            let id = self.comp.next_conn_id();
+                            conns.push(Conn::new(h, id, ROOT_TAPESTRY));
+                        } else {
+                            // Refuse fast: the pool is full.
+                            unsafe { t_close(h) };
+                        }
                     }
                 }
                 idx += 1;
             }
-            if arm_warp && pollfds[idx].revents & T_POLLIN != 0 && conns.len() < MAX_CONNS {
+            if arm_warp && pollfds[idx].revents & T_POLLIN != 0 {
                 let h = unsafe { t_srv_accept(warp_listener) };
                 if h >= 0 {
-                    let id = self.comp.next_conn_id();
-                    conns.push(Conn::new(h, id, ROOT_WARP));
+                    if conns.len() < MAX_CONNS {
+                        let id = self.comp.next_conn_id();
+                        conns.push(Conn::new(h, id, ROOT_WARP));
+                    } else {
+                        unsafe { t_close(h) };
+                    }
                 }
             }
 

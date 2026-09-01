@@ -650,6 +650,37 @@ and i3's per-window title bar are the prior art, both per-window). Concretely:
   (`halcyond::chrome`: the layout/rect parsers, the key derivation, the strip
   display list) are host-tested; the surfaces + fds live in the bin's
   `chromeset`.
+  AS-BUILT (the H-3b audit close; ratified under the standing authorization):
+  **the pane tree's trust model.** The per-pane files (`ctl`, `mode`, `tag`,
+  `role`) and the `layout` file were ungated since G-6 -- a session-scoped
+  layout API any client could drive. Once the tag bar renders a pane's `tag`
+  as *the tile's program* and the live key follows focus, that became a hole:
+  any client could `close` the console's leaf (halcyond exits on TEV_CLOSE),
+  steal focus (keystrokes routed to its tile -- the login prompt on the
+  graphical console included), flood a peer with FOCUS records until the
+  compositor wedge-retired it, or forge a tile's name. The model now is
+  rio's: **a client drives its own window; the environment drives the
+  rest.** The console renderer (`peer_is_renderer`, per write) may act on any
+  pane. Any other conn may MUTATE a subtree (`split`, `move`, `close`,
+  `mode`, `tab`) only if every hosted surface in it is its own (empty leaves
+  belong to nobody and never block; an all-empty subtree is anyone's), and
+  may TAKE or NAME a tile (`focus`, `zoom`, `focusdir`'s destination, `tag`,
+  `role`) only if that leaf hosts its own surface -- an empty leaf is nobody's
+  to focus (keystrokes to nowhere) or to name. E_PERM otherwise; every read
+  stays ungated (§13.7). The compositor's own chord layer acts as the
+  environment. Two defences ride beside it: FOCUS coalesces by replacement in
+  the event queue (focus is a state, like CONFIGURE), and one conn lands at
+  most four layout mutations per service pass (E_AGAIN beyond -- each is a
+  full repaint). **The chrome pool.** H-3b-3 minted each tag bar on a session
+  of its own against global pools of eight conns and eight surfaces, so a
+  third window filled both and every further mint became a five-second
+  blocking connect inside the renderer's loop. Now a tag bar is minted on the
+  renderer's pane-tree session (`Surface::chrome_on_shared`), the renderer
+  peer's per-conn surface cap is widened by `MAX_PANES`, the global pool is
+  sized so every conn can reach its cap at once, the listener stays armed
+  when the conn pool is full and refuses at once (accept + close, never a
+  blocking handshake), and a chrome surface whose bound pane closed is told
+  (TEV_CLOSE) and unbound rather than silently orphaned.
 
 **Pane chrome (H-3a).** Extend `paint_borders`/`paint_strips` from the flat 1px
 frame to Daylight §2: the NNW single-light-source 2px four-value bevel

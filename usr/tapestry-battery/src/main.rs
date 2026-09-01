@@ -95,17 +95,43 @@ fn nap(ms: u64) {
 /// returning t_write's rc (negative = -errno); the minted surface is
 /// destroyed again. The chrome-create gate probes need the errno, not
 /// write_file's bool.
-/// One global-ctl write on the battery's own conn, returning the raw rc
-/// (the errno, negated) rather than a bool: the tag-status gate probe
-/// needs to tell E_PERM from any other refusal.
-fn raw_ctl(root: i64, cmd: &str) -> i64 {
-    let fd = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OWRITE) };
+/// One write on the battery's own conn, returning the raw rc (the errno,
+/// negated) rather than a bool: the gate probes need to tell E_PERM from
+/// any other refusal.
+fn raw_write(root: i64, path: &str, cmd: &str) -> i64 {
+    let fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OWRITE) };
     if fd < 0 {
         return fd;
     }
     let rc = unsafe { t_write(fd, cmd.as_ptr(), cmd.len()) };
     unsafe { t_close(fd) };
     rc
+}
+
+fn raw_ctl(root: i64, cmd: &str) -> i64 {
+    raw_write(root, "ctl", cmd)
+}
+
+/// The pane hosting a surface that is NOT one of `ours` -- on the default
+/// image the console renderer's (aurora's) leaf. None on a headless run.
+fn foreign_pane(layout: &str, ours: &[u32]) -> Option<u32> {
+    for line in layout.lines() {
+        let line = line.trim();
+        if !line.contains(" leaf ") {
+            continue;
+        }
+        let mut it = line.split_ascii_whitespace();
+        let id: u32 = it.next()?.trim_end_matches('*').parse().ok()?;
+        let n: Option<u32> = it
+            .find(|t| t.starts_with("surface="))
+            .and_then(|t| t["surface=".len()..].parse().ok());
+        if let Some(n) = n {
+            if !ours.contains(&n) {
+                return Some(id);
+            }
+        }
+    }
+    None
 }
 
 fn raw_create(root: i64, cmd: &str) -> i64 {
@@ -543,6 +569,57 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
         say!("battery: tag-status gate OK");
+    }
+
+    // The pane tree's trust model (the H-3b round F2; HALCYON.md 13.6): a
+    // client acts only on what it OWNS -- a leaf hosting its own surface, a
+    // subtree whose hosted surfaces are all its own -- and the renderer on
+    // anything. The console renderer's leaf is neither ours nor empty, so
+    // from this battery: `close` (the console-kill), `focus` (the input
+    // steal) and a `tag` write (the rendered-identity forge) are all E_PERM,
+    // and the pane is intact afterwards (still hosting its surface, its tag
+    // unchanged). The positive control one variable away: the same `focus`
+    // on OUR pane succeeds (rc >= 0). Headless (no console): the leg is
+    // skipped with a line, never a hollow pass.
+    {
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        match foreign_pane(&fresh, &[a.id, b.id]) {
+            None => say!("battery: pane-tree gate SKIPPED (no foreign pane -- headless)"),
+            Some(cid) => {
+                let tag0 = read_file(root, &alloc::format!("pane/{}/tag", cid)).unwrap_or_default();
+                let tagpath = alloc::format!("pane/{}/tag", cid);
+                let probes: [(&str, alloc::string::String); 3] = [
+                    ("layout", alloc::format!("close {}", cid)),
+                    ("layout", alloc::format!("focus {}", cid)),
+                    (tagpath.as_str(), alloc::string::String::from("forged")),
+                ];
+                for (path, cmd) in probes.iter() {
+                    let rc = raw_write(root, path, cmd);
+                    if rc != -1 {
+                        say!("tapestry-battery: FAIL pane-tree gate: '{}' <- '{}' rc {} want -1 (E_PERM)",
+                            path, cmd, rc);
+                        return 1;
+                    }
+                }
+                let after = read_file(root, "layout").unwrap_or_default();
+                if foreign_pane(&after, &[a.id, b.id]) != Some(cid) {
+                    say!("tapestry-battery: FAIL pane-tree gate: the refused close changed the tree");
+                    return 1;
+                }
+                let tag1 = read_file(root, &alloc::format!("pane/{}/tag", cid)).unwrap_or_default();
+                if tag1 != tag0 {
+                    say!("tapestry-battery: FAIL pane-tree gate: the refused tag write landed ('{}' -> '{}')",
+                        tag0.trim(), tag1.trim());
+                    return 1;
+                }
+                let rc = raw_write(root, "layout", &alloc::format!("focus {}", pa.id));
+                if rc < 0 {
+                    say!("tapestry-battery: FAIL pane-tree gate: focus on OUR pane refused rc {}", rc);
+                    return 1;
+                }
+                say!("battery: pane-tree gate OK");
+            }
+        }
     }
 
     // Scenario 2 (G-6b, the resize protocol). B's pane content differs
@@ -1086,34 +1163,10 @@ pub extern "C" fn rs_main() -> i64 {
     say!("battery: close event OK");
     drop(b);
 
-    // Restore focus to the console's pane (the leaf hosting neither A nor
-    // B), so the session keyboard works the instant we exit.
-    if let Some(fresh) = read_file(root, "layout") {
-        let mut done = false;
-        for line in fresh.lines() {
-            let line = line.trim();
-            if !line.contains(" leaf ") || !line.contains("surface=") {
-                continue;
-            }
-            if let Some(tok) = line.split_ascii_whitespace().find(|t| t.starts_with("surface="))
-            {
-                let n: Option<u32> = tok["surface=".len()..].parse().ok();
-                if let Some(n) = n {
-                    if n != a.id && n != b_id {
-                        if let Some(info) = find_pane(&fresh, n) {
-                            let _ = write_file(root, "layout",
-                                &alloc::format!("focus {}", info.id));
-                            done = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        if !done {
-            say!("battery: no console pane to refocus (headless run)");
-        }
-    }
+    // Focus returns to the console's pane by the CLOSE path, not by a write
+    // from here: focusing a pane we do not own is exactly what the pane-tree
+    // gate refuses (the H-3b round F2), and when our last surface retires
+    // its leaf closes and the layout re-focuses the survivor.
     unsafe { t_close(root) };
     say!("tapestry-battery: PASS");
     // `a` drops on return (`b` already did, scenario 3): the surfaces

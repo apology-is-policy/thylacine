@@ -209,6 +209,13 @@ pub struct Transcript {
     max_blocks: usize,
     max_cost: usize,
     max_lines_per_block: usize,
+    /// The OPEN block's byte cap: the budget evicts only FROZEN blocks, so
+    /// an open block that never freezes escapes it entirely (the H-3b round
+    /// F1: 10 000 soft-wrapped 4096-cell lines = 320 MiB before the line
+    /// cap fires, against a 64 MiB heap). Crossing it freezes the block as
+    /// a continuation, exactly as the line cap does, so eviction can reach
+    /// the bytes. `max_cost / 8` by default.
+    max_open_cost: usize,
     /// Bumps on every structural change (a consumer's cheap dirty check).
     pub seq: u64,
     /// The exit code of the most recently completed command, latched by
@@ -259,6 +266,7 @@ impl Transcript {
             max_blocks,
             max_cost,
             max_lines_per_block: max_lines.max(1),
+            max_open_cost: (max_cost / 8).max(1),
             seq: 0,
         }
     }
@@ -623,10 +631,14 @@ impl Transcript {
         }
     }
 
-    /// The per-block line cap: an endless un-zoned stream must not grow one
-    /// block unboundedly -- freeze and continue, same kind, marked.
+    /// The per-block caps: an endless un-zoned stream must not grow one
+    /// block unboundedly, by LINE COUNT or by BYTES -- freeze and continue,
+    /// same kind, marked. The byte cap is the one that binds first under
+    /// the soft-wrap (each wrapped line is MAX_LINE_CELLS cells).
     fn enforce_block_cap(&mut self) {
-        if self.open.items.len() >= self.max_lines_per_block {
+        if self.open.items.len() >= self.max_lines_per_block
+            || self.open.cost >= self.max_open_cost
+        {
             let kind = self.open.kind;
             self.freeze_open(kind, true);
         }
@@ -1309,6 +1321,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    // The H-3b round F1 (the H-2 F3 re-prosecution): the budget evicts only
+    // FROZEN blocks, so an open block that soft-wraps forever must FREEZE on
+    // bytes, not only on its 10 000-line count -- else 320 MiB accrue before
+    // eviction can reach any of it. Small caps make the test cheap: the open
+    // block must never exceed its byte cap, and the whole transcript must
+    // stay within one open-cap of the budget.
+    #[test]
+    fn open_block_freezes_on_bytes_so_the_budget_can_evict_it() {
+        // 1 MiB budget -> a 128 KiB open cap (4 soft-wrapped lines per block);
+        // 4 MiB of newline-free bytes = 32 blocks' worth, of which the budget
+        // retains ~7. Without the byte cap the single open block would hold
+        // all 4 MiB (128 lines, far below the 10 000-line cap).
+        let max_cost = 1 << 20;
+        let mut t = Transcript::with_caps(daylight(), 1000, max_cost, 10_000);
+        let open_cap = max_cost / 8;
+        let line_bytes = MAX_LINE_CELLS * core::mem::size_of::<TCell>();
+        let blob = vec![b'z'; 4 << 20];
+        for chunk in blob.chunks(4096) {
+            t.feed(chunk);
+            assert!(t.open_block().cost < open_cap + line_bytes,
+                "the open block crossed its byte cap without freezing ({})", t.open_block().cost);
+            assert!(t.stored_cost <= max_cost + open_cap + line_bytes,
+                "stored_cost {} escaped the budget {}", t.stored_cost, max_cost);
+        }
+        assert!(t.frozen_blocks().len() > 1,
+            "the retained set holds several frozen blocks (frozen {} stored_cost {})",
+            t.frozen_blocks().len(), t.stored_cost);
+        assert!(t.frozen_blocks().iter().all(|b| b.cost <= open_cap + line_bytes),
+            "every frozen block is bounded by the open cap");
+        assert!(t.frozen_blocks().iter().filter(|b| b.continuation).count() >= 1,
+            "the byte cap froze the stream as continuation blocks");
     }
 
     #[test]

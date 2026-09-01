@@ -130,6 +130,9 @@ const UD_EVENT: u64 = 2;
 /// presents into it.
 pub struct Surface {
     root: i64,
+    /// Whether `root` is this surface's own session (closed on drop) or a
+    /// caller-owned one it was minted on (left open).
+    owns_root: bool,
     ctl: i64,
     weave_fd: i64,
     present_fd: i64,
@@ -211,7 +214,7 @@ impl Surface {
     }
 
     fn open_on(root: i64, w: u32, h: u32) -> Result<Surface, TapError> {
-        Self::open_on_bound(root, w, h, None)
+        Self::open_on_bound(root, w, h, None, true)
     }
 
     /// H-3b-2: a Role::Chrome surface bound to pane `pane_id`. The compositor
@@ -225,10 +228,31 @@ impl Surface {
         if root < 0 {
             return Err(TapError::Connect);
         }
-        Self::open_on_bound(root, w, h, Some(pane_id))
+        Self::open_on_bound(root, w, h, Some(pane_id), true)
     }
 
-    fn open_on_bound(root: i64, w: u32, h: u32, chrome_bind: Option<u32>) -> Result<Surface, TapError> {
+    /// H-3b-4 (the round's R2-F2): a Role::Chrome surface minted on the
+    /// CALLER's existing session `root` (left open on drop). A renderer
+    /// owns one tag bar per visible leaf; a session per bar exhausted the
+    /// compositor's conn pool at three windows and turned every further
+    /// mint into a blocking connect. The per-conn surface cap is widened
+    /// for the renderer peer server-side.
+    pub fn chrome_on_shared(root: i64, pane_id: u32, w: u32, h: u32) -> Result<Surface, TapError> {
+        if root < 0 {
+            return Err(TapError::Connect);
+        }
+        Self::open_on_bound(root, w, h, Some(pane_id), false)
+    }
+
+    fn open_on_bound(
+        root: i64,
+        w: u32,
+        h: u32,
+        chrome_bind: Option<u32>,
+        owns_root: bool,
+    ) -> Result<Surface, TapError> {
+        // A shared root is never closed on a failure path.
+        let own_root = if owns_root { root } else { -1 };
         let fail = |fds: &[i64], e: TapError| {
             for &fd in fds {
                 if fd >= 0 {
@@ -242,7 +266,7 @@ impl Surface {
         // ctl (the netd clone idiom); its read yields the id.
         let ctl = unsafe { t_open(root, b"surface/new".as_ptr(), 11, T_ORDWR) };
         if ctl < 0 {
-            return fail(&[root], TapError::Create);
+            return fail(&[own_root], TapError::Create);
         }
         let mut idbuf = [0u8; 16];
         let n = read_all(ctl, &mut idbuf);
@@ -251,7 +275,7 @@ impl Surface {
             .and_then(|s| s.trim().parse().ok())
         {
             Some(id) => id,
-            None => return fail(&[root, ctl], TapError::Protocol),
+            None => return fail(&[own_root, ctl], TapError::Protocol),
         };
 
         // create W H [role=chrome bind=<pane-id>]
@@ -262,7 +286,7 @@ impl Surface {
         }
         let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
         if rc < 0 {
-            return fail(&[root, ctl], TapError::Create);
+            return fail(&[own_root, ctl], TapError::Create);
         }
 
         // The weave: geometry read + the zero-copy map (Tweft under the
@@ -271,7 +295,7 @@ impl Surface {
         let _ = core::fmt::write(&mut path, format_args!("surface/{}/weave", id));
         let weave_fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OREAD) };
         if weave_fd < 0 {
-            return fail(&[root, ctl], TapError::Map);
+            return fail(&[own_root, ctl], TapError::Map);
         }
         let mut gbuf = [0u8; 128];
         let n = read_all(weave_fd, &mut gbuf);
@@ -287,11 +311,11 @@ impl Surface {
         // track would silently lose invalidations, which is the one failure
         // mode `age` exists to prevent.
         if gw != w || gh != h || stride != w * 4 || nslots == 0 || nslots as usize > MAX_SLOTS {
-            return fail(&[root, ctl, weave_fd], TapError::Protocol);
+            return fail(&[own_root, ctl, weave_fd], TapError::Protocol);
         }
         let map_va = unsafe { t_weft_map(weave_fd as u64, 0) };
         if map_va <= 0 {
-            return fail(&[root, ctl, weave_fd], TapError::Map);
+            return fail(&[own_root, ctl, weave_fd], TapError::Map);
         }
 
         let mut ppath = alloc::string::String::new();
@@ -301,13 +325,13 @@ impl Surface {
         let _ = core::fmt::write(&mut epath, format_args!("surface/{}/event", id));
         let event_fd = unsafe { t_open(root, epath.as_ptr(), epath.len(), T_OREAD) };
         if present_fd < 0 || event_fd < 0 {
-            return fail(&[root, ctl, weave_fd, present_fd, event_fd], TapError::Protocol);
+            return fail(&[own_root, ctl, weave_fd, present_fd, event_fd], TapError::Protocol);
         }
 
         // The Loom ring: register the two op fids + the staging buffer.
         let ring = match Ring::setup(8, 0) {
             Ok(r) => r,
-            Err(_) => return fail(&[root, ctl, weave_fd, present_fd, event_fd], TapError::Loom),
+            Err(_) => return fail(&[own_root, ctl, weave_fd, present_fd, event_fd], TapError::Loom),
         };
         let mut staging = RegisteredBuffer::new(STAGING_LEN).map_err(|_| TapError::Loom)?;
         staging.as_mut_slice().fill(0);
@@ -316,11 +340,12 @@ impl Surface {
             .is_err()
             || ring.register_buffers(&[staging.buf_reg()]).is_err()
         {
-            return fail(&[root, ctl, weave_fd, present_fd, event_fd], TapError::Loom);
+            return fail(&[own_root, ctl, weave_fd, present_fd, event_fd], TapError::Loom);
         }
 
         Ok(Surface {
             root,
+            owns_root,
             ctl,
             weave_fd,
             present_fd,
@@ -726,7 +751,8 @@ impl Drop for Surface {
         // The weave fid's clunk drops the client mapping (the kernel
         // ClunkMap); the ctl clunk + conn close retire the surface
         // server-side.
-        for fd in [self.event_fd, self.present_fd, self.weave_fd, self.ctl, self.root] {
+        let root = if self.owns_root { self.root } else { -1 };
+        for fd in [self.event_fd, self.present_fd, self.weave_fd, self.ctl, root] {
             if fd >= 0 {
                 unsafe { t_close(fd) };
             }

@@ -216,9 +216,13 @@ pub extern "C" fn rs_main() -> i64 {
     // transcript's exit mark and owed to the compositor as the console
     // tile's status (the gated `tag <id> status` verb). Held until the
     // tile's pane is known and the console is up; only the LAST exit
-    // matters, so a newer one replaces an unsent older one.
+    // matters, so a newer one replaces an unsent older one. A refusal is
+    // said once and the exit is dropped; the NEXT exit mark tries again
+    // (the H-3b round F4: a one-shot latch turned one transient refusal
+    // into a session-long loss of the live key -- display-only, so a
+    // cheap retry per command is the right posture).
     let mut pending_exit: Option<i64> = None;
-    let mut status_refused = false;
+    let mut status_refusal_said = false;
 
     let mut gs = GlyphSource::new_vendored(512);
     if gs.face_count() != 2 {
@@ -455,17 +459,17 @@ pub extern "C" fn rs_main() -> i64 {
             // re-reads it on the reconcile below). Rides the console
             // surface's own conn -- the gate reads the CONN's peer, and
             // this process holds the renderer role. Display-only: a refusal
-            // is said once and the feed stops (the bar stays resting-keyed).
-            if let (Some(code), Some(pane), false) = (pending_exit, chrome.own_pane(), status_refused) {
+            // drops this exit (said once) and the next exit mark retries.
+            if let (Some(code), Some(pane)) = (pending_exit, chrome.own_pane()) {
                 let st = if code == 0 { "ok" } else { "err" };
+                pending_exit = None;
                 match surf.global_ctl(&alloc::format!("tag {} status {}", pane, st)) {
-                    Ok(()) => {
-                        pending_exit = None;
-                        chrome.reconcile(troot, surf.id, &mut gs);
-                    }
+                    Ok(()) => chrome.reconcile(troot, surf.id, &mut gs),
                     Err(e) => {
-                        status_refused = true;
-                        say!("halcyond: tag status refused {:?}; live-tile key disabled", e);
+                        if !status_refusal_said {
+                            status_refusal_said = true;
+                            say!("halcyond: tag status refused {:?}; the live-tile key lags until the next exit", e);
+                        }
                     }
                 }
             }
