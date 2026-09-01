@@ -49,10 +49,21 @@ sub-chunks (vote 2), strip painted whole by halcyond (vote 1):
   Daylight NNW 2px four-value bevel + inner hairline + live-tile cast shadow +
   the recoloured strips (see the Landed table). Geometric, not audit-bearing;
   bevel witnessed on the lever (four-value). **H-3b is next.**
-- **H-3b** (NEXT): the executable tag bar — activate `Role::Chrome` (inert today);
-  the chrome-surface path (a surface halcyond paints, compositor-placed at a
-  strip rect, not auto-hosted); halcyond paints name/rule/pills/trail + the
-  sage/cinnabar status key; the gated `tag <id> status` verb (audit-bearing).
+- **H-3b** (NEXT; AUDIT-BEARING): the executable tag bar. **Ratified 2026-09-01
+  (operator vote): PER-LEAF** — every visible leaf carves a 20px Daylight tag bar
+  (§3.2/§4; acme/i3 prior art), NOT the per-container `visible_strips` (that stays
+  the tab indicator). `recompute` carves `TAG_BAR_H`=20 off each leaf's inner
+  rect top (inside the H-3a-2 ring; >1-leaf-gated; single fullscreen stays
+  borderless) → another content-rect reshape + consumer sweep. `TAB_STRIP_H` +
+  `TAG_BAR_H` move to `libhalcyon::theme::METRICS`; a new per-pane `tagbar` 9P
+  file exposes the strip rect. surface-create extends the ctl `create` verb
+  (`create W H role=chrome bind=<pane-id>` — a text change, not a wire break) →
+  `Role::Chrome` activated (non-hosted, non-focusable, excluded from Direct).
+  halcyond paints name/rule/pills/trail (DISPLAY-only; execution = H-3c) + the
+  gated `tag <id> status` verb sets a per-pane status enum → `paint_borders`
+  draws the §5.3 status hairline + the §5.4 cast-shadow's dark companion
+  (completing H-3a-2's shadow). halcyond needs `T_SPAWN_PERM_CONSOLE_RENDERER`.
+  Design in HALCYON.md §13.6 (the "RATIFIED ... PER-LEAF" block).
 - **H-3c** (THE GATE): obj rendering + the verbs rules engine (BEACON §7's
   two-tier plumber rules file) + context menus (the gated `menu place/dismiss`
   verb; input-redirect-to-halcyond + compositor-owned dismiss — the wedge-proof

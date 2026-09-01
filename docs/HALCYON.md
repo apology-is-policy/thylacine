@@ -553,6 +553,47 @@ are compositor-drawn and need the tile's status key, so halcyond signals it via 
 small gated ctl verb (`tag <pane-id> status ok|err|resting` — name provisional;
 rides the `peer_is_renderer` default-deny gate).
 
+**RATIFIED (operator vote 2026-09-01): the tag bar is PER-LEAF, not
+per-container.** The "strip rect" above is a **per-leaf tag-bar strip**, NOT the
+existing `visible_strips()` per-container tab indicator (that stays the
+tab/stack indicator, glyph-free, unchanged). Every visible LEAF contributes its
+own 20px Daylight tag bar (HALCYON-VISUAL §3.2/§4; the acme per-window tag line
+and i3's per-window title bar are the prior art, both per-window). Concretely:
+- **Geometry (H-3b, another content-rect reshape after H-3a-2's ring).**
+  `pane.rs recompute` carves `TAG_BAR_H` (= `METRICS.header_h` = 20) off the TOP
+  of each visible leaf's inner rect (inside the H-3a-2 floor+bevel+hairline
+  ring): from the leaf edge inward, floor + bevel(2) + hairline(1) + **tag bar
+  (20)** + client content. The carve is gated the same as the ring (>1 visible
+  leaf); a single fullscreen leaf stays borderless AND tag-bar-free (the stage-0
+  look preserved; a lone-console tag bar is a separate later decision, a
+  deliberate deviation from §3.2's "every tile"). The client-visible content
+  rect shrinks by 20px at the top on multi-leaf — a consumer sweep (the
+  tapestry-battery geometry + the ls-gfx family) rides this chunk.
+- **The strip rect is exposed on the pane 9P tree** (a new per-pane `tagbar`
+  geometry file "x y w h", beside `geometry`), and `TAB_STRIP_H` + a new
+  `TAG_BAR_H` move into `libhalcyon::theme::METRICS` (the H-3a precedent — the
+  single token source), so halcyond sizes/places without hardcoding a private
+  compositor constant (the survey found `TAB_STRIP_H` was tapestryd-private and
+  the strip rect not fully client-derivable — no child-count on the wire).
+- **surface-create carries the role + binding via the ctl `create` verb**
+  (`create W H role=chrome bind=<pane-id>`) — a ctl-verb TEXT-format change on
+  the surface ctl string, NOT a 9P wire/mount break (`libtapestry`
+  `open_on` + `surface_ctl`'s `create ` parse, which today rejects a 3rd token).
+  `role=chrome` makes the surface non-auto-hosted, non-focusable, and excluded
+  from the scanout-Direct leaf count; the compositor places it at `bind`'s
+  per-leaf tag-bar strip.
+- **Aurora (no halcyond chrome surface) on multi-leaf:** the compositor paints
+  the per-leaf tag-bar strip with the Daylight `header` background as a resting
+  fallback (the pane's `tag` file supplies a name if set) — vote-1-compatible
+  because halcyond's OPAQUE chrome surface fully covers the fallback when
+  present; aurora just gets a clean resting bar rather than a bare strip.
+- **The status verb** sets a per-pane status enum (`ok`->sage / `err`->cinnabar
+  / `resting`); `paint_borders` reads it to draw the §5.3 status-colored content
+  hairline and the §5.4 cast-shadow's dark companion — **completing the two-tone
+  shadow H-3a-2 landed the light half of.** halcyond must be spawned with
+  `T_SPAWN_PERM_CONSOLE_RENDERER` (the aurora precedent) for the gated verb to be
+  permitted. Pills are DISPLAY-only in H-3b; executing them is H-3c.
+
 **Pane chrome (H-3a).** Extend `paint_borders`/`paint_strips` from the flat 1px
 frame to Daylight §2: the NNW single-light-source 2px four-value bevel
 (top/left/right/bottom stored as the light direction + derived, never per-edge),
