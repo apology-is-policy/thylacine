@@ -30,12 +30,14 @@ use crate::transcript::{Block, BlockKind, Item, Style, TCell, EM_CODE, EM_DIM, E
 /// in full daylight). Colors are ARGB like everything in the weave.
 #[derive(Clone, Copy)]
 pub struct Sheet {
-    pub ground: u32,
-    pub ink: u32,
-    pub dim: u32,
-    pub accent: u32,
-    pub err: u32,
-    pub rule: u32,
+    pub ground: u32, // Daylight surface
+    pub ink: u32,    // Daylight fg
+    pub dim: u32,    // Daylight fg_muted (secondary text, the Normal-mode caret)
+    pub accent: u32, // Daylight ember (the Insert caret / turnstile / running mark)
+    pub obj: u32,    // Daylight syntax.slate (presentation refs -- section 1.5)
+    pub err: u32,    // Daylight cinnabar (exit failure)
+    pub ok: u32,     // Daylight fen (exit success; reserved -- H-2 is failure-only)
+    pub rule: u32,   // Daylight border (table rules)
     pub sel_bg: u32,
     pub body_px: f32,
     pub pad_x: i32,
@@ -45,18 +47,26 @@ pub struct Sheet {
     pub gen: u32,
 }
 
-/// The paper-light default, derived from the parchment palette (the vt
-/// THEMES carry it; aurora's held-proposal light theme is the seed).
-pub fn parchment_sheet() -> Sheet {
-    let pal = vt::THEMES[1].1;
+/// The paper-light transcript sheet, built from the Daylight visual scripture
+/// (docs/HALCYON-VISUAL.md via libhalcyon::theme -- the single token source the
+/// H-3 split names). Replaces the H-2 approximation seeded from vt::THEMES[1]:
+/// the transcript now matches the chrome that H-3a's compositor bevels + tag
+/// bar draw around it, because both derive from DAYLIGHT.
+pub fn daylight_sheet() -> Sheet {
+    let d = &libhalcyon::theme::DAYLIGHT;
     Sheet {
-        ground: pal.bg,
-        ink: pal.fg,
-        dim: pal.ansi[7],
-        accent: pal.ansi[4],
-        err: pal.ansi[1],
-        rule: pal.ansi[8],
-        sel_bg: 0xFFD8_CFC0,
+        ground: d.surface,
+        ink: d.fg,
+        dim: d.fg_muted,
+        accent: d.ember,
+        obj: d.syntax.slate,
+        err: d.cinnabar.key,
+        ok: d.syntax.fen,
+        rule: d.border,
+        // A parchment-compatible selection band: a warm step between surface
+        // and header (Daylight has no transcript-selection token; this sits in
+        // the same family, darker than surface, lighter than header).
+        sel_bg: 0xFFDF_D6C7,
         body_px: 16.0,
         pad_x: 8,
         block_gap: 6,
@@ -134,7 +144,9 @@ fn color_for(st: &Style, sheet: &Sheet) -> u32 {
         return sheet.dim;
     }
     if st.obj != 0 && st.fg == sheet.ink {
-        return sheet.accent;
+        // Presentation refs take the object-reference colour (Daylight slate,
+        // section 1.5), NOT the ember accent -- the accent is the caret/turnstile.
+        return sheet.obj;
     }
     st.fg
 }
@@ -402,7 +414,7 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
             Item::Line(line) => {
                 for (s, e, sid) in runs_of(&line.cells) {
                     let st = b.styles[sid as usize];
-                    let bg = if st.bg != sheet.ground && st.bg != vt::THEMES[1].1.bg {
+                    let bg = if st.bg != sheet.ground && st.bg != libhalcyon::theme::DAYLIGHT.surface {
                         Some(st.bg)
                     } else {
                         None
@@ -687,8 +699,8 @@ mod tests {
     use alloc::vec::Vec;
     use beacon::wire::{self, Op as BOp};
 
-    fn parchment() -> vt::Palette {
-        vt::THEMES[1].1
+    fn daylight() -> vt::Palette {
+        libhalcyon::theme::daylight_palette()
     }
 
     fn gs() -> GlyphSource {
@@ -697,7 +709,7 @@ mod tests {
 
     #[test]
     fn face_rule_plain_is_mono_annotated_is_body() {
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
         wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
         buf.extend_from_slice(b"plain ");
@@ -708,20 +720,20 @@ mod tests {
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
         let b = &t.frozen_blocks()[0];
-        let sheet = parchment_sheet();
+        let sheet = daylight_sheet();
         let mut g = gs();
         let laid = layout_block(b, 600, &sheet, &mut g);
         let line = &laid.lines[0];
         assert!(line.segs.len() >= 2);
         assert_eq!(line.segs[0].face, FACE_MONO, "un-annotated text is mono");
         assert_eq!(line.segs[1].face, FACE_BODY, "the obj span is body");
-        assert_eq!(line.segs[1].color, sheet.accent, "obj at default ink takes the accent");
+        assert_eq!(line.segs[1].color, sheet.obj, "obj at default ink takes the slate object colour");
         assert!(line.segs[1].obj > 0, "the obj hit target rides the seg");
     }
 
     #[test]
     fn mixed_line_uses_body_box_mono_line_uses_cell_box() {
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
         wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
         buf.extend_from_slice(b"pure mono line\n");
@@ -732,7 +744,7 @@ mod tests {
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
         let b = &t.frozen_blocks()[0];
-        let sheet = parchment_sheet();
+        let sheet = daylight_sheet();
         let mut g = gs();
         let (_, cell_h, _) = g.mono_cell();
         let laid = layout_block(b, 600, &sheet, &mut g);
@@ -743,7 +755,7 @@ mod tests {
 
     #[test]
     fn wrap_reflows_deterministically() {
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
         wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
         wire::open(&mut buf, BOp::Em, &[("class", "emph")]);
@@ -752,7 +764,7 @@ mod tests {
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
         let b = &t.frozen_blocks()[0];
-        let sheet = parchment_sheet();
+        let sheet = daylight_sheet();
         let mut g = gs();
         let wide = layout_block(b, 600, &sheet, &mut g);
         let narrow = layout_block(b, 220, &sheet, &mut g);
@@ -773,7 +785,7 @@ mod tests {
 
     #[test]
     fn table_aligns_and_rules() {
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
         wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
         wire::open(&mut buf, BOp::Table, &[("cols", "lr"), ("hdr", "1")]);
@@ -792,7 +804,7 @@ mod tests {
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
         let b = &t.frozen_blocks()[0];
-        let sheet = parchment_sheet();
+        let sheet = daylight_sheet();
         let mut g = gs();
         let laid = layout_block(b, 600, &sheet, &mut g);
         assert_eq!(laid.lines.len(), 3, "three table rows lay as three lines");
@@ -806,10 +818,10 @@ mod tests {
 
     #[test]
     fn exit_badge_only_on_failure() {
-        let sheet = parchment_sheet();
+        let sheet = daylight_sheet();
         let mut g = gs();
         for (code, expect_badge) in [(0i64, false), (7, true)] {
-            let mut t = Transcript::new(parchment());
+            let mut t = Transcript::new(daylight());
             let mut buf = Vec::new();
             wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
             buf.extend_from_slice(b"did things\n");
@@ -832,9 +844,9 @@ mod tests {
         // `mark k=exit code=<i64::MIN>` is an untrusted frame; the badge's
         // magnitude must come from unsigned_abs, not `-code` (which panics on
         // i64::MIN under overflow-checks -> the console dies) (F2).
-        let sheet = parchment_sheet();
+        let sheet = daylight_sheet();
         let mut g = gs();
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
         wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
         buf.extend_from_slice(b"did things\n");
@@ -854,7 +866,7 @@ mod tests {
     #[test]
     fn end_to_end_pixels_and_reflow() {
         let mut t = Transcript::with_caps(
-            parchment(),
+            daylight(),
             DEFAULT_MAX_BLOCKS,
             DEFAULT_MAX_COST,
             DEFAULT_MAX_LINES_PER_BLOCK,
@@ -870,7 +882,7 @@ mod tests {
         buf.extend_from_slice(b"\n");
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
-        let sheet = parchment_sheet();
+        let sheet = daylight_sheet();
         let mut g = gs();
         let mut cart = Cartoon::new();
         cart.ops.push(Op::Clear { color: sheet.ground });

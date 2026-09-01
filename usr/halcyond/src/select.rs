@@ -152,10 +152,9 @@ mod tests {
     use super::*;
     use crate::transcript::Transcript;
     use beacon::wire::{self, Op};
-    use vt::THEMES;
 
     fn corpus() -> Transcript {
-        let mut t = Transcript::new(THEMES[1].1);
+        let mut t = Transcript::new(libhalcyon::theme::daylight_palette());
         let mut buf = alloc::vec::Vec::new();
         wire::open(&mut buf, Op::Zone, &[("k", "prompt")]);
         buf.extend_from_slice(b"$ ls\n");

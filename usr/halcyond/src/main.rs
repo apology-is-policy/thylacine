@@ -34,7 +34,7 @@ use halcyond::input::{
     FEED_PENDING_MAX, FEED_RETRY_MS,
 };
 use halcyond::layout::{
-    cursor_pos, layout_block, layout_pending, parchment_sheet, render_block, LaidBlock, Sheet,
+    cursor_pos, layout_block, layout_pending, daylight_sheet, render_block, LaidBlock, Sheet,
 };
 use halcyond::raster::GlyphSource;
 use halcyond::transcript::Transcript;
@@ -204,8 +204,8 @@ pub extern "C" fn rs_main() -> i64 {
         say!("halcyond: FAIL vendored face parse");
         return 1;
     }
-    let sheet = parchment_sheet();
-    let mut t = Transcript::new(vt::THEMES[1].1);
+    let sheet = daylight_sheet();
+    let mut t = Transcript::new(libhalcyon::theme::daylight_palette());
     let mut cache = LayoutCache::new();
 
     // The winsize report: the transcript is flowed, but programs wrap to a

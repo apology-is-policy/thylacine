@@ -38,6 +38,7 @@ required-features = ["guest"]
 [dependencies]
 vt = { path = "../lib/vt" }
 cartoon = { path = "../lib/cartoon" }
+libhalcyon = { path = "../lib/libhalcyon" }
 beacon = { path = "../lib/beacon" }
 cornucopia = { path = "../lib/cornucopia" }
 fontdue = { version = "0.9.4", default-features = false, features = ["hashbrown"] }

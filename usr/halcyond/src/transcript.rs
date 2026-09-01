@@ -973,10 +973,9 @@ mod tests {
     use alloc::format;
     use alloc::vec;
     use beacon::wire::Op;
-    use vt::THEMES;
 
-    fn parchment() -> Palette {
-        THEMES[1].1
+    fn daylight() -> Palette {
+        libhalcyon::theme::daylight_palette()
     }
 
     fn frames(parts: &[FramePart]) -> Vec<u8> {
@@ -1078,7 +1077,7 @@ mod tests {
 
     #[test]
     fn zones_become_blocks() {
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         t.feed(&session_corpus());
         let blocks = t.frozen_blocks();
         assert_eq!(blocks.len(), 3, "foreign login + prompt + output");
@@ -1092,7 +1091,7 @@ mod tests {
 
     #[test]
     fn table_captures_cells_and_drops_padding() {
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         t.feed(&session_corpus());
         let out = &t.frozen_blocks()[2];
         let Some(Item::Table(tb)) = out.items.first() else {
@@ -1121,7 +1120,7 @@ mod tests {
 
     #[test]
     fn sgr_styles_and_utf8() {
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         t.feed(&session_corpus());
         let out = &t.frozen_blocks()[2];
         let Some(Item::Line(l)) = out.items.get(1) else {
@@ -1130,7 +1129,7 @@ mod tests {
         let s = line_str(l);
         assert_eq!(s, "red error plain \u{e9}");
         let red_style = out.styles[l.cells[0].style as usize];
-        let pal = parchment();
+        let pal = daylight();
         assert_eq!(red_style.fg, pal.ansi[1], "SGR 31 resolved against parchment");
         let plain_style = out.styles[l.cells[10].style as usize];
         assert_eq!(plain_style.fg, pal.fg, "SGR 0 reset");
@@ -1140,9 +1139,9 @@ mod tests {
     #[test]
     fn byte_by_byte_equals_whole() {
         let corpus = session_corpus();
-        let mut whole = Transcript::new(parchment());
+        let mut whole = Transcript::new(daylight());
         whole.feed(&corpus);
-        let mut split = Transcript::new(parchment());
+        let mut split = Transcript::new(daylight());
         for &b in corpus.iter() {
             split.feed(&[b]);
         }
@@ -1152,7 +1151,7 @@ mod tests {
 
     #[test]
     fn line_discipline_overwrite_tab_bs_el() {
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         t.feed(b"abc\rXY\n");
         t.feed(b"a\tb\n");
         t.feed(b"abcd\x08\x08Z\n");
@@ -1172,7 +1171,7 @@ mod tests {
 
     #[test]
     fn fullscreen_intent_latches() {
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         t.feed(b"hello\n");
         assert!(!t.raw_vt_intent);
         t.feed(b"\x1b[?1049h");
@@ -1187,7 +1186,7 @@ mod tests {
 
     #[test]
     fn spans_die_at_block_edge_pen_survives() {
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
         wire::open(&mut buf, Op::Zone, &[("k", "output")]);
         wire::open(&mut buf, Op::Em, &[("class", "strong")]);
@@ -1196,7 +1195,7 @@ mod tests {
         wire::close(&mut buf, Op::Zone);
         t.feed(&buf);
         t.feed(b"after\n");
-        let pal = parchment();
+        let pal = daylight();
         let open = t.open_block();
         let Item::Line(l) = &open.items[0] else { panic!() };
         let st = open.styles[l.cells[0].style as usize];
@@ -1206,7 +1205,7 @@ mod tests {
 
     #[test]
     fn budget_evicts_oldest() {
-        let mut t = Transcript::with_caps(parchment(), 3, usize::MAX, 100);
+        let mut t = Transcript::with_caps(daylight(), 3, usize::MAX, 100);
         for i in 0..6 {
             let mut buf = Vec::new();
             wire::open(&mut buf, Op::Zone, &[("k", "output")]);
@@ -1221,7 +1220,7 @@ mod tests {
 
     #[test]
     fn line_cap_freezes_a_continuation() {
-        let mut t = Transcript::with_caps(parchment(), 100, usize::MAX, 4);
+        let mut t = Transcript::with_caps(daylight(), 100, usize::MAX, 4);
         let mut buf = Vec::new();
         wire::open(&mut buf, Op::Zone, &[("k", "output")]);
         for i in 0..6 {
@@ -1238,7 +1237,7 @@ mod tests {
 
     #[test]
     fn floating_exit_mark_attaches_backward() {
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
         wire::open(&mut buf, Op::Zone, &[("k", "output")]);
         buf.extend_from_slice(b"out\n");
@@ -1254,9 +1253,9 @@ mod tests {
         // An OSC 1936 frame + a two-byte char, each split mid-sequence
         // across feeds, must parse exactly as when whole.
         let corpus = session_corpus();
-        let mut a = Transcript::new(parchment());
+        let mut a = Transcript::new(daylight());
         a.feed(&corpus);
-        let mut b = Transcript::new(parchment());
+        let mut b = Transcript::new(daylight());
         let mid = corpus.len() / 3;
         let mid2 = 2 * corpus.len() / 3;
         b.feed(&corpus[..mid]);
@@ -1273,7 +1272,7 @@ mod tests {
         // multiply, but a plain `+ digit` add overflows u32 -> panic under
         // the shipped overflow-checks profile -> the console dies (F1). One
         // untrusted escape sequence; must be absorbed.
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         t.feed(b"\x1b[9999999999mX\x1b[0m\n");
         // The huge param is a no-op SGR; the text after it survives (the line
         // is flushed into the still-open block -- no zone boundary froze it).
@@ -1286,7 +1285,7 @@ mod tests {
         // An endless no-newline stream must not grow one line unboundedly
         // (F3): the soft-wrap flushes it into MAX_LINE_CELLS-wide lines that
         // the block cap + budget then bound.
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         let blob = vec![b'a'; MAX_LINE_CELLS * 4 + 17];
         t.feed(&blob);
         assert!(t.pending_line().len() <= MAX_LINE_CELLS + 1, "the open line is bounded");
@@ -1304,7 +1303,7 @@ mod tests {
         // open Obj / close Obj repeated grows `open.objs` (close only pops the
         // stack) -- capped at MAX_OBJS_PER_BLOCK, degrading to no-obj (F3),
         // which also keeps the idx+1 encoding inside u16 (P3).
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
         for _ in 0..(MAX_OBJS_PER_BLOCK + 500) {
             wire::open(&mut buf, Op::Obj, &[("type", "path"), ("ref", "/x")]);
@@ -1321,7 +1320,7 @@ mod tests {
         // A truecolor gradient (2^24 distinct fg) with a distinct style per
         // char grows `open.styles` unboundedly and turns style_idx O(n^2)
         // (F3) -- capped at MAX_STYLES_PER_BLOCK.
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
         for i in 0..(MAX_STYLES_PER_BLOCK + 500) {
             let (r, g, b) = ((i & 0xff) as u32, ((i >> 8) & 0xff) as u32, ((i >> 4) & 0xff) as u32);
@@ -1335,7 +1334,7 @@ mod tests {
     fn unbounded_table_rows_stay_bounded() {
         // An unclosed table with endless empty rows grows the Vec-of-Vecs
         // (F3) -- rows cap at MAX_TABLE_ROWS; the realized model proves it.
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
         wire::open(&mut buf, Op::Table, &[("cols", "l"), ("hdr", "0")]);
         for _ in 0..(MAX_TABLE_ROWS + 200) {
@@ -1365,7 +1364,7 @@ mod tests {
         // The wire depth cap resets per feed() (F4): unbalanced opens paced
         // across drains would grow the nesting stacks without bound. The
         // transcript-side cap holds regardless of chunking.
-        let mut t = Transcript::new(parchment());
+        let mut t = Transcript::new(daylight());
         for _ in 0..64 {
             let mut buf = Vec::new();
             for _ in 0..8 {

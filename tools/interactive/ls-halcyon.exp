@@ -58,7 +58,7 @@ proc region {x0 y0 x1 y1} {
         return "DUMP-ERR $err"
     }
     if {![file exists $out]} { return "DUMP-MISSING" }
-    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py $out $x0 $y0 $x1 $y1 241 234 224} verdict]} {
+    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py $out $x0 $y0 $x1 $y1 242 235 224} verdict]} {
         return "REGION-ERR $verdict"
     }
     return $verdict
@@ -101,15 +101,15 @@ lc_run_expect "ls /lib/aurora; pwd" "/home/michael"
 lc_run_expect "ls -l /lib/aurora; pwd" "/home/michael"
 
 # The pixel proof: the dominant color of a center rect IS the parchment
-# ground (241,234,224) -- aurora's Bonfire dark can never produce it -- and
+# ground (242,235,224) -- aurora's Bonfire dark can never produce it -- and
 # ink exists on top (off > 0 alone would pass an unpainted buffer; require
 # real text mass).
 set v [region 200 150 1080 650]
 if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off total dr dg db]} {
     lc_fail "gfx_region verdict unparseable: $v"
 }
-if {$dr != 241 || $dg != 234 || $db != 224} {
-    lc_fail "dominant color ($dr,$dg,$db) is not the parchment ground (241,234,224) -- halcyond is not painting"
+if {$dr != 242 || $dg != 235 || $db != 224} {
+    lc_fail "dominant color ($dr,$dg,$db) is not the Daylight surface (242,235,224) -- halcyond is not painting"
 }
 if {$off < 300} {
     lc_fail "only $off/$total non-ground pixels -- no ink on the transcript"
