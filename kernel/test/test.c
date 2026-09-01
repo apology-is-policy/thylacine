@@ -770,6 +770,7 @@ void test_vivarium_ioctl_termios_map(void);
 void test_vivarium_ioctl_grammar_roundtrip(void);
 void test_vivarium_ioctl_dispatch_ebadf(void);
 void test_vivarium_session_errno_remap(void);
+void test_vivarium_ioctl_cons_identity_and_gate(void);
 void test_vivarium_sendrecv_domain(void);
 void test_vivarium_sockaddr(void);
 void test_vivarium_net_cmd(void);
@@ -2452,6 +2453,7 @@ struct test_case g_tests[] = {
     { "vivarium.ioctl_grammar_roundtrip", test_vivarium_ioctl_grammar_roundtrip, false, NULL },
     { "vivarium.ioctl_dispatch_ebadf", test_vivarium_ioctl_dispatch_ebadf, false, NULL },
     { "vivarium.session_errno_remap", test_vivarium_session_errno_remap, false, NULL },
+    { "vivarium.ioctl_cons_identity_and_gate", test_vivarium_ioctl_cons_identity_and_gate, false, NULL },
     { "vivarium.sockaddr",             test_vivarium_sockaddr,             false, NULL },
     { "vivarium.net_cmd",              test_vivarium_net_cmd,              false, NULL },
     { "vivarium.conn_n",               test_vivarium_conn_n,               false, NULL },

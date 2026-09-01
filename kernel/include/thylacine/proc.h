@@ -2005,6 +2005,14 @@ bool proc_is_console_attached(const struct Proc *p);
 // session. Fail-closed on NULL.
 bool proc_is_console_owner(const struct Proc *p);
 
+// C2-k1b F2: may `p`'s session flip the global console line discipline (a
+// phenotype TCSETS)? True iff p's session currently owns the console -- the
+// foreground session (owner shell + its spawned apps), refused for background/
+// other-session/post-SAK callers. console_session_match is the PURE gate logic
+// (owner_sid, caller_sid), split out for unit testing; owner_sid==0 = no owner.
+bool console_session_match(u32 owner_sid, u32 caller_sid);
+bool proc_console_owner_in_session(const struct Proc *p);
+
 // A-4c-1: the kernel console owner (the trusted-path anchor for /dev/cons).
 //
 // proc_set_console_owner — record `p` as the current console owner = the

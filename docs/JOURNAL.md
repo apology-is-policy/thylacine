@@ -22,6 +22,88 @@ needed the operator.
 
 ---
 
+## 2026-09-01 (aux) -- C2-kernel: the phenotype goes interactive (isatty + termios + job control)
+
+Resumed post-self-compact on the operator's "continue with milestone C" +
+"`viv sh` interactively." Recon first (the resume-note order), then THE EFFORT
+GATE fired: C2-kernel is load-bearing (VIVARIUM phenotype + cons/termios/
+job-control, I-20/I-43), effort was xhigh not max, so I raised the blocking
+question. **The operator chose to STAY at xhigh -- "I want to test-run it and
+observe the difference."** So this arc is the deliberate xhigh observation; the
+Fable-5 audit round stayed the soundness floor regardless.
+
+**The recon dissolved the feared design fork.** A ground-truth sweep (an Explore
+agent on the native side + direct reads on the phenotype side) found C2 is a
+TRANSLATION arc, not a new-mechanism one: Thylacine has NO ioctl surface and NO
+kernel termios struct -- terminal control is file-shaped (the cons/pts 5-flag
+consctl grammar) + discrete session syscalls (89-92), and the pouch PTY-3 patch
+is a complete working translation, just userspace-side. The phenotype runs
+unmodified binaries, so the same translation moves kernel-side. The one real
+split: cons ldisc is kernel-owned (g_cons) -> serveable directly; pts ldisc lives
+in the ptyfs userspace server -> a kernel->ptyfs 9P reach (deferred, C2-k1c). The
+operator's goal is interactive CONSOLE + `viv sh`, which is the cons path, so
+console-first IS the stated chunk, not a half-version.
+
+**C2-k1b (`05e91a06`) -- the ioctl shell.** Wired ioctl(29) to the pre-existing
+C2-k1a pure classifier; serves TCGETS/TCSETS/TIOCGWINSZ/TIOCSWINSZ on a cons fd.
+The error-prone flag/grammar logic is two PURE helpers (getdents64-transform
+precedent, since the kthread harness cannot stage a real cons fd + mapped memory).
+New ABI: struct viv_linux_termios (36, asserted) + winsize (8); T_E_NOTTY=25.
+Reused cons_set_mode_cmd as the ONE setter. isatty() is now true on the console.
+
+**C2-k2 (`348e21b7`) -- session/pgrp.** getpgid/getsid = pure renumbers;
+setsid/setpgid = TIER2 shells SOLELY to remap the native T_E_ACCES "EPERM
+contour" to Linux EPERM (the cores' comments say "POSIX EPERM"). Verified
+ACCES-specific (proc_setpgid's Linux-EACCES "child exec'd" case has no analog).
+
+**The audit (Fable 5, MODEL start==end) found 2 P1s -- and the self-audit
+converged on the first, then the holotype sharpened it past my fix.** SA-1 (mine):
+the cons-fd predicate checked only bit-41, but cons.h documents the marker as
+bit-41 "under the shared S_IFCHR," so I proposed adding an S_IFCHR gate. **F1 (the
+holotype) proved that INSUFFICIENT**: a dev9p-backed Spoor's qid_path is copied
+verbatim from the 9P server (dev9p.c:737), and tapestryd's PANE_FLAG is the
+*identical* bit 41 -- a shipping in-tree server. A server can forge S_IFCHR too,
+so the ONLY sound key is the UNFORGEABLE kernel Dev identity. Fix: a new
+`spoor_is_console` (devcons OR the devdev /dev/cons leaf), replacing the qid-bit
+test entirely. This is the run's best catch -- a real cross-subsystem forgery
+(phenotype x graphics, the arc's own goal) that neither the bit-only code nor my
+own weaker S_IFCHR patch would have closed. The control that caught it: an
+independent Fable prosecutor re-deriving the qid provenance across dev9p +
+tapestryd, not trusting the commit's "cannot drift" claim (which was already
+false in-tree).
+
+**F2 needed the operator.** The phenotype TCSETS flips the GLOBAL console cooking
+word with no console-attach re-check (post-SAK a lingering phenotype could flip
+ECHO on during corvus's passphrase prompt, I-27). But the obvious gate (require
+console-attach) would break ALL interactive phenotype apps -- attach is the
+CAP_HOSTOWNER elevation anchor (only joey/corvus hold it; foreground apps never
+do). I dug the model out: `devcons_write` is UNGATED (output isn't trust-sensitive;
+input + mode are), so "write-parity" didn't resolve it either. The operator asked
+whether to open the SAK/Imperium arc first (recurring authority debt). Grounded
+answer: **Imperium is JIT SELF-ELEVATION (a different axis) and its kernel build
+is explicitly MAIN's** -- F2 is foreground-session mode control, solvable now with
+the existing console-owner primitive, and Imperium would not reshape it. Operator
+chose: fix F2 now, do NOT start Imperium. Fix = a foreground-session gate
+(`proc_console_owner_in_session`: the caller's sid == the console owner's sid;
+post-SAK owner=NULL -> refused), gating ONLY the TCSETS mutation (reads stay
+ungated so isatty works for any holder), checked BEFORE the copy_in.
+
+P3a (test mutates g_cons, restore-before-assert) fixed; P3b closed with
+justification (static, single-caller, provably-fits 64-byte buffer); P3c
+(TIOCGPGRP/TIOCSPGRP -> ENOTTY) tracked as a C2-k3 job-control seam.
+
+Not a dirty close (0 P0, 2 P1, non-invasive fixes; self-audited). Suite
+1433/1433 default, 0 fail, 0 EXTINCTION, boot OK. **SMP gate PASS on the
+audit-fixed tree: 40/40 boots, 0 corruption / 0 external-kill / 0 inject-miss /
+0 timing / 0 other** (default+UBSan x smp4/smp8, N=10) -- the F2 accessor reads
+g_console_owner under g_proc_table_lock, the exact SMP surface, clean under smp8.
+
+**Ahead**: C2-k3 (`viv sh` interactive + nora-as-editor) -> C2-wiring
+(core.editor=nora) -> C2-k1c (pts ldisc reach). Imperium remains the operator's
+to open, coordinated with main, at effort max.
+
+---
+
 ## 2026-08-31 (aux) -- N-6: git push over https -- milestone B complete
 
 The last of milestone B's exit criteria. Clone and fetch were already gated

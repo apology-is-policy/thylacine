@@ -382,6 +382,20 @@ The "complete practical" polish. Gated on a kernel chunk.
   window size, a controlling terminal. **This is the largest new kernel work in
   the plan -- and it is a general win**: it lights up *every* interactive Linux
   TUI under `viv` (an editor, `top`, `less`, a REPL), not just git.
+  - **CONSOLE HALF LANDED** -- **C2-k1b** (`05e91a06`) wired the phenotype
+    `ioctl(29)` arm to the C2-k1a classifier and serves `TCGETS`/`TCSETS`/
+    `TIOCGWINSZ`/`TIOCSWINSZ` on a **console** fd off `g_cons` (kernel-owned
+    line discipline): `isatty()` is now true on the console, raw mode and the
+    window size work. **C2-k2** (`348e21b7`) maps `setsid`/`setpgid` (errno
+    `ACCES`->`EPERM` remap) + `getpgid`/`getsid` (pure renumbers) to the native
+    session cores (89-92) for job control. Thylacine has no ioctl surface and no
+    kernel termios struct, so the translation the pouch PTY-3 patch does in musl
+    happens kernel-side here (the phenotype runs UNMODIFIED binaries).
+  - **DEFERRED: C2-k1c (the pts half).** A pts fd IS a terminal, but its line
+    discipline lives in the ptyfs userspace server; reaching it from the kernel
+    (walk `/dev/pts/<N>ctl` + 9P I/O) is C2-k1c. Today a pts ioctl answers
+    `ENOTTY` (no regression: it was `ENOSYS` before). The console half covers the
+    stated goal (interactive git + `viv sh` on the console).
 - **C2-wiring: nora as the editor.** `core.editor=nora` + `sequence.editor=nora`
   -- **bare names, so git `execve`s nora directly with no `/bin/sh`** (git only
   invokes the shell when the editor string carries a metacharacter, space

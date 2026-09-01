@@ -1807,6 +1807,33 @@ bool proc_is_console_owner(const struct Proc *p) {
     return yes;
 }
 
+// C2-k1b F2: does `caller_sid` name the session that currently owns the console?
+// PURE (no globals) so the gate logic is unit-testable. owner_sid==0 means "no
+// owner" (e.g. post-SAK, which sets g_console_owner=NULL) -> never a match, so a
+// session-less (sid 0) caller never spuriously matches a no-owner console.
+bool console_session_match(u32 owner_sid, u32 caller_sid) {
+    return owner_sid != 0u && owner_sid == caller_sid;
+}
+
+// C2-k1b F2: may `p` flip the GLOBAL console line discipline (a phenotype
+// TCSETS)? True iff p's session currently OWNS the console -- the foreground
+// session shell (SPAWN_PERM_CONSOLE_OWNER) and the apps it spawns (which inherit
+// its sid), the Linux "only the foreground pgrp may tcsetattr" rule at
+// session granularity. A background/other-session proc, and every proc after a
+// SAK (which sets g_console_owner=NULL), is refused -- closing the F2 window
+// where a lingering phenotype flips ECHO on during corvus's trusted passphrase
+// prompt. g_console_owner is NULL or a LIVE Proc under g_proc_table_lock (cleared
+// on owner-death every path), so the sid deref is UAF-free (the sanctioned
+// discipline, the g_console_owner header above).
+bool proc_console_owner_in_session(const struct Proc *p) {
+    if (!p) return false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    u32 owner_sid = g_console_owner ? g_console_owner->sid : 0u;
+    u32 caller_sid = p->sid;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return console_session_match(owner_sid, caller_sid);
+}
+
 void proc_set_console_trusted(struct Proc *p) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     g_console_trusted_proc = p;

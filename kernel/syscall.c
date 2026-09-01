@@ -11781,9 +11781,11 @@ int viv_linux_termios_to_grammar(const struct viv_linux_termios *tio, char *g) {
 // termios/winsize ABI directly -- no ptyfs round-trip (that is the pts case,
 // C2-k1c). The error-prone flag/grammar logic is the two PURE helpers above;
 // this arm is the thin uaccess + setter glue.
-static s64 viv_ioctl_cons(enum viv_ioctl_op op, u64 argp) {
+static s64 viv_ioctl_cons(struct Proc *p, enum viv_ioctl_op op, u64 argp) {
     switch (op) {
     case VIV_IOCTL_TCGETS: {
+        // A READ -- ungated (isatty/tcgetattr work for any cons-fd holder,
+        // matching Linux; the ldisc flags are not sensitive).
         struct viv_linux_termios tio;
         viv_cons_to_linux_termios(cons_termios_get(), &tio);
         if (!sys_validate_user_buf(argp, sizeof(tio)))       return -(s64)T_E_FAULT;
@@ -11791,6 +11793,13 @@ static s64 viv_ioctl_cons(enum viv_ioctl_op op, u64 argp) {
         return 0;
     }
     case VIV_IOCTL_TCSETS: {
+        // F2: flipping the GLOBAL console line discipline requires p's session to
+        // OWN the console (the foreground session -- the Linux "only the fg pgrp
+        // may tcsetattr" rule at session granularity). A background/other-session
+        // proc, and every proc after a SAK (owner=NULL), is refused -- so a
+        // lingering phenotype cannot flip ECHO on during corvus's trusted
+        // passphrase prompt. Checked BEFORE any argp access (early, cheap reject).
+        if (!proc_console_owner_in_session(p))               return -(s64)T_E_PERM;
         struct viv_linux_termios tio;
         if (!sys_validate_user_buf(argp, sizeof(tio)))       return -(s64)T_E_FAULT;
         if (uaccess_copy_in(&tio, argp, sizeof(tio)) != 0)   return -(s64)T_E_FAULT;
@@ -11839,20 +11848,20 @@ static s64 viv_ioctl(struct Proc *p, u64 fd, u64 request, u64 argp) {
     s64 r;
     if (vivarium_ioctl_decide(request, &op) != VIV_TRANSLATED) {
         r = -(s64)T_E_NOTTY;                        // not a served terminal request
+    } else if (spoor_is_console(sp)) {
+        // F1: the cons fd is identified by UNFORGEABLE device identity (devcons /
+        // the devdev /dev/cons leaf), NOT the CONS_STAT_QID_FLAG bit -- a
+        // dev9p-backed Spoor carries that bit verbatim from the server (e.g.
+        // tapestryd's PANE_FLAG is the same bit 41), so a server-backed fd must
+        // never impersonate the console and flip its global line discipline.
+        r = viv_ioctl_cons(p, op, argp);
     } else {
-        struct t_stat st;
-        bool is_cons = (spoor_stat_native(sp, &st) == 0)
-                    && (st.qid_path & CONS_STAT_QID_FLAG) != 0u;
-        if (is_cons) {
-            r = viv_ioctl_cons(op, argp);
-        } else {
-            // Not the console. A pts fd IS a terminal, but its line discipline
-            // lives in the ptyfs userspace server -- reaching it from the kernel
-            // (walk /dev/pts/<N>ctl + 9P I/O) is C2-k1c. A plain file/pipe is not
-            // a terminal at all. Both answer ENOTTY today: no regression (ioctl
-            // was ENOSYS before) and no wrong answer, so they need not differ yet.
-            r = -(s64)T_E_NOTTY;
-        }
+        // Not the console. A pts fd IS a terminal, but its line discipline lives
+        // in the ptyfs userspace server -- reaching it from the kernel (walk
+        // /dev/pts/<N>ctl + 9P I/O) is C2-k1c. A server-backed fd (a tapestryd
+        // pane, a Stratum file) and a plain file/pipe are not the console. All
+        // answer ENOTTY today: no regression (ioctl was ENOSYS before).
+        r = -(s64)T_E_NOTTY;
     }
     spoor_clunk(sp);
     return r;

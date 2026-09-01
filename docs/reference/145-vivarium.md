@@ -3630,3 +3630,87 @@ No kernel append mode, no new write-path mechanism, no ABI break (the omode bit
 is additive; a native open that does not set it is unaffected). The arm carries
 two flags/numbers to machinery that already exists (Stratum's server-side append
 + the native pread/pwrite handlers).
+
+## Terminal control: ioctl termios/winsize + session/pgrp (C2-k1b/k2; aux, 2026-09-01)
+
+Milestone C2's kernel half -- what makes a phenotype process INTERACTIVE on the
+console. `isatty()` (which musl implements as `ioctl(fd, TIOCGWINSZ, &ws)`) was
+false on every fd because there was no `ioctl` row at all, so git dropped to
+non-interactive defaults and no Linux TUI could run. Thylacine has **no ioctl
+surface and no kernel termios struct** -- terminal control is file-shaped (the
+cons/pts 5-flag `consctl` grammar) plus the discrete session/pgrp syscalls
+(89-92). The phenotype runs UNMODIFIED binaries, so the translation the pouch
+PTY-3 patch does in musl must happen kernel-side.
+
+### The ioctl shell (C2-k1b, `05e91a06`)
+
+`viv_ioctl` (`kernel/syscall.c`) is the `viv_tier2` arm for `ioctl(29)`. It
+resolves the fd rights-agnostic (`sys_lookup_spoor(p, fd, 0)` -- Linux terminal
+ioctls do not check r/w mode, and `isatty()` probes fd 1/2, often write-only),
+so `EBADF` beats `ENOTTY` (the fd is validated before the request is classified
+by the pre-existing pure `vivarium_ioctl_decide`). The cons-fd predicate is
+exactly what `isatty()` relies on -- `spoor_stat_native` + the char-device
+posture + `CONS_STAT_QID_FLAG` (bit 41) -- so it covers BOTH cons doors (devcons
+and the devdev `/dev/cons` leaf) and cannot drift.
+
+On a cons fd, `viv_ioctl_cons` serves the family off the kernel-owned `g_cons`:
+- `TCGETS` -- `viv_cons_to_linux_termios` maps the cons 5-flag word (`CONS_ICANON/
+  ECHO/ISIG/ICRNL/ONLCR`) to a Linux `struct termios` (36-byte asm-generic
+  layout, `_Static_assert`ed), fills the `INIT_C_CC` control-char baseline, and
+  copies out (whole-span `sys_validate_user_buf` first -- the N-5 uaccess class).
+- `TCSETS{,W,F}` -- copies in the termios, and `viv_linux_termios_to_grammar`
+  builds a DETERMINISTIC 5-flag `+/-` grammar (every flag explicit, so the result
+  is independent of the current mode) fed to the ONE production setter
+  `cons_set_mode_cmd(g, n, /*allow_flags=*/true)`, reusing its atomic apply +
+  ICANON-clear-delivers-line + poller wake. `onlcr` requires `OPOST` (Linux
+  translates NL only under it).
+- `TIOCGWINSZ` -- `cons_winsize_get` -> `struct winsize` (8 bytes, asserted);
+  this is isatty's probe.
+- `TIOCSWINSZ` -- `EPERM` (console geometry is physical, owned by the renderer;
+  pouch-0029 parity).
+
+The two PURE helpers carry the error-prone flag/grammar logic and are unit-tested
+with plain structs + a behavioral round-trip through the real setter (the
+getdents64-transform precedent). `T_E_NOTTY` (25, POSIX `ENOTTY`) was added to the
+errno registry for the non-tty / unserved-request answer.
+
+### Session + process-group control (C2-k2, `348e21b7`)
+
+The Linux session/pgrp syscalls map to the native cores (89-92); arities line up.
+`getpgid(155)`/`getsid(156)` are PURE T1 renumbers (the cores return the pgid/sid
+or `-T_E_SRCH` = Linux `ESRCH`; pid 0 = self in both). `setsid(157)`/`setpgid(154)`
+are TIER2 shells for ONE reason -- the errno: the native cores return `T_E_ACCES`
+for what Linux reports as `EPERM` (setsid on a group leader; setpgid's
+cross-session / session-leader / no-such-group contour), so the shells remap
+`ACCES -> PERM` (INVAL/SRCH and the success value pass through). All four Linux
+numbers sit above `VIV_NATIVE_CEILING`, so the renumbers cannot mis-dispatch.
+
+### Degradations (documented, none silent-wrong)
+
+- **pts fds answer `ENOTTY` (C2-k1c deferred).** A pts's line discipline lives in
+  the ptyfs userspace server; reaching it from the kernel (walk `/dev/pts/<N>ctl`
+  + 9P I/O) is the deferred half. No regression -- ioctl was `ENOSYS` before.
+- **The console termios is GLOBAL** (single physical console; per-fd termios is a
+  fiction Thylacine does not maintain). A phenotype `TCSETS` mutates it for every
+  console user -- faithful to Linux's shared-tty termios, and ldisc flags are not
+  a security boundary (I-27 SAK/attach is independent). The background-`tcsetattr`
+  `SIGTTOU` strictness is a fidelity gap, not a soundness one.
+- **The termios subset is 5 ldisc flags** (the pouch PTY-3 honesty); other bits
+  are 0 on get and ignored on set, which round-trips a guest's
+  tcgetattr/modify/tcsetattr for the flags we implement.
+
+### I-43 / I-20
+
+A phenotype gets ABI SHAPE, not AUTHORITY: the ioctl shell touches only the
+caller's own cons fd + the global ldisc (no privilege bit), and setsid/setpgid/
+get* call the SAME native cores a native Proc uses -- no widening.
+
+### Witnesses
+
+Kernel units: `vivarium.ioctl_termios_map` (the pure cons<->Linux termios map,
+each flag + the c_cc/c_cflag baseline), `vivarium.ioctl_grammar_roundtrip` (the
+grammar via a behavioral round-trip through the real setter, incl. the
+ONLCR-requires-OPOST gate), `vivarium.ioctl_dispatch_ebadf` (the fd-first
+ordering: EBADF beats ENOTTY), `vivarium.session_errno_remap` (setsid/setpgid
+ACCES->EPERM + the INVAL passthrough discriminator). The full cons serve (a real
+cons fd + mapped user memory) is covered by the in-guest viv-run E2E.

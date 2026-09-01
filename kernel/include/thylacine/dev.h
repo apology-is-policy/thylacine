@@ -373,9 +373,18 @@ extern struct Dev devproc;        // dc='p'  — /proc/<pid>/{status,cmdline,ctl
 extern struct Dev devctl;         // dc='C'  — /ctl/{procs,memory,devices,kernel-base,sched}
 extern struct Dev devramfs;       // dc='m'  — /ramfs/<file> from cpio newc initrd
 extern struct Dev devdev;         // dc='d'  — /dev char-device directory (#57b)
+extern struct Dev devcons;        // dc='c'  — the console (SYS_CONSOLE_OPEN door)
 extern struct Dev devhw;          // dc='H'  — DTB hardware inventory tree (Menagerie devhw)
 extern struct Dev devpci;         // dc='P'  — /hw/pci mediated PCI topology (Menagerie 6b)
 extern struct Dev devenv;         // dc='E'  — /env per-Proc environment (G15, Go Stage 4a)
+
+// C2-k1b: is this Spoor the kernel console, by UNFORGEABLE device identity? True
+// for both console doors -- devcons (the SYS_CONSOLE_OPEN Dev) and the devdev
+// /dev/cons leaf. A 9P server cannot forge either. This deliberately does NOT
+// key on CONS_STAT_QID_FLAG, which a dev9p-backed Spoor carries verbatim from
+// the server (e.g. tapestryd's PANE_FLAG is the same bit 41), so the qid-bit
+// test would let a server-backed fd impersonate the console.
+bool spoor_is_console(struct Spoor *sp);
 
 // devramfs diagnostics (used by tests).
 int  devramfs_file_count(void);

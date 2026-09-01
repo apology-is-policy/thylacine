@@ -38,6 +38,8 @@
                                     //       against the REAL constants, not copies
 #include <thylacine/vivarium.h>
 #include <thylacine/cons.h>          // C2-k1b: CONS_* flags + the cons test hooks
+#include <thylacine/spoor.h>         // C2-k1b F1: struct Spoor for the identity test
+#include <thylacine/dev.h>           // C2-k1b F1: devcons/devramfs + spoor_is_console
 
 #include "../../mm/slub.h"          // #127: a real sigtab, so proc_free frees it
 
@@ -4578,7 +4580,10 @@ void test_vivarium_ioctl_grammar_roundtrip(void) {
     char g[64];
     int n;
 
-    // Save the global console mode; every mutation below is restored at the end.
+    // This test MUTATES the global g_cons.termios. Per the shared-fixture lesson
+    // (ASSERT AFTER TEARDOWN): observe every leg into a local, RESTORE the saved
+    // mode, and only THEN assert -- so a failing leg cannot leave the live
+    // console in a wrong mode for the next cons test.
     u32 saved = cons_test_termios();
 
     // Round-trip two distinct values through the full pure pipeline + real setter.
@@ -4586,35 +4591,40 @@ void test_vivarium_ioctl_grammar_roundtrip(void) {
     cons_test_set_termios(want1);
     viv_cons_to_linux_termios(cons_termios_get(), &tio);
     n = viv_linux_termios_to_grammar(&tio, g);
-    TEST_ASSERT(cons_set_mode_cmd(g, n, true) >= 0, "grammar applies cleanly (want1)");
-    TEST_EXPECT_EQ((int)cons_termios_get(), (int)want1,
-                   "get->map->grammar->set round-trips (cooked+isig)");
+    long apply1 = cons_set_mode_cmd(g, n, true);
+    u32 got1 = cons_termios_get();
 
     const u32 want2 = CONS_TERMIOS_ALL;                // all five set
     cons_test_set_termios(want2);
     viv_cons_to_linux_termios(cons_termios_get(), &tio);
     n = viv_linux_termios_to_grammar(&tio, g);
-    TEST_ASSERT(cons_set_mode_cmd(g, n, true) >= 0, "grammar applies cleanly (want2)");
-    TEST_EXPECT_EQ((int)cons_termios_get(), (int)want2, "round-trips all five set");
+    long apply2 = cons_set_mode_cmd(g, n, true);
+    u32 got2 = cons_termios_get();
 
     // ONLCR requires OPOST: a Linux termios with ONLCR but NOT OPOST must NOT turn
-    // native ONLCR on; with both, it must. Proven by the applied mode, starting
-    // each leg from a known state.
+    // native ONLCR on; with both, it must. Proven by the applied mode, each leg
+    // started from a known state.
     for (u64 i = 0; i < sizeof(tio); i++) ((u8 *)&tio)[i] = 0;
     tio.c_oflag = VIV_LINUX_ONLCR;                      // ONLCR without OPOST
     n = viv_linux_termios_to_grammar(&tio, g);
     cons_test_set_termios(CONS_ONLCR);                 // start ON to prove it clears
     (void)cons_set_mode_cmd(g, n, true);
-    TEST_ASSERT((cons_termios_get() & CONS_ONLCR) == 0u,
-                "ONLCR without OPOST leaves native ONLCR OFF");
+    u32 onlcr_off = cons_termios_get() & CONS_ONLCR;
     tio.c_oflag = VIV_LINUX_OPOST | VIV_LINUX_ONLCR;
     n = viv_linux_termios_to_grammar(&tio, g);
     cons_test_set_termios(0u);                          // start OFF to prove it sets
     (void)cons_set_mode_cmd(g, n, true);
-    TEST_ASSERT((cons_termios_get() & CONS_ONLCR) != 0u,
-                "OPOST|ONLCR turns native ONLCR ON");
+    u32 onlcr_on = cons_termios_get() & CONS_ONLCR;
 
-    cons_test_set_termios(saved);                       // restore the console mode
+    cons_test_set_termios(saved);                       // RESTORE before any assert
+
+    TEST_ASSERT(apply1 >= 0, "grammar applies cleanly (want1)");
+    TEST_EXPECT_EQ((int)got1, (int)want1,
+                   "get->map->grammar->set round-trips (cooked+isig)");
+    TEST_ASSERT(apply2 >= 0, "grammar applies cleanly (want2)");
+    TEST_EXPECT_EQ((int)got2, (int)want2, "round-trips all five set");
+    TEST_ASSERT(onlcr_off == 0u, "ONLCR without OPOST leaves native ONLCR OFF");
+    TEST_ASSERT(onlcr_on  != 0u, "OPOST|ONLCR turns native ONLCR ON");
 }
 
 // F3: the ioctl shell dispatch, driven through the REAL viv_tier2 arm. The
@@ -4684,6 +4694,67 @@ void test_vivarium_session_errno_remap(void) {
     s64 r_pgid_inval = viv_session_for_test(p, VIV_LINUX_SETPGID, 0, (u64)-1);
     TEST_EXPECT_EQ(r_pgid_inval, -(s64)T_E_INVAL,
                    "setpgid pgid<0 -> EINVAL (not remapped to EPERM)");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// C2-k1b audit F1 + F2 (Fable 5). F1: the cons-fd predicate keys on UNFORGEABLE
+// device identity, not the CONS_STAT_QID_FLAG bit -- a dev9p server sets qid_path
+// verbatim, and tapestryd's PANE_FLAG is the same bit 41, so a bit-only test
+// would let a server-backed fd flip the global console. F2: a phenotype TCSETS
+// (the global-mode flip) is gated on the caller's session OWNING the console, so
+// a non-owner-session / post-SAK proc is refused -- while reads (isatty's
+// TIOCGWINSZ) stay ungated for any cons-fd holder.
+extern hidx_t sys_console_open_for_proc(struct Proc *p);
+void test_vivarium_ioctl_cons_identity_and_gate(void);
+void test_vivarium_ioctl_cons_identity_and_gate(void) {
+    // F1: spoor_is_console by device identity (spoor_is_console only reads
+    // sp->dev + sp->qid.path -- a zeroed stack Spoor is a valid probe).
+    struct Spoor s;
+    for (u64 i = 0; i < sizeof(s); i++) ((u8 *)&s)[i] = 0;
+    s.dev = &devcons;
+    TEST_ASSERT(spoor_is_console(&s), "devcons spoor -> is console (F1 true-path)");
+    // THE FORGERY: a foreign Dev with CONS_STAT_QID_FLAG (bit 41) forged in its
+    // qid must NOT be mistaken for the console (the tapestryd PANE_FLAG == bit 41
+    // case). Fails on the pre-fix bit-only predicate.
+    s.dev = &devramfs;
+    s.qid.path = CONS_STAT_QID_FLAG | 0x5u;
+    TEST_ASSERT(!spoor_is_console(&s),
+                "foreign Dev with forged bit 41 -> NOT console (F1 forgery closed)");
+    TEST_ASSERT(!spoor_is_console(NULL), "NULL spoor -> not console");
+
+    // F2: the pure session-gate logic. owner_sid 0 = no owner (post-SAK) -> never.
+    TEST_ASSERT(console_session_match(5u, 5u), "same sid -> in the owner's session");
+    TEST_ASSERT(!console_session_match(5u, 6u), "different sid -> not");
+    TEST_ASSERT(!console_session_match(0u, 0u), "no owner (sid 0) -> never a match");
+    TEST_ASSERT(!console_session_match(0u, 5u), "no owner -> not");
+
+    // F2 integration: a REAL devcons fd (proving F1's true-path end to end) held
+    // by a proc NOT in the console owner's session.
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    p->state = PROC_STATE_ALIVE;
+    p->sid = 0xDEADBEEFu;                       // guaranteed NOT the owner's session
+    hidx_t fd = sys_console_open_for_proc(p);
+    TEST_ASSERT(fd >= 0, "console open for the test proc");
+    const u64 user_ok = 0x40000ull;
+
+    // TCSETS from a non-owner-session proc -> EPERM, and the F2 gate fires BEFORE
+    // the copy_in, so the unmapped argp is never touched. Fails-without-fix: with
+    // no gate, TCSETS reaches copy_in on the unmapped user_ok and returns EFAULT,
+    // so this EPERM assertion is the discriminating regression for F2.
+    s64 r_set = viv_ioctl_for_test(p, (u64)fd, VIV_TCSETS, user_ok);
+    TEST_EXPECT_EQ(r_set, -(s64)T_E_PERM,
+                   "TCSETS from a non-owner-session proc -> EPERM (F2 gate before copy)");
+
+    // TIOCGWINSZ (isatty's probe) is a READ -- NOT session-gated. It passes the
+    // identity check (a real cons fd, F1 true-path) and reaches copy_out on the
+    // unmapped argp -> EFAULT. EFAULT (not EPERM) proves the read is ungated.
+    s64 r_get = viv_ioctl_for_test(p, (u64)fd, VIV_TIOCGWINSZ, user_ok);
+    TEST_EXPECT_EQ(r_get, -(s64)T_E_FAULT,
+                   "TIOCGWINSZ ungated: reaches copy_out (EFAULT), not EPERM");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
