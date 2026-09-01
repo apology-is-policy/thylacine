@@ -11,6 +11,7 @@
 
 extern crate alloc;
 
+pub mod layout;
 pub mod raster;
 pub mod transcript;
 

@@ -13,10 +13,13 @@ use alloc::vec::Vec;
 
 use cartoon::{AtlasPacker, GlyphRef};
 
-/// A face slot in this source. The MVP carries the two vendored DejaVu
-/// weights; raw-VT/mono islands use the baked Cornucopia atlas, not this.
+/// A face slot in this source: the two vendored DejaVu weights, plus the
+/// system monospace -- the baked Cornucopia atlas (fixed cell, one size
+/// per advance), serving mono islands + foreign terminal output through
+/// the SAME packer/id space so one atlas store feeds the executor.
 pub const FACE_BODY: u8 = 0;
 pub const FACE_BODY_BOLD: u8 = 1;
+pub const FACE_MONO: u8 = 2;
 
 /// Per-(face, size) vertical metrics, integer pixels, y-down. `ascent` is
 /// baseline distance from the line top; `line_height` includes the gap.
@@ -38,6 +41,7 @@ struct Cached {
 /// too; the executor's gen check is the belt).
 pub struct GlyphSource {
     faces: Vec<fontdue::Font>,
+    mono: cornucopia::Atlas,
     pub packer: AtlasPacker,
     cache: BTreeMap<(u8, u32, char), Cached>,
 }
@@ -63,7 +67,18 @@ impl GlyphSource {
                 faces.push(f);
             }
         }
-        GlyphSource { faces, packer: AtlasPacker::new(page, page), cache: BTreeMap::new() }
+        GlyphSource {
+            faces,
+            mono: cornucopia::Atlas::for_advance(cornucopia::DEFAULT_ADVANCE),
+            packer: AtlasPacker::new(page, page),
+            cache: BTreeMap::new(),
+        }
+    }
+
+    /// The mono cell geometry (w, h, baseline) -- the raw-VT / foreign-
+    /// block metrics, and the mono island's advance.
+    pub fn mono_cell(&self) -> (i32, i32, i32) {
+        (self.mono.cell_w() as i32, self.mono.cell_h() as i32, self.mono.baseline() as i32)
     }
 
     pub fn face_count(&self) -> usize {
@@ -74,10 +89,37 @@ impl GlyphSource {
     /// None: unknown face, or the bitmap can never fit a page. A missing
     /// codepoint is NOT None -- fontdue rasterizes its .notdef box, which
     /// is the correct visible outcome for unmapped input.
+    ///
+    /// FACE_MONO ignores `px` (the baked atlas has one size per advance)
+    /// and serves the Cornucopia cell; a codepoint the 207-glyph bake
+    /// lacks falls back to DejaVu rasterized to the cell height with the
+    /// advance FORCED to the cell width (the grid survives; the glyph may
+    /// clip -- recorded MVP posture; box drawing stays a renderer concern).
     pub fn glyph(&mut self, face: u8, px: f32, ch: char) -> Option<GlyphRef> {
-        let key = (face, size_q(px), ch);
+        let q = if face == FACE_MONO { 0 } else { size_q(px) };
+        let key = (face, q, ch);
         if let Some(c) = self.cache.get(&key) {
             return Some(GlyphRef { glyph: c.id, advance: c.advance });
+        }
+        if face == FACE_MONO {
+            let (cw, chh, base) = self.mono_cell();
+            if let Some(alpha) = self.mono.glyph(ch) {
+                let id = self.packer.insert(cw as u32, chh as u32, alpha, 0, base)?;
+                self.cache.insert(key, Cached { id, advance: cw });
+                return Some(GlyphRef { glyph: id, advance: cw });
+            }
+            // Fallback: body-rasterized at cell height, grid-advance.
+            let f = self.faces.get(FACE_BODY as usize)?;
+            let (m, bitmap) = f.rasterize(ch, (chh - 4) as f32);
+            let id = self.packer.insert(
+                m.width as u32,
+                m.height as u32,
+                &bitmap,
+                m.xmin,
+                m.height as i32 + m.ymin,
+            )?;
+            self.cache.insert(key, Cached { id, advance: cw });
+            return Some(GlyphRef { glyph: id, advance: cw });
         }
         let f = self.faces.get(face as usize)?;
         let (m, bitmap) = f.rasterize(ch, px);
@@ -97,7 +139,12 @@ impl GlyphSource {
     }
 
     /// Vertical metrics for a face at a size (integer px, y-down).
+    /// FACE_MONO's are the baked cell's (px ignored).
     pub fn line_metrics(&self, face: u8, px: f32) -> Option<LineMetrics> {
+        if face == FACE_MONO {
+            let (_, chh, base) = self.mono_cell();
+            return Some(LineMetrics { ascent: base, descent: chh - base, line_height: chh });
+        }
         let f = self.faces.get(face as usize)?;
         let lm = f.horizontal_line_metrics(px)?;
         let ascent = (lm.ascent + 0.5) as i32;
