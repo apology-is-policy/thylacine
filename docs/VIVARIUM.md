@@ -4070,7 +4070,7 @@ cross-Proc interleaving of the flip against every note-posting path is a **named
 area** for the post-implementation audit.
 
 **The constructed-states sweep (post-implementation audit, Fable 5.1, 2026-09-01 — findings
-F1/F2, both P2, closed at the audit-close commit).** D makes two Proc states constructible
+F1/F2, both P2, closed at `5f2d4ded`).** D makes two Proc states constructible
 that were impossible under execve-preserves, and every per-Proc field whose soundness
 argument read "a *\<phenotype\>* Proc never has X" was a candidate to break: (1) a **Linux
 image carrying `PROC_FLAG_SELF_MANAGING_NOTES`** — a native image opens its notes fd (the mark
@@ -4224,7 +4224,7 @@ fixture" claim was false); the store comment's ordering overclaim (§13.10.4); f
 contracts (the "unreachable" nameless-entry refusal — §13.10.6's asymmetry; `stalk_exec`'s
 failure contract; `notes.c`'s "by construction"; the libthyla-rs and libt "inherit the
 spawner's phenotype" mirrors); and the unobservable declaration (`/proc/<pid>/ns` now renders
-`root: pheno-linux`). Closed at the audit-close commit; the closed list is
+`root: pheno-linux`). Closed at `5f2d4ded`; the closed list is
 `memory/audit_designd_closed_list.md`.
 
 #### 13.10.10 Alternatives considered + rejected

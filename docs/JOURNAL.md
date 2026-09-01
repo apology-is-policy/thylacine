@@ -189,7 +189,7 @@ now-false claims corrected.
 N=10; the full log archived in the session scratchpad).
 
 **The audit (Fable 5.1, `claude-fable-5-1`, MODEL start==end, 366K tokens): 0 P0 / 0 P1 /
-2 P2 / 4 P3, not dirty.** Every folded-in review item verified realized on the code; the
+2 P2 / 4 P3, not dirty; closed at `5f2d4ded`.** Every folded-in review item verified realized on the code; the
 named focus area -- the flip against every note-posting path -- re-derived sound by the
 same argument my self-audit had reached (delivery is a whole-ring scan at every EL0
 return; every cross-Proc reader gates on the phenotype before the sigtab). What the
