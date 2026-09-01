@@ -781,6 +781,7 @@ dependencies = [
 name = "libutopia"
 version = "0.1.0"
 dependencies = [
+ "beacon",
  "libthyla-rs",
 ]
 
@@ -1723,6 +1724,7 @@ dependencies = [
 name = "u-repl-test"
 version = "0.1.0"
 dependencies = [
+ "beacon",
  "libthyla-rs",
  "libutopia",
 ]

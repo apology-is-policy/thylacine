@@ -82,6 +82,52 @@ fn print_banner() {
 /// `Command::inherit_fd` (so it lands at ut's fd 3) and passes its number here.
 /// A bare-spawned ut (the boot check) is given no such arg -> -1 -> ut runs
 /// unchanged. N is parsed generically (always 3 in the trusted login->ut chain).
+// H-1c: read the renderer's tier advertisement off the consctl mode line
+// (`... winsize C R beacon <tier>\n`, ARCH 23.5.4). Returns the tier word,
+// or None on a read failure / a pre-H-1 line with no token (both mean:
+// leave /env/BEACON alone -- an inherited value survives). The read advances
+// the fd offset; nothing else reads this fd (the LS-7 dance only writes).
+fn read_beacon_tier(fd: i64) -> Option<&'static str> {
+    let mut buf = [0u8; 96];
+    let n = unsafe { libthyla_rs::t_read(fd, buf.as_mut_ptr(), buf.len()) };
+    if n <= 0 {
+        return None;
+    }
+    let line = &buf[..n as usize];
+    let needle = b"beacon ";
+    let at = line
+        .windows(needle.len())
+        .position(|w| w == needle)?;
+    let word = &line[at + needle.len()..];
+    if word.starts_with(b"rich") {
+        Some("rich")
+    } else if word.starts_with(b"cells") {
+        Some("cells")
+    } else if word.starts_with(b"none") {
+        Some("none")
+    } else {
+        None
+    }
+}
+
+// H-1c: export the session tier the Plan 9 way -- /env/BEACON, deep-copied
+// to every child at spawn (kernel env_clone_into; children read it via
+// libthyla_rs::env::var). Best-effort: a failed export leaves children at
+// tier none, degraded never broken.
+fn export_beacon(tier: &str) {
+    use libthyla_rs::io::Write as _;
+    match libthyla_rs::fs::File::create("/env/BEACON") {
+        Ok(mut f) => {
+            if f.write_all(tier.as_bytes()).is_err() {
+                t_putstr("ut: /env/BEACON write failed (children see none)\n");
+            }
+        }
+        Err(_) => {
+            t_putstr("ut: /env/BEACON create failed (children see none)\n");
+        }
+    }
+}
+
 fn parse_consctl_fd() -> i64 {
     let mut it = env::args().operands();
     while let Some(a) = it.next() {
@@ -315,6 +361,23 @@ pub extern "C" fn rs_main() -> i64 {
             t_putstr("ut: consctl ok (console line discipline via inherited fd)\n");
         } else {
             t_putstr("ut: consctl unavailable (mode-set rejected)\n");
+        }
+
+        // H-1c (BEACON.md 12.3/12.6): resolve the session's Beacon tier from
+        // the renderer's consctl advertisement and export it. The session ut
+        // is the ONLY writer of /env/BEACON (it read the advertisement off
+        // the console it owns); a consctl-less / pts-hosted / bare-spawned ut
+        // takes this branch never, so an INHERITED /env/BEACON from a parent
+        // session is left alone. Zones arm iff the tier is rich AND ut's own
+        // stdout is the console (a redirected session emits nothing).
+        let tier = read_beacon_tier(consctl_fd);
+        if let Some(t) = tier {
+            export_beacon(t);
+            let stdout_is_cons = unsafe { libthyla_rs::t_fd_devclass(1) } == b'c' as i64;
+            if t == "rich" && stdout_is_cons {
+                repl.set_beacon_rich(true);
+                t_putstr("ut: beacon rich (transcript zones armed)\n");
+            }
         }
     }
 

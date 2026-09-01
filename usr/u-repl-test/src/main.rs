@@ -248,6 +248,46 @@ pub extern "C" fn rs_main() -> i64 {
         t_putstr("u-repl-test: D4 menu completion OK\n");
     }
 
+    // H-1c (BEACON.md 12.6): the transcript zone frames -- the REAL driver of
+    // the rich arm (nothing advertises rich until Halcyon, so without this
+    // leg the gated path would be green-by-vacancy, the wired-gate trap).
+    // The discrimination pair: the SAME script through a rich and a plain
+    // repl -- frames present in one, absent in the other, and strip(rich)
+    // byte-identical to plain (the P1 property over the live REPL).
+    {
+        let script: &[u8] = b"let zz = 7\n";
+        let mut plain = Repl::new();
+        let mut plain_out: Vec<u8> = Vec::new();
+        plain.draw_prompt(&mut plain_out);
+        if plain.feed(script, &mut plain_out).is_some() {
+            return fail("beacon: the plain repl ended unexpectedly");
+        }
+        let mut rich = Repl::new();
+        rich.set_beacon_rich(true);
+        let mut rich_out: Vec<u8> = Vec::new();
+        rich.draw_prompt(&mut rich_out);
+        if rich.feed(script, &mut rich_out).is_some() {
+            return fail("beacon: the rich repl ended unexpectedly");
+        }
+        let has = |h: &[u8], needle: &[u8]| h.windows(needle.len()).any(|w| w == needle);
+        if has(&plain_out, b"\x1b]1936;") {
+            return fail("beacon: frames leaked into the plain tier");
+        }
+        if !has(&rich_out, b"\x1b]1936;v1;zone;k=prompt\x1b\\") {
+            return fail("beacon: no prompt zone frame at rich");
+        }
+        if !has(&rich_out, b"\x1b]1936;v1;zone;k=output\x1b\\") {
+            return fail("beacon: no output zone frame at rich");
+        }
+        if !has(&rich_out, b"\x1b]1936;v1;mark;k=exit;code=0\x1b\\") {
+            return fail("beacon: no exit mark at rich");
+        }
+        if beacon::wire::strip(&rich_out) != plain_out {
+            return fail("beacon: strip(rich) != plain (the P1 property broke)");
+        }
+        t_putstr("u-repl-test: beacon zones OK\n");
+    }
+
     t_putstr("u-repl-test: all OK\n");
     0
 }

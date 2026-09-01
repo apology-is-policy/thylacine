@@ -61,6 +61,27 @@ use crate::eval::{builtin, deliver_pending_notes, eval_source, Env, Value};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::palette::Role;
 
+/// H-1c: render an exit code decimal into a stack buffer (no_std, no alloc
+/// on the hot path -- the mark fires once per command).
+fn fmt_exit(buf: &mut [u8; 24], v: i64) -> &str {
+    let mut i = buf.len();
+    let neg = v < 0;
+    let mut u = v.unsigned_abs();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (u % 10) as u8;
+        u /= 10;
+        if u == 0 {
+            break;
+        }
+    }
+    if neg {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    core::str::from_utf8(&buf[i..]).unwrap_or("0")
+}
+
 /// The Utopia read-parse-eval loop driver.
 pub struct Repl {
     env: Env,
@@ -81,6 +102,13 @@ pub struct Repl {
     /// the prompt. Set on `MenuShow`; any other editor action first clears the
     /// strip line, so a stale strip never lingers below the prompt.
     menu_shown: bool,
+    /// H-1c (BEACON.md 12.6): emit transcript zone frames. Set by the ut
+    /// binary iff the resolved tier is Rich (the binary owns the consctl
+    /// read + the fd-class probe + the /env/BEACON export -- Repl only ever
+    /// emits bytes, keeping the no-kernel-surfaces layering). At false
+    /// (cells / none / host tests) the zone methods emit NOTHING, so every
+    /// existing byte-exact test and the serial console are untouched.
+    beacon_rich: bool,
 }
 
 impl Default for Repl {
@@ -102,6 +130,54 @@ impl Repl {
             completion_installed: false,
             history_path: None,
             menu_shown: false,
+            beacon_rich: false,
+        }
+    }
+
+    /// H-1c: arm the transcript zone frames (the ut binary calls this iff
+    /// the resolved Beacon tier is Rich; tests drive it directly to exercise
+    /// the rich arm without a renderer).
+    pub fn set_beacon_rich(&mut self, on: bool) {
+        self.beacon_rich = on;
+    }
+
+    // The zone emitters. Frames only at rich; the payload around them is
+    // exactly the untier'd byte stream (the 12.8 P1 property -- the rich arm
+    // of `feed` writes the SAME "\r\n"/prompt/eval bytes it always did, plus
+    // brackets). An unclosed zone at session end is fine by grammar (12.1
+    // rule 3: the renderer auto-closes at a zone boundary / end-of-stream).
+    fn zone_open(&self, out: &mut dyn IoWrite, z: beacon::sink::Zone) {
+        if self.beacon_rich {
+            let mut v: Vec<u8> = Vec::new();
+            let arg = match z {
+                beacon::sink::Zone::Prompt => "prompt",
+                beacon::sink::Zone::Command => "command",
+                beacon::sink::Zone::Output => "output",
+            };
+            beacon::wire::open(&mut v, beacon::wire::Op::Zone, &[("k", arg)]);
+            let _ = out.write_all(&v);
+        }
+    }
+
+    fn zone_close(&self, out: &mut dyn IoWrite) {
+        if self.beacon_rich {
+            let mut v: Vec<u8> = Vec::new();
+            beacon::wire::close(&mut v, beacon::wire::Op::Zone);
+            let _ = out.write_all(&v);
+        }
+    }
+
+    fn mark_exit(&self, out: &mut dyn IoWrite, code: i64) {
+        if self.beacon_rich {
+            let mut v: Vec<u8> = Vec::new();
+            let mut num = [0u8; 24];
+            let s = crate::repl::fmt_exit(&mut num, code);
+            beacon::wire::point(
+                &mut v,
+                beacon::wire::Op::Mark,
+                &[("k", "exit"), ("code", s)],
+            );
+            let _ = out.write_all(&v);
         }
     }
 
@@ -379,6 +455,11 @@ impl Repl {
     /// Emit the current prompt + buffer to `out`. Call once before the first
     /// `feed` to draw the initial prompt.
     pub fn draw_prompt(&self, out: &mut dyn IoWrite) {
+        // H-1c: the initial prompt opens the first prompt zone. Redraws
+        // (emit_prompt via EditorAction::Redraw / Cancel) stay INSIDE the
+        // open zone -- only this entry point and the accept arm's tail open
+        // one, so line editing never spawns zones per keystroke.
+        self.zone_open(out, beacon::sink::Zone::Prompt);
         let _ = out.write_all(self.editor.render(&self.prompt()).as_bytes());
         let _ = out.flush();
     }
@@ -417,6 +498,14 @@ impl Repl {
                     // The user pressed Enter; move the terminal past the
                     // edited line before any eval output or the next prompt.
                     let _ = out.write_all(b"\r\n");
+                    // H-1c: the accepted line ends the prompt zone (prompt +
+                    // line-editing echo are one region, the OSC 133 A..C
+                    // shape); everything from here to the exit mark is the
+                    // command's output zone. Children write the console
+                    // directly, so their bytes land inside the bracket
+                    // without ut ever touching them.
+                    self.zone_close(out);
+                    self.zone_open(out, beacon::sink::Zone::Output);
                     // R3-F1: drain notes BEFORE evaluating the line. A Ctrl-C
                     // pressed while idle at the prompt queues an `interrupt`
                     // note; left in the queue, the next command's
@@ -455,6 +544,15 @@ impl Repl {
                     // command held the loop. An idle interrupt drained here is
                     // discarded (benign at a sync point) -- the bool is ignored.
                     self.deliver_notes();
+                    // H-1c: the command's completion mark + the output zone
+                    // close, then the NEXT prompt zone opens around the fresh
+                    // prompt. Job-reap lines + note output above land inside
+                    // the output zone (they are this cycle's aftermath). The
+                    // `exit` early-return above leaves the zone open -- the
+                    // renderer auto-closes at end-of-stream (12.1 rule 3).
+                    self.mark_exit(out, self.env.status() as i64);
+                    self.zone_close(out);
+                    self.zone_open(out, beacon::sink::Zone::Prompt);
                     self.emit_prompt(out);
                 }
                 EditorAction::Cancel => {

@@ -369,6 +369,19 @@ pub extern "C" fn rs_main() -> i64 {
         say!("aurora: /dev/consctl open failed (winsize reporting off)");
     }
 
+    // H-1 (BEACON.md 12.3 / ARCH 23.5.4): advertise the cells tier -- aurora
+    // renders the Bonfire box+SGR language and swallows Beacon frames, so
+    // programs keep emitting exactly what they emit today. Once, at startup
+    // (the kernel resets the tier to none when the renderer's drain closes,
+    // so a respawn re-advertises here). Best-effort like winsize.
+    if consctl >= 0 {
+        let cmd = b"beacon cells";
+        let wr = unsafe { t_write(consctl, cmd.as_ptr(), cmd.len()) };
+        if wr != cmd.len() as i64 {
+            say!("aurora: beacon tier advertise failed (rich clients see none)");
+        }
+    }
+
     // cfg-2a/cfg-3: the system-tier config seeds settings BEFORE the
     // connect, so the compositor tier can push AHEAD of the surface create
     // -- the console surface is then born at the configured mode (no
