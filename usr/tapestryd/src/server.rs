@@ -4510,8 +4510,7 @@ impl Comp {
             Some(s) => s.res,
             None => return,
         };
-        let _ = self.gpu.transfer(res, 0, 0, 0, dw, dh);
-        let _ = self.gpu.flush(res, 0, 0, dw, dh);
+        let _ = self.gpu.transfer_then_flush(res, 0, 0, 0, dw, dh);
     }
 
     /// Reconcile scanout + chrome with the layout (run after every layout
@@ -4778,8 +4777,7 @@ impl Comp {
         let dw = self.gpu.width as u64;
         let off = ((r.y as u64) * dw + r.x as u64) * 4;
         let t0 = Instant::now();
-        let _ = self.gpu.transfer(res, off, r.x, r.y, r.w, r.h);
-        let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
+        let _ = self.gpu.transfer_then_flush(res, off, r.x, r.y, r.w, r.h);
         self.cost_add(Cost::Push, t0);
     }
 
@@ -5955,15 +5953,24 @@ impl Comp {
     /// spec, and cocoa's same-size surface replace renders nothing.
     fn direct_bind_adopted(&mut self, g: &GlAdopt, w: u32, h: u32) -> bool {
         let ok = match g.kind {
-            AdoptSrc::Bo => self.gpu.set_scanout(g.res_id, w, h).is_ok(),
+            AdoptSrc::Bo => {
+                let k = self.gpu.set_scanout(g.res_id, w, h).is_ok();
+                if k {
+                    let _ = self.gpu.flush(g.res_id, 0, 0, w, h);
+                }
+                k
+            }
+            // W-4 C: the Img arm IS the vk steady state (a rotating
+            // swapchain makes this the per-frame path), so its bind+flush
+            // pair rides one wait. The Bo arm stays sequential -- it runs
+            // once per source switch, never per frame.
             AdoptSrc::Img { stride } => self
                 .gpu
-                .set_scanout_blob(g.res_id, w, h, g.format, stride)
+                .set_scanout_blob_then_flush(g.res_id, w, h, g.format, stride)
                 .is_ok(),
         };
         if ok {
             self.bound_res = g.res_id;
-            let _ = self.gpu.flush(g.res_id, 0, 0, w, h);
         }
         ok
     }

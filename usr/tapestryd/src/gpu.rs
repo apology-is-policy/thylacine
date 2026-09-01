@@ -514,7 +514,21 @@ const RESP_OFF: u64 = 0x1000;
 /// layout assert below is what makes the width safe: the buffer still ends
 /// where the device-writable response region begins.
 const REQ_REGION_LEN: u32 = 0x500;
-const RESP_REGION_LEN: u32 = 0x1000;
+const RESP_REGION_LEN: u32 = 0xF00;
+
+// The SECOND sync slot (the W-4 C mechanism): a batched pair -- bind then
+// flush, or transfer then flush -- submits both chains before waiting
+// either, so the pair completes in one pacing quantum instead of two.
+// The second chain owns the first descriptor pair past the fenced lane
+// and small fixed carves at the tails of the request/response regions;
+// nothing else moves. RESP_REGION_LEN shrank 0x1000 -> 0xF00 to fund the
+// response carve: `get_capset` clamps to the constant, so a giant future
+// capset reads short and SAYS so rather than overlapping RESP2.
+const SYNC2_HEAD: u16 = (2 + 2 * FENCED_SLOTS) as u16;
+const REQ2_OFF: u64 = 0xF80;
+const REQ2_LEN: u32 = 0x80;
+const RESP2_OFF: u64 = RESP_OFF + RESP_REGION_LEN as u64;
+const RESP2_LEN: u32 = 0x100;
 
 const _: () = {
     assert!(CTRL_DESC_OFF + (QUEUE_SIZE as u64) * 16 <= CTRL_AVAIL_OFF);
@@ -526,6 +540,12 @@ const _: () = {
     assert!(REQ_OFF + (REQ_REGION_LEN as u64) <= RESP_OFF);
     assert!(RESP_OFF + (RESP_REGION_LEN as u64) <= RING_DMA_SIZE as u64);
     assert!(GPU_RESP_DISPLAY_INFO_LEN <= RESP_REGION_LEN);
+    // The second sync slot's carves + descriptor pair.
+    assert!((SYNC2_HEAD as usize) + 2 <= QUEUE_SIZE as usize);
+    assert!(REQ2_OFF + (REQ2_LEN as u64) <= RESP_OFF);
+    assert!(REQ_OFF + 0x100 <= REQ2_OFF); // batched req1 (<= 0x60 today) clears the carve
+    assert!(RESP2_OFF + (RESP2_LEN as u64) <= RING_DMA_SIZE as u64);
+    assert!(GPU_CTRL_HDR_LEN <= RESP2_LEN);
 };
 
 // The fenced lane (Warp-2d): a SECOND DMA region for fence-bearing 3D chains
@@ -949,6 +969,7 @@ struct Controlq {
     /// submit_and_wait sets it, and it never returns success with it set
     /// -- drain() treats an id-0 entry outside that window as corruption.
     sync_pending: bool,
+    sync2_pending: bool,
     /// Fence completions drained but not yet taken by the server pump.
     completed: alloc::vec::Vec<FenceTag>,
     /// #175: hold the completion drain so a submitted fence STAYS in
@@ -1146,6 +1167,18 @@ impl Controlq {
                 }
                 self.sync_pending = false;
                 sync_retired = true;
+                continue;
+            }
+            // The batched pair's second chain (W-4 C). Attributed BEFORE the
+            // fenced mapping: SYNC2_HEAD is even and would otherwise alias
+            // the first out-of-pool slot index.
+            if id == SYNC2_HEAD as u32 {
+                if !self.sync2_pending {
+                    say!("tapestryd: gpu used entry id {} with no second sync chain (ring corrupt)", id);
+                    self.dead = true;
+                    return sync_retired;
+                }
+                self.sync2_pending = false;
                 continue;
             }
             let slot = if id >= 2 && id % 2 == 0 {
@@ -1393,34 +1426,21 @@ impl Controlq {
     /// entry follows it in the same drain or the next -- re-narrowing the
     /// bound the instant the readback is gone would fail the very wait it
     /// widened.
-    fn submit_and_wait(&mut self, req_len: u32, resp_len: u32) -> Result<u32, ()> {
-        if self.dead {
-            return Err(());
-        }
+    /// True when every sync chain this wait covers has retired.
+    fn sync_done(&self, both: bool) -> bool {
+        !self.sync_pending && (!both || !self.sync2_pending)
+    }
+
+    /// The synchronous wait, extracted so the batched pair (W-4 C) shares
+    /// it verbatim: IRQ-wait + drain + bounded spin until the pending sync
+    /// chain(s) retire. The caller has already written descriptors, set the
+    /// pending flag(s), and published.
+    fn wait_sync_done(&mut self, both: bool) -> Result<(), ()> {
         let mut deadline_ms = if self.readback_in_flight() {
             FENCE_ABANDON_MS
         } else {
             SUBMIT_DEADLINE_MS
         };
-        for i in 0..(GPU_CTRL_HDR_LEN as u64) {
-            unsafe { w8(self.ring_va + RESP_OFF + i, 0) };
-        }
-
-        let desc_va = self.ring_va + CTRL_DESC_OFF;
-        unsafe {
-            w64(desc_va + 0, self.ring_pa + REQ_OFF);
-            w32(desc_va + 8, req_len);
-            w16(desc_va + 12, VIRTQ_DESC_F_NEXT);
-            w16(desc_va + 14, 1);
-
-            w64(desc_va + 16, self.ring_pa + RESP_OFF);
-            w32(desc_va + 24, resp_len);
-            w16(desc_va + 28, VIRTQ_DESC_F_WRITE);
-            w16(desc_va + 30, 0);
-        };
-        self.sync_pending = true;
-        self.publish(0);
-
         let used_va = self.ring_va + CTRL_USED_OFF;
         let mut wakes = 0u32;
         let mut stale_since: Option<Instant> = None;
@@ -1433,7 +1453,8 @@ impl Controlq {
             // Read-to-clear on every wake: consumes + deasserts the INTx
             // source (level hygiene). Deliberately NOT the break condition.
             let _ = unsafe { r8(self.isr_va) };
-            if self.drain() {
+            self.drain();
+            if self.sync_done(both) {
                 break 'wait;
             }
             if self.dead {
@@ -1448,7 +1469,8 @@ impl Controlq {
             while spins < USED_SPIN_PER_WAKE {
                 virtio_rmb();
                 if unsafe { r16(used_va + 2) } != self.used_seen {
-                    if self.drain() {
+                    self.drain();
+                    if self.sync_done(both) {
                         break 'wait;
                     }
                     if self.dead {
@@ -1479,12 +1501,96 @@ impl Controlq {
         // the spin). Read-to-clear once more so a retired command's own
         // assertion cannot surface as the next submit's stale wake (G-5 F2).
         let _ = unsafe { r8(self.isr_va) };
+        Ok(())
+    }
+
+    fn submit_and_wait(&mut self, req_len: u32, resp_len: u32) -> Result<u32, ()> {
+        if self.dead {
+            return Err(());
+        }
+        for i in 0..(GPU_CTRL_HDR_LEN as u64) {
+            unsafe { w8(self.ring_va + RESP_OFF + i, 0) };
+        }
+
+        let desc_va = self.ring_va + CTRL_DESC_OFF;
+        unsafe {
+            w64(desc_va + 0, self.ring_pa + REQ_OFF);
+            w32(desc_va + 8, req_len);
+            w16(desc_va + 12, VIRTQ_DESC_F_NEXT);
+            w16(desc_va + 14, 1);
+
+            w64(desc_va + 16, self.ring_pa + RESP_OFF);
+            w32(desc_va + 24, resp_len);
+            w16(desc_va + 28, VIRTQ_DESC_F_WRITE);
+            w16(desc_va + 30, 0);
+        };
+        self.sync_pending = true;
+        self.publish(0);
+        self.wait_sync_done(false)?;
 
         // VIRTIO 1.2 2.7.13.2: order the used-entry consumption before the
         // response-buffer read.
         virtio_rmb();
         let resp_type = unsafe { r32(self.ring_va + RESP_OFF) };
         Ok(resp_type)
+    }
+
+    /// The W-4 C primitive: two small commands queued before either wait, so
+    /// an order-dependent pair (bind then flush, transfer then flush) pays
+    /// ONE pacing quantum instead of two. The device consumes the controlq
+    /// in submission order, so the first chain's effect is visible to the
+    /// second exactly as in the sequential form; both replies are read
+    /// before returning, so nothing outlives the call.
+    fn submit_pair_and_wait(
+        &mut self,
+        req1_len: u32,
+        resp1_len: u32,
+        req2_len: u32,
+        resp2_len: u32,
+    ) -> Result<(u32, u32), ()> {
+        if self.dead {
+            return Err(());
+        }
+        for i in 0..(GPU_CTRL_HDR_LEN as u64) {
+            unsafe { w8(self.ring_va + RESP_OFF + i, 0) };
+            unsafe { w8(self.ring_va + RESP2_OFF + i, 0) };
+        }
+
+        let desc_va = self.ring_va + CTRL_DESC_OFF;
+        let desc2_va = self.ring_va + CTRL_DESC_OFF + (SYNC2_HEAD as u64) * 16;
+        unsafe {
+            w64(desc_va + 0, self.ring_pa + REQ_OFF);
+            w32(desc_va + 8, req1_len);
+            w16(desc_va + 12, VIRTQ_DESC_F_NEXT);
+            w16(desc_va + 14, 1);
+
+            w64(desc_va + 16, self.ring_pa + RESP_OFF);
+            w32(desc_va + 24, resp1_len);
+            w16(desc_va + 28, VIRTQ_DESC_F_WRITE);
+            w16(desc_va + 30, 0);
+
+            w64(desc2_va + 0, self.ring_pa + REQ2_OFF);
+            w32(desc2_va + 8, req2_len);
+            w16(desc2_va + 12, VIRTQ_DESC_F_NEXT);
+            w16(desc2_va + 14, SYNC2_HEAD + 1);
+
+            w64(desc2_va + 16, self.ring_pa + RESP2_OFF);
+            w32(desc2_va + 24, resp2_len);
+            w16(desc2_va + 28, VIRTQ_DESC_F_WRITE);
+            w16(desc2_va + 30, 0);
+        };
+        self.sync_pending = true;
+        self.sync2_pending = true;
+        self.publish(0);
+        self.publish(SYNC2_HEAD);
+        self.wait_sync_done(true)?;
+
+        // VIRTIO 1.2 2.7.13.2: order the used-entry consumption before the
+        // response-buffer reads.
+        virtio_rmb();
+        let r1 = unsafe { r32(self.ring_va + RESP_OFF) };
+        let r2 = unsafe { r32(self.ring_va + RESP2_OFF) };
+        Ok((r1, r2))
     }
 
     fn step(&mut self, label: &str, req_len: u32, resp_len: u32, expected: u32) -> Result<(), Error> {
@@ -1771,6 +1877,7 @@ impl Gpu {
                 fslot_poison_ctx: [0; FENCED_SLOTS],
                 vindicated: alloc::vec::Vec::new(),
                 sync_pending: false,
+                sync2_pending: false,
                 completed: alloc::vec::Vec::new(),
                 #[cfg(feature = "test-mode")]
                 hold_ctx: None,
@@ -3146,6 +3253,67 @@ impl Gpu {
         }
     }
 
+    /// W-4 C: the steady-state rotated-poke paint as ONE wait -- the blob
+    /// bind and its display flush queued back-to-back before waiting either,
+    /// so the pair completes in one pacing quantum. The bind's verdict is the
+    /// return (a refusal latches exactly as `set_scanout_blob`'s does, and
+    /// makes the already-queued flush a harmless no-op on a resource the
+    /// display does not reference); the flush's verdict has no consumer at
+    /// the call site but an anomaly is said, since a silent one would be
+    /// invisible precisely where the paint contract lives.
+    pub fn set_scanout_blob_then_flush(
+        &mut self,
+        resource_id: u32,
+        w: u32,
+        h: u32,
+        format: u32,
+        stride: u32,
+    ) -> Result<(), Error> {
+        let req_va = self.ring_va + REQ_OFF;
+        let req2_va = self.ring_va + REQ2_OFF;
+        unsafe {
+            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_SET_SCANOUT_BLOB);
+            write_rect(req_va + 24, 0, 0, w, h);
+            w32(req_va + 40, 0); // scanout_id
+            w32(req_va + 44, resource_id);
+            w32(req_va + 48, w);
+            w32(req_va + 52, h);
+            w32(req_va + 56, format);
+            w32(req_va + 60, 0); // padding
+            w32(req_va + 64, stride); // strides[0]
+            w32(req_va + 68, 0);
+            w32(req_va + 72, 0);
+            w32(req_va + 76, 0);
+            w32(req_va + 80, 0); // offsets[0..4]
+            w32(req_va + 84, 0);
+            w32(req_va + 88, 0);
+            w32(req_va + 92, 0);
+
+            write_ctrl_hdr(req2_va, VIRTIO_GPU_CMD_RESOURCE_FLUSH);
+            write_rect(req2_va + 24, 0, 0, w, h);
+            w32(req2_va + 40, resource_id);
+            w32(req2_va + 44, 0);
+        };
+        match self.ctrl.submit_pair_and_wait(
+            GPU_CTRL_HDR_LEN + 72,
+            GPU_CTRL_HDR_LEN,
+            GPU_CTRL_HDR_LEN + 24,
+            GPU_CTRL_HDR_LEN,
+        ) {
+            Ok((VIRTIO_GPU_RESP_OK_NODATA, f)) => {
+                if f != VIRTIO_GPU_RESP_OK_NODATA {
+                    say!("tapestryd: gpu BIND+FLUSH flush resp_type={:#x}", f);
+                }
+                // Same drain obligation as set_scanout_blob (round-3 F2):
+                // an accepted blob bind changes what the display names.
+                self.drain_condemned(resource_id);
+                Ok(())
+            }
+            Ok(_) => Err(Error::Hardware),
+            Err(()) => Err(Error::Hardware),
+        }
+    }
+
     /// W-3c: mint a PRESENTABLE -- a HOST3D blob bound by `blob_id` to a venus
     /// allocation, for a swapchain image that exists to be NAMED (scanned out,
     /// composed from) and never guest-mapped.
@@ -3230,6 +3398,49 @@ impl Gpu {
         };
         self.ctrl
             .step("FLUSH", GPU_CTRL_HDR_LEN + 24, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// W-4 C: the 2D paint pair -- upload then display flush of the SAME
+    /// rect, queued before waiting either (one pacing quantum, not two).
+    /// The controlq is consumed in submission order, so the flush paints
+    /// the bytes the transfer just landed, exactly as the sequential form.
+    /// Both call sites discard the pair's verdicts; anomalies are said.
+    pub fn transfer_then_flush(
+        &mut self,
+        resource_id: u32,
+        offset: u64,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+    ) -> Result<(), Error> {
+        let req_va = self.ring_va + REQ_OFF;
+        let req2_va = self.ring_va + REQ2_OFF;
+        unsafe {
+            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
+            write_rect(req_va + 24, x, y, w, h);
+            w64(req_va + 40, offset);
+            w32(req_va + 48, resource_id);
+            w32(req_va + 52, 0);
+
+            write_ctrl_hdr(req2_va, VIRTIO_GPU_CMD_RESOURCE_FLUSH);
+            write_rect(req2_va + 24, x, y, w, h);
+            w32(req2_va + 40, resource_id);
+            w32(req2_va + 44, 0);
+        };
+        match self.ctrl.submit_pair_and_wait(
+            GPU_CTRL_HDR_LEN + 32,
+            GPU_CTRL_HDR_LEN,
+            GPU_CTRL_HDR_LEN + 24,
+            GPU_CTRL_HDR_LEN,
+        ) {
+            Ok((VIRTIO_GPU_RESP_OK_NODATA, VIRTIO_GPU_RESP_OK_NODATA)) => Ok(()),
+            Ok((t, f)) => {
+                say!("tapestryd: gpu XFER+FLUSH resp_type={:#x}/{:#x}", t, f);
+                Err(Error::Hardware)
+            }
+            Err(()) => Err(Error::Hardware),
+        }
     }
 
     // --- the fenced lane (Warp-2d) ---------------------------------------

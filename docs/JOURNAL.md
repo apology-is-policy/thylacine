@@ -22,6 +22,51 @@ needed the operator.
 
 ---
 
+## 2026-09-01 (run 11, Fable) — W-4 fork C: the bind+flush pair under one wait
+
+**The charter**: the operator picked C from the §8.2 fork — batch the
+steady-state present pair under one wait, no contract change. A (MAILBOX)
+stays parked pending its semantics signoff; B stays unbuilt.
+
+**The mechanism as landed** (`gpu.rs` + `server.rs`): a second synchronous
+chain on the controlq — descriptor pair 34/35 (the first past the fenced
+lane), small carves at the request/response region tails (RESP_REGION_LEN
+0x1000 → 0xF00 funds the response carve; `get_capset` clamps to the
+constant, so the change is self-adjusting and announced at the one
+consumer that could ever collide). `submit_pair_and_wait` queues both
+chains before waiting either; `drain` attributes head 34 explicitly,
+BEFORE the fenced mapping that would alias it to the first out-of-pool
+slot; the wait loop is the old one verbatim, extracted predicate-driven.
+Two fused ops ride it: `set_scanout_blob_then_flush` (the vk rotated-poke
+paint — the per-frame steady state) and `transfer_then_flush` (the
+console's `screen_push`/`screen_flush_full` — which makes every local TCG
+boot a mass witness of the two-in-flight protocol). The bind's verdict
+semantics are §8.2's letter: checked first, a refusal latches exactly as
+before, the already-queued flush is a no-op on a resource the display
+does not reference. The GL weave-direct per-rect loop is deliberately NOT
+converted: its census splits Xfer from FlushDirect, and under a shared
+wait that attribution is meaningless — the instrumentation redesign is
+named for the compose chunk.
+
+**The prediction, pre-registered before the Pi run** (the double-paint
+precedent). From run 6's measured state — PokeBind avg 11.6 ms is the
+whole rotated paint (scanout wait + flush wait), and a lone flush massed
+8–11 ms — the model says the batched pair completes in one flush-quantum:
+saving ≈ 2.1 ms/frame. Point estimates: **linear 47.6 → ~52.9 (band
+50–55); blit 51.3 → ~57.5 (band 54–60)**; the post-C PokeBind histogram
+mass moves into the 8–11 bucket where lone flushes massed, the 11–14
+bucket largely emptying. **The falsifier is explicit**: if the host paces
+per COMMAND rather than per wait, the pair still pays two quanta — fps
+unchanged (±1), histogram unmoved — and the direction goes to B/A with
+that measurement in hand.
+
+**Local bar before the measurement**: userspace build clean (no new
+warnings in the touched files), suite exit-0 with the banner, arc gates
+2/2, clade gates 3×PASS — the batched 2D pair ran the whole boot's
+console painting with zero ring-corrupt or anomaly lines.
+
+---
+
 ## 2026-09-01 (run 10, Fable) — the r9-F3 sibling sweep: every reuse gate made interrupt-sound, and the sweep's own probe destroys what it was protecting
 
 **The charter**: the autonomous residue behind round 9's F3 — the "sibling
