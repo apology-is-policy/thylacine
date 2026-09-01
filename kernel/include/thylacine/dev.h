@@ -373,6 +373,13 @@ extern struct Dev devproc;        // dc='p'  — /proc/<pid>/{status,cmdline,ctl
 extern struct Dev devctl;         // dc='C'  — /ctl/{procs,memory,devices,kernel-base,sched}
 extern struct Dev devramfs;       // dc='m'  — /ramfs/<file> from cpio newc initrd
 extern struct Dev devdev;         // dc='d'  — /dev char-device directory (#57b)
+
+// H-1 (SYS_FD_DEVCLASS): the effective device class of a devdev-backed Spoor.
+// The /dev/cons leaf answers 'c' (the console -- same as a SYS_CONSOLE_OPEN
+// fd, so is-a-terminal is exactly dc=='c'); every other leaf answers devdev's
+// own 'd'. Callers pass a Spoor whose dev IS devdev; the leaf kind is read
+// from the qid (devdev encodes kind in qid.path).
+int devdev_fd_devclass(const struct Spoor *c);
 extern struct Dev devhw;          // dc='H'  — DTB hardware inventory tree (Menagerie devhw)
 extern struct Dev devpci;         // dc='P'  — /hw/pci mediated PCI topology (Menagerie 6b)
 extern struct Dev devenv;         // dc='E'  — /env per-Proc environment (G15, Go Stage 4a)

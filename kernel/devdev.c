@@ -98,6 +98,17 @@ static bool dev_kind_is_cons_io(u32 kind) {
     return kind == DEV_KIND_CONS;
 }
 
+// H-1 (SYS_FD_DEVCLASS): the effective class of a devdev-backed Spoor. Only
+// the cons DATA leaf normalizes to 'c' -- it IS the console, and a walked
+// /dev/cons fd must be indistinguishable from a SYS_CONSOLE_OPEN fd to the
+// is-a-terminal predicate (dc == 'c'). consctl/consdrain/consfeed/winsize are
+// control-plane files, not the terminal; they (and every other leaf) answer
+// devdev's own 'd'. A directory Spoor (kind 0) is 'd' too.
+int devdev_fd_devclass(const struct Spoor *c) {
+    if (!c) return '-';
+    return ((u32)c->qid.path == DEV_KIND_CONS) ? 'c' : devdev.dc;
+}
+
 // The I-27 console-attach gate, enforced at two tiers:
 //
 //   1. OPEN (both cons + consctl): only a console-attached caller can MINT a
@@ -448,9 +459,12 @@ static long devdev_read(struct Spoor *c, void *buf, long n, s64 off) {
     case DEV_KIND_CONS:                         // the shared console-input drain
         return cons_input_read(buf, n);
     case DEV_KIND_CONSCTL: {                     // LS-8b: read back the mode line
-        // #55: the render now ends "... winsize <cols> <rows>\n" (the ptyfs
-        // ctl_render shape) -- max 34 + " 65535 65535"-class tail = 54.
-        char tmp[64];
+        // #55 + H-1: the render ends "... winsize <cols> <rows> beacon
+        // <tier>\n" -- max 34 (flags) + 19 (winsize worst case) + 13
+        // (" beacon cells") + 1 = 67; cons_render_mode's fixed reserve floor
+        // is exactly that, so this staging buffer must be >= 67 or every
+        // consctl read EOFs (the H-1a suite catch: the old tmp[64] did).
+        char tmp[96];
         long len = cons_render_mode(tmp, (long)sizeof(tmp));
         if (off < 0 || off >= len) return 0;     // EOF (and bad offset reads empty)
         long avail = len - (long)off;

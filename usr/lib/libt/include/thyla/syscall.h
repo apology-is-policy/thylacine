@@ -108,6 +108,7 @@ enum {
     T_SYS_PCI_MAP_BAR       = 77,  // pci-1c: map a KObj_PCI BAR into user VA
     T_SYS_PCI_INFO          = 78,  // pci-1c: read a KObj_PCI's resolved topology
     T_SYS_CLOCK_SETTIME     = 79,  // net-7a: step CLOCK_REALTIME (CAP_HOSTOWNER)
+    T_SYS_FD_DEVCLASS       = 80,  // H-1: fd -> Dev class char ('c' = console)
     // 80 reserved (SYS_FD_DEVCLASS); 81 = SYS_WEFT_SHARE (CAP_HW_CREATE
     // server-side only; native libthyla-rs).
     T_SYS_WEFT_MAP          = 82,  // Weft-6a: map a flow/weave fid's shared ring -> VA
@@ -1665,6 +1666,25 @@ static inline long t_fd2path(long fd, char *buf, size_t buf_len) {
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_fd_devclass — the Dev class char backing `fd` (H-1;
+// docs/SYS-FD-DEVCLASS-SPEC.md). Returns a positive byte ('c' = the console --
+// a SYS_CONSOLE_OPEN fd or a walked /dev/cons fd; '|' = a pipe; '9' = a dev9p
+// file; ...), or a negative errno for a closed / non-Spoor fd. Read-only
+// introspection: no access right required, confers nothing. is-a-terminal is
+// exactly (t_fd_devclass(fd) == 'c').
+__attribute__((always_inline))
+static inline long t_fd_devclass(long fd) {
+    register long x0 __asm__("x0") = fd;
+    register long x8 __asm__("x8") = T_SYS_FD_DEVCLASS;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     return x0;

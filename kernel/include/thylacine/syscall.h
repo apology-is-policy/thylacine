@@ -1526,8 +1526,22 @@ enum {
     //   22.6 + the audit-trigger row.
     SYS_CLOCK_SETTIME = 79,  // arg: clk_id (x0), timespec_va (x1)
 
-    // 80 reserved for SYS_FD_DEVCLASS (the Menagerie fd->device-class query;
-    // NET-THROUGHPUT.md section 6.1). Not yet built.
+    // SYS_FD_DEVCLASS(fd) -> the Dev class char / -T_E_BADF  (H-1;
+    //   docs/SYS-FD-DEVCLASS-SPEC.md is the binding spec). Read-only fd
+    //   introspection: returns the `struct Dev.dc` character (a positive byte)
+    //   of the Dev backing `fd`, so userspace can tell the console from a pipe
+    //   (the isatty gap the coreutils --color=auto + the Beacon emission gate
+    //   both need, BEACON.md 12.4). rights == 0 (any KOBJ_SPOOR handle -- the
+    //   SYS_FD2PATH posture); no capability; no memory write; confers nothing
+    //   (the class char is not a handle -- I-5/I-22 unaffected). The dc is the
+    //   KERNEL's own Dev field cached on the Spoor at spoor_alloc -- never a
+    //   server-supplied stat/qid bit, so it is unforgeable by a 9P server.
+    //   One normalization (bound at H-1): a /dev/cons fd walked through the
+    //   devdev directory reports 'c' (the console), same as a SYS_CONSOLE_OPEN
+    //   fd -- so is-a-terminal is exactly (dc == 'c'). Every other devdev leaf
+    //   reports devdev's own 'd'. Non-Spoor fd kinds: -T_E_BADF (every v1.0 fd
+    //   is a Spoor).
+    SYS_FD_DEVCLASS = 80,  // arg: fd (x0)
 
     // SYS_WEFT_SHARE(ring_va, ring_size) -> share_id / -1  (Weft-6a-2;
     //   NET-THROUGHPUT.md section 6). The netd side of the per-flow zero-copy

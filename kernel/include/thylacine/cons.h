@@ -346,6 +346,25 @@ void cons_winsize_get(u16 *cols, u16 *rows);
 // byte count, or 0 if buf is too small (never a partial line).
 long cons_render_winsize(void *buf, long n);
 
+// =============================================================================
+// H-1: the console Beacon tier (BEACON.md 12.3 / ARCH 23.5.4). The renderer's
+// render-capability advertisement, beside the winsize + the five flags under
+// g_cons.lock. WRITER: the renderer, via the consctl `beacon <tier>` verb
+// (none | cells | rich; staged with the other tokens, atomic apply). Readback:
+// cons_render_mode appends "beacon <tier>" after the winsize pair -- absent on
+// a ptyfs ctl, so consumers treat a missing token as NONE. Reset to NONE when
+// the renderer's drain closes (no renderer => no rich sink) and on
+// cons_test_reset. No note posts: children read the tier at spawn (the shell
+// exports it); a mid-session renderer swap affects new children only.
+// =============================================================================
+
+#define CONS_BEACON_NONE   0u
+#define CONS_BEACON_CELLS  1u
+#define CONS_BEACON_RICH   2u
+
+// Snapshot the current tier (one g_cons.lock hold internally).
+u32 cons_beacon_tier(void);
+
 // Diagnostic: count of CHANGED winsize applies (each corresponds to one
 // tty:winch post attempt). The iff-changed regression reads it -- an unchanged
 // rewrite must NOT advance it.

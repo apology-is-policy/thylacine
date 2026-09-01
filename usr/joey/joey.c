@@ -6090,6 +6090,48 @@ int main(void) {
         }
         t_putstr("joey: probe #66 fd2path / + /srv (cross-transplant) OK\n");
     }
+    // H-1: SYS_FD_DEVCLASS end-to-end (docs/SYS-FD-DEVCLASS-SPEC.md). The
+    // load-bearing pair is console-vs-pipe -- the discrimination the coreutils
+    // --color=auto and the Beacon emission gate key on. Five arms: the walked
+    // /dev/cons leaf normalizes to 'c' (T_OPATH: walk-only, so the I-27 open
+    // gate is not in play -- the class rides the walk-minted qid); a sibling
+    // /dev/null leaf stays devdev's 'd' (the discrimination control one
+    // variable away); a pipe is '|' (DEVPIPE_DC), never 'c'; the devramfs
+    // root is 'm' (a third class); a closed fd is a negative errno.
+    {
+        long cf = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/cons", 9, T_OPATH);
+        if (cf < 0) { t_putstr("joey: probe H1 open /dev/cons FAILED\n"); return 1; }
+        long cd = t_fd_devclass(cf);
+        (void)t_close(cf);
+        if (cd != 'c') { t_putstr("joey: H1 devclass(/dev/cons) != 'c'\n"); return 1; }
+
+        long nf = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/null", 9, T_OPATH);
+        if (nf < 0) { t_putstr("joey: probe H1 open /dev/null FAILED\n"); return 1; }
+        long nd = t_fd_devclass(nf);
+        (void)t_close(nf);
+        if (nd != 'd') { t_putstr("joey: H1 devclass(/dev/null) != 'd'\n"); return 1; }
+
+        long prd = -1, pwr = -1;
+        if (t_pipe(&prd, &pwr) < 0) {
+            t_putstr("joey: probe H1 pipe FAILED\n"); return 1;
+        }
+        long pd = t_fd_devclass(prd);
+        long bad_after;
+        (void)t_close(prd);
+        bad_after = t_fd_devclass(prd);      // closed fd -> negative errno
+        (void)t_close(pwr);
+        if (pd != '|') { t_putstr("joey: H1 devclass(pipe) != '|'\n"); return 1; }
+        if (pd == 'c') { t_putstr("joey: H1 pipe reads as console\n"); return 1; }
+        if (bad_after >= 0) { t_putstr("joey: H1 closed fd not negative\n"); return 1; }
+
+        long rf = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+        if (rf < 0) { t_putstr("joey: probe H1 open / FAILED\n"); return 1; }
+        long rd2 = t_fd_devclass(rf);
+        (void)t_close(rf);
+        if (rd2 != 'm') { t_putstr("joey: H1 devclass(/) != 'm' (devramfs)\n"); return 1; }
+
+        t_putstr("joey: probe H1 fd_devclass cons/null/pipe/ramfs/closed OK\n");
+    }
     // #66b: /proc/<pid>/ns -- the Plan 9 `ns` substrate (the territory mount
     // list). Read kproc's (/proc/0/ns): pid 0 ALWAYS exists + carries the boot
     // mounts (/srv, /proc, /ctl, /dev), so the rendered list is non-empty + has

@@ -339,8 +339,11 @@ layout/typography ops is REFUSED on sight — that was the TermKit failure.
   parsed in the staged pass (`kernel/cons.c:2054-2081` shape), atomic
   whole-write reject on a malformed token, readback appended to
   `cons_render_mode`'s line as ` beacon <tier>` (parser parity with the
-  `winsize` token, `cons.c:2161-2177`), and **reset to `none` on renderer
-  detach** exactly where winsize resets (`cons.c:1412`). Mint gate: the same
+  `winsize` token, `cons.c:2161-2177`), and **reset to `none` at the
+  renderer drain's teardown** (`cons_drain_close` — corrected at
+  implementation: the `cons.c:1412` site this bullet first cited is
+  `cons_test_reset`, not a detach path; winsize never reset on detach, and
+  the tier resets at BOTH the drain close and the test reset). Mint gate: the same
   attached-OR-renderer widening winsize uses (ARCH §23.5.3) — only the
   console renderer (aurora / Halcyon) or the attached owner may set it.
 - **No new leaf.** Winsize needed the ungated `/dev/winsize` leaf because

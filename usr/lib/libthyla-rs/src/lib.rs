@@ -268,6 +268,7 @@ pub const T_SYS_PCI_CLAIM: u64        = 76;     // pci-1c: claim a VirtIO-PCI fu
 pub const T_SYS_PCI_MAP_BAR: u64      = 77;     // pci-1c: map a KObj_PCI BAR
 pub const T_SYS_PCI_INFO: u64         = 78;     // pci-1c: read KObj_PCI topology
 pub const T_SYS_CLOCK_SETTIME: u64    = 79;     // net-7a: step CLOCK_REALTIME (CAP_HOSTOWNER)
+pub const T_SYS_FD_DEVCLASS: u64      = 80;     // H-1: fd -> Dev class char ('c' = console)
 // 80 reserved for SYS_FD_DEVCLASS (Menagerie; not yet built).
 pub const T_SYS_WEFT_SHARE: u64       = 81;     // Weft-6a-2: register a per-flow ring -> share_id
 pub const T_SYS_WEFT_MAP: u64         = 82;     // Weft-6a-2: map a /net data fd's ring -> ring_va
@@ -2212,6 +2213,37 @@ pub unsafe fn t_fd2path(fd: i32, buf: *mut u8, buf_len: usize) -> i64 {
         options(nostack)
     );
     x0
+}
+
+// t_fd_devclass -- the Dev class char backing `fd` (H-1;
+// docs/SYS-FD-DEVCLASS-SPEC.md). Returns a positive byte ('c' = the console --
+// a SYS_CONSOLE_OPEN fd or a walked /dev/cons fd; '|' = a pipe; '9' = a dev9p
+// file; ...), or a negative errno for a closed / non-Spoor fd. Read-only
+// introspection: no access right required, confers nothing. The Beacon
+// emission gate (BEACON.md 12.4) and --color=auto both key on exactly
+// (t_fd_devclass(1) == 'c').
+#[inline(always)]
+pub unsafe fn t_fd_devclass(fd: i32) -> i64 {
+    let mut x0: i64 = fd as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_FD_DEVCLASS,
+        options(nostack)
+    );
+    x0
+}
+
+// fd_devclass -- the safe wrapper: Some(dc byte) for a live Spoor fd, None
+// otherwise. stdout_is_terminal() is the isatty(3)-shaped convenience the
+// emission gates use.
+pub fn fd_devclass(fd: i32) -> Option<u8> {
+    let r = unsafe { t_fd_devclass(fd) };
+    if r > 0 && r <= 0x7e { Some(r as u8) } else { None }
+}
+
+pub fn stdout_is_terminal() -> bool {
+    fd_devclass(1) == Some(b'c')
 }
 
 // t_getpid / t_getuid / t_getgid -- the calling Proc's pid / principal_id /

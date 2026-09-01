@@ -2972,6 +2972,27 @@ static s64 sys_fd2path_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw, u64 a3) 
     return (s64)len;
 }
 
+// H-1 (docs/SYS-FD-DEVCLASS-SPEC.md): the fd -> Dev-class query. The dc is the
+// kernel's own Dev field cached on the Spoor at spoor_alloc -- never a
+// server-supplied stat/qid bit, so a 9P server cannot forge "I am the console"
+// (the C-2 forgeable-qid lesson: authority keys on the kernel Dev, not a
+// pass-through field). rights == 0 mirrors fd2path: read-only introspection on
+// any KOBJ_SPOOR handle, no authority conferred. The one normalization: a
+// /dev/cons leaf walked through devdev answers 'c' like a SYS_CONSOLE_OPEN fd
+// (devdev_fd_devclass), so is-a-terminal is exactly (dc == 'c').
+static s64 sys_fd_devclass_handler(u64 fd_raw) {
+    struct Thread *t = current_thread();             if (!t) return -T_E_BADF;
+    struct Proc *p = t->proc;                        if (!p) return -T_E_BADF;
+
+    // #844: sys_lookup_spoor TRANSFERS the ref -- spoor_clunk on every exit.
+    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, 0);
+    if (!c)                                          return -T_E_BADF;
+
+    int dc = (c->dc == devdev.dc) ? devdev_fd_devclass(c) : c->dc;
+    spoor_clunk(c);
+    return (s64)(u8)dc;
+}
+
 // =============================================================================
 // LS-K (ARCH §22.6): identity reads + clock_gettime. The three identity calls
 // return the calling Proc's durable fields (no args, no memory write, no
@@ -11974,6 +11995,10 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_CLOCK_SETTIME:
         ctx->regs[0] = (u64)sys_clock_settime_handler(ctx->regs[0], ctx->regs[1],
                                                       ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_FD_DEVCLASS:
+        ctx->regs[0] = (u64)sys_fd_devclass_handler(ctx->regs[0]);
         return;
 
     case SYS_WEFT_SHARE:

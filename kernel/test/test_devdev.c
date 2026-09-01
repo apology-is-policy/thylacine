@@ -530,3 +530,40 @@ void test_devdev_renderer_gate(void) {
     cons_test_echo_capture(false);
     cons_test_reset();
 }
+
+// H-1 (SYS_FD_DEVCLASS): the /dev/cons normalization. Only the cons DATA
+// leaf answers 'c' -- a walked /dev/cons fd must be indistinguishable from a
+// SYS_CONSOLE_OPEN fd (devcons, dc 'c') to the is-a-terminal predicate.
+// Every other leaf, and the directory itself, answers devdev's own 'd'.
+void test_devdev_fd_devclass(void) {
+    struct Spoor *cons = walk_to("cons");
+    TEST_ASSERT(cons != NULL, "walk to cons");
+    TEST_EXPECT_EQ((long)devdev_fd_devclass(cons), (long)'c',
+                   "the cons leaf normalizes to 'c'");
+    spoor_unref(cons);
+
+    struct Spoor *ctl = walk_to("consctl");
+    TEST_ASSERT(ctl != NULL, "walk to consctl");
+    TEST_EXPECT_EQ((long)devdev_fd_devclass(ctl), (long)'d',
+                   "consctl is control-plane, stays 'd'");
+    spoor_unref(ctl);
+
+    struct Spoor *nul = walk_to("null");
+    TEST_ASSERT(nul != NULL, "walk to null");
+    TEST_EXPECT_EQ((long)devdev_fd_devclass(nul), (long)'d',
+                   "a non-cons leaf stays 'd'");
+    spoor_unref(nul);
+
+    struct Spoor *root = devdev.attach("");
+    TEST_ASSERT(root != NULL, "attach the /dev dir");
+    TEST_EXPECT_EQ((long)devdev_fd_devclass(root), (long)'d',
+                   "the directory itself is 'd'");
+    spoor_unref(root);
+
+    // The SYS_CONSOLE_OPEN half needs no normalization: a devcons Spoor's
+    // cached dc IS 'c' (the syscall handler only consults devdev for dc 'd').
+    struct Spoor *direct = devcons.attach(NULL);
+    TEST_ASSERT(direct != NULL, "devcons attach");
+    TEST_EXPECT_EQ((long)direct->dc, (long)'c', "a devcons Spoor caches dc 'c'");
+    spoor_unref(direct);
+}

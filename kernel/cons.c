@@ -104,6 +104,16 @@ struct cons_input {
     u16         ws_rows;
     u32         winch_events;
 
+    // H-1 (BEACON.md 12.3 / ARCH 23.5.4): the Beacon render-capability tier
+    // the console renderer advertises -- CONS_BEACON_NONE (unset; the serial
+    // posture), _CELLS (aurora), _RICH (Halcyon). Written by the renderer via
+    // the consctl `beacon <tier>` verb (the winsize discipline: staged parse,
+    // atomic apply, readback on the ctl render line); reset to NONE when the
+    // renderer's drain closes (cons_drain_close -- no renderer, no rich sink)
+    // and by cons_test_reset. Mutated + read under g_cons.lock like winsize.
+    // Confers nothing: a lying tier changes only how consumers FORMAT bytes.
+    u32         beacon_tier;
+
     // #95: the INPUT-path silent-drop counters. Every RX drop site is counted
     // here, under g_cons.lock (all three sites already run under it). They exist
     // because a lost input byte previously left NO trace anywhere: #95 observed
@@ -1412,6 +1422,7 @@ void cons_test_reset(void) {
     g_cons.ws_cols = 0u;                        // #55: winsize back to unset
     g_cons.ws_rows = 0u;
     g_cons.winch_events = 0u;
+    g_cons.beacon_tier = CONS_BEACON_NONE;      // H-1: tier back to unset
     g_cons.rx_bp_raw = 0u;                      // #95/#129: RX counters + report latch
     g_cons.rx_bp_flush = 0u;
     g_cons.rx_drop_line = 0u;
@@ -1837,6 +1848,15 @@ void cons_drain_close(void) {
     spin_unlock_irqrestore(&g_cons_drain.lock, s);
     wakeup(&g_cons_drain_rendez);
     poll_waiter_list_wake(&g_cons_drain.poll_list);
+
+    // H-1 (ARCH 23.5.4): the renderer's drain closing means the renderer is
+    // gone -- no renderer, no rich/cells sink, so the Beacon tier resets to
+    // NONE (a respawned renderer re-advertises, like it re-writes winsize).
+    // Separate lock acquisition AFTER the drain lock drops: g_cons.lock and
+    // g_cons_drain.lock never nest anywhere, and this keeps it that way.
+    s = spin_lock_irqsave(&g_cons.lock);
+    g_cons.beacon_tier = CONS_BEACON_NONE;
+    spin_unlock_irqrestore(&g_cons.lock, s);
 }
 
 // cond: drain data ready OR the drain was disarmed (EOF). Lockless RELAXED
@@ -2053,6 +2073,8 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
     int tokens = 0;
     bool have_ws = false;                                     // #55 winsize staged
     long ws_cols = 0, ws_rows = 0;
+    bool have_beacon = false;                                 // H-1 tier staged
+    u32 beacon = CONS_BEACON_NONE;
     long i = 0;
     while (i < n) {
         while (i < n && cons_is_space(b[i])) i++;            // skip whitespace
@@ -2076,11 +2098,44 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
             tokens++;
             continue;
         }
+        // H-1 (BEACON.md 12.3): the `beacon <tier>` verb -- the renderer's
+        // render-capability advertisement. Staged like winsize (atomic whole-
+        // write reject on a malformed tier word). Allowed on a renderer-minted
+        // consctl (see the F2 note below): the renderer IS the tier authority,
+        // and a lying tier only changes how consumers format bytes -- it
+        // confers nothing (ARCH 23.5.4).
+        if (sign == (u8)'b' && i + 6 <= n &&
+            b[i+1]==(u8)'e' && b[i+2]==(u8)'a' && b[i+3]==(u8)'c' &&
+            b[i+4]==(u8)'o' && b[i+5]==(u8)'n' &&
+            (i + 6 == n || cons_is_space(b[i+6]))) {
+            i += 6;
+            while (i < n && cons_is_space(b[i])) i++;
+            long w = i;
+            while (i < n && !cons_is_space(b[i])) i++;
+            long wl = i - w;
+            if (wl == 4 && b[w]==(u8)'n' && b[w+1]==(u8)'o' &&
+                b[w+2]==(u8)'n' && b[w+3]==(u8)'e') {
+                beacon = CONS_BEACON_NONE;
+            } else if (wl == 5 && b[w]==(u8)'c' && b[w+1]==(u8)'e' &&
+                       b[w+2]==(u8)'l' && b[w+3]==(u8)'l' && b[w+4]==(u8)'s') {
+                beacon = CONS_BEACON_CELLS;
+            } else if (wl == 4 && b[w]==(u8)'r' && b[w+1]==(u8)'i' &&
+                       b[w+2]==(u8)'c' && b[w+3]==(u8)'h') {
+                beacon = CONS_BEACON_RICH;
+            } else {
+                return -1;                                   // unknown tier word
+            }
+            have_beacon = true;
+            tokens++;
+            continue;
+        }
         if (sign != (u8)'+' && sign != (u8)'-') return -1;   // malformed token
-        // #55 audit F2: a renderer-minted consctl (CCONSWINSZONLY) may write
-        // ONLY the winsize verb -- a `+`/`-` flag token rejects the whole
-        // write, so a compromised renderer cannot flip the global termios
-        // (the ECHO-off serial-input mask defeat).
+        // #55 audit F2 (+ H-1): a renderer-minted consctl (CCONSWINSZONLY) may
+        // write ONLY the renderer-authority verbs -- winsize + beacon -- a
+        // `+`/`-` flag token rejects the whole write, so a compromised
+        // renderer cannot flip the global termios (the ECHO-off serial-input
+        // mask defeat). Both admitted verbs are authority-free: geometry is
+        // physical and the tier only shapes formatting.
         if (!allow_flags) return -1;
         long name_start = i + 1;
         long j = name_start;
@@ -2111,6 +2166,8 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
             winch = true;
         }
     }
+    if (have_beacon)
+        g_cons.beacon_tier = beacon;   // H-1: no post -- read at spawn time
     // The one thing a mode write does to the canonical assembly: a write that
     // CLEARS ICANON delivers the pending line[] to the reader; any other write
     // leaves it alone, and raw->canonical has nothing pending by construction.
@@ -2172,15 +2229,30 @@ long cons_render_mode(void *buf, long n) {
         for (long k = 0; k < namelen; k++) out[off++] = (u8)nm[k];
         out[off++] = (u8)' ';                                // #55: winsize follows
     }
-    // #55: `winsize <cols> <rows>` closes the line (the ptyfs ctl_render
-    // shape: "+icanon ... +onlcr winsize 80 24\n" -- parser parity, pouch
-    // 0021's strstr(buf, "winsize ") works on either ctl).
-    if (off + 8 + 5 + 1 + 5 + 1 > n) return 0;               // "winsize " CCCCC ' ' RRRRR '\n'
+    // #55: `winsize <cols> <rows>` follows the flags (the ptyfs ctl_render
+    // shape: "+icanon ... +onlcr winsize 80 24" -- parser parity, pouch
+    // 0021's strstr(buf, "winsize ") works on either ctl). H-1: `beacon
+    // <tier>` closes the line -- ABSENT on a ptyfs ctl, so consctl-line
+    // consumers treat a missing beacon token as NONE (strstr, never
+    // positional). Token order is flags, winsize, beacon; whole-line-or-
+    // nothing on a short buffer, like the flags.
+    u32 bt = cons_beacon_tier();                             // one lock hold
+    const char *btw = (bt == CONS_BEACON_RICH)  ? "rich"
+                    : (bt == CONS_BEACON_CELLS) ? "cells" : "none";
+    long btl = (bt == CONS_BEACON_CELLS) ? 5 : 4;
+    // "winsize " CCCCC ' ' RRRRR " beacon " + tier + '\n'. The reserve uses
+    // the FIXED max tier width (5, "cells") -- the #55-F4 discipline: the
+    // floor is deterministic, never content-dependent. Real readers are >= 96
+    // bytes (pouch 0021 buf[96]); nothing native reads this line today.
+    if (off + 8 + 5 + 1 + 5 + 8 + 5 + 1 > n) return 0;
     const char ws[] = "winsize ";
     for (long k = 0; ws[k]; k++) out[off++] = (u8)ws[k];
     cons_render_dec_u16(out, &off, wc);
     out[off++] = (u8)' ';
     cons_render_dec_u16(out, &off, wr);
+    const char bs[] = " beacon ";
+    for (long k = 0; bs[k]; k++) out[off++] = (u8)bs[k];
+    for (long k = 0; k < btl; k++) out[off++] = (u8)btw[k];
     out[off++] = (u8)'\n';
     return off;
 }
@@ -2192,6 +2264,14 @@ void cons_winsize_get(u16 *cols, u16 *rows) {
     if (cols) *cols = g_cons.ws_cols;
     if (rows) *rows = g_cons.ws_rows;
     spin_unlock_irqrestore(&g_cons.lock, s);
+}
+
+// H-1: the Beacon tier snapshot (ARCH 23.5.4; the cons_winsize_get shape).
+u32 cons_beacon_tier(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 bt = g_cons.beacon_tier;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return bt;
 }
 
 // #55: the standalone `winsize <cols> <rows>\n` line the UNGATED /dev/winsize

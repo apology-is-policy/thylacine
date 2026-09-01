@@ -3872,9 +3872,11 @@ renderer is the console's CAPABILITY AUTHORITY the same way it is the geometry
 authority: it writes **`beacon none|cells|rich`** to `/dev/consctl` (the same
 staged/atomic parse discipline as `winsize`, the same attached-OR-renderer
 mint gate, readback as a ` beacon <tier>` token on the `cons_render_mode`
-line, **reset to `none` on renderer detach** at the same site winsize
-unsets). Aurora writes `cells`; the serial backend writes nothing (⇒ `none`);
-Halcyon writes `rich`. **No new leaf** — winsize's `/dev/winsize` existed for
+line, **reset to `none` at the renderer drain's teardown** —
+`cons_drain_close`, the real no-renderer event; the earlier "where winsize
+unsets" wording was corrected at implementation: winsize resets only in
+`cons_test_reset`, which the tier also joins). Aurora writes `cells`; the
+serial backend writes nothing (⇒ `none`); Halcyon writes `rich`. **No new leaf** — winsize's `/dev/winsize` existed for
 pouch TIOCGWINSZ, and Beacon has no pouch consumer by construction; the
 consctl readback + ut's `BEACON` environment export (name
 proposal-of-record) carry it. Consumers gate emission on tier AND

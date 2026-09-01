@@ -1531,28 +1531,33 @@ void test_cons_consctl_parse(void) {
 }
 
 // LS-8b: the /dev/consctl read-back render. Symmetric grammar with the write:
-// five "+name"/"-name" tokens, then (#55) the winsize, one line -- the ptyfs
-// ctl_render shape ("-icanon ... -onlcr winsize 0 0\n").
+// five "+name"/"-name" tokens, then (#55) the winsize, then (H-1) the beacon
+// tier, one line -- the ptyfs ctl_render shape extended
+// ("-icanon ... -onlcr winsize 0 0 beacon none\n").
 void test_cons_consctl_render(void) {
     cons_test_reset();                                 // default = ISIG only, ws 0x0
-    char buf[64];
+    char buf[96];
     long n = cons_render_mode(buf, (long)sizeof(buf));
-    const char *want_default = "-icanon -echo +isig -icrnl -onlcr winsize 0 0\n";
-    TEST_EXPECT_EQ(n, 46L, "default render length");
-    bool ok = (n == 46);
+    const char *want_default = "-icanon -echo +isig -icrnl -onlcr winsize 0 0 beacon none\n";
+    TEST_EXPECT_EQ(n, 58L, "default render length");
+    bool ok = (n == 58);
     for (long i = 0; ok && i < n; i++) if (buf[i] != want_default[i]) ok = false;
-    TEST_ASSERT(ok, "default renders flags + winsize 0 0");
+    TEST_ASSERT(ok, "default renders flags + winsize 0 0 + beacon none");
 
     cons_test_set_termios(CONS_TERMIOS_ALL);
     n = cons_render_mode(buf, (long)sizeof(buf));
-    const char *want_all = "+icanon +echo +isig +icrnl +onlcr winsize 0 0\n";
-    ok = (n == 46);
+    const char *want_all = "+icanon +echo +isig +icrnl +onlcr winsize 0 0 beacon none\n";
+    ok = (n == 58);
     for (long i = 0; ok && i < n; i++) if (buf[i] != want_all[i]) ok = false;
     TEST_ASSERT(ok, "all-set renders every flag with '+'");
 
-    // A too-small buffer renders nothing (never a partial line).
+    // A too-small buffer renders nothing (never a partial line). The reserve
+    // floor is fixed-max (flags 34 + winsize 19 + beacon 14 = 67), never
+    // content-dependent (the #55-F4 discipline extended by H-1).
     TEST_EXPECT_EQ(cons_render_mode(buf, 10), 0L, "too-small buffer -> 0");
     TEST_EXPECT_EQ(cons_render_mode(buf, 40), 0L, "no room for the winsize tail -> 0");
+    TEST_EXPECT_EQ(cons_render_mode(buf, 66), 0L, "n=66 < the fixed floor -> 0");
+    TEST_EXPECT_EQ(cons_render_mode(buf, 67) > 0 ? 1L : 0L, 1L, "n=67 renders");
     cons_test_reset();
 }
 
@@ -1571,10 +1576,10 @@ void test_cons_winsize_roundtrip(void) {
     cons_winsize_get(&wc, &wr);
     TEST_ASSERT(wc == 132 && wr == 50, "snapshot reads 132x50");
 
-    char buf[64];
+    char buf[96];
     long n = cons_render_mode(buf, (long)sizeof(buf));
-    const char *want = "-icanon -echo +isig -icrnl -onlcr winsize 132 50\n";
-    bool ok = (n == 49);
+    const char *want = "-icanon -echo +isig -icrnl -onlcr winsize 132 50 beacon none\n";
+    bool ok = (n == 61);
     for (long i = 0; ok && i < n; i++) if (buf[i] != want[i]) ok = false;
     TEST_ASSERT(ok, "mode render carries winsize 132 50");
 
@@ -1607,6 +1612,65 @@ void test_cons_winsize_roundtrip(void) {
 
     // "winsizeX" is NOT the verb (the token must end at whitespace/EOL).
     TEST_EXPECT_EQ(cons_set_mode_cmd("winsizeX 1 2", 12, true), -1L, "winsizeX -> -1");
+    cons_test_reset();
+}
+
+// H-1 (BEACON.md 12.3 / ARCH 23.5.4): the beacon tier round-trip -- the verb
+// sets it, the snapshot + the mode render agree, malformed tier words reject
+// the WHOLE write (the tcsetattr-atomic seam), the renderer-minted consctl
+// (allow_flags=false) may write it, and the renderer's drain closing resets
+// it to NONE.
+void test_cons_beacon_roundtrip(void) {
+    cons_test_reset();
+    TEST_EXPECT_EQ((long)cons_beacon_tier(), (long)CONS_BEACON_NONE,
+                   "reset -> tier none");
+
+    TEST_EXPECT_EQ(cons_set_mode_cmd("beacon cells", 12, true), 12L,
+                   "beacon cells accepted");
+    TEST_EXPECT_EQ((long)cons_beacon_tier(), (long)CONS_BEACON_CELLS,
+                   "snapshot reads cells");
+
+    char buf[96];
+    long n = cons_render_mode(buf, (long)sizeof(buf));
+    const char *want = "-icanon -echo +isig -icrnl -onlcr winsize 0 0 beacon cells\n";
+    bool ok = (n == 59);
+    for (long i = 0; ok && i < n; i++) if (buf[i] != want[i]) ok = false;
+    TEST_ASSERT(ok, "mode render carries beacon cells");
+
+    // The renderer-minted consctl (CCONSWINSZONLY -> allow_flags=false) may
+    // write the renderer-authority verbs: beacon alone, and mixed with
+    // winsize. A flag token still rejects the whole write atomically.
+    TEST_EXPECT_EQ(cons_set_mode_cmd("beacon rich", 11, false), 11L,
+                   "renderer-minted consctl may set the tier");
+    TEST_EXPECT_EQ((long)cons_beacon_tier(), (long)CONS_BEACON_RICH,
+                   "snapshot reads rich");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 80 24 beacon cells", 26, false), 26L,
+                   "winsize + beacon mixed under allow_flags=false");
+    TEST_EXPECT_EQ((long)cons_beacon_tier(), (long)CONS_BEACON_CELLS,
+                   "mixed write applied the tier");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo beacon rich", 17, false), -1L,
+                   "a flag token under allow_flags=false rejects the batch");
+    TEST_EXPECT_EQ((long)cons_beacon_tier(), (long)CONS_BEACON_CELLS,
+                   "rejected batch left the tier alone");
+
+    // Malformed tier words reject the WHOLE write (atomic with the flags).
+    u32 before = cons_test_termios();
+    TEST_EXPECT_EQ(cons_set_mode_cmd("beacon", 6, true), -1L, "missing tier -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("beacon loud", 11, true), -1L, "unknown tier -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("beaconx rich", 12, true), -1L, "beaconx -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo beacon loud", 17, true), -1L,
+                   "a bad tier rejects the batch");
+    TEST_ASSERT(cons_test_termios() == before, "rejected batch left the flags alone");
+    TEST_EXPECT_EQ((long)cons_beacon_tier(), (long)CONS_BEACON_CELLS,
+                   "rejected writes left the tier alone");
+
+    // The renderer's drain closing resets the tier (no renderer, no sink).
+    // cons_drain_close on a never-armed drain is a structural no-op for the
+    // drain itself; the tier reset is the observable.
+    cons_drain_close();
+    TEST_EXPECT_EQ((long)cons_beacon_tier(), (long)CONS_BEACON_NONE,
+                   "drain close -> tier none");
+
     cons_test_reset();
 }
 
