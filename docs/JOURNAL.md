@@ -22,6 +22,73 @@ needed the operator.
 
 ---
 
+## 2026-09-01 (run 12, Fable) — the Halcyon kickoff: the design conversation → scripture
+
+**Not an autonomous run** — the operator-directed design session the W-4 close
+scheduled. The flow ran exactly as declared: I presented the recorded Halcyon
+state (the four-layer evolution stack — Phase-0 scroll buffer → the 2026-06-08
+anti-window compositor → the 2026-06-15 two-environments statement → the
+2026-07-17 §18 concretization — plus the honest tensions: "pure 2D" vs the
+measured vk substrate; VISION §3.3's un-updated "there is no compositor"; the
+Phase-0 §11.1 deliverables; the G-arc labels vs the as-built tree, with G-6
+largely built and G-7 surpassed by the W-arc). The operator then delivered the
+new vision.
+
+**The vision (operator, verbatim intent)**: three sources — **i3wm** (tiling;
+any tile runs a shell or any graphical app), **acme** (vertical tab stacking;
+executable text), **Symbolics Genera** (the wild one: a rich textual shell
+render — proportional + monospace mixed, programs communicating output through
+a markup language that Halcyon renders richly and Aurora ignores or receives as
+today's emission). Vulkan rendering (HW on Pi, lavapipe-lane on QEMU GL hosts).
+DejaVu Sans Condensed as the proportional face. Mouse for focus, selection,
+context menus, arrangement. A layout save/reload system.
+
+**My analysis, all points ratified by the operator**: the three sources land at
+three different layers (i3 → compositor, largely as-built; acme → chrome,
+ratified; Genera → pane content, the genuinely new territory). For the markup —
+the piece the operator explicitly asked for research on — the recommended shape
+held: in-band OSC-framed (text-as-payload bracketing; the OSC 8/133 precedent;
+degradation free because every VT parser already discards unknown OSC),
+semantic-only closed vocabulary (renderers own typography via stylesheets),
+`none|cells|rich` capability tiers with the isatty+tier emission gate, ut as a
+relay-not-transformer (propagate the tier, emit its own zones, never parse
+children), and presentations whose object references are **9P paths** with a
+plumber-style verbs file — the Genera×acme×Plan-9 fusion, and machine-readable
+ground truth for the agentic loop. Key transport proof: I-20 byte conservation
+already certifies the frames survive the PTY plumbing.
+
+**Findings along the way**: (1) "Bonfire" — I initially misread it as the
+operator's name for the markup; it is the *palette* (UTOPIA-VISUAL U-2), and
+the check surfaced that the coreutils **already speak a Bonfire visual
+language** (box+SGR, COREUTILS-THYLACINE-DESIGN.md) — so the cells tier
+already exists as code, and the emission library relocates it rather than
+inventing it. (2) The same doc records that `--color=auto` is PARKED because a
+console fd and a pipe fd are indistinguishable — the markup's emission gate
+pulls the owed `SYS_FD_DEVCLASS` forward (one kernel mechanism, both gates).
+(3) My best name candidate "Ember" was disqualified by the record — EMBER is a
+Bonfire palette role. The operator chose **Beacon** from the candidate set
+(Blaze/Beacon/Genus/Brindle). (4) Wine: an example only, post-1.0; the
+Wayland-bridge arc is named in ROADMAP §12 rather than folded into Halcyon.
+
+**Landed (this commit — scripture only, no code)**: `docs/HALCYON.md` born (the
+environment: three layers, vk rendering + the guest-lavapipe open question,
+typography + the paper-light "two lights" theme identity, the two pane classes,
+presentations/menus/mouse, layouts-respawn-from-tags, scope, H-0..H-7
+sequencing) + `docs/BEACON.md` born (the markup: OSC 1936 wire [proposal of
+record], the v1 vocabulary, tiers + the gate, transport proofs, ut's three
+obligations, verbs + the security clause, the migration). Reconciliation:
+ROADMAP §11 EVOLVED (pure-2D retired; §11.1 superseded; Beacon named) + §12
+Wayland line; VISION §3.3 rewritten + §9 non-goal reworded (the letter had
+rotted; the intent — no overlapping windows — unchanged) + §14 superseded
+banner; NOVEL Angle #4 second EVOLVED block (the Genera layer; the
+presentations-in-a-POSIX-OS novel claim); TAPESTRY §14 tag-bar RATIFIED +
+context-menu amendment + §17 pure-2D superseded; COREUTILS-design forward
+pointer. **Open**: the OSC number + `BEACON` env name are proposals-of-record,
+confirm at first implementation; H-1 (SYS_FD_DEVCLASS + the beacon library +
+ut zones + first emitters) is the natural opening chunk, operator sequences.
+
+---
+
 ## 2026-09-01 (run 11, Fable) — W-4 fork C: the bind+flush pair under one wait
 
 **The charter**: the operator picked C from the §8.2 fork — batch the

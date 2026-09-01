@@ -1216,6 +1216,32 @@ This is the last phase of v1.0 and the highest-risk angle (`NOVEL.md` Angle #4 �
 >   in `WARP-WSI-DESIGN.md` §8.3 and is picked up AFTER compose — not
 >   immediately, by explicit operator direction.
 
+> **EVOLVED 2026-09-01 — the Halcyon kickoff design conversation
+> (`docs/HALCYON.md` + `docs/BEACON.md` born; both authoritative).** The phase
+> opened with the operator's three-source UX vision (i3wm tiling / acme
+> stacking + executable text / **Symbolics Genera** rich-text presentations),
+> ratified in-session. Three consequences for this section:
+>
+> - **"Halcyon is pure 2D" is RETIRED.** Halcyon renders **Vulkan** on the
+>   measured venus substrate (the W-4 inversion; `HALCYON.md` §2). The 2026-06-08
+>   bullet above was insurance against a GPU stack that now exists, is audited,
+>   and is fastest. GL remains app-compat (its parity ledger is §8.3, after
+>   compose).
+> - **The §11.1 deliverables below are SUPERSEDED by `HALCYON.md` §8/§11** (they
+>   are Phase-0 vintage in nearly every detail: bash-subset parser → **ut**;
+>   fontdue → Cornucopia + DejaVu via the native TTF rasterizer; `/dev/fb/` →
+>   `/dev/tapestry` + Loom; the custom video-player server → a decide-at-the-
+>   chunk re-cut). The §11.2 exit criteria largely stand and gain Beacon
+>   criteria at the H-7 pass.
+> - **New cross-environment scripture: `docs/BEACON.md`** — the semantic output
+>   markup (programs emit meaning; Halcyon renders it richly; Aurora/serial
+>   degrade gracefully). Its opening chunk (H-1) pulls `SYS_FD_DEVCLASS`
+>   forward and lands value for the textual environment immediately.
+>
+> The risk posture is unchanged: Aurora ships regardless (VISION §3.3), and the
+> v1.0-rc fallback stands. The Wayland-bridge arc (Linux GUI ecosystem / Wine
+> under Vivarium tiles) is explicitly **post-v1.0** (§12).
+
 ### 11.1 Deliverables
 
 **VirtIO-GPU userspace driver (extend Phase 3)**:
@@ -1325,7 +1351,8 @@ Other v1.1+ candidates:
 - HW video decode.
 - Bare-metal Pi 5.
 - Apple Silicon bare metal.
-- Multi-pane Halcyon (within scroll buffer; experiment).
+- ~~Multi-pane Halcyon (within scroll buffer; experiment)~~ — superseded: tiling splits/tabs are CORE (TAPESTRY §14; built at G-6).
+- **The Wayland bridge** (2026-09-01): a Wayland-protocol adapter service over tapestryd (core + shm/dmabuf + xdg-shell) opening the Linux GUI ecosystem — Wine included — to Vivarium tiles. Its own arc, netd-class weight. `HALCYON.md` §8.
 
 These are explicitly *not in v1.0*; they're tracked for post-v1.0 work.
 

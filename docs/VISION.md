@@ -82,11 +82,19 @@ extension 2026-06-15; `docs/AURORA.md`):
   designed product that ships whether or not Halcyon lands.
 
 - **Halcyon — the graphical environment** (the *full calm day*). Not a terminal
-  emulator running inside a window manager. It is the graphical environment. The
-  display surface is a scroll buffer where each entry is either a text region or a
-  pixel-addressable graphical region. Images render inline. Video plays inline.
-  Halcyon controls scroll, history, focus, and command launching. There is no
-  compositor. There is no scene graph. There is no window manager. There is Halcyon.
+  emulator running inside a window manager: the terminal *is* the desktop. An
+  anti-window tiling environment (uniform containers — splits, vertical tab
+  stacks — never overlapping, floating, z-ordered windows) whose shell panes are
+  rich transcripts: proportional and monospace type mixed, output annotated with
+  meaning (**Beacon**, `docs/BEACON.md`), typed objects carrying live verbs, and
+  inline graphical surfaces — images, video, a running game — in the transcript
+  flow. Rendered with Vulkan on the measured GPU substrate. It is served by
+  `tapestryd`, the compositor-as-file-server (`docs/TAPESTRY.md` §13-18) — the
+  window *system* of the old world is deleted, not the display server: one 9P
+  tree, no scene graph, no window manager. Authoritative model: `docs/HALCYON.md`.
+  *(EVOLVED 2026-06-08 — the compositor/client architecture — and 2026-09-01 —
+  the Genera rich-text layer + Vulkan; the original "scroll buffer as the sole
+  primitive, no compositor" text is preserved in §14 as the Phase-0 record.)*
 
 Both are names for serene, beautiful times — the dawn and the halcyon days — so the
 choice is "which light," never "the cut-down one vs the real one." They share the
@@ -308,7 +316,7 @@ Explicit, with rationale. Each non-goal is a deliberate scope choice; relaxing a
 
 **Out by design**:
 
-- **Graphical windowing system.** No compositor, no window manager, no display server. Halcyon is the display surface. If you need a windowing system, Thylacine is not your OS. Rationale: design coherence — everything is 9P, including the display; a separate windowing system would be a second composition mechanism.
+- **Overlapping, floating, z-ordered windowing.** *(Reworded 2026-09-01; the intent is unchanged, the letter had rotted.)* No floating windows, no z-order, no user-draggable free placement, no persistent app-owned overlays — that is the anti-window thesis (`docs/TAPESTRY.md` §14, `docs/HALCYON.md`). The display *is* composed — by `tapestryd`, a file server serving one 9P tree — so "everything is 9P, including the display" holds by construction rather than by absence: the non-goal was never "no display server," it was "no second composition mechanism alongside 9P," and tapestryd is not a second mechanism. If you need overlapping windows, Thylacine is not your OS.
 - **Web browser, multi-pane IDE, Office-suite-class applications.** These applications are designed around overlapping windows, side-by-side panes, or document-style canvases. Halcyon's scroll-buffer model does not host them. Rationale: the OS targets shell-driven workflows; targeting GUI applications would invalidate the shell-as-UI thesis.
 - **Audio at v1.0.** No sound system. Rationale: a half-baked audio stack is the kind of stub the project explicitly rejects; ship it properly post-v1.0 or not at all.
 - **Bluetooth, USB peripherals beyond keyboard+mouse, hardware sensors, hardware acceleration beyond VirtIO-GPU.** v1.0 hardware: storage (VirtIO block / NVMe), network (VirtIO net / Ethernet), display (VirtIO GPU / framebuffer), input (VirtIO input / USB HID). Rationale: dev VM target; real-hardware breadth comes post-v1.0.
@@ -461,6 +469,15 @@ Utopia is not a separate codebase or build target — it is the state of the sys
 ---
 
 ## 14. Halcyon — the graphical shell
+
+> **SUPERSEDED as the operative model (kept as the Phase-0 record).** This
+> section is the original vision: the scroll buffer as the *sole* primitive,
+> written before the compositor architecture (2026-06-08, TAPESTRY §13-18), the
+> two-environments statement (2026-06-15, AURORA.md), and the Halcyon kickoff
+> (2026-09-01 — the Genera rich-text layer, Beacon, Vulkan rendering). The
+> authoritative model is **`docs/HALCYON.md`**; the scroll-buffer insight
+> survives inside it as the shell pane's transcript. Read on for the record,
+> not for the plan.
 
 Halcyon deserves its own section in the vision document because it is the most unusual design decision and the most exposed to "this can't work" objections.
 

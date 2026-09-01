@@ -17,6 +17,18 @@ immediately look that we're not in unix, but something far more exotic."*
 
 The discipline is not gone -- it is **relocated**. See "The color discipline".
 
+> **2026-09-01 — this visual language becomes Beacon's cells tier.** The Halcyon
+> kickoff adopted `docs/BEACON.md` (the semantic output markup): programs will
+> describe output once (tables, runs, typed objects) through a `libthyla-rs`
+> `beacon` module, which realizes it per capability tier — `rich` (Halcyon) as
+> Beacon frames, **`cells` as exactly the box+SGR emission this document
+> specifies** (the code path relocates into the library; behavior preserved
+> verbatim), `none`/`--color=never` as plain bytes. Three consequences here:
+> the color discipline below governs Beacon identically (payload tools emit
+> no frames at any tier, ever); `--color=WHEN` generalizes into the tier gate
+> (BEACON.md §4); and **the parked `auto` unparks** — the Beacon arc pulls
+> `SYS_FD_DEVCLASS` forward as a real dependency (H-1, HALCYON.md §11).
+
 ## The color discipline (load-bearing)
 
 Color belongs on **presentation** and **diagnostics**, NEVER on a data

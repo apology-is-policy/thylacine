@@ -517,6 +517,22 @@ The model:
 > that *is* the thesis. The risk profile (medium-high, last-phase, fallback to a
 > textual v1.0-rc) is unchanged and re-affirmed.
 
+> **EVOLVED 2026-09-01 — the Genera layer (the Halcyon kickoff;
+> `docs/HALCYON.md` + `docs/BEACON.md` authoritative).** The phase opened with a
+> third source joining i3 (the compositor layer, largely as-built) and acme (the
+> chrome layer, ratified): **Symbolics Genera** supplies the pane-content layer —
+> a rich textual shell render (proportional + monospace mixed; DejaVu Sans
+> Condensed + Cornucopia; paper-light default) over **Beacon**, a semantic
+> output markup in which programs annotate *meaning* (tables, zones, typed
+> object runs) and renderers own typography. The sharpest new novel claim:
+> **Genera-class presentations in a POSIX-compatible OS** — the presented
+> object's reference is a *9P path*, verbs are a plumber-style rules file, and
+> acme's executable text, Genera's presentation menus, and the pane tag line
+> dispatch through one mechanism, with graceful two-tier degradation (Aurora /
+> serial) that Genera never had to solve. Also retired here: "Halcyon is pure
+> 2D" — Halcyon renders **Vulkan** on the measured venus substrate (the W-4
+> inversion). Fallback posture unchanged.
+
 **Why it's novel**: every modern OS uses some compositor / window manager / display server (Wayland, X11, Scenic, AppKit, DWM). Plan 9's Rio + 8½ is the closest comparison — a tile-based windowing system without compositing — but it's still a windowing system, with its own protocol and event loop. **No production OS uses a scroll buffer with inline graphics as the sole UI primitive.** Smalltalk environments and some Lisp machines came close in the 1980s but never with modern hardware acceleration. Notebook UIs (Jupyter, Mathematica) achieve something similar but inside another OS's windowing system.
 
 Halcyon is the bet that, for shell-driven development workflows, this is enough.
