@@ -427,6 +427,38 @@ pub extern "C" fn rs_main() -> i64 {
     probe(root, pb.x + pb.w / 2, pb.y + pb.h / 2);
     nap(DUMP_MS);
 
+    // H-3b-1: the per-leaf Daylight tag bar. Every >1-leaf leaf carves a
+    // header_h strip off its content TOP (HALCYON-VISUAL 3.2/4); the `tagbar`
+    // file reports it and the compositor fills it `header`-bg -- the resting
+    // fallback before a halcyond Role::Chrome surface binds. Assert A's tagbar
+    // abuts its content (same x/width, meeting on y) and reads `header` at its
+    // centre (the positive render witness the .exp samples).
+    {
+        let tbs = read_file(root, &alloc::format!("pane/{}/tagbar", pa.id))
+            .unwrap_or_default();
+        let mut it = tbs.split_whitespace();
+        let tx = it.next().and_then(|s| s.parse::<u32>().ok());
+        let ty = it.next().and_then(|s| s.parse::<u32>().ok());
+        let tw = it.next().and_then(|s| s.parse::<u32>().ok());
+        let th = it.next().and_then(|s| s.parse::<u32>().ok());
+        match (tx, ty, tw, th) {
+            (Some(tx), Some(ty), Some(tw), Some(th)) if th > 0 => {
+                if tx != pa.x || tw != pa.w || ty + th != pa.y {
+                    say!("tapestry-battery: FAIL tagbar '{}' not above A [{},{},{},{}]",
+                        tbs.trim(), pa.x, pa.y, pa.w, pa.h);
+                    return 1;
+                }
+                say!("battery: tagbar A {} {}", tx + tw / 2, ty + th / 2);
+                probe(root, tx + tw / 2, ty + th / 2);
+                nap(DUMP_MS);
+            }
+            _ => {
+                say!("tapestry-battery: FAIL tagbar file '{}'", tbs.trim());
+                return 1;
+            }
+        }
+    }
+
     // Scenario 2 (G-6b, the resize protocol). B's pane content differs
     // from B's surface size, so the hosting reconcile issued B a
     // size-changing CONFIGURE offer. Negative probes first -- neither
@@ -577,14 +609,18 @@ pub extern "C" fn rs_main() -> i64 {
         let _ = b.present(None);
         // The strip geometry from B's content rect: the container's outer
         // rect is content + the Daylight chrome ring on x, and strip(5) +
-        // ring above it on y (TAB_STRIP_H = 5). The ring at the default
-        // gaps=1 is floor(1)+bevel(2)+hairline(1) = 4 (HALCYON-VISUAL
+        // ring + tag bar(20) above it on y (TAB_STRIP_H = 5). The ring at the
+        // default gaps=1 is floor(1)+bevel(2)+hairline(1) = 4 (HALCYON-VISUAL
         // section 2/2.4; tapestryd pane.rs recompute -- this driver runs on
-        // the default image at default gaps).
+        // the default image at default gaps). Since H-3b-1 each >1-leaf leaf
+        // also carves a header_h(20) tag bar off its content TOP (section
+        // 3.2/4), so B's content.y sits ring+tagbar below its rect and strip+
+        // ring+tagbar below the container top.
         let inset = 4u32;
+        let tagbar = 20u32; // METRICS.header_h
         let cx = tb.x - inset;
         let cw = tb.w + 2 * inset;
-        let sy = tb.y - inset - 5 + 2; // strip row center
+        let sy = tb.y - tagbar - inset - 5 + 2; // strip row center
         let sax = cx + cw / 4;
         let sbx = cx + 3 * cw / 4;
         say!("battery: tabbed ready {} {} {}", sy, sax, sbx);

@@ -422,6 +422,7 @@ const PFK_ROLE: u64 = 3;
 const PFK_TAG: u64 = 4;
 const PFK_SURFACE: u64 = 5;
 const PFK_GEOMETRY: u64 = 6;
+const PFK_TAGBAR: u64 = 7;
 
 fn make_surf(n: usize, fk: u64) -> u64 {
     SURF_FLAG | ((n as u64 & N_MASK) << 8) | (fk & FK_MASK)
@@ -4449,6 +4450,25 @@ impl Comp {
                     }
                 }
             }
+            // The Daylight tag bar (HALCYON-VISUAL section 4): the resting
+            // fallback -- fill the `header_h` strip at the leaf's content top
+            // with the tag-bar background (`header`, == the hairline colour, so
+            // hairline+strip read as one header band). halcyond's OPAQUE
+            // Role::Chrome surface composites ON TOP when present (H-3b-3);
+            // absent it (aurora, or before halcyond binds) the strip is never
+            // bare BG_COLOR. Inside the ring, above `content` -- disjoint from
+            // the bands and the shadow.
+            let tb = p.tagbar;
+            if !tb.is_empty() {
+                for y in tb.y..tb.y + tb.h {
+                    for x in tb.x..tb.x + tb.w {
+                        unsafe {
+                            *px.add((y as u64 * dw + x as u64) as usize) = D.header;
+                        }
+                    }
+                }
+                painted.push(tb);
+            }
             painted.push(Rect { x: r.x, y: r.y, w: r.w, h: inset });
             painted.push(Rect { x: r.x, y: y1 - inset, w: r.w, h: inset });
             painted.push(Rect { x: r.x, y: r.y, w: inset, h: r.h });
@@ -4519,7 +4539,7 @@ impl Comp {
                     }
                 }
                 Mode::Stacked => {
-                    let row_h = pane::TAB_STRIP_H;
+                    let row_h = libhalcyon::theme::METRICS.tab_strip_h as u32;
                     for (i, _) in children.iter().enumerate() {
                         fill(
                             Rect {
@@ -10857,6 +10877,7 @@ impl Conn {
                     b"tag" => PFK_TAG,
                     b"surface" => PFK_SURFACE,
                     b"geometry" => PFK_GEOMETRY,
+                    b"tagbar" => PFK_TAGBAR,
                     _ => return None,
                 };
                 Some((make_pane(id, fk), 0))
@@ -12188,6 +12209,13 @@ impl Conn {
                 let _ = core::fmt::write(
                     &mut s,
                     format_args!("{} {} {} {}\n", c.x, c.y, c.w, c.h),
+                );
+            }
+            PFK_TAGBAR => {
+                let t = comp.layout.get(slot).unwrap().tagbar;
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!("{} {} {} {}\n", t.x, t.y, t.w, t.h),
                 );
             }
             _ => return self.err(tag, p9::E_INVAL),
@@ -13877,6 +13905,7 @@ impl Conn {
                         (&b"tag"[..], PFK_TAG),
                         (&b"surface"[..], PFK_SURFACE),
                         (&b"geometry"[..], PFK_GEOMETRY),
+                        (&b"tagbar"[..], PFK_TAGBAR),
                     ] {
                         names.push((nm.to_vec(), make_pane(id, fk)));
                     }

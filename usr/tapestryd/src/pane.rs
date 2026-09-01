@@ -40,8 +40,11 @@ pub const BG_COLOR: u32 = 0xFF10_1014;
 /// The tab/stack indicator strip height (G-6c; glyph-free per D7 -- the
 /// compositor paints colored segments, never titles). Carved from the TOP
 /// of a tabbed/stacked container's rect: tabbed = ONE row divided into
-/// per-child segments; stacked = one full-width row PER child.
-pub const TAB_STRIP_H: u32 = 5;
+/// per-child segments; stacked = one full-width row PER child. The value
+/// lives in `theme::METRICS.tab_strip_h` (the single chrome-token source).
+fn tab_strip_h() -> u32 {
+    theme::METRICS.tab_strip_h as u32
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Dir {
@@ -163,8 +166,15 @@ pub struct Pane {
     pub tag: String,
     /// The pane's outer rect (computed; ZERO when hidden).
     pub rect: Rect,
-    /// The content rect (outer minus the border inset; ZERO when hidden).
+    /// The content rect (outer minus the border inset AND the tag bar; ZERO
+    /// when hidden). This is the client's usable area.
     pub content: Rect,
+    /// The Daylight tag bar (HALCYON-VISUAL 3.2/4): the `header_h` strip at
+    /// the TOP of the leaf's inner rect, inside the ring, above `content`.
+    /// ZERO when none -- a single fullscreen leaf, a container, or a leaf too
+    /// small to carve. A Role::Chrome surface binds here (H-3b); the
+    /// compositor paints it `header`-bg as the resting fallback.
+    pub tagbar: Rect,
     /// Visible under the current layout (tab-inactive subtrees are not).
     pub visible: bool,
 }
@@ -218,6 +228,7 @@ impl Layout {
             tag: String::new(),
             rect: Rect::ZERO,
             content: Rect::ZERO,
+            tagbar: Rect::ZERO,
             visible: false,
         };
         let slot = match self.panes.iter().position(|s| s.is_none()) {
@@ -851,8 +862,8 @@ impl Layout {
     /// to carve; children then get the full rect and no strip paints).
     fn strip_h(mode: Mode, n: u32, rect: Rect) -> u32 {
         let total = match mode {
-            Mode::Tabbed => TAB_STRIP_H,
-            Mode::Stacked => TAB_STRIP_H * n.max(1),
+            Mode::Tabbed => tab_strip_h(),
+            Mode::Stacked => tab_strip_h() * n.max(1),
             _ => 0,
         };
         if total == 0 || rect.h < total + 8 || rect.w < 8 {
@@ -911,6 +922,7 @@ impl Layout {
             p.visible = false;
             p.rect = Rect::ZERO;
             p.content = Rect::ZERO;
+            p.tagbar = Rect::ZERO;
         }
         // A zoomed leaf preempts the walk: it alone fills the display
         // (one visible leaf -> no inset -> borderless, the stage-0 look).
@@ -939,25 +951,38 @@ impl Layout {
         // give the 2px inter-pane floor).
         let chrome = (theme::METRICS.bevel + theme::METRICS.hairline) as u32;
         let inset = if self.visible_leaf_count() > 1 { gaps + chrome } else { 0 };
+        // The Daylight tag bar (HALCYON-VISUAL 3.2/4): every inset leaf carves a
+        // `header_h` strip off the TOP of its inner rect (inside the ring),
+        // above the client content. Gated with the ring (>1 leaf) -- a single
+        // fullscreen leaf stays borderless AND bar-free (stage-0). A leaf too
+        // short to spare the strip stays bar-free (the `+ tag_h` client floor,
+        // mirroring strip_h's `+ 8`).
+        let tag_h = theme::METRICS.header_h as u32;
         for p in self.panes.iter_mut().flatten() {
             if !p.visible {
                 continue;
             }
             let r = p.rect;
-            p.content = if inset > 0
+            if inset > 0
                 && matches!(p.kind, Kind::Leaf { .. })
                 && r.w > 2 * inset
                 && r.h > 2 * inset
             {
-                Rect {
+                let mut c = Rect {
                     x: r.x + inset,
                     y: r.y + inset,
                     w: r.w - 2 * inset,
                     h: r.h - 2 * inset,
+                };
+                if c.h > tag_h + tag_h {
+                    p.tagbar = Rect { x: c.x, y: c.y, w: c.w, h: tag_h };
+                    c.y += tag_h;
+                    c.h -= tag_h;
                 }
+                p.content = c;
             } else {
-                r
-            };
+                p.content = r;
+            }
         }
     }
 

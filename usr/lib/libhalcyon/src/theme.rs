@@ -92,6 +92,7 @@ pub struct Metrics {
     pub header_h: i32,  // tag bar height (20)
     pub status_h: i32,  // status bar height (20)
     pub tag_pad_x: i32, // tag bar horizontal padding (6)
+    pub tab_strip_h: i32, // tab/stack indicator strip (5); glyph-free, G-6c/D7
 }
 
 pub const METRICS: Metrics = Metrics {
@@ -101,6 +102,7 @@ pub const METRICS: Metrics = Metrics {
     header_h: 20,
     status_h: 20,
     tag_pad_x: 6,
+    tab_strip_h: 5,
 };
 
 /// Daylight (HALCYON-VISUAL section 1). Values are the doc's #rrggbb widened to
@@ -234,6 +236,7 @@ mod tests {
         assert_eq!(METRICS.hairline, 1);
         assert_eq!(METRICS.header_h, 20);
         assert_eq!(METRICS.status_h, 20);
+        assert_eq!(METRICS.tab_strip_h, 5);
     }
 
     // The ember is shared VERBATIM with Bonfire (section 1.3) -- the link

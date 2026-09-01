@@ -570,9 +570,12 @@ and i3's per-window title bar are the prior art, both per-window). Concretely:
   rect shrinks by 20px at the top on multi-leaf — a consumer sweep (the
   tapestry-battery geometry + the ls-gfx family) rides this chunk.
 - **The strip rect is exposed on the pane 9P tree** (a new per-pane `tagbar`
-  geometry file "x y w h", beside `geometry`), and `TAB_STRIP_H` + a new
-  `TAG_BAR_H` move into `libhalcyon::theme::METRICS` (the H-3a precedent — the
-  single token source), so halcyond sizes/places without hardcoding a private
+  geometry file "x y w h", beside `geometry`), and `TAB_STRIP_H` moves into
+  `libhalcyon::theme::METRICS` as `tab_strip_h` (the H-3a precedent — the
+  single token source). AS-BUILT (H-3b-1): there is NO second `TAG_BAR_H`
+  token — `METRICS.header_h` already IS the tag-bar height ("tag bar height
+  (20)"), and one value gets one name; the carve reads `header_h` directly.
+  So halcyond sizes/places without hardcoding a private
   compositor constant (the survey found `TAB_STRIP_H` was tapestryd-private and
   the strip rect not fully client-derivable — no child-count on the wire).
 - **surface-create carries the role + binding via the ctl `create` verb**

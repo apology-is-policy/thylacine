@@ -221,6 +221,72 @@ tapestryd warnings are pre-existing, none in the edited lines), libhalcyon host
 dossier delta was rung to vault via yip 0031; `usr/tapestry-battery/src` is
 unowned (sweep filed). **Next: H-3b**, the executable tag bar (audit-bearing).
 
+### H-3b-1: the per-leaf tag-bar geometry, and the batch that starved its own witness (same run, after the operator-directed self-compaction)
+
+The tag bar's first sub-chunk is pure geometry — no capability, no gate — so it
+landed without an audit round; the gated `tag status` verb (H-3b-4) is where the
+round attaches. Three things worth keeping from it.
+
+**A token that already existed.** The ratified plan said "add `TAG_BAR_H` to
+`METRICS`"; `theme.rs` already carried `header_h: 20 // tag bar height`. Adding a
+second name for the same 20 would have been two tokens for one value — exactly
+the drift the single-token-source rule (`libhalcyon::theme` "and nowhere else")
+exists to prevent. So the carve reads `METRICS.header_h` and the only move is the
+genuine one: `TAB_STRIP_H` (5) out of pane.rs into `METRICS.tab_strip_h`, with
+the libhalcyon test pinning it. Scripture §13.6 said "(= `METRICS.header_h`)" in
+one place and "a new `TAG_BAR_H`" in another; the as-built follows the first and
+the second is reconciled below.
+
+**Why the painter needed one addition, not a rewrite.** `paint_borders` derives
+the ring `inset` from `content.x - r.x` — horizontal. A tag bar carved off the
+content TOP changes only `content.y/h`, so every band, the mitre, and the cast
+shadow are untouched by construction; the single new paint is the strip filled
+`header`-bg (the same colour as the inner hairline, so hairline + strip read as
+one header band — §2.4's intent). That fill is load-bearing, not cosmetic: a full
+repaint clears the screen buffer to `BG_COLOR`, and the strip is no longer a
+content rect, so without it every leaf would wear a dark 20px gap until halcyond
+binds a chrome surface (H-3b-3). `content` is now the client rect, tag bar
+excluded, which is what `surface_at`, `visible_hosted`, and the `geometry` file
+all wanted anyway.
+
+**The sweep, by ground truth, and the witness it left behind.** The first boot
+failed exactly where the survey predicted a consumer hardcodes geometry: the
+battery back-computes the tab-strip row from B's content (`sy = tb.y - inset - 5
++ 2`), and B's content had moved down 20, so the probe landed inside the strip
+and read `206 196 182` — Daylight `header` — instead of ember. That failing pixel
+was an accidental proof that the fallback fill paints where the tag bar is; the
+fix subtracts the tag bar (`sy` = 22 → 2, the strip's centre row, `cy+2`).
+Content-centre probes never moved (the carve is top-only), and every other
+scenario passed unchanged. But a fix that moves a probe OFF the new surface
+leaves that surface unwitnessed, so the battery now reads `pane/<A>/tagbar`,
+asserts it abuts A's content (same x/w, `ty + th == pa.y`), and probes its
+centre; ls-gfx-panes samples the same point host-side. Both halves read
+`206 196 182` at `battery: tagbar A 960 14` [PASS 42 s]. ls-halcyon [27 s] and
+ls-gfx-chords [36 s] passed untouched — their bevel/floor samples sit at
+x,y = 1,2 and mid-height, outside a content-top strip.
+
+**The stall I caused, read honestly.** Single-leaf scenarios cannot regress
+here: with one visible leaf `inset` is 0, the `else { content = r }` branch is
+byte-identical to before, `tagbar` stays ZERO, and the painter skips on
+`rect == content`. I ran the eight CPU single-leaf gfx scenarios anyway, as
+belt-and-suspenders — at `LS_CI_JOBS=3`, i.e. three 4-vCPU guests on 8 cores.
+Seven passed. ls-gfx-age sat 12 minutes with its log frozen at `age: grid ...
+region`, the step before its `yes | head` fill — the CPU-heaviest phase of the
+scenario — under a 3× oversubscription of my own making. That is the one shape
+contention IS licensed to explain (a wall-clock budget, never a wrong value),
+and it is still a hypothesis until measured: the solo re-run is the measurement,
+and the operator declined it once mid-run, so it is recorded here as OWED, not
+absorbed. What is not a hypothesis: the scenario is single-leaf, so no line of
+this chunk executes in it. The batch was stopped by task, the straggler's QEMU
+reaped by the harness trap (census clean), and the lesson is the one aux already
+banked — cores are the contended resource, and a verification batch that
+oversubscribes them manufactures its own timeouts. Verify at jobs=1.
+
+Vault: `sub-tapestryd` owns pane.rs + server.rs — the tagbar/PFK_TAGBAR/fallback
+delta rung via yip 0031; `theme.rs`, the battery, and the .exp are unowned
+(reference section here, sweep filed). **Next: H-3b-2**, the surface-create ABI
+(`create W H role=chrome bind=<pane-id>`) + `Role::Chrome` activation.
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon

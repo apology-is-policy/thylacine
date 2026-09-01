@@ -116,6 +116,21 @@ gfx_sample stage1a $ax $ay "255 0 0"
 gfx_sample stage1b $bx $by "0 0 255"
 lc_pass "panes: composed pixels exact at both centers (A red, B blue)"
 
+# H-3b-1: the per-leaf Daylight tag bar renders header-bg (the resting
+# fallback, before a halcyond chrome surface binds). Positive witness: the
+# `tagbar` 9P file reports A's strip and its centre reads Daylight `header`
+# (0xCEC4B6 = 206 196 182).
+expect {
+    -re {battery: tagbar A (\d+) (\d+)\r?\n} {
+        set tbx $expect_out(1,string)
+        set tby $expect_out(2,string)
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the tagbar leg failed" }
+    timeout { lc_fail "no tagbar A line" }
+}
+gfx_sample tagbarA $tbx $tby "206 196 182"
+lc_pass "panes: per-leaf tag bar renders Daylight header-bg"
+
 # Scenario 2 (G-6b): the resize protocol.
 expect {
     -ex "battery: resize rejects OK" { lc_pass "panes: resize-ack negative probes OK" }
