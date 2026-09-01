@@ -32,6 +32,16 @@
 //     Boot fills the buffer. Consumer writes 1 more byte → sleeps.
 //     Boot closes the read end → writer wakes; write returns -1
 //     (EPIPE).
+//
+//   pipe_blocking.two_readers_share_one_empty_pipe
+//   pipe_blocking.two_writers_share_one_full_pipe
+//     TWO consumers block on the same direction of one pipe -- the shape
+//     every EL0 program that forks or dups a pipe end produces (a jobserver,
+//     `make -j 2>&1 | tee`, a prefork pool). Under the per-direction Rendez
+//     the second sleeper EXTINCTED the kernel ("rendez already has a
+//     waiter"); under the poll_list both sleep, a single edge wakes both,
+//     exactly one consumes it and the other re-samples and sleeps again, and
+//     the next edge (a close, a second drain) releases it.
 
 #include "test.h"
 
@@ -85,6 +95,22 @@ static void consumer_read_entry(void) {
 static void consumer_write_one_byte_entry(void) {
     static const u8 byte = 0x42;
     g_consumer_result = dev_write(g_wr, &byte, 1L);
+    sched();
+}
+
+// The SECOND consumer of the two-waiter tests: its own result slot + buffer,
+// so the test can tell which of the two waiters an edge released.
+static volatile long g_consumer2_result;
+static u8            g_consumer2_buf[PIPE_BUF_SIZE];
+
+static void consumer2_read_entry(void) {
+    g_consumer2_result = dev_read(g_rd, g_consumer2_buf, (long)sizeof(g_consumer2_buf));
+    sched();
+}
+
+static void consumer2_write_one_byte_entry(void) {
+    static const u8 byte = 0x43;
+    g_consumer2_result = dev_write(g_wr, &byte, 1L);
     sched();
 }
 
@@ -236,4 +262,133 @@ void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void) {
 
     thread_free(consumer);          // reap the parked helper (see write_wakes)
     spoor_clunk(g_wr);
+}
+
+// Two readers blocked on one empty pipe. The second `ready` + yield is the
+// witness: on the per-direction Rendez it never returned (the second sleep()
+// extincted the kernel). Then one 3-byte write wakes BOTH hooks, exactly one
+// drains, the other re-samples an empty ring and sleeps AGAIN (the re-loop),
+// and closing the write end releases it with EOF.
+void test_pipe_blocking_two_readers_share_one_empty_pipe(void);
+void test_pipe_blocking_two_readers_share_one_empty_pipe(void) {
+    g_rd = NULL;
+    g_wr = NULL;
+    g_consumer_result  = -999;
+    g_consumer2_result = -999;
+    TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
+
+    struct Thread *c1 = thread_create(kproc(), consumer_read_entry);
+    struct Thread *c2 = thread_create(kproc(), consumer2_read_entry);
+    TEST_ASSERT(c1 != NULL && c2 != NULL, "thread_create x2");
+    ready(c1);
+    TEST_YIELD_UNTIL(c1->state == THREAD_SLEEPING);
+    ready(c2);
+    TEST_YIELD_UNTIL(c2->state == THREAD_SLEEPING);   // the second sleeper
+    TEST_EXPECT_EQ(c1->state, THREAD_SLEEPING, "reader 1 SLEEPING on empty");
+    TEST_EXPECT_EQ(c2->state, THREAD_SLEEPING,
+        "reader 2 ALSO SLEEPING on the same empty pipe (no second-sleeper extinction)");
+
+    // ONE edge, two hooks woken, one consumer.
+    const u8 payload[] = { 0xa1, 0xb2, 0xc3 };
+    TEST_EXPECT_EQ(dev_write(g_wr, payload, (long)sizeof(payload)),
+                   (long)sizeof(payload), "boot writes 3 bytes");
+    TEST_YIELD_UNTIL(g_consumer_result != -999 || g_consumer2_result != -999);
+    bool           one_drained  = (g_consumer_result != -999);
+    struct Thread *other        = one_drained ? c2 : c1;
+    volatile long *other_result = one_drained ? &g_consumer2_result : &g_consumer_result;
+    const u8      *drained_buf  = one_drained ? g_consumer_buf : g_consumer2_buf;
+    long           drained      = one_drained ? g_consumer_result : g_consumer2_result;
+    // The other reader re-samples an EMPTY ring and goes back to sleep.
+    TEST_YIELD_UNTIL(other->state == THREAD_SLEEPING);
+    long other_after_edge = *other_result;
+
+    // The EOF edge releases it.
+    spoor_clunk(g_wr);
+    TEST_YIELD_UNTIL(*other_result != -999);
+    long other_final = *other_result;
+
+    thread_free(c1);
+    thread_free(c2);
+    spoor_clunk(g_rd);
+
+    TEST_EXPECT_EQ(drained, (long)sizeof(payload),
+        "exactly one reader drained the whole payload");
+    TEST_ASSERT(drained_buf[0] == 0xa1 && drained_buf[1] == 0xb2 && drained_buf[2] == 0xc3,
+        "...and got the bytes boot wrote");
+    TEST_EXPECT_EQ(other_after_edge, -999L,
+        "the other reader was woken by the same edge, found nothing, and re-slept");
+    TEST_EXPECT_EQ(other_final, 0L,
+        "the write-end close releases the re-slept reader with EOF (0)");
+}
+
+// Two writers blocked on one full pipe -- the `make -j 2>&1 | tee` shape.
+// Same witness on the write side; then each of two single-byte drains
+// releases exactly one writer, and the ring ends holding both bytes.
+void test_pipe_blocking_two_writers_share_one_full_pipe(void);
+void test_pipe_blocking_two_writers_share_one_full_pipe(void) {
+    g_rd = NULL;
+    g_wr = NULL;
+    g_consumer_result  = -999;
+    g_consumer2_result = -999;
+    TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
+
+    static u8 fill[PIPE_BUF_SIZE];
+    for (size_t i = 0; i < PIPE_BUF_SIZE; i++) fill[i] = (u8)(i & 0xff);
+    TEST_EXPECT_EQ(dev_write(g_wr, fill, (long)PIPE_BUF_SIZE),
+                   (long)PIPE_BUF_SIZE, "boot fills the buffer");
+
+    struct Thread *c1 = thread_create(kproc(), consumer_write_one_byte_entry);
+    struct Thread *c2 = thread_create(kproc(), consumer2_write_one_byte_entry);
+    TEST_ASSERT(c1 != NULL && c2 != NULL, "thread_create x2");
+    ready(c1);
+    TEST_YIELD_UNTIL(c1->state == THREAD_SLEEPING);
+    ready(c2);
+    TEST_YIELD_UNTIL(c2->state == THREAD_SLEEPING);   // the second sleeper
+    TEST_EXPECT_EQ(c1->state, THREAD_SLEEPING, "writer 1 SLEEPING on full");
+    TEST_EXPECT_EQ(c2->state, THREAD_SLEEPING,
+        "writer 2 ALSO SLEEPING on the same full pipe (no second-sleeper extinction)");
+
+    // First drain: one byte of room -> both hooks woken -> one writer appends,
+    // the other finds the ring full again and re-sleeps.
+    u8 drain[2];
+    TEST_EXPECT_EQ(dev_read(g_rd, drain, 1L), 1L, "boot drains 1 byte");
+    TEST_YIELD_UNTIL(g_consumer_result != -999 || g_consumer2_result != -999);
+    bool           one_wrote    = (g_consumer_result != -999);
+    struct Thread *other        = one_wrote ? c2 : c1;
+    volatile long *other_result = one_wrote ? &g_consumer2_result : &g_consumer_result;
+    long           first        = one_wrote ? g_consumer_result : g_consumer2_result;
+    TEST_YIELD_UNTIL(other->state == THREAD_SLEEPING);
+    long other_after_first = *other_result;
+
+    // Second drain releases the other writer.
+    TEST_EXPECT_EQ(dev_read(g_rd, drain, 1L), 1L, "boot drains a second byte");
+    TEST_YIELD_UNTIL(*other_result != -999);
+    long second = *other_result;
+
+    // The ring now holds fill[2..] followed by the two bytes, in the order the
+    // writers won. Drain it all and check the count + the tail set.
+    static u8 rest[PIPE_BUF_SIZE];
+    long total = 0;
+    for (;;) {
+        long got = dev_read(g_rd, rest + total, (long)PIPE_BUF_SIZE - total);
+        if (got <= 0) break;
+        total += got;
+        if (total >= (long)PIPE_BUF_SIZE) break;
+    }
+    u8 tail_a = rest[PIPE_BUF_SIZE - 2], tail_b = rest[PIPE_BUF_SIZE - 1];
+
+    thread_free(c1);
+    thread_free(c2);
+    spoor_clunk(g_rd);
+    spoor_clunk(g_wr);
+
+    TEST_ASSERT(drain[0] == 0x00 || drain[0] == 0x01, "the drains took the head bytes");
+    TEST_EXPECT_EQ(first, 1L, "exactly one writer appended after the first drain");
+    TEST_EXPECT_EQ(other_after_first, -999L,
+        "the other writer was woken by the same edge, found the ring full, and re-slept");
+    TEST_EXPECT_EQ(second, 1L, "the second drain released the other writer");
+    TEST_EXPECT_EQ(total, (long)PIPE_BUF_SIZE,
+        "the ring held exactly the fill minus 2 plus the 2 appended bytes");
+    TEST_ASSERT((tail_a == 0x42 && tail_b == 0x43) || (tail_a == 0x43 && tail_b == 0x42),
+        "the two appended bytes are the ring's tail, in either order");
 }

@@ -16,14 +16,14 @@ A pipe is the simplest IPC primitive: one process writes bytes, another reads th
 
 ## Semantics (blocking; P5-pipe-blocking)
 
-- **read** drains bytes from the buffer (1..n returned) when data is available; **blocks** (sleeps on `read_rendez`) when empty AND write end open; **returns 0 (EOF)** when empty AND write end closed.
-- **write** appends bytes (1..n returned, may be < n if buffer fills mid-write) when space is available; **blocks** (sleeps on `write_rendez`) when full AND read end open; **returns `-T_E_PIPE`** when read end closed (#100 -- it returned a flat `-1` until then, which made EPIPE unobtainable through both boundaries; see below).
+- **read** drains bytes from the buffer (1..n returned) when data is available; **blocks** (a per-call hook on the ring's `poll_list`, sleeping on a private stack Rendez) when empty AND write end open; **returns 0 (EOF)** when empty AND write end closed.
+- **write** appends bytes (1..n returned, may be < n if buffer fills mid-write) when space is available; **blocks** (the same hook mechanism) when full AND read end open; **returns `-T_E_PIPE`** when read end closed (#100 -- it returned a flat `-1` until then, which made EPIPE unobtainable through both boundaries; see below).
 - read on the **write** end → `-1` (wrong end).
 - write on the **read** end → `-1` (wrong end).
 
-The wait/wake protocol is modeled in `specs/pipe.tla` and pinned by `NoStuckReader` / `NoStuckWriter` invariants (specializations of ARCH §28 I-9 to the pipe's two-direction state machine). The TLC matrix is 1 clean cfg + 4 buggy cfgs; each buggy variant elides the wake-after-mutation step and produces a counterexample.
+The wait/wake protocol is modeled in `specs/pipe.tla` and pinned by `NoStuckReader` / `NoStuckWriter` invariants (specializations of ARCH §28 I-9 to the pipe's two-direction state machine). The TLC matrix is 2 clean cfgs (2 and 3 threads) + 5 buggy cfgs; four buggy variants elide the wake-after-mutation step, the fifth wakes ONE reader instead of all, and each produces a counterexample.
 
-**Single-waiter discipline**: at most one thread sleeps on each direction at a time. Mirrors the impl's `struct Rendez` (single-waiter; see `kernel/include/thylacine/rendez.h`). Multi-waiter wait queues are Phase 5+ (poll, futex).
+**Multi-waiter, wake-all (2026-09-02)**: any number of threads may block on either direction of one pipe at once. Each blocked reader/writer registers a per-call `struct poll_waiter` on the ring's `poll_list` -- the same list `.poll` uses -- under `r->lock`, atomically with the sample that found the ring not ready, and sleeps on a stack Rendez private to that call; every readiness edge (append, drain, either EOF) walks the list and wakes every hook, and a woken blocker re-samples and sleeps again if another waiter consumed the edge. This replaced a `struct Rendez` per direction on the ring, which is **single-waiter and extincts on a second sleeper** (`rendez.h`): sound while a pipe had one reader and one writer (the in-kernel uses of P5-pipe-blocking), an unprivileged kernel crash once `pipe2` (#155), `fork` (LINEAGE) and `CLONE_THREAD` (N-3) made every endpoint a Spoor many EL0 threads and Procs share -- `make -j 2>&1 | tee` (N children blocked in write on one full pipe) or a jobserver (N children blocked in read on one empty pipe) reached it. Found 2026-09-01 by the socktab holotype's self-audit while reading this file as the eventfd model; `tools/test.sh` on the pre-fix kernel with the two `pipe_blocking.two_*` tests EXTINCTS at the second sleeper.
 
 ---
 
@@ -70,7 +70,7 @@ struct pipe_endpoint {
 };
 ```
 
-`_Static_assert` pins `sizeof(struct pipe_ring) == 72 + 4096` (was 32 + 4096 in the non-blocking pre-image; P5-pipe-blocking added `read_eof` + `write_eof` flags, a `spin_lock_t lock`, and two `struct Rendez` wait queues, growing the header from 32 to 72 bytes). The ring is heap-allocated (kmalloc routes 4 KiB+ through alloc_pages; same path as p9_client). The endpoint is 16 bytes; SLUB-cached for compactness.
+`_Static_assert` pins `sizeof(struct pipe_ring) == 56 + 4096` (was 32 + 4096 in the non-blocking pre-image; P5-pipe-blocking added `read_eof` + `write_eof` flags, a `spin_lock_t lock` and two `struct Rendez` wait queues -> 72; P5-poll-a added the 16-byte `poll_list` -> 88; the multi-waiter rewrite removed the two Rendez -> 56). The ring is heap-allocated (kmalloc routes 4 KiB+ through alloc_pages; same path as p9_client). The endpoint is 16 bytes; SLUB-cached for compactness.
 
 Two endpoints share one ring. Each Spoor's `aux` is its own `pipe_endpoint`. The Dev vtable's read / write dispatch on `is_read_end`.
 
@@ -82,31 +82,34 @@ Standard mod-arithmetic two-segment copy. `ring_write` copies up to `PIPE_BUF_SI
 
 `devpipe` is registered in the bestiary by `pipe_init` (called from `kernel/main.c` after `dev9p_init`).
 
-- `read` is a blocking loop: take `r->lock`; if `count > 0` → drain (via `ring_read`) → drop lock → `wakeup(write_rendez)` → return bytes drained. If `write_eof` + empty → drop lock → return 0 (EOF). Else → drop lock → `sleep(read_rendez, cond_can_read, r)`; on wake, loop.
-- `write` is symmetric: take lock; if `read_eof` → return `-T_E_PIPE`. If space → append (via `ring_write`) → drop lock → `wakeup(read_rendez)` → return bytes written. Else → sleep on `write_rendez`.
-- `close` sets the appropriate EOF flag (`read_eof` or `write_eof`) under `r->lock`, drops the lock, **calls `wakeup` on the OTHER side's rendez** (the buggy variant skips this — caught by `BUGGY_CLOSE_*_NO_WAKE_*` spec configs). Then drops the ring's per-endpoint refcount; ring freed at 0; endpoint struct always freed.
+- `read` is a blocking loop: take `r->lock`; if `count > 0` → drain (via `ring_read`) → drop lock → `poll_waiter_list_wake(poll_list)` → return bytes drained. If `write_eof` + empty → drop lock → return 0 (EOF). If `CNONBLOCK` → drop lock → `-T_E_AGAIN`. Else → `pipe_block_locked(r)`: register a per-call hook on `poll_list` in the SAME hold, drop the lock, `sleep` on the call's private Rendez until the hook is walked, unregister; on `SLEEP_INTR` return -1 (death), else loop and re-sample.
+- `write` is symmetric: take lock; if `read_eof` → return `-T_E_PIPE`. If space → append (via `ring_write`) → drop lock → `poll_waiter_list_wake(poll_list)` → return bytes written. Else → `-T_E_AGAIN` under `CNONBLOCK`, or `pipe_block_locked(r)`.
+- `close` sets the appropriate EOF flag (`read_eof` or `write_eof`) under `r->lock`, drops the lock, **walks `poll_list`** -- every blocked reader/writer AND every poller wakes (the buggy variant skips this — caught by `BUGGY_CLOSE_*_NO_WAKE_*` spec configs). Then drops the ring's per-endpoint refcount; ring freed at 0; endpoint struct always freed.
 - Other slots: stubs (attach returns NULL — Plan 9's `/srv` posting model isn't wired at v1.0; the Phase 5+ syscall surface lands it).
 
 ### Wait/wake discipline
 
-The atomic check-then-sleep protocol is provided by `<thylacine/rendez.h>`. The pipe's contribution is:
+The atomic check-then-sleep protocol is provided by `<thylacine/rendez.h>` (one sleeper per Rendez) composed with `<thylacine/poll.h>`'s register-then-observe (`specs/poll.tla`). The pipe's contribution is:
 1. State mutation (count++, count--, eof := true) happens under `r->lock`.
-2. After dropping `r->lock`, call `wakeup(rendez)` to deliver the wake to any sleeper.
-3. The rendez's wakeup acquires its own lock, which pairs (release/acquire) with the next sleeper's cond evaluation at sleep entry — ensuring the cond reads the post-mutation state.
+2. A would-block caller registers its hook on `poll_list` while STILL holding `r->lock` -- the sample that found the ring not ready and the registration are one critical section, so no mutation can land between them.
+3. After dropping `r->lock`, the mutator calls `poll_waiter_list_wake(poll_list)`, which sets each hook's `ready` under the list lock and `wakeup`s each hook's private Rendez. The rendez lock pairs (release/acquire) with the sleeper's cond evaluation, so a wake that ran between the registration and the sleep is seen at sleep entry (fast path) and one that runs after is delivered.
+4. Every waiter is woken by every edge (wake-all); a waiter whose condition is false again after a peer consumed the edge re-registers and sleeps again.
+
+Lock order: `r->lock` -> `poll_list.lock` -> the hook's Rendez lock (poll.h's object -> list -> rendez chain). A hook never outlives its call (`NoStaleHook`).
 
 The discipline maps to `specs/pipe.tla` actions:
-- `ReadDrain(t)` ↔ devpipe_read's drain branch + `wakeup(write_rendez)`.
-- `WriteAppend(t)` ↔ devpipe_write's append branch + `wakeup(read_rendez)`.
-- `CloseRead` ↔ devpipe_close's read-side branch (set read_eof + `wakeup(write_rendez)`).
-- `CloseWrite` ↔ devpipe_close's write-side branch (set write_eof + `wakeup(read_rendez)`).
+- `ReadDrain(t)` ↔ devpipe_read's drain branch + `WakeAllWriters`.
+- `WriteAppend(t)` ↔ devpipe_write's append branch + `WakeAllReaders`.
+- `CloseRead` ↔ devpipe_close's read-side branch (set read_eof + `WakeAllWriters`).
+- `CloseWrite` ↔ devpipe_close's write-side branch (set write_eof + `WakeAllReaders`).
 
-The `BuggyXxxNoWake` variants elide the wakeup call → `NoStuckReader` / `NoStuckWriter` violated.
+The `BuggyXxxNoWake` variants elide the wake → `NoStuckReader` / `NoStuckWriter` violated; `BuggyWriteAppendWakeOne` wakes one chosen reader (the old single-waiter `wakeup`) and leaves a second reader stuck while `CanRead` holds.
 
 ### Lifecycle
 
-1. `pipe_create` allocates the ring (ref=2; lock + rendezes initialized) + two endpoints + two Spoors. Each Spoor's aux is set to its endpoint.
+1. `pipe_create` allocates the ring (ref=2; lock + `poll_list` initialized) + two endpoints + two Spoors. Each Spoor's aux is set to its endpoint.
 2. Caller uses read/write through `Spoor->dev->{read,write}`. Read on empty / write on full sleeps until woken.
-3. `spoor_clunk` on either end → `devpipe_close` → set EOF flag + wake the other side's rendez (so any sleeper exits) → drop ring ref to 1; endpoint freed; Spoor's `c->aux` cleared.
+3. `spoor_clunk` on either end → `devpipe_close` → set EOF flag + walk `poll_list` (so every sleeper and poller exits) → drop ring ref to 1; endpoint freed; Spoor's `c->aux` cleared.
 4. `spoor_clunk` on the other end → drop ring ref to 0; ring's magic clobbered; `kfree(ring)`; endpoint freed.
 
 ---
@@ -118,9 +121,8 @@ The `BuggyXxxNoWake` variants elide the wakeup call → `NoStuckReader` / `NoStu
 - Clean: `ReadDrain` / `ReadEof` / `ReadSleep` / `WriteAppend` / `WriteEpipe` / `WriteSleep` / `CloseRead` / `CloseWrite` (8 — symmetric pairs).
 - Buggy: `BuggyWriteAppendNoWake` / `BuggyReadDrainNoWake` / `BuggyCloseWriteNoWake` / `BuggyCloseReadNoWake` (4 — each elides the wake after a state-enabling mutation).
 
-5 invariants:
+4 invariants (`SingleWaiter` was retired with the single-waiter model; two waiters per side is now the point):
 - `TypeOk` — state space type-safety.
-- `SingleWaiter` — at most one thread in `WAITING_READ`; at most one in `WAITING_WRITE`. Mirrors the rendez API.
 - `EofMonotonic` — once set, never cleared.
 - `NoStuckReader` — `NOT ∃t : threadState[t] = "WAITING_READ" AND CanRead`. I-9 specialized to the read side.
 - `NoStuckWriter` — symmetric.
@@ -134,6 +136,8 @@ TLC verdicts at `Threads = {t1, t2}, CAP = 2`:
 | `pipe_buggy_read_no_wake_writer.cfg` | NoStuckWriter violated. |
 | `pipe_buggy_close_write_no_wake_reader.cfg` | NoStuckReader violated. |
 | `pipe_buggy_close_read_no_wake_writer.cfg` | NoStuckWriter violated. |
+| `pipe_multi.cfg` (`Threads = {t1, t2, t3}`) | Model checking completed; no error (40 distinct states; two readers or two writers may sleep at once). |
+| `pipe_buggy_wake_one_reader.cfg` (3 threads) | NoStuckReader violated (one reader woken, the other stuck while `ringCount > 0`). |
 
 The clean cfg models the impl discipline; each buggy cfg captures the bug class of "forgot to wake on a state-enabling mutation."
 
@@ -162,7 +166,7 @@ The clean cfg models the impl discipline; each buggy cfg captures the bug class 
 
 ### Multi-thread (sleep/wake protocol; P5-pipe-blocking)
 
-Each test spawns a consumer thread that performs a blocking op; the boot thread then triggers the wake. Pattern matches `test_rendez_basic_handoff`.
+Each test spawns a consumer thread that performs a blocking op; the boot thread then triggers the wake. Pattern matches `test_rendez_basic_handoff`. The two `two_*` tests spawn TWO consumers on one direction: on the pre-fix kernel the second `sleep()` extincts the suite ("rendez already has a waiter"); on the fixed kernel both sleep, one edge wakes both, exactly one consumes it, the other re-sleeps, and the next edge releases it. The in-guest twin is probe legs L272-L277 (two forked children blocked in `read()` on one empty pipe).
 
 | Test | Covers |
 |---|---|
@@ -223,7 +227,7 @@ storm's parallel jobs died silently. See `docs/LLVM-DESIGN.md` §7.2.
 
 - `read` / `write` are O(n) byte copies (mandatory).
 - Two cache caches: 1 SLUB cache for `pipe_endpoint` (16 B objects); 1 kmalloc path for `pipe_ring` (4 KiB objects via alloc_pages).
-- No locking at v1.0 (single-CPU); blocking variant adds a per-pipe spinlock + a pair of rendez wait queues.
+- One per-pipe spinlock (`r->lock`) plus the `poll_list` lock; a blocked call costs a stack Rendez + hook and one list register/unregister.
 
 ---
 
@@ -272,9 +276,9 @@ became `-T_E_BADF` / `-T_E_INVAL`. `!p` (a Spoor with a NULL aux) stays a flat
 `-1` per the ERRORS.md preamble-guard rule: an internal invariant violation, not
 a caller error, unreachable from EL0.
 
-### Single-waiter discipline
+### Multi-waiter discipline (was: single-waiter)
 
-At most one thread sleeps on each direction at a time. A second thread attempting to sleep extincts (rendez.h's `single-waiter` invariant). For v1.0 in-kernel uses (single consumer + single producer per pipe), this is fine. Multi-waiter wait queues (multiple consumers competing for one pipe end, or multiple producers blocking on full) need poll / futex extensions; not in v1.0 scope.
+Until 2026-09-02 this section said "at most one thread sleeps on each direction at a time; a second extincts; for v1.0 in-kernel uses this is fine." The sentence was true when written and silently falsified by `pipe2` + `fork` + `CLONE_THREAD`, which made every pipe end an object shared across EL0 threads and Procs -- the DEBUGGING-PLAYBOOK 6.15 red flag (a single-waiter Rendez on state reachable from more than one thread) that the per-struct sweep did not reach. Any number of sleepers per direction is legal now; the residual footgun is the `sleep()` primitive itself: a future Dev that embeds a `struct Rendez` in an object a shared Spoor can reach must either guard a second sleeper (`irqfwd`'s `KOBJ_IRQ_WAIT_BUSY`, `srvconn`'s `reading`/`writing`) or use the per-call hook shape this file now does. Sweep result at the fix: `devsrv`'s `srv_accept_blocking` sleeps on a service-embedded Rendez with no guard, reachable only by the posting Proc's own threads (trusted servers hold `MAY_POST_SERVICE`) -- tracked, not fixed here.
 
 ### Wrong-end calls return -1, not extinct
 

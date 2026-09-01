@@ -7,12 +7,23 @@
 // per-endpoint `struct pipe_endpoint` aux records; the Dev vtable
 // dispatches based on each endpoint's `is_read_end` flag.
 //
-// Wait/wake: the ring carries `read_rendez` / `write_rendez` for the
-// single-waiter reader/writer paths (specs/pipe.tla NoStuckReader /
-// NoStuckWriter). A `poll_list` on the ring is the multi-fd poller
-// callback set — populated by devpipe_poll, walked under r->lock at
-// every readiness mutation (data arrival, EOF). specs/poll.tla
-// MakeReady ↔ poll_waiter_list_wake calls below.
+// Wait/wake: ONE mechanism for pollers and blockers alike. The ring's
+// `poll_list` is the multi-waiter callback set (specs/poll.tla): devpipe_poll
+// registers a poller's hook on it, and a blocking read/write registers a
+// per-call hook of its own (pipe_block_locked below), each hook carrying the
+// waiting thread's private stack Rendez. Every readiness mutation (data
+// arrival, drain, either EOF) walks the list and wakes EVERY hook; a woken
+// blocker re-samples the ring and sleeps again if another waiter got there
+// first (specs/pipe.tla NoStuckReader / NoStuckWriter, multi-waiter form).
+//
+// Why not a Rendez per direction on the ring: `sleep()` is single-waiter and
+// EXTINCTS on a second sleeper (sched.c). The ring's two Rendez were sound
+// while a pipe had one reader and one writer -- the in-kernel uses of
+// P5-pipe-blocking -- but pipe2 (#155), fork (LINEAGE) and CLONE_THREAD (N-3)
+// made every endpoint a Spoor that many EL0 threads and Procs hold at once,
+// so two children blocked in write() on one full pipe (`make -j 2>&1 | tee`)
+// or two workers blocked in read() on one empty pipe (a jobserver, a prefork
+// pool) reached the second-sleeper extinction from unprivileged code.
 
 #include <thylacine/dev.h>
 #include <thylacine/errno.h>
@@ -43,9 +54,7 @@ struct pipe_ring {
     bool                      read_eof;       // read end closed → writes return -T_E_PIPE
     bool                      write_eof;      // write end closed → reads return 0 (EOF)
     spin_lock_t               lock;           // protects count/head/tail/{read,write}_eof
-    struct Rendez             read_rendez;    // single reader sleeps here on empty
-    struct Rendez             write_rendez;   // single writer sleeps here on full
-    struct poll_waiter_list   poll_list;      // P5-poll-a: pollers registered for any readiness change
+    struct poll_waiter_list   poll_list;      // every waiter: pollers AND blocked readers/writers
     u8                        buf[PIPE_BUF_SIZE];
 };
 
@@ -55,7 +64,8 @@ struct pipe_endpoint {
     bool               is_read_end;
 };
 
-// 88 bytes header — derived layout (16 B added at P5-poll-a for poll_list):
+// 56 bytes header — derived layout (was 88 while the ring carried a Rendez
+// per direction; the two 16-byte Rendez left with the multi-waiter rewrite):
 //   offset  0:  u32  magic           (4)
 //   offset  4:  int  ref             (4)
 //   offset  8:  size_t count         (8)
@@ -65,12 +75,10 @@ struct pipe_endpoint {
 //   offset 33:  bool write_eof       (1)
 //   offset 34-35: pad
 //   offset 36:  spin_lock_t lock     (4; u32)
-//   offset 40:  struct Rendez read_rendez  (16: spin_lock+pad+Thread*)
-//   offset 56:  struct Rendez write_rendez (16)
-//   offset 72:  struct poll_waiter_list poll_list  (16: spin_lock+pad+ptr)
-//   offset 88:  u8 buf[PIPE_BUF_SIZE]
-_Static_assert(sizeof(struct pipe_ring) == 88 + PIPE_BUF_SIZE,
-               "pipe_ring size pinned (88-byte header + 4 KiB buf)");
+//   offset 40:  struct poll_waiter_list poll_list  (16: spin_lock+pad+ptr)
+//   offset 56:  u8 buf[PIPE_BUF_SIZE]
+_Static_assert(sizeof(struct pipe_ring) == 56 + PIPE_BUF_SIZE,
+               "pipe_ring size pinned (56-byte header + 4 KiB buf)");
 
 // The ring is ~4 KiB — above the SLUB max-object threshold, so kmalloc
 // routes it through alloc_pages (same path the p9_client uses). The
@@ -233,23 +241,40 @@ static struct Spoor *devpipe_create(struct Spoor *c, const char *name, int omode
     return NULL;
 }
 
-// Cond functions used by sleep().
-//
-// Per CLAUDE.md spec-first discipline: these match `specs/pipe.tla`'s
-// CanRead / CanWrite predicates. They read shared state (count, eof
-// flags) under rendez->lock (sleep's discipline). Synchronization
-// between producer mutations (under r->lock) and these reads is via
-// rendez->lock acquired by wakeup(); see the comment in devpipe_close
-// for the discipline.
-
-static int cond_can_read(void *arg) {
-    struct pipe_ring *r = (struct pipe_ring *)arg;
-    return (r->count > 0) || r->write_eof;
+// The blocker's sleep condition: its own hook was walked by a wake. `ready`
+// is written under poll_list->lock by poll_waiter_list_wake, which then calls
+// wakeup() on the hook's Rendez -- the release/acquire pair on that Rendez
+// lock is what orders the store before this read, which sleep() evaluates
+// under the same lock (the devnotes_read discipline). Plain load.
+static int pipe_waiter_ready(void *arg) {
+    const struct poll_waiter *pw = (const struct poll_waiter *)arg;
+    return pw->ready ? 1 : 0;
 }
 
-static int cond_can_write(void *arg) {
-    struct pipe_ring *r = (struct pipe_ring *)arg;
-    return (r->count < PIPE_BUF_SIZE) || r->read_eof;
+// Block until the ring's poll_list is walked. ENTERED WITH r->lock HELD, and
+// that is the whole protocol: the caller sampled the ring under the lock and
+// found it not ready, so registering the hook in the SAME hold makes the
+// sample + the registration one atomic step (register-then-observe,
+// specs/poll.tla) -- a mutation cannot land between them, and every mutation
+// walks the list after it lands, so the hook is either registered before the
+// walk (woken) or registered after a sample that already saw the mutation.
+// Drops r->lock, sleeps on a stack Rendez private to this call (one sleeper
+// per Rendez by construction, however many threads share the pipe),
+// unregisters on every exit, and returns sleep()'s verdict: SLEEP_OK means
+// "re-sample" (another waiter may have consumed the edge), SLEEP_INTR means
+// the Proc is group-terminating and the caller unwinds (#811). The list lock
+// nests inside the ring lock (poll.h: object -> list), the Rendez lock inside
+// neither; a hook never outlives the call (NoStaleHook).
+static int pipe_block_locked(struct pipe_ring *r) {
+    struct Rendez      priv;
+    struct poll_waiter pw;
+    rendez_init(&priv);
+    poll_waiter_init(&pw, &priv);
+    poll_waiter_list_register(&r->poll_list, &pw);
+    spin_unlock(&r->lock);
+    int rc = sleep(&priv, pipe_waiter_ready, &pw);
+    poll_waiter_list_unregister(&pw);
+    return rc;
 }
 
 static void devpipe_close(struct Spoor *c) {
@@ -260,31 +285,18 @@ static void devpipe_close(struct Spoor *c) {
         extinction("pipe: close on endpoint with corrupted ring");
     }
 
-    // EOF propagation: closing the read end sets read_eof + wakes any
-    // sleeping writer (so it can return -EPIPE). Closing the write end
-    // sets write_eof + wakes any sleeping reader (so it can return 0
-    // for EOF). Per specs/pipe.tla CloseRead / CloseWrite + their buggy
-    // variants — the wake is REQUIRED for missed-wakeup-freedom.
-    //
-    // Discipline: set EOF flag under r->lock; release r->lock; call
-    // wakeup() which takes the rendez's own lock. The rendez API
-    // documents that the wakeup's lock acquisition provides the
-    // synchronization between this producer write and the reader's
-    // cond evaluation (which runs under rendez->lock at sleep entry).
+    // EOF propagation: closing the read end sets read_eof (every sleeping
+    // writer returns -EPIPE); closing the write end sets write_eof (every
+    // sleeping reader returns 0). Per specs/pipe.tla CloseRead / CloseWrite
+    // + their buggy variants -- the wake is REQUIRED for missed-wakeup-
+    // freedom, and it is the ONE wake: the flag is set under r->lock, the
+    // lock is dropped, and poll_waiter_list_wake walks every hook on the
+    // ring -- pollers (the surviving end is now POLLHUP- / POLLERR-ready)
+    // and blocked readers/writers alike; each re-samples after the wake.
     spin_lock(&r->lock);
-    if (p->is_read_end) {
-        r->read_eof = true;
-        spin_unlock(&r->lock);
-        wakeup(&r->write_rendez);
-    } else {
-        r->write_eof = true;
-        spin_unlock(&r->lock);
-        wakeup(&r->read_rendez);
-    }
-    // P5-poll-a: closing either end is a readiness edge — the surviving
-    // end becomes POLLHUP-ready (read end) or POLLERR-ready (write end).
-    // poll_waiter_list_wake walks every registered poller; the poller's
-    // post-wake .poll sample picks up the new EOF flag.
+    if (p->is_read_end) r->read_eof  = true;
+    else                r->write_eof = true;
+    spin_unlock(&r->lock);
     poll_waiter_list_wake(&r->poll_list);
 
     // Drop this endpoint's ring ref. When both endpoints have been
@@ -328,23 +340,24 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (n == 0) return 0;
 
     // Blocking read. Loop:
-    //   - take lock; if data → drain + drop lock + wake writer + return.
-    //   - if writeEof + empty → drop lock + return 0 (EOF).
-    //   - else → drop lock + sleep on read_rendez until cond_can_read.
+    //   - take lock; if data -> drain + drop lock + wake every waiter + return.
+    //   - if writeEof + empty -> drop lock + return 0 (EOF).
+    //   - else -> register on poll_list in the same hold + sleep; re-sample.
     //
-    // The sleep's cond re-check makes the protocol miss-wakeup-free per
-    // specs/pipe.tla NoStuckReader (composed with scheduler.tla's
-    // NoMissedWakeup at the rendez layer).
+    // The register-then-observe step + the per-call Rendez make the protocol
+    // miss-wakeup-free for ANY number of readers (specs/pipe.tla
+    // NoStuckReader, multi-waiter form; scheduler.tla NoMissedWakeup at the
+    // rendez layer). A reader woken after a peer drained the bytes simply
+    // finds count == 0 again and sleeps again.
     for (;;) {
         spin_lock(&r->lock);
         if (r->count > 0) {
             long got = ring_read(r, (u8 *)buf, n);
             spin_unlock(&r->lock);
             if (got > 0) {
-                wakeup(&r->write_rendez);
-                // A drained ring may have just become POLLOUT-ready for
-                // a poller registered on the write end. Wake every
-                // poller; their post-wake .poll re-sample filters.
+                // A drained ring may have just become writable: wake every
+                // hook -- a writer blocked on full, a poller on the write
+                // end; each re-samples and filters.
                 poll_waiter_list_wake(&r->poll_list);
             }
             return got;
@@ -353,7 +366,6 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
             spin_unlock(&r->lock);
             return 0;       // EOF
         }
-        spin_unlock(&r->lock);
         // #811 (ARCH §8.8.1): a death-interrupted sleep means the Proc is
         // group-terminating -- return so the Thread unwinds to its EL0-return
         // die-check (re-looping would re-register + re-INTR = livelock).
@@ -369,15 +381,17 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
         // read would sleep here, so a non-blocking read returns EAGAIN instead.
         // Placed AFTER the count>0 and write_eof checks so a non-blocking read
         // still drains available data and still returns 0 at EOF; it converts
-        // ONLY the would-block case. It never registers on read_rendez, so the
-        // I-9 wait/wake protocol (pipe.tla NoStuckReader) is untouched. The
-        // read is lockless (r->lock is dropped above), so `flag` is read
-        // atomically -- it is RMW'd from other lock domains (see spoor.h).
-        if (spoor_flag_get(c) & CNONBLOCK)
+        // ONLY the would-block case. It never registers a hook, so the I-9
+        // wait/wake protocol (pipe.tla NoStuckReader) is untouched. `flag` is
+        // an atomic read -- it is RMW'd from other lock domains (see spoor.h).
+        if (spoor_flag_get(c) & CNONBLOCK) {
+            spin_unlock(&r->lock);
             return -T_E_AGAIN;
-        if (sleep(&r->read_rendez, cond_can_read, r) == SLEEP_INTR)
+        }
+        // Registered under the lock we still hold; returns with it dropped.
+        if (pipe_block_locked(r) == SLEEP_INTR)
             return -1;
-        // Loop: re-check state with the lock held.
+        // Loop: re-sample with the lock held.
     }
 }
 
@@ -422,10 +436,7 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
         if ((long)(PIPE_BUF_SIZE - r->count) >= n) {
             long put = ring_write(r, (const u8 *)buf, n);   // == n (it fits)
             spin_unlock(&r->lock);
-            if (put > 0) {
-                wakeup(&r->read_rendez);
-                poll_waiter_list_wake(&r->poll_list);
-            }
+            if (put > 0) poll_waiter_list_wake(&r->poll_list);
             return put;
         }
         spin_unlock(&r->lock);
@@ -433,12 +444,12 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
     }
 
     // Blocking write. Loop:
-    //   - take lock; if readEof → drop lock + return -T_E_PIPE.
-    //   - if space → append + drop lock + wake reader + return.
-    //   - else → drop lock + sleep on write_rendez until cond_can_write.
+    //   - take lock; if readEof -> drop lock + return -T_E_PIPE.
+    //   - if space -> append + drop lock + wake every waiter + return.
+    //   - else -> register on poll_list in the same hold + sleep; re-sample.
     //
     // Discipline matches devpipe_read's read side; specs/pipe.tla
-    // NoStuckWriter is the invariant.
+    // NoStuckWriter (multi-waiter form) is the invariant.
     for (;;) {
         spin_lock(&r->lock);
         if (r->read_eof) {
@@ -473,27 +484,28 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
             long put = ring_write(r, (const u8 *)buf, n);
             spin_unlock(&r->lock);
             if (put > 0) {
-                wakeup(&r->read_rendez);
-                // A non-empty ring has just become POLLIN-ready for any
-                // poller registered on the read end.
+                // A non-empty ring has just become readable: wake every hook
+                // -- a reader blocked on empty, a poller on the read end.
                 poll_waiter_list_wake(&r->poll_list);
             }
             return put;
         }
-        spin_unlock(&r->lock);
         // O_NONBLOCK (CNONBLOCK): the pipe is completely full (count ==
         // PIPE_BUF_SIZE) with a live reader -- a blocking write would sleep, so
         // a non-blocking write returns EAGAIN. Placed AFTER the read_eof (EPIPE)
         // and space checks, so a non-blocking write still delivers EPIPE and
         // still writes what fits (partial); it converts ONLY the full case. It
-        // never registers on write_rendez, so I-9 (pipe.tla NoStuckWriter) is
-        // untouched. Byte-oriented, unlike CNBFRAME's frame-atomic tx above.
-        // Lockless read of `flag` (RMW'd from other lock domains -- see spoor.h).
-        if (spoor_flag_get(c) & CNONBLOCK)
+        // never registers a hook, so I-9 (pipe.tla NoStuckWriter) is untouched.
+        // Byte-oriented, unlike CNBFRAME's frame-atomic tx above. `flag` is an
+        // atomic read (RMW'd from other lock domains -- see spoor.h).
+        if (spoor_flag_get(c) & CNONBLOCK) {
+            spin_unlock(&r->lock);
             return -T_E_AGAIN;
-        // #811 (ARCH §8.8.1): death-interrupted -> Proc group-terminating;
-        // return so the Thread unwinds to its EL0-return die-check.
-        if (sleep(&r->write_rendez, cond_can_write, r) == SLEEP_INTR)
+        }
+        // #811 (ARCH section 8.8.1): death-interrupted -> Proc group-
+        // terminating; return so the Thread unwinds to its EL0-return
+        // die-check. Registered under the lock we still hold.
+        if (pipe_block_locked(r) == SLEEP_INTR)
             return -1;
     }
 }
@@ -511,7 +523,7 @@ static long devpipe_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
 // Compute the current revents bitmask for endpoint `p` on ring `r` under
 // r->lock. Filters POLLIN/POLLOUT by `events`; output-only POLLHUP/POLLERR
 // always returned. The read-end gets POLLIN when bytes are buffered and
-// POLLHUP when the write side has closed (matching cond_can_read's two
+// POLLHUP when the write side has closed (matching the read loop's two
 // wake conditions). The write-end gets POLLOUT when space is available
 // and POLLERR when the read side has closed (the EPIPE condition).
 static short devpipe_revents_under_lock(struct pipe_ring *r,
@@ -620,8 +632,6 @@ int pipe_create(struct Spoor **out_read_end, struct Spoor **out_write_end) {
     r->read_eof  = false;
     r->write_eof = false;
     spin_lock_init(&r->lock);
-    rendez_init(&r->read_rendez);
-    rendez_init(&r->write_rendez);
     poll_waiter_list_init(&r->poll_list);
     // buf[] already zero from KP_ZERO.
 

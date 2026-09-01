@@ -1410,6 +1410,8 @@ void test_pipe_blocking_write_wakes_sleeping_reader(void);
 void test_pipe_blocking_read_wakes_sleeping_writer(void);
 void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void);
 void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void);
+void test_pipe_blocking_two_readers_share_one_empty_pipe(void);
+void test_pipe_blocking_two_writers_share_one_full_pipe(void);
 void test_poll_ready_immediately_pollin(void);
 void test_poll_ready_immediately_pollout(void);
 void test_poll_timeout_zero_not_ready(void);
@@ -3255,6 +3257,8 @@ struct test_case g_tests[] = {
     { "pipe_blocking.read_wakes_sleeping_writer",           test_pipe_blocking_read_wakes_sleeping_writer,           false, NULL },
     { "pipe_blocking.close_write_end_wakes_reader_with_eof", test_pipe_blocking_close_write_end_wakes_reader_with_eof, false, NULL },
     { "pipe_blocking.close_read_end_wakes_writer_with_epipe", test_pipe_blocking_close_read_end_wakes_writer_with_epipe, false, NULL },
+    { "pipe_blocking.two_readers_share_one_empty_pipe",    test_pipe_blocking_two_readers_share_one_empty_pipe,    false, NULL },
+    { "pipe_blocking.two_writers_share_one_full_pipe",     test_pipe_blocking_two_writers_share_one_full_pipe,     false, NULL },
     { "poll.ready_immediately_pollin",          test_poll_ready_immediately_pollin,          false, NULL },
     { "poll.ready_immediately_pollout",         test_poll_ready_immediately_pollout,         false, NULL },
     { "poll.timeout_zero_not_ready",            test_poll_timeout_zero_not_ready,            false, NULL },

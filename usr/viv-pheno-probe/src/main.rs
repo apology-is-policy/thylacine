@@ -2059,6 +2059,52 @@ unsafe fn run_linux() -> ! {
     leg!(rep, svc3(NR_CLOSE, d3 as u64, 0, 0) == 0, b"L270\n");
     leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -22, b"L271\n");
 
+    // --- two readers blocked on ONE empty pipe (the shared-Spoor sleeper) ---
+    // Every pipe end a fork or dup hands out is the SAME kernel object, so
+    // two children blocked in read() on one empty pipe are two sleepers on
+    // one ring -- a jobserver, a prefork pool. The kernel's per-direction
+    // Rendez was single-waiter and the second sleeper EXTINCTED it (an
+    // unprivileged crash); the multi-waiter rewrite lets both sleep. Each
+    // child closes its write-end copy first (else the pipe can never EOF),
+    // then blocks; the parent lets them settle, writes 2 bytes (exactly one
+    // child gets them), closes its write end (the other gets EOF), and reaps
+    // both. A child exits 0 on either outcome and 1 on anything else; the
+    // verdict is the two statuses. Pre-fix this leg never returned.
+    let mut pp: [i32; 2] = [-1, -1];
+    leg!(rep, svc3(NR_PIPE2, pp.as_mut_ptr() as u64, 0, 0) == 0, b"L272\n");
+    let (prd, pwr) = (pp[0] as u64, pp[1] as u64);
+    let mut kids: [i64; 2] = [0, 0];
+    for k in 0..2 {
+        let f = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if f == 0 {
+            let _ = svc3(NR_CLOSE, pwr, 0, 0);
+            let mut b = [0u8; 4];
+            let n = svc3(NR_READ, prd, b.as_mut_ptr() as u64, b.len() as u64);
+            let ok = (n == 2 && b[0] == b'p' && b[1] == b'q') || n == 0;
+            linux_exit(if ok { 0 } else { 1 })
+        }
+        kids[k] = f;
+    }
+    leg!(rep, kids[0] > 0 && kids[1] > 0, b"L273\n");
+    // Let both children reach their blocking read (ppoll with no fds is the
+    // phenotype's sleep). Not load-bearing for the post-fix verdict; it is
+    // what made the pre-fix extinction deterministic.
+    let ts: [i64; 2] = [0, 200_000_000];
+    let _ = svc4(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0);
+    let two = b"pq";
+    leg!(rep, svc3(NR_WRITE, pwr, two.as_ptr() as u64, 2) == 2, b"L274\n");
+    leg!(rep, svc3(NR_CLOSE, pwr, 0, 0) == 0, b"L275\n");
+    for k in 0..2 {
+        let mut st: i32 = -1;
+        leg!(
+            rep,
+            svc4(NR_WAIT4, kids[k] as u64, &mut st as *mut i32 as u64, 0, 0) == kids[k]
+                && (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 0,
+            b"L276\n"
+        );
+    }
+    leg!(rep, svc3(NR_CLOSE, prd, 0, 0) == 0, b"L277\n");
+
     // The accepted fd IS a tracked socket, in CONNECTED state. EINVAL (a
     // connected socket cannot listen) rather than ENOTSOCK (no entry at all)
     // is what distinguishes the two -- and it is the ONLY leg that would catch
