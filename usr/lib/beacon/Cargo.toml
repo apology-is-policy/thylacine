@@ -1,0 +1,22 @@
+# Beacon -- the semantic output markup (docs/BEACON.md; the H-1 crate).
+#
+# Programs describe output once (text runs, emphasis, typed objects, tables,
+# the shell's zones); this crate realizes it per capability tier: `rich` ->
+# OSC 1936 frames wrapping the plain payload (BEACON.md 12.1-12.2), `cells` ->
+# the Bonfire box+SGR visual language the coreutils already speak (boxd/color/
+# palette RELOCATED here verbatim from usr/coreutils, 2026-09-01 -- the
+# behavior-preserving move BEACON.md 12.5 specifies), `none` -> plain bytes.
+#
+# PURE no_std + alloc, ZERO dependencies (the coreutils-crate pattern): the
+# width math, the SGR wrapping, the frame grammar, and the parser are all
+# host-tested (`cargo test -p beacon --target aarch64-apple-darwin`). The
+# syscall-touching gate INPUT (the fd's Dev class) is passed in by the caller;
+# the wrappers live in libthyla-rs (t_fd_devclass / stdout_is_terminal).
+[package]
+name = "beacon"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]

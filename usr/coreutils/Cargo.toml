@@ -26,3 +26,4 @@ backend = ["dep:libthyla-rs"]
 
 [dependencies]
 libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
+beacon = { path = "../lib/beacon" }

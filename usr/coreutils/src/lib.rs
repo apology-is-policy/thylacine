@@ -20,9 +20,12 @@
 
 extern crate alloc;
 
-pub mod boxd;
-pub mod color;
-pub mod palette;
+// H-1b (BEACON.md 12.5): boxd/color/palette RELOCATED into the beacon crate
+// -- they ARE the cells-tier realization of the semantic output layer. The
+// re-exports keep every bin's `use coreutils::{boxd,color,palette}` compiling
+// unchanged; behavior is byte-identical (the modules moved verbatim, their
+// unit tests with them).
+pub use beacon::{boxd, color, palette};
 pub mod size;
 
 // Backend-gated (these touch libthyla-rs): the metadata-presentation helpers

@@ -431,6 +431,16 @@ impl Table { pub fn realize(&self, s: &mut Sink); }
   writes the plain payload on every tier and adds frames only at `Rich` —
   so property P1 (§12.8) holds for any program using the API, not just
   well-behaved ones.
+- **AS-BUILT deviations (H-1b, within the "binding in shape" latitude),
+  recorded**: (1) zones are explicit `zone_open`/`zone_close`, not a scope
+  guard — the shell's zones are NOT lexically scoped (the prompt zone opens
+  in `draw_prompt` and closes in the accept arm, a different call); (2)
+  `em`/`obj` at the **Cells** tier are payload-only — the cells look is the
+  bins' existing box+SGR language used directly (object identity is a Rich
+  concept), which is also what keeps `realize(Cells)` byte-identical to
+  today; (3) an `obj` whose ref exceeds `VALUE_MAX` emits no frame at all
+  (plain text only) — a truncated ref would be a wrong ref for the verb
+  menu to act on.
 
 ### 12.6 ut integration (the shell half of H-1)
 
