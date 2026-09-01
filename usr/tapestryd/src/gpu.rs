@@ -970,6 +970,8 @@ struct Controlq {
     /// -- drain() treats an id-0 entry outside that window as corruption.
     sync_pending: bool,
     sync2_pending: bool,
+    #[cfg(feature = "test-mode")]
+    pair_said: bool,
     /// Fence completions drained but not yet taken by the server pump.
     completed: alloc::vec::Vec<FenceTag>,
     /// #175: hold the completion drain so a submitted fence STAYS in
@@ -1508,6 +1510,9 @@ impl Controlq {
         if self.dead {
             return Err(());
         }
+        // At the hazard, not in a comment: a resp overrun is the DEVICE
+        // DMA-writing past the region (round-10 F2 class).
+        assert!(req_len <= REQ_REGION_LEN && resp_len <= RESP_REGION_LEN);
         for i in 0..(GPU_CTRL_HDR_LEN as u64) {
             unsafe { w8(self.ring_va + RESP_OFF + i, 0) };
         }
@@ -1551,6 +1556,15 @@ impl Controlq {
         if self.dead {
             return Err(());
         }
+        // At the hazard (round-10 F2): req1 past the carve corrupts the
+        // pair's own second request; resp2 past its carve is the DEVICE
+        // DMA-writing past the two-page ring allocation.
+        assert!(
+            (req1_len as u64) <= REQ2_OFF - REQ_OFF
+                && resp1_len <= RESP_REGION_LEN
+                && req2_len <= REQ2_LEN
+                && resp2_len <= RESP2_LEN
+        );
         for i in 0..(GPU_CTRL_HDR_LEN as u64) {
             unsafe { w8(self.ring_va + RESP_OFF + i, 0) };
             unsafe { w8(self.ring_va + RESP2_OFF + i, 0) };
@@ -1581,6 +1595,15 @@ impl Controlq {
         };
         self.sync_pending = true;
         self.sync2_pending = true;
+        // The engagement witness (once): the W-4 C measurement run could not
+        // prove FROM ITS OWN LOG that the batched path executed -- success is
+        // silent by design, so a stale-binary run reads identically. One say
+        // at first use makes the mechanism's engagement log-discriminable.
+        #[cfg(feature = "test-mode")]
+        if !self.pair_said {
+            self.pair_said = true;
+            say!("tapestryd: gpu pair slot armed (batched sync chain live)");
+        }
         self.publish(0);
         self.publish(SYNC2_HEAD);
         self.wait_sync_done(true)?;
@@ -1650,6 +1673,59 @@ fn copy_stream(dst_va: u64, src: &[u8]) {
         unsafe { w8(dst_va + i as u64, src[i]) };
         i += 1;
     }
+}
+
+/// The full-request builders shared by the sequential and batched (W-4 C)
+/// forms -- one wire implementation per layout, so the pair path can never
+/// drift from the single-command path by a single-site edit (round-10 F1;
+/// the #230 mirror-by-meaning rule).
+unsafe fn write_scanout_blob_req(
+    req_va: u64,
+    resource_id: u32,
+    w: u32,
+    h: u32,
+    format: u32,
+    stride: u32,
+) {
+    write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_SET_SCANOUT_BLOB);
+    write_rect(req_va + 24, 0, 0, w, h);
+    w32(req_va + 40, 0); // scanout_id
+    w32(req_va + 44, resource_id);
+    w32(req_va + 48, w);
+    w32(req_va + 52, h);
+    w32(req_va + 56, format);
+    w32(req_va + 60, 0); // padding
+    w32(req_va + 64, stride); // strides[0]
+    w32(req_va + 68, 0);
+    w32(req_va + 72, 0);
+    w32(req_va + 76, 0);
+    w32(req_va + 80, 0); // offsets[0..4]
+    w32(req_va + 84, 0);
+    w32(req_va + 88, 0);
+    w32(req_va + 92, 0);
+}
+
+unsafe fn write_transfer_req(
+    req_va: u64,
+    resource_id: u32,
+    offset: u64,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) {
+    write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
+    write_rect(req_va + 24, x, y, w, h);
+    w64(req_va + 40, offset);
+    w32(req_va + 48, resource_id);
+    w32(req_va + 52, 0);
+}
+
+unsafe fn write_flush_req(req_va: u64, resource_id: u32, x: u32, y: u32, w: u32, h: u32) {
+    write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_FLUSH);
+    write_rect(req_va + 24, x, y, w, h);
+    w32(req_va + 40, resource_id);
+    w32(req_va + 44, 0);
 }
 
 unsafe fn write_rect(va: u64, x: u32, y: u32, w: u32, h: u32) {
@@ -1878,6 +1954,8 @@ impl Gpu {
                 vindicated: alloc::vec::Vec::new(),
                 sync_pending: false,
                 sync2_pending: false,
+                #[cfg(feature = "test-mode")]
+                pair_said: false,
                 completed: alloc::vec::Vec::new(),
                 #[cfg(feature = "test-mode")]
                 hold_ctx: None,
@@ -2459,7 +2537,41 @@ impl Gpu {
                 );
             }
         }
+        #[cfg(feature = "test-mode")]
+        self.pair_protocol_selftest();
         Ok(())
+    }
+
+    /// The two-in-flight protocol selftest (W-4 C, round-10 close): a
+    /// batched pair of GET_DISPLAY_INFOs at boot -- side-effect-free,
+    /// resource-free, and it exercises the WHOLE pair machinery (two
+    /// chains in flight, head-34 drain attribution, both response reads)
+    /// against the real device on every boot. This exists because the
+    /// close measured that NO local boot otherwise reaches a batched op:
+    /// the direct-mode console paints through the unconverted weave loop,
+    /// so "the console path witnesses the pair" was false -- the witness
+    /// say inside submit_pair_and_wait fires here instead, making the
+    /// mechanism's engagement a positive, greppable boot fact. resp2 is
+    /// deliberately header-truncated (the device bounds its write by the
+    /// descriptor): the selftest checks resp TYPES, not payloads.
+    #[cfg(feature = "test-mode")]
+    pub fn pair_protocol_selftest(&mut self) {
+        unsafe {
+            write_ctrl_hdr(self.ring_va + REQ_OFF, VIRTIO_GPU_CMD_GET_DISPLAY_INFO);
+            write_ctrl_hdr(self.ring_va + REQ2_OFF, VIRTIO_GPU_CMD_GET_DISPLAY_INFO);
+        };
+        match self.ctrl.submit_pair_and_wait(
+            GPU_CTRL_HDR_LEN,
+            GPU_RESP_DISPLAY_INFO_LEN,
+            GPU_CTRL_HDR_LEN,
+            GPU_CTRL_HDR_LEN,
+        ) {
+            Ok((VIRTIO_GPU_RESP_OK_DISPLAY_INFO, VIRTIO_GPU_RESP_OK_DISPLAY_INFO)) => {}
+            Ok((a, b)) => {
+                say!("tapestryd: gpu PAIR SELFTEST resp_types {:#x}/{:#x} (expected 0x1101 both)", a, b)
+            }
+            Err(()) => say!("tapestryd: gpu PAIR SELFTEST submit FAILED"),
+        }
     }
 
     /// cfg-3: probe GET_DISPLAY_INFO WITHOUT adopting -- the `mode auto`
@@ -3199,24 +3311,7 @@ impl Gpu {
         stride: u32,
     ) -> Result<u32, ()> {
         let req_va = self.ring_va + REQ_OFF;
-        unsafe {
-            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_SET_SCANOUT_BLOB);
-            write_rect(req_va + 24, 0, 0, w, h);
-            w32(req_va + 40, 0); // scanout_id
-            w32(req_va + 44, resource_id);
-            w32(req_va + 48, w);
-            w32(req_va + 52, h);
-            w32(req_va + 56, format);
-            w32(req_va + 60, 0); // padding
-            w32(req_va + 64, stride); // strides[0]
-            w32(req_va + 68, 0);
-            w32(req_va + 72, 0);
-            w32(req_va + 76, 0);
-            w32(req_va + 80, 0); // offsets[0..4]
-            w32(req_va + 84, 0);
-            w32(req_va + 88, 0);
-            w32(req_va + 92, 0);
-        };
+        unsafe { write_scanout_blob_req(req_va, resource_id, w, h, format, stride) };
         self.ctrl.submit_and_wait(GPU_CTRL_HDR_LEN + 72, GPU_CTRL_HDR_LEN)
     }
 
@@ -3272,27 +3367,8 @@ impl Gpu {
         let req_va = self.ring_va + REQ_OFF;
         let req2_va = self.ring_va + REQ2_OFF;
         unsafe {
-            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_SET_SCANOUT_BLOB);
-            write_rect(req_va + 24, 0, 0, w, h);
-            w32(req_va + 40, 0); // scanout_id
-            w32(req_va + 44, resource_id);
-            w32(req_va + 48, w);
-            w32(req_va + 52, h);
-            w32(req_va + 56, format);
-            w32(req_va + 60, 0); // padding
-            w32(req_va + 64, stride); // strides[0]
-            w32(req_va + 68, 0);
-            w32(req_va + 72, 0);
-            w32(req_va + 76, 0);
-            w32(req_va + 80, 0); // offsets[0..4]
-            w32(req_va + 84, 0);
-            w32(req_va + 88, 0);
-            w32(req_va + 92, 0);
-
-            write_ctrl_hdr(req2_va, VIRTIO_GPU_CMD_RESOURCE_FLUSH);
-            write_rect(req2_va + 24, 0, 0, w, h);
-            w32(req2_va + 40, resource_id);
-            w32(req2_va + 44, 0);
+            write_scanout_blob_req(req_va, resource_id, w, h, format, stride);
+            write_flush_req(req2_va, resource_id, 0, 0, w, h);
         };
         match self.ctrl.submit_pair_and_wait(
             GPU_CTRL_HDR_LEN + 72,
@@ -3377,25 +3453,14 @@ impl Gpu {
     /// origin within it.
     pub fn transfer(&mut self, resource_id: u32, offset: u64, x: u32, y: u32, w: u32, h: u32) -> Result<(), Error> {
         let req_va = self.ring_va + REQ_OFF;
-        unsafe {
-            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
-            write_rect(req_va + 24, x, y, w, h);
-            w64(req_va + 40, offset);
-            w32(req_va + 48, resource_id);
-            w32(req_va + 52, 0);
-        };
+        unsafe { write_transfer_req(req_va, resource_id, offset, x, y, w, h) };
         self.ctrl
             .step("TRANSFER", GPU_CTRL_HDR_LEN + 32, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
     }
 
     pub fn flush(&mut self, resource_id: u32, x: u32, y: u32, w: u32, h: u32) -> Result<(), Error> {
         let req_va = self.ring_va + REQ_OFF;
-        unsafe {
-            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_FLUSH);
-            write_rect(req_va + 24, x, y, w, h);
-            w32(req_va + 40, resource_id);
-            w32(req_va + 44, 0);
-        };
+        unsafe { write_flush_req(req_va, resource_id, x, y, w, h) };
         self.ctrl
             .step("FLUSH", GPU_CTRL_HDR_LEN + 24, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
     }
@@ -3417,16 +3482,8 @@ impl Gpu {
         let req_va = self.ring_va + REQ_OFF;
         let req2_va = self.ring_va + REQ2_OFF;
         unsafe {
-            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
-            write_rect(req_va + 24, x, y, w, h);
-            w64(req_va + 40, offset);
-            w32(req_va + 48, resource_id);
-            w32(req_va + 52, 0);
-
-            write_ctrl_hdr(req2_va, VIRTIO_GPU_CMD_RESOURCE_FLUSH);
-            write_rect(req2_va + 24, x, y, w, h);
-            w32(req2_va + 40, resource_id);
-            w32(req2_va + 44, 0);
+            write_transfer_req(req_va, resource_id, offset, x, y, w, h);
+            write_flush_req(req2_va, resource_id, x, y, w, h);
         };
         match self.ctrl.submit_pair_and_wait(
             GPU_CTRL_HDR_LEN + 32,

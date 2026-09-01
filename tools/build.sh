@@ -3515,6 +3515,12 @@ build_tyrquake() {
         local glq_stale=""
         [[ -n "$glq_needed" && "$BUILD_DIR/clade/gl/lib/libOSMesa.a" -nt "$glq_out" ]] \
             && glq_stale=1
+        # libSDL2.a x tyr-glquake (round-10 F3): glquake links -lSDL2 too,
+        # and the term below compares libSDL2.a against tyr-quake ONLY -- so
+        # an SDL2-triggered rebuild killed after the sw link published left
+        # a stale glquake the fresh tyr-quake's mtime then absorbed forever.
+        [[ -n "$glq_needed" && "$sysroot/lib/libSDL2.a" -nt "$glq_out" ]] \
+            && glq_stale=1
         if [[ -z "$stale" && -z "$glq_stale" && ! "$sysroot/lib/libSDL2.a" -nt "$progs_out/tyr-quake" ]]; then
             ledger "tyr-quake + tyr-glquake: REUSED (cached + up-to-date)"
             return 0
@@ -4270,6 +4276,16 @@ build_clade() {
         # leaving a full-size file with unflushed middles; the guest storm
         # is the backstop for that class. A failure here falls through to
         # the (incremental) rebuild, which relinks fast.
+        #
+        # An absent readelf is the INSTRUMENT missing, not the subject
+        # failing (round-10 F4): reading it as a failed verify would discard
+        # a valid multi-hour artifact on exactly the host least able to
+        # rebuild it. Skip the verify loudly and trust the mtime gate.
+        if [[ ! -x "$readelf" ]]; then
+            echo "==> clade: host llvm-readelf missing at $readelf -- structural verify SKIPPED"
+            ledger "clade (clang+lld multicall + clangd): REUSED (cached + up-to-date; UNVERIFIED)"
+            return 0
+        fi
         if "$readelf" -S "$out" >/dev/null 2>&1 \
            && "$readelf" -S "$outd" >/dev/null 2>&1; then
             ledger "clade (clang+lld multicall + clangd): REUSED (cached + up-to-date)"
@@ -4286,6 +4302,19 @@ build_clade() {
     local cxxflags="-march=armv8-a -moutline-atomics -fno-pic -nostdlibinc -isystem $sysroot/include/c++/v1 -isystem $sysroot/include -D_GNU_SOURCE=1"
     local cflags="-march=armv8-a -moutline-atomics -fno-pic -nostdlibinc -isystem $sysroot/include -D_GNU_SOURCE=1"
     if [[ ! -f "$bdir/CMakeCache.txt" || "${BASH_SOURCE[0]}" -nt "$bdir/CMakeCache.txt" ]]; then
+        # The reconfigure-from-scratch arm exists for stale local cmake
+        # state -- but a PULLED tree also carries CMakeCache.txt, so a mere
+        # recipe edit armed this rm against 185 MB of certified builder
+        # artifacts, and it ate them twice in one day (JOURNAL run-11).
+        # A structurally-valid multicall is never destroyed implicitly:
+        # refuse loudly and require the explicit override.
+        if [[ -x "$out" ]] && [[ ! -x "$readelf" || $("$readelf" -S "$out" >/dev/null 2>&1; echo $?) -eq 0 ]] \
+           && [[ "${CLADE_FORCE_RECONFIGURE:-0}" != 1 ]]; then
+            echo "==> clade: REFUSING to rm -rf $bdir -- it holds a structurally-valid bin/llvm" >&2
+            echo "    (pulled builder artifacts; a recipe edit does not invalidate them)." >&2
+            echo "    To rebuild locally from scratch: CLADE_FORCE_RECONFIGURE=1 tools/build.sh clade" >&2
+            exit 1
+        fi
         rm -rf "$bdir"
         mkdir -p "$bdir"
         local cmake_args=(

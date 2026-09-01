@@ -39,8 +39,18 @@ BEFORE the fenced mapping that would alias it to the first out-of-pool
 slot; the wait loop is the old one verbatim, extracted predicate-driven.
 Two fused ops ride it: `set_scanout_blob_then_flush` (the vk rotated-poke
 paint — the per-frame steady state) and `transfer_then_flush` (the
-console's `screen_push`/`screen_flush_full` — which makes every local TCG
-boot a mass witness of the two-in-flight protocol). The bind's verdict
+console's `screen_push`/`screen_flush_full`). **[Corrected at the round-10
+close]**: the claim made here at landing — that the console path makes
+every local boot a mass witness — was FALSE, discovered when the
+engagement witness stayed silent through a green suite: the direct-mode
+console paints through the unconverted weave loop, and `screen_push` is
+composed-mode machinery, so no local boot reached a batched op at all.
+The anomaly-grep "witness" had been a negative that cannot distinguish
+running-clean from not-running. The fix makes the claim true instead of
+retracting it: a boot-time pair-protocol selftest (two batched
+GET_DISPLAY_INFOs — resource-free, side-effect-free, the full
+two-in-flight machinery) now runs on every test-mode boot and fires the
+witness say. The bind's verdict
 semantics are §8.2's letter: checked first, a refusal latches exactly as
 before, the already-queued flush is a no-op on a resource the display
 does not reference. The GL weave-direct per-rect loop is deliberately NOT
@@ -64,6 +74,63 @@ that measurement in hand.
 warnings in the touched files), suite exit-0 with the banner, arc gates
 2/2, clade gates 3×PASS — the batched 2D pair ran the whole boot's
 console painting with zero ring-corrupt or anomaly lines.
+
+**MEASURED — the falsifier fired, and the failure is the finding.**
+Linear 47.5 (was 47.6), blit 51.3 (identical), PokeBind avg 11.55 ms
+(was 11.6), histogram mass unmoved — the exact pre-registered failure
+signature. Both verdict halves PASS; resize and the 3 s restore green.
+Before accepting it, the alternatives were re-derived: a stale binary is
+excluded by the provenance chain (the local suite exercised the batched
+console pair all boot before the chunk-verified sync), and no sequential
+fallback exists in the code. The refined model — the only one consistent
+with runs 4–6 AND this run: SET_SCANOUT_BLOB completes ~immediately; the
+~10–11 ms quantum lives entirely in RESOURCE_FLUSH's completion; the
+double-paint fix had already consumed the only removable quantum, and
+§8.2's "wall halves" expectation described the pre-fix state. C is
+retained (sound, free, and the pair primitive §8.3's GL item 1 needs,
+where BOTH commands measure paced and batching should truly halve); the
+vk wall's remaining directions are B/A, parked with the operator behind
+compose. One observability gap became a fix: the measurement run could
+not prove from its own log that the batched path executed — success is
+silent by design — so a once-per-boot test-mode witness say now marks
+the pair slot's first use. Also this window, operator-directed: the
+GL-parity backport ledger landed as WSI-DESIGN §8.3 + the ROADMAP §11
+addendum (compose opens under the Halcyon phase; the parity arc is
+deferred behind it, not dropped) at `581de48e`.
+
+**Round 10 (fork C + the carried-forward sweep, batched per the
+doubled-cadence directive): 0 P0 / 0 P1 / 0 P2 / 4 P3 — NOT dirty,
+Fable 5 start==end, all four fixed at the close.** The pair mechanism
+survived every arm — the extraction proven exact line-by-line, drain
+attribution enumerated over the whole id space, every error path
+absorbed by the dead latch. The four: duplicated wire layouts against
+the code's own one-copy rule (three shared builders now serve both
+forms); no assert-at-the-hazard on the pair's runtime lengths (a future
+resp2 overrun would have the DEVICE writing past the ring allocation —
+plain asserts in both primitives now); the tyrquake gate's
+libSDL2×tyr-glquake axis, the one input×output pair the sweep missed —
+**the prosecutor correctly falsified run 10's own "closes the sweep"
+claim**, and the record says so; and clade's verify conflating a
+missing readelf with a failed binary (now a loud SKIPPED +
+REUSED-UNVERIFIED arm). Every fix carries a discrimination proof.
+
+**The same trap, twice in one day — and the structural answer.**
+Probing F4's fix by running `build.sh clade` after editing build.sh
+armed `build.sh -nt CMakeCache → rm -rf $bdir` and destroyed the
+restored llvm-build tree a SECOND time — by the author of that
+morning's own M-PIN. Two occurrences in one day settle it: this is not
+a memory lapse to re-note, it is a structural hazard, and the fix is
+structural — the destructive arm now REFUSES (loud,
+CLADE_FORCE_RECONFIGURE=1 to override) whenever a structurally-valid
+bin/llvm exists, because a recipe edit does not invalidate pulled
+builder artifacts. Both guard arms proven (aged-but-valid → refusal,
+tree intact; fresh → REUSED via the verify). The re-restore added its
+own lesson: the keep's /tmp is cleared across stop/start, so a `$( )`
+over a file there fails INVISIBLY inside a remote command — the first
+re-pull silently shipped zero archives; the retry verified the tar's
+member count remotely (73) before pulling, and the manifest check ran
+against the local tree after. Full set restored: bin (md5-exact),
+lib/clang, all 73 archives, include, CMakeCache, cxx-rt.
 
 ---
 

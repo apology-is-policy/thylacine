@@ -903,6 +903,47 @@ produced the same impossible-triple signature before being fixed.)
 
 ---
 
+**C AS-BUILT + MEASURED (2026-09-01, `e31378bb`; the falsifier fired).**
+The operator picked C; the mechanism landed exactly as this section
+specified (a second sync chain -- descriptor pair 34/35, request/response
+tail carves -- `submit_pair_and_wait` queuing bind+flush before waiting
+either; the console's screen_push/screen_flush_full pair converted too --
+though the round-10 close measured that those are COMPOSED-mode paths, so
+no local direct-mode boot reaches a batched op through them; the local
+witness is instead the boot-time pair-protocol selftest, two batched
+GET_DISPLAY_INFOs firing the engagement say on every test-mode boot). The prediction was
+pre-registered (linear 50-55, blit 54-60, histogram mass shifting to
+8-11) WITH its falsifier -- and **the falsifier is what fired**: linear
+47.5 (was 47.6), blit 51.3 (identical), PokeBind avg 11.55 ms (was
+11.6), histogram mass unmoved (0/548/1278 across <8/<11/<14). Both
+verdict halves PASS; the resize driver and the 3 s console restore rode
+along green.
+
+**What the failed prediction bought -- the refined wall model.** The
+only story consistent with runs 4-6 AND this run: `SET_SCANOUT_BLOB`
+completes ~immediately (a host-side pointer swap), and the ~10-11 ms
+quantum lives ENTIRELY in `RESOURCE_FLUSH`'s completion (the display
+update path). The pre-fix bind (scanout wait + flush wait, sequential)
+already cost one flush-quantum plus ~1 ms -- there was never a second
+steady-state quantum for batching to reclaim; §8.2's original "the wall
+halves" expectation described the pre-double-paint state, and the
+double-paint fix had already consumed the only removable quantum.
+Batching's theoretical win was the scanout's ~1 ms, inside run noise.
+
+**Disposition**: C is RETAINED -- sound (zero anomalies across the local
+suite and the Pi run), free, and the pair primitive is exactly what
+§8.3's GL item 1 needs, where BOTH commands measure paced (Xfer ~11 +
+FlushDirect ~11, the run-4 GL split) and batching should truly halve.
+The vk wall now has one honest shape: a per-frame `RESOURCE_FLUSH`
+whose completion the host paces at ~10-11 ms, which no synchronous
+client-side arrangement removes -- the remaining directions are B
+(reply before the flush retires, a server-side FIFO queue) and A
+(MAILBOX), both parked with the operator per §0's sequencing (compose
+first, under the Halcyon phase). A QEMU-side question rides along for
+whichever is taken: whether the flush completion's pacing is the virgl
+fence poll, the display refresh timer, or egl-headless vsync -- worth
+one host-side measurement before building either mechanism.
+
 ### 8.3 The GL-parity ledger (deferred arc; operator-directed 2026-09-01)
 
 **The direction** (operator, 2026-09-01): document the GL/VK display-path
