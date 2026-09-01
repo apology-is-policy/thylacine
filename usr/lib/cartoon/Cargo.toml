@@ -1,0 +1,21 @@
+# cartoon -- the display list (HALCYON.md section 13.2) + its CPU executor.
+#
+# A tapestry CARTOON is the full-size design the weaver executes -- exactly
+# this artifact's role in the section-13.1 architecture: halcyond (the only
+# place that thinks) draws the cartoon; a dumb executor weaves it into
+# pixels. Ops (Clear/Rect/Glyphs/Image/Embed), the alpha atlas store + shelf
+# packer, and the CPU executor (the universal floor). The vk executor (H-6)
+# executes the same ops via the serialized wire form.
+#
+# PURE no_std + alloc, ZERO dependencies (the vt/beacon crate pattern):
+# host-tested (`cargo test -p cartoon --target aarch64-apple-darwin`).
+# fontdue and every other rasterizer live in the AUTHOR (halcyond) -- an
+# executor only ever sees finished alpha pages.
+[package]
+name = "cartoon"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]

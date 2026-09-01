@@ -391,6 +391,25 @@ construction (pages are append-only within a gen; a full page bumps the
 gen). Damage: halcyond computes per-frame damage rects and calls
 `present_rects` — the executor does not diff.
 
+**AS-BUILT at H-2b (2026-09-01)**: the crate is `usr/lib/cartoon` — a
+tapestry **cartoon** is the full-size design the weaver executes, exactly
+this artifact's role (halcyond draws the cartoon; executors weave it into
+pixels); the thematic name extends the Tapestry family with real weaving
+vocabulary (naming rationale in the crate header). Pure no_std + alloc,
+zero deps, host-tested (the vt/beacon pattern). Concretizations against
+the sketch above, all within the v0 vocabulary: glyph runs live FLAT in
+`Cartoon.runs` (ops carry `start`/`count` — already the H-6 wire shape);
+the atlas store carries the glyph table (`GlyphEntry` = page + rect +
+FreeType-convention bearing) beside its pages, with a shelf packer
+(`AtlasPacker`; page growth never bumps the gen — only the author's
+explicit `regen()` eviction does); a stale `atlas_gen` skips the whole op
+(fail-safe, like every malformed id); `Image` composites src-over at
+native size (the op's w/h are the flow reservation; scaling stays out of
+the executor's v0); `Embed` paints nothing (the author lays any
+placeholder ground beneath with `Rect`); `execute` takes an optional
+`ClipRect` execution bound (clamped regardless — no op can write outside
+the buffer).
+
 ### 13.3 The transcript model (the data structure; H-2's core)
 
 **Store semantics, derive pixels.** The transcript is a bounded deque of
