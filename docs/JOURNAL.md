@@ -22,6 +22,62 @@ needed the operator.
 
 ---
 
+## 2026-09-02 (aux) -- the socktab holotype closed; the pipe's single-waiter extinction found and fixed
+
+Autonomous run on the far side of the 600k self-compaction, under the operator's standing
+"vivarium arc + POSIX surface" direction. Two chunks, one bake, one suite, one gate: the
+socktab-across-images audit close (**4e694e5f**) and a pipe multi-waiter fix
+(**dd9f9508**) that nobody planned.
+
+**The round (Fable 5.1, 0/0/1/4).** The prosecutor's P2 and my parallel self-audit's first
+finding were the same defect: `rfork_internal` copied the handle table under the parent's
+handle lock, released it, and only THEN snapshotted the socktab under a different lock -- and
+since N-3 a Linux Proc has peer threads, so a `close(X)`+`socket()` on another CPU in that
+gap gave the child the OLD data Spoor at X beside the NEW socket's row. `handle_table_copy_into`'s
+own header names exactly that hazard (#844: "a peer cannot close fd 3 and open a different
+object at 3 midway") and closes it for the handle table; the row table reopened it one layer
+up. The fix is a hook: `handle_table_copy_into_hooked` runs a caller function inside the
+source-lock hold, and the socktab snapshot IS that function (the socktab lock nests as a leaf
+under the handle lock; verified one-directional). The unit witness wraps the hook and records
+the parent's handle lock word HELD when the snapshot runs -- a rewrite that snapshots after
+the copy returns fails it. **The reusable part is the premise that fell**: the socktab/6b
+closed list's item 2 ("a PHENO_LINUX Proc cannot obtain a peer thread") was true when written
+and false since N-3, and three rounds inherited it; five comments in the tree still asserted
+it, one of them 150 lines above the new code in the same function. A closed-list item is a
+claim with a date. The per-fd install-then-alias gaps at the dup arms (F2) are a program
+racing its OWN fd number and are tracked toward the socket OBJECT rather than patched; the
+socket arms now split EBADF (closed fd) from ENOTSOCK (live non-socket) as Linux does (F5),
+which hollowed three probe legs and one unit control that had asserted the merged errno --
+the #240 shape, third and fourth instances, each re-aimed rather than deleted.
+
+**The find.** Reading `kernel/pipe.c` as the model for eventfd (the next POSIX item), the
+blocking read and write slept on the ring's per-direction `struct Rendez`, and `sleep()`
+EXTINCTS on a second sleeper. `51-pipe.md` said "for v1.0 in-kernel uses (single consumer +
+single producer per pipe) this is fine" -- true at P5-pipe-blocking, silently falsified by
+`pipe2` (#155), `fork` (LINEAGE) and `CLONE_THREAD` (N-3), which made every pipe end a Spoor
+that many EL0 threads and Procs hold. `make -j4 2>&1 | tee log` -- every compiler child
+inheriting one write end, a slow consumer filling the ring, two children blocked in write --
+crashed the kernel from unprivileged code; so did GNU make's jobserver (N children blocked in
+read). Per the stewardship rule it was enqueued first and fixed in the same run: a blocked
+call registers a per-call `poll_waiter` on the ring's existing `poll_list` in the same
+`r->lock` hold as the not-ready sample and sleeps on a stack Rendez private to the call
+(the devnotes_read shape); every readiness edge already walked that list for pollers, so
+the wake sites did not change, only the two Rendez left (header 88 -> 56). The spec followed
+the code: `pipe.tla` sleeps ungated and wakes ALL, `SingleWaiter` is retired, a three-thread
+clean cfg passes (40 states) and a new buggy cfg (wake ONE reader instead of all) violates.
+Witnesses: two unit tests with two consumers on one direction (sabotage-verified: the
+pre-fix `pipe.c` under them extincts the suite with `sleep: rendez already has a waiter`) and a probe leg with two forked children blocked in
+read on one empty pipe. The sweep of every other blocking sleep site found the class
+guarded everywhere else (irqfwd, srvconn, cons) except `/srv` accept, reachable only by a
+trusted posting server's own threads -- tracked P3. The lesson for the playbook's 6.15
+list: **a limit documented as "fine for in-kernel uses" becomes an EL0 crash the day the
+object becomes EL0-shared, and nothing announces that day at the old paragraph.**
+
+**Also enqueued**: the sigtab entry tearing under a peer's sigaction (old handler + new
+flags/mask; a seqlock is the shape) -- P3, its own round; eventfd2 stays next after the gate.
+
+---
+
 ## 2026-09-01 (aux, late) -- git from a shell + the socktab across images; the console-TUI fork surfaced
 
 Autonomous run after Design D closed (`5f2d4ded`), under the operator's standing
