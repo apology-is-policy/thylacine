@@ -79,6 +79,17 @@ if {$have_ash} {
     lc_expect "G50" "getdents64 lists the moved name (dirent64 encode + cursor from EL0)"
     lc_send "rm /tmp/d50/g50 && rmdir /tmp/d50 && ls /tmp/d50 2>&1 | tr a-z A-Z"
     lc_expect "NO SUCH FILE" "unlinkat removed the file and (AT_REMOVEDIR) the dir; the name is gone"
+    # `>/dev/null` inside a container (the curl-demo census item, 2026-08-25:
+    # ash's `>` is openat(O_WRONLY|O_CREAT|O_TRUNC); the openat then refused
+    # O_CREAT outright and the staged /dev/null was a plain file). Two things
+    # closed it since: #50's open-create core is OPEN-FIRST (an existing
+    # target is opened, never re-created -- no parent-write permission needed
+    # on the read-only rootfs), and viv binds the kernel's real /dev/null leaf
+    # over the rootfs anchor. The witness is the redirect's own rc: DN=0 only
+    # if the open succeeded; a failed redirect makes ash print "can't create
+    # /dev/null" and $? = 1, so DN=1 and this leg times out.
+    lc_send "echo dn-probe >/dev/null; echo DN=\$? | tr a-z A-Z"
+    lc_expect "DN=0" ">/dev/null works inside the container (open-first create on the bound null leaf)"
     # ^C at the ash prompt: the pts's `interrupt` reaches the whole foreground
     # pgrp -- viv, its diorama and ash. Before 2026-08-18 the two NATIVE members
     # died of it (LS-5's uncaught-interrupt default), orphaning ash into a

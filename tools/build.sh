@@ -1576,6 +1576,9 @@ VIVEOF
 	fsync = none
 	createObject = rename
 	pager = cat
+	editor = nora
+[sequence]
+	editor = nora
 [http]
 	sslCAInfo = /etc/ssl/certs/ca-certificates.crt
 [safe]

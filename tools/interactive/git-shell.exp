@@ -1,0 +1,89 @@
+#!/usr/bin/expect -f
+# tools/interactive/git-shell.exp -- interactive git from a SESSION SHELL:
+# W1-a/W1-b (AUX-ROADMAP Stream 0) + the Design D 13.10.8 closure witness
+# (the C2-k3 F3 obligation, docs/GIT-ON-THYLACINE.md "C2-k3-kernel").
+#
+# Until now the shipped Linux git at /viv/bin was reachable from a shell only
+# by name: its transport helpers (git-remote-https, git-upload-pack) resolve
+# through GIT_EXEC_PATH and its system config through GIT_CONFIG_SYSTEM, and
+# both were set ONLY inside the container bundles' manifests. From a login
+# shell `git --exec-path` answered a build-time Linux path, no helper could be
+# exec'd, and /viv/bin/gitconfig (identity, templateDir, core.editor=nora,
+# pager=cat, sslCAInfo) was never read. login now seeds both into the session
+# /env, beside PATH.
+#
+# Every assertion is on a command's OUTPUT (lib.exp's echo discipline), through
+# `| tr a-z A-Z` so the token cannot appear in the typed line:
+#   1. `git --exec-path`            -> /VIV/BIN     (GIT_EXEC_PATH seeded AND
+#      the closure sits behind the pheno-mount, which is what Design D's
+#      re-decision requires: a helper exec'd from /viv/bin lands LINUX)
+#   2. `git config --system ...`    -> the editor keys (GIT_CONFIG_SYSTEM read)
+#   3. init + an empty commit in the user's home (a user principal, not the
+#      joey gate's SYSTEM; identity from the system config)
+#   4. the dashed helper, invoked from PATH: `git-upload-pack --advertise-refs
+#      <repo>` prints the ref advertisement -> REFS/HEADS/MAIN. It resolves
+#      through /viv/bin (phenotype-by-location) and runs Linux, which is the
+#      "no PATH entry ahead of /viv/bin shadows a helper" half of 13.10.8.
+#   5. git's OWN exec of a helper through GIT_EXEC_PATH, with no shell and
+#      no network: `git ls-remote https://127.0.0.1:1/x.git` starts
+#      git-remote-https as an argv (never a shell string) and must reach a
+#      connection REFUSAL from the helper -- "Failed to connect to 127.0.0.1
+#      port 1" on stderr -- not "Unable to find remote helper for 'https'"
+#      (the closure missing) and not a snare:ill death (the helper's
+#      bundled OpenSSL SIGILL-probes without OPENSSL_armcap=0, which login
+#      seeds beside the git vars for exactly this). The helper answering at
+#      all is the witness that it ran under the phenotype far enough to
+#      attempt a connection.
+#   A LOCAL clone cannot serve as the closure witness yet: for every local
+#   transport (`file://` AND `--no-local <path>`) git builds ONE quoted
+#   command string -- "git-upload-pack '/home/michael/gs/.git'" -- and hands
+#   it to its compile-time SHELL_PATH /bin/sh, which the login namespace does
+#   not have (measured twice: "fatal: cannot exec 'git-upload-pack '...''").
+#   That is AUX-ROADMAP X-11, its own item; this witness names it rather
+#   than hiding the shell-out.
+#
+# Every leg's token is UNIQUE TO THAT LEG. The first draft reused FIRST for
+# the source log and the clone log, and the commit line "[main (root-commit)
+# ...] first" left its own FIRST in the expect buffer after ROOT-COMMIT
+# matched -- so the source-log leg consumed the commit's residue and the
+# clone-log leg consumed the source log's, and a FAILED clone still passed
+# leg 4 (measured 2026-09-01). A token that an EARLIER leg's output can
+# contain is a token an earlier leg can satisfy.
+#
+# Persistent-state discipline (#85): the two repos live in the user's home and
+# are removed at START, never only at the end.
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# HEAL AT START.
+lc_send "rm -rf /home/michael/gs /home/michael/gs2"
+sleep 1
+lc_run_expect "echo gs-clean | tr a-z A-Z" "GS-CLEAN"
+
+# 1. the exec path, and with it the closure constraint.
+lc_run_expect "git --exec-path | tr a-z A-Z" "/VIV/BIN"
+
+# 2. the system config is the one at /viv/bin (the editor keys are C2-wiring).
+lc_run_expect "git config --system --get-regexp editor | tr a-z A-Z" "SEQUENCE.EDITOR NORA"
+lc_run_expect "git config --system core.pager | tr a-z A-Z" "CAT"
+
+# 3. a repo as the logged-in USER.
+lc_run_expect "git init /home/michael/gs | tr a-z A-Z" "INITIALIZED EMPTY GIT REPOSITORY"
+lc_run_expect "git -C /home/michael/gs commit --allow-empty -m first | tr a-z A-Z" "ROOT-COMMIT"
+lc_run_expect "git -C /home/michael/gs log --format=src-%s | tr a-z A-Z" "SRC-FIRST"
+
+# 4. the dashed helper from PATH (the pheno-mount half of the closure).
+lc_run_expect "git-upload-pack --advertise-refs /home/michael/gs | tr a-z A-Z" "REFS/HEADS/MAIN"
+
+# 5. git execs git-remote-https through GIT_EXEC_PATH (no shell, no network):
+# the helper's connection refusal on stderr is the witness. Room for the
+# helper's OpenSSL + curl init under TCG.
+set lc_cmd_timeout 120
+lc_send "git ls-remote https://127.0.0.1:1/x.git"
+lc_expect "Failed to connect to 127.0.0.1 port 1" "git-remote-https ran (exec'd via GIT_EXEC_PATH, under the phenotype) and reached a refused connect"
+set lc_cmd_timeout 30
+
+lc_pass "GIT-SHELL: a login shell runs the /viv/bin git with its helper closure behind the pheno-mount (exec-path /viv/bin, the system config read, init/commit as the user, the dashed upload-pack from PATH, git-remote-https exec'd through GIT_EXEC_PATH)"
+lc_quit
