@@ -584,7 +584,19 @@ and i3's per-window title bar are the prior art, both per-window). Concretely:
   `open_on` + `surface_ctl`'s `create ` parse, which today rejects a 3rd token).
   `role=chrome` makes the surface non-auto-hosted, non-focusable, and excluded
   from the scanout-Direct leaf count; the compositor places it at `bind`'s
-  per-leaf tag-bar strip.
+  per-leaf tag-bar strip. AS-BUILT (H-3b-2): `role=chrome` is RENDERER-GATED at
+  create (`peer_is_renderer` → E_PERM; syntax errors are E_INVAL for every peer
+  and are judged first) — an ungated chrome role would let any client overlay
+  fake chrome on another client's pane, so creation joins the gated-verb class
+  (the cfg-3 default-deny); the H-3b-4 round prosecutes it. The bind must name
+  a live LEAF (E_NOENT, checked before the weave allocation). Placement is one
+  authority, `surface_target`: a hosted surface → its pane's content rect, a
+  chrome surface → its bound pane's `tagbar` strip (crop, never letterbox;
+  invisible while the strip is ZERO or the pane hidden/closed — ids are never
+  reused). Chrome rides the structural CONFIGURE fan with the STRIP size (the
+  relayout hook) and the frame fan; the compositor's resting `header` fill is
+  painted on STRUCTURAL repaints only, so a focus-only repaint never paints
+  over a chrome surface's pixels.
 - **Aurora (no halcyond chrome surface) on multi-leaf:** the compositor paints
   the per-leaf tag-bar strip with the Daylight `header` background as a resting
   fallback (the pane's `tag` file supplies a name if set) — vote-1-compatible

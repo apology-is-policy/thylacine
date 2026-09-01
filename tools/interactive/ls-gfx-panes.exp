@@ -131,6 +131,16 @@ expect {
 gfx_sample tagbarA $tbx $tby "206 196 182"
 lc_pass "panes: per-leaf tag bar renders Daylight header-bg"
 
+# H-3b-2: the chrome-create gate (surface ctl `create W H role=chrome bind=<id>`):
+# malformed -> E_INVAL for every peer; well-formed chrome from a NON-renderer
+# (this battery) -> E_PERM. The positive twin (the same line from halcyond,
+# composited at the tag bar) is ls-halcyon's at H-3b-3.
+expect {
+    -ex "battery: chrome-create gate OK" { lc_pass "panes: chrome-create gate discriminates (E_INVAL syntax / E_PERM non-renderer)" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the chrome-create gate leg failed" }
+    timeout { lc_fail "battery never reached the chrome-create gate" }
+}
+
 # Scenario 2 (G-6b): the resize protocol.
 expect {
     -ex "battery: resize rejects OK" { lc_pass "panes: resize-ack negative probes OK" }

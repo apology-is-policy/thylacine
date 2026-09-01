@@ -298,6 +298,55 @@ delta rung via yip 0031; `theme.rs`, the battery, and the .exp are unowned
 (reference section here, sweep filed). **Next: H-3b-2**, the surface-create ABI
 (`create W H role=chrome bind=<pane-id>`) + `Role::Chrome` activation.
 
+### H-3b-2: the chrome role becomes a capability, not a flag (same run; the operator left mid-wait — see the standing authorization)
+
+The ratified text said `role=chrome` makes a surface "non-auto-hosted,
+non-focusable, excluded from the Direct count" and that the compositor places
+it at the bound pane's strip. It did not say who may create one. Read as
+written, any client could bind a chrome surface to any pane and paint over its
+tag bar — a fake tag bar on someone else's pane is the graphical twin of a
+spoofed prompt, and the whole reason the tag bar exists is that a user trusts
+what it says about the tile beneath it. So chrome creation joined the gated
+class: `peer_is_renderer` at create, E_PERM otherwise, the cfg-3 default-deny
+that every other chrome operation in §13.6 (menu place/dismiss, `tag status`)
+already rides. Syntax is judged first and separately (E_INVAL for every peer),
+so a peer cannot use the gate to learn whether a pane id exists, and the
+battery — a non-renderer — can witness the parser and the gate as two
+different verdicts on the same line. The positive twin, the same line from a
+renderer composited at the strip, is halcyond's at H-3b-3, one variable away.
+Recorded in §13.6 as as-built; the H-3b-4 round prosecutes it.
+
+The rest of the sub-chunk is the consequence of one observation about the
+compositor: a surface's screen rectangle is decided in exactly one place,
+`compose_geometry` (`find_hosting` → the pane's content rect, then letterbox
+or crop). A chrome surface is not hosted, so rather than teach hosting a
+second kind of leaf, that decision moved into a helper, `surface_target`,
+with two arms — content rect for a hosted surface, `tagbar` strip for a bound
+chrome one (crop only: its owner sizes it to the strip) — and the same helper
+now answers `compose_visible` and `note_present`. Everything the design
+listed as properties of chrome then falls out of "not hosted": no leaf means
+no focus, no Direct candidacy (`visible_hosted` never lists it), no pointer
+hit (`surface_at` walks leaves). The two fans that reach every visible surface
+gained a second half: the structural CONFIGURE fan sends chrome its STRIP
+size — which is the relayout hook halcyond will repaint and resize on — and
+the frame fan includes it. I first wrote that this carries the standing
+wedge-retire contract for an owner that never drains; reading `push_event`
+says otherwise — FRAME is a droppable, coalesced class and CONFIGURE
+coalesces by replacement, so an idle chrome owner cannot wedge its surface,
+and the events that do wedge (KEY, pointer) never reach chrome: it is not
+focused and `surface_at` walks leaf content rects. A claim true of a
+different event class, caught by reading the function it was about.
+
+One hazard was mine from the previous sub-chunk. H-3b-1's `paint_borders`
+refills the strip with the resting `header` and pushes that rect; on a
+focus-only repaint that would paint over a chrome surface's pixels and push
+the clobbered strip to the display. The fill is now structural-only
+(`fill_tagbars`): a focus change alters the shadow and the strip highlights,
+never the strip's content, so the refill there was always redundant and,
+with chrome present, wrong.
+
+Verified at jobs=1 after a ~75-minute wait for the mac (aux's audit close held it; I queued, declared `busy`, and waited on a 90-s-quiet-of-aux-QEMU signal rather than a lease expiry that `resources` later explained as a re-hold's TTL artifact): ls-gfx-panes PASS [42 s] (the four gate probes: `battery: chrome-create gate OK` + the exp's `discriminates (E_INVAL syntax / E_PERM non-renderer)`; the H-3b-1 tag-bar witness intact) + ls-halcyon PASS [27 s] (split/zoom reflow + the four-value bevel) + ls-gfx-chords PASS [36 s] (chord focus moves + `gaps` changes over the structural-vs-focus-only repaint split), all at LS_CI_JOBS=1; tapestryd/libtapestry/battery build clean (only the 3 pre-existing warnings); bake OK, keys paired. Vault: server.rs (sub-tapestryd) + lib.rs (sub-libtapestry) deltas rung on yip 0031; the battery + the .exp unowned (sweep filed). **Next: H-3b-3**, halcyond's per-leaf chrome surfaces — the positive twin of this sub-chunk's E_PERM probe.
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon

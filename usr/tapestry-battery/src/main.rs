@@ -61,7 +61,7 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 use alloc::string::String;
 
 use libthyla_rs::time::{sleep, Duration};
-use libthyla_rs::{t_close, t_open, t_read, t_write, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT};
+use libthyla_rs::{t_close, t_open, t_read, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT};
 use tapestry::{
     Event, Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_REL,
 };
@@ -89,6 +89,23 @@ const DUMP_MS: u64 = 1500;
 
 fn nap(ms: u64) {
     let _ = sleep(Duration::from_millis(ms));
+}
+
+/// H-3b-2: mint a surface and write ONE raw `create ...` line to its ctl,
+/// returning t_write's rc (negative = -errno); the minted surface is
+/// destroyed again. The chrome-create gate probes need the errno, not
+/// write_file's bool.
+fn raw_create(root: i64, cmd: &str) -> i64 {
+    let ctl = unsafe { t_open(root, b"surface/new".as_ptr(), 11, T_ORDWR) };
+    if ctl < 0 {
+        return ctl;
+    }
+    let mut idbuf = [0u8; 16];
+    let _ = unsafe { t_read(ctl, idbuf.as_mut_ptr(), idbuf.len()) };
+    let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
+    let _ = unsafe { t_write(ctl, b"destroy".as_ptr(), 7) };
+    unsafe { t_close(ctl) };
+    rc
 }
 
 fn read_file(root: i64, path: &str) -> Option<String> {
@@ -457,6 +474,33 @@ pub extern "C" fn rs_main() -> i64 {
                 return 1;
             }
         }
+    }
+
+    // H-3b-2: the chrome-create gate. `create W H` takes optional
+    // `role=<content|chrome>` + `bind=<pane-id>`; syntax is judged first
+    // (E_INVAL for every peer), then a well-formed chrome request is
+    // renderer-gated (E_PERM -- this battery is NOT the console renderer).
+    // Four probes, two errno classes: the errno separates the parser's
+    // verdict from the gate's. The positive twin (the same line from a
+    // renderer, composited at A's tag bar) is halcyond's -- ls-halcyon at
+    // H-3b-3. Errnos per libthyla-rs err.rs: T_E_INVAL = 22, T_E_PERM = 1.
+    {
+        let a_bind = alloc::format!("create 64 20 role=chrome bind={}", pa.id);
+        let probes: [(&str, i64, &str); 4] = [
+            ("create 64 20 role=bogus", -22, "unknown role -> E_INVAL"),
+            ("create 64 20 role=chrome", -22, "chrome without bind -> E_INVAL"),
+            ("create 64 20 bind=1", -22, "bind without chrome -> E_INVAL"),
+            (a_bind.as_str(), -1, "chrome from a non-renderer -> E_PERM"),
+        ];
+        for (cmd, want, what) in probes.iter() {
+            let rc = raw_create(root, cmd);
+            if rc != *want {
+                say!("tapestry-battery: FAIL chrome-create gate: '{}' rc {} want {} ({})",
+                    cmd, rc, want, what);
+                return 1;
+            }
+        }
+        say!("battery: chrome-create gate OK");
     }
 
     // Scenario 2 (G-6b, the resize protocol). B's pane content differs

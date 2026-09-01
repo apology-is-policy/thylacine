@@ -874,6 +874,16 @@ struct Surface {
     /// at every use, never cached, so either side's death is inert here.
     gl_src: Option<u32>,
     presents: u64, // diagnostic counter
+    /// H-3b-2: a Role::Chrome surface's binding -- the PUBLIC id of the pane
+    /// whose Daylight tag bar it paints. None = a content surface (hosted in
+    /// a leaf by `layout.host`). A chrome surface is never hosted: it is
+    /// placed at the bound pane's `tagbar` strip by `surface_target`, so it
+    /// is non-focusable and excluded from the Direct count and from pointer
+    /// routing by construction (none of those paths see an unhosted
+    /// surface). Pane ids are never reused (the net-3d discipline), so a
+    /// binding to a closed pane resolves to nothing and the surface is
+    /// simply invisible until its owner destroys it.
+    chrome_bind: Option<u32>,
 }
 
 /// The deferred flush a held present leaves behind. The pixel work
@@ -2198,6 +2208,7 @@ impl Comp {
             res_ids: [0; WEAVE_SLOTS as usize], // minted with the first generation
             old_weave: None,
             res_stale: [false; WEAVE_SLOTS as usize],
+            chrome_bind: None,
             comp_attached: false,
             gpu_said: false,
             held: None,
@@ -3466,13 +3477,43 @@ impl Comp {
     /// contract heals it on reveal: the reveal is structural and fans the
     /// redraw CONFIGURE).
     fn compose_visible(&self, n: usize) -> bool {
-        if self.screen.is_none() {
-            return false;
+        self.screen.is_some() && self.surface_target(n).is_some()
+    }
+
+    /// H-3b-2: the ONE placement authority's target rect for surface `n` --
+    /// a hosted content surface's visible pane CONTENT rect, or a chrome
+    /// surface's bound pane TAG-BAR strip (visible + carved). None = not
+    /// showable (hidden pane, unhosted, a stale binding, a bar-free leaf).
+    fn surface_target(&self, n: usize) -> Option<Rect> {
+        let s = self.surf(n)?;
+        if let Some(pid) = s.chrome_bind {
+            let slot = self.layout.slot_of_id(pid)?;
+            let p = self.layout.get(slot)?;
+            if !p.visible || p.tagbar.is_empty() {
+                return None;
+            }
+            return Some(p.tagbar);
         }
-        match self.layout.find_hosting(n) {
-            Some(leaf) => self.layout.get(leaf).map_or(false, |p| p.visible),
-            None => false,
+        let leaf = self.layout.find_hosting(n)?;
+        let p = self.layout.get(leaf)?;
+        if !p.visible {
+            return None;
         }
+        Some(p.content)
+    }
+
+    /// Every showable chrome surface with its strip -- the second half of the
+    /// CONFIGURE + frame fans (`visible_hosted` is the first).
+    fn visible_chrome(&self) -> Vec<(usize, Rect)> {
+        let mut out = Vec::new();
+        for n in 0..MAX_SURFACES {
+            if self.surf(n).map_or(false, |s| s.chrome_bind.is_some()) {
+                if let Some(r) = self.surface_target(n) {
+                    out.push((n, r));
+                }
+            }
+        }
+        out
     }
 
     /// The per-tick health verify of the compositor context, run right
@@ -3636,19 +3677,15 @@ impl Comp {
     /// rects ignored -- the whole scaled rect redraws); an accumulator, or
     /// a same-size surface, takes the damage-clipped CROP.
     fn compose_geometry(&mut self, n: usize, x: u32, y: u32, pw: u32, ph: u32) -> Option<ComposeOp> {
-        let (sw, sh_full, patchwork) = match self.surf(n) {
-            Some(s) if s.weave.is_some() => (s.w, s.h, s.patchwork),
+        let (sw, sh_full, patchwork, chrome) = match self.surf(n) {
+            Some(s) if s.weave.is_some() => (s.w, s.h, s.patchwork, s.chrome_bind.is_some()),
             _ => return None,
         };
-        let content = match self.layout.find_hosting(n) {
-            Some(leaf) => match self.layout.get(leaf) {
-                Some(p) if p.visible => p.content,
-                _ => return None, // hidden: no compose target
-            },
-            None => return None, // unhosted
-        };
+        let content = self.surface_target(n)?; // hidden / unhosted / stale bind: no target
         self.screen.as_ref()?;
-        if (sw != content.w || sh_full != content.h) && !patchwork {
+        // A chrome surface never letterboxes: its owner sizes it to the strip,
+        // and a transient mismatch (a relayout mid-resize) CROPS.
+        if (sw != content.w || sh_full != content.h) && !patchwork && !chrome {
             if content.w == 0 || content.h == 0 || sh_full == 0 || sw == 0 {
                 return None;
             }
@@ -3778,7 +3815,7 @@ impl Comp {
 
     /// `create W H`: the spec's WeaveFirst -- allocate + zero the weave,
     /// create the 2D resource, attach the whole weave as its backing.
-    fn create(&mut self, n: usize, w: u32, h: u32) -> Result<(), u32> {
+    fn create(&mut self, n: usize, w: u32, h: u32, chrome_bind: Option<u32>) -> Result<(), u32> {
         let (disp_w, disp_h) = (self.gpu.width, self.gpu.height);
         let s = self.surf(n).ok_or(p9::E_BADF)?;
         if s.state != SurfState::Minted {
@@ -3787,6 +3824,14 @@ impl Comp {
         // F9: the dimension bound (a weave is tapestryd's DMA allocation).
         if w == 0 || h == 0 || w > disp_w || h > disp_h {
             return Err(p9::E_INVAL);
+        }
+        // H-3b-2: a chrome binding names a LIVE LEAF (E_NOENT otherwise),
+        // judged BEFORE the weave allocation so a bad bind leaks nothing.
+        if let Some(pid) = chrome_bind {
+            match self.layout.slot_of_id(pid) {
+                Some(slot) if self.layout.is_leaf(slot) => {}
+                _ => return Err(p9::E_NOENT),
+            }
         }
         let (weave, slot_stride, res_ids, comp_attached) = self.alloc_weave(n, w, h)?;
 
@@ -3811,6 +3856,14 @@ impl Comp {
             s.res_stale = [true; WEAVE_SLOTS as usize];
         }
         s.state = SurfState::Woven;
+        s.chrome_bind = chrome_bind;
+        if chrome_bind.is_some() {
+            // H-3b-2: chrome is NOT hosted -- surface_target places it at its
+            // bound pane's tag-bar strip; reconcile fans it a CONFIGURE with
+            // the strip size whenever that strip is showable.
+            self.reconcile();
+            return Ok(());
+        }
         // G-6: host at create -- the focused empty leaf takes it, else the
         // focused leaf splits. A pane-table-exhausted surface stays
         // unhosted (invisible; presents complete without pixels). Hosting
@@ -4348,7 +4401,7 @@ impl Comp {
                 *px.add(i) = pane::BG_COLOR;
             }
         }
-        let _ = self.paint_borders();
+        let _ = self.paint_borders(true);
         let _ = self.paint_strips();
         self.chrome_epoch = self.layout.epoch;
     }
@@ -4363,7 +4416,7 @@ impl Comp {
     /// whole-buffer push here would blank every pane. The bevel is UNIFORM
     /// (section 2.1/5.1 -- it marks a pane, never a focused one); focus shows
     /// only in the cast shadow here and the strip highlight (paint_strips).
-    fn paint_borders(&mut self) -> Vec<Rect> {
+    fn paint_borders(&mut self, fill_tagbars: bool) -> Vec<Rect> {
         use libhalcyon::theme::{DAYLIGHT as D, METRICS as M};
         let mut painted: Vec<Rect> = Vec::new();
         let dw = self.gpu.width as u64;
@@ -4457,9 +4510,12 @@ impl Comp {
             // Role::Chrome surface composites ON TOP when present (H-3b-3);
             // absent it (aurora, or before halcyond binds) the strip is never
             // bare BG_COLOR. Inside the ring, above `content` -- disjoint from
-            // the bands and the shadow.
+            // the bands and the shadow. STRUCTURAL repaints only
+            // (`fill_tagbars`): a focus-only repaint changes nothing in the
+            // strip, and refilling + pushing it there would paint over a
+            // chrome surface's pixels (the strip is its target rect).
             let tb = p.tagbar;
-            if !tb.is_empty() {
+            if fill_tagbars && !tb.is_empty() {
                 for y in tb.y..tb.y + tb.h {
                     for x in tb.x..tb.x + tb.w {
                         unsafe {
@@ -4699,7 +4755,7 @@ impl Comp {
                     // would blank every pane; on the CPU path the buffer
                     // mirrors the host and the rect push is the same pixels
                     // (both paths behave identically from outside, 4.5.9).
-                    let mut rects = self.paint_borders();
+                    let mut rects = self.paint_borders(false);
                     rects.extend(self.paint_strips());
                     self.chrome_epoch = self.layout.epoch;
                     for r in rects {
@@ -4746,6 +4802,13 @@ impl Comp {
                     let mut wedged: Vec<usize> = Vec::new();
                     for (_, n, c) in self.layout.visible_hosted() {
                         if !self.emit_configure_to(n, c.w, c.h) {
+                            wedged.push(n);
+                        }
+                    }
+                    // H-3b-2: chrome surfaces get their STRIP size -- the
+                    // relayout hook their owner repaints or resizes on.
+                    for (n, t) in self.visible_chrome() {
+                        if !self.emit_configure_to(n, t.w, t.h) {
                             wedged.push(n);
                         }
                     }
@@ -5263,11 +5326,7 @@ impl Comp {
     pub fn note_present(&mut self, n: usize) {
         let visible = self.pending_direct == Some(n)
             || self.scanout == Scanout::Direct(n)
-            || self
-                .layout
-                .find_hosting(n)
-                .and_then(|leaf| self.layout.get(leaf))
-                .map_or(false, |p| p.visible);
+            || self.surface_target(n).is_some();
         if !visible {
             return;
         }
@@ -5311,7 +5370,8 @@ impl Comp {
             self.reconcile();
         }
         self.comp_replay_deferred_imports();
-        let vis: Vec<usize> = self.layout.visible_hosted().iter().map(|v| v.1).collect();
+        let mut vis: Vec<usize> = self.layout.visible_hosted().iter().map(|v| v.1).collect();
+        vis.extend(self.visible_chrome().iter().map(|v| v.0));
         for n in vis {
             let ev = Tevent {
                 kind: TEV_FRAME,
@@ -13184,10 +13244,39 @@ impl Conn {
             let mut it = rest.split_ascii_whitespace();
             let w: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
             let h: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
-            if it.next().is_some() {
-                return Err(p9::E_INVAL);
+            // H-3b-2: optional `role=<content|chrome>` + `bind=<pane-id>`
+            // (HALCYON.md 13.6 -- a ctl TEXT extension, not a wire break).
+            // Syntax is judged before authority, so a malformed line is
+            // E_INVAL for every peer; a well-formed `role=chrome` is then
+            // RENDERER-GATED (E_PERM): an ungated chrome role would let any
+            // client overlay fake chrome on another client's pane -- the
+            // cfg-3 default-deny, the same class as the gated global verbs.
+            let mut role = Role::Content;
+            let mut bind: Option<u32> = None;
+            for tok in it {
+                if let Some(r) = tok.strip_prefix("role=") {
+                    role = match Role::parse(r) {
+                        Some(Role::Content) => Role::Content,
+                        Some(Role::Chrome) => Role::Chrome,
+                        _ => return Err(p9::E_INVAL), // pin-target is a pane role
+                    };
+                } else if let Some(b) = tok.strip_prefix("bind=") {
+                    bind = Some(b.parse().map_err(|_| p9::E_INVAL)?);
+                } else {
+                    return Err(p9::E_INVAL);
+                }
             }
-            return comp.create(n, w, h);
+            let chrome_bind = match (role, bind) {
+                (Role::Content, None) => None,
+                (Role::Chrome, Some(pid)) => {
+                    if !self.peer_is_renderer() {
+                        return Err(p9::E_PERM);
+                    }
+                    Some(pid)
+                }
+                _ => return Err(p9::E_INVAL), // chrome needs a bind; content takes none
+            };
+            return comp.create(n, w, h, chrome_bind);
         }
         if s == "destroy" {
             comp.retire(n);

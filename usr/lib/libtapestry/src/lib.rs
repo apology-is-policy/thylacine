@@ -211,6 +211,24 @@ impl Surface {
     }
 
     fn open_on(root: i64, w: u32, h: u32) -> Result<Surface, TapError> {
+        Self::open_on_bound(root, w, h, None)
+    }
+
+    /// H-3b-2: a Role::Chrome surface bound to pane `pane_id`. The compositor
+    /// places it at that pane's Daylight tag-bar strip (read
+    /// `pane/<id>/tagbar` for the size), never hosts it in a leaf, and fans
+    /// it a CONFIGURE carrying the strip size on every relayout.
+    /// Renderer-gated server-side: E_PERM for a peer spawned without
+    /// T_SPAWN_PERM_CONSOLE_RENDERER.
+    pub fn chrome_on(pane_id: u32, w: u32, h: u32) -> Result<Surface, TapError> {
+        let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
+        if root < 0 {
+            return Err(TapError::Connect);
+        }
+        Self::open_on_bound(root, w, h, Some(pane_id))
+    }
+
+    fn open_on_bound(root: i64, w: u32, h: u32, chrome_bind: Option<u32>) -> Result<Surface, TapError> {
         let fail = |fds: &[i64], e: TapError| {
             for &fd in fds {
                 if fd >= 0 {
@@ -236,9 +254,12 @@ impl Surface {
             None => return fail(&[root, ctl], TapError::Protocol),
         };
 
-        // create W H
+        // create W H [role=chrome bind=<pane-id>]
         let mut cmd = alloc::string::String::new();
         let _ = core::fmt::write(&mut cmd, format_args!("create {} {}", w, h));
+        if let Some(pid) = chrome_bind {
+            let _ = core::fmt::write(&mut cmd, format_args!(" role=chrome bind={}", pid));
+        }
         let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
         if rc < 0 {
             return fail(&[root, ctl], TapError::Create);
