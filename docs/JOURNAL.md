@@ -22,6 +22,69 @@ needed the operator.
 
 ---
 
+## 2026-09-01 (run 14, Fable) — H-1 opens: the Beacon foundations, three sub-chunks landed
+
+**The charter**: the operator's "Let's start and proceed ourselves" — H-1 per
+BEACON.md §12, the build card written hours earlier by the concretization
+pass. Effort max (verified). Landed this run, each green before the next:
+
+- **H-1a @7cd1ab94** — `SYS_FD_DEVCLASS` (80, the June reservation held) +
+  the consctl `beacon <tier>` verb (ARCH §23.5.4). The spec's open decision
+  BOUND: the walked `/dev/cons` leaf normalizes to `'c'` via
+  `devdev_fd_devclass` (only the cons DATA leaf; every other leaf 'd').
+  Ground-truthing corrected two stale spec rows (the June dc table had 'C'
+  and 'r' wrong) and one scripture claim (winsize never reset on detach —
+  the tier resets at `cons_drain_close` + `cons_test_reset`; ARCH/BEACON
+  corrected in the same commit). **The suite caught a real blast-radius
+  miss on the first run**: the kernel's OWN consctl staging buffer
+  (`devdev.c tmp[64]`) sat below the new 67-byte render floor — every
+  consctl read EOF'd; the external-reader sweep (pouch 0021 buf[96],
+  digit-walk parser, /dev/winsize leaf asserts) had been done and the
+  same-file consumer missed (#254's enclosing-function lesson, relearned).
+  1434/1434 + the joey five-arm E2E (`probe H1 ... OK`).
+- **H-1b @5d638fec** — the `beacon` crate: the OSC 1936 wire (emit/parse/
+  strip; foreign escapes are payload — aurora's 7770 passthrough tested),
+  the Sink/Table per-tier API, and the cells relocation (boxd/color/palette
+  moved verbatim, git 100%-rename; the 15-test host baseline reproduced
+  exactly as 11 moved + 4 stayed). Three recorded deviations from the §12.5
+  sketch added to scripture (explicit zone open/close — the shell's zones
+  are not lexically scoped; em/obj payload-only at Cells; over-VALUE_MAX
+  obj refs emit no frame). One self-caught bug pre-test (a garbled bounds
+  check in pct_decode); one test-design error caught by the crate's own
+  debug_assert (the at-cap frame must be raw-built — the emitter correctly
+  refuses over-cap values).
+- **H-1c-1 @04186229** — the tier plumbing: aurora advertises `cells`; ut
+  reads the advertisement off its consctl fd, exports `/env/BEACON` (the
+  Plan 9 way — `env_clone_into` copies to children; verified in-tree
+  against builtin.rs's stale "envp does not exist" note), arms Repl zones
+  iff rich AND stdout answers 'c'. The u-repl-test leg is the rich arm's
+  REAL driver (nothing advertises rich until Halcyon — the wired-gate
+  trap): the same script through rich and plain Repls, frames
+  present/absent, strip(rich)==plain byte-identical, in-guest every boot.
+
+**The wrong turn worth more than the wins**: H-1c-1's first build FAILED
+(E0308) and the failure was invisible — the background chain's trailing
+`echo EXIT: $?` reported the final grep's status, `&&` had silently skipped
+test.sh, and the suite verdict I graded was the PREVIOUS run's
+`build/test-boot.log` (green, stale). The #184 gauge class exactly. What
+caught it: the missing `beacon zones OK` witness — the new leg's line was
+absent from an "all OK" log, which is impossible for the new binary. The
+unraveling ran: witness absent → binary strings clean → cpio strings clean
+→ cpio mtime 7 min older than the binary → no bake lines in the build log →
+"build failed, waiting for other jobs" at the log tail. Re-run reports each
+exit separately; the log's mtime is checked before grading. **A chained
+background command must never end in a status-masking echo, and a suite
+verdict is only as fresh as the log's own timestamp.**
+
+**Open at the boundary** (the compaction rides here): H-1c-2 — the four
+emitters (ls rich table + obj + the `--color=auto` flip; grep; ps; stat) +
+smoke legs; then the H-1 close: the AUDIT-TRIGGERS row + CLAUDE.md index
+line, docs/memory, the focused audit round batched over H-1a..c-2
+(holotype-reviewer, Fable-max), push both mirrors only after the round.
+Nothing pushed yet — three commits await the close per the discipline.
+
+---
+
 ## 2026-09-01 (run 13, Fable) — the Halcyon concretization pass: vision → implementation-grade
 
 **The charter** (operator, same day as the kickoff): "research and detail the
