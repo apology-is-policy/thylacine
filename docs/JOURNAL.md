@@ -22,6 +22,64 @@ needed the operator.
 
 ---
 
+## 2026-09-01 (run 16, Fable) — H-2: the transcript MVP lands; the E2E hunt that vindicated the gate
+
+**H-2 built end to end in seven chunks** (a `05d837a7` / b `1c053bb6` / c
+`9efe031c` / d-1 `30dfa16c` / d-2 `d02ed02f` / d-3 `ef22fe38` / d-4 at this
+entry): the vt extraction (15/15 ls-gfx, zero-diff; 9 dormant tests LIVE),
+the cartoon crate (the display list + CPU executor; the thematic name is
+real weaving vocabulary), the vendor step (fontdue's no_std claim VERIFIED
+at vendor time on the bare target — the §13.9 fallback unneeded; the whole
+139-crate registry closure went hermetic because cargo source replacement
+is all-or-nothing), the transcript core (the streaming-determinism property
+test caught the `safe_cut` last-ESC bug ON ITS FIRST RUN: an OSC's ST
+terminator is itself a later ESC, so cutting there strands the opener and
+the wire parser rightly drops it whole), layout (a +2 stretch clamp I wrote
+against §13.5 was WRONG and the box test said so; scripture stood), the bin
+(aurora's loop shape; the held-feed policy lib-side with aurora's selftest
+arms as real host tests), and the E2E.
+
+**The first boot of halcyond died silently; the second was dark.** Two real
+defects, each generalizable: (1) the libthyla-rs heap is a FIXED 4 MiB and
+a no_std OOM panics into a bare `t_exits(1)` — fontdue's parse of two
+DejaVu faces never fit; the fix is `ThylaAllocN<BYTES>` (const-generic;
+`ThylaAlloc` unchanged for every other binary) with halcyond at 64 MiB
+LAZY (demand-zero — physical pages only as touched). (2) my loop waited
+before presenting — the scanout is first-present-wins and frame ticks
+reach only VISIBLE surfaces, so a renderer that waits before its first
+present is dark AND event-starved forever; the render pass moved to the
+loop top and console-up now witnesses a real presented frame.
+
+**Then the E2E showed zone frames but NO ls/stat frames, and the hunt took
+five probes to vindicate the innocent.** The wrong turns, in order, each
+killed by an instrument: "env inheritance broken" (the `env` tool — itself
+a child — listed BEACON=rich); "the dc arm broken in children" (ps framed
+under the SAME auto gate, same session); "ls's --beacon=always broken"
+(the 32-char typed line died of the #60 quadratic-echo relay cliff BEFORE
+running — a diagnostic leg poisoned by its own length); "the
+multi-operand/-l forms unwired" (probe4 ran the exact forms; all silent);
+finally a temporary in-bin diagnostic printed `env=rich dc=Some(99)
+rich=true` — THE GATE WAS FINE — and the raw transcript held the answer
+one line later: `ls: /version: no such file or namespace entry`. **The
+operands were boot-ramfs paths that vanish at the pivot**; every
+path-taking emitter failed on its operand, the `; pwd` sequencing passed
+hollowly over the stderr error (the #212 skip-reported-as-pass shape
+wearing my own output-only discipline), and pathless `ps` framed the whole
+time. Two more scenario findings en route: a chord SPLIT focuses the NEW
+empty leaf (`pane.rs`), so the zoom chord hid the renderer until a
+Super+Left; and the no-such-file negative control must use the THYLACINE
+wording — the generic phrase matches delve's boot-time history noise.
+
+**The close bar**: ls-halcyon 12/12 on the lever image (45 s) — the
+parchment-dominant pixel proof (~40k ink px, dom exactly 241,234,224), the
+full rich chain on the wire (table + obj frames from real session `ls`),
+the split/zoom reflow round-trip (128 → 63 → 128 cols), F10 silent; the
+default-build suite re-run after the allocator/repl/ut changes. F10 landed
+with the first rich advertiser exactly as the H-1 round ordered; F7's
+transport+zone halves are now proven through a REAL advertisement; F11's
+decision (open-zone attribution, the ut-side refinement named) is recorded
+in the transcript module.
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon

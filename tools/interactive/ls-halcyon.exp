@@ -1,0 +1,178 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-halcyon.exp -- the H-2 transcript MVP, end to end
+# (HALCYON.md sections 4 + 13; the ROADMAP section-11.1 H-2 gate row).
+#
+# GATED ON THE BAKED LEVER (the cfg-4 precedent): the pool carries
+# /lib/halcyon/renderer = "halcyond" only under THYLACINE_HALCYON=1, because
+# every sibling scenario and the suite assume the aurora fbcon. On a default
+# image joey spawns aurora and this scenario SKIPs cleanly (the go5/chords
+# idiom: lc_quit + exit 0); on a lever image it proves:
+#
+#   render  : joey chose halcyond; the rich advertisement landed; login ->
+#             ut flows through the transcript; the screendump's dominant
+#             color is the PARCHMENT ground (paper-light -- aurora never
+#             paints it: its default is the Bonfire dark) with real ink on
+#             top (the discriminating pixel pair).
+#   rich    : the H-1 canary now reads RICH ("ut: beacon rich exported" +
+#             "transcript zones armed" -- the F7 transport half through a
+#             REAL advertisement), and `ls -l` emits the rich TABLE frames
+#             on the wire ("1936;v1;table" in the transcript -- output-only:
+#             no typed command contains it). F10's silence is pinned too:
+#             no "re-exported" line (the tier never changed mid-session).
+#   reflow  : /dev/winsize reads the full mono grid; a compositor SPLIT
+#             (the default Super+H chord over the REAL QMP keyboard path)
+#             halves the width -> halcyond reflows + re-reports winsize;
+#             ZOOM (Super+F) restores it. The resize E2E of the gate row.
+#
+# HVF like the gfx siblings (bare TCG hangs at the pre-existing 8a-2b
+# hwwatch E2E -- task #27). Serial discipline: typed commands stay short;
+# assertion tokens are output-only.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+# The whole-session transcript (the ls-3a idiom): tail greps are
+# buffer-order-immune where expect's cursor has already moved past a line.
+set transcript /tmp/ls-halcyon-[pid].log
+catch {file delete -force $transcript}
+log_file -a $transcript
+
+proc hkey {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} err]} {
+        lc_fail "qmp-sendtext -k $chord failed: $err"
+    }
+    after 1500 ;# split/zoom -> CONFIGURE -> reflow -> winsize re-report
+}
+
+# Screendump + region verdict: "<off> <total> <dom_r> <dom_g> <dom_b>".
+proc region {x0 y0 x1 y1} {
+    global repo qmp
+    set out /tmp/ls-halcyon-[pid].png
+    file delete -force $out
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} {
+        return "DUMP-ERR $err"
+    }
+    if {![file exists $out]} { return "DUMP-MISSING" }
+    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py $out $x0 $y0 $x1 $y1 241 234 224} verdict]} {
+        return "REGION-ERR $verdict"
+    }
+    return $verdict
+}
+
+lc_boot
+
+# The renderer probe: joey names its choice in the boot stream. Aurora =>
+# the lever is not baked => SKIP (never a red on a default image).
+set timeout $lc_boot_timeout
+expect {
+    -ex "joey: halcyond spawned" { lc_step "joey chose halcyond (lever image)" }
+    -ex "joey: aurora spawned" {
+        puts "\nLS-CI SKIP: default image (aurora fbcon) -- the halcyon lever\
+ is not baked. Bake with THYLACINE_HALCYON=1 to run this scenario."
+        lc_quit
+        exit 0
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the renderer spawn" }
+    timeout { lc_fail "no renderer spawn line within ${lc_boot_timeout}s" }
+    eof     { lc_fail "qemu exited before the renderer spawn" }
+}
+
+# halcyond bring-up: the rich advertisement + the surface, both before login.
+lc_expect "halcyond: beacon rich advertised" "the rich advertisement"
+lc_expect "halcyond: console up" "the transcript surface"
+
+lc_login michael correct-horse-battery-staple-v1
+
+# The session leg: real output through the transcript (frames bracket the
+# payload; the payload bytes are intact on serial -- the strip identity).
+# Sequencing markers are OUTPUT-ONLY (`; pwd` -> /home/michael): a token
+# from the ls arguments would match its own typed echo (the #60 class).
+# The CONTENT proof is the transcript's frame greps below + the pixels.
+# OPERANDS MUST EXIST POST-PIVOT: /version//welcome are BOOT-ramfs paths
+# and vanish at the pivot -- pointing ls at them made every leg pass
+# hollowly through `; pwd` while ls errored to stderr (the hunt that
+# found it: ps framed, ls never did; the gate was innocent).
+lc_run_expect "ls /lib/aurora; pwd" "/home/michael"
+lc_run_expect "ls -l /lib/aurora; pwd" "/home/michael"
+
+# The pixel proof: the dominant color of a center rect IS the parchment
+# ground (241,234,224) -- aurora's Bonfire dark can never produce it -- and
+# ink exists on top (off > 0 alone would pass an unpainted buffer; require
+# real text mass).
+set v [region 200 150 1080 650]
+if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off total dr dg db]} {
+    lc_fail "gfx_region verdict unparseable: $v"
+}
+if {$dr != 241 || $dg != 234 || $db != 224} {
+    lc_fail "dominant color ($dr,$dg,$db) is not the parchment ground (241,234,224) -- halcyond is not painting"
+}
+if {$off < 300} {
+    lc_fail "only $off/$total non-ground pixels -- no ink on the transcript"
+}
+lc_pass "halcyon: parchment ground + ink ($off/$total non-ground px, dom $dr,$dg,$db)"
+
+# The reflow E2E: full grid -> compositor split (REAL Super+H over QMP) ->
+# halcyond reflows + re-reports -> zoom restores. The winsize read is the
+# kernel-visible witness of the CONFIGURE path end to end.
+lc_run_expect "cat /dev/winsize" "winsize 128 "
+lc_pass "halcyon: full-width mono grid reported (128 cols)"
+
+hkey "meta_l+h"
+lc_send "cat /dev/winsize"
+set timeout $lc_cmd_timeout
+expect {
+    -re {winsize (\d+) (\d+)[\r\n]} {
+        set c $expect_out(1,string)
+        if {$c >= 100 || $c < 40} {
+            lc_fail "post-split cols $c (want a halved grid in \[40,100))"
+        }
+        lc_pass "halcyon: split reflow re-reported winsize ($c cols)"
+    }
+    timeout { lc_fail "no winsize line after the split" }
+    eof     { lc_fail "EOF after the split" }
+}
+
+# A chord split moves focus to the NEW (empty) leaf (pane.rs split:
+# `self.focused = new_leaf` -- caught when zoom targeted the empty pane
+# and halcyond, hidden, never got the restore CONFIGURE). Focus back to
+# halcyond first; THEN zoom it to full width.
+hkey "meta_l+left"
+hkey "meta_l+f"
+lc_run_expect "cat /dev/winsize" "winsize 128 "
+lc_pass "halcyon: zoom restored the full grid (reflow round-trip)"
+
+lc_quit
+
+# Transcript greps (output-only tokens; buffer-order-immune).
+log_file
+proc tgrep {pat what} {
+    global transcript
+    if {[catch {exec grep -q -- $pat $transcript}]} {
+        lc_fail "transcript missing: $what ($pat)"
+    }
+    lc_pass "halcyon: $what"
+}
+tgrep "ut: beacon rich exported" "the rich canary (the F7 transport half, real advertisement)"
+tgrep "transcript zones armed" "ut armed the transcript zones"
+tgrep "1936;v1;table" "ls -l emitted the rich table frames on the wire"
+tgrep "1936;v1;obj" "ls emitted obj presentation frames on the wire"
+tgrep "1936;v1;zone" "ut emitted zone frames on the wire (the F7 zone half)"
+# The Thylacine wording, NOT the generic "no such file": the boot-time
+# ambush probe prints delve's Unix-worded history-file complaint, which
+# is noise this control must not trip on.
+if {![catch {exec grep -q -- "no such file or namespace entry" $transcript}]} {
+    lc_fail "a session command errored on its operand (a hollow `; pwd` pass -- fix the operand)"
+}
+lc_pass "halcyon: no session command errored on its operand"
+if {![catch {exec grep -q -- "re-exported" $transcript}]} {
+    lc_fail "an unexpected tier re-export fired (F10 must be silent without a renderer change)"
+}
+lc_pass "halcyon: F10 stayed silent (no renderer change, no re-export)"
+
+lc_pass "ls-halcyon: the H-2 transcript MVP verified (halcyond render + rich chain + parchment pixels + split/zoom reflow)"
+exit 0

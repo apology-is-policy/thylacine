@@ -115,6 +115,14 @@ pub enum NormalAct {
     Top,
     Bottom,
     ToInsert,
+    /// `v`: toggle the selection anchor.
+    ToggleSelect,
+    /// `y`: yank the selected rows.
+    Yank,
+    /// `p`: paste the yank register into the prompt (returns to Insert).
+    Paste,
+    /// Esc in Normal: collapse the selection to the cursor.
+    Collapse,
 }
 
 /// Map a Normal-mode key (rune-first, then code) to its action.
@@ -128,6 +136,10 @@ pub fn normal_key(code: u16, rune: u32) -> NormalAct {
         0x67 => NormalAct::Top,    // g (gg collapsed to one press in v0)
         0x47 => NormalAct::Bottom, // G
         0x69 => NormalAct::ToInsert, // i
+        0x76 => NormalAct::ToggleSelect, // v
+        0x79 => NormalAct::Yank,         // y
+        0x70 => NormalAct::Paste,        // p
+        0x1b => NormalAct::Collapse,     // Esc
         _ => match code {
             103 => NormalAct::ScrollLines(1),      // Up
             108 => NormalAct::ScrollLines(-1),     // Down
@@ -235,6 +247,10 @@ mod tests {
         assert_eq!(normal_key(0, 0x69), NormalAct::ToInsert);
         assert_eq!(normal_key(0, 0x47), NormalAct::Bottom);
         assert_eq!(normal_key(104, 0), NormalAct::ScrollHalfPage(1));
+        assert_eq!(normal_key(0, 0x76), NormalAct::ToggleSelect);
+        assert_eq!(normal_key(0, 0x79), NormalAct::Yank);
+        assert_eq!(normal_key(0, 0x70), NormalAct::Paste);
+        assert_eq!(normal_key(0, 0x1b), NormalAct::Collapse);
         assert_eq!(normal_key(0, 0x7a), NormalAct::None);
     }
 }

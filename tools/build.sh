@@ -2782,6 +2782,27 @@ populate_stratum_pool() {
     echo "==> populate pool: /lib/aurora/config baked + readback-verified (aurora-config cfg-2a)"
     [[ "$aurcfg_baked" != "$aurcfg_src" ]] && rm -f "$aurcfg_baked"
 
+    # H-2: the renderer-choice lever (the cfg-4 gated-bake precedent). Under
+    # THYLACINE_HALCYON=1 the device boots halcyond (joey reads the one-token
+    # /lib/halcyon/renderer file post-pivot; absent = aurora, fail-safe).
+    # NOT baked by default: every other scenario + the suite assume the
+    # aurora fbcon; the ls-halcyon scenario probes the boot line and SKIPs
+    # cleanly on a default image.
+    if [[ "${THYLACINE_HALCYON:-0}" != "0" ]]; then
+        local halrend=/tmp/thyla-halcyon-renderer.$$
+        printf 'halcyond\n' > "$halrend"
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon \
+            || { echo "==> populate pool: mkdir /lib/halcyon FAILED" >&2; rm -f "$halrend"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" write /lib/halcyon/renderer < "$halrend" \
+            || { echo "==> populate pool: write /lib/halcyon/renderer FAILED" >&2; rm -f "$halrend"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (halcyon renderer) FAILED" >&2; rm -f "$halrend"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" read /lib/halcyon/renderer | cmp -s - "$halrend" \
+            || { echo "==> populate pool: /lib/halcyon/renderer readback MISMATCH" >&2; rm -f "$halrend"; kill -TERM "$stratumd_pid"; exit 1; }
+        rm -f "$halrend"
+        echo "==> populate pool: HALCYON renderer lever ENABLED (/lib/halcyon/renderer = halcyond)"
+    fi
+
     # cfg-3 F1 (the OSC-laundering regression): a file of RAW bytes carrying
     # a crafted settings-channel OSC whose value embeds a NEWLINE
     # (`theme;spinifex\nmode 640 480`). `cat`-ing it feeds the exact bytes to

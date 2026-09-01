@@ -16,8 +16,15 @@
 
 extern crate alloc;
 
+// A 64 MiB LAZY heap (demand-zero; physical pages commit as touched):
+// halcyond's working set -- two parsed DejaVu faces, atlas pages, the
+// transcript's 13.3 content budget -- does not fit the 4 MiB default,
+// and the death is a SILENT exit(1) (the no_std OOM panics into
+// t_exits). Found the honest way: the first on-device boot died between
+// the rich advertisement and console-up.
 #[global_allocator]
-static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 64 * 1024 * 1024 }> =
+    libthyla_rs::alloc::ThylaAllocN;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -75,6 +82,23 @@ fn write_ctl(fd: i64, s: &str) -> bool {
         return false;
     }
     unsafe { t_write(fd, s.as_ptr(), s.len()) == s.len() as i64 }
+}
+
+/// A source (item, row)'s visual extent within a laid block: the union of
+/// its (possibly wrapped) lines as (y, h). None when the item laid no line
+/// (evicted / empty).
+fn laid_line_for(laid: &LaidBlock, item: usize, row: usize) -> Option<(i32, i32)> {
+    let mut y0: Option<i32> = None;
+    let mut y1 = 0;
+    for l in laid.lines.iter() {
+        if l.src_item == item && l.src_row == row {
+            if y0.is_none() {
+                y0 = Some(l.y);
+            }
+            y1 = l.y + l.h;
+        }
+    }
+    y0.map(|y| (y, y1 - y))
 }
 
 struct CacheEnt {
@@ -200,6 +224,13 @@ pub extern "C" fn rs_main() -> i64 {
     let mut scroll_up: i32 = 0; // px above the bottom anchor (0 = anchored)
     let mut last_seq: u64 = u64::MAX;
     let mut dirty = true;
+    // Helix-modal selection (v0, row-wise): the flat row list + the
+    // selection state live only while in Normal mode; new output while
+    // selecting re-flattens + clamps (the transcript keeps moving).
+    let mut flat: Vec<halcyond::select::FlatRow> = Vec::new();
+    let mut flat_seq: u64 = u64::MAX;
+    let mut sel: Option<halcyond::select::Sel> = None;
+    let mut yank_buf: Vec<u8> = Vec::new();
     let mut feed_pending: Vec<u8> = Vec::new();
     let mut feed_dropped: u64 = 0;
     let mut feed_logged = false;
@@ -209,12 +240,182 @@ pub extern "C" fn rs_main() -> i64 {
     let mut present_fails: u32 = 0;
     const PRESENT_FAILS_FATAL: u32 = 240;
 
-    say!("halcyond: console up {}x{} px (rich transcript; mono grid {}x{})",
-         w, h, (w as i32 / cell_w).max(1), (h as i32 / cell_h).max(1));
+    let mut announced = false;
 
     loop {
-        // (0) Retry held input unconditionally (#129/#135).
+        // (0) The render pass runs at the TOP: pass 1 paints + presents the
+        // first frame BEFORE any wait -- the scanout is first-present-wins
+        // and frame ticks reach only VISIBLE surfaces, so a renderer that
+        // waits before presenting stays dark and event-starved forever
+        // (caught designing the first E2E: aurora paints frame 0 before its
+        // loop for exactly this reason).
+        // (0b) Retry held input unconditionally (#129/#135).
         feed_drain(feed, &mut feed_pending, &mut feed_dropped, &mut feed_logged);
+
+        // (0c) Render when the transcript moved or the view is dirty
+        // (pass 1 always: dirty starts true -- the first present).
+        if t.seq != last_seq || dirty {
+            last_seq = t.seq;
+            dirty = false;
+            // Evict layouts for blocks the budget dropped.
+            {
+                let frozen = t.frozen_blocks();
+                let mut live: alloc::collections::BTreeSet<u64> =
+                    alloc::collections::BTreeSet::new();
+                for b in frozen.iter() {
+                    live.insert(b.id);
+                }
+                cache.evict_missing(&|id| live.contains(&id));
+            }
+            let widthi = w as i32;
+            // Lay everything; measure heights + each block's y RELATIVE to
+            // the content top (the emit pass and the selection follow both
+            // key off it).
+            let mut heights: Vec<(u64, i32, i32)> = Vec::new(); // (id, h, rel_y)
+            let mut total: i32 = sheet.block_gap;
+            for b in t.frozen_blocks().iter() {
+                let lh = cache.get(b, widthi, &sheet, &mut gs).height;
+                heights.push((b.id, lh, total));
+                total += lh + sheet.block_gap;
+            }
+            let open_rel = total;
+            let open_laid = layout_block(t.open_block(), widthi, &sheet, &mut gs);
+            let pending_laid =
+                layout_pending(t.pending_line(), &t.open_block().styles, widthi, &sheet, &mut gs);
+            let open_h = open_laid.height + pending_laid.height;
+            total += open_h;
+
+            let viewh = h as i32;
+            let max_up = (total - viewh).max(0);
+            // The selection cursor drags the view (Helix: the view follows
+            // the cursor, not the wheel): locate the cursor row's rel_y and
+            // adjust scroll_up so it is visible BEFORE anchoring.
+            if mode == Mode::Normal {
+                if let Some(s) = sel.as_ref() {
+                    if let Some(fr) = flat.get(s.cursor).copied() {
+                        let (rel, lh) = if fr.block == usize::MAX {
+                            match laid_line_for(&open_laid, fr.item, fr.row) {
+                                Some((ly, lh)) => (open_rel + ly, lh),
+                                None => (open_rel, open_laid.height.max(1)),
+                            }
+                        } else if let (Some(b), Some(&(_, bh, rel))) =
+                            (t.frozen_blocks().get(fr.block), heights.get(fr.block))
+                        {
+                            let laid = cache.get(b, widthi, &sheet, &mut gs);
+                            match laid_line_for(laid, fr.item, fr.row) {
+                                Some((ly, lh)) => (rel + ly, lh),
+                                None => (rel, bh.max(1)),
+                            }
+                        } else {
+                            (0, 1)
+                        };
+                        // The row's distance from the content BOTTOM decides
+                        // scroll_up directly: visible iff
+                        //   scroll_up <= (total - rel - lh) <= scroll_up + viewh - lh
+                        let from_bottom = total - rel - lh;
+                        if from_bottom < scroll_up {
+                            scroll_up = from_bottom;
+                        } else if from_bottom > scroll_up + viewh - lh {
+                            scroll_up = from_bottom - (viewh - lh).max(0);
+                        }
+                    }
+                }
+            }
+            if scroll_up > max_up {
+                scroll_up = max_up;
+            }
+            if scroll_up < 0 {
+                scroll_up = 0;
+            }
+            // Bottom-anchored: the content's bottom sits at the view bottom
+            // (raised by scroll_up).
+            let y0 = if total <= viewh { 0 } else { viewh - total + scroll_up };
+
+            // The selection band set, grouped for the emit pass.
+            let sel_rows: Vec<halcyond::select::FlatRow> = match (mode, sel.as_ref()) {
+                (Mode::Normal, Some(s)) => {
+                    let (lo, hi) = s.range();
+                    flat.iter().skip(lo).take(hi - lo + 1).copied().collect()
+                }
+                _ => Vec::new(),
+            };
+
+            let mut cart = cartoon::Cartoon::new();
+            cart.ops.push(cartoon::Op::Clear { color: sheet.ground });
+            let mut y = y0 + sheet.block_gap;
+            for (bi, b) in t.frozen_blocks().iter().enumerate() {
+                let lh = heights.iter().find(|(id, _, _)| *id == b.id).map(|(_, h, _)| *h).unwrap_or(0);
+                if y + lh >= 0 && y <= viewh {
+                    // Bands under the block's selected rows, then the text.
+                    for fr in sel_rows.iter().filter(|fr| fr.block == bi) {
+                        let laid = cache.get(b, widthi, &sheet, &mut gs);
+                        if let Some(line) = laid_line_for(laid, fr.item, fr.row) {
+                            cart.ops.push(cartoon::Op::Rect {
+                                x: 0,
+                                y: y + line.0,
+                                w: w as u32,
+                                h: line.1 as u32,
+                                color: sheet.sel_bg,
+                            });
+                        }
+                    }
+                    let laid = cache.get(b, widthi, &sheet, &mut gs);
+                    render_block(&mut cart, laid, y, &gs);
+                }
+                y += lh + sheet.block_gap;
+            }
+            if y + open_h >= 0 && y <= viewh {
+                for fr in sel_rows.iter().filter(|fr| fr.block == usize::MAX) {
+                    if let Some(line) = laid_line_for(&open_laid, fr.item, fr.row) {
+                        cart.ops.push(cartoon::Op::Rect {
+                            x: 0,
+                            y: y + line.0,
+                            w: w as u32,
+                            h: line.1 as u32,
+                            color: sheet.sel_bg,
+                        });
+                    }
+                }
+                render_block(&mut cart, &open_laid, y, &gs);
+            }
+            let py = y + open_laid.height;
+            render_block(&mut cart, &pending_laid, py, &gs);
+            // The cursor: a beam at the pending column (Insert ink; Normal
+            // renders it hollow-dim -- the mode is visible at a glance).
+            let (cx, cy, ch2) = cursor_pos(&pending_laid, t.pending_col(), &sheet);
+            let ccol = if mode == Mode::Insert { sheet.ink } else { sheet.dim };
+            cart.ops.push(cartoon::Op::Rect {
+                x: cx,
+                y: py + cy,
+                w: 2,
+                h: ch2.max(4) as u32,
+                color: ccol,
+            });
+
+            let px = surf.pixels();
+            cartoon::execute(&cart, &gs.packer.store, &cartoon::BlobStore::new(), px, w, None);
+            match surf.present(None) {
+                Ok(()) => {
+                    present_fails = 0;
+                    if !announced {
+                        announced = true;
+                        say!("halcyond: console up {}x{} px (rich transcript; mono grid {}x{})",
+                             w, h, (w as i32 / cell_w).max(1), (h as i32 / cell_h).max(1));
+                    }
+                }
+                Err(_) => {
+                    // A dropped frame, never death (#31); the next pass
+                    // re-renders. A live-stream-but-never-presents wedge
+                    // is the backstop below.
+                    present_fails += 1;
+                    dirty = true;
+                    if present_fails >= PRESENT_FAILS_FATAL {
+                        say!("halcyond: {} consecutive present failures; exiting", present_fails);
+                        return 1;
+                    }
+                }
+            }
+        }
 
         // (1) The next event (bounded wait only while input is held).
         let mut ev = if wait_is_bounded(feed_pending.len()) {
@@ -244,25 +445,83 @@ pub extern "C" fn rs_main() -> i64 {
                 TEV_KEY => {
                     if e.value >= 1 {
                         if mode == Mode::Normal {
+                            // Keep the flat list current before acting: new
+                            // output during Normal mode moves the rows.
+                            if flat_seq != t.seq {
+                                flat_seq = t.seq;
+                                flat = halcyond::select::flatten(&t);
+                                if let Some(s) = sel.as_mut() {
+                                    s.clamp(flat.len());
+                                }
+                            }
+                            let page_rows = ((h as i32 / cell_h) / 2).max(1);
                             match normal_key(e.code, e.rune) {
                                 NormalAct::ScrollLines(n) => {
-                                    scroll_up += n * cell_h;
+                                    // The cursor moves; the view follows at
+                                    // render (Helix, not a scroll wheel).
+                                    if let Some(s) = sel.as_mut() {
+                                        s.mv(-n, flat.len());
+                                    }
                                     dirty = true;
                                 }
                                 NormalAct::ScrollHalfPage(n) => {
-                                    scroll_up += n * (h as i32 / 2);
+                                    if let Some(s) = sel.as_mut() {
+                                        s.mv(-n * page_rows, flat.len());
+                                    }
                                     dirty = true;
                                 }
                                 NormalAct::Top => {
-                                    scroll_up = i32::MAX / 2;
+                                    if let Some(s) = sel.as_mut() {
+                                        s.cursor = 0;
+                                    }
                                     dirty = true;
                                 }
                                 NormalAct::Bottom => {
+                                    if let Some(s) = sel.as_mut() {
+                                        s.cursor = flat.len().saturating_sub(1);
+                                    }
+                                    dirty = true;
+                                }
+                                NormalAct::ToggleSelect => {
+                                    if let Some(s) = sel.as_mut() {
+                                        s.toggle_anchor();
+                                    }
+                                    dirty = true;
+                                }
+                                NormalAct::Yank => {
+                                    if let Some(s) = sel.as_ref() {
+                                        let text = s.yank(&t, &flat);
+                                        yank_buf.clear();
+                                        yank_buf.extend_from_slice(text.as_bytes());
+                                        say!("halcyond: yanked {} bytes", yank_buf.len());
+                                    }
+                                    if let Some(s) = sel.as_mut() {
+                                        s.anchor = None;
+                                    }
+                                    dirty = true;
+                                }
+                                NormalAct::Paste => {
+                                    // Paste = type the register into the
+                                    // prompt: back to Insert, re-anchored.
+                                    mode = Mode::Insert;
+                                    sel = None;
                                     scroll_up = 0;
+                                    if !yank_buf.is_empty() {
+                                        feed_pending.extend_from_slice(&yank_buf);
+                                        feed_drain(feed, &mut feed_pending,
+                                                   &mut feed_dropped, &mut feed_logged);
+                                    }
+                                    dirty = true;
+                                }
+                                NormalAct::Collapse => {
+                                    if let Some(s) = sel.as_mut() {
+                                        s.anchor = None;
+                                    }
                                     dirty = true;
                                 }
                                 NormalAct::ToInsert => {
                                     mode = Mode::Insert;
+                                    sel = None;
                                     scroll_up = 0;
                                     dirty = true;
                                 }
@@ -271,8 +530,12 @@ pub extern "C" fn rs_main() -> i64 {
                         } else if e.rune == 0x1b {
                             // Esc enters Normal (the Helix-modal boundary;
                             // full-screen ESC consumers live in raw-VT
-                            // panes, H-3).
+                            // panes, H-3). The cursor starts on the newest
+                            // row.
                             mode = Mode::Normal;
+                            flat_seq = t.seq;
+                            flat = halcyond::select::flatten(&t);
+                            sel = Some(halcyond::select::Sel::at_end(flat.len()));
                             dirty = true;
                         } else {
                             keybuf.clear();
@@ -344,93 +607,5 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
 
-        // (3) Render when the transcript moved or the view is dirty.
-        if t.seq != last_seq || dirty {
-            last_seq = t.seq;
-            dirty = false;
-            // Evict layouts for blocks the budget dropped.
-            {
-                let frozen = t.frozen_blocks();
-                let mut live: alloc::collections::BTreeSet<u64> =
-                    alloc::collections::BTreeSet::new();
-                for b in frozen.iter() {
-                    live.insert(b.id);
-                }
-                cache.evict_missing(&|id| live.contains(&id));
-            }
-            let widthi = w as i32;
-            // Lay everything visible; measure total height first.
-            let mut heights: Vec<(u64, i32)> = Vec::new();
-            let mut total: i32 = sheet.block_gap;
-            for b in t.frozen_blocks().iter() {
-                let lh = cache.get(b, widthi, &sheet, &mut gs).height;
-                heights.push((b.id, lh));
-                total += lh + sheet.block_gap;
-            }
-            let open_laid = layout_block(t.open_block(), widthi, &sheet, &mut gs);
-            let pending_laid =
-                layout_pending(t.pending_line(), &t.open_block().styles, widthi, &sheet, &mut gs);
-            let open_h = open_laid.height + pending_laid.height;
-            total += open_h;
-
-            let viewh = h as i32;
-            let max_up = (total - viewh).max(0);
-            if scroll_up > max_up {
-                scroll_up = max_up;
-            }
-            if scroll_up < 0 {
-                scroll_up = 0;
-            }
-            // Bottom-anchored: the content's bottom sits at the view bottom
-            // (raised by scroll_up).
-            let y0 = if total <= viewh { 0 } else { viewh - total + scroll_up };
-
-            let mut cart = cartoon::Cartoon::new();
-            cart.ops.push(cartoon::Op::Clear { color: sheet.ground });
-            let mut y = y0 + sheet.block_gap;
-            for b in t.frozen_blocks().iter() {
-                let lh = heights.iter().find(|(id, _)| *id == b.id).map(|(_, h)| *h).unwrap_or(0);
-                if y + lh >= 0 && y <= viewh {
-                    let laid = cache.get(b, widthi, &sheet, &mut gs);
-                    render_block(&mut cart, laid, y, &gs);
-                }
-                y += lh + sheet.block_gap;
-            }
-            if y + open_h >= 0 && y <= viewh {
-                render_block(&mut cart, &open_laid, y, &gs);
-            }
-            let py = y + open_laid.height;
-            render_block(&mut cart, &pending_laid, py, &gs);
-            // The cursor: a beam at the pending column (Insert ink; Normal
-            // renders it hollow-dim -- the mode is visible at a glance).
-            let (cx, cy, ch2) = cursor_pos(&pending_laid, t.pending_col(), &sheet);
-            let ccol = if mode == Mode::Insert { sheet.ink } else { sheet.dim };
-            cart.ops.push(cartoon::Op::Rect {
-                x: cx,
-                y: py + cy,
-                w: 2,
-                h: ch2.max(4) as u32,
-                color: ccol,
-            });
-
-            let px = surf.pixels();
-            cartoon::execute(&cart, &gs.packer.store, &cartoon::BlobStore::new(), px, w, None);
-            match surf.present(None) {
-                Ok(()) => {
-                    present_fails = 0;
-                }
-                Err(_) => {
-                    // A dropped frame, never death (#31); the next pass
-                    // re-renders. A live-stream-but-never-presents wedge
-                    // is the backstop below.
-                    present_fails += 1;
-                    dirty = true;
-                    if present_fails >= PRESENT_FAILS_FATAL {
-                        say!("halcyond: {} consecutive present failures; exiting", present_fails);
-                        return 1;
-                    }
-                }
-            }
-        }
     }
 }

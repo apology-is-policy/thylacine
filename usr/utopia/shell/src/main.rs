@@ -368,6 +368,11 @@ pub extern "C" fn rs_main() -> i64 {
     // A bare-spawned `ut` parses -1 and runs unchanged. A pts-hosted `ut` is
     // never given --consctl-fd; the !jc gate keeps a stray one from clobbering
     // the dance's pts ctl.
+    // H-2 F10: the per-prompt tier re-read's session state (armed by the
+    // consctl block below iff the initial read succeeded -- i.e. this is a
+    // console session that owns the advertisement chain).
+    let mut beacon_tier: Option<&'static str> = None;
+    let mut beacon_console = false;
     let consctl_fd = parse_consctl_fd();
     if !jc && consctl_fd >= 0 {
         repl.set_consctl_fd(consctl_fd as i32);
@@ -399,6 +404,10 @@ pub extern "C" fn rs_main() -> i64 {
                 repl.set_beacon_rich(true);
                 t_putstr("ut: beacon rich (transcript zones armed)\n");
             }
+            // H-2 F10: arm the per-prompt re-read (below) with this
+            // session's baseline.
+            beacon_tier = Some(t);
+            beacon_console = stdout_is_cons;
         } else {
             // Absent token / failed read: the inherited /env/BEACON (if any)
             // survives; children resolve none. Loud so the chain never fails
@@ -441,6 +450,7 @@ pub extern "C" fn rs_main() -> i64 {
     // command's interrupt forwarding stays in `wait_pids_interruptible` (the
     // shell is not in THIS loop while a child runs).
     let cons_fd = io::stdin().as_raw_fd();
+    let mut beacon_cycles: u64 = 0;
     let mut notes_fd = repl.notes_fd();
     let mut poll = PollSet::new();
     poll.add_raw(cons_fd, PollEvents::READ);
@@ -510,6 +520,24 @@ pub extern "C" fn rs_main() -> i64 {
                 Ok(n) => {
                     if let Some(code) = repl.feed(&buf[..n], &mut out) {
                         break code;
+                    }
+                    // H-2 F10: a completed command cycle drew a fresh prompt
+                    // -- re-read the renderer's tier so a renderer swap's
+                    // reset (the kernel clears the tier when a drain closes)
+                    // reaches /env/BEACON at the NEXT prompt, not never. One
+                    // leaf read per command; silent unless the tier CHANGED.
+                    if beacon_tier.is_some() && repl.prompt_cycles() != beacon_cycles {
+                        beacon_cycles = repl.prompt_cycles();
+                        if let Some(t2) = read_beacon_tier() {
+                            if Some(t2) != beacon_tier {
+                                beacon_tier = Some(t2);
+                                export_beacon(t2);
+                                repl.set_beacon_rich(t2 == "rich" && beacon_console);
+                                t_putstr("ut: beacon ");
+                                t_putstr(t2);
+                                t_putstr(" re-exported (renderer change)\n");
+                            }
+                        }
                     }
                 }
             }

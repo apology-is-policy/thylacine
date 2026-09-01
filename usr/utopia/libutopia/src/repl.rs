@@ -86,6 +86,11 @@ fn fmt_exit(buf: &mut [u8; 24], v: i64) -> &str {
 pub struct Repl {
     env: Env,
     editor: LineEditor,
+    /// H-2 F10: bumps once per completed command cycle (the accept arm's
+    /// fresh prompt). The session shell polls it to re-read the renderer's
+    /// tier per prompt -- a renderer swap resets the kernel tier, and a
+    /// stale `/env/BEACON` would defeat that reset for every child.
+    prompt_cycles: u64,
     /// #115a: the cached `/bin` external-command scan (the #58 exec namespace,
     /// static for the session). Merged with the live builtins / aliases / funcs
     /// to form the Tab-completion command index. Empty until `install_completion`.
@@ -126,6 +131,7 @@ impl Repl {
         Repl {
             env,
             editor: LineEditor::new(),
+            prompt_cycles: 0,
             bin_commands: Vec::new(),
             completion_installed: false,
             history_path: None,
@@ -452,6 +458,14 @@ impl Repl {
         p
     }
 
+    /// H-2 F10: how many command cycles have completed (each one drew a
+    /// fresh prompt). The session shell re-reads `/dev/beacon` when this
+    /// moves, so a renderer swap's tier reset reaches `/env/BEACON` at the
+    /// next prompt instead of never.
+    pub fn prompt_cycles(&self) -> u64 {
+        self.prompt_cycles
+    }
+
     /// Emit the current prompt + buffer to `out`. Call once before the first
     /// `feed` to draw the initial prompt.
     pub fn draw_prompt(&self, out: &mut dyn IoWrite) {
@@ -554,6 +568,10 @@ impl Repl {
                     self.zone_close(out);
                     self.zone_open(out, beacon::sink::Zone::Prompt);
                     self.emit_prompt(out);
+                    // H-2 F10: one completed cycle -- the caller's cue to
+                    // re-check the renderer tier before this fresh prompt
+                    // takes input.
+                    self.prompt_cycles = self.prompt_cycles.wrapping_add(1);
                 }
                 EditorAction::Cancel => {
                     // Ctrl-C: discard the edit, fresh prompt. The editor has

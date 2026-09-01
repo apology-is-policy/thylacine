@@ -93,6 +93,12 @@ pub struct LaidLine {
     pub h: i32,
     pub baseline: i32,
     pub segs: Vec<Seg>,
+    /// Source addressing for selection: the block item this visual line
+    /// came from (usize::MAX = layout furniture), and the table row when
+    /// the item is a table (usize::MAX for a plain line). Wrapped lines
+    /// share their item's address -- selection is row-wise over items.
+    pub src_item: usize,
+    pub src_row: usize,
 }
 
 /// A rectangle the block wants painted UNDER its text (SGR backgrounds,
@@ -225,7 +231,7 @@ impl<'a> LineBuilder<'a> {
         };
         let h = asc + desc;
         let segs = core::mem::take(&mut self.segs);
-        self.lines.push(LaidLine { y: self.y, h, baseline: self.y + asc, segs });
+        self.lines.push(LaidLine { y: self.y, h, baseline: self.y + asc, segs, src_item: usize::MAX, src_row: usize::MAX });
         self.y += h;
         self.pen_x = self.sheet.pad_x;
         self.any_body = false;
@@ -391,6 +397,7 @@ impl<'a> LineBuilder<'a> {
 pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) -> LaidBlock {
     let mut lb = LineBuilder::new(sheet, width.max(2 * sheet.pad_x + 8));
     for (item_idx, item) in b.items.iter().enumerate() {
+        let lines_before = lb.lines.len();
         match item {
             Item::Line(line) => {
                 for (s, e, sid) in runs_of(&line.cells) {
@@ -417,6 +424,13 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
                     color: sheet.rule,
                 });
                 lb.y += 7;
+            }
+        }
+        // Stamp the item's visual lines with their source address (tables
+        // stamped per-row inside lay_table already carry src_row).
+        for l in lb.lines[lines_before..].iter_mut() {
+            if l.src_item == usize::MAX {
+                l.src_item = item_idx;
             }
         }
     }
@@ -517,6 +531,10 @@ fn lay_table(
             }
         }
         lb.break_line(gs);
+        if let Some(last) = lb.lines.last_mut() {
+            last.src_item = item_idx;
+            last.src_row = ri;
+        }
         if t.hdr && ri == 0 {
             // The header rule.
             let y = lb.y;

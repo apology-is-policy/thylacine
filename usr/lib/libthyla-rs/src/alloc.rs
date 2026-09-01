@@ -107,7 +107,7 @@ pub struct ThylaAlloc;
 
 unsafe impl GlobalAlloc for ThylaAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ensure_initialized();
+        ensure_initialized(INITIAL_HEAP_SIZE);
         HEAP.alloc(layout)
     }
 
@@ -115,6 +115,28 @@ unsafe impl GlobalAlloc for ThylaAlloc {
         // Reaching dealloc means alloc succeeded, which means
         // ensure_initialized completed at least once. Skip the
         // check on the hot path.
+        HEAP.dealloc(ptr, layout)
+    }
+}
+
+/// The sized variant (H-2): identical machinery, a per-BINARY heap span.
+/// The span is LAZY (demand-zero overcommit), so a big span costs address
+/// space only until touched -- physical pages commit one at a time as the
+/// high-water mark rises, and the I-32 page budget charges at fault time.
+/// A binary with a real working set (halcyond: two parsed faces, atlas
+/// pages, the transcript's content budget) declares
+/// `ThylaAllocN<{64 * 1024 * 1024}>`; everything else keeps `ThylaAlloc`
+/// (4 MiB) and is byte-for-byte unaffected. Only one global allocator
+/// exists per binary, so the singleton HEAP/STATE stay correct.
+pub struct ThylaAllocN<const BYTES: usize>;
+
+unsafe impl<const BYTES: usize> GlobalAlloc for ThylaAllocN<BYTES> {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ensure_initialized(BYTES);
+        HEAP.alloc(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         HEAP.dealloc(ptr, layout)
     }
 }
@@ -128,7 +150,7 @@ unsafe impl GlobalAlloc for ThylaAlloc {
 // atomic load + compare. Realistic call sites are deeply inlined
 // inside Box::new / Vec::push / etc., so even hot allocation loops
 // pay only the load.
-unsafe fn ensure_initialized() {
+unsafe fn ensure_initialized(heap_bytes: usize) {
     if STATE.load(Ordering::Acquire) == STATE_READY {
         return;
     }
@@ -141,11 +163,11 @@ unsafe fn ensure_initialized() {
     ) {
         Ok(_) => {
             // Won the race. Perform the one-time init. The heap region is
-            // RESERVED lazily (overcommit): the 4 MiB span costs nothing until
+            // RESERVED lazily (overcommit): the span costs nothing until
             // the linked-list allocator hands out blocks that get written,
             // which fault pages in one at a time. A binary that allocates
             // little commits little.
-            let rc = t_burrow_attach_lazy(INITIAL_HEAP_SIZE as u64);
+            let rc = t_burrow_attach_lazy(heap_bytes as u64);
             if rc <= 0 {
                 // SYS_BURROW_ATTACH_LAZY returns a positive VA on success
                 // and -1 on failure. Treat both 0 and negative as
@@ -156,7 +178,7 @@ unsafe fn ensure_initialized() {
                 // No path to recover at heap init time. Fail fast.
                 t_exits(1);
             }
-            HEAP.lock().init(rc as usize as *mut u8, INITIAL_HEAP_SIZE);
+            HEAP.lock().init(rc as usize as *mut u8, heap_bytes);
 
             // Publish the initialized heap bounds. Release pairs
             // with the Acquire load above (and with the spin loop
