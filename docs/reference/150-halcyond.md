@@ -89,6 +89,71 @@ ut reads `/dev/beacon` and exports `/env/BEACON` (BEACON.md §12.3).
 - `Image`/`Embed` ops exist in the executor but no transcript path emits
   them yet (images are H-7).
 
+## The chrome (H-3b-3): the per-leaf tag bar
+
+`src/chrome.rs` — halcyond owns one `Role::Chrome` tapestry surface per
+visible leaf that carries a Daylight tag-bar strip, paints the whole strip,
+and the compositor PLACES it at the leaf's `tagbar` rect (the H-3b-2
+`surface_target` arm; `create W H role=chrome bind=<pane-id>` is
+renderer-gated, and halcyond is spawned with `T_SPAWN_PERM_CONSOLE_RENDERER`
+by joey's renderer-choice block). DISPLAY-only at H-3b-3: pills are
+commands (H-3c) and the live sage/cinnabar states ride the H-3b-4 status verb.
+
+```rust
+pub struct ChromeSet { /* BTreeMap<pane id, Tile{ surf, focused, name, dirty, dead }> */ }
+impl ChromeSet {
+    pub fn new() -> ChromeSet;
+    /// Bring the tiles in line with the layout; paints every dirty tile.
+    pub fn reconcile(&mut self, troot: i64, own_surface: u32, gs: &mut GlyphSource);
+    /// Drain every tile's events (non-blocking). True = a CONFIGURE was
+    /// seen; the caller then reconciles in the same pass.
+    pub fn pump(&mut self) -> bool;
+    pub fn len(&self) -> usize;
+}
+```
+
+**Data sources — the §13.7 file-walk bias, no new verb.** `troot` is a
+second `/srv/tapestry` root fd (the console `Surface` keeps its own
+private). `layout` gives the visible leaves (lines `<id>[*] leaf ...`; a
+trailing `hidden` is skipped; `*` marks the focused leaf); `pane/<id>/tagbar`
+gives the strip as `x y w h` (ZERO = bar-free: a single fullscreen leaf, or
+one too short to spare it); `pane/<id>/tag` gives the NAME. halcyond names its
+own pane once through that file (`"halcyon"` — HALCYON-VISUAL §4.1: the name
+is "the tile's program"; §13.6 names the tag file as the source); every other
+tile shows its `tag` or nothing.
+
+**The reconcile.** Diff the wanted set (every visible leaf with a non-ZERO
+strip) against the live tiles: gone or bar-free → drop (a dropped `Surface`
+closes its conn and the compositor retires the surface; pane ids are never
+reused, so a stale key can only mean gone); new → `Surface::chrome_on(id, w,
+h)` (a failure is said and skipped — the next relayout retries); kept →
+repaint (focus and names move; a same-size relayout also blanked the strip to
+the compositor's resting fill).
+
+**When it runs.** Only after the console's first successful present — the
+scanout is first-present-wins and chrome must never precede it — and then on
+every main-surface `TEV_CONFIGURE` (any structural relayout fans one to every
+visible hosted surface) or `TEV_FOCUS`, and whenever `pump` saw a CONFIGURE on
+a tile. A focus move is a focus-only epoch that fans no relayout CONFIGURE, so
+the compositor's focus-only branch fans the visible chrome surfaces a
+same-size CONFIGURE (the redraw request, coalesced by replacement); that is
+the wake that keeps the "resting, active tile" separator on the focused leaf.
+There is no timer.
+
+**The paint** (HALCYON-VISUAL §4.1/§4.2/§4.3), one cartoon list per strip:
+`Op::Clear{header}`; `Op::Rect` on the bottom row = the separator
+(`ember_deep` on the focused leaf's tile, else `border`); the name as one
+glyph run in `FACE_BODY` at 10.5 px, x = `METRICS.tag_pad_x`, baseline centred
+via `line_metrics` (`fg` on the focused tile, `fg_muted` resting); executed
+into `surf.pixels()` exactly as the transcript renders, then `present(None)`.
+`pump` never paints: painting on a CONFIGURE before the reconcile re-reads the
+layout would flash the stale state.
+
+**Events.** `FRAME` is a droppable, coalesced class and `CONFIGURE` coalesces
+by replacement, so an idle tile cannot wedge; `KEY`/pointer never reach chrome
+(not focused; `surface_at` walks leaf content rects). `TEV_CLOSE` or a dead
+stream marks the tile for the next reconcile.
+
 ## Tests
 
 - Host: 35 lib tests (the table above) — all `--offline` against the
@@ -105,8 +170,9 @@ ut reads `/dev/beacon` and exports `/env/BEACON` (BEACON.md §12.3).
 
 ## Status
 
-H-2 (the transcript MVP on the CPU floor) as of the H-2d close. Not yet:
-raw-VT panes (H-3; `raw_vt_intent` latches today), chrome/menus (H-3),
+H-2 (the transcript MVP on the CPU floor) as of the H-2d close; H-3b-3
+added the per-leaf tag-bar chrome (DISPLAY-only; the section above). Not yet:
+raw-VT panes (H-3; `raw_vt_intent` latches today), menus (H-3c),
 layouts (H-4), compose (H-5), the vk executor + the display-list wire
 (H-6), images/`Embed` (H-7). Damage-rect presents are a recorded
 optimization (v0 presents full frames).

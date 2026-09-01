@@ -4761,6 +4761,19 @@ impl Comp {
                     for r in rects {
                         self.screen_push(r);
                     }
+                    // H-3b-3: a focus move re-keys the tag bars ("resting,
+                    // active tile" moves), so the chrome surfaces get a
+                    // same-size CONFIGURE -- the redraw request, coalesced
+                    // by replacement -- and their owner re-reads the layout.
+                    let mut wedged: Vec<usize> = Vec::new();
+                    for (n, t) in self.visible_chrome() {
+                        if !self.emit_configure_to(n, t.w, t.h) {
+                            wedged.push(n);
+                        }
+                    }
+                    for n in wedged {
+                        self.retire(n);
+                    }
                 }
                 if entering {
                     let sres = self.screen.as_ref().map(|s| s.res).unwrap_or(0);

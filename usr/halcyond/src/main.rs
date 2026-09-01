@@ -41,7 +41,7 @@ use halcyond::transcript::Transcript;
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN,
     T_WALK_OPEN_FROM_ROOT};
-use tapestry::{Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_KEY};
+use tapestry::{Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY};
 
 macro_rules! say {
     ($($a:tt)*) => {{
@@ -198,6 +198,18 @@ pub extern "C" fn rs_main() -> i64 {
     }
     let mut surf = surf.unwrap();
     let (mut w, mut h) = (surf.w as usize, surf.h as usize);
+
+    // H-3b-3: the per-leaf chrome. A second tapestry root fd for the pane
+    // 9P tree reads (the console Surface keeps its own private); the chrome
+    // set reconciles after the first successful present and on every
+    // structural relayout (the main surface's CONFIGURE), and pumps its
+    // tiles' events every pass.
+    let troot = open_path("/srv/tapestry", T_OREAD);
+    if troot < 0 {
+        say!("halcyond: /srv/tapestry root open failed (no tag bars)");
+    }
+    let mut chrome = halcyond::chrome::ChromeSet::new();
+    let mut relayout = true;
 
     let mut gs = GlyphSource::new_vendored(512);
     if gs.face_count() != 2 {
@@ -417,6 +429,20 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
 
+        // (0d) H-3b-3: the chrome. Only once the console is up (first-
+        // present-wins scanout: chrome never precedes it), then on every
+        // relayout; the pump is per pass (FRAME never queues, CONFIGURE
+        // coalesces, so this is cheap when idle).
+        if announced {
+            if chrome.pump() {
+                relayout = true;
+            }
+            if relayout {
+                relayout = false;
+                chrome.reconcile(troot, surf.id, &mut gs);
+            }
+        }
+
         // (1) The next event (bounded wait only while input is held).
         let mut ev = if wait_is_bounded(feed_pending.len()) {
             match surf.poll_event() {
@@ -556,6 +582,7 @@ pub extern "C" fn rs_main() -> i64 {
                     match surf.handle_configure(&e) {
                         Ok(false) => {
                             dirty = true; // same-size redraw request
+                            relayout = true; // a structural relayout fanned it
                         }
                         Ok(true) => {
                             w = surf.w as usize;
@@ -566,6 +593,7 @@ pub extern "C" fn rs_main() -> i64 {
                             cache.map.clear();
                             report_winsize(consctl, w, h);
                             dirty = true;
+                            relayout = true;
                         }
                         Err(TapError::Busy) => {}
                         Err(e2) => {
@@ -573,6 +601,11 @@ pub extern "C" fn rs_main() -> i64 {
                             return 1;
                         }
                     }
+                }
+                TEV_FOCUS => {
+                    // H-3b-3: focus moved onto or off the console -- the
+                    // tag bars re-key; re-read the layout next pass.
+                    relayout = true;
                 }
                 _ => {}
             }

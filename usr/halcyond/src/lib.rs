@@ -11,6 +11,7 @@
 
 extern crate alloc;
 
+pub mod chrome;
 pub mod input;
 pub mod layout;
 pub mod raster;

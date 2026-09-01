@@ -347,6 +347,61 @@ with chrome present, wrong.
 
 Verified at jobs=1 after a ~75-minute wait for the mac (aux's audit close held it; I queued, declared `busy`, and waited on a 90-s-quiet-of-aux-QEMU signal rather than a lease expiry that `resources` later explained as a re-hold's TTL artifact): ls-gfx-panes PASS [42 s] (the four gate probes: `battery: chrome-create gate OK` + the exp's `discriminates (E_INVAL syntax / E_PERM non-renderer)`; the H-3b-1 tag-bar witness intact) + ls-halcyon PASS [27 s] (split/zoom reflow + the four-value bevel) + ls-gfx-chords PASS [36 s] (chord focus moves + `gaps` changes over the structural-vs-focus-only repaint split), all at LS_CI_JOBS=1; tapestryd/libtapestry/battery build clean (only the 3 pre-existing warnings); bake OK, keys paired. Vault: server.rs (sub-tapestryd) + lib.rs (sub-libtapestry) deltas rung on yip 0031; the battery + the .exp unowned (sweep filed). **Next: H-3b-3**, halcyond's per-leaf chrome surfaces — the positive twin of this sub-chunk's E_PERM probe.
 
+### H-3b-3: halcyond paints the tag bar — and the greens that were skips (same run, at the 600k line)
+
+**The finding first, because it reaches back two sub-chunks.** H-3b-3's first
+verify came back `PASS: ls-halcyon [27s]`. Before claiming the witness I
+grepped the scenario's log for my own new pass lines — and found none. Not one
+`LS-CI PASS` in the whole log; the steps file read boot → `exit` → quit. The
+scenario is env-gated to the halcyond-renderer lever image and had SKIPPED:
+`puts "LS-CI SKIP: ..."` then `lc_quit; exit 0` — and the harness scores exit
+0 as PASS. Its SKIP code is 77 (three gfx scenarios already use it, and the
+summary then says "SKIPPED — NOT coverage"). So every "ls-halcyon PASS [27 s]"
+in today's H-3b-1 and H-3b-2 records was a skip read as a witness — the 27 s
+should have said so (H-3a-2's genuine lever run took 35 s). The sweep for the
+shape found one more: ls-gfx-chords prints a bare `==> SKIP` (no `LS-CI SKIP:`
+marker the harness could even quote) and exits 0; its own comment said "the
+runner counts it PASS". Its H-3b-1/H-3b-2 greens were skips too — H-3a-2 had
+written "SKIPs sans cfg-4" honestly, and I then read the PASS rows as
+evidence. Both exps now print `LS-CI SKIP:` and exit 77; both status rows are
+corrected. This is #212 (a skip reported as a pass) recurring in my own hands
+one day after it was pinned, and what caught it was the discipline of reading
+the log for the witness line rather than the verdict — the verdict was true
+and irrelevant. The code those rows describe is unchanged and was exercised by
+ls-gfx-panes; what was hollow was the *halcyon-side* claim, which this
+sub-chunk's real lever run now supplies.
+
+**The chrome.** `halcyond::chrome` owns one `Role::Chrome` surface per visible
+leaf that carries a strip. `reconcile` reads the pane 9P tree the §13.7 way —
+`layout` for the visible leaves and the focused `*`, `pane/<id>/tagbar` for the
+strip (ZERO = bar-free), `pane/<id>/tag` for the name — and diffs it against
+the live tiles: gone → drop (a dropped `Surface` closes its conn; the compositor
+retires), new → `Surface::chrome_on`, kept → repaint. halcyond names its own
+pane once through the same `tag` file ("halcyon" — §4.1's "the tile's program";
+§13.6 already named the tag file as the name source). One cartoon list per
+strip: the header ground, a 1 px separator on the bottom edge (`ember_deep` on
+the focused leaf's tile — "resting, active tile" — else `border`), the name in
+the proportional face at 10.5 px, centred via `line_metrics`. No pills: a
+Resting bar has none, and pills are commands, which is H-3c. `pump` drains
+every tile's events and returns whether a CONFIGURE was seen, which triggers a
+reconcile in the same pass — painting in the pump would flash the stale
+state. It runs only after the console's first successful present (the scanout
+is first-present-wins; chrome must never precede it), then on every
+main-surface CONFIGURE or FOCUS.
+
+**A gap in my own design, found by asking what wakes it.** The plan said
+"react to relayouts": a structural relayout fans every visible surface a
+CONFIGURE, so the main surface's CONFIGURE is the wake. But a focus move is a
+focus-only epoch, which fans nothing — so the separator that is supposed to
+follow focus would go stale on exactly the event it exists to show. The
+compositor's focus-only branch now fans the visible chrome surfaces a
+same-size CONFIGURE (the existing redraw request, coalesced by replacement),
+and the ls-halcyon witness asserts the round trip: after Super+Left the two
+separators swap.
+
+Verified, this time on the levers and by the lines, not the verdict: ls-halcyon on the THYLACINE_HALCYON=1 lever PASS [37 s] -- `pre-split control -- no tag-bar strip on a single leaf (dom 242,235,224)`, `left tag bar is Daylight header with name ink (186 4672 off/total)`, `tag-bar separators carry focus (left border, right ember_deep)`, `focus move re-keyed the tag-bar separators (left ember_deep, right border)`, `zoom dropped the tag bars (single leaf, strip ZERO)`, plus every H-2/H-3a-2 leg (parchment+ink, 63-col reflow, the four-value bevel, the rich chain); no `halcyond: chrome ... failed` line. ls-gfx-chords on the THYLACINE_AURORA_CFG4=1 lever PASS [34 s] with its real body (Super+H split, gaps 8 = the Daylight floor, Super+F unbound, Super+G zoom rebind + toggle) -- the first time today that scenario RAN. Default fixtures restored (0 lever lines in the restore bake) and ls-gfx-panes PASS [41 s] on them with both H-3b legs (`per-leaf tag bar renders Daylight header-bg`, `chrome-create gate discriminates`). All at LS_CI_JOBS=1; builds clean; keys paired. Three bakes for one sub-chunk (the halcyon lever, the cfg-4 lever, the default restore) is the cost of the lever design, and it is the right cost: a verdict that cannot tell a skip from a pass is the expensive thing. Vault: the server delta (the focus-epoch fan) rung on yip 0031; halcyond + both exps are unowned (`150-halcyond.md` gained the chrome section; sweep filed). **Next: H-3b-4** -- the gated `tag <pane-id> status` verb, the live sage/cinnabar states in both painters, and THE audit round covering H-3b-2's gate + this create path, with the AUDIT-TRIGGERS row.
+
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon

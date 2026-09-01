@@ -98,17 +98,20 @@ lc_login michael correct-horse-battery-staple-v1
 # ENV-GATE probe (F1): this scenario is enrolled in the default LS-CI glob,
 # but the compositor-tier test lines are baked ONLY under
 # THYLACINE_AURORA_CFG4=1. On a default image /lib/aurora/config carries no
-# `chord ` line -- SKIP cleanly (the go5.exp idiom: lc_quit + exit 0 = the
-# runner counts it PASS), never a deterministic red that trains red-blindness.
+# `chord ` line -- SKIP cleanly (exit 77: the harness scores SKIP, a third
+# state that is neither a red that trains red-blindness nor a PASS that reads
+# as coverage -- exit 0 here was read as a witness twice).
 # The `chord ` grep is output-only (a config line, never a typed echo).
 set timeout 8
 send "cat /lib/aurora/config\r"
 expect {
     -re {chord super\+g zoom} { lc_step "cfg-4 config present (super+g=zoom baked)" }
     timeout {
-        send_user "\n==> SKIP ls-gfx-chords: cfg-4 config not baked (build with THYLACINE_AURORA_CFG4=1 to run)\n"
+        puts "\nLS-CI SKIP: cfg-4 config not baked (build with THYLACINE_AURORA_CFG4=1 to run ls-gfx-chords)"
         lc_quit
-        exit 0
+        # 77 = the harness's SKIP code (scored SKIP, summarized as "NOT
+        # coverage"); exit 0 was scored PASS and read as a witness twice.
+        exit 77
     }
     eof { lc_fail "qemu exited during the cfg-4 config probe" }
 }

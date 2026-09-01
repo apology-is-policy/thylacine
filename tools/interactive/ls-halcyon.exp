@@ -50,7 +50,7 @@ proc hkey {chord} {
 }
 
 # Screendump + region verdict: "<off> <total> <dom_r> <dom_g> <dom_b>".
-proc region {x0 y0 x1 y1} {
+proc region {x0 y0 x1 y1 {r 242} {g 235} {b 224}} {
     global repo qmp
     set out /tmp/ls-halcyon-[pid].png
     file delete -force $out
@@ -58,7 +58,7 @@ proc region {x0 y0 x1 y1} {
         return "DUMP-ERR $err"
     }
     if {![file exists $out]} { return "DUMP-MISSING" }
-    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py $out $x0 $y0 $x1 $y1 242 235 224} verdict]} {
+    if {[catch {exec python3 $repo/tools/interactive/gfx_region.py $out $x0 $y0 $x1 $y1 $r $g $b} verdict]} {
         return "REGION-ERR $verdict"
     }
     return $verdict
@@ -75,7 +75,10 @@ expect {
         puts "\nLS-CI SKIP: default image (aurora fbcon) -- the halcyon lever\
  is not baked. Bake with THYLACINE_HALCYON=1 to run this scenario."
         lc_quit
-        exit 0
+        # 77 = the harness's SKIP code: scored SKIP and summarized as "NOT
+        # coverage". exit 0 here was scored PASS, and three H-3b runs read that
+        # PASS as a bevel/tag-bar witness the scenario never executed.
+        exit 77
     }
     -re {EXTINCTION:} { lc_extinction_fail "extinction before the renderer spawn" }
     timeout { lc_fail "no renderer spawn line within ${lc_boot_timeout}s" }
@@ -125,6 +128,15 @@ lc_pass "halcyon: parchment ground + ink ($off/$total non-ground px, dom $dr,$dg
 lc_run_expect "cat /dev/winsize" "winsize 128 "
 lc_pass "halcyon: full-width mono grid reported (128 cols)"
 
+# H-3b-3 control: the tag-bar strip does not exist on a single fullscreen
+# leaf -- the region the left pane's strip will occupy after the split is
+# transcript parchment now, not Daylight header (the strip APPEARS with the
+# split; the name ink appears with halcyond's paint).
+set vpre [region 8 6 300 22 206 196 182]
+if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vpre -> p_off p_tot pr pg pb]} { lc_fail "pre-split strip region unparseable: $vpre" }
+if {$pr == 206 && $pg == 196 && $pb == 182} { lc_fail "pre-split: the strip region already reads header on a single leaf (the >1-leaf gate is broken)" }
+lc_pass "halcyon: pre-split control -- no tag-bar strip on a single leaf (dom $pr,$pg,$pb)"
+
 hkey "meta_l+h"
 lc_send "cat /dev/winsize"
 set timeout $lc_cmd_timeout
@@ -166,14 +178,58 @@ if {$lr == $tr && $lg == $tg && $lb == $tb} {
 }
 lc_pass "halcyon: Daylight NNW bevel painted (left 226,214,192 != top 248,242,230 -- four-value)"
 
+# H-3b-3: the per-leaf tag bar, painted by halcyond -- the POSITIVE twin of
+# ls-gfx-panes' E_PERM probe (the same `role=chrome` create from the
+# renderer, composited at the strip). At gaps=1 the strip is y 4..24 (floor
+# 1 + bevel 2 + hairline 1 above it). The left (halcyond) strip's interior
+# must be Daylight header WITH INK (the name "halcyon" in fg_muted) and its
+# bottom row the resting separator (border); the split focused the NEW
+# (right, empty) leaf, whose strip carries the "resting, active tile"
+# separator (ember_deep). Retried: the chrome lands a relayout after the
+# split's CONFIGURE.
+proc strip_want {x0 y0 x1 y1 r g b what want_ink} {
+    set v ""
+    for {set i 0} {$i < 12} {incr i} {
+        set v [region $x0 $y0 $x1 $y1 $r $g $b]
+        if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off tot dr dg db]} {
+            if {$dr == $r && $dg == $g && $db == $b && (!$want_ink || $off > 0)} {
+                return "$off $tot"
+            }
+        }
+        after 500
+    }
+    lc_fail "$what: region $x0,$y0-$x1,$y1 never read dominant $r,$g,$b (want_ink=$want_ink; last: $v)"
+}
+set ink [strip_want 8 6 300 22 206 196 182 "left strip interior" 1]
+lc_pass "halcyon: left tag bar is Daylight header with name ink ($ink off/total)"
+strip_want 8 23 300 24 168 152 128 "left strip separator (unfocused -> border)" 0
+strip_want 700 23 1200 24 200 96 48 "right strip separator (focused new leaf -> ember_deep)" 0
+lc_pass "halcyon: tag-bar separators carry focus (left border, right ember_deep)"
+
 # A chord split moves focus to the NEW (empty) leaf (pane.rs split:
 # `self.focused = new_leaf` -- caught when zoom targeted the empty pane
 # and halcyond, hidden, never got the restore CONFIGURE). Focus back to
 # halcyond first; THEN zoom it to full width.
 hkey "meta_l+left"
+# Focus back on halcyond: the separators swap. A focus-only epoch reaches
+# the chrome as a same-size CONFIGURE; halcyond re-reads the layout's `*`.
+strip_want 8 23 300 24 200 96 48 "left strip separator after focus-back (ember_deep)" 0
+strip_want 700 23 1200 24 168 152 128 "right strip separator after focus-back (border)" 0
+lc_pass "halcyon: focus move re-keyed the tag-bar separators (left ember_deep, right border)"
 hkey "meta_l+f"
 lc_run_expect "cat /dev/winsize" "winsize 128 "
 lc_pass "halcyon: zoom restored the full grid (reflow round-trip)"
+# Zoomed = one visible leaf: the strips are ZERO and halcyond drops its
+# chrome tiles; the region reads transcript again, not header.
+set gone 0
+set v ""
+for {set i 0} {$i < 12} {incr i} {
+    set v [region 8 6 300 22 206 196 182]
+    if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> zo zt zr zg zb] && !($zr == 206 && $zg == 196 && $zb == 182)} { set gone 1; break }
+    after 500
+}
+if {!$gone} { lc_fail "zoomed: the left strip region still reads header (chrome not dropped / strip not ZERO): $v" }
+lc_pass "halcyon: zoom dropped the tag bars (single leaf, strip ZERO)"
 
 lc_quit
 

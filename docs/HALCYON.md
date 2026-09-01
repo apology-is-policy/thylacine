@@ -596,7 +596,12 @@ and i3's per-window title bar are the prior art, both per-window). Concretely:
   reused). Chrome rides the structural CONFIGURE fan with the STRIP size (the
   relayout hook) and the frame fan; the compositor's resting `header` fill is
   painted on STRUCTURAL repaints only, so a focus-only repaint never paints
-  over a chrome surface's pixels.
+  over a chrome surface's pixels. AS-BUILT (H-3b-3): a FOCUS-only epoch also
+  fans the visible chrome surfaces a same-size CONFIGURE (the redraw request,
+  coalesced by replacement) — the "resting, active tile" separator moves with
+  focus, and halcyond re-reads the layout's `*` on it. halcyond names its own
+  pane through the pane's `tag` file ("halcyon"); every other tile shows its
+  `tag` or nothing.
 - **Aurora (no halcyond chrome surface) on multi-leaf:** the compositor paints
   the per-leaf tag-bar strip with the Daylight `header` background as a resting
   fallback (the pane's `tag` file supplies a name if set) — vote-1-compatible
