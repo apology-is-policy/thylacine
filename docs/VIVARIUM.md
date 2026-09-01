@@ -3594,10 +3594,16 @@ Brand detection is **advisory input to a declaration**, never an inference:
    `PHENO_LINUX`: a binary resolved for exec through such a mount is stamped Linux
    even outside any vivarium. Both channels are OR-combined at the single exec-time
    phenotype stamp; no ELF byte, note, or interpreter path ever adds a third.
-2. Within a declared-Linux vivarium, every exec is `PHENO_LINUX` unless the binary is
-   positively identified as native (a Thylacine-native brand, §12.2).
+2. Within a declared-Linux vivarium, every image load is `PHENO_LINUX` — the vivarium's
+   **Territory** carries the declaration (`Territory.root_pheno`, §13.10.3), so every spawn
+   and `execve` in that namespace re-decides Linux — unless the binary is positively
+   identified as native (a Thylacine-native brand, §12.2; deferred). *(Amended by Design D,
+   §13.10, 2026-09-01: the declaration moved from a per-Proc stamp carried across `execve`
+   to a namespace property re-decided at every image load.)*
 3. Outside a vivarium **and not resolved through an `MPHENO_LINUX` mount**, the
-   phenotype is always `PHENO_NATIVE`. Only a namespace-composed declaration (a
+   phenotype is always `PHENO_NATIVE` — and it is decided at **every image load** (every
+   spawn variant and `execve`, §13.10.1), never carried across an `execve` from the previous
+   image; only `rfork`, which loads no image, preserves it. Only a namespace-composed declaration (a
    manifest, or a pheno-mount) ever sets it — never an ELF byte, note, or interpreter
    path. The fail-safe direction is preserved on BOTH channels: a coverage gap in
    either one leaves a binary NATIVE, never silently Linux (§13's fail-safe property).
@@ -3609,7 +3615,9 @@ Brand detection is **advisory input to a declaration**, never an inference:
 set by `viv` from the manifest's `annotations["org.thylacine.phenotype"]` on the
 container's **entrypoint** spawn only (the per-container diorama stays native —
 it is a Thylacine server that happens to serve a Linux-shaped world). Rule 2 is
-the ordinary `rfork` inherit in `rfork_internal`. Rule 3 is realised in the
+the ordinary `rfork` inherit in `rfork_internal` — and, since Design D (§13.10), the
+`Territory.root_pheno` seed that makes every in-container `execve` re-decide Linux; `execve`
+itself re-decides at every image load (§13.10.4). Rule 3 is realised in the
 ABI's *shape* rather than in a check: only `SYS_SPAWN_FULL_ARGV` carries the
 field, so the register-argument spawn variants cannot declare at all. Rule 4 is
 `elf_brand_hint`'s single caller in `exec_setup_from_spoor`, consulted **only
@@ -3714,9 +3722,10 @@ no coarseness footgun, and `git` ships as a plain pool file.
    (`if (pheno_linux) p->phenotype = PHENO_LINUX;`, the spawn thunk), `pheno_linux`
    already carries BOTH channels: the manifest `sa->pheno_flags` OR'd, at the
    SYS_SPAWN_FULL_ARGV resolution site, with the resolver's `exe_pheno_linux`. The stamp
-   itself stays channel-agnostic. Like the manifest channel, the mount channel rides
-   ONLY `SYS_SPAWN_FULL_ARGV` (the sole fresh-phenotype declarer, ARCH I-43); other
-   exec paths inherit via `rfork`.
+   itself stays channel-agnostic. *(As first built the mount channel rode ONLY
+   `SYS_SPAWN_FULL_ARGV`, other exec paths inheriting via `rfork`; **Design D (§13.10,
+   2026-09-01) applies the stamp at EVERY image load — every spawn variant and `execve` —
+   seeded by the resolving Territory's `root_pheno`; only `rfork` inherits.**)*
 4. **The scope is the true one.** Because the declaration is a property of the RESOLUTION
    (which mount you crossed), the SAME file is Linux reached through `/viv/bin` and
    native reached by any other path — the phenotype is a property of HOW you named it,
@@ -3763,7 +3772,8 @@ malfunction, never escalation. The `pheno_flags` manifest bit was *already* unga
 ("any Proc may declare its child's decode mode"), so the mount is a second ungated route
 to the same no-authority state, not a new hole.
 
-**Caveat — the mount channel is spawn-only (F3, sub-chunk-B holotype).** The crossing is
+**SUPERSEDED by Design D (§13.10, 2026-09-01) — kept as the historical record. Caveat — the
+mount channel is spawn-only (F3, sub-chunk-B holotype).** The crossing is
 read at exactly one site: the `SYS_SPAWN_FULL_ARGV` resolution (the sole fresh-phenotype
 declarer). A process that **`execve`s** `/viv/bin/git` (rather than spawning it) keeps
 its *inherited* phenotype — the six non-declaring exec callers use the phenotype-agnostic
@@ -3780,6 +3790,10 @@ location, and that asymmetry is intended, not a bug.
   from wrapping it in a diorama). That is what makes it *seamless* — git sees the
   user's cwd and files, which an isolated container territory could not. Sound because
   `/viv/bin` is system-owned: only trusted shipped binaries live behind the pheno-mount.
+  **Design D constraint (§13.10.8):** because `execve` now re-decides by location, the
+  *entire exec closure* of a `/viv/bin` program must itself sit behind a pheno-mount (for
+  git: `GIT_EXEC_PATH` ⊆ `/viv/bin`, verified in-guest) — a helper resolved from outside one
+  re-decides native.
 - **The A-3 wall stands, and it bounds the *user* story (AS-BUILT correction,
   sub-chunk B).** Per-principal 9P ownership (A-3) is **unbuilt at v1.0**
   (`tools/build.sh` states this at the git-probe staging): the pool 9P layer stamps
@@ -3899,6 +3913,284 @@ location, and that asymmetry is intended, not a bug.
     / `-territory` / `-syscall-dispatch`, `sub-stratum-boot`, `sub-substrate-build`).
 
 ---
+
+### 13.10 Design D — the phenotype re-decided at every image load (operator vote 2026-09-01)
+
+**Status: DESIGN RATIFIED (scripture-first). Operator-approved 2026-09-01 after an
+adversarial design review (§13.10.9). SUPERSEDES §13.4's F3 caveat ("the mount channel
+is spawn-only … that asymmetry is intended, not a bug") and AMENDS §12.1 rules 2/3 and
+§13.3 rule 3. No code at this commit; the implementation lands against this section and
+cites it.**
+
+#### 13.10.0 The requirement that forced it
+
+Milestone C2's wiring (`docs/GIT-ON-THYLACINE.md` §C2) wants `core.editor=nora`. git runs
+`PHENO_LINUX` (spawned through `/viv/bin`, §13.5); `nora` is Thylacine-native (`/bin/nora`,
+libthyla-rs). git launches its editor by `execve` — a bare editor name is exec'd directly,
+no `/bin/sh`. As-built at `dfd7aad7`, `sys_execve_core` (`kernel/syscall.c:9135`) resolved
+through the phenotype-*agnostic* wrapper (`exec_resolve_from_namespace`, NULL `pheno_out`)
+and never wrote `p->phenotype`, so **execve preserved the caller's phenotype** and
+`execve(nora)` from Linux git would have run the native nora under Linux decode — every
+native syscall number mis-read. §12.2's positive native brand is an explicitly deferred
+v1.x seam (main's). There was no path.
+
+The as-built rule was also *internally* inconsistent: `kernel/stalk.c:533` states "the
+phenotype is a property of the FINAL resolved binary's location", and the spawn thunk
+honors that, but execve — an image load like any other — did not. Design D makes the code
+honor the contract scripture already claimed.
+
+#### 13.10.1 The invariant (restated)
+
+**A phenotype is the ABI of the LOADED IMAGE.** It is decided at **every image load** —
+every spawn variant *and* `execve` — from the namespace, and defaults to native (the §12.1
+rule-3 fail-safe). `rfork` **preserves** it: a fork loads no image, the child runs the same
+one (`kernel/proc.c:1401`, already true). `execve` **re-decides** it: a new image. One stamp,
+one rule; the fork/exec split is exactly POSIX's "the ABI follows the image, and the image
+changes only at exec."
+
+The stamp, identical at every image load:
+
+> `PHENO_LINUX` **iff** (a) the exec-resolution walk **crosses an `MPHENO_LINUX` mount**
+> (§13.3, by-location — `/viv/bin`, `/viv/abin`), **or** (b) the resolving **Territory
+> declares Linux** (`Territory.root_pheno`, §13.10.3 — the container's namespace-level
+> declaration); **else `PHENO_NATIVE`.**
+
+Results, all from that one rule (each re-derived by the review, §13.10.9):
+
+- git (`/viv/bin`, crosses → Linux) `execve`s `nora` (`/bin`, crosses nothing, the user
+  namespace's `root_pheno` is false → **native**). nora works as the editor.
+- git `execve`s its Linux helpers (`git-remote-https` etc., resolved through `/viv/bin` →
+  Linux) — subject to the closure constraint of §13.10.8.
+- A container is uniformly Linux: `root_pheno=true` makes every in-container image load
+  Linux — the entrypoint, execve'd helpers in the rootfs, and rfork descendants.
+- The per-container diorama stays native: spawned before the declaration, from `/bin`,
+  crossing nothing (`usr/viv/src/main.rs:507`).
+
+#### 13.10.2 Why not a native-declaring mount (Design C): the fail-safe direction
+
+The obvious symmetric fix — an `MPHENO_NATIVE` flag on the native `/bin`, with execve
+preserving by default and a native-mount crossing resetting to native — was built out on
+paper and rejected on principle, not taste. It requires a **positive native declaration**,
+and a declaration's coverage gaps fail in the direction of its absence: an unmarked native
+binary would run under the *inherited Linux* ABI. That is the exact failure §13.4's
+fail-safe paragraph forbids — `MPHENO_LINUX` is "a DECLARATION whose gaps fail safe by
+construction" precisely because its absence means native. Design C inverts that: its gaps
+fail *unsafe*. Design D keeps the direction: **you are native unless a namespace
+declaration positively says Linux**, and every gap — a resolver error, an OOM, a missed
+mount, a failed load — leaves a binary native.
+
+#### 13.10.3 The container: `Territory.root_pheno`, not a rootfs pheno-mount
+
+The first cut of D had the container declare Linux by mounting its rootfs `MPHENO_LINUX`.
+That does not work, and the reason is load-bearing: **`territory_chroot` swaps
+`root_spoor` to the source Spoor** (`kernel/territory.c:1011`, atomic under `ns_lock`),
+so a container reaches its binaries from *inside* any rootfs mount. The crossing
+accumulator (`stalk_cross_mounts`, set-only on entering a pheno-mount) never fires for an
+in-container exec — a rootfs mount would silently fail to re-declare Linux across execve,
+exactly the fail-safe-toward-native malfunction that would break every container. The
+namespace object itself must carry the declaration:
+
+1. **`Territory.root_pheno`** — a flag bit in the Territory. It occupies the existing
+   `u32 _pad` at `kernel/include/thylacine/territory.h:214` (renamed to a flags word), because
+   `sizeof(struct Territory)` and its field offsets are `_Static_assert`-pinned
+   (`territory.h:253`, `:267-281`); appending a field would break the pins or, worse, be
+   "fixed" by moving offsets (review F7). `territory_alloc` KP_ZEROes it: a fresh Territory
+   declares nothing (fail-safe).
+2. **`territory_clone` copies it, under `ns_lock`, next to `root_spoor`**
+   (`territory.c:155`). This is a stated obligation, not an incidental: the clone copies
+   fields one by one, so an omitted copy would let a container child *look* Linux (the
+   rfork phenotype inherit) and then revert to native on its first execve — a silent break
+   of the whole descendant subtree (review F2 = self-audit SA-1; regression test owed:
+   fork inside a container, then exec).
+3. **`SPAWN_PHENO_LINUX` deepens in meaning; no new syscall.** The flag has always meant
+   "this child is a Linux world"; it now says so at the namespace level: in the
+   `SYS_SPAWN_FULL_ARGV` thunk, before EL0, it sets `root_pheno` on the CHILD's freshly
+   cloned Territory (the same set-once-before-EL0 discipline as the identity / allowance /
+   page-budget stamps at `syscall.c:8480-8518`). The child's own phenotype then follows from
+   the stamp (`crossed || child->territory->root_pheno`). This replaces the first cut's
+   "small syscall for viv to declare its own territory Linux" (review F4): it needs no new
+   syscall, keeps `viv`'s own territory native (viv never becomes a Linux world merely for
+   having launched one), makes `root_pheno` **set-once-before-EL0** so the resolver reads it
+   with a plain atomic load and no lock, and still propagates by clone. `viv` needs no
+   change for this half — it already passes the flag on the entrypoint spawn
+   (`usr/viv/src/main.rs:664`) and 0 on the diorama.
+4. **The narrowing, stated.** Under the old per-Proc model a container could in principle
+   host a native helper (spawned with `pheno=0`); under `root_pheno=true` any in-container
+   image load of a native binary re-decides Linux and mis-decodes. Accepted: a container is
+   *defined* as a uniformly-Linux world (§7.2), and a native program's place is the user
+   namespace, where `/viv/bin` gives by-location Linux next to native `/bin`. Nested
+   containers cannot run the native `viv` either — consistent with the existing
+   no-nested-containers posture (review F8.3).
+
+The declaration stays **ungated**, on §13.4's argument: setting `root_pheno` on a child's
+territory confers ABI shape and no capability (I-43); a mis-declared child mis-decodes its
+own calls behind its own gates.
+
+#### 13.10.4 The execve ordering (review F1): the load-bearing specification
+
+"execve re-stamps from the resolver result" is underspecified, and **every naive placement
+of the mutation is unsound in a different way** — the review found three consumers of
+`p->phenotype` during execve that straddle the commit point and pull in incompatible
+directions. The specification below is the design's load-bearing claim; an implementation
+that reads `p->phenotype` at any of these three sites is wrong even if it passes the tests.
+
+- **Leg A — the signal-state leak on the actual editor path.** The execve signal reset is
+  phenotype-conditional (`kernel/proc.c:3309-3314`): a Linux image keeps its `SIG_IGN` rows
+  and its `note_mask` (POSIX), a native image clears everything (Plan 9). It runs inside
+  `proc_exec_drop_image_state`, from `proc_exec_replace`, *after* the load. If the re-stamp
+  lands after that (the natural "stamp once committed" reading), a git→nora exec reads the
+  STALE Linux phenotype, takes the Linux arm, and keeps git's blocked-note mask — which the
+  delivery core reads ungated by phenotype (`notes.c:695`). Native nora would then defer
+  notes it never masked. An I-19 correctness defect on the very C2 flow.
+- **Leg B — fail-unsafe on a failed load.** The literal reading ("re-stamp from the
+  result") mutates right after the resolve, *before* `exec_load_into` (`syscall.c:9221`).
+  But the load can fail (`:9226`), and a failed execve returns to the **surviving old
+  image** (built detached, `:9209-9242`). An already-flipped phenotype leaves the old image
+  decoding its own calls under the wrong ABI. A failed execve must leave the process
+  wholly unchanged.
+- **Leg C — the PT_INTERP dispatch reads the field.** `exec_load_body` decides the
+  dynamic-loader dispatch on `nsp->phenotype` (`kernel/exec.c:1323`), inside the load,
+  before the commit. A native caller `execve`ing a *dynamic* `/viv/bin` binary decides Linux
+  at the resolver but the dispatch sees native and the binary hits the "dynamic Linux binary
+  rejected" refusal (`exec.c:1399-1406`) — D's symmetry unmet for exactly the case DISTRO
+  D-4 exists to serve.
+
+**The fix is one shape, three sites.** Decide the phenotype from the resolver into a
+**local**, before the load. **Thread that decided value as a parameter** into
+`exec_load_into`/`exec_load_body` (the PT_INTERP dispatch at `exec.c:1323` consults the
+parameter, never `nsp->phenotype`) and into `proc_exec_replace`/`proc_exec_drop_image_state`
+(the signal reset at `proc.c:3309` branches on the parameter). **Mutate `p->phenotype` only
+inside the infallible commit region** — in `proc_exec_replace`, at or immediately after the
+address-space commit, with a RELEASE store ordered before the signal reset, so a lock-free
+cross-Proc note poster (`notes.c:393/415/581`) never observes an incoherent
+(phenotype, note_mask) pair; a poster that races the flip sees either the old pair or the
+new pair, both I-43-safe. The spawn thunk already has this shape (decide → stamp before
+EL0 → load); execve gets the same shape with the stamp moved to the commit. The
+cross-Proc interleaving of the flip against every note-posting path is a **named focus
+area** for the post-implementation audit.
+
+#### 13.10.5 The resolver seed (review F8.2 = self-audit SA-3) and the interpreter
+
+`stalk_core` resets `*crossed_pheno = false` at the shared `restart:` label
+(`kernel/stalk.c:544`), which every resolution passes on its first pass **and** on every
+absolute-symlink / `..`-rebuild re-anchor (re-anchoring at the caller's current
+`root_spoor`, I-28). Under D that reset becomes the **seed**:
+`*crossed_pheno = territory->root_pheno`. Because the seed sits at `restart:` it covers
+both passes with one line — and it MUST stay there: "optimizing" the seed above the label
+(first pass only) would let an absolute symlink inside a container drop the declaration
+and revert its target to native. The I-28/I-43 outcomes are preserved on both sides: in
+the user namespace (seed false) an absolute symlink inside `/viv/bin` pointing at
+`/bin/nora` still yields native ("the same file reached another way is native",
+`stalk.c:533-544`); in a container (seed true) it stays Linux.
+
+**The PT_INTERP interpreter resolution stays phenotype-agnostic** (`kernel/exec.c:1346`
+keeps calling `exec_resolve_from_namespace`). The interpreter is a sub-step of the
+*program's* exec: the program's decided phenotype governs and the interpreter inherits it.
+Re-deciding by the interpreter's own location (a rootfs `ld-musl`, crossing nothing) would
+flip native and break every dynamic Linux binary (review F8.1).
+
+#### 13.10.6 Completeness (review F6 = self-audit SA-4): every spawn variant
+
+"Decided at every image load" must be true of every image load or it is a slogan. As-built,
+only `SYS_SPAWN_FULL_ARGV` resolves through the pheno-aware wrapper (`syscall.c:8620`); the
+legacy register-argument variants — `SYS_SPAWN` (`:7683`), `SYS_SPAWN_WITH_FDS` (`:7858`),
+the with-perms variant (`:8002`) — resolve agnostically, so a native parent spawning a
+`/viv/bin` binary through one of them would get a native child that mis-decodes (fail-safe,
+unreachable in practice: shells use FULL_ARGV, and a Linux Proc cannot call a native spawn
+number at all). **Design D unifies them**: every spawn variant resolves through
+`exec_resolve_from_namespace_ex` and applies the same stamp
+(`crossed || child->territory->root_pheno`; the register variants carry no `pheno_flags`, so
+they cannot *set* `root_pheno`, only inherit it by clone). After unification the rule as
+stated is exact.
+
+#### 13.10.7 Authority (review F5): the one coupling, and I-43
+
+Category-4 prosecution ("does anything couple authority to the phenotype field?") found
+exactly one site: the fork cap-inheritance policy (`kernel/syscall.c:9478`) — a Linux fork
+inherits `(parent_caps & CAP_ALL) & ~CAP_ELEVATION_ONLY`, a native fork gets `CAP_NONE`
+(§6.26). Because D mutates the field mid-life, a native process that `execve`s a `/viv/bin`
+binary changes its *subsequent* forks from cap-zeroing to cap-inheriting. This is **not an
+escalation** — `rfork_internal` bounds the child to ≤ the parent with elevation stripped
+(I-2), the same set the parent could already delegate by spawn — and it is classified here
+as ABI **shape** (the Linux fork's inheritance semantics are part of the Linux ABI a Linux
+image is entitled to). I-43 holds; the coupling is recorded in `ARCHITECTURE.md` §28 I-43 so
+it is audited, not discovered. Every other `p->phenotype` reader was enumerated by the
+review (`syscall.c:13586`; `exec.c:1323`; `notes.c:393/415/581/1340/1633/1885`;
+`proc.c:1401/1506/1583/3309`) and is an ABI-shape decision.
+
+#### 13.10.8 The direct-spawn deployment constraint (review F3)
+
+D's re-decision is also a **narrowing** of the direct-spawn model (§13.5): under
+execve-preserves, a Linux program's helpers inherited Linux regardless of where they lived;
+under D a helper is Linux **iff it is reached through a pheno-mount**. So in the user
+namespace (`root_pheno=false`) **the entire exec closure of a `/viv/bin` program must live
+behind a pheno-mount** — for git: `GIT_EXEC_PATH` ⊆ `/viv/bin`, and no PATH entry earlier
+than `/viv/bin` shadowing a Linux helper. The staged bundle already places
+`git-remote-https`/`git-http-fetch`/`git-upload-pack`/`git-receive-pack` beside `git` in
+`/viv/bin`; the closure is **verified in-guest** as a C2-wiring obligation (`git --exec-path`
++ a real fetch), not assumed. A container (`root_pheno=true`) dissolves the constraint
+entirely, which is the robust deployment when a closure cannot be curated.
+
+#### 13.10.9 The design review record
+
+Per the reviewer rule, a Fable prosecutor was spawned first (2026-09-01) and **died of
+credit exhaustion** (HTTP 429) before producing a report; per "never skip a round for want
+of Fable", an **Opus 4.8 max fallback** was spawned immediately — the implementation
+model's own lineage, so the round forfeited the family-diversity axis and retained
+**context independence** only (told to re-derive every claim from the tree and to fight
+agreeing with a construction it would also have written). `MODEL(start) == MODEL(end)`
+(Claude Opus 4.8, no mid-run switch). Verdict: **sound to write into scripture WITH
+modifications** — 0 P0 / 2 P1 / 3 P2 / 3 P3, all folded in above (F1 §13.10.4, F2/F4/F7/F8.3
+§13.10.3, F3 §13.10.8, F5 §13.10.7, F6 §13.10.6, F8.1/F8.2 §13.10.5). It confirmed every
+as-built premise and independently rejected C and B.
+
+Two prosecutors ran: the author's own self-audit (SA-1..SA-4) and the reviewer.
+Cross-validation: SA-1 = F2, SA-2 ≈ F4 (the reviewer bettered it: the spawn flag), SA-3 ≈
+F8.2, SA-4 = F6 — four independent agreements. The review caught what the self-audit
+missed — **F1** (the ordering trilemma), **F3** (the helper-closure regression), **F5** (the
+fork-cap coupling) — which is the context-independence value a fallback round still
+carries. The post-implementation audit runs on Fable 5.1 (credits restored the same day)
+and prosecutes F1's ordering on the real code, with the cross-Proc (phenotype, note_mask)
+interleaving as a named focus area; a design-only Fable re-run was judged not owed (the
+fallback round finished).
+
+#### 13.10.10 Alternatives considered + rejected
+
+- **A — a per-Proc sticky "manifest-declared" bit** (execve re-decides unless the Proc's
+  Linux-ness came from a manifest): works, but adds per-Proc state and a second question
+  ("where did my phenotype come from?") to every exec; `root_pheno` answers the same
+  question at the namespace, where §12.1 says the declaration lives.
+- **B — the positive native brand** (§12.2, `.note.thylacine`): the eventual answer that lets
+  rule 2 be exact instead of uniform; deferred v1.x, main's toolchain seam. D does not
+  preclude it — a brand would slot in as a third term of the stamp.
+- **C — `MPHENO_NATIVE`**: rejected on the fail-safe direction (§13.10.2).
+- **Ship a Linux editor instead of nora** (busybox `vi` from `/viv/abin`): would have shipped
+  the C2 exit criteria without touching the kernel, at the cost of the project's own editor
+  — rejected by the operator's standard (highest standard, no workarounds).
+
+#### 13.10.11 Implementation obligations (the checklist the impl commit cites)
+
+1. `Territory.root_pheno` in the `_pad` flags word; KP_ZERO default; copied in
+   `territory_clone` under `ns_lock`; set in the FULL_ARGV spawn thunk before EL0 from
+   `SPAWN_PHENO_LINUX`; the `syscall.h` flag comment rewritten to the namespace-level meaning.
+2. `sys_execve_core`: resolve via `_ex`; decide into a local (`crossed || root_pheno`);
+   thread it into `exec_load_into`/`exec_load_body` (the `exec.c:1323` dispatch) and into
+   `proc_exec_replace`/`proc_exec_drop_image_state` (the `proc.c:3309` reset); store
+   `p->phenotype` RELEASE in the commit region before the reset. No read of `p->phenotype`
+   at any of the three sites.
+3. The stalk seed at `restart:` = `root_pheno`; the interp resolver untouched.
+4. The legacy spawn variants unified onto `_ex` + the stamp.
+5. `docs/reference/145-vivarium.md` §3 rewritten for the every-image-load rule + the F5
+   coupling; `ARCHITECTURE.md` §28 I-43 amended (this commit); the AUDIT-TRIGGERS row +
+   CLAUDE.md index line appended with the impl.
+6. Tests: unit — the seed at both passes, `territory_clone` copies `root_pheno`, a failed
+   `exec_load_into` leaves `p->phenotype` unchanged (Leg B), the reset arm follows the NEW
+   phenotype (Leg A), the interp dispatch follows the parameter (Leg C), every spawn variant
+   stamps; in-guest — a Linux container forks then execs and stays Linux (F2), `viv-pheno-probe`
+   two-vantage stays green, and the C2 witness itself: git under `/viv/bin` `execve`s nora and
+   nora runs native (isatty + raw mode + a real `:wq`), then git's helpers still resolve
+   Linux (F3 closure).
+7. The SMP gate on the fixed tree; the Fable 5.1 audit with F1's interleaving as a focus area.
 
 ## References
 

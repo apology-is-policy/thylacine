@@ -104,6 +104,66 @@ to open, coordinated with main, at effort max.
 
 ---
 
+### Design D -- the phenotype re-decided at every image load (scripture-first, this run)
+
+C2-k3 recon (the `viv sh` + nora-as-editor tier) hit a real kernel gap within an
+hour: git runs PHENO_LINUX from `/viv/bin`, nora is native, git launches its
+editor by `execve`, and **execve preserved the phenotype** -- `sys_execve_core`
+(`kernel/syscall.c:9135`) resolved through the phenotype-agnostic wrapper and
+never wrote `p->phenotype`; only the spawn thunk (`:8496`) consulted the mount
+channel. `execve(nora)` would have run native nora under Linux decode. The tree
+even documented the asymmetry as intended (`VIVARIUM.md` 13.4 F3). The operator
+asked for the MOST PROPER, heritage-aligned answer rather than the fastest, and
+approved Design D: a phenotype is the ABI of the loaded image, decided at EVERY
+image load (spawn + execve) from the namespace, default native, fork preserves.
+Scripture landed at `VIVARIUM.md` 13.10 + the ARCH 28 I-43 row (this commit).
+
+Three wrong turns, each caught before code:
+
+1. **My first cut had the container declare Linux by mounting its rootfs
+   `MPHENO_LINUX`.** Falsified by reading `territory_chroot` (`territory.c:1011`):
+   it SWAPS `root_spoor` to the source, so a container reaches its binaries from
+   INSIDE any rootfs mount and the crossing accumulator (`stalk_cross_mounts`,
+   set-only on entering a mount) never fires. A rootfs mount would have silently
+   failed to re-declare Linux across execve -- every container broken, toward
+   native. The fix is a Territory-level flag (`root_pheno`), the namespace object
+   carrying the declaration.
+2. **I floated a symmetric `MPHENO_NATIVE` mount (Design C)** and then rejected it
+   on principle: it needs a POSITIVE native declaration whose coverage gaps fail
+   UNSAFE (an unmarked native binary runs under inherited Linux) -- the exact
+   failure 13.4's fail-safe paragraph forbids. D keeps the direction: native
+   unless a declaration positively says Linux.
+3. **My self-audit (SA-1..SA-4) missed the load-bearing part.** The design review
+   caught F1: the execve re-stamp ORDERING is a three-legged trilemma -- after the
+   commit it leaks git's `note_mask` into native nora (the reset at `proc.c:3309`
+   is phenotype-conditional; the mask read at `notes.c:695` is not); before the
+   load it is fail-UNSAFE (a failed `exec_load_into` at `:9226` returns to the old
+   image with a flipped ABI); and the PT_INTERP dispatch (`exec.c:1323`) reads the
+   field mid-load. One fix, three sites: decide into a local, thread it as a
+   parameter, mutate only in the infallible commit region, RELEASE-ordered. That
+   is now 13.10.4, the design's stated load-bearing claim.
+
+The review itself had a story: the Fable prosecutor DIED of credit exhaustion
+(HTTP 429) mid-run; per "never skip a round for want of Fable" I went straight to
+the Opus fallback -- which resolved to Opus 4.8, the implementation model's own
+lineage, so the round had zero family diversity and only context independence.
+That axis alone caught F1, F3 (D narrows the direct-spawn model: a Linux helper
+resolved OUTSIDE `/viv/bin` now re-decides native, so git's exec closure must sit
+behind the pheno-mount -- `GIT_EXEC_PATH` subset of `/viv/bin`, verified in-guest)
+and F5 (the ONE authority coupling: fork cap-inheritance keys on the field,
+`syscall.c:9478`; I-2-bounded, ABI shape). Its F4 bettered my mechanism: no new
+syscall -- `SPAWN_PHENO_LINUX` deepens to set the CHILD's `Territory.root_pheno`
+before EL0, set-once, keeping viv native. Verdict 0/2/3/3, "sound with
+modifications"; four self-audit findings cross-validated (SA-1=F2, SA-2~F4,
+SA-3~F8.2, SA-4=F6). Fable 5.1 was released the same afternoon and credits
+reset; the operator switched the session to Fable 5.1 + `/effort max` and signed
+off. The post-impl audit runs on Fable 5.1 with F1's cross-Proc interleaving as
+a named focus area; a design-only Fable re-run was not owed (the fallback round
+finished).
+
+**Open at this commit:** the implementation (13.10.11's checklist), then C2-k3
+proper (`viv sh` + `core.editor=nora`), which D unblocks.
+
 ## 2026-08-31 (aux) -- N-6: git push over https -- milestone B complete
 
 The last of milestone B's exit criteria. Clone and fetch were already gated
