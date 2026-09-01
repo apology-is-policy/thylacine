@@ -575,12 +575,16 @@ pub extern "C" fn rs_main() -> i64 {
         // until it re-acks; solid blue keeps the samples exact).
         fill(&mut b, BLUE);
         let _ = b.present(None);
-        // The strip geometry from B's content rect: the container's
-        // outer rect is content + the 1px leaf inset on x, and strip(5)
-        // + inset above it on y (TAB_STRIP_H = 5).
-        let cx = tb.x - 1;
-        let cw = tb.w + 2;
-        let sy = tb.y - 1 - 5 + 2; // strip row center
+        // The strip geometry from B's content rect: the container's outer
+        // rect is content + the Daylight chrome ring on x, and strip(5) +
+        // ring above it on y (TAB_STRIP_H = 5). The ring at the default
+        // gaps=1 is floor(1)+bevel(2)+hairline(1) = 4 (HALCYON-VISUAL
+        // section 2/2.4; tapestryd pane.rs recompute -- this driver runs on
+        // the default image at default gaps).
+        let inset = 4u32;
+        let cx = tb.x - inset;
+        let cw = tb.w + 2 * inset;
+        let sy = tb.y - inset - 5 + 2; // strip row center
         let sax = cx + cw / 4;
         let sbx = cx + 3 * cw / 4;
         say!("battery: tabbed ready {} {} {}", sy, sax, sbx);

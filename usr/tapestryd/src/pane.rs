@@ -20,21 +20,22 @@
 //     never removed (an empty root leaf is the blank screen).
 //   - pane PUBLIC ids are monotonic and never reused (the net-3d
 //     discipline for free: a stale pane fid resolves to nothing).
-//   - geometry: equal division (remainder to the last child), a 1px
-//     content inset per pane iff more than one pane is visible (the
+//   - geometry: equal division (remainder to the last child); the Daylight
+//     chrome ring per pane iff more than one pane is visible (the
 //     single-fullscreen root leaf keeps the stage-0 borderless look).
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use libhalcyon::theme;
+
 pub const MAX_PANES: usize = 32;
 
-/// Border/background palette (compositor chrome; glyph-free per D7).
+/// The blank/empty-pane fill (compositor background before a client presents).
+/// The Daylight chrome colours (bevel/hairline/floor/strip) live in
+/// `libhalcyon::theme::DAYLIGHT` -- the single token source (HALCYON-VISUAL);
+/// server.rs's painters read them from there.
 pub const BG_COLOR: u32 = 0xFF10_1014;
-pub const BORDER_COLOR: u32 = 0xFF3A_3A44;
-pub const FOCUS_COLOR: u32 = 0xFF7A_9ECC;
-/// A tab/stack segment whose child is active but not on the focus path.
-pub const ACTIVE_COLOR: u32 = 0xFF5A_5A66;
 
 /// The tab/stack indicator strip height (G-6c; glyph-free per D7 -- the
 /// compositor paints colored segments, never titles). Carved from the TOP
@@ -929,10 +930,15 @@ impl Layout {
         }
         let root = self.root;
         self.layout_pane(root, Rect { x: 0, y: 0, w: disp_w, h: disp_h });
-        // Pass 2: the content inset -- `gaps` px per leaf iff >1 leaf
-        // visible (cfg-4; the stage-0 default is 1). A single fullscreen
-        // leaf stays borderless regardless.
-        let inset = if self.visible_leaf_count() > 1 { gaps } else { 0 };
+        // Pass 2: the content inset -- the Daylight chrome ring per leaf iff
+        // >1 leaf visible. A single fullscreen leaf stays borderless (the
+        // stage-0 look). The ring = floor(`gaps`, the tunable gap) +
+        // bevel(2) + hairline(1); the bevel+hairline is fixed structural
+        // chrome (HALCYON-VISUAL section 2/2.4), the floor is the tunable
+        // inter-pane gap (section 2.3 -- at gaps=1 the two abutting floors
+        // give the 2px inter-pane floor).
+        let chrome = (theme::METRICS.bevel + theme::METRICS.hairline) as u32;
+        let inset = if self.visible_leaf_count() > 1 { gaps + chrome } else { 0 };
         for p in self.panes.iter_mut().flatten() {
             if !p.visible {
                 continue;

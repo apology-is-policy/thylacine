@@ -165,6 +165,62 @@ ls-halcyon stayed 12/12 on the lever, confirming the new ground renders.
 **Next: H-3a-2**, the tapestryd side — the NNW bevel, the hairline, and the
 live-tile cast shadow, the compositor's half of the Daylight chrome.
 
+### H-3a-2: the compositor chrome, and the "flaky" hang that was a real pre-existing race (same run)
+
+The scope was bigger than the resume note framed it. The note assumed the
+tapestryd chrome was a Halcyon-only concern; the blast-radius sweep found
+tapestryd is **warden-spawned unconditionally** (joey.c:10197), so its chrome
+painter runs on the default (aurora) image too — and two default-image gfx tests
+already hardcode its old colours (`ls-gfx-panes` asserts BORDER `58 58 68` +
+FOCUS `122 158 204`; `ls-gfx-chords` asserts BG `16 16 20`). The Daylight
+scripture settles the direction rather than opening a fork: its header binds
+*"the pane compositor"* to read its values, and HALCYON.md §13.6 ratifies H-3a as
+the unconditional compositor geometry. So the chrome is Daylight system-wide, and
+those tests are stale consumers to sweep by ground truth — not a design question.
+
+The mechanism: the chrome lives in the `inset`-wide ring between a leaf's `rect`
+and its `content`. A 1px flat frame fit in `inset=gaps` (default 1); a 2px bevel
++ 1px hairline + floor does not, so `recompute`'s inset grew from `gaps` to
+`gaps + bevel(2) + hairline(1)`. `paint_borders` now paints, per ring pixel, by
+distance-to-nearest-edge: floor / four-value bevel (mitred, horizontal winning
+ties for the top-weighted 45° corner) / hairline; the cast shadow is a 1px
+`border` line at the focused leaf's innermost bottom floor row, downward-only,
+owned by the tile. The bevel is uniform — the old focus-coloured frame is gone
+(§5.1: no pane-level focus treatment). The battery hardcodes the inset to derive
+its tab-strip sample coords, so its `1`→`4` was part of the sweep.
+
+**The finding nobody planned — and what caught it.** The first ls-halcyon run on
+the lever ran **15 minutes** against a 45-second baseline. The convenient reading
+was "flake"; the playbook forbids it as a conclusion, so it got hunted. Ground
+truth, in order: QEMU was at **6.8% CPU, sleeping** — idle, not a busy-loop, so
+not my painter running away. A live screendump of the stuck guest showed the
+**center was logged-in parchment with 15268 ink pixels** but the **left/top edges
+were parchment too (0 off)** — logged in, but single-pane, *no bevel* — i.e. the
+guest was stuck **before the split**, before any line of my chrome code runs. A
+re-run with a tight timeout printed the exact verdict: **"no login prompt within
+160s."** The cause was a pre-existing boot-output race: login's `Thylacine login:`
+and halcyond's `console up` print on the *same* serial from *different* procs, so
+their order is nondeterministic; the scenario's inline `lc_expect "console up"`
+consumes the stream up through that line, and when the login prompt raced ahead of
+it (as this boot), the prompt was swallowed and `lc_login` waited out the whole
+boot timeout. H-3a-1 had simply drawn the lucky ordering. Attribution: the racing
+procs and the `lc_expect`/`lc_login` sequencing are all upstream of and untouched
+by my bevel edit, and ls-gfx-panes/chords never hit it because they assert no
+"console up" between boot and login. Owned in passing (yip note + this entry, no
+`TaskCreate` in-session): the two bring-up assertions moved to order-independent
+`tgrep` at the end, so `lc_login` finds the prompt regardless of ordering. The
+re-run passed [35s].
+
+Verified: **ls-halcyon lever** — `Daylight NNW bevel painted (left 226,214,192 !=
+top 248,242,230 -- four-value)`, plus parchment+ink, split reflow (63 cols), zoom
+restore; **ls-gfx-panes default** — `tab strip segments exact (Daylight: inactive
+header, active-focused ember)` + the battery structure asserts (the new inset
+geometry) + client pixels; guest build RC 0, my code clippy-clean (the 231
+tapestryd warnings are pre-existing, none in the edited lines), libhalcyon host
+3/3. The vault owns `sub-tapestryd` (server.rs + pane.rs) — the Daylight-chrome
+dossier delta was rung to vault via yip 0031; `usr/tapestry-battery/src` is
+unowned (sweep filed). **Next: H-3b**, the executable tag bar (audit-bearing).
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon

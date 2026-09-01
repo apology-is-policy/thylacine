@@ -20,9 +20,9 @@
 # tapestryd chord plane), that a config chord/gaps line reaches the live
 # compositor:
 #
-#   gaps      : after a split, the console pane's 8px outer inset is
-#               BG (a config `gaps 8`); at the default gaps 1 that pixel
-#               is the console's own bonfire.
+#   gaps      : after a split, the console pane's 8px floor gap (a config
+#               `gaps 8`) shows the Daylight floor at x=4; at the default
+#               gaps 1 that pixel is the console's own bonfire (content).
 #   unbind    : Super+F -- the DEFAULT zoom key, `none`-unbound by the
 #               config -- does NOTHING (the split is preserved); without
 #               the config it would zoom (the default binding).
@@ -45,7 +45,7 @@ source [file join [file dirname [info script]] lib.exp]
 set repo $lc_repo
 set qmp [lc_qmp_sock]
 
-set BG "16 16 20"        ;# pane::BG_COLOR 0x101014, decimal RGB
+set FLOOR "138 118 96"   ;# Daylight floor 0x8A7660 (the inter-pane gap), decimal RGB
 set BONFIRE "14 12 12"   ;# bonfire bg 0x0E0C0C
 
 proc ch_dump {out} {
@@ -132,14 +132,15 @@ if {$bf > 0.7} {
 }
 lc_pass "chords: Super+H split (default binding; bonfire=$bf)"
 
-# gaps: the console (left pane) is inset 8px, so its outer-left column is
-# BG. At the default gaps 1 this pixel would be the console's bonfire.
+# gaps: the console (left pane) has an 8px floor gap, so x=4 is the Daylight
+# floor. At the default gaps 1 the ring is only 4px (floor1+bevel2+hairline1)
+# so x=4 would be the console's own bonfire content.
 set px [ch_pixel 4 400]
 if {$px eq "DUMP-FAILED"} { lc_fail "gaps leg: screendump never succeeded (harness, not the guest)" }
-if {$px ne $BG} {
-    lc_fail "gaps not applied: pixel (4,400)='$px' want BG '$BG' (build with THYLACINE_AURORA_CFG4=1?)"
+if {$px ne $FLOOR} {
+    lc_fail "gaps not applied: pixel (4,400)='$px' want FLOOR '$FLOOR' (build with THYLACINE_AURORA_CFG4=1?)"
 }
-lc_pass "chords: gaps 8 applied (the console's 8px outer inset is BG)"
+lc_pass "chords: gaps 8 applied (the console's 8px floor gap is the Daylight floor)"
 
 # unbind: Super+F is `none` in the config, so it does NOTHING (the split
 # stands). Without the config, F is the default zoom -> the empty focused

@@ -82,10 +82,13 @@ expect {
     eof     { lc_fail "qemu exited before the renderer spawn" }
 }
 
-# halcyond bring-up: the rich advertisement + the surface, both before login.
-lc_expect "halcyond: beacon rich advertised" "the rich advertisement"
-lc_expect "halcyond: console up" "the transcript surface"
-
+# halcyond bring-up (the rich advertisement + the transcript surface) is
+# asserted at the END via tgrep, NOT inline here: an inline lc_expect consumes
+# the stream up through "console up", but "Thylacine login: " races ahead of
+# "console up" on some boots (login and halcyond print on the SAME serial from
+# different procs, so their order is non-deterministic) -- swallowing the login
+# prompt and hanging lc_login for the whole boot timeout. tgrep is
+# order-independent (it greps the whole transcript at the end).
 lc_login michael correct-horse-battery-staple-v1
 
 # The session leg: real output through the transcript (frames bracket the
@@ -137,6 +140,32 @@ expect {
     eof     { lc_fail "EOF after the split" }
 }
 
+# The Daylight bevel (HALCYON-VISUAL section 2): the split put two leaves on
+# screen, so each pane now carries the NNW single-light-source 2px four-value
+# bevel. Sample the left (halcyond) pane's edges away from the corner -- x=1,2
+# is its left bevel, y=1,2 its top bevel -- and assert BOTH the scripture
+# values AND that they differ (four-value NNW, not the Win95 two-value
+# diagonal). Origin-anchored (x/y start at 0) so it is independent of the
+# split geometry.
+set vl [region 1 120 3 560]
+if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vl -> l_off l_tot lr lg lb]} {
+    lc_fail "bevel_left region unparseable: $vl"
+}
+if {$lr != 226 || $lg != 214 || $lb != 192} {
+    lc_fail "left-edge dominant ($lr,$lg,$lb) is not Daylight bevel_left (226,214,192) -- the pane bevel is not painting"
+}
+set vt [region 120 1 560 3]
+if {![regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $vt -> t_off t_tot tr tg tb]} {
+    lc_fail "bevel_top region unparseable: $vt"
+}
+if {$tr != 248 || $tg != 242 || $tb != 230} {
+    lc_fail "top-edge dominant ($tr,$tg,$tb) is not Daylight bevel_top (248,242,230) -- the pane bevel is not painting"
+}
+if {$lr == $tr && $lg == $tg && $lb == $tb} {
+    lc_fail "bevel_left == bevel_top -- the NNW four-value bevel collapsed to a two-value diagonal (section 2.1 broken)"
+}
+lc_pass "halcyon: Daylight NNW bevel painted (left 226,214,192 != top 248,242,230 -- four-value)"
+
 # A chord split moves focus to the NEW (empty) leaf (pane.rs split:
 # `self.focused = new_leaf` -- caught when zoom targeted the empty pane
 # and halcyond, hidden, never got the restore CONFIGURE). Focus back to
@@ -157,6 +186,8 @@ proc tgrep {pat what} {
     }
     lc_pass "halcyon: $what"
 }
+tgrep "halcyond: beacon rich advertised" "halcyond advertised the rich tier (the surface bring-up)"
+tgrep "halcyond: console up" "halcyond brought up the transcript surface"
 tgrep "ut: beacon rich exported" "the rich canary (the F7 transport half, real advertisement)"
 tgrep "transcript zones armed" "ut armed the transcript zones"
 tgrep "1936;v1;table" "ls -l emitted the rich table frames on the wire"

@@ -4352,12 +4352,18 @@ impl Comp {
         self.chrome_epoch = self.layout.epoch;
     }
 
-    /// Redraw ONLY the 1px leaf frames (focus ring moves must not blank
-    /// idle clients' content). Returns the edge rects it painted, so a
-    /// focus-only repaint can upload exactly those (Warp-C C-3): on the GPU
-    /// composed path the screen BUFFER holds chrome but not client pixels,
-    /// so a whole-buffer push here would blank every pane.
+    /// Redraw the Daylight pane chrome (HALCYON-VISUAL section 2) for every
+    /// visible leaf: the NNW single-light-source 2px four-value bevel + the
+    /// 1px inner hairline + the outer floor gap, all in the `inset`-wide ring
+    /// between `rect` and `content`, plus the cast shadow under the focused
+    /// leaf (section 5.4). Returns the ring rects it painted so a focus-only
+    /// repaint can upload exactly those (Warp-C C-3): on the GPU composed
+    /// path the screen BUFFER holds chrome but not client pixels, so a
+    /// whole-buffer push here would blank every pane. The bevel is UNIFORM
+    /// (section 2.1/5.1 -- it marks a pane, never a focused one); focus shows
+    /// only in the cast shadow here and the strip highlight (paint_strips).
     fn paint_borders(&mut self) -> Vec<Rect> {
+        use libhalcyon::theme::{DAYLIGHT as D, METRICS as M};
         let mut painted: Vec<Rect> = Vec::new();
         let dw = self.gpu.width as u64;
         let va = match &self.screen {
@@ -4366,6 +4372,30 @@ impl Comp {
         };
         let px = va as *mut u32;
         let focused = self.layout.focused;
+        let bevel = M.bevel as u32;
+        let hair = M.hairline as u32;
+        // The ring colour, given the four per-edge distances of a ring pixel.
+        // The bevel band mitres by the NEAREST edge, horizontal winning ties
+        // -- the top-weighted 45deg corner (section 2.1/2.2). `floor_w` = the
+        // outer floor band; then 2px bevel; then the 1px hairline.
+        let ring_color = |dl: u32, dr: u32, dt: u32, db: u32, floor_w: u32| -> u32 {
+            let d = dl.min(dr).min(dt).min(db);
+            if d < floor_w {
+                D.floor
+            } else if d < floor_w + bevel {
+                if dt == d {
+                    D.bevel_top
+                } else if db == d {
+                    D.bevel_bottom
+                } else if dl == d {
+                    D.bevel_left
+                } else {
+                    D.bevel_right
+                }
+            } else {
+                D.header // the inner hairline (section 2.4, == header)
+            }
+        };
         for (slot, _id) in self.layout.live_ids() {
             let p = match self.layout.get(slot) {
                 Some(p) => p,
@@ -4374,39 +4404,68 @@ impl Comp {
             if !p.visible || !self.layout.is_leaf(slot) || p.rect == p.content {
                 continue;
             }
-            let color = if slot == focused {
-                pane::FOCUS_COLOR
-            } else {
-                pane::BORDER_COLOR
-            };
             let r = p.rect;
-            // SAFETY: the geometry pass bounds every visible rect inside
-            // the display; the buffer covers the display.
-            unsafe {
-                for x in r.x..r.x + r.w {
-                    *px.add((r.y as u64 * dw + x as u64) as usize) = color;
-                    *px.add(((r.y + r.h - 1) as u64 * dw + x as u64) as usize) = color;
+            // The ring width is symmetric (content is inset equally on all
+            // four sides); floor_w = ring - bevel - hairline = the `gaps`.
+            let inset = p.content.x.saturating_sub(r.x);
+            let floor_w = inset.saturating_sub(bevel + hair);
+            let x1 = r.x + r.w; // exclusive
+            let y1 = r.y + r.h;
+            // Paint the four ring bands (corners double-covered by adjacent
+            // bands -- idempotent, ring_color depends only on absolute
+            // position). SAFETY: the geometry pass bounds every visible rect
+            // inside the display; the buffer covers the display.
+            let band = |bx0: u32, by0: u32, bx1: u32, by1: u32| {
+                for y in by0..by1 {
+                    let dt = y - r.y;
+                    let db = (y1 - 1) - y;
+                    for x in bx0..bx1 {
+                        let dl = x - r.x;
+                        let dr = (x1 - 1) - x;
+                        let c = ring_color(dl, dr, dt, db, floor_w);
+                        unsafe {
+                            *px.add((y as u64 * dw + x as u64) as usize) = c;
+                        }
+                    }
                 }
-                for y in r.y..r.y + r.h {
-                    *px.add((y as u64 * dw + r.x as u64) as usize) = color;
-                    *px.add((y as u64 * dw + (r.x + r.w - 1) as u64) as usize) = color;
+            };
+            band(r.x, r.y, x1, r.y + inset); // top
+            band(r.x, y1 - inset, x1, y1); // bottom
+            band(r.x, r.y, r.x + inset, y1); // left
+            band(x1 - inset, r.y, x1, y1); // right
+            // The cast shadow (section 5.4): a 1px `border` line at the
+            // focused leaf's innermost bottom floor row, spanning the pane
+            // body, downward only. Overpaints that floor row -> the two-tone
+            // (dark bevel_bottom above, this lighter line, then floor). Owned
+            // by the tile (its own ring), so last-in-stack is handled and no
+            // neighbour border is borrowed. Needs a floor row (floor_w >= 1);
+            // a zero-gap config skips it (focus still shows in the strip +
+            // the H-3b status key).
+            if slot == focused && floor_w >= 1 {
+                let sy = y1 - floor_w; // innermost floor row (d == floor_w-1)
+                for x in (r.x + floor_w)..(x1 - floor_w) {
+                    unsafe {
+                        *px.add((sy as u64 * dw + x as u64) as usize) = D.border;
+                    }
                 }
             }
-            painted.push(Rect { x: r.x, y: r.y, w: r.w, h: 1 });
-            painted.push(Rect { x: r.x, y: r.y + r.h - 1, w: r.w, h: 1 });
-            painted.push(Rect { x: r.x, y: r.y, w: 1, h: r.h });
-            painted.push(Rect { x: r.x + r.w - 1, y: r.y, w: 1, h: r.h });
+            painted.push(Rect { x: r.x, y: r.y, w: r.w, h: inset });
+            painted.push(Rect { x: r.x, y: y1 - inset, w: r.w, h: inset });
+            painted.push(Rect { x: r.x, y: r.y, w: inset, h: r.h });
+            painted.push(Rect { x: x1 - inset, y: r.y, w: inset, h: r.h });
         }
         painted
     }
 
     /// Paint the tab/stack indicator strips (G-6c; D7 glyph-free -- pure
-    /// colored segments, never text, never client memory). Tabbed: one
-    /// strip row split into per-child segments (1px gap); stacked: one
-    /// full-width row per child. The active child's segment lights
-    /// FOCUS_COLOR when the focused leaf is inside it, ACTIVE_COLOR
-    /// otherwise; the rest are BORDER_COLOR. Repainted with the borders
-    /// on focus-only epochs (the highlight follows focus).
+    /// colored segments, never text, never client memory; H-3b replaces this
+    /// placeholder with halcyond's real Daylight tag bar). Tabbed: one strip
+    /// row split into per-child segments (1px gap); stacked: one full-width
+    /// row per child. The active child's segment lights the Daylight ember
+    /// when the focused leaf is inside it, ember_deep otherwise (HALCYON-VISUAL
+    /// section 4.2 active-tile keys); the rest are `header` (resting tag-bar
+    /// background). Repainted with the borders on focus-only epochs (the
+    /// highlight follows focus).
     fn paint_strips(&mut self) -> Vec<Rect> {
         let mut painted: Vec<Rect> = Vec::new();
         let dw = self.gpu.width as u64;
@@ -4437,14 +4496,15 @@ impl Comp {
                 continue;
             }
             let seg_color = |i: usize| {
+                use libhalcyon::theme::DAYLIGHT as D;
                 if i == active {
                     if hot == Some(children[i]) {
-                        pane::FOCUS_COLOR
+                        D.ember
                     } else {
-                        pane::ACTIVE_COLOR
+                        D.ember_deep
                     }
                 } else {
-                    pane::BORDER_COLOR
+                    D.header
                 }
             };
             match mode {

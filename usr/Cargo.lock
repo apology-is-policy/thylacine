@@ -1680,6 +1680,7 @@ name = "tapestryd"
 version = "0.1.0"
 dependencies = [
  "libdriver",
+ "libhalcyon",
  "libthyla-rs",
 ]
 

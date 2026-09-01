@@ -155,9 +155,9 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the tabbed leg failed" }
     timeout { lc_fail "battery never reached tabbed" }
 }
-gfx_sample tabA $sax $sy "58 58 68"
-gfx_sample tabB $sbx $sy "122 158 204"
-lc_pass "panes: tab strip segments exact (inactive border, active focus)"
+gfx_sample tabA $sax $sy "206 196 182"
+gfx_sample tabB $sbx $sy "224 120 64"
+lc_pass "panes: tab strip segments exact (Daylight: inactive header, active-focused ember)"
 expect {
     -ex "battery: tab cycled" { lc_pass "panes: tab next cycled the active child" }
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the tab-cycle leg failed" }
