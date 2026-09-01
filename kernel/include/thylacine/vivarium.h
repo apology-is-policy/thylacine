@@ -317,6 +317,14 @@ enum {
     VIV_LINUX_GETUID          = 174,
     VIV_LINUX_GETGID          = 176,
     VIV_LINUX_GETTID          = 178,   // N-3: per-Thread tid (getpid stays per-Proc)
+    // C2-k2: session/process-group control for interactive job control (`viv sh`).
+    // Delegated to the native cores 89-92 (arities match). getpgid/getsid are
+    // pure renumbers; setsid/setpgid are shells that remap the native T_E_ACCES
+    // "EPERM contour" to the Linux EPERM a guest's errno check expects.
+    VIV_LINUX_SETPGID         = 154,
+    VIV_LINUX_GETPGID         = 155,
+    VIV_LINUX_GETSID          = 156,
+    VIV_LINUX_SETSID          = 157,
 
     // The time family. Both above the native ceiling (113, 169 > the highest
     // native syscall), so collision-free by construction -- their collision
@@ -2650,6 +2658,11 @@ int  viv_linux_termios_to_grammar(const struct viv_linux_termios *tio, char *g);
 // C2-k1b test shim: drive the ioctl shell without a phenotype dispatch. Mirrors
 // viv_readv_for_test -- the non-static shell entry the test suite calls.
 s64 viv_ioctl_for_test(struct Proc *p, u64 fd, u64 request, u64 argp);
+
+// C2-k2 test shim: drive a session/pgrp TIER2 shell (SETSID/SETPGID) through the
+// real viv_tier2 arm, so the ACCES->PERM errno remap is exercised on an explicit
+// Proc. linux_num is VIV_LINUX_SETSID or VIV_LINUX_SETPGID; a0/a1 are pid/pgid.
+s64 viv_session_for_test(struct Proc *p, u64 linux_num, u64 a0, u64 a1);
 
 // -----------------------------------------------------------------------------
 // uname (#150). A fabrication -- there is no underlying Thylacine call -- so the

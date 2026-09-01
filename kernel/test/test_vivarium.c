@@ -4641,3 +4641,50 @@ void test_vivarium_ioctl_dispatch_ebadf(void) {
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 }
+
+// C2-k2: the phenotype session/pgrp shells (`viv sh` job control). setsid/setpgid
+// are TIER2 shells ONLY to remap the native T_E_ACCES "EPERM contour" to the
+// Linux EPERM a guest's errno check keys on; the INVAL/SRCH paths and the success
+// value pass through. getpgid/getsid are pure renumbers (no remap; the native
+// SYS_GETPGID/GETSID handlers + the E2E cover them). This drives the two shells
+// on an explicit Proc whose session/group state is staged to hit each contour.
+void test_vivarium_session_errno_remap(void);
+void test_vivarium_session_errno_remap(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    p->state = PROC_STATE_ALIVE;
+
+    // setsid on a group leader (pgid == pid) fails: native T_E_ACCES, which the
+    // shell must present as Linux EPERM.
+    p->pgid = (u32)p->pid;
+    s64 r_sid_perm = viv_session_for_test(p, VIV_LINUX_SETSID, 0, 0);
+    TEST_EXPECT_EQ(r_sid_perm, -(s64)T_E_PERM,
+                   "setsid on a group leader -> EPERM (native ACCES remapped)");
+
+    // setsid success: a non-leader gets a new session; the return is the new sid
+    // (== pid, positive), never touched by the remap -- proving it is
+    // failure-specific, not a blanket rewrite of the return.
+    p->pgid = (u32)p->pid + 1u;                 // not a group leader
+    s64 r_sid_ok = viv_session_for_test(p, VIV_LINUX_SETSID, 0, 0);
+    TEST_EXPECT_EQ(r_sid_ok, (s64)p->pid, "setsid success -> new sid (== pid)");
+
+    // setpgid EPERM contour: a session leader (pid == sid) cannot setpgid itself.
+    // Native T_E_ACCES -> EPERM.
+    p->sid   = (u32)p->pid;
+    p->pgid  = (u32)p->pid;
+    p->state = PROC_STATE_ALIVE;
+    s64 r_pgid_perm = viv_session_for_test(p, VIV_LINUX_SETPGID, 0, 0);
+    TEST_EXPECT_EQ(r_pgid_perm, -(s64)T_E_PERM,
+                   "setpgid by a session leader -> EPERM (native ACCES remapped)");
+
+    // setpgid INVAL passes through UNCHANGED (pgid < 0): the discriminating leg,
+    // proving the remap targets ACCES specifically and does not rewrite every
+    // negative into EPERM.
+    s64 r_pgid_inval = viv_session_for_test(p, VIV_LINUX_SETPGID, 0, (u64)-1);
+    TEST_EXPECT_EQ(r_pgid_inval, -(s64)T_E_INVAL,
+                   "setpgid pgid<0 -> EINVAL (not remapped to EPERM)");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}

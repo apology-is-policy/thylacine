@@ -12957,6 +12957,26 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         return ct ? (s64)ct->tid : -(s64)T_E_INVAL;
     }
 
+    case VIV_LINUX_SETSID:
+        // setsid(void) -> new sid. A shell (not a renumber) ONLY to remap the
+        // errno: the native core returns T_E_ACCES for "already a group leader",
+        // which Linux setsid(2) reports as EPERM. Called with the explicit p (not
+        // via current_thread) so the _for_test path drives the exact Proc.
+        {
+            s64 r = (s64)proc_setsid(p);
+            return (r == -(s64)T_E_ACCES) ? -(s64)T_E_PERM : r;
+        }
+
+    case VIV_LINUX_SETPGID:
+        // setpgid(pid, pgid): x0 pid, x1 pgid. Same errno remap -- the native
+        // "EPERM contour" (cross-session / session-leader / no such group in the
+        // session) is T_E_ACCES; Linux setpgid(2) reports these as EPERM. INVAL
+        // (pgid < 0) and SRCH (no such target) already match Linux and pass through.
+        {
+            s64 r = (s64)proc_setpgid(p, (int)args[0], (int)args[1]);
+            return (r == -(s64)T_E_ACCES) ? -(s64)T_E_PERM : r;
+        }
+
     case VIV_LINUX_GETUID:
         // getuid(void). The native twin is exact, the arity matches, and it is
         // STILL a shell -- the sentinel mapping (vivarium.h) has to happen
@@ -13427,6 +13447,12 @@ s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt) {
 s64 viv_ioctl_for_test(struct Proc *p, u64 fd, u64 request, u64 argp) {
     u64 args[VIV_NARGS] = { fd, request, argp, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_IOCTL, args);
+}
+
+// C2-k2: drive a session/pgrp TIER2 shell through the REAL viv_tier2 arm.
+s64 viv_session_for_test(struct Proc *p, u64 linux_num, u64 a0, u64 a1) {
+    u64 args[VIV_NARGS] = { a0, a1, 0, 0, 0, 0 };
+    return viv_tier2(NULL, p, linux_num, args);
 }
 
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {

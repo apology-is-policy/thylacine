@@ -74,6 +74,13 @@ _Static_assert(VIV_LINUX_GETTID > VIV_NATIVE_CEILING,
                "gettid's collision argument is the ceiling one (N-3). Its "
                "threading siblings exit(93)/futex(98) are SUB-ceiling and carry "
                "per-number paragraphs at their rows instead");
+// C2-k2: the session/pgrp family. All four sit ABOVE the native ceiling, so the
+// getpgid/getsid renumbers cannot mis-dispatch onto a native number and the
+// setsid/setpgid shells face no sub-ceiling collision argument.
+_Static_assert(VIV_LINUX_SETSID  > VIV_NATIVE_CEILING, "setsid above the ceiling");
+_Static_assert(VIV_LINUX_SETPGID > VIV_NATIVE_CEILING, "setpgid above the ceiling");
+_Static_assert(VIV_LINUX_GETPGID > VIV_NATIVE_CEILING, "getpgid above the ceiling");
+_Static_assert(VIV_LINUX_GETSID  > VIV_NATIVE_CEILING, "getsid above the ceiling");
 
 // A T1 row: a Linux number, the Thylacine number it renumbers to, and the arity
 // that must carry across unchanged. `nargs` is not used to copy (the whole
@@ -226,6 +233,12 @@ static const struct viv_row g_viv_t1[] = {
     // band a Linux caller checks), and no error path at all in the native
     // handler beyond the current_thread() sanity check.
     { VIV_LINUX_GETPID,     SYS_GETPID,     0 },
+    // C2-k2: getpgid/getsid are PURE renumbers -- the native cores return the
+    // pgid/sid (a plain id < 2^32, never in the errno band) or -T_E_SRCH, which
+    // IS Linux ESRCH; pid 0 = self in both. No errno remap is needed, unlike
+    // their setsid/setpgid siblings (which are TIER2 shells for the EPERM remap).
+    { VIV_LINUX_GETPGID,    SYS_GETPGID,    1 },
+    { VIV_LINUX_GETSID,     SYS_GETSID,     1 },
 };
 
 #define VIV_T1_COUNT ((u32)(sizeof(g_viv_t1) / sizeof(g_viv_t1[0])))
@@ -435,6 +448,11 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_EXECVE,      VIV_TIER2   },  // L-6a: viv_execve
     { VIV_LINUX_WAIT4,       VIV_TIER2   },  // L-6b: vivarium_wait4_decide
     { VIV_LINUX_GETTID,      VIV_TIER2   },  // N-3: current_thread()->tid
+    // C2-k2: setsid/setpgid are shells (not renumbers) SOLELY to remap the native
+    // T_E_ACCES "EPERM contour" to the Linux EPERM a guest keys on; getpgid/getsid
+    // are pure renumbers in g_viv_t1 above (no remap).
+    { VIV_LINUX_SETSID,      VIV_TIER2   },  // C2-k2: proc_setsid + ACCES->PERM
+    { VIV_LINUX_SETPGID,     VIV_TIER2   },  // C2-k2: proc_setpgid + ACCES->PERM
 
     // N-3: futex(uaddr, op, val, timeout/val2, uaddr2, val3) -> torpor. A T2
     // shell (viv_futex + vivarium_futex_decide) for the WAIT/WAKE/REQUEUE subset.
