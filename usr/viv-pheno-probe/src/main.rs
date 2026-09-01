@@ -150,6 +150,7 @@ const SOCK_SEQPACKET: u64 = 5;
 // POSIX errno values a Linux libc compares against (musl generic bits/errno.h).
 const ENOSYS: i64 = 38;
 const ENOTSOCK: i64 = 88;
+const EBADF: i64 = 9;
 const EPROTONOSUPPORT: i64 = 93;
 const EOPNOTSUPP: i64 = 95;
 const EAFNOSUPPORT: i64 = 97;
@@ -1834,11 +1835,15 @@ unsafe fn run_linux() -> ! {
     // THE CLOSE HOOK, live. Close the socket, then confirm the fd index no
     // longer resolves to a socket. Without the hook the entry would survive,
     // and a later connect() on whatever reused this index would dial a
-    // stranger's connection.
+    // stranger's connection. EBADF, not ENOTSOCK: the socket arms split the
+    // two the way Linux does (a closed fd fails the fd lookup first), and the
+    // split keeps the discrimination -- the row is consulted BEFORE the fd
+    // liveness, so a surviving stale row would make connect proceed, never
+    // answer EBADF.
     leg!(rep, svc3(NR_CLOSE, sfd as u64, 0, 0) == 0, b"L49\n");
     leg!(
         rep,
-        svc3(NR_CONNECT, sfd as u64, sa.as_ptr() as u64, sa.len() as u64) == -ENOTSOCK,
+        svc3(NR_CONNECT, sfd as u64, sa.as_ptr() as u64, sa.len() as u64) == -EBADF,
         b"L50\n"
     );
 
@@ -2102,8 +2107,9 @@ unsafe fn run_linux() -> ! {
     // The close hook covers the accepted fd too: its socktab entry was claimed
     // by accept(), so it must be released by close() like any other. Paired
     // with L83, this brackets the entry's whole life: EINVAL while open,
-    // ENOTSOCK once closed.
-    leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -ENOTSOCK, b"L96\n");
+    // EBADF once closed (a surviving stale row would answer EINVAL again --
+    // the row is consulted before the fd liveness -- so EBADF is the drop).
+    leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -EBADF, b"L96\n");
 
     // --- V-5c: readiness ----------------------------------------------------
     // A Linux `struct pollfd` -- and the native one is byte-identical, which is
@@ -3324,8 +3330,14 @@ unsafe fn run_linux() -> ! {
     // replacement the same way. A UDP socket cannot listen (L57's EOPNOTSUPP),
     // which is the discriminator: EOPNOTSUPP on 33 means the alias IS a
     // tracked socket, ENOTSOCK would mean the number got no row. The source
-    // stays tracked, closing the alias drops only its own row (the source is
-    // still tracked afterwards, the closed number is not).
+    // stays tracked, closing the alias drops only its own row: afterwards the
+    // source still listens EOPNOTSUPP, 33 is CLOSED (F_GETFD and listen both
+    // say EBADF -- Linux's sockfd_lookup_light fails before any socket check;
+    // this leg pinned ENOTSOCK for a closed fd until the socktab holotype F5),
+    // and the alias rule's NEGATIVE half: a plain file (the report fd) dup3'd
+    // onto 33 is a live non-socket, so listen(33) is ENOTSOCK -- the answer
+    // Linux gives for a file fd, and proof that a non-socket source mints no
+    // row on the number it lands on.
     let sd = svc3(NR_SOCKET, AF_INET, SOCK_DGRAM, 0);
     leg!(
         rep,
@@ -3334,7 +3346,11 @@ unsafe fn run_linux() -> ! {
             && svc3(NR_LISTEN, sd as u64, 1, 0) == -EOPNOTSUPP
             && svc3(NR_CLOSE, 33, 0, 0) == 0
             && svc3(NR_LISTEN, sd as u64, 1, 0) == -EOPNOTSUPP
-            && svc3(NR_LISTEN, 33, 1, 0) == -ENOTSOCK,
+            && svc3(NR_FCNTL, 33, F_GETFD, 0) == -EBADF
+            && svc3(NR_LISTEN, 33, 1, 0) == -EBADF
+            && svc3(NR_DUP3, rep as u64, 33, 0) == 33
+            && svc3(NR_LISTEN, 33, 1, 0) == -ENOTSOCK
+            && svc3(NR_CLOSE, 33, 0, 0) == 0,
         b"L198\n"
     );
 

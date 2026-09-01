@@ -558,13 +558,31 @@ Three properties make the swap correct, each measured in §4.1.1:
 `Proc.sigtab` shape (V-6), CAS-installed outside every lock, freed at `proc_free`,
 **copied at `rfork` and aliased on `dup`/`dup3`/`F_DUPFD`** (each alias its own row with a
 fresh epoch — the Plan 9 APE per-process posture; operator-voted A 2026-08-18, landed
-2026-09-01: `viv_socktab_clone_into` after the handle copy keeps only rows whose fd the child
-holds; `viv_socktab_alias` runs after each alias install, room-checked before it; a state
+2026-09-01: the fork copy is `viv_socktab_fork_prepare` / `_snapshot` / `_finish` around
+`handle_table_copy_into_hooked` — the rows are snapshotted INSIDE the handle copy's source-lock
+hold, because a peer thread (N-3) closing and reopening a socket fd between two separate
+snapshots handed the child a handle and a row for one fd that named different sockets (the
+socktab holotype F1, closed 2026-09-02); finish keeps only rows whose fd the child holds;
+`viv_socktab_alias` runs after each alias install, room-checked before it; a state
 mutation through one alias — `connect`/`bind`/`listen`, which also swaps THAT handle
 ctl→data — is not seen through another, where Linux shares one description: the socket
 OBJECT is recorded in §9 as the faithful resolution), bounded (`VIV_SOCK_MAX`) so a guest cannot grow kernel
 memory without bound — the I-32 posture, with the socket count charged to the
 guest's own handle table besides.
+
+**What a number-keyed side table cannot make atomic, stated rather than implied (the
+socktab holotype, 2026-09-02).** `socket()` / `accept()` install the handle and claim the row
+in two steps of their own, and `dup` / `dup3` / `F_DUPFD` install the handle and alias the row
+in two; a peer thread that closes and reopens THAT fd number inside either gap gets a chimera
+the way Linux never does (a handle to one socket beside a row for another, or a socket handle
+with no row → `ENOTSOCK`). The fork gap is closed (above) because a fork with concurrent socket
+churn on other threads is a realistic program; the per-fd gaps are a program racing its OWN
+fd number (POSIX calls the result indeterminate), memory-safe, tracked as **F2 [P3]** of that
+round, and closed for good only by the socket OBJECT (option C in §9) — the row living on the
+kernel object the handle names, so every install carries its state by construction. Also from
+that round: the socket arms split Linux's two "no socket here" errnos — a CLOSED fd is
+`EBADF` (the fd lookup fails first), a live non-socket fd is `ENOTSOCK` (`viv_sock_row`);
+every row-less fd answered `ENOTSOCK` before.
 
 It is unavoidable, and the alternatives were measured rather than assumed:
 
@@ -3353,7 +3371,7 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | **More than 64 CONTRIBUTING fds is refused** (§5.5.4, V-5c-2) | `POLL_MAX_NFDS` bounds the pollfd ARRAY. Note this is a bound on the *count*, not on fd *values*: a `select` over fds 200 and 201 is two pollfds and is fine. (pouch's `select` caps the wrong axis and returns `EBADF` for any fd ≥ 64 — task #99 F-a) |
 | **An `nfds` above the fd table is CLAMPED, not refused** (§5.5.4, V-5c-2) | Which is Linux's own `if (n > max_fds) n = max_fds`. A bit above the table names an fd that cannot exist, so it is simply not scanned. A bit *below* the clamp naming no open handle still becomes `POLLNVAL` → `EBADF`, which is also Linux |
 | **`pipe2` admits `{0, O_CLOEXEC}` and nothing else** (#155) | `O_NONBLOCK` and `O_DIRECT` are flags Linux's `pipe2` genuinely accepts, and both answer `ENOSYS` here — devpipe has no non-blocking read and no packet framing, so admitting either would tell a guest something false about the pipe it just received. An allow-list rather than a deny-list, for the reason V-2d's `mmap` recorded: aarch64 defines flags a deny-list admits by omission. The two admitted values are not a conservative subset — they are what the gate's own busybox issues, measured off the binary (four sites through musl's `pipe()` with a hardcoded `mov x1, #0`, two through `pipe2()` with `mov w1, #0x80000`), and on aarch64 there is no legacy `pipe` number to reach instead |
-| **`dup3` / `dup` / `F_DUPFD` of a socket ALIAS the row (#157 retired 2026-09-01; the socktab-across-images vote)** | `dup2(sockfd, 0)` — the inetd idiom — works: the target number gets its OWN copy of the socket's `(proto, N, state)` row with a fresh epoch (`viv_socktab_alias`), `fork` copies the table (`viv_socktab_clone_into`), and `close` of an alias drops only its own row. What stays DEGRADED, and is now a statement rather than a decline: two aliases are two independent state machines over one connection — a `connect` through alias A advances A's row and swaps A's handle `ctl`→`data` while B still names `ctl` and still reads FRESH (the Plan 9 APE per-process rock; Linux shares one file description, so a state change through one alias is visible through all). Every fork shape that occurs (accept-then-fork, prefork accept, dup2 onto 0/1) works under the copy; only a program that mutates a socket's state through one alias and then acts on that state through another diverges. The faithful resolution is a refcounted socket OBJECT that an fd names and that indirects ctl-or-data itself (the design memo's option C) — the same object #98's Spoor-holding poll core wants; it is the DEGRADED tier's proper close and is recorded here, not built. |
+| **`dup3` / `dup` / `F_DUPFD` of a socket ALIAS the row (#157 retired 2026-09-01; the socktab-across-images vote)** | `dup2(sockfd, 0)` — the inetd idiom — works: the target number gets its OWN copy of the socket's `(proto, N, state)` row with a fresh epoch (`viv_socktab_alias`), `fork` copies the table (`viv_socktab_fork_*`, snapshotted inside the handle copy's lock hold), and `close` of an alias drops only its own row. What stays DEGRADED, and is now a statement rather than a decline: two aliases are two independent state machines over one connection — a `connect` through alias A advances A's row and swaps A's handle `ctl`→`data` while B still names `ctl` and still reads FRESH (the Plan 9 APE per-process rock; Linux shares one file description, so a state change through one alias is visible through all). Every fork shape that occurs (accept-then-fork, prefork accept, dup2 onto 0/1) works under the copy; only a program that mutates a socket's state through one alias and then acts on that state through another diverges. The faithful resolution is a refcounted socket OBJECT that an fd names and that indirects ctl-or-data itself (the design memo's option C) — the same object #98's Spoor-holding poll core wants; it is the DEGRADED tier's proper close and is recorded here, not built. |
 | **`dup3` admits `{0, O_CLOEXEC}` and refuses the rest with `EINVAL`, not `ENOSYS`** (#157) | Listed here for contrast rather than as a gap: unlike `pipe2` above, this row's served set is **equal** to Linux's, because `ksys_dup3` refuses everything outside the same pair with `EINVAL`. So a refused flags word is us reproducing Linux exactly, not declining to serve — which is why it must not be collapsed into the ENOSYS decline (V-2d's `munmap` note). The only genuinely degraded thing about this row is the socket case above |
 
 ---

@@ -282,9 +282,10 @@ static const struct viv_reject g_viv_rejects[] = {
     // output fd to wrap it in a FILE*, so the external-helper transports need
     // it -- FORWARD returned ENOSYS ("can't dup helper output fd"). It is an
     // fd-CREATING row, not fd-freeing (like pipe2 below), so it owes no socktab
-    // DROP; but it DECLINES a socket SOURCE (ENOSYS, as dup3 does), because a
-    // dup that did not also register the new number would hand back a socket fd
-    // the socket path cannot recognize. Its shell arm lives beside dup3's.
+    // DROP; it owes the ALIAS (the socktab-across-images vote): a socket source's
+    // row is copied onto the new number, so the socket path recognizes it. It
+    // DECLINED a socket source (ENOSYS) before that vote. Its shell arm lives
+    // beside dup3's.
     { VIV_LINUX_DUP,         VIV_TIER2   },  // git-remote-https helper pipe
     { VIV_LINUX_DUP3,        VIV_TIER2   },  // #157: vivarium_dup3_decide
     { VIV_LINUX_CLOSE_RANGE, VIV_FORWARD },
@@ -1824,46 +1825,68 @@ static void socktab_copy_row_locked(struct viv_socktab *tab, struct viv_sock *ds
 
 // fork's copy for the PHENOTYPE (POSIX fork(2); the socktab-across-images
 // design, operator-voted A 2026-08-18: COPY at fork, Plan 9 APE's per-process
-// rock). The child gets its OWN table holding every parent entry whose fd the
-// CHILD ACTUALLY HOLDS -- handle_table_copy_into ran first and may have left
-// holes (a non-aliasable handle is skipped), and a hole must never carry a
-// stale row for a number the child's next fd-creating call will be handed.
-// The parent's rows are SNAPSHOTTED under its lock (peer threads may be
-// claiming/dropping), then the child's table is built with NO lock: the
-// child is under construction and unpublished, so nothing can reach its
-// table, and taking its lock would nest the socktab lock under the handle
-// table's lock (the drop_cloexec ordering rule) for no benefit. The epoch
-// counter is copied too, so the child's future claims continue the
+// rock), in the three steps vivarium.h describes. The child gets its OWN
+// table holding every parent entry whose fd the CHILD ACTUALLY HOLDS.
+//
+// The snapshot runs INSIDE handle_table_copy_into_hooked's source-lock hold
+// (proc.c), with the parent's socktab lock nested under the handle lock. A
+// peer thread of a multi-threaded parent (N-3) that closes a socket fd and
+// opens a new one at the same number needs the handle lock for both halves,
+// so while the copy holds it the rows this reads are the rows those handles
+// were claimed for. Taken in a separate hold -- as the first version did --
+// the child could carry the OLD data Spoor at fd N beside a row naming the
+// NEW socket's connection, and its socket arms would then drive a
+// connection its fd never held (the socktab holotype F1). The nesting is
+// cycle-free: the socktab lock is a leaf (every hold covers array ops only;
+// nothing takes it and then a handle lock).
+//
+// The epoch counter is copied too, so the child's future claims continue the
 // parent's monotonic sequence and every copied row keeps an epoch unique
-// within the child's table. A parent with no table is a parent with no
-// sockets: the child's stays NULL (and the native parent never gets here --
-// rfork_internal gates on PHENO_LINUX, the sigtab precedent). Returns 0, or
-// -1 on OOM with child->socktab left NULL (proc_free's kfree(NULL) is a
-// clean no-op); the caller fails the fork, as it does for the sigtab.
-int viv_socktab_clone_into(struct Proc *child, const struct Proc *parent) {
-    if (!child || !parent) return -1;
-    struct viv_socktab *src = __atomic_load_n(&parent->socktab, __ATOMIC_ACQUIRE);
-    if (!src) return 0;
-    struct viv_socktab *dst = (struct viv_socktab *)kzalloc(sizeof(*dst), 0);
-    if (!dst) return -1;
-    for (u32 i = 0; i < VIV_SOCK_MAX; i++) dst->s[i].fd = -1;   // the FREE marker
+// within the child's table. finish runs with no lock: the child is under
+// construction and unpublished, so nothing can reach its table, and the
+// filter's handle_get_cloexec takes the CHILD's handle lock on its own.
+int viv_socktab_fork_prepare(struct viv_socktab_fork *f, const struct Proc *parent) {
+    if (!f || !parent) return -1;
+    f->parent = parent;
+    f->dst    = NULL;
+    if (!__atomic_load_n(&parent->socktab, __ATOMIC_ACQUIRE)) return 0;
+    f->dst = (struct viv_socktab *)kzalloc(sizeof(*f->dst), 0);
+    return f->dst ? 0 : -1;
+}
 
-    // The snapshot: entries + the epoch counter, field-wise -- never the struct,
-    // whose lock word is HELD while we read it.
+void viv_socktab_fork_snapshot(void *arg) {
+    struct viv_socktab_fork *f = (struct viv_socktab_fork *)arg;
+    if (!f || !f->dst) return;
+    // The pointer is CAS-installed once and cleared only by proc_free, and
+    // prepare saw it non-NULL, so this load is the same table.
+    struct viv_socktab *src = __atomic_load_n(&f->parent->socktab, __ATOMIC_ACQUIRE);
+    if (!src) return;
+    // Entries + the counter, field-wise -- never the struct, whose lock word
+    // is HELD while we read it.
     spin_lock(&src->lock);
-    for (u32 i = 0; i < VIV_SOCK_MAX; i++) dst->s[i] = src->s[i];
-    dst->next_epoch = src->next_epoch;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) f->dst->s[i] = src->s[i];
+    f->dst->next_epoch = src->next_epoch;
     spin_unlock(&src->lock);
+}
 
-    // The filter: keep only rows whose fd the child holds. handle_get_cloexec
-    // is the existence probe the dup arms use (-1 = no such handle).
+void viv_socktab_fork_finish(struct Proc *child, struct viv_socktab_fork *f) {
+    if (!child || !f || !f->dst) return;
+    struct viv_socktab *dst = f->dst;
+    f->dst = NULL;
+    u32 live = 0;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
         struct viv_sock *e = &dst->s[i];
-        if (e->state == VIV_SOCK_FREE) continue;
-        if (handle_get_cloexec(child, (hidx_t)e->fd) < 0) socktab_clear_slot(e);
+        if (e->state == VIV_SOCK_FREE) { e->fd = -1; continue; }   // the FREE marker (0 is a valid fd)
+        // The filter: keep only rows whose fd the child holds. handle_get_cloexec
+        // is the existence probe the dup arms use (-1 = no such handle).
+        if (handle_get_cloexec(child, (hidx_t)e->fd) < 0) { socktab_clear_slot(e); continue; }
+        live++;
+    }
+    if (live == 0) {
+        kfree(dst);         // nothing to carry: the child's first socket() allocates
+        return;
     }
     __atomic_store_n(&child->socktab, dst, __ATOMIC_RELEASE);
-    return 0;
 }
 
 // The alias rule (dup / dup3 / F_DUPFD of a socket; operator-voted with the

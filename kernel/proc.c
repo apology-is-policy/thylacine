@@ -1409,14 +1409,16 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // read all-SIG_DFL with an empty mask (`trap '' PIPE; cmd | head` handed
     // cmd a SIG_DFL SIGPIPE), and the exec image lost SIG_IGN and the mask.
     //
-    // THE SINGLE-THREADEDNESS THIS PARAGRAPH USED TO BUY SURVIVES, ON DIFFERENT
-    // GROUNDS -- and notes.c leans on it for the sigtab tearing argument, so
-    // the re-derivation matters rather than being bookkeeping. A PHENO_LINUX
-    // Proc still cannot make a second THREAD: CLONE_THREAD is outside the
-    // admitted domain, and the native SYS_THREAD_SPAWN is unreachable from a
-    // phenotyped Proc. What the clone row grants is a second PROC, which
-    // carries its own sigtab. Widening that domain to admit CLONE_THREAD would
-    // void the argument in notes.c.
+    // THE SINGLE-THREADEDNESS THIS PARAGRAPH ONCE BOUGHT IS GONE. N-3 admitted
+    // CLONE_THREAD (viv_clone_thread makes a peer Thread in THIS Proc), so a
+    // PHENO_LINUX Proc CAN have peer threads, and every per-Proc table they
+    // share needs its own discipline: the socktab took a lock at N-3 and its
+    // fork copy rides the handle copy's lock hold (below); the sigtab's
+    // lock-free entry read in notes.c is the OPEN item that paragraph names --
+    // a peer's sigaction() racing a delivery can pair the old handler with the
+    // new flags/mask (tracked: the sigtab tearing round). This comment said
+    // the opposite for the first weeks after N-3; a reader of rfork_internal
+    // was told no peer existed exactly where the fork copy's window was.
     // VIVARIUM V-4a-0: the executable name is INHERITED (a fork-without-exec
     // keeps running the parent's binary -- POSIX, and the honest answer for
     // /proc/<pid>/exe). Every v1.0 spawn execs immediately afterwards and
@@ -1557,26 +1559,35 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // RFFDG stays unsupported: under this tree's polarity it would mean SHARE
     // one table between two Procs, which needs a refcounted HandleTable object
     // -- an L-3a-style extraction, not this.
-    if (fc) handle_table_copy_into(child, parent);
-
-    // The socktab half of the same POSIX fork (the socktab-across-images
-    // design, operator-voted A 2026-08-18; VIVARIUM 5.5.2): a forked Linux
-    // child keeps every inherited socket's (proto, n, state) in a table of
-    // its OWN -- the Plan 9 APE per-process copy -- so an inherited socket fd
-    // is a SOCKET to the child (the accept-then-fork server, prefork workers),
-    // not a plain Spoor that answers ENOTSOCK to every socket arm. AFTER the
-    // handle copy on purpose: the clone keeps only rows whose fd the child
-    // holds, and only the copied table can say which those are. Fork-shape
-    // only (fc): a spawned child gets an explicit fd list at renumbered slots,
-    // which a number-keyed table cannot follow, so a native SYS_SPAWN endowing
-    // a socket fd to a Linux child stays the pre-existing omit posture (the
-    // fd reads and writes; the socket arms say ENOTSOCK) -- documented, not
-    // hidden. OOM fails the fork, the sigtab rule above.
-    if (fc && parent->phenotype == PHENO_LINUX &&
-        viv_socktab_clone_into(child, parent) != 0) {
-        child->state = PROC_STATE_ZOMBIE;
-        proc_free(child);
-        return -1;
+    if (fc) {
+        // The socktab half of the same POSIX fork (the socktab-across-images
+        // design, operator-voted A 2026-08-18; VIVARIUM 5.5.2): a forked Linux
+        // child keeps every inherited socket's (proto, n, state) in a table
+        // of its OWN -- the Plan 9 APE per-process copy -- so an inherited
+        // socket fd is a SOCKET to the child (the accept-then-fork server,
+        // prefork workers), not a plain Spoor that answers ENOTSOCK to every
+        // socket arm. The rows are snapshotted INSIDE the handle copy's
+        // source-lock hold (the hook), because a peer thread of this parent
+        // (N-3) may be closing and reopening socket fds while we copy, and two
+        // separate snapshots let it hand the child a handle and a row for one
+        // fd that name different sockets (the socktab holotype F1). finish
+        // then keeps only rows whose fd the child holds -- only the copied
+        // table can say which those are. Fork-shape only (fc): a spawned child
+        // gets an explicit fd list at renumbered slots, which a number-keyed
+        // table cannot follow, so a native SYS_SPAWN endowing a socket fd to a
+        // Linux child stays the pre-existing omit posture (the fd reads and
+        // writes; the socket arms say ENOTSOCK) -- documented, not hidden. OOM
+        // fails the fork before any copy, the sigtab rule above.
+        struct viv_socktab_fork sf = { .parent = parent, .dst = NULL };
+        if (parent->phenotype == PHENO_LINUX &&
+            viv_socktab_fork_prepare(&sf, parent) != 0) {
+            child->state = PROC_STATE_ZOMBIE;
+            proc_free(child);
+            return -1;
+        }
+        handle_table_copy_into_hooked(child, parent,
+                                      sf.dst ? viv_socktab_fork_snapshot : NULL, &sf);
+        viv_socktab_fork_finish(child, &sf);
     }
 
     // LINEAGE L-3b: the other step that differs between the two child shapes.

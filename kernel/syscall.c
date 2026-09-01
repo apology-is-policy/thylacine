@@ -10369,10 +10369,24 @@ static s64 viv_sock_socket(struct Proc *p, u64 domain, u64 type, u64 protocol) {
 //     only reference, and netd frees the connection at zero.
 // handle_replace does both correctly by construction: it installs the new
 // object first and releases the old one after.
+// The socket arms' fd -> row lookup, with Linux's two "no socket here" errnos
+// split the way sockfd_lookup_light splits them: a CLOSED fd is EBADF (the fd
+// lookup fails before any socket check), a live fd with no row is ENOTSOCK.
+// Every row-less fd used to answer ENOTSOCK, which is what the probe's L198
+// pinned as the meaning of "closed" until the socktab holotype (F5) caught it.
+// 0 with *out filled, or the negative errno.
+static s64 viv_sock_row(struct Proc *p, struct viv_socktab *tab, u64 fd_raw,
+                        struct viv_sock *out) {
+    if (viv_socktab_get(tab, (s32)(s64)fd_raw, out)) return 0;
+    if (fd_raw >= (u64)PROC_HANDLE_MAX || handle_get_cloexec(p, (hidx_t)fd_raw) < 0)
+        return -(s64)T_E_BADF;
+    return -(s64)T_E_NOTSOCK;
+}
+
 static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock     e;   // snapshot: proto/n are immutable, the rest read-once
-    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
     if (e.state == VIV_SOCK_CONNECTED) return -(s64)T_E_ISCONN;
     if (e.state == VIV_SOCK_LISTENING) return -(s64)T_E_ISCONN;
 
@@ -10519,7 +10533,7 @@ static s64 viv_copy_sockaddr(u64 addr_va, u64 addrlen, u8 *out /* [128] */) {
 static s64 viv_sock_bind(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock     e;
-    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
     if (e.state != VIV_SOCK_FRESH)     return -(s64)T_E_INVAL;
 
     u8  sa[128];
@@ -10575,7 +10589,7 @@ static s64 viv_sock_getsockopt(struct Proc *p, u64 fd_raw, u64 level,
                                u64 optname, u64 optval_va, u64 optlen_va) {
     // getsockopt reads no per-entry field: an existence test suffices.
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
-    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, NULL)) return -(s64)T_E_NOTSOCK;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, NULL); if (lr < 0) return lr; }
 
     s32 err = 0;
     if (!vivarium_getsockopt_decide(level, optname, &err))
@@ -10691,7 +10705,7 @@ static s64 viv_sock_sendto(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
                            u64 flags, u64 addr_va, u64 addrlen) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock     e;
-    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
 
     s32 err = 0;
     if (!vivarium_sendto_decide((enum viv_net_proto)e.proto, e.state, flags,
@@ -10708,7 +10722,7 @@ static s64 viv_sock_recvfrom(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
                              u64 flags, u64 addr_va) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock     e;
-    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
 
     s32 err = 0;
     if (!vivarium_recvfrom_decide(e.state, flags, addr_va, &err))
@@ -10728,7 +10742,7 @@ static s64 viv_sock_recvfrom(struct Proc *p, u64 fd_raw, u64 buf_va, u64 len,
 static s64 viv_sock_recvmsg(struct Proc *p, u64 fd_raw, u64 msg_va, u64 flags) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock     e;
-    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
 
     s32 derr = 0;
     if (!vivarium_recvmsg_decide(e.state, flags, e.remote_port != 0, &derr))
@@ -10879,7 +10893,7 @@ static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
     (void)backlog;
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock     e;
-    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
 
     s32 err = 0;
     if (!vivarium_listen_decide((enum viv_net_proto)e.proto,
@@ -10935,7 +10949,7 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
 
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     struct viv_sock     e;
-    if (!viv_socktab_get(tab, (s32)(s64)fd_raw, &e)) return -(s64)T_E_NOTSOCK;
+    { s64 lr = viv_sock_row(p, tab, fd_raw, &e); if (lr < 0) return lr; }
     if (e.state != VIV_SOCK_LISTENING)    return -(s64)T_E_INVAL;
 
     // Ask BEFORE blocking. Past this point a real peer is connected, and

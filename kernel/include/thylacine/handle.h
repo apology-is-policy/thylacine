@@ -374,6 +374,18 @@ hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights);
 // the regression tests assert on).
 int handle_table_copy_into(struct Proc *dst, struct Proc *src);
 
+// The same copy with a hook run INSIDE the source-lock hold -- after every
+// slot is copied, before either lock drops. For state that lives BESIDE the
+// handle table but is keyed by its indices (the phenotype socket table), this
+// is the only way its snapshot and the table's can be ONE: the source lock is
+// what stops a peer thread of a multi-threaded parent closing fd N and opening
+// a different object at N between the two, and it stops that only for a
+// snapshot taken while it is held. The hook may take leaf locks (the socket
+// table's nests here: handle -> socktab) and must neither sleep nor allocate.
+// `under_src_lock == NULL` is the plain copy.
+int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
+                                  void (*under_src_lock)(void *arg), void *arg);
+
 // #151: dup with the parent's rights carried VERBATIM, installing at the lowest
 // free index >= min_idx, and with the new descriptor's close-on-exec flag set to
 // `cloexec`. This is POSIX dup / F_DUPFD / F_DUPFD_CLOEXEC; handle_dup above is

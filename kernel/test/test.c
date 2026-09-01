@@ -789,6 +789,7 @@ void test_vivarium_socktab_reset(void);                             // Design D 
 void test_vivarium_socktab_clone_into(void);                        // socktab across images: fork
 void test_vivarium_socktab_alias(void);                             // socktab across images: alias
 void test_vivarium_dup3_alias(void);                                // ...at the dup3 arm
+void test_vivarium_socktab_arm_refusals(void);                      // ...the arms' refusals (holotype F4)
 void test_vivarium_listen_decide(void);
 void test_vivarium_timespec_to_ms(void);
 void test_vivarium_ppoll_decide(void);
@@ -2481,6 +2482,7 @@ struct test_case g_tests[] = {
     { "vivarium.socktab_clone_into",   test_vivarium_socktab_clone_into,   false, NULL },
     { "vivarium.socktab_alias",        test_vivarium_socktab_alias,        false, NULL },
     { "vivarium.dup3_alias",           test_vivarium_dup3_alias,           false, NULL },
+    { "vivarium.socktab_arm_refusals", test_vivarium_socktab_arm_refusals, false, NULL },
     { "vivarium.listen_decide",        test_vivarium_listen_decide,        false, NULL },
     { "vivarium.timespec_to_ms",       test_vivarium_timespec_to_ms,       false, NULL },
     { "vivarium.ppoll_decide",         test_vivarium_ppoll_decide,         false, NULL },

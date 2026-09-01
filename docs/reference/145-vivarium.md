@@ -387,21 +387,37 @@ stale note at the head; pending -> `SIG_IGN` -> handler -> unblock fires NOTHING
 a fresh SIGPIPE delivered exactly once).
 
 **Socket state across fork and dup (the socktab-across-images vote, operator A 2026-08-18;
-landed 2026-09-01).** `rfork_internal` copies `Proc.socktab` into the child right after the
-handle copy (`viv_socktab_clone_into`: the parent's rows snapshotted under its lock, the
-child's table built lock-free while unpublished, rows whose fd the child does not hold
-dropped so a hole never carries a stale row, the epoch counter carried over; OOM fails the
-fork like the sigtab clone). `dup` / `dup3` / `F_DUPFD` of a socket ALIAS the row onto the new
+landed 2026-09-01; the fork copy re-shaped by the holotype close 2026-09-02).**
+`rfork_internal` copies `Proc.socktab` into the child AS PART OF the handle copy:
+`viv_socktab_fork_prepare` allocates the child's table with no lock held (OOM fails the fork
+like the sigtab clone), `viv_socktab_fork_snapshot` is the `under_src_lock` hook of
+`handle_table_copy_into_hooked` -- the parent's rows and its epoch counter copied field-wise
+under the parent's socktab lock, nested inside the parent's handle lock the copy is holding,
+so a peer thread closing and reopening a socket fd (both halves need the handle lock) cannot
+land between the two snapshots -- and `viv_socktab_fork_finish` drops every row whose fd the
+child does not hold (a hole never carries a stale row), frees the table when no row survived,
+and RELEASE-stores it into the still-unpublished child. The first version snapshotted in a
+separate hold after the copy returned; the holotype's F1 [P2] showed a peer's
+`close(X)`+`socket()` in that gap handing the child the OLD data Spoor at X beside the NEW
+socket's row. `dup` / `dup3` / `F_DUPFD` of a socket ALIAS the row onto the new
 number (`viv_socktab_alias`: a copy with a fresh epoch, replace-on-claim at the target,
 room-checked by `viv_socktab_alias_fits` BEFORE the handle install and run AFTER it, so a
 refused call never touches the table and a refused install never mints a row; the dup3 shell's
 drop of the overwritten number is paid inside the alias for a socket source and by the plain
 drop otherwise). Each alias is its own row, so the close hook drops only the closed number's
 row and the original survives. The kept divergence -- two aliases are two state machines --
-is the VIVARIUM section-9 row. Regressions: `vivarium.socktab_clone_into` (the real
-`handle_table_copy_into`, a held fd copied whole, a hole dropped, the parent untouched, the
-child's drop leaves the parent), `vivarium.socktab_alias`, `vivarium.dup3_alias` (at the arm),
-the flipped `vivarium.dup_arm` socket leg, and probe legs L257-L271.
+is the VIVARIUM section-9 row; the per-fd install/alias gaps under a peer racing its OWN fd
+number are that round's F2 [P3], tracked toward the socket OBJECT. The socket arms now split
+Linux's two "no socket here" errnos (`viv_sock_row`: a closed fd `EBADF`, a live non-socket
+`ENOTSOCK`). Regressions: `vivarium.socktab_clone_into` (the real
+`handle_table_copy_into_hooked` with a witness hook that records the parent's handle lock
+HELD when the snapshot runs, a held fd copied whole, a hole dropped, the parent untouched,
+the child's drop leaves the parent, an all-holes parent leaves the child NULL),
+`vivarium.socktab_arm_refusals` (F_DUPFD aliases at the arm; a refused dup3 -- EBADF, EINVAL
+-- keeps the target's live row; dup / F_DUPFD of a socket with the socket table full are
+EMFILE with the handle table untouched), `vivarium.socktab_alias`, `vivarium.dup3_alias` (at
+the arm), the flipped `vivarium.dup_arm` socket leg, and probe legs L257-L271 + L198 (a closed
+number is EBADF to F_GETFD and listen; a file dup3'd onto it is ENOTSOCK to listen).
 
 **Signal state across fork and exec (POSIX; operator-voted 2026-08-17).**
 Two halves of one recorded decision (task #127 named both when clone became a

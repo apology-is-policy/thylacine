@@ -856,15 +856,18 @@ struct Proc {
     // described socket() -- a copy-paste that pointed anyone grepping for the
     // sigtab's lifetime at the wrong field): lazily allocated on the Proc's
     // first translated socket(), CAS-installed outside every lock, freed at
-    // proc_free, NOT rfork-inherited. It holds the (proto, N, state) tuple a
-    // translated socket needs and that neither the fd nor any path can carry
-    // -- docs/VIVARIUM.md section 5.5.2 has the measurement showing why.
+    // proc_free, and COPIED at fork into a table of the child's own
+    // (viv_socktab_fork_*, snapshotted inside the handle copy's lock hold).
+    // It holds the (proto, N, state) tuple a translated socket needs and that
+    // neither the fd nor any path can carry -- docs/VIVARIUM.md section 5.5.2
+    // has the measurement showing why.
     //
-    // The SAME lock-free argument applies, with the same warning: it is sound
-    // only because a PHENO_LINUX Proc cannot obtain a PEER THREAD -- and see
-    // the sigtab paragraph above for why that is a fact about the clone row's
-    // argument domain (which exists) rather than about the row's absence
-    // (which was the stated reason, and stopped being true at L-3d; #158).
+    // NOT lock-free, unlike the sigtab: since N-3 a PHENO_LINUX Proc CAN have
+    // peer threads (CLONE_THREAD is served), so the table carries a leaf
+    // spinlock held over array ops only, readers snapshot, writers are
+    // epoch-keyed (vivarium.h). The sentence that stood here -- "sound only
+    // because a PHENO_LINUX Proc cannot obtain a PEER THREAD" -- described the
+    // pre-N-3 tree.
     struct viv_socktab *socktab;
 
     // SQPOLL kernel threads this Proc has MINTED (SYS_LOOM_SETUP with

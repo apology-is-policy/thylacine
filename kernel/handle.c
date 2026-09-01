@@ -643,6 +643,11 @@ static bool handle_slot_may_alias(const struct Handle *s) {
 // renumber the ones after it), and the rights are carried VERBATIM rather than
 // narrowed by a caller-supplied ceiling.
 int handle_table_copy_into(struct Proc *dst, struct Proc *src) {
+    return handle_table_copy_into_hooked(dst, src, NULL, NULL);
+}
+
+int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
+                                  void (*under_src_lock)(void *arg), void *arg) {
     struct HandleTable *dt = proc_handles_or_extinct(dst);
     struct HandleTable *st = proc_handles_or_extinct(src);
     // Not merely unexpected -- the two-lock hold below would deadlock on
@@ -694,6 +699,10 @@ int handle_table_copy_into(struct Proc *dst, struct Proc *src) {
         __atomic_fetch_add(&g_handle_allocated, 1, __ATOMIC_RELAXED);
         copied++;
     }
+    // Side-table snapshots ride the same hold (see the header): whatever the
+    // hook copies is coherent with the slots above, because no peer could
+    // have changed a slot since the walk began.
+    if (under_src_lock) under_src_lock(arg);
     spin_unlock(&dt->lock);
     spin_unlock(&st->lock);
 

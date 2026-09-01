@@ -1637,19 +1637,18 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     // -----------------------------------------------------------------------
     if (p->phenotype == PHENO_LINUX && !proc_is_self_managing_notes(p)) {
         enum viv_signote sn = viv_signote_from_note_name(candidate.name);
-        // The 32-byte entry is read by the OWNING thread only; the sole
-        // cross-thread reader is notes_post's SIG_IGN hook, which touches one
-        // naturally-aligned u64 (single-copy-atomic on aarch64 -- old or new,
-        // never torn). A guest cannot make a second thread either -- and that
-        // half was RE-DERIVED when process creation landed, as this comment
-        // asked. It no longer rests on "clone is in no table row" (LINEAGE
-        // L-3d made it one). It rests on CLONE_THREAD being outside
-        // vivarium_clone_decide's admitted domain, plus the native
-        // SYS_THREAD_SPAWN being unreachable from a phenotyped Proc. What the
-        // clone row grants is a second PROC, carrying its OWN sigtab, not a
-        // second thread sharing this one.
-        //
-        // WIDENING THAT DOMAIN TO ADMIT CLONE_THREAD VOIDS THIS ARGUMENT.
+        // The 32-byte entry: the cross-Proc readers (notes_post's SIG_IGN
+        // hook and its siblings) touch one naturally-aligned u64, the handler
+        // word (single-copy-atomic on aarch64 -- old or new, never torn). This
+        // reader takes all four fields, and since N-3 admitted CLONE_THREAD a
+        // peer thread of this Proc CAN be inside viv_sigtab_set at the same
+        // moment: it stores flags/restorer/mask RELAXED and then the handler
+        // RELEASE, so a delivery that loaded the OLD handler can pair it with
+        // the NEW flags/mask (an SA_SIGINFO handler entered with one argument
+        // is the visible failure). The paragraph that stood here said no peer
+        // could exist; that stopped being true at N-3 and the tearing is an
+        // OPEN, tracked item (the sigtab tearing round) -- a seqlock over the
+        // entry, or the socktab's lock discipline, is the shape of the close.
         struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
         struct viv_ksigaction act;
         bool have_handler = viv_sigtab_note_handler(tab, sn, &act);

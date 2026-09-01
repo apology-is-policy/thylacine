@@ -701,8 +701,9 @@ Linux needs a refcounted entry, a real change to a table V-5 audited, and that
 belongs in a chunk about it; the cost is bounded and named (the inetd
 `dup2(connfd,0); dup2(connfd,1)` idiom), published in VIVARIUM §9's DEGRADED tier.
 **Both halves LANDED 2026-09-01 (the socktab-across-images vote, operator A 2026-08-18):**
-`rfork_internal` now calls `viv_socktab_clone_into` after the handle copy (only rows whose fd
-the child holds; a hole gets no row), and `dup`/`dup3`/`F_DUPFD` of a socket ALIAS the row onto
+`rfork_internal` now snapshots the socktab INSIDE the handle copy's lock hold
+(`viv_socktab_fork_*` around `handle_table_copy_into_hooked`; only rows whose fd the child
+holds survive, a hole gets no row), and `dup`/`dup3`/`F_DUPFD` of a socket ALIAS the row onto
 the new number with a fresh epoch instead of declining -- the *copying* posture above, chosen
 deliberately: it is Plan 9 APE's per-process rock, and every fork/dup shape that occurs works
 under it; the divergence it keeps (a state change through one alias unseen through another)

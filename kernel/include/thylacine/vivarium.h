@@ -1315,8 +1315,9 @@ _Static_assert(sizeof(struct viv_sock) == 32, "viv_sock pinned at 32 bytes "
                "(the u64 epoch identity key added 8; still 64*32 = 2 KiB, under a page)");
 
 // The per-Proc table (Proc.socktab). Lazily allocated on the first translated
-// socket(), CAS-installed, freed at proc_free, NOT rfork-inherited -- the
-// viv_sigtab shape exactly.
+// socket(), CAS-installed, freed at proc_free, and COPIED at fork into a table
+// of the child's own (viv_socktab_fork_*, the operator-voted socktab-across-
+// images design) -- the viv_sigtab shape plus the fork copy.
 //
 // LOCKED SINCE N-3 (phenotype threads). Until clone(CLONE_THREAD) landed this
 // table was lock-free, sound because a PHENO_LINUX Proc could not obtain a peer
@@ -1400,13 +1401,37 @@ void viv_socktab_drop(struct viv_socktab *tab, s32 fd);
 void viv_socktab_reset(struct viv_socktab *tab);
 
 // fork's copy (POSIX fork(2); operator-voted A, 2026-08-18 -- COPY at fork,
-// the Plan 9 APE per-process posture): the child gets its own table holding
-// every parent row whose fd the child actually holds (handle_table_copy_into
-// must have run first; a hole gets no row). Snapshots the parent under its
-// lock, builds the child's table lock-free (unpublished). 0, or -1 on OOM
-// with child->socktab NULL -- the caller fails the fork (the sigtab shape).
+// the Plan 9 APE per-process posture), in three steps AROUND the handle-table
+// copy so that the two snapshots are ONE critical section:
+//   prepare  -- allocate the child's table with no lock held; -1 on OOM and
+//               the caller fails the fork (the sigtab shape). A parent with no
+//               table leaves f->dst NULL and every later step a no-op.
+//   snapshot -- the handle_table_copy_into_hooked hook: every row + the epoch
+//               counter, copied field-wise under the PARENT's socktab lock,
+//               nested inside the parent's handle lock the copy is holding.
+//               That nesting is the whole point (the socktab holotype F1): a
+//               peer thread cannot close fd N and reopen it as a different
+//               socket between the handle snapshot and this one, because both
+//               halves of that sequence need the handle lock. Two separate
+//               holds handed the child a handle and a row for one fd that
+//               named different sockets.
+//   finish   -- drop every row whose fd the CHILD does not hold (a hole in the
+//               copy: a non-aliasable handle), free the table if no row
+//               survived (the child's first socket() allocates lazily), else
+//               RELEASE-store it into the still-unpublished child.
+// What no snapshot closes: socket()/accept() install the handle and claim the
+// row in two steps of their own, so a fork landing between them gives the
+// child a held ctl fd with no row (ENOTSOCK to the socket arms). Inherent to
+// a number-keyed side table; the socket OBJECT (VIVARIUM 5.5.2, option C) is
+// the close.
 struct Proc;
-int viv_socktab_clone_into(struct Proc *child, const struct Proc *parent);
+struct viv_socktab_fork {
+    const struct Proc  *parent;
+    struct viv_socktab *dst;        // NULL: nothing to carry
+};
+int  viv_socktab_fork_prepare(struct viv_socktab_fork *f, const struct Proc *parent);
+void viv_socktab_fork_snapshot(void *arg);      // arg: the struct viv_socktab_fork
+void viv_socktab_fork_finish(struct Proc *child, struct viv_socktab_fork *f);
 
 // The alias rule for dup / dup3 / F_DUPFD of a socket (the same vote): the
 // new number carries its OWN copy of the source's row with a FRESH epoch. A
