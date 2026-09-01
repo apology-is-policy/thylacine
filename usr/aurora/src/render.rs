@@ -5,7 +5,7 @@
 // damage granularity is the row (the VT marks dirty rows; present rects span
 // them).
 
-use crate::vt::{Cell, Vt, ATTR_REVERSE, ATTR_UNDERLINE};
+use vt::{Cell, Vt, ATTR_REVERSE, ATTR_UNDERLINE};
 use cornucopia::Atlas;
 
 pub struct Metrics {

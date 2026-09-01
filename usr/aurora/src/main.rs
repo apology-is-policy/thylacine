@@ -45,7 +45,6 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 mod config;
 mod osd;
 mod render;
-mod vt;
 
 use alloc::string::String;
 use alloc::vec::Vec;

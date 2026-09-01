@@ -417,6 +417,17 @@ line boxes.
   already touches only the cell grid + palette API). The move is
   behavior-preserving and gated by aurora's existing screendump scenarios
   (`ls-gfx*` — a ZERO-diff bar).
+- **AS-BUILT at H-2a (2026-09-01)**: the crate is `usr/lib/vt` (name `vt` —
+  the standard term won per the naming discipline's don't-force-it rule; the
+  §13.9 held slot is resolved). A git 100%-rename plus a 10-line crate
+  header; aurora's four use-sites went `crate::vt::` → `vt::`. The gate ran
+  as the full 15-scenario `ls-gfx*` family: ALL PASS (gl + glquake included
+  — real clade legs, no skips). Bonus the plan did not name: the module's
+  9 parser tests, dormant since birth (aurora is a no_std bin crate with no
+  cargo-test lane), are LIVE for the first time —
+  `cargo test -p vt --target aarch64-apple-darwin`, the beacon-crate
+  pattern. Aurora still carries 9 dormant tests (config 3 / render 1 /
+  osd 5); the vault's aurora dossier tracks them.
 - Halcyon uses it twice: **(a)** the raw-VT pane class hosts a full `Vt`
   grid per alt-screen program — literally an aurora-class pane, cashing the
   "Aurora terminals as panes" continuity; **(b)** the transcript's inline

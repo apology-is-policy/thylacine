@@ -20,7 +20,7 @@
 // plane's swallow-set discipline would be overkill for a settings dialog.
 
 use crate::render::{darken_rect, draw_run, Metrics};
-use crate::vt::THEMES;
+use vt::THEMES;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;

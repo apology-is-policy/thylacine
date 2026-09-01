@@ -9,6 +9,16 @@
 // Colors are the Bonfire palette (docs/UTOPIA-VISUAL.md section 1): default
 // bg/fg + the role-derived ANSI-16 map below. SGR 38;2 truecolor passes
 // through exactly (libutopia emits it), 38;5 maps via the xterm-256 cube.
+//
+// A shared crate since H-2a (HALCYON.md section 13.4): aurora hosts one Vt
+// per surface; halcyond hosts one per raw-VT pane plus the transcript's
+// inline SGR-subset interpreter. Pure no_std + alloc -- the parser is host-
+// tested (cargo test -p vt --target aarch64-apple-darwin); the pixel side
+// (render.rs, the atlas blit) stays with each consumer.
+
+#![no_std]
+
+extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec;

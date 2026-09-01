@@ -87,6 +87,7 @@ dependencies = [
  "cornucopia",
  "libtapestry",
  "libthyla-rs",
+ "vt",
 ]
 
 [[package]]
@@ -1859,6 +1860,10 @@ version = "0.1.0"
 dependencies = [
  "libthyla-rs",
 ]
+
+[[package]]
+name = "vt"
+version = "0.1.0"
 
 [[package]]
 name = "warden"
