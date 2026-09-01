@@ -141,6 +141,17 @@ expect {
     timeout { lc_fail "battery never reached the chrome-create gate" }
 }
 
+# H-3b-4: the tile-status verb (global ctl `tag <id> status ok|err|resting`)
+# is gated: a NON-renderer's write is refused (E_PERM) and the pane's
+# `status` file -- an ungated read -- still says `resting` after it (the
+# refusal did not apply). The positive twin (halcyond keying its live tile
+# sage/cinnabar) is ls-halcyon's.
+expect {
+    -ex "battery: tag-status gate OK" { lc_pass "panes: tag-status gate refuses a non-renderer (E_PERM; state unchanged)" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the tag-status gate leg failed" }
+    timeout { lc_fail "battery never reached the tag-status gate" }
+}
+
 # Scenario 2 (G-6b): the resize protocol.
 expect {
     -ex "battery: resize rejects OK" { lc_pass "panes: resize-ack negative probes OK" }

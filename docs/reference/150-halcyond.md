@@ -34,6 +34,13 @@ Surface, and the event loop.
 | `raster` | `GlyphSource`: vendored DejaVu (fontdue) + the baked Cornucopia mono cell through ONE `cartoon::AtlasPacker`; kerning; regen eviction | 6 (incl. the full-stack word-through-executor leg) |
 | `input` | the held-feed policy (aurora's #129/#135/#136 discipline, selftest arms as host tests), `key_bytes`, the modal key map | 8 |
 | `select` | Helix-modal selection v0: the flat row list, `Sel` (cursor/anchor/range/yank) | 4 |
+| `chrome` | the tag-bar RULES (H-3b): the `layout`/rect parsers, the §4.2 key derivation `key_for(focused, status)`, the per-key colours, the strip display list `strip_list` | 5 (leaf parse incl. hidden/malformed, rects, the key table, the colour table, the list shape) |
+
+The bin adds `chromeset` (`src/chromeset.rs`, `mod chromeset;` in main.rs): the
+tag-bar SURFACES — one `Role::Chrome` conn per strip, the pane-tree reads, the
+event pump, the paint into `surf.pixels()`. It is the syscalling half of
+`chrome` and nothing else; H-3b-3 first put both halves in the lib, which broke
+the lib's host-test build (the recipe above) until H-3b-4 split them.
 
 ## The data flow
 
@@ -89,20 +96,31 @@ ut reads `/dev/beacon` and exports `/env/BEACON` (BEACON.md §12.3).
 - `Image`/`Embed` ops exist in the executor but no transcript path emits
   them yet (images are H-7).
 
-## The chrome (H-3b-3): the per-leaf tag bar
+## The chrome (H-3b-3/H-3b-4): the per-leaf tag bar
 
-`src/chrome.rs` — halcyond owns one `Role::Chrome` tapestry surface per
-visible leaf that carries a Daylight tag-bar strip, paints the whole strip,
-and the compositor PLACES it at the leaf's `tagbar` rect (the H-3b-2
-`surface_target` arm; `create W H role=chrome bind=<pane-id>` is
-renderer-gated, and halcyond is spawned with `T_SPAWN_PERM_CONSOLE_RENDERER`
-by joey's renderer-choice block). DISPLAY-only at H-3b-3: pills are
-commands (H-3c) and the live sage/cinnabar states ride the H-3b-4 status verb.
+`src/chrome.rs` (lib, the rules) + `src/chromeset.rs` (bin, the surfaces) —
+halcyond owns one `Role::Chrome` tapestry surface per visible leaf that
+carries a Daylight tag-bar strip, paints the whole strip, and the compositor
+PLACES it at the leaf's `tagbar` rect (the H-3b-2 `surface_target` arm;
+`create W H role=chrome bind=<pane-id>` is renderer-gated, and halcyond is
+spawned with `T_SPAWN_PERM_CONSOLE_RENDERER` by joey's renderer-choice block).
+DISPLAY-only: pills are commands (H-3c).
 
 ```rust
-pub struct ChromeSet { /* BTreeMap<pane id, Tile{ surf, focused, name, dirty, dead }> */ }
+// lib: halcyond::chrome
+pub struct Leaf { pub id: u32, pub focused: bool, pub surface: Option<u32> }
+pub fn parse_leaves(layout: &str) -> Vec<Leaf>;         // "<id>[*] leaf ..." lines; `hidden` skipped
+pub fn parse_rect(s: &str) -> Option<(u32, u32, u32, u32)>;
+pub enum Key { Resting, Sage, Cinnabar }                 // the section 4.2 rows
+pub fn key_for(focused: bool, status: &str) -> Key;     // (live, last exit) -> key
+pub fn key_colors(key: Key) -> (Argb, Argb, Argb);      // ground, separator, name ink
+pub fn strip_list(key: Key, name: &str, w: u32, h: u32, gs: &mut GlyphSource) -> Cartoon;
+// bin: chromeset
+pub struct ChromeSet { /* BTreeMap<pane id, Tile{ surf, key, name, dirty, dead }>, own_pane */ }
 impl ChromeSet {
     pub fn new() -> ChromeSet;
+    /// The leaf hosting the console surface (the status verb's target).
+    pub fn own_pane(&self) -> Option<u32>;
     /// Bring the tiles in line with the layout; paints every dirty tile.
     pub fn reconcile(&mut self, troot: i64, own_surface: u32, gs: &mut GlyphSource);
     /// Drain every tile's events (non-blocking). True = a CONFIGURE was
@@ -112,15 +130,39 @@ impl ChromeSet {
 }
 ```
 
-**Data sources — the §13.7 file-walk bias, no new verb.** `troot` is a
+**Data sources — the §13.7 file-walk bias, no new read verb.** `troot` is a
 second `/srv/tapestry` root fd (the console `Surface` keeps its own
 private). `layout` gives the visible leaves (lines `<id>[*] leaf ...`; a
 trailing `hidden` is skipped; `*` marks the focused leaf); `pane/<id>/tagbar`
 gives the strip as `x y w h` (ZERO = bar-free: a single fullscreen leaf, or
-one too short to spare it); `pane/<id>/tag` gives the NAME. halcyond names its
-own pane once through that file (`"halcyon"` — HALCYON-VISUAL §4.1: the name
+one too short to spare it); `pane/<id>/tag` gives the NAME; `pane/<id>/status`
+gives the tile's RECORDED last-command status (`resting|ok|err`), read only for
+the focused leaf — the only tile a status can show on. halcyond names its own
+pane once through the `tag` file (`"halcyon"` — HALCYON-VISUAL §4.1: the name
 is "the tile's program"; §13.6 names the tag file as the source); every other
 tile shows its `tag` or nothing.
+
+**The states (§4.2) and the one authority.** `key_for(focused, status)`: the
+LIVE tile — the focused leaf, the one tile holding input — is `Sage` (exit 0,
+or nothing has run yet) or `Cinnabar` (the recorded status is exactly `err`);
+every other leaf is `Resting` — a resting pane's sole tile, "the tile a
+resting pane would return to" (header ground, `ember_deep` separator, `fg`
+name). The plain Resting row (border separator, muted name) belongs to a
+stack's collapsed tiles, which do not exist before tile stacking lands. The
+key is derived from the COMPOSITOR's record (the `status` file), the same
+record its live hairline reads, never from a private copy: strip and hairline
+cannot disagree.
+
+**The status feed (H-3b-4).** The transcript latches the exit code of each
+completed command from its `exit` mark (`Transcript::take_exit`; a latch, not
+a queue — only the LAST exit is the tile's status). The event loop's chrome
+step sends it as `tag <own-pane> status ok|err` through `Surface::global_ctl`
+on the CONSOLE surface's conn (the gate reads the conn's kernel-stamped peer,
+and this process holds the renderer role), then reconciles so the strip
+re-reads the record. Held while the console is not yet up or the own pane is
+not yet known; a newer exit replaces an unsent older one. Display-only: a
+refusal is said once (`halcyond: tag status refused`) and the feed stops —
+the bars stay resting-keyed, nothing else degrades.
 
 **The reconcile.** Diff the wanted set (every visible leaf with a non-ZERO
 strip) against the live tiles: gone or bar-free → drop (a dropped `Surface`
@@ -140,11 +182,12 @@ same-size CONFIGURE (the redraw request, coalesced by replacement); that is
 the wake that keeps the "resting, active tile" separator on the focused leaf.
 There is no timer.
 
-**The paint** (HALCYON-VISUAL §4.1/§4.2/§4.3), one cartoon list per strip:
-`Op::Clear{header}`; `Op::Rect` on the bottom row = the separator
-(`ember_deep` on the focused leaf's tile, else `border`); the name as one
-glyph run in `FACE_BODY` at 10.5 px, x = `METRICS.tag_pad_x`, baseline centred
-via `line_metrics` (`fg` on the focused tile, `fg_muted` resting); executed
+**The paint** (HALCYON-VISUAL §4.1/§4.2/§4.3), one cartoon list per strip
+from `strip_list`: `Op::Clear{ground}`; `Op::Rect` on the bottom row = the
+separator; the name as one glyph run in `FACE_BODY` at 10.5 px, x =
+`METRICS.tag_pad_x`, baseline centred via `line_metrics` — ground / separator
+/ ink per `key_colors` (Resting: header / ember_deep / fg; Sage: sage tint /
+sage / sage fg; Cinnabar: cinnabar tint / cinnabar / cinnabar fg); executed
 into `surf.pixels()` exactly as the transcript renders, then `present(None)`.
 `pump` never paints: painting on a CONFIGURE before the reconcile re-reads the
 layout would flash the stale state.
@@ -156,7 +199,7 @@ stream marks the tile for the next reconcile.
 
 ## Tests
 
-- Host: 35 lib tests (the table above) — all `--offline` against the
+- Host: 47 lib tests (the table above) — all `--offline` against the
   vendored registry.
 - In-guest: `tools/interactive/ls-halcyon.exp` — GATED on the baked lever
   (`THYLACINE_HALCYON=1` bakes `/lib/halcyon/renderer`; the scenario SKIPs
@@ -164,14 +207,23 @@ stream marks the tile for the next reconcile.
   the rich advertisement, login→ut through the transcript, the
   parchment-dominant screendump + ink, the rich canary + zone/obj/table
   frames on the wire, the split/zoom reflow round-trip (real QMP Super+H /
-  Super+F through the compositor), and F10's silence.
+  Super+F through the compositor), and F10's silence. Since H-3b: the tag
+  bars on a split — the pre-split control, the header-with-ink strip, the
+  §4.2 keys following focus (resting `ember_deep` vs live sage on strip AND
+  content hairline, the top hairline row vanishing into the live tint), a
+  failing command (`pwd; false`) keying the live tile cinnabar and a clean
+  one keying it back, and zoom dropping the bars (parchment at the top).
+- ls-gfx-panes (default image, the battery as a NON-renderer): the negative
+  twins — `role=chrome` create → E_PERM, `tag <A> status err` → E_PERM with
+  the pane's `status` file still `resting` after the refusal.
 - The default image's suite (1435/1435) pins the joey default arm
   (`aurora spawned`, no config).
 
 ## Status
 
 H-2 (the transcript MVP on the CPU floor) as of the H-2d close; H-3b-3
-added the per-leaf tag-bar chrome (DISPLAY-only; the section above). Not yet:
+added the per-leaf tag-bar chrome and H-3b-4 the live-tile keys + the status
+feed (DISPLAY-only; the section above). Not yet:
 raw-VT panes (H-3; `raw_vt_intent` latches today), menus (H-3c),
 layouts (H-4), compose (H-5), the vk executor + the display-list wire
 (H-6), images/`Embed` (H-7). Damage-rect presents are a recorded

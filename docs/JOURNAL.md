@@ -402,6 +402,91 @@ separators swap.
 Verified, this time on the levers and by the lines, not the verdict: ls-halcyon on the THYLACINE_HALCYON=1 lever PASS [37 s] -- `pre-split control -- no tag-bar strip on a single leaf (dom 242,235,224)`, `left tag bar is Daylight header with name ink (186 4672 off/total)`, `tag-bar separators carry focus (left border, right ember_deep)`, `focus move re-keyed the tag-bar separators (left ember_deep, right border)`, `zoom dropped the tag bars (single leaf, strip ZERO)`, plus every H-2/H-3a-2 leg (parchment+ink, 63-col reflow, the four-value bevel, the rich chain); no `halcyond: chrome ... failed` line. ls-gfx-chords on the THYLACINE_AURORA_CFG4=1 lever PASS [34 s] with its real body (Super+H split, gaps 8 = the Daylight floor, Super+F unbound, Super+G zoom rebind + toggle) -- the first time today that scenario RAN. Default fixtures restored (0 lever lines in the restore bake) and ls-gfx-panes PASS [41 s] on them with both H-3b legs (`per-leaf tag bar renders Daylight header-bg`, `chrome-create gate discriminates`). All at LS_CI_JOBS=1; builds clean; keys paired. Three bakes for one sub-chunk (the halcyon lever, the cfg-4 lever, the default restore) is the cost of the lever design, and it is the right cost: a verdict that cannot tell a skip from a pass is the expensive thing. Vault: the server delta (the focus-epoch fan) rung on yip 0031; halcyond + both exps are unowned (`150-halcyond.md` gained the chrome section; sweep filed). **Next: H-3b-4** -- the gated `tag <pane-id> status` verb, the live sage/cinnabar states in both painters, and THE audit round covering H-3b-2's gate + this create path, with the AUDIT-TRIGGERS row.
 
 
+### H-3b-4: the tile status becomes a fact the compositor keys by focus — and the halcyond lib split gets enforced (same run, after the self-compaction)
+
+**The design call, made under the standing authorization.** §13.6 ratified a
+three-valued verb (`tag <pane-id> status ok|err|resting`, "name provisional")
+and left open who decides what shows. Vote 1's wording ("the per-tile
+status-key COLOR it is told") reads as: the renderer sends a display key per
+tile and the compositor paints it. I did not build that, and the reason is
+the H-3c gate's own principle applied one chunk early: a display key sent per
+tile needs *two* verbs on every focus move (the old tile to `resting`, the new
+one to its key), and until the second lands — or forever, if halcyond is
+wedged — a tile that has lost input still carries the marker that §1.4 says
+means "where you are". So the verb carries only the fact the renderer alone
+holds, the LAST EXIT, and the compositor keeps focus as its own fact and
+combines the two at paint time: the live tile shows sage unless the record is
+`err`; a tile that is not live shows no key at all. A stale or wedged
+renderer cannot mark the wrong tile, and a focus move re-keys the hairline
+inside the compositor's own focus-only repaint with no second verb. `resting`
+survives as the explicit reset (= nothing recorded = sage when live), so the
+ratified enum stands with exact semantics: it is the record, not the display
+state, and the new per-pane `status` file reports exactly that. Recorded as
+ratified under the 2026-09-01 authorization; the as-built paragraph in §13.6
+says so.
+
+**Where the hairline goes, derived rather than chosen.** §5.3 outlines the
+live *content* on three sides; §2.4 wants the hairline to vanish alongside a
+tag bar. With a tinted live bar the header-coloured hairline would no longer
+vanish, so alongside the bar (the top row and the strip's flanks) it takes the
+bar's tint, and alongside the content it takes the key. The bottom row is the
+§5.4 shadow's dark half, above H-3a-2's lighter `border` row; the two dark
+bevel rows between them are the pane's and stay uniform, because §2.1 says a
+bevel never says "focused". The exp asserts both halves separately: the left
+column reads the key, the top row reads the tint.
+
+**What the scripture changed under H-3b-3's feet.** H-3b-3 painted the
+focused leaf's separator `ember_deep` as a stand-in for focus. §4.2 read
+carefully says otherwise: *Resting, active tile* is "the tile a resting pane
+would return to" — with one tile per leaf, that is every unfocused leaf, and
+the focused one is Live. So every resting pane now carries the ember on its
+separator with the name in full ink, and the plain Resting row (border
+separator, muted name) is reserved for a stack's collapsed tiles, which do
+not exist yet. The tab-strip painter had already made the same call
+(`ember_deep` = active-but-not-focused); the tag bars now agree with it.
+
+**The regression I inherited from myself.** The halcyond lib's charter is
+"everything that thinks, and nothing that syscalls", host-tested through a
+documented recipe. H-3b-3 put `chrome.rs` — surfaces, fds, the event pump —
+in the lib. The recipe then failed to build (`unresolved import libthyla_rs`)
+and nobody ran it at H-3b-3, so it was found here, by running it. The fix is
+the charter: `halcyond::chrome` is now the pure half (the layout and rect
+parsers, `key_for(focused, status)`, the per-key colours, the strip display
+list) with five host tests pinning the §4.2 table and the parse edge cases,
+and the bin's `chromeset` is the surfaces. 47/47 host tests, up from a
+recipe that did not compile.
+
+**A witness that would have gone hollow.** The H-3b-3 zoom leg asserted the
+strip region "no longer reads header". Under H-3b-4 that region reads the
+live tint before the zoom lands, so the old assertion would have passed
+immediately for the wrong reason. It now demands the transcript's parchment
+— the state only the zoom can produce.
+
+**The feed.** The transcript already parsed the shell's `exit` mark into the
+block; a latch (`take_exit`) exposes the last one, and the chrome step sends
+`tag <own-pane> status ok|err` on the console surface's own conn (the gate
+reads the conn's peer, and halcyond holds the renderer role). Held until the
+console is up and its pane is known; a refusal is said once and the feed
+stops — display only, nothing else degrades.
+
+Verified on the levers, by the lines: ls-halcyon on the THYLACINE_HALCYON=1
+lever PASS [43 s] — `tag-bar keys follow focus (left resting ember_deep, right
+live sage; left hairline header)`, `focus move re-keyed the tiles (left live
+sage: strip + content hairline; right resting ember_deep)` including the top
+hairline row reading the sage tint alongside the live bar, `pwd; false` →
+`a non-zero exit keyed the live tile cinnabar (strip + separator + content
+hairline)`, `pwd` → `a zero exit re-keyed the live tile sage (the status is
+the last exit)`, and `zoom dropped the tag bars (single leaf, strip ZERO,
+parchment at the top)`; no `tag status refused`, no `chrome ... failed`; every
+H-2/H-3a legs intact. Default fixtures restored (0 lever lines) and
+ls-gfx-panes PASS [42 s] with the battery as a non-renderer: `tag-status
+gate refuses a non-renderer (E_PERM; state unchanged)` — the write returns −1
+and the pane's `status` file still reads `resting` after it; the H-3b-1/-2
+legs intact. Three target crates clean; 47/47 host. **Next: the H-3b audit
+round** (holotype-reviewer, Fable max) on this commit — H-3b-2's create gate +
+H-3b-3's chrome path + this verb + the H-2 dirty-close re-prosecution — then
+the AUDIT-TRIGGERS row already landed with the chunk is the round's scope.
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon

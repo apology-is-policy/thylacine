@@ -613,6 +613,43 @@ and i3's per-window title bar are the prior art, both per-window). Concretely:
   shadow H-3a-2 landed the light half of.** halcyond must be spawned with
   `T_SPAWN_PERM_CONSOLE_RENDERER` (the aurora precedent) for the gated verb to be
   permitted. Pills are DISPLAY-only in H-3b; executing them is H-3c.
+  AS-BUILT (H-3b-4): `tag <pane-id> status ok|err|resting` (the provisional
+  name kept) records the exit of the tile's LAST completed command -- the one
+  fact only the renderer holds (the transcript's `exit` mark) -- as
+  `Pane.status`: `resting` = nothing recorded (the default; reset whenever the
+  tile's program changes: alloc, host into an empty leaf, the root collapse).
+  The compositor keeps FOCUS as its own fact and combines the two at paint time
+  (§1.4's key is a function of *(live, last exit)*): the LIVE tile -- the
+  focused leaf -- shows sage unless `err` (cinnabar); a tile that is not live
+  shows NO key. So a stale or wedged renderer can never leave a status on a
+  tile that lost input (the wedged-client robustness the H-3c gate is about,
+  applied here), and a focus move re-keys the hairline atomically with the
+  compositor's own focus-only repaint -- no second verb, no split brain.
+  Syntax first (E_INVAL), then the id must name a live LEAF (E_NOENT; the
+  create-bind precedent); the verb rides the cfg-3 default-deny gate, which
+  judges authority BEFORE syntax (a non-renderer sees E_PERM whatever it
+  writes). Read back via a new per-pane `status` file (`resting|ok|err` -- the
+  RECORD, not the display key; ungated like every pane read, the §13.7
+  file-walk bias; the H-3d condition slot's source). The hairline (§5.3): the
+  live tile's inner hairline is re-keyed alongside the CONTENT -- left, right,
+  and the bottom row, which is the §5.4 shadow's dark half above H-3a-2's
+  lighter `border` row (the pane's bevel between them is the pane's and stays
+  uniform, §2.1); alongside the TAG BAR (the top row + the strip's flanks) it
+  takes the bar's TINT, so it still vanishes into the bar as §2.4 intends --
+  the bar is tinted, the content is outlined; a bar-less live tile is outlined
+  on all four sides. halcyond's strip renders the §4.2 rows: the LIVE tile
+  sage/cinnabar (tint ground, key separator, the key's `fg` name); every other
+  leaf is a resting pane's sole tile and renders "Resting, active tile" (header
+  ground, `ember_deep` separator, `fg` name) -- the plain Resting row belongs
+  to a stack's collapsed tiles, which do not exist before tile stacking lands.
+  halcyond READS the key from the pane's `status` file (the same record the
+  hairline reads -- one authority) and WRITES its own tile's exit through the
+  verb on its console surface's conn after every completed command (display
+  only: a refusal is said once and the feed stops). The halcyond lib/bin split
+  (§13.1) is enforced by the host-test build: the pure rules
+  (`halcyond::chrome`: the layout/rect parsers, the key derivation, the strip
+  display list) are host-tested; the surfaces + fds live in the bin's
+  `chromeset`.
 
 **Pane chrome (H-3a).** Extend `paint_borders`/`paint_strips` from the flat 1px
 frame to Daylight §2: the NNW single-light-source 2px four-value bevel

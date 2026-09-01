@@ -51,6 +51,8 @@ macro_rules! say {
     }};
 }
 
+mod chromeset;
+
 const CONNECT_TRIES: u32 = 25;
 const CONNECT_DELAY_MS: u64 = 200;
 
@@ -208,8 +210,15 @@ pub extern "C" fn rs_main() -> i64 {
     if troot < 0 {
         say!("halcyond: /srv/tapestry root open failed (no tag bars)");
     }
-    let mut chrome = halcyond::chrome::ChromeSet::new();
+    let mut chrome = chromeset::ChromeSet::new();
     let mut relayout = true;
+    // H-3b-4: the exit of the last completed command, taken from the
+    // transcript's exit mark and owed to the compositor as the console
+    // tile's status (the gated `tag <id> status` verb). Held until the
+    // tile's pane is known and the console is up; only the LAST exit
+    // matters, so a newer one replaces an unsent older one.
+    let mut pending_exit: Option<i64> = None;
+    let mut status_refused = false;
 
     let mut gs = GlyphSource::new_vendored(512);
     if gs.face_count() != 2 {
@@ -441,6 +450,25 @@ pub extern "C" fn rs_main() -> i64 {
                 relayout = false;
                 chrome.reconcile(troot, surf.id, &mut gs);
             }
+            // The status feed: tell the compositor the console tile's last
+            // exit (it draws the live hairline + shadow from it; the strip
+            // re-reads it on the reconcile below). Rides the console
+            // surface's own conn -- the gate reads the CONN's peer, and
+            // this process holds the renderer role. Display-only: a refusal
+            // is said once and the feed stops (the bar stays resting-keyed).
+            if let (Some(code), Some(pane), false) = (pending_exit, chrome.own_pane(), status_refused) {
+                let st = if code == 0 { "ok" } else { "err" };
+                match surf.global_ctl(&alloc::format!("tag {} status {}", pane, st)) {
+                    Ok(()) => {
+                        pending_exit = None;
+                        chrome.reconcile(troot, surf.id, &mut gs);
+                    }
+                    Err(e) => {
+                        status_refused = true;
+                        say!("halcyond: tag status refused {:?}; live-tile key disabled", e);
+                    }
+                }
+            }
         }
 
         // (1) The next event (bounded wait only while input is held).
@@ -629,6 +657,9 @@ pub extern "C" fn rs_main() -> i64 {
                 let n = unsafe { t_read(drain, drainbuf.as_mut_ptr(), drainbuf.len()) };
                 if n > 0 {
                     t.feed(&drainbuf[..n as usize]);
+                    if let Some(code) = t.take_exit() {
+                        pending_exit = Some(code);
+                    }
                 } else if n == 0 {
                     drain_eof = true;
                     break;

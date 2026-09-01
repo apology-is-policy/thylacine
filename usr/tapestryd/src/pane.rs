@@ -125,6 +125,39 @@ impl Role {
     }
 }
 
+/// A tile's recorded status (HALCYON.md 13.6; HALCYON-VISUAL 1.4): the exit
+/// of the last command completed in it. `Resting` = none recorded (a fresh
+/// tile; "nothing has run yet"). The DISPLAY key is derived, never stored:
+/// the LIVE (focused) tile shows sage unless `Err` (cinnabar); a tile that
+/// is not live shows no key at all -- so a stale status can never mark a
+/// tile that does not hold input. Set only through the renderer-gated
+/// `tag <id> status` global verb; reset here whenever the tile's program
+/// changes (alloc / host / the root collapse).
+#[derive(Clone, Copy, PartialEq)]
+pub enum Status {
+    Resting,
+    Ok,
+    Err,
+}
+
+impl Status {
+    pub fn name(self) -> &'static str {
+        match self {
+            Status::Resting => "resting",
+            Status::Ok => "ok",
+            Status::Err => "err",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Status> {
+        match s {
+            "resting" => Some(Status::Resting),
+            "ok" => Some(Status::Ok),
+            "err" => Some(Status::Err),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: u32,
@@ -175,6 +208,8 @@ pub struct Pane {
     /// small to carve. A Role::Chrome surface binds here (H-3b); the
     /// compositor paints it `header`-bg as the resting fallback.
     pub tagbar: Rect,
+    /// The tile's recorded last-command status (see `Status`).
+    pub status: Status,
     /// Visible under the current layout (tab-inactive subtrees are not).
     pub visible: bool,
 }
@@ -229,6 +264,7 @@ impl Layout {
             rect: Rect::ZERO,
             content: Rect::ZERO,
             tagbar: Rect::ZERO,
+            status: Status::Resting,
             visible: false,
         };
         let slot = match self.panes.iter().position(|s| s.is_none()) {
@@ -377,12 +413,14 @@ impl Layout {
     /// Returns the hosting slot (None: pane table exhausted).
     pub fn host(&mut self, n: usize) -> Option<usize> {
         let f = self.focused;
-        if let Some(Kind::Leaf { surface: s @ None }) =
-            self.get_mut(f).map(|p| &mut p.kind)
-        {
-            *s = Some(n);
-            self.epoch += 1;
-            return Some(f);
+        if let Some(p) = self.get_mut(f) {
+            if let Kind::Leaf { surface: s @ None } = &mut p.kind {
+                *s = Some(n);
+                // A new program takes the tile: its status starts fresh.
+                p.status = Status::Resting;
+                self.epoch += 1;
+                return Some(f);
+            }
         }
         let r = self.get(f)?.content;
         let mode = if r.w >= r.h { Mode::SplitH } else { Mode::SplitV };
@@ -411,6 +449,7 @@ impl Layout {
             // The root never leaves; it collapses back to an empty leaf.
             if let Some(p) = self.get_mut(slot) {
                 p.kind = Kind::Leaf { surface: None };
+                p.status = Status::Resting;
             }
             // Free every other pane (the subtree was the whole tree).
             for i in 0..self.panes.len() {

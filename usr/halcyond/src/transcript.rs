@@ -211,6 +211,11 @@ pub struct Transcript {
     max_lines_per_block: usize,
     /// Bumps on every structural change (a consumer's cheap dirty check).
     pub seq: u64,
+    /// The exit code of the most recently completed command, latched by
+    /// its exit mark until the consumer takes it (`take_exit`): the tile
+    /// status feed (H-3b-4). A latch, not a queue -- only the LAST exit is
+    /// the tile's status.
+    last_exit: Option<i64>,
 }
 
 /// Default caps: sized against the 13.3 budget (a content budget, not a
@@ -228,6 +233,7 @@ impl Transcript {
         Transcript {
             frozen: VecDeque::new(),
             open: Block::new(0, BlockKind::Foreign),
+            last_exit: None,
             line: Vec::new(),
             col: 0,
             pen: SgrPen::new(&pal),
@@ -268,6 +274,12 @@ impl Transcript {
     /// The un-frozen line under construction (the cursor's line).
     pub fn pending_line(&self) -> &[TCell] {
         &self.line
+    }
+
+    /// Take the latched exit of the most recently completed command, if
+    /// one landed since the last take.
+    pub fn take_exit(&mut self) -> Option<i64> {
+        self.last_exit.take()
     }
 
     pub fn pending_col(&self) -> usize {
@@ -542,6 +554,7 @@ impl Transcript {
                 if Self::arg(args, "k") == Some("exit") {
                     let code = Self::arg(args, "code").and_then(|c| c.parse::<i64>().ok());
                     if code.is_some() {
+                        self.last_exit = code;
                         if self.open.kind != BlockKind::Foreign || self.open.has_content() {
                             self.open.exit = code;
                         } else if let Some(last) = self.frozen.back_mut() {

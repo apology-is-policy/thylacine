@@ -178,15 +178,17 @@ if {$lr == $tr && $lg == $tg && $lb == $tb} {
 }
 lc_pass "halcyon: Daylight NNW bevel painted (left 226,214,192 != top 248,242,230 -- four-value)"
 
-# H-3b-3: the per-leaf tag bar, painted by halcyond -- the POSITIVE twin of
-# ls-gfx-panes' E_PERM probe (the same `role=chrome` create from the
-# renderer, composited at the strip). At gaps=1 the strip is y 4..24 (floor
-# 1 + bevel 2 + hairline 1 above it). The left (halcyond) strip's interior
-# must be Daylight header WITH INK (the name "halcyon" in fg_muted) and its
-# bottom row the resting separator (border); the split focused the NEW
-# (right, empty) leaf, whose strip carries the "resting, active tile"
-# separator (ember_deep). Retried: the chrome lands a relayout after the
-# split's CONFIGURE.
+# H-3b-3/H-3b-4: the per-leaf tag bar, painted by halcyond -- the POSITIVE
+# twin of ls-gfx-panes' E_PERM probes (the same `role=chrome` create and
+# the same `tag status` verb from the renderer). At gaps=1 the strip is y
+# 4..24 (floor 1 + bevel 2 + hairline 1 above it); the left pane's hairline
+# column is x=3. HALCYON-VISUAL 4.2 states: the split focused the NEW
+# (right, empty) leaf, so IT is the live tile -- nothing has run in it, so
+# its strip is the sage tint with the sage separator; the left (halcyond)
+# tile is a resting pane's sole tile ("resting, active tile"): header bg
+# WITH INK (the name "halcyon" in fg) and the ember_deep separator; its
+# hairline stays header (no status shows where input is not). Retried: the
+# chrome lands a relayout after the split's CONFIGURE.
 proc strip_want {x0 y0 x1 y1 r g b what want_ink} {
     set v ""
     for {set i 0} {$i < 12} {incr i} {
@@ -202,34 +204,66 @@ proc strip_want {x0 y0 x1 y1 r g b what want_ink} {
 }
 set ink [strip_want 8 6 300 22 206 196 182 "left strip interior" 1]
 lc_pass "halcyon: left tag bar is Daylight header with name ink ($ink off/total)"
-strip_want 8 23 300 24 168 152 128 "left strip separator (unfocused -> border)" 0
-strip_want 700 23 1200 24 200 96 48 "right strip separator (focused new leaf -> ember_deep)" 0
-lc_pass "halcyon: tag-bar separators carry focus (left border, right ember_deep)"
+strip_want 8 23 300 24 200 96 48 "left strip separator (resting, active tile -> ember_deep)" 0
+strip_want 700 6 1200 22 184 204 196 "right strip interior (live, nothing has run -> sage tint)" 0
+strip_want 700 23 1200 24 30 88 68 "right strip separator (live -> sage key)" 0
+strip_want 3 120 4 560 206 196 182 "left hairline (not live -> header)" 0
+lc_pass "halcyon: tag-bar keys follow focus (left resting ember_deep, right live sage; left hairline header)"
 
 # A chord split moves focus to the NEW (empty) leaf (pane.rs split:
 # `self.focused = new_leaf` -- caught when zoom targeted the empty pane
 # and halcyond, hidden, never got the restore CONFIGURE). Focus back to
 # halcyond first; THEN zoom it to full width.
 hkey "meta_l+left"
-# Focus back on halcyond: the separators swap. A focus-only epoch reaches
-# the chrome as a same-size CONFIGURE; halcyond re-reads the layout's `*`.
-strip_want 8 23 300 24 200 96 48 "left strip separator after focus-back (ember_deep)" 0
-strip_want 700 23 1200 24 168 152 128 "right strip separator after focus-back (border)" 0
-lc_pass "halcyon: focus move re-keyed the tag-bar separators (left ember_deep, right border)"
+# Focus back on halcyond: the keys swap. A focus-only epoch reaches the
+# chrome as a same-size CONFIGURE; halcyond re-reads the layout's `*` and
+# the pane's `status` (its last command, `cat /dev/winsize`, exited 0 ->
+# `ok` -> sage). The compositor re-keys the LIVE tile's hairline from the
+# same record (5.3): the left column reads the sage key alongside the
+# content, and the top row alongside the bar reads the bar's TINT -- the
+# 2.4 vanish, kept under a live bar.
+strip_want 8 6 300 22 184 204 196 "left strip interior after focus-back (live ok -> sage tint)" 1
+strip_want 8 23 300 24 30 88 68 "left strip separator after focus-back (sage key)" 0
+strip_want 700 6 1200 22 206 196 182 "right strip interior after focus-back (resting -> header)" 0
+strip_want 700 23 1200 24 200 96 48 "right strip separator after focus-back (ember_deep)" 0
+strip_want 3 120 4 560 30 88 68 "left hairline after focus-back (live ok -> sage key)" 0
+strip_want 120 3 560 4 184 204 196 "left top hairline alongside the live bar (sage tint)" 0
+lc_pass "halcyon: focus move re-keyed the tiles (left live sage: strip + content hairline; right resting ember_deep)"
+
+# H-3b-4: the status feed end to end. A line whose LAST status is non-zero
+# (`pwd; false` -> \$? = 1; the exit mark carries the shell's status, the
+# sequencing token is pwd's output-only path) turns the live tile
+# cinnabar: strip tint + separator + the content hairline. Then a clean
+# command turns it back to sage -- the state is the LAST exit, never
+# sticky. `false` prints nothing, so the operand-error control below is
+# untouched.
+lc_run_expect "pwd; false" "/home/michael"
+strip_want 8 6 300 22 220 184 176 "left strip after a failing command (cinnabar tint)" 1
+strip_want 8 23 300 24 152 40 24 "left strip separator after a failing command (cinnabar key)" 0
+strip_want 3 120 4 560 152 40 24 "left hairline after a failing command (cinnabar key)" 0
+strip_want 120 3 560 4 220 184 176 "left top hairline alongside the cinnabar bar (tint)" 0
+lc_pass "halcyon: a non-zero exit keyed the live tile cinnabar (strip + separator + content hairline)"
+lc_run_expect "pwd" "/home/michael"
+strip_want 8 6 300 22 184 204 196 "left strip after recovery (sage tint)" 1
+strip_want 8 23 300 24 30 88 68 "left strip separator after recovery (sage key)" 0
+strip_want 3 120 4 560 30 88 68 "left hairline after recovery (sage key)" 0
+lc_pass "halcyon: a zero exit re-keyed the live tile sage (the status is the last exit)"
 hkey "meta_l+f"
 lc_run_expect "cat /dev/winsize" "winsize 128 "
 lc_pass "halcyon: zoom restored the full grid (reflow round-trip)"
 # Zoomed = one visible leaf: the strips are ZERO and halcyond drops its
-# chrome tiles; the region reads transcript again, not header.
+# chrome tiles; the region reads the transcript's parchment again -- not
+# header, and not the live tint it read a moment ago (a "not header" test
+# would pass on the tint before the zoom lands).
 set gone 0
 set v ""
 for {set i 0} {$i < 12} {incr i} {
-    set v [region 8 6 300 22 206 196 182]
-    if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> zo zt zr zg zb] && !($zr == 206 && $zg == 196 && $zb == 182)} { set gone 1; break }
+    set v [region 8 6 300 22]
+    if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> zo zt zr zg zb] && $zr == 242 && $zg == 235 && $zb == 224} { set gone 1; break }
     after 500
 }
-if {!$gone} { lc_fail "zoomed: the left strip region still reads header (chrome not dropped / strip not ZERO): $v" }
-lc_pass "halcyon: zoom dropped the tag bars (single leaf, strip ZERO)"
+if {!$gone} { lc_fail "zoomed: the left strip region never read the transcript parchment (chrome not dropped / strip not ZERO): $v" }
+lc_pass "halcyon: zoom dropped the tag bars (single leaf, strip ZERO, parchment at the top)"
 
 lc_quit
 
@@ -261,5 +295,5 @@ if {![catch {exec grep -q -- "re-exported" $transcript}]} {
 }
 lc_pass "halcyon: F10 stayed silent (no renderer change, no re-export)"
 
-lc_pass "ls-halcyon: the H-2 transcript MVP verified (halcyond render + rich chain + parchment pixels + split/zoom reflow)"
+lc_pass "ls-halcyon: the H-2 transcript MVP + the H-3b tag bar verified (halcyond render + rich chain + parchment pixels + split/zoom reflow + live-tile keys)"
 exit 0

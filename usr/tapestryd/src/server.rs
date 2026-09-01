@@ -122,7 +122,7 @@ const PRESENT_BURST_MIN: u32 = 4;
 use crate::chords::{ChordAction, Chords};
 use crate::gpu::{FenceTag, FencedErr, Gpu};
 use libdriver::Error;
-use crate::pane::{self, Dir, Layout, Mode, Rect, Role};
+use crate::pane::{self, Dir, Layout, Mode, Rect, Role, Status};
 
 pub const MAX_CONNS: usize = 8;
 /// Of those, at most this many may be WARP conns (audit F7). Warp-2c fed
@@ -423,6 +423,7 @@ const PFK_TAG: u64 = 4;
 const PFK_SURFACE: u64 = 5;
 const PFK_GEOMETRY: u64 = 6;
 const PFK_TAGBAR: u64 = 7;
+const PFK_STATUS: u64 = 8;
 
 fn make_surf(n: usize, fk: u64) -> u64 {
     SURF_FLAG | ((n as u64 & N_MASK) << 8) | (fk & FK_MASK)
@@ -4416,6 +4417,26 @@ impl Comp {
     /// whole-buffer push here would blank every pane. The bevel is UNIFORM
     /// (section 2.1/5.1 -- it marks a pane, never a focused one); focus shows
     /// only in the cast shadow here and the strip highlight (paint_strips).
+    /// H-3b-4: record a tile's status and, when it is the live tile on the
+    /// composed screen, repaint the rings (the status-keyed content
+    /// hairline + the cast shadow) and push just those rects -- the
+    /// focus-only discipline (a whole-buffer push would blank the
+    /// GPU-composed panes). A status on a tile that is not live changes
+    /// nothing on screen: the key is shown by focus, and the next focus
+    /// epoch's repaint reads it.
+    fn set_tile_status(&mut self, slot: usize, st: Status) {
+        match self.layout.get_mut(slot) {
+            Some(p) if p.status != st => p.status = st,
+            _ => return,
+        }
+        if self.scanout == Scanout::Composed && slot == self.layout.focused {
+            let rects = self.paint_borders(false);
+            for r in rects {
+                self.screen_push(r);
+            }
+        }
+    }
+
     fn paint_borders(&mut self, fill_tagbars: bool) -> Vec<Rect> {
         use libhalcyon::theme::{DAYLIGHT as D, METRICS as M};
         let mut painted: Vec<Rect> = Vec::new();
@@ -4469,6 +4490,32 @@ impl Comp {
             // bands -- idempotent, ring_color depends only on absolute
             // position). SAFETY: the geometry pass bounds every visible rect
             // inside the display; the buffer covers the display.
+            // H-3b-4 (HALCYON-VISUAL 5.3): the LIVE tile -- the focused
+            // leaf, the one tile holding input -- gets its inner hairline
+            // re-keyed by its recorded status: sage (exit 0, or nothing has
+            // run yet), cinnabar (last exit non-zero). The key runs alongside
+            // the CONTENT: left, right, and the bottom row, which is the cast
+            // shadow's dark half (5.4) above H-3a-2's lighter `border` row.
+            // Alongside the TAG BAR (the top row + the flanks of the strip)
+            // the hairline takes the bar's tint instead, so it still vanishes
+            // into the bar as 2.4 intends: the bar is tinted, the content is
+            // outlined, and the separator between them (the bar owner's
+            // bottom row) is the key. A bar-less live tile (too small to
+            // carve) is outlined on all four sides. Every other tile keeps
+            // the uniform `header` hairline: no status shows where input is
+            // not.
+            let live: Option<(u32, u32)> = if slot == focused {
+                let k = match p.status {
+                    Status::Err => &D.cinnabar,
+                    _ => &D.sage,
+                };
+                Some((k.key, k.tint))
+            } else {
+                None
+            };
+            let hair_d = floor_w + bevel;
+            let tb = p.tagbar;
+            let content_y = p.content.y;
             let band = |bx0: u32, by0: u32, bx1: u32, by1: u32| {
                 for y in by0..by1 {
                     let dt = y - r.y;
@@ -4476,7 +4523,17 @@ impl Comp {
                     for x in bx0..bx1 {
                         let dl = x - r.x;
                         let dr = (x1 - 1) - x;
-                        let c = ring_color(dl, dr, dt, db, floor_w);
+                        let d = dl.min(dr).min(dt).min(db);
+                        let c = match live {
+                            Some((key, tint)) if d == hair_d => {
+                                if !tb.is_empty() && y < content_y {
+                                    tint
+                                } else {
+                                    key
+                                }
+                            }
+                            _ => ring_color(dl, dr, dt, db, floor_w),
+                        };
                         unsafe {
                             *px.add((y as u64 * dw + x as u64) as usize) = c;
                         }
@@ -10951,6 +11008,7 @@ impl Conn {
                     b"surface" => PFK_SURFACE,
                     b"geometry" => PFK_GEOMETRY,
                     b"tagbar" => PFK_TAGBAR,
+                    b"status" => PFK_STATUS,
                     _ => return None,
                 };
                 Some((make_pane(id, fk), 0))
@@ -12291,6 +12349,12 @@ impl Conn {
                     format_args!("{} {} {} {}\n", t.x, t.y, t.w, t.h),
                 );
             }
+            PFK_STATUS => {
+                // The RECORDED status (resting|ok|err), not the display key:
+                // whether it shows is the compositor's focus fact.
+                let st = comp.layout.get(slot).unwrap().status;
+                let _ = core::fmt::write(&mut s, format_args!("{}\n", st.name()));
+            }
             _ => return self.err(tag, p9::E_INVAL),
         }
         self.read_str(tag, &s, offset, cap)
@@ -13167,6 +13231,36 @@ impl Conn {
             comp.reconcile();
             return Ok(());
         }
+        // H-3b-4: the tile status (HALCYON.md 13.6; HALCYON-VISUAL 1.4 /
+        // 5.3 / 5.4). `tag <pane-id> status ok|err|resting` records the
+        // exit of the last command completed in that tile. The renderer is
+        // the one party that knows it (the transcript's exit mark), so the
+        // verb rides the default-deny gate above with the other authority
+        // verbs. The compositor keeps FOCUS as its own fact: a recorded
+        // status is displayed only on the live (focused) tile -- the
+        // status-keyed content hairline + the cast shadow's dark half -- so
+        // a stale or wedged renderer can never leave a key on a tile that
+        // does not hold input. Syntax first (E_INVAL), then the id must
+        // name a live LEAF -- a tile -- else E_NOENT (a container has no
+        // status; the create-bind precedent). Read back via the pane's
+        // `status` file.
+        if let Some(rest) = s.strip_prefix("tag ") {
+            let mut it = rest.split_ascii_whitespace();
+            let id: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            if it.next() != Some("status") {
+                return Err(p9::E_INVAL);
+            }
+            let st = Status::parse(it.next().ok_or(p9::E_INVAL)?).ok_or(p9::E_INVAL)?;
+            if it.next().is_some() {
+                return Err(p9::E_INVAL);
+            }
+            let slot = comp.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
+            if !comp.layout.is_leaf(slot) {
+                return Err(p9::E_NOENT);
+            }
+            comp.set_tile_status(slot, st);
+            return Ok(());
+        }
         // Section 18.6 determinism mode (G-6c) -- compiled only into
         // dev/test builds (the `test-mode` cargo feature; the #880
         // strip-for-production class). `test-mode on` freezes the FRAME
@@ -14008,6 +14102,7 @@ impl Conn {
                         (&b"surface"[..], PFK_SURFACE),
                         (&b"geometry"[..], PFK_GEOMETRY),
                         (&b"tagbar"[..], PFK_TAGBAR),
+                        (&b"status"[..], PFK_STATUS),
                     ] {
                         names.push((nm.to_vec(), make_pane(id, fk)));
                     }

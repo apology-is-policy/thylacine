@@ -95,6 +95,19 @@ fn nap(ms: u64) {
 /// returning t_write's rc (negative = -errno); the minted surface is
 /// destroyed again. The chrome-create gate probes need the errno, not
 /// write_file's bool.
+/// One global-ctl write on the battery's own conn, returning the raw rc
+/// (the errno, negated) rather than a bool: the tag-status gate probe
+/// needs to tell E_PERM from any other refusal.
+fn raw_ctl(root: i64, cmd: &str) -> i64 {
+    let fd = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OWRITE) };
+    if fd < 0 {
+        return fd;
+    }
+    let rc = unsafe { t_write(fd, cmd.as_ptr(), cmd.len()) };
+    unsafe { t_close(fd) };
+    rc
+}
+
 fn raw_create(root: i64, cmd: &str) -> i64 {
     let ctl = unsafe { t_open(root, b"surface/new".as_ptr(), 11, T_ORDWR) };
     if ctl < 0 {
@@ -501,6 +514,35 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
         say!("battery: chrome-create gate OK");
+    }
+
+    // H-3b-4: the tile-status verb is a gated global verb (`tag <id> status
+    // ok|err|resting`; the cfg-3 default-deny judges authority BEFORE
+    // syntax, so a non-renderer sees E_PERM whatever it writes). The
+    // discriminating pair: the write is REFUSED (rc -1) AND the pane's
+    // `status` file -- an ungated read -- still says `resting` afterwards
+    // (a refusal that had applied the write would read `err`). The
+    // positive control one variable away is this same conn's ungated
+    // verbs (probe-screen above, test-mode below), which succeed. The
+    // positive twin of the write is halcyond's (ls-halcyon).
+    {
+        let path = alloc::format!("pane/{}/status", pa.id);
+        let s0 = read_file(root, &path).unwrap_or_default();
+        if s0.trim() != "resting" {
+            say!("tapestry-battery: FAIL tag-status: fresh tile reads '{}' want resting", s0.trim());
+            return 1;
+        }
+        let rc = raw_ctl(root, &alloc::format!("tag {} status err", pa.id));
+        if rc != -1 {
+            say!("tapestry-battery: FAIL tag-status: non-renderer write rc {} want -1 (E_PERM)", rc);
+            return 1;
+        }
+        let s1 = read_file(root, &path).unwrap_or_default();
+        if s1.trim() != "resting" {
+            say!("tapestry-battery: FAIL tag-status: the refused write changed the state to '{}'", s1.trim());
+            return 1;
+        }
+        say!("battery: tag-status gate OK");
     }
 
     // Scenario 2 (G-6b, the resize protocol). B's pane content differs
