@@ -123,6 +123,60 @@ fn window_contains(hay: &[u8], needle: &[u8]) -> bool {
     needle.len() <= hay.len() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
+// --- H-1c-2 Beacon helpers ---
+
+/// Assert `name args...` exits 0 with output free of ESC (0x1b) -- no SGR
+/// and no OSC frames. The piped-stdout auto-gate proof.
+fn beacon_clean(c: &mut Checker, label: &str, name: &str, args: &[&str]) {
+    match run_tool(name, args, b"") {
+        Some((0, out)) if !out.contains(&0x1b) => c.pass(label),
+        Some((0, _)) => c.fail(label, "ESC bytes in piped output"),
+        Some((code, _)) => c.fail(label, &format!("exit {}", code)),
+        None => c.fail(label, "spawn/wait failed"),
+    }
+}
+
+/// Write our own /env/BEACON; children inherit it via env_clone_into.
+fn write_env_beacon(value: &[u8]) -> bool {
+    match libthyla_rs::fs::File::create("/env/BEACON") {
+        Ok(mut f) => f.write_all(value).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Run `name` twice -- the rich invocation and the plain one -- and assert
+/// the P1 identity on real spawned output: the rich stream carries
+/// `frame_needle`, and stripping every frame yields the plain run's bytes
+/// EXACTLY. Both runs must agree on exit status too.
+fn beacon_rich_vs_plain(
+    c: &mut Checker,
+    label: &str,
+    name: &str,
+    rich_args: &[&str],
+    plain_args: &[&str],
+    input: &[u8],
+    frame_needle: &[u8],
+) {
+    let (rc, rout) = match run_tool(name, rich_args, input) {
+        Some(v) => v,
+        None => return c.fail(label, "rich spawn/wait failed"),
+    };
+    let (pc, pout) = match run_tool(name, plain_args, input) {
+        Some(v) => v,
+        None => return c.fail(label, "plain spawn/wait failed"),
+    };
+    if rc != pc {
+        return c.fail(label, &format!("exit mismatch rich={} plain={}", rc, pc));
+    }
+    if !window_contains(&rout, frame_needle) {
+        return c.fail(label, "expected frame missing from rich output");
+    }
+    if beacon::wire::strip(&rout) != pout {
+        return c.fail(label, "strip(rich) != plain");
+    }
+    c.pass(label);
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     let mut c = Checker { fails: 0, checks: 0 };
@@ -199,6 +253,109 @@ pub extern "C" fn rs_main() -> i64 {
     c.expect("id -u SYSTEM", "id", &["-u"], b"", b"4294967294\n", 0);
     c.expect("id SYSTEM", "id", &[], b"", b"uid=4294967294 gid=4294967294 groups=4294967294\n", 0);
     c.expect_contains("date UTC", "date", &[], b"", b"UTC", 0);
+
+    // --- H-1c-2: the Beacon emitters + the --color=auto flip, end to end.
+    // Every child here has a PIPED stdout, so SYS_FD_DEVCLASS answers '|'
+    // (devpipe) in the child -- under Auto both gates resolve OFF. These are
+    // the real spawns the crate's host tests cannot make.
+    //
+    // THE PIPE-BUDGET RULE (the module header's REAP-BEFORE-READ cap): every
+    // leg's output MUST stay well under PIPE_BUF_SIZE (4096) or the child
+    // blocks mid-write and wait() DEADLOCKS THE BOOT. So the ls subjects are
+    // explicit FILE operands -- bounded by ARGUMENT COUNT forever (`ls /`
+    // grows with every staged bin and `ls -l /` is ALREADY over budget; a
+    // directory subject cannot work anyway: the boot ramfs is FLAT, so the
+    // only listable dirs pre-pivot are root and the empty synth mounts, and
+    // an empty listing would satisfy the clean check vacuously, the #215
+    // broken-fixture shape). The ps rich leg first measures the raw snapshot
+    // and SKIPS LOUDLY if the frame-multiplied estimate approaches the cap
+    // (the proc table grows with boot services; a skip is visible in the
+    // log, a hang would not be). ---
+
+    // The flip's proof: `ls` (color now defaults to Auto) into a pipe is
+    // BYTE-CLEAN -- no SGR, no frames. Fails on the pre-flip Always default
+    // (file operands were SGR-wrapped too).
+    beacon_clean(&mut c, "ls auto pipe clean", "ls", &["/version", "/welcome"]);
+    beacon_clean(&mut c, "ls -l auto pipe clean", "ls", &["-l", "/version", "/welcome"]);
+    beacon_clean(&mut c, "ps auto pipe clean", "ps", &[]);
+
+    // `ps` piped = the verbatim /ctl/procs snapshot (parseable): the kernel
+    // header + this very process family are in it.
+    c.expect_contains("ps raw header", "ps", &[], b"", b"PID    PPID    NAME", 0);
+    c.expect_contains("ps raw joey", "ps", &[], b"", b"joey", 0);
+
+    // Force the rich tier down the REAL inheritance path: write our own
+    // /env/BEACON (env_clone_into deep-copies it into every child we spawn),
+    // then drive each emitter with --beacon=always (the flag trusts the
+    // advertised tier; the pipe dc no longer gates). Asserts: the frames are
+    // ON the wire, and stripping them yields the plain emission byte-exactly
+    // (the P1 identity, in-guest).
+    if write_env_beacon(b"rich") {
+        c.pass("env BEACON=rich exported");
+        beacon_rich_vs_plain(
+            &mut c,
+            "ls rich strips to plain",
+            "ls",
+            &["--beacon=always", "/version", "/welcome"],
+            &["--beacon=never", "--color=never", "/version", "/welcome"],
+            b"",
+            b"\x1b]1936;v1;obj;type=path;ref=/version",
+        );
+        beacon_rich_vs_plain(
+            &mut c,
+            "grep rich strips to plain",
+            "grep",
+            &["--beacon=always", "ba"],
+            &["--beacon=never", "ba"],
+            b"foo\nbar\nbaz\n",
+            b"\x1b]1936;v1;em;class=strong",
+        );
+        beacon_rich_vs_plain(
+            &mut c,
+            "stat rich strips to plain",
+            "stat",
+            &["--beacon=always", "/version"],
+            &["--beacon=never", "--color=never", "/version"],
+            b"",
+            b"\x1b]1936;v1;obj;type=path;ref=/version",
+        );
+        // ps at rich: the beacon table with obj pid cells. Its plain payload
+        // is the STYLED aligned table (not the raw snapshot), so assert the
+        // frame + content, not equality with the pass-through. Budget-gated:
+        // frames multiply a raw row ~6x, so re-measure the raw size first
+        // and skip (loudly) rather than risk the pipe-full deadlock.
+        match run_tool("ps", &[], b"") {
+            Some((0, raw)) if raw.len() * 7 < 3500 => {
+                match run_tool("ps", &["--beacon=always"], b"") {
+                    Some((0, out)) => {
+                        if window_contains(&out, b"\x1b]1936;v1;obj;type=pid;ref=")
+                            && window_contains(&out, b"\x1b]1936;v1;table;cols=rrllrrrr")
+                            && window_contains(&beacon::wire::strip(&out), b"joey")
+                        {
+                            c.pass("ps rich table + obj pid");
+                        } else {
+                            c.fail("ps rich table + obj pid", "frames/payload missing");
+                        }
+                    }
+                    Some((code, _)) => c.fail("ps rich table + obj pid", &format!("exit {}", code)),
+                    None => c.fail("ps rich table + obj pid", "spawn/wait failed"),
+                }
+            }
+            Some((0, raw)) => {
+                // NOT a pass: the leg was not exercised. Loud, greppable, and
+                // it should page whoever grew the boot's proc table this far.
+                t_putstr(&format!(
+                    "coreutil-smoke: ps rich leg SKIPPED (raw {}B; frame estimate would near PIPE_BUF)\n",
+                    raw.len()
+                ));
+            }
+            _ => c.fail("ps rich table + obj pid", "raw ps probe failed"),
+        }
+        // Reset our env so the tail checks (and anything after) see none.
+        let _ = write_env_beacon(b"none");
+    } else {
+        c.fail("env BEACON=rich exported", "/env/BEACON write failed");
+    }
 
     if c.fails == 0 {
         t_putstr(&format!("coreutil-smoke: all OK ({} checks)\n", c.checks));

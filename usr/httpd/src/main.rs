@@ -43,7 +43,7 @@ usage: httpd [-p PORT] [--color[=WHEN]] [DIR]
   Serve files under DIR (default /) over HTTP/1.1 on PORT (default 8080).
   GET and HEAD only; one connection at a time; Connection: close.
   -p PORT         listen port (default 8080)
-  --color[=WHEN]  colorize the access log: always (default) | never | auto
+  --color[=WHEN]  colorize the access log: always | never | auto (default)
   --help          show this help
 
 Examples:
@@ -61,7 +61,7 @@ fn run(args: Args) -> i64 {
         return rc;
     }
 
-    let mut mode = ColorMode::Always;
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut port: u16 = 8080;
     let mut dir = "/";
     let mut got_dir = false;
@@ -329,7 +329,8 @@ fn log(line: String) {
     println!("{}", line);
 }
 
-/// `--color=auto` stub; true until a kernel TTY check lands.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

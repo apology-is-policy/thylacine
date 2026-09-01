@@ -441,6 +441,34 @@ impl Table { pub fn realize(&self, s: &mut Sink); }
   today; (3) an `obj` whose ref exceeds `VALUE_MAX` emits no frame at all
   (plain text only) — a truncated ref would be a wrong ref for the verb
   menu to act on.
+- **AS-BUILT deviations (H-1c-2, the emitters)**: (1) the rich arms are
+  **ADDITIVE** — the cells/never realizations keep their existing code
+  byte-identical, and Rich branches beside them (§12.7's "Table::realize
+  replaces its direct boxd calls" was revised: the box IS the cells
+  realization and stays); (2) at Rich, SGR is forced OFF in the emitting
+  bin (`on = !rich && …`) so beacon-structured output never carries SGR —
+  for the annotation-shaped emitters (ls short, grep, stat) that makes
+  `strip(rich)` equal the tool's own plain output byte-exactly, asserted
+  in-guest on real spawns (coreutil-smoke); (3) **stat's `table` op is
+  deferred** — its GNU-shaped block is deliberately not tabular and a
+  table realization would break the strip identity; stat rich = the block
+  with `obj type=path` on the subject; (4) **`ps` did not exist and was
+  built as part of this chunk** (the §12.7 list assumed it): one atomic
+  `/ctl/procs` read; verbatim pass-through when unstyled; boxed at cells;
+  a beacon table with `obj type=pid` at Rich; parse-failure degrades to
+  the verbatim text; (5) `ls -l` at Rich drops the classify suffix (the
+  REALM column classifies) and emits the table WITH its header row — the
+  rich payload is the aligned header+rows form, not the header-less
+  `--color=never` row dump; (6) the `--color=auto` flip swept **all 15
+  remaining `stdout_is_console` stubs** (ns/qid/con/pelt/realm/netstat/
+  the net tools/weft-bench/httpd/nettest), not just ls — every stub's own
+  comment promised exactly this swap — AND the DEFAULTS unified to `Auto`
+  across every color-bearing tool (17 flips: the Always presentation tools
+  + grep's Never), per COREUTILS-THYLACINE-DESIGN's ordained end-state
+  ("both unify to `auto` once SYS_FD_DEVCLASS makes TTY detection real —
+  the default is simply color iff a terminal"); (7) obj-ref
+  canonicalization is `coreutils::path::abs` (cwd-anchored lexical clean,
+  shared with realpath) — a `None` (unreadable cwd) emits no frame.
 
 ### 12.6 ut integration (the shell half of H-1)
 

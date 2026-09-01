@@ -1,10 +1,18 @@
-// grep [-cilnorvw] [--color[=WHEN]] PATTERN [FILE...] -- print matching lines.
+// grep [-cilnorvw] [--color[=WHEN]] [--beacon=WHEN] PATTERN [FILE...] --
+// print matching lines.
 //
 // "simple" per the roadmap: PATTERN is a LITERAL substring, not a regex (no
 // regex engine in libthyla-rs). -i case-insensitive, -v invert, -n line
 // numbers, -c count-only, -w whole-word match, -o print only the matched part,
 // -l print only names of files with a match, -r recurse into directories. No
 // operand FILE reads stdin.
+//
+// Beacon (docs/BEACON.md): at the Rich tier the SAME plain bytes go out,
+// bracketed by semantic frames -- `obj type=path` on the filename prefix
+// (cleaned absolute ref) and `em class=strong` on each match span. SGR is
+// off inside rich-structured output, so strip(rich) == the plain emission
+// byte-exactly. Color defaults to auto (the H-1 unification): the console
+// highlights, a pipe stays byte-clean.
 
 #![no_std]
 #![no_main]
@@ -24,14 +32,15 @@ use libthyla_rs::fs::{self, File};
 use libthyla_rs::{eprintln, io};
 
 const USAGE: &str = "\
-usage: grep [-cilnorvw] [--color[=WHEN]] PATTERN [FILE...]
+usage: grep [-cilnorvw] [--color[=WHEN]] [--beacon=WHEN] PATTERN [FILE...]
   Print lines matching PATTERN (a literal substring). No FILE reads stdin.
   -i  ignore case        -v  invert (non-matching lines)
   -n  line numbers       -c  count only
   -w  match whole words  -o  print only the matched part (one per line)
   -l  print only names of files that match
   -r  recurse into directories
-  --color[=WHEN]  highlight matches (always | never | auto; default never)
+  --color[=WHEN]  highlight matches (always | never | auto; default auto)
+  --beacon=WHEN   semantic markup: auto (default) | always | never
   --help  show this help
 
 Examples:
@@ -101,29 +110,40 @@ fn find_spans(hay: &[u8], needle: &[u8], ci: bool, word: bool) -> Vec<(usize, us
     spans
 }
 
-/// Emit `line`, wrapping each matched span in bold ember. `spans` empty -> the
-/// plain line.
-fn emit_line(out: &mut io::OutSink, line: &[u8], spans: &[(usize, usize)]) {
+/// Emit `line`, wrapping each matched span in bold ember (SGR) or, at Rich,
+/// in an `em class=strong` frame around the SAME bytes (strip-clean). `spans`
+/// empty -> the plain line.
+fn emit_line(out: &mut io::OutSink, line: &[u8], spans: &[(usize, usize)], rich: bool) {
     if spans.is_empty() {
         out.put(line);
         return;
     }
     let mut last = 0;
+    let mut f: Vec<u8> = Vec::new();
     for &(s, e) in spans {
         out.put(&line[last..s]);
-        let _ = write!(out, "{}{}", palette::BOLD, palette::EMBER);
-        out.put(&line[s..e]);
-        let _ = write!(out, "{}", palette::RESET);
+        if rich {
+            f.clear();
+            beacon::wire::open(&mut f, beacon::wire::Op::Em, &[("class", "strong")]);
+            out.put(&f);
+            out.put(&line[s..e]);
+            f.clear();
+            beacon::wire::close(&mut f, beacon::wire::Op::Em);
+            out.put(&f);
+        } else {
+            let _ = write!(out, "{}{}", palette::BOLD, palette::EMBER);
+            out.put(&line[s..e]);
+            let _ = write!(out, "{}", palette::RESET);
+        }
         last = e;
     }
     out.put(&line[last..]);
 }
 
-/// `--color=auto` stub: no cooked-mode TTY detection yet (SYS_FD_DEVCLASS).
-/// grep's DEFAULT is `Never` (a payload tool stays byte-clean), so this only
-/// matters when the user opts in.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }
 
 struct Flags {
@@ -138,18 +158,32 @@ struct Flags {
 }
 
 /// The filename (slate) + `:` and, with -n, the line number (moss) + `:` that
-/// prefix a matching line/match. Byte-clean when color is off.
-fn emit_prefix(out: &mut io::OutSink, prefix: Option<&str>, n: usize, number: bool, on: bool) {
+/// prefix a matching line/match. Byte-clean when color is off. At Rich the
+/// filename carries an `obj type=path` frame (cleaned absolute ref; no frame
+/// when the ref cannot be canonicalized) around the SAME shown text.
+fn emit_prefix(out: &mut io::OutSink, prefix: Option<&str>, n: usize, number: bool, on: bool, rich: bool) {
     if let Some(p) = prefix {
-        let _ = write!(
-            out,
-            "{}{}{}{}:{}",
-            color::col(palette::SLATE, on),
-            p,
-            color::reset(on),
-            color::col(palette::DIM, on),
-            color::reset(on)
-        );
+        if rich {
+            {
+                let mut sout = coreutils::beacon_gate::SinkOut(out);
+                let mut s = beacon::sink::Sink::new(&mut sout, beacon::Tier::Rich);
+                match coreutils::path::abs(p) {
+                    Some(r) => s.obj(beacon::sink::ObjType::Path, &r, p),
+                    None => s.text(p),
+                }
+            }
+            out.put(b":");
+        } else {
+            let _ = write!(
+                out,
+                "{}{}{}{}:{}",
+                color::col(palette::SLATE, on),
+                p,
+                color::reset(on),
+                color::col(palette::DIM, on),
+                color::reset(on)
+            );
+        }
     }
     if number {
         let _ = write!(
@@ -167,7 +201,7 @@ fn emit_prefix(out: &mut io::OutSink, prefix: Option<&str>, n: usize, number: bo
 /// Grep one in-memory buffer. Returns the match count. With -o, emits each
 /// matched span on its own line; with -l, stops at the first match (the caller
 /// prints the filename). -c output is the caller's job.
-fn grep_data(out: &mut io::OutSink, data: &[u8], pat: &[u8], f: &Flags, prefix: Option<&str>, on: bool) -> usize {
+fn grep_data(out: &mut io::OutSink, data: &[u8], pat: &[u8], f: &Flags, prefix: Option<&str>, on: bool, rich: bool) -> usize {
     let mut lines: Vec<&[u8]> = data.split(|&b| b == b'\n').collect();
     if data.last() == Some(&b'\n') {
         lines.pop();
@@ -187,24 +221,27 @@ fn grep_data(out: &mut io::OutSink, data: &[u8], pat: &[u8], f: &Flags, prefix: 
         if f.only {
             // Only the matched substrings (an inverted line has none -> nothing).
             for &(s, e) in &find_spans(line, pat, f.ci, f.word) {
-                emit_prefix(out, prefix, n, f.number, on);
-                if on {
-                    let _ = write!(out, "{}{}", palette::BOLD, palette::EMBER);
-                }
-                out.put(&line[s..e]);
-                if on {
-                    let _ = write!(out, "{}", palette::RESET);
+                emit_prefix(out, prefix, n, f.number, on, rich);
+                let sub = &line[s..e];
+                if on || rich {
+                    // The whole emitted text IS the match span (styled).
+                    emit_line(out, sub, &[(0, sub.len())], rich);
+                } else {
+                    out.put(sub);
                 }
                 out.put(b"\n");
             }
         } else {
-            emit_prefix(out, prefix, n, f.number, on);
-            let spans = if on && !f.invert {
+            emit_prefix(out, prefix, n, f.number, on, rich);
+            // Spans are found when a styled realization wants them: SGR
+            // highlight (color on) or the Rich em frames. Inverted lines
+            // carry no matched span by definition.
+            let spans = if (on || rich) && !f.invert {
                 find_spans(line, pat, f.ci, f.word)
             } else {
                 Vec::new()
             };
-            emit_line(out, line, &spans);
+            emit_line(out, line, &spans, rich);
             out.put(b"\n");
         }
     }
@@ -213,7 +250,7 @@ fn grep_data(out: &mut io::OutSink, data: &[u8], pat: &[u8], f: &Flags, prefix: 
 
 /// Grep a path: a regular file is slurped + searched; a directory recurses
 /// under -r (else an error). Returns `(any_match, had_error)`.
-fn grep_path(out: &mut io::OutSink, path: &str, pat: &[u8], f: &Flags, on: bool, show_prefix: bool) -> (bool, bool) {
+fn grep_path(out: &mut io::OutSink, path: &str, pat: &[u8], f: &Flags, on: bool, rich: bool, show_prefix: bool) -> (bool, bool) {
     match fs::metadata(path) {
         Ok(m) if m.is_dir() => {
             if !f.recursive {
@@ -241,7 +278,7 @@ fn grep_path(out: &mut io::OutSink, path: &str, pat: &[u8], f: &Flags, on: bool,
                 if name == "." || name == ".." {
                     continue;
                 }
-                let (a, e) = grep_path(out, &join(path, name), pat, f, on, true);
+                let (a, e) = grep_path(out, &join(path, name), pat, f, on, rich, true);
                 any |= a;
                 err |= e;
             }
@@ -250,10 +287,22 @@ fn grep_path(out: &mut io::OutSink, path: &str, pat: &[u8], f: &Flags, on: bool,
         Ok(_) => match File::open(path).and_then(|mut fh| io::slurp(&mut fh)) {
             Ok(data) => {
                 let prefix = if show_prefix { Some(path) } else { None };
-                let m = grep_data(out, &data, pat, f, prefix, on);
+                let m = grep_data(out, &data, pat, f, prefix, on, rich);
                 if f.list {
                     if m > 0 {
-                        let _ = writeln!(out, "{}{}{}", color::col(palette::SLATE, on), path, color::reset(on));
+                        if rich {
+                            {
+                                let mut sout = coreutils::beacon_gate::SinkOut(out);
+                                let mut s = beacon::sink::Sink::new(&mut sout, beacon::Tier::Rich);
+                                match coreutils::path::abs(path) {
+                                    Some(r) => s.obj(beacon::sink::ObjType::Path, &r, path),
+                                    None => s.text(path),
+                                }
+                            }
+                            out.put(b"\n");
+                        } else {
+                            let _ = writeln!(out, "{}{}{}", color::col(palette::SLATE, on), path, color::reset(on));
+                        }
                     }
                 } else if f.count {
                     if show_prefix {
@@ -298,9 +347,10 @@ fn run(args: Args) -> i64 {
         list: false,
         recursive: false,
     };
-    // grep is a payload tool: byte-clean by default. `--color` opts in; it flips
-    // to `Auto` once a kernel TTY check (SYS_FD_DEVCLASS) lands.
-    let mut mode = ColorMode::Never;
+    // Both gates default Auto (the H-1 unification): a pipe is byte-clean
+    // by construction (dc != 'c'), the console highlights + may frame.
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
+    let mut bmode = beacon::BeaconMode::Auto;
     while let Some(a) = args.get_str(idx) {
         if a == "--" {
             idx += 1;
@@ -316,6 +366,23 @@ fn run(args: Args) -> i64 {
                 Some(m) => mode = m,
                 None => {
                     eprintln!("grep: invalid --color value -- '{}'", when);
+                    usage::hint("grep");
+                    return 2;
+                }
+            }
+            idx += 1;
+            continue;
+        }
+        if a == "--beacon" {
+            bmode = beacon::BeaconMode::Always;
+            idx += 1;
+            continue;
+        }
+        if let Some(when) = a.strip_prefix("--beacon=") {
+            match beacon::BeaconMode::parse_when(when) {
+                Some(m) => bmode = m,
+                None => {
+                    eprintln!("grep: invalid --beacon value -- '{}'", when);
                     usage::hint("grep");
                     return 2;
                 }
@@ -346,7 +413,9 @@ fn run(args: Args) -> i64 {
             break;
         }
     }
-    let on = mode.resolve(stdout_is_console);
+    // The emission gate (BEACON.md 12.4); SGR is off inside rich output.
+    let rich = coreutils::beacon_gate::resolve(bmode) == beacon::Tier::Rich;
+    let on = !rich && mode.resolve(stdout_is_console);
 
     let pat = match args.get(idx) {
         Some(p) => p,
@@ -379,7 +448,7 @@ fn run(args: Args) -> i64 {
     if files.is_empty() {
         match io::slurp(&mut io::stdin()) {
             Ok(data) => {
-                let m = grep_data(&mut out, &data, pat, &f, None, on);
+                let m = grep_data(&mut out, &data, pat, &f, None, on, rich);
                 if f.list {
                     if m > 0 {
                         let _ = writeln!(out, "(standard input)");
@@ -396,7 +465,7 @@ fn run(args: Args) -> i64 {
         }
     } else {
         for path in files {
-            let (a, e) = grep_path(&mut out, path, pat, &f, on, show_prefix);
+            let (a, e) = grep_path(&mut out, path, pat, &f, on, rich, show_prefix);
             any_match |= a;
             status_err |= e;
         }

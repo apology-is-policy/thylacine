@@ -42,7 +42,7 @@ usage: con [--color[=WHEN]] HOST PORT
        con [--color[=WHEN]] [tcp!]HOST!SERVICE
   Open an interactive TCP connection (resolved via /net/cs) and bridge it to
   the console. Ctrl-D half-closes the send side; the peer's close ends it.
-  --color[=WHEN]  colorize status: always (default) | never | auto
+  --color[=WHEN]  colorize status: always | never | auto (default)
   --help          show this help
 
 Examples:
@@ -58,7 +58,7 @@ fn run(args: Args) -> i64 {
         return rc;
     }
 
-    let mut mode = ColorMode::Always;
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut pos: [&str; 2] = [""; 2];
     let mut npos = 0usize;
     let mut i = 1;
@@ -141,8 +141,8 @@ fn build_dialstring(operands: &[&str]) -> core::result::Result<String, &'static 
     }
 }
 
-/// `--color=auto` stub; true until a kernel TTY check lands (matches the
-/// coreutils presentation tools).
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

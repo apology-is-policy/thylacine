@@ -143,6 +143,11 @@ defaults color-ON (you look at it; piping is rare); a **payload** tool (grep, an
 any future filter that gains optional color) defaults color-OFF (it is usually
 piped; `--color` opts in). Both unify to `auto` once `SYS_FD_DEVCLASS` makes TTY
 detection real -- then the default is simply "color iff a terminal."
+**UNIFIED at H-1c-2 (2026-09-01)**: every `stdout_is_console` stub now calls
+`libthyla_rs::stdout_is_terminal()` (dc == 'c') and every color-bearing tool
+defaults `Auto` -- interactive output keeps the exotic look, `tool | tool` is
+byte-clean by construction. In-guest proof: coreutil-smoke's piped-`ls`
+zero-ESC legs.
 - **stat / id / ns / which / env / date / uname**: labeled, lightly colored
   presentation (the label dim, the value in the kind color); a boxed form where a
   multi-field record warrants it.

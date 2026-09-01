@@ -46,7 +46,7 @@ usage: nc [-uv] [--color[=WHEN]] HOST PORT      (connect)
   -l              listen for one inbound TCP connection instead of dialing
   -u              use UDP datagrams instead of TCP (connect only)
   -v              print connection progress to stderr
-  --color[=WHEN]  colorize -v/error status: always (default) | never | auto
+  --color[=WHEN]  colorize -v/error status: always | never | auto (default)
   --help          show this help
 
 Examples:
@@ -64,7 +64,7 @@ fn run(args: Args) -> i64 {
     let mut listen = false;
     let mut udp = false;
     let mut verbose = false;
-    let mut mode = ColorMode::Always;
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut pos: [&str; 2] = [""; 2];
     let mut npos = 0usize;
     let mut opts_done = false;
@@ -217,8 +217,8 @@ fn do_listen(port: u16, verbose: bool, on: bool) -> i64 {
     netpump::stdio_pump(&mut stream, "nc")
 }
 
-/// `--color=auto` stub; true until a kernel TTY check lands (matches the
-/// coreutils presentation tools).
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

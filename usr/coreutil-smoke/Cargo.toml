@@ -18,3 +18,6 @@ path = "src/main.rs"
 # compiled them) AND a second exercise of the native-argv path (the tools
 # read their argv via env::args). Reports per-check markers + gates the boot.
 libthyla-rs = { path = "../lib/libthyla-rs" }
+# H-1c-2: the Beacon E2E legs strip frames from captured rich output to
+# assert the P1 identity in-guest (strip(rich) == plain, real spawns).
+beacon = { path = "../lib/beacon" }

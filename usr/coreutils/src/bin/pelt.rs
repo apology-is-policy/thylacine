@@ -11,7 +11,7 @@
 // Naming: the branch glyphs (the striped │ ├ └ rails running down the listing)
 // are the thylacine's pelt -- its stripes.
 //
-// Presentation tool -> color ON by default; --color=never drops color but keeps
+// Presentation tool -> color on the console (auto); --color=never drops color but keeps
 // the ASCII rails + the `(graft)` marker (the structure is the output).
 
 #![no_std]
@@ -41,7 +41,7 @@ usage: pelt [-ad] [-L N] [--color[=WHEN]] [PATH...]
   -a      include dotfiles
   -d      directories only
   -L N    descend at most N levels
-  --color[=WHEN]  colorize: always (default) | never | auto
+  --color[=WHEN]  colorize: always | never | auto (default)
   --help  show this help
 
 Examples:
@@ -68,7 +68,7 @@ fn run(args: Args) -> i64 {
     let mut all = false;
     let mut dirs_only = false;
     let mut max_depth = usize::MAX;
-    let mut mode = ColorMode::Always; // presentation tool
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut operands: Vec<&str> = Vec::new();
     let mut opts_done = false;
 
@@ -240,10 +240,10 @@ fn emit_entry(out: &mut io::OutSink, prefix: &str, branch: &str, name: &str, kin
     out.put(b"\n");
 }
 
-/// `--color=auto` resolution -- parked color-on until a kernel TTY check
-/// (SYS_FD_DEVCLASS) lands; see ls.rs / the design doc.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }
 
 fn join(dir: &str, name: &str) -> String {

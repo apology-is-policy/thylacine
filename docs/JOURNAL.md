@@ -22,6 +22,96 @@ needed the operator.
 
 ---
 
+## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
+
+Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon
+emitters (BEACON.md §12.7 items 2–5) + the H-1 close prep.
+
+**What landed** (one commit, hash in the close):
+
+- **ls**: rich short mode wraps each name in `obj type=path` (cleaned absolute
+  ref via the new `coreutils::path::abs`; strip(rich) == the plain listing
+  byte-exactly); rich `-l` realizes a beacon `table` (`llrlll`, header row,
+  obj name cells — no box; the renderer restyles). The long-parked
+  `--color=auto` flip: `stdout_is_console()` → `libthyla_rs::stdout_is_terminal()`
+  and the default `Always` → `Auto`.
+- **grep**: `obj path` on the filename prefix (normal, `-o`, `-l` arms),
+  `em class=strong` frames on match spans (byte-span emission via `beacon::wire`
+  directly — grep lines may be non-UTF-8, so `Sink::text(&str)` was the wrong
+  tool there). strip(rich) == the plain emission byte-exactly.
+- **stat**: the block + `obj path` on the subject. §12.7's `table` op is
+  DEFERRED (recorded in BEACON.md §12.5): the GNU block is deliberately not
+  tabular, and a table realization would break the strip identity.
+- **ps — did not exist and was built** (the §12.7 list assumed it; the
+  chunk-completeness pull-forward). One atomic `/ctl/procs` read (the kernel
+  renders the whole table under `g_proc_table_lock` — no readdir race);
+  verbatim pass-through when unstyled (the ns discipline); boxed at cells
+  (state colored by the REAL kernel vocabulary — ALIVE/ZOMBIE/STOPPED, checked
+  against `devctl.c::procs_state_name` after first writing a fictional
+  RUN/SLEEP set); a beacon table with `obj type=pid` at Rich; any row-parse
+  failure degrades the WHOLE output to the verbatim text.
+- **The unification sweep**: all 15 remaining `stdout_is_console` `true` stubs
+  → the real probe (each stub's own comment promised exactly this swap), and
+  all 17 color defaults → `Auto` — grep's `Never` included, because
+  COREUTILS-THYLACINE-DESIGN names grep by name and ordains the end-state
+  ("both unify to `auto`… the default is simply color iff a terminal"). The
+  pickup card had scoped the default flip to ls only; the design doc's
+  ordained end-state is the binding text, so the wider sweep is scripture
+  compliance, not scope creep. Piped consumers were enumerated first: the
+  joey netstat/nslookup/ping probes assert plain substrings (survive; get
+  cleaner), the LS-CI stat assertion is substring-through-SGR (unchanged
+  interactively — auto resolves ON at the console).
+- Shared plumbing: `coreutils::path` (lexical normalize moved out of
+  realpath.rs + the cwd-anchored `abs`), `coreutils::beacon_gate` (the
+  per-bin tier resolution + the `SinkOut` adapter). Docs: BEACON.md §12.5
+  H-1c-2 deviations (7 entries), the SPEC's consumer-#1 LANDED note, the
+  COREUTILS-design UNIFIED note, the AUDIT-TRIGGERS.md `SYS_FD_DEVCLASS`
+  row + the LS-8 BEACON TIER addendum, the CLAUDE.md index line.
+
+**The wrong turn, caught twice — the pipe-budget deadlock.** The first
+version of the coreutil-smoke Beacon legs used `ls /` and `ls -l /` as
+subjects. coreutil-smoke's REAP-BEFORE-READ pattern (its own module header
+documents it) deadlocks when a child's output exceeds `PIPE_BUF_SIZE` (4096):
+the child blocks mid-write, `wait()` never returns, and the BOOT HANGS — a
+timeout, not a red. `ls -l /` is ~8 KB today. The self-audit pass (run while
+the first bake+suite was already in flight) caught it by arithmetic; the
+suite then confirmed it empirically: the boot log ends at exactly
+`ls auto pipe clean ok` (the 1.4 KB `ls /` leg fit) and the harness reported
+`FAIL: timeout (300s)` — the very next leg was the 8 KB one. Fix: bounded
+subjects (`/etc`, one entry, bounded forever) + the ps-rich leg re-measures
+the raw snapshot first and SKIPS LOUDLY (a greppable marker, not a pass)
+when the frame-multiplied estimate nears the cap — the proc table grows with
+boot services, and a future hang would be the worst failure shape. Lesson
+banked: **self-audit BEFORE launching the expensive gate, not while it
+runs** — the flaw was findable by arithmetic before the bake; running the
+audit in parallel cost one full bake+suite cycle (~12 min).
+
+**The second wrong turn — the flat-ramfs subject.** The deadlock fix's first
+replacement subject was `ls /etc` ("one entry, bounded forever") — and the
+re-run failed 3/55 legs with `ls` exiting 1: **the boot ramfs is a FLAT
+namespace** (devramfs_readdir's own header: root lists every cpio file +
+the synth mount dirs; `/etc` is not a directory OBJECT, just a name prefix
+of a flat file, so readdir on it returns -1). The extinction in that log
+(`proc_pgtable_destroy` from `joey_run`) is joey's ordinary boot-gate
+teardown after the smoke's exit 1 — not a kernel bug. The durable fix:
+explicit FILE operands (`ls /version /welcome`) — bounded by ARGUMENT
+COUNT, immune to both directory growth and the flat-namespace shape (and a
+directory subject was doubly wrong: the only listable pre-pivot dirs are
+root and the EMPTY synth mounts, and an empty listing would satisfy the
+clean check vacuously — the #215 broken-fixture shape). The same failed run
+banked real positives: grep/stat/ps rich legs ALL PASSED in-guest (the P1
+strip identity on real spawns, the obj-pid table, the `/env/BEACON`
+inheritance chain) — only the ls legs rode the bad subject.
+
+**Vault + close prep**: quaestor run on the changed paths — MIXED: the
+kernel/cons/ls/build.sh prose is vault-owned (and the vault's
+`sub-coreutils-presenters` dossier — "fifteen tools, and fifteen copies of
+one stub" — is now wrong-in-subject: the stubs are real probes); the beacon
+crate is UNOWNED (sweep filed). Deltas queued on yip 0034 note 2. The
+`chg-2026-08-15-build-targets` PIN checked: the `usr_rs_bins` staging list
+(where `ps` was added) is not in its co-update set. The audit-round prompt
+drafted (scratchpad; spawns after the green commit).
+
 ## 2026-09-01 (run 14, Fable) — H-1 opens: the Beacon foundations, three sub-chunks landed
 
 **The charter**: the operator's "Let's start and proceed ourselves" — H-1 per

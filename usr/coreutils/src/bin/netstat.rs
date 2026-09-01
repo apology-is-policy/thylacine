@@ -4,7 +4,7 @@
 // enumerates the live /net/<proto>/N connection dirs, reading each one's
 // status/local/remote.
 //
-// A presentation tool -> the Bonfire palette by default (--color=never for
+// A presentation tool -> the Bonfire palette on the console (auto; --color=never for
 // plain). The interface + per-protocol views are streamed verbatim (netd's
 // authoritative text); the connection table is rendered as a boxed card.
 
@@ -37,7 +37,7 @@ const USAGE: &str = "\
 usage: netstat [--color[=WHEN]]
   Print the live network state: interfaces, per-protocol stats, and the live
   connection table.
-  --color[=WHEN]  colorize: always (default) | never | auto
+  --color[=WHEN]  colorize: always | never | auto (default)
   --help          show this help
 
 Examples:
@@ -50,7 +50,7 @@ fn run(args: Args) -> i64 {
         return rc;
     }
 
-    let mut mode = ColorMode::Always;
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut i = 1;
     while let Some(a) = args.get_str(i) {
         i += 1;
@@ -182,7 +182,8 @@ fn dash(s: &str) -> &str {
     }
 }
 
-/// `--color=auto` stub; true until a kernel TTY check lands.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

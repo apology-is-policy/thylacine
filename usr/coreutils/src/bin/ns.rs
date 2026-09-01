@@ -9,7 +9,7 @@
 // is a device root with no namespace name. We colorize + box the listing and add
 // a REALM column derived from the device char -- the precise realm, available NOW
 // from the kernel's "#<dc>" text (no SYS_FD_DEVCLASS needed). A presentation tool
-// -> color on by default; --color=never passes the raw kernel text through.
+// -> color on the console (auto); --color=never passes the raw kernel text through.
 //
 // `ns` with no operand shows kproc's namespace (pid 0 -- the system root).
 
@@ -35,7 +35,7 @@ const USAGE: &str = "\
 usage: ns [--color[=WHEN]] [pid]
   Print a process's namespace -- its territory mount list (mountpoint,
   source, and the source's realm). No pid shows the system root (pid 0).
-  --color[=WHEN]  colorize: always (default) | never (raw kernel text)
+  --color[=WHEN]  colorize: always | never (raw kernel text) | auto (default)
   --help          show this help
 
 Examples:
@@ -69,7 +69,7 @@ fn run(args: Args) -> i64 {
     if let Some(rc) = usage::help_if_requested(args, USAGE) {
         return rc;
     }
-    let mut mode = ColorMode::Always; // presentation tool
+    let mut mode = ColorMode::Auto; // color iff console (the H-1 SYS_FD_DEVCLASS unification)
     let mut pid: i64 = -1;
     let mut opts_done = false;
     let mut i = 1;
@@ -226,8 +226,8 @@ fn parse_pid(s: &str) -> Option<i64> {
     Some(v)
 }
 
-/// `--color=auto` stub (no cooked-mode TTY check yet; see the SYS_FD_DEVCLASS
-/// spec). True so an explicit `--color=auto` colorizes.
+/// `--color=auto`: stdout is the interactive console iff its Dev class is
+/// `'c'` (`SYS_FD_DEVCLASS`; H-1 closed the long-parked `true` stub).
 fn stdout_is_console() -> bool {
-    true
+    libthyla_rs::stdout_is_terminal()
 }

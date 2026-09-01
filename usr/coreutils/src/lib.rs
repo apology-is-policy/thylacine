@@ -26,10 +26,14 @@ extern crate alloc;
 // unchanged; behavior is byte-identical (the modules moved verbatim, their
 // unit tests with them).
 pub use beacon::{boxd, color, palette};
+pub mod path;
 pub mod size;
 
 // Backend-gated (these touch libthyla-rs): the metadata-presentation helpers
-// (ls / stat / realm / qid) and the --help / bad-usage plumbing.
+// (ls / stat / realm / qid), the Beacon emission gate, and the --help /
+// bad-usage plumbing.
+#[cfg(feature = "backend")]
+pub mod beacon_gate;
 #[cfg(feature = "backend")]
 pub mod meta;
 #[cfg(feature = "backend")]

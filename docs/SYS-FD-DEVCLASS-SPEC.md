@@ -115,8 +115,11 @@ impl Stdout { pub fn is_terminal(&self) -> bool {
 1. **ls `--color=auto`** (the motivating case): `ls::stdout_is_console()` becomes
    `io::stdout().is_terminal()`. Then **flip the ls default from `Always` to
    `Auto`** -- interactive `ls` is colored+boxed, `ls | cat` and `ls > f` are
-   byte-clean automatically. (Today `stdout_is_console()` is a `true` stub; this
-   is the exact swap point.)
+   byte-clean automatically. **LANDED at H-1c-2 (2026-09-01)**: every
+   `stdout_is_console()` stub in the tree (18 bins) now calls
+   `libthyla_rs::stdout_is_terminal()`; ls's default flipped to `Auto` (the
+   new `ps` is born `Auto`); the in-guest proof is coreutil-smoke's
+   `ls auto pipe clean` legs (piped `ls` asserts zero ESC bytes).
 2. **The ls REALM column, sharper** (optional, costs an `open` per entry): label
    `disk` (`9`) / `boot` (`r`) / `dev` (`c`/`d`) / `graft` (`p`/`s`/`H`/...)
    precisely from the entry's `dc`, instead of inferring `graft` from an fstat
