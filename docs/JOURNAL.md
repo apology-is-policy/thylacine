@@ -151,6 +151,14 @@ know which tests pin the negative you are about to flip). Kept the new
 shape (a leaf that opens + reads should stat; no consumer keys on the
 failure) and updated the pinned test + its three comment sites.
 
+**The close**: `140db874` (the audit close; all fixes + docs) + `435161a2`
+(hash fixup). ls-3a re-ran green WITH the canary leg (41 s, HVF). **PUSHED
+both mirrors, ls-remote verified at `435161a2`** — 7 commits
+(H-1a/b/c-1/c-2 + the run-14 journal + the close pair), the first push
+since the concretization. The H-1 gate closed in full: suite 1435/1435,
+smoke 55/55, beacon host 29/29, LS-CI 37/37 + the canary leg, audit round
+1 NOT dirty, 0 EXTINCTION.
+
 **Vault + close prep**: quaestor run on the changed paths — MIXED: the
 kernel/cons/ls/build.sh prose is vault-owned (and the vault's
 `sub-coreutils-presenters` dossier — "fifteen tools, and fifteen copies of
