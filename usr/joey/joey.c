@@ -10248,8 +10248,8 @@ int main(void) {
             }
 #endif
 
-            // G-4: the resident boot presenter is AURORA -- the console
-            // renderer (the fbcon). Spawned WITH T_SPAWN_PERM_CONSOLE_RENDERER
+            // G-4: the resident boot presenter -- the console renderer
+            // (the fbcon). Spawned WITH T_SPAWN_PERM_CONSOLE_RENDERER
             // (the I-27 third console role; joey is still console-attached
             // here, the narrow grant gate) so it may open the /dev/consdrain +
             // /dev/consfeed pair; its first present takes the scanout and the
@@ -10258,20 +10258,58 @@ int main(void) {
             // rendered console + a liveness differ (cursor blink / prompt
             // arrival). tapestry-demo stays baked for manual runs; it no
             // longer spawns at boot (first-present-wins scanout would race).
+            //
+            // H-2: WHICH renderer is the device's choice -- the one-token
+            // /lib/halcyon/renderer file (post-pivot pool path; this block
+            // runs after the pivot). "halcyond" selects the rich-transcript
+            // renderer (HALCYON.md section 13); anything else -- absent
+            // file, short read, unknown token -- is aurora, the default.
+            // Fail-safe by construction: a corrupt config can only name the
+            // proven fbcon.
             {
                 char dbuf[24];
                 const char aur_name[] = "/bin/aurora";
+                const char hal_name[] = "/bin/halcyond";
+                const char *rname = aur_name;
+                long rname_len = sizeof(aur_name) - 1;
+                const char *rlabel = "aurora";
+                {
+                    const char cfg[] = "/lib/halcyon/renderer";
+                    long cfd = t_open(T_WALK_OPEN_FROM_ROOT, cfg,
+                                      sizeof(cfg) - 1, T_OREAD);
+                    if (cfd >= 0) {
+                        char tok[16];
+                        long tn = t_read(cfd, tok, sizeof(tok) - 1);
+                        (void)t_close(cfd);
+                        if (tn >= 8) {
+                            tok[tn] = '\0';
+                            for (long i = 0; i < tn; i++)
+                                if (tok[i] == '\n' || tok[i] == '\r') { tok[i] = '\0'; break; }
+                            static const char want[] = "halcyond";
+                            int eq = 1;
+                            for (int i = 0; i < 9; i++)  /* incl. NUL */
+                                if (tok[i] != want[i]) { eq = 0; break; }
+                            if (eq) {
+                                rname = hal_name;
+                                rname_len = sizeof(hal_name) - 1;
+                                rlabel = "halcyond";
+                            }
+                        }
+                    }
+                }
                 long aur_pid = t_spawn_with_perms(
-                    aur_name, sizeof(aur_name) - 1,
+                    rname, rname_len,
                     /*fds=*/(const unsigned int *)0, /*fd_count=*/0,
                     /*cap_mask=*/0,
                     T_SPAWN_PERM_CONSOLE_RENDERER);
                 if (aur_pid <= 0) {
-                    t_putstr("joey: t_spawn_with_perms(\"/bin/aurora\") FAILED\n");
+                    t_putstr("joey: t_spawn_with_perms(console renderer) FAILED\n");
                     return 1;
                 }
-                joey_daemon_record(aur_pid, "aurora");   // #80
-                t_putstr("joey: aurora spawned pid=");
+                joey_daemon_record(aur_pid, rlabel);   // #80
+                t_putstr("joey: ");
+                t_putstr(rlabel);
+                t_putstr(" spawned pid=");
                 t_putstr(itoa_dec(aur_pid, dbuf, sizeof(dbuf)));
                 t_putstr(" (the console renderer; the gate's scanout owner)\n");
             }

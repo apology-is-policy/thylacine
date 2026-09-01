@@ -24,7 +24,7 @@ use cartoon::{Cartoon, GlyphRef, Op};
 use vt::ATTR_BOLD;
 
 use crate::raster::{GlyphSource, FACE_BODY, FACE_BODY_BOLD, FACE_MONO};
-use crate::transcript::{Block, Item, Style, TCell, EM_CODE, EM_DIM, EM_STRONG};
+use crate::transcript::{Block, BlockKind, Item, Style, TCell, EM_CODE, EM_DIM, EM_STRONG};
 
 /// The stylesheet: the paper-light theme's numbers (section 3 -- dark ink
 /// in full daylight). Colors are ARGB like everything in the weave.
@@ -598,6 +598,51 @@ fn lay_exit_badge(lb: &mut LineBuilder, code: i64, sheet: &Sheet, gs: &mut Glyph
     lb.segs.push(seg);
     lb.width = saved;
     lb.break_line(gs);
+}
+
+/// Lay the OPEN block's un-frozen tail line (the prompt under the
+/// cursor). Cells reference the open block's style table, so both come
+/// in; the temp block is layout furniture (never cached, id-less).
+pub fn layout_pending(
+    cells: &[TCell],
+    styles: &[Style],
+    width: i32,
+    sheet: &Sheet,
+    gs: &mut GlyphSource,
+) -> LaidBlock {
+    let b = Block {
+        id: u64::MAX,
+        kind: BlockKind::Foreign,
+        continuation: false,
+        exit: None,
+        items: alloc::vec![Item::Line(crate::transcript::Line { cells: cells.to_vec() })],
+        styles: styles.to_vec(),
+        objs: Vec::new(),
+        cost: 0,
+    };
+    layout_block(&b, width, sheet, gs)
+}
+
+/// The cursor's pixel position on a laid single-item block: the x of
+/// column `col` (or the end of the content when col is past it) plus the
+/// line's y/h. Columns count glyphs across the laid segs in order.
+pub fn cursor_pos(laid: &LaidBlock, col: usize, sheet: &Sheet) -> (i32, i32, i32) {
+    let mut remaining = col;
+    for line in laid.lines.iter() {
+        for seg in line.segs.iter() {
+            if remaining < seg.refs.len() {
+                return (seg.xs[remaining], line.y, line.h);
+            }
+            remaining -= seg.refs.len();
+        }
+        // Column beyond this line's content: if it is the LAST line, the
+        // cursor sits at the content end; otherwise spill to the next.
+    }
+    if let Some(last) = laid.lines.last() {
+        let x = last.segs.last().map(|s| s.x_end).unwrap_or(sheet.pad_x);
+        return (x, last.y, last.h);
+    }
+    (sheet.pad_x, 0, 16)
 }
 
 /// Emit a laid block into the cartoon at (0, y0): background rects first,
