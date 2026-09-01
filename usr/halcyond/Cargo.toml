@@ -1,0 +1,45 @@
+# halcyond -- the Halcyon environment client: the only place that thinks
+# (HALCYON.md section 13.1). Owns per-pane transcript state, the Beacon
+# parser, the VT cores, the fontdue rasterizer + atlas cache, the
+# stylesheet, and the per-frame cartoon each executor weaves into pixels.
+#
+# lib + bin from birth (the H-2a lesson: a no_std bin crate's tests are
+# dormant): the LIB is the brain -- pure logic over injected bytes, zero
+# syscalls, host-tested via
+#   cargo test -p halcyond --lib --no-default-features --target aarch64-apple-darwin
+# The BIN (the `guest` feature, on by default) is the thin body: syscalls,
+# the tapestry Surface, the event loop.
+#
+# fontdue is the tree's first vendored registry dependency: the closure
+# lives in third_party/rust/ (cargo-vendor layout; see third_party/README.md)
+# and usr/.cargo/config.toml pins the source replacement -- builds stay
+# offline + checksum-enforced. no_std verified on aarch64-unknown-none at
+# vendor time (HALCYON.md 13.9 item 1: VERIFIED, the fallback unneeded).
+[package]
+name = "halcyond"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[features]
+default = ["guest"]
+guest = ["dep:libthyla-rs", "dep:libtapestry"]
+
+[lib]
+name = "halcyond"
+path = "src/lib.rs"
+
+[[bin]]
+name = "halcyond"
+path = "src/main.rs"
+required-features = ["guest"]
+
+[dependencies]
+vt = { path = "../lib/vt" }
+cartoon = { path = "../lib/cartoon" }
+beacon = { path = "../lib/beacon" }
+cornucopia = { path = "../lib/cornucopia" }
+fontdue = { version = "0.9.4", default-features = false, features = ["hashbrown"] }
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }
+libtapestry = { path = "../lib/libtapestry", optional = true }

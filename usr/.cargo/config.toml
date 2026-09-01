@@ -72,3 +72,16 @@ rustflags = [
     # works without traps.
     "-C", "target-feature=+outline-atomics,+paca,+pacg,+bti",
 ]
+
+# The vendored registry (H-2c): every crates.io dependency of this
+# workspace resolves from third_party/rust/ -- offline, pinned, and
+# checksum-enforced per file (each crate dir carries .cargo-checksum.json;
+# cargo REFUSES a tampered tree). NEVER hand-edit a vendored crate: any
+# change is a checksum failure by design. To add/upgrade a registry dep:
+# edit the consumer's Cargo.toml, run `cargo vendor ../third_party/rust`
+# from usr/ (network), commit the regenerated tree with the lockfile.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "../third_party/rust"
