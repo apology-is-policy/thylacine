@@ -329,6 +329,13 @@ short cons_poll(short events, struct poll_waiter *pw);
 long cons_set_mode_cmd(const void *buf, long n, bool allow_flags);
 long cons_render_mode(void *buf, long n);
 
+// C2-k1b: the flag-word getter for the phenotype TCGETS shell, which must map the
+// live mode into a Linux struct termios rather than the "+name" render string.
+// A locked snapshot of the global termios word (CONS_* bits); the production twin
+// of the test-only cons_test_termios. Apply the reverse (a Linux termios -> the
+// five flags) with cons_set_mode_cmd(<deterministic grammar>, ..., true).
+u32 cons_termios_get(void);
+
 // DISPLAY-MODES.md 1b (audit F2): restore serial output unconditionally (clears
 // the renderer-set serial-silence flag). Called by proc_console_sak so a SAK's
 // trusted-path prompt reaches the emergency serial medium regardless of a

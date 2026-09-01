@@ -37,6 +37,7 @@
 #include <thylacine/proc.h>         // L-6b: WAIT_*, so the collision is asserted
                                     //       against the REAL constants, not copies
 #include <thylacine/vivarium.h>
+#include <thylacine/cons.h>          // C2-k1b: CONS_* flags + the cons test hooks
 
 #include "../../mm/slub.h"          // #127: a real sigtab, so proc_free frees it
 
@@ -4508,6 +4509,134 @@ void test_vivarium_readv_writev_guard_iovec_array(void) {
     s64 rd_user = viv_readv_for_test(p, 3, user_ok, 1);
     TEST_EXPECT_EQ(rd_user, -(s64)T_E_FAULT,
                    "readv: user-range array passes the span guard, faults at copy_in");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// C2-k1b: the phenotype terminal ioctl shell (interactive git + `viv sh`). The
+// error-prone logic is the two PURE helpers -- the cons 5-flag <-> Linux termios
+// map and the deterministic consctl grammar -- unit-tested here with plain
+// structs and a behavioral round-trip through the real setter (the
+// getdents64-transform precedent). The full cons SERVE (a uaccess copy of a live
+// termios/winsize to a MAPPED user buffer on a real cons fd) needs staging the
+// kthread harness cannot do -- like the readv serve path -- and is covered by
+// the in-guest viv-run E2E (isatty()/tcgetattr on /dev/cons).
+
+// F1: the pure cons-flags -> Linux termios map. Each cons flag lands in the right
+// Linux register and bit; ONLCR pulls OPOST (Linux translates NL only under it);
+// the c_cflag baseline + the c_cc control chars are present (a zero c_cflag reads
+// as B0/hang-up, and a zero VMIN/VINTR would break single-char input).
+void test_vivarium_ioctl_termios_map(void);
+void test_vivarium_ioctl_termios_map(void) {
+    struct viv_linux_termios tio;
+
+    // All cons flags clear -> all mode registers 0, baseline c_cflag, c_cc set.
+    viv_cons_to_linux_termios(0u, &tio);
+    TEST_EXPECT_EQ((int)tio.c_iflag, 0, "no ICRNL -> c_iflag 0");
+    TEST_EXPECT_EQ((int)tio.c_oflag, 0, "no ONLCR -> c_oflag 0");
+    TEST_EXPECT_EQ((int)tio.c_lflag, 0, "no lflags -> c_lflag 0");
+    TEST_EXPECT_EQ((int)tio.c_cflag,
+                   (int)(VIV_LINUX_B38400 | VIV_LINUX_CS8 | VIV_LINUX_CREAD),
+                   "c_cflag baseline B38400|CS8|CREAD");
+    TEST_EXPECT_EQ((int)tio.c_cc[0], 0x03, "VINTR ^C");
+    TEST_EXPECT_EQ((int)tio.c_cc[6], 0x01, "VMIN 1");
+    TEST_EXPECT_EQ((int)tio.c_cc[5], 0x00, "VTIME 0");
+    TEST_EXPECT_EQ((int)tio.c_cc[2], 0x7f, "VERASE DEL");
+    TEST_EXPECT_EQ((int)tio.c_line,  0,    "c_line N_TTY (0)");
+
+    // All five set -> the matching Linux bits; ONLCR pulls OPOST.
+    viv_cons_to_linux_termios(CONS_ICANON | CONS_ECHO | CONS_ISIG |
+                              CONS_ICRNL | CONS_ONLCR, &tio);
+    TEST_EXPECT_EQ((int)tio.c_lflag,
+                   (int)(VIV_LINUX_ICANON | VIV_LINUX_ECHO | VIV_LINUX_ISIG),
+                   "all lflags -> ICANON|ECHO|ISIG");
+    TEST_EXPECT_EQ((int)tio.c_iflag, (int)VIV_LINUX_ICRNL, "ICRNL -> c_iflag ICRNL");
+    TEST_EXPECT_EQ((int)tio.c_oflag, (int)(VIV_LINUX_OPOST | VIV_LINUX_ONLCR),
+                   "ONLCR -> c_oflag OPOST|ONLCR");
+
+    // Isolate each -> only its bit, no cross-register leak.
+    viv_cons_to_linux_termios(CONS_ECHO, &tio);
+    TEST_EXPECT_EQ((int)tio.c_lflag, (int)VIV_LINUX_ECHO, "ECHO alone");
+    viv_cons_to_linux_termios(CONS_ISIG, &tio);
+    TEST_EXPECT_EQ((int)tio.c_lflag, (int)VIV_LINUX_ISIG, "ISIG alone");
+    viv_cons_to_linux_termios(CONS_ICANON, &tio);
+    TEST_EXPECT_EQ((int)tio.c_lflag, (int)VIV_LINUX_ICANON, "ICANON alone");
+    viv_cons_to_linux_termios(CONS_ICRNL, &tio);
+    TEST_EXPECT_EQ((int)tio.c_iflag, (int)VIV_LINUX_ICRNL, "ICRNL alone -> c_iflag");
+    TEST_EXPECT_EQ((int)tio.c_lflag, 0, "ICRNL does not leak into c_lflag");
+}
+
+// F2: the Linux termios -> consctl grammar, proven BEHAVIORALLY by round-tripping
+// through the ONE production setter. A mode set on g_cons, mapped to a Linux
+// termios, turned into grammar, and applied back must reproduce the five flags --
+// so get->map->grammar->set composes. Plus the ONLCR-requires-OPOST gate, tested
+// by its effect on the applied mode (no string parsing).
+void test_vivarium_ioctl_grammar_roundtrip(void);
+void test_vivarium_ioctl_grammar_roundtrip(void) {
+    struct viv_linux_termios tio;
+    char g[64];
+    int n;
+
+    // Save the global console mode; every mutation below is restored at the end.
+    u32 saved = cons_test_termios();
+
+    // Round-trip two distinct values through the full pure pipeline + real setter.
+    const u32 want1 = CONS_ICANON | CONS_ISIG;         // cooked + signals, no echo
+    cons_test_set_termios(want1);
+    viv_cons_to_linux_termios(cons_termios_get(), &tio);
+    n = viv_linux_termios_to_grammar(&tio, g);
+    TEST_ASSERT(cons_set_mode_cmd(g, n, true) >= 0, "grammar applies cleanly (want1)");
+    TEST_EXPECT_EQ((int)cons_termios_get(), (int)want1,
+                   "get->map->grammar->set round-trips (cooked+isig)");
+
+    const u32 want2 = CONS_TERMIOS_ALL;                // all five set
+    cons_test_set_termios(want2);
+    viv_cons_to_linux_termios(cons_termios_get(), &tio);
+    n = viv_linux_termios_to_grammar(&tio, g);
+    TEST_ASSERT(cons_set_mode_cmd(g, n, true) >= 0, "grammar applies cleanly (want2)");
+    TEST_EXPECT_EQ((int)cons_termios_get(), (int)want2, "round-trips all five set");
+
+    // ONLCR requires OPOST: a Linux termios with ONLCR but NOT OPOST must NOT turn
+    // native ONLCR on; with both, it must. Proven by the applied mode, starting
+    // each leg from a known state.
+    for (u64 i = 0; i < sizeof(tio); i++) ((u8 *)&tio)[i] = 0;
+    tio.c_oflag = VIV_LINUX_ONLCR;                      // ONLCR without OPOST
+    n = viv_linux_termios_to_grammar(&tio, g);
+    cons_test_set_termios(CONS_ONLCR);                 // start ON to prove it clears
+    (void)cons_set_mode_cmd(g, n, true);
+    TEST_ASSERT((cons_termios_get() & CONS_ONLCR) == 0u,
+                "ONLCR without OPOST leaves native ONLCR OFF");
+    tio.c_oflag = VIV_LINUX_OPOST | VIV_LINUX_ONLCR;
+    n = viv_linux_termios_to_grammar(&tio, g);
+    cons_test_set_termios(0u);                          // start OFF to prove it sets
+    (void)cons_set_mode_cmd(g, n, true);
+    TEST_ASSERT((cons_termios_get() & CONS_ONLCR) != 0u,
+                "OPOST|ONLCR turns native ONLCR ON");
+
+    cons_test_set_termios(saved);                       // restore the console mode
+}
+
+// F3: the ioctl shell dispatch, driven through the REAL viv_tier2 arm. The
+// kthread harness has no fds, so this pins the fd-first ordering: a served
+// request (TCGETS) on a bad fd is EBADF, and -- the discriminating leg -- an
+// UNKNOWN request on the SAME bad fd is STILL EBADF, not ENOTTY. Were the pure
+// classify done before the fd lookup, the unknown request would answer ENOTTY on
+// a bad fd; EBADF must beat ENOTTY (Linux checks the fd first). The full cons
+// serve (a real cons fd) is the in-guest E2E's job.
+void test_vivarium_ioctl_dispatch_ebadf(void);
+void test_vivarium_ioctl_dispatch_ebadf(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    const u64 user_ok = 0x40000ull;
+
+    s64 r_badf = viv_ioctl_for_test(p, 3, VIV_TCGETS, user_ok);
+    TEST_EXPECT_EQ(r_badf, -(s64)T_E_BADF, "TCGETS on a bad fd -> EBADF");
+
+    s64 r_ord = viv_ioctl_for_test(p, 3, 0xDEADBEEFull, user_ok);
+    TEST_EXPECT_EQ(r_ord, -(s64)T_E_BADF,
+                   "unknown request on a bad fd -> EBADF (fd checked before classify)");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);

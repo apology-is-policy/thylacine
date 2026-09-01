@@ -766,6 +766,9 @@ void test_vivarium_renameat_domain(void);
 void test_vivarium_dirent64_encode(void);
 void test_vivarium_getdents64_guards_uaccess(void);
 void test_vivarium_readv_writev_guard_iovec_array(void);
+void test_vivarium_ioctl_termios_map(void);
+void test_vivarium_ioctl_grammar_roundtrip(void);
+void test_vivarium_ioctl_dispatch_ebadf(void);
 void test_vivarium_sendrecv_domain(void);
 void test_vivarium_sockaddr(void);
 void test_vivarium_net_cmd(void);
@@ -2444,6 +2447,9 @@ struct test_case g_tests[] = {
     { "vivarium.dirent64_encode",      test_vivarium_dirent64_encode,      false, NULL },
     { "vivarium.getdents64_guards_uaccess", test_vivarium_getdents64_guards_uaccess, false, NULL },
     { "vivarium.readv_writev_guard_iovec_array", test_vivarium_readv_writev_guard_iovec_array, false, NULL },
+    { "vivarium.ioctl_termios_map", test_vivarium_ioctl_termios_map, false, NULL },
+    { "vivarium.ioctl_grammar_roundtrip", test_vivarium_ioctl_grammar_roundtrip, false, NULL },
+    { "vivarium.ioctl_dispatch_ebadf", test_vivarium_ioctl_dispatch_ebadf, false, NULL },
     { "vivarium.sockaddr",             test_vivarium_sockaddr,             false, NULL },
     { "vivarium.net_cmd",              test_vivarium_net_cmd,              false, NULL },
     { "vivarium.conn_n",               test_vivarium_conn_n,               false, NULL },

@@ -2241,6 +2241,14 @@ static void cons_render_dec_u16(u8 *out, long *off, u32 v) {
     while (t > 0) out[(*off)++] = (u8)tmp[--t];
 }
 
+// C2-k1b: the flag-word getter for the phenotype TCGETS shell. A single relaxed
+// atomic load -- a one-word read needs no g_cons.lock (the store side holds the
+// lock only to keep the whole multi-flag/winsize apply atomic; there is no torn
+// read of a u32). Same value cons_render_mode snapshots, without the string.
+u32 cons_termios_get(void) {
+    return cons_termios_load();
+}
+
 long cons_render_mode(void *buf, long n) {
     if (!buf || n < 0) return 0;
     u16 wc, wr;

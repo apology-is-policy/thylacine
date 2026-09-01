@@ -300,6 +300,12 @@
 // POSIX: EMFILE.
 #define T_E_MFILE      24
 
+// The fd is not a terminal for the requested control op. Returned by the
+// phenotype ioctl shell (C2-k1b) for a TC*/TIOC* request on a non-tty fd, and
+// for any request the terminal surface does not serve. isatty() reads this (via
+// a failed TIOCGWINSZ) as "not a tty". POSIX: ENOTTY.
+#define T_E_NOTTY      25
+
 // The fd is not a socket. Returned when a socket call names an fd with no
 // socktab entry -- a plain file, or a socket whose entry was dropped.
 // POSIX: ENOTSOCK.
@@ -349,6 +355,7 @@ _Static_assert(T_E_OPNOTSUPP == 95,  "T_E_OPNOTSUPP ABI pin (POSIX EOPNOTSUPP)")
 // The V-5 socket family. Values read from musl's generic bits/errno.h, which
 // is what a Linux guest's libc compares against.
 _Static_assert(T_E_MFILE          == 24,  "T_E_MFILE ABI pin (POSIX EMFILE)");
+_Static_assert(T_E_NOTTY          == 25,  "T_E_NOTTY ABI pin (POSIX ENOTTY)");
 _Static_assert(T_E_NOTSOCK        == 88,  "T_E_NOTSOCK ABI pin (POSIX ENOTSOCK)");
 _Static_assert(T_E_PROTONOSUPPORT == 93,  "T_E_PROTONOSUPPORT ABI pin (POSIX EPROTONOSUPPORT)");
 _Static_assert(T_E_AFNOSUPPORT    == 97,  "T_E_AFNOSUPPORT ABI pin (POSIX EAFNOSUPPORT)");

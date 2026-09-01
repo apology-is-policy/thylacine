@@ -11715,6 +11715,149 @@ static s64 viv_readv(u64 fd, u64 iov_va, u64 iovcnt_raw) {
     return (s64)nread;
 }
 
+// C2-k1b: emit one "+name "/"-name " token of the consctl grammar. Returns the
+// bytes written. The TCSETS shell emits all five flags explicitly, so the
+// resulting command fully DETERMINES the mode regardless of the current one.
+static int viv_ioctl_emit_flag(char *out, const char *name, bool set) {
+    int k = 0;
+    out[k++] = set ? '+' : '-';
+    for (const char *s = name; *s != '\0'; s++) out[k++] = *s;
+    out[k++] = ' ';
+    return k;
+}
+
+// C2-k1b PURE: map the cons 5-flag word to a Linux struct termios (the TCGETS
+// content). No fd, no uaccess -- unit-testable with a plain struct, the
+// getdents64-transform precedent. Only the five modeled flags survive; other
+// bits are 0 (the pouch PTY-3 subset honesty), which round-trips a guest's
+// tcgetattr/modify/tcsetattr for the flags we implement. c_cc carries the Linux
+// INIT_C_CC baseline (asm-generic termbits indices) so a guest sees real
+// control chars; the rest stay 0.
+void viv_cons_to_linux_termios(u32 cons_flags, struct viv_linux_termios *out) {
+    if (!out) return;
+    for (u64 i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;   // defined zeros
+    out->c_iflag = (cons_flags & CONS_ICRNL) ? VIV_LINUX_ICRNL : 0u;
+    out->c_oflag = (cons_flags & CONS_ONLCR) ? (VIV_LINUX_OPOST | VIV_LINUX_ONLCR) : 0u;
+    out->c_lflag = ((cons_flags & CONS_ICANON) ? VIV_LINUX_ICANON : 0u)
+                 | ((cons_flags & CONS_ECHO)   ? VIV_LINUX_ECHO   : 0u)
+                 | ((cons_flags & CONS_ISIG)   ? VIV_LINUX_ISIG   : 0u);
+    out->c_cflag = VIV_LINUX_B38400 | VIV_LINUX_CS8 | VIV_LINUX_CREAD;
+    out->c_line  = 0;                                            // N_TTY
+    out->c_cc[0]  = 0x03;   // VINTR    ^C
+    out->c_cc[1]  = 0x1c;   // VQUIT    ^backslash
+    out->c_cc[2]  = 0x7f;   // VERASE   DEL
+    out->c_cc[3]  = 0x15;   // VKILL    ^U
+    out->c_cc[4]  = 0x04;   // VEOF     ^D
+    out->c_cc[5]  = 0x00;   // VTIME
+    out->c_cc[6]  = 0x01;   // VMIN
+    out->c_cc[8]  = 0x11;   // VSTART   ^Q
+    out->c_cc[9]  = 0x13;   // VSTOP    ^S
+    out->c_cc[10] = 0x1a;   // VSUSP    ^Z
+    out->c_cc[12] = 0x12;   // VREPRINT ^R
+    out->c_cc[13] = 0x0f;   // VDISCARD ^O
+    out->c_cc[14] = 0x17;   // VWERASE  ^W
+    out->c_cc[15] = 0x16;   // VLNEXT   ^V
+}
+
+// C2-k1b PURE: build the DETERMINISTIC 5-flag consctl grammar from a Linux
+// termios (the TCSETS content). Every flag is emitted explicitly (+/-), so the
+// result FULLY determines the mode regardless of the current one. Returns the
+// byte count; g must hold >= 64 bytes (max 5*8=40). onlcr requires OPOST --
+// Linux translates NL only under OPOST, so native ONLCR is on iff both.
+int viv_linux_termios_to_grammar(const struct viv_linux_termios *tio, char *g) {
+    int n = 0;
+    n += viv_ioctl_emit_flag(g + n, "icanon", (tio->c_lflag & VIV_LINUX_ICANON) != 0u);
+    n += viv_ioctl_emit_flag(g + n, "echo",   (tio->c_lflag & VIV_LINUX_ECHO)   != 0u);
+    n += viv_ioctl_emit_flag(g + n, "isig",   (tio->c_lflag & VIV_LINUX_ISIG)   != 0u);
+    n += viv_ioctl_emit_flag(g + n, "icrnl",  (tio->c_iflag & VIV_LINUX_ICRNL)  != 0u);
+    n += viv_ioctl_emit_flag(g + n, "onlcr",
+             (tio->c_oflag & VIV_LINUX_OPOST) != 0u
+          && (tio->c_oflag & VIV_LINUX_ONLCR) != 0u);
+    return n;
+}
+
+// C2-k1b: serve a classified terminal ioctl on a CONSOLE fd. The cons line
+// discipline (g_cons) is kernel-owned, so this maps it to/from the Linux
+// termios/winsize ABI directly -- no ptyfs round-trip (that is the pts case,
+// C2-k1c). The error-prone flag/grammar logic is the two PURE helpers above;
+// this arm is the thin uaccess + setter glue.
+static s64 viv_ioctl_cons(enum viv_ioctl_op op, u64 argp) {
+    switch (op) {
+    case VIV_IOCTL_TCGETS: {
+        struct viv_linux_termios tio;
+        viv_cons_to_linux_termios(cons_termios_get(), &tio);
+        if (!sys_validate_user_buf(argp, sizeof(tio)))       return -(s64)T_E_FAULT;
+        if (uaccess_copy_out(argp, &tio, sizeof(tio)) != 0)  return -(s64)T_E_FAULT;
+        return 0;
+    }
+    case VIV_IOCTL_TCSETS: {
+        struct viv_linux_termios tio;
+        if (!sys_validate_user_buf(argp, sizeof(tio)))       return -(s64)T_E_FAULT;
+        if (uaccess_copy_in(&tio, argp, sizeof(tio)) != 0)   return -(s64)T_E_FAULT;
+        char g[64];
+        int n = viv_linux_termios_to_grammar(&tio, g);
+        // allow_flags = true: this path is the fd holder setting line discipline,
+        // not a renderer-minted consctl file; the allow_flags gate (#55 F2)
+        // narrows only the latter. Reusing the ONE production setter gets the
+        // atomic apply + ICANON-clear-delivers-line + poller wake for free. A
+        // well-formed deterministic grammar cannot fail; map -1 to EINVAL.
+        return (cons_set_mode_cmd(g, n, true) < 0) ? -(s64)T_E_INVAL : 0;
+    }
+    case VIV_IOCTL_TIOCGWINSZ: {
+        u16 cols = 0, rows = 0;
+        cons_winsize_get(&cols, &rows);                             // coherent pair
+        struct viv_linux_winsize ws;
+        ws.ws_row = rows; ws.ws_col = cols; ws.ws_xpixel = 0; ws.ws_ypixel = 0;
+        if (!sys_validate_user_buf(argp, sizeof(ws)))       return -(s64)T_E_FAULT;
+        if (uaccess_copy_out(argp, &ws, sizeof(ws)) != 0)   return -(s64)T_E_FAULT;
+        return 0;
+    }
+    case VIV_IOCTL_TIOCSWINSZ:
+        // The console geometry is physical -- owned by the renderer via the
+        // consctl winsize verb, never an app's to set. pouch-0029 answers EPERM.
+        return -(s64)T_E_PERM;
+    default:
+        return -(s64)T_E_NOTTY;
+    }
+}
+
+// C2-k1b: the ioctl shell. Classify (pure), then serve terminal control on a
+// cons fd off g_cons. EBADF beats ENOTTY (Linux checks the fd first), so an
+// unserved request still validates the fd before answering ENOTTY.
+//
+// Rights: NONE required. Linux terminal ioctls do not check the fd's r/w mode,
+// and isatty() probes fd 1/2 -- often write-only -- so demanding RIGHT_READ
+// would make isatty() false on stdout/stderr and drop git to non-interactive.
+// TCSETS mutates the (global, single-console) line discipline; that is faithful
+// to Linux tty semantics (any tty fd may tcsetattr) and touches no security bit
+// -- the SAK/trusted path is independent of the ldisc flags (I-27).
+static s64 viv_ioctl(struct Proc *p, u64 fd, u64 request, u64 argp) {
+    struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd, 0);
+    if (!sp) return -(s64)T_E_BADF;
+
+    enum viv_ioctl_op op = VIV_IOCTL_UNSERVED;
+    s64 r;
+    if (vivarium_ioctl_decide(request, &op) != VIV_TRANSLATED) {
+        r = -(s64)T_E_NOTTY;                        // not a served terminal request
+    } else {
+        struct t_stat st;
+        bool is_cons = (spoor_stat_native(sp, &st) == 0)
+                    && (st.qid_path & CONS_STAT_QID_FLAG) != 0u;
+        if (is_cons) {
+            r = viv_ioctl_cons(op, argp);
+        } else {
+            // Not the console. A pts fd IS a terminal, but its line discipline
+            // lives in the ptyfs userspace server -- reaching it from the kernel
+            // (walk /dev/pts/<N>ctl + 9P I/O) is C2-k1c. A plain file/pipe is not
+            // a terminal at all. Both answer ENOTTY today: no regression (ioctl
+            // was ENOSYS before) and no wrong answer, so they need not differ yet.
+            r = -(s64)T_E_NOTTY;
+        }
+    }
+    spoor_clunk(sp);
+    return r;
+}
+
 // gettimeofday(tv, tz): write the wall clock as a struct timeval. There is no
 // native syscall to dispatch to -- SYS_CLOCK_GETTIME writes a timespec, and a
 // timeval carries MICROseconds -- so this shell does the read + convert + write
@@ -12754,6 +12897,11 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // writev(fd, iov, iovcnt): x0..x2.
         return viv_writev(args[0], args[1], args[2]);
 
+    case VIV_LINUX_IOCTL:
+        // ioctl(fd, request, argp): x0..x2. C2-k1b: terminal control on a cons
+        // fd (isatty/termios/winsize); pts deferred (C2-k1c); else ENOTTY.
+        return viv_ioctl(p, args[0], args[1], args[2]);
+
     case VIV_LINUX_GETCWD: {
         // getcwd(buf, size): x0 buf, x1 size.
         //
@@ -13272,6 +13420,13 @@ s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt);
 s64 viv_writev_for_test(struct Proc *p, u64 fd, u64 iov_va, u64 iovcnt) {
     u64 args[VIV_NARGS] = { fd, iov_va, iovcnt, 0, 0, 0 };
     return viv_tier2(NULL, p, VIV_LINUX_WRITEV, args);
+}
+
+// C2-k1b: drive the ioctl shell through the REAL viv_tier2 arm (declared in
+// vivarium.h). args order matches the case: {fd, request, argp}.
+s64 viv_ioctl_for_test(struct Proc *p, u64 fd, u64 request, u64 argp) {
+    u64 args[VIV_NARGS] = { fd, request, argp, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_IOCTL, args);
 }
 
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {

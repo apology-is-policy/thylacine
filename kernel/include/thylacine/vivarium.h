@@ -148,6 +148,11 @@ enum {
     // is refused on the flags word alone.)
     VIV_LINUX_DUP3        = 24,
     VIV_LINUX_CLOSE_RANGE = 436,
+    // ioctl (C2-k1b): terminal control (TC*/TIOC*). A TIER2 shell, never a
+    // renumber, so its sub-ceiling number carries no native-collision risk --
+    // viv_tier2 matches it in the Linux-number namespace and dispatches the
+    // explicit ioctl shell; nothing runs a native handler with the caller's args.
+    VIV_LINUX_IOCTL       = 29,
 
     VIV_LINUX_OPENAT     = 56,
     VIV_LINUX_CLOSE      = 57,
@@ -2583,6 +2588,68 @@ enum viv_ioctl_op {
 // VIV_TRANSLATED with *op_out set, or VIV_FORWARD (op_out untouched) for a
 // request this surface does not serve.
 enum viv_verdict vivarium_ioctl_decide(u64 request, enum viv_ioctl_op *op_out);
+
+// C2-k1b: the ioctl EXECUTION ABI. `struct viv_linux_termios` is EXACTLY what a
+// Linux kernel writes for TCGETS and reads for TCSETS -- the asm-generic uapi
+// layout (NCCS=19, no embedded speeds; termios2 is a separate request we do not
+// serve). The guest's own libc struct termios is a >=36-byte superset whose
+// first 36 bytes match this, so writing exactly 36 is what real Linux does and
+// what the guest expects. c_iflag/c_oflag/c_lflag are u32; c_line is the line
+// discipline byte (always N_TTY=0 here); c_cc[19] carries the control chars.
+struct viv_linux_termios {
+    u32 c_iflag;
+    u32 c_oflag;
+    u32 c_cflag;
+    u32 c_lflag;
+    u8  c_line;
+    u8  c_cc[19];
+};
+_Static_assert(sizeof(struct viv_linux_termios) == 36,
+               "viv_linux_termios == Linux asm-generic struct termios (36 bytes)");
+
+// The Linux `struct winsize` (TIOCGWINSZ/TIOCSWINSZ). isatty() succeeds iff
+// TIOCGWINSZ does, so serving this is what makes a phenotype fd a terminal.
+struct viv_linux_winsize {
+    u16 ws_row;
+    u16 ws_col;
+    u16 ws_xpixel;
+    u16 ws_ypixel;
+};
+_Static_assert(sizeof(struct viv_linux_winsize) == 8,
+               "viv_linux_winsize == Linux struct winsize (8 bytes)");
+
+// The asm-generic termbits bit values -- the ABI constants the guest's termios
+// carries. Only the five the cons/pts line discipline models are honored; every
+// other bit is accept-and-ignore on TCSETS and reported 0 on TCGETS (the pouch
+// PTY-3 "termios subset honesty", faithful for the flags we implement and stable
+// under a guest's tcgetattr/modify/tcsetattr round-trip).
+enum {
+    VIV_LINUX_ICRNL  = 0x00000100u,  // c_iflag
+    VIV_LINUX_OPOST  = 0x00000001u,  // c_oflag
+    VIV_LINUX_ONLCR  = 0x00000004u,  // c_oflag (acts only under OPOST on Linux)
+    VIV_LINUX_ISIG   = 0x00000001u,  // c_lflag
+    VIV_LINUX_ICANON = 0x00000002u,  // c_lflag
+    VIV_LINUX_ECHO   = 0x00000008u,  // c_lflag
+    // A cosmetic-but-sane c_cflag baseline for TCGETS (B38400 | CS8 | CREAD);
+    // git and the coreutils do not inspect the baud/char-size bits, but a zero
+    // c_cflag reads as B0 (hang-up), which a stricter program could reject.
+    VIV_LINUX_B38400 = 0x0000000fu,
+    VIV_LINUX_CS8    = 0x00000030u,
+    VIV_LINUX_CREAD  = 0x00000080u,
+};
+
+// C2-k1b PURE translation helpers (non-static for the unit tests, the
+// getdents64-transform precedent): the error-prone flag/grammar logic, isolated
+// from the fd + uaccess glue. viv_cons_to_linux_termios maps the cons 5-flag
+// word to a Linux termios (TCGETS content); viv_linux_termios_to_grammar builds
+// the deterministic consctl grammar from a Linux termios (TCSETS content),
+// returning the byte count (g needs >= 64 bytes).
+void viv_cons_to_linux_termios(u32 cons_flags, struct viv_linux_termios *out);
+int  viv_linux_termios_to_grammar(const struct viv_linux_termios *tio, char *g);
+
+// C2-k1b test shim: drive the ioctl shell without a phenotype dispatch. Mirrors
+// viv_readv_for_test -- the non-static shell entry the test suite calls.
+s64 viv_ioctl_for_test(struct Proc *p, u64 fd, u64 request, u64 argp);
 
 // -----------------------------------------------------------------------------
 // uname (#150). A fabrication -- there is no underlying Thylacine call -- so the

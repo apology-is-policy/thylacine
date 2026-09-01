@@ -275,6 +275,11 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_DUP,         VIV_TIER2   },  // git-remote-https helper pipe
     { VIV_LINUX_DUP3,        VIV_TIER2   },  // #157: vivarium_dup3_decide
     { VIV_LINUX_CLOSE_RANGE, VIV_FORWARD },
+    // C2-k1b: terminal control. The shell (viv_ioctl) classifies via
+    // vivarium_ioctl_decide, serves TC*/TIOC* on a cons fd off g_cons, and
+    // answers ENOTTY for a non-tty fd, a pts fd (ldisc reach deferred, C2-k1c),
+    // or an unserved request -- so isatty()/raw-mode work on the console.
+    { VIV_LINUX_IOCTL,       VIV_TIER2   },  // C2-k1b: viv_ioctl
 
     // pipe2 is an fd-CREATING row, not an fd-freeing one, so it needs no hook
     // extension: it puts TWO FRESH indices into the table and frees nothing. It
