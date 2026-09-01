@@ -195,6 +195,48 @@ void test_territory_clone_copies_root_pheno(void) {
     TEST_ASSERT(cu_after == false, "a declaration made AFTER the clone stays the parent's");
 }
 
+// Design D audit F6: the Territory-level declaration is rendered into
+// /proc/<pid>/ns ("root: pheno-linux"), for the reason the per-mount suffix is
+// -- a declaration that cannot be observed cannot be audited. The undeclared
+// control renders no such line; declared renders it AFTER the binds line; a
+// cap that fits the binds line but not the root line renders binds alone
+// (whole lines or nothing, never a prefix).
+static bool ns_has(const char *buf, u64 len, const char *needle) {
+    u64 n = 0;
+    while (needle[n] != '\0') n++;
+    if (n > len) return false;
+    for (u64 i = 0; i + n <= len; i++) {
+        u64 j = 0;
+        while (j < n && buf[i + j] == needle[j]) j++;
+        if (j == n) return true;
+    }
+    return false;
+}
+
+void test_territory_render_root_pheno(void);
+void test_territory_render_root_pheno(void) {
+    struct Territory *t = territory_alloc();
+    TEST_ASSERT(t != NULL, "territory_alloc");
+    if (!t) return;
+    char buf[128];
+    u64 n0 = territory_format_ns(t, buf, sizeof(buf));
+    bool undecl_has_root  = ns_has(buf, n0, "root: pheno-linux");
+    bool undecl_has_binds = ns_has(buf, n0, "binds: 0\n");
+    territory_declare_linux(t);
+    u64 n1 = territory_format_ns(t, buf, sizeof(buf));
+    bool decl_has_root = ns_has(buf, n1, "binds: 0\nroot: pheno-linux\n");
+    bool decl_ends_nl  = (n1 > 0 && buf[n1 - 1] == '\n');
+    char tiny[12];   // "binds: 0\n" fits (9 bytes); "root: pheno-linux\n" (18) does not
+    u64 n2 = territory_format_ns(t, tiny, sizeof(tiny));
+    bool tiny_whole = (n2 == 9) && ns_has(tiny, n2, "binds: 0\n");
+    territory_unref(t);
+    TEST_ASSERT(undecl_has_binds, "CONTROL: an undeclared Territory renders its binds line");
+    TEST_ASSERT(!undecl_has_root,  "CONTROL: ...and no root line");
+    TEST_ASSERT(decl_has_root, "F6: a declared Territory renders 'root: pheno-linux' after binds");
+    TEST_ASSERT(decl_ends_nl,  "whole lines only");
+    TEST_ASSERT(tiny_whole, "a cap that fits binds but not the root line renders binds alone");
+}
+
 // --- LS-4: per-Proc cwd ("dot") --------------------------------------------
 
 static int cwd_streq(const char *a, const char *b) {

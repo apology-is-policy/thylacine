@@ -176,19 +176,61 @@ diorama. Five discriminating unit tests (the decision truth table; the clone cop
 an undeclared control AND a post-clone-declaration independence check; the seed
 surviving a re-anchor, plus the seed's own no-crossing control before and after the
 declaration; Leg B on both arms; Leg A as field-X-decided-Y -> Y's arm, and the reset
-never writes the field). Leg C has no discriminating fixture in the tree -- every
-shipped pheno-mount binary is static, so no native->Linux execve of a DYNAMIC one
-exists to witness it; said so in the AUDIT-TRIGGERS row rather than writing a test
-that passes either way. Measured: suite **1480/1480**, 0 fail, 0 EXTINCTION, boot OK,
+never writes the field). Leg C: I wrote that it had no discriminating fixture in the
+tree (every shipped pheno-mount binary is static) and said so in the AUDIT-TRIGGERS row
+rather than write a test that passes either way. **That claim was false** -- the audit
+below refuted it, and the test now exists. Measured: suite **1480/1480**, 0 fail, 0 EXTINCTION, boot OK,
 arc gates L-6c + D-5 PASS (D-5 is the container's execve of dynamic binaries under
 `root_pheno` -- the container half of D, live). Quaestor: all nine kernel paths are
 vault-carried, so the deep prose rings the vault; `145-vivarium.md` got only its
 now-false claims corrected.
 
-**Open at this commit:** the SMP gate + the Fable 5.1 audit (F1's cross-Proc
-interleaving the named focus area), then C2-k3 proper (`viv sh` + `core.editor=nora`),
-which D unblocks -- and its first in-guest job is F3: `git --exec-path` + a real fetch
-from `/viv/bin`, then the editor witness itself.
+**The SMP gate on `3c26339f`: 40 PASS / 0 CORRUPTION** (default+UBSan x smp4/smp8,
+N=10; the full log archived in the session scratchpad).
+
+**The audit (Fable 5.1, `claude-fable-5-1`, MODEL start==end, 366K tokens): 0 P0 / 0 P1 /
+2 P2 / 4 P3, not dirty.** Every folded-in review item verified realized on the code; the
+named focus area -- the flip against every note-posting path -- re-derived sound by the
+same argument my self-audit had reached (delivery is a whole-ring scan at every EL0
+return; every cross-Proc reader gates on the phenotype before the sigtab). What the
+independent read found that neither the design review nor I did is the part worth
+keeping: **D constructs Proc states that were impossible before it**, and every field
+whose soundness argument read "by construction a Linux/native Proc never has X" was a
+candidate to break. Two did. F1: a native image opens its notes fd (the self-managing
+mark, one-way, "never cleared"), then execve's a `/viv/bin` binary -- a Linux image
+carrying the mark, which `notes.c`'s Linux delivery branch is gated AGAINST, so that
+image's whole signal delivery is switched off (every non-kill note stranded, the ring
+filling, the caught bit armed and never drained). F2: a Linux->native execve runs only the
+cloexec sweep, native `close()` never drops a socktab row, and the next native->Linux
+execve inherits rows keyed on fd numbers the new image is handed afresh -- `connect()`
+dials by path into a stranger's recycled `/net/<proto>/<n>`. Both were latent (nothing
+shipped does either) and both close at ONE site, `proc_exec_drop_image_state`, which the
+scripture now names the sweep site: the mark is cleared at every exec in both arms (the
+mark is the image's), the socktab is reset in the native arm, and a claim replaces any row
+already keyed on its fd. Lesson filed as [[bug-designd-constructed-states]]: the
+newly-constructible-states sweep is the audit question to ask whenever a design makes a
+mid-life transition possible that a field's invariant assumed away.
+
+The P3s were all about my own text. F3 refuted my "Leg C is untestable in-tree" claim
+with the fixture I had in front of me the whole time: a PT_INTERP naming `/hello`, loaded
+with `nsp` = kproc (field native) -- decided LINUX loads the interpreter, decided NATIVE
+refuses. I had reasoned from "no shipped dynamic pheno-mount binary" to "no fixture",
+which conflates a production witness with a unit fixture; the test is
+`exec.interp_dispatch_follows_parameter` now, and the four texts that carried the claim
+are corrected. F4: the store comment claimed a RELEASE store kept the (phenotype, mask)
+pair coherent for cross-Proc readers -- a RELEASE orders nothing AFTER it, so it never
+did, and it never needed to: all four combinations are observable and each is safe; the
+comment now carries that argument instead of the false one. F5: five contracts the design
+had made stale, the instructive one being `exec.c`'s "unreachable today" on the nameless
+PT_INTERP refusal -- unifying the register-variant spawns onto the pheno-aware resolver
+made it REACHABLE (they thread no name, and I-33 forbids substituting the Spoor's path),
+which is a static/dynamic asymmetry 13.10.6 now states rather than an unreachable arm.
+F6: the declaration was unobservable from userspace; `/proc/<pid>/ns` renders
+`root: pheno-linux`.
+
+**Open at this commit:** C2-k3 proper (`viv sh` + `core.editor=nora`), which D unblocks
+-- and its first in-guest job is F3: `git --exec-path` + a real fetch from `/viv/bin`,
+then the editor witness itself.
 
 ## 2026-08-31 (aux) -- N-6: git push over https -- milestone B complete
 

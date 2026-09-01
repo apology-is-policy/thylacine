@@ -1331,11 +1331,18 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
     // interpreter is resolved in ITS namespace.
     if (r == ELF_LOAD_HAS_INTERP && nsp && pheno == PHENO_LINUX) {
         if (!prog_name || prog_name_len == 0) {
-            // Unreachable today: the one entry that can produce a PHENO_LINUX
-            // image threads its name, and a PHENO_LINUX Proc cannot reach the
-            // native SYS_SPAWN numbers at all (vivarium.h). Loud rather than
-            // silent because the failure mode of a future entry forgetting the
-            // name is "dynamic binaries mysteriously do not run here".
+            // REACHABLE (Design D, VIVARIUM 13.10.6 -- this said "unreachable"
+            // until audit F5): the register-argument spawn variants stamp
+            // LINUX for a pheno-mount binary too, and they thread NO name.
+            // prog_name is the argv-side identity, and substituting the
+            // resolved Spoor's ->path for it is forbidden -- I-33 makes the
+            // retained name cosmetic, never load-bearing. So a DYNAMIC
+            // pheno-mount binary loads through SYS_SPAWN_FULL_ARGV and refuses
+            // here through SYS_SPAWN / _WITH_FDS / _WITH_PERMS / _WITH_CAPS:
+            // the static/dynamic asymmetry 13.10.6 states. Every shipped
+            // pheno-mount binary is static, so no caller meets it today. Loud
+            // rather than silent because the failure mode is "dynamic
+            // binaries mysteriously do not run here".
             exec_report_fail("PT_INTERP rewrite needs the program's own name and "
                              "this exec entry threaded none -- refusing", 0);
         } else {

@@ -2216,8 +2216,10 @@ void proc_mark_self_managing_notes(struct Proc *p) {
     // caller bug; surface it loudly (mirrors proc_mark_may_post_service).
     if (p->state != PROC_STATE_ALIVE)
         extinction("proc_mark_self_managing_notes on non-ALIVE Proc");
-    // One-way, idempotent — never cleared, never propagated by rfork
-    // (rfork_internal does not copy proc_flags). Atomic OR: the proc_flags
+    // Idempotent; never propagated by rfork (rfork_internal does not copy
+    // proc_flags); CLEARED at every exec (proc_exec_drop_image_state, both
+    // arms -- Design D audit F1: the mark is the IMAGE's, and a Linux image
+    // carrying it would have its delivery switched off). Atomic OR: the proc_flags
     // word is multi-writer post-A-4c-2 (the SAK kthread mutates the console
     // bit), so every RMW on it must be atomic. RELAXED: the bit is a
     // standalone predicate with no ordering dependency.
@@ -3320,7 +3322,39 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
     } else {
         viv_sigtab_reset(p->sigtab);
         self->note_mask = 0u;
+        // Design D audit F2 (the constructed-states sweep, VIVARIUM 13.10.4):
+        // a NATIVE image has no sockets, so the socktab -- the Linux socket
+        // state of the image this exec replaced -- is reset in place. Native
+        // close() never reaches this table (the drop lives only in the Linux
+        // dispatcher's close hook), so a row left here would outlive its fd
+        // and greet the NEXT Linux image's recycled fd number as a live
+        // (proto, n) connection: connect() dials BY PATH into whatever
+        // stranger now holds /net/<proto>/<n> (I-1). Before D this state was
+        // unconstructible (a Linux Proc never became native); D constructs
+        // it. A socket fd carried through the native interlude is a plain
+        // Spoor on the /net data file to the next Linux image, never a row.
+        // The table object stays (#254: cross-Proc-reachable, proc_free is
+        // the only free); NULL-safe for a Proc that was never Linux.
+        viv_socktab_reset(__atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE));
     }
+
+    // Design D audit F1 (the same sweep): the self-managing-notes mark belongs
+    // to the IMAGE that opened its notes fd, not to the Proc, so exec resets
+    // it -- in BOTH arms. It was "never cleared" because, before D, no image
+    // that set it could be followed by a Linux image in the same Proc
+    // (SYS_NOTE_OPEN has no translation row): "a PHENO_LINUX Proc is never
+    // self-managing" held by construction, and notes.c's Linux delivery
+    // branch is gated on exactly that. D makes the state constructible -- a
+    // native Proc opens its notes fd, then execs a /viv/bin binary -- and a
+    // Linux image carrying the mark has its whole signal delivery switched
+    // OFF: every non-kill note stranded, the ring filling, the caught bit
+    // armed and never drained. A native image that wants the mark re-opens
+    // its fd (the Plan 9 "exec resets" rule the mask clear above follows).
+    // rfork never copies proc_flags, so only a DIRECT execve by a
+    // self-managing Proc changes behaviour, and only toward the default
+    // disposition. Atomic AND: the word is multi-writer (the SAK kthread).
+    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_SELF_MANAGING_NOTES,
+                       __ATOMIC_RELAXED);
 
     // #247: and the in-handler LATCH, which the reset above missed until it was
     // audited. It is not a disposition, so it does not read as one -- but
@@ -3407,14 +3441,29 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
     // here in the infallible commit region and nowhere earlier. Before the
     // swap above the load could still fail and return the caller to its OLD
     // image, which must keep decoding its own calls under its own ABI (review
-    // F1 Leg B); after it, the new image is committed. RELEASE-ordered ahead
-    // of the signal reset below: a cross-Proc note poster loads p->phenotype
-    // lock-free (notes.c), so it observes either the old (phenotype, mask)
-    // pair or the new one. The window between this store and the mask clear
-    // in the reset can show (new phenotype, old mask); a note masked under the
-    // old mask is DEFERRED there, not lost -- the clear that follows releases
-    // it -- which is the same latitude POSIX gives a sigaction racing a signal
-    // already in flight (the standing rule for this Proc's sigtab, above).
+    // F1 Leg B); after it, the new image is committed.
+    //
+    // What the ordering does and does not promise (audit F4). RELEASE orders
+    // the accesses BEFORE this store (the address-space swap, the cloexec
+    // sweep) ahead of it for an ACQUIRE reader; it says nothing about the
+    // signal reset BELOW, whose plain and RELAXED stores a lock-free
+    // cross-Proc reader (notes.c's SIG_IGN hook, the default-disposition
+    // query, the ^Z fan) may observe before OR after this one. So all four
+    // (phenotype, reset-state) combinations are observable, and each is a
+    // legitimate state of ONE image: (NATIVE, either) -- the sigtab is never
+    // consulted for a native Proc; (LINUX, reset table) -- reads as
+    // all-SIG_DFL, the new image's own initial state; (LINUX, old table) --
+    // the old image's dispositions, the latitude POSIX gives a sigaction
+    // racing a signal already in flight (the standing rule for this Proc's
+    // sigtab, above). The note MASK is not a cross-Proc concern at all: it is
+    // re-read by this thread's own EL0-return scan under its final value, and
+    // a note deferred by the old mask is released by the clear. No note is
+    // lost, doubled, or mis-tabled in any combination. An earlier version of
+    // this comment claimed the store kept the (phenotype, mask) pair
+    // coherent for cross-Proc readers; a RELEASE store cannot order a later
+    // write, so it did not, and it never needed to. RELEASE stays: it is
+    // free, and it keeps the commit above visible to an ACQUIRE reader of the
+    // phenotype.
     __atomic_store_n(&p->phenotype, new_pheno, __ATOMIC_RELEASE);
 
     // Every cross-Proc reader of `->as` -- /proc/<pid>/{maps,mem}, /ctl/procs,

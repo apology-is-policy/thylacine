@@ -1429,10 +1429,13 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
 // Linux: SEEDED from the resolving Territory's declaration (territory_root_pheno,
 // Design D 13.10.5) at stalk_core's restart: label, then OR-accumulated with
 // every MPHENO_LINUX mount crossed. The caller inits *crossed_pheno = false and
-// reads it only on success; a NULL start/path or a failed walk leaves it as the
-// caller set it (fail-safe: the image load stays native). Every image-load
-// path -- all spawn variants and execve -- consumes this; stalk_err's own
-// callers are untouched.
+// reads it ONLY on success -- and that "only" is load-bearing (audit F5): a
+// NULL start/path returns before the seed and leaves the init, but a walk that
+// fails AFTER restart: has already written the seed, so on failure the value
+// may read true. No caller consults it then: a failed resolve loads no image,
+// so nothing is stamped (fail-safe -- the caller keeps its own image). Every
+// image-load path -- all spawn variants and execve -- consumes this;
+// stalk_err's own callers are untouched.
 struct Spoor *stalk_exec(struct Proc *p, struct Spoor *start,
                          const char *path, u64 pathlen, int amode, u32 omode,
                          int *errp, bool *crossed_pheno) {

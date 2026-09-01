@@ -7538,7 +7538,7 @@ static void sys_spawn_thunk(void *arg) {
     // spin_lock hold now disables preemption per-THREAD (spinlock.h #360) --
     // the general rule that replaced the interim whole-thunk IRQ mask.
     int rc = exec_setup_from_spoor(p, exe, exe_size,
-                                   /*prog_name=*/NULL, 0,   // D-4: native-only entry
+                                   /*prog_name=*/NULL, 0,   // D-4/13.10.6: nameless entry
                                    NULL, 0, 0, &entry, &sp);
     spoor_clunk(exe);
     if (rc != 0) {
@@ -7842,7 +7842,7 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     // #359/#360: preemptible fresh-thread exec; the c->lock holds are covered
     // by the spinlock preempt count (spinlock.h). See sys_spawn_thunk.
     int rc = exec_setup_from_spoor(p, exe, exe_size,
-                                   /*prog_name=*/NULL, 0,   // D-4: native-only entry
+                                   /*prog_name=*/NULL, 0,   // D-4/13.10.6: nameless entry
                                    NULL, 0, 0, &entry, &sp);
     spoor_clunk(exe);
     if (rc != 0) {

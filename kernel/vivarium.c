@@ -1729,6 +1729,14 @@ bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
                        enum viv_net_proto proto, u32 n, enum viv_sock_state born) {
     if (!tab || fd < 0) return false;
     spin_lock(&tab->lock);
+    // Replace-on-claim (Design D audit F2): the fd table is the truth. The
+    // caller was just handed `fd` by handle_alloc, so any row still keyed on
+    // it is STALE -- an fd closed by a path this table never saw -- and must
+    // not survive beside the new one: find_locked returns the FIRST match, so
+    // a stale row ahead of the fresh one would answer every later lookup with
+    // a stranger's (proto, n). Cleared under the same lock hold as the scan
+    // below, so the clear, the scan and the write are one critical section.
+    socktab_clear_slot(socktab_find_locked(tab, fd));
     // Scan + write are ONE critical section, so two peer claims cannot both see
     // the same slot FREE and stomp it -- the allocation race N-3 introduced.
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -1770,6 +1778,29 @@ void viv_socktab_drop(struct viv_socktab *tab, s32 fd) {
     if (!tab) return;
     spin_lock(&tab->lock);
     socktab_clear_slot(socktab_find_locked(tab, fd));
+    spin_unlock(&tab->lock);
+}
+
+// execve's reset for the NATIVE arm (Design D, VIVARIUM 13.10.4's constructed-
+// states sweep; audit F2). A native image has no sockets: a socket fd it
+// inherited is a plain Spoor on the /net data file, closed by native close()
+// -- which never reaches this table (the drop lives only in the Linux
+// dispatcher's close hook). Left alone, a row keyed on that fd number would
+// outlive the fd and greet the NEXT Linux image's recycled fd as a live
+// (proto, n) connection: connect() dials BY PATH into whatever stranger now
+// owns /net/<proto>/<n> (I-1). Every slot is cleared in place under the lock;
+// the object stays (mirrors viv_sigtab_reset -- proc_free is the only free,
+// #254); `next_epoch` is NOT reset, so the identity key stays monotonic for
+// the table's life and a keyed write from before the reset lands nowhere.
+// The lock is a leaf and this runs in execve's sole-live-thread window, so
+// taking it costs nothing and keeps the "held only over array ops" rule
+// uniform (drop_cloexec skips it only because it nests under the handle
+// table's lock; this does not). NULL-safe: a Proc that was never Linux has
+// no table.
+void viv_socktab_reset(struct viv_socktab *tab) {
+    if (!tab) return;
+    spin_lock(&tab->lock);
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) socktab_clear_slot(&tab->s[i]);
     spin_unlock(&tab->lock);
 }
 

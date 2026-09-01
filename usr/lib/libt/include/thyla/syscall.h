@@ -281,11 +281,17 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // a live renderer holds the role). joey grants it to /bin/aurora.
 #define T_SPAWN_PERM_CONSOLE_RENDERER  (1u << 3)
 
-// VIVARIUM V-1b: t_sys_spawn_args.pheno_flags bits (mirror SPAWN_PHENO_* in
-// the kernel header). T_SPAWN_PHENO_LINUX declares the child's ABI to be Linux
-// aarch64 -- its syscall numbers are decoded through the translation table.
-// UNGATED, unlike every T_SPAWN_PERM_* bit above: a phenotype confers ABI
-// SHAPE, never AUTHORITY (I-43), so a mis-declared child breaks only itself.
+// VIVARIUM V-1b / Design D (13.10): t_sys_spawn_args.pheno_flags bits (mirror
+// SPAWN_PHENO_* in the kernel header). The phenotype itself is DECIDED FROM
+// THE NAMESPACE at every image load -- every spawn variant and execve: Linux
+// iff the resolution crosses a pheno-linux mount (/viv/bin) or the resolving
+// Territory declares Linux; default native. T_SPAWN_PHENO_LINUX declares the
+// CHILD's Territory Linux (a container: viv sets it after chroot, before the
+// entrypoint), so every image the child loads -- and every execve after it --
+// decodes through the translation table. A 0 here declares nothing: the
+// child's ABI is whatever its images' locations say. UNGATED, unlike every
+// T_SPAWN_PERM_* bit above: a phenotype confers ABI SHAPE, never AUTHORITY
+// (I-43), so a mis-declared child breaks only itself.
 #define T_SPAWN_PHENO_LINUX            (1u << 0)
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +

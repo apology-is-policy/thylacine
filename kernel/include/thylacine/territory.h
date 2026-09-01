@@ -624,7 +624,9 @@ u64  territory_total_destroyed(void);
 // (NUL-NOT-appended; the caller treats [0,len) as the content) for the
 // /proc/<pid>/ns introspection file. One line per mount entry:
 //   "mount <mountpoint-name> <source-name-or-#dc>\n"
-// then "binds: <N>\n". The mount-point name is the entry's ref-held mp_path
+// then "binds: <N>\n", then -- iff the Territory declares the Linux phenotype
+// (territory_root_pheno; Design D, VIVARIUM 13.10.3) -- "root: pheno-linux\n",
+// each whole-line-or-nothing. The mount-point name is the entry's ref-held mp_path
 // (I-33; "?" when unknown); the source name is its Spoor's ->path, or "#<dc>"
 // (the Plan 9 device spec) when the source is a device root with no namespace
 // name. Reads the mount table UNDER ns_lock (the entries + their ref-held,

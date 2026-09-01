@@ -1373,11 +1373,12 @@ bool viv_socktab_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out);
 
 // Claim a free entry for `fd` in state `born`. Returns true on success, false if
 // the table is full (-> EMFILE) or `tab` is NULL. Takes the lock; the scan +
-// write are one critical section, so two peer claims cannot pick one slot. Does
-// NOT check for a duplicate fd: the caller has just been handed that fd by
-// handle_alloc, so it cannot already be in the table -- an entry left behind by
-// a closed fd would be the close-hook bug this table's drop path prevents, and a
-// duplicate here would be its symptom rather than its cause. `born` is FRESH for
+// write are one critical section, so two peer claims cannot pick one slot.
+// REPLACES any row already keyed on `fd` (Design D audit F2): the caller has
+// just been handed that fd by handle_alloc, so an existing row is by
+// definition stale -- an fd closed by a path this table never saw -- and it
+// is cleared in the same critical section rather than left ahead of the fresh
+// row, where find_locked would keep returning it. `born` is FRESH for
 // socket() and CONNECTED for accept() (an accepted fd IS data, born connected).
 bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
                        enum viv_net_proto proto, u32 n, enum viv_sock_state born);
@@ -1387,9 +1388,23 @@ bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
 // close hook run unconditionally for a phenotyped Proc. Takes the lock.
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd);
 
+// Reset the WHOLE table in place under its lock -- every slot cleared, the
+// object kept (#254: cross-Proc-reachable; proc_free is the only free), the
+// epoch counter untouched (monotonic for the table's life). execve's NATIVE
+// arm calls it (proc_exec_drop_image_state, Design D audit F2): a native image
+// has no sockets, and native close() never drops a row, so a Linux image's
+// rows would otherwise outlive their fds and greet the next Linux image's
+// recycled fd numbers as live connections. NULL-safe. Mirrors viv_sigtab_reset.
+void viv_socktab_reset(struct viv_socktab *tab);
+
 // Drop the socktab entry of every close-on-exec socket in `p`. execve calls this
 // AFTER the commit and BEFORE handle_close_on_exec frees the fds, so a freed fd
-// number cannot carry a stale (proto, n) row into the new image. Reads cloexec
+// number cannot carry a stale (proto, n) row into the new image. Since the
+// Design D audit close a socket() claim on that number would EVICT the stale
+// row itself (replace-on-claim), so the sweep's unique coverage is the number
+// recycled to a NON-socket: an open() claims nothing, and every socket arm
+// looks the table up by number, so a connect() on that file fd would find the
+// stale row and dial its dead connection. Still load-bearing. Reads cloexec
 // live from the handle table; runs in execve's sole-live-thread window
 // (proc_exec_alone), so it takes NO socktab lock -- there is no peer thread to
 // race, and taking the lock would nest it under the handle table's own lock

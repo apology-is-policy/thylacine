@@ -236,6 +236,7 @@ void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
 void test_territory_clone_copies_root_pheno(void);   // Design D F2/SA-1
+void test_territory_render_root_pheno(void);         // Design D audit F6
 void test_territory_cwd_lexical(void);
 void test_territory_cwd_join(void);
 void test_territory_cwd_dot(void);
@@ -414,7 +415,8 @@ void test_execve_load_into_rejects_dirty(void);
 void test_execve_failed_load_leaves_target_drainable(void);
 void test_exec_native_rejects_dynamic_linux(void);
 void test_exec_load_failure_leaves_phenotype(void);    // Design D Leg B
-void test_exec_reset_follows_decided_phenotype(void);  // Design D Leg A
+void test_exec_reset_follows_decided_phenotype(void);  // Design D Leg A (+ audit F1 leg)
+void test_exec_interp_dispatch_follows_parameter(void); // Design D Leg C (audit F3)
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
@@ -783,6 +785,7 @@ void test_vivarium_socktab(void);
 void test_vivarium_socktab_close_hook(void);                        // VIVARIUM V-6c
 void test_vivarium_socktab_bind_fields(void);                       // VIVARIUM V-5b
 void test_vivarium_socktab_keyed_write_identity(void);              // N-3 socktab lock
+void test_vivarium_socktab_reset(void);                             // Design D audit F2
 void test_vivarium_listen_decide(void);
 void test_vivarium_timespec_to_ms(void);
 void test_vivarium_ppoll_decide(void);
@@ -1811,6 +1814,7 @@ struct test_case g_tests[] = {
     { "territory.cycle_rejected",      test_namespace_cycle_rejected,      false, NULL },
     { "territory.fork_isolated",       test_namespace_fork_isolated,       false, NULL },
     { "territory.clone_copies_root_pheno", test_territory_clone_copies_root_pheno, false, NULL },
+    { "territory.render_root_pheno", test_territory_render_root_pheno, false, NULL },
     { "territory.cwd_lexical",         test_territory_cwd_lexical,         false, NULL },
     { "territory.cwd_join",            test_territory_cwd_join,            false, NULL },
     { "territory.cwd_dot",             test_territory_cwd_dot,             false, NULL },
@@ -2020,6 +2024,7 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "exec.load_failure_leaves_phenotype", test_exec_load_failure_leaves_phenotype, false, NULL },
     { "exec.reset_follows_decided_phenotype", test_exec_reset_follows_decided_phenotype, false, NULL },
+    { "exec.interp_dispatch_follows_parameter", test_exec_interp_dispatch_follows_parameter, false, NULL },
     { "exec.setup_multi_segment",      test_exec_setup_multi_segment,      false, NULL },
     { "exec.setup_lifecycle_round_trip",
                                        test_exec_setup_lifecycle_round_trip,
@@ -2469,6 +2474,7 @@ struct test_case g_tests[] = {
     { "vivarium.socktab_close_hook",   test_vivarium_socktab_close_hook,   false, NULL },
     { "vivarium.socktab_bind_fields",  test_vivarium_socktab_bind_fields,  false, NULL },
     { "vivarium.socktab_keyed_write_identity", test_vivarium_socktab_keyed_write_identity, false, NULL },
+    { "vivarium.socktab_reset",        test_vivarium_socktab_reset,        false, NULL },
     { "vivarium.listen_decide",        test_vivarium_listen_decide,        false, NULL },
     { "vivarium.timespec_to_ms",       test_vivarium_timespec_to_ms,       false, NULL },
     { "vivarium.ppoll_decide",         test_vivarium_ppoll_decide,         false, NULL },

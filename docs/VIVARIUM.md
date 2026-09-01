@@ -4069,6 +4069,57 @@ EL0 → load); execve gets the same shape with the stamp moved to the commit. Th
 cross-Proc interleaving of the flip against every note-posting path is a **named focus
 area** for the post-implementation audit.
 
+**The constructed-states sweep (post-implementation audit, Fable 5.1, 2026-09-01 — findings
+F1/F2, both P2, closed at the audit-close commit).** D makes two Proc states constructible
+that were impossible under execve-preserves, and every per-Proc field whose soundness
+argument read "a *\<phenotype\>* Proc never has X" was a candidate to break: (1) a **Linux
+image carrying `PROC_FLAG_SELF_MANAGING_NOTES`** — a native image opens its notes fd (the mark
+was one-way, "never cleared"), then `execve`s a `/viv/bin` binary; `notes.c`'s Linux delivery
+branch is gated on `!self_managing`, so that image's whole signal delivery is switched off
+(every non-`kill` note stranded, the ring filling, the caught bit armed and never drained).
+(2) a **native image carrying a Linux socktab** — a Linux→native `execve` runs only the
+cloexec sweep, native `close()` never drops a row (the drop lives in the Linux dispatcher's
+close hook alone), and a later native→Linux `execve` inherits rows keyed on fd numbers the
+new image is handed afresh: `connect()` dials **by path** into a stranger's recycled
+`/net/<proto>/<n>` (I-1). Both close in `proc_exec_drop_image_state`, which is therefore the
+**sweep site**: the self-managing mark is cleared at every exec in **both** arms (the mark is
+the image's — a native image re-opens its fd; `rfork` never copies `proc_flags`, so only a
+direct `execve` by a self-managing Proc changes behaviour, toward the default disposition);
+the socktab is reset in place in the **native** arm (`viv_socktab_reset`: a native image has
+no sockets, and a socket fd carried through the interlude is a plain Spoor on the `/net` data
+file to the next Linux image), and `viv_socktab_claim` **replaces** any row already keyed on
+its fd (the fd table is the truth). Replace-on-claim closes the *socket-recycle* instance of
+the stale-row misroute on its own, which hollowed the cloexec-sweep regression's negative
+control (its bug arm went UDP for the new reason — the #240 shape); the execve cloexec sweep
+(§6b) stays load-bearing for the number recycled to a **non-socket**, which no claim ever
+replaces and every socket arm looks up by number, and that test's control now witnesses
+exactly that. Fields swept and found NOT to cross the flip: `sigtab`
+(the reset above), `handler_va`, `note_mask`, `in_handler`, `note_saved_*`,
+`clear_child_tid`, TLS, the hardware breakpoints, the terminate/caught latches, cloexec.
+**The rule for new fields:** any per-Proc state whose soundness argument reads "by
+construction a Linux/native Proc never has X" is a Design D sweep item, prosecuted at that
+site (`AUDIT-TRIGGERS.md`, the Design D row).
+
+**The native→Linux direction of the mask.** The Linux arm keeps `note_mask` (POSIX "the
+signal mask is inherited"), so a Linux image inherits the *native* image's mask — libthyla-rs
+programs start with `NOTE_BIT_PIPE` masked, which the Linux image sees as a blocked `SIGPIPE`.
+That is faithful POSIX (a `sigprocmask` survives exec) and the image's to change; it is stated
+here so nobody reads it as a leak.
+
+**What the RELEASE store does and does not order (audit F4).** The `p->phenotype` store in
+`proc_exec_replace` is RELEASE, which orders the accesses *before* it (the address-space
+commit) ahead of it for an ACQUIRE reader — it says nothing about the signal reset that runs
+*after* it. A lock-free cross-Proc reader (`notes.c:393/415/581`) may therefore observe any
+of the four (phenotype, reset-state) combinations, and each is a legitimate state of one
+image: (NATIVE, either) — the sigtab is never consulted; (LINUX, reset table) — all-`SIG_DFL`,
+the new image's own initial state; (LINUX, old table) — the old image's dispositions, the
+latitude POSIX gives a `sigaction` racing a signal in flight. The mask is not a cross-Proc
+concern: it is re-read by the execing thread's own EL0-return scan under its final value, and
+a note deferred by the old mask is released by the clear. The paragraph above this one
+("never observes an incoherent (phenotype, note_mask) pair") overclaimed in its first draft;
+the comment at the store now carries the four-combination argument, and the claim that
+matters — no note lost, doubled, or mis-tabled in any combination — holds.
+
 #### 13.10.5 The resolver seed (review F8.2 = self-audit SA-3) and the interpreter
 
 `stalk_core` resets `*crossed_pheno = false` at the shared `restart:` label
@@ -4102,6 +4153,16 @@ number at all). **Design D unifies them**: every spawn variant resolves through
 (`crossed || child->territory->root_pheno`; the register variants carry no `pheno_flags`, so
 they cannot *set* `root_pheno`, only inherit it by clone). After unification the rule as
 stated is exact.
+
+**One asymmetry the unification leaves, stated (audit F5):** the register variants thread
+**no program name** (`prog_name = NULL`), and the PT_INTERP rewrite needs one to build the
+interpreter's argv. Substituting the resolved Spoor's retained `->path` is forbidden — I-33
+makes that name cosmetic, never load-bearing — so a **dynamic** pheno-mount binary loads
+through `SYS_SPAWN_FULL_ARGV` and **refuses loudly** through `SYS_SPAWN` / `_WITH_FDS` /
+`_WITH_PERMS` / `_WITH_CAPS` (`exec.c`'s nameless-entry refusal, which this section's first
+draft called "unreachable"). A *static* pheno-mount binary is decided and loaded identically
+on every variant. Every shipped pheno-mount binary is static, so no caller meets the asymmetry
+today; a future dynamic one is served by FULL_ARGV, which is what every shell uses.
 
 #### 13.10.7 Authority (review F5): the one coupling, and I-43
 
@@ -4153,6 +4214,18 @@ carries. The post-implementation audit runs on Fable 5.1 (credits restored the s
 and prosecutes F1's ordering on the real code, with the cross-Proc (phenotype, note_mask)
 interleaving as a named focus area; a design-only Fable re-run was judged not owed (the
 fallback round finished).
+
+**Post-implementation audit (Fable 5.1, `claude-fable-5-1`, `MODEL(start) == MODEL(end)`,
+2026-09-01):** 0 P0 / 0 P1 / 2 P2 / 4 P3, not dirty. Every folded-in review item verified
+realized; the named focus area re-derived sound. The two P2s are the constructed-states pair
+recorded in §13.10.4 (the self-managing mark, the socktab). The P3s: Leg C **is** testable
+in-tree (`exec.interp_dispatch_follows_parameter` — the impl commit's "no discriminating
+fixture" claim was false); the store comment's ordering overclaim (§13.10.4); five stale
+contracts (the "unreachable" nameless-entry refusal — §13.10.6's asymmetry; `stalk_exec`'s
+failure contract; `notes.c`'s "by construction"; the libthyla-rs and libt "inherit the
+spawner's phenotype" mirrors); and the unobservable declaration (`/proc/<pid>/ns` now renders
+`root: pheno-linux`). Closed at the audit-close commit; the closed list is
+`memory/audit_designd_closed_list.md`.
 
 #### 13.10.10 Alternatives considered + rejected
 

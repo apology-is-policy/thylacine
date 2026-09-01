@@ -580,6 +580,18 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
               ns_put_udec(buf, cap, &off, (u64)(nb < 0 ? 0 : nb)) &&
               ns_put_str(buf, cap, &off, "\n")))
             off = bstart;
+        // Design D audit F6: render the Territory-level phenotype declaration
+        // (VIVARIUM 13.10.3) for the reason the per-mount " pheno-linux"
+        // suffix above is rendered -- a declaration that cannot be observed
+        // cannot be audited. Whole-line-or-nothing, after the binds line so
+        // every existing parse of the file is unchanged. Read through the
+        // accessor (an atomic load): the flag is set once, on the child's
+        // clone before its first EL0 instruction, and copied by clone, so it
+        // needs no ns_lock.
+        if (territory_root_pheno(p)) {
+            u64 rstart = off;
+            if (!ns_put_str(buf, cap, &off, "root: pheno-linux\n")) off = rstart;
+        }
     }
     return off;
 }

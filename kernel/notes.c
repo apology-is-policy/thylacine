@@ -1624,11 +1624,16 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     // and `handler_va` is 0, so leaving this underneath would route every
     // Linux signal straight into the Plan 9 no-handler path.
     //
-    // A PHENO_LINUX Proc is not self-managing by construction (there is no
-    // translation row for SYS_NOTE_OPEN and a native number reaches the table
-    // first), but the check is kept: it is the predicate that means "someone
-    // else consumes this queue", and reading the disposition table would be
-    // wrong if that were ever true.
+    // A PHENO_LINUX image is never self-managing. Before Design D that held
+    // by construction (no translation row for SYS_NOTE_OPEN, and a native
+    // number reaches the table first); since D it is RESTORED BY RESET --
+    // execve re-decides the phenotype, so a native image that opened its
+    // notes fd can be followed by a Linux image in the same Proc, and
+    // proc_exec_drop_image_state clears the mark at every image load (audit
+    // F1) so that image never arrives here with this branch switched off.
+    // The check is kept: it is the predicate that means "someone else
+    // consumes this queue", and reading the disposition table would be wrong
+    // if that were ever true.
     // -----------------------------------------------------------------------
     if (p->phenotype == PHENO_LINUX && !proc_is_self_managing_notes(p)) {
         enum viv_signote sn = viv_signote_from_note_name(candidate.name);

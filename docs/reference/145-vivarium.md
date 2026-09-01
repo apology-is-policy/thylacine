@@ -954,6 +954,31 @@ the sweep on a fresh phenotype Proc with three entries (cloexec -> dropped, plai
 -> survives, closed-fd stale -> survives), each leg failing under a distinct wrong
 predicate.
 
+**Design D audit close (F2, 2026-09-01) narrowed the sweep's unique coverage
+without retiring it.** Two things changed. `viv_socktab_claim` now **replaces**
+any row already keyed on its fd (the fd table is the truth: the caller was just
+handed that number by `handle_alloc`, so an existing row is stale by definition),
+which on its own closes the *socket-recycle* instance of the misroute -- a
+`socket()` on the freed number evicts the stale row instead of being shadowed by
+it. And `proc_exec_drop_image_state`'s NATIVE arm calls the new
+`viv_socktab_reset` (every slot cleared in place under the lock; the object and
+the monotonic epoch kept), because Design D made a native image with a Linux
+socktab constructible -- a Linux->native `execve` ran only this cloexec sweep,
+native `close()` never drops a row, and the next native->Linux `execve` inherited
+rows keyed on numbers the new image was handed afresh. What the sweep still
+uniquely prevents is the number recycled to a **non-socket**: an `open()` claims
+nothing, and every socket arm (`connect`/`sendto`/`getsockname`/...) looks the
+table up by number, ENOTSOCK on a miss, so a `connect()` on that file fd would
+find the stale row and dial its dead connection. The ground-truth regression
+`vivarium.exec_sweep_prevents_fd_reuse_misroute` was re-aimed accordingly: its
+original control ("without the sweep, a fresh UDP socket on the reused number
+reads the stale TCP row") went red at the close for the *new* reason -- the bug
+arm now reads UDP because replace-on-claim evicted the row -- the #240 shape, a
+new guard hollowing an old test of the same negative. Its bug arm now recycles the
+number as a plain handle first (stale TCP row found: the sweep's job) and claims a
+UDP socket on it second (UDP read in BOTH arms: the replace-on-claim witness).
+`vivarium.socktab_reset` covers the reset and the replace directly.
+
 **Still owed** (each its own chunk, all "the socktab across an image or fd
 transition"): the fork clone (an inherited socktab must be copied, not shared),
 `dup`/`close_range` (the FORWARD obligation the T2 header already tracks), and

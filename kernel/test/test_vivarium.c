@@ -2376,6 +2376,62 @@ void test_vivarium_socktab(void) {
                 "a full table refuses rather than overwriting");
 }
 
+// Design D audit F2 (the constructed-states sweep): a Linux->native execve
+// leaves the socktab behind and native close() never drops a row, so the
+// native arm RESETS the table and a claim REPLACES any row already keyed on
+// its fd (the fd table is the truth). Both halves witnessed here, each with a
+// control one variable away: a sibling row survives the replace; the epoch
+// stays monotonic across the reset so a keyed write from before it lands
+// nowhere.
+void test_vivarium_socktab_reset(void);
+void test_vivarium_socktab_reset(void) {
+    static struct viv_socktab tab;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        tab.s[i].fd = -1; tab.s[i].state = VIV_SOCK_FREE;
+        tab.s[i].proto = 0; tab.s[i].n = 0; tab.s[i].epoch = 0;
+    }
+    tab.next_epoch = 0;
+    struct viv_sock e;
+
+    // Replace-on-claim: fd 5 claimed twice ends up as ONE row, the second.
+    TEST_ASSERT(viv_socktab_claim(&tab, 5, VIV_NET_TCP, 7, VIV_SOCK_FRESH), "claim fd 5 (tcp,7)");
+    TEST_ASSERT(viv_socktab_claim(&tab, 6, VIV_NET_TCP, 8, VIV_SOCK_FRESH), "claim fd 6 (sibling)");
+    TEST_ASSERT(viv_socktab_get(&tab, 5, &e) && e.proto == VIV_NET_TCP && e.n == 7,
+                "pre: fd 5 is (tcp,7)");
+    u64 stale_epoch = e.epoch;
+    TEST_ASSERT(viv_socktab_claim(&tab, 5, VIV_NET_UDP, 9, VIV_SOCK_FRESH), "re-claim fd 5 (udp,9)");
+    u32 rows = 0, rows_fd5 = 0;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        if (tab.s[i].state != VIV_SOCK_FREE) { rows++; if (tab.s[i].fd == 5) rows_fd5++; }
+    }
+    TEST_ASSERT(viv_socktab_get(&tab, 5, &e) && e.proto == VIV_NET_UDP && e.n == 9,
+                "F2: the re-claim REPLACES the stale row (fd 5 reads (udp,9))");
+    TEST_EXPECT_EQ((u64)rows_fd5, 1ull, "exactly one row keyed on fd 5");
+    TEST_EXPECT_EQ((u64)rows, 2ull, "CONTROL: the sibling row survives the replace");
+    TEST_ASSERT(!viv_socktab_set_state(&tab, 5, stale_epoch, VIV_SOCK_CONNECTED),
+                "a keyed write with the replaced row's epoch lands nowhere");
+    TEST_ASSERT(viv_socktab_get(&tab, 5, &e) && e.state == VIV_SOCK_FRESH,
+                "...and the new row is untouched");
+
+    // Reset: every row gone, the object usable, the epoch still monotonic.
+    u64 epoch_before_reset = e.epoch;
+    viv_socktab_reset(&tab);
+    TEST_ASSERT(!viv_socktab_get(&tab, 5, NULL) && !viv_socktab_get(&tab, 6, NULL),
+                "F2: reset drops every row");
+    rows = 0;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) if (tab.s[i].state != VIV_SOCK_FREE) rows++;
+    TEST_EXPECT_EQ((u64)rows, 0ull, "no slot left claimed");
+    TEST_ASSERT(viv_socktab_has_room(&tab), "the table is usable after the reset");
+    TEST_ASSERT(viv_socktab_claim(&tab, 5, VIV_NET_TCP, 1, VIV_SOCK_FRESH), "re-claim after the reset");
+    TEST_ASSERT(viv_socktab_get(&tab, 5, &e) && e.epoch > epoch_before_reset,
+                "the epoch stays monotonic across a reset");
+    TEST_ASSERT(!viv_socktab_set_state(&tab, 5, epoch_before_reset, VIV_SOCK_CONNECTED),
+                "a keyed write from before the reset lands nowhere");
+    viv_socktab_reset(NULL);   // NULL-safe (a Proc that was never Linux)
+    viv_socktab_reset(&tab);   // idempotent
+    TEST_ASSERT(!viv_socktab_get(&tab, 5, NULL), "idempotent");
+}
+
 // The close hook's regression (V-5). The hook lives in viv_linux_dispatch,
 // which needs a phenotyped Proc at EL0, so this drives the TABLE operation the
 // hook performs and pins the property the hook exists to guarantee: after a
@@ -4116,6 +4172,22 @@ void test_vivarium_getsockopt_shell_guards_uaccess(void) {
 // is not the literal "delete line 8455 and watch a test go red" guard; it is the
 // proof that the sweep is load-bearing and that a real cloexec-exec+socket in a
 // fresh-fork child does surface the stale entry the fix removes.
+//
+// RE-AIMED at the Design D audit close (F2, 2026-09-01). viv_socktab_claim now
+// REPLACES any row already keyed on its fd, so the original control -- "without
+// the sweep, a fresh UDP socket() on the reused number reads the stale TCP
+// row" -- asserted a misroute that no longer exists: the bug arm went UDP for
+// the new reason and the assertion went red (the #240 shape: a new guard
+// hollows an old test of the same negative). What the sweep still UNIQUELY
+// prevents is the fd number recycled to a NON-socket: an open() takes the
+// freed number, no claim ever runs, and every socket arm in the dispatcher
+// looks the table up by number (ENOTSOCK on a miss) -- so a connect() on that
+// FILE fd would find the stale TCP row and dial /net/tcp/<n>. The control now
+// recycles the number as a plain handle first (the sweep's job: bug arm sees
+// the stale TCP row, fix arm sees no row), THEN claims a UDP socket on it (the
+// F2 witness through the real handle_alloc geometry: BOTH arms read UDP, the
+// bug arm because replace-on-claim evicted the stale row). Two negatives, each
+// with its positive one variable away.
 void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void);
 void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
     // ---- ARM 1: WITH the sweep (the fix). ----
@@ -4135,12 +4207,15 @@ void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
     viv_socktab_drop_cloexec(pf);
     handle_close_on_exec(pf);            // frees f_a
 
+    // The post-exec image's first fd-creating call is an open(): it is handed
+    // the freed number and claims NOTHING -- the case only the sweep covers.
     hidx_t f_b = handle_alloc(pf, KOBJ_THREAD, RIGHT_READ, NULL);
-    viv_socktab_claim(pf->socktab, (s32)f_b, VIV_NET_UDP, 200, VIV_SOCK_FRESH);
-
     bool fix_reused = (f_b == f_a);
     struct viv_sock ef;
-    int fix_proto = viv_socktab_get(pf->socktab, (s32)f_b, &ef) ? (int)ef.proto : -1;
+    int fix_file_proto = viv_socktab_get(pf->socktab, (s32)f_b, &ef) ? (int)ef.proto : -1;
+    // Then a socket() claim on the same number (the replace-on-claim witness).
+    viv_socktab_claim(pf->socktab, (s32)f_b, VIV_NET_UDP, 200, VIV_SOCK_FRESH);
+    int fix_sock_proto = viv_socktab_get(pf->socktab, (s32)f_b, &ef) ? (int)ef.proto : -1;
 
     pf->state = PROC_STATE_ZOMBIE;
     proc_free(pf);
@@ -4162,25 +4237,31 @@ void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void) {
     handle_close_on_exec(pb);            // frees b_a but leaves its stale entry
 
     hidx_t b_b = handle_alloc(pb, KOBJ_THREAD, RIGHT_READ, NULL);
-    viv_socktab_claim(pb->socktab, (s32)b_b, VIV_NET_UDP, 200, VIV_SOCK_FRESH);
-
     bool bug_reused = (b_b == b_a);
     struct viv_sock eb;
-    int bug_proto = viv_socktab_get(pb->socktab, (s32)b_b, &eb) ? (int)eb.proto : -1;
+    int bug_file_proto = viv_socktab_get(pb->socktab, (s32)b_b, &eb) ? (int)eb.proto : -1;
+    viv_socktab_claim(pb->socktab, (s32)b_b, VIV_NET_UDP, 200, VIV_SOCK_FRESH);
+    int bug_sock_proto = viv_socktab_get(pb->socktab, (s32)b_b, &eb) ? (int)eb.proto : -1;
 
     pb->state = PROC_STATE_ZOMBIE;
     proc_free(pb);
 
     // ---- assert after teardown (TEST_ASSERT returns; proc_free freed both). ----
     TEST_ASSERT(fix_reused,
-                "control: the post-exec socket reuses the cloexec-freed fd (fix arm)");
+                "control: the post-exec open() reuses the cloexec-freed fd (fix arm)");
     TEST_ASSERT(bug_reused,
-                "control: the post-exec socket reuses the cloexec-freed fd (bug arm)");
-    TEST_EXPECT_EQ(fix_proto, (int)VIV_NET_UDP,
-                   "WITH the sweep: find(reused fd) returns the FRESH udp entry");
-    TEST_EXPECT_EQ(bug_proto, (int)VIV_NET_TCP,
-                   "WITHOUT the sweep: the STALE tcp entry shadows the reused fd -- "
-                   "the misroute the exec sweep prevents");
+                "control: the post-exec open() reuses the cloexec-freed fd (bug arm)");
+    TEST_EXPECT_EQ(fix_file_proto, -1,
+                   "WITH the sweep: the recycled FILE fd has no socktab row");
+    TEST_EXPECT_EQ(bug_file_proto, (int)VIV_NET_TCP,
+                   "WITHOUT the sweep: the STALE tcp row shadows the recycled FILE fd -- "
+                   "a connect() on it would dial /net/tcp/<n>; the misroute only the "
+                   "exec sweep prevents");
+    TEST_EXPECT_EQ(fix_sock_proto, (int)VIV_NET_UDP,
+                   "WITH the sweep: a socket() on the number reads its own FRESH udp row");
+    TEST_EXPECT_EQ(bug_sock_proto, (int)VIV_NET_UDP,
+                   "WITHOUT the sweep: a socket() on the number ALSO reads udp -- "
+                   "replace-on-claim (Design D audit F2) evicted the stale row");
 }
 
 // =============================================================================

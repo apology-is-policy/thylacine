@@ -2264,7 +2264,8 @@ u32 proc_spawn_budget_resolve(const struct Proc *parent, u32 req);
 // is "I read my own notes", not "I receive Ctrl-C" or "I am the SAK anchor").
 
 // proc_mark_self_managing_notes — stamp PROC_FLAG_SELF_MANAGING_NOTES on `p`.
-// One-way: idempotent, never cleared, never propagated by rfork. v1.0 caller:
+// Idempotent; never propagated by rfork; CLEARED at every exec (Design D audit
+// F1: the mark is the image's -- proc_exec_drop_image_state). v1.0 caller:
 // sys_note_open_handler, on the Proc that opened its notes fd. Atomic OR (the
 // proc_flags word is multi-writer post-A-4c-2). Extincts on a NULL / corrupted
 // / non-ALIVE Proc (mirrors proc_mark_may_post_service -- a Proc running
