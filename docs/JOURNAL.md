@@ -22,6 +22,96 @@ needed the operator.
 
 ---
 
+## 2026-09-01 (aux, late) -- git from a shell + the socktab across images; the console-TUI fork surfaced
+
+Autonomous run after Design D closed (`5f2d4ded`), under the operator's standing
+"continue on the vivarium arc + POSIX surface coverage" direction. Two chunks landed on one
+bake, one suite, one LS-CI pass and one amplifier gate (the double-the-distance cadence),
+in separate commits: **c97d8e3a** (W1-a/W1-b + the C2-k3 F3 closure witness) and
+**717d66cd** (the socktab across images). Chunk 2's audit round is OWED and runs first on
+the far side of the self-compaction that follows this entry.
+
+**Chunk 1 -- git from a session shell.** Recon found that the shipped `/viv/bin` git was
+reachable from a shell only by name: `GIT_EXEC_PATH` and `GIT_CONFIG_SYSTEM` were set only
+inside the container bundles' manifests, so an interactive git could exec no transport
+helper and never read `/viv/bin/gitconfig`. login now seeds both beside PATH; the gitconfig
+gains `core.editor = nora` + `sequence.editor = nora`. The witness
+(`tools/interactive/git-shell.exp`) is Design D 13.10.8's closure obligation made
+observable: `git --exec-path` -> `/viv/bin`, the system config read, init + an empty commit
+as the USER, the dashed `git-upload-pack --advertise-refs` from PATH (the pheno-mount half),
+and `git ls-remote https://127.0.0.1:1/` -- git execs `git-remote-https` through the exec
+path as an argv and the helper's own connection refusal is the proof it was found, ran
+under the phenotype, and reached a connect. That second leg needed `OPENSSL_armcap=0` in
+the session env (the helper bundles OpenSSL; the SIGILL-probe wall from the curl census),
+which login now seeds too. **Two witness drafts were wrong first**, and each wrong turn is
+a lesson: (1) a `file://` clone, then a `--no-local` clone, both died
+`fatal: cannot exec 'git-upload-pack '/home/michael/gs/.git''` -- for EVERY local
+transport git builds one quoted command string and hands it to `/bin/sh`, and the login
+namespace has no `/bin/sh`: enqueued as **X-11** (candidate: a pool symlink
+`/bin/sh -> /viv/abin/sh`, which Design D's absolute-symlink re-anchor lands LINUX; the
+operator's layout call); (2) the first draft's clone-log leg PASSED on the failed clone,
+because its token `FIRST` was residue in the expect buffer -- the commit line
+`[main (root-commit) x] first` after `ROOT-COMMIT` matched, then the source log's own
+`FIRST` -- so three legs shared one token and two of them were green for nothing. One
+token per leg, unique to that leg's computation, is the rule now
+(`bug_expect_token_residue_across_legs`). `viv-run.exp` gained a `>/dev/null`-
+inside-a-container leg: the 2026-08-25 census item had been closed since by #50's open-first
+create core + viv's bind of the real null leaf, and the bug file said otherwise until the
+leg witnessed it. The pthread_create census item was likewise resolved by N-3 without its
+file saying so; both files now do. LS-CI: git-shell PASS (73 s) + viv-run PASS (84 s).
+
+**The fork the recon surfaced, and did not build.** git launches its editor by `execve`,
+which Design D now lands native -- but on the CONSOLE session ut hands the console input
+(and raw mode) only to `is_raw_command` children (nora, ptyhost, prowl, quarry), an
+ordinary foreground `git commit` gets a Piped-drop stdin, and a native TUI has no
+`tcsetattr` equivalent (kaua never touches consctl by design, KAUA.md 3.5), while the
+phenotype's own `TCSETS` may set the console ldisc for any cons-fd holder whose session
+OWNS the console (`viv_ioctl_cons` -> `proc_console_owner_in_session`). So a nora that git
+execs arrives with neither the console nor raw mode. That is a line-discipline design
+question on main's surface (kaua/nora/ut) and a syscall-surface addition if answered
+natively (a `SYS_TTY_SETATTR` mirroring the phenotype's owner-in-session rule is the
+consistent shape; Plan 9's `rawon` on consctl is the heritage one). Written to main (yip
+0035, note 3) and to the pickup note for the operator; not touched here.
+
+**Chunk 2 -- the socktab across images (operator vote A, 2026-08-18; built now).** The
+voted design had sat unbuilt: `rfork_internal` copied the handle table but not
+`Proc.socktab`, so a forked Linux child's inherited socket answered ENOTSOCK to every socket
+arm, and `dup3`/`dup` of a socket DECLINED while `F_DUPFD` silently minted a row-less fd.
+Now `viv_socktab_clone_into` runs after the handle copy (snapshot under the parent's lock;
+the child's table built lock-free while unpublished, copying FIELDS -- the parent's lock word
+is HELD during the snapshot, so copying the struct would have copied a held lock; rows whose
+fd the child does not hold dropped; the epoch counter carried), and `viv_socktab_alias`
+copies a socket source's row onto the new number with a fresh epoch at the dup / dup3 /
+F_DUPFD arms -- room checked BEFORE the handle install, the alias run AFTER it, so a refused
+call never touches the table and a refused install never mints a row. The kept divergence
+(two aliases are two state machines; Linux shares) is stated in VIVARIUM section 9 with the
+socket OBJECT recorded as the faithful close. Units: `vivarium.socktab_clone_into` (through
+the real `handle_table_copy_into`), `vivarium.socktab_alias`, `vivarium.dup3_alias`, the
+flipped `vivarium.dup_arm` leg; probe legs L257-L271 (fork -> the child serves the accepted
+connection; every alias is a tracked socket; closing an alias leaves the original).
+
+**What the first suite run caught.** Units 1486/1486, but the boot's V-1b probe died at
+**L198** -- the existing leg that pinned the #157 dup3 socket DECLINE "as a DECISION rather
+than an oversight". The alias rule retires exactly that decision, so the leg now pins the
+replacement the same way (dup3 onto 33 succeeds; the alias answers EOPNOTSUPP to listen --
+a tracked UDP socket -- not ENOTSOCK; closing it leaves the source tracked). The #240 shape
+for the second time in one day (Design D's close had the same with the cloexec-sweep
+control): **a retired decision has a test that pinned it, and that test is the first thing
+the new rule breaks.** Grep every site the old decision named before the bake, not after.
+Also caught, by a background task that reported success: my edit helper's temp-file rename
+had dropped `tools/build.sh`'s exec bit (exit 126, "Permission denied") -- the helper now
+copies the mode, and `git diff --summary | grep "mode change"` is the pre-bake check.
+
+**Gates:** suite **1486/1486**, 0 EXTINCTION, boot OK (the probe's L198 + L257-L271 under the
+boot gate); LS-CI git-shell PASS (73 s) + viv-run PASS (84 s); amplifier SMP gate PASS -- default-smp4 10 PASS / 0 CORRUPTION + ubsan-smp4 10 PASS / 0 CORRUPTION (N=10).
+
+**Open at this entry:** chunk 2's holotype round (the AUDIT-TRIGGERS addendum carries its
+prosecution list); the console-TUI line-discipline fork (operator + main); eventfd2 (a
+kernel counter object -- the next POSIX-coverage chunk); the SIGILL catchable-fault-note
+arc (v1.x unless the mission forces it); C2-k3's `viv sh`, which shares the console
+input question above.
+
+
 ## 2026-09-01 (aux) -- C2-kernel: the phenotype goes interactive (isatty + termios + job control)
 
 Resumed post-self-compact on the operator's "continue with milestone C" +
