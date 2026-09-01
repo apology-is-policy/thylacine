@@ -131,6 +131,40 @@ close the surface. The kernel 1435 unit suite was deliberately not re-run —
 the change is userspace-only (halcyond/vt/beacon compile into no kernel object)
 and the production boot already exercised the userspace end to end.
 
+### H-3 opens: the design pass, then the first chrome landing (same run)
+
+The operator dropped the **Daylight** visual scripture mid-run
+(`docs/HALCYON-VISUAL.md` + a token CSS + a rendered mockup) and, asked, ratified
+it as binding + chose a design-pass-before-code. So H-3 began as a design
+conversation, not code. I surveyed the real compositor first (a subagent, so the
+proposal was grounded in what exists, not what I imagined): tapestryd already
+carries `Role::Chrome` on every leaf but it is **inert**, already CPU-paints
+strip segments + a flat 1px frame into the composed screen buffer, and already
+has the gated default-deny global-ctl that the menu verb will ride — while
+menus, input-grab, dismiss, chrome text, real bevels, and a status bar are all
+absent. That survey turned two forks into legible votes: halcyond paints the
+*whole* tag strip into a chrome surface (opaque, no alpha overlay — the
+compositor just places it and is told the status key), and the full Daylight
+chrome lands across four sub-chunks. Both ratified; the design went into
+HALCYON.md §13.6 as scripture (`345245c5`) before a line of code — the recorded
+pattern.
+
+**H-3a-1** (`6a812348`) is the first landing: `usr/lib/libhalcyon`, a no_std
+crate whose `theme` module is the whole Daylight §1 palette as code (tests pin
+every value to the scripture), and halcyond's transcript rebuilt through it. The
+one non-obvious part was a coherence trap: the transcript's "default ink" test
+(`st.fg == sheet.ink`, the hook that colours presentation refs and dim text)
+only fires when the pen's *default* fg — which comes from the vt palette —
+equals the Sheet's ink. Swapping the Sheet to Daylight's fg while leaving the
+palette on PARCHMENT broke it (they differ by a hair, `0x2B2320` vs `0x1A120A`),
+and a layout test caught it immediately. The fix is `daylight_palette()`: the
+transcript's palette is now grounded in Daylight too, so palette and Sheet agree
+by construction. The pixel proof's pinned ground moved with it — from the
+PARCHMENT surface (241,234,224) to the Daylight surface (242,235,224) — and
+ls-halcyon stayed 12/12 on the lever, confirming the new ground renders.
+**Next: H-3a-2**, the tapestryd side — the NNW bevel, the hairline, and the
+live-tile cast shadow, the compositor's half of the Daylight chrome.
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon
