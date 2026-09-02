@@ -61,7 +61,9 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 use alloc::string::String;
 
 use libthyla_rs::time::{sleep, Duration};
-use libthyla_rs::{t_close, t_open, t_read, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT};
+use libthyla_rs::{
+    t_close, t_open, t_read, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
+};
 use tapestry::{
     Event, Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_REL,
 };
@@ -241,7 +243,14 @@ fn find_pane(layout: &str, surf: u32) -> Option<PaneInfo> {
         let y: u32 = it.next()?.parse().ok()?;
         let w: u32 = it.next()?.parse().ok()?;
         let h: u32 = it.next()?.parse().ok()?;
-        return Some(PaneInfo { id, x, y, w, h, hidden: line.ends_with("hidden") });
+        return Some(PaneInfo {
+            id,
+            x,
+            y,
+            w,
+            h,
+            hidden: line.ends_with("hidden"),
+        });
     }
     None
 }
@@ -261,7 +270,6 @@ fn fill(surf: &mut Surface, color: u32) {
         *p = color;
     }
 }
-
 
 /// The compositor's placement, mirrored for sample points. The battery
 /// presents FULL-FRAME only (present(None) everywhere), so it never
@@ -398,7 +406,14 @@ fn drain_settle(surf: &mut Surface) {
 pub extern "C" fn rs_main() -> i64 {
     // The driver session (layout ops are compositor-global; surfaces stay
     // on each client session per F2).
-    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
+    let root = unsafe {
+        t_open(
+            T_WALK_OPEN_FROM_ROOT,
+            b"/srv/tapestry".as_ptr(),
+            13,
+            T_OREAD,
+        )
+    };
     if root < 0 {
         say!("tapestry-battery: FAIL no /srv/tapestry ({})", root);
         return 1;
@@ -487,12 +502,20 @@ pub extern "C" fn rs_main() -> i64 {
     // Structure asserts: nonzero, disjoint, inside the display; the pane
     // geometry file agrees with the layout text (two views, one truth).
     if pa.w == 0 || pa.h == 0 || pb.w == 0 || pb.h == 0 || overlap(pa, pb) {
-        say!("tapestry-battery: FAIL rects (a=[{},{},{},{}] b=[{},{},{},{}])",
-            pa.x, pa.y, pa.w, pa.h, pb.x, pb.y, pb.w, pb.h);
+        say!(
+            "tapestry-battery: FAIL rects (a=[{},{},{},{}] b=[{},{},{},{}])",
+            pa.x,
+            pa.y,
+            pa.w,
+            pa.h,
+            pb.x,
+            pb.y,
+            pb.w,
+            pb.h
+        );
         return 1;
     }
-    if pa.x + pa.w > disp.0 || pa.y + pa.h > disp.1 || pb.x + pb.w > disp.0
-        || pb.y + pb.h > disp.1
+    if pa.x + pa.w > disp.0 || pa.y + pa.h > disp.1 || pb.x + pb.w > disp.0 || pb.y + pb.h > disp.1
     {
         say!("tapestry-battery: FAIL rects out of display");
         return 1;
@@ -502,14 +525,23 @@ pub extern "C" fn rs_main() -> i64 {
         let g = read_file(root, &path).unwrap_or_default();
         let want = alloc::format!("{} {} {} {}", p.x, p.y, p.w, p.h);
         if g.trim() != want {
-            say!("tapestry-battery: FAIL {} geometry file '{}' != layout '{}'",
-                nm, g.trim(), want);
+            say!(
+                "tapestry-battery: FAIL {} geometry file '{}' != layout '{}'",
+                nm,
+                g.trim(),
+                want
+            );
             return 1;
         }
     }
     say!("tapestry-battery: structure OK");
-    say!("battery: stage1 centers {} {} {} {}",
-        pa.x + pa.w / 2, pa.y + pa.h / 2, pb.x + pb.w / 2, pb.y + pb.h / 2);
+    say!(
+        "battery: stage1 centers {} {} {} {}",
+        pa.x + pa.w / 2,
+        pa.y + pa.h / 2,
+        pb.x + pb.w / 2,
+        pb.y + pb.h / 2
+    );
     probe(root, pa.x + pa.w / 2, pa.y + pa.h / 2);
     probe(root, pb.x + pb.w / 2, pb.y + pb.h / 2);
     nap(DUMP_MS);
@@ -521,8 +553,7 @@ pub extern "C" fn rs_main() -> i64 {
     // abuts its content (same x/width, meeting on y) and reads `header` at its
     // centre (the positive render witness the .exp samples).
     {
-        let tbs = read_file(root, &alloc::format!("pane/{}/tagbar", pa.id))
-            .unwrap_or_default();
+        let tbs = read_file(root, &alloc::format!("pane/{}/tagbar", pa.id)).unwrap_or_default();
         let mut it = tbs.split_whitespace();
         let tx = it.next().and_then(|s| s.parse::<u32>().ok());
         let ty = it.next().and_then(|s| s.parse::<u32>().ok());
@@ -531,8 +562,14 @@ pub extern "C" fn rs_main() -> i64 {
         match (tx, ty, tw, th) {
             (Some(tx), Some(ty), Some(tw), Some(th)) if th > 0 => {
                 if tx != pa.x || tw != pa.w || ty + th != pa.y {
-                    say!("tapestry-battery: FAIL tagbar '{}' not above A [{},{},{},{}]",
-                        tbs.trim(), pa.x, pa.y, pa.w, pa.h);
+                    say!(
+                        "tapestry-battery: FAIL tagbar '{}' not above A [{},{},{},{}]",
+                        tbs.trim(),
+                        pa.x,
+                        pa.y,
+                        pa.w,
+                        pa.h
+                    );
                     return 1;
                 }
                 say!("battery: tagbar A {} {}", tx + tw / 2, ty + th / 2);
@@ -558,25 +595,50 @@ pub extern "C" fn rs_main() -> i64 {
         let a_bind = alloc::format!("create 64 20 role=chrome bind={}", pa.id);
         let probes: [(&str, i64, &str); 8] = [
             ("create 64 20 role=bogus", -22, "unknown role -> E_INVAL"),
-            ("create 64 20 role=chrome", -22, "chrome without bind -> E_INVAL"),
+            (
+                "create 64 20 role=chrome",
+                -22,
+                "chrome without bind -> E_INVAL",
+            ),
             ("create 64 20 bind=1", -22, "bind without chrome -> E_INVAL"),
             (a_bind.as_str(), -1, "chrome from a non-renderer -> E_PERM"),
             // H-3c: the menu role takes no bind (syntax) and is renderer-gated
             // (authority) -- an ungated menu would float over any pane and
             // take its input.
-            ("create 64 20 role=menu bind=1", -22, "menu with a bind -> E_INVAL"),
-            ("create 64 20 role=menu", -1, "menu from a non-renderer -> E_PERM"),
+            (
+                "create 64 20 role=menu bind=1",
+                -22,
+                "menu with a bind -> E_INVAL",
+            ),
+            (
+                "create 64 20 role=menu",
+                -1,
+                "menu from a non-renderer -> E_PERM",
+            ),
             // H-3d: the status bar takes no bind (syntax) and is renderer-gated
             // (authority) -- an ungated status role would let any client carve
             // the display and own the bar that speaks for the system.
-            ("create 64 20 role=status bind=1", -22, "status with a bind -> E_INVAL"),
-            ("create 64 20 role=status", -1, "status from a non-renderer -> E_PERM"),
+            (
+                "create 64 20 role=status bind=1",
+                -22,
+                "status with a bind -> E_INVAL",
+            ),
+            (
+                "create 64 20 role=status",
+                -1,
+                "status from a non-renderer -> E_PERM",
+            ),
         ];
         for (cmd, want, what) in probes.iter() {
             let rc = raw_create(root, cmd);
             if rc != *want {
-                say!("tapestry-battery: FAIL chrome-create gate: '{}' rc {} want {} ({})",
-                    cmd, rc, want, what);
+                say!(
+                    "tapestry-battery: FAIL chrome-create gate: '{}' rc {} want {} ({})",
+                    cmd,
+                    rc,
+                    want,
+                    what
+                );
                 return 1;
             }
         }
@@ -585,7 +647,9 @@ pub extern "C" fn rs_main() -> i64 {
         // zeros -- the file exists, the rect is empty (the positive twin, a
         // real bar's rect + the carve it makes, is halcyond's: ls-halcyon).
         match read_file(root, "statusbar") {
-            Some(t) if t.trim() == "0 0 0 0" => say!("battery: statusbar file reads empty (no bar)"),
+            Some(t) if t.trim() == "0 0 0 0" => {
+                say!("battery: statusbar file reads empty (no bar)")
+            }
             other => {
                 say!("tapestry-battery: FAIL statusbar file: {:?}", other);
                 return 1;
@@ -606,17 +670,26 @@ pub extern "C" fn rs_main() -> i64 {
         let path = alloc::format!("pane/{}/status", pa.id);
         let s0 = read_file(root, &path).unwrap_or_default();
         if s0.trim() != "resting" {
-            say!("tapestry-battery: FAIL tag-status: fresh tile reads '{}' want resting", s0.trim());
+            say!(
+                "tapestry-battery: FAIL tag-status: fresh tile reads '{}' want resting",
+                s0.trim()
+            );
             return 1;
         }
         let rc = raw_ctl(root, &alloc::format!("tag {} status err", pa.id));
         if rc != -1 {
-            say!("tapestry-battery: FAIL tag-status: non-renderer write rc {} want -1 (E_PERM)", rc);
+            say!(
+                "tapestry-battery: FAIL tag-status: non-renderer write rc {} want -1 (E_PERM)",
+                rc
+            );
             return 1;
         }
         let s1 = read_file(root, &path).unwrap_or_default();
         if s1.trim() != "resting" {
-            say!("tapestry-battery: FAIL tag-status: the refused write changed the state to '{}'", s1.trim());
+            say!(
+                "tapestry-battery: FAIL tag-status: the refused write changed the state to '{}'",
+                s1.trim()
+            );
             return 1;
         }
         say!("battery: tag-status gate OK");
@@ -637,7 +710,12 @@ pub extern "C" fn rs_main() -> i64 {
         for (cmd, what) in probes.iter() {
             let rc = raw_ctl(root, cmd);
             if rc != -1 {
-                say!("tapestry-battery: FAIL menu gate: '{}' rc {} want -1 (E_PERM; {})", cmd, rc, what);
+                say!(
+                    "tapestry-battery: FAIL menu gate: '{}' rc {} want -1 (E_PERM; {})",
+                    cmd,
+                    rc,
+                    what
+                );
                 return 1;
             }
         }
@@ -681,7 +759,9 @@ pub extern "C" fn rs_main() -> i64 {
                 }
                 let after = read_file(root, "layout").unwrap_or_default();
                 if foreign_pane(&after, &[a.id, b.id]) != Some(cid) {
-                    say!("tapestry-battery: FAIL pane-tree gate: the refused close changed the tree");
+                    say!(
+                        "tapestry-battery: FAIL pane-tree gate: the refused close changed the tree"
+                    );
                     return 1;
                 }
                 let tag1 = read_file(root, &alloc::format!("pane/{}/tag", cid)).unwrap_or_default();
@@ -692,7 +772,10 @@ pub extern "C" fn rs_main() -> i64 {
                 }
                 let rc = raw_write(root, "layout", &alloc::format!("focus {}", pa.id));
                 if rc < 0 {
-                    say!("tapestry-battery: FAIL pane-tree gate: focus on OUR pane refused rc {}", rc);
+                    say!(
+                        "tapestry-battery: FAIL pane-tree gate: focus on OUR pane refused rc {}",
+                        rc
+                    );
                     return 1;
                 }
                 // The positive control MOVED focus (that is the proof); put it
@@ -700,7 +783,10 @@ pub extern "C" fn rs_main() -> i64 {
                 // child (hosted last) -- also ours, so it must succeed.
                 let rc = raw_write(root, "layout", &alloc::format!("focus {}", pb.id));
                 if rc < 0 {
-                    say!("tapestry-battery: FAIL pane-tree gate: focus back on B refused rc {}", rc);
+                    say!(
+                        "tapestry-battery: FAIL pane-tree gate: focus back on B refused rc {}",
+                        rc
+                    );
                     return 1;
                 }
                 say!("battery: pane-tree gate OK");
@@ -759,7 +845,11 @@ pub extern "C" fn rs_main() -> i64 {
         let g = read_file(root, &path).unwrap_or_default();
         let want = alloc::format!("{} {} {} {}", pb.x, pb.y, b.w, b.h);
         if g.trim() != want {
-            say!("tapestry-battery: FAIL reweave geometry '{}' != '{}'", g.trim(), want);
+            say!(
+                "tapestry-battery: FAIL reweave geometry '{}' != '{}'",
+                g.trim(),
+                want
+            );
             return 1;
         }
     }
@@ -778,15 +868,30 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
         let rects = [
-            Rect { x: 0, y: 0, w: bw / 2, h: bh },
-            Rect { x: bw / 2, y: 0, w: bw - bw / 2, h: bh },
+            Rect {
+                x: 0,
+                y: 0,
+                w: bw / 2,
+                h: bh,
+            },
+            Rect {
+                x: bw / 2,
+                y: 0,
+                w: bw - bw / 2,
+                h: bh,
+            },
         ];
         if b.present_rects(&rects).is_err() {
             say!("tapestry-battery: FAIL multirect present");
             return 1;
         }
-        say!("battery: multirect ready {} {} {} {}",
-            pb.x + bw / 4, pb.y + bh / 2, pb.x + 3 * bw / 4, pb.y + bh / 2);
+        say!(
+            "battery: multirect ready {} {} {} {}",
+            pb.x + bw / 4,
+            pb.y + bh / 2,
+            pb.x + 3 * bw / 4,
+            pb.y + bh / 2
+        );
         probe(root, pb.x + bw / 4, pb.y + bh / 2);
         probe(root, pb.x + 3 * bw / 4, pb.y + bh / 2);
         nap(DUMP_MS);
@@ -812,15 +917,30 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
         let rects = [
-            Rect { x: 0, y: 0, w: bw, h: bh / 2 },
-            Rect { x: 0, y: bh / 2, w: bw, h: bh - bh / 2 },
+            Rect {
+                x: 0,
+                y: 0,
+                w: bw,
+                h: bh / 2,
+            },
+            Rect {
+                x: 0,
+                y: bh / 2,
+                w: bw,
+                h: bh - bh / 2,
+            },
         ];
         if b.present_rects(&rects).is_err() {
             say!("tapestry-battery: FAIL multirect-v present");
             return 1;
         }
-        say!("battery: multirect-v ready {} {} {} {}",
-            pb.x + bw / 2, pb.y + bh / 4, pb.x + bw / 2, pb.y + 3 * bh / 4);
+        say!(
+            "battery: multirect-v ready {} {} {} {}",
+            pb.x + bw / 2,
+            pb.y + bh / 4,
+            pb.x + bw / 2,
+            pb.y + 3 * bh / 4
+        );
         probe(root, pb.x + bw / 2, pb.y + bh / 4);
         probe(root, pb.x + bw / 2, pb.y + 3 * bh / 4);
     }
@@ -848,8 +968,11 @@ pub extern "C" fn rs_main() -> i64 {
             }
         };
         if !ta.hidden || tb.hidden || tb.w == 0 {
-            say!("tapestry-battery: FAIL tabbed visibility (A hidden={} B hidden={})",
-                ta.hidden, tb.hidden);
+            say!(
+                "tapestry-battery: FAIL tabbed visibility (A hidden={} B hidden={})",
+                ta.hidden,
+                tb.hidden
+            );
             return 1;
         }
         // B heals into the enlarged tab content (its bottom is cropped
@@ -907,7 +1030,11 @@ pub extern "C" fn rs_main() -> i64 {
         if let Some(ta) = find_pane(&fresh, a.id) {
             fill(&mut a, RED);
             let _ = a.present(None);
-            say!("battery: tab-cycled ready {} {}", ta.x + ta.w / 2, ta.y + ta.h / 2);
+            say!(
+                "battery: tab-cycled ready {} {}",
+                ta.x + ta.w / 2,
+                ta.y + ta.h / 2
+            );
             probe(root, ta.x + ta.w / 2, ta.y + ta.h / 2);
             nap(DUMP_MS);
         }
@@ -943,7 +1070,11 @@ pub extern "C" fn rs_main() -> i64 {
         let g = read_file(root, &alloc::format!("pane/{}/geometry", pa.id)).unwrap_or_default();
         let wantg = alloc::format!("0 0 {} {}", disp.0, disp.1);
         if g.trim() != wantg {
-            say!("tapestry-battery: FAIL zoom geometry '{}' != '{}'", g.trim(), wantg);
+            say!(
+                "tapestry-battery: FAIL zoom geometry '{}' != '{}'",
+                g.trim(),
+                wantg
+            );
             return 1;
         }
     }
@@ -958,7 +1089,11 @@ pub extern "C" fn rs_main() -> i64 {
         let g = read_file(root, &alloc::format!("pane/{}/geometry", pa.id)).unwrap_or_default();
         let wantg = alloc::format!("{} {} {} {}", pa.x, pa.y, pa.w, pa.h);
         if g.trim() != wantg {
-            say!("tapestry-battery: FAIL unzoom geometry '{}' != '{}'", g.trim(), wantg);
+            say!(
+                "tapestry-battery: FAIL unzoom geometry '{}' != '{}'",
+                g.trim(),
+                wantg
+            );
             return 1;
         }
     }
@@ -988,7 +1123,11 @@ pub extern "C" fn rs_main() -> i64 {
         if mb.x >= ma.x || mb.x < disp.0 / 6 {
             // B must sit BETWEEN aurora (the leftmost third) and A -- a
             // B at the left edge means the pull-out landed wrong.
-            say!("tapestry-battery: FAIL move-left order (B.x={} A.x={})", mb.x, ma.x);
+            say!(
+                "tapestry-battery: FAIL move-left order (B.x={} A.x={})",
+                mb.x,
+                ma.x
+            );
             return 1;
         }
     }
@@ -1058,9 +1197,7 @@ pub extern "C" fn rs_main() -> i64 {
         loop {
             match b.wait_event() {
                 Ok(ev) => {
-                    if ev.kind == TEV_KEY
-                        && matches!(ev.code, 103 | 105 | 106 | 108)
-                    {
+                    if ev.kind == TEV_KEY && matches!(ev.code, 103 | 105 | 106 | 108) {
                         say!("tapestry-battery: FAIL chord leaked arrow key {}", ev.code);
                         return 1;
                     }
@@ -1124,10 +1261,14 @@ pub extern "C" fn rs_main() -> i64 {
         }
         let t0 = ctl_u64(&c1, "tick ").unwrap_or(u64::MAX);
         nap(300);
-        let t1 = ctl_u64(&read_file(root, "ctl").unwrap_or_default(), "tick ")
-            .unwrap_or(u64::MAX - 1);
+        let t1 =
+            ctl_u64(&read_file(root, "ctl").unwrap_or_default(), "tick ").unwrap_or(u64::MAX - 1);
         if t0 != t1 {
-            say!("tapestry-battery: FAIL frozen clock advanced ({} -> {})", t0, t1);
+            say!(
+                "tapestry-battery: FAIL frozen clock advanced ({} -> {})",
+                t0,
+                t1
+            );
             return 1;
         }
         if !write_file(root, "ctl", "tick") {
@@ -1222,7 +1363,10 @@ pub extern "C" fn rs_main() -> i64 {
         say!("tapestry-battery: FAIL test-mode off");
         return 1;
     }
-    if !read_file(root, "ctl").unwrap_or_default().contains("test-mode off") {
+    if !read_file(root, "ctl")
+        .unwrap_or_default()
+        .contains("test-mode off")
+    {
         say!("tapestry-battery: FAIL test-mode not reported off");
         return 1;
     }
