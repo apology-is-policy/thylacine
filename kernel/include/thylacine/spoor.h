@@ -149,6 +149,12 @@ _Static_assert(sizeof(struct Qid) == 16,
 // of the members that existed at open time (F4: taken atomically under one
 // ns_lock; F7: immune to later namespace edits) in declared search order.
 struct union_snap {
+    struct Spoor *point;       // UM-8c (F5): the ref-held UNION MOUNT POINT this
+                               // snapshot was taken at. Lets an fd-relative
+                               // resolution / mutation off a union dirfd re-reach
+                               // the members via the mount table (the LIVE union;
+                               // readdir uses the m[] snapshot instead). NULL only
+                               // transiently while building.
     int           n;
     struct Spoor *m[];         // opened OREAD member dirs, declared order
 };

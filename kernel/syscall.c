@@ -3553,6 +3553,17 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
         if (!src)                                     return -T_E_BADF;
     }
 
+    // UM-8c F5: a union dirfd holds member[0]; a create must land in the union's
+    // first MCREATE member, not member[0]. spoor_create_install CONSUMES the
+    // parent ref, so swap in the MCREATE member (clunking member[0]) first.
+    if (src->union_snap && src->union_snap->point) {
+        int e = 0;
+        struct Spoor *cm = stalk_union_create_member(p, src->union_snap->point, &e);
+        spoor_clunk(src);
+        if (!cm) return e ? -(s64)e : -(s64)T_E_ACCES;
+        src = cm;
+    }
+
     return spoor_create_install(p, src, name_scratch, name_len_raw,
                                 omode_raw, perm, /*srv_post_ok=*/true);
 }
@@ -4316,6 +4327,27 @@ static s64 spoor_rename_in_dirs(struct Proc *p, struct Spoor *od,
     return od->dev->rename(od, old_name, nd, new_name);
 }
 
+// UM-8c F5: forward decl (defined in the vivarium section) -- two Spoors name
+// the same mount-point identity, used to detect a within-union rename.
+static bool spoor_same_mount_identity(const struct Spoor *a, const struct Spoor *b);
+
+// UM-8c F5: if `c` is a union dirfd (its union_snap carries the point), return
+// the member the mutation should act on -- the holder of `leaf` (remove) or the
+// first MCREATE member (create) -- ref-held (caller clunks). Returns NULL when
+// `c` is not a union (caller acts on `c` directly, *err untouched) OR when a
+// union has no holder / MCREATE member (*err set to a negative -T_E_*).
+static struct Spoor *sys_union_dirfd_member(struct Proc *p, struct Spoor *c,
+                                            const char *leaf, bool want_create,
+                                            s64 *err) {
+    if (!c->union_snap || !c->union_snap->point) return NULL;
+    int e = 0;
+    struct Spoor *m = want_create
+        ? stalk_union_create_member(p, c->union_snap->point, &e)
+        : stalk_union_member_holding(p, c->union_snap->point, leaf, &e);
+    if (!m) *err = e ? -(s64)e : -(s64)(want_create ? T_E_ACCES : T_E_NOENT);
+    return m;
+}
+
 static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len_raw,
                                u64 newdir_fd_raw, u64 newname_va, u64 newname_len_raw) {
     struct Thread *t = current_thread();
@@ -4338,7 +4370,36 @@ static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len
     struct Spoor *nd = sys_resolve_dir_wr(p, newdir_fd_raw);
     if (!nd)                                        { spoor_clunk(od); return -T_E_BADF; }
 
-    s64 rc = spoor_rename_in_dirs(p, od, nd, old_scratch, new_scratch);
+    // UM-8c F5: a union dirfd holds member[0]. A rename reaches the member that
+    // HOLDS the source (od) and lands the destination in the SAME member when
+    // both fds name one union (Plan 9 within-member rename), else the MCREATE
+    // member (nd). Non-union dirfds act on od/nd directly; a cross-member move
+    // then falls to spoor_rename_in_dirs's same-Dev guard (EXDEV -> EINVAL).
+    bool same_union = od->union_snap && od->union_snap->point &&
+                      nd->union_snap && nd->union_snap->point &&
+                      spoor_same_mount_identity(od->union_snap->point,
+                                                nd->union_snap->point);
+    s64 uerr = 0;
+    struct Spoor *od_m = sys_union_dirfd_member(p, od, old_scratch, false, &uerr);
+    if (!od_m && uerr) { spoor_clunk(od); spoor_clunk(nd); return uerr; }
+    struct Spoor *od_target = od_m ? od_m : od;
+    struct Spoor *nd_m = NULL;
+    struct Spoor *nd_target;
+    if (same_union) {
+        nd_target = od_target;   // within-member: borrow od_m (clunked once below)
+    } else {
+        nd_m = sys_union_dirfd_member(p, nd, new_scratch, true, &uerr);
+        if (!nd_m && uerr) {
+            if (od_m) spoor_clunk(od_m);
+            spoor_clunk(od); spoor_clunk(nd);
+            return uerr;
+        }
+        nd_target = nd_m ? nd_m : nd;
+    }
+
+    s64 rc = spoor_rename_in_dirs(p, od_target, nd_target, old_scratch, new_scratch);
+    if (od_m) spoor_clunk(od_m);
+    if (nd_m) spoor_clunk(nd_m);
     spoor_clunk(od);
     spoor_clunk(nd);
     return rc;
@@ -4390,7 +4451,15 @@ static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
     struct Spoor *c = sys_resolve_dir_wr(p, parent_fd_raw);
     if (!c)                                          return -T_E_BADF;
 
-    s64 rc = spoor_unlink_in_dir(p, c, scratch, (u32)flags_raw);
+    // UM-8c F5: a union dirfd holds member[0]; unlink acts on the member that
+    // HOLDS the leaf, not member[0].
+    s64 uerr = 0;
+    struct Spoor *um = sys_union_dirfd_member(p, c, scratch, false, &uerr);
+    if (!um && uerr) { spoor_clunk(c); return uerr; }
+    struct Spoor *target = um ? um : c;
+
+    s64 rc = spoor_unlink_in_dir(p, target, scratch, (u32)flags_raw);
+    if (um) spoor_clunk(um);
     spoor_clunk(c);
     return rc;
 }

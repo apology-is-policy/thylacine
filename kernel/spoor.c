@@ -84,6 +84,7 @@ void union_snap_free(struct union_snap *snap) {
     if (!snap) return;
     for (int i = 0; i < snap->n; i++)
         if (snap->m[i]) spoor_clunk(snap->m[i]);
+    if (snap->point) spoor_clunk(snap->point);   // UM-8c (F5): the retained point
     kfree(snap);
 }
 

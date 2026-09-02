@@ -346,6 +346,11 @@ static struct union_snap *stalk_build_union_snap(struct Proc *p,
         *errp = T_E_NOMEM;
         return NULL;
     }
+    // UM-8c (F5): retain the union POINT so an fd-relative op off this dirfd can
+    // re-reach the members (the LIVE union via the mount table); freed with the
+    // snapshot at spoor_free_internal.
+    snap->point = point;
+    spoor_ref(point);
     snap->n = 0;
     for (int k = 0; k < nsrc; k++) {
         struct Spoor *root = stalk_cross_src(p, srcs[k], NULL);  // pheno irrelevant to readdir
@@ -836,6 +841,18 @@ restart:
         struct Spoor *crossed = NULL;
         if (stalk_cross_mounts(p, base, &crossed, crossed_pheno) < 0) goto fail;
         if (crossed) trail[depth++] = crossed;
+    }
+
+    // UM-8c F5: a union DIRFD used as a resolution base holds member[0] + the
+    // union_snap (member 0's identity is not a mount point, so the base cross
+    // above did NOT cross it). Route the FIRST component through the union: set
+    // union_base to the retained point so the per-component branch searches
+    // every member (stalk_union_child), exactly as a descent-detected union. It
+    // is consumed by that branch after the first real component; the loop-end
+    // release below covers a path with no real component (only "." / "..").
+    if (base->union_snap && base->union_snap->point) {
+        union_base = base->union_snap->point;
+        spoor_ref(union_base);
     }
 
     while (i < pathlen) {
@@ -1606,6 +1623,12 @@ per_component:
         logical_depth++;       // (only consumed while pounce_ok)
         carried_valid = false; // a plain walk fetches no attrs for the new tip
     }
+
+    // UM-8c F5: a union base whose path had no real component (only "." / "..")
+    // never reached the per-component union branch that consumes union_base;
+    // release the point ref here. A descent-set union_base is always consumed in
+    // its own iteration, so this only ever fires for the base-set case.
+    if (union_base) { spoor_clunk(union_base); union_base = NULL; }
 
     // Determine the quarry.
     if (depth > 0) {

@@ -88,6 +88,7 @@ void test_stalk_union_create_first_wins(void);  // UM-5a: first MCREATE (declare
 void test_stalk_union_create_no_target(void);   // UM-5a: no MCREATE -> EACCES
 void test_stalk_union_member_holding(void);     // UM-8c/F3: holder, not MCREATE member
 void test_stalk_union_remove_uncrossed(void);    // UM-8c/F3: STALK_REMOVE leaves the point
+void test_stalk_union_fd_base(void);             // UM-8c/F5: fd-relative union base sees all members
 void test_stalk_pheno_symlink_reanchor(void);   // VIVARIUM section 13 (F1)
 // #66: namespace-name accumulation through the real resolver.
 void test_stalk_path_accumulate(void);
@@ -2190,6 +2191,74 @@ void test_stalk_union_remove_uncrossed(void) {
     TEST_ASSERT(cm1 == NULL, "STALK_CREATE result is a crossed member, not a union point");
     spoor_clunk(c);
 
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// =============================================================================
+// UM (union mounts) -- an fd-based union resolution base sees ALL members
+// (UM-7 F5). A handle to a union directory is member[0] + the union_snap (which
+// UM-8c makes retain the mount POINT). Resolving RELATIVE to that fd must search
+// every member, not just member[0].
+// =============================================================================
+
+void test_stalk_union_fd_base(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
+
+    // Open the union dir -> the fd is member[0] (um1, qid 22) + a union_snap that
+    // UM-8c makes retain the union POINT (qid 28).
+    struct Spoor *ufd = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(ufd != NULL, "open the union dir");
+    TEST_ASSERT(ufd->union_snap != NULL, "opened union fd carries a union_snap");
+    TEST_ASSERT(ufd->union_snap->point != NULL, "union_snap retains the point (UM-8c F5)");
+    TEST_EXPECT_EQ((u64)ufd->union_snap->point->qid.path, (u64)28,
+                   "retained point is the mount point umpt (qid 28)");
+    struct Spoor *pm1 = mount_member_at(p.territory, ufd->union_snap->point, 1, NULL);
+    TEST_ASSERT(pm1 != NULL, "the retained point is still a union point");
+    spoor_clunk(pm1);
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    // F5: "only2" lives only in member 1 (um2). WITHOUT the base-cross fix the
+    // resolution walks member[0] (um1) only and misses it; WITH it the union is
+    // searched -> um2's only2 (qid 27).
+    struct Spoor *q = stalk(&p, ufd, "only2", 5, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "fd-relative resolve only2 (member 1)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)27, "fd-relative walk sees member 1 (only2 qid 27)");
+    spoor_clunk(q);
+
+    // "only1" (member 0) still resolves relative to the fd -> qid 24.
+    q = stalk(&p, ufd, "only1", 5, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "fd-relative resolve only1 (member 0)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)24, "fd-relative walk member 0 (only1 qid 24)");
+    spoor_clunk(q);
+
+    // "shared" (both) -> first member (um1, qid 23) -- first-hit off the fd too.
+    q = stalk(&p, ufd, "shared", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "fd-relative resolve shared");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "fd-relative first-hit (shared qid 23)");
+    spoor_clunk(q);
+
+    // A clean miss relative to the fd -> ENOENT (no member has it).
+    int err = 0;
+    q = stalk_err(&p, ufd, "nosuch", 6, STALK_OPEN, 0, &err);
+    TEST_ASSERT(q == NULL, "fd-relative miss");
+    TEST_EXPECT_EQ(err, T_E_NOENT, "fd-relative all-miss -> ENOENT");
+
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across fd-relative union resolves");
+
+    spoor_clunk(ufd);
     territory_unref(p.territory);
     spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
     spoor_unref(root);
