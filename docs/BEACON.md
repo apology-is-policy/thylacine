@@ -618,3 +618,28 @@ hexdump/seq/echo never link the emitting half at any tier.
 4. Whether `grep`'s obj-path ref uses cwd-relative display text with an
    absolute ref (recommended: yes — text as shown, ref canonical; §12.2's
    obj row already requires the canonical ref).
+
+### 12.11 OSC 7 -- the working-directory report (H-3d, 2026-09-02; ratified, an ABI addition signed off by the operator)
+
+The status bar's "focused context" slot (HALCYON.md 13.6, Daylight 6) shows
+the working directory, and nothing on the wire carried it. The answer is
+the terminal world's de-facto standard, not a new Beacon op: **ut emits OSC
+7** at every prompt, inside the prompt zone --
+
+```
+OSC 7 ; file://localhost<cwd> ST            ; ESC ] 7 ; file://localhost/lib/aurora ESC \
+```
+
+-- the form iTerm2, VTE, foot, WezTerm and kitty read. `<cwd>` is the
+absolute, cleaned path; the host is `localhost` (a foreign sink that checks
+the host against its own treats `localhost` as local); the terminator is ST
+(sinks accept BEL, as for every OSC). The 1936 registry stays CLOSED: this
+is the ONE foreign OSC Beacon's sinks INTERPRET rather than pass through --
+the shared VT core (`usr/lib/vt`) recognizes `7` and reports the path; the
+transcript records the session's current directory (the latest report);
+aurora keeps ignoring it (its parser swallowed unknown OSC before and its
+consumer takes no action on the new report). The path is untrusted text at
+the sink: bounded like every OSC body (the 256-byte `osc_buf`; oversize is
+dropped whole, never truncated into a different path), rendered literal in
+the monospace face, never resolved, never executed. ut's emission rides the
+same emission gate as its zones (12.4): a non-Beacon sink never sees it.

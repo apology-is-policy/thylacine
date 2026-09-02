@@ -788,6 +788,67 @@ tiles keep their reconcile-driven repaint.
 (Daylight §6): workspaces / focused context / the sage-cinnabar condition slot /
 clock. The dark bar that grounds the composition.
 
+RATIFIED (H-3d design, 2026-09-02; the operator present -- two votes below):
+- **The placement (the tag-bar precedent, at the display level).** `create W
+  H role=status` mints the bar: RENDERER-GATED at create (E_PERM otherwise,
+  the cfg-3 default-deny), ONE per renderer (a second is E_INVAL), no bind
+  (its bind IS the display), W == the display width and H == the one
+  vertical unit (`METRICS.header_h`, 20 -- Daylight 8: "tag bar and status
+  bar are both 20px"), else E_INVAL: the bar is never cropped or letterboxed.
+  `surface_target`'s status arm places it at `{0, disp_h - header_h, disp_w,
+  header_h}`; while a status surface exists the layout is recomputed on
+  `disp_h - header_h` (the carve -- the ring, the gaps, every leaf and tag
+  bar move up; its retire restores the full display; both are structural
+  relayouts and fan CONFIGUREs); a display resize offers the bar a CONFIGURE
+  at the new width. The compositor paints the strip `status_bg` from the
+  carve on (the resting fill, `paint_borders`), so the bar is dark before
+  and between the renderer's presents. The global file `statusbar` reads
+  `x y w h` (zeros when none) -- the compositor's fact, the witness's source.
+  Never hosted, never focusable, no pointer (chrome by construction). The
+  alternatives -- a hosted bottom LEAF (Daylight 6: "the one piece of chrome
+  that belongs to the system rather than to any pane"), or halcyond
+  painting the bar into the console's own bottom rows (gone the moment the
+  console is not fullscreen) -- were not taken.
+- **The four slots (Daylight 6), their sources.** *Workspaces*: **ONE filled
+  `ember` indicator ("1") until H-4's layouts supply the list -- VOTE
+  (2026-09-02): "one filled indicator" over an empty slot or pulling the
+  workspace model forward.** *Focused context*: the focused leaf's tag name
+  (`pane/<id>/tag`; "transcript" for the console) `·` its working directory
+  `·` its last command -- the directory and the command are known only for
+  the console (the transcript's own session), so another program's focused
+  pane shows its name alone. *Condition*: the focused pane's `status` file,
+  the SAME record the live tile keys (sage for ok, cinnabar for err,
+  `status_idle` for resting) -- the bar is the redundant channel, the tile
+  the primary. *Clock*: `HH:MM` off `CLOCK_REALTIME` (`t_clock_gettime`),
+  repainted at the minute (the compositor's FRAME tick is the wake; the
+  minute boundary is checked per pass). Proportional face for names,
+  monospace islands for the directory and the command (Daylight 7).
+- **The working directory comes from ut, as OSC 7 -- VOTE (2026-09-02; an
+  ABI addition, signed off): "OSC 7 from ut now" over "program + last command
+  only" or "parse the prompt".** ut emits the de-facto standard cwd report
+  (`ESC ] 7 ; file://localhost<cwd> ST`) at every prompt, inside the prompt
+  zone; the shared VT core recognizes OSC 7 and reports it; the transcript
+  records the session's current directory (the latest report) and the last
+  command (the most recent command zone's text). Aurora keeps ignoring it.
+  BEACON.md 12.11 is the wire record; it is NOT a Beacon op (the 1936
+  registry stays closed) -- it is the one foreign OSC the sinks interpret.
+- **halcyond paints the bar on its ONE ring** (`Surface::status_on`, the
+  H-3c-2 event set): a `status` lib module (the four-slot cartoon list; host
+  tests for the layout arithmetic and the truncation order -- the context
+  slot yields first, from the left) + a `statusset` bin module (the surface,
+  the repaint triggers: a relayout or focus change [the pane-tree read], a
+  cwd/command change, a status change, the minute).
+- **Witness** (the lever): the `statusbar` rect read off the compositor;
+  the strip dark (`status_bg`) at both ends; the ember indicator at the
+  left; the condition slot cinnabar after a failing command and sage after
+  a passing one, in step with the live tile; the clock slot non-empty; the
+  context slot changing after `cd`; the carve measured (the console's
+  winsize loses rows; the tag bars move up by 20).
+- **Audit-bearing**: `role=status` is a gated-ctl surface on
+  `usr/tapestryd/src/server.rs` + a display-level carve (every surface's
+  geometry moves); the round at H-3d's close carries the H-3c-2 ROUND 2
+  FOCUS (the doubled-cadence rule).
+
 **obj interaction (H-3c).** Keyboard-first (§6 makes the mouse secondary):
 Esc-normal -> select an obj run -> a key opens its verb menu. Click-to-focus +
 click-a-path added in the same chunk if cheap (the survey confirms neither
@@ -851,9 +912,9 @@ status bar) not chosen* — the transcript would sit in un-beveled panes until a
 later chunk.
 
 **Audit-trigger** (ROADMAP §11.1 + AUDIT-TRIGGERS): the H-3b/c ctl verbs
-(`tag status`, `menu place/dismiss`) are gated-ctl surfaces on
-`usr/tapestryd/src/server.rs` — the cfg-3 default-deny pattern + compositor-owned
-dismiss; audit at each of H-3b/H-3c's close. H-3a (geometric painting, no new
+(`tag status`, `menu place/dismiss`) and H-3d's `role=status` create form are
+gated-ctl surfaces on `usr/tapestryd/src/server.rs` — the cfg-3 default-deny
+pattern + compositor-owned dismiss; audit at each of H-3b/H-3c/H-3d's close. H-3a (geometric painting, no new
 authority) is not audit-bearing on its own.
 
 ### 13.7 Layouts (H-4; the exact format)
