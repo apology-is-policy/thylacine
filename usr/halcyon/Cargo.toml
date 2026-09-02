@@ -1,0 +1,43 @@
+# halcyon -- the native Halcyon session tool (H-4). `halcyon layout save|restore`
+# manages the pane-tree layout; future subcommands (welcome, ...) live here too.
+#
+# Native libthyla-rs (ARCHITECTURE.md 3.5), run AS THE USER (HALCYON.md 13.7,
+# the D decision): the save/restore authority is the user's own -- no CAP, no
+# SPAWN_PERM, no server verb. Split like nora: a pure LIB (arg dispatch +
+# name validation + session-path building, host-tested) plus a thin BIN
+# (src/main.rs: the /dev/tapestry walk + the durable write, behind `backend`).
+#
+# Build (device):  cargo build -p halcyon         (backend on -> bin compiles)
+# Host-test (lib): cargo test -p halcyon --no-default-features --lib \
+#                       --target <host-triple>    (libthyla-rs is aarch64-only,
+#                                                  so drop backend + scope --lib)
+
+[package]
+name = "halcyon"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "halcyon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "halcyon"
+path = "src/main.rs"
+
+[features]
+# `backend` pulls libthyla-rs -- everything the binary needs to walk the
+# compositor tree and write the layout. On by default for the device build;
+# host tests of the pure lib drop it (and scope to --lib so the bin is not
+# compiled). Mirrors nora's split.
+default = ["backend"]
+backend = ["dep:libthyla-rs", "dep:libhalcyon"]
+
+[dependencies]
+# Both gate behind `backend`: only the bin (the /dev/tapestry walk + the
+# durable write) needs them; the pure lib compiles clean on the host with
+# neither.
+libhalcyon = { path = "../lib/libhalcyon", optional = true }
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }

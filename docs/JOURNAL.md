@@ -763,6 +763,118 @@ Verified by the lines, jobs=1: halcyond host 55/55; every libtapestry
 client builds; ls-halcyon on the lever PASS [113 s] with the
 3-leaf leg both ways; default restored: ls-gfx-panes PASS [42 s] (the battery's two surfaces on private rings; the menu-gate + pane-tree-gate legs), ls-gfx-age [40 s], font [66 s], live [74 s], mode [59 s], mp [44 s], osd [30 s], osd-persist [56 s], osd-push [35 s] all PASS (aurora on a private ring), 0 fails, all at LS_CI_JOBS=1 LS_CI_ATTEMPTS=1.
 
+### H-3d: the status bar -- the display-level carve, and the audit that caught a byte-budget drift the self-audit could not (same run, after a self-compaction)
+
+H-3d (`e3b5ba1e`, audit close `3587d8f2` + `9896c3c2`) closed the H-3 arc.
+The status bar is not a pane: it is a display-level carve
+(`Comp.status`), taken out of the layout height in `reconcile` so the tiling
+tree never sees it, with a `role=status` chrome surface the renderer paints
+into `status_rect`. ut reports the cwd (OSC 7) and marks each command
+(`mark k=cmd`) so the bar can show where you are and what ran.
+
+The audit (0 P0 / 0 P1 / 1 P2 / 4 P3, not dirty) found the one bug that
+mattered: the transcript charges every stored block against a shared byte
+budget (`stored_cost`), and eviction subtracts `dead.cost` from it -- but the
+`Op::Mark k=cmd` arm charged only `open.cost`, not `stored_cost`. So each
+command mark grew the block's cost without growing the budget it is later
+subtracted from; after enough eviction the budget underflows toward zero and
+`max_cost` never enforces again. The instructive part is HOW it slipped the
+self-audit: I read `self.open.cost += t.len()` and concluded "accounted."
+The invariant is not "the increment exists" -- it is "the PAIR moves
+together" (`open.cost` and `stored_cost` in lockstep at every charge site),
+and the self-audit verified the half it could see. The Fable prosecutor,
+which had not watched me write it, read the eviction path and the charge
+site together and saw the asymmetry. The fix mirrors `stored_cost` at the
+mark site and adds a regression asserting `stored_cost == sum of live block
+costs` (sabotage-checked: pre-fix 96 vs live 108). Recorded as the standing
+lesson: verify the INVARIANT, not the line.
+
+The reviewer flipped Fable -> Opus 4.8 mid-run; the JSONL `model` field
+caught it (a subagent's self-report cannot see its own fallback). A finished
+fallback round is closed -- no Fable re-run owed.
+
+### H-4 opens: the layout-authority fork, a Fable consult, and the D decision (same run)
+
+H-4 is layouts (save / reload / respawn). The hard part is not the format --
+it is the AUTHORITY: who may rebuild a saved pane tree, and with whose
+identity do the respawned programs run? I surfaced A/B/C/D to the operator,
+who asked (aligned with Thylacine's values) that I spawn a Fable 5.1
+consultation agent to help decide. That consult ran 200 turns with no
+fallback, in parallel with my own analysis, and the two CONVERGED on D --
+after the consult corrected three premises I had wrong:
+
+1. I assumed a new kernel grant was needed to key pane authority on the user.
+   The kernel ALREADY stamps `srv_peer_info.principal_id`; tapestryd just
+   uses it nowhere yet. No new syscall / CAP / SPAWN_PERM.
+2. I assumed the restorer needed renderer authority to build the empty
+   skeleton. `actor_owns_subtree` is vacuously true on an all-empty subtree
+   -- any client can arrange empty leaves -- so the real gap is narrower:
+   placement + naming (a leaf the tool can target and tag).
+3. I assumed SAVE could live in halcyond. halcyond is a pre-login SYSTEM
+   process with no `$home`; the session layout is in the user's namespace,
+   so SAVE must be the user's own tool.
+
+My initial self-analysis (Option A: a login-spawned manager DAEMON plus a
+new grant) was over-built; the tree already had the pieces. This is the
+wrong turn worth recording: the consult's value was not a second opinion on
+my design, it was catching that I had assigned costs to capabilities the
+tree already provides -- verify the facts before pricing the options.
+
+Option D (`e233d390`, scripture-first, no code): layout save/restore is a
+user-authority session tool run as the user (the Plan 9 riostart / acme
+Dump-Load idiom); tapestryd gains a `Session(principal)` actor keyed on the
+already-stamped principal; the read side is the pane-file walk; placement is
+a one-shot `claim` token (the Wayland xdg_activation / Fuchsia
+ViewCreationToken shape). The operator ratified D and, deliberately,
+same-principal mutual pane authority -- a program running as you may
+close/refocus/rename your other tiles, strictly weaker than the same-owner
+process kill I-26 already grants; the console (SYSTEM) and other users'
+tiles stay protected. The operator also ratified the first-launch welcome:
+the shipped device-tier default layout IS a self-demonstrating two-pane
+Genera tour (a live rich transcript on the left whose runnable objs drive
+the shell on the right) -- sell the differentiator by BEING it.
+
+### H-4a-1: the layout format core (same run)
+
+`cdce7f3f` (+ `f99dd6b1`): `libhalcyon::layout` -- the `halcyon-layout v1`
+serializer plus a bounded, no-panic parser (MAX_DEPTH 32 / NODES 256 / TAG
+1024; every malformed input returns an Err, never a panic, because a panic
+in a no_std tool is a silent exit(1)). It lives in libhalcyon, not in either
+consumer, because BOTH restore paths need it. libhalcyon host 11/11, clippy
+0, rustfmt clean, device build clean. The fixup filled the hash and folded a
+pre-existing theme.rs rustfmt drift that `cargo fmt -p libhalcyon` swept
+(the whole-crate reformat trap -- watch the staged set).
+
+### H-4a-2: the SAVE tool + the render_text bridge (same run, this entry)
+
+PENDING_HASH: `halcyon layout save <name>` -- the syscalling half. The
+authority story is the whole point: the tool runs AS THE USER, takes no
+capability and adds no server verb, and writes only the session tier
+($HOME/lib/halcyon/layouts/<name>). It reads the compositor's live tree from
+/dev/tapestry (the `layout` dump + each `pane/<id>/tag`) and folds it back
+into a LayoutNode via the new `libhalcyon::layout::from_render_text`.
+
+The one design call worth recording: render_text (tapestryd's introspection
+dump) and our v1 save format share the depth-indented pre-order, differing
+only in the per-row lead (render_text leads with the pane id + a focus `*`
+and trails a geometry rect; our format leads with the mode/leaf token and
+carries the tag). So rather than a second tree-builder, `from_render_text`
+tokenizes render_text rows into the SAME `Row` stream `parse` produces and
+both feed one `assemble` stack machine -- the child-count validation and the
+tree assembly are written once. A leaf's tag is resolved through a closure
+(the tool backs it with `pane/<id>/tag` reads; host tests back it with a
+map), and a tag past MAX_TAG_LEN is dropped to empty rather than truncated,
+so the fold always round-trips through serialize/parse.
+
+The durable write is aurora's config::save discipline verbatim (the
+gfx-status cfg-2a lesson): write-tmp, content fsync, atomic rename, then a
+STRICT metadata fsync on the SAME OWRITE fd -- because the fid follows the
+file across the rename and a fresh OREAD reopen would fail SYS_FSYNC's
+RIGHT_WRITE gate, which is exactly how aurora's first two barrier attempts
+silently failed. Non-audit-bearing (read + serialize + write, no new
+authority). `layout restore` is H-4b (the Session actor + the claim token --
+audit-bearing); the tool prints "not yet implemented" for it today.
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon

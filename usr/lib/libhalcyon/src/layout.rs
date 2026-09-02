@@ -175,21 +175,65 @@ pub fn parse(input: &str) -> Result<LayoutNode, ParseError> {
     if header.trim_end_matches('\r') != FMT_HEADER {
         return Err(ParseError::BadHeader);
     }
-
-    let mut stack: Vec<Frame> = Vec::new();
-    let mut root: Option<LayoutNode> = None;
-    let mut count: usize = 0;
-
+    let mut rows: Vec<(usize, Row)> = Vec::new();
     for raw in lines {
         let line = raw.trim_end_matches('\r');
         if line.is_empty() {
             continue; // blank lines (incl. a trailing newline's tail) ignored
         }
-        let (depth, row) = parse_row(line)?;
-        count += 1;
-        if count > MAX_NODES {
+        rows.push(parse_row(line)?);
+        if rows.len() > MAX_NODES {
             return Err(ParseError::TooMany);
         }
+    }
+    assemble(rows)
+}
+
+/// Build a `LayoutNode` tree from the DUMP `pane::render_text` produces
+/// (HALCYON.md 13.7, the D-decision read side): the same depth-indented
+/// pre-order, but each row leads with the pane `<id>` (+ an optional `*` focus
+/// marker), a leaf reads `leaf surface=<n>|empty` (its tag is NOT in the dump),
+/// and a trailing ` [x,y,w,h]` rect we discard -- geometry is never saved, a
+/// restored leaf gets a fresh surface and rect. `tag_of` resolves each leaf's
+/// command line by id (the save tool reads `pane/<id>/tag`); a tag longer than
+/// MAX_TAG_LEN is dropped to empty so the result always round-trips through
+/// serialize/parse. Bounded + fail-closed exactly like `parse`, so a garbled
+/// dump degrades (no save) rather than panicking (a silent exit in a no_std
+/// tool). This is the WRITE side's inverse of `parse`: `render_text` in ->
+/// `serialize` out.
+pub fn from_render_text(
+    render: &str,
+    tag_of: impl Fn(u32) -> String,
+) -> Result<LayoutNode, ParseError> {
+    let mut lines = render.split('\n');
+    let header = lines.next().unwrap_or("");
+    // render_text's first line is `epoch <n> focused <m> [zoomed <z>]`.
+    if !header.trim_end_matches('\r').starts_with("epoch ") {
+        return Err(ParseError::BadHeader);
+    }
+    let mut rows: Vec<(usize, Row)> = Vec::new();
+    for raw in lines {
+        let line = raw.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        rows.push(parse_render_row(line, &tag_of)?);
+        if rows.len() > MAX_NODES {
+            return Err(ParseError::TooMany);
+        }
+    }
+    assemble(rows)
+}
+
+/// The stack machine shared by `parse` and `from_render_text`: fold a pre-order
+/// (depth, row) stream into the tree, closing every open container the moment a
+/// row at its depth-or-shallower arrives, and validating each container's child
+/// count as it closes. Depth/node/tag bounds are enforced upstream by the row
+/// tokenizers; this stage owns only the tree shape.
+fn assemble(rows: Vec<(usize, Row)>) -> Result<LayoutNode, ParseError> {
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut root: Option<LayoutNode> = None;
+    for (depth, row) in rows {
         // Close every open container at this depth or deeper (complete).
         while stack.last().is_some_and(|f| f.depth >= depth) {
             let f = stack.pop().unwrap();
@@ -303,6 +347,63 @@ fn parse_row(line: &str) -> Result<(usize, Row), ParseError> {
         return Err(ParseError::TooMany);
     }
     Ok((depth, Row::Cont(mode, n, active)))
+}
+
+/// Tokenize one `render_text` row: leading-space pairs -> depth, then
+/// `<id>[*] leaf ...` or `<id>[*] <mode> n=<num> active=<num> ...`. The leaf's
+/// tag comes from `tag_of(id)` (render_text omits it); surface/geometry tokens
+/// are read past and discarded.
+fn parse_render_row(
+    line: &str,
+    tag_of: &impl Fn(u32) -> String,
+) -> Result<(usize, Row), ParseError> {
+    let spaces = line.len() - line.trim_start_matches(' ').len();
+    if !spaces.is_multiple_of(2) {
+        return Err(ParseError::BadIndent);
+    }
+    let depth = spaces / 2;
+    if depth > MAX_DEPTH {
+        return Err(ParseError::TooDeep);
+    }
+    let mut it = line[spaces..].split(' ');
+    // The pane id, with an optional trailing `*` focus marker stripped.
+    let id = it
+        .next()
+        .map(|t| t.strip_suffix('*').unwrap_or(t))
+        .and_then(|t| t.parse::<u32>().ok())
+        .ok_or(ParseError::BadRow)?;
+    match it.next() {
+        Some("leaf") => {
+            let tag = tag_of(id);
+            // A tag past the format's cap is dropped, never truncated: a
+            // half-command would respawn wrong, whereas an empty leaf is a
+            // clean placeholder -- and the output must round-trip through parse.
+            let tag = if tag.len() > MAX_TAG_LEN {
+                String::new()
+            } else {
+                tag
+            };
+            Ok((depth, Row::Leaf(tag)))
+        }
+        Some(tok) => {
+            let mode = LayoutMode::parse(tok).ok_or(ParseError::BadRow)?;
+            let n = it
+                .next()
+                .and_then(|t| t.strip_prefix("n="))
+                .and_then(|v| v.parse::<u32>().ok())
+                .ok_or(ParseError::BadRow)?;
+            let active = it
+                .next()
+                .and_then(|t| t.strip_prefix("active="))
+                .and_then(|v| v.parse::<u32>().ok())
+                .ok_or(ParseError::BadRow)?;
+            if n as usize > MAX_NODES {
+                return Err(ParseError::TooMany);
+            }
+            Ok((depth, Row::Cont(mode, n, active)))
+        }
+        None => Err(ParseError::BadRow),
+    }
 }
 
 /// Parse the body of `leaf tag="..."` (everything after the opening quote):
@@ -505,5 +606,146 @@ mod tests {
     fn trailing_blank_lines_are_ignored() {
         let s = "halcyon-layout v1\nleaf tag=\"ut\"\n\n\n";
         assert_eq!(parse(s), Ok(leaf("ut")));
+    }
+
+    // A tag resolver for the from_render_text tests: id -> command line, "" for
+    // an id the map doesn't name (an empty pane).
+    fn tags(pairs: &'static [(u32, &'static str)]) -> impl Fn(u32) -> String {
+        move |id| {
+            pairs
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map_or_else(String::new, |(_, t)| t.to_string())
+        }
+    }
+
+    #[test]
+    fn from_render_text_builds_the_welcome_shape() {
+        // Exactly what pane::render_text prints for the shipped welcome: a
+        // two-pane SplitH, the left leaf focused (the `*`), the right empty.
+        let render = "epoch 4 focused 3\n\
+0 splith n=2 active=0 [0,0,1920,1080]\n  \
+3* leaf surface=1 [0,0,960,1080]\n  \
+4 leaf empty [960,0,960,1080]\n";
+        let t = from_render_text(render, tags(&[(3, "halcyon welcome"), (4, "ut")]))
+            .expect("parse a render_text dump");
+        assert_eq!(
+            t,
+            cont(
+                LayoutMode::SplitH,
+                0,
+                vec![leaf("halcyon welcome"), leaf("ut")]
+            )
+        );
+        // And it serializes to exactly the save-file bytes (the write side).
+        assert_eq!(
+            serialize(&t),
+            "halcyon-layout v1\nsplith n=2 active=0\n  leaf tag=\"halcyon welcome\"\n  leaf tag=\"ut\"\n"
+        );
+    }
+
+    #[test]
+    fn from_render_text_single_leaf_root() {
+        // A fresh session: one full-screen leaf, no container.
+        let render = "epoch 1 focused 0\n0* leaf surface=2 [0,0,800,600]\n";
+        let t = from_render_text(render, tags(&[(0, "ut")])).expect("single leaf");
+        assert_eq!(t, leaf("ut"));
+    }
+
+    #[test]
+    fn from_render_text_round_trips_a_deep_tree() {
+        // A nested dump (with the zoomed header field and focus markers) folds
+        // to a tree that serializes and re-parses back to itself.
+        let render = "epoch 9 focused 5 zoomed 5\n\
+0 splith n=2 active=1 [0,0,1000,800]\n  \
+2 leaf surface=0 [0,0,500,800]\n  \
+3 tabbed n=2 active=0 [500,0,500,800]\n    \
+5* leaf surface=1 [500,0,500,760]\n    \
+6 leaf empty [500,0,500,760]\n";
+        let t = from_render_text(render, tags(&[(2, "ut"), (5, "hx a.rs"), (6, "")]))
+            .expect("deep dump");
+        let back = parse(&serialize(&t)).expect("re-parse own serialization");
+        assert_eq!(back, t);
+        // The empty pane (id 6, no tag) is a bare leaf; the tabbed active is kept.
+        assert_eq!(
+            t,
+            cont(
+                LayoutMode::SplitH,
+                1,
+                vec![
+                    leaf("ut"),
+                    cont(LayoutMode::Tabbed, 0, vec![leaf("hx a.rs"), leaf("")]),
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn from_render_text_drops_an_oversize_tag() {
+        // A pane whose tag exceeds the format cap saves as an empty leaf (a
+        // clean placeholder), never a truncated half-command.
+        let render = "epoch 1 focused 0\n0 leaf surface=0 [0,0,10,10]\n";
+        let huge = "x".repeat(MAX_TAG_LEN + 1);
+        let pairs: alloc::vec::Vec<(u32, String)> = vec![(0u32, huge)];
+        let t = from_render_text(render, |id| {
+            pairs
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map_or_else(String::new, |(_, t)| t.clone())
+        })
+        .expect("oversize tag drops, not fails");
+        assert_eq!(t, leaf(""));
+    }
+
+    #[test]
+    fn from_render_text_ignores_geometry_and_hidden() {
+        // A zoomed session: the header carries `zoomed`, and the un-zoomed
+        // sibling is marked ` hidden` after its rect. Both are transient
+        // display state -- the saved tree + tags are exactly as if neither
+        // marker existed (a restore is never zoomed, never hides).
+        let render = "epoch 2 focused 1 zoomed 1\n\
+0 splitv n=2 active=0 [0,0,800,600]\n  \
+1* leaf surface=0 [0,0,800,600]\n  \
+2 leaf empty [0,0,800,600] hidden\n";
+        let t = from_render_text(render, tags(&[(1, "ut"), (2, "")])).expect("hidden/zoom ignored");
+        assert_eq!(t, cont(LayoutMode::SplitV, 0, vec![leaf("ut"), leaf("")]));
+    }
+
+    #[test]
+    fn from_render_text_rejects_malformed_dumps() {
+        let m = tags(&[]);
+        // Not a render_text header.
+        assert_eq!(
+            from_render_text("halcyon-layout v1\nleaf\n", &m),
+            Err(ParseError::BadHeader)
+        );
+        // A non-numeric pane id.
+        assert_eq!(
+            from_render_text("epoch 1 focused 0\nx leaf surface=0 [0,0,1,1]\n", &m),
+            Err(ParseError::BadRow)
+        );
+        // An unknown container mode.
+        assert_eq!(
+            from_render_text(
+                "epoch 1 focused 0\n0 floaty n=1 active=0 [0,0,1,1]\n  1 leaf empty [0,0,1,1]\n",
+                &m
+            ),
+            Err(ParseError::BadRow)
+        );
+        // A leaf row with no kind token after the id.
+        assert_eq!(
+            from_render_text("epoch 1 focused 0\n0\n", &m),
+            Err(ParseError::BadRow)
+        );
+        // Odd indent (render_text is always even).
+        assert_eq!(
+            from_render_text("epoch 1 focused 0\n 0 leaf empty [0,0,1,1]\n", &m),
+            Err(ParseError::BadIndent)
+        );
+        // Header-only (no pane rows) -- an empty compositor is not a layout.
+        assert_eq!(
+            from_render_text("epoch 0 focused 0\n", &m),
+            Err(ParseError::Empty)
+        );
     }
 }

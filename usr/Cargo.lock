@@ -633,6 +633,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "halcyon"
+version = "0.1.0"
+dependencies = [
+ "libhalcyon",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "halcyond"
 version = "0.1.0"
 dependencies = [

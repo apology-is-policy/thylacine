@@ -7,14 +7,18 @@ tracker (the ROADMAP §9 phase) — the H-arc is arc-named the way its chunks ar
 
 ## TL;DR
 
-**H-0 landed** (kickoff + same-day concretization: `HALCYON.md` + `BEACON.md`
-born implementation-grade; ARCH §17/§23.5.4 + ROADMAP §11 rewritten). **H-1 is
-LANDED in four sub-chunks + the audit close** — the kernel fd-class syscall + consctl tier verb,
-the beacon crate (wire/sink + the cells relocation), the tier plumbing (aurora
-advertisement → ut export → transcript zones), and the emitters
-(ls/grep/ps/stat + the `--color=auto` unification). The H-1 close LANDED
-(`140db874`: the audit round + fixes); the push rides the ls-3a canary run. Next: **H-2**,
-the transcript MVP on the CPU floor (HALCYON.md §13).
+**H-1 through H-3 are CLOSED; H-4 (layouts) is open.** H-1 (Beacon: the
+fd-class syscall + the beacon crate + the tier plumbing + the emitters,
+audit-closed), H-2 (the transcript MVP on the CPU floor, audit-closed), and
+the whole H-3 chrome arc -- H-3a (Daylight chrome), H-3b (the executable
+per-leaf tag bar), H-3c (THE GATE: obj/verbs/menus), H-3c-2 (the event set:
+one 9P session + one Loom ring per client), H-3d (the status bar) -- each
+audit-closed. **H-4 layouts**: the D decision is ratified (a user-authority
+session tool + a tapestryd `Session(principal)` actor keyed on the
+kernel-stamped principal + a one-shot claim token; scripture `e233d390`); the
+format core landed (`cdce7f3f`); **H-4a-2 landed** -- the `halcyon layout
+save` tool + `libhalcyon::layout::from_render_text`. **Next: H-4b**, restore
+(the Session actor + the claim token in tapestryd; AUDIT-BEARING).
 
 ## Landed chunks
 
@@ -50,6 +54,7 @@ the transcript MVP on the CPU floor (HALCYON.md §13).
 | `3587d8f2` | **THE H-3d AUDIT CLOSE** (e3b5ba1e + the H-3c-2 ROUND 2 FOCUS carried). ONE prosecutor (holotype-reviewer, explicit `model: fable`): 60 turns on Fable 5.1 (every file read in scope + the re-derivation + the cataloguing of F1-F5), then a MID-RUN fallback to Opus 4.8 for the 29-turn synthesis/report/host-test tail -- the WHOLE ENVIRONMENT flipped at that moment (the commit-attribution reminder flipped with it, and back again later); the JSONL `model` field is the detector, `MODEL(end)` still claimed Fable (the self-report cannot see its own fallback -- the third occurrence in run 16). Per the standing rule a fallback round that FINISHES is closed; every key surface was read pre-fallback. The parallel self-audit was the second independent read. **0 P0 / 0 P1 / 1 P2 / 4 P3, NOT dirty; all fixed.** The two reads caught DIFFERENT things: the prosecutor the one real bug, the self-audit 4 latent/cosmetic P3s (mode-set latent; say-line quote; dot-y; H-4 active-index -- noted/withdrawn/deferred). **F1 [P2]**: the transcript's `mark k=cmd` arm bumped the output block's `open.cost` but NOT `stored_cost` -- on eviction `stored_cost -= dead.cost` subtracts a charge never added, so the byte budget drifts toward zero (saturating) until `stored_cost > max_cost` never fires and the 32 MiB content budget stops enforcing (the exact hazard the sibling obj/cell/table/style comment names). THE SELF-AUDIT GOT THIS WRONG: it verified the `open.cost` increment and wrote "accounted", missing that the invariant is the PAIR. Fixed by the mirror; regression test `the_cmd_mark_charges_the_shared_byte_budget_symmetrically`, sabotage-checked (pre-fix `stored_cost` 96 vs the live 108 -- short by exactly the cmd length). **F2**: a menu overlapping the status strip left stale menu pixels there on dismiss (`menu_heal` healed leaves + tag bars at once, the strip only via the async CONFIGURE fan) -> the strip is filled `status_bg` + pushed before the fan. **F3** (witness): the sage condition-dot leg reused the Err line's `cx`; the dot moves ~2px with the label width, so it passed only by pixel overlap -> re-read per state. **F4** (witness; the row itself asked for it): the carve was witnessed by the `statusbar` rect alone -- a regression that registered the bar but skipped `layout.recompute(dw, layout_h, ..)` would pass -> the lever reads the console leaf's carved content height from the `layout` file and asserts it == disp_h - 20 (cell-height independent: 780 of 800). **F5**: a persistently-failing bar mint ran two sync RPCs EVERY pass (ChromeSet retries per relayout) -> `StatusBar.want_mint` + `rearm()` on a relayout. Docs: the AUDIT-TRIGGERS row addendum; AUDIT-INDEX; `audit_h3d_closed_list.md` (auto-memory); JOURNAL | halcyond host 62/62 (+1: the F1 regression); beacon 36/36; the ring 9/9; every client builds; ls-halcyon on the THYLACINE_HALCYON=1 lever PASS [118 s], 46 witness lines (+1: `the carve shrank the layout -- the console leaf is 780 of the 800px display`), 0 WEDGED, 0 fails; default fixtures restored (0 lever lines): panes PASS [43 s] 32, age [39 s] 3, font [67 s] 5, live [74 s] 5, mode [60 s] 9, mp [46 s] 3, osd [31 s] 7, osd-persist [56 s] 6, osd-push [35 s] 5 witness lines, 0 fails; all at LS_CI_JOBS=1 LS_CI_ATTEMPTS=1 on a quiet host (aux released mac for the run) |
 | `e233d390` | **H-4 LAYOUTS DESIGN -- the D decision** (scripture-first, no code; ratified 2026-09-02, operator present, after a Fable 5.1 consult [200 turns, no fallback] + a parallel self-analysis CONVERGED). **Option D**: layout save/restore is a user-authority **session tool** (`halcyon layout save|restore`), run AS THE USER by the user's shell (Plan 9 riostart / acme Dump-Load); tapestryd gains a third actor **`Session(principal)`** derived from the kernel-stamped `srv_peer_info.principal_id` (already stamped; used nowhere today) -- ordinary pane authority keys on the USER principal, not per-process `stripes`, with NO new syscall/CAP/SPAWN_PERM; read side = the pane-file walk (no server verb); placement = a one-shot `claim` token (the Wayland xdg_activation / Fuchsia ViewCreationToken shape); halcyond supplies only the gesture + the device-tier geometry-only restore. The consult corrected 3 premises the finding + my initial Option A had wrong (the principal is already stamped -> no new grant; an all-empty subtree is anyone's -> no renderer-only skeleton; halcyond [pre-login SYSTEM, no $home] can't read the session-tier layout -> save is the user's tool too). **Ratified trust call**: same-principal peers gain rio-style mutual pane authority (weaker than the I-26 same-owner kill; the console [SYSTEM] + other users stay protected). **Also ratified**: the shipped device-tier DEFAULT layout IS the self-demonstrating first-launch welcome (two Utopia panes on Daylight; a live Genera tour whose runnable objs drive the right shell). Docs: HALCYON 13.1/13.6/13.7; TAPESTRY #42 realized; AURORA-CONFIG session-leader realized; NOVEL Angle #4 addendum; `design_h4_layouts.md`; scratchpad finding/analysis/intro-welcome | docs-only; no code |
 | `cdce7f3f` | **H-4a-1: the layout FORMAT core** (`libhalcyon::layout`, pure + host-tested). The `halcyon-layout v1` serializer + a bounded, no-panic parser for the pane tree's SHAPE (container mode + active; per-leaf tag = the command line; surface ids never saved). Reads UNTRUSTED input (a `$home` layout file) -> every path fail-closed: MAX_DEPTH 32 / MAX_NODES 256 / MAX_TAG_LEN 1024, malformed -> Err (the caller degrades), never a panic. Shared by halcyond (device restore + gesture) + the session tool + tapestryd, so it lives in libhalcyon (the D decision's home). Backslash escape for the tag (`\` `"` `\n`); active clamped not fatal; the two-pane welcome's exact serialization pinned. NEXT: H-4a-2 (the save tool: the pane-file walk -> the format -> the two-tier durable write) | libhalcyon host 11/11 (8 layout: round-trip [leaf/welcome/deep-nested], escaping, active-clamp, 12 malformed-input Errs, bounds, trailing-blank); clippy 0 + rustfmt clean; device build (aarch64-unknown-none) 0 errors |
+| `PENDING_HASH` | **H-4a-2: the layout SAVE tool** (`usr/halcyon`, native libthyla-rs; NON-audit-bearing -- read + serialize + write, no new authority). `halcyon layout save <name>` walks /dev/tapestry (the `layout` render_text dump + each `pane/<id>/tag`), folds it via the new `libhalcyon::layout::from_render_text` (render_text and the v1 format share the pre-order, so both feed one `assemble` stack machine; an oversize tag drops to empty so the fold always round-trips), serializes, and writes the SESSION tier ($HOME/lib/halcyon/layouts/<name>) with aurora's config::save discipline verbatim (write-tmp + content fsync + atomic rename + STRICT post-rename fsync on the SAME OWRITE fd; gfx-status cfg-2a). The `halcyon` crate mirrors nora: a pure host-tested lib (dispatch + name validation [one path component, no leading dot -- traversal closed by construction] + session-path building) + a thin bin. Run AS THE USER (HALCYON.md 13.7 the D decision): no CAP, no SPAWN_PERM, no server verb. `layout restore` prints "not yet implemented" (H-4b). Wiring: usr/Cargo.toml members + build.sh usr_rs_bins. Runtime E2E rides H-4b (save+restore round-trip). | libhalcyon layout host 17/17 (+6 from_render_text) + halcyon lib host 6/6 + device build (halcyon 107632 B staged) + suite 1435/1435 + boot OK |
 
 ## Remaining work
 
@@ -118,6 +123,17 @@ cd usr && cargo test -p coreutils --lib --no-default-features --target aarch64-a
 ```
 
 ## Trip hazards
+
+- **SAVE writes the SESSION tier only** ($HOME/lib/halcyon/layouts/<name>);
+  the device tier (/lib/halcyon/layouts/) is halcyond's / the image bake's
+  (HALCYON.md 13.7). The two-tier RESTORE precedence (session first, then
+  device) is H-4b; do not conflate "two tiers" with "save writes both."
+- **`from_render_text` consumes tapestryd's `render_text` dump**, an
+  introspection format that is NOT a pinned ABI (it is also read by
+  ls-halcyon.exp). A change to `pane::render_text` must keep both consumers in
+  sync (the leaf `<id> leaf surface=|empty`, the container `<id> <mode> n=
+  active=`, the trailing rect). The parser ignores trailing tokens (rect,
+  `hidden`) and the `*` focus marker by design.
 
 - **The consctl render line floor is 67 bytes; every reader ≥ 96** — including
   the kernel's own staging buffers (the H-1a lesson; sweep readers by
