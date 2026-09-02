@@ -525,7 +525,7 @@ pub extern "C" fn rs_main() -> i64 {
     // H-3b-3. Errnos per libthyla-rs err.rs: T_E_INVAL = 22, T_E_PERM = 1.
     {
         let a_bind = alloc::format!("create 64 20 role=chrome bind={}", pa.id);
-        let probes: [(&str, i64, &str); 6] = [
+        let probes: [(&str, i64, &str); 8] = [
             ("create 64 20 role=bogus", -22, "unknown role -> E_INVAL"),
             ("create 64 20 role=chrome", -22, "chrome without bind -> E_INVAL"),
             ("create 64 20 bind=1", -22, "bind without chrome -> E_INVAL"),
@@ -535,6 +535,11 @@ pub extern "C" fn rs_main() -> i64 {
             // take its input.
             ("create 64 20 role=menu bind=1", -22, "menu with a bind -> E_INVAL"),
             ("create 64 20 role=menu", -1, "menu from a non-renderer -> E_PERM"),
+            // H-3d: the status bar takes no bind (syntax) and is renderer-gated
+            // (authority) -- an ungated status role would let any client carve
+            // the display and own the bar that speaks for the system.
+            ("create 64 20 role=status bind=1", -22, "status with a bind -> E_INVAL"),
+            ("create 64 20 role=status", -1, "status from a non-renderer -> E_PERM"),
         ];
         for (cmd, want, what) in probes.iter() {
             let rc = raw_create(root, cmd);
@@ -545,6 +550,16 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
         say!("battery: chrome-create gate OK");
+        // H-3d: with no renderer bar the compositor's `statusbar` file reads
+        // zeros -- the file exists, the rect is empty (the positive twin, a
+        // real bar's rect + the carve it makes, is halcyond's: ls-halcyon).
+        match read_file(root, "statusbar") {
+            Some(t) if t.trim() == "0 0 0 0" => say!("battery: statusbar file reads empty (no bar)"),
+            other => {
+                say!("tapestry-battery: FAIL statusbar file: {:?}", other);
+                return 1;
+            }
+        }
     }
 
     // H-3b-4: the tile-status verb is a gated global verb (`tag <id> status

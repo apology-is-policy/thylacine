@@ -107,6 +107,9 @@ pub enum Role {
     PinTarget,
     /// H-3c: the ephemeral verb menu (a SURFACE role only; never a pane's).
     Menu,
+    /// H-3d: the screen-bottom status bar (a SURFACE role only): the one
+    /// piece of chrome bound to the DISPLAY, not to a pane.
+    Status,
 }
 
 impl Role {
@@ -116,6 +119,7 @@ impl Role {
             Role::Chrome => "chrome",
             Role::PinTarget => "pin-target",
             Role::Menu => "menu",
+            Role::Status => "status",
         }
     }
     pub fn parse(s: &str) -> Option<Role> {
@@ -124,6 +128,7 @@ impl Role {
             "chrome" => Some(Role::Chrome),
             "pin-target" => Some(Role::PinTarget),
             "menu" => Some(Role::Menu),
+            "status" => Some(Role::Status),
             _ => None,
         }
     }

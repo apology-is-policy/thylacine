@@ -419,6 +419,7 @@ const P_SURF_DIR: u64 = 2; // surface/
 const P_SURF_NEW: u64 = 3; // surface/new
 const P_LAYOUT: u64 = 4; // the container tree (G-6)
 const P_PANE_DIR: u64 = 5; // pane/
+const P_STATUSBAR: u64 = 6; // the status bar's rect, "x y w h" (H-3d)
 
 const SURF_FLAG: u64 = 1 << 40;
 const PANE_FLAG: u64 = 1 << 41; // pane qids (G-6): PANE_FLAG | id<<8 | fk
@@ -922,6 +923,12 @@ struct Surface {
     /// by construction, like chrome. Retired by the compositor on every
     /// dismiss path.
     is_menu: bool,
+    /// H-3d: the Role::Status surface -- the screen-bottom status bar
+    /// (HALCYON.md 13.6). Never hosted, bound to the DISPLAY: showable only
+    /// while it is THE registered bar (`Comp.status`, gen-pinned), placed
+    /// at the bottom strip the layout carves for it. Renderer-gated at
+    /// create, one per display.
+    is_status: bool,
     /// The slot of this surface's last accepted present: what
     /// `menu_reassert` re-composes when a screen write lands under a placed
     /// menu. None until the first present.
@@ -1310,6 +1317,14 @@ struct MenuState {
     rect: Rect,
 }
 
+/// H-3d: the registered status bar -- the surface the display's bottom
+/// strip is carved for (gen-pinned against slot reuse).
+#[derive(Clone, Copy)]
+struct StatusState {
+    n: usize,
+    gen: u32,
+}
+
 /// evdev KEY_ESC -- the compositor's own key while a menu is placed.
 const KEY_ESC: u16 = 1;
 /// The key-code tables span evdev KEY_MAX (0x2ff) rounded to a power of two;
@@ -1519,6 +1534,11 @@ pub struct Comp {
     /// carries the unplace + the heal -- so a wedged or dead owner cannot
     /// strand it.
     menu: Option<MenuState>,
+    /// H-3d: the one status bar on the display, if any. While Some the
+    /// layout is recomputed on the display MINUS the bottom strip (the
+    /// carve), `paint_borders` fills the strip `status_bg`, and no leaf is
+    /// Direct-scanned (a leaf is smaller than the display).
+    status: Option<StatusState>,
     /// H-3c round F1: where each pressed KEY went -- packed (slot+1) |
     /// gen<<16, 0 = none -- so a release or a repeat FOLLOWS ITS PRESS (the
     /// chord layer's rule): to the leaf that saw the press across a grab
@@ -2203,6 +2223,7 @@ impl Comp {
             weave_va_next: WEAVE_VA_BASE,
             last_focus: None,
             menu: None,
+            status: None,
             key_owner: [0; KEYCODE_SPAN],
             btn_owner: [0; BTNCODE_SPAN],
             menu_reason: "retire",
@@ -2319,6 +2340,7 @@ impl Comp {
             res_stale: [false; WEAVE_SLOTS as usize],
             chrome_bind: None,
             is_menu: false,
+            is_status: false,
             shown_slot: None,
             comp_attached: false,
             gpu_said: false,
@@ -3605,6 +3627,14 @@ impl Comp {
                 _ => None,
             };
         }
+        if s.is_status {
+            // H-3d: the status bar shows at the bottom strip, and only while
+            // it is the registered one (gen-pinned against slot reuse).
+            return match self.status {
+                Some(st) if st.n == n && st.gen == s.gen => self.status_rect(),
+                _ => None,
+            };
+        }
         if let Some(pid) = s.chrome_bind {
             let slot = self.layout.slot_of_id(pid)?;
             let p = self.layout.get(slot)?;
@@ -3621,13 +3651,27 @@ impl Comp {
         Some(p.content)
     }
 
+    /// H-3d: the status strip -- the display's bottom `status_h` rows
+    /// (Daylight 6/8: == the tag bar's height, one vertical unit) -- while a
+    /// status bar is registered. The layout is recomputed above it.
+    fn status_rect(&self) -> Option<Rect> {
+        self.status?;
+        let unit = libhalcyon::theme::METRICS.status_h as u32;
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        if dh <= unit || dw == 0 {
+            return None;
+        }
+        Some(Rect { x: 0, y: dh - unit, w: dw, h: unit })
+    }
+
     /// Every showable NON-HOSTED surface with its target -- chrome at its
-    /// strip, the placed menu at its rect (H-3c) -- the second half of the
-    /// CONFIGURE + frame fans (`visible_hosted` is the first).
+    /// strip, the placed menu at its rect (H-3c), the status bar at the
+    /// bottom strip (H-3d) -- the second half of the CONFIGURE + frame fans
+    /// (`visible_hosted` is the first).
     fn visible_chrome(&self) -> Vec<(usize, Rect)> {
         let mut out = Vec::new();
         for n in 0..MAX_SURFACES {
-            if self.surf(n).map_or(false, |s| s.chrome_bind.is_some() || s.is_menu) {
+            if self.surf(n).map_or(false, |s| s.chrome_bind.is_some() || s.is_menu || s.is_status) {
                 if let Some(r) = self.surface_target(n) {
                     out.push((n, r));
                 }
@@ -3799,7 +3843,7 @@ impl Comp {
     fn compose_geometry(&mut self, n: usize, x: u32, y: u32, pw: u32, ph: u32) -> Option<ComposeOp> {
         let (sw, sh_full, patchwork, chrome) = match self.surf(n) {
             Some(s) if s.weave.is_some() => {
-                (s.w, s.h, s.patchwork, s.chrome_bind.is_some() || s.is_menu)
+                (s.w, s.h, s.patchwork, s.chrome_bind.is_some() || s.is_menu || s.is_status)
             }
             _ => return None,
         };
@@ -3937,7 +3981,7 @@ impl Comp {
 
     /// `create W H`: the spec's WeaveFirst -- allocate + zero the weave,
     /// create the 2D resource, attach the whole weave as its backing.
-    fn create(&mut self, n: usize, w: u32, h: u32, chrome_bind: Option<u32>, is_menu: bool) -> Result<(), u32> {
+    fn create(&mut self, n: usize, w: u32, h: u32, chrome_bind: Option<u32>, is_menu: bool, is_status: bool) -> Result<(), u32> {
         let (disp_w, disp_h) = (self.gpu.width, self.gpu.height);
         let s = self.surf(n).ok_or(p9::E_BADF)?;
         if s.state != SurfState::Minted {
@@ -3946,6 +3990,15 @@ impl Comp {
         // F9: the dimension bound (a weave is tapestryd's DMA allocation).
         if w == 0 || h == 0 || w > disp_w || h > disp_h {
             return Err(p9::E_INVAL);
+        }
+        // H-3d: ONE status bar per display, exactly the strip's size -- the
+        // display width by the one vertical unit -- never cropped or
+        // letterboxed (HALCYON.md 13.6). Judged before the weave allocation.
+        if is_status {
+            let unit = libhalcyon::theme::METRICS.status_h as u32;
+            if self.status.is_some() || w != disp_w || h != unit || disp_h <= unit {
+                return Err(p9::E_INVAL);
+            }
         }
         // H-3b-2: a chrome binding names a LIVE LEAF (E_NOENT otherwise),
         // judged BEFORE the weave allocation so a bad bind leaks nothing.
@@ -3980,6 +4033,23 @@ impl Comp {
         s.state = SurfState::Woven;
         s.chrome_bind = chrome_bind;
         s.is_menu = is_menu;
+        s.is_status = is_status;
+        let gen = s.gen;
+        if is_status {
+            // H-3d: the status bar is neither hosted nor pane-bound -- its
+            // bind is the display. Registering it carves the layout
+            // (reconcile recomputes on disp_h - status_h: every leaf and tag
+            // bar moves up, structural) and surface_target places it at the
+            // strip, where reconcile fans it its CONFIGURE.
+            self.status = Some(StatusState { n, gen });
+            #[cfg(feature = "test-mode")]
+            say!(
+                "tapestryd: status bar {} created ({}x{}); the display carves {}",
+                n, w, h, libhalcyon::theme::METRICS.status_h
+            );
+            self.reconcile();
+            return Ok(());
+        }
         if is_menu {
             // H-3c: a menu is neither hosted nor placed at create -- it is
             // invisible until its owner's `menu place`, which reconciles.
@@ -4842,6 +4912,24 @@ impl Comp {
         let focused = self.layout.focused;
         let bevel = M.bevel as u32;
         let hair = M.hairline as u32;
+        // H-3d: the status strip's resting fill (`status_bg`, Daylight 6):
+        // the bar is dark from the carve on, before and between the
+        // renderer's presents (its OPAQUE Role::Status surface composites on
+        // top). STRUCTURAL repaints only, as the tag bars: a focus-only
+        // repaint must not paint over the bar's pixels (the strip is its
+        // target rect).
+        if fill_tagbars {
+            if let Some(sr) = self.status_rect() {
+                for y in sr.y..sr.y + sr.h {
+                    for x in sr.x..sr.x + sr.w {
+                        unsafe {
+                            *px.add((y as u64 * dw + x as u64) as usize) = D.status_bg;
+                        }
+                    }
+                }
+                painted.push(sr);
+            }
+        }
         // The ring colour, given the four per-edge distances of a ring pixel.
         // The bevel band mitres by the NEAREST edge, horizontal winning ties
         // -- the top-weighted 45deg corner (section 2.1/2.2). `floor_w` = the
@@ -5134,18 +5222,32 @@ impl Comp {
     fn reconcile(&mut self) {
         self.reap_orphan_chrome();
         let (dw, dh) = (self.gpu.width, self.gpu.height);
-        self.layout.recompute(dw, dh, self.chords.gaps);
+        // H-3d: the carve -- a registered status bar takes the bottom strip
+        // and the layout lives above it (a zoomed leaf too: the bar is the
+        // system's, never a pane's). ONLY the layout: every other use of the
+        // height below (the Direct test, the scanout bind, the CONFIGURE
+        // offers, the reassert rect) is the DISPLAY's -- shadowing `dh` with
+        // the carved height bound the display at 1280x780 and the strip was
+        // never scanned out (the lever's first pixel read).
+        let layout_h = match self.status_rect() {
+            Some(sr) => dh - sr.h,
+            None => dh,
+        };
+        self.layout.recompute(dw, layout_h, self.chords.gaps);
         let vis = self.layout.visible_hosted();
         let nleaves = self.layout.visible_leaf_count();
 
         // H-3c round F2: a placed menu is a visible thing with nothing under
         // it too -- Off would leave an invisible grab.
-        let want = if vis.is_empty() && nleaves <= 1 && self.menu.is_none() {
+        // H-3d: a status bar is a visible thing too (Off would hide it), and a
+        // leaf above the carve is smaller than the display (Direct is a
+        // display-sized weave): both arms need no bar.
+        let want = if vis.is_empty() && nleaves <= 1 && self.menu.is_none() && self.status.is_none() {
             match self.scanout {
                 Scanout::Boot => Scanout::Boot,
                 _ => Scanout::Off,
             }
-        } else if vis.len() == 1 && nleaves == 1 && self.menu.is_none() {
+        } else if vis.len() == 1 && nleaves == 1 && self.menu.is_none() && self.status.is_none() {
             // H-3c: a placed menu is a second visible thing -- it composes
             // over the leaf, so Direct is off while one is up.
             let n = vis[0].1;
@@ -5707,6 +5809,13 @@ impl Comp {
             }
             _ => None,
         };
+        // H-3d: the registered status bar dies with its surface: the carve
+        // is released (the reconcile below recomputes on the full display,
+        // structural) and the strip is floor again.
+        if self.status.map_or(false, |st| st.n == n) {
+            self.status = None;
+            say!("tapestryd: status bar {} retired; the display returns", n);
+        }
         // A stale last_focus naming this slot would suppress the gained
         // event for a FUTURE surface minted into it -- clear it (the
         // reconcile below re-emits for whatever takes focus).
@@ -11714,6 +11823,8 @@ impl Conn {
                     Some((P_LAYOUT, 0))
                 } else if name == b"pane" {
                     Some((P_PANE_DIR, 0))
+                } else if name == b"statusbar" {
+                    Some((P_STATUSBAR, 0))
                 } else {
                     None
                 }
@@ -12191,6 +12302,14 @@ impl Conn {
             // the composed string to the fid (text_snaps), so a
             // multi-read cannot straddle a mutation.
             let s = comp.layout.render_text();
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
+        }
+        if f.path == P_STATUSBAR {
+            // H-3d: the status strip the layout is carved for -- "x y w h",
+            // zeros when no bar is registered (the file always exists).
+            let r = comp.status_rect().unwrap_or(Rect::ZERO);
+            let mut s = String::new();
+            let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", r.x, r.y, r.w, r.h));
             return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
         }
         if is_pane(f.path) {
@@ -14189,6 +14308,7 @@ impl Conn {
                         Some(Role::Content) => Role::Content,
                         Some(Role::Chrome) => Role::Chrome,
                         Some(Role::Menu) => Role::Menu,
+                        Some(Role::Status) => Role::Status,
                         _ => return Err(p9::E_INVAL), // pin-target is a pane role
                     };
                 } else if let Some(b) = tok.strip_prefix("bind=") {
@@ -14197,13 +14317,23 @@ impl Conn {
                     return Err(p9::E_INVAL);
                 }
             }
-            let (chrome_bind, is_menu) = match (role, bind) {
-                (Role::Content, None) => (None, false),
+            let (chrome_bind, is_menu, is_status) = match (role, bind) {
+                (Role::Content, None) => (None, false, false),
                 (Role::Chrome, Some(pid)) => {
                     if !self.peer_is_renderer() {
                         return Err(p9::E_PERM);
                     }
-                    (Some(pid), false)
+                    (Some(pid), false, false)
+                }
+                // H-3d: the status bar takes no bind (its bind is the
+                // display); renderer-gated like every chrome -- an ungated
+                // status role would let any client carve the display and
+                // own the one bar that speaks for the system.
+                (Role::Status, None) => {
+                    if !self.peer_is_renderer() {
+                        return Err(p9::E_PERM);
+                    }
+                    (None, false, true)
                 }
                 // H-3c: a menu takes no bind (the compositor places it at
                 // `menu place`); renderer-gated like chrome -- an ungated
@@ -14213,11 +14343,11 @@ impl Conn {
                     if !self.peer_is_renderer() {
                         return Err(p9::E_PERM);
                     }
-                    (None, true)
+                    (None, true, false)
                 }
-                _ => return Err(p9::E_INVAL), // chrome needs a bind; content + menu take none
+                _ => return Err(p9::E_INVAL), // chrome needs a bind; content, menu + status take none
             };
-            return comp.create(n, w, h, chrome_bind, is_menu);
+            return comp.create(n, w, h, chrome_bind, is_menu, is_status);
         }
         if s == "destroy" {
             comp.retire(n);
@@ -14926,6 +15056,7 @@ impl Conn {
                 names.push((b"ctl".to_vec(), P_CTL));
                 names.push((b"surface".to_vec(), P_SURF_DIR));
                 names.push((b"layout".to_vec(), P_LAYOUT));
+                names.push((b"statusbar".to_vec(), P_STATUSBAR));
                 names.push((b"pane".to_vec(), P_PANE_DIR));
             }
             P_PANE_DIR => {

@@ -7606,3 +7606,52 @@ host 55/55, beacon 35/35, every libtapestry client builds; ls-halcyon on the
 lever PASS [114 s] (38 lines, both EVENT SET lines, both swallow edges, 0
 WEDGED); the default set on restored fixtures: panes PASS [42 s] 31, age [40 s] 3, font [67 s] 5, live [73 s] 5, mode [60 s] 9, mp [44 s] 3, osd [31 s] 7, osd-persist [57 s] 6, osd-push [34 s] 5 witness lines, 0 fails. The close
 is NOT dirty by the count rule; its residue rides the H-3d round.
+
+### H-3d: the status bar -- the carve, the directory nobody reported, and the boot check that caught the emission (same run; the operator back)
+
+The design went to scripture first (`a47b1a57`), with the two decisions the
+operator took in the room: the working directory comes from ut as OSC 7
+now (an ABI addition, signed off) rather than waiting or parsing the prompt,
+and the workspace slot shows one filled indicator until H-4 supplies the
+list. The placement was mine to call and followed the tag-bar precedent one
+level up: `role=status`, renderer-gated, one per display, exactly the
+strip's size, and the layout recomputed on the display minus the strip
+while the bar exists. One consequence surfaced only when the arithmetic was
+written down: a leaf above the carve is smaller than the display, so Direct
+scanout is impossible with a bar -- the console composes whenever halcyond
+runs, as it already did behind a menu and in every split. That is the price
+of a bar that belongs to the system, recorded as such.
+
+"Last command" had no producer-side source either: the wire's `command`
+zone is reserved and the prompt block holds prompt and typed line as one
+run. Parsing the prompt at the sink would have been exactly the TermKit
+inversion the Beacon thesis refuses. The growth policy sanctions a new mark
+kind, so ut now marks the accepted line as the output zone's FIRST child
+(the exit mark is its last): the zone knows what ran and how it ended, and
+the bar shows the RUNNING command while the zone is open.
+
+The first lever boot extincted at ten seconds, before the renderer ever
+spawned: `u-repl-test` holds ut to the P1 property at every boot --
+stripping every frame from the rich stream must yield the plain emission
+byte for byte -- and the OSC 7 report is a rich-only emission that is not a
+1936 frame, so the stripper passed it through and the streams differed. The
+stripper now removes the report too (a wire test pins ST, BEL, an
+unterminated tail, and that another foreign OSC still passes). A boot check
+written for a different emitter two chunks ago caught a wire addition on
+its first boot; that is what the P1 property is for. A smaller catch of the
+same shape: the scripture commit's status-doc edit never persisted (its stat
+showed two files, not three) -- check a commit's stat against the intended
+file list, not the edit script's print.
+
+Two more catches from the lever, both of the kind a pixel gate exists for.
+The strip was carved but never displayed: the carve had shadowed the
+display height for the whole of `reconcile`, so the scanout was bound at
+1280x780 and the bottom rows never reached the device -- the screendump's
+own size said so. And the bar's test-mode diagnostic line, said after
+every paint, landed in the transcript after every command (the observer
+effect) and shifted the row the H-3c keyboard leg keys on; it is now said
+only when the slot geometry moves, which is exactly when the witness needs
+it.
+
+Verified: ls-halcyon on the THYLACINE_HALCYON=1 lever PASS [116 s] (45 witness lines: the 5 status-bar legs + the 3 wire/context tgreps new; the census leg now expects the console + the bar; 0 WEDGED); default fixtures restored (0 lever lines): panes PASS [42 s] 32 (+1: the statusbar file), age [40 s] 3, font [67 s] 5, live [73 s] 5, mode [60 s] 9, mp [44 s] 3, osd [30 s] 7, osd-persist [57 s] 6, osd-push [34 s] 5 witness lines, 0 fails. NEXT: the H-3d audit round (the new AUDIT-TRIGGERS
+row; the H-3c-2 ROUND 2 FOCUS carried), then H-4.

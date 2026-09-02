@@ -59,6 +59,7 @@ macro_rules! say {
 
 mod chromeset;
 mod menuset;
+mod statusset;
 
 /// evdev BTN_LEFT (the tapestry PTR_BTN `code`).
 const BTN_LEFT: u16 = 0x110;
@@ -338,6 +339,9 @@ pub extern "C" fn rs_main() -> i64 {
     };
     say!("halcyond: {} verb rules loaded", rules.len());
     let mut menus = menuset::MenuSet::new(ring.clone());
+    // H-3d: the status bar -- one Role::Status surface on the same ring,
+    // minted once the console is up (step 0d).
+    let mut status = statusset::StatusBar::new(ring.clone());
     let mut frame: Vec<(u64, i32, i32)> = Vec::new();
     let mut last_open_laid: Option<LaidBlock> = None;
     let mut ptr: (i32, i32) = (0, 0);
@@ -613,6 +617,16 @@ pub extern "C" fn rs_main() -> i64 {
                     }
                 }
             }
+            // (0d') H-3d: the status bar. Minted once the console is up
+            // (never before it: first-present-wins), pumped per pass; its
+            // model is re-derived per pass from the sources -- the focused
+            // leaf's name + status (the last reconcile), the console's
+            // directory + running-or-last command (the transcript), the
+            // minute -- and painted only on a change.
+            status.ensure();
+            status.pump();
+            let sm = statusset::model_from(chrome.focused(), chrome.own_pane(), t.cwd(), t.last_command());
+            status.refresh(&sm, &mut gs);
         }
 
         // (0e) H-3c: the menu. A choice closes it from this side and types

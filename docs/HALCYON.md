@@ -827,11 +827,14 @@ RATIFIED (H-3d design, 2026-09-02; the operator present -- two votes below):
   ABI addition, signed off): "OSC 7 from ut now" over "program + last command
   only" or "parse the prompt".** ut emits the de-facto standard cwd report
   (`ESC ] 7 ; file://localhost<cwd> ST`) at every prompt, inside the prompt
-  zone; the shared VT core recognizes OSC 7 and reports it; the transcript
-  records the session's current directory (the latest report) and the last
-  command (the most recent command zone's text). Aurora keeps ignoring it.
-  BEACON.md 12.11 is the wire record; it is NOT a Beacon op (the 1936
-  registry stays closed) -- it is the one foreign OSC the sinks interpret.
+  zone; the transcript's own escape scanner recognizes OSC 7 and records
+  the session's current directory (the latest report). The last command
+  comes from ut too, as `mark k=cmd;text=<line>` -- the output zone's FIRST
+  child (the exit mark is its last), the registry's one v1 amendment
+  (BEACON.md 12.2, the growth policy) -- so the bar shows the RUNNING
+  command while the zone is open and the last one after. Aurora keeps
+  ignoring both. BEACON.md 12.11 is OSC 7's wire record; it is not a Beacon
+  op -- the one foreign OSC the sinks interpret.
 - **halcyond paints the bar on its ONE ring** (`Surface::status_on`, the
   H-3c-2 event set): a `status` lib module (the four-slot cartoon list; host
   tests for the layout arithmetic and the truncation order -- the context
@@ -848,6 +851,26 @@ RATIFIED (H-3d design, 2026-09-02; the operator present -- two votes below):
   `usr/tapestryd/src/server.rs` + a display-level carve (every surface's
   geometry moves); the round at H-3d's close carries the H-3c-2 ROUND 2
   FOCUS (the doubled-cadence rule).
+
+AS-BUILT (H-3d, 2026-09-02): as ratified, with three details the build
+fixed. The unit is the theme's own `status_h` (20, == `header_h`; Daylight
+8's one vertical unit), so a display shorter than 21 rows or a bar of any
+other size is refused. With the bar registered a single leaf is smaller
+than the display, so the console is never Direct-scanned while halcyond
+runs -- it composes, as it does behind a placed menu and in every split:
+the price of a bar that belongs to the system. The context slot truncates
+at its RIGHT with an ellipsis (the name proportional, the directory and the
+command monospace islands); the workspace indicator is the one ember box
+with its number in the bar's own dark; the condition is an 8px dot in the
+key colour (sage / cinnabar / `status_idle`) with its word; the clock is
+UTC (the RTC's zone; no zone database yet). halcyond re-derives the model
+every pass and paints only on a change (the pane tree's focus and status
+via the chrome reconcile, the transcript's directory and command, the
+minute). The lever's leg: the compositor's `statusbar` rect equals the
+bottom strip of ctl's display; both ends `status_bg`; the ember indicator;
+the condition dot cinnabar after `cat /nonexistent` and sage after a
+passing command, at the slot the `painted` line names; the context shows
+the directory after `cd` and the last command.
 
 **obj interaction (H-3c).** Keyboard-first (§6 makes the mouse secondary):
 Esc-normal -> select an obj run -> a key opens its verb menu. Click-to-focus +

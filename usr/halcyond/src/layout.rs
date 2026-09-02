@@ -644,6 +644,7 @@ pub fn layout_pending(
         kind: BlockKind::Foreign,
         continuation: false,
         exit: None,
+        cmd: None,
         items: alloc::vec![Item::Line(crate::transcript::Line { cells: cells.to_vec() })],
         styles: styles.to_vec(),
         objs: Vec::new(),

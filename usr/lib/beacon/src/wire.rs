@@ -375,12 +375,28 @@ pub fn parse(input: &[u8]) -> Vec<Event> {
 
 /// The P1 tool: every payload byte, no frames. `strip(realize(Rich)) ==
 /// realize(None)` byte-identical is the property every emitter is held to.
+/// The rich realization also carries ut's OSC 7 working-directory report
+/// (BEACON.md 12.11) -- a rich-only emission that is not a 1936 frame and
+/// passes `parse` as payload -- so the stripper removes it too; a report
+/// unterminated at the stream's end stays, as an unterminated frame does.
 pub fn strip(input: &[u8]) -> Vec<u8> {
-    let mut out: Vec<u8> = Vec::new();
+    let mut text: Vec<u8> = Vec::new();
     for ev in parse(input) {
         if let Event::Text(t) = ev {
-            out.extend_from_slice(&t);
+            text.extend_from_slice(&t);
         }
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if text[i] == 0x1b && text[i + 1..].starts_with(b"]7;") {
+            if let Some((_, next)) = osc_end(&text, i) {
+                i = next;
+                continue;
+            }
+        }
+        out.push(text[i]);
+        i += 1;
     }
     out
 }
@@ -394,6 +410,17 @@ mod tests {
         let mut v = Vec::new();
         open(&mut v, op, args);
         v
+    }
+
+    #[test]
+    fn strip_removes_the_cwd_report_too() {
+        // H-3d: OSC 7 is a rich-only emission (12.11), so the P1 tool strips
+        // it -- ST- and BEL-terminated -- and keeps every other byte; an
+        // unterminated report at the end stays, like an unterminated frame.
+        let rich = b"a\x1b]7;file://localhost/lib/aurora\x1b\\b\x1b]7;file:///x y\x07c\x1b]1936;v1;zone;k=prompt\x1b\\d";
+        assert_eq!(strip(rich), b"abcd");
+        assert_eq!(strip(b"keep \x1b]7;file://localhost/unterminated"), b"keep \x1b]7;file://localhost/unterminated");
+        assert_eq!(strip(b"\x1b]7770;aurora;k;v\x1b\\z"), b"\x1b]7770;aurora;k;v\x1b\\z", "another foreign OSC passes through");
     }
 
     #[test]

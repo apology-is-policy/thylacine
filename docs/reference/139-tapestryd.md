@@ -904,7 +904,20 @@ server retires a still-Minted surface when its last ctl fid clunks
 (`fid_clunk`) -- the pool's accounting is the server's, not the client's
 courtesy. `Drop` order is now by field order (an `OwnedFd` newtype; the
 session root last).
-**Event reads are single-shot,
+**The status bar (H-3d, 2026-09-02).** `create W H role=status` (renderer-
+gated; no bind -- the display is the bind; one per display; W == the
+display width and H == the theme's `status_h`, else E_INVAL) registers
+`Comp.status` {n, gen}: `reconcile` recomputes the layout on `disp_h -
+status_h` (the carve: a zoomed leaf too), `surface_target`'s status arm
+places the surface at `status_rect()` = the bottom strip, `visible_chrome`
+fans it CONFIGUREs with the other chrome, `paint_borders` fills the strip
+`status_bg` at every structural repaint (the resting fill), and both the
+Off and the Direct arms of `reconcile`'s `want` require no bar (a leaf
+above the carve is smaller than the display). `retire`'s status arm
+releases the carve. The global file `statusbar` reads `x y w h` (zeros with
+no bar). The battery probes the gate (`role=status` from a non-renderer ->
+E_PERM; with a bind -> E_INVAL) and reads the empty file; the positive twin
+is ls-halcyon's leg. **Event reads are single-shot,
 re-armed after each drain** — a multishot READ re-arms into the same
 registered slice, so an undrained shot would be overwritten (droppable for
 FRAME, a lost KEY otherwise); the multishot + provided-buffer-pool client

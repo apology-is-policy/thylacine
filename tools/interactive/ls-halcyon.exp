@@ -64,6 +64,20 @@ proc region {x0 y0 x1 y1 {r 242} {g 235} {b 224}} {
     return $verdict
 }
 
+proc strip_want {x0 y0 x1 y1 r g b what want_ink} {
+    set v ""
+    for {set i 0} {$i < 12} {incr i} {
+        set v [region $x0 $y0 $x1 $y1 $r $g $b]
+        if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off tot dr dg db]} {
+            if {$dr == $r && $dg == $g && $db == $b && (!$want_ink || $off > 0)} {
+                return "$off $tot"
+            }
+        }
+        after 500
+    }
+    lc_fail "$what: region $x0,$y0-$x1,$y1 never read dominant $r,$g,$b (want_ink=$want_ink; last: $v)"
+}
+
 lc_boot
 
 # The renderer probe: joey names its choice in the boot stream. Aurora =>
@@ -127,6 +141,68 @@ lc_pass "halcyon: parchment ground + ink ($off/$total non-ground px, dom $dr,$dg
 # kernel-visible witness of the CONFIGURE path end to end.
 lc_run_expect "cat /dev/winsize" "winsize 128 "
 lc_pass "halcyon: full-width mono grid reported (128 cols)"
+
+# H-3d: THE STATUS BAR (HALCYON.md 13.6; Daylight 6). halcyond mints ONE
+# Role::Status surface once the console is up; the compositor carves the
+# display's bottom 20 rows for it and places it there. The compositor's
+# `statusbar` file is the rect (its own fact, read off ctl's display size);
+# halcyond's `painted` line says where the four slots landed (it reaches the
+# serial like every say line; the transcript mirror is harmless -- the bar
+# is outside the transcript). Pixels: the strip's left end is the bar's own
+# dark (status_bg 26,18,10) and the active workspace indicator is ember
+# (224,120,64) -- colours nothing else on this screen is painted -- and the
+# condition dot follows the console's last exit: cinnabar (152,40,24) after
+# a failing command (a quiet `grep -q` miss: exit 1 with no operand error --
+# the sanity control below greps for that wording), sage (30,88,68) after a
+# passing one, in step with the live tile. The context slot carries the console's directory (ut's OSC 7)
+# and its running-or-last command (ut's cmd mark) -- checked at the end by
+# tgrep, order-independent.
+lc_send "cat /dev/tapestry/ctl"
+set dispw 0; set disph 0
+expect {
+    -re {display (\d+) (\d+)[\r\n]} { set dispw $expect_out(1,string); set disph $expect_out(2,string) }
+    timeout { lc_fail "no display line from the tapestry ctl" }
+}
+lc_send "cat /dev/tapestry/statusbar"
+expect {
+    -re {[\r\n\\](\d+) (\d+) (\d+) (\d+)[\r\n]} {
+        set sx $expect_out(1,string); set sy $expect_out(2,string); set sw $expect_out(3,string); set sh $expect_out(4,string)
+    }
+    timeout { lc_fail "no rect from the statusbar file" }
+}
+if {$sx != 0 || $sw != $dispw || $sh != 20 || $sy != $disph - 20} {
+    lc_fail "statusbar rect $sx $sy $sw $sh is not the bottom strip of ${dispw}x${disph}"
+}
+lc_pass "halcyon: the compositor carved the status strip ($sx $sy $sw $sh of ${dispw}x${disph})"
+set smid [expr {$sy + 10}]
+strip_want 1 [expr {$sy + 2}] 6 [expr {$sy + 18}] 26 18 10 "status bar left end (status_bg)" 0
+strip_want [expr {$dispw - 6}] [expr {$sy + 2}] [expr {$dispw - 1}] [expr {$sy + 18}] 26 18 10 "status bar right end (status_bg)" 0
+strip_want 9 [expr {$sy + 5}] 13 [expr {$sy + 15}] 224 120 64 "the active workspace indicator (ember)" 0
+lc_pass "halcyon: the status bar is dark at both ends with the ember workspace indicator at the left"
+# A failing command -> the live tile AND the bar's condition go cinnabar
+# (the same record); a passing one -> sage. The painted line carries the
+# condition slot's rect (the dot is its left 8px).
+proc status_painted {want_cond what} {
+    global timeout lc_cmd_timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -re "halcyond: status bar (\\d+) painted ws \\\[(\\d+) (\\d+)\\\] ctx \\\[(\\d+) (\\d+)\\\] cond \\\[(\\d+) (\\d+)\\\] clock \\\[(\\d+) (\\d+)\\\] context \"(\[^\"\]*)\" condition $want_cond" {
+            return [list $expect_out(6,string) $expect_out(7,string) $expect_out(10,string)]
+        }
+        timeout { lc_fail "$what: no status bar painted line with condition $want_cond" }
+    }
+}
+lc_send "grep -q h3d-not-there /lib/beacon/verbs"
+set p [status_painted Err "after a failing command"]
+set cx [lindex $p 0]
+strip_want [expr {$cx + 1}] [expr {$smid - 3}] [expr {$cx + 7}] [expr {$smid + 3}] 152 40 24 "condition dot after a failing command (cinnabar)" 0
+lc_pass "halcyon: the bar's condition went cinnabar with the failing command (context \"[lindex $p 2]\")"
+lc_send "cd /lib/aurora; ls; pwd"
+set p [status_painted Ok "after a passing command"]
+strip_want [expr {$cx + 1}] [expr {$smid - 3}] [expr {$cx + 7}] [expr {$smid + 3}] 30 88 68 "condition dot after a passing command (sage)" 0
+lc_pass "halcyon: the bar's condition went sage with the passing command (context \"[lindex $p 2]\")"
+lc_run_expect "pwd" "/lib/aurora"
+lc_run_expect "cd; pwd" "/home/michael"
 
 # H-3c: THE KEYBOARD PATH (HALCYON.md 13.6 "obj interaction"; 5/6). `ls
 # /lib/aurora; pwd` leaves a path obj run on the row above the newest; Esc
@@ -302,19 +378,6 @@ lc_pass "halcyon: Daylight NNW bevel painted (left 226,214,192 != top 248,242,23
 # WITH INK (the name "halcyon" in fg) and the ember_deep separator; its
 # hairline stays header (no status shows where input is not). Retried: the
 # chrome lands a relayout after the split's CONFIGURE.
-proc strip_want {x0 y0 x1 y1 r g b what want_ink} {
-    set v ""
-    for {set i 0} {$i < 12} {incr i} {
-        set v [region $x0 $y0 $x1 $y1 $r $g $b]
-        if {[regexp {^(\d+) (\d+) (\d+) (\d+) (\d+)$} $v -> off tot dr dg db]} {
-            if {$dr == $r && $dg == $g && $db == $b && (!$want_ink || $off > 0)} {
-                return "$off $tot"
-            }
-        }
-        after 500
-    }
-    lc_fail "$what: region $x0,$y0-$x1,$y1 never read dominant $r,$g,$b (want_ink=$want_ink; last: $v)"
-}
 set ink [strip_want 8 6 300 22 206 196 182 "left strip interior" 1]
 lc_pass "halcyon: left tag bar is Daylight header with name ink ($ink off/total)"
 strip_want 8 23 300 24 200 96 48 "left strip separator (resting, active tile -> ember_deep)" 0
@@ -636,13 +699,15 @@ for {set i 0} {$i < 6} {incr i} {
         timeout { lc_fail "no `surfaces N` line from /dev/tapestry/ctl" }
         eof     { lc_fail "EOF reading the ctl census" }
     }
-    if {$census == 1} break
+    if {$census == 2} break
     after 1000
 }
-if {$census != 1} {
-    lc_fail "surfaces $census after the zoom: dropped shared-session surfaces leaked server-side (want 1 = the console)"
+# H-3d: the status bar is the second surface (the console + the bar); a
+# leaked tag bar or menu would make it 3.
+if {$census != 2} {
+    lc_fail "surfaces $census after the zoom: dropped shared-session surfaces leaked server-side (want 2 = the console + the status bar)"
 }
-lc_pass "halcyon: the zoom's dropped tag bars + every menu retired server-side (surfaces 1)"
+lc_pass "halcyon: the zoom's dropped tag bars + every menu retired server-side (surfaces 2: the console + the status bar)"
 
 lc_quit
 
@@ -660,6 +725,9 @@ tgrep "halcyond: console up" "halcyond brought up the transcript surface"
 tgrep "ut: beacon rich exported" "the rich canary (the F7 transport half, real advertisement)"
 tgrep "transcript zones armed" "ut armed the transcript zones"
 tgrep "1936;v1;table" "ls -l emitted the rich table frames on the wire"
+tgrep "7;file://localhost/lib/aurora" "ut reported the working directory as OSC 7 (H-3d)"
+tgrep "1936;v1;mark;k=cmd;text=grep -q h3d-not-there /lib/beacon/verbs" "ut marked the accepted command as the output zone's first child (H-3d)"
+tgrep "context \"halcyon.*/lib/aurora.*pwd\" condition Ok" "the status bar showed the console's directory and last command (H-3d)"
 tgrep "1936;v1;obj" "ls emitted obj presentation frames on the wire"
 tgrep "1936;v1;zone" "ut emitted zone frames on the wire (the F7 zone half)"
 # The Thylacine wording, NOT the generic "no such file": the boot-time

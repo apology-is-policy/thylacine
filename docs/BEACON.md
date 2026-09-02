@@ -350,7 +350,7 @@ Normative rules, each load-bearing:
 | Op | Kind | Args | Notes |
 |---|---|---|---|
 | `zone` | paired | `k=prompt \| command \| output` | Emitted by the SHELL only (§12.6). `prompt` wraps prompt + line-editing echo (the OSC 133 A..C region); `output` wraps the command's whole output. `command` is RESERVED in v1 (ut echoes into the prompt zone; a shell that re-echoes the accepted line may wrap it later). |
-| `mark` | point | `k=exit;code=<i64>` | The command-completion mark (OSC 133 `D;exit` analog). Emitted as the LAST child of the `output` zone, immediately before its close (amended at H-1c-2, §12.5 deviation 8: containment beats a floating between-zones mark — the renderer needs no backward association). |
+| `mark` | point | `k=exit;code=<i64>` \| `k=cmd;text=<line>` | The command-completion mark (OSC 133 `D;exit` analog). Emitted as the LAST child of the `output` zone, immediately before its close (amended at H-1c-2, §12.5 deviation 8: containment beats a floating between-zones mark — the renderer needs no backward association). **v1 amendment (H-3d, 2026-09-02): `k=cmd;text=<line>`** — the ACCEPTED command line, emitted by the shell as the output zone's FIRST child (the zone knows what ran and how it ended); `text` percent-escaped, truncated by the emitter to the value cap at a char boundary; a sink shows it (the status bar's context), never parses the prompt for it. |
 | `table` | paired | `cols=<spec>;hdr=0\|1` | `<spec>` = one char per column, `l`/`r`/`c` alignment (e.g. `cols=lrrl`). `hdr=1` ⇒ the first `row` is a header row. |
 | `row` | paired | — | Direct child of `table`. The row's payload newline is ordinary stream bytes after the close. |
 | `cell` | paired | — | Direct child of `row`. The plain-stream realization between cells (spaces/padding) is payload OUTSIDE the cell frames — so stripping yields the aligned plain table. |
@@ -631,15 +631,22 @@ OSC 7 ; file://localhost<cwd> ST            ; ESC ] 7 ; file://localhost/lib/aur
 ```
 
 -- the form iTerm2, VTE, foot, WezTerm and kitty read. `<cwd>` is the
-absolute, cleaned path; the host is `localhost` (a foreign sink that checks
-the host against its own treats `localhost` as local); the terminator is ST
-(sinks accept BEL, as for every OSC). The 1936 registry stays CLOSED: this
-is the ONE foreign OSC Beacon's sinks INTERPRET rather than pass through --
-the shared VT core (`usr/lib/vt`) recognizes `7` and reports the path; the
-transcript records the session's current directory (the latest report);
-aurora keeps ignoring it (its parser swallowed unknown OSC before and its
-consumer takes no action on the new report). The path is untrusted text at
+absolute path, percent-encoded outside RFC 3986's unreserved set and `/`;
+the host is `localhost` (a foreign sink that checks the host against its
+own treats `localhost` as local); the terminator is ST (sinks accept BEL, as
+for every OSC). No new Beacon OP: this is the ONE foreign OSC Beacon's sinks
+INTERPRET rather than pass through -- halcyond's transcript scanner (its
+own escape scanner; the VT crate lends it only the palette and pen)
+recognizes `7` and records the session's current directory (the latest
+report; ours only when the host is empty or `localhost`; the path decoded,
+absolute, control-free, else the report is dropped whole); aurora keeps
+ignoring it (its parser swallowed unknown OSC before). The registry's one
+v1 amendment for the same slot is `mark k=cmd` (12.2). The path is untrusted text at
 the sink: bounded like every OSC body (the 256-byte `osc_buf`; oversize is
 dropped whole, never truncated into a different path), rendered literal in
 the monospace face, never resolved, never executed. ut's emission rides the
-same emission gate as its zones (12.4): a non-Beacon sink never sees it.
+same emission gate as its zones (12.4): a non-Beacon sink never sees it --
+and `wire::strip`, the P1 tool, removes it along with the frames, so 12.1
+rule 1 (`strip(realize(Rich)) == realize(None)`, byte-identical) holds with
+the report in the stream (the in-guest `u-repl-test` holds ut to it at every
+boot; the H-3d build's first boot failed exactly there).

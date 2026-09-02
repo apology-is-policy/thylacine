@@ -173,6 +173,61 @@ impl Repl {
         }
     }
 
+    /// H-3d (BEACON.md 12.11): the working-directory report -- OSC 7 with
+    /// the session's cwd as a `file://localhost` URL, at every prompt inside
+    /// its zone. The terminal world's de-facto standard, not a Beacon op;
+    /// it rides the zones' gate, so a plain sink never sees it.
+    fn cwd_report(&self, out: &mut dyn IoWrite) {
+        if self.beacon_rich {
+            let cwd = self.env.cwd();
+            let cwd = if cwd.is_empty() { "/" } else { cwd };
+            let mut v: Vec<u8> = Vec::with_capacity(cwd.len() + 32);
+            v.extend_from_slice(b"\x1b]7;file://localhost");
+            for &b in cwd.as_bytes() {
+                // RFC 3986: the unreserved set + the path separator pass;
+                // everything else percent-encodes (the sink decodes).
+                if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+                    v.push(b);
+                } else {
+                    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                    v.push(b'%');
+                    v.push(HEX[(b >> 4) as usize]);
+                    v.push(HEX[(b & 15) as usize]);
+                }
+            }
+            v.extend_from_slice(b"\x1b\\");
+            let _ = out.write_all(&v);
+        }
+    }
+
+    /// H-3d (BEACON.md 12.2, the v1 amendment): the accepted command line as
+    /// the output zone's FIRST child (`mark k=cmd`; the exit mark is its
+    /// last), so the zone knows what ran and how it ended and a sink never
+    /// parses the prompt for it. Truncated at a char boundary to the wire's
+    /// value cap (the parser drops an oversize frame whole).
+    fn mark_cmd(&self, out: &mut dyn IoWrite, line: &str) {
+        if self.beacon_rich {
+            let mut end = 0usize;
+            let mut acc = 0usize;
+            for (i, ch) in line.char_indices() {
+                let n = ch.len_utf8();
+                let l = beacon::wire::escaped_len(&line[i..i + n]);
+                if acc + l > beacon::wire::VALUE_MAX {
+                    break;
+                }
+                acc += l;
+                end = i + n;
+            }
+            let mut v: Vec<u8> = Vec::new();
+            beacon::wire::point(
+                &mut v,
+                beacon::wire::Op::Mark,
+                &[("k", "cmd"), ("text", &line[..end])],
+            );
+            let _ = out.write_all(&v);
+        }
+    }
+
     fn mark_exit(&self, out: &mut dyn IoWrite, code: i64) {
         if self.beacon_rich {
             let mut v: Vec<u8> = Vec::new();
@@ -474,6 +529,7 @@ impl Repl {
         // open zone -- only this entry point and the accept arm's tail open
         // one, so line editing never spawns zones per keystroke.
         self.zone_open(out, beacon::sink::Zone::Prompt);
+        self.cwd_report(out);
         let _ = out.write_all(self.editor.render(&self.prompt()).as_bytes());
         let _ = out.flush();
     }
@@ -520,6 +576,7 @@ impl Repl {
                     // without ut ever touching them.
                     self.zone_close(out);
                     self.zone_open(out, beacon::sink::Zone::Output);
+                    self.mark_cmd(out, &line);
                     // R3-F1: drain notes BEFORE evaluating the line. A Ctrl-C
                     // pressed while idle at the prompt queues an `interrupt`
                     // note; left in the queue, the next command's
@@ -567,6 +624,7 @@ impl Repl {
                     self.mark_exit(out, self.env.status() as i64);
                     self.zone_close(out);
                     self.zone_open(out, beacon::sink::Zone::Prompt);
+                    self.cwd_report(out);
                     self.emit_prompt(out);
                     // H-2 F10: one completed cycle -- the caller's cue to
                     // re-check the renderer tier before this fresh prompt
@@ -872,6 +930,53 @@ mod tests {
             }
         }
         (repl, exit, sink)
+    }
+
+    #[test]
+    fn a_rich_prompt_reports_the_cwd_as_osc7_inside_its_zone() {
+        // H-3d: the report follows the prompt zone's open (inside it) and
+        // names the session's cwd as a file://localhost URL; a plain-tier
+        // sink sees neither.
+        let mut repl = Repl::new();
+        repl.set_beacon_rich(true);
+        let mut sink: Vec<u8> = Vec::new();
+        repl.draw_prompt(&mut sink);
+        let s = String::from_utf8_lossy(&sink).into_owned();
+        let zone = s.find("\x1b]1936;v1;zone;k=prompt\x1b\\").expect("the prompt zone");
+        let osc7 = s.find("\x1b]7;file://localhost").expect("the cwd report");
+        assert!(osc7 > zone, "the report rides inside the prompt zone");
+        let cwd = repl.env().cwd();
+        let want = if cwd.is_empty() { "/" } else { cwd };
+        let tail = &s[osc7..];
+        assert!(
+            tail.starts_with(&alloc::format!("\x1b]7;file://localhost{}\x1b\\", want)),
+            "report {:?} names the cwd {:?}",
+            &tail[..tail.len().min(48)],
+            want
+        );
+        let mut plain = Repl::new();
+        let mut psink: Vec<u8> = Vec::new();
+        plain.draw_prompt(&mut psink);
+        assert!(!String::from_utf8_lossy(&psink).contains("\x1b]7;"), "plain tier: no report");
+    }
+
+    #[test]
+    fn accept_marks_the_command_first_in_the_output_zone() {
+        // H-3d: `mark k=cmd;text=<line>` is the output zone's FIRST child
+        // (the exit mark is its last): the zone knows what ran.
+        let mut repl = Repl::new();
+        repl.set_beacon_rich(true);
+        let mut sink: Vec<u8> = Vec::new();
+        let _ = repl.feed(b"let x = 1\n", &mut sink);
+        let s = String::from_utf8_lossy(&sink).into_owned();
+        let open = "\x1b]1936;v1;zone;k=output\x1b\\";
+        let at = s.find(open).expect("the output zone");
+        let mark = s.find("\x1b]1936;v1;mark;k=cmd;text=let x = 1\x1b\\").expect("the cmd mark");
+        assert_eq!(mark, at + open.len(), "the first child of the output zone");
+        let mut plain = Repl::new();
+        let mut psink: Vec<u8> = Vec::new();
+        let _ = plain.feed(b"let x = 1\n", &mut psink);
+        assert!(!String::from_utf8_lossy(&psink).contains("k=cmd"), "plain tier: no mark");
     }
 
     #[test]

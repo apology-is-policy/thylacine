@@ -99,6 +99,10 @@ pub struct Block {
     /// per-block line cap froze it mid-zone).
     pub continuation: bool,
     pub exit: Option<i64>,
+    /// H-3d: the command this OUTPUT block ran -- ut's `mark k=cmd`, the
+    /// zone's first child (BEACON.md 12.2); None for a prompt / foreign
+    /// block, or an output zone from a shell that does not mark.
+    pub cmd: Option<String>,
     pub items: Vec<Item>,
     pub styles: Vec<Style>,
     pub objs: Vec<Obj>,
@@ -113,6 +117,7 @@ impl Block {
             kind,
             continuation: false,
             exit: None,
+            cmd: None,
             items: Vec::new(),
             styles: Vec::new(),
             objs: Vec::new(),
@@ -126,6 +131,48 @@ impl Block {
 }
 
 // --- the feed-side scanners ------------------------------------------------
+
+/// The OSC body bound (aurora's `osc_buf` size): an oversize body is dropped
+/// whole at its terminator.
+const OSC_MAX: usize = 256;
+
+/// Percent-decode a `file:` URL path (H-3d, OSC 7): `%XX` pairs decode; a
+/// malformed escape, a control byte (raw or decoded), or invalid UTF-8
+/// rejects the whole report -- a path is never half-decoded.
+fn pct_decode_path(raw: &[u8]) -> Option<String> {
+    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        let b = raw[i];
+        let v = if b == b'%' {
+            let hex = |c: u8| -> Option<u8> {
+                match c {
+                    b'0'..=b'9' => Some(c - b'0'),
+                    b'a'..=b'f' => Some(c - b'a' + 10),
+                    b'A'..=b'F' => Some(c - b'A' + 10),
+                    _ => None,
+                }
+            };
+            if i + 2 >= raw.len() {
+                return None;
+            }
+            let v = (hex(raw[i + 1])? << 4) | hex(raw[i + 2])?;
+            i += 3;
+            v
+        } else {
+            i += 1;
+            b
+        };
+        if v < 0x20 || v == 0x7f {
+            return None;
+        }
+        out.push(v);
+    }
+    if out.first() != Some(&b'/') {
+        return None;
+    }
+    String::from_utf8(out).ok()
+}
 
 enum ScanState {
     Ground,
@@ -197,6 +244,13 @@ pub struct Transcript {
     csi_private: bool,
     // Partial trailing escape held back between feeds.
     carry: Vec<u8>,
+    /// H-3d: the session's working directory -- ut's latest OSC 7 report
+    /// (BEACON.md 12.11); empty until one arrives.
+    cwd: String,
+    /// The OSC body being scanned (bounded: an oversize body is dropped
+    /// whole at its terminator, never truncated into a different value).
+    osc_buf: Vec<u8>,
+    osc_over: bool,
     // Partial UTF-8 held across feeds/events.
     utf8: [u8; 4],
     utf8_len: u8,
@@ -252,6 +306,9 @@ impl Transcript {
             hdr: 0,
             table: None,
             state: ScanState::Ground,
+            cwd: String::new(),
+            osc_buf: Vec::new(),
+            osc_over: false,
             params: [0; MAX_PARAMS],
             nparams: 0,
             cur_param: 0,
@@ -288,6 +345,21 @@ impl Transcript {
     /// one landed since the last take.
     pub fn take_exit(&mut self) -> Option<i64> {
         self.last_exit.take()
+    }
+
+    /// H-3d: the session's working directory as last reported by the shell
+    /// (OSC 7); empty before the first report.
+    pub fn cwd(&self) -> &str {
+        &self.cwd
+    }
+
+    /// H-3d: the command running now (the open output block's mark) or,
+    /// between commands, the last one that ran.
+    pub fn last_command(&self) -> Option<&str> {
+        self.open
+            .cmd
+            .as_deref()
+            .or_else(|| self.frozen.iter().rev().find_map(|b| b.cmd.as_deref()))
     }
 
     pub fn pending_col(&self) -> usize {
@@ -559,6 +631,16 @@ impl Transcript {
     fn point_op(&mut self, op: Op, args: &[wire::Arg]) {
         match op {
             Op::Mark => {
+                // H-3d: the output zone's command (its first child, ut's
+                // `mark k=cmd`): recorded on the block it opens.
+                if Self::arg(args, "k") == Some("cmd") {
+                    if let Some(t) = Self::arg(args, "text") {
+                        if self.open.kind == BlockKind::Output {
+                            self.open.cost += t.len();
+                            self.open.cmd = Some(String::from(t));
+                        }
+                    }
+                }
                 if Self::arg(args, "k") == Some("exit") {
                     let code = Self::arg(args, "code").and_then(|c| c.parse::<i64>().ok());
                     if code.is_some() {
@@ -700,7 +782,11 @@ impl Transcript {
                     self.csi_private = false;
                     self.state = ScanState::Csi;
                 }
-                b']' => self.state = ScanState::Osc,
+                b']' => {
+                    self.osc_buf.clear();
+                    self.osc_over = false;
+                    self.state = ScanState::Osc;
+                }
                 b'(' | b')' => self.state = ScanState::EscCharset,
                 b'D' | b'M' | b'E' | b'7' | b'8' | b'c' => {
                     // Index/reverse-index/save-restore/reset: cursor-motion
@@ -727,14 +813,62 @@ impl Transcript {
                 _ => self.state = ScanState::Ground, // malformed: abandon
             },
             ScanState::Osc => match b {
-                0x07 => self.state = ScanState::Ground,
+                0x07 => {
+                    self.osc_end();
+                    self.state = ScanState::Ground;
+                }
                 0x1b => self.state = ScanState::OscEsc,
-                _ => {} // foreign OSC body: swallowed (termination-detect only)
+                _ => self.osc_push(b), // the body, bounded; OSC 7 is read at the end
             },
             ScanState::OscEsc => {
-                self.state = if b == b'\\' { ScanState::Ground } else { ScanState::Osc };
+                if b == b'\\' {
+                    self.osc_end();
+                    self.state = ScanState::Ground;
+                } else {
+                    self.osc_push(0x1b);
+                    self.osc_push(b);
+                    self.state = ScanState::Osc;
+                }
             }
         }
+    }
+
+    fn osc_push(&mut self, b: u8) {
+        if self.osc_over {
+            return;
+        }
+        if self.osc_buf.len() >= OSC_MAX {
+            self.osc_over = true;
+            self.osc_buf.clear();
+            return;
+        }
+        self.osc_buf.push(b);
+    }
+
+    /// The OSC terminated: the one foreign OSC this sink interprets is 7,
+    /// the working-directory report (`7;file://<host><path>`, BEACON.md
+    /// 12.11). Ours only when the host is empty or `localhost`; the path is
+    /// percent-decoded, must be absolute, and may carry no control byte.
+    /// Everything else -- another OSC, an oversize body -- is dropped.
+    fn osc_end(&mut self) {
+        let over = self.osc_over;
+        self.osc_over = false;
+        if over {
+            self.osc_buf.clear();
+            return;
+        }
+        if let Some(rest) = self.osc_buf.strip_prefix(b"7;") {
+            if let Some(url) = rest.strip_prefix(b"file://") {
+                let slash = url.iter().position(|&b| b == b'/').unwrap_or(url.len());
+                let (host, path) = url.split_at(slash);
+                if (host.is_empty() || host == b"localhost") && !path.is_empty() {
+                    if let Some(p) = pct_decode_path(path) {
+                        self.cwd = p;
+                    }
+                }
+            }
+        }
+        self.osc_buf.clear();
     }
 
     fn push_param(&mut self) {
@@ -1026,6 +1160,78 @@ mod tests {
 
     fn line_str(l: &Line) -> String {
         l.cells.iter().map(|c| c.ch).collect()
+    }
+
+    #[test]
+    fn osc7_sets_the_session_cwd_and_a_bad_report_changes_nothing() {
+        // H-3d: the one foreign OSC the transcript interprets. ST and BEL
+        // terminators; percent-decoding; another host is not ours; an
+        // oversize body is dropped WHOLE (never truncated into a different
+        // path); a control byte rejects the report.
+        let mut t = Transcript::new(daylight());
+        assert_eq!(t.cwd(), "");
+        t.feed(b"\x1b]7;file://localhost/lib/aurora\x1b\\");
+        assert_eq!(t.cwd(), "/lib/aurora");
+        t.feed(b"before \x1b]7;file:///a%20b\x07 after");
+        assert_eq!(t.cwd(), "/a b");
+        assert_eq!(line_str(&Line { cells: t.pending_line().to_vec() }), "before  after");
+        t.feed(b"\x1b]7;file://otherhost/elsewhere\x1b\\");
+        assert_eq!(t.cwd(), "/a b", "another host's report is not ours");
+        let mut long: Vec<u8> = Vec::from(&b"\x1b]7;file://localhost/"[..]);
+        long.extend(core::iter::repeat(b'x').take(300));
+        long.extend_from_slice(b"\x1b\\");
+        t.feed(&long);
+        assert_eq!(t.cwd(), "/a b", "oversize: dropped whole");
+        t.feed(b"\x1b]7;file://localhost/no\x01ctl\x1b\\");
+        assert_eq!(t.cwd(), "/a b", "a control byte: rejected");
+        t.feed(b"\x1b]7;file://localhost/bad%zz\x1b\\");
+        assert_eq!(t.cwd(), "/a b", "a malformed escape: rejected");
+        t.feed(b"\x1b]7;file://localhostrelative\x1b\\");
+        assert_eq!(t.cwd(), "/a b", "not absolute: rejected");
+        // Split across feeds (the byte-at-a-time console): the scanner and
+        // its body persist.
+        t.feed(b"\x1b]7;file://local");
+        t.feed(b"host/split\x1b");
+        t.feed(b"\\");
+        assert_eq!(t.cwd(), "/split");
+    }
+
+    #[test]
+    fn the_output_zones_cmd_mark_is_the_running_then_the_last_command() {
+        // H-3d: ut marks the accepted line as the output zone's first child;
+        // while the zone is open it is the RUNNING command, then the last.
+        let mut t = Transcript::new(daylight());
+        assert!(t.last_command().is_none());
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "prompt")]),
+            F::Text("cora@thyla / $ ls -l\n"),
+            F::Close(Op::Zone),
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Point(Op::Mark, &[("k", "cmd"), ("text", "ls -l")]),
+            F::Text("total 0\n"),
+        ]));
+        assert_eq!(t.last_command(), Some("ls -l"), "while it runs");
+        t.feed(&frames(&[
+            F::Point(Op::Mark, &[("k", "exit"), ("code", "0")]),
+            F::Close(Op::Zone),
+            F::Open(Op::Zone, &[("k", "prompt")]),
+            F::Text("cora@thyla / $ "),
+        ]));
+        assert_eq!(t.last_command(), Some("ls -l"), "after it, until the next");
+        t.feed(&frames(&[
+            F::Text("make\n"),
+            F::Close(Op::Zone),
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Point(Op::Mark, &[("k", "cmd"), ("text", "make; echo x%3B")]),
+        ]));
+        assert_eq!(t.last_command(), Some("make; echo x%3B"), "the wire's escaping is transparent");
+        // A cmd mark outside an output zone (a prompt block) is not a command.
+        let mut u = Transcript::new(daylight());
+        u.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "prompt")]),
+            F::Point(Op::Mark, &[("k", "cmd"), ("text", "nope")]),
+        ]));
+        assert!(u.last_command().is_none());
     }
 
     fn session_corpus() -> Vec<u8> {

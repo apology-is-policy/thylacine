@@ -300,6 +300,23 @@ the compositor routes a repeat to the surface that saw the press, so a held
 Enter used to re-summon the menu at the autorepeat rate (F6). See 139
 "THE EVENT SET" for the ring-side changes.
 
+**The status bar (H-3d, 2026-09-02).** `halcyond::status` (the lib: the
+four-slot cartoon `status_list(model, w, h, gs) -> (Cartoon, Slots)`,
+`condition_for` off the pane's status text, `context_text` -- name `·`
+directory `·` command, empties dropped -- `bar_height` = the theme's
+`status_h`; host tests pin the slot order, the colours, the truncation)
++ `statusset` (the bin: ONE `Surface::status_on` on the ring, minted once
+the console is up (0d'), pumped per pass (CONFIGURE -> repaint; CLOSE ->
+re-mint), `model_from(focused, own_pane, cwd, cmd)` -- the focused leaf's
+name + status from `ChromeSet::focused()` (recorded at reconcile), the
+transcript's `cwd()` + `last_command()` when that leaf hosts the console,
+`clock_hm()` UTC -- and `refresh` paints only on a change, and in test builds
+says the four slot rects + the context + the condition when the slot
+GEOMETRY changes -- never per paint: every say line lands in the
+transcript, and a line after every command shifted the row the H-3c
+keyboard leg keys on; the witness needs the rects when they move). The transcript scans OSC 7 (a bounded body; `pct_decode_path`)
+and records ut's `mark k=cmd` on the output block (`Block.cmd`).
+
 **The audit close (2026-09-02).** `menu_size(m, gs, max_h)` caps the
 surface height at the display (`display_h` reads `ctl`'s `display W H` on
 the pane-tree session; the round's F3: the compositor refuses a taller

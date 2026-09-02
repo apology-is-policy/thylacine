@@ -91,17 +91,34 @@ pub struct ChromeSet {
     /// reconcile -- it fails fast at the mint now that no connect is
     /// involved -- but the line is said once per pane).
     failed_said: Vec<u32>,
+    /// H-3d: the focused leaf as the last layout read named it -- its pane
+    /// id, its tag name, its recorded status text -- the status bar's
+    /// context + condition sources.
+    focused: Option<(u32, String, String)>,
 }
 
 impl ChromeSet {
     pub fn new(ring: EventRing) -> ChromeSet {
-        ChromeSet { ring, tiles: BTreeMap::new(), own_named: false, own_pane: None, failed_said: Vec::new() }
+        ChromeSet {
+            ring,
+            tiles: BTreeMap::new(),
+            own_named: false,
+            own_pane: None,
+            failed_said: Vec::new(),
+            focused: None,
+        }
     }
 
     /// The public id of the leaf hosting the console surface, once a
     /// layout read has named it.
     pub fn own_pane(&self) -> Option<u32> {
         self.own_pane
+    }
+
+    /// H-3d: the focused leaf (pane id, tag name, status text) as of the
+    /// last reconcile; None before one, or with nothing focused.
+    pub fn focused(&self) -> Option<&(u32, String, String)> {
+        self.focused.as_ref()
     }
 
     /// Bring the chrome set in line with the layout: drop tiles for leaves
@@ -126,7 +143,17 @@ impl ChromeSet {
         }
         // The wanted set: every visible leaf with a carved strip.
         let mut want: Vec<(u32, u32, u32, Key, String)> = Vec::new();
+        self.focused = None;
         for l in leaves.iter() {
+            if l.focused {
+                // H-3d: the status bar's sources, read whether or not the
+                // leaf carves a strip (a single fullscreen leaf carves none).
+                let name = read_file(troot, &format!("pane/{}/tag", l.id))
+                    .map(|s| String::from(s.trim()))
+                    .unwrap_or_default();
+                let status = read_file(troot, &format!("pane/{}/status", l.id)).unwrap_or_default();
+                self.focused = Some((l.id, name, status));
+            }
             let tb = match read_file(troot, &format!("pane/{}/tagbar", l.id)).and_then(|s| parse_rect(&s)) {
                 Some(r) => r,
                 None => continue,

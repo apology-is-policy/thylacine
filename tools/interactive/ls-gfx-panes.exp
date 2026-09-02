@@ -136,9 +136,19 @@ lc_pass "panes: per-leaf tag bar renders Daylight header-bg"
 # (this battery) -> E_PERM. The positive twin (the same line from halcyond,
 # composited at the tag bar) is ls-halcyon's at H-3b-3.
 expect {
-    -ex "battery: chrome-create gate OK" { lc_pass "panes: chrome-create gate discriminates (E_INVAL syntax / E_PERM non-renderer)" }
+    -ex "battery: chrome-create gate OK" { lc_pass "panes: chrome-create gate discriminates (E_INVAL syntax / E_PERM non-renderer; + the H-3d status role)" }
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the chrome-create gate leg failed" }
     timeout { lc_fail "battery never reached the chrome-create gate" }
+}
+
+# H-3d: the status bar is a display-level chrome surface (`role=status`, no
+# bind, renderer-gated -- probed in the gate above); with no renderer bar the
+# compositor's `statusbar` file reads zeros. The positive twin (a real bar's
+# rect + the carve it makes) is ls-halcyon's at H-3d-3.
+expect {
+    -ex "battery: statusbar file reads empty (no bar)" { lc_pass "panes: the statusbar file exists and reads empty with no renderer bar" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the statusbar file leg failed" }
+    timeout { lc_fail "battery never reached the statusbar file read" }
 }
 
 # H-3b-4: the tile-status verb (global ctl `tag <id> status ok|err|resting`)

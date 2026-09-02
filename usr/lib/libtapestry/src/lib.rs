@@ -223,6 +223,7 @@ enum Mint {
     Content,
     Chrome(u32),
     Menu,
+    Status,
 }
 
 #[cfg(feature = "guest")]
@@ -272,6 +273,17 @@ impl Surface {
         Self::open_on_bound(ring, w, h, Mint::Menu)
     }
 
+    /// H-3d: the Role::Status surface on `ring` -- the screen-bottom status
+    /// bar the compositor carves the display for and places at the bottom
+    /// strip (HALCYON.md 13.6). `w` must be the display width and `h` the
+    /// one vertical unit (`statusbar` / the theme's `status_h`), else the
+    /// compositor refuses (E_INVAL); one per display; renderer-gated
+    /// server-side. Never hosted, never focusable; a CONFIGURE offers the
+    /// new width on a display resize.
+    pub fn status_on(ring: &EventRing, w: u32, h: u32) -> Result<Surface, TapError> {
+        Self::open_on_bound(ring, w, h, Mint::Status)
+    }
+
 
     fn open_on_bound(ring: &EventRing, w: u32, h: u32, mint: Mint) -> Result<Surface, TapError> {
         let root = ring.root();
@@ -317,6 +329,7 @@ impl Surface {
                 let _ = core::fmt::write(&mut cmd, format_args!(" role=chrome bind={}", pid));
             }
             Mint::Menu => cmd.push_str(" role=menu"),
+            Mint::Status => cmd.push_str(" role=status"),
         }
         let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
         if rc < 0 {
