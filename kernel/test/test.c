@@ -957,6 +957,9 @@ void test_stalk_cross_mount_xsearch_deny(void);
 void test_stalk_mount_amode_no_cross(void);
 void test_stalk_cross_mount_chain(void);
 void test_stalk_cross_mount_no_leak(void);
+void test_stalk_union_walk(void);
+void test_stalk_union_order(void);
+void test_stalk_union_xskip(void);
 void test_stalk_pheno_symlink_reanchor(void);
 void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
@@ -3528,6 +3531,9 @@ struct test_case g_tests[] = {
     { "stalk.mount_amode_no_cross",    test_stalk_mount_amode_no_cross,    false, NULL },
     { "stalk.cross_mount_chain",       test_stalk_cross_mount_chain,       false, NULL },
     { "stalk.cross_mount_no_leak",     test_stalk_cross_mount_no_leak,     false, NULL },
+    { "stalk.union_walk",              test_stalk_union_walk,              false, NULL },
+    { "stalk.union_order",             test_stalk_union_order,             false, NULL },
+    { "stalk.union_xskip",             test_stalk_union_xskip,             false, NULL },
     { "stalk.pheno_symlink_reanchor",  test_stalk_pheno_symlink_reanchor,  false, NULL },
     { "stalk.path_accumulate",         test_stalk_path_accumulate,         false, NULL },
     { "stalk.path_dotdot",             test_stalk_path_dotdot,             false, NULL },

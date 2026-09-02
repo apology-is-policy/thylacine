@@ -76,6 +76,10 @@ void test_stalk_cross_mount_xsearch_deny(void);
 void test_stalk_mount_amode_no_cross(void);
 void test_stalk_cross_mount_chain(void);
 void test_stalk_cross_mount_no_leak(void);
+// UM (union mounts): the union walk over the real resolver.
+void test_stalk_union_walk(void);
+void test_stalk_union_order(void);
+void test_stalk_union_xskip(void);
 void test_stalk_pheno_symlink_reanchor(void);   // VIVARIUM section 13 (F1)
 // #66: namespace-name accumulation through the real resolver.
 void test_stalk_path_accumulate(void);
@@ -172,6 +176,31 @@ static const struct fixnode g_fix[] = {
     { 19,  0, "phx",    QTDIR,     0755u, NULL },
     { 20, 19, "lnaway", QTSYMLINK, 0777u, "/xfile" },
     { 21, 19, "preal",  QTFILE,    0644u, NULL },
+
+    // ---- UM (union mounts): an isolated union subtree. `um1` + `um2` are two
+    // mount SOURCES with a COLLIDING child name ("shared", distinct qids) plus
+    // one unique child each; `umpt` is the empty union mount POINT. Nothing
+    // else references them, so they cannot perturb any other test (the phx
+    // pattern). The union walk must return the FIRST member's "shared"
+    // (order/first-hit), fall through to member 2 for "only2", and miss
+    // cleanly on a name in neither.
+    { 22,  0, "um1",    QTDIR,  0755u, NULL },
+    { 23, 22, "shared", QTFILE, 0644u, NULL },   // collides with qid 26
+    { 24, 22, "only1",  QTFILE, 0644u, NULL },
+    { 25,  0, "um2",    QTDIR,  0755u, NULL },
+    { 26, 25, "shared", QTFILE, 0644u, NULL },   // same NAME as qid 23
+    { 27, 25, "only2",  QTFILE, 0644u, NULL },
+    { 28,  0, "umpt",   QTDIR,  0755u, NULL },   // the empty union mount point
+    // Per-member X-skip: `uma` is a union member the caller cannot search
+    // (0600, no owner-x -> X denied even for the SYSTEM owner, as nox proves);
+    // `umb` is searchable (0755). Both hold "tgt" -- a union walk must SKIP the
+    // unsearchable member and land on umb's tgt, NOT EACCES (Plan 9 union skip,
+    // the divergence from a lone directory's EACCES).
+    { 29,  0, "uma",    QTDIR,  0600u, NULL },   // X-denied union member
+    { 30, 29, "tgt",    QTFILE, 0644u, NULL },   // shadowed (uma unsearchable)
+    { 31,  0, "umb",    QTDIR,  0755u, NULL },   // searchable union member
+    { 32, 31, "tgt",    QTFILE, 0644u, NULL },   // the one that wins
+    { 33,  0, "umpt2",  QTDIR,  0755u, NULL },   // X-skip union mount point
 };
 #define FIX_LOOP_PATH 7u
 // The first symlink qid -- the boundary the fixture walk uses to answer
@@ -1587,6 +1616,127 @@ void test_stalk_cross_mount_no_leak(void) {
     territory_unref(p.territory);
     spoor_clunk(src);
     spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+// =============================================================================
+// UM (union mounts): the union WALK. Grafts multiple sources at one point and
+// drives the REAL resolver through the union -- declared-order search,
+// first-hit, fallthrough on miss, per-member X-skip, clean miss. The spec
+// (specs/territory.tla WalkFirstHit / OrderCorrect + the buggy cfgs) proves the
+// model; these prove the impl matches it.
+// =============================================================================
+
+void test_stalk_union_walk(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+
+    // Union [um1, um2]: um1 MBEFORE (searched first), um2 MAFTER (last).
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "mount um1 MBEFORE umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "mount um2 MAFTER umpt");
+
+    // Leak accounting spans the four resolves (the union path adds union_base
+    // ref/clunk + the helper's per-member clone/clunk -- balance them).
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    // First-hit: "shared" is in BOTH members; member 0 (um1) wins -> qid 23.
+    struct Spoor *q = stalk(&p, root, "umpt/shared", 11, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve umpt/shared");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "union first-hit -> um1's shared (qid 23)");
+    spoor_clunk(q);
+
+    // Member-0 hit: "only1" exists only in um1 -> qid 24.
+    q = stalk(&p, root, "umpt/only1", 10, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve umpt/only1");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)24, "union member-0 hit (qid 24)");
+    spoor_clunk(q);
+
+    // Fallthrough: "only2" exists only in um2 -> um1 misses, um2 wins qid 27.
+    q = stalk(&p, root, "umpt/only2", 10, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve umpt/only2 (fallthrough)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)27, "union fallthrough -> um2's only2 (qid 27)");
+    spoor_clunk(q);
+
+    // Clean miss: neither member has "nosuch".
+    int err = 0;
+    q = stalk_err(&p, root, "umpt/nosuch", 11, STALK_OPEN, 0, &err);
+    TEST_ASSERT(q == NULL, "umpt/nosuch misses");
+    TEST_EXPECT_EQ(err, T_E_NOENT, "union all-miss -> ENOENT");
+
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across union resolves");
+
+    territory_unref(p.territory);
+    spoor_clunk(um1);
+    spoor_clunk(um2);
+    spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// The ORDER flip: mounting um2 MBEFORE (prepend -> searched first) makes um2's
+// "shared" win instead of um1's -- the declared order is load-bearing (the
+// OrderCorrect / BUGGY_MOUNT_ORDER counterexample, at runtime).
+void test_stalk_union_order(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+
+    // um1 MAFTER, then um2 MBEFORE -> union [um2, um1] (MBEFORE prepends).
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MAFTER),  0, "mount um1 MAFTER umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MBEFORE), 0, "mount um2 MBEFORE umpt");
+
+    // um2 is now searched first -> "shared" resolves to um2's (qid 26), not 23.
+    struct Spoor *q = stalk(&p, root, "umpt/shared", 11, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve umpt/shared (order flipped)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)26, "MBEFORE order -> um2's shared (qid 26)");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(um1);
+    spoor_clunk(um2);
+    spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// Per-member X-skip: a union member the caller cannot search is SKIPPED, and
+// the walk lands on the next searchable member's entry -- NOT EACCES (the union
+// divergence from a lone directory, where an X denial is fatal).
+void test_stalk_union_xskip(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *uma = stalk(&p, root, "uma",   3, STALK_WALK,  0);  // 0600, no X
+    struct Spoor *umb = stalk(&p, root, "umb",   3, STALK_WALK,  0);  // 0755
+    struct Spoor *pt  = stalk(&p, root, "umpt2", 5, STALK_MOUNT, 0);
+    TEST_ASSERT(uma && umb && pt, "resolve uma + umb + umpt2");
+
+    // union [uma, umb]: uma (unsearchable) first, umb (searchable) second.
+    TEST_EXPECT_EQ(mount(p.territory, uma, pt, MBEFORE), 0, "mount uma MBEFORE umpt2");
+    TEST_EXPECT_EQ(mount(p.territory, umb, pt, MAFTER),  0, "mount umb MAFTER umpt2");
+
+    // "tgt" is in BOTH members; uma is unsearchable (0600) -> SKIPPED, umb wins.
+    struct Spoor *q = stalk(&p, root, "umpt2/tgt", 9, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve umpt2/tgt (uma X-skipped)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)32,
+                   "X-denied member skipped -> umb's tgt (qid 32)");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(uma);
+    spoor_clunk(umb);
+    spoor_clunk(pt);
     spoor_unref(root);
 }
 

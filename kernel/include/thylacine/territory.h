@@ -471,6 +471,21 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint);
 struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe,
                            u32 *flags_out);
 
+// mount_member_at (UM, union mounts): the ordered union iterator for the
+// resolver. Returns a REF-HELD source Spoor of the `index`-th mount entry
+// whose mount-point identity matches `probe`'s (dc, devno, qid.path), in
+// DECLARED SEARCH ORDER (MBEFORE members first, MAFTER last -- the mounts[]
+// array order maintained by mount()), or NULL when `index` is past the last
+// member. `*flags_out` (if non-NULL) gets that member's flags. Same atomic
+// ns_lock discipline as mount_lookup (lookup + spoor_ref atomic vs a
+// concurrent unmount). THE CALLER MUST spoor_clunk the returned Spoor.
+// mount_lookup is exactly mount_member_at(..., 0, ...) -- the union walk
+// iterates index 0,1,2,... trying the next component in each member and
+// stopping at the first that resolves it (ARCH 9.5 "check each in declared
+// order until one succeeds").
+struct Spoor *mount_member_at(struct Territory *territory, struct Spoor *probe,
+                              int index, u32 *flags_out);
+
 // mount_is_point_id: MEMBERSHIP-only mount-point test by raw (dc, devno,
 // qid_path) identity — no Spoor needed, no ref minted. The stalk POUNCE
 // post-scan uses it on batch-walked components that were never materialized as

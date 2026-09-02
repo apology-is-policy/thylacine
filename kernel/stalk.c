@@ -184,8 +184,16 @@ static struct Spoor *clone_walk_zero(struct Spoor *src) {
 //   return -1              : probe IS a mount point but minting the crossed
 //                            Spoor failed (OOM / walk error); *out == NULL and
 //                            probe is still owned -- the caller fails the walk.
-int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
-                       struct Spoor **out, bool *crossed_pheno) {
+// stalk_cross_from -- the generalized cross. The FIRST hop crosses the
+// `first_member`-th UNION MEMBER of `probe` (mount_member_at, declared order)
+// rather than always the primary; mount-over-mount hops that follow cross the
+// primary (member 0) of each crossed link, as usual. `first_member == 0` is
+// exactly stalk_cross_mounts (the common single-source / primary path); the
+// union walk calls it with 1,2,... to try the later members after the primary
+// missed a component. Returns 0 with *out == NULL when `probe` has no member at
+// that index (not a mount point, or index past the last member).
+static int stalk_cross_from(struct Proc *p, struct Spoor *probe, int first_member,
+                            struct Spoor **out, bool *crossed_pheno) {
     // VIVARIUM section 13: crossed_pheno is a SET-ONLY accumulator (the caller
     // inits it false before the first cross and reads it after the last; NULL
     // for callers that do not resolve for exec). We only ever set it true, so a
@@ -202,13 +210,17 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
     // crosses are possible. The bound remains as a defensive backstop (it would
     // stop crossing rather than spin even if a cycle somehow existed).
     for (int hops = 0; hops < PGRP_MAX_MOUNTS; hops++) {
-        // RW-4 SA-F1: mount_lookup now returns a REF-HELD source (the lookup +
-        // ref are atomic under the Territory ns_lock, so a concurrent unmount
-        // cannot free it mid-cross). clone_walk_zero mints an INDEPENDENT crossed
-        // Spoor from it; release the transferred ref immediately after.
+        // RW-4 SA-F1: mount_lookup / mount_member_at return a REF-HELD source
+        // (the lookup + ref are atomic under the Territory ns_lock, so a
+        // concurrent unmount cannot free it mid-cross). clone_walk_zero mints an
+        // INDEPENDENT crossed Spoor from it; release the transferred ref after.
+        // hops==0 selects the chosen union member; deeper hops (mount-over-mount)
+        // always cross the primary (member 0) of the crossed link.
         u32 mflags = 0;
-        struct Spoor *src = mount_lookup(p->territory, id, &mflags);
-        if (!src) break;                          // id is not a mount point
+        struct Spoor *src = (hops == 0)
+            ? mount_member_at(p->territory, id, first_member, &mflags)
+            : mount_lookup(p->territory, id, &mflags);
+        if (!src) break;                          // no member at this index
         // VIVARIUM section 13: this cross went through a pheno-mount. Recorded
         // BEFORE the clone can fail, so a pheno-mount is detected even if the
         // subsequent clone_walk_zero errors (the walk then fails closed, but the
@@ -232,6 +244,11 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
     if (cur) spoor_path_transplant(cur, probe);
     *out = cur;
     return 0;
+}
+
+int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
+                       struct Spoor **out, bool *crossed_pheno) {
+    return stalk_cross_from(p, probe, 0, out, crossed_pheno);
 }
 
 // path_has_dotdot -- pre-scan for a ".." component. The POUNCE compresses a
@@ -440,6 +457,66 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
     return stalk_err(p, start, path, pathlen, amode, omode, NULL);
 }
 
+// stalk_union_child (UM) -- resolve component `namebuf` in the UNION at
+// `union_base` (a pre-cross mount point with >= 2 members): try each member in
+// declared order, crossing it to its leaf (mount-over-mount followed via
+// stalk_cross_from), then per-member X-search + directory-type + walk; return
+// the FIRST member's resolved child (ref-held, its qid set), or NULL when no
+// member has a searchable entry for the name. Plan 9 union skip semantics: a
+// member that is not a directory, denies X-search, or lacks the component is
+// SKIPPED (not an error) -- unlike a lone directory, where an X denial is
+// EACCES; only exhausting all members is a miss (the caller reports ENOENT).
+// *errp is set ONLY on a hard error (a member cross failure / OOM); an ordinary
+// all-miss leaves *errp 0. The phenotype of the WINNING member (only) is OR'd
+// into *crossed_pheno -- a losing member's Linux mount must not stamp a
+// resolution that landed elsewhere.
+static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
+                                       const char *namebuf,
+                                       bool *crossed_pheno, int *errp) {
+    *errp = 0;
+    for (int k = 0; k < PGRP_MAX_MOUNTS; k++) {
+        // Per-member phenotype: accumulate locally, propagate only on a WIN.
+        bool member_pheno = false;
+        struct Spoor *leaf = NULL;
+        if (stalk_cross_from(p, union_base, k, &leaf, &member_pheno) < 0) {
+            *errp = T_E_IO;              // a member cross failed -> fail closed
+            return NULL;
+        }
+        if (!leaf) break;               // no member at index k -- members exhausted
+        // Skip a non-directory member (a union is over directories).
+        if (!(leaf->qid.type & QTDIR)) { spoor_clunk(leaf); continue; }
+        // Per-member X-search: a member that denies search is SKIPPED (Plan 9
+        // union semantics), not an EACCES failure.
+        if (leaf->dev && leaf->dev->perm_enforced) {
+            struct t_stat st;
+            int sr = spoor_stat_native(leaf, &st);
+            if (sr != 0 || perm_check(p, &st, PERM_X) != 0) {
+                spoor_clunk(leaf); continue;
+            }
+        }
+        if (!leaf->dev || !leaf->dev->walk) { spoor_clunk(leaf); continue; }
+        // Walk the component in this member. Cleanup mirrors the non-union arm's
+        // three miss cases exactly (NULL -> shares aux; reuse-violation ->
+        // shares aux; nqid!=1 -> reused, clunk-safe).
+        struct Spoor *nc = spoor_clone(leaf);
+        if (!nc) { spoor_clunk(leaf); *errp = T_E_NOMEM; return NULL; }
+        const char *names[1] = { namebuf };
+        struct Walkqid *w = leaf->dev->walk(leaf, nc, names, 1);
+        if (!w) { nc->aux = NULL; spoor_unref(nc); spoor_clunk(leaf); continue; }
+        if (w->spoor != nc) {
+            walkqid_free(w); nc->aux = NULL; spoor_unref(nc); spoor_clunk(leaf); continue;
+        }
+        if (w->nqid != 1) {
+            walkqid_free(w); spoor_clunk(nc); spoor_clunk(leaf); continue;
+        }
+        walkqid_free(w);
+        spoor_clunk(leaf);              // done with the member root
+        if (member_pheno && crossed_pheno) *crossed_pheno = true;  // winner only
+        return nc;                     // HIT: first member with the component
+    }
+    return NULL;                       // all members exhausted -> caller: ENOENT
+}
+
 // stalk_core -- the resolver body. stat_out/stat_done are the STALK_STAT
 // walk-query sink (stalk_stat only): when the final run resolves through
 // Dev.walk_attrs and the leaf is clean, the core fills *stat_out, sets
@@ -483,6 +560,15 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
     // the depth-0 position reads `base`.
     struct Spoor        *base = start;
     struct stalk_expand *ex   = NULL;
+
+    // UM (union mounts): when the directory being searched is a union mount
+    // point (>= 2 grafted members), `union_base` holds a ref to the pre-cross
+    // mount-point Spoor so the per-component walk can iterate its members in
+    // declared order (stalk_union_child). Set at the descent cross when a
+    // second member is detected; POUNCE is disabled for that component; the
+    // per_component union branch consumes (clunks) it. NULL for the common
+    // single-source path. Clunked at `fail` if a goto slips past the consume.
+    struct Spoor        *union_base = NULL;
 
     // POUNCE state (docs/POUNCE-DESIGN.md §5). `carried` holds the current
     // trail tip's attrs when they arrived fused with the walk that produced it
@@ -637,13 +723,36 @@ restart:
         // already proven not-a-mount by the base cross above.
         struct Spoor *parent;
         if (depth > 0) {
-            struct Spoor *crossed = NULL;
-            if (stalk_cross_mounts(p, trail[depth - 1], &crossed, crossed_pheno) < 0) goto fail;
-            if (crossed) {
-                spoor_clunk(trail[depth - 1]);
-                trail[depth - 1] = crossed;
-                carried_valid = false;   // the tip changed; the record described
-                                         // the mount point, not the mounted root
+            // UM: detect a UNION (>= 2 members) at this point. mount_member_at(_,1)
+            // != NULL means a second member exists. For a union we do NOT cross
+            // here -- we leave the mount POINT as the trail tip (so a later '..'
+            // lands on the union point and the recorded parent stays accurate)
+            // and let the per_component union branch cross each member via
+            // stalk_union_child. union_base refs the mount-point Spoor. The mount
+            // point is itself a directory, so the #79 QTDIR check below passes.
+            bool is_union = false;
+            if (p && p->territory) {
+                struct Spoor *m1 = mount_member_at(p->territory, trail[depth - 1],
+                                                   1, NULL);
+                if (m1) {
+                    spoor_clunk(m1);
+                    is_union    = true;
+                    union_base  = trail[depth - 1];
+                    spoor_ref(union_base);
+                }
+            }
+            if (!is_union) {
+                // Common single-source path: cross the tip in place to the
+                // mounted root so we walk INTO the mounted tree.
+                struct Spoor *crossed = NULL;
+                if (stalk_cross_mounts(p, trail[depth - 1], &crossed, crossed_pheno) < 0) goto fail;
+                if (crossed) {
+                    spoor_clunk(trail[depth - 1]);
+                    trail[depth - 1] = crossed;
+                    carried_valid = false;   // the tip changed; the record
+                                             // described the mount point, not
+                                             // the mounted root
+                }
             }
             parent = trail[depth - 1];
         } else {
@@ -688,7 +797,7 @@ restart:
         // Disabled when the path contains '..' (pounce_ok) or the Dev lacks
         // the slot -- those take the per-component loop unchanged.
         // =====================================================================
-        if (pounce_ok && !pounce_skip_one && parent->dev &&
+        if (pounce_ok && !pounce_skip_one && !union_base && parent->dev &&
             parent->dev->walk_attrs && logical_depth < STALK_MAX_DEPTH) {
             // -- Gather the run. The already-tokenized component is names[0];
             // keep consuming real components (a '.' / '..' / over-long token
@@ -1152,67 +1261,90 @@ per_component:
         pounce_skip_one = false;   // D-1: the protected component reached the
                                    // per-component arm; pouncing may resume on
                                    // the components that follow it
-        if (parent->dev && parent->dev->perm_enforced) {
-            struct t_stat st;
-            int sr = spoor_stat_native(parent, &st);
-            if (sr != 0)                         { err = err_code(sr); goto fail; }
-            if (perm_check(p, &st, PERM_X) != 0) { err = T_E_ACCES;    goto fail; }
-        }
-
-        // Trail-full reject. When pouncing is possible on this path, ALSO
-        // enforce the cap on the LOGICAL component count -- runs compress the
-        // trail array, and without this a >STALK_MAX_DEPTH-component path
-        // whose tail lands on a walk_attrs-less Dev would resolve where the
-        // per-component loop INVALs (a surface divergence). Monotone since
-        // pounce_ok excludes '..'.
-        if (depth >= STALK_MAX_DEPTH ||
-            (pounce_ok && logical_depth >= STALK_MAX_DEPTH))
-                                                 { err = T_E_INVAL; goto fail; }  // trail full
-        if (!parent->dev || !parent->dev->walk)  { err = T_E_INVAL; goto fail; }
-
-        struct Spoor *nc = spoor_clone(parent);
-        if (!nc) goto fail;
 
         // NUL-terminate the single component for the Dev.walk strlen scan
-        // (dev9p_walk discovers each name's length by scanning for '\0').
+        // (dev9p_walk discovers each name's length by scanning for '\0'). Both
+        // the union + non-union walks pass it to Dev.walk.
         char namebuf[SYS_WALK_OPEN_NAME_MAX + 1];
         for (u64 k = 0; k < clen; k++) namebuf[k] = path[s + k];
         namebuf[clen] = '\0';
-        const char *names[1] = { namebuf };
 
-        struct Walkqid *w = parent->dev->walk(parent, nc, names, 1);
-        if (!w) {
-            // Walk failed: nc still shares the parent's aux -> detach + unref.
-            // A NULL Walkqid is dev9p's miss (p9_client_walk Rlerror/short) --
-            // the dominant case is "no such component" (ENOENT). The rare deep
-            // failures (session-dead -> EIO, OOM) also land here; reporting
-            // NOENT is the load-bearing-correct answer (os.IsNotExist), and the
-            // kernel's own perm_check above is the ACCES authority, so a walk
-            // NULL is never a masked permission denial. (ER-2 may propagate the
-            // exact dev9p errno via a walk-vtable out-param.)
-            nc->aux = NULL;
-            spoor_unref(nc);
-            err = T_E_NOENT;
-            goto fail;
-        }
-        if (w->spoor != nc) {
-            // Dev violated the reuse-nc contract (defense-in-depth; dev9p +
-            // devramfs both honor it). nc still shares the parent's aux.
+        struct Spoor *nc;
+        if (union_base) {
+            // UM: the parent is a UNION mount point (>= 2 members). Search the
+            // members in declared order (each: cross -> per-member X-search ->
+            // directory-type -> walk the component, Plan 9 skip-on-miss/deny),
+            // first that resolves the component wins. The single-parent
+            // perm_check below is intentionally skipped -- it checks member 0
+            // only; the helper does the check per member. The trail-full bound
+            // still applies to the resulting entry.
+            if (depth >= STALK_MAX_DEPTH ||
+                (pounce_ok && logical_depth >= STALK_MAX_DEPTH)) {
+                spoor_clunk(union_base); union_base = NULL;
+                err = T_E_INVAL; goto fail;   // trail full
+            }
+            int uerr = 0;
+            nc = stalk_union_child(p, union_base, namebuf, crossed_pheno, &uerr);
+            spoor_clunk(union_base); union_base = NULL;   // consumed
+            if (!nc) { err = uerr ? uerr : T_E_NOENT; goto fail; }
+        } else {
+            if (parent->dev && parent->dev->perm_enforced) {
+                struct t_stat st;
+                int sr = spoor_stat_native(parent, &st);
+                if (sr != 0)                         { err = err_code(sr); goto fail; }
+                if (perm_check(p, &st, PERM_X) != 0) { err = T_E_ACCES;    goto fail; }
+            }
+
+            // Trail-full reject. When pouncing is possible on this path, ALSO
+            // enforce the cap on the LOGICAL component count -- runs compress the
+            // trail array, and without this a >STALK_MAX_DEPTH-component path
+            // whose tail lands on a walk_attrs-less Dev would resolve where the
+            // per-component loop INVALs (a surface divergence). Monotone since
+            // pounce_ok excludes '..'.
+            if (depth >= STALK_MAX_DEPTH ||
+                (pounce_ok && logical_depth >= STALK_MAX_DEPTH))
+                                                 { err = T_E_INVAL; goto fail; }  // trail full
+            if (!parent->dev || !parent->dev->walk)  { err = T_E_INVAL; goto fail; }
+
+            nc = spoor_clone(parent);
+            if (!nc) goto fail;
+
+            const char *names[1] = { namebuf };
+
+            struct Walkqid *w = parent->dev->walk(parent, nc, names, 1);
+            if (!w) {
+                // Walk failed: nc still shares the parent's aux -> detach + unref.
+                // A NULL Walkqid is dev9p's miss (p9_client_walk Rlerror/short) --
+                // the dominant case is "no such component" (ENOENT). The rare deep
+                // failures (session-dead -> EIO, OOM) also land here; reporting
+                // NOENT is the load-bearing-correct answer (os.IsNotExist), and the
+                // kernel's own perm_check above is the ACCES authority, so a walk
+                // NULL is never a masked permission denial. (ER-2 may propagate the
+                // exact dev9p errno via a walk-vtable out-param.)
+                nc->aux = NULL;
+                spoor_unref(nc);
+                err = T_E_NOENT;
+                goto fail;
+            }
+            if (w->spoor != nc) {
+                // Dev violated the reuse-nc contract (defense-in-depth; dev9p +
+                // devramfs both honor it). nc still shares the parent's aux.
+                walkqid_free(w);
+                nc->aux = NULL;
+                spoor_unref(nc);
+                goto fail;
+            }
+            if (w->nqid != 1) {
+                // Walk-miss (devramfs returns nqid=0; dev9p returns NULL above).
+                // nc was reused (w->spoor == nc) with a non-heap (devramfs) aux,
+                // so clunk is safe -- matches sys_walk_open_handler's nqid!=1 path.
+                walkqid_free(w);
+                spoor_clunk(nc);
+                err = T_E_NOENT;            // walk-miss (devramfs)
+                goto fail;
+            }
             walkqid_free(w);
-            nc->aux = NULL;
-            spoor_unref(nc);
-            goto fail;
         }
-        if (w->nqid != 1) {
-            // Walk-miss (devramfs returns nqid=0; dev9p returns NULL above).
-            // nc was reused (w->spoor == nc) with a non-heap (devramfs) aux,
-            // so clunk is safe -- matches sys_walk_open_handler's nqid!=1 path.
-            walkqid_free(w);
-            spoor_clunk(nc);
-            err = T_E_NOENT;            // walk-miss (devramfs)
-            goto fail;
-        }
-        walkqid_free(w);
 
         // ====================================================================
         // D-1: symlink expansion (docs/DISTRO.md section 4). The just-walked
@@ -1412,6 +1544,7 @@ per_component:
 
 fail:
     if (errp) *errp = err;             // the cause, for the caller's -*errp
+    if (union_base) spoor_clunk(union_base);  // UM: a goto slipped past the consume
     if (quarry) spoor_clunk(quarry);   // quarry was popped off the trail
     stalk_unwind(trail, depth);        // release any remaining ancestors
     stalk_expand_free(ex);             // D-1

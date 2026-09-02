@@ -798,7 +798,12 @@ int mount(struct Territory *territory, struct Spoor *source,
     // lock; the MREPL spoor_clunk(old) is captured under the lock + deferred to
     // OUTSIDE it (the displaced source's Dev close hook may sleep -- never hold a
     // spinlock across it, the dot_lock free-outside-the-lock discipline).
-    struct Spoor *to_clunk = NULL;
+    // UM: MREPL replaces the whole union group at a point, so up to
+    // PGRP_MAX_MOUNTS displaced sources may need clunking -- deferred to OUTSIDE
+    // the lock (a Dev close hook may sleep). repl_nclunk stays 0 on every
+    // non-MREPL path.
+    struct Spoor *repl_clunk[PGRP_MAX_MOUNTS];
+    int repl_nclunk = 0;
     int rc;
     spin_lock(&territory->ns_lock);
 
@@ -850,37 +855,41 @@ int mount(struct Territory *territory, struct Spoor *source,
         }
     }
 
-    // MREPL semantics at v1.0: if `flags & MREPL` and an entry at the
-    // same mount-point identity exists (with a different source — idempotent
-    // same-source handled above), replace the FIRST matching entry. Drop the
-    // old source's refcount; install the new source with a fresh ref.
+    // UM (union mounts): dispatch on the ordering flags to place the new member
+    // in the point's SEARCH ORDER (ARCH 9.5/9.6; territory.tla MountRepl /
+    // MountBefore / MountAfter). A point's members are searched in mounts[]
+    // array order -- MBEFORE members first, MAFTER (and the flagless default)
+    // last -- and mount_member_at / the resolver iterate that order.
     //
-    // MBEFORE/MAFTER/MCREATE union semantics are recorded but treated
-    // as "append a new entry" at v1.0; union walking is Phase 5+ once
-    // the walk algorithm grows union support.
+    //   MREPL   -> replace the WHOLE group: remove every existing member at the
+    //              point (defer their source clunks; drop their Path refs), then
+    //              install this one. v1.0 single-member points make this
+    //              identical to the prior "replace the first entry", but a real
+    //              union now collapses correctly (the spec's MountRepl replaces
+    //              the sequence, not just its head).
+    //   MBEFORE -> insert at the index of the point's FIRST existing member, so
+    //              it is searched before them (Plan 9 prepend; later MBEFOREs go
+    //              to the very front, LIFO).
+    //   MAFTER / flagless -> append after the point's members (searched last,
+    //              FIFO). This preserves the pre-UM append behavior exactly.
     if (flags & MREPL) {
-        for (int i = 0; i < territory->nmounts; i++) {
+        int i = 0;
+        while (i < territory->nmounts) {
             if (mount_key_eq(&territory->mounts[i], mountpoint)) {
-                // spoor_clunk (not spoor_unref): MREPL displaces a holder; if this
-                // was the last ref on `old`, the Dev's close hook must run to
-                // release per-Spoor state (P5-mount-syscall fix). Deferred to `out`.
-                to_clunk = territory->mounts[i].source;
-                // #66 (I-33): re-capture the mount-point name from the new
-                // mountpoint Spoor (same (dc,devno,qid.path) identity, fresh
-                // resolve -> latest retained name). ref-NEW-before-unref-OLD so a
-                // (degenerate) shared Path object survives the swap.
-                struct Path *old_mp = territory->mounts[i].mp_path;
-                territory->mounts[i].mp_path = mountpoint->path;
-                path_ref(territory->mounts[i].mp_path);
-                path_unref(old_mp);
-                territory->mounts[i].source = source;
-                territory->mounts[i].flags  = flags;
-                spoor_ref(source);
-                rc = 0;
-                goto out;
+                // Defer the displaced source's clunk (its Dev close hook may
+                // sleep -- never under ns_lock); drop the mount-point Path ref
+                // now (path_unref is non-sleeping).
+                repl_clunk[repl_nclunk++] = territory->mounts[i].source;
+                path_unref(territory->mounts[i].mp_path);
+                for (int j = i; j < territory->nmounts - 1; j++)
+                    territory->mounts[j] = territory->mounts[j + 1];
+                territory->nmounts--;
+                // do NOT advance i: the shifted-down entry now occupies slot i.
+            } else {
+                i++;
             }
         }
-        // MREPL with no existing entry: fall through to append.
+        // fall through to install the one new member below.
     }
 
     if (territory->nmounts >= PGRP_MAX_MOUNTS) { rc = -2; goto out; }
@@ -889,7 +898,22 @@ int mount(struct Territory *territory, struct Spoor *source,
     // below is infallible after the ref, so no rollback is needed.
     spoor_ref(source);
 
-    struct PgrpMount *e = &territory->mounts[territory->nmounts];
+    // Choose the insertion index. MBEFORE opens a slot at the point's first
+    // existing member (so the new member is searched first); every other flag
+    // (MAFTER / flagless / post-MREPL) appends after the point's members.
+    int ins = territory->nmounts;
+    if (flags & MBEFORE) {
+        for (int i = 0; i < territory->nmounts; i++) {
+            if (mount_key_eq(&territory->mounts[i], mountpoint)) { ins = i; break; }
+        }
+        // Shift [ins .. nmounts-1] right by one to open slot `ins`. Each struct
+        // copy MOVES its source + mp_path refs along (no ref change); mounts[]
+        // has room (nmounts < PGRP_MAX_MOUNTS, checked above).
+        for (int j = territory->nmounts; j > ins; j--)
+            territory->mounts[j] = territory->mounts[j - 1];
+    }
+
+    struct PgrpMount *e = &territory->mounts[ins];
     e->source      = source;
     // #66 (I-33): retain the mount-POINT's namespace name for /proc/<pid>/ns.
     // path_ref is NULL-safe (a kernel-internal mountpoint with no retained name
@@ -907,7 +931,7 @@ int mount(struct Territory *territory, struct Spoor *source,
 
 out:
     spin_unlock(&territory->ns_lock);
-    if (to_clunk) spoor_clunk(to_clunk);
+    for (int k = 0; k < repl_nclunk; k++) spoor_clunk(repl_clunk[k]);
     return rc;
 }
 
@@ -932,14 +956,17 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint) {
             // to outside the lock.
             to_clunk = territory->mounts[i].source;
             // #66 (I-33): drop the removed entry's mount-point name BEFORE the
-            // swap-remove overwrites the slot (else the Path ref leaks). The
-            // last entry's own mp_path ref TRANSFERS into slot i via the struct
-            // copy -- no ref change for it. path_unref is non-sleeping (no defer).
+            // shift overwrites the slot (else the Path ref leaks). path_unref is
+            // non-sleeping (no defer).
             path_unref(territory->mounts[i].mp_path);
-            // Remove by swapping with the last element. Order within mounts[] is
-            // not load-bearing at v1.0; MBEFORE/MAFTER union walking (Phase 5+)
-            // introduces an ordering invariant + switches to shift-down then.
-            territory->mounts[i] = territory->mounts[territory->nmounts - 1];
+            // UM: SHIFT-DOWN (not swap-remove) so the union SEARCH ORDER is
+            // preserved -- MBEFORE/MAFTER ordering is now load-bearing (the
+            // resolver + mount_member_at iterate mounts[] in array order). Each
+            // entry [i+1 ..] moves left, carrying its source + mp_path refs
+            // (struct move, no ref change). Removes the FIRST match; call again
+            // to drop the next union member (the contract is unchanged).
+            for (int j = i; j < territory->nmounts - 1; j++)
+                territory->mounts[j] = territory->mounts[j + 1];
             territory->nmounts--;
             rc = 0;
             break;
@@ -975,6 +1002,40 @@ struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe,
             // without a second scan (and without racing an unmount).
             if (flags_out) *flags_out = territory->mounts[i].flags;
             break;
+        }
+    }
+    spin_unlock(&territory->ns_lock);
+    return src;
+}
+
+// mount_member_at (UM) -- the ordered union iterator. Returns a REF-HELD source
+// of the `index`-th mount entry whose mount-point identity matches `probe`, in
+// mounts[] array order (= declared search order per mount()'s ordering), or NULL
+// when `index` is past the last member. Same atomic ns_lock discipline as
+// mount_lookup. The resolver iterates index 0,1,2,... trying the next component
+// in each member and stopping at the first that resolves it. THE CALLER MUST
+// spoor_clunk the returned Spoor.
+struct Spoor *mount_member_at(struct Territory *territory, struct Spoor *probe,
+                              int index, u32 *flags_out) {
+    if (flags_out) *flags_out = 0;
+    if (!territory)                    return NULL;
+    if (territory->magic != PGRP_MAGIC) extinction("mount_member_at on corrupted Territory");
+    if (!probe)                        return NULL;
+    if (probe->magic != SPOOR_MAGIC)   extinction("mount_member_at probe corrupted Spoor");
+    if (index < 0)                     return NULL;
+
+    struct Spoor *src = NULL;
+    int seen = 0;
+    spin_lock(&territory->ns_lock);
+    for (int i = 0; i < territory->nmounts; i++) {
+        if (mount_key_eq(&territory->mounts[i], probe)) {
+            if (seen == index) {
+                src = territory->mounts[i].source;
+                spoor_ref(src);   // transfer a ref to the caller (atomic vs unmount)
+                if (flags_out) *flags_out = territory->mounts[i].flags;
+                break;
+            }
+            seen++;
         }
     }
     spin_unlock(&territory->ns_lock);

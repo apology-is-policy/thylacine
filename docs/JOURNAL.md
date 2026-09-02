@@ -22,6 +22,71 @@ needed the operator.
 
 ---
 
+## 2026-09-02 (aux) -- union mounts: the operator turned a /bin/sh symlink into the real Plan 9 feature
+
+**How it started, and the wrong turn the operator caught.** X-11 was "add `/bin/sh`"
+(git's compile-time `SHELL_PATH`; absent from the login namespace). I pinned the
+wiring: `/bin` is a `T_MREPL` bind of the pre-pivot **devramfs** binary tree
+(joey.c:7022, "#58") -- native binaries live only in the initrd, not the pool --
+and devramfs has no symlink type, and union walking was deferred to v1.x
+(territory.c:859). So I reasoned toward "add a symlink type to devramfs." The
+operator asked **"Why devramfs?"** then **"Let's do union mounts now."** That is
+the reusable catch: the contained hack (devramfs symlinks) was reachable only
+because I'd ruled out the RIGHT mechanism (union mounts) on the ground that
+scripture deferred it -- when scripture had also already *designed* it (ARCH 9.5:
+"check each in declared order until one succeeds"). Ratified via AskUserQuestion:
+**full Plan 9 union / spec-first (extend territory.tla) / effort max**.
+
+**The semantic question answered by scripture, not by guessing.** Does a union
+point search the mounted-on directory's OWN contents, or only the grafted
+sources? I went back and forth on Plan 9's `mh->from` behavior -- then found
+Thylacine's own ARCH 9.6 settles it (grafted sources only), which is binding AND
+sidesteps the self-mount cycle check (`would_create_mount_cycle` rejects
+source-identity == mountpoint-identity, so an "original as member" would be
+refused). No original-as-member special case.
+
+**Spec first (UM-1, `45465e8d`).** Upgraded `territory.tla`: `mounts` set ->
+ordered `morder: [Procs -> [Paths -> Seq(Member)]]` + a `holds` contents relation,
+and four union invariants -- `WalkFirstHit` / `OrderCorrect` /
+`ReaddirDedupFirstWins` / `CreateTargetCorrect`. TLC clean **2,032,452 distinct /
+diameter 9** (9 min); all 9 buggy cfgs counterexample; the four union cfgs were
+each ALSO checked against ONLY their target invariant (not the `Invariants`
+bundle) and violate exactly that one -- the discrimination control, so a bug hits
+its own check and not incidentally a refcount one.
+
+**The walk impl (UM-3 territory.c + UM-4 stalk.c, uncommitted at this entry's
+writing).** `mount()` honors MBEFORE (group-front insert) / MAFTER (append) /
+MREPL (replace whole group -- was head-only, identical while a point held one
+member); `unmount()` shift-down (order-preserving); new `mount_member_at`
+iterator. The resolver: `stalk_cross_from(probe, member_idx)` generalizes
+`stalk_cross_mounts`; `stalk_union_child` searches members in order with Plan 9
+skip semantics (a member denying X-search or not a directory is SKIPPED, not
+EACCES -- the divergence from a lone directory). The design call that took the
+most thought: for a union point, DON'T cross to member 0 -- leave the mount POINT
+as the trail tip and let the helper cross each member. That keeps a later `..`
+landing on the union point (accurate recorded parent) and avoids a member-0
+re-cross. Winner-only phenotype: a losing Linux member must not stamp a
+resolution that lands elsewhere.
+
+**A test wrong turn, caught by reading my own helper.** I first built the X-skip
+fixture as a *subdir* denying X. But the helper X-checks the MEMBER ROOT, not a
+subdir -- so I redesigned the fixture to a 0600 member (`uma`) that the SYSTEM
+caller cannot search (proven denyable by the existing `nox` 0644 test), and the
+walk skips it to `umb`'s `tgt` (qid 32). Suite **1492/1492** (+3 union tests,
+boot log 1656-1658).
+
+**Cost + coordination.** The clean TLC run is ~9 min (2M states); I released the
+mac to main mid-arc for a timing-thin H-3d verification (which starves under
+contention) and re-held after -- the walk verify is CPU-heavy and would have
+confounded main's pixel-timing legs.
+
+**Open (sequenced as sub-chunks, not deferred -- the operator chose full union):**
+UM-5 union readdir (merge + dedup; needs the open fd to track the union), UM-5a
+MCREATE create-side, UM-6 /bin/sh application, UM-7 the arc-close holotype audit
+(Territory + stalk). **Documented v1.0 limitation**: a union at the resolution
+ROOT itself is searched via member 0 only (the detection is at the depth>0
+descent cross); every sub-root union (/bin, ...) -- every real case -- is covered.
+
 ## 2026-09-02 (aux) -- the socktab holotype closed; the pipe's single-waiter extinction found and fixed
 
 Autonomous run on the far side of the 600k self-compaction, under the operator's standing
