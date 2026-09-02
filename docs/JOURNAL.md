@@ -22,6 +22,83 @@ needed the operator.
 
 ---
 
+## 2026-09-02 (run 17, Fable→Opus 4.8) — H-4b-2: the Session actor, and the reformat that had to come first
+
+**Two things landed, in this order: four reformat commits, then the Session
+actor.** Tip `8f507bb9`; NOT pushed (the pane-tree-trust surface is
+audit-bearing and the holotype batches at the H-4b arc close, after H-4b-3).
+
+**The reformat, and why it went first.** The tapestry crate family carried
+~493 pre-existing `rustfmt` hunks (tapestryd 290 / libtapestry 14 / battery 34
+/ halcyond 152) because no fmt gate ever ran on it. Rather than let H-4b-2's
+diff mingle whitespace with the authority change, I surfaced the choice to the
+operator (reformat now / a `rustfmt.toml` declaring the wide style / leave);
+they chose reformat now. Four pure `cargo fmt -p <crate>` commits
+(`fb626450` / `0949963d` / `452ff1d2` / `d9334feb`). The interesting part is
+the *purity proof*, because a reformat that silently altered an emitted string
+would corrupt the E2Es that match those strings exactly: I proved it three ways
+— the reformat is idempotent (a re-run reports zero residual hunks), zero
+string-literal *contents* changed across every reformatted file (a per-file
+extract-and-diff of every Rust double-quoted literal — the diff was empty), and
+`cargo fmt` is an AST-preserving pretty-print over already-compiling code. The
+panes E2E (which matches tapestryd's emitted strings exactly) later confirmed it
+at runtime. Committed ahead of the build on that basis; the build confirmed.
+
+**H-4b-2 `636937b0`: the `Session(principal)` actor.** The authority key
+changed. Before this, every non-renderer peer was one `Client(stripes)` actor
+keyed on the per-process tag, so two processes of one user were mutually walled
+— which makes layout restore impossible, since the restore tool and the
+programs it spawns are different processes of the same user. `actor()` is now
+3-way: Renderer / `Client(stripes)` for SYSTEM|NONE|INVALID (the boot chain
+must not become one session) / `Session(principal)` for a real user. Surfaces
+and empty leaves carry `owner_principal` (empties stamped at split from the
+splitting actor via a free `actor_owner_principal`); the three authority checks
+gained `Session(p)` arms; `actor_names` now lets a session NAME an empty leaf
+it owns (the tool tags at claim time); the H-4b-1 claim mint narrowed from its
+interim "any peer" rule to owner-only; `reap_session_empties` closes a departed
+session's empty scaffolding on its principal's last conn death (main's two
+conn-removal sites do the last-conn check against the survivors).
+
+**The load-bearing claim was regression-safety, and it was reasoned before it
+was measured.** A single-process user is unchanged because stripes and
+principal both uniquely identify it — so the battery, now a `Session(michael)`
+actor, keeps its own-pane ops AND its `michael → SYSTEM` negative. The measured
+witness matched the reasoning: ls-gfx-panes **33/33** under `Session(michael)`,
+and the two legs that would have caught a regression both held — `battery:
+claim OK` (the mint still works, because the battery owns the leaf it split, so
+the narrowed owner-gate admits it) and `pane-tree gate refuses ... on a foreign
+pane (E_PERM)` (michael ≠ SYSTEM). Clean boot, joey suite, login E2E for
+michael + cora, 0 EXTINCTION.
+
+**A self-review catch worth keeping.** My `peer_principal()` getter landed
+between a pre-existing (mis-stacked) doc comment and `actor()`, which would have
+re-attached that stale doc to my getter. Caught on the pre-audit diff read;
+moved the getter after `actor()` so the pre-existing state was restored exactly.
+
+**The scope decision.** H-4b-3 (the restore tool) is a genuinely large chunk —
+spawn-as-user, `/env` token passing, a libtapestry auto-claim, and a skeleton
+algorithm that maps a saved tree onto tapestry's split/flatten. I kept it a
+focused next run rather than stack a large unbuilt chunk on unbuilt -2, and I
+decided the POSITIVE cross-process mutual-authority witness should ride the
+*real* tool at H-4b-3, not a synthetic rfork test in -2 — the highest-standard
+witness is the actual second same-principal peer, not a test hack. So H-4b-2
+lands regression-safe here; the new authority is first *exercised and witnessed*
+at H-4b-3, and the batched holotype over H-4b-1..3 covers both. The full H-4b-3
+plumbing was verified this run and recorded in `design_h4_layouts.md`.
+
+**Cost / contention.** aux held mac for UM-8a most of the run; I used the wait
+for no-cores work only (writing + self-reviewing -2, drafting its commit
+message, the vault text, and the H-4b-3 design), took mac for one ~6-minute
+build+boot burst when it freed, and released immediately. No oversubscription.
+
+**Open, exact:** the positive cross-process witness is owed at H-4b-3 (not a
+gap in -2 — the authority is dormant until a second same-principal tapestry
+client exists, which first happens at -3). MEMORY.md compaction is owed (21.9KB
+of the 24.4KB read limit; the hook flagged it; deferred as a dedicated pass
+rather than rushed at a run's tail). The /dev/random world-rw vs cap-gated
+`SYS_GETRANDOM` inconsistency (found at H-4b-1) is still enqueued for the A-4
+sweep. Vault `8bcdd2f8`.
+
 ## 2026-09-01 (run 16, Fable) — H-2: the transcript MVP lands; the E2E hunt that vindicated the gate
 
 **H-2 built end to end in seven chunks** (a `05d837a7` / b `1c053bb6` / c
