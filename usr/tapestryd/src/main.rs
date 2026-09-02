@@ -523,6 +523,15 @@ impl Driver for Tapestryd {
                 if !ok {
                     let mut c = conns.remove(i);
                     c.teardown(&mut self.comp);
+                    // H-4b-2: on the LAST conn of a real user principal, reap
+                    // its empty layout scaffolding (occupied tiles are already
+                    // gone via teardown's retire_conn). `conns` no longer holds
+                    // `c`, so this scans only the survivors; reap_session_empties
+                    // itself no-ops for the environment / system / unknown.
+                    let gone_principal = c.peer_principal();
+                    if conns.iter().all(|o| o.peer_principal() != gone_principal) {
+                        self.comp.reap_session_empties(gone_principal);
+                    }
                     unsafe { t_close(c.raw_fd()) };
                 }
             }
@@ -662,6 +671,15 @@ impl Driver for Tapestryd {
                 if re & (T_POLLIN | T_POLLHUP) != 0 && !conns[i].service(&mut self.comp) {
                     let mut c = conns.remove(i);
                     c.teardown(&mut self.comp);
+                    // H-4b-2: on the LAST conn of a real user principal, reap
+                    // its empty layout scaffolding (occupied tiles are already
+                    // gone via teardown's retire_conn). `conns` no longer holds
+                    // `c`, so this scans only the survivors; reap_session_empties
+                    // itself no-ops for the environment / system / unknown.
+                    let gone_principal = c.peer_principal();
+                    if conns.iter().all(|o| o.peer_principal() != gone_principal) {
+                        self.comp.reap_session_empties(gone_principal);
+                    }
                     unsafe { t_close(c.raw_fd()) };
                 }
             }

@@ -249,6 +249,17 @@ pub struct Pane {
     /// cleared the instant the leaf is hosted or freed -- so a claim can
     /// never steer a surface into a leaf that already holds one.
     pub claim_token: Option<u128>,
+    /// H-4b-2: the principal that owns this pane when it is an EMPTY leaf --
+    /// recorded at SPLIT from the splitting actor (0 = the renderer's / the
+    /// environment; a user session stamps its own principal). Load-bearing
+    /// on EXACTLY two paths: the claim mint (a session mints a placement
+    /// token only on an empty leaf it owns) and the session reap (an empty
+    /// leaf is closed when its owning principal's last conn goes). It is
+    /// NOT consulted for structural authority (`actor_owns_subtree` keys on
+    /// the hosted SURFACES, and an all-empty subtree is vacuously anyone's
+    /// -- HALCYON.md 13.6); an occupied leaf's ownership is its surface's,
+    /// so this field is meaningful only while the leaf is empty.
+    pub owner_principal: u32,
 }
 
 pub struct Layout {
@@ -308,6 +319,7 @@ impl Layout {
             status: Status::Resting,
             visible: false,
             claim_token: None,
+            owner_principal: 0,
         };
         let slot = match self.panes.iter().position(|s| s.is_none()) {
             Some(i) => {
@@ -356,6 +368,32 @@ impl Layout {
         match self.get(slot).map(|p| &p.kind) {
             Some(Kind::Leaf { surface }) => *surface,
             _ => None,
+        }
+    }
+
+    /// H-4b-2: is `slot` an EMPTY leaf (a leaf hosting no surface)? The
+    /// unit the claim mint and the session reap both key on -- ownership
+    /// (`owner_principal`) is meaningful only for these.
+    pub fn is_empty_leaf(&self, slot: usize) -> bool {
+        matches!(
+            self.get(slot).map(|p| &p.kind),
+            Some(Kind::Leaf { surface: None })
+        )
+    }
+
+    /// H-4b-2: the recorded owner principal of `slot` (0 = the renderer's /
+    /// the environment, and the default for a missing slot). Meaningful for
+    /// an empty leaf; an occupied leaf's real owner is its surface's.
+    pub fn pane_owner_principal(&self, slot: usize) -> u32 {
+        self.get(slot).map_or(0, |p| p.owner_principal)
+    }
+
+    /// H-4b-2: stamp `slot`'s owner principal (called after `split` with
+    /// the splitting actor's principal, and by the reap to hand a reaped
+    /// root-leaf back to the environment).
+    pub fn set_owner_principal(&mut self, slot: usize, principal: u32) {
+        if let Some(p) = self.get_mut(slot) {
+            p.owner_principal = principal;
         }
     }
 

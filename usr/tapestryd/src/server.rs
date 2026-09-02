@@ -102,8 +102,8 @@ use libthyla_rs::time::Instant;
 use libthyla_rs::{
     t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map,
     t_hostmem_refcount, t_srv_peer, t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM,
-    T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
-    T_SRV_PEER_FLAG_CONSOLE_RENDERER,
+    T_PRINCIPAL_INVALID, T_PRINCIPAL_NONE, T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE,
+    T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
 
 /// Present-pressure window for the idle throttle (#164): two adjacent
@@ -155,14 +155,40 @@ const MAX_SURFACES_PER_CONN: usize = 4;
 /// HALCYON.md 13.6): the console renderer is the environment and may act
 /// on any pane; any other PROCESS acts only on what it OWNS -- rio's line
 /// (a client drives its own window's wctl; the window manager drives the
-/// rest). Resolved per write from the conn's kernel-stamped peer; the
-/// client identity is the peer's `stripes` (a process holds several
-/// sessions -- one per Surface plus a driver session -- and they are all
-/// one owner). Client(0) = an unknown peer: owns nothing.
+/// rest). Resolved per write from the conn's kernel-stamped peer.
+///
+/// THREE identities (H-4b-2, HALCYON.md 13.7 -- the ratified D decision):
+/// - `Renderer`: the console renderer; the environment, acts anywhere.
+/// - `Client(stripes)`: a per-PROCESS peer keyed on the kernel `stripes`
+///   tag (a process holds several sessions -- one per Surface plus a
+///   driver session -- all one owner). Client(0) = an unknown peer: owns
+///   nothing. This is what a SYSTEM daemon / an unauthenticated / an
+///   unknown peer stays -- mutually walled, owning only what it mints.
+/// - `Session(principal)`: an ORDINARY USER peer, keyed on the kernel
+///   principal, NOT stripes. The ratified consequence: same-principal
+///   peers gain rio-style mutual pane authority (a program running as you
+///   may close/refocus/rename your OTHER tiles) -- strictly weaker than
+///   the same-owner process kill I-26 already grants. The console (SYSTEM
+///   principal) and other users (another principal) stay protected.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Actor {
     Renderer,
     Client(u64),
+    Session(u32),
+}
+
+/// H-4b-2: the principal to STAMP on an empty leaf this actor creates at
+/// split -- the key that later gates who may mint a placement claim on it.
+/// A session stamps its own principal; the renderer AND a Client
+/// (system/none) stamp 0 (the environment), so no user session can claim
+/// their empties and the reap (which only touches real user principals)
+/// never disturbs them.
+fn actor_owner_principal(actor: Actor) -> u32 {
+    match actor {
+        Actor::Renderer => 0,
+        Actor::Session(p) => p,
+        Actor::Client(_) => 0,
+    }
 }
 
 /// What a `create` hosts (the surface_ctl arm's parse, typed): a content
@@ -840,6 +866,14 @@ struct Surface {
     /// (one per Surface + a driver session), so "mine" is the process, not
     /// the conn. 0 = unknown peer, owns nothing.
     owner_peer: u64,
+    /// H-4b-2: the minting conn's peer PRINCIPAL (the kernel's durable
+    /// per-Proc identity, immutable for a running Proc). The `Session`
+    /// actor's ownership key: an ordinary user's surfaces across all its
+    /// processes share this, so a same-principal peer may act on them
+    /// (mutual pane authority). SYSTEM / unauthenticated / unknown peers
+    /// carry their sentinel principal here but are Client(stripes) actors,
+    /// so this is inert for them.
+    owner_principal: u32,
     state: SurfState,
     w: u32,
     h: u32,
@@ -2340,13 +2374,14 @@ impl Comp {
     }
 
     /// Mint a surface slot for `conn_id` (F9 caps enforced by the caller).
-    fn mint(&mut self, conn_id: u64, peer: u64) -> Option<usize> {
+    fn mint(&mut self, conn_id: u64, peer: u64, principal: u32) -> Option<usize> {
         let n = self.surfaces.iter().position(|s| s.is_none())?;
         self.gen_seq = self.gen_seq.wrapping_add(1);
         self.surfaces[n] = Some(Surface {
             gen: self.gen_seq,
             owner_conn: conn_id,
             owner_peer: peer,
+            owner_principal: principal,
             state: SurfState::Minted,
             w: 0,
             h: 0,
@@ -6040,6 +6075,15 @@ impl Comp {
                 .subtree_surfaces(slot)
                 .iter()
                 .all(|&n| self.surf(n).map_or(false, |s| s.owner_peer == c)),
+            // H-4b-2: a session owns the subtree iff every hosted surface
+            // is its principal's (an all-empty subtree is vacuously true --
+            // "anyone's", same as Client; empty-leaf placement authority is
+            // the separate claim-mint gate, not this structural check).
+            Actor::Session(p) => self
+                .layout
+                .subtree_surfaces(slot)
+                .iter()
+                .all(|&n| self.surf(n).map_or(false, |s| s.owner_principal == p)),
         }
     }
 
@@ -6055,6 +6099,14 @@ impl Comp {
                 .leaf_surface(slot)
                 .and_then(|n| self.surf(n))
                 .map_or(false, |s| s.owner_peer == c),
+            // H-4b-2: a session takes a tile hosting one of its principal's
+            // surfaces (the ratified mutual authority -- any of the user's
+            // processes may refocus/zoom any of the user's tiles).
+            Actor::Session(p) => self
+                .layout
+                .leaf_surface(slot)
+                .and_then(|n| self.surf(n))
+                .map_or(false, |s| s.owner_principal == p),
         }
     }
 
@@ -6062,7 +6114,25 @@ impl Comp {
     /// by whoever owns its whole subtree.
     fn actor_names(&self, actor: Actor, slot: usize) -> bool {
         if self.layout.is_leaf(slot) {
-            self.actor_hosts(actor, slot)
+            if self.actor_hosts(actor, slot) {
+                return true;
+            }
+            // H-4b-2: a session may NAME an empty leaf it OWNS -- the
+            // restore tool writes a leaf's tag at claim time, before the
+            // child it spawns hosts a surface (acme's tag-before-`win`).
+            // An empty leaf hosts no surface, so actor_hosts is false; an
+            // empty leaf's owner is its recorded owner_principal (stamped
+            // at split), not a hosted surface. The renderer names anything
+            // (the environment, incl. an empty leaf); a Client (system/
+            // none) owns no empty leaf to name.
+            match actor {
+                Actor::Renderer => true,
+                Actor::Session(p) => {
+                    self.layout.is_empty_leaf(slot)
+                        && self.layout.pane_owner_principal(slot) == p
+                }
+                Actor::Client(_) => false,
+            }
         } else {
             self.actor_owns_subtree(actor, slot)
         }
@@ -6159,7 +6229,12 @@ impl Comp {
                 return Err(p9::E_PERM);
             }
             self.layout.unzoom();
-            self.layout.split(slot, mode).ok_or(p9::E_NOMEM)?;
+            let new_leaf = self.layout.split(slot, mode).ok_or(p9::E_NOMEM)?;
+            // H-4b-2: the new empty leaf records its creator's principal, so
+            // the creator (and only it, or the renderer) may later mint a
+            // placement claim on it -- "placement is a capability".
+            self.layout
+                .set_owner_principal(new_leaf, actor_owner_principal(actor));
         } else if let Some(rest) = cmd.strip_prefix("move ") {
             let d = Dir::parse(rest.trim()).ok_or(p9::E_INVAL)?;
             if !self.actor_owns_subtree(actor, slot) {
@@ -6366,6 +6441,61 @@ impl Comp {
                 self.retire(n);
             }
         }
+    }
+
+    /// H-4b-2: reap a departed session's empty scaffolding. `retire_conn`
+    /// (called first, at teardown) already closed the dying conn's OCCUPIED
+    /// leaves -- `retire` closes the leaf that hosted each retired surface.
+    /// What survives is the empty leaves the session built (via `split`) but
+    /// never hosted -- the restore skeleton. When the principal's LAST live
+    /// conn is gone (main confirms no sibling shares it), those are closed:
+    /// a logged-out user's layout should not persist as dead empty tiles.
+    /// Only a real user principal reaches here; the environment's leaves
+    /// (owner_principal 0) and other principals' tiles are untouched. The
+    /// root never leaves -- a reaped root-leaf is handed back to the
+    /// environment (owner 0) instead of closed.
+    pub fn reap_session_empties(&mut self, principal: u32) {
+        // Only a real user principal owns reapable empties (INVALID == 0 is
+        // the environment's; SYSTEM/NONE are per-process, never a session).
+        if principal == T_PRINCIPAL_INVALID
+            || principal == T_PRINCIPAL_SYSTEM
+            || principal == T_PRINCIPAL_NONE
+        {
+            return;
+        }
+        // Collect victim IDS first: `close` restructures slots (single-child
+        // containers dissolve), but ids are stable, so re-resolve per id.
+        let victims: Vec<u32> = self
+            .layout
+            .live_ids()
+            .into_iter()
+            .filter(|&(slot, _)| {
+                self.layout.is_empty_leaf(slot)
+                    && self.layout.pane_owner_principal(slot) == principal
+            })
+            .map(|(_, id)| id)
+            .collect();
+        if victims.is_empty() {
+            return;
+        }
+        #[cfg(feature = "test-mode")]
+        say!(
+            "tapestryd: reaped {} empty leaf/leaves of principal {}",
+            victims.len(),
+            principal
+        );
+        for id in victims {
+            let slot = match self.layout.slot_of_id(id) {
+                Some(s) => s,
+                None => continue, // freed by an earlier close's collapse
+            };
+            if slot == self.layout.root {
+                self.layout.set_owner_principal(slot, 0);
+            } else {
+                let _ = self.layout.close(slot);
+            }
+        }
+        self.reconcile();
     }
 
     /// Queue an event on surface `n` under the R2-F4 policy. Returns false
@@ -12264,6 +12394,13 @@ pub struct Conn {
     /// identity the pane tree's ownership is keyed on, fixed for the conn's
     /// life (the connector never changes; its death flips `alive`, not this).
     peer_stripes: u64,
+    /// H-4b-2: the connecting peer's kernel PRINCIPAL (durable identity;
+    /// T_PRINCIPAL_NONE for a dead/unknown peer). Cached ONCE at
+    /// `Conn::new` -- unlike renderer-status (which `peer_is_renderer`
+    /// re-reads per write because it is dynamic: the SAK can revoke it),
+    /// a running Proc's principal is immutable, so a single read is sound.
+    /// The `Session` actor's key; drives the claim-mint gate and the reap.
+    peer_principal: u32,
     /// Layout mutations landed in the current service pass.
     layout_verbs: u32,
     /// Which tree this conn serves: P_ROOT (/srv/tapestry) or W_ROOT
@@ -12353,15 +12490,22 @@ fn rects_cover_full(rects: &[(u32, u32, u32, u32)], w: u32, h: u32) -> bool {
 impl Conn {
     pub fn new(handle: i64, conn_id: u64, root: u64) -> Conn {
         let mut info = TSrvPeerInfo::default();
-        let peer_stripes = if unsafe { t_srv_peer(handle, &mut info) } == 0 && info.alive == 1 {
-            info.stripes
+        // One read, two fields: stripes (per-process) and principal (durable
+        // identity). A dead/unknown peer is stripes 0 (owns nothing) and
+        // principal NONE (an unauthenticated nobody -> Client(0), never a
+        // Session), so both fail closed.
+        let ok = unsafe { t_srv_peer(handle, &mut info) } == 0 && info.alive == 1;
+        let peer_stripes = if ok { info.stripes } else { 0 };
+        let peer_principal = if ok {
+            info.principal_id
         } else {
-            0
+            T_PRINCIPAL_NONE
         };
         Conn {
             handle,
             conn_id,
             peer_stripes,
+            peer_principal,
             layout_verbs: 0,
             root,
             version_done: false,
@@ -12982,7 +13126,7 @@ impl Conn {
                 return self.err(tag, p9::E_NOMEM);
             }
             let conn_id = self.conn_id;
-            let n = match comp.mint(conn_id, self.peer_stripes) {
+            let n = match comp.mint(conn_id, self.peer_stripes, self.peer_principal) {
                 Some(n) => n,
                 None => return self.err(tag, p9::E_NOMEM),
             };
@@ -13185,15 +13329,14 @@ impl Conn {
             // and a later offset serves the pin whatever the leaf holds by
             // then. Only a LIVE EMPTY leaf is claimable at mint: a container
             // is E_NOENT (no tile), an occupied leaf E_PERM (its placement
-            // is taken). WHO may mint, at this stage: any peer -- today's
-            // empty-leaf rule (an all-empty subtree is anyone's; anyone may
-            // close an empty), and a claim is strictly weaker than the close
-            // every peer already holds over the same leaf: it can never take
-            // a tile that holds a surface (the create path hosts only into a
-            // still-empty leaf). The scripture's tightening -- the leaf must
-            // be SESSION-OWNED -- lands with `owner_principal` recorded at
-            // split (H-4b-2), when this mint narrows to the reader's own
-            // empties.
+            // is taken). WHO may mint (H-4b-2, HALCYON.md 13.7 -- "a
+            // session-owned empty leaf's claim"): the leaf's OWNER only.
+            // The renderer acts anywhere (the environment); a session owns
+            // an empty leaf stamped with its principal at split; a Client
+            // (system/none) owns no empty leaf. A claim is still strictly
+            // weaker than the close every peer holds over the same leaf --
+            // it can never take a tile that holds a surface (the create
+            // path hosts only into a still-empty leaf).
             let id = pane_id(f.path);
             let slot = match comp.layout.slot_of_id(id) {
                 Some(s) => s,
@@ -13205,6 +13348,17 @@ impl Conn {
                     return self.err(tag, p9::E_NOENT);
                 }
                 if comp.layout.leaf_surface(slot).is_some() {
+                    return self.err(tag, p9::E_PERM);
+                }
+                // Placement is a capability: mint only on a leaf the reader
+                // owns. E_PERM (as for an occupied leaf) -- both are "this
+                // placement is not available to you".
+                let owns = match self.actor() {
+                    Actor::Renderer => true,
+                    Actor::Session(p) => comp.layout.pane_owner_principal(slot) == p,
+                    Actor::Client(_) => false,
+                };
+                if !owns {
                     return self.err(tag, p9::E_PERM);
                 }
                 let mut raw = [0u8; 16];
@@ -14989,13 +15143,33 @@ impl Conn {
     /// to GATED" (an allowlist would silently ungate a verb added without
     /// touching the gate line).
     /// The pane-tree actor this conn is, for this write (per write:
-    /// revocation-correct, like the global-ctl gate).
+    /// revocation-correct for the renderer axis, like the global-ctl gate;
+    /// the principal axis is immutable so its cache is sound).
     fn actor(&self) -> Actor {
         if self.peer_is_renderer() {
             Actor::Renderer
-        } else {
+        } else if self.peer_principal == T_PRINCIPAL_SYSTEM
+            || self.peer_principal == T_PRINCIPAL_NONE
+            || self.peer_principal == T_PRINCIPAL_INVALID
+        {
+            // System daemons (aurora, warp-prove, the battery-as-system),
+            // the unauthenticated, and unknown peers stay per-PROCESS:
+            // keyed on stripes, mutually walled, owning only what they
+            // mint. Keeping SYSTEM per-process is deliberate -- the boot
+            // chain must not become one mutually-authoritative session
+            // (HALCYON.md 13.7). Only an ordinary user principal earns
+            // session-wide mutual authority.
             Actor::Client(self.peer_stripes)
+        } else {
+            Actor::Session(self.peer_principal)
         }
+    }
+
+    /// This conn's kernel principal (for main's session reap on the last
+    /// conn of a principal). Cached at Conn::new; see the `peer_principal`
+    /// field.
+    pub fn peer_principal(&self) -> u32 {
+        self.peer_principal
     }
 
     /// One layout mutation's per-pass budget (see LAYOUT_VERBS_PER_PASS).
