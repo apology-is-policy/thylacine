@@ -64,8 +64,49 @@ use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe, ENTER_GETEVENTS};
 use libthyla_rs::{
     t_close, t_open, t_read, t_weft_map, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
+#[cfg(feature = "guest")]
+use core::sync::atomic::{AtomicBool, Ordering};
 
 mod ring;
+
+/// H-4b-3: the env var the layout-restore tool seeds into a spawned child's
+/// `/env`, carrying the one-shot placement claim for the leaf the tool placed
+/// it in (13.7's opaque cookie -- the child never learns its placement).
+#[cfg(feature = "guest")]
+const CLAIM_ENV: &str = "TAPESTRY_CLAIM";
+
+/// Set once the process has consumed its inherited placement claim, so only
+/// the FIRST content surface claims. Later surfaces of the same process (and
+/// any descendant that inherited the value) open normally. The server-side
+/// consume is already one-shot -- a spent token falls back to focus placement
+/// -- so this latch is a correctness-neutral optimization that also silences
+/// the "claim unmatched" log line a second read would provoke.
+#[cfg(feature = "guest")]
+static CLAIM_TAKEN: AtomicBool = AtomicBool::new(false);
+
+/// Take this process's inherited placement claim, exactly once. Returns the
+/// token iff `TAPESTRY_CLAIM` is present and a well-formed 32-hex `u128` and
+/// no earlier call has taken it. Absent/malformed -> None (the common case:
+/// a normally-launched program has no such var and opens un-placed).
+#[cfg(feature = "guest")]
+fn take_env_claim() -> Option<u128> {
+    if CLAIM_TAKEN.load(Ordering::Relaxed) {
+        return None;
+    }
+    let v = libthyla_rs::env::var(CLAIM_ENV)?;
+    let s = v.trim();
+    if s.len() != 32 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let tok = u128::from_str_radix(s, 16).ok()?;
+    // Only NOW consume the latch: an absent/malformed var leaves it unset, so
+    // a later well-formed value (a child that writes its own /env) is still
+    // honored, while a race between two first opens lets exactly one win.
+    if CLAIM_TAKEN.swap(true, Ordering::Relaxed) {
+        return None;
+    }
+    Some(tok)
+}
 
 pub const TPRESENT_LEN: usize = 32;
 pub const TPRESENT_V1: u32 = 1;
@@ -315,6 +356,19 @@ impl Surface {
     }
 
     fn open_on_bound(ring: &EventRing, w: u32, h: u32, mint: Mint) -> Result<Surface, TapError> {
+        // H-4b-3: a restored child's FIRST content surface consumes the
+        // placement claim the restore tool seeded in its /env (13.7's opaque
+        // cookie -- plain `open` lands it in the tool's target leaf without
+        // the child knowing). One-shot; an explicit open_claim or a
+        // chrome/menu/status mint is untouched. A normally-launched program
+        // has no such var and this is a no-op.
+        let mint = match mint {
+            Mint::Content => match take_env_claim() {
+                Some(tok) => Mint::Claim(tok),
+                None => Mint::Content,
+            },
+            other => other,
+        };
         let root = ring.root();
         let fail = |fds: &[i64], e: TapError| {
             for &fd in fds {
