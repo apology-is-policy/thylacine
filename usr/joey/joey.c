@@ -7026,6 +7026,30 @@ int main(void) {
             }
             (void)t_close(bin_src_h);
 
+            // UM-6 (X-11): graft the /bin/sh compat shim MAFTER onto /bin,
+            // making /bin a UNION [devramfs (MBEFORE, native binaries win),
+            // shcompat (MAFTER, the `sh -> /viv/abin/sh` fallback)]. Because
+            // MAFTER appends, every existing /bin/<name> spawn (corvus, login,
+            // loom-*, ...) still resolves in the devramfs member searched FIRST
+            // -- the #58 ordering invariant above is preserved. execve("/bin/sh")
+            // misses devramfs (no native sh) -> hits shcompat's sh symlink ->
+            // Design D re-anchors the absolute target -> /viv/abin MPHENO_LINUX
+            // busybox. SOFT: no /lib/shcompat (no busybox tarball) -> /bin stays
+            // the single devramfs member, unchanged (no /bin/sh, as before).
+            {
+                long shsrc = t_open(T_WALK_OPEN_FROM_ROOT, "/lib/shcompat", 13, T_OPATH);
+                if (shsrc < 0) {
+                    t_putstr("joey: UM-6 /bin/sh shim SKIPPED (no /lib/shcompat)\n");
+                } else {
+                    if (t_mount("/bin", 4, shsrc, T_MAFTER) != 0) {
+                        t_putstr("joey: UM-6 /bin/sh shim t_mount(/bin MAFTER) FAILED\n");
+                    } else {
+                        t_putstr("joey: UM-6 /bin/sh shim mount OK (union /bin: devramfs + shcompat)\n");
+                    }
+                    (void)t_close(shsrc);
+                }
+            }
+
             // #57: re-establish /proc + /ctl on the pivoted root (mirror /srv +
             // /bin). mkdir each (idempotent -- the Stratum pool persists across
             // reboots), graft the pre-pivot Dev root (MREPL; the mount takes its

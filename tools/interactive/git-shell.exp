@@ -34,13 +34,21 @@
 #      seeds beside the git vars for exactly this). The helper answering at
 #      all is the witness that it ran under the phenotype far enough to
 #      attempt a connection.
-#   A LOCAL clone cannot serve as the closure witness yet: for every local
-#   transport (`file://` AND `--no-local <path>`) git builds ONE quoted
-#   command string -- "git-upload-pack '/home/michael/gs/.git'" -- and hands
-#   it to its compile-time SHELL_PATH /bin/sh, which the login namespace does
-#   not have (measured twice: "fatal: cannot exec 'git-upload-pack '...''").
-#   That is AUX-ROADMAP X-11, its own item; this witness names it rather
-#   than hiding the shell-out.
+#   6. /bin/sh EXISTS + EXECS -- what X-11/UM-6 delivered. git's local transports
+#      (`file://` AND `--no-local`) build ONE quoted command -- "git-upload-pack
+#      '/home/michael/gs'" -- and hand it to compile-time SHELL_PATH /bin/sh; the
+#      login namespace HAD no /bin/sh at all (measured twice: "fatal: cannot exec
+#      'git-upload-pack '...''"). UM-6 grafts /lib/shcompat (`sh -> /viv/abin/sh`)
+#      MAFTER onto the devramfs /bin as a union, so /bin/sh now resolves and
+#      re-anchors LINUX under Design D. The witness is a direct `/bin/sh -c`
+#      shell-out (token unique to the leg -- the git-shell F1 residue trap).
+#
+#      A FURTHER gap, NAMED not hidden: the full `git clone --no-local` HANGS on
+#      the upload-pack pipe under the phenotype (no output, no exit -- measured
+#      2026-09-02, AFTER /bin/sh was in place; the shim mounts + /bin/sh execs,
+#      so this is a fork/pipe/exec gap in git's local transport, NOT a /bin/sh
+#      gap). That is its own item ([[bug-git-local-clone-hangs-under-phenotype]]);
+#      this witness proves the /bin/sh closure UM-6 owns and stops there.
 #
 # Every leg's token is UNIQUE TO THAT LEG. The first draft reused FIRST for
 # the source log and the clone log, and the commit line "[main (root-commit)
@@ -85,5 +93,13 @@ lc_send "git ls-remote https://127.0.0.1:1/x.git"
 lc_expect "Failed to connect to 127.0.0.1 port 1" "git-remote-https ran (exec'd via GIT_EXEC_PATH, under the phenotype) and reached a refused connect"
 set lc_cmd_timeout 30
 
-lc_pass "GIT-SHELL: a login shell runs the /viv/bin git with its helper closure behind the pheno-mount (exec-path /viv/bin, the system config read, init/commit as the user, the dashed upload-pack from PATH, git-remote-https exec'd through GIT_EXEC_PATH)"
+# 6. X-11/UM-6: /bin/sh EXISTS + EXECS now (the union graft of /lib/shcompat
+# MAFTER onto /bin). The direct shell-out is the witness: `/bin/sh -c ...`
+# resolves the ABSOLUTE path through the union (devramfs miss, no native sh ->
+# shcompat's `sh -> /viv/abin/sh` -> Design D re-anchor -> /viv/abin MPHENO_LINUX
+# busybox ash), execs it, and runs the command. Before UM-6 this was "cannot
+# exec" -- the login namespace had no /bin/sh at all. Token unique to the leg.
+lc_run_expect "/bin/sh -c 'echo sh-via-bin-union' | tr a-z A-Z" "SH-VIA-BIN-UNION"
+
+lc_pass "GIT-SHELL: a login shell runs the /viv/bin git with its helper closure behind the pheno-mount (exec-path /viv/bin, the system config read, init/commit as the user, the dashed upload-pack from PATH, git-remote-https exec'd through GIT_EXEC_PATH, and /bin/sh exec'd through the UM-6 union graft -- the local-clone-hang is a further named gap)"
 lc_quit

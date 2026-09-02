@@ -128,9 +128,50 @@ asserting `g_fix_create_last_parent`, first-MCREATE-wins, no-MCREATE->EACCES).
 SMP gate at the UM-5a tip (covers the whole union resolver surface incl. UM-5):
 *(running at write time)*.
 
-**Next**: UM-6 (/bin/sh, the X-11 application: pool `sh -> /viv/abin/sh` grafted
-MAFTER under devramfs at /bin; git-shell LS-CI) -> UM-7 (arc-close holotype audit
-+ the AUDIT-TRIGGERS row + CLAUDE index, batched over walk+readdir+create).
+### UM-6 (same run): /bin/sh -- the first application, and the wall past it
+
+The operator ratified the layout (dedicated pool dir `/lib/shcompat`, `sh ->
+/viv/abin/sh`, MAFTER graft). UM-6 makes the running system's `/bin` a UNION:
+build.sh stages the shim + puts it, joey grafts it MAFTER onto the devramfs
+`/bin` (devramfs still searched first, so every existing `/bin/<name>` spawn is
+untouched -- the #58 ordering invariant holds by construction of MAFTER).
+
+Three build-infra wrong turns, each caught by the build log and fixed:
+1. the put guard `[[ -e $shim ]]` is FALSE for the shim -- it is a DANGLING
+   symlink at host-stage time (its target `/viv/abin/sh` is a runtime mount
+   path), and `-e` follows the link. `-L` (is-a-symlink) is the right test.
+   The tell was "staged at" printing while "compat shim baked" did NOT.
+2. `stratum-fs put` does NOT create intermediate parents ("put walk remote
+   parent: ENOENT") -- `/lib` must exist first.
+3. a pre-emptive `mkdir /lib` then collides EEXIST with the net-4a ndb block's
+   own `mkdir /lib`. Resolution: drop my mkdir, place the shim put AFTER the
+   ndb/aurora bakes, where `/lib` already exists.
+
+**What UM-6 delivered, verified**: the shim mounts (`joey: UM-6 /bin/sh shim
+mount OK`), and `/bin/sh` RESOLVES + EXECS -- git-shell.exp's `/bin/sh -c`
+witness passes (`SH-VIA-BIN-UNION`, 74s, no retries). The union graft is real
+and end-to-end.
+
+**The wall past it, named not hidden**: the full `git clone --no-local` HANGS --
+zero output, no exit, 60s timeout -- EVEN with /bin/sh in place. The first run's
+witness (asserting the clone) caught it: legs 1-5 green, the clone leg timed out
+waiting for "CLONING INTO" with the console silent. Because the shim mounts and
+`/bin/sh -c` execs, this is NOT the X-11 gap (that was "no /bin/sh at all"); it
+is a fork/pipe/exec gap in git's local transport (`/bin/sh -c "git-upload-pack
+'<path>'"` + pipes). Enqueued as [[bug-git-local-clone-hangs-under-phenotype]].
+I changed the git-shell witness to assert the `/bin/sh` closure UM-6 owns and to
+NAME the clone-hang in its header -- the same discipline the scenario used for
+X-11 before UM-6, rather than asserting a green it cannot yet reach.
+
+**Honest disposition**: UM-6 delivers the `/bin/sh` infrastructure (a real,
+reusable building block -- any non-pipe shell-out works now); it does NOT yet
+deliver the git file:// clone, which is blocked by the enqueued next gap. The
+union-mounts MECHANISM (walk + readdir + create) is complete and gated; UM-6 is
+its first running application.
+
+**Next**: UM-7 (arc-close holotype audit over Territory + stalk = the union
+mechanism, batched; the AUDIT-TRIGGERS row + CLAUDE index land there). Separately
+[[bug-git-local-clone-hangs-under-phenotype]] is the next VIVARIUM/git wall.
 
 ## 2026-09-02 (aux) -- union mounts: the operator turned a /bin/sh symlink into the real Plan 9 feature
 

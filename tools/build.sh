@@ -1302,6 +1302,25 @@ VIVEOF
                         exit 1
                     fi
                     echo "==> viv bundles: /viv-abin production busybox tree staged at $vabin ($abin_n applets as RELATIVE links -> busybox, so they resolve from outside a container too; joey binds it at /viv/abin MPHENO_LINUX)"
+
+                    # UM-6 (X-11): the /bin/sh compat shim. A DEDICATED pool dir
+                    # holding one ABSOLUTE symlink `sh -> /viv/abin/sh`. joey
+                    # grafts it MAFTER onto the devramfs /bin (making /bin a
+                    # union), so execve("/bin/sh") misses devramfs (no native sh)
+                    # and hits this symlink; Design D re-anchors the absolute
+                    # target at the caller's root and the walk crosses /viv/abin's
+                    # MPHENO_LINUX mount -> busybox ash, LINUX. This unblocks
+                    # git's local transports (file:// / --no-local build one
+                    # quoted command handed to SHELL_PATH /bin/sh), config
+                    # scripts, make recipes, any system()/popen(). Staged INSIDE
+                    # the bb_ok guard because the symlink target /viv/abin/sh
+                    # exists only when the busybox tree is staged; the link is
+                    # dangling at host-stage time (the target is a runtime mount
+                    # path) but stratum-fs put carries it verbatim.
+                    local shcompat="$BUILD_DIR/shcompat"
+                    rm -rf "$shcompat"; mkdir -p "$shcompat"
+                    ln -s /viv/abin/sh "$shcompat/sh"
+                    echo "==> viv bundles: /bin/sh compat shim staged at $shcompat (sh -> /viv/abin/sh; joey grafts it MAFTER at /bin -- UM-6/X-11)"
                 fi
                 # The CONSOLE ^C twin (item 12): the same rootfs, a
                 # non-interactive entrypoint that PRE-INSTALLS a SIGINT trap and
@@ -3484,6 +3503,25 @@ populate_stratum_pool() {
     "$stratum_fs_bin" -s "$sock_path" read /lib/aurora/config | cmp -s - "$aurcfg_baked" \
         || { echo "==> populate pool: /lib/aurora/config readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /lib/aurora/config baked + readback-verified (aurora-config cfg-2a)"
+
+    # UM-6 (X-11): the /bin/sh compat shim -> /lib/shcompat. Placed HERE, after
+    # the ndb + aurora bakes, because /lib already exists by now (the ndb block
+    # created it) -- stratum-fs put does NOT create intermediate parents, and a
+    # pre-emptive `mkdir /lib` earlier collides EEXIST with ndb's own. joey
+    # grafts /lib/shcompat MAFTER onto the devramfs /bin (a union), so
+    # execve("/bin/sh") misses devramfs and hits `sh -> /viv/abin/sh`, which
+    # Design D re-anchors LINUX at /viv/abin's MPHENO_LINUX busybox. Guarded on
+    # -L (not -e): the shim is a DANGLING symlink at host-stage time (target
+    # /viv/abin/sh is a runtime mount path), and -e is false for a dangling link;
+    # -L tests symlink-ness. Staged only when the busybox tree is (the target
+    # exists at runtime only then), so a busybox-less pool bakes unchanged.
+    if [[ -L "$BUILD_DIR/shcompat/sh" ]]; then
+        "$stratum_fs_bin" -s "$sock_path" put "$BUILD_DIR/shcompat" /lib/shcompat \
+            || { echo "==> populate pool: put /lib/shcompat FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (shcompat) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: /bin/sh compat shim baked (/lib/shcompat/sh -> /viv/abin/sh; joey grafts MAFTER at /bin -- UM-6/X-11)"
+    fi
     [[ "$aurcfg_baked" != "$aurcfg_src" ]] && rm -f "$aurcfg_baked"
 
     # cfg-3 F1 (the OSC-laundering regression): a file of RAW bytes carrying
