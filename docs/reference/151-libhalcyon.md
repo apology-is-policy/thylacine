@@ -358,6 +358,20 @@ pane. Runtime witness: `tools/interactive/ls-gfx-restore.exp` (HVF) — the tool
 spawns two `tapestry-demo`s into built leaves, replays a cross-process focus,
 and reports `restored 2 of 2`.
 
+**Known caveat (H-4b audit F1, a v1.x multi-seat seam).** Empty-leaf
+`owner_principal` gates the placement CLAIM MINT but NOT the structural verbs
+(`close`/`split`/`move`/`mode`), because `actor_owns_subtree` is vacuously true on
+an all-empty subtree (the ratified 13.6 "an all-empty subtree is anyone's"). So
+during a restore's build-then-fill window (up to ~10 s of `wait_landed`) a
+co-resident `Session(other)` or a `Client` could `close` the in-flight skeleton
+and disrupt the restore (E_NOENT on the claim reads; a graceful focus fallback).
+This is HARMLESS under v1.0's single-session model (one user session at a time;
+SYSTEM daemons are trusted; a hostile same-user program already owns the user's
+empties) and is a DoS/misplacement of an in-flight restore only — no escalation,
+no degradation of a tile hosting a surface, no crash. The fix (blocking a subtree
+that contains a foreign-owned empty leaf) refines the ratified 13.6 rule and lands
+with the multi-seat hardening (the console-owner-principal token seam).
+
 ## Naming rationale
 
 *Halcyon* is the graphical shell's name (the calm before; the impossible

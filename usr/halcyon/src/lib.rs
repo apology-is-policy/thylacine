@@ -121,6 +121,25 @@ pub fn device_layout_path(name: &str) -> String {
     s
 }
 
+/// Is a tile's `pane/<id>/owner` value the ENVIRONMENT's -- one a session
+/// restore must NOT respawn? `owner` is the owner-file read: `Some(principal)`
+/// on success, `None` when unreadable/unparseable. It is env iff the owner is
+/// NOT the caller (`me`): a real other principal (the console = SYSTEM, another
+/// user), OR the INVALID/unowned principal 0 (nobody's -- a tile hosting a
+/// principal-0 surface is not the session's to reconstruct), OR unreadable
+/// (fail-CLOSED). Only the caller's own tiles (`owner == me`) are NOT env. An
+/// EMPTY leaf owned by the session (owner == me, stamped at split) is rebuilt
+/// as an empty pane; an empty leaf owned by 0/another is env and pruned, which
+/// is harmless (its tag is empty, so it is never respawned anyway) -- the
+/// distinction MATTERS only for an OCCUPIED tile, where fail-OPEN on owner 0
+/// would respawn a principal-0 surface's command line as the user.
+pub fn owner_is_env(owner: Option<u32>, me: u32) -> bool {
+    match owner {
+        Some(o) => o != me,
+        None => true,
+    }
+}
+
 /// A leaf's tag as the argv a restore spawns: the tag IS the command line
 /// (acme), split on ASCII whitespace -- no quoting, no shell (a tag that
 /// needs either names a shell explicitly). Empty for an empty/blank tag.
@@ -270,6 +289,21 @@ mod tests {
             prog_candidates("./local/thing"),
             vec![String::from("./local/thing")]
         );
+    }
+
+    #[test]
+    fn owner_is_env_is_fail_closed_and_owner_0_is_env() {
+        let me = 1000u32;
+        // The session's own tile: NOT env.
+        assert!(!owner_is_env(Some(1000), me));
+        // Another real user, and the SYSTEM console: env.
+        assert!(owner_is_env(Some(1001), me));
+        assert!(owner_is_env(Some(0xFFFF_FFFE), me)); // T_PRINCIPAL_SYSTEM
+        // Owner 0 (INVALID / nobody): env -- the fail-OPEN arm F2 closed. An
+        // occupied principal-0 tile must never be respawned as the user.
+        assert!(owner_is_env(Some(0), me));
+        // Unreadable: fail-CLOSED (env, never respawned).
+        assert!(owner_is_env(None, me));
     }
 
     #[test]

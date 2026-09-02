@@ -44,7 +44,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use halcyon::{
-    argv_of, device_layout_path, parse_cmd, prog_candidates, session_dir_chain,
+    argv_of, device_layout_path, owner_is_env, parse_cmd, prog_candidates, session_dir_chain,
     session_layout_path, Cmd, CmdError,
 };
 use libhalcyon::layout::{self, LayoutMode};
@@ -225,24 +225,18 @@ fn read_tag(id: u32) -> String {
 }
 
 /// Is leaf `id`'s tile the ENVIRONMENT's -- one a session restore must not
-/// respawn? It is env iff its `pane/<id>/owner` names a real OTHER principal
-/// (the console = SYSTEM, another user). Owner 0 is nobody's (an empty
-/// placeholder the session may rebuild empty) -> NOT env; owner == me is the
-/// session's own tile -> NOT env. Fail-CLOSED: an unreadable owner reads as
-/// env, so a restore never respawns a tile it could not classify.
+/// respawn? Reads `pane/<id>/owner` and classifies via `owner_is_env`: env iff
+/// the owner is not the caller (a real other principal -- the console = SYSTEM,
+/// another user -- OR the unowned principal 0 -- OR unreadable, fail-CLOSED).
+/// Only the caller's OWN tiles are respawned.
 fn is_env_tile(id: u32, me: u32) -> bool {
     let path = format!("/dev/tapestry/pane/{}/owner", id);
-    match read_capped(&path, 32) {
-        Ok(bytes) => match core::str::from_utf8(&bytes)
+    let owner = read_capped(&path, 32).ok().and_then(|bytes| {
+        core::str::from_utf8(&bytes)
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
-        {
-            Some(0) => false,
-            Some(owner) => owner != me,
-            None => true,
-        },
-        Err(_) => true,
-    }
+    });
+    owner_is_env(owner, me)
 }
 
 fn read_capped(path: &str, cap: usize) -> Result<Vec<u8>> {
