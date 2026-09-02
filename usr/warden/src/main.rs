@@ -48,7 +48,7 @@ use libthyla_rs::io::{slurp_capped, Read};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::process::{Child, Command, ExitStatus, Stdio};
 use libthyla_rs::time::{sleep, Duration};
-use libthyla_rs::{T_CAP_HW_CREATE, T_SPAWN_PERM_MAY_POST_SERVICE};
+use libthyla_rs::{T_CAP_CSPRNG_READ, T_CAP_HW_CREATE, T_SPAWN_PERM_MAY_POST_SERVICE};
 
 use libdriver::driver::to_allowance;
 use libdriver::{
@@ -117,6 +117,7 @@ driver "tapestryd" {
     restart   = on-crash
     lifecycle = persistent
     gather    = all
+    caps      = ["csprng"]
 }
 "#,
     r#"
@@ -673,8 +674,23 @@ fn run_once(m: &Manifest, grant: &BoundResources) -> RunOutcome {
     // /bin/<name>.
     let bin = alloc::format!("/{}", m.name);
 
+    // H-4b-1: the manifest's named caps ride beside CAP_HW_CREATE -- each a
+    // fork-grantable bit the warden itself holds (joey confers the set it may
+    // pass down; I-2 keeps the chain monotone). The vocabulary is the
+    // manifest parser's (an unknown name never parses), so this map is total.
+    // Said, so the extra grant sits in the log beside the allowance it rides.
+    fn cap_bit(c: libdriver::manifest::Cap) -> u64 {
+        match c {
+            libdriver::manifest::Cap::Csprng => T_CAP_CSPRNG_READ,
+        }
+    }
+    let extra = m.caps.iter().fold(0u64, |acc, c| acc | cap_bit(*c));
+    if extra != 0 {
+        say!("warden: {} caps +{:#x} (manifest)", m.name, extra);
+    }
+
     let mut cmd = Command::new(bin.as_str());
-    cmd.arg(desc).caps(T_CAP_HW_CREATE).allowance(allow);
+    cmd.arg(desc).caps(T_CAP_HW_CREATE | extra).allowance(allow);
     // A persistent service serves a namespace -- it posts a /srv listener (netd
     // posts /srv/net for joey to mount at /net), which requires
     // PROC_FLAG_MAY_POST_SERVICE. The warden confers it here, one hop: joey

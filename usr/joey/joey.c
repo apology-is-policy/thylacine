@@ -5816,13 +5816,18 @@ int main(void) {
         // joey is console-attached here (pre-relinquish) AND holds the bit, so
         // the kernel grant gate passes; the warden then re-confers it one hop to
         // netd (the #827b delegation). No fds (the warden runs with none).
+        // H-4b-1: CAP_CSPRNG_READ rides the same one-hop shape -- the warden
+        // never draws entropy itself; it confers the bit on the one driver
+        // whose manifest declares `caps = ["csprng"]` (tapestryd, which mints
+        // the one-shot placement claims). I-2: a child holds at most its
+        // parent's caps, so the warden must hold the bit to pass it down.
         struct t_sys_spawn_args wreq = {
             .name_va       = (unsigned long)wd_name,
             .argv_data_va  = (unsigned long)wd_argv,
             .name_len      = sizeof(wd_name) - 1,
             .argv_data_len = sizeof(wd_argv),
             .argc          = wd_argc,
-            .cap_mask      = T_CAP_HW_CREATE,
+            .cap_mask      = T_CAP_HW_CREATE | T_CAP_CSPRNG_READ,
             .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
         };
         long wd_pid = t_spawn_full_argv(&wreq);

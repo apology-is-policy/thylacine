@@ -216,7 +216,9 @@ fn parse_two(text: &str, key: &str) -> Option<(u32, u32)> {
 }
 
 /// What `create` mints: a hosted content surface, a Role::Chrome surface
-/// bound to a pane's tag bar (H-3b), or a Role::Menu surface (H-3c).
+/// bound to a pane's tag bar (H-3b), a Role::Menu surface (H-3c), the
+/// Role::Status bar (H-3d), or a content surface steered into a claimed
+/// empty leaf (H-4b).
 #[cfg(feature = "guest")]
 #[derive(Clone, Copy)]
 enum Mint {
@@ -224,6 +226,7 @@ enum Mint {
     Chrome(u32),
     Menu,
     Status,
+    Claim(u128),
 }
 
 #[cfg(feature = "guest")]
@@ -284,6 +287,33 @@ impl Surface {
         Self::open_on_bound(ring, w, h, Mint::Status)
     }
 
+    /// H-4b: a W x H content surface hosted into the SPECIFIC empty leaf
+    /// whose one-shot placement claim `token` was minted by reading that
+    /// leaf's `pane/<id>/claim` -- the layout-restore placement path
+    /// (HALCYON.md 13.7): the session tool arranges the empty skeleton,
+    /// mints a claim per leaf, and hands each token to the child it spawns
+    /// there. The token is an opaque cookie: a claim naming no live empty
+    /// leaf -- stale (the leaf was re-claimed, hosted or closed since the
+    /// mint), already spent, or never minted -- FALLS BACK to the ordinary
+    /// focus placement, so a child never fails to create because its
+    /// placement hint went stale under it (the client cannot observe
+    /// placement either way). Only a MALFORMED token (not 32 hex digits) is
+    /// E_INVAL. Placement only: the token confers no authority over any
+    /// other tile.
+    pub fn open_claim_on(
+        ring: &EventRing,
+        w: u32,
+        h: u32,
+        token: u128,
+    ) -> Result<Surface, TapError> {
+        Self::open_on_bound(ring, w, h, Mint::Claim(token))
+    }
+
+    /// `open_claim_on` on a private ring + session.
+    pub fn open_claim(w: u32, h: u32, token: u128) -> Result<Surface, TapError> {
+        let ring = EventRing::connect()?;
+        Self::open_claim_on(&ring, w, h, token)
+    }
 
     fn open_on_bound(ring: &EventRing, w: u32, h: u32, mint: Mint) -> Result<Surface, TapError> {
         let root = ring.root();
@@ -320,7 +350,7 @@ impl Surface {
             None => return fail(&[ctl], TapError::Protocol),
         };
 
-        // create W H [role=chrome bind=<pane-id> | role=menu]
+        // create W H [role=chrome bind=<pane-id> | role=menu | role=status | claim=<tok>]
         let mut cmd = alloc::string::String::new();
         let _ = core::fmt::write(&mut cmd, format_args!("create {} {}", w, h));
         match mint {
@@ -330,6 +360,11 @@ impl Surface {
             }
             Mint::Menu => cmd.push_str(" role=menu"),
             Mint::Status => cmd.push_str(" role=status"),
+            // The 32-hex form `pane/<id>/claim` minted (the server refuses
+            // any other width).
+            Mint::Claim(tok) => {
+                let _ = core::fmt::write(&mut cmd, format_args!(" claim={:032x}", tok));
+            }
         }
         let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
         if rc < 0 {

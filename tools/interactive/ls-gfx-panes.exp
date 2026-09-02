@@ -391,9 +391,20 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail_detail "the pane-close leg failed" }
     timeout { lc_fail "TEV_CLOSE never arrived" }
 }
+
+# H-4b: the one-shot placement claim -- a surface created with the LIVE
+# claim lands in the claimed EMPTY leaf while focus sits elsewhere (the
+# focus path would have split A); a STALE token (re-minted under it) falls
+# back to focus placement and never steers into that leaf; a malformed
+# token is E_INVAL at the syntax gate.
+expect {
+    -ex "battery: claim OK" { lc_pass "panes: live claim places into the claimed leaf; stale falls back; malformed refused" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the claim leg failed" }
+    timeout { lc_fail "the claim leg never finished" }
+}
 expect {
     -ex "tapestry-battery: PASS" { lc_pass "panes: battery PASS" }
-    -ex "tapestry-battery: FAIL" { lc_fail_detail "battery failed after the close leg" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "battery failed after the claim leg" }
     timeout { lc_fail "battery never finished" }
 }
 

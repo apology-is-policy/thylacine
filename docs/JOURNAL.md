@@ -875,6 +875,116 @@ silently failed. Non-audit-bearing (read + serialize + write, no new
 authority). `layout restore` is H-4b (the Session actor + the claim token --
 audit-bearing); the tool prints "not yet implemented" for it today.
 
+### H-4b-1: the placement claim, the scripture the self-read caught me deviating from, and the entropy the compositor never had (same run, after the self-compaction)
+
+Resumed from my own 600k self-compaction with H-4b (restore) as the next
+chunk and a pre-compaction recommendation to FOLD the Session actor and the
+claim token into one commit because "the authority model is only observable
+through a 2nd same-principal peer, and the claim token IS that peer". Ground
+truth refuted the premise before a line was written: `PFK_TAG`'s write gate
+is `actor_names` (host-of-leaf, so an empty leaf cannot be named), `create`
+hosts via `layout.host(n)` (focused-empty-else-split), and a claiming child
+hosts its OWN surface -- it never observes cross-process authority. The
+restore tool arranges *empty* leaves (vacuously owned) and its children fill
+them; mutual authority is a separate, ratified feature. So H-4b splits:
+**H-4b-1 the placement primitive** (this entry), H-4b-2 the Session actor
+(the highest-risk authority-key change, on its own), H-4b-3 the tool, one
+batched holotype at the arc close.
+
+**The mechanism** (`usr/tapestryd/src/{pane,server}.rs`): `Pane.claim_token:
+Option<u128>` -- set only on an EMPTY leaf, cleared wherever a leaf is hosted
+(`host`, `host_into`) or freed (`close`), so occupancy is structural.
+`pane/<id>/claim` (`PFK_CLAIM`, the ninth pane file) mints on the offset-0
+read -- 16 CSPRNG bytes, stored by `Layout::mint_claim`, returned as
+`{:032x}\n`, pinned to the fid by `read_text_snapped` so a read-to-EOF spends
+ONE mint; a second read re-tokens (last mint wins); a container is E_NOENT,
+an occupied leaf E_PERM. `create W H claim=<32 hex>` spends it after the
+weave allocation (`consume_claim` + `host_into`: never splits, never moves
+focus) and FALLS BACK to `host()` when the token names no live empty leaf.
+`create`'s three loose role parameters became a typed `Host` enum (`Content
+{ claim } | Chrome { bind } | Menu | Status`), so a claim on a never-hosted
+class is unrepresentable past the syntax gate -- which also retired the
+clippy `too_many_arguments` the extra parameter had tripped. libtapestry
+gained `Surface::open_claim[_on]`.
+
+**Two scripture deviations, both caught by the pre-audit self-read** against
+HALCYON.md 13.7 rather than by a prosecutor. (1) The first cut failed LOUD
+(E_INVAL) on a stale token -- chosen for debuggability -- but 13.7 says
+"hosts into that leaf iff still empty (else falls back to focus placement)"
+and "the client passes an opaque cookie and never observes placement": a
+ported program must not die because its placement hint went stale under it.
+Corrected to the fallback, `say!`-ed server-side so a restore whose claims
+all miss is visible in the transcript, and the battery's negatives were
+redesigned around it (a leaf minted TWICE so the first token is stale; the
+stale create must land, never in that leaf, which stays `surface none`; the
+live create must land in it; `claim=nothex` E_INVAL raw). (2) My claim-read
+comment said "placement is not an authority boundary"; 13.7 says "PLACEMENT
+is itself a capability" minted for a *session-owned* empty leaf. The mint
+gates on emptiness alone at this stage -- ownership of empties does not exist
+until `owner_principal` is recorded at split (H-4b-2) -- and that is strictly
+weaker than the `close` every peer already holds over an empty, so it stands
+as an explicitly STAGED step; the comment, the dossier and the Seams bullet
+now say exactly that instead of claiming it as the design.
+
+**Three instrument findings on the way.** `cargo fmt --check ... | head -60`
+reported exit 0 with drift on screen: `head` closed the pipe, the checker took
+EPIPE and exited clean -- proven both ways (`| head -5` -> 0, untruncated ->
+1), and it nearly got recorded as a multi-`-p` cargo quirk (refuted: both
+orderings exit 1). Untruncated, the tapestry family carries **493
+pre-existing rustfmt hunks** (tapestryd 292, libtapestry 14, the battery 35,
+halcyond 152; halcyon + libhalcyon, formatted that morning, show 0 -- the
+toolchain is stable, the crates were simply never default-formatted, and
+there is no fmt gate anywhere in the repo). My lines were hand-reflowed to
+what rustfmt wants (0 new hunks in every touched range); the crate-family
+reformat is surfaced as a decision, not swept into an audit-bearing diff. And
+one clippy "error" was the shell's cwd having been reset to the repo root --
+`could not find Cargo.toml` -- the instrument, not the code.
+
+**The E2E was red on my own leg.** 28 of 29 legs passed (every pre-existing
+one); the new claim leg failed at `first mint unreadable` with no server
+line. The artifact was the one I had verified (the guest loaded the same
+77511136-byte, 199-file ramfs). The kernel's close-to-open EOF
+(`dev9p_read`, `co_size`) was killed by the positive control one variable
+away -- the `layout` file reads through the same path with the same size-0
+getattr and works -- and `cached_open` needs the Larder, which `/srv`
+attaches never get. Then the property sweep: the one thing the claim read
+does that no other pane file does is call `getrandom` -- and
+`sys_getrandom_handler` refuses without `CAP_CSPRNG_READ`, while the warden
+confers exactly `caps(T_CAP_HW_CREATE)` to every driver (main.rs:677).
+Proven by code, no boot spent. My `E_IO` path said nothing; it does now.
+
+**The fork went to the operator** (present): a manifest cap grant vs reading
+the world-rw `/dev/random` (devdev.c:19) vs a userspace DRBG seeded from the
+`AT_RANDOM` exec already provides. The call: the grant. Implemented as
+`caps = ["csprng"]` on tapestryd's manifest -- libdriver's closed `Cap`
+vocabulary (`Cap::parse`/`name`, fail-closed on an unknown or repeated name
+and a duplicate key; the module stays pure, 89/89 on the host with the new
+round-trip + rejection tests), the warden maps it to the bit at spawn and
+says the grant beside the allowance, and joey adds `CAP_CSPRNG_READ` to the
+warden's own mask so the joey -> warden -> driver chain stays monotone under
+I-2. MENAGERIE.md section 6 documents the field. Found in passing and NOT
+fixed here: `/dev/random` is world-rw while the syscall is cap-gated -- two
+gates of different strength on one axis, enqueued as
+`bug_dev_random_ungated_vs_csprng_cap.md` for the A-4 sweep.
+
+**The doc pass followed `quaestor owner`'s MIXED verdict**: the mechanism
+into `sub-tapestryd` (a dated section + a Seams bullet + the Tests pointer),
+the unowned battery + expect scenario into 139-tapestryd.md's gate paragraph
+with `seam-tapestry-battery-unowned` recording the routing (the prover's
+class), and `sub-warden` gains the caps chain. One more instrument caveat:
+`quaestor stale` measures against the checkout it runs in, and the vault
+worktree's `server.rs` predates H-3d -- the dossier carries no H-3 sections
+and `stale` said 0.
+
+**Re-gate**: the paired bake with the fix (content-verified: the new tapestryd +
+warden strings in the 77511760-byte ramfs), `tools/test.sh` (boot OK, arc gates
+2/2, exit 0), then one HVF `ls-gfx-panes`: **33/33**, with the mechanism's own
+lines in the transcript -- `warden: tapestryd caps +0x4 (manifest)` (the grant),
+`tapestryd: surface 2 claim unmatched; focus placement` (the stale token's
+fallback, said), `battery: claim OK`, and the leg's `LS-CI PASS: panes: live
+claim places into the claimed leaf; stale falls back; malformed refused`. The
+first run's 28/29 with the leg red is the record that the leg discriminates.
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon

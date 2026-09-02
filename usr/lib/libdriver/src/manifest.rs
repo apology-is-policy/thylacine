@@ -64,10 +64,45 @@ pub struct Manifest {
     /// resources (TAPESTRY section 18.7 -- the compositor owns both the GPU
     /// and the input functions).
     pub gather: bool,
+    /// Fork-grantable capabilities the warden confers on the driver beyond
+    /// `CAP_HW_CREATE`, by name (`caps = ["csprng"]`; MENAGERIE.md section 6).
+    /// The vocabulary is closed: an unknown name is a parse error, so a typo
+    /// can neither widen nor silently narrow a driver. Empty by default. The
+    /// warden maps each name to its kernel bit and must hold it itself (I-2).
+    pub caps: Vec<Cap>,
     /// An optional package signature -- the section-9 authorization input. Carried
     /// verbatim; this crate neither produces nor verifies it (a warden/policy
     /// concern), it only round-trips the field.
     pub sig: Option<String>,
+}
+
+/// A fork-grantable capability a manifest may ask the warden to confer (the
+/// `caps = [...]` vocabulary). Named, not numbered: this module is pure (no
+/// libthyla-rs), so the warden maps each name to its `T_CAP_*` bit at spawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cap {
+    /// `CAP_CSPRNG_READ` (`SYS_GETRANDOM`) -- for a driver that must mint
+    /// unguessable tokens: tapestryd's one-shot placement claims (HALCYON.md
+    /// 13.7).
+    Csprng,
+}
+
+impl Cap {
+    /// The name -> cap half of the vocabulary; `None` for an unknown name
+    /// (the parser fails closed on it).
+    pub fn parse(name: &str) -> Option<Cap> {
+        match name {
+            "csprng" => Some(Cap::Csprng),
+            _ => None,
+        }
+    }
+
+    /// The cap -> name half (`to_text`); the exact inverse of `parse`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Cap::Csprng => "csprng",
+        }
+    }
 }
 
 /// The hardware a driver declares it needs. Each axis is a *selection*: the
@@ -228,6 +263,18 @@ impl Manifest {
         s.push('\n');
         if self.gather {
             s.push_str("    gather = all\n");
+        }
+        if !self.caps.is_empty() {
+            s.push_str("    caps = [");
+            for (i, c) in self.caps.iter().enumerate() {
+                if i != 0 {
+                    s.push_str(", ");
+                }
+                s.push('"');
+                s.push_str(c.name());
+                s.push('"');
+            }
+            s.push_str("]\n");
         }
         if let Some(sig) = &self.sig {
             s.push_str("    sig = \"");
@@ -458,6 +505,7 @@ impl<'a> Parser<'a> {
         let mut lifecycle: Option<Lifecycle> = None;
         let mut gather: Option<bool> = None;
         let mut sig: Option<String> = None;
+        let mut caps: Option<Vec<Cap>> = None;
 
         loop {
             match self.peek() {
@@ -525,6 +573,13 @@ impl<'a> Parser<'a> {
                     self.expect(&Tok::Eq)?;
                     sig = Some(self.expect_str()?);
                 }
+                "caps" => {
+                    if caps.is_some() {
+                        return Err(Error::Parse);
+                    }
+                    self.expect(&Tok::Eq)?;
+                    caps = Some(self.parse_caps()?);
+                }
                 _ => return Err(Error::Parse), // unknown key
             }
         }
@@ -542,8 +597,23 @@ impl<'a> Parser<'a> {
             restart: restart.unwrap_or(Restart::OnCrash),
             lifecycle: lifecycle.unwrap_or(Lifecycle::Transient),
             gather: gather.unwrap_or(false),
+            caps: caps.unwrap_or_default(),
             sig,
         })
+    }
+
+    /// `caps = ["csprng", ...]`: the closed capability vocabulary. An unknown
+    /// or repeated name is a parse error (fail-closed on both).
+    fn parse_caps(&mut self) -> Result<Vec<Cap>, Error> {
+        let mut out: Vec<Cap> = Vec::new();
+        for name in self.parse_str_list()? {
+            let cap = Cap::parse(name.as_str()).ok_or(Error::Parse)?;
+            if out.contains(&cap) {
+                return Err(Error::Parse);
+            }
+            out.push(cap);
+        }
+        Ok(out)
     }
 
     fn parse_needs(&mut self) -> Result<Needs, Error> {
@@ -779,6 +849,45 @@ driver "rp1-eth" {
         let text = m.to_text();
         let m2 = Manifest::parse(&text).expect("re-parse");
         assert_eq!(m, m2);
+    }
+
+    #[test]
+    fn parses_caps_and_round_trips_them() {
+        let src = r#"driver "comp" {
+            abi = 1
+            binds = ["virtio-pci:16"]
+            serves = "/dev/comp"
+            caps = ["csprng"]
+        }"#;
+        let m = Manifest::parse(src).expect("parse");
+        assert_eq!(m.caps, [Cap::Csprng]);
+        let m2 = Manifest::parse(&m.to_text()).expect("re-parse");
+        assert_eq!(m, m2);
+    }
+
+    #[test]
+    fn caps_default_empty() {
+        let m = Manifest::parse(EXAMPLE).expect("parse");
+        assert!(m.caps.is_empty());
+    }
+
+    #[test]
+    fn rejects_unknown_repeated_and_duplicate_caps() {
+        // The vocabulary is closed (fail-closed on a typo), a name may not
+        // repeat within the list, and the key may not repeat in the block.
+        let bad = |caps: &str| {
+            let src = alloc::format!(
+                r#"driver "x" {{ abi = 1 binds = ["a"] serves = "/x" caps = {} }}"#,
+                caps
+            );
+            Manifest::parse(&src).is_err()
+        };
+        assert!(bad(r#"["frobnicate"]"#));
+        assert!(bad(r#"["csprng", "csprng"]"#));
+        assert!(bad(r#"["csprng"] caps = ["csprng"]"#));
+        // The positive control one variable away: the same block with a
+        // well-formed list parses.
+        assert!(!bad(r#"["csprng"]"#));
     }
 
     #[test]

@@ -166,6 +166,19 @@ pub enum Actor {
     Client(u64),
 }
 
+/// What a `create` hosts (the surface_ctl arm's parse, typed): a content
+/// surface -- optionally steered by an H-4b placement claim -- or one of
+/// the never-hosted renderer classes. The claim rides ONLY the content
+/// arm, so a claim on chrome/menu/status is unrepresentable past the
+/// syntax gate rather than re-checked downstream.
+#[derive(Clone, Copy)]
+enum Host {
+    Content { claim: Option<u128> },
+    Chrome { bind: u32 },
+    Menu,
+    Status,
+}
+
 /// Layout mutations one conn may land per service pass (the H-3b round
 /// R2-F1 (d): every structural verb is a full repaint + flush, and a
 /// pipelined batch could land ~1000 in one pass). Beyond it: E_AGAIN --
@@ -450,6 +463,8 @@ const PFK_SURFACE: u64 = 5;
 const PFK_GEOMETRY: u64 = 6;
 const PFK_TAGBAR: u64 = 7;
 const PFK_STATUS: u64 = 8;
+/// H-4b: the one-shot placement claim (read mints; `create claim=` spends).
+const PFK_CLAIM: u64 = 9;
 
 fn make_surf(n: usize, fk: u64) -> u64 {
     SURF_FLAG | ((n as u64 & N_MASK) << 8) | (fk & FK_MASK)
@@ -3981,7 +3996,13 @@ impl Comp {
 
     /// `create W H`: the spec's WeaveFirst -- allocate + zero the weave,
     /// create the 2D resource, attach the whole weave as its backing.
-    fn create(&mut self, n: usize, w: u32, h: u32, chrome_bind: Option<u32>, is_menu: bool, is_status: bool) -> Result<(), u32> {
+    fn create(&mut self, n: usize, w: u32, h: u32, host: Host) -> Result<(), u32> {
+        let (chrome_bind, is_menu, is_status, claim) = match host {
+            Host::Content { claim } => (None, false, false, claim),
+            Host::Chrome { bind } => (Some(bind), false, false, None),
+            Host::Menu => (None, true, false, None),
+            Host::Status => (None, false, true, None),
+        };
         let (disp_w, disp_h) = (self.gpu.width, self.gpu.height);
         let s = self.surf(n).ok_or(p9::E_BADF)?;
         if s.state != SurfState::Minted {
@@ -4067,7 +4088,26 @@ impl Comp {
         // unhosted (invisible; presents complete without pixels). Hosting
         // is structural: a zoomed layout restores first (the tmux rule).
         self.layout.unzoom();
-        if self.layout.host(n).is_none() {
+        // H-4b: a claim steers the surface into the empty leaf it was minted
+        // on, spending the token (one-shot). A token that names no live
+        // empty leaf -- stale (re-minted under it, or the leaf hosted or
+        // closed since), already spent, or never minted -- FALLS BACK to the
+        // focus placement (HALCYON.md 13.7): the child passes an opaque
+        // cookie and must never fail to create because its placement hint
+        // went stale under it. Said, so a restore whose claims miss shows in
+        // the log rather than silently landing everything on focus.
+        let claimed = claim.and_then(|tok| self.layout.consume_claim(tok));
+        if claim.is_some() && claimed.is_none() {
+            say!("tapestryd: surface {} claim unmatched; focus placement", n);
+        }
+        let hosted = match claimed {
+            Some(slot) => self
+                .layout
+                .host_into(n, slot)
+                .or_else(|| self.layout.host(n)),
+            None => self.layout.host(n),
+        };
+        if hosted.is_none() {
             say!("tapestryd: surface {} unhosted (pane table full)", n);
         }
         self.reconcile();
@@ -11863,6 +11903,7 @@ impl Conn {
                     b"geometry" => PFK_GEOMETRY,
                     b"tagbar" => PFK_TAGBAR,
                     b"status" => PFK_STATUS,
+                    b"claim" => PFK_CLAIM,
                     _ => return None,
                 };
                 Some((make_pane(id, fk), 0))
@@ -12323,6 +12364,53 @@ impl Conn {
             let r = comp.status_rect().unwrap_or(Rect::ZERO);
             let mut s = String::new();
             let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", r.x, r.y, r.w, r.h));
+            return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
+        }
+        if is_pane(f.path) && pane_fk(f.path) == PFK_CLAIM {
+            // H-4b: the one-shot placement claim (HALCYON.md 13.7 --
+            // "PLACEMENT is itself a capability"). The offset-0 read MINTS a
+            // fresh 128-bit token on the leaf (last mint wins) and pins it
+            // to the fid (text_snaps), so a read-to-EOF spends one mint, not
+            // two; a seeked first read (no pin) mints nothing and reads EOF,
+            // and a later offset serves the pin whatever the leaf holds by
+            // then. Only a LIVE EMPTY leaf is claimable at mint: a container
+            // is E_NOENT (no tile), an occupied leaf E_PERM (its placement
+            // is taken). WHO may mint, at this stage: any peer -- today's
+            // empty-leaf rule (an all-empty subtree is anyone's; anyone may
+            // close an empty), and a claim is strictly weaker than the close
+            // every peer already holds over the same leaf: it can never take
+            // a tile that holds a surface (the create path hosts only into a
+            // still-empty leaf). The scripture's tightening -- the leaf must
+            // be SESSION-OWNED -- lands with `owner_principal` recorded at
+            // split (H-4b-2), when this mint narrows to the reader's own
+            // empties.
+            let id = pane_id(f.path);
+            let slot = match comp.layout.slot_of_id(id) {
+                Some(s) => s,
+                None => return self.err(tag, p9::E_NOENT),
+            };
+            let mut s = String::new();
+            if a.offset == 0 {
+                if !comp.layout.is_leaf(slot) {
+                    return self.err(tag, p9::E_NOENT);
+                }
+                if comp.layout.leaf_surface(slot).is_some() {
+                    return self.err(tag, p9::E_PERM);
+                }
+                let mut raw = [0u8; 16];
+                if libthyla_rs::rand::fill_bytes(&mut raw).is_err() {
+                    // SYS_GETRANDOM needs CAP_CSPRNG_READ; a mint that cannot
+                    // draw entropy must SAY so -- the client sees only a
+                    // failed read, and this class hid behind that once.
+                    say!("tapestryd: claim mint on pane {}: csprng unavailable (E_IO)", id);
+                    return self.err(tag, E_IO);
+                }
+                let tok = u128::from_le_bytes(raw);
+                if !comp.layout.mint_claim(slot, tok) {
+                    return self.err(tag, p9::E_PERM);
+                }
+                let _ = core::fmt::write(&mut s, format_args!("{:032x}\n", tok));
+            }
             return self.read_text_snapped(a.fid, f.path, tag, s, a.offset, cap);
         }
         if is_pane(f.path) {
@@ -14315,6 +14403,7 @@ impl Conn {
             // cfg-3 default-deny, the same class as the gated global verbs.
             let mut role = Role::Content;
             let mut bind: Option<u32> = None;
+            let mut claim: Option<u128> = None;
             for tok in it {
                 if let Some(r) = tok.strip_prefix("role=") {
                     role = match Role::parse(r) {
@@ -14326,17 +14415,33 @@ impl Conn {
                     };
                 } else if let Some(b) = tok.strip_prefix("bind=") {
                     bind = Some(b.parse().map_err(|_| p9::E_INVAL)?);
+                } else if let Some(c) = tok.strip_prefix("claim=") {
+                    // H-4b: the one-shot placement token `pane/<id>/claim`
+                    // minted -- exactly 32 hex digits (a 128-bit token as
+                    // `{:032x}`), so a signed/short/garbage form is E_INVAL.
+                    if c.len() != 32 || !c.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err(p9::E_INVAL);
+                    }
+                    claim = Some(u128::from_str_radix(c, 16).map_err(|_| p9::E_INVAL)?);
                 } else {
                     return Err(p9::E_INVAL);
                 }
             }
-            let (chrome_bind, is_menu, is_status) = match (role, bind) {
-                (Role::Content, None) => (None, false, false),
+            // H-4b: a claim steers a HOSTED (content) surface only -- chrome,
+            // menu and status are never hosted in a leaf, so `claim=` beside
+            // any other role is a malformed line: E_INVAL for every peer,
+            // judged BEFORE the renderer gate below (syntax before
+            // authority); past here the Host type cannot carry one.
+            if claim.is_some() && !matches!(role, Role::Content) {
+                return Err(p9::E_INVAL);
+            }
+            let host = match (role, bind) {
+                (Role::Content, None) => Host::Content { claim },
                 (Role::Chrome, Some(pid)) => {
                     if !self.peer_is_renderer() {
                         return Err(p9::E_PERM);
                     }
-                    (Some(pid), false, false)
+                    Host::Chrome { bind: pid }
                 }
                 // H-3d: the status bar takes no bind (its bind is the
                 // display); renderer-gated like every chrome -- an ungated
@@ -14346,7 +14451,7 @@ impl Conn {
                     if !self.peer_is_renderer() {
                         return Err(p9::E_PERM);
                     }
-                    (None, false, true)
+                    Host::Status
                 }
                 // H-3c: a menu takes no bind (the compositor places it at
                 // `menu place`); renderer-gated like chrome -- an ungated
@@ -14356,11 +14461,11 @@ impl Conn {
                     if !self.peer_is_renderer() {
                         return Err(p9::E_PERM);
                     }
-                    (None, true, false)
+                    Host::Menu
                 }
                 _ => return Err(p9::E_INVAL), // chrome needs a bind; content, menu + status take none
             };
-            return comp.create(n, w, h, chrome_bind, is_menu, is_status);
+            return comp.create(n, w, h, host);
         }
         if s == "destroy" {
             comp.retire(n);
@@ -15091,6 +15196,7 @@ impl Conn {
                         (&b"geometry"[..], PFK_GEOMETRY),
                         (&b"tagbar"[..], PFK_TAGBAR),
                         (&b"status"[..], PFK_STATUS),
+                        (&b"claim"[..], PFK_CLAIM),
                     ] {
                         names.push((nm.to_vec(), make_pane(id, fk)));
                     }
@@ -15302,7 +15408,10 @@ impl Conn {
         // kernel's rwx layer reads the mode, so a write-open fails at the
         // open, not only at the Twrite.
         let ro = is_pane(f.path)
-            && matches!(pane_fk(f.path), PFK_SURFACE | PFK_GEOMETRY | PFK_TAGBAR | PFK_STATUS);
+            && matches!(
+                pane_fk(f.path),
+                PFK_SURFACE | PFK_GEOMETRY | PFK_TAGBAR | PFK_STATUS | PFK_CLAIM
+            );
         let (mode, nlink) = if is_dir(f.path) {
             (DIR_MODE, 2u64)
         } else if ro {

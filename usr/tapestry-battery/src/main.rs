@@ -134,6 +134,37 @@ fn foreign_pane(layout: &str, ours: &[u32]) -> Option<u32> {
     None
 }
 
+/// The FOCUSED empty leaf's pane id (a `<id>*` `leaf` row whose surface
+/// token is the bare `empty`), if any -- a split focuses its new empty leaf.
+fn empty_pane(layout: &str) -> Option<u32> {
+    for line in layout.lines() {
+        let line = line.trim();
+        if !line.contains(" leaf ") {
+            continue;
+        }
+        let mut it = line.split_ascii_whitespace();
+        let idtok = it.next()?;
+        if !idtok.ends_with('*') {
+            continue;
+        }
+        let id: u32 = idtok.trim_end_matches('*').parse().ok()?;
+        if it.any(|t| t == "empty") {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Read one `pane/<id>/claim` mint: exactly 32 hex digits, else None.
+fn read_claim(root: i64, path: &str) -> Option<u128> {
+    let s = read_file(root, path)?;
+    let t = s.trim();
+    if t.len() != 32 {
+        return None;
+    }
+    u128::from_str_radix(t, 16).ok()
+}
+
 fn raw_create(root: i64, cmd: &str) -> i64 {
     let ctl = unsafe { t_open(root, b"surface/new".as_ptr(), 11, T_ORDWR) };
     if ctl < 0 {
@@ -1217,6 +1248,121 @@ pub extern "C" fn rs_main() -> i64 {
     }
     say!("battery: close event OK");
     drop(b);
+
+    // H-4b: the one-shot placement claim (HALCYON.md 13.7 -- the layout-
+    // restore placement primitive). Split OUR leaf (a new EMPTY leaf E takes
+    // focus) and mint E's claim TWICE: the first token goes STALE under the
+    // second (last mint wins). Move focus BACK onto A, so the focus path
+    // would SPLIT A's tile. Then a create with the stale token must FALL
+    // BACK to that path (it lands, but never in E, and E stays empty), and
+    // a create with the live token must land in E itself -- the two legs
+    // discriminate a working claim from a decorative one in both directions.
+    // A malformed token is E_INVAL at the syntax gate (raw, no surface).
+    {
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        let pa2 = match find_pane(&fresh, a.id) {
+            Some(p) => p,
+            None => {
+                say!("tapestry-battery: FAIL claim: A's pane not found");
+                return 1;
+            }
+        };
+        if raw_write(root, "layout", &alloc::format!("split {} h", pa2.id)) < 0 {
+            say!("tapestry-battery: FAIL claim: split A refused");
+            return 1;
+        }
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        let eid = match empty_pane(&fresh) {
+            Some(id) => id,
+            None => {
+                say!("tapestry-battery: FAIL claim: no focused empty leaf after split");
+                return 1;
+            }
+        };
+        let claim_path = alloc::format!("pane/{}/claim", eid);
+        let stale = match read_claim(root, &claim_path) {
+            Some(t) => t,
+            None => {
+                say!("tapestry-battery: FAIL claim: first mint unreadable");
+                return 1;
+            }
+        };
+        let live = match read_claim(root, &claim_path) {
+            Some(t) => t,
+            None => {
+                say!("tapestry-battery: FAIL claim: second mint unreadable");
+                return 1;
+            }
+        };
+        if stale == live {
+            say!("tapestry-battery: FAIL claim: two mints returned one token");
+            return 1;
+        }
+        if raw_write(root, "layout", &alloc::format!("focus {}", pa2.id)) < 0 {
+            say!("tapestry-battery: FAIL claim: focus back on A refused");
+            return 1;
+        }
+        let rc = raw_create(root, "create 16 16 claim=nothex");
+        if rc != -22 {
+            say!(
+                "tapestry-battery: FAIL claim: malformed token rc {} want -22 (E_INVAL)",
+                rc
+            );
+            return 1;
+        }
+        let c1 = match Surface::open_claim(disp.0 / 2, disp.1 / 2, stale) {
+            Ok(s) => s,
+            Err(e) => {
+                say!(
+                    "tapestry-battery: FAIL claim: stale token refused {:?} (want fallback)",
+                    e
+                );
+                return 1;
+            }
+        };
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        match find_pane(&fresh, c1.id) {
+            Some(pc) if pc.id != eid => {}
+            other => {
+                say!(
+                    "tapestry-battery: FAIL claim: stale token steered into {:?} (E is {})",
+                    other.map(|p| p.id),
+                    eid
+                );
+                return 1;
+            }
+        }
+        let e_surf = read_file(root, &alloc::format!("pane/{}/surface", eid)).unwrap_or_default();
+        if e_surf.trim() != "none" {
+            say!(
+                "tapestry-battery: FAIL claim: E not empty after the stale fallback ('{}')",
+                e_surf.trim()
+            );
+            return 1;
+        }
+        let c2 = match Surface::open_claim(disp.0 / 2, disp.1 / 2, live) {
+            Ok(s) => s,
+            Err(e) => {
+                say!("tapestry-battery: FAIL claim: live token refused {:?}", e);
+                return 1;
+            }
+        };
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        match find_pane(&fresh, c2.id) {
+            Some(pc) if pc.id == eid => {}
+            other => {
+                say!(
+                    "tapestry-battery: FAIL claim: live token landed in {:?}, want E ({})",
+                    other.map(|p| p.id),
+                    eid
+                );
+                return 1;
+            }
+        }
+        drop(c2);
+        drop(c1);
+        say!("battery: claim OK");
+    }
 
     // Focus returns to the console's pane by the CLOSE path, not by a write
     // from here: focusing a pane we do not own is exactly what the pane-tree

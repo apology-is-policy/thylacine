@@ -488,7 +488,15 @@ geometry files, disjoint nonzero rects], the resize protocol [G-6b], the
 host-side pixel asserts at the printed pane centers via `screendump.sh
 -P` + `tools/ppm-sample.py` [solid red/blue, exact], the focus legs
 [QMP-typed keys arrive on the focused surface only — leg A via the
-layout file, leg B via B's own pane ctl], and the pane-close leg [G-6b])
+layout file, leg B via B's own pane ctl], the pane-close leg [G-6b], and
+the placement-claim leg [H-4b-1: the battery splits its own leaf and
+reads the fresh empty leaf's `pane/<id>/claim` TWICE, so the first mint
+goes stale under the second (last mint wins); it moves focus back onto A,
+so the focus path would split A; then `create claim=<stale>` must fall
+back to that path — the surface lands, never in the claimed leaf, which
+stays `surface none` — and `create claim=<live>` must land in the claimed
+leaf itself; a malformed token (`claim=nothex`) is E_INVAL at the syntax
+gate, raw, no surface behind it])
 plus the collapse coda (the battery exits, panes collapse, the console
 returns to fullscreen direct scanout, `-c` passes again).
 

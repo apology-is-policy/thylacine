@@ -228,6 +228,11 @@ pub struct Pane {
     pub status: Status,
     /// Visible under the current layout (tab-inactive subtrees are not).
     pub visible: bool,
+    /// H-4b: a one-shot placement claim (`pane/<id>/claim` mints it, a
+    /// `create ... claim=<tok>` consumes it). Set only on an EMPTY leaf and
+    /// cleared the instant the leaf is hosted or freed -- so a claim can
+    /// never steer a surface into a leaf that already holds one.
+    pub claim_token: Option<u128>,
 }
 
 pub struct Layout {
@@ -286,6 +291,7 @@ impl Layout {
             tagbar: Rect::ZERO,
             status: Status::Resting,
             visible: false,
+            claim_token: None,
         };
         let slot = match self.panes.iter().position(|s| s.is_none()) {
             Some(i) => {
@@ -438,6 +444,7 @@ impl Layout {
                 *s = Some(n);
                 // A new program takes the tile: its status starts fresh.
                 p.status = Status::Resting;
+                p.claim_token = None;
                 self.epoch += 1;
                 return Some(f);
             }
@@ -450,6 +457,70 @@ impl Layout {
         }
         self.epoch += 1;
         Some(leaf)
+    }
+
+    /// H-4b: host surface `n` into the SPECIFIC empty leaf `slot` (the
+    /// claim-token placement path) -- never splits, never moves focus (the
+    /// tool arranges the whole skeleton, then sets focus once). Returns
+    /// `slot` on success; None if `slot` is not an empty leaf (a container,
+    /// a bad slot, or a leaf hosted since the claim was minted). Clears the
+    /// leaf's claim regardless of the surface it now holds.
+    pub fn host_into(&mut self, n: usize, slot: usize) -> Option<usize> {
+        let p = self.get_mut(slot)?;
+        if let Kind::Leaf { surface: s @ None } = &mut p.kind {
+            *s = Some(n);
+            p.status = Status::Resting;
+            p.claim_token = None;
+            self.epoch += 1;
+            Some(slot)
+        } else {
+            None
+        }
+    }
+
+    /// H-4b: mint a placement claim on the empty leaf `slot`. Returns false
+    /// (nothing stored) unless `slot` is an EMPTY leaf -- an occupied leaf
+    /// or a container is not claimable. Last mint wins (a fresh read
+    /// re-tokens the leaf); a matching `create claim=` consumes it.
+    pub fn mint_claim(&mut self, slot: usize, token: u128) -> bool {
+        match self.get_mut(slot) {
+            Some(Pane {
+                kind: Kind::Leaf { surface: None },
+                claim_token,
+                ..
+            }) => {
+                *claim_token = Some(token);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// H-4b: the empty leaf whose live claim matches `token`, if any
+    /// (non-consuming; `consume_claim` spends it).
+    fn find_claim(&self, token: u128) -> Option<usize> {
+        self.panes.iter().position(|p| {
+            matches!(
+                p,
+                Some(Pane {
+                    kind: Kind::Leaf { surface: None },
+                    claim_token: Some(t),
+                    ..
+                }) if *t == token
+            )
+        })
+    }
+
+    /// H-4b: spend the claim `token` -- clear it (one-shot) and return the
+    /// empty leaf it named. None if no empty leaf carries it (a bad/stale
+    /// token, or the leaf was hosted since the mint). The caller hosts into
+    /// the returned slot; a replay of the same token lands nothing.
+    pub fn consume_claim(&mut self, token: u128) -> Option<usize> {
+        let slot = self.find_claim(token)?;
+        if let Some(p) = self.get_mut(slot) {
+            p.claim_token = None;
+        }
+        Some(slot)
     }
 
     /// Close a pane. A leaf is removed (root: stays as an empty leaf); a
@@ -470,6 +541,7 @@ impl Layout {
             if let Some(p) = self.get_mut(slot) {
                 p.kind = Kind::Leaf { surface: None };
                 p.status = Status::Resting;
+                p.claim_token = None;
             }
             // Free every other pane (the subtree was the whole tree).
             for i in 0..self.panes.len() {
