@@ -4052,7 +4052,7 @@ s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
     // BORROWED (owned by the fd, freed at spoor_free_internal). So this runs no
     // re-cross and no per-call ref work, and NEVER clunks a member.
     struct union_snap  *snap    = c->union_snap;
-    struct Spoor *const *members = snap->m;
+    const struct union_member *members = snap->m;
     int                  nmembers = snap->n;
 
     u8 *tmp = kmalloc(UNION_RD_TMP, 0);
@@ -4063,7 +4063,7 @@ s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
     bool full   = false;
 
     for (int k = 0; k < nmembers && !full; k++) {
-        struct Spoor *m = members[k];
+        struct Spoor *m = members[k].opened;   // the OREAD fid -- readdir
         if (!m)                               continue;   // (snapshot stores no NULLs; defensive)
         if (!(m->qid.type & QTDIR))           continue;   // non-directory member
         if (!m->dev || !m->dev->readdir)      continue;   // no readdir slot
@@ -4088,7 +4088,9 @@ s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
                 // deterministic, so re-drive resumes at the same idx.
                 bool dup = false;
                 for (int j = 0; j < k && !dup; j++) {
-                    struct Spoor *mj = members[j];
+                    // R2-F1: dedup Twalks the UNOPENED clone -- a 9P server
+                    // rejects a Twalk from the opened readdir fid.
+                    struct Spoor *mj = members[j].walkable;
                     if (mj && (mj->qid.type & QTDIR))
                         dup = stalk_union_has_child(p, mj, nm, nlen);
                 }

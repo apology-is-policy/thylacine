@@ -82,8 +82,10 @@ struct Spoor *spoor_alloc(struct Dev *d) {
 // the STALK_OPEN union cleanup both satisfy this).
 void union_snap_free(struct union_snap *snap) {
     if (!snap) return;
-    for (int i = 0; i < snap->n; i++)
-        if (snap->m[i]) spoor_clunk(snap->m[i]);
+    for (int i = 0; i < snap->n; i++) {
+        if (snap->m[i].opened)   spoor_clunk(snap->m[i].opened);    // readdir fid
+        if (snap->m[i].walkable) spoor_clunk(snap->m[i].walkable);  // R2-F1 dedup fid
+    }
     if (snap->point) spoor_clunk(snap->point);   // UM-8c (F5): the retained point
     kfree(snap);
 }

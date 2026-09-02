@@ -300,6 +300,12 @@ static int g_fix_walkattrs_calls;
 static struct Walkqid *fix_walk(struct Spoor *c, struct Spoor *nc,
                                 const char **name, int nname) {
     if (!c || nname < 0) return NULL;
+    // R2-F1 regression: a 9P server rejects a Twalk (any nwname) from an OPENED
+    // fid (Stratum h_walk: is_open -> EINVAL). The fixture must refuse what
+    // production refuses, else the union readdir dedup -- which walks earlier
+    // members to drop duplicate names -- passes here while silently failing on
+    // dev9p (round-1 F1's inverse: a double LOOSER than production).
+    if (c->flag & COPEN) return NULL;
     if (nname > 0) g_fix_walk_calls++;   // real steps only (0-walk = clone)
     struct Walkqid *wq = walkqid_alloc(nname > 0 ? nname : 1);
     if (!wq) return NULL;

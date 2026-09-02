@@ -340,7 +340,7 @@ static struct union_snap *stalk_build_union_snap(struct Proc *p,
     int nsrc = mount_members_snapshot(p->territory, point, srcs, NULL,
                                       PGRP_MAX_MOUNTS);
     struct union_snap *snap =
-        kmalloc(sizeof(*snap) + (size_t)nsrc * sizeof(struct Spoor *), 0);
+        kmalloc(sizeof(*snap) + (size_t)nsrc * sizeof(struct union_member), 0);
     if (!snap) {
         for (int k = 0; k < nsrc; k++) spoor_clunk(srcs[k]);
         *errp = T_E_NOMEM;
@@ -363,10 +363,18 @@ static struct union_snap *stalk_build_union_snap(struct Proc *p,
                 perm_check(p, &st, PERM_R) != 0) { spoor_clunk(root); continue; }
         }
         if (!root->dev || !root->dev->open) { spoor_clunk(root); continue; }
-        struct Spoor *op = root->dev->open(root, 0 /* OREAD */); // F1: opened fid for readdir
-        if (!op)                            { spoor_clunk(root); continue; }
+        // R2-F1: mint the UNOPENED walkable clone BEFORE opening. A 9P server
+        // rejects a Twalk from an OPENED fid (Stratum h_walk is_open -> EINVAL),
+        // so the readdir dedup probe cannot reuse the opened member; clone_walk_
+        // zero mints an independent 0-walk fid off the still-unopened root.
+        struct Spoor *walkable = clone_walk_zero(root);
+        if (!walkable)                      { spoor_clunk(root); continue; }
+        struct Spoor *op = root->dev->open(root, 0 /* OREAD */); // opened fid for readdir
+        if (!op)          { spoor_clunk(walkable); spoor_clunk(root); continue; }
         if (op != root) spoor_clunk(root);   // Dev.open replaced the Spoor -> adopt the opened one
-        snap->m[snap->n++] = op;
+        snap->m[snap->n].opened   = op;
+        snap->m[snap->n].walkable = walkable;
+        snap->n++;
     }
     return snap;
 }

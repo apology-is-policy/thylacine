@@ -148,15 +148,29 @@ _Static_assert(sizeof(struct Qid) == 16,
 // each member clunked + the struct kfree'd with its Spoor. m[] is a snapshot
 // of the members that existed at open time (F4: taken atomically under one
 // ns_lock; F7: immune to later namespace edits) in declared search order.
+// UM-8c (R2-F1): each union member carries TWO fids. `opened` is OREAD-opened
+// for the per-member readdir (dev9p's Treaddir is accepted only on an opened
+// fid). `walkable` is an UNOPENED clone-walk minted BEFORE the open, used for
+// the readdir dedup Twalk -- a 9P server (Stratum h_walk) REJECTS a Twalk from
+// an OPENED fid (is_open -> EINVAL), so the dedup cannot reuse `opened`. For a
+// native Dev that opens in place both point at distinct Spoors; when Dev.open
+// returns a fresh Spoor, `opened` is that one and `walkable` is the pre-open clone.
+struct union_member {
+    struct Spoor *opened;      // OREAD-opened dir -- the per-member readdir source
+    struct Spoor *walkable;    // UNOPENED clone -- the dedup existence-probe source
+};
+
 struct union_snap {
     struct Spoor *point;       // UM-8c (F5): the ref-held UNION MOUNT POINT this
                                // snapshot was taken at. Lets an fd-relative
                                // resolution / mutation off a union dirfd re-reach
                                // the members via the mount table (the LIVE union;
                                // readdir uses the m[] snapshot instead). NULL only
-                               // transiently while building.
+                               // transiently while building; a POINT-ONLY snap
+                               // (n == 0, point set) tags an O_PATH union base
+                               // (R2-F2) -- the point without any member opens.
     int           n;
-    struct Spoor *m[];         // opened OREAD member dirs, declared order
+    struct union_member m[];   // (opened, walkable) per member, declared order
 };
 
 // union_snap_free -- clunk every opened member + kfree the array. NULL-safe.
