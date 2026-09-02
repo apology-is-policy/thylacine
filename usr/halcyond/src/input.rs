@@ -134,27 +134,27 @@ pub enum NormalAct {
 /// Positive scroll = toward older content (up).
 pub fn normal_key(code: u16, rune: u32) -> NormalAct {
     match rune {
-        0x6a => NormalAct::ScrollLines(-1), // j: down (newer)
-        0x6b => NormalAct::ScrollLines(1),  // k: up (older)
+        0x6a => NormalAct::ScrollLines(-1),           // j: down (newer)
+        0x6b => NormalAct::ScrollLines(1),            // k: up (older)
         0x64 | 0x04 => NormalAct::ScrollHalfPage(-1), // d / ctrl-d
         0x75 | 0x15 => NormalAct::ScrollHalfPage(1),  // u / ctrl-u
-        0x67 => NormalAct::Top,    // g (gg collapsed to one press in v0)
-        0x47 => NormalAct::Bottom, // G
-        0x69 => NormalAct::ToInsert, // i
-        0x76 => NormalAct::ToggleSelect, // v
-        0x79 => NormalAct::Yank,         // y
-        0x70 => NormalAct::Paste,        // p
-        0x1b => NormalAct::Collapse,     // Esc
-        0x77 => NormalAct::NextRun,      // w
-        0x62 => NormalAct::PrevRun,      // b
-        0x0d | 0x0a => NormalAct::Act,   // Enter
+        0x67 => NormalAct::Top,                       // g (gg collapsed to one press in v0)
+        0x47 => NormalAct::Bottom,                    // G
+        0x69 => NormalAct::ToInsert,                  // i
+        0x76 => NormalAct::ToggleSelect,              // v
+        0x79 => NormalAct::Yank,                      // y
+        0x70 => NormalAct::Paste,                     // p
+        0x1b => NormalAct::Collapse,                  // Esc
+        0x77 => NormalAct::NextRun,                   // w
+        0x62 => NormalAct::PrevRun,                   // b
+        0x0d | 0x0a => NormalAct::Act,                // Enter
         _ => match code {
-            103 => NormalAct::ScrollLines(1),      // Up
-            108 => NormalAct::ScrollLines(-1),     // Down
-            104 => NormalAct::ScrollHalfPage(1),   // PgUp
-            109 => NormalAct::ScrollHalfPage(-1),  // PgDn
-            102 => NormalAct::Top,                 // Home
-            107 => NormalAct::Bottom,              // End
+            103 => NormalAct::ScrollLines(1),     // Up
+            108 => NormalAct::ScrollLines(-1),    // Down
+            104 => NormalAct::ScrollHalfPage(1),  // PgUp
+            109 => NormalAct::ScrollHalfPage(-1), // PgDn
+            102 => NormalAct::Top,                // Home
+            107 => NormalAct::Bottom,             // End
             _ => NormalAct::None,
         },
     }
@@ -177,7 +177,10 @@ mod tests {
             seen.push(b.to_vec());
             4i64
         };
-        assert_eq!(feed_drain_with(&mut w, &mut q, 8, &mut dropped), FeedLoss::None);
+        assert_eq!(
+            feed_drain_with(&mut w, &mut q, 8, &mut dropped),
+            FeedLoss::None
+        );
         assert!(q.is_empty());
         assert_eq!(seen[0].as_slice(), b"abcd");
         assert_eq!(dropped, 0);
@@ -189,7 +192,10 @@ mod tests {
         let mut dropped = 0u64;
         q.extend_from_slice(b"abcd");
         let mut w = |_: &[u8]| 0i64;
-        assert_eq!(feed_drain_with(&mut w, &mut q, 8, &mut dropped), FeedLoss::None);
+        assert_eq!(
+            feed_drain_with(&mut w, &mut q, 8, &mut dropped),
+            FeedLoss::None
+        );
         assert_eq!(q.as_slice(), b"abcd");
         assert_eq!(dropped, 0);
     }
@@ -200,7 +206,10 @@ mod tests {
         let mut dropped = 0u64;
         q.extend_from_slice(b"abcd");
         let mut w = |_: &[u8]| 2i64;
-        assert_eq!(feed_drain_with(&mut w, &mut q, 8, &mut dropped), FeedLoss::None);
+        assert_eq!(
+            feed_drain_with(&mut w, &mut q, 8, &mut dropped),
+            FeedLoss::None
+        );
         assert_eq!(q.as_slice(), b"cd");
     }
 
@@ -210,8 +219,15 @@ mod tests {
         let mut dropped = 0u64;
         q.extend_from_slice(b"0123456789AB");
         let mut w = |_: &[u8]| 0i64;
-        assert_eq!(feed_drain_with(&mut w, &mut q, 8, &mut dropped), FeedLoss::OverBound);
-        assert_eq!(q.as_slice(), b"01234567", "the newest went, the oldest survive");
+        assert_eq!(
+            feed_drain_with(&mut w, &mut q, 8, &mut dropped),
+            FeedLoss::OverBound
+        );
+        assert_eq!(
+            q.as_slice(),
+            b"01234567",
+            "the newest went, the oldest survive"
+        );
         assert_eq!(dropped, 4);
     }
 
@@ -221,7 +237,10 @@ mod tests {
         let mut dropped = 0u64;
         q.extend_from_slice(b"abcd");
         let mut w = |_: &[u8]| -1i64;
-        assert_eq!(feed_drain_with(&mut w, &mut q, 8, &mut dropped), FeedLoss::WriteErr);
+        assert_eq!(
+            feed_drain_with(&mut w, &mut q, 8, &mut dropped),
+            FeedLoss::WriteErr
+        );
         assert!(q.is_empty());
         assert_eq!(dropped, 4);
     }

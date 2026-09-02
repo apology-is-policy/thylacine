@@ -137,7 +137,9 @@ impl ChromeSet {
         let leaves = parse_leaves(&layout);
         if let Some(mine) = leaves.iter().find(|l| l.surface == Some(own_surface)) {
             self.own_pane = Some(mine.id);
-            if !self.own_named && write_file(troot, &format!("pane/{}/tag", mine.id), &console_name()) {
+            if !self.own_named
+                && write_file(troot, &format!("pane/{}/tag", mine.id), &console_name())
+            {
                 self.own_named = true;
             }
         }
@@ -154,7 +156,9 @@ impl ChromeSet {
                 let status = read_file(troot, &format!("pane/{}/status", l.id)).unwrap_or_default();
                 self.focused = Some((l.id, name, status));
             }
-            let tb = match read_file(troot, &format!("pane/{}/tagbar", l.id)).and_then(|s| parse_rect(&s)) {
+            let tb = match read_file(troot, &format!("pane/{}/tagbar", l.id))
+                .and_then(|s| parse_rect(&s))
+            {
                 Some(r) => r,
                 None => continue,
             };
@@ -198,7 +202,13 @@ impl ChromeSet {
                 // its own left its events unread until a pane-tree RPC.
                 None => match Surface::chrome_on(&self.ring, id, w, h) {
                     Ok(surf) => {
-                        let mut t = Tile { surf, key, name, dirty: true, dead: false };
+                        let mut t = Tile {
+                            surf,
+                            key,
+                            name,
+                            dirty: true,
+                            dead: false,
+                        };
                         paint(&mut t, gs);
                         self.failed_said.retain(|&f| f != id);
                         self.tiles.insert(id, t);
@@ -268,7 +278,14 @@ fn paint(t: &mut Tile, gs: &mut GlyphSource) {
     }
     let cart = strip_list(t.key, &t.name, w, h, gs);
     let px = t.surf.pixels();
-    cartoon::execute(&cart, &gs.packer.store, &cartoon::BlobStore::new(), px, w as usize, None);
+    cartoon::execute(
+        &cart,
+        &gs.packer.store,
+        &cartoon::BlobStore::new(),
+        px,
+        w as usize,
+        None,
+    );
     if t.surf.present(None).is_err() {
         // A dropped frame, never death: the next relayout repaints.
     }

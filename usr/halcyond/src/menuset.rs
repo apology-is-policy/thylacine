@@ -138,8 +138,12 @@ impl MenuSet {
                     TEV_CONFIGURE => match o.surf.handle_configure(&e) {
                         Ok(_) => {
                             #[cfg(feature = "test-mode")]
-                            say(&format!("halcyond: menu {} configure {}x{} -> repaint",
-                                         o.surf.id, e.value >> 16, e.value & 0xffff));
+                            say(&format!(
+                                "halcyond: menu {} configure {}x{} -> repaint",
+                                o.surf.id,
+                                e.value >> 16,
+                                e.value & 0xffff
+                            ));
                             repaint = true;
                         }
                         Err(TapError::Busy) => {}
@@ -195,11 +199,21 @@ fn paint(o: &mut Open, gs: &mut GlyphSource) {
     }
     let cart = menu_list(&o.model, w, h, gs);
     let px = o.surf.pixels();
-    cartoon::execute(&cart, &gs.packer.store, &cartoon::BlobStore::new(), px, w as usize, None);
+    cartoon::execute(
+        &cart,
+        &gs.packer.store,
+        &cartoon::BlobStore::new(),
+        px,
+        w as usize,
+        None,
+    );
     let rc = o.surf.present(None);
     #[cfg(feature = "test-mode")]
     if let Err(e) = &rc {
-        say(&format!("halcyond: menu {} present failed {:?}", o.surf.id, e));
+        say(&format!(
+            "halcyond: menu {} present failed {:?}",
+            o.surf.id, e
+        ));
     }
     let _ = rc;
 }

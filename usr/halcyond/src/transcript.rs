@@ -287,10 +287,20 @@ pub const DEFAULT_MAX_LINES_PER_BLOCK: usize = 10_000;
 
 impl Transcript {
     pub fn new(pal: Palette) -> Transcript {
-        Transcript::with_caps(pal, DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST, DEFAULT_MAX_LINES_PER_BLOCK)
+        Transcript::with_caps(
+            pal,
+            DEFAULT_MAX_BLOCKS,
+            DEFAULT_MAX_COST,
+            DEFAULT_MAX_LINES_PER_BLOCK,
+        )
     }
 
-    pub fn with_caps(pal: Palette, max_blocks: usize, max_cost: usize, max_lines: usize) -> Transcript {
+    pub fn with_caps(
+        pal: Palette,
+        max_blocks: usize,
+        max_cost: usize,
+        max_lines: usize,
+    ) -> Transcript {
         Transcript {
             frozen: VecDeque::new(),
             open: Block::new(0, BlockKind::Foreign),
@@ -723,8 +733,7 @@ impl Transcript {
     /// same kind, marked. The byte cap is the one that binds first under
     /// the soft-wrap (each wrapped line is MAX_LINE_CELLS cells).
     fn enforce_block_cap(&mut self) {
-        if self.open.items.len() >= self.max_lines_per_block
-            || self.open.cost >= self.max_open_cost
+        if self.open.items.len() >= self.max_lines_per_block || self.open.cost >= self.max_open_cost
         {
             let kind = self.open.kind;
             self.freeze_open(kind, true);
@@ -804,8 +813,10 @@ impl Transcript {
             ScanState::EscCharset => self.state = ScanState::Ground,
             ScanState::Csi => match b {
                 b'0'..=b'9' => {
-                    self.cur_param =
-                        self.cur_param.saturating_mul(10).saturating_add((b - b'0') as u32);
+                    self.cur_param = self
+                        .cur_param
+                        .saturating_mul(10)
+                        .saturating_add((b - b'0') as u32);
                 }
                 b';' | b':' => self.push_param(),
                 b'?' => self.csi_private = true,
@@ -989,7 +1000,10 @@ impl Transcript {
             // padding between cells is the plain realization -- dropped. The
             // per-cell char cap AND the whole-table byte budget both bound it.
             if t.in_cell && t.cell.len() < MAX_CELL_CHARS && t.bytes < MAX_TABLE_BYTES {
-                t.cell.push(TCell { ch: if ch < ' ' { ' ' } else { ch }, style });
+                t.cell.push(TCell {
+                    ch: if ch < ' ' { ' ' } else { ch },
+                    style,
+                });
                 t.bytes = t.bytes.saturating_add(core::mem::size_of::<TCell>());
             }
             return;
@@ -1179,7 +1193,12 @@ mod tests {
         assert_eq!(t.cwd(), "/lib/aurora");
         t.feed(b"before \x1b]7;file:///a%20b\x07 after");
         assert_eq!(t.cwd(), "/a b");
-        assert_eq!(line_str(&Line { cells: t.pending_line().to_vec() }), "before  after");
+        assert_eq!(
+            line_str(&Line {
+                cells: t.pending_line().to_vec()
+            }),
+            "before  after"
+        );
         t.feed(b"\x1b]7;file://otherhost/elsewhere\x1b\\");
         assert_eq!(t.cwd(), "/a b", "another host's report is not ours");
         let mut long: Vec<u8> = Vec::from(&b"\x1b]7;file://localhost/"[..]);
@@ -1229,7 +1248,11 @@ mod tests {
             F::Open(Op::Zone, &[("k", "output")]),
             F::Point(Op::Mark, &[("k", "cmd"), ("text", "make; echo x%3B")]),
         ]));
-        assert_eq!(t.last_command(), Some("make; echo x%3B"), "the wire's escaping is transparent");
+        assert_eq!(
+            t.last_command(),
+            Some("make; echo x%3B"),
+            "the wire's escaping is transparent"
+        );
         // A cmd mark outside an output zone (a prompt block) is not a command.
         let mut u = Transcript::new(daylight());
         u.feed(&frames(&[
@@ -1281,8 +1304,14 @@ mod tests {
     fn structure_fingerprint(t: &Transcript) -> String {
         let mut s = String::new();
         for b in t.frozen_blocks().iter() {
-            s.push_str(&format!("[{:?} exit={:?} items={} styles={} objs={}]",
-                b.kind, b.exit, b.items.len(), b.styles.len(), b.objs.len()));
+            s.push_str(&format!(
+                "[{:?} exit={:?} items={} styles={} objs={}]",
+                b.kind,
+                b.exit,
+                b.items.len(),
+                b.styles.len(),
+                b.objs.len()
+            ));
             for it in b.items.iter() {
                 match it {
                     Item::Line(l) => {
@@ -1293,7 +1322,12 @@ mod tests {
                         }
                     }
                     Item::Table(tb) => {
-                        s.push_str(&format!("T{}r{}h{}", tb.rows.len(), tb.cols.len(), tb.hdr as u8));
+                        s.push_str(&format!(
+                            "T{}r{}h{}",
+                            tb.rows.len(),
+                            tb.cols.len(),
+                            tb.hdr as u8
+                        ));
                         for r in tb.rows.iter() {
                             for c in r.iter() {
                                 s.push(':');
@@ -1306,8 +1340,14 @@ mod tests {
             }
             s.push('|');
         }
-        s.push_str(&format!("open[{:?} items={}]", t.open_block().kind, t.open_block().items.len()));
-        s.push_str(&line_str(&Line { cells: t.pending_line().to_vec() }));
+        s.push_str(&format!(
+            "open[{:?} items={}]",
+            t.open_block().kind,
+            t.open_block().items.len()
+        ));
+        s.push_str(&line_str(&Line {
+            cells: t.pending_line().to_vec(),
+        }));
         s
     }
 
@@ -1320,9 +1360,22 @@ mod tests {
         assert_eq!(blocks[0].kind, BlockKind::Foreign);
         assert_eq!(blocks[1].kind, BlockKind::Prompt);
         assert_eq!(blocks[2].kind, BlockKind::Output);
-        assert_eq!(blocks[2].exit, Some(0), "the exit mark landed inside the output zone");
-        assert_eq!(t.open_block().kind, BlockKind::Prompt, "the next prompt is open");
-        assert_eq!(line_str(&Line { cells: t.pending_line().to_vec() }), "cora@thyla / $ ");
+        assert_eq!(
+            blocks[2].exit,
+            Some(0),
+            "the exit mark landed inside the output zone"
+        );
+        assert_eq!(
+            t.open_block().kind,
+            BlockKind::Prompt,
+            "the next prompt is open"
+        );
+        assert_eq!(
+            line_str(&Line {
+                cells: t.pending_line().to_vec()
+            }),
+            "cora@thyla / $ "
+        );
     }
 
     #[test]
@@ -1366,7 +1419,10 @@ mod tests {
         assert_eq!(s, "red error plain \u{e9}");
         let red_style = out.styles[l.cells[0].style as usize];
         let pal = daylight();
-        assert_eq!(red_style.fg, pal.ansi[1], "SGR 31 resolved against parchment");
+        assert_eq!(
+            red_style.fg, pal.ansi[1],
+            "SGR 31 resolved against parchment"
+        );
         let plain_style = out.styles[l.cells[10].style as usize];
         assert_eq!(plain_style.fg, pal.fg, "SGR 0 reset");
         assert_eq!(l.cells[s.chars().count() - 1].ch, '\u{e9}', "UTF-8 decoded");
@@ -1381,8 +1437,11 @@ mod tests {
         for &b in corpus.iter() {
             split.feed(&[b]);
         }
-        assert_eq!(structure_fingerprint(&whole), structure_fingerprint(&split),
-            "chunk boundaries are invisible (the streaming property)");
+        assert_eq!(
+            structure_fingerprint(&whole),
+            structure_fingerprint(&split),
+            "chunk boundaries are invisible (the streaming property)"
+        );
     }
 
     #[test]
@@ -1393,13 +1452,25 @@ mod tests {
         t.feed(b"abcd\x08\x08Z\n");
         t.feed(b"wipe me\x1b[2Kk\n");
         let b = t.open_block();
-        let l0 = match &b.items[0] { Item::Line(l) => line_str(l), _ => panic!() };
+        let l0 = match &b.items[0] {
+            Item::Line(l) => line_str(l),
+            _ => panic!(),
+        };
         assert_eq!(l0, "XYc", "\\r overwrites in place");
-        let l1 = match &b.items[1] { Item::Line(l) => line_str(l), _ => panic!() };
+        let l1 = match &b.items[1] {
+            Item::Line(l) => line_str(l),
+            _ => panic!(),
+        };
         assert_eq!(l1, "a       b", "tab to the 8-col stop");
-        let l2 = match &b.items[2] { Item::Line(l) => line_str(l), _ => panic!() };
+        let l2 = match &b.items[2] {
+            Item::Line(l) => line_str(l),
+            _ => panic!(),
+        };
         assert_eq!(l2, "abZd", "backspace repositions, write overwrites");
-        let l3 = match &b.items[3] { Item::Line(l) => line_str(l), _ => panic!() };
+        let l3 = match &b.items[3] {
+            Item::Line(l) => line_str(l),
+            _ => panic!(),
+        };
         // EL never moves the cursor (VT semantics): the wipe cleared the
         // line, the cursor stayed at col 7, and `k` landed there.
         assert_eq!(l3, "       k", "EL2 wipes without moving the cursor");
@@ -1433,10 +1504,15 @@ mod tests {
         t.feed(b"after\n");
         let pal = daylight();
         let open = t.open_block();
-        let Item::Line(l) = &open.items[0] else { panic!() };
+        let Item::Line(l) = &open.items[0] else {
+            panic!()
+        };
         let st = open.styles[l.cells[0].style as usize];
         assert_eq!(st.em, EM_NONE, "the em span died at the boundary");
-        assert_eq!(st.fg, pal.ansi[1], "the SGR pen persisted (terminal semantics)");
+        assert_eq!(
+            st.fg, pal.ansi[1],
+            "the SGR pen persisted (terminal semantics)"
+        );
     }
 
     #[test]
@@ -1450,7 +1526,9 @@ mod tests {
             t.feed(&buf);
         }
         assert_eq!(t.frozen_blocks().len(), 3);
-        let Item::Line(l) = &t.frozen_blocks()[0].items[0] else { panic!() };
+        let Item::Line(l) = &t.frozen_blocks()[0].items[0] else {
+            panic!()
+        };
         assert_eq!(line_str(l), "cmd 3", "the oldest blocks evicted");
     }
 
@@ -1468,7 +1546,10 @@ mod tests {
         assert_eq!(blocks.len(), 2, "the cap split the monster block");
         assert_eq!(blocks[0].kind, BlockKind::Output);
         assert_eq!(blocks[1].kind, BlockKind::Output);
-        assert!(blocks[1].continuation, "the second is marked a continuation");
+        assert!(
+            blocks[1].continuation,
+            "the second is marked a continuation"
+        );
     }
 
     #[test]
@@ -1480,8 +1561,11 @@ mod tests {
         wire::close(&mut buf, Op::Zone);
         wire::point(&mut buf, Op::Mark, &[("k", "exit"), ("code", "7")]);
         t.feed(&buf);
-        assert_eq!(t.frozen_blocks()[0].exit, Some(7),
-            "the pre-deviation-8 floating order still lands");
+        assert_eq!(
+            t.frozen_blocks()[0].exit,
+            Some(7),
+            "the pre-deviation-8 floating order still lands"
+        );
     }
 
     #[test]
@@ -1512,7 +1596,9 @@ mod tests {
         t.feed(b"\x1b[9999999999mX\x1b[0m\n");
         // The huge param is a no-op SGR; the text after it survives (the line
         // is flushed into the still-open block -- no zone boundary froze it).
-        let Some(Item::Line(l)) = t.open_block().items.first() else { panic!("no line") };
+        let Some(Item::Line(l)) = t.open_block().items.first() else {
+            panic!("no line")
+        };
         assert_eq!(line_str(l), "X");
     }
 
@@ -1524,11 +1610,17 @@ mod tests {
         let mut t = Transcript::new(daylight());
         let blob = vec![b'a'; MAX_LINE_CELLS * 4 + 17];
         t.feed(&blob);
-        assert!(t.pending_line().len() <= MAX_LINE_CELLS + 1, "the open line is bounded");
+        assert!(
+            t.pending_line().len() <= MAX_LINE_CELLS + 1,
+            "the open line is bounded"
+        );
         for b in t.frozen_blocks().iter() {
             for it in b.items.iter() {
                 if let Item::Line(l) = it {
-                    assert!(l.cells.len() <= MAX_LINE_CELLS + 1, "each flushed line is bounded");
+                    assert!(
+                        l.cells.len() <= MAX_LINE_CELLS + 1,
+                        "each flushed line is bounded"
+                    );
                 }
             }
         }
@@ -1553,18 +1645,34 @@ mod tests {
         let blob = vec![b'z'; 4 << 20];
         for chunk in blob.chunks(4096) {
             t.feed(chunk);
-            assert!(t.open_block().cost < open_cap + line_bytes,
-                "the open block crossed its byte cap without freezing ({})", t.open_block().cost);
-            assert!(t.stored_cost <= max_cost + open_cap + line_bytes,
-                "stored_cost {} escaped the budget {}", t.stored_cost, max_cost);
+            assert!(
+                t.open_block().cost < open_cap + line_bytes,
+                "the open block crossed its byte cap without freezing ({})",
+                t.open_block().cost
+            );
+            assert!(
+                t.stored_cost <= max_cost + open_cap + line_bytes,
+                "stored_cost {} escaped the budget {}",
+                t.stored_cost,
+                max_cost
+            );
         }
-        assert!(t.frozen_blocks().len() > 1,
+        assert!(
+            t.frozen_blocks().len() > 1,
             "the retained set holds several frozen blocks (frozen {} stored_cost {})",
-            t.frozen_blocks().len(), t.stored_cost);
-        assert!(t.frozen_blocks().iter().all(|b| b.cost <= open_cap + line_bytes),
-            "every frozen block is bounded by the open cap");
-        assert!(t.frozen_blocks().iter().filter(|b| b.continuation).count() >= 1,
-            "the byte cap froze the stream as continuation blocks");
+            t.frozen_blocks().len(),
+            t.stored_cost
+        );
+        assert!(
+            t.frozen_blocks()
+                .iter()
+                .all(|b| b.cost <= open_cap + line_bytes),
+            "every frozen block is bounded by the open cap"
+        );
+        assert!(
+            t.frozen_blocks().iter().filter(|b| b.continuation).count() >= 1,
+            "the byte cap froze the stream as continuation blocks"
+        );
     }
 
     #[test]
@@ -1603,10 +1711,7 @@ mod tests {
             let cmd = format!("command-number-{}-with-some-length-to-charge", i);
             u.feed(&frames(&[
                 F::Open(Op::Zone, &[("k", "output")]),
-                F::Point(Op::Mark, &[("k", "cmd"), (
-                    "text",
-                    cmd.as_str(),
-                )]),
+                F::Point(Op::Mark, &[("k", "cmd"), ("text", cmd.as_str())]),
                 F::Text("out\n"),
                 F::Close(Op::Zone),
             ]));
@@ -1645,7 +1750,11 @@ mod tests {
         let mut t = Transcript::new(daylight());
         let mut buf = Vec::new();
         for i in 0..(MAX_STYLES_PER_BLOCK + 500) {
-            let (r, g, b) = ((i & 0xff) as u32, ((i >> 8) & 0xff) as u32, ((i >> 4) & 0xff) as u32);
+            let (r, g, b) = (
+                (i & 0xff) as u32,
+                ((i >> 8) & 0xff) as u32,
+                ((i >> 4) & 0xff) as u32,
+            );
             buf.extend_from_slice(format!("\x1b[38;2;{};{};{}mZ", r, g, b).as_bytes());
         }
         t.feed(&buf);
@@ -1695,6 +1804,10 @@ mod tests {
             t.feed(&buf); // 8 opens per feed, never closed
         }
         let (em_depth, _) = t.nest_depths();
-        assert!(em_depth <= MAX_SPAN_NEST, "em nesting bounded across feeds: {}", em_depth);
+        assert!(
+            em_depth <= MAX_SPAN_NEST,
+            "em nesting bounded across feeds: {}",
+            em_depth
+        );
     }
 }

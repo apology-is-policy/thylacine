@@ -58,7 +58,10 @@ impl GlyphSource {
     /// working set).
     pub fn new_vendored(page: u32) -> GlyphSource {
         let mut faces = Vec::new();
-        for bytes in [crate::DEJAVU_SANS_CONDENSED, crate::DEJAVU_SANS_CONDENSED_BOLD] {
+        for bytes in [
+            crate::DEJAVU_SANS_CONDENSED,
+            crate::DEJAVU_SANS_CONDENSED_BOLD,
+        ] {
             // The vendored faces parse by construction; a fontdue reject
             // here is a build-input defect, not a runtime input -- panic
             // in tests, but stay total in the API: skip the face (its
@@ -78,7 +81,11 @@ impl GlyphSource {
     /// The mono cell geometry (w, h, baseline) -- the raw-VT / foreign-
     /// block metrics, and the mono island's advance.
     pub fn mono_cell(&self) -> (i32, i32, i32) {
-        (self.mono.cell_w() as i32, self.mono.cell_h() as i32, self.mono.baseline() as i32)
+        (
+            self.mono.cell_w() as i32,
+            self.mono.cell_h() as i32,
+            self.mono.baseline() as i32,
+        )
     }
 
     pub fn face_count(&self) -> usize {
@@ -99,14 +106,20 @@ impl GlyphSource {
         let q = if face == FACE_MONO { 0 } else { size_q(px) };
         let key = (face, q, ch);
         if let Some(c) = self.cache.get(&key) {
-            return Some(GlyphRef { glyph: c.id, advance: c.advance });
+            return Some(GlyphRef {
+                glyph: c.id,
+                advance: c.advance,
+            });
         }
         if face == FACE_MONO {
             let (cw, chh, base) = self.mono_cell();
             if let Some(alpha) = self.mono.glyph(ch) {
                 let id = self.packer.insert(cw as u32, chh as u32, alpha, 0, base)?;
                 self.cache.insert(key, Cached { id, advance: cw });
-                return Some(GlyphRef { glyph: id, advance: cw });
+                return Some(GlyphRef {
+                    glyph: id,
+                    advance: cw,
+                });
             }
             // Fallback: body-rasterized at cell height, grid-advance.
             let f = self.faces.get(FACE_BODY as usize)?;
@@ -119,7 +132,10 @@ impl GlyphSource {
                 m.height as i32 + m.ymin,
             )?;
             self.cache.insert(key, Cached { id, advance: cw });
-            return Some(GlyphRef { glyph: id, advance: cw });
+            return Some(GlyphRef {
+                glyph: id,
+                advance: cw,
+            });
         }
         let f = self.faces.get(face as usize)?;
         let (m, bitmap) = f.rasterize(ch, px);
@@ -143,14 +159,22 @@ impl GlyphSource {
     pub fn line_metrics(&self, face: u8, px: f32) -> Option<LineMetrics> {
         if face == FACE_MONO {
             let (_, chh, base) = self.mono_cell();
-            return Some(LineMetrics { ascent: base, descent: chh - base, line_height: chh });
+            return Some(LineMetrics {
+                ascent: base,
+                descent: chh - base,
+                line_height: chh,
+            });
         }
         let f = self.faces.get(face as usize)?;
         let lm = f.horizontal_line_metrics(px)?;
         let ascent = (lm.ascent + 0.5) as i32;
         let descent = (-lm.descent + 0.5) as i32; // fontdue descent is negative
         let gap = (lm.line_gap + 0.5) as i32;
-        Some(LineMetrics { ascent, descent, line_height: ascent + descent + gap })
+        Some(LineMetrics {
+            ascent,
+            descent,
+            line_height: ascent + descent + gap,
+        })
     }
 
     /// The kerning adjustment between two glyphs at a size (integer px),
@@ -163,7 +187,11 @@ impl GlyphSource {
         };
         match f.horizontal_kern(left, right, px) {
             Some(k) => {
-                if k >= 0.0 { (k + 0.5) as i32 } else { -((-k + 0.5) as i32) }
+                if k >= 0.0 {
+                    (k + 0.5) as i32
+                } else {
+                    -((-k + 0.5) as i32)
+                }
             }
             None => 0,
         }
@@ -191,8 +219,16 @@ mod tests {
         let gs = GlyphSource::new_vendored(512);
         assert_eq!(gs.face_count(), 2, "both vendored DejaVu weights parse");
         let lm = gs.line_metrics(FACE_BODY, 16.0).unwrap();
-        assert!(lm.ascent > 8 && lm.ascent < 24, "16px ascent sane: {}", lm.ascent);
-        assert!(lm.descent > 0 && lm.descent < 12, "descent sane: {}", lm.descent);
+        assert!(
+            lm.ascent > 8 && lm.ascent < 24,
+            "16px ascent sane: {}",
+            lm.ascent
+        );
+        assert!(
+            lm.descent > 0 && lm.descent < 12,
+            "descent sane: {}",
+            lm.descent
+        );
         assert!(lm.line_height >= lm.ascent + lm.descent);
     }
 
@@ -202,7 +238,11 @@ mod tests {
         let a1 = gs.glyph(FACE_BODY, 16.0, 'A').unwrap();
         let a2 = gs.glyph(FACE_BODY, 16.0, 'A').unwrap();
         assert_eq!(a1.glyph, a2.glyph, "second lookup hits the cache");
-        assert!(a1.advance > 3 && a1.advance < 20, "16px 'A' advance sane: {}", a1.advance);
+        assert!(
+            a1.advance > 3 && a1.advance < 20,
+            "16px 'A' advance sane: {}",
+            a1.advance
+        );
         // The bitmap actually covers pixels.
         let ge = gs.packer.store.glyphs[a1.glyph as usize];
         assert!(ge.w > 0 && ge.h > 0);
@@ -215,7 +255,12 @@ mod tests {
                 }
             }
         }
-        assert!(on > (ge.w * ge.h / 8) as usize, "the 'A' covers: {}/{}", on, ge.w * ge.h);
+        assert!(
+            on > (ge.w * ge.h / 8) as usize,
+            "the 'A' covers: {}/{}",
+            on,
+            ge.w * ge.h
+        );
         // A different size is a different glyph.
         let a3 = gs.glyph(FACE_BODY, 24.0, 'A').unwrap();
         assert_ne!(a1.glyph, a3.glyph);
@@ -249,7 +294,10 @@ mod tests {
         assert_eq!(gs.gen(), 0);
         gs.regen();
         assert_eq!(gs.gen(), 1);
-        assert!(gs.packer.store.glyphs.is_empty(), "the table went with the pages");
+        assert!(
+            gs.packer.store.glyphs.is_empty(),
+            "the table went with the pages"
+        );
         let a2 = gs.glyph(FACE_BODY, 16.0, 'A').unwrap();
         assert_eq!(a2.glyph, 0, "fresh table restarts ids");
         let _ = a1;
@@ -283,11 +331,20 @@ mod tests {
         let w = 96usize;
         let h = (lm.line_height + 8) as usize;
         let mut px = alloc::vec![0u32; w * h];
-        cartoon::execute(&cart, &gs.packer.store, &cartoon::BlobStore::new(), &mut px, w, None);
+        cartoon::execute(
+            &cart,
+            &gs.packer.store,
+            &cartoon::BlobStore::new(),
+            &mut px,
+            w,
+            None,
+        );
         let ink = px.iter().filter(|&&p| p != 0xFFF1_EAE0).count();
         assert!(ink > 60, "the word inked {} pixels", ink);
         // Nothing painted outside the first line box + margins.
-        assert!(px[..w].iter().filter(|&&p| p != 0xFFF1_EAE0).count() < w / 2,
-                "row 0 is mostly ground");
+        assert!(
+            px[..w].iter().filter(|&&p| p != 0xFFF1_EAE0).count() < w / 2,
+            "row 0 is mostly ground"
+        );
     }
 }

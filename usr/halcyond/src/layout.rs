@@ -243,7 +243,14 @@ impl<'a> LineBuilder<'a> {
         };
         let h = asc + desc;
         let segs = core::mem::take(&mut self.segs);
-        self.lines.push(LaidLine { y: self.y, h, baseline: self.y + asc, segs, src_item: usize::MAX, src_row: usize::MAX });
+        self.lines.push(LaidLine {
+            y: self.y,
+            h,
+            baseline: self.y + asc,
+            segs,
+            src_item: usize::MAX,
+            src_row: usize::MAX,
+        });
         self.y += h;
         self.pen_x = self.sheet.pad_x;
         self.any_body = false;
@@ -294,9 +301,7 @@ impl<'a> LineBuilder<'a> {
             if face != FACE_MONO && i + 1 < cells.len() {
                 gr.advance += gs.kern(face, px, ch, cells[i + 1].ch);
             }
-            if self.pen_x + gr.advance > self.width - self.sheet.pad_x
-                && !seg.refs.is_empty()
-            {
+            if self.pen_x + gr.advance > self.width - self.sheet.pad_x && !seg.refs.is_empty() {
                 // Wrap: prefer the last space boundary inside this seg.
                 if let Some((cut, cut_col)) = last_space {
                     if cut > 0 && cut < seg.refs.len() {
@@ -414,11 +419,12 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
             Item::Line(line) => {
                 for (s, e, sid) in runs_of(&line.cells) {
                     let st = b.styles[sid as usize];
-                    let bg = if st.bg != sheet.ground && st.bg != libhalcyon::theme::DAYLIGHT.surface {
-                        Some(st.bg)
-                    } else {
-                        None
-                    };
+                    let bg =
+                        if st.bg != sheet.ground && st.bg != libhalcyon::theme::DAYLIGHT.surface {
+                            Some(st.bg)
+                        } else {
+                            None
+                        };
                     lb.lay_span(gs, &line.cells[s..e], &st, false, item_idx, s, bg);
                 }
                 lb.break_line(gs);
@@ -468,7 +474,11 @@ pub fn layout_block(b: &Block, width: i32, sheet: &Sheet, gs: &mut GlyphSource) 
             }
         }
     }
-    LaidBlock { height: lb.y, lines: lb.lines, rects }
+    LaidBlock {
+        height: lb.y,
+        lines: lb.lines,
+        rects,
+    }
 }
 
 fn lay_table(
@@ -480,7 +490,13 @@ fn lay_table(
     gs: &mut GlyphSource,
 ) {
     // Measure: each cell's natural width at its style.
-    let ncols = t.rows.iter().map(|r| r.len()).max().unwrap_or(0).max(t.cols.len());
+    let ncols = t
+        .rows
+        .iter()
+        .map(|r| r.len())
+        .max()
+        .unwrap_or(0)
+        .max(t.cols.len());
     if ncols == 0 {
         return;
     }
@@ -595,7 +611,14 @@ fn lay_exit_badge(lb: &mut LineBuilder, code: i64, sheet: &Sheet, gs: &mut Glyph
         }
     }
     lb.pen_x = (lb.width - sheet.pad_x - w).max(sheet.pad_x);
-    let st = Style { fg: sheet.err, bg: sheet.ground, attrs: 0, em: 0, obj: 0, hdr: 0 };
+    let st = Style {
+        fg: sheet.err,
+        bg: sheet.ground,
+        attrs: 0,
+        em: 0,
+        obj: 0,
+        hdr: 0,
+    };
     let cells: Vec<TCell> = text.chars().map(|ch| TCell { ch, style: 0 }).collect();
     // A synthetic span: bypass the block style table (the badge is layout
     // furniture, not content -- selection never addresses it).
@@ -645,7 +668,9 @@ pub fn layout_pending(
         continuation: false,
         exit: None,
         cmd: None,
-        items: alloc::vec![Item::Line(crate::transcript::Line { cells: cells.to_vec() })],
+        items: alloc::vec![Item::Line(crate::transcript::Line {
+            cells: cells.to_vec()
+        })],
         styles: styles.to_vec(),
         objs: Vec::new(),
         cost: 0,
@@ -679,7 +704,13 @@ pub fn cursor_pos(laid: &LaidBlock, col: usize, sheet: &Sheet) -> (i32, i32, i32
 /// then glyph runs (paint order is the op order).
 pub fn render_block(cart: &mut Cartoon, laid: &LaidBlock, y0: i32, gs: &GlyphSource) {
     for r in laid.rects.iter() {
-        cart.ops.push(Op::Rect { x: r.x, y: y0 + r.y, w: r.w, h: r.h, color: r.color });
+        cart.ops.push(Op::Rect {
+            x: r.x,
+            y: y0 + r.y,
+            w: r.w,
+            h: r.h,
+            color: r.color,
+        });
     }
     let gen = gs.gen();
     for line in laid.lines.iter() {
@@ -696,7 +727,9 @@ pub fn render_block(cart: &mut Cartoon, laid: &LaidBlock, y0: i32, gs: &GlyphSou
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcript::{Transcript, DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST, DEFAULT_MAX_LINES_PER_BLOCK};
+    use crate::transcript::{
+        Transcript, DEFAULT_MAX_BLOCKS, DEFAULT_MAX_COST, DEFAULT_MAX_LINES_PER_BLOCK,
+    };
     use alloc::vec::Vec;
     use beacon::wire::{self, Op as BOp};
 
@@ -728,7 +761,10 @@ mod tests {
         assert!(line.segs.len() >= 2);
         assert_eq!(line.segs[0].face, FACE_MONO, "un-annotated text is mono");
         assert_eq!(line.segs[1].face, FACE_BODY, "the obj span is body");
-        assert_eq!(line.segs[1].color, sheet.obj, "obj at default ink takes the slate object colour");
+        assert_eq!(
+            line.segs[1].color, sheet.obj,
+            "obj at default ink takes the slate object colour"
+        );
         assert!(line.segs[1].obj > 0, "the obj hit target rides the seg");
     }
 
@@ -749,9 +785,16 @@ mod tests {
         let mut g = gs();
         let (_, cell_h, _) = g.mono_cell();
         let laid = layout_block(b, 600, &sheet, &mut g);
-        assert_eq!(laid.lines[0].h, cell_h, "all-mono line keeps the exact cell box");
+        assert_eq!(
+            laid.lines[0].h, cell_h,
+            "all-mono line keeps the exact cell box"
+        );
         let body_lm = g.line_metrics(FACE_BODY, sheet.body_px).unwrap();
-        assert_eq!(laid.lines[1].h, body_lm.line_height + 0, "mixed line takes the body box");
+        assert_eq!(
+            laid.lines[1].h,
+            body_lm.line_height + 0,
+            "mixed line takes the body box"
+        );
     }
 
     #[test]
@@ -760,7 +803,9 @@ mod tests {
         let mut buf = Vec::new();
         wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
         wire::open(&mut buf, BOp::Em, &[("class", "emph")]);
-        buf.extend_from_slice(b"the quick brown fox jumps over the lazy dog and keeps going yet further\n");
+        buf.extend_from_slice(
+            b"the quick brown fox jumps over the lazy dog and keeps going yet further\n",
+        );
         wire::close(&mut buf, BOp::Em);
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
@@ -771,7 +816,11 @@ mod tests {
         let narrow = layout_block(b, 220, &sheet, &mut g);
         let narrow2 = layout_block(b, 220, &sheet, &mut g);
         assert!(narrow.lines.len() > wide.lines.len(), "narrow wraps more");
-        assert_eq!(narrow.lines.len(), narrow2.lines.len(), "same width, same shape");
+        assert_eq!(
+            narrow.lines.len(),
+            narrow2.lines.len(),
+            "same width, same shape"
+        );
         assert_eq!(narrow.height, narrow2.height);
         // Every glyph stays inside the width.
         for l in narrow.lines.iter() {
@@ -780,7 +829,13 @@ mod tests {
             }
         }
         // No content lost: total glyph count matches.
-        let count = |lb: &LaidBlock| lb.lines.iter().flat_map(|l| l.segs.iter()).map(|s| s.refs.len()).sum::<usize>();
+        let count = |lb: &LaidBlock| {
+            lb.lines
+                .iter()
+                .flat_map(|l| l.segs.iter())
+                .map(|s| s.refs.len())
+                .sum::<usize>()
+        };
         assert_eq!(count(&wide), count(&narrow), "reflow loses nothing");
     }
 
@@ -851,7 +906,11 @@ mod tests {
         let mut buf = Vec::new();
         wire::open(&mut buf, BOp::Zone, &[("k", "output")]);
         buf.extend_from_slice(b"did things\n");
-        wire::point(&mut buf, BOp::Mark, &[("k", "exit"), ("code", "-9223372036854775808")]);
+        wire::point(
+            &mut buf,
+            BOp::Mark,
+            &[("k", "exit"), ("code", "-9223372036854775808")],
+        );
         wire::close(&mut buf, BOp::Zone);
         t.feed(&buf);
         // Must not panic; the failure badge renders (nonzero exit).
@@ -861,7 +920,10 @@ mod tests {
             .iter()
             .flat_map(|l| l.segs.iter())
             .any(|s| s.color == sheet.err);
-        assert!(has_err_seg, "the i64::MIN exit still renders a failure badge");
+        assert!(
+            has_err_seg,
+            "the i64::MIN exit still renders a failure badge"
+        );
     }
 
     #[test]
@@ -886,7 +948,9 @@ mod tests {
         let sheet = daylight_sheet();
         let mut g = gs();
         let mut cart = Cartoon::new();
-        cart.ops.push(Op::Clear { color: sheet.ground });
+        cart.ops.push(Op::Clear {
+            color: sheet.ground,
+        });
         let mut y = 4;
         for b in t.frozen_blocks().iter() {
             let laid = layout_block(b, 300, &sheet, &mut g);
@@ -896,7 +960,14 @@ mod tests {
         let w = 300usize;
         let h = (y + 4) as usize;
         let mut px = alloc::vec![0u32; w * h];
-        cartoon::execute(&cart, &g.packer.store, &cartoon::BlobStore::new(), &mut px, w, None);
+        cartoon::execute(
+            &cart,
+            &g.packer.store,
+            &cartoon::BlobStore::new(),
+            &mut px,
+            w,
+            None,
+        );
         let ink = px.iter().filter(|&&p| p != sheet.ground).count();
         assert!(ink > 100, "the session inked {} px", ink);
     }

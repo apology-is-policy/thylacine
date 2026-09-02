@@ -68,7 +68,11 @@ pub fn parse_leaves(layout: &str) -> Vec<Leaf> {
         let surface = it
             .find_map(|t| t.strip_prefix("surface="))
             .and_then(|s| s.parse().ok());
-        out.push(Leaf { id, focused, surface });
+        out.push(Leaf {
+            id,
+            focused,
+            surface,
+        });
     }
     out
 }
@@ -129,7 +133,13 @@ pub fn strip_list(key: Key, name: &str, w: u32, h: u32, gs: &mut GlyphSource) ->
     }
     let (bg, sep, ink) = key_colors(key);
     cart.ops.push(Op::Clear { color: bg });
-    cart.ops.push(Op::Rect { x: 0, y: h as i32 - 1, w, h: 1, color: sep });
+    cart.ops.push(Op::Rect {
+        x: 0,
+        y: h as i32 - 1,
+        w,
+        h: 1,
+        color: sep,
+    });
     if !name.is_empty() {
         let (asc, desc) = gs
             .line_metrics(FACE_BODY, NAME_PX)
@@ -170,9 +180,27 @@ mod tests {
     #[test]
     fn leaves_parse_focus_surface_and_skip_hidden() {
         let l = parse_leaves(LAYOUT);
-        assert_eq!(l.len(), 2, "the container, the hidden leaf and the malformed id are not leaves");
-        assert_eq!(l[0], Leaf { id: 2, focused: false, surface: Some(0) });
-        assert_eq!(l[1], Leaf { id: 3, focused: true, surface: None });
+        assert_eq!(
+            l.len(),
+            2,
+            "the container, the hidden leaf and the malformed id are not leaves"
+        );
+        assert_eq!(
+            l[0],
+            Leaf {
+                id: 2,
+                focused: false,
+                surface: Some(0)
+            }
+        );
+        assert_eq!(
+            l[1],
+            Leaf {
+                id: 3,
+                focused: true,
+                surface: None
+            }
+        );
     }
 
     #[test]
@@ -199,9 +227,15 @@ mod tests {
     // The 4.2 table, pinned: ground / separator / name per row.
     #[test]
     fn strip_colors_match_the_scripture() {
-        assert_eq!(key_colors(Key::Resting), (0xFFCEC4B6, 0xFFC86030, 0xFF1A120A));
+        assert_eq!(
+            key_colors(Key::Resting),
+            (0xFFCEC4B6, 0xFFC86030, 0xFF1A120A)
+        );
         assert_eq!(key_colors(Key::Sage), (0xFFB8CCC4, 0xFF1E5844, 0xFF0C2820));
-        assert_eq!(key_colors(Key::Cinnabar), (0xFFDCB8B0, 0xFF982818, 0xFF3C1008));
+        assert_eq!(
+            key_colors(Key::Cinnabar),
+            (0xFFDCB8B0, 0xFF982818, 0xFF3C1008)
+        );
     }
 
     #[test]
@@ -209,7 +243,16 @@ mod tests {
         let mut gs = GlyphSource::new_vendored(64);
         let c = strip_list(Key::Cinnabar, "halcyon", 300, 20, &mut gs);
         assert!(matches!(c.ops[0], Op::Clear { color: 0xFFDCB8B0 }));
-        assert!(matches!(c.ops[1], Op::Rect { x: 0, y: 19, w: 300, h: 1, color: 0xFF982818 }));
+        assert!(matches!(
+            c.ops[1],
+            Op::Rect {
+                x: 0,
+                y: 19,
+                w: 300,
+                h: 1,
+                color: 0xFF982818
+            }
+        ));
         assert!(c.ops.len() > 2, "the name produced glyph ops");
         let empty = strip_list(Key::Sage, "", 300, 20, &mut gs);
         assert_eq!(empty.ops.len(), 2, "no name, no glyph run");

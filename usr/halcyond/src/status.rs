@@ -166,12 +166,29 @@ pub fn status_list(m: &StatusModel, w: u32, h: u32, gs: &mut GlyphSource) -> (Ca
     // The condition: a dot in the key colour + its label, left of the clock.
     let (dot_color, label) = condition_colors(m.condition);
     let lrun = shape(gs, FACE_BODY, label);
-    let cond_w = DOT + if lrun.width > 0 { PAD / 2 + lrun.width } else { 0 };
+    let cond_w = DOT
+        + if lrun.width > 0 {
+            PAD / 2 + lrun.width
+        } else {
+            0
+        };
     let cond_x = clock_x - PAD - cond_w;
     if cond_x > 0 {
-        cart.ops.push(Op::Rect { x: cond_x, y: (hi - DOT) / 2, w: DOT as u32, h: DOT as u32, color: dot_color });
+        cart.ops.push(Op::Rect {
+            x: cond_x,
+            y: (hi - DOT) / 2,
+            w: DOT as u32,
+            h: DOT as u32,
+            color: dot_color,
+        });
         if !lrun.refs.is_empty() {
-            cart.push_glyphs(gen, cond_x + DOT + PAD / 2, baseline, d.status_fg, &lrun.refs);
+            cart.push_glyphs(
+                gen,
+                cond_x + DOT + PAD / 2,
+                baseline,
+                d.status_fg,
+                &lrun.refs,
+            );
         }
     }
     slots.cond = (cond_x, cond_w);
@@ -187,12 +204,30 @@ pub fn status_list(m: &StatusModel, w: u32, h: u32, gs: &mut GlyphSource) -> (Ca
         let nrun = shape(gs, FACE_BODY, &num);
         let box_w = WS_BOX.max(nrun.width + 6);
         if i == m.active {
-            cart.ops.push(Op::Rect { x, y: (hi - WS_BOX) / 2, w: box_w as u32, h: WS_BOX as u32, color: d.ember });
+            cart.ops.push(Op::Rect {
+                x,
+                y: (hi - WS_BOX) / 2,
+                w: box_w as u32,
+                h: WS_BOX as u32,
+                color: d.ember,
+            });
             if !nrun.refs.is_empty() {
-                cart.push_glyphs(gen, x + (box_w - nrun.width) / 2, baseline, d.status_bg, &nrun.refs);
+                cart.push_glyphs(
+                    gen,
+                    x + (box_w - nrun.width) / 2,
+                    baseline,
+                    d.status_bg,
+                    &nrun.refs,
+                );
             }
         } else if !nrun.refs.is_empty() {
-            cart.push_glyphs(gen, x + (box_w - nrun.width) / 2, baseline, d.status_idle, &nrun.refs);
+            cart.push_glyphs(
+                gen,
+                x + (box_w - nrun.width) / 2,
+                baseline,
+                d.status_idle,
+                &nrun.refs,
+            );
         }
         x += box_w + PAD / 2;
     }
@@ -213,7 +248,11 @@ pub fn status_list(m: &StatusModel, w: u32, h: u32, gs: &mut GlyphSource) -> (Ca
         let mut fits = true;
         let mut byte = 0;
         for ch in text.chars() {
-            let face = if byte < mono_from { FACE_BODY } else { FACE_MONO };
+            let face = if byte < mono_from {
+                FACE_BODY
+            } else {
+                FACE_MONO
+            };
             byte += ch.len_utf8();
             if let Some(g) = gs.glyph(face, NAME_PX, ch) {
                 if width + g.advance > avail {
@@ -284,12 +323,19 @@ mod tests {
         assert_eq!(condition_for("err"), Condition::Err);
         assert_eq!(condition_for("resting\n"), Condition::Idle);
         assert_eq!(condition_for(""), Condition::Idle);
-        assert_eq!(condition_for("warning"), Condition::Idle, "warnings do not promote");
+        assert_eq!(
+            condition_for("warning"),
+            Condition::Idle,
+            "warnings do not promote"
+        );
     }
 
     #[test]
     fn context_joins_the_present_parts_with_the_middle_dot() {
-        assert_eq!(context_text("transcript", "/lib/aurora", "make check"), "transcript \u{b7} /lib/aurora \u{b7} make check");
+        assert_eq!(
+            context_text("transcript", "/lib/aurora", "make check"),
+            "transcript \u{b7} /lib/aurora \u{b7} make check"
+        );
         assert_eq!(context_text("hx", "", ""), "hx");
         assert_eq!(context_text("", "/x", ""), "/x");
         assert_eq!(context_text("", "", ""), "");
@@ -300,18 +346,81 @@ mod tests {
         let mut gs = GlyphSource::new_vendored(64);
         let (c, s) = status_list(&model(), 1280, 20, &mut gs);
         assert!(matches!(c.ops[0], Op::Clear { color: 0xFF1A120A }));
-        assert!(s.ws.0 == PAD && s.ws.1 >= WS_BOX, "the workspace indicator at the left: {:?}", s.ws);
-        assert!(s.ctx.0 > s.ws.0 + s.ws.1, "the context after the workspaces");
+        assert!(
+            s.ws.0 == PAD && s.ws.1 >= WS_BOX,
+            "the workspace indicator at the left: {:?}",
+            s.ws
+        );
+        assert!(
+            s.ctx.0 > s.ws.0 + s.ws.1,
+            "the context after the workspaces"
+        );
         assert!(s.cond.0 > s.ctx.0, "the condition after the context");
-        assert!(s.clock.0 > s.cond.0 + s.cond.1, "the clock after the condition");
-        assert!(s.clock.0 + s.clock.1 <= 1280 - PAD, "the clock ends inside the right pad");
+        assert!(
+            s.clock.0 > s.cond.0 + s.cond.1,
+            "the clock after the condition"
+        );
+        assert!(
+            s.clock.0 + s.clock.1 <= 1280 - PAD,
+            "the clock ends inside the right pad"
+        );
         // The active indicator is an ember box; the condition dot is sage.
-        assert!(c.ops.iter().any(|o| matches!(o, Op::Rect { color: 0xFFE07840, .. })), "the ember box");
-        assert!(c.ops.iter().any(|o| matches!(o, Op::Rect { color: 0xFF1E5844, w: 8, h: 8, .. })), "the sage dot");
-        let (_, e) = status_list(&StatusModel { condition: Condition::Err, ..model() }, 1280, 20, &mut gs);
-        assert_eq!(e.clock, s.clock, "the clock does not move with the condition");
-        let (ci, _) = status_list(&StatusModel { condition: Condition::Idle, ..model() }, 1280, 20, &mut gs);
-        assert!(ci.ops.iter().any(|o| matches!(o, Op::Rect { color: 0xFF3A2E22, w: 8, h: 8, .. })), "the idle dot");
+        assert!(
+            c.ops.iter().any(|o| matches!(
+                o,
+                Op::Rect {
+                    color: 0xFFE07840,
+                    ..
+                }
+            )),
+            "the ember box"
+        );
+        assert!(
+            c.ops.iter().any(|o| matches!(
+                o,
+                Op::Rect {
+                    color: 0xFF1E5844,
+                    w: 8,
+                    h: 8,
+                    ..
+                }
+            )),
+            "the sage dot"
+        );
+        let (_, e) = status_list(
+            &StatusModel {
+                condition: Condition::Err,
+                ..model()
+            },
+            1280,
+            20,
+            &mut gs,
+        );
+        assert_eq!(
+            e.clock, s.clock,
+            "the clock does not move with the condition"
+        );
+        let (ci, _) = status_list(
+            &StatusModel {
+                condition: Condition::Idle,
+                ..model()
+            },
+            1280,
+            20,
+            &mut gs,
+        );
+        assert!(
+            ci.ops.iter().any(|o| matches!(
+                o,
+                Op::Rect {
+                    color: 0xFF3A2E22,
+                    w: 8,
+                    h: 8,
+                    ..
+                }
+            )),
+            "the idle dot"
+        );
     }
 
     #[test]
@@ -320,8 +429,14 @@ mod tests {
         let wide = status_list(&model(), 1280, 20, &mut gs);
         let narrow = status_list(&model(), 200, 20, &mut gs);
         assert!(narrow.1.ctx.1 < wide.1.ctx.1);
-        assert!(narrow.1.clock.0 + narrow.1.clock.1 <= 200 - PAD, "the clock still fits");
-        assert!(narrow.0.runs.len() < wide.0.runs.len(), "fewer context glyphs on the narrow bar");
+        assert!(
+            narrow.1.clock.0 + narrow.1.clock.1 <= 200 - PAD,
+            "the clock still fits"
+        );
+        assert!(
+            narrow.0.runs.len() < wide.0.runs.len(),
+            "fewer context glyphs on the narrow bar"
+        );
         let (c, s) = status_list(&model(), 1, 20, &mut gs);
         assert_eq!(s.ctx.1, 0);
         assert!(matches!(c.ops[0], Op::Clear { .. }));

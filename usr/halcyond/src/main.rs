@@ -29,24 +29,25 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAllocN<{ 64 * 1024 * 1024 }> =
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use beacon::verbs::{parse as parse_verbs, Rule};
 use halcyond::input::{
     feed_drain_with, key_bytes, normal_key, wait_is_bounded, FeedLoss, Mode, NormalAct,
     FEED_PENDING_MAX, FEED_RETRY_MS,
 };
 use halcyond::layout::{
-    cursor_pos, layout_block, layout_pending, daylight_sheet, render_block, LaidBlock, Sheet,
+    cursor_pos, daylight_sheet, layout_block, layout_pending, render_block, LaidBlock, Sheet,
 };
 use halcyond::menu::{build_menu, hit_run, obj_of, run_rect, runs_on_row, step_run, Action, Menu};
 use halcyond::raster::GlyphSource;
 use halcyond::select::{FlatRow, Sel};
 use halcyond::transcript::Transcript;
-use beacon::verbs::{parse as parse_verbs, Rule};
 use libthyla_rs::time::{sleep, Duration};
-use libthyla_rs::{t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN,
-    T_WALK_OPEN_FROM_ROOT};
+use libthyla_rs::{
+    t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN, T_WALK_OPEN_FROM_ROOT,
+};
 use tapestry::{
-    EventRing,
-    Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_BTN, TEV_PTR_MOVE,
+    EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_BTN,
+    TEV_PTR_MOVE,
 };
 
 macro_rules! say {
@@ -77,13 +78,19 @@ fn feed_drain(fd: i64, pending: &mut Vec<u8>, dropped: &mut u64, logged: &mut bo
     if loss == FeedLoss::WriteErr {
         if !*logged {
             *logged = true;
-            say!("halcyond: consfeed WRITE FAILED; discarded queued input (total {})", *dropped);
+            say!(
+                "halcyond: consfeed WRITE FAILED; discarded queued input (total {})",
+                *dropped
+            );
         }
     } else if loss == FeedLoss::OverBound {
         if !*logged {
             *logged = true;
-            say!("halcyond: consfeed backlog over {} bytes; dropping input (total {})",
-                 FEED_PENDING_MAX, *dropped);
+            say!(
+                "halcyond: consfeed backlog over {} bytes; dropping input (total {})",
+                FEED_PENDING_MAX,
+                *dropped
+            );
         }
     } else if pending.is_empty() {
         *logged = false;
@@ -127,7 +134,11 @@ fn drain_console(
         return;
     }
     for _ in 0..8 {
-        let mut pfd = [TPollFd { fd: drain as i32, events: T_POLLIN, revents: 0 }];
+        let mut pfd = [TPollFd {
+            fd: drain as i32,
+            events: T_POLLIN,
+            revents: 0,
+        }];
         let rc = unsafe { t_poll(pfd.as_mut_ptr(), 1, 0) };
         if rc <= 0 || (pfd[0].revents & T_POLLIN) == 0 {
             break;
@@ -152,7 +163,13 @@ fn drain_console(
 /// H-3c: the selected obj run's rect within a laid block, when the Normal
 /// cursor row lives in block `bi` (usize::MAX = the open block) and a run is
 /// selected there -- the ember underline's geometry.
-fn run_mark(mode: Mode, sel: Option<&Sel>, flat: &[FlatRow], bi: usize, laid: &LaidBlock) -> Option<(i32, i32, i32, i32)> {
+fn run_mark(
+    mode: Mode,
+    sel: Option<&Sel>,
+    flat: &[FlatRow],
+    bi: usize,
+    laid: &LaidBlock,
+) -> Option<(i32, i32, i32, i32)> {
     if mode != Mode::Normal {
         return None;
     }
@@ -186,7 +203,12 @@ fn summon(
         .map(|r| (r.0 as i32, r.1 as i32))
         .unwrap_or((0, 0));
     let d = |v: i32, o: i32| (v + o).max(0) as u32;
-    let run_d = (d(run.0, gx), d(run.1, gy), run.2.max(0) as u32, run.3.max(0) as u32);
+    let run_d = (
+        d(run.0, gx),
+        d(run.1, gy),
+        run.2.max(0) as u32,
+        run.3.max(0) as u32,
+    );
     menus.open(model, d(ax, gx), d(ay, gy), run_d, gs);
 }
 
@@ -205,7 +227,9 @@ struct LayoutCache {
 
 impl LayoutCache {
     fn new() -> LayoutCache {
-        LayoutCache { map: BTreeMap::new() }
+        LayoutCache {
+            map: BTreeMap::new(),
+        }
     }
 
     fn get(
@@ -224,7 +248,15 @@ impl LayoutCache {
                 self.map.clear();
             }
             let laid = layout_block(b, width, sheet, gs);
-            self.map.insert(b.id, CacheEnt { width, sheet_gen: sheet.gen, atlas_gen: gen, laid });
+            self.map.insert(
+                b.id,
+                CacheEnt {
+                    width,
+                    sheet_gen: sheet.gen,
+                    atlas_gen: gen,
+                    laid,
+                },
+            );
         }
         &self.map.get(&b.id).unwrap().laid
     }
@@ -427,8 +459,13 @@ pub extern "C" fn rs_main() -> i64 {
             }
             let open_rel = total;
             let open_laid = layout_block(t.open_block(), widthi, &sheet, &mut gs);
-            let pending_laid =
-                layout_pending(t.pending_line(), &t.open_block().styles, widthi, &sheet, &mut gs);
+            let pending_laid = layout_pending(
+                t.pending_line(),
+                &t.open_block().styles,
+                widthi,
+                &sheet,
+                &mut gs,
+            );
             let open_h = open_laid.height + pending_laid.height;
             total += open_h;
 
@@ -476,7 +513,11 @@ pub extern "C" fn rs_main() -> i64 {
             }
             // Bottom-anchored: the content's bottom sits at the view bottom
             // (raised by scroll_up).
-            let y0 = if total <= viewh { 0 } else { viewh - total + scroll_up };
+            let y0 = if total <= viewh {
+                0
+            } else {
+                viewh - total + scroll_up
+            };
 
             // The selection band set, grouped for the emit pass.
             let sel_rows: Vec<halcyond::select::FlatRow> = match (mode, sel.as_ref()) {
@@ -488,11 +529,17 @@ pub extern "C" fn rs_main() -> i64 {
             };
 
             let mut cart = cartoon::Cartoon::new();
-            cart.ops.push(cartoon::Op::Clear { color: sheet.ground });
+            cart.ops.push(cartoon::Op::Clear {
+                color: sheet.ground,
+            });
             let mut y = y0 + sheet.block_gap;
             frame.clear();
             for (bi, b) in t.frozen_blocks().iter().enumerate() {
-                let lh = heights.iter().find(|(id, _, _)| *id == b.id).map(|(_, h, _)| *h).unwrap_or(0);
+                let lh = heights
+                    .iter()
+                    .find(|(id, _, _)| *id == b.id)
+                    .map(|(_, h, _)| *h)
+                    .unwrap_or(0);
                 frame.push((b.id, y, lh));
                 if y + lh >= 0 && y <= viewh {
                     // Bands under the block's selected rows, then the text.
@@ -552,7 +599,11 @@ pub extern "C" fn rs_main() -> i64 {
             // The cursor: a beam at the pending column (Insert ink; Normal
             // renders it hollow-dim -- the mode is visible at a glance).
             let (cx, cy, ch2) = cursor_pos(&pending_laid, t.pending_col(), &sheet);
-            let ccol = if mode == Mode::Insert { sheet.ink } else { sheet.dim };
+            let ccol = if mode == Mode::Insert {
+                sheet.ink
+            } else {
+                sheet.dim
+            };
             cart.ops.push(cartoon::Op::Rect {
                 x: cx,
                 y: py + cy,
@@ -562,14 +613,26 @@ pub extern "C" fn rs_main() -> i64 {
             });
 
             let px = surf.pixels();
-            cartoon::execute(&cart, &gs.packer.store, &cartoon::BlobStore::new(), px, w, None);
+            cartoon::execute(
+                &cart,
+                &gs.packer.store,
+                &cartoon::BlobStore::new(),
+                px,
+                w,
+                None,
+            );
             match surf.present(None) {
                 Ok(()) => {
                     present_fails = 0;
                     if !announced {
                         announced = true;
-                        say!("halcyond: console up {}x{} px (rich transcript; mono grid {}x{})",
-                             w, h, (w as i32 / cell_w).max(1), (h as i32 / cell_h).max(1));
+                        say!(
+                            "halcyond: console up {}x{} px (rich transcript; mono grid {}x{})",
+                            w,
+                            h,
+                            (w as i32 / cell_w).max(1),
+                            (h as i32 / cell_h).max(1)
+                        );
                     }
                 }
                 Err(_) => {
@@ -579,7 +642,10 @@ pub extern "C" fn rs_main() -> i64 {
                     present_fails += 1;
                     dirty = true;
                     if present_fails >= PRESENT_FAILS_FATAL {
-                        say!("halcyond: {} consecutive present failures; exiting", present_fails);
+                        say!(
+                            "halcyond: {} consecutive present failures; exiting",
+                            present_fails
+                        );
                         return 1;
                     }
                 }
@@ -628,7 +694,12 @@ pub extern "C" fn rs_main() -> i64 {
             // minute -- and painted only on a change.
             status.ensure();
             status.pump();
-            let sm = statusset::model_from(chrome.focused(), chrome.own_pane(), t.cwd(), t.last_command());
+            let sm = statusset::model_from(
+                chrome.focused(),
+                chrome.own_pane(),
+                t.cwd(),
+                t.last_command(),
+            );
             status.refresh(&sm, &mut gs);
         }
 
@@ -668,7 +739,10 @@ pub extern "C" fn rs_main() -> i64 {
                 // was typed meanwhile.
                 #[cfg(feature = "test-mode")]
                 {
-                    match act.strip_prefix("#wedge ").and_then(|v| v.trim().parse::<u64>().ok()) {
+                    match act
+                        .strip_prefix("#wedge ")
+                        .and_then(|v| v.trim().parse::<u64>().ok())
+                    {
                         Some(ms) => {
                             say!("halcyond: wedge-test: frozen {} ms with the menu up", ms);
                             let _ = sleep(Duration::from_millis(ms));
@@ -678,7 +752,10 @@ pub extern "C" fn rs_main() -> i64 {
                     }
                 }
                 #[cfg(not(feature = "test-mode"))]
-                say!("halcyond: internal action {} ignored (production build)", act);
+                say!(
+                    "halcyond: internal action {} ignored (production build)",
+                    act
+                );
             }
             menuset::MenuEvent::Closed => {
                 dirty = true;
@@ -795,8 +872,12 @@ pub extern "C" fn rs_main() -> i64 {
                                     scroll_up = 0;
                                     if !yank_buf.is_empty() {
                                         feed_pending.extend_from_slice(&yank_buf);
-                                        feed_drain(feed, &mut feed_pending,
-                                                   &mut feed_dropped, &mut feed_logged);
+                                        feed_drain(
+                                            feed,
+                                            &mut feed_pending,
+                                            &mut feed_dropped,
+                                            &mut feed_logged,
+                                        );
                                     }
                                     dirty = true;
                                 }
@@ -817,7 +898,9 @@ pub extern "C" fn rs_main() -> i64 {
                                     // (across rows); the view follows.
                                     let fwd = act == NormalAct::NextRun;
                                     if let Some(s) = sel.as_mut() {
-                                        if let Some((row, obj)) = step_run(&t, &flat, s.cursor, s.obj, fwd) {
+                                        if let Some((row, obj)) =
+                                            step_run(&t, &flat, s.cursor, s.obj, fwd)
+                                        {
                                             s.cursor = row;
                                             s.anchor = None;
                                             s.obj = Some(obj);
@@ -832,31 +915,49 @@ pub extern "C" fn rs_main() -> i64 {
                                     // witness subtracts it).
                                     #[cfg(feature = "test-mode")]
                                     {
-                                        let at = sel.as_ref().and_then(|s| flat.get(s.cursor).map(|fr| (*fr, s.obj)));
+                                        let at = sel.as_ref().and_then(|s| {
+                                            flat.get(s.cursor).map(|fr| (*fr, s.obj))
+                                        });
                                         if let Some((fr, Some(obj))) = at {
                                             let key = if fr.block == usize::MAX {
                                                 Some(u64::MAX)
                                             } else {
                                                 t.frozen_blocks().get(fr.block).map(|b| b.id)
                                             };
-                                            let by = key.and_then(|k| frame.iter().find(|f| f.0 == k).map(|f| f.1));
+                                            let by = key.and_then(|k| {
+                                                frame.iter().find(|f| f.0 == k).map(|f| f.1)
+                                            });
                                             let rect = if fr.block == usize::MAX {
-                                                last_open_laid.as_ref().and_then(|l| run_rect(l, fr.item, fr.row, obj))
+                                                last_open_laid
+                                                    .as_ref()
+                                                    .and_then(|l| run_rect(l, fr.item, fr.row, obj))
                                             } else {
                                                 t.frozen_blocks().get(fr.block).and_then(|b| {
-                                                    let laid = cache.get(b, w as i32, &sheet, &mut gs);
+                                                    let laid =
+                                                        cache.get(b, w as i32, &sheet, &mut gs);
                                                     run_rect(laid, fr.item, fr.row, obj)
                                                 })
                                             };
                                             if let (Some(by), Some((rx, ry, rw, rh))) = (by, rect) {
                                                 let (gx, gy) = chrome
                                                     .own_pane()
-                                                    .and_then(|id| chromeset::read_file(troot, &alloc::format!("pane/{}/geometry", id)))
+                                                    .and_then(|id| {
+                                                        chromeset::read_file(
+                                                            troot,
+                                                            &alloc::format!("pane/{}/geometry", id),
+                                                        )
+                                                    })
                                                     .and_then(|s| halcyond::chrome::parse_rect(&s))
                                                     .map(|r| (r.0 as i32, r.1 as i32))
                                                     .unwrap_or((0, 0));
-                                                say!("halcyond: run at {} {} {} {} rowh {}",
-                                                     gx + rx, gy + by + ry, rw, rh, cell_h);
+                                                say!(
+                                                    "halcyond: run at {} {} {} {} rowh {}",
+                                                    gx + rx,
+                                                    gy + by + ry,
+                                                    rw,
+                                                    rh,
+                                                    cell_h
+                                                );
                                             }
                                         }
                                     }
@@ -866,9 +967,12 @@ pub extern "C" fn rs_main() -> i64 {
                                     // run (the row's first when none is),
                                     // anchored under the run as the last
                                     // frame laid it.
-                                    let at = sel.as_ref().and_then(|s| flat.get(s.cursor).map(|fr| (*fr, s.obj)));
+                                    let at = sel
+                                        .as_ref()
+                                        .and_then(|s| flat.get(s.cursor).map(|fr| (*fr, s.obj)));
                                     if let Some((fr, cur)) = at {
-                                        let obj = cur.or_else(|| runs_on_row(&t, fr).first().map(|r| r.obj));
+                                        let obj = cur
+                                            .or_else(|| runs_on_row(&t, fr).first().map(|r| r.obj));
                                         // Nothing to act on is said in test
                                         // builds: a silent no-op is not a
                                         // diagnosable outcome on a lever run.
@@ -887,13 +991,18 @@ pub extern "C" fn rs_main() -> i64 {
                                             } else {
                                                 t.frozen_blocks().get(fr.block).map(|b| b.id)
                                             };
-                                            let by = key.and_then(|k| frame.iter().find(|f| f.0 == k).map(|f| f.1));
+                                            let by = key.and_then(|k| {
+                                                frame.iter().find(|f| f.0 == k).map(|f| f.1)
+                                            });
                                             let rect = if fr.block == usize::MAX {
-                                                last_open_laid.as_ref().and_then(|l| run_rect(l, fr.item, fr.row, obj))
+                                                last_open_laid
+                                                    .as_ref()
+                                                    .and_then(|l| run_rect(l, fr.item, fr.row, obj))
                                             } else {
                                                 match t.frozen_blocks().get(fr.block) {
                                                     Some(b) => {
-                                                        let laid = cache.get(b, w as i32, &sheet, &mut gs);
+                                                        let laid =
+                                                            cache.get(b, w as i32, &sheet, &mut gs);
                                                         run_rect(laid, fr.item, fr.row, obj)
                                                     }
                                                     None => None,
@@ -904,10 +1013,19 @@ pub extern "C" fn rs_main() -> i64 {
                                                 say!("halcyond: act: obj {} unplaced (frame-y {:?} rect {:?})", obj, by, rect);
                                             }
                                             if let (Some(by), Some((rx, ry, rw, rh))) = (by, rect) {
-                                                if let Some((ty, refv)) = obj_of(&t, fr.block, obj) {
+                                                if let Some((ty, refv)) = obj_of(&t, fr.block, obj)
+                                                {
                                                     let model = build_menu(&rules, ty, refv);
-                                                    summon(troot, chrome.own_pane(), &mut menus, model,
-                                                           rx, by + ry + rh, (rx, by + ry, rw, rh), &mut gs);
+                                                    summon(
+                                                        troot,
+                                                        chrome.own_pane(),
+                                                        &mut menus,
+                                                        model,
+                                                        rx,
+                                                        by + ry + rh,
+                                                        (rx, by + ry, rw, rh),
+                                                        &mut gs,
+                                                    );
                                                 }
                                             }
                                         }
@@ -917,7 +1035,10 @@ pub extern "C" fn rs_main() -> i64 {
                                 // press: the press acted (a held Enter would
                                 // re-summon the menu at the repeat rate -- the
                                 // H-3c-2 round F6); movement keys repeat.
-                                NormalAct::None | NormalAct::Act | NormalAct::Paste | NormalAct::ToggleSelect => {}
+                                NormalAct::None
+                                | NormalAct::Act
+                                | NormalAct::Paste
+                                | NormalAct::ToggleSelect => {}
                             }
                         } else if e.rune == 0x1b {
                             // Esc enters Normal (the Helix-modal boundary;
@@ -931,7 +1052,13 @@ pub extern "C" fn rs_main() -> i64 {
                             // drain within a pass; without this, an Esc sent
                             // right after a command's output froze the view
                             // one command behind (the H-3c lever caught it).
-                            drain_console(drain, &mut t, &mut drainbuf, &mut drain_eof, &mut pending_exit);
+                            drain_console(
+                                drain,
+                                &mut t,
+                                &mut drainbuf,
+                                &mut drain_eof,
+                                &mut pending_exit,
+                            );
                             mode = Mode::Normal;
                             flat_seq = t.seq;
                             flat = halcyond::select::flatten(&t);
@@ -942,21 +1069,31 @@ pub extern "C" fn rs_main() -> i64 {
                             key_bytes(e.code, e.value, e.rune, &mut keybuf);
                             if !keybuf.is_empty() {
                                 feed_pending.extend_from_slice(&keybuf);
-                                feed_drain(feed, &mut feed_pending, &mut feed_dropped,
-                                           &mut feed_logged);
+                                feed_drain(
+                                    feed,
+                                    &mut feed_pending,
+                                    &mut feed_dropped,
+                                    &mut feed_logged,
+                                );
                             }
                         }
                     }
                 }
                 TEV_PTR_MOVE => {
-                    ptr = ((e.value >> 16) as u16 as i32, (e.value & 0xffff) as u16 as i32);
+                    ptr = (
+                        (e.value >> 16) as u16 as i32,
+                        (e.value & 0xffff) as u16 as i32,
+                    );
                 }
                 TEV_PTR_BTN => {
                     // H-3c click-a-path (HALCYON.md 5/6): a left press on an
                     // obj run's glyphs -- as the last frame laid them --
                     // opens its verb menu at the pointer.
                     if e.code == BTN_LEFT && e.value == 1 {
-                        let hit = frame.iter().find(|f| ptr.1 >= f.1 && ptr.1 < f.1 + f.2).copied();
+                        let hit = frame
+                            .iter()
+                            .find(|f| ptr.1 >= f.1 && ptr.1 < f.1 + f.2)
+                            .copied();
                         if let Some((id, by, _)) = hit {
                             let block = if id == u64::MAX {
                                 Some(usize::MAX)
@@ -964,23 +1101,35 @@ pub extern "C" fn rs_main() -> i64 {
                                 t.frozen_blocks().iter().position(|b| b.id == id)
                             };
                             let found = match block {
-                                Some(usize::MAX) => last_open_laid
-                                    .as_ref()
-                                    .and_then(|l| hit_run(l, ptr.0, ptr.1 - by).map(|(i, r, o)| (i, r, o, run_rect(l, i, r, o)))),
+                                Some(usize::MAX) => last_open_laid.as_ref().and_then(|l| {
+                                    hit_run(l, ptr.0, ptr.1 - by)
+                                        .map(|(i, r, o)| (i, r, o, run_rect(l, i, r, o)))
+                                }),
                                 Some(bi) => match t.frozen_blocks().get(bi) {
                                     Some(b) => {
                                         let laid = cache.get(b, w as i32, &sheet, &mut gs);
-                                        hit_run(laid, ptr.0, ptr.1 - by).map(|(i, r, o)| (i, r, o, run_rect(laid, i, r, o)))
+                                        hit_run(laid, ptr.0, ptr.1 - by)
+                                            .map(|(i, r, o)| (i, r, o, run_rect(laid, i, r, o)))
                                     }
                                     None => None,
                                 },
                                 None => None,
                             };
-                            if let (Some(bi), Some((_, _, obj, Some((rx, ry, rw, rh))))) = (block, found) {
+                            if let (Some(bi), Some((_, _, obj, Some((rx, ry, rw, rh))))) =
+                                (block, found)
+                            {
                                 if let Some((ty, refv)) = obj_of(&t, bi, obj) {
                                     let model = build_menu(&rules, ty, refv);
-                                    summon(troot, chrome.own_pane(), &mut menus, model,
-                                           ptr.0, ptr.1, (rx, by + ry, rw, rh), &mut gs);
+                                    summon(
+                                        troot,
+                                        chrome.own_pane(),
+                                        &mut menus,
+                                        model,
+                                        ptr.0,
+                                        ptr.1,
+                                        (rx, by + ry, rw, rh),
+                                        &mut gs,
+                                    );
                                 }
                             }
                         }
@@ -1031,7 +1180,12 @@ pub extern "C" fn rs_main() -> i64 {
         }
 
         // (2) The drain, non-blocking, bounded per pass.
-        drain_console(drain, &mut t, &mut drainbuf, &mut drain_eof, &mut pending_exit);
-
+        drain_console(
+            drain,
+            &mut t,
+            &mut drainbuf,
+            &mut drain_eof,
+            &mut pending_exit,
+        );
     }
 }

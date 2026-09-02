@@ -35,10 +35,18 @@ pub fn flatten(t: &Transcript) -> Vec<FlatRow> {
 fn push_block_rows(out: &mut Vec<FlatRow>, block: usize, items: &[Item]) {
     for (ii, item) in items.iter().enumerate() {
         match item {
-            Item::Line(_) => out.push(FlatRow { block, item: ii, row: usize::MAX }),
+            Item::Line(_) => out.push(FlatRow {
+                block,
+                item: ii,
+                row: usize::MAX,
+            }),
             Item::Table(tb) => {
                 for r in 0..tb.rows.len() {
-                    out.push(FlatRow { block, item: ii, row: r });
+                    out.push(FlatRow {
+                        block,
+                        item: ii,
+                        row: r,
+                    });
                 }
             }
             Item::Rule => {}
@@ -91,7 +99,11 @@ pub struct Sel {
 impl Sel {
     /// A fresh cursor at the newest row.
     pub fn at_end(flat_len: usize) -> Sel {
-        Sel { cursor: flat_len.saturating_sub(1), anchor: None, obj: None }
+        Sel {
+            cursor: flat_len.saturating_sub(1),
+            anchor: None,
+            obj: None,
+        }
     }
 
     /// Clamp into a (possibly changed) flat list. New output while in
@@ -224,7 +236,11 @@ mod tests {
 
     #[test]
     fn range_normalizes_direction() {
-        let mut sel = Sel { cursor: 5, anchor: Some(2), obj: None };
+        let mut sel = Sel {
+            cursor: 5,
+            anchor: Some(2),
+            obj: None,
+        };
         assert_eq!(sel.range(), (2, 5));
         sel.cursor = 1;
         assert_eq!(sel.range(), (1, 2));

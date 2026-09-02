@@ -90,7 +90,12 @@ impl StatusBar {
         match Surface::status_on(&self.ring, dw, bar_height()) {
             Ok(s) => {
                 #[cfg(feature = "test-mode")]
-                say(&format!("halcyond: status bar {} minted ({}x{})", s.id, dw, bar_height()));
+                say(&format!(
+                    "halcyond: status bar {} minted ({}x{})",
+                    s.id,
+                    dw,
+                    bar_height()
+                ));
                 self.surf = Some(s);
                 self.painted = None;
                 self.said_slots = None;
@@ -162,7 +167,14 @@ impl StatusBar {
         }
         let (cart, slots) = status_list(model, w, h, gs);
         let px = surf.pixels();
-        cartoon::execute(&cart, &gs.packer.store, &cartoon::BlobStore::new(), px, w as usize, None);
+        cartoon::execute(
+            &cart,
+            &gs.packer.store,
+            &cartoon::BlobStore::new(),
+            px,
+            w as usize,
+            None,
+        );
         match surf.present(None) {
             Ok(()) => {
                 #[cfg(feature = "test-mode")]
