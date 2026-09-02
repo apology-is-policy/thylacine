@@ -92,7 +92,13 @@ pub(crate) fn leave(slots: &mut [Slot], slot: u16) -> bool {
 pub(crate) fn table(slots: &[Slot], placeholder: i32) -> Vec<i32> {
     slots
         .iter()
-        .map(|s| if s.used && !s.retiring { s.event_fd } else { placeholder })
+        .map(|s| {
+            if s.used && !s.retiring {
+                s.event_fd
+            } else {
+                placeholder
+            }
+        })
         .collect()
 }
 
@@ -224,7 +230,10 @@ mod tests {
         assert!(!s[i].armed);
         assert!(!arm_wanted(&s[i]));
         assert!(!any_armed(&s));
-        assert!(matches!(take_event(&mut s, i as u16), Err(TapError::Closed)));
+        assert!(matches!(
+            take_event(&mut s, i as u16),
+            Err(TapError::Closed)
+        ));
     }
 
     #[test]
@@ -244,7 +253,10 @@ mod tests {
         let b = take_event(&mut s, i as u16).unwrap().unwrap();
         assert_eq!((a.kind, a.tick), (1, 0));
         assert_eq!((b.kind, b.tick), (2, 1));
-        assert!(matches!(take_event(&mut s, i as u16), Err(TapError::Closed)));
+        assert!(matches!(
+            take_event(&mut s, i as u16),
+            Err(TapError::Closed)
+        ));
     }
 
     #[test]

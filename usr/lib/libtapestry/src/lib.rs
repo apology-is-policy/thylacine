@@ -59,11 +59,10 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 #[cfg(feature = "guest")]
-use libthyla_rs::loom::{Ring, RegisteredBuffer, Sqe, ENTER_GETEVENTS};
+use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe, ENTER_GETEVENTS};
 #[cfg(feature = "guest")]
 use libthyla_rs::{
-    t_close, t_open, t_read, t_weft_map, t_write, T_ORDWR, T_OREAD, T_OWRITE,
-    T_WALK_OPEN_FROM_ROOT,
+    t_close, t_open, t_read, t_weft_map, t_write, T_ORDWR, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
 
 mod ring;
@@ -416,7 +415,11 @@ impl Surface {
         let _ = core::fmt::write(&mut epath, format_args!("surface/{}/event", id));
         let event_fd = unsafe { t_open(root, epath.as_ptr(), epath.len(), T_OREAD) };
         if present_fd < 0 || event_fd < 0 {
-            return fail_created(ctl, &[ctl, weave_fd, present_fd, event_fd], TapError::Protocol);
+            return fail_created(
+                ctl,
+                &[ctl, weave_fd, present_fd, event_fd],
+                TapError::Protocol,
+            );
         }
 
         // Join the ring: a slot (the event queue) + the event fid on its
@@ -491,7 +494,11 @@ impl Surface {
         let _ = core::fmt::write(&mut cmd, format_args!("resize {} {} {}", w, h, serial));
         let rc = unsafe { t_write(self.ctl, cmd.as_ptr(), cmd.len()) };
         if rc < 0 {
-            return Err(if rc == -11 { TapError::Busy } else { TapError::Protocol });
+            return Err(if rc == -11 {
+                TapError::Busy
+            } else {
+                TapError::Protocol
+            });
         }
 
         let mut path = alloc::string::String::new();
@@ -694,7 +701,12 @@ impl Surface {
         d[4..8].copy_from_slice(&self.cur_slot.to_le_bytes());
         d[8..12].copy_from_slice(&flags.to_le_bytes());
         d[12..16].copy_from_slice(&(rects.len() as u32).to_le_bytes());
-        let r0 = rects.first().copied().unwrap_or(Rect { x: 0, y: 0, w: 0, h: 0 });
+        let r0 = rects.first().copied().unwrap_or(Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        });
         d[16..20].copy_from_slice(&r0.x.to_le_bytes());
         d[20..24].copy_from_slice(&r0.y.to_le_bytes());
         d[24..28].copy_from_slice(&r0.w.to_le_bytes());
@@ -778,7 +790,14 @@ impl Drop for Surface {
 /// Surface::fullscreen parses).
 #[cfg(feature = "guest")]
 pub fn display_dims() -> Option<(u32, u32)> {
-    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
+    let root = unsafe {
+        t_open(
+            T_WALK_OPEN_FROM_ROOT,
+            b"/srv/tapestry".as_ptr(),
+            13,
+            T_OREAD,
+        )
+    };
     if root < 0 {
         return None;
     }
@@ -802,7 +821,14 @@ pub fn display_dims() -> Option<(u32, u32)> {
 /// CALLER's identity. Connect + write + close; fail-soft to the caller.
 #[cfg(feature = "guest")]
 pub fn global_ctl_once(cmd: &str) -> Result<(), TapError> {
-    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
+    let root = unsafe {
+        t_open(
+            T_WALK_OPEN_FROM_ROOT,
+            b"/srv/tapestry".as_ptr(),
+            13,
+            T_OREAD,
+        )
+    };
     if root < 0 {
         return Err(TapError::Connect);
     }
@@ -872,7 +898,9 @@ pub struct EventRing {
 #[cfg(feature = "guest")]
 impl Clone for EventRing {
     fn clone(&self) -> EventRing {
-        EventRing { core: self.core.clone() }
+        EventRing {
+            core: self.core.clone(),
+        }
     }
 }
 
@@ -880,7 +908,14 @@ impl Clone for EventRing {
 impl EventRing {
     /// Connect a fresh session to /srv/tapestry and set up its ring.
     pub fn connect() -> Result<EventRing, TapError> {
-        let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
+        let root = unsafe {
+            t_open(
+                T_WALK_OPEN_FROM_ROOT,
+                b"/srv/tapestry".as_ptr(),
+                13,
+                T_OREAD,
+            )
+        };
         if root < 0 {
             return Err(TapError::Connect);
         }
@@ -1008,7 +1043,14 @@ impl RingCore {
                 continue;
             }
             let gen = self.slots[i].gen;
-            let sqe = Sqe::read(i as u32, 0, EV_CAP as u32, 0, (i as u64) * EV_REGION, ring::ud(i, gen));
+            let sqe = Sqe::read(
+                i as u32,
+                0,
+                EV_CAP as u32,
+                0,
+                (i as u64) * EV_REGION,
+                ring::ud(i, gen),
+            );
             self.ring.try_submit(&sqe).map_err(|_| TapError::Loom)?;
             self.slots[i].armed = true;
             n += 1;
@@ -1038,7 +1080,12 @@ impl RingCore {
         };
         rc.map_err(|_| TapError::Loom)?;
         while let Some(cqe) = self.ring.reap() {
-            ring::route(&mut self.slots, self.staging.as_mut_slice(), cqe.user_data, cqe.result);
+            ring::route(
+                &mut self.slots,
+                self.staging.as_mut_slice(),
+                cqe.user_data,
+                cqe.result,
+            );
         }
         Ok(())
     }
@@ -1051,7 +1098,6 @@ impl RingCore {
 // RingCore drops by field order: the Loom (its fd close abandons any read
 // still in flight), the staging buffer, the queues, then the two owned fds
 // -- the placeholder, and the session root last.
-
 
 /// A tiny front-pop helper (Vec as a FIFO; event volumes are small).
 pub(crate) trait PopFirst<T> {
