@@ -8,10 +8,14 @@
 # single-quoted for ut (rc's rule: '' is the one escape) -- the command
 # acts on exactly the ref the menu displayed. Types are BEACON.md 12.2's:
 # path, pid, url, commit, user. Baked from usr/lib/beacon/verbs.default.
+#
+# Quoting makes the ref ONE argument; only `--` keeps a ref that begins with
+# `-` out of option position. It goes wherever the program takes it (ls,
+# stat, cat); hexdump, nora, wget and the ut builtins do not yet (queued).
 
-path   ls        ls -l {}
-path   cat       cat {}
-path   stat      stat {}
+path   ls        ls -l -- {}
+path   cat       cat -- {}
+path   stat      stat -- {}
 path   cd        cd {}
 path   edit      nora {}
 path   hexdump   hexdump {}

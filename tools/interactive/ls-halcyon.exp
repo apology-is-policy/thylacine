@@ -390,6 +390,23 @@ lc_pass "halcyon: a click on the run opened the same menu at the pointer (clampe
 ptr_abs [expr {$cx + $cw / 2}] [expr {max($cy - 40, 30)}]
 ptr_click
 menu_expect_dismissed "click-away" "click menu"
+# The H-3c round F1: BOTH edges of the click-away are the compositor's -- the
+# press and its release (a release with no press would reach the pane under
+# the pointer, where a release-activated widget acts; the first cut set the
+# swallow record and then let the retire arm clear it). Each line is printed
+# from inside its swallow branch: a compositor that delivered either edge
+# prints neither. halcyond ignores releases, so no other witness can see it.
+set timeout $lc_cmd_timeout
+expect {
+    -re {tapestryd: menu click-away press swallowed \(btn (\d+)\)[\r\n]} {}
+    timeout { lc_fail "the click-away press was not swallowed (no compositor line)" }
+    eof     { lc_fail "EOF waiting for the press swallow" }
+}
+expect {
+    -re {tapestryd: menu click-away release swallowed \(btn (\d+)\)[\r\n]} {}
+    timeout { lc_fail "the click-away RELEASE was not swallowed (the H-3c round F1: it reached the pane under the pointer)" }
+    eof     { lc_fail "EOF waiting for the release swallow" }
+}
 menu_want_gone $cx $cy $cw $ch "click menu"
 set timeout 3
 expect {
@@ -398,7 +415,7 @@ expect {
     }
     timeout {}
 }
-lc_pass "halcyon: a click outside the menu dismissed it compositor-side; the press never reached the console"
+lc_pass "halcyon: a click outside the menu dismissed it compositor-side; neither its press nor its release reached the console"
 
 # THE GATE PROOF (HALCYON.md 13.6; ROADMAP 11.1's H-3 row: "menu-dismiss-
 # by-compositor proven against a wedged client"). The lever bake put a test
@@ -450,6 +467,42 @@ expect {
 }
 menu_want_gone $wx $wy $ww $wh "wedged owner's menu"
 lc_pass "halcyon: the transcript healed under the menu once its owner woke"
+
+# H-3c round (SA-8 + F5): THE COMMAND PATH -- a chosen verb runs on exactly
+# the displayed ref, as its OWN command line. A draft half-typed at the
+# prompt (`echo half`, no Enter) must not be run INTO: halcyond feeds ^E ^U
+# before the command (ut's editor: the draft moves to the kill buffer), so
+# the transcript never shows `halfls` -- the token the concatenation would
+# print twice (the echoed line, then echo's own output). The verb chosen is
+# `ls` (the lever table: wedge-test first, then ls = `ls -l -- {}`) on an
+# `ls /lib/aurora` row's run (pwd's own output is plain text, no obj): the
+# `menu ran:` line carries the exact command (the `--` guard + the rc
+# quoting of the ref the placement line named); the global operand-error
+# control at the end proves ls took `--` (a rejected `--` errors on it).
+# The mode is Insert here (the `i` typed during the freeze).
+lc_run_expect "ls /lib/aurora; pwd" "/home/michael"
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "echo half"} err]} {
+    lc_fail "qmp-sendtext draft failed: $err"
+}
+after 500
+lassign [menu_open_kbd "command-path menu"] vid vx vy vw vh vref
+if {![string match "/lib/aurora/*" $vref]} { lc_fail "the command-path menu opened on '$vref', want a /lib/aurora/ path" }
+menu_want_raised $vx $vy $vw $vh "command-path menu"
+hkey "j"
+hkey "ret"
+# The owner's dismiss (`menu dismiss` from halcyond's close) precedes the
+# `menu ran:` line in the stream -- expect them in that order.
+menu_expect_dismissed "owner" "command-path menu"
+set timeout $lc_cmd_timeout
+expect {
+    -ex "halcyond: menu ran: ls -l -- '$vref'" { lc_step "the verb ran on the quoted ref behind --" }
+    -re {halcyond: menu ran: [^\r\n]*} { lc_fail "the verb ran the wrong command: $expect_out(0,string)" }
+    timeout { lc_fail "no `menu ran:` line after choosing ls" }
+    eof     { lc_fail "EOF waiting for the verb to run" }
+}
+menu_want_gone $vx $vy $vw $vh "command-path menu"
+lc_run_expect "pwd" "/home/michael"
+lc_pass "halcyon: a chosen verb ran `ls -l -- '$vref'` as its own command line (the draft killed first, the ref rc-quoted behind --)"
 
 # H-3b-4: the status feed end to end. A line whose LAST status is non-zero
 # (`pwd; false` -> \$? = 1; the exit mark carries the shell's status, the
@@ -544,7 +597,17 @@ if {![catch {exec grep -q -- "WEDGED" $transcript}]} {
     lc_fail "a surface was WEDGED during the run (the frozen console, or a menu, was wedge-retired)"
 }
 lc_pass "halcyon: no surface was wedge-retired (the frozen owner's console survived the gate)"
+# The command path's draft control: the draft WAS typed (its echo is in the
+# transcript) and was never run into (`halfls` would appear twice if the
+# ^E ^U had not killed it).
+# ut's editor redraws the line per key with per-token SGR sequences, so the
+# echoed draft is "echo" + SGR + "half": grep the token, not the phrase.
+tgrep "half" "the half-typed draft was echoed before the verb ran (the positive arm of the draft control)"
+if {![catch {exec grep -q -- "halfls" $transcript}]} {
+    lc_fail "the chosen verb was appended to the half-typed draft (halfls): the ^E ^U kill did not land"
+}
+lc_pass "halcyon: the chosen verb never ran into the half-typed draft (no halfls)"
 tgrep "verb rules loaded" "halcyond loaded the verb table (/lib/beacon/verbs)"
 
-lc_pass "ls-halcyon: the H-2 transcript MVP + the H-3b tag bar + the H-3c menus verified (halcyond render + rich chain + parchment pixels + split/zoom reflow + live-tile keys + keyboard/click menus + the compositor-owned dismiss against a wedged owner)"
+lc_pass "ls-halcyon: the H-2 transcript MVP + the H-3b tag bar + the H-3c menus verified (halcyond render + rich chain + parchment pixels + split/zoom reflow + live-tile keys + keyboard/click menus + the compositor-owned dismiss against a wedged owner + both click-away edges swallowed + the command path behind --)"
 exit 0

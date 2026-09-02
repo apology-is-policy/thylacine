@@ -203,7 +203,16 @@ system tier is baked at `/lib/beacon/verbs` from `usr/lib/beacon/verbs.default`
 SESSION tier is deferred: halcyond is spawned pre-login as the device's
 renderer and knows no `$home`, so `$home/lib/beacon/verbs` will arrive over
 the settings channel (the aurora-config cfg-2 push precedent), not as a file
-read -- the two-tier shape stands; the transport is named.
+read -- the two-tier shape stands; the transport is named. The H-3c audit
+close (2026-09-02): the templates whose programs take it carry `--` before
+`{}` (ls, stat, cat) -- quoting makes the ref ONE argument, but only `--`
+keeps a ref that begins with `-` out of option position (`ls -l '-R'` is
+`ls -l -R`); hexdump, nora, wget and the ut builtins cd/kill do not take
+`--` yet (queued: `memory/project_coreutils_end_of_options.md`), and none
+has a no-value option that destroys, so a crafted ref there is a confusing
+no-op, never an action. A chosen verb is typed as its OWN line: halcyond
+feeds ^E ^U ahead of it, so a draft half-typed at the prompt is killed
+(recoverable with ^Y), never run into.
 
 **The security clause (binding, and the whole of it):** a Beacon frame can only
 ever change how bytes *look* and what a *user click offers* — **never execute,

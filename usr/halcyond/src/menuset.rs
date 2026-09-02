@@ -14,7 +14,21 @@ use alloc::string::String;
 
 use halcyond::menu::{menu_key, menu_list, menu_size, Action, Menu};
 use halcyond::raster::GlyphSource;
-use tapestry::{Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_KEY};
+use tapestry::{Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_KEY, TEV_SCROLL};
+
+/// The display height off the pane-tree session's `ctl` (its `display W H`
+/// line) -- the cap on a menu's surface height (the H-3c round F3: the
+/// compositor refuses a taller surface). Unreadable = uncapped.
+fn display_h(troot: i64) -> u32 {
+    crate::chromeset::read_file(troot, "ctl")
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.strip_prefix("display "))
+                .and_then(|r| r.split_ascii_whitespace().nth(1))
+                .and_then(|h| h.parse().ok())
+        })
+        .unwrap_or(u32::MAX)
+}
 
 fn say(s: &str) {
     let mut t = String::from(s);
@@ -65,7 +79,7 @@ impl MenuSet {
         gs: &mut GlyphSource,
     ) -> bool {
         self.close();
-        let (w, h) = menu_size(&model, gs);
+        let (w, h) = menu_size(&model, gs, display_h(troot));
         let surf = match Surface::menu_on_shared(troot, w, h) {
             Ok(s) => s,
             Err(e) => {
@@ -151,6 +165,10 @@ impl MenuSet {
                     TEV_CLOSE => {
                         dead = true;
                         break;
+                    }
+                    TEV_SCROLL => {
+                        o.model.wheel(e.value as i32);
+                        repaint = true;
                     }
                     _ => {}
                 },

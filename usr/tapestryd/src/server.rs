@@ -1312,6 +1312,32 @@ struct MenuState {
 
 /// evdev KEY_ESC -- the compositor's own key while a menu is placed.
 const KEY_ESC: u16 = 1;
+/// The key-code tables span evdev KEY_MAX (0x2ff) rounded to a power of two;
+/// a code is masked into it (`key_idx`), so nothing indexes out of range.
+const KEYCODE_SPAN: usize = 0x400;
+/// The button tables span BTN_MISC (0x100) .. BTN_MISC + 0x80 (the mouse,
+/// joystick, touch and tool buttons), masked likewise (`btn_idx`).
+const BTNCODE_SPAN: usize = 0x80;
+const BTN_BASE: u16 = 0x100;
+/// `btn_owner` state: the press was consumed by the compositor (a
+/// click-away dismiss); its release is consumed too.
+const OWNER_SWALLOWED: u64 = 0xffff;
+fn key_idx(code: u16) -> usize {
+    (code as usize) & (KEYCODE_SPAN - 1)
+}
+fn btn_idx(code: u16) -> usize {
+    (code.wrapping_sub(BTN_BASE) as usize) & (BTNCODE_SPAN - 1)
+}
+fn owner_pack(n: usize, gen: u32) -> u64 {
+    ((gen as u64) << 16) | (n as u64 + 1)
+}
+fn owner_unpack(v: u64) -> Option<(usize, u32)> {
+    let slot = v & 0xffff;
+    if slot == 0 || slot == OWNER_SWALLOWED {
+        return None;
+    }
+    Some((slot as usize - 1, (v >> 16) as u32))
+}
 
 pub struct Comp {
     pub gpu: Gpu,
@@ -1493,20 +1519,30 @@ pub struct Comp {
     /// carries the unplace + the heal -- so a wedged or dead owner cannot
     /// strand it.
     menu: Option<MenuState>,
-    /// The button whose PRESS was a click-away dismiss: its RELEASE is
-    /// swallowed too (a release with no press would reach the pane under
-    /// the pointer).
-    menu_swallow_btn: Option<u16>,
+    /// H-3c round F1: where each pressed KEY went -- packed (slot+1) |
+    /// gen<<16, 0 = none -- so a release or a repeat FOLLOWS ITS PRESS (the
+    /// chord layer's rule): to the leaf that saw the press across a grab
+    /// that began after it, to a dismissed menu's retired slot (dropped),
+    /// never to whoever holds focus now. Indexed like `chord_down`.
+    key_owner: [u64; KEYCODE_SPAN],
+    /// The same for the pointer BUTTONS (evdev BTN_* -- their own table:
+    /// BTN_LEFT & 0xff aliases KEY_Q in the key table), plus one more
+    /// state: `OWNER_SWALLOWED` -- the press was a click-away dismiss the
+    /// compositor consumed, so its release is consumed too (rio: a click
+    /// outside a menu cancels, never acts -- on either edge).
+    btn_owner: [u64; BTNCODE_SPAN],
     /// Why the placed menu is being retired (the diagnostic's word); set by
     /// `menu_dismiss`, read + reset by the retire arm.
     menu_reason: &'static str,
     /// Keys whose PRESS was swallowed by the Super chord layer (section
     /// 18.4: reserved chords never reach a surface); their release /
     /// repeat swallow too, even if Super lifted first (no stray release
-    /// reaches a client). evdev codes are < 256. INDEPENDENT of `chords`
-    /// (cfg-4): the swallow-set tracks physical key state, so a live
-    /// rebind never leaks a half key-pair.
-    chord_down: [u64; 4],
+    /// reaches a client). One bit per evdev key code up to KEY_MAX (the
+    /// H-3c round F6: a `& 0xff` index aliased the codes past 255 --
+    /// KEY_FN, the media keys -- onto the first page). INDEPENDENT of
+    /// `chords` (cfg-4): the swallow-set tracks physical key state, so a
+    /// live rebind never leaks a half key-pair.
+    chord_down: [u64; KEYCODE_SPAN / 64],
     /// The runtime chord binding table (cfg-4): (key, shift) -> action,
     /// seeded with the stage-0 defaults, remapped by the gated `chord`
     /// ctl verb. Also holds the inter-pane `gaps` inset.
@@ -2167,9 +2203,10 @@ impl Comp {
             weave_va_next: WEAVE_VA_BASE,
             last_focus: None,
             menu: None,
-            menu_swallow_btn: None,
+            key_owner: [0; KEYCODE_SPAN],
+            btn_owner: [0; BTNCODE_SPAN],
             menu_reason: "retire",
-            chord_down: [0; 4],
+            chord_down: [0; KEYCODE_SPAN / 64],
             chords: Chords::new(),
             ptr_x: 0,
             abs_last: None,
@@ -4538,6 +4575,12 @@ impl Comp {
             Some(s) if s.is_menu && s.weave.is_some() => (s.w, s.h, s.gen),
             _ => return Err(p9::E_NOENT),
         };
+        // The same surface placed again (a move): its old rect is healed
+        // below, after the new placement composes (SA-1).
+        let old_rect = match self.menu {
+            Some(m) if m.n == n => Some(m.rect),
+            _ => None,
+        };
         if self.menu.map_or(false, |m| m.n != n) {
             self.menu_dismiss("replaced");
         }
@@ -4548,11 +4591,13 @@ impl Comp {
         let y = y.min(dh - h);
         let rect = Rect { x, y, w, h };
         self.menu = Some(MenuState { n, gen, rect });
-        self.menu_swallow_btn = None;
         say!("tapestryd: menu {} placed at {},{} {}x{}", n, x, y, w, h);
         self.reconcile();
         if !self.emit_configure_to(n, sw, sh) {
             self.retire(n);
+        }
+        if let Some(o) = old_rect {
+            self.menu_heal(o);
         }
         Ok(())
     }
@@ -4573,7 +4618,7 @@ impl Comp {
             // The slot was already empty (retire returned before its arm):
             // unplace + heal here so the grab can never outlive the surface.
             self.menu = None;
-            self.menu_swallow_btn = None;
+            self.menu_reason = "retire";
             self.menu_heal(m.rect);
         }
         true
@@ -4638,11 +4683,28 @@ impl Comp {
                 if !tb.is_empty() {
                     fills.push((tb, libhalcyon::theme::DAYLIGHT.header));
                 }
-                if matches!(p.kind, pane::Kind::Leaf { surface: None }) {
-                    let c = p.content.intersect(r);
-                    if !c.is_empty() {
-                        fills.push((c, pane::BG_COLOR));
+                match &p.kind {
+                    pane::Kind::Leaf { surface: None } => {
+                        let c = p.content.intersect(r);
+                        if !c.is_empty() {
+                            fills.push((c, pane::BG_COLOR));
+                        }
                     }
+                    // The bars around a letterboxed or cropped surface are
+                    // the compositor's floor, which its client can never
+                    // repaint (SA-7); the placement itself heals by the
+                    // client's redraw CONFIGURE below.
+                    pane::Kind::Leaf { surface: Some(n) } => {
+                        let c = p.content;
+                        let inner = self.placement_rect(*n, c).unwrap_or(Rect::ZERO);
+                        for bar in Self::bars_around(c, inner) {
+                            let b = bar.intersect(r);
+                            if !b.is_empty() {
+                                fills.push((b, pane::BG_COLOR));
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             for (fr, color) in fills {
@@ -4663,6 +4725,66 @@ impl Comp {
         }
         for n in wedged {
             self.retire(n);
+        }
+    }
+
+    /// A hosted surface's placement inside its pane's content rect -- THE
+    /// SAME map `compose_geometry` composes by: the crop (content origin,
+    /// surface extent) for a same-size or accumulator client, the letterbox
+    /// rect otherwise. None = nothing showable.
+    fn placement_rect(&self, n: usize, content: Rect) -> Option<Rect> {
+        let s = self.surf(n)?;
+        if s.w == 0 || s.h == 0 || content.w == 0 || content.h == 0 {
+            return None;
+        }
+        if s.patchwork || (s.w == content.w && s.h == content.h) {
+            return Some(Rect { x: content.x, y: content.y, w: s.w.min(content.w), h: s.h.min(content.h) });
+        }
+        let (ox, oy, dw2, dh2) = Self::letterbox(s.w, s.h, content.w, content.h);
+        Some(Rect { x: content.x + ox, y: content.y + oy, w: dw2, h: dh2 })
+    }
+
+    /// The four bands of `outer` around `inner` (top, bottom, left, right;
+    /// empty ones included) -- the floor a client's placement leaves bare.
+    fn bars_around(outer: Rect, inner: Rect) -> [Rect; 4] {
+        if inner.is_empty() {
+            return [outer, Rect::ZERO, Rect::ZERO, Rect::ZERO];
+        }
+        let ox1 = outer.x + outer.w;
+        let oy1 = outer.y + outer.h;
+        let ix1 = inner.x + inner.w;
+        let iy1 = inner.y + inner.h;
+        [
+            Rect { x: outer.x, y: outer.y, w: outer.w, h: inner.y.saturating_sub(outer.y) },
+            Rect { x: outer.x, y: iy1.min(oy1), w: outer.w, h: oy1.saturating_sub(iy1) },
+            Rect { x: outer.x, y: inner.y, w: inner.x.saturating_sub(outer.x), h: inner.h },
+            Rect { x: ix1.min(ox1), y: inner.y, w: ox1.saturating_sub(ix1), h: inner.h },
+        ]
+    }
+
+    /// Compose every visible hosted surface's last-presented slot into the
+    /// screen BUFFER at its current placement -- the structural repaint's
+    /// pre-fill (SA-6), so the display shows each client's last frame at
+    /// the bind instead of a blank pane until its redraw CONFIGURE lands.
+    /// Reads a slot outside its present dispatch: the one the client
+    /// presented last, which the direct-scanout contract already forbids it
+    /// to write until a later present moves on -- a client that breaks it
+    /// shows itself torn for one frame, nobody else. A GL adoption has no
+    /// guest-visible pixels (its frame is host-side) and a held (test-mode
+    /// HOLD) slot stays unshown, as `release` promises.
+    fn prefill_from_shown(&mut self) {
+        for (_, n, _) in self.layout.visible_hosted() {
+            if self.gl_adoption(n).is_some() {
+                continue;
+            }
+            let (slot, w, h) = match self.surf(n) {
+                Some(s) if s.held.is_none() => match (s.shown_slot, &s.weave) {
+                    (Some(sl), Some(_)) => (sl, s.w, s.h),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let _ = self.blit_composed_pixels(n, slot, 0, 0, w, h, None);
         }
     }
 
@@ -5016,7 +5138,9 @@ impl Comp {
         let vis = self.layout.visible_hosted();
         let nleaves = self.layout.visible_leaf_count();
 
-        let want = if vis.is_empty() && nleaves <= 1 {
+        // H-3c round F2: a placed menu is a visible thing with nothing under
+        // it too -- Off would leave an invisible grab.
+        let want = if vis.is_empty() && nleaves <= 1 && self.menu.is_none() {
             match self.scanout {
                 Scanout::Boot => Scanout::Boot,
                 _ => Scanout::Off,
@@ -5082,9 +5206,14 @@ impl Comp {
                 let sig = self.calc_geom_sig();
                 let structural = entering || sig != self.geom_sig;
                 if structural {
-                    // Structural: full repaint (content blanks; panes heal
-                    // by the redraw CONFIGUREs below).
+                    // Structural: full repaint, then every visible pane
+                    // pre-filled from its client's last-presented slot
+                    // (SA-6: the repaint used to show every pane BLANK until
+                    // its redraw CONFIGURE landed -- a blink per menu open on
+                    // a Direct console, per split); the fan below still
+                    // makes each client repaint at the new geometry.
                     self.paint_chrome();
+                    self.prefill_from_shown();
                     self.geom_sig = sig;
                     self.screen_flush_full();
                     // C-5 SA-1: every held region is superseded by this
@@ -5572,7 +5701,6 @@ impl Comp {
         let menu_heal: Option<Rect> = match self.menu {
             Some(m) if m.n == n => {
                 self.menu = None;
-                self.menu_swallow_btn = None;
                 say!("tapestryd: menu {} dismissed ({})", n, self.menu_reason);
                 self.menu_reason = "retire";
                 Some(m.rect)
@@ -5925,6 +6053,25 @@ impl Comp {
 
     /// Deliver a key to the FOCUSED leaf's surface (G-6 routing).
     pub fn key_event(&mut self, code: u16, value: u32, rune: u32, mods: u16) {
+        let ki = key_idx(code);
+        // A release or a repeat FOLLOWS ITS PRESS (the H-3c round F1; the
+        // chord layer's rule): the surface that saw the press gets them --
+        // across a grab that began after it (no stuck key in the leaf), and
+        // a dismissed menu's retired slot drops them (no stray release in
+        // the leaf) -- never whoever holds focus now. A press with no record
+        // (older than the compositor's memory) takes the live routing below.
+        if value != 1 {
+            let v = self.key_owner[ki];
+            if value == 0 {
+                self.key_owner[ki] = 0;
+            }
+            if let Some((n, gen)) = owner_unpack(v) {
+                if self.surf(n).map_or(false, |s| s.gen == gen) {
+                    self.push_key(n, code, value, rune, mods);
+                }
+                return;
+            }
+        }
         // H-3c: the grab -- a placed menu takes every key. Esc is the
         // compositor's: its press dismisses and is swallowed, with its
         // release + repeats through the chord swallow-set, so no stray Esc
@@ -5952,6 +6099,14 @@ impl Comp {
                 }
             },
         };
+        if value == 1 {
+            let gen = self.surf(n).map_or(0, |s| s.gen);
+            self.key_owner[ki] = owner_pack(n, gen);
+        }
+        self.push_key(n, code, value, rune, mods);
+    }
+
+    fn push_key(&mut self, n: usize, code: u16, value: u32, rune: u32, mods: u16) {
         let ev = Tevent {
             kind: TEV_KEY,
             code,
@@ -6127,20 +6282,43 @@ impl Comp {
     /// Pointer button (evdev BTN_*) at the current pointer position.
     /// Non-droppable (a lost release strands a drag).
     pub fn ptr_btn(&mut self, code: u16, pressed: bool, mods: u16) {
+        let bi = btn_idx(code);
+        // A release FOLLOWS ITS PRESS (the H-3c round F1): the surface that
+        // saw the press -- a menu that has since been dismissed drops it --
+        // or, for a click-away's, the compositor, which consumed the press
+        // and consumes this edge too. An unrecorded release takes the live
+        // routing.
+        if !pressed {
+            let v = self.btn_owner[bi];
+            self.btn_owner[bi] = 0;
+            if v == OWNER_SWALLOWED {
+                #[cfg(feature = "test-mode")]
+                {
+                    say!("tapestryd: menu click-away release swallowed (btn {})", code);
+                }
+                return;
+            }
+            if let Some((n, gen)) = owner_unpack(v) {
+                if self.surf(n).map_or(false, |s| s.gen == gen) {
+                    self.push_btn(n, code, false, mods);
+                }
+                return;
+            }
+        }
         // H-3c: the grab. A press OUTSIDE the placed menu is the click-away:
         // the compositor dismisses and swallows the press AND its release
         // (rio: a click outside a menu cancels, never acts -- it must not
         // reach the pane under the pointer, where it would act). A press
         // inside routes to the menu.
-        if self.menu_swallow_btn == Some(code) && !pressed {
-            self.menu_swallow_btn = None;
-            return;
-        }
         let target = match self.menu {
             Some(m) => {
                 if pressed && !m.rect.contains(self.ptr_x, self.ptr_y) {
-                    self.menu_swallow_btn = Some(code);
                     self.menu_dismiss("click-away");
+                    self.btn_owner[bi] = OWNER_SWALLOWED;
+                    #[cfg(feature = "test-mode")]
+                    {
+                        say!("tapestryd: menu click-away press swallowed (btn {})", code);
+                    }
                     return;
                 }
                 Some(m.n)
@@ -6163,18 +6341,26 @@ impl Comp {
             }
         };
         if let Some(n) = target {
-            let ev = Tevent {
-                kind: TEV_PTR_BTN,
-                code,
-                value: pressed as u32,
-                rune: 0,
-                mods,
-                flags: 0,
-                tick: self.tick,
-            };
-            if !self.push_event(n, ev) {
-                self.retire(n);
+            if pressed {
+                let gen = self.surf(n).map_or(0, |s| s.gen);
+                self.btn_owner[bi] = owner_pack(n, gen);
             }
+            self.push_btn(n, code, pressed, mods);
+        }
+    }
+
+    fn push_btn(&mut self, n: usize, code: u16, pressed: bool, mods: u16) {
+        let ev = Tevent {
+            kind: TEV_PTR_BTN,
+            code,
+            value: pressed as u32,
+            rune: 0,
+            mods,
+            flags: 0,
+            tick: self.tick,
+        };
+        if !self.push_event(n, ev) {
+            self.retire(n);
         }
     }
 
@@ -6182,6 +6368,23 @@ impl Comp {
     /// Non-droppable (discrete steps; losing one skips content).
     pub fn ptr_scroll(&mut self, delta: i32, mods: u16) {
         if let Some((n, _, _)) = self.ptr_route(self.ptr_x, self.ptr_y) {
+            // The H-3c round F4: wheel deltas to the placed MENU sum at the
+            // back of its queue (the REL discipline): its owner reads the
+            // delta (the list scrolls by it), and a frozen owner's queue
+            // must not wedge under a scroll storm -- the wedge would be a
+            // dismiss, but by the wrong mechanism and past the WEDGED
+            // control. Content surfaces keep the discrete-step class.
+            if self.menu.map_or(false, |m| m.n == n) {
+                let t = self.tick;
+                if let Some(s) = self.surf_mut(n) {
+                    if let Some(e) = s.events.back_mut().filter(|e| e.kind == TEV_SCROLL) {
+                        e.value = (e.value as i32).saturating_add(delta) as u32;
+                        e.mods = mods;
+                        e.tick = t;
+                        return;
+                    }
+                }
+            }
             let ev = Tevent {
                 kind: TEV_SCROLL,
                 code: 0,
@@ -6198,11 +6401,11 @@ impl Comp {
     }
 
     fn chord_bit(&self, code: u16) -> bool {
-        let i = (code as usize) & 0xff;
+        let i = key_idx(code);
         self.chord_down[i / 64] & (1 << (i % 64)) != 0
     }
     fn chord_bit_set(&mut self, code: u16, on: bool) {
-        let i = (code as usize) & 0xff;
+        let i = key_idx(code);
         if on {
             self.chord_down[i / 64] |= 1 << (i % 64);
         } else {

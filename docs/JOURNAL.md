@@ -653,6 +653,74 @@ ls-halcyon on the lever PASS [88 s] with every H-3c line; default
 restored: ls-gfx-panes PASS [42 s] with the menu-gate negatives,
 ls-gfx-age PASS [39 s].
 
+### The H-3c audit close: a release that followed the wrong thing, and a synthesis that ran on the fallback (same run, after the third self-compaction)
+
+The round ran as one holotype prosecutor with the explicit `model: fable`
+override, and the override did what it did last time: every READ landed on
+Fable 5.1 -- 72 turns, every file in scope, the scripture, the witnesses --
+and at turn 73 the transcript's `model` field flipped to Opus 4.8 for the
+rest: the host suites, the build, and the entire synthesis (21 turns). The
+report's last line said `MODEL(end): Claude Fable 5.1`, exactly as the H-3b
+round's did; the self-report is not a fallback detector and never will be.
+The standing rule closes a fallback round that finishes, and the parallel
+self-audit was the second independent read, so the round stands, with the
+Opus synthesis named in the closed list rather than laundered.
+
+**The P1 both readers found, from opposite ends.** The click-away's press
+was swallowed as designed; its RELEASE was not. `ptr_btn` set the swallow
+record and THEN called `menu_dismiss`, whose retire arm cleared the record
+along with the menu -- so the release fell to the live routing and reached
+the pane under the pointer as a button-up with no button-down. The lever's
+click-away leg could not see it: halcyond ignores releases, and the leg's
+negative ("no second menu placed") is satisfied by the press alone. The
+prosecutor added the variant the self-audit had missed: a button pressed
+INTO the menu and released after an Esc dismiss leaks the same way. The fix
+is the chord layer's rule made general -- a release or a repeat follows its
+press: the compositor records where every key and button press went (slot +
+generation, in two tables because BTN_LEFT & 0xff is KEY_Q) and routes the
+release there, dropping it if the surface retired. That also closes the
+self-audit's stuck-key case (a key held before the grab whose release went
+to the menu) and the stray-release case (a key pressed into the menu whose
+release, after the dismiss, went to the leaf). The witness is the branch
+itself: the compositor says both swallow lines from inside them, and the
+leg expects both.
+
+**What each reader found alone.** The prosecutor: a placed menu with nothing
+hosted under it left the scanout Off (an invisible grab; unreachable with
+halcyond); a verb-rich type asked for a surface taller than the display and
+got NO menu (the compositor refuses it) -- now capped and scrolling; the
+wheel could wedge a frozen owner's menu (now summed); `--` where the
+programs take it (the prosecutor assumed hexdump did; a grep said no -- the
+rest is queued); the chord swallow-set aliased key codes past 255. The
+self-audit: re-placing the same menu healed nothing under its old rect; the
+heal left the menu's pixels in the floor around a letterboxed surface, which
+no client can repaint; a chosen verb was APPENDED to a half-typed prompt
+line (`echo fo` + `ls` ran `echo fols -l ...`) -- halcyond now feeds ^E ^U
+first, and the lever's new command-path leg proves it (`menu ran: ls -l --
+'/lib/aurora/<ref>'`, the draft's echo present, `halfls` absent); and the one
+that is not a menu bug at all: a menu opened on a Direct console blinked the
+console BLACK for one pass, because entering Composed is the structural
+repaint and the structural repaint blanks every pane until its redraw lands
+-- every split has done this since G-6. The repaint now pre-fills each pane
+from its client's last-presented slot.
+
+**The finding that became a chunk.** Reading the session-reader model for
+the round, the self-audit generalized what the lever had measured for the
+menu: the chrome tiles' events -- the same-size CONFIGURE on a focus-only
+epoch, a resize offer, the orphan CLOSE -- complete only while some thread
+is inside an RPC on the pane-tree session, and halcyond's loop waits on the
+console's. A focus move between two NON-console panes re-keys no tag bar
+until something else wakes a reconcile; the two-pane lever never exercises
+it. The H-3b-3 contract ("pump reports a CONFIGURE so the caller
+reconciles") is hollow. The right fix is io_uring's: one ring per thread --
+a libtapestry event set with every surface on one session -- and it goes
+BEFORE H-3d, whose status bar is another shared-session surface. Not a
+per-pass poll; that is the workaround the operator's standing rule forbids.
+
+Verified by the lines, jobs=1: halcyond host 55/55 (+1), beacon 35/35;
+ls-halcyon on the lever PASS [97 s] with the two swallow lines
+and the command-path leg; default restored (0 lever lines): ls-gfx-panes PASS [41 s] incl. `menu gate refuses place/dismiss from a non-renderer (E_PERM; none placed)` + the H-3b legs; ls-gfx-age PASS [40 s]; ls-gfx-font [67 s] / live [74 s] / mode [59 s] / mp [44 s] / osd [30 s] / osd-persist [56 s] / osd-push [35 s] PASS (the pre-fill touches every structural repaint, so the whole single-leaf CPU set re-ran); all at LS_CI_JOBS=1 LS_CI_ATTEMPTS=1.
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon

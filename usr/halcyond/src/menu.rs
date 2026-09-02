@@ -243,6 +243,21 @@ pub fn menu_key(code: u16, rune: u32) -> MenuKey {
 }
 
 impl Menu {
+    /// A wheel delta (evdev REL_WHEEL: +1 = away from the user = up): the
+    /// selection moves by it, clamped -- the window `menu_list` lays
+    /// follows the selection, so a list taller than its surface scrolls.
+    pub fn wheel(&mut self, delta: i32) {
+        if self.items.is_empty() {
+            return;
+        }
+        let last = self.items.len() - 1;
+        self.sel = if delta > 0 {
+            self.sel.saturating_sub(delta as usize)
+        } else {
+            self.sel.saturating_add(delta.unsigned_abs() as usize).min(last)
+        };
+    }
+
     /// Apply a key: Up/Down move the selection (clamped); Enter yields the
     /// selected item's action (None on an empty menu).
     pub fn key(&mut self, k: MenuKey) -> Option<Action> {
@@ -287,8 +302,10 @@ fn row_h(gs: &GlyphSource) -> i32 {
 
 /// The menu's surface size for its content: the widest of the title (type
 /// label + ref) and the items, padded; one row per item (or the "no verbs"
-/// row) under the title row and its rule. Capped at MENU_MAX_W wide.
-pub fn menu_size(m: &Menu, gs: &mut GlyphSource) -> (u32, u32) {
+/// row) under the title row and its rule. Capped at MENU_MAX_W wide and at
+/// `max_h` tall (the display: the compositor refuses a taller surface -- the
+/// H-3c round F3); past the cap the item list scrolls (`menu_list`).
+pub fn menu_size(m: &Menu, gs: &mut GlyphSource, max_h: u32) -> (u32, u32) {
     let (cw, _, _) = gs.mono_cell();
     let title_w = body_width(gs, &m.ty) + 2 * cw + mono_width(gs, &m.refv);
     let mut w = title_w;
@@ -301,7 +318,16 @@ pub fn menu_size(m: &Menu, gs: &mut GlyphSource) -> (u32, u32) {
     let rows = 1 + m.items.len().max(1) as i32;
     let h = 2 * MENU_PAD_Y + rows * row_h(gs) + 1;
     let w = (w + 2 * MENU_PAD_X).max(1) as u32;
-    (w.min(MENU_MAX_W), h.max(1) as u32)
+    (w.min(MENU_MAX_W), (h.max(1) as u32).min(max_h.max(1)))
+}
+
+/// How many item rows fit under the title row and its rule in `h`, and the
+/// first item shown so the selection stays inside them.
+pub fn item_window(m: &Menu, h: u32, gs: &GlyphSource) -> (usize, usize) {
+    let rh = row_h(gs).max(1);
+    let fit = ((h as i32 - 2 * MENU_PAD_Y - 1 - rh) / rh).max(1) as usize;
+    let first = if m.sel >= fit { m.sel + 1 - fit } else { 0 };
+    (first, fit)
 }
 
 fn push_body(cart: &mut Cartoon, gs: &mut GlyphSource, x: i32, baseline: i32, color: u32, s: &str) -> i32 {
@@ -361,7 +387,8 @@ pub fn menu_list(m: &Menu, w: u32, h: u32, gs: &mut GlyphSource) -> Cartoon {
         push_mono(&mut cart, gs, MENU_PAD_X, y + ROW_PAD / 2 + mono_base, d.fg_muted, NO_VERBS);
         return cart;
     }
-    for (i, it) in m.items.iter().enumerate() {
+    let (first, fit) = item_window(m, h, gs);
+    for (i, it) in m.items.iter().enumerate().skip(first).take(fit) {
         if i == m.sel {
             cart.ops.push(Op::Rect { x: 1, y, w: w - 2, h: rh as u32, color: d.header });
         }
@@ -507,9 +534,9 @@ mod tests {
         let rules = parse("path ls ls {}\npath cat cat {}\n", false);
         let m = build_menu(&rules, "path", "/lib/aurora/config");
         let mut gs = GlyphSource::new_vendored(64);
-        let (w, h) = menu_size(&m, &mut gs);
+        let (w, h) = menu_size(&m, &mut gs, 800);
         assert!(w > 40 && h > 20, "{}x{}", w, h);
-        let (w0, h0) = menu_size(&build_menu(&rules, "pid", "1"), &mut gs);
+        let (w0, h0) = menu_size(&build_menu(&rules, "pid", "1"), &mut gs, 800);
         assert!(h0 < h, "no verbs = one placeholder row; two verbs = two rows");
         assert!(w0 > 0);
         let c = menu_list(&m, w, h, &mut gs);
@@ -518,5 +545,49 @@ mod tests {
         assert!(c.ops.iter().any(|o| matches!(o, Op::Rect { color: 0xFFCEC4B6, .. })), "the selected item's header band");
         assert!(c.ops.iter().filter(|o| matches!(o, Op::Glyphs { .. })).count() >= 4, "type + ref + two labels");
         assert!(menu_list(&m, 0, 0, &mut gs).ops.is_empty());
+    }
+
+    // The H-3c round F3: a verb-rich type must not ask the compositor for a
+    // surface taller than the display (refused = no menu at all); the list
+    // scrolls inside the cap instead, the selection always in the window.
+    #[test]
+    fn a_tall_list_caps_at_the_display_and_scrolls_to_the_selection() {
+        let text: String = (0..40).map(|i| alloc::format!("path v{} echo {} {{}}\n", i, i)).collect();
+        let rules = parse(&text, false);
+        let mut m = build_menu(&rules, "path", "/x");
+        assert_eq!(m.items.len(), 40);
+        let mut gs = GlyphSource::new_vendored(64);
+        let (_, uncapped) = menu_size(&m, &mut gs, u32::MAX);
+        let (w, h) = menu_size(&m, &mut gs, 200);
+        assert!(uncapped > 200 && h == 200, "uncapped {} capped {}", uncapped, h);
+        let (first, fit) = item_window(&m, h, &gs);
+        assert_eq!(first, 0);
+        assert!(fit >= 2 && fit < 40, "fit {}", fit);
+        for _ in 0..39 {
+            m.key(MenuKey::Down);
+        }
+        assert_eq!(m.sel, 39);
+        let (first, _) = item_window(&m, h, &gs);
+        assert_eq!(first, 40 - fit, "the window ends at the selection");
+        // The selected band lies inside the surface.
+        let c = menu_list(&m, w, h, &mut gs);
+        let band = c.ops.iter().find_map(|o| match o {
+            Op::Rect { y, h: bh, color: 0xFFCEC4B6, .. } => Some((*y, *bh as i32)),
+            _ => None,
+        }).expect("the selected item's band");
+        assert!(band.0 >= 0 && band.0 + band.1 <= h as i32, "band {:?} in h {}", band, h);
+        // Glyph rows drawn = the window, not the whole list.
+        let glyph_ops = c.ops.iter().filter(|o| matches!(o, Op::Glyphs { .. })).count();
+        assert!(glyph_ops <= fit + 2, "{} glyph ops for a {}-row window", glyph_ops, fit);
+        // The wheel: up moves toward the top, clamped; down clamps at the end.
+        m.wheel(3);
+        assert_eq!(m.sel, 36);
+        m.wheel(-100);
+        assert_eq!(m.sel, 39);
+        m.wheel(1000);
+        assert_eq!(m.sel, 0);
+        let mut empty = build_menu(&rules, "pid", "1");
+        empty.wheel(-1);
+        assert_eq!(empty.sel, 0);
     }
 }

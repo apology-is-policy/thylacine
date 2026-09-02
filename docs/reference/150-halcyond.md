@@ -274,14 +274,29 @@ returns to Insert. An `Internal` `#wedge <ms>` (test-mode): the loop sleeps
 with the menu still placed -- THE GATE's wedged-owner lever -- and says
 `wedge-test: frozen ... / woke`.
 
+**The audit close (2026-09-02).** `menu_size(m, gs, max_h)` caps the
+surface height at the display (`display_h` reads `ctl`'s `display W H` on
+the pane-tree session; the round's F3: the compositor refuses a taller
+surface, so a verb-rich type opened NO menu at all) and `item_window`
+keeps the selection inside the rows that fit, so a long list scrolls --
+j/k/Up/Down, and the wheel (`Menu::wheel` on a SCROLL, whose delta the
+compositor sums in the menu's queue). A `Command` choice feeds `^E ^U` +
+the command + newline: ut's line editor takes them as CursorEnd +
+KillToStart, so a draft half-typed at the prompt moves to the kill buffer
+(^Y restores it) instead of being run INTO (`echo fo` + the verb typed
+`echo fols -l ...`); a canonical reader sees VKILL, a raw-mode program two
+keys. The system-tier templates carry `--` where their programs take it.
+
 ## Tests
 
-- Host: 54 lib tests (the table above; H-3c added `menu.rs`'s six: runs per
+- Host: 55 lib tests (the table above; H-3c added `menu.rs`'s six: runs per
   obj index in cell order incl. a table cell, stepping across rows both
   ways, `run_rect`/`hit_run` agreeing on the laid geometry, the menu
   showing the resolved ref + typed verbs with an unquotable ref keeping only
   internal actions, clamped keys + Enter, the raised/bordered list growing
-  with items; `input.rs` pins `w`/`b`/Enter; incl. the round's F1 regression
+  with items; the audit close added the seventh: a 40-verb list caps at the
+  display height, its window ends at the selection, the selected band and
+  the drawn rows stay inside the surface, the wheel moves and clamps; `input.rs` pins `w`/`b`/Enter; incl. the round's F1 regression
   `open_block_freezes_on_bytes_so_the_budget_can_evict_it` — the OPEN block
   now freezes on bytes, `max_open_cost` = budget/8, so the budget's
   frozen-only eviction can reach a newline-free stream; before it 320 MiB
@@ -308,8 +323,14 @@ with the menu still placed -- THE GATE's wedged-owner lever -- and says
   press); THE GATE: the lever's `wedge-test` rule freezes halcyond 6 s with
   the menu up, Esc dismisses it meanwhile, `ipwd` typed over QMP during the
   freeze runs after the wake (`/home/michael`), the rect heals, and no
-  `WEDGED` line exists; after the zoom `cat /dev/tapestry/ctl` reads
-  `surfaces 1` (the dropped bars + every menu retired server-side).
+  `WEDGED` line exists; the audit close's legs: the click-away's press AND
+  release are both reported swallowed by the compositor (the lines are
+  printed inside the swallow branches), and the command path -- a draft
+  half-typed at the prompt, then `ls` chosen on an `ls /lib/aurora` row's run (pwd's output is plain text, no obj):
+  `menu ran: ls -l -- '/lib/aurora/<ref>'`, the draft's echo present, `halfls`
+  absent, the global operand-error control proving ls took `--`; after the
+  zoom `cat /dev/tapestry/ctl` reads `surfaces 1` (the dropped bars + every
+  menu retired server-side).
 - ls-gfx-panes (default image, the battery as a NON-renderer): the negative
   twins — `role=chrome` create → E_PERM, `tag <A> status err` → E_PERM with
   the pane's `status` file still `resting` after the refusal; H-3c:

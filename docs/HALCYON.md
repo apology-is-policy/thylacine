@@ -794,6 +794,25 @@ click-a-path added in the same chunk if cheap (the survey confirms neither
 exists today; pointer routing is under-the-pointer, no click-to-focus).
 AS-BUILT (H-3c): all four landed -- `w`/`b`/Enter on obj runs, click-a-path,
 click-to-focus (the Menus paragraph above has the mechanics).
+AS-BUILT (the H-3c audit close, 2026-09-02): **a release or a repeat follows
+its press** -- the compositor records where every key and button press went
+(slot + generation) and routes its release or repeat there: across a grab
+that began after the press (no stuck key in the leaf), to a dismissed menu's
+retired slot (dropped: no stray release in the leaf), and, for a click-away's
+press, to the compositor itself, so BOTH edges of a click-away are swallowed
+(the first cut set the swallow record and let the retire arm clear it -- the
+round's F1: the release reached the pane under the pointer, where a
+release-activated widget acts). A menu taller than the display is capped at
+it and its list SCROLLS to the selection, by the keys and by the wheel (F3;
+wheel deltas to a menu sum in its queue, F4); a placed menu with nothing
+hosted under it still forces Composed (F2). The structural repaint pre-fills
+every visible pane from its client's last-presented slot, so a menu opened on
+a Direct console -- and every split -- no longer blinks the pane blank; the
+heal under a dismissed menu also refills the floor around a letterboxed or
+cropped surface, which its client can never repaint. A chosen verb runs as
+its OWN command line: halcyond feeds ^E ^U before it (ut's editor moves a
+half-typed draft to the kill buffer; ^Y restores it), and the system-tier
+templates whose programs take `--` carry it (BEACON.md 7).
 
 **RATIFIED VOTE 2 — scope + sequencing: four sub-chunks, full Daylight.**
 H-3a (pane bevels + hairline + cast shadow + the `libhalcyon::theme` crate +

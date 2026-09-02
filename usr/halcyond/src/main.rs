@@ -613,6 +613,13 @@ pub extern "C" fn rs_main() -> i64 {
                 sel = None;
                 scroll_up = 0;
                 dirty = true;
+                // ^E ^U first (SA-8): ut's line editor takes them as
+                // CursorEnd + KillToStart, so a half-typed draft moves to the
+                // kill buffer (^Y restores it) instead of being run INTO --
+                // `echo fo` + the verb typed `echo fols -l ...`. A canonical
+                // reader sees VKILL; a raw-mode program sees two keys, as it
+                // would from the keyboard.
+                feed_pending.extend_from_slice(b"\x05\x15");
                 feed_pending.extend_from_slice(cmd.as_bytes());
                 feed_pending.push(b'\n');
                 feed_drain(feed, &mut feed_pending, &mut feed_dropped, &mut feed_logged);
