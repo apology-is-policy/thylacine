@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-08-24
+updated: 2026-09-02
 ---
 ## Purpose
 
@@ -777,6 +777,13 @@ construction: one IRQ wait per GPU command.
   connects. A per-client ACL is the Halcyon-era seam.
 - A tapestryd crash resets its virtio devices — scanout blanks until a
   restart re-inits ([[haz-driver-panic-dos]]).
+- **The placement-claim mint is any peer's (H-4b-1).** `pane/<id>/claim`
+  gates on emptiness alone -- today's empty-leaf rule, and strictly weaker
+  than the `close` every peer already holds over an empty. HALCYON.md 13.7
+  wants the leaf SESSION-OWNED; that narrowing lands with `owner_principal`
+  recorded at split (H-4b-2). Until then the residue is a placement DoS by
+  a same-display peer (re-minting under the restore tool's tokens), never
+  an authority breach: a claim cannot take a tile that holds a surface.
 
 ## Caveats
 
@@ -838,10 +845,17 @@ config surface (cfg-3). Swept into the vault by
 In-guest: the per-boot pattern gate drives the full path with a liveness
 double-dump; `ls-gfx` drives QMP-typed input through the whole loop
 asserted on the serial tee; `ls-gfx-live` covers the VNC live-display
-leg; `ls-gfx-panes` (22 legs) covers the G-6 pane tree; `ls-gfx-mode`
-covers the display-mode verb and its authority gate. The `test-mode`
-cargo feature strips the determinism surface to `E_OPNOTSUPP` for
-production, and both variants compile.
+leg; `ls-gfx-panes` (23 legs since H-4b-1) covers the G-6 pane tree and,
+since H-4b-1, the placement claim (one leaf minted twice, focus moved off
+it: the stale token falls back to focus placement and never steers into
+the leaf, the live token lands in it, `claim=nothex` is E_INVAL raw);
+`ls-gfx-mode` covers the display-mode verb and its authority gate. The
+`test-mode` cargo feature strips the determinism surface to `E_OPNOTSUPP`
+for production, and both variants compile. The battery and its expect
+scenario (`usr/tapestry-battery/src`, `tools/interactive/ls-gfx-panes.exp`)
+are UNOWNED -- their reference lives in `docs/reference/139-tapestryd.md`
+(the gate paragraph); the coverage sweep is
+[[seam-tapestry-battery-unowned]].
 
 The V-3a coherent ring is proven on the GL host by `warp-prove ring`
 (`tools/warp-host.sh ring`), virgl-only — a 2D device SKIPs `ctx/new`, so
@@ -945,3 +959,65 @@ inert-hostmem-under-HVF constraint.
 The line is emitted before the `virgl` gate, so it reports on **every** boot
 including 2D ones, and it prints before any hang in later init -- which is what
 made it useful on a host where tapestryd later gave up.
+
+## The placement claim -- one-shot, minted on read, spent by create (2026-09-02, H-4b-1)
+
+HALCYON.md 13.7 makes PLACEMENT a capability: `host()` auto-splits the
+FOCUSED leaf, so a layout restore -- which must land each spawned child in
+the leaf the saved tree names -- cannot be built on the focus path. H-4b-1
+lands that primitive alone; the authority model is untouched (the Session
+actor is H-4b-2, the restore tool H-4b-3).
+
+**The token lives on the pane, not the surface.** `Pane.claim_token:
+Option<u128>` (`pane.rs`) is set only on an EMPTY leaf and cleared the
+instant the leaf is hosted (`host`, `host_into`) or freed (`close`: the root
+collapses to `None`, every other pane is dropped), so a claim can never
+steer a surface into a leaf that already holds one -- the occupancy rule is
+structural, not a branch that could be skipped.
+
+**Mint = the offset-0 read of `pane/<id>/claim`** (`PFK_CLAIM`, the ninth
+pane file; handled in `h_read` BEFORE the immutable `pane_read`, because
+minting mutates). 16 CSPRNG bytes (`libthyla_rs::rand::fill_bytes`) become a
+`u128`, `Layout::mint_claim` stores it (refusing a non-empty leaf itself),
+and the read returns `{:032x}\n`. The text is pinned to the fid by
+`read_text_snapped`, so a client reading to EOF spends ONE mint; a seeked
+first read mints nothing and reads EOF; a later offset serves the pin
+whatever the leaf holds by then (the emptiness gate applies at mint only).
+A container is E_NOENT (no tile), an occupied leaf E_PERM (its placement is
+taken), a CSPRNG failure E_IO. **Last mint wins**: a second read re-tokens
+the leaf and the first token is stale.
+
+**Spend = `create W H claim=<32 hex>`** (the surface ctl's create arm).
+Syntax first: exactly 32 hex digits, and `claim=` beside any role but
+content is E_INVAL for every peer -- judged BEFORE the renderer gate; past
+the gate the typed `Host` enum (`Content { claim } | Chrome { bind } | Menu
+| Status`, which replaced the three loose create parameters) cannot carry a
+claim on a never-hosted class. At the host step, after the weave allocation
+(a failed alloc spends nothing), `Layout::consume_claim` finds the EMPTY
+leaf whose live token matches, clears it (one-shot), and `host_into` hosts
+there -- never splitting, never moving focus (the restore tool arranges the
+whole skeleton, then sets focus once). **A token naming no live empty leaf
+-- stale, spent, or never minted -- FALLS BACK to `host()`**, the focus
+placement, exactly as 13.7 says: the child passes an opaque cookie and must
+never fail to create because its placement hint went stale under it. The
+fallback is `say!`-ed, so a restore whose claims all miss shows in the log
+instead of silently landing on focus. (An earlier draft failed loud with
+E_INVAL; that contradicted 13.7 and would have made a ported program die on
+a stale hint -- corrected before landing.)
+
+**Who may mint, at this stage: any peer.** The mint gates on emptiness alone
+-- today's empty-leaf rule (an all-empty subtree is anyone's; anyone may
+`close` an empty), and a claim is strictly weaker than the close every peer
+already holds over the same leaf: it can never take a tile that holds a
+surface. The scripture's tightening -- the leaf must be SESSION-OWNED --
+lands with `owner_principal` recorded at split (H-4b-2), when the mint
+narrows to the reader's own empties. Until then the residue is a placement
+DoS by a same-display peer (re-minting under the tool's tokens, or closing
+its empties -- the latter possible today already), never an authority
+breach.
+
+**Witness**: the battery's placement-claim leg (ls-gfx-panes) -- one leaf
+minted twice, focus moved off it, the stale token falls back (its surface
+lands, never in that leaf, which stays `surface none`), the live token lands
+in it; `claim=nothex` is E_INVAL raw. libtapestry gained
+`Surface::open_claim[_on]` (`Mint::Claim(u128)` -> ` claim={:032x}`).

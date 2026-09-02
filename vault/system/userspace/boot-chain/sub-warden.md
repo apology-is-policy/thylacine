@@ -15,7 +15,7 @@ abis: []
 design:
   - docs/MENAGERIE.md sections 3-6
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-09-02
 ---
 ## Purpose
 
@@ -76,7 +76,18 @@ one.
 
 **Grant.** The manifest's declared needs are intersected with the device's
 actual resources. This is the step nothing else re-derives — see *Invariants
-enforced*.
+enforced*. Since H-4b-1 (2026-09-02) a manifest may also name fork-grantable
+**capabilities** -- `caps = ["csprng"]` -- which the warden confers at spawn
+beside the unconditional `CAP_HW_CREATE` (`cap_bit` maps libdriver's closed
+`Cap` vocabulary to the `T_CAP_*` bit; an unknown name never parses, so the
+map is total; the grant is `say!`-ed beside the allowance it rides). The
+chain stays monotone under I-2: joey confers on the warden exactly the set it
+may pass down (`T_CAP_HW_CREATE | T_CAP_CSPRNG_READ`; the warden draws no
+entropy itself), and the one driver that asks is tapestryd, whose one-shot
+placement claims must be unguessable (HALCYON.md 13.7). Before this the
+warden's cap grant was a single hard-coded bit, and tapestryd's first claim
+mint failed with a silent `E_IO` -- `SYS_GETRANDOM` is gated on
+`CAP_CSPRNG_READ`, which no driver held.
 
 **Supervise.** Spawn, wait for the driver to declare itself, and decide.
 

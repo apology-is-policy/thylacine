@@ -97,6 +97,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-srv-9p-connect-unit]] | open | sub-kernel-devsrv | chg-2026-06-03-stalk3b-open-connect |  |
 | [[seam-srv-registry-lifecycle]] | open | sub-kernel-devsrv | chg-2026-05-19-srv-birth |  |
 | [[seam-stratum-notify-peercred]] | open | sub-stratum-session, sub-stratum-server | chg-2026-08-02-stratum-sweep |  |
+| [[seam-tapestry-battery-unowned]] | open | sub-tapestryd | chg-2026-09-02-h4b1-claim | H-4b-1 placement-claim doc pass, 2026-09-02 |
 | [[seam-tickless-bare-metal]] | open | sub-kernel-sched-smp | chg-2026-06-22-ti4-work-conservation | owed at Lazarus / RPi |
 | [[seam-timerwait-sharding]] | open | sub-kernel-rendez | chg-2026-05-17-p5-tsleep | documented future optimization |
 | [[seam-torpor-cross-proc]] | open | sub-kernel-torpor | chg-2026-05-23-torpor | POUCH-DESIGN section 7, Tier-2 burrows |

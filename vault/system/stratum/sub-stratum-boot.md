@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-08-15
+updated: 2026-09-02
 ---
 ## Purpose
 
@@ -214,6 +214,12 @@ event-driven; no timing constant appears in this path.
 
 ## Caveats
 
+- joey's **warden** spawn mask is `CAP_HW_CREATE | CAP_CSPRNG_READ` (+
+  `SPAWN_PERM_MAY_POST_SERVICE`) since H-4b-1 (2026-09-02): the warden never
+  draws entropy itself, it confers the second bit on the one driver whose
+  manifest declares `caps = ["csprng"]` (tapestryd, which mints unguessable
+  placement claims) -- under I-2 a child holds at most its parent's caps, so
+  joey must hand the warden every bit it may pass down ([[sub-warden]]).
 - The keyfile is read from a literal `/system.key` at the initrd root; the
   FHS-shaped `/etc/stratum/` placement is a deferred lift.
 - `--fs-workers 4` is a flat constant, not probed: in-VM musl `sysconf` has

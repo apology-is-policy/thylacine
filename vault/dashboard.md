@@ -36,7 +36,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 87
+## Open seams: 88
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -117,6 +117,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-srv-9p-connect-unit]] (sub-kernel-devsrv)
 - [[seam-srv-registry-lifecycle]] (sub-kernel-devsrv)
 - [[seam-stratum-notify-peercred]] (sub-stratum-session, sub-stratum-server)
+- [[seam-tapestry-battery-unowned]] (sub-tapestryd)
 - [[seam-tickless-bare-metal]] (sub-kernel-sched-smp)
 - [[seam-timerwait-sharding]] (sub-kernel-rendez)
 - [[seam-torpor-cross-proc]] (sub-kernel-torpor)
@@ -128,6 +129,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-09-02 [[chg-2026-09-02-h4b1-claim]] — H-4b-1: the one-shot placement claim (pane/<id>/claim + create claim=) lands in tapestryd
 - 2026-08-24 [[chg-2026-08-24-v3b-1a]] — V-3b-1a HOST3D+MAP_BLOB substrate: sub-tapestryd mechanism section + the venus-ctx finding
 - 2026-08-24 [[chg-2026-08-24-v3b-1b]] — V-3b-1b hostmem guest-map: sub-tapestryd guest-map section + the SYS_BURROW_FROM_HOSTMEM client wrapper
 - 2026-08-24 [[chg-2026-08-24-v3b-1c-1]] — V-3b-1c-1 persistent hostmem ring engine: sub-tapestryd engine section + the WC->host-dictated correction
@@ -135,5 +137,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-19 [[chg-2026-08-19-v3a-ring]] — V-3a coherent-ring vault ring: sub-tapestryd ring-lane section + inv-i9 edge
 - 2026-08-18 [[chg-2026-08-18-extinction-ring-claim]] — The prescription named the wrong lock, and the old one was already breaking the crash path
 - 2026-08-16 [[chg-2026-08-16-boot-banner-mirror-set]] — The boot-banner ABI note carried the phantom it was supposed to be the cure for
-- 2026-08-16 [[chg-2026-08-16-boot-cwg-parenthetical]] — Two comments in one commit disagree about a measured result
 <!-- generated:end -->
