@@ -4,7 +4,7 @@ type: chg
 title: "H-4b-2: the Session(principal) actor -- session-wide mutual pane authority in tapestryd"
 date: 2026-09-02
 arc: arc-tapestry
-commits: ["636937b0"]
+commits: ["636937b0", "f6e306ae"]
 touched: [sub-tapestryd]
 established: []
 closed: []

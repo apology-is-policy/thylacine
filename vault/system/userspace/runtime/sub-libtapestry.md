@@ -210,5 +210,21 @@ operation.
   of every function here and none of the failure paths — including the one
   that leaks.
 
+## The restore auto-claim (2026-09-02, H-4b-3a)
+
+`Surface::open` auto-consumes an inherited `TAPESTRY_CLAIM` from `/env`
+(`take_env_claim`, guest-gated): the offset the restore tool seeds into a
+spawned child's environment, a one-shot 32-hex `u128` placement token. When
+present, `open_on_bound` upgrades a Content mint to `Claim(token)`, so the
+child's FIRST content surface lands in the leaf the tool placed it in and the
+child never learns about placement (13.7's opaque cookie; i3 append_layout
+minus the swallow hack). One-shot per process via a `CLAIM_TAKEN` latch, but
+correctness does not depend on it -- the server-side consume is already
+one-shot, so a spent or inherited-stale token falls back to focus placement,
+and the latch only spares the wasted "claim unmatched" round trip. Absent or
+malformed -> a normal un-placed open, so a normally-launched program is
+unaffected (proved: ls-gfx-panes 33/33, the battery has no such var). The
+restore TOOL that mints the tokens + spawns the children is H-4b-3b.
+
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

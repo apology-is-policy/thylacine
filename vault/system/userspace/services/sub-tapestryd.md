@@ -1054,7 +1054,15 @@ write because the SAK can revoke it): a running Proc's principal is immutable.
 from the minting conn. An EMPTY leaf carries `Pane.owner_principal` too,
 stamped at SPLIT from the splitting actor via `actor_owner_principal`
 (Renderer and Client -> 0 = the environment, unclaimable by any user session
-and untouched by the reap; Session(p) -> p). The three authority checks gained
+and untouched by the reap; Session(p) -> p). BOTH empty children of a split
+are stamped, not just the new one (Fix A, `f6e306ae`): 13.7's plural "empty
+leaves record an owner_principal at split", and the layout-restore precondition
+-- a session building a whole tree from the environment root (owner 0) must own
+EVERY leaf it builds, or it could claim only one child of each split. Bounded to
+empty leaves (an occupied original keeps its surface's ownership -- the field is
+inert there); an empty leaf is already anyone's to mutate (13.6), so
+re-stamping one confers nothing beyond the close every peer already holds, and
+it never touches a leaf hosting a surface. The three authority checks gained
 `Session(p)` arms keyed on `owner_principal` (`actor_owns_subtree`: every
 hosted surface == p, vacuous-true on an all-empty subtree, same as Client;
 `actor_hosts`: the leaf's surface == p). `actor_names` now also lets a session
