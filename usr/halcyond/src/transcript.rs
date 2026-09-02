@@ -637,6 +637,11 @@ impl Transcript {
                     if let Some(t) = Self::arg(args, "text") {
                         if self.open.kind == BlockKind::Output {
                             self.open.cost += t.len();
+                            // Symmetric with the obj/cell/table/style sites:
+                            // charge stored_cost too, or eviction's
+                            // `sub(dead.cost)` drifts the byte budget to zero
+                            // and max_cost never enforces again (F1).
+                            self.stored_cost += t.len();
                             self.open.cmd = Some(String::from(t));
                         }
                     }
@@ -1560,6 +1565,59 @@ mod tests {
             "every frozen block is bounded by the open cap");
         assert!(t.frozen_blocks().iter().filter(|b| b.continuation).count() >= 1,
             "the byte cap froze the stream as continuation blocks");
+    }
+
+    #[test]
+    fn the_cmd_mark_charges_the_shared_byte_budget_symmetrically() {
+        // F1: `mark k=cmd` bumped the output block's `cost` but NOT
+        // `stored_cost`. Eviction does `stored_cost -= dead.cost`, so each
+        // evicted cmd-marked block subtracted a charge that was never added,
+        // drifting the byte budget toward zero until max_cost stopped
+        // enforcing (the sibling obj/cell/table/style comment names exactly
+        // this hazard). The invariant every content site upholds:
+        // stored_cost == the sum of every live block's cost.
+        let mut t = Transcript::new(daylight());
+        t.feed(&frames(&[
+            F::Open(Op::Zone, &[("k", "prompt")]),
+            F::Text("$ "),
+            F::Close(Op::Zone),
+            F::Open(Op::Zone, &[("k", "output")]),
+            F::Point(Op::Mark, &[("k", "cmd"), ("text", "make -j8 all")]),
+            F::Text("building\n"),
+        ]));
+        let live: usize =
+            t.frozen_blocks().iter().map(|b| b.cost).sum::<usize>() + t.open_block().cost;
+        assert_eq!(
+            t.stored_cost, live,
+            "stored_cost {} != the sum of live block costs {}: the cmd mark's \
+             t.len() must charge stored_cost too (else the byte budget drifts)",
+            t.stored_cost, live
+        );
+        assert_eq!(t.last_command(), Some("make -j8 all"));
+
+        // And the drift is fatal at scale: many cmd-marked blocks under a
+        // tight budget must keep stored_cost tracking the retained set (never
+        // saturating to zero, which would disable max_cost enforcement).
+        let mut u = Transcript::with_caps(daylight(), 1000, 1 << 16, 10_000);
+        for i in 0..400 {
+            let cmd = format!("command-number-{}-with-some-length-to-charge", i);
+            u.feed(&frames(&[
+                F::Open(Op::Zone, &[("k", "output")]),
+                F::Point(Op::Mark, &[("k", "cmd"), (
+                    "text",
+                    cmd.as_str(),
+                )]),
+                F::Text("out\n"),
+                F::Close(Op::Zone),
+            ]));
+        }
+        let live2: usize =
+            u.frozen_blocks().iter().map(|b| b.cost).sum::<usize>() + u.open_block().cost;
+        assert_eq!(
+            u.stored_cost, live2,
+            "after eviction stored_cost {} drifted from the retained cost {}",
+            u.stored_cost, live2
+        );
     }
 
     #[test]

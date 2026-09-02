@@ -174,6 +174,23 @@ if {$sx != 0 || $sw != $dispw || $sh != 20 || $sy != $disph - 20} {
     lc_fail "statusbar rect $sx $sy $sw $sh is not the bottom strip of ${dispw}x${disph}"
 }
 lc_pass "halcyon: the compositor carved the status strip ($sx $sy $sw $sh of ${dispw}x${disph})"
+# H-3d (F4): the carve is not just the statusbar rect -- it must shrink the
+# LAYOUT. The single console leaf's content height in the compositor's
+# `layout` file must equal the display MINUS the strip. A regression that
+# registered the bar (rect correct) but skipped `layout.recompute(dw,
+# layout_h, ..)` would leave the leaf full-height -- its bottom 20px hidden
+# behind the opaque bar -- and still pass the rect check above. Cell-height
+# independent (reads the compositor's own geometry, not a derived grid).
+lc_send "cat /dev/tapestry/layout"
+set leaf_h 0
+expect {
+    -re {leaf surface=\d+ \[\d+,\d+,\d+,(\d+)\]} { set leaf_h $expect_out(1,string) }
+    timeout { lc_fail "no console leaf row in the layout file" }
+}
+if {$leaf_h != $disph - 20} {
+    lc_fail "the console leaf height $leaf_h is not the carved region [expr {$disph - 20}] (the layout was not recomputed above the bar)"
+}
+lc_pass "halcyon: the carve shrank the layout -- the console leaf is $leaf_h of the ${disph}px display (strip 20)"
 set smid [expr {$sy + 10}]
 strip_want 1 [expr {$sy + 2}] 6 [expr {$sy + 18}] 26 18 10 "status bar left end (status_bg)" 0
 strip_want [expr {$dispw - 6}] [expr {$sy + 2}] [expr {$dispw - 1}] [expr {$sy + 18}] 26 18 10 "status bar right end (status_bg)" 0
@@ -199,6 +216,10 @@ strip_want [expr {$cx + 1}] [expr {$smid - 3}] [expr {$cx + 7}] [expr {$smid + 3
 lc_pass "halcyon: the bar's condition went cinnabar with the failing command (context \"[lindex $p 2]\")"
 lc_send "cd /lib/aurora; ls; pwd"
 set p [status_painted Ok "after a passing command"]
+# F3: the dot's x moves with the condition label ("ok" is narrower than
+# "err"), so re-extract cx from THIS (Ok) painted line -- reusing the Err
+# line's cx read the sage dot ~2px off, passing only by pixel overlap.
+set cx [lindex $p 0]
 strip_want [expr {$cx + 1}] [expr {$smid - 3}] [expr {$cx + 7}] [expr {$smid + 3}] 30 88 68 "condition dot after a passing command (sage)" 0
 lc_pass "halcyon: the bar's condition went sage with the passing command (context \"[lindex $p 2]\")"
 lc_run_expect "pwd" "/lib/aurora"

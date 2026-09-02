@@ -46,19 +46,43 @@ pub struct StatusBar {
     /// paint, so the row-relative legs after a command see no extra row.
     said_slots: Option<halcyond::status::Slots>,
     failed_said: bool,
+    /// Whether a mint should be attempted: true at start and after a CLOSE
+    /// (the compositor dropped the bar), cleared by each attempt. A FAILED
+    /// mint waits for the next `rearm` (a relayout) before retrying, so a
+    /// persistent failure costs one attempt per relayout -- ChromeSet's
+    /// cadence -- not two sync RPCs every pass (the H-3d round F5).
+    want_mint: bool,
 }
 
 impl StatusBar {
     pub fn new(ring: EventRing) -> StatusBar {
-        StatusBar { ring, surf: None, painted: None, said_slots: None, failed_said: false }
+        StatusBar {
+            ring,
+            surf: None,
+            painted: None,
+            said_slots: None,
+            failed_said: false,
+            want_mint: true,
+        }
+    }
+
+    /// Re-arm the mint retry: called on a relayout (the compositor/display
+    /// state changed, so a prior failure may now succeed) -- the retry
+    /// cadence ChromeSet gets for free from reconcile. A no-op once the bar
+    /// is up.
+    pub fn rearm(&mut self) {
+        if self.surf.is_none() {
+            self.want_mint = true;
+        }
     }
 
     /// Mint the bar if there is none: the display width (off the ring's
     /// `ctl`) by the bar height. Said once on a refusal; retried per call.
     pub fn ensure(&mut self) {
-        if self.surf.is_some() {
+        if self.surf.is_some() || !self.want_mint {
             return;
         }
+        self.want_mint = false; // this attempt consumes the arm (rearm on a relayout)
         let (dw, _) = match self.ring.display_dims() {
             Some(d) => d,
             None => return,
@@ -116,6 +140,7 @@ impl StatusBar {
         if dead {
             self.surf = None; // Drop: destroy + leave + fds
             self.painted = None;
+            self.want_mint = true; // a CLOSE is itself the re-mint signal
             say("halcyond: status bar closed by the compositor");
         } else if repaint {
             self.painted = None;

@@ -597,6 +597,9 @@ pub extern "C" fn rs_main() -> i64 {
             if relayout {
                 relayout = false;
                 chrome.reconcile(troot, surf.id, &mut gs);
+                // A relayout re-arms the status bar's mint retry (H-3d F5):
+                // a prior mint failure may now succeed, ChromeSet's cadence.
+                status.rearm();
             }
             // The status feed: tell the compositor the console tile's last
             // exit (it draws the live hairline + shadow from it; the strip

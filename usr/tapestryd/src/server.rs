@@ -4777,6 +4777,19 @@ impl Comp {
                     _ => {}
                 }
             }
+            // H-3d: the menu clamp uses the full display, so a menu can overlap
+            // the status strip. The tag bars above heal immediately (a fill +
+            // push); the strip must too, or the dismissed menu's pixels linger
+            // there until the bar's own redraw CONFIGURE lands a pass later.
+            // status_bg is the bar's Clear colour, so the strip reads
+            // correct-minus-glyphs at once; the CONFIGURE fan below repaints the
+            // glyphs (visible_chrome includes the bar).
+            if let Some(sr) = self.status_rect() {
+                let i = sr.intersect(r);
+                if !i.is_empty() {
+                    fills.push((i, libhalcyon::theme::DAYLIGHT.status_bg));
+                }
+            }
             for (fr, color) in fills {
                 self.fill_rect(fr, color);
                 self.screen_push(fr);
