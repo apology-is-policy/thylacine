@@ -10,23 +10,32 @@
 // V2 grant-is-the-share vote delivers) and operates a *Loom ring* to
 // present into it.
 //
-// THE SESSION MODEL (F2): `Surface::open` connects its OWN 9P session
-// (open=connect on /srv/tapestry mints a fresh server conn per opener), so
-// this client's surfaces are unresolvable from any other session -- the
-// per-session isolation the design binds. Procs that deliberately share the
-// session (fd inheritance) share its surfaces; that is the Plan 9
-// shared-mount semantic, not a leak.
+// THE SESSION MODEL (F2; the H-3c-2 EVENT SET): an `EventRing` is ONE 9P
+// session to /srv/tapestry (open=connect mints a fresh server conn per
+// opener) + ONE Loom ring, and every Surface a client opens on it shares
+// both. The compositor keys authority on the peer PROCESS, so a client's
+// surfaces stay unresolvable from any other process's session -- the
+// per-session isolation the design binds -- while one thread waits for ANY
+// of its surfaces' events with one blocking enter (io_uring's one ring per
+// thread). One session per ring is load-bearing, not convenience: a Loom
+// wait pumps the session of its FIRST in-flight op only
+// (loom_wait_for_completions), so a ring over two sessions would starve the
+// second -- the H-3c lever measured that starvation across two rings on two
+// sessions (the session-reader model), which is what this replaces.
+// `Surface::fullscreen` / `open` keep a private ring + session each (the
+// one-surface clients: aurora, the battery, warp-prove).
 //
 // THE WIRE (stage 0):
-//   open /srv/tapestry            -> the private session root
+//   open /srv/tapestry            -> the session root (the ring's)
 //   open surface/new (mint)      -> the surface ctl fid; read -> "<id>"
-//   write ctl "create W H"       -> weave + GPU resource allocated
+//   write ctl "create W H ..."   -> weave + GPU resource allocated
 //   open surface/<id>/weave      -> read geometry; SYS_WEFT_MAP -> the
 //                                    zero-copy client mapping (Tweft rides
 //                                    the kernel's own session op)
-//   open surface/<id>/present    -> LOOM_OP_WRITE of a 32-byte tpresent;
-//                                    the CQE is the D1 recycle gate
+//   open surface/<id>/present    -> a synchronous write of a tpresent; the
+//                                    Rwrite is the D1 recycle gate
 //   open surface/<id>/event      -> LOOM_OP_READ of 24-byte tevent records
+//                                    on the ring's registered handle
 //
 // EVENT READS ARE SINGLE-SHOT, deliberately: a multishot READ re-arms into
 // the SAME registered slice, so a shot landing before the client drains the
@@ -39,7 +48,9 @@
 
 extern crate alloc;
 
+use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use libthyla_rs::loom::{Cqe, Ring, RegisteredBuffer, Sqe, ENTER_GETEVENTS};
 use libthyla_rs::{
@@ -92,6 +103,8 @@ pub struct Rect {
 
 #[derive(Debug)]
 pub enum TapError {
+    /// The ring carries MAX_RING_SURFACES surfaces already.
+    Full,
     Connect,
     Protocol,
     Create,
@@ -105,14 +118,18 @@ pub enum TapError {
     Busy,
 }
 
-// The staging RegisteredBuffer layout: the tpresent descriptor (header +
-// inline rect array) at 0, the event landing zone at EV_OFF.
-const EV_OFF: u64 = 1024;
-const EV_CAP: usize = 4 * TEVENT_LEN; // up to 4 records per delivery
-const STAGING_LEN: usize = 4096;
-/// The client-side rect bound: the descriptor region below EV_OFF holds
-/// 32 + 16*(k-1) bytes -> k <= 63 (the server caps at 64 independently).
-pub const MAX_RECTS: usize = (EV_OFF as usize - TPRESENT_LEN) / TRECT_LEN + 1;
+// The ring's ONE registered buffer: an EV_REGION-byte event landing zone per
+// slot (a delivery is up to 4 tevent records).
+const EV_REGION: u64 = 128;
+const EV_CAP: usize = 4 * TEVENT_LEN;
+/// Surfaces one EventRing carries: one registered handle (the event fid)
+/// each; the Loom registers 64.
+pub const MAX_RING_SURFACES: usize = 64;
+const RING_ENTRIES: u32 = 128;
+/// The client-side rect bound: a tpresent descriptor is 32 + 16*(k-1) bytes
+/// (the server caps at 64 independently).
+pub const MAX_RECTS: usize = 63;
+const PRESENT_MAX: usize = TPRESENT_LEN + (MAX_RECTS - 1) * TRECT_LEN;
 
 /// Slot count this library can track ages for (GPU-DESIGN 4.5.8b). The server
 /// ships 3; the bound exists so the array below is fixed-size in no_std, and
@@ -123,16 +140,15 @@ pub const MAX_SLOTS: usize = 8;
 /// this generation, or invalidated since. `age` reports 0 for it.
 const SLOT_UNSEEN: u64 = u64::MAX;
 
-const UD_PRESENT: u64 = 1;
 const UD_EVENT: u64 = 2;
 
-/// One mapped surface + its private tapestryd session + the Loom ring that
-/// presents into it.
+/// One mapped surface on an `EventRing` (its session + its Loom ring).
 pub struct Surface {
+    ring: EventRing,
+    /// This surface's slot on the ring (its event queue + registered handle).
+    slot: u16,
+    /// The ring's session root (the ring closes it; a surface never does).
     root: i64,
-    /// Whether `root` is this surface's own session (closed on drop) or a
-    /// caller-owned one it was minted on (left open).
-    owns_root: bool,
     ctl: i64,
     weave_fd: i64,
     present_fd: i64,
@@ -145,21 +161,12 @@ pub struct Surface {
     slot_stride: u64,
     nslots: u32,
     map_va: u64,
-    ring: Ring,
-    staging: RegisteredBuffer,
     cur_slot: u32,
     /// Presents completed on this generation; the clock `slot_seen` reads.
     presents: u64,
     /// Per slot, the `presents` value at which it was last presented, or
     /// `SLOT_UNSEEN` when its content is undefined. Drives `age`.
     slot_seen: [u64; MAX_SLOTS],
-    event_armed: bool,
-    /// Latched when the event stream EOFs (the surface retired server-side):
-    /// no further reads are armed -- without the latch, a non-blocking
-    /// poll_event caller would re-arm through the EOF forever.
-    closed: bool,
-    pending: Vec<Event>,
-    seq: u64,
 }
 
 fn read_all(fd: i64, buf: &mut [u8]) -> usize {
@@ -193,87 +200,54 @@ enum Mint {
 }
 
 impl Surface {
-    /// Connect a fresh session and create a fullscreen surface (the display
-    /// geometry is read from the global ctl).
+    /// A private ring + session, and a fullscreen surface on it (the
+    /// one-surface clients; the display geometry off the session's ctl).
     pub fn fullscreen() -> Result<Surface, TapError> {
-        let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
-        if root < 0 {
-            return Err(TapError::Connect);
-        }
-        let gctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OREAD) };
-        if gctl < 0 {
-            unsafe { t_close(root) };
-            return Err(TapError::Protocol);
-        }
-        let mut buf = [0u8; 256];
-        let n = read_all(gctl, &mut buf);
-        unsafe { t_close(gctl) };
-        let text = core::str::from_utf8(&buf[..n]).map_err(|_| TapError::Protocol)?;
-        let (w, h) = parse_two(text, "display ").ok_or(TapError::Protocol)?;
-        Self::open_on(root, w, h)
+        let ring = EventRing::connect()?;
+        Self::fullscreen_on(&ring)
     }
 
-    /// Connect a fresh session and create a W x H surface.
+    /// A fullscreen surface on `ring`.
+    pub fn fullscreen_on(ring: &EventRing) -> Result<Surface, TapError> {
+        let (w, h) = ring.display_dims().ok_or(TapError::Protocol)?;
+        Self::open_on_bound(ring, w, h, Mint::Content)
+    }
+
+    /// A private ring + session, and a W x H surface on it.
     pub fn open(w: u32, h: u32) -> Result<Surface, TapError> {
-        let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
-        if root < 0 {
-            return Err(TapError::Connect);
-        }
-        Self::open_on(root, w, h)
+        let ring = EventRing::connect()?;
+        Self::open_on(&ring, w, h)
     }
 
-    fn open_on(root: i64, w: u32, h: u32) -> Result<Surface, TapError> {
-        Self::open_on_bound(root, w, h, Mint::Content, true)
+    /// A W x H content surface on `ring`.
+    pub fn open_on(ring: &EventRing, w: u32, h: u32) -> Result<Surface, TapError> {
+        Self::open_on_bound(ring, w, h, Mint::Content)
     }
 
-    /// H-3b-2: a Role::Chrome surface bound to pane `pane_id`. The compositor
-    /// places it at that pane's Daylight tag-bar strip (read
+    /// H-3b-2: a Role::Chrome surface bound to pane `pane_id`, on `ring`. The
+    /// compositor places it at that pane's Daylight tag-bar strip (read
     /// `pane/<id>/tagbar` for the size), never hosts it in a leaf, and fans
     /// it a CONFIGURE carrying the strip size on every relayout.
     /// Renderer-gated server-side: E_PERM for a peer spawned without
-    /// T_SPAWN_PERM_CONSOLE_RENDERER.
-    pub fn chrome_on(pane_id: u32, w: u32, h: u32) -> Result<Surface, TapError> {
-        let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
-        if root < 0 {
-            return Err(TapError::Connect);
-        }
-        Self::open_on_bound(root, w, h, Mint::Chrome(pane_id), true)
+    /// T_SPAWN_PERM_CONSOLE_RENDERER. A renderer owns one tag bar per
+    /// visible leaf (the H-3b round R2-F2 put them on one session; the
+    /// H-3c-2 event set puts them on one ring too).
+    pub fn chrome_on(ring: &EventRing, pane_id: u32, w: u32, h: u32) -> Result<Surface, TapError> {
+        Self::open_on_bound(ring, w, h, Mint::Chrome(pane_id))
     }
 
-    /// H-3b-4 (the round's R2-F2): a Role::Chrome surface minted on the
-    /// CALLER's existing session `root` (left open on drop). A renderer
-    /// owns one tag bar per visible leaf; a session per bar exhausted the
-    /// compositor's conn pool at three windows and turned every further
-    /// mint into a blocking connect. The per-conn surface cap is widened
-    /// for the renderer peer server-side.
-    pub fn chrome_on_shared(root: i64, pane_id: u32, w: u32, h: u32) -> Result<Surface, TapError> {
-        if root < 0 {
-            return Err(TapError::Connect);
-        }
-        Self::open_on_bound(root, w, h, Mint::Chrome(pane_id), false)
+    /// H-3c: a Role::Menu surface on `ring` -- the one ephemeral menu the
+    /// compositor places (`menu place <id> <x> <y>`), grabs input for, and
+    /// tears down itself (Esc / click-away / a chord / the owner's death;
+    /// HALCYON.md 13.6). Invisible until placed; renderer-gated server-side.
+    /// Never hosted, never focusable.
+    pub fn menu_on(ring: &EventRing, w: u32, h: u32) -> Result<Surface, TapError> {
+        Self::open_on_bound(ring, w, h, Mint::Menu)
     }
 
-    /// H-3c: a Role::Menu surface on the CALLER's session -- the one
-    /// ephemeral menu the compositor places (`menu place <id> <x> <y>`),
-    /// grabs input for, and tears down itself (Esc / click-away / a chord /
-    /// the owner's death; HALCYON.md 13.6). Invisible until placed;
-    /// renderer-gated server-side. Never hosted, never focusable.
-    pub fn menu_on_shared(root: i64, w: u32, h: u32) -> Result<Surface, TapError> {
-        if root < 0 {
-            return Err(TapError::Connect);
-        }
-        Self::open_on_bound(root, w, h, Mint::Menu, false)
-    }
 
-    fn open_on_bound(
-        root: i64,
-        w: u32,
-        h: u32,
-        mint: Mint,
-        owns_root: bool,
-    ) -> Result<Surface, TapError> {
-        // A shared root is never closed on a failure path.
-        let own_root = if owns_root { root } else { -1 };
+    fn open_on_bound(ring: &EventRing, w: u32, h: u32, mint: Mint) -> Result<Surface, TapError> {
+        let root = ring.root();
         let fail = |fds: &[i64], e: TapError| {
             for &fd in fds {
                 if fd >= 0 {
@@ -282,12 +256,20 @@ impl Surface {
             }
             Err(e)
         };
+        // After `create` succeeded the surface exists server-side, and only
+        // `destroy` (or the session's death) retires it: a failure past that
+        // point says so before closing, or the slot leaks until the session
+        // ends.
+        let fail_created = |ctl: i64, fds: &[i64], e: TapError| {
+            unsafe { t_write(ctl, b"destroy".as_ptr(), 7) };
+            fail(fds, e)
+        };
 
         // Mint: opening surface/new rebinds the fid onto the new surface's
         // ctl (the netd clone idiom); its read yields the id.
         let ctl = unsafe { t_open(root, b"surface/new".as_ptr(), 11, T_ORDWR) };
         if ctl < 0 {
-            return fail(&[own_root], TapError::Create);
+            return Err(TapError::Create);
         }
         let mut idbuf = [0u8; 16];
         let n = read_all(ctl, &mut idbuf);
@@ -296,7 +278,7 @@ impl Surface {
             .and_then(|s| s.trim().parse().ok())
         {
             Some(id) => id,
-            None => return fail(&[own_root, ctl], TapError::Protocol),
+            None => return fail(&[ctl], TapError::Protocol),
         };
 
         // create W H [role=chrome bind=<pane-id> | role=menu]
@@ -311,7 +293,7 @@ impl Surface {
         }
         let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
         if rc < 0 {
-            return fail(&[own_root, ctl], TapError::Create);
+            return fail(&[ctl], TapError::Create);
         }
 
         // The weave: geometry read + the zero-copy map (Tweft under the
@@ -320,27 +302,33 @@ impl Surface {
         let _ = core::fmt::write(&mut path, format_args!("surface/{}/weave", id));
         let weave_fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OREAD) };
         if weave_fd < 0 {
-            return fail(&[own_root, ctl], TapError::Map);
+            return fail_created(ctl, &[ctl], TapError::Map);
         }
         let mut gbuf = [0u8; 128];
         let n = read_all(weave_fd, &mut gbuf);
-        let gtext = core::str::from_utf8(&gbuf[..n]).map_err(|_| TapError::Protocol)?;
-        let mut it = gtext.split_ascii_whitespace();
-        let gw: u32 = it.next().and_then(|s| s.parse().ok()).ok_or(TapError::Protocol)?;
-        let gh: u32 = it.next().and_then(|s| s.parse().ok()).ok_or(TapError::Protocol)?;
-        let stride: u32 = it.next().and_then(|s| s.parse().ok()).ok_or(TapError::Protocol)?;
-        let slot_stride: u64 = it.next().and_then(|s| s.parse().ok()).ok_or(TapError::Protocol)?;
-        let nslots: u32 = it.next().and_then(|s| s.parse().ok()).ok_or(TapError::Protocol)?;
+        let parsed = core::str::from_utf8(&gbuf[..n]).ok().and_then(|t| {
+            let mut it = t.split_ascii_whitespace();
+            let gw: u32 = it.next()?.parse().ok()?;
+            let gh: u32 = it.next()?.parse().ok()?;
+            let stride: u32 = it.next()?.parse().ok()?;
+            let slot_stride: u64 = it.next()?.parse().ok()?;
+            let nslots: u32 = it.next()?.parse().ok()?;
+            Some((gw, gh, stride, slot_stride, nslots))
+        });
+        let (gw, gh, stride, slot_stride, nslots) = match parsed {
+            Some(v) => v,
+            None => return fail_created(ctl, &[ctl, weave_fd], TapError::Protocol),
+        };
         // `nslots` bounds the age bookkeeping, so it is validated against the
         // array that holds it -- a server advertising more slots than we can
         // track would silently lose invalidations, which is the one failure
         // mode `age` exists to prevent.
         if gw != w || gh != h || stride != w * 4 || nslots == 0 || nslots as usize > MAX_SLOTS {
-            return fail(&[own_root, ctl, weave_fd], TapError::Protocol);
+            return fail_created(ctl, &[ctl, weave_fd], TapError::Protocol);
         }
         let map_va = unsafe { t_weft_map(weave_fd as u64, 0) };
         if map_va <= 0 {
-            return fail(&[own_root, ctl, weave_fd], TapError::Map);
+            return fail_created(ctl, &[ctl, weave_fd], TapError::Map);
         }
 
         let mut ppath = alloc::string::String::new();
@@ -350,27 +338,20 @@ impl Surface {
         let _ = core::fmt::write(&mut epath, format_args!("surface/{}/event", id));
         let event_fd = unsafe { t_open(root, epath.as_ptr(), epath.len(), T_OREAD) };
         if present_fd < 0 || event_fd < 0 {
-            return fail(&[own_root, ctl, weave_fd, present_fd, event_fd], TapError::Protocol);
+            return fail_created(ctl, &[ctl, weave_fd, present_fd, event_fd], TapError::Protocol);
         }
 
-        // The Loom ring: register the two op fids + the staging buffer.
-        let ring = match Ring::setup(8, 0) {
-            Ok(r) => r,
-            Err(_) => return fail(&[own_root, ctl, weave_fd, present_fd, event_fd], TapError::Loom),
+        // Join the ring: a slot (the event queue) + the event fid on its
+        // registered-handle table.
+        let slot = match ring.core.borrow_mut().join(event_fd as i32) {
+            Ok(s) => s,
+            Err(e) => return fail_created(ctl, &[ctl, weave_fd, present_fd, event_fd], e),
         };
-        let mut staging = RegisteredBuffer::new(STAGING_LEN).map_err(|_| TapError::Loom)?;
-        staging.as_mut_slice().fill(0);
-        if ring
-            .register_handles(&[present_fd as i32, event_fd as i32])
-            .is_err()
-            || ring.register_buffers(&[staging.buf_reg()]).is_err()
-        {
-            return fail(&[own_root, ctl, weave_fd, present_fd, event_fd], TapError::Loom);
-        }
 
         Ok(Surface {
+            ring: ring.clone(),
+            slot,
             root,
-            owns_root,
             ctl,
             weave_fd,
             present_fd,
@@ -382,15 +363,9 @@ impl Surface {
             slot_stride,
             nslots,
             map_va: map_va as u64,
-            ring,
-            staging,
             cur_slot: 0,
             presents: 0,
             slot_seen: [SLOT_UNSEEN; MAX_SLOTS],
-            event_armed: false,
-            closed: false,
-            pending: Vec::new(),
-            seq: 2,
         })
     }
 
@@ -631,142 +606,65 @@ impl Surface {
         if rects.len() > MAX_RECTS {
             return Err(TapError::Present);
         }
-        self.seq += 1;
-        let ud = (self.seq << 8) | UD_PRESENT;
         let len = if rects.len() <= 1 {
             TPRESENT_LEN
         } else {
             TPRESENT_LEN + (rects.len() - 1) * TRECT_LEN
         };
-        {
-            let d = self.staging.as_mut_slice();
-            d[0..4].copy_from_slice(&TPRESENT_V1.to_le_bytes());
-            d[4..8].copy_from_slice(&self.cur_slot.to_le_bytes());
-            d[8..12].copy_from_slice(&flags.to_le_bytes());
-            d[12..16].copy_from_slice(&(rects.len() as u32).to_le_bytes());
-            let r0 = rects.first().copied().unwrap_or(Rect { x: 0, y: 0, w: 0, h: 0 });
-            d[16..20].copy_from_slice(&r0.x.to_le_bytes());
-            d[20..24].copy_from_slice(&r0.y.to_le_bytes());
-            d[24..28].copy_from_slice(&r0.w.to_le_bytes());
-            d[28..32].copy_from_slice(&r0.h.to_le_bytes());
-            for (i, r) in rects.iter().enumerate().skip(1) {
-                let o = TPRESENT_LEN + (i - 1) * TRECT_LEN;
-                d[o..o + 4].copy_from_slice(&r.x.to_le_bytes());
-                d[o + 4..o + 8].copy_from_slice(&r.y.to_le_bytes());
-                d[o + 8..o + 12].copy_from_slice(&r.w.to_le_bytes());
-                d[o + 12..o + 16].copy_from_slice(&r.h.to_le_bytes());
-            }
+        let mut d = [0u8; PRESENT_MAX];
+        d[0..4].copy_from_slice(&TPRESENT_V1.to_le_bytes());
+        d[4..8].copy_from_slice(&self.cur_slot.to_le_bytes());
+        d[8..12].copy_from_slice(&flags.to_le_bytes());
+        d[12..16].copy_from_slice(&(rects.len() as u32).to_le_bytes());
+        let r0 = rects.first().copied().unwrap_or(Rect { x: 0, y: 0, w: 0, h: 0 });
+        d[16..20].copy_from_slice(&r0.x.to_le_bytes());
+        d[20..24].copy_from_slice(&r0.y.to_le_bytes());
+        d[24..28].copy_from_slice(&r0.w.to_le_bytes());
+        d[28..32].copy_from_slice(&r0.h.to_le_bytes());
+        for (i, r) in rects.iter().enumerate().skip(1) {
+            let o = TPRESENT_LEN + (i - 1) * TRECT_LEN;
+            d[o..o + 4].copy_from_slice(&r.x.to_le_bytes());
+            d[o + 4..o + 8].copy_from_slice(&r.y.to_le_bytes());
+            d[o + 8..o + 12].copy_from_slice(&r.w.to_le_bytes());
+            d[o + 12..o + 16].copy_from_slice(&r.h.to_le_bytes());
         }
-        let sqe = Sqe::write(0, 0, len as u32, 0, 0, ud);
-        self.ring.try_submit(&sqe).map_err(|_| TapError::Loom)?;
-        // Wait for THIS present's CQE; route any event CQE that arrives
-        // first (one ring, mixed ops -- correlate by user_data).
-        loop {
-            self.ring
-                .enter(1, 1, ENTER_GETEVENTS)
-                .map_err(|_| TapError::Loom)?;
-            let mut saw = false;
-            while let Some(cqe) = self.ring.reap() {
-                saw = true;
-                if cqe.user_data == ud {
-                    if cqe.result < 0 {
-                        // No rotation on failure, so no slot changed hands and
-                        // the age bookkeeping must not advance either.
-                        return Err(TapError::Present);
-                    }
-                    self.slot_seen[self.cur_slot as usize] = self.presents;
-                    self.presents += 1;
-                    self.cur_slot = (self.cur_slot + 1) % self.nslots;
-                    return Ok(());
-                }
-                self.route(cqe);
-            }
-            if !saw {
-                // enter returned without a reapable CQE; go around.
-                continue;
-            }
+        // A synchronous write: the compositor composes inside the write's
+        // dispatch, so the Rwrite IS the recycle gate. It rides the ring's
+        // session, and this thread is that session's reader for the call --
+        // any event reply in flight is demuxed to its CQE meanwhile, for the
+        // next poll to reap. (The Loom WRITE it replaces bought nothing here:
+        // a present waits for its own completion either way, and a
+        // registered handle per present fid halved the ring's surface count.)
+        let rc = unsafe { t_write(self.present_fd, d.as_ptr(), len) };
+        if rc < 0 {
+            // No rotation on failure, so no slot changed hands and the age
+            // bookkeeping must not advance either.
+            return Err(TapError::Present);
         }
-    }
-
-    fn route(&mut self, cqe: Cqe) {
-        if cqe.user_data == UD_EVENT {
-            self.event_armed = false;
-            if cqe.result == 0 {
-                // EOF: the surface retired server-side; latch closed.
-                self.closed = true;
-            }
-            if cqe.result > 0 {
-                let n = (cqe.result as usize).min(EV_CAP);
-                let d = self.staging.as_mut_slice();
-                let mut off = EV_OFF as usize;
-                let end = EV_OFF as usize + n;
-                while off + TEVENT_LEN <= end {
-                    let g16 = |o: usize| u16::from_le_bytes([d[o], d[o + 1]]);
-                    let g32 =
-                        |o: usize| u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
-                    let g64 = |o: usize| {
-                        let mut b = [0u8; 8];
-                        b.copy_from_slice(&d[o..o + 8]);
-                        u64::from_le_bytes(b)
-                    };
-                    self.pending.push(Event {
-                        kind: g16(off),
-                        code: g16(off + 2),
-                        value: g32(off + 4),
-                        rune: g32(off + 8),
-                        mods: g16(off + 12),
-                        flags: g16(off + 14),
-                        tick: g64(off + 16),
-                    });
-                    off += TEVENT_LEN;
-                }
-            }
-        }
-    }
-
-    /// Arm the event read if idle (single-shot; see the header note).
-    fn arm_events(&mut self) -> Result<(), TapError> {
-        if self.event_armed || self.closed {
-            return Ok(());
-        }
-        let sqe = Sqe::read(1, 0, EV_CAP as u32, 0, EV_OFF, UD_EVENT);
-        self.ring.try_submit(&sqe).map_err(|_| TapError::Loom)?;
-        self.ring.enter(1, 0, 0).map_err(|_| TapError::Loom)?;
-        self.event_armed = true;
+        self.slot_seen[self.cur_slot as usize] = self.presents;
+        self.presents += 1;
+        self.cur_slot = (self.cur_slot + 1) % self.nslots;
         Ok(())
     }
 
-    /// Non-blocking event poll: drain any completed reads, re-arm.
+    /// Non-blocking event poll: reap what the ring has completed, re-arm.
     /// `Err(Closed)` once the stream has EOF'd and the backlog is drained.
     pub fn poll_event(&mut self) -> Result<Option<Event>, TapError> {
-        self.arm_events()?;
-        while let Some(cqe) = self.ring.reap() {
-            self.route(cqe);
-        }
-        self.arm_events()?;
-        if self.closed && self.pending.is_empty() {
-            return Err(TapError::Closed);
-        }
-        Ok(self.pending.pop_first())
+        self.ring.poll()?;
+        self.ring.core.borrow_mut().take_event(self.slot)
     }
 
-    /// Block until at least one event is available, then return it. An empty
-    /// completion (a retired surface's EOF) yields `Err(Closed)`.
+    /// Block until an event for THIS surface is available, then return it
+    /// (other surfaces' events reaped meanwhile wait in their own queues;
+    /// a multi-surface client waits on the ring instead -- `EventRing::wait`
+    /// -- and polls each surface). An empty completion (a retired surface's
+    /// EOF) yields `Err(Closed)`.
     pub fn wait_event(&mut self) -> Result<Event, TapError> {
         loop {
-            if let Some(ev) = self.pending.pop_first() {
+            if let Some(ev) = self.ring.core.borrow_mut().take_event(self.slot)? {
                 return Ok(ev);
             }
-            if self.closed {
-                return Err(TapError::Closed); // EOF observed; backlog drained
-            }
-            self.arm_events()?;
-            self.ring
-                .enter(0, 1, ENTER_GETEVENTS)
-                .map_err(|_| TapError::Loom)?;
-            while let Some(cqe) = self.ring.reap() {
-                self.route(cqe); // an EOF latches `closed` inside route()
-            }
+            self.ring.wait()?;
         }
     }
 }
@@ -775,19 +673,20 @@ impl Drop for Surface {
     fn drop(&mut self) {
         // The weave fid's clunk drops the client mapping (the kernel
         // ClunkMap). The SURFACE retires server-side only on ctl `destroy`,
-        // the owning conn's teardown, or a wedge -- a clunk is bookkeeping.
-        // An own-session surface retires through the conn close below; one
-        // minted on a SHARED session must say `destroy` itself, or the slot,
-        // its weave pages and GPU resources outlive it until the session
-        // dies (the H-3b close's shared chrome leaked one per dropped tag
-        // bar and hit the renderer's cap after ~17 zoom cycles). Harmless
-        // on a surface the compositor already retired (a menu it
-        // dismissed): the stale fid answers an error nobody reads.
-        if !self.owns_root && self.ctl >= 0 {
+        // its conn's teardown, or a wedge -- a clunk is bookkeeping -- and
+        // the ring's session outlives any one surface on it, so every
+        // surface says `destroy` itself (the H-3b close's shared chrome
+        // leaked one server-side surface per dropped tag bar without it).
+        // Harmless on a surface the compositor already retired (a menu it
+        // dismissed): the stale fid answers an error nobody reads. FIRST,
+        // so the event read still in flight EOFs promptly and frees the
+        // ring slot; then leave the ring (the registered table drops this
+        // fid; the in-flight read keeps its own pin); then the fds.
+        if self.ctl >= 0 {
             unsafe { t_write(self.ctl, b"destroy".as_ptr(), 7) };
         }
-        let root = if self.owns_root { self.root } else { -1 };
-        for fd in [self.event_fd, self.present_fd, self.weave_fd, self.ctl, root] {
+        self.ring.core.borrow_mut().leave(self.slot);
+        for fd in [self.event_fd, self.present_fd, self.weave_fd, self.ctl] {
             if fd >= 0 {
                 unsafe { t_close(fd) };
             }
@@ -839,6 +738,315 @@ pub fn global_ctl_once(cmd: &str) -> Result<(), TapError> {
     }
     Ok(())
 }
+
+// =============================================================================
+// The event set (H-3c-2): ONE session + ONE Loom ring per client, shared by
+// every Surface opened on it -- io_uring's one ring per thread. A slot per
+// surface holds its event queue + its place on the registered-handle table;
+// a slot is reused only after the read in flight on it has completed (the
+// retiring state), so a stale completion can never land in a re-minted
+// surface's region, and its generation tag makes the check belt and braces.
+// =============================================================================
+
+struct Slot {
+    used: bool,
+    /// The surface dropped while a read was in flight: the slot stays taken
+    /// until that read's completion (the EOF after `destroy`) frees it.
+    retiring: bool,
+    event_fd: i32,
+    /// This slot's index on the ring's registered-handle table (rebuilt at
+    /// every join/leave -- dense, in slot order).
+    hidx: u32,
+    armed: bool,
+    /// Latched when the event stream EOFs (the surface retired server-side):
+    /// no further reads are armed -- without the latch, a poll caller would
+    /// re-arm through the EOF forever.
+    closed: bool,
+    /// Bumped per join: the tag a completion must carry to be this
+    /// surface's.
+    gen: u32,
+    pending: Vec<Event>,
+}
+
+struct RingCore {
+    root: i64,
+    ring: Ring,
+    staging: RegisteredBuffer,
+    slots: Vec<Slot>,
+}
+
+/// ONE 9P session to the compositor + ONE Loom ring, shared by every
+/// Surface opened on it: `wait` blocks until ANY of them has an event
+/// (then poll each); `poll` reaps without blocking. Clone = another handle
+/// to the same ring; the session closes with the last one.
+pub struct EventRing {
+    core: Rc<RefCell<RingCore>>,
+}
+
+impl Clone for EventRing {
+    fn clone(&self) -> EventRing {
+        EventRing { core: self.core.clone() }
+    }
+}
+
+impl EventRing {
+    /// Connect a fresh session to /srv/tapestry and set up its ring.
+    pub fn connect() -> Result<EventRing, TapError> {
+        let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
+        if root < 0 {
+            return Err(TapError::Connect);
+        }
+        Self::adopt(root)
+    }
+
+    /// A ring over a session root fd the caller opened; the ring owns it
+    /// from here (closed with the ring).
+    pub fn adopt(root: i64) -> Result<EventRing, TapError> {
+        if root < 0 {
+            return Err(TapError::Connect);
+        }
+        let ring = match Ring::setup(RING_ENTRIES, 0) {
+            Ok(r) => r,
+            Err(_) => {
+                unsafe { t_close(root) };
+                return Err(TapError::Loom);
+            }
+        };
+        let mut staging = match RegisteredBuffer::new(MAX_RING_SURFACES * EV_REGION as usize) {
+            Ok(b) => b,
+            Err(_) => {
+                unsafe { t_close(root) };
+                return Err(TapError::Loom);
+            }
+        };
+        staging.as_mut_slice().fill(0);
+        if ring.register_buffers(&[staging.buf_reg()]).is_err() {
+            unsafe { t_close(root) };
+            return Err(TapError::Loom);
+        }
+        let mut slots = Vec::with_capacity(MAX_RING_SURFACES);
+        for _ in 0..MAX_RING_SURFACES {
+            slots.push(Slot {
+                used: false,
+                retiring: false,
+                event_fd: -1,
+                hidx: 0,
+                armed: false,
+                closed: false,
+                gen: 0,
+                pending: Vec::new(),
+            });
+        }
+        Ok(EventRing { core: Rc::new(RefCell::new(RingCore { root, ring, staging, slots })) })
+    }
+
+    /// The session root fd (for the pane-tree files, `ctl`, ...). Owned by
+    /// the ring: never close it.
+    pub fn root(&self) -> i64 {
+        self.core.borrow().root
+    }
+
+    /// The display geometry off this session's global ctl.
+    pub fn display_dims(&self) -> Option<(u32, u32)> {
+        let root = self.root();
+        let gctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OREAD) };
+        if gctl < 0 {
+            return None;
+        }
+        let mut buf = [0u8; 256];
+        let n = read_all(gctl, &mut buf);
+        unsafe { t_close(gctl) };
+        let text = core::str::from_utf8(&buf[..n]).ok()?;
+        parse_two(text, "display ")
+    }
+
+    /// How many surfaces are on the ring (a retiring slot counts until its
+    /// last read completes).
+    pub fn surfaces(&self) -> usize {
+        self.core.borrow().slots.iter().filter(|s| s.used).count()
+    }
+
+    /// Block until at least one event has completed for SOME surface on the
+    /// ring, then reap everything posted (into the surfaces' queues). The
+    /// wait is bounded by the compositor's FRAME ticks to any visible surface.
+    pub fn wait(&self) -> Result<(), TapError> {
+        self.core.borrow_mut().pump(true)
+    }
+
+    /// Reap what has completed without blocking (re-arming idle reads).
+    pub fn poll(&self) -> Result<(), TapError> {
+        self.core.borrow_mut().pump(false)
+    }
+}
+
+impl RingCore {
+    fn ud(slot: usize, gen: u32) -> u64 {
+        ((slot as u64) << 40) | ((gen as u64) << 8) | UD_EVENT
+    }
+
+    /// Take a slot for `event_fd` and put the fid on the table.
+    fn join(&mut self, event_fd: i32) -> Result<u16, TapError> {
+        let i = self.slots.iter().position(|s| !s.used).ok_or(TapError::Full)?;
+        {
+            let s = &mut self.slots[i];
+            s.used = true;
+            s.retiring = false;
+            s.event_fd = event_fd;
+            s.armed = false;
+            s.closed = false;
+            s.gen = s.gen.wrapping_add(1);
+            s.pending.clear();
+        }
+        if let Err(e) = self.reregister() {
+            self.slots[i].used = false;
+            return Err(e);
+        }
+        Ok(i as u16)
+    }
+
+    /// A surface is going: off the table now; the slot frees now, or when
+    /// the read in flight on it completes.
+    fn leave(&mut self, slot: u16) {
+        let i = slot as usize;
+        if i >= self.slots.len() || !self.slots[i].used {
+            return;
+        }
+        {
+            let s = &mut self.slots[i];
+            s.pending.clear();
+            if s.armed {
+                s.retiring = true;
+            } else {
+                s.used = false;
+            }
+        }
+        let _ = self.reregister();
+    }
+
+    /// The registered-handle table = every live slot's event fid, dense, in
+    /// slot order; each slot learns its index. Replaces the kernel's table
+    /// (IORING_REGISTER_FILES semantics); a read in flight keeps its own pin.
+    fn reregister(&mut self) -> Result<(), TapError> {
+        let mut fds: Vec<i32> = Vec::new();
+        for s in self.slots.iter_mut() {
+            if s.used && !s.retiring {
+                s.hidx = fds.len() as u32;
+                fds.push(s.event_fd);
+            }
+        }
+        self.ring.register_handles(&fds).map_err(|_| TapError::Loom)
+    }
+
+    /// Arm a read on every live slot without one (single-shot; see the
+    /// header note). Returns how many were queued.
+    fn arm_all(&mut self) -> Result<u32, TapError> {
+        let mut n = 0u32;
+        for i in 0..self.slots.len() {
+            let (hidx, gen) = {
+                let s = &self.slots[i];
+                if !s.used || s.retiring || s.armed || s.closed {
+                    continue;
+                }
+                (s.hidx, s.gen)
+            };
+            let sqe = Sqe::read(hidx, 0, EV_CAP as u32, 0, (i as u64) * EV_REGION, Self::ud(i, gen));
+            self.ring.try_submit(&sqe).map_err(|_| TapError::Loom)?;
+            self.slots[i].armed = true;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Submit the armed reads and reap: blocking (>= 1 completion; the
+    /// kernel drives this session's reader meanwhile) or not (a submit-only
+    /// enter -- the kernel demuxes replies only inside a blocking wait or
+    /// this thread's own RPCs on the session, so a poll sees what those
+    /// posted).
+    fn pump(&mut self, block: bool) -> Result<(), TapError> {
+        let n = self.arm_all()?;
+        let rc = if block {
+            self.ring.enter(n, 1, ENTER_GETEVENTS)
+        } else if n > 0 {
+            self.ring.enter(n, 0, 0)
+        } else {
+            Ok(0)
+        };
+        rc.map_err(|_| TapError::Loom)?;
+        while let Some(cqe) = self.ring.reap() {
+            self.route(cqe);
+        }
+        Ok(())
+    }
+
+    fn route(&mut self, cqe: Cqe) {
+        if cqe.user_data & 0xff != UD_EVENT {
+            return;
+        }
+        let i = (cqe.user_data >> 40) as usize;
+        let gen = ((cqe.user_data >> 8) & 0xffff_ffff) as u32;
+        if i >= self.slots.len() {
+            return;
+        }
+        let region = (i as u64 * EV_REGION) as usize;
+        let d = self.staging.as_mut_slice();
+        let s = &mut self.slots[i];
+        if !s.used || s.gen != gen {
+            return; // a completion for a slot that has moved on
+        }
+        s.armed = false;
+        if s.retiring {
+            // The dropped surface's last read completed (the EOF after its
+            // `destroy`, or an error): the slot may be re-minted now.
+            s.used = false;
+            s.retiring = false;
+            return;
+        }
+        if cqe.result == 0 {
+            s.closed = true; // EOF: the surface retired server-side
+        }
+        if cqe.result > 0 {
+            let n = (cqe.result as usize).min(EV_CAP);
+            let mut off = region;
+            let end = region + n;
+            while off + TEVENT_LEN <= end {
+                let g16 = |o: usize| u16::from_le_bytes([d[o], d[o + 1]]);
+                let g32 = |o: usize| u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
+                let g64 = |o: usize| {
+                    let mut b = [0u8; 8];
+                    b.copy_from_slice(&d[o..o + 8]);
+                    u64::from_le_bytes(b)
+                };
+                s.pending.push(Event {
+                    kind: g16(off),
+                    code: g16(off + 2),
+                    value: g32(off + 4),
+                    rune: g32(off + 8),
+                    mods: g16(off + 12),
+                    flags: g16(off + 14),
+                    tick: g64(off + 16),
+                });
+                off += TEVENT_LEN;
+            }
+        }
+    }
+
+    fn take_event(&mut self, slot: u16) -> Result<Option<Event>, TapError> {
+        let s = &mut self.slots[slot as usize];
+        if s.closed && s.pending.is_empty() {
+            return Err(TapError::Closed);
+        }
+        Ok(s.pending.pop_first())
+    }
+}
+
+impl Drop for RingCore {
+    fn drop(&mut self) {
+        // The Ring + the staging buffer drop themselves (the loom fd close
+        // abandons any read still in flight); the session goes last.
+        unsafe { t_close(self.root) };
+    }
+}
+
 
 /// A tiny front-pop helper (Vec as a FIFO; event volumes are small).
 trait PopFirst<T> {

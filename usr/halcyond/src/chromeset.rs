@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use halcyond::chrome::{console_name, key_for, parse_leaves, parse_rect, strip_list, Key};
 use halcyond::raster::GlyphSource;
 use libthyla_rs::{t_close, t_open, t_read, t_write, T_OREAD, T_OWRITE};
-use tapestry::{Surface, TapError, TEV_CLOSE, TEV_CONFIGURE};
+use tapestry::{EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE};
 
 fn say(s: &str) {
     let mut t = String::from(s);
@@ -79,6 +79,9 @@ struct Tile {
 /// The live chrome surfaces, keyed by the bound pane's public id (ids are
 /// never reused, so a stale key can only mean "gone").
 pub struct ChromeSet {
+    /// The renderer's ONE ring + session (the H-3c-2 event set): every tile
+    /// is minted on it, so their CONFIGUREs wake and land with the console's.
+    ring: EventRing,
     tiles: BTreeMap<u32, Tile>,
     own_named: bool,
     /// The leaf hosting the console surface, as the last layout read named
@@ -91,8 +94,8 @@ pub struct ChromeSet {
 }
 
 impl ChromeSet {
-    pub fn new() -> ChromeSet {
-        ChromeSet { tiles: BTreeMap::new(), own_named: false, own_pane: None, failed_said: Vec::new() }
+    pub fn new(ring: EventRing) -> ChromeSet {
+        ChromeSet { ring, tiles: BTreeMap::new(), own_named: false, own_pane: None, failed_said: Vec::new() }
     }
 
     /// The public id of the leaf hosting the console surface, once a
@@ -160,12 +163,13 @@ impl ChromeSet {
                     // the strip to its resting fill.
                     t.dirty = true;
                 }
-                // Minted on the pane-tree session (`troot`), never on a
+                // Minted on the renderer's one ring + session, never on a
                 // session of its own: the H-3b round R2-F2 -- a session per
                 // bar exhausted the compositor's conn pool at three windows,
                 // and every further mint became a 5 s blocking connect
-                // inside this single-threaded loop.
-                None => match Surface::chrome_on_shared(troot, id, w, h) {
+                // inside this single-threaded loop; and (H-3c-2) a ring of
+                // its own left its events unread until a pane-tree RPC.
+                None => match Surface::chrome_on(&self.ring, id, w, h) {
                     Ok(surf) => {
                         let mut t = Tile { surf, key, name, dirty: true, dead: false };
                         paint(&mut t, gs);
@@ -194,7 +198,10 @@ impl ChromeSet {
     /// marks the tile. Returns true when any CONFIGURE was seen: the caller
     /// then reconciles, which re-reads the layout (focus, statuses, names)
     /// and paints -- painting here would flash the stale state first. FRAME
-    /// is droppable and never queues up.
+    /// is droppable and never queues up. The tiles share the console's ring,
+    /// so a focus-only CONFIGURE (no console event) still wakes the loop's
+    /// `EventRing::wait` and is here on the next pass -- the H-3c-2 event
+    /// set; before it, a tile's event landed only at the next pane-tree RPC.
     pub fn pump(&mut self) -> bool {
         let mut relayout = false;
         for t in self.tiles.values_mut() {

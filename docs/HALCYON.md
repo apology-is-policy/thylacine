@@ -813,6 +813,16 @@ cropped surface, which its client can never repaint. A chosen verb runs as
 its OWN command line: halcyond feeds ^E ^U before it (ut's editor moves a
 half-typed draft to the kill buffer; ^Y restores it), and the system-tier
 templates whose programs take `--` carry it (BEACON.md 7).
+AS-BUILT (H-3c-2, the event set, 2026-09-02): a renderer's surfaces --
+the console, every tag-bar tile, the menu -- live on ONE `tapestry::
+EventRing` (one 9P session + one Loom ring; io_uring's one ring per
+thread), so one blocking wait wakes for any of their events and one
+session's reader demuxes all of them. Two sessions under one thread
+starved whichever the thread was not waiting on (a Loom wait pumps one
+session): a tile's CONFIGURE landed only at the next pane-tree RPC -- a
+focus move between two non-console panes re-keyed no tag bar -- and a
+menu's key never, which H-3c had worked around for the menu alone. The
+lever's 3-leaf leg witnesses the fix.
 
 **RATIFIED VOTE 2 — scope + sequencing: four sub-chunks, full Daylight.**
 H-3a (pane bevels + hairline + cast shadow + the `libhalcyon::theme` crate +

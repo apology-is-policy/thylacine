@@ -343,6 +343,88 @@ strip_want 3 120 4 560 30 88 68 "left hairline after focus-back (live ok -> sage
 strip_want 120 3 560 4 184 204 196 "left top hairline alongside the live bar (sage tint)" 0
 lc_pass "halcyon: focus move re-keyed the tiles (left live sage: strip + content hairline; right resting ember_deep)"
 
+# H-3c-2 (THE EVENT SET): a focus move between two panes NEITHER of which
+# is the console re-keys their tag bars. Before the event set a tile's
+# events landed only at the next pane-tree RPC, and this move sends the
+# console nothing (no FOCUS, no CONFIGURE -- the focus-only fan is chrome-
+# only), so the bars stayed stale until some later relayout; the 2-pane
+# legs above never exercised it (every move touched the console). Split the
+# right leaf again (Super+Right onto it, Super+H): three leaves -- the
+# console, A (the middle, resting) and B (the new right, live). Then
+# Super+Left (B -> A) and Super+Right (A -> B): the strips' interiors +
+# separators must swap live/resting each time. The strip rects come off the
+# pane tree through the console (ids depend on the layout history; the
+# observer effect scrolls the transcript, harmless at the strips).
+hkey "meta_l+right"
+hkey "meta_l+h"
+lc_send "cat /dev/tapestry/layout"
+set timeout $lc_cmd_timeout
+set ev_leaves {}
+set ev_console -1
+set ev_focused -1
+expect {
+    -re {[\r\n] *(\d+)(\*?) leaf([^\r\n]*)[\r\n]} {
+        set lid $expect_out(1,string)
+        lappend ev_leaves $lid
+        if {$expect_out(2,string) eq "*"} { set ev_focused $lid }
+        if {[string match "*surface=*" $expect_out(3,string)]} { set ev_console $lid }
+        if {[llength $ev_leaves] < 3} { exp_continue }
+    }
+    timeout { lc_fail "the layout did not list three leaves after the second split (got: $ev_leaves)" }
+    eof     { lc_fail "EOF reading the layout" }
+}
+if {$ev_console < 0 || $ev_focused < 0 || $ev_focused == $ev_console} {
+    lc_fail "event set: leaves $ev_leaves, console $ev_console, focused $ev_focused -- the second split did not focus a new non-console leaf"
+}
+set ev_b $ev_focused
+set ev_a -1
+foreach lid $ev_leaves { if {$lid != $ev_console && $lid != $ev_b} { set ev_a $lid } }
+if {$ev_a < 0} { lc_fail "event set: no third leaf among $ev_leaves" }
+# The "x y w h" text follows the output zone's frame on the SAME line (no
+# newline before its first digit), so the match anchors on the trailing
+# newline only.
+proc bar_rect {id what} {
+    global timeout lc_cmd_timeout
+    lc_send "cat /dev/tapestry/pane/$id/tagbar"
+    set timeout $lc_cmd_timeout
+    expect {
+        -re {(\d+) (\d+) (\d+) (\d+)[\r\n]} {
+            return [list $expect_out(1,string) $expect_out(2,string) $expect_out(3,string) $expect_out(4,string)]
+        }
+        timeout { lc_fail "$what: no tagbar rect for pane $id" }
+        eof     { lc_fail "$what: EOF reading pane $id's tagbar" }
+    }
+}
+lassign [bar_rect $ev_a "pane A"] ax ay aw ah
+lassign [bar_rect $ev_b "pane B"] bx by bw bh
+if {$aw < 40 || $bw < 40 || $ah < 8 || $bh < 8} { lc_fail "event set: degenerate bars A ${aw}x$ah B ${bw}x$bh" }
+proc bar_want {x y w h live what} {
+    if {$live} {
+        strip_want [expr {$x + 6}] [expr {$y + 2}] [expr {$x + $w - 6}] [expr {$y + $h - 2}] 184 204 196 "$what interior (live -> sage tint)" 0
+        strip_want [expr {$x + 6}] [expr {$y + $h - 1}] [expr {$x + $w - 6}] [expr {$y + $h}] 30 88 68 "$what separator (live -> sage key)" 0
+    } else {
+        strip_want [expr {$x + 6}] [expr {$y + 2}] [expr {$x + $w - 6}] [expr {$y + $h - 2}] 206 196 182 "$what interior (resting -> header)" 0
+        strip_want [expr {$x + 6}] [expr {$y + $h - 1}] [expr {$x + $w - 6}] [expr {$y + $h}] 200 96 48 "$what separator (resting -> ember_deep)" 0
+    }
+}
+bar_want $ax $ay $aw $ah 0 "A after the split (B focused)"
+bar_want $bx $by $bw $bh 1 "B after the split (B focused)"
+hkey "meta_l+left"
+bar_want $ax $ay $aw $ah 1 "A after B->A"
+bar_want $bx $by $bw $bh 0 "B after B->A"
+lc_pass "halcyon: THE EVENT SET -- a focus move between two non-console panes re-keyed both tag bars (A live sage, B resting ember_deep) with no event to the console"
+hkey "meta_l+right"
+bar_want $ax $ay $aw $ah 0 "A after A->B"
+bar_want $bx $by $bw $bh 1 "B after A->B"
+lc_pass "halcyon: THE EVENT SET -- and back (A resting, B live)"
+# Restore the two-pane layout the legs below were written against: close B
+# (Super+Shift+Q, the chord table's close; focus lands on a neighbour), then
+# lefts back to the console (a left at the edge is a no-op).
+hkey "meta_l+shift+q"
+hkey "meta_l+left"
+hkey "meta_l+left"
+strip_want 8 23 300 24 30 88 68 "console separator after returning focus (sage key)" 0
+
 # H-3c: CLICK-A-PATH + CLICK-AWAY (the mouse door to the same menu), in the
 # split: the console is the LEFT pane now, so its run rects carry the pane's
 # content origin. The keyboard path first, to learn the run's display rect

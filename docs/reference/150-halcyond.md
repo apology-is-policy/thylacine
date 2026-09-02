@@ -274,6 +274,23 @@ returns to Insert. An `Internal` `#wedge <ms>` (test-mode): the loop sleeps
 with the menu still placed -- THE GATE's wedged-owner lever -- and says
 `wedge-test: frozen ... / woke`.
 
+**The event set (H-3c-2, 2026-09-02).** halcyond opens ONE
+`tapestry::EventRing` (one session + one Loom ring) and every surface it
+owns lives on it: the console (`Surface::fullscreen_on`), each tag-bar
+tile (`chrome_on`), the menu (`menu_on`); the pane-tree files are read on
+the ring's session root. The loop's step (1) takes the console's next
+event or, when its queue is empty, blocks in `EventRing::wait` -- any
+surface's event wakes it -- and the pumps (`ChromeSet::pump`,
+`MenuSet::service`) drain their surfaces' queues every pass. This retires
+the H-3c session-reader dance (`service(block_first)` waiting on the
+menu's own ring while the console was polled) and FIXES the H-3b-3 tiles'
+latency: a tile's CONFIGURE used to land only at the next pane-tree RPC
+(the console's session was the one the loop waited on, and a Loom wait
+pumps one session), so a focus move between two non-console panes
+re-keyed no tag bar until a later relayout. Witness: the lever's 3-leaf
+leg (Super+Left/Right between the two non-console panes; both bars swap
+live/resting with no event to the console).
+
 **The audit close (2026-09-02).** `menu_size(m, gs, max_h)` caps the
 surface height at the display (`display_h` reads `ctl`'s `display W H` on
 the pane-tree session; the round's F3: the compositor refuses a taller
@@ -328,7 +345,10 @@ keys. The system-tier templates carry `--` where their programs take it.
   printed inside the swallow branches), and the command path -- a draft
   half-typed at the prompt, then `ls` chosen on an `ls /lib/aurora` row's run (pwd's output is plain text, no obj):
   `menu ran: ls -l -- '/lib/aurora/<ref>'`, the draft's echo present, `halfls`
-  absent, the global operand-error control proving ls took `--`; after the
+  absent, the global operand-error control proving ls took `--`; the event
+  set's leg (H-3c-2): a second split makes three leaves and Super+Left /
+  Super+Right between the two non-console ones re-key both tag bars each
+  way (their rects read off the pane tree through the console); after the
   zoom `cat /dev/tapestry/ctl` reads `surfaces 1` (the dropped bars + every
   menu retired server-side).
 - ls-gfx-panes (default image, the battery as a NON-renderer): the negative

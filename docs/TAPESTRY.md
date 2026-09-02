@@ -1204,7 +1204,10 @@ domain + the virtio-gpu-resource detach fold into the G-2 T-1 spec/audit (NOT
 asserted type-independent). The client PTE attribute (Normal-WB, verified) was
 already sound; F1 is about region *contents*, not attrs.
 
-**F2 [P1] — `/dev/tapestry` is per-session isolated** (the enforcement V2 rests
+**F2 [P1] — `/dev/tapestry` is per-session isolated** (AS-BUILT H-3c-2: a client's
+surfaces share ONE session + ONE Loom ring, `tapestry::EventRing` -- per-process,
+still unresolvable from any other process's session; the compositor keys
+authority on the peer process) (the enforcement V2 rests
 on). A client sees + resolves ONLY the surfaces it created: the surface `<id>`
 qids are per-session-scoped, netd-`/net`-style (the `CONN_FLAG|…|N`
 per-connection encoding — a walk from session B cannot resolve session A's

@@ -863,18 +863,30 @@ zoom census witnesses it.
 ## libtapestry + tapestry-demo
 
 `usr/lib/libtapestry` (`tapestry::Surface`) is the aux-POC client model
-cashed onto `libthyla_rs::loom`: private-session connect →
-`surface/new` mint → `create` → the weave geometry read →
-`t_weft_map` (the kernel issues Tweft on the client's own session — the
-F2 property falls out: the mint arrives on the owning conn) →
-`present`/`event` fids registered on one Loom ring with a staging
-`RegisteredBuffer`. `present()` submits a LOOM_OP_WRITE and waits its
-CQE (routing any event CQE reaped meanwhile), then rotates slots.
-**Event reads are single-shot, re-armed after each drain** — a
-multishot READ re-arms into the same registered slice, so an undrained
-shot would be overwritten (droppable for FRAME, a lost KEY otherwise);
-the multishot + provided-buffer-pool client lift is a recorded G-6 seam
-(the kernel MULTISHOT mechanism itself is Loom-5-proven).
+cashed onto `libthyla_rs::loom`: a session connect → `surface/new` mint →
+`create` → the weave geometry read → `t_weft_map` (the kernel issues Tweft
+on the client's own session — the F2 property falls out: the mint arrives
+on the owning conn) → the `event` fid on the session's Loom ring.
+
+**THE EVENT SET (H-3c-2, 2026-09-02; the vault's libtapestry dossier
+carries the mechanism -- this is the pointer).** `tapestry::EventRing` = ONE
+9P session + ONE Loom ring per client, shared by every Surface opened on it
+(`fullscreen_on` / `open_on` / `chrome_on` / `menu_on`; `fullscreen` /
+`open` keep a private ring each for the one-surface clients). A surface
+takes a ring slot (its event queue, its registered event fid, a staging
+region); `wait` arms every idle read and blocks once, `poll` only submits;
+presents are a synchronous write of the tpresent (the Rwrite is the recycle
+gate). One session per ring is load-bearing: a Loom wait pumps the session
+of its FIRST in-flight op only (`loom_wait_for_completions`), and a
+non-blocking enter demuxes nothing -- the mechanism behind the H-3c
+lever's session-reader finding. A dropped surface says `destroy`, leaves the
+table, and holds its slot RETIRING until its in-flight read completes.
+**Event reads are single-shot,
+re-armed after each drain** — a multishot READ re-arms into the same
+registered slice, so an undrained shot would be overwritten (droppable for
+FRAME, a lost KEY otherwise); the multishot + provided-buffer-pool client
+lift is a recorded G-6 seam (the kernel MULTISHOT mechanism itself is
+Loom-5-proven).
 
 `tapestry-demo` draws the P4-L 4-quadrant pattern (the
 `tools/screendump.sh -v` contract: quadrant centers exact) plus an

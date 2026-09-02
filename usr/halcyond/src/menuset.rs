@@ -14,7 +14,7 @@ use alloc::string::String;
 
 use halcyond::menu::{menu_key, menu_list, menu_size, Action, Menu};
 use halcyond::raster::GlyphSource;
-use tapestry::{Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_KEY, TEV_SCROLL};
+use tapestry::{EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_KEY, TEV_SCROLL};
 
 /// The display height off the pane-tree session's `ctl` (its `display W H`
 /// line) -- the cap on a menu's surface height (the H-3c round F3: the
@@ -51,18 +51,14 @@ struct Open {
 }
 
 pub struct MenuSet {
+    /// The renderer's ONE ring + session (the H-3c-2 event set).
+    ring: EventRing,
     open: Option<Open>,
 }
 
 impl MenuSet {
-    pub fn new() -> MenuSet {
-        MenuSet { open: None }
-    }
-
-    /// A menu is up: its keys arrive on ITS stream, so the caller must not
-    /// block on the console's.
-    pub fn is_open(&self) -> bool {
-        self.open.is_some()
+    pub fn new(ring: EventRing) -> MenuSet {
+        MenuSet { ring, open: None }
     }
 
     /// Summon `model` at display point (x, y): mint, paint, place, present.
@@ -71,7 +67,6 @@ impl MenuSet {
     /// refuses -- no menu, the transcript is unaffected.
     pub fn open(
         &mut self,
-        troot: i64,
         model: Menu,
         x: u32,
         y: u32,
@@ -79,8 +74,8 @@ impl MenuSet {
         gs: &mut GlyphSource,
     ) -> bool {
         self.close();
-        let (w, h) = menu_size(&model, gs, display_h(troot));
-        let surf = match Surface::menu_on_shared(troot, w, h) {
+        let (w, h) = menu_size(&model, gs, display_h(self.ring.root()));
+        let surf = match Surface::menu_on(&self.ring, w, h) {
             Ok(s) => s,
             Err(e) => {
                 say(&format!("halcyond: menu surface failed {:?}", e));
@@ -108,19 +103,16 @@ impl MenuSet {
         true
     }
 
-    /// Service the menu surface's events: keys move the selection or
-    /// choose; a CONFIGURE repaints (the redraw request; a resize offer
-    /// reweaves); a CLOSE or a dead stream means the compositor dismissed
-    /// it. `block_first`: WAIT for the first event on the menu's own ring.
-    /// A 9P session's replies are read only by a thread inside a wait or an
-    /// RPC on THAT session, and this surface lives on the pane-tree session
-    /// while the console's stream lives on its own -- a loop parked on the
-    /// console's ring never sees a menu key (nor a chrome tile's CONFIGURE:
-    /// those landed only at the next reconcile's reads, which is how the
-    /// lever found this). The wait is bounded by construction: a placed
-    /// menu receives FRAME ticks (>= the idle rate) and the compositor's
-    /// dismiss EOFs the stream.
-    pub fn service(&mut self, gs: &mut GlyphSource, block_first: bool) -> MenuEvent {
+    /// Service the menu surface's events (non-blocking): keys move the
+    /// selection or choose; a CONFIGURE repaints (the redraw request; a
+    /// resize offer reweaves); a CLOSE or a dead stream means the compositor
+    /// dismissed it. The menu lives on the renderer's one ring (the H-3c-2
+    /// event set), so the loop's `EventRing::wait` wakes for its keys like
+    /// the console's; before the event set this pump had to WAIT on the
+    /// menu's own ring while a menu was up, because a 9P session's replies
+    /// are read only by a thread waiting on that session (the lever found
+    /// the console-parked loop never saw a menu key).
+    pub fn service(&mut self, gs: &mut GlyphSource) -> MenuEvent {
         let o = match self.open.as_mut() {
             Some(o) => o,
             None => return MenuEvent::None,
@@ -128,14 +120,8 @@ impl MenuSet {
         let mut chosen: Option<Action> = None;
         let mut repaint = false;
         let mut dead = false;
-        let mut first = block_first;
         loop {
-            let next = if first {
-                first = false;
-                o.surf.wait_event().map(Some)
-            } else {
-                o.surf.poll_event()
-            };
+            let next = o.surf.poll_event();
             match next {
                 Ok(Some(e)) => match e.kind {
                     TEV_KEY => {

@@ -721,6 +721,48 @@ Verified by the lines, jobs=1: halcyond host 55/55 (+1), beacon 35/35;
 ls-halcyon on the lever PASS [97 s] with the two swallow lines
 and the command-path leg; default restored (0 lever lines): ls-gfx-panes PASS [41 s] incl. `menu gate refuses place/dismiss from a non-renderer (E_PERM; none placed)` + the H-3b legs; ls-gfx-age PASS [40 s]; ls-gfx-font [67 s] / live [74 s] / mode [59 s] / mp [44 s] / osd [30 s] / osd-persist [56 s] / osd-push [35 s] PASS (the pre-fill touches every structural repaint, so the whole single-leaf CPU set re-ran); all at LS_CI_JOBS=1 LS_CI_ATTEMPTS=1.
 
+### H-3c-2: the event set -- one ring, one session, and the kernel fact that made it necessary (same run)
+
+The H-3c close had queued the chrome tiles' event latency as its own
+chunk, ahead of H-3d, and the first thing the chunk did was read the
+kernel: `loom_wait_for_completions` pumps the session of the ring's FIRST
+in-flight op and no other, and a non-blocking `enter` on a non-SQPOLL ring
+demuxes nothing at all. That is the whole mechanism behind the lever's
+session-reader finding. With two rings on two sessions, the thread parked
+on one ring never reads the other session; with ONE ring over two sessions
+it would read only the session of whichever op happened to be first in
+flight and starve the other, silently. So the design is not "a shared
+ring" but "ONE session AND one ring per client" -- io_uring's one ring per
+thread, with the session invariant made explicit because the kernel makes
+it load-bearing.
+
+`tapestry::EventRing` holds both. Every surface takes a slot: its event
+queue, its place on the registered-handle table, a region of one staging
+buffer. `wait` arms every idle slot's read and blocks once; `poll` only
+submits. Presents became a synchronous write of the tpresent on the
+present fid -- the compositor composes inside the write's dispatch, so the
+Rwrite was always the recycle gate and the Loom WRITE bought nothing but a
+second registered handle per surface (which would have halved the ring's
+capacity to 32 surfaces against halcyond's 36 worst case). The slot
+lifecycle is the I-7-shaped hazard the audit row names: a dropped surface
+says `destroy` first so its in-flight read EOFs promptly, leaves the table
+at once, and holds its slot RETIRING until that read's completion frees
+it, so a stale completion can never write a re-minted surface's region.
+halcyond's console, tiles and menu now share the ring; the loop blocks in
+`ring.wait()` when the console's queue is empty, and the H-3c dance
+(`service(block_first)` waiting on the menu's own ring while the console
+was polled) is gone rather than generalized.
+
+The witness is the case the two-pane lever could never reach: a second
+split makes three leaves, and Super+Left / Super+Right between the two
+non-console panes must re-key both bars each way -- a move that sends the
+console nothing. The leg reads the bar rects off the pane tree through
+the console (ids depend on the layout's history).
+
+Verified by the lines, jobs=1: halcyond host 55/55; every libtapestry
+client builds; ls-halcyon on the lever PASS [113 s] with the
+3-leaf leg both ways; default restored: ls-gfx-panes PASS [42 s] (the battery's two surfaces on private rings; the menu-gate + pane-tree-gate legs), ls-gfx-age [40 s], font [66 s], live [74 s], mode [59 s], mp [44 s], osd [30 s], osd-persist [56 s], osd-push [35 s] all PASS (aurora on a private ring), 0 fails, all at LS_CI_JOBS=1 LS_CI_ATTEMPTS=1.
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon

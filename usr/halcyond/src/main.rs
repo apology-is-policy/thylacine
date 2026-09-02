@@ -45,6 +45,7 @@ use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN,
     T_WALK_OPEN_FROM_ROOT};
 use tapestry::{
+    EventRing,
     Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_BTN, TEV_PTR_MOVE,
 };
 
@@ -185,7 +186,7 @@ fn summon(
         .unwrap_or((0, 0));
     let d = |v: i32, o: i32| (v + o).max(0) as u32;
     let run_d = (d(run.0, gx), d(run.1, gy), run.2.max(0) as u32, run.3.max(0) as u32);
-    menus.open(troot, model, d(ax, gx), d(ay, gy), run_d, gs);
+    menus.open(model, d(ax, gx), d(ay, gy), run_d, gs);
 }
 
 struct CacheEnt {
@@ -266,12 +267,32 @@ pub extern "C" fn rs_main() -> i64 {
         say!("halcyond: beacon tier advertise failed (clients see none)");
     }
 
-    // The surface (bounded connect retry; aurora's discipline).
+    // THE EVENT SET (H-3c-2): ONE session + ONE Loom ring for every surface
+    // this renderer opens -- the console, the tag-bar tiles, the menu -- so
+    // one blocking wait wakes for any of their events and one session's
+    // reader demuxes all of them. (Two sessions under one thread starved
+    // whichever the thread was not waiting on: a tile's CONFIGURE landed
+    // only at the next pane-tree RPC, a menu's key never -- the H-3c lever.)
+    // The console surface + the ring (bounded connect retry; aurora's
+    // discipline).
+    let mut ring: Option<EventRing> = None;
     let mut surf: Option<Surface> = None;
     for i in 0..CONNECT_TRIES {
-        match Surface::fullscreen() {
+        let r = match EventRing::connect() {
+            Ok(r) => r,
+            Err(e) => {
+                if i == CONNECT_TRIES - 1 {
+                    say!("halcyond: FAIL connect {:?}", e);
+                    return 1;
+                }
+                let _ = sleep(Duration::from_millis(CONNECT_DELAY_MS));
+                continue;
+            }
+        };
+        match Surface::fullscreen_on(&r) {
             Ok(s) => {
                 surf = Some(s);
+                ring = Some(r);
                 break;
             }
             Err(e) => {
@@ -283,19 +304,17 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
     }
+    let ring = ring.unwrap();
     let mut surf = surf.unwrap();
     let (mut w, mut h) = (surf.w as usize, surf.h as usize);
 
-    // H-3b-3: the per-leaf chrome. A second tapestry root fd for the pane
-    // 9P tree reads (the console Surface keeps its own private); the chrome
-    // set reconciles after the first successful present and on every
-    // structural relayout (the main surface's CONFIGURE), and pumps its
-    // tiles' events every pass.
-    let troot = open_path("/srv/tapestry", T_OREAD);
-    if troot < 0 {
-        say!("halcyond: /srv/tapestry root open failed (no tag bars)");
-    }
-    let mut chrome = chromeset::ChromeSet::new();
+    // H-3b-3: the per-leaf chrome, on the same session (its root serves the
+    // pane 9P tree reads) and ring; the chrome set reconciles after the
+    // first successful present and on every structural relayout (the main
+    // surface's CONFIGURE) or a tile's own CONFIGURE (a focus-only epoch),
+    // and pumps its tiles' queues every pass.
+    let troot = ring.root();
+    let mut chrome = chromeset::ChromeSet::new(ring.clone());
     let mut relayout = true;
     // H-3b-4: the exit of the last completed command, taken from the
     // transcript's exit mark and owed to the compositor as the console
@@ -318,7 +337,7 @@ pub extern "C" fn rs_main() -> i64 {
         None => Vec::new(),
     };
     say!("halcyond: {} verb rules loaded", rules.len());
-    let mut menus = menuset::MenuSet::new();
+    let mut menus = menuset::MenuSet::new(ring.clone());
     let mut frame: Vec<(u64, i32, i32)> = Vec::new();
     let mut last_open_laid: Option<LaidBlock> = None;
     let mut ptr: (i32, i32) = (0, 0);
@@ -604,8 +623,7 @@ pub extern "C" fn rs_main() -> i64 {
         // `MenuSet::service`: its session is read only by a waiter on it;
         // the menu's FRAME ticks bound the wait) and step (1) polls the
         // console's stream instead of blocking on it.
-        let menu_up = menus.is_open();
-        match menus.service(&mut gs, menu_up) {
+        match menus.service(&mut gs) {
             menuset::MenuEvent::Chosen(Action::Command(cmd)) => {
                 menus.close();
                 say!("halcyond: menu ran: {}", cmd);
@@ -652,19 +670,11 @@ pub extern "C" fn rs_main() -> i64 {
         }
 
         // (1) The next event. Bounded wait while input is held (the
-        // held-feed discipline's pace); NON-blocking while a menu is up --
-        // step (0e) already waited on the menu's ring this pass, and a wait
-        // on the console's ring would park the one thread away from the
-        // session the menu's keys arrive on.
-        let mut ev = if menu_up {
-            match surf.poll_event() {
-                Ok(next) => next,
-                Err(_) => {
-                    say!("halcyond: event stream ended (compositor gone); exiting");
-                    return 1;
-                }
-            }
-        } else if wait_is_bounded(feed_pending.len()) {
+        // held-feed discipline's pace); otherwise the console's queue, and
+        // when it is empty a wait on the RING -- any surface's event wakes
+        // it (a tile's CONFIGURE, a menu key), after which this pass may
+        // find the console's queue still empty and simply run the pumps.
+        let mut ev = if wait_is_bounded(feed_pending.len()) {
             match surf.poll_event() {
                 Ok(next) => {
                     if next.is_none() {
@@ -678,8 +688,21 @@ pub extern "C" fn rs_main() -> i64 {
                 }
             }
         } else {
-            match surf.wait_event() {
-                Ok(e) => Some(e),
+            match surf.poll_event() {
+                Ok(Some(e)) => Some(e),
+                Ok(None) => {
+                    if ring.wait().is_err() {
+                        say!("halcyond: event ring wait failed (compositor gone); exiting");
+                        return 1;
+                    }
+                    match surf.poll_event() {
+                        Ok(next) => next,
+                        Err(_) => {
+                            say!("halcyond: event stream ended (compositor gone); exiting");
+                            return 1;
+                        }
+                    }
+                }
                 Err(_) => {
                     say!("halcyond: event stream ended (compositor gone); exiting");
                     return 1;
