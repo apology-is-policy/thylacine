@@ -1095,3 +1095,31 @@ and principal both uniquely identify it). The NEW mutual authority is first
 exercised by H-4b-3's restore tool (the real second same-principal peer),
 where the positive cross-process witness lands; the batched holotype over
 H-4b-1..3 is at that arc close.
+
+## The owner file + the H-4b arc audit close (2026-09-02, H-4b-3b)
+
+H-4b-3b landed the restore TOOL (`halcyon layout restore`, in the halcyon
+crate -- not this surface) and added one tapestryd file for its SAVE side:
+`pane/<id>/owner` (`PFK_OWNER`, read-only, in the RO pane-file set). It reports
+the tile's kernel principal -- a hosted leaf's surface `owner_principal`, or an
+empty leaf's recorded `owner_principal` (0 = the environment); a container is
+E_NOENT. Ungated (a principal id is no secret; the `layout` dump is already
+ungated). The save tool reads it to mark each tile it must NOT respawn (the
+console = SYSTEM, another user); the tool's classifier is fail-CLOSED (owner 0
+and an unreadable owner are BOTH treated as the environment's).
+
+The batched holotype over H-4b-1..3 CLOSED here: **0 P0 / 0 P1 / 0 P2 / 2 P3,
+NOT dirty** (Opus fallback -- Fable was out of credits; a finished fallback
+round is closed; the prosecutor re-derived every load-bearing claim from code,
+and a parallel self-audit found 0). F2 [P3] (a fail-OPEN arm in the halcyon
+tool's env classifier -- owner 0 treated as respawnable) was FIXED on the
+halcyon side (the pure `owner_is_env`). F1 [P3] is a tapestryd-adjacent SEAM
+worth recording here: **empty-leaf `owner_principal` gates the claim MINT but
+NOT the structural verbs** (`close`/`split`/`move`/`mode`) -- `actor_owns_subtree`
+is vacuously true on an all-empty subtree (the ratified 13.6 "an all-empty
+subtree is anyone's"), so a co-resident `Session(other)` or a `Client` can
+`close` an in-flight restore's empty scaffolding before it is filled. HARMLESS
+at v1.0 (one session; trusted system daemons; a hostile same-user program is
+`Session(self)` which owns its own empties); no escalation, no hosted-tile
+degradation, no crash. The fix (block a subtree containing a FOREIGN-owned
+empty leaf) refines the ratified 13.6 rule and lands with the multi-seat seam.

@@ -224,7 +224,15 @@ one-shot, so a spent or inherited-stale token falls back to focus placement,
 and the latch only spares the wasted "claim unmatched" round trip. Absent or
 malformed -> a normal un-placed open, so a normally-launched program is
 unaffected (proved: ls-gfx-panes 33/33, the battery has no such var). The
-restore TOOL that mints the tokens + spawns the children is H-4b-3b.
+restore TOOL that mints the tokens + spawns the children LANDED at H-4b-3b
+(`halcyon layout restore`, in the halcyon crate). H-4b-3b also hardened the
+consume: `take_env_claim` now `remove_file`s the spent `TAPESTRY_CLAIM` from the
+consuming child's OWN `/env` (a per-Proc deep copy -- the spawner's is
+untouched), so a grandchild spawned from a restored child cannot inherit a token
+that names a leaf already taken. Best-effort (a `/env` that cannot unlink only
+ever degrades a grandchild to focus fallback, never a foreign placement). The
+H-4b arc audit closed 0 P0 / 0 P1 / 0 P2 / 2 P3 (NOT dirty); this surface drew
+no finding.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
