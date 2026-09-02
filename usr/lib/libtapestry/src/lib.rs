@@ -45,18 +45,28 @@
 // correct by construction, one syscall per delivery batch.
 
 #![no_std]
+// The `guest` feature is the syscall-bound half (every Surface, the ring's
+// Loom + session); off, the crate is the wire types + `ring` (the slot
+// bookkeeping), which the host tests drive.
+#![cfg_attr(not(feature = "guest"), allow(dead_code))]
 
 extern crate alloc;
 
+#[cfg(feature = "guest")]
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+#[cfg(feature = "guest")]
 use core::cell::RefCell;
 
-use libthyla_rs::loom::{Cqe, Ring, RegisteredBuffer, Sqe, ENTER_GETEVENTS};
+#[cfg(feature = "guest")]
+use libthyla_rs::loom::{Ring, RegisteredBuffer, Sqe, ENTER_GETEVENTS};
+#[cfg(feature = "guest")]
 use libthyla_rs::{
     t_close, t_open, t_read, t_weft_map, t_write, T_ORDWR, T_OREAD, T_OWRITE,
     T_WALK_OPEN_FROM_ROOT,
 };
+
+mod ring;
 
 pub const TPRESENT_LEN: usize = 32;
 pub const TPRESENT_V1: u32 = 1;
@@ -122,10 +132,22 @@ pub enum TapError {
 // slot (a delivery is up to 4 tevent records).
 const EV_REGION: u64 = 128;
 const EV_CAP: usize = 4 * TEVENT_LEN;
-/// Surfaces one EventRing carries: one registered handle (the event fid)
-/// each; the Loom registers 64.
-pub const MAX_RING_SURFACES: usize = 64;
+/// Surfaces one EventRing carries. The bound is the compositor SESSION's,
+/// not the ring's: the kernel's 9P client holds one tag per in-flight RPC
+/// out of a 64-wide table (`P9_SESSION_MAX_OUTSTANDING`), and a parked event
+/// read holds its tag until an event arrives -- so N surfaces pin N tags
+/// nearly always, and the synchronous RPCs the same thread makes on the
+/// session (presents, ctl verbs, the pane-tree reads, `destroy`, the
+/// fire-and-forget clunk of every closed fd) need tags of their own: at 64
+/// the kernel refuses every send. 48 leaves 16; halcyond's worst case is
+/// 36. (The Loom registers 64 handles; the SQ holds 128.)
+pub const MAX_RING_SURFACES: usize = 48;
 const RING_ENTRIES: u32 = 128;
+/// Events a slot holds unread before the ring stops arming its read: the
+/// back-pressure that hands a consumer which never polls a surface to the
+/// compositor's own per-surface cap (which retires the surface) -- as it
+/// was before the event set pulled every surface's events client-side.
+const SLOT_QUEUE_CAP: usize = 256;
 /// The client-side rect bound: a tpresent descriptor is 32 + 16*(k-1) bytes
 /// (the server caps at 64 independently).
 pub const MAX_RECTS: usize = 63;
@@ -143,6 +165,7 @@ const SLOT_UNSEEN: u64 = u64::MAX;
 const UD_EVENT: u64 = 2;
 
 /// One mapped surface on an `EventRing` (its session + its Loom ring).
+#[cfg(feature = "guest")]
 pub struct Surface {
     ring: EventRing,
     /// This surface's slot on the ring (its event queue + registered handle).
@@ -169,6 +192,7 @@ pub struct Surface {
     slot_seen: [u64; MAX_SLOTS],
 }
 
+#[cfg(feature = "guest")]
 fn read_all(fd: i64, buf: &mut [u8]) -> usize {
     let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
     if n <= 0 {
@@ -178,6 +202,7 @@ fn read_all(fd: i64, buf: &mut [u8]) -> usize {
     }
 }
 
+#[cfg(feature = "guest")]
 fn parse_two(text: &str, key: &str) -> Option<(u32, u32)> {
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix(key) {
@@ -192,6 +217,7 @@ fn parse_two(text: &str, key: &str) -> Option<(u32, u32)> {
 
 /// What `create` mints: a hosted content surface, a Role::Chrome surface
 /// bound to a pane's tag bar (H-3b), or a Role::Menu surface (H-3c).
+#[cfg(feature = "guest")]
 #[derive(Clone, Copy)]
 enum Mint {
     Content,
@@ -199,6 +225,7 @@ enum Mint {
     Menu,
 }
 
+#[cfg(feature = "guest")]
 impl Surface {
     /// A private ring + session, and a fullscreen surface on it (the
     /// one-surface clients; the display geometry off the session's ctl).
@@ -293,7 +320,10 @@ impl Surface {
         }
         let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
         if rc < 0 {
-            return fail(&[ctl], TapError::Create);
+            // The mint already took a server-side slot (the per-conn cap
+            // counts a Minted surface): say `destroy`, or a refused create
+            // pins the slot for the session's life (the H-3c-2 round F2).
+            return fail_created(ctl, &[ctl], TapError::Create);
         }
 
         // The weave: geometry read + the zero-copy map (Tweft under the
@@ -669,6 +699,7 @@ impl Surface {
     }
 }
 
+#[cfg(feature = "guest")]
 impl Drop for Surface {
     fn drop(&mut self) {
         // The weave fid's clunk drops the client mapping (the kernel
@@ -697,6 +728,7 @@ impl Drop for Surface {
 /// cfg-3: read the display geometry off a throwaway connection (the
 /// startup push's verify-readback; the same "display W H" line
 /// Surface::fullscreen parses).
+#[cfg(feature = "guest")]
 pub fn display_dims() -> Option<(u32, u32)> {
     let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
     if root < 0 {
@@ -720,6 +752,7 @@ pub fn display_dims() -> Option<(u32, u32)> {
 /// console surface is born at the pushed geometry), and the gate's
 /// peer identity is per-conn, so the throwaway conn still carries the
 /// CALLER's identity. Connect + write + close; fail-soft to the caller.
+#[cfg(feature = "guest")]
 pub fn global_ctl_once(cmd: &str) -> Result<(), TapError> {
     let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
     if root < 0 {
@@ -742,53 +775,60 @@ pub fn global_ctl_once(cmd: &str) -> Result<(), TapError> {
 // =============================================================================
 // The event set (H-3c-2): ONE session + ONE Loom ring per client, shared by
 // every Surface opened on it -- io_uring's one ring per thread. A slot per
-// surface holds its event queue + its place on the registered-handle table;
-// a slot is reused only after the read in flight on it has completed (the
-// retiring state), so a stale completion can never land in a re-minted
-// surface's region, and its generation tag makes the check belt and braces.
+// surface holds its event queue + its place on the registered-handle table
+// (index == slot index, always: the table is replaced whole at every join
+// and leave, a placeholder fid standing in every slot without a live event
+// fid, so an SQE the kernel has queued but not yet consumed can never be
+// re-bound to another surface's fid by a rebuild in between); a slot is
+// reused only after the read in flight on it has completed (the retiring
+// state), so a stale completion can never land in a re-minted surface's
+// region, and its generation tag makes the check belt and braces.
 // =============================================================================
 
-struct Slot {
-    used: bool,
-    /// The surface dropped while a read was in flight: the slot stays taken
-    /// until that read's completion (the EOF after `destroy`) frees it.
-    retiring: bool,
-    event_fd: i32,
-    /// This slot's index on the ring's registered-handle table (rebuilt at
-    /// every join/leave -- dense, in slot order).
-    hidx: u32,
-    armed: bool,
-    /// Latched when the event stream EOFs (the surface retired server-side):
-    /// no further reads are armed -- without the latch, a poll caller would
-    /// re-arm through the EOF forever.
-    closed: bool,
-    /// Bumped per join: the tag a completion must carry to be this
-    /// surface's.
-    gen: u32,
-    pending: Vec<Event>,
+/// An fd closed with its owner; declared last in `RingCore` so the session
+/// root outlives the Loom (whose registered table + in-flight reads hold
+/// their own Spoor refs) by construction, not by a comment.
+#[cfg(feature = "guest")]
+struct OwnedFd(i64);
+
+#[cfg(feature = "guest")]
+impl Drop for OwnedFd {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            unsafe { t_close(self.0) };
+        }
+    }
 }
 
+#[cfg(feature = "guest")]
 struct RingCore {
-    root: i64,
     ring: Ring,
     staging: RegisteredBuffer,
-    slots: Vec<Slot>,
+    slots: Vec<ring::Slot>,
+    /// A read-only `ctl` fid: the registered table's entry for every slot
+    /// without a live event fid (free, retiring, or left). A stale read on
+    /// it returns text nobody reads -- never another surface's event.
+    placeholder: OwnedFd,
+    root: OwnedFd,
 }
 
 /// ONE 9P session to the compositor + ONE Loom ring, shared by every
 /// Surface opened on it: `wait` blocks until ANY of them has an event
 /// (then poll each); `poll` reaps without blocking. Clone = another handle
 /// to the same ring; the session closes with the last one.
+#[cfg(feature = "guest")]
 pub struct EventRing {
     core: Rc<RefCell<RingCore>>,
 }
 
+#[cfg(feature = "guest")]
 impl Clone for EventRing {
     fn clone(&self) -> EventRing {
         EventRing { core: self.core.clone() }
     }
 }
 
+#[cfg(feature = "guest")]
 impl EventRing {
     /// Connect a fresh session to /srv/tapestry and set up its ring.
     pub fn connect() -> Result<EventRing, TapError> {
@@ -824,26 +864,27 @@ impl EventRing {
             unsafe { t_close(root) };
             return Err(TapError::Loom);
         }
-        let mut slots = Vec::with_capacity(MAX_RING_SURFACES);
-        for _ in 0..MAX_RING_SURFACES {
-            slots.push(Slot {
-                used: false,
-                retiring: false,
-                event_fd: -1,
-                hidx: 0,
-                armed: false,
-                closed: false,
-                gen: 0,
-                pending: Vec::new(),
-            });
+        let placeholder = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OREAD) };
+        if placeholder < 0 {
+            unsafe { t_close(root) };
+            return Err(TapError::Protocol);
         }
-        Ok(EventRing { core: Rc::new(RefCell::new(RingCore { root, ring, staging, slots })) })
+        let slots = ring::new_slots();
+        Ok(EventRing {
+            core: Rc::new(RefCell::new(RingCore {
+                ring,
+                staging,
+                slots,
+                placeholder: OwnedFd(placeholder),
+                root: OwnedFd(root),
+            })),
+        })
     }
 
     /// The session root fd (for the pane-tree files, `ctl`, ...). Owned by
     /// the ring: never close it.
     pub fn root(&self) -> i64 {
-        self.core.borrow().root
+        self.core.borrow().root.0
     }
 
     /// The display geometry off this session's global ctl.
@@ -879,77 +920,47 @@ impl EventRing {
     }
 }
 
+#[cfg(feature = "guest")]
 impl RingCore {
-    fn ud(slot: usize, gen: u32) -> u64 {
-        ((slot as u64) << 40) | ((gen as u64) << 8) | UD_EVENT
-    }
-
     /// Take a slot for `event_fd` and put the fid on the table.
     fn join(&mut self, event_fd: i32) -> Result<u16, TapError> {
-        let i = self.slots.iter().position(|s| !s.used).ok_or(TapError::Full)?;
-        {
-            let s = &mut self.slots[i];
-            s.used = true;
-            s.retiring = false;
-            s.event_fd = event_fd;
-            s.armed = false;
-            s.closed = false;
-            s.gen = s.gen.wrapping_add(1);
-            s.pending.clear();
-        }
+        let i = ring::join(&mut self.slots, event_fd)?;
         if let Err(e) = self.reregister() {
-            self.slots[i].used = false;
+            self.slots[i as usize].used = false;
             return Err(e);
         }
-        Ok(i as u16)
+        Ok(i)
     }
 
     /// A surface is going: off the table now; the slot frees now, or when
     /// the read in flight on it completes.
     fn leave(&mut self, slot: u16) {
-        let i = slot as usize;
-        if i >= self.slots.len() || !self.slots[i].used {
-            return;
+        if ring::leave(&mut self.slots, slot) {
+            let _ = self.reregister();
         }
-        {
-            let s = &mut self.slots[i];
-            s.pending.clear();
-            if s.armed {
-                s.retiring = true;
-            } else {
-                s.used = false;
-            }
-        }
-        let _ = self.reregister();
     }
 
-    /// The registered-handle table = every live slot's event fid, dense, in
-    /// slot order; each slot learns its index. Replaces the kernel's table
-    /// (IORING_REGISTER_FILES semantics); a read in flight keeps its own pin.
+    /// The registered-handle table (`ring::table`): index == slot index,
+    /// replaced whole (the kernel has no per-entry update;
+    /// IORING_REGISTER_FILES_UPDATE's index stability, emulated). A read in
+    /// flight keeps its own pin; an SQE still queued keeps its index --
+    /// which names the placeholder once its slot left. A failed replace
+    /// leaves the kernel's table as it was, which every index still matches.
     fn reregister(&mut self) -> Result<(), TapError> {
-        let mut fds: Vec<i32> = Vec::new();
-        for s in self.slots.iter_mut() {
-            if s.used && !s.retiring {
-                s.hidx = fds.len() as u32;
-                fds.push(s.event_fd);
-            }
-        }
+        let fds = ring::table(&self.slots, self.placeholder.0 as i32);
         self.ring.register_handles(&fds).map_err(|_| TapError::Loom)
     }
 
-    /// Arm a read on every live slot without one (single-shot; see the
-    /// header note). Returns how many were queued.
+    /// Arm a read on every slot that wants one (`ring::arm_wanted`; single-
+    /// shot, see the header note). Returns how many were queued.
     fn arm_all(&mut self) -> Result<u32, TapError> {
         let mut n = 0u32;
         for i in 0..self.slots.len() {
-            let (hidx, gen) = {
-                let s = &self.slots[i];
-                if !s.used || s.retiring || s.armed || s.closed {
-                    continue;
-                }
-                (s.hidx, s.gen)
-            };
-            let sqe = Sqe::read(hidx, 0, EV_CAP as u32, 0, (i as u64) * EV_REGION, Self::ud(i, gen));
+            if !ring::arm_wanted(&self.slots[i]) {
+                continue;
+            }
+            let gen = self.slots[i].gen;
+            let sqe = Sqe::read(i as u32, 0, EV_CAP as u32, 0, (i as u64) * EV_REGION, ring::ud(i, gen));
             self.ring.try_submit(&sqe).map_err(|_| TapError::Loom)?;
             self.slots[i].armed = true;
             n += 1;
@@ -964,6 +975,12 @@ impl RingCore {
     /// posted).
     fn pump(&mut self, block: bool) -> Result<(), TapError> {
         let n = self.arm_all()?;
+        if block && !ring::any_armed(&self.slots) {
+            // Nothing in flight: the kernel's wait returns at once and a
+            // caller looping on `wait` would spin. Every surface here is
+            // closed, full, or gone -- nothing on this ring can complete.
+            return Err(TapError::Closed);
+        }
         let rc = if block {
             self.ring.enter(n, 1, ENTER_GETEVENTS)
         } else if n > 0 {
@@ -973,83 +990,23 @@ impl RingCore {
         };
         rc.map_err(|_| TapError::Loom)?;
         while let Some(cqe) = self.ring.reap() {
-            self.route(cqe);
+            ring::route(&mut self.slots, self.staging.as_mut_slice(), cqe.user_data, cqe.result);
         }
         Ok(())
     }
 
-    fn route(&mut self, cqe: Cqe) {
-        if cqe.user_data & 0xff != UD_EVENT {
-            return;
-        }
-        let i = (cqe.user_data >> 40) as usize;
-        let gen = ((cqe.user_data >> 8) & 0xffff_ffff) as u32;
-        if i >= self.slots.len() {
-            return;
-        }
-        let region = (i as u64 * EV_REGION) as usize;
-        let d = self.staging.as_mut_slice();
-        let s = &mut self.slots[i];
-        if !s.used || s.gen != gen {
-            return; // a completion for a slot that has moved on
-        }
-        s.armed = false;
-        if s.retiring {
-            // The dropped surface's last read completed (the EOF after its
-            // `destroy`, or an error): the slot may be re-minted now.
-            s.used = false;
-            s.retiring = false;
-            return;
-        }
-        if cqe.result == 0 {
-            s.closed = true; // EOF: the surface retired server-side
-        }
-        if cqe.result > 0 {
-            let n = (cqe.result as usize).min(EV_CAP);
-            let mut off = region;
-            let end = region + n;
-            while off + TEVENT_LEN <= end {
-                let g16 = |o: usize| u16::from_le_bytes([d[o], d[o + 1]]);
-                let g32 = |o: usize| u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
-                let g64 = |o: usize| {
-                    let mut b = [0u8; 8];
-                    b.copy_from_slice(&d[o..o + 8]);
-                    u64::from_le_bytes(b)
-                };
-                s.pending.push(Event {
-                    kind: g16(off),
-                    code: g16(off + 2),
-                    value: g32(off + 4),
-                    rune: g32(off + 8),
-                    mods: g16(off + 12),
-                    flags: g16(off + 14),
-                    tick: g64(off + 16),
-                });
-                off += TEVENT_LEN;
-            }
-        }
-    }
-
     fn take_event(&mut self, slot: u16) -> Result<Option<Event>, TapError> {
-        let s = &mut self.slots[slot as usize];
-        if s.closed && s.pending.is_empty() {
-            return Err(TapError::Closed);
-        }
-        Ok(s.pending.pop_first())
+        ring::take_event(&mut self.slots, slot)
     }
 }
 
-impl Drop for RingCore {
-    fn drop(&mut self) {
-        // The Ring + the staging buffer drop themselves (the loom fd close
-        // abandons any read still in flight); the session goes last.
-        unsafe { t_close(self.root) };
-    }
-}
+// RingCore drops by field order: the Loom (its fd close abandons any read
+// still in flight), the staging buffer, the queues, then the two owned fds
+// -- the placeholder, and the session root last.
 
 
 /// A tiny front-pop helper (Vec as a FIFO; event volumes are small).
-trait PopFirst<T> {
+pub(crate) trait PopFirst<T> {
     fn pop_first(&mut self) -> Option<T>;
 }
 impl<T> PopFirst<T> for Vec<T> {

@@ -752,7 +752,7 @@ pub extern "C" fn rs_main() -> i64 {
                                     }
                                     dirty = true;
                                 }
-                                NormalAct::ToggleSelect => {
+                                NormalAct::ToggleSelect if e.value == 1 => {
                                     if let Some(s) = sel.as_mut() {
                                         s.toggle_anchor();
                                     }
@@ -770,7 +770,7 @@ pub extern "C" fn rs_main() -> i64 {
                                     }
                                     dirty = true;
                                 }
-                                NormalAct::Paste => {
+                                NormalAct::Paste if e.value == 1 => {
                                     // Paste = type the register into the
                                     // prompt: back to Insert, re-anchored.
                                     mode = Mode::Insert;
@@ -844,7 +844,7 @@ pub extern "C" fn rs_main() -> i64 {
                                         }
                                     }
                                 }
-                                NormalAct::Act => {
+                                NormalAct::Act if e.value == 1 => {
                                     // H-3c: the verb menu for the selected
                                     // run (the row's first when none is),
                                     // anchored under the run as the last
@@ -896,7 +896,11 @@ pub extern "C" fn rs_main() -> i64 {
                                         }
                                     }
                                 }
-                                NormalAct::None => {}
+                                // An autorepeat of a one-shot is not another
+                                // press: the press acted (a held Enter would
+                                // re-summon the menu at the repeat rate -- the
+                                // H-3c-2 round F6); movement keys repeat.
+                                NormalAct::None | NormalAct::Act | NormalAct::Paste | NormalAct::ToggleSelect => {}
                             }
                         } else if e.rune == 0x1b {
                             // Esc enters Normal (the Helix-modal boundary;

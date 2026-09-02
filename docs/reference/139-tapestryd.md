@@ -881,6 +881,29 @@ of its FIRST in-flight op only (`loom_wait_for_completions`), and a
 non-blocking enter demuxes nothing -- the mechanism behind the H-3c
 lever's session-reader finding. A dropped surface says `destroy`, leaves the
 table, and holds its slot RETIRING until its in-flight read completes.
+**The H-3c-2 audit close (2026-09-02)** hardened the slot machinery, now
+`usr/lib/libtapestry/src/ring.rs` (syscall-free, host-tested: `cargo test -p
+libtapestry --no-default-features --target aarch64-apple-darwin`, 9 tests,
+two sabotage-checked): a read that completes with an ERROR ends the stream
+exactly as EOF does (F1 -- an errored read re-armed forever posted its error
+inline and satisfied every blocking wait at once: a dead compositor livelocked
+every client at 100 % CPU); the registered table is INDEX-STABLE (index ==
+slot index; a read-only `ctl` fid stands in every slot without a live event
+fid; the table is replaced whole at every join/leave) so an SQE the kernel
+has queued but not yet consumed -- `loom_drain_sq` stops early behind the CQ
+admission gate -- can never be re-bound to another surface's fid (F3/SA-4);
+the ring stops at **48 surfaces**, the session's 64-tag table minus the
+tags the same thread's synchronous RPCs need (a parked event read holds a
+tag; at 64 every send is refused -- SA-3); a slot whose queue holds 256
+unread events is not re-armed, so a surface its owner never polls falls
+back to the compositor's own 128-event cap + retire (F4); a blocking `wait`
+with nothing in flight returns `Err(Closed)` instead of spinning; a refused
+`create` says `destroy` before closing (F2: the mint already took a
+server-side slot, and the session now outlives every surface); and the
+server retires a still-Minted surface when its last ctl fid clunks
+(`fid_clunk`) -- the pool's accounting is the server's, not the client's
+courtesy. `Drop` order is now by field order (an `OwnedFd` newtype; the
+session root last).
 **Event reads are single-shot,
 re-armed after each drain** — a multishot READ re-arms into the same
 registered slice, so an undrained shot would be overwritten (droppable for

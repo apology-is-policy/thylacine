@@ -9,5 +9,12 @@ license.workspace = true
 name = "tapestry"
 path = "src/lib.rs"
 
+[features]
+default = ["guest"]
+# The syscall-bound half (every Surface + the ring's Loom + session). Off,
+# the crate is the wire types + the ring's slot bookkeeping, host-testable:
+#   cargo test -p libtapestry --no-default-features --target aarch64-apple-darwin
+guest = ["dep:libthyla-rs"]
+
 [dependencies]
-libthyla-rs = { path = "../libthyla-rs" }
+libthyla-rs = { path = "../libthyla-rs", optional = true }

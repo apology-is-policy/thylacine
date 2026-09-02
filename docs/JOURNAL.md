@@ -7521,3 +7521,88 @@ tty-susp predicate was "one predicate away" in a comment for weeks.
   a fallback round would spend the surface without buying it.
 - **`docs/REFERENCE.md`'s snapshot block** — dead since Phase 5 (above). Needs a
   decision about what it is for, not a patch.
+
+### The H-3c-2 audit close: the error nobody latched, the table that moved under a queued read, and a bound that was the session's, not the ring's (same run, after the fourth self-compaction; the operator back)
+
+The round on `7b9a457d` (one holotype-reviewer, explicit `model: fable`; every
+one of its 103 turns on Fable 5.1 by the transcript's `model` field, start ==
+end -- the first round this run with no fallback) came back 0 P0 / 1 P1 /
+1 P2 / 5 P3, and the self-audit that ran beside it found eight, four of them
+the same defects. Two things about the round itself are worth more than the
+counts. First, the report was nearly lost: the reviewer wrote it as a `Write`
+to its scratchpad file, the harness refused the write ("subagents return
+findings as text"), and the transcript went silent -- the report was recovered
+from the refused call's input, and the completion notification that arrived
+later matched it byte for byte. Second, the waiter I had on the reviewer
+matched `MODEL(end): Claude` inside a TOOL RESULT (the reviewer's own read of
+the brief echoed the token) and reported the agent finished while it was
+mid-read -- the expect-token-residue trap again, now on the harness side.
+A waiter on an agent must key on the agent's own final text block, never on
+any occurrence of the token in its transcript.
+
+**F1 [P1] was pre-existing and the event set made it universal.** `route`
+latched `closed` on a zero-byte read only. A NEGATIVE result -- the kernel
+posts one for every in-flight op when the session dies, and a dead session
+completes every re-arm INLINE with an error (`p9_client_submit_async`,
+K10) -- cleared `armed` and nothing else, so the next pump re-armed the
+slot, the inline error CQE satisfied the blocking wait's `min_complete`
+at once, and `wait_event` (aurora, the demo) and halcyond's step (1) spun at
+100 % CPU with the "compositor gone; exiting" arms unreachable, because the
+lib never yielded the `Err` they were written against. The old per-surface
+lib had the identical latch; the shared ring carried it into every client.
+Now `result <= 0` ends the stream, with a host test that fails on the old
+latch (sabotage-checked).
+
+**The table that could move under a queued read (SA-4, F3).** The registered
+table was rebuilt DENSE at every join and leave, each live slot learning a
+new index. I had assumed every SQE queued by `arm_all` is consumed by the
+same pump's enter -- and the kernel says no: `loom_drain_sq` stops early
+behind the CQ admission gate and the chain gate, leaving the SQE at the SQ
+head for the NEXT enter. With a rebuild in between, that SQE's index names
+another surface's fid, and its completion carries the retiring slot's tag:
+the other surface's event is consumed and dropped. Unreachable at today's
+sizes (the CQ is 256 against at most 48 in flight), which is exactly the
+kind of correctness that rots when a constant moves. The fix is by
+construction, not arithmetic: index == slot index, always; a read-only `ctl`
+fid stands in every slot without a live event fid; the table is replaced
+whole -- IORING_REGISTER_FILES_UPDATE's index stability, emulated on a
+kernel that only has REPLACE. The prosecutor's F3 (indices committed before
+the syscall) fell out of the same change.
+
+**The bound was the session's.** MAX_RING_SURFACES was 64 -- the Loom's
+registered-handle count -- but a parked event read holds a 9P TAG until an
+event arrives, the session's table is 64 wide, and `alloc_tag` refuses at
+64: a client with 64 surfaces could not present, could not read the pane
+tree, could not even say `destroy`. The ring stops at 48, with the
+derivation in the doc comment; halcyond's worst case is 36.
+
+Also closed: an unpolled surface's queue was unbounded client-side (the
+shared ring pulls every surface's events; before, the server's 128 cap
+retired a frozen surface) -- a slot at 256 unread is not re-armed, so the
+server's cap applies again (F4); a blocking wait with nothing in flight
+returned at once and a looping caller spun (SA-6); the drop-order comment
+was true of an order the code did not implement (F5 -- `OwnedFd`, field
+order); a refused `create` closed the ctl fid without `destroy` and the
+mint had already taken a server-side slot that the session's new lifetime
+never releases (F2, P2 -- `fail_created`, plus the server now retires a
+minted-never-created surface when its last ctl fid clunks: the pool's
+accounting is the server's, not the client's courtesy); halcyond acted on
+Enter AUTOREPEATS -- the compositor's rule (a repeat follows its press,
+never the modal) is right, and halcyond then re-summoned the menu thirty
+times a second for as long as the key was held (F6 -- one-shots on the
+press only). The slot bookkeeping is now `ring.rs`, syscall-free behind a
+`guest` feature (default on; every consumer unchanged), with nine host tests.
+
+**Deferred, owned: F7.** The held-feed path polls and sleeps, and a
+submit-only enter demuxes nothing, so keys typed while the feed is held can
+queue server-side until the console is WEDGE-retired. The two cheap fixes
+are both wrong: a throwaway RPC per pass is a workaround, and waiting on the
+ring is bounded by FRAME ticks only while the console is visible. The honest
+primitive is a timed Loom enter -- a syscall-interface change, its own
+kernel chunk (`memory/bug_held_feed_path_never_demuxes.md`).
+
+Verified: libtapestry ring host tests 9/9 (two sabotage-checked), halcyond
+host 55/55, beacon 35/35, every libtapestry client builds; ls-halcyon on the
+lever PASS [114 s] (38 lines, both EVENT SET lines, both swallow edges, 0
+WEDGED); the default set on restored fixtures: panes PASS [42 s] 31, age [40 s] 3, font [67 s] 5, live [73 s] 5, mode [60 s] 9, mp [44 s] 3, osd [31 s] 7, osd-persist [57 s] 6, osd-push [34 s] 5 witness lines, 0 fails. The close
+is NOT dirty by the count rule; its residue rides the H-3d round.

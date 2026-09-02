@@ -291,6 +291,15 @@ re-keyed no tag bar until a later relayout. Witness: the lever's 3-leaf
 leg (Super+Left/Right between the two non-console panes; both bars swap
 live/resting with no event to the console).
 
+**The H-3c-2 audit close (2026-09-02).** The ring's routing (now
+`libtapestry`'s `ring` module, host-tested) ends a stream on an errored
+read as it does on EOF, so a dead compositor reaches the loop's
+"compositor gone; exiting" arms instead of livelocking it (the round's F1);
+`NormalAct::Act` / `Paste` / `ToggleSelect` fire on a key's PRESS only --
+the compositor routes a repeat to the surface that saw the press, so a held
+Enter used to re-summon the menu at the autorepeat rate (F6). See 139
+"THE EVENT SET" for the ring-side changes.
+
 **The audit close (2026-09-02).** `menu_size(m, gs, max_h)` caps the
 surface height at the display (`display_h` reads `ctl`'s `display W H` on
 the pane-tree session; the round's F3: the compositor refuses a taller
@@ -382,3 +391,12 @@ optimization (v0 presents full frames).
 - The consfeed held-queue discipline is aurora's #129/#135/#136 verbatim;
   its policy lives in `input.rs` so the host tests pin it — do not inline
   a "simpler" retry loop in the bin.
+- OWNED, deferred (the H-3c-2 round F7, pre-existing): the held-feed path
+  (`wait_is_bounded`) polls and sleeps; a submit-only Loom enter demuxes
+  nothing, so while the feed is held and nothing else makes an RPC on the
+  session, the console's parked read reply sits undemuxed and every KEY
+  typed queues server-side until the compositor's 128-event cap WEDGE-
+  retires the console (a held key for ~4 s in front of a silent, non-reading
+  foreground). The honest primitive is a timed Loom enter (a kernel seam +
+  a syscall-arg change); a per-pass throwaway RPC would be a workaround.
+  `memory/bug_held_feed_path_never_demuxes.md`.

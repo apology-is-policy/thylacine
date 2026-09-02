@@ -11464,15 +11464,35 @@ impl Conn {
         }
     }
 
-    fn fid_clunk(&mut self, fid: u32) {
+    fn fid_clunk(&mut self, comp: &mut Comp, fid: u32) {
+        let mut gone: Option<Fid> = None;
         if let Some(i) = self.fid_find(fid) {
-            self.fids[i] = None;
+            gone = self.fids[i].take();
         }
         // Cancel site 2 (clunk): this fid's held replies die with it.
         self.pending_reads.retain(|pr| pr.fid != fid);
         self.pending_fences.retain(|pf| pf.fid != fid);
         self.pending_ring_fences.retain(|pf| pf.fid != fid);
         self.text_snaps.retain(|t| t.0 != fid);
+        // A surface minted (surface/new) and never created, whose last ctl
+        // fid just clunked, can never be created -- the verb rides that fid
+        // -- and nothing but `destroy` or the conn's death would reap it: a
+        // client that mints and closes (a refused create; a crash between
+        // the two) would pin its own pool for the session's life (the
+        // H-3c-2 round F2). The accounting is the server's, not the
+        // client's courtesy: retire it here.
+        if let Some(f) = gone {
+            if is_surf(f.path) && surf_fk(f.path) == FK_CTL {
+                let n = surf_n(f.path);
+                let minted = comp.surf_owned(n, self.conn_id, f.gen)
+                    && comp.surf(n).map_or(false, |s| matches!(s.state, SurfState::Minted));
+                let another = self.fids.iter().flatten().any(|o| o.path == f.path);
+                if minted && !another {
+                    say!("tapestryd: surface {} minted, never created, its ctl clunked: retired", n);
+                    comp.retire(n);
+                }
+            }
+        }
     }
 
     fn drop_all_fids(&mut self, comp: &mut Comp) {
@@ -11592,7 +11612,7 @@ impl Conn {
             p9::P9_TWRITE => self.h_write(comp, tmsg, tag),
             p9::P9_TREADDIR => self.h_readdir(comp, tmsg, tag),
             p9::P9_TGETATTR => self.h_getattr(comp, tmsg, tag),
-            p9::P9_TCLUNK => self.h_clunk(tmsg, tag),
+            p9::P9_TCLUNK => self.h_clunk(comp, tmsg, tag),
             p9::P9_TFLUSH => self.h_flush(tmsg, tag),
             p9::P9_TWEFT => self.h_weft(comp, tmsg, tag),
             _ => self.err(tag, p9::E_NOSYS),
@@ -15167,7 +15187,7 @@ impl Conn {
         )
     }
 
-    fn h_clunk(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_clunk(&mut self, comp: &mut Comp, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_tclunk(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -15175,7 +15195,7 @@ impl Conn {
         if self.fid_find(a.fid).is_none() {
             return self.err(tag, p9::E_BADF);
         }
-        self.fid_clunk(a.fid);
+        self.fid_clunk(comp, a.fid);
         p9::build_rclunk(&mut self.out_buf, tag)
     }
 

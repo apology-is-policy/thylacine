@@ -824,6 +824,22 @@ focus move between two non-console panes re-keyed no tag bar -- and a
 menu's key never, which H-3c had worked around for the menu alone. The
 lever's 3-leaf leg witnesses the fix.
 
+AS-BUILT (the H-3c-2 audit close, 2026-09-02; ratified under the 2026-09-01
+standing authorization, the operator back for the close): the ring's slot
+machinery moved into a syscall-free `ring` module with host tests, and the
+round's findings hardened it -- an errored read ends its stream as EOF does
+(a dead compositor no longer livelocks every client), the registered table
+is index-stable (a queued-but-unconsumed read can never be re-bound to
+another surface's fid), the ring stops at 48 surfaces (the session's 64-tag
+table minus the synchronous RPCs' share), a surface nobody polls stops being
+read for at 256 queued events (the compositor's own cap then retires it), a
+refused `create` says `destroy` (the mint already took a server-side slot),
+and the compositor retires a minted-never-created surface whose last ctl fid
+clunks. halcyond acts on a one-shot key (Enter, p, v) on its press only --
+a held Enter no longer re-summons the menu at the autorepeat rate. OWNED,
+deferred to a kernel seam: the held-feed path never demuxes (a timed Loom
+enter is the honest primitive; `memory/bug_held_feed_path_never_demuxes.md`).
+
 **RATIFIED VOTE 2 — scope + sequencing: four sub-chunks, full Daylight.**
 H-3a (pane bevels + hairline + cast shadow + the `libhalcyon::theme` crate +
 the transcript-palette adoption) -> H-3b (the executable tag bar: the
