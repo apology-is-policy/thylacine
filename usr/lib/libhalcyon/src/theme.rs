@@ -35,14 +35,14 @@ pub struct LiveKey {
 /// itself. Content inside an embedded terminal is Bonfire's, not Daylight's.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Syntax {
-    pub slate: Argb, // keyword / info / OBJECT REFERENCE (the presentation colour)
-    pub sage: Argb,  // type
-    pub sand: Argb,  // member / warning
-    pub moss: Argb,  // constant
-    pub ash: Argb,   // function / identifier
-    pub dusk: Argb,  // string
-    pub smoke: Argb, // comment
-    pub fen: Argb,   // success
+    pub slate: Argb,    // keyword / info / OBJECT REFERENCE (the presentation colour)
+    pub sage: Argb,     // type
+    pub sand: Argb,     // member / warning
+    pub moss: Argb,     // constant
+    pub ash: Argb,      // function / identifier
+    pub dusk: Argb,     // string
+    pub smoke: Argb,    // comment
+    pub fen: Argb,      // success
     pub cinnabar: Argb, // error
 }
 
@@ -51,11 +51,11 @@ pub struct Syntax {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     // Ground (section 1.1)
-    pub floor: Argb,    // workspace floor; the bevel perceptual midpoint
-    pub surface: Argb,  // pane surface (parchment)
-    pub header: Argb,   // tag bar bg; ALSO the inner hairline (section 2.4)
-    pub raised: Argb,   // pill bg
-    pub border: Argb,   // explicit strokes, tag-bar separators, the cast shadow
+    pub floor: Argb,   // workspace floor; the bevel perceptual midpoint
+    pub surface: Argb, // pane surface (parchment)
+    pub header: Argb,  // tag bar bg; ALSO the inner hairline (section 2.4)
+    pub raised: Argb,  // pill bg
+    pub border: Argb,  // explicit strokes, tag-bar separators, the cast shadow
     // Ink (section 1.2)
     pub fg: Argb,
     pub fg_dim: Argb,
@@ -86,12 +86,12 @@ pub struct Theme {
 /// Chrome metrics (HALCYON-VISUAL section 3.1 / 4.3). Pixels.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Metrics {
-    pub bevel: i32,     // pane bevel width (2)
-    pub gap: i32,       // inter-pane gap AND workspace padding (2)
-    pub hairline: i32,  // structural hairline (1)
-    pub header_h: i32,  // tag bar height (20)
-    pub status_h: i32,  // status bar height (20)
-    pub tag_pad_x: i32, // tag bar horizontal padding (6)
+    pub bevel: i32,       // pane bevel width (2)
+    pub gap: i32,         // inter-pane gap AND workspace padding (2)
+    pub hairline: i32,    // structural hairline (1)
+    pub header_h: i32,    // tag bar height (20)
+    pub status_h: i32,    // status bar height (20)
+    pub tag_pad_x: i32,   // tag bar horizontal padding (6)
     pub tab_strip_h: i32, // tab/stack indicator strip (5); glyph-free, G-6c/D7
 }
 
@@ -199,7 +199,7 @@ mod tests {
         assert_eq!(d.raised, 0xFFBDB0A0);
         assert_eq!(d.border, 0xFFA89880);
         assert_eq!(hairline(d), 0xFFCEC4B6); // == header, section 2.4
-        // ink
+                                             // ink
         assert_eq!(d.fg, 0xFF1A120A);
         assert_eq!(d.fg_dim, 0xFF3A2E22);
         assert_eq!(d.fg_muted, 0xFF6A5A48);
@@ -209,7 +209,10 @@ mod tests {
         assert_eq!(d.bevel_left, 0xFFE2D6C0);
         assert_eq!(d.bevel_right, 0xFF362410);
         assert_eq!(d.bevel_bottom, 0xFF221405);
-        assert!(d.bevel_top != d.bevel_left, "NNW gives four distinct edges, not two");
+        assert!(
+            d.bevel_top != d.bevel_left,
+            "NNW gives four distinct edges, not two"
+        );
         assert!(d.bevel_right != d.bevel_bottom);
         // accent
         assert_eq!(d.ember, 0xFFE07840);
