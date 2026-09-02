@@ -65,6 +65,15 @@ struct t_stat;   // <thylacine/syscall.h>; the stalk_stat metadata sink
                         // (ARCH 9.5); a union with NO MCREATE member fails
                         // -T_E_ACCES (no writable target). A non-union parent
                         // crosses to the mounted root exactly as STALK_WALK.
+#define STALK_REMOVE 5  // resolve a REMOVE PARENT (unlink / rmdir / rename
+                        // source). Identical to STALK_WALK EXCEPT at a
+                        // UNION final quarry, where it returns the mount
+                        // point UNCROSSED (like STALK_MOUNT): the caller
+                        // then selects the member that HOLDS the leaf
+                        // (stalk_union_member_holding), so a remove acts on
+                        // the entry's own member, not member 0 or the
+                        // MCREATE member (UM-7 F3). A non-union parent
+                        // crosses to the mounted root exactly as STALK_WALK.
 
 // amode FLAG (OR'd into one of the four base amodes above; DISTRO D-1):
 // do NOT follow a symlink at the FINAL component. Intermediate symlinks are
@@ -183,4 +192,25 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe, struct Spoor **out,
 bool stalk_union_has_child(struct Proc *p, struct Spoor *dir,
                            const char *name, u32 namelen);
 
+
+// stalk_union_member_holding (UM, UM-7 F3) -- the member of the union at
+// `point` (a pre-cross mount point with >= 2 members) that HOLDS the entry
+// `leaf` (NUL-terminated): snapshot every member ATOMICALLY, cross each in
+// declared order, and return the FIRST whose Dev.walk resolves `leaf` (the
+// same first-hit rule as the walk). The returned Spoor is the crossed MEMBER
+// ROOT (ref-held, mount-point name transplanted) -- the directory a remove of
+// `leaf` must act on. Plan 9 union skip: a member that fails to cross / is not
+// a directory / denies X-search / lacks `leaf` is SKIPPED; NULL means no member
+// holds it (caller answers -T_E_NOENT). *errp is set only on a clone OOM.
+struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
+                                         const char *leaf, int *errp);
+
+// stalk_union_create_member (UM) -- the create-target member of the union at
+// `point`: the FIRST member (declared order) carrying MCREATE, crossed to its
+// leaf root (ref-held, mount-point name transplanted). NULL + *errp==0 means
+// no MCREATE member (caller answers -T_E_ACCES); NULL + *errp==T_E_IO means the
+// chosen member failed to cross. Exposed (UM-8c) for the fd/rename dest that
+// resolves a union point and must route a create through its writable member.
+struct Spoor *stalk_union_create_member(struct Proc *p, struct Spoor *point,
+                                        int *errp);
 #endif // THYLACINE_STALK_H

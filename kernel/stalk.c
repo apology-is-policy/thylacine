@@ -293,7 +293,7 @@ bool stalk_union_has_child(struct Proc *p, struct Spoor *dir,
 // target) or a member cross fails (*errp = T_E_IO). The create is member-scoped
 // (Plan 9): it does NOT check other members for the leaf name -- the merged-view
 // existence check is the open-first leg's job.
-static struct Spoor *stalk_union_create_member(struct Proc *p, struct Spoor *base,
+struct Spoor *stalk_union_create_member(struct Proc *p, struct Spoor *base,
                                                int *errp) {
     *errp = 0;
     if (!p || !p->territory || !base) return NULL;
@@ -647,6 +647,63 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
     return hit;                        // NULL: all members exhausted -> ENOENT
 }
 
+
+// stalk_union_member_holding (UM, UM-7 F3) -- the member of the union at
+// `point` (a pre-cross mount point with >= 2 members) whose directory HOLDS
+// the entry `leafname` (NUL-terminated): the FIRST member (declared order)
+// whose Dev.walk resolves it -- the SAME first-hit selection as stalk_union_
+// child, but it returns the crossed MEMBER ROOT (the directory a remove of
+// `leafname` must act on) rather than the child. Plan 9 union skip: a member
+// that fails to cross / is not a directory / denies X-search / lacks the name
+// is SKIPPED (not an error). Returns the ref-held member (mount-point name
+// transplanted -- #66/I-33) or NULL when no member holds the name (the caller
+// answers -T_E_NOENT). *errp is set ONLY on a clone OOM.
+struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
+                                         const char *leafname, int *errp) {
+    *errp = 0;
+    if (!p || !p->territory || !point || !leafname) return NULL;
+    struct Spoor *srcs[PGRP_MAX_MOUNTS];
+    int nsrc = mount_members_snapshot(p->territory, point, srcs, NULL,
+                                      PGRP_MAX_MOUNTS);
+    struct Spoor *hit = NULL;
+    for (int k = 0; k < nsrc && !hit; k++) {
+        // Cross the EXACT snapshot source (never a re-derived index -- F4).
+        struct Spoor *mroot = stalk_cross_src(p, srcs[k], NULL);
+        if (!mroot)                            continue;   // F8: cross-fail -> skip
+        // #66/I-33: the crossed member takes the MOUNT-POINT's namespace name.
+        spoor_path_transplant(mroot, point);
+        if (!(mroot->qid.type & QTDIR)) { spoor_clunk(mroot); continue; }
+        // Per-member X-search skip (Plan 9 union), not EACCES; the remove's own
+        // W|X gate (spoor_unlink_in_dir / spoor_rename_in_dirs) is the mutation
+        // authority.
+        if (mroot->dev && mroot->dev->perm_enforced) {
+            struct t_stat st;
+            if (spoor_stat_native(mroot, &st) != 0 ||
+                perm_check(p, &st, PERM_X) != 0) { spoor_clunk(mroot); continue; }
+        }
+        if (!mroot->dev || !mroot->dev->walk) { spoor_clunk(mroot); continue; }
+        // Existence probe: walk `leafname` in this member. Cleanup mirrors the
+        // non-union arm's three miss cases exactly (NULL -> shares aux;
+        // reuse-violation -> shares aux; nqid!=1 -> reused, clunk-safe).
+        struct Spoor *nc = spoor_clone(mroot);
+        if (!nc) { spoor_clunk(mroot); *errp = T_E_NOMEM; break; }   // OOM: hard fail
+        const char *names[1] = { leafname };
+        struct Walkqid *w = mroot->dev->walk(mroot, nc, names, 1);
+        if (!w) { nc->aux = NULL; spoor_unref(nc); spoor_clunk(mroot); continue; }
+        if (w->spoor != nc) {
+            walkqid_free(w); nc->aux = NULL; spoor_unref(nc); spoor_clunk(mroot); continue;
+        }
+        if (w->nqid != 1) {
+            walkqid_free(w); spoor_clunk(nc); spoor_clunk(mroot); continue;
+        }
+        walkqid_free(w);
+        spoor_clunk(nc);            // the child was only an existence probe
+        hit = mroot;               // HIT: first member that holds `leafname`
+    }
+    for (int k = 0; k < nsrc; k++) spoor_clunk(srcs[k]);   // release the snapshot
+    return hit;                    // NULL: no member holds the leaf -> ENOENT
+}
+
 // stalk_core -- the resolver body. stat_out/stat_done are the STALK_STAT
 // walk-query sink (stalk_stat only): when the final run resolves through
 // Dev.walk_attrs and the leaf is clean, the core fills *stat_out, sets
@@ -668,7 +725,7 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
         { if (errp) *errp = T_E_INVAL; return NULL; }
     amode &= STALK_AMODE_MASK;
     if (amode != STALK_WALK && amode != STALK_OPEN && amode != STALK_MOUNT &&
-        amode != STALK_STAT && amode != STALK_CREATE)
+        amode != STALK_STAT && amode != STALK_CREATE && amode != STALK_REMOVE)
         { if (errp) *errp = T_E_INVAL; return NULL; }
     // D-1: the mount POINT is never followed (STALK_MOUNT's no-cross-final
     // precedent extends to no-follow-final -- SYS_MOUNT names the link's own
@@ -1580,7 +1637,14 @@ per_component:
             if (m1) { spoor_clunk(m1); is_union = true; }
         }
 
-        if (is_union && amode == STALK_CREATE) {
+        if (is_union && amode == STALK_REMOVE) {
+            // UM-7 F3: a REMOVE parent (unlink / rmdir / rename source) leaves
+            // the union point UNCROSSED (like STALK_MOUNT). The caller then
+            // selects the member that HOLDS the leaf via
+            // stalk_union_member_holding -- a remove must act on the entry's own
+            // member, never member 0 or the MCREATE member. `carried` still
+            // describes the (uncrossed) mount point, so it stays valid.
+        } else if (is_union && amode == STALK_CREATE) {
             // A create PARENT: cross to the FIRST MCREATE member (ARCH 9.5), not
             // member 0. No MCREATE member -> the union has no writable target ->
             // -T_E_ACCES. (Non-union creates fall through to the normal cross.)

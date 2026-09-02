@@ -3790,14 +3790,16 @@ static enum kpath_leaf_class kpath_split_leaf(const char *rpath, u64 rlen,
 // NULL with *err_out set.
 static struct Spoor *sys_stalk_parent(struct Proc *p, struct Spoor *start,
                                       const char *rpath, u64 prefix_len,
-                                      int *err_out) {
+                                      int amode, int *err_out) {
     const char *pp = (prefix_len == 0) ? "." : rpath;
     u64 pl         = (prefix_len == 0) ? 1   : prefix_len;
     int serr = T_E_NOENT;
-    // STALK_CREATE (not STALK_WALK): identical resolution, except a UNION parent
-    // crosses to its first MCREATE member so the create lands in the writable
-    // mount (ARCH 9.5); a union with no MCREATE member fails -T_E_ACCES.
-    struct Spoor *parent = stalk_err(p, start, pp, pl, STALK_CREATE, 0, &serr);
+    // `amode` selects the union final-quarry rule: STALK_CREATE (a create parent
+    // -- a union crosses to its first MCREATE member, ARCH 9.5) or STALK_REMOVE
+    // (an unlink / rmdir / rename-source parent -- a union stays UNCROSSED so the
+    // caller selects the member that HOLDS the leaf, UM-7 F3). A non-union parent
+    // resolves identically to a walk under either.
+    struct Spoor *parent = stalk_err(p, start, pp, pl, amode, 0, &serr);
     if (!parent) { *err_out = serr; return NULL; }
     return parent;
 }
@@ -3822,7 +3824,8 @@ static s64 open_create_try_create(struct Proc *p, struct Spoor *start,
                                   const char *leaf, u64 leaf_len,
                                   u64 omode_raw, u32 perm) {
     int serr = 0;
-    struct Spoor *parent = sys_stalk_parent(p, start, rpath, prefix_len, &serr);
+    struct Spoor *parent = sys_stalk_parent(p, start, rpath, prefix_len,
+                                            STALK_CREATE, &serr);
     if (!parent) return -(s64)serr;
 
     return spoor_create_install(p, parent, leaf, leaf_len, omode_raw, perm,
@@ -12205,8 +12208,9 @@ u64 viv_dirent64_encode_run(const u8 *src, u64 src_len,
 // copied NUL-terminated into leaf_scratch (SYS_WALK_OPEN_NAME_MAX + 1), or
 // NULL with *err_out set to the full -T_E_* return value.
 static struct Spoor *viv_mutation_parent(struct Proc *p, u64 path_va,
-                                         bool allow_trailing,
-                                         char *leaf_scratch, s64 *err_out) {
+                                         bool allow_trailing, char *leaf_scratch,
+                                         bool *is_union_out, s64 *err_out) {
+    *is_union_out = false;
     u32 plen = 0;
     s64 m = viv_measure_user_path(path_va, &plen);
     if (m != 0) { *err_out = m; return NULL; }
@@ -12242,10 +12246,48 @@ static struct Spoor *viv_mutation_parent(struct Proc *p, u64 path_va,
     struct Spoor *root = territory_root_ref(p->territory);
     if (!root)                   { *err_out = -(s64)T_E_INVAL;  return NULL; }
     int serr = 0;
-    struct Spoor *parent = sys_stalk_parent(p, root, rpath, leaf_start, &serr);
+    // STALK_REMOVE (UM-7 F3): a union parent resolves to the mount point
+    // UNCROSSED; *is_union_out then tells the caller to select the member that
+    // HOLDS the leaf (viv_union_member), not member 0 / the MCREATE member.
+    struct Spoor *parent = sys_stalk_parent(p, root, rpath, leaf_start,
+                                            STALK_REMOVE, &serr);
     spoor_clunk(root);
     if (!parent)                 { *err_out = -(s64)serr;       return NULL; }
+    if (p->territory) {
+        struct Spoor *m1 = mount_member_at(p->territory, parent, 1, NULL);
+        if (m1) { spoor_clunk(m1); *is_union_out = true; }
+    }
     return parent;
+}
+
+// UM-7 F3: two Spoors name the SAME mount-point identity (Plan 9 type+dev+qid
+// == dc / devno / qid.path). The union rename uses it to detect that old and new
+// resolve to the same union point -- the destination then lands in the source
+// member (a within-member rename), not the union's MCREATE member.
+static bool spoor_same_mount_identity(const struct Spoor *a,
+                                      const struct Spoor *b) {
+    return a && b && a->dc == b->dc && a->devno == b->devno &&
+           a->qid.path == b->qid.path;
+}
+
+// UM-7 F3: select the union member a mutation acts on, CONSUMING `resolved`
+// (the uncrossed union point when is_union, else the crossed parent). Returns a
+// ref-held member (caller clunks) or NULL with *err set to a negative -T_E_*:
+//   - not a union            -> `resolved` itself (ownership passes through).
+//   - remove (want_create 0) -> the member that HOLDS `leaf` (first-hit), else
+//                               -T_E_NOENT (no member has the entry).
+//   - create (want_create 1) -> the first MCREATE member, else -T_E_ACCES.
+static struct Spoor *viv_union_member(struct Proc *p, struct Spoor *resolved,
+                                      bool is_union, const char *leaf,
+                                      bool want_create, s64 *err) {
+    if (!is_union) return resolved;
+    int e = 0;
+    struct Spoor *m = want_create
+        ? stalk_union_create_member(p, resolved, &e)
+        : stalk_union_member_holding(p, resolved, leaf, &e);
+    spoor_clunk(resolved);
+    if (!m) *err = e ? -(s64)e : -(s64)(want_create ? T_E_ACCES : T_E_NOENT);
+    return m;
 }
 
 // The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
@@ -12389,9 +12431,15 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             return -(s64)T_E_NOSYS;
         char leaf[SYS_WALK_OPEN_NAME_MAX + 1];
         s64 err = 0;
-        struct Spoor *parent = viv_mutation_parent(
-            p, args[1], /*allow_trailing=*/tflags != 0, leaf, &err);
-        if (!parent) return err;
+        bool is_union = false;
+        struct Spoor *resolved = viv_mutation_parent(
+            p, args[1], /*allow_trailing=*/tflags != 0, leaf, &is_union, &err);
+        if (!resolved) return err;
+        // UM-7 F3: a union parent resolves to the mount POINT; act on the member
+        // that HOLDS the leaf, not member 0 / the MCREATE member.
+        struct Spoor *parent = viv_union_member(p, resolved, is_union, leaf,
+                                                /*want_create=*/false, &err);
+        if (!parent) return err;   // resolved already consumed
         s64 rc = spoor_unlink_in_dir(p, parent, leaf, tflags);
         spoor_clunk(parent);
         return rc;
@@ -12410,14 +12458,37 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         char oldleaf[SYS_WALK_OPEN_NAME_MAX + 1];
         char newleaf[SYS_WALK_OPEN_NAME_MAX + 1];
         s64 err = 0;
-        struct Spoor *od = viv_mutation_parent(p, args[1],
-                                               /*allow_trailing=*/false,
-                                               oldleaf, &err);
-        if (!od) return err;
-        struct Spoor *nd = viv_mutation_parent(p, args[3],
-                                               /*allow_trailing=*/false,
-                                               newleaf, &err);
-        if (!nd) { spoor_clunk(od); return err; }
+        bool od_union = false, nd_union = false;
+        struct Spoor *od_res = viv_mutation_parent(p, args[1],
+                                                   /*allow_trailing=*/false,
+                                                   oldleaf, &od_union, &err);
+        if (!od_res) return err;
+        struct Spoor *nd_res = viv_mutation_parent(p, args[3],
+                                                   /*allow_trailing=*/false,
+                                                   newleaf, &nd_union, &err);
+        if (!nd_res) { spoor_clunk(od_res); return err; }
+        // UM-7 F3: a union rename is WITHIN the source member (Plan 9 -- a 9P
+        // Trenameat is one server). When old and new name the SAME union point,
+        // the destination lands in the member holding the source, not the
+        // union's MCREATE member. Otherwise the source parent selects the member
+        // holding oldleaf and a different-union / non-union dest selects its
+        // create target; spoor_rename_in_dirs's same-Dev guard then answers a
+        // genuine cross-member move as cross-server (EXDEV -> EINVAL).
+        bool same_union = od_union && nd_union &&
+                          spoor_same_mount_identity(od_res, nd_res);
+        struct Spoor *od = viv_union_member(p, od_res, od_union, oldleaf,
+                                            /*want_create=*/false, &err);
+        if (!od) { spoor_clunk(nd_res); return err; }
+        struct Spoor *nd;
+        if (same_union) {
+            spoor_clunk(nd_res);
+            nd = od;
+            spoor_ref(nd);
+        } else {
+            nd = viv_union_member(p, nd_res, nd_union, newleaf,
+                                  /*want_create=*/true, &err);
+            if (!nd) { spoor_clunk(od); return err; }
+        }
         s64 rc = spoor_rename_in_dirs(p, od, nd, oldleaf, newleaf);
         spoor_clunk(od);
         spoor_clunk(nd);

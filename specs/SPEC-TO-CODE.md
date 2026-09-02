@@ -210,7 +210,7 @@ MAFTER appended = last, MREPL = replace the whole group); the mounted-on dir's o
 contents are NOT an implicit member (grafted-sources-only — this also sidesteps the
 `would_create_mount_cycle` self-mount check, so no original-as-member case). New
 `holds: [Spoors -> SUBSET Names]` (member contents, fixed at Init, explored for
-coverage) drives the four new union invariants:
+coverage) drives the five new union invariants:
 
 - `OrderCorrect` — every MBEFORE member precedes every MAFTER member in a point's
   sequence (search order). `BuggyMountOrder` appends an MBEFORE member -> violated.
@@ -220,6 +220,11 @@ coverage) drives the four new union invariants:
   first-member-wins. `BUGGY_READDIR_LAST_WINS` keeps the last holder.
 - `CreateTargetCorrect` — a create lands in the first MCREATE member (or nowhere).
   `BUGGY_CREATE_ANY_MEMBER` ignores MCREATE (picks the first member).
+- `RemoveTargetCorrect` (UM-7 F3) — a remove (unlink / rmdir / rename source)
+  acts on the first member HOLDING the leaf (`RemoveSel = FirstHolder`, the same
+  first-hit as walk), never the MCREATE member. `BUGGY_REMOVE_MCREATE_MEMBER`
+  routes remove through the create target -> violated whenever the holder is not
+  the first MCREATE member (the F3 mis-selection).
 
 TLC verdicts at `Procs = {p1, p2}, Paths = {a, b}, Spoors = {s1, s2}, Names = {n1}`
 (+ `CONSTRAINT StateConstraint`, non-empty points <= 2):
@@ -236,8 +241,9 @@ TLC verdicts at `Procs = {p1, p2}, Paths = {a, b}, Spoors = {s1, s2}, Names = {n
 | `territory_buggy_walk_last_hit.cfg`       | `BUGGY_WALK_LAST_HIT`     | WalkFirstHit violated             | (fast) |
 | `territory_buggy_readdir_last_wins.cfg`   | `BUGGY_READDIR_LAST_WINS` | ReaddirDedupFirstWins violated    | (fast) |
 | `territory_buggy_create_any_member.cfg`   | `BUGGY_CREATE_ANY_MEMBER` | CreateTargetCorrect violated      | (fast) |
+| `territory_buggy_remove_mcreate.cfg`      | `BUGGY_REMOVE_MCREATE_MEMBER` | RemoveTargetCorrect violated  | (fast) |
 
-Each of the four union buggy cfgs was ALSO checked against ONLY its target
+Each of the union buggy cfgs was ALSO checked against ONLY its target
 invariant (not the `Invariants` bundle) and violates exactly that one — the
 discrimination control (a bug hits its own check, not incidentally a refcount one).
 
@@ -245,7 +251,9 @@ Impl mapping (lands at UM-3/UM-4/UM-5): `MountBefore`/`MountAfter`/`MountRepl` -
 `kernel/territory.c::mount` (MBEFORE insert-at-group-front / MAFTER append / MREPL
 replace-whole-group); `Unmount` -> `::unmount` (shift-down, order-preserving);
 `morder` iteration -> new `::mount_members` (ordered ref-held sources); `WalkSel` /
-`ReaddirSel` / `CreateSel` -> `kernel/stalk.c` union walk + the union readdir merge.
+`ReaddirSel` / `CreateSel` -> `kernel/stalk.c` union walk + the union readdir merge;
+`RemoveSel` -> `kernel/stalk.c::stalk_union_member_holding` (UM-8c, the F3 remove
+member-selection) via the `STALK_REMOVE` amode + `syscall.c::viv_union_member`.
 
 ### P2-Ea landed (this chunk)
 

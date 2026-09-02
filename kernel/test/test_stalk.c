@@ -86,6 +86,8 @@ void test_stalk_union_readdir_nontagged(void);  // UM-5: control (not over-tagge
 void test_stalk_union_create(void);             // UM-5a: MCREATE member selected
 void test_stalk_union_create_first_wins(void);  // UM-5a: first MCREATE (declared order)
 void test_stalk_union_create_no_target(void);   // UM-5a: no MCREATE -> EACCES
+void test_stalk_union_member_holding(void);     // UM-8c/F3: holder, not MCREATE member
+void test_stalk_union_remove_uncrossed(void);    // UM-8c/F3: STALK_REMOVE leaves the point
 void test_stalk_pheno_symlink_reanchor(void);   // VIVARIUM section 13 (F1)
 // #66: namespace-name accumulation through the real resolver.
 void test_stalk_path_accumulate(void);
@@ -2086,6 +2088,111 @@ void test_stalk_union_create_no_target(void) {
                    "nothing was created in any member");
 
     ocp_teardown(p);
+}
+
+// =============================================================================
+// UM (union mounts) -- REMOVE targets the member HOLDING the leaf (UM-7 F3).
+//
+// unlink / rmdir / rename-source must act on the member that HOLDS the entry
+// (walk first-hit), NOT the MCREATE member a create would pick. Pre-fix these
+// routed through STALK_CREATE, so `rm /u/foo` on a union whose foo lived in a
+// non-MCREATE member hit the writable member instead (ENOENT, or unlinking a
+// shadow). territory.tla::RemoveTargetCorrect + BUGGY_REMOVE_MCREATE_MEMBER.
+// =============================================================================
+
+// stalk_union_member_holding returns the member whose walk FINDS the leaf, in
+// declared order -- distinct from the MCREATE member. Union [um1 MBEFORE (NOT
+// MCREATE), um2 MAFTER|MCREATE]: "only1" lives in um1 (member 0), so the holder
+// is um1 (qid 22), NOT the MCREATE member um2 (qid 25) a create would choose.
+void test_stalk_union_member_holding(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE),          0, "um1 MBEFORE (no MCREATE)");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER | MCREATE), 0, "um2 MAFTER|MCREATE");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    // "only1" is held by um1 (member 0, NOT MCREATE). The holder is um1, NOT the
+    // MCREATE member -- the exact F3 mis-selection (STALK_CREATE would give 25).
+    int e = 0;
+    struct Spoor *m = stalk_union_member_holding(&p, pt, "only1", &e);
+    TEST_ASSERT(m != NULL, "only1 has a holder");
+    TEST_EXPECT_EQ((u64)m->qid.path, (u64)22,
+                   "holder of only1 = um1 (member 0), NOT the MCREATE member um2 (25)");
+    spoor_clunk(m);
+
+    // "only2" is held only by um2 (which is also the MCREATE member) -> um2.
+    e = 0;
+    m = stalk_union_member_holding(&p, pt, "only2", &e);
+    TEST_ASSERT(m != NULL, "only2 has a holder");
+    TEST_EXPECT_EQ((u64)m->qid.path, (u64)25, "holder of only2 = um2 (25)");
+    spoor_clunk(m);
+
+    // "shared" is held by BOTH -> the FIRST member (um1), matching walk first-hit.
+    e = 0;
+    m = stalk_union_member_holding(&p, pt, "shared", &e);
+    TEST_ASSERT(m != NULL, "shared has a holder");
+    TEST_EXPECT_EQ((u64)m->qid.path, (u64)22, "holder of shared = first member um1 (22)");
+    spoor_clunk(m);
+
+    // No member holds "nosuch" -> NULL, and NOT an error (the caller answers
+    // ENOENT; *errp stays 0, distinguishing a miss from a clone OOM).
+    e = 0;
+    m = stalk_union_member_holding(&p, pt, "nosuch", &e);
+    TEST_ASSERT(m == NULL, "nosuch has no holder");
+    TEST_EXPECT_EQ(e, 0, "a no-holder miss is not an error");
+
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across member_holding");
+
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// STALK_REMOVE resolves a union parent to the UNCROSSED mount point (so the
+// caller selects the holder), while STALK_CREATE crosses to the MCREATE member.
+// The divergence at the final quarry is the whole of the F3 stalk change.
+void test_stalk_union_remove_uncrossed(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE),          0, "um1 MBEFORE (no MCREATE)");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER | MCREATE), 0, "um2 MAFTER|MCREATE");
+
+    // STALK_REMOVE: the union quarry is left UNCROSSED -- still the mount point
+    // (qid 28) and still a union (member 1 exists).
+    struct Spoor *r = stalk(&p, root, "umpt", 4, STALK_REMOVE, 0);
+    TEST_ASSERT(r != NULL, "STALK_REMOVE resolves umpt");
+    TEST_EXPECT_EQ((u64)r->qid.path, (u64)28, "STALK_REMOVE yields the mount point (28), uncrossed");
+    struct Spoor *rm1 = mount_member_at(p.territory, r, 1, NULL);
+    TEST_ASSERT(rm1 != NULL, "STALK_REMOVE left umpt a union point (member 1 present)");
+    spoor_clunk(rm1);
+    spoor_clunk(r);
+
+    // STALK_CREATE: the union quarry crosses to the MCREATE member (um2, 25),
+    // which is NOT itself a mount point.
+    struct Spoor *c = stalk(&p, root, "umpt", 4, STALK_CREATE, 0);
+    TEST_ASSERT(c != NULL, "STALK_CREATE resolves umpt");
+    TEST_EXPECT_EQ((u64)c->qid.path, (u64)25, "STALK_CREATE crosses to the MCREATE member um2 (25)");
+    struct Spoor *cm1 = mount_member_at(p.territory, c, 1, NULL);
+    TEST_ASSERT(cm1 == NULL, "STALK_CREATE result is a crossed member, not a union point");
+    spoor_clunk(c);
+
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
 }
 
 // =============================================================================

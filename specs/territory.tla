@@ -115,7 +115,8 @@ CONSTANTS
     BUGGY_MOUNT_ORDER,         \* BuggyMountOrder appends an MBEFORE member
     BUGGY_WALK_LAST_HIT,       \* WalkSel returns the LAST holder
     BUGGY_READDIR_LAST_WINS,   \* ReaddirSel dedups to the LAST holder
-    BUGGY_CREATE_ANY_MEMBER    \* CreateSel ignores MCREATE (first member)
+    BUGGY_CREATE_ANY_MEMBER,   \* CreateSel ignores MCREATE (first member)
+    BUGGY_REMOVE_MCREATE_MEMBER \* RemoveSel picks the MCREATE member, not the holder
 
 ASSUME Cardinality(Procs) >= 1
 ASSUME Cardinality(Paths) >= 2
@@ -130,6 +131,7 @@ ASSUME BUGGY_MOUNT_ORDER \in BOOLEAN
 ASSUME BUGGY_WALK_LAST_HIT \in BOOLEAN
 ASSUME BUGGY_READDIR_LAST_WINS \in BOOLEAN
 ASSUME BUGGY_CREATE_ANY_MEMBER \in BOOLEAN
+ASSUME BUGGY_REMOVE_MCREATE_MEMBER \in BOOLEAN
 
 (***************************************************************************)
 (* NONE — sentinel for "no value" (a Proc's un-pivoted root_spoor, or a    *)
@@ -429,6 +431,20 @@ CreateSel(p, pt) ==
     ELSE FirstCreateMember(p, pt)
 
 (***************************************************************************)
+(* RemoveSel — where a REMOVE (unlink / rmdir / rename source) at a union  *)
+(* lands. Correct: the FIRST HOLDER (the member whose directory holds nm)  *)
+(* -- the entry is removed from the member that actually has it. This is   *)
+(* identical to WalkSel: a remove first RESOLVES the leaf (first-hit), then *)
+(* mutates that member. Buggy (BUGGY_REMOVE_MCREATE_MEMBER): the create    *)
+(* target (FirstCreateMember) -- the UM-7 F3 bug, which routed remove       *)
+(* through STALK_CREATE and so acted on the writable member instead of the *)
+(* holder (`rm foo && test -e foo` could be TRUE, or a shadow was unlinked).*)
+(***************************************************************************)
+RemoveSel(p, pt, nm) ==
+    IF BUGGY_REMOVE_MCREATE_MEMBER THEN FirstCreateMember(p, pt)
+                                   ELSE FirstHolder(p, pt, nm)
+
+(***************************************************************************)
 (* ============================== ACTIONS ================================= *)
 (***************************************************************************)
 
@@ -500,6 +516,18 @@ CreateTargetCorrect ==
         CreateSel(p, pt) = FirstCreateMember(p, pt)
 
 (***************************************************************************)
+(* RemoveTargetCorrect (UM, UM-7 F3) — a remove of nm at a union acts on   *)
+(* the FIRST member holding nm, never the MCREATE member by virtue of      *)
+(* being writable. Stated as RemoveSel = FirstHolder always; the correct   *)
+(* action makes them equal, BUGGY_REMOVE_MCREATE_MEMBER makes RemoveSel    *)
+(* the create target, which differs whenever the first holder is not the   *)
+(* first MCREATE member (the F3 mis-selection).                            *)
+(***************************************************************************)
+RemoveTargetCorrect ==
+    \A p \in Procs, pt \in Paths, nm \in Names :
+        RemoveSel(p, pt, nm) = FirstHolder(p, pt, nm)
+
+(***************************************************************************)
 (* OrderCorrect (UM) — in every mount sequence, every MBEFORE member       *)
 (* precedes every MAFTER member (declared search order).                   *)
 (***************************************************************************)
@@ -516,6 +544,7 @@ Invariants ==
     /\ WalkFirstHit
     /\ ReaddirDedupFirstWins
     /\ CreateTargetCorrect
+    /\ RemoveTargetCorrect
     /\ OrderCorrect
 
 (***************************************************************************)
