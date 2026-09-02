@@ -79,10 +79,28 @@ inherited claim tokens and hosted into the tool-built leaves, knowing nothing
 about placement. libtapestry now also drops the spent `TAPESTRY_CLAIM` from the
 consuming child's own `/env` so a grandchild can't inherit a taken token.
 
-Evidence: ls-gfx-restore (HVF) PASS 5/5 (tip pending); ls-gfx-panes (HVF) 33/33
+Evidence: ls-gfx-restore (HVF) PASS 5/5 (@3b12f7b4); ls-gfx-panes (HVF) 33/33
 regression (the new `owner` file rides the battery readdir); libhalcyon host
-31/31, halcyon lib host 9/9; halcyon's own source clippy-clean. NOT pushed — the
-whole H-4b arc pushes after the batched holotype.
+31/31, halcyon lib host 10/10; halcyon's own source clippy-clean.
+
+**The arc close.** The batched holotype over the whole H-4b arc (H-4b-1..3)
+closed 0 P0 / 0 P1 / 0 P2 / 2 P3, NOT dirty. Fable was out of credits (429 at
+launch), so the round DIED and re-spawned on the Opus fallback per "never skip a
+round for want of Fable" — a finished fallback round is closed, and the
+prosecutor still brought full context independence (it re-derived peer_principal
+immutability from the kernel and the renderer principal from joey/login rather
+than trusting the author's comments). My parallel self-audit found 0. The two
+P3s were the two places a second pair of eyes earned its keep: F2, a fail-OPEN
+arm in the save-side env classifier (`is_env_tile` treated owner 0 as
+respawnable — safe today because no hosting client runs as principal 0, but an
+inversion of the stated fail-closed intent), fixed by the pure host-tested
+`owner_is_env`; and F1, that empty-leaf ownership gates the claim MINT but not
+the structural verbs, so an in-flight restore skeleton is grief-able
+cross-principal until filled — harmless under v1.0's single-session model,
+documented as a v1.x multi-seat seam. Both grounded in quoted code; neither an
+escalation. The whole arc (reformat + H-4b-1..3 + the close) pushed to both
+mirrors at 589f0735 (codeberg + github verified); the vault notes + a chg landed
+at 5c77bb5e.
 
 ## 2026-09-02 (run 17, Fable→Opus 4.8) — H-4b-2: the Session actor, and the reformat that had to come first
 
