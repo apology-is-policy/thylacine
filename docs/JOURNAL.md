@@ -76,6 +76,40 @@ object becomes EL0-shared, and nothing announces that day at the old paragraph.*
 **Also enqueued**: the sigtab entry tearing under a peer's sigaction (old handler + new
 flags/mask; a seqlock is the shape) -- P3, its own round; eventfd2 stays next after the gate.
 
+**The round closed clean, and its P3s were worth the effort (2026-09-02, continued).** The
+second holotype (the pipe multi-waiter dd9f9508 + the socktab hooked copy 4e694e5f) came back
+0 P0 / 0 P1 / 0 P2 / 4 P3, MODEL(start)==MODEL(end) both Fable 5.1 -- a clean close. All four
+P3s were cheap and real, so all four landed rather than deferred. The sharpest was F1, a lesson
+about witnesses: my two-thread pipe tests proved "no second-sleeper crash" but NOT "wake-all",
+because a woken reader's drain re-walks the poll_list, so a wake-one bug hides behind the
+cascade -- the tests would have passed a broken impl. The discriminator is a CLOSE edge, whose
+EOF return takes no further wake: with two waiters asleep, a wake-one bug strands one at EOF
+forever. Rebuilt as three-thread tests (feed one, two re-sample, then a close releases both).
+F4 was a POSIX-compat find the multi-waiter fix EXPOSED rather than caused: a blocking write of
+n<=PIPE_BUF returned partial, which tears a line when two writers share a pipe (`make -j | tee`)
+-- unreachable from EL0 until two writers could block on one pipe at all. Now n<=PIPE_BUF blocks
+for the whole fit. F3 closed a narrow window the F1 hooked-copy fix's own premise missed: the
+socktab fork carrier was allocated only if the parent already had a socket table, so a peer
+thread's socket() completing between prepare and the copy left the child inheriting that fd
+row-less; prepare now allocates unconditionally. F2 swept the retired-Rendez doc residue.
+
+**A test caught its own fix's drift.** F3 changed prepare's contract (always allocate), and the
+socktab_clone_into test's socket-less-parent leg still asserted the old NULL-carrier contract --
+the suite went 1488/1489 on exactly that leg. Fixed the leg to the new contract (allocated then
+freed as all-holes). The #240 shape again: a contract change hollows the test that pinned the
+old contract; the test is a finding, not an obstacle.
+
+**Operator decisions this session (ratified, not assumed).** The operator returned mid-run and
+settled the two parked calls: X-11 -- add `/bin/sh -> /viv/abin/sh` as a pool symlink (its own
+chunk; the pool-put's symlink handling needs verifying). Console-TUI fork -- the operator handed
+aux ut/nora/kaua (main is on Halcyon for days) and NODDED on the ABI: a native
+SYS_TTY_GETATTR/SETATTR pair mirroring the phenotype's TCGETS/TCSETS, gated by the SAME
+proc_console_owner_in_session and routed to the SAME cons_set_mode_cmd. The research dissolved
+the "new authority model?" worry: consctl (the Plan 9 idiom) exists but its open is
+attachment-gated and inherited-fd, which breaks when git (not ut) launches nora; the phenotype
+already uses the session-ownership gate, so the fix is parity, not novelty. Both are their own
+chunks after this close pushes (design_tty_setattr_syscall memory).
+
 ---
 
 ## 2026-09-01 (aux, late) -- git from a shell + the socktab across images; the console-TUI fork surfaced
