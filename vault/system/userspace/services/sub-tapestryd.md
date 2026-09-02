@@ -777,13 +777,13 @@ construction: one IRQ wait per GPU command.
   connects. A per-client ACL is the Halcyon-era seam.
 - A tapestryd crash resets its virtio devices — scanout blanks until a
   restart re-inits ([[haz-driver-panic-dos]]).
-- **The placement-claim mint is any peer's (H-4b-1).** `pane/<id>/claim`
-  gates on emptiness alone -- today's empty-leaf rule, and strictly weaker
-  than the `close` every peer already holds over an empty. HALCYON.md 13.7
-  wants the leaf SESSION-OWNED; that narrowing lands with `owner_principal`
-  recorded at split (H-4b-2). Until then the residue is a placement DoS by
-  a same-display peer (re-minting under the restore tool's tokens), never
-  an authority breach: a claim cannot take a tile that holds a surface.
+- **The placement-claim mint is owner-gated (H-4b-2, CLOSED).** H-4b-1 minted
+  on emptiness alone (an interim "any peer" rule); H-4b-2 narrowed it to the
+  leaf's OWNER -- Renderer anywhere / a session iff `owner_principal == p` /
+  a Client never -- per HALCYON.md 13.7's "a session-owned empty leaf's
+  claim". The placement-DoS residue this bullet warned of is closed: a
+  foreign same-display peer can no longer re-mint under the restore tool's
+  tokens (it does not own the leaf). See "The Session actor" note below.
 
 ## Caveats
 
@@ -845,10 +845,15 @@ config surface (cfg-3). Swept into the vault by
 In-guest: the per-boot pattern gate drives the full path with a liveness
 double-dump; `ls-gfx` drives QMP-typed input through the whole loop
 asserted on the serial tee; `ls-gfx-live` covers the VNC live-display
-leg; `ls-gfx-panes` (23 legs since H-4b-1) covers the G-6 pane tree and,
+leg; `ls-gfx-panes` (33 legs) covers the G-6 pane tree and,
 since H-4b-1, the placement claim (one leaf minted twice, focus moved off
 it: the stale token falls back to focus placement and never steers into
-the leaf, the live token lands in it, `claim=nothex` is E_INVAL raw);
+the leaf, the live token lands in it, `claim=nothex` is E_INVAL raw).
+Since H-4b-2 the battery is a `Session(michael)` actor, so the whole 33/33
+run also proves the Session path REGRESSION-safe (the claim leg still
+mints -- the battery owns the leaf it split -- and the pane-tree negative
+still refuses `michael -> SYSTEM` with E_PERM); the POSITIVE cross-process
+mutual-authority witness is owed at H-4b-3's restore tool;
 `ls-gfx-mode` covers the display-mode verb and its authority gate. The
 `test-mode` cargo feature strips the determinism surface to `E_OPNOTSUPP`
 for production, and both variants compile. The battery and its expect
@@ -1021,3 +1026,64 @@ minted twice, focus moved off it, the stale token falls back (its surface
 lands, never in that leaf, which stays `surface none`), the live token lands
 in it; `claim=nothex` is E_INVAL raw. libtapestry gained
 `Surface::open_claim[_on]` (`Mint::Claim(u128)` -> ` claim={:032x}`).
+
+## The Session actor -- session-wide mutual pane authority (2026-09-02, H-4b-2)
+
+The authority KEY changed. Before H-4b-2 every non-renderer peer was one
+`Client(stripes)` actor, keyed on the kernel per-PROCESS tag, so two
+processes of ONE user were mutually walled. That makes layout RESTORE
+impossible: the restore tool and the programs it spawns are different
+processes of the same user, and the tool arranges tiles the spawned programs
+then occupy. H-4b-2 adds a third identity `Actor::Session(u32)` keyed on the
+kernel's durable per-Proc PRINCIPAL.
+
+**The 3-way `actor()`** (per authority write): `peer_is_renderer` ->
+`Renderer` (the environment, acts anywhere); else `peer_principal` in
+{SYSTEM, NONE, INVALID} -> `Client(peer_stripes)` (system daemons, the
+unauthenticated, and unknown peers stay per-PROCESS, mutually walled --
+deliberate: the boot chain must not collapse into one session); else
+`Session(peer_principal)`. So only a real user principal earns the ratified
+same-principal mutual authority (a program running as you may
+close/refocus/rename/claim your OTHER tiles) -- strictly weaker than the
+same-owner process kill I-26 already grants; the console (SYSTEM) and other
+users (another principal) stay protected. `Conn.peer_principal` is cached ONCE
+at `Conn::new`, unlike renderer-status (which `peer_is_renderer` re-reads per
+write because the SAK can revoke it): a running Proc's principal is immutable.
+
+**Ownership carries the principal.** `Surface.owner_principal` is set at mint
+from the minting conn. An EMPTY leaf carries `Pane.owner_principal` too,
+stamped at SPLIT from the splitting actor via `actor_owner_principal`
+(Renderer and Client -> 0 = the environment, unclaimable by any user session
+and untouched by the reap; Session(p) -> p). The three authority checks gained
+`Session(p)` arms keyed on `owner_principal` (`actor_owns_subtree`: every
+hosted surface == p, vacuous-true on an all-empty subtree, same as Client;
+`actor_hosts`: the leaf's surface == p). `actor_names` now also lets a session
+NAME an EMPTY leaf it owns -- the restore tool tags a leaf at claim time,
+before its spawned child hosts a surface (acme's tag-before-`win`); an empty
+leaf hosts no surface so `actor_hosts` is false, and an empty leaf's owner is
+its recorded `owner_principal`, not a hosted surface.
+
+**The claim mint is now owner-gated** (this closes the H-4b-1 seam). The
+offset-0 read of `pane/<id>/claim` mints only on a leaf the reader OWNS:
+Renderer anywhere / `Session(p)` iff `pane_owner_principal == p` / a Client
+never (owns no empty leaf). E_PERM otherwise -- the same code as an occupied
+leaf, both "this placement is not available to you". A claim stays strictly
+weaker than the close every peer holds: it can never take a tile that holds a
+surface.
+
+**The reap.** `reap_session_empties(principal)` closes a departed session's
+empty scaffolding when the principal's LAST live conn is gone. `retire_conn`
+(at teardown) already closed the dying conn's OCCUPIED leaves (`retire` closes
+each retired surface's hosting leaf), so the reap only touches leftover empty
+leaves stamped with that principal -- never another principal's tiles, never
+the environment's (owner 0). The root never leaves; a reaped root-leaf is
+handed back to the environment. Main's TWO conn-removal sites do the last-conn
+check: `conns.remove(i)` first (so `conns` holds only the survivors), then
+`conns.iter().all(|o| o.peer_principal() != gone)` -> reap. The guard rejects
+the sentinels, so a system/renderer/unknown death no-ops.
+
+REGRESSION-SAFE by construction: a single-process user is unchanged (stripes
+and principal both uniquely identify it). The NEW mutual authority is first
+exercised by H-4b-3's restore tool (the real second same-principal peer),
+where the positive cross-process witness lands; the batched holotype over
+H-4b-1..3 is at that arc close.
