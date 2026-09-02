@@ -4060,12 +4060,17 @@ void test_vivarium_socktab_clone_into(void) {
     parent->phenotype = PHENO_LINUX;
     child->phenotype  = PHENO_LINUX;
 
-    // NULL parent table -> prepare carries nothing, finish is a no-op, the
-    // child's stays NULL (a socket-less parent).
+    // A socket-less parent (parent->socktab still NULL here): prepare allocates
+    // the carrier UNCONDITIONALLY since F3 (so a peer's socket() racing the copy
+    // is captured), and finish frees it as all-holes -> the child's table stays
+    // NULL. Before F3 prepare returned a NULL carrier and this leg asserted that;
+    // the unconditional allocation is exactly what closes the race, so the leg
+    // now checks the carrier is allocated THEN freed.
     struct viv_socktab_fork f0 = { .parent = NULL, .dst = NULL };
-    int  rc_null   = viv_socktab_fork_prepare(&f0, parent);
-    bool null_dst  = (f0.dst == NULL);
+    int  rc_null    = viv_socktab_fork_prepare(&f0, parent);
+    bool prep_alloc = (f0.dst != NULL);
     viv_socktab_fork_finish(child, &f0);
+    bool f0_freed   = (f0.dst == NULL);
     bool child_null = (__atomic_load_n(&child->socktab, __ATOMIC_ACQUIRE) == NULL);
 
     parent->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
@@ -4115,8 +4120,9 @@ void test_vivarium_socktab_clone_into(void) {
     child->state  = PROC_STATE_ZOMBIE; proc_free(child);
     parent->state = PROC_STATE_ZOMBIE; proc_free(parent);
 
-    TEST_EXPECT_EQ(rc_null, 0, "a parent with no table prepares nothing");
-    TEST_ASSERT(null_dst && child_null, "...and leaves the child's table NULL");
+    TEST_EXPECT_EQ(rc_null, 0, "prepare succeeds for a socket-less parent");
+    TEST_ASSERT(prep_alloc, "...and allocates the carrier UNCONDITIONALLY (F3: captures a peer socket() racing the copy)");
+    TEST_ASSERT(f0_freed && child_null, "...but finish frees the all-holes carrier -> child table NULL");
     TEST_EXPECT_EQ(rc, 0, "prepare succeeds");
     TEST_ASSERT(prepared, "...and allocated the carrier for a parent WITH a table");
     TEST_EXPECT_EQ((u64)w.calls, 1ull, "the hook ran exactly once");

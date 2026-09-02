@@ -1848,8 +1848,18 @@ static void socktab_copy_row_locked(struct viv_socktab *tab, struct viv_sock *ds
 int viv_socktab_fork_prepare(struct viv_socktab_fork *f, const struct Proc *parent) {
     if (!f || !parent) return -1;
     f->parent = parent;
-    f->dst    = NULL;
-    if (!__atomic_load_n(&parent->socktab, __ATOMIC_ACQUIRE)) return 0;
+    // Allocate UNCONDITIONALLY -- not gated on the parent having a table yet
+    // (holotype F3). The gate was `parent->socktab != NULL` at prepare time,
+    // but a peer thread's socket() can install the table AND claim a row
+    // between prepare and the copy's lock hold; without a carrier the snapshot
+    // hook is a no-op and the child inherits that fd (copied by the handle
+    // walk) with no row -- ENOTSOCK on a live socket. With the carrier the
+    // hook (under the copy's lock) captures any row claimed before it runs;
+    // the only residual is the inherent socket() install-then-claim gap (the
+    // handle installed but the row not yet claimed at snapshot time), which no
+    // snapshot closes and which VIVARIUM 5.5.2 states. The cost of the
+    // carrier for a socket-less fork is one kzalloc that fork_finish frees as
+    // an all-holes table.
     f->dst = (struct viv_socktab *)kzalloc(sizeof(*f->dst), 0);
     return f->dst ? 0 : -1;
 }
