@@ -661,13 +661,19 @@ and i3's per-window title bar are the prior art, both per-window). Concretely:
   compositor wedge-retired it, or forge a tile's name. The model now is
   rio's: **a client drives its own window; the environment drives the
   rest.** The console renderer (`peer_is_renderer`, per write) may act on any
-  pane. Any other conn may MUTATE a subtree (`split`, `move`, `close`,
+  pane. Any other PROCESS may MUTATE a subtree (`split`, `move`, `close`,
   `mode`, `tab`) only if every hosted surface in it is its own (empty leaves
   belong to nobody and never block; an all-empty subtree is anyone's), and
   may TAKE or NAME a tile (`focus`, `zoom`, `focusdir`'s destination, `tag`,
   `role`) only if that leaf hosts its own surface -- an empty leaf is nobody's
   to focus (keystrokes to nowhere) or to name. E_PERM otherwise; every read
-  stays ungated (§13.7). The compositor's own chord layer acts as the
+  stays ungated (§13.7). The owner is the PROCESS, keyed on the kernel's
+  per-Proc `stripes` tag stamped on the conn's peer (monotonic, never reused,
+  0 = unknown = owns nothing) -- not the conn: a client holds one session per
+  Surface plus a driver session, and the first cut keyed on the conn refused
+  the battery's own pane through its driver session. The battery's positive
+  control ("focus on OUR pane succeeds", one variable away from its three
+  refusals) is what caught it. The compositor's own chord layer acts as the
   environment. Two defences ride beside it: FOCUS coalesces by replacement in
   the event queue (focus is a state, like CONFIGURE), and one conn lands at
   most four layout mutations per service pass (E_AGAIN beyond -- each is a

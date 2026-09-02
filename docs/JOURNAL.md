@@ -487,6 +487,82 @@ round** (holotype-reviewer, Fable max) on this commit — H-3b-2's create gate +
 H-3b-3's chrome path + this verb + the H-2 dirty-close re-prosecution — then
 the AUDIT-TRIGGERS row already landed with the chunk is the round's scope.
 
+### The H-3b audit close: two prosecutors, three P1-class findings, and a self-report that could not see its own fallback (same run)
+
+**The round's shape.** One prosecutor on the full brief (H-3b-2/-3/-4 plus
+the H-2 dirty-close re-prosecution), spawned through the agent definition
+that pins Fable. Its transcript's `model` field tells a story its report does
+not: 46 turns on Fable 5.1, then Opus 4.8 for the rest — the fallback landed
+exactly as it began the server.rs deep read, and its final report ran on
+Opus while its `MODEL(end)` line said Fable. A model cannot observe its own
+fallback; the self-report is a claim, the API field is the measurement, and
+from now on the latter is what the closed list records. Rather than discard
+fifty Fable turns or accept an Opus read of the load-bearing half, a second
+prosecutor went out scoped to exactly that half, spawned with the explicit
+model override (a probe agent confirmed Fable resolved that way), and stayed
+on Fable throughout. Two independent reads of the compositor; one of the
+transcript.
+
+**What they found, distinct: 0 P0, three P1-class, four P3 — all fixed.**
+
+*The transcript's open block escaped the budget* (R1, P1 — the H-2
+re-prosecution paying off). The budget evicts frozen blocks only; the open
+block froze on a 10 000-line count alone; a newline-free stream soft-wraps
+into 4096-cell lines, so 320 MiB could sit in one open block against a 64 MiB
+heap. `cat` of a large minified file was a silent renderer death. The H-2 F3
+disposition had said "flush → budget bounds it" — true of each line, false of
+the block. The open block now freezes on bytes too. The regression's first cut
+asserted that several frozen blocks survive under a 64 KiB budget and failed:
+one 32 KiB line per block means the budget keeps exactly one. The failure was
+the mechanism working, and the test now asserts the bound instead of a count.
+
+*The pane tree was ungated* (R1 + R2, P1 — pre-existing G-6, owned). The
+sharper prosecution came from R2: 128 `focus` flips fit in one 32 KiB service
+pass, the victim cannot drain between frames of a pass, FOCUS was
+non-droppable, so any client could wedge-retire any other client's surface —
+the console's included — and a focus steal routes the graphical login prompt's
+keystrokes to the thief. H-3b had made this worse without noticing: the tag
+bar renders `tag` as *the tile's program* and the live key follows focus, so
+a rename or a focus steal became a lie the chrome tells. The fix is a trust
+model, decided under the standing authorization and written into §13.6: rio's
+line — a client drives its own window, the environment drives the rest. A
+subtree mutation needs every hosted surface in it to be yours; taking or
+naming a tile needs the leaf to host your surface; the renderer may do
+anything; reads stay ungated. FOCUS now coalesces like CONFIGURE, and one conn
+lands at most four layout mutations per pass. The battery — a non-renderer by
+design — kept every one of its scenarios, because every one acts on its own
+subtree; the single thing it lost was an end-of-run refocus of the console, a
+pane it does not own, which the close path restores anyway. Its new leg
+witnesses the gate from the wrong side of it — and its positive control, one
+variable away from the three refusals ("focus on OUR pane succeeds"), caught
+the first cut of the fix: ownership was keyed on the conn, and a client holds
+one session per Surface plus a driver session, so the battery's own pane was
+foreign to the conn that asked. The owner is the process, keyed on the
+kernel's per-Proc `stripes` tag. A gate leg that only proved refusals would
+have passed that bug straight through.
+
+*My own H-3b-3 design exhausted the pools* (R2, P1). One session per tag bar,
+against global pools of eight conns and eight surfaces: a third window filled
+both, and past it every chrome mint was a five-second blocking connect inside
+the renderer's single-threaded loop — the listener is un-armed when full, so
+the connect sat on the kernel's handshake deadline — repeated on every
+reconcile, with keyboard autorepeat during the stall enough to wedge-retire
+the console surface. The gates run at two leaves and never reached the bound.
+Now a tag bar is minted on the renderer's existing pane-tree session, the
+renderer's cap is widened by one surface per pane and the pool is sized so
+every conn can reach its cap at once, and the listener stays armed and refuses
+at once when full, so a connect can never block its caller.
+
+**The close is dirty by the invasive-fix rule** — two load-bearing mechanisms
+were restructured — and the fixes ride forward as the H-3c round's
+re-prosecution focus rather than a round of their own.
+
+Verified by the lines: halcyond host 48/48; ls-halcyon on the lever PASS
+[41 s] with every H-3b-4 key line; ls-gfx-chords on the cfg-4 lever PASS
+[34 s]; default restored: ls-gfx-panes PASS [42 s] with the
+pane-tree gate leg, ls-gfx-age PASS [39 s], the 7 single-leaf CPU gfx
+PASS. All at jobs=1, after a lease wait behind aux's SMP gate.
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon

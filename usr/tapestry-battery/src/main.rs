@@ -617,6 +617,14 @@ pub extern "C" fn rs_main() -> i64 {
                     say!("tapestry-battery: FAIL pane-tree gate: focus on OUR pane refused rc {}", rc);
                     return 1;
                 }
+                // The positive control MOVED focus (that is the proof); put it
+                // back on B, which the scenarios below assume is the active
+                // child (hosted last) -- also ours, so it must succeed.
+                let rc = raw_write(root, "layout", &alloc::format!("focus {}", pb.id));
+                if rc < 0 {
+                    say!("tapestry-battery: FAIL pane-tree gate: focus back on B refused rc {}", rc);
+                    return 1;
+                }
                 say!("battery: pane-tree gate OK");
             }
         }

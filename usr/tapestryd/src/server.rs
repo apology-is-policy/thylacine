@@ -154,9 +154,12 @@ const MAX_SURFACES_PER_CONN: usize = 4;
 
 /// Who is driving a layout mutation (the pane tree's trust model,
 /// HALCYON.md 13.6): the console renderer is the environment and may act
-/// on any pane; any other conn acts only on what it OWNS -- rio's line (a
-/// client drives its own window's wctl; the window manager drives the
-/// rest). Resolved per write from the conn's kernel-stamped peer.
+/// on any pane; any other PROCESS acts only on what it OWNS -- rio's line
+/// (a client drives its own window's wctl; the window manager drives the
+/// rest). Resolved per write from the conn's kernel-stamped peer; the
+/// client identity is the peer's `stripes` (a process holds several
+/// sessions -- one per Surface plus a driver session -- and they are all
+/// one owner). Client(0) = an unknown peer: owns nothing.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Actor {
     Renderer,
@@ -816,6 +819,12 @@ enum SurfState {
 struct Surface {
     gen: u32,        // the slot-reuse guard (net-3d); fids capture it at bind
     owner_conn: u64, // F2: the minting conn's id
+    /// The minting conn's peer PROCESS (the kernel's per-Proc `stripes`
+    /// tag: monotonic, never 0, never reused -- an rfork child gets a fresh
+    /// one). The pane tree's ownership key: a client holds SEVERAL sessions
+    /// (one per Surface + a driver session), so "mine" is the process, not
+    /// the conn. 0 = unknown peer, owns nothing.
+    owner_peer: u64,
     state: SurfState,
     w: u32,
     h: u32,
@@ -2215,12 +2224,13 @@ impl Comp {
     }
 
     /// Mint a surface slot for `conn_id` (F9 caps enforced by the caller).
-    fn mint(&mut self, conn_id: u64) -> Option<usize> {
+    fn mint(&mut self, conn_id: u64, peer: u64) -> Option<usize> {
         let n = self.surfaces.iter().position(|s| s.is_none())?;
         self.gen_seq = self.gen_seq.wrapping_add(1);
         self.surfaces[n] = Some(Surface {
             gen: self.gen_seq,
             owner_conn: conn_id,
+            owner_peer: peer,
             state: SurfState::Minted,
             w: 0,
             h: 0,
@@ -5108,11 +5118,12 @@ impl Comp {
     fn actor_owns_subtree(&self, actor: Actor, slot: usize) -> bool {
         match actor {
             Actor::Renderer => true,
+            Actor::Client(0) => false,
             Actor::Client(c) => self
                 .layout
                 .subtree_surfaces(slot)
                 .iter()
-                .all(|&n| self.surf(n).map_or(false, |s| s.owner_conn == c)),
+                .all(|&n| self.surf(n).map_or(false, |s| s.owner_peer == c)),
         }
     }
 
@@ -5122,11 +5133,12 @@ impl Comp {
     fn actor_hosts(&self, actor: Actor, slot: usize) -> bool {
         match actor {
             Actor::Renderer => true,
+            Actor::Client(0) => false,
             Actor::Client(c) => self
                 .layout
                 .leaf_surface(slot)
                 .and_then(|n| self.surf(n))
-                .map_or(false, |s| s.owner_conn == c),
+                .map_or(false, |s| s.owner_peer == c),
         }
     }
 
@@ -10748,6 +10760,10 @@ fn map_fenced_err(e: FencedErr) -> u32 {
 pub struct Conn {
     handle: i64,
     pub conn_id: u64,
+    /// The connecting PROCESS's kernel `stripes` tag (0 = unknown): the
+    /// identity the pane tree's ownership is keyed on, fixed for the conn's
+    /// life (the connector never changes; its death flips `alive`, not this).
+    peer_stripes: u64,
     /// Layout mutations landed in the current service pass.
     layout_verbs: u32,
     /// Which tree this conn serves: P_ROOT (/srv/tapestry) or W_ROOT
@@ -10833,9 +10849,16 @@ fn rects_cover_full(rects: &[(u32, u32, u32, u32)], w: u32, h: u32) -> bool {
 
 impl Conn {
     pub fn new(handle: i64, conn_id: u64, root: u64) -> Conn {
+        let mut info = TSrvPeerInfo::default();
+        let peer_stripes = if unsafe { t_srv_peer(handle, &mut info) } == 0 && info.alive == 1 {
+            info.stripes
+        } else {
+            0
+        };
         Conn {
             handle,
             conn_id,
+            peer_stripes,
             layout_verbs: 0,
             root,
             version_done: false,
@@ -11427,7 +11450,7 @@ impl Conn {
                 return self.err(tag, p9::E_NOMEM);
             }
             let conn_id = self.conn_id;
-            let n = match comp.mint(conn_id) {
+            let n = match comp.mint(conn_id, self.peer_stripes) {
                 Some(n) => n,
                 None => return self.err(tag, p9::E_NOMEM),
             };
@@ -13329,7 +13352,7 @@ impl Conn {
         if self.peer_is_renderer() {
             Actor::Renderer
         } else {
-            Actor::Client(self.conn_id)
+            Actor::Client(self.peer_stripes)
         }
     }
 
