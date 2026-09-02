@@ -205,7 +205,12 @@ impl Driver for Tapestryd {
         );
 
         // The GPU function is mandatory.
-        let g = gpu::Gpu::probe(GPU_BAR_WINDOW_VA, GPU_RING_VA, GPU_FLANE_VA, GPU_BLOB_PROBE_VA)?;
+        let g = gpu::Gpu::probe(
+            GPU_BAR_WINDOW_VA,
+            GPU_RING_VA,
+            GPU_FLANE_VA,
+            GPU_BLOB_PROBE_VA,
+        )?;
 
         // The input functions are best-effort: an environment without them
         // (or without their functions in the gathered allowance) yields an
@@ -385,19 +390,18 @@ impl Driver for Tapestryd {
                 let mask = self.mods.mask();
                 let (dw, dh) = (self.comp.gpu.width, self.comp.gpu.height);
                 let mut moved = false;
-                let commit =
-                    |c: &mut Comp, ax: u32, ay: u32, moved: &mut bool| {
-                        if !*moved {
-                            return;
-                        }
-                        *moved = false;
-                        let (mx, my) = self.tab_max;
-                        let px = (ax.min(mx) as u64 * dw.saturating_sub(1) as u64
-                            / mx.max(1) as u64) as u32;
-                        let py = (ay.min(my) as u64 * dh.saturating_sub(1) as u64
-                            / my.max(1) as u64) as u32;
-                        c.ptr_move(px, py, mask);
-                    };
+                let commit = |c: &mut Comp, ax: u32, ay: u32, moved: &mut bool| {
+                    if !*moved {
+                        return;
+                    }
+                    *moved = false;
+                    let (mx, my) = self.tab_max;
+                    let px =
+                        (ax.min(mx) as u64 * dw.saturating_sub(1) as u64 / mx.max(1) as u64) as u32;
+                    let py =
+                        (ay.min(my) as u64 * dh.saturating_sub(1) as u64 / my.max(1) as u64) as u32;
+                    c.ptr_move(px, py, mask);
+                };
                 for ev in &raw_events {
                     match ev.etype {
                         EV_ABS if ev.code == ABS_X => {

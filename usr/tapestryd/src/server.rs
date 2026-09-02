@@ -102,8 +102,7 @@ use libthyla_rs::time::Instant;
 use libthyla_rs::{
     t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map,
     t_hostmem_refcount, t_srv_peer, t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM,
-    T_PRINCIPAL_SYSTEM,
-    T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
+    T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
     T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
 
@@ -121,8 +120,8 @@ const PRESENT_BURST_MIN: u32 = 4;
 
 use crate::chords::{ChordAction, Chords};
 use crate::gpu::{FenceTag, FencedErr, Gpu};
-use libdriver::Error;
 use crate::pane::{self, Dir, Layout, Mode, Rect, Role, Status};
+use libdriver::Error;
 
 pub const MAX_CONNS: usize = 8;
 /// Of those, at most this many may be WARP conns (audit F7). Warp-2c fed
@@ -517,25 +516,25 @@ const WARP_FLAG: u64 = 1 << 42;
 const WARP_CTX: u64 = 1 << 39; // a ctx/<id> node (below the tag bits)
 const WARP_BO: u64 = 1 << 38; // a ctx bo/<id> node
 const WARP_RING: u64 = 1 << 43; // a ctx ring/<ridx> node (V-3a). Its bit must
-// be DISJOINT from every other qid tag AND from the id field. The id field is
-// (WARP_N_MASK << 8) = bits 8..37, so a tag must be bit >= 38; and bits 38..42
-// are ALL taken -- WARP_BO=38, WARP_CTX=39, SURF_FLAG=40, PANE_FLAG=41,
-// WARP_FLAG=42. Two earlier picks were wrong for this exact reason: 1<<37 sat
-// INSIDE the id field (leaked into warp_id -> no ring resolved), and 1<<40
-// aliased SURF_FLAG (is_surf(ring)=true -> the walk misrouted to the surface
-// arm). 1<<43 is the first free bit above the whole tag block. A ring path
-// still carries WARP_FLAG (is_warp), so is_warp/is_surf/is_pane/is_wctx/is_wbo
-// all read it correctly. The _Static_assert below now guards ALL of these.
+                                // be DISJOINT from every other qid tag AND from the id field. The id field is
+                                // (WARP_N_MASK << 8) = bits 8..37, so a tag must be bit >= 38; and bits 38..42
+                                // are ALL taken -- WARP_BO=38, WARP_CTX=39, SURF_FLAG=40, PANE_FLAG=41,
+                                // WARP_FLAG=42. Two earlier picks were wrong for this exact reason: 1<<37 sat
+                                // INSIDE the id field (leaked into warp_id -> no ring resolved), and 1<<40
+                                // aliased SURF_FLAG (is_surf(ring)=true -> the walk misrouted to the surface
+                                // arm). 1<<43 is the first free bit above the whole tag block. A ring path
+                                // still carries WARP_FLAG (is_warp), so is_warp/is_surf/is_pane/is_wctx/is_wbo
+                                // all read it correctly. The _Static_assert below now guards ALL of these.
 
 const WARP_MEM: u64 = 1 << 44; // a ctx mem/<handle> node (V-3b-3c-2, a
-// HOST_VISIBLE VkDeviceMemory blob). The first free bit above WARP_RING=43 --
-// same disjointness rule: a tag bit >= 44, clear of the id field (bits 8..37)
-// and of every other tag; the _Static_assert below guards it with the rest.
+                               // HOST_VISIBLE VkDeviceMemory blob). The first free bit above WARP_RING=43 --
+                               // same disjointness rule: a tag bit >= 44, clear of the id field (bits 8..37)
+                               // and of every other tag; the _Static_assert below guards it with the rest.
 
 const WARP_IMG: u64 = 1 << 45; // a ctx img/<handle> node (W-3c: a PRESENTABLE
-// -- a venus swapchain image's HOST3D blob, minted MAPPABLE and NEVER
-// mapped; see WARP-WSI-DESIGN 4.1 AS AMENDED). Next free
-// bit above WARP_MEM=44, same disjointness rule, same assert.
+                               // -- a venus swapchain image's HOST3D blob, minted MAPPABLE and NEVER
+                               // mapped; see WARP-WSI-DESIGN 4.1 AS AMENDED). Next free
+                               // bit above WARP_MEM=44, same disjointness rule, same assert.
 
 const W_ROOT: u64 = WARP_FLAG;
 /// The attach roots by listener (main.rs hands the accepting listener's
@@ -581,8 +580,8 @@ const WFK_MEM_NEW: u64 = 9;
 // WFK_SUBMIT_T_BASE + t for t in 1..WARP_TIMELINES; `submit` = timeline 0.
 const WFK_TIMELINES: u64 = 10;
 const WFK_SUBMIT_T_BASE: u64 = 10; // +1..=3 -> 11,12,13 = submit1..submit3
-// Ctx-level img kinds (ctx/<id>/img/*), W-3c. 14/15 are the first ctx-FK
-// values above the submit<t> family's 11..=13.
+                                   // Ctx-level img kinds (ctx/<id>/img/*), W-3c. 14/15 are the first ctx-FK
+                                   // values above the submit<t> family's 11..=13.
 const WFK_IMG_DIR: u64 = 14;
 const WFK_IMG_NEW: u64 = 15;
 // Mem-level file kinds (ctx/<id>/mem/<handle>/*), under WARP_MEM (WFK_DIR=0
@@ -646,10 +645,10 @@ const WARP_RING_OFF_TAIL: u64 = 0x08; // host-written consumer index
 const WARP_RING_OFF_IDLE: u64 = 0x10; // host-written: 1 = pump parked; kick iff 1
 const WARP_RING_OFF_SEQ: u64 = 0x18; // host-written monotone completed-seq feedback
 const WARP_RING_MAX: u64 = 1 << 20; // 1 MiB single-ring cap (F2)
-// HOST3D ring slots (ridx 0-63): shmem command rings (the instance ring, the
-// reply/TLS pools). NOT VkQueue timelines -- a queue is a pure fence lane with
-// no memory ring behind it (WARP-MULTIQUEUE-DESIGN section E.1); the old
-// "(Venus: one per VkQueue)" note here was that exact conflation in a comment.
+                                    // HOST3D ring slots (ridx 0-63): shmem command rings (the instance ring, the
+                                    // reply/TLS pools). NOT VkQueue timelines -- a queue is a pure fence lane with
+                                    // no memory ring behind it (WARP-MULTIQUEUE-DESIGN section E.1); the old
+                                    // "(Venus: one per VkQueue)" note here was that exact conflation in a comment.
 const WARP_RINGS_PER_CTX: usize = 64;
 // Venus fence TIMELINES (multi-queue F3): 0 = the ctx-global lane, 1..=3 =
 // VkQueue lanes (mesa max_timeline_count = 4, the ratified v1.0 bound). Sizes
@@ -997,7 +996,12 @@ fn rect_union(a: Rect, b: Rect) -> Rect {
     let y1 = a.y.min(b.y);
     let x2 = (a.x + a.w).max(b.x + b.w);
     let y2 = (a.y + a.h).max(b.y + b.h);
-    Rect { x: x1, y: y1, w: x2 - x1, h: y2 - y1 }
+    Rect {
+        x: x1,
+        y: y1,
+        w: x2 - x1,
+        h: y2 - y1,
+    }
 }
 
 /// The compositor's own screen buffer (Composed mode). A WEAVE-subtype
@@ -2507,9 +2511,7 @@ impl Comp {
         if scanned {
             return;
         }
-        if let Some((oldw, old_res)) =
-            self.surf_mut(n).and_then(|s| s.old_weave.take())
-        {
+        if let Some((oldw, old_res)) = self.surf_mut(n).and_then(|s| s.old_weave.take()) {
             self.release_gen(&oldw, &old_res);
         }
     }
@@ -2575,7 +2577,10 @@ impl Comp {
                 self.comp_attach_refused += 1;
                 say!(
                     "tapestryd: comp-attach surface {} res {}..{}: attach failed (device, slot {})",
-                    n, r0, rl, i
+                    n,
+                    r0,
+                    rl,
+                    i
                 );
                 return false;
             }
@@ -2584,7 +2589,9 @@ impl Comp {
             self.comp_attach_refused += 1;
             say!(
                 "tapestryd: comp-attach surface {} res {}..{}: SKIPPED (no witness probe)",
-                n, r0, rl
+                n,
+                r0,
+                rl
             );
             return false;
         }
@@ -2592,7 +2599,9 @@ impl Comp {
             self.comp_attach_refused += 1;
             say!(
                 "tapestryd: comp-attach surface {} res {}..{}: SKIPPED (compositor ctx unhealthy)",
-                n, r0, rl
+                n,
+                r0,
+                rl
             );
             return false;
         }
@@ -2695,7 +2704,8 @@ impl Comp {
         }
         // A buffer copy names BYTES: 4 of them (the texture form's 1x1
         // texel is the same 4 bytes) -- `probe_copy_region` keys the width.
-        self.probe_copy_region(COMPOSITOR_CTX, buf, mark_res, sent_res).is_ok()
+        self.probe_copy_region(COMPOSITOR_CTX, buf, mark_res, sent_res)
+            .is_ok()
     }
 
     /// The READ half: the sentinel back, true iff it holds the mark. On a
@@ -2732,7 +2742,8 @@ impl Comp {
     /// client submit by construction (one controlq, one slot).
     fn probe_upload(&mut self, dev_ctx: u32, buf: bool, res: u32) -> Result<(), Error> {
         if buf {
-            self.gpu.transfer_to_3d_box_sync(dev_ctx, res, 0, 0, 4, 1, 0, 0)
+            self.gpu
+                .transfer_to_3d_box_sync(dev_ctx, res, 0, 0, 4, 1, 0, 0)
         } else {
             self.gpu.transfer_to_3d_sync(dev_ctx, res, 1, 1, 4)
         }
@@ -2740,7 +2751,8 @@ impl Comp {
 
     fn probe_readback(&mut self, dev_ctx: u32, buf: bool, res: u32) -> Result<(), Error> {
         if buf {
-            self.gpu.transfer_from_3d_box_sync(dev_ctx, res, 0, 0, 4, 1, 0, 0)
+            self.gpu
+                .transfer_from_3d_box_sync(dev_ctx, res, 0, 0, 4, 1, 0, 0)
         } else {
             self.gpu.transfer_from_3d_sync(dev_ctx, res, 1, 1, 4)
         }
@@ -2749,7 +2761,13 @@ impl Comp {
     /// One `VIRGL_CCMD_RESOURCE_COPY_REGION` of the probe's 4 bytes, `src`
     /// -> `dst`, submitted on `dev_ctx`'s synchronous slot: a box 4 BYTES
     /// wide on a buffer pair, 1 texel on a texture pair (the same 4 bytes).
-    fn probe_copy_region(&mut self, dev_ctx: u32, buf: bool, src: u32, dst: u32) -> Result<(), Error> {
+    fn probe_copy_region(
+        &mut self,
+        dev_ctx: u32,
+        buf: bool,
+        src: u32,
+        dst: u32,
+    ) -> Result<(), Error> {
         let mut st: [u32; 14] = [0; 14];
         st[0] = (VIRGL_CCMD_RESOURCE_COPY_REGION & 0xff) | (VIRGL_CMD_RCR_SIZE << 16);
         st[1] = dst; // dst handle; level, x, y, z = 0
@@ -2849,13 +2867,21 @@ impl Comp {
             return None;
         }
         unsafe { core::ptr::write_volatile(sent_va as *mut u32, poison) };
-        if self.gpu.transfer_to_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4).is_err() {
+        if self
+            .gpu
+            .transfer_to_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4)
+            .is_err()
+        {
             return None;
         }
         if self.comp_copy_px(res, sent_res).is_err() {
             return None;
         }
-        if self.gpu.transfer_from_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4).is_err() {
+        if self
+            .gpu
+            .transfer_from_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4)
+            .is_err()
+        {
             return None;
         }
         let got = unsafe { core::ptr::read_volatile(sent_va as *const u32) } & 0x00FF_FFFF;
@@ -2883,7 +2909,12 @@ impl Comp {
             .wctx(ctx_pub, conn)
             .and_then(|c| c.bos.iter().flatten().find(|b| b.pub_id == bo_pub))
         {
-            Some(b) => (b.res_id, b.comp_imported, b.composable, (b.target, b.format, b.flags)),
+            Some(b) => (
+                b.res_id,
+                b.comp_imported,
+                b.composable,
+                (b.target, b.format, b.flags),
+            ),
             None => return,
         };
         if already || res_id == 0 {
@@ -2945,11 +2976,18 @@ impl Comp {
             );
             return;
         }
-        if self.gpu.ctx_attach_resource(COMPOSITOR_CTX, res_id).is_err() {
+        if self
+            .gpu
+            .ctx_attach_resource(COMPOSITOR_CTX, res_id)
+            .is_err()
+        {
             self.comp_attach_refused += 1;
             say!(
                 "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: attach failed (device)",
-                ctx_pub, bo_pub, res_id, sn
+                ctx_pub,
+                bo_pub,
+                res_id,
+                sn
             );
             return;
         }
@@ -2980,7 +3018,10 @@ impl Comp {
             self.comp_attach_witnessed += 1;
             say!(
                 "tapestryd: comp-attach ctx {} bo {} res {} -> surface {}: witnessed",
-                ctx_pub, bo_pub, res_id, sn
+                ctx_pub,
+                bo_pub,
+                res_id,
+                sn
             );
         } else {
             self.comp_attach_refused += 1;
@@ -3007,13 +3048,21 @@ impl Comp {
         for _ in 0..2 {
             let poison = self.comp_probe_token();
             unsafe { core::ptr::write_volatile(sent_va as *mut u32, poison) };
-            if self.gpu.transfer_to_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4).is_err() {
+            if self
+                .gpu
+                .transfer_to_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4)
+                .is_err()
+            {
                 return false;
             }
             if self.comp_copy_px(res, sent_res).is_err() {
                 return false;
             }
-            if self.gpu.transfer_from_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4).is_err() {
+            if self
+                .gpu
+                .transfer_from_3d_sync(COMPOSITOR_CTX, sent_res, 1, 1, 4)
+                .is_err()
+            {
                 return false;
             }
             let got = unsafe { core::ptr::read_volatile(sent_va as *const u32) };
@@ -3249,7 +3298,12 @@ impl Comp {
         if slot_u.is_none() && slot_s.is_none() && bo_u.is_none() && bo_s.is_none() {
             return None;
         }
-        Some(BlitConv { slot_u, slot_s, bo_u, bo_s })
+        Some(BlitConv {
+            slot_u,
+            slot_s,
+            bo_u,
+            bo_s,
+        })
     }
 
     /// Measure + confirm one (shape, size class). `bo` selects the flags-0
@@ -3261,8 +3315,19 @@ impl Comp {
     /// landing at 16-1-dh instead of 1). Then the confirmation: source rows
     /// 1..4 into destination row 3.., with the derived corrections, must
     /// land those exact rows in the wanted order and touch nothing else.
-    fn conv_measure_class(&mut self, p: &ConvProbe, seq: &mut u32, bo: bool, scaled: bool, toks: &[u32; 4]) -> Option<ClassConv> {
-        let (src_res, src_name) = if bo { (p.bo_res, "bo") } else { (p.slot_res, "slot") };
+    fn conv_measure_class(
+        &mut self,
+        p: &ConvProbe,
+        seq: &mut u32,
+        bo: bool,
+        scaled: bool,
+        toks: &[u32; 4],
+    ) -> Option<ClassConv> {
+        let (src_res, src_name) = if bo {
+            (p.bo_res, "bo")
+        } else {
+            (p.slot_res, "slot")
+        };
         let cls = if scaled { "S" } else { "U" };
         let mult: usize = if scaled { 2 } else { 1 };
         let mut found: Option<ClassConv> = None;
@@ -3283,7 +3348,10 @@ impl Comp {
                 match landing {
                     Some(l) => alloc::format!(
                         "run at row {} src rows {}..{} {}",
-                        l.first, l.src_lo, l.src_lo + 2, if l.straight { "straight" } else { "mirrored" }
+                        l.first,
+                        l.src_lo,
+                        l.src_lo + 2,
+                        if l.straight { "straight" } else { "mirrored" }
                     ),
                     None => String::from("no clean run"),
                 }
@@ -3302,7 +3370,11 @@ impl Comp {
                 f if f == CONV_ROWS - 1 - dh as usize => true,
                 _ => continue,
             };
-            found = Some(ClassConv { variant, src_flip, dst_flip });
+            found = Some(ClassConv {
+                variant,
+                src_flip,
+                dst_flip,
+            });
             break;
         }
         let conv = found?;
@@ -3310,7 +3382,18 @@ impl Comp {
         // destination row 3.. (3 rows, or 6 scaled). Expected: exactly those
         // rows, in the wanted order, at rows 3..3+3*mult, and zero elsewhere.
         let dh = 3 * mult as u32;
-        let words = Self::conv_words(p.scr_res, src_res, conv.variant, conv.src_flip, conv.dst_flip, 4, 1, 3, 3, dh);
+        let words = Self::conv_words(
+            p.scr_res,
+            src_res,
+            conv.variant,
+            conv.src_flip,
+            conv.dst_flip,
+            4,
+            1,
+            3,
+            3,
+            dh,
+        );
         let rows = self.conv_attempt(p, seq, |c, ctx| c.submit_blits(ctx, &[words]))?;
         let rgb = |v: u32| v & 0x00FF_FFFF;
         let mut ok = true;
@@ -3334,7 +3417,11 @@ impl Comp {
             conv.src_flip as u32,
             conv.dst_flip as u32,
             Self::conv_rows_str(&rows, toks),
-            if ok { "CONFIRMED" } else { "FAILED -- class OFF" }
+            if ok {
+                "CONFIRMED"
+            } else {
+                "FAILED -- class OFF"
+            }
         );
         if ok {
             Some(conv)
@@ -3380,7 +3467,11 @@ impl Comp {
             return None;
         }
         // Everything outside the run must be zero.
-        if rows.iter().enumerate().any(|(i, &r)| !(first..first + len).contains(&i) && r != 0) {
+        if rows
+            .iter()
+            .enumerate()
+            .any(|(i, &r)| !(first..first + len).contains(&i) && r != 0)
+        {
             return None;
         }
         let a = idx(rows[first])?;
@@ -3401,7 +3492,11 @@ impl Comp {
         if lo != 0 && lo != 2 {
             return None;
         }
-        Some(Landing { first, src_lo: lo, straight })
+        Some(Landing {
+            first,
+            src_lo: lo,
+            straight,
+        })
     }
 
     /// Build one probe/composition request from GUEST boxes and a class
@@ -3410,11 +3505,38 @@ impl Comp {
     /// the source's height; the target's is CONV_ROWS here and the screen's
     /// in the compose path (`blit_request`).
     #[allow(clippy::too_many_arguments)]
-    fn conv_words(dst_res: u32, src_res: u32, variant: BlitVariant, src_flip: bool, dst_flip: bool,
-                  hs: u32, sy: u32, sh: u32, dy: u32, dh: u32) -> [u32; 22] {
-        Self::blit_request(dst_res, CONV_ROWS as u32, 0, dy, 1, dh,
-                           src_res, VIRGL_FORMAT_B8G8R8A8_UNORM, hs, 0, sy, 1, sh,
-                           ClassConv { variant, src_flip, dst_flip })
+    fn conv_words(
+        dst_res: u32,
+        src_res: u32,
+        variant: BlitVariant,
+        src_flip: bool,
+        dst_flip: bool,
+        hs: u32,
+        sy: u32,
+        sh: u32,
+        dy: u32,
+        dh: u32,
+    ) -> [u32; 22] {
+        Self::blit_request(
+            dst_res,
+            CONV_ROWS as u32,
+            0,
+            dy,
+            1,
+            dh,
+            src_res,
+            VIRGL_FORMAT_B8G8R8A8_UNORM,
+            hs,
+            0,
+            sy,
+            1,
+            sh,
+            ClassConv {
+                variant,
+                src_flip,
+                dst_flip,
+            },
+        )
     }
 
     /// The general request: source box (sx, sy, sw, sh) of `src_res` (height
@@ -3457,9 +3579,22 @@ impl Comp {
         ]
     }
 
-    fn blit_request(dst_res: u32, hd: u32, dx: u32, dy: u32, dw: u32, dh: u32,
-                    src_res: u32, src_fmt: u32, hs: u32, sx: u32, sy: u32, sw: u32, sh: u32,
-                    conv: ClassConv) -> [u32; 22] {
+    fn blit_request(
+        dst_res: u32,
+        hd: u32,
+        dx: u32,
+        dy: u32,
+        dw: u32,
+        dh: u32,
+        src_res: u32,
+        src_fmt: u32,
+        hs: u32,
+        sx: u32,
+        sy: u32,
+        sw: u32,
+        sh: u32,
+        conv: ClassConv,
+    ) -> [u32; 22] {
         let syp = (if conv.src_flip { hs - sy - sh } else { sy }) as i32;
         let dyp = (if conv.dst_flip { hd - dy - dh } else { dy }) as i32;
         let (fsy, fsh, fdy, fdh) = match conv.variant {
@@ -3467,7 +3602,9 @@ impl Comp {
             BlitVariant::SrcNeg => (syp + sh as i32, -(sh as i32), dyp, dh as i32),
             BlitVariant::DstNeg => (syp, sh as i32, dyp + dh as i32, -(dh as i32)),
         };
-        Self::blit_words(dst_res, dx, fdy, dw, fdh, src_res, src_fmt, sx, fsy, sw, fsh)
+        Self::blit_words(
+            dst_res, dx, fdy, dw, fdh, src_res, src_fmt, sx, fsy, sw, fsh,
+        )
     }
 
     /// One convention-probe attempt on a FRESH throwaway context: create it,
@@ -3485,7 +3622,10 @@ impl Comp {
         // The conv throwaways must never climb into the venus ctx band
         // (V-3b-1c-2); if this ever fires the WARP_VENUS_CTX_BASE gap is too
         // small and the two families could alias.
-        debug_assert!(ctx < WARP_VENUS_CTX_BASE, "conv probe ctx climbed into the venus band");
+        debug_assert!(
+            ctx < WARP_VENUS_CTX_BASE,
+            "conv probe ctx climbed into the venus band"
+        );
         *seq += 1;
         if self.gpu.ctx_create(ctx, b"tapestry-conv").is_err() {
             return None;
@@ -3498,13 +3638,25 @@ impl Comp {
             for i in 0..CONV_ROWS {
                 unsafe { core::ptr::write_volatile((p.scr_va as *mut u32).add(i), 0) };
             }
-            let staged = self.gpu.transfer_to_3d_box_sync(ctx, p.scr_res, 0, 0, 1, CONV_ROWS as u32, 0, 4).is_ok()
-                && self.gpu.transfer_to_3d_box_sync(ctx, p.bo_res, 0, 0, 1, 4, 0, 4).is_ok();
+            let staged = self
+                .gpu
+                .transfer_to_3d_box_sync(ctx, p.scr_res, 0, 0, 1, CONV_ROWS as u32, 0, 4)
+                .is_ok()
+                && self
+                    .gpu
+                    .transfer_to_3d_box_sync(ctx, p.bo_res, 0, 0, 1, 4, 0, 4)
+                    .is_ok();
             if staged && body(self, ctx).is_ok() {
                 for i in 0..CONV_ROWS {
-                    unsafe { core::ptr::write_volatile((p.scr_va as *mut u32).add(i), 0xDEAD_BEEF) };
+                    unsafe {
+                        core::ptr::write_volatile((p.scr_va as *mut u32).add(i), 0xDEAD_BEEF)
+                    };
                 }
-                if self.gpu.transfer_from_3d_box_sync(ctx, p.scr_res, 0, 0, 1, CONV_ROWS as u32, 0, 4).is_ok() {
+                if self
+                    .gpu
+                    .transfer_from_3d_box_sync(ctx, p.scr_res, 0, 0, 1, CONV_ROWS as u32, 0, 4)
+                    .is_ok()
+                {
                     let mut rows = [0u32; CONV_ROWS];
                     for (i, r) in rows.iter_mut().enumerate() {
                         *r = unsafe { core::ptr::read_volatile((p.scr_va as *const u32).add(i)) };
@@ -3542,7 +3694,17 @@ impl Comp {
                 return None;
             }
         };
-        Some(ConvProbe { slot_res, slot_fd, slot_va, bo_res, bo_fd, bo_va, scr_res, scr_fd, scr_va })
+        Some(ConvProbe {
+            slot_res,
+            slot_fd,
+            slot_va,
+            bo_res,
+            bo_fd,
+            bo_va,
+            scr_res,
+            scr_fd,
+            scr_va,
+        })
     }
 
     /// One probe resource of `kind` (0 = slot: `resource_create_2d`, the
@@ -3589,7 +3751,11 @@ impl Comp {
             unsafe { t_close(fd) };
             return None;
         }
-        if self.gpu.attach_backing(res, pa as u64, size as u32).is_err() {
+        if self
+            .gpu
+            .attach_backing(res, pa as u64, size as u32)
+            .is_err()
+        {
             let _ = self.gpu.resource_unref(res);
             unsafe { t_burrow_detach(va, size) };
             unsafe { t_close(fd) };
@@ -3616,7 +3782,10 @@ impl Comp {
     /// up, a witness probe to verify it with, blit conventions the probe
     /// could establish, and no latch since.
     fn gpu_compose_ready(&self) -> bool {
-        self.comp_ctx && self.comp_probe.is_some() && self.comp_conv.is_some() && !self.comp_gpu_dead
+        self.comp_ctx
+            && self.comp_probe.is_some()
+            && self.comp_conv.is_some()
+            && !self.comp_gpu_dead
     }
 
     /// Is surface `n` hosted in a VISIBLE pane with a screen to compose
@@ -3676,7 +3845,12 @@ impl Comp {
         if dh <= unit || dw == 0 {
             return None;
         }
-        Some(Rect { x: 0, y: dh - unit, w: dw, h: unit })
+        Some(Rect {
+            x: 0,
+            y: dh - unit,
+            w: dw,
+            h: unit,
+        })
     }
 
     /// Every showable NON-HOSTED surface with its target -- chrome at its
@@ -3686,7 +3860,9 @@ impl Comp {
     fn visible_chrome(&self) -> Vec<(usize, Rect)> {
         let mut out = Vec::new();
         for n in 0..MAX_SURFACES {
-            if self.surf(n).map_or(false, |s| s.chrome_bind.is_some() || s.is_menu || s.is_status) {
+            if self.surf(n).map_or(false, |s| {
+                s.chrome_bind.is_some() || s.is_menu || s.is_status
+            }) {
                 if let Some(r) = self.surface_target(n) {
                     out.push((n, r));
                 }
@@ -3763,7 +3939,10 @@ impl Comp {
         if first {
             say!(
                 "tapestryd: surface {} composed via GPU blit ({} res {} -> screen res {})",
-                n, kind, src_res, scr_res
+                n,
+                kind,
+                src_res,
+                scr_res
             );
         }
     }
@@ -3855,11 +4034,21 @@ impl Comp {
     /// from its pane LETTERBOXES (aspect-preserving scale, centered; damage
     /// rects ignored -- the whole scaled rect redraws); an accumulator, or
     /// a same-size surface, takes the damage-clipped CROP.
-    fn compose_geometry(&mut self, n: usize, x: u32, y: u32, pw: u32, ph: u32) -> Option<ComposeOp> {
+    fn compose_geometry(
+        &mut self,
+        n: usize,
+        x: u32,
+        y: u32,
+        pw: u32,
+        ph: u32,
+    ) -> Option<ComposeOp> {
         let (sw, sh_full, patchwork, chrome) = match self.surf(n) {
-            Some(s) if s.weave.is_some() => {
-                (s.w, s.h, s.patchwork, s.chrome_bind.is_some() || s.is_menu || s.is_status)
-            }
+            Some(s) if s.weave.is_some() => (
+                s.w,
+                s.h,
+                s.patchwork,
+                s.chrome_bind.is_some() || s.is_menu || s.is_status,
+            ),
             _ => return None,
         };
         let content = self.surface_target(n)?; // hidden / unhosted / stale bind: no target
@@ -3878,24 +4067,51 @@ impl Comp {
                     su.lb_logged = Some(sig);
                     say!(
                         "tapestryd: surface {} letterbox {}x{} -> {}x{} @({},{}) in {}x{}",
-                        n, sw, sh_full, dw2, dh2, ox, oy, content.w, content.h
+                        n,
+                        sw,
+                        sh_full,
+                        dw2,
+                        dh2,
+                        ox,
+                        oy,
+                        content.w,
+                        content.h
                     );
                 }
             }
             return Some(ComposeOp {
-                src: Rect { x: 0, y: 0, w: sw, h: sh_full },
-                dst: Rect { x: content.x + ox, y: content.y + oy, w: dw2, h: dh2 },
+                src: Rect {
+                    x: 0,
+                    y: 0,
+                    w: sw,
+                    h: sh_full,
+                },
+                dst: Rect {
+                    x: content.x + ox,
+                    y: content.y + oy,
+                    w: dw2,
+                    h: dh2,
+                },
             });
         }
         // Same-size fast path: damage-clipped.
-        let inter = Rect { x, y, w: pw, h: ph }
-            .intersect(Rect { x: 0, y: 0, w: content.w, h: content.h });
+        let inter = Rect { x, y, w: pw, h: ph }.intersect(Rect {
+            x: 0,
+            y: 0,
+            w: content.w,
+            h: content.h,
+        });
         if inter.is_empty() {
             return None;
         }
         Some(ComposeOp {
             src: inter,
-            dst: Rect { x: content.x + inter.x, y: content.y + inter.y, w: inter.w, h: inter.h },
+            dst: Rect {
+                x: content.x + inter.x,
+                y: content.y + inter.y,
+                w: inter.w,
+                h: inter.h,
+            },
         })
     }
 
@@ -3916,12 +4132,29 @@ impl Comp {
     /// class. The caller has transferred the damage into `src_res` and holds
     /// `comp_attached` for its generation; the screen is the 3D one. None =
     /// this class is CPU-composed on this host.
-    fn compose_gpu_slot_words(&self, op: ComposeOp, src_res: u32, sh_full: u32, scr_res: u32) -> Option<[u32; 22]> {
+    fn compose_gpu_slot_words(
+        &self,
+        op: ComposeOp,
+        src_res: u32,
+        sh_full: u32,
+        scr_res: u32,
+    ) -> Option<[u32; 22]> {
         let scaled = op.src.w != op.dst.w || op.src.h != op.dst.h;
         let conv = self.class_conv(false, scaled)?;
         Some(Self::blit_request(
-            scr_res, self.gpu.height, op.dst.x, op.dst.y, op.dst.w, op.dst.h,
-            src_res, VIRGL_FORMAT_B8G8R8A8_UNORM, sh_full, op.src.x, op.src.y, op.src.w, op.src.h,
+            scr_res,
+            self.gpu.height,
+            op.dst.x,
+            op.dst.y,
+            op.dst.w,
+            op.dst.h,
+            src_res,
+            VIRGL_FORMAT_B8G8R8A8_UNORM,
+            sh_full,
+            op.src.x,
+            op.src.y,
+            op.src.w,
+            op.src.h,
             conv,
         ))
     }
@@ -3931,19 +4164,42 @@ impl Comp {
     /// found this renderer honours for the op's size class. None = readback
     /// arm (no measured request for the class, or a partial/foreign-format
     /// source the probe did not measure).
-    fn compose_gpu_bo_words(&self, op: ComposeOp, bo_res: u32, bo_fmt: u32, bo_h: u32, scr_res: u32) -> Option<[u32; 22]> {
+    fn compose_gpu_bo_words(
+        &self,
+        op: ComposeOp,
+        bo_res: u32,
+        bo_fmt: u32,
+        bo_h: u32,
+        scr_res: u32,
+    ) -> Option<[u32; 22]> {
         // Measured for the FULL source only (a GL frame is whole-frame by
         // nature; the GL arms present full damage) and for the probe's own
         // format: a partial source op, or another format, is not something
         // this code has a measured request for -- readback arm.
-        if op.src.x != 0 || op.src.y != 0 || op.src.h != bo_h || op.src.w == 0 || bo_fmt != VIRGL_FORMAT_B8G8R8A8_UNORM {
+        if op.src.x != 0
+            || op.src.y != 0
+            || op.src.h != bo_h
+            || op.src.w == 0
+            || bo_fmt != VIRGL_FORMAT_B8G8R8A8_UNORM
+        {
             return None;
         }
         let scaled = op.src.w != op.dst.w || op.src.h != op.dst.h;
         let conv = self.class_conv(true, scaled)?;
         Some(Self::blit_request(
-            scr_res, self.gpu.height, op.dst.x, op.dst.y, op.dst.w, op.dst.h,
-            bo_res, bo_fmt, bo_h, 0, 0, op.src.w, bo_h,
+            scr_res,
+            self.gpu.height,
+            op.dst.x,
+            op.dst.y,
+            op.dst.w,
+            op.dst.h,
+            bo_res,
+            bo_fmt,
+            bo_h,
+            0,
+            0,
+            op.src.w,
+            bo_h,
             conv,
         ))
     }
@@ -4066,7 +4322,10 @@ impl Comp {
             #[cfg(feature = "test-mode")]
             say!(
                 "tapestryd: status bar {} created ({}x{}); the display carves {}",
-                n, w, h, libhalcyon::theme::METRICS.status_h
+                n,
+                w,
+                h,
+                libhalcyon::theme::METRICS.status_h
             );
             self.reconcile();
             return Ok(());
@@ -4156,7 +4415,11 @@ impl Comp {
             // u16 compare; serial spaces are tiny per surface lifetime.
             // A wrap-straddling stale reads as "unknown" -- fail-closed
             // either way (both are rejections).
-            return Err(if serial < s.cfg_serial { E_AGAIN } else { p9::E_INVAL });
+            return Err(if serial < s.cfg_serial {
+                E_AGAIN
+            } else {
+                p9::E_INVAL
+            });
         }
         if w != ow || h != oh {
             return Err(p9::E_INVAL); // the ack must echo the offer
@@ -4230,7 +4493,10 @@ impl Comp {
     /// feature negotiation -- so it is reported where the host is brought up.
     pub fn report_composed_posture(&mut self) {
         if self.ensure_comp_ctx() {
-            say!("tapestryd: composed path = GPU (compositor ctx {})", COMPOSITOR_CTX);
+            say!(
+                "tapestryd: composed path = GPU (compositor ctx {})",
+                COMPOSITOR_CTX
+            );
             // C-2c: the context's own mark/sentinel pair -- the instrument
             // every import verdict is read through. Built once, held for the
             // process lifetime like the context itself; a failed build
@@ -4351,7 +4617,11 @@ impl Comp {
         let handle =
             unsafe { t_dma_create_weave(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if handle < 0 {
-            say!("tapestryd: screen t_dma_create_weave({}) failed {}", size, handle);
+            say!(
+                "tapestryd: screen t_dma_create_weave({}) failed {}",
+                size,
+                handle
+            );
             return None;
         }
         let va = self.weave_va_next;
@@ -4452,7 +4722,11 @@ impl Comp {
                 unsafe { t_close(handle) };
                 return None;
             }
-            if self.gpu.attach_backing(res, pa as u64, size as u32).is_err() {
+            if self
+                .gpu
+                .attach_backing(res, pa as u64, size as u32)
+                .is_err()
+            {
                 let _ = self.gpu.resource_unref(res);
                 unsafe { t_burrow_detach(va, size) };
                 unsafe { t_close(handle) };
@@ -4467,7 +4741,13 @@ impl Comp {
             dh,
             why
         );
-        Some(Screen { handle, va, size, res, is3d })
+        Some(Screen {
+            handle,
+            va,
+            size,
+            res,
+            is3d,
+        })
     }
 
     /// The witness behind the screen's "3D" word: a sentinel written into
@@ -4562,12 +4842,16 @@ impl Comp {
         // stands, the OSD apply is refused (never persisted), and a
         // startup push of a too-big persisted mode is rejected so aurora
         // comes up at the default (the self-heal in aurora clears it).
-        let probe = unsafe {
-            t_dma_create_weave(surf_size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP)
-        };
+        let probe =
+            unsafe { t_dma_create_weave(surf_size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if probe < 0 {
-            say!("tapestryd: mode {}x{} refused -- surface weave {} unallocatable ({})",
-                 w, h, surf_size, probe);
+            say!(
+                "tapestryd: mode {}x{} refused -- surface weave {} unallocatable ({})",
+                w,
+                h,
+                surf_size,
+                probe
+            );
             return Err(p9::E_NOMEM);
         }
         unsafe { t_close(probe) };
@@ -4742,7 +5026,12 @@ impl Comp {
             None => return,
         };
         let (dw, dh) = (self.gpu.width, self.gpu.height);
-        let r = r.intersect(Rect { x: 0, y: 0, w: dw, h: dh });
+        let r = r.intersect(Rect {
+            x: 0,
+            y: 0,
+            w: dw,
+            h: dh,
+        });
         if r.is_empty() {
             return;
         }
@@ -4861,10 +5150,20 @@ impl Comp {
             return None;
         }
         if s.patchwork || (s.w == content.w && s.h == content.h) {
-            return Some(Rect { x: content.x, y: content.y, w: s.w.min(content.w), h: s.h.min(content.h) });
+            return Some(Rect {
+                x: content.x,
+                y: content.y,
+                w: s.w.min(content.w),
+                h: s.h.min(content.h),
+            });
         }
         let (ox, oy, dw2, dh2) = Self::letterbox(s.w, s.h, content.w, content.h);
-        Some(Rect { x: content.x + ox, y: content.y + oy, w: dw2, h: dh2 })
+        Some(Rect {
+            x: content.x + ox,
+            y: content.y + oy,
+            w: dw2,
+            h: dh2,
+        })
     }
 
     /// The four bands of `outer` around `inner` (top, bottom, left, right;
@@ -4878,10 +5177,30 @@ impl Comp {
         let ix1 = inner.x + inner.w;
         let iy1 = inner.y + inner.h;
         [
-            Rect { x: outer.x, y: outer.y, w: outer.w, h: inner.y.saturating_sub(outer.y) },
-            Rect { x: outer.x, y: iy1.min(oy1), w: outer.w, h: oy1.saturating_sub(iy1) },
-            Rect { x: outer.x, y: inner.y, w: inner.x.saturating_sub(outer.x), h: inner.h },
-            Rect { x: ix1.min(ox1), y: inner.y, w: ox1.saturating_sub(ix1), h: inner.h },
+            Rect {
+                x: outer.x,
+                y: outer.y,
+                w: outer.w,
+                h: inner.y.saturating_sub(outer.y),
+            },
+            Rect {
+                x: outer.x,
+                y: iy1.min(oy1),
+                w: outer.w,
+                h: oy1.saturating_sub(iy1),
+            },
+            Rect {
+                x: outer.x,
+                y: inner.y,
+                w: inner.x.saturating_sub(outer.x),
+                h: inner.h,
+            },
+            Rect {
+                x: ix1.min(ox1),
+                y: inner.y,
+                w: ox1.saturating_sub(ix1),
+                h: inner.h,
+            },
         ]
     }
 
@@ -4932,14 +5251,29 @@ impl Comp {
         };
         // Menu-relative source: the rect may be smaller than the surface
         // (a menu larger than the display crops).
-        let src = Rect { x: inter.x - m.rect.x, y: inter.y - m.rect.y, w: inter.w, h: inter.h }
-            .intersect(Rect { x: 0, y: 0, w: sw, h: sh });
+        let src = Rect {
+            x: inter.x - m.rect.x,
+            y: inter.y - m.rect.y,
+            w: inter.w,
+            h: inter.h,
+        }
+        .intersect(Rect {
+            x: 0,
+            y: 0,
+            w: sw,
+            h: sh,
+        });
         if src.is_empty() {
             return None;
         }
         let op = ComposeOp {
             src,
-            dst: Rect { x: m.rect.x + src.x, y: m.rect.y + src.y, w: src.w, h: src.h },
+            dst: Rect {
+                x: m.rect.x + src.x,
+                y: m.rect.y + src.y,
+                w: src.w,
+                h: src.h,
+            },
         };
         self.compose_cpu(op, va + (slot as u64) * slot_stride, sw, sh);
         Some(op.dst)
@@ -4949,7 +5283,14 @@ impl Comp {
     fn menu_text(&self) -> String {
         match self.menu {
             None => String::from("none"),
-            Some(m) => alloc::format!("{} {} {} {} {}", m.n, m.rect.x, m.rect.y, m.rect.w, m.rect.h),
+            Some(m) => alloc::format!(
+                "{} {} {} {} {}",
+                m.n,
+                m.rect.x,
+                m.rect.y,
+                m.rect.w,
+                m.rect.h
+            ),
         }
     }
 
@@ -5078,14 +5419,14 @@ impl Comp {
             band(r.x, y1 - inset, x1, y1); // bottom
             band(r.x, r.y, r.x + inset, y1); // left
             band(x1 - inset, r.y, x1, y1); // right
-            // The cast shadow (section 5.4): a 1px `border` line at the
-            // focused leaf's innermost bottom floor row, spanning the pane
-            // body, downward only. Overpaints that floor row -> the two-tone
-            // (dark bevel_bottom above, this lighter line, then floor). Owned
-            // by the tile (its own ring), so last-in-stack is handled and no
-            // neighbour border is borrowed. Needs a floor row (floor_w >= 1);
-            // a zero-gap config skips it (focus still shows in the strip +
-            // the H-3b status key).
+                                           // The cast shadow (section 5.4): a 1px `border` line at the
+                                           // focused leaf's innermost bottom floor row, spanning the pane
+                                           // body, downward only. Overpaints that floor row -> the two-tone
+                                           // (dark bevel_bottom above, this lighter line, then floor). Owned
+                                           // by the tile (its own ring), so last-in-stack is handled and no
+                                           // neighbour border is borrowed. Needs a floor row (floor_w >= 1);
+                                           // a zero-gap config skips it (focus still shows in the strip +
+                                           // the H-3b status key).
             if slot == focused && floor_w >= 1 {
                 let sy = y1 - floor_w; // innermost floor row (d == floor_w-1)
                 for x in (r.x + floor_w)..(x1 - floor_w) {
@@ -5116,10 +5457,30 @@ impl Comp {
                 }
                 painted.push(tb);
             }
-            painted.push(Rect { x: r.x, y: r.y, w: r.w, h: inset });
-            painted.push(Rect { x: r.x, y: y1 - inset, w: r.w, h: inset });
-            painted.push(Rect { x: r.x, y: r.y, w: inset, h: r.h });
-            painted.push(Rect { x: x1 - inset, y: r.y, w: inset, h: r.h });
+            painted.push(Rect {
+                x: r.x,
+                y: r.y,
+                w: r.w,
+                h: inset,
+            });
+            painted.push(Rect {
+                x: r.x,
+                y: y1 - inset,
+                w: r.w,
+                h: inset,
+            });
+            painted.push(Rect {
+                x: r.x,
+                y: r.y,
+                w: inset,
+                h: r.h,
+            });
+            painted.push(Rect {
+                x: x1 - inset,
+                y: r.y,
+                w: inset,
+                h: r.h,
+            });
         }
         painted
     }
@@ -5179,9 +5540,21 @@ impl Comp {
                     let each = area.w / n;
                     let mut x = area.x;
                     for (i, _) in children.iter().enumerate() {
-                        let w = if i as u32 == n - 1 { area.x + area.w - x } else { each };
+                        let w = if i as u32 == n - 1 {
+                            area.x + area.w - x
+                        } else {
+                            each
+                        };
                         let gap = if i as u32 == n - 1 || w == 0 { 0 } else { 1 };
-                        fill(Rect { x, y: area.y, w: w - gap, h: area.h }, seg_color(i));
+                        fill(
+                            Rect {
+                                x,
+                                y: area.y,
+                                w: w - gap,
+                                h: area.h,
+                            },
+                            seg_color(i),
+                        );
                         x += w;
                     }
                 }
@@ -5237,7 +5610,12 @@ impl Comp {
             Some(s) => s.res,
             None => return,
         };
-        self.menu_reassert(Rect { x: 0, y: 0, w: dw, h: dh });
+        self.menu_reassert(Rect {
+            x: 0,
+            y: 0,
+            w: dw,
+            h: dh,
+        });
         let _ = self.gpu.transfer_then_flush(res, 0, 0, 0, dw, dh);
     }
 
@@ -5295,7 +5673,8 @@ impl Comp {
         // H-3d: a status bar is a visible thing too (Off would hide it), and a
         // leaf above the carve is smaller than the display (Direct is a
         // display-sized weave): both arms need no bar.
-        let want = if vis.is_empty() && nleaves <= 1 && self.menu.is_none() && self.status.is_none() {
+        let want = if vis.is_empty() && nleaves <= 1 && self.menu.is_none() && self.status.is_none()
+        {
             match self.scanout {
                 Scanout::Boot => Scanout::Boot,
                 _ => Scanout::Off,
@@ -5304,9 +5683,7 @@ impl Comp {
             // H-3c: a placed menu is a second visible thing -- it composes
             // over the leaf, so Direct is off while one is up.
             let n = vis[0].1;
-            let full = self
-                .surf(n)
-                .map_or(false, |s| s.w == dw && s.h == dh);
+            let full = self.surf(n).map_or(false, |s| s.w == dw && s.h == dh);
             if full {
                 Scanout::Direct(n)
             } else {
@@ -5424,7 +5801,12 @@ impl Comp {
                     // this line once did, reported an intent as an event.
                     if self.gpu.set_scanout(sres, dw, dh).is_ok() {
                         self.bound_res = sres;
-                        say!("tapestryd: scanout composed ({}x{}) res {} bound", dw, dh, sres);
+                        say!(
+                            "tapestryd: scanout composed ({}x{}) res {} bound",
+                            dw,
+                            dh,
+                            sres
+                        );
                     } else {
                         say!(
                             "tapestryd: scanout composed ({}x{}) res {} BIND FAILED -- display keeps the previous scanout",
@@ -6015,8 +6397,8 @@ impl Comp {
             // record, preserving order). Overflow falls through to the
             // droppable class below.
             if let Some(t) = s.events.back_mut().filter(|e| e.kind == TEV_PTR_REL) {
-                let sx = (t.value >> 16) as u16 as i16 as i32
-                    + (ev.value >> 16) as u16 as i16 as i32;
+                let sx =
+                    (t.value >> 16) as u16 as i16 as i32 + (ev.value >> 16) as u16 as i16 as i32;
                 let sy = (t.value & 0xFFFF) as u16 as i16 as i32
                     + (ev.value & 0xFFFF) as u16 as i16 as i32;
                 let sx = sx.clamp(-32768, 32767) as i16 as u16 as u32;
@@ -6298,9 +6680,15 @@ impl Comp {
         // Width-bound iff cw/sw <= ch/sh  <=>  cw*sh <= ch*sw (u64: no
         // overflow for display-scale dims).
         let (dw2, dh2) = if (cw as u64) * (sh as u64) <= (ch as u64) * (sw as u64) {
-            (cw, (((sh as u64) * (cw as u64)) / (sw as u64).max(1)) as u32)
+            (
+                cw,
+                (((sh as u64) * (cw as u64)) / (sw as u64).max(1)) as u32,
+            )
         } else {
-            ((((sw as u64) * (ch as u64)) / (sh as u64).max(1)) as u32, ch)
+            (
+                (((sw as u64) * (ch as u64)) / (sh as u64).max(1)) as u32,
+                ch,
+            )
         };
         let (dw2, dh2) = (dw2.max(1), dh2.max(1));
         ((cw - dw2) / 2, (ch - dh2) / 2, dw2, dh2)
@@ -6374,8 +6762,12 @@ impl Comp {
         // `+` here overflows for any ptr_x >= 1 and, under
         // overflow-checks + panic=abort, kills the console. Round 3's
         // commit message claimed this line was fixed; it was not.
-        let px = (self.ptr_x as i32).saturating_add(dx).clamp(0, dw.max(1) - 1) as u32;
-        let py = (self.ptr_y as i32).saturating_add(dy).clamp(0, dh.max(1) - 1) as u32;
+        let px = (self.ptr_x as i32)
+            .saturating_add(dx)
+            .clamp(0, dw.max(1) - 1) as u32;
+        let py = (self.ptr_y as i32)
+            .saturating_add(dy)
+            .clamp(0, dh.max(1) - 1) as u32;
         self.ptr_commit(px, py, mods);
     }
 
@@ -6385,7 +6777,11 @@ impl Comp {
     fn ptr_rel_emit(&mut self, dx: i32, dy: i32, mods: u16) {
         // H-3c: the grab takes the deltas too (a menu ignores them; the
         // leaf underneath must not see motion it cannot act on).
-        let n = match self.menu.map(|m| m.n).or_else(|| self.layout.focused_surface()) {
+        let n = match self
+            .menu
+            .map(|m| m.n)
+            .or_else(|| self.layout.focused_surface())
+        {
             Some(n) => n,
             None => return,
         };
@@ -6414,8 +6810,14 @@ impl Comp {
     fn ptr_route(&self, px: u32, py: u32) -> Option<(usize, u16, u16)> {
         match self.menu {
             Some(m) => {
-                let sx = px.saturating_sub(m.rect.x).min(m.rect.w.saturating_sub(1)).min(0xFFFF) as u16;
-                let sy = py.saturating_sub(m.rect.y).min(m.rect.h.saturating_sub(1)).min(0xFFFF) as u16;
+                let sx = px
+                    .saturating_sub(m.rect.x)
+                    .min(m.rect.w.saturating_sub(1))
+                    .min(0xFFFF) as u16;
+                let sy = py
+                    .saturating_sub(m.rect.y)
+                    .min(m.rect.h.saturating_sub(1))
+                    .min(0xFFFF) as u16;
                 Some((m.n, sx, sy))
             }
             None => self.ptr_hit(px, py),
@@ -6456,7 +6858,10 @@ impl Comp {
             if v == OWNER_SWALLOWED {
                 #[cfg(feature = "test-mode")]
                 {
-                    say!("tapestryd: menu click-away release swallowed (btn {})", code);
+                    say!(
+                        "tapestryd: menu click-away release swallowed (btn {})",
+                        code
+                    );
                 }
                 return;
             }
@@ -6663,13 +7068,12 @@ impl Comp {
             ChordAction::SplitToggle => {
                 // Split-orientation toggle on the focused leaf's parent.
                 let f = self.layout.focused;
-                let parent_mode = self
-                    .layout
-                    .get(f)
-                    .and_then(|p| p.parent)
-                    .and_then(|pi| match self.layout.get(pi).map(|p| &p.kind) {
-                        Some(pane::Kind::Container { mode, .. }) => Some(*mode),
-                        _ => None,
+                let parent_mode =
+                    self.layout.get(f).and_then(|p| p.parent).and_then(|pi| {
+                        match self.layout.get(pi).map(|p| &p.kind) {
+                            Some(pane::Kind::Container { mode, .. }) => Some(*mode),
+                            _ => None,
+                        }
                     });
                 let want = match parent_mode {
                     Some(Mode::SplitH) => Mode::SplitV,
@@ -6807,16 +7211,36 @@ fn ctx_guest_backing(c: &WarpCtx) -> u64 {
     // ring is physically hostmem, but rings are <= WARP_RING_MAX (1 MiB) each
     // and charging them here is conservative in the direction that can never
     // widen the guest exposure -- documented, not accidental (W-4 split).
-    let bo: u64 = c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
-    let ring: u64 = c.ring_slots.iter().flatten().map(|r| r.size).fold(0u64, u64::saturating_add);
+    let bo: u64 = c
+        .bos
+        .iter()
+        .flatten()
+        .map(|b| b.size)
+        .fold(0u64, u64::saturating_add);
+    let ring: u64 = c
+        .ring_slots
+        .iter()
+        .flatten()
+        .map(|r| r.size)
+        .fold(0u64, u64::saturating_add);
     bo.saturating_add(ring).saturating_add(c.leaked_bytes)
 }
 
 fn ctx_hostmem_backing(c: &WarpCtx) -> u64 {
     // The HOSTMEM family (WARP_CTX_HOSTMEM_MAX): mems + imgs are HOST3D
     // blobs in QEMU's hostmem window (W-4 split; see the const's rationale).
-    let mem: u64 = c.mems.iter().flatten().map(|m| m.host3d.size).fold(0u64, u64::saturating_add);
-    let img: u64 = c.imgs.iter().flatten().map(|i| i.size).fold(0u64, u64::saturating_add);
+    let mem: u64 = c
+        .mems
+        .iter()
+        .flatten()
+        .map(|m| m.host3d.size)
+        .fold(0u64, u64::saturating_add);
+    let img: u64 = c
+        .imgs
+        .iter()
+        .flatten()
+        .map(|i| i.size)
+        .fold(0u64, u64::saturating_add);
     mem.saturating_add(img)
 }
 
@@ -7109,7 +7533,13 @@ impl Comp {
                 self.poke_hist_bind[Self::poke_hist_slot(bns)] += 1;
             }
             if bound {
-                say!("tapestryd: scanout direct {} img res {} ({}x{})", n, g.res_id, w, h);
+                say!(
+                    "tapestryd: scanout direct {} img res {} ({}x{})",
+                    n,
+                    g.res_id,
+                    w,
+                    h
+                );
                 self.scanout = Scanout::Direct(n);
                 self.pending_direct = None;
                 self.pending_bind_refused_said = false;
@@ -7269,7 +7699,12 @@ impl Comp {
         // conn's resources until they finish, and excluding them let one
         // connection mint-poison-destroy in a loop, burning a ctx slot
         // per abandoned fence.
-        if self.warp_ctxs.iter().flatten().any(|c| c.owner_conn == conn) {
+        if self
+            .warp_ctxs
+            .iter()
+            .flatten()
+            .any(|c| c.owner_conn == conn)
+        {
             return None; // one ctx per client
         }
         let slot = (0..MAX_WARP_CTXS)
@@ -7375,7 +7810,10 @@ impl Comp {
             }
         }
         if probe.is_none() {
-            say!("tapestryd: warp ctx {} has no #240 health probe (mint failed)", pub_id);
+            say!(
+                "tapestryd: warp ctx {} has no #240 health probe (mint failed)",
+                pub_id
+            );
         }
         if let Some(c) = self.wctx_mut(pub_id, conn) {
             c.probe = probe;
@@ -7386,9 +7824,18 @@ impl Comp {
         // sentinel, named instead of printed raw.
         #[cfg(feature = "test-mode")]
         if conn == u64::MAX {
-            say!("tapestryd: warp ctx {} minted conn=selftest slot={}", pub_id, slot);
+            say!(
+                "tapestryd: warp ctx {} minted conn=selftest slot={}",
+                pub_id,
+                slot
+            );
         } else {
-            say!("tapestryd: warp ctx {} minted conn={} slot={}", pub_id, conn, slot);
+            say!(
+                "tapestryd: warp ctx {} minted conn={} slot={}",
+                pub_id,
+                conn,
+                slot
+            );
         }
         Some(pub_id)
     }
@@ -7416,7 +7863,12 @@ impl Comp {
     /// that the detach names `size` while the bump rounds it up to pages --
     /// equal today (`size` is PAGE), and a probe of any other size would
     /// need the detach to name the rounded length.
-    fn warp_probe_res_kind(&mut self, dev_ctx: u32, size: u64, buffer: bool) -> Option<(u32, i64, u64)> {
+    fn warp_probe_res_kind(
+        &mut self,
+        dev_ctx: u32,
+        size: u64,
+        buffer: bool,
+    ) -> Option<(u32, i64, u64)> {
         let fd = unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if fd < 0 {
             return None;
@@ -7477,7 +7929,11 @@ impl Comp {
             undo(&mut self.gpu, 1, res_id);
             return None;
         }
-        if self.gpu.attach_backing(res_id, pa as u64, size as u32).is_err() {
+        if self
+            .gpu
+            .attach_backing(res_id, pa as u64, size as u32)
+            .is_err()
+        {
             undo(&mut self.gpu, 2, res_id);
             return None;
         }
@@ -7695,7 +8151,9 @@ impl Comp {
                 }
             }
             let p = c.probe.as_ref()?;
-            (c.dev_ctx, p.buffer, p.mark_res, p.mark_va, p.sent_res, p.sent_va)
+            (
+                c.dev_ctx, p.buffer, p.mark_res, p.mark_va, p.sent_res, p.sent_va,
+            )
         };
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
             c.verify_seq += 1;
@@ -7746,7 +8204,10 @@ impl Comp {
         if self.probe_upload(dev_ctx, buf, sent_res).is_err() {
             return None;
         }
-        if self.probe_copy_region(dev_ctx, buf, mark_res, sent_res).is_err() {
+        if self
+            .probe_copy_region(dev_ctx, buf, mark_res, sent_res)
+            .is_err()
+        {
             return None;
         }
         if self.probe_readback(dev_ctx, buf, sent_res).is_err() {
@@ -7792,7 +8253,10 @@ impl Comp {
                     "tapestryd: warp ctx {} verify {} -- the MARK reads {:?}, not {:#x}, so the \
                      probe cannot judge the copy. UNKNOWN, not a verdict. (first only; \
                      the rate is global `verify-unknown`)",
-                    ctx_pub, seq, mark_now, PROBE_MARK
+                    ctx_pub,
+                    seq,
+                    mark_now,
+                    PROBE_MARK
                 );
             }
             return None;
@@ -7805,7 +8269,9 @@ impl Comp {
                 say!(
                     "tapestryd: warp ctx {} verify {} read {:#x} (neither mark nor token) \
                      -- unknown (first only; the rate is global `verify-unknown`)",
-                    ctx_pub, seq, got
+                    ctx_pub,
+                    seq,
+                    got
                 );
             }
             return None;
@@ -7817,7 +8283,8 @@ impl Comp {
                 say!(
                     "tapestryd: warp ctx {} STREAM REJECTED -- the host refused a submit \
                      in (prev verify, {}]; the ctx is dead, recreate it (#240)",
-                    ctx_pub, seq
+                    ctx_pub,
+                    seq
                 );
             }
         }
@@ -7896,7 +8363,14 @@ impl Comp {
                 c.build_diag_arms |= 1 << arm;
                 say!(
                     "tapestryd: warp create3d refused ({} {}) fmt={} {}x{} lvl={} size={} ctx={}",
-                    why, detail, format, w, h, last_level, size, ctx_pub
+                    why,
+                    detail,
+                    format,
+                    w,
+                    h,
+                    last_level,
+                    size,
+                    ctx_pub
                 );
             }
         } else {
@@ -7942,7 +8416,18 @@ impl Comp {
         size: u64,
     ) -> bool {
         if size == 0 || size % PAGE != 0 {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_SIZE_ALIGN, "size-align", size as i64, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_SIZE_ALIGN,
+                "size-align",
+                size as i64,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         // The backing is CLIENT-DECLARED, and nothing downstream charges
@@ -7962,7 +8447,18 @@ impl Comp {
         // step is checked anyway (belt AND braces: the round-1 version
         // checked only the multiplications and panicked on `v + v/2`).
         if size > WARP_CTX_BACKING_MAX {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_SIZE_CAP, "size-cap", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_SIZE_CAP,
+                "size-cap",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         let px = (w as u64)
@@ -7980,7 +8476,18 @@ impl Comp {
             None => WARP_CTX_BACKING_MAX, // geometry alone is unbounded; the cap rules
         };
         if size > geom_max {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_GEOMETRY, "geometry", geom_max as i64, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_GEOMETRY,
+                "geometry",
+                geom_max as i64,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         // NO create-time lower bound on the backing, and this is deliberate --
@@ -8019,7 +8526,18 @@ impl Comp {
             let c = match self.wctx(ctx_pub, conn) {
                 Some(c) => c,
                 None => {
-                    self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_CTX_GONE, "ctx-gone", 0, format, w, h, last_level, size);
+                    self.wbo_diag_once(
+                        ctx_pub,
+                        conn,
+                        Self::WDIAG_CTX_GONE,
+                        "ctx-gone",
+                        0,
+                        format,
+                        w,
+                        h,
+                        last_level,
+                        size,
+                    );
                     return false;
                 }
             };
@@ -8031,22 +8549,22 @@ impl Comp {
             // client-chosen sizes and must never panic (round-2 F1). The bo-only
             // high-water census below stays bo-scoped (bo_bytes_peak).
             let total: u64 = ctx_guest_backing(c);
-        // Round-6 F1: the byte cap does NOT bound the leak COUNT. The
-        // minimum accepted size is PAGE, so 16384 backings fit inside the
-        // 64 MiB budget -- and since `bos[]` slots are reused across
-        // mint/build/destroy, a poisoned-yet-live ctx could park all of
-        // them into a 16-wide graveyard. The overflow then dropped each
-        // surplus `WarpBo` by value, leaking a handle AND a mapping
-        // (`WarpBo` has no `Drop`).
-        //
-        // The quantity that must be bounded is every backing this ctx will
-        // EVER have to park, which is the ones already parked plus the ones
-        // still live -- a live backing is parked wholesale by the leak arm
-        // of `wctx_finish`. Bounding `leaked_count` alone would still admit
-        // 15 parked + 16 live = 31 parks into a 16-wide graveyard. Only
-        // BACKED BOs can be parked (`wbo_retire` returns 0, and so parks
-        // nothing, when `dma_fd < 0`), so an unbacked mint is correctly not
-        // counted here.
+            // Round-6 F1: the byte cap does NOT bound the leak COUNT. The
+            // minimum accepted size is PAGE, so 16384 backings fit inside the
+            // 64 MiB budget -- and since `bos[]` slots are reused across
+            // mint/build/destroy, a poisoned-yet-live ctx could park all of
+            // them into a 16-wide graveyard. The overflow then dropped each
+            // surplus `WarpBo` by value, leaking a handle AND a mapping
+            // (`WarpBo` has no `Drop`).
+            //
+            // The quantity that must be bounded is every backing this ctx will
+            // EVER have to park, which is the ones already parked plus the ones
+            // still live -- a live backing is parked wholesale by the leak arm
+            // of `wctx_finish`. Bounding `leaked_count` alone would still admit
+            // 15 parked + 16 live = 31 parks into a 16-wide graveyard. Only
+            // BACKED BOs can be parked (`wbo_retire` returns 0, and so parks
+            // nothing, when `dma_fd < 0`), so an unbacked mint is correctly not
+            // counted here.
             let live_backed = c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count();
             (
                 total.saturating_add(size) > WARP_CTX_BACKING_MAX,
@@ -8061,15 +8579,48 @@ impl Comp {
             )
         };
         if byte_fail {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_BYTE_CAP, "byte-cap", byte_live as i64, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_BYTE_CAP,
+                "byte-cap",
+                byte_live as i64,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         if count_fail {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_COUNT_CAP, "count-cap", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_COUNT_CAP,
+                "count-cap",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         if no_mint {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_NO_MINT, "no-mint-record", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_NO_MINT,
+                "no-mint-record",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         // Already built? create3d is once per BO -- benign, but SAY so:
@@ -8077,14 +8628,35 @@ impl Comp {
         // the #198 hunt lost a session to a contradiction it could not
         // name (client saw a refusal, server named nothing).
         if already_built {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_ALREADY_BUILT, "already-built", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_ALREADY_BUILT,
+                "already-built",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
 
-        let fd =
-            unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
+        let fd = unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if fd < 0 {
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DMA_CREATE, "dma-create", fd, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_DMA_CREATE,
+                "dma-create",
+                fd,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         let va = self.weave_va_next;
@@ -8092,7 +8664,18 @@ impl Comp {
         let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
         if pa < 0 {
             unsafe { t_close(fd) };
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DMA_MAP, "dma-map", pa, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_DMA_MAP,
+                "dma-map",
+                pa,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
 
@@ -8120,21 +8703,60 @@ impl Comp {
         let res_id = self.res_seq;
         if self
             .gpu
-            .resource_create_3d(res_id, target, format, bind, w, h, d, array, last_level, samples, flags)
+            .resource_create_3d(
+                res_id, target, format, bind, w, h, d, array, last_level, samples, flags,
+            )
             .is_err()
         {
             unwind(&mut self.gpu, 0, res_id);
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DEV_CREATE, "dev-create", target as i64, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_DEV_CREATE,
+                "dev-create",
+                target as i64,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         if self.gpu.ctx_attach_resource(dev_ctx, res_id).is_err() {
             unwind(&mut self.gpu, 1, res_id);
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DEV_ATTACH_CTX, "dev-attach-ctx", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_DEV_ATTACH_CTX,
+                "dev-attach-ctx",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
-        if self.gpu.attach_backing(res_id, pa as u64, size as u32).is_err() {
+        if self
+            .gpu
+            .attach_backing(res_id, pa as u64, size as u32)
+            .is_err()
+        {
             unwind(&mut self.gpu, 2, res_id);
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DEV_ATTACH_BACKING, "dev-attach-backing", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_DEV_ATTACH_BACKING,
+                "dev-attach-backing",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
 
@@ -8170,7 +8792,18 @@ impl Comp {
             // built for it, and must NAME itself (audit F2: this was the
             // one refusal arm still silent).
             unwind(&mut self.gpu, 3, res_id);
-            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_RECORD_VANISHED, "record-vanished", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(
+                ctx_pub,
+                conn,
+                Self::WDIAG_RECORD_VANISHED,
+                "record-vanished",
+                0,
+                format,
+                w,
+                h,
+                last_level,
+                size,
+            );
             return false;
         }
         // #204 census: track the backed high-water on BOTH axes -- count
@@ -8182,8 +8815,12 @@ impl Comp {
         if live > c.bo_backed_peak {
             c.bo_backed_peak = live;
         }
-        let live_bytes: u64 =
-            c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
+        let live_bytes: u64 = c
+            .bos
+            .iter()
+            .flatten()
+            .map(|b| b.size)
+            .fold(0u64, u64::saturating_add);
         if live_bytes > c.bo_bytes_peak {
             c.bo_bytes_peak = live_bytes;
         }
@@ -8314,7 +8951,8 @@ impl Comp {
                 continue;
             }
             if let Some(ri) = c.ring_slots.iter().position(|r| {
-                r.as_ref().map_or(false, |r| r.pub_id == ring_pub && !r.retiring)
+                r.as_ref()
+                    .map_or(false, |r| r.pub_id == ring_pub && !r.retiring)
             }) {
                 found = Some((si, ri));
                 break;
@@ -8535,7 +9173,11 @@ impl Comp {
         let res_id = if self.gpu.blob {
             self.res_seq = self.res_seq.wrapping_add(1);
             let rid = self.res_seq;
-            if self.gpu.create_ring_blob(rid, pa as u64, bytes as u32).is_err() {
+            if self
+                .gpu
+                .create_ring_blob(rid, pa as u64, bytes as u32)
+                .is_err()
+            {
                 unsafe { t_burrow_detach(va, bytes) };
                 self.weave_va_next = va; // audit F5: mapping detached -- reclaim the VA
                 unsafe { t_close(fd) };
@@ -8719,12 +9361,22 @@ impl Comp {
 
     /// Test lever: arm `count` mid-drain head advances on the caller's ring
     /// (one consumed per kick re-scan pass).
-    fn wring_arm_inject(&mut self, ctx_pub: u32, conn: u64, ridx: u32, count: u32) -> Result<(), u32> {
+    fn wring_arm_inject(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        ridx: u32,
+        count: u32,
+    ) -> Result<(), u32> {
         if (ridx as usize) >= WARP_RINGS_PER_CTX {
             return Err(p9::E_INVAL);
         }
         let c = self.wctx_mut(ctx_pub, conn).ok_or(p9::E_NOENT)?;
-        match c.ring_slots.get_mut(ridx as usize).and_then(|slot| slot.as_mut()) {
+        match c
+            .ring_slots
+            .get_mut(ridx as usize)
+            .and_then(|slot| slot.as_mut())
+        {
             Some(r) => {
                 r.inject_count = count;
                 Ok(())
@@ -8735,12 +9387,22 @@ impl Comp {
 
     /// Test lever: set the per-ring re-scan-disable flag (audit F3 -- per-ring,
     /// not a global box-wide I-9 kill switch). Caller-ctx-bounded.
-    fn wring_set_noscan(&mut self, ctx_pub: u32, conn: u64, ridx: u32, on: bool) -> Result<(), u32> {
+    fn wring_set_noscan(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        ridx: u32,
+        on: bool,
+    ) -> Result<(), u32> {
         if (ridx as usize) >= WARP_RINGS_PER_CTX {
             return Err(p9::E_INVAL);
         }
         let c = self.wctx_mut(ctx_pub, conn).ok_or(p9::E_NOENT)?;
-        match c.ring_slots.get_mut(ridx as usize).and_then(|slot| slot.as_mut()) {
+        match c
+            .ring_slots
+            .get_mut(ridx as usize)
+            .and_then(|slot| slot.as_mut())
+        {
             Some(r) => {
                 r.noscan = on;
                 Ok(())
@@ -8984,7 +9646,11 @@ impl Comp {
         let pub_id = self.warp_mem_seq;
         match self.wctx_mut(ctx_pub, conn) {
             Some(c) => {
-                c.mems[handle as usize] = Some(WarpMem { pub_id, host3d: hr, share_id: None });
+                c.mems[handle as usize] = Some(WarpMem {
+                    pub_id,
+                    host3d: hr,
+                    share_id: None,
+                });
             }
             None => {
                 // Single-threaded -> unreachable; unwind the engine's blob
@@ -9017,8 +9683,10 @@ impl Comp {
             if c.owner_conn != conn || c.retiring {
                 continue;
             }
-            if let Some(mi) =
-                c.mems.iter().position(|m| m.as_ref().map_or(false, |m| m.pub_id == mem_pub))
+            if let Some(mi) = c
+                .mems
+                .iter()
+                .position(|m| m.as_ref().map_or(false, |m| m.pub_id == mem_pub))
             {
                 found = Some((si, mi));
                 break;
@@ -9038,7 +9706,9 @@ impl Comp {
     /// the WarpMem by value -- the non-Copy HostRing moves into
     /// retire_host3d_ring exactly once (a double-drop is a compile error).
     fn wmem_teardown(gpu: &mut Gpu, m: WarpMem) {
-        let WarpMem { host3d, share_id, .. } = m;
+        let WarpMem {
+            host3d, share_id, ..
+        } = m;
         if let Some(id) = share_id {
             let _ = unsafe { t_weft_unshare(id) };
         }
@@ -9213,7 +9883,11 @@ impl Comp {
             self.res_seq = 1;
         }
         let res_id = self.res_seq;
-        if self.gpu.create_presentable(res_id, venus_ctx, len, mem_id).is_err() {
+        if self
+            .gpu
+            .create_presentable(res_id, venus_ctx, len, mem_id)
+            .is_err()
+        {
             return Err(E_IO);
         }
         self.warp_img_seq = self.warp_img_seq.wrapping_add(1);
@@ -9223,8 +9897,16 @@ impl Comp {
         let pub_id = self.warp_img_seq;
         match self.wctx_mut(ctx_pub, conn) {
             Some(c) => {
-                c.imgs[handle as usize] =
-                    Some(WarpImg { pub_id, res_id, blob_id: mem_id, w, h, format, stride, size: bytes });
+                c.imgs[handle as usize] = Some(WarpImg {
+                    pub_id,
+                    res_id,
+                    blob_id: mem_id,
+                    w,
+                    h,
+                    format,
+                    stride,
+                    size: bytes,
+                });
                 Ok(())
             }
             None => {
@@ -9331,7 +10013,10 @@ impl Comp {
             return;
         }
         let (st, blit) = match self.warp_present_compose_probe(src_res, H, false, shape) {
-            "ctlok" => ("ok", self.warp_present_compose_probe(src_res, H, true, shape)),
+            "ctlok" => (
+                "ok",
+                self.warp_present_compose_probe(src_res, H, true, shape),
+            ),
             "noreadback" => ("latched", "skipped"),
             other => {
                 say!(
@@ -9405,7 +10090,10 @@ impl Comp {
             None => return "noscaffold",
         };
         let ctx = CONV_PROBE_CTX_BASE + 900;
-        debug_assert!(ctx < WARP_VENUS_CTX_BASE, "compose probe ctx climbed into the venus band");
+        debug_assert!(
+            ctx < WARP_VENUS_CTX_BASE,
+            "compose probe ctx climbed into the venus band"
+        );
         let mut verdict = "noscaffold";
         if self.gpu.ctx_create(ctx, b"tapestry-cmp").is_ok() {
             // The presentable must attach at all. W-3a measured this layer
@@ -9444,14 +10132,39 @@ impl Comp {
                     .transfer_to_3d_box_sync(ctx, dst_res, 0, 0, 1, ROWS as u32, 0, 4)
                     .is_ok()
                 {
-                    let w = if do_blit { Self::blit_request(
-                        dst_res, ROWS as u32, 0, 0, 1, ROWS as u32,
-                        src_res, VIRGL_FORMAT_B8G8R8A8_UNORM, src_h, 0, 0, 1, ROWS as u32,
-                        ClassConv { variant: BlitVariant::Plain, src_flip: false, dst_flip: false },
-                    ) } else { [0u32; 22] };
-                    let submitted = if do_blit { self.submit_blits(ctx, &[w]).is_ok() } else { true };
+                    let w = if do_blit {
+                        Self::blit_request(
+                            dst_res,
+                            ROWS as u32,
+                            0,
+                            0,
+                            1,
+                            ROWS as u32,
+                            src_res,
+                            VIRGL_FORMAT_B8G8R8A8_UNORM,
+                            src_h,
+                            0,
+                            0,
+                            1,
+                            ROWS as u32,
+                            ClassConv {
+                                variant: BlitVariant::Plain,
+                                src_flip: false,
+                                dst_flip: false,
+                            },
+                        )
+                    } else {
+                        [0u32; 22]
+                    };
+                    let submitted = if do_blit {
+                        self.submit_blits(ctx, &[w]).is_ok()
+                    } else {
+                        true
+                    };
                     for i in 0..ROWS {
-                        unsafe { core::ptr::write_volatile((dst_va as *mut u32).add(i), 0xDEAD_BEEF) };
+                        unsafe {
+                            core::ptr::write_volatile((dst_va as *mut u32).add(i), 0xDEAD_BEEF)
+                        };
                     }
                     if self
                         .gpu
@@ -9474,13 +10187,21 @@ impl Comp {
                             // On the CONTROL leg the same bytes mean the
                             // instrument itself failed -- scaffolding, and
                             // the gates reject it.
-                            if do_blit { "poisoned" } else { "noreadback" }
+                            if do_blit {
+                                "poisoned"
+                            } else {
+                                "noreadback"
+                            }
                         } else if rows.iter().all(|&r| r == PAT) {
                             // The destination still holds what was staged: on
                             // the CONTROL that is the CORRECT outcome (nothing
                             // was asked to write it), on the TEST it means the
                             // blit did not land.
-                            if do_blit { "refused" } else { "ctlok" }
+                            if do_blit {
+                                "refused"
+                            } else {
+                                "ctlok"
+                            }
                         } else if submitted && do_blit {
                             "landed"
                         } else {
@@ -9519,8 +10240,10 @@ impl Comp {
             if c.owner_conn != conn || c.retiring {
                 continue;
             }
-            if let Some(ii) =
-                c.imgs.iter().position(|i| i.as_ref().map_or(false, |i| i.pub_id == img_pub))
+            if let Some(ii) = c
+                .imgs
+                .iter()
+                .position(|i| i.as_ref().map_or(false, |i| i.pub_id == img_pub))
             {
                 found = Some((si, ii));
                 break;
@@ -9537,10 +10260,12 @@ impl Comp {
             .as_ref()
             .and_then(|c| c.imgs[ii].as_ref())
             .map(|i| i.pub_id);
-        let consent_sl = self.warp_ctxs[si].as_ref().and_then(|c| match (c.present_to, dying) {
-            (Some((sl, _, PresentSrc::Img(ip))), Some(dp)) if ip == dp => Some(sl),
-            _ => None,
-        });
+        let consent_sl = self.warp_ctxs[si]
+            .as_ref()
+            .and_then(|c| match (c.present_to, dying) {
+                (Some((sl, _, PresentSrc::Img(ip))), Some(dp)) if ip == dp => Some(sl),
+                _ => None,
+            });
         if let Some(sl) = consent_sl {
             if let Some(c) = self.warp_ctxs[si].as_mut() {
                 c.present_to = None;
@@ -9660,7 +10385,8 @@ impl Comp {
                 // orphan a use in another function.
                 say!(
                     "tapestryd: warp bo res {} leak-parked {} bytes (fence wedge)",
-                    b.res_id, b.size
+                    b.res_id,
+                    b.size
                 );
                 return b.size;
             }
@@ -10034,7 +10760,10 @@ impl Comp {
             Some(s) => s,
             None => return, // just minted -> unreachable
         };
-        if self.wring_mint(ctx_pub, SELFTEST_CONN, PAGE, 0, true).is_err() {
+        if self
+            .wring_mint(ctx_pub, SELFTEST_CONN, PAGE, 0, true)
+            .is_err()
+        {
             self.wctx_finish(slot, false);
             return; // non-venus device -- warp_host3d_selftest reported it
         }
@@ -10057,7 +10786,9 @@ impl Comp {
         } else {
             say!(
                 "tapestryd: warp ring-recreate FAIL (destroyed={} slot_freed={} remint_ok={})",
-                destroyed, slot_freed, remint_ok
+                destroyed,
+                slot_freed,
+                remint_ok
             );
         }
     }
@@ -10250,7 +10981,10 @@ impl Comp {
         if att == crate::gpu::GPU_RESP_OK_NODATA {
             let _ = self.gpu.ctx_detach_resource(COMPOSITOR_CTX, res_id);
         }
-        let att_neg = match self.gpu.ctx_attach_resource_probe(COMPOSITOR_CTX, BOGUS_RES) {
+        let att_neg = match self
+            .gpu
+            .ctx_attach_resource_probe(COMPOSITOR_CTX, BOGUS_RES)
+        {
             Ok(code) => code,
             Err(()) => {
                 self.wctx_finish(slot, false);
@@ -10349,9 +11083,15 @@ impl Comp {
         // scripture. A control must not encode a decision the design is
         // still free to make.
         const BOGUS_FMT: u32 = u32::MAX;
-        let bad_fmt = self.wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, BOGUS_FMT, stride, 0).is_err();
-        let bad_stride = self.wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, fmt, stride - 4, 0).is_err();
-        let bad_dim = self.wimg_mint(ctx_pub, SELFTEST_CONN, 0, 0, IH, fmt, stride, 0).is_err();
+        let bad_fmt = self
+            .wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, BOGUS_FMT, stride, 0)
+            .is_err();
+        let bad_stride = self
+            .wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, fmt, stride - 4, 0)
+            .is_err();
+        let bad_dim = self
+            .wimg_mint(ctx_pub, SELFTEST_CONN, 0, 0, IH, fmt, stride, 0)
+            .is_err();
         let shape_ok = bad_fmt && bad_stride && bad_dim;
         // ARM 2, on TWO axes, because the first version of this arm had one
         // axis and could not read its own result. `wimg_mint` answers E_IO
@@ -10392,7 +11132,10 @@ impl Comp {
         let mut flags_word = "none";
         for (name, fl) in [
             ("shareable", crate::gpu::BLOB_FLAG_SHAREABLE),
-            ("mappable+shareable", crate::gpu::BLOB_FLAG_MAPPABLE | crate::gpu::BLOB_FLAG_SHAREABLE),
+            (
+                "mappable+shareable",
+                crate::gpu::BLOB_FLAG_MAPPABLE | crate::gpu::BLOB_FLAG_SHAREABLE,
+            ),
             ("mappable", crate::gpu::BLOB_FLAG_MAPPABLE),
         ] {
             self.res_seq = self.res_seq.wrapping_add(1);
@@ -10400,7 +11143,11 @@ impl Comp {
                 self.res_seq = 1;
             }
             let probe_res = self.res_seq;
-            if self.gpu.create_host3d_blob(probe_res, venus_ctx, fl, stride * IH, 0).is_ok() {
+            if self
+                .gpu
+                .create_host3d_blob(probe_res, venus_ctx, fl, stride * IH, 0)
+                .is_ok()
+            {
                 let _ = self.gpu.resource_unref(probe_res);
                 flags_word = name;
                 break;
@@ -10432,7 +11179,10 @@ impl Comp {
         // so that conjunct can, and it is the whole arm.
         let mint_ok = got_size == (stride as u64) * (IH as u64);
         // ARM 3: the Direct bind at the DECLARED shape.
-        let bind_ok = self.gpu.set_scanout_blob(res_id, IW, IH, fmt, stride).is_ok();
+        let bind_ok = self
+            .gpu
+            .set_scanout_blob(res_id, IW, IH, fmt, stride)
+            .is_ok();
         if bind_ok {
             self.bound_res = res_id;
         }
@@ -10518,8 +11268,14 @@ impl Comp {
         // direction for a witness to fail in.
         let refuse = if bind_ok {
             let mut ok = false;
-            if self.wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, fmt, stride, 0).is_ok() {
-                let r2 = self.wctx(ctx_pub, SELFTEST_CONN).and_then(|c| c.imgs[0].as_ref()).map(|i| (i.pub_id, i.res_id));
+            if self
+                .wimg_mint(ctx_pub, SELFTEST_CONN, 0, IW, IH, fmt, stride, 0)
+                .is_ok()
+            {
+                let r2 = self
+                    .wctx(ctx_pub, SELFTEST_CONN)
+                    .and_then(|c| c.imgs[0].as_ref())
+                    .map(|i| (i.pub_id, i.res_id));
                 if let Some((pub2, res2)) = r2 {
                     if self.gpu.set_scanout_blob(res2, IW, IH, fmt, stride).is_ok() {
                         self.bound_res = res2;
@@ -10548,7 +11304,11 @@ impl Comp {
                     }
                 }
             }
-            if ok { "ok" } else { "FAIL" }
+            if ok {
+                "ok"
+            } else {
+                "FAIL"
+            }
         } else {
             "n/a"
         };
@@ -10745,7 +11505,9 @@ impl Comp {
                 continue;
             }
             if quiesced {
-                let mut b = self.warp_ctxs[slot].as_mut().unwrap().bos[j].take().unwrap();
+                let mut b = self.warp_ctxs[slot].as_mut().unwrap().bos[j]
+                    .take()
+                    .unwrap();
                 let leaked = Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
                 if leaked > 0 {
                     self.warp_park_leaked(slot, b);
@@ -10793,7 +11555,11 @@ impl Comp {
     /// retiring ctx is addressable by nobody, so counting it made a
     /// correct system report a stale number (and the gate FAIL).
     fn warp_live_ctxs(&self) -> usize {
-        self.warp_ctxs.iter().flatten().filter(|c| !c.retiring).count()
+        self.warp_ctxs
+            .iter()
+            .flatten()
+            .filter(|c| !c.retiring)
+            .count()
     }
 
     // --- Warp-C C-6: the compositor readback (GPU-DESIGN 4.5.13) -----------
@@ -10860,7 +11626,12 @@ impl Comp {
             .transfer_from_3d_comp(g.dev_ctx, g.ctx_pub, g.res_id, g.w, g.h, g.w * 4);
         self.cost_add(Cost::Readback, t0);
         let fence_id = r?;
-        if let Some(c) = self.warp_ctxs.iter_mut().flatten().find(|c| c.pub_id == g.ctx_pub) {
+        if let Some(c) = self
+            .warp_ctxs
+            .iter_mut()
+            .flatten()
+            .find(|c| c.pub_id == g.ctx_pub)
+        {
             c.fences_in_flight += 1;
             c.comp_rb_in_flight += 1;
         }
@@ -10937,13 +11708,17 @@ impl Comp {
                 // keep the record (its own retire is still owed).
                 say!(
                     "tapestryd: comp readback fence {} retired but {} is in flight",
-                    tag.fence_id, r.fence_id
+                    tag.fence_id,
+                    r.fence_id
                 );
                 self.comp_rb = Some(r);
                 return;
             }
             None => {
-                say!("tapestryd: comp readback fence {} retired with none in flight", tag.fence_id);
+                say!(
+                    "tapestryd: comp readback fence {} retired with none in flight",
+                    tag.fence_id
+                );
                 return;
             }
         };
@@ -11212,7 +11987,10 @@ impl Comp {
             self.warp_free_leaked(slot);
             self.warp_ctx_slot_poisoned[slot] = false;
             self.warp_ctx_vindicate[slot] = 0;
-            say!("tapestryd: warp ctx slot {} recovered (device finished)", slot);
+            say!(
+                "tapestryd: warp ctx slot {} recovered (device finished)",
+                slot
+            );
         }
         self.warp_pump_retires();
         // C-6: a completion or a vindication may have freed the reserved
@@ -11321,7 +12099,7 @@ impl Comp {
 
     fn warp_submit(&mut self, ctx_pub: u32, conn: u64, stream: &[u8]) -> Result<u64, u32> {
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
-            c.fenced_rx += 1;      // #210: arrived at the fenced funnel
+            c.fenced_rx += 1; // #210: arrived at the fenced funnel
         }
         let r = (|| {
             let dev_ctx = self.warp_fenced_admit(ctx_pub, conn)?;
@@ -11397,7 +12175,8 @@ impl Comp {
     /// the venus decoder -- self-harm only (own ctx, trusted-host refusal), no
     /// authority change.
     fn wctx_has_venus(&self, ctx_pub: u32, conn: u64) -> bool {
-        self.wctx(ctx_pub, conn).map_or(false, |c| c.venus_ctx.is_some())
+        self.wctx(ctx_pub, conn)
+            .map_or(false, |c| c.venus_ctx.is_some())
     }
 
     /// #210: classify one fenced-funnel outcome on the ctx ledger.
@@ -11438,12 +12217,24 @@ impl Comp {
             return Err(p9::E_INVAL);
         }
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
-            c.fenced_rx += 1;      // #210: arrived at the fenced funnel
+            c.fenced_rx += 1; // #210: arrived at the fenced funnel
         }
         let r = (|| {
             let dev_ctx = self.warp_fenced_admit(ctx_pub, conn)?;
             match self.gpu.transfer_3d(
-                to_host, dev_ctx, ctx_pub, res_id, level, x, y, z, w, h, d, offset, stride,
+                to_host,
+                dev_ctx,
+                ctx_pub,
+                res_id,
+                level,
+                x,
+                y,
+                z,
+                w,
+                h,
+                d,
+                offset,
+                stride,
                 layer_stride,
             ) {
                 Ok(f) => {
@@ -11521,7 +12312,10 @@ const NO_FID: Option<Fid> = None;
 fn rects_cover_full(rects: &[(u32, u32, u32, u32)], w: u32, h: u32) -> bool {
     // Fast path: a single full-surface rect (the dominant shape --
     // rect_count 0, SDL_UpdateWindowSurface, present(None)).
-    if rects.iter().any(|&(x, y, pw, ph)| x == 0 && y == 0 && pw == w && ph == h) {
+    if rects
+        .iter()
+        .any(|&(x, y, pw, ph)| x == 0 && y == 0 && pw == w && ph == h)
+    {
         return true;
     }
     let mut ys: Vec<u32> = Vec::with_capacity(rects.len() * 2 + 2);
@@ -11621,7 +12415,8 @@ impl Conn {
             self.fid_full_said = true;
             say!(
                 "tapestryd: 9p fid table FULL (cap {}) conn={} -- walks refuse E_NOMEM",
-                MAX_FIDS, self.conn_id
+                MAX_FIDS,
+                self.conn_id
             );
         }
     }
@@ -11647,10 +12442,15 @@ impl Conn {
             if is_surf(f.path) && surf_fk(f.path) == FK_CTL {
                 let n = surf_n(f.path);
                 let minted = comp.surf_owned(n, self.conn_id, f.gen)
-                    && comp.surf(n).map_or(false, |s| matches!(s.state, SurfState::Minted));
+                    && comp
+                        .surf(n)
+                        .map_or(false, |s| matches!(s.state, SurfState::Minted));
                 let another = self.fids.iter().flatten().any(|o| o.path == f.path);
                 if minted && !another {
-                    say!("tapestryd: surface {} minted, never created, its ctl clunked: retired", n);
+                    say!(
+                        "tapestryd: surface {} minted, never created, its ctl clunked: retired",
+                        n
+                    );
                     comp.retire(n);
                 }
             }
@@ -12212,7 +13012,12 @@ impl Conn {
                 None => return self.err(tag, p9::E_NOMEM),
             };
             let path = make_wctx(id, WFK_CTL);
-            self.fids[i] = Some(Fid { fid: a.fid, path, gen: 0, opened: true });
+            self.fids[i] = Some(Fid {
+                fid: a.fid,
+                path,
+                gen: 0,
+                opened: true,
+            });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
         }
@@ -12227,7 +13032,12 @@ impl Conn {
                 None => return self.err(tag, p9::E_NOMEM),
             };
             let path = make_wbo(id, WFK_BO_CTL);
-            self.fids[i] = Some(Fid { fid: a.fid, path, gen: 0, opened: true });
+            self.fids[i] = Some(Fid {
+                fid: a.fid,
+                path,
+                gen: 0,
+                opened: true,
+            });
             let q = self.qid_of(path);
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
         }
@@ -12402,7 +13212,10 @@ impl Conn {
                     // SYS_GETRANDOM needs CAP_CSPRNG_READ; a mint that cannot
                     // draw entropy must SAY so -- the client sees only a
                     // failed read, and this class hid behind that once.
-                    say!("tapestryd: claim mint on pane {}: csprng unavailable (E_IO)", id);
+                    say!(
+                        "tapestryd: claim mint on pane {}: csprng unavailable (E_IO)",
+                        id
+                    );
                     return self.err(tag, E_IO);
                 }
                 let tok = u128::from_le_bytes(raw);
@@ -12776,8 +13589,7 @@ impl Conn {
                     // put it here). A production client cannot depend on a
                     // test-mode field.
                     {
-                        let signaled =
-                            comp.wctx(id, self.conn_id).map_or(0, |c| c.fence_signaled);
+                        let signaled = comp.wctx(id, self.conn_id).map_or(0, |c| c.fence_signaled);
                         let _ = core::fmt::write(
                             &mut s,
                             format_args!(
@@ -12807,11 +13619,7 @@ impl Conn {
                         let (live, peak, live_b, peak_b) =
                             comp.wctx(id, self.conn_id).map_or((0, 0, 0, 0), |c| {
                                 (
-                                    c.bos
-                                        .iter()
-                                        .flatten()
-                                        .filter(|b| b.dma_fd >= 0)
-                                        .count() as u32,
+                                    c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count() as u32,
                                     c.bo_backed_peak,
                                     c.bos
                                         .iter()
@@ -12841,21 +13649,15 @@ impl Conn {
                             .map_or((0, 0), |c| (ctx_guest_backing(c), ctx_hostmem_backing(c)));
                         let _ = core::fmt::write(
                             &mut s,
-                            format_args!(
-                                "backing-bytes {}\nhostmem-bytes {}\n",
-                                guest_b, host_b
-                            ),
+                            format_args!("backing-bytes {}\nhostmem-bytes {}\n", guest_b, host_b),
                         );
                         // The #198-hunt storm scale: the one-shots name only
                         // the FIRST refusal per family; this counts them all.
                         // Appended LAST so the client-critical keys
                         // (fence-signaled) stay inside a 255-byte snapshot.
-                        let refused =
-                            comp.wctx(id, self.conn_id).map_or(0, |c| c.create_refused);
-                        let _ = core::fmt::write(
-                            &mut s,
-                            format_args!("create-refused {}\n", refused),
-                        );
+                        let refused = comp.wctx(id, self.conn_id).map_or(0, |c| c.create_refused);
+                        let _ =
+                            core::fmt::write(&mut s, format_args!("create-refused {}\n", refused));
                     }
                     // Audit F11: the "keep the client-critical keys inside a
                     // 255-byte snapshot" discipline above was a comment with
@@ -12905,10 +13707,7 @@ impl Conn {
                     let c = comp.wctx(id, self.conn_id).unwrap();
                     let mut s = String::new();
                     for (t, n) in c.timeline_signaled.iter().enumerate() {
-                        let _ = core::fmt::write(
-                            &mut s,
-                            format_args!("timeline {} {}\n", t, n),
-                        );
+                        let _ = core::fmt::write(&mut s, format_args!("timeline {} {}\n", t, n));
                     }
                     self.read_str(tag, &s, a.offset, cap)
                 }
@@ -13004,7 +13803,10 @@ impl Conn {
                     let mut s = String::new();
                     let _ = core::fmt::write(
                         &mut s,
-                        format_args!("res {} ridx {} bytes {} hdr {}\n", res, ridx, size, WARP_RING_HDR),
+                        format_args!(
+                            "res {} ridx {} bytes {} hdr {}\n",
+                            res, ridx, size, WARP_RING_HDR
+                        ),
                     );
                     self.read_str(tag, &s, a.offset, cap)
                 }
@@ -13090,7 +13892,14 @@ impl Conn {
                         &mut s,
                         format_args!(
                             "res {} w {} h {} format {} stride {} size {} bound {} mem {}\n",
-                            res, w, h, format, stride, size, u32::from(bound), mem
+                            res,
+                            w,
+                            h,
+                            format,
+                            stride,
+                            size,
+                            u32::from(bound),
+                            mem
                         ),
                     );
                     self.read_str(tag, &s, a.offset, cap)
@@ -13150,10 +13959,7 @@ impl Conn {
             FK_GEOMETRY => {
                 let surf = comp.surf(n).unwrap();
                 let mut s = String::new();
-                let _ = core::fmt::write(
-                    &mut s,
-                    format_args!("0 0 {} {} 0 0\n", surf.w, surf.h),
-                );
+                let _ = core::fmt::write(&mut s, format_args!("0 0 {} {} 0 0\n", surf.w, surf.h));
                 self.read_str(tag, &s, a.offset, cap)
             }
             FK_EVENT => {
@@ -13297,17 +14103,11 @@ impl Conn {
             },
             PFK_GEOMETRY => {
                 let c = comp.layout.get(slot).unwrap().content;
-                let _ = core::fmt::write(
-                    &mut s,
-                    format_args!("{} {} {} {}\n", c.x, c.y, c.w, c.h),
-                );
+                let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", c.x, c.y, c.w, c.h));
             }
             PFK_TAGBAR => {
                 let t = comp.layout.get(slot).unwrap().tagbar;
-                let _ = core::fmt::write(
-                    &mut s,
-                    format_args!("{} {} {} {}\n", t.x, t.y, t.w, t.h),
-                );
+                let _ = core::fmt::write(&mut s, format_args!("{} {} {} {}\n", t.x, t.y, t.w, t.h));
             }
             PFK_STATUS => {
                 // The RECORDED status (resting|ok|err), not the display key:
@@ -13556,9 +14356,7 @@ impl Conn {
                         Err(e) => self.err(tag, e),
                     }
                 }
-                fk if fk > WFK_SUBMIT_T_BASE
-                    && fk < WFK_SUBMIT_T_BASE + WARP_TIMELINES as u64 =>
-                {
+                fk if fk > WFK_SUBMIT_T_BASE && fk < WFK_SUBMIT_T_BASE + WARP_TIMELINES as u64 => {
                     // Multi-queue F3: submit<t> -- the venus timeline rides the
                     // FILE NAME (the payload is opaque bytes; see the WFK
                     // constants). Venus-only: a virgl stream has no timeline,
@@ -13810,8 +14608,7 @@ impl Conn {
                 // surface half).
                 let a2 = it.next().ok_or(p9::E_INVAL)?;
                 let src = if a2 == "img" {
-                    let handle: u32 =
-                        it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+                    let handle: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
                     if it.next().is_some() {
                         return Err(p9::E_INVAL);
                     }
@@ -13946,11 +14743,44 @@ impl Conn {
                     }
                     let cp = ctx_pub.unwrap_or(0);
                     if e == p9::E_INVAL {
-                        comp.wbo_diag_once(cp, self.conn_id, Comp::WDIAG_CTL_PARSE, "ctl-parse", data.len() as i64, 0, 0, 0, 0, 0);
+                        comp.wbo_diag_once(
+                            cp,
+                            self.conn_id,
+                            Comp::WDIAG_CTL_PARSE,
+                            "ctl-parse",
+                            data.len() as i64,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        );
                     } else if e == p9::E_NOENT {
-                        comp.wbo_diag_once(cp, self.conn_id, Comp::WDIAG_CTL_NO_RECORD, "ctl-no-record", id as i64, 0, 0, 0, 0, 0);
+                        comp.wbo_diag_once(
+                            cp,
+                            self.conn_id,
+                            Comp::WDIAG_CTL_NO_RECORD,
+                            "ctl-no-record",
+                            id as i64,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        );
                     } else if e == p9::E_OPNOTSUPP {
-                        comp.wbo_diag_once(cp, self.conn_id, Comp::WDIAG_CTL_NOT_VIRGL, "ctl-not-virgl", 0, 0, 0, 0, 0, 0);
+                        comp.wbo_diag_once(
+                            cp,
+                            self.conn_id,
+                            Comp::WDIAG_CTL_NOT_VIRGL,
+                            "ctl-not-virgl",
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        );
                     }
                 }
                 r
@@ -14073,8 +14903,20 @@ impl Conn {
             .map(|(c, _)| c.pub_id)
             .ok_or(p9::E_NOENT)?;
         if comp.wbo_create(
-            ctx_pub, id, self.conn_id, target, format, bind, w, h, d, array,
-            last_level, samples, flags, size,
+            ctx_pub,
+            id,
+            self.conn_id,
+            target,
+            format,
+            bind,
+            w,
+            h,
+            d,
+            array,
+            last_level,
+            samples,
+            flags,
+            size,
         ) {
             Ok(())
         } else {
@@ -14108,7 +14950,19 @@ impl Conn {
         let stride = arg("stride")? as u32;
         let layer_stride = arg("layer_stride")? as u32;
         comp.warp_transfer(
-            id, self.conn_id, to_host, level, x, y, z, w, h, d, offset, stride, layer_stride,
+            id,
+            self.conn_id,
+            to_host,
+            level,
+            x,
+            y,
+            z,
+            w,
+            h,
+            d,
+            offset,
+            stride,
+            layer_stride,
         )
         .map(|_| ())
     }
@@ -14187,8 +15041,16 @@ impl Conn {
         }
         if let Some(rest) = s.strip_prefix("mode ") {
             let mut it = rest.split_ascii_whitespace();
-            let w: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
-            let h: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            let w: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
+            let h: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
             if it.next().is_some() {
                 return Err(p9::E_INVAL);
             }
@@ -14242,10 +15104,21 @@ impl Conn {
             let mut it = rest.split_ascii_whitespace();
             match it.next() {
                 Some("place") => {
-                    let id: usize =
-                        it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
-                    let x: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
-                    let y: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+                    let id: usize = it
+                        .next()
+                        .ok_or(p9::E_INVAL)?
+                        .parse()
+                        .map_err(|_| p9::E_INVAL)?;
+                    let x: u32 = it
+                        .next()
+                        .ok_or(p9::E_INVAL)?
+                        .parse()
+                        .map_err(|_| p9::E_INVAL)?;
+                    let y: u32 = it
+                        .next()
+                        .ok_or(p9::E_INVAL)?
+                        .parse()
+                        .map_err(|_| p9::E_INVAL)?;
                     if it.next().is_some() {
                         return Err(p9::E_INVAL);
                     }
@@ -14289,7 +15162,11 @@ impl Conn {
         // `status` file.
         if let Some(rest) = s.strip_prefix("tag ") {
             let mut it = rest.split_ascii_whitespace();
-            let id: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            let id: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
             if it.next() != Some("status") {
                 return Err(p9::E_INVAL);
             }
@@ -14342,8 +15219,16 @@ impl Conn {
             // enters determinism mode.
             if let Some(rest) = s.strip_prefix("probe-screen ") {
                 let mut it = rest.split_ascii_whitespace();
-                let x: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
-                let y: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+                let x: u32 = it
+                    .next()
+                    .ok_or(p9::E_INVAL)?
+                    .parse()
+                    .map_err(|_| p9::E_INVAL)?;
+                let y: u32 = it
+                    .next()
+                    .ok_or(p9::E_INVAL)?
+                    .parse()
+                    .map_err(|_| p9::E_INVAL)?;
                 if it.next().is_some() {
                     return Err(p9::E_INVAL);
                 }
@@ -14392,8 +15277,16 @@ impl Conn {
         let s = s.trim();
         if let Some(rest) = s.strip_prefix("create ") {
             let mut it = rest.split_ascii_whitespace();
-            let w: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
-            let h: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            let w: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
+            let h: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
             // H-3b-2: optional `role=<content|chrome>` + `bind=<pane-id>`
             // (HALCYON.md 13.6 -- a ctl TEXT extension, not a wire break).
             // Syntax is judged before authority, so a malformed line is
@@ -14482,10 +15375,21 @@ impl Conn {
             // CONFIGURE offer; a successful Rwrite IS the generation
             // fence (see resize_ack).
             let mut it = rest.split_ascii_whitespace();
-            let w: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
-            let h: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
-            let serial: u16 =
-                it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            let w: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
+            let h: u32 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
+            let serial: u16 = it
+                .next()
+                .ok_or(p9::E_INVAL)?
+                .parse()
+                .map_err(|_| p9::E_INVAL)?;
             if it.next().is_some() {
                 return Err(p9::E_INVAL);
             }
@@ -14596,7 +15500,11 @@ impl Conn {
             rects.push((0, 0, w, h));
         } else {
             for i in 0..rect_count as usize {
-                let o = if i == 0 { 16 } else { TPRESENT_LEN + (i - 1) * TRECT_LEN };
+                let o = if i == 0 {
+                    16
+                } else {
+                    TPRESENT_LEN + (i - 1) * TRECT_LEN
+                };
                 rects.push((word(o), word(o + 4), word(o + 8), word(o + 12)));
             }
         }
@@ -14622,7 +15530,12 @@ impl Conn {
             #[cfg(feature = "test-mode")]
             if s.is_menu {
                 let vis = comp.compose_visible(n);
-                say!("tapestryd: menu {} present slot {} visible {}", n, slot, vis);
+                say!(
+                    "tapestryd: menu {} present slot {} visible {}",
+                    n,
+                    slot,
+                    vis
+                );
             }
         }
 
@@ -14672,7 +15585,14 @@ impl Conn {
                     // response consults the renderer, and a refusal used to
                     // print it anyway (an attempt-report sold as an
                     // event-report).
-                    say!("tapestryd: scanout direct {} {} res {} ({}x{})", n, fam, g.res_id, w, h);
+                    say!(
+                        "tapestryd: scanout direct {} {} res {} ({}x{})",
+                        n,
+                        fam,
+                        g.res_id,
+                        w,
+                        h
+                    );
                     comp.scanout = Scanout::Direct(n);
                     comp.pending_direct = None;
                     comp.pending_bind_refused_said = false;
@@ -14693,11 +15613,12 @@ impl Conn {
                 // present-COMPLETE). A stale client resource (composed-era
                 // presents never transferred to it) expands this transfer
                 // to the full surface first.
-                let stale = comp
-                    .surf(n)
-                    .map_or(false, |s| s.res_stale[slot as usize]);
-                let xfer: Vec<(u32, u32, u32, u32)> =
-                    if stale { alloc::vec![(0, 0, w, h)] } else { rects.clone() };
+                let stale = comp.surf(n).map_or(false, |s| s.res_stale[slot as usize]);
+                let xfer: Vec<(u32, u32, u32, u32)> = if stale {
+                    alloc::vec![(0, 0, w, h)]
+                } else {
+                    rects.clone()
+                };
                 // C-2d-b: the slot IS the resource now, so the transfer
                 // offset loses its slot base and carries only the rect origin.
                 let res = res_ids[slot as usize];
@@ -14717,7 +15638,13 @@ impl Conn {
                     // restore/retake WITNESS for three gated captures
                     // (vkq-venus / glq-virgl / warp-img), so it reports the
                     // EVENT, byte-identical on success.
-                    say!("tapestryd: scanout direct {} slot {} ({}x{})", n, slot, w, h);
+                    say!(
+                        "tapestryd: scanout direct {} slot {} ({}x{})",
+                        n,
+                        slot,
+                        w,
+                        h
+                    );
                     // Post-bind full flush (#57): the per-rect flushes
                     // above targeted a not-yet-scanned-out resource
                     // (dropped by spec), and cocoa's same-size surface
@@ -14771,7 +15698,11 @@ impl Conn {
                     // rather than flush a non-scanned-out resource, which
                     // the spec drops silently. Family-dispatched (W-3c-2):
                     // an img rebind must be SET_SCANOUT_BLOB.
-                    say!("tapestryd: direct rebind {} -> {}", comp.bound_res, g.res_id);
+                    say!(
+                        "tapestryd: direct rebind {} -> {}",
+                        comp.bound_res,
+                        g.res_id
+                    );
                     let t0 = Instant::now();
                     if !comp.direct_bind_adopted(&g, w, h) {
                         return Err(E_IO);
@@ -14920,13 +15851,17 @@ impl Conn {
                     && g.composable
                     && g.format != 0
                     && scr.map_or(false, |(_, is3d)| is3d)
-                    && comp.comp_conv.map_or(false, |c| c.bo_u.is_some() || c.bo_s.is_some());
+                    && comp
+                        .comp_conv
+                        .map_or(false, |c| c.bo_u.is_some() || c.bo_s.is_some());
                 if bo_gpu {
                     match comp.compose_geometry(n, 0, 0, w, h) {
                         None => done = true, // hidden / unhosted: nothing to compose either way
                         Some(op) => {
                             let scr_res = scr.map(|(r, _)| r).unwrap_or(0);
-                            if let Some(b) = comp.compose_gpu_bo_words(op, g.res_id, g.format, g.h, scr_res) {
+                            if let Some(b) =
+                                comp.compose_gpu_bo_words(op, g.res_id, g.format, g.h, scr_res)
+                            {
                                 if comp.submit_blits(COMPOSITOR_CTX, &[b]).is_err() {
                                     return Err(E_IO);
                                 }
@@ -15104,7 +16039,10 @@ impl Conn {
                         cpu: rect_union(cpu, ncpu),
                         gpu: rect_union(gpu, ngpu),
                     },
-                    _ => Held::Composed { cpu: ncpu, gpu: ngpu }, // a stale Direct hold is superseded
+                    _ => Held::Composed {
+                        cpu: ncpu,
+                        gpu: ngpu,
+                    }, // a stale Direct hold is superseded
                 };
                 if let Some(s) = comp.surf_mut(n) {
                     s.held = Some(held);
@@ -15385,7 +16323,11 @@ impl Conn {
                 break;
             }
             let q = self.qid_of(*path);
-            let dtype = if is_dir(*path) { p9::DT_DIR } else { p9::DT_REG };
+            let dtype = if is_dir(*path) {
+                p9::DT_DIR
+            } else {
+                p9::DT_REG
+            };
             let mut tmp = alloc::vec![0u8; need];
             let n = p9::pack_dirent(&mut tmp, 0, &q, ord, dtype, nm)?;
             data.extend_from_slice(&tmp[..n]);
@@ -15516,9 +16458,7 @@ impl Conn {
             return self.err(tag, p9::E_NOENT);
         }
         match comp.weft_ensure(n) {
-            Some((share_id, size)) => {
-                p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0)
-            }
+            Some((share_id, size)) => p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0),
             None => self.err(tag, p9::E_NOMEM),
         }
     }

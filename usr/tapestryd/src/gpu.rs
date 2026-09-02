@@ -266,7 +266,11 @@ struct HostmemAllocator {
 
 impl HostmemAllocator {
     fn new(region_len: u64) -> Self {
-        Self { next: 0, len: region_len, free: alloc::vec::Vec::new() }
+        Self {
+            next: 0,
+            len: region_len,
+            free: alloc::vec::Vec::new(),
+        }
     }
 
     /// Reserve `size` bytes (rounded up to a page); returns the offset, or None
@@ -704,7 +708,10 @@ fn init_device(
     unsafe {
         w8(common + CCFG_DEVICE_STATUS, 0);
         w8(common + CCFG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
-        w8(common + CCFG_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
+        w8(
+            common + CCFG_DEVICE_STATUS,
+            STATUS_ACKNOWLEDGE | STATUS_DRIVER,
+        );
         w16(common + CCFG_CONFIG_MSIX_VECTOR, VIRTIO_MSI_NO_VECTOR);
 
         w32(common + CCFG_DEVICE_FEATURE_SELECT, 0);
@@ -1033,7 +1040,9 @@ impl Controlq {
                     let age = self.fslot_since[i]
                         .map(|s| s.elapsed().as_millis() as u64)
                         .unwrap_or(0);
-                    (i, t.fence_id, t.ctx_pub, t.ring_idx, t.readback, t.comp, age)
+                    (
+                        i, t.fence_id, t.ctx_pub, t.ring_idx, t.readback, t.comp, age,
+                    )
                 })
             })
             .collect()
@@ -1150,7 +1159,8 @@ impl Controlq {
             if used_idx.wrapping_sub(self.used_seen) > outstanding {
                 say!(
                     "tapestryd: gpu used.idx {} past published {} (ring corrupt)",
-                    used_idx, self.avail_idx
+                    used_idx,
+                    self.avail_idx
                 );
                 self.dead = true;
                 return sync_retired;
@@ -1176,7 +1186,10 @@ impl Controlq {
             // the first out-of-pool slot index.
             if id == SYNC2_HEAD as u32 {
                 if !self.sync2_pending {
-                    say!("tapestryd: gpu used entry id {} with no second sync chain (ring corrupt)", id);
+                    say!(
+                        "tapestryd: gpu used entry id {} with no second sync chain (ring corrupt)",
+                        id
+                    );
                     self.dead = true;
                     return sync_retired;
                 }
@@ -1275,7 +1288,8 @@ impl Controlq {
             if !tag.ok {
                 say!(
                     "tapestryd: gpu fenced cmd (fence {}) resp_type={:#x}",
-                    tag.fence_id, rt
+                    tag.fence_id,
+                    rt
                 );
             }
             self.completed.push(tag);
@@ -1359,7 +1373,10 @@ impl Controlq {
             }
             say!(
                 "tapestryd: gpu fence {} released ({}) -- slot {} retired, ctx {} poisoned",
-                tag.fence_id, why, i, tag.ctx_pub
+                tag.fence_id,
+                why,
+                i,
+                tag.ctx_pub
             );
             self.completed.push(tag);
         }
@@ -1490,7 +1507,8 @@ impl Controlq {
             if t0.elapsed().as_millis() as u64 >= deadline_ms {
                 say!(
                     "tapestryd: gpu command never retired ({} stale wakes over {} ms)",
-                    wakes, deadline_ms
+                    wakes,
+                    deadline_ms
                 );
                 self.dead = true;
                 return Err(());
@@ -1616,11 +1634,22 @@ impl Controlq {
         Ok((r1, r2))
     }
 
-    fn step(&mut self, label: &str, req_len: u32, resp_len: u32, expected: u32) -> Result<(), Error> {
+    fn step(
+        &mut self,
+        label: &str,
+        req_len: u32,
+        resp_len: u32,
+        expected: u32,
+    ) -> Result<(), Error> {
         match self.submit_and_wait(req_len, resp_len) {
             Ok(t) if t == expected => Ok(()),
             Ok(t) => {
-                say!("tapestryd: gpu {} resp_type={:#x} (expected {:#x})", label, t, expected);
+                say!(
+                    "tapestryd: gpu {} resp_type={:#x} (expected {:#x})",
+                    label,
+                    t,
+                    expected
+                );
                 Err(Error::Hardware)
             }
             Err(()) => {
@@ -1878,7 +1907,10 @@ impl Gpu {
             Error::Hardware
         })?;
         if common_len < CCFG_MIN_LEN {
-            say!("tapestryd: gpu common-cfg region too small ({})", common_len);
+            say!(
+                "tapestryd: gpu common-cfg region too small ({})",
+                common_len
+            );
             return Err(Error::Hardware);
         }
         let (notify_base, notify_len) = pci.region(PciRegion::Notify).ok_or_else(|| {
@@ -1917,7 +1949,13 @@ impl Gpu {
             virgl,
             ctxinit,
             blob,
-        } = init_device(common_va, notify_base, notify_mul, u64::from(notify_len), ring_pa)?;
+        } = init_device(
+            common_va,
+            notify_base,
+            notify_mul,
+            u64::from(notify_len),
+            ring_pa,
+        )?;
 
         let flane = if virgl {
             let f = unsafe { Dma::new(FLANE_DMA_SIZE, rw_map, flane_va, prot) }.map_err(|_| {
@@ -1973,7 +2011,10 @@ impl Gpu {
             cmd_seq: 0,
             last_scanout_seq: 0,
             last_unref_seq: 0,
-            condemned: [Condemned { res: 0, unref_requested: false }; GPU_CONDEMNED_MAX],
+            condemned: [Condemned {
+                res: 0,
+                unref_requested: false,
+            }; GPU_CONDEMNED_MAX],
             condemned_n: 0,
             condemned_overflowed: false,
             fail_next_scanout_disable: false,
@@ -2039,7 +2080,10 @@ impl Gpu {
             }
         };
         if dev_len < GPUCFG_MIN_LEN {
-            say!("tapestryd: gpu device-cfg region too small ({}); capsets unknown", dev_len);
+            say!(
+                "tapestryd: gpu device-cfg region too small ({}); capsets unknown",
+                dev_len
+            );
             return Ok(());
         }
         let scanouts = unsafe { r32(dev_va + GPUCFG_NUM_SCANOUTS) };
@@ -2070,7 +2114,10 @@ impl Gpu {
                     if self.ctrl.dead {
                         return Err(e);
                     }
-                    say!("tapestryd: gpu capset[{}] refused (engine healthy); 2D only", idx);
+                    say!(
+                        "tapestryd: gpu capset[{}] refused (engine healthy); 2D only",
+                        idx
+                    );
                     return Ok(());
                 }
             };
@@ -2106,7 +2153,10 @@ impl Gpu {
                     if self.ctrl.dead {
                         return Err(e);
                     }
-                    say!("tapestryd: gpu GET_CAPSET id={} refused (engine healthy); 2D only", id);
+                    say!(
+                        "tapestryd: gpu GET_CAPSET id={} refused (engine healthy); 2D only",
+                        id
+                    );
                 }
             }
         }
@@ -2172,7 +2222,10 @@ impl Gpu {
                         if self.ctrl.dead {
                             return Err(e);
                         }
-                        say!("tapestryd: gpu ctx-capset {} REFUSED (engine healthy)", label);
+                        say!(
+                            "tapestryd: gpu ctx-capset {} REFUSED (engine healthy)",
+                            label
+                        );
                     }
                 }
             }
@@ -2304,7 +2357,11 @@ impl Gpu {
         // Arm A (POSITIVE): a HOST3D blob_id=0 mappable blob under a VENUS
         // (capset-4) context -- the vkr shm path, the Model B ring substrate.
         if self
-            .ctx_create_capset(HOST3D_PROBE_CTX_ID, VIRTIO_GPU_CAPSET_VENUS, b"host3d-probe")
+            .ctx_create_capset(
+                HOST3D_PROBE_CTX_ID,
+                VIRTIO_GPU_CAPSET_VENUS,
+                b"host3d-probe",
+            )
             .is_err()
         {
             say!("tapestryd: gpu host3d-map venus ctx create failed; skipped");
@@ -2334,10 +2391,17 @@ impl Gpu {
         ) {
             Ok(()) => match self.map_blob(res_id, offset) {
                 Ok(mi) => {
-                    say!("tapestryd: gpu host3d-map {} MAPPED (map_info={:#x})", tag, mi);
+                    say!(
+                        "tapestryd: gpu host3d-map {} MAPPED (map_info={:#x})",
+                        tag,
+                        mi
+                    );
                     let _ = self.unmap_blob(res_id);
                 }
-                Err(_) => say!("tapestryd: gpu host3d-map {} create OK but MAP refused", tag),
+                Err(_) => say!(
+                    "tapestryd: gpu host3d-map {} create OK but MAP refused",
+                    tag
+                ),
             },
             Err(_) => say!("tapestryd: gpu host3d-map {} create refused", tag),
         }
@@ -2364,7 +2428,11 @@ impl Gpu {
             return Ok(());
         }
         if self
-            .ctx_create_capset(HOSTMEM_PROBE_CTX_ID, VIRTIO_GPU_CAPSET_VENUS, b"hostmem-probe")
+            .ctx_create_capset(
+                HOSTMEM_PROBE_CTX_ID,
+                VIRTIO_GPU_CAPSET_VENUS,
+                b"hostmem-probe",
+            )
             .is_err()
         {
             say!("tapestryd: gpu hostmem-ring venus ctx create failed; skipped");
@@ -2431,7 +2499,10 @@ impl Gpu {
         } else {
             say!(
                 "tapestryd: gpu hostmem-ring FAIL (a_ok={} b_ok={} distinct={} reuse={})",
-                a_ok, b_ok, distinct, reuse
+                a_ok,
+                b_ok,
+                distinct,
+                reuse
             );
         }
     }
@@ -2460,7 +2531,9 @@ impl Gpu {
             VIRTIO_GPU_RESP_OK_CAPSET_INFO,
         )?;
         let r = self.ring_va + RESP_OFF + GPU_CTRL_HDR_LEN as u64;
-        Ok((unsafe { r32(r) }, unsafe { r32(r + 4) }, unsafe { r32(r + 8) }))
+        Ok((unsafe { r32(r) }, unsafe { r32(r + 4) }, unsafe {
+            r32(r + 8)
+        }))
     }
 
     /// GET_CAPSET: fetch the capset blob into the RESP region and log its
@@ -2568,7 +2641,11 @@ impl Gpu {
         ) {
             Ok((VIRTIO_GPU_RESP_OK_DISPLAY_INFO, VIRTIO_GPU_RESP_OK_DISPLAY_INFO)) => {}
             Ok((a, b)) => {
-                say!("tapestryd: gpu PAIR SELFTEST resp_types {:#x}/{:#x} (expected 0x1101 both)", a, b)
+                say!(
+                    "tapestryd: gpu PAIR SELFTEST resp_types {:#x}/{:#x} (expected 0x1101 both)",
+                    a,
+                    b
+                )
             }
             Err(()) => say!("tapestryd: gpu PAIR SELFTEST submit FAILED"),
         }
@@ -2591,7 +2668,8 @@ impl Gpu {
         let w = unsafe { r32(d0 + 8) };
         let h = unsafe { r32(d0 + 12) };
         let enabled = unsafe { r32(d0 + 16) };
-        if enabled != 0 && (1..=MAX_DISPLAY_DIM).contains(&w) && (1..=MAX_DISPLAY_DIM).contains(&h) {
+        if enabled != 0 && (1..=MAX_DISPLAY_DIM).contains(&w) && (1..=MAX_DISPLAY_DIM).contains(&h)
+        {
             Ok(Some((w, h)))
         } else {
             Ok(None)
@@ -2607,8 +2685,12 @@ impl Gpu {
             w32(req_va + 32, w);
             w32(req_va + 36, h);
         };
-        self.ctrl
-            .step("RESOURCE_CREATE_2D", GPU_CTRL_HDR_LEN + 16, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+        self.ctrl.step(
+            "RESOURCE_CREATE_2D",
+            GPU_CTRL_HDR_LEN + 16,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
     }
 
     /// Attach the whole weave (one physically-contiguous KObj_DMA chunk) as
@@ -2624,8 +2706,12 @@ impl Gpu {
             w32(req_va + 40, len);
             w32(req_va + 44, 0);
         };
-        self.ctrl
-            .step("ATTACH_BACKING", GPU_CTRL_HDR_LEN + 8 + 16, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+        self.ctrl.step(
+            "ATTACH_BACKING",
+            GPU_CTRL_HDR_LEN + 8 + 16,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
     }
 
     pub fn detach_backing(&mut self, resource_id: u32) -> Result<(), Error> {
@@ -2635,8 +2721,12 @@ impl Gpu {
             w32(req_va + 24, resource_id);
             w32(req_va + 28, 0);
         };
-        self.ctrl
-            .step("DETACH_BACKING", GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+        self.ctrl.step(
+            "DETACH_BACKING",
+            GPU_CTRL_HDR_LEN + 8,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
     }
 
     /// Free a resource -- UNLESS the display still names it because a
@@ -2686,7 +2776,11 @@ impl Gpu {
     /// still-live device id FAILS AT THE DEVICE (the mint returns E_IO), so
     /// the wrap is fail-closed rather than silently aliasing.
     pub fn condemn(&mut self, res_id: u32) {
-        if res_id == 0 || self.condemned[..self.condemned_n].iter().any(|e| e.res == res_id) {
+        if res_id == 0
+            || self.condemned[..self.condemned_n]
+                .iter()
+                .any(|e| e.res == res_id)
+        {
             return;
         }
         if self.condemned_n == GPU_CONDEMNED_MAX {
@@ -2704,11 +2798,16 @@ impl Gpu {
                  UNRECORDED unrefs in this window are LEAKED, fail-safe, until drain \
                  ({} lost); the device has refused that many unbinds without \
                  accepting one",
-                GPU_CONDEMNED_MAX, res_id, self.condemned_lost
+                GPU_CONDEMNED_MAX,
+                res_id,
+                self.condemned_lost
             );
             return;
         }
-        self.condemned[self.condemned_n] = Condemned { res: res_id, unref_requested: false };
+        self.condemned[self.condemned_n] = Condemned {
+            res: res_id,
+            unref_requested: false,
+        };
         self.condemned_n += 1;
     }
 
@@ -2774,8 +2873,12 @@ impl Gpu {
             w32(req_va + 24, resource_id);
             w32(req_va + 28, 0);
         };
-        self.ctrl
-            .step("RESOURCE_UNREF", GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+        self.ctrl.step(
+            "RESOURCE_UNREF",
+            GPU_CTRL_HDR_LEN + 8,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
     }
 
     /// RESOURCE_CREATE_BLOB for a GUEST-memory blob (Warp-6 V-1): the blob's
@@ -2814,7 +2917,7 @@ impl Gpu {
             w32(req_va + 36, 1); // nr_entries
             w64(req_va + 40, 0); // blob_id: 0 for a guest blob (host mints none)
             w64(req_va + 48, u64::from(len)); // size
-            // mem_entry[0]: the single guest-page backing.
+                                              // mem_entry[0]: the single guest-page backing.
             w64(req_va + 56, pa);
             w32(req_va + 64, len);
             w32(req_va + 68, 0); // padding
@@ -2864,11 +2967,11 @@ impl Gpu {
             w32(req_va + 28, VIRTIO_GPU_BLOB_MEM_HOST3D);
             w32(req_va + 32, blob_flags);
             w32(req_va + 36, 0); // nr_entries: 0 -- host-allocated, no guest backing
-            // blob_id names the host resource the blob binds. A command ring
-            // uses 0 (Venus requires supports_blob_id_0, matching vtest's
-            // shmem); a HOST_VISIBLE VkDeviceMemory bo passes the Venus
-            // mem_id, so virglrenderer maps THAT allocation's host pages
-            // (V-3b-3c-2). The kernel/QEMU treat it as an opaque u64.
+                                 // blob_id names the host resource the blob binds. A command ring
+                                 // uses 0 (Venus requires supports_blob_id_0, matching vtest's
+                                 // shmem); a HOST_VISIBLE VkDeviceMemory bo passes the Venus
+                                 // mem_id, so virglrenderer maps THAT allocation's host pages
+                                 // (V-3b-3c-2). The kernel/QEMU treat it as an opaque u64.
             w64(req_va + 40, blob_id);
             w64(req_va + 48, u64::from(len)); // size
         };
@@ -2980,9 +3083,13 @@ impl Gpu {
                 None => return Err(Error::Hardware),
             }
         };
-        if let Err(e) =
-            self.create_host3d_blob(res_id, ctx_id, VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE, size32, blob_id)
-        {
+        if let Err(e) = self.create_host3d_blob(
+            res_id,
+            ctx_id,
+            VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE,
+            size32,
+            blob_id,
+        ) {
             self.hostmem_free(off, size);
             return Err(e);
         }
@@ -3004,7 +3111,13 @@ impl Gpu {
                 return Err(Error::Hardware);
             }
         };
-        Ok(HostRing { res_id, offset: off, va, size, cache })
+        Ok(HostRing {
+            res_id,
+            offset: off,
+            va,
+            size,
+            cache,
+        })
     }
 
     /// V-3b-1c-2b F2: retire a HOST3D ring -- reap now if safe, else PARK. The
@@ -3042,7 +3155,8 @@ impl Gpu {
                 // else it is bounded by the client's own I-32 budget.
                 say!(
                     "tapestryd: hostmem ring res {} unexpected refcount {} at retire -- parking",
-                    ring.res_id, refs
+                    ring.res_id,
+                    refs
                 );
             }
             self.hostmem_parked.push(ring);
@@ -3115,10 +3229,16 @@ impl Gpu {
     pub fn drop_host3d_ring(&mut self, ring: HostRing) {
         let _ = unsafe { t_burrow_detach(ring.va, ring.size) };
         if self.unmap_blob(ring.res_id).is_err() {
-            say!("tapestryd: hostmem ring res {} unmap refused at teardown", ring.res_id);
+            say!(
+                "tapestryd: hostmem ring res {} unmap refused at teardown",
+                ring.res_id
+            );
         }
         if self.resource_unref(ring.res_id).is_err() {
-            say!("tapestryd: hostmem ring res {} unref refused at teardown", ring.res_id);
+            say!(
+                "tapestryd: hostmem ring res {} unref refused at teardown",
+                ring.res_id
+            );
         }
         self.hostmem_free(ring.offset, ring.size);
     }
@@ -3184,15 +3304,23 @@ impl Gpu {
                 w8(req_va + 32 + i as u64, *b);
             }
         };
-        self.ctrl
-            .step("CTX_CREATE", GPU_CTRL_HDR_LEN + 72, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+        self.ctrl.step(
+            "CTX_CREATE",
+            GPU_CTRL_HDR_LEN + 72,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
     }
 
     pub fn ctx_destroy(&mut self, ctx_id: u32) -> Result<(), Error> {
         let req_va = self.ring_va + REQ_OFF;
         unsafe { write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_DESTROY, ctx_id) };
-        self.ctrl
-            .step("CTX_DESTROY", GPU_CTRL_HDR_LEN, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+        self.ctrl.step(
+            "CTX_DESTROY",
+            GPU_CTRL_HDR_LEN,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
     }
 
     /// Attach a device-global resource to a context: virgl scopes command
@@ -3205,8 +3333,12 @@ impl Gpu {
             w32(req_va + 24, resource_id);
             w32(req_va + 28, 0);
         };
-        self.ctrl
-            .step("CTX_ATTACH_RESOURCE", GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+        self.ctrl.step(
+            "CTX_ATTACH_RESOURCE",
+            GPU_CTRL_HDR_LEN + 8,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
     }
 
     pub fn ctx_detach_resource(&mut self, ctx_id: u32, resource_id: u32) -> Result<(), Error> {
@@ -3216,8 +3348,12 @@ impl Gpu {
             w32(req_va + 24, resource_id);
             w32(req_va + 28, 0);
         };
-        self.ctrl
-            .step("CTX_DETACH_RESOURCE", GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+        self.ctrl.step(
+            "CTX_DETACH_RESOURCE",
+            GPU_CTRL_HDR_LEN + 8,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
     }
 
     /// RESOURCE_CREATE_3D: mint a device-global 3D resource. The parameter
@@ -3256,8 +3392,12 @@ impl Gpu {
             w32(req_va + 64, flags);
             w32(req_va + 68, 0); // padding
         };
-        self.ctrl
-            .step("RESOURCE_CREATE_3D", GPU_CTRL_HDR_LEN + 48, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+        self.ctrl.step(
+            "RESOURCE_CREATE_3D",
+            GPU_CTRL_HDR_LEN + 48,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
     }
 
     /// Bind scanout 0 to a resource (resource_id 0 = disable the scanout).
@@ -3281,9 +3421,12 @@ impl Gpu {
             self.injected_refusal = true;
             return Err(Error::Hardware);
         }
-        let r = self
-            .ctrl
-            .step("SET_SCANOUT", GPU_CTRL_HDR_LEN + 24, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA);
+        let r = self.ctrl.step(
+            "SET_SCANOUT",
+            GPU_CTRL_HDR_LEN + 24,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        );
         if r.is_ok() {
             self.drain_condemned(resource_id);
         }
@@ -3312,7 +3455,8 @@ impl Gpu {
     ) -> Result<u32, ()> {
         let req_va = self.ring_va + REQ_OFF;
         unsafe { write_scanout_blob_req(req_va, resource_id, w, h, format, stride) };
-        self.ctrl.submit_and_wait(GPU_CTRL_HDR_LEN + 72, GPU_CTRL_HDR_LEN)
+        self.ctrl
+            .submit_and_wait(GPU_CTRL_HDR_LEN + 72, GPU_CTRL_HDR_LEN)
     }
 
     /// W-3c: the Direct arm's bind -- scanout 0 shows the presentable's blob
@@ -3430,7 +3574,13 @@ impl Gpu {
         len: u32,
         blob_id: u64,
     ) -> Result<(), Error> {
-        self.create_host3d_blob(res_id, ctx_id, VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE, len, blob_id)
+        self.create_host3d_blob(
+            res_id,
+            ctx_id,
+            VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE,
+            len,
+            blob_id,
+        )
     }
 
     /// W-3a probe: CTX_ATTACH_RESOURCE with the raw resp_type returned -- the
@@ -3444,25 +3594,42 @@ impl Gpu {
             w32(req_va + 24, resource_id);
             w32(req_va + 28, 0);
         };
-        self.ctrl.submit_and_wait(GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN)
+        self.ctrl
+            .submit_and_wait(GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN)
     }
 
     /// TRANSFER_TO_HOST_2D: host-DMA-read the backing at `offset` into the
     /// resource rect. Rows advance by the RESOURCE stride (w*4), so `offset`
     /// = slot_base + (y*res_w + x)*4 selects both the slot and the rect
     /// origin within it.
-    pub fn transfer(&mut self, resource_id: u32, offset: u64, x: u32, y: u32, w: u32, h: u32) -> Result<(), Error> {
+    pub fn transfer(
+        &mut self,
+        resource_id: u32,
+        offset: u64,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+    ) -> Result<(), Error> {
         let req_va = self.ring_va + REQ_OFF;
         unsafe { write_transfer_req(req_va, resource_id, offset, x, y, w, h) };
-        self.ctrl
-            .step("TRANSFER", GPU_CTRL_HDR_LEN + 32, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+        self.ctrl.step(
+            "TRANSFER",
+            GPU_CTRL_HDR_LEN + 32,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
     }
 
     pub fn flush(&mut self, resource_id: u32, x: u32, y: u32, w: u32, h: u32) -> Result<(), Error> {
         let req_va = self.ring_va + REQ_OFF;
         unsafe { write_flush_req(req_va, resource_id, x, y, w, h) };
-        self.ctrl
-            .step("FLUSH", GPU_CTRL_HDR_LEN + 24, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+        self.ctrl.step(
+            "FLUSH",
+            GPU_CTRL_HDR_LEN + 24,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
     }
 
     /// W-4 C: the 2D paint pair -- upload then display flush of the SAME
@@ -3550,7 +3717,15 @@ impl Gpu {
             .submit_fenced(
                 slot,
                 req_len,
-                FenceTag { fence_id, ctx_pub, readback, comp, abandoned: false, ok: false, ring_idx },
+                FenceTag {
+                    fence_id,
+                    ctx_pub,
+                    readback,
+                    comp,
+                    abandoned: false,
+                    ok: false,
+                    ring_idx,
+                },
             )
             .map_err(|_| FencedErr::Dead)?;
         self.fence_next = fence_id;
@@ -3578,7 +3753,10 @@ impl Gpu {
         unsafe {
             write_ctrl_hdr_fenced(req, VIRTIO_GPU_CMD_SUBMIT_3D, ctx_id, fence_id);
             if ring_idx > 0 {
-                w32(req + 4, VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX);
+                w32(
+                    req + 4,
+                    VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX,
+                );
                 w8(req + 20, ring_idx);
             }
             w32(req + 24, stream.len() as u32);
@@ -3713,12 +3891,33 @@ impl Gpu {
     ) -> Result<u64, FencedErr> {
         let slot = self.fenced_begin(48)?;
         self.stage_transfer_3d(
-            slot, to_host, ctx_id, res_id, level, x, y, z, w, h, d, offset, stride, layer_stride,
+            slot,
+            to_host,
+            ctx_id,
+            res_id,
+            level,
+            x,
+            y,
+            z,
+            w,
+            h,
+            d,
+            offset,
+            stride,
+            layer_stride,
         );
         let fence_id = self.fence_next.wrapping_add(1);
         // A readback marks the lane (the sync-slot deadline reads it, C-6):
         // the device executes it synchronously at processing time.
-        self.fenced_commit(slot, GPU_CTRL_HDR_LEN + 48, fence_id, ctx_pub, !to_host, false, 0)
+        self.fenced_commit(
+            slot,
+            GPU_CTRL_HDR_LEN + 48,
+            fence_id,
+            ctx_pub,
+            !to_host,
+            false,
+            0,
+        )
     }
 
     /// The COMPOSITOR-OWNED fenced readback (Warp-C C-6, GPU-DESIGN 4.5.13):
@@ -3741,9 +3940,19 @@ impl Gpu {
         stride: u32,
     ) -> Result<u64, FencedErr> {
         let slot = self.fenced_begin_comp()?;
-        self.stage_transfer_3d(slot, false, ctx_id, res_id, 0, 0, 0, 0, w, h, 1, 0, stride, 0);
+        self.stage_transfer_3d(
+            slot, false, ctx_id, res_id, 0, 0, 0, 0, w, h, 1, 0, stride, 0,
+        );
         let fence_id = self.fence_next.wrapping_add(1);
-        self.fenced_commit(slot, GPU_CTRL_HDR_LEN + 48, fence_id, ctx_pub, true, true, 0)
+        self.fenced_commit(
+            slot,
+            GPU_CTRL_HDR_LEN + 48,
+            fence_id,
+            ctx_pub,
+            true,
+            true,
+            0,
+        )
     }
 
     /// Stage a TRANSFER_TO/FROM_HOST_3D request in fenced slot `slot`'s
@@ -3896,8 +4105,7 @@ impl Gpu {
         for slot in core::mem::take(&mut self.ctrl.held_retires) {
             match self.ctrl.fslots[slot].take() {
                 Some(mut tag) => {
-                    let resp_va =
-                        self.ctrl.flane_va + FRESP_OFF + (slot as u64) * FRESP_STRIDE;
+                    let resp_va = self.ctrl.flane_va + FRESP_OFF + (slot as u64) * FRESP_STRIDE;
                     let rt = unsafe { r32(resp_va) };
                     // Mirror `drain`'s arm EXACTLY -- including the round-F2
                     // verdict. A replay that composed where the real path
@@ -3906,7 +4114,8 @@ impl Gpu {
                     if !tag.ok {
                         say!(
                             "tapestryd: gpu fenced cmd (fence {}) resp_type={:#x}",
-                            tag.fence_id, rt
+                            tag.fence_id,
+                            rt
                         );
                     }
                     self.ctrl.completed.push(tag);

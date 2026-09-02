@@ -176,7 +176,12 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub const ZERO: Rect = Rect { x: 0, y: 0, w: 0, h: 0 };
+    pub const ZERO: Rect = Rect {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+    };
 
     /// Intersection (empty rects collapse to ZERO).
     pub fn intersect(self, o: Rect) -> Rect {
@@ -187,7 +192,12 @@ impl Rect {
         if x2 <= x1 || y2 <= y1 {
             return Rect::ZERO;
         }
-        Rect { x: x1, y: y1, w: x2 - x1, h: y2 - y1 }
+        Rect {
+            x: x1,
+            y: y1,
+            w: x2 - x1,
+            h: y2 - y1,
+        }
     }
     pub fn is_empty(self) -> bool {
         self.w == 0 || self.h == 0
@@ -202,8 +212,14 @@ impl Rect {
 }
 
 pub enum Kind {
-    Leaf { surface: Option<usize> },
-    Container { mode: Mode, children: Vec<usize>, active: usize },
+    Leaf {
+        surface: Option<usize>,
+    },
+    Container {
+        mode: Mode,
+        children: Vec<usize>,
+        active: usize,
+    },
 }
 
 pub struct Pane {
@@ -346,7 +362,10 @@ impl Layout {
     /// The leaf hosting surface `n` (linear scan; the table is small).
     pub fn find_hosting(&self, n: usize) -> Option<usize> {
         self.panes.iter().enumerate().find_map(|(i, p)| match p {
-            Some(Pane { kind: Kind::Leaf { surface: Some(s) }, .. }) if *s == n => Some(i),
+            Some(Pane {
+                kind: Kind::Leaf { surface: Some(s) },
+                ..
+            }) if *s == n => Some(i),
             _ => None,
         })
     }
@@ -385,8 +404,9 @@ impl Layout {
                 Kind::Container { mode: m, .. } if m == mode);
             if same {
                 let new_leaf = self.alloc(Some(pi), Kind::Leaf { surface: None })?;
-                if let Some(Kind::Container { children, active, .. }) =
-                    self.get_mut(pi).map(|p| &mut p.kind)
+                if let Some(Kind::Container {
+                    children, active, ..
+                }) = self.get_mut(pi).map(|p| &mut p.kind)
                 {
                     let at = children.iter().position(|&c| c == slot).unwrap_or(0);
                     children.insert(at + 1, new_leaf);
@@ -398,11 +418,14 @@ impl Layout {
             }
         }
         // Nest: the leaf's position becomes a container [leaf, new-leaf].
-        let container = self.alloc(parent, Kind::Container {
-            mode,
-            children: Vec::new(),
-            active: 1,
-        })?;
+        let container = self.alloc(
+            parent,
+            Kind::Container {
+                mode,
+                children: Vec::new(),
+                active: 1,
+            },
+        )?;
         let new_leaf = match self.alloc(Some(container), Kind::Leaf { surface: None }) {
             Some(l) => l,
             None => {
@@ -423,8 +446,7 @@ impl Layout {
             None => self.root = container,
         }
         self.get_mut(slot).unwrap().parent = Some(container);
-        if let Some(Kind::Container { children, .. }) =
-            self.get_mut(container).map(|p| &mut p.kind)
+        if let Some(Kind::Container { children, .. }) = self.get_mut(container).map(|p| &mut p.kind)
         {
             children.push(slot);
             children.push(new_leaf);
@@ -450,7 +472,11 @@ impl Layout {
             }
         }
         let r = self.get(f)?.content;
-        let mode = if r.w >= r.h { Mode::SplitH } else { Mode::SplitV };
+        let mode = if r.w >= r.h {
+            Mode::SplitH
+        } else {
+            Mode::SplitV
+        };
         let leaf = self.split(f, mode)?;
         if let Some(Kind::Leaf { surface }) = self.get_mut(leaf).map(|p| &mut p.kind) {
             *surface = Some(n);
@@ -557,8 +583,9 @@ impl Layout {
             None => return,
         };
         self.free_subtree(slot);
-        if let Some(Kind::Container { children, active, .. }) =
-            self.get_mut(parent).map(|p| &mut p.kind)
+        if let Some(Kind::Container {
+            children, active, ..
+        }) = self.get_mut(parent).map(|p| &mut p.kind)
         {
             if let Some(at) = children.iter().position(|&c| c == slot) {
                 children.remove(at);
@@ -611,17 +638,16 @@ impl Layout {
     /// place (in the grandparent, or as root).
     fn dissolve_if_single(&mut self, slot: usize) {
         let (only, gp) = match self.get(slot) {
-            Some(Pane { kind: Kind::Container { children, .. }, parent, .. })
-                if children.len() == 1 =>
-            {
-                (children[0], *parent)
-            }
+            Some(Pane {
+                kind: Kind::Container { children, .. },
+                parent,
+                ..
+            }) if children.len() == 1 => (children[0], *parent),
             _ => return,
         };
         match gp {
             Some(g) => {
-                if let Some(Kind::Container { children, .. }) =
-                    self.get_mut(g).map(|p| &mut p.kind)
+                if let Some(Kind::Container { children, .. }) = self.get_mut(g).map(|p| &mut p.kind)
                 {
                     if let Some(at) = children.iter().position(|&c| c == slot) {
                         children[at] = only;
@@ -645,7 +671,9 @@ impl Layout {
     pub fn first_leaf(&self, slot: usize) -> Option<usize> {
         match self.get(slot).map(|p| &p.kind) {
             Some(Kind::Leaf { .. }) => Some(slot),
-            Some(Kind::Container { children, active, .. }) => {
+            Some(Kind::Container {
+                children, active, ..
+            }) => {
                 let mut order: Vec<usize> = Vec::new();
                 if *active < children.len() {
                     order.push(children[*active]);
@@ -679,8 +707,9 @@ impl Layout {
                 // tab/stack ancestor (revealing the focused leaf).
                 let mut cur = l;
                 while let Some(pi) = self.get(cur).and_then(|p| p.parent) {
-                    if let Some(Kind::Container { children, active, .. }) =
-                        self.get_mut(pi).map(|p| &mut p.kind)
+                    if let Some(Kind::Container {
+                        children, active, ..
+                    }) = self.get_mut(pi).map(|p| &mut p.kind)
                     {
                         if let Some(at) = children.iter().position(|&c| c == cur) {
                             if *active != at {
@@ -713,8 +742,7 @@ impl Layout {
         let target = self.mode_target(slot);
         match target {
             Some(t) => {
-                if let Some(Kind::Container { mode: m, .. }) =
-                    self.get_mut(t).map(|p| &mut p.kind)
+                if let Some(Kind::Container { mode: m, .. }) = self.get_mut(t).map(|p| &mut p.kind)
                 {
                     if *m != mode {
                         *m = mode;
@@ -797,14 +825,26 @@ impl Layout {
             }
             let r = p.rect;
             let (ok, dist, ov) = match dir {
-                Dir::Left => (r.x + r.w <= fr.x, fr.x - (r.x + r.w).min(fr.x),
-                    overlap(r.y, r.h, fr.y, fr.h)),
-                Dir::Right => (fr.x + fr.w <= r.x, r.x.saturating_sub(fr.x + fr.w),
-                    overlap(r.y, r.h, fr.y, fr.h)),
-                Dir::Up => (r.y + r.h <= fr.y, fr.y - (r.y + r.h).min(fr.y),
-                    overlap(r.x, r.w, fr.x, fr.w)),
-                Dir::Down => (fr.y + fr.h <= r.y, r.y.saturating_sub(fr.y + fr.h),
-                    overlap(r.x, r.w, fr.x, fr.w)),
+                Dir::Left => (
+                    r.x + r.w <= fr.x,
+                    fr.x - (r.x + r.w).min(fr.x),
+                    overlap(r.y, r.h, fr.y, fr.h),
+                ),
+                Dir::Right => (
+                    fr.x + fr.w <= r.x,
+                    r.x.saturating_sub(fr.x + fr.w),
+                    overlap(r.y, r.h, fr.y, fr.h),
+                ),
+                Dir::Up => (
+                    r.y + r.h <= fr.y,
+                    fr.y - (r.y + r.h).min(fr.y),
+                    overlap(r.x, r.w, fr.x, fr.w),
+                ),
+                Dir::Down => (
+                    fr.y + fr.h <= r.y,
+                    r.y.saturating_sub(fr.y + fr.h),
+                    overlap(r.x, r.w, fr.x, fr.w),
+                ),
             };
             if !ok || ov == 0 {
                 continue;
@@ -828,7 +868,10 @@ impl Layout {
             let p = self.get(cur).and_then(|p| p.parent)?;
             if matches!(
                 self.get(p).map(|q| &q.kind),
-                Some(Kind::Container { mode: Mode::Tabbed | Mode::Stacked, .. })
+                Some(Kind::Container {
+                    mode: Mode::Tabbed | Mode::Stacked,
+                    ..
+                })
             ) {
                 return Some(p);
             }
@@ -844,8 +887,9 @@ impl Layout {
             Some(p) => p,
             None => return,
         };
-        if let Some(Kind::Container { children, active, .. }) =
-            self.get_mut(parent).map(|p| &mut p.kind)
+        if let Some(Kind::Container {
+            children, active, ..
+        }) = self.get_mut(parent).map(|p| &mut p.kind)
         {
             if let Some(at) = children.iter().position(|&c| c == slot) {
                 children.remove(at);
@@ -892,11 +936,14 @@ impl Layout {
                         return false;
                     }
                     let mode = if horiz { Mode::SplitH } else { Mode::SplitV };
-                    let c = match self.alloc(None, Kind::Container {
-                        mode,
-                        children: Vec::new(),
-                        active: 0,
-                    }) {
+                    let c = match self.alloc(
+                        None,
+                        Kind::Container {
+                            mode,
+                            children: Vec::new(),
+                            active: 0,
+                        },
+                    ) {
                         Some(c) => c,
                         None => return false, // pane table full: untouched
                     };
@@ -967,9 +1014,7 @@ impl Layout {
             // REPLACED in place at its own index).
             let at = if before { i } else { i + 1 };
             self.detach_leaf(slot);
-            if let Some(Kind::Container { children, .. }) =
-                self.get_mut(anc).map(|p| &mut p.kind)
-            {
+            if let Some(Kind::Container { children, .. }) = self.get_mut(anc).map(|p| &mut p.kind) {
                 let at = at.min(children.len());
                 children.insert(at, slot);
             }
@@ -992,16 +1037,25 @@ impl Layout {
             };
             let is_tab = matches!(
                 self.get(p).map(|q| &q.kind),
-                Some(Kind::Container { mode: Mode::Tabbed | Mode::Stacked, .. })
+                Some(Kind::Container {
+                    mode: Mode::Tabbed | Mode::Stacked,
+                    ..
+                })
             );
             if is_tab {
                 let target = match self.get_mut(p).map(|q| &mut q.kind) {
-                    Some(Kind::Container { children, active, .. }) => {
+                    Some(Kind::Container {
+                        children, active, ..
+                    }) => {
                         let n = children.len();
                         if n == 0 {
                             return false;
                         }
-                        *active = if forward { (*active + 1) % n } else { (*active + n - 1) % n };
+                        *active = if forward {
+                            (*active + 1) % n
+                        } else {
+                            (*active + n - 1) % n
+                        };
                         children[*active]
                     }
                     _ => return false,
@@ -1050,7 +1104,12 @@ impl Layout {
             .enumerate()
             .filter_map(|(i, p)| match p {
                 Some(Pane {
-                    kind: Kind::Container { mode: m @ (Mode::Tabbed | Mode::Stacked), children, active },
+                    kind:
+                        Kind::Container {
+                            mode: m @ (Mode::Tabbed | Mode::Stacked),
+                            children,
+                            active,
+                        },
                     visible: true,
                     rect,
                     ..
@@ -1061,7 +1120,12 @@ impl Layout {
                     }
                     Some((
                         i,
-                        Rect { x: rect.x, y: rect.y, w: rect.w, h: strip },
+                        Rect {
+                            x: rect.x,
+                            y: rect.y,
+                            w: rect.w,
+                            h: strip,
+                        },
                         *m,
                         children.clone(),
                         *active,
@@ -1078,7 +1142,14 @@ impl Layout {
         self.panes
             .iter()
             .filter(|p| {
-                matches!(p, Some(Pane { kind: Kind::Leaf { .. }, visible: true, .. }))
+                matches!(
+                    p,
+                    Some(Pane {
+                        kind: Kind::Leaf { .. },
+                        visible: true,
+                        ..
+                    })
+                )
             })
             .count()
     }
@@ -1098,7 +1169,12 @@ impl Layout {
         if let Some(zid) = self.zoomed_id {
             match self.slot_of_id(zid) {
                 Some(z) if self.is_leaf(z) => {
-                    let full = Rect { x: 0, y: 0, w: disp_w, h: disp_h };
+                    let full = Rect {
+                        x: 0,
+                        y: 0,
+                        w: disp_w,
+                        h: disp_h,
+                    };
                     let p = self.get_mut(z).unwrap();
                     p.visible = true;
                     p.rect = full;
@@ -1109,7 +1185,15 @@ impl Layout {
             }
         }
         let root = self.root;
-        self.layout_pane(root, Rect { x: 0, y: 0, w: disp_w, h: disp_h });
+        self.layout_pane(
+            root,
+            Rect {
+                x: 0,
+                y: 0,
+                w: disp_w,
+                h: disp_h,
+            },
+        );
         // Pass 2: the content inset -- the Daylight chrome ring per leaf iff
         // >1 leaf visible. A single fullscreen leaf stays borderless (the
         // stage-0 look). The ring = floor(`gaps`, the tunable gap) +
@@ -1118,7 +1202,11 @@ impl Layout {
         // inter-pane gap (section 2.3 -- at gaps=1 the two abutting floors
         // give the 2px inter-pane floor).
         let chrome = (theme::METRICS.bevel + theme::METRICS.hairline) as u32;
-        let inset = if self.visible_leaf_count() > 1 { gaps + chrome } else { 0 };
+        let inset = if self.visible_leaf_count() > 1 {
+            gaps + chrome
+        } else {
+            0
+        };
         // The Daylight tag bar (HALCYON-VISUAL 3.2/4): every inset leaf carves a
         // `header_h` strip off the TOP of its inner rect (inside the ring),
         // above the client content. Gated with the ring (>1 leaf) -- a single
@@ -1143,7 +1231,12 @@ impl Layout {
                     h: r.h - 2 * inset,
                 };
                 if c.h > tag_h + tag_h {
-                    p.tagbar = Rect { x: c.x, y: c.y, w: c.w, h: tag_h };
+                    p.tagbar = Rect {
+                        x: c.x,
+                        y: c.y,
+                        w: c.w,
+                        h: tag_h,
+                    };
                     c.y += tag_h;
                     c.h -= tag_h;
                 }
@@ -1169,19 +1262,26 @@ impl Layout {
             p.rect = rect;
             match &p.kind {
                 Kind::Leaf { .. } => Next::Done,
-                Kind::Container { mode, children, active } => match mode {
+                Kind::Container {
+                    mode,
+                    children,
+                    active,
+                } => match mode {
                     // Tab/stack: only the active child is visible, in the
                     // rect below the indicator strip (G-6c; strip_h = 0
                     // when the rect is too small to carve).
                     m @ (Mode::Tabbed | Mode::Stacked) => {
                         let strip = Self::strip_h(*m, children.len() as u32, rect);
                         match children.get(*active).copied() {
-                            Some(a) => Next::One(a, Rect {
-                                x: rect.x,
-                                y: rect.y + strip,
-                                w: rect.w,
-                                h: rect.h - strip,
-                            }),
+                            Some(a) => Next::One(
+                                a,
+                                Rect {
+                                    x: rect.x,
+                                    y: rect.y + strip,
+                                    w: rect.w,
+                                    h: rect.h - strip,
+                                },
+                            ),
                             None => Next::Done,
                         }
                     }
@@ -1201,16 +1301,40 @@ impl Layout {
                     let each = rect.w / n;
                     let mut x = rect.x;
                     for (i, &c) in children.iter().enumerate() {
-                        let w = if i as u32 == n - 1 { rect.x + rect.w - x } else { each };
-                        self.layout_pane(c, Rect { x, y: rect.y, w, h: rect.h });
+                        let w = if i as u32 == n - 1 {
+                            rect.x + rect.w - x
+                        } else {
+                            each
+                        };
+                        self.layout_pane(
+                            c,
+                            Rect {
+                                x,
+                                y: rect.y,
+                                w,
+                                h: rect.h,
+                            },
+                        );
                         x += w;
                     }
                 } else {
                     let each = rect.h / n;
                     let mut y = rect.y;
                     for (i, &c) in children.iter().enumerate() {
-                        let h = if i as u32 == n - 1 { rect.y + rect.h - y } else { each };
-                        self.layout_pane(c, Rect { x: rect.x, y, w: rect.w, h });
+                        let h = if i as u32 == n - 1 {
+                            rect.y + rect.h - y
+                        } else {
+                            each
+                        };
+                        self.layout_pane(
+                            c,
+                            Rect {
+                                x: rect.x,
+                                y,
+                                w: rect.w,
+                                h,
+                            },
+                        );
                         y += h;
                     }
                 }
@@ -1246,8 +1370,11 @@ impl Layout {
         let mut s = String::new();
         let _ = core::fmt::write(
             &mut s,
-            format_args!("epoch {} focused {}", self.epoch,
-                self.id_of(self.focused).unwrap_or(0)),
+            format_args!(
+                "epoch {} focused {}",
+                self.epoch,
+                self.id_of(self.focused).unwrap_or(0)
+            ),
         );
         if let Some(z) = self.zoomed_id {
             let _ = core::fmt::write(&mut s, format_args!(" zoomed {}", z));
@@ -1276,19 +1403,35 @@ impl Layout {
                     None => s.push_str(" empty"),
                 }
             }
-            Kind::Container { mode, children, active } => {
+            Kind::Container {
+                mode,
+                children,
+                active,
+            } => {
                 let _ = core::fmt::write(
                     s,
-                    format_args!("{}{} {} n={} active={}", p.id, star, mode.name(),
-                        children.len(), active),
+                    format_args!(
+                        "{}{} {} n={} active={}",
+                        p.id,
+                        star,
+                        mode.name(),
+                        children.len(),
+                        active
+                    ),
                 );
             }
         }
         let c = p.content;
         let _ = core::fmt::write(
             s,
-            format_args!(" [{},{},{},{}]{}\n", c.x, c.y, c.w, c.h,
-                if p.visible { "" } else { " hidden" }),
+            format_args!(
+                " [{},{},{},{}]{}\n",
+                c.x,
+                c.y,
+                c.w,
+                c.h,
+                if p.visible { "" } else { " hidden" }
+            ),
         );
         if let Kind::Container { children, .. } = &p.kind {
             for &c in children {

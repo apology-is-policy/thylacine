@@ -106,7 +106,10 @@ const VIRTQ_DESC_F_WRITE: u16 = 2;
 const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
 
 const _: () = {
-    assert!(EVENT_POOL_OFF + (QUEUE_SIZE as u64) * (VIRTIO_INPUT_EVENT_LEN as u64) <= INPUT_DMA_SIZE as u64);
+    assert!(
+        EVENT_POOL_OFF + (QUEUE_SIZE as u64) * (VIRTIO_INPUT_EVENT_LEN as u64)
+            <= INPUT_DMA_SIZE as u64
+    );
 };
 
 /// A raw virtio_input_event record.
@@ -192,17 +195,21 @@ impl InputDev {
     /// the statusq -- LED writeback -- is deliberately unconfigured at
     /// stage 0).
     pub fn probe(nth: u32, bar_window_va: u64, dma_va: u64) -> Result<InputDev, Error> {
-        let pci = unsafe { PciDev::claim_nth(VIRTIO_DEVICE_ID_INPUT, nth, bar_window_va) }.map_err(|e| {
-            say!("tapestryd: input[{}] PCI claim/map failed {:?}", nth, e);
-            Error::Hardware
-        })?;
+        let pci = unsafe { PciDev::claim_nth(VIRTIO_DEVICE_ID_INPUT, nth, bar_window_va) }
+            .map_err(|e| {
+                say!("tapestryd: input[{}] PCI claim/map failed {:?}", nth, e);
+                Error::Hardware
+            })?;
 
         let (common, common_len) = pci.region(PciRegion::Common).ok_or_else(|| {
             say!("tapestryd: input no common-cfg region");
             Error::Hardware
         })?;
         if common_len < CCFG_MIN_LEN {
-            say!("tapestryd: input common-cfg region too small ({})", common_len);
+            say!(
+                "tapestryd: input common-cfg region too small ({})",
+                common_len
+            );
             return Err(Error::Hardware);
         }
 
@@ -218,7 +225,10 @@ impl InputDev {
         unsafe {
             w8(common + CCFG_DEVICE_STATUS, 0);
             w8(common + CCFG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
-            w8(common + CCFG_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
+            w8(
+                common + CCFG_DEVICE_STATUS,
+                STATUS_ACKNOWLEDGE | STATUS_DRIVER,
+            );
             w16(common + CCFG_CONFIG_MSIX_VECTOR, VIRTIO_MSI_NO_VECTOR);
 
             w32(common + CCFG_DEVICE_FEATURE_SELECT, 0);
@@ -270,7 +280,6 @@ impl InputDev {
             );
         }
 
-        
         say!("tapestryd: input[{}] up (poll-mode eventq)", nth);
         Ok(InputDev {
             dma_va,
@@ -333,7 +342,11 @@ impl InputDev {
             }
             r32(cfg + INPUT_CFG_PAYLOAD_OFF + 4)
         };
-        if max == 0 { 0x7FFF } else { max }
+        if max == 0 {
+            0x7FFF
+        } else {
+            max
+        }
     }
 
     /// Drain every pending eventq record, invoking `f` per record; recycle
@@ -375,7 +388,11 @@ impl InputDev {
                 unsafe { w16(avail_va + 4 + avail_slot * 2, desc_id as u16) };
                 self.avail_idx = self.avail_idx.wrapping_add(1);
             } else {
-                say!("tapestryd: input malformed used elem id={} len={}", desc_id, used_len);
+                say!(
+                    "tapestryd: input malformed used elem id={} len={}",
+                    desc_id,
+                    used_len
+                );
             }
             idx = idx.wrapping_add(1);
             consumed += 1;

@@ -131,10 +131,10 @@ pub fn resolve(code: u16, mods: u16) -> u32 {
         53 => sel(shift, b'/', b'?'),
         // Whitespace + control runes.
         57 => b' ' as u32,
-        28 => b'\r' as u32,  // Enter
-        15 => b'\t' as u32,  // Tab
-        14 => 0x08,          // Backspace
-        1 => 0x1B,           // Esc
+        28 => b'\r' as u32, // Enter
+        15 => b'\t' as u32, // Tab
+        14 => 0x08,         // Backspace
+        1 => 0x1B,          // Esc
         _ => 0,
     };
     if base == 0 {
