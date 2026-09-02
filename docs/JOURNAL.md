@@ -22,6 +22,80 @@ needed the operator.
 
 ---
 
+## 2026-09-02 (aux) -- union mounts UM-5: readdir merges the members
+
+Second run of the union arc (after a self-compaction at the 600k line). The WALK
+landed last run (`3468fd6c`); this run built **union readdir** -- `ls` of a
+union directory must show every member's entries, not just member[0]'s.
+
+**Why it was needed even though /bin/sh (UM-6) doesn't require it.** The git
+driver reaches `/bin/sh` by WALK (first-hit), which already works. But a union
+`/bin` you can't `ls` correctly is a visible, surprising hole -- open `/bin`
+today and readdir returns only the first member. So readdir is part of the
+mechanism, not the application; built now per the operator's full-union scope.
+
+**The hard part was the cursor, and it decided the whole design.** readdir is
+paginated: the fd carries a single opaque `c->offset`, and the handler commits
+it only AFTER the copy-out succeeds (the F3 property -- a faulted copy must
+re-fetch, never skip). A union readdir has to merge N members AND dedup by name
+(first-member-wins, to match the walk's first-hit) across those pages. I weighed
+three shapes:
+
+- *Materialize the whole merged listing at open* -- O(dir), clean dedup, but
+  kmalloc caps at 2048 (buddy pages above that), so it needs a big per-fd buffer
+  + a cap policy, and a Spoor-lifetime buffer to free.
+- *Stream forward with a compound (member, member-cookie) cursor* -- memory-light
+  but the cursor doesn't fit one u64 without packing (member cookies can be full
+  64-bit), and it fights F3 because its state isn't a single handler-committed
+  word.
+- *Ordinal-restart* (chosen): the merged-dedup sequence is DETERMINISTIC, so
+  `c->offset` is a 1-based ordinal into it; each call re-drives from the start,
+  skips `in_ordinal` kept entries, emits the next batch, and writes the ordinal
+  into each dirent's on-wire offset field. This composes with F3 for free -- both
+  the native handler and the getdents64 re-encode already commit "the last
+  delivered entry's cookie," and since the cookie IS the ordinal, resume is
+  correct for both. O(dir) per page; unions are small.
+
+The deciding fact: getdents64 (`syscall.c:~12461`) commits `emit_cookie` -- the
+last *re-encoded* entry that fit -- not the raw batch's cookie. Only because the
+ordinal lives in the on-wire offset field do both paths resume identically. That
+one observation is why ordinal-restart works and the compound cursor doesn't.
+
+**What landed.** New `Spoor.union_base` (a ref to the mount POINT, set only by a
+`STALK_OPEN` of a `>=2`-member mount, immutable after, never inherited by
+`spoor_clone`, freed at `spoor_free_internal`); `union_readdir_run` (non-static,
+takes the Proc explicitly so it is unit-testable); a branch in
+`spoor_readdir_run`; two stalk exports (`stalk_union_member` = `stalk_cross_from`
+re-export, `stalk_union_has_child` = a raw-walk dedup probe). Dedup is relookup
+(no seen-set), which is why `union_base` stays immutable and a shared union fd
+needs no lock.
+
+**Self-review caught one thing before the build**: the only false-EOD path is a
+first eligible entry larger than `want` (outlen stays 0 while `full`) -- a
+paginating reader would read 0 as EOD and silently truncate. Unreachable at
+`want >= 2048` (a dirent is `<= 24 + 255`), but a userspace tiny buffer could
+hit it, so it returns `-T_E_INVAL` ("can't hold one record", the getdents64
+stance) instead of 0.
+
+**Verified.** Suite **1495/1495** (1492 + 3 new: merge/dedup, ordinal
+pagination, and a non-tagged control proving a plain dir + a single-member mount
+are NOT tagged). The dedup test asserts the shared name resolves to um1's qid
+(23), not um2's (26) -- first-member-wins by content, not just count. Boot-stack
+high-water 8192/16384B (the off-stack `tmp` kmalloc kept the frame flat). SMP
+gate: *(amplifier default-smp4 + ubsan-smp4, N=10 -- running at write time)*.
+
+**Doc-discipline note.** `quaestor owner` reports all 5 changed paths are
+vault-OWNED (`sub-kernel-stalk/territory/spoor/syscall`), so strictly the prose
+belongs in the vault. But the vault worktree is 379 commits / 16 days behind and
+its dossiers predate the entire union arc, and the vault agent is dormant (last
+beat 384h). The union WALK prose already lives in `reference/18-territory.md`, so
+I kept the arc coherent there (readdir beside walk) and flagged the vault to
+absorb the whole union arc when it next runs -- rather than block UM-5 on a
+dormant agent or split the arc's prose across two homes.
+
+**Next**: UM-5a (MCREATE target member) -> UM-6 (/bin/sh) -> UM-7 (arc-close
+holotype audit + the AUDIT-TRIGGERS row + CLAUDE index, batched).
+
 ## 2026-09-02 (aux) -- union mounts: the operator turned a /bin/sh symlink into the real Plan 9 feature
 
 **How it started, and the wrong turn the operator caught.** X-11 was "add `/bin/sh`"

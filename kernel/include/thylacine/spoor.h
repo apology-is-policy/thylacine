@@ -171,6 +171,24 @@ struct Spoor {
                                // spoor_free_internal. Lifetime subset of the
                                // Spoor's; the field needs no lock (like qid/dev)
                                // -- only path->ref is concurrent (atomic).
+
+    struct Spoor *union_base;  // UM (union mounts): NON-NULL iff this Spoor was
+                               // opened (STALK_OPEN) on a UNION mount point
+                               // (>= 2 grafted members). Holds a ref to the
+                               // mount-POINT Spoor (pre-cross identity); the
+                               // opened Spoor's OWN identity is member[0] (the
+                               // final cross), so fstat/type/every non-readdir
+                               // op sees member[0] -- ONLY spoor_readdir_run
+                               // consults union_base, to merge every member's
+                               // entries (dedup first-member-wins, matching the
+                               // walk's first-hit; specs/territory.tla
+                               // ReaddirDedupFirstWins). IMMUTABLE after the
+                               // open sets it (readdir re-fetches members via
+                               // mount_member_at each call and never mutates it,
+                               // so a fork/dup-SHARED union fd needs no lock),
+                               // and NEVER inherited by spoor_clone (a clone is
+                               // a walk position, not a union open). Freed
+                               // (spoor_clunk) at spoor_free_internal.
 };
 
 _Static_assert(__builtin_offsetof(struct Spoor, magic) == 0,

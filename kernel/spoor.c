@@ -62,6 +62,7 @@ static struct Spoor *spoor_alloc_internal(struct Dev *d) {
     c->mode   = 0;
     c->offset = 0;
     c->aux    = NULL;
+    c->union_base = NULL;    // UM: set only by a STALK_OPEN of a union point.
     // qid is left zeroed (KP_ZERO already cleared it); the dev's
     // attach/walk hooks populate it as appropriate.
 
@@ -87,6 +88,14 @@ static void spoor_free_internal(struct Spoor *c) {
     // Spoor's, I-33); path_unref is NULL-safe.
     path_unref(c->path);
     c->path = NULL;
+
+    // UM: drop the union mount-point ref a STALK_OPEN of a union directory
+    // attached here. The mount-point Spoor is a DISTINCT object from this one
+    // (this Spoor is member[0], the final cross), so this is not a self-clunk.
+    if (c->union_base) {
+        spoor_clunk(c->union_base);
+        c->union_base = NULL;
+    }
 
     // Clobber magic explicitly so a stale-pointer dereference between
     // free and SLUB-list-write extincts on the magic check rather than
@@ -163,6 +172,11 @@ struct Spoor *spoor_clone(struct Spoor *c) {
     //   - aux: shallow-copied. Devs whose aux owns refcounted state
     //     MUST take their own ref in dev->walk before populating the
     //     new Spoor's aux; spoor_clone does not interpret aux.
+    //   - union_base (UM): deliberately NOT inherited -- spoor_alloc_internal
+    //     left it NULL. A clone is a walk position (an intermediate cross, a
+    //     dirfd re-clone), never a union open; only the STALK_OPEN final cross
+    //     attaches it. Inheriting it would double-free the mount-point ref and
+    //     misroute readdir of a plain child through the parent's union.
     nc->qid    = c->qid;
     nc->flag   = c->flag & ~CWALKONLY;   // #81: never inherit the nav-only marker
     nc->mode   = c->mode;

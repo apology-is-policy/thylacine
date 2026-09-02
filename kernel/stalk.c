@@ -251,6 +251,41 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
     return stalk_cross_from(p, probe, 0, out, crossed_pheno);
 }
 
+// stalk_union_member (UM) -- the k-th union member of `base`, crossed + ref-held
+// (see stalk.h). Pure re-export of stalk_cross_from for the union readdir merge;
+// phenotype is irrelevant to readdir (NULL crossed_pheno).
+int stalk_union_member(struct Proc *p, struct Spoor *base, int k,
+                       struct Spoor **out) {
+    return stalk_cross_from(p, base, k, out, NULL);
+}
+
+// stalk_union_has_child (UM) -- raw Dev.walk existence probe for the union
+// readdir dedup (see stalk.h). Mirrors the per-component walk's three miss-path
+// cleanups exactly (NULL / reuse-violation share the parent aux -> detach+unref;
+// nqid mismatch reused nc -> clunk-safe). No perm_check, no symlink follow: this
+// asks only whether the NAME is present, so an earlier member's entry shadows a
+// later member's same-named entry regardless of access or link-ness.
+bool stalk_union_has_child(struct Proc *p, struct Spoor *dir,
+                           const char *name, u32 namelen) {
+    (void)p;
+    if (!dir || !dir->dev || !dir->dev->walk)              return false;
+    if (namelen == 0 || namelen > SYS_WALK_OPEN_NAME_MAX)  return false;
+    char nb[SYS_WALK_OPEN_NAME_MAX + 1];
+    for (u32 i = 0; i < namelen; i++) nb[i] = name[i];
+    nb[namelen] = '\0';
+
+    struct Spoor *nc = spoor_clone(dir);
+    if (!nc)                                               return false;
+    const char *names[1] = { nb };
+    struct Walkqid *w = dir->dev->walk(dir, nc, names, 1);
+    if (!w)             { nc->aux = NULL; spoor_unref(nc);            return false; }
+    if (w->spoor != nc) { walkqid_free(w); nc->aux = NULL; spoor_unref(nc); return false; }
+    bool found = (w->nqid == 1);
+    walkqid_free(w);
+    spoor_clunk(nc);    // nc was reused (w->spoor == nc) -> clunk-safe either way
+    return found;
+}
+
 // path_has_dotdot -- pre-scan for a ".." component. The POUNCE compresses a
 // run of components into ONE trail entry (intermediates never materialize as
 // Spoors), which is incompatible with `..`'s pop-one-component semantics --
@@ -1443,13 +1478,32 @@ per_component:
     // underlying point even when it already hosts a mount. On failure the quarry
     // is still owned -> the fail path clunks it.
     if (amode != STALK_MOUNT) {
+        // UM: is the quarry a UNION mount point (>= 2 grafted members)? If so
+        // AND this is an OPEN (the only resolution that yields a readdir fd),
+        // tag the opened Spoor with the union base so spoor_readdir_run merges
+        // every member (dedup first-wins). Capture the base BEFORE the cross:
+        // the crossed Spoor carries member[0]'s qid, not the mount point's, so
+        // the base must be the pre-cross quarry (the mount-point identity
+        // mount_member_at keys on). The +1 ref is transferred onto the crossed
+        // Spoor's union_base (a DISTINCT object -- the cross mints a fresh
+        // Spoor) and released at spoor_free_internal.
+        struct Spoor *union_pt = NULL;
+        if (amode == STALK_OPEN && p && p->territory) {
+            struct Spoor *m1 = mount_member_at(p->territory, quarry, 1, NULL);
+            if (m1) { spoor_clunk(m1); union_pt = quarry; spoor_ref(union_pt); }
+        }
         struct Spoor *crossed = NULL;
-        if (stalk_cross_mounts(p, quarry, &crossed, crossed_pheno) < 0) goto fail;
+        if (stalk_cross_mounts(p, quarry, &crossed, crossed_pheno) < 0) {
+            if (union_pt) spoor_clunk(union_pt);
+            goto fail;
+        }
         if (crossed) {
             spoor_clunk(quarry);
             quarry = crossed;
             carried_valid = false;   // the record described the mount point
+            if (union_pt) { quarry->union_base = union_pt; union_pt = NULL; }
         }
+        if (union_pt) spoor_clunk(union_pt);   // union w/o a cross (defensive)
     }
 
     // #82: a trailing '/' asserts the path names a DIRECTORY. Gate the QUARRY,

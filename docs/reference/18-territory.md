@@ -315,6 +315,20 @@ Sufficient for v1.0's test scenarios + the eventual ramfs / proc / dev / ctl mou
 
 MREPL, MBEFORE and MAFTER all carry distinguished semantics. `mount()` places a member in `mounts[]` array order per its flag (MBEFORE prepends to the point's group, MAFTER/default appends, MREPL replaces the group); `unmount()` shift-downs to preserve order; the new `mount_member_at(territory, probe, index, flags_out)` is the ordered iterator. The resolver (`kernel/stalk.c::stalk_union_child`, reached when the tip is a >=2-member union point) searches the members in order and returns the first that resolves the component -- with per-member X-search + directory-type skip (Plan 9 union skip semantics). `stalk_cross_from(probe, member_idx, ...)` generalizes `stalk_cross_mounts` (the latter is `member_idx == 0`). Modelled by `specs/territory.tla` (`WalkFirstHit` / `OrderCorrect`, TLC-green + buggy-cfg counterexamples). MCREATE is stored + modelled (`CreateTargetCorrect`); its create-side honoring is a follow-on UM sub-chunk. **Documented limitation**: a union at the resolution ROOT itself (the walk BASE being a union mount point) is searched via member 0 only -- the union detection is at the descent cross (depth > 0); every sub-root union (`/bin`, ...) is covered.
 
+### Union readdir: merge + dedup first-member-wins (UM-5, AS-BUILT)
+
+`readdir` of a union directory presents every member's entries as ONE stream, **deduplicated by name, first-member-wins** -- consistent with the walk's first-hit (a name you can `open` in the union appears exactly once, backed by the member the walk would pick). Modelled by `specs/territory.tla::ReaddirDedupFirstWins`.
+
+The mechanism (`kernel/syscall.c::union_readdir_run`, reached from `spoor_readdir_run` when the open Spoor carries `union_base`):
+
+- **Tagging**: a `STALK_OPEN` of a `>= 2`-member mount point records the mount-POINT Spoor on the opened fd's `Spoor.union_base` (ref-held, freed at `spoor_free_internal`). The fd's OWN identity stays member[0] (the final cross), so `fstat`/type/every non-readdir op sees member[0]; only `spoor_readdir_run` consults `union_base`. It is set only for a real union (`mount_member_at(_, 1) != NULL`), never for a plain directory or a single-member mount, and NEVER inherited by `spoor_clone` (a clone is a walk position, not a union open).
+- **The merged stream** is 9P2000.L dirents whose 8-byte offset field is a **1-based ORDINAL** into the merged-dedup sequence -- so the caller's cursor-parse, the #955 non-advancing-cursor bound, and BOTH copy-out paths (native `SYS_READDIR` + the phenotype `getdents64` re-encode) treat it byte-identically to a single-Dev batch and resume correctly off the ordinal.
+- **Cursor / F3**: the sequence is deterministic (member declared order, then each member's stable readdir order, then deterministic relookup dedup), so the run re-drives from the start each call, SKIPS the first `in_ordinal` kept entries, and emits the next batch. The cursor advances only when a handler commits the last EMITTED ordinal AFTER its copy-out, so a partial fit or a faulted copy re-fetches, never skips.
+- **Dedup** is a raw `Dev.walk` existence probe into earlier members (`stalk_union_has_child`: no perm check, no symlink follow -- name presence only). No persistent seen-set: `union_base` is IMMUTABLE after the open, so a fork/dup-SHARED union fd needs no lock.
+- **Skip semantics** (Plan 9): a member that fails to cross (a hole), is not a directory, or lacks a `.readdir` slot is skipped, never a hard failure of the whole listing.
+
+**Cost**: O(dir) per page (each member read once per page; unions are small). Cross-page snapshot-inconsistency under concurrent modification is the standard POSIX readdir posture. `union_readdir_run` is non-static (like `viv_dirent64_encode_run`) so the merge/dedup/ordinal-pagination is unit-tested directly (`kernel/test/test_stalk.c::test_stalk_union_readdir{,_paginate,_nontagged}`).
+
 ### `unmount` removes ONE entry per call
 
 Plan 9's `unmount(name, old)` can remove a specific entry; `unmount(name)` removes everything at name. Thylacine's kernel-internal `unmount(territory, target_path)` removes ONE entry (the first found). To unmount a union, call repeatedly until -1.
@@ -364,7 +378,9 @@ ARCH §9.6 specifies `mount(source_spoor_fd, target_path, flags)` as a user-visi
 | Per-Territory `ns_lock` (mounts/binds/root_spoor) | **Done (RW-4 SA-F1)** |
 | RFNAMEG cross-Proc shared territory | Phase 5+ |
 | RFNAMEG shared territory | Phase 5+ |
-| Mount-union walk (MBEFORE/MAFTER ordering at walk time) | Phase 5+ |
+| Mount-union walk (MBEFORE/MAFTER ordering at walk time) | **Landed (UM arc)** -- `stalk_union_child` + `mount_member_at`; `territory.tla::WalkFirstHit`/`OrderCorrect` |
+| Mount-union readdir (merge + dedup first-member-wins) | **Landed (UM-5)** -- `union_readdir_run` + `Spoor.union_base`; `territory.tla::ReaddirDedupFirstWins` |
+| Mount-union create (MCREATE target member) | UM-5a (modelled: `territory.tla::CreateTargetCorrect`) |
 | `pivot_root` / `unchroot` (replace one-way chroot) | v1.x per CORVUS-DESIGN §10.1 Q2 |
 | RB tree key=qid (replacing flat arrays) | Phase 5+ when count growth justifies |
 | Multi-component walker consuming mount table | Phase 5+ alongside path resolution |

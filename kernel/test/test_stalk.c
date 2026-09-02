@@ -80,6 +80,9 @@ void test_stalk_cross_mount_no_leak(void);
 void test_stalk_union_walk(void);
 void test_stalk_union_order(void);
 void test_stalk_union_xskip(void);
+void test_stalk_union_readdir(void);            // UM-5: merge + dedup first-wins
+void test_stalk_union_readdir_paginate(void);   // UM-5: ordinal-cursor resume
+void test_stalk_union_readdir_nontagged(void);  // UM-5: control (not over-tagged)
 void test_stalk_pheno_symlink_reanchor(void);   // VIVARIUM section 13 (F1)
 // #66: namespace-name accumulation through the real resolver.
 void test_stalk_path_accumulate(void);
@@ -491,6 +494,41 @@ static struct Spoor *fix_open_cached(struct Spoor *c, const char *const *names,
     return co;
 }
 
+// UM: enumerate `c`'s children as 9P2000.L dirents for the union readdir merge
+// tests. Children = fixnodes whose parent == c->qid.path (self-parent root
+// excluded). Cookie = a 1-based ordinal in array order (monotonic, like
+// devramfs), so union_readdir_run's per-member cursor advances correctly.
+static long fix_readdir(struct Spoor *c, void *buf, long n, s64 off) {
+    if (!c || !buf) return -1;
+    u8 *out = (u8 *)buf;
+    long len = 0;
+    u64  ord = 0;
+    int  nfix = (int)(sizeof(g_fix) / sizeof(g_fix[0]));
+    for (int i = 0; i < nfix; i++) {
+        if (g_fix[i].parent != c->qid.path) continue;
+        if (g_fix[i].path   == c->qid.path) continue;   // exclude a self-parent root
+        ord++;
+        if ((s64)ord <= off) continue;                  // resume: already delivered
+        const char *nm = g_fix[i].name;
+        u32 nlen = 0; while (nm && nm[nlen]) nlen++;
+        long entry = 24 + (long)nlen;
+        if (len + entry > n) break;                     // batch full
+        u8 *e = out + len;
+        for (long b = 0; b < entry; b++) e[b] = 0;
+        e[0] = (g_fix[i].type & QTDIR) ? QTDIR : 0;                 // qid.type
+        for (int b = 0; b < 8; b++)                                 // qid.path @5..12
+            e[5 + b] = (u8)((u64)g_fix[i].path >> (8 * b));
+        for (int b = 0; b < 8; b++)                                 // offset cookie @13..20
+            e[13 + b] = (u8)(ord >> (8 * b));
+        e[21] = (g_fix[i].type & QTDIR) ? 4 : 8;                    // d_type (cosmetic)
+        e[22] = (u8)(nlen & 0xff);
+        e[23] = (u8)((nlen >> 8) & 0xff);
+        for (u32 b = 0; b < nlen; b++) e[24 + b] = (u8)nm[b];
+        len += entry;
+    }
+    return len;
+}
+
 // The fixture Dev. dc is a test-only sentinel; it is NOT dev_register'd, so the
 // dc never collides with a real Dev (stalk reaches it only through the Spoors we
 // hand it directly).
@@ -507,6 +545,7 @@ static struct Dev stalkfix = {
     .close         = fix_close,
     .readlink      = fix_readlink,   // D-1: the expansion RPC
     .create        = fix_create,     // #50: the SYS_OPEN_CREATE battery
+    .readdir       = fix_readdir,    // UM: the union readdir merge tests
 };
 
 // The A/B twin: the SAME tree with NO walk_attrs slot -- resolves through the
@@ -1737,6 +1776,189 @@ void test_stalk_union_xskip(void) {
     spoor_clunk(uma);
     spoor_clunk(umb);
     spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// =============================================================================
+// UM (union mounts) -- union READDIR merge/dedup/pagination (UM-5).
+//
+// The merge logic lives in kernel/syscall.c (union_readdir_run, non-static like
+// viv_dirent64_encode_run so the byte-level behavior is unit-testable). These
+// tests build a real union over the fixture (fix_readdir emits each member's
+// children as 9P2000.L dirents), open it through the real resolver (which tags
+// union_base), and assert the merged stream: dedup first-member-wins, member
+// declared order, 1-based ordinal cookies, and correct paginated resume.
+// =============================================================================
+
+extern s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
+                             u64 in_ordinal);
+
+// Parse the idx-th 9P2000.L dirent in buf[0..len). Returns its byte span (> 0)
+// or 0 if idx is past the last complete entry. Fills qid_path / cookie / name.
+static long urd_entry(const u8 *buf, long len, int idx,
+                      u64 *qid_path, u64 *cookie, char *name, u32 namecap) {
+    long pos = 0;
+    for (int i = 0; ; i++) {
+        if (pos + 24 > len) return 0;
+        u32  nlen  = (u32)buf[pos + 22] | ((u32)buf[pos + 23] << 8);
+        long entry = 24 + (long)nlen;
+        if (pos + entry > len) return 0;
+        if (i == idx) {
+            u64 q = 0, ck = 0;
+            for (int b = 0; b < 8; b++) q  |= (u64)buf[pos + 5  + b] << (8 * b);
+            for (int b = 0; b < 8; b++) ck |= (u64)buf[pos + 13 + b] << (8 * b);
+            if (qid_path) *qid_path = q;
+            if (cookie)   *cookie   = ck;
+            if (name) {
+                u32 c = 0;
+                for (; c < nlen && c + 1 < namecap; c++) name[c] = (char)buf[pos + 24 + c];
+                name[c] = '\0';
+            }
+            return entry;
+        }
+        pos += entry;
+    }
+}
+
+static bool urd_name_eq(const char *a, const char *b) {
+    while (*a && *b) { if (*a != *b) return false; a++; b++; }
+    return *a == *b;
+}
+
+void test_stalk_union_readdir(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER umpt");
+
+    // Open the union directory: the resolver tags union_base and the fd's own
+    // identity is member[0] (um1 root, qid 22).
+    struct Spoor *q = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "open union dir umpt");
+    TEST_ASSERT(q->union_base != NULL, "STALK_OPEN of a union tags union_base");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22, "opened union identity = member[0] (qid 22)");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    u8  buf[512];
+    s64 got = union_readdir_run(&p, q, buf, (long)sizeof(buf), 0);
+    TEST_ASSERT(got > 0, "union readdir returns a run");
+
+    // Merged-dedup sequence [shared(um1,qid23), only1(qid24), only2(um2,qid27)];
+    // um2's "shared"(qid26) is DROPPED (first-member-wins). Ordinals 1,2,3.
+    u64 qp = 0, ck = 0; char nm[64];
+    TEST_ASSERT(urd_entry(buf, (long)got, 0, &qp, &ck, nm, sizeof(nm)) > 0, "entry 0");
+    TEST_ASSERT(urd_name_eq(nm, "shared"), "entry 0 name = shared");
+    TEST_EXPECT_EQ(qp, (u64)23, "shared dedup first-wins -> um1's qid 23");
+    TEST_EXPECT_EQ(ck, (u64)1,  "entry 0 ordinal cookie = 1");
+
+    TEST_ASSERT(urd_entry(buf, (long)got, 1, &qp, &ck, nm, sizeof(nm)) > 0, "entry 1");
+    TEST_ASSERT(urd_name_eq(nm, "only1"), "entry 1 name = only1");
+    TEST_EXPECT_EQ(qp, (u64)24, "only1 -> qid 24");
+    TEST_EXPECT_EQ(ck, (u64)2,  "entry 1 ordinal = 2");
+
+    TEST_ASSERT(urd_entry(buf, (long)got, 2, &qp, &ck, nm, sizeof(nm)) > 0, "entry 2");
+    TEST_ASSERT(urd_name_eq(nm, "only2"), "entry 2 name = only2 (um2 fallthrough)");
+    TEST_EXPECT_EQ(qp, (u64)27, "only2 -> qid 27");
+    TEST_EXPECT_EQ(ck, (u64)3,  "entry 2 ordinal = 3");
+
+    // Exactly three (um2's shared deduped away): a 4th entry is absent.
+    TEST_EXPECT_EQ(urd_entry(buf, (long)got, 3, &qp, &ck, nm, sizeof(nm)), (long)0,
+                   "exactly 3 merged entries");
+
+    // Resume past the last ordinal -> end-of-directory.
+    TEST_EXPECT_EQ((long)union_readdir_run(&p, q, buf, (long)sizeof(buf), 3), (long)0,
+                   "resume past last ordinal -> EOD");
+
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across union readdir");
+
+    spoor_clunk(q);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// Paginated resume: a `want` that holds only part of the merged stream splits
+// it across calls; the ordinal carries the cursor with no gap and no dup.
+void test_stalk_union_readdir_paginate(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
+
+    struct Spoor *q = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL && q->union_base != NULL, "open + tag union");
+
+    // shared=24+6=30, only1=24+5=29, only2=24+5=29. want=60 holds page 1
+    // (shared+only1 = 59), not only2 (would be 88).
+    u8  buf[512];
+    u64 qp = 0, ck = 0; char nm[64];
+
+    s64 g0 = union_readdir_run(&p, q, buf, 60, 0);
+    TEST_ASSERT(g0 > 0, "page 1 returns");
+    TEST_ASSERT(urd_entry(buf, (long)g0, 0, &qp, &ck, nm, sizeof(nm)) > 0 &&
+                urd_name_eq(nm, "shared"), "page1 e0 = shared");
+    TEST_ASSERT(urd_entry(buf, (long)g0, 1, &qp, &ck, nm, sizeof(nm)) > 0 &&
+                urd_name_eq(nm, "only1"), "page1 e1 = only1");
+    TEST_EXPECT_EQ(ck, (u64)2, "page1 last ordinal = 2");
+    TEST_EXPECT_EQ(urd_entry(buf, (long)g0, 2, &qp, &ck, nm, sizeof(nm)), (long)0,
+                   "page1 holds exactly 2");
+
+    // Page 2 resumes at ordinal 2 -> only2 (ordinal 3), then EOD.
+    s64 g1 = union_readdir_run(&p, q, buf, 60, 2);
+    TEST_ASSERT(g1 > 0, "page 2 returns");
+    TEST_ASSERT(urd_entry(buf, (long)g1, 0, &qp, &ck, nm, sizeof(nm)) > 0 &&
+                urd_name_eq(nm, "only2"), "page2 e0 = only2 (no gap, no dup)");
+    TEST_EXPECT_EQ(ck, (u64)3, "page2 ordinal = 3");
+    TEST_EXPECT_EQ(urd_entry(buf, (long)g1, 1, &qp, &ck, nm, sizeof(nm)), (long)0,
+                   "page2 holds exactly 1");
+    TEST_EXPECT_EQ((long)union_readdir_run(&p, q, buf, 60, 3), (long)0, "page 3 EOD");
+
+    spoor_clunk(q);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// Control: a plain directory open and a SINGLE-member mount are NOT unions, so
+// union_base stays NULL -- readdir takes the ordinary single-Dev path. Proves
+// the tag is set only for a >= 2-member mount (no over-tagging regression).
+void test_stalk_union_readdir_nontagged(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    // (a) plain directory (um1 is not a mount point).
+    struct Spoor *q1 = stalk(&p, root, "um1", 3, STALK_OPEN, 0);
+    TEST_ASSERT(q1 != NULL, "open plain dir um1");
+    TEST_ASSERT(q1->union_base == NULL, "plain dir open is not tagged");
+    spoor_clunk(q1);
+
+    // (b) single-member mount (one graft on umpt) is not a union.
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um2 && pt, "resolve um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MBEFORE), 0, "single mount um2 -> umpt");
+    struct Spoor *q2 = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(q2 != NULL, "open single-mount umpt");
+    TEST_ASSERT(q2->union_base == NULL, "single-member mount is not a union");
+    spoor_clunk(q2);
+
+    territory_unref(p.territory);
+    spoor_clunk(um2); spoor_clunk(pt);
     spoor_unref(root);
 }
 

@@ -3996,6 +3996,127 @@ static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
 // in c->offset for the next call (mirrors Linux v9fs).
 // =============================================================================
 
+// union_readdir_run (UM) -- readdir of a UNION directory (c->union_base set):
+// merge every grafted member's entries into a single stream, DEDUPED by name
+// first-member-wins (matching the walk's first-hit; specs/territory.tla
+// ReaddirDedupFirstWins). The output is well-formed 9P2000.L dirents whose
+// 8-byte offset field is a 1-based ORDINAL into the merged-dedup sequence, so
+// the caller's cursor-parse + #955 bound + both copy-out paths treat it
+// identically to a single-Dev batch.
+//
+// CURSOR (load-bearing): `in_ordinal` is c->offset -- the count of merged
+// entries already delivered. The sequence is DETERMINISTIC (member declared
+// order, then each member's stable readdir order, then deterministic relookup
+// dedup), so the run re-drives from the start each call, SKIPS the first
+// `in_ordinal` kept entries, and emits the next batch (each with cookie
+// idx+1). This composes with the F3 property: the cursor advances only when a
+// handler commits the last EMITTED entry's ordinal AFTER its copy-out, so a
+// partial fit / faulted copy re-fetches, never skips. O(dir) per page; unions
+// are small. Cross-page snapshot-inconsistency under concurrent modification is
+// the standard POSIX readdir posture.
+//
+// A member that fails to cross (a HOLE), is not a directory, or lacks a
+// .readdir slot is SKIPPED (Plan 9 union skip semantics), never a hard failure
+// of the whole listing. `out` is filled with whole dirents up to `want`; the
+// return is the byte count (> 0), 0 at end-of-directory, or -T_E_NOMEM/-T_E_IO.
+enum { UNION_RD_TMP = 2048 };   // per-member read batch (kmalloc, off-stack)
+
+// `p` is the resolving Proc (its Territory holds the union's mount table);
+// spoor_readdir_run passes current_thread()->proc. Non-static so the merge /
+// dedup / ordinal-pagination logic is unit-testable with a Proc + a mounted
+// union of readdir-capable Devs (kernel/test/test_stalk.c).
+s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
+                      u64 in_ordinal) {
+    if (!p || !c->union_base)                        return -T_E_IO;
+    struct Spoor *base = c->union_base;
+
+    // Snapshot every member once (crossed, ref-held). A cross-error member is a
+    // NULL HOLE -- skipped below, never a premature stop of the enumeration.
+    struct Spoor *members[PGRP_MAX_MOUNTS];
+    int nmembers = 0;
+    for (int k = 0; k < PGRP_MAX_MOUNTS; k++) {
+        struct Spoor *m = NULL;
+        int mr = stalk_union_member(p, base, k, &m);
+        if (mr == 0 && !m)                           break;   // past the last member
+        members[k] = m;                                       // m, or NULL on a hole
+        nmembers = k + 1;
+    }
+
+    u8 *tmp = kmalloc(UNION_RD_TMP, 0);
+    if (!tmp) {
+        for (int k = 0; k < nmembers; k++) if (members[k]) spoor_clunk(members[k]);
+        return -T_E_NOMEM;
+    }
+
+    u64  idx    = 0;      // 0-based index into the merged-dedup sequence
+    long outlen = 0;      // bytes written to `out`
+    bool full   = false;
+
+    for (int k = 0; k < nmembers && !full; k++) {
+        struct Spoor *m = members[k];
+        if (!m)                               continue;   // cross-error hole
+        if (!(m->qid.type & QTDIR))           continue;   // non-directory member
+        if (!m->dev || !m->dev->readdir)      continue;   // no readdir slot
+
+        s64 moff = 0;
+        for (;;) {
+            long got = m->dev->readdir(m, tmp, UNION_RD_TMP, moff);
+            if (got <= 0)                     break;       // member EOD / error
+            long pos = 0;
+            bool advanced = false;
+            while (pos + 24 <= got && !full) {
+                u64 cookie = 0;
+                for (int i = 0; i < 8; i++)
+                    cookie |= (u64)tmp[pos + 13 + i] << (8 * i);
+                u32  nlen  = (u32)tmp[pos + 22] | ((u32)tmp[pos + 23] << 8);
+                long entry = 24 + (long)nlen;
+                if (pos + entry > got)         break;       // truncated trailing entry
+                const char *nm = (const char *)&tmp[pos + 24];
+
+                // DEDUP first-member-wins: drop a member[k>0] entry whose name an
+                // earlier member already provides. Relookup (no seen-set state):
+                // deterministic, so re-drive resumes at the same idx.
+                bool dup = false;
+                for (int j = 0; j < k && !dup; j++) {
+                    struct Spoor *mj = members[j];
+                    if (mj && (mj->qid.type & QTDIR))
+                        dup = stalk_union_has_child(p, mj, nm, nlen);
+                }
+
+                if (!dup) {
+                    if (idx >= in_ordinal) {
+                        if (outlen + entry > want) {
+                            full = true;                    // re-fetched next call
+                        } else {
+                            for (long b = 0; b < entry; b++)
+                                out[outlen + b] = tmp[pos + b];
+                            u64 ord = idx + 1;              // 1-based ordinal cookie
+                            for (int i = 0; i < 8; i++)
+                                out[outlen + 13 + i] = (u8)(ord >> (8 * i));
+                            outlen += entry;
+                        }
+                    }
+                    idx++;
+                }
+                moff = (s64)cookie;      // advance THIS member's own cursor
+                advanced = true;
+                pos += entry;
+            }
+            if (full || !advanced)            break;
+        }
+    }
+
+    kfree(tmp);
+    for (int k = 0; k < nmembers; k++) if (members[k]) spoor_clunk(members[k]);
+    // `full` with nothing emitted means the FIRST eligible entry did not fit in
+    // `want` -- report EINVAL ("buffer can't hold one record", the getdents64
+    // stance) rather than 0, which a paginating reader would read as EOD and
+    // silently truncate the listing. Unreachable at want >= 2048 (a dirent is
+    // <= 24 + 255); the guard bounds a pathological tiny buffer.
+    if (full && outlen == 0)                         return -T_E_INVAL;
+    return (s64)outlen;   // 0 => nothing at/after in_ordinal => end-of-directory
+}
+
 // The readdir RUN, extracted from the handler so the phenotype getdents64
 // shell runs the SAME dev-op, malformed-stream guard and #955
 // non-advancing-cursor bound as the native SYS_READDIR -- extraction, not
@@ -4014,12 +4135,25 @@ static s64 spoor_readdir_run(struct Spoor *c, u8 *scratch, long want,
                              u64 *last_cookie_out) {
     // #81: a T_OPATH navigation handle is NOT a byte-I/O channel -- reject
     // readdir too (listing a dir's entries is content the perm_check-exempt
-    // O_PATH open would otherwise leak for a non-readable dir).
+    // O_PATH open would otherwise leak for a non-readable dir). (An O_PATH open
+    // resolves STALK_WALK, which never sets union_base, so this reject precedes
+    // the union branch by construction.)
     if (c->flag & CWALKONLY)                        return -T_E_BADF;
-    if (!c->dev || !c->dev->readdir)                return -T_E_OPNOTSUPP;
 
     u64 in_cookie = (u64)c->offset;   // the opaque resume cookie we resume FROM
-    long got = c->dev->readdir(c, scratch, want, c->offset);
+    long got;
+    if (c->union_base) {
+        // UM: union directory -- merge every member's entries (dedup first-
+        // wins), presented as 9P2000.L dirents with 1-based ordinal cookies.
+        // The parse + #955 bound + copy-out below are byte-identical to a
+        // single-Dev batch, so native SYS_READDIR and the getdents64 shell both
+        // resume correctly off the ordinal.
+        struct Thread *rt = current_thread();
+        got = union_readdir_run(rt ? rt->proc : NULL, c, scratch, want, in_cookie);
+    } else {
+        if (!c->dev || !c->dev->readdir)            return -T_E_OPNOTSUPP;
+        got = c->dev->readdir(c, scratch, want, c->offset);
+    }
     if (got < 0)                                    return (s64)got;
     if (got == 0)                                   return 0;      // EOD
 
