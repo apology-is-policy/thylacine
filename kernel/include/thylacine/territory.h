@@ -486,6 +486,18 @@ struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe,
 struct Spoor *mount_member_at(struct Territory *territory, struct Spoor *probe,
                               int index, u32 *flags_out);
 
+// mount_members_snapshot (UM, union mounts): the ATOMIC whole-union snapshot.
+// Refs EVERY member of the union at `probe` in ONE ns_lock hold, in declared
+// search order (at most `max`), recording each member's flags in flags_out[]
+// (if non-NULL). Returns the count (0 = not a mount point). THE CALLER MUST
+// spoor_clunk every returned Spoor. Preferred over a loop of mount_member_at
+// for any op touching the WHOLE union (the union-open member snapshot; the
+// resolver's union walk): mount_member_at takes the lock once per index, so a
+// concurrent unmount shifts the member set between calls (UM-7 F4); one hold
+// gives a consistent set.
+int mount_members_snapshot(struct Territory *territory, struct Spoor *probe,
+                           struct Spoor **out, u32 *flags_out, int max);
+
 // mount_is_point_id: MEMBERSHIP-only mount-point test by raw (dc, devno,
 // qid_path) identity — no Spoor needed, no ref minted. The stalk POUNCE
 // post-scan uses it on batch-walked components that were never materialized as

@@ -174,18 +174,6 @@ int stalk_stat(struct Proc *p, struct Spoor *start,
 int stalk_cross_mounts(struct Proc *p, struct Spoor *probe, struct Spoor **out,
                        bool *crossed_pheno);
 
-// stalk_union_member (UM, union mounts) -- fetch the `k`-th grafted member of
-// the union whose mount POINT is `base`, CROSSED to its leaf root (mount-over-
-// mount followed), ref-held. This is stalk_cross_from(k) exposed for the union
-// readdir merge (spoor_readdir_run). `base` is NOT consumed.
-//   *out == NULL, return 0 : `k` is past the last member -> stop enumerating.
-//   *out != NULL, return 0 : got member `k`, crossed; *out is OWNED (clunk it).
-//   return -1              : member `k` exists but crossing it failed; *out ==
-//                            NULL -> the caller SKIPS this member (Plan 9 union
-//                            skip-on-error) and continues at k+1.
-int stalk_union_member(struct Proc *p, struct Spoor *base, int k,
-                       struct Spoor **out);
-
 // stalk_union_has_child (UM) -- does the directory `dir` (a crossed member root)
 // contain an entry named `name` (length `namelen`, NOT NUL-terminated)? A raw
 // Dev.walk existence probe: NO permission check and NO symlink expansion (dedup

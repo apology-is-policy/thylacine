@@ -62,7 +62,7 @@ static struct Spoor *spoor_alloc_internal(struct Dev *d) {
     c->mode   = 0;
     c->offset = 0;
     c->aux    = NULL;
-    c->union_base = NULL;    // UM: set only by a STALK_OPEN of a union point.
+    c->union_snap = NULL;    // UM: set only by a STALK_OPEN of a union point.
     // qid is left zeroed (KP_ZERO already cleared it); the dev's
     // attach/walk hooks populate it as appropriate.
 
@@ -72,6 +72,19 @@ static struct Spoor *spoor_alloc_internal(struct Dev *d) {
 
 struct Spoor *spoor_alloc(struct Dev *d) {
     return spoor_alloc_internal(d);
+}
+
+// UM (union mounts): clunk every opened member of a union fd's snapshot + kfree
+// the array. NULL-safe. Each m[i] is a distinct opened member Spoor (never this
+// fd itself -- the fd is member[0]'s cross, held separately), so this is not a
+// self-clunk. spoor_clunk is declared in spoor.h; a member clunk's Dev close
+// hook may sleep, so callers must not hold a spinlock (spoor_free_internal and
+// the STALK_OPEN union cleanup both satisfy this).
+void union_snap_free(struct union_snap *snap) {
+    if (!snap) return;
+    for (int i = 0; i < snap->n; i++)
+        if (snap->m[i]) spoor_clunk(snap->m[i]);
+    kfree(snap);
 }
 
 static void spoor_free_internal(struct Spoor *c) {
@@ -89,13 +102,14 @@ static void spoor_free_internal(struct Spoor *c) {
     path_unref(c->path);
     c->path = NULL;
 
-    // UM: drop the union mount-point ref a STALK_OPEN of a union directory
-    // attached here. The mount-point Spoor is a DISTINCT object from this one
-    // (this Spoor is member[0], the final cross), so this is not a self-clunk.
-    if (c->union_base) {
-        spoor_clunk(c->union_base);
-        c->union_base = NULL;
-    }
+    // UM: free the union member snapshot a STALK_OPEN of a union directory
+    // attached here (Chan.umh). Each entry is a DISTINCT opened member Spoor
+    // (this Spoor is member[0]'s cross; the snapshot holds every member OREAD),
+    // so clunking them is not a self-clunk; the array itself is kfree'd. A member
+    // clunk's Dev close hook may sleep -- spoor_free_internal is never called
+    // under a spinlock (spoor_clunk is the release seam), so this is safe here.
+    union_snap_free(c->union_snap);
+    c->union_snap = NULL;
 
     // Clobber magic explicitly so a stale-pointer dereference between
     // free and SLUB-list-write extincts on the magic check rather than
@@ -172,10 +186,10 @@ struct Spoor *spoor_clone(struct Spoor *c) {
     //   - aux: shallow-copied. Devs whose aux owns refcounted state
     //     MUST take their own ref in dev->walk before populating the
     //     new Spoor's aux; spoor_clone does not interpret aux.
-    //   - union_base (UM): deliberately NOT inherited -- spoor_alloc_internal
+    //   - union_snap (UM): deliberately NOT inherited -- spoor_alloc_internal
     //     left it NULL. A clone is a walk position (an intermediate cross, a
     //     dirfd re-clone), never a union open; only the STALK_OPEN final cross
-    //     attaches it. Inheriting it would double-free the mount-point ref and
+    //     attaches it. Inheriting it would double-free the opened members and
     //     misroute readdir of a plain child through the parent's union.
     nc->qid    = c->qid;
     nc->flag   = c->flag & ~CWALKONLY;   // #81: never inherit the nav-only marker

@@ -136,6 +136,28 @@ _Static_assert(sizeof(struct Qid) == 16,
 // and extinct cleanly.
 #define SPOOR_MAGIC 0x53504F4F52BAD2EAULL    // 'SPOOR\0' || 0xBA 0xD2 0xEA
 
+// UM (union mounts): the opened-member snapshot retained on a union-directory
+// fd -- Plan 9's Chan.umh/umc. Built ONCE at STALK_OPEN of a union mount point
+// (>= 2 grafted members): every member is crossed to its leaf root, R-gated
+// (PERM_R; a denied member is SKIPPED, Plan 9 union semantics), and OPENED
+// (OREAD). The open is load-bearing, not incidental: a backend that gates
+// readdir on an opened fid (dev9p -> Stratum h_readdir's is_open check) EINVALs
+// a Treaddir on a clone-walked-but-unopened member, so an un-opened member is
+// silently dropped from the listing (UM-7 F1, the P0). `n` may be 0 (every
+// member denied/failed -> the union reads as empty). Immutable after the open;
+// each member clunked + the struct kfree'd with its Spoor. m[] is a snapshot
+// of the members that existed at open time (F4: taken atomically under one
+// ns_lock; F7: immune to later namespace edits) in declared search order.
+struct union_snap {
+    int           n;
+    struct Spoor *m[];         // opened OREAD member dirs, declared order
+};
+
+// union_snap_free -- clunk every opened member + kfree the array. NULL-safe.
+// Used by spoor_free_internal (a union fd's teardown) and by the STALK_OPEN
+// union path's error / no-cross cleanup.
+void union_snap_free(struct union_snap *snap);
+
 struct Spoor {
     u64           magic;       // SPOOR_MAGIC; clobbered by SLUB on free
     int           dc;          // matches dev->dc; cached for cheap dispatch
@@ -172,23 +194,26 @@ struct Spoor {
                                // Spoor's; the field needs no lock (like qid/dev)
                                // -- only path->ref is concurrent (atomic).
 
-    struct Spoor *union_base;  // UM (union mounts): NON-NULL iff this Spoor was
-                               // opened (STALK_OPEN) on a UNION mount point
-                               // (>= 2 grafted members). Holds a ref to the
-                               // mount-POINT Spoor (pre-cross identity); the
-                               // opened Spoor's OWN identity is member[0] (the
-                               // final cross), so fstat/type/every non-readdir
-                               // op sees member[0] -- ONLY spoor_readdir_run
-                               // consults union_base, to merge every member's
-                               // entries (dedup first-member-wins, matching the
-                               // walk's first-hit; specs/territory.tla
-                               // ReaddirDedupFirstWins). IMMUTABLE after the
-                               // open sets it (readdir re-fetches members via
-                               // mount_member_at each call and never mutates it,
-                               // so a fork/dup-SHARED union fd needs no lock),
-                               // and NEVER inherited by spoor_clone (a clone is
-                               // a walk position, not a union open). Freed
-                               // (spoor_clunk) at spoor_free_internal.
+    struct union_snap *union_snap;  // UM (union mounts): NON-NULL iff this Spoor
+                               // was opened (STALK_OPEN) on a UNION mount point
+                               // (>= 2 grafted members). Holds the member
+                               // directories OPENED (OREAD) + R-gated + ref-held
+                               // AT OPEN TIME, in declared order (Plan 9's
+                               // Chan.umh/umc). ONLY spoor_readdir_run consults
+                               // it, to merge every member's entries (dedup
+                               // first-member-wins; specs/territory.tla
+                               // ReaddirDedupFirstWins). The opened Spoor's OWN
+                               // identity is member[0] (the final cross), so
+                               // fstat/type/every non-readdir op sees member[0].
+                               // Captured ONCE at open (UM-8 F1/F2/F7: dev9p
+                               // readdir needs an OPENED fid -- a clone-walked
+                               // member EINVALs Stratum's is_open gate; the
+                               // per-member R-gate; a stable snapshot immune to
+                               // later namespace edits), so a fork/dup-SHARED
+                               // union fd needs no lock. NEVER inherited by
+                               // spoor_clone (a clone is a walk position, not a
+                               // union open). Freed (clunk each member + kfree)
+                               // at spoor_free_internal.
 };
 
 _Static_assert(__builtin_offsetof(struct Spoor, magic) == 0,

@@ -1042,6 +1042,37 @@ struct Spoor *mount_member_at(struct Territory *territory, struct Spoor *probe,
     return src;
 }
 
+// mount_members_snapshot (UM, union mounts): capture EVERY member of the union
+// at `probe` in ONE ns_lock hold -- each source ref-held, its flags recorded,
+// in declared search order. Returns the count (0 if `probe` is not a mount
+// point); writes at most `max` entries. THE CALLER MUST spoor_clunk every
+// returned Spoor. This is the atomic form of iterating mount_member_at(0),(1),
+// ...: those take the lock once PER index, so a concurrent unmount can shift
+// the member set between calls (UM-7 F4 -- an index-based re-derivation then
+// crosses a DIFFERENT member than it inspected). A single-hold snapshot closes
+// that window for any operation over the WHOLE union (the readdir member
+// snapshot at open; the resolver's union walk).
+int mount_members_snapshot(struct Territory *territory, struct Spoor *probe,
+                           struct Spoor **out, u32 *flags_out, int max) {
+    if (!territory)                    return 0;
+    if (territory->magic != PGRP_MAGIC) extinction("mount_members_snapshot on corrupted Territory");
+    if (!probe || !out || max <= 0)    return 0;
+    if (probe->magic != SPOOR_MAGIC)   extinction("mount_members_snapshot probe corrupted Spoor");
+
+    int n = 0;
+    spin_lock(&territory->ns_lock);
+    for (int i = 0; i < territory->nmounts && n < max; i++) {
+        if (mount_key_eq(&territory->mounts[i], probe)) {
+            out[n] = territory->mounts[i].source;
+            spoor_ref(out[n]);               // transfer a ref to the caller (atomic vs unmount)
+            if (flags_out) flags_out[n] = territory->mounts[i].flags;
+            n++;
+        }
+    }
+    spin_unlock(&territory->ns_lock);
+    return n;
+}
+
 bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
                        u64 qid_path) {
     if (!territory)                    return false;

@@ -3999,7 +3999,7 @@ static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
 // in c->offset for the next call (mirrors Linux v9fs).
 // =============================================================================
 
-// union_readdir_run (UM) -- readdir of a UNION directory (c->union_base set):
+// union_readdir_run (UM) -- readdir of a UNION directory (c->union_snap set):
 // merge every grafted member's entries into a single stream, DEDUPED by name
 // first-member-wins (matching the walk's first-hit; specs/territory.tla
 // ReaddirDedupFirstWins). The output is well-formed 9P2000.L dirents whose
@@ -4030,26 +4030,19 @@ enum { UNION_RD_TMP = 2048 };   // per-member read batch (kmalloc, off-stack)
 // union of readdir-capable Devs (kernel/test/test_stalk.c).
 s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
                       u64 in_ordinal) {
-    if (!p || !c->union_base)                        return -T_E_IO;
-    struct Spoor *base = c->union_base;
-
-    // Snapshot every member once (crossed, ref-held). A cross-error member is a
-    // NULL HOLE -- skipped below, never a premature stop of the enumeration.
-    struct Spoor *members[PGRP_MAX_MOUNTS];
-    int nmembers = 0;
-    for (int k = 0; k < PGRP_MAX_MOUNTS; k++) {
-        struct Spoor *m = NULL;
-        int mr = stalk_union_member(p, base, k, &m);
-        if (mr == 0 && !m)                           break;   // past the last member
-        members[k] = m;                                       // m, or NULL on a hole
-        nmembers = k + 1;
-    }
+    if (!p || !c->union_snap)                        return -T_E_IO;
+    // The members are the OPENED snapshot captured at STALK_OPEN (UM-8
+    // F1/F4/F7): each is already OREAD -- dev9p readdir issues Treaddir on the
+    // fid, which Stratum's h_readdir accepts only for an opened fid -- the set
+    // is immutable for the fd's life (a stable listing), and every entry is
+    // BORROWED (owned by the fd, freed at spoor_free_internal). So this runs no
+    // re-cross and no per-call ref work, and NEVER clunks a member.
+    struct union_snap  *snap    = c->union_snap;
+    struct Spoor *const *members = snap->m;
+    int                  nmembers = snap->n;
 
     u8 *tmp = kmalloc(UNION_RD_TMP, 0);
-    if (!tmp) {
-        for (int k = 0; k < nmembers; k++) if (members[k]) spoor_clunk(members[k]);
-        return -T_E_NOMEM;
-    }
+    if (!tmp)                                        return -T_E_NOMEM;
 
     u64  idx    = 0;      // 0-based index into the merged-dedup sequence
     long outlen = 0;      // bytes written to `out`
@@ -4057,7 +4050,7 @@ s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
 
     for (int k = 0; k < nmembers && !full; k++) {
         struct Spoor *m = members[k];
-        if (!m)                               continue;   // cross-error hole
+        if (!m)                               continue;   // (snapshot stores no NULLs; defensive)
         if (!(m->qid.type & QTDIR))           continue;   // non-directory member
         if (!m->dev || !m->dev->readdir)      continue;   // no readdir slot
 
@@ -4110,7 +4103,7 @@ s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
     }
 
     kfree(tmp);
-    for (int k = 0; k < nmembers; k++) if (members[k]) spoor_clunk(members[k]);
+    // members[] are the fd-owned opened snapshot (borrowed) -- NOT clunked here.
     // `full` with nothing emitted means the FIRST eligible entry did not fit in
     // `want` -- report EINVAL ("buffer can't hold one record", the getdents64
     // stance) rather than 0, which a paginating reader would read as EOD and
@@ -4139,13 +4132,13 @@ static s64 spoor_readdir_run(struct Spoor *c, u8 *scratch, long want,
     // #81: a T_OPATH navigation handle is NOT a byte-I/O channel -- reject
     // readdir too (listing a dir's entries is content the perm_check-exempt
     // O_PATH open would otherwise leak for a non-readable dir). (An O_PATH open
-    // resolves STALK_WALK, which never sets union_base, so this reject precedes
+    // resolves STALK_WALK, which never sets union_snap, so this reject precedes
     // the union branch by construction.)
     if (c->flag & CWALKONLY)                        return -T_E_BADF;
 
     u64 in_cookie = (u64)c->offset;   // the opaque resume cookie we resume FROM
     long got;
-    if (c->union_base) {
+    if (c->union_snap) {
         // UM: union directory -- merge every member's entries (dedup first-
         // wins), presented as 9P2000.L dirents with 1-based ordinal cookies.
         // The parse + #955 bound + copy-out below are byte-identical to a

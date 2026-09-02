@@ -184,6 +184,36 @@ static struct Spoor *clone_walk_zero(struct Spoor *src) {
 //   return -1              : probe IS a mount point but minting the crossed
 //                            Spoor failed (OOM / walk error); *out == NULL and
 //                            probe is still owned -- the caller fails the walk.
+// stalk_cross_src -- cross an already-held mount SOURCE to its leaf root:
+// clone_walk_zero mints an INDEPENDENT crossed Spoor, then follow any
+// mount-over-mount chain (mount_lookup on each crossed link's primary). Does
+// NOT consume `src`'s ref (the caller clunks it). Returns the crossed root
+// (owned) or NULL on OOM / walk failure. The #66 path transplant is the
+// CALLER's job (the crossed Spoor takes the MOUNT-POINT's name, not the
+// source's). Bounded by PGRP_MAX_MOUNTS -- I-3 (would_create_mount_cycle at
+// mount()) makes the graph acyclic; the bound is a defensive backstop. Extracted
+// (UM-8) so a caller holding a source from mount_members_snapshot can cross the
+// EXACT snapshot entry rather than re-deriving it by index (UM-7 F4).
+static struct Spoor *stalk_cross_src(struct Proc *p, struct Spoor *src,
+                                     bool *crossed_pheno) {
+    if (!p || !p->territory || !src) return NULL;
+    struct Spoor *cur = clone_walk_zero(src);
+    if (!cur) return NULL;
+    struct Spoor *id = cur;                        // identity to re-test each round
+    for (int hops = 1; hops < PGRP_MAX_MOUNTS; hops++) {
+        u32 mflags = 0;
+        struct Spoor *next = mount_lookup(p->territory, id, &mflags);
+        if (!next) break;                          // the crossed link is not itself a point
+        if ((mflags & MPHENO_LINUX) && crossed_pheno) *crossed_pheno = true;
+        struct Spoor *crossed = clone_walk_zero(next);
+        spoor_clunk(next);
+        if (!crossed) { spoor_clunk(cur); return NULL; }
+        spoor_clunk(cur);                          // keep only the latest link
+        cur = crossed; id = cur;                   // mount-over-mount: re-test
+    }
+    return cur;
+}
+
 // stalk_cross_from -- the generalized cross. The FIRST hop crosses the
 // `first_member`-th UNION MEMBER of `probe` (mount_member_at, declared order)
 // rather than always the primary; mount-over-mount hops that follow cross the
@@ -201,62 +231,31 @@ static int stalk_cross_from(struct Proc *p, struct Spoor *probe, int first_membe
     *out = NULL;
     if (!p || !p->territory || !probe) return 0;
 
-    struct Spoor *cur = NULL;     // latest owned crossed clone (NULL until 1st)
-    struct Spoor *id  = probe;    // identity to test each round
-    // Bound by the table size: each cross consumes a DISTINCT entry, and the
-    // mount graph is acyclic -- I-3 is ENFORCED at mount() time
-    // (territory.c::would_create_mount_cycle rejects a self-mount or a cross-tree
-    // oscillation), NOT merely "by construction" -- so at most PGRP_MAX_MOUNTS
-    // crosses are possible. The bound remains as a defensive backstop (it would
-    // stop crossing rather than spin even if a cycle somehow existed).
-    for (int hops = 0; hops < PGRP_MAX_MOUNTS; hops++) {
-        // RW-4 SA-F1: mount_lookup / mount_member_at return a REF-HELD source
-        // (the lookup + ref are atomic under the Territory ns_lock, so a
-        // concurrent unmount cannot free it mid-cross). clone_walk_zero mints an
-        // INDEPENDENT crossed Spoor from it; release the transferred ref after.
-        // hops==0 selects the chosen union member; deeper hops (mount-over-mount)
-        // always cross the primary (member 0) of the crossed link.
-        u32 mflags = 0;
-        struct Spoor *src = (hops == 0)
-            ? mount_member_at(p->territory, id, first_member, &mflags)
-            : mount_lookup(p->territory, id, &mflags);
-        if (!src) break;                          // no member at this index
-        // VIVARIUM section 13: this cross went through a pheno-mount. Recorded
-        // BEFORE the clone can fail, so a pheno-mount is detected even if the
-        // subsequent clone_walk_zero errors (the walk then fails closed, but the
-        // fact that a pheno-mount was on the path is not silently lost).
-        if ((mflags & MPHENO_LINUX) && crossed_pheno) *crossed_pheno = true;
-        struct Spoor *crossed = clone_walk_zero(src);
-        spoor_clunk(src);                         // done with the looked-up source
-        if (!crossed) {
-            if (cur) spoor_clunk(cur);
-            return -1;
-        }
-        if (cur) spoor_clunk(cur);                // keep only the latest link
-        cur = crossed;
-        id  = cur;                                // mount-over-mount: re-test
-    }
+    // RW-4 SA-F1: mount_member_at returns a REF-HELD source (lookup + ref atomic
+    // under ns_lock, so a concurrent unmount cannot free it mid-cross). hop 0
+    // selects the chosen union member; stalk_cross_src crosses it + follows any
+    // mount-over-mount chain (hops 1+, whose pheno it accumulates).
+    u32 mflags = 0;
+    struct Spoor *src = mount_member_at(p->territory, probe, first_member, &mflags);
+    if (!src) return 0;                            // no member at this index
+    // VIVARIUM section 13: recorded BEFORE the cross can fail, so a pheno-mount
+    // is detected even if the subsequent clone errors (the walk then fails
+    // closed, but the fact that a pheno-mount was on the path is not lost).
+    if ((mflags & MPHENO_LINUX) && crossed_pheno) *crossed_pheno = true;
+    struct Spoor *root = stalk_cross_src(p, src, crossed_pheno);
+    spoor_clunk(src);                              // done with the looked-up source
+    if (!root) return -1;
     // #66: a crossed Spoor takes the MOUNT-POINT's namespace name -- the user
     // named `probe`'s path (e.g. /mnt), and crossing into the mounted tree keeps
-    // that name, NOT the mount source's internal name. One transplant on the
-    // final link (a mount-over-mount chain keeps the original mount point's
-    // name). Non-load-bearing (I-33): cosmetic only.
-    if (cur) spoor_path_transplant(cur, probe);
-    *out = cur;
+    // that name, NOT the mount source's internal name. Non-load-bearing (I-33).
+    spoor_path_transplant(root, probe);
+    *out = root;
     return 0;
 }
 
 int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
                        struct Spoor **out, bool *crossed_pheno) {
     return stalk_cross_from(p, probe, 0, out, crossed_pheno);
-}
-
-// stalk_union_member (UM) -- the k-th union member of `base`, crossed + ref-held
-// (see stalk.h). Pure re-export of stalk_cross_from for the union readdir merge;
-// phenotype is irrelevant to readdir (NULL crossed_pheno).
-int stalk_union_member(struct Proc *p, struct Spoor *base, int k,
-                       struct Spoor **out) {
-    return stalk_cross_from(p, base, k, out, NULL);
 }
 
 // stalk_union_has_child (UM) -- raw Dev.walk existence probe for the union
@@ -310,6 +309,51 @@ static struct Spoor *stalk_union_create_member(struct Proc *p, struct Spoor *bas
         }
     }
     return NULL;         // no MCREATE member -> caller: -T_E_ACCES
+}
+
+// stalk_build_union_snap (UM-8 F1/F2/F4/F7) -- capture the opened-member
+// snapshot of the union at `point` (a mount point with >= 2 members) for a
+// STALK_OPEN, so spoor_readdir_run can merge every member. Snapshots all member
+// sources ATOMICALLY (mount_members_snapshot, one ns_lock hold -- F4), then per
+// member in declared order: cross to its leaf root (stalk_cross_src on the held
+// source, never a re-derived index -- F4), skip a non-directory, R-gate (PERM_R;
+// a denied member is SKIPPED, Plan 9 union semantics -- F2), and OPEN it OREAD
+// (F1: a dev9p member EINVALs a Treaddir on a clone-walked-but-unopened fid, so
+// each member must be opened HERE and RETAINED -- F7 -- for the fd's life).
+// Returns a kmalloc'd union_snap (snap->n may be 0: every member denied/failed
+// -> the union reads as empty), or NULL on OOM (*errp = T_E_NOMEM). The caller
+// stores it on the opened (member[0]) Spoor; spoor_free_internal frees it.
+static struct union_snap *stalk_build_union_snap(struct Proc *p,
+                                                 struct Spoor *point, int *errp) {
+    *errp = 0;
+    struct Spoor *srcs[PGRP_MAX_MOUNTS];
+    int nsrc = mount_members_snapshot(p->territory, point, srcs, NULL,
+                                      PGRP_MAX_MOUNTS);
+    struct union_snap *snap =
+        kmalloc(sizeof(*snap) + (size_t)nsrc * sizeof(struct Spoor *), 0);
+    if (!snap) {
+        for (int k = 0; k < nsrc; k++) spoor_clunk(srcs[k]);
+        *errp = T_E_NOMEM;
+        return NULL;
+    }
+    snap->n = 0;
+    for (int k = 0; k < nsrc; k++) {
+        struct Spoor *root = stalk_cross_src(p, srcs[k], NULL);  // pheno irrelevant to readdir
+        spoor_clunk(srcs[k]);                                    // done with the source
+        if (!root)                              continue;        // cross hole -> skip (Plan 9)
+        if (!(root->qid.type & QTDIR)) { spoor_clunk(root); continue; }  // non-directory member
+        if (root->dev && root->dev->perm_enforced) {            // R-gate (F2): deny -> SKIP
+            struct t_stat st;
+            if (spoor_stat_native(root, &st) != 0 ||
+                perm_check(p, &st, PERM_R) != 0) { spoor_clunk(root); continue; }
+        }
+        if (!root->dev || !root->dev->open) { spoor_clunk(root); continue; }
+        struct Spoor *op = root->dev->open(root, 0 /* OREAD */); // F1: opened fid for readdir
+        if (!op)                            { spoor_clunk(root); continue; }
+        if (op != root) spoor_clunk(root);   // Dev.open replaced the Spoor -> adopt the opened one
+        snap->m[snap->n++] = op;
+    }
+    return snap;
 }
 
 // path_has_dotdot -- pre-scan for a ".." component. The POUNCE compresses a
@@ -1522,29 +1566,33 @@ per_component:
             quarry = cm;
             carried_valid = false;   // the record described the mount point
         } else {
-            // STALK_OPEN of a union tags the opened Spoor with the union base so
-            // spoor_readdir_run merges every member (UM-5, dedup first-wins).
-            // Capture the base BEFORE the cross: the crossed Spoor carries
-            // member[0]'s qid, not the mount point's, so the base must be the
-            // pre-cross quarry. The +1 ref transfers onto the crossed Spoor's
-            // union_base (a DISTINCT object -- the cross mints a fresh Spoor)
-            // and is released at spoor_free_internal.
-            struct Spoor *union_pt = NULL;
+            // STALK_OPEN of a union tags the opened Spoor with the opened-member
+            // snapshot (UM-8: union_snap = Chan.umh) so spoor_readdir_run merges
+            // every member (dedup first-wins). BUILD it from the PRE-CROSS quarry
+            // (the mount point): mount_members_snapshot keys on the point, and
+            // each member must be crossed + R-gated + OPENED (a clone-walked
+            // member EINVALs dev9p readdir -- UM-7 F1). Only then cross the quarry
+            // itself to member[0] (the fd's own identity) and attach the snapshot.
+            // The snapshot precedes the cross because the crossed Spoor carries
+            // member[0]'s qid, not the mount point's. Freed at spoor_free_internal.
+            struct union_snap *snap = NULL;
             if (is_union && amode == STALK_OPEN) {
-                union_pt = quarry; spoor_ref(union_pt);
+                int serr = 0;
+                snap = stalk_build_union_snap(p, quarry, &serr);
+                if (!snap) { err = serr ? serr : T_E_NOMEM; goto fail; }
             }
             struct Spoor *crossed = NULL;
             if (stalk_cross_mounts(p, quarry, &crossed, crossed_pheno) < 0) {
-                if (union_pt) spoor_clunk(union_pt);
+                union_snap_free(snap);
                 goto fail;
             }
             if (crossed) {
                 spoor_clunk(quarry);
                 quarry = crossed;
                 carried_valid = false;   // the record described the mount point
-                if (union_pt) { quarry->union_base = union_pt; union_pt = NULL; }
+                if (snap) { quarry->union_snap = snap; snap = NULL; }
             }
-            if (union_pt) spoor_clunk(union_pt);   // union w/o a cross (defensive)
+            union_snap_free(snap);   // union w/o a cross (defensive; NULL-safe)
         }
     }
 

@@ -503,6 +503,16 @@ static struct Spoor *fix_open_cached(struct Spoor *c, const char *const *names,
 // devramfs), so union_readdir_run's per-member cursor advances correctly.
 static long fix_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
+    // UM-8 F1 REGRESSION: mirror the PRODUCTION contract -- dev9p issues
+    // Treaddir on the fid and Stratum's h_readdir refuses (EINVAL) a fid that
+    // was never opened (is_open). The pre-UM-8 union readdir crossed each member
+    // via clone_walk_zero (a Twalk clone, never Dev.open'd) then called readdir,
+    // so every dev9p member silently vanished (UM-7 F1, the P0). This fixture
+    // used to readdir an UNOPENED Spoor happily -- a test double LOOSER than
+    // production, so the P0 passed green. Gating on COPEN makes the union readdir
+    // tests fail on the old cross-without-open path and pass ONLY on the
+    // opened-member snapshot (union_snap).
+    if (!(c->flag & COPEN)) return -1;
     u8 *out = (u8 *)buf;
     long len = 0;
     u64  ord = 0;
@@ -1683,7 +1693,7 @@ void test_stalk_union_walk(void) {
     TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "mount um1 MBEFORE umpt");
     TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "mount um2 MAFTER umpt");
 
-    // Leak accounting spans the four resolves (the union path adds union_base
+    // Leak accounting spans the four resolves (the union path adds union_snap
     // ref/clunk + the helper's per-member clone/clunk -- balance them).
     u64 live_before = spoor_total_allocated() - spoor_total_freed();
 
@@ -1789,7 +1799,7 @@ void test_stalk_union_xskip(void) {
 // viv_dirent64_encode_run so the byte-level behavior is unit-testable). These
 // tests build a real union over the fixture (fix_readdir emits each member's
 // children as 9P2000.L dirents), open it through the real resolver (which tags
-// union_base), and assert the merged stream: dedup first-member-wins, member
+// union_snap), and assert the merged stream: dedup first-member-wins, member
 // declared order, 1-based ordinal cookies, and correct paginated resume.
 // =============================================================================
 
@@ -1840,11 +1850,11 @@ void test_stalk_union_readdir(void) {
     TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE umpt");
     TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER umpt");
 
-    // Open the union directory: the resolver tags union_base and the fd's own
+    // Open the union directory: the resolver tags union_snap and the fd's own
     // identity is member[0] (um1 root, qid 22).
     struct Spoor *q = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
     TEST_ASSERT(q != NULL, "open union dir umpt");
-    TEST_ASSERT(q->union_base != NULL, "STALK_OPEN of a union tags union_base");
+    TEST_ASSERT(q->union_snap != NULL, "STALK_OPEN of a union tags union_snap");
     TEST_EXPECT_EQ((u64)q->qid.path, (u64)22, "opened union identity = member[0] (qid 22)");
 
     u64 live_before = spoor_total_allocated() - spoor_total_freed();
@@ -1903,7 +1913,7 @@ void test_stalk_union_readdir_paginate(void) {
     TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
 
     struct Spoor *q = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
-    TEST_ASSERT(q != NULL && q->union_base != NULL, "open + tag union");
+    TEST_ASSERT(q != NULL && q->union_snap != NULL, "open + tag union");
 
     // shared=24+6=30, only1=24+5=29, only2=24+5=29. want=60 holds page 1
     // (shared+only1 = 59), not only2 (would be 88).
@@ -1937,7 +1947,7 @@ void test_stalk_union_readdir_paginate(void) {
 }
 
 // Control: a plain directory open and a SINGLE-member mount are NOT unions, so
-// union_base stays NULL -- readdir takes the ordinary single-Dev path. Proves
+// union_snap stays NULL -- readdir takes the ordinary single-Dev path. Proves
 // the tag is set only for a >= 2-member mount (no over-tagging regression).
 void test_stalk_union_readdir_nontagged(void) {
     struct Proc p;
@@ -1947,7 +1957,7 @@ void test_stalk_union_readdir_nontagged(void) {
     // (a) plain directory (um1 is not a mount point).
     struct Spoor *q1 = stalk(&p, root, "um1", 3, STALK_OPEN, 0);
     TEST_ASSERT(q1 != NULL, "open plain dir um1");
-    TEST_ASSERT(q1->union_base == NULL, "plain dir open is not tagged");
+    TEST_ASSERT(q1->union_snap == NULL, "plain dir open is not tagged");
     spoor_clunk(q1);
 
     // (b) single-member mount (one graft on umpt) is not a union.
@@ -1957,7 +1967,7 @@ void test_stalk_union_readdir_nontagged(void) {
     TEST_EXPECT_EQ(mount(p.territory, um2, pt, MBEFORE), 0, "single mount um2 -> umpt");
     struct Spoor *q2 = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
     TEST_ASSERT(q2 != NULL, "open single-mount umpt");
-    TEST_ASSERT(q2->union_base == NULL, "single-member mount is not a union");
+    TEST_ASSERT(q2->union_snap == NULL, "single-member mount is not a union");
     spoor_clunk(q2);
 
     territory_unref(p.territory);
