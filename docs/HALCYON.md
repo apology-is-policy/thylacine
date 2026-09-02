@@ -330,8 +330,12 @@ the palette, **Beacon** the signal (BEACON.md §11). The paper-light default
   environment client, and the only place that thinks.** Owns: per-pane
   transcript state, the Beacon parser, the VT core instances, the fontdue
   glyph rasterizer + atlas cache, the stylesheet/theme, the verbs engine +
-  menu content, `halcyon.rc` execution and layout save/restore, and a
-  **display list** per pane per frame (§13.2).
+  menu content, the layout **format** + the save/restore **gesture** + the
+  device-tier (pre-login) geometry-only restore, and a **display list** per
+  pane per frame (§13.2). The **session-tier** layout save/restore is NOT
+  halcyond's: halcyond is a pre-login SYSTEM process with no `$home`, and a
+  user's layout lives in the user's session namespace, so it is carried by a
+  user-authority session tool (§13.7 H-4, the D decision, ratified 2026-09-02).
 - **The CPU executor** (a module INSIDE halcyond, not a process) — executes
   a display list into a `libtapestry::Surface`'s pixel weave and presents
   damage rects. This is the **universal floor**: it runs wherever aurora
@@ -688,6 +692,48 @@ and i3's per-window title bar are the prior art, both per-window). Concretely:
   blocking handshake), and a chrome surface whose bound pane closed is told
   (TEV_CLOSE) and unbound rather than silently orphaned.
 
+  AS-DESIGNED (H-4, the D decision, ratified 2026-09-02, operator present;
+  the pane-tree trust model's SESSION axis). Layout save/restore needs two
+  authorities no single component had: renderer authority to build a saved
+  SKELETON, and the USER's identity to spawn the tags. halcyond is the
+  pre-login SYSTEM renderer (joey-spawned, cross-login, I-27) and ut is a
+  console program with no pane connection, so neither can be the restorer.
+  D keys ordinary pane authority on the kernel-stamped PRINCIPAL, not the
+  per-process `stripes`: a THIRD actor, `Session(principal)`, for a
+  non-renderer, non-SYSTEM peer, which may MUTATE a subtree / TAKE-or-NAME a
+  tile when every hosted surface in scope shares its principal (the H-3b
+  `stripes` rule, broadened by one axis). THREE cases: the console renderer
+  (`peer_is_renderer`) is the environment and acts anywhere; a
+  SYSTEM-but-not-renderer peer stays `Client(stripes)` (the boot chain must
+  not become a session); an ordinary user peer is `Session(principal)`. The
+  RATIFIED consequence: same-principal peers gain rio-style mutual pane
+  authority -- a program running as you may close/refocus/rename your OTHER
+  tiles. This is DELIBERATE and consistent policy: it is strictly weaker than
+  the same-owner process kill I-26 already grants you, the console stays
+  protected (it is the SYSTEM principal, not yours), and another user's tiles
+  stay protected (another principal). The key is the kernel's
+  `srv_peer_info.principal_id` -- already stamped, resolved per authority
+  write like `peer_is_renderer`, fail-closed for a dead peer, and used by
+  tapestryd NOWHERE today -- so the authority needs NO new syscall, `CAP_*`,
+  or `SPAWN_PERM_*`: it is tapestryd reading a field the kernel already hands
+  it. Empty leaves record an `owner_principal` at split (0 = the renderer's)
+  and are reaped when the principal's last live conn is gone; anyone may still
+  close an empty (today's rule). PLACEMENT is itself a capability:
+  `create ... claim=<tok>` against a one-shot random token minted by reading a
+  session-owned empty leaf's `pane/<id>/claim` (the client passes an opaque
+  cookie and never observes placement -- the Wayland `xdg_activation` /
+  Fuchsia `ViewCreationToken` shape). This REALIZES TAPESTRY.md's per-client
+  layout-control capability (task #42) and AURORA-CONFIG's session-leader
+  admission, both of which named it. AUDIT: no new section-28 number at v1.0
+  (the I-27 "generalizes" precedent) -- a prose obligation under the tapestryd
+  pane-tree-trust AUDIT-TRIGGERS row + a focused audit at the H-4b close; a
+  candidate invariant is RESERVED for the multi-session future (a non-renderer
+  actor's pane mutations never degrade a tile hosting ANOTHER principal's
+  surface). The one v1.x seam: focus is a single seat, so a session focusing
+  its own empty leaf pulls input from another session's tile; the token is the
+  console OWNER's principal (a `srv_peer_info` flag), deferred -- v1.0 has one
+  session.
+
 **Pane chrome (H-3a).** Extend `paint_borders`/`paint_strips` from the flat 1px
 frame to Daylight §2: the NNW single-light-source 2px four-value bevel
 (top/left/right/bottom stored as the light direction + derived, never per-edge),
@@ -946,15 +992,51 @@ authority) is not audit-bearing on its own.
   (`pane.rs:1044`) prints today PLUS the two fields it omits: each leaf's
   `tag` and each container's full mode/active. Format: a versioned header
   (`halcyon-layout v1`), then the depth-indented rows extended with
-  `tag="<escaped>"`. The read side is a new gated tapestryd ctl surface OR
-  a halcyond-side walk of `/dev/tapestry` `pane/` files — DECIDE AT THE
-  CHUNK; bias to the file-walk (layout-as-9P purity; no new server verb
-  for reading what files already expose).
-- **Restore** = build the container skeleton via existing pane ctl verbs,
-  then respawn each leaf **from its tag** (the tag IS the command line —
-  acme; i3's `append_layout` precedent, minus the swallow hack). A leaf
-  with an empty tag restores as an empty pane. Geometry-only restore is the
-  degenerate case (skip the spawns).
+  `tag="<escaped>"`. **Read side DECIDED (H-4, the D
+  decision): the file-walk** of `/dev/tapestry` `pane/` files (layout-as-9P
+  purity; no new server verb). The design pass confirmed the walk needs no
+  server addition: `render_pane` (pane.rs) already prints each container's
+  `mode n= active=` and every node's rect; only the per-leaf `tag` is absent
+  from the `layout` file, and `pane/<id>/tag` already exposes it. (The earlier
+  "omits each container's full mode/active" was stale -- `render_pane` prints
+  it.) **SAVE is carried by the user-authority session tool for the SESSION
+  tier** (the user's `$home` is unreachable to the pre-login SYSTEM halcyond,
+  section 13.1); the DEVICE tier (`/lib/halcyon/layouts/`) halcyond may
+  write/read directly.
+- **Restore** = the **session tool** (`halcyon layout restore <name>`, native,
+  coreutil-class), run **as the user** by the user's shell (the Plan 9
+  `riostart` / acme `Dump`/`Load` idiom): it reads the layout (session tier
+  first, then device), builds the container skeleton via the existing pane ctl
+  verbs (an all-empty subtree is anyone's -- section 13.6 -- so the tool needs
+  no renderer role for the skeleton), and for each leaf with a non-empty tag
+  **claims** the target empty leaf (a one-shot placement token, below) and
+  **spawns the tag as the user** (its own identity; the tag IS the command
+  line -- acme; i3 `append_layout`, minus the swallow hack). An empty tag
+  restores an empty pane. Geometry-only restore is the degenerate case (skip
+  the spawns) and is ALSO the device-tier pre-login restore (halcyond,
+  renderer authority, no user, no spawns).
+- **Placement + naming** is the real gap (`host()` auto-splits into the
+  FOCUSED leaf, so it cannot target an arbitrary saved leaf): the tool reads
+  `pane/<id>/claim` for a session-owned empty leaf, tapestryd mints a one-shot
+  random token, and `create ... claim=<tok>` hosts into that leaf iff still
+  empty (else falls back to focus placement). The token rides the tool's own
+  `/env` (`TAPESTRY_CLAIM`) into the spawned child (the login
+  `seed_session_env` idiom; the client passes an opaque cookie and still
+  cannot observe placement -- the Wayland `xdg_activation` / Fuchsia
+  `ViewCreationToken` precedent). The tool writes the leaf's `tag` at claim
+  time (acme's tag-before-`win`), so a saved layout's tags survive even though
+  no ported client names its own leaf today.
+- **The shipped device-tier default layout IS the first-launch welcome**
+  (ratified 2026-09-02, operator present): a two-pane split, both Utopia on
+  Daylight -- LEFT a live, self-demonstrating Genera-style tour (a "try this"
+  table whose rows are RUNNABLE objs targeting the RIGHT pane; a clickable
+  path obj raising the verb menu), RIGHT a live shell prompt. The pitch is
+  SHOWN, not told: the user's first `ls` renders as clickable file objects,
+  and the left tour's runnable objs drive the right pane so the
+  dead-terminal-vs-live-transcript contrast sells itself. The Genera lineage
+  (the Lisp Machine's live presentations, on a Plan 9 shell) is the honest
+  narrative. Full UX: `scratchpad/h4-intro-welcome.md`; builds as an H-4 late
+  chunk once the format + the tool land.
 - Named layouts: `/lib/halcyon/layouts/` (device tier) +
   `$home/lib/halcyon/layouts/` (session tier) — the aurora-config two-tier
   precedent, including its hard-won durability discipline (fsync the same

@@ -532,6 +532,16 @@ The model:
 > serial) that Genera never had to solve. Also retired here: "Halcyon is pure
 > 2D" — Halcyon renders **Vulkan** on the measured venus substrate (the W-4
 > inversion). Fallback posture unchanged.
+>
+> **ADDENDUM 2026-09-02 (H-4 layouts, the D decision):** the executable
+> layout -- acme `Dump`/`Load` + rio `riostart` -- on a compositor SHARED
+> between the persistent SYSTEM console renderer (halcyond, I-27) and the
+> user's session, partitioned by the kernel-attested PRINCIPAL (a
+> `Session(principal)` actor, no new grant) with a startup CLAIM token for
+> placement (the Wayland `xdg_activation` / Fuchsia `ViewCreationToken`
+> shape). The Plan 9 idiom (layout-as-executable-text run as the user) fused
+> with the capability-microkernel session-scope; the shipped default layout is
+> the self-demonstrating first-launch welcome. HALCYON.md 13.6/13.7.
 
 **Why it's novel**: every modern OS uses some compositor / window manager / display server (Wayland, X11, Scenic, AppKit, DWM). Plan 9's Rio + 8½ is the closest comparison — a tile-based windowing system without compositing — but it's still a windowing system, with its own protocol and event loop. **No production OS uses a scroll buffer with inline graphics as the sole UI primitive.** Smalltalk environments and some Lisp machines came close in the 1980s but never with modern hardware acceleration. Notebook UIs (Jupyter, Mathematica) achieve something similar but inside another OS's windowing system.
 

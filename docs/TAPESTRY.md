@@ -1053,7 +1053,7 @@ only the trusted boot chain is spawned where it can connect — no
 untrusted tapestry client exists at v1.0. The per-client
 layout-control CAPABILITY (a WM-control client holds it; ordinary
 surface clients don't) + renderer-role protection + the D5 read ACL are
-the Halcyon-era multi-untrusted-client fix (task #42); a partial
+the Halcyon-era multi-untrusted-client fix (task #42) -- **REALIZED at H-4 (the D decision, ratified 2026-09-02): the WM-control capability is the `Session(principal)` actor tapestryd derives from the kernel-stamped `srv_peer_info.principal_id` (no new grant); a session-side layout tool, run as the user, drives layout, and placement is a one-shot `claim` token (HALCYON.md 13.6/13.7).** A partial
 owner-scope now would break the global-WM model (the no-overfit trap).
 The global `clock-rate` ctl is the same same-session-trust family;
 `test-mode`/`tick`/`release`/HOLD are dev-build-only (the `test-mode`
