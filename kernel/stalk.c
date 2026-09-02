@@ -379,6 +379,23 @@ static struct union_snap *stalk_build_union_snap(struct Proc *p,
     return snap;
 }
 
+// union_snap_point_only (UM-8c R2-F2) -- a POINT-ONLY snapshot: the retained
+// union mount point with NO member opens (n == 0). Tags an O_PATH (STALK_WALK)
+// union base so the F5 fd-mutation / fd-resolution consumers -- which key on
+// union_snap->point -- reach the union off this handle (native fs:: opens its
+// mutation parent O_PATH) WITHOUT opening any member (the O_PATH no-byte-I/O
+// posture). readdir yields EOD (0 members); an O_PATH handle is CWALKONLY so it
+// never readdirs. Returns NULL + *errp on OOM.
+static struct union_snap *union_snap_point_only(struct Spoor *point, int *errp) {
+    *errp = 0;
+    struct union_snap *snap = kmalloc(sizeof(*snap), 0);   // n == 0: no member array
+    if (!snap) { *errp = T_E_NOMEM; return NULL; }
+    snap->point = point;
+    spoor_ref(point);
+    snap->n = 0;
+    return snap;
+}
+
 // path_has_dotdot -- pre-scan for a ".." component. The POUNCE compresses a
 // run of components into ONE trail entry (intermediates never materialize as
 // Spoors), which is incompatible with `..`'s pop-one-component semantics --
@@ -1650,8 +1667,13 @@ per_component:
         // base): the quarry is `base` itself, clone-walked to an owned,
         // openable Spoor (base is borrowed / the ref-held re-anchor root).
         // base is not a mount point (the base cross verified), so no cross is
-        // owed before this clone.
-        quarry = clone_walk_zero(base);
+        // owed before this clone. R2-F3: off a UNION base, clone the POINT (not
+        // member[0]) so the final-quarry dispatch below keeps the union -- else
+        // a bare-leaf create (parent nets to ".") lands in member[0] regardless
+        // of MCREATE, and openat(ufd,".") drops the union to member[0].
+        struct Spoor *zbase = (base->union_snap && base->union_snap->point)
+                                  ? base->union_snap->point : base;
+        quarry = clone_walk_zero(zbase);
         if (!quarry) goto fail;
     }
 
@@ -1699,6 +1721,15 @@ per_component:
             if (is_union && amode == STALK_OPEN) {
                 int serr = 0;
                 snap = stalk_build_union_snap(p, quarry, &serr);
+                if (!snap) { err = serr ? serr : T_E_NOMEM; goto fail; }
+            } else if (is_union && amode == STALK_WALK) {
+                // R2-F2: an O_PATH (STALK_WALK) union base keeps the POINT (no
+                // member opens) so the F5 fd-mutation / fd-resolution consumers
+                // reach the union off this handle -- native fs:: opens its
+                // mutation parent O_PATH, the handle class the STALK_OPEN-only
+                // snapshot missed.
+                int serr = 0;
+                snap = union_snap_point_only(quarry, &serr);
                 if (!snap) { err = serr ? serr : T_E_NOMEM; goto fail; }
             }
             struct Spoor *crossed = NULL;

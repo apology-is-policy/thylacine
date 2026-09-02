@@ -89,6 +89,8 @@ void test_stalk_union_create_no_target(void);   // UM-5a: no MCREATE -> EACCES
 void test_stalk_union_member_holding(void);     // UM-8c/F3: holder, not MCREATE member
 void test_stalk_union_remove_uncrossed(void);    // UM-8c/F3: STALK_REMOVE leaves the point
 void test_stalk_union_fd_base(void);             // UM-8c/F5: fd-relative union base sees all members
+void test_stalk_union_opath_base(void);          // UM-8c/R2-F2: O_PATH base carries the point
+void test_stalk_union_zero_component(void);      // UM-8c/R2-F3: "." off a union base keeps it
 void test_stalk_pheno_symlink_reanchor(void);   // VIVARIUM section 13 (F1)
 // #66: namespace-name accumulation through the real resolver.
 void test_stalk_path_accumulate(void);
@@ -2263,6 +2265,92 @@ void test_stalk_union_fd_base(void) {
 
     u64 live_after = spoor_total_allocated() - spoor_total_freed();
     TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across fd-relative union resolves");
+
+    spoor_clunk(ufd);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// R2-F2: an O_PATH (STALK_WALK) union base carries the POINT-ONLY snap (no
+// member opens) so fd-relative resolution off it reaches every member -- the
+// handle class native fs:: uses for mutation, which the STALK_OPEN-only snap
+// missed.
+void test_stalk_union_opath_base(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE),          0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER | MCREATE), 0, "um2 MAFTER|MCREATE");
+
+    // Resolve the union with STALK_WALK (the O_PATH amode) -> member[0] + a
+    // POINT-ONLY snap: point set, NO members opened (n == 0).
+    struct Spoor *op = stalk(&p, root, "umpt", 4, STALK_WALK, 0);
+    TEST_ASSERT(op != NULL, "O_PATH-resolve the union");
+    TEST_ASSERT(op->union_snap != NULL, "O_PATH union base carries a union_snap (R2-F2)");
+    TEST_EXPECT_EQ((long)op->union_snap->n, (long)0, "point-only snap: no member opens");
+    TEST_ASSERT(op->union_snap->point != NULL &&
+                (u64)op->union_snap->point->qid.path == (u64)28,
+                "point-only snap retains the mount point (qid 28)");
+    TEST_ASSERT((op->flag & COPEN) == 0, "O_PATH handle is NOT opened");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    // Fd-relative resolution off the O_PATH base reaches member 1.
+    struct Spoor *q = stalk(&p, op, "only2", 5, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "O_PATH-relative only2");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)27, "O_PATH base sees member 1 (only2 qid 27)");
+    spoor_clunk(q);
+    q = stalk(&p, op, "shared", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "O_PATH-relative shared");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "O_PATH base first-hit (shared qid 23)");
+    spoor_clunk(q);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no leak across O_PATH-relative resolves");
+
+    spoor_clunk(op);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// R2-F3: a zero-component resolution off a union base ("." / a bare-leaf parent)
+// keeps the union -- STALK_CREATE lands the MCREATE member, STALK_REMOVE the
+// uncrossed point, NOT member[0] (which would bypass MCREATE / drop the union).
+void test_stalk_union_zero_component(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE),          0, "um1 MBEFORE (no MCREATE)");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER | MCREATE), 0, "um2 MAFTER|MCREATE");
+
+    struct Spoor *ufd = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(ufd != NULL && ufd->union_snap != NULL, "open the union fd");
+
+    // "." off the union base, STALK_CREATE -> the MCREATE member (um2, qid 25),
+    // NOT member[0] (um1, qid 22). Pre-fix the zero-component clone of member[0]
+    // bypassed MCREATE.
+    struct Spoor *c = stalk(&p, ufd, ".", 1, STALK_CREATE, 0);
+    TEST_ASSERT(c != NULL, "zero-component STALK_CREATE off the union fd");
+    TEST_EXPECT_EQ((u64)c->qid.path, (u64)25,
+                   "zero-component create keeps the union -> MCREATE member um2 (25), not member[0]");
+    spoor_clunk(c);
+
+    // "." off the union base, STALK_REMOVE -> the uncrossed point (qid 28).
+    struct Spoor *r = stalk(&p, ufd, ".", 1, STALK_REMOVE, 0);
+    TEST_ASSERT(r != NULL, "zero-component STALK_REMOVE off the union fd");
+    TEST_EXPECT_EQ((u64)r->qid.path, (u64)28, "zero-component remove -> uncrossed point (28)");
+    struct Spoor *rm1 = mount_member_at(p.territory, r, 1, NULL);
+    TEST_ASSERT(rm1 != NULL, "still a union point");
+    spoor_clunk(rm1);
+    spoor_clunk(r);
 
     spoor_clunk(ufd);
     territory_unref(p.territory);

@@ -12325,8 +12325,13 @@ static struct Spoor *viv_mutation_parent(struct Proc *p, u64 path_va,
     spoor_clunk(root);
     if (!parent)                 { *err_out = -(s64)serr;       return NULL; }
     if (p->territory) {
-        struct Spoor *m1 = mount_member_at(p->territory, parent, 1, NULL);
-        if (m1) { spoor_clunk(m1); *is_union_out = true; }
+        // R2-F4: probe index 0 ("is this the uncrossed mount point STALK_REMOVE
+        // left me"), NOT index 1. A >=2-member test flips to "not union" if a
+        // peer unmounts to a single member between stalk and here -- routing the
+        // unlink onto the covered mounted-onto directory. Index 0 is stable and
+        // stalk_union_member_holding handles any member count (1..N).
+        struct Spoor *m0 = mount_member_at(p->territory, parent, 0, NULL);
+        if (m0) { spoor_clunk(m0); *is_union_out = true; }
     }
     return parent;
 }
