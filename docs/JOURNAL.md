@@ -75,6 +75,23 @@ between a pre-existing (mis-stacked) doc comment and `actor()`, which would have
 re-attached that stale doc to my getter. Caught on the pre-audit diff read;
 moved the getter after `actor()` so the pre-existing state was restored exactly.
 
+**A dependency the design surfaced — Fix A `f6e306ae`.** Designing H-4b-3
+revealed that H-4b-2 under-implemented the scripture. HALCYON.md 13.7 says
+"empty leaves record an owner_principal at split" — *plural*, and a split of an
+empty leaf yields *two* empty children. H-4b-2 stamped only the new one, so a
+session building a tree from the environment root (owner 0) could claim only
+one child of each split; the other stayed owner 0 and unclaimable — which
+breaks restore, whose precondition is that every leaf it builds is
+session-owned. The fix stamps both empty children with the splitter. It is
+sound because it touches only empty leaves, which are already anyone's to
+mutate (13.6), so it confers nothing beyond the close every peer already holds,
+and never touches a leaf hosting a surface. Pulled forward as H-4b-3's
+tapestryd precondition and gated the same way — the panes battery splits leaf A
+then claims the new empty leaf, so the 33/33 run directly witnesses the
+both-stamp path. Worth stating plainly: this was an autonomous refinement to a
+just-landed audit-bearing surface; the batched holotype at the arc close is the
+check on the reasoning.
+
 **The scope decision.** H-4b-3 (the restore tool) is a genuinely large chunk —
 spawn-as-user, `/env` token passing, a libtapestry auto-claim, and a skeleton
 algorithm that maps a saved tree onto tapestry's split/flatten. I kept it a
