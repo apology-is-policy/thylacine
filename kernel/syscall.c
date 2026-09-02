@@ -7350,6 +7350,13 @@ int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
     if (!p->territory)                               return -1;
     if (!mountpoint)                                 return -1;
     if (flags & ~SYS_MOUNT_VALID_FLAGS)               return -1;
+    // UM-8 F10: MREPL / MBEFORE / MAFTER are mutually-exclusive placement modes
+    // (Plan 9; territory.tla models one `mb` boolean + a repl action). More than
+    // one set is a caller error -- mount()'s dispatch would silently take MREPL
+    // then MBEFORE -- so reject loudly rather than act on an ambiguous request.
+    // (place & (place-1)) != 0 iff more than one placement bit is set.
+    u32 place = flags & (u32)(MREPL | MBEFORE | MAFTER);
+    if (place & (place - 1))                          return -1;
 
     // RIGHT_READ on the source: a mount holder consumes the source's
     // tree (walks it, reads files through it). A handle without READ

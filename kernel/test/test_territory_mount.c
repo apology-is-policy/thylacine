@@ -255,6 +255,68 @@ void test_territory_mount_mrepl_replaces(void) {
     territory_unref(p);
 }
 
+// UM-8 F6: MREPL of an EXISTING member of a union must replace the WHOLE group,
+// not converge that member's flags in place. Pre-fix the idempotency arm fired
+// on the existing pair and returned BEFORE the group-replace, leaving the other
+// members mounted -- a caller MREPLing to guarantee exclusivity got a union.
+void test_territory_mount_mrepl_existing_replaces_group(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *a = spoor_alloc(&devnone);
+    struct Spoor *b = spoor_alloc(&devnone);
+    struct Spoor *mp = mkmp(11u);
+    TEST_ASSERT(p && a && b && mp, "alloc");
+
+    TEST_EXPECT_EQ(mount(p, a, mp, MBEFORE), 0, "A MBEFORE -> [A]");
+    TEST_EXPECT_EQ(mount(p, b, mp, MAFTER),  0, "B MAFTER  -> [A, B]");
+    TEST_EXPECT_EQ(territory_nmounts(p), 2, "union has 2 members");
+
+    // MREPL the EXISTING member A: the whole group collapses to [A].
+    TEST_EXPECT_EQ(mount(p, a, mp, MREPL), 0, "MREPL existing A");
+    TEST_EXPECT_EQ(territory_nmounts(p), 1, "group replaced -> 1 member (B removed)");
+    struct Spoor *m0 = mount_member_at(p, mp, 0, NULL);
+    struct Spoor *m1 = mount_member_at(p, mp, 1, NULL);
+    TEST_ASSERT(m0 == a, "sole member is A");
+    TEST_ASSERT(m1 == NULL, "no second member after MREPL");
+    if (m0) spoor_clunk(m0);
+    TEST_EXPECT_EQ(b->ref, 1, "B's per-entry ref dropped by the group replace");
+
+    TEST_EXPECT_EQ(unmount(p, mp), 0, "unmount");
+    spoor_unref(mp); spoor_unref(a); spoor_unref(b);
+    territory_unref(p);
+}
+
+// UM-8 F6: MBEFORE of an EXISTING member must MOVE it to the front, not
+// converge its flags in place (a silent reorder no-op reporting success).
+void test_territory_mount_mbefore_moves_existing(void) {
+    struct Territory *p = territory_alloc();
+    struct Spoor *a = spoor_alloc(&devnone);
+    struct Spoor *b = spoor_alloc(&devnone);
+    struct Spoor *mp = mkmp(12u);
+    TEST_ASSERT(p && a && b && mp, "alloc");
+
+    TEST_EXPECT_EQ(mount(p, a, mp, MAFTER), 0, "A MAFTER -> [A]");
+    TEST_EXPECT_EQ(mount(p, b, mp, MAFTER), 0, "B MAFTER -> [A, B]");
+    struct Spoor *m0 = mount_member_at(p, mp, 0, NULL);
+    TEST_ASSERT(m0 == a, "member 0 is A before the move");
+    if (m0) spoor_clunk(m0);
+
+    // Re-mount the EXISTING member B with MBEFORE: it moves to the front.
+    TEST_EXPECT_EQ(mount(p, b, mp, MBEFORE), 0, "B MBEFORE (reposition)");
+    TEST_EXPECT_EQ(territory_nmounts(p), 2, "still 2 members (a move, not an add)");
+    m0 = mount_member_at(p, mp, 0, NULL);
+    struct Spoor *m1 = mount_member_at(p, mp, 1, NULL);
+    TEST_ASSERT(m0 == b, "member 0 is now B (moved to front)");
+    TEST_ASSERT(m1 == a, "member 1 is A");
+    if (m0) spoor_clunk(m0);
+    if (m1) spoor_clunk(m1);
+    TEST_EXPECT_EQ(b->ref, 2, "B ref net-unchanged by the move (self + one entry)");
+
+    TEST_EXPECT_EQ(unmount(p, mp), 0, "unmount B (first match)");
+    TEST_EXPECT_EQ(unmount(p, mp), 0, "unmount A");
+    spoor_unref(mp); spoor_unref(a); spoor_unref(b);
+    territory_unref(p);
+}
+
 void test_territory_mount_unmount_missing_returns_error(void) {
     struct Territory *p = territory_alloc();
     TEST_ASSERT(p != NULL, "territory_alloc returned NULL");

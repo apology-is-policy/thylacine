@@ -846,12 +846,33 @@ int mount(struct Territory *territory, struct Spoor *source,
     // makes Path non-load-bearing -- write-only, cosmetic to /proc/<pid>/ns --
     // and the fresh mountpoint Spoor keys to the same identity by construction,
     // so a ref-swap under ns_lock would buy no semantic difference.
-    for (int i = 0; i < territory->nmounts; i++) {
-        if (mount_key_eq(&territory->mounts[i], mountpoint) &&
-            territory->mounts[i].source == source) {
-            territory->mounts[i].flags = flags;
-            rc = 0;
-            goto out;
+    // UM-8 F6: MREPL is handled by the group-replace below (which removes this
+    // pair too), so it must NOT short-circuit here -- else MREPL of an existing
+    // member would converge flags and leave the OTHER members in place. For a
+    // flagless re-mount (no ordering change requested) converge flags in place
+    // (the #219 direction). For MBEFORE/MAFTER on an EXISTING pair, MOVE it to
+    // the requested position: remove it here (deferring its source clunk +
+    // dropping its Path ref) and fall through to re-insert at the ordering index
+    // below -- else the reorder was a silent no-op that reported success (F6).
+    if (!(flags & MREPL)) {
+        for (int i = 0; i < territory->nmounts; i++) {
+            if (mount_key_eq(&territory->mounts[i], mountpoint) &&
+                territory->mounts[i].source == source) {
+                if (!(flags & (MBEFORE | MAFTER))) {
+                    territory->mounts[i].flags = flags;   // in-place converge
+                    rc = 0;
+                    goto out;
+                }
+                // Reposition: remove now, re-insert at the ordering index below.
+                // The deferred clunk drops the old entry's ref; the insert takes
+                // a fresh one (source stays alive on the caller's borrowed ref).
+                repl_clunk[repl_nclunk++] = territory->mounts[i].source;
+                path_unref(territory->mounts[i].mp_path);
+                for (int j = i; j < territory->nmounts - 1; j++)
+                    territory->mounts[j] = territory->mounts[j + 1];
+                territory->nmounts--;
+                break;   // at most one (point, source) pair
+            }
         }
     }
 

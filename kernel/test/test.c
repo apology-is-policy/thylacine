@@ -244,6 +244,8 @@ void test_territory_mount_smoke(void);
 void test_territory_mount_idempotent_same_source(void);
 void test_territory_mount_idempotent_converges_flags(void);
 void test_territory_mount_mrepl_replaces(void);
+void test_territory_mount_mrepl_existing_replaces_group(void);   // UM-8 F6
+void test_territory_mount_mbefore_moves_existing(void);          // UM-8 F6
 void test_territory_mount_unmount_missing_returns_error(void);
 void test_territory_mount_table_full(void);
 void test_territory_mount_clone_bumps_refs(void);
@@ -1837,6 +1839,8 @@ struct test_case g_tests[] = {
     { "territory_mount.idempotent_same_source",           test_territory_mount_idempotent_same_source,           false, NULL },
     { "territory_mount.idempotent_converges_flags",       test_territory_mount_idempotent_converges_flags,       false, NULL },
     { "territory_mount.mrepl_replaces",                   test_territory_mount_mrepl_replaces,                   false, NULL },
+    { "territory_mount.mrepl_existing_replaces_group",    test_territory_mount_mrepl_existing_replaces_group,    false, NULL },
+    { "territory_mount.mbefore_moves_existing",           test_territory_mount_mbefore_moves_existing,           false, NULL },
     { "territory_mount.unmount_missing_returns_error",    test_territory_mount_unmount_missing_returns_error,    false, NULL },
     { "territory_mount.table_full",                       test_territory_mount_table_full,                       false, NULL },
     { "territory_mount.clone_bumps_refs",                 test_territory_mount_clone_bumps_refs,                 false, NULL },

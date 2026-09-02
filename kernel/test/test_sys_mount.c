@@ -224,6 +224,14 @@ void test_sys_mount_rejects_invalid_flags(void) {
     // assertions above and silently honour the request.
     TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MREPL | 0x40), -1,
         "a valid flag ORed with junk is refused, not masked");
+    // UM-8 F10: MREPL / MBEFORE / MAFTER are mutually-exclusive placement modes;
+    // more than one set is refused wholesale (mount()'s dispatch would silently
+    // take MREPL then MBEFORE). Each bit is individually VALID -- only the
+    // COMBINATION is rejected, so these survive the invalid-bit allowlist above.
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MBEFORE | MAFTER), -1,
+        "MBEFORE|MAFTER (two placements) -> -1");
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MREPL | MBEFORE), -1,
+        "MREPL|MBEFORE (two placements) -> -1");
     TEST_EXPECT_EQ(territory_nmounts(p->territory), 0,
         "no entry installed for invalid flags");
 
