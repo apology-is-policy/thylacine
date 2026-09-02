@@ -480,7 +480,20 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
             }
             return -T_E_PIPE;
         }
-        if (r->count < PIPE_BUF_SIZE) {
+        // POSIX pipe(7): a write of n <= PIPE_BUF is ATOMIC -- it must not tear
+        // across a full boundary, so it proceeds only when the WHOLE n fits and
+        // otherwise blocks (holotype F4). A write of n > PIPE_BUF may fill what
+        // space there is and return short (POSIX permits the split; the caller
+        // loops). Before the multi-waiter fix a second blocking writer on one
+        // pipe crashed the kernel, so a torn <= PIPE_BUF write was unreachable
+        // from EL0; now two writers sharing a pipe (make -j | tee) make it
+        // observable, and a partial <= PIPE_BUF write would let the peer's line
+        // interleave mid-write. An empty ring always fits any n <= PIPE_BUF, so
+        // this never deadlocks.
+        size_t avail = PIPE_BUF_SIZE - r->count;
+        bool   fits  = (n <= (long)PIPE_BUF_SIZE) ? (avail >= (size_t)n)
+                                                  : (avail > 0);
+        if (fits) {
             long put = ring_write(r, (const u8 *)buf, n);
             spin_unlock(&r->lock);
             if (put > 0) {
@@ -490,14 +503,16 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
             }
             return put;
         }
-        // O_NONBLOCK (CNONBLOCK): the pipe is completely full (count ==
-        // PIPE_BUF_SIZE) with a live reader -- a blocking write would sleep, so
-        // a non-blocking write returns EAGAIN. Placed AFTER the read_eof (EPIPE)
-        // and space checks, so a non-blocking write still delivers EPIPE and
-        // still writes what fits (partial); it converts ONLY the full case. It
-        // never registers a hook, so I-9 (pipe.tla NoStuckWriter) is untouched.
-        // Byte-oriented, unlike CNBFRAME's frame-atomic tx above. `flag` is an
-        // atomic read (RMW'd from other lock domains -- see spoor.h).
+        // O_NONBLOCK (CNONBLOCK): the write would block -- the ring is full, or
+        // it holds n > PIPE_BUF but is partially full (n > PIPE_BUF took the
+        // fits branch above and wrote what it could; reaching here with n >
+        // PIPE_BUF means avail == 0), or n <= PIPE_BUF does not WHOLLY fit
+        // (the atomicity rule: POSIX returns EAGAIN having written nothing, not
+        // a partial). Placed AFTER the read_eof (EPIPE) and fits checks, so a
+        // non-blocking write still delivers EPIPE and still takes the partial
+        // n > PIPE_BUF path; it converts ONLY the would-block case. It never
+        // registers a hook, so I-9 (pipe.tla NoStuckWriter) is untouched.
+        // `flag` is an atomic read (RMW'd from other lock domains -- see spoor.h).
         if (spoor_flag_get(c) & CNONBLOCK) {
             spin_unlock(&r->lock);
             return -T_E_AGAIN;

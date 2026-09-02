@@ -116,10 +116,10 @@ The `BuggyXxxNoWake` variants elide the wake → `NoStuckReader` / `NoStuckWrite
 
 ## Spec posture
 
-`specs/pipe.tla` (landed at P5-pipe-blocking) models the wait/wake protocol with 7 actions:
+`specs/pipe.tla` (landed at P5-pipe-blocking; re-modelled multi-waiter 2026-09-02) models the wait/wake protocol:
 
-- Clean: `ReadDrain` / `ReadEof` / `ReadSleep` / `WriteAppend` / `WriteEpipe` / `WriteSleep` / `CloseRead` / `CloseWrite` (8 — symmetric pairs).
-- Buggy: `BuggyWriteAppendNoWake` / `BuggyReadDrainNoWake` / `BuggyCloseWriteNoWake` / `BuggyCloseReadNoWake` (4 — each elides the wake after a state-enabling mutation).
+- Clean: `ReadDrain` / `ReadEof` / `ReadSleep` / `WriteAppend` / `WriteEpipe` / `WriteSleep` / `CloseRead` / `CloseWrite` (8). Sleeps are never gated (any number of waiters per side) and drains/appends/closes wake ALL waiters on that side.
+- Buggy: `BuggyWriteAppendNoWake` / `BuggyReadDrainNoWake` / `BuggyCloseWriteNoWake` / `BuggyCloseReadNoWake` (each elides the wake) + `BuggyWriteAppendWakeOne` (wakes one reader instead of all) — 5.
 
 4 invariants (`SingleWaiter` was retired with the single-waiter model; two waiters per side is now the point):
 - `TypeOk` — state space type-safety.
@@ -147,7 +147,7 @@ The clean cfg models the impl discipline; each buggy cfg captures the bug class 
 
 ## Tests
 
-10 single-thread tests in `kernel/test/test_pipe.c` + 4 multi-thread tests in `kernel/test/test_pipe_blocking.c`:
+10 single-thread tests in `kernel/test/test_pipe.c` + 6 multi-thread tests in `kernel/test/test_pipe_blocking.c`:
 
 ### Single-thread (sequential write/read; no sleep)
 
@@ -237,13 +237,13 @@ storm's parallel jobs died silently. See `docs/LLVM-DESIGN.md` §7.2.
 |---|---|
 | Ring + Dev + Spoor pair | **Landed (P5-pipe)** |
 | `pipe_init` bestiary registration | **Landed (P5-pipe)** |
-| Per-pipe spin lock + 2 rendez wait queues + EOF flags | **Landed (P5-pipe-blocking)** |
+| Per-pipe spin lock + a `poll_list` multi-waiter (was 2 rendez wait queues until 2026-09-02) + EOF flags | **Landed** |
 | Blocking read / write / close-wakes-other-side | **Landed (P5-pipe-blocking)** |
 | `specs/pipe.tla` + 4 buggy cfgs (NoStuckReader / NoStuckWriter) | **Landed (P5-pipe-blocking)** |
-| 14 unit tests (10 sequential + 4 multi-thread blocking) | **Landed (P5-pipe-blocking)** |
+| 16 unit tests (10 sequential + 6 multi-thread blocking) | **Landed** |
 | Userspace `pipe(2)` syscall | Deferred to **P5-fd-syscalls** |
 | Plan 9 `/srv` posting (named pipes via the namespace) | Phase 5+ |
-| Multi-waiter wait queues (more than one reader / writer sleeping at once) | Phase 5+ when poll / futex land |
+| Multi-waiter wait queues (more than one reader / writer sleeping at once) | **Landed 2026-09-02** (a per-call `poll_waiter` on the ring's `poll_list`) |
 
 ---
 
@@ -251,9 +251,9 @@ storm's parallel jobs died silently. See `docs/LLVM-DESIGN.md` §7.2.
 
 ### `CNBFRAME` — the frame-atomic non-blocking write mode (round-B F1, 2026-08-18)
 
-A write whose tx Spoor carries `CNBFRAME` (`spoor.h` bit 6) takes an early arm in `devpipe_write` that is **atomic** and **non-blocking**: it commits the *whole* buffer iff it fits (`PIPE_BUF_SIZE - count >= n`) and otherwise returns `-T_E_AGAIN` having written **nothing** — never a partial write, never a `sleep()`. The default (unflagged) write is unchanged: partial when the pipe is nearly full, blocking (`sleep(write_rendez)`) when exactly full.
+A write whose tx Spoor carries `CNBFRAME` (`spoor.h` bit 6) takes an early arm in `devpipe_write` that is **atomic** and **non-blocking**: it commits the *whole* buffer iff it fits (`PIPE_BUF_SIZE - count >= n`) and otherwise returns `-T_E_AGAIN` having written **nothing** — never a partial write, never a `sleep()`. The default (unflagged) write blocks (registering a `poll_list` hook) when its bytes cannot fit -- and since the PIPE_BUF-atomicity fix (2026-09-02) a write of `n <= PIPE_BUF` blocks until the WHOLE `n` fits rather than tearing; only `n > PIPE_BUF` fills what it can and returns short.
 
-It exists for **one** consumer: the tx end of the byte-pipe 9P transport (`p9_spoor_transport_init` sets the flag). The 9P client holds `c->lock` across `p9_transport_send`, so a **blocking** pipe write there is the `#360` lock-across-sleep extinction (an unprivileged multi-threaded container filling `c2s` with concurrent `/proc` opens kills the guest), and a **partial** write strands a 9P-frame fragment and desyncs the shared stream (`do_send` treats a mid-frame EAGAIN as fatal, `#349`). `-T_E_AGAIN` == `P9_TRANSPORT_EAGAIN` (-11) lets `client_send_flow` drop `c->lock` and retry. A `read_eof` still yields the `pipe` note + `-T_E_PIPE` under CNBFRAME. Regression: `pipe.cnbframe_atomic_nonblocking` (the exact contrast to `pipe.write_short_when_partially_full`). Nothing but the 9P transport tx should set this flag.
+It exists for **one** consumer: the tx end of the byte-pipe 9P transport (`p9_spoor_transport_init` sets the flag). The 9P client holds `c->lock` across `p9_transport_send`, so a **blocking** pipe write there is the `#360` lock-across-sleep extinction (an unprivileged multi-threaded container filling `c2s` with concurrent `/proc` opens kills the guest), and a **partial** write strands a 9P-frame fragment and desyncs the shared stream (`do_send` treats a mid-frame EAGAIN as fatal, `#349`). `-T_E_AGAIN` == `P9_TRANSPORT_EAGAIN` (-11) lets `client_send_flow` drop `c->lock` and retry. A `read_eof` still yields the `pipe` note + `-T_E_PIPE` under CNBFRAME. Regression: `pipe.cnbframe_atomic_nonblocking` (the exact contrast to `pipe.write_short_when_partially_full`, which since 2026-09-02 uses `n > PIPE_BUF` because a partial `n <= PIPE_BUF` write no longer occurs). Nothing but the 9P transport tx should set this flag.
 
 ### Blocking semantics — read returning 0 means EOF
 
@@ -290,7 +290,7 @@ If the second Spoor alloc fails after the first succeeded, the rollback path det
 
 ### Ring is 4 KiB exactly
 
-PIPE_BUF_SIZE = 4096 matches POSIX's PIPE_BUF guarantee (writes ≤ PIPE_BUF are atomic — atomic at the Plan 9 level too once concurrency lands). The struct adds 32 bytes of header → 4128 bytes total → kmalloc routes through alloc_pages (order=2 = 16 KiB allocation). The waste (12 KiB unused per pipe) is acceptable at v1.0; future tightening can pack multiple pipes into a single allocation.
+PIPE_BUF_SIZE = 4096 matches POSIX's PIPE_BUF guarantee (writes ≤ PIPE_BUF are atomic — atomic at the Plan 9 level too once concurrency lands). The struct adds 56 bytes of header → 4152 bytes total → kmalloc routes through alloc_pages (order=2 = 16 KiB allocation). The waste (12 KiB unused per pipe) is acceptable at v1.0; future tightening can pack multiple pipes into a single allocation.
 
 ### No `bread` / `bwrite`
 

@@ -358,7 +358,7 @@ void test_sys_pipe_handle_close_releases_one_end(void) {
     TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
 
     // Close the read end. devpipe_close sets write_eof (no — read_eof;
-    // closing the read end means read_eof = true) + wakes write_rendez
+    // closing the read end means read_eof = true) + walks the poll_list
     // (no waiter; no-op) + drops the ring's per-endpoint ref (2 → 1).
     // Ring is NOT freed yet.
     TEST_EXPECT_EQ(handle_close(p, fd_rd), 0, "close rd");

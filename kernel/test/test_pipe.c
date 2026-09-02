@@ -158,11 +158,15 @@ void test_pipe_write_short_when_partially_full(void) {
                    (long)(PIPE_BUF_SIZE - 10),
         "partial fill");
 
-    // Ask to write 100; only 10 fit.
-    u8 more[100];
-    for (size_t i = 0; i < 100; i++) more[i] = 0xDD;
-    TEST_EXPECT_EQ(dev_write(wr, more, 100L), 10L,
-        "short write returns space-available");
+    // Ask to write n > PIPE_BUF; only the 10 free bytes fit and the write
+    // returns short. Since the 2026-09-02 PIPE_BUF-atomicity fix, ONLY a write
+    // of n > PIPE_BUF partials -- a blocking write of n <= PIPE_BUF that does
+    // not wholly fit now WAITS for the whole fit (POSIX atomicity), so the old
+    // 100-byte form would sleep forever on this single-threaded boot path.
+    static u8 more[PIPE_BUF_SIZE + 50];
+    for (size_t i = 0; i < sizeof(more); i++) more[i] = 0xDD;
+    TEST_EXPECT_EQ(dev_write(wr, more, (long)sizeof(more)), 10L,
+        "short write (n > PIPE_BUF) returns space-available");
 
     spoor_clunk(rd);
     spoor_clunk(wr);
@@ -222,14 +226,18 @@ void test_pipe_nonblock_returns_eagain(void) {
 }
 
 // CNBFRAME (the byte-pipe 9P transport's tx end): frame-atomic + non-blocking.
-// The round-B F1 regression: without CNBFRAME the write above is PARTIAL when
-// the frame does not fit (returns space-available, 10L) and BLOCKS (sleeps)
-// when the pipe is exactly full -- and that sleep, taken under the 9P client's
-// held c->lock, is the #360 lock-across-sleep extinction. With CNBFRAME a write
-// commits the WHOLE frame or returns -T_E_AGAIN having written NOTHING, and
-// never sleeps. This is the exact contrast to
-// test_pipe_write_short_when_partially_full above (same 10-free pipe, atomic
-// EAGAIN here vs a 10-byte partial there).
+// The round-B F1 regression: a 9P frame is n <= msize <= PIPE_BUF, and since
+// the 2026-09-02 PIPE_BUF-atomicity fix a NON-CNBFRAME blocking write of
+// n <= PIPE_BUF that does not wholly fit BLOCKS (sleeps) until it does -- not a
+// partial. Taken under the 9P client's held c->lock, that sleep is the #360
+// lock-across-sleep extinction. (Even before the atomicity fix it was fatal:
+// then the non-fitting frame partial-wrote and stranded a fragment, desyncing
+// the shared stream, #349.) With CNBFRAME a write commits the WHOLE frame or
+// returns -T_E_AGAIN having written NOTHING, and never sleeps -- so the client
+// drops c->lock and retries. The contrast test
+// test_pipe_write_short_when_partially_full now uses n > PIPE_BUF (the only
+// size that still partials); a frame-sized non-fitting write there would block,
+// which is exactly the hazard this flag exists to avoid.
 void test_pipe_cnbframe_atomic_nonblocking(void) {
     struct Spoor *rd = NULL, *wr = NULL;
     TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "create");
@@ -247,8 +255,10 @@ void test_pipe_cnbframe_atomic_nonblocking(void) {
             "CNBFRAME: fitting frames commit whole");
 
     // (3) The frame no longer fits (96 free < 1000) -> -T_E_AGAIN, ATOMIC.
-    //     The non-CNBFRAME path would partial-write the 96 free bytes (the
-    //     contrast test above); CNBFRAME writes NOTHING and never sleeps.
+    //     The non-CNBFRAME path would BLOCK on a frame this size (n <= PIPE_BUF
+    //     waits for the whole fit since the 2026-09-02 atomicity fix; before it
+    //     it partial-wrote the 96 free bytes); CNBFRAME writes NOTHING and
+    //     never sleeps -- that is the whole point of the flag.
     TEST_EXPECT_EQ(dev_write(wr, frame, 1000L), (long)(-T_E_AGAIN),
         "CNBFRAME: a non-fitting frame -> -T_E_AGAIN, nothing written");
 

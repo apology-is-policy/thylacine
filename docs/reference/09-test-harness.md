@@ -241,8 +241,10 @@ believed.
 
 Fail-closed proven by revert-probe: one condition made unsatisfiable →
 `1232/1233 FAIL` in 3 s, message naming the condition, suite completing normally.
-Note a *broader* sabotage (deleting the real `wakeup(&r->read_rendez)` in
-`kernel/pipe.c`) does **not** probe this: it hangs the boot earlier, at
+Note a *broader* sabotage (deleting the real `poll_waiter_list_wake(&r->poll_list)`
+in `kernel/pipe.c` -- the ONLY pipe wake path since the 2026-09-02 multi-waiter
+rewrite; the `wakeup(&r->read_rendez)` this once named is gone) does **not** probe
+this: it hangs the boot earlier, at
 `userspace.attach_probe_round_trip`, which blocks in a real kernel `sleep()` —
 correctly untimed — before any guarded site is reached. A revert-probe has to be
 confined to the sites under test or it measures something else.
