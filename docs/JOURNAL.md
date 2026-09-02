@@ -92,7 +92,19 @@ both-stamp path. Worth stating plainly: this was an autonomous refinement to a
 just-landed audit-bearing surface; the batched holotype at the arc close is the
 check on the reasoning.
 
-**The scope decision.** H-4b-3 (the restore tool) is a genuinely large chunk —
+**H-4b-3a `75365f95` — the client half landed too.** Rather than carry a large
+unbuilt H-4b-3 as one lump, I split off the libtapestry piece: `Surface::open`
+now auto-consumes an inherited `TAPESTRY_CLAIM` from `/env`, upgrading a Content
+mint to a claim so a restored program lands in the tool's target leaf without
+knowing about placement (13.7's opaque cookie). It is a clean sub-boundary
+because it changes the surface-open hot path and so needs a boot to prove it a
+NO-OP for normal clients — and the panes E2E did (33/33; the battery has no
+`TAPESTRY_CLAIM`, so it opens exactly as before). Correctness does not lean on
+the one-shot latch: the server-side consume is already one-shot, so a spent or
+inherited-stale token falls back to focus placement on its own. The restore
+TOOL and the skeleton algorithm (H-4b-3b) are the fresh-context remainder.
+
+**The scope decision.** H-4b-3b (the restore tool) is a genuinely large chunk —
 spawn-as-user, `/env` token passing, a libtapestry auto-claim, and a skeleton
 algorithm that maps a saved tree onto tapestry's split/flatten. I kept it a
 focused next run rather than stack a large unbuilt chunk on unbuilt -2, and I
