@@ -6233,8 +6233,20 @@ impl Comp {
             // H-4b-2: the new empty leaf records its creator's principal, so
             // the creator (and only it, or the renderer) may later mint a
             // placement claim on it -- "placement is a capability".
-            self.layout
-                .set_owner_principal(new_leaf, actor_owner_principal(actor));
+            let owner = actor_owner_principal(actor);
+            self.layout.set_owner_principal(new_leaf, owner);
+            // Scripture 13.7's PLURAL "empty leaves record an owner_principal
+            // at split": splitting an EMPTY leaf yields TWO empty children,
+            // and both are the splitter's -- so a session that builds a whole
+            // tree from the environment root (owner 0) can claim EVERY leaf it
+            // built (layout restore's precondition), not just the new sibling
+            // of each split. Bounded to empties: an OCCUPIED original keeps
+            // its surface's ownership (this field is inert there), and an
+            // empty leaf is already anyone's to mutate (13.6), so re-stamping
+            // one confers nothing beyond the close every peer already holds.
+            if self.layout.is_empty_leaf(slot) {
+                self.layout.set_owner_principal(slot, owner);
+            }
         } else if let Some(rest) = cmd.strip_prefix("move ") {
             let d = Dir::parse(rest.trim()).ok_or(p9::E_INVAL)?;
             if !self.actor_owns_subtree(actor, slot) {
