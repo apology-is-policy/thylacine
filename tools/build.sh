@@ -2782,6 +2782,37 @@ populate_stratum_pool() {
     echo "==> populate pool: /lib/aurora/config baked + readback-verified (aurora-config cfg-2a)"
     [[ "$aurcfg_baked" != "$aurcfg_src" ]] && rm -f "$aurcfg_baked"
 
+    # H-3c: bake the presentation verb table at /lib/beacon/verbs (BEACON.md
+    # 7; the system tier of the plumber-style rules halcyond's obj menu
+    # offers). /lib exists from the ndb bake above. Under the HALCYON lever
+    # the baked file also carries the test rule `path wedge-test #wedge 6000`
+    # -- an INTERNAL action only a test-mode halcyond interprets (it freezes
+    # the renderer for 6 s with the menu up: THE GATE's wedged-owner proof;
+    # a production halcyond drops `#` rules at parse, the #880 strip class).
+    local verbs_src="$REPO_ROOT/usr/lib/beacon/verbs.default"
+    local verbs_baked="$verbs_src"
+    if [[ "${THYLACINE_HALCYON:-0}" != "0" ]]; then
+        verbs_baked=/tmp/thyla-beacon-verbs.$$
+        # FIRST in the file (= first in the menu), so the lever's proof
+        # reaches it with one Enter.
+        printf 'path   wedge-test   #wedge 6000\n' > "$verbs_baked"
+        cat "$verbs_src" >> "$verbs_baked"
+    fi
+    "$stratum_fs_bin" -s "$sock_path" mkdir /lib/beacon \
+        || { echo "==> populate pool: mkdir /lib/beacon FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" write /lib/beacon/verbs < "$verbs_baked" \
+        || { echo "==> populate pool: write /lib/beacon/verbs FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" sync \
+        || { echo "==> populate pool: sync (beacon verbs) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" read /lib/beacon/verbs | cmp -s - "$verbs_baked" \
+        || { echo "==> populate pool: /lib/beacon/verbs readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    if [[ "$verbs_baked" != "$verbs_src" ]]; then
+        rm -f "$verbs_baked"
+        echo "==> populate pool: /lib/beacon/verbs baked + readback-verified (BEACON 7; + the HALCYON lever's wedge-test rule)"
+    else
+        echo "==> populate pool: /lib/beacon/verbs baked + readback-verified (BEACON 7 system tier)"
+    fi
+
     # H-2: the renderer-choice lever (the cfg-4 gated-bake precedent). Under
     # THYLACINE_HALCYON=1 the device boots halcyond (joey reads the one-token
     # /lib/halcyon/renderer file post-pivot; absent = aurora, fail-safe).

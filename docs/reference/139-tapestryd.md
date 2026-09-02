@@ -724,6 +724,101 @@ the new surface); benign for aurora (ignores releases), a raw-evdev
 client would see a stuck key (task #43). The synthetic-release-on-
 focus-change fix is a hardening seam.
 
+## Menus (H-3c): the grab + the compositor-owned dismiss
+
+HALCYON.md 13.6 "Menus -- THE GATE" as built (2026-09-02). The renderer
+summons ONE ephemeral menu; from the placement on, the compositor owns it.
+
+**The surface.** `create W H role=menu` (`surface_ctl`; syntax first, then
+`peer_is_renderer` -> E_PERM; a `bind=` with the menu role is E_INVAL) mints
+a `Surface { is_menu: true }`: never hosted (`create` returns before the
+G-6 host step), no Direct count, no pointer routing by construction --
+`surface_target` names it ONLY while it is the placed menu
+(`Comp.menu: Option<MenuState { n, gen, rect }>`, gen-pinned against slot
+reuse). `Surface.shown_slot` records the slot of the last accepted present
+(set in `present` after validation) for the re-compose below.
+
+**The verbs** (`global_ctl`, behind the cfg-3 default-deny gate: authority
+before syntax). `menu place <surface-id> <x> <y>`: E_INVAL on syntax; the id
+must name a menu surface (E_NOENT) owned by the CALLER'S PROCESS
+(`Surface.owner_peer == Conn.peer_stripes`, E_PERM -- the pane tree's key);
+`Comp::menu_place` clamps (w, h) to the display and (x, y) so the rect stays
+inside, dismisses a previously placed DIFFERENT menu ("replaced"), sets
+`Comp.menu`, says `tapestryd: menu N placed at X,Y WxH`, reconciles (a placed
+menu forces Composed: the Direct arm gained `&& self.menu.is_none()`), and
+emits the menu a same-size CONFIGURE (a present before the place composed
+nowhere -- the redraw request makes the owner present again).
+`menu dismiss`: E_NOENT when none is placed, E_PERM unless the placed menu is
+the caller's process's; then `menu_dismiss("owner")`.
+
+**The grab.** `key_event`: with a menu placed, every key goes to the menu
+surface; an Esc PRESS (`KEY_ESC` or rune 0x1b) instead calls
+`menu_dismiss("esc")` and marks the code in the chord swallow-set
+(`chord_bit_set`) so its release + repeats are consumed by `chord_key`
+before they could reach the leaf, which keeps logical focus throughout (no
+FOCUS events). `ptr_route` replaces `ptr_hit` for MOVE (`ptr_commit`) and
+SCROLL: menu-relative clamped coords while placed; `ptr_rel_emit` sends the
+deltas to the menu too. `ptr_btn`: a PRESS outside `MenuState.rect` is the
+click-away -- `menu_dismiss("click-away")`, the press swallowed and its
+RELEASE swallowed through `menu_swallow_btn` (a release with no press would
+reach the pane under the pointer); a press inside routes to the menu.
+`chord_key`: a consumed Super press calls `menu_dismiss("chord")` before
+`chord_action`. **Click-to-focus** (HALCYON.md 6) rides the no-menu arm of
+`ptr_btn`: a press whose hit leaf is `focusable` and not `layout.focused`
+calls `layout.focus(leaf)` + `reconcile()`, and the press still reaches the
+client.
+
+**Compositor-owned dismiss = retire.** `menu_dismiss(reason)` sets
+`menu_reason` and calls `retire(n)`; `retire` carries the menu arm (unplace
+FIRST: `Comp.menu = None`, so no routing or target names the surface while it
+goes; the `tapestryd: menu N dismissed (<reason>)` line; the heal at the
+tail after the weave teardown + reconcile). Every other path converges on
+the same arm with reason `retire`: the owner's ctl `destroy`, `retire_conn`
+on the owner conn's death, a WEDGE (`push_event` false -> retire). A wedged
+or dead owner therefore cannot strand a modal -- nothing in the dismiss
+needs it.
+
+**The heal** (`menu_heal(rect)`, targeted, never structural): re-run
+`paint_borders(false)` + `paint_strips()` and push only their intersections
+with the rect; refill (`fill_rect`) + push the intersections of every
+visible leaf's tag bar (`header`, the resting fallback the chrome surface
+re-presents over) and of an EMPTY leaf's content (`BG_COLOR`); then the
+same-size CONFIGURE to every hosted surface and every `visible_chrome`
+surface whose target intersects the rect (wedged -> retire, the fans'
+discipline). A frozen client's content under the menu stays stale until it
+re-presents -- the reveal contract, no worse than the rest of its content.
+Rio's save-under was rejected: on the GPU composed path the screen BUFFER
+holds no client pixels (a save-under would restore chrome and blank
+content), and 4.5.9 wants both paths identical from outside.
+
+**The menu composes last.** `menu_reassert(r)`: if a placed menu with a
+`shown_slot` intersects `r`, `compose_cpu` its slot pixels (menu-relative
+sub-rect) into the screen buffer and return the intersection. Called from
+`screen_push` before its upload (chrome repaints + the CPU client path),
+from `screen_flush_rect` after the GPU path's flush (then pushed), and from
+`screen_flush_full` (the structural repaint). One mechanism, both paths; a
+client present under the menu can never paint over it.
+
+**Fans + census.** `visible_chrome` (renamed in spirit: every showable
+NON-hosted surface with its target) now includes the placed menu, so it
+receives FRAME ticks, the structural CONFIGURE, and the focus-only redraw.
+`compose_geometry` crops a menu like chrome (never letterboxes). The `ctl`
+read gained `menu none | <n> <x> <y> <w> <h>`.
+
+**Witnesses.** ls-halcyon on the lever (keyboard menu, click-a-path,
+click-away, THE GATE's wedged-owner proof, the post-zoom `surfaces 1`
+census); ls-gfx-panes (the battery's negatives: `role=menu` -> E_PERM,
+`role=menu bind=1` -> E_INVAL, `menu place/dismiss/bogus` -> E_PERM with
+`menu none` after). The audit round: `docs/AUDIT-TRIGGERS.md` (the H-3c row).
+
+**Also landed here: the shared-session surface leak.** The compositor
+retires a surface on ctl `destroy`, conn teardown, or a wedge -- a clunk is
+bookkeeping. The H-3b close's `chrome_on_shared` surfaces were dropped by a
+`Drop` that only closed fds, leaking one server-side surface (slot + weave +
+GPU resources) per dropped tag bar until the renderer's cap (36) filled.
+libtapestry's `Drop` now writes `destroy` on a `!owns_root` surface; the
+zoom census witnesses it.
+
 ## libtapestry + tapestry-demo
 
 `usr/lib/libtapestry` (`tapestry::Surface`) is the aux-POC client model

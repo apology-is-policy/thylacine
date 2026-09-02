@@ -710,6 +710,79 @@ two-tier rules file, `type`->verbs; the security clause is binding — the menu
 always displays the RESOLVED ref, frames carry no authority). The
 input-redirect + compositor-owned dismiss are the security-critical properties;
 the H-3 exit gate is "menu-dismiss-by-compositor proven vs a wedged client."
+AS-BUILT (H-3c, 2026-09-02; ratified under the 2026-09-01 standing
+authorization): **the menu is a `Role::Menu` SURFACE** (`create W H
+role=menu` -- renderer-gated at create like chrome, no bind: the compositor
+places it), never hosted, invisible until placed. The gated global verbs are
+`menu place <surface-id> <x> <y>` (display coords, clamped into the display;
+the surface must be a menu surface owned by the CALLER'S PROCESS -- E_NOENT
+if it is no menu, E_PERM if another process's; ONE menu at a time, a second
+placement dismisses the first) and `menu dismiss` (the owner's). **The
+grab**: while placed, every key routes to the menu surface (Esc is the
+compositor's -- its press dismisses and is swallowed, release + repeats
+through the chord swallow-set), every pointer event routes to it
+menu-relative, a BUTTON press outside its rect is the click-away (dismiss;
+the press AND its release swallowed -- rio: a click outside a menu cancels,
+never acts), a Super chord dismisses first and then acts, and FOCUS is
+untouched (the leaf keeps logical focus under the grab). **Compositor-owned
+dismiss = force-retire of the menu surface**, and `retire` carries the
+unplace + the heal, so Esc, click-away, a chord, the owner's verb, the
+owner's ctl `destroy`, the owner conn's death, a WEDGE and a replacement all
+converge on one mechanism that needs nothing from the owner -- the
+wedged-client property comes free of it. A placed menu forces Composed and
+composes LAST (`menu_reassert` re-composes its last-presented slot over any
+screen write that lands under it, on both compose paths); a dismiss returns
+to Direct through the F16 pending switch. The heal under a dismissed menu is
+TARGETED, not structural (a structural repaint blanks every pane until each
+re-presents -- a whole-screen flash per menu): the compositor's own pixels
+inside the rect are repainted + pushed (rings, strips, the resting tag-bar
+fill, the floor under an empty leaf) and every surface whose target
+intersects the rect gets the same-size CONFIGURE, the redraw request every
+reveal already heals by. Rio's save-under was REJECTED: on the GPU composed
+path the screen buffer holds no client pixels, and both paths must behave
+identically from outside (GPU-DESIGN 4.5.9). **Click-to-focus** (§6) landed
+with it: a button press in a hosted, focusable leaf that is not the focused
+one focuses it, and the press still reaches the client (i3 passes the click
+through). **halcyond**: `beacon::verbs` is the ONE rules engine (BEACON.md §7
+as-built); the system tier is baked at `/lib/beacon/verbs`; the session tier
+is deferred to the settings-channel push (halcyond runs pre-login as the
+device's renderer and has no `$home`). Esc-normal: `w`/`b` step obj runs (a
+run = the cells of a row sharing one obj index; the index is minted per
+frame, so it IS the run's identity), the selected run is underlined in
+ember, Enter opens its menu under the run; a left click on a run's glyphs
+(hit-tested against the last frame's laid geometry) opens the same menu at
+the pointer. The menu: `raised` ground, `border` stroke, the TYPE
+(proportional, muted) + the RESOLVED ref (monospace, full ink) first -- the
+anti-clickjack line -- a rule, then the verbs in monospace with the selected
+one on a `header` band; Up/Down/j/k move, Enter runs (the owner dismisses
+through the verb, then the expanded command + newline is typed into the
+console -- the tag line's "executes typed text"; the gesture is the choice);
+Esc never reaches halcyond. **THE GATE PROOF** (ls-halcyon on the lever): a
+`wedge-test` rule the lever bake puts first (`#wedge 6000`, an INTERNAL
+action only a test-mode halcyond admits -- the #880 strip class) freezes
+halcyond for 6 s with the menu up; Esc dismisses it compositor-side (its
+line) while the owner is frozen, keys typed over the real keyboard during
+the freeze route to the CONSOLE and run when it wakes (`pwd`'s output-only
+path), the rect heals, and no surface is WEDGED. Beside it the H-3c survey
+found the H-3b close's shared-session chrome leaking a server-side surface
+per dropped tag bar (a `Drop` that closed fds without `destroy`; the
+compositor retires only on `destroy` / conn teardown / a wedge) -- fixed in
+libtapestry's `Drop` and witnessed by the zoom's `surfaces 1` census. Three
+more mechanics the lever forced, all as-built: (1) Esc drains the console
+mirror BEFORE it freezes the cursor row, so "everything printed so far" is
+what Normal mode sees (keys are serviced before the drain within a pass; a
+key sent right after a command's output froze the view one command behind);
+(2) the menu is placed FIRST and then painted + presented ONCE -- the weave
+slots rotate per present, so a bare second present shows the next slot's
+zeros (a black menu); (3) **a 9P session's replies are read only by a thread
+inside a wait or an RPC on that session** (ARCHITECTURE 8.8.1.1's elected
+reader): the menu -- and every chrome tile -- lives on halcyond's pane-tree
+session while the console's stream lives on its own private session, so a
+loop parked on the console's ring never sees a menu key (and a tile's
+CONFIGURE landed only at the next reconcile's reads). While a menu is up
+halcyond waits on the MENU's ring (its FRAME ticks bound the wait; the
+compositor's dismiss EOFs it) and polls the console's stream; the chrome
+tiles keep their reconcile-driven repaint.
 
 **Status bar (H-3d).** A screen-bottom `Role::Chrome` surface halcyond paints
 (Daylight §6): workspaces / focused context / the sage-cinnabar condition slot /
@@ -719,6 +792,8 @@ clock. The dark bar that grounds the composition.
 Esc-normal -> select an obj run -> a key opens its verb menu. Click-to-focus +
 click-a-path added in the same chunk if cheap (the survey confirms neither
 exists today; pointer routing is under-the-pointer, no click-to-focus).
+AS-BUILT (H-3c): all four landed -- `w`/`b`/Enter on obj runs, click-a-path,
+click-to-focus (the Menus paragraph above has the mechanics).
 
 **RATIFIED VOTE 2 — scope + sequencing: four sub-chunks, full Daylight.**
 H-3a (pane bevels + hairline + cast shadow + the `libhalcyon::theme` crate +

@@ -204,9 +204,84 @@ by replacement, so an idle tile cannot wedge; `KEY`/pointer never reach chrome
 (not focused; `surface_at` walks leaf content rects). `TEV_CLOSE` or a dead
 stream marks the tile for the next reconcile.
 
+## The menu (H-3c): obj runs, the verb table, the summon
+
+HALCYON.md 13.6 "Menus -- THE GATE" + "obj interaction", BEACON.md 7 as
+built (2026-09-02). Same split as the chrome: `halcyond::menu` (lib, pure,
+host-tested) thinks; the bin's `menuset.rs` owns the surface.
+
+**Obj runs (`menu.rs`).** A run is the cells of one flat row sharing one
+obj index (`Style.obj`, idx+1 into `Block.objs`); the index is minted per
+`obj` frame and never shared, so it IS the run's identity.
+`runs_on_row(t, fr)` walks a Line's cells or a table row's cells in order;
+`obj_of(t, block, obj)` yields the (type, resolved ref); `step_run` moves
+the selection `w`/`b` across rows; `run_rect(laid, item, row, obj)` is the
+run's union rect over the laid block's (possibly wrapped) lines;
+`hit_run(laid, x, y)` is the inverse for a click. `Sel.obj` (select.rs) names
+the selected run on the cursor row and clears on every row motion; the
+render pass underlines it 2 px in `ember` (`run_mark`).
+
+**The verb table.** `beacon::verbs::parse` over `/lib/beacon/verbs` (read
+once at start, said as `N verb rules loaded`); `build_menu(rules, ty, ref)`
+expands each typed rule into a `Command` (the rc-quoted ref substituted) or
+an `Internal` action (`#...`, admitted only under the `test-mode` feature).
+`menu_size` + `menu_list` produce the Daylight list: `raised` ground,
+`border` 1 px stroke, the type (proportional 10.5 px, `fg_muted`) + the
+RESOLVED ref (monospace, `fg`) on the title row -- the anti-clickjack line
+-- a `border` rule, one monospace row per verb, the selected one on a
+`header` band (`fg_dim` for an internal action). `menu_key` maps
+Up/Down/j/k/Enter; `Menu::key` moves clamped and yields the chosen action.
+Test builds (the `test-mode` feature, default on) also say `act: no obj run
+...` / `act: obj N unplaced ...` on a silent no-op, `run at X Y W H rowh R`
+on `w`/`b`, `menu N configure -> repaint` and `menu N present failed` in the
+pump (the compositor says `menu N present slot S visible V` and `key C
+dropped (no focused surface)`).
+
+**The summon (main.rs).** The render pass keeps `frame` = (block id, screen
+y, height) per painted block (u64::MAX = the open block) and the open
+block's last layout; keyboard: Normal `w`/`b` -> `step_run`, Enter -> the
+selected run (the row's first when none) -> `run_rect` + the frame's y ->
+`summon` (surface coords + the console pane's `geometry` origin = display
+coords) -> `MenuSet::open`; click: `TEV_PTR_MOVE` tracks the pointer,
+`TEV_PTR_BTN` (left press) -> the frame block under the pointer ->
+`hit_run` -> the same summon at the pointer. `MenuSet::open` mints
+`Surface::menu_on_shared(troot, w, h)`, writes `menu place <id> <x> <y>` on
+that session (the renderer's peer; the pane-tree key), THEN paints + presents
+once (a present before the place composes nowhere; a bare second present
+would show the next slot's zeros -- the slots rotate per present -- which is
+how the lever first showed a black menu), and says `halcyond: menu N placed
+at X Y (WxH) for <type> <ref> run at RX RY RW RH` (the REQUESTED display
+coords; the compositor's own line carries the clamped rect). `service(gs,
+block_first)` drains the menu's own stream each pass and, while the menu is
+up, WAITS on its ring first: a 9P session's replies are read only by a
+thread inside a wait/RPC on that session (ARCH 8.8.1.1), the menu and the
+chrome tiles live on the pane-tree session, the console on its own -- a loop
+parked on the console's ring never saw a menu key, and a tile's CONFIGURE
+landed only at the next reconcile's troot reads. The wait is bounded by the
+menu's FRAME ticks (>= the idle rate) and the dismiss's EOF; step (1) polls
+the console non-blocking meanwhile. Esc drains the console mirror before it
+freezes the cursor row (keys are serviced before the drain in a pass).
+**The observer effect** (the witnesses): every diagnostic line halcyond or
+the compositor prints is mirrored into the console transcript and scrolls
+it, so a run rect reported earlier no longer holds; test builds say the
+selected run's CURRENT display rect + the mono row height on `w`, and the
+click leg subtracts that one row. `pump` drains the menu's
+own stream each pass: keys move/choose, CONFIGURE repaints, CLOSE or a dead
+stream = the compositor dismissed it (`menu closed by the compositor`). A
+`Command` choice: `close` (the owner's `menu dismiss`, then Drop's
+`destroy`), then the command + newline is fed to the console and the mode
+returns to Insert. An `Internal` `#wedge <ms>` (test-mode): the loop sleeps
+with the menu still placed -- THE GATE's wedged-owner lever -- and says
+`wedge-test: frozen ... / woke`.
+
 ## Tests
 
-- Host: 48 lib tests (the table above; incl. the round's F1 regression
+- Host: 54 lib tests (the table above; H-3c added `menu.rs`'s six: runs per
+  obj index in cell order incl. a table cell, stepping across rows both
+  ways, `run_rect`/`hit_run` agreeing on the laid geometry, the menu
+  showing the resolved ref + typed verbs with an unquotable ref keeping only
+  internal actions, clamped keys + Enter, the raised/bordered list growing
+  with items; `input.rs` pins `w`/`b`/Enter; incl. the round's F1 regression
   `open_block_freezes_on_bytes_so_the_budget_can_evict_it` — the OPEN block
   now freezes on bytes, `max_open_cost` = budget/8, so the budget's
   frozen-only eviction can reach a newline-free stream; before it 320 MiB
@@ -224,19 +299,33 @@ stream marks the tile for the next reconcile.
   content hairline, the top hairline row vanishing into the live tint), a
   failing command (`pwd; false`) keying the live tile cinnabar and a clean
   one keying it back, and zoom dropping the bars (parchment at the top).
+  Since H-3c: Enter on a path run opens the menu (the placed rect's dominant
+  colour is Daylight `raised`, the ref a resolved `/lib/aurora/` path), Esc
+  dismisses it compositor-side (`tapestryd: menu N dismissed (esc)`) and the
+  rect heals to parchment; in the split, a real QMP tablet click on the
+  run's display rect opens the same menu at the pointer and a click outside
+  it dismisses it (`(click-away)`) with NO second placement (the swallowed
+  press); THE GATE: the lever's `wedge-test` rule freezes halcyond 6 s with
+  the menu up, Esc dismisses it meanwhile, `ipwd` typed over QMP during the
+  freeze runs after the wake (`/home/michael`), the rect heals, and no
+  `WEDGED` line exists; after the zoom `cat /dev/tapestry/ctl` reads
+  `surfaces 1` (the dropped bars + every menu retired server-side).
 - ls-gfx-panes (default image, the battery as a NON-renderer): the negative
   twins — `role=chrome` create → E_PERM, `tag <A> status err` → E_PERM with
-  the pane's `status` file still `resting` after the refusal.
+  the pane's `status` file still `resting` after the refusal; H-3c:
+  `role=menu bind=1` → E_INVAL, `role=menu` → E_PERM, `menu place/dismiss/
+  bogus` → E_PERM with `menu none` in the ctl read after.
 - The default image's suite (1435/1435) pins the joey default arm
   (`aurora spawned`, no config).
 
 ## Status
 
 H-2 (the transcript MVP on the CPU floor) as of the H-2d close; H-3b-3
-added the per-leaf tag-bar chrome and H-3b-4 the live-tile keys + the status
-feed (DISPLAY-only; the section above). Not yet:
-raw-VT panes (H-3; `raw_vt_intent` latches today), menus (H-3c),
-layouts (H-4), compose (H-5), the vk executor + the display-list wire
+added the per-leaf tag-bar chrome, H-3b-4 the live-tile keys + the status
+feed, H-3c the obj verb menu (keyboard + click; the compositor-owned dismiss
+proven against a wedged owner). Not yet: raw-VT panes (H-3; `raw_vt_intent`
+latches today), the status bar (H-3d), the session-tier verbs (the settings
+push), layouts (H-4), compose (H-5), the vk executor + the display-list wire
 (H-6), images/`Embed` (H-7). Damage-rect presents are a recorded
 optimization (v0 presents full frames).
 

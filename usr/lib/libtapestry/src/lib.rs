@@ -183,6 +183,15 @@ fn parse_two(text: &str, key: &str) -> Option<(u32, u32)> {
     None
 }
 
+/// What `create` mints: a hosted content surface, a Role::Chrome surface
+/// bound to a pane's tag bar (H-3b), or a Role::Menu surface (H-3c).
+#[derive(Clone, Copy)]
+enum Mint {
+    Content,
+    Chrome(u32),
+    Menu,
+}
+
 impl Surface {
     /// Connect a fresh session and create a fullscreen surface (the display
     /// geometry is read from the global ctl).
@@ -214,7 +223,7 @@ impl Surface {
     }
 
     fn open_on(root: i64, w: u32, h: u32) -> Result<Surface, TapError> {
-        Self::open_on_bound(root, w, h, None, true)
+        Self::open_on_bound(root, w, h, Mint::Content, true)
     }
 
     /// H-3b-2: a Role::Chrome surface bound to pane `pane_id`. The compositor
@@ -228,7 +237,7 @@ impl Surface {
         if root < 0 {
             return Err(TapError::Connect);
         }
-        Self::open_on_bound(root, w, h, Some(pane_id), true)
+        Self::open_on_bound(root, w, h, Mint::Chrome(pane_id), true)
     }
 
     /// H-3b-4 (the round's R2-F2): a Role::Chrome surface minted on the
@@ -241,14 +250,26 @@ impl Surface {
         if root < 0 {
             return Err(TapError::Connect);
         }
-        Self::open_on_bound(root, w, h, Some(pane_id), false)
+        Self::open_on_bound(root, w, h, Mint::Chrome(pane_id), false)
+    }
+
+    /// H-3c: a Role::Menu surface on the CALLER's session -- the one
+    /// ephemeral menu the compositor places (`menu place <id> <x> <y>`),
+    /// grabs input for, and tears down itself (Esc / click-away / a chord /
+    /// the owner's death; HALCYON.md 13.6). Invisible until placed;
+    /// renderer-gated server-side. Never hosted, never focusable.
+    pub fn menu_on_shared(root: i64, w: u32, h: u32) -> Result<Surface, TapError> {
+        if root < 0 {
+            return Err(TapError::Connect);
+        }
+        Self::open_on_bound(root, w, h, Mint::Menu, false)
     }
 
     fn open_on_bound(
         root: i64,
         w: u32,
         h: u32,
-        chrome_bind: Option<u32>,
+        mint: Mint,
         owns_root: bool,
     ) -> Result<Surface, TapError> {
         // A shared root is never closed on a failure path.
@@ -278,11 +299,15 @@ impl Surface {
             None => return fail(&[own_root, ctl], TapError::Protocol),
         };
 
-        // create W H [role=chrome bind=<pane-id>]
+        // create W H [role=chrome bind=<pane-id> | role=menu]
         let mut cmd = alloc::string::String::new();
         let _ = core::fmt::write(&mut cmd, format_args!("create {} {}", w, h));
-        if let Some(pid) = chrome_bind {
-            let _ = core::fmt::write(&mut cmd, format_args!(" role=chrome bind={}", pid));
+        match mint {
+            Mint::Content => {}
+            Mint::Chrome(pid) => {
+                let _ = core::fmt::write(&mut cmd, format_args!(" role=chrome bind={}", pid));
+            }
+            Mint::Menu => cmd.push_str(" role=menu"),
         }
         let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
         if rc < 0 {
@@ -749,8 +774,18 @@ impl Surface {
 impl Drop for Surface {
     fn drop(&mut self) {
         // The weave fid's clunk drops the client mapping (the kernel
-        // ClunkMap); the ctl clunk + conn close retire the surface
-        // server-side.
+        // ClunkMap). The SURFACE retires server-side only on ctl `destroy`,
+        // the owning conn's teardown, or a wedge -- a clunk is bookkeeping.
+        // An own-session surface retires through the conn close below; one
+        // minted on a SHARED session must say `destroy` itself, or the slot,
+        // its weave pages and GPU resources outlive it until the session
+        // dies (the H-3b close's shared chrome leaked one per dropped tag
+        // bar and hit the renderer's cap after ~17 zoom cycles). Harmless
+        // on a surface the compositor already retired (a menu it
+        // dismissed): the stale fid answers an error nobody reads.
+        if !self.owns_root && self.ctl >= 0 {
+            unsafe { t_write(self.ctl, b"destroy".as_ptr(), 7) };
+        }
         let root = if self.owns_root { self.root } else { -1 };
         for fd in [self.event_fd, self.present_fd, self.weave_fd, self.ctl, root] {
             if fd >= 0 {

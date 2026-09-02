@@ -8,6 +8,8 @@
 //!     only bracket it.
 //!   - `sink`: the per-tier realization API programs emit through (Sink for
 //!     runs/zones, Table for listings).
+//!   - `verbs`: the presentation verb table (BEACON.md 7) -- the rules
+//!     engine a renderer's context menu offers per obj type (H-3c).
 //!   - `boxd` / `color` / `palette`: the cells tier -- the Bonfire visual
 //!     language, relocated verbatim from the coreutils crate (2026-09-01).
 //!     The color discipline (COREUTILS-THYLACINE-DESIGN.md) is inherited
@@ -27,6 +29,7 @@ pub mod boxd;
 pub mod color;
 pub mod palette;
 pub mod sink;
+pub mod verbs;
 pub mod wire;
 
 /// The renderer-advertised capability tier (BEACON.md 12.3; ARCH 23.5.4).

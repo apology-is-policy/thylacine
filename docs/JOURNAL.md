@@ -563,6 +563,96 @@ Verified by the lines: halcyond host 48/48; ls-halcyon on the lever PASS
 pane-tree gate leg, ls-gfx-age PASS [39 s], the 7 single-leaf CPU gfx
 PASS. All at jobs=1, after a lease wait behind aux's SMP gate.
 
+### H-3c: THE GATE — the obj verb menu, the grab, and a dismiss that needs nothing from its owner (same run)
+
+**What the chunk is.** The H-3 exit gate reads "menu-dismiss-by-compositor
+proven vs a wedged client". The whole design rests on two properties the
+compositor must hold alone: while a menu is up every key and pointer event
+goes to it and nothing reaches the leaf underneath; and the menu comes down
+on Esc, a click outside it, a chord, or its owner's death without the owner's
+cooperation. The as-built (HALCYON.md §13.6) makes the second property fall
+out of one mechanism: the menu is a `Role::Menu` surface and *dismissing it is
+retiring it* — `retire` carries the unplace and the heal, so Esc, click-away,
+a chord, the owner's own verb, ctl `destroy`, the conn's death, a wedge and a
+replacement all land in the same arm. A wedged halcyond cannot strand a modal
+because the modal's lifetime was never halcyond's.
+
+**Decisions taken under the standing authorization**, each with its
+alternative: the heal under a dismissed menu is targeted (chrome
+intersections re-pushed, the resting fills, a redraw CONFIGURE to the
+intersecting surfaces) rather than a structural repaint, which blanks every
+pane until each re-presents — a whole-screen flash per menu. Rio's save-under
+was the heritage answer and was rejected on a measured fact about this
+compositor: on the GPU composed path the screen buffer holds no client
+pixels, so a save-under would restore chrome and blank content there, and
+4.5.9 wants both paths identical from outside. The menu composes last by
+re-composing its shown slot over any screen write that lands under it — one
+`menu_reassert` on the three device-visible steps, both paths. The rules
+engine lives in the beacon crate (the vocabulary owner hosts the verb table),
+its file format is plumber-style, the ref is rc-single-quoted so the chosen
+command acts on exactly what the menu displayed, and a template starting with
+`#` is an internal action a production build drops at parse. The session tier
+is deferred honestly: halcyond runs pre-login and has no `$home`; the
+aurora-config precedent says the session tier arrives over the settings
+channel, and BEACON.md now says so too.
+
+**The proof.** The lever bake prepends a `wedge-test` rule; choosing it puts
+halcyond to sleep for six seconds with the menu placed. The scenario then
+sends Esc — the compositor's `dismissed (esc)` line is the only thing that can
+say it — and types `ipwd` over the real keyboard while the owner is still
+frozen. Those keys can only queue on the console surface if the grab is
+gone; after the wake, `pwd` runs and its output-only path appears. Had the
+grab stood, the keys would have sat on a menu surface halcyond later found
+dead; had the compositor wedge-retired the frozen console, no output could
+follow and a `WEDGED` line would be in the transcript (it must not be).
+
+**What the survey found before a line was written.** The compositor retires
+a surface on ctl `destroy`, conn teardown, or a wedge — a clunk is
+bookkeeping. The H-3b close's fix for the chrome pool moved every tag bar
+onto the renderer's shared session and dropped them with a `Drop` that only
+closed fds. Every zoom leaked a server-side surface per dropped bar; the
+renderer's cap of 36 fills after about seventeen zoom cycles, after which
+every tag bar fails to mint. The H-3b verify ran one zoom and could not see
+it. A resource freed by the replaced path's implicit cleanup must be freed by
+the replacement: `Drop` now writes `destroy` on a shared-session surface, and
+the scenario reads `surfaces 1` from `/dev/tapestry/ctl` after the zoom.
+
+**What the lever caught, in order — three mechanisms, none of them the
+menu.** Run one: the split-state Enter opened nothing, silently. Test-mode
+diagnostics (a say of the resolution, mirrored into the very transcript
+under test) showed the flat list at 56 rows on Esc and 61 on Enter: the
+scenario's cue was the serial, halcyond's drain runs after its keys within a
+pass, and Esc froze the cursor one command behind. Esc now drains first.
+Run three: the menu composed as a solid black rectangle. `MenuSet::open`
+painted, presented, placed, presented again — the weave slots rotate per
+present, and the second present showed the next slot's zeros. Place first,
+then one painted present. Run six: the menu opened, the Enter on it was
+never processed, yet a frame-tick witness proved the loop alive. The
+menu's redraw CONFIGURE had only ever been consumed at dismiss time, and
+the same was true of every chrome tile since H-3b-3: a 9P session's replies
+are read only by a thread inside a wait or an RPC on that session (ARCH
+8.8.1.1's elected reader). halcyond's one thread parks on the console's
+private session; the menu and the tiles live on the pane-tree session,
+whose wire nobody reads until a reconcile's synchronous reads happen to.
+While a menu is up halcyond now waits on the menu's ring — bounded by its
+frame ticks and the dismiss's EOF — and polls the console. The tiles'
+CONFIGUREs were never load-bearing (the reconcile repaints them), which is
+why H-3b's witnesses could not see it. Each of the three was found by an
+instrument, not a theory, and each instrument left a line in the transcript
+that moved the thing it measured — the witnesses now read the compositor's
+clamped rect and a fresh per-run report, and subtract the report's own row.
+
+**A mistake worth recording.** A "syntax check" of the scenario by `expect -c
+'source ...'` ran it: `lc_boot` spawned a real QEMU on the default image with
+no lease held, and the pipeline's `head` left it orphaned for 36 s before a
+PID kill. Any check that would run the file is a run; expect/Tcl syntax is
+checked with `tclsh` + `info complete`.
+
+Verified by the lines, jobs=1: beacon host 35/35, halcyond host 54/54;
+ls-halcyon on the lever PASS [88 s] with every H-3c line; default
+restored: ls-gfx-panes PASS [42 s] with the menu-gate negatives,
+ls-gfx-age PASS [39 s].
+
 ## 2026-09-01 (run 15, Fable) — H-1c-2: the emitters + the --color=auto unification; the pipe-budget deadlock caught twice
 
 Resumed from the run-14 self-compaction mid-H-1. The chunk: the four Beacon

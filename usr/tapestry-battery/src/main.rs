@@ -525,11 +525,16 @@ pub extern "C" fn rs_main() -> i64 {
     // H-3b-3. Errnos per libthyla-rs err.rs: T_E_INVAL = 22, T_E_PERM = 1.
     {
         let a_bind = alloc::format!("create 64 20 role=chrome bind={}", pa.id);
-        let probes: [(&str, i64, &str); 4] = [
+        let probes: [(&str, i64, &str); 6] = [
             ("create 64 20 role=bogus", -22, "unknown role -> E_INVAL"),
             ("create 64 20 role=chrome", -22, "chrome without bind -> E_INVAL"),
             ("create 64 20 bind=1", -22, "bind without chrome -> E_INVAL"),
             (a_bind.as_str(), -1, "chrome from a non-renderer -> E_PERM"),
+            // H-3c: the menu role takes no bind (syntax) and is renderer-gated
+            // (authority) -- an ungated menu would float over any pane and
+            // take its input.
+            ("create 64 20 role=menu bind=1", -22, "menu with a bind -> E_INVAL"),
+            ("create 64 20 role=menu", -1, "menu from a non-renderer -> E_PERM"),
         ];
         for (cmd, want, what) in probes.iter() {
             let rc = raw_create(root, cmd);
@@ -569,6 +574,33 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
         say!("battery: tag-status gate OK");
+    }
+
+    // H-3c: the menu verbs (`menu place <surface> <x> <y>` / `menu dismiss`)
+    // ride the same default-deny gate: a non-renderer sees E_PERM whatever
+    // it writes (authority before syntax), and the ungated `ctl` read shows
+    // no menu placed afterwards (a refusal that had placed one would read a
+    // rect). The positive twin -- the renderer placing a menu, the
+    // compositor dismissing it against a wedged owner -- is ls-halcyon's.
+    {
+        let probes: [(&str, &str); 3] = [
+            ("menu place 0 0 0", "place from a non-renderer"),
+            ("menu dismiss", "dismiss from a non-renderer"),
+            ("menu bogus", "unknown menu verb from a non-renderer"),
+        ];
+        for (cmd, what) in probes.iter() {
+            let rc = raw_ctl(root, cmd);
+            if rc != -1 {
+                say!("tapestry-battery: FAIL menu gate: '{}' rc {} want -1 (E_PERM; {})", cmd, rc, what);
+                return 1;
+            }
+        }
+        let ctl = read_file(root, "ctl").unwrap_or_default();
+        if !ctl.lines().any(|l| l == "menu none") {
+            say!("tapestry-battery: FAIL menu gate: ctl reads no `menu none` line after the refusals: {}", ctl.trim());
+            return 1;
+        }
+        say!("battery: menu gate OK");
     }
 
     // The pane tree's trust model (the H-3b round F2; HALCYON.md 13.6): a

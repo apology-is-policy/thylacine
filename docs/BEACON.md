@@ -186,6 +186,25 @@ A rich renderer makes every `obj` run mouse-sensitive:
   the same dispatch — text + (inferred or annotated) type → verb — so the
   transcript, the tag bar, and the context menu share one rules engine.
 
+**AS-BUILT (H-3c, 2026-09-02).** The rules engine is `beacon::verbs`
+(`usr/lib/beacon/src/verbs.rs`, host-tested): one rule per line
+`<type> <label> <command template...>`, `#` comments; `{}` in the template is
+replaced by the RESOLVED ref single-quoted the way ut's lexer reads it (rc's
+`''` escape), so the chosen command acts on exactly the ref the menu
+displayed; a ref carrying a control character gets no command verb at all
+(no quoting makes a newline safe on one line). Every field is length-capped
+(type 16 / label 32 / template 256 chars) and the rule count at 256 -- an
+over-long or malformed line is DROPPED, never truncated. A template starting
+with `#` is an INTERNAL action a renderer interprets itself (halcyond's
+test-mode `#wedge <ms>`, THE GATE's lever), admitted only when the parser is
+asked to and dropped by a production build (the #880 strip class). The
+system tier is baked at `/lib/beacon/verbs` from `usr/lib/beacon/verbs.default`
+(path: ls / cat / stat / cd / edit / hexdump; pid: kill; url: fetch). The
+SESSION tier is deferred: halcyond is spawned pre-login as the device's
+renderer and knows no `$home`, so `$home/lib/beacon/verbs` will arrive over
+the settings channel (the aurora-config cfg-2 push precedent), not as a file
+read -- the two-tier shape stands; the transport is named.
+
 **The security clause (binding, and the whole of it):** a Beacon frame can only
 ever change how bytes *look* and what a *user click offers* — **never execute,
 never elevate, never alter input routing, never trigger any action without a

@@ -23,8 +23,14 @@ publish.workspace = true
 license.workspace = true
 
 [features]
-default = ["guest"]
+default = ["guest", "test-mode"]
 guest = ["dep:libthyla-rs", "dep:libtapestry"]
+# H-3c: the renderer's test levers (the #880 strip-for-production class,
+# tapestryd's precedent): with the feature on, an INTERNAL verb rule
+# (`#wedge <ms>` in /lib/beacon/verbs) freezes the renderer with the menu
+# up -- THE GATE's wedged-owner proof; without it, `#` rules are dropped at
+# parse and no lever exists.
+test-mode = []
 
 [lib]
 name = "halcyond"

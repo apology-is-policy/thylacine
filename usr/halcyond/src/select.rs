@@ -83,12 +83,15 @@ pub fn row_text(t: &Transcript, fr: FlatRow) -> String {
 pub struct Sel {
     pub cursor: usize,
     pub anchor: Option<usize>,
+    /// H-3c: the selected obj run on the cursor row (its obj index), or
+    /// none. Cleared by every row motion; set by `w`/`b` (menu::step_run).
+    pub obj: Option<u16>,
 }
 
 impl Sel {
     /// A fresh cursor at the newest row.
     pub fn at_end(flat_len: usize) -> Sel {
-        Sel { cursor: flat_len.saturating_sub(1), anchor: None }
+        Sel { cursor: flat_len.saturating_sub(1), anchor: None, obj: None }
     }
 
     /// Clamp into a (possibly changed) flat list. New output while in
@@ -102,6 +105,7 @@ impl Sel {
         }
         if self.cursor >= flat_len {
             self.cursor = flat_len - 1;
+            self.obj = None;
         }
         if let Some(a) = self.anchor {
             if a >= flat_len {
@@ -111,6 +115,7 @@ impl Sel {
     }
 
     pub fn mv(&mut self, delta: i32, flat_len: usize) {
+        self.obj = None;
         if flat_len == 0 {
             return;
         }
@@ -219,7 +224,7 @@ mod tests {
 
     #[test]
     fn range_normalizes_direction() {
-        let mut sel = Sel { cursor: 5, anchor: Some(2) };
+        let mut sel = Sel { cursor: 5, anchor: Some(2), obj: None };
         assert_eq!(sel.range(), (2, 5));
         sel.cursor = 1;
         assert_eq!(sel.range(), (1, 2));

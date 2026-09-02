@@ -32,7 +32,7 @@ fn say(s: &str) {
 /// leaves after the cut -- the H-3b round F3), bounded by `READ_MAX`
 /// (the tree's files are small by construction; the bound is a backstop
 /// against a runaway server, not a size the parse relies on).
-fn read_file(root: i64, path: &str) -> Option<String> {
+pub fn read_file(root: i64, path: &str) -> Option<String> {
     const READ_MAX: usize = 1 << 20;
     let fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OREAD) };
     if fd < 0 {
@@ -142,8 +142,9 @@ impl ChromeSet {
             };
             want.push((l.id, tb.2, tb.3, key_for(l.focused, &status), name));
         }
-        // Gone (or bar-free): drop -- Drop closes the tile's conn and the
-        // compositor retires the surface.
+        // Gone (or bar-free): drop -- the tile lives on the shared session,
+        // so its Drop says `destroy` (the explicit retire) before closing
+        // its fds; a bare close would leak the slot server-side.
         let keep: Vec<u32> = want.iter().map(|w| w.0).collect();
         self.tiles.retain(|id, t| keep.contains(id) && !t.dead);
         for (id, w, h, key, name) in want {

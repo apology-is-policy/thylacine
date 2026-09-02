@@ -123,6 +123,11 @@ pub enum NormalAct {
     Paste,
     /// Esc in Normal: collapse the selection to the cursor.
     Collapse,
+    /// `w` / `b`: select the next / previous obj run (H-3c).
+    NextRun,
+    PrevRun,
+    /// Enter: open the verb menu for the selected obj run (H-3c).
+    Act,
 }
 
 /// Map a Normal-mode key (rune-first, then code) to its action.
@@ -140,6 +145,9 @@ pub fn normal_key(code: u16, rune: u32) -> NormalAct {
         0x79 => NormalAct::Yank,         // y
         0x70 => NormalAct::Paste,        // p
         0x1b => NormalAct::Collapse,     // Esc
+        0x77 => NormalAct::NextRun,      // w
+        0x62 => NormalAct::PrevRun,      // b
+        0x0d | 0x0a => NormalAct::Act,   // Enter
         _ => match code {
             103 => NormalAct::ScrollLines(1),      // Up
             108 => NormalAct::ScrollLines(-1),     // Down
@@ -245,6 +253,9 @@ mod tests {
         assert_eq!(normal_key(0, 0x6b), NormalAct::ScrollLines(1));
         assert_eq!(normal_key(0, 0x6a), NormalAct::ScrollLines(-1));
         assert_eq!(normal_key(0, 0x69), NormalAct::ToInsert);
+        assert_eq!(normal_key(0, 0x77), NormalAct::NextRun);
+        assert_eq!(normal_key(0, 0x62), NormalAct::PrevRun);
+        assert_eq!(normal_key(28, 0x0d), NormalAct::Act);
         assert_eq!(normal_key(0, 0x47), NormalAct::Bottom);
         assert_eq!(normal_key(104, 0), NormalAct::ScrollHalfPage(1));
         assert_eq!(normal_key(0, 0x76), NormalAct::ToggleSelect);

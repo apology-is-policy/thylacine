@@ -916,6 +916,16 @@ struct Surface {
     /// binding to a closed pane resolves to nothing and the surface is
     /// simply invisible until its owner destroys it.
     chrome_bind: Option<u32>,
+    /// H-3c: a Role::Menu surface -- the ephemeral verb menu (HALCYON.md
+    /// 13.6). Never hosted; showable only while it is THE placed menu
+    /// (`Comp.menu`), so it is non-focusable and outside the Direct count
+    /// by construction, like chrome. Retired by the compositor on every
+    /// dismiss path.
+    is_menu: bool,
+    /// The slot of this surface's last accepted present: what
+    /// `menu_reassert` re-composes when a screen write lands under a placed
+    /// menu. None until the first present.
+    shown_slot: Option<u32>,
 }
 
 /// The deferred flush a held present leaves behind. The pixel work
@@ -1290,6 +1300,19 @@ enum Scanout {
     Composed,
 }
 
+/// H-3c: the ONE placed menu -- its surface slot, the slot's generation pin,
+/// and the display rect it was clamped into (the grab region + its compose
+/// target).
+#[derive(Clone, Copy)]
+struct MenuState {
+    n: usize,
+    gen: u32,
+    rect: Rect,
+}
+
+/// evdev KEY_ESC -- the compositor's own key while a menu is placed.
+const KEY_ESC: u16 = 1;
+
 pub struct Comp {
     pub gpu: Gpu,
     surfaces: [Option<Surface>; MAX_SURFACES],
@@ -1464,6 +1487,19 @@ pub struct Comp {
     /// compares against the layout's focused surface and emits the
     /// lost/gained pair on every change.
     last_focus: Option<usize>,
+    /// H-3c: THE placed menu (one at a time). While Some, input is GRABBED
+    /// (every key and pointer event routes to it) and the scanout is
+    /// Composed. Cleared on every dismiss path through `retire`, which
+    /// carries the unplace + the heal -- so a wedged or dead owner cannot
+    /// strand it.
+    menu: Option<MenuState>,
+    /// The button whose PRESS was a click-away dismiss: its RELEASE is
+    /// swallowed too (a release with no press would reach the pane under
+    /// the pointer).
+    menu_swallow_btn: Option<u16>,
+    /// Why the placed menu is being retired (the diagnostic's word); set by
+    /// `menu_dismiss`, read + reset by the retire arm.
+    menu_reason: &'static str,
     /// Keys whose PRESS was swallowed by the Super chord layer (section
     /// 18.4: reserved chords never reach a surface); their release /
     /// repeat swallow too, even if Super lifted first (no stray release
@@ -2130,6 +2166,9 @@ impl Comp {
             present_prev_count: 0,
             weave_va_next: WEAVE_VA_BASE,
             last_focus: None,
+            menu: None,
+            menu_swallow_btn: None,
+            menu_reason: "retire",
             chord_down: [0; 4],
             chords: Chords::new(),
             ptr_x: 0,
@@ -2242,6 +2281,8 @@ impl Comp {
             old_weave: None,
             res_stale: [false; WEAVE_SLOTS as usize],
             chrome_bind: None,
+            is_menu: false,
+            shown_slot: None,
             comp_attached: false,
             gpu_said: false,
             held: None,
@@ -3519,6 +3560,14 @@ impl Comp {
     /// showable (hidden pane, unhosted, a stale binding, a bar-free leaf).
     fn surface_target(&self, n: usize) -> Option<Rect> {
         let s = self.surf(n)?;
+        if s.is_menu {
+            // H-3c: a menu shows exactly where `menu place` clamped it, and
+            // only while it is the placed one (gen-pinned against slot reuse).
+            return match self.menu {
+                Some(m) if m.n == n && m.gen == s.gen => Some(m.rect),
+                _ => None,
+            };
+        }
         if let Some(pid) = s.chrome_bind {
             let slot = self.layout.slot_of_id(pid)?;
             let p = self.layout.get(slot)?;
@@ -3535,12 +3584,13 @@ impl Comp {
         Some(p.content)
     }
 
-    /// Every showable chrome surface with its strip -- the second half of the
+    /// Every showable NON-HOSTED surface with its target -- chrome at its
+    /// strip, the placed menu at its rect (H-3c) -- the second half of the
     /// CONFIGURE + frame fans (`visible_hosted` is the first).
     fn visible_chrome(&self) -> Vec<(usize, Rect)> {
         let mut out = Vec::new();
         for n in 0..MAX_SURFACES {
-            if self.surf(n).map_or(false, |s| s.chrome_bind.is_some()) {
+            if self.surf(n).map_or(false, |s| s.chrome_bind.is_some() || s.is_menu) {
                 if let Some(r) = self.surface_target(n) {
                     out.push((n, r));
                 }
@@ -3711,7 +3761,9 @@ impl Comp {
     /// a same-size surface, takes the damage-clipped CROP.
     fn compose_geometry(&mut self, n: usize, x: u32, y: u32, pw: u32, ph: u32) -> Option<ComposeOp> {
         let (sw, sh_full, patchwork, chrome) = match self.surf(n) {
-            Some(s) if s.weave.is_some() => (s.w, s.h, s.patchwork, s.chrome_bind.is_some()),
+            Some(s) if s.weave.is_some() => {
+                (s.w, s.h, s.patchwork, s.chrome_bind.is_some() || s.is_menu)
+            }
             _ => return None,
         };
         let content = self.surface_target(n)?; // hidden / unhosted / stale bind: no target
@@ -3848,7 +3900,7 @@ impl Comp {
 
     /// `create W H`: the spec's WeaveFirst -- allocate + zero the weave,
     /// create the 2D resource, attach the whole weave as its backing.
-    fn create(&mut self, n: usize, w: u32, h: u32, chrome_bind: Option<u32>) -> Result<(), u32> {
+    fn create(&mut self, n: usize, w: u32, h: u32, chrome_bind: Option<u32>, is_menu: bool) -> Result<(), u32> {
         let (disp_w, disp_h) = (self.gpu.width, self.gpu.height);
         let s = self.surf(n).ok_or(p9::E_BADF)?;
         if s.state != SurfState::Minted {
@@ -3890,6 +3942,12 @@ impl Comp {
         }
         s.state = SurfState::Woven;
         s.chrome_bind = chrome_bind;
+        s.is_menu = is_menu;
+        if is_menu {
+            // H-3c: a menu is neither hosted nor placed at create -- it is
+            // invisible until its owner's `menu place`, which reconciles.
+            return Ok(());
+        }
         if chrome_bind.is_some() {
             // H-3b-2: chrome is NOT hosted -- surface_target places it at its
             // bound pane's tag-bar strip; reconcile fans it a CONFIGURE with
@@ -4469,6 +4527,187 @@ impl Comp {
         }
     }
 
+    // ---- H-3c: the menu (HALCYON.md 13.6 "Menus -- THE GATE") -------------
+
+    /// Place menu surface `n` at display point (x, y): clamp its rect into
+    /// the display, make it THE menu (a previously placed one is dismissed
+    /// first -- one at a time), force Composed, and ask the owner for its
+    /// frame (a present before the place composed nowhere).
+    fn menu_place(&mut self, n: usize, x: u32, y: u32) -> Result<(), u32> {
+        let (sw, sh, gen) = match self.surf(n) {
+            Some(s) if s.is_menu && s.weave.is_some() => (s.w, s.h, s.gen),
+            _ => return Err(p9::E_NOENT),
+        };
+        if self.menu.map_or(false, |m| m.n != n) {
+            self.menu_dismiss("replaced");
+        }
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let w = sw.min(dw);
+        let h = sh.min(dh);
+        let x = x.min(dw - w);
+        let y = y.min(dh - h);
+        let rect = Rect { x, y, w, h };
+        self.menu = Some(MenuState { n, gen, rect });
+        self.menu_swallow_btn = None;
+        say!("tapestryd: menu {} placed at {},{} {}x{}", n, x, y, w, h);
+        self.reconcile();
+        if !self.emit_configure_to(n, sw, sh) {
+            self.retire(n);
+        }
+        Ok(())
+    }
+
+    /// Compositor-owned dismiss: retire the placed menu's surface. `retire`
+    /// carries the unplace + the heal, so every dismiss path -- this one
+    /// (Esc / click-away / a chord / the owner's verb / a replacement), the
+    /// owner's ctl `destroy`, its conn's death, a WEDGE -- converges on the
+    /// one mechanism, and none of them needs the owner to cooperate.
+    fn menu_dismiss(&mut self, reason: &'static str) -> bool {
+        let m = match self.menu {
+            Some(m) => m,
+            None => return false,
+        };
+        self.menu_reason = reason;
+        self.retire(m.n);
+        if self.menu.map_or(false, |x| x.n == m.n) {
+            // The slot was already empty (retire returned before its arm):
+            // unplace + heal here so the grab can never outlive the surface.
+            self.menu = None;
+            self.menu_swallow_btn = None;
+            self.menu_heal(m.rect);
+        }
+        true
+    }
+
+    /// Fill a screen-BUFFER rect (clipped to the display). Buffer only; the
+    /// caller pushes.
+    fn fill_rect(&mut self, r: Rect, color: u32) {
+        let va = match &self.screen {
+            Some(s) => s.va,
+            None => return,
+        };
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let r = r.intersect(Rect { x: 0, y: 0, w: dw, h: dh });
+        if r.is_empty() {
+            return;
+        }
+        let px = va as *mut u32;
+        // SAFETY: clipped to the display; the buffer covers the display.
+        unsafe {
+            for y in r.y..r.y + r.h {
+                for x in r.x..r.x + r.w {
+                    *px.add((y as u64 * dw as u64 + x as u64) as usize) = color;
+                }
+            }
+        }
+    }
+
+    /// Heal the screen under a dismissed menu's rect `r` WITHOUT a structural
+    /// repaint (which blanks every pane until each re-presents -- a whole-
+    /// screen flash per menu). The compositor's own pixels are repainted and
+    /// pushed within the rect (rings + strips via the painters; the resting
+    /// tag-bar fill; the floor under an empty leaf), and every surface whose
+    /// target intersects the rect gets the same-size CONFIGURE -- the redraw
+    /// request every reveal already heals by. Rio's save-under was rejected:
+    /// on the GPU composed path the screen BUFFER holds no client pixels, so
+    /// a save-under would restore chrome and blank content there, and both
+    /// paths must behave identically from outside (GPU-DESIGN 4.5.9).
+    fn menu_heal(&mut self, r: Rect) {
+        if r.is_empty() {
+            return;
+        }
+        if self.screen.is_some() {
+            let mut rects = self.paint_borders(false);
+            rects.extend(self.paint_strips());
+            for pr in rects {
+                let i = pr.intersect(r);
+                if !i.is_empty() {
+                    self.screen_push(i);
+                }
+            }
+            let mut fills: Vec<(Rect, u32)> = Vec::new();
+            for (slot, _id) in self.layout.live_ids() {
+                let p = match self.layout.get(slot) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if !p.visible || !self.layout.is_leaf(slot) {
+                    continue;
+                }
+                let tb = p.tagbar.intersect(r);
+                if !tb.is_empty() {
+                    fills.push((tb, libhalcyon::theme::DAYLIGHT.header));
+                }
+                if matches!(p.kind, pane::Kind::Leaf { surface: None }) {
+                    let c = p.content.intersect(r);
+                    if !c.is_empty() {
+                        fills.push((c, pane::BG_COLOR));
+                    }
+                }
+            }
+            for (fr, color) in fills {
+                self.fill_rect(fr, color);
+                self.screen_push(fr);
+            }
+        }
+        let mut wedged: Vec<usize> = Vec::new();
+        for (_, n, c) in self.layout.visible_hosted() {
+            if !c.intersect(r).is_empty() && !self.emit_configure_to(n, c.w, c.h) {
+                wedged.push(n);
+            }
+        }
+        for (n, t) in self.visible_chrome() {
+            if !t.intersect(r).is_empty() && !self.emit_configure_to(n, t.w, t.h) {
+                wedged.push(n);
+            }
+        }
+        for n in wedged {
+            self.retire(n);
+        }
+    }
+
+    /// The menu composes LAST: re-compose the placed menu's shown slot into
+    /// the screen buffer wherever a screen write `r` lands under it, and
+    /// return the intersection for the caller to push. Called by every
+    /// device-visible step (`screen_push` before its upload, the GPU path's
+    /// flush, the full flush), so a client present or a chrome repaint under
+    /// the menu can never paint over it -- on either path, by one mechanism.
+    fn menu_reassert(&mut self, r: Rect) -> Option<Rect> {
+        let m = self.menu?;
+        let inter = r.intersect(m.rect);
+        if inter.is_empty() {
+            return None;
+        }
+        let (sw, sh, slot_stride, va, slot) = match self.surf(m.n) {
+            Some(s) if s.gen == m.gen => match (&s.weave, s.shown_slot) {
+                (Some(w), Some(slot)) => (s.w, s.h, s.slot_stride, w.va, slot),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        // Menu-relative source: the rect may be smaller than the surface
+        // (a menu larger than the display crops).
+        let src = Rect { x: inter.x - m.rect.x, y: inter.y - m.rect.y, w: inter.w, h: inter.h }
+            .intersect(Rect { x: 0, y: 0, w: sw, h: sh });
+        if src.is_empty() {
+            return None;
+        }
+        let op = ComposeOp {
+            src,
+            dst: Rect { x: m.rect.x + src.x, y: m.rect.y + src.y, w: src.w, h: src.h },
+        };
+        self.compose_cpu(op, va + (slot as u64) * slot_stride, sw, sh);
+        Some(op.dst)
+    }
+
+    /// The `ctl` read's menu line: `none` or `<n> <x> <y> <w> <h>`.
+    fn menu_text(&self) -> String {
+        match self.menu {
+            None => String::from("none"),
+            Some(m) => alloc::format!("{} {} {} {} {}", m.n, m.rect.x, m.rect.y, m.rect.w, m.rect.h),
+        }
+    }
+
     fn paint_borders(&mut self, fill_tagbars: bool) -> Vec<Rect> {
         use libhalcyon::theme::{DAYLIGHT as D, METRICS as M};
         let mut painted: Vec<Rect> = Vec::new();
@@ -4735,6 +4974,7 @@ impl Comp {
             Some(s) => s.res,
             None => return,
         };
+        self.menu_reassert(Rect { x: 0, y: 0, w: dw, h: dh });
         let _ = self.gpu.transfer_then_flush(res, 0, 0, 0, dw, dh);
     }
 
@@ -4781,7 +5021,9 @@ impl Comp {
                 Scanout::Boot => Scanout::Boot,
                 _ => Scanout::Off,
             }
-        } else if vis.len() == 1 && nleaves == 1 {
+        } else if vis.len() == 1 && nleaves == 1 && self.menu.is_none() {
+            // H-3c: a placed menu is a second visible thing -- it composes
+            // over the leaf, so Direct is off while one is up.
             let n = vis[0].1;
             let full = self
                 .surf(n)
@@ -5043,6 +5285,9 @@ impl Comp {
             Some(s) => s.res,
             None => return,
         };
+        // H-3c: the menu composes last -- re-assert it in the buffer under
+        // this push before the upload carries the region.
+        self.menu_reassert(r);
         let dw = self.gpu.width as u64;
         let off = ((r.y as u64) * dw + r.x as u64) * 4;
         let t0 = Instant::now();
@@ -5065,6 +5310,11 @@ impl Comp {
         let t0 = Instant::now();
         let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
         self.cost_add(Cost::Flush, t0);
+        // H-3c: a GPU-composed region under the placed menu -- put the menu
+        // back on top (buffer + push of just the intersection).
+        if let Some(i) = self.menu_reassert(r) {
+            self.screen_push(i);
+        }
     }
 
     /// Flush surface `n`'s held region (F13 release; also the implicit
@@ -5315,6 +5565,20 @@ impl Comp {
             None => return,
         };
         say!("tapestryd: retire surface {}", n);
+        // H-3c: the placed menu dies with its surface, on EVERY path (the
+        // owner's verb, Esc, click-away, a chord, ctl `destroy`, the conn's
+        // death, a WEDGE): unplace first so no routing or target names it
+        // while it goes, heal the screen under it at the tail.
+        let menu_heal: Option<Rect> = match self.menu {
+            Some(m) if m.n == n => {
+                self.menu = None;
+                self.menu_swallow_btn = None;
+                say!("tapestryd: menu {} dismissed ({})", n, self.menu_reason);
+                self.menu_reason = "retire";
+                Some(m.rect)
+            }
+            _ => None,
+        };
         // A stale last_focus naming this slot would suppress the gained
         // event for a FUTURE surface minted into it -- clear it (the
         // reconcile below re-emits for whatever takes focus).
@@ -5418,6 +5682,9 @@ impl Comp {
         // byte patterns mid-line (it split `/home/michael` in the panes
         // post-battery assert). The error/edge prints above stay.
         let _ = s.presents;
+        if let Some(r) = menu_heal {
+            self.menu_heal(r);
+        }
     }
 
     /// Retire every surface owned by a dying conn (teardown / Tversion).
@@ -5658,9 +5925,32 @@ impl Comp {
 
     /// Deliver a key to the FOCUSED leaf's surface (G-6 routing).
     pub fn key_event(&mut self, code: u16, value: u32, rune: u32, mods: u16) {
-        let n = match self.layout.focused_surface() {
-            Some(n) => n,
-            None => return, // no focused surface; input drops
+        // H-3c: the grab -- a placed menu takes every key. Esc is the
+        // compositor's: its press dismisses and is swallowed, with its
+        // release + repeats through the chord swallow-set, so no stray Esc
+        // reaches the leaf that keeps logical focus underneath.
+        let n = match self.menu {
+            Some(m) => {
+                if value >= 1 && (code == KEY_ESC || rune == 0x1b) {
+                    self.chord_bit_set(code, true);
+                    self.menu_dismiss("esc");
+                    return;
+                }
+                m.n
+            }
+            None => match self.layout.focused_surface() {
+                Some(n) => n,
+                None => {
+                    // No focused surface: input drops. Said in test builds
+                    // (a key that vanishes is otherwise undiagnosable on a
+                    // lever run; the #880 strip class).
+                    #[cfg(feature = "test-mode")]
+                    if value == 1 {
+                        say!("tapestryd: key {} dropped (no focused surface)", code);
+                    }
+                    return;
+                }
+            },
         };
         let ev = Tevent {
             kind: TEV_KEY,
@@ -5776,7 +6066,9 @@ impl Comp {
     /// a focus companion like keys, decoupled from the pointer position;
     /// PTR_MOVE keeps the under-pointer rule). Deltas clamp to i16.
     fn ptr_rel_emit(&mut self, dx: i32, dy: i32, mods: u16) {
-        let n = match self.layout.focused_surface() {
+        // H-3c: the grab takes the deltas too (a menu ignores them; the
+        // leaf underneath must not see motion it cannot act on).
+        let n = match self.menu.map(|m| m.n).or_else(|| self.layout.focused_surface()) {
             Some(n) => n,
             None => return,
         };
@@ -5799,10 +6091,24 @@ impl Comp {
     /// The shared position commit: MOVE is the coalescible class (R2-F4):
     /// an overflowing queue evicts it, never a control event, so a motion
     /// burst cannot WEDGE a surface.
+    /// H-3c: where pointer events go -- the placed menu (menu-relative,
+    /// clamped: the grab owns the whole display while it is up) or the
+    /// surface under the pointer.
+    fn ptr_route(&self, px: u32, py: u32) -> Option<(usize, u16, u16)> {
+        match self.menu {
+            Some(m) => {
+                let sx = px.saturating_sub(m.rect.x).min(m.rect.w.saturating_sub(1)).min(0xFFFF) as u16;
+                let sy = py.saturating_sub(m.rect.y).min(m.rect.h.saturating_sub(1)).min(0xFFFF) as u16;
+                Some((m.n, sx, sy))
+            }
+            None => self.ptr_hit(px, py),
+        }
+    }
+
     fn ptr_commit(&mut self, px: u32, py: u32, mods: u16) {
         self.ptr_x = px;
         self.ptr_y = py;
-        if let Some((n, sx, sy)) = self.ptr_hit(px, py) {
+        if let Some((n, sx, sy)) = self.ptr_route(px, py) {
             let ev = Tevent {
                 kind: TEV_PTR_MOVE,
                 code: 0,
@@ -5821,7 +6127,42 @@ impl Comp {
     /// Pointer button (evdev BTN_*) at the current pointer position.
     /// Non-droppable (a lost release strands a drag).
     pub fn ptr_btn(&mut self, code: u16, pressed: bool, mods: u16) {
-        if let Some((n, _, _)) = self.ptr_hit(self.ptr_x, self.ptr_y) {
+        // H-3c: the grab. A press OUTSIDE the placed menu is the click-away:
+        // the compositor dismisses and swallows the press AND its release
+        // (rio: a click outside a menu cancels, never acts -- it must not
+        // reach the pane under the pointer, where it would act). A press
+        // inside routes to the menu.
+        if self.menu_swallow_btn == Some(code) && !pressed {
+            self.menu_swallow_btn = None;
+            return;
+        }
+        let target = match self.menu {
+            Some(m) => {
+                if pressed && !m.rect.contains(self.ptr_x, self.ptr_y) {
+                    self.menu_swallow_btn = Some(code);
+                    self.menu_dismiss("click-away");
+                    return;
+                }
+                Some(m.n)
+            }
+            None => {
+                let hit = self.ptr_hit(self.ptr_x, self.ptr_y).map(|(n, _, _)| n);
+                // Click-to-focus (HALCYON.md 6): a press in a hosted leaf
+                // that is not the focused one focuses it -- and still
+                // reaches the client (i3 passes the click through). A pane
+                // marked non-focusable keeps its input without taking focus.
+                if pressed {
+                    if let Some(leaf) = hit.and_then(|n| self.layout.find_hosting(n)) {
+                        let focusable = self.layout.get(leaf).map_or(false, |p| p.focusable);
+                        if focusable && leaf != self.layout.focused && self.layout.focus(leaf) {
+                            self.reconcile();
+                        }
+                    }
+                }
+                hit
+            }
+        };
+        if let Some(n) = target {
             let ev = Tevent {
                 kind: TEV_PTR_BTN,
                 code,
@@ -5840,7 +6181,7 @@ impl Comp {
     /// Wheel scroll (signed delta) at the current pointer position.
     /// Non-droppable (discrete steps; losing one skips content).
     pub fn ptr_scroll(&mut self, delta: i32, mods: u16) {
-        if let Some((n, _, _)) = self.ptr_hit(self.ptr_x, self.ptr_y) {
+        if let Some((n, _, _)) = self.ptr_route(self.ptr_x, self.ptr_y) {
             let ev = Tevent {
                 kind: TEV_SCROLL,
                 code: 0,
@@ -5898,6 +6239,9 @@ impl Comp {
             return false;
         }
         self.chord_bit_set(code, true);
+        // H-3c: a chord dismisses a placed menu first, then acts -- the
+        // environment's plane outranks a modal.
+        self.menu_dismiss("chord");
         self.chord_action(code, mods & crate::keymap::MOD_SHIFT != 0);
         true
     }
@@ -11558,14 +11902,15 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "display {} {}\nsurfaces {}\nclock-rate {}\ntick {}\npanes {}\nfocused {}\n",
+                    "display {} {}\nsurfaces {}\nclock-rate {}\ntick {}\npanes {}\nfocused {}\nmenu {}\n",
                     comp.gpu.width,
                     comp.gpu.height,
                     comp.live_count(),
                     comp.clock_hz,
                     comp.tick,
                     comp.layout.live_ids().len(),
-                    comp.layout.id_of(comp.layout.focused).unwrap_or(0)
+                    comp.layout.id_of(comp.layout.focused).unwrap_or(0),
+                    comp.menu_text()
                 ),
             );
             // Warp-C C-3: which composed-pixel path presents are taking,
@@ -13441,6 +13786,51 @@ impl Conn {
             comp.reconcile();
             return Ok(());
         }
+        // H-3c: the menu verbs (HALCYON.md 13.6 "Menus -- THE GATE"). The
+        // renderer summons ONE ephemeral Role::Menu surface at a display
+        // point; the compositor owns it from there: input is redirected to
+        // it while it is up, and Esc / a click outside it / a chord / the
+        // owner's death all tear it down HERE, without the owner's
+        // cooperation. Authority first (the default-deny gate above), then
+        // syntax (E_INVAL), then the surface must be a menu surface owned by
+        // the CALLER'S PROCESS (E_NOENT if it is no menu, E_PERM if it is
+        // another process's -- the pane tree's ownership key).
+        if let Some(rest) = s.strip_prefix("menu ") {
+            let mut it = rest.split_ascii_whitespace();
+            match it.next() {
+                Some("place") => {
+                    let id: usize =
+                        it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+                    let x: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+                    let y: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+                    if it.next().is_some() {
+                        return Err(p9::E_INVAL);
+                    }
+                    let owner = comp
+                        .surf(id)
+                        .filter(|s| s.is_menu)
+                        .map(|s| s.owner_peer)
+                        .ok_or(p9::E_NOENT)?;
+                    if self.peer_stripes == 0 || owner != self.peer_stripes {
+                        return Err(p9::E_PERM);
+                    }
+                    return comp.menu_place(id, x, y);
+                }
+                Some("dismiss") => {
+                    if it.next().is_some() {
+                        return Err(p9::E_INVAL);
+                    }
+                    let m = comp.menu.ok_or(p9::E_NOENT)?;
+                    let owner = comp.surf(m.n).map(|s| s.owner_peer).unwrap_or(0);
+                    if self.peer_stripes == 0 || owner != self.peer_stripes {
+                        return Err(p9::E_PERM);
+                    }
+                    comp.menu_dismiss("owner");
+                    return Ok(());
+                }
+                _ => return Err(p9::E_INVAL),
+            }
+        }
         // H-3b-4: the tile status (HALCYON.md 13.6; HALCYON-VISUAL 1.4 /
         // 5.3 / 5.4). `tag <pane-id> status ok|err|resting` records the
         // exit of the last command completed in that tile. The renderer is
@@ -13575,6 +13965,7 @@ impl Conn {
                     role = match Role::parse(r) {
                         Some(Role::Content) => Role::Content,
                         Some(Role::Chrome) => Role::Chrome,
+                        Some(Role::Menu) => Role::Menu,
                         _ => return Err(p9::E_INVAL), // pin-target is a pane role
                     };
                 } else if let Some(b) = tok.strip_prefix("bind=") {
@@ -13583,17 +13974,27 @@ impl Conn {
                     return Err(p9::E_INVAL);
                 }
             }
-            let chrome_bind = match (role, bind) {
-                (Role::Content, None) => None,
+            let (chrome_bind, is_menu) = match (role, bind) {
+                (Role::Content, None) => (None, false),
                 (Role::Chrome, Some(pid)) => {
                     if !self.peer_is_renderer() {
                         return Err(p9::E_PERM);
                     }
-                    Some(pid)
+                    (Some(pid), false)
                 }
-                _ => return Err(p9::E_INVAL), // chrome needs a bind; content takes none
+                // H-3c: a menu takes no bind (the compositor places it at
+                // `menu place`); renderer-gated like chrome -- an ungated
+                // menu role would let any client float a surface over
+                // another client's pane and take its input.
+                (Role::Menu, None) => {
+                    if !self.peer_is_renderer() {
+                        return Err(p9::E_PERM);
+                    }
+                    (None, true)
+                }
+                _ => return Err(p9::E_INVAL), // chrome needs a bind; content + menu take none
             };
-            return comp.create(n, w, h, chrome_bind);
+            return comp.create(n, w, h, chrome_bind, is_menu);
         }
         if s == "destroy" {
             comp.retire(n);
@@ -13743,6 +14144,16 @@ impl Conn {
         // so it cannot hold the clock awake; hidden-surface presents are
         // filtered inside (audit F1).
         comp.note_present(n);
+        if let Some(s) = comp.surf_mut(n) {
+            s.shown_slot = Some(slot);
+            // Test builds: a menu present's slot + whether it can compose
+            // (the lever's black-menu hunt needed exactly this line).
+            #[cfg(feature = "test-mode")]
+            if s.is_menu {
+                let vis = comp.compose_visible(n);
+                say!("tapestryd: menu {} present slot {} visible {}", n, slot, vis);
+            }
+        }
 
         // The #56 present-style latch: a present whose damage does not
         // cover the full surface marks the client an ACCUMULATOR --

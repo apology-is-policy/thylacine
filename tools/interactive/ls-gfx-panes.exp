@@ -152,6 +152,17 @@ expect {
     timeout { lc_fail "battery never reached the tag-status gate" }
 }
 
+# H-3c: the menu verbs (`menu place` / `menu dismiss`) are gated like the
+# tile status -- a NON-renderer is refused whatever it writes, and the
+# `ctl` read shows `menu none` afterwards. The positive twin (halcyond
+# summoning a menu, the compositor dismissing it against a wedged owner)
+# is ls-halcyon's.
+expect {
+    -ex "battery: menu gate OK" { lc_pass "panes: menu gate refuses place/dismiss from a non-renderer (E_PERM; none placed)" }
+    -ex "tapestry-battery: FAIL" { lc_fail_detail "the menu gate leg failed" }
+    timeout { lc_fail "battery never reached the menu gate" }
+}
+
 # The pane tree's trust model (the H-3b round F2): a client acts only on
 # what it owns. From the battery, `close` / `focus` / a `tag` write on the
 # console renderer's pane are E_PERM and the pane is intact; `focus` on its

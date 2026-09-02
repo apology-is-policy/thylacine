@@ -105,6 +105,8 @@ pub enum Role {
     Content,
     Chrome,
     PinTarget,
+    /// H-3c: the ephemeral verb menu (a SURFACE role only; never a pane's).
+    Menu,
 }
 
 impl Role {
@@ -113,6 +115,7 @@ impl Role {
             Role::Content => "content",
             Role::Chrome => "chrome",
             Role::PinTarget => "pin-target",
+            Role::Menu => "menu",
         }
     }
     pub fn parse(s: &str) -> Option<Role> {
@@ -120,6 +123,7 @@ impl Role {
             "content" => Some(Role::Content),
             "chrome" => Some(Role::Chrome),
             "pin-target" => Some(Role::PinTarget),
+            "menu" => Some(Role::Menu),
             _ => None,
         }
     }
@@ -182,6 +186,13 @@ impl Rect {
     }
     pub fn is_empty(self) -> bool {
         self.w == 0 || self.h == 0
+    }
+    /// Does the half-open rect contain display point (x, y)?
+    pub fn contains(self, x: u32, y: u32) -> bool {
+        x >= self.x
+            && x < self.x.saturating_add(self.w)
+            && y >= self.y
+            && y < self.y.saturating_add(self.h)
     }
 }
 
