@@ -4147,9 +4147,11 @@ static s64 spoor_readdir_run(struct Spoor *c, u8 *scratch, long want,
                              u64 *last_cookie_out) {
     // #81: a T_OPATH navigation handle is NOT a byte-I/O channel -- reject
     // readdir too (listing a dir's entries is content the perm_check-exempt
-    // O_PATH open would otherwise leak for a non-readable dir). (An O_PATH open
-    // resolves STALK_WALK, which never sets union_snap, so this reject precedes
-    // the union branch by construction.)
+    // O_PATH open would otherwise leak for a non-readable dir). An O_PATH open
+    // resolves STALK_WALK, which SINCE R2-F2 DOES carry a point-only union_snap
+    // (so a maintainer must not assume CWALKONLY implies union_snap==NULL) -- but
+    // every O_PATH fd is stamped CWALKONLY, so this reject still precedes the
+    // union branch below.
     if (c->flag & CWALKONLY)                        return -T_E_BADF;
 
     u64 in_cookie = (u64)c->offset;   // the opaque resume cookie we resume FROM

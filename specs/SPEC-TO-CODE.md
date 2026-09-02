@@ -243,6 +243,15 @@ TLC verdicts at `Procs = {p1, p2}, Paths = {a, b}, Spoors = {s1, s2}, Names = {n
 | `territory_buggy_create_any_member.cfg`   | `BUGGY_CREATE_ANY_MEMBER` | CreateTargetCorrect violated      | (fast) |
 | `territory_buggy_remove_mcreate.cfg`      | `BUGGY_REMOVE_MCREATE_MEMBER` | RemoveTargetCorrect violated  | (fast) |
 
+**Rule-pin note (UM-7 R2-F8).** The union selectors (`WalkSel` / `CreateSel` /
+`RemoveSel`) are DEFINITIONAL invariants -- each states the SELECTION RULE
+(`= FirstHolder` / `= FirstCreateMember`) and its buggy cfg discriminates that
+rule. No `Next` action consumes them, so the model pins WHICH member an op
+picks, not the two-step IMPL mechanism (e.g. the R2-F4 uncrossed-point ->
+caller-re-probe path, fixed by probing member index 0). Treat these as rule
+pins, not mechanism models; the mechanism's rigor is the audit + the runtime
+tests.
+
 Each of the union buggy cfgs was ALSO checked against ONLY its target
 invariant (not the `Invariants` bundle) and violates exactly that one — the
 discrimination control (a bug hits its own check, not incidentally a refcount one).

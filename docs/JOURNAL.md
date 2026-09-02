@@ -23,6 +23,82 @@ needed the operator.
 ---
 
 
+## 2026-09-02 (aux, run 3, Opus 4.8, effort max) -- UM-8c-2..4: the F3/F5 close, then two more audit rounds
+
+Picked up at `2fa3aaa4` to close the last two UM-7 findings the prior run had
+scoped and deferred as "do together": **F3** (a union REMOVE hit the MCREATE
+member, not the entry's holder) and **F5** (an fd-based resolution off a union
+dirfd saw only member[0]). Both P2, both latent -- no shipped path drives them --
+but real defects against any EL0 program. What was meant to be a two-commit
+close became a five-commit, three-audit-round close, because each round found
+the fix broke or missed a sibling.
+
+**F3 (`5c2ef31d`).** The mutation path resolved its parent with `STALK_CREATE`
+(UM-5a's create-parent amode), which crosses a union to the first MCREATE
+member -- correct for a create, wrong for a remove. Spec-first (the union
+surface is re-enabled): added `RemoveSel`/`RemoveTargetCorrect` to
+`territory.tla`; the clean run came back **2,032,452 distinct -- byte-identical
+to UM-1's count**, so the invariant is additive by measurement, not assertion,
+and the buggy cfg counterexamples in 64 states. Impl: a new `STALK_REMOVE` amode
+leaves a union final quarry UNCROSSED; `stalk_union_member_holding` selects the
+first member whose walk finds the leaf; rename lands the destination in the
+SOURCE member when old+new name one union (Plan 9 within-member rename).
+
+**F5 (`ce5b1af0`).** The finding's own prescription ("consult
+`base->union_base`") was stale -- UM-8a had renamed the field to `union_snap` and
+dropped the point. Fix: carry the point back inside `union_snap`, then reuse F3's
+machinery for the base cross + fd-mutation handlers.
+
+**Round 2 (Fable 5.1) came back DIRTY AGAIN: 2 P1 + 2 P2.** Both P1s were real
+and I verified them against the code + Stratum source before touching anything:
+- **R2-F1**: UM-8a opened each union member IN PLACE and then had the readdir
+  dedup Twalk FROM that opened fid. A 9P server rejects a Twalk from an opened
+  fid (Stratum `h_walk`: `is_open -> EINVAL`, `server.c:1725`), so dedup silently
+  returned false for every dev9p member -- a union with a dev9p member searched
+  earlier lists shared names twice. The **same class as round-1's P0, one op
+  over**: the P0 fix broke the sibling op, and the shipped `/bin` escaped only
+  because its dev9p member is LAST. Fixed (`076f30d2`, UM-8c-4a): each member
+  now carries a `{opened, walkable}` pair -- readdir reads `opened`, dedup Twalks
+  an UNOPENED `walkable` clone minted before the open. **Proven by sabotage**:
+  reverting the dedup to the opened member with the fixture's new COPEN gate live
+  FAILs the suite 1501/1503; restored, green.
+- **R2-F2**: my F5 fix keyed on `union_snap`, which only a `STALK_OPEN` quarry
+  builds -- but native `fs::` opens its mutation parent `T_OPATH` (`STALK_WALK`),
+  which carried none, so the fix missed the exact handle class native code uses.
+  Fixed (`7dacf3cb`, UM-8c-4b): a POINT-ONLY snap (n==0, point ref'd, no member
+  opens) at a `STALK_WALK` union quarry.
+- **R2-F3/F4** (P2, same commit): a zero-component base dropped the union (clone
+  member[0] -> MCREATE bypass); and `viv_mutation_parent` re-probed union-ness in
+  a second ns_lock hold, so a peer unmount-to-one-member routed the unlink onto
+  the covered mounted-onto directory. Fixed: clone the POINT off a union base;
+  probe member index 0 (stable against the unmount).
+
+**Round 3 ran on the Opus fallback -- Fable's credits exhausted mid-run** (HTTP
+429, before it produced a finding). Per the binding never-skip-a-round
+discipline, straight to the highest available Opus at max, with the
+context-independence preamble (family diversity is not what an Opus round buys;
+re-deriving every claim from source is). It came back **CLEAN: 0 P0 / 0 P1 /
+0 P2 + 1 P3** -- the P3 a comment R2-F2 had falsified (`spoor_readdir_run` said
+"STALK_WALK never sets union_snap"; it does now, though the code stays correct
+because every O_PATH fd is CWALKONLY and rejected before the union branch).
+Fixed the comment. JSONL census: 109/109 `claude-opus-4-8`, no downgrade below
+the fallback. The 20-point verified-sound list independently confirmed the
+self-audit (the `{opened,walkable}` ref graph, the point-only ref surviving the
+cross, the index-0 probe strictly safer than index-1).
+
+**Cost / left open.** SMP amplifier gate **20/20** (default+ubsan smp4, 0
+corruption) at each of the two batch tips. Tests: `stalk.union_member_holding`,
+`_remove_uncrossed`, `_fd_base`, `_opath_base`, `_zero_component` (14 union tests
+total, 0 real FAIL). Contention note: main held the mac for its own gfx work at
+the close, so the final build+test+push queued behind it. **Tracked, not
+closed**: F9 (unmount-by-source needs a syscall arg = a format break -->
+escalation); R2-F5/F6 (SYS_WALK_OPEN + mount-over-mount union blindness,
+pre-existing, native nav uses SYS_OPEN); R2-F7 (an unmounted-union fd's readdir
+serves the snapshot while its mutations go live -- a posture inconsistency). The
+reusable lesson across three rounds: **a P0/P1 fix on one op is not verified
+against its siblings** -- round 1's readdir-open broke dedup (R2-F1); F5's
+snapshot-keying missed the O_PATH class (R2-F2). Sweep the sibling ops.
+
 ## 2026-09-02 (aux, run 2, Opus 4.8, effort max) -- UM-7 audit (DIRTY) + UM-8a/b/c-1
 
 Picked up from a self-compaction at the union-mounts "mechanism complete" tip
