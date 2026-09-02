@@ -22,6 +22,79 @@ needed the operator.
 
 ---
 
+
+## 2026-09-02 (aux, run 2, Opus 4.8, effort max) -- UM-7 audit (DIRTY) + UM-8a/b/c-1
+
+Picked up from a self-compaction at the union-mounts "mechanism complete" tip
+(1943a867). The one remaining arc step was UM-7: the arc-close holotype audit
+over the union surface (Territory + stalk, I-1/I-3/I-28). It came back **DIRTY**
+and that is the story of this run.
+
+**The prosecutor (Fable 5.1, JSONL census 90/90 -- no fallback, family-diverse
+vs the Opus impl) found 1 P0 + 1 P1 + 4 P2 + 5 P3.** The P0 is the one that
+matters: `union_readdir_run` crossed each union member with `clone_walk_zero` --
+a Twalk *clone*, never `Dev.open`'d -- then called `dev->readdir`. For a dev9p
+member that is a Treaddir on an unopened fid, which Stratum's `h_readdir` refuses
+(`is_open` -> EINVAL); the skip-on-error posture then silently dropped every
+dev9p member. `ls /bin` after UM-6 listed the initrd and never `sh` -- readdir
+and walk disagreed by construction. **My own self-audit missed it** -- I traced
+the readdir merge logic in isolation and trusted `m->dev->readdir(m,...)` without
+asking whether a clone-walked member was open. The prosecutor cross-read
+`dev9p.c` + Stratum's `server.c::h_readdir` -- exactly the context-independence a
+subagent review buys. And the fixture `fix_readdir` enumerated with no open
+requirement: a test double LOOSER than production, so the P0 sat green.
+
+**UM-8 = the correctness pass (round-2 re-audit owed -- dirty).** Three commits
+this run, each suite-verified:
+- **UM-8a @66358c5b** (F1 P0 + F2 P1 + F4-readdir + F7): the Plan 9 Chan.umh
+  answer the prosecutor recommended -- `Spoor.union_base` -> `union_snap`, a
+  kmalloc'd snapshot of the OPENED + R-gated members captured once at STALK_OPEN
+  and retained on the fd. Closes four findings with one mechanism (opened fid
+  for F1, per-member R-gate for F2, atomic snapshot for F4-readdir, immutable
+  set for F7). `stalk_cross_from` refactored to extract `stalk_cross_src`.
+  `fix_readdir` now COPEN-gated -- the F1 regression that makes the fixture
+  match production.
+- **UM-8b @2918bb4e** (F6 P2 + F10 P3): mount()'s idempotency arm ran before the
+  placement dispatch, so MREPL/MBEFORE/MAFTER of an EXISTING member converged
+  flags and returned -- MREPL left the other members, MBEFORE was a silent
+  reorder no-op. Now MREPL group-replaces and MBEFORE/MAFTER move; SYS_MOUNT
+  rejects >1 placement bit (F10).
+- **UM-8c-1 @a425a97c** (F4-walk + F4-create + F8): the walk and create resolvers
+  now take the atomic member snapshot too and skip a cross failure (F8).
+
+**The wrong turn I caught (the reusable part):** extracting `stalk_cross_src`
+moved the inline #66 mount-point-name transplant to the caller, and
+`stalk_union_child`/`_create_member` did not re-do it. A union child inherited
+the member SOURCE's name ("/") instead of the mount point's -- the walk resolved
+and executed FINE, but the exe Path came out "/ptyfs" not "/bin/ptyfs" and
+joey's V-4a-0 boot assert extincted init. The union_walk UNIT test asserted only
+qids, so it stayed green; the E2E caught it. Lesson: **extracting a helper drops
+an inline side-effect its callers now owe** -- enumerate every side effect the
+extracted code performed and re-do it at each site. Fixed the transplant + added
+a Path assertion to union_walk (seeding the qid-Dev fixture root's Path, which it
+otherwise lacks -- else `q->path` is NULL and the assert is vacuous: I proved
+that with a one-shot `uart_puts` debug rather than guessing).
+
+**Cost/verification**: suite green (0 FAIL, 9 union tests + 2 new F6 tests + the
+Path assertion PASS) on every sub-chunk; build rc=0; boot OK; V-4a-0 PASS. SMP
+gate over a425a97c (default-smp4 + ubsan-smp4, N=10) run at the arc tip.
+
+**What "fixed" does NOT cover**: F3 (unlink/rename/rmdir on a union resolve the
+parent with STALK_CREATE -> mutate the MCREATE member, not the holder) and F5
+(fd-base union: a handle to a union point holds member[0]; the base cross never
+consults `union_snap`) remain OPEN -- both P2, both LATENT (no shipped path
+exercises union unlink/rename or an fd-relative union walk yet). They interact
+(both are "an fd/parent to a union must reach the right member") and are delicate
+resolver work -- deferred to a fresh context with a scoped design (F3 needs the
+leaf name at the union final quarry; two shapes analyzed in the arc memory). F9
+(unmount-by-source) is a syscall-arg change = a format break, escalation-tracked.
+The round-2 re-audit (dirty follow-up) batches over all of UM-8 once F3/F5 land.
+
+**Decisions**: proceeded autonomously per the operator-away rule (Opus arm: stop
+only at escalation-list items; these fixes are kernel-internal corrections toward
+ARCH/spec with a Fable-originated heritage design, not scripture forks). Deferred
+F3/F5 to a fresh context -- a scope/quality call, not a scripture change.
+
 ## 2026-09-02 (aux) -- union mounts UM-5: readdir merges the members
 
 Second run of the union arc (after a self-compaction at the 600k line). The WALK
