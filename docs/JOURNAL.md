@@ -93,8 +93,44 @@ I kept the arc coherent there (readdir beside walk) and flagged the vault to
 absorb the whole union arc when it next runs -- rather than block UM-5 on a
 dormant agent or split the arc's prose across two homes.
 
-**Next**: UM-5a (MCREATE target member) -> UM-6 (/bin/sh) -> UM-7 (arc-close
-holotype audit + the AUDIT-TRIGGERS row + CLAUDE index, batched).
+### UM-5a (same run): union create -> the MCREATE member
+
+Ran straight through the UM-5 checkpoint into UM-5a (the create side of the
+mechanism). A create in a union must land in the first `MCREATE`-flagged member
+(ARCH 9.5); the parent resolved via `STALK_WALK`, which crosses a union parent to
+member[0] -- losing the MCREATE target.
+
+Design: a new `STALK_CREATE` amode (Plan 9 `Acreate`). Before adding it I audited
+every `amode ==`/`!=` check in stalk.c -- they are almost all `== STALK_OPEN` /
+`STALK_MOUNT` / `STALK_STAT`, so a 4th value falls into the `STALK_WALK`-like
+default everywhere except the three spots I touch (the validation, the mask
+[0xFF already fits], and the final cross). That audit is what made a new amode
+low-risk rather than a scattered-conditional hazard. `sys_stalk_parent` (both
+create callers) switched to it; a non-union parent crosses to the mounted root
+exactly as WALK, so every existing create is unchanged (the suite confirms).
+
+Semantics settled by ARCH 9.5, not guessed: the create is MEMBER-SCOPED (Plan 9)
+-- `stalk_union_create_member` picks the first MCREATE member and creates there
+without checking other members for the leaf; the merged-view existence check is
+the open-first leg's job. A consequence recorded as a documented divergence: an
+`O_EXCL` create can shadow a name in a non-MCREATE member. No MCREATE member ->
+`-T_E_ACCES` (no writable target), never a silent create in a read-only member.
+
+A wrong turn, caught by the build: the two e2e create tests use the #50
+`ocp_proc` / `ocp_teardown` / `sys_open_create_kpath_for_proc` helpers, which are
+defined LOWER in test_stalk.c than where I placed the tests -- 11 implicit-decl
+errors. A failing build after a refactor is a finding, not an obstacle: added
+forward decls (a static forward decl matching the later static def is legal).
+Rebuilt clean.
+
+Verified: suite **1498/1498** (+3: MCREATE-flag-selects via the REAL create path
+asserting `g_fix_create_last_parent`, first-MCREATE-wins, no-MCREATE->EACCES).
+SMP gate at the UM-5a tip (covers the whole union resolver surface incl. UM-5):
+*(running at write time)*.
+
+**Next**: UM-6 (/bin/sh, the X-11 application: pool `sh -> /viv/abin/sh` grafted
+MAFTER under devramfs at /bin; git-shell LS-CI) -> UM-7 (arc-close holotype audit
++ the AUDIT-TRIGGERS row + CLAUDE index, batched over walk+readdir+create).
 
 ## 2026-09-02 (aux) -- union mounts: the operator turned a /bin/sh symlink into the real Plan 9 feature
 

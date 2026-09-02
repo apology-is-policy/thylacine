@@ -329,6 +329,14 @@ The mechanism (`kernel/syscall.c::union_readdir_run`, reached from `spoor_readdi
 
 **Cost**: O(dir) per page (each member read once per page; unions are small). Cross-page snapshot-inconsistency under concurrent modification is the standard POSIX readdir posture. `union_readdir_run` is non-static (like `viv_dirent64_encode_run`) so the merge/dedup/ordinal-pagination is unit-tested directly (`kernel/test/test_stalk.c::test_stalk_union_readdir{,_paginate,_nontagged}`).
 
+### Union create: the MCREATE member (UM-5a, AS-BUILT)
+
+A create in a union lands in the **first member (declared order) whose mount entry carries `MCREATE`** (ARCH 9.5 "create in the first writable mount"; `specs/territory.tla::CreateTargetCorrect`). A union with NO `MCREATE` member has no writable target and the create is denied `-T_E_ACCES` -- never silently placed in a read-only member.
+
+The parent of a create resolves via a new **`STALK_CREATE`** amode (Plan 9 `Acreate`, `stalk.h`): identical to `STALK_WALK` (resolve-only, no open, quarry crossed) EXCEPT at a union final quarry, where it crosses to the first `MCREATE` member (`stalk_union_create_member`) instead of member 0. A non-union parent (plain dir or single-member mount) crosses to the mounted root exactly as `STALK_WALK`, so every non-union create is unchanged. Both create callers -- `open_create_try_create` (`SYS_OPEN_CREATE`) and the phenotype openat-O_CREAT/mkdirat path -- go through `sys_stalk_parent`, now `STALK_CREATE`.
+
+The create is **member-scoped** (Plan 9): `stalk_union_create_member` does NOT check other members for the leaf name before creating -- the merged-view existence check is the open-first leg's job (a plain create opens first across all members via the union walk, then creates in the `MCREATE` member only on `ENOENT`). A consequence: an `O_EXCL` create can shadow a name that exists in a NON-`MCREATE` member (the exclusive check is scoped to the `MCREATE` member the create targets) -- the ratified Plan 9 semantics, a documented divergence from POSIX-strict merged-view `O_EXCL`. Tested: `test_stalk_union_create` (MCREATE flag selects over member[0]), `test_stalk_union_create_first_wins` (first MCREATE in declared order), `test_stalk_union_create_no_target` (no MCREATE -> EACCES).
+
 ### `unmount` removes ONE entry per call
 
 Plan 9's `unmount(name, old)` can remove a specific entry; `unmount(name)` removes everything at name. Thylacine's kernel-internal `unmount(territory, target_path)` removes ONE entry (the first found). To unmount a union, call repeatedly until -1.
@@ -380,7 +388,7 @@ ARCH §9.6 specifies `mount(source_spoor_fd, target_path, flags)` as a user-visi
 | RFNAMEG shared territory | Phase 5+ |
 | Mount-union walk (MBEFORE/MAFTER ordering at walk time) | **Landed (UM arc)** -- `stalk_union_child` + `mount_member_at`; `territory.tla::WalkFirstHit`/`OrderCorrect` |
 | Mount-union readdir (merge + dedup first-member-wins) | **Landed (UM-5)** -- `union_readdir_run` + `Spoor.union_base`; `territory.tla::ReaddirDedupFirstWins` |
-| Mount-union create (MCREATE target member) | UM-5a (modelled: `territory.tla::CreateTargetCorrect`) |
+| Mount-union create (MCREATE target member) | **Landed (UM-5a)** -- `STALK_CREATE` + `stalk_union_create_member`; `territory.tla::CreateTargetCorrect` |
 | `pivot_root` / `unchroot` (replace one-way chroot) | v1.x per CORVUS-DESIGN §10.1 Q2 |
 | RB tree key=qid (replacing flat arrays) | Phase 5+ when count growth justifies |
 | Multi-component walker consuming mount table | Phase 5+ alongside path resolution |

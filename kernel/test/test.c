@@ -963,6 +963,9 @@ void test_stalk_union_xskip(void);
 void test_stalk_union_readdir(void);
 void test_stalk_union_readdir_paginate(void);
 void test_stalk_union_readdir_nontagged(void);
+void test_stalk_union_create(void);
+void test_stalk_union_create_first_wins(void);
+void test_stalk_union_create_no_target(void);
 void test_stalk_pheno_symlink_reanchor(void);
 void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
@@ -3540,6 +3543,9 @@ struct test_case g_tests[] = {
     { "stalk.union_readdir",           test_stalk_union_readdir,           false, NULL },
     { "stalk.union_readdir_paginate",  test_stalk_union_readdir_paginate,  false, NULL },
     { "stalk.union_readdir_nontagged", test_stalk_union_readdir_nontagged, false, NULL },
+    { "stalk.union_create",            test_stalk_union_create,            false, NULL },
+    { "stalk.union_create_first_wins", test_stalk_union_create_first_wins, false, NULL },
+    { "stalk.union_create_no_target",  test_stalk_union_create_no_target,  false, NULL },
     { "stalk.pheno_symlink_reanchor",  test_stalk_pheno_symlink_reanchor,  false, NULL },
     { "stalk.path_accumulate",         test_stalk_path_accumulate,         false, NULL },
     { "stalk.path_dotdot",             test_stalk_path_dotdot,             false, NULL },

@@ -83,6 +83,9 @@ void test_stalk_union_xskip(void);
 void test_stalk_union_readdir(void);            // UM-5: merge + dedup first-wins
 void test_stalk_union_readdir_paginate(void);   // UM-5: ordinal-cursor resume
 void test_stalk_union_readdir_nontagged(void);  // UM-5: control (not over-tagged)
+void test_stalk_union_create(void);             // UM-5a: MCREATE member selected
+void test_stalk_union_create_first_wins(void);  // UM-5a: first MCREATE (declared order)
+void test_stalk_union_create_no_target(void);   // UM-5a: no MCREATE -> EACCES
 void test_stalk_pheno_symlink_reanchor(void);   // VIVARIUM section 13 (F1)
 // #66: namespace-name accumulation through the real resolver.
 void test_stalk_path_accumulate(void);
@@ -1960,6 +1963,108 @@ void test_stalk_union_readdir_nontagged(void) {
     territory_unref(p.territory);
     spoor_clunk(um2); spoor_clunk(pt);
     spoor_unref(root);
+}
+
+// =============================================================================
+// UM (union mounts) -- union CREATE targets the first MCREATE member (UM-5a).
+//
+// A create in a union lands in the FIRST member (declared order) whose mount
+// entry carries MCREATE (ARCH 9.5 "create in the first writable mount";
+// territory.tla::CreateTargetCorrect). The parent resolves via STALK_CREATE,
+// which differs from STALK_WALK only at a union final quarry. These drive the
+// REAL create path (sys_open_create_kpath_for_proc, asserting the create's
+// parent qid via the fixture's g_fix_create_last_parent) plus a stalk-level
+// first-wins check.
+// =============================================================================
+
+// The #50 create-driver helpers are defined lower in this file (the
+// SYS_OPEN_CREATE battery); forward-declare them for the two e2e create tests
+// here. A static forward decl matching the later static definition is legal;
+// the extern matches the identical decl at the #50 section head.
+extern s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+                                          const char *kpath, u64 klen,
+                                          u64 omode_raw, u64 perm_raw);
+static struct Proc *ocp_proc(const char *dot);
+static void ocp_teardown(struct Proc *p);
+
+// The MCREATE flag -- not member position -- selects the create target: member 0
+// (um1) is NOT MCREATE, member 1 (um2) is, so the create lands in um2.
+void test_stalk_union_create(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/");
+    TEST_ASSERT(p != NULL, "proc + territory");
+
+    struct Spoor *root = p->territory->root_spoor;
+    struct Spoor *um1 = stalk(p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p->territory, um1, pt, MBEFORE),          0, "um1 MBEFORE (no MCREATE)");
+    TEST_EXPECT_EQ(mount(p->territory, um2, pt, MAFTER | MCREATE), 0, "um2 MAFTER|MCREATE");
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+
+    fixmade_reset();
+    s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            "/umpt/newfile", 13, 1 /*OWRITE*/, 0644);
+    TEST_ASSERT(fd >= 0, "create /umpt/newfile in the union");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)25,
+                   "create landed in the MCREATE member (um2, qid 25), NOT member[0] um1 (22)");
+
+    ocp_teardown(p);
+}
+
+// First MCREATE member (declared order) wins when MORE THAN ONE is writable:
+// both um1 (MBEFORE) and um2 (MAFTER) carry MCREATE, so um1 -- searched first --
+// is the target. Stalk-level: STALK_CREATE returns the chosen member root.
+void test_stalk_union_create_first_wins(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE | MCREATE), 0, "um1 MBEFORE|MCREATE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER  | MCREATE), 0, "um2 MAFTER|MCREATE");
+
+    struct Spoor *q = stalk(&p, root, "umpt", 4, STALK_CREATE, 0);
+    TEST_ASSERT(q != NULL, "STALK_CREATE resolves the union create target");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22,
+                   "first MCREATE member wins (um1 root, qid 22), not um2 (25)");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// A union with NO MCREATE member has no writable create target -> the create is
+// denied -T_E_ACCES and NOTHING is created (not silently placed in a read-only
+// member). Real create path.
+void test_stalk_union_create_no_target(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/");
+    TEST_ASSERT(p != NULL, "proc + territory");
+
+    struct Spoor *root = p->territory->root_spoor;
+    struct Spoor *um1 = stalk(p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p->territory, um1, pt, MBEFORE), 0, "um1 MBEFORE (no MCREATE)");
+    TEST_EXPECT_EQ(mount(p->territory, um2, pt, MAFTER),  0, "um2 MAFTER (no MCREATE)");
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+
+    fixmade_reset();
+    s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            "/umpt/newfile", 13, 1 /*OWRITE*/, 0644);
+    TEST_EXPECT_EQ((long)fd, (long)(-(s64)T_E_ACCES),
+                   "no MCREATE member -> create denied EACCES");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)-1,
+                   "nothing was created in any member");
+
+    ocp_teardown(p);
 }
 
 // =============================================================================

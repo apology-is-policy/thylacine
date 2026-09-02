@@ -286,6 +286,32 @@ bool stalk_union_has_child(struct Proc *p, struct Spoor *dir,
     return found;
 }
 
+// stalk_union_create_member (UM) -- the create-target member of the union at
+// `base`: the FIRST member (declared order) whose mount entry carries MCREATE,
+// crossed to its leaf root, ref-held (ARCH 9.5 "create in the first writable
+// mount"). Returns the crossed member (caller clunks), or NULL when no member
+// is MCREATE-flagged (caller answers -T_E_ACCES: the union has no writable
+// target) or a member cross fails (*errp = T_E_IO). The create is member-scoped
+// (Plan 9): it does NOT check other members for the leaf name -- the merged-view
+// existence check is the open-first leg's job.
+static struct Spoor *stalk_union_create_member(struct Proc *p, struct Spoor *base,
+                                               int *errp) {
+    *errp = 0;
+    if (!p || !p->territory || !base) return NULL;
+    for (int k = 0; k < PGRP_MAX_MOUNTS; k++) {
+        u32 flags = 0;
+        struct Spoor *src = mount_member_at(p->territory, base, k, &flags);
+        if (!src) break;                       // past the last member
+        spoor_clunk(src);                      // needed only the flags; re-cross below
+        if (flags & MCREATE) {
+            struct Spoor *cm = NULL;
+            if (stalk_cross_from(p, base, k, &cm, NULL) < 0) { *errp = T_E_IO; return NULL; }
+            return cm;   // the crossed MCREATE member root (NULL only on a race-unmount)
+        }
+    }
+    return NULL;         // no MCREATE member -> caller: -T_E_ACCES
+}
+
 // path_has_dotdot -- pre-scan for a ".." component. The POUNCE compresses a
 // run of components into ONE trail entry (intermediates never materialize as
 // Spoors), which is incompatible with `..`'s pop-one-component semantics --
@@ -573,7 +599,7 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
         { if (errp) *errp = T_E_INVAL; return NULL; }
     amode &= STALK_AMODE_MASK;
     if (amode != STALK_WALK && amode != STALK_OPEN && amode != STALK_MOUNT &&
-        amode != STALK_STAT)
+        amode != STALK_STAT && amode != STALK_CREATE)
         { if (errp) *errp = T_E_INVAL; return NULL; }
     // D-1: the mount POINT is never followed (STALK_MOUNT's no-cross-final
     // precedent extends to no-follow-final -- SYS_MOUNT names the link's own
@@ -1478,32 +1504,48 @@ per_component:
     // underlying point even when it already hosts a mount. On failure the quarry
     // is still owned -> the fail path clunks it.
     if (amode != STALK_MOUNT) {
-        // UM: is the quarry a UNION mount point (>= 2 grafted members)? If so
-        // AND this is an OPEN (the only resolution that yields a readdir fd),
-        // tag the opened Spoor with the union base so spoor_readdir_run merges
-        // every member (dedup first-wins). Capture the base BEFORE the cross:
-        // the crossed Spoor carries member[0]'s qid, not the mount point's, so
-        // the base must be the pre-cross quarry (the mount-point identity
-        // mount_member_at keys on). The +1 ref is transferred onto the crossed
-        // Spoor's union_base (a DISTINCT object -- the cross mints a fresh
-        // Spoor) and released at spoor_free_internal.
-        struct Spoor *union_pt = NULL;
-        if (amode == STALK_OPEN && p && p->territory) {
+        // UM: is the quarry a UNION mount point (>= 2 grafted members)?
+        bool is_union = false;
+        if (p && p->territory) {
             struct Spoor *m1 = mount_member_at(p->territory, quarry, 1, NULL);
-            if (m1) { spoor_clunk(m1); union_pt = quarry; spoor_ref(union_pt); }
+            if (m1) { spoor_clunk(m1); is_union = true; }
         }
-        struct Spoor *crossed = NULL;
-        if (stalk_cross_mounts(p, quarry, &crossed, crossed_pheno) < 0) {
-            if (union_pt) spoor_clunk(union_pt);
-            goto fail;
-        }
-        if (crossed) {
+
+        if (is_union && amode == STALK_CREATE) {
+            // A create PARENT: cross to the FIRST MCREATE member (ARCH 9.5), not
+            // member 0. No MCREATE member -> the union has no writable target ->
+            // -T_E_ACCES. (Non-union creates fall through to the normal cross.)
+            int cerr = 0;
+            struct Spoor *cm = stalk_union_create_member(p, quarry, &cerr);
+            if (!cm) { err = cerr ? cerr : T_E_ACCES; goto fail; }
             spoor_clunk(quarry);
-            quarry = crossed;
+            quarry = cm;
             carried_valid = false;   // the record described the mount point
-            if (union_pt) { quarry->union_base = union_pt; union_pt = NULL; }
+        } else {
+            // STALK_OPEN of a union tags the opened Spoor with the union base so
+            // spoor_readdir_run merges every member (UM-5, dedup first-wins).
+            // Capture the base BEFORE the cross: the crossed Spoor carries
+            // member[0]'s qid, not the mount point's, so the base must be the
+            // pre-cross quarry. The +1 ref transfers onto the crossed Spoor's
+            // union_base (a DISTINCT object -- the cross mints a fresh Spoor)
+            // and is released at spoor_free_internal.
+            struct Spoor *union_pt = NULL;
+            if (is_union && amode == STALK_OPEN) {
+                union_pt = quarry; spoor_ref(union_pt);
+            }
+            struct Spoor *crossed = NULL;
+            if (stalk_cross_mounts(p, quarry, &crossed, crossed_pheno) < 0) {
+                if (union_pt) spoor_clunk(union_pt);
+                goto fail;
+            }
+            if (crossed) {
+                spoor_clunk(quarry);
+                quarry = crossed;
+                carried_valid = false;   // the record described the mount point
+                if (union_pt) { quarry->union_base = union_pt; union_pt = NULL; }
+            }
+            if (union_pt) spoor_clunk(union_pt);   // union w/o a cross (defensive)
         }
-        if (union_pt) spoor_clunk(union_pt);   // union w/o a cross (defensive)
     }
 
     // #82: a trailing '/' asserts the path names a DIRECTORY. Gate the QUARRY,

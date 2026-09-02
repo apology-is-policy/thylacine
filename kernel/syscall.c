@@ -3794,7 +3794,10 @@ static struct Spoor *sys_stalk_parent(struct Proc *p, struct Spoor *start,
     const char *pp = (prefix_len == 0) ? "." : rpath;
     u64 pl         = (prefix_len == 0) ? 1   : prefix_len;
     int serr = T_E_NOENT;
-    struct Spoor *parent = stalk_err(p, start, pp, pl, STALK_WALK, 0, &serr);
+    // STALK_CREATE (not STALK_WALK): identical resolution, except a UNION parent
+    // crosses to its first MCREATE member so the create lands in the writable
+    // mount (ARCH 9.5); a union with no MCREATE member fails -T_E_ACCES.
+    struct Spoor *parent = stalk_err(p, start, pp, pl, STALK_CREATE, 0, &serr);
     if (!parent) { *err_out = serr; return NULL; }
     return parent;
 }

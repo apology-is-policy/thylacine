@@ -36,9 +36,10 @@ struct t_stat;   // <thylacine/syscall.h>; the stalk_stat metadata sink
 
 // amode -- what stalk does at the final (quarry) component.
 #define STALK_WALK  0   // resolve only; do NOT open (the O_PATH / walkable-base
-                        // case -- a navigation / create / chroot target). The
-                        // quarry IS crossed (a walked mount point yields the
-                        // mounted root).
+                        // case -- a navigation / chroot target). The quarry IS
+                        // crossed (a walked mount point yields the mounted
+                        // root). A create PARENT uses STALK_CREATE instead (the
+                        // union create-member selection differs).
 #define STALK_OPEN  1   // resolve + Dev.open(quarry, omode) (the byte-I/O case).
                         // The quarry is crossed before opening.
 #define STALK_MOUNT 2   // resolve to the mount point's OWN identity (the final
@@ -56,6 +57,14 @@ struct t_stat;   // <thylacine/syscall.h>; the stalk_stat metadata sink
                         // 1-RPC stat). Callers use stalk_stat(); passing
                         // STALK_STAT to stalk()/stalk_err() (no stat sink)
                         // degrades to STALK_WALK behavior.
+#define STALK_CREATE 4  // resolve a create PARENT (Plan 9 Acreate). Identical to
+                        // STALK_WALK -- resolve-only, no open, quarry crossed --
+                        // EXCEPT at a UNION final quarry: it crosses to the
+                        // FIRST MCREATE (writable) member instead of member 0,
+                        // so a create lands in the union's writable mount
+                        // (ARCH 9.5); a union with NO MCREATE member fails
+                        // -T_E_ACCES (no writable target). A non-union parent
+                        // crosses to the mounted root exactly as STALK_WALK.
 
 // amode FLAG (OR'd into one of the four base amodes above; DISTRO D-1):
 // do NOT follow a symlink at the FINAL component. Intermediate symlinks are
