@@ -22,6 +22,68 @@ needed the operator.
 
 ---
 
+## 2026-09-02 (run 18, Opus 4.8) — H-4b-3b: the restore tool, and a `mkdir -p` wall found in the E2E
+
+The H-4b arc's last sub-chunk: `halcyon layout restore`, the syscalling half of
+the D decision. It reads a saved layout, keeps the session's part, and rebuilds
+that subtree beside the console. Landed with a full HVF E2E green; the arc close
+(the batched holotype over H-4b-1..3 + AUDIT-TRIGGERS + CLAUDE index + push) is
+next.
+
+**The pure planner first, so the hard part was host-testable.** The one genuinely
+tricky piece is turning a saved tree into compositor verbs: the compositor has
+only `split` (which NESTS a new container when the leaf's parent has a different
+mode, FLATTENS into the parent when they match) and `mode`. I put the model in
+`libhalcyon::skeleton` (pure, 13 host tests) and kept the id-binding + the
+divergence check in the tool: the tool runs each planned verb and DIFFS the live
+`layout` dump before/after to bind the new pane id AND confirm the compositor
+nested-or-flattened as the plan predicted. A mismatch aborts the restore — it
+never mis-places a program on a wrong guess. The key correctness lemma
+(host-tested and reasoned): the anchor's parent mode after the tool's initial
+split always equals `anchor_split(...).mode()`, whether the split flattened into
+an existing container or nested a new one, so the root verb's expectation holds
+in both console orientations.
+
+**The env marker: a save must know whose tiles are whose.** A saved screen
+includes the console (the SYSTEM principal) and possibly other users; a
+`Session(principal)` restore must NOT try to respawn those. So the save side
+gained `pane/<id>/owner` (a new read-only tapestryd pane file) and marks each
+leaf `env` iff a real OTHER principal owns it — owner 0 (a blank pane, nobody's)
+is deliberately NOT env, so the session may rebuild an empty pane. `prune_env`
+drops the env leaves and dissolves the orphaned containers. This is what lets the
+same file be a faithful picture of the whole screen AND a restore recipe for the
+session's part.
+
+**The E2E found a real wall, and it was not in the tool.** First run: the
+scenario laid down a layout with `mkdir -p /home/michael/lib/halcyon/layouts` and
+it was REFUSED — `permission denied`. Ground truth (not theory): `mkdir -p`
+creates every ancestor, including the `/home/michael` MOUNT POINT, and a user
+cannot write the SYSTEM-owned `/home` (the pool is system-owned, #957/the walls);
+the coreutil catches `Exists` but the kernel returns EACCES-before-Exists on an
+existing dir under an unwritable parent. ls-3b passes precisely because it uses a
+single-level `mkdir /home/michael/l3b` (parent michael-owned). The restore/save
+TOOL is unaffected — its `session_dir_chain` starts at `<home>/lib`, never
+touching the mount point — so this is a `mkdir -p`-under-home coreutil defect,
+enqueued, not this chunk's. The E2E switched to single-level mkdirs and went
+green. (Also visible: the #958 line-editor redraw storm on the graphical
+console; batching the setup into few round-trips kept the output-token matches
+robust.)
+
+**The witness that matters.** The E2E is where H-4b-2's POSITIVE cross-process
+mutual-authority claim finally lands: the tool (one michael process) spawns two
+`tapestry-demo`s (two other michael processes), and the log shows it FOCUSING a
+tile hosting a peer process's surface — `halcyon: focus -> pane` — which only
+succeeds because tapestryd keys authority on the kernel principal, not the
+per-process `stripes`. Then `restored 2 of 2`: both demos auto-consumed their
+inherited claim tokens and hosted into the tool-built leaves, knowing nothing
+about placement. libtapestry now also drops the spent `TAPESTRY_CLAIM` from the
+consuming child's own `/env` so a grandchild can't inherit a taken token.
+
+Evidence: ls-gfx-restore (HVF) PASS 5/5 (tip pending); ls-gfx-panes (HVF) 33/33
+regression (the new `owner` file rides the battery readdir); libhalcyon host
+31/31, halcyon lib host 9/9; halcyon's own source clippy-clean. NOT pushed — the
+whole H-4b arc pushes after the batched holotype.
+
 ## 2026-09-02 (run 17, Fable→Opus 4.8) — H-4b-2: the Session actor, and the reformat that had to come first
 
 **Two things landed, in this order: four reformat commits, then the Session

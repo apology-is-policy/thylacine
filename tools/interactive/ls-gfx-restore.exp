@@ -1,0 +1,113 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-restore.exp -- the H-4b-3b layout-restore leg
+# (HALCYON.md 13.7, the D decision).
+#
+# Drives the `halcyon layout restore` session tool end-to-end and, in doing
+# so, witnesses H-4b-2's POSITIVE cross-process mutual-pane-authority claim --
+# the tool and the programs it spawns are two DIFFERENT processes sharing one
+# principal (michael), so the tool naming/claiming a leaf that another
+# michael-process then hosts, and the tool FOCUSING that other process's tile,
+# only succeed because tapestryd keys pane authority on the kernel PRINCIPAL
+# (the `Session(principal)` actor), not the per-process `stripes`.
+#
+# The scenario:
+#   1. log in as michael (its own kernel principal; the compositor sees it as
+#      Session(michael), the console stays SYSTEM).
+#   2. lay a known two-pane layout into the SESSION tier
+#      ($HOME/lib/halcyon/layouts/e2e) -- a splith of two `tapestry-demo`s.
+#   3. `halcyon layout restore e2e`: the tool builds the skeleton beside the
+#      console (a throwaway placeholder gives it a leaf to split), claims each
+#      built leaf, seeds the one-shot token into /env, and spawns a
+#      `tapestry-demo` per tag. Each demo's libtapestry auto-consumes the
+#      inherited TAPESTRY_CLAIM on its first `open` and lands in its leaf,
+#      knowing nothing about placement (13.7's opaque cookie).
+#   4. the tool waits for both demos to host, replays the saved focus over a
+#      tile another process owns (the mutual-authority witness), and reports.
+#
+# The witness lines, in order: the tool's per-spawn line, then `focus -> pane`
+# (the cross-process focus succeeded), then `restored 2 of 2 program(s)` (both
+# demos hosted into the tool-built leaves). A per-process-keyed model would
+# refuse the focus (no `focus -> pane`) and never see the second demo host into
+# the tool's claimed leaf.
+#
+# HVF (the gfx-scenario medium; TCG hangs at the pre-existing 8a-2b hwwatch
+# E2E, task #27), like ls-gfx-panes. Needs no QMP or python -- the assertions
+# are the tool's own stdout on the session tty.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Lay down a known two-pane layout in the session tier. Explicit $HOME path
+# (login seeds HOME=/home/michael) -- no tilde in a redirect target. The dirs
+# are made ONE LEVEL AT A TIME, never `mkdir -p /home/michael/...`: `mkdir -p`
+# tries to create every ancestor incl. the /home/michael MOUNT POINT, and a
+# user cannot write the SYSTEM-owned /home, so the create is refused (EACCES)
+# on an existing dir -- see the mkdir-p-under-home bug note. Single-level
+# creates land in michael's own 0700 home (each parent michael-owned). Each
+# leaf row is a single-quoted echo arg so the inner double-quotes and the
+# leading indent pass through verbatim (echo emits bytes as-is; no -e). The
+# commands are batched (few round-trips) against the #958 line-editor redraw
+# storm on the graphical console.
+set lay /home/michael/lib/halcyon/layouts/e2e
+lc_send "mkdir /home/michael/lib; mkdir /home/michael/lib/halcyon; mkdir /home/michael/lib/halcyon/layouts"
+lc_send "echo 'halcyon-layout v1' > $lay; echo 'splith n=2 active=0' >> $lay"
+lc_send {echo '  leaf tag="tapestry-demo"' >> /home/michael/lib/halcyon/layouts/e2e; echo '  leaf tag="tapestry-demo"' >> /home/michael/lib/halcyon/layouts/e2e}
+
+# Sync + integrity: the file exists and reads back the container row (a token
+# absent from the typed command, so no echo collision -- the #60 discipline).
+lc_run_expect "cat $lay" "splith n=2 active=0"
+lc_pass "restore: the saved layout landed in the session tier"
+
+# The restore. Generous timeout: the tool builds the skeleton, spawns two
+# demos, and waits up to ~10 s for both to host their surfaces.
+set timeout 60
+lc_send "halcyon layout restore e2e"
+
+# Both demos spawned (two per-spawn lines; we match the first, then the
+# summary skips past the second and the demos' own chatter).
+expect {
+    -re {halcyon: pane \d+: tapestry-demo \(pid \d+\)} {
+        lc_pass "restore: the tool spawned a demo into a built leaf"
+    }
+    -re {halcyon: .*(refused|malformed|unreachable|no layout)} {
+        lc_fail "restore: the tool errored before spawning a program"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during restore" }
+    timeout { lc_fail "restore: the tool never spawned a program" }
+    eof { lc_fail "qemu exited during restore" }
+}
+
+# THE CROSS-PROCESS WITNESS: the tool focused a tile hosting ANOTHER
+# michael-process's surface. Under the ratified Session(principal) model this
+# succeeds; under a per-process-stripes model it would be E_PERM (no line).
+expect {
+    -ex "halcyon: focus -> pane" {
+        lc_pass "restore: the tool focused a peer process's tile (Session(principal) mutual authority)"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during restore focus" }
+    timeout { lc_fail "restore: the saved focus was never replayed (mutual-authority focus refused?)" }
+    eof { lc_fail "qemu exited before the focus replay" }
+}
+
+# Both programs hosted into the tool-built leaves (the placement path: claim
+# mint -> /env token -> child auto-claim -> host_into). A partial restore
+# prints "restored 1 of 2" and would fall through to the timeout arm.
+expect {
+    -ex "halcyon: restored 2 of 2 program(s)" {
+        lc_pass "restore: both demos hosted into their claimed leaves (2 of 2)"
+    }
+    -re {halcyon: restored \d+ of \d+ program\(s\)} {
+        lc_fail "restore: an incomplete restore (not 2 of 2) -- a program failed to host"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction finishing restore" }
+    timeout { lc_fail "restore: the tool never reported a final tally" }
+    eof { lc_fail "qemu exited before the restore tally" }
+}
+
+lc_quit
+lc_pass "ls-gfx-restore: layout restore verified (skeleton build + claim placement + cross-process focus)"
+exit 0

@@ -268,6 +268,96 @@ cd usr && cargo test -p libhalcyon --target aarch64-apple-darwin --release
 cd usr && cargo test -p halcyon --no-default-features --lib --target aarch64-apple-darwin
 ```
 
+## The `skeleton` module (H-4b-3b)
+
+`skeleton.rs` is the pure RESTORE planner: it turns a saved `LayoutNode` tree
+into the sequence of compositor verbs (`split <leaf> h|v`, `mode <container>
+<m>`) that rebuilds it. It is a MODEL of tapestryd's own split rule — a `split`
+NESTS a fresh container when the leaf's parent has a different mode and
+FLATTENS into the parent when the modes agree — so the plan can predict, for
+each verb, whether the compositor will mint a new container. The executor (the
+`halcyon` tool) resolves each symbolic ref against the live `layout` dump and
+verifies that prediction, aborting rather than placing a program into the wrong
+tile.
+
+```rust
+pub enum SplitDir { H, V }                 // split <id> h|v ; the mode it creates/joins
+pub enum Op {
+    Split { at: LeafRef, dir: SplitDir, new_leaf: LeafRef, nests: Option<ContRef> },
+    SetMode { cont: ContRef, mode: LayoutMode },
+}
+pub struct PlannedLeaf { pub leaf: LeafRef, pub tag: String }
+pub struct Plan {
+    pub ops: Vec<Op>,          // the verbs, in order
+    pub leaves: Vec<PlannedLeaf>, // every leaf, pre-order, with its tag
+    pub focus: Vec<LeafRef>,   // focus steps that reproduce each container's `active`
+    pub leaf_count: usize, pub cont_count: usize,
+}
+pub fn anchor_split(root: &LayoutNode, outer: Option<LayoutMode>) -> SplitDir;
+pub fn plan(root: &LayoutNode, anchor_parent: Option<LayoutMode>) -> Plan;
+```
+
+**Refs, not ids.** The plan names leaves and containers by index (`LeafRef` 0 is
+the ANCHOR — the empty leaf the tree grows from); the executor binds each ref to
+a real pane id when the split that creates it runs. This keeps the planner pure
+(no live tree, host-testable) and puts the id-binding + the divergence check in
+the one place that can see the compositor's actual response.
+
+**Nest vs flatten, and why alternating modes always nest.** `render_text` never
+emits a same-mode container nested directly in a same-mode parent (the
+compositor flattens on split), so a saved tree has alternating modes down every
+spine and each recursive split nests. A hand-written same-mode nesting (a
+`splith` inside a `splith`) is planned as a flatten — exactly what the
+compositor would do — so the plan and the live tree never disagree. The
+`anchor_parent` passed to `plan` is `anchor_split(...).mode()`, which is the
+mode the anchor's parent container has after the tool's initial split (whether
+by flatten-into-existing or nest-into-new), so the root split's expectation is
+correct in both console orientations.
+
+**Focus replay.** `focus` is a post-order list of the leaf on each container's
+active path (deepest first, deduplicated), ending at the tree's own active path
+— the tool replays it so the restored layout has the same focused tile, but only
+over tiles whose program actually hosted (an empty or failed leaf is nobody's to
+focus).
+
+`skeleton.rs` carries host unit tests for every shape (single leaf, root
+flatten, nested/tabbed/nested-tabbed, alternating-mode spine, same-mode flatten,
+one-child dissolve, active clamp, the anchor-split direction table, and a
+MAX_NODES-wide fan), each asserting the leaf refs are a permutation of
+`0..leaf_count`.
+
+## The `layout` env marker (H-4b save side)
+
+`LayoutNode::Leaf` carries an `env: bool`: a tile that was NOT the saving
+session's at save time (the console = the SYSTEM principal, or another user).
+`serialize` writes it as a trailing ` env` on the leaf row; `from_render_text`
+sets it from the classifier the save tool passes (comparing `pane/<id>/owner` to
+the caller's principal). `layout::prune_env(&tree)` drops every `env` leaf,
+dissolves the containers that lose a child, and re-aims each surviving
+container's `active` — the SESSION's part of a saved screen, which is what a
+`Session(principal)` restore may rebuild (an environment-driven restore, unbuilt
+at v1.0, would keep them). A tile owned by nobody (owner 0 — a blank pane) is
+NOT `env`: the session may rebuild it empty.
+
+## Consumer: the `halcyon` restore tool (H-4b-3b)
+
+`halcyon layout restore <name>` (`usr/halcyon/src/main.rs`) reads the layout
+(session tier, then device), `prune_env`s it, and rebuilds the session's subtree
+beside the console on the tool's OWN `/srv/tapestry` session — a
+`Session(principal)` peer, so its splits/tags/claims are judged as the user's
+(the shared `/dev/tapestry` mount's peer is the mounter, joey, and is used only
+for reads). A throwaway placeholder surface yields a leaf the tool may split;
+`skeleton::plan` drives the build with a dump-diff id-binding + divergence check;
+each tagged leaf is claimed (`pane/<id>/claim`), named (`pane/<id>/tag`), seeded
+with its one-shot token into the tool's `/env` (`TAPESTRY_CLAIM`), and spawned
+as the user (`resolve_prog` mirrors the shell's `/bin` search, since the kernel
+resolves a spawn name relative to CWD, not `$path`). The child's libtapestry
+(H-4b-3a) auto-consumes the token on its first `open`. `argv_of` splits a tag
+into argv (the tag IS the command line — acme); an empty tag restores an empty
+pane. Runtime witness: `tools/interactive/ls-gfx-restore.exp` (HVF) — the tool
+spawns two `tapestry-demo`s into built leaves, replays a cross-process focus,
+and reports `restored 2 of 2`.
+
 ## Naming rationale
 
 *Halcyon* is the graphical shell's name (the calm before; the impossible

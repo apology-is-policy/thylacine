@@ -61,10 +61,17 @@ impl LayoutMode {
 /// A node of the saved tree: a leaf carrying its program's command line (the
 /// tag; empty = an empty pane), or a container with its mode, active-child
 /// index, and children.
+///
+/// `env` marks a leaf whose tile was NOT the saving session's at save time --
+/// the environment's (the console, a transcript pane) or another principal's.
+/// A session restore never respawns such a leaf (it is not the session's to
+/// provide); the marker keeps the saved file a faithful picture of the whole
+/// screen, so a future environment-driven restore can still place it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LayoutNode {
     Leaf {
         tag: String,
+        env: bool,
     },
     Container {
         mode: LayoutMode,
@@ -98,7 +105,8 @@ pub enum ParseError {
 
 /// Serialize a tree to the `halcyon-layout v1` format: the header, then one
 /// pre-order row per node, two spaces of indent per depth. A leaf is
-/// `leaf` (empty tag) or `leaf tag="<escaped>"`; a container is
+/// `leaf` (empty tag) or `leaf tag="<escaped>"`, with a trailing ` env` when
+/// the tile was the environment's; a container is
 /// `<mode> n=<count> active=<idx>` followed by its children.
 pub fn serialize(root: &LayoutNode) -> String {
     let mut s = String::new();
@@ -113,12 +121,15 @@ fn ser_node(node: &LayoutNode, depth: usize, out: &mut String) {
         out.push_str("  ");
     }
     match node {
-        LayoutNode::Leaf { tag } => {
+        LayoutNode::Leaf { tag, env } => {
             out.push_str("leaf");
             if !tag.is_empty() {
                 out.push_str(" tag=\"");
                 escape_into(tag, out);
                 out.push('"');
+            }
+            if *env {
+                out.push_str(" env");
             }
             out.push('\n');
         }
@@ -155,6 +166,44 @@ fn escape_into(s: &str, out: &mut String) {
     }
 }
 
+/// The SESSION's part of a saved tree: drop every `env` leaf (a tile the
+/// session cannot provide -- the console, another principal's), dissolve the
+/// containers that end up with one child (the compositor would dissolve them
+/// too), and re-aim each surviving container's `active` at the same child
+/// (or the first, when the active child was pruned). `None` when nothing is
+/// the session's (a console-only save) -- there is nothing to restore.
+pub fn prune_env(node: &LayoutNode) -> Option<LayoutNode> {
+    match node {
+        LayoutNode::Leaf { env: true, .. } => None,
+        LayoutNode::Leaf { .. } => Some(node.clone()),
+        LayoutNode::Container {
+            mode,
+            active,
+            children,
+        } => {
+            let mut kept: Vec<LayoutNode> = Vec::new();
+            let mut new_active: Option<u32> = None;
+            for (i, c) in children.iter().enumerate() {
+                if let Some(k) = prune_env(c) {
+                    if i as u32 == *active {
+                        new_active = Some(kept.len() as u32);
+                    }
+                    kept.push(k);
+                }
+            }
+            match kept.len() {
+                0 => None,
+                1 => kept.pop(),
+                _ => Some(LayoutNode::Container {
+                    mode: *mode,
+                    active: new_active.unwrap_or(0),
+                    children: kept,
+                }),
+            }
+        }
+    }
+}
+
 struct Frame {
     depth: usize,
     mode: LayoutMode,
@@ -164,7 +213,7 @@ struct Frame {
 }
 
 enum Row {
-    Leaf(String),
+    Leaf(String, bool),
     Cont(LayoutMode, u32, u32),
 }
 
@@ -194,16 +243,17 @@ pub fn parse(input: &str) -> Result<LayoutNode, ParseError> {
 /// pre-order, but each row leads with the pane `<id>` (+ an optional `*` focus
 /// marker), a leaf reads `leaf surface=<n>|empty` (its tag is NOT in the dump),
 /// and a trailing ` [x,y,w,h]` rect we discard -- geometry is never saved, a
-/// restored leaf gets a fresh surface and rect. `tag_of` resolves each leaf's
-/// command line by id (the save tool reads `pane/<id>/tag`); a tag longer than
-/// MAX_TAG_LEN is dropped to empty so the result always round-trips through
-/// serialize/parse. Bounded + fail-closed exactly like `parse`, so a garbled
-/// dump degrades (no save) rather than panicking (a silent exit in a no_std
-/// tool). This is the WRITE side's inverse of `parse`: `render_text` in ->
-/// `serialize` out.
+/// restored leaf gets a fresh surface and rect. `leaf_of` resolves each leaf
+/// by id to its command line + its `env` marker (the save tool reads
+/// `pane/<id>/tag` and compares `pane/<id>/owner` to its own principal); a tag
+/// longer than MAX_TAG_LEN is dropped to empty so the result always
+/// round-trips through serialize/parse. Bounded + fail-closed exactly like
+/// `parse`, so a garbled dump degrades (no save) rather than panicking (a
+/// silent exit in a no_std tool). This is the WRITE side's inverse of `parse`:
+/// `render_text` in -> `serialize` out.
 pub fn from_render_text(
     render: &str,
-    tag_of: impl Fn(u32) -> String,
+    leaf_of: impl Fn(u32) -> (String, bool),
 ) -> Result<LayoutNode, ParseError> {
     let mut lines = render.split('\n');
     let header = lines.next().unwrap_or("");
@@ -217,7 +267,7 @@ pub fn from_render_text(
         if line.is_empty() {
             continue;
         }
-        rows.push(parse_render_row(line, &tag_of)?);
+        rows.push(parse_render_row(line, &leaf_of)?);
         if rows.len() > MAX_NODES {
             return Err(ParseError::TooMany);
         }
@@ -250,7 +300,9 @@ fn assemble(rows: Vec<(usize, Row)>) -> Result<LayoutNode, ParseError> {
             return Err(ParseError::BadIndent);
         }
         match row {
-            Row::Leaf(tag) => attach(&mut stack, &mut root, LayoutNode::Leaf { tag }, depth)?,
+            Row::Leaf(tag, env) => {
+                attach(&mut stack, &mut root, LayoutNode::Leaf { tag, env }, depth)?
+            }
             Row::Cont(mode, n, active) => stack.push(Frame {
                 depth,
                 mode,
@@ -318,11 +370,14 @@ fn parse_row(line: &str) -> Result<(usize, Row), ParseError> {
     }
     let rest = &line[spaces..];
     if rest == "leaf" {
-        return Ok((depth, Row::Leaf(String::new())));
+        return Ok((depth, Row::Leaf(String::new(), false)));
+    }
+    if rest == "leaf env" {
+        return Ok((depth, Row::Leaf(String::new(), true)));
     }
     if let Some(tail) = rest.strip_prefix("leaf tag=\"") {
-        let tag = parse_tag(tail)?;
-        return Ok((depth, Row::Leaf(tag)));
+        let (tag, env) = parse_tag(tail)?;
+        return Ok((depth, Row::Leaf(tag, env)));
     }
     // A container: `<mode> n=<num> active=<num>`.
     let mut it = rest.split(' ');
@@ -351,11 +406,11 @@ fn parse_row(line: &str) -> Result<(usize, Row), ParseError> {
 
 /// Tokenize one `render_text` row: leading-space pairs -> depth, then
 /// `<id>[*] leaf ...` or `<id>[*] <mode> n=<num> active=<num> ...`. The leaf's
-/// tag comes from `tag_of(id)` (render_text omits it); surface/geometry tokens
-/// are read past and discarded.
+/// tag + env marker come from `leaf_of(id)` (render_text carries neither);
+/// surface/geometry tokens are read past and discarded.
 fn parse_render_row(
     line: &str,
-    tag_of: &impl Fn(u32) -> String,
+    leaf_of: &impl Fn(u32) -> (String, bool),
 ) -> Result<(usize, Row), ParseError> {
     let spaces = line.len() - line.trim_start_matches(' ').len();
     if !spaces.is_multiple_of(2) {
@@ -374,7 +429,7 @@ fn parse_render_row(
         .ok_or(ParseError::BadRow)?;
     match it.next() {
         Some("leaf") => {
-            let tag = tag_of(id);
+            let (tag, env) = leaf_of(id);
             // A tag past the format's cap is dropped, never truncated: a
             // half-command would respawn wrong, whereas an empty leaf is a
             // clean placeholder -- and the output must round-trip through parse.
@@ -383,7 +438,7 @@ fn parse_render_row(
             } else {
                 tag
             };
-            Ok((depth, Row::Leaf(tag)))
+            Ok((depth, Row::Leaf(tag, env)))
         }
         Some(tok) => {
             let mode = LayoutMode::parse(tok).ok_or(ParseError::BadRow)?;
@@ -407,22 +462,23 @@ fn parse_render_row(
 }
 
 /// Parse the body of `leaf tag="..."` (everything after the opening quote):
-/// unescape `\\`/`\"`/`\n` up to the closing unescaped quote, which must be
-/// the last character of the row.
-fn parse_tag(tail: &str) -> Result<String, ParseError> {
+/// unescape `\\`/`\"`/`\n` up to the closing unescaped quote, which must end
+/// the row or be followed by exactly ` env` (the environment marker).
+fn parse_tag(tail: &str) -> Result<(String, bool), ParseError> {
     let mut out = String::new();
     let mut chars = tail.char_indices();
     while let Some((i, ch)) = chars.next() {
         match ch {
             '"' => {
-                // The closing quote must end the row.
-                if i + 1 != tail.len() {
-                    return Err(ParseError::BadRow);
-                }
+                let env = match &tail[i + 1..] {
+                    "" => false,
+                    " env" => true,
+                    _ => return Err(ParseError::BadRow),
+                };
                 if out.len() > MAX_TAG_LEN {
                     return Err(ParseError::TagTooLong);
                 }
-                return Ok(out);
+                return Ok((out, env));
             }
             '\\' => match chars.next() {
                 Some((_, '\\')) => out.push('\\'),
@@ -446,7 +502,16 @@ mod tests {
     use alloc::vec;
 
     fn leaf(t: &str) -> LayoutNode {
-        LayoutNode::Leaf { tag: t.to_string() }
+        LayoutNode::Leaf {
+            tag: t.to_string(),
+            env: false,
+        }
+    }
+    fn env_leaf(t: &str) -> LayoutNode {
+        LayoutNode::Leaf {
+            tag: t.to_string(),
+            env: true,
+        }
     }
     fn cont(m: LayoutMode, a: u32, c: Vec<LayoutNode>) -> LayoutNode {
         LayoutNode::Container {
@@ -608,14 +673,17 @@ mod tests {
         assert_eq!(parse(s), Ok(leaf("ut")));
     }
 
-    // A tag resolver for the from_render_text tests: id -> command line, "" for
-    // an id the map doesn't name (an empty pane).
-    fn tags(pairs: &'static [(u32, &'static str)]) -> impl Fn(u32) -> String {
+    // A leaf resolver for the from_render_text tests: id -> (command line,
+    // env), "" + not-env for an id the map doesn't name (an empty pane).
+    fn tags(pairs: &'static [(u32, &'static str)]) -> impl Fn(u32) -> (String, bool) {
         move |id| {
-            pairs
-                .iter()
-                .find(|(i, _)| *i == id)
-                .map_or_else(String::new, |(_, t)| t.to_string())
+            (
+                pairs
+                    .iter()
+                    .find(|(i, _)| *i == id)
+                    .map_or_else(String::new, |(_, t)| t.to_string()),
+                false,
+            )
         }
     }
 
@@ -688,10 +756,13 @@ mod tests {
         let huge = "x".repeat(MAX_TAG_LEN + 1);
         let pairs: alloc::vec::Vec<(u32, String)> = vec![(0u32, huge)];
         let t = from_render_text(render, |id| {
-            pairs
-                .iter()
-                .find(|(i, _)| *i == id)
-                .map_or_else(String::new, |(_, t)| t.clone())
+            (
+                pairs
+                    .iter()
+                    .find(|(i, _)| *i == id)
+                    .map_or_else(String::new, |(_, t)| t.clone()),
+                false,
+            )
         })
         .expect("oversize tag drops, not fails");
         assert_eq!(t, leaf(""));
@@ -747,5 +818,123 @@ mod tests {
             from_render_text("epoch 0 focused 0\n", &m),
             Err(ParseError::Empty)
         );
+    }
+    #[test]
+    fn env_leaves_round_trip_in_every_form() {
+        // The four leaf rows: bare, env, tagged, tagged+env.
+        roundtrip(&leaf(""));
+        roundtrip(&env_leaf(""));
+        roundtrip(&leaf("hx a"));
+        roundtrip(&env_leaf("halcyon"));
+        assert_eq!(
+            serialize(&cont(
+                LayoutMode::SplitH,
+                1,
+                vec![env_leaf("halcyon"), env_leaf(""), leaf("tapestry-demo"), leaf("")]
+            )),
+            "halcyon-layout v1\nsplith n=4 active=1\n  leaf tag=\"halcyon\" env\n  leaf env\n  leaf tag=\"tapestry-demo\"\n  leaf\n"
+        );
+        // The marker is exactly ` env` after the row's tag (or after `leaf`).
+        assert_eq!(parse("halcyon-layout v1\nleaf env\n"), Ok(env_leaf("")));
+        assert_eq!(
+            parse("halcyon-layout v1\nleaf tag=\"x\" env\n"),
+            Ok(env_leaf("x"))
+        );
+        assert_eq!(
+            parse("halcyon-layout v1\nleaf tag=\"x\"env\n"),
+            Err(ParseError::BadRow)
+        );
+        assert_eq!(
+            parse("halcyon-layout v1\nleaf tag=\"x\" envy\n"),
+            Err(ParseError::BadRow)
+        );
+        assert_eq!(
+            parse("halcyon-layout v1\nleaf env extra\n"),
+            Err(ParseError::BadRow)
+        );
+        assert_eq!(
+            parse("halcyon-layout v1\nleaf  env\n"),
+            Err(ParseError::BadRow)
+        );
+    }
+
+    #[test]
+    fn from_render_text_marks_env_leaves() {
+        // The save tool's classifier says which tiles are not the session's.
+        let render = "epoch 4 focused 3\n\
+0 splith n=2 active=0 [0,0,1920,1080]\n  \
+3* leaf surface=1 [0,0,960,1080]\n  \
+4 leaf surface=2 [960,0,960,1080]\n";
+        let t = from_render_text(render, |id| match id {
+            3 => (String::from("halcyon"), true),
+            4 => (String::from("tapestry-demo"), false),
+            _ => (String::new(), false),
+        })
+        .expect("dump with an env leaf");
+        assert_eq!(
+            t,
+            cont(
+                LayoutMode::SplitH,
+                0,
+                vec![env_leaf("halcyon"), leaf("tapestry-demo")]
+            )
+        );
+        assert_eq!(
+            serialize(&t),
+            "halcyon-layout v1\nsplith n=2 active=0\n  leaf tag=\"halcyon\" env\n  leaf tag=\"tapestry-demo\"\n"
+        );
+    }
+
+    #[test]
+    fn prune_env_keeps_the_sessions_subtree() {
+        // A console-only save prunes to nothing: there is nothing to restore.
+        assert_eq!(prune_env(&env_leaf("")), None);
+        assert_eq!(
+            prune_env(&cont(LayoutMode::SplitH, 0, vec![env_leaf("halcyon"), env_leaf("")])),
+            None
+        );
+        // The console beside one program: the container dissolves to the leaf.
+        assert_eq!(
+            prune_env(&cont(
+                LayoutMode::SplitH,
+                1,
+                vec![env_leaf("halcyon"), leaf("tapestry-demo")]
+            )),
+            Some(leaf("tapestry-demo"))
+        );
+        // A session subtree beside the console survives whole; the active
+        // index follows its child across the renumbering.
+        let saved = cont(
+            LayoutMode::SplitH,
+            1,
+            vec![
+                env_leaf("halcyon"),
+                cont(LayoutMode::SplitV, 1, vec![leaf("a"), leaf("b")]),
+            ],
+        );
+        assert_eq!(
+            prune_env(&saved),
+            Some(cont(LayoutMode::SplitV, 1, vec![leaf("a"), leaf("b")]))
+        );
+        // Pruning INSIDE a container renumbers: active pointed at the third
+        // child (index 2); the first was env, so it is now index 1.
+        let saved = cont(
+            LayoutMode::Tabbed,
+            2,
+            vec![env_leaf(""), leaf("a"), leaf("b"), leaf("")],
+        );
+        assert_eq!(
+            prune_env(&saved),
+            Some(cont(LayoutMode::Tabbed, 1, vec![leaf("a"), leaf("b"), leaf("")]))
+        );
+        // The active child itself pruned -> the first surviving child.
+        let saved = cont(LayoutMode::SplitH, 0, vec![env_leaf(""), leaf("a"), leaf("b")]);
+        assert_eq!(
+            prune_env(&saved),
+            Some(cont(LayoutMode::SplitH, 0, vec![leaf("a"), leaf("b")]))
+        );
+        // A tree with no env leaf is returned unchanged.
+        let t = cont(LayoutMode::SplitV, 1, vec![leaf("a"), leaf("")]);
+        assert_eq!(prune_env(&t), Some(t.clone()));
     }
 }

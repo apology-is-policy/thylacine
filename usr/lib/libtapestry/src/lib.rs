@@ -105,6 +105,11 @@ fn take_env_claim() -> Option<u128> {
     if CLAIM_TAKEN.swap(true, Ordering::Relaxed) {
         return None;
     }
+    // Spent: drop the var from THIS process's /env (a deep copy -- the
+    // spawner's is untouched) so a grandchild spawned from here does not
+    // inherit a token that names a leaf already taken. Best-effort: a
+    // surviving stale token only ever falls back to focus placement.
+    let _ = libthyla_rs::fs::remove_file("/env/TAPESTRY_CLAIM");
     Some(tok)
 }
 

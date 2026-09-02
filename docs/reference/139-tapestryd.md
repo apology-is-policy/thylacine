@@ -470,7 +470,7 @@ generation fence — see "The resize protocol" below).
 **The 9P layer**: the root gains `layout` (read: the tree text —
 `epoch`/`focused` header + one pane per line with mode, surface, and
 content rect; write: `split <id> h|v`, `close <id>`, `focus <id>`,
-`mode <id> <m>`) and `pane/<id>/{ctl,mode,role,tag,surface,geometry}`
+`mode <id> <m>`) and `pane/<id>/{ctl,mode,role,tag,surface,geometry,tagbar,status,claim,owner}`
 (ctl = the same verbs with the fid's pane implicit; mode/role/tag are
 direct field reads/writes; geometry is the content rect). Pane qids
 carry bit 41 (`PANE_FLAG`); ids never reused. Pane files are GLOBAL

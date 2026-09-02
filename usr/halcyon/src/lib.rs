@@ -107,6 +107,52 @@ pub fn session_layout_path(home: &str, name: &str) -> String {
     s
 }
 
+/// The device-tier layouts directory (HALCYON.md 13.7): the image's shipped
+/// layouts, read by a restore when the session tier has no layout of that
+/// name; never written by the session tool.
+pub const DEVICE_LAYOUTS_DIR: &str = "/lib/halcyon/layouts";
+
+/// The full path of a named layout in the device tier. `name` MUST have
+/// passed [`name_is_valid`].
+pub fn device_layout_path(name: &str) -> String {
+    let mut s = String::from(DEVICE_LAYOUTS_DIR);
+    s.push('/');
+    s.push_str(name);
+    s
+}
+
+/// A leaf's tag as the argv a restore spawns: the tag IS the command line
+/// (acme), split on ASCII whitespace -- no quoting, no shell (a tag that
+/// needs either names a shell explicitly). Empty for an empty/blank tag.
+pub fn argv_of(tag: &str) -> Vec<&str> {
+    tag.split_ascii_whitespace().collect()
+}
+
+/// The directories a bare program name is searched in, in order -- the shell's
+/// `resolve_command` list (`usr/utopia/.../eval/stmt.rs`), so a saved tag
+/// resolves to the same binary the shell would run. The kernel resolves a
+/// spawn name relative to the child's CWD (not a `$path` search), so the tool
+/// must expand a bare name itself.
+pub const PROG_DIRS: [&str; 3] = ["/bin/", "/", "/goroot/bin/"];
+
+/// The candidate paths for `argv0`, in probe order. A name containing `/` is
+/// used verbatim (one candidate); a bare name expands to the PROG_DIRS joins.
+/// The caller probes each (an O-read existence check) and, on no hit, spawns
+/// the first (`/bin/<name>`) for a clean, shell-identical spawn error.
+pub fn prog_candidates(argv0: &str) -> Vec<String> {
+    if argv0.contains('/') {
+        return alloc::vec![String::from(argv0)];
+    }
+    PROG_DIRS
+        .iter()
+        .map(|d| {
+            let mut s = String::from(*d);
+            s.push_str(argv0);
+            s
+        })
+        .collect()
+}
+
 /// The directory chain to `mkdir -p` (top-down, each ignoring "already
 /// exists") before a session write: `<home>/lib`, `<home>/lib/halcyon`,
 /// `<home>/lib/halcyon/layouts`. The kernel create is exclusive and errors on
@@ -200,6 +246,38 @@ mod tests {
             session_layout_path("/home/cora", "work"),
             "/home/cora/lib/halcyon/layouts/work"
         );
+    }
+
+    #[test]
+    fn device_paths() {
+        assert_eq!(device_layout_path("default"), "/lib/halcyon/layouts/default");
+    }
+
+    #[test]
+    fn prog_candidates_mirror_the_shell() {
+        // A bare name expands to the three probe dirs, /bin first.
+        assert_eq!(
+            prog_candidates("tapestry-demo"),
+            vec![
+                String::from("/bin/tapestry-demo"),
+                String::from("/tapestry-demo"),
+                String::from("/goroot/bin/tapestry-demo"),
+            ]
+        );
+        // A slashed name is verbatim (one candidate).
+        assert_eq!(prog_candidates("/bin/hx"), vec![String::from("/bin/hx")]);
+        assert_eq!(
+            prog_candidates("./local/thing"),
+            vec![String::from("./local/thing")]
+        );
+    }
+
+    #[test]
+    fn argv_splits_a_tag_on_whitespace() {
+        assert_eq!(argv_of("tapestry-demo"), vec!["tapestry-demo"]);
+        assert_eq!(argv_of("hx  /lib/aurora/config\t-r"), vec!["hx", "/lib/aurora/config", "-r"]);
+        assert!(argv_of("").is_empty());
+        assert!(argv_of("   ").is_empty());
     }
 
     #[test]

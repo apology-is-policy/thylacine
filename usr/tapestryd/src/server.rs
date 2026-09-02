@@ -490,6 +490,10 @@ const PFK_TAGBAR: u64 = 7;
 const PFK_STATUS: u64 = 8;
 /// H-4b: the one-shot placement claim (read mints; `create claim=` spends).
 const PFK_CLAIM: u64 = 9;
+/// H-4b-3: the tile's owner principal (read-only) -- the hosted surface's,
+/// or an empty leaf's recorded owner (0 = the environment). The session
+/// tool's `layout save` reads it to mark the tiles it must never respawn.
+const PFK_OWNER: u64 = 10;
 
 fn make_surf(n: usize, fk: u64) -> u64 {
     SURF_FLAG | ((n as u64 & N_MASK) << 8) | (fk & FK_MASK)
@@ -12860,6 +12864,7 @@ impl Conn {
                     b"tagbar" => PFK_TAGBAR,
                     b"status" => PFK_STATUS,
                     b"claim" => PFK_CLAIM,
+                    b"owner" => PFK_OWNER,
                     _ => return None,
                 };
                 Some((make_pane(id, fk), 0))
@@ -14280,6 +14285,26 @@ impl Conn {
                 // whether it shows is the compositor's focus fact.
                 let st = comp.layout.get(slot).unwrap().status;
                 let _ = core::fmt::write(&mut s, format_args!("{}\n", st.name()));
+            }
+            PFK_OWNER => {
+                // H-4b-3: whose tile this is, as the kernel PRINCIPAL the
+                // authority checks key on (HALCYON.md 13.6): a hosted leaf's
+                // surface owner, an empty leaf's recorded owner (0 = the
+                // environment's). A container owns nothing (E_NOENT, like
+                // `claim`). Ungated like every pane read -- a principal id is
+                // no secret (`ps` prints it) -- and it is what lets `layout
+                // save` tell the session's tiles from the console's, so a
+                // session restore never tries to respawn the environment.
+                let owner = match comp.layout.get(slot).map(|p| &p.kind) {
+                    Some(pane::Kind::Leaf { surface: Some(n) }) => {
+                        comp.surf(*n).map_or(0, |sf| sf.owner_principal)
+                    }
+                    Some(pane::Kind::Leaf { surface: None }) => {
+                        comp.layout.pane_owner_principal(slot)
+                    }
+                    _ => return self.err(tag, p9::E_NOENT),
+                };
+                let _ = core::fmt::write(&mut s, format_args!("{}\n", owner));
             }
             _ => return self.err(tag, p9::E_INVAL),
         }
@@ -16321,6 +16346,7 @@ impl Conn {
                         (&b"tagbar"[..], PFK_TAGBAR),
                         (&b"status"[..], PFK_STATUS),
                         (&b"claim"[..], PFK_CLAIM),
+                        (&b"owner"[..], PFK_OWNER),
                     ] {
                         names.push((nm.to_vec(), make_pane(id, fk)));
                     }
@@ -16538,7 +16564,7 @@ impl Conn {
         let ro = is_pane(f.path)
             && matches!(
                 pane_fk(f.path),
-                PFK_SURFACE | PFK_GEOMETRY | PFK_TAGBAR | PFK_STATUS | PFK_CLAIM
+                PFK_SURFACE | PFK_GEOMETRY | PFK_TAGBAR | PFK_STATUS | PFK_CLAIM | PFK_OWNER
             );
         let (mode, nlink) = if is_dir(f.path) {
             (DIR_MODE, 2u64)
