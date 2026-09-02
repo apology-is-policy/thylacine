@@ -297,18 +297,28 @@ static struct Spoor *stalk_union_create_member(struct Proc *p, struct Spoor *bas
                                                int *errp) {
     *errp = 0;
     if (!p || !p->territory || !base) return NULL;
-    for (int k = 0; k < PGRP_MAX_MOUNTS; k++) {
-        u32 flags = 0;
-        struct Spoor *src = mount_member_at(p->territory, base, k, &flags);
-        if (!src) break;                       // past the last member
-        spoor_clunk(src);                      // needed only the flags; re-cross below
-        if (flags & MCREATE) {
-            struct Spoor *cm = NULL;
-            if (stalk_cross_from(p, base, k, &cm, NULL) < 0) { *errp = T_E_IO; return NULL; }
-            return cm;   // the crossed MCREATE member root (NULL only on a race-unmount)
+    // UM-8 F4: snapshot members + flags ATOMICALLY, then cross the FIRST MCREATE
+    // source DIRECTLY. The prior code read a member's flags via mount_member_at
+    // then RE-crossed "index k" via a second lookup -- a concurrent unmount
+    // between the two could shift a non-MCREATE member into slot k, landing the
+    // create in a member the caller did not flag writable.
+    struct Spoor *srcs[PGRP_MAX_MOUNTS];
+    u32           flags[PGRP_MAX_MOUNTS];
+    int nsrc = mount_members_snapshot(p->territory, base, srcs, flags,
+                                      PGRP_MAX_MOUNTS);
+    struct Spoor *cm = NULL;
+    for (int k = 0; k < nsrc; k++) {
+        if (flags[k] & MCREATE) {
+            cm = stalk_cross_src(p, srcs[k], NULL);   // the FIRST MCREATE member
+            if (cm) spoor_path_transplant(cm, base);  // #66: the mount-point name
+            else    *errp = T_E_IO;                    // the chosen member failed to cross
+            break;                                     // Plan 9: create in the FIRST writable
         }
     }
-    return NULL;         // no MCREATE member -> caller: -T_E_ACCES
+    for (int k = 0; k < nsrc; k++) spoor_clunk(srcs[k]);   // release the snapshot
+    // cm NULL + *errp 0  -> no MCREATE member (caller: -T_E_ACCES);
+    // cm NULL + *errp IO -> the first MCREATE member failed to cross.
+    return cm;
 }
 
 // stalk_build_union_snap (UM-8 F1/F2/F4/F7) -- capture the opened-member
@@ -563,31 +573,45 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
 }
 
 // stalk_union_child (UM) -- resolve component `namebuf` in the UNION at
-// `union_base` (a pre-cross mount point with >= 2 members): try each member in
-// declared order, crossing it to its leaf (mount-over-mount followed via
-// stalk_cross_from), then per-member X-search + directory-type + walk; return
+// `union_base` (a pre-cross mount point with >= 2 members): snapshot every
+// member ATOMICALLY (UM-8 F4 -- one ns_lock hold, so a concurrent unmount
+// cannot shift the set mid-walk and cross a DIFFERENT member than it
+// inspected), cross each to its leaf (mount-over-mount followed, stalk_cross_src
+// on the held source), then per-member X-search + directory-type + walk; return
 // the FIRST member's resolved child (ref-held, its qid set), or NULL when no
 // member has a searchable entry for the name. Plan 9 union skip semantics: a
-// member that is not a directory, denies X-search, or lacks the component is
-// SKIPPED (not an error) -- unlike a lone directory, where an X denial is
-// EACCES; only exhausting all members is a miss (the caller reports ENOENT).
-// *errp is set ONLY on a hard error (a member cross failure / OOM); an ordinary
-// all-miss leaves *errp 0. The phenotype of the WINNING member (only) is OR'd
-// into *crossed_pheno -- a losing member's Linux mount must not stamp a
-// resolution that landed elsewhere.
+// member that FAILS TO CROSS (UM-8 F8: a dead session / transient clone OOM),
+// is not a directory, denies X-search, or lacks the component is SKIPPED (not
+// an error) -- unlike a lone directory, where an X denial is EACCES; only
+// exhausting all members is a miss (the caller reports ENOENT). *errp is set
+// ONLY on a clone OOM (a cross failure is skipped, F8); an ordinary all-miss
+// leaves *errp 0. The phenotype of the WINNING member (only) is OR'd into
+// *crossed_pheno -- a losing member's Linux mount must not stamp a resolution
+// that landed elsewhere.
 static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
                                        const char *namebuf,
                                        bool *crossed_pheno, int *errp) {
     *errp = 0;
-    for (int k = 0; k < PGRP_MAX_MOUNTS; k++) {
+    struct Spoor *srcs[PGRP_MAX_MOUNTS];
+    int nsrc = mount_members_snapshot(p->territory, union_base, srcs, NULL,
+                                      PGRP_MAX_MOUNTS);
+    struct Spoor *hit = NULL;
+    for (int k = 0; k < nsrc && !hit; k++) {
         // Per-member phenotype: accumulate locally, propagate only on a WIN.
         bool member_pheno = false;
-        struct Spoor *leaf = NULL;
-        if (stalk_cross_from(p, union_base, k, &leaf, &member_pheno) < 0) {
-            *errp = T_E_IO;              // a member cross failed -> fail closed
-            return NULL;
-        }
-        if (!leaf) break;               // no member at index k -- members exhausted
+        // Cross the EXACT snapshot source (never a re-derived index -- F4).
+        struct Spoor *leaf = stalk_cross_src(p, srcs[k], &member_pheno);
+        // UM-8 F8: a member that fails to cross (a dead 9P session, a transient
+        // clone OOM) is SKIPPED -- matching the readdir merge and Plan 9's union
+        // skip-on-error -- NOT a hard failure of the whole walk, which hid a
+        // name held by a LATER member behind an earlier member's fault.
+        if (!leaf)                             continue;
+        // #66/I-33: the crossed member leaf takes the MOUNT-POINT's namespace
+        // name (union_base's, e.g. "/bin"), NOT the member source's internal
+        // name -- so the child nc, cloned from leaf, inherits it and the
+        // caller's spoor_path_extend yields "/bin/<component>". stalk_cross_from
+        // did this transplant inline; stalk_cross_src leaves it to the caller.
+        spoor_path_transplant(leaf, union_base);
         // Skip a non-directory member (a union is over directories).
         if (!(leaf->qid.type & QTDIR)) { spoor_clunk(leaf); continue; }
         // Per-member X-search: a member that denies search is SKIPPED (Plan 9
@@ -604,7 +628,7 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
         // three miss cases exactly (NULL -> shares aux; reuse-violation ->
         // shares aux; nqid!=1 -> reused, clunk-safe).
         struct Spoor *nc = spoor_clone(leaf);
-        if (!nc) { spoor_clunk(leaf); *errp = T_E_NOMEM; return NULL; }
+        if (!nc) { spoor_clunk(leaf); *errp = T_E_NOMEM; break; }   // OOM: hard fail
         const char *names[1] = { namebuf };
         struct Walkqid *w = leaf->dev->walk(leaf, nc, names, 1);
         if (!w) { nc->aux = NULL; spoor_unref(nc); spoor_clunk(leaf); continue; }
@@ -617,9 +641,10 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
         walkqid_free(w);
         spoor_clunk(leaf);              // done with the member root
         if (member_pheno && crossed_pheno) *crossed_pheno = true;  // winner only
-        return nc;                     // HIT: first member with the component
+        hit = nc;                      // HIT: first member with the component
     }
-    return NULL;                       // all members exhausted -> caller: ENOENT
+    for (int k = 0; k < nsrc; k++) spoor_clunk(srcs[k]);   // release the snapshot
+    return hit;                        // NULL: all members exhausted -> ENOENT
 }
 
 // stalk_core -- the resolver body. stat_out/stat_done are the STALK_STAT

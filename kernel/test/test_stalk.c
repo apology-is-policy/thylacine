@@ -1683,6 +1683,11 @@ void test_stalk_union_walk(void) {
     struct Proc p;
     struct Spoor *root = cross_setup(&p);
     TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    // Seed the root Path (the qid-Dev fixture carries none; the real devramfs/
+    // dev9p roots are attach-seeded) so the resolver accumulates names and the
+    // union-child Path regression below is observable.
+    root->path = path_make_root();
+    TEST_ASSERT(root->path != NULL, "seed root path /");
 
     struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
     struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
@@ -1701,6 +1706,12 @@ void test_stalk_union_walk(void) {
     struct Spoor *q = stalk(&p, root, "umpt/shared", 11, STALK_OPEN, 0);
     TEST_ASSERT(q != NULL, "resolve umpt/shared");
     TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "union first-hit -> um1's shared (qid 23)");
+    // UM-8 regression (#66/I-33): the union child takes the MOUNT-POINT name
+    // (/umpt), not the winning member's internal name (/um1). A stalk_cross_src
+    // that omits the transplant yields "/um1/shared" -- which crashes joey's
+    // V-4a-0 exe-path assert at boot ("got '/ptyfs' want '/bin/ptyfs'").
+    TEST_ASSERT(q->path != NULL && fix_streq(q->path->s, "/umpt/shared"),
+        "union child Path = /umpt/shared (mount-point name, not the member's)");
     spoor_clunk(q);
 
     // Member-0 hit: "only1" exists only in um1 -> qid 24.
