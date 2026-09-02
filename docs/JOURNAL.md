@@ -847,7 +847,7 @@ pre-existing theme.rs rustfmt drift that `cargo fmt -p libhalcyon` swept
 
 ### H-4a-2: the SAVE tool + the render_text bridge (same run, this entry)
 
-PENDING_HASH: `halcyon layout save <name>` -- the syscalling half. The
+`30551d8f`: `halcyon layout save <name>` -- the syscalling half. The
 authority story is the whole point: the tool runs AS THE USER, takes no
 capability and adds no server verb, and writes only the session tier
 ($HOME/lib/halcyon/layouts/<name>). It reads the compositor's live tree from

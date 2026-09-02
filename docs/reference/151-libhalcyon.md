@@ -157,7 +157,7 @@ Not applicable.
   as the tag-bar carve.
 - H-4a-1 `cdce7f3f`: the `layout` module — `halcyon-layout v1` serializer + the
   bounded no-panic `parse`.
-- H-4a-2 *(pending)*: `layout::from_render_text` (the render_text bridge) + the
+- H-4a-2 `30551d8f`: `layout::from_render_text` (the render_text bridge) + the
   `usr/halcyon` save tool (the session-tier durable write).
 
 ## Known caveats / footguns
