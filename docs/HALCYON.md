@@ -1190,9 +1190,15 @@ as-built: `halcyond` already stores `TCell`s and renders them (§14.0); only the
 
 **AS-SETTLED — the seam protocol (2026-09-03, yip call 0045; the render
 responsibility operator-ratified B).** The wire is one **ordered record stream**
-up (kaua-term → halcyond) plus a small stream down, and it is **transport-agnostic**
-(halcyond's ingest is a halcyond-owned Loom ring per tile — the H-3c-2 `EventRing`
-reuse; the kernel primitive firms at KT-1):
+up (kaua-term → halcyond) plus a small stream down. It is **transport-agnostic at
+the record level** — the wire codec (`kaua_term::wire`) is independent of how the
+bytes move — but the concrete transport is a **pipe pair** per tile (§14.11.6). The
+earlier "halcyond-owned Loom ring per tile" is **struck (KT-1.5, 2026-09-03)**: a
+Loom `read` requires a dev9p (9P-backed) handle (`kernel/loom.c:1198`), so a pipe is
+`-EINVAL`-rejected at submit, and the prior "confirmed `loom.rs:281`" pointed only at
+the `Sqe::read` struct builder (which asserts nothing about handle types). halcyond
+instead drains the up-pipes and unifies its wait by making the Loom ring itself
+pollable (§14.11.7 / §14.11.7a). The record set:
 
 - **Up** (kaua-term → halcyond): `CellDiff{ changed (row,col,cell)[], cursor(row,col,vis) }`
   (the live screen) · `ScrollOff{ rows: cell[] }` (normal-mode lines off the top →
@@ -1302,9 +1308,12 @@ inline, promote it to fullscreen" and "a terminal in a tile" are one mechanism.
 ### 14.9 Build order
 
 1. **`kaua-term` native mode + the seam + `halcyond` per-tile composite** →
-   **unblocks H-4d** (the welcome's two `ut` panes). **Zero kernel work**: native
-   `ut` already has full pts job control today (`t_tty_*` + the PTY-4b session
-   dance). This is aux's KT-1 (`docs/KAUA-TERM.md`).
+   **unblocks H-4d** (the welcome's two `ut` panes). Native `ut` already has full
+   pts job control today (`t_tty_*` + the PTY-4b session dance), so the *terminal*
+   half needs no kernel work; the *ingest* half adds **one small kernel enabler** --
+   `KObj_Loom` pollable + SQPOLL for the compositor ring (§14.11.7a, KT-1.5,
+   operator-ratified Option 1 2026-09-03), which also fixes the pre-existing
+   frame-coupled console latency. This is KT-1 (`docs/KAUA-TERM.md`).
 2. **C2-k1c** → Linux tiles (termios/winsize reach).
 3. **C2-k3** → Linux job control (fg/bg/^Z).
 
@@ -1431,17 +1440,63 @@ the app the child hosts never sees halcyond's pipes (the non-inheritance ptyhost
 relies on). This is halcyond's FIRST child-spawn -- new machinery
 (`Command`/`Stdio::File` on the two pipe ends).
 
-**14.11.7 Multiplex.** halcyond registers each tile's **up-pipe read end** with a
-Loom ring and reaps records with `read` ops (the H-3c-2 `EventRing` PATTERN, not
-its tapestryd-specific `Event` type -- Loom `read`/`write` operate on any
-registered handle, pipes included, confirmed `loom.rs:281`). One ring with N
-registered handles, demultiplexed by `user_data`/handle -> the owning tile's
-`FrameDecoder`, is the model (as `RingCore` already multiplexes N surface event
-fids). The main loop's existing `EventRing::wait` (the tapestryd surface ring,
-`main.rs:788`) and the tiles' record ring compose: either a per-tile Loom ring
-polled alongside, or -- preferred -- the record reads folded onto the same ring
-discipline. (The exact one-ring-vs-two composition is an implementation choice at
-KT-1.5b; the contract is transport-agnostic.)
+**14.11.7 Multiplex -- the unified `poll(2)` (CORRECTED; operator-ratified Option 1,
+2026-09-03).** The tile up-channels are **pipes**, not Loom-registered handles: a
+Loom `read` requires a dev9p handle (`kernel/loom.c:1198`; a pipe `-EINVAL`s at
+submit), and the earlier "confirmed `loom.rs:281`" was a misread of the `Sqe::read`
+struct builder, which says nothing about handle types (triple-confirmed by the KT-1.5
+research pass -- Weft is out too: its readiness ring is single-source and its
+blocking park is unwired, so the only wake-on-any-of-N is a Loom ring, and that needs
+dev9p handles). halcyond therefore multiplexes every readiness source in **one
+`poll(2)`**:
+
+```
+poll { tapestry-EventRing loom-fd | N tile up-pipes | /dev/consdrain }
+```
+
+waking promptly on any -- a byte on a tile pipe, a surface event, or console output.
+On a tile pipe -> drain records -> that tile's `FrameDecoder` -> its grid; on the
+loom-fd -> reap the CQ in userspace + route surface events; on consdrain -> the
+existing console drain. Pipes and `/dev/consdrain` are already pollable
+(`kernel/pipe.c`; `cons_drain_poll`); the **new** piece is making the Loom ring
+pollable (§14.11.7a). This also eliminates a pre-existing **FRAME-coupled** console
+latency: halcyond/aurora block on the ring and drain consdrain only per frame ->
+~16 ms active, up to ~67 ms idle, and a full stall on an occluded surface
+(`tapestryd/src/main.rs:124`, `aurora/src/main.rs:21`). With a pollable ring the wait
+is byte-driven, not frame-driven -- the fix lands system-wide (aurora shares
+`EventRing`).
+
+**14.11.7a The kernel enabler -- `KObj_Loom` pollable + the compositor ring runs
+SQPOLL (operator-ratified live 2026-09-03).** Two pieces, both small and
+well-precedented:
+
+- **`KObj_Loom.poll`.** `poll_scan_one` (`kernel/poll.c:213`) gains a `KOBJ_LOOM`
+  arm calling a new `loom_poll(l, events, pw)` that registers the poller on the ring's
+  **existing** `l->cq_waiters` list and reports `POLLIN` iff `loom_cq_ready(l) > 0`.
+  The wake is already wired -- every CQE post fires
+  `poll_waiter_list_wake(&l->cq_waiters)` (`kernel/loom.c:374,678`) -- so this is a
+  direct **register-then-observe** on the same list `loom_wait_for_completions`
+  already uses (`loom_cqw_cond`, `kernel/loom.c:1758`). **No new spec:** unlike the
+  cons `.poll` (LS-8a / `cons_poll.tla`, whose IRQ-context RX forced a deferred
+  mgr-kthread relay), the Loom CQE wake ALREADY runs in process/kthread context, so it
+  is a plain instance of the poll_waiter_list I-9 pattern (`poll.tla` lineage) --
+  validated by prose + the existing poll/loom buggy cfgs + runtime tests + the audit,
+  per the standing spec-first suspension (no re-enablement warranted).
+
+- **SQPOLL for the compositor ring.** A poll on a Loom ring is only meaningful if CQEs
+  post **without** the owner calling `enter` (else nothing pumps the 9P session while
+  halcyond sleeps in `poll`). `LOOM_SETUP_SQPOLL` already provides this -- a kernel
+  poll-thread admits + pumps + posts autonomously (tested `test_loom.c`; used by
+  `loom-bench`). `libtapestry`'s `EventRing` gains an SQPOLL setup mode + a userspace
+  CQ-reap path (reap without `enter`) + the ring fd exposed for `poll`; the tapestry
+  session is one-per-ring (the `EventRing` invariant), so the SQPOLL kthread's
+  single-session pump is sound (no cross-session starvation).
+
+**Audit-bearing.** Both `kernel/loom.c` and `kernel/poll.c` are audit-trigger surfaces
+(I-29/I-30 Loom completion integrity; I-9 poll wake). The `KObj_Loom.poll` arm + the
+SQPOLL compositor adoption get an `AUDIT-TRIGGERS.md` row + the vault
+`sub-kernel-loom` / `sub-kernel-poll` / `sub-libtapestry` updates at implementation,
+and join the batched KT-1 audit.
 
 **14.11.8 Resize.** halcyond is the geometry authority (it owns the tile rects).
 On a tile resize it sends `Resize{cols, rows}` down; the kaua-term sets the pts
@@ -1462,22 +1517,30 @@ the layout (`chrome.rs`), already parsed.
 bounds-checks the wire (the `kaua_term::wire` `FrameDecoder` -- MAX_FRAME, checked
 fields, no untrusted pre-alloc; the "bounds-check like the 9P wire"). A
 `WireError` (oversize/malformed), a `Control(Exit)`, or an up-pipe EOF tears down
-**only that tile** -- its Loom registration, its pipes, its grid+transcript, and
+**only that tile** -- its pipe fds, its poll-set slot, its grid+transcript, and
 its Tapestry content surface -- never the whole environment. A tile whose child
 dies shows an exit affordance; a relayout that drops the leaf reaps it.
 
 **14.11.11 Build stages (KT-1.5).**
 
-- **KT-1.5a** -- spawn + transport for ONE tile: halcyond spawns a kaua-term
-  (its own console area to start), the pipe pair, the Loom-ring registration, and
-  a raw record drain (decode + log). Boot-proves the transport + the bin's
-  2-thread PTY surface (not host-testable in isolation).
-- **KT-1.5b** -- ingest -> the model: apply CellDiff to a per-tile live grid,
-  ScrollOff + Control(Osc1936) to the scrollback transcript, Mode to the render
+- **KT-1.5a -- the transport prover (`kaua-term-probe`).** A boot probe (NOT
+  halcyond) spawns ONE kaua-term hosting a known program over a real pipe pair,
+  drains its records with **`t_read`** (a blocking pipe read -- Loom does not read
+  pipes), decodes them, and asserts the hosted output + a clean `Control::Exit`.
+  Boot-proves the untestable process-level surface: the pts host, the two blocking
+  threads, the codec over a real pipe. (Run 21's probe becomes this once its
+  Loom-over-pipe read is replaced with `t_read`.)
+- **KT-1.5-kernel -- `KObj_Loom` pollable + SQPOLL (§14.11.7a).** The enabler for the
+  unified wait: the `poll_scan_one` `KOBJ_LOOM` arm + `loom_poll`; `libtapestry`'s
+  `EventRing` SQPOLL setup + userspace CQ reap + the ring fd exposed for `poll`. Its
+  own kernel-test (`test_loom.c` extension) + the SMP gate; audit-bearing (Loom + poll).
+- **KT-1.5b -- halcyond ingest -> the model (on the unified `poll`).** The
+  `poll { loom-fd | N up-pipes | consdrain }` loop; apply CellDiff to a per-tile live
+  grid, ScrollOff + Control(Osc1936) to the scrollback transcript, Mode to the render
   mode; render normal (scrollback + grid) and alt (grid only).
-- **KT-1.5c** -- multi-tile: per-leaf spawn/teardown off `reconcile`, the N-stream
-  multiplex, focus-routed input (Key/Resize down), per-tile composite -> **unblocks
-  H-4d**.
+- **KT-1.5c -- multi-tile.** Per-leaf spawn/teardown off `reconcile`, the N-pipe
+  multiplex in the unified poll, focus-routed input (Key/Resize down), per-tile
+  composite -> **unblocks H-4d**.
 
 Then the batched KT-1 audit (KT-1.1..1.5; format-fuzz + PTY-master + the new
 ingest trust boundary) + the boot gate, then push.
