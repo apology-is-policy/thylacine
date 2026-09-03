@@ -1,0 +1,11 @@
+[package]
+name = "kaua-term"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "kaua_term"
+path = "src/lib.rs"
+
+[dependencies]
+vt = { path = "../lib/vt" }

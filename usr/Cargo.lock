@@ -786,6 +786,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaua-term"
+version = "0.1.0"
+dependencies = [
+ "vt",
+]
+
+[[package]]
 name = "keccak"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -296,11 +296,12 @@ pub enum Boundary {
     /// title/Beacon semantics. The 7770 aurora-config channel is consumed
     /// in-parser (settings_req) and never surfaces here.
     Osc(Vec<u8>),
-    /// Entered the alt screen. Carries the OUTGOING main buffer (the swap has
-    /// already happened, so `cells` is the fresh blank alt) -- the consumer
-    /// diffs its pending changes against this, emits the mode switch, then
-    /// resets its shadow to the now-blank alt.
-    AltEnter(Vec<Cell>),
+    /// Entered the alt screen. Carries the OUTGOING main buffer AND its cursor
+    /// `(cx, cy)` (the swap has already happened, so `cells` is the fresh blank
+    /// alt and the live cursor is homed) -- the consumer flushes the main's
+    /// final diff with THIS cursor (so a later alt-leave restores it correctly),
+    /// emits the mode switch, then resets its shadow to the now-blank alt.
+    AltEnter(Vec<Cell>, (usize, usize)),
     /// Left the alt screen. Carries the RESTORED main buffer (== `cells` now)
     /// -- the alt live grid is discarded; the consumer resets its shadow to
     /// this and resumes normal-mode diffing.
@@ -984,7 +985,8 @@ impl Vt {
             // The consumer flushes its pending diff against the carried buffer,
             // then resets its shadow (blank alt on enter / restored main on leave).
             self.pending.push(if enter {
-                Boundary::AltEnter(self.alt_cells.clone())
+                // self.saved holds the main cursor (implicit DECSC at enter).
+                Boundary::AltEnter(self.alt_cells.clone(), self.saved)
             } else {
                 Boundary::AltLeave(self.cells.clone())
             });
@@ -2020,7 +2022,10 @@ mod tests {
         let bs = drive(&mut vt, b"main\x1b[?1049halt\x1b[?1049l");
         assert_eq!(bs.len(), 2);
         match &bs[0] {
-            Boundary::AltEnter(outgoing) => assert_eq!(outgoing[0].ch, 'm'), // outgoing main
+            Boundary::AltEnter(outgoing, cursor) => {
+                assert_eq!(outgoing[0].ch, 'm'); // outgoing main
+                assert_eq!(*cursor, (4, 0)); // main cursor (cx=4 after "main", cy=0)
+            }
             other => panic!("expected AltEnter, got {other:?}"),
         }
         match &bs[1] {
