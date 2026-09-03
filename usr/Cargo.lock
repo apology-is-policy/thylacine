@@ -796,6 +796,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaua-term-probe"
+version = "0.1.0"
+dependencies = [
+ "kaua-term",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "keccak"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
