@@ -64,6 +64,21 @@ fn open_rdwr(path: &str) -> i64 {
     unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_ORDWR) }
 }
 
+/// Set the winsize of pts `n` via /dev/pts/<n>ctl (best-effort). Standalone so a
+/// party that holds only the pts index -- the kaua-term's input thread reacting
+/// to a Resize record, not the Master owner -- can set it without a Master.
+/// A winsize change raises the kernel's TTY_SIG_WINCH -> SIGWINCH to the fg pgrp.
+pub fn set_winsize(n: u64, cols: u16, rows: u16) {
+    let ctl_path = format!("/dev/pts/{}ctl", n);
+    let ctl = open_rdwr(&ctl_path);
+    if ctl >= 0 {
+        let ws = format!("winsize {} {}", cols, rows);
+        // SAFETY: SVC wrapper; ws is a valid byte buffer for its len.
+        let _ = unsafe { t_write(ctl, ws.as_ptr(), ws.len()) };
+        let _ = unsafe { t_close(ctl) };
+    }
+}
+
 impl Master {
     /// Mint a new pts. Opens the clone file (the returned fd IS the master),
     /// then validates the fstat qid against the PTS_FLAG|master contract. On
@@ -94,14 +109,7 @@ impl Master {
     /// Seed the slave winsize via /dev/pts/<n>ctl. Best-effort: a ctl-open or
     /// write failure is swallowed (the ptyfs default size is the fallback).
     pub fn seed_winsize(&self, cols: u16, rows: u16) {
-        let ctl_path = format!("/dev/pts/{}ctl", self.n);
-        let ctl = open_rdwr(&ctl_path);
-        if ctl >= 0 {
-            let ws = format!("winsize {} {}", cols, rows);
-            // SAFETY: SVC wrapper; ws is a valid byte buffer for its len.
-            let _ = unsafe { t_write(ctl, ws.as_ptr(), ws.len()) };
-            let _ = unsafe { t_close(ctl) };
-        }
+        set_winsize(self.n, cols, rows);
     }
 
     /// Open the slave three times over (one File per stdio slot) and spawn

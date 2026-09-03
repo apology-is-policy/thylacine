@@ -790,6 +790,8 @@ name = "kaua-term"
 version = "0.1.0"
 dependencies = [
  "kaua",
+ "libthyla-rs",
+ "ptyhold",
  "vt",
 ]
 
