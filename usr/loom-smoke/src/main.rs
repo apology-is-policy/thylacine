@@ -16,6 +16,10 @@
 //                                 error-completes rather than crashing. Proves
 //                                 submit -> dispatch -> error CQE -> reap and the
 //                                 safe rejection of a non-dev9p handle.
+//   5. KObj_Loom.poll (KT-1.5)  -- an SQPOLL ring folded into poll(2): an idle
+//                                 ring polls not-ready, and after a NOP + a kthread
+//                                 wake, poll(raw_fd) reports POLLIN + the CQE reaps.
+//                                 The FIRST EL0 SQPOLL consumer (loom_poll's e2e).
 //
 // The POSITIVE dev9p async round-trip (READ / WRITE / FSYNC that succeed) runs
 // post-pivot in loom-stress (Loom-6d-2), where the disk 9P FS is live.
@@ -32,8 +36,8 @@ extern crate alloc;
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use libthyla_rs::fs::File;
-use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe};
-use libthyla_rs::{t_exits, t_putstr};
+use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe, SETUP_SQPOLL};
+use libthyla_rs::{t_exits, t_poll, t_putstr, TPollFd, T_POLLIN};
 
 fn fail(msg: &str) -> ! {
     t_putstr(msg);
@@ -89,6 +93,40 @@ pub extern "C" fn rs_main() -> i64 {
         fail("loom-smoke: FAIL -- payload op on non-9P handle was NOT rejected\n");
     }
     t_putstr("loom-smoke: payload op on non-9P handle cleanly rejected\n");
+
+    // 5. KT-1.5: KObj_Loom.poll -- fold a Loom ring into poll(2). On an SQPOLL ring
+    //    the kthread drains the SQ + posts CQEs WITHOUT the owner calling ENTER, so
+    //    poll(raw_fd) wakes on a completion (the halcyond unified-wait scenario).
+    //    This is the FIRST EL0 SQPOLL consumer (kernel-tested only until now).
+    let sq = match Ring::setup(8, SETUP_SQPOLL) {
+        Ok(r) => r,
+        Err(_) => fail("loom-smoke: FAIL -- SQPOLL Ring::setup\n"),
+    };
+    // NEGATIVE: nothing staged -> an idle ring must poll NOT-ready (bounded wait,
+    // no false-positive). rc == 0 (timeout), revents clear.
+    let mut nfd = [TPollFd { fd: sq.raw_fd(), events: T_POLLIN, revents: 0 }];
+    let nrc = unsafe { t_poll(nfd.as_mut_ptr(), 1, 200) };
+    if nrc != 0 || (nfd[0].revents & T_POLLIN) != 0 {
+        fail("loom-smoke: FAIL -- idle SQPOLL ring polled READY (loom_poll false-positive)\n");
+    }
+    // POSITIVE: stage a NOP + wake the parked kthread (ENTER submits nothing on an
+    //    SQPOLL ring, it just kicks the kthread); it drains + posts the CQE, which
+    //    fires cq_waiters -> poll wakes with POLLIN. register-then-observe means a
+    //    post before OR after the poll's sample is caught (no lost wake, I-9).
+    if sq.try_submit(&Sqe::nop(0x9011)).is_err() {
+        fail("loom-smoke: FAIL -- SQPOLL try_submit(NOP)\n");
+    }
+    let _ = sq.enter(0, 0, 0);
+    let mut pfd = [TPollFd { fd: sq.raw_fd(), events: T_POLLIN, revents: 0 }];
+    let prc = unsafe { t_poll(pfd.as_mut_ptr(), 1, 5000) };
+    if prc < 1 || (pfd[0].revents & T_POLLIN) == 0 {
+        fail("loom-smoke: FAIL -- poll(SQPOLL loom-fd) did not report POLLIN on a posted CQE\n");
+    }
+    match sq.reap() {
+        Some(c) if c.user_data == 0x9011 && c.result == 0 && !c.more() => {}
+        _ => fail("loom-smoke: FAIL -- reaped NOP CQE mismatch after poll\n"),
+    }
+    t_putstr("loom-smoke: KObj_Loom.poll ok (idle=not-ready; SQPOLL NOP -> poll POLLIN -> reap)\n");
 
     t_putstr("loom-smoke: PASS\n");
     0

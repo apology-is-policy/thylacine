@@ -20,6 +20,87 @@ needed the operator.
 - **Say what is still open, and be exact about what "fixed" covers.** A half a
   defect closed is written as a half.
 
+
+---
+
+## 2026-09-03 (run 22, Opus 4.8) -- KT-1.5: the tile transport was impossible; the fix makes a Loom ring pollable
+
+Run 21 built the kaua-term producer side and surfaced KT-1.5 (halcyond ingest) as
+a design question. This run answered it -- and the answer overturned a transport
+claim I had ratified into scripture the same day.
+
+**The defect.** HALCYON 14.11.7 (mine, run 21) said halcyond drains each tile's
+up-PIPE over a per-tile Loom ring, "confirmed loom.rs:281." Impossible: a Loom
+read/write requires a dev9p (9P-backed) handle (kernel/loom.c:1198
+dev9p_client_fid); a pipe -EINVALs at submit, and the kernel deliberately bars
+non-9P handles from going async (loom.c:491-497). The "confirmation" pointed at
+the Sqe::read STRUCT BUILDER (libthyla-rs/src/loom.rs:281) -- a true statement
+about the wrong layer. The KT-1.5a probe encoding it compiled but was never
+boot-wired, so nothing had caught it.
+
+**The research (operator asked for it).** The operator did not want a cold fork;
+they asked for "the most performant solution that is simultaneously aligned with
+Thylacine's values." Three parallel agents mapped the candidates against verified
+code:
+- Weft (the zero-copy shared-Burrow dataplane) is OUT: no cheap EL0 path
+  (SYS_WEFT_SHARE needs CAP_HW_CREATE + a Tweft 9P server -- an authority
+  inversion for a crash-prone tile), and its readiness ring is single-source with
+  an UNWIRED blocking park, so it is not even the multiplex primitive.
+- A 9P-server-per-tile (~1.2-1.8k LOC/tile) buys zero-copy that is irrelevant
+  here -- records are pre-digested + low-volume, and a generic Loom read copies
+  anyway (loom.c:763).
+- The real multiplex primitive is the Loom ring (N dev9p handles, reap-any in one
+  enter). But a Loom ring is NOT pollable (KObj_Loom -> POLLNVAL), and halcyond is
+  irrevocably a Loom consumer (tapestry surface events arrive only via the
+  EventRing), so its two wait domains (Loom + poll) could not be unified.
+- The research also surfaced a pre-existing, quantified wart: halcyond/aurora
+  block on the ring and drain /dev/consdrain only per FRAME -> ~16-67 ms console
+  latency, a full stall on an occluded surface (tapestryd/main.rs:124).
+
+**The decision (operator, live: "Option 1 absolutely").** Make the Loom ring
+pollable + keep tiles as plain pipes, so halcyond waits on {tapestry loom-fd | N
+up-pipes | /dev/consdrain} in ONE poll(2) -- which also retires the frame-coupled
+wart, system-wide. Landed scripture-first (8eeff965), per the design-conversation
+pattern.
+
+**KT-1.5a -- the transport boot-prove (90d95d08).** The probe reads its pipe with
+t_read (Loom cannot read a pipe). It boot-proves the un-host-testable process
+surface: the pts host, the two threads, the codec over a real pipe
+(kaua-term-probe: PASS + Thylacine boot OK). No kaua-term change was needed -- its
+multi-thread exit is already sound (SYS_EXITS -> exits_code's live-peer cascade
+#811 + the #926 close-handles-at-termination path delivers up_wr's EOF to the
+probe). WRONG TURN caught by the boot: attempt 1 spawned by the BARE name
+"kaua-term-probe" and FAILED -- post-pivot, every spawn resolves by full path
+(/bin/X via the #58 bind); the pre-pivot loom-smoke idiom does not carry over.
+
+**KT-1.5-kernel -- loom_poll (VERIFIED).**
+poll_scan_one gains a KOBJ_LOOM arm -> loom_poll, which registers the poller on
+the ring's EXISTING l->cq_waiters and reports POLLIN iff loom_cq_ready>0, under
+l->lock (register-then-observe; the wake was already wired at loom.c:374,678). No
+new spec: unlike the cons .poll's IRQ relay, the CQE wake runs in process/kthread
+context -- a plain poll_waiter_list I-9 instance. The keep_out ref-retention holds
+the loom alive across the sleep automatically (handle_get/put ref/unref
+KOBJ_LOOM). Proven two ways: a deterministic kernel unit test (test_loom_poll) and
+an EL0 e2e leg in loom-smoke.
+
+WRONG TURN, TWICE, same shape -- a grep match read as a usage. I wrote "SQPOLL ...
+used by loom-bench" in the scripture; loom-bench runs Ring::setup(_, 0) --
+NON-SQPOLL. The grep for "SQPOLL" had matched a COMMENT. I had made the identical
+error minutes earlier reading aurora ("aurora uses SQPOLL" -- also a comment
+match; aurora is non-SQPOLL and carries the frame-coupled wart). SQPOLL had NO EL0
+consumer at all, so the loom-smoke leg is the first. Both corrected. The lesson is
+the standing one (MEMORY.md): a grep hit is a location, not a usage -- read the
+call, not the file.
+
+**Open / next.** KT-1.5-kernel is VERIFIED -- the loom.poll kernel unit test PASSES
++ the loom-smoke SQPOLL leg PASSES + Thylacine boot OK. The SMP gate (loom + poll
+are audit-trigger surfaces) is owed at the batched KT-1 audit-close, per the
+"double the distance between gates" discipline -- loom_poll composes the already-
+SMP-gated cq_waiters register-then-observe + the generic poll dispatch, so it adds
+no new SMP surface. Then KT-1.5b (libtapestry EventRing SQPOLL mode + halcyond's unified
+poll + the per-tile grid/scrollback ingest) -> KT-1.5c (multi-tile, unblocks
+H-4d) -> the batched KT-1 audit -> push.
+
 ---
 
 ## 2026-09-03 (run 21, Opus 4.8) -- KT-1: the kaua-term producer side, built + self-audited; and what halcyond actually is

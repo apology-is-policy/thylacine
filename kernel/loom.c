@@ -1466,6 +1466,35 @@ static u32 loom_cq_ready(struct Loom *l) {
     return (d > l->cq_entries) ? l->cq_entries : d;
 }
 
+// Loom-4 (KT-1.5): the KObj_Loom .poll hook -- fold a Loom ring into a poll(2)
+// set alongside pollable devs (pipes, /dev/consdrain). Register-then-observe on
+// the SAME l->cq_waiters list loom_wait_for_completions uses, under l->lock (the
+// poll.tla lineage; I-9): a CQE post between the sample and the poller's sleep
+// fires poll_waiter_list_wake(&l->cq_waiters) (loom_post_cqe + the session-death
+// path), and the woken poller re-samples -- no wake lost. Unlike the cons .poll
+// (cons_poll.tla), the CQE wake already runs in process/kthread context, so
+// there is no deferred IRQ relay: this is a plain poll_waiter_list instance.
+// POLLIN iff a CQE is ready to reap. Meaningful only on an SQPOLL ring (a kthread
+// posts CQEs without the poller calling ENTER); on a non-SQPOLL ring nothing
+// advances the CQ while the owner sleeps in poll(), so it never signals --
+// correct, not useful. POLLOUT (SQ space) is not modelled at v1.0: the
+// compositor submits via SQPOLL/ENTER and never blocks on a full SQ. The
+// keep_out ref-retention in poll_scan_one holds the loom_ref across the sleep
+// once pw lists on cq_waiters (handle_put's loom_unref pairs it).
+short loom_poll(struct Loom *l, short events, struct poll_waiter *pw) {
+    if (!l || l->magic != LOOM_MAGIC) return POLLERR;
+    short revents = 0;
+    spin_lock(&l->lock);
+    if (pw && (events & POLLIN)) {
+        poll_waiter_list_register(&l->cq_waiters, pw);
+    }
+    if ((events & POLLIN) && loom_cq_ready(l) > 0) {
+        revents |= POLLIN;
+    }
+    spin_unlock(&l->lock);
+    return revents;
+}
+
 // The client of the first still-in-flight (non-terminal) async op, or NULL when
 // none remain (no further completion can arrive). To keep the borrowed client
 // alive across the caller's pump -- which runs AFTER l->lock is dropped -- this

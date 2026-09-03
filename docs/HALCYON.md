@@ -1486,8 +1486,10 @@ well-precedented:
 - **SQPOLL for the compositor ring.** A poll on a Loom ring is only meaningful if CQEs
   post **without** the owner calling `enter` (else nothing pumps the 9P session while
   halcyond sleeps in `poll`). `LOOM_SETUP_SQPOLL` already provides this -- a kernel
-  poll-thread admits + pumps + posts autonomously (tested `test_loom.c`; used by
-  `loom-bench`). `libtapestry`'s `EventRing` gains an SQPOLL setup mode + a userspace
+  poll-thread admits + pumps + posts autonomously (kernel-tested -- `test_loom.c`'s
+  `sqpoll_*` tests; it had **no** EL0 consumer until KT-1.5-kernel -- `loom-bench`
+  runs `flags=0` -- so the loom-smoke poll leg is the FIRST EL0 SQPOLL driver).
+  `libtapestry`'s `EventRing` gains an SQPOLL setup mode + a userspace
   CQ-reap path (reap without `enter`) + the ring fd exposed for `poll`; the tapestry
   session is one-per-ring (the `EventRing` invariant), so the SQPOLL kthread's
   single-session pump is sound (no cross-session starvation).

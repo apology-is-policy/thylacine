@@ -28,6 +28,7 @@
 #include <thylacine/devsrv.h>      // srv_handle_poll — KObj_Srv dispatch
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
+#include <thylacine/loom.h>       // loom_poll -- KObj_Loom .poll (KT-1.5)
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
@@ -233,6 +234,13 @@ static int poll_scan_one(struct Proc *p, struct pollfd *pfd,
         // The KObj_Srv flavor (listener SrvService vs client SrvConn) is
         // discriminated inside srv_handle_poll via the obj's magic.
         revents = (s16)srv_handle_poll(hh.obj, pfd->events, pw_or_null);
+        break;
+    case KOBJ_LOOM:
+        // KT-1.5: a Loom ring folds into a poll(2) set (KObj_Loom.poll). The
+        // keep_out retention below holds the loom_ref across the sleep once
+        // loom_poll lists pw on l->cq_waiters (handle_put's loom_unref pairs it).
+        // Meaningful on an SQPOLL ring, whose kthread posts CQEs without ENTER.
+        revents = (s16)loom_poll((struct Loom *)hh.obj, pfd->events, pw_or_null);
         break;
     default:
         // Every other kobj kind (Burrow / Mmio / Irq / Dma / Interrupt /
