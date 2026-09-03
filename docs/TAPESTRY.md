@@ -442,6 +442,17 @@ menus, tooltips, dialogs, multiple top-levels) map awkwardly — a menu is a
 transient floating window by nature. Accepted: the porting target is games / TUIs,
 not the Linux desktop-app ecosystem.
 
+**Concretization — the multi-console substrate (2026-09-03, operator-ratified).**
+The "terminal is the desktop" model is concretized in `docs/HALCYON.md` §14: every
+tile is a console on a **pts** (the built `ptyfs`), hosted by a per-tile,
+crash-isolated **`kaua-term`** process (UNIFORM-Y) that parses the pts and feeds
+`halcyond` cells; `halcyond` keeps the transcript, render, inline media, and Helix,
+and composites. A graphical app spawned in a tile is an inline-live client surface —
+and under UNIFORM-Y a terminal tile is *also* a composited client surface, so inline
+graphics and terminals are one shape. The substrate / topology / seam / split, plus
+the trusted-path reconciliation (this §, §18.7), live in HALCYON §14; the per-tile
+parser is the aux track's `docs/KAUA-TERM.md`.
+
 ## 15. Layout-as-9P — the compositor is a file server
 
 **Decision (2026-06-08): the compositor exposes its layout as a 9P tree** (the

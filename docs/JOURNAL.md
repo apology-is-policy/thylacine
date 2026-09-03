@@ -22,6 +22,94 @@ needed the operator.
 
 ---
 
+## 2026-09-03 (run 19, Opus 4.8) — the multi-console design: a topology fork caught, an operator override, and the tree-divergence rule 3x
+
+No code this run — a design conversation (→ scripture) with the aux track. The
+interesting parts are two catches and one operator decision that went past both
+experts.
+
+**The ask.** Design the multi-console tile model — the concretization of "the
+terminal is the desktop" (TAPESTRY §14): most tiles start as a console (a `ut` on
+its own terminal), graphical apps run inline-live and promote to fullscreen, the
+console shows inline media. Aux was on adjacent ground (Aurora + vivarium), so the
+operator had us design it together (yip call 0044).
+
+**Convergence #1 — it's one component.** Aux had just audited its VT parser and
+found a Linux `vim` corrupts in Aurora because Aurora's parser is only the Kaua
+*subset*; the fix aux was building — a full-xterm parser hosting the app on a pts,
+rendering through Kaua — *is* the per-tile terminal I was about to spec. Same
+component. The substrate fork (rio per-tile `/dev/cons` vs pts vs kernel
+multi-console) collapsed to **pts**: `ut` already runs on a pts slave
+(ptyhost/PTY-4b, shell/src/main.rs:346), and nothing avoids a VT round-trip today
+(Aurora is already a VT-parser→cells), so a per-tile `/dev/cons` would be a second
+substrate beside the pts Linux needs anyway.
+
+**The catch — a topology fork the co-design glossed.** Reading HALCYON.md §13 (the
+2026-09-01 concretization, which aux-2 structurally cannot see — no `halcyond/`
+dir there), I found §13.1 places the VT hosting *in halcyond, in-process* ("the
+only place that thinks, owns the VT core instances"), while aux's model spawned a
+*separate process per tile*. I raised it before either of us wrote scripture on
+the opposite assumption.
+
+**The wrong turn, and what caught it.** I leaned (X) in-process, on a
+transcript-ownership argument (the transcript is halcyond's core; it is built from
+the parse; so the parse is halcyond's). Aux corrected me with grounded code:
+Aurora and Kaua are `no_std` with `panic = abort` (aurora main.rs:870, kaua
+term.rs:21); a full-xterm parser on *hostile* Linux bytes will eventually panic →
+abort the process — and if that process is halcyond, the whole environment dies.
+That is §13.1's *own* crash-isolation logic (why `halcyon-gpu` is a spawned child)
+applied to a hostile-input parser. My transcript-ownership argument survives only
+for the *native* case. The catch was aux re-deriving from real code the thing I
+had argued past — I had told the operator it would "likely resolve to (X)"; it did
+not.
+
+**The operator decision — past both experts.** The fork narrowed to native tiles:
+HYBRID (native in-process, Linux isolated) vs UNIFORM (all isolated). Both aux and
+I leaned HYBRID. The operator chose **UNIFORM-Y** — every tile isolated, one
+uniform path, universal crash-isolation over two experiences. It revises §13's
+single-brain model, so it is recorded as operator-authorized (HALCYON.md §14.2).
+
+**Convergence #2 — the seam.** With halcyond no longer the VT host, where does the
+transcript render? Both aux and I independently landed on **(B) feed-cells**: the
+kaua-term is a headless parser feeding `TCell` + events; halcyond keeps the
+transcript, fontdue render, inline media, and Helix, and composites. Grounded that
+it *fits*: halcyond's transcript is already `TCell`-based (transcript.rs:70),
+ingests via `t.feed()` (main.rs:148), renders via cartoon+fontdue
+(main.rs:531/616) — so the parse moving out is a clean refactor, not a rebuild.
+Crash-isolation holds (only the parser is isolated; the renderer touches trusted
+cells + a font).
+
+**A smaller catch, same rule.** Aux's deep pass claimed the render *tier*
+"dissolves — nothing to relocate." Grounding it in *my* domain (aux swept
+kaua/aurora/ptyfs/ut, not halcyond) found a real `beacon rich` runtime
+advertisement (halcyond→consctl, cons.c:2138, a renderer-authority verb paired
+with winsize; `ut` exports `BEACON=rich`). It does not dissolve — it rides the
+winsize relocation per-tile, or a CELLS tile's program reads a stale tier and
+emits TTF-assuming output. Aux accepted it and diagnosed the miss precisely: tree
+divergence (aux-2 has zero `beacon` tokens).
+
+**The tree-divergence rule earned its keep three times in one run** — the beacon
+catch, the `usr/lib/vt` H-2a location (absent in aux-2, so growing the parser is a
+cross-tree coordination point), and the topology fork itself. Each was a fact one
+track could ground and the other structurally could not from its own worktree. The
+rule ("neither track grounds *or authors* the other's half") is now the build's
+load-bearing coordination discipline, and the doc-split follows it: main writes
+HALCYON/TAPESTRY, aux writes KAUA-TERM.md, the seam is authored once on each side.
+
+**What landed (scripture, no code).** HALCYON.md §14 (the authoritative
+multi-console record) + §13.1/§13.3/§13.4 supersession notes + TAPESTRY.md §14
+concretization + the status row. Aux landed its half (`docs/KAUA-TERM.md`
+@`8cbc77e5`, both mirrors).
+
+**What is open.** The seam *protocol* (the `TCell`-row + event encoding — a fresh
+co-design call, owed before KT-1's seam is built). The build: **KT-1** (kaua-term
+native mode + seam + halcyond composite) unblocks **H-4d** with zero kernel work
+(native `ut` has pts job control today); then **C2-k1c** (Linux tiles); then
+**C2-k3** (Linux job control). The native-`ut` VT-round-trip question and the
+`usr/lib/vt` cross-tree coordination ride the seam-protocol call.
+
+---
+
 ## 2026-09-02 (run 18, Opus 4.8) — H-4b-3b: the restore tool, and a `mkdir -p` wall found in the E2E
 
 The H-4b arc's last sub-chunk: `halcyon layout restore`, the syscalling half of

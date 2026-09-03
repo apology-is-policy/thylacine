@@ -324,6 +324,16 @@ the palette, **Beacon** the signal (BEACON.md §11). The paper-light default
 
 ### 13.1 The process architecture (BOUND; the fork analysis recorded)
 
+> **REVISED by §14 (multi-console pass, 2026-09-03, operator-ratified):** under the
+> multi-console model `halcyond` is the compositor + transcript-orchestrator but is
+> **no longer the VT host** — each tile is an isolated `kaua-term` process that
+> parses the pts and feeds `halcyond` cells (§14.2/§14.3). "Owns … the VT core
+> instances" below is superseded for per-tile terminals; the rest of §13.1 (the
+> brain owns the transcript/render/layout; the in-process executor; `halcyon-gpu`
+> as a spawned child) stands — and in fact *motivates* the isolation, since a
+> hostile-input parser panicking (`no_std` `panic = abort`) would otherwise take
+> the whole environment down (§14.2).
+
 **Halcyon is not one program.** It is a small family with one brain:
 
 - **`halcyond`** (native `libthyla-rs`, `no_std + alloc`) — **the
@@ -416,6 +426,12 @@ the buffer).
 
 ### 13.3 The transcript model (the data structure; H-2's core)
 
+> **REVISED by §14 (2026-09-03):** the generic-VT parse (`t.feed()`, below) moves
+> **out of process** to the per-tile `kaua-term`; the transcript **consumes cells**
+> over the seam (§14.3). The `TCell` model and everything above the parse are
+> unchanged — the move is a clean refactor precisely because storage is already
+> cell-addressed.
+
 **Store semantics, derive pixels.** The transcript is a bounded deque of
 **blocks** (one per Beacon `zone` cycle: prompt text, command-era bytes,
 output, exit mark; un-zoned foreign output coalesces into anonymous
@@ -458,6 +474,12 @@ line boxes.
   previous block (flat block sequence; `command` stays RESERVED).
 
 ### 13.4 The shared VT core (the extraction; H-2 opens with it)
+
+> **REVISED by §14 (2026-09-03):** §13.4(a)'s raw-VT pane — a full `Vt` grid hosted
+> **in `halcyond`** — is superseded by the per-tile `kaua-term` process (§14.2). The
+> shared `usr/lib/vt` crate is **grown to full-xterm** and consumed by the
+> `kaua-term`; the growth is a cross-tree coordination point (the crate is absent in
+> the aux worktree — §14.10).
 
 - `usr/aurora/src/vt.rs` MOVES to a shared crate (`usr/lib/` sibling of
   kaua/libtapestry; name held — `vt` is acceptable, a thematic name may be
@@ -1074,3 +1096,205 @@ authority) is not audit-bearing on its own.
 5. JPEG's vehicle (H-7).
 6. BEACON.md §12.10's items (OSC number, env name, devpipe dc, grep ref
    form).
+
+## 14. The multi-console tile model + the kaua-term substrate (design pass 2026-09-03)
+
+> Same bar as §13 / BEACON.md §12: a session on a lesser model must build this
+> without re-deriving a decision. **Operator-ratified 2026-09-03** (the topology
+> vote); co-designed with the aux track (Aurora + vivarium), yip call 0044. This
+> section is **authoritative for the multi-console model** and **revises §13.1 /
+> §13.3 / §13.4** where the single-in-process-brain assumption no longer holds
+> (§14.10). Every "exists" claim is verified against the tree (file:line).
+
+### 14.0 The problem + the ground truth
+
+Today Halcyon has **one** `/dev/cons` and **one** transcript: `halcyond` opens
+`/dev/consdrain` + `/dev/consfeed` + `/dev/consctl` (`main.rs:278-290`), the same
+single-console seam Aurora uses; the kernel `cons` layer is the tty and the
+renderer differs only by Beacon posture (rich vs cells). But TAPESTRY §14
+ratified "the terminal is the desktop": most tiles START as a console (a `ut` on
+its own terminal); a graphical app spawned in a console tile runs inline-live,
+promotable to fullscreen; the console shows inline media. The G/H arc built
+split/tabbed/zoom/present — **not** N consoles, inline-live, or promotion. This
+pass reconciles the ratified anti-window model with the as-built and names the
+substrate that gives N terminals.
+
+Ground truth (verified 2026-09-03):
+
+| Fact | Where | Consequence |
+|---|---|---|
+| `ut` does not open `/dev/cons` — it reads inherited fd 0/1/2, and `ptyhost` already runs it on a **pts slave** (the PTY-4b "pts session dance") | `usr/utopia/shell/src/main.rs:27,337,346` | Native-`ut`-on-a-pts is a solved path, not new impedance. `ut` self-edits its line (libutopia `line_editor`), so it needs only raw pts pass-through. |
+| `ptyfs` (`/dev/pts`, `/dev/ptmx`) is the built pts 9P server (PTY-2, I-20) | `usr/ptyfs/src/{main,server}.rs` | The per-tile terminal substrate already exists. |
+| Aurora's `Vt` parser moved to the shared crate `usr/lib/vt` (H-2a); `halcyond` + Aurora both consume it | `docs/HALCYON.md §13.4` | The parser is already a shared crate — growing it to full-xterm benefits both. |
+| Aurora and Kaua are `no_std` with **`panic = abort`** | `usr/aurora/src/main.rs:870`, `usr/lib/kaua/src/term.rs:21` | A parser panic on hostile bytes aborts the whole process — the crux of the topology decision (§14.2). |
+| `halcyond`'s transcript is **cell-addressed** (`TCell`), ingests the byte stream via `t.feed()`, and renders via the `cartoon` executor + fontdue atlas | `transcript.rs:70,76,85`, `main.rs:148,531,616` | A cell-feed from an out-of-process parser is a clean refactor, not a rebuild (§14.3). |
+
+### 14.1 The substrate — (b) uniform-pts-per-tile
+
+Every tile's program (native `ut` **or** a Linux binary) runs on a **pts slave**;
+`ptyfs` is the substrate. The substrate fork was three-way: (a) a compositor-served
+per-tile `/dev/cons` (the Plan 9 rio model), (b) pts-per-tile (the tmux/kitty model
+on the built `ptyfs`), (c) kernel multi-console (a per-tile kernel `cons`). Resolved
+to **(b)**: `ut` is already pts-agnostic (above), nothing avoids a VT round-trip
+today (`ut` emits VT to fd1; even Kaua's `Terminal` emits cell-diff-as-VT; Aurora is
+already a VT-parser → cells), and a Linux binary requires a pts for termios/job
+control regardless — so a per-tile `/dev/cons` would be a *second* substrate beside
+the pts Linux needs anyway. The heritage (rio per-window terminal) and SOTA
+(tmux/kitty ptys, Fuchsia session-per-component) both fuse into "the terminal is the
+desktop" on the pts substrate.
+
+### 14.2 The topology — UNIFORM-Y (operator-ratified)
+
+**Every tile is a separate, crash-isolated `kaua-term` process** — native and Linux
+uniformly. This **revises §13.1**: `halcyond` no longer hosts the VT parse in its own
+process.
+
+The decision is a robustness one, grounded in the tree. A full-xterm parser is a
+complex state machine; on **hostile** input (a Linux binary emits arbitrary bytes)
+it will eventually hit a panicking edge, and `no_std` `panic = abort` (§14.0) aborts
+the *process*. If that process is `halcyond`, the whole environment dies — every
+tile. Isolating a hostile-input parser in its own process is exactly the
+crash-isolation §13.1 already rests on (why `halcyon-gpu` is a spawned child), not a
+departure from it.
+
+The co-design narrowed the fork to the *native* tile — a **hybrid** (native `ut`
+in-process, trusted + constrained + low-panic-risk; Linux isolated) versus
+**uniform** (every tile isolated). Both aux and main leaned hybrid. **The operator
+chose uniform** (2026-09-03): one uniform crash-isolated path and one seam defined
+once, over two experiences. So native `ut` tiles are also `kaua-term` processes.
+(A pure all-in-process option — accept the crash risk for simplicity — was rejected
+by both tracks: a hostile binary crashing the whole environment is not acceptable.)
+
+### 14.3 The seam — (B) feed-cells
+
+The `kaua-term` is a **headless** isolated parser+input process. It holds the pts
+master, runs the generic-VT parse (the grown `usr/lib/vt`) into a live `TCell` grid,
+and feeds `halcyond`, over the seam, **cells + events**: the live-screen `TCell`
+rows, lines as they scroll off, and forwarded control/OSC events (Beacon frames,
+bell, exit marks, winsize acks). `halcyond` **keeps** everything it owns today — the
+transcript (`TCell` storage), the Beacon-zone/block model, inline media
+(`Image`/`Embed`), Helix-modal scrollback selection, and the `cartoon` + fontdue
+render — and composites all tiles.
+
+This is the (B) arm of a render-vs-parse fork. The alternative (A) — the `kaua-term`
+renders pixels (a weave surface) and `halcyond` is a pure placement orchestrator —
+was **rejected**: it drags fontdue + the `cartoon` executor + image decode into the
+`kaua-term`, duplicates fontdue per process, and breaks Helix-modal selection (which
+needs the *text* in `halcyond`) and inline media (which needs `halcyond` to own the
+flow). (A)'s genuine buys (D7 purity; parallel per-process rasterization) do not
+outweigh those. **Crash-isolation holds under (B)**: the isolated part is precisely
+the hostile-input *parser*; `halcyond`'s renderer only ever touches trusted cells + a
+font — far lower panic risk than the parser. (B) is a **clean refactor** of the
+as-built: `halcyond` already stores `TCell`s and renders them (§14.0); only the
+`t.feed()` parse moves out of process.
+
+The exact wire format (the `TCell`-row + event encoding; the native-`ut`
+VT-round-trip question — a native Kaua app may feed cells more directly than
+emitting VT to be re-parsed; the input `KeyEvent → xterm-encode → pts` leg) is the
+**seam protocol**, owed at a fresh co-design call. The shape (B, cells-to-halcyond)
+is fixed; the encoding is not yet.
+
+### 14.4 The split
+
+- **`halcyond`** — compositor + **transcript-orchestrator** + placement/promotion.
+  Owns: the transcript, Beacon parse, inline media, Helix selection, fontdue + the
+  `cartoon` render, the layout/chrome/menus, and per-tile composition. Spawns a
+  `kaua-term` per tile; consumes its cell-feed. **Not a VT host** (the §13.1
+  revision).
+- **`kaua-term`** (aux track; `docs/KAUA-TERM.md`) — the isolated per-tile
+  parser+input process: the grown VT parser, the pts-master host, the
+  `KeyEvent → xterm` re-encode, and the seam's `kaua-term` side. Both modes (native
+  + Linux) uniformly isolated.
+- **kernel / vivarium** — **C2-k1c** (the four termios/winsize ioctls
+  `{TCGETS, TCSETS/W/F, TIOCGWINSZ, TIOCSWINSZ}` reached through the Linux phenotype
+  to the *existing* `ptyfs` line discipline — a Linux-tile enabler; native `ut`
+  needs none of it) and **C2-k3** (the job-control ioctls
+  `{TIOCSPGRP, TIOCGPGRP, TIOCSCTTY}` + `SIGTTIN`/`SIGTTOU` — Linux `bash` fg/bg/^Z;
+  a follow-on, not MVP-blocking). Cooked mode itself is **already built** in `ptyfs`
+  userspace; C2-k1c is only the phenotype's reach to it.
+
+### 14.5 Trusted path / I-27 — unchanged and orthogonal
+
+Grounded in TAPESTRY §18.7: on virtio-gpu-only media (QEMU) the trusted path stays
+**serial** (BREAK-SAK); the single `/dev/cons` is a renderer-held drain/feed fid pair
+(`halcyond`'s), and a framebuffer SAK episode (simplefb-class boards) suspends the
+renderer while the kernel paints. The multi-console model adds per-tile ptys **below**
+that single trusted `/dev/cons`, all **uniformly untrusted** (exactly as rio windows
+are never the trusted console). The trusted conversation never touches a tile pts, so
+the trusted path is untouched and **orthogonal to the X/Y topology** — it does not
+discriminate between in-process and per-process tiles.
+
+### 14.6 winsize + beacon relocate per-tile, together
+
+Under one `/dev/cons` the renderer reports winsize and its render **tier** through
+`consctl`: the `winsize <cols> <rows>` verb (#55) and the `beacon <tier>` verb —
+paired as the two renderer-authority verbs a `CCONSWINSZONLY` consctl may write
+(`cons.c:2138`); `ut` reads `/dev/beacon` and exports `BEACON=rich`, which programs
+read to choose output. Under multi-console **both** relocate to the per-tile pts,
+**together**:
+
+- **winsize** → the pts (`TIOCGWINSZ`); the compositor is the geometry authority,
+  sets the tile's pts winsize, and a resize raises `SIGWINCH`. The per-pts `ptyfs`
+  winsize model already exists.
+- **beacon tier** has two sides that **must match per tile**: the **render** side
+  (a compositor-set rasterizer flag the `kaua-term` honors — the tier is the
+  compositor's choice, not the app's) and the **advertise** side (the program reads
+  its tile's tier via `BEACON` on the tile's pts). A CELLS tile whose program reads a
+  stale `BEACON=rich` would emit TTF-assuming output the tile cannot honor — so the
+  advertisement is per-tile, not global. Retiring the `CCONSWINSZONLY` console
+  special-case for tiles moves winsize **and** beacon onto the per-tile pts ctl.
+
+### 14.7 Inline media — native, out-of-band
+
+`cat picture.png` → an inline image is a **native** path: a `display`/type-aware
+coreutil or the shell emits an `Embed`/`Image` to `halcyond` **directly** (out of
+band), **not** PNG bytes down the pts — raw image bytes down the pts hit the VT
+parser as garbage. This matches NOVEL §3.4 (bytes-in-text rejected as the media
+mechanism) and keeps image decode in `halcyond` (Rust, the format-fuzz surface).
+Terminal image-escape protocols (sixel / kitty / iTerm) are **v1.x**.
+
+### 14.8 Inline-live graphical apps + promotion (TAPESTRY §14 concretized)
+
+A graphical app spawned in a console tile (the operator's `tyr-quake` example) is a
+separate `libtapestry` client surface, placed **inline-live** (`Embed`) in the tile's
+transcript flow (TAPESTRY §14's D5 placement-transparency); it promotes inline-live →
+pane-zoomed → tab/display (D6 live-reparent), the client rendering the same surface
+throughout. **Under UNIFORM-Y this unifies cleanly**: the `kaua-term` is *also* a
+client surface `halcyond` composites, so a terminal tile and an inline graphical app
+are the **same shape** — a composited client surface in a tile's flow. "Start a game
+inline, promote it to fullscreen" and "a terminal in a tile" are one mechanism.
+
+### 14.9 Build order
+
+1. **`kaua-term` native mode + the seam + `halcyond` per-tile composite** →
+   **unblocks H-4d** (the welcome's two `ut` panes). **Zero kernel work**: native
+   `ut` already has full pts job control today (`t_tty_*` + the PTY-4b session
+   dance). This is aux's KT-1 (`docs/KAUA-TERM.md`).
+2. **C2-k1c** → Linux tiles (termios/winsize reach).
+3. **C2-k3** → Linux job control (fg/bg/^Z).
+
+The gate (H-4d) never waits on the kernel work.
+
+### 14.10 §13 supersessions + audit + open items
+
+- **§13.1** "`halcyond` … owns … the VT core instances … in-process" → **superseded**
+  for per-tile terminals: the `kaua-term` process owns the parse (§14.2/§14.3).
+  `halcyond` remains the single brain for the transcript, render, layout, and
+  composition.
+- **§13.3** "ingests the byte stream via `t.feed()`" (in-process) → the generic-VT
+  parse **moves to the `kaua-term`**; the transcript **consumes cells** over the seam
+  (§14.3). The `TCell` model and everything above the parse are unchanged.
+- **§13.4(a)** "the raw-VT pane class hosts a full `Vt` grid … in `halcyond`" →
+  **superseded** by the `kaua-term` process; the shared `usr/lib/vt` crate is grown
+  to full-xterm (DECSTBM/margins, SU/SD, origin mode, wide chars, SGR residue) and
+  consumed by the `kaua-term`. This is a **shared-crate** change: `usr/lib/vt` (H-2a)
+  is absent in the aux worktree (its `vt.rs` is still in Aurora there), so the growth
+  is a coordination point — H-2a must reach the aux tree, or the crate is coordinated
+  at the seam.
+- **Audit**: the `kaua-term` is a hostile-input parse surface — it joins the
+  format-fuzz audit class (like the Beacon parser). C2-k1c/C2-k3 are syscall/ioctl
+  surfaces (an AUDIT-TRIGGERS row at their build). The seam is a new IPC parse surface
+  on `halcyond`'s side (bounds-check the cell-feed like the 9P wire).
+- **Open**: the seam **protocol** (the `TCell`-row + event encoding — owed at a fresh
+  co-design call); the native-`ut` VT-round-trip question; sixel/kitty and JPEG →
+  v1.x.
