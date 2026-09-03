@@ -101,12 +101,25 @@ multi-console record) + §13.1/§13.3/§13.4 supersession notes + TAPESTRY.md §
 concretization + the status row. Aux landed its half (`docs/KAUA-TERM.md`
 @`8cbc77e5`, both mirrors).
 
-**What is open.** The seam *protocol* (the `TCell`-row + event encoding — a fresh
-co-design call, owed before KT-1's seam is built). The build: **KT-1** (kaua-term
-native mode + seam + halcyond composite) unblocks **H-4d** with zero kernel work
-(native `ut` has pts job control today); then **C2-k1c** (Linux tiles); then
-**C2-k3** (Linux job control). The native-`ut` VT-round-trip question and the
-`usr/lib/vt` cross-tree coordination ride the seam-protocol call.
+**Then the seam protocol, same run (yip call 0045).** With B the lean, aux and I
+firmed the wire in one more call. The shape: one ordered record stream up —
+`CellDiff` / `ScrollOff` / `Control{ osc1936_raw | bell | title | exit }` / `Mode` —
+**boundary-flushed** so a Beacon zone-frame lands at the exact point between the
+cells it separates (aux's producer realization: flush a pending `CellDiff` before
+every `Control`/`Mode`/`ScrollOff`, never coalesce across a boundary — the block
+model stays exact); `Key`/`Resize` down; the wire cell is the shared
+`usr/lib/vt::Cell`, no translation. The render-responsibility choice (B vs A) was
+teed to the operator and **ratified B** — aligned with both experts this time (A's
+D7-purity + parallel-raster buys noted, outweighed). Recorded in HALCYON §14.3;
+aux's producer side in KAUA-TERM.md. One refinement caught on the record: aurora is
+*not* renderer-subsumed — it stays the unchanged trusted `/dev/cons` rasterizer (the
+SAK sink); only the `usr/lib/vt` *parser* is shared, three renderers apart.
+
+**What is open.** The build: **KT-1** (kaua-term native mode + seam + halcyond
+composite) unblocks **H-4d** with zero kernel work (native `ut` has pts job control
+today); then **C2-k1c** (Linux tiles); then **C2-k3** (Linux job control).
+Build-prep: the `usr/lib/vt` H-2a sync to the aux tree (aux's cherry-pick at KT-2).
+The native-`ut` VT-round-trip stays a v1.x optimization.
 
 ---
 

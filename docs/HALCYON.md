@@ -1188,11 +1188,39 @@ font — far lower panic risk than the parser. (B) is a **clean refactor** of th
 as-built: `halcyond` already stores `TCell`s and renders them (§14.0); only the
 `t.feed()` parse moves out of process.
 
-The exact wire format (the `TCell`-row + event encoding; the native-`ut`
-VT-round-trip question — a native Kaua app may feed cells more directly than
-emitting VT to be re-parsed; the input `KeyEvent → xterm-encode → pts` leg) is the
-**seam protocol**, owed at a fresh co-design call. The shape (B, cells-to-halcyond)
-is fixed; the encoding is not yet.
+**AS-SETTLED — the seam protocol (2026-09-03, yip call 0045; the render
+responsibility operator-ratified B).** The wire is one **ordered record stream**
+up (kaua-term → halcyond) plus a small stream down, and it is **transport-agnostic**
+(halcyond's ingest is a halcyond-owned Loom ring per tile — the H-3c-2 `EventRing`
+reuse; the kernel primitive firms at KT-1):
+
+- **Up** (kaua-term → halcyond): `CellDiff{ changed (row,col,cell)[], cursor(row,col,vis) }`
+  (the live screen) · `ScrollOff{ rows: cell[] }` (normal-mode lines off the top →
+  the transcript) · `Control{ osc1936_raw | bell | title | exit(code) | winsize_ack }`
+  (the kaua-term forwards OSC 1936 Beacon frames **raw** — halcyond keeps the Beacon
+  parser, R5) · `Mode{ normal | alt_screen }`. **Ordering is load-bearing** (a Beacon
+  zone-frame must land at the exact point between the cells it separates), so the
+  producer **flushes a pending `CellDiff` before every `Control`/`Mode`/`ScrollOff`
+  and at end-of-input-chunk**, never coalescing a frame across a zone boundary.
+  halcyond replays the stream in order; the block model is exact (a scroll-off after
+  a zone-open lands in the new zone). Within a `CellDiff` the cells are position-keyed,
+  so only the *boundary* order is load-bearing.
+- **Down** (halcyond → kaua-term): `Key{ KeyEvent }` (halcyond routes
+  post-chrome-chord input to the focused tile; the kaua-term xterm-encodes honoring
+  DECCKM/keypad → the pts) · `Resize{ cols, rows }` (the kaua-term sets pts winsize +
+  the app gets `SIGWINCH`).
+- **The wire cell is the shared `usr/lib/vt::Cell`** (self-contained `ch` + style), so
+  the wire is a slice of one struct with no translation; halcyond's per-block `TCell`
+  style-interning is a consumer-internal detail on ingest. This requires the H-2a crate
+  to reach the aux tree (a build-prep sync at KT-2; §14.10).
+- **Tier**: under B halcyond renders, so the render tier is RICH for every Halcyon
+  tile; the pts advertises `BEACON=rich` (set at kaua-term spawn — §14.6's advertise
+  side), so a tier-aware program in the tile emits rich markup.
+
+The native-`ut` VT-round-trip (a native Kaua app feeding cells more directly than
+emitting VT to be re-parsed) stays a **v1.x optimization**; v1.0 native `ut` emits VT
+to its pts and the kaua-term parses it, as terminals do. The aux track's producer side
+of this contract is `docs/KAUA-TERM.md`.
 
 ### 14.4 The split
 
@@ -1212,6 +1240,13 @@ is fixed; the encoding is not yet.
   `{TIOCSPGRP, TIOCGPGRP, TIOCSCTTY}` + `SIGTTIN`/`SIGTTOU` — Linux `bash` fg/bg/^Z;
   a follow-on, not MVP-blocking). Cooked mode itself is **already built** in `ptyfs`
   userspace; C2-k1c is only the phenotype's reach to it.
+- **`aurora`** — **unchanged.** It remains the CELLS-tier renderer and the trusted
+  `/dev/cons` rasterizer (the SAK sink) for aurora-mode sessions; the multi-console
+  neither subsumes nor alters it. What the `kaua-term` shares with `aurora` is the
+  `usr/lib/vt` **parser** only, not `aurora`'s renderer — the `kaua-term` does not
+  rasterize (halcyond does, under B). So the co-design's earlier "R2 subsume" is
+  refined under (B) to a **parser-share**: one `usr/lib/vt` crate that `aurora`, the
+  `kaua-term`, and halcyond's ingest-side `Cell` all consume, three renderers apart.
 
 ### 14.5 Trusted path / I-27 — unchanged and orthogonal
 
@@ -1295,6 +1330,7 @@ The gate (H-4d) never waits on the kernel work.
   format-fuzz audit class (like the Beacon parser). C2-k1c/C2-k3 are syscall/ioctl
   surfaces (an AUDIT-TRIGGERS row at their build). The seam is a new IPC parse surface
   on `halcyond`'s side (bounds-check the cell-feed like the 9P wire).
-- **Open**: the seam **protocol** (the `TCell`-row + event encoding — owed at a fresh
-  co-design call); the native-`ut` VT-round-trip question; sixel/kitty and JPEG →
-  v1.x.
+- **Open**: the seam **protocol** is now **SETTLED** (§14.3 AS-SETTLED, yip call 0045);
+  what remains is the **H-2a crate sync** to the aux tree (a build-prep step, aux's
+  cherry-pick at KT-2), the native-`ut` VT-round-trip **v1.x optimization**, and
+  sixel/kitty + JPEG → v1.x.
