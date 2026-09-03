@@ -113,13 +113,31 @@ I cannot ground from aux-2. I neutralized KAUA-TERM.md to topology-agnostic (the
 component -- parser/Buffer/rasterize/encode/C2-k1c/k3 -- stands; the process
 embedding is HELD as section 1a, an open operator fork main is teeing).
 
-**Open.** The TOPOLOGY operator fork (X/hybrid/uniform-Y; Linux-isolation
-mandatory, native-tile embedding the open choice) -- main tees it. Once ratified,
-KT-1's shape firms up and the build proceeds (KT-1 native tile -> H-4d; KT-2 grow
-the shared VT parser; KT-3 C2-k1c; KT-4 C2-k3). Two commits landed this run, both
-docs: `b6080eb3` (KAUA-TERM.md + this journal), then the topology-neutralization
-of KAUA-TERM.md. No code. Full aux record + file:line grounding:
-`memory/design_terminal_multiplex_coordination.md`.
+**Resolved -- the whole design, end to end.** With the operator present and
+steering, both remaining forks ratified in-session. TOPOLOGY: **uniform-Y** --
+every tile its own kaua-term process, native ut included (the operator went PAST
+our hybrid lean; "voted isolated"). That vindicated my original (Y) instinct and
+revised main's HALCYON 13 single-brain instead (halcyond becomes compositor +
+transcript-orchestrator, not VT-host). Then the SEAM (a fresh call, 0045): the
+render-responsibility fork -- kaua-term renders pixels (A) vs feeds cells (B).
+Ratified **(B)**: the kaua-term is a per-tile PARSER+producer that feeds an ordered
+cell-record stream (CellDiff/ScrollOff/Control/Mode, boundary-flushed so
+Beacon-zone order is exact) to halcyond, which rasterizes (fontdue) + owns the
+transcript. (A) was ruled out (it hands halcyond only pixels -> N fontdue copies).
+The mandatory crash-isolation holds under B because the isolated part is the
+hostile-input PARSER; halcyond's renderer sees only trusted cells.
+
+**Landed (7 commits this run, all docs):** `b6080eb3` (KAUA-TERM.md substrate +
+journal) -> `8ffd634d` (neutralize the topology assumption main caught) ->
+`8cbc77e5` (topology uniform-Y firmed) -> `9d475830` (seam B firmed; the doc
+rewritten from A-flavored to B end to end). The design is COMPLETE + ratified;
+no code -- the as-built reference lands with the build.
+
+**Open (the build, a fresh phase).** KT-1 (kaua-term process hosting ut + the
+ordered stream + halcyond's Loom ingest -> H-4d, zero kernel) needs the H-2a crate
+sync + the ring seam + the aux producer side (a fresh build call). KT-2 grows the
+shared usr/lib/vt parser; KT-3 C2-k1c; KT-4 C2-k3. Full aux record + file:line
+grounding: `memory/design_terminal_multiplex_coordination.md`.
 
 
 ## 2026-09-02 (aux, run 3, Opus 4.8, effort max) -- UM-8c-2..4: the F3/F5 close, then two more audit rounds
