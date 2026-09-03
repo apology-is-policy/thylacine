@@ -22,6 +22,55 @@ needed the operator.
 
 ---
 
+## 2026-09-03 (aux, Opus 4.8, effort max) -- the merge, aux side: the fresh-checkout vendoring bug that a long-lived worktree can't see
+
+The aux half of the 0046 merge (run 20 above has the merge narrative). aux was
+the verifier + the viv-side authority. Beyond the per-hunk intent, aux's
+independent reads earned three things: a `git merge-tree` cross-check that
+matched main's 13 conflicts exactly (and caught my OWN grep over-match first --
+it conflated "Auto-merging X" with "CONFLICT in X" and would have fabricated a
+24-file discrepancy; re-parsed to CONFLICT-lines-only before saying anything);
+the build-critical `VIV_NATIVE_CEILING` catch (a literal `108` in aux's
+`vivarium.h`, pinned by the `vivarium.c:30` static_assert, absent from main's
+"verified complete" 108->109 blast radius -- owner-verifies-own-surface); and a
+spec-gate scope confirmation (aux changed ONLY `territory.tla` + `pipe.tla` among
+specs, so main's territory+pipe buggy-cfg set was exactly complete -- I nearly
+flagged a false gap from the modelled CODE files aux touched, until the specs/
+diff showed they merged clean = already-validated).
+
+**The finding nobody planned: forking a genuinely fresh branch off merged-main
+broke the build in a way main's tree structurally could not show.** aux-3 @
+`3d4d633e` failed `build.sh` at Cargo's vendored-crate checksum step --
+`third_party/rust/aegis/wasm-libs/libaegis.a: No such file`. Root cause: the
+vendored `third_party/rust` crates require 107 files (~37.7 MiB) that broad
+`.gitignore` rules EXCLUDE -- `*.a` (aegis + 5 windows import libs), `*.bin` (76
+pkcs5/ring/rustls-webpki/smoltcp/thiserror fixtures), `*.o` (17 ring objects),
+and the build-output `target/` rule wrongly eating `cc/src/target/*.rs` SOURCE.
+Cargo checksums every vendored crate, so a fresh checkout dies one file at a
+time. PRE-EXISTING in main's H-arc (the crates are in pre-merge main 93aa6325,
+not aux-2), and invisible on any long-lived worktree, which accumulated all 107
+when the crates were first vendored -- so main's builds and the SMP/spec gates
+never saw it. Blast radius: every fresh checkout -- a new worktree, a clean
+clone, CI, and `warp-host.sh sync` to thyla-pi (git-archive of HEAD drops
+gitignored files). **Caught only because forking a fresh branch is exactly the
+thing a long-lived worktree cannot test.** My first scope scan REPEATED the
+gitignore's own over-match (I filtered `/target/` and missed cc's source module
+literally named `target`); the reliable scan is `git ls-files --others --ignored`
+with no pattern filter, diffed main-vs-aux. Worked around for aux-3 by mirroring
+all 107 from main (identical commit -> checksums verified against each crate's
+`.cargo-checksum.json`); the proper fix is main-owned (a `.gitignore` edit +
+committing the ~37 MiB vendored subset) so fresh checkouts are reproducible.
+Tracked: `memory/bug_vendored_gitignored_breaks_fresh_checkout.md`; flagged on
+0046 turn 16. It does NOT block the close -- both worktrees build.
+
+**Outcome.** aux-3 @ `3d4d633e` (= c83da249 + main's run-20 journal, docs-only):
+`build.sh kernel` + `userspace` + the suite all green (boot banner, arc gates
+L-6c + D-5 PASS, "Thylacine boot OK"), pushed both mirrors, ls-remote verified.
+SMP soundness inherited from c83da249 (aux-3's kernel is the byte-identical
+binary main gated 40 boots / 0 corruption -- not re-run on identical bits). The
+operator's 3-part bar is met: aux-2 merged, aux-3 fresh off merged-main, both
+build+test green. Role split: aux -> viv on aux-3, main -> KT-1.
+
 ## 2026-09-03 (run 20, Opus 4.8) -- the aux-2 -> main merge: a syscall collision, one half of it silent
 
 The operator directed a synchronous merge of the two tracks: aux-2 (VIVARIUM
