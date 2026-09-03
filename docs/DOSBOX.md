@@ -148,6 +148,14 @@ server + virtio-sound (post-v1.0) lights it up.
 - **DX-2** -- FIRST LIGHT: stage into ramfs, boot in a tile, wire the file-I/O
   boundary-line (mount a host folder as a DOS drive), reach `Z:\>`, run a DOS
   program in a Tapestry pane. Exit: a DOS program runs + an `ls-gfx-dosbox` gate.
+  - **DX-2a DONE** (`@c9c4cb40`): the ET_EXEC RUNS (`dosbox-x -version`).
+  - **DX-2b DONE** (2026-09-03): the RENDER leg -- `dosbox-x` graphical paints its
+    VGA text screen (blue welcome + `Z:\>`) to a Tapestry pane via output=surface
+    -> the SDL_thylacine framebuffer path; `ls-gfx-dosbox` render leg gates it.
+    Fixes: force SDL dummy audio (0004), a `SetWindowSize` tap-recreate hook, and a
+    non-resizable window (0005) to end the compositor resize-war. THYLACINE_BAKE_DOSBOX
+    still opt-in (flips default-on at DX-2 close).
+  - **DX-2c NEXT**: mount a host/9P dir as a DOS drive + run a real DOS program.
 - **DX-3** -- sound fully stubbed/hardened; input polish (keyboard + mouse for
   games); config/autoexec; larger real DOS programs.
 - **DX-4** -- the **CAP_JIT dynarec** (I-42; central): wire `dynamic_x86` to emit

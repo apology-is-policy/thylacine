@@ -20,6 +20,79 @@ needed the operator.
 - **Say what is still open, and be exact about what "fixed" covers.** A half a
   defect closed is written as a half.
 
+
+---
+
+## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-2b: DOSBox-X FIRST LIGHT (Z:\ on a Tapestry pane)
+
+The Cryptid arc's first-light milestone: `dosbox-x` graphical paints its VGA text
+screen -- the blue "Welcome to DOSBox-X ! v2026.08.31" box and the `Z:\>` prompt
+-- to a Tapestry pane, through `output=surface` -> the `SDL_thylacine` framebuffer
+path -> the compositor. `ls-gfx-dosbox` renders it and gates on it (24 color
+buckets vs the console's ~12; `PASS [38s]`), and `ls-gfx-quake` still passes in
+the same run (no regression from the SDL2 backend change).
+
+It was NOT a straight shot -- it was a three-bug hunt through an SDL-app-vs-
+compositor impedance mismatch, plus a spurious green caught by looking.
+
+**The spurious green (caught by VIEWING the pixels).** The first exploratory boot
+PASSED a naive color floor (12 buckets >= 2) -- but the screendump was the aurora
+CONSOLE, not a DOS screen: DOSBox-X had `E_Exit`ed at `Can't init SDL: No available
+audio device`, and the console's own log text carries ~12 buckets. A color floor
+alone measures whatever is on the scanout, console included (the [[greens can be
+irrelevant]] trap). The fix was to make the gate's load-bearing proof the LOG, not
+the pixels: a `Video thylacine` arm (SDL init got past the fatal combined init) and
+a `COMMAND.COM` arm (the internal DOS reached its shell) -- an exit now trips the
+death arms instead of passing on the console.
+
+**Bug 1 -- SDL audio init is fatal.** `gui/sdlmain.cpp:9508` calls
+`SDL_Init(SDL_INIT_AUDIO|SDL_INIT_VIDEO|...)` as ONE combined call and `E_Exit`s on
+any failure; Thylacine ships no SDL audio backend, and SDL's dummy audio driver is
+`demand_only` (never an auto-fallback). Fix: patch `0004` forces
+`setenv("SDL_AUDIODRIVER","dummy",0)` before the init (consistent with dosbox's own
+`putenv("SDL_AUDIODRIVER=dummy")` at line 7527, an automated-mode path never hit here).
+
+**Bug 2 -- the `SetWindowSize` NULL-surface crash.** Past audio, DOSBox-X got deep
+(tapestryd composed surface 0 at 1280x800, created surface 1 at 640x400, ran the
+whole DOS init) then SEGV'd: `snare:segv addr=0x10 pc=0xc2b698` -> `OUTPUT_SURFACE_SetSize`,
+disassembly `ldr w12, [x0, #0x10]` = `sdl.surface->w` with `sdl.surface` NULL (offset
+of `w` in `SDL_Surface` is 0x10). `SDL_GetWindowSurface` returned NULL right after
+`GFX_SetSDLWindowMode` -> `SDL_SetWindowSize(640,772)`, because the `SDL_thylacine`
+backend had NO `SetWindowSize` hook: the window dims raced ahead of the weave, and
+`SDL_CreateWindowFramebuffer` built a surface over a wrong-sized buffer. A live weave
+can't be reweaved without a compositor CONFIGURE serial (`thyla_tap_reweave` returns
+-EAGAIN on a stale one), so the fix RECREATES the tap at the new size in a new
+`THYLACINE_SetWindowSize` hook (`StopEventPump` -> `thyla_tap_close` ->
+`thyla_tap_open` -> `StartEventPump`, a mirror of DestroyWindow+CreateWindow;
+`thyla_tap_open` memsets first, so recreate-on-a-used-tap is safe).
+
+**Bug 3 -- the resize war (found by instrumenting, not theorizing).** With the
+recreate hook the crash was gone but the scanout read "Display output is not active".
+Theory kept contradicting the tapestryd log (the surface reweaving to 1280x800
+implied a resizable window, but `SDL2_resize_enable` defaults false and no
+`GFX_SetResizeable(true)` sat in our build). So I `SDL_Log`-instrumented the backend
+and MEASURED it: `winflags=0x202c RESIZABLE=1`. The window IS resizable --
+`gui/sdlmain.cpp:4310 GFX_SetResizeable(true)` in the first-time video init, a call
+site I had missed. A resizable window ACKS the compositor's pane offer (the
+`TEV_CONFIGURE` Fork-1 reweave + `RESIZED`), DOSBox-X reads `RESIZED` as a user
+resize (`GFX_HandleVideoResize` sets `userResizeWindow*`), re-asserts its own
+aspect size (640x772), the compositor re-offers the pane (632x772), forever -- the
+8px gap never converges. Fix: patch `0005` pins the window non-resizable on Thylacine
+(the compositor is authoritative + letterboxes), so it takes the Fork-2 DECLINE path.
+After the fix the instrumentation showed `surface consider` firing exactly twice
+(640x497, 720x417) with `final == consider` -- settled, no chase.
+
+**What "fixed" covers, exactly.** DX-2b is the RENDER half of DX-2 (first light). It
+does NOT include DX-2c (mount a host/9P dir as a DOS drive + run a real DOS program)
+-- that is next. Sound is dummy-driver silent (a v1.0 non-goal). The
+`SetWindowSize` change lives in `SDL_thylacinevideo.c`, a file NAMED in the W-3e
+audit row but only for its Vulkan slots; this change is the software-framebuffer
+window-lifecycle path (client-side, not the compositor/kernel I-40 enforcement),
+mirrors the proven DestroyWindow+CreateWindow lifecycle, and was self-audited (no
+race -- the pump is joined before the recreate; no UAF -- SDL frees only the borrowed
+surface struct; graceful error fallback). The vault is 597 commits behind and cannot
+see the new port paths -- a vault sweep of `usr/ports/dosbox-x` + `usr/ports/sdl2` is
+owed.
 ---
 
 ## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-2a: DOSBox-X EXECUTES on Thylacine

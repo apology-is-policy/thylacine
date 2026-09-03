@@ -39,6 +39,7 @@ static int THYLACINE_VideoInit(_THIS);
 static void THYLACINE_VideoQuit(_THIS);
 static int THYLACINE_CreateWindow(_THIS, SDL_Window *window);
 static void THYLACINE_DestroyWindow(_THIS, SDL_Window *window);
+static void THYLACINE_SetWindowSize(_THIS, SDL_Window *window);
 static int THYLACINE_CreateWindowFramebuffer(_THIS, SDL_Window *window,
                                              Uint32 *format, void **pixels,
                                              int *pitch);
@@ -76,6 +77,7 @@ static SDL_VideoDevice *THYLACINE_CreateDevice(void)
     device->PumpEvents = THYLACINE_PumpEvents;
     device->CreateSDLWindow = THYLACINE_CreateWindow;
     device->DestroyWindow = THYLACINE_DestroyWindow;
+    device->SetWindowSize = THYLACINE_SetWindowSize;
     device->CreateWindowFramebuffer = THYLACINE_CreateWindowFramebuffer;
     device->UpdateWindowFramebuffer = THYLACINE_UpdateWindowFramebuffer;
     device->DestroyWindowFramebuffer = THYLACINE_DestroyWindowFramebuffer;
@@ -224,6 +226,53 @@ static void THYLACINE_DestroyWindow(_THIS, SDL_Window *window)
     if (vd->window == window) {
         vd->window = NULL;
     }
+}
+
+static void THYLACINE_SetWindowSize(_THIS, SDL_Window *window)
+{
+    SDL_WindowData *wd = (SDL_WindowData *)window->driverdata;
+    uint32_t neww, newh, oldw, oldh;
+    int ok;
+
+    if (!wd) {
+        return;
+    }
+    neww = (uint32_t)(window->w > 0 ? window->w : 1);
+    newh = (uint32_t)(window->h > 0 ? window->h : 1);
+    oldw = wd->tap.w;
+    oldh = wd->tap.h;
+    if (neww == oldw && newh == oldh) {
+        return;
+    }
+    /* The compositor owns placement + scale, and a LIVE weave cannot be
+     * reweaved without a compositor CONFIGURE serial (thyla_tap_reweave). But a
+     * client MAY choose its surface size at open time, so honour an app-driven
+     * resize (SDL_SetWindowSize) by recreating the tap at the new size -- retire
+     * the old surface, open a new one -- and let the compositor letterbox it.
+     * Without this, window->w/h races ahead of the weave and the next
+     * SDL_GetWindowSurface hands back a surface over a wrong-sized buffer (a
+     * NULL surface, or an out-of-bounds draw). Mirrors DestroyWindow's teardown
+     * + CreateWindow's surface setup. */
+    THYLACINE_StopEventPump(window);
+    thyla_tap_close(&wd->tap);
+    ok = (thyla_tap_open(&wd->tap, neww, newh) == 0);
+    if (!ok) {
+        /* Reopen at the requested size failed: fall back to the prior size so
+         * window->w/h never lead the weave. */
+        ok = (thyla_tap_open(&wd->tap, oldw, oldh) == 0);
+        if (ok) {
+            window->w = (int)oldw;
+            window->h = (int)oldh;
+        }
+    }
+    if (ok) {
+        wd->frame_seq = 0;
+        wd->presented_seq = 0;
+        THYLACINE_StartEventPump(window);
+    }
+    /* !ok: the compositor refused both sizes (it is gone) -- leave the pump
+     * stopped and the tap closed; the next present returns an SDL error and the
+     * app tears the window down. */
 }
 
 static int THYLACINE_CreateWindowFramebuffer(_THIS, SDL_Window *window,

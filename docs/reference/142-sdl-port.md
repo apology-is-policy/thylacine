@@ -109,6 +109,36 @@ on press; a size-changing `TEV_CONFIGURE` acks + reweaves on the SDL thread
 then reports `SDL_WINDOWEVENT_RESIZED`; `TEV_FOCUS`/`TEV_CLOSE` map to the
 SDL window events.
 
+### App-driven resize (`SetWindowSize` -> tap recreate; DX-2b)
+
+A size-changing `TEV_CONFIGURE` is the compositor OFFERING a size, and a
+`reweave` acks it (above). The inverse -- an app calling `SDL_SetWindowSize`
+-- has no compositor serial to ack, so it CANNOT reweave a live weave. The
+`THYLACINE_SetWindowSize` hook instead RECREATES the tap at the requested
+size: `StopEventPump` (retires the old surface + joins the pump) ->
+`thyla_tap_close` -> `thyla_tap_open(neww,newh)` -> `StartEventPump` -- a
+mirror of `DestroyWindow`'s teardown + `CreateWindow`'s surface setup, so the
+next `SDL_GetWindowSurface` hands back a valid surface at the new size.
+Without the hook, `SDL_SetWindowSize` invalidates the SDL surface but leaves
+the weave at the old size, and the next `SDL_GetWindowSurface` builds a
+surface over a wrong-sized buffer -- a NULL surface (the app derefs it and
+faults) or an out-of-bounds draw. A reopen failure falls back to the prior
+size so `window->w/h` never lead the weave; `thyla_tap_open` memsets the
+struct first, so recreating on a used tap is safe.
+
+**The resize war (why apps that manage their own size are non-resizable
+here).** The two resize paths FIGHT for a RESIZABLE window: the app sets its
+size (recreate) -> the compositor offers the pane size via `TEV_CONFIGURE`
+-> the resizable window acks it (reweave + `RESIZED`) -> the app reads
+`RESIZED` as a user resize and re-asserts its own aspect-corrected size ->
+the compositor re-offers, forever, and the scanout never settles ("Display
+output is not active"). A NON-resizable window declines the offer (the
+`TEV_CONFIGURE` Fork-2 path: keep the surface dims, the compositor
+letterboxes) -- no `RESIZED`, no chase. DOSBox-X, which computes its own
+aspect-corrected window size, is therefore pinned non-resizable on Thylacine
+(`usr/ports/dosbox-x/patches/0005-*`), and the compositor letterboxes its
+640x`N` DOS surface into the pane. Worked example: the DX-2b first light.
+
 **G-7c — the pointer path.** `TEV_PTR_MOVE` carries the surface-relative
 position packed `x<<16|y` (TAPESTRY §18.4). In relative mode (Quake
 mouse-look) translation computes deltas DRIVER-side from successive

@@ -1,0 +1,28 @@
+Thylacine: force SDL's dummy audio driver so SDL_Init does not E_Exit.
+
+DOSBox-X's main SDL bring-up calls SDL_Init(SDL_INIT_AUDIO|SDL_INIT_VIDEO|
+SDL_INIT_TIMER|...) as one combined call and treats any failure as fatal
+(E_Exit "Can't init SDL ..."). Thylacine ships no SDL audio backend (sound
+is a v1.0 non-goal), so every real audio driver fails and the combined init
+aborts with "No available audio device" before the video surface is ever
+created. SDL's dummy audio driver is compiled in but demand-only (never an
+auto-fallback), so setenv SDL_AUDIODRIVER=dummy (overwrite=0, respecting an
+explicit choice) makes SDL_INIT_AUDIO succeed silently and lets the render
+path run. Guarded by __thylacine__ so upstream and other targets are untouched.
+--- a/src/gui/sdlmain.cpp
++++ b/src/gui/sdlmain.cpp
+@@ -9504,6 +9504,14 @@
+ 	CheckPreventCap();
+ 	LOG_MSG("Prevent capture: %u",preventcap);
+ 
++#if defined(__thylacine__)
++        /* Thylacine ships no SDL audio backend (sound is a v1.0 non-goal), so
++         * every real audio driver fails and the combined SDL_Init below would
++         * abort on SDL_INIT_AUDIO with "No available audio device" -> E_Exit.
++         * Force SDL's demand-only dummy driver so audio inits silently;
++         * overwrite=0 respects an explicit SDL_AUDIODRIVER. */
++        setenv("SDL_AUDIODRIVER", "dummy", 0);
++#endif
+         /* -- SDL init */
+         if (SDL_Init(SDL_INIT_AUDIO|SDL_INIT_VIDEO|SDL_INIT_TIMER|SDL_INIT_NOPARACHUTE) >= 0)
+             sdl.inited = true;
