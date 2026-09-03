@@ -62,7 +62,7 @@ a build.sh/libcxx-source edit cascades. The practical lesson for this arc: batch
 build.sh edits, bake once. Not fixed here -- it is operator-owned build-infra,
 and "fixing" a conservative staleness check risks under-rebuilding.
 
-Landed (@pending): `dosbox-x.conf` staging in `tools/build.sh` +
+Landed (@dcc1dd71): `dosbox-x.conf` staging in `tools/build.sh` +
 `tools/interactive/ls-gfx-dosbox-conf.exp`.
 
 ## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-3a: a keystroke reaches DOS, and the foreground-exit "wedge" dissolves
