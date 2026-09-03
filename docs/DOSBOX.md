@@ -197,13 +197,12 @@ server + virtio-sound (post-v1.0) lights it up.
 - **File-I/O + SDL usage**: heavy path-based I/O (disk images, drives) + DOSBox-X's
   varied SDL usage (8bpp/palette, mode changes) -> new musl + backend patches.
 
-## 11. Naming (thematic -- proposed, pending operator)
+## 11. Naming (thematic -- RATIFIED)
 
-Keep the **DOSBox-X** name (a foreign port keeps its identity). Proposed thematic
-name for the Thylacine-side DOS/Win9x-emulation capability / the emulated-machine
-tile: **Cryptid** -- the cryptozoology / Lazarus-species angle (software long
-thought dead, sighted alive on Thylacine). Chunk prefix **DX**. (Operator to
-confirm Cryptid vs plain.)
+Keep the **DOSBox-X** name (a foreign port keeps its identity). The Thylacine-side
+DOS/Win9x-emulation capability / the emulated-machine tile is named **Cryptid**
+(operator-ratified 2026-09-03) -- the cryptozoology / Lazarus-species angle:
+software long thought dead, sighted alive on Thylacine. Chunk prefix **DX**.
 
 ## 12. Exit criteria ("done")
 
