@@ -89,6 +89,12 @@ audit-bearing kernel at runtime under SMP.
 
 ### run 20 continued (post-self-compact) -- KT-1a: the shared VT parser to full-xterm, and a P0 that a new feature had hidden
 
+**Numbering (corrected post-push, operator-ratified 2026-09-03):** this parser growth
+is scripture's **KT-2** in the ratified build order (HALCYON 14.9 / KAUA-TERM 6: KT-1 =
+the kaua-term integration, KT-2 = the parser, KT-3/KT-4 = the ioctl reach). It was
+committed under the label `KT-1a-*` -- a self-compact mis-numbering; the pushed commits
+keep that label, this is the map. KT-1 (the integration) is next.
+
 After the merge the operator said "start KT." KT-1a grows `usr/lib/vt` (the
 shared parser aurora + halcyond + the coming kaua-term all render from) to the
 xterm behaviors a real Linux TUI needs. Four pieces: `c01bb942` KT-1a-1 (DECSTBM
