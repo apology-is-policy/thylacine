@@ -1,0 +1,40 @@
+Thylacine DX-1: gate the BIOS boot-logo PNG decode behind C_LIBPNG.
+bios.cpp decodes an embedded DOSBox logo PNG (BIOSLOGO_PNG_READ + a
+self-contained block) via libpng UNCONDITIONALLY -- upstream assumes
+libpng is always present. DX-1 builds without libpng (logo + screenshots
+are DX-3), so gate both regions; the ASCII text logo fallback remains.
+
+--- a/src/ints/bios.cpp
++++ b/src/ints/bios.cpp
+@@ -9848,6 +9848,7 @@
+ # include "dosbox224x186.h"
+ # include "dosbox224x224.h"
+ 
++#if C_LIBPNG
+ static const unsigned char *BIOSLOGO_PNG_PTR = NULL;
+ static const unsigned char *BIOSLOGO_PNG_FENCE = NULL;
+ 
+@@ -9863,6 +9864,7 @@
+ 		count--;
+ 	}
+ }
++#endif /* C_LIBPNG */
+ 
+ #endif
+ 
+@@ -11393,6 +11395,7 @@
+ 
+         BIOS_Int10RightJustifiedPrint(x,y,msg);
+ 
++#if C_LIBPNG
+         {
+             png_bytep rows[1];
+             unsigned char *row = NULL;/*png_width*/
+@@ -11545,6 +11548,7 @@
+             if (png_context) png_destroy_read_struct(&png_context,&png_info,&png_end);
+             if (png_fp) fclose(png_fp);
+         }
++#endif /* C_LIBPNG (Thylacine DX-1: no libpng -> no PNG boot logo; ASCII logo remains) */
+ 
+         if (machine == MCH_PC98 && textsplash) {
+             unsigned int bo, lastline = 7;

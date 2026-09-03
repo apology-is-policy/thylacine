@@ -4555,6 +4555,263 @@ build_tyrquake() {
     ledger "tyr-glquake: BUILT (GL acceptance gate, section 9 step 3)"
 }
 
+build_zlib() {
+    # zlib 1.3.1 for aarch64-thylacine -- a dependency of the DOSBox-X (Cryptid)
+    # port: cdrom_image.cpp unity-includes libchdr (CHD disk images) and
+    # include/zip.h (savestates + zip drive mounts), both needing zlib.h/-lz.
+    # Pure C, no configure (zconf.h ships pre-made). Installs libz.a + zlib.h +
+    # zconf.h into the pouch sysroot for any port to link. (zlib license --
+    # permissive, GPL-compatible.)
+    local sysroot="$BUILD_DIR/sysroot"
+    local vendor="$REPO_ROOT/third_party/zlib"
+    local obj="$BUILD_DIR/pouch/zlib-obj"
+    local clang="$LLVM_PREFIX/bin/clang"
+    local ar_tool="$LLVM_PREFIX/bin/llvm-ar"
+    local archive="$sysroot/lib/libz.a"
+
+    if [[ ! -f "$vendor/zlib.h" ]]; then
+        echo "==> zlib: vendored source missing at $vendor" >&2
+        exit 1
+    fi
+    if sysroot_is_stale; then build_sysroot; fi
+
+    # Staleness: reuse the archive when newer than the vendored tree + this recipe.
+    if [[ -f "$archive" && -f "$sysroot/include/zlib.h" ]]; then
+        local stale
+        stale="$(find "$vendor" -type f -newer "$archive" -print -quit 2>/dev/null)"
+        if [[ -z "$stale" && ! "${BASH_SOURCE[0]}" -nt "$archive" ]]; then
+            ledger "libz.a: REUSED (cached + up-to-date)"
+            return 0
+        fi
+    fi
+
+    echo "==> building zlib 1.3.1 (aarch64-thylacine)"
+    rm -rf "$obj"; mkdir -p "$obj" "$sysroot/lib" "$sysroot/include"
+    local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
+                   -std=gnu11 -O2 -fno-pie -DNDEBUG -DZ_HAVE_UNISTD_H=1
+                   -nostdlibinc -isystem "$sysroot/include" -I"$vendor" )
+    local zc n=0 f
+    local zsrc=( adler32 compress crc32 deflate gzclose gzlib gzread gzwrite
+                 infback inffast inflate inftrees trees uncompr zutil )
+    for f in "${zsrc[@]}"; do
+        "$clang" "${cflags[@]}" -c "$vendor/$f.c" -o "$obj/$f.o"
+        n=$((n + 1))
+    done
+    "$ar_tool" rcs "$archive.tmp" "$obj"/*.o
+    mv "$archive.tmp" "$archive"
+    cp "$vendor/zlib.h" "$vendor/zconf.h" "$sysroot/include/"
+    echo "    libz.a: $n objects -> $(wc -c < "$archive" | tr -d ' ') bytes"
+    ledger "libz.a (zlib 1.3.1): BUILT"
+}
+
+build_dosbox_x() {
+    # DX-1 (the Cryptid DOS/Win9x-emulation arc; docs/DOSBOX.md) -- cross-build
+    # DOSBox-X (SDL2 path, core=normal, software-surface video, sound stubbed)
+    # for aarch64-thylacine against the pouch sysroot + libc++ + libSDL2.a (the
+    # SDL_thylacine Tapestry backend). "TyrQuake, upgraded C -> C++, at larger
+    # scale": the vendored tree (third_party/dosbox-x, pruned-pristine per its
+    # PRUNE-MANIFEST.md) compiles via a curated object list DERIVED from the
+    # upstream Makefile.am SOURCES (tools/dosbox-x-sources.py) + the hand
+    # config.h (usr/ports/dosbox-x/). The link is a DIRECT pouch link (fork
+    # clang++ driver + -lSDL2), NOT autotools -- we own the static / ET_EXEC /
+    # no-PT_DYNAMIC / custom-CRT shape libtool would fight.
+    #
+    # Feature posture is DX-1: no dynarec (core=normal; the CAP_JIT dynarec is
+    # DX-4), no GL/D3D/TTF, no zlib/libpng, no SDL_net/pcap/slirp, no curses
+    # debugger. config.h enforces it; the object list omits the disabled libs.
+    #
+    # DBX_LANDSCAPE=1 -> compile-only, never exit nonzero, report failing TUs +
+    # keep per-file logs (the compile-fix loop's instrument). DBX_OPT overrides
+    # the opt level (-O0 for a fast iteration loop; default -O2 for the ship).
+    local sysroot="$BUILD_DIR/sysroot"
+    local dbx_vendor="$REPO_ROOT/third_party/dosbox-x"
+    local port_dir="$REPO_ROOT/usr/ports/dosbox-x"
+    local dbx_src="$BUILD_DIR/pouch/dosbox-x-src"
+    local dbx_obj="$BUILD_DIR/pouch/dosbox-x-obj"
+    local progs_out="$BUILD_DIR/pouch/progs"
+    local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
+    local clangxx="${POUCH_CXX:-$fork/build/bin/clang++}"
+    local clang_c="${POUCH_CC:-$fork/build/bin/clang}"
+    local out="$progs_out/dosbox-x"
+    local opt="${DBX_OPT:--O2}"
+    local jobs="${DBX_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
+
+    if [[ ! -f "$dbx_vendor/src/dosbox.cpp" ]]; then
+        echo "==> dosbox-x: vendored source missing at $dbx_vendor" >&2
+        exit 1
+    fi
+    if [[ ! -x "$clangxx" ]]; then
+        echo "==> dosbox-x: fork clang++ not found at $clangxx (the C++ gate --"
+        echo "    build the LLVM fork; see build_libcxx). Skipping."
+        return 0
+    fi
+    if [[ ! -f "$sysroot/lib/libSDL2.a" ]]; then build_sdl2; fi
+    if [[ ! -f "$sysroot/lib/libc++.a" ]]; then build_libcxx; fi
+    if [[ ! -f "$sysroot/lib/libz.a" ]]; then build_zlib; fi
+
+    # Staleness: reuse when the binary is newer than the tree + port + extractor
+    # + the archives it links.
+    if [[ -f "$out" && -z "${DBX_FORCE:-}" ]]; then
+        local stale
+        stale="$(find "$dbx_vendor" "$port_dir" "$REPO_ROOT/tools/dosbox-x-sources.py" \
+                      -type f -newer "$out" -print -quit 2>/dev/null)"
+        if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$out" \
+              && ! "$sysroot/lib/libc++.a" -nt "$out" \
+              && ! "$sysroot/lib/libz.a" -nt "$out" ]]; then
+            ledger "dosbox-x: REUSED (cached + up-to-date)"
+            return 0
+        fi
+    fi
+
+    echo "==> building DOSBox-X 2026.08.31 (SDL2, core=normal, aarch64-thylacine, $opt, -j$jobs)"
+    rm -rf "$dbx_src" "$dbx_obj"
+    mkdir -p "$dbx_src" "$dbx_obj" "$progs_out"
+    cp -R "$dbx_vendor/src" "$dbx_src/src"
+    cp -R "$dbx_vendor/include" "$dbx_src/include"
+    # vs/sdl/src/cdrom/ carries the SDL1-CD-ROM compat shim (compat_SDL_cdrom.h
+    # + SDL_cdrom.c + the dummy "0 host drives" syscdrom backend) that cdrom.h
+    # reaches via "../../vs/sdl/src/cdrom/..."; the rest of vs/ is pruned.
+    cp -R "$dbx_vendor/vs" "$dbx_src/vs"
+    # The hand config lands at the src-copy root (on the -I path). DOSBox sources
+    # #include "config.h" -> resolved via -I"$dbx_src/src".
+    cp "$port_dir/config.h" "$dbx_src/src/config.h"
+    cp "$port_dir/config_package.h" "$dbx_src/src/config_package.h"
+    # Port-glue: stubs for host APIs Thylacine lacks at DX-1 (opusfile/speexdsp
+    # for opus CD-audio; the SERIAL_* host serial port). Compiled beside the tree.
+    cp -R "$port_dir/glue" "$dbx_src/thylacine-glue"
+    # Boundary-line patches apply to the COPY; the vendored tree stays pristine.
+    local pp
+    for pp in "$port_dir"/patches/*.patch; do
+        [[ -e "$pp" ]] || continue
+        patch -s -p1 -t -d "$dbx_src" -i "$pp"
+    done
+
+    # Include search: the src root (config.h + shared headers), the top include/,
+    # and the bundled-lib dirs whose headers cross-included TUs reference.
+    # The union of every kept subsystem's AM_CPPFLAGS -I set (a single global
+    # search path rather than per-TU flags): the top dir (for "include/menu.h"
+    # + "src/ints/int10.h" style includes), src root, include/, the bundled-lib
+    # dirs, and the snd_pc98 (PC-98 sound) subtree that hardware/ files reference
+    # by bare header name.
+    local incs=(
+        -I"$dbx_src"
+        -I"$dbx_src/src"
+        -I"$dbx_src/include"
+        -I"$dbx_src/src/libs"
+        -I"$dbx_src/src/libs/gui_tk"
+        -I"$dbx_src/src/libs/zmbv"
+        -I"$dbx_src/src/aviwriter"
+        -I"$dbx_src/src/hardware"
+        -I"$dbx_src/src/hardware/snd_pc98/sound"
+        -I"$dbx_src/src/hardware/snd_pc98/sound/getsnd"
+        -I"$dbx_src/src/hardware/snd_pc98/common"
+        -I"$dbx_src/src/hardware/snd_pc98/generic"
+        -I"$dbx_src/src/hardware/snd_pc98/x11"
+        -I"$dbx_src/src/hardware/snd_pc98/cbus"
+        -I"$dbx_src/vs/sdl/src/cdrom"
+        -I"$dbx_src/vs/zlib/contrib/minizip"
+    )
+    # DOSBox-X uses C++ exceptions + RTTI -> keep them ON. -fno-pie for the
+    # static ET_EXEC. -Wno-* silence the high-volume legacy-tree warnings that
+    # would drown the real errors in the landscape pass.
+    # -Wno-register: minizip/decoder C code is unity-#included into .cpp TUs and
+    # uses the C++17-removed 'register' keyword; allow it rather than patch vendored C.
+    local common_warn=( -Wno-format -Wno-unused-parameter -Wno-unused-variable
+                        -Wno-deprecated-declarations -Wno-register )
+    local cxxflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
+                     -std=gnu++17 "$opt" -fno-pie
+                     -nostdlibinc -D_GNU_SOURCE=1 -D__thylacine__=1 -DC_SDL2=1
+                     -isystem "$sysroot/include/c++/v1"
+                     -isystem "$sysroot/include"
+                     -isystem "$sysroot/include/SDL2"
+                     "${incs[@]}" "${common_warn[@]}" )
+    local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
+                   -std=gnu11 "$opt" -fno-pie
+                   -nostdlibinc -D_GNU_SOURCE=1 -D__thylacine__=1 -DC_SDL2=1
+                   -isystem "$sysroot/include"
+                   -isystem "$sysroot/include/SDL2"
+                   "${incs[@]}" "${common_warn[@]}" )
+
+    # Generate the per-TU compiler (baked flags; xargs -P drives it in parallel).
+    # A failure drops a .fail marker beside the object (append-race-free) + keeps
+    # the per-file .log -- the compile-fix loop reads build/pouch/dosbox-x-obj.
+    local cc1="$dbx_obj/cc-one.sh"
+    {
+        echo '#!/usr/bin/env bash'
+        echo 'set -u'
+        echo "SRC='$dbx_src'"
+        echo "OBJ='$dbx_obj'"
+        echo "CLANGXX='$clangxx'"
+        echo "CLANG_C='$clang_c'"
+        echo "CXXFLAGS='${cxxflags[*]}'"
+        echo "CFLAGS='${cflags[*]}'"
+        cat <<'CC1'
+f="$1"
+src="$SRC/$f"
+obj="$OBJ/${f%.*}.o"
+log="$OBJ/${f%.*}.log"
+mkdir -p "$(dirname "$obj")"
+if [[ "$f" == *.c ]]; then
+    "$CLANG_C" $CFLAGS -c "$src" -o "$obj" 2>"$log" || touch "$obj.fail"
+else
+    "$CLANGXX" $CXXFLAGS -c "$src" -o "$obj" 2>"$log" || touch "$obj.fail"
+fi
+CC1
+    } > "$cc1"
+    chmod +x "$cc1"
+
+    # The compile list is TOP-RELATIVE (compiled from $dbx_src): the extractor's
+    # src/-relative paths get an "src/" prefix. The vs/ SDL1-CD-ROM compat files
+    # (SDL_cdrom.c + dummy/SDL_syscdrom.c) are vendored but NOT compiled here --
+    # cdrom.cpp unity-#includes them (the dummy backend via its no-platform #else
+    # arm), so compiling them standalone would duplicate the SDL_CD* symbols.
+    local list_file="$dbx_obj/sources.list"
+    {
+        python3 "$REPO_ROOT/tools/dosbox-x-sources.py" "$dbx_src/src" | sed 's|^|src/|'
+        echo "thylacine-glue/thylacine-audio-stubs.c"
+        echo "thylacine-glue/thylacine-serial-stub.cpp"
+    } > "$list_file"
+    local total
+    total="$(wc -l < "$list_file" | tr -d ' ')"
+    echo "    compiling $total translation units..."
+    xargs -P "$jobs" -n 1 "$cc1" < "$list_file"
+
+    local nfail
+    nfail="$(find "$dbx_obj" -name '*.o.fail' | wc -l | tr -d ' ')"
+    echo "    compiled $((total - nfail))/$total objects ($nfail failed)"
+    if [[ "$nfail" -gt 0 ]]; then
+        echo "    == failing TUs (first line of each error log) =="
+        find "$dbx_obj" -name '*.o.fail' | sed "s|$dbx_obj/||; s|\.o\.fail\$||" \
+            | sort | while read -r ff; do
+            echo "      $ff: $(head -1 "$dbx_obj/$ff.log" 2>/dev/null)"
+        done | head -60
+        if [[ -n "${DBX_LANDSCAPE:-}" ]]; then
+            echo "    (DBX_LANDSCAPE: compile-only; logs under $dbx_obj)"
+            return 0
+        fi
+        echo "==> dosbox-x: $nfail compile failures (logs under $dbx_obj)" >&2
+        exit 1
+    fi
+
+    # Link via the fork clang++ driver (adds --eh-frame-hdr + the c++ runtime
+    # trio + CRT + libc + builtins), plus libSDL2 (the Tapestry backend). Publish
+    # atomically so a killed link never leaves a fresh-mtime partial the reuse
+    # gate would trust.
+    echo "    linking dosbox-x..."
+    if ! "$clangxx" --target=aarch64-thylacine --sysroot="$sysroot" \
+        $(find "$dbx_obj" -name '*.o') \
+        -L"$sysroot/lib" -lSDL2 -lz \
+        -o "$out.tmp" 2>"$dbx_obj/link.log"; then
+        echo "==> dosbox-x: LINK FAILED (see $dbx_obj/link.log)" >&2
+        tail -40 "$dbx_obj/link.log" >&2
+        [[ -n "${DBX_LANDSCAPE:-}" ]] && return 0
+        exit 1
+    fi
+    mv "$out.tmp" "$out"
+    echo "    dosbox-x: $(wc -c < "$out" | tr -d ' ') bytes (ET_EXEC, static)"
+    ledger "dosbox-x: BUILT"
+}
+
 build_vkquake() {
     # Warp W-4 (the vkQuake FPS gate; docs/WARP-WSI-DESIGN.md section 7,
     # GPU-DESIGN section 8) -- cross-build vkQuake 1.05.3 (QuakeSpasm
@@ -5699,6 +5956,8 @@ case "$target" in
     pouch-progs) build_pouch_progs ;;
     sdl2)        build_sdl2        ;;
     tyrquake)    build_tyrquake    ;;
+    zlib)        build_zlib        ;;
+    dosbox-x)    build_dosbox_x    ;;
     vkquake)     build_vkquake     ;;
     gnumake)     build_gnumake     ;;
     libcxx)      build_libcxx      ;;

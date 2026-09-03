@@ -22,6 +22,72 @@ needed the operator.
 
 ---
 
+## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-1: DOSBox-X (Cryptid) vendored + a curated C++ build that LINKS
+
+The first build chunk of the Cryptid arc (`docs/DOSBOX.md`). Exit criterion --
+"a static ET_EXEC that links" -- MET: `build/pouch/progs/dosbox-x`, **24,923,984
+bytes, ELF64 EXEC AArch64, 0 PT_DYNAMIC** (kernel/elf.c-loadable), 311/311 TUs
+compiled + linked against libc++ + libSDL2.a + a new libz.a.
+
+DOSBox-X v2026.08.31 (commit `4f19017c`) vendored pruned-pristine to
+`third_party/dosbox-x/` (59M; dropped vs/ + contrib/ + build-scripts/ + docs/;
+`PRUNE-MANIFEST.md`). The build (`build_dosbox_x` in tools/build.sh) is the
+TyrQuake idiom at C++ scale: a curated object list DERIVED from the upstream
+Makefile.am `_SOURCES` by `tools/dosbox-x-sources.py` (self-maintaining across a
+version bump; 311 TUs), a hand `config.h` (aarch64/POSIX/LP64; core=normal,
+nosound, no-GL/D3D/TTF/net; the vs/config.h `_M_ARM64` arms are DEAD on
+aarch64-thylacine so every value is set unconditionally), and a DIRECT pouch link
+(fork clang++ driver + -lSDL2 -lz) -- not autotools, because the Pouch link
+(static/ET_EXEC/no-PT_DYNAMIC/custom-CRT) is the shape libtool would fight.
+
+Build method decided over autotools cross-compile precisely because the *link* is
+the hard, non-standard part; the object SELECTION and config were the tractable
+parts (extract from Makefile.am; adapt vs/config.h).
+
+The compile-fix loop, measured (landscape mode, -O0, xargs -P8):
+- **220 fail -> 6**: structural includes. `-I<top>` for "include/menu.h"-style
+  includes; the six snd_pc98 `-I` dirs; byteorder.h routed to `<endian.h>` for
+  thylacine (patch 0001, `-D__thylacine__=1`); the over-pruned
+  `vs/sdl/src/cdrom/` SDL1-CD-ROM compat shim re-vendored.
+- **6 -> 1**: `-DC_SDL2=1` global (SDL_cdrom.c includes SDL's config, not
+  DOSBox's, so C_SDL2 was undefined for it); **zlib pulled forward** (new
+  `build_zlib`, zlib 1.3.1 -> the sysroot) because cdrom_image unity-includes
+  libchdr AND include/zip.h both hard-require it; whereami.c routed to its Linux
+  /proc/self/exe arm (patch 0003); bios.cpp's boot-logo PNG decode gated behind
+  C_LIBPNG (patch 0002).
+- **1 -> 0 compile**: `vs/zlib/contrib/minizip/` re-vendored (savestates
+  unity-include).
+- **link 16 undefined -> 0**: cdrom.cpp already unity-includes SDL_cdrom.c +
+  the dummy syscdrom backend, so my compiling them standalone DUPLICATED the
+  SDL_CD* symbols -- dropped from the object list (kept vendored). opngeng.c
+  un-excluded (its `#error use opngen.x86` is `#if OPNGENX86`-gated, off on ARM,
+  so it compiles the C generator defining opngen_getpcm). opusfile `op_*` +
+  speexdsp `speex_resampler_*` (cdrom_image's opus CD-audio decoder) and the
+  host `SERIAL_*` API (opl3duoboard, a real OPL3-over-serial board) STUBBED as
+  port glue (`usr/ports/dosbox-x/glue/`) rather than compiling the 169-file
+  libopusint or adding a libserial platform arm -- both are nosound/no-hardware
+  features irrelevant to DX-1; decode/connect fail gracefully. DX-3 (audio) can
+  build real libopusint.
+
+**The wrong turn worth recording.** The bios.cpp C_LIBPNG-gate patch first came
+out as a FULL-FILE hunk (`@@ -1,13427 +1,13431 @@`, every line re-added).
+bios.cpp is CRLF; python3 text-mode read silently converted it to LF, so the
+"2-hunk gate" would have rewritten all 13427 lines to LF. **Both** guards passed
+it -- `check-patch-hunks.py` (counts were internally consistent) AND
+`patch --dry-run` (applied clean) -- a textbook "a passing check is not proof."
+Caught by eyeballing the hunk header (a full-file span for a 4-line insert is the
+tell), confirmed with `file` (CRLF) + a CR-count diff, and regenerated in binary
+mode preserving `\r\n` -> 4 clean localized hunks; verified the CRs survive the
+apply. whereami.c/byteorder.h are LF, so their patches were fine -- the line-ending
+is per-file, not per-tree.
+
+**What DX-1 does NOT cover (exact).** This is compile + link only -- the binary
+has not booted. core=normal only (the CAP_JIT dynarec is DX-4); sound stubbed;
+opus CD-audio + host serial stubbed; no GL/TTF/screenshots/savestate-verified.
+First light (reach `Z:\>` in a Tapestry pane + the ls-gfx-dosbox gate) is DX-2.
+Built + verified at -O0 (landscape) AND the strict default -O2 path. Not yet
+committed at the time of this entry's first draft; commit + push follow.
+
 ## 2026-09-03 (aux, Opus 4.8, effort max) -- the merge, aux side: the fresh-checkout vendoring bug that a long-lived worktree can't see
 
 The aux half of the 0046 merge (run 20 above has the merge narrative). aux was
