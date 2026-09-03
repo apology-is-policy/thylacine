@@ -22,6 +22,73 @@ needed the operator.
 
 ---
 
+## 2026-09-03 (run 21, Opus 4.8) -- KT-1: the kaua-term producer side, built + self-audited; and what halcyond actually is
+
+The KT arc's KT-1 (the per-tile terminal that unblocks H-4d). This run built the
+ENTIRE aux-plus-main "producer side" of the multi-console seam -- the kaua-term
+process and everything under it -- as eight local commits (a90eea53..5879804d,
+unpushed; the batched-audit-then-push discipline), each host-tested against the
+authoritative HALCYON 14.3 contract:
+
+- **KT-1.1** (a90eea53): extracted `usr/lib/ptyhold` (Master mint/seed_winsize/
+  spawn_on_slave) from ptyhost, ptyhost re-pointed BEHAVIOR-IDENTICAL. The shared
+  master-hold both hosts need; the relay policy stays per-host (ptyhost pumps raw
+  bytes, the kaua-term parses).
+- **KT-1.2a** (3cce9ff1): grew `usr/lib/vt` with a resumable `feed_until` + a
+  Boundary event stream (Scroll/Bell/Osc/AltEnter+cursor/AltLeave), OPT-IN behind
+  `capture_events` so aurora stays byte- AND allocation-identical (host-tested).
+  This was the crux: vt was a state machine exposing only final state, but the
+  seam needs the events interleaved with cell changes IN STREAM ORDER (a boundary
+  delimits a Beacon zone).
+- **KT-1.2b** (e2c115bc): `usr/kaua-term` -- the Producer (boundary-flushed
+  shadow-diff) + the Record types. The alt-screen buffer discontinuity was the
+  subtle case; the fix required refining AltEnter to carry the outgoing cursor
+  (else a later alt-leave restores a stale cursor -- caught by a producer test).
+- **KT-1.3** (3851df53): the KeyEvent->xterm re-encoder + DECCKM (?1) tracking in
+  vt. Application keypad was DEFERRED with its keycodes (the shared KeyEvent model
+  has none, so tracking it now would be dead state -- built as one unit later).
+- **KT-1.4a** (e55543e3): the wire codec. The decode side is the trust boundary
+  (halcyond ingests the untrusted, crash-isolated kaua-term), so it is bounds-safe
+  on any byte sequence -- every field checked, MAX_FRAME hard cap, no untrusted
+  pre-alloc, trailing-bytes + non-UTF-8 rejected.
+- **KT-1.4b** (91333a9a): the process. fd0=down, fd1=up, pts internal; two
+  blocking threads (master non-QTPOLL, the ptyhost model). Crate feature-gated so
+  the lib host-tests without libthyla-rs (--no-default-features).
+
+**The self-audit earned its keep -- two reachable P1s the ptyhost precedent does
+not have, both from the kaua-term PARSING (ptyhost is a dumb relay):**
+- @1f991394: the master has TWO writers now (the output thread's CPR replies +
+  the input thread's keys); write_all loops on partial writes, so a reply during
+  a keystroke interleaves and corrupts the app's stdin. Live -- ut/kaua emits
+  `ESC [ 6 n`. Fixed with a blocking futex mutex on master writes (a spinlock is
+  wrong -- a master write can park server-side).
+- @5879804d: the producer coalesced ScrollOff unbounded; `seq 100000` / `yes ''`
+  makes a single ScrollOff serialize past MAX_FRAME, which halcyond rejects and
+  kills the tile. Ordinary output would kill the tile. Fixed with a cols-derived
+  cap that splits the run, losing no row.
+
+**The finding that was not in the plan: what halcyond actually is.** An Explore
+map of halcyond (main.rs 54KB, transcript.rs 66KB) established that HALCYON 14.3's
+"clean refactor -- only the t.feed() parse moves out of process" materially
+under-estimates KT-1.5. halcyond today is a SINGLE-console, FLOW-based renderer:
+one `Transcript` (a flowed deque of blocks -- no grid, no alt-screen buffer), one
+byte source (`/dev/consdrain`, a kernel console mirror -- it owns no pty and
+spawns NO child process), and its "tiles" (chromeset) are tag-bar chrome for the
+compositor's leaves, not terminal content. But the seam sends a GRID model
+(CellDiff on rows x cols). So KT-1.5 is not "move the parse out" -- it is: add a
+per-tile grid live-area, add child-spawn machinery halcyond has never had,
+multiplex N record streams into the ring loop, and refactor the flow-based
+transcript to ingest the grid+scrollback model. That is a genuine load-bearing
+design gap (halcyond gaining a grid) that scripture assumed already existed --
+surfaced to the operator per the design-conversation pattern rather than built
+unilaterally.
+
+**Open:** KT-1.5 (halcyond ingest) -- the design question above is with the
+operator. KT-1.1..1.4b stay LOCAL until the batched KT-1 audit (after KT-1.5) +
+the boot gate (the bin's 2-thread PTY surface is not host-testable in isolation),
+then push. Numbering note: this run's "KT-1.x" are sub-chunks of scripture's KT-1
+(the integration); the earlier-pushed "KT-1a-*" were scripture's KT-2 (the parser).
+
 ## 2026-09-03 (run 20, Opus 4.8) -- the aux-2 -> main merge: a syscall collision, one half of it silent
 
 The operator directed a synchronous merge of the two tracks: aux-2 (VIVARIUM
