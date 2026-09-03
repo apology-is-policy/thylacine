@@ -1285,10 +1285,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ptyhold"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "ptyhost"
 version = "0.1.0"
 dependencies = [
  "libthyla-rs",
+ "ptyhold",
 ]
 
 [[package]]
