@@ -22,6 +22,87 @@ needed the operator.
 
 ---
 
+## 2026-09-03 (aux, Opus 4.8, effort max) -- terminal-multiplexer co-design with main: converged on (b) uniform-pts + kaua-term
+
+Resumed post-self-compact on the operator's directive: co-design the terminal
+multiplexer WITH main so Halcyon's multiplexer and the aux kaua-`term` idea are
+not built twice. Main had already opened yip call `0044`; I joined it rather than
+opening a duplicate. NO code landed this run -- the output is a converged design +
+a fork awaiting operator ratification (scripture-touching; on Opus I surface, I
+do not auto-ratify).
+
+**The convergence.** Main independently ground its side and moved off its rio
+lean ((a) per-tile /dev/cons) onto (b) uniform-pts + a shared per-tile terminal
+emulator (the kaua-`term`). Two facts settled it: `ut` is already
+substrate-agnostic (reads inherited fd 0/1/2, `usr/utopia/shell/src/main.rs:442`;
+`ptyhost` already hosts it on a pts, PTY-4b), and nothing avoids the VT
+round-trip today (aurora is already a VT-parser -> cells -> a tapestryd surface),
+so a per-tile /dev/cons would be a SECOND terminal substrate alongside the pts a
+Linux binary needs -- pure duplication. The split: main = halcyond
+tiles/placement/composition + transcript/inline-media (TAPESTRY 13-14); aux = the
+kaua-term; kernel/viv = C2-k1c.
+
+**The aux deep pass.** Grounded R1-R5 against the as-built tree via four read-only
+sweeps (kaua, aurora, ptyfs/ptyhost, ut). Resolutions: R4 the kaua-term EMBEDS
+ptyhost's master-hold (re-point the pump's two ends: master -> parse ->
+Buffer -> present; KeyEvent -> xterm-encode -> master); R2 SUBSUME aurora (one
+VT codebase, aurora = the console-instantiation mode); R1 winsize -> the pts
+(the per-pts ptyfs-ctl winsize model already exists), tier = a compositor-set
+render-backend flag; R3 C2-k1c bounded; R5 the kaua-term exposes one narrow seam
+(live-screen surface + geometry), the transcript stays halcyond's.
+
+**Wrong turn, caught by grounding against as-built (the reusable part).** My
+first draft AND the shared design memo both stated "C2-k1c = pts cooked mode +
+job-control ioctls." The ptyfs/kernel sweep falsified BOTH halves: (1) the pts
+line discipline is USERSPACE (`usr/ptyfs/src/server.rs:555-646`), not kernel --
+cooked mode already runs for any pts reader; the kernel (`kernel/pts.c:24-33`)
+owns only session/pgrp/controlling-tty. (2) `vivarium_ioctl_decide`
+(`kernel/vivarium.c:1059-1093`) handles only termios+winsize; the job-control
+ioctls (TIOCSPGRP/TIOCGPGRP/TIOCSCTTY) are a SEPARATE deferral, C2-k3
+(`docs/phase7-status.md:54`), and SIGTTIN/SIGTTOU are absent everywhere (a v1.0
+gap). So C2-k1c is termios+winsize ONLY -- much smaller -- and it is all the
+terminal SUBSTRATE needs (vim/less/interactive-sh); Linux bash fg/bg/^Z is the
+C2-k3 follow-on. The catch came from checking the design memo's claim against the
+code, not from trusting the memo. A parser correction landed the same way: the
+full-xterm parser is GROWN from aurora's existing 1170-line `usr/aurora/src/vt.rs`
+(not built from scratch). Posted four corrections to main (call 0044 turn 4).
+
+**A SECOND wrong turn, caught by the OTHER track -- the reusable lesson of this
+run.** My fourth correction claimed "no beacon tier-negotiation mechanism exists,
+refuted tree-wide." Main (grounding its OWN half -- halcyond+cons -- which I did
+not sweep) falsified it: a `beacon` runtime advertisement DOES exist (halcyond
+writes `beacon rich` to consctl `main.rs:294-300`; the kernel pairs it with
+winsize under CCONSWINSZONLY `cons.c:2138`; `ut` exports `BEACON=` and programs
+read it to pick output). My sweep missed it for a concrete reason: TREE
+DIVERGENCE. aux-2 has ZERO `beacon` tokens and no `usr/halcyond*`/`usr/tapestryd*`
+dirs -- main's H-arc is not merged here, so my worktree-scoped grep was
+aux-2-correct but blind to the integrated system. The lesson: in a two-tree
+co-design, **neither track can ground the other's half from its own worktree** --
+a "refuted tree-wide" is only ever "refuted in MY tree." The correction stands
+and cleanly confirms the ownership split: each track grounds its own half. C3
+recorded main's way -- winsize AND beacon relocate per-tile together (a render
+side = the compositor's rasterizer flag, and an advertise side = BEACON on the
+tile's pts the program reads; the two tiers must match or a CELLS tile emits
+TTF-assuming output).
+
+**Converged (turns 1-6).** Main concurred on C1/C2/C4 + all R1-R5; C3 corrected as
+above. Coordination: the operator is present and set a synchronous protocol (main
+and aux stay live on the call until bye or an arbitration/question); main tees the
+ONE unified fork to the operator on the main side (they are live there), aux holds
+the aux side -- one surface, not two, avoiding a split vote. One aux sequencing
+insight that de-risks the gate: **H-4d needs no C2-k1c** -- the welcome's two
+console tiles are native `ut`, which already has full pts job control today, so
+the build sequences [kaua-term + halcyond per-tile] -> H-4d unblocked, THEN C2-k1c
+(Linux tiles), THEN C2-k3 (Linux job control).
+
+**Open.** Operator ratification of the fork (ratify (b) + the split + R2/R1-with-
+beacon); recommendation YES on all (both tracks converged; heritage-aligned; small
+build -- the substrate ships, the parser is grown, the kernel MVP is 4 ioctls).
+Then a scripture commit (reconcile TAPESTRY 13-14 with the as-built + a new
+kaua-term reference; name substrate/split/C2-k1c/C2-k3) -> THEN build. No code
+landed this run. Full aux record + file:line grounding:
+`memory/design_terminal_multiplex_coordination.md`.
+
 
 ## 2026-09-02 (aux, run 3, Opus 4.8, effort max) -- UM-8c-2..4: the F3/F5 close, then two more audit rounds
 
