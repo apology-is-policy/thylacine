@@ -106,8 +106,18 @@ impl Producer {
         let mut pos = 0;
         while let Some(b) = vt.feed_until(bytes, &mut pos) {
             match b {
-                // Coalesce: hold rows until a non-scroll boundary or chunk end.
-                Boundary::Scroll(row) => self.scroll_acc.push(row),
+                // Coalesce consecutive scrolls into one ScrollOff, but bound its
+                // size: a bulk scroll (seq 100000, yes '') would otherwise pile
+                // thousands of rows into one record whose serialized frame
+                // exceeds wire::MAX_FRAME, and halcyond's decoder would reject it
+                // and kill the tile. Flush at the cap; order is preserved (the
+                // rows split across several ScrollOff records, in sequence).
+                Boundary::Scroll(row) => {
+                    self.scroll_acc.push(row);
+                    if self.scroll_acc.len() >= self.scroll_cap() {
+                        self.flush_scroll(out);
+                    }
+                }
                 Boundary::Bell => {
                     self.flush(vt, out);
                     out.push(Record::Control(Control::Bell));
@@ -168,6 +178,14 @@ impl Producer {
             let rows = core::mem::take(&mut self.scroll_acc);
             out.push(Record::ScrollOff { rows });
         }
+    }
+
+    // The row cap that keeps one coalesced ScrollOff's serialized frame under
+    // wire::MAX_FRAME. Each scrolled row is `cols` cells (~13 B each) plus a
+    // small header; half MAX_FRAME leaves ample headroom for the frame envelope.
+    // At least 1 so a pathologically wide tile still makes progress.
+    fn scroll_cap(&self) -> usize {
+        (crate::wire::MAX_FRAME / 2 / (self.cols.max(1) * 16 + 8)).max(1)
     }
 
     // Diff `current` against the shadow; emit a CellDiff iff a cell changed OR
@@ -538,6 +556,34 @@ mod tests {
             Record::CellDiff { cursor, .. } => assert_eq!(*cursor, (0, 4, true)), // (row 0, col 4)
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn bulk_scroll_splits_into_bounded_scrolloffs() {
+        // A large scroll run (seq 100000, yes '') must NOT pile every row into
+        // one ScrollOff whose frame exceeds wire::MAX_FRAME (halcyond would
+        // reject it and kill the tile). It splits at the cap; no row is lost.
+        let mut vt = Vt::new(200, 2);
+        vt.set_capture_events(true);
+        let mut p = Producer::new(&vt);
+        let cap = p.scroll_cap();
+        let mut out = Vec::new();
+        // On a 2-row screen the first LF moves cy 0 -> 1 (no scroll); every LF
+        // after that scrolls once. So `scrolls` scrolls need scrolls + 1 LFs.
+        let scrolls = cap + 50;
+        let feed = alloc::vec![b'\n'; scrolls + 1];
+        p.feed(&mut vt, &feed, &mut out);
+        let sos: Vec<&Vec<Vec<Cell>>> = out
+            .iter()
+            .filter_map(|r| match r {
+                Record::ScrollOff { rows } => Some(rows),
+                _ => None,
+            })
+            .collect();
+        assert!(sos.len() >= 2, "expected the cap to split the run: {} records", sos.len());
+        assert!(sos.iter().all(|rows| rows.len() <= cap), "a ScrollOff exceeded the cap");
+        let total: usize = sos.iter().map(|rows| rows.len()).sum();
+        assert_eq!(total, scrolls, "no scrolled row may be lost");
     }
 
     #[test]
