@@ -130,6 +130,135 @@ pub static THEMES: [(&str, Palette); 3] = [
 pub const ATTR_REVERSE: u8 = 1 << 0;
 pub const ATTR_UNDERLINE: u8 = 1 << 1;
 pub const ATTR_BOLD: u8 = 1 << 2;
+pub const ATTR_ITALIC: u8 = 1 << 3;
+pub const ATTR_DIM: u8 = 1 << 4;
+pub const ATTR_BLINK: u8 = 1 << 5;
+pub const ATTR_STRIKE: u8 = 1 << 6;
+
+/// Cell geometry, not an SGR pen attr: the parser sets it on the LEFT half of
+/// a double-width glyph so a consumer draws it two cells wide and skips the
+/// next (blank) continuation cell. It lives above the SGR pen bits (which the
+/// SgrPen owns, 0..=6) so the pen never sets it.
+pub const ATTR_WIDE: u8 = 1 << 7;
+
+// Cell display width (a wcwidth over Unicode scalars -- the parser decodes
+// UTF-8 before put_char, so this sees full code points). 0 = combining /
+// zero-width, 2 = East Asian Wide/Fullwidth + emoji, else 1. A hostile-input
+// surface: total over every char, never panics. Ranges follow Markus Kuhn's
+// reference wcwidth (the de-facto terminal standard) plus the supplementary
+// emoji planes; obscure combining marks outside the table fall back to width 1
+// -- a minor rendering imperfection, never a misaccounting of the common case.
+fn in_ranges(cp: u32, table: &[(u32, u32)]) -> bool {
+    let (mut lo, mut hi) = (0usize, table.len());
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let (a, b) = table[mid];
+        if cp < a {
+            hi = mid;
+        } else if cp > b {
+            lo = mid + 1;
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_wide(cp: u32) -> bool {
+    cp >= 0x1100
+        && (cp <= 0x115F // Hangul Jamo (leading)
+            || cp == 0x2329
+            || cp == 0x232A
+            || ((0x2E80..=0xA4CF).contains(&cp) && cp != 0x303F) // CJK radicals..Yi
+            || (0xAC00..=0xD7A3).contains(&cp) // Hangul Syllables
+            || (0xF900..=0xFAFF).contains(&cp) // CJK Compat Ideographs
+            || (0xFE10..=0xFE19).contains(&cp) // Vertical forms
+            || (0xFE30..=0xFE6F).contains(&cp) // CJK Compat Forms
+            || (0xFF00..=0xFF60).contains(&cp) // Fullwidth forms
+            || (0xFFE0..=0xFFE6).contains(&cp) // Fullwidth signs
+            || (0x1F300..=0x1FAFF).contains(&cp) // emoji pictographs
+            || (0x20000..=0x3FFFD).contains(&cp)) // CJK Ext B..G
+}
+
+fn char_width(c: char) -> usize {
+    let cp = c as u32;
+    if cp == 0 {
+        return 0;
+    }
+    if in_ranges(cp, COMBINING) {
+        return 0;
+    }
+    if is_wide(cp) {
+        return 2;
+    }
+    1
+}
+
+// Sorted, non-overlapping inclusive nonspacing-mark ranges (Kuhn's combining
+// table, BMP-complete + the high-value supplementary marks + variation
+// selectors). The sort/non-overlap invariant that in_ranges' binary search
+// relies on is asserted by combining_table_is_sorted.
+const COMBINING: &[(u32, u32)] = &[
+    (0x0300, 0x036F), (0x0483, 0x0489), (0x0591, 0x05BD), (0x05BF, 0x05BF),
+    (0x05C1, 0x05C2), (0x05C4, 0x05C5), (0x05C7, 0x05C7), (0x0610, 0x061A),
+    (0x064B, 0x065F), (0x0670, 0x0670), (0x06D6, 0x06DC), (0x06DF, 0x06E4),
+    (0x06E7, 0x06E8), (0x06EA, 0x06ED), (0x0711, 0x0711), (0x0730, 0x074A),
+    (0x07A6, 0x07B0), (0x07EB, 0x07F3), (0x0816, 0x0819), (0x081B, 0x0823),
+    (0x0825, 0x0827), (0x0829, 0x082D), (0x0859, 0x085B), (0x08E3, 0x0902),
+    (0x093A, 0x093A), (0x093C, 0x093C), (0x0941, 0x0948), (0x094D, 0x094D),
+    (0x0951, 0x0957), (0x0962, 0x0963), (0x0981, 0x0981), (0x09BC, 0x09BC),
+    (0x09C1, 0x09C4), (0x09CD, 0x09CD), (0x09E2, 0x09E3), (0x0A01, 0x0A02),
+    (0x0A3C, 0x0A3C), (0x0A41, 0x0A42), (0x0A47, 0x0A48), (0x0A4B, 0x0A4D),
+    (0x0A70, 0x0A71), (0x0A75, 0x0A75), (0x0A81, 0x0A82), (0x0ABC, 0x0ABC),
+    (0x0AC1, 0x0AC5), (0x0AC7, 0x0AC8), (0x0ACD, 0x0ACD), (0x0AE2, 0x0AE3),
+    (0x0B01, 0x0B01), (0x0B3C, 0x0B3C), (0x0B3F, 0x0B3F), (0x0B41, 0x0B44),
+    (0x0B4D, 0x0B4D), (0x0B56, 0x0B56), (0x0B62, 0x0B63), (0x0B82, 0x0B82),
+    (0x0BC0, 0x0BC0), (0x0BCD, 0x0BCD), (0x0C00, 0x0C00), (0x0C3E, 0x0C40),
+    (0x0C46, 0x0C48), (0x0C4A, 0x0C4D), (0x0C55, 0x0C56), (0x0C62, 0x0C63),
+    (0x0C81, 0x0C81), (0x0CBC, 0x0CBC), (0x0CBF, 0x0CBF), (0x0CC6, 0x0CC6),
+    (0x0CCC, 0x0CCD), (0x0CE2, 0x0CE3), (0x0D01, 0x0D01), (0x0D41, 0x0D44),
+    (0x0D4D, 0x0D4D), (0x0D62, 0x0D63), (0x0DCA, 0x0DCA), (0x0DD2, 0x0DD4),
+    (0x0DD6, 0x0DD6), (0x0E31, 0x0E31), (0x0E34, 0x0E3A), (0x0E47, 0x0E4E),
+    (0x0EB1, 0x0EB1), (0x0EB4, 0x0EB9), (0x0EBB, 0x0EBC), (0x0EC8, 0x0ECD),
+    (0x0F18, 0x0F19), (0x0F35, 0x0F35), (0x0F37, 0x0F37), (0x0F39, 0x0F39),
+    (0x0F71, 0x0F7E), (0x0F80, 0x0F84), (0x0F86, 0x0F87), (0x0F8D, 0x0F97),
+    (0x0F99, 0x0FBC), (0x0FC6, 0x0FC6), (0x102D, 0x1030), (0x1032, 0x1037),
+    (0x1039, 0x103A), (0x103D, 0x103E), (0x1058, 0x1059), (0x105E, 0x1060),
+    (0x1071, 0x1074), (0x1082, 0x1082), (0x1085, 0x1086), (0x108D, 0x108D),
+    (0x109D, 0x109D), (0x135D, 0x135F), (0x1712, 0x1714), (0x1732, 0x1734),
+    (0x1752, 0x1753), (0x1772, 0x1773), (0x17B4, 0x17B5), (0x17B7, 0x17BD),
+    (0x17C6, 0x17C6), (0x17C9, 0x17D3), (0x17DD, 0x17DD), (0x180B, 0x180D),
+    (0x1885, 0x1886), (0x18A9, 0x18A9), (0x1920, 0x1922), (0x1927, 0x1928),
+    (0x1932, 0x1932), (0x1939, 0x193B), (0x1A17, 0x1A18), (0x1A1B, 0x1A1B),
+    (0x1A56, 0x1A56), (0x1A58, 0x1A5E), (0x1A60, 0x1A60), (0x1A62, 0x1A62),
+    (0x1A65, 0x1A6C), (0x1A73, 0x1A7C), (0x1A7F, 0x1A7F), (0x1AB0, 0x1ABE),
+    (0x1B00, 0x1B03), (0x1B34, 0x1B34), (0x1B36, 0x1B3A), (0x1B3C, 0x1B3C),
+    (0x1B42, 0x1B42), (0x1B6B, 0x1B73), (0x1B80, 0x1B81), (0x1BA2, 0x1BA5),
+    (0x1BA8, 0x1BA9), (0x1BAB, 0x1BAD), (0x1BE6, 0x1BE6), (0x1BE8, 0x1BE9),
+    (0x1BED, 0x1BED), (0x1BEF, 0x1BF1), (0x1C2C, 0x1C33), (0x1C36, 0x1C37),
+    (0x1CD0, 0x1CD2), (0x1CD4, 0x1CE0), (0x1CE2, 0x1CE8), (0x1CED, 0x1CED),
+    (0x1CF4, 0x1CF4), (0x1CF8, 0x1CF9), (0x1DC0, 0x1DFF), (0x20D0, 0x20F0),
+    (0x2CEF, 0x2CF1), (0x2D7F, 0x2D7F), (0x2DE0, 0x2DFF), (0x302A, 0x302D),
+    (0x3099, 0x309A), (0xA66F, 0xA672), (0xA674, 0xA67D), (0xA69E, 0xA69F),
+    (0xA6F0, 0xA6F1), (0xA802, 0xA802), (0xA806, 0xA806), (0xA80B, 0xA80B),
+    (0xA825, 0xA826), (0xA8C4, 0xA8C5), (0xA8E0, 0xA8F1), (0xA926, 0xA92D),
+    (0xA947, 0xA951), (0xA980, 0xA982), (0xA9B3, 0xA9B3), (0xA9B6, 0xA9B9),
+    (0xA9BC, 0xA9BC), (0xAA29, 0xAA2E), (0xAA31, 0xAA32), (0xAA35, 0xAA36),
+    (0xAA43, 0xAA43), (0xAA4C, 0xAA4C), (0xAAB0, 0xAAB0), (0xAAB2, 0xAAB4),
+    (0xAAB7, 0xAAB8), (0xAABE, 0xAABF), (0xAAC1, 0xAAC1), (0xAAEC, 0xAAED),
+    (0xAAF6, 0xAAF6), (0xABE5, 0xABE5), (0xABE8, 0xABE8), (0xABED, 0xABED),
+    (0xFB1E, 0xFB1E), (0xFE00, 0xFE0F), (0xFE20, 0xFE2F), (0x101FD, 0x101FD),
+    (0x102E0, 0x102E0), (0x10376, 0x1037A), (0x10A01, 0x10A03), (0x10A05, 0x10A06),
+    (0x10A0C, 0x10A0F), (0x10A38, 0x10A3A), (0x10A3F, 0x10A3F), (0x10AE5, 0x10AE6),
+    (0x11001, 0x11001), (0x11038, 0x11046), (0x1107F, 0x11081), (0x110B3, 0x110B6),
+    (0x110B9, 0x110BA), (0x11100, 0x11102), (0x11127, 0x1112B), (0x1112D, 0x11134),
+    (0x11173, 0x11173), (0x11180, 0x11181), (0x111B6, 0x111BE), (0x116AB, 0x116AB),
+    (0x116AD, 0x116AD), (0x116B0, 0x116B5), (0x116B7, 0x116B7), (0x16AF0, 0x16AF4),
+    (0x16B30, 0x16B36), (0x16F8F, 0x16F92), (0x1D167, 0x1D169), (0x1D17B, 0x1D182),
+    (0x1D185, 0x1D18B), (0x1D1AA, 0x1D1AD), (0x1D242, 0x1D244), (0x1DA00, 0x1DA36),
+    (0x1DA3B, 0x1DA6C), (0x1DA75, 0x1DA75), (0x1DA84, 0x1DA84), (0x1DA9B, 0x1DA9F),
+    (0x1DAA1, 0x1DAAF), (0xE0100, 0xE01EF),
+];
 
 #[derive(Clone, Copy)]
 pub struct Cell {
@@ -184,11 +313,18 @@ impl SgrPen {
                     self.attrs = 0;
                 }
                 1 => self.attrs |= ATTR_BOLD,
+                2 => self.attrs |= ATTR_DIM,
+                3 => self.attrs |= ATTR_ITALIC,
                 4 => self.attrs |= ATTR_UNDERLINE,
+                5 | 6 => self.attrs |= ATTR_BLINK, // 6 (rapid) folded into blink
                 7 => self.attrs |= ATTR_REVERSE,
-                22 => self.attrs &= !ATTR_BOLD,
+                9 => self.attrs |= ATTR_STRIKE,
+                22 => self.attrs &= !(ATTR_BOLD | ATTR_DIM), // 22 clears both
+                23 => self.attrs &= !ATTR_ITALIC,
                 24 => self.attrs &= !ATTR_UNDERLINE,
+                25 => self.attrs &= !ATTR_BLINK,
                 27 => self.attrs &= !ATTR_REVERSE,
+                29 => self.attrs &= !ATTR_STRIKE,
                 30..=37 => self.fg = self.ansi_fg(pal, (v - 30) as usize),
                 39 => self.fg = pal.fg,
                 40..=47 => self.bg = pal.ansi[(v - 40) as usize],
@@ -655,6 +791,10 @@ impl Vt {
             b'@' => self.insert_chars(self.p(0, 1) as usize),
             b'P' => self.delete_chars(self.p(0, 1) as usize),
             b'X' => self.erase_chars(self.p(0, 1) as usize),
+            b'S' => self.scroll_region_up(self.p(0, 1) as usize),
+            // CSI T with 0/1 params is SD; the 5-param form is xterm highlight
+            // mouse tracking (unimplemented) -- don't read it as a giant scroll.
+            b'T' if self.nparams <= 1 => self.scroll_region_down(self.p(0, 1) as usize),
             b'm' => self.sgr(),
             b'h' | b'l' => self.mode_set(fin == b'h'),
             b's' => self.saved = (self.cx, self.cy),
@@ -757,35 +897,63 @@ impl Vt {
     }
 
     fn put_char(&mut self, ch: char) {
+        let w = char_width(ch);
+        if w == 0 {
+            // Combining / zero-width: no column of its own, no advance. (A
+            // fuller impl folds it into the preceding cell; either way the
+            // grid stays width-correct -- the invariant is it takes no column.)
+            return;
+        }
+        // Resolve a deferred wrap left pending by the previous glyph.
         if self.cx >= self.cols {
             if self.wrap {
-                // Deferred wrap (last-column semantics simplified: wrap
-                // before the write once past the edge).
                 self.cx = 0;
                 self.line_feed();
             } else {
                 // DECAWM reset: the cursor sticks at the right margin; each
                 // new glyph overwrites the last column (the VT100 rule).
-                // Without this gate a bottom-right-cell paint line-fed at
-                // the last row -> a whole-screen scroll per status repaint.
                 self.cx = self.cols - 1;
             }
         }
+        // A double-width glyph never straddles the right margin: with autowrap
+        // it moves whole to the next line; without, it degrades to a single-
+        // width paint clamped into the last cell.
+        if w == 2 && self.cx + 1 >= self.cols {
+            if self.wrap {
+                self.cx = 0;
+                self.line_feed();
+            } else {
+                let (cx, cy) = (self.cols - 1, self.cy);
+                self.write_cell(cx, cy, ch, self.attrs);
+                self.cx = self.cols - 1;
+                return;
+            }
+        }
         let (cx, cy) = (self.cx, self.cy);
+        let attrs = if w == 2 { self.attrs | ATTR_WIDE } else { self.attrs };
+        self.write_cell(cx, cy, ch, attrs);
+        if w == 2 {
+            // The continuation (right half): a blank carrying the pen (so
+            // reverse video / bg covers both cells), NOT marked wide.
+            self.write_cell(cx + 1, cy, ' ', self.attrs);
+        }
+        self.cx += w;
+    }
+
+    fn write_cell(&mut self, cx: usize, cy: usize, ch: char, attrs: u8) {
         let idx = cy * self.cols + cx;
         self.cells[idx] = Cell {
             ch,
-            fg: if self.attrs & ATTR_BOLD != 0 && self.fg == self.pal.fg {
+            fg: if attrs & ATTR_BOLD != 0 && self.fg == self.pal.fg {
                 // Bold default-fg stays fg (no brighter tier exists).
                 self.pal.fg
             } else {
                 self.fg
             },
             bg: self.bg,
-            attrs: self.attrs,
+            attrs,
         };
         self.mark(cy);
-        self.cx += 1;
     }
 
     // Map a 0-based CUP/VPA row through DECOM: origin-relative + region-clamped
@@ -828,6 +996,23 @@ impl Vt {
             *c = Cell::blank(fg, bg);
         }
         self.mark_all();
+    }
+
+    // SU (CSI S) / SD (CSI T): scroll the band by n lines, cursor unmoved.
+    // n is clamped to the band height -- scrolling by >= the region height
+    // just clears it, and the clamp bounds the cost against a hostile count.
+    fn scroll_region_up(&mut self, n: usize) {
+        let band = self.scroll_bot - self.scroll_top + 1;
+        for _ in 0..n.min(band) {
+            self.scroll_up();
+        }
+    }
+
+    fn scroll_region_down(&mut self, n: usize) {
+        let band = self.scroll_bot - self.scroll_top + 1;
+        for _ in 0..n.min(band) {
+            self.scroll_down();
+        }
     }
 
     fn erase_display(&mut self, mode: u32) {
@@ -1342,5 +1527,165 @@ mod tests {
         vt.resize(4, 6); // resize -> region resets to full [0,5]
         feed(&mut vt, b"\x1b[1;1Ha\x1b[6;1H\n"); // 'a' at (0,0), LF at the new last row
         assert_eq!(vt.cells[0].ch, ' '); // full-screen scroll -> 'a' gone
+    }
+
+    #[test]
+    fn su_scrolls_region_up_cursor_unmoved() {
+        let mut vt = Vt::new(4, 5);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(&mut vt, b"\x1b[2;4r"); // region 0-based [1,3]; homes cursor to (0,0)
+        feed(&mut vt, b"\x1b[3;2H"); // park the cursor at cy=2, cx=1
+        feed(&mut vt, b"\x1b[S"); // SU default 1 -> band shifts up, row 3 blanks
+        assert_eq!(vt.cells[0].ch, '0'); // outside band, untouched
+        assert_eq!(vt.cells[4].ch, '2'); // row 1 <- old row 2
+        assert_eq!(vt.cells[8].ch, '3'); // row 2 <- old row 3
+        assert_eq!(vt.cells[12].ch, ' '); // row 3 (scroll_bot) blanked
+        assert_eq!(vt.cells[16].ch, '4'); // outside band, untouched
+        assert_eq!((vt.cy, vt.cx), (2, 1)); // SU never moves the cursor
+    }
+
+    #[test]
+    fn sd_scrolls_region_down() {
+        let mut vt = Vt::new(4, 5);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(&mut vt, b"\x1b[2;4r"); // region [1,3]
+        feed(&mut vt, b"\x1b[T"); // SD default 1 -> band shifts down, row 1 blanks
+        assert_eq!(vt.cells[0].ch, '0'); // outside, untouched
+        assert_eq!(vt.cells[4].ch, ' '); // row 1 (scroll_top) blanked
+        assert_eq!(vt.cells[8].ch, '1'); // row 2 <- old row 1
+        assert_eq!(vt.cells[12].ch, '2'); // row 3 <- old row 2
+        assert_eq!(vt.cells[16].ch, '4'); // outside, untouched
+    }
+
+    #[test]
+    fn su_huge_count_clears_band_no_hang() {
+        // The clamp: a hostile CSI count scrolls at most the band height, which
+        // clears the region -- and bounds the loop (no multi-billion iteration).
+        let mut vt = Vt::new(4, 5);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(&mut vt, b"\x1b[2;4r"); // region [1,3], height 3
+        feed(&mut vt, b"\x1b[999999S"); // clamped to 3 -> whole band cleared
+        assert_eq!(vt.cells[0].ch, '0'); // outside, untouched
+        assert_eq!(vt.cells[4].ch, ' ');
+        assert_eq!(vt.cells[8].ch, ' ');
+        assert_eq!(vt.cells[12].ch, ' ');
+        assert_eq!(vt.cells[16].ch, '4'); // outside, untouched
+    }
+
+    #[test]
+    fn sd_five_param_is_highlight_not_scroll() {
+        // CSI 1;2;3;4;5 T is xterm highlight mouse tracking (unimplemented),
+        // NOT SD -- a 5-param T must not scroll the screen.
+        let mut vt = Vt::new(4, 3);
+        feed(&mut vt, b"\x1b[1;1HA"); // 'A' at (0,0)
+        feed(&mut vt, b"\x1b[1;2;3;4;5T"); // 5 params -> ignored, no scroll
+        assert_eq!(vt.cells[0].ch, 'A'); // unmoved
+        assert_eq!(vt.cells[4].ch, ' '); // did NOT scroll down into row 1
+    }
+
+    #[test]
+    fn combining_table_is_sorted() {
+        // in_ranges' binary search relies on sorted, non-overlapping ranges;
+        // this catches any transcription slip in COMBINING.
+        let mut prev: Option<u32> = None;
+        for &(a, b) in COMBINING {
+            assert!(a <= b, "inverted range {:#x}..{:#x}", a, b);
+            if let Some(pv) = prev {
+                assert!(a > pv, "range {:#x} not strictly after {:#x}", a, pv);
+            }
+            prev = Some(b);
+        }
+    }
+
+    #[test]
+    fn char_width_representative_points() {
+        assert_eq!(char_width('A'), 1);
+        assert_eq!(char_width(' '), 1);
+        assert_eq!(char_width('\u{00E9}'), 1); // precomposed 'e-acute' is narrow
+        assert_eq!(char_width('\u{0301}'), 0); // combining acute
+        assert_eq!(char_width('\u{FE0F}'), 0); // variation selector-16
+        assert_eq!(char_width('\u{4E00}'), 2); // CJK ideograph
+        assert_eq!(char_width('\u{FF21}'), 2); // fullwidth A
+        assert_eq!(char_width('\u{1F600}'), 2); // emoji
+        assert_eq!(char_width('\u{1100}'), 2); // Hangul Jamo leading
+        assert_eq!(char_width('\u{303F}'), 1); // the Kuhn wide-range exclusion
+    }
+
+    #[test]
+    fn wide_char_advances_two_and_marks_left() {
+        let mut vt = Vt::new(6, 2);
+        feed(&mut vt, b"\xe4\xb8\x80"); // U+4E00 CJK (wide)
+        assert_eq!(vt.cells[0].ch, '\u{4E00}');
+        assert!(vt.cells[0].attrs & ATTR_WIDE != 0); // left half marked wide
+        assert_eq!(vt.cells[1].ch, ' '); // blank continuation
+        assert_eq!(vt.cells[1].attrs & ATTR_WIDE, 0); // continuation not marked
+        assert_eq!(vt.cx, 2); // advanced two columns
+    }
+
+    #[test]
+    fn wide_char_at_right_margin_wraps_whole() {
+        let mut vt = Vt::new(3, 2); // cols = 3
+        feed(&mut vt, b"ab"); // cols 0,1; cx = 2 (the last column)
+        feed(&mut vt, b"\xe4\xb8\x80"); // wide: can't fit at col 2 -> wrap
+        assert_eq!(vt.cells[2].ch, ' '); // col 2 left blank
+        assert_eq!(vt.cells[3].ch, '\u{4E00}'); // row 1 col 0
+        assert!(vt.cells[3].attrs & ATTR_WIDE != 0);
+        assert_eq!(vt.cells[4].ch, ' '); // continuation
+        assert_eq!((vt.cy, vt.cx), (1, 2));
+    }
+
+    #[test]
+    fn wide_char_no_wrap_at_margin_degrades_single() {
+        let mut vt = Vt::new(3, 2);
+        feed(&mut vt, b"\x1b[?7l"); // DECAWM off
+        feed(&mut vt, b"ab"); // cx = 2 at the last column
+        feed(&mut vt, b"\xe4\xb8\x80"); // wide, no room, no wrap -> single
+        assert_eq!(vt.cells[2].ch, '\u{4E00}'); // placed at the margin
+        assert_eq!(vt.cells[2].attrs & ATTR_WIDE, 0); // degraded, not marked wide
+        assert_eq!((vt.cy, vt.cx), (0, 2)); // cursor sticks at the margin
+        assert_eq!(vt.cells[5].ch, ' '); // nothing spilled onto row 1
+    }
+
+    #[test]
+    fn combining_mark_takes_no_column() {
+        let mut vt = Vt::new(4, 2);
+        feed(&mut vt, b"e"); // 'e' at col 0; cx = 1
+        feed(&mut vt, b"\xcc\x81"); // U+0301 combining acute -> width 0
+        assert_eq!(vt.cells[0].ch, 'e');
+        assert_eq!(vt.cx, 1); // no advance for the combining mark
+        feed(&mut vt, b"x"); // lands at col 1, not col 2
+        assert_eq!(vt.cells[1].ch, 'x');
+    }
+
+    #[test]
+    fn sgr_italic_dim_blink_strike_tracked() {
+        let mut vt = Vt::new(8, 1);
+        feed(&mut vt, b"\x1b[3mi"); // italic
+        feed(&mut vt, b"\x1b[2md"); // + dim
+        feed(&mut vt, b"\x1b[5mb"); // + blink
+        feed(&mut vt, b"\x1b[9ms"); // + strike
+        assert!(vt.cells[0].attrs & ATTR_ITALIC != 0);
+        assert_eq!(
+            vt.cells[1].attrs & (ATTR_ITALIC | ATTR_DIM),
+            ATTR_ITALIC | ATTR_DIM
+        );
+        assert!(vt.cells[2].attrs & ATTR_BLINK != 0);
+        assert!(vt.cells[3].attrs & ATTR_STRIKE != 0);
+        feed(&mut vt, b"\x1b[23m\x1b[25m\x1b[29mR"); // clear italic/blink/strike
+        let a = vt.cells[4].attrs;
+        assert_eq!(a & (ATTR_ITALIC | ATTR_BLINK | ATTR_STRIKE), 0);
+        assert!(a & ATTR_DIM != 0); // dim survives -- only 0/22 clear it
+    }
+
+    #[test]
+    fn sgr_22_clears_bold_and_dim() {
+        let mut vt = Vt::new(4, 1);
+        feed(&mut vt, b"\x1b[1m\x1b[2mA"); // bold + dim
+        assert_eq!(
+            vt.cells[0].attrs & (ATTR_BOLD | ATTR_DIM),
+            ATTR_BOLD | ATTR_DIM
+        );
+        feed(&mut vt, b"\x1b[22mB"); // 22 clears BOTH
+        assert_eq!(vt.cells[1].attrs & (ATTR_BOLD | ATTR_DIM), 0);
     }
 }
