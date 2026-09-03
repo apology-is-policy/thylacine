@@ -60,40 +60,78 @@ mechanism that serves BOTH native and Linux programs, with one render substrate.
 
 ---
 
-## 1a. OPEN -- the process topology (operator fork, surfaced 2026-09-03)
+## 1a. The process topology -- RATIFIED: uniform per-tile process (Y), 2026-09-03
 
-The kaua-term is a COMPONENT (full-xterm parse + kaua `Buffer` + rasterize + input
-re-encode + the pts master host). WHERE that component runs is an OPEN operator
-fork, surfaced by main from `HALCYON.md` 13 (structurally invisible to aux-2 --
-tree divergence, the build rule biting: aux authored a topology claim that is
-entangled with halcyond's process model, which it cannot see):
+**Every tile is its own kaua-term PROCESS** -- native `ut` and Linux binaries
+alike. Each kaua-term holds its tile's pts master, parses, rasterizes, and
+presents a `Surface` that halcyond composites into the tile rect. There is no
+in-halcyond terminal pane; halcyond has ONE composition path (surfaces), applied
+uniformly. The operator ratified this on 2026-09-03 (main teed the fork; the
+operator "voted isolated" = uniform-Y).
 
-- **(X) IN-PROCESS:** halcyond holds N pts masters + N VT/transcript instances
-  (via the shared `usr/lib/vt` crate, main's H-2a) and composites itself. Matches
-  HALCYON 13.1's single-brain pattern (halcyond is "the only place that thinks";
-  the VT cores + per-pane transcript live in-process; the only spawned child is
-  halcyon-gpu) + 13.4(a) (a raw-VT pane already runs an aurora-class grid in
-  halcyond).
-- **(Y) PER-TILE PROCESS:** each tile is a kaua-term process holding a pts master
-  + presenting a `Surface` halcyond composites. Crash-isolated.
-- **HYBRID:** native/trusted (ut) in-process (X); Linux/untrusted isolated (Y).
+The fork (for the record): (X) in-process -- halcyond holds N VT/transcript
+instances via the shared `usr/lib/vt` crate, matching HALCYON 13.1's single-brain
+pattern; (Y) per-tile process -- crash-isolated; HYBRID -- native in-process,
+Linux isolated. Uniform-Y (chosen) subsumes the mandatory half and adds
+uniformity.
 
-The load-bearing constraint (the aux/aurora/viv robustness call, FIRM): **a
-hostile-input VT parser must NOT share halcyond's process.** aurora + kaua are
-no_std with panic=abort (aurora `main.rs:870` "panic -> no_std abort -> a dark
-console"; kaua `term.rs:21`); a full-xterm parser on arbitrary Linux bytes will
-eventually hit a panicking edge -> the process aborts. In (X) that aborts halcyond
-= the WHOLE environment, every tile. So Linux/untrusted tiles MUST be isolated (Y)
--- the same crash-isolation that motivates 13.1 (halcyon-gpu is a child for
-exactly this). The only open question is the native/trusted tile: in-process
-(hybrid) vs also isolated (uniform-Y) -- a halcyond-simplicity tradeoff, both
-sound. Aux LEAN: hybrid if halcyond's two-path cost is low, else uniform-Y.
+Why it is sound (and why the mandatory half forced at least (Y) for Linux): a
+full-xterm parser is a state machine on UNTRUSTED bytes (a Linux binary emits
+anything); aurora + kaua are `no_std` with panic=abort (aurora `main.rs:870`
+"panic -> no_std abort -> a dark console"; kaua `term.rs:21`), so a panicking edge
+aborts the process. In (X) that would abort halcyond = the WHOLE environment. A
+per-tile process confines a parser panic (or any tile-local fault) to that ONE
+tile -- the same crash-isolation that motivates 13.1 (halcyon-gpu is a child for
+exactly this reason), now applied to every tile. The cost the operator accepted:
+a native `ut` tile is a process too (cheap) rather than an in-halcyond pane; the
+gain is one uniform halcyond path + uniform isolation.
 
-Everything topology-INDEPENDENT below (the parser, the `Buffer`, rasterize, input
-re-encode, C2-k1c/C2-k3) STANDS as written. Everything topology-DEPENDENT
-(whether the kaua-term is a process or an in-halcyond module; the
-live-screen<->transcript seam; KT-1's shape) is **HELD pending this fork's
-ratification.** Read the sections below with that caveat.
+Consequences now FIRM (previously held on this fork):
+- The kaua-term is a `tapestryd` CLIENT process (owns a surface), per tile.
+- The **live-screen<->transcript seam** (halcyond's transcript, R5, receiving the
+  kaua-term's live-screen surface + cell geometry) is a real cross-process seam to
+  define, for EVERY tile (not just Linux). It is defined once, uniformly.
+- KT-1 (section 6) is a kaua-term process hosting `ut`, native included.
+
+The trusted CONSOLE renderer (the SAK sink on `/dev/cons`, subsuming aurora --
+section 2 "console mode") is a distinct role from a tile and is unaffected by this
+tile-topology decision; it renders `/dev/cons`, not a pts, and is suspended during
+a framebuffer SAK episode (18.7).
+
+---
+
+## 1b. OPEN -- the live-screen<->transcript seam (the next shared design)
+
+With uniform-Y fixed, the load-bearing shared design becomes the seam between the
+per-tile kaua-term process and halcyond (surfaced by main, 2026-09-03; it is a
+FRESH main<->aux design conversation, not settled here). The fork -- the
+render-responsibility:
+
+- **(A) kaua-term RENDERS PIXELS:** parse -> `Buffer` -> rasterize (fontdue /
+  Cornucopia) -> a weave `Surface`; halcyond composites. fontdue + the render path
+  move INTO the kaua-term; halcyond is a pure placement orchestrator.
+- **(B) kaua-term FEEDS CELLS:** parse -> `Buffer`; feed the cell grid + input
+  events to halcyond; halcyond keeps fontdue + the transcript + Helix-modal
+  scrollback selection + inline media (`Image`/`Embed`) + beacon, rasterizes, and
+  composites. The kaua-term is then a pure isolated PARSER+input process (no
+  rasterizer, no surface).
+
+**Aux lean: (B)**, grounded in -- R5 (the transcript stays halcyond's: B gives
+halcyond the cells to build it; A gives halcyond only pixels); Helix-modal
+scrollback selection needs the TEXT in halcyond (B provides it, A does not);
+inline media (`cat pic.png` -> halcyond `Image`/`Embed` in the transcript flow)
+needs halcyond to own the flow (B); fontdue stays in one place (B) rather than
+duplicated per process (A). The mandatory crash-isolation is preserved in B
+because the isolated part is the PARSER (hostile bytes); halcyond's renderer
+processes only TRUSTED cells (a bounded grid + a font), a much lower crash risk
+than the parser. (A) buys D7-purity + parallel per-process rasterization; the
+tradeoff is real, so it is an operator-teed fork after main+aux converge.
+
+This is main-HEAVY (halcyond's renderer/transcript/Helix/inline-media/beacon are
+all main's HALCYON 13 domain, invisible to aux-2 -- so aux CANNOT ground main's
+half; main grounds it). Aux's half of the seam: the kaua-term's cell-feed +
+input-event side (B) or the rasterize+present side (A). Settle in the fresh seam
+call before KT-1's render path is written.
 
 ---
 
@@ -115,13 +153,17 @@ ratification.** Read the sections below with that caveat.
              routes input: raw kbd --> KeyEvent (chrome chords filtered) --> the focused tile's kaua-term
 ```
 
-The pipeline above is drawn for the (Y)/hybrid-Linux topology (section 1a), where
-the kaua-term is a `tapestryd` CLIENT that owns a surface (as aurora does today --
-`Surface::fullscreen` / `present`) and halcyond composites it. In the (X)
-topology the same parse/Buffer/render logic is a MODULE inside halcyond (via the
-shared VT crate) with no per-tile surface -- topology HELD (section 1a). Either
-way D7 stays pristine: the terminal owns glyphs (rasterization); the compositor
-owns placement (pixels + input routing), never text.
+The pipeline above reflects the RATIFIED uniform-Y topology (section 1a): the
+kaua-term is a per-tile PROCESS. What remains OPEN is the render-responsibility
+SEAM (section 1b): whether the kaua-term rasterizes its `Buffer` to a `Surface`
+halcyond composites (A -- fontdue + the render path move INTO the kaua-term), or
+feeds the cell `Buffer` + input events to halcyond's renderer (B -- halcyond keeps
+fontdue + the transcript + Helix-modal + inline media + beacon, and composites).
+Either way the hostile-input PARSER is isolated in the kaua-term process (the
+mandatory crash-isolation of section 1a); the seam decides only WHERE the trusted
+renderer + transcript live. D7 (the tapestryd compositor deals in pixels, never
+glyphs) holds in both -- halcyond is a tapestryd CLIENT that may rasterize its own
+panes (HALCYON 13), distinct from the compositor.
 
 **Two instantiation modes (R2: one codebase).**
 
@@ -252,18 +294,18 @@ what the pts fd already names (I-43: a phenotype is ABI shape, never authority).
 
 ## 6. The build arc
 
-**The build arc's SHAPE is HELD on the section-1a topology fork** (X in-halcyond
-module vs Y per-tile process vs hybrid). KT-2/KT-3/KT-4 are topology-INDEPENDENT
-(the parser, the ioctl reach) and stand; KT-1's shape (a per-tile process vs an
-in-halcyond native pane) firms up once the operator ratifies the topology.
+**Topology RATIFIED (uniform-Y, section 1a): every tile is a kaua-term PROCESS.**
+The one remaining design gate before KT-1's render path is the live-screen<->
+transcript SEAM (section 1b: render-in-kaua-term (A) vs feed-cells-to-halcyond
+(B)), a fresh main<->aux design conversation. KT-2/KT-3/KT-4 stand regardless (the
+parser, the ioctl reach).
 
-- **KT-1 -- native-ut tile -> unblocks H-4d** (topology-dependent shape, HELD).
+- **KT-1 -- native-ut tile (a kaua-term process) -> unblocks H-4d.**
   The welcome's two console tiles are native `ut`, which already has full pts job
-  control; ZERO kernel work. In (X)/hybrid: halcyond reads the ut pts master +
-  builds the transcript in-process (native = trusted = in-process). In
-  (Y)/uniform: a kaua-term process hosts ut + presents a composited surface. Either
-  way the halcyond per-tile spawn/composite is MAIN's half and the seam is a
-  build-time coordination call.
+  control; ZERO kernel work. A kaua-term process hosts ut on a pts; the live screen
+  reaches halcyond per the section-1b seam (cells or pixels); halcyond spawns the
+  kaua-term per tile + composites (MAIN's half; a build-time coordination call).
+  Gated on the seam (1b) being settled.
 - **KT-2 -- grow the shared VT parser to full-xterm** (main's `usr/lib/vt` crate,
   H-2a; still `aurora/vt.rs` in aux-2 -- coordinate the crate): DECSTBM + top/bottom
   margin fields, SU/SD, origin mode, wide-char advance via unicode-width, SGR
