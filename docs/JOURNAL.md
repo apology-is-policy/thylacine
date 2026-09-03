@@ -75,8 +75,19 @@ adds a mount + a 49-byte program).
 
 Landed: `tools/dx2c-dosprog.py` (new), the `DX2C.COM` ramfs staging in
 `tools/build.sh` (under `THYLACINE_BAKE_DOSBOX`), and the rewritten
-`tools/interactive/ls-gfx-dosbox.exp`. Open: the foreground-exit shell-return;
-the DX-2 default-on flip (deferred to DX-2 close); the vault sweep of
+`tools/interactive/ls-gfx-dosbox.exp`.
+
+**DX-2 close -- the default-on decision (operator's call).** I recommended
+keeping `THYLACINE_BAKE_DOSBOX` opt-in until DX-5 (the flip taxes every default
+build across both tracks: +17.6 MB ramfs, ~30s/bake, for a DOS emulator at DX-2
+of 7). The operator chose **default-on now** ("DX-1 default ON"). Implemented by
+mirroring `build_go_goroot`'s opt-out: `${THYLACINE_BAKE_DOSBOX:-1}=="1"` at all
+three gate sites (build + stage + DX2C.COM emit), so `=0` opts out and an absent
+LLVM C++ fork still skips the emulator gracefully (build_dosbox_x returns 0; a
+missing *vendored* source stays fatal, but it is committed). Verified by a plain
+`build.sh kernel` with the env var UNSET staging both dosbox-x and DX2C.COM.
+
+Open: the foreground-exit shell-return (DX-3); the vault sweep of
 `usr/ports/dosbox-x` + `usr/ports/sdl2` (vault behind).
 
 ---

@@ -165,7 +165,11 @@ server + virtio-sound (post-v1.0) lights it up.
     (`&`) so the shell stays free for the readback. `ls-gfx-dosbox` now proves BOTH
     DX-2 halves in one leg (render screendump + OUT.TXT readback). With DX-2c the
     DX-2 exit criterion is met.
-  - **DX-2 close (NEXT)**: flip `THYLACINE_BAKE_DOSBOX` default-on; then DX-3.
+  - **DX-2 close DONE** (2026-09-03, operator-directed): `THYLACINE_BAKE_DOSBOX`
+    is now DEFAULT-ON (`${THYLACINE_BAKE_DOSBOX:-1}=="1"`, mirroring
+    `build_go_goroot`) -- the emulator + DX2C.COM ship in the default image;
+    `THYLACINE_BAKE_DOSBOX=0` opts out for a fast iteration loop, and an absent
+    LLVM C++ fork skips the emulator gracefully. **NEXT = DX-3** (sound stub/input).
 - **DX-3** -- sound fully stubbed/hardened; input polish (keyboard + mouse for
   games); config/autoexec; larger real DOS programs.
 - **DX-4** -- the **CAP_JIT dynarec** (I-42; central): wire `dynamic_x86` to emit

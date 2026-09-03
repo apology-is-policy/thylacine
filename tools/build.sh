@@ -305,9 +305,12 @@ build_kernel() {
     # G-7b: cross-build TyrQuake + stage the shareware pak BEFORE the pool
     # fixture (populate_stratum_pool puts the stage at /quake).
     build_tyrquake
-    # DX-2 (Cryptid): cross-build DOSBox-X before the ramfs bake, only when
-    # opted in (THYLACINE_BAKE_DOSBOX=1) -- see the pouch_bins staging note.
-    [[ -n "${THYLACINE_BAKE_DOSBOX:-}" ]] && build_dosbox_x
+    # DX-2 (Cryptid): cross-build DOSBox-X before the ramfs bake. DEFAULT-ON
+    # since DX-2 close (the emulator ships in the default image, operator
+    # direction 2026-09-03; mirrors build_go_goroot's opt-out). THYLACINE_BAKE_DOSBOX=0
+    # opts out for a fast iteration loop; an absent LLVM C++ fork skips gracefully
+    # (build_dosbox_x returns 0). See the pouch_bins staging note.
+    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" ]] && build_dosbox_x
     # Warp W-4: cross-build vkQuake over venus + the W-3e SDL Vulkan glue.
     # Self-skips (announced) without the fetched venus link set.
     build_vkquake
@@ -597,10 +600,11 @@ EOF
     # Same curation discipline — explicit list, not a glob.
     local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "tyr-glquake" "make" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
-    # DX-2 (Cryptid first light): dosbox-x is a 17.6 MB binary -- opt-in to the
-    # ramfs via THYLACINE_BAKE_DOSBOX=1 (mirrors build_go_goroot's opt-out) so it
-    # does not slow the default build during the arc; flips default-on at DX-2 close.
-    [[ -n "${THYLACINE_BAKE_DOSBOX:-}" ]] && pouch_bins+=( "dosbox-x" )
+    # DX-2 (Cryptid): dosbox-x (17.6 MB) is DEFAULT-ON since DX-2 close (operator
+    # direction 2026-09-03; mirrors build_go_goroot's opt-out). THYLACINE_BAKE_DOSBOX=0
+    # opts out for a fast iteration loop; an absent LLVM C++ fork leaves no binary,
+    # so this stages nothing (the -f guard below).
+    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" ]] && pouch_bins+=( "dosbox-x" )
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
         if [[ -f "$src" ]]; then
@@ -614,8 +618,8 @@ EOF
     # guest runs, NOT a Thylacine binary), so it rides the bake directly rather
     # than pouch_bins. The ls-gfx-dosbox gate mounts a writable guest dir as C:,
     # copies this in, runs it, and reads back C:\OUT.TXT ("DX-2C-OK"). Same
-    # THYLACINE_BAKE_DOSBOX opt-in as the emulator binary above.
-    if [[ -n "${THYLACINE_BAKE_DOSBOX:-}" ]]; then
+    # THYLACINE_BAKE_DOSBOX default-on gate as the emulator binary above.
+    if [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" ]]; then
         python3 "$REPO_ROOT/tools/dx2c-dosprog.py" "$ramfs_src/DX2C.COM" \
             || { echo "==> ramfs: DX2C.COM emit FAILED" >&2; exit 1; }
         chmod 0644 "$ramfs_src/DX2C.COM"
