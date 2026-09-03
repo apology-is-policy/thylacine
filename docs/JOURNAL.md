@@ -22,6 +22,36 @@ needed the operator.
 
 ---
 
+## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-2a: DOSBox-X EXECUTES on Thylacine
+
+Same run as DX-1 below (self-compacted at 600k between DX-2a and the DX-2b
+render leg). The Cryptid arc's execution milestone, `@c9c4cb40`: the DX-1 binary
+is not just a linking ET_EXEC -- it RUNS. Under a full HVF boot + login,
+`dosbox-x -version` printed **"DOSBox-X version 2026.08.31"** and exited cleanly
+(no snare/fault). So main() runs, the pouch libc++ runtime initializes, and arg
+parsing works on aarch64-thylacine -- the C++ runtime + static-init + the whole
+17.6 MB image are live, not merely linked.
+
+Wiring: dosbox-x bakes into the ramfs only under `THYLACINE_BAKE_DOSBOX=1`
+(opt-in, build_go_goroot's pattern) so a 17.6 MB binary does not tax the default
+build during the arc; flips default-on at DX-2 close. The gate is
+`tools/interactive/ls-gfx-dosbox.exp` (execution leg; the render leg is DX-2b).
+
+**Checkpoint catch worth recording:** the smoke's expect run left a **stray
+QEMU + two caffeinate timers** alive after it exited (the boot harness did not
+reap its own VM on the expect exit path). Found only by the checkpoint contract's
+"account for every running process" sweep (`ps` scoped to the worktree), killed
+by explicit PID before self-compacting. A stray QEMU holding the qmp socket +
+the build fixtures is exactly the kind of thing that silently breaks the next
+boot -- the sweep is not tidiness.
+
+**DX-2b (next):** the render leg -- run dosbox-x graphically so the DOS `Z:\`
+prompt renders to a Tapestry pane, screendump the scanout, gate on a color-bucket
+floor (the ls-gfx-quake pattern), then kill it. Risk: DOSBox's SDL usage differs
+from Quake's (8bpp palette, VGA text mode) so the SDL_thylacine backend may need
+gap-filling. The ramfs is currently baked WITH dosbox-x, so the gate runs without
+a re-bake unless a plain `build.sh kernel` clobbers it.
+
 ## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-1: DOSBox-X (Cryptid) vendored + a curated C++ build that LINKS
 
 The first build chunk of the Cryptid arc (`docs/DOSBOX.md`). Exit criterion --
