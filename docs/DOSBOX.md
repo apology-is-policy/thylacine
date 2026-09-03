@@ -1,221 +1,215 @@
-# DOSBox on Thylacine -- the DOS-emulation arc (design)
+# DOSBox-X on Thylacine -- the DOS + Win9x emulation arc (design)
 
-> Status: DESIGN (scoping, 2026-09-03). Arc prefix **DX**. Design-first: this
-> scripture lands before code; each sub-chunk implements against it, audited
-> where invariant-bearing. Owner: aux track.
+> Status: DESIGN (scoping, 2026-09-03). Arc prefix **DX**. Variant decided:
+> **DOSBox-X** (operator, 2026-09-03) for its Win9x-guest + 3dfx-Glide reach.
+> Design-first: this scripture lands before code; each sub-chunk implements
+> against it, audited where invariant-bearing. Owner: aux track.
 
 ## 1. Goal + why it belongs
 
-Port **DOSBox** so Thylacine runs the vast library of DOS applications and games.
-This is a flagship of Thylacine's **emulation strength** -- the same conviction
-behind VIVARIUM (unmodified Linux binaries), the planned x86 translation layer,
-and the planned Wine path. VIVARIUM answers "run Linux binaries"; DOSBox answers
-"run DOS software," a whole platform otherwise extinct on modern hardware. It is
-also a real, fun, visible payoff: a graphical, interactive retro-computing target
-that exercises the compositor + input + JIT end to end.
+Port **DOSBox-X** so Thylacine runs the vast library of DOS applications and
+games -- AND, in a second act, boots **Windows 9x guests** and runs **3dfx
+Voodoo / Glide** titles. This is a flagship of Thylacine's **emulation strength**
+-- the same conviction behind VIVARIUM (unmodified Linux binaries), the planned
+x86 translation layer, and the planned Wine path. VIVARIUM answers "run Linux
+binaries"; DOSBox-X answers "run DOS software" and then "boot Windows 98 + a 3dfx
+game" -- a whole era otherwise extinct on modern hardware. The end-state demo --
+Thylacine booting Win98 and running a Voodoo title -- is a spectacular showcase of
+the CAP_JIT + compositor + input stack end to end.
 
-Positioning: DOSBox is a **port** (a GPL app running on Thylacine), not a new
+Positioning: DOSBox-X is a **port** (a GPL app running on Thylacine), not a new
 kernel mechanism -- EXCEPT its dynamic recompiler, which becomes a genuine
 demonstration of **JIT-as-a-capability (I-42 / CAP_JIT)**: an x86->ARM64 JIT
-riding Thylacine's capability-gated, W^X-preserving code emission. That angle is
-the novel, load-bearing part of the arc, and (see 6) DOSBox turns out to be a
-*cleaner* fit for the as-built JIT surface than a general dynamic binary
-translator would be.
+riding Thylacine's capability-gated, W^X-preserving code emission. With DOSBox-X
+that dynarec is not a nicety -- Win9x and Voodoo emulation REQUIRE it for usable
+speed -- so DX-4 is load-bearing and moves early (see 6, 8).
 
 ## 2. Licensing -- CLEAR
 
-- DOSBox (all major variants: original, Staging, DOSBox-X) is **GPL-2.0-or-later**.
+- DOSBox-X (like original DOSBox + Staging) is **GPL-2.0-or-later**.
 - Thylacine is **GPL v3**. GPL-2.0-**or-later** is COMPATIBLE with GPLv3 (the
   "or later" clause lets the code be taken under v3). GPL-2.0-**only** would be
-  incompatible -- DOSBox is not that.
-- A standalone app (separate process) = mere aggregation, no combination question.
-  A Pouch build linking Thylacine GPLv3 libs = combined work under GPLv3, fine
-  (musl is MIT; only the Thylacine boundary-line patches are GPLv3). SDL2 is zlib.
-- The one real check at vendor time: grep the DOSBox tree for any VENDORED
-  GPL-2.0-**only** or GPLv3-incompatible third-party component (rare).
+  incompatible -- DOSBox-X is not that.
+- A standalone app (separate process) = mere aggregation. A Pouch build linking
+  Thylacine GPLv3 libs = combined work under GPLv3, fine (musl is MIT; only the
+  Thylacine boundary-line patches are GPLv3). SDL2 is zlib.
+- Vendor-time check: grep for any VENDORED GPL-2.0-**only** / GPLv3-incompatible
+  component. DOSBox-X's feature sprawl pulls more bundled deps than Staging
+  (OpenGlide for Glide, PC-98 fonts, etc.) -- audit each bundled dep's license.
 
-## 3. Source target -- DOSBox Staging
+## 3. Source target -- DOSBox-X (decided)
 
-- **DOSBox Staging** (modern C++17/20, **SDL2** 2.0.2+, actively maintained,
-  cleanest tree). Its x86 core is host-arch-independent. THE target.
-- NOT classic DOSBox (SDL 1.2): Thylacine's backend is SDL2, and SDL2 has no
-  fbdev path -- SDL1.2 would be a bad fit.
-- DOSBox-X (SDL2, GPLv2-or-later, feature-rich) is the alternative if its extras
-  are wanted; Staging is the default for a first port (smaller, cleaner). (An
-  operator call -- see the arc-open decisions.)
+- **DOSBox-X** (SDL2 build path; GPLv2-or-later). Chosen over DOSBox Staging for
+  its exclusive reach:
+  - **Win9x guests** -- Staging deliberately DROPPED Win9x/XP; DOSBox-X supports
+    Win 3.x/9x/ME (its `dynamic_x86` core was reworked for NON-recursive page
+    faults specifically to run Win9x reliably -- the core we wire to CAP_JIT).
+  - **Glide passthrough** -- both do low-level 3dfx Voodoo 1 emulation now;
+    DOSBox-X additionally does high-level Glide passthrough (glide2x.dll -> a
+    host provider like OpenGlide).
+- The tradeoff accepted: DOSBox-X is the bigger, more legacy, "harder to work
+  with" tree (Staging IS the modernized fork). That is a one-time DX-1 porting
+  cost (see 5, 10), paid for the Win9x + Glide payoff.
+- **Build the SDL2 target** (DOSBox-X supports SDL1 + SDL2; Thylacine's backend
+  is SDL2). Verify the SDL2 build path early in DX-1.
 
 ## 4. Build path -- Pouch (native port), NOT libt-native, NOT viv
 
 - **Pouch (musl + boundary-line) is the route.** Ported foreign POSIX C++ ->
-  Pouch is scripture (ARCH 3.5), and it is the PROVEN path: SDL2 + the C++
-  runtime already exist on Pouch (see 5).
-- **NOT native (POSIX->libt):** Thylacine's native path is Rust no_std / C libt
-  with NO native C++ runtime. DOSBox is ~100K LOC of C++ (exceptions, RTTI, STL,
-  threads); a native port would mean re-authoring it AND building a native C++
-  std, AND re-porting SDL. Wrong fit.
-- **NOT viv (prebuilt Linux binary):** the vivarium-graphics arc (W4) is entirely
-  unbuilt and its Wayland/AF_UNIX stage is deferred post-v1.0 (Mycelium). A stock
-  Linux DOSBox cannot reach the display under viv today. (Networking under viv
-  works; graphics does not.)
+  Pouch is scripture (ARCH 3.5), and the PROVEN path: SDL2 + the C++ runtime
+  already exist on Pouch (see 5). DOSBox-X's larger dep surface (more to vendor)
+  is the main delta vs a Staging port.
+- **NOT native (POSIX->libt):** no native C++ runtime; DOSBox-X is even larger
+  C++ than Staging. Wrong fit.
+- **NOT viv (prebuilt Linux binary):** the vivarium-graphics arc (W4) is unbuilt
+  and its Wayland/AF_UNIX stage is deferred post-v1.0. A stock Linux DOSBox-X
+  cannot reach the display under viv today.
 
 ## 5. Architecture -- how it maps (the hard parts already exist)
 
-DOSBox = **"TyrQuake, upgraded C -> C++."** Every load-bearing dependency is
-built and gate-passing in-tree:
+DOSBox-X = **"TyrQuake, upgraded C -> C++, at larger scale."** Every load-bearing
+dependency is built and gate-passing in-tree:
 
-- **SDL2 + `SDL_thylacine`** (`third_party/SDL2` 2.32.10, zlib; backend at
+- **SDL2 + `SDL_thylacine`** (`third_party/SDL2` 2.32.10; backend at
   `usr/ports/sdl2/thylacine/`): video renders zero-copy to a **Tapestry weave**
-  (`thyla_tap.c`, plain C over 9P to `/srv/tapestry` -- no Rust dep); present is
-  one blocking `tpresent` write, tear-free. Input: a pthread parks on the
-  tapestry event fid, evdev keycodes -> SDL scancodes, relative + absolute mouse.
-  PROVEN by **TyrQuake** (969 frames to the real scanout, CI green).
+  (`thyla_tap.c`, plain C over 9P to `/srv/tapestry`); present is one blocking
+  `tpresent` write, tear-free. Input: a pthread parks on the tapestry event fid,
+  evdev keycodes -> SDL scancodes, relative + absolute mouse. PROVEN by TyrQuake
+  (969 frames to the scanout, CI green). Win9x's 2D desktop (GDI -> emulated SVGA
+  framebuffer -> SDL surface -> Tapestry) rides this SAME software path.
 - **Pouch C++ runtime**: static libc++/libc++abi/libunwind over musl (Clade CL-2),
-  prover-passing (throw/catch, RTTI, std::thread, STL, iostreams, std::filesystem).
-  GATE: requires the LLVM fork clang present (build.sh skips C++ otherwise).
+  prover-passing. GATE: requires the LLVM fork clang present.
 - **The port idiom** (TyrQuake template, `docs/reference/143-tyrquake.md`): vendor
   pruned-pristine + a boundary-line patch series + a curated object-list build in
-  `tools/build.sh` (mirror `build_tyrquake()`/`build_sdl2()`) + null-sound +
-  probable stack/heap sizing (TyrQuake forced EXEC_USER_STACK_SIZE 256K->1M).
-- **Placement**: DOSBox mints a tapestry surface; Halcyon/tapestryd place it as a
-  **pane** (a tile). No new client API. Software renderer -> the proven software
-  weave path (NOT the GL/Vulkan/Warp path; DOSBox needs no GPU accel).
+  `tools/build.sh` + null-sound + stack/heap sizing. DOSBox-X is a BIGGER tree
+  than TyrQuake/Staging -> expect a larger patch series + more object-build labor.
+- **Placement**: DOSBox-X mints a tapestry surface; Halcyon/tapestryd place it as
+  a **pane**. Software renderer -> the proven software weave path. (Glide
+  PASSTHROUGH is the one exception -- it needs the GL path; see 6/8/10.)
 
-## 6. The CAP_JIT dynarec (I-42) -- the load-bearing sub-chunk
+## 6. The CAP_JIT dynarec (I-42) -- CENTRAL, not optional
 
-DOSBox's dynamic core translates x86 basic blocks to ARM64 at runtime, executes
-them immediately, and re-emits on self-modifying DOS code. On ARM this needs
-write-then-execute, which strict W^X (I-12) forbids -- except through **CAP_JIT
-(I-42)**, which is **AS-BUILT + proven** (CL-7k, kernel `1f0e66c0` + userspace
-`5633d056`; a Rust wrapper, an in-guest E2E prover, a real LLVM ORC mapper, and
-llvmpipe rendering GL 4.6 on-device all ride it).
+DOSBox-X's `dynamic_x86` core translates x86 basic blocks to ARM64 at runtime,
+executes them immediately, and re-emits on self-modifying code. **For Win9x and
+Voodoo it is mandatory** -- `core=normal` (the interpreter) is fine for a DOS
+text program but painfully slow for Win98 or a 3dfx title. On ARM the dynarec
+needs write-then-execute, which strict W^X (I-12) forbids -- except through
+**CAP_JIT (I-42)**, which is AS-BUILT + proven (CL-7k).
 
 **The mechanism -- dual-mapping, not an RW->RX flip.** A code Burrow
 (`BURROW_TYPE_CODE`) maps one set of physical pages at TWO virtual addresses in
 one Proc: **RW at `writer_va`, RX at `exec_va`**, each a separate VMA with fixed
-prot. No PTE is ever W-and-X, so **I-12 holds at page granularity unchanged, not
-relaxed**. `SYS_JIT_CREATE(len, out)` installs both aliases atomically ->
-`{writer_va, exec_va}` (16-byte `struct t_jit_region`). Emit = **plain stores
-through `writer_va` (NOT a syscall)**. Publish = **`SYS_ICACHE_SYNC(va, len)`**
-(D-cache clean + I-cache invalidate; no permission change -- the exec alias is RX
-from creation). Execute = branch `exec_va + off`. Un-emitted pages are zero =
-AArch64 `UDF #0`, so an unpublished region traps rather than running residue.
-Syscalls: `SYS_JIT_CREATE`=101 (CAP_JIT-gated), `SYS_JIT_DESTROY`=102 (ungated),
-`SYS_ICACHE_SYNC`=103 (range-check-gated). `JIT_REGION_MAX` = 64 MiB. Wrapper:
-`libthyla_rs::jit::CodeRegion` + raw `t_jit_*`.
+prot. No PTE is ever W-and-X, so I-12 holds unchanged. `SYS_JIT_CREATE(len,out)`
+installs both aliases -> `{writer_va, exec_va}`. Emit = plain stores through
+`writer_va` (NOT a syscall). Publish = `SYS_ICACHE_SYNC(va,len)`. Execute =
+branch `exec_va+off`. Un-emitted pages are zero = `UDF #0` (trap, not residue).
+Syscalls: `SYS_JIT_CREATE`=101 (CAP_JIT-gated), `SYS_JIT_DESTROY`=102,
+`SYS_ICACHE_SYNC`=103; `JIT_REGION_MAX`=64 MiB; wrapper `libthyla_rs::jit`.
 
-**Why DOSBox is a CLEAN fit -- cleaner than a general DBT, needs NO kernel change:**
-- **Incremental emit is free.** One big region (up to 64 MiB, far larger than
-  DOSBox's few-MB code cache); bump-allocate blocks; pay **one `SYS_ICACHE_SYNC`
-  per committed block**. Create/destroy amortize to ~zero.
-- **SMC / re-emit is the mechanism.** Re-publishing IS invalidation (no separate
-  inval syscall; the `jit-prover` re-emit leg proves it). Block-linking (patch a
-  tail branch) = write the patch through the writer alias + `publish_range` over
-  the patched bytes.
-- **Same-thread emit-then-execute.** DOSBox emits and runs a block on the SAME
-  thread, so the only cross-PE hazard (F2: a broadcast-ISB is a documented
-  contract, bites only when emit-thread != execute-thread) is fully covered by
-  the calling-PE ISB. No broadcast-ISB variant needed.
-- **Software SMC detection.** DOSBox detects self-modifying DOS code in software
-  (its own emulated-MMU write handlers), NOT via host page-write-protection +
-  resumable faults -- so the designed-only "resumable faults" JIT caveat (not
-  built at v1.0) does NOT block DOSBox.
+**Why DOSBox-X is a CLEAN fit -- no kernel change:**
+- One big region (64 MiB >> the code cache), bump-allocate blocks, one
+  `SYS_ICACHE_SYNC` per committed block. Emit is free (plain stores).
+- Re-publishing IS invalidation (the `jit-prover` re-emit leg proves it) ->
+  self-modifying-code + block-linking = write via the writer alias + `publish_range`.
+- DOSBox-X emits-then-executes on the SAME thread -> the cross-PE ISB contract
+  (F2) is covered by the calling-PE ISB.
+- DOSBox-X detects SMC in SOFTWARE (its emulated MMU) -> it does NOT need the
+  resumable-host-fault path (the one designed-but-unbuilt JIT caveat). And Win9x
+  specifically leans on DOSBox-X's NON-recursive page-fault dynarec core, which
+  is a software-side property -- no kernel dependency.
 
-**The integration work (DX-4):**
-- Adapt DOSBox's ARM64 dynarec backend to **emit at `writer_va+off`** and use
-  **`exec_va+off`** for the block entry pointer + any absolute code address it
-  embeds (block-link targets, jump tables). Intra-block PC-relative branches are
-  alias-agnostic (offset-identical in both aliases); only absolute code addresses
-  need the writer->exec translation. This is exactly the ORC `DualMapMemoryMapper`
-  `writerFor` split (`usr/ports/llvm/patches/0007-*` -- the C++ template).
-- One `SYS_ICACHE_SYNC` per published block (the one irreducible cost -- the
-  architecture requires a sync between write and fetch; batch where blocks emit
-  together).
-- Emit `bti c` at each indirect-branch-reached block entry; be PAC-aware on
-  hardened silicon.
-- **Acquire CAP_JIT at startup** via the corvus `jit` clearance -- elevation-only,
-  stripped at every fork (no spawn-time grant); template `thyla_capjit.h` /
-  `libthyla_rs::cap`. The user needs `jit`-clearance eligibility.
+**Integration work (DX-4):** adapt DOSBox-X's ARM64 dynarec backend to emit at
+`writer_va+off` and use `exec_va+off` for the block entry + any absolute code
+address (block-link targets, jump tables); intra-block PC-relative branches are
+alias-agnostic. The ORC `DualMapMemoryMapper` (`usr/ports/llvm/patches/0007-*`)
+is the writer->exec split template. Emit `bti c` at indirect-branch block entries;
+PAC-aware on hardened silicon. Acquire CAP_JIT at startup via the corvus `jit`
+clearance (elevation-only, stripped at fork). Audit-bearing (I-42 + I-12).
 
-**Fallback: `core=normal`** (DOSBox's pure interpreter, no codegen) needs none of
-this, is W^X-clean, needs no kernel change, and is the DX-2 first-light target.
-DX-4 (the dynarec) is the performance follow-on.
-
-**Audit surface:** DX-4 is a CAP_JIT consumer touching I-42 + I-12 (W^X-adjacent
--> prosecute hard); adds an AUDIT-TRIGGERS row. The KERNEL surface is unchanged
-(no new syscall) -- the audit prosecutes the DOSBox-side integration's correct
-USE of the proven surface: the writer->exec address translation, the per-block
-publish, and the code-cache lifecycle. DX-4 gets a short focused design pass
-against the ORC template at implementation time.
+**Fallback: `core=normal`** needs none of this and is the DX-2 DOS first-light
+target; DX-4 is required before the Win9x/Voodoo acts (DX-6/DX-7).
 
 ## 7. Sound -- fully stubbed (v1.0 non-goal)
 
-Audio is a hard v1.0 non-goal (no virtio-sound driver; `VISION.md`). DOSBox is
-sound-centric (PC speaker, SB16, AdLib/OPL, GUS, MIDI) -- ALL of it compiles out
-to a null mixer, exactly as TyrQuake shipped `-nosound` (and had to NULL-guard
-the no-sound path). This is the single biggest behavioral haircut; it is
-precedented and clean. A future audio server + virtio-sound (post-v1.0) is what
-would light sound up.
+Audio is a hard v1.0 non-goal (no virtio-sound; `VISION.md`). DOSBox-X is
+even more sound-rich than Staging (PC speaker, SB16, AdLib/OPL, GUS, MIDI,
+PC-98 sound) -- ALL of it compiles out to a null mixer, as TyrQuake shipped
+`-nosound`. Biggest behavioral haircut; precedented + clean. A future audio
+server + virtio-sound (post-v1.0) lights it up.
 
-## 8. Arc structure (sub-chunks)
+## 8. Arc structure (two acts)
 
-- **DX-0** -- this scripture (the arc scope). Lands as a scripture commit, no code.
-- **DX-1** -- vendor DOSBox Staging pruned-pristine (`usr/ports/dosbox-staging/`)
-  + license grep; get it to COMPILE + LINK via Pouch (libc++ + libSDL2.a +
-  SDL_thylacine), `core=normal`, sound stubbed. Exit: a static ET_EXEC that links.
+**Act 1 -- DOS (the spine; core=normal then dynarec):**
+- **DX-0** -- this scripture. Scripture commit, no code.
+- **DX-1** -- vendor DOSBox-X pruned-pristine (`usr/ports/dosbox-x/`) + license
+  grep of bundled deps; SDL2 build path; get it to COMPILE + LINK via Pouch
+  (libc++ + libSDL2.a + SDL_thylacine), `core=normal`, sound stubbed. The
+  heaviest labor chunk (big tree). Exit: a static ET_EXEC that links.
 - **DX-2** -- FIRST LIGHT: stage into ramfs, boot in a tile, wire the file-I/O
-  boundary-line (mount a host folder as a DOS drive), reach `Z:\>`, run a simple
-  DOS program rendering in a Tapestry pane. Exit: a DOS program runs + an LS-CI
-  gate asserts frames on the scanout (`ls-gfx-dosbox`, the `ls-gfx-quake` pattern).
-- **DX-3** -- sound fully stubbed/hardened; input polish (keyboard + mouse for DOS
-  games); config/autoexec; larger real programs.
-- **DX-4** -- the **CAP_JIT dynarec** (I-42): wire the dynamic core to emit through
-  CAP_JIT (the writer/exec split per 6); self-modifying-code via re-publish.
-  AUDIT-BEARING (its own design pass against the ORC template + the focused
-  audit). Exit: `core=dynamic` correct + measurably faster than `core=normal`;
-  I-42/I-12 prosecuted clean.
-- **DX-5** -- arc close: a recognizable DOS GAME runs end-to-end; focused audit;
+  boundary-line (mount a host folder as a DOS drive), reach `Z:\>`, run a DOS
+  program in a Tapestry pane. Exit: a DOS program runs + an `ls-gfx-dosbox` gate.
+- **DX-3** -- sound fully stubbed/hardened; input polish (keyboard + mouse for
+  games); config/autoexec; larger real DOS programs.
+- **DX-4** -- the **CAP_JIT dynarec** (I-42; central): wire `dynamic_x86` to emit
+  through CAP_JIT (writer/exec split per the ORC template); SMC via re-publish.
+  AUDIT-BEARING (own design pass + focused audit). Exit: `core=dynamic` correct +
+  measurably faster; I-42/I-12 prosecuted clean. **Prerequisite for Act 2.**
+- **DX-5** -- Act-1 close: a recognizable DOS GAME end-to-end; focused audit;
   reference doc + user-manual entry; AUDIT-TRIGGERS row for the DX-4 surface.
+
+**Act 2 -- Win9x + 3dfx (the showcase; needs DX-4):**
+- **DX-6** -- **Win9x guest bring-up**: boot Windows 98 in DOSBox-X on Thylacine
+  (IDE/disk-image + SVGA + PCI all in DOSBox-X's C++; display via the software
+  weave; needs more guest RAM + the dynarec). Its own milestone -- Win9x boot is
+  finicky even on Linux. Exit: the Win98 desktop renders in a pane; a Win9x app runs.
+- **DX-7** -- **3dfx Voodoo / Glide**: low-level Voodoo 1 emulation first (CPU via
+  CAP_JIT, no GL). Glide PASSTHROUGH (OpenGlide -> host GL) is GATED ON the
+  GL-accel path (Warp/venus/Mesa/llvmpipe) being lit in the bake -- a cross-arc
+  dependency (see 10); sequence low-level first, passthrough when GL lands. Exit:
+  a Voodoo title renders.
 
 ## 9. Invariant / audit surface
 
-- **I-42 (JIT-as-a-capability)** + **I-12 (W^X)**: the DX-4 dynarec is the surface.
-  It must never make a page writable+executable (the kernel already guarantees
-  this by construction -- the two aliases are distinct PTEs of one PA; DX-4 must
-  simply USE the surface correctly), must publish via `SYS_ICACHE_SYNC`, and gets
-  a focused audit. Adds an AUDIT-TRIGGERS row (a CAP_JIT consumer).
-- DX-1..DX-3 are a userspace port (no new invariant); the audit floor is the
-  suite + the LS-CI gate. New musl boundary-line patches follow the pouch audit
-  discipline.
+- **I-42 (JIT-as-a-capability)** + **I-12 (W^X)**: DX-4 is the surface (kernel
+  unchanged; the audit prosecutes DOSBox-X's correct USE -- writer->exec
+  translation, per-block publish, cache lifecycle). Adds an AUDIT-TRIGGERS row.
+- DX-1..DX-3, DX-6 are userspace port work (no new invariant); the audit floor is
+  the suite + the LS-CI gate + the pouch boundary-line audit discipline.
+- DX-7 Glide passthrough, if built, rides the GL-accel path -> its invariant
+  surface is that arc's (Warp/I-45 + the JIT for llvmpipe), not new here.
 
 ## 10. Risks
 
+- **DOSBox-X codebase size + legacy** (the main port cost): bigger, older-style,
+  "harder to work with" than Staging. DX-1 is the heaviest chunk -- more source,
+  more POSIX/SDL surface to patch, more bundled deps to vendor + license-check.
+- **Glide passthrough depends on the GL-accel arc.** OpenGlide needs host GL; the
+  Warp/venus/Mesa/llvmpipe path exists in source but is NOT baked in the current
+  tree. So DX-7 passthrough is gated on that arc; low-level Voodoo (CPU/CAP_JIT)
+  is the un-gated fallback. Do NOT promise passthrough before GL is lit.
+- **Win9x is resource + dynarec heavy**: makes DX-4 a hard prerequisite for DX-6;
+  needs more guest RAM (mind Thylacine's guest memory envelope). Win9x boot is
+  finicky (a real bring-up milestone, not a flip).
 - **CAP_JIT fit -- RESOLVED (clean).** The as-built dual-map surface covers a
-  single-process, same-thread, software-SMC dynarec entirely; no kernel extension
-  needed. The one real cost is **one `SYS_ICACHE_SYNC` per emitted block**
-  (irreducible; mitigate by batching co-emitted blocks). Was the biggest unknown;
-  the JIT-mechanics review closed it.
-- **C++ build friction**: the LLVM-fork gate (build.sh skips C++ without it);
-  DOSBox uses meson/autotools -- we do a curated object build (manual for a big
-  tree, TyrQuake precedent). The largest labor item.
-- **File-I/O boundary-line**: DOSBox does heavy path-based I/O (disk images,
-  drive mounts) -- expect new musl patches beyond Quake's.
-- **SDL usage mismatch**: SDL_thylacine was proven for Quake's usage; DOSBox uses
-  SDL differently (8bpp/palette modes, surface vs texture, mode changes) -- may
-  surface backend gaps to fill.
-- **Memory sizing** (stack/heap) -- TyrQuake precedent.
+  same-thread, software-SMC dynarec entirely; no kernel extension. One
+  `SYS_ICACHE_SYNC` per emitted block is the only irreducible cost.
+- **C++ build friction**: the LLVM-fork gate; curated object build for a big tree.
+- **File-I/O + SDL usage**: heavy path-based I/O (disk images, drives) + DOSBox-X's
+  varied SDL usage (8bpp/palette, mode changes) -> new musl + backend patches.
 
-## 11. Naming (thematic -- propose, don't impose)
+## 11. Naming (thematic -- proposed, pending operator)
 
-Keep the **DOSBox** name (a foreign port keeps its identity, like TyrQuake).
-Candidate thematic name for the Thylacine-side DOS-emulation capability / the
-emulated-machine tile, for the operator to weigh: **Cryptid** -- the
-cryptozoology / Lazarus-species angle in the naming sources (software long
-thought dead, sighted alive on Thylacine). Or leave it plain. Chunk prefix **DX**.
+Keep the **DOSBox-X** name (a foreign port keeps its identity). Proposed thematic
+name for the Thylacine-side DOS/Win9x-emulation capability / the emulated-machine
+tile: **Cryptid** -- the cryptozoology / Lazarus-species angle (software long
+thought dead, sighted alive on Thylacine). Chunk prefix **DX**. (Operator to
+confirm Cryptid vs plain.)
 
 ## 12. Exit criteria ("done")
 
-DOSBox Staging runs on Thylacine as a Tapestry pane; mounts host folders as DOS
-drives; runs DOS programs AND games (text-mode + VGA graphics); `core=dynamic`
-via CAP_JIT for real speed (with `core=normal` as the always-works floor); audio
-cleanly stubbed; the DX-4 CAP_JIT integration audited; reference + manual docs
-landed. The DOS library is open to the user.
+DOSBox-X runs on Thylacine as a Tapestry pane; mounts host folders as DOS drives;
+runs DOS programs AND games (text + VGA) with `core=dynamic` via CAP_JIT (and
+`core=normal` as the floor); **boots a Windows 9x guest** whose desktop renders in
+a pane; runs a **3dfx Voodoo** title (low-level; Glide passthrough when the
+GL-accel path is lit); audio cleanly stubbed; DX-4 audited; reference + manual
+docs landed. The DOS AND Win9x libraries are open to the user.
