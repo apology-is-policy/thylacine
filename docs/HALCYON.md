@@ -1331,6 +1331,161 @@ The gate (H-4d) never waits on the kernel work.
   surfaces (an AUDIT-TRIGGERS row at their build). The seam is a new IPC parse surface
   on `halcyond`'s side (bounds-check the cell-feed like the 9P wire).
 - **Open**: the seam **protocol** is now **SETTLED** (§14.3 AS-SETTLED, yip call 0045);
-  what remains is the **H-2a crate sync** to the aux tree (a build-prep step, aux's
-  cherry-pick at KT-2), the native-`ut` VT-round-trip **v1.x optimization**, and
-  sixel/kitty + JPEG → v1.x.
+  the **halcyond ingest model** (the grid live-area + scrollback transcript, the
+  render composition, spawn/multiplex/focus/teardown) is designed in **§14.11**
+  (KT-1.5, 2026-09-03) -- the finding that §14.3's "clean refactor" under-estimated
+  it (halcyond is single-console + flow-based, no grid, no spawn). What remains to
+  build is KT-1.5 (§14.11.11 stages); what remains cross-tree is the **H-2a crate
+  sync** to the aux tree (build-prep, aux's cherry-pick at KT-2), the native-`ut`
+  VT-round-trip **v1.x optimization**, and sixel/kitty + JPEG → v1.x.
+
+### 14.11 The halcyond ingest model -- the live grid + the scrollback transcript (KT-1.5 design)
+
+**Why this section (the finding that drove it, 2026-09-03 run 21).** Building the
+kaua-term producer side surfaced that §14.3's "clean refactor -- only the
+`t.feed()` parse moves out of process" materially under-estimates the halcyond
+side. As-built (Explore-mapped): halcyond is a **single-console, flow-based**
+renderer -- ONE `Transcript` (`transcript.rs:221`, a flowed deque of blocks; no
+fixed grid, no alt-screen buffer), ONE byte source (`/dev/consdrain`,
+`main.rs:278` -- a kernel console mirror; it owns no pty and **spawns no child
+process**), and its "tiles" (`chromeset.rs`) are tag-bar chrome for the
+compositor's leaves, not terminal content. The seam sends a **grid** model
+(CellDiff on rows x cols). So KT-1.5 is not "move the parse out"; it is: give
+halcyond a per-tile grid it never had, child-spawn machinery it never had, a
+multiplex of N record streams, and a transcript refactored to ingest
+grid+scrollback. This section pins that model (scripture before code, the
+design-conversation pattern; operator chose "scripture design pass first").
+
+**14.11.1 The per-tile model = a live grid + a scrollback transcript.** Each tile
+holds two structures, not one:
+
+- **The live grid** -- a fixed `rows x cols` cell buffer (`vt::Cell`), the current
+  terminal screen. It is what CellDiff mutates. It is the §13.4(a) "raw-VT pane
+  grid" resurrected as the *universal* live-screen (both modes), now fed by the
+  kaua-term's records rather than an in-halcyond `Vt`.
+- **The scrollback transcript** -- the existing block model (`transcript.rs`,
+  §13.3), now fed by **ScrollOff** (lines that left the top of the grid), cut into
+  blocks by **Beacon zones**. It is pure history: everything that has scrolled off.
+
+They are **separate** because the grid spans zone boundaries: the last `rows`
+lines of a session routinely straddle a prompt (the tail of one command's output
++ the next prompt), so the grid cannot be "one zone's block". The grid is
+zone-agnostic; the transcript carries the zone structure. This supersedes §13.3's
+"the open block is the live tail" -- under §14 the live tail is the **grid**, and
+the transcript's blocks are finalized history.
+
+**14.11.2 The record -> model mapping.**
+
+| Up record | Applied to |
+|---|---|
+| `CellDiff{changed, cursor}` | the live grid (position-keyed cell writes + cursor) |
+| `ScrollOff{rows}` | append rows to the current history block (a new block if a zone just opened) |
+| `Control(Osc1936Raw)` | fed to `beacon::wire::parse` -> the zone/block cut + span state (exactly as `Transcript::feed` does today, `transcript.rs:407`) |
+| `Control(Bell)` | the bell affordance (visual/log; no kernel bell) |
+| `Control(Title)` | the tile's OSC-0/2 title |
+| `Control(Exit(code))` | the tile's exit latch (the child is gone; teardown) |
+| `Control(WinsizeAck)` | resize handshake bookkeeping |
+| `Mode(Normal\|AltScreen)` | the render mode (14.11.3) |
+
+The ORDER is load-bearing and already guaranteed by the producer (a pending
+CellDiff is flushed before every ScrollOff/Control/Mode) -- so a zone frame lands
+at the exact point between the cells it separates, and a scroll-off after a
+zone-open lands in the new zone.
+
+**14.11.3 The render composition.**
+
+- **Normal mode**: the scrollback blocks (flow layout, `layout.rs`, cursor-anchored
+  like #55) render above; the **live grid** renders as the tail (a fixed-height
+  grid region at the bottom). The viewport shows the tail by default; scrolling up
+  reveals history. The seam is contiguous: a line leaving the grid (ScrollOff)
+  becomes the top-of-history-block's newest line.
+- **Alt-screen mode** (`Mode(AltScreen)`, e.g. vim): render the **live grid only**,
+  full-tile; the scrollback is frozen and hidden. On `Mode(Normal)` the scrollback
+  returns and the grid resumes as the tail. This finally renders full-screen apps
+  correctly -- today halcyond sets `raw_vt_intent` and *paints nothing*
+  (`transcript.rs:932`).
+
+**14.11.4 Beacon zones + the grid.** Beacon frames arrive as `Control(Osc1936Raw)`
+interleaved in stream order; halcyond feeds them to the *same* `beacon::wire`
+parser it uses today, driving the *same* block-cut / span state on the scrollback
+transcript. The grid is not zoned; the "current zone" is simply whichever block
+ScrollOff is currently appending to. A zone-open freezes the current block and
+starts a new one; subsequent ScrollOff lines land there.
+
+**14.11.5 Selection + inline media.** Helix-modal selection addresses
+`(block, item, col)` over the scrollback AND the live grid (the grid is selectable
+as the live region -- a virtual trailing block; yank re-derives cell text as
+today). Inline media (`Image`/`Embed`) stays the **out-of-band native seam**
+(§14.7): the grid is text-only; a graphical app in a tile promotes to a Tapestry
+surface (§14.8), it does not paint pixels through the cell stream.
+
+**14.11.6 Spawn.** halcyond spawns one `kaua-term` per **leaf tile**. The
+enumeration hook already exists: `ChromeSet::reconcile` (`chromeset.rs:129`)
+iterates `parse_leaves` (`chrome.rs:51`) over the compositor's `layout` file per
+`u32` leaf id, computing the create/keep/drop diff each relayout -- KT-1.5 hangs
+per-leaf spawn/teardown off that same diff. The child is launched
+`kaua-term <cols> <rows> [prog]` with **fd 0 = the down pipe** (halcyond->child)
+and **fd 1 = the up pipe** (child->halcyond); fd 2 = stderr to halcyond's log.
+The pts is internal to the child; spawn installs only the child's three slots, so
+the app the child hosts never sees halcyond's pipes (the non-inheritance ptyhost
+relies on). This is halcyond's FIRST child-spawn -- new machinery
+(`Command`/`Stdio::File` on the two pipe ends).
+
+**14.11.7 Multiplex.** halcyond registers each tile's **up-pipe read end** with a
+Loom ring and reaps records with `read` ops (the H-3c-2 `EventRing` PATTERN, not
+its tapestryd-specific `Event` type -- Loom `read`/`write` operate on any
+registered handle, pipes included, confirmed `loom.rs:281`). One ring with N
+registered handles, demultiplexed by `user_data`/handle -> the owning tile's
+`FrameDecoder`, is the model (as `RingCore` already multiplexes N surface event
+fids). The main loop's existing `EventRing::wait` (the tapestryd surface ring,
+`main.rs:788`) and the tiles' record ring compose: either a per-tile Loom ring
+polled alongside, or -- preferred -- the record reads folded onto the same ring
+discipline. (The exact one-ring-vs-two composition is an implementation choice at
+KT-1.5b; the contract is transport-agnostic.)
+
+**14.11.8 Resize.** halcyond is the geometry authority (it owns the tile rects).
+On a tile resize it sends `Resize{cols, rows}` down; the kaua-term sets the pts
+winsize (kernel `SIGWINCH` to the fg pgrp) and resizes its `Vt`, then emits a full
+CellDiff of the new grid, which halcyond applies to the (resized) live grid. The
+scrollback reflows by re-running the pure `layout()` at the new width (§13.3,
+correct-by-construction).
+
+**14.11.9 Focus + input.** halcyond routes post-chrome-chord keyboard input to the
+**focused** tile only: it filters its own chrome chords first (menu, split, zoom,
+focus-move -- the existing `input.rs` path), then encodes the remaining KeyEvent as
+`Key{KeyEvent}` down the focused tile's pipe; the kaua-term xterm-encodes it
+(honoring DECCKM) to the pts. Focus is the compositor's `l.focused` / the `*` in
+the layout (`chrome.rs`), already parsed.
+
+**14.11.10 Teardown + the trust boundary.** The kaua-term is the crash-isolated
+**hostile-input** parser, so halcyond's record ingest is a trust boundary: it
+bounds-checks the wire (the `kaua_term::wire` `FrameDecoder` -- MAX_FRAME, checked
+fields, no untrusted pre-alloc; the "bounds-check like the 9P wire"). A
+`WireError` (oversize/malformed), a `Control(Exit)`, or an up-pipe EOF tears down
+**only that tile** -- its Loom registration, its pipes, its grid+transcript, and
+its Tapestry content surface -- never the whole environment. A tile whose child
+dies shows an exit affordance; a relayout that drops the leaf reaps it.
+
+**14.11.11 Build stages (KT-1.5).**
+
+- **KT-1.5a** -- spawn + transport for ONE tile: halcyond spawns a kaua-term
+  (its own console area to start), the pipe pair, the Loom-ring registration, and
+  a raw record drain (decode + log). Boot-proves the transport + the bin's
+  2-thread PTY surface (not host-testable in isolation).
+- **KT-1.5b** -- ingest -> the model: apply CellDiff to a per-tile live grid,
+  ScrollOff + Control(Osc1936) to the scrollback transcript, Mode to the render
+  mode; render normal (scrollback + grid) and alt (grid only).
+- **KT-1.5c** -- multi-tile: per-leaf spawn/teardown off `reconcile`, the N-stream
+  multiplex, focus-routed input (Key/Resize down), per-tile composite -> **unblocks
+  H-4d**.
+
+Then the batched KT-1 audit (KT-1.1..1.5; format-fuzz + PTY-master + the new
+ingest trust boundary) + the boot gate, then push.
+
+**14.11.12 Invariants + audit.** The ingest joins the **format-fuzz** audit class
+(halcyond parsing an untrusted per-tile stream). A tile's kaua-term crash, a
+malformed/oversize frame, or its exit MUST be contained to that tile (no
+cross-tile effect, no halcyond death) -- the I-27-adjacent isolation the whole
+uniform-Y topology (§14.2) rests on. The grid is text-only (no pixel path through
+cells; graphical apps promote to a Tapestry surface, preserving D7). An
+AUDIT-TRIGGERS row lands with the KT-1.5 code.
