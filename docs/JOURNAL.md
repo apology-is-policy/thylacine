@@ -22,6 +22,71 @@ needed the operator.
 
 ---
 
+## 2026-09-03 (run 20, Opus 4.8) -- the aux-2 -> main merge: a syscall collision, one half of it silent
+
+The operator directed a synchronous merge of the two tracks: aux-2 (VIVARIUM
+Linux-compat, union mounts, the git arc, notes/job-control/PTY, DISPLAY-MODES,
+C2-k1b) into main (the Halcyon H-arc). Both tracks compacted for it; the merge
+ran over yip call 0046, main resolving in its worktree and aux bringing live
+per-hunk intent for the viv side (the tree-divergence rule -- neither track can
+ground the other's half from its own worktree). 163 aux files merged clean; 13
+conflicts. Result: merge commit `c83da249` (parents 93aa6325 + 797bba6b).
+
+**The one load-bearing decision was a syscall-number collision -- and its
+dangerous half was the one git did NOT flag.** Both tracks had independently
+minted a syscall at 108: main's `SYS_HOSTMEM_REFCOUNT` (Warp-6 V-3b-1c-2b) and
+aux's `SYS_OPEN_CREATE` (#50). The enum collision in `syscall.h` conflicted, so
+git surfaced it. But the SAME collision existed in `usr/lib/libthyla-rs/src/lib.rs`
+-- `T_SYS_OPEN_CREATE=108` (:257) and `T_SYS_HOSTMEM_REFCOUNT=108` (:288) -- at
+different offsets, so it MERGED CLEAN and git never said a word. A tree-wide grep
+for the literal caught it; the conflict list alone would not have. (The lesson
+aux had flagged in advance -- the silent same-number/different-name hazard -- and
+it was real, in a file outside the conflict set.)
+
+Resolved by moving the INCOMING syscall (aux's OPEN_CREATE) to 109, keeping main's
+incumbent at 108. aux's `vivarium.c:30 _Static_assert(VIV_NATIVE_CEILING ==
+SYS_OPEN_CREATE)` reinforced the direction: it pins OPEN_CREATE as the highest
+native number, so it had to STAY the top (the clean +1); moving HOSTMEM_REFCOUNT
+above it would have broken the ceiling invariant. **aux caught the build-critical
+site my grep missed**: `VIV_NATIVE_CEILING 108` (vivarium.h:507) is tied to
+OPEN_CREATE only through that static_assert -- a bare number, not a `SYS_OPEN_CREATE=108`
+string, so a SYMBOL-pattern sweep skips it, and the assert would have failed the
+build. Owner-verifies-own-surface earned its keep.
+
+**The renumber's real blast radius was bare-number prose, not just SYMBOL=108.**
+A first sweep fixed the `SYS_OPEN_CREATE`=108 sites (code + 8 doc mentions). A
+verification grep then found what that missed, all semantically the syscall's
+number or the ceiling: "dispatch 108", "VIV_NATIVE_CEILING 107->108", "[... >
+108]", "the ceiling (108)", "< 108". Swept by MEANING (the #230 lesson: a lifted/
+moved constant voids every proof that named it -- mirror by meaning, not by
+literal). History was preserved rather than rewritten: the JOURNAL entry and the
+vivarium.h landing comment NOTE the renumber ("renumbered ->109 at the merge")
+instead of falsifying the past-tense record (aux's (c) call; I own the docs).
+
+The audit-bearing kernel conflicts were all additive unions, aux independently
+re-verifying each GREEN by reading main's worktree: cons.c (main's beacon-tier
+grammar + aux's 1b serial-silence -- serialsilent stays above the +/- gate, both
+emit-gate conjuncts intact, cleared in all 3 sites); the syscall dispatch (both
+cases); dev.h (dropped aux's redundant second `extern devcons` -- the base already
+declares it -- kept the unforgeable spoor_is_console identity); joey.c
+(pouch_smoke_core now carries BOTH new params, main's drain_first + aux's
+want_status = 9 args, the body composing because status is captured in both drain
+orderings); repl.rs draw_prompt (aux's &mut self + prompt-first render with main's
+H-1c zone body). aux's one nit was audit-honesty, not a bug: the CCONSWINSZONLY
+gate comment enumerated "winsize + beacon" but serialsilent is now a third pre-gate
+renderer verb -- fixed in the merge commit so a future auditor reading it to list
+the renderer's authority won't miss it.
+
+The JOURNAL itself was the largest doc conflict: both tracks had prepended run
+entries to the newest-first log. Interleaved by date (77 entries, main + aux),
+the older shared tail kept once, verified lossless (10393 non-blank lines before
+== after, zero lost, zero gained).
+
+Verification: kernel + userspace build clean (the static_assert compiles); the
+default suite passes (boot OK, arc gates L-6c + D-5 PASS). The SMP gate passed clean -- 40 boots (default+UBSan x smp4/smp8, N=10), 0
+corruption / 0 external-kill / 0 timing / 0 other -- validating the merged
+audit-bearing kernel at runtime under SMP.
+
 ## 2026-09-03 (run 19, Opus 4.8) — the multi-console design: a topology fork caught, an operator override, and the tree-divergence rule 3x
 
 No code this run — a design conversation (→ scripture) with the aux track. The
