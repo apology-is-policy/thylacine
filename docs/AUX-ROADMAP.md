@@ -30,9 +30,186 @@ whenever the arc changes, not whenever it is convenient.
 |---|---|
 | **Graphics G-0..G-7** | **COMPLETE.** G-0..G-5 + PTY are already ancestors of `main`; G-6 (compositor) + G-7 (SDL/Quake) are on `gfx-4` awaiting the merge. |
 | **Track B — Aurora config (cfg-1..cfg-5)** | **COMPLETE.** OSD + persistence + OSC session push + the apply-authority gate + runtime chords/gaps + baked font sizes, each audited. |
-| **VIVARIUM (V-0..V-8)** | **STARTED.** V-0 scripture + V-1a (phenotype ledger + brand hint) landed; V-4 specced build-ready. |
+| **VIVARIUM (V-0..V-8) + DISTRO (D-1..D-5)** | **CLOSED (arc close).** Runs unmodified Linux musl-static + stock dynamic-PIE Alpine binaries under `viv`; TCP sockets, real signals, `/proc`+`/sys`, interactive ash on pts+console. **curl/git mission ACTIVE** (real 3rd-party programs end-to-end): the phenotype network reaches the internet; the time translators landed; **a REAL Linux curl (static-PIE 8.18.0) fetches a URL by name under viv (ROADMAP 9.2 criterion TICKED)** -- forced three socket rows (`getsockopt` SO_ERROR + `sendto`/`recvfrom` send/recv shapes) and produced the gap census (SIGILL feature-probing fatal, /dev/null redirects, eventfd2, pthread_create, timeouts -- each enqueued). **git arc OPEN** (operator "let us do git" 2026-08-25) with the reconnaissance-verified keystone: **#50, the path-mutation family** (design ratified, `VIVARIUM.md` section 6.24 — `SYS_OPEN_CREATE`=109 fulfilling the ARCH section 11.2 `create` row + the four phenotype rows `openat(O_CREAT)`/`mkdirat`/`unlinkat`/`renameat`; git cannot write a single file until it lands). Then: getdents64+fsync rows; build a static aarch64 NO_CURL git via the musl cross env (no prebuilt exists — milestone A = local init/add/commit/`clone file://` with `pack.threads=1`); milestone B = full https git (+libcurl+openssl, `OPENSSL_armcap=0`); then weigh the pthread arc for compute-SMP. |
+| **Phenotype networking + threading (net-4d + CLONE_THREAD; the "make it literal" cluster)** | **N-1 + N-2 + N-3 LANDED (incl. the socktab-lock follow-on); N-4 DEFERRED to the Mycelium NOVEL (operator 2026-08-31); N-5 DONE + AUDIT-CLOSED (served readv; git v2 works, forced-v0 retired; the audit found + fixed a P0 -- readv AND writev copy_in the iovec ARRAY at an unvalidated iov_va -> unprivileged kernel-DoS, both twins guarded; SMP 40/40 PASS; PUSHED @537f8b7e); **N-6 DONE -- git push https:// works, MILESTONE B COMPLETE** (`docs/GIT-ON-THYLACINE.md` "Milestone B2"). **N-3 socktab-lock DONE `32eec7ca`** (N-3 sprang the DNS F2 trap -- `Proc.socktab` went multi-thread-reachable; the focused spinlock closed it, see below). The cluster of VIVARIUM gaps most networked/concurrent Linux binaries hit -- surfaced by curl (threaded resolver, DNS-by-name) and npxf (threads + AF_UNIX + non-blocking sockets). Sequenced N-1..N-6: **N-1 DONE** non-blocking sockets (`SOCK_NONBLOCK`/`SOCK_CLOEXEC` admitted; `CNONBLOCK` on the ctl fd, preserved across connect's swap) + **N-2 DONE** net-4d unconnected-UDP DNS-by-name (unconnected `sendto` + `recvmsg`(212) + 0->EAGAIN; **`git clone https://github.com/...` is now LITERAL, no `/etc/hosts` pin** -- proven by the git-https gate's `GITHTTPS-DNS` getent leg AND the pin-free clone) -> **N-3 DONE** phenotype threads (`CLONE_THREAD` -> a Thread in the caller's OWN Proc via `thread_create_forked(cur->proc,...)` -- NOT the guide's speculative `thread_create_forked_in_proc`, the existing core was already parameterized on proc; `exit`(93)->`SYS_THREAD_EXIT`, `gettid`(178), `futex`(98) WAIT/WAKE/REQUEUE onto torpor with REQUEUE emulated as `wake(val+val2)`; the pthread word `0x007D0F00`; proven by viv-pheno-probe L164-L169c spawn+run+SETTLS+gettid+ptid+join, discrimination-verified by a tls=0 sabotage -> `marker=L166`; `c507b787`+`f388e9fb`+`9227073d`. **socktab lock DONE `32eec7ca`** -- N-3 sprang the DNS chunk's F2 trap [[bug-n3-socktab-multithread-race]]: `Proc.socktab` was lock-free ONLY while `CLONE_THREAD` was refused; a multithreaded phenotype program with concurrent socket ops (curl's threaded resolver + connection socket; npxf) would have raced it. Closed by a leaf spinlock on `struct viv_socktab` -- SNAPSHOT reads (`viv_socktab_get`) + IDENTITY-GUARDED keyed writes (`set_*`/`record_remote`, keyed on a MONOTONIC per-claim `epoch` -- NOT `n`, which netd recycles as the lowest-free slot index: the holotype F1 P1), held only over pure array ops, never across I/O; `claim` gained a born-state; sigtab confirmed needs-no-lock. New regression `vivarium.socktab_keyed_write_identity` (same-`n` recycle, sabotage-discrimination-proven); suite 1470/1470; audit 0 P0 / 1 P1(F1 epoch) / 1 P2 / 1 P3, all fixed) -> **N-4** AF_UNIX **DEFERRED** (operator 2026-08-31 -> the Mycelium NOVEL, `docs/NOVEL.md` "Post-v1.0 candidates": no near-term driver -- npxf runs over AF_INET loopback, only the optional Wayland W4-5 needs AF_UNIX and it needs the whole AF_UNIX + SCM_RIGHTS + shmem cluster; design it native-first AS Mycelium, design session OWED) -> **N-5** protocol-v2 root-cause **DONE** (root cause: the phenotype never served `readv`(65) while its twin `writev`(66) was served -- git v2's stateless-connect path reads the helper response through readv -> ENOSYS -> silent abort; served readv mirroring `viv_writev`; forced `protocol.version=0` retired from BOTH gitconfigs; the git-net gate now clones on git's default v2; suite 1471/1471; **AUDIT (self-audit + Fable-5 holotype, CONVERGED on 1 P0, all else sound)**: viv_readv AND viv_writev copy_in the iovec ARRAY at an unvalidated iov_va -> a kernel-range array ptr extincts the kernel (unprivileged DoS; the uaccess fault-fixup covers ONLY the user half, exception.c:280); pre-existing in writev #150, PROPAGATED into readv, both twins fixed with one whole-span sys_validate_user_buf (viv_sock_recvmsg's F1 = the proven in-tree pattern); dirty close but a holotype-pre-blessed one-liner -> a self-audit of the fix replaced a re-round (getdents64 precedent); git-v2 clone E2E PASS (guard admits git's user-range iovs); SMP 40/40 PASS; PUSHED @537f8b7e; [[bug-viv-iovec-array-kernel-va-extinction]]) -> **N-6 push-over-https DONE**: git push https:// works under the phenotype to a real writable remote FIRST TRY -- push rides clone's transport (git-remote-https POST git-receive-pack via the helper pipe: readv [the N-5 prereq] + writev), NO new syscall (eventfd2 dodged), test-infra only (build.sh push leg + provisioning + tools/test-git-push.sh); operator-ratified external sandbox + a fine-grained PAT (revoked after); GITHTTPS-PUSH witness, token-leak 0. **MILESTONE B COMPLETE** (clone + fetch + push over https all green under the phenotype). |
+| **Stream 0 — the workflow bar** | **ACTIVE, and it orders everything below it** (operator, 2026-08-31). Four end-to-end terminal workflows (W1 Go-over-https, W2 tarball-to-clang-TUI, W3 network 9P host mount, W4 vivarium graphics) plus six cross-cutting fixes. See Stream 0 immediately below. |
 | **Halcyon G-8/G-9** | Not started. The graphics endgame. |
 | **Notes / job control / PTY (the kernel line, aux#240..)** | **ACTIVE.** See Stream 4 below. |
+
+---
+
+## Stream 0 — the workflow bar (operator-set, 2026-08-31)
+
+**The organizing principle above every other stream in this file.** Ratified by
+the operator: *"someone sits with Utopia and wants to do something, finding
+things that impede them along the way -- the more impediments we remove, the
+more pleasant and complete will the system feel."*
+
+Streams 1-4 order work by subsystem. This one orders it by **what a person at
+the terminal is trying to finish**, and it wins ties: a small fix that unblocks a
+workflow outranks a large chunk that advances a subsystem nobody is standing in
+front of. Four workflows define the bar. Each is written as the literal command
+sequence, so "done" is observable rather than argued.
+
+The findings below were established 2026-08-31 by three parallel investigations
+plus direct verification; every load-bearing claim carries its `file:line`.
+
+### W1 — clone a Go repo over https, build it, run it
+
+```
+git clone https://github.com/<user>/<repo>.git && cd <repo> && go build && ./<repo>
+```
+
+**Works already:** on-device `go build` is a boot-fatal gate (`joey.c:7267`);
+`/net` is mounted into the login namespace *before* the getty loop
+(`joey.c:7865` vs `:11298`), so an interactively-spawned process inherits TCP
+reach with no capability grant -- **networking is namespace-derived, not a cap.**
+
+| Id | Blocker | Shape |
+|---|---|---|
+| **W1-a** | `GIT_EXEC_PATH` + `GIT_CONFIG_SYSTEM` are set only inside the three container bundles (`build.sh:1487,1656,1851`); nothing sets them for `/viv/bin/git` from a shell. Interactive git therefore cannot find `git-remote-https`, never reads `/viv/bin/gitconfig` (so no `templateDir`, no `sslCAInfo`, **and no `protocol.version=0`** -- which `build.sh:1529` records as required because v2 aborts silently under the phenotype), and cannot re-exec itself for `maintenance`. | **LANDED 2026-09-01**: login's `seed_session_env` seeds `GIT_EXEC_PATH=/viv/bin` + `GIT_CONFIG_SYSTEM=/viv/bin/gitconfig` beside PATH; the gitconfig gains `core.editor`/`sequence.editor = nora`. Also seeds `OPENSSL_armcap=0` (the helpers bundle OpenSSL; the SIGILL-probe wall). Witness `tools/interactive/git-shell.exp` (exec-path, config read, init+commit as the user, the dashed upload-pack from PATH, git-remote-https exec'd through GIT_EXEC_PATH -- the Design D 13.10.8 closure). Local clones need `/bin/sh`: **X-11**. |
+| **W1-b** | `$PATH` omits `/viv/bin` (`usr/login/src/main.rs:952`, `joey.c:7682`) while ut's static list includes it (`eval/stmt.rs:590`) -- so `git` runs but `which git` fails. `which.rs`'s own header predicted this drift. | **LANDED** (both seeds already carried `/viv/bin` + `/viv/abin`; the drift was the git env, closed with W1-a). |
+| **W1-c** | DNS by name. **DONE (N-2/net-4d).** musl's `getaddrinfo` now resolves over the phenotype unconnected-UDP path (`sendto` + `recvmsg`(212) + non-blocking); the `/etc/hosts` pin is retired. Proven by the git-https gate: the `GITHTTPS-DNS` getent leg (single-threaded getaddrinfo) AND the pin-free `git clone https://github.com/...`. | LANDED; pin dropped from `test-git-https.sh`. |
+
+**Exit:** the command sequence above, from a fresh login, with no `/etc/hosts`
+pin.
+
+### W2 — fetch a C/C++ source tarball, unpack it, build it with clang, run the TUI
+
+```
+curl -O https://.../src.tar.gz && tar xzf src.tar.gz && cd src && clang++ ... -o app && ./app
+```
+
+**Works already:** `curl`, `wget`, `https`, `make` are all on the base image;
+the clade sysroot is complete -- `libc.a libc++.a libc++abi.a libunwind.a
+libclang_rt.builtins.a libSDL2.a` (`build/clade/stage/sysroot/lib/`); and the
+clade clang is configured with `DEFAULT_SYSROOT=/clade/sysroot`,
+`CLANG_DEFAULT_CXX_STDLIB=libc++`, `CLANG_DEFAULT_LINKER=lld`,
+`CLANG_DEFAULT_RTLIB=compiler-rt`, `CLANG_DEFAULT_UNWINDLIB=libunwind`
+(`build.sh:4713-4717`).
+
+| Id | Blocker | Shape |
+|---|---|---|
+| **W2-a** | **CLOSED for busybox tar** (X-1 + X-2 + X-8). busybox `tar` -- uncompressed AND `.tar.gz` -- runs from a session shell anywhere in the namespace (`/viv/abin`, phenotype-by-location). Proven end to end: `tools/interactive/abin-tar.exp` 8/8. A NATIVE tar is still the longer-term answer (no busybox dependency); `gzip`/`unzip` as standalone commands are separate (busybox provides them, but a native set is cleaner). | LANDED via X-1/X-2/X-8 |
+| **W2-b** | Despite the configured defaults above, `clang++ main.cpp -o app` does **not** work -- the operator needs a hand-written 13-line response file (`--ld-path`, `--sysroot`, `-nostdinc++`, `-isystem .../c++/v1`, `-nostdlib++`, `-lc++ -lc++abi -lunwind -lc -lm`) which *does* work. **Root cause not yet established.** Leading hypothesis: `aarch64-unknown-thylacine` has no ToolChain class in clang's driver, so the generic fallback emits neither the libc++ header search nor the default link line. | **investigate first.** Cheap fix: ship a `clang++.cfg` beside the binary (clang auto-loads it) carrying exactly the working flags. Proper fix: a Thylacine ToolChain in the clade LLVM patch set -- **that is an arc**, inserted below. |
+| **W2-c** | An interactive TUI needs `isatty()`, which is `ioctl(TIOCGWINSZ)`. There is no ioctl row at all, so it is false on every fd. | **LANDED (console)** -- C2-k1b (`05e91a06`) wired the ioctl shell + serves TC*/TIOC* on a cons fd; `isatty()` is now true on the console. C2-k2 (`348e21b7`) added setsid/setpgid for job control. pts-fd ldisc reach = C2-k1c (deferred). |
+
+**Exit:** the sequence above with a plain `clang++ main.cpp -o app`, and the
+resulting TUI takes the terminal.
+
+### W3 — mount a host directory over the network and copy both ways
+
+```
+mount tcp!10.0.2.100!5640 /n/host     # spelling per UTOPIA-SHELL-DESIGN.md:521 + 9front
+cd /n/host && cp somefile ~/
+```
+
+**Zero kernel work is required.** Every mechanism exists and is proven: the
+transport vtable is already an abstract byte pipe (`9p_transport.h:87-124`), and
+`viv run` performs this exact dance today -- pipe pair, spawn the server on fds
+0/1, close our ends, `t_attach_9p`, `t_mount` (`usr/viv/src/main.rs:499-534`),
+which `docs/reference/145-vivarium.md:3049` names as Plan 9's own `mount(fd)`
+idiom. **Swap the spawned server for a TCP relay and the workflow is done.**
+
+The structural constraint that decides the shape: **mounts are per-Proc and
+`RFNAMEG` is unimplemented** (`kernel/proc.c:1528` -- "the parent ALWAYS gets a
+clone"), so a mount performed by a child dies with the child. `mount` therefore
+**cannot be an external command** -- it must be a shell builtin, exactly as
+`UTOPIA-SHELL-DESIGN.md:518` already states.
+
+| Id | Piece | Shape |
+|---|---|---|
+| **W3-a** | a slirp `guestfwd` rule for the 9P port | ~5 lines; the mechanism is already parameterized (`run-vm.sh:183-199`). |
+| **W3-b** | a native byte-relay daemon: dial with `TcpStream::connect`, poll `{fd 0, stream.ready_fd()}` (**never** the data fd -- it has no `QTPOLL` and reports always-ready, `dev9p_poll.c:284`), pump both directions. Parses nothing. | ~150 LOC; template is `coreutils/src/netpump.rs:80-126`. Name held for signoff -- `9pbridge` is plain, the thematic register would prefer something like `tether`. |
+| **W3-c** | `mount` / `unmount` builtins in ut = **U-8**, designed and unbuilt (`phase7-status.md:255`; dependency U-6 landed). Should recognize a `tcp!` dialstring and spawn the bridge itself, and should join a relative path against cwd (`SYS_MOUNT` requires absolute). | ~150 LOC. Builtin table: `eval/builtin.rs:114`. |
+| **W3-d** | *(perf, later)* msize is hard-capped at **4096** -- `SYS_ATTACH_DEFAULT_MSIZE` == `PIPE_BUF_SIZE`, and `CNBFRAME` is all-or-nothing, so a larger frame can never be sent. ~4 KiB per round trip. | audit-bearing (Pipe + SYS_ATTACH_9P rows). |
+
+**The `/srv` route is closed and should stay closed:** posting requires
+`PROC_FLAG_MAY_POST_SERVICE`, which nothing past login holds, and widening it
+was explicitly rejected (`docs/reference/145-vivarium.md:3023-3120`) because one
+shared boot registry lets any program squat a trusted name.
+
+**Security posture:** default `MNOEXEC` on a network mount -- `dev9p` sets
+`may_back_exec = true` (`dev9p.c:2252`), so without it a hostile server can back
+executable mappings (I-12 PROVENANCE / I-36). Hostile `Rlerror` is already
+bounded (I-14). The real residual gap is duplicate-reply / tag reuse, which
+`ARCHITECTURE.md:3558` records as needing wire-level tag generations, a v1.x ABI
+lift -- **acceptable for a trusted dev Mac, and it belongs in the manual page
+rather than being discovered later.**
+
+**On the server side:** the design is indifferent to what serves the directory,
+so the operator's own `npxf` is a legitimate Mac-side server rather than a
+kludge to replace. What this track owns is the guest half (W3-a..c).
+
+### W4 — run a graphical Linux binary under vivarium
+
+**Greenfield: `docs/VIVARIUM.md` contains no occurrence of graphics, GL,
+Wayland, DRM, framebuffer, mesa, vulkan, tapestry, weave, warp, GPU or surface.**
+No prior art, no TODO, no declined-with-a-reason. Inserted here as a new arc.
+
+How a Pouch program reaches the screen today: stock SDL2 2.32.10 plus a
+Thylacine video driver (`usr/ports/sdl2/thylacine/`, ~1360 lines) speaking the
+tapestry protocol -- which is **open/read/write/close on a 9P tree plus exactly
+one special syscall**. That syscall is `SYS_WEFT_MAP`, and the decisive fact is
+that it takes an **fd** and returns a **VA** with **no capability gate**
+(`kernel/syscall.c:6568-6602` -- verified: `handle_get` -> `KOBJ_SPOOR` ->
+`dev9p_priv` -> `Tweft` -> `weft_map_claimed`, no `CAP_` check). The *producer*
+side is gated on `CAP_HW_CREATE` (`:6404`), so only a trusted server can offer a
+share; a client merely claims one. **`SYS_WEFT_MAP` is already `mmap`'s shape.**
+
+| Id | Stage | New kernel primitive? |
+|---|---|---|
+| **W4-1** | translate `mmap(MAP_SHARED)` on a dev9p fd to `sys_weft_map_for_proc`. Domain: `prot == R\|W`, `flags == MAP_SHARED` exactly, `offset == 0`, length within the burrow. Add to `vivarium_mmap_arms_disjoint` (`vivarium.c:1309`). | **No.** One T2 row + shell, ~60 lines. |
+| **W4-2** | a `viv` manifest annotation (`org.thylacine.display`) binding `/srv/tapestry` into the container, mirroring `org.thylacine.net` (`usr/viv/src/main.rs:309`). | No. ~30 lines. |
+| **W4-3** | port the existing SDL2 Thylacine driver to the Linux ABI, shipped as `libSDL2.so` in the bundle. Two mechanical changes: `t_weft_map(fd,0)` -> `mmap(...MAP_SHARED,fd,0)`, and the two dirfd-relative opens -> absolute (phenotype `openat` takes `AT_FDCWD` only). | No -- but needs a Linux-musl cross lane. |
+| **W4-4** | hardware GL via the warp winsys -- the **same** mmap arm on `bo/<id>/map`. Needs no `CAP_JIT` (shaders compile to GPU ISA), unlike guest-side llvmpipe. | No. |
+| **W4-5** | *only if the target set demands it:* AF_UNIX (**N-4**) + fd passing + a client-allocatable shared-memory object, then a Wayland shim. | **Yes** -- the only stage needing real new machinery. |
+
+**Rejected, with reasons that still hold:** DRM/KMS ioctl emulation
+(`GPU-DESIGN.md:2696` -- a strictly larger surface than writing the winsys, and
+GEM/PRIME is a second redundant capability system under ours); X11
+(`VISION.md:509`); `/dev/fb0` (**SDL2 has no fbdev backend at all** -- it would
+serve only Qt-linuxfb / SDL1.2 / DOSBox).
+
+**Open risks to settle before W4-1 lands:** whether `SYS_BURROW_DETACH` is
+correct on a `VMA_FLAG_SHARED_IN` VMA (the documented teardown is the weave
+fid's clunk); session granularity -- a bind gives **one tapestryd conn per
+container**, so container processes co-own surfaces and container death retires
+them, which is coherent but must be *decided*, not discovered; and whether
+`dlopen` works under vivarium (it would widen W4-3's reach via
+`SDL_DYNAMIC_API`).
+
+### Cross-cutting — one fix, several workflows
+
+| Id | Item | Serves |
+|---|---|---|
+| **X-1** | **`S_IFMT` mask** before the `mode & ~0777` gate in `vivarium_mkdirat_decide:829` and `vivarium_openat_create_decide:790`. busybox passes the full mode (`S_IFDIR\|0755`, `S_IFREG\|0644`, established by disassembly); the gate was written to refuse setuid/sgid/sticky and catches `S_IFMT` as collateral. Linux defines those bits as ignored here, so masking is exact, and the deliberate `07000` refusal survives. | W2-a, every archive tool |
+| **X-2** | restage the alpine bundle with `/bin` links **relative** (`-> busybox`, currently 80 of 80 are absolute `-> /bin/busybox`), then mount it `MPHENO_LINUX` like `/viv/bin` (`joey.c:7115`, ~25 lines) and add to both path lists. Absolute targets re-anchor at the caller's root (`stalk.c:383-403`, I-28 working as designed), which is exactly why they resolve inside a container and ghost outside one. | W2-a, and the operator's standing "invoke alpine bins directly" ask |
+| **X-3** | raise `INITIAL_HEAP_SIZE` (`alloc.rs:77`) from 4 MiB to 64 MiB. **Costs zero committed pages**: `burrow_attach_lazy` charges nothing at attach (`syscall.c:5468`), the fault charges one page at a time (`fault.c:635`), and `HoleList::new` writes a single 16-byte header. Also fix the doc comment, which cites `BURROW_ATTACH_MAX` (256 MiB, the *eager* cap) where the real bound is `BURROW_RESERVE_MAX` (1 GiB). | nora, every native program |
+| **X-4** | **make panics say something.** `lib.rs:3269` is `fn panic(_info) -> ! { t_exits(1) }` -- info discarded, silent exit 1. Every OOM and panic in native userspace is currently indistinguishable from "the program did nothing". | all of them |
+| **X-5** | ut: stop the prompt render erasing a partial last row (`line_editor.rs:803` emits `\r` + `\x1b[K` first), which eats the last line of any output lacking a trailing newline. | all of them |
+| **X-6** | ut: print on spawn failure. `eval/stmt.rs:1490` sets `$errstr`, sets `$status=127`, and returns `Ok` -- nothing prints on the `Ok` path, so an unknown command is silent. | all of them |
+| **X-7** | **`mkdir -p` was broken essentially everywhere -- LANDED.** It walks the chain from `/` and tried to create every ancestor, swallowing only `Error::Exists`; an ancestor that already exists inside a directory the user cannot write answers **PermissionDenied** instead, because the kernel checks the parent's write bit before noticing the child is there. So `mkdir -p a/b` from `/tmp` died trying to create `/tmp`, and from a home died on `/home`. Now benign whenever the component *is* a directory afterwards, whatever the errno said. Found by X-1's own E2E, which could not build its fixture. | all of them |
+| **X-8** | **`tar -z` (compressed) -- LANDED @`de6ca24e`.** busybox spawns `gzip` via `vfork()` proper (`clone(CLONE_VM\|CLONE_VFORK\|SIGCHLD, stack=0)`, disassembled), which the clone decide declined. Served as a fork (option B, operator-voted; `LINEAGE.md` 3.1). `.tar.gz` create+extract round-trips through gzip (`abin-tar` legs g/h). **The four "plumbing rows" I predicted (pipe2/dup3/wait4/ppoll) were NOT needed** -- ground truth (disassembly + the passing E2E) showed busybox passes the already-admitted arguments (flags=0/options=0/rusage=0); the census declines of those numbers came from `viv-pheno-probe`'s edge-case probing, not tar's pipeline. No speculative widening landed. | **W2-a COMPRESSED half closed** |
+| **X-9** | *(fidelity, small)* the kernel answers **PermissionDenied** where Linux answers **EEXIST** when a create targets an existing entry inside a non-writable parent (Linux's `filename_create` returns EEXIST from the lookup before the permission check). X-7 makes userspace robust either way; whether to match Linux's ordering is a separate call, and it trades an information disclosure (existence, to a caller without write permission) that Linux accepts. | fidelity |
+| **X-10** | **command resolution: native-first + `viv <cmd>` to force the phenotype variant (design RATIFIED, operator 2026-08-31).** `/viv/abin` now puts ~304 Alpine busybox applets on PATH, colliding with native coreutils (`ping`, `nslookup`, and any native we add). Model: PATH order is native-first (`/bin` before `/viv/abin`, already so) -- a bare name resolves native if one exists, else the phenotype applet transparently, and `/viv/abin` being `MPHENO_LINUX` means the resolving mount also picks the ABI. To FORCE the phenotype variant when a native exists: **`viv <cmd>`** -- extend the launcher (the Plan 9 `9 cmd` / `toolbox run` / `nix run` idiom), NOT a bang suffix (leading `!` is rc's NOT operator + bash history-expansion; trailing `!` risks the same and says nothing). `/viv/abin/<cmd>` stays the unambiguous escape hatch; `bind -b /viv/abin /bin` the persistent reorder. Impl: `viv` grows a "resolve `<cmd>` from the phenotype PATH and exec in the CURRENT namespace" mode beside its existing bundle mode. | all workflows; sequence after the networking/threads line |
+| **X-11** | **no `/bin/sh` in the login namespace.** git hands any shell-shaped helper command to its compile-time `SHELL_PATH` `/bin/sh`: the `file://` transport (`git-upload-pack '<path>'`, one quoted string), `mergetool`/`difftool` (POSIX scripts), any `!`-alias or hook. Measured 2026-09-01 by the git-shell witness: `git clone file:///home/michael/gs` -> `fatal: cannot exec 'git-upload-pack '/home/michael/gs'': No such file or directory` (the witness uses `--no-local`, which execs upload-pack directly). `/viv/abin/sh` (busybox ash, phenotype-by-location) is on PATH but not at the absolute path. Candidate: a pool symlink `/bin/sh -> /viv/abin/sh` -- the absolute target re-anchors at the root and the walk crosses the pheno-mount, so `execve("/bin/sh")` lands LINUX under Design D exactly as `/viv/abin/sh` does; a native program's `system()`/`popen()` would get the same ash. A namespace-layout call (the operator's): a native `sh` is the other answer. | W1 (file:// clones, hooks), W2 (configure scripts, `make` recipes that assume `/bin/sh`), every ported program that shells out |
+
+### Arcs inserted by this pass
+
+1. **Clang Thylacine ToolChain** (W2-b) -- if the `clang++.cfg` workaround is
+   not enough, teaching clang's driver about `aarch64-unknown-thylacine` is an
+   LLVM-patch arc, not a fix.
+2. **U-8 namespace builtins** (W3-c) -- designed in `UTOPIA-SHELL-DESIGN.md`,
+   never built; W3 cannot exist without it.
+3. **Vivarium graphics W4-1..W4-5** -- a new arc; nothing in scripture yet.
+4. **Native archive tooling** (`tar`, `gzip`) -- if we choose not to depend on
+   busybox for W2-a permanently.
+5. **Allocator reclaim** -- `SYS_BURROW_DECOMMIT` = 84 exists, is complete and
+   correct (the `MADV_DONTNEED` analog), is reachable as `t_burrow_decommit`,
+   and has **zero callers**. `linked_list_allocator` has `extend` and no
+   `shrink`, so a native program's peak stays resident and charged for its whole
+   lifetime. Go reclaims (`joey.c:5820`); pouch does not; native Rust does not.
 
 ---
 
@@ -437,6 +614,26 @@ so the compositor never grows a glyph path; the richer end state is Acme's
 
 ## Stream 4 — notes / job control / PTY (the kernel line)
 
+> **P1 (round B on 437213c4/5336c894, Fable 5) -- FIXED @663d4b64, pushed
+> @790f6671; SMP 40/40. The follow-up round found the fix INCOMPLETE (a P1):
+> CNBFRAME is honored by devpipe_write ONLY, but SYS_ATTACH_9P accepts any
+> writable Spoor as tx, so a NON-PIPE tx (a /srv byte-conn) re-opens the
+> extinction. LATENT (callers pass pipes). OWED: gate tx/rx on dev==&devpipe
+> (memory/audit_663d4b64_closed_list.md). CLOSED @c2dfbf0b: a SYSCALL pipe-only
+> gate (sys_attach_9p_ends_are_pipes; NOT at the init -- that broke the Dev-
+> generic mock tests). SMP 40/40; pushed @9f86e5e5; a fourth Fable round running:** the pipe (spoor) 9P transport BLOCKS inside `devpipe_write`
+> while `client_send_flow` holds `c->lock` -- an unprivileged multi-threaded
+> container can EXTINCT the box (a `#360` lock-across-sleep). `437213c4` made
+> `SYS_ATTACH_9P` over a pipe pair the diorama transport = the Phase-5 spoor
+> transport's FIRST production consumer under the shared `p9_client`, which was
+> written for a NON-BLOCKING (EAGAIN) transport. Fix: make `spoor_transport_send`
+> non-blocking (return `P9_TRANSPORT_EAGAIN` on a would-block) so the existing
+> pump/park drops `c->lock`. `memory/bug_spoor_transport_lock_across_sleep_
+> extinction.md`. AUDIT-BEARING + SMP gate + a follow-up round. **This outranks
+> every item below it (stewardship: a soundness threat outranks chunk
+> completion).**
+
+
 The line the header names: the EL0-return tail's note dispatch, the STOP
 class, the tty family, the pts job-control seam, and the tests that construct
 their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
@@ -553,7 +750,7 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    Researched option set in `memory/design_237_pipe_note_default.md` (Plan 9
    kills; Rust-std/pouch mask; the Go port has no note handling at all):
    recommend terminate-for-real + libthyla-rs/Go-port startup masks.
-6. **`Proc.socktab` is NOT cloned at fork** (the d3a11c8e round, seen in passing;
+6. **LANDED 2026-09-01 -- `Proc.socktab` COPIED at fork + ALIASED on dup/dup3/F_DUPFD (the vote below, option A; was: NOT cloned at fork)** (the d3a11c8e round, seen in passing;
    `memory/bug_socktab_not_cloned_at_fork.md`): a phenotype child forked with an
    open socket fd inherits the HANDLE but no `(proto,N)` row -- the fork half of
    LINEAGE.md:691's dup3 note; fork-per-connection servers are the L-6c
@@ -602,6 +799,99 @@ their states. It runs the full bar (suite + SMP gate + pty specs + LS-CI).
    it (^C at the prompt / inside `read` / inside `wait`, then ^C a job); if
    real, a P1 for interactive phenotype shells that needs an abandoned-frame
    rule or a per-thread stack of save blocks (design; vote).
+   **Blocked first by item 9** (found while building the experiment): the
+   interactive `viv run` never ran a container at all. **RAN 2026-08-18
+   (3/3, after items 9 + the ^C mask): INCONCLUSIVE on the wedge, conclusive on
+   item 11** -- after ash's prompt (blocked in read) a ^C produced NOTHING for
+   10 s, twice; the next typed line was then discarded (`^C`, newline,
+   reprompt AFTER the line): the SIGINT was delivered only when the read
+   completed. Re-run once item 11 lands (the wedge witness needs a promptly
+   delivered first ^C).
+9. **An interactive `viv run` never ran the container -- LANDED (pending its
+   bar) 2026-08-17** (`memory/bug_viv_interactive_container_no_stdio.md`):
+   the console line `viv: spawn /bin/diorama` in every R5-F9 log is viv's
+   ERROR path -- viv requested `MAY_POST_SERVICE` for its per-container diorama
+   (which posted the fixed `/srv/viv-dio`) and nothing past login holds the
+   bit (login confers CONSOLE_OWNER on ut; ut confers nothing), so
+   `spawn_perm_grant_check` refused; every boot `viv` was joey-spawned WITH
+   the bit, so no gate ran the interactive path. The V-7 commit body listed
+   the seam; nobody enqueued it. Fix: the diorama channel is a PRIVATE PIPE
+   PAIR + `SYS_ATTACH_9P` (Plan 9's mount(fd); the Phase-5 stub-driver
+   transport's first production consumer) -- no name, no privilege, no
+   collision: concurrent containers moved OUT -> IN (VIVARIUM 7.2.1), the V-8
+   F3 attach gate became structural (the joey #101 leg -> the `viv-channel`
+   leg, two spawns one variable apart; the V-7 leg runs TWO probe containers
+   concurrently), joey's boot `viv run`s pass no perm bits (they now run the
+   interactive path). Userspace-only (viv, diorama, joey, libt/libthyla-rs
+   wrappers); kernel byte-unchanged. Rejected: widening `MAY_POST_SERVICE` to
+   user commands (one shared boot registry -> name squatting). Reference:
+   `docs/reference/145-vivarium.md` "The diorama channel is a private pipe
+   pair". **Residual, OPEN (kernel, Pipe audit row):** `devpipe_write` posts a
+   `pipe` note to the WRITING Proc on a dead reader, and the kernel 9P spoor
+   transport writes in the syscalling Proc's context -- a container Proc that
+   touches `/proc` after its diorama died (an orphan outliving its runner; a
+   diorama crash) gets a SIGPIPE-shaped note where the /srv transport gave an
+   error; fix = a `MSG_NOSIGNAL`-shaped kernel-internal transport write (Linux
+   trans_fd writes from a workqueue). Also OPEN, seen once, unreproduced: two
+   ^C at a `ptyhost`ed ut's IDLE prompt, then the next command echoed but not
+   executed -- REPRODUCED, see item 10.
+   **LANDED `437213c4`** (boot: 1413/1413, `V-7 viv-probe (containered, x2
+   concurrent) PASS`, both `viv-channel` lines, V-1b/L-6c/D-5 PASS; LS-CI
+   viv-run PASS attempt 1). **Follow-on, same watch (2026-08-18):** the first
+   ^C at the interactive ash's prompt KILLED viv and its diorama (the pts's
+   `interrupt` reaches the whole fg pgrp; a native Proc with no handler dies of
+   it, LS-5), orphaning the shell into a terminal it then shared with the
+   outer ut (`memory/bug_viv_dies_on_ctrlc.md`) -- viv masks `interrupt` (tty
+   family unmasked so ^Z stops it with the container), the diorama masks both
+   families; viv-run.exp gained the ^C leg (`uname -s | tr` -> LINUX after ^C).
+10. **Two ^C at a `ptyhost`ed ut's IDLE prompt lose the next command line**
+   (`memory/bug_hosted_ut_double_ctrlc_idle.md`; REPRODUCED 2026-08-18 by
+   `scratchpad/r5f9/ctrlc-idle.exp`: outer-cc=1 inner-c=1 **inner-cc=0**
+   recover=1 -- one ^C is fine, the console ut is fine, an extra Enter
+   recovers). The render suggests the hosted ut's `interrupt` arrives LATE and
+   its line-discard eats characters of the NEXT line. Aux's own line
+   (notes/job control/PTY): reproduce, root-cause (ut's hosted-session poll set
+   / notes-fd wake / ldisc post order), fix, adopt the scenario into LS-CI.
+   CONFIRMED (read-only, 2026-08-18) the same mechanism as item 11: the hosted
+   ut's fd 0 is a non-QTPOLL pts slave, `dev9p_poll.c:288` returns POSIX
+   always-ready for it, so the hosted ut is functionally blocked in `read(fd0)`
+   = a dev9p Tread at idle (its poll returns instantly). The pts ISIG posts
+   `interrupt`; the dev9p read does not unwind (item 11) -> the ^C lands with
+   the next typed line and the deferred `editor.reset()` eats it. Item 11's
+   note-interruptible-wait fix (the #90 frame-atomic 9P reader) closes item 10;
+   do NOT fix it separately. NB: option B (pts/cons-ldisc-only unwind) does NOT
+   close this -- the wait to unwind is the dev9p CLIENT read of the pts slave.
+11. **A CAUGHT note does not wake a thread blocked in a syscall wait -- VOTE
+   OWED (kernel notes design)** (`memory/design_caught_notes_do_not_interrupt_
+   waits.md`; measured 3/3 + read in code): `thread_die_pending` is the only
+   sleep-unwind predicate and fires for group death and the UNCAUGHT terminate
+   latches only, so a handler-having (or notes-fd) program blocked in read()
+   gets its ^C only when the read completes -- after the user's next line,
+   which the handler then discards. Plan 9 (Eintr) and Linux (EINTR /
+   ERESTARTSYS + SA_RESTART) both interrupt the wait. Fork: (A) note-
+   interruptible waits (extend the #811 predicate with "a deliverable note is
+   pending"; native -EINTR [no `T_E_INTR` in errno.h -- an ERRORS.md ABI row,
+   signoff]; phenotype restart per SA_RESTART; the 9P client's blocked read
+   unwinds frame-atomically per #90) -- RECOMMENDED, audit-bearing (Notes +
+   Pipe + 9P client rows + SMP gate); (B) a Dev-level unwind for pts/cons reads
+   only; (C) v1.x. Retires the "late ^C eats the next line" family (items 8,
+   10) in one move.
+12. **On the KERNEL CONSOLE a container never receives ^C after 5336c894 -- LANDED a2870706 2026-08-20**
+   (self-found 2026-08-18 before the 437213c4+5336c894 round; the fix + the
+   discrimination-proven alpine-trap regression + the holotype round) (`memory/
+   bug_console_ctrlc_swallowed_by_viv_mask.md`). The serial console has no job
+   control: `env.job_control` is None there, the console's ^C is OWNER-routed
+   (`proc_console_post_interrupt` -> the session `ut`), and `ut` FORWARDS the
+   `interrupt` by pid to its foreground children (`drain_fg_wait_notes`,
+   libutopia stmt.rs). `viv`'s new mask swallows that forward, so the container
+   sees nothing (before 5336c894 the forward KILLED viv and orphaned the
+   container -- destructively wrong; now silently wrong). The pgrp fan that makes
+   the mask right exists only on a pts. Fix candidates: viv self-manages (opens
+   its notes fd, parks on poll{notes} + WNOHANG reaps) and FORWARDS `interrupt`
+   to the container entrypoint when the note did not come from the kernel's pgrp
+   fan (docker's --sig-proxy) -- the mask then goes; or the console grows a
+   fg-pgrp fan (kernel, LS-5's owner routing generalized). Regression: an LS-CI
+   scenario on the CONSOLE (not ptyhost) with a `trap 'echo CAUGHT' INT` ash.
 
 ---
 

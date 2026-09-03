@@ -1854,7 +1854,15 @@ static void wake_rendez_waiter(struct Rendez *r, struct Thread *t,
     ready(t);
 }
 
-int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
+// item 11 (ARCH §8.8.3): the shared core of sleep() and sleep_noteintr().
+// `caught_ok` enables the caught-note unwind (SLEEP_NOTEINTR): when true, a
+// deliverable caught note interrupts the wait ALONGSIDE the death-interrupt.
+// It is OPT-IN per wait because the caught-note unwind returns to userspace and
+// CONTINUES (must be fully EINTR-safe), and some sleeps must NOT be so
+// interrupted (e.g. vfork_await_release, where a live return while the child
+// shares the parent AddrSpace corrupts memory). Death is always checked first.
+static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
+                        bool caught_ok) {
     if (!r)    extinction("sleep(NULL rendez)");
     if (!cond) extinction("sleep with NULL cond");
 
@@ -1990,6 +1998,36 @@ int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
             break;
         }
 
+        // item 11 (ARCH 8.8.3): the caught-note unwind, AFTER the die-check so
+        // death always wins. Gated on caught_ok (the caller opted in). The SAME
+        // #90 frame-atomic guard applies -- a mid-frame elected 9P reader BLOCKS
+        // THROUGH a caught note exactly as it blocks through death (else it
+        // desyncs the shared stream); it falls to the sched() below and unwinds
+        // at the next boundary. Undo the registration exactly as the die-check
+        // does, but return the NON-death SLEEP_NOTEINTR so the caller returns
+        // -T_E_INTR and LIVES (the note delivers at its EL0-return tail).
+        // 11b-9p finding #1: DATA/reply wins over a caught note (`!cond(arg)`).
+        // A wake whose cond is now true (the reply demuxed, a frame is ready)
+        // must return the data, not EINTR -- and abandoning a just-demuxed reply
+        // would LOSE its bytes (client_run's NOTEINTR path frees reply_buf). The
+        // guard is gated behind caught_ok so the 39 non-opted callers never pay
+        // the extra cond() call. Death still wins regardless (checked above).
+        if (caught_ok && !cond(arg) && thread_caught_note_deliverable(t) &&
+            proc_caught_note_eintr_ready(t->proc) &&
+            !thread_reader_blocks_death(t)) {
+            r->waiter            = NULL;
+            t->rendez_blocked_on = NULL;
+            t->state             = THREAD_RUNNING;
+            // 11b-9p: an elected 9P reader (stop_no_park set, at a frame
+            // boundary) unwinds via the note_unwound latch so the client_wait
+            // classifier hands the reader role off (not re-block like a stop);
+            // a non-reader sleep (stop_no_park clear) carries the signal in the
+            // SLEEP_NOTEINTR return itself.
+            if (t->stop_no_park) t->note_unwound = true;
+            rc = SLEEP_NOTEINTR;
+            break;
+        }
+
         // Drop BOTH locks before sched() (the IRQ mask stays via the wait_lock
         // irqsave). wait_lock MUST NOT be held across sched() -- a descheduled
         // sleeper holding it would deadlock the cascade. sched() sees state ==
@@ -2025,11 +2063,37 @@ int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
             rc = SLEEP_INTR;
             break;
         }
+
+        // item 11: the caught-note prompt-path unwind (post-sched, woken by
+        // proc_caught_note_wake or a spurious wake), AFTER the die-check so
+        // death wins. Same #90 frame-atomic guard: a mid-frame reader loops
+        // (block-through) rather than unwind here.
+        if (caught_ok && !cond(arg) && thread_caught_note_deliverable(t) &&
+            proc_caught_note_eintr_ready(t->proc) &&
+            !thread_reader_blocks_death(t)) {
+            if (t->stop_no_park) t->note_unwound = true;   // 11b-9p reader boundary
+            rc = SLEEP_NOTEINTR;
+            break;
+        }
     }
 
     spin_unlock(&r->lock);
     spin_unlock_irqrestore(&t->wait_lock, s);
     return rc;
+}
+
+// item 11 (ARCH §8.8.3): sleep() is the caught_ok=false wrapper -- the 39
+// existing callers keep their exact semantics (death-interruptible only).
+int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
+    return sleep_common(r, cond, arg, false);
+}
+
+// sleep_noteintr() is the caught_ok=true wrapper: a caught, deliverable note
+// interrupts the wait (returns SLEEP_NOTEINTR) alongside death. Opted-in
+// blocking sites (interruptible reads/waits whose unwind is fully EINTR-safe)
+// call this instead of sleep(); the site maps SLEEP_NOTEINTR to -T_E_INTR.
+int sleep_noteintr(struct Rendez *r, int (*cond)(void *arg), void *arg) {
+    return sleep_common(r, cond, arg, true);
 }
 
 // P5-tsleep: sleep bounded by an absolute deadline. See rendez.h for the
@@ -2041,16 +2105,24 @@ int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
 // all three so the waiter is woken exactly once; cond is re-checked
 // first on every (re-)evaluation so a wait satisfied at the deadline
 // reports AWOKEN (tsleep.tla WokenSound / TimeoutSound).
-int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
-           u64 deadline_ns) {
+// item 11 (ARCH §8.8.3): the shared core of tsleep() and tsleep_noteintr().
+// `caught_ok` enables the caught-note unwind (TSLEEP_NOTEINTR); see
+// sleep_common's contract.
+static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
+                         u64 deadline_ns, bool caught_ok) {
     if (!r)    extinction("tsleep(NULL rendez)");
     if (!cond) extinction("tsleep with NULL cond");
 
     // No deadline: tsleep degrades to plain sleep (ARCH §8.8). sleep is the
-    // spec-proven path (scheduler.tla NoMissedWakeup); route through it. Map
-    // sleep's death-interrupt (SLEEP_INTR) onto TSLEEP_INTR; otherwise AWOKEN.
+    // spec-proven path (scheduler.tla NoMissedWakeup); route through it,
+    // carrying caught_ok. Map sleep's interrupts onto tsleep's: SLEEP_INTR ->
+    // TSLEEP_INTR (death), SLEEP_NOTEINTR -> TSLEEP_NOTEINTR (caught note),
+    // otherwise AWOKEN.
     if (deadline_ns == 0) {
-        return (sleep(r, cond, arg) == SLEEP_INTR) ? TSLEEP_INTR : TSLEEP_AWOKEN;
+        int src = sleep_common(r, cond, arg, caught_ok);
+        if (src == SLEEP_INTR)     return TSLEEP_INTR;
+        if (src == SLEEP_NOTEINTR) return TSLEEP_NOTEINTR;
+        return TSLEEP_AWOKEN;
     }
 
     u64 deadline_cnt = timer_ns_to_counter(deadline_ns);
@@ -2168,6 +2240,23 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
             break;
         }
 
+        // item 11 (ARCH 8.8.3): the caught-note unwind (tsleep register arm),
+        // AFTER the die-check so death wins. Undo the FULL registration (rendez
+        // + timer-wait) exactly as the die-check does; return TSLEEP_NOTEINTR so
+        // the caller LIVES. Same #90 frame-atomic guard (a mid-frame reader
+        // blocks through).
+        if (caught_ok && !cond(arg) && thread_caught_note_deliverable(t) &&
+            proc_caught_note_eintr_ready(t->proc) &&
+            !thread_reader_blocks_death(t)) {
+            r->waiter            = NULL;
+            t->rendez_blocked_on = NULL;
+            timerwait_unlink(t);
+            t->state             = THREAD_RUNNING;
+            if (t->stop_no_park) t->note_unwound = true;   // 11b-9p reader boundary
+            ret = TSLEEP_NOTEINTR;
+            break;
+        }
+
         // Drop all three locks (the IRQ mask stays via the wait_lock irqsave).
         // sched() sees SLEEPING and keeps t out of the run tree; wakeup() / the
         // tick scan / the cascade transition t back, eagerly unlinking it from
@@ -2197,12 +2286,34 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
             ret = TSLEEP_INTR;
             break;
         }
+
+        // item 11: the caught-note prompt-path unwind (tsleep), AFTER the
+        // die-check so death wins. Same frame-atomic guard; a mid-frame reader
+        // loops (block-through) or reaches the loop's timeout check.
+        if (caught_ok && !cond(arg) && thread_caught_note_deliverable(t) &&
+            proc_caught_note_eintr_ready(t->proc) &&
+            !thread_reader_blocks_death(t)) {
+            if (t->stop_no_park) t->note_unwound = true;   // 11b-9p reader boundary
+            ret = TSLEEP_NOTEINTR;
+            break;
+        }
     }
 
     spin_unlock(&r->lock);
     spin_unlock(&g_timerwait.lock);
     spin_unlock_irqrestore(&t->wait_lock, s);
     return ret;
+}
+
+// item 11 (ARCH §8.8.3): tsleep() is the caught_ok=false wrapper (existing
+// callers unchanged); tsleep_noteintr() is the caught_ok=true opt-in.
+int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg, u64 deadline_ns) {
+    return tsleep_common(r, cond, arg, deadline_ns, false);
+}
+
+int tsleep_noteintr(struct Rendez *r, int (*cond)(void *arg), void *arg,
+                    u64 deadline_ns) {
+    return tsleep_common(r, cond, arg, deadline_ns, true);
 }
 
 // ============================================================================

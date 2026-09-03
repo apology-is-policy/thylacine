@@ -243,7 +243,9 @@ The `cond` predicate (`chan_cond_readable`) reads `count`/`eof` without
 the channel lock — `tsleep` evaluates it under `rendez->lock`, and the
 producer mutates the channel under `ch->lock` then calls `wakeup()`,
 whose `rendez->lock` acquisition is the happens-before. This is exactly
-`devpipe`'s `cond_can_read` discipline (`kernel/pipe.c`; `specs/pipe.tla`).
+`devpipe`'s wait/wake discipline (`kernel/pipe.c`; `specs/pipe.tla`) -- since the
+2026-09-02 multi-waiter rewrite the pipe's own cond is `pipe_waiter_ready` on a
+per-call `poll_waiter`, but the producer-mutates-then-wakes shape is the same.
 
 The `Rendez` is single-waiter. The convention holds because the kernel
 9P client serializes every op on `p9_client.lock`, so at most one

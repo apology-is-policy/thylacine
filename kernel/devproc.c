@@ -993,7 +993,7 @@ static void devproc_close(struct Spoor *c) {
     // g_proc_table_lock: this hook is reached from handle_release_obj (SYS_CLOSE)
     // and the #68 last-thread-out close, both with g_proc_table_lock DROPPED, so
     // proc_for_each may take it (no recursion).
-    if (c && (c->flag & CDEBUGOWNER)) {
+    if (c && (spoor_flag_get(c) & CDEBUGOWNER)) {   // flag RMW'd cross-domain -- atomic read
         struct devproc_debug_release_ctx r = { .ctl = c, .found = false };
         proc_for_each(devproc_debug_release_cb, &r);
     }
@@ -1891,7 +1891,7 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
         if (target->debug_owner != NULL)                  { d->result = -1; return 1; }  // Einuse
         target->debug_owner = d->ctl;              // claim (under g_proc_table_lock)
         target->debug_exitkill = false;            // 5d: a fresh slot starts unmarked (the debugger sends `exitkill` iff it LAUNCHED this target)
-        d->ctl->flag |= CDEBUGOWNER;               // gate the close-hook release
+        spoor_flag_set(d->ctl, CDEBUGOWNER);       // gate the close-hook release (atomic: `flag` is RMW'd cross-domain -- fcntl CNONBLOCK under a table lock)
         d->result = 1;
         return 1;
     }

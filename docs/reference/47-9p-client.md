@@ -141,6 +141,45 @@ class; every v1.0 9P server is a trusted local Proc). Modeled by
 buggy cfg is the pre-#90 mid-frame unwind). Regressions:
 `rendez.reader_frame_predicate` + `rendez.reader_frame_blocks_death`.
 
+### Caught-note reader unwind (item 11 11b-9p, ARCH §8.8.3)
+
+The SAME frame-atomic machinery carries a CAUGHT note (a phenotype-Linux
+handler; a native self-managing reader waits for 11c). A `^C` at a phenotype
+shell's pts prompt must interrupt its blocked `read()` with `-EINTR` while the
+thread LIVES (the note delivers at the EL0-return tail), instead of the note
+delivering a line late (item 8). The elected reader blocks in `reader_recv_frame`
+→ `srvconn_client_recv`'s `tsleep`; `proc_caught_note_wake` (fired by
+`notes_post_pgrp` on the pts ISIG) wakes it.
+
+A third per-Thread latch, `note_unwound` (the caught twin of `stop_unwound`), is
+SET by the sched caught branch when it unwinds a reader with `stop_no_park` set,
+and READ+cleared by `client_wait`'s election classifier. On a set `note_unwound`
+the classifier HANDS OFF the reader role (survivors never freeze) and returns a
+new `CLIENT_WAIT_NOTEINTR` — NOT re-block like a STOP, because a caught note must
+reach the EL0 tail. `client_run` maps it to the SAME op-abandon as `DIED` (Tflush
++ free `reply_buf`) but returns `-P9_E_INTR` (== `T_E_INTR` == `EINTR`). A
+non-reader waiter uses `sleep_noteintr` with the same handoff + data-wins
+discipline.
+
+Two gates keep it surgical and non-regressing:
+
+- **Phenotype gate** (`proc_caught_note_eintr_ready(t->proc) == PHENO_LINUX`) on
+  all four sched caught arms. A phenotype reader goes through musl (EINTR-aware
+  by POSIX); a native reader is not until 11c, so it stays death-only — no
+  regression, and a native self-managing reader can never caught-unwind (the
+  general form of the 11b-core pipe-build-bug fix).
+- **`recv_caught_ok`** scopes the caught recv interrupt to the WAIT-path election
+  (`reader_recv_frame`'s `caught_ok` param → true only there). The send-path
+  self-pump / drain / SQPOLL pumps pass false: a caught-unwind there drains
+  nothing, so the send retry would livelock. The send path stays byte-identical.
+
+Data/reply wins over the note: the sched caught arms carry `&& !cond(arg)`, so a
+reader that woke because a frame arrived (`chan_cond_readable` true) READS it
+rather than abandoning a demuxed reply (which would lose pts bytes) — the note
+delivers after, at the read's successful return. The SPOOR pipe-pair transport
+reader (`devpipe_read`) is not yet opted in (a documented follow-up seam; no
+phenotype reader mounts a spoor transport today).
+
 ### Composition pattern
 
 Every operation follows the same shape:
@@ -170,6 +209,9 @@ The pattern is the only thing in this layer. The reason each op is a separate fu
 -EBUSY  — session not OPEN (handshake hasn't run)
 -EIO    — lower-layer failure: send/recv error, frame malformed,
           tag pool full, fid bookkeeping conflict
+-EINTR  — a caught note interrupted a phenotype reader's blocked wait
+          (item 11 11b-9p; P9_E_INTR == T_E_INTR); the op is abandoned
+          (Tflush) and the thread lives to deliver the note
 -<n>    — Rlerror surface: n = the Linux errno the server returned
 ```
 

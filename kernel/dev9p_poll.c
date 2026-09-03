@@ -120,8 +120,9 @@ struct dev9p_poll_state {
 #define DEV9P_POLL_IDLE_NS  (20ull * 1000ull * 1000ull)   // 20ms reader-pump idle deadline
 // Distinct QTPOLL clients the kthread pumps per cycle (F1: the global pump must be
 // FAIR across clients -- pumping only one would starve a second client's pending
-// reply). v1.0 has exactly ONE QTPOLL client (the single netd /net mount); the
-// per-user-netd v1.x config has a handful. With MORE than this many simultaneous
+// reply). v1.0 has TWO QTPOLL clients (the netd /net mount + the ptyfs /dev/pts
+// mount, item 10); the per-user-netd v1.x config a handful. With MORE than this many
+// simultaneous
 // QTPOLL clients each holding a perpetually-parked op, the cap is NOT graceful: the
 // registry is LIFO and the collect always walks from the head with no rotation, so
 // the >MAX clients nearest the head are pumped every cycle and a TAIL client is
@@ -438,8 +439,9 @@ short dev9p_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
 // across the blocking pump, even if a concurrent reaper frees the op). out_cl[i] /
 // out_pin[i] are paired; returns the count (<= max). Under g_dev9p_poll_lock.
 //
-// v1.0 has exactly ONE QTPOLL client (the single netd /net mount) -> collects 1; the
-// per-user-netd v1.x config a handful. With MORE than `max` distinct clients this
+// v1.0 has TWO QTPOLL clients (the netd /net mount + the ptyfs /dev/pts mount,
+// item 10) -> collects up to 2; the per-user-netd v1.x config a handful. With MORE
+// than `max` distinct clients this
 // head-anchored LIFO scan STARVES the tail (R2-F1; see the DEV9P_POLL_MAX_PUMP note)
 // -- the v1.x per-client-work-queue close must use a fair start, not this scan.
 static u32 dev9p_poll_collect_clients(struct p9_client **out_cl,

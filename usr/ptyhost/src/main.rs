@@ -26,11 +26,14 @@
 // (the outer session died), the input pump ends the whole host
 // (`t_exit_group`) and the same master-close teardown follows.
 //
-// Two blocking pump threads, no poll: ptyfs is deliberately non-QTPOLL
-// (reads park server-side), so the natural shape is one thread per
-// direction. The main thread runs master->fd1 (it ends deterministically at
-// the child's exit); the spawned thread runs fd0->master and is unwound by
-// the process-exit group cascade (#809) when the main thread finishes.
+// Two blocking pump threads, no poll: the pty DATA endpoints (master + slave)
+// are non-QTPOLL (reads park server-side), so the natural shape here is one
+// thread per direction. The main thread runs master->fd1 (it ends
+// deterministically at the child's exit); the spawned thread runs fd0->master
+// and is unwound by the process-exit group cascade (#809) when the main thread
+// finishes. (item 10 added a SEPARATE per-pts /dev/pts/<n>ready QTPOLL file for
+// a native SLAVE poller (ut) to block on; the master + the data files stay
+// non-QTPOLL, so ptyhost's blocking-pump model is unchanged.)
 
 #![no_std]
 #![no_main]

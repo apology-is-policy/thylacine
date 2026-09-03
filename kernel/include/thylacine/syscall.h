@@ -1620,9 +1620,15 @@ enum {
 
     // SYS_PWRITE(fd, buf, len, off) -> bytes written / -1 / -errno
     //   The write twin: RIGHT_WRITE + the same off >= 0 / overflow /
-    //   dev->seekable gates; cursor untouched. No O_APPEND interaction
-    //   exists (Thylacine has no kernel append mode; ports emulate
-    //   O_APPEND above this layer).
+    //   dev->seekable gates; cursor untouched. The kernel still has no append
+    //   MODE of its own: SYS_PWRITE writes exactly at `off`. O_APPEND is
+    //   DELEGATED to the FS -- SYS_WALK_OPEN_OAPPEND rides to the 9P Tlopen and
+    //   Stratum positions each write at EOF server-side (the git chunk,
+    //   VIVARIUM.md 6.27). For an append fd the kernel cursor is advisory: the
+    //   server ignores the client offset, so a raw phenotype binary (git) gets
+    //   correct appends without the kernel or a libc emulating them. (Pouch
+    //   ports still emulate O_APPEND above this layer for the native SYS_RW
+    //   path, which carries no append bit.)
     SYS_PWRITE = 86,   // arg: fd (x0), buf (x1), len (x2), off (x3)
 
     // SYS_YIELD() -> 0 (#33)
@@ -2109,6 +2115,75 @@ enum {
     //   KASLR surface stays closed). A garbage/foreign/non-hostmem va ->
     //   -T_E_INVAL, never a plausible count.
     SYS_HOSTMEM_REFCOUNT = 108,   // arg: va (x0), len (x1)
+
+    // SYS_OPEN_CREATE(start_fd, path_va, path_len, omode, perm) -> opened_fd / -errno
+    //   The path-based open-or-create -- the create(name, mode, perm) row
+    //   ARCH section 11.2 has carried since Phase 0, minted for the #50
+    //   path-mutation family (VIVARIUM.md section 6.24; scripture commit
+    //   b417b307). Heritage: Plan 9's create(2) is path-based and its kernel
+    //   (namec Acreate) composes create-else-open internally; Linux v9fs does
+    //   the same as a bounded client loop. Both idioms agree: EXCLUSIVE
+    //   create is atomic at the server (Tlcreate); open-if-present is a
+    //   bounded retry loop. This syscall is that composition, kernel-side.
+    //
+    //   x0 = start_fd  (hidx_t KOBJ_SPOOR with RIGHT_READ -- a NAVIGATION
+    //                   base, exactly SYS_OPEN's gate; the write-side gate is
+    //                   the A-2d W|X check on the RESOLVED parent directory,
+    //                   identical to the two-step SYS_OPEN(OPATH) +
+    //                   SYS_WALK_CREATE envelope -- OR the FROM_ROOT sentinel
+    //                   (u64)-1: resolve at the Territory root, and a RELATIVE
+    //                   path first joins the LS-4 cwd EXACTLY as SYS_OPEN does.
+    //                   That join-parity is the point: SYS_WALK_CREATE's
+    //                   identical-looking sentinel resolves at the ROOT with no
+    //                   cwd join, which is the silent wrong-directory hazard
+    //                   [VIVARIUM.md 6.20 blocker 3] this syscall exists to
+    //                   close. Both call sites share one join helper so the
+    //                   parity is structural, not copied.)
+    //   x1 = path_va   (user-VA of the multi-component path; '/' allowed.)
+    //   x2 = path_len  (bytes; 1 .. SYS_OPEN_PATH_MAX; no embedded NUL.)
+    //   x3 = omode     (OREAD/OWRITE/ORDWR + optional OTRUNC + optional
+    //                   SYS_WALK_OPEN_NOFOLLOW + optional SYS_WALK_OPEN_OEXCL.
+    //                   OPATH is REJECTED -- a navigation handle cannot want
+    //                   creation. Mask: SYS_OPEN_CREATE_OMODE_VALID.)
+    //   x4 = perm      (u32 Plan 9 perm: low 9 mode bits, plus DMDIR to create
+    //                   a DIRECTORY -- the mkdir-by-path row, create-only.
+    //                   SYS_WALK_CREATE_PERM_VALID; the DMSRV* service-post
+    //                   bits are NOT admitted here -- a service post remains
+    //                   SYS_WALK_CREATE's fd-based shape, and a path-create
+    //                   whose parent resolves to a /srv registry answers
+    //                   -T_E_OPNOTSUPP.)
+    //
+    //   Semantics rows (the leaf is classified LEXICALLY before any RPC; the
+    //   split classifies, never resolves -- the parent PREFIX resolves through
+    //   stalk with full I-28 containment + symlink expansion + mount-cross):
+    //   - trailing-slash, ".", "..", or root leaf -> -T_E_ISDIR (the Linux
+    //     open_last_lookups rows: O_CREAT with a non-NORM last component).
+    //   - OEXCL or DMDIR: ONE create attempt on the resolved parent --
+    //     server-atomic; an existing leaf answers -T_E_EEXIST honestly.
+    //   - plain (no OEXCL, no DMDIR): open-first via the full-path stalk
+    //     (OTRUNC applies on this leg); -T_E_NOENT -> create on the parent
+    //     (OTRUNC stripped -- a fresh file is already empty); a create lost to
+    //     an exists-race -> retry the open; bounded at 2 rounds, then the last
+    //     real error. Two racing creators converge (the loser opens the
+    //     winner's file); racing OTRUNC writers may truncate each other
+    //     exactly as on Linux.
+    //   - NOFOLLOW composes: a final symlink answers -T_E_LOOP (live or
+    //     dangling), never creates through. WITHOUT NOFOLLOW a DANGLING final
+    //     symlink answers -T_E_EEXIST after the bounded loop (Linux would
+    //     create the TARGET; documented degradation, VIVARIUM.md 6.24).
+    //
+    //   Returns: opened KOBJ_SPOOR fd (rights_for_omode + RIGHT_TRANSFER; a
+    //   DMDIR create returns the dir opened OREAD per the SYS_WALK_CREATE
+    //   contract) or -errno: -T_E_INVAL (bad omode/perm/path shape),
+    //   -T_E_FAULT (path_va), -T_E_ISDIR (the leaf rows), -T_E_NOENT (parent
+    //   prefix missing), -T_E_NOTDIR (prefix component not a dir), -T_E_ACCES
+    //   (per-component X / parent W|X denial), -T_E_EEXIST (OEXCL/DMDIR loser,
+    //   or the bounded-loop exit), -T_E_LOOP (NOFOLLOW final symlink),
+    //   -T_E_OPNOTSUPP (parent Dev cannot create / /srv registry parent),
+    //   -T_E_NOMEM (clone/handle-table), server Rlerror passthrough.
+    //
+    //   Audit-bearing: the #50 path-mutation-family row (AUDIT-TRIGGERS.md).
+    SYS_OPEN_CREATE = 109,   // arg: start_fd(x0) path_va(x1) path_len(x2) omode(x3) perm(x4)
 };
 
 // V-2 (GPU-DESIGN §6.2.1): the host-dictated cache attribute a
@@ -2356,12 +2431,21 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 #define SPAWN_ALLOWANCE_SET          (1u << 0)
 #define SPAWN_ALLOWANCE_FLAGS_ALL    (SPAWN_ALLOWANCE_SET)
 
-// VIVARIUM V-1b (docs/VIVARIUM.md section 12.1): sys_spawn_args.pheno_flags
-// bits. SPAWN_PHENO_LINUX stamps the child Proc PHENO_LINUX in the spawn thunk
-// (before exec / before EL0), so every syscall the child ever issues is decoded
-// through the Linux translation table (kernel/vivarium.c). Descendants inherit
-// the phenotype via rfork (proc.c), which is section 12.1 rule 2: within a
-// declared-Linux vivarium every exec is PHENO_LINUX.
+// VIVARIUM V-1b (docs/VIVARIUM.md section 12.1) + Design D (section 13.10):
+// sys_spawn_args.pheno_flags bits. SPAWN_PHENO_LINUX declares the child a
+// LINUX WORLD at the NAMESPACE level: in the spawn thunk, before EL0, it sets
+// TERRITORY_ROOT_PHENO_LINUX on the child's freshly cloned Territory
+// (territory_declare_linux), and the child's own image is then decided
+// PHENO_LINUX by the same rule every image load uses (phenotype_decide: an
+// MPHENO_LINUX crossing OR the resolving Territory's declaration). Because the
+// declaration rides the namespace and every image load -- every spawn variant
+// and execve -- re-decides from the namespace, the child's execve'd helpers and
+// its rfork descendants (territory_clone copies the flag) stay Linux without
+// any per-Proc inheritance across exec. This deepened the flag's meaning from
+// V-1b's per-Proc stamp (which execve used to carry forward); its value,
+// position, and every existing producer's intent ("this container is Linux")
+// are unchanged. A phenotype is the ABI of the LOADED IMAGE; rfork preserves
+// it (no new image), execve re-decides it.
 //
 // DELIBERATELY UNGATED -- and that is I-43 doing the work, not an oversight:
 // a phenotype confers ABI SHAPE, NEVER AUTHORITY. Every translated call lands
@@ -2373,10 +2457,13 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // DOES confer a role and is therefore gate-checked.
 //
 // Only SYS_SPAWN_FULL_ARGV carries the declaration (the struct has the field;
-// the register-argument spawn variants cannot declare and always spawn native
-// -- section 12.1 rule 3). The v1.0 producer is `viv`, which sets the bit on a
+// the register-argument spawn variants cannot DECLARE -- section 12.1 rule 3 --
+// though since Design D 13.10.6 they too resolve through the pheno-aware
+// resolver and decide by the same rule, so a child spawned through one from a
+// /viv/bin location, or inside a declared Territory, is Linux by location or by
+// inheritance of the clone). The v1.0 producer is `viv`, which sets the bit on a
 // container's ENTRYPOINT spawn when the bundle manifest's annotation
-// `org.thylacine.phenotype` says "linux".
+// `org.thylacine.phenotype` says "linux"; the diorama spawn passes 0.
 #define SPAWN_PHENO_LINUX            (1u << 0)
 #define SPAWN_PHENO_FLAGS_ALL        (SPAWN_PHENO_LINUX)
 
@@ -2828,7 +2915,38 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // The bit is STRIPPED before the omode reaches Dev.open / Dev.create on every
 // path, so no server and no Spoor.mode ever sees it.
 #define SYS_WALK_OPEN_NOFOLLOW     0x20u
-#define SYS_WALK_OPEN_OMODE_VALID  0xB3u
+// The valid omode bit set: access(0x3) + OTRUNC(0x10) + NOFOLLOW(0x20) +
+// OAPPEND(0x40) + OPATH(0x80). Bit 0x40 (OAPPEND) joined at the git chunk
+// (VIVARIUM.md 6.27); the OAPPEND _Static_assert below pins it inside this mask.
+#define SYS_WALK_OPEN_OMODE_VALID  0xF3u
+
+// The OTRUNC modifier the comment above names, given its symbol so the strips
+// in the create core reference the ABI value by meaning rather than literal
+// (the value is pinned inside SYS_WALK_OPEN_OMODE_VALID's bit 4 regardless).
+#define SYS_WALK_OPEN_OTRUNC       0x10u
+// The git chunk (VIVARIUM.md section 6.27): the APPEND modifier. dev9p passes it
+// to the 9P Tlopen as O_APPEND, and Stratum enforces the append server-side --
+// each Twrite to an O_APPEND fid writes at the file's current EOF (server.c
+// h_write). The kernel gains NO append MODE: its write path and its cursor are
+// unchanged, and the FS does the positioning (the append face of "the
+// filesystem is the OS"). Bit 0x40 is Thylacine's own; Plan 9's 0x40 (ORCLOSE)
+// is not implemented here, so there is no collision of MEANING, only of value.
+#define SYS_WALK_OPEN_OAPPEND      0x40u
+_Static_assert(SYS_WALK_OPEN_OAPPEND == 0x40u &&
+               (SYS_WALK_OPEN_OMODE_VALID & SYS_WALK_OPEN_OAPPEND) != 0,
+               "SYS_WALK_OPEN_OAPPEND must be a bit inside SYS_WALK_OPEN_OMODE_VALID");
+// #50 (VIVARIUM.md section 6.24): the EXCLUSIVE-create modifier, at the value
+// the comment above pre-reserved for it. Meaningful ONLY to SYS_OPEN_CREATE
+// (create-first, once; an existing leaf answers -T_E_EEXIST -- atomic at the
+// server, the lockfile primitive). SYS_WALK_OPEN / SYS_OPEN / SYS_WALK_CREATE
+// do not admit it: their masks are unchanged, so the bit arrives there as an
+// invalid-omode reject, never a silent drop.
+#define SYS_WALK_OPEN_OEXCL        0x1000u
+// SYS_OPEN_CREATE's omode envelope: access bits + OTRUNC + NOFOLLOW + OEXCL.
+// OPATH is deliberately absent (a navigation handle cannot want creation) --
+// its bit here is a loud -T_E_INVAL.
+#define SYS_OPEN_CREATE_OMODE_VALID \
+    ((SYS_WALK_OPEN_OMODE_VALID & ~SYS_WALK_OPEN_OPATH) | SYS_WALK_OPEN_OEXCL)
 
 // SYS_WALK_CREATE perm: the Plan 9 perm word. Low 9 bits are the POSIX
 // rwxrwxrwx mode; the DMDIR bit selects directory creation. All other Plan 9
@@ -3069,5 +3187,14 @@ struct exception_context;
 // path and sched()'s context-switch picks another thread. The user
 // thread is left in EXITING state until wait_pid reaps it.
 void syscall_dispatch(struct exception_context *ctx);
+
+// The follow-up round's F1 gate predicate (defined in syscall.c): SYS_ATTACH_9P
+// admits pipe pairs ONLY -- the spoor transport is sound solely over a
+// non-blocking tx, and CNBFRAME is honored by devpipe alone (a /srv byte-conn or
+// a dev9p file tx BLOCKS under the 9P client's held c->lock, the #360 lock-
+// across-sleep extinction). Non-static so the regression (test_pipe.c) exercises
+// the ACTUAL predicate the handler gates on, not a re-derivation.
+struct Spoor;
+bool sys_attach_9p_ends_are_pipes(const struct Spoor *tx, const struct Spoor *rx);
 
 #endif // THYLACINE_SYSCALL_H

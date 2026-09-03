@@ -110,6 +110,9 @@ pub const T_SYS_PIPE: u64            = 8;
 pub const T_SYS_READ: u64            = 9;
 pub const T_SYS_WRITE: u64           = 10;
 pub const T_SYS_CLOSE: u64           = 11;
+// P5-attach-syscall: a 9P attach over a byte-pipe pair (tx, rx). Backs
+// t_attach_9p; the byte-mode /srv twin is T_SYS_ATTACH_9P_SRV (52).
+pub const T_SYS_ATTACH_9P: u64       = 13;
 // P5-spawn-wait: reap one zombie child + return its (pid, status). Backs
 // t::process::Child::wait (U-2d).
 pub const T_SYS_WAIT_PID: u64        = 22;
@@ -245,6 +248,13 @@ pub const T_SYS_READDIR: u64          = 56;
 // FS-gamma (IDENTITY-DESIGN.md section 9.3): atomic rename/move + remove.
 pub const T_SYS_RENAME: u64           = 57;
 pub const T_SYS_UNLINK: u64           = 58;
+// #50 (VIVARIUM.md section 6.24): path-based open-or-create -- the ARCH
+// section 11.2 create(name, mode, perm) row, minted. One syscall replaces the
+// userspace split + parent-T_OPATH + WALK_CREATE dance (and its cwd
+// handling): the kernel joins the cwd exactly as SYS_OPEN, stalks the parent,
+// and composes create-else-open bounded (T_OEXCL / DMDIR are the exclusive
+// arms, server-atomic).
+pub const T_SYS_OPEN_CREATE: u64      = 109;
 // A-2a (IDENTITY-DESIGN.md section 9.5): chmod/chown via Tsetattr.
 pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;
@@ -320,6 +330,9 @@ pub const T_OWRITE: u32               = 1;
 pub const T_ORDWR: u32                = 2;
 pub const T_OEXEC: u32                = 3;
 pub const T_OTRUNC: u32               = 0x10;
+/// The git 6.27 append bit: dev9p forwards it to the 9P Tlopen as O_APPEND and
+/// Stratum positions each write at EOF server-side (the kernel has no append mode).
+pub const T_OAPPEND: u32              = 0x40;
 // DISTRO D-1: do not expand a symlink FINAL component. What that yields depends
 // on the rest of the omode, which is why it is a flag and not an access mode:
 // with T_OPATH the returned handle IS the link (the v1.0 lstat spelling --
@@ -334,6 +347,11 @@ pub const T_ONOFOLLOW: u32            = 0x20;
 // SYS_CHROOT target (a normally-opened handle is not: 9P forbids Twalk from an
 // opened fid). Access bits are ignored when set.
 pub const T_OPATH: u32                = 0x80;
+// #50 (VIVARIUM.md section 6.24): EXCLUSIVE create, meaningful ONLY to
+// SYS_OPEN_CREATE (create-first, once; an existing leaf answers EEXIST --
+// atomic at the server, the lockfile primitive). The other omode-taking
+// syscalls reject the bit. Mirrors SYS_WALK_OPEN_OEXCL.
+pub const T_OEXCL: u32                = 0x1000;
 
 // SYS_WALK_CREATE perm: low 9 bits = POSIX mode; DMDIR selects a directory.
 // Must mirror SYS_WALK_CREATE_PERM_VALID / SYS_WALK_CREATE_DMDIR in the kernel.
@@ -594,6 +612,10 @@ pub const T_MCREATE: u32              = 0x0008;
 // #217: the mounted device instance may not back an executable mapping --
 // refuses exec resolution AND the file-backed PROT_EXEC phenotype mmap arm.
 pub const T_MNOEXEC: u32              = 0x0010;
+// VIVARIUM section 13: a binary whose exec resolution CROSSES this mount runs the
+// Linux phenotype (the /viv/bin subtree-scope declaration channel). Ungated: an
+// ABI-shape declaration, never authority (I-43).
+pub const T_MPHENO_LINUX: u32        = 0x0020;
 
 // path_id_t — abstract path token used by the mount/unmount/bind
 // surface at v1.0. The kernel comment is the canonical reference:
@@ -1437,6 +1459,32 @@ pub unsafe fn t_pivot_root(new_root_fd: i64) -> i64 {
         "svc #0",
         inlateout("x0") x0,
         in("x8") T_SYS_PIVOT_ROOT,
+        options(nostack)
+    );
+    x0
+}
+
+/// t_attach_9p -- drive a 9P attach over a byte-pipe PAIR (SYS_ATTACH_9P):
+/// `tx_fd` carries client->server bytes (needs RIGHT_WRITE), `rx_fd`
+/// server->client bytes (needs RIGHT_READ) -- two Plan 9 pipes from `t_pipe`
+/// with the matching ends handed to the server (the stub-driver shape), or one
+/// duplex Spoor passed as both. The kernel runs Tversion + Tattach (asserting
+/// the caller's kernel-stamped principal as `n_uname`; the value passed here
+/// is vestigial) and returns a KOBJ_SPOOR rooting the attached tree
+/// (R|W|TRANSFER). The attach holds its own refs on both transport Spoors, so
+/// the pipe fds may be closed afterwards. Returns the new fd (>= 0) or -1.
+#[inline(always)]
+pub unsafe fn t_attach_9p(tx_fd: i64, rx_fd: i64, aname: *const u8, aname_len: usize,
+                          n_uname: u64) -> i64 {
+    let mut x0: i64 = tx_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") rx_fd as u64,
+        in("x2") aname as u64,
+        in("x3") aname_len as u64,
+        in("x4") n_uname,
+        in("x8") T_SYS_ATTACH_9P,
         options(nostack)
     );
     x0
@@ -2512,6 +2560,32 @@ pub unsafe fn t_walk_create(parent_fd: i64, name: *const u8, name_len: usize,
     x0
 }
 
+// t_open_create — path-based open-or-create (#50; SYS_OPEN_CREATE = 109).
+// `start_fd` is a RIGHT_READ navigation base or T_WALK_OPEN_FROM_ROOT (a
+// relative path then joins the cwd EXACTLY as SYS_OPEN — the parity the
+// syscall exists for). `omode` admits access + T_OTRUNC + T_ONOFOLLOW +
+// T_OEXCL (T_OPATH rejected); `perm` is the low-9 mode, plus
+// T_WALK_CREATE_DMDIR for mkdir-by-path (create-only, opened OREAD).
+// Plain create is open-first / create-on-NOENT / bounded-retry in the
+// KERNEL; T_OEXCL and DMDIR are one server-atomic create. Returns the new
+// fd (>= 0) or -T_E_* (a real errno, not a bare -1).
+#[inline(always)]
+pub unsafe fn t_open_create(start_fd: i64, path: *const u8, path_len: usize,
+                            omode: u32, perm: u32) -> i64 {
+    let mut x0: i64 = start_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") path as u64,
+        in("x2") path_len as u64,
+        in("x3") omode as u64,
+        in("x4") perm as u64,
+        in("x8") T_SYS_OPEN_CREATE,
+        options(nostack)
+    );
+    x0
+}
+
 // t_fsync — durability barrier on `fd` (KOBJ_SPOOR, RIGHT_WRITE). datasync 0 =
 // full, non-zero = data only. Returns 0 / -1. FS-mutation foundation (§9.2).
 #[inline(always)]
@@ -3044,6 +3118,21 @@ unsafe extern "C" fn __libthyla_rt_start(argc: usize, argv: *const *const u8) ->
     RT_ARGC.store(argc, Ordering::Release);
     RT_ARGV.store(argv as *mut *const u8, Ordering::Release);
     capture_auxv(argc, argv);
+    // #237: mask the `pipe` note by default -- a native Rust program that writes
+    // to a closed pipe gets EPIPE, not death (the kernel's I-19 default is now
+    // TERMINATE; a program unmasks T_NOTE_BIT_PIPE to opt into Plan 9 pipe-death).
+    // A native Proc resets note_mask to 0 at exec, so a plain SET is correct. The
+    // libt (C) _start carries the identical mask for C-native bins.
+    //
+    // SCOPE: the MAIN thread only. note_mask is per-thread and native thread-spawn
+    // does NOT inherit it (the kernel rfork rule), so a thread started via
+    // thread::spawn_raw begins PIPE-unmasked and would take the proc-wide pipe
+    // latch on a closed-pipe write. No shipping multi-threaded libthyla-rs program
+    // writes a closed pipe on a spawned thread (the spawners are all benchmarks /
+    // torture tests over sockets or CPU/memory), so this is a latent limitation,
+    // not a regression -- the Go runtime, which IS such a writer, masks per-M in
+    // minit. A spawned thread that needs EPIPE-not-death masks NOTE_BIT_PIPE itself.
+    let _ = t_note_mask(1u64 << T_NOTE_BIT_PIPE, core::ptr::null_mut());
     rs_main()
 }
 

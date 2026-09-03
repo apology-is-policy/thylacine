@@ -574,6 +574,43 @@ void notes_mark_self_managing(struct Proc *p);
 // those sites.
 bool thread_die_pending(struct Thread *t);
 
+// item 11 (ARCH §8.8.3): the NON-death sibling of thread_die_pending. True iff a
+// CAUGHT, deliverable note (a handler is installed OR the Proc self-manages its
+// notes fd) of a family UNMASKED for `t` is queued -- so `t`'s caught-note-
+// interruptible sleep should unwind SLEEP_NOTEINTR and return -T_E_INTR while
+// LIVING (the note delivers at the EL0-return tail). LOCK-FREE, same shape as
+// thread_die_pending; read only at the sleep sites' caught_ok arm, ALWAYS after
+// the die-check (death wins). Disjoint from thread_die_pending: the caught
+// latch and the terminate latch are never both set for one note.
+bool thread_caught_note_deliverable(struct Thread *t);
+
+// bug-2 (VIVARIUM 6.23): does `t` hold a PHENO_LINUX note handler that ESCAPED
+// its frame -- siglongjmp'd to an ancestor sigsetjmp point without rt_sigreturn,
+// so in_handler is stuck true and the N-3 re-entrancy guard would otherwise
+// refuse every future caught-note delivery for the life of the guest? True iff
+// in_handler is set, the Proc is PHENO_LINUX, and the current SP_EL0 (sp_el0,
+// the caller's ctx->sp) has unwound AT OR ABOVE the pre-handler sp captured at
+// delivery (note_saved_sp_el0). A live handler always runs BELOW that sp (the
+// sigframe is pushed below it; nested/deep handlers only go lower), and a
+// siglongjmp target must be an ANCESTOR frame ON THAT STACK (returned env is UB)
+// -- older, hence higher -- so the discrimination is total for a single-stack
+// guest, not a heuristic (the cross-stack swapcontext-to-a-higher-stack case is
+// the documented F1 exception -- VIVARIUM 6.23 + the section-9 DEGRADED row).
+// Both operands are the SP_EL0 bank. PURE: the caller clears in_handler on true.
+// LOAD-BEARING: sigaltstack(132) stays ENOSYS (else an alt-stack handler runs at
+// an unrelated sp and the compare is meaningless).
+bool thread_note_handler_escaped(const struct Thread *t, u64 sp_el0);
+
+// 11b-9p (item 11): does `p`'s reader handle -T_E_INTR? A caught-note wait unwind
+// returns EINTR to userspace, and a reader that does not expect it breaks (the
+// native ut $(cmd) capture, 11b-core's build bug). PHENO_LINUX programs go through
+// musl, which is EINTR-aware by construction (POSIX); native (libthyla-rs) readers
+// are NOT until they retry -T_E_INTR (11c). So the caught-note sleep unwind is gated
+// on this in the sched caught branch: only an EINTR-ready Proc unwinds; a native
+// reader's opted-in sleep degrades to death-only (the note delivers late, the
+// pre-item-11 behavior -- no regression). Widens to native per-reader at 11c.
+bool proc_caught_note_eintr_ready(struct Proc *p);
+
 // =============================================================================
 // Synthetic posters — kernel-internal callers (proc.c::exits, pipe.c write
 // path). These wrap notes_post with the appropriate canonical name + arg

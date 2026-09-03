@@ -306,32 +306,39 @@ static int notes_find_locked(struct NoteQueue *q, const char *name,
 // SLEEP_INTR so the Proc reaches the tail and dies), and a STOP has nothing
 // to say to a sleeper -- and tty:winch /
 // tty:cont are informational (queue for the fd-read path, no default
-// action -- the pipe/child_exit shape). Returns the class's LATCH flag
+// action -- the child_exit shape; #237 moved pipe OUT of this shape into
+// TERMINATE). Returns the class's LATCH flag
 // (PROC_FLAG_INTR_TERMINATE_PENDING for interrupt,
-// PROC_FLAG_TTY_TERMINATE_PENDING for the tty pair -- each latch pairs
+// PROC_FLAG_TTY_TERMINATE_PENDING for the tty pair, and #237's
+// PROC_FLAG_PIPE_TERMINATE_PENDING for pipe -- each latch pairs
 // with ITS OWN family mask bit in the lock-free die predicate), or 0 for a
 // non-terminate name.
-// #15 rewrote the CLASS test to read g_known_notes' `dfl` column instead of
-// re-listing tty:quit / tty:hup by literal here. Behaviour-identical on all
-// nine rows -- the literals it replaced were exactly the TTY-family rows whose
-// dfl is TERMINATE -- but a tenth terminate-class note now gets its latch from
-// its own table row rather than from someone remembering to extend this `if`.
+// #15 rewrote the CLASS test (is-this-terminate?) to read g_known_notes' `dfl`
+// column instead of re-listing tty:quit / tty:hup by literal here, so a new
+// terminate note in an EXISTING family needs no edit. The FAMILY->flag arm
+// below is separate: a new terminate FAMILY still adds a case (as #237's pipe
+// row did -- TERMINATE in the table catches its class for free, but NOTE_BIT_-
+// PIPE had no prior latch, so its bit->flag line was added).
 //
 // The family split stays: a latch is per-FAMILY (one flag for interrupt, one
 // for the tty family), not per-note, because notes_drain_intr_locked clears a
 // latch when the last note sharing it is consumed.
 //
-// TWO terminate-class notes deliberately yield NO latch, and both are load-
-// bearing omissions rather than oversights:
+// ONE terminate-class note deliberately yields NO latch, a load-bearing
+// omission rather than an oversight:
 //   `kill` -- non-catchable (N-4); the EL0-tail kill branch terminates it
-//     before the latch machinery is consulted at all.
-//   `pipe` -- the EL0-tail uncaught arm therefore never default-terminates on
-//     it, which contradicts docs/reference/83-pouch-signals.md:20 and
-//     ARCHITECTURE.md's `pipe` row. That disagreement is REAL and OPEN (task
-//     #237); #15 preserves the behaviour rather than changing it in passing,
-//     because giving `pipe` a latch newly kills native programs that write to
-//     a closed pipe. Named here so the tidier code does not read as though the
-//     gap were designed.
+//     before the latch machinery is consulted at all, so a latch would be
+//     dead weight.
+//
+// `pipe` USED to be a second such omission -- the EL0-tail uncaught arm never
+// default-terminated on it, contradicting docs/reference/83-pouch-signals.md
+// and ARCHITECTURE.md's `pipe` row (#15 named the gap but preserved it, since
+// giving `pipe` a latch newly kills native programs that write to a closed
+// pipe). #237 closes it: `pipe` now gets PROC_FLAG_PIPE_TERMINATE_PENDING
+// below, and the newly-exposed native runtimes (libthyla-rs / libt / the Go
+// rt0) mask NOTE_BIT_PIPE at startup so their default stays EPIPE-not-death;
+// an unmasked write-to-closed-pipe now default-terminates, making the I-19
+// `pipe`=TERMINATE claim finally true.
 static u32 notes_name_terminate_latch(const char *name) {
     if (notes_default_action(name) != NOTE_DFL_TERMINATE) return 0;
     int bit = notes_name_to_bit(name);
@@ -339,6 +346,8 @@ static u32 notes_name_terminate_latch(const char *name) {
         return PROC_FLAG_INTR_TERMINATE_PENDING;
     if (bit == (int)NOTE_BIT_TTY)
         return PROC_FLAG_TTY_TERMINATE_PENDING;
+    if (bit == (int)NOTE_BIT_PIPE)
+        return PROC_FLAG_PIPE_TERMINATE_PENDING;
     return 0;
 }
 
@@ -418,6 +427,36 @@ static void notes_arm_intr_terminate_locked(struct Proc *p, const char *name) {
     __atomic_or_fetch(&p->proc_flags, latch, __ATOMIC_RELEASE);
 }
 
+// The caught-note sub-field (proc.h) carries a literal mask because proc.h does
+// not include notes.h; assert it equals NOTE_MASK_SUPPORTED shifted, so a new
+// NOTE_BIT_* family (widening NOTE_MASK_SUPPORTED) can never silently outgrow it.
+_Static_assert((NOTE_MASK_SUPPORTED << PROC_CAUGHT_NOTE_SHIFT) == PROC_FLAG_CAUGHT_NOTE_MASK,
+               "item 11: PROC_FLAG_CAUGHT_NOTE_MASK must equal NOTE_MASK_SUPPORTED << SHIFT");
+
+// item 11 (ARCH 8.8.3): the CAUGHT-note twin of the terminate arm above -- its
+// EXACT COMPLEMENT. The terminate arm REFUSES when a live handler exists OR the
+// Proc is self-managing; this one arms PRECISELY THEN. A committed note whose
+// family is caught (a handler will run it, or a self-managing notes fd will read
+// it) arms that family's bit in the PROC_FLAG_CAUGHT_NOTE_MASK sub-field, which
+// the lock-free sleep predicate thread_caught_note_deliverable reads. Per-family
+// (bit == NOTE_BIT_*) so the sleeper's ~note_mask gate stays precise (the PTY-1b
+// reason). KILL is excluded: it is non-catchable and routes through
+// group_exit_msg (death), never a caught-deliverable note. The wake of already-
+// blocked peers is the caller's duty (proc_caught_note_wake needs g_proc_table_-
+// lock); a not-yet-sleeping thread reads the latch at its own register-then-
+// observe. Same discipline as the terminate arm: caller holds q->lock; never
+// kproc; not rfork-propagated (proc_flags never are).
+static void notes_arm_caught_note_locked(struct Proc *p, const char *name) {
+    if (p == kproc()) return;
+    int bit = notes_name_to_bit(name);
+    if (bit < 0 || bit == (int)NOTE_BIT_KILL) return;
+    if (!notes_proc_has_live_handler(p, name) && !proc_is_self_managing_notes(p))
+        return;
+    __atomic_or_fetch(&p->proc_flags,
+                      (1u << (PROC_CAUGHT_NOTE_SHIFT + (u32)bit)),
+                      __ATOMIC_RELEASE);
+}
+
 // #240: the STOP twin of the terminate arm above. A committed STOP-disposition
 // note (tty:susp) arms the freshness flag proc_job_stop_self reads before it
 // applies #15's deferred stop; any cont clears it. See the susp_stop_armed
@@ -457,6 +496,27 @@ static void notes_drain_intr_locked(struct Proc *p, struct NoteQueue *q,
         idx = (idx + 1) % NOTE_QUEUE_DEPTH;
     }
     __atomic_and_fetch(&p->proc_flags, ~latch, __ATOMIC_RELEASE);
+}
+
+// item 11 (ARCH 8.8.3): the CAUGHT-note twin of notes_drain_intr_locked. When a
+// note of family F pops, clear F's caught bit iff no queued note of family F
+// remains -- mirroring the terminate drain per-family (the post-time caught
+// snapshot is kept while any same-family note is queued, exactly as the
+// terminate latch keeps its class). KILL excluded to match the arm. A bit that
+// was never armed (an uncaught family) just clears a zero -- harmless. Caller
+// MUST hold q->lock.
+static void notes_drain_caught_note_locked(struct Proc *p, struct NoteQueue *q,
+                                           const struct Note *popped) {
+    int bit = notes_name_to_bit(popped->name);
+    if (bit < 0 || bit == (int)NOTE_BIT_KILL) return;
+    u32 fambit = (1u << (PROC_CAUGHT_NOTE_SHIFT + (u32)bit));
+    u32 idx = q->head;
+    for (u32 n = 0; n < q->count; n++) {
+        if (notes_name_to_bit(q->ring[idx].name) == bit)
+            return;             // another same-family note remains queued
+        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+    }
+    __atomic_and_fetch(&p->proc_flags, ~fambit, __ATOMIC_RELEASE);
 }
 
 int notes_post(struct Proc *p, const char *name, u32 arg,
@@ -544,6 +604,10 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
             // #240: and the STOP twin -- a coalesced susp is still a susp
             // asking for a stop, so it re-arms exactly as a fresh one does.
             notes_arm_susp_stop_locked(p, name);
+            // item 11: the CAUGHT-note twin -- re-evaluate the caught
+            // disposition too (a handler may have been installed since the
+            // original post declined to arm it).
+            notes_arm_caught_note_locked(p, name);
             // Wake registered poll_waiters AND devnotes_read's pollers
             // (same list at F3 close).
             poll_waiter_list_wake(&q->poll_list);
@@ -573,13 +637,20 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // g_proc_table_lock for the p->threads walk): every interrupt-posting
     // site calls proc_interrupt_terminate_wake after this returns. A
     // not-yet-sleeping thread is covered without the wake -- its sleep's
-    // register-then-observe reads the latch.
+    // register-then-observe reads the latch. (notes_post_pipe does NOT yet do
+    // this wake -- #237 F1 is open; see the note there.)
     notes_arm_intr_terminate_locked(p, name);
     // #240: and the STOP twin -- see notes_arm_susp_stop_locked. Armed on the
     // COMMIT, after the -EAGAIN return above: a susp that never made the queue
     // is never delivered, so arming for it would leave the flag set for an
     // NDFLT that a LATER note reaches.
     notes_arm_susp_stop_locked(p, name);
+    // item 11 (ARCH 8.8.3): the CAUGHT-note twin -- arms a family bit iff the
+    // committed note is caught (handler or self-managing). Same "arm on COMMIT"
+    // ordering as the STOP twin. The wake of ALREADY-blocked peers is likewise
+    // the caller's duty (proc_caught_note_wake, needs g_proc_table_lock); a
+    // not-yet-sleeping thread reads this latch at its own register-then-observe.
+    notes_arm_caught_note_locked(p, name);
 
     // Wake every registered poll_waiter (including any devnotes_read
     // parked on this list per F3 close) BEFORE we drop the queue lock.
@@ -725,6 +796,7 @@ int notes_dequeue_for_fd_locked(struct Proc *p, struct Thread *t,
             // LS-5c: draining the last queued interrupt un-arms the
             // terminate latch (an inherited-notes-fd reader consumed it).
             notes_drain_intr_locked(p, q, out);
+            notes_drain_caught_note_locked(p, q, out);  // item 11: the caught twin
             return 1;
         }
         idx = (idx + 1) % NOTE_QUEUE_DEPTH;
@@ -767,6 +839,7 @@ int notes_dequeue_locked(struct Proc *p, struct Thread *t, struct Note *out) {
                 // clear -- notes_set_handler cleared it at registration --
                 // so this is defense-in-depth for the dispatcher pop).
                 notes_drain_intr_locked(p, q, out);
+                notes_drain_caught_note_locked(p, q, out);  // item 11: caught twin
                 return 1;
             }
             idx = (idx + 1) % NOTE_QUEUE_DEPTH;
@@ -824,6 +897,7 @@ u32 notes_discard_name(struct Proc *p, const char *name) {
         struct Note gone = q->ring[found];
         notes_pop_at_locked(q, (u32)found);
         notes_drain_intr_locked(p, q, &gone);
+        notes_drain_caught_note_locked(p, q, &gone);  // item 11: caught twin
         removed++;
     }
     spin_unlock(&q->lock);
@@ -848,6 +922,13 @@ void notes_post_child_exit(struct Proc *parent, int child_pid, int status) {
 void notes_post_pipe(struct Proc *writer) {
     if (!writer) return;
     (void)notes_post(writer, "pipe", 0u, NULL, true);
+    // #237 F1 (the prosecutor's P2) is OPEN, not fixed here: the naive
+    // "mirror the self-post wake" (proc_interrupt_terminate_wake after this
+    // post) DETERMINISTICALLY breaks the boot at the L-6c Alpine SIGPIPE gate
+    // -- reverted 2026-08-19. The wake's mechanism vs the gate is not yet
+    // understood (single-threaded writers should make it a no-op, yet the boot
+    // dies), so F1 needs a proper investigation, not a checkpoint-line fix.
+    // See memory/audit_237_closed_list.md.
 }
 
 // ---------------------------------------------------------------------------
@@ -1051,6 +1132,17 @@ int notes_stop_dequeue_locked(struct Proc *p, struct Thread *t,
     // `dfl` is TERMINATE), so notes_drain_intr_locked would return at its first
     // line for any note this can ever pop -- present or future. The other pop
     // sites call it because THEY can pop a terminate-class note.
+    //
+    // The CAUGHT drain (item 11, round F1) is DIFFERENT and MUST run: the
+    // caught latch is per-FAMILY, and the TTY family bit is SHARED across
+    // tty:winch/susp/cont/quit/hup. A caught tty:winch (a SIGWINCH handler)
+    // arms the family bit; this pop removes a same-family sibling (an uncaught
+    // tty:susp), so the family bit must be re-evaluated -- else it stays
+    // STALE-ARMED with no tty note queued, and thread_caught_note_deliverable
+    // reads true forever -> an opted-in reader EINTR-livelocks. notes_drain_-
+    // caught_note_locked self-guards (a no-op unless the popped name's family
+    // has a caught bit and no same-family note remains).
+    notes_drain_caught_note_locked(p, q, out);
     return 1;
 }
 
@@ -1077,8 +1169,7 @@ void notes_set_handler(struct Proc *p, u64 handler_va) {
         // and a blocked peer is then covered by the death cascade exits()
         // triggers; see ARCH 8.8.2.)
         __atomic_and_fetch(&p->proc_flags,
-                           ~(PROC_FLAG_INTR_TERMINATE_PENDING |
-                             PROC_FLAG_TTY_TERMINATE_PENDING),
+                           ~PROC_FLAG_TERMINATE_PENDING_MASK,
                            __ATOMIC_RELEASE);
     }
     spin_unlock(&q->lock);
@@ -1096,8 +1187,7 @@ void notes_mark_self_managing(struct Proc *p) {
     spin_lock(&q->lock);
     proc_mark_self_managing_notes(p);
     __atomic_and_fetch(&p->proc_flags,
-                       ~(PROC_FLAG_INTR_TERMINATE_PENDING |
-                         PROC_FLAG_TTY_TERMINATE_PENDING),
+                       ~PROC_FLAG_TERMINATE_PENDING_MASK,
                        __ATOMIC_RELEASE);
     spin_unlock(&q->lock);
 }
@@ -1106,8 +1196,10 @@ void notes_mark_self_managing(struct Proc *p) {
 // loads of group_exit_msg + proc_flags, and the OWNER-read note_mask (`t` is
 // always the calling thread at every site -- sleep/tsleep's register-then-
 // observe, torpor's post-register check, the 9P reader's unwind decision --
-// and a thread's mask only changes by its own SYS_NOTE_MASK, never while it
-// is inside one of those calls). A masked thread reads false from the latch
+// and note_mask is written ONLY by the owning thread: SYS_NOTE_MASK, the
+// phenotype's rt_sigprocmask row, the Linux delivery store, and the phenotype
+// sigreturn restore -- never while that thread is inside one of those waits).
+// A masked thread reads false from the latch
 // leg: it neither unwinds nor terminates until it unmasks (masking defers --
 // matching the EL0-return tail, which also applies the observing thread's
 // mask, so a latch-woken thread never unwinds into a tail that refuses to
@@ -1157,8 +1249,105 @@ bool thread_die_pending(struct Thread *t) {
         if ((flags & PROC_FLAG_TTY_TERMINATE_PENDING) != 0 &&
             (t->note_mask & (1u << NOTE_BIT_TTY)) == 0)
             return true;
+        // #237: the pipe terminate latch, PER-FAMILY like the two above -- a
+        // thread that masked NOTE_BIT_PIPE (libthyla-rs / libt / the Go rt0
+        // mask it at startup, so a native's default on a closed-pipe write is
+        // EPIPE-not-death) does NOT unwind here; an UNMASKED one terminates.
+        // This per-family precision -- not the whole-class MASK -- is exactly
+        // where "mask to opt out of Plan 9 pipe-death" lives.
+        if ((flags & PROC_FLAG_PIPE_TERMINATE_PENDING) != 0 &&
+            (t->note_mask & (1u << NOTE_BIT_PIPE)) == 0)
+            return true;
     }
     return false;
+}
+
+// item 11 (ARCH 8.8.3): the NON-death sibling of thread_die_pending. True iff a
+// CAUGHT, deliverable note of a family UNMASKED for THIS thread is queued -- so
+// a caught-note-interruptible sleep should unwind SLEEP_NOTEINTR, return
+// -T_E_INTR, and deliver the note at its EL0-return tail WITHOUT dying.
+//
+// LOCK-FREE, exactly as thread_die_pending: acquire-load proc_flags (pairs with
+// notes_arm_caught_note_locked's RELEASE arm), OWNER-read note_mask (written
+// only by the owning thread -- see the thread_die_pending contract). The
+// caught-note sub-field is per-family; `& ~note_mask` drops the families this
+// thread deferred. Gated off for kproc + the exit_close_active finalization
+// window (a closing thread must not EINTR-unwind its orderly handle close) --
+// the same two gates thread_die_pending applies. DISJOINT from thread_die_-
+// pending by construction: a caught bit is armed ONLY for a caught note, which
+// the terminate arm refuses -- so no note ever sets both a terminate latch and
+// a caught bit, and death (checked FIRST at every sleep site) always wins.
+bool thread_caught_note_deliverable(struct Thread *t) {
+    if (!t) return false;
+    if (t->exit_close_active) return false;
+    // A note that the N-3 re-entrancy guard will refuse to deliver is NOT
+    // deliverable, and treating it as such is a read-interrupt LIVELOCK: the
+    // sleep-interrupt predicate returns SLEEP_NOTEINTR, the op unwinds to EL0
+    // to deliver -- where notes_deliver_at_el0_return hits `if (t->in_handler)
+    // return` and re-queues the note -- so the very next blocking read is
+    // interrupted again, and again, with zero forward progress (measured: a
+    // pouch shell whose SIGINT handler escaped its frame without rt_sigreturn
+    // left in_handler stuck, and the child_exit from a finished `uname | tr`
+    // stormed its pts read ~40% of runs). Gate the sleep interrupt on the SAME
+    // condition the delivery site does: a note is deliverable only when no
+    // handler is running. When in_handler later clears (rt_sigreturn) the note
+    // delivers at the next EL0-return; the sleeping read meanwhile parks and
+    // wakes on data, exactly as a no-caught-note read would.
+    if (t->in_handler) return false;
+    struct Proc *p = t->proc;
+    if (!p || p == kproc()) return false;
+    u32 flags  = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    u32 caught = (flags & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
+    return (caught & ~t->note_mask & NOTE_MASK_SUPPORTED) != 0;
+}
+
+// bug-2 (VIVARIUM.md §6.23): detect a PHENO_LINUX note handler that ESCAPED its
+// frame -- siglongjmp'd to an ancestor sigsetjmp point without rt_sigreturn --
+// so in_handler is stuck true (it is cleared ONLY by notes_noted_restore/exec)
+// and the N-3 re-entrancy guard would otherwise refuse EVERY future caught-note
+// delivery for the life of the guest (permanent signal-deafness + a
+// NOTE_QUEUE_DEPTH pile-up). The caller clears in_handler on a true return.
+//
+// note_saved_sp_el0 is the PRE-handler sp captured at delivery; the handler is
+// launched at ctx->sp = sigframe BELOW it, and nested/deep handlers only push
+// lower -- so a LIVE handler is ALWAYS below the saved sp. A siglongjmp target
+// must be an ANCESTOR frame ON THAT STACK (jumping to a returned env is UB) --
+// older, hence higher -- so a same-stack escape is ALWAYS at or above it: total
+// discrimination for a single-contiguous-stack guest, not a heuristic. Both
+// operands are the SP_EL0 bank (exception_context.sp is KERNEL_ENTRY's mrs
+// sp_el0; the kernel runs EL1h), so the compare is never across banks.
+//   F1 (audit): the claim fails ACROSS stacks -- a swapcontext from a handler to
+//   a HIGHER-addressed separate stack (a suspended coroutine, not an
+//   abandonment) also trips >=, false-clearing in_handler -> a nested delivery
+//   overwrites the single note_saved_* slot. Contained (guest-self-corruption,
+//   validated user VA, per-Thread, kill-immune) + exotic (no v1.0 target does
+//   signal-driven cross-stack coroutine switching). Documented VIVARIUM 6.23 +
+//   the section-9 DEGRADED row; the VMA-same-stack hardening is tracked for v1.x.
+//
+// LOAD-BEARING: this soundness rests on the handler running on the SAME stack as
+// the pre-handler sp, which holds only while sigaltstack is unserved. The static
+// assert ties this detector to the sigaltstack row so a renumber trips the build;
+// the disposition (that 132 resolves to ENOSYS, not a served alt-stack) is pinned
+// by the runtime regression in test_notes.c -- a table-row VALUE cannot be
+// _Static_asserted. Anyone serving sigaltstack must revisit this and §6.23.
+_Static_assert(VIV_LINUX_SIGALTSTACK == 132,
+               "bug-2 escape-detector: sigaltstack must stay unserved (its "
+               "ENOSYS is load-bearing for the sp-comparison); revisit "
+               "thread_note_handler_escaped + VIVARIUM.md 6.23 before serving it");
+bool thread_note_handler_escaped(const struct Thread *t, u64 sp_el0) {
+    if (!t || !t->in_handler) return false;
+    struct Proc *p = t->proc;
+    if (!p || p->phenotype != PHENO_LINUX) return false;
+    return sp_el0 >= t->note_saved_sp_el0;
+}
+
+// 11b-9p (item 11): the caught-note sleep unwind returns -T_E_INTR to userspace;
+// gate it on a reader that expects EINTR. A PHENO_LINUX Proc goes through musl
+// (EINTR-aware by POSIX); a native (libthyla-rs) reader is not until 11c teaches
+// it to retry. phenotype is the proxy: exact and unforgeable (I-43 stamps it at
+// spawn/exec). See the notes.h contract for the 11c widening path.
+bool proc_caught_note_eintr_ready(struct Proc *p) {
+    return p && p->phenotype == PHENO_LINUX;
 }
 
 // VIVARIUM V-6c: deliver the head note to a Linux-phenotype handler.
@@ -1410,6 +1599,16 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
         // unreachable
     }
 
+    // bug-2 (VIVARIUM.md §6.23): defense-in-depth handler-escape clear, placed
+    // at the exact point the N-3 guard below would otherwise refuse. The EL0-
+    // entry clear (viv_linux_dispatch) is the PRIMARY -- it fires before a
+    // blocking read can park, which the liveness argument requires; this copy
+    // covers a fault-return-before-next-syscall window and self-heals the guard
+    // here. ctx->sp was validated as a sane user SP_EL0 above (F1). in_handler is
+    // written only by the owning thread, and this tail runs on it, so the clear
+    // needs no extra lock; q->lock stays held for the delivery that follows.
+    if (thread_note_handler_escaped(t, ctx->sp)) t->in_handler = false;
+
     // N-3 re-entrancy guard: skip non-kill delivery while a handler is
     // running. (R2-F2: kill bypasses this check above.)
     if (t->in_handler) {
@@ -1425,27 +1624,31 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     // and `handler_va` is 0, so leaving this underneath would route every
     // Linux signal straight into the Plan 9 no-handler path.
     //
-    // A PHENO_LINUX Proc is not self-managing by construction (there is no
-    // translation row for SYS_NOTE_OPEN and a native number reaches the table
-    // first), but the check is kept: it is the predicate that means "someone
-    // else consumes this queue", and reading the disposition table would be
-    // wrong if that were ever true.
+    // A PHENO_LINUX image is never self-managing. Before Design D that held
+    // by construction (no translation row for SYS_NOTE_OPEN, and a native
+    // number reaches the table first); since D it is RESTORED BY RESET --
+    // execve re-decides the phenotype, so a native image that opened its
+    // notes fd can be followed by a Linux image in the same Proc, and
+    // proc_exec_drop_image_state clears the mark at every image load (audit
+    // F1) so that image never arrives here with this branch switched off.
+    // The check is kept: it is the predicate that means "someone else
+    // consumes this queue", and reading the disposition table would be wrong
+    // if that were ever true.
     // -----------------------------------------------------------------------
     if (p->phenotype == PHENO_LINUX && !proc_is_self_managing_notes(p)) {
         enum viv_signote sn = viv_signote_from_note_name(candidate.name);
-        // The 32-byte entry is read by the OWNING thread only; the sole
-        // cross-thread reader is notes_post's SIG_IGN hook, which touches one
-        // naturally-aligned u64 (single-copy-atomic on aarch64 -- old or new,
-        // never torn). A guest cannot make a second thread either -- and that
-        // half was RE-DERIVED when process creation landed, as this comment
-        // asked. It no longer rests on "clone is in no table row" (LINEAGE
-        // L-3d made it one). It rests on CLONE_THREAD being outside
-        // vivarium_clone_decide's admitted domain, plus the native
-        // SYS_THREAD_SPAWN being unreachable from a phenotyped Proc. What the
-        // clone row grants is a second PROC, carrying its OWN sigtab, not a
-        // second thread sharing this one.
-        //
-        // WIDENING THAT DOMAIN TO ADMIT CLONE_THREAD VOIDS THIS ARGUMENT.
+        // The 32-byte entry: the cross-Proc readers (notes_post's SIG_IGN
+        // hook and its siblings) touch one naturally-aligned u64, the handler
+        // word (single-copy-atomic on aarch64 -- old or new, never torn). This
+        // reader takes all four fields, and since N-3 admitted CLONE_THREAD a
+        // peer thread of this Proc CAN be inside viv_sigtab_set at the same
+        // moment: it stores flags/restorer/mask RELAXED and then the handler
+        // RELEASE, so a delivery that loaded the OLD handler can pair it with
+        // the NEW flags/mask (an SA_SIGINFO handler entered with one argument
+        // is the visible failure). The paragraph that stood here said no peer
+        // could exist; that stopped being true at N-3 and the tearing is an
+        // OPEN, tracked item (the sigtab tearing round) -- a seqlock over the
+        // entry, or the socktab's lock discipline, is the shape of the close.
         struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
         struct viv_ksigaction act;
         bool have_handler = viv_sigtab_note_handler(tab, sn, &act);
@@ -1587,6 +1790,11 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     u64 new_sp = (ctx->sp - NOTE_NAME_MAX) & ~(u64)0xf;
     if (new_sp == 0 || new_sp >= UACCESS_USER_VA_TOP) {
         (void)notes_reenqueue_head_locked(q, &popped);
+        // item 11 (round F2): the pop above drained the caught latch, but the
+        // note is back in the queue -- re-arm so a re-blocking sleep_noteintr
+        // stays interruptible for it. This native path runs only with a live
+        // handler, so the re-arm sets the bit (arm re-checks handler/self-mgmt).
+        notes_arm_caught_note_locked(p, popped.name);
         spin_unlock(&q->lock);
         return;
     }
@@ -1599,6 +1807,7 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     for (u32 i = 0; i < NOTE_NAME_MAX; i++) {
         if (uaccess_store_u8(new_sp + i, (u8)popped.name[i]) != 0) {
             (void)notes_reenqueue_head_locked(q, &popped);
+            notes_arm_caught_note_locked(p, popped.name);  // item 11 (round F2)
             spin_unlock(&q->lock);
             return;
         }

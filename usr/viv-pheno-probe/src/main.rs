@@ -49,7 +49,7 @@
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use libthyla_rs::{env, t_putstr};
 
 // ---------------------------------------------------------------------------
@@ -150,6 +150,7 @@ const SOCK_SEQPACKET: u64 = 5;
 // POSIX errno values a Linux libc compares against (musl generic bits/errno.h).
 const ENOSYS: i64 = 38;
 const ENOTSOCK: i64 = 88;
+const EBADF: i64 = 9;
 const EPROTONOSUPPORT: i64 = 93;
 const EOPNOTSUPP: i64 = 95;
 const EAFNOSUPPORT: i64 = 97;
@@ -162,6 +163,18 @@ const NR_MPROTECT: u64 = 226;
 const NR_RT_SIGACTION: u64 = 134;
 const NR_RT_SIGRETURN: u64 = 139;
 const NR_RT_SIGPROCMASK: u64 = 135;
+
+// The time family. Their translators (kernel/vivarium.c) are what a libc's
+// timeout path needs; a native Proc issuing these same numbers gets -1 (they are
+// above the native ceiling), which is what run_native's brk discriminator proves.
+const NR_CLOCK_GETTIME: u64 = 113;
+const NR_GETTIMEOFDAY: u64 = 169;
+const CLOCK_REALTIME: u64 = 0;
+const CLOCK_MONOTONIC: u64 = 1;
+const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;   // no Thylacine clock -> EINVAL leg
+// A wall clock seeded from the RTC is past this (2023-11-14); a 1970 epoch (the
+// ENOSYS-with-no-write failure mode) is far below it. The threshold IS the leg.
+const WALL_CLOCK_FLOOR_SEC: u64 = 1_700_000_000;
 
 // ---------------------------------------------------------------------------
 // The V-6c signal handler, its trampoline, and the evidence it leaves behind.
@@ -232,10 +245,13 @@ extern "C" fn viv_sig_handler(signo: i32, info: *const u8, uc: *const u8) {
         // compiled C does the moment it uses a float or an autovectorised
         // memcpy. Explicit asm so the clobber is guaranteed -- a handler that
         // happened not to touch V registers would let the L40 check below pass
-        // on a kernel with no FP save at all. (Legs L155-L157, numbered at the END
-        // of the space rather than here: L39-L41 were already taken just below,
-        // and renumbering 100+ existing markers to keep these positional would
-        // be a far larger change than an out-of-order triple.)
+        // on a kernel with no FP save at all. (Legs L254-L256 -- the true END of
+        // the marker space, past L253. Numbered out of order because L39-L41 were
+        // already taken just below and renumbering 100+ positional markers would
+        // be a far larger change. They were briefly L155-L157, which COLLIDED
+        // with the L-3d clone block's own L155-L157 -- a boot failure printing
+        // "L156" could then have meant either the FP-save leg or the fork leg;
+        // moved to L254-L256 so every fail-marker names exactly one leg.)
         core::arch::asm!(
             "movi v0.16b,  #0x11", "movi v1.16b,  #0x11",
             "movi v2.16b,  #0x11", "movi v3.16b,  #0x11",
@@ -341,6 +357,108 @@ fn mh_runs() -> u64 { unsafe { core::ptr::read_volatile(&raw const MH_RUNS) } }
 fn mh_mask_in() -> u64 { unsafe { core::ptr::read_volatile(&raw const MH_MASK_IN) } }
 fn mh_child() -> i64 { unsafe { core::ptr::read_volatile(&raw const MH_CHILD) } }
 fn mh_am_child() -> u64 { unsafe { core::ptr::read_volatile(&raw const MH_AM_CHILD) } }
+
+// ---------------------------------------------------------------------------
+// bug-2 (VIVARIUM.md 6.23): the deterministic handler-escape driver (L245-L248).
+// ---------------------------------------------------------------------------
+//
+// A PHENO_LINUX handler that leaves via siglongjmp -- a jump back to a
+// sigsetjmp point in the main loop, never reaching rt_sigreturn -- leaves the
+// kernel's per-Thread `in_handler` latch set, since notes_noted_restore is its
+// only clear. The N-3 re-entrancy guard then refuses EVERY future caught-note
+// delivery and the process goes signal-deaf. The bug-2 fix clears the stuck
+// latch once it observes the handler has demonstrably unwound above its frame
+// (sp >= note_saved_sp_el0) at the next EL0 transition.
+//
+// r5f9-ash.exp (busybox ash ^C) is a REGRESSION NET, not a control: it passes
+// 6/6 on a kernel WITHOUT the fix, because ash reprompts and never takes a
+// SECOND caught signal while the latch is stuck. This leg is the missing
+// fails-without-fix control -- it forces a second signal across the escape and
+// asserts the handler fires TWICE. Without the fix the second SIGPIPE is
+// N-3-refused and the handler fires only ONCE (L248 red). It exercises both
+// clears jointly (the EL0-entry clear on the unblock does the work here; the
+// EL0-return copy is idempotent behind it).
+//
+// setjmp/longjmp are hand-rolled: there is no libc here, and this is exactly
+// the pair a no_std guest would carry. The jmp_buf saves x19-x30, sp, and the
+// callee-saved d8-d15 -- a correct primitive, so nothing the compiler parks in
+// a callee-saved register across the escape is silently lost. The classic
+// returns-twice hazard does not bite: longjmp restores every callee-saved
+// register AND sp to the setjmp snapshot (exactly what the caller assumes is
+// preserved across the call), and nothing in run_linux's frame is mutated
+// between the setjmp return and the synchronous escape.
+static mut ESC_JMP: [u64; 22] = [0; 22];
+static mut ESC_FIRED: u64 = 0;
+static mut ESC_PHASE: u64 = 0; // 0 = escape on next delivery, 1 = count it
+
+core::arch::global_asm!(
+    ".globl esc_setjmp",
+    ".type  esc_setjmp, @function",
+    "esc_setjmp:",
+    "    bti     c",
+    "    stp     x19, x20, [x0, #0]",
+    "    stp     x21, x22, [x0, #16]",
+    "    stp     x23, x24, [x0, #32]",
+    "    stp     x25, x26, [x0, #48]",
+    "    stp     x27, x28, [x0, #64]",
+    "    stp     x29, x30, [x0, #80]",
+    "    mov     x1, sp",
+    "    str     x1, [x0, #96]",
+    "    stp     d8,  d9,  [x0, #104]",
+    "    stp     d10, d11, [x0, #120]",
+    "    stp     d12, d13, [x0, #136]",
+    "    stp     d14, d15, [x0, #152]",
+    "    mov     x0, #0",
+    "    ret",
+    ".size esc_setjmp, .-esc_setjmp",
+);
+
+core::arch::global_asm!(
+    ".globl esc_longjmp",
+    ".type  esc_longjmp, @function",
+    "esc_longjmp:",
+    "    bti     c",
+    "    ldp     x19, x20, [x0, #0]",
+    "    ldp     x21, x22, [x0, #16]",
+    "    ldp     x23, x24, [x0, #32]",
+    "    ldp     x25, x26, [x0, #48]",
+    "    ldp     x27, x28, [x0, #64]",
+    "    ldp     x29, x30, [x0, #80]",
+    "    ldr     x2, [x0, #96]",
+    "    mov     sp, x2",
+    "    ldp     d8,  d9,  [x0, #104]",
+    "    ldp     d10, d11, [x0, #120]",
+    "    ldp     d12, d13, [x0, #136]",
+    "    ldp     d14, d15, [x0, #152]",
+    "    cmp     x1, #0",
+    "    csinc   x0, x1, xzr, ne", // return val, or 1 when val == 0
+    "    ret",
+    ".size esc_longjmp, .-esc_longjmp",
+);
+
+extern "C" {
+    fn esc_setjmp(buf: *mut u64) -> u64;
+    fn esc_longjmp(buf: *mut u64, val: u64) -> !;
+}
+
+/// The escape handler: on its FIRST delivery it longjmps back to the main loop
+/// (the siglongjmp escape -- rt_sigreturn is never reached, so the kernel latch
+/// stays set); on any later delivery it just counts and returns normally, so the
+/// SECOND delivery -- the one the fix must let through -- unwinds through the
+/// restorer and rt_sigreturn as an ordinary handler would.
+extern "C" fn viv_escape_handler(_signo: i32, _info: *const u8, _uc: *const u8) {
+    unsafe {
+        ESC_FIRED += 1;
+        if core::ptr::read_volatile(&raw const ESC_PHASE) == 0 {
+            core::ptr::write_volatile(&raw mut ESC_PHASE, 1);
+            esc_longjmp(&raw mut ESC_JMP as *mut u64, 1); // never returns here
+        }
+        // phase 1: count only; fall off the end -> restorer -> rt_sigreturn.
+    }
+}
+fn esc_handler_addr() -> u64 { viv_escape_handler as usize as u64 }
+fn esc_fired() -> u64 { unsafe { core::ptr::read_volatile(&raw const ESC_FIRED) } }
+fn esc_phase() -> u64 { unsafe { core::ptr::read_volatile(&raw const ESC_PHASE) } }
 
 // Task #96 sentinel buffers for the phenotype-path FP check (L39-L41).
 static mut FP_SENT: [u8; 512] = [0; 512];
@@ -578,6 +696,149 @@ extern "C" fn clone_child_main(_arg: u64) -> ! {
     // the TPIDR -- the two stores are ordered by SeqCst and by this sequence.
     CLONE_CHILD_RAN.store(CLONE_RAN_TOKEN, Ordering::SeqCst);
     unsafe { linux_exit(0) }
+}
+
+// ---------------------------------------------------------------------------
+// N-3: the CLONE_THREAD path -- a genuinely concurrent Thread in the CALLER's
+// OWN Proc, the shape musl's pthread_create emits. This differs from the fork
+// shim in TWO ways that are the whole point:
+//   1. The clone word is the EXACT pthread word 0x007D0F00, and x2/x3/x4 are
+//      REAL (ptid, tls, ctid), not poison -- a thread NEEDS its TLS + tid
+//      publish + exit-clear, so this shim passes them through where __viv_clone
+//      poisons them.
+//   2. The child exits via SYS_exit(93) -> thread_exit_self (THIS thread only,
+//      the Proc lives on), NEVER exit_group(94) which would take the Proc down.
+// The child runs CONCURRENTLY (no vfork suspend), so parent/child synchronise
+// through futex, exactly as pthread_join does.
+const NR_GETTID: u64 = 178;
+const NR_FUTEX: u64 = 98;
+const NR_EXIT_THREAD: u64 = 93;             // SYS_exit -- a THREAD's exit
+const FUTEX_WAIT: u64 = 0;
+const FUTEX_WAKE: u64 = 1;
+const FUTEX_REQUEUE: u64 = 3;
+const FUTEX_PRIVATE: u64 = 0x80;
+const CLONE_FLAGS_THREAD: u64 = 0x007D0F00; // the musl pthread_create word
+
+// The child's own stack, disjoint from CLONE_STACK (which the fork/vfork legs
+// used). A concurrent thread must not share a live stack with anything.
+#[repr(align(16))]
+struct ThreadStack(#[allow(dead_code)] [u8; 16 * 1024]);
+static mut THREAD_STACK: ThreadStack = ThreadStack([0; 16 * 1024]);
+
+// The tls the parent hands the thread. A REAL mapped VA (the address of a
+// static) so that even if the compiler sneaks a thread-local access into the
+// child it does not fault -- but the child only READS tpidr_el0 into a register
+// (never derefs it), so the value's only job is to prove SETTLS passed x3
+// through instead of dropping it or handing over poison.
+static mut THREAD_TLS_AREA: [u64; 8] = [0; 8];
+static RAN_FUTEX: AtomicU32 = AtomicU32::new(0);      // child sets 1 + FUTEX_WAKE
+static THREAD_CHILD_TPIDR: AtomicU64 = AtomicU64::new(0);
+static THREAD_CHILD_TID: AtomicU64 = AtomicU64::new(0);
+// The CLONE_PARENT_SETTID + CLONE_CHILD_CLEARTID words. Statics (stable .bss
+// addresses) so the kernel's uaccess_store_u32 writes them and the parent reads
+// them atomically; the join waits on CTID reaching 0. Nonzero-sentinel constants
+// mirror musl (ctid starts nonzero, the kernel zeroes it at thread exit).
+static PTID_WORD: AtomicU32 = AtomicU32::new(0);
+static CTID_WORD: AtomicU32 = AtomicU32::new(0);
+const CTID_ARMED: u32 = 0xC71D;                       // ctid before the thread exits
+const THREAD_RAN_TOKEN: u32 = 0x5654_3031; // "VT01"-ish, nonzero
+
+#[inline(always)]
+unsafe fn linux_thread_exit(code: i64) -> ! {
+    asm!(
+        "svc #0",
+        in("x0") code,
+        in("x8") NR_EXIT_THREAD,
+        options(noreturn, nostack)
+    );
+}
+
+// The thread clone shim. Same different-stack discipline as __viv_clone, but the
+// clone REGISTERS carry real ptid/tls/ctid and the child backstop is SYS_exit
+// (93), not exit_group. Rust ABI: x0=entry, x1=stack_top, x2=flags, x3=arg,
+// x4=ptid, x5=tls, x6=ctid. Linux clone(flags, stack, ptid, tls, ctid) wants
+// x0=flags, x1=stack, x2=ptid, x3=tls, x4=ctid.
+core::arch::global_asm!(
+    ".section .text.__viv_clone_thread, \"ax\"",
+    ".globl __viv_clone_thread",
+    ".type   __viv_clone_thread, %function",
+    "__viv_clone_thread:",
+    "    bti     c",
+    // Seed the CHILD's stack with (entry, arg) and make x1 the child SP.
+    "    and     x1, x1, #-16",
+    "    stp     x0, x3, [x1, #-16]!",
+    // Marshal the clone args. Copy ptid/tls/ctid BEFORE overwriting the source
+    // registers: x0<-flags(x2), then x2<-ptid(x4), x3<-tls(x5), x4<-ctid(x6).
+    "    uxtw    x0, w2",
+    "    mov     x2, x4",
+    "    mov     x3, x5",
+    "    mov     x4, x6",
+    "    mov     x8, #220",                 // Linux SYS_clone
+    "    svc     #0",
+    "    cbz     x0, 1f",                   // x0 == 0 -> we are the CHILD
+    "    ret",                              // parent: tid, or -errno
+    // Child: SP is its own; x29/x30 still point into the parent, so establish a
+    // frame via blr before any compiled code runs.
+    "1:  ldp     x1, x0, [sp], #16",        // x1 := entry, x0 := arg
+    "    mov     x29, #0",
+    "    mov     x30, #0",
+    "    blr     x1",
+    "    mov     x8, #93",                  // SYS_exit backstop (thread, not group)
+    "    mov     x0, #1",
+    "    svc     #0",
+    "2:  wfe",
+    "    b       2b",
+    ".size __viv_clone_thread, .-__viv_clone_thread",
+);
+
+extern "C" {
+    fn __viv_clone_thread(entry: extern "C" fn(u64) -> !, stack_top: u64,
+                          flags: u64, arg: u64, ptid: u64, tls: u64,
+                          ctid: u64) -> i64;
+}
+
+extern "C" fn thread_child_main(_arg: u64) -> ! {
+    // Read our own thread pointer FIRST -- it must equal the tls the parent
+    // passed (SETTLS), not the parent's TPIDR and not any poison.
+    let tp: u64;
+    unsafe {
+        core::arch::asm!("mrs {}, tpidr_el0", out(reg) tp,
+                         options(nomem, nostack, preserves_flags));
+    }
+    THREAD_CHILD_TPIDR.store(tp, Ordering::SeqCst);
+    // gettid: our own per-Thread id (must differ from the Proc pid, and equal
+    // the tid the parent's clone returned).
+    let tid = unsafe { svc3(NR_GETTID, 0, 0, 0) };
+    THREAD_CHILD_TID.store(tid as u64, Ordering::SeqCst);
+    // Publish RAN, then FUTEX_WAKE the parent waiting on it. Store BEFORE the
+    // wake so a parent whose WAIT races sees the new value (I-9: no lost wake).
+    RAN_FUTEX.store(THREAD_RAN_TOKEN, Ordering::SeqCst);
+    unsafe {
+        let _ = svc3(NR_FUTEX, core::ptr::addr_of!(RAN_FUTEX) as u64,
+                     FUTEX_WAKE | FUTEX_PRIVATE, 1);
+    }
+    // Exit as a THREAD (93) -> thread_exit_self -> the CLONE_CHILD_CLEARTID
+    // handoff zeroes+wakes the ctid word the parent joins on.
+    unsafe { linux_thread_exit(0) }
+}
+
+// A bounded FUTEX_WAIT loop: block while *addr == expected, up to `spins`
+// timed waits (~2s each). Returns true if *addr changed to != expected, false
+// if it stayed put across every spin (so a broken wake/wire is a REPORTED leg
+// failure, never an unbounded hang that reads as a stuck boot).
+unsafe fn futex_wait_until_ne(addr: *const AtomicU32, expected: u32, spins: u32) -> bool {
+    // 2 seconds, RELATIVE -- exactly the timespec shape musl sends.
+    let ts: [i64; 2] = [2, 0];
+    let mut i = 0u32;
+    while i < spins {
+        if (*addr).load(Ordering::SeqCst) != expected {
+            return true;
+        }
+        let _ = svc6(NR_FUTEX, addr as u64, FUTEX_WAIT | FUTEX_PRIVATE,
+                     expected as u64, ts.as_ptr() as u64, 0, 0);
+        i += 1;
+    }
+    (*addr).load(Ordering::SeqCst) != expected
 }
 
 // Every leg is `cond or (report, exit)`. The marker goes into the report file
@@ -1037,7 +1298,7 @@ unsafe fn run_linux() -> ! {
     let wrc2 = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
     // Queued but blocked: the handler must NOT have run yet, or the sentinel
     // was never at risk and L40 would prove nothing.
-    leg!(rep, wrc2 < 0 && sig_fired() == fired_before, b"L155\n");
+    leg!(rep, wrc2 < 0 && sig_fired() == fired_before, b"L254\n");
 
     unsafe {
         let sp = &raw const FP_SENT as *const u8;
@@ -1079,12 +1340,12 @@ unsafe fn run_linux() -> ! {
     }
 
     // The handler ran (so the registers really were exposed to it) ...
-    leg!(rep, sig_fired() == fired_before + 1, b"L156\n");
+    leg!(rep, sig_fired() == fired_before + 1, b"L255\n");
     // ... and every V register came back exactly as it went in.
     leg!(
         rep,
         unsafe { (0..512).all(|i| FP_SEEN[i] == FP_SENT[i]) },
-        b"L157\n"
+        b"L256\n"
     );
 
     // --- L205-L216: SIG_IGN discards a PENDING signal (POSIX 2.4.3) ---------
@@ -1312,8 +1573,8 @@ unsafe fn run_linux() -> ! {
     // the interruption point off its copied user stack. Here: SIGPIPE raised
     // by the reader-less fd 0 write, the handler forks; BOTH processes return
     // from the handler and resume after the write; the child then exits 0 --
-    // the ONLY exit code that survives v1.0's status collapse (exit_group(N):
-    // N != 0 -> exits("fail") -> 1, kernel/syscall.c) -- and the parent reaps
+    // chosen because this leg needs clean-vs-failure, not a specific byte (#91
+    // now preserves non-zero codes verbatim too) -- and the parent reaps
     // exactly a clean 0. Every failure reads 1: a refused sigreturn (the child
     // dies at `brk #0` -- a `snare:brk` user-fault line names it), or a child
     // that resumed with its store lost (it runs the parent's L234 and exits 1
@@ -1504,14 +1765,15 @@ unsafe fn run_linux() -> ! {
         svc3(NR_SOCKET, AF_INET, SOCK_SEQPACKET, 0) == -EPROTONOSUPPORT,
         b"L40\n"
     );
-    // SOCK_NONBLOCK is REFUSED, not silently dropped. A guest that asked for a
-    // non-blocking socket and got a blocking one blocks where it expected
-    // EAGAIN -- the exact mistranslation the argument domain exists to prevent.
-    leg!(
-        rep,
-        svc3(NR_SOCKET, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0) == -22,
-        b"L41\n"
-    );
+    // N-1a: SOCK_NONBLOCK/SOCK_CLOEXEC are ADMITTED now (musl's DNS socket asks
+    // for both). The flags are applied to the ctl fd -- a nonblock socket gets
+    // EAGAIN, an un-cloexec'd one leaks across exec -- rather than refused.
+    // socket() with them succeeds; close the fd so the leg leaks nothing.
+    let nbfd = svc3(NR_SOCKET, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    leg!(rep, nbfd >= 0, b"L41\n");
+    if nbfd >= 0 {
+        svc3(NR_CLOSE, nbfd as u64, 0, 0);
+    }
 
     // A real UDP socket. UDP is the deterministic choice: netd's udp_connect
     // binds a local port and records the remote with NO handshake, so this
@@ -1573,11 +1835,15 @@ unsafe fn run_linux() -> ! {
     // THE CLOSE HOOK, live. Close the socket, then confirm the fd index no
     // longer resolves to a socket. Without the hook the entry would survive,
     // and a later connect() on whatever reused this index would dial a
-    // stranger's connection.
+    // stranger's connection. EBADF, not ENOTSOCK: the socket arms split the
+    // two the way Linux does (a closed fd fails the fd lookup first), and the
+    // split keeps the discrimination -- the row is consulted BEFORE the fd
+    // liveness, so a surviving stale row would make connect proceed, never
+    // answer EBADF.
     leg!(rep, svc3(NR_CLOSE, sfd as u64, 0, 0) == 0, b"L49\n");
     leg!(
         rep,
-        svc3(NR_CONNECT, sfd as u64, sa.as_ptr() as u64, sa.len() as u64) == -ENOTSOCK,
+        svc3(NR_CONNECT, sfd as u64, sa.as_ptr() as u64, sa.len() as u64) == -EBADF,
         b"L50\n"
     );
 
@@ -1737,6 +2003,108 @@ unsafe fn run_linux() -> ! {
     leg!(rep, n2 == 2, b"L81\n");
     leg!(rep, got2[0] == b'o' && got2[1] == b'k', b"L82\n");
 
+    // --- the socktab across images (operator-voted A, 2026-08-18: COPY at
+    // fork, ALIAS on dup/dup3/F_DUPFD; VIVARIUM 5.5.2) ------------------------
+    // fork -> the CHILD serves the accepted connection. `afd` is a socket to
+    // the child only if fork COPIED its row: listen() on a tracked CONNECTED
+    // fd answers EINVAL (L83's idiom below), on an untracked one ENOTSOCK --
+    // and read/write cannot tell the two apart (T1 rows on a real Spoor),
+    // which is why the listen probe is the discriminator. The child then
+    // writes on it and the parent reads the bytes off `cli`: the
+    // accept-then-fork server shape, end to end. The child's exit status is
+    // the verdict; its own table dies with it.
+    let fk2 = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if fk2 == 0 {
+        let tracked = svc3(NR_LISTEN, afd as u64, 1, 0) == -22;
+        let m3 = b"fk";
+        let wrote = svc3(NR_WRITE, afd as u64, m3.as_ptr() as u64, m3.len() as u64) == 2;
+        linux_exit(if tracked && wrote { 0 } else { 1 })
+    }
+    leg!(rep, fk2 > 0, b"L257\n");
+    let mut fst: i32 = -1;
+    leg!(
+        rep,
+        svc4(NR_WAIT4, fk2 as u64, &mut fst as *mut i32 as u64, 0, 0) == fk2
+            && (fst & 0x7f) == 0 && ((fst >> 8) & 0xff) == 0,
+        b"L258\n"
+    );
+    let mut got3 = [0u8; 8];
+    leg!(
+        rep,
+        svc3(NR_READ, cli as u64, got3.as_mut_ptr() as u64, got3.len() as u64) == 2
+            && got3[0] == b'f' && got3[1] == b'k',
+        b"L259\n"
+    );
+    // The parent's own row survived the child's exit: the child's table was
+    // its own copy, so its death dropped ITS rows, not ours.
+    leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -22, b"L260\n");
+
+    // dup(): the alias is a tracked socket; closing it leaves the original
+    // (each alias carries its own row, so the close hook drops only its own).
+    const NR_DUP: u64 = 23;
+    let d1 = svc3(NR_DUP, afd as u64, 0, 0);
+    leg!(rep, d1 >= 0 && d1 != afd, b"L261\n");
+    leg!(rep, svc3(NR_LISTEN, d1 as u64, 1, 0) == -22, b"L262\n");
+    leg!(rep, svc3(NR_CLOSE, d1 as u64, 0, 0) == 0, b"L263\n");
+    leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -22, b"L264\n");
+    // dup3(): the inetd idiom, dup2(connfd, N) onto a fixed number (29: above
+    // every fd this probe holds).
+    leg!(rep, svc3(NR_DUP3, afd as u64, 29, 0) == 29, b"L265\n");
+    leg!(rep, svc3(NR_LISTEN, 29, 1, 0) == -22, b"L266\n");
+    leg!(rep, svc3(NR_CLOSE, 29, 0, 0) == 0, b"L267\n");
+    // F_DUPFD: the same rule through fcntl.
+    let d3 = svc3(NR_FCNTL, afd as u64, F_DUPFD, 30);
+    leg!(rep, d3 >= 30, b"L268\n");
+    leg!(rep, svc3(NR_LISTEN, d3 as u64, 1, 0) == -22, b"L269\n");
+    leg!(rep, svc3(NR_CLOSE, d3 as u64, 0, 0) == 0, b"L270\n");
+    leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -22, b"L271\n");
+
+    // --- two readers blocked on ONE empty pipe (the shared-Spoor sleeper) ---
+    // Every pipe end a fork or dup hands out is the SAME kernel object, so
+    // two children blocked in read() on one empty pipe are two sleepers on
+    // one ring -- a jobserver, a prefork pool. The kernel's per-direction
+    // Rendez was single-waiter and the second sleeper EXTINCTED it (an
+    // unprivileged crash); the multi-waiter rewrite lets both sleep. Each
+    // child closes its write-end copy first (else the pipe can never EOF),
+    // then blocks; the parent lets them settle, writes 2 bytes (exactly one
+    // child gets them), closes its write end (the other gets EOF), and reaps
+    // both. A child exits 0 on either outcome and 1 on anything else; the
+    // verdict is the two statuses. Pre-fix this leg never returned.
+    let mut pp: [i32; 2] = [-1, -1];
+    leg!(rep, svc3(NR_PIPE2, pp.as_mut_ptr() as u64, 0, 0) == 0, b"L272\n");
+    let (prd, pwr) = (pp[0] as u64, pp[1] as u64);
+    let mut kids: [i64; 2] = [0, 0];
+    for k in 0..2 {
+        let f = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if f == 0 {
+            let _ = svc3(NR_CLOSE, pwr, 0, 0);
+            let mut b = [0u8; 4];
+            let n = svc3(NR_READ, prd, b.as_mut_ptr() as u64, b.len() as u64);
+            let ok = (n == 2 && b[0] == b'p' && b[1] == b'q') || n == 0;
+            linux_exit(if ok { 0 } else { 1 })
+        }
+        kids[k] = f;
+    }
+    leg!(rep, kids[0] > 0 && kids[1] > 0, b"L273\n");
+    // Let both children reach their blocking read (ppoll with no fds is the
+    // phenotype's sleep). Not load-bearing for the post-fix verdict; it is
+    // what made the pre-fix extinction deterministic.
+    let ts: [i64; 2] = [0, 200_000_000];
+    let _ = svc4(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0);
+    let two = b"pq";
+    leg!(rep, svc3(NR_WRITE, pwr, two.as_ptr() as u64, 2) == 2, b"L274\n");
+    leg!(rep, svc3(NR_CLOSE, pwr, 0, 0) == 0, b"L275\n");
+    for k in 0..2 {
+        let mut st: i32 = -1;
+        leg!(
+            rep,
+            svc4(NR_WAIT4, kids[k] as u64, &mut st as *mut i32 as u64, 0, 0) == kids[k]
+                && (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 0,
+            b"L276\n"
+        );
+    }
+    leg!(rep, svc3(NR_CLOSE, prd, 0, 0) == 0, b"L277\n");
+
     // The accepted fd IS a tracked socket, in CONNECTED state. EINVAL (a
     // connected socket cannot listen) rather than ENOTSOCK (no entry at all)
     // is what distinguishes the two -- and it is the ONLY leg that would catch
@@ -1785,8 +2153,9 @@ unsafe fn run_linux() -> ! {
     // The close hook covers the accepted fd too: its socktab entry was claimed
     // by accept(), so it must be released by close() like any other. Paired
     // with L83, this brackets the entry's whole life: EINVAL while open,
-    // ENOTSOCK once closed.
-    leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -ENOTSOCK, b"L96\n");
+    // EBADF once closed (a surviving stale row would answer EINVAL again --
+    // the row is consulted before the fd liveness -- so EBADF is the drop).
+    leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -EBADF, b"L96\n");
 
     // --- V-5c: readiness ----------------------------------------------------
     // A Linux `struct pollfd` -- and the native one is byte-identical, which is
@@ -2381,8 +2750,12 @@ unsafe fn run_linux() -> ! {
         b"L156b\n"
     );
 
-    // CLONE_THREAD: a genuinely concurrent child has a correct target already,
-    // and it is SYS_THREAD_SPAWN, not this row.
+    // CLONE_THREAD as a stray bit on the VFORK word declines. Since N-3 the
+    // pure pthread word IS served (the L164+ legs below spawn a real thread), but
+    // this combo is NOT that word -- it carries CLONE_VFORK+SIGCHLD and lacks
+    // FS/FILES/SIGHAND/SYSVSEM/SETTLS/PARENT_SETTID/CHILD_CLEARTID/DETACHED -- so
+    // exact-equality declines it. The point it pins: the THREAD arm is a
+    // SEPARATE exact word, not a bit admitted into the fork/vfork words.
     leg!(
         rep,
         svc6(NR_CLONE, CLONE_VM | CLONE_VFORK | CLONE_THREAD | SIGCHLD,
@@ -2401,14 +2774,41 @@ unsafe fn run_linux() -> ! {
     );
 
     // stack == 0 is Linux's vfork() proper -- "share the parent's stack".
-    // SYS_RFORK refuses a zero child_sp by contract, so the row declines one
-    // layer above rather than weakening a landed kernel gate.
-    leg!(
-        rep,
-        svc6(NR_CLONE, CLONE_VM | CLONE_VFORK | SIGCHLD, 0, 0, 0, 0, 0)
-            == NEG_ENOSYS,
-        b"L159\n"
-    );
+    // Option B (2026-08-31; LINEAGE.md 3.1) SERVES it as a FORK, a private
+    // copy-on-write child, rather than weakening SYS_RFORK's child_sp rule
+    // (Plan 9 has no two-Procs-one-stack shape; option A was rejected as
+    // anti-lineage). So this is now the L156 fork leg wearing the vfork flags
+    // word: it PRODUCES A CHILD, and the child must exit at once rather than
+    // fall through into the remaining legs (which would interleave a second,
+    // garbage verdict stream into the same file -- the exact failure the
+    // pre-B assertion caused when this became a served fork). Until 2026-08-31
+    // this asserted `== NEG_ENOSYS`; the leg number and its place in the ladder
+    // are kept so the marker sequence a boot gate greps for is stable.
+    let vfpid = svc6(NR_CLONE, CLONE_VM | CLONE_VFORK | SIGCHLD, 0, 0, 0, 0, 0);
+    if vfpid == 0 {
+        unsafe { linux_exit(0) }             // the fork child; never returns
+    }
+    leg!(rep, vfpid > 0, b"L159\n");
+    // Reap it AT ONCE, by pid, blocking. The wait4 accounting below (L170-L176)
+    // is written for EXACTLY the two zombies L156 (fork) and L160 (vfork)
+    // leave outstanding, and L174 asserts "every child reaped -> ECHILD".
+    // Option B makes this leg a real fork that leaves a THIRD zombie; reaping it
+    // here restores the by-construction count the ladder depends on and adds no
+    // new outstanding state. It cannot disturb fpid/cpid -- a by-pid wait
+    // touches only vfpid, and cpid is not even created until L160 below.
+    {
+        let mut _vst: i32 = -1;
+        // Assert the reap (F3): the ladder's "two zombies by construction"
+        // count below depends on this child being gone, and a by-pid wait
+        // returning anything but vfpid would otherwise surface as a baffling
+        // L171 miscount two legs downstream rather than here at the cause.
+        leg!(
+            rep,
+            svc4(NR_WAIT4, vfpid as u64,
+                 &mut _vst as *mut i32 as u64, 0, 0) == vfpid,
+            b"L159b\n"
+        );
+    }
 
     // NOW THE REAL ONE. Through the musl-shaped shim, because the child returns
     // on a different stack; the shim also poisons x2/x3/x4, which is what makes
@@ -2445,6 +2845,111 @@ unsafe fn run_linux() -> ! {
     let child_tp = CLONE_CHILD_TPIDR.load(Ordering::SeqCst);
     leg!(rep, child_tp != CLONE_POISON_TLS, b"L162\n");
     leg!(rep, child_tp == my_tp, b"L163\n");
+
+    // --- L164-L169 (N-3): a REAL CLONE_THREAD, spawned + run + joined --------
+    //
+    // The pure pthread word 0x007D0F00 spawns a Thread in THIS Proc (shared
+    // address space, one pid), the shape musl's pthread_create emits. These legs
+    // are the positive witness that the crux is WIRED: boot OK and the
+    // clone_decide unit test do not prove a thread actually runs, only this does.
+    // Sabotage viv_clone_thread or viv_futex and a marker vanishes. The child
+    // runs CONCURRENTLY (no vfork suspend), so every wait here is a BOUNDED
+    // futex loop that reports on timeout rather than hanging the boot.
+    let tls = core::ptr::addr_of!(THREAD_TLS_AREA) as u64;   // a real, mapped VA
+    CTID_WORD.store(CTID_ARMED, Ordering::SeqCst);           // nonzero BEFORE clone
+    PTID_WORD.store(0, Ordering::SeqCst);
+    let tstack = core::ptr::addr_of!(THREAD_STACK) as u64 + (16 * 1024);
+
+    // Spawn. The shim passes REAL ptid/tls/ctid (the fork shim poisons them).
+    let ttid = __viv_clone_thread(
+        thread_child_main,
+        tstack,
+        CLONE_FLAGS_THREAD,
+        0,
+        core::ptr::addr_of!(PTID_WORD) as u64,
+        tls,
+        core::ptr::addr_of!(CTID_WORD) as u64,
+    );
+    leg!(rep, ttid > 0, b"L164\n");
+
+    // The thread RAN, proven by a futex round-trip: the child stores RAN_FUTEX
+    // and FUTEX_WAKEs it, the parent FUTEX_WAITs until it changes. This drives
+    // futex WAIT (parent) + WAKE (child) -- the pthread mutex/cond primitive. A
+    // broken wire (or an unrun thread) times out across the spins and REPORTS
+    // rather than hanging.
+    leg!(
+        rep,
+        futex_wait_until_ne(core::ptr::addr_of!(RAN_FUTEX), 0, 8)
+            && RAN_FUTEX.load(Ordering::SeqCst) == THREAD_RAN_TOKEN,
+        b"L165\n"
+    );
+
+    // SETTLS worked: the thread's TPIDR_EL0 is the tls the parent passed, NOT
+    // the parent's own TPIDR and NOT poison. A thread whose TLS is wrong dies
+    // fast (musl derefs it for errno almost immediately), so a clean read of the
+    // exact value is a strong witness for the crux's tls arm.
+    leg!(rep, THREAD_CHILD_TPIDR.load(Ordering::SeqCst) == tls, b"L166\n");
+
+    // gettid: the thread's OWN tid equals the clone return value, and is DISTINCT
+    // from the parent thread's tid (getpid stays per-Proc; tid is per-Thread).
+    let parent_tid = svc3(NR_GETTID, 0, 0, 0);
+    leg!(rep, THREAD_CHILD_TID.load(Ordering::SeqCst) == ttid as u64, b"L167\n");
+    leg!(rep, THREAD_CHILD_TID.load(Ordering::SeqCst) != parent_tid as u64, b"L167b\n");
+
+    // CLONE_PARENT_SETTID: the kernel published the new tid into *ptid before the
+    // thread was made runnable (the parent sees it after the RAN handshake).
+    leg!(rep, PTID_WORD.load(Ordering::SeqCst) as i64 == ttid, b"L168\n");
+
+    // JOIN via CLONE_CHILD_CLEARTID. The thread exits with SYS_exit(93) ->
+    // thread_exit_self, whose handoff zeroes *ctid and FUTEX_WAKEs it -- exactly
+    // what musl's __tl_sync barrier joins on. A thread that never reached
+    // thread_exit_self (wrong exit routing -- e.g. 93 aliasing PTY_REGISTER) or a
+    // missing handoff leaves ctid at CTID_ARMED and this leg reports, not hangs.
+    leg!(
+        rep,
+        futex_wait_until_ne(core::ptr::addr_of!(CTID_WORD), CTID_ARMED, 8)
+            && CTID_WORD.load(Ordering::SeqCst) == 0,
+        b"L169\n"
+    );
+
+    // L169c: FUTEX_REQUEUE is SERVED (not ENOSYS). musl's pthread_cond wake-chain
+    // needs it -- op 3 unserved DEADLOCKS a broadcast with >=2 waiters on a
+    // default mutex. A no-waiter REQUEUE returns 0 woken (a served op) where an
+    // ENOSYS regression returns -38, so this pins the arm reached + served and
+    // exercises the val+val2 marshal. The full wake-a-cond-waiter integration is
+    // the real-musl follow-on: a standalone REQUEUE-wakes-a-waiter test carries
+    // an inherent register-before-wait race that only the cond barrier state
+    // closes, so it is NOT built here -- but the WAKE primitive REQUEUE dispatches
+    // onto is itself E2E-proven by L165.
+    let mut rq_src: u32 = 0;
+    let mut rq_dst: u32 = 0;
+    leg!(
+        rep,
+        svc6(NR_FUTEX, &mut rq_src as *mut u32 as u64,
+             FUTEX_REQUEUE | FUTEX_PRIVATE, 0, 1,
+             &mut rq_dst as *mut u32 as u64, 0) == 0,
+        b"L169c\n"
+    );
+
+    // L169d (audit F1 regression, P0): a FUTEX_WAIT with an OUT-OF-BAND timeout
+    // pointer must return -EFAULT, NOT extinct the kernel. `viv_futex` copies the
+    // relative timespec from x3; before the fix it did so with NO
+    // sys_validate_user_buf, so a kernel/non-canonical timeout VA faulted with
+    // `vaddr >= UACCESS_USER_VA_TOP` -- which the EL1 fixup deliberately does NOT
+    // rescue -> unprivileged EL0 input extincting the whole kernel. The validate
+    // closes it. THE POINTER MUST BE OUT-OF-BAND: an in-band unmapped VA (like
+    // UNMAPPED_USER_VA) routes through uaccess_copy_in's OWN fixup to -EFAULT and
+    // never reaches the F1 gate, so it is a kernel VA here. Fails-without-fix by
+    // EXTINCTION (the boot dies), which is exactly the defect; passes as -EFAULT.
+    // The uaddr (RAN_FUTEX) is valid -- only the timeout pointer is hostile, and
+    // the timeout copy-in is the FIRST thing WAIT does, before *uaddr/val matter.
+    let kernel_va: u64 = 0xFFFF_FFFF_FFFF_FFF0;   // >= UACCESS_USER_VA_TOP (2^47)
+    leg!(
+        rep,
+        svc6(NR_FUTEX, core::ptr::addr_of!(RAN_FUTEX) as u64,
+             FUTEX_WAIT | FUTEX_PRIVATE, 0xDEAD_BEEF, kernel_va, 0, 0) == NEG_EFAULT,
+        b"L169d\n"
+    );
 
     // --- L170-L176 (LINEAGE L-6b): wait4 -------------------------------------
     //
@@ -2492,17 +2997,18 @@ unsafe fn run_linux() -> ! {
 
     // THE PACKED-STATUS PROOF, which needs a child that exits NON-ZERO: the
     // kernel returns the RAW exit status unless a PTY-1e flag was passed, and
-    // this wait passes none, so the translator must pack. Raw 1 would fail
-    // WIFEXITED outright ((1 & 0x7f) != 0 reads as "killed by signal 1"), and
-    // packed 1 is 0x100. The two are distinguishable, which 0 was not.
+    // this wait passes none, so the translator must pack. Raw 7 would fail
+    // WIFEXITED outright ((7 & 0x7f) != 0 reads as "killed by signal 7"), and
+    // packed 7 is 0x700. The two are distinguishable, which 0 was not.
     //
-    // WEXITSTATUS is 1 rather than a richer code because Thylacine's exit
-    // status is boolean at v1.0 -- sys_exits_handler collapses every non-zero
-    // to "fail" (task #91). This leg asserts what the system can actually
-    // deliver; when #91 lands it should assert the real code.
+    // #91 (LANDED): this asserts a DISTINCTIVE non-1 code (7) -- a value the
+    // pre-#91 collapse could never deliver (sys_exits_handler / exit_group both
+    // turned every non-zero into "fail" -> 1). The child's real exit byte now
+    // survives end to end through exit_group(7) -> proc_group_terminate_code ->
+    // wait4, which asserting == 7 (not == 1) proves.
     let xpid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
     if xpid == 0 {
-        unsafe { linux_exit(1) }             // the child; never returns
+        unsafe { linux_exit(7) }             // the child; never returns
     }
     leg!(rep, xpid > 0, b"L172\n");
     st = -1;
@@ -2511,7 +3017,7 @@ unsafe fn run_linux() -> ! {
         svc4(NR_WAIT4, xpid as u64, &mut st as *mut i32 as u64, 0, 0) == xpid,
         b"L172b\n"
     );
-    leg!(rep, (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 1, b"L173\n");
+    leg!(rep, (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 7, b"L173\n");
 
     // ECHILD. Every child is now reaped, so this is the reap-loop termination
     // condition -- and the errno is the point: a bare -1 would reach a Linux
@@ -2863,15 +3369,34 @@ unsafe fn run_linux() -> ! {
     let _ = svc3(NR_CLOSE, 32, 0, 0);
     let _ = svc3(NR_CLOSE, dup_at, 0, 0);
 
-    // THE SOCKET DECLINE. Thylacine's socktab keys (proto, N, state) on the fd
-    // NUMBER and is not refcounted, so two descriptors cannot share one socket's
-    // state -- copying the entry gives two diverging state machines, omitting it
-    // gives an fd that reads but cannot connect. Declining is the honest answer
-    // and this leg is what pins it as a DECISION rather than an oversight.
+    // THE ALIAS RULE (the socktab-across-images vote, operator A 2026-08-18;
+    // VIVARIUM 5.5.2): dup3 of a socket source no longer DECLINES -- the target
+    // number gets its OWN copy of the row (fresh epoch). This leg used to pin
+    // the #157 decline as a DECISION rather than an oversight; it now pins the
+    // replacement the same way. A UDP socket cannot listen (L57's EOPNOTSUPP),
+    // which is the discriminator: EOPNOTSUPP on 33 means the alias IS a
+    // tracked socket, ENOTSOCK would mean the number got no row. The source
+    // stays tracked, closing the alias drops only its own row: afterwards the
+    // source still listens EOPNOTSUPP, 33 is CLOSED (F_GETFD and listen both
+    // say EBADF -- Linux's sockfd_lookup_light fails before any socket check;
+    // this leg pinned ENOTSOCK for a closed fd until the socktab holotype F5),
+    // and the alias rule's NEGATIVE half: a plain file (the report fd) dup3'd
+    // onto 33 is a live non-socket, so listen(33) is ENOTSOCK -- the answer
+    // Linux gives for a file fd, and proof that a non-socket source mints no
+    // row on the number it lands on.
     let sd = svc3(NR_SOCKET, AF_INET, SOCK_DGRAM, 0);
     leg!(
         rep,
-        sd >= 0 && svc3(NR_DUP3, sd as u64, 33, 0) == NEG_ENOSYS,
+        sd >= 0 && svc3(NR_DUP3, sd as u64, 33, 0) == 33
+            && svc3(NR_LISTEN, 33, 1, 0) == -EOPNOTSUPP
+            && svc3(NR_LISTEN, sd as u64, 1, 0) == -EOPNOTSUPP
+            && svc3(NR_CLOSE, 33, 0, 0) == 0
+            && svc3(NR_LISTEN, sd as u64, 1, 0) == -EOPNOTSUPP
+            && svc3(NR_FCNTL, 33, F_GETFD, 0) == -EBADF
+            && svc3(NR_LISTEN, 33, 1, 0) == -EBADF
+            && svc3(NR_DUP3, rep as u64, 33, 0) == 33
+            && svc3(NR_LISTEN, 33, 1, 0) == -ENOTSOCK
+            && svc3(NR_CLOSE, 33, 0, 0) == 0,
         b"L198\n"
     );
 
@@ -2945,6 +3470,112 @@ unsafe fn run_linux() -> ! {
         b"L204\n"
     );
     let _ = svc3(NR_CLOSE, fd_mem as u64, 0, 0);
+
+    // === bug-2 (VIVARIUM.md 6.23): the deterministic handler-escape driver ===
+    // The fails-without-fix control r5f9-ash.exp could not be (it is a
+    // regression net -- 6/6 with OR without the fix). Force a siglongjmp escape
+    // out of a SIGPIPE handler, then deliver a SECOND SIGPIPE across it. With
+    // the fix the stuck in_handler latch is cleared at the escape's first EL0
+    // entry and the second delivery lands (the handler fires twice); without it
+    // the N-3 guard refuses the second (the handler fires once) -> L248 red.
+    {
+        // Self-contained: install the escape handler + unblock SIGPIPE here,
+        // whatever disposition the prior legs left it in.
+        let eksa: [u64; 4] =
+            [esc_handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+        leg!(
+            rep,
+            svc4(NR_RT_SIGACTION, SIGPIPE, eksa.as_ptr() as u64, 0, 8) == 0,
+            b"L245\n"
+        );
+        let pset = bit(SIGPIPE);
+        let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK,
+                     &pset as *const u64 as u64, 0, 8);
+
+        let jv = esc_setjmp(&raw mut ESC_JMP as *mut u64);
+        if jv == 0 {
+            // First pass: raise SIGPIPE (a one-byte write to the reader-less fd
+            // 0). The handler MUST escape via longjmp and never let this write
+            // return -- reaching the leg below means the escape did not happen
+            // (delivery broke, or the handler returned normally).
+            let byte: u8 = b'e';
+            let _ = svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1);
+            leg!(rep, false, b"L246\n");
+        }
+        // Escaped. The handler ran exactly once and jumped back here; the kernel
+        // latch is now stuck (no rt_sigreturn ran), and SIGPIPE is still blocked
+        // by the handler's auto-mask that no sigreturn will lift.
+        leg!(rep, esc_fired() == 1 && esc_phase() == 1, b"L247\n");
+        // This unblock is ALSO the EL0-entry syscall the fix uses to observe the
+        // escape (sp >= note_saved_sp_el0) and clear the stuck latch.
+        let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK,
+                     &pset as *const u64 as u64, 0, 8);
+        // The SECOND delivery -- the whole point. Fires iff the latch was
+        // cleared; the handler is now in phase 1, so it counts and returns
+        // normally through the restorer.
+        let byte2: u8 = b'E';
+        let _ = svc3(NR_WRITE, 0, &byte2 as *const u8 as u64, 1);
+        leg!(rep, esc_fired() == 2 && esc_phase() == 1, b"L248\n");
+    }
+
+    // --- the time family (clock_gettime 113 + gettimeofday 169) -------------
+    // Each leg is deterministic fail-without-fix: before the translators land,
+    // these numbers FORWARD -> -ENOSYS, so the `== 0` guard is false and the
+    // marker is written. curl/git/TLS all bound their waits with these.
+    {
+        // L249: clock_gettime(REALTIME) writes a wall clock seeded from the RTC.
+        // The 1970 epoch that a no-write ENOSYS leaves behind is far below the
+        // floor, and tv_nsec must be a real sub-second remainder.
+        let mut rt = [0u64; 2];
+        leg!(
+            rep,
+            svc3(NR_CLOCK_GETTIME, CLOCK_REALTIME, rt.as_mut_ptr() as u64, 0) == 0
+                && rt[0] >= WALL_CLOCK_FLOOR_SEC
+                && rt[1] < 1_000_000_000,
+            b"L249\n"
+        );
+
+        // L250: MONOTONIC is sane and never runs backward across two reads.
+        let mut m0 = [0u64; 2];
+        let mut m1 = [0u64; 2];
+        let mono_ok = svc3(NR_CLOCK_GETTIME, CLOCK_MONOTONIC, m0.as_mut_ptr() as u64, 0) == 0
+            && svc3(NR_CLOCK_GETTIME, CLOCK_MONOTONIC, m1.as_mut_ptr() as u64, 0) == 0
+            && m0[1] < 1_000_000_000
+            && m1[1] < 1_000_000_000
+            && (m1[0] > m0[0] || (m1[0] == m0[0] && m1[1] >= m0[1]));
+        leg!(rep, mono_ok, b"L250\n");
+
+        // L251: gettimeofday converts ns -> a MICROsecond timeval. tv_usec <
+        // 1e6 is the conversion's signature -- a shell that wrote nanoseconds
+        // would overflow it -- and the seconds track a real wall clock.
+        let mut tv = [0u64; 2];
+        leg!(
+            rep,
+            svc3(NR_GETTIMEOFDAY, tv.as_mut_ptr() as u64, 0, 0) == 0
+                && tv[0] >= WALL_CLOCK_FLOOR_SEC
+                && tv[1] < 1_000_000,
+            b"L251\n"
+        );
+
+        // L252: the validated writeback rejects a bad pointer with EFAULT on
+        // BOTH calls -- never a silent write into unmapped space, never a crash.
+        leg!(
+            rep,
+            svc3(NR_CLOCK_GETTIME, CLOCK_REALTIME, UNMAPPED_USER_VA, 0) == NEG_EFAULT
+                && svc3(NR_GETTIMEOFDAY, UNMAPPED_USER_VA, 0, 0) == NEG_EFAULT,
+            b"L252\n"
+        );
+
+        // L253: a clk_id with no Thylacine clock is a SERVED EINVAL (Linux's own
+        // answer), NOT a decline-to-ENOSYS and NOT a wrong value.
+        let mut junk = [0u64; 2];
+        leg!(
+            rep,
+            svc3(NR_CLOCK_GETTIME, CLOCK_PROCESS_CPUTIME_ID, junk.as_mut_ptr() as u64, 0)
+                == NEG_EINVAL,
+            b"L253\n"
+        );
+    }
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its
@@ -3118,11 +3749,68 @@ unsafe fn run_maskexec_child() -> ! {
     linux_exit(1)
 }
 
+/// The BARE-SPAWN phenotype witness (VIVARIUM section 13, the /viv/bin
+/// resolver-subtree-scope channel). `linux` above is CONTAINER-shaped: its
+/// signal legs (L32-L36) require the spawner to hand fd 0 as a reader-less pipe
+/// for the SIGPIPE self-inflict, which viv sets up and a bare joey spawn does
+/// not. This mode assumes NOTHING from the spawner -- an empty handle table, so
+/// /pheno-scratch really is this process's fd 0 -- and proves the ONE claim the
+/// mount channel makes: a Proc spawned through an MPHENO_LINUX mount, carrying
+/// NO manifest and NO spawn-arg declaration, is PHENO_LINUX.
+///
+/// That is the brk discriminator (translated -> -ENOSYS; native 214 is unknown
+/// to the dispatcher -> -1) plus real byte movement through translated
+/// openat/read (our own ELF magic) and write (the verdict). The full Linux-ABI
+/// conformance chain stays in `linux`, driven by the container leg -- this
+/// witness is deliberately narrow, so a failure here names a broken MECHANISM,
+/// never an incidental bare-namespace ABI gap.
+unsafe fn run_linux_loc() -> ! {
+    let rep = svc4(NR_OPENAT, AT_FDCWD, SCRATCH_PATH.as_ptr() as u64, O_WRONLY, 0);
+    // >= 0, not > 0: a bare spawn hands an empty handle table, so this first
+    // open really is fd 0 (the same reasoning run_linux states).
+    if rep < 0 {
+        linux_exit(1);
+    }
+
+    // The discriminator. brk is the table's explicit ENOSYS row (the heap is
+    // Burrow-based; there is no break pointer). Natively 214 is unassigned and
+    // the dispatcher answers -1. -ENOSYS here <=> the mount stamped this Proc
+    // PHENO_LINUX -- the whole of the claim, in one comparison.
+    leg!(rep, svc3(NR_BRK, 0, 0, 0) == NEG_ENOSYS, b"L01\n");
+
+    // Real bytes through translated openat + read: open our own image and read
+    // its ELF magic. A translation that returned plausible values without
+    // moving bytes passes the discriminator and fails here.
+    let fd = svc4(NR_OPENAT, AT_FDCWD, SELF_PATH.as_ptr() as u64, O_RDONLY, 0);
+    leg!(rep, fd >= 0, b"L03\n");
+    let mut magic = [0u8; 4];
+    leg!(rep, svc3(NR_READ, fd as u64, magic.as_mut_ptr() as u64, 4) == 4, b"L04\n");
+    leg!(
+        rep,
+        magic[0] == 0x7f && magic[1] == b'E' && magic[2] == b'L' && magic[3] == b'F',
+        b"L05\n"
+    );
+    leg!(rep, svc3(NR_CLOSE, fd as u64, 0, 0) == 0, b"L14\n");
+
+    // The verdict, at offset 0 so it lands on the sentinel joey stamped (no
+    // passing leg wrote, so the offset is still 0; the lseek is defensive).
+    let _ = svc3(NR_LSEEK, rep as u64, 0, SEEK_SET);
+    if svc3(NR_WRITE, rep as u64, PASS_MARK.as_ptr() as u64, PASS_MARK.len() as u64)
+        != PASS_MARK.len() as i64
+    {
+        linux_exit(1);
+    }
+    linux_exit(0)
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     let mode: &[u8] = env::args().nth(1).unwrap_or(&[]);
     if mode == b"linux".as_slice() {
         unsafe { run_linux() }
+    }
+    if mode == b"linux-loc".as_slice() {
+        unsafe { run_linux_loc() }
     }
     if mode == b"cloexec-child".as_slice() {
         unsafe { run_cloexec_child() }

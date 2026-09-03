@@ -203,14 +203,15 @@ unreachable because both happen under `r->lock`.
 
 ### The producer-side wake
 
-Each existing wakeup site in `kernel/pipe.c` (line 231 close, 285
-read-drains, 328 write-appends) also calls `poll_waiter_list_wake`
-right after releasing `r->lock`:
+Each readiness mutation site in `kernel/pipe.c` (close, read-drains,
+write-appends) calls `poll_waiter_list_wake` right after releasing
+`r->lock`. Since the multi-waiter rewrite (2026-09-02) that is the ONLY
+wake path -- the per-direction `read_rendez`/`write_rendez` are gone, and
+a blocked reader/writer registers its OWN hook on the same `poll_list`:
 
 ```c
 spin_unlock(&r->lock);
-wakeup(&r->read_rendez);
-poll_waiter_list_wake(&r->poll_list);  // sets pw->ready + signals each rendez
+poll_waiter_list_wake(&r->poll_list);  // sets pw->ready + signals each hook's rendez
 ```
 
 The wake walks under the list lock; for each registered hook it (a)
@@ -285,14 +286,14 @@ offset 32:  bool read_eof
 offset 33:  bool write_eof
 offset 34-35: pad
 offset 36:  spin_lock_t lock    (4 B; u32)
-offset 40:  struct Rendez read_rendez   (16 B: spin_lock + pad + Thread*)
-offset 56:  struct Rendez write_rendez  (16 B)
-offset 72:  struct poll_waiter_list poll_list  (16 B: spin_lock + pad + ptr)  ← NEW at P5-poll-a
-offset 88:  u8 buf[PIPE_BUF_SIZE]
+offset 40:  struct poll_waiter_list poll_list  (16 B: spin_lock + pad + ptr)
+offset 56:  u8 buf[PIPE_BUF_SIZE]
 ```
 
-`_Static_assert(sizeof(struct pipe_ring) == 88 + PIPE_BUF_SIZE)` pins
-the layout.
+`_Static_assert(sizeof(struct pipe_ring) == 56 + PIPE_BUF_SIZE)` pins
+the layout. (Before the 2026-09-02 multi-waiter rewrite the header was 88:
+it also held `read_rendez`@40 + `write_rendez`@56, two `struct Rendez` the
+per-call hooks replaced.)
 
 ### `struct pollfd` ABI
 

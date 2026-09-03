@@ -86,6 +86,19 @@
 // 1:1. POSIX: ESRCH.
 #define T_E_SRCH       3
 
+// A blocking wait was interrupted by a deliverable caught note before its
+// condition became true (item 11 / note-interruptible waits). Distinct from
+// death: the terminate latch (thread_die_pending) unwinds a wait to TERMINATE
+// the Thread; T_E_INTR unwinds a wait so a CAUGHT note (a Linux-phenotype
+// sigaction handler, or a native self-managing notes-fd reader) can be
+// delivered at the EL0-return tail without the Thread dying. The syscall then
+// returns -T_E_INTR: a native caller re-issues the wait after servicing the
+// note; a Linux-phenotype caller restarts the syscall iff the handler carried
+// SA_RESTART, else observes EINTR (ARCH 8.8.2, VIVARIUM 6.22). Slot 4 was the
+// last free low errno (3=ESRCH, 5=EIO); the operator ratified the ABI row.
+// POSIX: EINTR.
+#define T_E_INTR       4
+
 // I/O error. Use when a block-device read fails (Stratum/bdev), a
 // 9P transport returns Rerror, or a hardware operation reports
 // failure. POSIX: EIO.
@@ -201,6 +214,16 @@
 // the X-search check (see kernel/stalk.c). POSIX: ENOTDIR.
 #define T_E_NOTDIR     20
 
+// Is a directory -- the operation names a directory where a non-directory
+// is required. Two producers: (a) the 9P server (Stratum answers EISDIR
+// for write-opening a directory; it reached EL0 through the [-4095,-2]
+// Rlerror passthrough long before this name existed -- the name was added
+// with user signoff at #50, 2026-08-25, and mints no new ABI value);
+// (b) SYS_OPEN_CREATE's lexical leaf rows (a create against a trailing-
+// slash / "." / ".." / root leaf -- the Linux open_last_lookups rows,
+// answered before any RPC). POSIX: EISDIR.
+#define T_E_ISDIR      21
+
 // Invalid argument. Use when a syscall argument is structurally
 // malformed (NULL where non-NULL required; out-of-range integer;
 // alignment violated; size exceeds bound). POSIX: EINVAL.
@@ -277,6 +300,12 @@
 // POSIX: EMFILE.
 #define T_E_MFILE      24
 
+// The fd is not a terminal for the requested control op. Returned by the
+// phenotype ioctl shell (C2-k1b) for a TC*/TIOC* request on a non-tty fd, and
+// for any request the terminal surface does not serve. isatty() reads this (via
+// a failed TIOCGWINSZ) as "not a tty". POSIX: ENOTTY.
+#define T_E_NOTTY      25
+
 // The fd is not a socket. Returned when a socket call names an fd with no
 // socktab entry -- a plain file, or a socket whose entry was dropped.
 // POSIX: ENOTSOCK.
@@ -321,10 +350,12 @@ _Static_assert(T_E_OK        == 0,   "T_E_OK ABI pin");
 _Static_assert(T_E_PERM      == 1,   "T_E_PERM ABI pin (POSIX EPERM)");
 _Static_assert(T_E_NOENT     == 2,   "T_E_NOENT ABI pin (POSIX ENOENT)");
 _Static_assert(T_E_SRCH      == 3,   "T_E_SRCH ABI pin (POSIX ESRCH)");
+_Static_assert(T_E_INTR      == 4,   "T_E_INTR ABI pin (POSIX EINTR)");
 _Static_assert(T_E_OPNOTSUPP == 95,  "T_E_OPNOTSUPP ABI pin (POSIX EOPNOTSUPP)");
 // The V-5 socket family. Values read from musl's generic bits/errno.h, which
 // is what a Linux guest's libc compares against.
 _Static_assert(T_E_MFILE          == 24,  "T_E_MFILE ABI pin (POSIX EMFILE)");
+_Static_assert(T_E_NOTTY          == 25,  "T_E_NOTTY ABI pin (POSIX ENOTTY)");
 _Static_assert(T_E_NOTSOCK        == 88,  "T_E_NOTSOCK ABI pin (POSIX ENOTSOCK)");
 _Static_assert(T_E_PROTONOSUPPORT == 93,  "T_E_PROTONOSUPPORT ABI pin (POSIX EPROTONOSUPPORT)");
 _Static_assert(T_E_AFNOSUPPORT    == 97,  "T_E_AFNOSUPPORT ABI pin (POSIX EAFNOSUPPORT)");
@@ -345,6 +376,7 @@ _Static_assert(T_E_FAULT     == 14,  "T_E_FAULT ABI pin (POSIX EFAULT)");
 _Static_assert(T_E_BUSY      == 16,  "T_E_BUSY ABI pin (POSIX EBUSY)");
 _Static_assert(T_E_EXIST     == 17,  "T_E_EXIST ABI pin (POSIX EEXIST)");
 _Static_assert(T_E_NOTDIR    == 20,  "T_E_NOTDIR ABI pin (POSIX ENOTDIR)");
+_Static_assert(T_E_ISDIR     == 21,  "T_E_ISDIR ABI pin (POSIX EISDIR)");
 _Static_assert(T_E_INVAL     == 22,  "T_E_INVAL ABI pin (POSIX EINVAL)");
 _Static_assert(T_E_PIPE      == 32,  "T_E_PIPE ABI pin (POSIX EPIPE)");
 _Static_assert(T_E_RANGE     == 34,  "T_E_RANGE ABI pin (POSIX ERANGE)");

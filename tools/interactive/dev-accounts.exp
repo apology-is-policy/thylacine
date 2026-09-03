@@ -1,0 +1,41 @@
+#!/usr/bin/expect -f
+# tools/interactive/dev-accounts.exp -- prove BOTH seeded login accounts work.
+#
+# Every other scenario logs in as michael. This one also drives cora -- the
+# short-password daily account -- so a regression in cora's provisioning (or in
+# a second account's home/identity) is caught by CI rather than by a user who
+# cannot log in. It is IMAGE-AGNOSTIC on purpose: on the default (BOOT_PROBES)
+# image the ladder creates michael/cora; on a lean (DEV_ACCOUNTS-only) image
+# provision_dev_accounts does -- with the SAME credentials (usr/joey/joey.c
+# DEV_*), so the login contract asserted here holds on either build. The
+# lean-provisioner boot lines ("provision_dev_accounts: ...") are lean-only and
+# are proven separately, off the boot log, not here.
+#
+# Reaching each shell banner proves login authenticated with that account's
+# password; `pwd` printing the account's own home proves login placed the
+# session in the right per-user encrypted home (#113, the ergo-1 pattern) -- so
+# the two accounts are distinct identities, not one login landing twice.
+
+# HVF: this is a login smoke (nothing hardware-specific), so it rides the fast
+# accel like ls-ci; the TCG/GICv3 axes stay covered by the anchor set.
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+
+# cora -- the short-password daily login (the account the operator actually uses).
+lc_login cora kora
+lc_run_expect "pwd" "/home/cora"
+lc_pass "dev-accounts(cora): short-password login authenticates + lands in /home/cora"
+
+# Log out and prove michael -- the long-password admin -- authenticates too, on
+# the same image, into his own distinct home.
+lc_send "exit"
+lc_login michael correct-horse-battery-staple-v1
+lc_run_expect "pwd" "/home/michael"
+lc_pass "dev-accounts(michael): long-password login authenticates + lands in /home/michael"
+
+lc_quit
+lc_pass "dev-accounts: both seeded accounts (cora + michael) authenticate as distinct identities"
+exit 0

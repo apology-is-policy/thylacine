@@ -192,6 +192,78 @@ TLC verdicts at `Procs = {p1, p2}, Paths = {a, b, c}, Spoors = {s1, s2}`:
 | `MountRefcountConsistency` (per-Spoor refcount equals cardinality of mount entries referencing it across all Territories) | spoor_ref / spoor_unref discipline at every mount-table mutation site: `mount` bumps before insert; `unmount` drops after remove; `territory_clone` bumps per cloned entry; `territory_unref` final-release drops per remaining entry BEFORE `kmem_cache_free`. |
 | `MountRefcountNonNegative` | `spoor_unref`'s underflow extinct guarantees the counter never drops below zero. |
 
+### UM (union mounts) extension — spec-first re-enabled (2026-09-02)
+
+> **Currency note (UM, 2026-09-02).** The Mount/Unmount rows above modeled an
+> UNORDERED `mounts: [Procs -> SUBSET (Paths X Spoors)]` set. The union-mounts
+> arc **upgraded `mounts` to an ordered `morder: [Procs -> [Paths -> Seq(Member)]]`**
+> where `Member == [s: Spoors, mb: BOOLEAN, mc: BOOLEAN]` (mb = mounted MBEFORE,
+> mc = MCREATE). One representation now, not a set beside a seq. The refcount +
+> NoCycle invariants are preserved (adapted to occurrence-counting over the
+> sequences); the config-table numbers above are the pre-UM bounds and are
+> superseded by the table below.
+
+Models the Plan 9 union semantics ARCH §9.5/§9.6 declares but the v1.0 walk never
+grew (`docs/reference/18-territory.md` had them "Phase 5+"): a union point's members
+are the GRAFTED sources in declared order (MBEFORE prepended = searched first,
+MAFTER appended = last, MREPL = replace the whole group); the mounted-on dir's own
+contents are NOT an implicit member (grafted-sources-only — this also sidesteps the
+`would_create_mount_cycle` self-mount check, so no original-as-member case). New
+`holds: [Spoors -> SUBSET Names]` (member contents, fixed at Init, explored for
+coverage) drives the five new union invariants:
+
+- `OrderCorrect` — every MBEFORE member precedes every MAFTER member in a point's
+  sequence (search order). `BuggyMountOrder` appends an MBEFORE member -> violated.
+- `WalkFirstHit` — walk `pt/nm` lands on the EARLIEST member holding `nm`
+  (`WalkSel = FirstHolder`). `BUGGY_WALK_LAST_HIT` returns the last holder.
+- `ReaddirDedupFirstWins` — the union listing is complete, deduplicated by name,
+  first-member-wins. `BUGGY_READDIR_LAST_WINS` keeps the last holder.
+- `CreateTargetCorrect` — a create lands in the first MCREATE member (or nowhere).
+  `BUGGY_CREATE_ANY_MEMBER` ignores MCREATE (picks the first member).
+- `RemoveTargetCorrect` (UM-7 F3) — a remove (unlink / rmdir / rename source)
+  acts on the first member HOLDING the leaf (`RemoveSel = FirstHolder`, the same
+  first-hit as walk), never the MCREATE member. `BUGGY_REMOVE_MCREATE_MEMBER`
+  routes remove through the create target -> violated whenever the holder is not
+  the first MCREATE member (the F3 mis-selection).
+
+TLC verdicts at `Procs = {p1, p2}, Paths = {a, b}, Spoors = {s1, s2}, Names = {n1}`
+(+ `CONSTRAINT StateConstraint`, non-empty points <= 2):
+
+| Config | Flag | Verdict | Distinct |
+|---|---|---|---|
+| `territory.cfg`                          | (all FALSE)                | clean (no error), diameter 9 | 2,032,452 |
+| `territory_buggy.cfg`                     | `BUGGY_CYCLE`              | NoCycle violated                  | (fast) |
+| `territory_buggy_mount_no_refbump.cfg`    | `BUGGY_MOUNT_NO_REFBUMP`  | MountRefcountConsistency violated | (fast) |
+| `territory_buggy_unmount_no_refdrop.cfg`  | `BUGGY_UNMOUNT_NO_REFDROP`| MountRefcountConsistency violated | (fast) |
+| `territory_buggy_destroy_leak.cfg`        | `BUGGY_DESTROY_LEAK`      | MountRefcountConsistency violated | (fast) |
+| `territory_buggy_chroot_no_refbump.cfg`   | `BUGGY_CHROOT_NO_REFBUMP` | MountRefcountConsistency violated | (fast) |
+| `territory_buggy_mount_order.cfg`         | `BUGGY_MOUNT_ORDER`       | OrderCorrect violated             | (fast) |
+| `territory_buggy_walk_last_hit.cfg`       | `BUGGY_WALK_LAST_HIT`     | WalkFirstHit violated             | (fast) |
+| `territory_buggy_readdir_last_wins.cfg`   | `BUGGY_READDIR_LAST_WINS` | ReaddirDedupFirstWins violated    | (fast) |
+| `territory_buggy_create_any_member.cfg`   | `BUGGY_CREATE_ANY_MEMBER` | CreateTargetCorrect violated      | (fast) |
+| `territory_buggy_remove_mcreate.cfg`      | `BUGGY_REMOVE_MCREATE_MEMBER` | RemoveTargetCorrect violated  | (fast) |
+
+**Rule-pin note (UM-7 R2-F8).** The union selectors (`WalkSel` / `CreateSel` /
+`RemoveSel`) are DEFINITIONAL invariants -- each states the SELECTION RULE
+(`= FirstHolder` / `= FirstCreateMember`) and its buggy cfg discriminates that
+rule. No `Next` action consumes them, so the model pins WHICH member an op
+picks, not the two-step IMPL mechanism (e.g. the R2-F4 uncrossed-point ->
+caller-re-probe path, fixed by probing member index 0). Treat these as rule
+pins, not mechanism models; the mechanism's rigor is the audit + the runtime
+tests.
+
+Each of the union buggy cfgs was ALSO checked against ONLY its target
+invariant (not the `Invariants` bundle) and violates exactly that one — the
+discrimination control (a bug hits its own check, not incidentally a refcount one).
+
+Impl mapping (lands at UM-3/UM-4/UM-5): `MountBefore`/`MountAfter`/`MountRepl` ->
+`kernel/territory.c::mount` (MBEFORE insert-at-group-front / MAFTER append / MREPL
+replace-whole-group); `Unmount` -> `::unmount` (shift-down, order-preserving);
+`morder` iteration -> new `::mount_members` (ordered ref-held sources); `WalkSel` /
+`ReaddirSel` / `CreateSel` -> `kernel/stalk.c` union walk + the union readdir merge;
+`RemoveSel` -> `kernel/stalk.c::stalk_union_member_holding` (UM-8c, the F3 remove
+member-selection) via the `STALK_REMOVE` amode + `syscall.c::viv_union_member`.
+
 ### P2-Ea landed (this chunk)
 
 - `bindings` variable + Reachable transitive-closure helper.
@@ -2191,3 +2263,5 @@ pty_stop, reader_frame, ...) are recorded per-row in
 **RE-ENABLED for the capability network dataplane (user-directed, 2026-06-20; NET-THROUGHPUT / the Weft arc, I-37).** The fifth instance of re-enabling point (a). The Weft dataplane (`docs/NET-THROUGHPUT.md`) gives a confined Proc a per-flow, capability-scoped, zero-copy shared-page path to its `/net` flows — netd does the control-plane setup at grant, the bytes then flow through a shared Burrow with **no per-op mediation** (the Snap-transport + Arrakis-framing + RDMA-registration-is-the-capability fusion the five-lineage literature pass confirms unoccupied: the closest *primitive*, Fuchsia's IOBuffer, is logging-only; the closest *property-set*, Arrakis, is NIC-hardware-enforced). Its central hazard is the famous io_uring `ubuf_info` buffer-lifetime race: a registered payload page reused before the LAST of {netd stack, NIC DMA, peer ACK} is done → in-flight-page UAF / cross-Proc corruption (the `F_NOTIF` two-CQE contract releases the I-30 pin at notification-terminal, not op-terminal) — exactly the subtle class that benefits from machine-checked exploration. **Model-first**: `specs/weft.tla` (clean + the buggy cfgs `premature_release` / `recheck_per_op` [the reviewer-attack per-packet re-check] / `ring_toctou` / `share_outlives_flow`) is **LANDED at Weft-1** (`d42e91b`+; TLC-green model-first: the clean cfg [13 invariants, 1412 distinct, depth 22] + the `EventuallyReleased` liveness witness + the four buggy cfgs, each a counterexample on its named invariant — `premature_release`->`PinHeldWhileInFlight`, `recheck_per_op`->`NoPerOpMediation`, `ring_toctou`->`DescPinnedToSnapshot`, `share_outlives_flow`->`ShareBoundedByFlow`); the impl is validated against it across Weft-2..7 (`specs/SPEC-TO-CODE.md::weft.tla`). Re-enabled for THIS surface only; the broader suspension stands elsewhere.
 
 **RE-ENABLED for the debugger stop/continue/step state machine (user-directed, 2026-07-14; Go IDE Stage 8a, I-39).** The sixth instance of re-enabling point (a). The kernel debug surface (`docs/DEBUG-FS-DESIGN.md`) lets a debugger stop an EL0 target at the EL0-return-tail checkpoint, read/write its registers + cross-Proc memory, single-step it, and walk its unified user->kernel stack — bounded by I-39 (debug authority = namespace + the owner-or-`CAP_DEBUG` two-axis gate). Its central hazard is an SMP wait/wake race on the **most bug-prone lineage in the tree** (#788/#806/#860/#809/#811/#68 — the death path): a stop request racing a group-terminate/kill, a resume racing a detach or the target's death, a lost or double wake of a parked thread — exactly the class the tests are structurally blind to and that machine-checked exploration catches (the deep-smp-review / death_wake precedent). The sharp correctness line — a stop is observed at the EL0-return tail for a RUNNING thread (parks-and-reparks, preserving an in-progress syscall) OR, **since 8c-2 (the stop-of-a-sleeper)**, via a nested stop-detour INSIDE `sleep()`/`tsleep()` for a SYSCALL-BLOCKED sleeper (the multi-thread-Go-target fix: an idle futex-parked M never reaches the tail on its own, so without the detour the target could never become fully-stopped and a blocking `stop` hangs) — in BOTH cases the `#811` death check PRECEDES the stop (the stop-detour is gated `r != &debug_rendez` and the die-check fires first on wake, so a death UNWINDS the syscall while a stop parks-and-reparks it), ordered AFTER `el0_return_die_check` so **death always wins over a stop** — is a model obligation, not a comment. **Model-first**: `specs/debug_stop.tla` (clean + the buggy cfgs `park_before_die` / `lost_stop` / `double_wake` / `strand_on_debugger_death`, each a counterexample on its named invariant — NoLostStop, DeathWinsOverStop, NoEL0AfterStopped, ExactlyOnceResume — plus the `EventuallyResumed` NoStrand liveness witness that a debugger's detach/close/death always resumes the target) is written + TLC-green BEFORE the 8a-1 impl; the impl is validated against it (`specs/SPEC-TO-CODE.md::debug_stop.tla`). **8a-2c added the 5th invariant `StopImpliesOwned == sflag => attached`** (the per-Proc stop flag is set only while a debugger owns the slot) + the `FaultStop` action + the `fault_stop_ungated` buggy cfg — the SA-1 fix (a hardware bp/wp/step fire must deliver the stop under `g_proc_table_lock` gated on `debug_owner != NULL`, via `proc_debug_fault_stop`, exactly `RequestStop`'s attach gate; the pre-fix EC path set the flag ungated → a fire racing a detach stranded the debuggee). Re-enabled for THIS surface only; the broader suspension stands elsewhere.
+
+**RE-ENABLED for union mounts (user-directed, 2026-09-02; the UM arc, I-28/I-3).** The seventh instance of re-enabling point (a). The union-mounts arc grows the v1.0 resolver's mount-table walk into the full Plan 9 union semantics ARCH 9.5/9.6 declares (`docs/reference/18-territory.md` had MBEFORE/MAFTER/MCREATE "recorded but treated as append; union walking Phase 5+"). Its central hazards are ORDERING (a mis-ordered union searches the wrong source first -> a shadowed binary or a wrong `/bin/sh`) and the resolver's per-component union walk on the most privilege-load-bearing surface in the tree (`kernel/stalk.c`, an I-28 boundary) -- exactly the class where a mis-modeled first-hit/dedup rule benefits from machine-checked exploration. **Model-first**: `specs/territory.tla` UPGRADED (mounts set -> ordered `morder` sequences + `holds` contents) with the four union invariants (`OrderCorrect`/`WalkFirstHit`/`ReaddirDedupFirstWins`/`CreateTargetCorrect`) + their buggy cfgs, TLC-green (clean 2,032,452 distinct, diameter 9; each buggy cfg a counterexample on its named invariant, discrimination-checked against the specific invariant) BEFORE the UM-3/4/5 impl; the impl (mount ordering + `mount_members` + the stalk union walk + union readdir) is validated against it. Re-enabled for THIS surface only; the broader suspension stands elsewhere.

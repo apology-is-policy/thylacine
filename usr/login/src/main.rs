@@ -946,11 +946,36 @@ unsafe fn seed_session_env(user: &[u8]) {
     let mut home_val: Vec<u8> = Vec::with_capacity(6 + user.len());
     home_val.extend_from_slice(b"/home/");
     home_val.extend_from_slice(user);
-    let path_val: &[u8] = b"/bin:/goroot/bin";
-    let pairs: [(&[u8], &[u8]); 3] = [
+    // Mirrors the shell's static $path (eval/stmt.rs resolve_command) so `which`
+    // and POSIX/Go tools agree with what `ut` runs; drift is a bug. /clade/bin is
+    // the Clade C/C++ toolchain (absent when that chunk is off -- a harmless miss).
+    // The two /viv entries are the phenotype-BY-LOCATION mounts (git, then the
+    // busybox applets): they were the drift this comment warned about -- `git`
+    // ran because ut's static list had /viv/bin while `which git` failed because
+    // this one did not.
+    let path_val: &[u8] = b"/bin:/goroot/bin:/clade/bin:/viv/bin:/viv/abin";
+    // W1-a (AUX-ROADMAP Stream 0): the shipped Linux git lives at /viv/bin and
+    // finds NOTHING without these -- its helpers (git-remote-https,
+    // git-upload-pack: the exec closure Design D 13.10.8 requires to sit
+    // behind the pheno-mount) resolve through GIT_EXEC_PATH, and the system
+    // config (identity, templateDir, sslCAInfo, core.editor=nora, pager) is
+    // read only through GIT_CONFIG_SYSTEM. Until now only the container
+    // bundles' manifests set them, so an interactive `git clone https://...`
+    // from a shell could not exec its transport helper at all.
+    // OPENSSL_armcap=0: the shipped git-remote-https (and the static curl)
+    // bundle OpenSSL, whose armcap init SIGILL-probes CPU features -- fatal
+    // under the phenotype (a snare:ill note is terminal; the 2026-08-25 curl
+    // census, wall 1). The container bundles carry this in their manifests;
+    // an interactive `git clone https://` from a shell needs it in the
+    // session env for exactly the same reason. OpenSSL's own documented
+    // override: pure-C crypto paths, no probing.
+    let pairs: [(&[u8], &[u8]); 6] = [
         (b"HOME", &home_val),
         (b"USER", user),
         (b"PATH", path_val),
+        (b"GIT_EXEC_PATH", b"/viv/bin"),
+        (b"GIT_CONFIG_SYSTEM", b"/viv/bin/gitconfig"),
+        (b"OPENSSL_armcap", b"0"),
     ];
     let mut ok = true;
     for (key, val) in pairs.iter() {

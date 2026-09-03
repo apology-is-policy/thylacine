@@ -1288,6 +1288,14 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     // BEFORE this open -- so a dev9p OEXEC-open reads the bytes as O_RDONLY.
     if (flags == 3) flags = 0;
     if (omode & 0x10) flags |= 01000;       // OTRUNC → O_TRUNC
+    // O_APPEND (the git 6.27 arm): forward the bit to the Tlopen. Stratum stores
+    // it per-fid and, on every Twrite to this fid, ignores the client offset and
+    // writes at the file's current EOF (server.c h_write) -- so the kernel needs
+    // NO append mode of its own. c->offset stays advisory below (the server does
+    // not consult it for an append fd); this is correct for a write-only append
+    // (git's reflog), and a mixed read+append on the SAME fd sees the tracked
+    // cursor, best-effort. Value 02000 == Linux O_APPEND == Stratum STM_9P_O_APPEND.
+    if (omode & SYS_WALK_OPEN_OAPPEND) flags |= 02000;   // O_APPEND
     struct p9_qid qid;
     u32 iounit;
     int rc = p9_client_lopen(p->client, p->fid, flags, &qid, &iounit);
@@ -1306,10 +1314,20 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
         larder_attr_invalidate(&p->client->larder, c->qid.path);
         larder_page_invalidate(&p->client->larder, c->qid.path);
         // F1 write-behind eligibility: an OTRUNC-opened fd's end is KNOWN
-        // (0) -- the append anchor (the create twin; same gate).
+        // (0) -- the append anchor (the create twin; same gate). EXCLUDE an
+        // O_APPEND fd (git 6.27 R1-F1): its Twrites are RELOCATED to EOF by
+        // Stratum, so the kernel's wb_base anchor and the server's EOF are two
+        // independent "write at end" mechanisms. Under concurrent append they
+        // diverge, and the flush's larder_page_install_own would then install
+        // this fd's bytes at wb_base offsets the server filled with ANOTHER
+        // writer's bytes -- a fabricated own-page serve (I-38). Pure
+        // write-through is coherent for an append fd (per-write attr
+        // invalidate; append only extends, so the extension range was never
+        // cached and the range-invalidate is conservative).
         if (p->client->loose &&
             __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
-            c->qid.type == 0) {
+            c->qid.type == 0 &&
+            !(omode & SYS_WALK_OPEN_OAPPEND)) {
             p->wb_eligible = true;
             p->wb_known    = true;
             p->wb_base     = 0;
@@ -1393,6 +1411,11 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
         // new file. Map Plan 9 omode -> Linux O_* (same shape as dev9p_open).
         u32 flags = (u32)(omode & 0x3);
         if (omode & 0x10) flags |= 01000u;        // OTRUNC -> O_TRUNC
+        // O_APPEND on the create-open (git 6.27): a fresh reflog is
+        // O_CREAT|O_APPEND, so this Tlcreate carries the append bit exactly like
+        // dev9p_open's Tlopen. Stratum enforces the append server-side; no kernel
+        // append mode. 02000 == Linux O_APPEND == Stratum STM_9P_O_APPEND.
+        if (omode & SYS_WALK_OPEN_OAPPEND) flags |= 02000u;   // O_APPEND
         int rc = p9_client_lcreate(p->client, p->fid, (const u8 *)name, name_len,
                                     flags, mode, gid, &qid, &iounit);
         if (rc != 0) {                            // p->fid still parent; caller clunks
@@ -1454,9 +1477,19 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     // entirely create-then-write). Gate: loose (the B1 I-38 opt-in) +
     // cacheable + plain file. Pre-share (no handle exists yet), so plain
     // stores; the dir arm never reaches (DMDIR-gated).
+    // EXCLUDE an O_APPEND create (git 6.27 R1-F1): a fresh reflog is
+    // O_CREAT|O_WRONLY|O_APPEND, and Stratum RELOCATES every Twrite on the fid
+    // to EOF -- so wb staging + the server's EOF override are two independent
+    // "write at end" mechanisms that diverge under concurrent append, at which
+    // point the flush's larder_page_install_own fabricates own-pages at wb_base
+    // offsets the server filled with another writer's bytes (I-38). Pure
+    // write-through is coherent for an append fd. (Single-writer git is correct
+    // either way -- cursor==EOF on a fresh file -- but the anchor makes the
+    // concurrent case, the canonical O_APPEND workload, unsound.)
     if ((perm & SYS_WALK_CREATE_DMDIR) == 0 && p->client->loose &&
         __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
-        c->qid.type == 0) {
+        c->qid.type == 0 &&
+        !(omode & SYS_WALK_OPEN_OAPPEND)) {
         p->wb_eligible = true;
         p->wb_known    = true;
         p->wb_base     = 0;
@@ -1955,7 +1988,15 @@ static long dev9p_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     u64 offset = (u64)off;
     u32 got = 0;
     int rc = p9_client_readdir(p->client, p->fid, offset, count, (u8 *)buf, &got);
-    if (rc != 0) return -1;
+    // Errno rollout (getdents64 chunk): the bare -1 crossed the viv boundary as
+    // a fabricated EPERM -- and, worse, flattened a caught-note EINTR (the ^C-
+    // during-ls path this chunk adds an E2E leg for) into a non-retryable error.
+    // Surface the real code exactly as dev9p_readlink/dev9p_fsync do: -P9_E_INTR
+    // -> EINTR (retryable), a transport drop -> EIO, a server Rlerror passed
+    // through. NOT fid_suspect: an interrupt/transport error does not indict the
+    // fid (the rename/fsync arms mark it because a mid-op failure there can
+    // desync the fid; a readdir cursor is re-read from c->offset, unchanged).
+    if (rc != 0) return dev9p_wire_errno(rc);
     return (long)got;
 }
 

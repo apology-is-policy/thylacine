@@ -105,6 +105,13 @@ static u32 g_tread_clamp_once;  // != 0: the NEXT big-file Tread short-returns
 // (a partial walk) -- the session layer must then leave newfid unbound and
 // dev9p_walk_attrs must leave nc untouched.
 static bool g_dev9p_wga_partial;
+// #50: the ONE-SHOT variant -- answer the next N Twalkgetattrs one short,
+// then behave. Drives SYS_OPEN_CREATE's open-leg NOENT exactly once, so the
+// bounded loop's RETRY-open (after a lost create race) resolves for real.
+static u32  g_dev9p_wga_partial_n;
+// #50: Tlcreate arrival counter -- the open-first economy + retry-vs-recreate
+// discrimination reads it.
+static u32  g_tlcreate_seen;
 
 // F1 write-behind: wire-op counters, sequencing, payload capture + fault
 // injection for the wb_* tests. g_wire_seq bumps on EVERY request the
@@ -338,6 +345,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TLCREATE) {
+        g_tlcreate_seen++;                        // #50: arrival counter
         if (g_tlcreate_fail_ecode) {              // #99: inject an Rlerror (e.g. EEXIST)
             u32 ec = g_tlcreate_fail_ecode;
             g_tlcreate_fail_ecode = 0;
@@ -492,6 +500,10 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         u16 nwname = (u16)req[23] | ((u16)req[24] << 8);
         u16 nwqid  = nwname;
         if (g_dev9p_wga_partial && nwqid > 0) nwqid--;
+        else if (g_dev9p_wga_partial_n > 0 && nwqid > 0) {   // #50: one-shot
+            nwqid--;
+            g_dev9p_wga_partial_n--;
+        }
         size_t total = P9_HDR_LEN + 2 + (size_t)nwqid * P9_WGA_BODY_LEN;
         if (resp_cap < total) return -1;
         for (size_t i = 0; i < total; i++) resp[i] = 0;
@@ -2993,4 +3005,151 @@ void test_dev9p_wb_writethrough_range_invalidate(void) {
     TEST_ASSERT(ok, "page 1 bytes intact");
     spoor_clunk(f);
     wb_test_end(root);
+}
+
+// =============================================================================
+// #50: SYS_OPEN_CREATE over the dev9p LOOPBACK (VIVARIUM.md section 6.24).
+// The fixture-tree battery (test_stalk.c) owns the resolution rows; these own
+// the legs only dev9p's errno channel can drive: the open-NOENT -> Tlcreate
+// leg, the lost-exists-race retry-open, and the OEXCL EEXIST-exact answer.
+// The one-shot g_dev9p_wga_partial_n makes the open leg miss EXACTLY once, so
+// the retry resolves for real; g_tlcreate_seen discriminates retry-open from
+// a second create.
+//
+// FIXTURE LESSON (#85/#87 family, earned here): (1) every injection knob is
+// cleared UNCONDITIONALLY after the call under test -- the first run of this
+// battery leaked an armed Tlcreate injection into create_downgrades_parent_attr
+// and broke it. (2) The loopback_send unread-reply discipline check needed the
+// modeled Rclunk-drop exception: the create leg legitimately double-parks the
+// parent dir fid (park the first RPC-free, p9_client_clunk_async the second),
+// and the fire-and-forget Rclunk nobody reads made the single-slot loopback
+// refuse the NEXT send -- killing the client (client_mark_dead_locked) for a
+// pattern every real transport absorbs (the demux's #210 orphan-clunk arm).
+// =============================================================================
+
+extern s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+                                          const char *kpath, u64 klen,
+                                          u64 omode_raw, u64 perm_raw);
+
+// A Proc holding an UNOPENED fd at the loopback root (clone + clone-walk for
+// its own fid -- the walkable start base). CAP_DAC_OVERRIDE: the canonical
+// Rgetattr reports S_IFREG|0644/uid 0x1234, which would fail the A-2d W|X
+// parent gate; the cap bypasses rwx (perm_check), and the A-2d denial row
+// itself is proven in the stalk battery -- nothing is lost by bypassing here.
+static struct Proc *oc9_proc(struct Spoor *root, hidx_t *fd_out) {
+    struct Spoor *nc = spoor_clone(root);
+    if (!nc) return NULL;
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    if (!w) { nc->aux = NULL; spoor_unref(nc); return NULL; }
+    walkqid_free(w);
+    struct Proc *p = proc_alloc();
+    if (!p) { spoor_clunk(nc); return NULL; }
+    p->principal_id = 0x1234u;
+    p->primary_gid  = 0x5678u;
+    p->caps         = CAP_DAC_OVERRIDE;
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc);
+    if (fd < 0) { spoor_clunk(nc); p->state = PROC_STATE_ZOMBIE; proc_free(p); return NULL; }
+    *fd_out = fd;
+    return p;
+}
+
+// The open-NOENT -> create leg: the leaf misses once (one-shot partial), the
+// create answers Rlcreate(0x77), and the caller holds the created file.
+void test_dev9p_open_create_noent_then_create(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    hidx_t base = -1;
+    struct Proc *p = oc9_proc(root, &base);
+    TEST_ASSERT(p != NULL, "proc + start fd");
+
+    g_tlcreate_seen = 0;
+    g_dev9p_wga_partial_n = 1;   // the open leg misses exactly once
+    s64 fd = sys_open_create_kpath_for_proc(p, (u64)base, "newfile", 7,
+                                            1 /*OWRITE*/, 0644);
+    g_dev9p_wga_partial_n = 0;   // fixture hygiene: never leak an armed knob
+    TEST_ASSERT(fd >= 0, "open-NOENT -> create succeeded");
+    TEST_EXPECT_EQ((u64)g_tlcreate_seen, (u64)1, "exactly one Tlcreate");
+    // #50 close F1: the Rclunk-drop exception is EXACT-COUNTED per leg, so a
+    // future SYNCHRONOUS clunk that leaks its reply -- the discipline bug the
+    // send guard exists for -- moves the count and fails here instead of
+    // passing as the modeled async-clunk. The value is a MEASURED anchor
+    // (uart-instrumented boot, 2026-08-25), not a derivation: the choreography
+    // lives in the dirfid park/reuse pool, and a first-principles park-slot
+    // model predicted it wrong. A change in EITHER direction means the clunk
+    // choreography changed -- re-measure before re-pinning. This leg
+    // (successful create; the parked dir fid is REUSED by the create): 0.
+    TEST_EXPECT_EQ((u64)g_loopback.dropped_rclunks, (u64)0,
+                   "async-clunk drop count (measured anchor)");
+    struct Handle h;
+    TEST_ASSERT(handle_get(p, (hidx_t)fd, &h) == 0 && h.kind == KOBJ_SPOOR,
+                "created fd resolves to a Spoor handle");
+    TEST_EXPECT_EQ((u64)((struct Spoor *)h.obj)->qid.path, (u64)0x77,
+                   "the fd holds the CREATED file (Rlcreate qid)");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+}
+
+// The lost-exists-race leg (the Plan 9 namec / Linux v9fs idiom): open misses
+// (one-shot), the create loses the race (Rlerror EEXIST, one-shot), and the
+// bounded loop's RETRY-OPEN serves the winner's file -- exactly ONE Tlcreate,
+// so the recovery was the open, not a second create.
+void test_dev9p_open_create_exists_race_retries_open(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    hidx_t base = -1;
+    struct Proc *p = oc9_proc(root, &base);
+    TEST_ASSERT(p != NULL, "proc + start fd");
+
+    g_tlcreate_seen = 0;
+    g_dev9p_wga_partial_n = 1;   // miss once; the RETRY open resolves
+    g_tlcreate_fail_ecode = 17;  // EEXIST: the create loses the race
+    s64 fd = sys_open_create_kpath_for_proc(p, (u64)base, "raced", 5,
+                                            1 /*OWRITE*/, 0644);
+    // Fixture hygiene: clear both knobs unconditionally BEFORE any assert.
+    g_tlcreate_fail_ecode = 0;
+    g_dev9p_wga_partial_n = 0;
+    TEST_ASSERT(fd >= 0, "the loser converged by OPENING the winner's file");
+    TEST_EXPECT_EQ((u64)g_tlcreate_seen, (u64)1,
+                   "exactly one Tlcreate -- the recovery was the retry-open");
+    // #50 close F1 (measured anchor, as above): the lost-race leg's failed
+    // create clunks its clone-walked dir fid AND the stalked parent (same
+    // qid) -- park + async-clunk -- and the retry-open's traffic drops the
+    // staged Rclunk: 1.
+    TEST_EXPECT_EQ((u64)g_loopback.dropped_rclunks, (u64)1,
+                   "async-clunk drop count (measured anchor)");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+}
+
+// OEXCL: ONE create, no open-first, no retry -- and the EEXIST is EXACT
+// (-T_E_EXIST via the #99 errno channel), the lockfile caller's contract.
+void test_dev9p_open_create_excl_eexist_exact(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    hidx_t base = -1;
+    struct Proc *p = oc9_proc(root, &base);
+    TEST_ASSERT(p != NULL, "proc + start fd");
+
+    g_tlcreate_seen = 0;
+    g_tlcreate_fail_ecode = 17;  // EEXIST
+    s64 rc = sys_open_create_kpath_for_proc(p, (u64)base, "lockfile", 8,
+                                            1 | SYS_WALK_OPEN_OEXCL, 0600);
+    g_tlcreate_fail_ecode = 0;   // fixture hygiene
+    TEST_EXPECT_EQ((u64)rc, (u64)(s64)-T_E_EXIST,
+                   "OEXCL loser answers EXACTLY -T_E_EXIST (lockfile contract)");
+    TEST_EXPECT_EQ((u64)g_tlcreate_seen, (u64)1,
+                   "one create, no open-first, no retry");
+    // #50 close F1 (measured anchor, as above): the OEXCL loser's failed
+    // create runs the same double-clunk of the parent-qid pair as the
+    // lost-race leg: 1.
+    TEST_EXPECT_EQ((u64)g_loopback.dropped_rclunks, (u64)1,
+                   "async-clunk drop count (measured anchor)");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
 }

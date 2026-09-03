@@ -17,7 +17,7 @@ The translation is intentionally partial. Plan 9 notes are string-named and caus
 | `SIGINT` (2) | `interrupt` | yes | terminate (`exits("interrupt")`) |
 | `SIGTERM` (15) | `interrupt` (shared with SIGINT — documented v1.0 limitation) | yes | terminate |
 | `SIGKILL` (9) | `kill` (`sigaction(SIGKILL)` returns EINVAL per POSIX) | **no** — kernel-side N-4 enforced | terminate (kernel calls `exits("killed")`) |
-| `SIGPIPE` (13) | `pipe` | yes (default-masked at startup; see below) | terminate (if mask cleared) — but see task #237: the kernel's EL0-tail arm does NOT actually default-terminate on `pipe`, so this row and the code disagree |
+| `SIGPIPE` (13) | `pipe` | yes (default-masked at startup; see below) | terminate if the mask is cleared (#237: the kernel's EL0-tail arm now default-terminates on an unmasked+unhandled `pipe` — pouch's startup mask is what keeps the POSIX EPIPE-not-death default) |
 | `SIGCHLD` (17) | `child_exit` | yes | ignore |
 | every other signal | (unsupported) | — | `sigaction()` returns `EINVAL` |
 

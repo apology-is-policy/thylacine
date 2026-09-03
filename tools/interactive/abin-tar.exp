@@ -1,0 +1,102 @@
+#!/usr/bin/expect -f
+# tools/interactive/abin-tar.exp -- AUX-ROADMAP Stream 0, X-1 + X-2 end to end.
+#
+# Proves, from a REAL session shell rather than at the decide level, the two
+# halves of "busybox applets are usable anywhere in the Thylacine namespace":
+#
+#   X-2  the /viv/abin phenotype mount resolves, and its applets are on the
+#        session $PATH. `which tar` answers /viv/abin/tar -- which is BOTH the
+#        mount working AND the login PATH seed carrying it (the two are
+#        separate mechanisms, and `which` reads only the seed).
+#
+#   X-1  busybox `tar -x` actually extracts. It passes file_header->mode
+#        unnarrowed, so mkdirat sees S_IFDIR|0755 and openat sees S_IFREG|0644;
+#        before the VIV_S_IFMT mask both DECLINED and extraction failed on
+#        every entry with "Function not implemented". A directory member and a
+#        file member therefore exercise the two fixed decides respectively.
+#
+# The archive is BUILT IN THE GUEST and then extracted, so the test carries no
+# fixture and cannot silently pass against a stale one. The directory is
+# removed between create and extract, so its reappearance is proof of mkdirat
+# rather than of the original having survived.
+#
+# Honors the three LS-CI portability facts (lib.exp): run under script(1),
+# global spawn_id (lc_boot), match OUTPUT not typed input. Every asserted token
+# is output-only -- the typed lines never contain them.
+
+# Shell + FS assertions only; no hardware-specific surface, so HVF is safe here
+# for the same reason ergo-1 gives (and this scenario is boot-dominated).
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# --- X-2: the mount + the PATH seed -----------------------------------------
+# `which` searches $PATH from the /env device only -- it does NOT consult ut's
+# static list -- so this answer proves the LOGIN SEED carries /viv/abin, which
+# is the exact drift that made `which git` fail while `git` ran.
+lc_run_expect "which tar" "/viv/abin/tar"
+lc_pass "abin-tar(a): /viv/abin is mounted and on the session PATH (X-2)"
+
+# --- build an archive in the guest ------------------------------------------
+# A directory member AND a file member: extraction exercises mkdirat for the
+# former and openat(O_CREAT) for the latter, which are precisely the two
+# decides the S_IFMT mask fixed.
+lc_send "cd /tmp"
+lc_send "rm -rf abin-t && mkdir -p abin-t/sub"
+lc_send "echo tarpayload > abin-t/sub/payload.txt"
+lc_run_expect "cat abin-t/sub/payload.txt" "tarpayload"
+lc_pass "abin-tar(b): the source tree exists before archiving"
+
+# UNCOMPRESSED deliberately. `-z` makes busybox spawn gzip, which needs vfork
+# -- unserved, so `tar czf` reports "tar: vfork: Function not implemented".
+# That is a real gap (AUX-ROADMAP Stream 0, W2-a) but it is NOT the gap X-1
+# closed, and a test that bundles both proves neither: a failure could not be
+# attributed. This scenario therefore exercises exactly the mkdirat +
+# openat(O_CREAT) path the S_IFMT mask fixed, and the compressed case gets its
+# own item rather than riding along here.
+lc_send "tar cf abin-t.tar abin-t"
+lc_run_expect "ls abin-t.tar" "abin-t.tar"
+lc_pass "abin-tar(c): busybox tar created an archive"
+
+# --- X-1: extraction ---------------------------------------------------------
+# Remove the tree first: everything asserted below must come from the archive.
+lc_send "rm -rf abin-t"
+lc_run_expect_hardfail "tar xf abin-t.tar && echo ABIN-EXTRACT-RC0" \
+    "ABIN-EXTRACT-RC0" "Function not implemented"
+lc_pass "abin-tar(d): tar -x completed without ENOSYS (X-1)"
+
+# The directory member came back -- mkdirat(S_IFDIR|0755) was SERVED. This is
+# the leg that failed with "tar: can't make dir X: Function not implemented".
+lc_run_expect "test -d abin-t/sub && echo ABIN-DIR-OK" "ABIN-DIR-OK"
+lc_pass "abin-tar(e): the directory member extracted (mkdirat S_IFMT masked)"
+
+# The file member came back WITH ITS CONTENT -- openat(O_CREAT, S_IFREG|0644)
+# was served and the bytes round-tripped. Content, not just existence: an empty
+# file would satisfy a bare -f test while still meaning the write path broke.
+lc_run_expect "cat abin-t/sub/payload.txt" "tarpayload"
+lc_pass "abin-tar(f): the file member extracted with its content (openat S_IFMT masked)"
+
+# --- COMPRESSED: the vfork->fork proof (option B) ---------------------------
+# `-z` makes busybox spawn gzip via vfork() proper -- clone(CLONE_VM|CLONE_VFORK
+# |SIGCHLD, stack=0). Pre-B that declined ENOSYS ("tar: vfork: Function not
+# implemented") and no .tar.gz worked. Option B serves the null-stack vfork as a
+# private COW fork (LINEAGE.md 3.1), so the gzip child runs. This is the leg
+# that would have failed before the clone-decide change, and its create+extract
+# round trip is the end-to-end witness that busybox's vfork+pipe+exec+reap
+# pipeline works -- the pieces the census showed declining (pipe2/dup3/wait4)
+# are proven non-blocking BY THIS PASSING, since a real block would surface here.
+lc_send "tar czf abin-c.tar.gz abin-t"
+lc_run_expect "ls abin-c.tar.gz" "abin-c.tar.gz"
+lc_pass "abin-tar(g): busybox tar -z spawned gzip (vfork->fork, option B)"
+
+lc_send "rm -rf abin-t"
+lc_run_expect_hardfail "tar xzf abin-c.tar.gz && echo ABIN-GZ-RC0" \
+    "ABIN-GZ-RC0" "Function not implemented"
+lc_run_expect "cat abin-t/sub/payload.txt" "tarpayload"
+lc_pass "abin-tar(h): the .tar.gz round-trips through gzip (W2-a compressed)"
+
+lc_send "rm -rf abin-t abin-t.tar abin-c.tar.gz"
+lc_quit

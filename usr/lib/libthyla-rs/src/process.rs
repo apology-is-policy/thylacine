@@ -449,7 +449,10 @@ impl Command {
             allowance_va: allow_va,
             allowance_flags: allow_flags,
             page_budget: 0,   // CL-5: inherit the spawner's budget
-            pheno_flags: 0,   // V-1b: inherit the spawner's phenotype
+            pheno_flags: 0,   // Design D (VIVARIUM 13.10): the phenotype is
+                              // decided from the namespace at every image
+                              // load; this bit only declares a container's
+                              // Territory Linux (viv sets it, after chroot)
             _pad_spawn2: 0,
         };
 

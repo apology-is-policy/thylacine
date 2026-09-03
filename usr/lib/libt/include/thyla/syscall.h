@@ -102,7 +102,7 @@ enum {
     T_SYS_CHDIR             = 69,  // LS-4: set the per-Proc cwd (dot_path)
     T_SYS_GETCWD            = 70,  // LS-4: read the per-Proc cwd (dot_path)
     T_SYS_FD2PATH           = 71,  // #66: fd -> namespace name (Plan 9 fd2path)
-    // 72..74 = getpid/uid/gid (native libthyla-rs only).
+    T_SYS_GETPID            = 72,  // LS-K: the caller's own pid (73/74 = uid/gid: native libthyla-rs only)
     T_SYS_CLOCK_GETTIME     = 75,  // LS-K: read CLOCK_REALTIME / CLOCK_MONOTONIC
     T_SYS_PCI_CLAIM         = 76,  // pci-1c: claim a VirtIO-PCI function -> KOBJ_PCI
     T_SYS_PCI_MAP_BAR       = 77,  // pci-1c: map a KObj_PCI BAR into user VA
@@ -236,6 +236,9 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_ORDWR    2u
 #define T_OEXEC    3u
 #define T_OTRUNC   0x10u
+// The git 6.27 append bit: dev9p forwards it to the 9P Tlopen as O_APPEND and
+// Stratum positions each write at EOF server-side (the kernel has no append mode).
+#define T_OAPPEND  0x40u
 // DISTRO D-1: do not expand a symlink FINAL component. What that yields depends
 // on the rest of the omode, which is why it is a flag and not an access mode:
 // with T_OPATH the returned handle IS the link (the v1.0 lstat spelling --
@@ -279,11 +282,17 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // a live renderer holds the role). joey grants it to /bin/aurora.
 #define T_SPAWN_PERM_CONSOLE_RENDERER  (1u << 3)
 
-// VIVARIUM V-1b: t_sys_spawn_args.pheno_flags bits (mirror SPAWN_PHENO_* in
-// the kernel header). T_SPAWN_PHENO_LINUX declares the child's ABI to be Linux
-// aarch64 -- its syscall numbers are decoded through the translation table.
-// UNGATED, unlike every T_SPAWN_PERM_* bit above: a phenotype confers ABI
-// SHAPE, never AUTHORITY (I-43), so a mis-declared child breaks only itself.
+// VIVARIUM V-1b / Design D (13.10): t_sys_spawn_args.pheno_flags bits (mirror
+// SPAWN_PHENO_* in the kernel header). The phenotype itself is DECIDED FROM
+// THE NAMESPACE at every image load -- every spawn variant and execve: Linux
+// iff the resolution crosses a pheno-linux mount (/viv/bin) or the resolving
+// Territory declares Linux; default native. T_SPAWN_PHENO_LINUX declares the
+// CHILD's Territory Linux (a container: viv sets it after chroot, before the
+// entrypoint), so every image the child loads -- and every execve after it --
+// decodes through the translation table. A 0 here declares nothing: the
+// child's ABI is whatever its images' locations say. UNGATED, unlike every
+// T_SPAWN_PERM_* bit above: a phenotype confers ABI SHAPE, never AUTHORITY
+// (I-43), so a mis-declared child breaks only itself.
 #define T_SPAWN_PHENO_LINUX            (1u << 0)
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
@@ -466,6 +475,13 @@ _Static_assert(__builtin_offsetof(struct t_allowance_desc, pci) == 180,
 #define T_MBEFORE  0x0002u
 #define T_MAFTER   0x0004u
 #define T_MCREATE  0x0008u
+
+// MPHENO_LINUX (mirror kernel/include/thylacine/territory.h): a per-mount-point
+// declaration that a binary whose exec RESOLUTION crosses this mount is a Linux
+// phenotype (VIVARIUM.md section 13, the resolver-subtree-scope channel). Rides
+// t_mount's flag word; settable since the SYS_MOUNT valid-flag widening. It
+// confers ABI SHAPE, never AUTHORITY (I-43).
+#define T_MPHENO_LINUX  0x0020u
 
 // VMA prot bits — MUST mirror kernel/include/thylacine/vma.h's
 // VMA_PROT_* values. Used as the 3rd argument to t_mmio_map.
@@ -1643,6 +1659,20 @@ static inline long t_walk_open(long spoor_fd, const char *name,
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_getpid — the caller's own pid (LS-K; SYS_GETPID). Always > 0.
+__attribute__((always_inline))
+static inline long t_getpid(void) {
+    register long x0 __asm__("x0");
+    register long x8 __asm__("x8") = T_SYS_GETPID;
+    __asm__ volatile (
+        "svc #0"
+        : "=r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     return x0;

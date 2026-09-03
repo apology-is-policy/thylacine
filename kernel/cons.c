@@ -113,6 +113,16 @@ struct cons_input {
     // and by cons_test_reset. Mutated + read under g_cons.lock like winsize.
     // Confers nothing: a lying tier changes only how consumers FORMAT bytes.
     u32         beacon_tier;
+    // DISPLAY-MODES.md 1b: the serial-silence flag. When a graphical renderer
+    // is the PRIMARY display (thylacine.display=gpu), it silences EL0 program
+    // output on the serial UART so the framebuffer is the sole view. Set/cleared
+    // by the renderer via the consctl `serialsilent <0|1>` verb (the same
+    // renderer-minted consctl that reports winsize -- a display-routing decision
+    // by the display owner, never a termios flag), stored under g_cons.lock and
+    // read LOCKLESSLY (relaxed-atomic) in the two cons_emit paths. It gates ONLY
+    // the serial sink; the drain tap (aurora), kernel diagnostics + the boot
+    // banner + extinction (all direct uart_puts, never cons_emit) are untouched.
+    bool        serial_silent;
 
     // #95: the INPUT-path silent-drop counters. Every RX drop site is counted
     // here, under g_cons.lock (all three sites already run under it). They exist
@@ -335,6 +345,14 @@ static inline void cons_pollwake_store(bool v) { __atomic_store_n(&g_cons.poll_w
 // cons_mgr_pending (which runs under the Rendez lock, not this one).
 static inline bool cons_dropreport_load(void)   { return __atomic_load_n(&g_cons.drop_report_pending, __ATOMIC_RELAXED); }
 static inline void cons_dropreport_store(bool v) { __atomic_store_n(&g_cons.drop_report_pending, v, __ATOMIC_RELAXED); }
+// DISPLAY-MODES.md 1b: the serial-silence flag. Written under g_cons.lock (the
+// consctl verb apply), read locklessly in the two cons_emit paths (both run
+// with g_cons.lock RELEASED). RELAXED is correct: there is no ordering
+// dependency, and a stale read only lets a byte or two reach serial during the
+// one-time startup race before the renderer sets it -- harmless (never a
+// correctness or safety property, unlike the count/intr flags).
+static inline bool cons_serial_silent_load(void)   { return __atomic_load_n(&g_cons.serial_silent, __ATOMIC_RELAXED); }
+static inline void cons_serial_silent_store(bool v) { __atomic_store_n(&g_cons.serial_silent, v, __ATOMIC_RELAXED); }
 
 // LS-8b: the termios word. Read + written under g_cons.lock (cooking reads it,
 // consctl writes it); RELAXED-atomic for consistency with the sibling flags.
@@ -828,6 +846,22 @@ bool cons_test_tx_armed(void) {
     return a;
 }
 
+// DISPLAY-MODES.md 1b: the serial-silence flag, for the regression test to
+// assert the consctl verb applied. Lockless relaxed read (same as production).
+bool cons_test_serial_silent(void) {
+    return cons_serial_silent_load();
+}
+
+// DISPLAY-MODES.md 1b (audit F2): restore serial output unconditionally. The SAK
+// path (proc_console_sak) calls this so the operator's trusted-path prompt is
+// visible on the emergency serial medium even if a renderer had silenced it --
+// TRUSTED-PATH.md section 7 keeps the trusted path ON serial for virtio-gpu
+// media, so a muted serial there is a trusted-path gap. Lockless relaxed store
+// (the flag carries no happens-before obligation); callable from any context.
+void cons_serial_silent_clear(void) {
+    cons_serial_silent_store(false);
+}
+
 // Exported so the test asserts against the REAL constants instead of mirroring
 // them -- a silently-drifted mirror is its own bug class (the struct t_stat
 // lesson: a per-mirror size assert proves only that mirror's self-consistency).
@@ -868,6 +902,15 @@ static void cons_emit_bulk(const u8 *b, u32 n) {
     // can then assert drain content with the UART suppressed. Tap, release,
     // THEN push: the two leaf locks are never nested.
     cons_drain_tap_bulk(b, n);
+    // DISPLAY-MODES.md 1b: when a renderer owns the display, EL0 output is
+    // silenced on the serial sink (the tap above already gave the renderer its
+    // copy). Gate AFTER the tap and BEFORE the capture stand-in, so silence
+    // suppresses the serial sink whole -- kernel diagnostics + the banner never
+    // reach here (direct uart_puts), so they are unaffected. The silence is
+    // conditioned on `drain_armed` (a renderer is actually receiving the tap):
+    // if the renderer dies, the drain disarms and serial output RESUMES -- else
+    // a dead renderer would strand the console with no sink at all (audit F1).
+    if (cons_serial_silent_load() && drain_armed_load()) return;
     if (g_cons_echo_capture) { cons_echo_capture_take(b, n); return; }
     if (cons_tx_push_bulk(b, n, true) == n) cons_tx_kick();
 }
@@ -889,6 +932,13 @@ static void cons_emit_bulk(const u8 *b, u32 n) {
 static u32 cons_emit_bulk_wait(const u8 *b, u32 n) {
     if (n == 0u) return 0u;
     cons_drain_tap_bulk(b, n);
+    // DISPLAY-MODES.md 1b: serial silenced -> the EL0 write SUCCEEDS fully (the
+    // bytes reached the renderer via the tap; the serial sink is intentionally
+    // dropped). Returning n, never a short write, so the program never blocks or
+    // sees an error for output it "produced". Gated on `drain_armed` (a live
+    // renderer): a dead renderer disarms the drain and serial output resumes,
+    // so silence never outlives the mirror that justifies it (audit F1).
+    if (cons_serial_silent_load() && drain_armed_load()) return n;
     if (g_cons_echo_capture) { cons_echo_capture_take(b, n); return n; }
     u32 done = 0u;
     for (;;) {
@@ -1421,6 +1471,7 @@ void cons_test_reset(void) {
     g_cons.line_len = 0u;
     g_cons.ws_cols = 0u;                        // #55: winsize back to unset
     g_cons.ws_rows = 0u;
+    cons_serial_silent_store(false);            // 1b: back to loud (serial live)
     g_cons.winch_events = 0u;
     g_cons.beacon_tier = CONS_BEACON_NONE;      // H-1: tier back to unset
     g_cons.rx_bp_raw = 0u;                      // #95/#129: RX counters + report latch
@@ -1859,6 +1910,13 @@ void cons_drain_close(void) {
     s = spin_lock_irqsave(&g_cons_drain.lock);
     g_cons_drain.open = false;
     drain_armed_store(false);
+    // 1b (audit F1): the renderer that requested serial-silence is gone, so the
+    // routing decision is void -- clear it. The emit gate already conditions on
+    // drain_armed (so serial resumes on death regardless), but keeping the flag
+    // honest means introspection + a re-armed drain do not inherit a stale
+    // silence. A fresh renderer re-asserts silence per bootargs after its first
+    // present. Relaxed store (the flag carries no happens-before obligation).
+    cons_serial_silent_store(false);
     spin_unlock_irqrestore(&g_cons_drain.lock, s);
     wakeup(&g_cons_drain_rendez);
     poll_waiter_list_wake(&g_cons_drain.poll_list);
@@ -2080,6 +2138,8 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
     long ws_cols = 0, ws_rows = 0;
     bool have_beacon = false;                                 // H-1 tier staged
     u32 beacon = CONS_BEACON_NONE;
+    bool have_silent = false;                                 // 1b serialsilent staged
+    long silent_val = 0;
     long i = 0;
     while (i < n) {
         while (i < n && cons_is_space(b[i])) i++;            // skip whitespace
@@ -2134,13 +2194,34 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
             tokens++;
             continue;
         }
+        // DISPLAY-MODES.md 1b: the `serialsilent <0|1>` verb. Like winsize it is
+        // renderer-writable (handled BEFORE the +/- allow_flags gate) -- silence
+        // is a display-routing decision by the display owner, not a termios flag,
+        // so it does NOT widen the CCONSWINSZONLY authority the #55 audit F2 gate
+        // narrows (it cannot flip ECHO/ICANON or defeat the serial-input mask;
+        // it only drops EL0 OUTPUT on the serial UART, never kernel diagnostics).
+        if (sign == (u8)'s' && i + 12 <= n &&
+            b[i+1]==(u8)'e' && b[i+2]==(u8)'r' && b[i+3]==(u8)'i' && b[i+4]==(u8)'a' &&
+            b[i+5]==(u8)'l' && b[i+6]==(u8)'s' && b[i+7]==(u8)'i' && b[i+8]==(u8)'l' &&
+            b[i+9]==(u8)'e' && b[i+10]==(u8)'n' && b[i+11]==(u8)'t' &&
+            (i + 12 == n || cons_is_space(b[i+12]))) {
+            i += 12;
+            while (i < n && cons_is_space(b[i])) i++;
+            long v = cons_parse_u16_token(b, n, &i);
+            if (v != 0 && v != 1) return -1;                 // strictly 0|1
+            have_silent = true;
+            silent_val = v;
+            tokens++;
+            continue;
+        }
         if (sign != (u8)'+' && sign != (u8)'-') return -1;   // malformed token
-        // #55 audit F2 (+ H-1): a renderer-minted consctl (CCONSWINSZONLY) may
-        // write ONLY the renderer-authority verbs -- winsize + beacon -- a
-        // `+`/`-` flag token rejects the whole write, so a compromised
-        // renderer cannot flip the global termios (the ECHO-off serial-input
-        // mask defeat). Both admitted verbs are authority-free: geometry is
-        // physical and the tier only shapes formatting.
+        // #55 audit F2 (+ H-1 + 1b): a renderer-minted consctl (CCONSWINSZONLY)
+        // may write ONLY the renderer-authority verbs -- winsize + beacon +
+        // serialsilent -- a `+`/`-` flag token rejects the whole write, so a
+        // compromised renderer cannot flip the global termios (the ECHO-off
+        // serial-input mask defeat). All three admitted verbs are authority-
+        // free: geometry is physical, the tier only shapes formatting, and
+        // serialsilent routes serial OUTPUT only (never a termios flag).
         if (!allow_flags) return -1;
         long name_start = i + 1;
         long j = name_start;
@@ -2173,6 +2254,11 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
     }
     if (have_beacon)
         g_cons.beacon_tier = beacon;   // H-1: no post -- read at spawn time
+    // 1b: stored under g_cons.lock for atomicity of the whole apply; the emit
+    // paths read it locklessly (relaxed-atomic) with the lock released.
+    if (have_silent) {
+        cons_serial_silent_store(silent_val != 0);
+    }
     // The one thing a mode write does to the canonical assembly: a write that
     // CLEARS ICANON delivers the pending line[] to the reader; any other write
     // leaves it alone, and raw->canonical has nothing pending by construction.
@@ -2215,6 +2301,14 @@ static void cons_render_dec_u16(u8 *out, long *off, u32 v) {
     int t = 0;
     do { tmp[t++] = (char)('0' + (v % 10u)); v /= 10u; } while (v != 0u);
     while (t > 0) out[(*off)++] = (u8)tmp[--t];
+}
+
+// C2-k1b: the flag-word getter for the phenotype TCGETS shell. A single relaxed
+// atomic load -- a one-word read needs no g_cons.lock (the store side holds the
+// lock only to keep the whole multi-flag/winsize apply atomic; there is no torn
+// read of a u32). Same value cons_render_mode snapshots, without the string.
+u32 cons_termios_get(void) {
+    return cons_termios_load();
 }
 
 long cons_render_mode(void *buf, long n) {

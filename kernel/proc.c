@@ -1409,14 +1409,16 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // read all-SIG_DFL with an empty mask (`trap '' PIPE; cmd | head` handed
     // cmd a SIG_DFL SIGPIPE), and the exec image lost SIG_IGN and the mask.
     //
-    // THE SINGLE-THREADEDNESS THIS PARAGRAPH USED TO BUY SURVIVES, ON DIFFERENT
-    // GROUNDS -- and notes.c leans on it for the sigtab tearing argument, so
-    // the re-derivation matters rather than being bookkeeping. A PHENO_LINUX
-    // Proc still cannot make a second THREAD: CLONE_THREAD is outside the
-    // admitted domain, and the native SYS_THREAD_SPAWN is unreachable from a
-    // phenotyped Proc. What the clone row grants is a second PROC, which
-    // carries its own sigtab. Widening that domain to admit CLONE_THREAD would
-    // void the argument in notes.c.
+    // THE SINGLE-THREADEDNESS THIS PARAGRAPH ONCE BOUGHT IS GONE. N-3 admitted
+    // CLONE_THREAD (viv_clone_thread makes a peer Thread in THIS Proc), so a
+    // PHENO_LINUX Proc CAN have peer threads, and every per-Proc table they
+    // share needs its own discipline: the socktab took a lock at N-3 and its
+    // fork copy rides the handle copy's lock hold (below); the sigtab's
+    // lock-free entry read in notes.c is the OPEN item that paragraph names --
+    // a peer's sigaction() racing a delivery can pair the old handler with the
+    // new flags/mask (tracked: the sigtab tearing round). This comment said
+    // the opposite for the first weeks after N-3; a reader of rfork_internal
+    // was told no peer existed exactly where the fork copy's window was.
     // VIVARIUM V-4a-0: the executable name is INHERITED (a fork-without-exec
     // keeps running the parent's binary -- POSIX, and the honest answer for
     // /proc/<pid>/exe). Every v1.0 spawn execs immediately afterwards and
@@ -1557,7 +1559,36 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // RFFDG stays unsupported: under this tree's polarity it would mean SHARE
     // one table between two Procs, which needs a refcounted HandleTable object
     // -- an L-3a-style extraction, not this.
-    if (fc) handle_table_copy_into(child, parent);
+    if (fc) {
+        // The socktab half of the same POSIX fork (the socktab-across-images
+        // design, operator-voted A 2026-08-18; VIVARIUM 5.5.2): a forked Linux
+        // child keeps every inherited socket's (proto, n, state) in a table
+        // of its OWN -- the Plan 9 APE per-process copy -- so an inherited
+        // socket fd is a SOCKET to the child (the accept-then-fork server,
+        // prefork workers), not a plain Spoor that answers ENOTSOCK to every
+        // socket arm. The rows are snapshotted INSIDE the handle copy's
+        // source-lock hold (the hook), because a peer thread of this parent
+        // (N-3) may be closing and reopening socket fds while we copy, and two
+        // separate snapshots let it hand the child a handle and a row for one
+        // fd that name different sockets (the socktab holotype F1). finish
+        // then keeps only rows whose fd the child holds -- only the copied
+        // table can say which those are. Fork-shape only (fc): a spawned child
+        // gets an explicit fd list at renumbered slots, which a number-keyed
+        // table cannot follow, so a native SYS_SPAWN endowing a socket fd to a
+        // Linux child stays the pre-existing omit posture (the fd reads and
+        // writes; the socket arms say ENOTSOCK) -- documented, not hidden. OOM
+        // fails the fork before any copy, the sigtab rule above.
+        struct viv_socktab_fork sf = { .parent = parent, .dst = NULL };
+        if (parent->phenotype == PHENO_LINUX &&
+            viv_socktab_fork_prepare(&sf, parent) != 0) {
+            child->state = PROC_STATE_ZOMBIE;
+            proc_free(child);
+            return -1;
+        }
+        handle_table_copy_into_hooked(child, parent,
+                                      sf.dst ? viv_socktab_fork_snapshot : NULL, &sf);
+        viv_socktab_fork_finish(child, &sf);
+    }
 
     // LINEAGE L-3b: the other step that differs between the two child shapes.
     // Everything above -- caps, identity, phenotype, allowance, env, territory,
@@ -1695,6 +1726,21 @@ int rfork_forked(unsigned flags, const struct fork_context *fc) {
     return rfork_internal(flags, NULL, NULL, CAP_NONE, fc);
 }
 
+// The caps-bearing fork: identical to rfork_forked but with an explicit
+// caps_mask instead of the CAP_NONE default. The ONLY caller is the phenotype
+// clone path (sys_rfork_core, PHENO_LINUX), which passes CAP_ALL so a Linux
+// fork INHERITS the parent's capabilities -- Linux's own semantics (I-43 shape
+// fidelity). rfork_internal still intersects with the parent's actual caps and
+// still strips ~CAP_ELEVATION_ONLY unconditionally, so the child never exceeds
+// the parent (I-2: child_caps == parent_caps & ~elevation <= parent_caps) and
+// elevation-only caps never propagate by inheritance. Native fork keeps
+// CAP_NONE (Thylacine's stronger fork-zeros-caps default) via rfork_forked.
+int rfork_forked_with_caps(unsigned flags, const struct fork_context *fc,
+                           caps_t caps_mask) {
+    if (!fc) extinction("rfork_forked_with_caps with NULL fork_context");
+    return rfork_internal(flags, NULL, NULL, caps_mask, fc);
+}
+
 int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
                     caps_t caps_mask) {
     return rfork_internal(flags, entry, arg, caps_mask, NULL);
@@ -1790,6 +1836,33 @@ bool proc_is_console_owner(const struct Proc *p) {
     bool yes = (g_console_owner == p);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return yes;
+}
+
+// C2-k1b F2: does `caller_sid` name the session that currently owns the console?
+// PURE (no globals) so the gate logic is unit-testable. owner_sid==0 means "no
+// owner" (e.g. post-SAK, which sets g_console_owner=NULL) -> never a match, so a
+// session-less (sid 0) caller never spuriously matches a no-owner console.
+bool console_session_match(u32 owner_sid, u32 caller_sid) {
+    return owner_sid != 0u && owner_sid == caller_sid;
+}
+
+// C2-k1b F2: may `p` flip the GLOBAL console line discipline (a phenotype
+// TCSETS)? True iff p's session currently OWNS the console -- the foreground
+// session shell (SPAWN_PERM_CONSOLE_OWNER) and the apps it spawns (which inherit
+// its sid), the Linux "only the foreground pgrp may tcsetattr" rule at
+// session granularity. A background/other-session proc, and every proc after a
+// SAK (which sets g_console_owner=NULL), is refused -- closing the F2 window
+// where a lingering phenotype flips ECHO on during corvus's trusted passphrase
+// prompt. g_console_owner is NULL or a LIVE Proc under g_proc_table_lock (cleared
+// on owner-death every path), so the sid deref is UAF-free (the sanctioned
+// discipline, the g_console_owner header above).
+bool proc_console_owner_in_session(const struct Proc *p) {
+    if (!p) return false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    u32 owner_sid = g_console_owner ? g_console_owner->sid : 0u;
+    u32 caller_sid = p->sid;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return console_session_match(owner_sid, caller_sid);
 }
 
 void proc_set_console_trusted(struct Proc *p) {
@@ -1893,6 +1966,7 @@ static int pgrp_post_cb(struct Proc *q, void *arg) {
         if (notes_post(q, c->name, c->arg, NULL, true) == 0)
             c->posted++;
         proc_interrupt_terminate_wake(q);
+        proc_caught_note_wake(q);   // item 11: the caught-note twin
     }
     return 0;   // keep walking -- every member gets its post
 }
@@ -1918,6 +1992,7 @@ int notes_post_pid(int pid, const char *name, u32 arg) {
     if (q && q->state == PROC_STATE_ALIVE) {
         if (notes_post(q, name, arg, NULL, true) == 0) posted = 1;
         proc_interrupt_terminate_wake(q);
+        proc_caught_note_wake(q);   // item 11: the caught-note twin
     }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return posted;
@@ -1970,11 +2045,21 @@ void proc_console_post_interrupt(void) {
     if (owner && owner->magic == PROC_MAGIC && owner->state == PROC_STATE_ALIVE) {
         notes_post(owner, "interrupt", 0u, NULL, true);
         // LS-5c (P3-terminate): if the post armed the terminate latch (the
-        // owner has no handler and is not self-managing -- never the session
-        // shell, which is self-managing), wake its blocked threads so the
-        // LS-5b terminate fires at their EL0-return tails. g_proc_table_lock
-        // is held (this function's lock), satisfying the wake's contract.
+        // owner has no handler and is not self-managing), wake its blocked
+        // threads so the LS-5b terminate fires at their EL0-return tails.
         proc_interrupt_terminate_wake(owner);
+        // item 11 (ARCH 8.8.3, P3-deliver): the CAUGHT twin -- the session
+        // shell IS self-managing, so its `interrupt` is caught (deliverable via
+        // its notes fd), NOT a terminate latch; the wake above is a no-op for
+        // it. THIS wake unwinds an owner blocked in an OPTED-IN caught-note-
+        // interruptible read (SLEEP_NOTEINTR -> -T_E_INTR) so it services the
+        // Ctrl-C promptly instead of a line late. As of 11b-core only the pipe
+        // read is opted in (sleep_noteintr); the shell's actual prompt read
+        // (dev9p pts / cons, cons.c uses plain sleep today) opts in at
+        // 11b-9p/later -- so for the console shell this wake is the wired-ahead
+        // infrastructure whose consumer lands with the reader opt-in (items
+        // 8/10). g_proc_table_lock is held, satisfying both wakes' contract.
+        proc_caught_note_wake(owner);
     }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
@@ -2004,6 +2089,12 @@ void proc_console_relinquish(struct Proc *p) {
 // g_proc_table_lock -> note q->lock edge is gone (revoke/mark/is-attached are
 // lock-free atomic RMWs), strictly simplifying the lock order.
 void proc_console_sak(void) {
+    // DISPLAY-MODES.md 1b (audit F2): a SAK is a demand for the trusted path on
+    // the EMERGENCY serial medium -- restore serial output regardless of any
+    // renderer's silence, before anything else and covering the idempotent
+    // repeat-SAK path below. Lockless relaxed store, so it takes no lock and
+    // introduces no g_proc_table_lock -> g_cons.lock edge.
+    cons_serial_silent_clear();
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     struct Proc *owner   = g_console_owner;
     struct Proc *trusted = g_console_trusted_proc;
@@ -2156,8 +2247,10 @@ void proc_mark_self_managing_notes(struct Proc *p) {
     // caller bug; surface it loudly (mirrors proc_mark_may_post_service).
     if (p->state != PROC_STATE_ALIVE)
         extinction("proc_mark_self_managing_notes on non-ALIVE Proc");
-    // One-way, idempotent — never cleared, never propagated by rfork
-    // (rfork_internal does not copy proc_flags). Atomic OR: the proc_flags
+    // Idempotent; never propagated by rfork (rfork_internal does not copy
+    // proc_flags); CLEARED at every exec (proc_exec_drop_image_state, both
+    // arms -- Design D audit F1: the mark is the IMAGE's, and a Linux image
+    // carrying it would have its delivery switched off). Atomic OR: the proc_flags
     // word is multi-writer post-A-4c-2 (the SAK kthread mutates the console
     // bit), so every RMW on it must be atomic. RELAXED: the bit is a
     // standalone predicate with no ordering dependency.
@@ -2180,13 +2273,27 @@ bool proc_intr_terminate_pending(const struct Proc *p) {
     // LOCK-FREE by the #811 sleep predicate, thread_die_pending — see the
     // PROC_FLAG_INTR_TERMINATE_PENDING contract in proc.h).
     if (!p || p->magic != PROC_MAGIC) return false;
-    // PTY-1b: EITHER terminate-class latch (interrupt OR tty:quit/hup) --
-    // this is the wake gate; the per-family mask precision lives in
+    // PTY-1b + #237: ANY terminate-class latch (interrupt / tty:quit-hup /
+    // pipe) -- this is the wake gate; the per-family mask precision lives in
     // thread_die_pending's re-check, so a spurious wake here costs one
-    // predicate re-evaluation, never a wrong unwind.
+    // predicate re-evaluation, never a wrong unwind. The whole-class MASK, not
+    // the per-family bits: the gate only asks "is a terminate pending at all",
+    // and #237's pipe latch must fire it too or a pipe-terminate latched on a
+    // syscall-blocked thread would sleep until an unrelated wake.
     return (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE)
-            & (PROC_FLAG_INTR_TERMINATE_PENDING |
-               PROC_FLAG_TTY_TERMINATE_PENDING)) != 0;
+            & PROC_FLAG_TERMINATE_PENDING_MASK) != 0;
+}
+
+bool proc_caught_note_pending(const struct Proc *p) {
+    // item 11 (ARCH 8.8.3): the non-death twin of proc_intr_terminate_pending.
+    // Fail-closed. Acquire pairs with the release arm in notes_post so the
+    // lock-free reader (thread_caught_note_deliverable) sees a published latch.
+    // The wake gate; per-family mask precision lives in the reader's re-check,
+    // so a spurious wake costs one predicate re-eval, never a wrong unwind --
+    // exactly as the terminate-latch gate above.
+    if (!p || p->magic != PROC_MAGIC) return false;
+    return (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE)
+            & PROC_FLAG_CAUGHT_NOTE_MASK) != 0;
 }
 
 // LS-5c (P3-terminate, ARCH 8.8.2): wake every blocked Thread of `p` so it
@@ -2213,6 +2320,29 @@ void proc_interrupt_terminate_wake(struct Proc *p) {
     if (p == g_kproc) return;            // belt: the arm never latches kproc
     if (p->state != PROC_STATE_ALIVE) return;
     if (!proc_intr_terminate_pending(p)) return;
+    for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
+        irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
+        struct Rendez *r = peer->rendez_blocked_on;
+        if (r) wakeup(r);
+        spin_unlock_irqrestore(&peer->wait_lock, ws);
+    }
+}
+
+// item 11 (ARCH 8.8.3): the CAUGHT-note twin of proc_interrupt_terminate_wake.
+// IDENTICAL body + lock contract (CALLER HOLDS g_proc_table_lock; see the
+// proc.h contract + the death-template rationale above), gated on the
+// caught-note sub-field instead of the terminate latch. A blocked peer it wakes
+// unwinds SLEEP_NOTEINTR (not SLEEP_INTR), returns -T_E_INTR, and delivers its
+// queued caught note at the EL0-return tail WITHOUT dying. Interrupt-posting
+// sites call this right after proc_interrupt_terminate_wake: for a given post
+// exactly one of the two latches is armed (uncaught -> terminate; caught -> this
+// sub-field -- the arms are mutually exclusive by notes_post's arm-refusal), so
+// the other wake is a no-op via its gate.
+void proc_caught_note_wake(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return;
+    if (p == g_kproc) return;            // belt: the arm never latches kproc
+    if (p->state != PROC_STATE_ALIVE) return;
+    if (!proc_caught_note_pending(p)) return;
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         struct Rendez *r = peer->rendez_blocked_on;
@@ -2786,7 +2916,16 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
        thread_exit_self after the group cascade) */
 }
 
+// #91: the string-only wrapper preserving the native Plan 9 exits(string)
+// contract (msg=="ok" -> exit_status 0; every other string -> 1). The in-kernel
+// callers (exits("ok") / exits("boom") / ...) keep the boolean mapping; the
+// SYS_EXITS syscall entry calls exits_code directly with the real byte.
 void exits(const char *msg) {
+    exits_code((msg && msg[0] == 'o' && msg[1] == 'k' && msg[2] == 0) ? 0 : 1, msg);
+    extinction("exits: exits_code returned (impossible)");
+}
+
+void exits_code(int code, const char *msg) {
     struct Thread *t = current_thread();
     if (!t)                  extinction("exits with no current thread");
     if (t->magic != THREAD_MAGIC)
@@ -2874,7 +3013,7 @@ void exits(const char *msg) {
         // die-check; the last Thread out reaps the Proc with this msg's status
         // (thread_exit_self reads the recorded group_exit_msg). A well-formed
         // multi-thread program joins its peers first and never reaches here.
-        proc_group_terminate(p, msg);
+        proc_group_terminate_code(p, code, msg);
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         thread_exit_self();
         extinction("exits: thread_exit_self returned after group terminate");
@@ -2908,8 +3047,7 @@ void exits(const char *msg) {
             extinction("exits: peer appeared during handle close");
     }
 
-    int status = (msg && msg[0] == 'o' && msg[1] == 'k' && msg[2] == 0) ? 0 : 1;
-    proc_become_zombie_locked(p, status, msg);
+    proc_become_zombie_locked(p, code, msg);
 
     // Mark the executing thread EXITING so sched() leaves it out of the
     // run tree (it will be reaped by the parent's wait_pid).
@@ -3033,15 +3171,18 @@ void thread_exit_self(void) {
         // This Thread is the last live one. Proc transitions to ZOMBIE.
         // SYS_EXIT_GROUP / kill cross-thread shootdown (I-24): if a group
         // termination is in progress, use the recorded group_exit_msg + its
-        // derived status (the same "ok" -> 0 / else -> 1 collapse exits()
-        // uses); otherwise the SYS_THREAD_EXIT convention is status 0 / "ok"
-        // (no user-specified status; explicit-status program exit goes through
-        // exits()). The group_exit_msg read is under g_proc_table_lock here +
-        // set via release CAS in proc_group_terminate -- a coherent snapshot.
+        // companion group_exit_code (#91: the REAL exit byte, no longer the
+        // "ok" -> 0 / else -> 1 collapse -- a phenotype exit_group(N) reaches
+        // the parent's wait as WEXITSTATUS == N); otherwise the SYS_THREAD_EXIT
+        // convention is status 0 / "ok" (no user-specified status; explicit-
+        // status program exit goes through exits_code). The group_exit_msg read
+        // is under g_proc_table_lock here + set via release CAS in
+        // proc_group_terminate_code -- a coherent snapshot; group_exit_code is
+        // written in the SAME set-once CAS-winner branch and read plainly under
+        // this lock (the write side holds it too), so it matches the winning msg.
         const char *gmsg = __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE);
         if (gmsg) {
-            int gstatus = (gmsg[0] == 'o' && gmsg[1] == 'k' && gmsg[2] == 0) ? 0 : 1;
-            proc_become_zombie_locked(p, gstatus, gmsg);
+            proc_become_zombie_locked(p, p->group_exit_code, gmsg);
         } else {
             proc_become_zombie_locked(p, 0, "ok");
         }
@@ -3153,7 +3294,8 @@ bool proc_exec_alone(struct Proc *p) {
 // Keep this the ONE place the note-side reset happens. Splitting it -- an
 // in_handler clear here and a mask clear at the call site, say -- is how the
 // next field gets missed, which is exactly how #247 happened.
-static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self) {
+static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
+                                       u32 pheno) {
     __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
 
     // VIVARIUM V-6b Linux dispositions, reset IN PLACE -- the table is NOT
@@ -3198,12 +3340,52 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self) {
     // resets only the caught rows. The sentence this used to carry -- "Zeroing
     // is exact POSIX" -- was true of the caught rows and false of the rest. A
     // native Proc keeps the Plan 9 rule: everything clears.
-    if (p->phenotype == PHENO_LINUX) {
+    //
+    // Design D (VIVARIUM 13.10.4, review F1 Leg A): the arm is chosen by the NEW
+    // image's phenotype -- the `pheno` PARAMETER, never `p->phenotype`. execve
+    // re-decides the phenotype at every image load, and this reset is the one
+    // consumer that runs after the address-space commit: read the field here
+    // and a Linux git exec'ing the native nora would take the Linux arm, keep
+    // git's blocked-note mask, and hand native nora notes it never masked
+    // (notes_peek_locked reads note_mask ungated by phenotype).
+    if (pheno == PHENO_LINUX) {
         viv_sigtab_reset_caught(p->sigtab);
     } else {
         viv_sigtab_reset(p->sigtab);
         self->note_mask = 0u;
+        // Design D audit F2 (the constructed-states sweep, VIVARIUM 13.10.4):
+        // a NATIVE image has no sockets, so the socktab -- the Linux socket
+        // state of the image this exec replaced -- is reset in place. Native
+        // close() never reaches this table (the drop lives only in the Linux
+        // dispatcher's close hook), so a row left here would outlive its fd
+        // and greet the NEXT Linux image's recycled fd number as a live
+        // (proto, n) connection: connect() dials BY PATH into whatever
+        // stranger now holds /net/<proto>/<n> (I-1). Before D this state was
+        // unconstructible (a Linux Proc never became native); D constructs
+        // it. A socket fd carried through the native interlude is a plain
+        // Spoor on the /net data file to the next Linux image, never a row.
+        // The table object stays (#254: cross-Proc-reachable, proc_free is
+        // the only free); NULL-safe for a Proc that was never Linux.
+        viv_socktab_reset(__atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE));
     }
+
+    // Design D audit F1 (the same sweep): the self-managing-notes mark belongs
+    // to the IMAGE that opened its notes fd, not to the Proc, so exec resets
+    // it -- in BOTH arms. It was "never cleared" because, before D, no image
+    // that set it could be followed by a Linux image in the same Proc
+    // (SYS_NOTE_OPEN has no translation row): "a PHENO_LINUX Proc is never
+    // self-managing" held by construction, and notes.c's Linux delivery
+    // branch is gated on exactly that. D makes the state constructible -- a
+    // native Proc opens its notes fd, then execs a /viv/bin binary -- and a
+    // Linux image carrying the mark has its whole signal delivery switched
+    // OFF: every non-kill note stranded, the ring filling, the caught bit
+    // armed and never drained. A native image that wants the mark re-opens
+    // its fd (the Plan 9 "exec resets" rule the mask clear above follows).
+    // rfork never copies proc_flags, so only a DIRECT execve by a
+    // self-managing Proc changes behaviour, and only toward the default
+    // disposition. Atomic AND: the word is multi-writer (the SAK kthread).
+    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_SELF_MANAGING_NOTES,
+                       __ATOMIC_RELAXED);
 
     // #247: and the in-handler LATCH, which the reset above missed until it was
     // audited. It is not a disposition, so it does not read as one -- but
@@ -3240,12 +3422,12 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self) {
 // driving this on a RUNNING Proc would interleave a whole-table reset with that
 // Proc's own viv_sigtab_set. The test drives it on a Proc it built and never
 // scheduled.
-void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t);
-void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t) {
-    proc_exec_drop_image_state(p, t);
+void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 pheno);
+void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 pheno) {
+    proc_exec_drop_image_state(p, t, pheno);
 }
 
-void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
+void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
     if (!p || p->magic != PROC_MAGIC) extinction("proc_exec_replace: bad Proc");
     if (!nas)                         extinction("proc_exec_replace: NULL address space");
     struct Thread *self = current_thread();
@@ -3286,6 +3468,35 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
         spin_unlock_irqrestore(&g_proc_table_lock, s);
     }
 
+    // Design D (VIVARIUM 13.10.4): the ONE store of the new image's phenotype,
+    // here in the infallible commit region and nowhere earlier. Before the
+    // swap above the load could still fail and return the caller to its OLD
+    // image, which must keep decoding its own calls under its own ABI (review
+    // F1 Leg B); after it, the new image is committed.
+    //
+    // What the ordering does and does not promise (audit F4). RELEASE orders
+    // the accesses BEFORE this store (the address-space swap, the cloexec
+    // sweep) ahead of it for an ACQUIRE reader; it says nothing about the
+    // signal reset BELOW, whose plain and RELAXED stores a lock-free
+    // cross-Proc reader (notes.c's SIG_IGN hook, the default-disposition
+    // query, the ^Z fan) may observe before OR after this one. So all four
+    // (phenotype, reset-state) combinations are observable, and each is a
+    // legitimate state of ONE image: (NATIVE, either) -- the sigtab is never
+    // consulted for a native Proc; (LINUX, reset table) -- reads as
+    // all-SIG_DFL, the new image's own initial state; (LINUX, old table) --
+    // the old image's dispositions, the latitude POSIX gives a sigaction
+    // racing a signal already in flight (the standing rule for this Proc's
+    // sigtab, above). The note MASK is not a cross-Proc concern at all: it is
+    // re-read by this thread's own EL0-return scan under its final value, and
+    // a note deferred by the old mask is released by the clear. No note is
+    // lost, doubled, or mis-tabled in any combination. An earlier version of
+    // this comment claimed the store kept the (phenotype, mask) pair
+    // coherent for cross-Proc readers; a RELEASE store cannot order a later
+    // write, so it did not, and it never needed to. RELEASE stays: it is
+    // free, and it keeps the commit above visible to an ACQUIRE reader of the
+    // phenotype.
+    __atomic_store_n(&p->phenotype, new_pheno, __ATOMIC_RELEASE);
+
     // Every cross-Proc reader of `->as` -- /proc/<pid>/{maps,mem}, /ctl/procs,
     // the weft reaper -- resolves its target under g_proc_table_lock, so after
     // the section above none of them can still be holding `old`. That is what
@@ -3318,7 +3529,7 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     // freed here (#254: cross-Proc readers reach `p->sigtab` lock-free, so the
     // object is immortal per Proc; proc_free is the only free), and WHAT resets
     // is phenotype-conditional -- both live in proc_exec_drop_image_state.
-    proc_exec_drop_image_state(p, self);
+    proc_exec_drop_image_state(p, self, new_pheno);
 
     // L-7 F2: hardware breakpoints and watchpoints are addresses in the OLD
     // image, for exactly the reason the handler entry points above are. Nothing
@@ -3359,7 +3570,17 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     fp_restore_area(g_fp_zero_area);
 }
 
+// #91: the string-only wrapper. The kill / legate / debugger callers keep the
+// boolean status they always had (msg=="ok" -> 0, else 1; a NULL msg becomes
+// "killed" inside the core -> 1, correct for a kill). The two real-code callers
+// (SYS_EXIT_GROUP and exits_code's live-peers cascade) call the _code core
+// directly with the true exit byte.
 void proc_group_terminate(struct Proc *p, const char *msg) {
+    int code = (msg && msg[0] == 'o' && msg[1] == 'k' && msg[2] == 0) ? 0 : 1;
+    proc_group_terminate_code(p, code, msg);
+}
+
+void proc_group_terminate_code(struct Proc *p, int code, const char *msg) {
     if (!p || p->magic != PROC_MAGIC) return;   // fail-safe; caller validates
     if (p == g_kproc) return;   // #809 P3a: kproc runs at EL1 + never group-exits
     if (!msg) msg = "killed";
@@ -3382,8 +3603,17 @@ void proc_group_terminate(struct Proc *p, const char *msg) {
     // still re-runs the wake + kick below (idempotent). __ATOMIC_RELEASE so a
     // peer's __ATOMIC_ACQUIRE load at its die-check sees a fully-published msg.
     const char *expected = NULL;
-    __atomic_compare_exchange_n(&p->group_exit_msg, &expected, msg,
-                                false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    if (__atomic_compare_exchange_n(&p->group_exit_msg, &expected, msg,
+                                    false, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+        // #91: record the companion exit code EXACTLY ONCE, in the set-once
+        // winner branch, so group_exit_code always corresponds to the winning
+        // group_exit_msg. A plain store: this Proc's g_proc_table_lock (the
+        // caller's #811 precondition, held for the p->threads walk below) is the
+        // sole ordering vs thread_exit_self's read, which holds the same lock. A
+        // racing loser (a second exit_group, or a kill racing the exit) writes
+        // NEITHER field, so no torn (msg, code) pair can be observed.
+        p->group_exit_code = code;
+    }
 
     // Wake every futex (torpor) sleeper of p so it returns from torpor_wait to
     // its EL0-return die-check. MUST run AFTER the flag set: a peer that
@@ -3956,6 +4186,7 @@ static int pgrp_hupcont_cb(struct Proc *q, void *arg) {
         return 0;
     (void)notes_post(q, NOTE_NAME_TTY_HUP, 0u, NULL, true);
     proc_interrupt_terminate_wake(q);
+    proc_caught_note_wake(q);   // item 11: caught SIGHUP handler wakes too
     (void)notes_post(q, NOTE_NAME_TTY_CONT, 0u, NULL, true);
     proc_job_resume_one_locked(q);
     return 0;
@@ -4187,10 +4418,13 @@ static int child_wait_ready_cond(void *arg) {
 // "The child is off my frame" means "the child no longer maps my address
 // space", and that is a fact already written down: `child->as`. At an RFMEM
 // fork the two are equal by construction; proc_exec_replace swaps the child's
-// to a freshly-allocated one; death removes the child from ALIVE. Nothing else
-// can change it, because the only other way a Proc acquires a private space is
-// a fork the child cannot perform (RFPROC alone is refused) and an exec the
-// parent cannot perform (it is parked here).
+// to a freshly-allocated one; death removes the child from ALIVE. Those two --
+// exec and death -- are the ONLY writers of the child's `->as` after the fork,
+// which is what makes the comparison exhaustive. A fork the child ITSELF issues
+// (RFPROC alone has been served since L-5, and a PHENO_LINUX vfork child forks
+// via option B) does not reassign `child->as`: it allocates the GRANDCHILD a
+// private space and leaves the child's own pointer untouched. So a busy child
+// spawning its own children cannot spuriously release the parked parent.
 //
 // A flag would have been the obvious design and is strictly worse: it records
 // the release somewhere other than where the release happens, so a third

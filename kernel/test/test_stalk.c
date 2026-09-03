@@ -76,6 +76,22 @@ void test_stalk_cross_mount_xsearch_deny(void);
 void test_stalk_mount_amode_no_cross(void);
 void test_stalk_cross_mount_chain(void);
 void test_stalk_cross_mount_no_leak(void);
+// UM (union mounts): the union walk over the real resolver.
+void test_stalk_union_walk(void);
+void test_stalk_union_order(void);
+void test_stalk_union_xskip(void);
+void test_stalk_union_readdir(void);            // UM-5: merge + dedup first-wins
+void test_stalk_union_readdir_paginate(void);   // UM-5: ordinal-cursor resume
+void test_stalk_union_readdir_nontagged(void);  // UM-5: control (not over-tagged)
+void test_stalk_union_create(void);             // UM-5a: MCREATE member selected
+void test_stalk_union_create_first_wins(void);  // UM-5a: first MCREATE (declared order)
+void test_stalk_union_create_no_target(void);   // UM-5a: no MCREATE -> EACCES
+void test_stalk_union_member_holding(void);     // UM-8c/F3: holder, not MCREATE member
+void test_stalk_union_remove_uncrossed(void);    // UM-8c/F3: STALK_REMOVE leaves the point
+void test_stalk_union_fd_base(void);             // UM-8c/F5: fd-relative union base sees all members
+void test_stalk_union_opath_base(void);          // UM-8c/R2-F2: O_PATH base carries the point
+void test_stalk_union_zero_component(void);      // UM-8c/R2-F3: "." off a union base keeps it
+void test_stalk_pheno_symlink_reanchor(void);   // VIVARIUM section 13 (F1)
 // #66: namespace-name accumulation through the real resolver.
 void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
@@ -104,6 +120,13 @@ void test_stalk_symlink_nofollow(void);
 void test_stalk_symlink_stat_vs_lstat(void);
 void test_stalk_symlink_pounce_split(void);
 void test_stalk_symlink_lifetime(void);
+
+// #50: SYS_OPEN_CREATE over the fixture (the create overlay).
+void test_stalk_open_create_cwd_parity(void);
+void test_stalk_open_create_open_if_present(void);
+void test_stalk_open_create_mkdir_and_nest(void);
+void test_stalk_open_create_leaf_rows(void);
+void test_stalk_open_create_containment_and_denials(void);
 
 // =============================================================================
 // The fixture Dev.
@@ -154,6 +177,41 @@ static const struct fixnode g_fix[] = {
     { 17, 0, "lnnox",  QTSYMLINK, 0777u, "nox/sekret" },  // through a no-X dir
     { 18, 3, "lnleaf", QTSYMLINK, 0777u, "leaf" },     // MID-RUN link, so a
                                          // pounced run must split at it
+
+    // ---- VIVARIUM section 13 (F1): a fresh, isolated subtree for the
+    // pheno-mount symlink-re-anchor regression. `phx` is mounted MPHENO_LINUX in
+    // one test; `lnaway` is an ABSOLUTE symlink pointing OUT of phx (to /xfile at
+    // the root), so following it re-anchors the resolution out of the pheno
+    // mount; `preal` is the plain-file control reached THROUGH the mount. Nothing
+    // else in the fixture references phx, so it cannot perturb any other test.
+    { 19,  0, "phx",    QTDIR,     0755u, NULL },
+    { 20, 19, "lnaway", QTSYMLINK, 0777u, "/xfile" },
+    { 21, 19, "preal",  QTFILE,    0644u, NULL },
+
+    // ---- UM (union mounts): an isolated union subtree. `um1` + `um2` are two
+    // mount SOURCES with a COLLIDING child name ("shared", distinct qids) plus
+    // one unique child each; `umpt` is the empty union mount POINT. Nothing
+    // else references them, so they cannot perturb any other test (the phx
+    // pattern). The union walk must return the FIRST member's "shared"
+    // (order/first-hit), fall through to member 2 for "only2", and miss
+    // cleanly on a name in neither.
+    { 22,  0, "um1",    QTDIR,  0755u, NULL },
+    { 23, 22, "shared", QTFILE, 0644u, NULL },   // collides with qid 26
+    { 24, 22, "only1",  QTFILE, 0644u, NULL },
+    { 25,  0, "um2",    QTDIR,  0755u, NULL },
+    { 26, 25, "shared", QTFILE, 0644u, NULL },   // same NAME as qid 23
+    { 27, 25, "only2",  QTFILE, 0644u, NULL },
+    { 28,  0, "umpt",   QTDIR,  0755u, NULL },   // the empty union mount point
+    // Per-member X-skip: `uma` is a union member the caller cannot search
+    // (0600, no owner-x -> X denied even for the SYSTEM owner, as nox proves);
+    // `umb` is searchable (0755). Both hold "tgt" -- a union walk must SKIP the
+    // unsearchable member and land on umb's tgt, NOT EACCES (Plan 9 union skip,
+    // the divergence from a lone directory's EACCES).
+    { 29,  0, "uma",    QTDIR,  0600u, NULL },   // X-denied union member
+    { 30, 29, "tgt",    QTFILE, 0644u, NULL },   // shadowed (uma unsearchable)
+    { 31,  0, "umb",    QTDIR,  0755u, NULL },   // searchable union member
+    { 32, 31, "tgt",    QTFILE, 0644u, NULL },   // the one that wins
+    { 33,  0, "umpt2",  QTDIR,  0755u, NULL },   // X-skip union mount point
 };
 #define FIX_LOOP_PATH 7u
 // The first symlink qid -- the boundary the fixture walk uses to answer
@@ -170,6 +228,38 @@ static const struct fixnode *fix_node(u64 path) {
     for (unsigned i = 0; i < sizeof(g_fix) / sizeof(g_fix[0]); i++) {
         if (g_fix[i].path == path) return &g_fix[i];
     }
+    return NULL;
+}
+
+// #50: the create overlay -- a small MUTABLE extension of the static tree so
+// SYS_OPEN_CREATE's core can be driven over the REAL resolver (cwd join,
+// containment, X-search, the leaf rows). fix_create records nodes here;
+// fix_walk_one / fix_stat_qid consult it after the static table. Reset
+// per-test. Overlay qids start at 0x100, clear of the static table's.
+#define FIXMADE_MAX  8
+#define FIXMADE_BASE 0x100u
+struct fixmade {
+    u64  parent;
+    char name[SYS_WALK_OPEN_NAME_MAX + 1];
+    u64  path;
+    u8   type;
+    u32  mode;
+};
+static struct fixmade g_fixmade[FIXMADE_MAX];
+static int g_fixmade_n;
+static u64 g_fix_create_last_parent;   // parent qid of the LAST create -- the
+                                       // cwd-parity witness reads this
+static int g_fix_create_calls;
+
+static void fixmade_reset(void) {
+    g_fixmade_n = 0;
+    g_fix_create_last_parent = (u64)-1;
+    g_fix_create_calls = 0;
+}
+
+static const struct fixmade *fixmade_node(u64 path) {
+    for (int i = 0; i < g_fixmade_n; i++)
+        if (g_fixmade[i].path == path) return &g_fixmade[i];
     return NULL;
 }
 
@@ -191,6 +281,15 @@ static bool fix_walk_one(u64 cur_path, const char *name, struct Qid *out) {
             return true;
         }
     }
+    // #50: the create overlay resolves like any other child.
+    for (int i = 0; i < g_fixmade_n; i++) {
+        if (g_fixmade[i].parent == cur_path &&
+            fix_streq(name, g_fixmade[i].name)) {
+            out->path = g_fixmade[i].path;
+            out->type = g_fixmade[i].type;
+            return true;
+        }
+    }
     return false;
 }
 
@@ -203,6 +302,12 @@ static int g_fix_walkattrs_calls;
 static struct Walkqid *fix_walk(struct Spoor *c, struct Spoor *nc,
                                 const char **name, int nname) {
     if (!c || nname < 0) return NULL;
+    // R2-F1 regression: a 9P server rejects a Twalk (any nwname) from an OPENED
+    // fid (Stratum h_walk: is_open -> EINVAL). The fixture must refuse what
+    // production refuses, else the union readdir dedup -- which walks earlier
+    // members to drop duplicate names -- passes here while silently failing on
+    // dev9p (round-1 F1's inverse: a double LOOSER than production).
+    if (c->flag & COPEN) return NULL;
     if (nname > 0) g_fix_walk_calls++;   // real steps only (0-walk = clone)
     struct Walkqid *wq = walkqid_alloc(nname > 0 ? nname : 1);
     if (!wq) return NULL;
@@ -225,13 +330,25 @@ static struct Walkqid *fix_walk(struct Spoor *c, struct Spoor *nc,
 
 static int fix_stat_qid(u64 qid_path, struct t_stat *out) {
     const struct fixnode *fn = fix_node(qid_path);
-    if (!fn) return -1;
+    u8  ntype;
+    u32 nmode;
+    if (fn) {
+        ntype = fn->type;
+        nmode = fn->mode;
+    } else {
+        // #50: overlay nodes stat like static ones (the A-2d parent check +
+        // the dot gates + X-search must see a created directory as a real dir).
+        const struct fixmade *m = fixmade_node(qid_path);
+        if (!m) return -1;
+        ntype = m->type;
+        nmode = m->mode;
+    }
     for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
-    out->mode     = ((fn->type & QTDIR)     ? T_S_IFDIR :
-                     (fn->type & QTSYMLINK) ? T_S_IFLNK : T_S_IFREG) | fn->mode;
+    out->mode     = ((ntype & QTDIR)     ? T_S_IFDIR :
+                     (ntype & QTSYMLINK) ? T_S_IFLNK : T_S_IFREG) | nmode;
     out->nlink    = 1;
-    out->qid_path = fn->path;
-    out->qid_type = fn->type;
+    out->qid_path = qid_path;
+    out->qid_type = ntype;
     out->blksize  = 4096;
     out->uid      = PRINCIPAL_SYSTEM;
     out->gid      = GID_SYSTEM;
@@ -292,6 +409,41 @@ static struct Spoor *fix_open(struct Spoor *c, int omode) {
     c->flag |= COPEN;
     c->mode  = omode;
     return c;
+}
+
+// #50: the fixture create -- the dev9p create CONTRACT over the overlay:
+// exclusive (an existing child answers NULL -- the errno-precision channel is
+// dev9p-private, so the fixture's failure surfaces as the generic -1; the
+// loopback tests in test_dev9p.c own the EEXIST-exact legs), transitions nc
+// onto the new node OPENED and returns nc (the reuse-nc contract
+// spoor_create_install enforces).
+static struct Spoor *fix_create(struct Spoor *nc, const char *name, int omode,
+                                u32 perm, u32 gid) {
+    (void)gid;
+    g_fix_create_calls++;
+    if (!nc) return NULL;
+    struct Qid q;
+    if (fix_walk_one(nc->qid.path, name, &q)) return NULL;   // exists
+    if (g_fixmade_n >= FIXMADE_MAX)           return NULL;
+    struct fixmade *m = &g_fixmade[g_fixmade_n];
+    m->parent = nc->qid.path;
+    size_t l = 0;
+    while (name[l] != '\0' && l < SYS_WALK_OPEN_NAME_MAX) {
+        m->name[l] = name[l];
+        l++;
+    }
+    m->name[l] = '\0';
+    m->path = FIXMADE_BASE + (u64)g_fixmade_n;
+    m->type = (perm & SYS_WALK_CREATE_DMDIR) ? QTDIR : QTFILE;
+    m->mode = perm & 0777u;
+    g_fixmade_n++;
+    g_fix_create_last_parent = nc->qid.path;
+    nc->qid.path = m->path;
+    nc->qid.vers = 0;
+    nc->qid.type = m->type;
+    nc->flag |= COPEN;
+    nc->mode  = omode;
+    return nc;
 }
 
 static void fix_close(struct Spoor *c) { (void)c; /* qid-based: no heap aux */ }
@@ -356,6 +508,51 @@ static struct Spoor *fix_open_cached(struct Spoor *c, const char *const *names,
     return co;
 }
 
+// UM: enumerate `c`'s children as 9P2000.L dirents for the union readdir merge
+// tests. Children = fixnodes whose parent == c->qid.path (self-parent root
+// excluded). Cookie = a 1-based ordinal in array order (monotonic, like
+// devramfs), so union_readdir_run's per-member cursor advances correctly.
+static long fix_readdir(struct Spoor *c, void *buf, long n, s64 off) {
+    if (!c || !buf) return -1;
+    // UM-8 F1 REGRESSION: mirror the PRODUCTION contract -- dev9p issues
+    // Treaddir on the fid and Stratum's h_readdir refuses (EINVAL) a fid that
+    // was never opened (is_open). The pre-UM-8 union readdir crossed each member
+    // via clone_walk_zero (a Twalk clone, never Dev.open'd) then called readdir,
+    // so every dev9p member silently vanished (UM-7 F1, the P0). This fixture
+    // used to readdir an UNOPENED Spoor happily -- a test double LOOSER than
+    // production, so the P0 passed green. Gating on COPEN makes the union readdir
+    // tests fail on the old cross-without-open path and pass ONLY on the
+    // opened-member snapshot (union_snap).
+    if (!(c->flag & COPEN)) return -1;
+    u8 *out = (u8 *)buf;
+    long len = 0;
+    u64  ord = 0;
+    int  nfix = (int)(sizeof(g_fix) / sizeof(g_fix[0]));
+    for (int i = 0; i < nfix; i++) {
+        if (g_fix[i].parent != c->qid.path) continue;
+        if (g_fix[i].path   == c->qid.path) continue;   // exclude a self-parent root
+        ord++;
+        if ((s64)ord <= off) continue;                  // resume: already delivered
+        const char *nm = g_fix[i].name;
+        u32 nlen = 0; while (nm && nm[nlen]) nlen++;
+        long entry = 24 + (long)nlen;
+        if (len + entry > n) break;                     // batch full
+        u8 *e = out + len;
+        for (long b = 0; b < entry; b++) e[b] = 0;
+        e[0] = (g_fix[i].type & QTDIR) ? QTDIR : 0;                 // qid.type
+        for (int b = 0; b < 8; b++)                                 // qid.path @5..12
+            e[5 + b] = (u8)((u64)g_fix[i].path >> (8 * b));
+        for (int b = 0; b < 8; b++)                                 // offset cookie @13..20
+            e[13 + b] = (u8)(ord >> (8 * b));
+        e[21] = (g_fix[i].type & QTDIR) ? 4 : 8;                    // d_type (cosmetic)
+        e[22] = (u8)(nlen & 0xff);
+        e[23] = (u8)((nlen >> 8) & 0xff);
+        for (u32 b = 0; b < nlen; b++) e[24 + b] = (u8)nm[b];
+        len += entry;
+    }
+    return len;
+}
+
 // The fixture Dev. dc is a test-only sentinel; it is NOT dev_register'd, so the
 // dc never collides with a real Dev (stalk reaches it only through the Spoors we
 // hand it directly).
@@ -371,6 +568,8 @@ static struct Dev stalkfix = {
     .open          = fix_open,
     .close         = fix_close,
     .readlink      = fix_readlink,   // D-1: the expansion RPC
+    .create        = fix_create,     // #50: the SYS_OPEN_CREATE battery
+    .readdir       = fix_readdir,    // UM: the union readdir merge tests
 };
 
 // The A/B twin: the SAME tree with NO walk_attrs slot -- resolves through the
@@ -1289,6 +1488,107 @@ void test_stalk_cross_mount_xsearch_deny(void) {
     spoor_unref(root);
 }
 
+// VIVARIUM section 13 (F1, the holotype's P2): crossed_pheno is a SET-ONLY
+// accumulator, and the resolver's `restart:` (a symlink re-anchor / '..'-rebuild)
+// must reset it -- otherwise a resolution that crosses a pheno-mount and THEN
+// follows an absolute symlink OUT of it would stamp the NATIVE target
+// PHENO_LINUX, falsifying territory.h's "the SAME file reached by another path is
+// native." This drives the FULL resolver: phx is mounted MPHENO_LINUX at loop;
+// loop/lnaway crosses the pheno-mount then re-anchors to /xfile (a native file
+// OUT of the mount) -> crossed_pheno must be false; loop/preal reaches a plain
+// file THROUGH the mount with no re-anchor -> crossed_pheno stays true. Without
+// the restart: reset, loop/lnaway reports true (fails-without-fix).
+void test_stalk_pheno_symlink_reanchor(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    if (!root || !p.territory) return;
+    // The absolute symlink (lnaway -> /xfile) re-anchors at the caller's OWN
+    // Territory root (stalk.c:393, I-28), so the root must be established --
+    // cross_setup leaves it NULL, exactly as the lnabs leg of symlink_follow does.
+    TEST_EXPECT_EQ(territory_chroot(p.territory, root), 0, "chroot to fixture root");
+
+    struct Spoor *src = stalk(&p, root, "phx", 3, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    int mrc = (src && mp) ? mount(p.territory, src, mp, MPHENO_LINUX) : -1;
+
+    // Leg 1 (the fix): loop/lnaway -> cross loop (pheno) -> lnaway -> re-anchor
+    // to /xfile (OUT). Caller inits crossed_pheno false, as exec_resolve does.
+    int  e1 = 0;
+    bool pheno_link = false;
+    struct Spoor *q1 = (mrc == 0)
+        ? stalk_exec(&p, root, "loop/lnaway", 11, STALK_OPEN, 0, &e1, &pheno_link)
+        : NULL;
+    // Leg 2 (control): loop/preal -> a plain file UNDER the pheno-mount, no
+    // re-anchor -> crossed_pheno true.
+    int  e2 = 0;
+    bool pheno_plain = false;
+    struct Spoor *q2 = (mrc == 0)
+        ? stalk_exec(&p, root, "loop/preal", 10, STALK_OPEN, 0, &e2, &pheno_plain)
+        : NULL;
+
+    // Design D (VIVARIUM 13.10.5, review F8.2 = self-audit SA-3): the restart:
+    // reset is a SEED from the resolving Territory's declaration. Leg 0 is the
+    // seed's own control BEFORE any declaration: a resolution that crosses NO
+    // mount (xfile) reports false. Then declare the Territory Linux (the
+    // container's namespace-level declaration) and re-run: leg 3 re-anchors OUT
+    // of the pheno-mount exactly as leg 1 did and must now report TRUE -- the
+    // seed survives the re-anchor because the reset IS the seed (a seed hoisted
+    // above restart: would drop it here); leg 4 crosses no mount and must report
+    // TRUE on the seed alone.
+    int  e0 = 0;
+    bool pheno_nomount_undecl = false;
+    struct Spoor *q0 = stalk_exec(&p, root, "xfile", 5, STALK_OPEN, 0, &e0,
+                                  &pheno_nomount_undecl);
+    territory_declare_linux(p.territory);
+    int  e3 = 0;
+    bool pheno_link_decl = false;
+    struct Spoor *q3 = (mrc == 0)
+        ? stalk_exec(&p, root, "loop/lnaway", 11, STALK_OPEN, 0, &e3, &pheno_link_decl)
+        : NULL;
+    int  e4 = 0;
+    bool pheno_nomount_decl = false;
+    struct Spoor *q4 = stalk_exec(&p, root, "xfile", 5, STALK_OPEN, 0, &e4,
+                                  &pheno_nomount_decl);
+
+    // Observe, THEN tear down, THEN assert (TEST_ASSERT returns).
+    bool q1ok = (q1 != NULL), q2ok = (q2 != NULL);
+    bool q0ok = (q0 != NULL), q3ok = (q3 != NULL), q4ok = (q4 != NULL);
+    if (q0) spoor_clunk(q0);
+    if (q3) spoor_clunk(q3);
+    if (q4) spoor_clunk(q4);
+    u64  q1qid = q1 ? (u64)q1->qid.path : (u64)-1;
+    u64  q2qid = q2 ? (u64)q2->qid.path : (u64)-1;
+    if (q1) spoor_clunk(q1);
+    if (q2) spoor_clunk(q2);
+    territory_unref(p.territory);
+    if (src) spoor_clunk(src);
+    if (mp)  spoor_clunk(mp);
+    spoor_unref(root);
+
+    TEST_EXPECT_EQ(mrc, 0, "mount phx at loop MPHENO_LINUX");
+    TEST_ASSERT(q1ok, "loop/lnaway resolves (re-anchored to /xfile)");
+    TEST_ASSERT(q2ok, "loop/preal resolves (through the pheno-mount)");
+    TEST_EXPECT_EQ(q1qid, (u64)9,
+        "loop/lnaway -> /xfile (qid 9, OUT of the pheno-mount)");
+    TEST_EXPECT_EQ(q2qid, (u64)21,
+        "loop/preal -> phx/preal (qid 21, via the pheno-mount)");
+    TEST_ASSERT(pheno_link == false,
+        "F1: a symlink re-anchor OUT of a pheno-mount RESETS crossed_pheno "
+        "(the native /xfile is not stamped PHENO_LINUX)");
+    TEST_ASSERT(pheno_plain == true,
+        "CONTROL: a plain file reached THROUGH the pheno-mount keeps "
+        "crossed_pheno (final-location, no re-anchor)");
+    TEST_ASSERT(q0ok && q3ok && q4ok, "the Design D legs resolve");
+    TEST_ASSERT(pheno_nomount_undecl == false,
+        "SEED CONTROL: no crossing + no declaration -> false (rule 3)");
+    TEST_ASSERT(pheno_link_decl == true,
+        "Design D: a declared Territory's seed SURVIVES the re-anchor OUT of the "
+        "pheno-mount (the restart: reset is the seed, not a false)");
+    TEST_ASSERT(pheno_nomount_decl == true,
+        "Design D: a declared Territory decides Linux with NO crossing at all");
+}
+
 void test_stalk_mount_amode_no_cross(void) {
     struct Proc p;
     struct Spoor *root = cross_setup(&p);
@@ -1379,6 +1679,682 @@ void test_stalk_cross_mount_no_leak(void) {
     territory_unref(p.territory);
     spoor_clunk(src);
     spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+// =============================================================================
+// UM (union mounts): the union WALK. Grafts multiple sources at one point and
+// drives the REAL resolver through the union -- declared-order search,
+// first-hit, fallthrough on miss, per-member X-skip, clean miss. The spec
+// (specs/territory.tla WalkFirstHit / OrderCorrect + the buggy cfgs) proves the
+// model; these prove the impl matches it.
+// =============================================================================
+
+void test_stalk_union_walk(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    // Seed the root Path (the qid-Dev fixture carries none; the real devramfs/
+    // dev9p roots are attach-seeded) so the resolver accumulates names and the
+    // union-child Path regression below is observable.
+    root->path = path_make_root();
+    TEST_ASSERT(root->path != NULL, "seed root path /");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+
+    // Union [um1, um2]: um1 MBEFORE (searched first), um2 MAFTER (last).
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "mount um1 MBEFORE umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "mount um2 MAFTER umpt");
+
+    // Leak accounting spans the four resolves (the union path adds union_snap
+    // ref/clunk + the helper's per-member clone/clunk -- balance them).
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    // First-hit: "shared" is in BOTH members; member 0 (um1) wins -> qid 23.
+    struct Spoor *q = stalk(&p, root, "umpt/shared", 11, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve umpt/shared");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "union first-hit -> um1's shared (qid 23)");
+    // UM-8 regression (#66/I-33): the union child takes the MOUNT-POINT name
+    // (/umpt), not the winning member's internal name (/um1). A stalk_cross_src
+    // that omits the transplant yields "/um1/shared" -- which crashes joey's
+    // V-4a-0 exe-path assert at boot ("got '/ptyfs' want '/bin/ptyfs'").
+    TEST_ASSERT(q->path != NULL && fix_streq(q->path->s, "/umpt/shared"),
+        "union child Path = /umpt/shared (mount-point name, not the member's)");
+    spoor_clunk(q);
+
+    // Member-0 hit: "only1" exists only in um1 -> qid 24.
+    q = stalk(&p, root, "umpt/only1", 10, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve umpt/only1");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)24, "union member-0 hit (qid 24)");
+    spoor_clunk(q);
+
+    // Fallthrough: "only2" exists only in um2 -> um1 misses, um2 wins qid 27.
+    q = stalk(&p, root, "umpt/only2", 10, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve umpt/only2 (fallthrough)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)27, "union fallthrough -> um2's only2 (qid 27)");
+    spoor_clunk(q);
+
+    // Clean miss: neither member has "nosuch".
+    int err = 0;
+    q = stalk_err(&p, root, "umpt/nosuch", 11, STALK_OPEN, 0, &err);
+    TEST_ASSERT(q == NULL, "umpt/nosuch misses");
+    TEST_EXPECT_EQ(err, T_E_NOENT, "union all-miss -> ENOENT");
+
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across union resolves");
+
+    territory_unref(p.territory);
+    spoor_clunk(um1);
+    spoor_clunk(um2);
+    spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// The ORDER flip: mounting um2 MBEFORE (prepend -> searched first) makes um2's
+// "shared" win instead of um1's -- the declared order is load-bearing (the
+// OrderCorrect / BUGGY_MOUNT_ORDER counterexample, at runtime).
+void test_stalk_union_order(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+
+    // um1 MAFTER, then um2 MBEFORE -> union [um2, um1] (MBEFORE prepends).
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MAFTER),  0, "mount um1 MAFTER umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MBEFORE), 0, "mount um2 MBEFORE umpt");
+
+    // um2 is now searched first -> "shared" resolves to um2's (qid 26), not 23.
+    struct Spoor *q = stalk(&p, root, "umpt/shared", 11, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve umpt/shared (order flipped)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)26, "MBEFORE order -> um2's shared (qid 26)");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(um1);
+    spoor_clunk(um2);
+    spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// Per-member X-skip: a union member the caller cannot search is SKIPPED, and
+// the walk lands on the next searchable member's entry -- NOT EACCES (the union
+// divergence from a lone directory, where an X denial is fatal).
+void test_stalk_union_xskip(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *uma = stalk(&p, root, "uma",   3, STALK_WALK,  0);  // 0600, no X
+    struct Spoor *umb = stalk(&p, root, "umb",   3, STALK_WALK,  0);  // 0755
+    struct Spoor *pt  = stalk(&p, root, "umpt2", 5, STALK_MOUNT, 0);
+    TEST_ASSERT(uma && umb && pt, "resolve uma + umb + umpt2");
+
+    // union [uma, umb]: uma (unsearchable) first, umb (searchable) second.
+    TEST_EXPECT_EQ(mount(p.territory, uma, pt, MBEFORE), 0, "mount uma MBEFORE umpt2");
+    TEST_EXPECT_EQ(mount(p.territory, umb, pt, MAFTER),  0, "mount umb MAFTER umpt2");
+
+    // "tgt" is in BOTH members; uma is unsearchable (0600) -> SKIPPED, umb wins.
+    struct Spoor *q = stalk(&p, root, "umpt2/tgt", 9, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve umpt2/tgt (uma X-skipped)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)32,
+                   "X-denied member skipped -> umb's tgt (qid 32)");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(uma);
+    spoor_clunk(umb);
+    spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// =============================================================================
+// UM (union mounts) -- union READDIR merge/dedup/pagination (UM-5).
+//
+// The merge logic lives in kernel/syscall.c (union_readdir_run, non-static like
+// viv_dirent64_encode_run so the byte-level behavior is unit-testable). These
+// tests build a real union over the fixture (fix_readdir emits each member's
+// children as 9P2000.L dirents), open it through the real resolver (which tags
+// union_snap), and assert the merged stream: dedup first-member-wins, member
+// declared order, 1-based ordinal cookies, and correct paginated resume.
+// =============================================================================
+
+extern s64 union_readdir_run(struct Proc *p, struct Spoor *c, u8 *out, long want,
+                             u64 in_ordinal);
+
+// Parse the idx-th 9P2000.L dirent in buf[0..len). Returns its byte span (> 0)
+// or 0 if idx is past the last complete entry. Fills qid_path / cookie / name.
+static long urd_entry(const u8 *buf, long len, int idx,
+                      u64 *qid_path, u64 *cookie, char *name, u32 namecap) {
+    long pos = 0;
+    for (int i = 0; ; i++) {
+        if (pos + 24 > len) return 0;
+        u32  nlen  = (u32)buf[pos + 22] | ((u32)buf[pos + 23] << 8);
+        long entry = 24 + (long)nlen;
+        if (pos + entry > len) return 0;
+        if (i == idx) {
+            u64 q = 0, ck = 0;
+            for (int b = 0; b < 8; b++) q  |= (u64)buf[pos + 5  + b] << (8 * b);
+            for (int b = 0; b < 8; b++) ck |= (u64)buf[pos + 13 + b] << (8 * b);
+            if (qid_path) *qid_path = q;
+            if (cookie)   *cookie   = ck;
+            if (name) {
+                u32 c = 0;
+                for (; c < nlen && c + 1 < namecap; c++) name[c] = (char)buf[pos + 24 + c];
+                name[c] = '\0';
+            }
+            return entry;
+        }
+        pos += entry;
+    }
+}
+
+static bool urd_name_eq(const char *a, const char *b) {
+    while (*a && *b) { if (*a != *b) return false; a++; b++; }
+    return *a == *b;
+}
+
+void test_stalk_union_readdir(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER umpt");
+
+    // Open the union directory: the resolver tags union_snap and the fd's own
+    // identity is member[0] (um1 root, qid 22).
+    struct Spoor *q = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "open union dir umpt");
+    TEST_ASSERT(q->union_snap != NULL, "STALK_OPEN of a union tags union_snap");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22, "opened union identity = member[0] (qid 22)");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    u8  buf[512];
+    s64 got = union_readdir_run(&p, q, buf, (long)sizeof(buf), 0);
+    TEST_ASSERT(got > 0, "union readdir returns a run");
+
+    // Merged-dedup sequence [shared(um1,qid23), only1(qid24), only2(um2,qid27)];
+    // um2's "shared"(qid26) is DROPPED (first-member-wins). Ordinals 1,2,3.
+    u64 qp = 0, ck = 0; char nm[64];
+    TEST_ASSERT(urd_entry(buf, (long)got, 0, &qp, &ck, nm, sizeof(nm)) > 0, "entry 0");
+    TEST_ASSERT(urd_name_eq(nm, "shared"), "entry 0 name = shared");
+    TEST_EXPECT_EQ(qp, (u64)23, "shared dedup first-wins -> um1's qid 23");
+    TEST_EXPECT_EQ(ck, (u64)1,  "entry 0 ordinal cookie = 1");
+
+    TEST_ASSERT(urd_entry(buf, (long)got, 1, &qp, &ck, nm, sizeof(nm)) > 0, "entry 1");
+    TEST_ASSERT(urd_name_eq(nm, "only1"), "entry 1 name = only1");
+    TEST_EXPECT_EQ(qp, (u64)24, "only1 -> qid 24");
+    TEST_EXPECT_EQ(ck, (u64)2,  "entry 1 ordinal = 2");
+
+    TEST_ASSERT(urd_entry(buf, (long)got, 2, &qp, &ck, nm, sizeof(nm)) > 0, "entry 2");
+    TEST_ASSERT(urd_name_eq(nm, "only2"), "entry 2 name = only2 (um2 fallthrough)");
+    TEST_EXPECT_EQ(qp, (u64)27, "only2 -> qid 27");
+    TEST_EXPECT_EQ(ck, (u64)3,  "entry 2 ordinal = 3");
+
+    // Exactly three (um2's shared deduped away): a 4th entry is absent.
+    TEST_EXPECT_EQ(urd_entry(buf, (long)got, 3, &qp, &ck, nm, sizeof(nm)), (long)0,
+                   "exactly 3 merged entries");
+
+    // Resume past the last ordinal -> end-of-directory.
+    TEST_EXPECT_EQ((long)union_readdir_run(&p, q, buf, (long)sizeof(buf), 3), (long)0,
+                   "resume past last ordinal -> EOD");
+
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across union readdir");
+
+    spoor_clunk(q);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// Paginated resume: a `want` that holds only part of the merged stream splits
+// it across calls; the ordinal carries the cursor with no gap and no dup.
+void test_stalk_union_readdir_paginate(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
+
+    struct Spoor *q = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL && q->union_snap != NULL, "open + tag union");
+
+    // shared=24+6=30, only1=24+5=29, only2=24+5=29. want=60 holds page 1
+    // (shared+only1 = 59), not only2 (would be 88).
+    u8  buf[512];
+    u64 qp = 0, ck = 0; char nm[64];
+
+    s64 g0 = union_readdir_run(&p, q, buf, 60, 0);
+    TEST_ASSERT(g0 > 0, "page 1 returns");
+    TEST_ASSERT(urd_entry(buf, (long)g0, 0, &qp, &ck, nm, sizeof(nm)) > 0 &&
+                urd_name_eq(nm, "shared"), "page1 e0 = shared");
+    TEST_ASSERT(urd_entry(buf, (long)g0, 1, &qp, &ck, nm, sizeof(nm)) > 0 &&
+                urd_name_eq(nm, "only1"), "page1 e1 = only1");
+    TEST_EXPECT_EQ(ck, (u64)2, "page1 last ordinal = 2");
+    TEST_EXPECT_EQ(urd_entry(buf, (long)g0, 2, &qp, &ck, nm, sizeof(nm)), (long)0,
+                   "page1 holds exactly 2");
+
+    // Page 2 resumes at ordinal 2 -> only2 (ordinal 3), then EOD.
+    s64 g1 = union_readdir_run(&p, q, buf, 60, 2);
+    TEST_ASSERT(g1 > 0, "page 2 returns");
+    TEST_ASSERT(urd_entry(buf, (long)g1, 0, &qp, &ck, nm, sizeof(nm)) > 0 &&
+                urd_name_eq(nm, "only2"), "page2 e0 = only2 (no gap, no dup)");
+    TEST_EXPECT_EQ(ck, (u64)3, "page2 ordinal = 3");
+    TEST_EXPECT_EQ(urd_entry(buf, (long)g1, 1, &qp, &ck, nm, sizeof(nm)), (long)0,
+                   "page2 holds exactly 1");
+    TEST_EXPECT_EQ((long)union_readdir_run(&p, q, buf, 60, 3), (long)0, "page 3 EOD");
+
+    spoor_clunk(q);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// Control: a plain directory open and a SINGLE-member mount are NOT unions, so
+// union_snap stays NULL -- readdir takes the ordinary single-Dev path. Proves
+// the tag is set only for a >= 2-member mount (no over-tagging regression).
+void test_stalk_union_readdir_nontagged(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    // (a) plain directory (um1 is not a mount point).
+    struct Spoor *q1 = stalk(&p, root, "um1", 3, STALK_OPEN, 0);
+    TEST_ASSERT(q1 != NULL, "open plain dir um1");
+    TEST_ASSERT(q1->union_snap == NULL, "plain dir open is not tagged");
+    spoor_clunk(q1);
+
+    // (b) single-member mount (one graft on umpt) is not a union.
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um2 && pt, "resolve um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MBEFORE), 0, "single mount um2 -> umpt");
+    struct Spoor *q2 = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(q2 != NULL, "open single-mount umpt");
+    TEST_ASSERT(q2->union_snap == NULL, "single-member mount is not a union");
+    spoor_clunk(q2);
+
+    territory_unref(p.territory);
+    spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// =============================================================================
+// UM (union mounts) -- union CREATE targets the first MCREATE member (UM-5a).
+//
+// A create in a union lands in the FIRST member (declared order) whose mount
+// entry carries MCREATE (ARCH 9.5 "create in the first writable mount";
+// territory.tla::CreateTargetCorrect). The parent resolves via STALK_CREATE,
+// which differs from STALK_WALK only at a union final quarry. These drive the
+// REAL create path (sys_open_create_kpath_for_proc, asserting the create's
+// parent qid via the fixture's g_fix_create_last_parent) plus a stalk-level
+// first-wins check.
+// =============================================================================
+
+// The #50 create-driver helpers are defined lower in this file (the
+// SYS_OPEN_CREATE battery); forward-declare them for the two e2e create tests
+// here. A static forward decl matching the later static definition is legal;
+// the extern matches the identical decl at the #50 section head.
+extern s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+                                          const char *kpath, u64 klen,
+                                          u64 omode_raw, u64 perm_raw);
+static struct Proc *ocp_proc(const char *dot);
+static void ocp_teardown(struct Proc *p);
+
+// The MCREATE flag -- not member position -- selects the create target: member 0
+// (um1) is NOT MCREATE, member 1 (um2) is, so the create lands in um2.
+void test_stalk_union_create(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/");
+    TEST_ASSERT(p != NULL, "proc + territory");
+
+    struct Spoor *root = p->territory->root_spoor;
+    struct Spoor *um1 = stalk(p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p->territory, um1, pt, MBEFORE),          0, "um1 MBEFORE (no MCREATE)");
+    TEST_EXPECT_EQ(mount(p->territory, um2, pt, MAFTER | MCREATE), 0, "um2 MAFTER|MCREATE");
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+
+    fixmade_reset();
+    s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            "/umpt/newfile", 13, 1 /*OWRITE*/, 0644);
+    TEST_ASSERT(fd >= 0, "create /umpt/newfile in the union");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)25,
+                   "create landed in the MCREATE member (um2, qid 25), NOT member[0] um1 (22)");
+
+    ocp_teardown(p);
+}
+
+// First MCREATE member (declared order) wins when MORE THAN ONE is writable:
+// both um1 (MBEFORE) and um2 (MAFTER) carry MCREATE, so um1 -- searched first --
+// is the target. Stalk-level: STALK_CREATE returns the chosen member root.
+void test_stalk_union_create_first_wins(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE | MCREATE), 0, "um1 MBEFORE|MCREATE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER  | MCREATE), 0, "um2 MAFTER|MCREATE");
+
+    struct Spoor *q = stalk(&p, root, "umpt", 4, STALK_CREATE, 0);
+    TEST_ASSERT(q != NULL, "STALK_CREATE resolves the union create target");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)22,
+                   "first MCREATE member wins (um1 root, qid 22), not um2 (25)");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// A union with NO MCREATE member has no writable create target -> the create is
+// denied -T_E_ACCES and NOTHING is created (not silently placed in a read-only
+// member). Real create path.
+void test_stalk_union_create_no_target(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/");
+    TEST_ASSERT(p != NULL, "proc + territory");
+
+    struct Spoor *root = p->territory->root_spoor;
+    struct Spoor *um1 = stalk(p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p->territory, um1, pt, MBEFORE), 0, "um1 MBEFORE (no MCREATE)");
+    TEST_EXPECT_EQ(mount(p->territory, um2, pt, MAFTER),  0, "um2 MAFTER (no MCREATE)");
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+
+    fixmade_reset();
+    s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            "/umpt/newfile", 13, 1 /*OWRITE*/, 0644);
+    TEST_EXPECT_EQ((long)fd, (long)(-(s64)T_E_ACCES),
+                   "no MCREATE member -> create denied EACCES");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)-1,
+                   "nothing was created in any member");
+
+    ocp_teardown(p);
+}
+
+// =============================================================================
+// UM (union mounts) -- REMOVE targets the member HOLDING the leaf (UM-7 F3).
+//
+// unlink / rmdir / rename-source must act on the member that HOLDS the entry
+// (walk first-hit), NOT the MCREATE member a create would pick. Pre-fix these
+// routed through STALK_CREATE, so `rm /u/foo` on a union whose foo lived in a
+// non-MCREATE member hit the writable member instead (ENOENT, or unlinking a
+// shadow). territory.tla::RemoveTargetCorrect + BUGGY_REMOVE_MCREATE_MEMBER.
+// =============================================================================
+
+// stalk_union_member_holding returns the member whose walk FINDS the leaf, in
+// declared order -- distinct from the MCREATE member. Union [um1 MBEFORE (NOT
+// MCREATE), um2 MAFTER|MCREATE]: "only1" lives in um1 (member 0), so the holder
+// is um1 (qid 22), NOT the MCREATE member um2 (qid 25) a create would choose.
+void test_stalk_union_member_holding(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE),          0, "um1 MBEFORE (no MCREATE)");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER | MCREATE), 0, "um2 MAFTER|MCREATE");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    // "only1" is held by um1 (member 0, NOT MCREATE). The holder is um1, NOT the
+    // MCREATE member -- the exact F3 mis-selection (STALK_CREATE would give 25).
+    int e = 0;
+    struct Spoor *m = stalk_union_member_holding(&p, pt, "only1", &e);
+    TEST_ASSERT(m != NULL, "only1 has a holder");
+    TEST_EXPECT_EQ((u64)m->qid.path, (u64)22,
+                   "holder of only1 = um1 (member 0), NOT the MCREATE member um2 (25)");
+    spoor_clunk(m);
+
+    // "only2" is held only by um2 (which is also the MCREATE member) -> um2.
+    e = 0;
+    m = stalk_union_member_holding(&p, pt, "only2", &e);
+    TEST_ASSERT(m != NULL, "only2 has a holder");
+    TEST_EXPECT_EQ((u64)m->qid.path, (u64)25, "holder of only2 = um2 (25)");
+    spoor_clunk(m);
+
+    // "shared" is held by BOTH -> the FIRST member (um1), matching walk first-hit.
+    e = 0;
+    m = stalk_union_member_holding(&p, pt, "shared", &e);
+    TEST_ASSERT(m != NULL, "shared has a holder");
+    TEST_EXPECT_EQ((u64)m->qid.path, (u64)22, "holder of shared = first member um1 (22)");
+    spoor_clunk(m);
+
+    // No member holds "nosuch" -> NULL, and NOT an error (the caller answers
+    // ENOENT; *errp stays 0, distinguishing a miss from a clone OOM).
+    e = 0;
+    m = stalk_union_member_holding(&p, pt, "nosuch", &e);
+    TEST_ASSERT(m == NULL, "nosuch has no holder");
+    TEST_EXPECT_EQ(e, 0, "a no-holder miss is not an error");
+
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across member_holding");
+
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// STALK_REMOVE resolves a union parent to the UNCROSSED mount point (so the
+// caller selects the holder), while STALK_CREATE crosses to the MCREATE member.
+// The divergence at the final quarry is the whole of the F3 stalk change.
+void test_stalk_union_remove_uncrossed(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE),          0, "um1 MBEFORE (no MCREATE)");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER | MCREATE), 0, "um2 MAFTER|MCREATE");
+
+    // STALK_REMOVE: the union quarry is left UNCROSSED -- still the mount point
+    // (qid 28) and still a union (member 1 exists).
+    struct Spoor *r = stalk(&p, root, "umpt", 4, STALK_REMOVE, 0);
+    TEST_ASSERT(r != NULL, "STALK_REMOVE resolves umpt");
+    TEST_EXPECT_EQ((u64)r->qid.path, (u64)28, "STALK_REMOVE yields the mount point (28), uncrossed");
+    struct Spoor *rm1 = mount_member_at(p.territory, r, 1, NULL);
+    TEST_ASSERT(rm1 != NULL, "STALK_REMOVE left umpt a union point (member 1 present)");
+    spoor_clunk(rm1);
+    spoor_clunk(r);
+
+    // STALK_CREATE: the union quarry crosses to the MCREATE member (um2, 25),
+    // which is NOT itself a mount point.
+    struct Spoor *c = stalk(&p, root, "umpt", 4, STALK_CREATE, 0);
+    TEST_ASSERT(c != NULL, "STALK_CREATE resolves umpt");
+    TEST_EXPECT_EQ((u64)c->qid.path, (u64)25, "STALK_CREATE crosses to the MCREATE member um2 (25)");
+    struct Spoor *cm1 = mount_member_at(p.territory, c, 1, NULL);
+    TEST_ASSERT(cm1 == NULL, "STALK_CREATE result is a crossed member, not a union point");
+    spoor_clunk(c);
+
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// =============================================================================
+// UM (union mounts) -- an fd-based union resolution base sees ALL members
+// (UM-7 F5). A handle to a union directory is member[0] + the union_snap (which
+// UM-8c makes retain the mount POINT). Resolving RELATIVE to that fd must search
+// every member, not just member[0].
+// =============================================================================
+
+void test_stalk_union_fd_base(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE), 0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER),  0, "um2 MAFTER");
+
+    // Open the union dir -> the fd is member[0] (um1, qid 22) + a union_snap that
+    // UM-8c makes retain the union POINT (qid 28).
+    struct Spoor *ufd = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(ufd != NULL, "open the union dir");
+    TEST_ASSERT(ufd->union_snap != NULL, "opened union fd carries a union_snap");
+    TEST_ASSERT(ufd->union_snap->point != NULL, "union_snap retains the point (UM-8c F5)");
+    TEST_EXPECT_EQ((u64)ufd->union_snap->point->qid.path, (u64)28,
+                   "retained point is the mount point umpt (qid 28)");
+    struct Spoor *pm1 = mount_member_at(p.territory, ufd->union_snap->point, 1, NULL);
+    TEST_ASSERT(pm1 != NULL, "the retained point is still a union point");
+    spoor_clunk(pm1);
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    // F5: "only2" lives only in member 1 (um2). WITHOUT the base-cross fix the
+    // resolution walks member[0] (um1) only and misses it; WITH it the union is
+    // searched -> um2's only2 (qid 27).
+    struct Spoor *q = stalk(&p, ufd, "only2", 5, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "fd-relative resolve only2 (member 1)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)27, "fd-relative walk sees member 1 (only2 qid 27)");
+    spoor_clunk(q);
+
+    // "only1" (member 0) still resolves relative to the fd -> qid 24.
+    q = stalk(&p, ufd, "only1", 5, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "fd-relative resolve only1 (member 0)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)24, "fd-relative walk member 0 (only1 qid 24)");
+    spoor_clunk(q);
+
+    // "shared" (both) -> first member (um1, qid 23) -- first-hit off the fd too.
+    q = stalk(&p, ufd, "shared", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "fd-relative resolve shared");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "fd-relative first-hit (shared qid 23)");
+    spoor_clunk(q);
+
+    // A clean miss relative to the fd -> ENOENT (no member has it).
+    int err = 0;
+    q = stalk_err(&p, ufd, "nosuch", 6, STALK_OPEN, 0, &err);
+    TEST_ASSERT(q == NULL, "fd-relative miss");
+    TEST_EXPECT_EQ(err, T_E_NOENT, "fd-relative all-miss -> ENOENT");
+
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across fd-relative union resolves");
+
+    spoor_clunk(ufd);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// R2-F2: an O_PATH (STALK_WALK) union base carries the POINT-ONLY snap (no
+// member opens) so fd-relative resolution off it reaches every member -- the
+// handle class native fs:: uses for mutation, which the STALK_OPEN-only snap
+// missed.
+void test_stalk_union_opath_base(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE),          0, "um1 MBEFORE");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER | MCREATE), 0, "um2 MAFTER|MCREATE");
+
+    // Resolve the union with STALK_WALK (the O_PATH amode) -> member[0] + a
+    // POINT-ONLY snap: point set, NO members opened (n == 0).
+    struct Spoor *op = stalk(&p, root, "umpt", 4, STALK_WALK, 0);
+    TEST_ASSERT(op != NULL, "O_PATH-resolve the union");
+    TEST_ASSERT(op->union_snap != NULL, "O_PATH union base carries a union_snap (R2-F2)");
+    TEST_EXPECT_EQ((long)op->union_snap->n, (long)0, "point-only snap: no member opens");
+    TEST_ASSERT(op->union_snap->point != NULL &&
+                (u64)op->union_snap->point->qid.path == (u64)28,
+                "point-only snap retains the mount point (qid 28)");
+    TEST_ASSERT((op->flag & COPEN) == 0, "O_PATH handle is NOT opened");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    // Fd-relative resolution off the O_PATH base reaches member 1.
+    struct Spoor *q = stalk(&p, op, "only2", 5, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "O_PATH-relative only2");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)27, "O_PATH base sees member 1 (only2 qid 27)");
+    spoor_clunk(q);
+    q = stalk(&p, op, "shared", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "O_PATH-relative shared");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)23, "O_PATH base first-hit (shared qid 23)");
+    spoor_clunk(q);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no leak across O_PATH-relative resolves");
+
+    spoor_clunk(op);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+}
+
+// R2-F3: a zero-component resolution off a union base ("." / a bare-leaf parent)
+// keeps the union -- STALK_CREATE lands the MCREATE member, STALK_REMOVE the
+// uncrossed point, NOT member[0] (which would bypass MCREATE / drop the union).
+void test_stalk_union_zero_component(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *um1 = stalk(&p, root, "um1",  3, STALK_WALK,  0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(um1 && um2 && pt, "resolve um1 + um2 + umpt");
+    TEST_EXPECT_EQ(mount(p.territory, um1, pt, MBEFORE),          0, "um1 MBEFORE (no MCREATE)");
+    TEST_EXPECT_EQ(mount(p.territory, um2, pt, MAFTER | MCREATE), 0, "um2 MAFTER|MCREATE");
+
+    struct Spoor *ufd = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    TEST_ASSERT(ufd != NULL && ufd->union_snap != NULL, "open the union fd");
+
+    // "." off the union base, STALK_CREATE -> the MCREATE member (um2, qid 25),
+    // NOT member[0] (um1, qid 22). Pre-fix the zero-component clone of member[0]
+    // bypassed MCREATE.
+    struct Spoor *c = stalk(&p, ufd, ".", 1, STALK_CREATE, 0);
+    TEST_ASSERT(c != NULL, "zero-component STALK_CREATE off the union fd");
+    TEST_EXPECT_EQ((u64)c->qid.path, (u64)25,
+                   "zero-component create keeps the union -> MCREATE member um2 (25), not member[0]");
+    spoor_clunk(c);
+
+    // "." off the union base, STALK_REMOVE -> the uncrossed point (qid 28).
+    struct Spoor *r = stalk(&p, ufd, ".", 1, STALK_REMOVE, 0);
+    TEST_ASSERT(r != NULL, "zero-component STALK_REMOVE off the union fd");
+    TEST_EXPECT_EQ((u64)r->qid.path, (u64)28, "zero-component remove -> uncrossed point (28)");
+    struct Spoor *rm1 = mount_member_at(p.territory, r, 1, NULL);
+    TEST_ASSERT(rm1 != NULL, "still a union point");
+    spoor_clunk(rm1);
+    spoor_clunk(r);
+
+    spoor_clunk(ufd);
+    territory_unref(p.territory);
+    spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
     spoor_unref(root);
 }
 
@@ -2242,4 +3218,200 @@ void test_stalk_symlink_lifetime(void) {
                    "expansion leaks no Spoor and double-frees none");
 
     spoor_unref(root);
+}
+
+// =============================================================================
+// #50: SYS_OPEN_CREATE over the fixture (VIVARIUM.md section 6.24; scripture
+// b417b307). These drive sys_open_create_kpath_for_proc -- the kernel core
+// under the native handler AND the phenotype openat/mkdirat shells -- over the
+// REAL resolver: the cwd join, containment, X-search/A-2d, and the lexical
+// leaf rows. The EEXIST-exact + bounded-retry legs live in test_dev9p.c (the
+// loopback's errno channel is dev9p-private; the fixture's create-fail is the
+// generic -1 by design).
+// =============================================================================
+
+extern s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+                                          const char *kpath, u64 klen,
+                                          u64 omode_raw, u64 perm_raw);
+
+// One heap Proc with a Territory rooted in the fixture + a cwd. proc_free
+// tears the whole thing down (handles -> clunks; territory_unref -> root).
+static struct Proc *ocp_proc(const char *dot) {
+    struct Proc *p = proc_alloc();
+    if (!p) return NULL;
+    p->principal_id = PRINCIPAL_SYSTEM;   // fixnode owner: A-2d owner bits
+    p->primary_gid  = GID_SYSTEM;
+    p->caps         = CAP_NONE;
+    p->territory    = territory_alloc();
+    if (!p->territory) { p->state = PROC_STATE_ZOMBIE; proc_free(p); return NULL; }
+    p->territory->root_spoor = fix_root();   // territory owns this ref
+    if (dot && territory_setdot(p->territory, dot) != 0) {
+        p->state = PROC_STATE_ZOMBIE; proc_free(p); return NULL;
+    }
+    return p;
+}
+
+static void ocp_teardown(struct Proc *p) {
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// THE blocker-3 regression (VIVARIUM.md 6.20 Correction 1, third blocker): a
+// RELATIVE create through FROM_ROOT must land in the CWD, not the Territory
+// root. SYS_WALK_CREATE's identical-looking sentinel resolves at the ROOT
+// with no join -- the silent wrong-directory hazard the shared join helper
+// closes. Non-vacuous: re-pointing the create core at a joinless resolve
+// lands the file at qid 0 and this fails.
+void test_stalk_open_create_cwd_parity(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/a");
+    TEST_ASSERT(p != NULL, "proc + territory + cwd=/a");
+
+    s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            "newfile", 7, 1 /*OWRITE*/, 0644);
+    TEST_ASSERT(fd >= 0, "relative create succeeds");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)1,
+                   "create landed in the CWD (/a, qid 1), NOT the root (qid 0)");
+
+    // The same call with an ABSOLUTE path ignores the cwd (SYS_OPEN parity).
+    s64 fd2 = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                             "/rootfile", 9, 1, 0644);
+    TEST_ASSERT(fd2 >= 0, "absolute create succeeds");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)0,
+                   "absolute create landed at the root, cwd ignored");
+    ocp_teardown(p);
+}
+
+// The open-if-present half + create-RPC economy: the second O_CREAT (no EXCL)
+// of an existing leaf OPENS it -- no second create call, no second overlay
+// entry. Then OEXCL on the same leaf fails and creates nothing (exclusivity;
+// the -T_E_EXIST-exact assertion is the loopback test's).
+void test_stalk_open_create_open_if_present(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc(NULL);
+    TEST_ASSERT(p != NULL, "proc");
+
+    s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            "/a/deep/fresh", 13, 1, 0644);
+    TEST_ASSERT(fd >= 0, "create the absent leaf");
+    TEST_EXPECT_EQ((u64)g_fix_create_calls, (u64)1, "one create call");
+
+    s64 fd2 = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                             "/a/deep/fresh", 13, 1, 0644);
+    TEST_ASSERT(fd2 >= 0, "O_CREAT on the existing leaf OPENS it");
+    TEST_EXPECT_EQ((u64)g_fix_create_calls, (u64)1,
+                   "open-first: the present case pays NO create call");
+    TEST_EXPECT_EQ((u64)g_fixmade_n, (u64)1, "no duplicate node");
+
+    s64 fd3 = sys_open_create_kpath_for_proc(
+        p, SYS_WALK_OPEN_FROM_ROOT, "/a/deep/fresh", 13,
+        1 | SYS_WALK_OPEN_OEXCL, 0644);
+    TEST_ASSERT(fd3 < 0, "OEXCL on an existing leaf fails");
+    TEST_EXPECT_EQ((u64)g_fixmade_n, (u64)1, "OEXCL created nothing");
+    ocp_teardown(p);
+}
+
+// mkdir-by-path (DMDIR = the exclusive arm) + the created dir is REAL to the
+// resolver: a file then creates INSIDE it (X-search + QTDIR + A-2d all read
+// the overlay node's stat).
+void test_stalk_open_create_mkdir_and_nest(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc(NULL);
+    TEST_ASSERT(p != NULL, "proc");
+
+    s64 dfd = sys_open_create_kpath_for_proc(
+        p, SYS_WALK_OPEN_FROM_ROOT, "/a/subdir", 9,
+        0 /*OREAD*/, (u64)SYS_WALK_CREATE_DMDIR | 0755);
+    TEST_ASSERT(dfd >= 0, "mkdir /a/subdir");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)1, "dir created under /a");
+
+    s64 ffd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                             "/a/subdir/inner", 15, 1, 0600);
+    TEST_ASSERT(ffd >= 0, "create a file INSIDE the created dir");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)FIXMADE_BASE,
+                   "the new dir (first overlay qid) is the parent");
+
+    s64 again = sys_open_create_kpath_for_proc(
+        p, SYS_WALK_OPEN_FROM_ROOT, "/a/subdir", 9,
+        0, (u64)SYS_WALK_CREATE_DMDIR | 0755);
+    TEST_ASSERT(again < 0, "mkdir of an existing dir fails (create-only)");
+    ocp_teardown(p);
+}
+
+// The lexical leaf rows (Linux open_last_lookups / filename_create parity) +
+// the omode envelope. All answered BEFORE any resolution -- no overlay entry
+// may appear.
+void test_stalk_open_create_leaf_rows(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc(NULL);
+    TEST_ASSERT(p != NULL, "proc");
+    struct { const char *path; u64 len; u64 omode; u64 perm; s64 want; const char *why; } rows[] = {
+        { "/a/f/",  5, 1, 0644, -(s64)T_E_ISDIR, "trailing slash on a FILE create" },
+        { "/a/.",   4, 1, 0644, -(s64)T_E_ISDIR, "dot leaf on a FILE create" },
+        { "/a/..",  5, 1, 0644, -(s64)T_E_ISDIR, "dotdot leaf on a FILE create" },
+        { "/",      1, 1, 0644, -(s64)T_E_ISDIR, "root leaf on a FILE create" },
+        { "/a/.",   4, 0, (u64)SYS_WALK_CREATE_DMDIR | 0755, -(s64)T_E_EXIST,
+          "mkdir(.) answers EEXIST (Linux filename_create)" },
+        { "/",      1, 0, (u64)SYS_WALK_CREATE_DMDIR | 0755, -(s64)T_E_EXIST,
+          "mkdir(/) answers EEXIST" },
+        { "/a/x",   4, 1 | 0x80 /*OPATH*/, 0644, -(s64)T_E_INVAL,
+          "OPATH is rejected (a navigation handle cannot want creation)" },
+        { "/a/x",   4, 1 | 0x8 /*stray bit*/, 0644, -(s64)T_E_INVAL,
+          "an omode bit outside the mask is rejected" },
+    };
+    for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        s64 rc = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                                rows[i].path, rows[i].len,
+                                                rows[i].omode, rows[i].perm);
+        TEST_EXPECT_EQ((u64)rc, (u64)rows[i].want, rows[i].why);
+    }
+    TEST_EXPECT_EQ((u64)g_fixmade_n, (u64)0, "no row created anything");
+    TEST_EXPECT_EQ((u64)g_fix_create_calls, (u64)0, "no row reached create");
+    ocp_teardown(p);
+}
+
+// Containment (I-28, inherited from stalk) + the denial rows: '..' clamps at
+// the Territory root; a no-X parent answers ACCES; a missing prefix NOENT;
+// mkdir("d/") strips the slash (legal); NOFOLLOW on a final symlink answers
+// LOOP and creates nothing; a DANGLING final symlink + O_CREAT fails loudly
+// and creates nothing (the documented degradation: Linux would create the
+// TARGET; we refuse rather than silently creating the wrong thing).
+void test_stalk_open_create_containment_and_denials(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/");
+    TEST_ASSERT(p != NULL, "proc");
+
+    s64 fd = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            "../../esc", 9, 1, 0644);
+    TEST_ASSERT(fd >= 0, "'..' spam resolves (clamped), create succeeds");
+    TEST_EXPECT_EQ(g_fix_create_last_parent, (u64)0,
+                   "clamped at the Territory root -- no escape (I-28)");
+
+    s64 rc = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                            "/nox/inside", 11, 1, 0644);
+    TEST_EXPECT_EQ((u64)rc, (u64)(s64)-T_E_ACCES,
+                   "create into a no-X/no-W dir answers ACCES (A-2d)");
+
+    rc = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                        "/nosuch/f", 9, 1, 0644);
+    TEST_EXPECT_EQ((u64)rc, (u64)(s64)-T_E_NOENT,
+                   "a missing prefix answers NOENT");
+
+    s64 dfd = sys_open_create_kpath_for_proc(
+        p, SYS_WALK_OPEN_FROM_ROOT, "/a/dslash/", 10,
+        0, (u64)SYS_WALK_CREATE_DMDIR | 0755);
+    TEST_ASSERT(dfd >= 0, "mkdir('d/') strips the trailing slash (legal)");
+
+    int made_before = g_fixmade_n;
+    rc = sys_open_create_kpath_for_proc(
+        p, SYS_WALK_OPEN_FROM_ROOT, "/lnb", 4,
+        1 | SYS_WALK_OPEN_NOFOLLOW, 0644);
+    TEST_EXPECT_EQ((u64)rc, (u64)(s64)-T_E_LOOP,
+                   "NOFOLLOW + a final symlink answers LOOP, never creates");
+    rc = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                        "/lndead", 7, 1, 0644);
+    TEST_ASSERT(rc < 0, "O_CREAT through a DANGLING final symlink fails LOUDLY");
+    TEST_EXPECT_EQ((u64)g_fixmade_n, (u64)made_before,
+                   "neither symlink row created anything");
+    ocp_teardown(p);
 }

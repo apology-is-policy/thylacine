@@ -72,9 +72,29 @@ static inline void rendez_init(struct Rendez *r) {
 // EL0-return die-check (`el0_return_die_check`). The value the caller
 // ultimately returns to userspace is immaterial; a group-flagged Thread never
 // re-enters EL0. Callers that have nothing to unwind may ignore the return.
-#define SLEEP_OK     0   // cond satisfied -- normal return
-#define SLEEP_INTR   1   // group-terminate death-interrupt -- caller unwinds
+//
+// SLEEP_NOTEINTR (item 11, ARCH §8.8.3) is the NON-death sibling: the wait was
+// interrupted by a deliverable CAUGHT note (a handler is installed, or the Proc
+// self-manages its notes fd), so the Thread must unwind BUT LIVES -- it returns
+// to userspace and CONTINUES. The caller returns -T_E_INTR and the queued note
+// is delivered at the EL0-return tail. Because the Thread continues, the unwind
+// on SLEEP_NOTEINTR must be FULLY EINTR-safe (no half-held lock, no leaked
+// ref/fid, no half-applied side effect a retry would double) -- stronger than
+// the death-unwind's obligation, which is why it is a DISTINCT code each site
+// opts into rather than a widening of SLEEP_INTR. A site that has not opted in
+// never receives it (the sleep primitives gate the caught-note check).
+#define SLEEP_OK        0   // cond satisfied -- normal return
+#define SLEEP_INTR      1   // group-terminate death-interrupt -- caller unwinds + dies
+#define SLEEP_NOTEINTR  2   // caught-note interrupt (item 11) -- caller unwinds + returns -EINTR, LIVES
 int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg);
+
+// item 11 (ARCH §8.8.3): the caught-note-interruptible variant of sleep().
+// Identical to sleep() except it ALSO returns SLEEP_NOTEINTR when a deliverable
+// caught note interrupts the wait (a handler is installed / the Proc self-
+// manages its notes fd). Death is still checked first (SLEEP_INTR wins). Only a
+// site whose unwind is FULLY EINTR-safe may call this; it maps SLEEP_NOTEINTR
+// to -T_E_INTR. sleep() (above) never returns SLEEP_NOTEINTR.
+int sleep_noteintr(struct Rendez *r, int (*cond)(void *arg), void *arg);
 
 // Wake the (at most one) thread sleeping on r. If no thread is
 // sleeping, wakeup is a no-op. Returns 1 if a waiter was woken,
@@ -102,6 +122,11 @@ int wakeup(struct Rendez *r);
                                 //   Thread dies at its EL0-return die-check.
                                 //   Distinct from AWOKEN/TIMEDOUT so a caller's
                                 //   `== TSLEEP_TIMEDOUT` test never mistakes it.
+#define TSLEEP_NOTEINTR (-2)    // caught-note interrupt (item 11, ARCH §8.8.3):
+                                //   the tsleep twin of SLEEP_NOTEINTR -- caller
+                                //   unwinds + returns -T_E_INTR, the Thread
+                                //   LIVES. Distinct from _INTR/_TIMEDOUT so a
+                                //   caller can route it to EINTR, not death.
 
 // sleep, bounded by an absolute deadline. Identical to sleep() except
 // the wait ALSO ends when monotonic time (timer_now_ns) reaches
@@ -129,5 +154,11 @@ int wakeup(struct Rendez *r);
 // quick. Modeled by specs/tsleep.tla.
 int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
            u64 deadline_ns);
+
+// item 11 (ARCH §8.8.3): the caught-note-interruptible variant of tsleep().
+// Adds TSLEEP_NOTEINTR to tsleep()'s outcomes; same opt-in/EINTR-safety
+// contract as sleep_noteintr(). tsleep() never returns TSLEEP_NOTEINTR.
+int tsleep_noteintr(struct Rendez *r, int (*cond)(void *arg), void *arg,
+                    u64 deadline_ns);
 
 #endif // THYLACINE_RENDEZ_H

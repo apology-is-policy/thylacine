@@ -21,8 +21,13 @@
 //
 // This catches a RENUMBER of the current top. It cannot catch a NEW higher
 // number by itself, which is why the rows that lean on the ceiling assert
-// against VIV_NATIVE_CEILING individually below.
-_Static_assert(VIV_NATIVE_CEILING == SYS_RFORK,
+// against VIV_NATIVE_CEILING individually below. The very drift this admits it
+// cannot catch DID happen: the ceiling sat at SYS_RFORK (105) while the Warp arc
+// landed SYS_DMA_CREATE_GPU_BO (106) and SYS_BURROW_FROM_HOSTMEM (107) above it,
+// and this assert -- pinned to SYS_RFORK's identity -- passed the whole time. So
+// it is re-pinned to the current top; the lesson is that "add a syscall" must
+// include "move the ceiling", which no static_assert can force on a NEW number.
+_Static_assert(VIV_NATIVE_CEILING == SYS_OPEN_CREATE,
                "VIV_NATIVE_CEILING must be the highest ASSIGNED native syscall "
                "number. Adding one above it silently voids the collision "
                "argument for every vivarium row at or below the new value -- "
@@ -43,6 +48,39 @@ _Static_assert(VIV_LINUX_EXECVE > VIV_NATIVE_CEILING,
                "execve's collision argument is the ceiling one (LINEAGE L-6a)");
 _Static_assert(VIV_LINUX_WAIT4 > VIV_NATIVE_CEILING,
                "wait4's collision argument is the ceiling one (LINEAGE L-6b)");
+_Static_assert(VIV_LINUX_CLOCK_GETTIME > VIV_NATIVE_CEILING,
+               "clock_gettime's collision argument is the ceiling one (time family)");
+_Static_assert(VIV_LINUX_GETTIMEOFDAY > VIV_NATIVE_CEILING,
+               "gettimeofday's collision argument is the ceiling one (time family)");
+_Static_assert(VIV_LINUX_GETSOCKOPT > VIV_NATIVE_CEILING,
+               "getsockopt's collision argument is the ceiling one (SO_ERROR row)");
+_Static_assert(VIV_LINUX_SENDTO > VIV_NATIVE_CEILING,
+               "sendto's collision argument is the ceiling one (send() shape)");
+_Static_assert(VIV_LINUX_RECVFROM > VIV_NATIVE_CEILING,
+               "recvfrom's collision argument is the ceiling one (recv() shape)");
+_Static_assert(VIV_LINUX_RENAMEAT2 > VIV_NATIVE_CEILING,
+               "renameat2's collision argument is the ceiling one (#50; its "
+               "three sub-ceiling siblings 34/35/38 carry per-number "
+               "paragraphs in vivarium.h instead)");
+_Static_assert(VIV_LINUX_GETEUID > VIV_NATIVE_CEILING,
+               "geteuid's collision argument is the ceiling one (git chunk; "
+               "faccessat 48 is its sub-ceiling sibling with a per-number "
+               "paragraph in vivarium.h instead)");
+_Static_assert(VIV_LINUX_GETEGID > VIV_NATIVE_CEILING,
+               "getegid's collision argument is the ceiling one (git chunk)");
+_Static_assert(VIV_LINUX_GETRANDOM > VIV_NATIVE_CEILING,
+               "getrandom's collision argument is the ceiling one (git chunk)");
+_Static_assert(VIV_LINUX_GETTID > VIV_NATIVE_CEILING,
+               "gettid's collision argument is the ceiling one (N-3). Its "
+               "threading siblings exit(93)/futex(98) are SUB-ceiling and carry "
+               "per-number paragraphs at their rows instead");
+// C2-k2: the session/pgrp family. All four sit ABOVE the native ceiling, so the
+// getpgid/getsid renumbers cannot mis-dispatch onto a native number and the
+// setsid/setpgid shells face no sub-ceiling collision argument.
+_Static_assert(VIV_LINUX_SETSID  > VIV_NATIVE_CEILING, "setsid above the ceiling");
+_Static_assert(VIV_LINUX_SETPGID > VIV_NATIVE_CEILING, "setpgid above the ceiling");
+_Static_assert(VIV_LINUX_GETPGID > VIV_NATIVE_CEILING, "getpgid above the ceiling");
+_Static_assert(VIV_LINUX_GETSID  > VIV_NATIVE_CEILING, "getsid above the ceiling");
 
 // A T1 row: a Linux number, the Thylacine number it renumbers to, and the arity
 // that must carry across unchanged. `nargs` is not used to copy (the whole
@@ -151,7 +189,36 @@ static const struct viv_row g_viv_t1[] = {
     { VIV_LINUX_WRITE,      SYS_WRITE,      3 },
     { VIV_LINUX_CLOSE,      SYS_CLOSE,      1 },
     { VIV_LINUX_LSEEK,      SYS_LSEEK,      3 },
+    // pread64/pwrite64 (the git 6.27 clone arm): identical (fd, buf, count,
+    // offset) shape to SYS_PREAD/SYS_PWRITE, and the native handlers validate
+    // the buffer + gate on off>=0 / RIGHT_* exactly as read/write do -- so a
+    // bare renumber is correct where read/write's is. git's index-pack reads
+    // the cloned pack via pread; without this it FORWARDs to ENOSYS. The
+    // sub-ceiling collision with the LOOM pair is the read/write renumbers'
+    // damage-envelope argument (see vivarium.h).
+    { VIV_LINUX_PREAD64,    SYS_PREAD,      4 },
+    { VIV_LINUX_PWRITE64,   SYS_PWRITE,     4 },
     { VIV_LINUX_EXIT_GROUP, SYS_EXIT_GROUP, 1 },
+
+    // N-3: a musl THREAD (not the process) exits via SYS_exit(93), always with
+    // status 0 (pthread_create.c: `for(;;) __syscall(SYS_exit,0)`), NEVER
+    // exit_group. It renumbers to SYS_THREAD_EXIT, whose handler runs
+    // thread_exit_self: the LAST live Thread of the Proc becomes the zombie
+    // (status 0/"ok"), any earlier one just retires (THREAD_EXITING + sched),
+    // and the CLONE_CHILD_CLEARTID handoff (thread_clear_child_tid_handoff) fires
+    // at that retirement to wake a joiner. The status word is dropped, which is
+    // exactly right: musl threads pass 0, and process exit-status travels on
+    // exit_group above. SYS_THREAD_EXIT takes no args so nargs=0.
+    //
+    // SUB-CEILING COLLISION (93 == native SYS_PTY_REGISTER): harmless by the same
+    // structure as the read/write and pread/pwrite renumbers. A PHENO_LINUX Proc
+    // reaches the native switch ONLY through this table, which rewrites regs[8]
+    // to SYS_THREAD_EXIT (42) BEFORE the native dispatch sees it, so nr 93 never
+    // arrives as PTY_REGISTER for a phenotype caller; a native Proc never enters
+    // viv_linux_dispatch, so its 93 stays PTY_REGISTER. The two readings never
+    // meet. (Before this row, 93 FORWARDed to a clean ENOSYS -- no collision then
+    // either, since FORWARD returns -ENOSYS without touching the native switch.)
+    { VIV_LINUX_EXIT,       SYS_THREAD_EXIT, 0 },
 
     // #150. getpid is the ONLY member of the startup batch that is a clean
     // renumber, and stating why the others are not is the point of listing it
@@ -166,6 +233,12 @@ static const struct viv_row g_viv_t1[] = {
     // band a Linux caller checks), and no error path at all in the native
     // handler beyond the current_thread() sanity check.
     { VIV_LINUX_GETPID,     SYS_GETPID,     0 },
+    // C2-k2: getpgid/getsid are PURE renumbers -- the native cores return the
+    // pgid/sid (a plain id < 2^32, never in the errno band) or -T_E_SRCH, which
+    // IS Linux ESRCH; pid 0 = self in both. No errno remap is needed, unlike
+    // their setsid/setpgid siblings (which are TIER2 shells for the EPERM remap).
+    { VIV_LINUX_GETPGID,    SYS_GETPGID,    1 },
+    { VIV_LINUX_GETSID,     SYS_GETSID,     1 },
 };
 
 #define VIV_T1_COUNT ((u32)(sizeof(g_viv_t1) / sizeof(g_viv_t1[0])))
@@ -188,21 +261,39 @@ static const struct viv_reject g_viv_rejects[] = {
     // handed to the next fd-creating call, so a later connect() writes its dial
     // verb to a STRANGER'S connection -- the sharpest bug this family can have.
     //
-    // TWO of them are now rows, and they pay the obligation in DIFFERENT PLACES
-    // (#157). `close` pays it in the ENTRY HOOK in viv_linux_dispatch, which is
-    // correct there because a close whose fd carries an entry always proceeds.
-    // `dup3` pays it INSIDE ITS SHELL, after every refusal and immediately
-    // before the install, because a dup3 can be REFUSED (bad flags, old == new,
-    // bad old) while `new` is a live socket -- an unconditional entry-time drop
-    // would destroy the guest's socket state on a call that failed.
+    // TWO of them are rows that pay the obligation in DIFFERENT PLACES (#157),
+    // and execve pays it a THIRD way (6b). `close` pays it in the ENTRY HOOK in
+    // viv_linux_dispatch, which is correct there because a close whose fd carries
+    // an entry always proceeds. `dup3` pays it INSIDE ITS SHELL, after every
+    // refusal and immediately before the install, because a dup3 can be REFUSED
+    // (bad flags, old == new, bad old) while `new` is a live socket -- an
+    // unconditional entry-time drop would destroy the guest's socket state on a
+    // call that failed. `execve` pays it in sys_execve_core via
+    // viv_socktab_drop_cloexec, after the commit and before handle_close_on_exec:
+    // the close-on-exec sweep frees cloexec fds through the handle_close
+    // PRIMITIVE, which never enters viv_linux_dispatch and so never runs the hook.
     //
     // So the rule for a future promotion is not "extend the hook" but "pay it
-    // in the arm your refusal structure demands". `dup` and `close_range` still
-    // owe it, and each still looks like a trivial renumber that would silently
-    // reintroduce the bug.
-    { VIV_LINUX_DUP,         VIV_FORWARD },
+    // in the arm your refusal structure demands". `close_range` still owes it,
+    // and still looks like a trivial renumber that would silently reintroduce
+    // the bug.
+    //
+    // `dup` (git-remote-https): git's transport-helper dup()s the helper's
+    // output fd to wrap it in a FILE*, so the external-helper transports need
+    // it -- FORWARD returned ENOSYS ("can't dup helper output fd"). It is an
+    // fd-CREATING row, not fd-freeing (like pipe2 below), so it owes no socktab
+    // DROP; it owes the ALIAS (the socktab-across-images vote): a socket source's
+    // row is copied onto the new number, so the socket path recognizes it. It
+    // DECLINED a socket source (ENOSYS) before that vote. Its shell arm lives
+    // beside dup3's.
+    { VIV_LINUX_DUP,         VIV_TIER2   },  // git-remote-https helper pipe
     { VIV_LINUX_DUP3,        VIV_TIER2   },  // #157: vivarium_dup3_decide
     { VIV_LINUX_CLOSE_RANGE, VIV_FORWARD },
+    // C2-k1b: terminal control. The shell (viv_ioctl) classifies via
+    // vivarium_ioctl_decide, serves TC*/TIOC* on a cons fd off g_cons, and
+    // answers ENOTTY for a non-tty fd, a pts fd (ldisc reach deferred, C2-k1c),
+    // or an unserved request -- so isatty()/raw-mode work on the console.
+    { VIV_LINUX_IOCTL,       VIV_TIER2   },  // C2-k1b: viv_ioctl
 
     // pipe2 is an fd-CREATING row, not an fd-freeing one, so it needs no hook
     // extension: it puts TWO FRESH indices into the table and frees nothing. It
@@ -212,6 +303,29 @@ static const struct viv_reject g_viv_rejects[] = {
     // socktab entry attached, which holds while close is the only freeing row.)
     { VIV_LINUX_PIPE2,      VIV_TIER2   },  // #155: vivarium_pipe2_decide
     { VIV_LINUX_OPENAT,     VIV_TIER2   },  // V-2b: vivarium_openat_decide/_build
+                                            //  + #50: the O_CREAT domain
+                                            //    (vivarium_openat_create_decide)
+
+    // The path-mutation family (#50; VIVARIUM.md section 6.24) -- the rows
+    // git's writes stand on (init alone needs all four: object dirs, the
+    // config lockfile, its unlink, its rename-into-place). Each shell splits
+    // the path lexically, stalks the parent, and runs the SAME extracted
+    // native mechanics (spoor_create_install / spoor_unlink_in_dir /
+    // spoor_rename_in_dirs) the fd-based syscalls run -- I-43 by
+    // construction. 34/35/38 sit below the native ceiling and carry
+    // per-number collision paragraphs in vivarium.h.
+    { VIV_LINUX_MKDIRAT,    VIV_TIER2   },  // #50: vivarium_mkdirat_decide
+    { VIV_LINUX_UNLINKAT,   VIV_TIER2   },  // #50: vivarium_unlinkat_decide
+    { VIV_LINUX_RENAMEAT,   VIV_TIER2   },  // #50: vivarium_renameat_decide
+    { VIV_LINUX_RENAMEAT2,  VIV_TIER2   },  // #50: same decide, flags==0 only
+    // The directory-read + durability rows (section 6.25). getdents64 is the
+    // 9P-dirent -> linux_dirent64 re-encode over the SAME spoor_readdir_run
+    // the native SYS_READDIR runs; fsync/fdatasync delegate to the native
+    // fsync core with an explicit datasync 0/1 (never a stale register).
+    // 61/82/83 sit below the ceiling; damage-envelope paragraphs in vivarium.h.
+    { VIV_LINUX_GETDENTS64, VIV_TIER2   },  // getdents64(fd, dirp, count)
+    { VIV_LINUX_FSYNC,      VIV_TIER2   },  // fsync(fd)     -> datasync=0
+    { VIV_LINUX_FDATASYNC,  VIV_TIER2   },  // fdatasync(fd) -> datasync=1
     { VIV_LINUX_FSTAT,      VIV_TIER2   },  // V-2b: vivarium_stat_to_linux
     { VIV_LINUX_NEWFSTATAT, VIV_TIER2   },  // V-2c: vivarium_fstatat_decide
     { VIV_LINUX_MMAP,       VIV_TIER2   },  // V-2d: vivarium_mmap_decide
@@ -276,15 +390,25 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_SHUTDOWN,    VIV_FORWARD },
     { VIV_LINUX_GETSOCKNAME, VIV_FORWARD },
     { VIV_LINUX_GETPEERNAME, VIV_FORWARD },
-    { VIV_LINUX_SENDTO,      VIV_FORWARD },
-    { VIV_LINUX_RECVFROM,    VIV_FORWARD },
+    // sendto/recvfrom left the FORWARD block above (curl-demo chunk): aarch64
+    // has NO plain send/recv syscall -- musl's send() IS sendto(fd, buf, len,
+    // flags, NULL, 0) and recv() IS recvfrom(..., NULL, NULL) -- so every
+    // Linux binary that sends on a socket via send() (curl does; busybox wget
+    // happens to use write()) reaches these numbers. The T2 shells serve
+    // EXACTLY the connected-socket send()/recv() shape by delegating to the
+    // native write/read handlers (the same data path a T1-renumbered
+    // read/write takes), and decline everything else -- the with-address
+    // datagram shape, MSG_PEEK, MSG_DONTWAIT -- back to ENOSYS. The full
+    // per-argument argument: vivarium_sendto_decide / vivarium_recvfrom_decide.
+    { VIV_LINUX_SENDTO,      VIV_TIER2   },
+    { VIV_LINUX_RECVFROM,    VIV_TIER2   },
     //
     // Live decisions, not deferrals:
     //   socketpair    — AF_UNIX only in practice, and /srv has no
     //                   mint-a-connected-pair operation; a guest that wanted a
     //                   pipe should use pipe2.
-    //   setsockopt /  — /net exposes no option surface at all. Answering
-    //   getsockopt      "success" to a TCP_NODELAY the stack ignores is the
+    //   setsockopt    — /net exposes no option surface at all. Answering
+    //                   "success" to a TCP_NODELAY the stack ignores is the
     //                   silent lie this tier exists to prevent; ENOSYS lets the
     //                   guest's own fallback run. (Linux libcs routinely
     //                   tolerate a failing setsockopt for tuning options.)
@@ -292,9 +416,24 @@ static const struct viv_reject g_viv_rejects[] = {
     //   recvmsg         passing, which is I-4's domain, not a socket detail).
     { VIV_LINUX_SOCKETPAIR,  VIV_ENOSYS },
     { VIV_LINUX_SETSOCKOPT,  VIV_ENOSYS },
-    { VIV_LINUX_GETSOCKOPT,  VIV_ENOSYS },
+    // getsockopt LEFT the blanket refusal above (curl-demo chunk): its
+    // (SOL_SOCKET, SO_ERROR) point is a READ of connection state, not a tuning
+    // knob -- and refusing it turns every libcurl consumer's SUCCEEDED connect
+    // into a reported failure (verifyconnect treats a getsockopt error as a
+    // connect error). The T2 shell serves exactly that point and declines the
+    // rest to ENOSYS, so every other option behaves as it did under the
+    // blanket row. The full honesty argument: vivarium_getsockopt_decide's
+    // header comment.
+    { VIV_LINUX_GETSOCKOPT,  VIV_TIER2  },
+    // sendmsg LEFT at ENOSYS: musl's DNS resolver uses it only for the TCP
+    // fallback (start_tcp, on a truncated UDP reply), which is off the git-clone
+    // happy path (A records fit one UDP datagram). recvmsg is SERVED (N-2b): the
+    // T2 shell reads one datagram + synthesizes msg_name from the recorded
+    // remote, which is how res_msend RECEIVES every UDP reply. Control messages
+    // (SCM_RIGHTS fd-passing, I-4's domain) are NOT served -- msg_control is
+    // reported empty; a cmsg-bearing recvmsg gets no ancillary data, not a lie.
     { VIV_LINUX_SENDMSG,     VIV_ENOSYS },
-    { VIV_LINUX_RECVMSG,     VIV_ENOSYS },
+    { VIV_LINUX_RECVMSG,     VIV_TIER2  },  // N-2b: viv_sock_recvmsg
 
     // Readiness (V-5c, section 5.5.4). aarch64 has no plain poll/select, so
     // these two carry the whole family -- musl's poll() and select() are
@@ -306,14 +445,34 @@ static const struct viv_reject g_viv_rejects[] = {
     // the same commit under this file's own rule -- a VIV_TIER2 row whose shell
     // is missing declares a capability the code does not have.
     //
-    { VIV_LINUX_CLONE,       VIV_TIER2   },  // L-3d: vivarium_clone_decide
+    { VIV_LINUX_CLONE,       VIV_TIER2   },  // L-3d + N-3: vivarium_clone_decide
     { VIV_LINUX_EXECVE,      VIV_TIER2   },  // L-6a: viv_execve
     { VIV_LINUX_WAIT4,       VIV_TIER2   },  // L-6b: vivarium_wait4_decide
+    { VIV_LINUX_GETTID,      VIV_TIER2   },  // N-3: current_thread()->tid
+    // C2-k2: setsid/setpgid are shells (not renumbers) SOLELY to remap the native
+    // T_E_ACCES "EPERM contour" to the Linux EPERM a guest keys on; getpgid/getsid
+    // are pure renumbers in g_viv_t1 above (no remap).
+    { VIV_LINUX_SETSID,      VIV_TIER2   },  // C2-k2: proc_setsid + ACCES->PERM
+    { VIV_LINUX_SETPGID,     VIV_TIER2   },  // C2-k2: proc_setpgid + ACCES->PERM
+
+    // N-3: futex(uaddr, op, val, timeout/val2, uaddr2, val3) -> torpor. A T2
+    // shell (viv_futex + vivarium_futex_decide) for the WAIT/WAKE/REQUEUE subset.
+    //
+    // SUB-CEILING COLLISION (98 == native SYS_TTY_CONT): harmless by the T2
+    // structure, the same way exit(93) is harmless as a T1. A PHENO_LINUX Proc
+    // reaches viv_tier2 for 98, whose shell returns an s64 into regs[0] and
+    // `return false` -- the native switch is NEVER reached, so 98 never arrives
+    // as TTY_CONT for a phenotype caller; a native Proc never enters viv
+    // dispatch. (Before this row, 98 FORWARDed to a clean ENOSYS, no collision
+    // then either.) It is therefore a per-number paragraph, not a ceiling
+    // static_assert -- 98 < VIV_NATIVE_CEILING, so an assert would fail the build.
+    { VIV_LINUX_FUTEX,       VIV_TIER2   },  // N-3: viv_futex -> torpor
 
     // The startup batch (#150, LINEAGE L-6c). Every row here was MEASURED --
     // this is the census a running busybox printed, not a guess at what a libc
     // might want -- and each is a shell rather than a renumber for a reason
     // named at its declaration in vivarium.h.
+    { VIV_LINUX_READV,           VIV_TIER2 },  // N-5: writev's twin, same iovec judgement (git protocol-v2)
     { VIV_LINUX_WRITEV,          VIV_TIER2 },  // the arity rule's sharpest case
     { VIV_LINUX_GETCWD,          VIV_TIER2 },  // +1 on the length, and ERANGE
     { VIV_LINUX_GETPPID,         VIV_TIER2 },  // no native twin exists
@@ -342,6 +501,27 @@ static const struct viv_reject g_viv_rejects[] = {
     // renumber would read `10` as a set of capability bits and hand back a
     // descriptor with arbitrary authority -- silently, for a legal input.
     { VIV_LINUX_FCNTL,           VIV_TIER2 },
+
+    // The time family. TIER-2 rather than a renumber for two different reasons,
+    // one per row. clock_gettime's timespec IS byte-identical to the native one,
+    // so it LOOKS like a T1 renumber -- but its clk_id domain is not total (Linux
+    // has ids Thylacine cannot serve), so it drops to T2 (the lseek precedent)
+    // and the shell maps the id. gettimeofday has no native counterpart at all
+    // and its timeval carries MICROseconds where the native clock speaks
+    // nanoseconds -- a real struct conversion. Both shells land in this commit.
+    { VIV_LINUX_CLOCK_GETTIME,   VIV_TIER2 },  // clk_id map -> SYS_CLOCK_GETTIME
+    { VIV_LINUX_GETTIMEOFDAY,    VIV_TIER2 },  // realtime ns -> timeval {sec,usec}
+
+    // The git chunk (VIVARIUM.md section 6.26). faccessat is a real translation
+    // (stat + perm_check); geteuid/getegid are the one-principal twins of
+    // getuid/getgid.
+    { VIV_LINUX_FACCESSAT,       VIV_TIER2 },  // stat + perm_check(mode&7)
+    { VIV_LINUX_CHDIR,           VIV_TIER2 },  // measure len -> SYS_CHDIR
+    { VIV_LINUX_FCHMODAT,        VIV_TIER2 },  // open O_PATH -> wstat(MODE)
+    { VIV_LINUX_READLINKAT,      VIV_TIER2 },  // NOFOLLOW stalk -> .readlink
+    { VIV_LINUX_GETEUID,         VIV_TIER2 },  // == getuid (one principal)
+    { VIV_LINUX_GETEGID,         VIV_TIER2 },  // == getgid (one principal)
+    { VIV_LINUX_GETRANDOM,       VIV_TIER2 },  // -> SYS_GETRANDOM (CAP-gated)
 };
 
 #define VIV_REJECT_COUNT ((u32)(sizeof(g_viv_rejects) / sizeof(g_viv_rejects[0])))
@@ -390,6 +570,7 @@ enum {
     VIV_OMODE_WRITE  = 1u,
     VIV_OMODE_RDWR   = 2u,
     VIV_OMODE_TRUNC  = 0x10u,   // == T_OTRUNC
+    VIV_OMODE_APPEND = 0x40u,   // == SYS_WALK_OPEN_OAPPEND (the git 6.27 arm)
 };
 
 // The `openat` flags whose effect SYS_OPEN can honour EXACTLY. Every bit outside
@@ -438,8 +619,8 @@ enum {
 //               land, with nothing to catch it"): the moment arrived, and the
 //               flag rode the same chunk that landed the feature.
 #define VIV_OPENAT_ADMITTED                                                  \
-    ((u32)(VIV_O_ACCMODE | VIV_O_TRUNC | VIV_O_PATH | VIV_O_NOFOLLOW |       \
-           VIV_O_CLOEXEC | VIV_O_NOCTTY | VIV_O_LARGEFILE))
+    ((u32)(VIV_O_ACCMODE | VIV_O_TRUNC | VIV_O_APPEND | VIV_O_PATH |         \
+           VIV_O_NOFOLLOW | VIV_O_CLOEXEC | VIV_O_NOCTTY | VIV_O_LARGEFILE))
 
 // Why each notable rejected flag is rejected -- i.e. why ignoring it would be a
 // SILENT WRONG ANSWER rather than a no-op:
@@ -466,14 +647,36 @@ enum {
 //                (syscall.c:2870). So the "obvious" AT_FDCWD mapping would create
 //                the file in the WRONG DIRECTORY whenever cwd != "/" -- wrong for
 //                a legal class of inputs with no error, which is exactly the
-//                munmap failure this tier exists to refuse. Task #50 tracks the
-//                userspace half; the kernel half wants a create-by-PATH syscall
-//                that does not exist.
+//                munmap failure this tier exists to refuse.
+//                #50 BUILT the resolution (VIVARIUM.md section 6.24): the
+//                verdict above stands against ROUTING to SYS_WALK_CREATE; the
+//                shell now routes O_CREAT-without-O_PATH to
+//                vivarium_openat_create_decide + SYS_OPEN_CREATE's kernel
+//                core, whose cwd join is SYS_OPEN's own helper (blocker 3
+//                closed structurally) and whose create-else-open composition
+//                is kernel-side (blockers 1+2 dissolved the Plan 9 way).
+//                O_CREAT WITH O_PATH stays on the plain decide, which STRIPS
+//                it (Linux's O_PATH ignores O_CREAT) -- served exactly, not
+//                declined; the in-body arm below carries the contour.
 //   O_DIRECTORY  Requires the target BE a directory (Linux: ENOTDIR otherwise).
 //                SYS_OPEN has no such check, so ignoring it turns an error into
 //                a successful open of a regular file. The worst kind of wrong.
-//   O_APPEND     Every write must seek to end. SYS_OPEN's omode mask has no
-//                append bit; ignoring it silently corrupts a log writer.
+//                RETIRED as a reject at the getdents64 chunk (the O_NOFOLLOW
+//                pattern: the blocker was real until the mechanism landed):
+//                the decide now TRANSLATES it as the dir_required output and
+//                the SHELL enforces the postcondition on the minted handle's
+//                own qid -- the error Linux promises, produced at the layer
+//                that can see the answer. The CREATE arm still declines it
+//                (not in its admitted set; open(O_CREAT|O_DIRECTORY) stays
+//                census-visible).
+//   O_APPEND     ADMITTED AND TRANSLATED since the git chunk (VIVARIUM 6.27):
+//                maps 1:1 onto SYS_WALK_OPEN_OAPPEND, which dev9p forwards to
+//                the 9P Tlopen as O_APPEND so Stratum positions each write at
+//                EOF server-side. The kernel gains no append MODE (its write
+//                path is unchanged; the FS does the seek-to-end, the append
+//                face of "the filesystem is the OS"). This closes the V-2b trap
+//                the reject named ("silently corrupts a log writer"): the
+//                mechanism landed, so the flag rode the chunk that added it.
 //   O_EXCL, O_NONBLOCK, O_SYNC/O_DSYNC, O_DIRECT, O_NOATIME, O_TMPFILE, O_ASYNC
 //                each carry semantics with no SYS_OPEN counterpart.
 //                (O_NOFOLLOW moved to the ADMITTED list at DISTRO D-1 -- the
@@ -481,9 +684,14 @@ enum {
 
 enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
                                         u64 *start_fd_out, u32 *omode_out,
-                                        bool *cloexec_out) {
+                                        bool *cloexec_out,
+                                        bool *dir_required_out) {
     // Fail toward the supervisor, never toward a dispatch (cf. vivarium_translate).
-    if (!start_fd_out || !omode_out || !cloexec_out) return VIV_FORWARD;
+    if (!start_fd_out || !omode_out || !cloexec_out ||
+        !dir_required_out)                           return VIV_FORWARD;
+    bool dirreq = false;   // written to *dir_required_out only on TRANSLATED
+                           // (a forwarded call leaves every output alone --
+                           // the contract the domain test enforces per-output)
 
     // Linux passes `dirfd` and `flags` as `int`, so ONLY the low 32 bits are
     // significant. This matters concretely for AT_FDCWD: a caller may leave x0
@@ -517,6 +725,32 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
     // family passes a real fd.
     if (dfd != VIV_AT_FDCWD) return VIV_FORWARD;
 
+    // #50 close (SA-1): Linux's O_PATH IGNORES O_CREAT (open(2): an O_PATH
+    // open honours only CLOEXEC/DIRECTORY/NOFOLLOW), so O_CREAT composed WITH
+    // O_PATH is served HERE by stripping it -- the exact contour, and the
+    // reason the shell's routing sends only O_CREAT-without-O_PATH to the
+    // create decide. O_CREAT WITHOUT O_PATH remains out of THIS decide's
+    // domain: a direct call answers FORWARD, never a silent ENOENT-shaped
+    // ignore (the V-2b hazard the rejected-flag block below narrates) -- the
+    // decide owns its whole domain without leaning on the shell's routing.
+    if (fl & VIV_O_CREAT) {
+        if (!(fl & VIV_O_PATH)) return VIV_FORWARD;
+        fl &= ~(u32)VIV_O_CREAT;
+    }
+
+    // getdents64 chunk: O_DIRECTORY translates as a SHELL-ENFORCED
+    // postcondition, not an ignore (ignoring it would turn Linux's ENOTDIR
+    // into a successful open of a regular file -- the exact V-2b hazard).
+    // The decide reports the requirement; the shell checks the minted
+    // handle's own qid (QTDIR) and answers ENOTDIR on a miss. One of the
+    // three flags Linux's O_PATH does NOT ignore, so it rides both arms.
+    // musl opendir (open O_RDONLY|O_CLOEXEC|O_DIRECTORY) is the forcing
+    // caller -- without this arm no phenotype ever reaches getdents64.
+    if (fl & VIV_O_DIRECTORY) {
+        dirreq = true;
+        fl &= ~(u32)VIV_O_DIRECTORY;
+    }
+
     if (fl & ~VIV_OPENAT_ADMITTED) return VIV_FORWARD;
 
     u32 omode;
@@ -538,7 +772,24 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
             // §4 forbids the table from minting new ones.
             return VIV_FORWARD;
         }
-        if (fl & VIV_O_TRUNC) omode |= VIV_OMODE_TRUNC;
+        // O_TRUNC is dropped when O_DIRECTORY is also set: a directory is never
+        // truncated on Linux, and O_DIRECTORY|O_TRUNC on a REGULAR file is
+        // ENOTDIR *before* any truncation. Carrying TRUNC here would truncate
+        // the regular file's contents and only THEN the shell's QTDIR
+        // postcondition answers ENOTDIR -- silent data loss the Linux row never
+        // incurs. Clearing it makes the open non-destructive so the ENOTDIR (or
+        // the kernel's own EISDIR on a write-open of a dir) fires cleanly.
+        if ((fl & VIV_O_TRUNC) && !dirreq) omode |= VIV_OMODE_TRUNC;
+        // O_APPEND (the git 6.27 arm) rides the same non-O_PATH arm as O_TRUNC:
+        // it is a WRITE modifier (an O_PATH handle cannot write, and Linux's
+        // O_PATH ignores O_APPEND), and it maps 1:1 onto SYS_WALK_OPEN_OAPPEND
+        // -- dev9p forwards it to the 9P Tlopen so Stratum positions each write
+        // at EOF. Dropped under O_DIRECTORY for the SAME structural reason but a
+        // DIFFERENT hazard than TRUNC: a directory is opened read-only, so
+        // append is simply vacuous there (no data-loss risk -- appending to a
+        // dir just fails the write); the drop keeps a nonsensical flag off the
+        // dir's Tlopen.
+        if ((fl & VIV_O_APPEND) && !dirreq) omode |= VIV_OMODE_APPEND;
     }
     // D-1: O_NOFOLLOW rides BOTH arms -- it is one of the three flags Linux's
     // O_PATH does NOT ignore (the #151 comment below lists them), and
@@ -565,6 +816,132 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
     // ignore, alongside O_DIRECTORY and O_NOFOLLOW), and the flag belongs to the
     // descriptor, which an O_PATH open produces like any other.
     *cloexec_out  = (fl & VIV_O_CLOEXEC) != 0;
+    // getdents64 chunk: the O_DIRECTORY requirement, enforced by the SHELL as
+    // a postcondition on the minted handle (the decide cannot see the object;
+    // the arm above stripped the bit so the omode never carries it).
+    *dir_required_out = dirreq;
+    return VIV_TRANSLATED;
+}
+
+// #50 (VIVARIUM.md section 6.24): the O_CREAT domain of openat. The header
+// carries the domain; this body is the map. The shell routes here when
+// O_CREAT is set WITHOUT O_PATH (Linux's O_PATH ignores O_CREAT, so that
+// combination stays on the plain decide -- the exact Linux contour).
+enum viv_verdict vivarium_openat_create_decide(u64 dirfd, u64 flags, u64 mode,
+                                               u32 *omode_out, u32 *perm_out,
+                                               bool *cloexec_out) {
+    // Fail toward the supervisor, never toward a dispatch.
+    if (!omode_out || !perm_out || !cloexec_out) return VIV_FORWARD;
+
+    // int-typed on the Linux side: only the low 32 bits are significant (the
+    // sibling decides' narrowing, for the same sign/zero-extension reason).
+    s32 dfd = (s32)(u32)dirfd;
+    u32 fl  = (u32)flags;
+    u32 md  = (u32)mode;
+
+    // AT_FDCWD only -- the plain row's gate, for the plain row's reason
+    // (a real dirfd is blocked by handle STATE; section 6.20 Correction 2).
+    if (dfd != VIV_AT_FDCWD) return VIV_FORWARD;
+
+    // The admitted set: the plain decide's, minus O_PATH (the shell already
+    // excluded it), plus O_CREAT + O_EXCL. O_APPEND now rides through (the git
+    // 6.27 arm -- a fresh reflog is O_CREAT|O_WRONLY|O_APPEND, so the create
+    // path is exactly where git's first ref update lands). Everything else
+    // outside the set declines to the supervisor -- O_DIRECTORY / O_TMPFILE
+    // keep their V-2b rejections through this arm.
+    u32 admitted = (VIV_OPENAT_ADMITTED & ~(u32)VIV_O_PATH)
+                 | (u32)VIV_O_CREAT | (u32)VIV_O_EXCL;
+    if (fl & ~admitted) return VIV_FORWARD;
+
+    // mode: the low-9 permission bits only, after discarding the file-TYPE
+    // field. S_IFMT is ignored on this argument by definition (the type comes
+    // from the call), and callers pass it routinely -- busybox `tar` hands
+    // `file_header->mode` straight through, so a regular file arrives as
+    // S_IFREG|0644 and the un-masked gate below refused every extraction.
+    // Masking it is exact; masking 07000 would not be, which is why a
+    // setuid/sgid/sticky request still DECLINES rather than being silently
+    // stripped -- that strip would record LESS restrictive metadata than the
+    // caller asked for, wrong with nothing to catch it. See VIV_S_IFMT.
+    md &= ~VIV_S_IFMT;
+    if (md & ~0777u) return VIV_FORWARD;
+
+    u32 omode;
+    switch (fl & VIV_O_ACCMODE) {
+    case VIV_O_RDONLY: omode = VIV_OMODE_READ;  break;
+    case VIV_O_WRONLY: omode = VIV_OMODE_WRITE; break;
+    case VIV_O_RDWR:   omode = VIV_OMODE_RDWR;  break;
+    default:           return VIV_FORWARD;   // (fl & ACCMODE) == 3: Linux EINVAL
+    }
+    if (fl & VIV_O_TRUNC)    omode |= VIV_OMODE_TRUNC;
+    // O_APPEND (the git 6.27 arm) on the create path: a fresh reflog is
+    // O_CREAT|O_WRONLY|O_APPEND, so this arm is the one git's FIRST ref update
+    // exercises. No dirreq gate here (O_DIRECTORY is not admitted on create),
+    // so it maps unconditionally onto SYS_WALK_OPEN_OAPPEND -> the Tlcreate
+    // flags -> Stratum appends server-side.
+    if (fl & VIV_O_APPEND)   omode |= VIV_OMODE_APPEND;
+    if (fl & VIV_O_NOFOLLOW) omode |= SYS_WALK_OPEN_NOFOLLOW;
+    if (fl & VIV_O_EXCL)     omode |= SYS_WALK_OPEN_OEXCL;
+
+    // Belt-and-braces, as the plain decide: never emit an omode the target
+    // rejects -- a future admission that forgets the kernel mask fails HERE
+    // as a forward, not downstream as an unexplained error.
+    if (omode & ~(u32)SYS_OPEN_CREATE_OMODE_VALID) return VIV_FORWARD;
+
+    *omode_out   = omode;
+    *perm_out    = md;          // low-9 only, gated above
+    *cloexec_out = (fl & VIV_O_CLOEXEC) != 0;
+    return VIV_TRANSLATED;
+}
+
+// #50: mkdirat -- the exclusive arm with DMDIR (mkdir has no open-if-present).
+enum viv_verdict vivarium_mkdirat_decide(u64 dirfd, u64 mode, u32 *perm_out) {
+    if (!perm_out) return VIV_FORWARD;
+    s32 dfd = (s32)(u32)dirfd;
+    u32 md  = (u32)mode;
+    if (dfd != VIV_AT_FDCWD) return VIV_FORWARD;
+    // Low-9 only, after discarding the file-TYPE field -- the openat-create
+    // arm's reasoning exactly (VIV_S_IFMT): S_IFMT is ignored here by
+    // definition and busybox `tar` passes S_IFDIR|0755, so the un-masked gate
+    // refused every `tar` directory. 07000 still declines -- but NOTE the
+    // justification differs from the openat-create arm's and is weaker here:
+    // Linux's own `vfs_mkdir` masks `mode & (S_IRWXUGO|S_ISVTX)`, so a setgid
+    // bit passed to mkdirat is stripped BY LINUX, and setgid dirs materialise
+    // from parent inheritance or a later chmod (git's `adjust_shared_perm`
+    // chmods). So no caller is wronged by a strip on THIS path; the decline is
+    // chosen for stance symmetry -- we refuse what we will not record, rather
+    // than recording something other than what was asked -- not to protect a
+    // caller. The wronged-caller argument is real on openat-create, where
+    // Linux keeps 07000 via S_IALLUGO and O_CREAT|04755 really does record
+    // setuid.
+    md &= ~VIV_S_IFMT;
+    if (md & ~0777u)         return VIV_FORWARD;
+    *perm_out = md | SYS_WALK_CREATE_DMDIR;
+    return VIV_TRANSLATED;
+}
+
+// #50: unlinkat -- flags map 1:1 onto SYS_UNLINK's (0 <-> file,
+// AT_REMOVEDIR <-> SYS_UNLINK_REMOVEDIR); anything else declines.
+enum viv_verdict vivarium_unlinkat_decide(u64 dirfd, u64 flags,
+                                          u32 *tflags_out) {
+    if (!tflags_out) return VIV_FORWARD;
+    s32 dfd = (s32)(u32)dirfd;
+    u32 fl  = (u32)flags;
+    if (dfd != VIV_AT_FDCWD)               return VIV_FORWARD;
+    if (fl & ~(u32)VIV_AT_REMOVEDIR)       return VIV_FORWARD;
+    *tflags_out = (fl & VIV_AT_REMOVEDIR) ? SYS_UNLINK_REMOVEDIR : 0u;
+    return VIV_TRANSLATED;
+}
+
+// #50: renameat/renameat2 -- the domain gate alone (the map is 1:1: Linux's
+// replace-existing atomicity IS SYS_RENAME's documented contract). renameat
+// passes literal 0 for flags; renameat2 admits exactly 0 (NOREPLACE /
+// EXCHANGE / WHITEOUT decline, census-visible).
+enum viv_verdict vivarium_renameat_decide(u64 olddirfd, u64 newdirfd,
+                                          u64 flags) {
+    s32 odfd = (s32)(u32)olddirfd;
+    s32 ndfd = (s32)(u32)newdirfd;
+    if (odfd != VIV_AT_FDCWD || ndfd != VIV_AT_FDCWD) return VIV_FORWARD;
+    if ((u32)flags != 0)                              return VIV_FORWARD;
     return VIV_TRANSLATED;
 }
 
@@ -652,9 +1029,66 @@ enum viv_verdict vivarium_fcntl_decide(u64 cmd, u64 arg,
         *min_fd_out  = arg;
         return VIV_TRANSLATED;
 
+    case VIV_F_GETFL:
+        // Read the open-file status flags. The shell composes the access mode
+        // (from the fd's Spoor) with O_NONBLOCK (the CNONBLOCK flag); no payload
+        // is decoded here.
+        *op_out = VIV_FCNTL_GETFL;
+        return VIV_TRANSLATED;
+
+    case VIV_F_SETFL:
+        // Set the open-file status flags. Linux F_SETFL honors only
+        // O_NONBLOCK / O_APPEND / O_ASYNC / O_DIRECT and silently IGNORES the
+        // rest (including the access mode), so the classic
+        // `F_GETFL -> F_SETFL(flags | O_NONBLOCK)` round-trip works even though
+        // we serve only O_NONBLOCK. The shell reads `arg & O_NONBLOCK` itself
+        // (it has the arg), so nothing is decoded here -- unlike SETFD, which
+        // needs the decider only because the shell lacks a generic arg path.
+        *op_out = VIV_FCNTL_SETFL;
+        return VIV_TRANSLATED;
+
     default:
-        // F_GETFL / F_SETFL / the locking family / everything else. See the
-        // header on why this is ENOSYS at the shell rather than Linux's EINVAL.
+        // The locking family (F_GETLK / F_SETLK / ...) + everything else. See
+        // the header on why this is ENOSYS at the shell, not Linux's EINVAL.
+        return VIV_FORWARD;
+    }
+}
+
+// C2-k1 (interactive git): classify a terminal ioctl request. PURE -- request
+// code only. The shell owns the fd's tty-ness and the user-struct copy.
+enum viv_verdict vivarium_ioctl_decide(u64 request, enum viv_ioctl_op *op_out) {
+    if (!op_out) return VIV_FORWARD;
+    *op_out = VIV_IOCTL_UNSERVED;
+
+    // Linux passes the ioctl request as an int (32-bit) -- narrow like fcntl,
+    // so a sign- or zero-extended register still classifies.
+    switch ((u32)request) {
+    case VIV_TCGETS:
+        *op_out = VIV_IOCTL_TCGETS;
+        return VIV_TRANSLATED;
+
+    case VIV_TCSETS:
+    case VIV_TCSETSW:
+    case VIV_TCSETSF:
+        // TCSANOW / TCSADRAIN / TCSAFLUSH all apply the mode. The cons/pts line
+        // discipline has no separate termios drain/flush stage, so the three are
+        // indistinguishable here -- one op (documented divergence).
+        *op_out = VIV_IOCTL_TCSETS;
+        return VIV_TRANSLATED;
+
+    case VIV_TIOCGWINSZ:
+        *op_out = VIV_IOCTL_TIOCGWINSZ;
+        return VIV_TRANSLATED;
+
+    case VIV_TIOCSWINSZ:
+        *op_out = VIV_IOCTL_TIOCSWINSZ;
+        return VIV_TRANSLATED;
+
+    default:
+        // Not a terminal request this surface serves. The shell (C2-k1b) turns
+        // this into the terminal errno -- a real tty answers ENOTTY for an
+        // unknown request on Linux; the T_E_NOTTY ABI decision owns that. The
+        // decode only reports "not one of ours".
         return VIV_FORWARD;
     }
 }
@@ -776,6 +1210,16 @@ enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags,
     if (fl & VIV_AT_SYMLINK_NOFOLLOW) *stalk_flags_out = 1;
 
     return VIV_TRANSLATED;
+}
+
+// faccessat -- the whole decision is the AT_FDCWD gate. See the header comment
+// for why this single check is both the cwd-form contract and the native-48
+// collision defense; the mode's EINVAL contour and the stat + perm_check are in
+// the shell (the mmap-judges-len precedent), so this stays pure and memoryless.
+enum viv_verdict vivarium_faccessat_decide(u64 dirfd) {
+    // Signed, for the AT_FDCWD sign-extension reason vivarium_openat_decide
+    // spells out: an `int` -100 arrives sign-extended and must compare equal.
+    return ((s32)(u32)dirfd == VIV_AT_FDCWD) ? VIV_TRANSLATED : VIV_FORWARD;
 }
 
 // =============================================================================
@@ -969,9 +1413,9 @@ bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
 // =============================================================================
 
 enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
-                                       bool *share_mem_out) {
-    if (!share_mem_out) return VIV_FORWARD;     // fail closed
-    *share_mem_out = false;
+                                       enum viv_clone_mode *mode_out) {
+    if (!mode_out) return VIV_FORWARD;          // fail closed
+    *mode_out = VIV_CLONE_MODE_FORK;            // safe default; FORWARD arms leave it
     // THE COMPARISON IS FULL-WIDTH, and that is a deliberate difference from
     // vivarium_mmap_decide / vivarium_openat_decide, which narrow to 32 bits.
     // Those calls take `int` parameters in the Linux ABI, so the narrowing is
@@ -999,14 +1443,20 @@ enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
     //     and serving it anyway turns a working program into a deadlock. The
     //     header carries the full argument for why L-3c-2's fail-safe reasoning
     //     does not extend here.
-    //   * CLONE_THREAD (and the rest of the thread set) -- a genuinely
-    //     concurrent child has a correct target already, SYS_THREAD_SPAWN, and
-    //     it is not this row.
-    //   * CLONE_SETTLS / CLONE_PARENT_SETTID / CLONE_CHILD_{SET,CLEAR}TID --
-    //     each makes one of x2/x3/x4 MEANINGFUL, and this translator's whole
-    //     safety argument is that it never reads them (the header's garbage-
-    //     register note). Excluding them is what makes "pass a literal 0 for
-    //     child_tls" correct rather than merely convenient.
+    //   * CLONE_THREAD as a stray bit on a NON-thread word -- refused here. The
+    //     FULL pthread word VIV_CLONE_FLAGS_THREAD is served, but as its own
+    //     exact arm below (VIV_CLONE_MODE_THREAD), not by admitting the bit into
+    //     the fork/vfork words. Fork-with-a-CLONE_THREAD-bit is a shape nobody
+    //     emits and nobody has reasoned about, so it declines.
+    //   * CLONE_SETTLS / CLONE_PARENT_SETTID / CLONE_CHILD_{SET,CLEAR}TID -- on
+    //     the FORK/VFORK arms each makes one of x2/x3/x4 MEANINGFUL, and those
+    //     arms' whole safety argument is that they never read them (the header's
+    //     garbage-register note): the shell passes a LITERAL 0 for child_tls.
+    //     The THREAD arm is the deliberate exception -- its word carries SETTLS +
+    //     PARENT_SETTID + CHILD_CLEARTID precisely because a thread NEEDS its TLS,
+    //     tid publish, and exit-clear, so the THREAD shell DOES read x2/x3/x4.
+    //     Keeping the arms separate is what lets the fork/vfork "never read the
+    //     garbage registers" claim stay literally true.
     //
     // An exit signal other than SIGCHLD is refused by the same equality, and
     // deliberately: `exits()` posts `child_exit` unconditionally (I-19), so a
@@ -1028,20 +1478,58 @@ enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
     // its own copy at that address, which is exactly what fork() means. So the
     // vfork arm rejects zero below and this one does not.
     if (flags == (u64)VIV_CLONE_FLAGS_FORK) {
-        *share_mem_out = false;
+        *mode_out = VIV_CLONE_MODE_FORK;
+        return VIV_TRANSLATED;
+    }
+
+    // N-3: the pthread word. Served as a Thread in the caller's OWN Proc. Checked
+    // between fork and vfork so the exact-equality ladder reads fork -> thread ->
+    // vfork -- three distinct words, none a mask of another. A thread MUST carry
+    // its own stack (two threads on one stack corrupt each other -- the RFMEM
+    // child_sp invariant, now load-bearing for a genuinely concurrent child), so
+    // a zero stack forwards (out of domain) rather than translating, exactly as
+    // the RFMEM vfork arm rejects a zero stack below.
+    if (flags == (u64)VIV_CLONE_FLAGS_THREAD) {
+        if (stack == 0) return VIV_FORWARD;
+        *mode_out = VIV_CLONE_MODE_THREAD;
         return VIV_TRANSLATED;
     }
 
     if (flags != (u64)VIV_CLONE_FLAGS_ADMITTED) return VIV_FORWARD;
 
-    // A ZERO stack is Linux's "share the parent's stack", which is `vfork()`
-    // proper. SYS_RFORK refuses a zero child_sp by contract, so this declines
-    // one layer above the kernel rather than weakening a landed gate. It is a
-    // DOMAIN question, not a semantic one -- Linux serves stack==0 happily, so
-    // there is no errno of its own to reproduce (contrast mmap's `len`, which
-    // IS judged in the shell precisely because Linux gives it EINVAL/ENOMEM).
-    if (stack == 0) return VIV_FORWARD;
-    *share_mem_out = true;
+    // The vfork shape splits on `stack`, and the split is option B (the
+    // 2026-08-31 vote; lineage-aligned per LINEAGE.md 3.1).
+    //
+    //   stack != 0 -- posix_spawn's shape. The child runs on its OWN stack
+    //   while sharing the parent's memory, so it is a true RFMEM vfork: the
+    //   parent suspends (vfork_await_release), the child execs/exits on its own
+    //   stack, and the two never push a shared frame concurrently.
+    //   mode = VIV_CLONE_MODE_VFORK.
+    //
+    //   stack == 0 -- `vfork()` proper: "run on the parent's ONE stack, and
+    //   trust me not to disturb it before exec/exit." Plan 9 has NO such shape.
+    //   rfork always gives the child its own stack -- it has no stack argument
+    //   precisely because two Procs never share one (LINEAGE.md 3.1) -- and our
+    //   RFMEM child_sp rule is that invariant wearing a Linux parameter.
+    //   Weakening it to serve this (option A) was rejected as anti-lineage.
+    //   Instead serve it as a FORK: a private copy-on-write child. POSIX makes
+    //   anything but _exit/exec after vfork UNDEFINED, so a copy is a
+    //   conformant implementation (the classic `#define vfork fork`), and the
+    //   only observable differences -- the parent not suspending, the child's
+    //   pre-exec writes not reaching the parent -- are exactly what POSIX
+    //   leaves undefined. The alternative is an ENOSYS the caller has no
+    //   fallback for: busybox's spawn aborts with "vfork: Function not
+    //   implemented" and no tar/gzip pipeline runs.
+    //
+    //   This arm is provably equivalent to the fork arm above: MODE_FORK +
+    //   stack=0 reaches the shell as sys_rfork_core(RFPROC, 0, 0), the exact
+    //   translation `clone(SIGCHLD, 0)` already produces. It is not a new path,
+    //   it is the same path reached by a different flags word.
+    if (stack == 0) {
+        *mode_out = VIV_CLONE_MODE_FORK;
+        return VIV_TRANSLATED;
+    }
+    *mode_out = VIV_CLONE_MODE_VFORK;
 
     // NOTE what is NOT checked: alignment, range, and overlap with the caller's
     // own stack. Those are SYS_RFORK's own gate, they are identical for a
@@ -1050,6 +1538,24 @@ enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
     // the native handler does, which is the V-8 `sys_fstat_for_proc` discipline
     // -- one implementation, reached two ways.
     return VIV_TRANSLATED;
+}
+
+// N-3: futex op classifier. PURE. Strips FUTEX_PRIVATE_FLAG (0x80) and
+// FUTEX_CLOCK_REALTIME (0x100) -- exactly Linux's FUTEX_CMD_MASK -- then
+// classifies the base op. Only the three ops musl's default mutex/cond/join
+// path emits translate; everything else (PI, WAKE_OP, CMP_REQUEUE, WAIT_BITSET)
+// forwards to a clean ENOSYS, the honest answer for a robust/PI path we do not
+// serve. The private bit is discarded, not honored: all CLONE_THREAD peers share
+// one AddrSpace, so a shared and a private wait on the same VA are the same wait.
+enum viv_verdict vivarium_futex_decide(u32 op, enum viv_futex_op *op_out) {
+    if (!op_out) return VIV_FORWARD;   // fail closed
+    u32 base = op & ~(u32)(VIV_FUTEX_PRIVATE_FLAG | VIV_FUTEX_CLOCK_REALTIME);
+    switch (base) {
+    case 0: *op_out = VIV_FUTEX_OP_WAIT;    return VIV_TRANSLATED;
+    case 1: *op_out = VIV_FUTEX_OP_WAKE;    return VIV_TRANSLATED;
+    case 3: *op_out = VIV_FUTEX_OP_REQUEUE; return VIV_TRANSLATED;
+    default: return VIV_FORWARD;
+    }
 }
 
 // =============================================================================
@@ -1167,19 +1673,22 @@ bool viv_signote_is_deliverable(enum viv_signote note) {
 //   SOCK_STREAM / SOCK_DGRAM  arch/aarch64/bits/socket.h via include/sys/socket.h
 //   SOCK_NONBLOCK / SOCK_CLOEXEC  the type-word flag bits (04000 / 02000000)
 //   IPPROTO_TCP / IPPROTO_UDP  include/netinet/in.h (6 / 17)
+// VIV_SOCK_NONBLOCK / VIV_SOCK_CLOEXEC moved to vivarium.h (the socket shell in
+// syscall.c also needs them to apply the flags to the ctl fd).
 enum {
     VIV_AF_INET        = 2,
     VIV_AF_INET6       = 10,
     VIV_SOCK_STREAM    = 1,
     VIV_SOCK_DGRAM     = 2,
-    VIV_SOCK_NONBLOCK  = 04000,
-    VIV_SOCK_CLOEXEC   = 02000000,
     VIV_IPPROTO_TCP    = 6,
     VIV_IPPROTO_UDP    = 17,
 };
 
-struct viv_sock *viv_socktab_find(struct viv_socktab *tab, s32 fd) {
-    if (!tab || fd < 0) return NULL;
+// The building block: find the entry for `fd`, or NULL. The caller MUST hold
+// tab->lock (or be in the exec-alone window). A returned pointer is valid only
+// while the lock is held -- the public readers snapshot through it and drop it.
+static struct viv_sock *socktab_find_locked(struct viv_socktab *tab, s32 fd) {
+    if (fd < 0) return NULL;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
         if (tab->s[i].state != VIV_SOCK_FREE && tab->s[i].fd == fd)
             return &tab->s[i];
@@ -1187,44 +1696,322 @@ struct viv_sock *viv_socktab_find(struct viv_socktab *tab, s32 fd) {
     return NULL;
 }
 
-struct viv_sock *viv_socktab_claim(struct viv_socktab *tab, s32 fd,
-                                   enum viv_net_proto proto, u32 n) {
-    if (!tab || fd < 0) return NULL;
-    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
-        if (tab->s[i].state == VIV_SOCK_FREE) {
-            tab->s[i].fd         = fd;
-            tab->s[i].proto      = (u8)proto;
-            tab->s[i].state      = VIV_SOCK_FRESH;
-            tab->s[i].n          = n;
-            tab->s[i].bound_addr = 0;   // a fresh socket carries no bind
-            tab->s[i].bound_port = 0;
-            return &tab->s[i];
-        }
-    }
-    return NULL;   // full -> EMFILE
+// Clear the WHOLE entry, not just the state -- the single source of truth for
+// the field clear. A stale field left in a freed slot would be visible to any
+// future claim that forgets to set it, and the bind fields make that concrete: a
+// recycled slot still carrying the previous socket's port would let a listen()
+// announce a port this socket never asked for. Lock-held (or exec-alone).
+static void socktab_clear_slot(struct viv_sock *e) {
+    if (!e) return;
+    e->fd          = -1;
+    e->proto       = 0;
+    e->state       = VIV_SOCK_FREE;
+    e->n           = 0;
+    e->epoch       = 0;   // hygiene: a FREE slot is skipped by find_locked, and a
+                          // reclaim overwrites this -- but keep "clear the WHOLE
+                          // entry" honest (0 == never claimed)
+    e->bound_addr  = 0;
+    e->bound_port  = 0;
+    e->remote_addr = 0;   // else a recycled slot reports a stranger's peer as
+    e->remote_port = 0;   // this socket's, exactly as a stale bound_port would
 }
 
-bool viv_socktab_has_room(const struct viv_socktab *tab) {
+bool viv_socktab_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out) {
     if (!tab) return false;
+    spin_lock(&tab->lock);
+    struct viv_sock *e = socktab_find_locked(tab, fd);
+    bool found = (e != NULL);
+    if (found && out) *out = *e;   // snapshot under the lock; safe past unlock
+    spin_unlock(&tab->lock);
+    return found;
+}
+
+bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
+                       enum viv_net_proto proto, u32 n, enum viv_sock_state born) {
+    if (!tab || fd < 0) return false;
+    spin_lock(&tab->lock);
+    // Replace-on-claim (Design D audit F2): the fd table is the truth. The
+    // caller was just handed `fd` by handle_alloc, so any row still keyed on
+    // it is STALE -- an fd closed by a path this table never saw -- and must
+    // not survive beside the new one: find_locked returns the FIRST match, so
+    // a stale row ahead of the fresh one would answer every later lookup with
+    // a stranger's (proto, n). Cleared under the same lock hold as the scan
+    // below, so the clear, the scan and the write are one critical section.
+    socktab_clear_slot(socktab_find_locked(tab, fd));
+    // Scan + write are ONE critical section, so two peer claims cannot both see
+    // the same slot FREE and stomp it -- the allocation race N-3 introduced.
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        if (tab->s[i].state == VIV_SOCK_FREE) {
+            tab->s[i].fd          = fd;
+            tab->s[i].proto       = (u8)proto;
+            tab->s[i].state       = (u8)born;   // FRESH (socket) or CONNECTED (accept)
+            tab->s[i].n           = n;
+            // The identity stamp: monotonic, never reused, so a later recycle of
+            // this slot (even to the same fd + same netd n) draws a greater epoch
+            // and a stale keyed write cannot match it. Pre-increment -> first
+            // claim is epoch 1 (0 stays reserved for "never claimed").
+            tab->s[i].epoch       = ++tab->next_epoch;
+            tab->s[i].bound_addr  = 0;   // a fresh socket carries no bind
+            tab->s[i].bound_port  = 0;
+            tab->s[i].remote_addr = 0;   // and no unconnected-sendto destination
+            tab->s[i].remote_port = 0;
+            spin_unlock(&tab->lock);
+            return true;
+        }
+    }
+    spin_unlock(&tab->lock);
+    return false;   // full -> EMFILE
+}
+
+bool viv_socktab_has_room(struct viv_socktab *tab) {
+    if (!tab) return false;
+    spin_lock(&tab->lock);
     for (u32 i = 0; i < VIV_SOCK_MAX; i++)
-        if (tab->s[i].state == VIV_SOCK_FREE) return true;
+        if (tab->s[i].state == VIV_SOCK_FREE) {
+            spin_unlock(&tab->lock);
+            return true;
+        }
+    spin_unlock(&tab->lock);
     return false;
 }
 
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd) {
-    struct viv_sock *e = viv_socktab_find(tab, fd);
-    if (!e) return;
-    // Clear the WHOLE entry, not just the state. A stale field left in a freed
-    // slot would be visible to any future claim that forgets to set it -- and
-    // the bind fields make that concrete: a recycled slot still carrying the
-    // previous socket's port would let a listen() announce a port this socket
-    // never asked for.
-    e->fd         = -1;
-    e->proto      = 0;
-    e->state      = VIV_SOCK_FREE;
-    e->n          = 0;
-    e->bound_addr = 0;
-    e->bound_port = 0;
+    if (!tab) return;
+    spin_lock(&tab->lock);
+    socktab_clear_slot(socktab_find_locked(tab, fd));
+    spin_unlock(&tab->lock);
+}
+
+// execve's reset for the NATIVE arm (Design D, VIVARIUM 13.10.4's constructed-
+// states sweep; audit F2). A native image has no sockets: a socket fd it
+// inherited is a plain Spoor on the /net data file, closed by native close()
+// -- which never reaches this table (the drop lives only in the Linux
+// dispatcher's close hook). Left alone, a row keyed on that fd number would
+// outlive the fd and greet the NEXT Linux image's recycled fd as a live
+// (proto, n) connection: connect() dials BY PATH into whatever stranger now
+// owns /net/<proto>/<n> (I-1). Every slot is cleared in place under the lock;
+// the object stays (mirrors viv_sigtab_reset -- proc_free is the only free,
+// #254); `next_epoch` is NOT reset, so the identity key stays monotonic for
+// the table's life and a keyed write from before the reset lands nowhere.
+// The lock is a leaf and this runs in execve's sole-live-thread window, so
+// taking it costs nothing and keeps the "held only over array ops" rule
+// uniform (drop_cloexec skips it only because it nests under the handle
+// table's lock; this does not). NULL-safe: a Proc that was never Linux has
+// no table.
+void viv_socktab_reset(struct viv_socktab *tab) {
+    if (!tab) return;
+    spin_lock(&tab->lock);
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) socktab_clear_slot(&tab->s[i]);
+    spin_unlock(&tab->lock);
+}
+
+// Copy one live entry's socket state into the slot `dst` for fd `newfd`,
+// stamping a FRESH epoch. The identity key is per-ROW: a keyed write that
+// snapshotted the source row's epoch must not land on the alias, and vice
+// versa -- two rows over one connection are two lifetimes (the APE posture,
+// VIVARIUM 5.5.2). Lock-held.
+static void socktab_copy_row_locked(struct viv_socktab *tab, struct viv_sock *dst,
+                                    const struct viv_sock *src, s32 newfd) {
+    dst->fd          = newfd;
+    dst->proto       = src->proto;
+    dst->state       = src->state;
+    dst->n           = src->n;
+    dst->epoch       = ++tab->next_epoch;
+    dst->bound_addr  = src->bound_addr;
+    dst->bound_port  = src->bound_port;
+    dst->remote_addr = src->remote_addr;
+    dst->remote_port = src->remote_port;
+}
+
+// fork's copy for the PHENOTYPE (POSIX fork(2); the socktab-across-images
+// design, operator-voted A 2026-08-18: COPY at fork, Plan 9 APE's per-process
+// rock), in the three steps vivarium.h describes. The child gets its OWN
+// table holding every parent entry whose fd the CHILD ACTUALLY HOLDS.
+//
+// The snapshot runs INSIDE handle_table_copy_into_hooked's source-lock hold
+// (proc.c), with the parent's socktab lock nested under the handle lock. A
+// peer thread of a multi-threaded parent (N-3) that closes a socket fd and
+// opens a new one at the same number needs the handle lock for both halves,
+// so while the copy holds it the rows this reads are the rows those handles
+// were claimed for. Taken in a separate hold -- as the first version did --
+// the child could carry the OLD data Spoor at fd N beside a row naming the
+// NEW socket's connection, and its socket arms would then drive a
+// connection its fd never held (the socktab holotype F1). The nesting is
+// cycle-free: the socktab lock is a leaf (every hold covers array ops only;
+// nothing takes it and then a handle lock).
+//
+// The epoch counter is copied too, so the child's future claims continue the
+// parent's monotonic sequence and every copied row keeps an epoch unique
+// within the child's table. finish runs with no lock: the child is under
+// construction and unpublished, so nothing can reach its table, and the
+// filter's handle_get_cloexec takes the CHILD's handle lock on its own.
+int viv_socktab_fork_prepare(struct viv_socktab_fork *f, const struct Proc *parent) {
+    if (!f || !parent) return -1;
+    f->parent = parent;
+    // Allocate UNCONDITIONALLY -- not gated on the parent having a table yet
+    // (holotype F3). The gate was `parent->socktab != NULL` at prepare time,
+    // but a peer thread's socket() can install the table AND claim a row
+    // between prepare and the copy's lock hold; without a carrier the snapshot
+    // hook is a no-op and the child inherits that fd (copied by the handle
+    // walk) with no row -- ENOTSOCK on a live socket. With the carrier the
+    // hook (under the copy's lock) captures any row claimed before it runs;
+    // the only residual is the inherent socket() install-then-claim gap (the
+    // handle installed but the row not yet claimed at snapshot time), which no
+    // snapshot closes and which VIVARIUM 5.5.2 states. The cost of the
+    // carrier for a socket-less fork is one kzalloc that fork_finish frees as
+    // an all-holes table.
+    f->dst = (struct viv_socktab *)kzalloc(sizeof(*f->dst), 0);
+    return f->dst ? 0 : -1;
+}
+
+void viv_socktab_fork_snapshot(void *arg) {
+    struct viv_socktab_fork *f = (struct viv_socktab_fork *)arg;
+    if (!f || !f->dst) return;
+    // The pointer is CAS-installed once and cleared only by proc_free, and
+    // prepare saw it non-NULL, so this load is the same table.
+    struct viv_socktab *src = __atomic_load_n(&f->parent->socktab, __ATOMIC_ACQUIRE);
+    if (!src) return;
+    // Entries + the counter, field-wise -- never the struct, whose lock word
+    // is HELD while we read it.
+    spin_lock(&src->lock);
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) f->dst->s[i] = src->s[i];
+    f->dst->next_epoch = src->next_epoch;
+    spin_unlock(&src->lock);
+}
+
+void viv_socktab_fork_finish(struct Proc *child, struct viv_socktab_fork *f) {
+    if (!child || !f || !f->dst) return;
+    struct viv_socktab *dst = f->dst;
+    f->dst = NULL;
+    u32 live = 0;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        struct viv_sock *e = &dst->s[i];
+        if (e->state == VIV_SOCK_FREE) { e->fd = -1; continue; }   // the FREE marker (0 is a valid fd)
+        // The filter: keep only rows whose fd the child holds. handle_get_cloexec
+        // is the existence probe the dup arms use (-1 = no such handle).
+        if (handle_get_cloexec(child, (hidx_t)e->fd) < 0) { socktab_clear_slot(e); continue; }
+        live++;
+    }
+    if (live == 0) {
+        kfree(dst);         // nothing to carry: the child's first socket() allocates
+        return;
+    }
+    __atomic_store_n(&child->socktab, dst, __ATOMIC_RELEASE);
+}
+
+// The alias rule (dup / dup3 / F_DUPFD of a socket; operator-voted with the
+// fork copy): the new number gets its OWN copy of the source's row, fresh
+// epoch. Returns 1 if `oldfd` was a socket and the alias row now exists, 0 if
+// `oldfd` carries no row (a plain dup: nothing to do), -1 if the table has no
+// room. Any row already keyed on `newfd` is cleared first (replace-on-claim:
+// the caller has just installed `newfd`, so a row there is stale -- dup3 onto
+// a live socket number closed that socket). The caller installs the HANDLE
+// before calling this, so a refused dup never touches the table; the room
+// check is the caller's (viv_socktab_alias_fits) because it must precede the
+// install. Lock-held for the whole find+clear+claim: one critical section.
+int viv_socktab_alias(struct viv_socktab *tab, s32 oldfd, s32 newfd) {
+    if (!tab || oldfd < 0 || newfd < 0 || oldfd == newfd) return 0;
+    spin_lock(&tab->lock);
+    struct viv_sock *src = socktab_find_locked(tab, oldfd);
+    if (!src) { spin_unlock(&tab->lock); return 0; }
+    struct viv_sock snap = *src;                      // the clear below may hit
+    socktab_clear_slot(socktab_find_locked(tab, newfd)); // a slot; snapshot first
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        if (tab->s[i].state == VIV_SOCK_FREE) {
+            socktab_copy_row_locked(tab, &tab->s[i], &snap, newfd);
+            spin_unlock(&tab->lock);
+            return 1;
+        }
+    }
+    spin_unlock(&tab->lock);
+    return -1;
+}
+
+// The pre-install room check for the alias rule: true iff aliasing `oldfd`
+// onto `newfd` cannot run out of rows -- `oldfd` is not a socket (no row
+// needed), or `newfd` already has a row (replace-on-claim reuses it), or a
+// FREE slot exists. Advisory in the has_room sense: a peer thread may claim
+// the slot between this and the alias, which is a guest racing its own
+// table; the alias then returns -1 and the caller unwinds what it can.
+bool viv_socktab_alias_fits(struct viv_socktab *tab, s32 oldfd, s32 newfd) {
+    if (!tab || oldfd < 0) return true;
+    spin_lock(&tab->lock);
+    bool fits = (socktab_find_locked(tab, oldfd) == NULL)
+             || (socktab_find_locked(tab, newfd) != NULL);
+    if (!fits) {
+        for (u32 i = 0; i < VIV_SOCK_MAX; i++)
+            if (tab->s[i].state == VIV_SOCK_FREE) { fits = true; break; }
+    }
+    spin_unlock(&tab->lock);
+    return fits;
+}
+
+// The keyed, identity-guarded writers. Each re-finds `fd` under the lock and
+// writes only if the slot still names the same socket (present AND epoch ==
+// expect_epoch) -- so a stale write from an op that blocked while the guest
+// closed and recycled the fd lands nowhere, never on the socket that reused the
+// slot. `expect_epoch` is the monotonic stamp the caller snapshotted; `n` cannot
+// serve as the key because netd recycles it (the holotype F1 finding, struct hdr).
+bool viv_socktab_set_state(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
+                           enum viv_sock_state st) {
+    if (!tab) return false;
+    spin_lock(&tab->lock);
+    struct viv_sock *e = socktab_find_locked(tab, fd);
+    bool ok = (e && e->epoch == expect_epoch);
+    if (ok) e->state = (u8)st;
+    spin_unlock(&tab->lock);
+    return ok;
+}
+
+bool viv_socktab_set_bound(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
+                           u32 addr, u16 port) {
+    if (!tab) return false;
+    spin_lock(&tab->lock);
+    struct viv_sock *e = socktab_find_locked(tab, fd);
+    bool ok = (e && e->epoch == expect_epoch);
+    if (ok) { e->bound_addr = addr; e->bound_port = port; }
+    spin_unlock(&tab->lock);
+    return ok;
+}
+
+bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
+                               u32 addr, u16 port, bool also_connect) {
+    if (!tab) return false;
+    spin_lock(&tab->lock);
+    struct viv_sock *e = socktab_find_locked(tab, fd);
+    bool ok = (e && e->epoch == expect_epoch);
+    if (ok) {
+        // remote first, THEN the state transition -- so a peer that observes
+        // CONNECTED (under this same lock) always sees the remote already set.
+        e->remote_addr = addr;
+        e->remote_port = port;
+        if (also_connect) e->state = (u8)VIV_SOCK_CONNECTED;
+    }
+    spin_unlock(&tab->lock);
+    return ok;
+}
+
+// execve's close-on-exec socktab sweep. A socket fd marked FD_CLOEXEC is about
+// to be closed by handle_close_on_exec, which knows nothing of this table; drop
+// its entry first, or the freed fd number would carry a stale (proto, n) row
+// into the new image (whose first fd-creating call is handed that number, then a
+// lookup returns the stale connection). Reads the cloexec bit LIVE from the
+// handle table -- the entry does not cache it, so two entries that ever share an
+// fd necessarily agree on it. Clears BY SLOT (the pointer is in hand). The
+// caller (sys_execve_core) runs this in execve's sole-live-thread window
+// (proc_exec_alone), so it takes NO socktab lock -- there is no peer thread to
+// race, and locking here would nest tab->lock under the handle table's t->lock
+// (handle_get_cloexec requires it). NULL-safe: a native Proc has no socktab.
+void viv_socktab_drop_cloexec(struct Proc *p) {
+    if (!p) return;
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    if (!tab) return;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        struct viv_sock *e = &tab->s[i];
+        if (e->state != VIV_SOCK_FREE &&
+            handle_get_cloexec(p, (hidx_t)e->fd) == 1)
+            socktab_clear_slot(e);
+    }
 }
 
 bool vivarium_socket_decide(u64 domain, u64 type, u64 protocol,
@@ -1243,16 +2030,23 @@ bool vivarium_socket_decide(u64 domain, u64 type, u64 protocol,
         return false;
     }
 
-    // The type word carries flags in its high bits. REFUSE them rather than
-    // masking them off -- a guest that asked for SOCK_NONBLOCK and silently
-    // received a blocking socket blocks where it expected EAGAIN.
-    if (type & (u64)(VIV_SOCK_NONBLOCK | VIV_SOCK_CLOEXEC)) {
+    // The type word carries SOCK_NONBLOCK/SOCK_CLOEXEC in its high bits. Mask
+    // them off before the base-type switch and ADMIT them: the shell applies
+    // NONBLOCK as the open-file's CNONBLOCK and CLOEXEC as the fd's cloexec bit,
+    // so the guest gets exactly the socket it asked for. (They were refused
+    // until N-1a, when musl's DNS resolver -- socket(DGRAM|CLOEXEC|NONBLOCK) at
+    // res_msend.c:123 -- became the consumer that needs them; a blocking socket
+    // there would hang the recvmsg drain loop, and an un-cloexec'd one would
+    // leak the resolver fd across the git exec.) Reject any OTHER high bit: a
+    // type word carrying an unknown flag is a request we cannot honour truthfully.
+    u64 base_type = type & ~(u64)(VIV_SOCK_NONBLOCK | VIV_SOCK_CLOEXEC);
+    if (base_type & ~(u64)0xFFu) {   // no base SOCK_* value exceeds a byte
         *out_err = T_E_INVAL;
         return false;
     }
 
     enum viv_net_proto proto;
-    switch (type) {
+    switch (base_type) {
     case VIV_SOCK_STREAM:
         proto = VIV_NET_TCP;
         if (protocol != 0 && protocol != VIV_IPPROTO_TCP) {
@@ -1276,6 +2070,102 @@ bool vivarium_socket_decide(u64 domain, u64 type, u64 protocol,
     (void)err;
     *out_proto = proto;
     return true;
+}
+
+bool vivarium_getsockopt_decide(u64 level, u64 optname, s32 *out_err) {
+    if (!out_err) return false;                  // fail closed
+    *out_err = T_E_NOSYS;
+    // Narrowed to 32 bits: both are C `int`s in the Linux ABI (the openat
+    // precedent -- the narrowing IS the ABI; contrast clone's full-width read,
+    // whose argument is an unsigned long).
+    if ((u32)level   != (u32)VIV_SOL_SOCKET) return false;
+    if ((u32)optname != (u32)VIV_SO_ERROR)   return false;
+    *out_err = 0;
+    return true;
+}
+
+bool vivarium_sendto_decide(enum viv_net_proto proto, u8 state, u64 flags,
+                            u64 addr_va, u64 addrlen, s32 *out_err) {
+    if (!out_err) return false;                  // fail closed
+    *out_err = T_E_NOSYS;
+
+    // flags is a C int: narrowed (the openat precedent). MSG_NOSIGNAL is
+    // admitted as a TRUTHFUL no-op: it suppresses SIGPIPE, and the phenotype
+    // socket data path is a 9P Spoor write -- the pipe EPIPE-note machinery
+    // never runs there, so there is no SIGPIPE to suppress in the first
+    // place. Everything else would lie: MSG_DONTWAIT on a blocking-only
+    // socket, MSG_MORE on a stack that cannot coalesce.
+    if (((u32)flags & ~(u32)VIV_MSG_NOSIGNAL) != 0) return false;
+
+    // sendto WITH a destination -- the connectionless datagram shape, which is
+    // exactly what musl's DNS resolver uses (res_msend.c:189: one bound UDP
+    // socket, a sendto per nameserver). SERVED FOR UDP (N-2a): the shell writes
+    // `connect ip!port` to the ctl fd per datagram (netd re-points conn N) and
+    // moves the bytes on a transient data fid. It requires a socket whose fd is
+    // still its `ctl` -- FRESH: a CONNECTED fd has already been swapped onto
+    // `data` (no ctl to dial), and a LISTENING one is a server. TCP has no
+    // connectionless send, so it stays ENOSYS -- census-visible unbuilt, not a
+    // fake state errno.
+    if (addr_va != 0 || addrlen != 0) {
+        if (proto != VIV_NET_UDP)             return false;   // ENOSYS
+        if (state == (u8)VIV_SOCK_CONNECTED) { *out_err = T_E_ISCONN; return false; }
+        if (state == (u8)VIV_SOCK_LISTENING) { *out_err = T_E_ISCONN; return false; }
+        *out_err = 0;
+        return true;                                          // state FRESH
+    }
+
+    // sendto with NO destination -- the connected send()/write() shape. Only the
+    // CONNECTED shape is served; an unconnected send with no addr is genuinely
+    // UNBUILT (there is no dial without a destination), so it declines to ENOSYS
+    // -- census-visible, NOT a fabricated ENOTCONN (the R2-F1 correction: that
+    // both mismatched Linux and hid the missing capability from the census).
+    if (state != (u8)VIV_SOCK_CONNECTED) return false;   // *out_err == T_E_NOSYS
+
+    *out_err = 0;
+    return true;
+}
+
+bool vivarium_recvfrom_decide(u8 state, u64 flags, u64 addr_va, s32 *out_err) {
+    if (!out_err) return false;                  // fail closed
+    *out_err = T_E_NOSYS;
+
+    // A non-NULL source-address out-pointer asks for the peer's address
+    // written back -- state the socktab does not carry. Declined until a
+    // consumer needs it (recv() passes NULL).
+    if (addr_va != 0) return false;
+
+    // No recv flag is truthfully servable: MSG_PEEK needs a non-consuming
+    // read the 9P data path does not have, MSG_WAITALL changes the return
+    // contract, MSG_DONTWAIT lies on a blocking-only socket.
+    if ((u32)flags != 0) return false;
+
+    // Only CONNECTED is served (R2-F1, as sendto): a recv on an unconnected
+    // socket is UNBUILT -- notably the bound-UDP-server idiom (bind then recv)
+    // that Linux serves -- so it declines to ENOSYS, census-visible, rather
+    // than claiming a fake ENOTCONN over a state Linux considers valid.
+    if (state != (u8)VIV_SOCK_CONNECTED) return false;   // *out_err == T_E_NOSYS
+
+    *out_err = 0;
+    return true;
+}
+
+bool vivarium_recvmsg_decide(u8 state, u64 flags, bool has_remote, s32 *out_err) {
+    if (!out_err) return false;                  // fail closed
+    *out_err = T_E_NOSYS;
+
+    // Same flag stance as recvfrom: no recv flag is truthfully servable here
+    // (MSG_PEEK has no non-consuming 9P read, MSG_WAITALL changes the return
+    // contract, MSG_DONTWAIT is redundant with the socket's own CNONBLOCK).
+    if ((u32)flags != 0) return false;
+
+    // CONNECTED (the fd is `data`) OR a FRESH socket that has been sendto'd (a
+    // recorded remote -- the DNS datagram path) can produce a datagram. A FRESH
+    // socket that was never sent to has no connection to read, and a LISTENING
+    // one is a server; both decline to ENOSYS rather than fabricate a state error.
+    if (state == (u8)VIV_SOCK_CONNECTED)               { *out_err = 0; return true; }
+    if (state == (u8)VIV_SOCK_FRESH && has_remote)     { *out_err = 0; return true; }
+
+    return false;                                // *out_err == T_E_NOSYS
 }
 
 const char *vivarium_net_proto_dir(enum viv_net_proto proto) {
@@ -2358,4 +3248,69 @@ bool vivarium_setid_is_noop(u32 requested, u32 current_mapped) {
     // let through. Comparing against the raw principal would refuse that call
     // for a PRINCIPAL_SYSTEM Proc -- the one case it most needs to serve.
     return requested == current_mapped;
+}
+
+// The Linux clockid_t VALUES clock_gettime's first argument carries. Argument
+// values, not syscall numbers, so they live here beside their translator exactly
+// as VIV_OMODE_* do -- not in the VIV_LINUX_* number enum in vivarium.h.
+enum {
+    VIV_CLOCK_REALTIME           = 0,
+    VIV_CLOCK_MONOTONIC          = 1,
+    VIV_CLOCK_PROCESS_CPUTIME_ID = 2,
+    VIV_CLOCK_THREAD_CPUTIME_ID  = 3,
+    VIV_CLOCK_MONOTONIC_RAW      = 4,
+    VIV_CLOCK_REALTIME_COARSE    = 5,
+    VIV_CLOCK_MONOTONIC_COARSE   = 6,
+    VIV_CLOCK_BOOTTIME           = 7,
+};
+
+// clock_gettime(clk_id, tp): the clk_id map. PURE -- it maps the Linux clock id
+// onto one of Thylacine's two clocks and nothing else; the shell in syscall.c
+// does the validated write through the native SYS_CLOCK_GETTIME handler, whose
+// timespec is byte-identical to Linux's, so the number map is the ONLY
+// translation. Returns false for a clk_id this kernel has no clock for; the
+// caller answers -EINVAL, which is also Linux's answer for a clk_id IT cannot
+// serve -- the error semantics coincide on the unknown case even though the
+// KNOWN sets differ (why this is T2, not a T1 renumber: a T1 row must be total
+// over the argument domain, and this one is not -- the lseek precedent).
+//
+// Thylacine has exactly two clocks: T_CLOCK_REALTIME (wall ns) and
+// T_CLOCK_MONOTONIC (ns since boot, raw CNTVCT, never backward). Each admitted
+// Linux id is an individual CLAIM that one of those two satisfies its contract:
+//
+//   CLOCK_REALTIME        (0) -> REALTIME. Identical.
+//   CLOCK_MONOTONIC       (1) -> MONOTONIC. Identical.
+//   CLOCK_MONOTONIC_RAW   (4) -> MONOTONIC. Linux's RAW is monotonic WITHOUT the
+//                                NTP slew; Thylacine performs no slewing, so its
+//                                monotonic already IS raw. Exact, not approximate.
+//   CLOCK_REALTIME_COARSE (5) -> REALTIME. COARSE requests a cheap last-tick
+//                                value; returning the precise one is a valid
+//                                refinement (more accurate, never wrong).
+//   CLOCK_MONOTONIC_COARSE(6) -> MONOTONIC. Same refinement.
+//   CLOCK_BOOTTIME        (7) -> MONOTONIC. BOOTTIME is monotonic INCLUDING
+//                                suspend; a QEMU guest does not suspend and
+//                                Thylacine's monotonic is ns-since-boot, so the
+//                                two coincide here.
+//
+// DECLINED (-> the caller's -EINVAL, a served answer, not a "declined row"):
+//   CLOCK_PROCESS_CPUTIME_ID (2), CLOCK_THREAD_CPUTIME_ID (3) -- per-process /
+//   per-thread CPU time, which Thylacine does not expose. EINVAL is honest, and
+//   a program that probes clock support tolerates it. Any other id is unknown
+//   to both sides and is EINVAL on both.
+bool vivarium_clock_gettime_map(u64 linux_clk_id, u64 *thyla_clk_id_out) {
+    if (!thyla_clk_id_out) return false;
+    switch (linux_clk_id) {
+    case VIV_CLOCK_REALTIME:
+    case VIV_CLOCK_REALTIME_COARSE:
+        *thyla_clk_id_out = T_CLOCK_REALTIME;
+        return true;
+    case VIV_CLOCK_MONOTONIC:
+    case VIV_CLOCK_MONOTONIC_RAW:
+    case VIV_CLOCK_MONOTONIC_COARSE:
+    case VIV_CLOCK_BOOTTIME:
+        *thyla_clk_id_out = T_CLOCK_MONOTONIC;
+        return true;
+    default:
+        return false;
+    }
 }

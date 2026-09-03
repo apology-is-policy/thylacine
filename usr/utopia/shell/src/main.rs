@@ -437,6 +437,18 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     let mut out = io::stdout();
+    // DISPLAY-MODES.md section 3.4: learn the terminal width so the line editor
+    // wraps at the real column count. Session-only (same live-stdout gate as
+    // open_notes / install_completion): reads the pts ctl winsize on a pts, else
+    // /dev/winsize, else a CPR probe whose reply arrives on the input path. Must
+    // run AFTER the pts/consctl dance (it keys on job_control / consctl_fd) and
+    // BEFORE the first prompt draw (a corner-probe's cursor motion is undone by
+    // the prompt's own \r+clear). A width that only resolves via the async CPR
+    // reply is applied on the next redraw -- the first prompt is correct on the
+    // /dev/winsize + pts fast paths and self-corrects on the probe path.
+    if io::stdout_is_live() {
+        repl.probe_winsize(&mut out);
+    }
     // Draw the first prompt (no-op to the UART if fd 1 is absent).
     repl.draw_prompt(&mut out);
 
@@ -451,9 +463,17 @@ pub extern "C" fn rs_main() -> i64 {
     // shell is not in THIS loop while a child runs).
     let cons_fd = io::stdin().as_raw_fd();
     let mut beacon_cycles: u64 = 0;
+    // item 10: the fd to POLL for stdin readiness. When pts-hosted this is the
+    // `/dev/pts/<n>ready` file, NOT fd 0 -- the pts slave is not directly
+    // pollable (dev9p.poll is always-ready for it), so polling fd 0 would return
+    // at once and the shell would block in read(), where a caught `interrupt`
+    // note cannot wake it. On the console (or a degraded ready open) this is
+    // cons_fd itself (pollable via LS-8a) -- the loop is then byte-identical to
+    // pre-item-10. The READ is always fd 0.
+    let poll_in_fd = repl.poll_in_fd().unwrap_or(cons_fd);
     let mut notes_fd = repl.notes_fd();
     let mut poll = PollSet::new();
-    poll.add_raw(cons_fd, PollEvents::READ);
+    poll.add_raw(poll_in_fd, PollEvents::READ);
     if let Some(nfd) = notes_fd {
         poll.add_raw(nfd, PollEvents::READ);
     }
@@ -466,10 +486,13 @@ pub extern "C" fn rs_main() -> i64 {
         match poll.poll(PollTimeout::Block) {
             Ok(results) => {
                 for ev in results {
-                    if ev.fd == cons_fd {
-                        // Any cons event (READ / HUP / ERR) -> attempt the read,
+                    if ev.fd == poll_in_fd {
+                        // Any readiness event (READ / HUP / ERR on the pts ready
+                        // file, or on cons_fd itself) -> attempt the fd-0 read,
                         // which resolves data (feed) or EOF/error (break). A bare
-                        // HUP MUST set this or a closed stdin would spin the loop.
+                        // HUP MUST set this or a closed stdin would spin the loop
+                        // (item 10: the ready file reports POLLHUP on master-gone,
+                        // and the fd-0 read then returns EOF -> clean teardown).
                         cons_ready = true;
                     } else if Some(ev.fd) == notes_fd {
                         if ev.is_readable() {

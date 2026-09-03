@@ -131,6 +131,33 @@ static int joey_daemon_registry_selftest(void) {
 }
 #endif /* THYLA_BOOT_PROBES (#80 registry selftest) */
 
+// Dev-account credentials + the corvus wire-protocol version, hoisted to file
+// scope so BOTH the BOOT_PROBES ladder (below) and the lean provision_dev_accounts
+// (further down) build every USER_CREATE / AUTH / ADMIN_ELEVATE frame from ONE
+// source. The two are never compiled together, so the drift they must not suffer
+// is CROSS-CONFIG: a pool provisioned by the lean image and later booted by a probe
+// image (or the reverse) re-AUTHs michael/cora with the OTHER build's literals, so
+// both builds must anchor on the same macro or a persistent pool fails AUTH loudly.
+// Only the constant DATA is shared; the provisioning CONTROL FLOW stays separate
+// (option F). michael is the long-password admin (bootstrap user); cora is the
+// short daily login (created post-elevation); the system passphrase gates
+// ADMIN_ELEVATE. These are dev conveniences, PUBLIC in this repo -- INSTALLER.md
+// owns real first-boot credentials (see production.config).
+//
+// These macros anchor ONLY joey's own create/auth/elevate frames. The SAME strings
+// live in copies these macros do NOT reach -- editing a macro without them fails
+// LOUDLY (a probe-boot assert or a CI login), never as a silent pool drift, but sync
+// them together: corvus-mint's host-baked system passphrase (tools/build.sh, the
+// CORVUS_SYSTEM_PASSPHRASE default "thylacine"), the ladder's RESOLVE_NAME /
+// CLEARANCE_GRANT / login+recover E2E fixtures below, and the expect login scripts
+// (tools/interactive/*.exp, incl. dev-accounts.exp + lib.exp).
+#define CORVUS_PROTOCOL_VERSION 1
+#define DEV_MICHAEL_USER "michael"
+#define DEV_MICHAEL_PASS "correct-horse-battery-staple-v1"
+#define DEV_CORA_USER    "cora"
+#define DEV_CORA_PASS    "kora"
+#define DEV_SYSTEM_PASS  "thylacine"
+
 #if THYLA_BOOT_PROBES  /* #61: corvus-protocol + smoke-probe helpers (boot-test only) */
 // dirents_have_name — scan a t_readdir buffer (9P2000.L dirents: qid 13 +
 // offset 8 + type 1 + namelen 2 LE + name) for an EXACT name. A bare substring
@@ -226,8 +253,8 @@ static int mkt_file_eq(const char *path, size_t path_len,
 // frame, read a [status|len_lo|len_hi|payload] response frame. On
 // transport success returns 0 and fills *status + *resp_len; the
 // response payload lands in rx[3 .. 3+*resp_len]. -1 on transport
-// error.
-#define CORVUS_PROTOCOL_VERSION 1
+// error. CORVUS_PROTOCOL_VERSION is #defined above the gate (shared with the
+// lean provisioner).
 static int corvus_exchange(long conn_fd,
                            unsigned char verb,
                            const unsigned char *payload, size_t payload_len,
@@ -467,12 +494,17 @@ static int smoke_drain(long rd, unsigned char *acc, size_t acc_cap,
 // expected to exit non-zero (e.g., terminated by an EL0 fault routed
 // through proc_fault_terminate at kernel/proc.c -- the snare:* family).
 // Used only by /pouch-hello-fault.
+// `want_status >= 0`: require the child's exit_status to equal it EXACTLY
+// (a native reap returns the raw status). Overrides expect_fault. Used by
+// /pouch-hello-exitgroup (#91): a specific non-1 code proves the exit byte
+// survived the cross-thread group_exit_code handoff. Pass -1 to disable.
 static int pouch_smoke_core(const char *name, size_t name_len,
                             const char *expect, size_t expect_len,
                             unsigned long cap_mask,
                             unsigned long perm_flags,
                             int expect_fault,
-                            int drain_first) {
+                            int drain_first,
+                            int want_status) {
     long rd = -1, wr = -1;
     if (t_pipe(&rd, &wr) < 0) {
         t_putstr("joey: pouch-smoke t_pipe FAILED\n");
@@ -545,10 +577,19 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         t_putstr("joey: pouch-smoke t_close(rd) FAILED\n");
         return -1;
     }
-    if (expect_fault) {
+    if (want_status >= 0) {
+        // #91 witness path: the child MUST exit with EXACTLY want_status. A
+        // native reap returns the raw exit_status, so a specific non-1 code
+        // (42 from /pouch-hello-exitgroup) proves the byte survived -- pre-#91
+        // every non-zero collapsed to 1, so this would have read 1.
+        if (status != want_status) {
+            t_putstr("joey: pouch-smoke child status != expected\n");
+            return -1;
+        }
+    } else if (expect_fault) {
         // /pouch-hello-fault path: child MUST exit non-zero (terminated
-        // by proc_fault_terminate via exits(NOTE_NAME_SNARE_*) at v1.0,
-        // collapsed to exit_status = 1 by sys_exits_handler).
+        // by proc_fault_terminate via exits(NOTE_NAME_SNARE_*) -> the string
+        // wrapper -> exit_status 1; the fault path is #91-unaffected).
         if (status == 0) {
             t_putstr("joey: pouch-smoke expected fault but child exited 0\n");
             return -1;
@@ -569,7 +610,7 @@ static int pouch_smoke_core(const char *name, size_t name_len,
 // caps variant is used). Pre-existing API; the pouch hellos use this.
 static int pouch_smoke_one(const char *name, size_t name_len,
                            const char *expect, size_t expect_len) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 0);
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 0, -1);
 }
 
 // pouch_smoke_one_drain_first — drain-then-reap variant for a THIRD-PARTY child
@@ -579,7 +620,17 @@ static int pouch_smoke_one(const char *name, size_t name_len,
 // child must not use the reap-first order.
 static int pouch_smoke_one_drain_first(const char *name, size_t name_len,
                                        const char *expect, size_t expect_len) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 1);
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 1, -1);
+}
+
+// pouch_smoke_one_status — #91 variant. Like pouch_smoke_one but ALSO requires
+// the child's exit_status to equal `want_status` exactly. Used by /pouch-hello-
+// exitgroup to prove a specific non-1 code (42) survives the cross-thread
+// group_exit_code handoff end-to-end.
+static int pouch_smoke_one_status(const char *name, size_t name_len,
+                                  const char *expect, size_t expect_len,
+                                  int want_status) {
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0, 0, want_status);
 }
 
 // pouch_smoke_one_expect_fault — variant for the durable P6 hardening
@@ -592,7 +643,7 @@ static int pouch_smoke_one_drain_first(const char *name, size_t name_len,
 // `Thylacine boot OK`.
 static int pouch_smoke_one_expect_fault(const char *name, size_t name_len,
                                         const char *expect, size_t expect_len) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 1, 0);
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 1, 0, -1);
 }
 
 // pouch_smoke_one_caps — capability-granting variant. Spawns via
@@ -601,7 +652,7 @@ static int pouch_smoke_one_expect_fault(const char *name, size_t name_len,
 static int pouch_smoke_one_caps(const char *name, size_t name_len,
                                 const char *expect, size_t expect_len,
                                 unsigned long cap_mask) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, cap_mask, 0, 0, 0);
+    return pouch_smoke_core(name, name_len, expect, expect_len, cap_mask, 0, 0, 0, -1);
 }
 
 // pouch_smoke_one_perms — permission-granting variant. Spawns via
@@ -614,7 +665,7 @@ static int pouch_smoke_one_perms(const char *name, size_t name_len,
                                  unsigned long cap_mask,
                                  unsigned long perm_flags) {
     return pouch_smoke_core(name, name_len, expect, expect_len,
-                            cap_mask, perm_flags, 0, 0);
+                            cap_mask, perm_flags, 0, 0, -1);
 }
 
 // argv_marker — one substring expected to appear in the child's stdout.
@@ -786,19 +837,22 @@ static int do_pouch_hello_smoke(void) {
     t_putstr("joey: pouch-hello-threads smoke ok (pthread + mutex over SYS_THREAD_* / SYS_TORPOR_*)\n");
 
     // SYS_EXIT_GROUP (#809; ARCH §7.9.1 / invariant I-24): the cross-thread-
-    // shootdown proving binary. A multi-thread Proc calls _Exit(0) ->
-    // __NR_exit_group -> SYS_EXIT_GROUP with TWO live, un-joined workers (one
-    // futex/cond-wait torpor sleeper, one userspace spinner). Pre-fix this
-    // extincted the kernel ("exits with live peer threads", the #808 audit F3
-    // hazard); post-fix the kernel cascades termination to both workers and the
-    // Proc exits status 0. joey's t_wait_pid returning rc == 0 IS the proof the
-    // full cascade completed -- the Proc only zombies once BOTH peers died.
+    // shootdown proving binary, doubling as the #91 cross-thread group_exit_code
+    // witness. A multi-thread Proc calls _Exit(42) -> __NR_exit_group ->
+    // SYS_EXIT_GROUP with TWO live, un-joined workers (one futex/cond-wait torpor
+    // sleeper, one userspace spinner). Pre-#809 this extincted the kernel ("exits
+    // with live peer threads"); post-fix the kernel cascades termination to both
+    // workers and the Proc exits WEXITSTATUS 42. joey's t_wait_pid returning IS
+    // the proof the cascade completed (the Proc only zombies once BOTH peers
+    // died); the reaped status being EXACTLY 42 is the #91 proof -- the main
+    // thread set group_exit_code but a WORKER was last out and read it, so a 42
+    // (not the pre-#91 collapse to 1) proves the cross-thread, cross-CPU handoff.
     static const char peg_name[]   = "pouch-hello-exitgroup";
     static const char peg_expect[] = "pouch-hello-exitgroup: 2 live un-joined workers";
-    if (pouch_smoke_one(peg_name, sizeof(peg_name) - 1,
-                        peg_expect, sizeof(peg_expect) - 1) != 0)
+    if (pouch_smoke_one_status(peg_name, sizeof(peg_name) - 1,
+                               peg_expect, sizeof(peg_expect) - 1, 42) != 0)
         return -1;
-    t_putstr("joey: pouch-hello-exitgroup smoke ok (exit_group with live peers cascades -- SYS_EXIT_GROUP)\n");
+    t_putstr("joey: pouch-hello-exitgroup smoke ok (exit_group live-peer cascade + #91 cross-thread exit code 42 -- SYS_EXIT_GROUP)\n");
 
     // P6-pouch-poll sub-chunk 10: the polling pouch hello. Exercises the
     // boundary-line patched src/select/{poll,ppoll,select,pselect}.c.
@@ -1075,7 +1129,7 @@ static int do_fork_probe(void) {
 static int run_viv_bundle(const char *vargv, unsigned int vargv_len,
                           unsigned int argc, const char *what, int *status_out,
                           unsigned char *acc, size_t acc_cap, size_t *acc_len,
-                          size_t *total_out) {
+                          size_t *total_out, unsigned long extra_caps) {
     *acc_len = 0;
     *status_out = -1;
     if (total_out) *total_out = 0;
@@ -1104,7 +1158,18 @@ static int run_viv_bundle(const char *vargv, unsigned int vargv_len,
         .argc          = argc,
         .fd_list_va    = (unsigned long)fds,
         .fd_count      = 3,
-        .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+        // No perm bits: viv needs none (its per-container diorama rides a
+        // private pipe pair, not a /srv name), and every boot `viv run` is
+        // spawned the plain way a session shell spawns it -- so these gates
+        // run the interactive path, not a privileged twin of it.
+        //
+        // extra_caps is the ONE exception, and it is 0 for every gate but the
+        // git one. cap_mask masks the child's caps to (parent & mask), so a
+        // non-zero value hands viv exactly the named subset of joey's caps for
+        // it to confer onward -- the git gate passes CAP_CSPRNG_READ so viv can
+        // grant the container's git the entropy it needs (I-43: the authority
+        // is real and must be conferred, only the ABI shape is Linux's).
+        .cap_mask      = extra_caps,
     };
     long pid = t_spawn_full_argv(&req);
     if (pid <= 0) {
@@ -1249,7 +1314,7 @@ static int do_alpine_shell_gate(void) {
     int    status  = -1;
     size_t total   = 0;
     int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "L-6c", &status,
-                                    acc, sizeof(acc), &acc_len, &total);
+                                    acc, sizeof(acc), &acc_len, &total, 0);
 
     // sizeof-derived, never hand-counted: a literal length that disagrees with
     // its string is a marker that silently never matches, which would read as
@@ -1569,7 +1634,7 @@ static int do_stock_distro_gate(void) {
     // mechanism inside the stock-distro claim, which is the one-mechanism-per-
     // leg rule this gate's own leg-C fix exists to enforce.
     int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "D-5", &status,
-                                    acc, sizeof(acc), &acc_len, NULL);
+                                    acc, sizeof(acc), &acc_len, NULL, 0);
 
     // sizeof-derived, never hand-counted: a literal length that disagrees with
     // its string is a marker that silently never matches, which would read as
@@ -1613,6 +1678,261 @@ static int do_stock_distro_gate(void) {
              "ran its own shell through its own symlink, loader and libc -- "
              "the DISTRO arc chain is live end to end)\n");
     g_arc_d5 = "PASS";
+    return 0;
+}
+
+// do_git_probe_gate -- the git-under-VIVARIUM milestone-A gate. joey (SYSTEM)
+// spawns `viv run /vivarium/git-probe`, which runs /gitprobe.sh: git init, add,
+// commit, log, clone file://, verify. Each step emits a GITPROBE-* marker; the
+// gate asserts the terminal GITPROBE-DONE and reports the first missing step (a
+// container that dies at COMMIT and one that dies at CLONE are different bugs).
+//
+// It runs as SYSTEM deliberately, and that is the whole reason it is a boot
+// probe rather than an interactive `viv run`. The pool 9P mount is
+// system-owned, so a container's files are stamped PRINCIPAL_SYSTEM; git's
+// config write chmods its own lockfile, and chmod requires OWNERSHIP. A
+// SYSTEM-principal container OWNS those files, so the chmod succeeds. Running
+// git as a real non-SYSTEM USER needs per-principal 9P ownership (A-3, unbuilt
+// at v1.0) -- tracked as a separate arc; this gate proves git init/add/commit/
+// clone WORK under the phenotype, which is milestone A.
+//
+// SOFT-SKIP when the bundle is absent: it needs a static-git tarball in
+// build/cache, and the default build stays hermetic. BOOT-FATAL when present,
+// for the L-6c reason -- a gate that cannot redden is a disabled test.
+static int do_git_probe_gate(void) {
+    static const char gb[] = "/vivarium/git-probe/config.json";
+    long gbfd = t_open(T_WALK_OPEN_FROM_ROOT, gb, sizeof(gb) - 1, T_OPATH);
+    if (gbfd < 0) {
+        t_putstr("joey: git-probe gate SKIPPED (no /vivarium/git-probe bundle "
+                 "-- drop a git-static-*-aarch64-musl.tar.gz in build/cache/ "
+                 "and rebuild with THYLACINE_MKFS_PRESERVE=0)\n");
+        return 0;
+    }
+    (void)t_close(gbfd);
+
+    static const char vargv[] = "/bin/viv\0run\0/vivarium/git-probe";
+    unsigned char acc[4096];
+    size_t acc_len = 0;
+    int    status  = -1;
+    size_t total   = 0;
+    int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "git-probe",
+                                    &status, acc, sizeof(acc), &acc_len, &total,
+                                    T_CAP_CSPRNG_READ);
+    (void)total;
+
+#define GP_MK(s) { (s), sizeof(s) - 1 }
+    // The full chain under the phenotype as SYSTEM: init + add + commit + log +
+    // clone file:// + verify, reflogs ON. Since the git 6.27 arm the phenotype
+    // openat ADMITS O_APPEND (Stratum positions the reflog writes at EOF), so
+    // COMMIT + CLONE -- which each append the reflog -- now run. Each is asserted
+    // in order, so the first-missing report distinguishes a commit failure from
+    // a clone failure from a verify failure.
+    static const struct argv_marker legs[] = {
+        GP_MK("GITPROBE-INIT"),
+        GP_MK("GITPROBE-ADD"),
+        GP_MK("GITPROBE-COMMIT"),
+        GP_MK("GITPROBE-LOG"),
+        GP_MK("GITPROBE-COMMIT2"),   // R1-F2: the second commit...
+        GP_MK("GITPROBE-REFLOG2"),   // ...appends a NONEMPTY reflog (cursor != EOF)
+        GP_MK("GITPROBE-CLONE"),
+        GP_MK("GITPROBE-VERIFY"),
+        GP_MK("GITPROBE-DONE"),
+    };
+#undef GP_MK
+    int missing = -1;
+    for (unsigned i = 0; i < sizeof(legs) / sizeof(legs[0]); i++) {
+        if (!mem_contains(acc, acc_len, legs[i].str, legs[i].len)) {
+            missing = (int)i;
+            break;
+        }
+    }
+    if (ran != 0 || status != 0 || missing >= 0) {
+        char nb[24];
+        t_putstr("joey: git-probe gate FAILED first-missing=");
+        t_putstr(missing >= 0 ? legs[missing].str : "<none>");
+        t_putstr(" status=");
+        t_putstr(itoa_dec(status, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: git-probe gate PASS (git init + add + commit + log + clone "
+             "file:// + verify under the phenotype, as SYSTEM, reflogs ON -- "
+             "proves the sub-chunk-1 syscalls + phenotype-fork-caps AND the git "
+             "6.27 O_APPEND arm: the reflog append rides the 9P Tlopen to "
+             "Stratum's server-side EOF positioning)\n");
+    return 0;
+}
+
+// do_git_https_gate -- the git-under-VIVARIUM milestone-B gate (network git).
+// joey (SYSTEM) spawns `viv run /vivarium/git-net`, which runs /githttps.sh: a
+// real `git clone` + `git fetch` over HTTPS from an external remote, through
+// netd + slirp + the baked Mozilla CA bundle. Each step emits a GITHTTPS-* marker;
+// the gate asserts the terminal GITHTTPS-DONE and reports the first missing step
+// (a DNS failure, a TLS failure and a pack failure are different bugs).
+//
+// HERMETICITY: the git-net bundle is staged ONLY under THYLACINE_BAKE_GITNET=1
+// (tools/build.sh), so the DEFAULT image has no /vivarium/git-net and this gate
+// SOFT-SKIPS -- every hermetic boot (test.sh, the SMP gate, LS-CI) stays
+// internet-free. It is BOOT-FATAL only when the bundle is present, i.e. only on
+// an explicit tools/test-git-https.sh bake on a networked host, which owns that
+// network dependency. This is the git-probe SKIP-if-absent / FATAL-if-present
+// idiom carried to a network test (the NP-3 precedent: a real-NIC probe is never
+// a fatal member of the hermetic ladder).
+//
+// Net is a NAMESPACE bind (viv opens /net and binds it into the container when
+// the manifest says net=granted), NOT a capability -- so the extra_caps handed to
+// run_viv_bundle is CSPRNG only (git's entropy), exactly as the git-probe gate.
+static int do_git_https_gate(void) {
+    static const char gb[] = "/vivarium/git-net/config.json";
+    long gbfd = t_open(T_WALK_OPEN_FROM_ROOT, gb, sizeof(gb) - 1, T_OPATH);
+    if (gbfd < 0) {
+        t_putstr("joey: git-https gate SKIPPED (no /vivarium/git-net bundle -- "
+                 "the default image is hermetic; rebuild THYLACINE_BAKE_GITNET=1 "
+                 "on a networked host, or run tools/test-git-https.sh)\n");
+        return 0;
+    }
+    (void)t_close(gbfd);
+
+    static const char vargv[] = "/bin/viv\0run\0/vivarium/git-net";
+    unsigned char acc[4096];
+    size_t acc_len = 0;
+    int    status  = -1;
+    size_t total   = 0;
+    int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "git-net",
+                                    &status, acc, sizeof(acc), &acc_len, &total,
+                                    T_CAP_CSPRNG_READ);
+    (void)total;
+
+#define GH_MK(s) { (s), sizeof(s) - 1 }
+    // clone + fetch over HTTPS from a real remote, in order, so the first-missing
+    // report distinguishes a helper-spawn failure from a clone failure from a
+    // fetch failure.
+    static const struct argv_marker legs[] = {
+        GH_MK("GITHTTPS-GIT-OK"),
+        GH_MK("GITHTTPS-DNS"),      // net-4d: getaddrinfo resolves a name (my path)
+        GH_MK("GITHTTPS-CLONE"),
+        GH_MK("GITHTTPS-VERIFY"),
+        GH_MK("GITHTTPS-FETCH"),
+        GH_MK("GITHTTPS-DONE"),
+    };
+#undef GH_MK
+    int missing = -1;
+    for (unsigned i = 0; i < sizeof(legs) / sizeof(legs[0]); i++) {
+        if (!mem_contains(acc, acc_len, legs[i].str, legs[i].len)) {
+            missing = (int)i;
+            break;
+        }
+    }
+    if (ran != 0 || status != 0 || missing >= 0) {
+        char nb[24];
+        t_putstr("joey: git-https gate FAILED first-missing=");
+        t_putstr(missing >= 0 ? legs[missing].str : "<none>");
+        t_putstr(" status=");
+        t_putstr(itoa_dec(status, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: git-https gate PASS (git clone + fetch over HTTPS from a real "
+             "remote under the phenotype, as SYSTEM -- DNS via netd+slirp, TLS "
+             "against the baked Mozilla CA bundle, smart-http + pack: network git "
+             "works, milestone B)\n");
+    return 0;
+}
+
+// do_git_workflow_gate -- the git-under-VIVARIUM milestone-C1 gate (the
+// self-hosting FLOOR). joey (SYSTEM) spawns `viv run /vivarium/git-workflow`,
+// which runs /gitworkflow.sh: the NON-INTERACTIVE developer workflow a real
+// self-hosting user hits -- branch, checkout, diff, status, merge (fast-forward
+// AND a 3-way with a real conflict resolved by editing the marked file, no
+// editor), rebase (non-interactive), reset, stash, worktree, manual gc. Each
+// step emits a GITWF-* marker; the gate asserts the terminal GITWF-DONE and
+// reports the first missing step (a merge failure and a rebase failure are
+// different bugs).
+//
+// Every verb rides ALREADY-PROVEN primitives (O_CREAT|O_EXCL, rename, O_APPEND,
+// fork+exec, stat/readdir), so this is the C1 "verify" half: it should pass
+// today, and whatever reddens is the precise "fill" work. It is deliberately
+// INSENSITIVE to #91 (the exit(N) boolean collapse) -- every leg branches on
+// 0-vs-nonzero (which the collapse preserves) or on file content, never a
+// specific exit code, so it stays green regardless of the #91 fix. Exit-code
+// FIDELITY is owned by the L-6c leg-I measurement.
+//
+// HERMETIC (no net): staged ONLY under THYLACINE_BAKE_GITWF=1 while the arc is
+// in flight, so it does not redden the default suite / SMP gate before it is
+// proven; driven by tools/test-git-workflow.sh. SOFT-SKIP when the bundle is
+// absent (git-probe idiom), BOOT-FATAL when present (a gate that cannot redden
+// is a disabled test). Extra caps: CSPRNG only (git's entropy), as git-probe.
+static int do_git_workflow_gate(void) {
+    static const char gb[] = "/vivarium/git-workflow/config.json";
+    long gbfd = t_open(T_WALK_OPEN_FROM_ROOT, gb, sizeof(gb) - 1, T_OPATH);
+    if (gbfd < 0) {
+        t_putstr("joey: git-workflow gate SKIPPED (no /vivarium/git-workflow "
+                 "bundle -- rebuild THYLACINE_BAKE_GITWF=1, or run "
+                 "tools/test-git-workflow.sh)\n");
+        return 0;
+    }
+    (void)t_close(gbfd);
+
+    static const char vargv[] = "/bin/viv\0run\0/vivarium/git-workflow";
+    unsigned char acc[4096];
+    size_t acc_len = 0;
+    int    status  = -1;
+    size_t total   = 0;
+    int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "git-workflow",
+                                    &status, acc, sizeof(acc), &acc_len, &total,
+                                    T_CAP_CSPRNG_READ);
+    (void)total;
+
+#define GW_MK(s) { (s), sizeof(s) - 1 }
+    // The full non-interactive workflow, in order, so the first-missing report
+    // pinpoints the failing verb. No entry is a substring of another (STASHSV vs
+    // STASHPOP, RESET vs RESOLVE, MERGEFF standalone) -- the substring-pollution
+    // trap the gate's own marker scan would otherwise fall into.
+    static const struct argv_marker legs[] = {
+        GW_MK("GITWF-INIT"),
+        GW_MK("GITWF-BASE"),
+        GW_MK("GITWF-BRANCH"),
+        GW_MK("GITWF-DIFF"),
+        GW_MK("GITWF-STATUS"),
+        GW_MK("GITWF-FCOMMIT"),
+        GW_MK("GITWF-LOG"),
+        GW_MK("GITWF-MERGEFF"),
+        GW_MK("GITWF-CONFLICT"),
+        GW_MK("GITWF-RESOLVE"),
+        GW_MK("GITWF-REBASE"),
+        GW_MK("GITWF-RESET"),
+        // stash save + pop: git's async pump sets its subprocess pipe non-blocking
+        // (fcntl F_SETFL O_NONBLOCK), served since the CNONBLOCK devpipe fill. The
+        // gate legs are a round-trip witness (save reverts the change -> clean
+        // tree; pop restores it), not a bare exit code.
+        GW_MK("GITWF-STASHSV"),
+        GW_MK("GITWF-STASHPOP"),
+        GW_MK("GITWF-WORKTREE"),
+        GW_MK("GITWF-GC"),
+        GW_MK("GITWF-DONE"),
+    };
+#undef GW_MK
+    int missing = -1;
+    for (unsigned i = 0; i < sizeof(legs) / sizeof(legs[0]); i++) {
+        if (!mem_contains(acc, acc_len, legs[i].str, legs[i].len)) {
+            missing = (int)i;
+            break;
+        }
+    }
+    if (ran != 0 || status != 0 || missing >= 0) {
+        char nb[24];
+        t_putstr("joey: git-workflow gate FAILED first-missing=");
+        t_putstr(missing >= 0 ? legs[missing].str : "<none>");
+        t_putstr(" status=");
+        t_putstr(itoa_dec(status, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: git-workflow gate PASS (branch + checkout + diff[same-size] "
+             "+ status + merge[ff+3-way-conflict] + rebase + reset + stash[save+pop] "
+             "+ worktree + gc under the phenotype, as SYSTEM -- the non-interactive "
+             "developer workflow: the self-hosting floor, milestone C1, all 13 "
+             "verbs)\n");
     return 0;
 }
 
@@ -1720,6 +2040,209 @@ static size_t g_michael_phrase_len = 0;
 static int g_recover_armed = 0;
 #endif /* THYLA_BOOT_PROBES (recovery-phrase capture state) */
 
+#if defined(THYLA_DEV_ACCOUNTS) && !defined(THYLA_BOOT_PROBES)
+// provision_dev_accounts -- login provisioning for a lean image. In a BOOT_PROBES-off
+// build do_corvus_bringup's full auth/elevate/create ladder (and every corvus wire
+// helper it uses) is compiled out, yet the getty still runs /sbin/login -- so a fresh
+// pool would have no one to authenticate (the finding-#1 bug). This creates the two
+// daily-use accounts:
+//   - michael: the bootstrap user (table empty -> corvus admits USER_CREATE with no
+//     caller cap; it provisions michael's encrypted home + enrolls the A-5c recovery
+//     phrase). The long-password admin identity.
+//   - cora: the short daily login. Once michael exists corvus's admin gate requires
+//     the caller to hold CAP_HOSTOWNER, so cora can only be created AFTER joey elevates
+//     -- AUTH michael -> ADMIN_ELEVATE(system passphrase) -> t_cap_use(HOSTOWNER).
+// On a persistent pool each USER_CREATE returns st==2 (already-exists / admin-gated) --
+// also success. Any other outcome fails the boot loudly (return -1 -> joey exits) rather
+// than boot an unloginnable system.
+//
+// susan/wheel + the ladder's E2E assertions stay BOOT_PROBES-only. Option F: the
+// CONTROL FLOW here is self-contained (a clean spine, no test assertions), duplicating
+// only the trivial corvus framing/byte-packing from the gated-out helper block; the
+// credential DATA is shared via the DEV_* #defines above the gate so the two paths
+// cannot drift on a cross-config pool. A malformed frame is rejected by corvus at boot
+// (never a silent skip). The eventual home for account provisioning is first-boot
+// (INSTALLER.md), which retires this and the ladder copy.
+static int pda_write_all(long fd, const unsigned char *b, size_t n) {
+    size_t s = 0;
+    while (s < n) { long w = t_write(fd, &b[s], n - s); if (w <= 0) return -1; s += (size_t)w; }
+    return 0;
+}
+static int pda_read_exact(long fd, unsigned char *b, size_t n) {
+    size_t g = 0;
+    while (g < n) { long r = t_read(fd, &b[g], n - g); if (r <= 0) return -1; g += (size_t)r; }
+    return 0;
+}
+// pda_exchange -- one self-contained corvus request/response over `conn`, mirroring
+// the ladder's corvus_exchange (gated out here). A response that would overflow rx is
+// a transport error, never a silent truncation. On success rx[3 .. 3+*rlen_out] holds
+// the reply payload and *status the corvus status byte.
+static int pda_exchange(long conn, unsigned char verb,
+                        const unsigned char *payload, size_t plen,
+                        unsigned char *rx, size_t rx_cap,
+                        unsigned char *status, size_t *rlen_out) {
+    unsigned char hdr[4] = { verb, CORVUS_PROTOCOL_VERSION,
+                             (unsigned char)(plen & 0xff), (unsigned char)(plen >> 8) };
+    if (pda_write_all(conn, hdr, 4) != 0) return -1;
+    if (plen > 0 && pda_write_all(conn, payload, plen) != 0) return -1;
+    if (pda_read_exact(conn, rx, 3) != 0) return -1;
+    *status = rx[0];
+    size_t rlen = (size_t)rx[1] | ((size_t)rx[2] << 8);
+    if (3 + rlen > rx_cap) return -1;
+    if (rlen > 0 && pda_read_exact(conn, &rx[3], rlen) != 0) return -1;
+    *rlen_out = rlen;
+    return 0;
+}
+// Connect /srv/corvus/ctl, retrying while corvus finishes posting (the two-step open
+// + poll-yield pacing of connect_corvus). Returns the ctl fd or -1.
+static long pda_connect(void) {
+    long rd_y, wr_y;
+    if (t_pipe(&rd_y, &wr_y) != 0) return -1;
+    long ctl = -1;
+    for (int i = 0; i < 60; i++) {
+        long root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/corvus", 11, T_OREAD);
+        if (root >= 0) {
+            long c = t_open(root, "ctl", 3, T_ORDWR);
+            (void)t_close(root);
+            if (c >= 0) { ctl = c; break; }
+        }
+        struct pollfd pfd = { .fd = (int)rd_y, .events = POLLIN, .revents = 0 };
+        (void)t_poll(&pfd, 1, 1000);
+    }
+    (void)t_close(rd_y);
+    (void)t_close(wr_y);
+    return ctl;
+}
+// USER_CREATE payload (verb 5): user_len(1) + user + pass_len(2 LE) + pass + backend(1)=0.
+// Byte-identical to the ladder's build_user_create.
+static size_t pda_build_user_create(unsigned char *pl, const char *user, size_t ulen,
+                                    const char *pass, size_t plen) {
+    size_t o = 0;
+    pl[o++] = (unsigned char)ulen;
+    for (size_t i = 0; i < ulen; i++) pl[o++] = (unsigned char)user[i];
+    pl[o++] = (unsigned char)(plen & 0xff);
+    pl[o++] = (unsigned char)(plen >> 8);
+    for (size_t i = 0; i < plen; i++) pl[o++] = (unsigned char)pass[i];
+    pl[o++] = 0; // backend = passphrase
+    return o;
+}
+// Wipe a buffer: the USER_CREATE OK frame carries michael's one-time A-5c recovery
+// phrase, the AUTH OK frame the 33-byte session token, and tx the token + system
+// passphrase mid-spine; none is surfaced here (phrase display belongs to first-boot /
+// INSTALLER.md), so we do not leave a live credential in joey's stack frame. The
+// volatile pointer keeps a release-build optimizer from eliding the stores as dead
+// (the buffers die on return) -- the explicit-bzero property corvus relies on too.
+static void pda_scrub(unsigned char *b, size_t n) {
+    volatile unsigned char *v = b;
+    for (size_t i = 0; i < n; i++) v[i] = 0;
+}
+static int provision_dev_accounts(void) {
+    long conn = pda_connect();
+    if (conn < 0) {
+        t_putstr("joey: provision_dev_accounts: connect /srv/corvus FAILED\n");
+        return -1;
+    }
+    unsigned char tx[128];      // largest frame is ADMIN_ELEVATE: token(33) + 2 + sys_pass
+    unsigned char rx[300];      // largest reply is USER_CREATE OK: 3 + id + gid + phrase
+    unsigned char token[33];
+    unsigned char st;
+    size_t rlen, o;
+    // A future longer credential must not silently overflow tx -- refuse at build time.
+    _Static_assert(1 + (sizeof(DEV_MICHAEL_USER) - 1) + 2 + (sizeof(DEV_MICHAEL_PASS) - 1) + 1
+                       <= sizeof(tx), "USER_CREATE michael frame must fit tx");
+    _Static_assert(1 + (sizeof(DEV_CORA_USER) - 1) + 2 + (sizeof(DEV_CORA_PASS) - 1) + 1
+                       <= sizeof(tx), "USER_CREATE cora frame must fit tx");
+    _Static_assert(33 + 2 + (sizeof(DEV_SYSTEM_PASS) - 1) <= sizeof(tx),
+                   "ADMIN_ELEVATE frame must fit tx");
+
+    // 1. USER_CREATE michael -- the bootstrap user. st==0 fresh; st==2 an account
+    //    already exists (persistent pool: joey is not yet elevated, so corvus's admin
+    //    gate returns PermissionDenied BEFORE the exists check -- st==2 proves only
+    //    "some account exists"; AUTH below proves michael specifically). Either is ok.
+    o = pda_build_user_create(tx, DEV_MICHAEL_USER, sizeof(DEV_MICHAEL_USER) - 1,
+                              DEV_MICHAEL_PASS, sizeof(DEV_MICHAEL_PASS) - 1);
+    if (pda_exchange(conn, 5, tx, o, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: provision_dev_accounts: USER_CREATE michael transport FAILED\n");
+        goto fail;
+    }
+    pda_scrub(rx, sizeof(rx));   // the OK frame carried michael's recovery phrase
+    if (st != 0 && st != 2) {
+        t_putstr("joey: provision_dev_accounts: USER_CREATE michael unexpected status\n");
+        goto fail;
+    }
+    t_putstr(st == 0 ? "joey: provision_dev_accounts: created michael (fresh pool)\n"
+                     : "joey: provision_dev_accounts: an account already exists (persistent pool)\n");
+
+    // 2. AUTH michael -> 33-byte session token (prefix 's'); proves michael's wrap is
+    //    loadable and the password matches.
+    o = 0;
+    tx[o++] = (unsigned char)(sizeof(DEV_MICHAEL_USER) - 1);
+    for (size_t i = 0; i < sizeof(DEV_MICHAEL_USER) - 1; i++) tx[o++] = (unsigned char)DEV_MICHAEL_USER[i];
+    tx[o++] = (unsigned char)((sizeof(DEV_MICHAEL_PASS) - 1) & 0xff);
+    tx[o++] = (unsigned char)((sizeof(DEV_MICHAEL_PASS) - 1) >> 8);
+    for (size_t i = 0; i < sizeof(DEV_MICHAEL_PASS) - 1; i++) tx[o++] = (unsigned char)DEV_MICHAEL_PASS[i];
+    if (pda_exchange(conn, 1, tx, o, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: provision_dev_accounts: AUTH michael transport FAILED\n");
+        goto fail;
+    }
+    if (st != 0 || rlen != 33 || rx[3] != 's') {
+        t_putstr("joey: provision_dev_accounts: AUTH michael FAILED\n");
+        pda_scrub(rx, sizeof(rx));
+        goto fail;
+    }
+    for (int i = 0; i < 33; i++) token[i] = rx[3 + i];
+    pda_scrub(rx, sizeof(rx));
+
+    // 3. ADMIN_ELEVATE(token + system passphrase) -> corvus writes joey's hostowner
+    //    grant; t_cap_use redeems it so the next USER_CREATE is admitted.
+    o = 0;
+    for (int i = 0; i < 33; i++) tx[o++] = token[i];
+    tx[o++] = (unsigned char)((sizeof(DEV_SYSTEM_PASS) - 1) & 0xff);
+    tx[o++] = (unsigned char)((sizeof(DEV_SYSTEM_PASS) - 1) >> 8);
+    for (size_t i = 0; i < sizeof(DEV_SYSTEM_PASS) - 1; i++) tx[o++] = (unsigned char)DEV_SYSTEM_PASS[i];
+    pda_scrub(token, sizeof(token));   // the token is consumed into the ELEVATE frame
+    if (pda_exchange(conn, 7, tx, o, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: provision_dev_accounts: ADMIN_ELEVATE transport FAILED\n");
+        goto fail;
+    }
+    if (st != 0) {
+        t_putstr("joey: provision_dev_accounts: ADMIN_ELEVATE FAILED\n");
+        goto fail;
+    }
+    if (t_cap_use(T_CAP_HOSTOWNER) != 0) {
+        t_putstr("joey: provision_dev_accounts: t_cap_use(HOSTOWNER) FAILED\n");
+        goto fail;
+    }
+
+    // 4. USER_CREATE cora -- joey now holds hostowner, so the admin gate admits it.
+    //    st==0 fresh; st==2 cora already exists (persistent pool). Either is ok.
+    o = pda_build_user_create(tx, DEV_CORA_USER, sizeof(DEV_CORA_USER) - 1,
+                              DEV_CORA_PASS, sizeof(DEV_CORA_PASS) - 1);
+    if (pda_exchange(conn, 5, tx, o, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: provision_dev_accounts: USER_CREATE cora transport FAILED\n");
+        goto fail;
+    }
+    pda_scrub(rx, sizeof(rx));
+    if (st != 0 && st != 2) {
+        t_putstr("joey: provision_dev_accounts: USER_CREATE cora unexpected status\n");
+        goto fail;
+    }
+    t_putstr(st == 0 ? "joey: provision_dev_accounts: created cora (fresh pool)\n"
+                     : "joey: provision_dev_accounts: cora already provisioned (persistent pool)\n");
+
+    pda_scrub(tx, sizeof(tx));       // tx still holds token bytes behind the last frame
+    (void)t_close(conn);
+    t_putstr("joey: provision_dev_accounts: michael + cora ready\n");
+    return 0;
+fail:
+    pda_scrub(rx, sizeof(rx));       // symmetric hygiene: leave no credential on any exit
+    pda_scrub(tx, sizeof(tx));       // an ELEVATE-fail path can leave the full token in tx
+    pda_scrub(token, sizeof(token));
+    (void)t_close(conn);
+    return -1;
+}
+#endif /* THYLA_DEV_ACCOUNTS && !THYLA_BOOT_PROBES */
+
 // A-1.7: corvus bringup -- spawn /sbin/corvus handing it `storage_dup_fd`
 // (a R|W-no-TRANSFER storage-root capability) at fd 0, then drive the
 // verb-protocol E2E over /srv/corvus. Moved out of main + called
@@ -1788,7 +2311,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // desync the baked phrase. On a fresh pool the host-baked wrap is intact.
     int fresh_pool = 0;
 
-    const char pass_michael[] = "correct-horse-battery-staple-v1";
+    const char pass_michael[] = DEV_MICHAEL_PASS;
     const char pass_susan[]   = "anatomy-trombone-glacier-velvet-42";
 
     // === USER_CREATE michael === (first user; bootstrap exception
@@ -1802,7 +2325,8 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // loaded from disk and joey is not yet elevated, so the admin gate returns
     // PermissionDenied -- accepted here; AUTH below proves the RELOADED wrap,
     // and RESOLVE_NAME proves the persisted id. Either path proceeds to AUTH.
-    pl = build_user_create(tx, "michael", 7, pass_michael, sizeof(pass_michael) - 1);
+    pl = build_user_create(tx, DEV_MICHAEL_USER, sizeof(DEV_MICHAEL_USER) - 1,
+                           pass_michael, sizeof(pass_michael) - 1);
     if (corvus_exchange(conn_fd, 5, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: USER_CREATE michael transport FAILED\n");
         return 1;
@@ -1845,7 +2369,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
     }
 
     // === AUTH michael (wrong passphrase) → BadAuth (1) ===
-    pl = build_auth(tx, "michael", 7, "wrong-passphrase", 16);
+    pl = build_auth(tx, DEV_MICHAEL_USER, sizeof(DEV_MICHAEL_USER) - 1, "wrong-passphrase", 16);
     if (corvus_exchange(conn_fd, 1, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: AUTH(wrong) transport FAILED\n");
         return 1;
@@ -1859,7 +2383,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
     t_putstr("joey: AUTH(wrong pass) returned BadAuth (expected)\n");
 
     // === AUTH michael (correct) → OK + 33-byte session token ===
-    pl = build_auth(tx, "michael", 7, pass_michael, sizeof(pass_michael) - 1);
+    pl = build_auth(tx, DEV_MICHAEL_USER, sizeof(DEV_MICHAEL_USER) - 1, pass_michael, sizeof(pass_michael) - 1);
     if (corvus_exchange(conn_fd, 1, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: AUTH transport FAILED\n");
         return 1;
@@ -1900,7 +2424,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // returns OK. Then joey redeems via t_cap_use → joey's Proc gets
     // CAP_HOSTOWNER. After this, joey can call admin-gated verbs
     // (USER_CREATE et al.).
-    pl = build_admin_elevate(tx, token, "thylacine", 9);
+    pl = build_admin_elevate(tx, token, DEV_SYSTEM_PASS, sizeof(DEV_SYSTEM_PASS) - 1);
     if (corvus_exchange(conn_fd, 7, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: ADMIN_ELEVATE transport FAILED\n");
         return 1;
@@ -1966,7 +2490,8 @@ static int do_corvus_bringup(long storage_dup_fd) {
     if (fresh_pool) {
         static const char sys_phrase[] = CORVUS_SYSTEM_RECOVERY_PHRASE;
         pl = build_recover_system(tx, (const unsigned char *)sys_phrase,
-                                  sizeof(sys_phrase) - 1, "thylacine", 9);
+                                  sizeof(sys_phrase) - 1,
+                                  DEV_SYSTEM_PASS, sizeof(DEV_SYSTEM_PASS) - 1);
         if (corvus_exchange(conn_fd, 8, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
             t_putstr("joey: RECOVER(system) transport FAILED\n");
             return 1;
@@ -2049,7 +2574,8 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // -- a local-VM affordance, NOT a security posture; cora joins michael/susan
     // in the baked test-identity set stripped for production builds (#880).
     // login provisions cora's encrypted home on her first interactive login.
-    pl = build_user_create(tx, "cora", 4, "kora", 4);
+    pl = build_user_create(tx, DEV_CORA_USER, sizeof(DEV_CORA_USER) - 1,
+                           DEV_CORA_PASS, sizeof(DEV_CORA_PASS) - 1);
     if (corvus_exchange(conn_fd, 5, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: USER_CREATE cora transport FAILED\n");
         return 1;
@@ -2454,7 +2980,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
         t_putstr("joey: reconnect t_srv_connect FAILED\n");
         return 1;
     }
-    pl = build_auth(tx, "michael", 7, pass_michael, sizeof(pass_michael) - 1);
+    pl = build_auth(tx, DEV_MICHAEL_USER, sizeof(DEV_MICHAEL_USER) - 1, pass_michael, sizeof(pass_michael) - 1);
     if (corvus_exchange(conn_fd3, 1, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: reconnect AUTH transport FAILED\n");
         return 1;
@@ -6647,6 +7173,30 @@ int main(void) {
             }
             (void)t_close(bin_src_h);
 
+            // UM-6 (X-11): graft the /bin/sh compat shim MAFTER onto /bin,
+            // making /bin a UNION [devramfs (MBEFORE, native binaries win),
+            // shcompat (MAFTER, the `sh -> /viv/abin/sh` fallback)]. Because
+            // MAFTER appends, every existing /bin/<name> spawn (corvus, login,
+            // loom-*, ...) still resolves in the devramfs member searched FIRST
+            // -- the #58 ordering invariant above is preserved. execve("/bin/sh")
+            // misses devramfs (no native sh) -> hits shcompat's sh symlink ->
+            // Design D re-anchors the absolute target -> /viv/abin MPHENO_LINUX
+            // busybox. SOFT: no /lib/shcompat (no busybox tarball) -> /bin stays
+            // the single devramfs member, unchanged (no /bin/sh, as before).
+            {
+                long shsrc = t_open(T_WALK_OPEN_FROM_ROOT, "/lib/shcompat", 13, T_OPATH);
+                if (shsrc < 0) {
+                    t_putstr("joey: UM-6 /bin/sh shim SKIPPED (no /lib/shcompat)\n");
+                } else {
+                    if (t_mount("/bin", 4, shsrc, T_MAFTER) != 0) {
+                        t_putstr("joey: UM-6 /bin/sh shim t_mount(/bin MAFTER) FAILED\n");
+                    } else {
+                        t_putstr("joey: UM-6 /bin/sh shim mount OK (union /bin: devramfs + shcompat)\n");
+                    }
+                    (void)t_close(shsrc);
+                }
+            }
+
             // #57: re-establish /proc + /ctl on the pivoted root (mirror /srv +
             // /bin). mkdir each (idempotent -- the Stratum pool persists across
             // reboots), graft the pre-pivot Dev root (MREPL; the mount takes its
@@ -6715,6 +7265,85 @@ int main(void) {
                 }
                 (void)t_close(e);
                 t_putstr("joey: Go-4b post-pivot /env re-graft OK\n");
+            }
+
+            // VIVARIUM section 13: the /viv/bin PRODUCTION phenotype mount --
+            // ship git on the user's PATH, run under the Linux phenotype BY
+            // LOCATION (docs/VIVARIUM.md 13). Bind the pool's /vivarium/viv-bin
+            // tree (static git + dashed pack symlinks + gitconfig, staged by
+            // build.sh) onto /viv/bin with MPHENO_LINUX, so /viv/bin/git
+            // resolves and its exec CROSSES a pheno-mount -> the child is
+            // PHENO_LINUX (the second declaration channel; no manifest, no
+            // spawn-arg). Ungated so real logins inherit it. SOFT, unlike the
+            // core /bin mount: a build with no static-git tarball simply has no
+            // /vivarium/viv-bin and thus no /viv/bin, and a mount hiccup degrades
+            // to "no git on PATH" rather than bricking the boot -- the
+            // BOOT_PROBES git gate below is what turns a broken mount RED.
+            // NOTE the A-3 boundary (per-principal 9P ownership, unbuilt at
+            // v1.0): git run as SYSTEM owns the pool files it touches and works;
+            // a real non-SYSTEM USER cannot yet chmod its own repo files, so
+            // seamless user-git awaits A-3 + the ut cap-conferral (the user-git
+            // arc). This mount SHIPS the binary and proves it as SYSTEM.
+            {
+                long gsrc = t_open(T_WALK_OPEN_FROM_ROOT, "/vivarium/viv-bin", 17,
+                                   T_OPATH);
+                if (gsrc < 0) {
+                    t_putstr("joey: section-13 /viv/bin SKIPPED (no"
+                             " /vivarium/viv-bin -- no static-git tarball)\n");
+                } else {
+                    long vd  = mkdir_or_open(T_WALK_OPEN_FROM_ROOT, "viv", 3);
+                    long vbd = (vd >= 0) ? mkdir_or_open(vd, "bin", 3) : -1;
+                    if (vd  >= 0) (void)t_close(vd);
+                    if (vbd >= 0) (void)t_close(vbd);
+                    if (vbd < 0) {
+                        t_putstr("joey: section-13 /viv + /viv/bin mkdir FAILED"
+                                 " (degraded: no git on PATH)\n");
+                    } else if (t_mount("/viv/bin", 8, gsrc,
+                                       T_MREPL | T_MPHENO_LINUX) != 0) {
+                        t_putstr("joey: section-13 /viv/bin t_mount FAILED"
+                                 " (degraded: no git on PATH)\n");
+                    } else {
+                        t_putstr("joey: section-13 /viv/bin git mount OK"
+                                 " (pheno-linux)\n");
+                    }
+                    (void)t_close(gsrc);
+                }
+            }
+
+            // X-2 (AUX-ROADMAP Stream 0): the /viv/abin busybox applet tree --
+            // the same section-13 phenotype-BY-LOCATION mount as /viv/bin
+            // above, carrying tar/gzip/find/sed/~80 more. Its links are
+            // RELATIVE (`-> busybox`, built that way by build.sh), which is the
+            // whole reason it works here at all: Alpine's own absolute
+            // `-> /bin/busybox` links re-anchor at the caller's root (I-28,
+            // kernel/stalk.c:383) and dangle for anyone outside a container.
+            // SOFT exactly like the git mount: no busybox tarball -> no
+            // /vivarium/viv-abin -> no /viv/abin, degrading to "no applets on
+            // PATH" rather than bricking the boot.
+            {
+                long asrc = t_open(T_WALK_OPEN_FROM_ROOT, "/vivarium/viv-abin", 18,
+                                   T_OPATH);
+                if (asrc < 0) {
+                    t_putstr("joey: section-13 /viv/abin SKIPPED (no"
+                             " /vivarium/viv-abin -- no busybox tarball)\n");
+                } else {
+                    long avd  = mkdir_or_open(T_WALK_OPEN_FROM_ROOT, "viv", 3);
+                    long avbd = (avd >= 0) ? mkdir_or_open(avd, "abin", 4) : -1;
+                    if (avd  >= 0) (void)t_close(avd);
+                    if (avbd >= 0) (void)t_close(avbd);
+                    if (avbd < 0) {
+                        t_putstr("joey: section-13 /viv/abin mkdir FAILED"
+                                 " (degraded: no applets on PATH)\n");
+                    } else if (t_mount("/viv/abin", 9, asrc,
+                                       T_MREPL | T_MPHENO_LINUX) != 0) {
+                        t_putstr("joey: section-13 /viv/abin t_mount FAILED"
+                                 " (degraded: no applets on PATH)\n");
+                    } else {
+                        t_putstr("joey: section-13 /viv/abin busybox mount OK"
+                                 " (pheno-linux)\n");
+                    }
+                    (void)t_close(asrc);
+                }
             }
 
 /* #228: the Clade + Go on-device toolchain probes. Ungated until now, so the
@@ -7245,16 +7874,20 @@ int main(void) {
                                 // set PATH: gopls resolves `go` via exec.LookPath
                                 // ($PATH) to load a workspace view (else "no
                                 // views") + os.Executable() falls back to $PATH.
-                                // Login gives the real user env PATH=/bin:/goroot/
-                                // bin; joey's boot env has none. Mutated HERE (in
-                                // the will-spawn path) so it is symmetric with the
-                                // unlink below -- F3 (no PATH leak on a skip path).
+                                // Login gives the real user env a PATH (seeded in
+                                // login/main.rs); joey's boot env has none. Mutated
+                                // HERE (in the will-spawn path) so it is symmetric
+                                // with the unlink below -- F3 (no PATH leak on a skip
+                                // path).
                                 if (edir >= 0) {
                                     (void)t_unlink(edir, "GO111MODULE", 11, 0);
                                     long pv = t_walk_create(edir, "PATH", 4,
                                                             T_OWRITE, 0644);
                                     if (pv >= 0) {
-                                        const char pc[] = "/bin:/goroot/bin";
+                                        // Mirror the login PATH seed (login/main.rs)
+                                        // so this boot-test run matches an interactive
+                                        // session; drift is a bug.
+                                        const char pc[] = "/bin:/goroot/bin:/clade/bin:/viv/bin:/viv/abin";
                                         (void)t_write(pv, pc, sizeof(pc) - 1);
                                         (void)t_close(pv);
                                     }
@@ -7262,7 +7895,7 @@ int main(void) {
                                 // argv[0] ABSOLUTE so os.Executable() resolves
                                 // it (executable_path.go's absolute branch) even
                                 // with no PATH in joey's env -- matching the
-                                // login-env interactive run (PATH=/bin:/goroot/bin)
+                                // login-env interactive run (which has a $PATH)
                                 // where os.Executable succeeds + gopls starts its
                                 // telemetry sidecar.
                                 static const char argv_gp[] =
@@ -9346,6 +9979,16 @@ int main(void) {
         }
         (void)t_close(corvus_storage);
 
+#if defined(THYLA_DEV_ACCOUNTS) && !defined(THYLA_BOOT_PROBES)
+        // Lean image: do_corvus_bringup spawned corvus (with the elevation grant caps,
+        // stamped before the BOOT_PROBES gate) but its provisioning ladder is compiled
+        // out, so create the login users (michael + cora) here -- the finding-#1 fix. A
+        // BOOT_PROBES build provisions via that ladder and skips this.
+        if (provision_dev_accounts() != 0) {
+            return 1;
+        }
+#endif
+
 #if THYLA_BOOT_PROBES
         // === A-4a-3: the legate E2E prover ===
         // corvus is up, michael is eligible for fs-admin (granted in the bringup),
@@ -9612,13 +10255,23 @@ int main(void) {
 
             // === VIVARIUM V-7 gate: a viv-assembled container, proven from
             // the inside. Boot-fatal. joey spawns `viv run /vivarium/probe`
-            // with MAY_POST_SERVICE (viv confers it on its per-container
-            // diorama; joey is the grant root). viv assembles the section-7.2
-            // territory -- bundle rootfs as /, the per-container diorama's
-            // /proc + /sys, the /dev leaf binds, the manifest env -- and
-            // spawns /bin/viv-probe inside it; the probe's legs (host absent,
-            // pid view == {self}, principal == invoker's, live /dev binds)
-            // are the gate. viv exits with the probe's status.
+            // -- with NO perm bits: viv needs none (its per-container diorama
+            // rides a private pipe pair, not a /srv name), and this spawn is
+            // deliberately the plain shape a session shell uses, so the boot
+            // gate runs the same path an interactive `viv run` does. viv
+            // assembles the section-7.2 territory -- bundle rootfs as /, the
+            // per-container diorama's /proc + /sys, the /dev leaf binds, the
+            // manifest env -- and spawns /bin/viv-probe inside it; the probe's
+            // legs (host absent, pid view == {self}, principal == invoker's,
+            // live /dev binds) are the gate. viv exits with the probe's status.
+            //
+            // TWO of them, CONCURRENTLY. Each probe asserts its pid view is
+            // EXACTLY {self}, so two live containers prove from the inside
+            // what the retired #101 leg proved from outside: container A's
+            // /proc never shows container B (each diorama filters by ITS
+            // runner's descendants; nothing shared -- no fixed name -- exists
+            // to cross them). It is also the concurrent-containers claim, gated
+            // rather than asserted.
             {
                 const char vb[] = "/vivarium/probe/config.json";
                 long bfd = t_open(T_WALK_OPEN_FROM_ROOT, vb, sizeof(vb) - 1,
@@ -9639,130 +10292,170 @@ int main(void) {
                     .name_len      = sizeof(vname) - 1,
                     .argv_data_len = sizeof(vargv),
                     .argc          = 3,
-                    .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
                 };
-                long vpid = t_spawn_full_argv(&vreq);
-                if (vpid <= 0) {
-                    t_putstr("joey: V-7 spawn /bin/viv FAILED\n");
-                    return 1;
+                long vpid[2] = { -1, -1 };
+                for (int k = 0; k < 2; k++) {
+                    vpid[k] = t_spawn_full_argv(&vreq);
+                    if (vpid[k] <= 0) {
+                        t_putstr("joey: V-7 spawn /bin/viv FAILED\n");
+                        return 1;
+                    }
                 }
-                int  vst  = 0;
-                long vgot = t_wait_pid_for((int)vpid, 0, &vst);
-                if (vgot != vpid || vst != 0) {
-                    t_putstr("joey: V-7 viv-probe (containered) FAILED rc=");
-                    t_putstr(itoa_dec(vst, pbuf, sizeof(pbuf)));
-                    t_putstr("\n");
-                    return 1;
+                for (int k = 0; k < 2; k++) {
+                    int  vst  = 0;
+                    long vgot = t_wait_pid_for((int)vpid[k], 0, &vst);
+                    if (vgot != vpid[k] || vst != 0) {
+                        t_putstr("joey: V-7 viv-probe (containered, x2 concurrent) "
+                                 "FAILED rc=");
+                        t_putstr(itoa_dec(vst, pbuf, sizeof(pbuf)));
+                        t_putstr("\n");
+                        return 1;
+                    }
                 }
-                t_putstr("joey: V-7 viv-probe (containered) PASS\n");
+                t_putstr("joey: V-7 viv-probe (containered, x2 concurrent) PASS\n");
             }
 
-            // === V-8 F3 (#101): the vivarium diorama refuses a foreign runner.
+            // === The per-container diorama CHANNEL (supersedes the V-8 F3
+            // #101 leg). A vivarium diorama serves ONE private pipe pair --
+            // the server ends arrive as its fds 0/1, the runner attaches the
+            // client ends with SYS_ATTACH_9P -- and posts NO /srv name, so no
+            // second runner can reach it (what #101's peer-pid gate used to
+            // check) and no posting privilege is needed (what kept a session
+            // shell's `viv run` from ever spawning its diorama). Its one
+            // startup premise is that the argv runner is its PARENT -- the
+            // Proc that could have made the pair; membership descends from
+            // that pid, so a wrong one is a wrong view and must fail hard.
             //
-            // The leg above proves the ALLOW branch (a real `viv run` still
-            // mounts its own diorama). It does NOT prove the gate is wired at
-            // all -- an `if (false)` gate would pass it identically -- so the
-            // DENY branch needs its own proof, and this is the only place a
-            // non-runner can reach a vivarium-mode diorama: inside the
-            // container /srv is not bound, so viv-probe cannot attempt it.
-            //
-            // Spawn one whose declared runner is a pid joey cannot be, then
-            // attempt the open joey has no right to. Runs AFTER the container
-            // leg so it cannot collide with the real /srv/viv-dio.
-            {
+            // Two spawns one variable apart, so neither branch can pass for
+            // the wrong reason (a diorama that cannot start would satisfy the
+            // refusal leg alone; a diorama with no parent check would satisfy
+            // the serve leg alone):
+            //   1. runner = joey (its true parent): the attach MUST succeed,
+            //      and, with the server provably up, /srv/viv-dio MUST NOT
+            //      resolve -- the "posts nothing" negative with its positive
+            //      control in the same breath. Closing the attach root is the
+            //      last client-end drop; the diorama MUST see EOF and exit on
+            //      its own (the brace a dead runner's container relies on).
+            //   2. runner = 4294967295 (a pid joey is not): the diorama exits
+            //      at its parent check before answering Tversion; our reply
+            //      read sees EOF and the attach MUST fail.
+            for (int leg = 0; leg < 2; leg++) {
                 const char dname[] = "/bin/diorama";
-                const char dargv[] = "/bin/diorama\0--vivarium\0" "4294967295";
+                char dargv[64];
+                unsigned dargv_len = 0;
+                {
+                    const char a0[] = "/bin/diorama";
+                    const char a1[] = "--vivarium";
+                    for (unsigned k = 0; k < sizeof(a0); k++) dargv[dargv_len++] = a0[k];
+                    for (unsigned k = 0; k < sizeof(a1); k++) dargv[dargv_len++] = a1[k];
+                    if (leg == 0) {
+                        char nb[24];
+                        const char *ns = itoa_dec(t_getpid(), nb, sizeof(nb));
+                        for (unsigned k = 0; ns[k]; k++) dargv[dargv_len++] = ns[k];
+                        dargv[dargv_len++] = '\0';
+                    } else {
+                        const char bogus[] = "4294967295";
+                        for (unsigned k = 0; k < sizeof(bogus); k++)
+                            dargv[dargv_len++] = bogus[k];
+                    }
+                }
+                long c2s_rd = -1, c2s_wr = -1, s2c_rd = -1, s2c_wr = -1;
+                if (t_pipe(&c2s_rd, &c2s_wr) < 0 || t_pipe(&s2c_rd, &s2c_wr) < 0) {
+                    t_putstr("joey: viv-channel t_pipe FAILED\n");
+                    return 1;
+                }
+                unsigned int dfds[2] = { (unsigned int)c2s_rd, (unsigned int)s2c_wr };
                 struct t_sys_spawn_args dreq = {
                     .name_va       = (unsigned long)dname,
                     .argv_data_va  = (unsigned long)dargv,
                     .name_len      = sizeof(dname) - 1,
-                    .argv_data_len = sizeof(dargv),
+                    .argv_data_len = dargv_len,
                     .argc          = 3,
-                    .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+                    .fd_list_va    = (unsigned long)dfds,
+                    .fd_count      = 2,
                 };
                 long fpid = t_spawn_full_argv(&dreq);
+                // Our copies of the server ends go regardless: while we hold
+                // c2s_rd the diorama's death can never surface as EOF to us.
+                (void)t_close(c2s_rd);
+                (void)t_close(s2c_wr);
                 if (fpid <= 0) {
-                    t_putstr("joey: #101 spawn diorama(foreign) FAILED\n");
+                    t_putstr("joey: viv-channel spawn diorama FAILED\n");
                     return 1;
                 }
+                long root = t_attach_9p(c2s_wr, s2c_rd, "/", 1, 0);
+                (void)t_close(c2s_wr);
+                (void)t_close(s2c_rd);
 
-                // PRECONDITION, and the whole leg rests on it: prove the
-                // service is POSTED before concluding anything from a refused
-                // open. Without this the assertion below is satisfied just as
-                // well by a diorama that never came up. O_PATH walks to the
-                // service without opening it, so it is not itself gated --
-                // devsrv's open IS the connect, and only the connect attaches.
-                const char vd[] = "/srv/viv-dio";
-                long posted = -1;
-                long fr = -1, fw = -1;
-                if (t_pipe(&fr, &fw) == 0) {
-                    for (int i = 0; i < 30; i++) {
-                        posted = t_open(T_WALK_OPEN_FROM_ROOT, vd,
-                                        sizeof(vd) - 1, T_OPATH);
-                        if (posted >= 0) break;
-                        int fst = 0;
-                        if (t_wait_pid_for((int)fpid, WAIT_WNOHANG, &fst)
-                            == fpid) {
-                            t_putstr("joey: #101 diorama(foreign) died before "
-                                     "posting -- leg would be vacuous\n");
-                            t_close(fr);
-                            t_close(fw);
-                            return 1;
-                        }
-                        struct pollfd fpf = { .fd      = (int)fr,
-                                              .events  = POLLIN,
-                                              .revents = 0 };
-                        (void)t_poll(&fpf, 1, 500);
+                if (leg == 0) {
+                    if (root < 0) {
+                        t_putstr("joey: viv-channel FAILED -- the runner could "
+                                 "not attach its own diorama over the pipe pair\n");
+                        return 1;
                     }
-                    t_close(fr);
-                    t_close(fw);
+                    const char vd[] = "/srv/viv-dio";
+                    long named = t_open(T_WALK_OPEN_FROM_ROOT, vd, sizeof(vd) - 1,
+                                        T_OPATH);
+                    (void)t_close(root);
+                    if (named >= 0) {
+                        (void)t_close(named);
+                        t_putstr("joey: viv-channel FAILED -- a vivarium diorama "
+                                 "posted /srv/viv-dio\n");
+                        return 1;
+                    }
+                    // EOF-exit: bounded wait for the diorama to leave on its
+                    // own; a diorama that outlives its channel is a leak the
+                    // ctl-kill below would mask.
+                    int st = -1;
+                    long got = -1;
+                    for (int i = 0; i < 40 && got != fpid; i++) {
+                        got = t_wait_pid_for((int)fpid, WAIT_WNOHANG, &st);
+                        if (got == fpid) break;
+                        long pr = -1, pw = -1;
+                        if (t_pipe(&pr, &pw) == 0) {
+                            struct pollfd fpf = { .fd = (int)pr, .events = POLLIN,
+                                                  .revents = 0 };
+                            (void)t_poll(&fpf, 1, 100);
+                            (void)t_close(pr);
+                            (void)t_close(pw);
+                        }
+                    }
+                    if (got != fpid) {
+                        char fctl[64];
+                        unsigned fctl_len = 0;
+                        char nb[24];
+                        const char *ns = itoa_dec(fpid, nb, sizeof(nb));
+                        const char pfx[] = "/proc/";
+                        for (unsigned k = 0; k < sizeof(pfx) - 1; k++)
+                            fctl[fctl_len++] = pfx[k];
+                        for (unsigned k = 0; ns[k]; k++) fctl[fctl_len++] = ns[k];
+                        const char sfx[] = "/ctl";
+                        for (unsigned k = 0; k < sizeof(sfx) - 1; k++)
+                            fctl[fctl_len++] = sfx[k];
+                        long kfd = t_open(T_WALK_OPEN_FROM_ROOT, fctl, fctl_len,
+                                          T_OWRITE);
+                        if (kfd >= 0) {
+                            (void)t_write(kfd, "kill", 4);
+                            (void)t_close(kfd);
+                        }
+                        (void)t_wait_pid_for((int)fpid, 0, &st);
+                        t_putstr("joey: viv-channel FAILED -- the diorama did not "
+                                 "exit on channel EOF (killed)\n");
+                        return 1;
+                    }
+                    t_putstr("joey: viv-channel: private pair serves, no /srv name, "
+                             "EOF-exit\n");
+                } else {
+                    int st = -1;
+                    (void)t_wait_pid_for((int)fpid, 0, &st);
+                    if (root >= 0) {
+                        (void)t_close(root);
+                        t_putstr("joey: viv-channel FAILED -- a diorama served a "
+                                 "runner that is not its parent\n");
+                        return 1;
+                    }
+                    t_putstr("joey: viv-channel: non-parent runner REFUSED\n");
                 }
-
-                // Teardown, built once: the diorama serves forever, and it
-                // holds /srv/viv-dio, so it MUST be gone before boot moves on.
-                char fctl[64];
-                unsigned fctl_len = 0;
-                {
-                    char nb[24];
-                    const char *ns = itoa_dec(fpid, nb, sizeof(nb));
-                    const char pfx[] = "/proc/";
-                    for (unsigned k = 0; k < sizeof(pfx) - 1; k++)
-                        fctl[fctl_len++] = pfx[k];
-                    for (unsigned k = 0; ns[k]; k++) fctl[fctl_len++] = ns[k];
-                    const char sfx[] = "/ctl";
-                    for (unsigned k = 0; k < sizeof(sfx) - 1; k++)
-                        fctl[fctl_len++] = sfx[k];
-                    fctl[fctl_len] = '\0';
-                }
-
-                if (posted < 0) {
-                    t_putstr("joey: #101 /srv/viv-dio never posted -- leg "
-                             "would be vacuous\n");
-                    return 1;
-                }
-                (void)t_close(posted);
-
-                // THE ASSERTION: joey is not pid 4294967295, so the attach
-                // must be refused and the open must fail.
-                long stolen = t_open(T_WALK_OPEN_FROM_ROOT, vd,
-                                     sizeof(vd) - 1, T_OREAD);
-
-                long kfd = t_open(T_WALK_OPEN_FROM_ROOT, fctl, fctl_len,
-                                  T_OWRITE);
-                if (kfd >= 0) {
-                    (void)t_write(kfd, "kill", 4);
-                    (void)t_close(kfd);
-                }
-                int fst2 = 0;
-                (void)t_wait_pid_for((int)fpid, 0, &fst2);
-
-                if (stolen >= 0) {
-                    (void)t_close(stolen);
-                    t_putstr("joey: #101 FAILED -- a foreign runner mounted "
-                             "the container diorama\n");
-                    return 1;
-                }
-                t_putstr("joey: #101 foreign-runner attach REFUSED\n");
             }
 
             // === VIVARIUM V-1b gate: the phenotype, from both vantages.
@@ -9849,7 +10542,6 @@ int main(void) {
                     .name_len      = sizeof(hname) - 1,
                     .argv_data_len = sizeof(hargv),
                     .argc          = 3,
-                    .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
                 };
                 long hpid = t_spawn_full_argv(&hreq);
                 if (hpid <= 0) {
@@ -9891,6 +10583,265 @@ int main(void) {
                 }
                 t_putstr("joey: V-1b phenotype (native + containered linux) PASS\n");
 
+                // === VIVARIUM V-1b-loc: the phenotype MOUNT mechanism, bare
+                // spawned. The container leg above declared the phenotype
+                // through the MANIFEST (viv reads org.thylacine.phenotype).
+                // This leg declares it through the SECOND channel: a mount
+                // marked MPHENO_LINUX, so a binary whose exec RESOLUTION
+                // crosses it is stamped PHENO_LINUX with NO spawn-arg and NO
+                // manifest -- the resolver-subtree-scope mechanism, live.
+                //
+                // The claim is SUBTREE SCOPE: the SAME on-pool bytes
+                // (viv-pheno-probe) are native reached via /bin -- proven by
+                // leg A above (viv-pheno-probe native -> exit 0) -- and Linux
+                // reached via a pheno-mount. Only the mount crossed differs, and
+                // it is the ONLY declaration (pheno_flags = 0, no manifest).
+                //
+                // This proof mounts at a DISTINCT point, /viv/probe-bin, NOT the
+                // product /viv/bin: the section-13 production mount above already
+                // grafted git at /viv/bin (MPHENO_LINUX), and a proof that
+                // MREPL-rebound + t_unmounted /viv/bin would tear the shipped git
+                // mount out from under every later leg. The mechanism is
+                // mount-point-agnostic, so /viv/probe-bin proves it identically.
+                // PROOF SHORTCUT, stated so it is not mistaken for the product:
+                // this binds the WHOLE initrd /bin at /viv/probe-bin, so every
+                // native tool is (harmlessly, here) reachable as Linux; the
+                // product /viv/bin holds ONLY the git tree. Runs after the
+                // container leg, so its narrower proof has already reported if
+                // the phenotype itself is broken.
+                {
+                    // (a) A writable verdict file at joey's OWN root: the bare
+                    // probe resolves "/pheno-scratch" in joey's namespace (no
+                    // container rootfs), so it lands here. Stamp a sentinel
+                    // first -- a stale "OK" from a prior PRESERVEd boot must not
+                    // pass a broken run (the fixture-freshness rule).
+                    long scfd = t_walk_create(T_WALK_OPEN_FROM_ROOT,
+                                              "pheno-scratch", 13,
+                                              T_OWRITE | T_OTRUNC, 0644u);
+                    if (scfd < 0) {
+                        scfd = t_open(T_WALK_OPEN_FROM_ROOT, "/pheno-scratch", 14,
+                                      T_OWRITE | T_OTRUNC);
+                    }
+                    if (scfd < 0) {
+                        t_putstr("joey: V-1b-loc /pheno-scratch unopenable\n");
+                        return 1;
+                    }
+                    if (t_write(scfd, "??\n", 3) != 3) {
+                        t_putstr("joey: V-1b-loc scratch stamp FAILED\n");
+                        (void)t_close(scfd);
+                        return 1;
+                    }
+                    (void)t_close(scfd);
+
+                    // (b) Build the pheno mount: mkdir /viv (idempotent -- the
+                    // production mount may already own it), mkdir /viv/probe-bin,
+                    // then graft the initrd binary tree onto /viv/probe-bin with
+                    // MPHENO_LINUX. The source is a fresh O_PATH handle to /bin
+                    // (the #58 bind above already resolves it to the devramfs
+                    // bin root); t_mount takes its own ref, so it closes after.
+                    long vivd = mkdir_or_open(T_WALK_OPEN_FROM_ROOT, "viv", 3);
+                    if (vivd < 0) {
+                        t_putstr("joey: V-1b-loc mkdir /viv FAILED\n");
+                        return 1;
+                    }
+                    long vbd = mkdir_or_open(vivd, "probe-bin", 9);
+                    (void)t_close(vivd);
+                    if (vbd < 0) {
+                        t_putstr("joey: V-1b-loc mkdir /viv/probe-bin FAILED\n");
+                        return 1;
+                    }
+                    (void)t_close(vbd);
+                    long bin_src2 = t_open(T_WALK_OPEN_FROM_ROOT, "/bin", 4,
+                                           T_OPATH);
+                    if (bin_src2 < 0) {
+                        t_putstr("joey: V-1b-loc /bin source unopenable\n");
+                        return 1;
+                    }
+                    if (t_mount("/viv/probe-bin", 14, bin_src2,
+                                T_MREPL | T_MPHENO_LINUX) != 0) {
+                        t_putstr("joey: V-1b-loc t_mount(/viv/probe-bin,"
+                                 " MPHENO_LINUX) FAILED\n");
+                        (void)t_close(bin_src2);
+                        return 1;
+                    }
+                    (void)t_close(bin_src2);
+
+                    // (c) The bare spawn -- pheno_flags = 0. The MOUNT is the
+                    // sole declaration; the exec resolver crosses /viv/probe-bin
+                    // and stamps PHENO_LINUX. The probe's "linux-loc" mode is the
+                    // BARE witness (the container's full "linux" mode needs viv
+                    // to hand it fd 0 as a reader-less pipe for its SIGPIPE
+                    // legs; a bare spawn hands nothing): it proves ONLY the
+                    // claim -- brk == -ENOSYS (the translation discriminator; a
+                    // native Proc gets -1) plus real openat/read/write bytes.
+                    // Were the mechanism dead the probe would run native, the
+                    // discriminator could not hold, and the verdict file would
+                    // name L01, not OK. The "same bytes, native via /bin"
+                    // half of the subtree-scope claim is leg A above; that the
+                    // MOUNT and not the arg decides is the kernel unit test
+                    // exec_ns.pheno_mount_crossing (mount cross sets it, a plain
+                    // mount does not).
+                    const char lname[] = "/viv/probe-bin/viv-pheno-probe";
+                    const char largv[] =
+                        "/viv/probe-bin/viv-pheno-probe\0linux-loc";
+                    struct t_sys_spawn_args lreq = {
+                        .name_va       = (unsigned long)lname,
+                        .argv_data_va  = (unsigned long)largv,
+                        .name_len      = sizeof(lname) - 1,
+                        .argv_data_len = sizeof(largv),
+                        .argc          = 2,
+                    };
+                    long lpid = t_spawn_full_argv(&lreq);
+                    if (lpid <= 0) {
+                        t_putstr("joey: V-1b-loc spawn"
+                                 " /viv/probe-bin/viv-pheno-probe FAILED\n");
+                        return 1;
+                    }
+                    int  lst  = 0;
+                    long lgot = t_wait_pid_for((int)lpid, 0, &lst);
+
+                    char lmark[8];
+                    for (unsigned i = 0; i < sizeof(lmark); i++) lmark[i] = 0;
+                    long lrfd = t_open(T_WALK_OPEN_FROM_ROOT, "/pheno-scratch",
+                                       14, T_OREAD);
+                    long ln = (lrfd < 0) ? -1
+                                         : t_read(lrfd, lmark, sizeof(lmark) - 1);
+                    if (lrfd >= 0) (void)t_close(lrfd);
+
+                    int lmarked_ok = (ln >= 3 && lmark[0] == 'O'
+                                              && lmark[1] == 'K');
+                    if (lgot != lpid || lst != 0 || !lmarked_ok) {
+                        t_putstr("joey: V-1b-loc /viv/probe-bin phenotype leg"
+                                 " FAILED marker=");
+                        if (ln > 0) {
+                            for (long i = 0; i < ln; i++)
+                                if (lmark[i] == '\n') lmark[i] = 0;
+                            t_putstr(lmark);
+                        } else {
+                            t_putstr("<unreadable>");
+                        }
+                        t_putstr(" status=");
+                        t_putstr(itoa_dec(lst, pbuf, sizeof(pbuf)));
+                        t_putstr("\n");
+                        return 1;
+                    }
+                    // Remove the proof mount so nothing later resolves through a
+                    // whole-/bin-declared-Linux /viv/probe-bin. Probe-only
+                    // residue otherwise, but tidy and it exercises the teardown.
+                    // (The product /viv/bin git mount is a different point and
+                    // untouched.)
+                    (void)t_unmount("/viv/probe-bin", 14);
+                    t_putstr("joey: V-1b-loc /viv/probe-bin"
+                             " resolver-subtree-scope PASS\n");
+                }
+
+                // === VIVARIUM section 13 git deployment gate: the REAL git,
+                // via the product /viv/bin mount. The V-1b-loc leg above proved
+                // the MECHANISM with a synthetic probe on a scratch mount; this
+                // proves the DELIVERABLE -- the actual static git binary the
+                // section-13 mount grafted at /viv/bin runs under the Linux
+                // phenotype BY LOCATION. Bare spawn, pheno_flags = 0: the ONLY
+                // thing that can make a Linux ELF's syscalls decode is the
+                // /viv/bin mount stamping the child PHENO_LINUX. A native git
+                // mis-decodes its first libc-init syscall and dies before it
+                // creates a repo, so `git init` completing (status 0 + a real
+                // .git) is itself the proof the mount channel is live for a
+                // third-party binary. SOFT-SKIPS if the product mount is absent
+                // (no static-git tarball) -- the deliverable simply is not built.
+                //
+                // git gets a real stdio trio (the fd-less-spawn reason the probe
+                // above self-opens its report file -- git writes to fd 1) via a
+                // drained pipe, exactly like run_viv_bundle, and CAP_CSPRNG_READ
+                // for its getrandom (I-43: the ABI is Linux's, the entropy
+                // authority is real and must be conferred). Runs as SYSTEM, which
+                // owns the pool files git touches -- the A-3 boundary a real user
+                // would hit (per-principal 9P ownership, unbuilt) does not apply.
+                {
+                    long gprobe = t_open(T_WALK_OPEN_FROM_ROOT, "/viv/bin/git", 12,
+                                         T_OPATH);
+                    if (gprobe < 0) {
+                        t_putstr("joey: section-13 git gate SKIPPED (no"
+                                 " /viv/bin/git -- deliverable not built)\n");
+                    } else {
+                        (void)t_close(gprobe);
+                        long grd = -1, gwr = -1;
+                        if (t_pipe(&grd, &gwr) < 0) {
+                            t_putstr("joey: section-13 git gate t_pipe FAILED\n");
+                            return 1;
+                        }
+                        unsigned int gfds[3] = { (unsigned int)gwr,
+                                                 (unsigned int)gwr,
+                                                 (unsigned int)gwr };
+                        const char giname[] = "/viv/bin/git";
+                        const char giargv[] =
+                            "/viv/bin/git\0init\0/tmp/vivgit-repo";
+                        struct t_sys_spawn_args gireq = {
+                            .name_va       = (unsigned long)giname,
+                            .argv_data_va  = (unsigned long)giargv,
+                            .name_len      = sizeof(giname) - 1,
+                            .argv_data_len = sizeof(giargv),
+                            .argc          = 3,
+                            .fd_list_va    = (unsigned long)gfds,
+                            .fd_count      = 3,
+                            .cap_mask      = T_CAP_CSPRNG_READ,
+                        };
+                        long gipid = t_spawn_full_argv(&gireq);
+                        if (gipid <= 0) {
+                            t_putstr("joey: section-13 git gate spawn"
+                                     " /viv/bin/git FAILED\n");
+                            (void)t_close(grd); (void)t_close(gwr);
+                            return 1;
+                        }
+                        (void)t_close(gwr);
+                        // Drain to EOF FIRST, then reap (run_viv_bundle's order,
+                        // same deadlock argument: all three child fds are the one
+                        // write end, and nothing drains while joey waits). While
+                        // draining, roll a substring match for git's own success
+                        // line -- "Git repository" appears in both "Initialized
+                        // empty Git repository ..." (fresh) and "Reinitialized
+                        // existing ..." (a PRESERVEd pool). This corroboration is
+                        // THIS boot's output, so unlike a check of the persistent
+                        // .git dir it cannot be satisfied by a stale repo from a
+                        // prior boot (F2): status 0 is the discriminator a native
+                        // git cannot reach, and the output match is fresh proof
+                        // git actually did the work.
+                        static const char gneedle[] = "Git repository";
+                        unsigned int gmatch = 0;
+                        int gfound = 0;
+                        for (;;) {
+                            unsigned char gbuf[256];
+                            long gn = t_read(grd, gbuf, sizeof(gbuf));
+                            if (gn <= 0) break;
+                            (void)t_puts((const char *)gbuf, (size_t)gn);
+                            for (long i = 0; i < gn; i++) {
+                                char c = (char)gbuf[i];
+                                if (c == gneedle[gmatch]) {
+                                    gmatch++;
+                                    if (gmatch == sizeof(gneedle) - 1) {
+                                        gfound = 1;
+                                        gmatch = 0;
+                                    }
+                                } else {
+                                    gmatch = (c == gneedle[0]) ? 1u : 0u;
+                                }
+                            }
+                        }
+                        (void)t_close(grd);
+                        int  gist  = 0;
+                        long gigot = t_wait_pid_for((int)gipid, 0, &gist);
+                        if (gigot != gipid || gist != 0 || !gfound) {
+                            t_putstr("joey: section-13 git gate FAILED"
+                                     " (git init via /viv/bin) status=");
+                            t_putstr(itoa_dec(gist, pbuf, sizeof(pbuf)));
+                            t_putstr(gfound ? " (git output seen)\n"
+                                            : " (no git output)\n");
+                            return 1;
+                        }
+                        t_putstr("joey: section-13 git via /viv/bin"
+                                 " (phenotype BY LOCATION) PASS\n");
+                    }
+                }
+
                 // === LINEAGE L-6c: the ARC gate. Runs LAST among the
                 // phenotype legs, because it is the only one whose caller is
                 // a real third-party Linux program -- if it fails, every
@@ -9906,6 +10857,28 @@ int main(void) {
                 // the stock-dynamic path. Ordering them the other way would
                 // lose that.
                 if (do_stock_distro_gate() != 0) return 1;
+
+                // === The git-under-VIVARIUM milestone-A gate. Runs after the
+                // DISTRO gate: it is the heaviest phenotype workload (a real
+                // static git driving init/add/commit/clone), so a failure here
+                // reads against a log where every narrower phenotype leg has
+                // already reported. SOFT-SKIPS without the static-git tarball.
+                if (do_git_probe_gate() != 0) return 1;
+
+                // The git-under-VIVARIUM milestone-B gate (network git over
+                // HTTPS). SOFT-SKIPS without the git-net bundle -- the default
+                // hermetic image never stages it -- so this is a no-op on every
+                // normal boot; it runs only on a THYLACINE_BAKE_GITNET=1 bake
+                // (tools/test-git-https.sh) on a networked host.
+                if (do_git_https_gate() != 0) return 1;
+
+                // The git-under-VIVARIUM milestone-C1 gate (the non-interactive
+                // developer workflow -- the self-hosting floor). HERMETIC, but
+                // SOFT-SKIPS without the git-workflow bundle (staged only under
+                // THYLACINE_BAKE_GITWF=1 while the arc is in flight), so it too is
+                // a no-op on every normal boot; it runs only on a
+                // tools/test-git-workflow.sh bake.
+                if (do_git_workflow_gate() != 0) return 1;
 
                 // #212: the one line the harness keys on. Both gates have run
                 // and recorded their disposition; say which, in a form an exit

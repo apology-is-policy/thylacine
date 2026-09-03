@@ -172,12 +172,60 @@ struct PgrpMount {
 // FLOOR beneath this flag; do not re-derive the coverage claim from the key.
 #define MNOEXEC   0x0010
 
+// MPHENO_LINUX (VIVARIUM section 13) -- the phenotype-declaration mount flag: a
+// binary whose exec RESOLUTION CROSSES a mount carrying this flag is stamped
+// PHENO_LINUX, even outside any vivarium. The SECOND (and, at v1.0, last)
+// declaration channel besides the container manifest's pheno_flags spawn arg
+// (section 12.1 rule 1); the two are OR-combined at the single exec-time phenotype
+// stamp. This is how /viv/bin ships bare Linux binaries (git) on the user's PATH:
+// the location IS the declaration (the settled Q3 answer -- a static binary has no
+// reliable intrinsic ABI marker, so a phenotype is declared, never sniffed).
+// FreeBSD's /compat/linux path-prefix brand in a Plan 9 mount-flag form.
+//
+// SCOPE is per MOUNT POINT, detected by the RESOLVER, NOT the (dc, devno)
+// device-instance key MNOEXEC uses. This is deliberate and load-bearing: a devno
+// is minted per 9P SESSION (dev9p.c: "one devno == one session"), so a
+// device-instance key would scope to a WHOLE session -- flagging a subdir of the
+// shared pool would declare EVERY file in it, native /bin/ut included. Instead
+// stalk reports whether a resolution crossed a pheno-mount (stalk_cross_mounts ->
+// stalk_err's crossed_pheno out-param -> exec_resolve_from_namespace), giving the
+// exact "/viv/bin subtree" semantics with no coarseness footgun: the SAME file
+// reached through /viv/bin is Linux, reached by another path is native -- because
+// the phenotype is a property of HOW you named it, not of the bytes.
+//
+// FAIL-SAFE: a resolution that crosses no pheno-mount leaves the binary
+// PHENO_NATIVE (section 12.1 rule 3's default) -- a Linux binary that does not get
+// the phenotype makes Linux-numbered calls that hit native handlers and fails
+// cleanly (rule 4's diagnostic), never a silent privilege gain.
+//
+// I-43: confers ABI SHAPE via the namespace and NO authority -- caps come solely
+// from the spawn cap_mask. Every translated Linux number collides with a live
+// native one, so a mis-declared Proc mis-decodes its own calls behind its own
+// gates and reaches nothing new (ARCH section 28 I-43). Deliberately UNGATED like
+// MNOEXEC: composing a mount is a namespace edit that confers no authority, and
+// /viv/bin is composed by PRINCIPAL_SYSTEM at boot.
+#define MPHENO_LINUX 0x0020
+
+// Design D (VIVARIUM 13.10.3): the NAMESPACE-LEVEL phenotype declaration, a bit
+// in Territory.flags. Set => every image load (any spawn variant, execve) whose
+// resolution starts from this Territory decides PHENO_LINUX: stalk_core seeds
+// crossed_pheno from it at its restart: label, so the seed covers both the first
+// pass and every symlink re-anchor. The container's declaration -- chroot SWAPS
+// root_spoor (territory_chroot), so a container reaches its binaries from INSIDE
+// any rootfs mount and a crossing can never fire; the namespace object itself
+// must carry it. Set ONCE, on a CHILD's freshly cloned Territory in the
+// FULL_ARGV spawn thunk before EL0 (SPAWN_PHENO_LINUX); copied by
+// territory_clone under ns_lock next to root_spoor; KP_ZERO at alloc declares
+// nothing (fail-safe native). Ungated for I-43's reason: shape, never authority.
+#define TERRITORY_ROOT_PHENO_LINUX 0x1u
+
 struct Territory {
     u64                  magic;      // PGRP_MAGIC
     int                  ref;        // refcount; rfork(RFNAMEG) shares (Phase 5+)
     int                  nbinds;
     int                  nmounts;
-    u32                  _pad;       // 8-byte alignment for root_spoor + binds[]
+    u32                  flags;      // TERRITORY_* bits; occupies the old alignment pad
+                                     // (Design D) so the pinned size/offsets below hold
     // P5-stratumd-stub-bringup-e2: the pivoted root Spoor (NULL until the
     // first territory_chroot). When SYS_WALK_OPEN is called with the
     // spoor_fd == -1 sentinel, the handler uses this Spoor as the walk
@@ -232,7 +280,7 @@ _Static_assert(__builtin_offsetof(struct Territory, magic) == 0,
 // territory_chroot's ref discipline, and the mount-table iteration.
 _Static_assert(__builtin_offsetof(struct Territory, root_spoor) == 24,
                "root_spoor pinned at offset 24 (after 8B magic + "
-               "4B ref + 4B nbinds + 4B nmounts + 4B _pad)");
+               "4B ref + 4B nbinds + 4B nmounts + 4B flags [Design D: was _pad])");
 _Static_assert(__builtin_offsetof(struct Territory, binds) == 32,
                "binds[] pinned at offset 32 (after the 32B header)");
 _Static_assert(__builtin_offsetof(struct Territory, mounts)
@@ -420,7 +468,35 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint);
 // the source between the lookup and the caller's use. THE CALLER MUST
 // spoor_clunk the returned Spoor when done (stalk_cross_mounts clunks it after
 // clone_walk_zero mints the independent crossed Spoor).
-struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe);
+struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe,
+                           u32 *flags_out);
+
+// mount_member_at (UM, union mounts): the ordered union iterator for the
+// resolver. Returns a REF-HELD source Spoor of the `index`-th mount entry
+// whose mount-point identity matches `probe`'s (dc, devno, qid.path), in
+// DECLARED SEARCH ORDER (MBEFORE members first, MAFTER last -- the mounts[]
+// array order maintained by mount()), or NULL when `index` is past the last
+// member. `*flags_out` (if non-NULL) gets that member's flags. Same atomic
+// ns_lock discipline as mount_lookup (lookup + spoor_ref atomic vs a
+// concurrent unmount). THE CALLER MUST spoor_clunk the returned Spoor.
+// mount_lookup is exactly mount_member_at(..., 0, ...) -- the union walk
+// iterates index 0,1,2,... trying the next component in each member and
+// stopping at the first that resolves it (ARCH 9.5 "check each in declared
+// order until one succeeds").
+struct Spoor *mount_member_at(struct Territory *territory, struct Spoor *probe,
+                              int index, u32 *flags_out);
+
+// mount_members_snapshot (UM, union mounts): the ATOMIC whole-union snapshot.
+// Refs EVERY member of the union at `probe` in ONE ns_lock hold, in declared
+// search order (at most `max`), recording each member's flags in flags_out[]
+// (if non-NULL). Returns the count (0 = not a mount point). THE CALLER MUST
+// spoor_clunk every returned Spoor. Preferred over a loop of mount_member_at
+// for any op touching the WHOLE union (the union-open member snapshot; the
+// resolver's union walk): mount_member_at takes the lock once per index, so a
+// concurrent unmount shifts the member set between calls (UM-7 F4); one hold
+// gives a consistent set.
+int mount_members_snapshot(struct Territory *territory, struct Spoor *probe,
+                           struct Spoor **out, u32 *flags_out, int max);
 
 // mount_is_point_id: MEMBERSHIP-only mount-point test by raw (dc, devno,
 // qid_path) identity — no Spoor needed, no ref minted. The stalk POUNCE
@@ -463,6 +539,16 @@ bool mount_noexec_covers(struct Territory *territory, int dc, u32 devno);
 // a REF-HELD root Spoor (caller spoor_clunks it) or NULL if no root is set. This
 // is the ONLY sound way to obtain the FROM_ROOT walk base in a multi-thread Proc.
 struct Spoor *territory_root_ref(struct Territory *territory);
+
+// Design D (VIVARIUM 13.10.3): the namespace-level phenotype declaration.
+// territory_root_pheno: does this Territory declare Linux? NULL-safe (false).
+// A plain acquire load -- the flag is set once, before the declaring child's
+// EL0, so no lock is needed to read it (the set-once-before-EL0 discipline of
+// the identity / allowance / page-budget stamps).
+// territory_declare_linux: set it (idempotent; release-ordered). Precondition:
+// called in the spawn thunk on the CHILD's own cloned Territory before EL0.
+bool territory_root_pheno(const struct Territory *territory);
+void territory_declare_linux(struct Territory *territory);
 
 // =============================================================================
 // Chroot (root-Spoor pivot) — P5-stratumd-stub-bringup-e2.
@@ -565,7 +651,9 @@ u64  territory_total_destroyed(void);
 // (NUL-NOT-appended; the caller treats [0,len) as the content) for the
 // /proc/<pid>/ns introspection file. One line per mount entry:
 //   "mount <mountpoint-name> <source-name-or-#dc>\n"
-// then "binds: <N>\n". The mount-point name is the entry's ref-held mp_path
+// then "binds: <N>\n", then -- iff the Territory declares the Linux phenotype
+// (territory_root_pheno; Design D, VIVARIUM 13.10.3) -- "root: pheno-linux\n",
+// each whole-line-or-nothing. The mount-point name is the entry's ref-held mp_path
 // (I-33; "?" when unknown); the source name is its Spoor's ->path, or "#<dc>"
 // (the Plan 9 device spec) when the source is a device root with no namespace
 // name. Reads the mount table UNDER ns_lock (the entries + their ref-held,

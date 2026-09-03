@@ -977,7 +977,11 @@ matter:
   every `FK_READY` qid (walk / lopen / getattr), so the kernel's cached qid has
   the bit. `dev9p.poll` probes **only** a Spoor whose qid carries `QTPOLL`; a
   regular dev9p file (Stratum, corvus) is POSIX always-ready and never probed
-  (the fail-safe distinguisher — netd is the only server that sets the bit).
+  (the fail-safe distinguisher). Two servers set the bit as of item 10: netd's
+  `/net/<proto>/N/ready` and ptyfs's `/dev/pts/<n>ready` (the pts slave
+  poll-readiness bridge, reference/136 — the same probe protocol); the kernel
+  bridge is server-agnostic, so pts is simply its second QTPOLL client (the pump
+  cap is 16 distinct clients — far above two).
 - **The probe is a `Tread` whose offset is the poll event-mask, count 4.** This
   is exactly the net-6b-2a `ready`-file read: `check_ready(mask)` replies the
   satisfied `revents` (u32 LE) immediately, or **DEFERS** (parks a `PendingReady`)

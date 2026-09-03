@@ -117,6 +117,24 @@ directly. `mprotect` dispatches nothing at all. Arity: `mmap` supplies six
 arguments and the shell reads exactly `args[0..5]`; `munmap` supplies two and the
 shell reads `args[0..1]`.
 
+**Design D (2026-09-01; VIVARIUM section 13.10; scripture `56085f83`).** The
+declaration's *timing* changed after this section was written, and the argument above
+survives unchanged: a phenotype is now the ABI of the LOADED IMAGE, decided at **every
+image load** -- every spawn variant AND `execve` -- by one function
+(`phenotype_decide`, `proc.h`): `PHENO_LINUX` iff the exec resolution crossed an
+`MPHENO_LINUX` mount OR the resolving Territory declares Linux (`Territory.root_pheno`,
+set on the child's clone by `SPAWN_PHENO_LINUX` before EL0, copied by
+`territory_clone`); else native. `rfork` preserves it (no new image); `execve`
+re-decides it and stores the field ONLY in `proc_exec_replace`'s infallible commit
+region, RELEASE-ordered before the phenotype-conditional signal reset, which branches on
+the decided value rather than the field (the three-legged ordering hazard the design
+review found, 13.10.4). Where this section or others in this file say the phenotype is
+"set once in the spawn thunk" or "inherited" across an exec, read: decided at every
+image load. The ONE place the field touches authority is the fork cap-inheritance
+policy (`rfork_forked_with_caps` under `PHENO_LINUX`); an `execve` that flips the
+phenotype changes that policy for the image's subsequent forks -- ABI shape, I-2-bounded
+(review F5), recorded in `ARCHITECTURE.md` section 28 I-43.
+
 ## 4. The dispatch path
 
 ```
@@ -138,9 +156,9 @@ Keeping the arms distinct makes V-3's change one line.
 
 ### The Tier-2 shells
 
-Three impure shells, one per translator, all in `kernel/syscall.c` (the pure
+The impure shells, one per translator, all in `kernel/syscall.c` (the pure
 halves stay in `kernel/vivarium.c` so they remain unit-testable with no kernel
-plumbing):
+plumbing). The file translators the V-2b/c arc built first:
 
 - **`openat`** — `vivarium_openat_decide` first, then `viv_measure_user_path`,
   then `vivarium_openat_build`, then `sys_open_handler`. **Decide before
@@ -154,6 +172,35 @@ plumbing):
   `sys_stat_for_proc`, convert, copy out. (There is no
   `vivarium_fstatat_build`, and its absence is structural — see §6.20 of the
   design doc.)
+
+The time translators (the phenotype-network → curl/git arc: a libc bounds every
+timeout with these, and busybox `date` reads 1970 without them):
+
+- **`clock_gettime`** (113) — `vivarium_clock_gettime_map` (pure clk_id map)
+  then the native `sys_clock_gettime_handler`, which does the validated timespec
+  writeback. The Linux `struct timespec` is byte-identical to `t_timespec`, so
+  the map is the whole translation. It is T2 rather than a renumber because the
+  clk_id domain is **not total** — Linux ids `CLOCK_PROCESS/THREAD_CPUTIME` (2/3)
+  have no Thylacine clock and answer a served `-EINVAL` (Linux's own answer),
+  while `MONOTONIC_RAW`/`_COARSE`/`REALTIME_COARSE`/`BOOTTIME` each map onto the
+  two clocks Thylacine has, per-id justified in the map. The lseek precedent:
+  a coincident-enumeration renumber drops to T2 the moment the domains diverge.
+  Consequence worth recording for a future port author: musl's ISO-C `clock()`
+  is built on `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)`, so it returns
+  `(clock_t)-1` (its documented error path) here rather than a CPU-time value.
+  The target binaries (curl/git/busybox) use only REALTIME/MONOTONIC and are
+  fully served; a per-process CPU clock is a v1.x capability, not a gap in
+  fidelity — `-EINVAL` is exactly Linux's answer for a clock it cannot serve.
+- **`gettimeofday`** (169) — no native counterpart, and a MICROsecond `timeval`
+  where the native clock speaks nanoseconds, so the shell
+  (`viv_gettimeofday_write`) reads the realtime clock and writes the converted
+  struct itself, mirroring `sys_clock_gettime_handler`'s uaccess discipline
+  (4-byte-aligned target, one `uaccess_store_u32` per word, any fault → EFAULT
+  with nothing further touched). `gettimeofday(NULL, tz)` matches Linux —
+  writes only `tz`, returns 0 — and a non-NULL `tz` is zero-filled, not rejected.
+
+(The socket, signal, `clone`, `wait4`, and startup-batch families are also T2
+shells; they are documented in their own arc sections, not re-listed here.)
 
 `viv_measure_user_path` is bounded by `SYS_OPEN_PATH_MAX` and validates each
 byte's VA before loading it, because the length is unknown up front and the
@@ -339,6 +386,39 @@ stale note at the head; pending -> `SIG_IGN` -> handler -> unblock fires NOTHING
 -- the leg that separates install-time from delivery-time; each round ends with
 a fresh SIGPIPE delivered exactly once).
 
+**Socket state across fork and dup (the socktab-across-images vote, operator A 2026-08-18;
+landed 2026-09-01; the fork copy re-shaped by the holotype close 2026-09-02).**
+`rfork_internal` copies `Proc.socktab` into the child AS PART OF the handle copy:
+`viv_socktab_fork_prepare` allocates the child's table with no lock held (OOM fails the fork
+like the sigtab clone), `viv_socktab_fork_snapshot` is the `under_src_lock` hook of
+`handle_table_copy_into_hooked` -- the parent's rows and its epoch counter copied field-wise
+under the parent's socktab lock, nested inside the parent's handle lock the copy is holding,
+so a peer thread closing and reopening a socket fd (both halves need the handle lock) cannot
+land between the two snapshots -- and `viv_socktab_fork_finish` drops every row whose fd the
+child does not hold (a hole never carries a stale row), frees the table when no row survived,
+and RELEASE-stores it into the still-unpublished child. The first version snapshotted in a
+separate hold after the copy returned; the holotype's F1 [P2] showed a peer's
+`close(X)`+`socket()` in that gap handing the child the OLD data Spoor at X beside the NEW
+socket's row. `dup` / `dup3` / `F_DUPFD` of a socket ALIAS the row onto the new
+number (`viv_socktab_alias`: a copy with a fresh epoch, replace-on-claim at the target,
+room-checked by `viv_socktab_alias_fits` BEFORE the handle install and run AFTER it, so a
+refused call never touches the table and a refused install never mints a row; the dup3 shell's
+drop of the overwritten number is paid inside the alias for a socket source and by the plain
+drop otherwise). Each alias is its own row, so the close hook drops only the closed number's
+row and the original survives. The kept divergence -- two aliases are two state machines --
+is the VIVARIUM section-9 row; the per-fd install/alias gaps under a peer racing its OWN fd
+number are that round's F2 [P3], tracked toward the socket OBJECT. The socket arms now split
+Linux's two "no socket here" errnos (`viv_sock_row`: a closed fd `EBADF`, a live non-socket
+`ENOTSOCK`). Regressions: `vivarium.socktab_clone_into` (the real
+`handle_table_copy_into_hooked` with a witness hook that records the parent's handle lock
+HELD when the snapshot runs, a held fd copied whole, a hole dropped, the parent untouched,
+the child's drop leaves the parent, an all-holes parent leaves the child NULL),
+`vivarium.socktab_arm_refusals` (F_DUPFD aliases at the arm; a refused dup3 -- EBADF, EINVAL
+-- keeps the target's live row; dup / F_DUPFD of a socket with the socket table full are
+EMFILE with the handle table untouched), `vivarium.socktab_alias`, `vivarium.dup3_alias` (at
+the arm), the flipped `vivarium.dup_arm` socket leg, and probe legs L257-L271 + L198 (a closed
+number is EBADF to F_GETFD and listen; a file dup3'd onto it is ENOTSOCK to listen).
+
 **Signal state across fork and exec (POSIX; operator-voted 2026-08-17).**
 Two halves of one recorded decision (task #127 named both when clone became a
 table row): (1) `rfork`/`clone` COPIES the parent's `viv_sigtab` -- every
@@ -472,6 +552,7 @@ in-guest leg L26 asserts the divergence so it cannot go stale silently.
 | **the chain** — manifest → viv → declaration → branch → translated call | joey's V-1b leg B: `viv run /vivarium/pheno`, whose entrypoint speaks only raw Linux numbers |
 | the mmap argument domain, each admission and decline by name | `vivarium.mmap_domain` |
 | **the memory round trip** — map, write through it, read it back, unmap | leg B's L16–L23 |
+| **the time family** — realtime seed, monotonic advance, `timeval` µs conversion, the EFAULT + EINVAL paths | leg B's L249–L253 |
 
 The two layers are not redundant, and V-2d's revert probes show exactly why.
 Reverting the `mmap` table row *or* widening the prot allow-list to admit
@@ -497,6 +578,17 @@ refusal, asserted so a future "optimisation" cannot quietly delete it),
 `close`, `write`, `close`, and `exit_group` — the last of which is its own
 assertion, since an untranslated 94 would reach `SYS_TTY_SIGNAL` and joey's
 by-pid wait would never return.
+
+The time-family legs (L249–L253) are each deterministic fail-without-fix,
+because before the translators these numbers FORWARD → `-ENOSYS` and the `== 0`
+guard is false: **L249** `clock_gettime(REALTIME)` writes a wall clock past
+`1_700_000_000` (a 1970 epoch, the no-write failure mode, is far below);
+**L250** `clock_gettime(MONOTONIC)` is sub-second-bounded and never runs backward
+across two reads; **L251** `gettimeofday` writes a `timeval` whose `tv_usec` is
+`< 1e6` (the µs conversion's signature — a shell that wrote nanoseconds would
+overflow it); **L252** both calls answer `EFAULT` on an unmapped pointer; **L253**
+a CPU-time clk_id answers the served `EINVAL`. The discrimination was measured:
+reverting the two table rows fails the boot at exactly `marker=L249`.
 
 Iterating on this prover needs `THYLACINE_MKFS_PRESERVE=0`: the entrypoint lives
 in the **pool** (the bundle rootfs), and a preserved pool skips populate, so the
@@ -557,16 +649,20 @@ the handler is entered. And a `SIG_DFL` whose Linux default is *terminate*
 (SIGPIPE / SIGINT / SIGHUP / SIGQUIT -- `viv_signote_default_is_terminate`)
 `exits()` the Proc **from the phenotype branch itself**, on the candidate, with
 the note's canonical name, instead of falling through to the native uncaught
-arm. That arm scans for the *native* terminate latch, and the native `pipe`
-note has none (task #237, a Plan 9 ABI question this does not touch) -- so
-before the c8ab2744 round a `SIG_DFL` SIGPIPE was consumed by **no** arm: the
+arm. That arm scans for the *native* terminate latch. When this branch was
+written the native `pipe` note had none -- so before the c8ab2744 round a
+`SIG_DFL` SIGPIPE was consumed by **no** arm: the
 terminate scan skipped it, the stop consumer skipped it, and "leave it queued
 for the fd reader" stranded it at the head of a queue no fd will ever read.
 It became the dispatcher candidate for the life of the guest; every later
 caught signal was blocked behind it, every later default-ignore note was never
 dropped, and (F1 below) every later caught terminate-class note killed the
 guest. Linux's answer -- SIG_DFL SIGPIPE terminates -- is not in doubt, so the
-phenotype answers it for its own Procs. The phenotype `wait4` folds a
+phenotype answers it for its own Procs. (#237 has since given the native
+`pipe` note its own terminate latch, but the phenotype keeps answering
+SIG_DFL SIGPIPE from this branch -- exactly as it does for SIGINT / SIGHUP /
+SIGQUIT, whose native latches it likewise does not defer to -- because it must
+exits() on the candidate, with the Linux-canonical name and disposition.) The phenotype `wait4` folds a
 note-death into an EXITED status (#91), so `exits("pipe")` reads exactly as
 `exits("interrupt")` already did. Only the STOP default (`tty:susp`) still
 falls through, to the native branch's stop consumer. In-guest: the L-6c gate's
@@ -730,12 +826,105 @@ errnos because a Linux program acts on them differently, and collapsing them to
 off**. A guest that asks for a non-blocking socket and silently receives a
 blocking one blocks where it expected `EAGAIN`.
 
-Landed as honest declines with their reasons in the table: `setsockopt`/
-`getsockopt` (`/net` exposes no option surface, and answering "success" to a
-`TCP_NODELAY` nothing honours is the silent lie this tier exists to prevent),
-`socketpair`, `sendmsg`/`recvmsg` (scatter-gather plus `SCM_RIGHTS`, which is
-I-4's domain). `bind`/`listen`/`accept` are V-5b; `shutdown`/`getsockname`/
-`getpeername`/`sendto`/`recvfrom` are V-5a's remainder.
+Landed as honest declines with their reasons in the table: `setsockopt`
+(`/net` exposes no option surface, and answering "success" to a `TCP_NODELAY`
+nothing honours is the silent lie this tier exists to prevent), `socketpair`,
+`sendmsg`/`recvmsg` (scatter-gather plus `SCM_RIGHTS`, which is I-4's domain).
+`bind`/`listen`/`accept` are V-5b; `shutdown`/`getsockname`/`getpeername`/
+`sendto`/`recvfrom` are V-5a's remainder.
+
+`getsockopt` left the blanket refusal in the curl-demo chunk and became a
+Tier-2 row serving **exactly one point: `(SOL_SOCKET, SO_ERROR)`**
+(`vivarium_getsockopt_decide` + `viv_sock_getsockopt`). The forcing case:
+curl's `verifyconnect` -- run by every libcurl consumer after every connect --
+reads `SO_ERROR` and treats a *getsockopt failure* as a *connect failure*, so
+the refused row turned a measured-successful connect (61 ms through slirp)
+into `(7) Could not connect`. Serving it is honest because `SO_ERROR` is a
+READ of pending-error state, not a tuning knob, and a phenotype socket carries
+no SYNCHRONOUSLY-pending error: `SOCK_NONBLOCK` is refused at `socket()` and
+`F_SETFL` is not served, so every guest socket op completes synchronously and
+its failure was already that op's own return value -- the constant 0 the shell
+writes is the true answer for every synchronously-delivered error, which is
+the connect-verification purpose the row serves (see the async-latch
+degradation below for the one state where it is stale). The revisit is pinned
+in the decide's header: a future NONBLOCK row must make `FRESH` carry the
+in-flight connect outcome. Every other `(level, optname)` still declines to `ENOSYS` through
+the same T2 "declined these arguments" path, so guest fallbacks behave
+byte-identically to the blanket era. One deliberate delta: `getsockopt` on a
+non-socket fd is now `ENOTSOCK` (the Linux answer) rather than `ENOSYS`.
+Covered by `vivarium.getsockopt_domain` (the pure domain + the 32-bit
+narrowing + fail-closed) and end-to-end by `tools/phenonet/curl-demo.exp`
+(fails without the row -- measured three times -- and passes with it).
+The shell validates BOTH the `optval` and `optlen` spans with
+`sys_validate_user_buf` before any access -- the byte-wise uaccess helpers
+assume a validated user VA, and the fault fixup only engages below
+`UACCESS_USER_VA_TOP`, so an unchecked kernel VA would silently write kernel
+memory or extinct the box (holotype F1, fixed before merge; regression
+`vivarium.getsockopt_shell_guards_uaccess` drives the real shell and proves a
+kernel-range address on either span is rejected `EFAULT` before any access).
+
+**Two documented degradations** (both narrower than the old blanket ENOSYS,
+neither a silent lie):
+- *The async-latch gap (F2, operator-ratified narrow).* The 0 answer is true
+  for every synchronously-delivered error -- the connect-verification purpose
+  the row serves -- but netd also latches errors ASYNCHRONOUSLY (a
+  connected-UDP/ICMP local send failure sets `slot.err` and surfaces POLLERR
+  via `check_ready`), and the shell does not consult that latch, so a guest
+  that observes POLLERR then reads `SO_ERROR` gets 0. Latent at v1.0 (no
+  shipping guest reaches it -- UDP DNS is not live). The honest fix is the
+  **netd-errno arc**: a netd protocol path exposing the per-connection errno
+  (the latch is a `&'static str` today, not an errno) + a blocking kernel
+  read-and-clear in the shell + the race-safe fd lifecycle + a fresh audit.
+  Tracked, not built.
+- *ENOTSOCK vs EBADF (F4).* `viv_socktab_find` returns NULL both for a
+  valid-but-non-socket fd (correct: `ENOTSOCK`) and for a closed/never-open fd
+  (Linux: `EBADF`); the shell answers `ENOTSOCK` for both. Strictly better
+  than the old blanket `ENOSYS`; the residual drift on the bad-fd axis is
+  benign (no distinguisher exists at this layer without a handle-table
+  lookup).
+- *F_DUPFD / dup of a socket loses the socktab entry (R2-F4).* `fcntl(sock,
+  F_DUPFD, n)` mints a second fd on the data Spoor with no socktab entry (the
+  OMIT-the-entry shape `dup3` already declines), so `send`/`recv` on the
+  alias is `ENOTSOCK` where Linux serves, while `write`/`read` on it work.
+  No soundness impact (no stale entry, no authority gain, I-43 holds); the
+  honest fix is socktab-entry duplication on dup, its own chunk (tracked).
+
+Coverage gap on the success path: the optval WRITEBACK value has no direct
+kernel-test witness (the harness cannot stage a live EL0 mapping for the
+uaccess; the E2E covers it -- verifyconnect reads a 0 and the fetch
+completes). A poisoned-buffer probe leg would need a net-granted probe bundle
+= a network-dependent boot gate -- declined, tracked.
+
+`sendto`/`recvfrom` became Tier-2 in the same chunk, because **aarch64 has no
+plain `send`/`recv` syscall**: musl's `send()` IS `sendto(fd, buf, len,
+flags, NULL, 0)` and `recv()` IS `recvfrom(..., NULL, NULL)`, so any Linux
+binary that moves socket data through `send()`/`recv()` -- curl does; busybox
+wget happens to use `write()`, which is why it never hit this -- died
+`ENOSYS` mid-connection (`curl: (55) Send failure`). The served shape is
+exactly the connected-socket `send()`/`recv()`: socktab state `CONNECTED`,
+NULL address, flags 0 (send also admits `MSG_NOSIGNAL` as a *truthful no-op*
+-- the socket data path is a 9P Spoor write and the pipe EPIPE-note machinery
+never runs there, so no SIGPIPE exists to suppress). After the screening
+(`vivarium_sendto_decide` / `vivarium_recvfrom_decide`, pure) the shells
+delegate the data movement to the NATIVE `sys_write_handler` /
+`sys_read_handler` -- the same staging tiers, weft fast-path, short-op
+semantics, and #844 fd lifecycle a T1-renumbered `write()`/`read()` on the
+same fd gets. Declines, each to `ENOSYS` (census-visible unbuilt), each honest: the
+with-address datagram shape (a per-datagram destination has no /net verb
+yet), `MSG_PEEK` (no non-consuming 9P read), `MSG_DONTWAIT` (blocking-only
+sockets), `MSG_WAITALL` (changes the return contract), a non-NULL `recvfrom`
+source address (peer-address state the socktab does not carry), AND an
+UNCONNECTED socket. That last is the R2-F1 correction: unconnected send/recv
+is genuinely unbuilt (no per-datagram dial; the bound-UDP-server `recv`
+idiom Linux serves has no path here), so it declines to `ENOSYS` -- which
+`viv_report_unserved` surfaces on the mission's work-list -- rather than a
+fabricated `ENOTCONN` (Linux answers `EPIPE`/`EDESTADDRREQ` on the send side,
+none of which we serve, so answering an errno would both mismatch Linux and
+hide the gap).
+Error-value fidelity on a dead connection is the data path's (an errno from
+the 9P write, not Linux's `EPIPE`) -- honest in kind, imperfect in value;
+noted rather than papered over. Covered by `vivarium.sendrecv_domain` and
+end-to-end by the curl demo (the fetch is a send + recv on the wire).
 
 ### The close hook -- the sharpest bug this chunk could have had
 
@@ -768,6 +957,65 @@ assertion; removing its outgoing-kind gate fails the I-5 one; leaving a stale
 socktab entry fails the close-hook regression; skipping the connect swap (while
 still reporting success) fails in-guest **L46** and only L46; removing the close
 hook fails in-guest **L50**.
+
+### The exec sweep -- close-on-exec bypasses the close hook (6b)
+
+The close **hook** above rides `viv_linux_dispatch`, so it only fires for a
+`close()` that reaches the syscall dispatch. `execve` closes its close-on-exec
+fds a different way: `handle_close_on_exec` walks the cloexec bitmap and calls
+the `handle_close` **primitive** directly, which never enters the dispatch and so
+never runs the hook. Left alone, every `socket(); fcntl(F_SETFD, FD_CLOEXEC);
+execve()` -- the shape real musl's `socket(SOCK_CLOEXEC)` falls back to -- strands
+a `(proto, N)` entry on the freed fd for the new image's first `socket()`/`open()`
+to collide with, and `connect()` then dials a dead `data` while `poll` opens a
+stale `ready`.
+
+`sys_execve_core` closes the gap with `viv_socktab_drop_cloexec(p)`, run after
+the commit (`proc_exec_replace`) and **before** `handle_close_on_exec`, so it
+reads each entry's cloexec bit while it is still set. It drops only the entries
+whose fd is close-on-exec (`handle_get_cloexec == 1`); a plain socket's entry and
+a pre-existing stale entry at a closed fd (`== -1`) both survive. It takes no
+lock: `execve` is single-threaded there (`proc_exec_replace` extincts if a live
+peer exists), the same window that lets `handle_close_on_exec` walk the handle
+table unlocked.
+
+`viv_socktab_drop_cloexec` clears **by slot** (it holds the entry pointer) rather
+than via `viv_socktab_drop`'s re-find-by-fd; the two are equivalent here because
+the cloexec bit lives on the handle, not the entry, so two entries that ever
+share an fd agree on it. Regression: `vivarium.exec_drops_cloexec_sockets` drives
+the sweep on a fresh phenotype Proc with three entries (cloexec -> dropped, plain
+-> survives, closed-fd stale -> survives), each leg failing under a distinct wrong
+predicate.
+
+**Design D audit close (F2, 2026-09-01) narrowed the sweep's unique coverage
+without retiring it.** Two things changed. `viv_socktab_claim` now **replaces**
+any row already keyed on its fd (the fd table is the truth: the caller was just
+handed that number by `handle_alloc`, so an existing row is stale by definition),
+which on its own closes the *socket-recycle* instance of the misroute -- a
+`socket()` on the freed number evicts the stale row instead of being shadowed by
+it. And `proc_exec_drop_image_state`'s NATIVE arm calls the new
+`viv_socktab_reset` (every slot cleared in place under the lock; the object and
+the monotonic epoch kept), because Design D made a native image with a Linux
+socktab constructible -- a Linux->native `execve` ran only this cloexec sweep,
+native `close()` never drops a row, and the next native->Linux `execve` inherited
+rows keyed on numbers the new image was handed afresh. What the sweep still
+uniquely prevents is the number recycled to a **non-socket**: an `open()` claims
+nothing, and every socket arm (`connect`/`sendto`/`getsockname`/...) looks the
+table up by number, ENOTSOCK on a miss, so a `connect()` on that file fd would
+find the stale row and dial its dead connection. The ground-truth regression
+`vivarium.exec_sweep_prevents_fd_reuse_misroute` was re-aimed accordingly: its
+original control ("without the sweep, a fresh UDP socket on the reused number
+reads the stale TCP row") went red at the close for the *new* reason -- the bug
+arm now reads UDP because replace-on-claim evicted the row -- the #240 shape, a
+new guard hollowing an old test of the same negative. Its bug arm now recycles the
+number as a plain handle first (stale TCP row found: the sweep's job) and claims a
+UDP socket on it second (UDP read in BOTH arms: the replace-on-claim witness).
+`vivarium.socktab_reset` covers the reset and the replace directly.
+
+**Still owed** (each its own chunk, all "the socktab across an image or fd
+transition"): the fork clone (an inherited socktab must be copied, not shared),
+`dup`/`close_range` (the FORWARD obligation the T2 header already tracks), and
+`fcntl(F_DUPFD)`'s entry-less alias.
 
 ---
 
@@ -1256,6 +1504,13 @@ reason.
 
 ## V-8 F3 [P2] -- the fixed diorama name was first-come-first-served
 
+> **SUPERSEDED 2026-08-17** -- the per-container diorama no longer posts any
+> name: its channel is a private pipe pair handed at spawn (see "The diorama
+> channel is a private pipe pair" at the end of this document). The gate, the
+> `#101` joey leg and the "concurrent containers are still unsupported" note
+> below describe the state between V-8 and that change; kept as the record of
+> why the fixed name existed and what it cost.
+
 `/srv/viv-dio` is a FIXED name, and deliberately so: the boot `SrvRegistry`
 never frees a dead entry (task #33), so a per-container unique name would burn
 a registry slot on every `viv run` forever, where a fixed one rebinds a single
@@ -1651,11 +1906,18 @@ So the domain is an exact equality and the caller gets an honest decline. The
 genuinely concurrent shape keeps the target it already has: `CLONE_THREAD` onto
 `SYS_THREAD_SPAWN`, whenever that row is written.
 
-A zero `stack` declines for the adjacent reason: it is Linux's `vfork()` proper,
-"share the parent's stack", safe there only because `CLONE_VFORK` suspends the
-parent so the two never push concurrently. `SYS_RFORK` refuses a zero `child_sp`
-by contract, and weakening a landed kernel gate to widen a phenotype row is the
-wrong direction of change.
+A zero `stack` is Linux's `vfork()` proper ("share the parent's stack"), and it
+is **served as a fork** (option B, operator-voted 2026-08-31). Plan 9 has no
+two-Procs-one-stack shape — `rfork` always gives the child its own stack — and
+`SYS_RFORK`'s RFMEM `child_sp` rule is that invariant, so rather than weaken it
+(option A, rejected as anti-lineage) the null-stack vfork maps to a private
+copy-on-write child. POSIX makes anything but `_exit`/`exec` after `vfork`
+undefined, so a copy is conformant, and the result is `share_mem=false` — the
+same translation `clone(SIGCHLD, 0)` produces, reached by a second flags word. A
+**non-zero** `stack` stays a true RFMEM vfork (`posix_spawn`'s shape). Full
+rationale: `docs/LINEAGE.md` §3.1 + the "A zero stack" paragraph. The concrete
+driver was busybox's `tar`/`gzip` pipeline, which issues `vfork()` proper and
+had no fallback for the pre-B `ENOSYS`.
 
 The exit signal is the **low byte**, not a flag, and only `SIGCHLD` is admitted:
 `exits()` posts `child_exit` unconditionally (I-19), so any other request —
@@ -2840,3 +3102,691 @@ the pool when changing them, and confirm from the build log's
 `populate pool: viv bundles baked at /vivarium` -- **not** from a green boot, and
 not by grepping `pool.img`, whose contents are encrypted and will never show a
 plaintext marker.
+
+## The diorama channel is a private pipe pair (aux, 2026-08-17)
+
+### The defect: an interactive `viv run` never ran the container
+
+`viv run <bundle>` from a session shell -- `ut`, hosted by `ptyhost` or not --
+printed one line on the console, `viv: spawn /bin/diorama`, and returned. That
+line is not progress: it is `Err(String::from("spawn /bin/diorama"))` reaching
+`say`. The per-container diorama posted the fixed name `/srv/viv-dio`, so `viv`
+requested `SPAWN_PERM_MAY_POST_SERVICE` for it, and `spawn_perm_grant_check`
+grants that bit only to a console-attached granter or an existing holder. Nothing
+past login is one: joey confers it on `/sbin/login`, login confers
+`CONSOLE_OWNER` on `ut` (`usr/login/src/main.rs`, the shell spawn) and nothing
+else, `ut` confers nothing on its externals. Every boot-gate `viv` was
+joey-spawned WITH the bit, so no gate had ever run the interactive path. The V-7
+commit body listed the seam ("interactive `viv` from a session shell needs ut to
+hold+confer MAY_POST_SERVICE") and nothing enqueued it.
+
+Two readings of the fix were on the table:
+
+* **Widen the privilege** -- login confers `MAY_POST_SERVICE` on `ut`, `ut` on
+  every command. Rejected: at v1.0 there is ONE shared boot `SrvRegistry`, so
+  every user program could then squat `/srv/home-<user>` before that user logs
+  in, or re-post a tombstoned trusted name (`/srv/net` after netd dies -- a
+  tombstone is re-postable by any marked Proc). And the fixed-name collision
+  (V-8 F3) stays.
+* **Need no name.** The runner and its diorama are parent and child; the
+  channel between them can be handed at spawn. This is Plan 9's own idiom --
+  `mount(fd, ...)` over a pipe; `srv(3)` only PUBLISHES fds for strangers to
+  find -- and the capability-microkernel one (a component's private service
+  channel arrives in its startup handles). The kernel already has the primitive:
+  `SYS_ATTACH_9P(tx, rx)` over two Plan 9 pipes, the P5 `stub-driver` shape,
+  exercised by `test_attach_probe` since Phase 5 and until now by nothing in
+  production.
+
+The second is what landed. It removes the privilege, the name, and the
+collision at once, and turns the F3 attach gate from a check into a structural
+property.
+
+### The shape
+
+`viv` (`usr/viv/src/main.rs::run`):
+
+```
+c2s = t_pipe(); s2c = t_pipe()
+spawn /bin/diorama --vivarium <my pid>   with fds [c2s_rd, s2c_wr]  (its 0 and 1)
+close c2s_rd, s2c_wr                     -- ours; while held, no EOF could ever surface
+root = t_attach_9p(c2s_wr, s2c_rd, "/")  -- Tversion + Tattach over the pair
+close c2s_wr, s2c_rd                     -- the attach holds its own transport refs
+mount root at /dio  ...                  -- unchanged from here
+```
+
+The diorama's server ends are its ONLY fds: it wants no stdio (diagnostics ride
+`SYS_PUTS`), and the fewer things a per-container server holds the better. The
+runner passes NO perm bits, and joey's boot `viv run`s were changed to pass none
+either -- so every gate now runs the same path a session shell runs.
+
+`diorama --vivarium` (`usr/diorama/src/main.rs`): after the selftest, verify the
+argv runner is our PARENT (the ppid line of our own native
+`/proc/<self>/status`; `viv_runner_is_parent` is pure and in the selftest), then
+serve ONE `Conn::over(0, 1)` -- `Conn` grew a distinct `tx` (a /srv endpoint is
+both; the pair is two fds) -- until `service()` reports EOF, then exit 0. No
+listener, no post. The boot mode (`/srv/diorama`, joey-spawned with the bit) is
+untouched.
+
+**Who is `self` now.** There is no `SYS_SRV_PEER` on a pipe. `Conn::peer()` in
+vivarium mode builds the peer from kernel state this server holds about itself
+and its parent: pid = the runner (checked against our ppid at startup), alive = a
+native `/proc/<runner>` resolve (unfiltered -- the runner is not a member of its
+own container's view, so it cannot go through `native_pid_exists`), ids = our
+own `t_getuid`/`t_getgid` (a plain spawn inherits the runner's; and I-43 holds
+whatever we report -- the diorama's authority is its own principal's). Same
+content SYS_SRV_PEER gave when the runner opened the name: the mounter. Task #90
+(`/proc/self` names the mounter, not the reader) is unchanged by the channel.
+
+The Tattach `n_uname` -- which `sys_attach_9p_handler` overwrites with the
+caller's kernel-stamped principal -- was considered as a consistency check
+against `t_getuid()` and dropped: it would guard only the Uid line's cosmetics
+(authority never depended on it), and a check nothing can drive is a gate the
+"boot OK proves nothing" rule forbids carrying.
+
+### The V-8 F3 section above is superseded
+
+Its mechanism -- `viv_attach_allowed(runner, peer_alive, peer_pid)` in
+`h_attach`, the joey `#101` deny leg, the "concurrent containers are still
+unsupported" note -- is gone. The property it protected (container A never
+mounts container B's `/proc`) now holds because no second runner can reach the
+attach at all: nobody but the runner holds an end. What remains checkable is the
+startup premise (the runner is the parent), and it is checked.
+
+### Gates
+
+The joey `#101` leg became the **viv-channel** leg, two spawns of
+`diorama --vivarium` one variable apart so neither branch passes for the wrong
+reason:
+
+| runner argv | expected | proves |
+|---|---|---|
+| joey's own pid | the attach over the pair SUCCEEDS; with the server provably up, `/srv/viv-dio` does NOT resolve; closing the attach root (the last client-end drop) makes the diorama exit on EOF within a bounded wait | the channel serves; nothing is posted; a dead runner's diorama does not linger |
+| `4294967295` | the diorama exits at its parent check before Tversion; the reply read sees EOF; the attach FAILS | the parent check is wired |
+
+And the V-7 leg now spawns **two** `viv run /vivarium/probe` **concurrently** and
+waits for both: each probe's leg 3 asserts its pid view is EXACTLY {self}, so two
+live containers prove from the inside what `#101` proved from outside (A never
+shows B), and the concurrent-containers claim is gated rather than asserted.
+The interactive path itself -- the one no boot leg can run -- is
+`tools/interactive/viv-run.exp` (LS-CI, 36 scenarios now): from the CONSOLE
+`ut`, `viv run /vivarium/probe` must print `viv-probe: FAIL: principal is not
+the invoker's` -- the probe bundle's manifest expects the joey gate's SYSTEM
+principal, so from a user the FIRST failing leg is #6, and that exact line
+proves legs 1-5 (rootfs, `/proc`+`/sys` from the diorama, pid view == {self},
+host `/srv` unreachable, `/net` absent) held under a user principal from a
+plain shell (a viv that cannot spawn its diorama prints no probe line at all);
+then from a `ptyhost`ed `ut`, `viv run /vivarium/alpine-ash` (the new
+INTERACTIVE twin `tools/build.sh` stages beside the L-6c bundle: same rootfs,
+args `/bin/sh -i`) must show the ash prompt on the pts, answer a `| tr`
+pipeline through stdin/stdout, and `exit` back to `ut` -- the pts half SKIPs
+when the Alpine bundle is not staged.
+
+Measured (this chunk, first boot after the change, no retries): kernel suite
+1413/1413 (the kernel binary is not rebuilt -- no `kernel/`/`arch/`/`mm/`
+file changed); `joey: V-7 viv-probe (containered, x2 concurrent) PASS`
+(two `viv-probe: PASS` lines, two `diorama: selftest PASS` lines);
+`joey: viv-channel: private pair serves, no /srv name, EOF-exit`;
+`diorama: --vivarium pid is not my parent` then `joey: viv-channel:
+non-parent runner REFUSED`; V-1b + L-6c + D-5 PASS; `Thylacine boot OK`.
+LS-CI `viv-run`: PASS on attempt 1 -- the console `viv run /vivarium/probe`
+printed the leg-6 line, the `ptyhost`ed `viv run /vivarium/alpine-ash` showed
+`/ $ ` on the pts and answered `ASH-ALIVE` through it (so the stdio question
+the earlier hypothesis raised is answered: a pts trio passes `stdio_born` and
+flows both ways), `exit` returned to `ut` twice over. Full LS-CI over `5336c894`
+(this + the ^C masks): 34 PASS + 2 SKIP (GL) over 36, 0 retries.
+
+### A wart worth naming: the pipe note on a dead diorama
+
+`devpipe_write` posts a `pipe` note to the WRITING Proc when the ring's reader
+is gone (`kernel/pipe.c`, the EPIPE arm), and the kernel 9P client's spoor
+transport writes from the syscalling Proc's context. So a container Proc that
+issues a 9P op through `/dio` after the diorama has DIED gets a `pipe` note --
+under the phenotype, a `SIGPIPE`-shaped death for a `/proc` read -- where the
+`/srv` transport (a dead SrvConn) returned only an error. The diorama dies only
+when its channel is already gone (EOF) or when `viv` kills it after the
+entrypoint has exited, so the reachable case is a container Proc that outlives
+its runner (an orphaned daemon) touching `/proc` afterwards, or a diorama crash.
+Linux's kernel 9P client does not signal the process on a dead transport
+(`net/9p/trans_fd.c` writes from a workqueue). The clean fix is a
+`MSG_NOSIGNAL`-shaped kernel-internal pipe write for transports -- a
+`kernel/pipe.c` change on the Pipe wait/wake audit surface, deliberately NOT
+folded into this userspace-only chunk. Recorded in `docs/AUX-ROADMAP.md`.
+
+## ^C reaches the container, not the runner (aux, 2026-08-18)
+
+The first thing the channel fix let anyone type at an interactive phenotype
+ash was ^C, and the first ^C killed `viv`. The R5-F9 experiment scenario
+(`scratchpad/r5f9/r5f9-ash.exp`, 3/3 attempts) put the console line right
+where the prompt should have been: `proc: orphan pid=N name="sh" (parent
+pid=M name="viv" exiting) -> adopted by pid=1974`, then the same for the
+diorama. Mechanism, all as-built: the pts's ISIG cooks 0x03 into an
+`interrupt` posted to the terminal's FOREGROUND PGRP; `viv` runs as `ut`'s
+foreground job, so its pgrp is `viv` + its diorama + every container Proc; the
+container's shell sees SIGINT and handles it, but a NATIVE Proc with no
+handler and no notes fd dies of an uncaught `interrupt` (LS-5's default) --
+so both native members died, the shell and its `/proc` server were orphaned to
+init, and the orphaned shell went on reading the same pts as the outer `ut`,
+splitting every later keystroke between two readers so that neither answered.
+(That input-stealing shape is the v1.0 pts's missing TTIN arbitration, PTY-4's
+own footnote, seen from the other side.)
+
+**The fix is a mask, and only a mask.** `viv` masks `interrupt` at startup
+(`SYS_NOTE_MASK`, bit 0). The container needs nothing forwarded -- it is in the
+pgrp and receives the note directly -- and nothing leaks into it: a spawned
+child starts with a ZERO mask (`rfork_internal` copies `note_mask` only when
+the PARENT is `PHENO_LINUX`, and the native exec-image reset zeroes it). The
+tty family stays UNMASKED in `viv` on purpose: ^Z (`tty:susp`) must STOP `viv`
+together with the container, or `ut`'s `wait_pid(WUNTRACED)` on the job never
+sees it stop and the terminal is never handed back; a hangup ends `viv` with
+the container; ^\ (`tty:quit`) still kills the runner and detaches a running
+container, which is what `docker run` does under SIGQUIT too. The diorama has
+no such constraint -- nothing waits on it as a job -- so it masks BOTH
+families: a server never dies of a keystroke, and its lifetime is its
+channel's (EOF, or the runner's kill).
+
+Kernel facts this rests on, read rather than assumed: the terminate LATCH is
+armed at post regardless of the mask (`notes_arm_intr_terminate_locked` gates
+on the name, kproc, a live handler and self-management), but both consumers
+honour the per-thread mask -- the EL0 tail's `notes_terminate_pending_name_
+locked` skips a masked family, and the #811 sleep predicate reads the latch
+through the mask -- so a masked `interrupt` is neither delivered nor unwinds a
+blocked `wait_pid`; the ldisc's post is `synthetic`, so repeated ^C coalesce at
+the queue threshold rather than filling it.
+
+Coverage: `tools/interactive/viv-run.exp` gained the leg -- at the ash prompt
+on the pts, `uname -s | tr a-z A-Z` answers `LINUX` (the phenotype's `uname`
+row; the outer `ut`'s coreutil says `THYLACINE`, so the token names WHICH shell
+answered), then ^C, then the same command must answer `LINUX` again through
+the same `viv`. Measured: PASS on attempt 1 (`saw: ash still answers after ^C
+(the runner survived it; ut would say THYLACINE)`), on the build whose only
+change from `437213c4` is the two masks.
+
+**Found alongside, OPEN, aux's own line (`memory/bug_hosted_ut_double_ctrlc_
+idle.md`):** two ^C at a `ptyhost`ed `ut`'s IDLE prompt, then the next typed
+command is echoed but not executed until an extra Enter -- one ^C is fine, and
+the console `ut` is fine either way (`scratchpad/r5f9/ctrlc-idle.exp`,
+RESULT `outer-cc=1 inner-c=1 inner-cc=0 recover=1`). The R5-F9 question itself
+(does ash's `raise_interrupt` longjmp wedge `in_handler`) is **answered YES** by
+the arm-2 hunt: an escaping handler that never reaches `rt_sigreturn` leaves
+`in_handler` stuck, which is exactly `bug-2` (VIVARIUM 6.23). `bug-1`
+(`0149d1e3`) stopped the livelock *symptom*; `bug-2` (`438cac78`) clears the
+stuck latch at the next EL0 transition. The deterministic proof is
+`viv-pheno-probe` legs L245-L248: a `PHENO_LINUX` handler `siglongjmp`s out of
+itself, a second `SIGPIPE` is delivered across the escape, and the leg asserts
+the handler fired **twice** -- red (`joey: ... marker=L248`) on a kernel with the
+two clears disabled, green with them.
+
+## The path-mutation family (#50; aux, 2026-08-25)
+
+Design: `VIVARIUM.md` section 6.24 (scripture `b417b307`). Four Tier-2 rows —
+`openat(O_CREAT)` + `mkdirat`(34) + `unlinkat`(35) + `renameat`(38)/
+`renameat2`(276, flags==0) — on ONE new kernel primitive, plus the native mint
+`SYS_OPEN_CREATE = 109` (the ARCH section 11.2 `create(name, mode, perm)` row,
+fulfilled). git's writes stand on all four (`git init` alone needs create +
+mkdir + unlink + rename-into-place). The openat routing reads register bits
+only: `O_CREAT` WITHOUT `O_PATH` goes to the create decide; WITH `O_PATH` it
+stays on the plain decide, which STRIPS it — Linux's `O_PATH` ignores
+`O_CREAT`, and the strip serves that contour exactly (the #50 close's SA-1;
+before it the composition declined while the comment claimed the contour).
+
+### The mechanism (extraction, not duplication — the I-43 rule)
+
+- `sys_join_cwd_if_relative` — the LS-4 cwd join, extracted from SYS_OPEN's
+  core and shared VERBATIM with the create core, so the FROM_ROOT-sentinel
+  parity (the 6.20 blocker-3 hazard) is structural.
+- `kpath_split_leaf` — the lexical last-component split (classify, never
+  resolve; the libthyla #87 rows kernel-side) + `sys_stalk_parent` (walk-only
+  stalk of the prefix; I-28 containment, symlink expansion, mount-cross all
+  inherited).
+- `spoor_create_install` — the create mechanics extracted from
+  `sys_walk_create_handler` (dev slots, QTDIR, the A-2d W|X parent gate,
+  clone-walk, `dev->create`, rights, install). The /srv service-post branch is
+  fd-based-only (`srv_post_ok=false` for every path caller answers
+  `-T_E_OPNOTSUPP` on a /srv-registry parent).
+- `spoor_unlink_in_dir` / `spoor_rename_in_dirs` — the unlink/rename
+  mechanics, same extraction; the phenotype shells run them on the split
+  parent via `viv_mutation_parent`.
+- `sys_open_create_kpath_for_proc` — the composition: OEXCL (0x1000, the
+  pre-reserved bit) and DMDIR are ONE server-atomic create (EEXIST honest —
+  the lockfile primitive); plain create is open-first (OTRUNC rides the open
+  leg only), create-on-NOENT, retry-open on a lost exists-race, bounded at 2
+  rounds — the Plan 9 `namec(Acreate)` / Linux v9fs idiom.
+
+### Degradations (documented, none silent-wrong)
+
+- A DANGLING final symlink + O_CREAT answers EEXIST after the bounded loop
+  where Linux creates the TARGET (loud; git never does this).
+- No umask: guest `umask` is ENOSYS and the kernel applies no mask, so modes
+  arrive unmasked (0666 where Linux yields 0644). Cosmetic under A-2d.
+- `mode`/`perm` admit the low-9 bits only, and the two fields above them are
+  handled OPPOSITELY because they differ in kind:
+  - **S_IFMT (0170000) is MASKED** (`VIV_S_IFMT`). POSIX and Linux define the
+    file type on `openat`/`mkdirat` as determined by the CALL, so these bits
+    carry no meaning on this argument and Linux discards them. Discarding a
+    field with no meaning is exact, not a strip. Callers pass it routinely:
+    busybox `tar` selects its directory branch on `S_IFMT` and then hands
+    `file_header->mode` through unnarrowed, so `mkdirat` sees `S_IFDIR|0755`
+    and `openat` sees `S_IFREG|0644`. Before the mask both DECLINED, and
+    `tar -x` failed on every entry with "Function not implemented" -- the
+    gate below was catching S_IFMT as collateral.
+  - **setuid/sgid/sticky (07000) still DECLINES** census-visibly. The strength
+    of that argument DIFFERS between the two arms, and the reference should not
+    flatten them:
+    - On **openat-create** it is a caller-protection argument: Linux keeps
+      07000 via `S_IALLUGO`, so `O_CREAT|04755` really does record setuid, and
+      a silent strip would record less authority than asked with nothing to
+      catch it. `git`'s shared-repository shapes are the real caller.
+    - On **mkdirat** it is only a stance-symmetry argument. Linux's own
+      `vfs_mkdir` masks `mode & (S_IRWXUGO|S_ISVTX)`, so a setgid bit passed to
+      `mkdirat` is stripped BY LINUX; setgid directories come from parent
+      inheritance or a later `chmod` (git's `adjust_shared_perm` chmods). No
+      caller is wronged by a strip here -- we decline to keep one rule ("refuse
+      what we will not record") rather than two.
+  - The regression tests pin both halves, including the cases proving the mask
+    does not reach 07000 (`S_IFDIR|02755` and `S_IFREG|04644` still decline)
+    and the sticky boundary (`S_IFDIR|01777`, the `/tmp` entry every real
+    rootfs tarball carries).
+- **Residue worth knowing before extracting a distro image**: because 07000
+  still declines, `tar -x` of a real rootfs still fails on its sticky `/tmp`
+  and any setuid binary. The S_IFMT mask narrows the failure set from *every*
+  entry to *07000-bearing* entries; it does not empty it. Widening that is a
+  deliberate decline-vs-strip-with-census design fork, not a quiet change.
+- Real (non-AT_FDCWD) dirfds stay out (the 6.20 Correction-2 handle-state
+  blocker, untouched). renameat2 flags != 0 (NOREPLACE/EXCHANGE/WHITEOUT)
+  decline. `O_DIRECTORY` keeps its V-2b rejection on the create arm (`O_APPEND`
+  translates since §6.27 -- the FS-pass-through arm).
+- A trailing slash on a rename/unlink-file path answers ENOTDIR *lexically* —
+  including `rename("d1/", "d2")` on a REAL directory, which Linux resolves
+  and permits (the #50 holotype's F2). Strictly refuse-more: no mutation ever
+  proceeds that Linux would refuse; the inverse admission would need a
+  resolve-on-trailing probe, deferred until a consumer materializes (git
+  renames carry no trailing slashes).
+- Sticky-dir deletion restriction is not enforced (A-2d checks W|X only) —
+  pre-existing SYS_UNLINK behavior, now reachable by path.
+
+### The errno registry gained `T_E_ISDIR` (21)
+
+User-signed-off (2026-08-25): the VALUE already crossed to EL0 through the
+`[-4095,-2]` Rlerror passthrough (Stratum answers EISDIR for write-opening a
+directory); the name lets the lexical leaf rows answer exactly what Linux
+answers. `docs/ERRORS.md` carries the row.
+
+### The bake gained the /tmp re-stamp
+
+`stratum-fs put` preserves only the exec bit (dirs bake 0755 SYSTEM-owned),
+so the containers' /tmp lost its 1777 and a user-principal `viv run` could
+not write ANYWHERE in the rootfs — measured as `can't create /tmp/f50:
+Permission denied` the first time the E2E ran the create leg as a user.
+`populate_stratum_pool` now re-stamps each bundle's `rootfs/tmp` 1777 after
+the put (`stratum-fs chmod` -> Tsetattr; the parser admits 4-digit octal).
+The kernel enforces no sticky bit at v1.0 so 1777 behaves as 0777 today;
+baking the real Linux mode means the fixture needs no revisit when sticky
+enforcement lands (the #50 holotype's F4). The general gap — `put` flattens
+every OTHER non-exec mode bit a rootfs carries (e.g. /var/tmp's 1777, setgid
+dirs) — is Stratum-side and remains open.
+
+### The loopback learned the async-clunk drain
+
+The create leg legitimately double-parks the parent dir fid (dirfid_put
+parks the first RPC-free, `p9_client_clunk_async`'s fire-and-forget clunks
+the second), leaving an ownerless Rclunk a later reader drains on a real
+transport (the demux #210 orphan-clunk arm). The single-slot test loopback
+REFUSED the next send over the unread reply — `client_mark_dead_locked`, the
+whole client dead, every later op EIO — killing a legitimate pattern no real
+backend fails. `loopback_send` now discards exactly a WHOLE staged Rclunk
+(counted in `dropped_rclunks`); every other unread-reply send still refuses.
+The three dev9p legs assert the count EXACTLY (0 / 1 / 1 — MEASURED anchors,
+uart-instrumented boot; a first-principles park-slot model predicted 1 / 2 / 0
+and was wrong, because the choreography lives in the dirfid park/reuse pool),
+so an unexpected drop — a real synchronous-clunk reply leak, the class the
+guard exists for — moves a count and fails loudly instead of passing as the
+modeled pattern (the holotype's F1).
+Cost of finding it: six instrumented boots (the step-tracker bisection).
+
+### Witnesses
+
+Kernel: `stalk.open_create_*` (5 — the cwd-parity blocker-3 regression,
+open-if-present + create-call economy, mkdir + nest-into-created-dir, the
+lexical leaf rows, containment + ACCES/NOENT/LOOP/dangling denials) +
+`dev9p.open_create_*` (3 — NOENT-then-create, the lost-race retry-open with
+exactly one Tlcreate, OEXCL EEXIST-exact) + `vivarium.*_domain` (4 decides).
+E2E: `tools/interactive/viv-run.exp` runs `>file`/`mkdir`/`mv`/`rm`+`rmdir`
+inside the phenotype ash as a PLAIN USER on a pts. Native: libthyla-rs
+`open_create_at_path` + `create_dir` rewired onto `t_open_create` (every
+`File::create` caller adopted through one function; the stale create-first
+rationale retired).
+
+## getdents64 + fsync/fdatasync + O_DIRECTORY (the 6.24 follow-on; aux, 2026-08-26)
+
+Design: `VIVARIUM.md` section 6.25. Three Tier-2 rows — `getdents64`(61) +
+`fsync`(82)/`fdatasync`(83) — plus the `O_DIRECTORY` admission that unblocks
+them (musl's `opendir` opens `O_RDONLY|O_DIRECTORY|O_CLOEXEC`; while the flag
+sat on the V-2b reject list, `getdents64` was unreachable).
+
+### The mechanism
+
+- `spoor_readdir_run` (`kernel/syscall.c`) — the readdir core extracted from
+  `sys_readdir_handler` with a NO-offset-advance contract: the helper reads
+  raw 9P dirents + reports the last cookie; each caller commits `c->offset`
+  only after its own copy-out (a faulting user buffer never advances the
+  cursor — the F3 fault property). Errno rollout on the shared handler:
+  `-T_E_BADF` (CWALKONLY) / `-T_E_OPNOTSUPP` (no slot) / `-T_E_IO` (malformed
+  dirent) / dev errors verbatim. **`dev9p_readdir` itself now returns
+  `dev9p_wire_errno(rc)`** (it was the one dev9p op still flattening every RPC
+  failure to a bare `-1`, unlike its `readlink`/`fsync`/rename siblings) — so a
+  caught-note EINTR (the ^C-during-`ls` path) surfaces as retryable EINTR
+  rather than a fabricated EPERM at the viv boundary (the audit's F2).
+- `viv_dirent64_encode_run` (`kernel/syscall.c`, non-static: unit-tested) —
+  the pure 9P-dirent -> `linux_dirent64` transform: `d_ino <- qid.path`,
+  `d_off <- resume cookie`, `d_type` verbatim (shared DT numbering),
+  `d_reclen` = align8(19 + namelen + 1). Whole records only; stops at the
+  first no-fit; reports the last EMITTED cookie (the committed cursor never
+  passes what the guest received); returns 0 when the first record does not
+  fit (the caller's EINVAL row).
+- The `VIV_LINUX_GETDENTS64` arm — 2048-byte raw / 2560-byte encode stack
+  buffers (worst growth align8(20+n)/(24+n) at n==5 = 32/29; 2048*32/29 =
+  2260 < 2560, no overrun); `count==0 -> EINVAL`; **`sys_validate_user_buf`
+  on the user `dirp` up front (before the fd lookup, mirroring the native
+  `sys_readdir_handler`)** — the copy-out writes via `uaccess_store_u8`, whose
+  fault fixup engages only for the user half, so an unvalidated kernel-half
+  `dirp` would extinct (or corrupt) rather than fault-gracefully; this was the
+  audit's F1 P0; no-RIGHT_READ -> EBADF; non-QTDIR -> ENOTDIR; emitted==0 with
+  raw bytes -> EINVAL.
+- `vivarium_openat_decide` gained `bool *dir_required_out` (NULL permitted;
+  written only on TRANSLATED). The openat shell enforces it as a
+  postcondition on the MINTED Spoor's own qid (`sys_lookup_spoor` -> QTDIR ->
+  on miss `handle_close` + `-T_E_NOTDIR`) — no extra RPC, no TOCTOU. The
+  create decide still declines `O_DIRECTORY`.
+- `VIV_LINUX_FSYNC`/`FDATASYNC` — T2 shells onto `sys_fsync_handler(fd,
+  datasync)` with the datasync bit passed EXPLICITLY (a T1 renumber would
+  read garbage x1). `sys_fsync_handler` errno rollout: `-T_E_BADF` /
+  `-T_E_OPNOTSUPP` (both formerly bare `-1` = fabricated EPERM across the
+  boundary).
+
+### Degradations (documented, none silent-wrong)
+
+- `fsync` on an `O_RDONLY` fd answers EBADF (the native RIGHT_WRITE gate)
+  where Linux syncs — git milestone A runs `core.fsync=none`; revisit on a
+  real rdonly-sync consumer.
+- The number rows carry damage-envelope collision paragraphs in `vivarium.h`
+  (61 vs SYS_CAP_GRANT_CLEARANCE, 82 vs SYS_WEFT_MAP, 83 vs
+  SYS_BURROW_ATTACH_LAZY — all fd-based, caller's-own-things envelope).
+- `O_DIRECTORY|O_TRUNC` drops the TRUNC (`vivarium_openat_decide`): a directory
+  is never truncated on Linux, and this combination on a regular file is
+  ENOTDIR *before* truncation — carrying TRUNC would truncate the file and only
+  then answer ENOTDIR (the audit's F3, silent data loss). Dropping TRUNC makes
+  the open non-destructive so the ENOTDIR fires cleanly.
+
+### Witnesses
+
+Kernel: `vivarium.dirent64_encode` (two-record layout, partial-fit cookie,
+first-no-fit 0, truncated-tail drop) + the O_DIRECTORY domain assertions
+(plain, the musl-opendir flag set, `O_PATH|O_DIRECTORY`) + the 5-way NULL
+guard on the decide outputs + **`vivarium.getdents64_guards_uaccess`** (the F1
+regression: a kernel-range `dirp` -> EFAULT before the fd lookup; a user-ok
+`dirp` with a bad fd reaches the lookup -> EBADF; count==0 -> EINVAL first —
+MEASURED fails-without-fix, guard off gives BADF where EFAULT is asserted).
+E2E: viv-run's 4th leg (`ls /tmp/d50` -> `G50`: busybox ls -> musl readdir ->
+the 61 row, as a plain user).
+
+### The E2E ^C leg — the settle is load-bearing (the 2026-08-26 hunt)
+
+Adding the 4th leg deterministically re-timed the following ^C leg into a
+failure whose counter-instrumented hunt exonerated the kernel at every link:
+a ^C sent the instant the prior leg's output matches lands inside
+busybox-ash's reap window (the shell still holds SIGINT=SIG_IGN), and the
+V-6b ignore-drop discards the note at post time — Linux's own semantics for
+a generated-while-ignored signal. The scenario now settles before the ^C.
+The hunt measured the full caught-note chain live (fan -> arm -> wake of the
+parked elected 9P reader -> SLEEP_NOTEINTR -> CLIENT_WAIT_NOTEINTR -> EINTR
+-> handler -> prompt), exercising the wake-of-a-parked-reader leg for the
+first time, and byte-captured ash's post-^C read returning the typed line
+intact (rc=22, hex-exact). Residue, busybox-internal and kernel-blameless:
+ash's own pending-interrupt latch can consume the first line completed after
+a delivery (its INT_OFF/INT_ON bracketing), alignment-dependent.
+
+## The git chunk: faccessat/chdir/fchmodat/readlinkat + geteuid/getegid + getrandom, and the three walls (milestone A: init + add; aux, 2026-08-26)
+
+Forcing consumer: a real static aarch64 musl `git 2.51.2` under the phenotype.
+Milestone A is `git init` + `git add`; `commit`/`clone` are §6.27 (the reflog
+`O_APPEND`). Three walls; only the first is syscall translation.
+
+### The seven rows (VIVARIUM.md §6.26)
+
+| Linux # | Row | Kind | Mechanism |
+|---|---|---|---|
+| 48 | `faccessat(dirfd,path,mode)` | T2 | AT_FDCWD gate -> `sys_stat_for_proc` (follow) + `perm_check(mode&7)`; `mode & ~0x7` EINVAL; F_OK = existence |
+| 49 | `chdir(path)` | T2 | measure len -> `sys_chdir_handler`; bare -1 -> ENOENT (documented collapse; SUCCESS exact) |
+| 53 | `fchmodat(dirfd,path,mode)` | T2 | AT_FDCWD gate; RAW 3-arg (args[3] undefined residue, NOT read -- the F1 fix; flags is fchmodat2/452); open O_PATH -> `sys_wstat_for_proc(T_WSTAT_MODE, mode & T_WSTAT_MODE_MASK)`; fd closed on every path |
+| 78 | `readlinkat(dirfd,path,buf,bufsiz)` | T2 | AT_FDCWD gate; NOFOLLOW `stalk_err` (F3: preserves EACCES/ELOOP) -> QTSYMLINK + `.readlink`; negative dev errno (INTR/IO) PRESERVED (F2), non-symlink/malformed-len EINVAL; **`sys_validate_user_buf(buf_va, n)` before `uaccess_copy_out`** |
+| 175 | `geteuid()` | T2 | `vivarium_map_uid(principal_id)` -- effective == real (I-22, one principal) |
+| 177 | `getegid()` | T2 | `vivarium_map_gid(primary_gid)` |
+| 278 | `getrandom(buf,len,flags)` | T2 | `sys_getrandom_handler`; bare -1 -> EAGAIN; **CAP_CSPRNG_READ kept (I-43)** |
+
+`readlinkat`'s copy-out is the getdents64 P0 class made safe: `n = min(tlen,
+bufsiz)`, `tlen` bounded to `1..SYS_OPEN_PATH_MAX` by the `stalk.c` vtable
+contract, the target staged in a `SYS_OPEN_PATH_MAX+1` kernel buffer, and the
+EXACT `n` span validated before the write. `sys_readlink_for_proc` clunks its
+Spoors on every early return.
+
+### The AT_FDCWD gate is both the cwd-form contract and the collision defense
+
+`vivarium_faccessat_decide(dirfd)` returns `VIV_TRANSLATED` iff
+`(s32)(u32)dirfd == VIV_AT_FDCWD` (-100), else `VIV_FORWARD`. 48/53/78 all
+route through it. Below the ceiling (109), they collide with native
+`SYS_NOTE_MASK`(48) / `SYS_PIVOT_ROOT`(53) / `SYS_PCI_INFO`(78) -- each native
+arg (a note bitfield, a Spoor fd, a PCI handle) is a small non-negative value,
+never -100, so a mis-declared native caller FORWARDs to ENOSYS on shape.
+FD-less `chdir`(49) vs native `SYS_SPAWN_FULL_ARGV` carries the damage-envelope
+argument instead (caller's-own-cwd, never authority). 175/177/278 are above the
+ceiling -- collision-free, `_Static_assert`ed in `vivarium.c`.
+
+### The three walls
+
+1. **The seven numbers** (above) -- each `FORWARD`ed to ENOSYS and killed the
+   corresponding git step.
+2. **The pool is SYSTEM-owned.** dev9p reports `PRINCIPAL_SYSTEM` for the boot
+   FS, so a container's created files are SYSTEM-stamped regardless of the
+   creating principal; git's config write chmods its own lockfile (needs
+   OWNERSHIP), so a real-user container is denied and `init` dies. Per-principal
+   9P ownership is **A-3, unbuilt at v1.0**. Milestone A runs git as a
+   **SYSTEM-principal boot probe**, which owns the files.
+3. **Phenotype fork must inherit caps.** `rfork_forked` passes `CAP_NONE`, so a
+   forked child's caps = `parent & 0 = 0` -- fork zeros caps. git is FORKED from
+   the entrypoint shell, so it lost `CAP_CSPRNG_READ` and `getrandom` failed.
+   Fix: `rfork_forked_with_caps`, taken by `sys_rfork_core`'s `PHENO_LINUX` arm
+   with `CAP_ALL`; `rfork_internal` computes
+   `child->caps = (parent_caps & CAP_ALL) & ~CAP_ELEVATION_ONLY`, so the child
+   gets `parent minus elevation` -- **I-2** (`<= parent`, never grown), **I-43**
+   (Linux's inherit shape; no authority the parent lacked; elevation never
+   propagates). Native fork keeps `CAP_NONE` (unchanged).
+
+### The cap-conferral chain (I-2, each hop intersects)
+
+joey grants `CAP_CSPRNG_READ` to `viv` (`run_viv_bundle(..., T_CAP_CSPRNG_READ)`
+-- the new `extra_caps` param, 0 for every other gate); `viv` confers it on the
+entrypoint when the bundle sets `org.thylacine.csprng: granted` (symmetric with
+`org.thylacine.net`; `cap_mask` masks against viv's own caps, so viv passes on
+only what it was granted); the forked git inherits it (wall 3). No annotation ->
+container cap floor stays 0.
+
+### Degradations (documented, none silent-wrong)
+
+- `chdir`'s `ENOTDIR`/`EACCES` collapse to `ENOENT` (the native handler's bare
+  -1; SUCCESS path exact; revisit on a richer native chdir errno).
+- `fchmodat` drops setuid/setgid/sticky (T_WSTAT rejects them at v1.0; git's
+  config modes never carry them).
+- `getrandom`'s no-cap / not-seeded / fault all map to `EAGAIN` (a v1.0 backend
+  cannot distinguish; Linux's "entropy not available" is the closest analog).
+- git-as-a-real-user awaits A-3 (per-principal 9P ownership); milestone A is
+  SYSTEM-owned.
+
+### Witnesses
+
+Kernel unit: `vivarium.git_chunk_rows` (all seven rows are `VIV_TIER2`, never
+forward; the four sub-ceiling collision identities 48==NOTE_MASK / 49==
+SPAWN_FULL_ARGV / 53==PIVOT_ROOT / 78==PCI_INFO made executable) +
+`vivarium.faccessat_gate` (AT_FDCWD sign-extended AND bare-u32 -> TRANSLATED;
+0, 5, -1 -> FORWARD). Boot gate: `do_git_probe_gate` (joey, SYSTEM,
+boot-probe-gated) spawns `viv run /vivarium/git-probe` -> `GITPROBE-INIT` /
+`-ADD` / `-DONE`; asserts the terminal marker, reports the first missing step,
+SOFT-SKIPs without the static-git tarball, BOOT-FATAL when present.
+
+### Deferred to §6.27 (commit + clone)
+
+`commit`/`clone file://` open `.git/logs/HEAD` `O_APPEND`, which the phenotype
+`openat` does not admit (no kernel append mode). A phenotype `O_APPEND`
+(open-at-EOF, sound single-threaded; for git's absent reflog the open need only
+RESOLVE->ENOENT instead of FORWARD->ENOSYS) is the next chunk.
+
+## O_APPEND (FS pass-through) + pread64/pwrite64: git commit + clone (§6.27; aux, 2026-08-26)
+
+Makes the FULL git chain run under the phenotype: init/add/commit/log/clone
+file:///verify, reflogs ON. Two small walls, neither the kernel-append-mode the
+§6.26 deferral feared.
+
+### O_APPEND is delegated to Stratum, not implemented in the kernel
+
+Stratum already enforces O_APPEND: its 9P server stores the fid's open flags at
+Tlopen and, on every Twrite to an O_APPEND fid, ignores the client offset and
+writes at the current size (`server.c` h_write; `_Static_assert(STM_9P_O_APPEND
+== O_APPEND)`). So the kernel PASSES the flag through:
+
+| Site | Change |
+|---|---|
+| `syscall.h` | NEW `SYS_WALK_OPEN_OAPPEND` 0x40 + `_Static_assert` it is inside the mask; `SYS_WALK_OPEN_OMODE_VALID` 0xB3->0xF3; the SYS_PWRITE append-stance note (kernel delegates; no append mode) |
+| `dev9p.c` | `omode & SYS_WALK_OPEN_OAPPEND -> flags |= 02000` in BOTH `dev9p_open` AND `dev9p_create` (the reflog is O_CREAT|O_APPEND, so the create path matters) |
+| `vivarium.c` | `VIV_OMODE_APPEND` 0x40; `VIV_OPENAT_ADMITTED += VIV_O_APPEND`; the O_APPEND arm in BOTH openat decides (plain drops it under dirreq -- append on a read-only dir is vacuous; create sets it unconditionally) |
+
+The kernel write path is UNCHANGED (SYS_PWRITE still writes exactly at `off`);
+the FS does the positioning. For an append fd `c->offset` is advisory (Stratum
+ignores it): correct for a write-only append (git's reflog). The divergence is
+NOT vague -- it is off by exactly the file's PRE-OPEN size S (R1-F4): open an
+existing size-S file O_APPEND (`c->offset`=0), write n bytes -> data lands at
+[S, S+n) but `lseek(SEEK_CUR)` returns n, where Linux returns S+n. Only a
+tell-after-append consumer (log rotation, offset indexing) or an O_RDWR|O_APPEND
+read sees it; git does not. Conversely `pwrite` on an O_APPEND fd APPENDS
+(ignoring its explicit offset) -- Stratum's per-fid override reproduces exactly
+Linux's documented `pwrite(2)` O_APPEND behavior.
+
+**The write-behind anchor EXCLUDES append fds (R1-F1).** `dev9p_create`/
+`dev9p_open` otherwise set the anchor (`wb_eligible`/`wb_base`) on create/OTRUNC,
+but an append fd is now excluded -- pure write-through -- so the kernel's wb
+"write at end" and Stratum's EOF-override do not co-exist on one fd. Without the
+exclusion, a CONCURRENT-append flush would install own-pages at `wb_base` offsets
+the server relocated to a different EOF, fabricating cached content (an I-38
+violation the prosecutor caught; single-writer git was correct either way,
+cursor==EOF on a fresh file). Write-through is larder-coherent for append: the
+per-write attr-invalidate kills a stale size, append only extends, and the
+extension range was never cached.
+
+### pread64/pwrite64 (67/68): the clone pack read
+
+git's `index-pack` reads the fetched pack via `pread`; untranslated, clone died
+with `error reading from ...pack: Function not implemented`. `pread64(67)`/
+`pwrite64(68)` have the exact `(fd, buf, count, offset)` shape of `SYS_PREAD(85)`/
+`SYS_PWRITE(86)`, so they are pure T1 renumbers (no shell). Sub-ceiling,
+colliding with the native LOOM pair (67=SYS_LOOM_REGISTER, 68=SYS_LOOM_ENTER);
+the collision argument is the read/write renumbers' damage-envelope -- a renumber
+runs the native handler with the caller's OWN args + rights, and a mis-declared
+LOOM caller's loom handle is not a RIGHT_WRITE Spoor so SYS_PWRITE fails clean.
+
+### Witnesses
+
+Kernel unit: `vivarium.openat_domain` (O_WRONLY|O_APPEND -> OWRITE|OAPPEND 0x41) +
+`vivarium.openat_create_domain` (O_CREAT|O_WRONLY|O_APPEND admitted -> the omode
+bit) + `vivarium.t1_renumbers` (pread64->SYS_PREAD, pwrite64->SYS_PWRITE). Boot
+gate: `do_git_probe_gate` now asserts the FULL chain (GITPROBE-INIT/ADD/COMMIT/
+LOG/CLONE/VERIFY/DONE), reflogs ON so the reflog append exercises the O_APPEND
+path end to end.
+
+### What this is NOT
+
+No kernel append mode, no new write-path mechanism, no ABI break (the omode bit
+is additive; a native open that does not set it is unaffected). The arm carries
+two flags/numbers to machinery that already exists (Stratum's server-side append
++ the native pread/pwrite handlers).
+
+## Terminal control: ioctl termios/winsize + session/pgrp (C2-k1b/k2; aux, 2026-09-01)
+
+Milestone C2's kernel half -- what makes a phenotype process INTERACTIVE on the
+console. `isatty()` (which musl implements as `ioctl(fd, TIOCGWINSZ, &ws)`) was
+false on every fd because there was no `ioctl` row at all, so git dropped to
+non-interactive defaults and no Linux TUI could run. Thylacine has **no ioctl
+surface and no kernel termios struct** -- terminal control is file-shaped (the
+cons/pts 5-flag `consctl` grammar) plus the discrete session/pgrp syscalls
+(89-92). The phenotype runs UNMODIFIED binaries, so the translation the pouch
+PTY-3 patch does in musl must happen kernel-side.
+
+### The ioctl shell (C2-k1b, `05e91a06`)
+
+`viv_ioctl` (`kernel/syscall.c`) is the `viv_tier2` arm for `ioctl(29)`. It
+resolves the fd rights-agnostic (`sys_lookup_spoor(p, fd, 0)` -- Linux terminal
+ioctls do not check r/w mode, and `isatty()` probes fd 1/2, often write-only),
+so `EBADF` beats `ENOTTY` (the fd is validated before the request is classified
+by the pre-existing pure `vivarium_ioctl_decide`). The cons-fd predicate is
+exactly what `isatty()` relies on -- `spoor_stat_native` + the char-device
+posture + `CONS_STAT_QID_FLAG` (bit 41) -- so it covers BOTH cons doors (devcons
+and the devdev `/dev/cons` leaf) and cannot drift.
+
+On a cons fd, `viv_ioctl_cons` serves the family off the kernel-owned `g_cons`:
+- `TCGETS` -- `viv_cons_to_linux_termios` maps the cons 5-flag word (`CONS_ICANON/
+  ECHO/ISIG/ICRNL/ONLCR`) to a Linux `struct termios` (36-byte asm-generic
+  layout, `_Static_assert`ed), fills the `INIT_C_CC` control-char baseline, and
+  copies out (whole-span `sys_validate_user_buf` first -- the N-5 uaccess class).
+- `TCSETS{,W,F}` -- copies in the termios, and `viv_linux_termios_to_grammar`
+  builds a DETERMINISTIC 5-flag `+/-` grammar (every flag explicit, so the result
+  is independent of the current mode) fed to the ONE production setter
+  `cons_set_mode_cmd(g, n, /*allow_flags=*/true)`, reusing its atomic apply +
+  ICANON-clear-delivers-line + poller wake. `onlcr` requires `OPOST` (Linux
+  translates NL only under it).
+- `TIOCGWINSZ` -- `cons_winsize_get` -> `struct winsize` (8 bytes, asserted);
+  this is isatty's probe.
+- `TIOCSWINSZ` -- `EPERM` (console geometry is physical, owned by the renderer;
+  pouch-0029 parity).
+
+The two PURE helpers carry the error-prone flag/grammar logic and are unit-tested
+with plain structs + a behavioral round-trip through the real setter (the
+getdents64-transform precedent). `T_E_NOTTY` (25, POSIX `ENOTTY`) was added to the
+errno registry for the non-tty / unserved-request answer.
+
+### Session + process-group control (C2-k2, `348e21b7`)
+
+The Linux session/pgrp syscalls map to the native cores (89-92); arities line up.
+`getpgid(155)`/`getsid(156)` are PURE T1 renumbers (the cores return the pgid/sid
+or `-T_E_SRCH` = Linux `ESRCH`; pid 0 = self in both). `setsid(157)`/`setpgid(154)`
+are TIER2 shells for ONE reason -- the errno: the native cores return `T_E_ACCES`
+for what Linux reports as `EPERM` (setsid on a group leader; setpgid's
+cross-session / session-leader / no-such-group contour), so the shells remap
+`ACCES -> PERM` (INVAL/SRCH and the success value pass through). All four Linux
+numbers sit above `VIV_NATIVE_CEILING`, so the renumbers cannot mis-dispatch.
+
+### Degradations (documented, none silent-wrong)
+
+- **pts fds answer `ENOTTY` (C2-k1c deferred).** A pts's line discipline lives in
+  the ptyfs userspace server; reaching it from the kernel (walk `/dev/pts/<N>ctl`
+  + 9P I/O) is the deferred half. No regression -- ioctl was `ENOSYS` before.
+- **The console termios is GLOBAL** (single physical console; per-fd termios is a
+  fiction Thylacine does not maintain). A phenotype `TCSETS` mutates it for every
+  console user -- faithful to Linux's shared-tty termios, and ldisc flags are not
+  a security boundary (I-27 SAK/attach is independent). The background-`tcsetattr`
+  `SIGTTOU` strictness is a fidelity gap, not a soundness one.
+- **The termios subset is 5 ldisc flags** (the pouch PTY-3 honesty); other bits
+  are 0 on get and ignored on set, which round-trips a guest's
+  tcgetattr/modify/tcsetattr for the flags we implement.
+
+### I-43 / I-20
+
+A phenotype gets ABI SHAPE, not AUTHORITY: the ioctl shell touches only the
+caller's own cons fd + the global ldisc (no privilege bit), and setsid/setpgid/
+get* call the SAME native cores a native Proc uses -- no widening.
+
+### Witnesses
+
+Kernel units: `vivarium.ioctl_termios_map` (the pure cons<->Linux termios map,
+each flag + the c_cc/c_cflag baseline), `vivarium.ioctl_grammar_roundtrip` (the
+grammar via a behavioral round-trip through the real setter, incl. the
+ONLCR-requires-OPOST gate), `vivarium.ioctl_dispatch_ebadf` (the fd-first
+ordering: EBADF beats ENOTTY), `vivarium.session_errno_remap` (setsid/setpgid
+ACCES->EPERM + the INVAL passthrough discriminator). The full cons serve (a real
+cons fd + mapped user memory) is covered by the in-guest viv-run E2E.

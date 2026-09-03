@@ -216,8 +216,10 @@ pub extern "C" fn rs_main() -> i64 {
     c.expect("grep -c", "grep", &["-c", "ba"], b"foo\nbar\nbaz\n", b"2\n", 0);
 
     // --- LS-3c misc coreutils ---
-    // The kernel collapses any non-zero child exit to 1, so env's 125 and
-    // cmp's 2 both arrive as 1. `yes` is intentionally NOT smoked here: it is
+    // (#91 landed: a child's real non-zero exit now survives verbatim -- cmp's
+    // error-2 and env's 125 arrive as themselves. Neither is bare-name smoked
+    // here anyway: env is the /env device pre-pivot, and cmp is smoked only for
+    // equal/differ, a genuine 0/1.) `yes` is intentionally NOT smoked here: it is
     // an unbounded producer, and the capture harness holds the read-end open
     // (no BrokenPipe), so its write never errors and wait() would deadlock --
     // `yes` is covered interactively (`yes | head`) in the LS-CI ls-3c scenario.

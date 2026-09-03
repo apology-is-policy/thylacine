@@ -745,7 +745,10 @@ pub extern "C" fn rs_main() -> i64 {
 
     // Mask validation — set then restore. set_mask returns the prior
     // mask; setting NoteMask::just(Interrupt), then NONE, must
-    // round-trip cleanly. Default mask is NONE.
+    // round-trip cleanly. #237: the process default is now PIPE, not NONE --
+    // libthyla-rs's rt_start masks NOTE_BIT_PIPE at startup (EPIPE-not-death),
+    // so the prior mask on this first swap is exactly PIPE. This assertion
+    // doubles as the native-side positive proof that the rt_start pipe mask ran.
     let prior = match notes::set_mask(NoteMask::just(NoteClass::Interrupt)) {
         Ok(m) => m,
         Err(_) => {
@@ -753,8 +756,8 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     };
-    if !prior.is_empty() {
-        t_putstr("alloc-smoke: notes mask prior not NONE FAILED\n");
+    if prior != NoteMask::just(NoteClass::Pipe) {
+        t_putstr("alloc-smoke: notes mask prior not PIPE (#237 rt_start default) FAILED\n");
         return 1;
     }
     let after = match notes::set_mask(NoteMask::NONE) {
@@ -793,6 +796,14 @@ pub extern "C" fn rs_main() -> i64 {
     };
     if !post_guard.is_empty() {
         t_putstr("alloc-smoke: with_mask did not restore prior mask FAILED\n");
+        return 1;
+    }
+
+    // #237: this round-trip walked the mask down to NONE, which leaves pipe
+    // unmasked. Restore the rt_start default (pipe masked) so any later pipe
+    // operation keeps EPIPE-not-death rather than terminating the probe.
+    if notes::set_mask(NoteMask::just(NoteClass::Pipe)).is_err() {
+        t_putstr("alloc-smoke: notes::set_mask(restore pipe) FAILED\n");
         return 1;
     }
 

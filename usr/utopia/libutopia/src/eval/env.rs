@@ -80,6 +80,11 @@ pub struct JobControlState {
     /// The pts index `N` (from the fd-0 qid decode) -- diagnostic only;
     /// every tty syscall goes through fd 0 itself.
     pub pts_n: u32,
+    /// The `/dev/pts/<n>ready` fd ut POLLS for fd-0 input readiness (item 10;
+    /// the pts slave is not directly pollable -- dev9p.poll is always-ready for
+    /// it). None if the ready open failed (poll degrades to fd 0, today's
+    /// behavior). ut reads fd 0 (the slave); it only POLLS this.
+    pub poll_in_fd: Option<i32>,
 }
 
 /// The evaluator's runtime state. One Env per shell process / per
@@ -267,7 +272,11 @@ impl Env {
             pending_exit: None,
             jobs: JobTable::new(),
             notes: None,
-            note_mask: libthyla_rs::notes::NoteMask::NONE,
+            // #237: the process default is pipe-masked (rt_start), and the
+            // shell's set_mask SWAPS the whole kernel mask, so the model must
+            // carry pipe -- otherwise the first `mask note` block clobbers it
+            // and a later shell pipe-write would terminate instead of EPIPE.
+            note_mask: libthyla_rs::notes::NoteMask::just(libthyla_rs::notes::NoteClass::Pipe),
             deferred_notes: Vec::new(),
             eval_depth: Cell::new(0),
             interrupt_pending: false,

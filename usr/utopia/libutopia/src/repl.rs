@@ -334,8 +334,38 @@ impl Repl {
             t_putstr("ut: pts session: ctl open failed\n");
             return false;
         }
+        // Open the poll-readiness sibling (item 10): ut POLLS this for fd-0 input
+        // readiness because the pts slave itself is not pollable (dev9p.poll is
+        // always-ready for it, so a poll on fd 0 returns at once and the shell
+        // blocks in read() -- where a caught `interrupt` note cannot wake it). A
+        // ready open failure degrades to polling fd 0 (today's behavior); it does
+        // NOT fail the dance (job control is unaffected).
+        let mut rpath = String::new();
+        {
+            use core::fmt::Write as _;
+            let _ = write!(&mut rpath, "/dev/pts/{}ready", n);
+        }
+        // SAFETY: t_open SVC wrapper; rpath is a valid NUL-free byte slice.
+        let ready = unsafe {
+            libthyla_rs::t_open(
+                libthyla_rs::T_WALK_OPEN_FROM_ROOT,
+                rpath.as_ptr(),
+                rpath.len(),
+                libthyla_rs::T_OREAD,
+            )
+        };
+        let poll_in_fd = if ready >= 0 {
+            Some(ready as i32)
+        } else {
+            t_putstr("ut: pts session: ready open failed (poll degrades to fd 0)\n");
+            None
+        };
         self.env.consctl_fd = Some(ctl as i32);
-        self.env.job_control = Some(crate::eval::env::JobControlState { own_pgid, pts_n: n });
+        self.env.job_control = Some(crate::eval::env::JobControlState {
+            own_pgid,
+            pts_n: n,
+            poll_in_fd,
+        });
         true
     }
 
@@ -355,18 +385,20 @@ impl Repl {
     }
 
     /// #115a: install namespace-driven Tab completion. Scans the static `$path`
-    /// dirs ONCE (`/bin` + `/goroot/bin` -- the #58 exec namespace, matching
-    /// `resolve_command`'s search list so a resolvable command is a completable
-    /// one; static for a session) and builds the initial command index, then
-    /// installs the production `ShellCompletionSource` into the editor. Called
-    /// by the consumer ON-TARGET (gated on a live console, like `open_notes`)
+    /// dirs ONCE (`/bin` + `/goroot/bin` + `/clade/bin` + `/viv/bin` -- the #58 exec
+    /// namespace, matching `resolve_command`'s search list so a resolvable command
+    /// is a completable one; static for a session) and builds the initial command
+    /// index, then installs the production `ShellCompletionSource` into the editor.
+    /// Called by the consumer ON-TARGET (gated on a live console, like `open_notes`)
     /// -- `new()` stays syscall-free so host tests + the bare-spawn boot check
     /// pay nothing. A failed scan degrades to builtins + aliases + funcs only
-    /// (Tab still completes those; `/goroot/bin` is absent on a non-bake
-    /// image); it never fails startup. Idempotent (a re-call re-scans).
+    /// (Tab still completes those; `/goroot/bin` + `/clade/bin` + `/viv/bin` are
+    /// absent on a non-bake / non-clade / non-viv image); it never fails startup.
+    /// Idempotent (a re-call re-scans). `/viv/bin` is the shipped Linux binaries
+    /// (git), run under the Linux phenotype by the MPHENO_LINUX mount (section 13).
     pub fn install_completion(&mut self) {
         self.bin_commands.clear();
-        for dir in ["/bin", "/goroot/bin"] {
+        for dir in ["/bin", "/goroot/bin", "/clade/bin", "/viv/bin", "/viv/abin"] {
             if let Ok(rd) = libthyla_rs::fs::read_dir(dir) {
                 for ent in rd.flatten() {
                     if ent.is_file() {
@@ -523,15 +555,88 @@ impl Repl {
 
     /// Emit the current prompt + buffer to `out`. Call once before the first
     /// `feed` to draw the initial prompt.
-    pub fn draw_prompt(&self, out: &mut dyn IoWrite) {
+    pub fn draw_prompt(&mut self, out: &mut dyn IoWrite) {
         // H-1c: the initial prompt opens the first prompt zone. Redraws
         // (emit_prompt via EditorAction::Redraw / Cancel) stay INSIDE the
         // open zone -- only this entry point and the accept arm's tail open
         // one, so line editing never spawns zones per keystroke.
         self.zone_open(out, beacon::sink::Zone::Prompt);
         self.cwd_report(out);
-        let _ = out.write_all(self.editor.render(&self.prompt()).as_bytes());
+        // render() borrows the editor mutably (it tracks the wrapped-render
+        // cursor row), so compute the prompt string first.
+        let p = self.prompt();
+        let _ = out.write_all(self.editor.render(&p).as_bytes());
         let _ = out.flush();
+    }
+
+    /// DISPLAY-MODES.md section 3.4: learn the terminal width for the
+    /// visual-wrapped-row line editor. The per-deployment display authority
+    /// (one primary display per mode -> one CPR answerer) makes a single
+    /// deterministic rule correct:
+    ///   - On a pts (a job-control session), read THIS pts's own winsize from
+    ///     the ldisc ctl the session dance already opened -- tmux/ssh set it via
+    ///     TIOCSWINSZ. `/dev/winsize` is the CONSOLE leaf, not the pts geometry,
+    ///     so it must not be read here; and the pts owner is authoritative, so
+    ///     no CPR probe (a fresh, unset pts stays width-unknown -> no-wrap).
+    ///   - On the console, read `/dev/winsize`. A live renderer (aurora) reports
+    ///     its cell grid there; the serial posture is `winsize 0 0`, and only
+    ///     then do we ask the terminal directly with a CPR probe. The reply
+    ///     (`ESC[<rows>;<cols>R`) flows back through the normal input path and
+    ///     the editor's CSI parser calls `set_cols`.
+    /// A wrong width is strictly worse than none (wrong cursor-up counts corrupt
+    /// the display), so every parse/read failure leaves `cols` `None` -- the
+    /// byte-identical no-wrap fallback. Session-only: the caller gates on a live
+    /// stdout, exactly like `open_notes` / `install_completion`, so the
+    /// bare-spawn boot check + host tests never probe.
+    pub fn probe_winsize(&mut self, out: &mut dyn IoWrite) {
+        // pts: the ldisc ctl render carries "... winsize <cols> <rows>". Read
+        // the fd the dance opened (offset 0, never yet read); no CPR.
+        if self.env.job_control.is_some() {
+            if let Some(fd) = self.env.consctl_fd {
+                let mut buf = [0u8; 128];
+                let n = unsafe { libthyla_rs::t_read(fd as i64, buf.as_mut_ptr(), buf.len()) };
+                if n > 0 {
+                    if let Some((c, r)) = parse_winsize(&buf[..n as usize]) {
+                        if c > 0 && r > 0 {
+                            self.editor.set_cols(c as usize);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        // console: /dev/winsize, then CPR iff `winsize 0 0`.
+        let path = "/dev/winsize";
+        let mut cols_known = false;
+        let fd = unsafe {
+            libthyla_rs::t_open(
+                libthyla_rs::T_WALK_OPEN_FROM_ROOT,
+                path.as_ptr(),
+                path.len(),
+                libthyla_rs::T_OREAD,
+            )
+        };
+        if fd >= 0 {
+            let mut buf = [0u8; 64];
+            let n = unsafe { libthyla_rs::t_read(fd, buf.as_mut_ptr(), buf.len()) };
+            let _ = unsafe { libthyla_rs::t_close(fd) };
+            if n > 0 {
+                if let Some((c, r)) = parse_winsize(&buf[..n as usize]) {
+                    if c > 0 && r > 0 {
+                        self.editor.set_cols(c as usize);
+                        cols_known = true;
+                    }
+                }
+            }
+        }
+        if !cols_known {
+            // Ask the terminal: save cursor, jump to the far corner (clamps to
+            // the screen's bottom-right cell), request the position, restore.
+            // Emitted before the first prompt draw, so any residual cursor
+            // motion is undone by the prompt's own `\r` + clear.
+            let _ = out.write_all(b"\x1b[s\x1b[9999;9999H\x1b[6n\x1b[u");
+            let _ = out.flush();
+        }
     }
 
     /// Feed one chunk of input bytes through the editor + evaluator.
@@ -646,6 +751,10 @@ impl Repl {
                 }
                 EditorAction::ClearScreen => {
                     let _ = out.write_all(b"\x1b[2J\x1b[H");
+                    // The terminal cursor is now home (0,0); the editor did
+                    // not see that move, so drop its stale block-row before
+                    // the fresh redraw.
+                    self.editor.reset_render_position();
                     self.emit_prompt(out);
                 }
                 EditorAction::MenuShow {
@@ -734,8 +843,9 @@ impl Repl {
         self.env.let_set("*", Value::list(args.to_vec()));
     }
 
-    fn emit_prompt(&self, out: &mut dyn IoWrite) {
-        let _ = out.write_all(self.editor.render(&self.prompt()).as_bytes());
+    fn emit_prompt(&mut self, out: &mut dyn IoWrite) {
+        let p = self.prompt();
+        let _ = out.write_all(self.editor.render(&p).as_bytes());
         let _ = out.flush();
     }
 
@@ -822,6 +932,14 @@ impl Repl {
         self.env.notes().map(|n| n.as_raw_fd())
     }
 
+    /// The fd the shell's idle loop should POLL for fd-0 input readiness
+    /// (item 10). Some(`/dev/pts/<n>ready`) when pts-hosted -- the pts slave is
+    /// not directly pollable; None otherwise, so the caller polls fd 0 itself
+    /// (the console, made pollable by LS-8a). ut always READS fd 0 regardless.
+    pub fn poll_in_fd(&self) -> Option<i32> {
+        self.env.job_control.as_ref().and_then(|jc| jc.poll_in_fd)
+    }
+
     /// Service an async wake of the shell's note fd while idle at the prompt
     /// (LS-8c). The `ut` binary's multi-fd poll loop calls this when poll()
     /// reports the note fd ready and no foreground command is running (that
@@ -843,6 +961,9 @@ impl Repl {
         if interrupted {
             self.editor.reset();
         }
+        // The leading `\r\n` + any notification moved the cursor to a fresh
+        // line the editor did not see -> redraw the prompt as a fresh block.
+        self.editor.reset_render_position();
         self.emit_prompt(out);
     }
 }
@@ -902,6 +1023,40 @@ fn render_menu_strip(cands: &[String], selected: usize) -> String {
     out
 }
 
+// DISPLAY-MODES.md section 3.4: pull the trailing `winsize <cols> <rows>` out
+// of a cons/ptyfs ctl render. Both surfaces share the token by design
+// (kernel/cons.c:2176 "parser parity, pouch 0021's strstr(buf, "winsize ")"),
+// so one parser serves the console `/dev/winsize` line ("winsize C R\n") and
+// the pts ctl line ("+icanon ... +onlcr winsize C R\n"). Returns the first
+// pair; None if the token or either decimal is absent/malformed. `pub` so the
+// in-guest /u-repl-test gate can exercise it (this crate's #[cfg(test)] cases
+// document but do not execute -- they are no_std).
+pub fn parse_winsize(buf: &[u8]) -> Option<(u32, u32)> {
+    let needle = b"winsize ";
+    let pos = buf.windows(needle.len()).position(|w| w == needle)?;
+    let rest = &buf[pos + needle.len()..];
+    let mut toks = rest.split(|&b| b == b' ' || b == b'\n' || b == b'\r');
+    let cols = scan_u32(toks.next()?)?;
+    let rows = scan_u32(toks.next()?)?;
+    Some((cols, rows))
+}
+
+// Decimal ASCII -> u32, rejecting empty / non-digit / overflow (a malformed
+// winsize must leave the width unknown, never guess).
+fn scan_u32(tok: &[u8]) -> Option<u32> {
+    if tok.is_empty() {
+        return None;
+    }
+    let mut v: u32 = 0;
+    for &b in tok {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        v = v.checked_mul(10)?.checked_add((b - b'0') as u32)?;
+    }
+    Some(v)
+}
+
 // core::fmt::Write adapter so run_line can format an EvalErrorKind (Debug)
 // into the diagnostic String without pulling alloc::format into every path.
 struct FmtSink<'a>(&'a mut String);
@@ -930,6 +1085,29 @@ mod tests {
             }
         }
         (repl, exit, sink)
+    }
+
+    // DISPLAY-MODES.md section 3.4: parse_winsize serves BOTH ctl renders.
+    #[test]
+    fn parse_winsize_console_and_pts_and_malformed() {
+        // The console `/dev/winsize` line.
+        assert_eq!(parse_winsize(b"winsize 80 24\n"), Some((80, 24)));
+        // The serial posture -- 0 0 parses (the caller treats it as unknown).
+        assert_eq!(parse_winsize(b"winsize 0 0\n"), Some((0, 0)));
+        // The pts ldisc ctl render -- winsize is the TRAILING token.
+        assert_eq!(
+            parse_winsize(b"+icanon +echo +isig +icrnl +onlcr winsize 132 43\n"),
+            Some((132, 43))
+        );
+        // No token at all -> unknown.
+        assert_eq!(parse_winsize(b"+icanon +echo +isig +icrnl +onlcr\n"), None);
+        // A non-digit / empty second field -> unknown, never a guess.
+        assert_eq!(parse_winsize(b"winsize 80 x\n"), None);
+        assert_eq!(parse_winsize(b"winsize 80 \n"), None);
+        assert_eq!(parse_winsize(b"winsize  24\n"), None);
+        // u16 max fits; a value past u32 rejects rather than wrapping.
+        assert_eq!(parse_winsize(b"winsize 65535 65535\n"), Some((65535, 65535)));
+        assert_eq!(parse_winsize(b"winsize 99999999999 24\n"), None);
     }
 
     #[test]

@@ -32,6 +32,7 @@ hardware/external dependency, so failure to come up is always a defect.
 | `/dev/pts/ptmx` | 1 | the clone file: open = mint pts N, rebind the fid onto the MASTER endpoint |
 | `/dev/pts/<n>` | `PTS_FLAG\|N<<8\|2` | the slave byte channel (resolves only while the slot is live) |
 | `/dev/pts/<n>ctl` | `PTS_FLAG\|N<<8\|3` | the per-pts ctl (termios + winsize; the Plan 9 `eia0`/`eia0ctl` idiom) |
+| `/dev/pts/<n>ready` | `PTS_FLAG\|N<<8\|4` (**QTPOLL**) | the poll-readiness file (item 10): a native SLAVE poller blocks on it — walkable, **not** in readdir (a hidden companion, the master precedent) |
 | (master, minted) | `PTS_FLAG\|N<<8\|1` | the master byte channel — never walkable, never in readdir |
 
 `PTS_FLAG` = bit 40. **The qid encoding is a documented client contract**:
@@ -111,6 +112,39 @@ net-6a-1 discipline), NOT the cons single-reader. I-9 holds by
 single-threadedness: a ring fills only via a serviced frame, so every parked
 read is re-checked before the loop parks. Cancel paths: `Tflush` (by oldtag),
 clunk (by fid), teardown/Tversion (all).
+
+## Poll-readiness: the `<n>ready` bridge (item 10)
+
+A pts slave (`/dev/pts/<n>`) is not directly pollable — a data read parks
+server-side (above), and dev9p.poll reports a non-QTPOLL file as POSIX
+always-ready. So a **native** poller of its slave fd (the hosted `ut`) would
+`poll()` fd 0, get always-ready, then block in `read()` — where a caught
+`interrupt` note cannot wake it (the "^C eats the next line" bug). The fix is
+the netd `/net/<proto>/N/ready` precedent (net-6b-2b): a **separate**
+per-pts `/dev/pts/<n>ready` file whose qid carries **QTPOLL**, so the kernel's
+`dev9p_poll` probes it instead of assuming always-ready.
+
+- **The probe** (`h_read` on a ready fid): `dev9p_poll` encodes the wanted poll
+  mask in the Tread **offset** (count 4). `ready_revents(n, mask)` returns the
+  4-byte LE bitmap — POLLIN iff `read_ready(slave)` (a line queued OR the master
+  gone ⇒ EOF-as-readable), POLLOUT iff `s2m` has room, POLLHUP iff the master is
+  gone (always reported, the poll(2) contract). Non-zero ⇒ reply now; zero ⇒
+  **park** (netd's defer). A separate fid, never the slave's, because the slave's
+  read offset is meaningless and a real 4-byte data read must never be misread as
+  a probe.
+- **Reuses the `PendingRead` set**: a parked probe is a `PendingRead{probe:true,
+  mask}` in the SAME Vec as data reads, so `poll_reads` re-evaluates it
+  (recompute revents, non-consuming, deliver once satisfiable) and the SAME
+  cancel paths (Tflush/clunk/teardown/Tversion) dispose it — no separate cancel
+  machinery to miss.
+- **Scope**: SLAVE readiness only. `ptyhost` pumps the master with two blocking
+  threads (no poll), so only the slave needs the bridge; the master + the data
+  files stay non-QTPOLL. A master-poll `<n>mready` is a future seam.
+- **Client**: `ut`'s `init_pts_session` opens `<n>ready` (OREAD) and its idle
+  loop POLLS that fd (not fd 0); it still READS fd 0. A ready-open failure
+  degrades to polling fd 0 (pre-item-10 behavior), never fails the pts dance.
+  The kernel bridge (`kernel/dev9p_poll.c`) is unchanged — pts is simply its
+  second QTPOLL client after netd.
 
 ## Teardown (PTY-2d)
 

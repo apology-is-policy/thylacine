@@ -322,8 +322,25 @@ short cons_poll(short events, struct poll_waiter *pw);
 // grammar; false for a RENDERER-minted consctl (CCONSWINSZONLY) -> the winsize
 // verb ONLY (a `+`/`-` flag token rejects the write). Keeps a compromised
 // renderer off the global termios (the serial-input ECHO-off mask defeat).
+// The grammar also carries two RENDERER-writable verbs (allowed regardless of
+// allow_flags, like the flags they are not): `winsize <cols> <rows>` (#55) and
+// `serialsilent <0|1>` (DISPLAY-MODES.md 1b -- when the renderer is the primary
+// display it drops EL0 OUTPUT on the serial UART; kernel diagnostics untouched).
 long cons_set_mode_cmd(const void *buf, long n, bool allow_flags);
 long cons_render_mode(void *buf, long n);
+
+// C2-k1b: the flag-word getter for the phenotype TCGETS shell, which must map the
+// live mode into a Linux struct termios rather than the "+name" render string.
+// A locked snapshot of the global termios word (CONS_* bits); the production twin
+// of the test-only cons_test_termios. Apply the reverse (a Linux termios -> the
+// five flags) with cons_set_mode_cmd(<deterministic grammar>, ..., true).
+u32 cons_termios_get(void);
+
+// DISPLAY-MODES.md 1b (audit F2): restore serial output unconditionally (clears
+// the renderer-set serial-silence flag). Called by proc_console_sak so a SAK's
+// trusted-path prompt reaches the emergency serial medium regardless of a
+// renderer's display-routing choice.
+void cons_serial_silent_clear(void);
 
 // =============================================================================
 // #55: the console winsize (ARCH 23.5.3). One kernel-held size (cols, rows --
@@ -500,6 +517,10 @@ void cons_test_set_termios(u32 v);
 // (so a test detects truncation/overflow).
 void cons_test_echo_capture(bool on);
 u32  cons_test_echo_captured(u8 *out, u32 max);
+
+// DISPLAY-MODES.md 1b: read the serial-silence flag (for the regression test to
+// assert the `serialsilent` verb applied).
+bool cons_test_serial_silent(void);
 
 // G-4: drain observability for tests. Buffered byte count / cumulative
 // drop-oldest count / the deferred drain POLLIN edge flag.

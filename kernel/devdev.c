@@ -112,6 +112,19 @@ int devdev_fd_devclass(const struct Spoor *c) {
     return ((u32)c->qid.path == DEV_KIND_CONS) ? 'c' : devdev.dc;
 }
 
+// C2-k1b F1: is this Spoor the kernel console, by UNFORGEABLE device identity?
+// The phenotype ioctl shell must decide "is this fd the console?" without
+// trusting a qid bit -- a dev9p-backed Spoor's qid_path is copied verbatim from
+// the 9P server (dev9p_stat_native), and tapestryd's PANE_FLAG is the same bit
+// (41) as CONS_STAT_QID_FLAG, so a server-backed pane fd would pass a bit-only
+// test. Device identity is server-unforgeable: only the kernel installs devcons
+// (the SYS_CONSOLE_OPEN door) and the devdev /dev/cons leaf. Both are covered.
+bool spoor_is_console(struct Spoor *sp) {
+    if (!sp) return false;
+    return sp->dev == &devcons
+        || (sp->dev == &devdev && (u32)sp->qid.path == DEV_KIND_CONS);
+}
+
 // The I-27 console-attach gate, enforced at two tiers:
 //
 //   1. OPEN (both cons + consctl): only a console-attached caller can MINT a

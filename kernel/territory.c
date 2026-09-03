@@ -98,6 +98,19 @@ struct Territory *territory_alloc(void) {
     return p;
 }
 
+// Design D (VIVARIUM 13.10.3): the namespace-level phenotype declaration.
+bool territory_root_pheno(const struct Territory *territory) {
+    if (!territory) return false;
+    return (__atomic_load_n(&territory->flags, __ATOMIC_ACQUIRE)
+            & TERRITORY_ROOT_PHENO_LINUX) != 0;
+}
+
+void territory_declare_linux(struct Territory *territory) {
+    if (!territory)                    extinction("territory_declare_linux(NULL)");
+    if (territory->magic != PGRP_MAGIC) extinction("territory_declare_linux on corrupted Territory");
+    __atomic_fetch_or(&territory->flags, TERRITORY_ROOT_PHENO_LINUX, __ATOMIC_RELEASE);
+}
+
 struct Territory *territory_clone(struct Territory *parent) {
     if (!parent)                  extinction("territory_clone(NULL)");
     if (parent->magic != PGRP_MAGIC)
@@ -156,6 +169,13 @@ struct Territory *territory_clone(struct Territory *parent) {
     if (child->root_spoor) {
         spoor_ref(child->root_spoor);
     }
+    // Design D (VIVARIUM 13.10.3; review F2 = self-audit SA-1): the namespace-
+    // level phenotype declaration is a namespace property -- copied WITH
+    // root_spoor, under the same lock. This clone copies fields one by one, so
+    // an omitted copy would let a container child LOOK Linux (the rfork
+    // phenotype inherit at proc.c) and then revert to native on its first
+    // execve, silently, for the whole descendant subtree.
+    child->flags = __atomic_load_n(&parent->flags, __ATOMIC_ACQUIRE);
     spin_unlock(&parent->ns_lock);
 
     // LS-4: copy the cwd snapshot (POSIX fork semantics -- the child inherits
@@ -539,6 +559,10 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
         // is not an answer about a RUNNING namespace. Rendered as a suffix so
         // every existing parse of the line's first two fields is unchanged.
         if (ok && (m->flags & MNOEXEC)) ok = ns_put_str(buf, cap, &off, " noexec");
+        // VIVARIUM section 13: render MPHENO_LINUX for the same reason -- a
+        // declaration that cannot be observed cannot be audited. An operator
+        // asking "is /viv/bin actually a pheno-linux mount?" reads it here.
+        if (ok && (m->flags & MPHENO_LINUX)) ok = ns_put_str(buf, cap, &off, " pheno-linux");
         if (ok) ok = ns_put_str(buf, cap, &off, "\n");
 
         if (!ok) { off = line_start; truncated = true; break; }   // discard partial
@@ -556,6 +580,18 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
               ns_put_udec(buf, cap, &off, (u64)(nb < 0 ? 0 : nb)) &&
               ns_put_str(buf, cap, &off, "\n")))
             off = bstart;
+        // Design D audit F6: render the Territory-level phenotype declaration
+        // (VIVARIUM 13.10.3) for the reason the per-mount " pheno-linux"
+        // suffix above is rendered -- a declaration that cannot be observed
+        // cannot be audited. Whole-line-or-nothing, after the binds line so
+        // every existing parse of the file is unchanged. Read through the
+        // accessor (an atomic load): the flag is set once, on the child's
+        // clone before its first EL0 instruction, and copied by clone, so it
+        // needs no ns_lock.
+        if (territory_root_pheno(p)) {
+            u64 rstart = off;
+            if (!ns_put_str(buf, cap, &off, "root: pheno-linux\n")) off = rstart;
+        }
     }
     return off;
 }
@@ -762,7 +798,12 @@ int mount(struct Territory *territory, struct Spoor *source,
     // lock; the MREPL spoor_clunk(old) is captured under the lock + deferred to
     // OUTSIDE it (the displaced source's Dev close hook may sleep -- never hold a
     // spinlock across it, the dot_lock free-outside-the-lock discipline).
-    struct Spoor *to_clunk = NULL;
+    // UM: MREPL replaces the whole union group at a point, so up to
+    // PGRP_MAX_MOUNTS displaced sources may need clunking -- deferred to OUTSIDE
+    // the lock (a Dev close hook may sleep). repl_nclunk stays 0 on every
+    // non-MREPL path.
+    struct Spoor *repl_clunk[PGRP_MAX_MOUNTS];
+    int repl_nclunk = 0;
     int rc;
     spin_lock(&territory->ns_lock);
 
@@ -805,46 +846,71 @@ int mount(struct Territory *territory, struct Spoor *source,
     // makes Path non-load-bearing -- write-only, cosmetic to /proc/<pid>/ns --
     // and the fresh mountpoint Spoor keys to the same identity by construction,
     // so a ref-swap under ns_lock would buy no semantic difference.
-    for (int i = 0; i < territory->nmounts; i++) {
-        if (mount_key_eq(&territory->mounts[i], mountpoint) &&
-            territory->mounts[i].source == source) {
-            territory->mounts[i].flags = flags;
-            rc = 0;
-            goto out;
+    // UM-8 F6: MREPL is handled by the group-replace below (which removes this
+    // pair too), so it must NOT short-circuit here -- else MREPL of an existing
+    // member would converge flags and leave the OTHER members in place. For a
+    // flagless re-mount (no ordering change requested) converge flags in place
+    // (the #219 direction). For MBEFORE/MAFTER on an EXISTING pair, MOVE it to
+    // the requested position: remove it here (deferring its source clunk +
+    // dropping its Path ref) and fall through to re-insert at the ordering index
+    // below -- else the reorder was a silent no-op that reported success (F6).
+    if (!(flags & MREPL)) {
+        for (int i = 0; i < territory->nmounts; i++) {
+            if (mount_key_eq(&territory->mounts[i], mountpoint) &&
+                territory->mounts[i].source == source) {
+                if (!(flags & (MBEFORE | MAFTER))) {
+                    territory->mounts[i].flags = flags;   // in-place converge
+                    rc = 0;
+                    goto out;
+                }
+                // Reposition: remove now, re-insert at the ordering index below.
+                // The deferred clunk drops the old entry's ref; the insert takes
+                // a fresh one (source stays alive on the caller's borrowed ref).
+                repl_clunk[repl_nclunk++] = territory->mounts[i].source;
+                path_unref(territory->mounts[i].mp_path);
+                for (int j = i; j < territory->nmounts - 1; j++)
+                    territory->mounts[j] = territory->mounts[j + 1];
+                territory->nmounts--;
+                break;   // at most one (point, source) pair
+            }
         }
     }
 
-    // MREPL semantics at v1.0: if `flags & MREPL` and an entry at the
-    // same mount-point identity exists (with a different source — idempotent
-    // same-source handled above), replace the FIRST matching entry. Drop the
-    // old source's refcount; install the new source with a fresh ref.
+    // UM (union mounts): dispatch on the ordering flags to place the new member
+    // in the point's SEARCH ORDER (ARCH 9.5/9.6; territory.tla MountRepl /
+    // MountBefore / MountAfter). A point's members are searched in mounts[]
+    // array order -- MBEFORE members first, MAFTER (and the flagless default)
+    // last -- and mount_member_at / the resolver iterate that order.
     //
-    // MBEFORE/MAFTER/MCREATE union semantics are recorded but treated
-    // as "append a new entry" at v1.0; union walking is Phase 5+ once
-    // the walk algorithm grows union support.
+    //   MREPL   -> replace the WHOLE group: remove every existing member at the
+    //              point (defer their source clunks; drop their Path refs), then
+    //              install this one. v1.0 single-member points make this
+    //              identical to the prior "replace the first entry", but a real
+    //              union now collapses correctly (the spec's MountRepl replaces
+    //              the sequence, not just its head).
+    //   MBEFORE -> insert at the index of the point's FIRST existing member, so
+    //              it is searched before them (Plan 9 prepend; later MBEFOREs go
+    //              to the very front, LIFO).
+    //   MAFTER / flagless -> append after the point's members (searched last,
+    //              FIFO). This preserves the pre-UM append behavior exactly.
     if (flags & MREPL) {
-        for (int i = 0; i < territory->nmounts; i++) {
+        int i = 0;
+        while (i < territory->nmounts) {
             if (mount_key_eq(&territory->mounts[i], mountpoint)) {
-                // spoor_clunk (not spoor_unref): MREPL displaces a holder; if this
-                // was the last ref on `old`, the Dev's close hook must run to
-                // release per-Spoor state (P5-mount-syscall fix). Deferred to `out`.
-                to_clunk = territory->mounts[i].source;
-                // #66 (I-33): re-capture the mount-point name from the new
-                // mountpoint Spoor (same (dc,devno,qid.path) identity, fresh
-                // resolve -> latest retained name). ref-NEW-before-unref-OLD so a
-                // (degenerate) shared Path object survives the swap.
-                struct Path *old_mp = territory->mounts[i].mp_path;
-                territory->mounts[i].mp_path = mountpoint->path;
-                path_ref(territory->mounts[i].mp_path);
-                path_unref(old_mp);
-                territory->mounts[i].source = source;
-                territory->mounts[i].flags  = flags;
-                spoor_ref(source);
-                rc = 0;
-                goto out;
+                // Defer the displaced source's clunk (its Dev close hook may
+                // sleep -- never under ns_lock); drop the mount-point Path ref
+                // now (path_unref is non-sleeping).
+                repl_clunk[repl_nclunk++] = territory->mounts[i].source;
+                path_unref(territory->mounts[i].mp_path);
+                for (int j = i; j < territory->nmounts - 1; j++)
+                    territory->mounts[j] = territory->mounts[j + 1];
+                territory->nmounts--;
+                // do NOT advance i: the shifted-down entry now occupies slot i.
+            } else {
+                i++;
             }
         }
-        // MREPL with no existing entry: fall through to append.
+        // fall through to install the one new member below.
     }
 
     if (territory->nmounts >= PGRP_MAX_MOUNTS) { rc = -2; goto out; }
@@ -853,7 +919,22 @@ int mount(struct Territory *territory, struct Spoor *source,
     // below is infallible after the ref, so no rollback is needed.
     spoor_ref(source);
 
-    struct PgrpMount *e = &territory->mounts[territory->nmounts];
+    // Choose the insertion index. MBEFORE opens a slot at the point's first
+    // existing member (so the new member is searched first); every other flag
+    // (MAFTER / flagless / post-MREPL) appends after the point's members.
+    int ins = territory->nmounts;
+    if (flags & MBEFORE) {
+        for (int i = 0; i < territory->nmounts; i++) {
+            if (mount_key_eq(&territory->mounts[i], mountpoint)) { ins = i; break; }
+        }
+        // Shift [ins .. nmounts-1] right by one to open slot `ins`. Each struct
+        // copy MOVES its source + mp_path refs along (no ref change); mounts[]
+        // has room (nmounts < PGRP_MAX_MOUNTS, checked above).
+        for (int j = territory->nmounts; j > ins; j--)
+            territory->mounts[j] = territory->mounts[j - 1];
+    }
+
+    struct PgrpMount *e = &territory->mounts[ins];
     e->source      = source;
     // #66 (I-33): retain the mount-POINT's namespace name for /proc/<pid>/ns.
     // path_ref is NULL-safe (a kernel-internal mountpoint with no retained name
@@ -871,7 +952,7 @@ int mount(struct Territory *territory, struct Spoor *source,
 
 out:
     spin_unlock(&territory->ns_lock);
-    if (to_clunk) spoor_clunk(to_clunk);
+    for (int k = 0; k < repl_nclunk; k++) spoor_clunk(repl_clunk[k]);
     return rc;
 }
 
@@ -896,14 +977,17 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint) {
             // to outside the lock.
             to_clunk = territory->mounts[i].source;
             // #66 (I-33): drop the removed entry's mount-point name BEFORE the
-            // swap-remove overwrites the slot (else the Path ref leaks). The
-            // last entry's own mp_path ref TRANSFERS into slot i via the struct
-            // copy -- no ref change for it. path_unref is non-sleeping (no defer).
+            // shift overwrites the slot (else the Path ref leaks). path_unref is
+            // non-sleeping (no defer).
             path_unref(territory->mounts[i].mp_path);
-            // Remove by swapping with the last element. Order within mounts[] is
-            // not load-bearing at v1.0; MBEFORE/MAFTER union walking (Phase 5+)
-            // introduces an ordering invariant + switches to shift-down then.
-            territory->mounts[i] = territory->mounts[territory->nmounts - 1];
+            // UM: SHIFT-DOWN (not swap-remove) so the union SEARCH ORDER is
+            // preserved -- MBEFORE/MAFTER ordering is now load-bearing (the
+            // resolver + mount_member_at iterate mounts[] in array order). Each
+            // entry [i+1 ..] moves left, carrying its source + mp_path refs
+            // (struct move, no ref change). Removes the FIRST match; call again
+            // to drop the next union member (the contract is unchanged).
+            for (int j = i; j < territory->nmounts - 1; j++)
+                territory->mounts[j] = territory->mounts[j + 1];
             territory->nmounts--;
             rc = 0;
             break;
@@ -920,7 +1004,9 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint) {
 // atomically under ns_lock so a concurrent unmount cannot free the source between
 // the lookup and the caller's use. THE CALLER MUST spoor_clunk the result
 // (stalk_cross_mounts clunks it after clone_walk_zero mints the crossed Spoor).
-struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe) {
+struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe,
+                           u32 *flags_out) {
+    if (flags_out) *flags_out = 0;
     if (!territory)                    return NULL;
     if (territory->magic != PGRP_MAGIC) extinction("mount_lookup on corrupted Territory");
     if (!probe)                        return NULL;
@@ -932,11 +1018,80 @@ struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe) {
         if (mount_key_eq(&territory->mounts[i], probe)) {
             src = territory->mounts[i].source;
             spoor_ref(src);   // transfer a ref to the caller (atomic vs unmount)
+            // VIVARIUM section 13: hand back the entry's flags under the same
+            // lock, so the resolver can see MPHENO_LINUX on the mount it crosses
+            // without a second scan (and without racing an unmount).
+            if (flags_out) *flags_out = territory->mounts[i].flags;
             break;
         }
     }
     spin_unlock(&territory->ns_lock);
     return src;
+}
+
+// mount_member_at (UM) -- the ordered union iterator. Returns a REF-HELD source
+// of the `index`-th mount entry whose mount-point identity matches `probe`, in
+// mounts[] array order (= declared search order per mount()'s ordering), or NULL
+// when `index` is past the last member. Same atomic ns_lock discipline as
+// mount_lookup. The resolver iterates index 0,1,2,... trying the next component
+// in each member and stopping at the first that resolves it. THE CALLER MUST
+// spoor_clunk the returned Spoor.
+struct Spoor *mount_member_at(struct Territory *territory, struct Spoor *probe,
+                              int index, u32 *flags_out) {
+    if (flags_out) *flags_out = 0;
+    if (!territory)                    return NULL;
+    if (territory->magic != PGRP_MAGIC) extinction("mount_member_at on corrupted Territory");
+    if (!probe)                        return NULL;
+    if (probe->magic != SPOOR_MAGIC)   extinction("mount_member_at probe corrupted Spoor");
+    if (index < 0)                     return NULL;
+
+    struct Spoor *src = NULL;
+    int seen = 0;
+    spin_lock(&territory->ns_lock);
+    for (int i = 0; i < territory->nmounts; i++) {
+        if (mount_key_eq(&territory->mounts[i], probe)) {
+            if (seen == index) {
+                src = territory->mounts[i].source;
+                spoor_ref(src);   // transfer a ref to the caller (atomic vs unmount)
+                if (flags_out) *flags_out = territory->mounts[i].flags;
+                break;
+            }
+            seen++;
+        }
+    }
+    spin_unlock(&territory->ns_lock);
+    return src;
+}
+
+// mount_members_snapshot (UM, union mounts): capture EVERY member of the union
+// at `probe` in ONE ns_lock hold -- each source ref-held, its flags recorded,
+// in declared search order. Returns the count (0 if `probe` is not a mount
+// point); writes at most `max` entries. THE CALLER MUST spoor_clunk every
+// returned Spoor. This is the atomic form of iterating mount_member_at(0),(1),
+// ...: those take the lock once PER index, so a concurrent unmount can shift
+// the member set between calls (UM-7 F4 -- an index-based re-derivation then
+// crosses a DIFFERENT member than it inspected). A single-hold snapshot closes
+// that window for any operation over the WHOLE union (the readdir member
+// snapshot at open; the resolver's union walk).
+int mount_members_snapshot(struct Territory *territory, struct Spoor *probe,
+                           struct Spoor **out, u32 *flags_out, int max) {
+    if (!territory)                    return 0;
+    if (territory->magic != PGRP_MAGIC) extinction("mount_members_snapshot on corrupted Territory");
+    if (!probe || !out || max <= 0)    return 0;
+    if (probe->magic != SPOOR_MAGIC)   extinction("mount_members_snapshot probe corrupted Spoor");
+
+    int n = 0;
+    spin_lock(&territory->ns_lock);
+    for (int i = 0; i < territory->nmounts && n < max; i++) {
+        if (mount_key_eq(&territory->mounts[i], probe)) {
+            out[n] = territory->mounts[i].source;
+            spoor_ref(out[n]);               // transfer a ref to the caller (atomic vs unmount)
+            if (flags_out) flags_out[n] = territory->mounts[i].flags;
+            n++;
+        }
+    }
+    spin_unlock(&territory->ns_lock);
+    return n;
 }
 
 bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
