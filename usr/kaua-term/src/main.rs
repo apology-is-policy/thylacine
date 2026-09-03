@@ -37,8 +37,8 @@ use ptyhold::{set_winsize, Master};
 use vt::Vt;
 
 use libthyla_rs::{
-    env, t_burrow_attach, t_close, t_exit_group, t_putstr, t_read, t_wait_pid_for,
-    t_write, thread,
+    env, t_burrow_attach, t_close, t_exit_group, t_putstr, t_read, t_wait_pid_for, t_write, thread,
+    torpor,
 };
 
 #[global_allocator]
@@ -48,14 +48,46 @@ const DOWN_FD: i64 = 0;
 const UP_FD: i64 = 1;
 const PUMP_STACK: u64 = 64 * 1024;
 
+// A blocking (parking) mutex, the 3-state futex pattern: 0 = free, 1 = held with
+// no waiters, 2 = held with possible waiters. It serializes MASTER writes across
+// the two threads (see write_master). A spinlock would be wrong here -- a master
+// write can block server-side, so the holder may park mid-write; a waiter must
+// park too, not burn a core. Only the master needs it (fd 1 has a single writer).
+struct WriteLock(AtomicU32);
+
+impl WriteLock {
+    const fn new() -> WriteLock {
+        WriteLock(AtomicU32::new(0))
+    }
+    fn lock(&self) {
+        if self.0.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            return;
+        }
+        // Contended: claim as "held, maybe-waiters" and park until free.
+        while self.0.swap(2, Ordering::Acquire) != 0 {
+            let _ = torpor::wait(&self.0, 2, None);
+        }
+    }
+    fn unlock(&self) {
+        if self.0.swap(0, Ordering::Release) == 2 {
+            let _ = torpor::wake_one(&self.0);
+        }
+    }
+}
+
 // The state the two threads share. mfd + n are immutable after mint; the two
-// atomics are the only mutable cross-thread state (see the file header).
+// atomics + the write lock are the only mutable cross-thread state (file header).
 struct Shared {
     mfd: i64,
     n: u64,
     app_cursor: AtomicBool,
     // (cols << 16) | rows, or 0 for "no pending resize".
     pending_resize: AtomicU32,
+    // Serializes the master's TWO writers: the output thread's terminal replies
+    // (CPR/DSR/DA) and the input thread's re-encoded keys. Without it a reply
+    // written during a keystroke could interleave mid-sequence and corrupt the
+    // app's stdin (ut/kaua emits [6n for its size handshake, so this is live).
+    master_write: WriteLock,
 }
 
 fn write_all(fd: i64, buf: &[u8]) {
@@ -68,6 +100,16 @@ fn write_all(fd: i64, buf: &[u8]) {
         }
         off += w as usize;
     }
+}
+
+// A master write held under the lock, so a reply and a key never interleave.
+fn write_master(sh: &Shared, buf: &[u8]) {
+    if buf.is_empty() {
+        return;
+    }
+    sh.master_write.lock();
+    write_all(sh.mfd, buf);
+    sh.master_write.unlock();
 }
 
 fn emit(recs: &[Record], out: &mut Vec<u8>) {
@@ -100,7 +142,7 @@ extern "C" fn pump_in(arg: u64) {
                     Ok(Input::Key(ev)) => {
                         kbuf.clear();
                         encode_key(&ev, sh.app_cursor.load(Ordering::Relaxed), &mut kbuf);
-                        write_all(sh.mfd, &kbuf);
+                        write_master(sh, &kbuf);
                     }
                     Ok(Input::Resize { cols, rows }) => {
                         // Flag the output thread BEFORE setting the winsize, so
@@ -176,6 +218,7 @@ fn run() -> i64 {
         n: master.n,
         app_cursor: AtomicBool::new(false),
         pending_resize: AtomicU32::new(0),
+        master_write: WriteLock::new(),
     }));
 
     // The input thread. A spawn failure degrades to output-only (the tile still
@@ -220,9 +263,10 @@ fn run() -> i64 {
         recs.clear();
         prod.feed(&mut vt, &buf[..n as usize], &mut recs);
         sh.app_cursor.store(vt.app_cursor(), Ordering::Relaxed);
-        // The terminal's own replies (CPR etc.) go back to the app on the master.
+        // The terminal's own replies (CPR etc.) go back to the app on the master,
+        // under the lock so they never interleave with an input-thread key write.
         if !vt.reply.is_empty() {
-            write_all(mfd, &vt.reply);
+            write_master(sh, &vt.reply);
             vt.reply.clear();
         }
         // The aurora-config OSC channel is not a tile concern; drop it.
