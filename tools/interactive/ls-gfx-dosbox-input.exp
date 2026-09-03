@@ -1,0 +1,152 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-dosbox-input.exp -- the DX-3 (Cryptid) keyboard-input
+# gate: a keystroke reaches a running DOS program end to end.
+#
+# DX-2 proved DOSBox-X runs + renders + runs a mounted DOS program (autoexec).
+# DX-3 proves the INPUT path: an injected key travels
+#   QMP send-key -> QEMU virtio-keyboard-PCI -> tapestryd (the compositor owns
+#   the input device, usr/tapestryd/src/input.rs) -> the FOCUSED DOSBox-X
+#   surface -> the SDL_thylacine event pump (SDL_thylacineevents.c) -> DOSBox-X's
+#   BIOS keyboard buffer -> INT 21h AH=08h in the guest program.
+#
+# THE DOS PROGRAM (DX3K.COM): a 67-byte DOS .COM emitted by
+# tools/dx3-keyprog.py, baked at the devramfs root (reached at /bin/DX3K.COM
+# post-pivot, joey's /bin bind). It prints "HITKEY", reads ONE key with no echo
+# (AH=08h), and writes "KEY=<c>" to C:\OUT.TXT where <c> is the byte read. The
+# file readback is the verifiable signal (DOS console output paints the pane,
+# not the serial log). No key injected -> the program blocks forever -> the
+# readback times out: a clean "the key did not arrive" failure.
+#
+# WHY BACKGROUND DOSBOX-X (`&`): identical to ls-gfx-dosbox -- the FILE is the
+# only serial-visible signal, so the shell must stay free to `cat` it while
+# DOSBox-X keeps the pane (and its keyboard focus) alive. ut's `&` is real.
+#
+# FOREGROUND-EXIT CHARACTERIZATION (DX-3 open item): after the input proof, a
+# non-failing leg runs a FOREGROUND dosbox that exits immediately and checks
+# whether the shell returns. DX-2c saw a foreground dosbox leave the shell
+# wedged; this harvests ground truth (it reports, it does not fail the gate --
+# once understood + fixed it graduates to a hard leg).
+#
+# HVF posture (the ls-gfx sibling; TCG hangs at the 8a-2b hwwatch E2E, #27).
+
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+# Fingerprint a screendump PNG -> "<rolling-hash> <distinct-color-buckets>".
+proc gfx_fingerprint {png} {
+    return [exec python3 [file join [file dirname [info script]] gfx_fp.py] $png]
+}
+proc gfx_dump_or_fail {out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} {
+        return $err
+    }
+    return ""
+}
+# Inject a QKeyCode via QMP (the "agentic fingers"; tools/qmp-send-key.sh).
+proc qmp_key {qcode} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-send-key.sh -s $qmp $qcode} err]} {
+        return $err
+    }
+    return ""
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Stage the baked keystroke program into the dir we mount as C: (same /bin bind
+# path as DX2C.COM -- devramfs root survives joey's pivot only under /bin).
+lc_send "cp /bin/DX3K.COM /home/michael/DX3K.COM"
+after 1500
+
+# Background DOSBox-X: mount C: = /home/michael, switch to it, run DX3K.COM.
+# DX3K.COM prints HITKEY and BLOCKS on the key read, holding the pane + focus.
+lc_send "dosbox-x -c \"mount c /home/michael\" -c \"c:\" -c \"DX3K.COM\" &"
+
+# SDL up (past the fatal combined SDL_Init the 0004 patch fixes).
+set timeout 30
+expect {
+    -re {Video thylacine}       { lc_step "SDL up: thylacine video + dummy audio" }
+    -re {E_Exit|Can't init SDL} { lc_fail "dosbox-x E_Exit during SDL init (0004 regressed?)" }
+    "snare:"                    { lc_fail "dosbox-x graphical faulted (snare)" }
+    "user fault"                { lc_fail "dosbox-x graphical user fault" }
+    -re {EXTINCTION:}           { lc_extinction_fail "kernel extinction while dosbox-x ran" }
+    timeout                     { lc_fail "dosbox-x SDL did not come up within 30s" }
+}
+# DOS live (COMMAND.COM runs the autoexec that launches DX3K.COM).
+set timeout 25
+expect {
+    -re {COMMAND\.COM}                         { lc_step "DOS booted: COMMAND.COM up; launching DX3K.COM" }
+    -re {user fault|snare:|E_Exit|EXTINCTION:} { lc_fail "dosbox-x died before COMMAND.COM" }
+    timeout                                    { lc_fail "no COMMAND.COM within 25s" }
+}
+
+# Settle: let the autoexec run DX3K.COM so it prints HITKEY and parks on the key
+# read. A screendump here shows the pane with the prompt (not gated -- a "not
+# flat black" backstop that the surface is live and focusable).
+after 6000
+set dbx_png $repo/build/ls-gfx-dosbox-input.png
+if {[gfx_dump_or_fail $dbx_png] eq ""} {
+    set c [lindex [gfx_fingerprint $dbx_png] 1]
+    lc_step "render: $c color buckets in the scanout (DX3K.COM waiting on a key)"
+}
+
+# --- THE INPUT PROOF: inject 'a' and confirm it reached DOS ---
+# Two presses ~1s apart: the compositor delivers input at most one FRAME period
+# late and the guest may still be entering AH=08h at the first; the second is
+# belt-and-suspenders. AH=08h consumes exactly one, so OUT.TXT holds the first
+# key seen (either press is 'a').
+if {[qmp_key a] ne ""} { lc_fail "qmp-send-key failed (QMP send-key error)" }
+after 1000
+if {[qmp_key a] ne ""} { lc_fail "qmp-send-key failed (QMP send-key error)" }
+
+# DX3K.COM now writes C:\OUT.TXT = "KEY=a" and terminates. Poll the readback:
+# OUT.TXT does not exist until the key is consumed + written, so a single cat
+# could race ahead of the write ("No such" is transient, not a verdict). Retry
+# a bounded number of times; only "still absent after all retries" is failure.
+set gotkey 0
+after 3000
+for {set i 0} {$i < 8 && !$gotkey} {incr i} {
+    lc_send "cat /home/michael/OUT.TXT"
+    set timeout 10
+    expect {
+        -ex "KEY=a"             { lc_step "input: KEY=a -- injected 'a' reached DOS INT 21h AH=08h (full input path live)"; set gotkey 1 }
+        -re {KEY=(.)}           { lc_step "input: KEY=$expect_out(1,string) reached DOS (injected 'a'; case/layout delta, path proven)"; set gotkey 1 }
+        -re {No such|not found} { after 1500 }
+        -re {EXTINCTION:}       { lc_extinction_fail "kernel extinction reading OUT.TXT" }
+        timeout                 { after 500 }
+    }
+}
+if {!$gotkey} {
+    lc_fail "no KEY= marker after 8 reads -- the injected key never reached DX3K.COM (input path broken)"
+}
+lc_pass "dosbox-x input: an injected keystroke reached a running DOS program (DX-3 QMP->virtio-kbd->tapestryd->SDL->INT 21h)"
+
+# --- foreground-exit (the DX-2c open item, now RESOLVED + a HARD leg) ---
+# The DX-2c "wedge" was misdiagnosed as a possible SDL-teardown hang. It is not:
+# a FOREGROUND dosbox that runs the full mount+program sequence and then exits
+# via an autoexec `-c "exit"` returns the shell cleanly (SDL_Quit -> the pump
+# join -> process exit all complete -- the never-before-exercised clean exit of
+# an SDL app to the shell works). The real DX-2c pitfall was typing `exit` on
+# the SERIAL console: DOSBox reads its input from the PANE (SDL events), not
+# serial, so a serial `exit` never reaches the DOS shell and the foreground
+# dosbox runs forever. The cure is an autoexec exit (here) or backgrounding.
+# The buffered `echo` marker fires the moment the shell reads input after dosbox.
+lc_send "cp /bin/DX2C.COM /home/michael/DX2C.COM"
+after 1000
+lc_send "dosbox-x -c \"mount c /home/michael\" -c \"c:\" -c \"DX2C.COM\" -c \"exit\""
+lc_send "echo FG-EXIT-DONE-MARKER"
+set timeout 70
+expect {
+    -re {FG-EXIT-DONE-MARKER} { lc_step "foreground-exit: mount+program+exit returned the shell -- SDL teardown clean, no hang" }
+    -re {EXTINCTION:}         { lc_extinction_fail "kernel extinction during foreground dosbox exit" }
+    timeout                   { lc_fail "foreground-exit: shell did NOT return after mount+program+exit -- a wedge or SDL-teardown hang" }
+}
+
+lc_quit
+lc_pass "ls-gfx-dosbox-input: the DX-3 Cryptid keyboard-input gate verified"
+exit 0

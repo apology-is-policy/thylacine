@@ -23,6 +23,54 @@ needed the operator.
 
 ---
 
+## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-3a: a keystroke reaches DOS, and the foreground-exit "wedge" dissolves
+
+DX-3's crown jewel: an injected keystroke reaches a running DOS program end to
+end. The path is long and every hop is now proven live -- QMP `send-key` -> QEMU
+virtio-keyboard-PCI -> **tapestryd** (the compositor owns the input device,
+`usr/tapestryd/src/input.rs`) -> the DOSBox-X surface (auto-focused on create)
+-> the **SDL_thylacine event pump** (`SDL_thylacineevents.c`: evdev keycode ->
+`linux_scancode_table` -> `SDL_SendKeyboardKey`) -> DOSBox-X's BIOS keyboard
+buffer -> INT 21h AH=08h in the guest. The witness is **DX3K.COM**
+(`tools/dx3-keyprog.py`, a 67-byte `.COM`, offsets computed from the 45-byte code
+length and asserted, not hand-transcribed): it prints a prompt, reads one key
+with no echo, self-patches the read byte into a `KEY=?\r\n` buffer, and writes
+`C:\OUT.TXT`, which the Thylacine shell reads back. Result on HVF: `KEY=a` for an
+injected `a` -- lowercase, matching a no-shift injection, so even the layout is
+right. Gate: `ls-gfx-dosbox-input.exp` (45 s), driving a new reusable
+`tools/qmp-send-key.sh` -- the "agentic fingers" to screendump.sh's "agentic
+eyes".
+
+**The finding nobody planned: the DX-2c "foreground-exit wedge" was a
+misdiagnosis, and chasing it the obvious way would have wasted the run.** DX-2c
+left an open item: a foreground dosbox seemed to leave the shell wedged, and the
+leading theory (mine, from a static read) was a hang in the SDL teardown -- the
+`SDL_Quit -> VideoQuit -> DestroyWindow -> StopEventPump` pump-join, a path NO
+SDL app had ever exercised on Thylacine (the Quake gate kills the VM with
+`lc_quit`; it never exits Quake to the shell). That theory was plausible and
+wrong. One boot settled it: `dosbox-x -c "exit"` in the FOREGROUND exits cleanly
+and the shell returns (`FG-EXIT-DONE-MARKER` appears). So the teardown does not
+hang -- this is, in fact, the first clean exit of an SDL app back to the shell on
+Thylacine, a whole-graphical-stack soundness fact worth having. The real DX-2c
+pitfall was mundane: DOSBox-X reads its input from the PANE (SDL events), never
+from the serial console, so typing `exit` on serial never reached DOSBox's DOS
+shell -- the foreground dosbox simply kept running, correctly. The cure is an
+autoexec `-c "exit"` (or backgrounding). Promoted to a HARD gate leg with the
+full DX-2c sequence (`mount c` + `c:` + `DX2C.COM` + `exit`), re-confirmed green,
+and it also proves two dosbox instances coexist (the input proof's backgrounded
+dosbox stays alive while the foreground-exit dosbox runs and exits).
+
+Wrong turn avoided, not just caught: the static teardown analysis was the RIGHT
+preparation (it named the exact join to watch) but the WRONG conclusion, and the
+cheap disambiguator was a single boot with a post-exit marker rather than a deep
+dive into the pump-join. Ground truth over theory, again.
+
+Landed (@pending): `tools/dx3-keyprog.py`, `tools/qmp-send-key.sh`,
+`tools/interactive/ls-gfx-dosbox-input.exp`, and the `DX3K.COM` staging in
+`tools/build.sh` (under the same `THYLACINE_BAKE_DOSBOX` default-on gate as
+DX2C.COM). Open for the DX-3 remainder: sound-stub hardening, config/autoexec
+(`dosbox.conf`), and a larger real DOS program.
+
 ## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-2c: a real DOS program runs off a mounted host drive
 
 DX-2's second half, and the DX-2 exit criterion met: `dosbox-x` mounts a host

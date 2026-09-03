@@ -624,6 +624,15 @@ EOF
             || { echo "==> ramfs: DX2C.COM emit FAILED" >&2; exit 1; }
         chmod 0644 "$ramfs_src/DX2C.COM"
         ledger "ramfs.cpio: staged DX2C.COM (DX-2c DOS run-a-program witness)"
+        # DX-3: the 67-byte DX3K.COM keystroke witness -- prints a prompt,
+        # reads ONE key (INT 21h AH=08h), writes "KEY=<c>" to C:\OUT.TXT. The
+        # ls-gfx-dosbox-input gate injects a key via QMP and reads the file
+        # back, proving the QMP -> virtio-keyboard -> tapestryd -> SDL -> DOS
+        # input path end to end.
+        python3 "$REPO_ROOT/tools/dx3-keyprog.py" "$ramfs_src/DX3K.COM" \
+            || { echo "==> ramfs: DX3K.COM emit FAILED" >&2; exit 1; }
+        chmod 0644 "$ramfs_src/DX3K.COM"
+        ledger "ramfs.cpio: staged DX3K.COM (DX-3 DOS keystroke witness)"
     fi
 
     # P6-pouch-stratumd-boot (sub-chunk 16a): copy the cross-built stratumd

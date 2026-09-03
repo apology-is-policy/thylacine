@@ -172,6 +172,25 @@ server + virtio-sound (post-v1.0) lights it up.
     LLVM C++ fork skips the emulator gracefully. **NEXT = DX-3** (sound stub/input).
 - **DX-3** -- sound fully stubbed/hardened; input polish (keyboard + mouse for
   games); config/autoexec; larger real DOS programs.
+  - **DX-3a DONE** (2026-09-03): the INPUT path proven end to end + the DX-2c
+    foreground-exit open item RESOLVED. An injected keystroke travels QMP
+    `send-key` -> QEMU virtio-keyboard-PCI -> tapestryd (the compositor owns the
+    input device) -> the auto-focused DOSBox-X surface -> the SDL_thylacine event
+    pump -> DOSBox-X's BIOS keyboard buffer -> INT 21h AH=08h in a guest program.
+    The witness: `DX3K.COM` (`tools/dx3-keyprog.py`, a 67-byte .COM baked at the
+    devramfs root) prints a prompt, reads ONE key with no echo, and writes
+    "KEY=<c>" to `C:\OUT.TXT`, read back through the Thylacine shell. Gate:
+    `tools/interactive/ls-gfx-dosbox-input.exp`, driving `tools/qmp-send-key.sh`
+    (the "agentic fingers", companion to screendump.sh's "agentic eyes").
+    RESOLVED (the DX-2c "wedge"): it was never an SDL-teardown hang -- a
+    FOREGROUND dosbox that exits via an autoexec `-c "exit"` returns the shell
+    cleanly (SDL_Quit -> the event-pump join -> process exit all complete; the
+    first clean exit of an SDL app to the shell on Thylacine). The pitfall was
+    typing `exit` on the SERIAL console: DOSBox-X reads its input from the PANE
+    (SDL events), not serial, so a serial `exit` never reaches the DOS shell and
+    the foreground dosbox runs on. The cure is an autoexec exit or backgrounding;
+    the gate's foreground-exit leg is now HARD. **NEXT (DX-3 remainder): sound
+    stub hardening, config/autoexec (dosbox.conf), a larger real DOS program.**
 - **DX-4** -- the **CAP_JIT dynarec** (I-42; central): wire `dynamic_x86` to emit
   through CAP_JIT (writer/exec split per the ORC template); SMC via re-publish.
   AUDIT-BEARING (own design pass + focused audit). Exit: `core=dynamic` correct +
