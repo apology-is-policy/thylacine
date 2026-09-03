@@ -3,8 +3,9 @@
 // app-side emitter). The subset covers what the tree's emitters produce
 // (libutopia's ANSI + truecolor SGR, Kaua's cursor/erase/alt-screen, login's
 // plain lines) plus the classic VT100 core; unknown sequences are parsed and
-// dropped (never desync). DECSTBM scroll regions are accepted-and-ignored
-// (full-screen scroll only) -- the recorded MVP seam.
+// dropped (never desync). DECSTBM scroll regions, DECOM origin mode, SU/SD,
+// wide (double-width) glyphs, and italic/dim/blink/strike SGR are honored
+// (KT-1a); full wide/attr RENDERING is the consumer's (KT-1c/1d).
 //
 // Colors are the Bonfire palette (docs/UTOPIA-VISUAL.md section 1): default
 // bg/fg + the role-derived ANSI-16 map below. SGR 38;2 truecolor passes
@@ -401,7 +402,7 @@ const MAX_PARAMS: usize = 16;
 // Append `n` in decimal (the CPR reply formatter; no core::fmt in the byte
 // machine's hot path).
 fn push_dec(out: &mut Vec<u8>, n: usize) {
-    let mut buf = [0u8; 8];
+    let mut buf = [0u8; 20]; // max usize decimal digits
     let mut i = buf.len();
     let mut v = n.max(1); // rows/cols are 1-based and nonzero
     while v > 0 {
@@ -438,8 +439,9 @@ pub struct Vt {
     // the full-screen default preserves its behavior (the shared-crate contract).
     scroll_top: usize,
     scroll_bot: usize,
-    // DECOM (?6): when set, CUP/VPA rows are origin-relative + region-clamped and
-    // the cursor cannot leave the band; default off (absolute).
+    // DECOM (?6): when set, CUP/VPA rows are origin-relative + region-clamped
+    // (see origin_row); default off (absolute). Relative moves (CUU/CUD/CUF/CUB)
+    // are NOT confined to the band -- a full-DECOM refinement, deferred.
     origin: bool,
     // DECAWM (?7). Default SET (autowrap on -- the VT default). Kaua's
     // Terminal::enter emits ?7l so it can paint the bottom-right cell
@@ -483,6 +485,12 @@ pub struct Vt {
 
 impl Vt {
     pub fn new(cols: usize, rows: usize) -> Vt {
+        // The parser assumes cols >= 1 && rows >= 1 (scroll_bot = rows-1, cursor
+        // clamps, cy*cols+cx indexing). resize() guards this; new() must too, so
+        // compositor-supplied zero geometry cannot underflow at birth (F2). A
+        // shared crate -- kaua-term constructs a Vt per tile.
+        let cols = cols.max(1);
+        let rows = rows.max(1);
         let pal = BONFIRE;
         Vt {
             cols,
@@ -791,10 +799,13 @@ impl Vt {
             b'@' => self.insert_chars(self.p(0, 1) as usize),
             b'P' => self.delete_chars(self.p(0, 1) as usize),
             b'X' => self.erase_chars(self.p(0, 1) as usize),
-            b'S' => self.scroll_region_up(self.p(0, 1) as usize),
+            b'S' if !self.csi_priv => self.scroll_region_up(self.p(0, 1) as usize),
             // CSI T with 0/1 params is SD; the 5-param form is xterm highlight
             // mouse tracking (unimplemented) -- don't read it as a giant scroll.
-            b'T' if self.nparams <= 1 => self.scroll_region_down(self.p(0, 1) as usize),
+            // Both gate on !csi_priv: CSI ? ... S/T are private (sixel) queries.
+            b'T' if !self.csi_priv && self.nparams <= 1 => {
+                self.scroll_region_down(self.p(0, 1) as usize)
+            }
             b'm' => self.sgr(),
             b'h' | b'l' => self.mode_set(fin == b'h'),
             b's' => self.saved = (self.cx, self.cy),
@@ -904,6 +915,11 @@ impl Vt {
             // grid stays width-correct -- the invariant is it takes no column.)
             return;
         }
+        // A double-width glyph in a terminal too narrow to ever hold one shows
+        // single-width: the margin-wrap below assumes wrapping creates room
+        // (true only for cols >= 2); without this the continuation write runs
+        // off the row (F1 P0), and cx would exceed cols (ICH/DCH/ECH underflow).
+        let w = if w == 2 && self.cols < 2 { 1 } else { w };
         // Resolve a deferred wrap left pending by the previous glyph.
         if self.cx >= self.cols {
             if self.wrap {
@@ -1073,37 +1089,49 @@ impl Vt {
     }
 
     fn insert_lines(&mut self, n: usize) {
-        let n = n.min(self.rows - self.cy);
+        // xterm: IL is confined to the scroll region and is a no-op when the
+        // cursor is outside it (F3). Lines within [cy, scroll_bot] shift down;
+        // content pushed past scroll_bot is discarded.
+        if self.cy < self.scroll_top || self.cy > self.scroll_bot {
+            return;
+        }
+        let n = n.min(self.scroll_bot + 1 - self.cy);
         if n == 0 {
             return;
         }
         let cols = self.cols;
         let start = self.cy * cols;
-        let end = self.rows * cols;
+        let end = (self.scroll_bot + 1) * cols;
         self.cells.copy_within(start..end - n * cols, start + n * cols);
         let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[start..start + n * cols].iter_mut() {
             *c = Cell::blank(fg, bg);
         }
-        for r in self.cy..self.rows {
+        for r in self.cy..=self.scroll_bot {
             self.mark(r);
         }
     }
 
     fn delete_lines(&mut self, n: usize) {
-        let n = n.min(self.rows - self.cy);
+        // xterm: DL is confined to the scroll region and is a no-op when the
+        // cursor is outside it (F3). Lines within [cy, scroll_bot] shift up; the
+        // vacated bottom of the region is blanked.
+        if self.cy < self.scroll_top || self.cy > self.scroll_bot {
+            return;
+        }
+        let n = n.min(self.scroll_bot + 1 - self.cy);
         if n == 0 {
             return;
         }
         let cols = self.cols;
         let start = self.cy * cols;
-        let end = self.rows * cols;
+        let end = (self.scroll_bot + 1) * cols;
         self.cells.copy_within(start + n * cols..end, start);
         let (fg, bg) = (self.pal.fg, self.bg);
-        for c in self.cells[end - n * cols..].iter_mut() {
+        for c in self.cells[end - n * cols..end].iter_mut() {
             *c = Cell::blank(fg, bg);
         }
-        for r in self.cy..self.rows {
+        for r in self.cy..=self.scroll_bot {
             self.mark(r);
         }
     }
@@ -1687,5 +1715,87 @@ mod tests {
         );
         feed(&mut vt, b"\x1b[22mB"); // 22 clears BOTH
         assert_eq!(vt.cells[1].attrs & (ATTR_BOLD | ATTR_DIM), 0);
+    }
+
+    #[test]
+    fn wide_char_in_narrow_grid_degrades_no_oob() {
+        // F1 (P0): a wide glyph in a <2-col grid must degrade to single width,
+        // not write the continuation off the row (an OOB abort at the bottom).
+        let mut vt = Vt::new(1, 1);
+        feed(&mut vt, b"\xe4\xb8\x80"); // U+4E00, wide
+        assert_eq!(vt.cells[0].ch, '\u{4E00}');
+        assert_eq!(vt.cells[0].attrs & ATTR_WIDE, 0); // degraded, not marked wide
+        assert!(vt.cx <= vt.cols); // the invariant ICH/DCH/ECH rely on
+        // the original abort site: a wide glyph at the bottom row of a 1-col grid
+        let mut vt = Vt::new(1, 4);
+        feed(&mut vt, b"\x1b[4;1H"); // last row
+        feed(&mut vt, b"\xf0\x9f\x98\x80"); // U+1F600 emoji, wide
+        feed(&mut vt, b"\x1b[@"); // ICH: cols-cx underflows (panic) if cx>cols
+        assert!(vt.cx <= vt.cols);
+    }
+
+    #[test]
+    fn zero_dimension_grid_is_clamped_not_panic() {
+        // F2 (P2): a zero dimension clamps to 1, never underflows at birth.
+        let mut vt = Vt::new(1, 0); // rows=0 -> 1
+        feed(&mut vt, b"x");
+        assert!(!vt.cells.is_empty());
+        let mut vt = Vt::new(0, 3); // cols=0 -> 1
+        feed(&mut vt, b"\t"); // the cols-1 underflow path
+        feed(&mut vt, b"\xe4\xb8\x80"); // wide into a 1-col grid
+        assert!(!vt.cells.is_empty());
+    }
+
+    #[test]
+    fn insert_lines_confined_to_region() {
+        // F3 (P1): IL confined to [scroll_top, scroll_bot].
+        let mut vt = Vt::new(1, 5);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(&mut vt, b"\x1b[2;4r"); // region 0-based [1,3]
+        feed(&mut vt, b"\x1b[2;1H"); // cursor row 1 (inside)
+        feed(&mut vt, b"\x1b[L"); // IL 1
+        assert_eq!(vt.cells[0].ch, '0'); // outside, untouched
+        assert_eq!(vt.cells[1].ch, ' '); // inserted blank
+        assert_eq!(vt.cells[2].ch, '1'); // <- old row 1
+        assert_eq!(vt.cells[3].ch, '2'); // <- old row 2 (old '3' discarded)
+        assert_eq!(vt.cells[4].ch, '4'); // outside, untouched (was corrupted pre-fix)
+    }
+
+    #[test]
+    fn delete_lines_confined_to_region() {
+        let mut vt = Vt::new(1, 5);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(&mut vt, b"\x1b[2;4r"); // region [1,3]
+        feed(&mut vt, b"\x1b[2;1H"); // row 1
+        feed(&mut vt, b"\x1b[M"); // DL 1
+        assert_eq!(vt.cells[0].ch, '0'); // outside
+        assert_eq!(vt.cells[1].ch, '2'); // <- old row 2
+        assert_eq!(vt.cells[2].ch, '3'); // <- old row 3
+        assert_eq!(vt.cells[3].ch, ' '); // scroll_bot blanked
+        assert_eq!(vt.cells[4].ch, '4'); // outside, untouched
+    }
+
+    #[test]
+    fn insert_delete_lines_noop_outside_region() {
+        let mut vt = Vt::new(1, 5);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(&mut vt, b"\x1b[2;4r"); // region [1,3]
+        feed(&mut vt, b"\x1b[5;1H"); // cursor row 4 (BELOW region)
+        feed(&mut vt, b"\x1b[L");
+        feed(&mut vt, b"\x1b[M");
+        for (i, c) in [b'0', b'1', b'2', b'3', b'4'].iter().enumerate() {
+            assert_eq!(vt.cells[i].ch, *c as char); // nothing moved
+        }
+    }
+
+    #[test]
+    fn private_scroll_finals_are_not_scroll() {
+        // F5: CSI ? ... S / T are private (sixel) queries, not SU/SD.
+        let mut vt = Vt::new(1, 3);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2");
+        feed(&mut vt, b"\x1b[?1S"); // private -> ignored
+        feed(&mut vt, b"\x1b[?1T"); // private -> ignored
+        assert_eq!(vt.cells[0].ch, '0');
+        assert_eq!(vt.cells[2].ch, '2'); // unmoved
     }
 }
