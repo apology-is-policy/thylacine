@@ -1,0 +1,29 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-dosbox.exp -- the DX-2 (Cryptid) first-light gate.
+#
+# Mirrors the G-7 ls-gfx-quake acceptance gate: a demanding SDL2 client
+# (DOSBox-X) drives the Tapestry stack. DX-2 legs:
+#   execution : `dosbox-x -version` prints "DOSBox-X version ..." and exits --
+#               proves the 17.6 MB static ET_EXEC runs main() on Thylacine.
+#   (render leg + Z:\ prompt on the scanout: added once execution passes.)
+#
+# HVF posture (the ls-gfx sibling; TCG hangs at the 8a-2b hwwatch E2E, #27).
+
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# --- execution leg: does the binary run + print + exit?
+lc_send "dosbox-x -version"
+set timeout 60
+expect {
+    -re {DOSBox-X version ([0-9.]+)} {
+        lc_pass "dosbox-x executes: version $expect_out(1,string) (17.6 MB static ET_EXEC runs main() on Thylacine)"
+    }
+    "snare:" { lc_fail "dosbox-x -version faulted (snare)" }
+    "user fault" { lc_fail "dosbox-x -version user fault" }
+    -re {not found|No such} { lc_fail "dosbox-x not in the namespace (ramfs staging?)" }
+    timeout { lc_fail "no version line within 60s" }
+}

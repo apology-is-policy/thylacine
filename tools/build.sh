@@ -305,6 +305,9 @@ build_kernel() {
     # G-7b: cross-build TyrQuake + stage the shareware pak BEFORE the pool
     # fixture (populate_stratum_pool puts the stage at /quake).
     build_tyrquake
+    # DX-2 (Cryptid): cross-build DOSBox-X before the ramfs bake, only when
+    # opted in (THYLACINE_BAKE_DOSBOX=1) -- see the pouch_bins staging note.
+    [[ -n "${THYLACINE_BAKE_DOSBOX:-}" ]] && build_dosbox_x
     # Warp W-4: cross-build vkQuake over venus + the W-3e SDL Vulkan glue.
     # Self-skips (announced) without the fetched venus link set.
     build_vkquake
@@ -594,6 +597,10 @@ EOF
     # Same curation discipline — explicit list, not a glob.
     local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "tyr-glquake" "make" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
+    # DX-2 (Cryptid first light): dosbox-x is a 17.6 MB binary -- opt-in to the
+    # ramfs via THYLACINE_BAKE_DOSBOX=1 (mirrors build_go_goroot's opt-out) so it
+    # does not slow the default build during the arc; flips default-on at DX-2 close.
+    [[ -n "${THYLACINE_BAKE_DOSBOX:-}" ]] && pouch_bins+=( "dosbox-x" )
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
         if [[ -f "$src" ]]; then
