@@ -1,11 +1,12 @@
 # KAUA-TERM.md -- the per-tile terminal emulator (the Halcyon terminal substrate)
 
-The `kaua-term` is the shared component that hosts a program (native `ut` OR an
-unmodified Linux binary) on a pseudoterminal, parses its full-xterm output into a
-`kaua` cell `Buffer`, rasterizes that into a `tapestryd` surface, and re-encodes
-input back to the pts. It is the per-tile terminal emulator for Halcyon's
-"the terminal is the desktop" model, and it SUBSUMES `aurora` (today's single
-console renderer) as one instantiation mode.
+The `kaua-term` is the per-tile terminal-emulator process that hosts a program
+(native `ut` OR an unmodified Linux binary) on a pseudoterminal, parses its
+full-xterm output into a cell grid, feeds an ordered cell-record stream to
+halcyond (which rasterizes + composites -- the render seam = B, section 1b), and
+re-encodes input back to the pts. It is the per-tile terminal for Halcyon's
+"the terminal is the desktop" model, and it shares the full-xterm PARSER crate
+(`usr/lib/vt`) with `aurora` (the trusted-console renderer).
 
 **Status: DESIGN (ratified, unbuilt).** This is the design-conversation output,
 committed BEFORE code per the design-first policy. The as-built reference
@@ -63,11 +64,11 @@ mechanism that serves BOTH native and Linux programs, with one render substrate.
 ## 1a. The process topology -- RATIFIED: uniform per-tile process (Y), 2026-09-03
 
 **Every tile is its own kaua-term PROCESS** -- native `ut` and Linux binaries
-alike. Each kaua-term holds its tile's pts master, parses, rasterizes, and
-presents a `Surface` that halcyond composites into the tile rect. There is no
-in-halcyond terminal pane; halcyond has ONE composition path (surfaces), applied
-uniformly. The operator ratified this on 2026-09-03 (main teed the fork; the
-operator "voted isolated" = uniform-Y).
+alike. Each kaua-term holds its tile's pts master, parses, and feeds an ordered
+cell-record stream to halcyond, which rasterizes + composites (the render seam =
+B, section 1b). There is no in-halcyond terminal pane; halcyond has ONE
+ingest+render path, applied uniformly. The operator ratified this on 2026-09-03
+(main teed the fork; the operator "voted isolated" = uniform-Y).
 
 The fork (for the record): (X) in-process -- halcyond holds N VT/transcript
 instances via the shared `usr/lib/vt` crate, matching HALCYON 13.1's single-brain
@@ -86,11 +87,13 @@ exactly this reason), now applied to every tile. The cost the operator accepted:
 a native `ut` tile is a process too (cheap) rather than an in-halcyond pane; the
 gain is one uniform halcyond path + uniform isolation.
 
-Consequences now FIRM (previously held on this fork):
-- The kaua-term is a `tapestryd` CLIENT process (owns a surface), per tile.
-- The **live-screen<->transcript seam** (halcyond's transcript, R5, receiving the
-  kaua-term's live-screen surface + cell geometry) is a real cross-process seam to
-  define, for EVERY tile (not just Linux). It is defined once, uniformly.
+Consequences now FIRM (topology + the seam both ratified):
+- The kaua-term is a per-tile PARSER+producer process; it does NOT own a surface
+  or rasterize -- it feeds the ordered cell stream to halcyond (seam=B, 1b), and
+  halcyond rasterizes + composites.
+- The **live-screen<->transcript seam** (section 1b, the record contract:
+  CellDiff/ScrollOff/Control/Mode up; Key/Resize down) is a real cross-process
+  seam, defined once for EVERY tile (native + Linux) -- RATIFIED (B).
 - KT-1 (section 6) is a kaua-term process hosting `ut`, native included.
 
 The trusted CONSOLE renderer (the SAK sink on `/dev/cons`, subsuming aurora --
@@ -100,38 +103,47 @@ a framebuffer SAK episode (18.7).
 
 ---
 
-## 1b. OPEN -- the live-screen<->transcript seam (the next shared design)
+## 1b. The live-screen<->transcript seam -- RATIFIED: (B) FEED-CELLS, 2026-09-03
 
-With uniform-Y fixed, the load-bearing shared design becomes the seam between the
-per-tile kaua-term process and halcyond (surfaced by main, 2026-09-03; it is a
-FRESH main<->aux design conversation, not settled here). The fork -- the
-render-responsibility:
+The kaua-term FEEDS CELLS to halcyond; halcyond rasterizes + owns the transcript.
+The operator ratified (B) (main+aux call 0045); (A) render-pixels was ruled OUT --
+it hands halcyond only pixels, so the rich transcript / Helix-modal / inline media
+would force fontdue + the whole transcript machinery INTO every kaua-term process
+(N copies). (A)'s genuine buys (D7-purity, parallel per-process rasterization) were
+noted and outweighed by the rich-transcript vision. The mandatory crash-isolation
+is preserved under (B): the isolated part is the hostile-input PARSER (in the
+kaua-term process); halcyond's renderer sees only TRUSTED cells.
 
-- **(A) kaua-term RENDERS PIXELS:** parse -> `Buffer` -> rasterize (fontdue /
-  Cornucopia) -> a weave `Surface`; halcyond composites. fontdue + the render path
-  move INTO the kaua-term; halcyond is a pure placement orchestrator.
-- **(B) kaua-term FEEDS CELLS:** parse -> `Buffer`; feed the cell grid + input
-  events to halcyond; halcyond keeps fontdue + the transcript + Helix-modal
-  scrollback selection + inline media (`Image`/`Embed`) + beacon, rasterizes, and
-  composites. The kaua-term is then a pure isolated PARSER+input process (no
-  rasterizer, no surface).
+**THE CONTRACT (firm; both tracks concur). One ordered record stream up, a small
+stream down. The record ORDER is load-bearing (it delimits Beacon zones); the
+kaua-term emits in VT-stream order, flushing a pending CellDiff at every boundary.**
 
-**Aux lean: (B)**, grounded in -- R5 (the transcript stays halcyond's: B gives
-halcyond the cells to build it; A gives halcyond only pixels); Helix-modal
-scrollback selection needs the TEXT in halcyond (B provides it, A does not);
-inline media (`cat pic.png` -> halcyond `Image`/`Embed` in the transcript flow)
-needs halcyond to own the flow (B); fontdue stays in one place (B) rather than
-duplicated per process (A). The mandatory crash-isolation is preserved in B
-because the isolated part is the PARSER (hostile bytes); halcyond's renderer
-processes only TRUSTED cells (a bounded grid + a font), a much lower crash risk
-than the parser. (A) buys D7-purity + parallel per-process rasterization; the
-tradeoff is real, so it is an operator-teed fork after main+aux converge.
+kaua-term -> halcyond (ordered):
+- `CellDiff { changed (row,col,cell)[], cursor(row,col,vis) }` -- the live screen.
+  (Cells are position-keyed, so intra-batch order is irrelevant -- only the
+  boundary order between records matters.)
+- `ScrollOff { rows: cell[][] }` -- normal-mode lines off the top -> the transcript.
+- `Control { osc1936_raw(bytes) | bell | title(str) | exit(code) | winsize_ack }`
+  -- the kaua-term forwards OSC 1936 (Beacon-zone frames) RAW, uninterpreted
+  (halcyond keeps the Beacon parser -- R5 + its format-fuzz surface), plus BEL,
+  OSC 0/2 title, the hosted child's exit code, and a winsize ack.
+- `Mode { normal | alt_screen }` -- the ?1049/47/1047 flip; `alt_screen` => a full
+  live grid, NO ScrollOff; `normal` => ScrollOff appends to the transcript.
 
-This is main-HEAVY (halcyond's renderer/transcript/Helix/inline-media/beacon are
-all main's HALCYON 13 domain, invisible to aux-2 -- so aux CANNOT ground main's
-half; main grounds it). Aux's half of the seam: the kaua-term's cell-feed +
-input-event side (B) or the rasterize+present side (A). Settle in the fresh seam
-call before KT-1's render path is written.
+halcyond -> kaua-term:
+- `Key { KeyEvent }` -- halcyond routes post-chrome-chord input; the kaua-term
+  xterm-encodes honoring DECCKM/keypad -> the pts master.
+- `Resize { cols, rows }` -- the kaua-term sets the pts winsize (TIOCSWINSZ) + the
+  hosted app gets SIGWINCH.
+
+WIRE CELL = the shared `usr/lib/vt::Cell` (self-contained `ch` + inline style);
+halcyond interns per-block internally (its `TCell`) on ingest. IPC = a
+halcyond-owned Loom ring per tile (H-3c-2 EventRing reuse; main's side; the kernel
+primitive firms at KT-1); the contract itself is transport-agnostic. TIER = RICH
+per Halcyon tile (halcyond rasterizes with fontdue); the pts advertises `BEACON=`
+at kaua-term spawn (the aux producer side; no dynamic per-tile tier switch at v1.0).
+
+Main records the same contract in HALCYON 14.3 (its scripture half).
 
 ---
 
@@ -144,41 +156,42 @@ call before KT-1's render path is written.
          pts slave  --(ptyfs userspace line discipline: cook/echo/isig)-->  pts master
                                                                                ^  |
                                                           held by the tile's kaua-term
-           kaua-term:                                                          |  v
-             master bytes --> FULL-xterm VT PARSER --> kaua cell Buffer
-             kaua Buffer   --> rasterize (Cornucopia | fontdue) --> tapestryd weave surface --> present
-             compositor KeyEvent --> xterm re-encode (honors DECCKM/keypad) --> master
-           halcyond:
-             composites the kaua-term's surface into the tile rect --> framebuffer
-             routes input: raw kbd --> KeyEvent (chrome chords filtered) --> the focused tile's kaua-term
+           kaua-term (a PARSER+producer PROCESS; does NOT rasterize):          |  v
+             master bytes --> FULL-xterm VT PARSER (usr/lib/vt) --> a cell grid
+             --> ONE ordered record stream: CellDiff/ScrollOff/Control/Mode --> halcyond
+             halcyond Key/Resize records --> xterm re-encode (honors DECCKM/keypad) --> master
+           halcyond (the renderer + orchestrator):
+             ingests the ordered cell stream --> rasterizes (fontdue) + builds the
+             transcript (Helix-modal, inline media) --> composites the tile --> framebuffer
+             routes input: raw kbd --> KeyEvent (chrome chords filtered) --> the focused kaua-term
 ```
 
-The pipeline above reflects the RATIFIED uniform-Y topology (section 1a): the
-kaua-term is a per-tile PROCESS. What remains OPEN is the render-responsibility
-SEAM (section 1b): whether the kaua-term rasterizes its `Buffer` to a `Surface`
-halcyond composites (A -- fontdue + the render path move INTO the kaua-term), or
-feeds the cell `Buffer` + input events to halcyond's renderer (B -- halcyond keeps
-fontdue + the transcript + Helix-modal + inline media + beacon, and composites).
-Either way the hostile-input PARSER is isolated in the kaua-term process (the
-mandatory crash-isolation of section 1a); the seam decides only WHERE the trusted
-renderer + transcript live. D7 (the tapestryd compositor deals in pixels, never
-glyphs) holds in both -- halcyond is a tapestryd CLIENT that may rasterize its own
-panes (HALCYON 13), distinct from the compositor.
+The pipeline reflects the RATIFIED design (uniform-Y topology, section 1a; the
+render-responsibility SEAM = B, section 1b): the kaua-term is a per-tile
+PARSER+producer PROCESS that feeds an ordered cell-record stream to halcyond;
+halcyond rasterizes + composites. The mandatory crash-isolation holds -- the
+hostile-input PARSER is isolated in the kaua-term process; halcyond's renderer
+sees only TRUSTED cells (a bounded grid + a font). D7 holds: tapestryd (the
+compositor) stays pixels-only; halcyond is a tapestryd CLIENT that rasterizes its
+own panes (HALCYON 13/14).
 
-**Two instantiation modes (R2: one codebase).**
+**Two roles, one shared PARSER crate (R2, refined by seam=B).**
 
-| axis        | tile mode                     | console mode (subsumes aurora)          |
-|-------------|-------------------------------|-----------------------------------------|
-| input       | pts master                    | `/dev/consdrain` + `/dev/consfeed`      |
-| output      | composited weave (a tile rect)| whole-screen `Surface`                  |
-| trust       | untrusted (like a rio window) | the trusted console (SAK sink)          |
-| tier        | compositor-set flag           | the console beacon posture              |
-| parser      | the ONE grown vt.rs (shared)  | the ONE grown vt.rs (shared)            |
+| axis        | tile role (a kaua-term)              | console role (aurora, the trusted renderer) |
+|-------------|--------------------------------------|---------------------------------------------|
+| input       | pts master                           | `/dev/consdrain` + `/dev/consfeed`          |
+| output      | the ordered cell stream -> halcyond  | rasterize (Cornucopia) -> whole-screen `Surface` -> present |
+| rasterize   | NO -- halcyond does (fontdue)        | YES (Cornucopia)                            |
+| trust       | untrusted (like a rio window)        | the trusted console (SAK sink)              |
+| shared      | the PARSER crate `usr/lib/vt`        | the PARSER crate `usr/lib/vt`               |
 
-Console mode IS today's aurora, generalized. During a framebuffer SAK episode the
-console-mode kaua-term is suspended exactly as aurora is today (the kernel is sole
-painter; `TAPESTRY.md` 18.7) -- I-27 unchanged. On QEMU/virtio-gpu the trusted
-path stays on serial and the renderer is not suspended (18.7).
+Under seam=B the SHARED thing is the full-xterm PARSER crate (`usr/lib/vt`),
+consumed by BOTH the kaua-term (tile producer) and aurora (console renderer);
+halcyond consumes its `Cell` TYPE on ingest. The kaua-term does NOT rasterize (it
+produces cells); aurora stays the trusted-console rasterizer, unchanged. During a
+framebuffer SAK episode aurora is suspended (the kernel is sole painter;
+`TAPESTRY.md` 18.7) -- I-27 unchanged. On QEMU/virtio-gpu the trusted path stays
+on serial and the renderer is not suspended (18.7).
 
 ---
 
@@ -230,9 +243,11 @@ its own worktree.
 
 - **R4 -- the kaua-term EMBEDS ptyhost's master-hold** (does not spawn a separate
   ptyhost per tile). It reuses ptyhost's mint + spawn-on-slave + master-hold, with
-  the pump's two ends re-pointed: `master -> fd1` becomes `master -> parse ->
-  Buffer -> present`; `console-fd0 -> master` becomes `KeyEvent -> xterm-encode ->
-  master`. The transcode must sit where the master bytes are; a separate host +
+  the pump's two ends re-pointed: `master -> fd1` becomes `master -> parse -> a
+  cell grid -> the ordered record stream (1b) to halcyond`; `console-fd0 -> master`
+  becomes `halcyond Key records -> xterm-encode -> master`. The parse must sit
+  where the master bytes are (and where a hostile-input panic is isolated); a
+  separate host +
   transcoder would be two processes + an extra pipe hop for no gain. `ptyhost`
   stays as-is for the non-tile console-hosted `ptyhost` command.
 - **R3 -- C2-k1c scope:** section 5.
@@ -240,18 +255,23 @@ its own worktree.
   winsize model already exists (ptyfs carries each pts's winsize on its ctl);
   the compositor is the geometry authority (it owns the tile rect), sets the tile
   pts's winsize, and a resize raises `TTY_SIG_WINCH` -> SIGWINCH to the fg pgrp.
-  BEACON (the render/advertise TIER): the RENDER side (AUX) is a compositor-set
-  rasterizer flag the kaua-term honors (Cornucopia MVP / fontdue later); the
-  ADVERTISE side (MAIN, `BEACON` on the tile's pts, read by the program to decide
-  what to emit) must MATCH -- a CELLS tile whose program reads a stale
-  `BEACON=rich` would emit TTF-assuming output the tile cannot honor. Retiring
-  the single-renderer `/dev/winsize` + `CCONSWINSZONLY` console special-case for
-  tiles moves winsize AND beacon onto the per-tile pts ctl together. (The console
-  special-case stays for the non-tile console/serial fallback.)
-- **R2 -- SUBSUME aurora** into the kaua-term (one VT codebase; the two modes in
-  section 2). Growing aurora's `vt.rs` to full-xterm is the one real net-new parser
-  piece; a "beside" model would keep kaua's weaker emitter-subset AND aurora's
-  subset-parser as two VT codebases -- the duplication the convergence deleted.
+  BEACON (the TIER), refined by seam=B: the RENDER side is halcyond's (it
+  rasterizes with fontdue -> RICH for every Halcyon tile; the kaua-term does not
+  rasterize). The ADVERTISE side is the AUX producer's: the tile's pts advertises
+  `BEACON=` at kaua-term SPAWN (a spawn param, no dynamic per-tile switch at v1.0),
+  read by the hosted program to decide what markup to emit; it must MATCH halcyond's
+  render tier. Retiring the single-renderer `/dev/winsize` + `CCONSWINSZONLY`
+  console special-case for tiles moves winsize AND the beacon advertisement onto
+  the per-tile pts ctl together. (The console special-case stays for the non-tile
+  console/serial fallback.)
+- **R2 -- SHARED PARSER crate** (refined by seam=B): the full-xterm PARSER
+  (`usr/lib/vt`) is the one shared codebase, consumed by the kaua-term (tile
+  producer) AND aurora (console renderer); halcyond consumes its `Cell` type on
+  ingest. Under B the kaua-term does NOT rasterize (it produces the ordered cell
+  stream; halcyond rasterizes with fontdue); aurora stays the trusted-console
+  rasterizer, unchanged. Growing the shared parser to full-xterm is the one real
+  net-new parser piece; a "beside" model (two parsers) is the duplication the
+  convergence deleted.
 - **R5 -- the terminal exposes ONE narrow seam** (MAIN owns the transcript). The
   kaua-term renders the live app's SCREEN (main or alt) as one surface + reports
   cell geometry; scrollback + inline `Image`/`Embed` + the media pipeline are
@@ -294,18 +314,18 @@ what the pts fd already names (I-43: a phenotype is ABI shape, never authority).
 
 ## 6. The build arc
 
-**Topology RATIFIED (uniform-Y, section 1a): every tile is a kaua-term PROCESS.**
-The one remaining design gate before KT-1's render path is the live-screen<->
-transcript SEAM (section 1b: render-in-kaua-term (A) vs feed-cells-to-halcyond
-(B)), a fresh main<->aux design conversation. KT-2/KT-3/KT-4 stand regardless (the
-parser, the ioctl reach).
+**The DESIGN is fully RATIFIED** -- topology uniform-Y (1a) + the seam = B (1b) +
+the record contract. No design gates remain; the build is the next phase (a fresh
+main<->aux build call for KT-1). KT-2/KT-3/KT-4 are aux-side (the parser, the
+ioctl reach).
 
 - **KT-1 -- native-ut tile (a kaua-term process) -> unblocks H-4d.**
   The welcome's two console tiles are native `ut`, which already has full pts job
-  control; ZERO kernel work. A kaua-term process hosts ut on a pts; the live screen
-  reaches halcyond per the section-1b seam (cells or pixels); halcyond spawns the
-  kaua-term per tile + composites (MAIN's half; a build-time coordination call).
-  Gated on the seam (1b) being settled.
+  control; ZERO kernel work. A kaua-term process hosts ut on a pts + feeds the
+  ordered cell stream (section 1b contract) to halcyond; halcyond spawns the
+  kaua-term per tile, ingests via the Loom ring, rasterizes + composites (MAIN's
+  half). A fresh build coordination call covers the three pieces: the H-2a sync,
+  the ring seam, and the aux producer side (below).
 - **KT-2 -- grow the shared VT parser to full-xterm** (main's `usr/lib/vt` crate,
   H-2a; still `aurora/vt.rs` in aux-2 -- coordinate the crate): DECSTBM + top/bottom
   margin fields, SU/SD, origin mode, wide-char advance via unicode-width, SGR
