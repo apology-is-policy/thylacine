@@ -85,22 +85,40 @@ side = the compositor's rasterizer flag, and an advertise side = BEACON on the
 tile's pts the program reads; the two tiers must match or a CELLS tile emits
 TTF-assuming output).
 
-**Converged (turns 1-6).** Main concurred on C1/C2/C4 + all R1-R5; C3 corrected as
-above. Coordination: the operator is present and set a synchronous protocol (main
-and aux stay live on the call until bye or an arbitration/question); main tees the
-ONE unified fork to the operator on the main side (they are live there), aux holds
-the aux side -- one surface, not two, avoiding a split vote. One aux sequencing
-insight that de-risks the gate: **H-4d needs no C2-k1c** -- the welcome's two
-console tiles are native `ut`, which already has full pts job control today, so
-the build sequences [kaua-term + halcyond per-tile] -> H-4d unblocked, THEN C2-k1c
-(Linux tiles), THEN C2-k3 (Linux job control).
+**Converged, ratified, scripture landed (turns 1-8).** Main concurred on
+C1/C2/C4 + all R1-R5; C3 corrected as above. The operator (present) set a
+synchronous protocol and RATIFIED the single unified fork ("Ratify -- write
+scripture"): (b) uniform-pts + kaua-term + the split + R2-subsume + R1-with-beacon.
+Doc-ownership split agreed (main writes HALCYON/TAPESTRY; aux writes the kaua-term
+reference + C2-k1c/k3; no shared-section edits). Aux sequencing insight that
+de-risks the gate: **H-4d needs no C2-k1c** (its two console tiles are native
+`ut`, which already has pts job control). I wrote + committed + pushed the aux-side
+scripture `docs/KAUA-TERM.md` (@b6080eb3, both mirrors).
 
-**Open.** Operator ratification of the fork (ratify (b) + the split + R2/R1-with-
-beacon); recommendation YES on all (both tracks converged; heritage-aligned; small
-build -- the substrate ships, the parser is grown, the kernel MVP is 4 ioctls).
-Then a scripture commit (reconcile TAPESTRY 13-14 with the as-built + a new
-kaua-term reference; name substrate/split/C2-k1c/C2-k3) -> THEN build. No code
-landed this run. Full aux record + file:line grounding:
+**A THIRD cross-tree catch -- and it caught MY just-committed scripture (turns
+9-10).** Main HELD the bye to raise a seam I could not see: the process TOPOLOGY
+of the terminal (HALCYON.md 13, invisible to aux-2). My KAUA-TERM.md had asserted
+(Y) per-tile-process as THE architecture -- but 13.1 makes halcyond a single-brain
+that already hosts VT grids IN-PROCESS (13.4a) via a shared `usr/lib/vt` crate
+(H-2a). So the topology is a real fork: (X) in-process (matches single-brain, but
+a no_std parser panic on hostile input aborts halcyond = the whole environment),
+(Y) per-tile process (crash-isolated), or hybrid. aux-2's OWN posture settles the
+robustness half: aurora is no_std `panic -> abort` (`main.rs:870`), so a
+hostile-input parser MUST NOT share halcyond's process -- Linux/untrusted tiles
+must be isolated (Y), the same crash-isolation §13/13.1 is built on; native tiles
+are a halcyond-simplicity choice (hybrid vs uniform-Y). This is the build rule
+biting for the THIRD time (after the beacon catch and the usr/lib/vt-location
+catch): I authored a topology claim entangled with halcyond's process model, which
+I cannot ground from aux-2. I neutralized KAUA-TERM.md to topology-agnostic (the
+component -- parser/Buffer/rasterize/encode/C2-k1c/k3 -- stands; the process
+embedding is HELD as section 1a, an open operator fork main is teeing).
+
+**Open.** The TOPOLOGY operator fork (X/hybrid/uniform-Y; Linux-isolation
+mandatory, native-tile embedding the open choice) -- main tees it. Once ratified,
+KT-1's shape firms up and the build proceeds (KT-1 native tile -> H-4d; KT-2 grow
+the shared VT parser; KT-3 C2-k1c; KT-4 C2-k3). Two commits landed this run, both
+docs: `b6080eb3` (KAUA-TERM.md + this journal), then the topology-neutralization
+of KAUA-TERM.md. No code. Full aux record + file:line grounding:
 `memory/design_terminal_multiplex_coordination.md`.
 
 
