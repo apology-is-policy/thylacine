@@ -261,7 +261,7 @@ const COMBINING: &[(u32, u32)] = &[
     (0x1DAA1, 0x1DAAF), (0xE0100, 0xE01EF),
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cell {
     pub ch: char,
     pub fg: u32,
@@ -273,6 +273,38 @@ impl Cell {
     fn blank(fg: u32, bg: u32) -> Cell {
         Cell { ch: ' ', fg, bg, attrs: 0 }
     }
+}
+
+/// A boundary event emitted DURING feed, in VT-stream order, when the parser
+/// is in event-capture mode (`set_capture_events(true)`; off by default so the
+/// console renderer sees byte-identical behavior). The kaua-term (KT-1) drains
+/// these via `feed_until` to build the ordered seam record stream: a boundary
+/// delimits a Beacon zone, so a consumer flushes its pending cell-diff at each
+/// one. When capture is OFF the parser pushes nothing and the enum is inert.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Boundary {
+    /// A normal-mode, full-screen (top margin at row 0) scroll pushed this row
+    /// off the top of the screen -> the transcript. Carries the row's cells as
+    /// they were before the scroll. A DECSTBM region scroll (top margin != 0)
+    /// discards its top line like xterm and emits nothing.
+    Scroll(Vec<Cell>),
+    /// BEL (0x07) in ground state.
+    Bell,
+    /// A non-7770 OSC terminated: the raw payload bytes between the OSC
+    /// introducer and the terminator (e.g. `b"0;title"` or `b"1936;v1;..."`).
+    /// The consumer routes by the leading numeric code; vt stays agnostic of
+    /// title/Beacon semantics. The 7770 aurora-config channel is consumed
+    /// in-parser (settings_req) and never surfaces here.
+    Osc(Vec<u8>),
+    /// Entered the alt screen. Carries the OUTGOING main buffer (the swap has
+    /// already happened, so `cells` is the fresh blank alt) -- the consumer
+    /// diffs its pending changes against this, emits the mode switch, then
+    /// resets its shadow to the now-blank alt.
+    AltEnter(Vec<Cell>),
+    /// Left the alt screen. Carries the RESTORED main buffer (== `cells` now)
+    /// -- the alt live grid is discarded; the consumer resets its shadow to
+    /// this and resumes normal-mode diffing.
+    AltLeave(Vec<Cell>),
 }
 
 /// The SGR pen: the fg/bg/attrs state one `CSI ... m` sequence mutates.
@@ -481,6 +513,16 @@ pub struct Vt {
     utf_acc: u32,
     utf_rem: u8,
     pub dirty: Vec<bool>, // per-row damage
+    // KT-1 event capture. Off by default: the console renderer (aurora) never
+    // sets it, so the leaf handlers push nothing and every path is byte- and
+    // allocation-identical to before. The kaua-term sets it and drains
+    // `pending` via feed_until to build the ordered seam record stream.
+    capture_events: bool,
+    // Boundaries queued by the current byte, drained one per feed_until return.
+    // A single byte can queue several (a bulk SU scroll pushes up to `rows`
+    // rows off the top -- bounded by scroll_region_up's n.min(band)); the OSC
+    // payload cap (256) and per-row cell clones bound the rest.
+    pending: Vec<Boundary>,
 }
 
 impl Vt {
@@ -524,7 +566,40 @@ impl Vt {
             utf_acc: 0,
             utf_rem: 0,
             dirty: vec![true; rows],
+            capture_events: false,
+            pending: Vec::new(),
         }
+    }
+
+    /// Enable/disable boundary-event capture (KT-1). The console renderer
+    /// leaves it off (the default); the kaua-term turns it on so feed_until
+    /// yields the ordered seam boundaries. Toggling clears any queued events.
+    pub fn set_capture_events(&mut self, on: bool) {
+        self.capture_events = on;
+        self.pending.clear();
+    }
+
+    /// Resumable feed for the event-capture consumer (KT-1). Processes bytes
+    /// from `*pos` and returns at the first boundary event (having advanced
+    /// `*pos` past its triggering byte and applied its cell effect), or None at
+    /// end-of-slice. Parser state persists in self, so a chunk split across
+    /// calls resumes correctly. With capture off this consumes the whole slice
+    /// and returns None (behaving like feed). The consumer flushes a pending
+    /// cell-diff before acting on each returned boundary (the Beacon-zone
+    /// ordering the seam requires).
+    pub fn feed_until(&mut self, bytes: &[u8], pos: &mut usize) -> Option<Boundary> {
+        if !self.pending.is_empty() {
+            return Some(self.pending.remove(0));
+        }
+        while *pos < bytes.len() {
+            let b = bytes[*pos];
+            *pos += 1;
+            self.byte(b);
+            if !self.pending.is_empty() {
+                return Some(self.pending.remove(0));
+            }
+        }
+        None
     }
 
     /// #55 (AURORA.md section 4): the reweave grid resize. Content-preserving
@@ -596,6 +671,12 @@ impl Vt {
         for &b in bytes {
             self.byte(b);
         }
+        // feed() does not surface the event stream; drop anything capture mode
+        // queued so it cannot leak into a later feed_until (aurora never sets
+        // capture, so this is a no-op on the console path).
+        if !self.pending.is_empty() {
+            self.pending.clear();
+        }
     }
 
     fn byte(&mut self, b: u8) {
@@ -660,7 +741,11 @@ impl Vt {
                 let next = (self.cx / 8 + 1) * 8;
                 self.cx = next.min(self.cols - 1);
             }
-            0x07 => {} // BEL
+            0x07 => {
+                if self.capture_events {
+                    self.pending.push(Boundary::Bell);
+                }
+            } // BEL
             0x00..=0x06 | 0x0B..=0x0C | 0x0E..=0x1F | 0x7F => {} // other C0 + DEL: drop
             0x20..=0x7E => self.put_char(b as char),
             0xC0..=0xDF => {
@@ -893,6 +978,17 @@ impl Vt {
             self.cy = self.saved.1.min(self.rows - 1);
             self.wrap = self.saved_wrap;
         }
+        if self.capture_events {
+            // After the swap: on enter the outgoing main sits in alt_cells (cells
+            // is the freshly-blanked alt); on leave the restored main is in cells.
+            // The consumer flushes its pending diff against the carried buffer,
+            // then resets its shadow (blank alt on enter / restored main on leave).
+            self.pending.push(if enter {
+                Boundary::AltEnter(self.alt_cells.clone())
+            } else {
+                Boundary::AltLeave(self.cells.clone())
+            });
+        }
         self.mark_all();
     }
 
@@ -993,6 +1089,13 @@ impl Vt {
     fn scroll_up(&mut self) {
         let cols = self.cols;
         let (top, bot) = (self.scroll_top, self.scroll_bot);
+        // A full-screen scroll in normal mode pushes the top row into the
+        // transcript (xterm scrollback). Capture it before the shift overwrites
+        // it. A DECSTBM region (top != 0) discards its top line, and the alt
+        // screen has no scrollback -- neither surfaces a Scroll boundary.
+        if self.capture_events && !self.on_alt && top == 0 {
+            self.pending.push(Boundary::Scroll(self.cells[0..cols].to_vec()));
+        }
         // Shift rows (top+1..=bot) up one within the band; blank row `bot`.
         self.cells.copy_within((top + 1) * cols..(bot + 1) * cols, top * cols);
         let (fg, bg) = (self.pal.fg, self.bg);
@@ -1200,8 +1303,10 @@ impl Vt {
             self.osc_buf.clear();
             return;
         }
+        let mut is_config = false;
         if let Ok(s) = core::str::from_utf8(&self.osc_buf) {
             if let Some(rest) = s.strip_prefix("7770;aurora;") {
+                is_config = true;
                 if let Some((k, v)) = rest.split_once(';') {
                     let clean = |t: &str| !t.is_empty() && !t.bytes().any(|b| b < 0x20 || b == b';');
                     if clean(k) && !v.contains(';') && !v.bytes().any(|b| b < 0x20)
@@ -1215,6 +1320,12 @@ impl Vt {
                     }
                 }
             }
+        }
+        // KT-1: forward every non-config OSC raw (titles = 0/2, Beacon = 1936,
+        // ...) as a boundary; the consumer routes by leading code. The 7770
+        // aurora-config channel is consumed above and never surfaced.
+        if self.capture_events && !is_config {
+            self.pending.push(Boundary::Osc(self.osc_buf.clone()));
         }
         self.osc_buf.clear();
     }
@@ -1797,5 +1908,153 @@ mod tests {
         feed(&mut vt, b"\x1b[?1T"); // private -> ignored
         assert_eq!(vt.cells[0].ch, '0');
         assert_eq!(vt.cells[2].ch, '2'); // unmoved
+    }
+
+    // ---- KT-1 boundary-event capture (feed_until) ----
+
+    // Drain every boundary from one feed chunk (capture must be on).
+    fn drive(vt: &mut Vt, s: &[u8]) -> Vec<Boundary> {
+        let mut pos = 0;
+        let mut out = Vec::new();
+        while let Some(b) = vt.feed_until(s, &mut pos) {
+            out.push(b);
+        }
+        out
+    }
+
+    #[test]
+    fn capture_off_feed_until_consumes_all_no_boundaries() {
+        // With capture off, feed_until behaves like feed: no boundaries, all
+        // bytes consumed, identical cells. The console (aurora) path.
+        let mut a = Vt::new(6, 2);
+        let mut b = Vt::new(6, 2);
+        let seq = b"hi\x07\x1b]0;t\x07\x1b[?1049hx\x1b[?1049l";
+        feed(&mut a, seq);
+        assert!(drive(&mut b, seq).is_empty()); // capture off by default
+        assert_eq!(a.cells, b.cells);
+        assert_eq!(a.on_alt, b.on_alt);
+    }
+
+    #[test]
+    fn bell_is_a_boundary_between_cell_runs() {
+        let mut vt = Vt::new(6, 1);
+        vt.set_capture_events(true);
+        // Manually drive to prove the ORDER: the Bell arrives with 'A' painted
+        // and 'B' not yet -- the flush-at-boundary contract.
+        let seq = b"A\x07B";
+        let mut pos = 0;
+        let first = vt.feed_until(seq, &mut pos).unwrap();
+        assert_eq!(first, Boundary::Bell);
+        assert_eq!(vt.cells[0].ch, 'A');
+        assert_eq!(vt.cells[1].ch, ' '); // B not processed yet
+        assert!(vt.feed_until(seq, &mut pos).is_none());
+        assert_eq!(vt.cells[1].ch, 'B'); // now it is
+    }
+
+    #[test]
+    fn title_osc_forwarded_raw() {
+        let mut vt = Vt::new(6, 1);
+        vt.set_capture_events(true);
+        assert_eq!(drive(&mut vt, b"\x1b]0;hi\x07"), vec![Boundary::Osc(b"0;hi".to_vec())]);
+        // OSC 2 (title) via ST terminator.
+        assert_eq!(drive(&mut vt, b"\x1b]2;t\x1b\\"), vec![Boundary::Osc(b"2;t".to_vec())]);
+    }
+
+    #[test]
+    fn osc1936_forwarded_raw() {
+        let mut vt = Vt::new(6, 1);
+        vt.set_capture_events(true);
+        assert_eq!(
+            drive(&mut vt, b"\x1b]1936;v1;zone;k=prompt\x1b\\"),
+            vec![Boundary::Osc(b"1936;v1;zone;k=prompt".to_vec())]
+        );
+    }
+
+    #[test]
+    fn config_7770_consumed_not_forwarded() {
+        let mut vt = Vt::new(6, 1);
+        vt.set_capture_events(true);
+        // The aurora config channel is consumed in-parser, never surfaced.
+        assert!(drive(&mut vt, b"\x1b]7770;aurora;theme;dark\x07").is_empty());
+        assert_eq!(vt.settings_req, vec![String::from("theme dark")]);
+    }
+
+    #[test]
+    fn scroll_off_captures_the_leaving_row() {
+        let mut vt = Vt::new(4, 2); // cols=4, rows=2, full-screen scroll region
+        vt.set_capture_events(true);
+        // Row 0 = "top!", row 1 = "bot!", cursor at bottom, then LF scrolls.
+        let bs = drive(&mut vt, b"\x1b[1;1Htop!\x1b[2;1Hbot!\x1b[2;1H\n");
+        assert_eq!(bs.len(), 1);
+        match &bs[0] {
+            Boundary::Scroll(row) => {
+                let s: String = row.iter().map(|c| c.ch).collect();
+                assert_eq!(s, "top!");
+            }
+            other => panic!("expected Scroll, got {other:?}"),
+        }
+        // Post-scroll: "bot!" is now the top row, bottom blanked.
+        assert_eq!(vt.cells[0].ch, 'b');
+    }
+
+    #[test]
+    fn region_scroll_emits_no_scrolloff() {
+        let mut vt = Vt::new(2, 4);
+        vt.set_capture_events(true);
+        // DECSTBM rows 2..4 (1-based) -> top margin != 0: a region scroll
+        // discards its top line (xterm) and must NOT surface a Scroll boundary.
+        feed(&mut vt, b"\x1b[2;4r"); // set region; also homes to origin
+        feed(&mut vt, b"\x1b[2;1HA\x1b[3;1HB\x1b[4;1HC"); // rows 1,2,3 = A,B,C
+        feed(&mut vt, b"\x1b[4;1H"); // cursor to the region's bottom
+        let bs = drive(&mut vt, b"\n"); // one region scroll
+        // Positive control: the scroll DID happen (row 2 'B' shifted into row 1),
+        // so the absence of a Scroll boundary is meaningful, not vacuous.
+        assert_eq!(vt.cells[2].ch, 'B'); // row 1 (index 1*cols=2) now holds 'B'
+        assert!(bs.iter().all(|b| !matches!(b, Boundary::Scroll(_))), "{bs:?}");
+    }
+
+    #[test]
+    fn alt_enter_and_leave_carry_the_main_buffer() {
+        let mut vt = Vt::new(6, 3);
+        vt.set_capture_events(true);
+        let bs = drive(&mut vt, b"main\x1b[?1049halt\x1b[?1049l");
+        assert_eq!(bs.len(), 2);
+        match &bs[0] {
+            Boundary::AltEnter(outgoing) => assert_eq!(outgoing[0].ch, 'm'), // outgoing main
+            other => panic!("expected AltEnter, got {other:?}"),
+        }
+        match &bs[1] {
+            Boundary::AltLeave(restored) => assert_eq!(restored[0].ch, 'm'), // restored main
+            other => panic!("expected AltLeave, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bulk_su_emits_one_scroll_per_row_bounded() {
+        let mut vt = Vt::new(2, 3);
+        vt.set_capture_events(true);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2"); // rows "0","1","2"
+        let bs = drive(&mut vt, b"\x1b[9S"); // SU 9, bounded to band (3)
+        let rows: Vec<char> = bs
+            .iter()
+            .filter_map(|b| match b {
+                Boundary::Scroll(r) => Some(r[0].ch),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows, vec!['0', '1', '2']); // exactly the band, in order
+    }
+
+    #[test]
+    fn feed_until_resumes_a_split_osc_across_calls() {
+        let mut vt = Vt::new(6, 1);
+        vt.set_capture_events(true);
+        // The OSC is split across two slices; parser state persists in self, so
+        // the boundary surfaces once, whole, from the second slice.
+        let mut pos = 0;
+        assert!(vt.feed_until(b"\x1b]0;h", &mut pos).is_none()); // slice 1: no terminator yet
+        let mut pos2 = 0;
+        let got = vt.feed_until(b"i\x07", &mut pos2).unwrap();
+        assert_eq!(got, Boundary::Osc(b"0;hi".to_vec()));
     }
 }
