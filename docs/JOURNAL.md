@@ -85,8 +85,10 @@ is per-file, not per-tree.
 has not booted. core=normal only (the CAP_JIT dynarec is DX-4); sound stubbed;
 opus CD-audio + host serial stubbed; no GL/TTF/screenshots/savestate-verified.
 First light (reach `Z:\>` in a Tapestry pane + the ls-gfx-dosbox gate) is DX-2.
-Built + verified at -O0 (landscape) AND the strict default -O2 path. Not yet
-committed at the time of this entry's first draft; commit + push follow.
+Built + verified at -O0 (landscape) AND the strict default -O2 path. Landed at
+`5af3e46d`, pushed to both mirrors; fresh-checkout integrity verified (committed
+== on-disk == 1502 files, 0 gitignored -- no repeat of the vendored-gitignore
+bug).
 
 ## 2026-09-03 (aux, Opus 4.8, effort max) -- the merge, aux side: the fresh-checkout vendoring bug that a long-lived worktree can't see
 
