@@ -296,6 +296,15 @@ pub struct Vt {
     param_seen: bool,
     csi_priv: bool,
     saved: (usize, usize),
+    // DECSTBM scroll region [scroll_top, scroll_bot], 0-based inclusive; default
+    // full screen. LF at the bottom margin, RI at the top, and SU/SD scroll only
+    // this band; xterm resets it to full on resize. aurora never sets DECSTBM, so
+    // the full-screen default preserves its behavior (the shared-crate contract).
+    scroll_top: usize,
+    scroll_bot: usize,
+    // DECOM (?6): when set, CUP/VPA rows are origin-relative + region-clamped and
+    // the cursor cannot leave the band; default off (absolute).
+    origin: bool,
     // DECAWM (?7). Default SET (autowrap on -- the VT default). Kaua's
     // Terminal::enter emits ?7l so it can paint the bottom-right cell
     // scroll-free; ignoring it made every last-cell paint arm the deferred
@@ -359,6 +368,9 @@ impl Vt {
             param_seen: false,
             csi_priv: false,
             saved: (0, 0),
+            scroll_top: 0,
+            scroll_bot: rows - 1,
+            origin: false,
             wrap: true,
             saved_wrap: true,
             reply: Vec::new(),
@@ -406,6 +418,9 @@ impl Vt {
         self.alt_cells = alt;
         self.cols = ncols;
         self.rows = nrows;
+        // DECSTBM resets to the full screen on resize (xterm parity).
+        self.scroll_top = 0;
+        self.scroll_bot = nrows - 1;
         self.cy = self.cy.saturating_sub(shift);
         if self.cy >= nrows {
             self.cy = nrows - 1;
@@ -548,11 +563,11 @@ impl Vt {
             }
             b'D' => self.line_feed(),
             b'M' => {
-                // Reverse index: up, scrolling down at the top.
-                if self.cy > 0 {
-                    self.cy -= 1;
-                } else {
+                // Reverse index: up, scrolling the region down at the top margin.
+                if self.cy == self.scroll_top {
                     self.scroll_down();
+                } else if self.cy > 0 {
+                    self.cy -= 1;
                 }
             }
             b'c' => {
@@ -562,6 +577,9 @@ impl Vt {
                 self.attrs = 0;
                 self.cx = 0;
                 self.cy = 0;
+                self.scroll_top = 0;
+                self.scroll_bot = self.rows - 1;
+                self.origin = false;
                 self.cursor_visible = true;
                 let (fg, bg) = (self.pal.fg, self.bg);
                 for c in self.cells.iter_mut() {
@@ -625,9 +643,9 @@ impl Vt {
             b'C' => self.cx = (self.cx + self.p(0, 1) as usize).min(self.cols - 1),
             b'D' => self.cx = self.cx.saturating_sub(self.p(0, 1) as usize),
             b'G' => self.cx = (self.p(0, 1) as usize - 1).min(self.cols - 1),
-            b'd' => self.cy = (self.p(0, 1) as usize - 1).min(self.rows - 1),
+            b'd' => self.cy = self.origin_row(self.p(0, 1) as usize - 1),
             b'H' | b'f' => {
-                self.cy = (self.p(0, 1) as usize - 1).min(self.rows - 1);
+                self.cy = self.origin_row(self.p(0, 1) as usize - 1);
                 self.cx = (self.p(1, 1) as usize - 1).min(self.cols - 1);
             }
             b'J' => self.erase_display(self.p(0, 0)),
@@ -644,7 +662,22 @@ impl Vt {
                 self.cx = self.saved.0.min(self.cols - 1);
                 self.cy = self.saved.1.min(self.rows - 1);
             }
-            b'r' => {} // DECSTBM: accepted, ignored (full-screen scroll; MVP seam)
+            b'r' if !self.csi_priv => {
+                // DECSTBM: set the scroll region [top, bot] (1-based params;
+                // empty -> full screen). A malformed region (top >= bot, or out
+                // of range) resets to full (xterm). Homes the cursor (origin-aware).
+                let top = (self.p(0, 1).max(1) as usize) - 1;
+                let bot = (self.p(1, self.rows as u32) as usize) - 1;
+                if top < bot && bot < self.rows {
+                    self.scroll_top = top;
+                    self.scroll_bot = bot;
+                } else {
+                    self.scroll_top = 0;
+                    self.scroll_bot = self.rows - 1;
+                }
+                self.cx = 0;
+                self.cy = if self.origin { self.scroll_top } else { 0 };
+            }
             // DSR. 6 = CPR: answer with the cursor position -- kaua's size
             // handshake (SAVE + park-far + [6n + RESTORE) reads the parked
             // report to learn the real grid; an unanswered request strands
@@ -670,6 +703,13 @@ impl Vt {
         }
         for i in 0..self.nparams {
             match self.params[i] {
+                6 => {
+                    // DECOM origin mode. Set/reset homes the cursor to the
+                    // (origin-relative) top-left (xterm / DEC STD-070).
+                    self.origin = set;
+                    self.cx = 0;
+                    self.cy = if set { self.scroll_top } else { 0 };
+                }
                 7 => self.wrap = set, // DECAWM (kaua paints the last cell under ?7l)
                 25 => self.cursor_visible = set,
                 47 | 1047 | 1049 => self.alt_screen(set),
@@ -748,20 +788,31 @@ impl Vt {
         self.cx += 1;
     }
 
-    fn line_feed(&mut self) {
-        if self.cy + 1 < self.rows {
-            self.cy += 1;
+    // Map a 0-based CUP/VPA row through DECOM: origin-relative + region-clamped
+    // when set, absolute (clamped to the screen) when reset.
+    fn origin_row(&self, row: usize) -> usize {
+        if self.origin {
+            (self.scroll_top + row).min(self.scroll_bot)
         } else {
+            row.min(self.rows - 1)
+        }
+    }
+
+    fn line_feed(&mut self) {
+        if self.cy == self.scroll_bot {
             self.scroll_up();
+        } else if self.cy + 1 < self.rows {
+            self.cy += 1;
         }
     }
 
     fn scroll_up(&mut self) {
         let cols = self.cols;
-        self.cells.copy_within(cols.., 0);
+        let (top, bot) = (self.scroll_top, self.scroll_bot);
+        // Shift rows (top+1..=bot) up one within the band; blank row `bot`.
+        self.cells.copy_within((top + 1) * cols..(bot + 1) * cols, top * cols);
         let (fg, bg) = (self.pal.fg, self.bg);
-        let last = (self.rows - 1) * cols;
-        for c in self.cells[last..].iter_mut() {
+        for c in self.cells[bot * cols..(bot + 1) * cols].iter_mut() {
             *c = Cell::blank(fg, bg);
         }
         self.mark_all();
@@ -769,10 +820,11 @@ impl Vt {
 
     fn scroll_down(&mut self) {
         let cols = self.cols;
-        let total = self.cols * self.rows;
-        self.cells.copy_within(0..total - cols, cols);
+        let (top, bot) = (self.scroll_top, self.scroll_bot);
+        // Shift rows (top..bot) down one within the band; blank row `top`.
+        self.cells.copy_within(top * cols..bot * cols, (top + 1) * cols);
         let (fg, bg) = (self.pal.fg, self.bg);
-        for c in self.cells[..cols].iter_mut() {
+        for c in self.cells[top * cols..(top + 1) * cols].iter_mut() {
             *c = Cell::blank(fg, bg);
         }
         self.mark_all();
@@ -1222,5 +1274,73 @@ mod tests {
         vt.reply.clear();
         feed(&mut vt, b"\x1b[2;5H\x1b[6n");
         assert_eq!(vt.reply.as_slice(), b"\x1b[2;5R");
+    }
+
+    // --- KT-1a-1: DECSTBM scroll regions + DECOM origin mode ---
+
+    #[test]
+    fn decstbm_confines_scroll() {
+        let mut vt = Vt::new(4, 5);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(&mut vt, b"\x1b[2;4r"); // region 1-based 2;4 -> 0-based [1,3], homes (0,0)
+        feed(&mut vt, b"\x1b[4;1H\n"); // cursor to the bottom margin (row 3), LF scrolls the band
+        assert_eq!(vt.cells[0].ch, '0'); // row 0: outside the region, untouched
+        assert_eq!(vt.cells[16].ch, '4'); // row 4: outside, untouched
+        assert_eq!(vt.cells[4].ch, '2'); // row 1 <- old row 2
+        assert_eq!(vt.cells[8].ch, '3'); // row 2 <- old row 3
+        assert_eq!(vt.cells[12].ch, ' '); // row 3 blanked
+    }
+
+    #[test]
+    fn decstbm_malformed_resets_full() {
+        let mut vt = Vt::new(2, 4);
+        feed(&mut vt, b"\x1b[9;99r"); // top=8 out of range -> reset to full [0,3]
+        feed(&mut vt, b"\x1b[1;1Ha\x1b[4;1H\n"); // 'a' at (0,0), LF at the last row -> full scroll
+        assert_eq!(vt.cells[0].ch, ' '); // 'a' scrolled off the top (proves the region is full)
+    }
+
+    #[test]
+    fn origin_mode_cup_is_region_relative() {
+        let mut vt = Vt::new(4, 6);
+        feed(&mut vt, b"\x1b[3;5r"); // region 0-based [2,4]
+        feed(&mut vt, b"\x1b[?6h"); // DECOM on (homes to scroll_top = 2)
+        feed(&mut vt, b"\x1b[1;1HX"); // origin CUP 1;1 -> row scroll_top(2)
+        assert_eq!(vt.cells[8].ch, 'X');
+        feed(&mut vt, b"\x1b[99;1HY"); // origin CUP row 99 -> clamped to scroll_bot(4)
+        assert_eq!(vt.cells[16].ch, 'Y');
+        feed(&mut vt, b"\x1b[?6l\x1b[1;1HZ"); // DECOM off -> absolute, homes (0,0)
+        assert_eq!(vt.cells[0].ch, 'Z');
+    }
+
+    #[test]
+    fn ri_scrolls_region_down_at_top() {
+        let mut vt = Vt::new(4, 5);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[4;1H3\x1b[5;1H4");
+        feed(&mut vt, b"\x1b[2;4r\x1b[2;1H"); // region [1,3]; cursor to the top margin (row 1)
+        feed(&mut vt, b"\x1bM"); // RI at the top margin -> scroll the band down
+        assert_eq!(vt.cells[0].ch, '0'); // outside, untouched
+        assert_eq!(vt.cells[16].ch, '4'); // outside, untouched
+        assert_eq!(vt.cells[4].ch, ' '); // row 1 blanked
+        assert_eq!(vt.cells[8].ch, '1'); // row 2 <- old row 1
+        assert_eq!(vt.cells[12].ch, '2'); // row 3 <- old row 2
+    }
+
+    #[test]
+    fn full_screen_lf_scrolls_all_no_decstbm() {
+        // Backward-compat with aurora: no DECSTBM -> the whole screen scrolls.
+        let mut vt = Vt::new(4, 3);
+        feed(&mut vt, b"\x1b[1;1H0\x1b[2;1H1\x1b[3;1H2\x1b[3;1H\n");
+        assert_eq!(vt.cells[0].ch, '1'); // row 0 <- old row 1
+        assert_eq!(vt.cells[4].ch, '2'); // row 1 <- old row 2
+        assert_eq!(vt.cells[8].ch, ' '); // row 2 blanked
+    }
+
+    #[test]
+    fn decstbm_resets_on_resize() {
+        let mut vt = Vt::new(4, 5);
+        feed(&mut vt, b"\x1b[2;4r"); // region [1,3]
+        vt.resize(4, 6); // resize -> region resets to full [0,5]
+        feed(&mut vt, b"\x1b[1;1Ha\x1b[6;1H\n"); // 'a' at (0,0), LF at the new last row
+        assert_eq!(vt.cells[0].ch, ' '); // full-screen scroll -> 'a' gone
     }
 }
