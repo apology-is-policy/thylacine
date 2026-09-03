@@ -789,6 +789,7 @@ dependencies = [
 name = "kaua-term"
 version = "0.1.0"
 dependencies = [
+ "kaua",
  "vt",
 ]
 

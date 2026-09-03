@@ -25,6 +25,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use kaua::{KeyCode, KeyEvent, Mods};
 use vt::{Boundary, Cell, Vt};
 
 /// The screen mode a tile is in: normal (ScrollOff feeds the transcript) or the
@@ -225,6 +226,139 @@ fn classify_osc(payload: &[u8]) -> Option<Control> {
         }
         _ => None,
     }
+}
+
+// ---- The down channel: KeyEvent -> xterm bytes (KT-1.3) ----
+
+/// Encode one halcyond-routed KeyEvent as the xterm byte sequence to write to
+/// the pts master. `app_cursor` is the vt's DECCKM state: when set (and the key
+/// is unmodified) arrows/Home/End use SS3 (`ESC O A`) instead of CSI (`ESC [ A`),
+/// which is what full-screen apps expect. Modified special keys always use the
+/// CSI form with the xterm modifier parameter (1 + shift + alt*2 + ctrl*4).
+pub fn encode_key(ev: &KeyEvent, app_cursor: bool, out: &mut Vec<u8>) {
+    let m = ev.mods;
+    let has_mod = !m.is_empty();
+    let modparam = 1
+        + if m.contains(Mods::SHIFT) { 1 } else { 0 }
+        + if m.contains(Mods::ALT) { 2 } else { 0 }
+        + if m.contains(Mods::CTRL) { 4 } else { 0 };
+    match ev.code {
+        KeyCode::Char(c) => encode_char(c, m, out),
+        KeyCode::Enter => out.push(b'\r'),
+        KeyCode::Esc => out.push(0x1b),
+        KeyCode::Backspace => out.push(0x7f), // DEL, the xterm default
+        KeyCode::Tab => out.push(b'\t'),
+        KeyCode::BackTab => out.extend_from_slice(b"\x1b[Z"),
+        KeyCode::Up | KeyCode::Down | KeyCode::Right | KeyCode::Left | KeyCode::Home | KeyCode::End => {
+            let f = match ev.code {
+                KeyCode::Up => b'A',
+                KeyCode::Down => b'B',
+                KeyCode::Right => b'C',
+                KeyCode::Left => b'D',
+                KeyCode::Home => b'H',
+                KeyCode::End => b'F',
+                _ => unreachable!(),
+            };
+            if has_mod {
+                out.extend_from_slice(b"\x1b[1;");
+                push_num(out, modparam);
+                out.push(f);
+            } else if app_cursor {
+                out.extend_from_slice(b"\x1bO");
+                out.push(f);
+            } else {
+                out.extend_from_slice(b"\x1b[");
+                out.push(f);
+            }
+        }
+        KeyCode::Insert => tilde(out, 2, has_mod, modparam),
+        KeyCode::Delete => tilde(out, 3, has_mod, modparam),
+        KeyCode::PageUp => tilde(out, 5, has_mod, modparam),
+        KeyCode::PageDown => tilde(out, 6, has_mod, modparam),
+        KeyCode::F(n) => encode_fkey(n, has_mod, modparam, out),
+    }
+}
+
+// A printable/control key. Alt prefixes ESC; Ctrl folds to a control byte; Shift
+// is already baked into the char's case (the KeyEvent contract), so a bare Shift
+// is a no-op here.
+fn encode_char(c: char, m: Mods, out: &mut Vec<u8>) {
+    if m.contains(Mods::ALT) {
+        out.push(0x1b);
+    }
+    if m.contains(Mods::CTRL) {
+        if let Some(ctl) = ctrl_byte(c) {
+            out.push(ctl);
+            return;
+        }
+    }
+    let mut buf = [0u8; 4];
+    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+}
+
+// The C0 control byte for Ctrl+<c>, or None if there is no mapping (then the
+// literal char is emitted).
+fn ctrl_byte(c: char) -> Option<u8> {
+    match c {
+        'a'..='z' => Some(c as u8 - b'a' + 1),
+        'A'..='Z' => Some(c as u8 - b'A' + 1),
+        ' ' | '@' => Some(0),
+        '[' => Some(0x1b),
+        '\\' => Some(0x1c),
+        ']' => Some(0x1d),
+        '^' => Some(0x1e),
+        '_' => Some(0x1f),
+        '?' => Some(0x7f),
+        _ => None,
+    }
+}
+
+// A CSI "~"-terminated special key (Insert/Delete/PageUp/PageDown): ESC [ n ~,
+// or ESC [ n ; mod ~ when modified.
+fn tilde(out: &mut Vec<u8>, n: u32, has_mod: bool, modparam: u32) {
+    out.extend_from_slice(b"\x1b[");
+    push_num(out, n);
+    if has_mod {
+        out.push(b';');
+        push_num(out, modparam);
+    }
+    out.push(b'~');
+}
+
+fn encode_fkey(n: u8, has_mod: bool, modparam: u32, out: &mut Vec<u8>) {
+    // F1-F4 are SS3 (ESC O P..S) unmodified, CSI with a mod param otherwise.
+    if (1..=4).contains(&n) {
+        let f = b'P' + (n - 1);
+        if has_mod {
+            out.extend_from_slice(b"\x1b[1;");
+            push_num(out, modparam);
+            out.push(f);
+        } else {
+            out.extend_from_slice(b"\x1bO");
+            out.push(f);
+        }
+        return;
+    }
+    // F5-F12 are CSI "~" keys with their xterm codes.
+    let code = match n {
+        5 => 15,
+        6 => 17,
+        7 => 18,
+        8 => 19,
+        9 => 20,
+        10 => 21,
+        11 => 23,
+        12 => 24,
+        _ => return, // out of range: emit nothing
+    };
+    tilde(out, code, has_mod, modparam);
+}
+
+fn push_num(out: &mut Vec<u8>, n: u32) {
+    if n >= 10 {
+        push_num(out, n / 10);
+    }
+    out.push(b'0' + (n % 10) as u8);
 }
 
 #[cfg(test)]
@@ -454,5 +588,65 @@ mod tests {
             }
             other => panic!("expected a cursor-only CellDiff, got {other:?}"),
         }
+    }
+
+    // ---- the down channel: encode_key ----
+
+    fn enc(ev: KeyEvent, app_cursor: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_key(&ev, app_cursor, &mut out);
+        out
+    }
+
+    #[test]
+    fn encode_plain_and_control_chars() {
+        assert_eq!(enc(KeyEvent::char('a'), false), b"a");
+        assert_eq!(enc(KeyEvent::char('A'), false), b"A"); // Shift baked in
+        assert_eq!(enc(KeyEvent::with(KeyCode::Char('c'), Mods::CTRL), false), b"\x03"); // Ctrl-C
+        assert_eq!(enc(KeyEvent::with(KeyCode::Char('x'), Mods::ALT), false), b"\x1bx"); // Alt-x
+        // Alt+Ctrl-c -> ESC then the control byte.
+        assert_eq!(enc(KeyEvent::with(KeyCode::Char('c'), Mods::ALT | Mods::CTRL), false), b"\x1b\x03");
+    }
+
+    #[test]
+    fn encode_named_keys() {
+        assert_eq!(enc(KeyEvent::new(KeyCode::Enter), false), b"\r");
+        assert_eq!(enc(KeyEvent::new(KeyCode::Esc), false), b"\x1b");
+        assert_eq!(enc(KeyEvent::new(KeyCode::Backspace), false), b"\x7f");
+        assert_eq!(enc(KeyEvent::new(KeyCode::Tab), false), b"\t");
+        assert_eq!(enc(KeyEvent::new(KeyCode::BackTab), false), b"\x1b[Z");
+    }
+
+    #[test]
+    fn encode_cursor_keys_honor_decckm() {
+        // Normal (DECCKM reset): CSI. Application (DECCKM set): SS3.
+        assert_eq!(enc(KeyEvent::new(KeyCode::Up), false), b"\x1b[A");
+        assert_eq!(enc(KeyEvent::new(KeyCode::Up), true), b"\x1bOA");
+        assert_eq!(enc(KeyEvent::new(KeyCode::Home), false), b"\x1b[H");
+        assert_eq!(enc(KeyEvent::new(KeyCode::Home), true), b"\x1bOH");
+        assert_eq!(enc(KeyEvent::new(KeyCode::End), true), b"\x1bOF");
+    }
+
+    #[test]
+    fn encode_modified_cursor_keys_are_csi_even_in_app_mode() {
+        // A modifier forces the CSI form with the xterm modifier param, whatever
+        // DECCKM says (1 + shift + alt*2 + ctrl*4).
+        assert_eq!(enc(KeyEvent::with(KeyCode::Up, Mods::SHIFT), true), b"\x1b[1;2A");
+        assert_eq!(enc(KeyEvent::with(KeyCode::Up, Mods::CTRL), true), b"\x1b[1;5A");
+        assert_eq!(enc(KeyEvent::with(KeyCode::Left, Mods::CTRL | Mods::ALT), false), b"\x1b[1;7D");
+    }
+
+    #[test]
+    fn encode_function_and_tilde_keys() {
+        assert_eq!(enc(KeyEvent::new(KeyCode::F(1)), false), b"\x1bOP");
+        assert_eq!(enc(KeyEvent::new(KeyCode::F(4)), false), b"\x1bOS");
+        assert_eq!(enc(KeyEvent::new(KeyCode::F(5)), false), b"\x1b[15~");
+        assert_eq!(enc(KeyEvent::new(KeyCode::F(12)), false), b"\x1b[24~");
+        assert_eq!(enc(KeyEvent::with(KeyCode::F(1), Mods::CTRL), false), b"\x1b[1;5P");
+        assert_eq!(enc(KeyEvent::new(KeyCode::Insert), false), b"\x1b[2~");
+        assert_eq!(enc(KeyEvent::new(KeyCode::Delete), false), b"\x1b[3~");
+        assert_eq!(enc(KeyEvent::new(KeyCode::PageUp), false), b"\x1b[5~");
+        assert_eq!(enc(KeyEvent::new(KeyCode::PageDown), false), b"\x1b[6~");
+        assert_eq!(enc(KeyEvent::with(KeyCode::Delete, Mods::SHIFT), false), b"\x1b[3;2~");
     }
 }

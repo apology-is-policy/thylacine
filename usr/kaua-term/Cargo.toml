@@ -9,3 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 vt = { path = "../lib/vt" }
+# The pure event model (KeyEvent/KeyCode/Mods) only -- default-features drops
+# kaua's `backend` (libthyla-rs), so the producer + encoder host-test like vt.
+# The process (KT-1.4) adds its own libthyla-rs + ptyhold deps.
+kaua = { path = "../lib/kaua", default-features = false }

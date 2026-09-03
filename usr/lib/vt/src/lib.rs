@@ -524,6 +524,13 @@ pub struct Vt {
     // rows off the top -- bounded by scroll_region_up's n.min(band)); the OSC
     // payload cap (256) and per-row cell clones bound the rest.
     pending: Vec<Boundary>,
+    // KT-1.3 DECCKM (?1, application cursor keys), set by the app's OUTPUT stream
+    // and read by the kaua-term's DOWN-channel key re-encoder to emit SS3 arrows
+    // instead of CSI. It only steers key encoding, never the cell grid, so the
+    // console renderer (which does not re-encode keys) ignores it. Application
+    // keypad (DECKPAM/DECKPNM) is deferred with its keycodes -- the shared
+    // KeyEvent model has no keypad keys yet, so there is nothing to re-encode.
+    app_cursor: bool,
 }
 
 impl Vt {
@@ -569,7 +576,15 @@ impl Vt {
             dirty: vec![true; rows],
             capture_events: false,
             pending: Vec::new(),
+            app_cursor: false,
         }
+    }
+
+    /// DECCKM (?1): application cursor-key mode. When set, the kaua-term's key
+    /// re-encoder emits SS3 (`ESC O A`) for the arrows/Home/End instead of CSI
+    /// (`ESC [ A`) -- what full-screen apps (vim, less) expect.
+    pub fn app_cursor(&self) -> bool {
+        self.app_cursor
     }
 
     /// Enable/disable boundary-event capture (KT-1). The console renderer
@@ -811,6 +826,7 @@ impl Vt {
                 self.scroll_bot = self.rows - 1;
                 self.origin = false;
                 self.cursor_visible = true;
+                self.app_cursor = false;
                 let (fg, bg) = (self.pal.fg, self.bg);
                 for c in self.cells.iter_mut() {
                     *c = Cell::blank(fg, bg);
@@ -940,6 +956,7 @@ impl Vt {
         }
         for i in 0..self.nparams {
             match self.params[i] {
+                1 => self.app_cursor = set, // DECCKM (application cursor keys)
                 6 => {
                     // DECOM origin mode. Set/reset homes the cursor to the
                     // (origin-relative) top-left (xterm / DEC STD-070).
@@ -2048,6 +2065,18 @@ mod tests {
             })
             .collect();
         assert_eq!(rows, vec!['0', '1', '2']); // exactly the band, in order
+    }
+
+    #[test]
+    fn decckm_app_cursor_tracks_and_ris_resets() {
+        let mut vt = Vt::new(4, 2);
+        assert!(!vt.app_cursor());
+        feed(&mut vt, b"\x1b[?1h"); // DECCKM set (application cursor keys)
+        assert!(vt.app_cursor());
+        feed(&mut vt, b"\x1b[?1l"); // reset
+        assert!(!vt.app_cursor());
+        feed(&mut vt, b"\x1b[?1h\x1bc"); // set, then RIS
+        assert!(!vt.app_cursor()); // RIS cleared it
     }
 
     #[test]
