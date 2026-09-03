@@ -2,13 +2,14 @@
 //
 // The kaua-term process + the seam wire codec are host-tested, but the
 // PROCESS-level transport (the pts host, the two blocking threads, the codec
-// over a real pipe) is not host-testable. This probe proves it at boot, the way
-// halcyond will drive it (KT-1.5c): spawn a kaua-term on a pipe pair, read its
-// UP channel over a Loom ring (the H-3c-2 pattern -- Loom read on a pipe fd),
-// decode the record stream, and assert the hosted program's output + clean exit
+// over a real pipe) is not host-testable. This probe proves it at boot: spawn a
+// kaua-term on a pipe pair, drain its UP channel with a blocking `t_read` --
+// Loom cannot read a pipe (a Loom read needs a dev9p handle, kernel/loom.c:1198;
+// halcyond's own drain is a `poll(2)` over the pipes, HALCYON 14.11.7) -- decode
+// the record stream, and assert the hosted program's output + clean exit
 // arrived. joey spawns + reaps + asserts exit 0 + the "kaua-term-probe: PASS"
 // marker (THYLA_BOOT_PROBES). This is the transport half of KT-1.5; the halcyond
-// spawn + multiplex + grid/scrollback ingest is KT-1.5b/1.5c (HALCYON 14.11).
+// ingest (grid + scrollback) + multi-tile multiplex is KT-1.5b/1.5c (HALCYON 14.11).
 
 #![no_std]
 #![no_main]
@@ -18,9 +19,8 @@ extern crate alloc;
 use alloc::string::String;
 use kaua_term::wire::{parse_record, FrameDecoder};
 use kaua_term::{Control, Record};
-use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe};
 use libthyla_rs::process::{pipe, Command, Stdio};
-use libthyla_rs::{t_putstr, t_wait_pid_for};
+use libthyla_rs::{t_putstr, t_read, t_wait_pid_for};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
@@ -62,38 +62,28 @@ fn run() -> i64 {
     };
     let pid = child.pid();
 
-    // Read the UP channel over a Loom ring: register the pipe read end as a
-    // handle, then read into a registered buffer until EOF (the kaua-term closes
-    // fd 1 when it exits).
-    let ring = match Ring::setup(8, 0) {
-        Ok(r) => r,
-        Err(_) => return fail("kaua-term-probe: FAIL -- Ring::setup\n"),
-    };
-    let mut buf = match RegisteredBuffer::new(65536) {
-        Ok(b) => b,
-        Err(_) => return fail("kaua-term-probe: FAIL -- RegisteredBuffer::new\n"),
-    };
-    if ring.register_buffers(&[buf.buf_reg()]).is_err() {
-        return fail("kaua-term-probe: FAIL -- register_buffers\n");
-    }
-    if ring.register_handles(&[up_rd.as_raw_fd()]).is_err() {
-        return fail("kaua-term-probe: FAIL -- register_handles\n");
-    }
-
+    // Drain the UP channel with a blocking pipe read until EOF. A blocking
+    // `t_read` on a pipe returns >0 with data, or 0 when every write end is
+    // closed -- and the kaua-term's fd 1 (the up pipe's write end) closes when
+    // the Proc terminates (the #926/#68 close-handles-at-exit path delivers the
+    // EOF at termination, not at reap). The kaua-term is multi-thread (output +
+    // input); when its hosted echo exits, the output thread returns -> SYS_EXITS
+    // -> exits_code sees the input thread as a live peer -> proc_group_terminate
+    // cascade (#811) death-interrupts it, so BOTH threads exit and fd 1 closes.
+    // We keep _down_wr open so that input thread stays blocked on fd 0 (closing
+    // it would EOF fd 0 and tear the kaua-term down before echo ran).
+    let rawfd: i64 = up_rd.as_raw_fd() as i64;
     let mut dec = FrameDecoder::new();
     let mut seen = String::new(); // accumulated CellDiff glyphs
     let mut exit_code: Option<i32> = None;
-    let cap = buf.len() as u32;
+    let mut buf = [0u8; 4096];
     loop {
-        let cqe = match ring.submit_one_wait(&Sqe::read(0, 0, cap, 0, 0, 1)) {
-            Ok(c) => c,
-            Err(_) => return fail("kaua-term-probe: FAIL -- Loom read submit\n"),
-        };
-        let n = cqe.result;
+        // SAFETY: SVC wrapper over this function's own stack buffer.
+        let n = unsafe { t_read(rawfd, buf.as_mut_ptr(), buf.len()) };
         if n <= 0 {
-            break; // EOF (kaua-term closed fd 1 on exit) or error
+            break; // EOF (kaua-term terminated, fd 1 closed) or error
         }
-        dec.push(&buf.as_mut_slice()[..n as usize]);
+        dec.push(&buf[..n as usize]);
         loop {
             match dec.next_frame() {
                 Some(Ok((tag, payload))) => {
@@ -129,7 +119,7 @@ fn run() -> i64 {
     }
     match exit_code {
         Some(0) => {
-            t_putstr("kaua-term-probe: PASS -- transport + bin + codec over the ring\n");
+            t_putstr("kaua-term-probe: PASS -- transport + bin + codec over the pipe\n");
             0
         }
         _ => fail("kaua-term-probe: FAIL -- no clean Control::Exit(0)\n"),

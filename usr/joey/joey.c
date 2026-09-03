@@ -10179,6 +10179,32 @@ int main(void) {
         (void)t_close(pts_root);
         t_putstr("joey: /dev/pts mounted (ptyfs devpts tree)\n");
 
+#if THYLA_BOOT_PROBES
+        // === /kaua-term-probe (KT-1.5a: the kaua-term transport boot-prove) ===
+        // Proves the process-level transport that is NOT host-testable: the probe
+        // spawns a /bin/kaua-term hosting `echo`, drains its UP pipe with t_read,
+        // decodes the seam record stream, and asserts the hosted output + a clean
+        // Control::Exit. Placed HERE because it needs both /bin (the #58 post-pivot
+        // bind) and /dev/pts (mounted just above). Default perms suffice: minting a
+        // pts is not cap-gated (ptyfs perm_check passes any principal rw), and
+        // spawning children is not perm-gated. Boot-fatal on any failure.
+        {
+            const char ktp_name[] = "/bin/kaua-term-probe";
+            long ktp_pid = t_spawn(ktp_name, sizeof(ktp_name) - 1);
+            if (ktp_pid <= 0) {
+                t_putstr("joey: t_spawn(\"kaua-term-probe\") FAILED\n");
+                return 1;
+            }
+            int ktp_status = -1;
+            long ktp_reaped = t_wait_pid_for((int)ktp_pid, 0, &ktp_status);
+            if (ktp_reaped != ktp_pid || ktp_status != 0) {
+                t_putstr("joey: /kaua-term-probe FAILED -- KT-1.5a transport (pts host + 2-thread + codec over a pipe)\n");
+                return 1;
+            }
+            t_putstr("joey: /kaua-term-probe reaped status=0 (KT-1.5a: kaua-term bin + seam codec over a real pipe verified)\n");
+        }
+#endif /* THYLA_BOOT_PROBES (KT-1.5a kaua-term transport prove) */
+
         // === VIVARIUM V-4a: spawn /sbin/diorama + run the in-guest gate ===
         //
         // The diorama is the synthetic Linux world (docs/VIVARIUM.md section 6):
