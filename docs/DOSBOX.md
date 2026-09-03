@@ -155,7 +155,17 @@ server + virtio-sound (post-v1.0) lights it up.
     Fixes: force SDL dummy audio (0004), a `SetWindowSize` tap-recreate hook, and a
     non-resizable window (0005) to end the compositor resize-war. THYLACINE_BAKE_DOSBOX
     still opt-in (flips default-on at DX-2 close).
-  - **DX-2c NEXT**: mount a host/9P dir as a DOS drive + run a real DOS program.
+  - **DX-2c DONE** (2026-09-03): mount a host dir as a DOS drive + run a real DOS
+    program. `dosbox-x -c "mount c /home/michael" -c "c:" -c "DX2C.COM"` mounts
+    michael's writable home as C:, runs DX2C.COM (a 49-byte DOS `.COM` emitted by
+    `tools/dx2c-dosprog.py`, baked at the devramfs root, reached at `/bin/DX2C.COM`
+    post-pivot via joey's /bin bind), which creates `C:\OUT.TXT` = "DX-2C-OK" via
+    INT 21h -- read back through the Thylacine shell (the FILE is the only reliable
+    signal; DOS output paints the pane, not serial). The gate backgrounds DOSBox-X
+    (`&`) so the shell stays free for the readback. `ls-gfx-dosbox` now proves BOTH
+    DX-2 halves in one leg (render screendump + OUT.TXT readback). With DX-2c the
+    DX-2 exit criterion is met.
+  - **DX-2 close (NEXT)**: flip `THYLACINE_BAKE_DOSBOX` default-on; then DX-3.
 - **DX-3** -- sound fully stubbed/hardened; input polish (keyboard + mouse for
   games); config/autoexec; larger real DOS programs.
 - **DX-4** -- the **CAP_JIT dynarec** (I-42; central): wire `dynamic_x86` to emit

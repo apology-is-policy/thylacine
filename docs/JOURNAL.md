@@ -23,6 +23,64 @@ needed the operator.
 
 ---
 
+## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-2c: a real DOS program runs off a mounted host drive
+
+DX-2's second half, and the DX-2 exit criterion met: `dosbox-x` mounts a host
+directory as the DOS `C:` drive, runs a real DOS program off it, and the program
+writes a host file that Thylacine reads back. The program is **DX2C.COM** -- a
+49-byte DOS `.COM` (`tools/dx2c-dosprog.py`, offsets computed from the fixed
+31-byte code length, not hand-transcribed) that creates `C:\OUT.TXT`, writes the
+marker `DX-2C-OK`, and terminates via INT 21h. Baked at the devramfs root under
+`THYLACINE_BAKE_DOSBOX`. Verified end to end on HVF; `ls-gfx-dosbox` now proves
+both DX-2 halves in one leg.
+
+Two wrong turns, both caught by grounding in a **pane screendump** rather than a
+green/red verdict -- the DX-2b spurious-green lesson paying off again:
+
+- **"Bad command or filename".** The first real run mounted C: fine
+  ("Drive C is mounted as local directory /home/michael/") but `DX2C.COM` was
+  not found. The screendump showed the exact DOS-shell text -- decisive. Root
+  cause: I copied the program from `/DX2C.COM`, but joey pivots root to the
+  Stratum pool at boot's end, and `bin_src_h = t_open("/", O_PATH)` (pre-pivot,
+  `usr/joey/joey.c:7081`) is what gets MREPL-mounted onto `/bin`. So the devramfs
+  root -- including the baked `DX2C.COM` -- survives the pivot ONLY at `/bin`;
+  plain `/DX2C.COM` is gone (/ is the pool). The `cp` had silently copied
+  nothing. Fix: source `/bin/DX2C.COM`. A lesson that generalizes past this
+  chunk: a devramfs-root DATA file is reachable post-pivot only through the /bin
+  bind, exactly like the coreutil binaries -- and spawn's devramfs-backed lookup
+  (which is pivot-independent) does NOT extend to an `open()` of a data file.
+
+- **The shell never came back.** With a foreground DOSBox-X, reading `OUT.TXT`
+  back needs the shell, and it blocks on the emulator for its whole run.
+  Returning it after -- an autoexec `exit` (the last `-c`), then a Ctrl-C --
+  both left the shell wedged (no readback, 45s quiet). I did NOT conclude
+  "DOSBox-X exit is broken": the failure is equally explained by console input
+  buffering / the emulator draining stdin, and distinguishing them would have
+  cost boots for no DX-2c benefit. Instead I backgrounded DOSBox-X (`&`; ut's
+  job control is real, `u-job-test` drives it) so the shell stays free for the
+  `cat` while the emulator keeps painting the pane for the screendump. Clean,
+  and it sidesteps the exit question entirely. (The foreground-exit shell-return
+  is left as an open question for DX-3, noted in memory, not silently dropped.)
+
+Method note: three probe boots, each deliberately exploratory (the resume note's
+"a wrong assumption burns a boot"). Probe v1 (autoexec exit) -> shell wedged.
+Probe v2 (no exit + screendump + Ctrl-C) -> the screendump proved mount OK / file
+not found / Ctrl-C wedged. Probe v3 (`/bin` path + background) -> `OUT.TXT =
+DX-2C-OK` + 24-bucket DOS screen. Each boot bought a specific fact; none was a
+retry of the same guess.
+
+Cost: the re-bake reused the cached 17.6 MB emulator (only the ramfs+pool
+re-baked). No quake regression expected (the render path is unchanged; DX-2c only
+adds a mount + a 49-byte program).
+
+Landed: `tools/dx2c-dosprog.py` (new), the `DX2C.COM` ramfs staging in
+`tools/build.sh` (under `THYLACINE_BAKE_DOSBOX`), and the rewritten
+`tools/interactive/ls-gfx-dosbox.exp`. Open: the foreground-exit shell-return;
+the DX-2 default-on flip (deferred to DX-2 close); the vault sweep of
+`usr/ports/dosbox-x` + `usr/ports/sdl2` (vault behind).
+
+---
+
 ## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-2b: DOSBox-X FIRST LIGHT (Z:\ on a Tapestry pane)
 
 The Cryptid arc's first-light milestone: `dosbox-x` graphical paints its VGA text

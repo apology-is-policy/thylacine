@@ -1,29 +1,46 @@
 #!/usr/bin/expect -f
-# tools/interactive/ls-gfx-dosbox.exp -- the DX-2 (Cryptid) first-light gate.
+# tools/interactive/ls-gfx-dosbox.exp -- the DX-2 (Cryptid) gate: first light +
+# run-a-program.
 #
 # Mirrors the G-7 ls-gfx-quake acceptance gate: a demanding SDL2 client
 # (DOSBox-X) drives the Tapestry stack. Two legs:
 #   execution : `dosbox-x -version` prints "DOSBox-X version ..." and exits --
 #               proves the 17.6 MB static ET_EXEC runs main() on Thylacine.
-#   render    : `dosbox-x` (no args) auto-mounts its internal Z:\ and paints the
-#               VGA text screen through output=surface -> the SDL framebuffer
-#               path (THYLACINE_CreateWindowFramebuffer/UpdateWindowFramebuffer)
-#               -> thyla_tap_present -> the tapestry compositor. First light:
-#               Z:\ on the pane. Ctrl-C stops it.
+#   first-light + run-a-program (DX-2c): mount a writable host dir as the DOS
+#               C: drive, run a real DOS program off it, paint the DOS screen to
+#               a Tapestry pane, and read the program's output file back through
+#               the Thylacine shell. This is BOTH halves of DX-2: the VGA text
+#               screen renders through output=surface -> the SDL framebuffer
+#               path -> the tapestry compositor (first light), AND a mounted DOS
+#               program runs and writes a host file (run-a-program).
 #
 # output=surface is DOSBox-X's default on THIS build (C_OPENGL/D3D/TTF all off
 # -> GetDefaultOutput() returns "surface", src/output/output_tools.cpp) --
 # exactly the software-framebuffer path the SDL_thylacine backend implements.
 #
+# THE DOS PROGRAM (DX2C.COM): a 49-byte DOS .COM emitted by
+# tools/dx2c-dosprog.py and baked at the devramfs root. It creates C:\OUT.TXT
+# and writes the marker "DX-2C-OK", then terminates (INT 21h AH=4Ch). It is
+# reached at /bin/DX2C.COM: joey binds the pre-pivot devramfs root onto /bin
+# (usr/joey/joey.c #58), so devramfs-root files survive the pivot to the pool
+# there -- the plain "/DX2C.COM" is GONE post-pivot (/ is the Stratum pool).
+#
+# WHY BACKGROUND DOSBOX-X (`&`): the FILE is the only reliable "the program
+# ran" signal -- DOSBox-X's own DOS output renders to the pane, not the serial
+# console, so a screendump cannot read text. Reading C:\OUT.TXT back needs a
+# free shell, and a foreground DOSBox-X blocks the shell for its whole run;
+# returning the shell after it (autoexec `exit`, or Ctrl-C) proved unreliable
+# under console buffering. Backgrounding keeps the shell free to `cat` the file
+# while DOSBox-X keeps rendering the pane for the screendump. ut's `&` is real
+# (u-job-test drives it).
+#
 # GATE SOUNDNESS (the DX-2b spurious-green lesson): the color-bucket floor alone
 # is NOT a first-light proof -- the aurora CONSOLE (dosbox-x's own log text)
-# yields ~12 buckets, so a screendump taken after dosbox-x EXITS passes a naive
-# floor while nothing rendered. The load-bearing signal is the log: DOSBox-X
-# prints "SDL: version ... Video thylacine, Audio dummy" only AFTER the fatal
-# combined SDL_Init(AUDIO|VIDEO|...) succeeds; an audio-backend gap makes that
-# init E_Exit ("Can't init SDL") BEFORE any surface. So the render leg gates on
-# "Video thylacine" (positive) + fails on E_Exit / a crash / a no-show, then the
-# floor is just a "not flat black" sanity check on the presented frame.
+# yields ~12 buckets, so a screendump taken when nothing DOS rendered passes a
+# naive floor. The load-bearing signals are the log ("Video thylacine" after the
+# fatal combined SDL_Init succeeds; "COMMAND.COM" once the internal DOS boots)
+# and the OUT.TXT readback (a real DOS program ran + wrote a mounted host file);
+# the floor is just a "not flat black" sanity check on the presented frame.
 #
 # HVF posture (the ls-gfx sibling; TCG hangs at the 8a-2b hwwatch E2E, #27).
 
@@ -64,20 +81,28 @@ expect {
     timeout { lc_fail "no version line within 60s" }
 }
 
-# --- render leg: does graphical dosbox-x paint the DOS screen to the scanout?
-# Foreground run: dosbox-x reads keyboard from the Tapestry path, not the
-# console, so the console stays free for the log-based fault-watch while the
-# shell blocks on it.
+# --- first-light + run-a-program leg (DX-2c) ---
 set dbx_render_png $repo/build/ls-gfx-dosbox-render.png
-# "Not flat black" backstop on the presented frame (measured: the DOSBox-X
-# welcome screen yields ~24 buckets; the aurora console alone ~12; a resize-loop
-# inactive scanout ~2). The LOAD-BEARING proof is the "Video thylacine" + the
-# "COMMAND.COM" log arms below, not this number (see GATE SOUNDNESS).
+# "Not flat black" backstop on the presented frame (measured: the DOSBox-X DOS
+# screen yields ~24 buckets; the aurora console alone ~12; a flat scanout ~2).
+# The LOAD-BEARING proof is the "Video thylacine" + "COMMAND.COM" log arms and
+# the OUT.TXT readback below, not this number (see GATE SOUNDNESS).
 set dbx_color_floor 8
-lc_send "dosbox-x"
-# Positive: "SDL: version ... Video thylacine ..." proves the fatal combined
-# SDL_Init succeeded with our driver. Fail fast on E_Exit (the audio-backend
-# gap the 0004 patch closes), a crash, a kernel fault, or a no-show.
+
+# Stage the baked DOS program into the dir we mount as C:. /bin/DX2C.COM (the
+# devramfs-root file via joey's /bin bind) -> /home/michael (michael's writable
+# per-user home, mounted by login), which DOSBox-X then mounts as C:.
+lc_send "cp /bin/DX2C.COM /home/michael/DX2C.COM"
+after 1500
+
+# Background DOSBox-X so the shell stays free for the OUT.TXT readback. The
+# autoexec (-c commands) mounts C: = /home/michael, switches to it, and runs
+# DX2C.COM, which writes C:\OUT.TXT and returns to the C:\ prompt on the pane.
+lc_send "dosbox-x -c \"mount c /home/michael\" -c \"c:\" -c \"DX2C.COM\" &"
+
+# Positive 1: "Video thylacine" proves the fatal combined SDL_Init succeeded
+# with our backend. Fail fast on E_Exit (the audio-backend gap the 0004 patch
+# closes), a crash, a kernel fault, or a no-show.
 set timeout 30
 expect {
     -re {Video thylacine}       { lc_step "SDL up: thylacine video + dummy audio (past the fatal SDL_Init)" }
@@ -87,23 +112,20 @@ expect {
     -re {EXTINCTION:}           { lc_extinction_fail "kernel extinction while dosbox-x graphical ran" }
     timeout                     { lc_fail "dosbox-x SDL did not come up within 30s (no 'Video thylacine' line)" }
 }
-# Positive 2: DOSBox-X boots its INTERNAL DOS to the COMMAND.COM shell (the Z:\
-# prompt). This is the load-bearing "the DOS is live" proof -- SDL being up is
-# not enough, and it closes the spurious-green gap (a screendump taken after
-# dosbox-x EXITED would show the console, but an exit trips the death arms here).
+# Positive 2: DOSBox-X boots its INTERNAL DOS to the COMMAND.COM shell, which
+# runs the autoexec (-c) commands. This is the "the DOS is live" proof.
 set timeout 25
 expect {
-    -re {COMMAND\.COM}                        { lc_step "DOS booted: COMMAND.COM shell up (Z:\ reached)" }
+    -re {COMMAND\.COM}                         { lc_step "DOS booted: COMMAND.COM shell up; running the mount+program autoexec" }
     -re {user fault|snare:|E_Exit|EXTINCTION:} { lc_fail "dosbox-x died before the internal DOS reached COMMAND.COM" }
     timeout                                    { lc_fail "DOSBox-X did not reach the COMMAND.COM DOS shell within 25s" }
 }
-# Settle: let the VGA text screen present to the scanout, watching for a late death.
-set timeout 6
-expect {
-    -re {user fault|snare:|E_Exit|EXTINCTION:} { lc_fail "dosbox-x died after reaching the DOS shell, before the scanout settled" }
-    timeout { lc_step "dosbox-x rendering the DOS screen (no death in the settle window)" }
-}
+# Settle: let the autoexec (mount c / c: / DX2C.COM) run and paint the DOS
+# screen. DX2C.COM writes + closes C:\OUT.TXT here, so it is visible to the
+# readback below (close-to-open via the FS).
+after 8000
 
+# Render proof: the DOS screen is on the scanout.
 if {[gfx_dump_or_fail $dbx_render_png] ne ""} { lc_fail "screendump failed" }
 set fp [gfx_fingerprint $dbx_render_png]
 set c [lindex $fp 1]
@@ -112,12 +134,21 @@ if {$c < $dbx_color_floor} {
     lc_fail "too few colors ($c < $dbx_color_floor) -- the DOS screen is not on the scanout (flat/black surface?)"
 }
 
-# Stop it: the console Ctrl-C cooks to the `interrupt` note -> the foreground
-# process group (dosbox-x). Best-effort clean stop; lc_quit is the backstop.
-lc_ctrlc
-after 1500
-lc_pass "dosbox-x's DOS screen on the scanout ($c color buckets; output=surface -> SDL framebuffer -> tapestry)"
+# Run-a-program proof: DX2C.COM created C:\OUT.TXT (= /home/michael/OUT.TXT) and
+# wrote the marker. "DX-2C-OK" cannot appear in the typed line, so the match is
+# unambiguous. This proves a real DOS program ran off a mounted host drive AND
+# wrote back through the DOS->host file boundary.
+lc_send "cat /home/michael/OUT.TXT"
+set timeout 25
+expect {
+    -ex "DX-2C-OK"          { lc_step "run-a-program: C:\\OUT.TXT = DX-2C-OK (DX2C.COM ran off the mounted C: drive + wrote a host file)" }
+    -re {No such|not found} { lc_fail "OUT.TXT absent -- DX2C.COM did not run, or the C: mount was not writable" }
+    -re {EXTINCTION:}       { lc_extinction_fail "kernel extinction reading OUT.TXT" }
+    timeout                 { lc_fail "no OUT.TXT marker within 25s -- DX2C.COM did not write the mounted host file" }
+}
+
+lc_pass "dosbox-x: DOS screen on the scanout ($c color buckets) + a real DOS program ran off a mounted host drive (DX-2c)"
 
 lc_quit
-lc_pass "ls-gfx-dosbox: the DX-2 Cryptid first-light gate verified"
+lc_pass "ls-gfx-dosbox: the DX-2 Cryptid first-light + run-a-program gate verified"
 exit 0

@@ -609,6 +609,19 @@ EOF
         fi
     done
 
+    # DX-2c (Cryptid: run a real DOS program): emit the 49-byte DX2C.COM DOS
+    # program into the ramfs root. It is a DATA file (a DOS .COM the emulated
+    # guest runs, NOT a Thylacine binary), so it rides the bake directly rather
+    # than pouch_bins. The ls-gfx-dosbox gate mounts a writable guest dir as C:,
+    # copies this in, runs it, and reads back C:\OUT.TXT ("DX-2C-OK"). Same
+    # THYLACINE_BAKE_DOSBOX opt-in as the emulator binary above.
+    if [[ -n "${THYLACINE_BAKE_DOSBOX:-}" ]]; then
+        python3 "$REPO_ROOT/tools/dx2c-dosprog.py" "$ramfs_src/DX2C.COM" \
+            || { echo "==> ramfs: DX2C.COM emit FAILED" >&2; exit 1; }
+        chmod 0644 "$ramfs_src/DX2C.COM"
+        ledger "ramfs.cpio: staged DX2C.COM (DX-2c DOS run-a-program witness)"
+    fi
+
     # P6-pouch-stratumd-boot (sub-chunk 16a): copy the cross-built stratumd
     # daemon binary if build_stratumd has produced it. Separate from
     # pouch_bins because stratumd is the real daemon (not a hello test
