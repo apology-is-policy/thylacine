@@ -23,6 +23,8 @@
 
 extern crate alloc;
 
+pub mod wire;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use kaua::{KeyCode, KeyEvent, Mods};
