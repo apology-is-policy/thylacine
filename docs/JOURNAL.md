@@ -65,7 +65,7 @@ preparation (it named the exact join to watch) but the WRONG conclusion, and the
 cheap disambiguator was a single boot with a post-exit marker rather than a deep
 dive into the pump-join. Ground truth over theory, again.
 
-Landed (@pending): `tools/dx3-keyprog.py`, `tools/qmp-send-key.sh`,
+Landed (@bd9cbe02): `tools/dx3-keyprog.py`, `tools/qmp-send-key.sh`,
 `tools/interactive/ls-gfx-dosbox-input.exp`, and the `DX3K.COM` staging in
 `tools/build.sh` (under the same `THYLACINE_BAKE_DOSBOX` default-on gate as
 DX2C.COM). Open for the DX-3 remainder: sound-stub hardening, config/autoexec
