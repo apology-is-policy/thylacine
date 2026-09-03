@@ -87,6 +87,65 @@ default suite passes (boot OK, arc gates L-6c + D-5 PASS). The SMP gate passed c
 corruption / 0 external-kill / 0 timing / 0 other -- validating the merged
 audit-bearing kernel at runtime under SMP.
 
+### run 20 continued (post-self-compact) -- KT-1a: the shared VT parser to full-xterm, and a P0 that a new feature had hidden
+
+After the merge the operator said "start KT." KT-1a grows `usr/lib/vt` (the
+shared parser aurora + halcyond + the coming kaua-term all render from) to the
+xterm behaviors a real Linux TUI needs. Four pieces: `c01bb942` KT-1a-1 (DECSTBM
+scroll regions + DECOM origin mode, landed pre-compact); `1c4d537d` KT-1a-2..4
+(SU/SD band scroll; wide chars via a Kuhn wcwidth with a new `ATTR_WIDE` bit;
+SGR italic/dim/blink/strike). All host-tested + clippy-clean before the audit.
+
+The audit is where the run earned its keep. Fable died mid-spawn on credit
+exhaustion; per the reviewer discipline (never skip a round for want of Fable;
+on credit-death go straight to the fallback tier) I re-spawned on Opus at max
+with the fallback framing -- family diversity forfeit, context-independence
+retained, re-derive don't-trust-comments. Round 1 returned **1 P0 + 1 P1 + 1 P2
++ 2 P3**.
+
+**The P0 is the reusable finding.** A double-width glyph in a 1-column grid
+wrote its blank continuation cell at `cx+1` -- off the row -- an OOB abort at the
+bottom row, plus it stranded `cx>cols` which cascades into an
+insert/delete/erase-chars `cols-cx` underflow. My own concurrent self-audit
+found the same OOB but rated it **P1** (latent -- "aurora's grid is always
+wide"). The prosecutor rated it **P0**, and it was right: it read
+`aurora/main.rs:876`, where the resize floors `cols` at `.max(1)` and a comment
+declares that floor panic-safe ("only a cosmetically-small fbcon, never a
+panic"). KT-1a-3 silently invalidated that proof -- a 1px-narrow tile or an
+oversized font yields `cols=1`, and then any CJK/emoji at the bottom row aborts
+the *shared console*. This is the [[bug-240-new-gate-hollows-old-negative]] /
+[[bug-230-lifted-constant-voids-proofs]] family: **a new capability (width-2
+writes) voids a bound a prior author proved complete for the old input set
+(narrow ASCII).** The lesson for the self-audit: reachability is not "does a
+caller do this today" -- it is "does any bound elsewhere in the tree now rest on
+an assumption my feature broke." The prosecutor's willingness to open
+`aurora/main.rs` and read the resize floor is exactly the context-independence
+the fallback round still buys. Fix: a wide glyph degrades to single-width when
+`cols<2`, restoring `cx<=cols`.
+
+The P1 (IL/DL ignored the DECSTBM region) was also an elevation: I'd rated it
+P3 (not unsound), the prosecutor rated it P1 because it corrupts exactly the
+region-using TUIs the arc exists to serve (ncurses/pagers/tmux) and is
+internally inconsistent with the region-aware SU/SD KT-1a-1 shipped. Fixed by
+confining IL/DL to `[scroll_top, scroll_bot]`.
+
+Because a P0 returned, the close was dirty -> a round-2 audit on the fixes
+(`a8dbf46c`), also Opus fallback. **R2 = CLEAN (0/0/0/0)**: it built a verbatim
+copy under `overflow-checks` and ran an exhaustive F3 sweep (every
+`(scroll_top, scroll_bot, cy, n)` on a 5-row grid) plus a 4000-sequence fuzz over
+every grid 1x1..4x4, and could not break a fix. Clean via two rounds is still
+clean. Both rounds were Opus (Fable credit-exhausted); a Fable round would add
+the one axis -- family diversity -- these lacked, but the surface is small,
+single-threaded, alloc-free, and exhaustively fuzzed.
+
+Cost/close: vt host tests 34 (+12 for the features, +6 for the audit
+regressions); the full build + boot gate is green -- aurora comes up 128x36 and
+its #129 feed selftest passes, so the new parser renders in a real boot. New
+reference doc `docs/reference/150-vt.md`. Still open (deferred, documented,
+non-soundness): DECOM does not confine relative cursor moves to the band -- a
+full-DECOM fidelity refinement no in-tree consumer needs yet.
+
+
 ## 2026-09-03 (run 19, Opus 4.8) — the multi-console design: a topology fork caught, an operator override, and the tree-divergence rule 3x
 
 No code this run — a design conversation (→ scripture) with the aux track. The
