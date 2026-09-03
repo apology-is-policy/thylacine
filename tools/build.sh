@@ -633,6 +633,29 @@ EOF
             || { echo "==> ramfs: DX3K.COM emit FAILED" >&2; exit 1; }
         chmod 0644 "$ramfs_src/DX3K.COM"
         ledger "ramfs.cpio: staged DX3K.COM (DX-3 DOS keystroke witness)"
+        # DX-3b: a sample DOSBox-X config demonstrating declarative startup.
+        # `dosbox-x -conf <file>` loads settings + runs the [autoexec] section
+        # (the file-based equivalent of -c flags). This SAMPLE mounts the seeded
+        # user's home as C: and runs a program on startup; users copy it and
+        # edit the path/program. The ls-gfx-dosbox-conf gate proves -conf loads
+        # the [autoexec] from a file (OUT.TXT appears with NO -c flags passed).
+        cat > "$ramfs_src/dosbox-x.conf" <<'DOSBOXCONF'
+# Thylacine DOSBox-X sample config (DX-3b). Load it with:
+#   dosbox-x -conf /path/to/dosbox-x.conf
+# The [autoexec] section runs at startup -- the declarative form of -c flags.
+# Sound is stubbed on Thylacine (v1.0 non-goal); emulated sound devices still
+# run so DOS software detects a card and plays silently rather than misbehaving.
+[sdl]
+output=surface
+
+[autoexec]
+@echo off
+mount c /home/michael
+c:
+DX2C.COM
+DOSBOXCONF
+        chmod 0644 "$ramfs_src/dosbox-x.conf"
+        ledger "ramfs.cpio: staged dosbox-x.conf (DX-3b sample config/autoexec)"
     fi
 
     # P6-pouch-stratumd-boot (sub-chunk 16a): copy the cross-built stratumd

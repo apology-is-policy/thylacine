@@ -189,8 +189,28 @@ server + virtio-sound (post-v1.0) lights it up.
     typing `exit` on the SERIAL console: DOSBox-X reads its input from the PANE
     (SDL events), not serial, so a serial `exit` never reaches the DOS shell and
     the foreground dosbox runs on. The cure is an autoexec exit or backgrounding;
-    the gate's foreground-exit leg is now HARD. **NEXT (DX-3 remainder): sound
-    stub hardening, config/autoexec (dosbox.conf), a larger real DOS program.**
+    the gate's foreground-exit leg is now HARD.
+  - **DX-3b DONE** (2026-09-03): file-based config/autoexec. `dosbox-x -conf
+    <file>` loads a dosbox-x.conf whose `[autoexec]` section runs at startup --
+    the declarative equivalent of `-c` flags (a persistent config vs retyping
+    flags). A sample dosbox-x.conf is baked at the devramfs root (build.sh,
+    under THYLACINE_BAKE_DOSBOX): it sets `[sdl] output=surface` and an
+    `[autoexec]` that mounts C: = the home and runs a program. Gate
+    `ls-gfx-dosbox-conf.exp` runs `dosbox-x -conf <file>` with NO `-c` flags and
+    verifies the autoexec ran (C:\OUT.TXT appears) -- and the transcript shows
+    `CONFIG: Loaded config file`. (Gate-authoring note: `[word]` in a
+    double-quoted Tcl/expect message is command substitution -- reword config
+    section names in message strings, or the gate crashes when that arm runs.)
+  - **Sound**: DONE by design -- the SDL dummy driver (patch 0004) + full sound
+    device emulation with discarded output is the compat-correct stub (DOS
+    software detects a sound card and runs its audio code silently rather than
+    mishandling "no card"); disabling devices would HURT compatibility. Proven
+    by every dosbox boot bringing the sound stack up without a crash.
+  - **Larger real DOS program**: deferred to DX-5 (the DOS-game milestone),
+    where sourcing a recognizable real program is the explicit task -- no
+    assembler is vendored for a richer hand-written one, and DX-5 owns the
+    fetch. **DX-3 is otherwise complete; NEXT = DX-4 (the CAP_JIT dynarec,
+    AUDIT-BEARING, prereq for Act 2).**
 - **DX-4** -- the **CAP_JIT dynarec** (I-42; central): wire `dynamic_x86` to emit
   through CAP_JIT (writer/exec split per the ORC template); SMC via re-publish.
   AUDIT-BEARING (own design pass + focused audit). Exit: `core=dynamic` correct +

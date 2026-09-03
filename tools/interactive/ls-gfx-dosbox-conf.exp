@@ -1,0 +1,82 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-dosbox-conf.exp -- the DX-3b (Cryptid) config/autoexec
+# gate: DOSBox-X loads settings + runs an [autoexec] section from a FILE.
+#
+# DX-2c proved the `-c` mechanism (each -c is one autoexec line). DX-3b proves
+# the FILE-based form: `dosbox-x -conf <file>` reads a dosbox-x.conf whose
+# [autoexec] section runs on startup. This is how a user configures DOSBox-X
+# declaratively (a persistent config) instead of retyping -c flags.
+#
+# THE CONFIG (dosbox-x.conf): a sample baked at the devramfs root (build.sh,
+# under THYLACINE_BAKE_DOSBOX), reached at /bin/dosbox-x.conf post-pivot. Its
+# [autoexec] mounts C: = /home/michael and runs DX2C.COM (which writes
+# C:\OUT.TXT = "DX-2C-OK"). NO -c flags are passed on the command line, so
+# OUT.TXT appears IFF the config's [autoexec] ran -- i.e. iff -conf loaded the
+# file. The failure marker "CONFIG: Can't open specified config file" fails fast.
+#
+# WHY BACKGROUND DOSBOX-X (`&`): identical to the sibling gates -- the FILE is
+# the only serial-visible signal, so the shell stays free to `cat` it.
+#
+# HVF posture (the ls-gfx sibling; TCG hangs at the 8a-2b hwwatch E2E, #27).
+
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Stage the sample config + the program its [autoexec] runs into the C: dir.
+lc_send "cp /bin/dosbox-x.conf /home/michael/dosbox-x.conf"
+after 800
+lc_send "cp /bin/DX2C.COM /home/michael/DX2C.COM"
+after 800
+
+# Background DOSBox-X with ONLY -conf (no -c): the mount+program come from the
+# config's [autoexec]. If that section runs, DX2C.COM writes C:\OUT.TXT.
+lc_send "dosbox-x -conf /home/michael/dosbox-x.conf &"
+
+# SDL up; fail fast if the config file could not be opened.
+set timeout 30
+expect {
+    -re {CONFIG: Can't open specified config file} { lc_fail "dosbox-x could not open the -conf file (staging/path?)" }
+    -re {Video thylacine}       { lc_step "SDL up: thylacine video + dummy audio" }
+    -re {E_Exit|Can't init SDL} { lc_fail "dosbox-x E_Exit during SDL init" }
+    "snare:"                    { lc_fail "dosbox-x graphical faulted (snare)" }
+    "user fault"                { lc_fail "dosbox-x graphical user fault" }
+    -re {EXTINCTION:}           { lc_extinction_fail "kernel extinction while dosbox-x ran" }
+    timeout                     { lc_fail "dosbox-x SDL did not come up within 30s" }
+}
+# The config's [autoexec] runs inside COMMAND.COM.
+set timeout 25
+expect {
+    -re {CONFIG: Can't open specified config file} { lc_fail "dosbox-x could not open the -conf file" }
+    -re {COMMAND\.COM}                             { lc_step "DOS booted: COMMAND.COM up; running the config's autoexec section" }
+    -re {user fault|snare:|E_Exit|EXTINCTION:}     { lc_fail "dosbox-x died before COMMAND.COM" }
+    timeout                                        { lc_fail "no COMMAND.COM within 25s" }
+}
+
+# Poll the readback: OUT.TXT exists only if the config's [autoexec] mounted C:
+# and ran DX2C.COM -- i.e. iff -conf loaded the file (no -c flags were passed).
+set gotout 0
+after 6000
+for {set i 0} {$i < 8 && !$gotout} {incr i} {
+    lc_send "cat /home/michael/OUT.TXT"
+    set timeout 10
+    expect {
+        -ex "DX-2C-OK"         { lc_step "config/autoexec: C:\\OUT.TXT = DX-2C-OK -- the -conf file's autoexec section ran (no -c flags)"; set gotout 1 }
+        -re {No such|not found} { after 1500 }
+        -re {EXTINCTION:}       { lc_extinction_fail "kernel extinction reading OUT.TXT" }
+        timeout                 { after 500 }
+    }
+}
+if {!$gotout} {
+    lc_fail "no OUT.TXT after 8 reads -- the -conf file's autoexec section did not run (config/autoexec broken)"
+}
+lc_pass "dosbox-x config/autoexec: `dosbox-x -conf <file>` loaded settings + ran the autoexec section from a file (DX-3b)"
+
+lc_quit
+lc_pass "ls-gfx-dosbox-conf: the DX-3b Cryptid config/autoexec gate verified"
+exit 0

@@ -23,6 +23,48 @@ needed the operator.
 
 ---
 
+## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-3b: file-based config/autoexec, plus two findings the run turned up
+
+DOSBox-X loads a `dosbox-x.conf` from disk and runs its `[autoexec]` section --
+the declarative equivalent of `-c` flags. Proven with the section running with NO
+`-c` flags on the command line: `dosbox-x -conf /home/michael/dosbox-x.conf`
+alone mounts C: and runs a program, and the transcript carries both
+`CONFIG: Loaded config file: /home/michael/dosbox-x.conf` and the resulting
+`C:\OUT.TXT`. A sample config is baked at the devramfs root. Gate:
+`ls-gfx-dosbox-conf.exp`. With this, DX-3 is substantially complete (input,
+foreground-exit, sound, config/autoexec); the "larger real DOS program" defers to
+DX-5, which owns sourcing a real one (no assembler is vendored to hand-write a
+richer one).
+
+**Wrong turn, caught by the transcript, not the verdict.** The first config-gate
+boot FAILED, and the failure LOOKED like DOSBox: the log showed
+`COMMAND.COM env invalid command name "autoexec"`. It was not DOSBox -- it was
+MY gate. A `[word]` inside a double-quoted Tcl/expect message string is COMMAND
+SUBSTITUTION, so `lc_step "... running the config's [autoexec]"` made expect try
+to execute the command `autoexec` and abort. The tells that it was mine, not
+dosbox's: the same transcript carried `CONFIG: Loaded config file` (so -conf
+worked) and the Tcl error frame named my `.exp` file and line. The trap is nasty
+because `info complete` passes (it parses fine) and only the REACHED arm crashes
+-- so a `[...]` in an untriggered fail arm is a latent time bomb. Fixed by
+rewording every message; swept both dosbox gates; recorded the rule +
+grep-before-boot detector in memory. See
+[[bug-tcl-bracket-command-substitution-in-gate-messages]].
+
+**Build-hygiene finding (efficiency, not soundness), now pinned.** Both DX-3
+bakes recompiled DOSBox-X from scratch (311 TUs, ~4 min) despite unchanged
+source. Root cause: the libcxx reuse check requires `libc++.a` newer than
+`build.sh` itself (`build.sh:5260`, `${BASH_SOURCE[0]}`). Editing build.sh --
+which each DX staging change does -- makes it newer than libc++.a, so libcxx
+rebuilds, which bumps libc++.a's mtime, which trips the dosbox staleness check
+(`libc++.a -nt dosbox-x`) into a full rebuild. It is conservative-by-design, not
+a bug: a *repeated default build* (build.sh untouched) keeps dosbox cached; only
+a build.sh/libcxx-source edit cascades. The practical lesson for this arc: batch
+build.sh edits, bake once. Not fixed here -- it is operator-owned build-infra,
+and "fixing" a conservative staleness check risks under-rebuilding.
+
+Landed (@pending): `dosbox-x.conf` staging in `tools/build.sh` +
+`tools/interactive/ls-gfx-dosbox-conf.exp`.
+
 ## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-3a: a keystroke reaches DOS, and the foreground-exit "wedge" dissolves
 
 DX-3's crown jewel: an injected keystroke reaches a running DOS program end to
