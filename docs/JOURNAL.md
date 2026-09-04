@@ -23,6 +23,69 @@ needed the operator.
 
 ---
 
+## 2026-09-04 (aux, Opus 4.8, effort max) -- the REAL Duke3D oscillation cause: DOSBox cycles=auto
+
+The frame-intent pin (the entry below) was necessary but NOT the cause. The
+operator ran the fixed build, held a turn key, and reported ground truth that
+overrode the "fixed" close: "it flipped to 60, but I could still see the
+oscillation." The compositor clock was pinned at 60 (the frame-intent fix working
+as designed) and the ~500ms turn-speed oscillation persisted. So the idle
+throttle was never the cause -- the gates had proved the MECHANISM (the clock no
+longer flaps), not the SYMPTOM (the operator's visible oscillation). A
+verify-around-the-symptom miss; owned, fed back (SendFeedback), and re-opened.
+
+**The real cause, found by reading the emulator + a period fingerprint.** With the
+clock ruled out, "spins slower then faster" is a *speed* change, not judder --
+the emulated CPU rate, not frame delivery. We ship DOSBox-X with no `cycles=`
+setting, so it defaults to `cycles=auto`; for a protected-mode game that enables
+`CPU_CycleAutoAdjust`, a feedback control loop in `increaseticks()`
+(`src/dosbox.cpp`) that re-scales the emulated CPU speed. Its evaluation window is
+**250 ms** (`if (ticksScheduled >= 250 || ticksDone >= 250 ...)`) -- an
+overshoot-then-correct cycle spans ~500 ms, the operator's exact period. That
+250ms-in-the-code / 500ms-in-the-symptom match was the fingerprint.
+
+**Measured, not asserted (the 0007 telemetry patch).** DOSBox-X carries a
+commented-out per-adjust `cyclelog` (`dosbox.cpp:679`); uncommented it, rebuilt,
+booted Duke3D at `cycles=auto`, dwelt 45s through the attract-mode demo (real
+in-game load). Over 531 adjustments the applied `CPU_CycleMax` swung
+**748 <-> 495,725** -- peak-to-peak 506% of the mean, reversing direction 21% of
+steps -- with the raw `ticksDone`/`ticksScheduled` timing inputs themselves
+swinging 500-1200%. A control loop fed noisy measurements, hunting hard. That is
+the oscillation, in numbers. (The telemetry sits after the
+`if (!CPU_CycleAutoAdjust) return` guard, so it is silent under a fixed cycles=
+setting -- a zero-overhead diagnostic that ships.)
+
+**Fix, verified by the absence of the thing.** `cycles=fixed 60000` (Pentium-100
+class, near the measured median 62,851) turns `CPU_CycleAutoAdjust` off. Re-ran
+the showcase gate with the fix: **0** cyclelog lines (the loop never fires) + the
+game renders + takes input (1463 kernel tests PASS, 0 FAIL, 0 EXTINCTION).
+Delivered as a launch flag -- no pool rebake, because the fix is a launch-time
+setting, not a binary/data change; the operator plays the current build now.
+
+**A second broken measurement, caught by a coincidence that could not be one.**
+The dynrec-vs-interpreter perf script reported `title_reached_ms=9738` for BOTH
+cores -- byte-identical, impossible for genuine core-dependent timing. Cause:
+`buckets>=30` fires on DOSBox's SDL-rendered *startup* screen (core-independent),
+not Duke3D's emulated title. Boot-to-title is the wrong metric; the honest
+core-speed signal is the achievable cycle count under `cycles=auto` (the loop
+drives each core to ~90% realtime). Measured: dynrec median 62,851 vs interpreter
+(core=normal) 44,985 -- ~1.4x median, ~3x at peak (495,725 vs 158,088), noisy on
+both. The modest ratio is REAL, not a measurement flaw: the Build engine's
+software rasteriser + the SDL blit are host-side, so the demo is only partly
+CPU-bound, and on M2/HVF both cores clear Duke3D's ~60,000-cycle need easily. The
+dynrec's decisive advantage is HEADROOM for Win9x/Voodoo, not Duke3D on fast
+silicon. A clean single-number speedup needs a dedicated CPU-bound benchmark
+(deferred -- the attract demo is too render-mixed to isolate the recompiler).
+
+**Open, not this arc.** Whether Thylacine's host-timer resolution/jitter
+*amplifies* the auto-adjust instability beyond a native host is unmeasured (needs
+a native-Linux baseline of the same telemetry -- do NOT assume; that is the
+forbidden "host" reflex). The fix is correct regardless. Also inherited +
+surfaced: `joey: pouch-smoke spawn FAILED` x2 at boot (pre-existing, all boots,
+non-fatal, a different subsystem -- enqueued, not fixed here).
+
+---
+
 ## 2026-09-04 (aux, Opus 4.8, effort max) -- the frame-intent throttle pin (the operator's Duke3D FPS oscillation)
 
 Playing Duke Nukem 3D under the new DX-5 showcase (DOSBox-X `core=dynamic`), the

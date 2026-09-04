@@ -71,7 +71,11 @@ lc_login michael correct-horse-battery-staple-v1
 # fast on the local pool.
 lc_send "cp -r /duke3d /home/michael/duke3d"
 after 10000
-lc_send "dosbox-x -set \"cpu core=dynamic_rec\" -c \"mount c /home/michael/duke3d\" -c \"c:\" -c \"DUKE3D.EXE\" &"
+# cycles=fixed 60000 (DX-5): cycles=auto's control loop (increaseticks(), 250ms
+# window) hunts CPU_CycleMax wildly here (measured 506% peak-to-peak) -> a ~500ms
+# emulated-speed oscillation. A fixed cycle count (Pentium-100 class) pins the
+# emulated speed. See docs/reference/152-dosbox.md.
+lc_send "dosbox-x -set \"cpu core=dynamic_rec\" -set \"cpu cycles=fixed 60000\" -c \"mount c /home/michael/duke3d\" -c \"c:\" -c \"DUKE3D.EXE\" &"
 
 # WITNESS 1: the dynrec cache was minted through CAP_JIT.
 set timeout 45
