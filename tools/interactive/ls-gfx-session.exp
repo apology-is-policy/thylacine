@@ -1,0 +1,90 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-session.exp -- KT-1.5d-1a: the per-user session
+# compositor bootstrap (HALCYON.md 14.12).
+#
+# GATED ON THE BAKED LEVER (the cfg-4 / ls-halcyon precedent): the pool carries
+# /lib/halcyon/session = "on" only under THYLACINE_HALCYON_SESSION=1. On a
+# default image login spawns ut and this scenario SKIPs cleanly (lc_quit + exit
+# 0); on a lever image it proves:
+#
+#   login -> the per-user compositor. login authenticates, then spawns
+#   /bin/halcyond --session AS the user (NOT ut on /dev/cons) -- "login: session
+#   compositor (halcyond) spawned" -- and the per-user halcyond connects to the
+#   SYSTEM tapestryd + presents a fullscreen surface: "halcyond: session up NxN
+#   px", printed only inside Ok(present), so the marker witnesses connect +
+#   present (not merely that the line ran -- the M-PIN post-present-marker rule).
+#
+# aurora is the pre-login console renderer here (renderer absent -> aurora), and
+# does NOT silence serial (no thylacine.display=gpu bootarg -- aurora only
+# silences under that arg, cons.c 1b), so login is drivable over serial exactly
+# as ls-ci; halcyond's markers ride the kernel diagnostic UART (t_puts), immune
+# to any renderer silence regardless. d-1a is content to compose alongside
+# aurora (Composed); the clean aurora relinquish -> Direct(halcyond) handoff +
+# logout resume are d-1b.
+#
+# HVF like the gfx siblings; the GPU environment (virtio-gpu + tapestryd) is
+# required for halcyond to present, and is present by default (THYLACINE_DISPLAY
+# unset -> virtio-gpu on, no display=gpu bootarg -> serial stays loud).
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+
+# Login drive (lc_login's prompt/password steps -- but the session path never
+# reaches the ut "Thylacine textual shell" banner, so the shell-up arm below is
+# replaced by the session/default DISCRIMINATION).
+global lc_boot_timeout timeout
+set timeout $lc_boot_timeout
+expect {
+    -ex "Thylacine login: " { lc_step "login prompt" }
+    -re {EXTINCTION:}       { lc_extinction_fail "extinction before login prompt" }
+    timeout                 { lc_fail "no login prompt within ${lc_boot_timeout}s" }
+    eof                     { lc_fail "qemu exited before login prompt" }
+}
+lc_raw_send "michael\r" "login user"
+expect {
+    -ex "password: "  { lc_step "password prompt" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction at password prompt" }
+    timeout           { lc_fail "no password prompt (username not received?)" }
+    eof               { lc_fail "qemu exited at password prompt" }
+}
+lc_raw_send "correct-horse-battery-staple-v1\r" "login password"
+
+# DISCRIMINATE: the session lever (proceed) vs a default image (SKIP). The two
+# markers are mutually exclusive -- login spawns EITHER the session halcyond OR
+# ut, never both.
+expect {
+    -ex "login: session compositor (halcyond) spawned" {
+        lc_step "session path taken (lever image)"
+    }
+    -ex "Thylacine textual shell" {
+        lc_step "default (ut) image -- session lever absent; SKIP"
+        lc_quit
+        exit 0
+    }
+    -ex "login incorrect"  { lc_fail "auth rejected for michael -- see ls-ci's #233 note (an echoed byte after 'password: ' truncated the passphrase)" }
+    -re {EXTINCTION:}      { lc_extinction_fail "extinction during login/session spawn" }
+    timeout                { lc_fail "neither session nor ut path within ${lc_boot_timeout}s" }
+    eof                    { lc_fail "qemu exited during login" }
+}
+
+# The bootstrap witness: halcyond connected to tapestryd + PRESENTED. A RED
+# verdict is keyed on halcyond's own FAIL line too (the safe #186 direction: a
+# spurious match turns a pass into a fail, never the reverse), so a connect/
+# present failure reports at once instead of waiting out the timeout.
+expect {
+    -ex "halcyond: session up" { lc_step "saw: per-user compositor presented" }
+    -re {halcyond: FAIL session} { lc_fail "halcyond --session failed to connect/present (tapestryd absent or the present was refused)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during session bringup" }
+    timeout { lc_fail "halcyond: session up never appeared (the per-user compositor did not present)" }
+    eof     { lc_fail "qemu exited during session bringup" }
+}
+
+lc_pass "KT-1.5d-1a: login -> per-user halcyond --session -> connected + presented"
+
+# No shell to `exit` on the session path (halcyond --session runs blank in
+# d-1a; logout/resume is d-1b); lc_quit's `exit` line is harmlessly unread and
+# Ctrl-A x tears the VM down.
+lc_quit

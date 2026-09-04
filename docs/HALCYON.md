@@ -1661,11 +1661,21 @@ already held.
 
 **Sequencing (a multi-chunk arc; supersedes the old KT-1.5b-ii-b single-tile framing).**
 14.12 is scripture; implementation stages:
-- **KT-1.5d-1 -- the per-user halcyond bootstrap.** login spawns `/bin/halcyond
-  --session` as the user; a session-variant halcyond that skips the console trio,
-  connects to tapestryd as `Session`, and presents a fullscreen surface (blank/single
-  tile). Prove: login -> per-user halcyond presents; the aurora relinquish -> Direct
-  handoff; logout -> aurora resumes. Graphical E2E.
+- **KT-1.5d-1 -- the per-user halcyond bootstrap.** Split a/b to de-risk (the
+  handoff touches the load-bearing fbcon; the bootstrap is additive + gated):
+  - **KT-1.5d-1a (additive, gated -- default boot untouched).** login reads the
+    `/lib/halcyon/session` lever and, when `on`, spawns `/bin/halcyond --session`
+    AS the user; a session-variant halcyond (`session_main`) that skips the
+    `/dev/cons` trio, connects to tapestryd as `Session`, and presents a BLANK
+    fullscreen surface (content to compose ALONGSIDE aurora -- Composed). Prove:
+    login -> per-user halcyond presents (`halcyond: session up`, a post-present
+    marker). Graphical E2E `ls-gfx-session` (serial-driven: aurora is serial-loud
+    without `thylacine.display=gpu`; halcyond's markers ride the diagnostic UART
+    regardless).
+  - **KT-1.5d-1b -- the clean display handoff.** aurora relinquishes its surface
+    (the root leaf collapses to halcyond alone -> `Direct(halcyond)`); logout ->
+    aurora resumes. Touches aurora (the fbcon). The relinquish/resume mechanism
+    is emergent from the pane layout, no new primitive (14.12 step 4).
 - **KT-1.5d-2 -- one session tile.** the per-user halcyond spawns ONE kaua-term (as
   the user) hosting `ut`, folds its up-pipe into the unified poll, ingests via the
   ii-a `Tile` model, and renders it (normal = scrollback + grid tail; alt = grid only,

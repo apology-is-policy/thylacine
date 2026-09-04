@@ -3663,6 +3663,31 @@ populate_stratum_pool() {
         echo "==> populate pool: HALCYON renderer lever ENABLED (/lib/halcyon/renderer = halcyond)"
     fi
 
+    # KT-1.5d-1a (HALCYON 14.12): the per-user session lever. Under
+    # THYLACINE_HALCYON_SESSION=1 the device boots the per-user Halcyon
+    # SESSION -- login reads the one-token /lib/halcyon/session file and, when
+    # it is "on", spawns /bin/halcyond --session AS the user instead of ut on
+    # /dev/cons (aurora stays the pre-login console renderer). Distinct from
+    # THYLACINE_HALCYON (joey's system-renderer lever, being retired 14.12):
+    # absent = the proven ut path, fail-safe. NOT baked by default; the
+    # ls-gfx-session scenario probes the post-login markers + SKIPs on a
+    # default image (login spawns ut -> "Thylacine textual shell").
+    # The mkdir is EEXIST-tolerant (the renderer block above may have made the
+    # dir); the write's readback is the real bake-verify (verify by CONTENT).
+    if [[ "${THYLACINE_HALCYON_SESSION:-0}" != "0" ]]; then
+        local halsess=/tmp/thyla-halcyon-session.$$
+        printf 'on\n' > "$halsess"
+        "$stratum_fs_bin" -s "$sock_path" mkdir /lib/halcyon 2>/dev/null || true
+        "$stratum_fs_bin" -s "$sock_path" write /lib/halcyon/session < "$halsess" \
+            || { echo "==> populate pool: write /lib/halcyon/session FAILED" >&2; rm -f "$halsess"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync (halcyon session) FAILED" >&2; rm -f "$halsess"; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" read /lib/halcyon/session | cmp -s - "$halsess" \
+            || { echo "==> populate pool: /lib/halcyon/session readback MISMATCH" >&2; rm -f "$halsess"; kill -TERM "$stratumd_pid"; exit 1; }
+        rm -f "$halsess"
+        echo "==> populate pool: HALCYON session lever ENABLED (/lib/halcyon/session = on)"
+    fi
+
     # cfg-3 F1 (the OSC-laundering regression): a file of RAW bytes carrying
     # a crafted settings-channel OSC whose value embeds a NEWLINE
     # (`theme;spinifex\nmode 640 480`). `cat`-ing it feeds the exact bytes to

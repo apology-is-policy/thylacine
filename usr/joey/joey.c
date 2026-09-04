@@ -3138,8 +3138,14 @@ static int login_e2e_run(const char *user, size_t ulen,
     // console-attached here (do_login_e2e runs before the relinquish), so the
     // devdev_open mint-gate lets it open. Best-effort: -1 runs the bare spawn.
     long cc_fd = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/consctl", 12, T_ORDWR);
-    static const char login_argv_bare[]    = "login\0";
-    static const char login_argv_consctl[] = "login\0" "--consctl-fd\0" "3\0";
+    // KT-1.5d-1a (HALCYON 14.12): --no-session forces login down the ut path
+    // regardless of the /lib/halcyon/session lever. This seeded boot-test waits
+    // for login to EXIT (t_wait_pid_for below), and a session halcyond never
+    // exits -- so without this flag a lever-on image would hang HERE, before
+    // SYS_BOOT_COMPLETE and the interactive getty. The getty login passes no
+    // such flag, so the interactive session still reads the lever normally.
+    static const char login_argv_bare[]    = "login\0" "--no-session\0";
+    static const char login_argv_consctl[] = "login\0" "--consctl-fd\0" "3\0" "--no-session\0";
     const char login_name[] = "/bin/login";  // #58: resolved via the post-pivot /bin bind
     int e2e_cc = (cc_fd >= 0);
     unsigned int login_fds[4] = { (unsigned int)cr_rd, (unsigned int)cr_rd,
@@ -3151,7 +3157,7 @@ static int login_e2e_run(const char *user, size_t ulen,
         .name_len      = sizeof(login_name) - 1,
         .argv_data_len = e2e_cc ? (unsigned int)(sizeof(login_argv_consctl) - 1)
                                 : (unsigned int)(sizeof(login_argv_bare) - 1),
-        .argc          = e2e_cc ? 3u : 1u,
+        .argc          = e2e_cc ? 4u : 2u,
         .fd_count      = e2e_cc ? 4u : 3u,
         .perm_flags    = LOGIN_PERMS,
         ._pad_envp     = 0,

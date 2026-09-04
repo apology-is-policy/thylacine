@@ -266,8 +266,170 @@ impl LayoutCache {
     }
 }
 
+/// KT-1.5d-1a (HALCYON 14.12): the per-user SESSION compositor. login spawns
+/// this AS the user (`/bin/halcyond --session`) with the user identity and the
+/// mounted `/home/<user>` -- ZERO identity delegation (I-22 clean): the only
+/// identity-stamp is login's, and this process holds no `CAP_SET_IDENTITY` and
+/// no `SPAWN_PERM_CONSOLE_RENDERER`. It connects to the SYSTEM tapestryd
+/// (`/srv/tapestry`) as an ordinary-user `Session` actor -- connecting is
+/// ungated -- and presents a fullscreen surface.
+///
+/// d-1a presents a BLANK Daylight ground (the bootstrap: prove login -> a
+/// per-user compositor connects + presents). It reuses the connect/surface/
+/// present primitives but NOT the console render brain: no fonts, no atlas, no
+/// transcript, no chrome -- those wire in at KT-1.5d-2 (the first kaua-term tile,
+/// the ii-a `Tile` model). The aurora relinquish -> `Direct(halcyond)` handoff
+/// is d-1b; d-1a is content to compose alongside aurora.
+fn session_main() -> i64 {
+    // Connect to tapestryd + take a fullscreen surface, with the console
+    // path's bounded connect retry (tapestryd may still be coming up). SQPOLL
+    // is harmless with no tile pipes yet and is what KT-1.5d-2's unified poll
+    // needs, so the session ring is SQPOLL from the start.
+    let mut ring: Option<EventRing> = None;
+    let mut surf: Option<Surface> = None;
+    for i in 0..CONNECT_TRIES {
+        let r = match EventRing::connect_sqpoll() {
+            Ok(r) => r,
+            Err(e) => {
+                if i == CONNECT_TRIES - 1 {
+                    say!("halcyond: FAIL session connect {:?}", e);
+                    return 1;
+                }
+                let _ = sleep(Duration::from_millis(CONNECT_DELAY_MS));
+                continue;
+            }
+        };
+        match Surface::fullscreen_on(&r) {
+            Ok(s) => {
+                surf = Some(s);
+                ring = Some(r);
+                break;
+            }
+            Err(e) => {
+                if i == CONNECT_TRIES - 1 {
+                    say!("halcyond: FAIL session connect/create {:?}", e);
+                    return 1;
+                }
+                let _ = sleep(Duration::from_millis(CONNECT_DELAY_MS));
+            }
+        }
+    }
+    let ring = ring.unwrap();
+    let mut surf = surf.unwrap();
+    let ground = daylight_sheet().ground;
+
+    let mut announced = false;
+    let mut dirty = true;
+    let mut present_fails: u32 = 0;
+    const PRESENT_FAILS_FATAL: u32 = 240;
+
+    loop {
+        // Render at the TOP: the first present precedes any wait (the scanout
+        // is first-present-wins and frame ticks reach only visible surfaces --
+        // a renderer that waits before presenting stays dark + event-starved).
+        if dirty {
+            dirty = false;
+            let (sw, sh) = (surf.w as usize, surf.h as usize);
+            for p in surf.pixels().iter_mut() {
+                *p = ground;
+            }
+            match surf.present(None) {
+                Ok(()) => {
+                    present_fails = 0;
+                    if !announced {
+                        announced = true;
+                        say!("halcyond: session up {}x{} px", sw, sh);
+                    }
+                }
+                Err(_) => {
+                    // A dropped frame, never death (#31); the next pass
+                    // re-renders. A never-succeeds wedge is the backstop.
+                    present_fails += 1;
+                    dirty = true;
+                    if present_fails >= PRESENT_FAILS_FATAL {
+                        say!(
+                            "halcyond: {} consecutive session present failures; exiting",
+                            present_fails
+                        );
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        // The next event: take a queued one, else block on the ring (no
+        // console drain in session mode -- the SQPOLL kthread posts CQEs
+        // off-thread, so poll(ring_fd) reports POLLIN for any surface event).
+        let first = match surf.poll_event() {
+            Ok(Some(e)) => Some(e),
+            Ok(None) => {
+                let mut waitfds = [TPollFd {
+                    fd: ring.poll_fd(),
+                    events: T_POLLIN,
+                    revents: 0,
+                }];
+                if unsafe { t_poll(waitfds.as_mut_ptr(), 1, -1) } < 0 {
+                    say!("halcyond: session poll failed (compositor gone); exiting");
+                    return 1;
+                }
+                match surf.poll_event() {
+                    Ok(next) => next,
+                    Err(_) => {
+                        say!("halcyond: session event stream ended (compositor gone); exiting");
+                        return 1;
+                    }
+                }
+            }
+            Err(_) => {
+                say!("halcyond: session event stream ended (compositor gone); exiting");
+                return 1;
+            }
+        };
+        let mut ev = first;
+        while let Some(e) = ev {
+            match e.kind {
+                TEV_CLOSE => {
+                    say!("halcyond: session CLOSE received; exiting");
+                    return 0;
+                }
+                TEV_CONFIGURE => match surf.handle_configure(&e) {
+                    // Any accepted reconfigure (resize or same-size redraw)
+                    // re-fills + re-presents the ground next pass.
+                    Ok(_) => dirty = true,
+                    Err(TapError::Busy) => {}
+                    Err(e2) => {
+                        say!("halcyond: session reweave failed {:?}; exiting", e2);
+                        return 1;
+                    }
+                },
+                _ => {}
+            }
+            ev = match surf.poll_event() {
+                Ok(next) => next,
+                Err(_) => {
+                    say!("halcyond: session event stream ended (compositor gone); exiting");
+                    return 1;
+                }
+            };
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    // KT-1.5d-1a (HALCYON 14.12): `--session` selects the per-user SESSION
+    // compositor -- login spawns this AS the user, NOT joey as the system
+    // console renderer. The session variant holds no g_console_renderer role:
+    // it skips the /dev/cons drain/feed/consctl trio entirely and hosts the
+    // session in tapestryd (later: pts tiles), never the console mirror. The
+    // console-renderer body below is unchanged (the proven aurora-shaped path,
+    // still selected by joey when the device names halcyond as the renderer).
+    if libthyla_rs::env::args()
+        .operands()
+        .any(|a| a == b"--session")
+    {
+        return session_main();
+    }
     if !cornucopia::verify_all() {
         say!("halcyond: FAIL atlas magic/version");
         return 1;

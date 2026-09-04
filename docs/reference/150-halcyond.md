@@ -16,7 +16,9 @@ It is spawned by joey as the console renderer (the G-4 slot,
 `/lib/halcyon/renderer` reads `halcyond`; anything else — absent file,
 short read, unknown token — spawns aurora (fail-safe: a corrupt config can
 only name the proven fbcon). `usr/joey/joey.c` (the G-4 block) is the only
-reader.
+reader. Since KT-1.5d-1a (HALCYON.md §14.12) halcyond has a **second role** —
+the per-user session compositor, `login`-spawned with `--session`, which holds
+NO console-renderer role (see "The `--session` variant" below).
 
 ## Structure — lib is the brain, bin is the body
 
@@ -61,6 +63,44 @@ Input: TEV_KEY → (Insert) `key_bytes` → `/dev/consfeed` with the held-feed
 discipline; (Normal) the selection state. `beacon rich` is advertised on
 `/dev/consctl` at startup — halcyond is the tree's first rich advertiser;
 ut reads `/dev/beacon` and exports `/env/BEACON` (BEACON.md §12.3).
+
+## The `--session` variant: the per-user compositor bootstrap (KT-1.5d-1a)
+
+halcyond has TWO roles, selected by `rs_main`'s first act — a `--session`
+operand (`env::args().operands()`):
+
+- **No `--session` (the default, joey-spawned):** the console renderer above —
+  it opens the `/dev/consdrain`/`consfeed`/`consctl` trio, holds the
+  `g_console_renderer` role, and weaves the `/dev/cons` transcript.
+- **`--session` (login-spawned, HALCYON.md §14.12):** the **per-user session
+  compositor**. `/sbin/login` spawns `/bin/halcyond --session` AS the
+  authenticated user (identity only — no `CAP_SET_IDENTITY`, no
+  `SPAWN_PERM_CONSOLE_RENDERER`; zero identity delegation, the only
+  identity-stamp is login's). It holds NO console-renderer role: `session_main`
+  skips the whole `/dev/cons` trio and never reads the console mirror. It
+  connects to the SYSTEM tapestryd (`/srv/tapestry`) as an ordinary-user
+  `Actor::Session` (connecting is ungated) and presents a fullscreen surface; it
+  will host the session's terminals as `kaua-term` processes it spawns as itself
+  (§14.2), ingesting each tile's record stream through the `Tile` model below
+  instead of the console drain.
+
+**d-1a is the bootstrap only.** `session_main` presents a BLANK Daylight ground
+(`daylight_sheet().ground`) — it reuses only the connect/surface/present
+primitives (`EventRing::connect_sqpoll` + `Surface::fullscreen_on` + the
+first-present-before-wait discipline + the SQPOLL unified-poll wait on
+`ring.poll_fd()`), NOT the render brain (no fonts, atlas, transcript, or
+chrome). The witness is `halcyond: session up NxN px`, printed only inside
+`Ok(present)`, so it proves connect + present, not merely that the line ran. The
+tiles wire in at KT-1.5d-2; the aurora relinquish → `Direct(halcyond)` display
+handoff (emergent from tapestryd's pane layout, no new primitive) + the logout
+resume are KT-1.5d-1b.
+
+**The session lever.** `login` reads the one-token `/lib/halcyon/session` file:
+`on` → the session variant; absent / any other token → the proven `ut` path
+(fail-safe, exactly as joey's renderer lever). Distinct from
+`/lib/halcyon/renderer` (joey's system-renderer choice, being retired at
+§14.12). Baked under `THYLACINE_HALCYON_SESSION=1`; the `ls-gfx-session`
+scenario probes the post-login markers + SKIPs cleanly on a default image.
 
 ## The tile model (KT-1.5b-ii): the live grid + the scrollback ingest
 
