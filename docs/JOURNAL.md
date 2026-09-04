@@ -67,10 +67,18 @@ must account for *every* login invocation, not just the interactive one.
 
 Post-fix, the E2E PASSed in **27s, first attempt**: `Thylacine boot OK` -> getty
 prompt -> `login michael` -> `halcyond: session up 1280x800 px` -> `LS-CI PASS`.
-The guest also went straight to `tapestryd: scanout direct 0` -- halcyond took
-Direct scanout with no aurora contention on the leaf, so d-1b is mostly the
-logout/resume + the multi-renderer relinquish case rather than a fight for the
-display.
+
+The scanout sequence (verified in the passing log, not assumed): aurora
+`scanout direct 0` (its OWN console surface, `aurora: console up`) -> login spawns
+halcyond -> `tapestryd: scanout composed` -> `halcyond: session up` in **Composed**
+mode. So aurora and halcyond **tile**, exactly as d-1a scoped ("content to compose
+alongside aurora"). d-1b therefore remains the FULL aurora relinquish ->
+`Direct(halcyond)` -- the leaf must collapse to halcyond alone -- plus logout
+resume; it is not "mostly logout/resume". (A wrong turn, corrected here: I first
+read the log's `scanout direct 0` as halcyond taking Direct with no aurora
+contention. It was AURORA's console surface, stamped BEFORE halcyond appeared --
+"a comment true about the wrong subject". The commit 739f6cb7 message carries the
+same overstatement in its Deferred paragraph; this is the correction of record.)
 
 **A wrong turn I caught cheaply.** I ran `expect -c "source ls-gfx-session.exp"`
 as a "syntax check" -- `source` *executes* the scenario, which called `lc_boot`
