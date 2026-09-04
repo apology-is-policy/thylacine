@@ -4710,6 +4710,7 @@ build_dosbox_x() {
     if [[ -f "$out" && -z "${DBX_FORCE:-}" ]]; then
         local stale
         stale="$(find "$dbx_vendor" "$port_dir" "$REPO_ROOT/tools/dosbox-x-sources.py" \
+                      "$REPO_ROOT/usr/lib/thylajit" \
                       -type f -newer "$out" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$out" \
               && ! "$sysroot/lib/libc++.a" -nt "$out" \
@@ -4739,7 +4740,15 @@ build_dosbox_x() {
     local pp
     for pp in "$port_dir"/patches/*.patch; do
         [[ -e "$pp" ]] || continue
-        patch -s -p1 -t -d "$dbx_src" -i "$pp"
+        # Fail LOUD on a patch that does not apply (audit DX-4 F3): a silently
+        # skipped hunk (patch -t) after a vendored-tree bump would compile with
+        # __thylacine__ defined but WITHOUT the dynrec CAP_JIT arm -> the malloc
+        # fallback hands back a non-executable region -> a runtime fault the gate
+        # only catches downstream. The dosbox patches all apply rc=0 (verified).
+        patch -s -p1 -t -d "$dbx_src" -i "$pp" || {
+            echo "==> dosbox-x: patch $(basename "$pp") FAILED to apply" >&2
+            exit 1
+        }
     done
 
     # Include search: the src root (config.h + shared headers), the top include/,
@@ -4753,6 +4762,7 @@ build_dosbox_x() {
         -I"$dbx_src"
         -I"$dbx_src/src"
         -I"$dbx_src/include"
+        -I"$REPO_ROOT/usr/lib/thylajit"   # DX-4: thyla_jit.h + thyla_capjit.h (CAP_JIT dynrec)
         -I"$dbx_src/src/libs"
         -I"$dbx_src/src/libs/gui_tk"
         -I"$dbx_src/src/libs/zmbv"

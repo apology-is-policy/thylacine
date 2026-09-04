@@ -1,0 +1,92 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-dosbox-dynarec.exp -- the DX-4 (Cryptid) CAP_JIT
+# dynarec gate: DOSBox-X's core=dynamic_rec (the portable AArch64 dynamic
+# recompiler) runs a real DOS program through a dual-mapped code Burrow, with
+# no page ever writable-and-executable.
+#
+# DX-1..DX-3 ran core=normal (the interpreter). DX-4 wires the dynrec code cache
+# to CAP_JIT (I-42): the code cache is a CODE Burrow mapped RW at a writer alias
+# and RX at an exec alias (SYS_JIT_CREATE); emitted blocks are published with
+# SYS_ICACHE_SYNC before execution (EL0 dc/ic maintenance traps here, UCI=0).
+#
+# THE TWO WITNESSES, together, prove the dynrec (not the interpreter) executed:
+#   1. "dosbox-x: CAP_JIT acquired" on the serial console. This printf lives ONLY
+#      on the path that allocates the dynrec code cache (the __thylacine__ arm in
+#      cpu/dynamic_alloc_common.h), reached from CPU_Core_Dynrec_Cache_Init at
+#      startup when core=dynamic_rec. Its presence PROVES the dynrec cache was
+#      minted through CAP_JIT -- there is no other producer of this line.
+#   2. C:\OUT.TXT == "DX-2C-OK", written by DX2C.COM's INT 21h calls, read back
+#      through the shell. This PROVES the dynrec-compiled code ran the program
+#      correctly. A CAP_JIT/SYS_JIT_CREATE failure E_Exits dosbox (the file is
+#      never written), so a correct readback also proves the region was minted.
+#
+# core=dynamic_rec is forced with `-set "cpu core=dynamic_rec"` (a startup option
+# applied before the DOS boots), so the dynrec is active from the first block --
+# no reliance on auto-determine / protected-mode entry.
+#
+# WHY BACKGROUND DOSBOX-X (`&`): identical to the ls-gfx-dosbox siblings -- the
+# FILE is the only serial-visible correctness signal, so the shell must stay free
+# to `cat` it while DOSBox-X keeps the pane alive.
+#
+# HVF posture (the ls-gfx sibling; TCG hangs, #27).
+
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Stage the DOS witness program into the dir we mount as C: (the /bin bind --
+# the devramfs root survives joey's pivot only under /bin).
+lc_send "cp /bin/DX2C.COM /home/michael/DX2C.COM"
+after 1500
+
+# Background DOSBox-X with the dynrec forced: mount C: = /home/michael, switch to
+# it, run DX2C.COM. The dynrec cache is minted at CPU init (before the DOS boots),
+# so "CAP_JIT acquired" prints early.
+lc_send "dosbox-x -set \"cpu core=dynamic_rec\" -c \"mount c /home/michael\" -c \"c:\" -c \"DX2C.COM\" &"
+
+# WITNESS 1: the dynrec cache was minted through CAP_JIT. This must appear if the
+# dynrec is active at all; a capability/region failure E_Exits instead. This is
+# printed AFTER SDL video init (the CPU cores init after the video subsystem), so
+# matching it here consumes past "Video thylacine" -- do NOT expect that line
+# separately afterwards (it prints once, before this, and would time out). The DOS
+# boot (COMMAND.COM) + the DX2C.COM run happen during the OUT.TXT poll below.
+set timeout 45
+expect {
+    -re {dosbox-x: CAP_JIT acquired}   { lc_step "dynrec: CAP_JIT acquired -- the dynrec code cache is a dual-mapped CODE Burrow (I-42)" }
+    -re {CAP_JIT acquisition failed}   { lc_fail "dynrec: CAP_JIT acquire E_Exit -- the corvus 'jit' clearance did not grant CAP_JIT" }
+    -re {SYS_JIT_CREATE.*failed}       { lc_fail "dynrec: SYS_JIT_CREATE failed -- no code region minted" }
+    -re {dosbox-x: FAIL}               { lc_fail "dynrec: CAP_JIT clearance walk failed (corvus reach/auth)" }
+    -re {E_Exit|Can't init SDL}        { lc_fail "dosbox-x E_Exit before the dynrec cache initialized" }
+    "snare:"                           { lc_fail "dosbox-x faulted (snare) during dynrec bring-up" }
+    "user fault"                       { lc_fail "dosbox-x user fault during dynrec bring-up" }
+    -re {EXTINCTION:}                  { lc_extinction_fail "kernel extinction during dynrec bring-up" }
+    timeout                            { lc_fail "no CAP_JIT-acquired line within 45s -- the dynrec cache never initialized" }
+}
+
+# WITNESS 2: the dynrec-compiled program ran correctly. DX2C.COM writes
+# C:\OUT.TXT = "DX-2C-OK" then terminates; poll the readback (the file does not
+# exist until the program runs, so "No such" is transient, not a verdict).
+# Settle: after CAP_JIT the DOS still boots COMMAND.COM and runs the autoexec
+# (mount c: / c: / DX2C.COM) before OUT.TXT exists. Give it room, then poll.
+set gotok 0
+after 6000
+for {set i 0} {$i < 10 && !$gotok} {incr i} {
+    lc_send "cat /home/michael/OUT.TXT"
+    set timeout 10
+    expect {
+        -ex "DX-2C-OK"          { lc_step "dynrec output: OUT.TXT = DX-2C-OK -- core=dynamic_rec executed the DOS program correctly"; set gotok 1 }
+        -re {No such|not found} { after 1500 }
+        -re {EXTINCTION:}       { lc_extinction_fail "kernel extinction reading OUT.TXT (dynrec)" }
+        "snare:"                { lc_fail "kernel snare reading OUT.TXT (dynrec)" }
+        timeout                 { after 500 }
+    }
+}
+if {!$gotok} {
+    lc_fail "no DX-2C-OK after 10 reads -- the dynrec-compiled program did not run correctly"
+}
+
+lc_quit
+lc_pass "ls-gfx-dosbox-dynarec: the DX-4 CAP_JIT dynarec gate verified (core=dynamic_rec, I-42 dual-map, DOS program ran)"
+exit 0

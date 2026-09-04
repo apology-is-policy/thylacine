@@ -1,13 +1,13 @@
 /* config.h for DOSBox-X on Thylacine (aarch64-thylacine, Pouch/musl, SDL2).
  *
  * Hand-authored for the Cryptid DOS/Win9x-emulation arc (docs/DOSBOX.md, arc
- * prefix DX), adapted from the upstream vs/config.h template. This is the
- * DX-1 posture: core=normal ONLY, software-surface video via the SDL_thylacine
- * Tapestry backend, sound stubbed to a null mixer, and every external-dep
- * feature (GL, D3D, TTF, zlib, libpng, SDL_net, fluidsynth, mt32, libpcap,
- * libslirp, curses debugger, dynarec) OFF. The later DX sub-chunks light some
- * of these up -- most importantly the dynarec (C_DYNREC / C_DYNAMIC_X86) via
- * CAP_JIT at DX-4.
+ * prefix DX), adapted from the upstream vs/config.h template. Posture as of
+ * DX-4: core=normal AND the portable dynamic recompiler (C_DYNREC, AArch64)
+ * wired to CAP_JIT (I-42); software-surface video via the SDL_thylacine
+ * Tapestry backend; sound stubbed to a null mixer; and the remaining
+ * external-dep features (GL, D3D, TTF, libpng, SDL_net, fluidsynth, mt32,
+ * libpcap, libslirp, curses debugger, and the x86-host dynarec C_DYNAMIC_X86)
+ * OFF. Later DX sub-chunks light more of these up.
  *
  * DELIBERATE INVARIANT: an OFF feature is left UNDEFINED, never "#define X 0".
  * DOSBox-X mixes "#if C_FOO" (value) and "#ifdef C_FOO" (definedness) checks;
@@ -29,12 +29,23 @@
  *   (LINUX / WIN32 / MACOSX / OS2 / BSD deliberately left undefined) */
 
 /* --- Target CPU + emulator cores ----------------------------------------
- * DX-1 = the interpreter (core=normal) only. The generic recompiler
- * (C_DYNREC) and the x86 dynarec (C_DYNAMIC_X86) are OFF until DX-4 wires
- * them to CAP_JIT. C_TARGETCPU is only consulted inside those ifdefs. */
-/* #undef C_TARGETCPU */
+ * DX-4 turns ON the portable dynamic recompiler (C_DYNREC) for AArch64 and
+ * wires its W^X code cache to CAP_JIT (I-42) via a __thylacine__ arm in
+ * cpu/dynamic_alloc_common.h (patch 0006). The x86-host dynarec
+ * (C_DYNAMIC_X86) stays OFF -- it emits native x86 and cannot run on ARM.
+ *
+ * C_TARGETCPU is the NUMERIC value of ARMV8LE (0x07), NOT the bare token
+ * `ARMV8LE`. core_dynrec.cpp defines the symbolic names (X86=0x01 .. ARMV8LE
+ * =0x07) locally and selects risc_armv8le.h with `#if C_TARGETCPU==ARMV8LE`
+ * (0x07==0x07). But cpu.cpp:399 and dosbox.h:51 also test `C_TARGETCPU==X86`
+ * WITHOUT defining X86, so with the bare token those become `ARMV8LE==X86` ->
+ * `0==0` -> WRONGLY TRUE on ARM (both are undefined identifiers, which the
+ * preprocessor reads as 0). The numeric 0x07 reads FALSE at every x86 site
+ * (0x07 != 0) and TRUE only where ARMV8LE is defined to 0x07. Do NOT "fix"
+ * this to the symbolic token -- it reintroduces the cpu.cpp x86-arm bug. */
+#define C_TARGETCPU  0x07   /* ARMV8LE (numeric; see above) */
 /* #undef C_DYNAMIC_X86 */
-/* #undef C_DYNREC */
+#define C_DYNREC     1
 
 /* Floating point: the portable FPU core (no x86 asm). */
 #define C_FPU 1
@@ -95,8 +106,12 @@
 /* #undef C_X11_XKB */
 /* #undef HAVE_ALSA */
 
-/* --- Memory model. aarch64 permits unaligned normal accesses. The dynarec
- * code-cache primitives stay OFF (dynarec off until DX-4). */
+/* --- Memory model. aarch64 permits unaligned normal accesses. The host
+ * code-cache primitives stay OFF: Thylacine has no mmap-with-PROT, no
+ * mprotect, no memfd, no mach_vm_remap. The DX-4 dynrec code cache is a
+ * dual-mapped CODE Burrow via SYS_JIT_CREATE instead (the __thylacine__ arm
+ * in cpu/dynamic_alloc_common.h, patch 0006) -- DYNCOREM_DUAL_RW_X, so
+ * cache_rwtox is the constant writer->exec delta and no page is ever W+X. */
 #define C_UNALIGNED_MEMORY 1
 #define C_HAVE_POSIX_MEMALIGN 1
 /* #undef C_HAVE_MMAP */

@@ -211,10 +211,35 @@ server + virtio-sound (post-v1.0) lights it up.
     assembler is vendored for a richer hand-written one, and DX-5 owns the
     fetch. **DX-3 is otherwise complete; NEXT = DX-4 (the CAP_JIT dynarec,
     AUDIT-BEARING, prereq for Act 2).**
-- **DX-4** -- the **CAP_JIT dynarec** (I-42; central): wire `dynamic_x86` to emit
-  through CAP_JIT (writer/exec split per the ORC template); SMC via re-publish.
-  AUDIT-BEARING (own design pass + focused audit). Exit: `core=dynamic` correct +
-  measurably faster; I-42/I-12 prosecuted clean. **Prerequisite for Act 2.**
+- **DX-4 DONE** (2026-09-04) -- the **CAP_JIT dynarec** (I-42; central).
+  Correction to the DX-0 sketch: on ARM the recompiler is DOSBox-X's PORTABLE
+  `core_dynrec` (`C_DYNREC`, `C_TARGETCPU==ARMV8LE`, `risc_armv8le.h`), NOT
+  `dynamic_x86` (which emits native x86 and cannot run on AArch64 -- it stays
+  OFF). The two headline findings that shrank the chunk: (1) DOSBox-X ALREADY
+  implements a dual-mapped W^X cache (`DYNCOREM_DUAL_RW_X` in
+  `dynamic_alloc_common.h`) with `cache_rwtox()` the constant writer->exec delta
+  and block metadata carrying both `cache.start` (writer) + `cache.xstart`
+  (exec); (2) the AArch64 backend embeds NO absolute in-cache code address (block
+  links go indirect through the metadata `xstart`, intra-block branches are
+  PC-relative and alias-agnostic), so NO codegen change was needed. DX-4 is
+  therefore a small `#if defined(__thylacine__)` port (patch 0006): a Thylacine
+  allocation arm (acquire `CAP_JIT` via the corvus `jit` clearance ->
+  `SYS_JIT_CREATE` mints the RW/RX region), and routing the two
+  `__builtin___clear_cache` sites (the per-block `cache_block_closing` publish +
+  the dual-map self-test) plus the `cache_init`/`cache_reset` link-blocks page
+  through `SYS_ICACHE_SYNC` (EL0 `dc`/`ic` trap on Thylacine, `SCTLR_EL1.UCI=0`).
+  `usr/lib/thylajit/thyla_jit.h` carries the inline-SVC syscall wrappers.
+  Self-audit found + fixed a real W^X/publish gap: the runcode trampoline + link
+  stubs (page 0 of the region) were emitted but never published -- worked on a
+  cold I-cache, a hazard on other silicon (`cache_reset`'s re-emit is
+  stale-not-cold). Gate `ls-gfx-dosbox-dynarec.exp`: `core=dynamic_rec` boots,
+  "CAP_JIT acquired" on serial (the dynrec cache is a dual-mapped CODE Burrow),
+  and DX2C.COM runs correctly (`OUT.TXT=DX-2C-OK`), no page ever W+X. **Deferred
+  to DX-5**: a `measurably faster` NUMBER -- DX2C.COM is 49 bytes, so a
+  meaningful dynrec-vs-normal comparison needs the compute-heavy real program
+  DX-5 sources; the dynrec is faster by construction (it JITs rather than
+  interprets) and is proven active + correct here. **Prerequisite for Act 2 --
+  met.**
 - **DX-5** -- Act-1 close: a recognizable DOS GAME end-to-end; focused audit;
   reference doc + user-manual entry; AUDIT-TRIGGERS row for the DX-4 surface.
 

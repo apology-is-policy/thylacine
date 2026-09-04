@@ -23,6 +23,84 @@ needed the operator.
 
 ---
 
+## 2026-09-04 (aux, Opus 4.8, effort max) -- DX-4: the CAP_JIT dynarec (core=dynamic) on Thylacine
+
+DOSBox-X's dynamic recompiler now runs on Thylacine: `core=dynamic_rec`
+JIT-compiles x86 to AArch64 and executes it out of a dual-mapped code Burrow,
+with no page ever writable-and-executable. This is the prerequisite for Act 2
+(Win9x, 3dfx), and the first non-Mesa userspace consumer of CAP_JIT (I-42).
+
+**The chunk was far smaller than the DX-0 sketch feared, for two reasons found
+by reading the code before touching it.** (1) DOSBox-X ALREADY implements a
+dual-mapped W^X code cache (`DYNCOREM_DUAL_RW_X` in `dynamic_alloc_common.h`),
+built for Linux memfd / Darwin `mach_vm_remap`: `cache_rwtox()` is exactly the
+constant writer->exec delta the kernel's `SYS_JIT_CREATE` hands back, and each
+block already stores both `cache.start` (writer) and `cache.xstart` (exec). (2)
+The AArch64 backend (`risc_armv8le.h`) embeds ZERO absolute in-cache code
+addresses -- block-to-block links go indirect through the block metadata's
+`xstart` field (read at runtime, never patched into code), and intra-block
+branches are PC-relative, so the writer/exec delta cancels and they are
+alias-agnostic. So NO codegen change was needed. DX-4 collapsed to: enable
+`C_DYNREC` + `C_TARGETCPU=0x07` (config.h), a `#if defined(__thylacine__)`
+allocation arm that acquires CAP_JIT (the corvus `jit` clearance, walked by the
+Proc itself via `thyla_capjit.h`) then `SYS_JIT_CREATE`s the region, and routing
+the `__builtin___clear_cache` publish sites through `SYS_ICACHE_SYNC`. All in one
+boundary-line patch (`0006`) plus a small syscall-wrapper header
+(`usr/lib/thylajit/thyla_jit.h`). The DX-0 sketch said "wire `dynamic_x86`" --
+that was wrong: `dynamic_x86` emits native x86; the ARM path is the portable
+`core_dynrec`. Corrected in `docs/DOSBOX.md`.
+
+**Why the clear_cache sites HAD to move (a measured kernel fact, not a guess).**
+`__builtin___clear_cache` lowers to `dc cvau`/`ic ivau`, and Thylacine runs EL0
+with `SCTLR_EL1.UCI=0` (start.S: the MMU-on SCTLR is `0x30D00800 | M|C|I`, no bit
+26), so those instructions TRAP at EL0. The kernel does the maintenance instead
+(`SYS_ICACHE_SYNC` -> `arch_icache_sync_range` on its own direct map). A related
+question resolved by reading the kernel: `PTE_GP` (the BTI guard bit) is set on
+kernel text ONLY, so the JIT exec alias is not BTI-guarded and the dynrec's
+indirect block entries need no `bti c` landing pads.
+
+**Wrong turn #1, caught by the transcript.** The gate's first run FAILED with
+"dosbox-x SDL did not come up within 30s" -- but the transcript showed the SDL
+surface created, tapestryd compositing it, and COMMAND.COM booted. The dynrec
+WORKED; my gate had an expect-ordering bug: "Video thylacine" prints BEFORE
+"CAP_JIT acquired" (SDL inits before the CPU cores), so matching CAP_JIT first
+consumed past the Video line and the later `expect "Video thylacine"` timed out.
+Fixed by dropping the fragile intermediate expects -- CAP_JIT-acquired (the
+dynrec witness) then the OUT.TXT poll (the correctness witness) are order-robust.
+
+**Wrong turn #2 -- a real W^X gap, caught by self-audit, not the gate.** The gate
+PASSED (`CAP_JIT acquired` + `OUT.TXT=DX-2C-OK`) before I found this. `cache_init`
+and `cache_reset` emit the two link stubs + the runcode trampoline into page 0 of
+the code region through the writer alias, and NO per-block `cache_block_closing`
+ever covers page 0 -- so the trampoline was executed (via the exec alias) without
+ever being published. It worked on this host by cold-I-cache luck; on other
+silicon (the A72 Pi) an un-cleaned-to-PoU write or a stale line would fetch the
+wrong bytes, and `cache_reset`'s re-emit is stale-not-cold. Fixed:
+`thyla_jit_icache_sync(cache_code_link_blocks, PAGESIZE_TEMP)` after both emit
+sites (`cache.h` in patch 0006). This is the reusable lesson -- a gate that
+passes on one machine is not proof the publish protocol is correct; the emit-vs-
+execute pairing has to be enumerated, and page 0 was the site no per-block flush
+reached. Rebuilt + re-gated green on the fix.
+
+**Evidence.** Gate `tools/interactive/ls-gfx-dosbox-dynarec.exp` PASS [37s]:
+`core=dynamic_rec` boots, `dosbox-x: CAP_JIT acquired (SELF)` on serial (the
+dynrec cache is a dual-mapped CODE Burrow -- there is no other producer of that
+line), and DX2C.COM writes `C:\OUT.TXT=DX-2C-OK` under the dynrec. Build:
+311/311 TUs, `core_dynrec.o` 385 KB (was a near-empty TU under `#if C_DYNREC`).
+
+**Decision the operator made mid-run.** Fable ran out of credits (the DX-4
+holotype review died HTTP 429 mid-run); the operator directed "use Opus 5 for
+reviews until told otherwise." The DX-4 focused audit re-ran on Opus 5 (the
+highest-available-Opus fallback the reviewer rule already prescribes), spawned
+with the context-independence framing the same-family fallback requires.
+
+**Open, and exact about it.** The DX-4 exit criterion has two halves --
+`core=dynamic` correct (met) and "measurably faster" (deferred to DX-5). DX2C.COM
+is 49 bytes, so a dynrec-vs-normal NUMBER is not meaningful here; DX-5 sources a
+compute-heavy real program and owns the measurement. The dynrec is faster by
+construction and is proven active + correct. Act 2's prerequisite is a WORKING
+dynrec, which is met.
+
 ## 2026-09-03 (aux, Opus 4.8, effort max) -- DX-3b: file-based config/autoexec, plus two findings the run turned up
 
 DOSBox-X loads a `dosbox-x.conf` from disk and runs its `[autoexec]` section --

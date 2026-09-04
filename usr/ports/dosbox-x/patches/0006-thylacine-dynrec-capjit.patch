@@ -1,0 +1,218 @@
+Thylacine DX-4: wire the AArch64 dynamic recompiler (core=dynamic) to CAP_JIT.
+
+DOSBox-X's portable dynrec (C_DYNREC, C_TARGETCPU==ARMV8LE) needs a code cache
+that is written then executed. Strict W^X (I-12) forbids a W+X page and
+Thylacine has neither mprotect nor a PROT-honoring mmap, so the upstream host
+allocation arms (RWX mmap / memfd dual-map / mprotect toggle / malloc+mprotect)
+are all compiled out (C_HAVE_MMAP/MPROTECT/MEMFD/MACH_VM_REMAP undef) and the
+malloc fallback would hand back a non-executable region.
+
+I-42 (CAP_JIT) is the answer, and DOSBox-X already carries the exact shape the
+kernel provides: DYNCOREM_DUAL_RW_X -- one physical region mapped RW at a
+writer alias and RX at an exec alias, with cache_rwtox() the constant
+writer->exec delta and the block metadata carrying both cache.start (writer)
+and cache.xstart (exec). The AArch64 backend already emits through cache.start
+and branches to cache.xstart, and embeds NO absolute in-cache code address
+(block links go indirect through the metadata xstart, intra-block branches are
+PC-relative and alias-agnostic), so no codegen change is needed.
+
+This patch adds, all guarded by __thylacine__ so upstream and other targets are
+untouched:
+
+1. dynamic_alloc_common.h: a Thylacine allocation arm that runs FIRST in
+   cache_dynamic_common_alloc -- it acquires CAP_JIT (elevation-only, walked
+   from the corvus 'jit' clearance by the Proc itself; thyla_acquire_cap_jit),
+   then SYS_JIT_CREATE mints the dual-mapped region and sets
+   cache_code_start_ptr/cache_exec_ptr + DYNCOREM_DUAL_RW_X + DYNCOREF_W_XOR_X.
+   The host arms' cache_code_start_ptr==NULL guards then all skip.
+
+2. The two __builtin___clear_cache sites reachable on AArch64 (the dual-map
+   self-test here, and cache_block_closing's per-block publish in
+   risc_armv8le.h) route through SYS_ICACHE_SYNC. EL0 cache maintenance
+   (dc cvau / ic ivau) TRAPS on Thylacine (SCTLR_EL1.UCI=0), which is exactly
+   what __builtin___clear_cache lowers to; the kernel performs the maintenance
+   on its own direct map. Either alias may name the range (both map the same
+   physical pages), so passing the writer-alias block_start is valid.
+
+3. cache.h: publish the link stubs + the runcode trampoline that cache_init /
+   cache_reset emit into the link-blocks page (page 0 of the code region).
+   No per-block cache_block_closing ever covers that page, so without a publish
+   the first BR into runcode fetches bytes that were written through the writer
+   alias but never cleaned to PoU / invalidated in the I-cache -- undefined I/D
+   coherence (it happened to work on a cold I-cache, but is a real hazard on
+   other silicon, and cache_reset's re-emit is worse -- stale, not cold).
+
+4. include/cpu.h: a DYNCOREALLOC_THYLACINE_JIT enumerator for the alloc-source
+   diagnostic (+ its LOG case).
+
+thyla_jit.h + thyla_capjit.h come from usr/lib/thylajit (added to the DX build
+include path). Audit-bearing: I-42 (CAP_JIT) + I-12 (W^X) + SYS_ICACHE_SYNC.
+diff --git a/include/cpu.h b/include/cpu.h
+index 667f5dfb..724cc189 100644
+--- a/include/cpu.h
++++ b/include/cpu.h
+@@ -627,6 +627,7 @@ enum dyncore_alloc_t {
+     DYNCOREALLOC_SHM_MMAP,          /* allocated as a file in shared memory (i.e. /dev/shm) using shmget */
+     DYNCOREALLOC_MEMFD,             /* allocated with a Linux memfd handle */
+     DYNCOREALLOC_VIRTUALALLOC,      /* allocated with VirtualAlloc() (in Windows) */
++    DYNCOREALLOC_THYLACINE_JIT,     /* Thylacine SYS_JIT_CREATE dual-mapped CODE Burrow (I-42, DX-4) */
+ 
+     DYNCOREALLOC_MAX
+ };
+diff --git a/src/cpu/core_dynrec/cache.h b/src/cpu/core_dynrec/cache.h
+index 6feff801..f5cf287b 100644
+--- a/src/cpu/core_dynrec/cache.h
++++ b/src/cpu/core_dynrec/cache.h
+@@ -662,6 +662,17 @@ static void cache_reset(void) {
+ 		link_blocks[1].cache.start=cache.pos;
+ 		link_blocks[1].cache.xstart=(uint8_t*)cache_rwtox(link_blocks[1].cache.start);
+ 		dyn_return(BR_Link2,false);
++#if defined(__thylacine__)
++		/* DX-4: republish the re-emitted link stubs (see cache_init). The reset
++		 * rewrites them through the writer alias into a page whose exec-alias
++		 * I-cache lines are stale from the pre-reset code; publish so the exec
++		 * alias fetches the fresh bytes. The stubs are deterministic, so the bytes
++		 * match today -- but relying on that is exactly the fragility publish
++		 * removes, and cache_reset fires on any real (cache-filling) workload.
++		 * Fail loud (audit F1). */
++		if (thyla_jit_icache_sync(cache_code_link_blocks, PAGESIZE_TEMP) != 0)
++			E_Exit("dyncore: SYS_ICACHE_SYNC link-blocks publish failed (reset)");
++#endif
+ 		cache.free_pages=nullptr;
+ 		cache.last_page=nullptr;
+ 		cache.used_pages=nullptr;
+@@ -729,6 +740,20 @@ static void cache_init(bool enable) {
+ //		link_blocks[1].cache.start=cache.pos;
+ 		dyn_run_code();
+ 
++#if defined(__thylacine__)
++		/* DX-4: publish the link stubs + runcode trampoline just emitted into the
++		 * link-blocks page (page 0 of the code region). No per-block
++		 * cache_block_closing ever covers that page, so without this the first BR
++		 * into runcode (through the exec alias) fetches bytes that were written
++		 * through the writer alias but never cleaned to PoU / invalidated in the
++		 * I-cache -- undefined coherence. It happened to work on a cold I-cache,
++		 * but correctness on all silicon requires the publish. PAGESIZE_TEMP spans
++		 * every stub ([0],[32]) and the trampoline ([64]). Fail loud (audit F1) --
++		 * a silent publish failure here executes the trampoline stale. */
++		if (thyla_jit_icache_sync(cache_code_link_blocks, PAGESIZE_TEMP) != 0)
++			E_Exit("dyncore: SYS_ICACHE_SYNC link-blocks publish failed (init)");
++#endif
++
+ 		cache.free_pages=nullptr;
+ 		cache.last_page=nullptr;
+ 		cache.used_pages=nullptr;
+diff --git a/src/cpu/core_dynrec/risc_armv8le.h b/src/cpu/core_dynrec/risc_armv8le.h
+index 43ef622a..12c0d0d6 100644
+--- a/src/cpu/core_dynrec/risc_armv8le.h
++++ b/src/cpu/core_dynrec/risc_armv8le.h
+@@ -20,6 +20,12 @@
+ 
+ /* ARMv8 (little endian, 64-bit) backend by M-HT */
+ 
++#if defined(__thylacine__)
++/* DX-4: SYS_ICACHE_SYNC for the CAP_JIT dual-map publish (idempotent include;
++ * cache.h -> dynamic_alloc_common.h already pulled it in). -I usr/lib/thylajit. */
++#include "thyla_jit.h"
++#endif
++
+ 
+ // some configuring defines that specify the capabilities of this architecture
+ // or aspects of the recompiling
+@@ -1145,6 +1151,16 @@ static void cache_block_closing(uint8_t* block_start,Bitu block_size) {
+ #ifdef _MSC_VER
+     //flush cache - Win32 API for MSVC
+     FlushInstructionCache(GetCurrentProcess(), block_start, block_size);
++#elif defined(__thylacine__)
++    /* DX-4: publish the just-emitted block. block_start is the WRITER alias
++     * (cache.start); SYS_ICACHE_SYNC accepts either alias (both name the same
++     * physical pages) and the kernel does the dc-cvau/ic-ivau on its own direct
++     * map -- EL0 cache maintenance traps here (SCTLR_EL1.UCI=0), which is why
++     * __builtin___clear_cache cannot be used. MANDATORY before the block is
++     * entered via cache.xstart (the exec alias); a silent failure would execute
++     * stale I-cache lines, so fail LOUD (audit F1). */
++    if (thyla_jit_icache_sync(block_start, (size_t)block_size) != 0)
++        E_Exit("dyncore: SYS_ICACHE_SYNC block publish failed");
+ #else
+ 	//flush cache - GCC/LLVM builtin
+ 	__builtin___clear_cache((char *)block_start, (char *)(block_start+block_size));
+diff --git a/src/cpu/dynamic_alloc_common.h b/src/cpu/dynamic_alloc_common.h
+index 1662fec3..576821b2 100644
+--- a/src/cpu/dynamic_alloc_common.h
++++ b/src/cpu/dynamic_alloc_common.h
+@@ -15,6 +15,13 @@
+ #include <mach/mach_vm.h>
+ #endif
+ 
++#if defined(__thylacine__)
++/* DX-4: the CAP_JIT (I-42) code-Burrow backend for the W^X code cache.
++ * thyla_jit_create -> {writer_va, exec_va}; thyla_jit_icache_sync publishes;
++ * thyla_acquire_cap_jit walks the corvus jit clearance. -I usr/lib/thylajit. */
++#include "thyla_jit.h"
++#endif
++
+ /* DEBUG: Force dual rw/rx on a Linux system that otherwise allows rwx */
+ //#define DEBUG_LINUX_FORCE_MEMFD_DUAL_RW_X
+ 
+@@ -63,6 +70,35 @@ static void cache_dynamic_common_alloc(Bitu allocsz) {
+     dyncore_method = DYNCOREM_RWX;
+     dyncore_alloc = DYNCOREALLOC_NONE;
+ 
++#if defined(__thylacine__)
++    /* DX-4: the ONLY code-cache path on Thylacine. W^X (I-12) is enforced at
++     * the PTE with no mprotect and no PROT-honoring mmap, so every host arm
++     * below is compiled out (C_HAVE_MMAP/MPROTECT/MEMFD/MACH_VM_REMAP are all
++     * undef) and the malloc fallback would hand back a NON-executable region.
++     * Instead: acquire CAP_JIT (elevation-only, walked from the corvus 'jit'
++     * clearance by the calling Proc itself), then SYS_JIT_CREATE mints one
++     * physical region mapped RW at writer_va and RX at exec_va -- no page ever
++     * W+X, so I-12 holds. DYNCOREM_DUAL_RW_X makes cache_rwtox the constant
++     * writer->exec delta; the AArch64 backend already writes through
++     * cache.start (writer) and branches to cache.xstart (exec), so no codegen
++     * change is needed. Runs FIRST so the host arms' cache_code_start_ptr==NULL
++     * guards all skip. */
++    if (cache_code_start_ptr == NULL) {
++        if (thyla_acquire_cap_jit("dosbox-x") != 0)
++            E_Exit("dyncore: CAP_JIT acquisition failed -- core=dynamic needs "
++                   "the corvus 'jit' clearance (use core=normal, or acquire it)");
++        struct thyla_jit_region reg = { 0, 0 };
++        long rc = thyla_jit_create((size_t)actualsz, &reg);
++        if (rc != 0)
++            E_Exit("dyncore: SYS_JIT_CREATE(%lu) failed rc=%ld",
++                   (unsigned long)actualsz, rc);
++        cache_code_start_ptr = (uint8_t*)(uintptr_t)reg.writer_va;
++        cache_exec_ptr       = (uint8_t*)(uintptr_t)reg.exec_va;
++        dyncore_alloc  = DYNCOREALLOC_THYLACINE_JIT;
++        dyncore_method = DYNCOREM_DUAL_RW_X;
++        dyncore_flags |= DYNCOREF_W_XOR_X;
++    }
++#endif
+ #if defined (WIN32)
+     if (cache_code_start_ptr == NULL) {
+         cache_code_start_ptr=(uint8_t*)VirtualAlloc(0,actualsz,MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+@@ -197,6 +233,7 @@ static void cache_dynamic_common_alloc(Bitu allocsz) {
+         case DYNCOREALLOC_MMAP_ANON:        LOG(LOG_MISC,LOG_DEBUG)("dyncore alloc: mmap using MAP_PRIVATE|MAP_ANONYMOUS"); break;
+         case DYNCOREALLOC_MALLOC:           LOG(LOG_MISC,LOG_DEBUG)("dyncore alloc: malloc"); break;
+         case DYNCOREALLOC_MEMFD:            LOG(LOG_MISC,LOG_DEBUG)("dyncore alloc: memfd"); break;
++        case DYNCOREALLOC_THYLACINE_JIT:    LOG(LOG_MISC,LOG_DEBUG)("dyncore alloc: Thylacine SYS_JIT_CREATE (CAP_JIT dual-map)"); break;
+         default:                            LOG(LOG_MISC,LOG_DEBUG)("dyncore alloc: ?"); break;
+     };
+ 
+@@ -216,7 +253,17 @@ static void cache_dynamic_common_alloc(Bitu allocsz) {
+     /* make sure dual mapping works */
+     if (cache_exec_ptr != cache_code) {
+         *cache_code = 0xAA;
++#if defined(__thylacine__)
++        /* EL0 dc-cvau/ic-ivau trap on Thylacine (SCTLR_EL1.UCI=0), and
++         * __builtin___clear_cache lowers to exactly those; publish via the
++         * kernel instead (SYS_ICACHE_SYNC, either alias names the range).
++         * Fail loud on a publish error (audit F1); the 0xAA read-back below
++         * would also catch it, but the verdict belongs on the sync too. */
++        if (thyla_jit_icache_sync(cache_code, 128) != 0)
++            E_Exit("dyncore: SYS_ICACHE_SYNC self-test publish failed");
++#else
+         __builtin___clear_cache((char*)cache_code,(char*)(cache_code+128));
++#endif
+         if (*cache_exec_ptr == 0xAA) {
+             LOG(LOG_MISC,LOG_DEBUG)("dyncore: dual map test passed. adj=0x%lx",(unsigned long)((uintptr_t)((char*)cache_exec_ptr) - (uintptr_t)((char*)cache_code)));
+         }
