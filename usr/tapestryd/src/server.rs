@@ -7313,7 +7313,21 @@ impl Comp {
             ChordAction::Split(mode) => {
                 self.layout.unzoom();
                 let f = self.layout.focused;
-                if self.layout.split(f, mode).is_some() {
+                // The new empty leaf must record the owner of the leaf being
+                // split (its hosted surface's principal), so a SESSION that
+                // Super+H-splits its own tile can later mint the placement
+                // claim on the new leaf (HALCYON.md 13.7). The client `split`
+                // verb (pane_cmd) already stamps this; the chord path must
+                // match, else a session-driven split yields an environment-
+                // owned (0) leaf its own compositor cannot claim -- KT-1.5d-3.
+                let owner = self
+                    .layout
+                    .leaf_surface(f)
+                    .and_then(|n| self.surf(n))
+                    .map(|s| s.owner_principal)
+                    .unwrap_or_else(|| self.layout.pane_owner_principal(f));
+                if let Some(new_leaf) = self.layout.split(f, mode) {
+                    self.layout.set_owner_principal(new_leaf, owner);
                     self.reconcile();
                 }
             }

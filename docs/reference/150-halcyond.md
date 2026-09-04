@@ -84,7 +84,7 @@ operand (`env::args().operands()`):
   (§14.2), ingesting each tile's record stream through the `Tile` model below
   instead of the console drain.
 
-**The bootstrap (d-1a).** `session_main` connects + takes a fullscreen surface
+**The bootstrap (d-1a).** `session::run` connects + takes a fullscreen surface
 (the connect/surface/present primitives — `EventRing::connect_sqpoll` +
 `Surface::fullscreen_on` + the first-present-before-wait discipline + the SQPOLL
 unified-poll wait on `ring.poll_fd()`). The witness is `halcyond: session up
@@ -93,37 +93,58 @@ merely that the line ran. The aurora → `Direct(halcyond)` handoff is d-1b
 (tapestryd's reconcile backgrounds the console renderer, §14.12 step 4; no new
 primitive).
 
-**One session tile (d-2).** `session_main` spawns ONE `kaua-term` hosting
-`/bin/ut`, AS itself (the user login stamped — plain `t_spawn`, no cap, zero
-delegation), with `Stdio::Piped` on stdin/stdout: the child's fd 0 = the down
-pipe (halcyond writes `Key`/`Resize` `Input` frames) and fd 1 = the up pipe
-(the child writes the `Record` stream); fd 2 inherits. The pts is internal to
-the child, so `ut` never sees these pipes. The loop then:
+**Multiple session tiles (d-3).** `session::run` (in `session.rs` — the I/O half
+of the 13.1 lib/bin split; the pure create/drop diff is host-tested in
+`halcyond::tiles::plan_tiles`) hosts ONE `kaua-term` + content `Surface` + `Tile`
+per compositor leaf, keyed by leaf id in a `BTreeMap`, reconciled off the
+`layout` file each relayout. d-2 was the single-tile special case of this loop.
+Each `kaua-term` runs `/bin/ut` AS the session (plain `t_spawn`, no cap, zero
+delegation), `Stdio::Piped`: the child's fd 0 = the down pipe (halcyond writes
+`Key`/`Resize` `Input` frames), fd 1 = the up pipe (the child writes the `Record`
+stream), fd 2 inherits; the pts is internal to the child, so `ut` never sees
+these pipes. The loop:
 
-- **renders** the `Tile` (grid tail + scrollback flow, `Tile::render` below) via
-  the reused render brain (a `GlyphSource` + the Daylight sheet + cartoon),
-  presenting each dirty frame — the FIRST render is at the loop top before any
-  wait (first-present-wins);
-- **waits** on ONE `poll { ring.poll_fd() | up_pipe }` — a surface event on the
-  ring (`poll_event` pumps the SQPOLL CQEs) or records on the up pipe;
-- **ingests** the up pipe: one `t_read` per wake → `FrameDecoder` → `parse_record`
-  → `Tile::apply` (the trust boundary: a bounds-checked wire, a `WireError` tears
-  down the tile — here the whole one-tile session, i.e. logout, §14.11.10/.12);
-- **routes input**: a `TEV_KEY` → `input::map_key` → an `Input::Key` frame down
-  the pipe → the kaua-term re-encodes it (honoring DECCKM) to the pts (§14.11.9;
-  one tile, so always focused — a backgrounded console renderer no longer holds
-  input focus, the tapestryd reconcile focus transfer);
-- **resizes** on `TEV_CONFIGURE`: recompute cols/rows from the surface, resize the
-  tile grid, send `Resize` down (the kaua-term sets the pts winsize + replies with
-  a full CellDiff);
-- **logs out** when the tile's `ut` exits — a `Control::Exit` (or an up-pipe EOF)
-  latches the exit and `session_main` returns; `login`'s `wait()` returns → getty
-  → the session leaf retires → aurora un-backgrounds + resumes (d-1b). The witness
-  is `halcyond: session tile exited (code N) -- logout`. On teardown it drops the
-  down pipe (EOF → the kaua-term group exits, taking `ut`), then kills + reaps.
+- **reconciles** on every relayout (a `TEV_CONFIGURE` on any tile): reads the
+  `layout`, `plan_tiles` diffs the visible leaves against what it hosts. A new
+  EMPTY leaf it owns is CLAIMED (`pane/<id>/claim`, the server-side owner +
+  emptiness authority, §13.7 — a failed read means "not ours", skip) and hosted
+  with `Surface::open_claim_on` at the leaf's `pane/<id>/geometry` size, then a
+  `kaua-term` is spawned into it. A vanished leaf's tile is reaped. The bootstrap
+  root is the first entry, keyed on the leaf hosting the fullscreen surface.
+- **renders** each dirty `Tile` (grid tail + scrollback flow, `Tile::render`
+  below) via the reused render brain (a `GlyphSource` + the Daylight sheet +
+  cartoon); the FIRST render precedes any wait (first-present-wins).
+- **waits** on ONE `poll { ring.poll_fd() | up_0 .. up_N }` — a surface event on
+  the ring (`poll_event` pumps the SQPOLL CQEs, demuxed per surface) or records
+  on any LIVE tile's up pipe (a crashed/exited tile's pipe is skipped).
+- **ingests** each readable tile: one `t_read` per wake → `FrameDecoder` →
+  `parse_record` → `Tile::apply` — the trust boundary (a bounds-checked wire).
+- **routes input to the focused tile FOR FREE**: tapestryd delivers `TEV_KEY`
+  only to the FOCUSED surface (`key_event` → `layout.focused_surface`), so
+  draining each tile's surface events and forwarding its `TEV_KEY` (via
+  `input::map_key` → an `Input::Key` frame down THAT tile's pipe) is inherently
+  focus-routed — halcyond never reads `l.focused` (§14.11.9). The Super chord
+  layer (split / focus-move / zoom / close, §18.4) is the compositor's; halcyond
+  only reacts to the layout changes it produces.
+- **resizes** per tile on `TEV_CONFIGURE`: recompute cols/rows, resize the tile
+  grid, send `Resize` down (the kaua-term sets the pts winsize + replies with a
+  full CellDiff).
+- **contains a tile's death** (§14.11.10): a `Control::Exit(0)` (clean) CLOSES
+  the leaf (a `close <leaf>` layout verb — the pane collapses, tmux-style) and
+  reaps the tile; a `WireError` / non-clean exit / abnormal EOF (a crash of the
+  isolated parser) FREEZES the tile as an affordance (its last frame held, its
+  pipe skipped, its `kaua-term` killed), reaped when the user closes the leaf.
+  Neither ends the environment. A `closed` leaf-id set is the permanent respawn
+  guard: a leaf whose tile is gone is never re-filled (leaf ids never reuse).
+- **logs out** when the LAST tile is gone — `session::run` returns, `login`'s
+  `wait()` returns → getty → the session leaf retires → aurora un-backgrounds +
+  resumes (d-1b).
 
-The witnesses on the diagnostic UART: `session tile spawned pid=N WxH (/bin/ut)`,
-`session tile ingest live` (the first record applied), the logout line above.
+The witnesses on the diagnostic UART: `session tile leaf=N spawned pid=M WxH`
+(per tile), `session up NxN px` (the first successful present), `session tile
+ingest live` (the first record applied), `session tile leaf=N exited (code C)
+-- closing` (a clean tile close) / `session tile leaf=N crashed -- affordance
+held` (a contained crash), and `session logout (code C)` (the last tile gone).
 
 **The session lever.** `login` reads the one-token `/lib/halcyon/session` file:
 `on` → the session variant; absent / any other token → the proven `ut` path

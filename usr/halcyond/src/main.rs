@@ -43,21 +43,16 @@ use halcyond::select::{FlatRow, Sel};
 use halcyond::transcript::Transcript;
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{
-    t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLHUP, T_POLLIN,
-    T_WALK_OPEN_FROM_ROOT,
+    t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN, T_WALK_OPEN_FROM_ROOT,
 };
 use tapestry::{
     EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_BTN,
     TEV_PTR_MOVE,
 };
 
-// KT-1.5d-2: the per-user session tile -- spawn one kaua-term, ingest its record
-// stream into the ii-a Tile model, render it, route input, exit on logout.
-use halcyond::input::map_key;
-use halcyond::tile::Tile;
-use kaua_term::wire::{encode_input, parse_record, FrameDecoder, Input};
-use libhalcyon::theme::daylight_palette;
-use libthyla_rs::process::{Command, Stdio};
+// The per-user SESSION compositor (the `--session` body) lives in `session.rs`
+// (KT-1.5d-3, the multi-tile multiplex); the console-renderer body below is the
+// `rs_main` default path.
 
 macro_rules! say {
     ($($a:tt)*) => {{
@@ -69,6 +64,7 @@ macro_rules! say {
 
 mod chromeset;
 mod menuset;
+mod session;
 mod statusset;
 
 /// evdev BTN_LEFT (the tapestry PTR_BTN `code`).
@@ -79,21 +75,6 @@ const CONNECT_DELAY_MS: u64 = 200;
 
 fn open_path(path: &str, omode: u32) -> i64 {
     unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), omode) }
-}
-
-/// Write all of `buf` to a raw fd (the tile down-channel), looping on short
-/// writes. A pipe write to a live kaua-term takes the whole buffer; a failure
-/// (<=0) means the tile is gone and stops the loop -- the up-pipe EOF / exit
-/// latch is the authoritative teardown, so a lost down-write is harmless here.
-fn write_all_fd(fd: i64, buf: &[u8]) {
-    let mut off = 0usize;
-    while off < buf.len() {
-        let w = unsafe { t_write(fd, buf.as_ptr().add(off), buf.len() - off) };
-        if w <= 0 {
-            break;
-        }
-        off += w as usize;
-    }
 }
 
 fn feed_drain(fd: i64, pending: &mut Vec<u8>, dropped: &mut u64, logged: &mut bool) {
@@ -290,318 +271,6 @@ impl LayoutCache {
     }
 }
 
-/// KT-1.5d-1a (HALCYON 14.12): the per-user SESSION compositor. login spawns
-/// this AS the user (`/bin/halcyond --session`) with the user identity and the
-/// mounted `/home/<user>` -- ZERO identity delegation (I-22 clean): the only
-/// identity-stamp is login's, and this process holds no `CAP_SET_IDENTITY` and
-/// no `SPAWN_PERM_CONSOLE_RENDERER`. It connects to the SYSTEM tapestryd
-/// (`/srv/tapestry`) as an ordinary-user `Session` actor -- connecting is
-/// ungated -- and presents a fullscreen surface.
-///
-/// d-1a presents a BLANK Daylight ground (the bootstrap: prove login -> a
-/// per-user compositor connects + presents). It reuses the connect/surface/
-/// present primitives but NOT the console render brain: no fonts, no atlas, no
-/// transcript, no chrome -- those wire in at KT-1.5d-2 (the first kaua-term tile,
-/// the ii-a `Tile` model). The aurora relinquish -> `Direct(halcyond)` handoff
-/// is d-1b; d-1a is content to compose alongside aurora.
-fn session_main() -> i64 {
-    // Connect to tapestryd + take a fullscreen surface, with the console
-    // path's bounded connect retry (tapestryd may still be coming up). SQPOLL
-    // is harmless with no tile pipes yet and is what KT-1.5d-2's unified poll
-    // needs, so the session ring is SQPOLL from the start.
-    let mut ring: Option<EventRing> = None;
-    let mut surf: Option<Surface> = None;
-    for i in 0..CONNECT_TRIES {
-        let r = match EventRing::connect_sqpoll() {
-            Ok(r) => r,
-            Err(e) => {
-                if i == CONNECT_TRIES - 1 {
-                    say!("halcyond: FAIL session connect {:?}", e);
-                    return 1;
-                }
-                let _ = sleep(Duration::from_millis(CONNECT_DELAY_MS));
-                continue;
-            }
-        };
-        match Surface::fullscreen_on(&r) {
-            Ok(s) => {
-                surf = Some(s);
-                ring = Some(r);
-                break;
-            }
-            Err(e) => {
-                if i == CONNECT_TRIES - 1 {
-                    say!("halcyond: FAIL session connect/create {:?}", e);
-                    return 1;
-                }
-                let _ = sleep(Duration::from_millis(CONNECT_DELAY_MS));
-            }
-        }
-    }
-    let ring = ring.unwrap();
-    let mut surf = surf.unwrap();
-
-    // The render brain (HALCYON.md 14.12: the per-user compositor REUSES the
-    // console render brain) -- the mono glyph source + the Daylight sheet. The
-    // grid is a terminal (FACE_MONO); the scrollback flows through the same
-    // proportional layout the console transcript uses.
-    let mut gs = GlyphSource::new_vendored(512);
-    if gs.face_count() != 2 {
-        say!("halcyond: FAIL vendored face parse");
-        return 1;
-    }
-    let sheet = daylight_sheet();
-    let (cell_w, cell_h, _) = gs.mono_cell();
-    let cols_of = |w: usize| -> u16 { ((w as i32 / cell_w).max(1)) as u16 };
-    let rows_of = |h: usize| -> u16 { ((h as i32 / cell_h).max(1)) as u16 };
-
-    // Spawn ONE kaua-term hosting ut, AS OURSELVES -- the identity login already
-    // stamped (14.12: zero delegation, I-22 clean; plain spawn, no cap). fd0 =
-    // the down pipe (we write Key/Resize), fd1 = the up pipe (we read the record
-    // stream), fd2 inherits our log. The kaua-term mints the pts internally, so
-    // ut never sees these pipes (the non-inheritance ptyhost relies on).
-    let mut tcols = cols_of(surf.w as usize);
-    let mut trows = rows_of(surf.h as usize);
-    let mut child = match Command::new("/bin/kaua-term")
-        .arg(alloc::format!("{}", tcols))
-        .arg(alloc::format!("{}", trows))
-        .arg("/bin/ut")
-        .stdin(Stdio::Piped)
-        .stdout(Stdio::Piped)
-        .stderr(Stdio::Inherit)
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            say!("halcyond: FAIL session tile spawn {:?}", e);
-            return 1;
-        }
-    };
-    let tile_pid = child.pid();
-    let (down, up) = match (child.stdin.take(), child.stdout.take()) {
-        (Some(d), Some(u)) => (d, u),
-        _ => {
-            say!("halcyond: FAIL session tile pipe ends missing");
-            let _ = child.kill();
-            let _ = child.wait();
-            return 1;
-        }
-    };
-    let down_fd = down.as_raw_fd() as i64;
-    let up_fd = up.as_raw_fd() as i64;
-    say!(
-        "halcyond: session tile spawned pid={} {}x{} (/bin/ut)",
-        tile_pid,
-        tcols,
-        trows
-    );
-
-    // The tile model (grid + scrollback, ii-a) + the ingest decoder (the trust
-    // boundary: bounds-checked wire, 14.11.10/.12) + the reusable frame list.
-    let mut tile = Tile::new(tcols as usize, trows as usize, daylight_palette());
-    let mut dec = FrameDecoder::new();
-    let mut inbuf = [0u8; 8192];
-    let mut wire_out: Vec<u8> = Vec::new();
-    let mut cart = cartoon::Cartoon::new();
-
-    let mut announced = false;
-    let mut ingest_announced = false;
-    let mut dirty = true;
-    let mut present_fails: u32 = 0;
-    const PRESENT_FAILS_FATAL: u32 = 240;
-    // The logout latch: Some(code) once the tile's child is gone (Control::Exit,
-    // up-pipe EOF), the compositor is gone (CLOSE / stream-end), or the render
-    // wedged. Draining to a clean teardown, so a code set mid-drain still reaps.
-    let mut logout: Option<i32> = None;
-
-    loop {
-        // (1) Render at the TOP: the first present precedes any wait (the scanout
-        // is first-present-wins and frame ticks reach only VISIBLE surfaces).
-        // tile.render composes the live grid (mono tail) + the scrollback flow.
-        if dirty && logout.is_none() {
-            dirty = false;
-            let (sw, sh) = (surf.w as usize, surf.h as usize);
-            tile.render(&mut cart, sw, sh, &mut gs, &sheet, 0);
-            {
-                let px = surf.pixels();
-                cartoon::execute(
-                    &cart,
-                    &gs.packer.store,
-                    &cartoon::BlobStore::new(),
-                    px,
-                    sw,
-                    None,
-                );
-            }
-            match surf.present(None) {
-                Ok(()) => {
-                    present_fails = 0;
-                    if !announced {
-                        announced = true;
-                        say!("halcyond: session up {}x{} px", sw, sh);
-                    }
-                }
-                Err(_) => {
-                    // A dropped frame, never death (#31); the next pass
-                    // re-renders. A never-succeeds wedge is the backstop.
-                    present_fails += 1;
-                    dirty = true;
-                    if present_fails >= PRESENT_FAILS_FATAL {
-                        say!(
-                            "halcyond: {} consecutive session present failures; exiting",
-                            present_fails
-                        );
-                        logout = Some(1);
-                    }
-                }
-            }
-        }
-
-        // (2) Drain queued surface events (poll_event pumps the SQPOLL ring's
-        // CQEs): CLOSE -> logout; CONFIGURE -> resize the tile + send Resize
-        // down; KEY -> route to the tile's down-channel (14.11.9; one tile, so
-        // always focused -- d-3 adds focus routing).
-        loop {
-            match surf.poll_event() {
-                Ok(Some(e)) => match e.kind {
-                    TEV_CLOSE => {
-                        say!("halcyond: session CLOSE received -- logout");
-                        logout = Some(0);
-                    }
-                    TEV_CONFIGURE => match surf.handle_configure(&e) {
-                        Ok(_) => {
-                            let (nc, nr) = (cols_of(surf.w as usize), rows_of(surf.h as usize));
-                            if nc != tcols || nr != trows {
-                                tcols = nc;
-                                trows = nr;
-                                tile.resize(nc as usize, nr as usize);
-                                wire_out.clear();
-                                encode_input(&Input::Resize { cols: nc, rows: nr }, &mut wire_out);
-                                write_all_fd(down_fd, &wire_out);
-                            }
-                            dirty = true;
-                        }
-                        Err(TapError::Busy) => {}
-                        Err(e2) => {
-                            say!("halcyond: session reweave failed {:?}; exiting", e2);
-                            logout = Some(1);
-                        }
-                    },
-                    TEV_KEY => {
-                        if let Some(kev) = map_key(e.code, e.rune, e.value) {
-                            wire_out.clear();
-                            encode_input(&Input::Key(kev), &mut wire_out);
-                            write_all_fd(down_fd, &wire_out);
-                        }
-                    }
-                    _ => {}
-                },
-                Ok(None) => break,
-                Err(_) => {
-                    say!("halcyond: session event stream ended (compositor gone); exiting");
-                    logout = Some(1);
-                    break;
-                }
-            }
-            if logout.is_some() {
-                break;
-            }
-        }
-        if logout.is_some() {
-            break;
-        }
-
-        // If the drain produced a render need, re-render before blocking.
-        if dirty {
-            continue;
-        }
-
-        // (3) Block: poll { compositor ring | tile up-pipe }. The SQPOLL kthread
-        // posts ring CQEs off-thread, so ring POLLIN means a surface event; up
-        // POLLIN/HUP means the tile wrote records or closed.
-        let mut waitfds = [
-            TPollFd {
-                fd: ring.poll_fd(),
-                events: T_POLLIN,
-                revents: 0,
-            },
-            TPollFd {
-                fd: up_fd as i32,
-                events: T_POLLIN,
-                revents: 0,
-            },
-        ];
-        if unsafe { t_poll(waitfds.as_mut_ptr(), 2, -1) } < 0 {
-            say!("halcyond: session poll failed (compositor gone); exiting");
-            logout = Some(1);
-            break;
-        }
-
-        // (4) Ingest the tile's record stream (one read per wake; the decoder
-        // buffers a partial frame for the next). A wire error / EOF / Exit tears
-        // down ONLY that tile (14.11.10/.12); with one tile, that is the logout.
-        if waitfds[1].revents & (T_POLLIN | T_POLLHUP) != 0 {
-            let n = unsafe { t_read(up_fd, inbuf.as_mut_ptr(), inbuf.len()) };
-            if n <= 0 {
-                if tile.exited().is_none() {
-                    say!("halcyond: session tile pipe EOF -- logout");
-                }
-                logout = Some(tile.exited().unwrap_or(0));
-            } else {
-                dec.push(&inbuf[..n as usize]);
-                loop {
-                    match dec.next_frame() {
-                        Some(Ok((tag, payload))) => match parse_record(tag, &payload) {
-                            Ok(rec) => {
-                                tile.apply(rec);
-                                dirty = true;
-                                if !ingest_announced {
-                                    ingest_announced = true;
-                                    say!("halcyond: session tile ingest live");
-                                }
-                            }
-                            Err(_) => {
-                                say!("halcyond: session tile record wire error -- logout");
-                                logout = Some(1);
-                                break;
-                            }
-                        },
-                        Some(Err(_)) => {
-                            say!("halcyond: session tile frame wire error -- logout");
-                            logout = Some(1);
-                            break;
-                        }
-                        None => break,
-                    }
-                }
-            }
-        }
-
-        // (5) The child exited (a Control::Exit landed above) -> logout.
-        if logout.is_none() {
-            if let Some(code) = tile.exited() {
-                say!("halcyond: session tile exited (code {}) -- logout", code);
-                logout = Some(code);
-            }
-        }
-        if logout.is_some() {
-            break;
-        }
-    }
-
-    // Teardown: drop the down pipe (EOF -> the kaua-term's input pump exits ->
-    // the kaua-term group tears down, taking ut with it), belt-and-suspenders
-    // kill, then reap so the tile does not linger as a zombie. Then return the
-    // code; login's wait() returns -> getty -> the next login -> aurora
-    // un-backgrounds + resumes (14.12 step 4).
-    let code = logout.unwrap_or(0);
-    drop(down);
-    drop(up);
-    let _ = child.kill();
-    let _ = child.wait();
-    code as i64
-}
-
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     // KT-1.5d-1a (HALCYON 14.12): `--session` selects the per-user SESSION
@@ -615,7 +284,7 @@ pub extern "C" fn rs_main() -> i64 {
         .operands()
         .any(|a| a == b"--session")
     {
-        return session_main();
+        return session::run();
     }
     if !cornucopia::verify_all() {
         say!("halcyond: FAIL atlas magic/version");

@@ -20,6 +20,7 @@ pub mod raster;
 pub mod select;
 pub mod status;
 pub mod tile;
+pub mod tiles;
 pub mod transcript;
 
 /// The vendored proportional faces (third_party/dejavu-fonts; HALCYON.md

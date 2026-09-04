@@ -23,6 +23,79 @@ needed the operator.
 
 ---
 
+## 2026-09-04 (run 27, Opus 4.8) -- KT-1.5d-3: multi-tile; the E2E hunt that surfaced two tapestryd bugs
+
+d-3 generalized the per-user compositor from one session tile to N. New
+`usr/halcyond/src/session.rs` (`session::run`, the I/O half, moved out of
+`main.rs`) hosts one `kaua-term` + content `Surface` + `Tile` per compositor
+leaf, keyed by leaf id, reconciled off the `layout` file each relayout; new
+host-tested `halcyond::tiles::plan_tiles` (the pure create/drop diff, 6 tests).
+Create = claim (`pane/<id>/claim`, the owner+emptiness authority) + `open_claim_on`
+at the leaf's `geometry`; multiplex = ONE `poll { ring | up_0..up_N }`; input is
+focus-routed FOR FREE (tapestryd delivers KEY only to the focused surface, so
+per-surface drain is inherently routed -- halcyond never reads `l.focused`);
+teardown is contained (clean exit closes the leaf, a crash freezes an affordance).
+
+**The chunk was supposed to be halcyond-only. The E2E proved it was not** -- and
+the proving is the reusable part.
+
+**Wrong turn #1, caught: the green that wasn't.** The first E2E's harness exit was
+0, but the SCENARIO had failed all 3 attempts -- `test-interactive.sh` returns 0
+regardless. Reading the exit code would have shipped a broken chunk; reading the
+CONTENT (`grep FAIL`) showed `Super+H produced no second tile`. The M-PIN
+two-halves lesson, live.
+
+**Wrong turn #2, avoided: theory vs ground truth.** The transcript showed a
+baffling `surface 1 letterbox 1280x800 -> 418x261 in 418x772` -- a 3-column
+geometry from one split. Rather than theorize, I baked in a reconcile DIAG and
+re-ran. The DIAG settled everything in four lines: `reconcile 3 leaves
+[(1,Some(0)), (3,Some(1)), (4,None,focused)]; create [4]` then `claim leaf=4
+DENIED`. The split HAD fired; my session simply could not claim the new leaf.
+
+**F1 (the blocker, FIXED).** `exec_chord`'s `Split` (the compositor's Super-chord
+layer) creates the new leaf via `alloc` (owner_principal=0, the environment) and
+-- unlike the client `split` verb (`pane_cmd`, which stamps
+`set_owner_principal(new_leaf, actor)`) -- NEVER stamped the owner. The claim gate
+is `Session(p) => owner==p`, so a session could not claim its own chord-split
+leaf. Latent because the console renderer never claims leaves; d-3 is the first
+claimant. Fix: `exec_chord` stamps the new leaf with the split (focused) leaf's
+surface owner. With it, the DIAG re-run showed the full correct chain --
+`leaf=4 spawned 42x35` -> focus-routed `exit` closed the focused B -> the d-2
+focus-transfer re-homed focus to session leaf 3 (the close's `first_leaf` had
+picked aurora, backgrounded; reconcile moved it back) -> `leaf=3 exited` ->
+`foreground` -> `session logout`. The mechanism works.
+
+**Wrong turn #3, caught: my own test's ordering.** Even with F1 the E2E stayed
+red -- `the console renderer never foregrounded`. But the log showed it DID
+foreground. `foreground` (tapestryd) and `session logout` (halcyond) are
+cross-process and interleave; the observed order was foreground-THEN-logout, but
+my expects demanded logout-then-foreground, so matching "logout" discarded the
+earlier "foreground" line. Fixed with an order-tolerant `exp_continue` matcher
+that ticks off both in either order. A false red from a test that assumed a
+cross-process order it could not guarantee.
+
+**F2 (OPEN, surfaced).** The DIAG also exposed a real d-1b bug: aurora's
+BACKGROUNDED leaf (leaf 1, surface 0) still consumes a tiling column. d-1b's
+backgrounding is SCANOUT-ONLY -- `recompute` (the shared layout engine) tiles ALL
+leaves and runs BEFORE backgrounding is even determined in reconcile -- so a
+multi-tile session tiles into N+1 columns (2 session tiles at 418px + a blank
+aurora third), not N. Masked with one tile (Direct fills the display, bypassing
+tiling); the first split exposes it. It does NOT block d-3's mechanism (the E2E
+greens; the d-2 focus-transfer self-corrects the focus), but the geometry is
+wrong and H-4d (the welcome's two ut panes) needs it. The fix is a non-trivial
+reconcile/recompute restructure (an audit surface) with a genuine shape choice
+(reorder backgrounding before recompute / a conditional second recompute /
+per-session workspaces), and it refines the operator-ratified d-1b -- so on Opus
+I surfaced it rather than self-resolving. Enqueued:
+`memory/bug_d3_aurora_backgrounded_leaf_tiling.md`.
+
+**Cost:** d-3 stopped being halcyond-only -- F1 lives in `usr/tapestryd/src/server.rs`
+(`exec_chord`), the aux-3 merge surface (aux edits `main.rs`, a different file).
+The batched KT-1 audit now covers the chord-split owner-stamp + F2's eventual fix.
+
+
+---
+
 ## 2026-09-04 (run 26, Opus 4.8) -- KT-1.5d-2: one session tile; two integration findings the E2E surfaced
 
 d-2 made the per-user compositor host a REAL terminal: `halcyond --session` spawns
