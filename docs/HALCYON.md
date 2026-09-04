@@ -1547,10 +1547,15 @@ dies shows an exit affordance; a relayout that drops the leaf reaps it.
   the default suite (aurora-no-regression, `loom.poll` unit, the `loom-smoke`
   SQPOLL leg) + the `ls-halcyon.exp` graphical E2E (render + rich + reflow +
   menus, all on the SQPOLL ring).
-- **KT-1.5b-ii -- halcyond ingest -> the model.** halcyond spawns ONE kaua-term
-  over a pipe pair and folds its up-pipe into the same `poll`; apply CellDiff to a
-  per-tile live grid, ScrollOff + Control(Osc1936) to the scrollback transcript,
-  Mode to the render mode; render normal (scrollback + grid) and alt (grid only).
+- **KT-1.5b-ii -- halcyond ingest -> the model. RESHAPED by 14.12.** The old
+  "halcyond spawns ONE kaua-term + renders" framing is superseded by the per-user
+  compositor decision (14.12, operator-ratified 2026-09-04): the spawn+render lands
+  INSIDE a per-user halcyond login spawns as the user, staged as **KT-1.5d-1** (the
+  per-user bootstrap + the aurora->halcyond display handoff), **KT-1.5d-2** (one
+  session tile: CellDiff->grid / ScrollOff->scrollback / Mode->render-mode + the
+  normal/alt render, on the ii-a `Tile` model), **KT-1.5d-3** (multi-tile -> H-4d).
+  The KT-1.5b-ii-a `Tile` MODEL (grid + ingest, host-tested, @a0324198) feeds
+  KT-1.5d-2 directly.
 - **KT-1.5c -- multi-tile.** Per-leaf spawn/teardown off `reconcile`, the N-pipe
   multiplex in the unified poll, focus-routed input (Key/Resize down), per-tile
   composite -> **unblocks H-4d**.
@@ -1565,3 +1570,113 @@ cross-tile effect, no halcyond death) -- the I-27-adjacent isolation the whole
 uniform-Y topology (§14.2) rests on. The grid is text-only (no pixel path through
 cells; graphical apps promote to a Tapestry surface, preserving D7). An
 AUDIT-TRIGGERS row lands with the KT-1.5 code.
+
+### 14.12 The per-user session compositor -- login spawns halcyond as the user (operator-ratified 2026-09-04)
+
+**The problem this resolves.** 14.11.6 has `halcyond` spawn the session's `kaua-term`
+tiles, but the session `ut` needs the **user identity + the encrypted `/home/<user>`
+that only `/sbin/login` establishes** (`CAP_SET_IDENTITY` + the per-user DEK unlock,
+A-5). The as-built `halcyond` is a **system** renderer spawned by joey *before* login
+(`joey.c:11255-11319`), so "halcyond spawns the session tile" collides with "login
+owns the user identity." Closing that gap by giving the system halcyond
+identity-delegation power is an **I-22 ambient-authority hole** (a system daemon that
+can run code as any user). Ground truth (Explore, run 23): the trusted path is
+**orthogonal** (SAK is a kernel `/dev/cons` BREAK -> `proc_console_sak` `proc.c:2091`;
+a pts carries none of it; `/dev/consfeed` hardwires `is_break=false`; the graphical
+trusted path is unbuilt, the live one serial-only), so the crux is **identity, not the
+trusted path**.
+
+**The decision (operator-ratified 2026-09-04, over system-halcyond-delegation and
+prove-first-defer).** `halcyond` is a **per-user session compositor**, spawned by
+`/sbin/login` **as the user**, not a system renderer. This is the Plan 9 rio idiom
+(a per-user window system started after login), the Wayland compositor-per-session
+model, and the Fuchsia session-per-user model, fused onto Thylacine's per-principal
+`tapestryd`. **Zero identity delegation** -- the only identity-stamp is login's, which
+login already holds.
+
+**The model.**
+
+1. **Pre-login (system): aurora renders the console.** joey spawns `aurora` (the
+   existing fbcon system renderer, `SPAWN_PERM_CONSOLE_RENDERER`); the getty runs
+   `/sbin/login` on the kernel `/dev/cons`; aurora mirror-renders the login prompt
+   via `/dev/consdrain`. This is aurora's existing role -- **the `THYLACINE_HALCYON`
+   lever that made joey spawn halcyond as the SYSTEM console renderer is retired**;
+   halcyond is now per-user/post-login and never the console renderer.
+2. **Login (on `/dev/cons`, aurora-rendered).** `/sbin/login` authenticates via corvus
+   and establishes the user identity + unlocks + mounts `/home/<user>` (A-5,
+   unchanged). Then, instead of spawning `ut` on `/dev/cons`, login spawns a **per-user
+   `halcyond` AS the user** -- `Command::new("/bin/halcyond").identity(pid,gid,&supp)`,
+   exactly as it spawns `ut` today (`login/main.rs:1236`) -- and `wait()`s it; the
+   halcyond exit is logout.
+3. **Session (per-user halcyond).** The per-user halcyond:
+   - connects to the **system** `tapestryd` (`/srv/tapestry`) as the user. Connecting
+     is ungated and classifies the conn `Actor::Session(user_principal)` -- the
+     per-principal design already anticipates ordinary-user renderer clients
+     (`server.rs:15185-15202`); no special cap.
+   - presents a fullscreen surface and hosts the session's terminals as **kaua-term
+     processes** (14.2 uniform-Y -- separate + crash-isolated), spawned **as itself**
+     (the user's identity; plain `t_spawn`, no cap, no delegation). It reuses the
+     current halcyond render brain (transcript / chrome / menus / fontdue / cartoon,
+     the ii-a `Tile` model) but ingests each tile's record stream instead of the
+     `/dev/consdrain` mirror.
+   - routes input (tapestryd `TEV_KEY`/`TEV_PTR` on its EventRing, the same input path
+     aurora uses) to the **focused tile's pts down-channel**, not `/dev/consfeed`.
+   - the session `ut`s run in the tiles (pts job control -- the Ctrl-C axis is the
+     pts fg pgrp, not the `/dev/cons` owner), never on `/dev/cons`.
+4. **The display handoff -- emergent from the shared pane layout, no new primitive.**
+   tapestryd's scanout follows the layout, not client identity (`Comp::reconcile`
+   `server.rs:5692`): `Direct(n)` iff exactly one visible display-sized leaf, else
+   `Composed`. So aurora + a per-user halcyond both presenting fullscreen would
+   **tile**, not swap. The clean full-display takeover is **aurora relinquishing its
+   surface** so the root leaf collapses to halcyond alone -> `Direct(halcyond)` at
+   halcyond's next present-COMPLETE. Login orchestrates the ordering (it spawns
+   halcyond; the console-renderer suspend/resume of aurora across the session is the
+   coordination detail, refined at impl -- a console-renderer suspend signal or
+   aurora self-relinquishing while `/dev/cons` is idle). On logout (halcyond exits),
+   aurora resumes and renders the next login.
+5. **Trusted path (I-27) -- orthogonal, unchanged (14.5).** `/dev/cons` + the SAK
+   stay the kernel trusted path (serial today, kernel-sink future); whichever renderer
+   is active suspends during a trusted episode (when the graphical suspension lands).
+   login's credential entry stays on `/dev/cons`, the path the future graphical trusted
+   sink will protect -- it is **never** buried in an untrusted kaua-term pts (which
+   would let a userspace terminal see the passphrase). The tiles are below the trusted
+   console, never trusted.
+
+**What is reused vs retired.** REUSED: the entire halcyond render brain (H-2 transcript,
+H-3 chrome/menus/status, the Daylight stylesheet, fontdue + cartoon, the KT-1.5b-ii-a
+`Tile` grid+scrollback model) + libtapestry + the KT-1.5b-i unified poll. RETIRED for
+the session: halcyond as the **system console renderer** -- it no longer opens
+`/dev/consdrain`/`consfeed`/`consctl` (the session halcyond is a **variant** that skips
+that trio, `main.rs:278-296`, and reads pts tiles instead) and no longer holds
+`g_console_renderer` (aurora does, for the pre-login console). The `THYLACINE_HALCYON`
+pool lever + the ls-halcyon system-renderer test are superseded by a per-user-session
+graphical test.
+
+**Capabilities (I-22 clean; Explore-verified).** The per-user halcyond needs: (a)
+connect to tapestryd -- **none** (ungated); (b) spawn kaua-term processes -- **none**
+(same-identity children); (c) route input -- **none** (pts writes). It does **not** need
+`CAP_SET_IDENTITY` (it is a user, not an identity-stamper) or `SPAWN_PERM_CONSOLE_RENDERER`
+(it does not read the kernel console mirror). The single identity-stamp is login's,
+already held.
+
+**Sequencing (a multi-chunk arc; supersedes the old KT-1.5b-ii-b single-tile framing).**
+14.12 is scripture; implementation stages:
+- **KT-1.5d-1 -- the per-user halcyond bootstrap.** login spawns `/bin/halcyond
+  --session` as the user; a session-variant halcyond that skips the console trio,
+  connects to tapestryd as `Session`, and presents a fullscreen surface (blank/single
+  tile). Prove: login -> per-user halcyond presents; the aurora relinquish -> Direct
+  handoff; logout -> aurora resumes. Graphical E2E.
+- **KT-1.5d-2 -- one session tile.** the per-user halcyond spawns ONE kaua-term (as
+  the user) hosting `ut`, folds its up-pipe into the unified poll, ingests via the
+  ii-a `Tile` model, and renders it (normal = scrollback + grid tail; alt = grid only,
+  14.11.3). This is the old ii-b render, now inside the per-user compositor.
+- **KT-1.5d-3 -- multi-tile.** per-leaf spawn/teardown + N-pipe multiplex +
+  focus-routed input (the old 1.5c) -> **unblocks H-4d** (the welcome's two `ut` panes).
+
+**Invariants + audit.** No new I-22 surface (zero delegation -- the property to
+prosecute is exactly that: the per-user halcyond holds no identity-stamp and no
+console-renderer role). I-27 unchanged (14.5). The session halcyond joins the
+format-fuzz audit class (ingesting untrusted per-tile record streams, 14.11.12). The
+login->per-user-halcyond spawn + the aurora handoff are the new privilege-adjacent
+surfaces (an AUDIT-TRIGGERS row at KT-1.5d-1). The kaua-term parser stays the
+crash-isolated hostile-input surface (14.2).
