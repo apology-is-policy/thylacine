@@ -1623,17 +1623,28 @@ login already holds.
      aurora uses) to the **focused tile's pts down-channel**, not `/dev/consfeed`.
    - the session `ut`s run in the tiles (pts job control -- the Ctrl-C axis is the
      pts fg pgrp, not the `/dev/cons` owner), never on `/dev/cons`.
-4. **The display handoff -- emergent from the shared pane layout, no new primitive.**
-   tapestryd's scanout follows the layout, not client identity (`Comp::reconcile`
-   `server.rs:5692`): `Direct(n)` iff exactly one visible display-sized leaf, else
-   `Composed`. So aurora + a per-user halcyond both presenting fullscreen would
-   **tile**, not swap. The clean full-display takeover is **aurora relinquishing its
-   surface** so the root leaf collapses to halcyond alone -> `Direct(halcyond)` at
-   halcyond's next present-COMPLETE. Login orchestrates the ordering (it spawns
-   halcyond; the console-renderer suspend/resume of aurora across the session is the
-   coordination detail, refined at impl -- a console-renderer suspend signal or
-   aurora self-relinquishing while `/dev/cons` is idle). On logout (halcyond exits),
-   aurora resumes and renders the next login.
+4. **The display handoff -- the compositor backgrounds the console renderer
+   (operator-ratified 2026-09-04; the Plan 9 rio / Fuchsia-Wayland idiom).**
+   tapestryd's scanout follows the layout AND an actor priority (`Comp::reconcile`):
+   a **SESSION** leaf (its `owner_principal` a real user principal -- the `actor()`
+   test) outranks **SYSTEM** leaves (a sentinel principal: the console renderer
+   aurora, and any system client). When a session leaf is visible, the SYSTEM leaves
+   are **BACKGROUNDED** -- excluded from the scanout decision, not composited, and
+   not FRAME-ticked. So aurora + a per-user halcyond both presenting fullscreen do
+   NOT tile: the root collapses to the session (`Direct(halcyond)`), and aurora's own
+   FRAME-driven loop goes dormant (no FRAME -> it blocks in `wait_event`; it keeps its
+   surface + ring the whole time, staying observable). On logout (halcyond exits),
+   reconcile re-runs, aurora is no longer backgrounded, the FRAME clock ticks it
+   again, and it resumes + repaints -> `Direct(aurora)`, rendering the next login.
+   **NO new primitive, NO drain-poll.** The "emergent, drain-idle resume" of the
+   earlier draft was WRONG: `SYS_PUTS`/`say!` routes through `cons_emit` (kernel #76),
+   so the console drain carries ALL daemon diagnostic output and is NEVER idle during
+   a session -- a drain-based resume flaps (relinquish -> tapestryd logs -> drain ->
+   resume -> ...). The priority is **backward-compatible**: with no session leaf
+   present (every pre-session + gfx-test path) nothing backgrounds and the pre-existing
+   `Direct(n)` iff one display-sized leaf else `Composed` logic is byte-identical.
+   **aurora is UNCHANGED** -- the whole mechanism lives in tapestryd's reconcile +
+   frame_tick + compose.
 5. **Trusted path (I-27) -- orthogonal, unchanged (14.5).** `/dev/cons` + the SAK
    stay the kernel trusted path (serial today, kernel-sink future); whichever renderer
    is active suspends during a trusted episode (when the graphical suspension lands).
@@ -1672,10 +1683,12 @@ already held.
     marker). Graphical E2E `ls-gfx-session` (serial-driven: aurora is serial-loud
     without `thylacine.display=gpu`; halcyond's markers ride the diagnostic UART
     regardless).
-  - **KT-1.5d-1b -- the clean display handoff.** aurora relinquishes its surface
-    (the root leaf collapses to halcyond alone -> `Direct(halcyond)`); logout ->
-    aurora resumes. Touches aurora (the fbcon). The relinquish/resume mechanism
-    is emergent from the pane layout, no new primitive (14.12 step 4).
+  - **KT-1.5d-1b -- the clean display handoff.** tapestryd's reconcile backgrounds
+    the console renderer (aurora) when a session leaf is present -> `Direct(halcyond)`;
+    on logout aurora un-backgrounds and its FRAME-driven loop resumes (14.12 step 4).
+    Touches tapestryd's scanout machine (audit-bearing); **aurora is unchanged** (no
+    FRAME -> dormant; FRAME -> renders). No new primitive; backward-compatible (the
+    priority is inert with no session leaf present).
 - **KT-1.5d-2 -- one session tile.** the per-user halcyond spawns ONE kaua-term (as
   the user) hosting `ut`, folds its up-pipe into the unified poll, ingests via the
   ii-a `Tile` model, and renders it (normal = scrollback + grid tail; alt = grid only,
