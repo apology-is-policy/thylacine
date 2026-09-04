@@ -23,6 +23,78 @@ needed the operator.
 
 ---
 
+## 2026-09-04 (run 24, Opus 4.8) -- KT-1.5d-1a: the per-user session bootstrap; the lever that hung the boot
+
+Run 23 self-compacted at a design->impl boundary; the operator had ratified 14.12
+(login spawns a per-user halcyond as the user, zero delegation). Run 24 built the
+bootstrap half. Landed `739f6cb7` (local, batched to the KT-1 close): halcyond's
+`--session` variant, login's session lever + spawn branch, joey's boot-test fix,
+the pool bake, the E2E, and the docs.
+
+**The decomposition.** 14.12 listed KT-1.5d-1 as one chunk (bootstrap + aurora
+handoff + logout). I split it a/b to de-risk: d-1a is additive + gated (no aurora
+or joey-renderer change; the default boot is untouched); d-1b touches aurora, the
+load-bearing fbcon, for the clean `Direct(halcyond)` handoff + logout resume. The
+research that forced the split: there is **no kernel console-renderer suspend
+primitive** (`cons.c` `serialsilent` gates only the serial sink, not a renderer's
+tapestryd surface; the framebuffer-SAK renderer suspension of 14.5 is unbuilt), so
+the aurora->halcyond handoff must be emergent from tapestryd's pane layout -- which
+is d-1b's work, not d-1a's. `session_main` therefore reuses only connect/present
+and paints a blank Daylight ground; the render brain waits for d-2's first tile.
+
+**The wedge, and what caught it (the run's real work).** The first E2E wedged --
+30 minutes, each attempt burning the full 900s boot budget. Ground truth over
+theory: `"Thylacine login:"` appeared **0 times** in the guest log (the scenario
+died at its first expect, the getty prompt), yet BOTH `"Thylacine textual shell"`
+(ut) and `"halcyond: session up"` appeared and the log **ended** at "session up".
+The joey boot flow is `do_recover_e2e` -> `do_login_e2e` (seeded michael+cora) ->
+`SYS_BOOT_COMPLETE` -> `session_getty_loop` (interactive). Root cause: the SEEDED
+`do_login_e2e` michael login read `/lib/halcyon/session=on` and spawned
+`halcyond --session`, which **never exits** -> `login_e2e_run`'s `t_wait_pid_for`
+never returned -> the boot hung *before* BOOT_COMPLETE and the getty. So the getty
+prompt never printed, and my scenario (which drives the interactive getty) wedged.
+
+This was a **real defect**, not a test artifact: any boot-probes image with the
+lever on hangs at boot. The seeded boot-test is testing login->shell (it needs
+login to EXIT); the session is interactive and non-terminating. Fix: the seeded
+login opts out via `--no-session` (joey `login_e2e_run` passes it; login honors it
+as `session_halcyon = read_session_lever() && !--no-session`), restoring its
+login->ut behavior. The interactive getty (`session_getty_loop`) passes no flag,
+so it reads the lever. `do_recover_e2e` was unaffected (its recovery login exits
+before any shell spawn). Generalizes: a non-terminating child breaks any waiter
+that assumes the child exits, and a lever that changes login's terminal behavior
+must account for *every* login invocation, not just the interactive one.
+
+Post-fix, the E2E PASSed in **27s, first attempt**: `Thylacine boot OK` -> getty
+prompt -> `login michael` -> `halcyond: session up 1280x800 px` -> `LS-CI PASS`.
+The guest also went straight to `tapestryd: scanout direct 0` -- halcyond took
+Direct scanout with no aurora contention on the leaf, so d-1b is mostly the
+logout/resume + the multi-renderer relinquish case rather than a fight for the
+display.
+
+**A wrong turn I caught cheaply.** I ran `expect -c "source ls-gfx-session.exp"`
+as a "syntax check" -- `source` *executes* the scenario, which called `lc_boot`
+and started a VM boot on the mac (which the operator held for Duke3D). The
+`head -3` pipe-close SIGPIPE'd the chain before qemu fully launched; `ps` confirmed
+no stray from my tree. Lesson: never `expect -c source <scenario>` for a parse
+check -- Tcl `info complete` on the file content validates balance without
+executing.
+
+**Coordination.** The operator was interactively testing Duke3D on the mac
+(aux's DX arc) and asked me to keep off until they released; I did all the
+core-free work (code, harness, docs, self-audit) while queued, asked via yip 0047
+rather than stealing an expired lease, and built only once they said "Free now."
+
+**I-22, verified by construction:** tapestryd's `actor()` (`server.rs:15184`)
+classifies an ordinary-user, non-renderer peer as `Actor::Session(principal)`,
+ungated, owning only its own principal's subtree -- no cross-user authority, no
+delegation. The property the KT-1 audit must prosecute holds at the source.
+
+**Open (recorded, not lost):** d-1b (aurora relinquish + logout resume); a
+login-loop if a lever-on image lacks tapestryd (a fallback-to-ut would be more
+robust); CONSOLE_OWNER semantics for the session (real at d-2). The full default
+suite + SMP gate run at the KT-1 batch close, not per-commit.
+
 ## 2026-09-04 (run 23, Opus 4.8) -- KT-1.5b-i: the halcyond consumer; the near-gap I proved closed by reading the kthread
 
 Run 22 landed the kernel enabler (a Loom ring made pollable) and self-compacted at
