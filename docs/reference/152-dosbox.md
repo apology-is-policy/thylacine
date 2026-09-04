@@ -153,6 +153,38 @@ sits after `if (!CPU_CycleAutoAdjust) return`, so it is **silent under a fixed
 with `cycles=auto` to observe the hunt, ship with `cycles=fixed` to silence it.
 Analyzer: `scratchpad/dx5-cyclelog-analyze.py` (not committed).
 
+## DX-7: software Voodoo/Glide -- the Tomb Raider showcase
+
+The 3dfx Voodoo + Glide stack is **already compiled into our DOSBox-X** (the
+source-list generator walks `hardware/` + `builtin/`, and Voodoo is not gated by a
+compile define -- it is runtime-selected by `voodoo_card=`). Because `C_OPENGL` is
+**off** in `config.h`, `voodoo.cpp` maps `voodoo_card=auto` (the default) ->
+`emulation_type=1` = the **CPU software rasteriser** (`voodoo_emu.cpp`) -- **no host
+GL**. A DOS Glide game loads `GLIDE2X.OVL`, which DOSBox-X supplies from its
+built-in blob (`builtin/glide2x.cpp`) and routes to the emulated card. So software
+Voodoo is a **launch-config path on the existing, already-audited CAP_JIT dynrec
+(I-42)** -- no kernel change, no new build.
+
+**Verified with Tomb Raider (1996), the 3dfx DOS demo** (`TOMB.EXE` = DOS4GW, the
+3dfx build; `/tombraider` = the "City of Vilcabamba" demo, archive.org `tomb3dem`),
+launched with `-set "voodoo voodoo_card=software"`:
+- the emulated Voodoo LFB maps (`VOODOO LFB now at ...` on serial);
+- the 3dfx title renders on the scanout;
+- **the in-game 3D renders** -- Lara in the Vilcabamba cave/cavern, textured Mayan
+  architecture, correct perspective;
+- **keyboard input drives Lara through the 3D world** (walk/turn -> the view
+  updates). The first 3D-accelerated gameplay on Thylacine.
+
+**Run model** (as Duke3D): `/tombraider` is a read-only SYSTEM master; copy to a
+writable home (`cp -r /tombraider ~/tombraider`) then
+`dosbox-x -set "cpu core=dynamic_rec" -set "cpu cycles=fixed 60000" -set "voodoo voodoo_card=software" -c "mount c ~/tombraider" -c "c:" -c "TOMB.EXE"`.
+
+**Owed follow-up:** `build_tombraider_fixture` (a build-time archive.org fetch,
+sha256-pinned, mirroring `build_duke3d_fixture`) is not yet written -- the pool bake
+is currently conditional on a locally-staged `build/tombraider/stage` (the demo is
+game data, never committed -- the quake/Duke3D posture). Pinning the fetch needs a
+networked build context.
+
 ## The gates (`tools/interactive/`)
 
 | Gate | Proves |
@@ -162,6 +194,7 @@ Analyzer: `scratchpad/dx5-cyclelog-analyze.py` (not committed).
 | `ls-gfx-dosbox-conf.exp` | DX-3b: `-conf` loads settings + runs the `[autoexec]` (OUT.TXT with no `-c` flags) |
 | `ls-gfx-dosbox-dynarec.exp` | DX-4: `core=dynamic_rec` runs a DOS program correctly (I-42 dual-map) |
 | `ls-gfx-dosbox-duke3d.exp` | DX-5a: Duke3D under `core=dynamic_rec` — CAP_JIT acquired on serial + a colour-rich title render (≥30 quantized buckets) + a keystroke advancing the frame |
+| `ls-gfx-dosbox-tombraider.exp` | DX-7: Tomb Raider 3dfx under software Voodoo — CAP_JIT + `VOODOO LFB` mapped + colour-rich title render + ENTER changes the frame (in-game 3D verified by hand) |
 
 ## Performance characteristics
 
@@ -197,9 +230,11 @@ Two dynrec-vs-interpreter attempts, both instructive:
 - **Sound fully stubbed** (v1.0 non-goal): all DOSBox-X audio (PC speaker, SB16,
   AdLib/OPL, GUS, MIDI) compiles to a null mixer via the forced dummy driver
   (`0004`). A future audio server + virtio-sound (post-v1.0) lights it up.
-- **Glide/Voodoo passthrough (DX-7) is unbuilt** — it needs the host GL-accel
-  path (Warp/venus/Mesa/llvmpipe), which is not baked in the current tree.
-  Low-level Voodoo (CPU/CAP_JIT) is the un-gated fallback.
+- **Software Voodoo/Glide is AS-BUILT** (DX-7, verified with Tomb Raider — see
+  above): CPU-rasterised, no host GL, on the CAP_JIT dynrec. It is CPU-heavy
+  (fine for a 1996 game on M2, not blazing). **GL-accelerated Voodoo** (fast,
+  high-res) is the unbuilt DX-7-proper path — it needs the host GL-accel arc
+  (Warp/venus/Mesa/llvmpipe).
 - **Win9x (DX-6) unbuilt** — resource + dynarec heavy; DX-4 is its prerequisite.
 - **The run model copies the game to the user's home** — `/duke3d` is read-only
   SYSTEM-owned; DOSBox-X needs a writable drive, so the game is copied first
@@ -211,5 +246,5 @@ Two dynrec-vs-interpreter attempts, both instructive:
 
 DX-1..DX-4 + DX-5a AS-BUILT (`core=normal` floor, `core=dynamic_rec` via CAP_JIT,
 Duke3D showcase). DX-5 (the cycles-auto oscillation fix + telemetry) landed this
-session. DX-6 (Win9x) and DX-7 (Glide passthrough) unbuilt. Design + exit
+session. DX-7 software Voodoo/Glide AS-BUILT (Tomb Raider). DX-6 (Win9x) + DX-7 GL-accelerated Voodoo unbuilt. Design + exit
 criteria: `docs/DOSBOX.md`.

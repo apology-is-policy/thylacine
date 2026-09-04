@@ -23,6 +23,52 @@ needed the operator.
 
 ---
 
+## 2026-09-04 (aux, Opus 4.8, effort max) -- DX-7: Voodoo/Glide 3D on Thylacine (Tomb Raider)
+
+Operator: "let's give Voodoo/Glide a shot." First target was Unreal (they had the
+demo) -- but inspecting it showed a 100% Win32 game (Unreal.exe PE32; every
+renderer, incl. SoftDrv, a Win32 DLL; InstallShield installer): DOSBox-X runs the
+hardware, not Win32, so without a Win9x install it cannot run, and that is a
+three-mountain path (Win9x media + DX-6 Win9x-guest + DX-7). Pivoted to a
+DOS-native Glide game.
+
+**The surprise: no build work.** Our DOSBox-X already has the ENTIRE Voodoo/Glide
+stack compiled in -- the source-list generator walks hardware/ + builtin/, and
+Voodoo is runtime-selected by voodoo_card=, not a compile define. Because C_OPENGL
+is OFF in our config, voodoo.cpp maps voodoo_card=auto -> emulation_type=1 = the
+CPU software rasteriser (voodoo_emu.cpp), NO host GL; the built-in GLIDE2X.OVL
+(builtin/glide2x.cpp) supplies the Glide the DOS game loads. So software Voodoo is
+a launch-config path on the already-audited CAP_JIT dynrec (I-42) -- no kernel
+change, no new build. (Binary check: Voodoo_Initialize + GLIDE2X present.)
+
+**Tomb Raider (1996), the free 3dfx demo (archive.org tomb3dem).** DOS game:
+TOMB.EXE (DOS4GW, the 3dfx build -- "Failed to download texture to 3Dfx board" +
+FX_GLIDE_SWAPINTERVAL in the binary), no bundled GLIDE2X.OVL (uses DOSBox's
+built-in). Staged to /tombraider (build.sh populate mirroring Duke3D), launched
+with -set "voodoo voodoo_card=software". RESULT (screenshotted): the 3dfx title
+renders (VOODOO LFB mapped on serial); the IN-GAME 3D renders -- Lara in the
+Vilcabamba cave/cavern, textured Mayan architecture, correct perspective; and
+keyboard input walks her through the 3D world (corridor -> cavern). First
+3D-accelerated gameplay on Thylacine, no host GL.
+
+**A gate wrong-turn, caught.** The first ls-gfx-dosbox-tombraider gate FAILED
+witness-4 "frame went flat after input (26 buckets)". NOT a TR failure: I had
+copied Duke3D's assertion (post-ENTER frame stays >= 30 colour buckets), but TR's
+ENTER advances toward the DARKER level, legitimately dropping buckets -- a test
+double stricter than the contract. Fixed: the input witness is frame-CHANGED
+(hash) + still-rendering (not black, buckets > 8), not stays-colourful. The kernel
+was green throughout (1463 tests, 0 fail).
+
+**Honest scope.** Software Voodoo is CPU-rasterised (fine for a 1996 game on M2,
+not blazing); GL-accelerated Voodoo (fast) is the unbuilt DX-7-proper path (rides
+the Warp/GL arc). build_tombraider_fixture (a build-time archive.org fetch,
+sha256-pinned, like Duke3D) is OWED -- the pool bake is currently conditional on a
+locally-staged build/tombraider/stage (the demo is game data, never committed;
+network is sandboxed here, so the operator downloaded it). Unreal remains a
+Win9x-arc target (DX-6), not attempted.
+
+---
+
 ## 2026-09-04 (aux, Opus 4.8, effort max) -- the REAL Duke3D oscillation cause: DOSBox cycles=auto
 
 The frame-intent pin (the entry below) was necessary but NOT the cause. The

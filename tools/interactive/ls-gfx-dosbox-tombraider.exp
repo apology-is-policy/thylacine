@@ -1,0 +1,87 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-dosbox-tombraider.exp -- the DX-7 (Cryptid) Voodoo/Glide
+# showcase: the Tomb Raider (1996) 3dfx DOS demo runs under DOSBox-X's SOFTWARE-
+# emulated 3dfx Voodoo on Thylacine -- the first 3D-accelerated game on the OS.
+#
+# TOMB.EXE (DOS4GW, the 3dfx build) drives Glide -> DOSBox-X's built-in GLIDE2X.OVL
+# -> voodoo_emu (the CPU rasteriser; C_OPENGL is off so voodoo_card=software, no
+# host GL), executed by the CAP_JIT dynrec (I-42). No kernel change: the Voodoo
+# stack is already compiled in; this is a launch-config path (voodoo_card=software).
+#
+# WITNESSES:
+#   1. CAP_JIT acquired on serial -- the dynrec code cache is a dual-mapped CODE
+#      Burrow (I-42), same as Duke3D.
+#   2. "VOODOO LFB now at" on serial -- the game mapped the emulated Voodoo card's
+#      linear frame buffer, i.e. the software Voodoo engaged (the 3dfx build errors
+#      "Failed to download texture to 3Dfx board" if the card is absent).
+#   3. A colour-rich title render (>= 30 quantized buckets) on the scanout.
+#   4. ENTER changes the frame (still rendering, not black) -- keyboard reached
+#      the dynrec-executed game. (TR darkens toward the level on ENTER; the
+#      witness is frame-CHANGED, not stays-colourful.)
+# The in-game 3D (Lara in the Vilcabamba cave/cavern, moving on input) is verified
+# by hand (docs/reference/152-dosbox.md screenshots); the menu-nav-to-level path is
+# left out of the deterministic gate as timing-fragile.
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+proc gfx_dump_or_fail {out} { global repo qmp; if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} { return $err }; return "" }
+proc gfx_fp {png} { global repo; return [exec python3 $repo/tools/interactive/gfx_fp.py $png] }
+proc qkey {qcode} { global repo qmp; catch {exec $repo/tools/qmp-send-key.sh -s $qmp $qcode} }
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# /tombraider is a read-only SYSTEM master; copy to a writable home (the quake shape).
+lc_send "cp -r /tombraider /home/michael/tombraider"
+after 10000
+lc_send "dosbox-x -set \"cpu core=dynamic_rec\" -set \"cpu cycles=fixed 60000\" -set \"voodoo voodoo_card=software\" -c \"mount c /home/michael/tombraider\" -c \"c:\" -c \"TOMB.EXE\" &"
+
+# WITNESS 1: the dynrec cache was minted through CAP_JIT.
+set timeout 45
+expect {
+    -re {dosbox-x: CAP_JIT acquired}   { lc_step "dynrec: CAP_JIT acquired -- TOMB.EXE's code cache is a dual-mapped CODE Burrow (I-42)" }
+    -re {E_Exit|Can't init SDL}        { lc_fail "dosbox-x E_Exit before bring-up" }
+    "snare:"                           { lc_fail "dosbox-x faulted (snare) during TR bring-up" }
+    -re {EXTINCTION:}                  { lc_extinction_fail "kernel extinction during TR bring-up" }
+    timeout                            { lc_fail "no CAP_JIT-acquired line within 45s" }
+}
+
+# WITNESS 2: the emulated Voodoo card engaged (LFB mapped).
+set timeout 30
+expect {
+    -re {VOODOO LFB now at}            { lc_step "voodoo: LFB mapped -- the software-emulated 3dfx Voodoo engaged (Glide via the built-in GLIDE2X.OVL)" }
+    -re {Failed to download texture to 3Dfx board}  { lc_fail "TR could not talk to the Voodoo board -- the software Voodoo did not engage" }
+    -re {EXTINCTION:}                  { lc_extinction_fail "kernel extinction awaiting VOODOO LFB" }
+    timeout                            { lc_fail "no 'VOODOO LFB now at' within 30s -- the Voodoo card did not activate" }
+}
+
+# WITNESS 3: the 3dfx title rendered on the scanout.
+after 20000
+if {[gfx_dump_or_fail /tmp/lstr-1.png] ne ""} { lc_fail "screendump 1 failed" }
+set fp1 [gfx_fp /tmp/lstr-1.png]
+set h1 [lindex $fp1 0]; set c1 [lindex $fp1 1]
+if {$c1 < 30} { lc_fail "TR title not colour-rich ($c1 buckets < 30) -- render did not reach the scanout" }
+lc_step "render: TR 3dfx title on the scanout ($c1 colour buckets, >= 30)"
+
+# WITNESS 4: keyboard reaches the dynrec-executed game (ENTER changes the frame).
+qkey ret
+after 2500
+qkey ret
+after 2500
+if {[gfx_dump_or_fail /tmp/lstr-2.png] ne ""} { lc_fail "screendump 2 failed" }
+set fp2 [gfx_fp /tmp/lstr-2.png]
+set h2 [lindex $fp2 0]; set c2 [lindex $fp2 1]
+# TR's ENTER advances the title toward the (darker) menu/level -- unlike Duke3D it
+# does NOT stay at a colour-rich menu, so the witness is "the frame CHANGED and is
+# still rendering (not black)", NOT "stays >= 30 buckets" (that Duke3D-shaped
+# assertion is stricter than TR's contract and fails correct code).
+if {$h1 eq $h2} { lc_fail "frame did not change after ENTER ($h1) -- keyboard did not reach the game" }
+if {$c2 < 8} { lc_fail "frame went BLACK after input ($c2 buckets) -- the game stopped rendering" }
+lc_step "input: ENTER changed the frame ($c1 -> $c2 buckets, hash $h1 -> $h2, still rendering) -- keyboard reached the dynrec-executed game"
+
+lc_quit
+lc_pass "ls-gfx-dosbox-tombraider: DX-7 showcase verified -- Tomb Raider 3dfx runs\
+         under core=dynamic (CAP_JIT dynrec) on the SOFTWARE-emulated Voodoo (Glide),\
+         renders, and takes input"
+exit 0

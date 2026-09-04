@@ -3546,6 +3546,21 @@ populate_stratum_pool() {
         echo "==> populate pool: Duke3D shareware baked at /duke3d"
     fi
 
+    # --- DX-7 (Cryptid): the Tomb Raider 3dfx DOS demo (-> /tombraider). Staged
+    # by copying build/tombraider/stage; baked iff TOMB.EXE is present. The 3dfx
+    # build (TOMB.EXE + DOS4GW) drives Glide -> DOSBox-X's built-in GLIDE2X.OVL ->
+    # the software-emulated Voodoo (voodoo_card=software; C_OPENGL off). Read-only
+    # SYSTEM master; the gate copies it to a writable home (the quake shape).
+    local tombraider_stage="$BUILD_DIR/tombraider/stage"
+    if [[ -f "$tombraider_stage/TOMB.EXE" ]]; then
+        echo "==> populate pool: baking Tomb Raider 3dfx demo ($tombraider_stage -> /tombraider, $(du -sh "$tombraider_stage" | cut -f1))"
+        "$stratum_fs_bin" -s "$sock_path" put "$tombraider_stage" /tombraider \
+            || { echo "==> populate pool: put /tombraider FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after /tombraider FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: Tomb Raider 3dfx demo baked at /tombraider"
+    fi
+
     # --- VIVARIUM V-7: the container bundles (-> /vivarium; staged by
     # stage_viv_bundles per docs/VIVARIUM.md section 7.2). The probe bundle is
     # the V-7 boot gate's fixture -- joey spawns `viv run /vivarium/probe`
@@ -3813,6 +3828,7 @@ populate_stratum_pool() {
     local vp_storm="$BUILD_DIR/storm/stage"
     local vp_quake="$BUILD_DIR/quake/stage"
     local vp_duke3d="$BUILD_DIR/duke3d/stage"
+    local vp_tombraider="$BUILD_DIR/tombraider/stage"
 
     # /thylacine-version is written unconditionally near the top of this
     # function, so it is the POSITIVE CONTROL: it proves `stat` can see a file
@@ -3850,6 +3866,10 @@ QUAKE /quake/id1/pak0.pak"
     if [[ -f "$vp_duke3d/DUKE3D.GRP" ]]; then
         bake_want="$bake_want
 DUKE3D /duke3d/DUKE3D.GRP"
+    fi
+    if [[ -f "$vp_tombraider/TOMB.EXE" ]]; then
+        bake_want="$bake_want
+TOMBRAIDER /tombraider/TOMB.EXE"
     fi
 
     local bake_missing=""
