@@ -74,12 +74,37 @@ keyboard/click **menus** + wedge-dismiss (menu CQEs). Console output *and* every
 compositor-event class flow through the one poll. Cost: ~7 min mac hold, one
 userspace build + two paired pool bakes + two HVF boots.
 
-**Open.** KT-1.5b-ii (halcyond spawns one kaua-term + ingests grid/scrollback --
-the tile path) is next; then KT-1.5c (multi-tile, unblocks H-4d); then the batched
-KT-1 audit (Opus fallback, Fable credit-exhausted) + SMP gate + push. The F7 repro
-rides that audit. The wart's *latency* improvement is structural + proven-correct
-but not yet **measured** in ms -- a number is a cheap follow-up if the operator
-wants it.
+**KT-1.5b-ii-a landed (`a0324198`) -- the tile model, host-tested.** The piece that
+gives halcyond the live grid it never had (as-built it is single-console,
+flow-only, no grid, no child): `grid.rs` (a fixed rows x cols vt::Cell buffer,
+CellDiff-mutated, OOB writes dropped since a tile is untrusted -- 14.11.12
+format-fuzz) + `tile.rs` (the `apply(Record)` dispatch: CellDiff->grid,
+ScrollOff->scrollback, Osc1936Raw->the SAME beacon parser the console uses,
+Mode->render mode) + `transcript.rs` (extract `intern_style`, add
+`push_scrolled_rows`). 13 new host tests (6 grid + 7 tile), 75 pass; clippy +
+rustfmt clean; device build green. Pure logic, no boot -- the render/spawn wiring
+is ii-b.
+
+**Stopped at a design fork (operator's call).** KT-1.5b-ii-b -- the spawn + render
+wiring -- is not a "just implement it" chunk: it is halcyond ceasing to be a VT
+host and instead spawning a crash-isolated kaua-term that hosts the `ut`, which
+CHANGES the login/session flow (today login runs on the kernel `/dev/cons` that
+halcyond mirror-renders; a kaua-term hosts its own `ut` on a pts) and touches the
+trusted path (I-27). Section 14 pins the END STATE (halcyond renders kaua-term
+tiles; aurora keeps the trusted console) but NOT the incremental transition: does
+the first tile REPLACE the console (pulling in login/I-27 now) or PROVE the
+pipeline non-invasively (deferring login to 1.5c)? That is a load-bearing,
+scripture-level decision -- the design-conversation pattern says land it as
+scripture BEFORE code -- and on Opus with the operator away the standing rule is
+stop at the first user-input item. Surfaced as a blocking question with three
+researched options (prove-first / replace-now / skip-to-multi-tile). NOT a
+convenience stop: making a unilateral console<->login<->trusted-path call while
+the operator is away is exactly what the rule forbids.
+
+**Also open.** The batched KT-1 audit (Opus fallback, Fable credit-exhausted) +
+SMP gate + push ride the arc close; the F7 repro rides that audit; the 1.5b-i
+latency win is structural + proven-correct but not yet measured in ms (a cheap
+follow-up if wanted).
 
 ---
 
