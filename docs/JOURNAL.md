@@ -23,6 +23,67 @@ needed the operator.
 
 ---
 
+## 2026-09-04 (run 25, Opus 4.8) -- KT-1.5d-1b: the display handoff; the drain-resume flap and the compositor-backgrounding redesign
+
+Run 24 queued d-1b as "aurora relinquish -> Direct(halcyond) + logout resume." Run
+25 built it -- but the design d-1a had recorded was WRONG, the E2E caught it, and the
+operator ratified a better one. Landed `fe16a8b0` (scripture) + `9a4b9c0b` (impl),
+both local, batched to the KT-1 close. `ls-gfx-session` E2E PASS, zero flap.
+
+**The surfaced fork (on Opus, per the operator-away rule).** d-1b's mechanism was a
+real fork touching the load-bearing fbcon, so on the Opus fallback I surfaced it
+(AskUserQuestion) with the prior-art research (Plan 9 rio: the window system owns
+the display while up; Fuchsia/Wayland: the compositor decides ownership + tells the
+client) and recommended the "emergent, no new primitive" option: aurora relinquishes
+its surface when tiled and RESUMES when `/dev/consdrain` shows output (the post-logout
+login prompt), on the premise the drain is idle during a session. The operator picked
+it.
+
+**The premise was false, and the E2E proved it.** The E2E passed its markers but the
+log showed an 18-cycle/session relinquish<->resume FLAP. Ground truth (elusive-bug
+playbook: stop theorizing, OBSERVE): a FLAPDBG probe read the waking drain bytes --
+they decoded to `tapestryd: retire surface 0\r\n...`. `SYS_PUTS`/`say!` routes
+through `cons_output_write` -> `cons_emit` (`kernel/syscall.c` #76, deliberately, so
+daemon diagnostics reach the renderer), so the drain mirrors ALL daemon output and is
+NEVER idle during a session. aurora's own relinquish made tapestryd log via say! ->
+the drain -> aurora's drain-resume fired -> a self-sustaining feedback loop. Two
+theory-driven fixes (drain-in-the-relinquish-pass; suspect the poll readiness) each
+failed a re-test before the probe settled it -- the playbook's "a theory contradicted
+twice -> instrument and observe" earning its keep.
+
+**The ratified redesign (compositor-backgrounding).** I surfaced the corrected
+research: "drain has data" cannot mean "logout"; the resume signal must come from the
+compositor (the display owner) -- the rio/Fuchsia/Wayland answer. The operator chose
+it: a SESSION leaf (a real user principal) outranks SYSTEM leaves; when a session is
+visible, `Comp::reconcile` BACKGROUNDS the console renderer (excluded from the scanout
+decision, not composited, not FRAME-ticked). The elegant part: **aurora needed ZERO
+changes** -- its 60 Hz FRAME heartbeat IS dormancy (no FRAME -> it blocks in
+`wait_event`) and resume (FRAME returns -> it renders) for free -- so the whole
+mechanism is `server.rs` reconcile + frame_tick + compose. BACKWARD-COMPATIBLE by
+construction: no session leaf -> nothing backgrounds -> the decision is byte-identical
+to the pre-d-1b logic, so every pre-session + gfx-test path is untouched.
+
+**What the E2E witnesses.** ls-gfx-session drives the full cycle via a test-only
+scripted logout (halcyond auto-exits after 30 frames -- a stand-in for a session tile
+exiting at d-2/d-3; a test DRIVER, not a behaviour double): Direct(console) ->
+`background surface 0 (session took the display)` -> `scanout direct 1` (halcyond) ->
+logout -> `foreground surface 0 (session gone)` -> `scanout direct 0` (console).
+Background 1x, foreground 1x. Two of my own E2E bugs were caught + fixed (both
+test-only): an assertion ordering (background fires BEFORE "session up" -- it rides
+the surface HOST, not the first present) and a regex with a space before "session"
+where the log has "(session".
+
+**Open / deferred to the KT-1 batch close.** The focused audit of the reconcile
+change (audit-bearing scanout, I-40-adjacent); the vault ring of sub-tapestryd +
+sub-substrate-machine (both vault-owned per quaestor); the 150-halcyond autoexit note
++ an AUDIT-TRIGGERS note. aurora was reverted to committed (the drop/recreate code is
+gone).
+
+**Next:** KT-1.5d-2 (one session tile) -> d-3 (multi-tile -> H-4d) -> the batched
+KT-1 audit + SMP gate -> push.
+
+---
+
 ## 2026-09-04 (run 24, Opus 4.8) -- KT-1.5d-1a: the per-user session bootstrap; the lever that hung the boot
 
 Run 23 self-compacted at a design->impl boundary; the operator had ratified 14.12
