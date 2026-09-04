@@ -1,0 +1,148 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-throttle.exp -- the frame-intent throttle regression
+# (reference/139 "Frame intent"). The deterministic guard for the fix to the
+# ~500ms FPS oscillation the operator saw playing Duke3D under core=dynamic.
+#
+# THE MECHANISM UNDER TEST: a VISIBLE surface that declares frame-intent DYNAMIC
+# pins the compositor's synthesized clock to the ctl rate, even when it goes
+# idle (no presents, no input) -- so a continuous-animation client the present
+# heuristic cannot detect never gets its rate flapped. A STATIC surface (the
+# default: console, chrome) still throttles when idle.
+#
+# HOW IT IS PROVEN, deterministically + host-independently: tapestry-demo,
+# spawned fullscreen with "idle", presents ONCE (taking the scanout -> visible)
+# then STOPS presenting -- so animating() falls to false and the compositor's
+# virtio-input last_input goes stale (the serial console we drive is a separate
+# device, so our own keystrokes never refresh it). The ONLY thing that can hold
+# the clock is then the frame-intent DYNAMIC pin. The witness is tapestryd's own
+# serial line "idle-throttle 60 -> 15 Hz (... dyn=<bool>)":
+#
+#   Leg A  static idle -> the line MUST appear   (the idle condition is reached;
+#                                                 the throttle still works)
+#   Leg B  dynamic idle -> the line MUST NOT appear (the pin holds the clock)
+#
+# The two legs differ by ONE token (static vs dynamic). Leg A is the positive
+# control: without it, Leg B's "no -> 15" could mean "the pin works" OR "the
+# idle condition was never reached" -- Leg A rules out the latter.
+#
+# SABOTAGE (what makes the green mean something): revert the `|| any_dyn`
+# disjunct in usr/tapestryd/src/main.rs. Leg A still passes (static throttles
+# regardless); Leg B FAILS with "idle-throttle 60 -> 15 Hz (... dyn=true)" --
+# the surface declared DYNAMIC yet the clock dropped anyway. Run it once with
+# the disjunct removed to confirm this gate can fail.
+#
+# HVF (the ls-gfx sibling; TCG cannot pace a realistic clock). SKIPs (77) when
+# tapestry-demo is not baked.
+
+set ::env(THYLACINE_ACCEL) hvf
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp [lc_qmp_sock]
+
+proc gfx_fp {png} {
+    return [exec python3 [file join [file dirname [info script]] gfx_fp.py] $png]
+}
+proc gfx_dump_or_fail {out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} { return $err }
+    return ""
+}
+
+# Force the compositor clock to the ctl rate (60 Hz): inject a virtio-input
+# event so the input drain sets input_seen -> last_input resets -> the throttle's
+# quiet_ms goes to 0. This establishes a KNOWN 60 Hz state, so the subsequent
+# drop (STATIC) or hold (DYNAMIC) is a FRESH, observable transition -- the demo
+# alone can leave the clock already throttled at 15 with no new transition to
+# see, and forcing 60 first is what makes the sabotage catchable (a dynamic leg
+# stuck at 15 would otherwise pass spuriously). Mirrors the operator's scenario:
+# input, then quiet. A tablet move AND a no-op modifier keypress -- whichever the
+# compositor's drain counts wins; the modifier inserts no shell character.
+proc force_clock_60 {} {
+    global repo qmp
+    catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "abs 16000 16000"}
+    catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k shift}
+}
+
+# Bring a visible tapestry-demo up in `intent` mode ("dynamic"|"static"), idle,
+# and CONFIRM it took the scanout (colour-rich plasma, >= 30 buckets -- a text
+# console reads far lower). Leaves a consumed serial buffer via a unique marker,
+# so the caller's throttle watch sees only transitions from THIS point on (an
+# earlier aurora throttle, before the demo took the scanout, must not count).
+proc bring_up_demo {intent marker} {
+    global repo qmp
+    lc_send "tapestry-demo $intent idle &"
+    # Let it connect, present frame-0 (take the scanout), and settle to idle.
+    after 4000
+    if {[gfx_dump_or_fail /tmp/thr-$intent.png] ne ""} {
+        lc_fail "throttle: screendump failed bringing up the $intent demo"
+    }
+    set fp [gfx_fp /tmp/thr-$intent.png]
+    set c [lindex $fp 1]
+    if {$c < 30} {
+        lc_fail "throttle: the $intent tapestry-demo is not on the scanout\
+                 ($c colour buckets, < 30 -- expected the plasma). A hidden\
+                 surface is visible-gated OUT, so the throttle assertion below\
+                 would be meaningless; fix the bring-up first."
+    }
+    lc_step "throttle: $intent tapestry-demo visible on the scanout ($c buckets)"
+    # Consume the serial buffer up to now (past any earlier aurora transition).
+    lc_send "echo $marker"
+    expect {
+        -re $marker  {}
+        timeout      { lc_fail "throttle: marker $marker never echoed" }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Leg A -- STATIC idle: the throttle MUST engage (the positive control).
+# ---------------------------------------------------------------------------
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+bring_up_demo static THR_WATCH_A
+force_clock_60
+set timeout 10
+expect {
+    -re {idle-throttle 60 -> 15 Hz}  {
+        lc_step "throttle: STATIC idle throttled to 15 Hz -- the idle condition\
+                 is reached and the throttle still works (control OK)"
+    }
+    -re {EXTINCTION:}                 { lc_extinction_fail "kernel extinction (leg A)" }
+    timeout {
+        lc_fail "throttle: STATIC idle did NOT throttle within 10s -- the\
+                 demo-idle mechanism is not reaching the idle condition, so\
+                 Leg B cannot be trusted. Fix the reproduction before reading\
+                 Leg B's result."
+    }
+}
+lc_quit
+
+# ---------------------------------------------------------------------------
+# Leg B -- DYNAMIC idle: the throttle MUST NOT engage (the fix).
+# ---------------------------------------------------------------------------
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+bring_up_demo dynamic THR_WATCH_B
+force_clock_60
+set timeout 10
+expect {
+    -re {idle-throttle 60 -> 15 Hz \(quiet_ms=\d+ animating=false dyn=true\)} {
+        lc_fail "throttle: a DYNAMIC surface throttled anyway (dyn=true, clock\
+                 dropped to 15) -- any_visible_dynamic is not pinning the clock.\
+                 This is the exact bug (or the sabotage)."
+    }
+    -re {idle-throttle 60 -> 15 Hz} {
+        lc_fail "throttle: the clock dropped to 15 with a visible DYNAMIC\
+                 surface up (the pin did not hold)"
+    }
+    -re {EXTINCTION:}  { lc_extinction_fail "kernel extinction (leg B)" }
+    timeout {
+        lc_step "throttle: DYNAMIC idle stayed pinned (no -> 15 for 10s) -- the\
+                 frame-intent DYNAMIC pin holds the clock (the fix)"
+    }
+}
+lc_quit
+
+lc_pass "ls-gfx-throttle: frame-intent verified -- a visible DYNAMIC surface\
+         pins the compositor clock (no idle-throttle flap), a STATIC one\
+         throttles. reference/139 Frame intent."

@@ -188,6 +188,11 @@ static int THYLACINE_CreateWindow(_THIS, SDL_Window *window)
         SDL_free(wd);
         return SDL_SetError("thylacine: surface create failed");
     }
+    /* reference/139 "Frame intent": an SDL app is a game/video/continuous
+     * renderer -- declare DYNAMIC so the compositor pins the frame clock while
+     * this surface is visible. Best-effort: a failed declaration is non-fatal
+     * (the surface still works, just throttle-eligible). */
+    (void)thyla_tap_intent(&wd->tap, 1);
     window->driverdata = wd;
     vd->window = window;
 

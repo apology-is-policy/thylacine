@@ -274,6 +274,17 @@ enum Mint {
     Claim(u128),
 }
 
+/// reference/139 "Frame intent": a surface's throttle posture. Static (default)
+/// is throttle-eligible; Dynamic pins the compositor clock to the ctl rate
+/// while the surface is visible (a game, a video). Declared with
+/// `Surface::intent`.
+#[cfg(feature = "guest")]
+#[derive(Clone, Copy, PartialEq)]
+pub enum FrameIntent {
+    Static,
+    Dynamic,
+}
+
 #[cfg(feature = "guest")]
 impl Surface {
     /// A private ring + session, and a fullscreen surface on it (the
@@ -726,6 +737,16 @@ impl Surface {
             return Err(TapError::Protocol);
         }
         Ok(())
+    }
+
+    /// reference/139 "Frame intent": declare this surface's throttle posture.
+    /// Runtime-settable (a toggle) -- a video player is Dynamic while playing,
+    /// Static when paused. Server-side default is Static until set.
+    pub fn intent(&self, intent: FrameIntent) -> Result<(), TapError> {
+        self.surface_ctl(match intent {
+            FrameIntent::Static => "intent static",
+            FrameIntent::Dynamic => "intent dynamic",
+        })
     }
 
     /// cfg-3: write one global-ctl command on THIS connection. The

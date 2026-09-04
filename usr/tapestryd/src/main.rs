@@ -481,20 +481,46 @@ impl Driver for Tapestryd {
             // then pick the effective tick rate. Never throttle under test-mode
             // (the frozen clock is ctl-driven). `base_hz` is the ctl rate (60,
             // or whatever `tick`/clock ctl set); `eff_hz` drops to IDLE_HZ once
-            // the console has been input-quiet for IDLE_AFTER_MS.
+            // the console has been input-quiet for IDLE_AFTER_MS AND no visible
+            // surface declared frame-intent DYNAMIC (reference/139 "Frame
+            // intent") AND the present heuristic sees no sustained visible
+            // animation. The DYNAMIC disjunct pins the ctl rate for a
+            // continuous-animation client the present floor cannot detect (a
+            // game presenting near ~8 Hz with a held key), while it is visible.
             if input_seen {
                 last_input = Instant::now();
             }
             let base_hz = self.comp.clock_hz;
-            let eff_hz = if frozen
-                || (last_input.elapsed().as_millis() as u64) < IDLE_AFTER_MS
-                || self.comp.animating()
-            {
+            let quiet_ms = last_input.elapsed().as_millis() as u64;
+            // Probe the activity signals only on the idle path (preserving the
+            // original short-circuit: not frozen, past the quiet threshold), so
+            // test-mode's frozen clock is never perturbed and the O(surfaces)
+            // visible-dynamic scan runs only when it can matter.
+            let (animating, any_dyn) = if frozen || quiet_ms < IDLE_AFTER_MS {
+                (false, false)
+            } else {
+                // Sequential (not a tuple literal): animating() borrows &mut,
+                // any_visible_dynamic() borrows &self -- separate statements
+                // keep the borrows non-overlapping.
+                let a = self.comp.animating();
+                let d = self.comp.any_visible_dynamic();
+                (a, d)
+            };
+            let eff_hz = if frozen || quiet_ms < IDLE_AFTER_MS || animating || any_dyn {
                 base_hz
             } else {
                 IDLE_HZ.min(base_hz)
             };
             if eff_hz != cur_hz || (was_frozen && !frozen) {
+                // Witness the transition: `dyn` distinguishes an intent pin
+                // from an activity pin, and the flap the DYNAMIC pin removes
+                // was previously unobservable (the felt-but-uncaught bug).
+                if eff_hz != cur_hz {
+                    say!(
+                        "tapestryd: idle-throttle {} -> {} Hz (quiet_ms={} animating={} dyn={})",
+                        cur_hz, eff_hz, quiet_ms, animating, any_dyn
+                    );
+                }
                 cur_hz = eff_hz;
                 anchor = Instant::now();
                 ticks_done = 0;

@@ -861,6 +861,29 @@ enum SurfState {
     Live,   // presents flowing
 }
 
+/// A surface's frame intent (reference/139 "Frame intent"): whether the idle
+/// throttle may drop this surface's frame rate. Declared at runtime via the
+/// `intent` ctl verb; defaults to Static.
+#[derive(Clone, Copy, PartialEq)]
+enum FrameIntent {
+    /// Throttle-eligible (default): coarse or absent motion (console, chrome,
+    /// menus, the status bar).
+    Static,
+    /// Pin the clock to the ctl rate WHILE VISIBLE: games, video, any
+    /// continuous-animation client the present heuristic cannot detect.
+    Dynamic,
+}
+
+impl FrameIntent {
+    fn parse(s: &str) -> Option<FrameIntent> {
+        match s {
+            "static" => Some(FrameIntent::Static),
+            "dynamic" => Some(FrameIntent::Dynamic),
+            _ => None,
+        }
+    }
+}
+
 struct Surface {
     gen: u32,        // the slot-reuse guard (net-3d); fids capture it at bind
     owner_conn: u64, // F2: the minting conn's id
@@ -985,6 +1008,9 @@ struct Surface {
     /// `menu_reassert` re-composes when a screen write lands under a placed
     /// menu. None until the first present.
     shown_slot: Option<u32>,
+    /// reference/139 "Frame intent": whether the idle throttle may drop this
+    /// surface's rate. Default Static; set via the `intent` ctl verb.
+    intent: FrameIntent,
 }
 
 /// The deferred flush a held present leaves behind. The pixel work
@@ -2400,6 +2426,7 @@ impl Comp {
             is_menu: false,
             is_status: false,
             shown_slot: None,
+            intent: FrameIntent::Static,
             comp_attached: false,
             gpu_said: false,
             held: None,
@@ -6652,6 +6679,24 @@ impl Comp {
     pub fn animating(&mut self) -> bool {
         self.roll_present_buckets();
         self.present_bucket_count + self.present_prev_count >= PRESENT_BURST_MIN
+    }
+
+    /// reference/139 "Frame intent": true iff some VISIBLE surface declared
+    /// DYNAMIC. The idle throttle ORs this into its keep-the-clock decision,
+    /// so a continuous-animation client the present heuristic cannot detect (a
+    /// game near the present floor with a held key) pins the ctl rate while on
+    /// screen. Visible-gated -- a hidden DYNAMIC surface throttles like any
+    /// other. The visibility predicate is IDENTICAL to `note_present`'s (the
+    /// direct-scanout fast paths + the composed target), so a fullscreen game
+    /// on the Direct scanout is covered, not just a composed one. `&self` so it
+    /// composes with `animating()` in the main-loop rate decision.
+    pub fn any_visible_dynamic(&self) -> bool {
+        (0..MAX_SURFACES).any(|n| {
+            self.surf(n).map_or(false, |s| s.intent == FrameIntent::Dynamic)
+                && (self.pending_direct == Some(n)
+                    || self.scanout == Scanout::Direct(n)
+                    || self.surface_target(n).is_some())
+        })
     }
 
     /// Emit the FRAME tick to every VISIBLE hosted surface (G-6: hidden
@@ -15578,6 +15623,16 @@ impl Conn {
         if let Some(t) = s.strip_prefix("title ") {
             if let Some(surf) = comp.surf_mut(n) {
                 surf.title = String::from(t.trim());
+            }
+            return Ok(());
+        }
+        if let Some(rest) = s.strip_prefix("intent ") {
+            // reference/139 "Frame intent": static (default) | dynamic.
+            // Runtime-set so a client can toggle (a video player is dynamic
+            // only while playing). A malformed value is rejected.
+            let intent = FrameIntent::parse(rest.trim()).ok_or(p9::E_INVAL)?;
+            if let Some(surf) = comp.surf_mut(n) {
+                surf.intent = intent;
             }
             return Ok(());
         }

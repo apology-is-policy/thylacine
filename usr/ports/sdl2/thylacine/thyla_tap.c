@@ -244,6 +244,19 @@ int thyla_tap_glsrc(ThylaTap *t, uint32_t ctx_pub)
     return t_write(t->ctl, cmd, (size_t)(p - cmd)) < 0 ? -1 : 0;
 }
 
+/* reference/139 "Frame intent": declare this surface DYNAMIC (pin the
+ * compositor clock while visible) or STATIC (throttle-eligible). SDL games/
+ * video declare DYNAMIC after open; the compositor visible-gates the pin.
+ * ctl "intent dynamic" | "intent static". Returns 0 or -1. */
+int thyla_tap_intent(ThylaTap *t, int dynamic)
+{
+    if (t->ctl < 0)
+        return -1;
+    if (dynamic)
+        return t_write(t->ctl, "intent dynamic", 14) < 0 ? -1 : 0;
+    return t_write(t->ctl, "intent static", 13) < 0 ? -1 : 0;
+}
+
 int thyla_tap_reweave(ThylaTap *t, uint32_t w, uint32_t h, uint16_t serial)
 {
     /* resize W H <serial>: the Rwrite is the server's generation fence. */
