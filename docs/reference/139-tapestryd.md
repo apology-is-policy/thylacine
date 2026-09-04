@@ -1090,3 +1090,72 @@ rate, but the naive `Instant`-based version deterministically broke aurora's
 drain render (render-loop-dead; `Instant` itself works in aurora — an
 unexplained render-loop interaction, a recorded gfx-track seam, NOT shipped).
 The frames-based blink is retained.
+
+### Frame intent (the declared axis)
+
+The throttle's activity heuristic — input OR `Comp::animating()` — *infers*
+whether the screen is changing. Inference has a floor: `animating()` needs
+sustained ≥ ~8 Hz screen-changing presents (`PRESENT_BURST_MIN` summed over the
+two buckets), so a continuously-animating client whose present rate hovers near
+or below that floor cannot hold the clock, and a held key (which emits no repeat
+events — Thylacine's virtio-input has no auto-repeat) removes the other signal.
+#164 added the present axis and it fixed the *fast* case (a GL client at 60
+easily clears the floor); it does **not** fix the *slow* case (Duke3D under
+DOSBox SW-VGA, presenting near the floor with a held turn key), where the clock
+flaps 60 ↔ 15 and the displayed motion oscillates — the ~500 ms soft-envelope
+stutter reported on `core=dynamic`.
+
+The residual is structural: a heuristic cannot know a client's *intent*, only
+its recent behavior. The fix lets the client *declare* it. Each surface carries
+a **frame intent**, a per-`Surface` field defaulting to STATIC:
+
+- **STATIC** (default): throttle-eligible — the surface contributes nothing to
+  the idle-floor decision. Console, chrome, menus, the status bar: motion is
+  either absent or coarse (a cursor blink at the idle rate is fine).
+- **DYNAMIC**: while this surface is **visible**, the effective tick is pinned
+  to the ctl rate unconditionally — no dependence on present rate or input.
+
+The compositor honours it via `Comp::any_visible_dynamic(&self)` (mirrors
+`visible_chrome`'s iteration, gated on `surface_target(n).is_some()` — the same
+visibility predicate `note_present` filters on), OR'd into the effective-rate
+decision in `main.rs` alongside `frozen` / recent-input / `animating()`.
+`animating()` **remains** the fallback for undeclared clients; frame intent is
+the declared override for the case the heuristic cannot serve.
+
+**Declaration is runtime, not create-time** — `intent <static|dynamic>` written
+to the surface `ctl` fid (server: a `surface_ctl` verb modelled on `title`;
+client: `Surface::intent()` in libtapestry, `thyla_tap_intent()` in the SDL C
+backend). Runtime-set makes it a toggle (a video player is DYNAMIC while
+playing, STATIC when paused) and avoids widening the create grammar (the C
+`thyla_tap` create buffer is fixed-size). `SDL_thylacine` writes `intent
+dynamic` right after surface open, so every ported SDL app (Duke3D, TyrQuake, a
+video player) is covered without per-app work. A native client opts in with
+`surf.intent(FrameIntent::Dynamic)`; the `TAPESTRY_FRAME_INTENT` env override
+lets a native client (and the regression gate) force either value.
+
+**Visible-gated** (the ratified choice): a DYNAMIC surface that is hidden
+(occluded by a fullscreen peer, or in a non-visible pane) does **not** pin the
+clock — `surface_target` returns `None`, exactly as `note_present` already
+filters a hidden client's presents (audit F1). A game tabbed to the background
+lets an idle console throttle as before, so the idle %cpu floor is preserved
+(`THYLACINE_IDLE_STRICT` still passes: aurora is STATIC).
+
+**Rejected alternatives.**
+- *A held-key-only patch* (treat a key-down as activity for a fixed window):
+  catches the held key but not input-free animation — an attract demo or a
+  playing video with no input flaps identically. An input-derived signal cannot
+  cover input-free motion (the operator's Q2 that killed this option).
+- *Tuning the present heuristic* (lower `PRESENT_BURST_MIN`, widen the window):
+  trades one wrong answer for another — a lower floor lets a genuinely idle
+  bare-present client (the cursor blink) re-inflate idle %cpu. No present-rate
+  threshold separates "slow game" from "idle blink"; only the client knows.
+
+**SOTA.** This is the per-surface shape every modern compositor exposes: Wayland
+`wp_content_type` (a surface tags itself photo/video/game), Android
+`Surface.setFrameRate` (the app declares its target cadence), macOS App-Nap
+activity types (a process declares `userInitiated` / `background` to opt out of
+throttling). Thylacine's is a STATIC/DYNAMIC declaration on the existing surface
+`ctl` channel — the compositor is the authority (it gates on its own
+visibility), the client is the declarer. The regression witness is the
+`idle-throttle N -> M Hz` observability line in `main.rs`: a visible DYNAMIC
+surface produces no `-> 15` transition where a STATIC one does.

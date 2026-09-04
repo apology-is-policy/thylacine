@@ -821,6 +821,15 @@ struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
   hardware backends slots in behind the same event. A client that only
   recycles on present-CQEs never needs FRAME (the game loop); a client that
   paces (video) arms it.
+- **FRAME intent** (the declared throttle axis): a surface declares STATIC
+  (default) or DYNAMIC via `intent <static|dynamic>` on its `ctl` fid. While a
+  DYNAMIC surface is VISIBLE the compositor pins the synthesized clock to the
+  ctl rate, overriding the idle throttle's activity heuristic for
+  continuous-animation clients it cannot detect (a game presenting near the
+  throttle's present floor with a held key — the ~500 ms `core=dynamic` stutter).
+  Visible-gated: a hidden DYNAMIC surface throttles like any other.
+  `SDL_thylacine` declares DYNAMIC; console and chrome stay STATIC. See
+  reference/139 "Frame intent".
 - The Super/Hyper compositor-control layer (§14) is intercepted ABOVE this
   stream: reserved chords never reach a surface's events.
 
