@@ -23,6 +23,66 @@ needed the operator.
 
 ---
 
+## 2026-09-04 (run 23, Opus 4.8) -- KT-1.5b-i: the halcyond consumer; the near-gap I proved closed by reading the kthread
+
+Run 22 landed the kernel enabler (a Loom ring made pollable) and self-compacted at
+the 600k line. Run 23 built the consumer half: halcyond now waits in ONE `poll(2)`
+over its SQPOLL event ring AND `/dev/consdrain`, retiring the block-on-ring model.
+Landed at `a85c94e4` (local, batched to the KT-1 close). Two files of code
+(libtapestry additive SQPOLL; halcyond's else-branch wait), two of docs.
+
+**The near-gap, and what caught it.** The run-22 design + my resume note asserted
+`poll_event()` "ALREADY arms+wakes+reaps on an SQPOLL ring ... CONFIRMED by the
+loom-smoke leg." That confirmation was for a **NOP** (inline-completed, no 9P RPC).
+The event ring's reads are **dev9p** reads over `/srv/tapestry`, and under SQPOLL
+halcyond's thread sits in `poll(2)`, not in a blocking `enter` -- so *who demuxes
+the 9P replies* was an open question the NOP never touched. Left unproven, a broken
+answer means halcyond hangs (reads staged, replies never demuxed, `poll` never
+fires). I read the mechanism instead of assuming it: `loom_sqpoll_main`
+(kernel/loom.c:2157) drives `p9_client_reader_pump_once_deadline` on every inflight
+op, each demuxed reply posts a CQE (`loom_post_cqe`:628) that wakes `l->cq_waiters`
+(:678) -- the same list `loom_poll` (:1489) registers on. Then the gating check:
+the kthread only recvs on a **deadline-capable** transport (the register gate,
+:487), so I chased that too -- `p9_client_recv_is_deadline_capable` returns
+`set_recv_deadline != NULL` (9p_client.c:1195), and srvconn wires it
+(`p9_srvconn_transport_ops`:172), its comment stating the ops exist *precisely* to
+"let the Loom SQPOLL reader arm a frame-boundary idle deadline." The disk
+spoor-pipe transport is NULL there -- which is exactly why loom-stress/loom-bench
+stay non-SQPOLL and why the loom-smoke SQPOLL leg used a NOP. The picture is
+coherent and Option 1 needs **no second kernel enabler**. This was the run's real
+work; the code was the easy part.
+
+**A pre-existing hazard fell out.** 150-halcyond.md carried an OWNED F7 note: on the
+held-feed path a submit-only Loom enter "demuxes nothing," so a silent foreground +
+a key flood pile up server-side until the compositor's 128-event cap wedge-retires
+the console; it named the fix as "a timed Loom enter (a kernel seam + a syscall-arg
+change)." That primitive is *exactly* the SQPOLL kthread's deadline-capable reader
+pump -- it demuxes the parked reply continuously, independent of halcyond's loop
+branch. So KT-1.5b-i removes F7's root cause. I did NOT mark it closed: a targeted
+repro (feed held + silent foreground + key flood, asserting no wedge) is owed at the
+KT-1 audit. The doc says "ADDRESSED ... repro owed," not "fixed."
+
+**Verification.** aurora keeps the non-SQPOLL `connect()`, so the shipping console
+path is untouched by construction -- and measured: the default suite ran 1463
+`[test]` PASS, 0 FAIL, 0 EXTINCTION, aurora spawned + feed-selftest PASS + console
+up. The new path proved two ways: `loom.poll` (kernel unit) + `loom-smoke:
+KObj_Loom.poll ok` (the first EL0 SQPOLL consumer), and the `ls-halcyon.exp`
+graphical E2E under HVF (THYLACINE_HALCYON=1) all-green -- rich-tier advertise,
+transcript surface, `ls -l` rich frames (console output through the unified
+consdrain), status bar (chrome CQEs), split/zoom **reflow** (CONFIGURE events),
+keyboard/click **menus** + wedge-dismiss (menu CQEs). Console output *and* every
+compositor-event class flow through the one poll. Cost: ~7 min mac hold, one
+userspace build + two paired pool bakes + two HVF boots.
+
+**Open.** KT-1.5b-ii (halcyond spawns one kaua-term + ingests grid/scrollback --
+the tile path) is next; then KT-1.5c (multi-tile, unblocks H-4d); then the batched
+KT-1 audit (Opus fallback, Fable credit-exhausted) + SMP gate + push. The F7 repro
+rides that audit. The wart's *latency* improvement is structural + proven-correct
+but not yet **measured** in ms -- a number is a cheap follow-up if the operator
+wants it.
+
+---
+
 ## 2026-09-03 (run 22, Opus 4.8) -- KT-1.5: the tile transport was impossible; the fix makes a Loom ring pollable
 
 Run 21 built the kaua-term producer side and surfaced KT-1.5 (halcyond ingest) as
