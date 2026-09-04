@@ -85,26 +85,45 @@ Mode->render mode) + `transcript.rs` (extract `intern_style`, add
 rustfmt clean; device build green. Pure logic, no boot -- the render/spawn wiring
 is ii-b.
 
-**Stopped at a design fork (operator's call).** KT-1.5b-ii-b -- the spawn + render
-wiring -- is not a "just implement it" chunk: it is halcyond ceasing to be a VT
-host and instead spawning a crash-isolated kaua-term that hosts the `ut`, which
-CHANGES the login/session flow (today login runs on the kernel `/dev/cons` that
-halcyond mirror-renders; a kaua-term hosts its own `ut` on a pts) and touches the
-trusted path (I-27). Section 14 pins the END STATE (halcyond renders kaua-term
-tiles; aurora keeps the trusted console) but NOT the incremental transition: does
-the first tile REPLACE the console (pulling in login/I-27 now) or PROVE the
-pipeline non-invasively (deferring login to 1.5c)? That is a load-bearing,
-scripture-level decision -- the design-conversation pattern says land it as
-scripture BEFORE code -- and on Opus with the operator away the standing rule is
-stop at the first user-input item. Surfaced as a blocking question with three
-researched options (prove-first / replace-now / skip-to-multi-tile). NOT a
-convenience stop: making a unilateral console<->login<->trusted-path call while
-the operator is away is exactly what the rule forbids.
+**Two design forks surfaced + resolved (operator present, live).** KT-1.5b-ii-b
+(spawn + render) turned out to be a load-bearing architectural transition, not a
+"just implement" chunk, so I stopped and surfaced it rather than deciding unilaterally
+on a login/trusted-path surface. **Fork 1** ("how invasive is the first kaua-term
+tile?") -> the operator chose **replace the console now** (over prove-first-defer).
+That opened **fork 2**, which two Explore passes turned out to hinge on IDENTITY, not
+the trusted path: the trusted path (SAK) is a kernel `/dev/cons` BREAK, orthogonal to
+the renderer (14.5 confirmed); the real crux is that the session `ut` needs the user
+identity + encrypted /home only `/sbin/login` establishes, while 14.11.6 has the
+SYSTEM halcyond (spawned before login) spawn the tile -- and delegating that identity
+power to a system daemon is an I-22 hole. **Fork 2** ("how does the session ut reach
+its tile?") -> the operator chose **per-user halcyond (rio-aligned)**: login spawns
+halcyond AS the user, zero delegation.
 
-**Also open.** The batched KT-1 audit (Opus fallback, Fable credit-exhausted) +
-SMP gate + push ride the arc close; the F7 repro rides that audit; the 1.5b-i
-latency win is structural + proven-correct but not yet measured in ms (a cheap
-follow-up if wanted).
+**14.12 landed (`eba6951f`, scripture-only).** The per-user session compositor:
+aurora renders the pre-login console (its existing role; the THYLACINE_HALCYON
+system-renderer lever retired); login authenticates on /dev/cons then spawns a per-user
+halcyond AS the user (`.identity()`, as it spawns ut); that halcyond joins the
+system tapestryd as `Actor::Session(user)` (ungated, no special cap -- Explore-verified),
+presents fullscreen, and hosts kaua-term PROCESSES spawned as itself. The display
+handoff is emergent from tapestryd's shared pane layout (scanout follows the layout,
+not identity -- no new primitive: aurora relinquishes -> the root leaf collapses to
+halcyond -> Direct(halcyond)). Zero identity delegation (I-22 clean); the trusted path
+is untouched (I-27); login's credential entry stays on /dev/cons, never in an untrusted
+pts. The arc reshapes: old KT-1.5b-ii-b -> KT-1.5d-1 (per-user bootstrap + handoff),
+KT-1.5d-2 (one session tile, on the ii-a model), KT-1.5d-3 (multi-tile -> H-4d).
+
+**Method note worth keeping.** The design was NOT guessed: the two Explore passes
+(a7491dc8 login/trusted-path, a027432b tapestryd/scanout/input) turned a scary "this
+touches I-27 + login" into "the trusted path is orthogonal; the only crux is identity,
+and the per-user model closes it with zero new capability." The one agent error caught:
+a027432b read the KT-1.5b-ii-a Cargo.toml dep (the wire TYPES) as "kaua-term is a
+library, terminals emulated in-process" -- but 14.2 ratified kaua-term as separate
+crash-isolated PROCESSES; the conclusion (spawn as the user, no cap) held regardless.
+
+**Open.** KT-1.5d-1 (the per-user bootstrap) is the next implementation chunk. The
+batched KT-1 audit (Opus fallback, Fable credit-exhausted) + SMP gate + push ride the
+arc close; the F7 repro rides that audit; the 1.5b-i latency win is structural +
+proven-correct but not yet measured in ms (a cheap follow-up if wanted).
 
 ---
 
