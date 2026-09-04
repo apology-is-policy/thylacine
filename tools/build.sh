@@ -311,6 +311,14 @@ build_kernel() {
     # opts out for a fast iteration loop; an absent LLVM C++ fork skips gracefully
     # (build_dosbox_x returns 0). See the pouch_bins staging note.
     [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" ]] && build_dosbox_x
+    # DX-5 (Cryptid): fetch + stage the Duke Nukem 3D shareware data BEFORE the
+    # pool fixture (populate_stratum_pool puts the stage at /duke3d). It is the
+    # compute-heavy showcase for the DX-4 CAP_JIT dynarec. Gated on dosbox too:
+    # the game DATA is useless without the emulator that runs it, so an emulator
+    # opt-out (THYLACINE_BAKE_DOSBOX=0) also skips the 12 MB of game data.
+    # THYLACINE_BAKE_DUKE3D=0 opts out of just the game (keeps the emulator) for
+    # a fast/offline iteration loop.
+    [[ "${THYLACINE_BAKE_DOSBOX:-1}" == "1" && "${THYLACINE_BAKE_DUKE3D:-1}" == "1" ]] && build_duke3d_fixture
     # Warp W-4: cross-build vkQuake over venus + the W-3e SDL Vulkan glue.
     # Self-skips (announced) without the fetched venus link set.
     build_vkquake
@@ -3517,6 +3525,27 @@ populate_stratum_pool() {
         echo "==> populate pool: Quake shareware baked at /quake"
     fi
 
+    # --- DX-5: the Duke Nukem 3D shareware data (-> /duke3d). Staged by
+    # build_duke3d_fixture; skipped gracefully when the stage is absent
+    # (THYLACINE_BAKE_DUKE3D=0 or the dosbox emulator opted out). This is the
+    # READ-ONLY MASTER (SYSTEM-owned; the natural staged modes -- 0644 files,
+    # 0755 dir -- ride through the put). DOSBox-X opens the group file
+    # READ-WRITE, and a non-owner cannot open a SYSTEM-owned file read-write
+    # even at 0666 (the pool ownership model, the "walls"), so Duke3D is NOT run
+    # in place from here -- a "Could not find group file" bail. Instead a user
+    # (and the ls-gfx-dosbox-duke3d gate) copies /duke3d into their own writable
+    # home and runs from there: the same "install to a writable dir" step a real
+    # DOS game needs, and the quake precedent's per-user game-dir shape. ---
+    local duke3d_stage="$BUILD_DIR/duke3d/stage"
+    if [[ -f "$duke3d_stage/DUKE3D.GRP" ]]; then
+        echo "==> populate pool: baking Duke3D shareware data ($duke3d_stage -> /duke3d, $(du -sh "$duke3d_stage" | cut -f1))"
+        "$stratum_fs_bin" -s "$sock_path" put "$duke3d_stage" /duke3d \
+            || { echo "==> populate pool: put /duke3d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after /duke3d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: Duke3D shareware baked at /duke3d"
+    fi
+
     # --- VIVARIUM V-7: the container bundles (-> /vivarium; staged by
     # stage_viv_bundles per docs/VIVARIUM.md section 7.2). The probe bundle is
     # the V-7 boot gate's fixture -- joey spawns `viv run /vivarium/probe`
@@ -3783,6 +3812,7 @@ populate_stratum_pool() {
     local vp_clade="$BUILD_DIR/clade/stage"
     local vp_storm="$BUILD_DIR/storm/stage"
     local vp_quake="$BUILD_DIR/quake/stage"
+    local vp_duke3d="$BUILD_DIR/duke3d/stage"
 
     # /thylacine-version is written unconditionally near the top of this
     # function, so it is the POSITIVE CONTROL: it proves `stat` can see a file
@@ -3816,6 +3846,10 @@ STORM /storm/Makefile"
     if [[ -f "$vp_quake/id1/pak0.pak" ]]; then
         bake_want="$bake_want
 QUAKE /quake/id1/pak0.pak"
+    fi
+    if [[ -f "$vp_duke3d/DUKE3D.GRP" ]]; then
+        bake_want="$bake_want
+DUKE3D /duke3d/DUKE3D.GRP"
     fi
 
     local bake_missing=""
@@ -4609,6 +4643,97 @@ build_tyrquake() {
     echo "    tyr-glquake: $(wc -c < "$glq" | tr -d ' ') bytes (ET_EXEC, static,"
     echo "                 OSMesa entry points resolved)"
     ledger "tyr-glquake: BUILT (GL acceptance gate, section 9 step 3)"
+}
+
+build_duke3d_fixture() {
+    # DX-5 (Cryptid): the Duke Nukem 3D shareware data -> /duke3d. It is the
+    # compute-heavy real DOS program that exercises + demonstrates the DX-4
+    # CAP_JIT dynarec (core=dynamic); DOSBox-X mounts /duke3d as a DOS drive C:
+    # and runs DUKE3D.EXE. Unlike build_tyrquake (a NATIVE SDL port), Duke3D is
+    # a DOS program run UNDER DOSBox-X, so this stages DATA only -- no compile.
+    #
+    # The shareware distribution (3dduke13.zip, Apogee's official v1.3d
+    # shareware, sha256-pinned) is fetched ONCE into build/duke3d/ and the
+    # released file set extracted from its DN3DSW13.SHR payload -- a PKLITE
+    # self-extractor wrapping a standard ZIP, which the host bsdtar/libarchive
+    # reads natively (the same trick build_tyrquake uses for the DeIce resource
+    # -- no extra dependency). populate_stratum_pool puts the stage at /duke3d.
+    # The zip is NEVER committed -- build-time fetch only.
+    #
+    # LICENSE (3D Realms shareware, 1996): individuals are encouraged to share
+    # and give copies, conditioned on all released files being included WITHOUT
+    # modification and no copyright/trademark removed. We therefore stage the
+    # COMPLETE released file set (every file in the .SHR), not a runnable
+    # subset. Commercial/product redistribution (CD-ROM, retail) requires 3D
+    # Realms' written permission -- a v1.0-packaging decision noted in
+    # docs/DOSBOX.md, orthogonal to this dev/gate fixture. Mirrors the existing
+    # ungated /quake shareware bake.
+    local duke_dir="$BUILD_DIR/duke3d"
+    local stage="$duke_dir/stage"
+    local zip="$duke_dir/3dduke13.zip"
+    local zip_sha="c67efd179022bc6d9bde54f404c707cbcbdc15423c20be72e277bc2bdddf3d0e"
+    local grp_sha="f943d0c2e2a0803a644a2107c81ea897dec87596d9dd1a6a432131ad6f5818d6"
+
+    # Extraction is cache-guarded on the GRP sha (a truncated/wrong cached stage
+    # re-fetches rather than shipping corrupt game data). The CFG copy at the
+    # end always runs, so adding or altering the shipped config does not require
+    # busting the expensive .SHR extraction.
+    local need_extract=1
+    if [[ -f "$stage/DUKE3D.GRP" ]]; then
+        local have_sha
+        have_sha="$(shasum -a 256 "$stage/DUKE3D.GRP" | awk '{print $1}')"
+        if [[ "$have_sha" == "$grp_sha" ]]; then
+            need_extract=0
+        else
+            echo "==> duke3d: cached GRP sha mismatch ($have_sha); re-staging" >&2
+            rm -rf "$stage"
+        fi
+    fi
+
+    if [[ "$need_extract" == "1" ]]; then
+        mkdir -p "$duke_dir" "$stage"
+        if [[ ! -f "$zip" ]]; then
+            echo "==> duke3d: fetching 3dduke13.zip (Apogee v1.3d shareware, ~5.9 MB)"
+            curl -sL --max-time 300 -o "$zip" \
+                "https://archive.org/download/3dduke13/3dduke13.zip" \
+                || { echo "==> duke3d: shareware fetch failed" >&2; exit 1; }
+        fi
+        local got_sha
+        got_sha="$(shasum -a 256 "$zip" | awk '{print $1}')"
+        if [[ "$got_sha" != "$zip_sha" ]]; then
+            echo "==> duke3d: 3dduke13.zip sha256 mismatch ($got_sha)" >&2
+            exit 1
+        fi
+
+        rm -rf "$duke_dir/unzip"
+        mkdir -p "$duke_dir/unzip"
+        unzip -o -q "$zip" -d "$duke_dir/unzip"
+        # DN3DSW13.SHR = PKLITE MZ stub + embedded ZIP; libarchive reads past the
+        # stub and extracts the COMPLETE released file set (license condition).
+        /usr/bin/tar xf "$duke_dir/unzip/DN3DSW13.SHR" -C "$stage" \
+            || { echo "==> duke3d: .SHR extract failed" >&2; exit 1; }
+        rm -rf "$duke_dir/unzip"
+
+        local pak_sha
+        pak_sha="$(shasum -a 256 "$stage/DUKE3D.GRP" | awk '{print $1}')"
+        if [[ "$pak_sha" != "$grp_sha" ]]; then
+            echo "==> duke3d: DUKE3D.GRP sha256 mismatch ($pak_sha) -- not the v1.3d shareware GRP" >&2
+            exit 1
+        fi
+        echo "    duke3d shareware staged ($(du -sh "$stage" | cut -f1), GRP $(wc -c < "$stage/DUKE3D.GRP" | tr -d ' ') bytes, episode 1 shareware)"
+    fi
+
+    # Ship a ready-to-play config. DUKE3D.CFG is NOT in the .SHR (SETUP.EXE
+    # generates it per-user); we ship a SETUP-generated default (sound device
+    # None -- Thylacine stubs audio, so no init hang; ControllerType=1 =
+    # keyboard+mouse, mouse Fire/Strafe bound) so the game boots straight to its
+    # title without the user running SETUP first. It is a generated config, not
+    # a 3D Realms file, so it rides the repo (not the sha-pinned fetch) and is
+    # orthogonal to license condition [C]. Copied unconditionally (idempotent)
+    # so it lands even on the GRP cache-hit path.
+    mkdir -p "$stage"
+    cp "$REPO_ROOT/usr/ports/dosbox-x/duke3d/DUKE3D.CFG" "$stage/DUKE3D.CFG" \
+        || { echo "==> duke3d: DUKE3D.CFG stage failed" >&2; exit 1; }
 }
 
 build_zlib() {

@@ -240,8 +240,40 @@ server + virtio-sound (post-v1.0) lights it up.
   DX-5 sources; the dynrec is faster by construction (it JITs rather than
   interprets) and is proven active + correct here. **Prerequisite for Act 2 --
   met.**
-- **DX-5** -- Act-1 close: a recognizable DOS GAME end-to-end; focused audit;
-  reference doc + user-manual entry; AUDIT-TRIGGERS row for the DX-4 surface.
+- **DX-5 IN PROGRESS** (2026-09-04) -- Act-1 close: **Duke Nukem 3D shareware**,
+  the compute-heavy real game DX-4's dynrec was built for.
+  - **SHOWCASE LANDED**: the v1.3d shareware (`3dduke13.zip`, Apogee's official
+    shareware, sha256-pinned; DUKE3D.GRP 11,035,779 B) is fetched at build time
+    (the quake idiom -- NEVER committed) and staged to the pool at `/duke3d` via
+    `build_duke3d_fixture` + a `THYLACINE_BAKE_DUKE3D` flag (default-on with the
+    emulator). DOSBox-X `core=dynamic_rec` runs it to its title + main menu; the
+    `ls-gfx-dosbox-duke3d` gate verifies it (CAP_JIT acquired + a colour-rich
+    title render + keyboard advancing the menu). Operator-confirmed "runs
+    absolutely fluently" -- the informal dynrec-perf win DX-4 deferred.
+  - **RUN MODEL**: the pool `/duke3d` is a READ-ONLY SYSTEM-owned master;
+    DOSBox-X opens the group file READ-WRITE and a non-owner cannot (the pool
+    ownership model), so the game is COPIED into the user's writable home first
+    (`cp -r /duke3d ~/duke3d`) -- the normal "install to a writable dir" step,
+    the quake per-user-copy shape. A SETUP-generated `DUKE3D.CFG` (sound=None,
+    keyboard+mouse) ships in the master so it boots straight to the title.
+  - **LICENSE**: the 1996 3D Realms shareware permits free individual sharing;
+    condition [C] requires all released files unmodified (we stage the COMPLETE
+    .SHR file set). Commercial/product redistribution (a shipped v1.0 image)
+    may need 3D Realms' written permission -- **a v1.0-packaging decision for
+    the operator**, orthogonal to this dev/gate fixture (same posture as the
+    already-shipped /quake shareware).
+  - **FOLLOW-ONS (owed)**: the deterministic INT-33h MOUSE witness (DX5M.COM --
+    a bug: it does not write OUT.TXT, WIP in scratchpad); the measured perf
+    number (dynrec vs core=normal); the full reference doc + user-manual entry;
+    the AUDIT-TRIGGERS row for the DX-4 surface. Plus the **frame-intent
+    throttle fix** the showcase surfaced (see below).
+  - **SURFACED DEFECT (operator-found, ratified fix)**: a ~500ms FPS oscillation
+    while holding a turn key -- the #164 tapestryd idle throttle flapping
+    eff_hz 60<->15 (a held key emits no input events + a slow client dips under
+    animating()'s ~8Hz present threshold). FIX (ratified): a per-surface
+    frame-intent hint (STATIC/DYNAMIC, visible-gated) so SDL clients declare
+    DYNAMIC and pin the clock -- its own graphics-arc chunk (scripture ->
+    libtapestry + tapestryd + SDL_thylacine -> audit).
 
 **Act 2 -- Win9x + 3dfx (the showcase; needs DX-4):**
 - **DX-6** -- **Win9x guest bring-up**: boot Windows 98 in DOSBox-X on Thylacine
