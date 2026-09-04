@@ -23,6 +23,111 @@ needed the operator.
 
 ---
 
+## 2026-09-04 (aux, Opus 4.8, effort max) -- the frame-intent throttle pin (the operator's Duke3D FPS oscillation)
+
+Playing Duke Nukem 3D under the new DX-5 showcase (DOSBox-X `core=dynamic`), the
+operator saw the displayed motion oscillate ~2 Hz while holding a turn key --
+"every 500ms or so he spins a bit slower, then faster" -- in tiled AND
+fullscreen. They asked (a design question) whether graphical apps should carry a
+manifest telling the compositor they are static-UI vs dynamic-high-performance.
+They are right, and this run built it.
+
+**First, the housekeeping.** DX-5a (the Duke3D showcase, `8ce2c537`) was
+committed local last run but never pushed (the mac was busy). Pushed both
+mirrors, ls-remote-verified. A follow-up (`b3ace730`): the showcase gate's
+header comment claimed the `/duke3d` data is "world-writable (0666)" -- a
+leftover from a reverted chmod experiment; build.sh actually stages it 0644
+read-only and the gate copies it to a writable home. A stale security-posture
+claim in pushed code, corrected. (Found by re-reading my own gate while modelling
+the new one on it -- the good kind of accident.)
+
+**The culprit, and why #164 did not already cover it.** The #164 idle throttle
+drops the synthesized frame clock 60 -> 15 Hz after 250ms with no input AND no
+sustained *visible* presents (`animating()`, >= ~8 Hz). #164 added the present
+axis precisely because a held key emits no repeat input events (virtio-input has
+no auto-repeat), so an input-only heuristic flapped for GLQuake. But `animating()`
+has a floor: it needs >= ~8 Hz presents. A GL client at 60 clears it easily; a
+DOSBox SW-VGA game presenting *near* the floor does not -- so for the slow client
+the clock still flaps, exactly the ~500ms wobble reported. The residual is
+structural: a heuristic cannot know a client's intent, only its recent behaviour.
+
+**The fix: a declared per-surface frame intent.** STATIC (default,
+throttle-eligible) vs DYNAMIC (while VISIBLE, pins the clock to the ctl rate
+unconditionally). The operator ratified visible-gating (a hidden DYNAMIC surface
+throttles like any other). Landed design-first: scripture `628b0387`
+(reference/139 "Frame intent" + TAPESTRY.md 18.4), then impl `58dee4d1`. SDL
+declares DYNAMIC at window create, so every ported SDL game/video is covered with
+no per-app work; `animating()` remains the fallback for undeclared native
+clients. SOTA-aligned (Wayland `wp_content_type`, Android `setFrameRate`, macOS
+App-Nap). Runtime-set via an `intent <static|dynamic>` surface ctl verb, not a
+create token -- a toggle, and it kept the fixed-size C create buffer untouched.
+
+**The wrong turn, caught by the observability log (the reusable part).** The
+regression gate's first run FAILED at its own control leg: a visible STATIC idle
+`tapestry-demo` produced no `60 -> 15` transition in 10s. The instinct was to
+suspect the fix -- but the re-added observability line (`idle-throttle N -> M Hz
+(quiet_ms= animating= dyn=)`) showed the truth: the ONLY `60 -> 15` in the whole
+boot happened during early boot, before the demo, and was consumed by my marker;
+the clock was *already at 15* when the demo came up, so there was no new
+transition to see. The gate's premise ("a visible idle demo causes a 60 -> 15")
+was wrong: the observability log only fires on *transitions*, and the clock may
+already be throttled. **Fix: `force_clock_60` -- inject a QMP input event (a
+tablet move + a no-op modifier key; verified against the three `input_seen`
+drains in main.rs) to establish a known 60 Hz state first, THEN watch the
+drop-or-hold.** This also made the sabotage catchable: a dynamic leg stuck at 15
+would else pass spuriously. That the flap had "no witness before"
+(felt-but-uncaught) is exactly why the observability line is retained.
+
+**Verified three ways, all green:**
+- **ls-gfx-throttle** (the deterministic gate, sabotage-proof, one token apart):
+  Leg A static -> `60 -> 15 (quiet_ms=336 animating=false dyn=false)` (control:
+  the throttle still works). Leg B dynamic -> `15 -> 60 (quiet_ms=19655
+  animating=false dyn=true)` then NO `60 -> 15` -- the clock held at 60 with
+  input stale 19.6s AND animation false, *solely* because `dyn=true`. That log
+  line is the fix, precisely witnessed.
+- **ci-idle-gate STRICT**: idle mean 10.3% <= 20% -- no idle regression (aurora
+  is STATIC, still throttles at the login prompt).
+- **ls-gfx-quake** (the G-7 SDL acceptance gate, the same `SDL_CreateWindow` ->
+  `thyla_tap_intent` path Duke3D uses): 969 frames @ 62.5 fps, textured world on
+  scanout. My SDL change does not break SDL apps.
+
+**Self-audit (in parallel with the formal round):** the `intent` ctl verb is
+conn-scoped AND gen-guarded -- `surf_owned(n, self.conn_id, f.gen)` gates the
+whole surface_ctl dispatch (server.rs:14686) before my code runs, so no
+cross-conn intent-setting and no stale-slot confusion. tapestryd is a
+single-threaded serve loop (no thread spawns in main.rs), so the intent write
+and the `any_visible_dynamic` read are sequential -- no TOCTOU. The visibility
+predicate is copied verbatim from `note_present` (pending_direct | Direct scanout
+| composed target), so a fullscreen game on the Direct scanout is covered, not
+just a composed one -- a coverage gap I found and closed before the build.
+
+**Audit CLOSED CLEAN** (holotype-reviewer, Opus 4.8 -- Fable out of credits,
+operator directed close-on-4.8; MODEL start==end, no mid-run fallback):
+**0 P0 / 0 P1 / 0 P2 / 5 P3**, all bounded/documentation. The audit
+independently re-derived and verified SOUND every core property (cross-conn
+authority is gen-checked + conn-scoped via `surf_owned`; no truly-hidden pin;
+test-mode exactly preserved; no TOCTOU -- single-threaded serve loop; I-40's
+present/scanout/retire path untouched, only the tick rate changes; the gate is
+sabotage-proof with a real positive control) -- independent agreement with the
+self-audit. The 5 P3s: F3 (scripture said `surface_target`-gated, impl uses the
+full three-arm `note_present` predicate -- the exact mismatch I had already
+queued) and F4 (reference/139 documented a `TAPESTRY_FRAME_INTENT` env override
+that does not exist -- I chose argv and did not update the doc) were FIXED in
+reference/139; F1 (a visible-but-blank DYNAMIC surface pins the clock -- bounded,
+no compounding, self-revealing, consistent with the ratified layout-visible
+gating), F2 (the observability `say!` is client-flappable via intent-toggling
+into serial log-spam -- bounded, rides a pre-existing ctl-flood spin; a
+rate-limit follow-up is tracked), and F5 (SDL declares DYNAMIC unconditionally,
+so a static visible SDL app pins the clock -- a power tradeoff, the doc's
+argued policy) are recorded as bounded "Known caveats" in reference/139. No code
+defect surfaced, so no re-build/re-gate and no round 2 (a clean close needs
+none). **Still open:** the current build is `BAKE_DOSBOX=0` (no Duke3D
+in the pool), so a full rebuild is owed before the operator can play Duke3D with
+the fix in place -- the SDL path is proven via quake, but the operator's exact
+app wants the DOSBox image rebuilt (deferred; the mac went to the main track).
+
+---
+
 ## 2026-09-04 (aux, Opus 4.8, effort max) -- DX-4: the CAP_JIT dynarec (core=dynamic) on Thylacine
 
 DOSBox-X's dynamic recompiler now runs on Thylacine: `core=dynamic_rec`

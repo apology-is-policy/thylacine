@@ -1116,9 +1116,11 @@ a **frame intent**, a per-`Surface` field defaulting to STATIC:
   to the ctl rate unconditionally — no dependence on present rate or input.
 
 The compositor honours it via `Comp::any_visible_dynamic(&self)` (mirrors
-`visible_chrome`'s iteration, gated on `surface_target(n).is_some()` — the same
-visibility predicate `note_present` filters on), OR'd into the effective-rate
-decision in `main.rs` alongside `frozen` / recent-input / `animating()`.
+`visible_chrome`'s iteration, gated on the SAME three-arm predicate
+`note_present` uses — `pending_direct == Some(n) || scanout == Direct(n) ||
+surface_target(n).is_some()` — so a fullscreen game on the DIRECT scanout is
+covered, not only a composed one), OR'd into the effective-rate decision in
+`main.rs` alongside `frozen` / recent-input / `animating()`.
 `animating()` **remains** the fallback for undeclared clients; frame intent is
 the declared override for the case the heuristic cannot serve.
 
@@ -1130,15 +1132,20 @@ playing, STATIC when paused) and avoids widening the create grammar (the C
 `thyla_tap` create buffer is fixed-size). `SDL_thylacine` writes `intent
 dynamic` right after surface open, so every ported SDL app (Duke3D, TyrQuake, a
 video player) is covered without per-app work. A native client opts in with
-`surf.intent(FrameIntent::Dynamic)`; the `TAPESTRY_FRAME_INTENT` env override
-lets a native client (and the regression gate) force either value.
+`surf.intent(FrameIntent::Dynamic)`. The regression gate forces either value
+through `tapestry-demo`'s argv test lever (`tapestry-demo <static|dynamic>
+[idle]`, scanned across all args), not an env var.
 
 **Visible-gated** (the ratified choice): a DYNAMIC surface that is hidden
 (occluded by a fullscreen peer, or in a non-visible pane) does **not** pin the
-clock — `surface_target` returns `None`, exactly as `note_present` already
-filters a hidden client's presents (audit F1). A game tabbed to the background
-lets an idle console throttle as before, so the idle %cpu floor is preserved
-(`THYLACINE_IDLE_STRICT` still passes: aurora is STATIC).
+clock — all three predicate arms are false (not the direct scanout, not
+pending-direct, `surface_target` `None`), exactly as `note_present` filters a
+hidden client's presents. (A surface whose content is still on the direct
+scanout during a deferred `Direct(n) -> Direct(m)` switch pins even while
+layout-backgrounded — the pin follows the displayed content, which is correct.)
+A game tabbed to the background lets an idle console throttle as before, so the
+idle %cpu floor is preserved (`THYLACINE_IDLE_STRICT` still passes: aurora is
+STATIC).
 
 **Rejected alternatives.**
 - *A held-key-only patch* (treat a key-down as activity for a fixed window):
@@ -1159,3 +1166,32 @@ throttling). Thylacine's is a STATIC/DYNAMIC declaration on the existing surface
 visibility), the client is the declarer. The regression witness is the
 `idle-throttle N -> M Hz` observability line in `main.rs`: a visible DYNAMIC
 surface produces no `-> 15` transition where a STATIC one does.
+
+**Known caveats (audit 58dee4d1, 0 P0 / 0 P1 / 0 P2 / 5 P3):**
+
+- *"Visible" means occupies visible screen space, painted or not* (F1). A content
+  surface is hosted into the focused (visible) leaf at `create`, before any
+  present, so a client that declares DYNAMIC and never presents a frame still
+  pins the clock while it occupies a visible pane (displaying blank/stale
+  pixels). This is BOUNDED — the ceiling is `base_hz` (the pre-throttle
+  baseline), N DYNAMIC surfaces do not compound (a boolean OR), and the attacker
+  must occupy a visible pane, which is self-revealing as a blank pane — and it is
+  consistent with the ratified layout-visible gating (the throttle-defeat via a
+  visible present-spammer already exists through `animating()`; this is a cheaper
+  variant needing no presents). Not a correctness or safety issue.
+- *SDL declares DYNAMIC unconditionally* (F5). `SDL_thylacinevideo.c` writes
+  `intent dynamic` for every window at create, so a genuinely static or paused
+  SDL app that stays visible pins the compositor clock to `base_hz` — a
+  power-efficiency tradeoff, not a bug. The runtime toggle to `intent static`
+  exists (`thyla_tap_intent(t, 0)`) but SDL does not call it on pause/idle. This
+  is the accepted v1.0 policy (SDL clients are overwhelmingly games/video); a
+  future refinement could drop to STATIC after a window of no presents.
+- *The observability `say!` is client-flappable* (F2). The `idle-throttle N -> M
+  Hz` line fires on every `eff_hz` transition and is NOT test-gated (the
+  regression gate reads it). A client that toggles its `intent` every serve-loop
+  pass drives one transition — and one ~70-byte serial line — per pass. This is
+  BOUNDED by serial bandwidth and rides a PRE-EXISTING ctl-flood spin (a conn
+  with a pending ctl write keeps its fd readable, so the loop paces at
+  serial-write throughput regardless of this line). The newly-introduced harm is
+  the log amplification; a follow-up (rate-limit the throttle `say!`, or fix the
+  ctl-flood spin itself) is tracked. A well-behaved client sets intent once.
