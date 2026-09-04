@@ -23,6 +23,71 @@ needed the operator.
 
 ---
 
+## 2026-09-04 (run 26, Opus 4.8) -- KT-1.5d-2: one session tile; two integration findings the E2E surfaced
+
+d-2 made the per-user compositor host a REAL terminal: `halcyond --session` spawns
+one `kaua-term` running `/bin/ut`, ingests its record stream into the ii-a `Tile`
+model, renders it, routes input to it, and the tile's `ut` EXITING is the logout
+(retiring the d-1b autoexit test lever). Landed `65db7b6f`, local, batched to the
+KT-1 close. `ls-gfx-session` PASS 30s first attempt, the full chain in order, zero
+flap: `background surface 0` -> `Direct(halcyond)` -> `tile spawned pid=2411 128x36`
+-> `session up 1280x800` -> `tile ingest live` -> input `exit` -> `tile exited (code
+0) -- logout` -> `foreground surface 0` -> `Direct(console)`.
+
+The chunk was mostly plumbing (`Stdio::Piped` maps 1:1 onto the kaua-term's
+fd0=down/fd1=up contract; `FrameDecoder`/`parse_record`/`Tile::apply` was already
+host-tested at ii-a). Two integration facts it did NOT plan for are the reusable
+part:
+
+**Finding 1 -- the palette is the PRODUCER's job (the seam ships RGB).** The
+kaua-term's `Vt::new` hardcoded BONFIRE (bg `0xFF0E0C0C`, near-black); the session
+surface is Daylight (surface `0xFFF2EBE0`, near-white). Cells carry RESOLVED fg/bg
+over the seam (14.3), so halcyond cannot re-theme downstream -- a BONFIRE tile would
+paint dark boxes on the light ground. The theme authority is the compositor (14.6),
+so the palette must be applied where the cells are stamped. Fix: `vt::DAYLIGHT` +
+`Vt::with_palette` (new delegates with BONFIRE, aurora untouched); the kaua-term
+builds its Vt with DAYLIGHT; `libhalcyon::daylight_palette()` now returns
+`vt::DAYLIGHT` as the single source, pinned by `daylight_is_vt_daylight`. v1.x seam:
+the compositor should PLUMB the palette (the 14.6 tier precedent) rather than the
+producer defaulting -- noted in the vt const.
+
+**Finding 2 -- a backgrounded leaf must not hold input focus (a d-1b gap d-2
+surfaced).** `pane.rs::host` splits the focused leaf but leaves focus on the OLD
+leaf (`self.focused` unchanged). Pre-login aurora is the focused console leaf; the
+session halcyond hosts by splitting it, so focus STAYS on aurora -- which d-1b then
+backgrounds. Input routes to `layout.focused_surface()`, so the session tile's `ut`
+would have been UNINPUTTABLE in production, not just the test. Fix: reconcile now
+moves focus off a now-backgrounded leaf onto the visible session leaf (the input
+twin of the d-1b scanout priority), gated by `has_session` so session-less paths
+are byte-identical. The `exit` E2E leg is the end-to-end witness -- it reaches `ut`
+only if focus reached halcyond.
+
+**The caught verification wrong turn.** First regression pass: I baked the pool with
+`THYLACINE_HALCYON_SESSION=1` (for ls-gfx-session) and ran ls-gfx-panes against that
+SAME pool -- panes failed deterministically at "pre-battery console verify", and the
+log showed `login: session compositor (halcyond) spawned` + `background surface 0`
+firing PRE-battery. The lever is POOL-WIDE: michael's login in ANY test spawns the
+session halcyond, backgrounding aurora before the -c console check. That is a
+bake-config artifact, not a code regression. Re-baked default (lever off), re-ran:
+ls-gfx-panes PASS 43s, ls-gfx-restore PASS 28s -- and both EXERCISED the interaction
+(2x `background`/`foreground surface 0` cycles, the battery a michael/session
+principal), including panes' focus + chord legs and the post-battery console+winsize
+restore. So d-1b's backgrounding + d-2's focus transfer do NOT regress the
+michael-session gfx path. Lesson: a per-pool lever changes EVERY login in the pool;
+verify a lever-gated feature and the default gfx suite against SEPARATE bakes.
+
+Default suite (test.sh, default pool): 1464 `[test]` PASS, 0 FAIL, 0 EXTINCTION,
+boot OK, aurora console up -- the `Vt::new`->`with_palette` refactor does not
+regress aurora.
+
+**Open (batched to the KT-1 close):** the focused audit of the reconcile
+backgrounding + focus transfer (audit-bearing scanout, I-40-adjacent); the vault
+ring (`sub-tapestryd` owns `server.rs`, plus the unowned vt/libhalcyon/kaua-term/
+halcyond surfaces filed for a sweep); the `halcyon-status.md` rows for the whole
+KT-1.5 arc; the `AUDIT-TRIGGERS.md` note; the SMP gate + the full matrix. Deferred
+inside d-2: wheel-scroll (`scroll_up` is wired but held at 0), and a screendump
+pixel-proof leg (the render is proven by the present + the boot, not pixels).
+
 ## 2026-09-04 (run 25, Opus 4.8) -- KT-1.5d-1b: the display handoff; the drain-resume flap and the compositor-backgrounding redesign
 
 Run 24 queued d-1b as "aurora relinquish -> Direct(halcyond) + logout resume." Run
