@@ -43,11 +43,12 @@ use halcyond::select::{FlatRow, Sel};
 use halcyond::transcript::Transcript;
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{
-    t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_open, t_poll, t_read, t_write, TPollFd, T_OREAD, T_OWRITE, T_POLLIN,
+    T_WALK_OPEN_FROM_ROOT,
 };
 use tapestry::{
-    EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_BTN,
-    TEV_PTR_MOVE,
+    EventRing, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_FRAME, TEV_KEY,
+    TEV_PTR_BTN, TEV_PTR_MOVE,
 };
 
 macro_rules! say {
@@ -70,6 +71,30 @@ const CONNECT_DELAY_MS: u64 = 200;
 
 fn open_path(path: &str, omode: u32) -> i64 {
     unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), omode) }
+}
+
+/// d-1b (TEST-ONLY): does the boot cmdline carry
+/// `thylacine.halcyon.session.autoexit`? The ls-gfx-session E2E sets it (via
+/// THYLACINE_HALCYON_SESSION_AUTOEXIT -> run-vm.sh -> /chosen/bootargs) to drive
+/// a scripted logout so aurora's resume path gets a positive witness. It is a
+/// test DRIVER, not a behaviour double: it only makes the session compositor
+/// return 0 (the logout login already waits for), leaving aurora's resume code
+/// under test untouched. Production never sets it; the real logout arrives when
+/// a session tile can exit (d-2/d-3). Read via the FDT mount, like aurora.
+fn bootarg_session_autoexit() -> bool {
+    let fd = open_path("/hw/chosen/bootargs", T_OREAD);
+    if fd < 0 {
+        return false;
+    }
+    let mut buf = [0u8; 256];
+    let n = unsafe { t_read(fd, buf.as_mut_ptr(), buf.len()) };
+    unsafe { t_close(fd) };
+    if n <= 0 {
+        return false;
+    }
+    let hay = &buf[..n as usize];
+    let needle = b"thylacine.halcyon.session.autoexit";
+    hay.windows(needle.len()).any(|w| w == needle)
 }
 
 fn feed_drain(fd: i64, pending: &mut Vec<u8>, dropped: &mut u64, logged: &mut bool) {
@@ -323,6 +348,15 @@ fn session_main() -> i64 {
     let mut present_fails: u32 = 0;
     const PRESENT_FAILS_FATAL: u32 = 240;
 
+    // d-1b (test-only): the scripted-logout lever + its post-announce frame
+    // counter. The handoff (aurora relinquish -> Direct(halcyond)) lands within
+    // the first few frames, so any count comfortably past that suffices; 30
+    // gives the E2E ample margin to witness Direct before the exit, at any
+    // FRAME rate. Off in production (the lever is absent).
+    let autoexit = bootarg_session_autoexit();
+    let mut frame_count: u32 = 0;
+    const SESSION_AUTOEXIT_FRAMES: u32 = 30;
+
     loop {
         // Render at the TOP: the first present precedes any wait (the scanout
         // is first-present-wins and frame ticks reach only visible surfaces --
@@ -402,6 +436,21 @@ fn session_main() -> i64 {
                         return 1;
                     }
                 },
+                // d-1b (test-only): the scripted logout. Count frames since the
+                // surface presented; past the handoff window, return 0 so
+                // login's wait() returns -> getty -> the next login prompt ->
+                // aurora resumes. Gated on the boot lever; production halcyond
+                // --session fails the guard and TEV_FRAME falls through to no-op.
+                TEV_FRAME if autoexit && announced => {
+                    frame_count += 1;
+                    if frame_count >= SESSION_AUTOEXIT_FRAMES {
+                        say!(
+                            "halcyond: session autoexit (test lever) -- logout after {} frames",
+                            frame_count
+                        );
+                        return 0;
+                    }
+                }
                 _ => {}
             }
             ev = match surf.poll_event() {

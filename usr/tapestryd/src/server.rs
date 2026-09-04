@@ -191,6 +191,15 @@ fn actor_owner_principal(actor: Actor) -> u32 {
     }
 }
 
+/// d-1b (HALCYON 14.12 step 4): is `p` a real user principal (a SESSION), as
+/// opposed to a sentinel (SYSTEM / unauthenticated / unknown -- the console
+/// renderer + system clients)? This is exactly the discriminator `actor()`
+/// applies to a conn's peer_principal, read here off a leaf's stamped
+/// `owner_principal`. A SESSION leaf outranks SYSTEM leaves for the display.
+fn principal_is_session(p: u32) -> bool {
+    p != T_PRINCIPAL_INVALID && p != T_PRINCIPAL_SYSTEM && p != T_PRINCIPAL_NONE
+}
+
 /// What a `create` hosts (the surface_ctl arm's parse, typed): a content
 /// surface -- optionally steered by an H-4b placement claim -- or one of
 /// the never-hosted renderer classes. The claim rides ONLY the content
@@ -878,6 +887,12 @@ struct Surface {
     /// carry their sentinel principal here but are Client(stripes) actors,
     /// so this is inert for them.
     owner_principal: u32,
+    /// d-1b (HALCYON 14.12 step 4): this SYSTEM leaf (console renderer / system
+    /// client) is backgrounded by a visible SESSION leaf -- excluded from the
+    /// scanout decision, not composited, not FRAME-ticked. Set + cleared per
+    /// reconcile; false whenever no session leaf is present (so it is inert on
+    /// every pre-session + gfx-test path).
+    backgrounded: bool,
     state: SurfState,
     w: u32,
     h: u32,
@@ -2386,6 +2401,7 @@ impl Comp {
             owner_conn: conn_id,
             owner_peer: peer,
             owner_principal: principal,
+            backgrounded: false,
             state: SurfState::Minted,
             w: 0,
             h: 0,
@@ -5165,6 +5181,10 @@ impl Comp {
         }
         let mut wedged: Vec<usize> = Vec::new();
         for (_, n, c) in self.layout.visible_hosted() {
+            // d-1b: a backgrounded SYSTEM leaf is not composited/reconfigured.
+            if self.surf(n).map_or(false, |s| s.backgrounded) {
+                continue;
+            }
             if !c.intersect(r).is_empty() && !self.emit_configure_to(n, c.w, c.h) {
                 wedged.push(n);
             }
@@ -5255,6 +5275,10 @@ impl Comp {
     /// HOLD) slot stays unshown, as `release` promises.
     fn prefill_from_shown(&mut self) {
         for (_, n, _) in self.layout.visible_hosted() {
+            // d-1b: a backgrounded SYSTEM leaf contributes no composed pixels.
+            if self.surf(n).map_or(false, |s| s.backgrounded) {
+                continue;
+            }
             if self.gl_adoption(n).is_some() {
                 continue;
             }
@@ -5707,21 +5731,81 @@ impl Comp {
         let vis = self.layout.visible_hosted();
         let nleaves = self.layout.visible_leaf_count();
 
+        // d-1b (HALCYON 14.12 step 4): a user SESSION outranks SYSTEM content for
+        // the display. A leaf whose owner_principal is a real user principal is a
+        // session; SYSTEM leaves (the console renderer aurora + any system client)
+        // are BACKGROUNDED when a session leaf is visible -- excluded from the
+        // decision below, skipped by the compose + CONFIGURE-fan sites, and skipped
+        // by frame_tick, so the root collapses to the session (Direct) and aurora's
+        // FRAME-driven loop goes dormant. Recomputed every reconcile; a transition
+        // (either direction) is logged once as the fg/bg witness. BACKWARD-COMPAT:
+        // no session leaf -> has_session false -> bg_now empty -> active_* equal the
+        // raw vis/nleaves and the decision is byte-identical to the pre-d-1b logic.
+        let has_session = vis
+            .iter()
+            .any(|v| self.surf(v.1).map_or(false, |s| principal_is_session(s.owner_principal)));
+        let bg_now: Vec<usize> = if has_session {
+            vis.iter()
+                .filter(|v| {
+                    self.surf(v.1)
+                        .map_or(false, |s| !principal_is_session(s.owner_principal))
+                })
+                .map(|v| v.1)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut bg_transitions: Vec<(usize, bool)> = Vec::new();
+        for n in 0..MAX_SURFACES {
+            let now = bg_now.contains(&n);
+            if let Some(s) = self.surf_mut(n) {
+                if s.backgrounded != now {
+                    s.backgrounded = now;
+                    bg_transitions.push((n, now));
+                }
+            }
+        }
+        for (n, now) in bg_transitions {
+            say!(
+                "tapestryd: {} surface {} ({})",
+                if now { "background" } else { "foreground" },
+                n,
+                if now {
+                    "session took the display"
+                } else {
+                    "session gone"
+                }
+            );
+        }
+        let active_vis: Vec<(usize, usize, Rect)> = vis
+            .iter()
+            .filter(|v| self.surf(v.1).map_or(false, |s| !s.backgrounded))
+            .cloned()
+            .collect();
+        let active_nleaves = nleaves.saturating_sub(bg_now.len());
+
         // H-3c round F2: a placed menu is a visible thing with nothing under
         // it too -- Off would leave an invisible grab.
         // H-3d: a status bar is a visible thing too (Off would hide it), and a
         // leaf above the carve is smaller than the display (Direct is a
         // display-sized weave): both arms need no bar.
-        let want = if vis.is_empty() && nleaves <= 1 && self.menu.is_none() && self.status.is_none()
+        let want = if active_vis.is_empty()
+            && active_nleaves <= 1
+            && self.menu.is_none()
+            && self.status.is_none()
         {
             match self.scanout {
                 Scanout::Boot => Scanout::Boot,
                 _ => Scanout::Off,
             }
-        } else if vis.len() == 1 && nleaves == 1 && self.menu.is_none() && self.status.is_none() {
+        } else if active_vis.len() == 1
+            && active_nleaves == 1
+            && self.menu.is_none()
+            && self.status.is_none()
+        {
             // H-3c: a placed menu is a second visible thing -- it composes
             // over the leaf, so Direct is off while one is up.
-            let n = vis[0].1;
+            let n = active_vis[0].1;
             let full = self.surf(n).map_or(false, |s| s.w == dw && s.h == dh);
             if full {
                 Scanout::Direct(n)
@@ -5874,6 +5958,10 @@ impl Comp {
                     // cropped/letterboxed by the blit clip.
                     let mut wedged: Vec<usize> = Vec::new();
                     for (_, n, c) in self.layout.visible_hosted() {
+                        // d-1b: a backgrounded SYSTEM leaf gets no redraw offer.
+                        if self.surf(n).map_or(false, |s| s.backgrounded) {
+                            continue;
+                        }
                         if !self.emit_configure_to(n, c.w, c.h) {
                             wedged.push(n);
                         }
@@ -6673,7 +6761,16 @@ impl Comp {
             self.reconcile();
         }
         self.comp_replay_deferred_imports();
-        let mut vis: Vec<usize> = self.layout.visible_hosted().iter().map(|v| v.1).collect();
+        // d-1b: a backgrounded SYSTEM leaf (a session holds the display) gets no
+        // FRAME -- that is exactly what makes the console renderer's FRAME-driven
+        // loop go dormant while the session owns the display.
+        let mut vis: Vec<usize> = self
+            .layout
+            .visible_hosted()
+            .iter()
+            .filter(|v| self.surf(v.1).map_or(false, |s| !s.backgrounded))
+            .map(|v| v.1)
+            .collect();
         vis.extend(self.visible_chrome().iter().map(|v| v.0));
         for n in vis {
             let ev = Tevent {

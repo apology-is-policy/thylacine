@@ -1,6 +1,10 @@
 #!/usr/bin/expect -f
-# tools/interactive/ls-gfx-session.exp -- KT-1.5d-1a: the per-user session
-# compositor bootstrap (HALCYON.md 14.12).
+# tools/interactive/ls-gfx-session.exp -- KT-1.5d-1a/b: the per-user session
+# compositor (HALCYON.md 14.12). d-1a: the login-spawned bootstrap (login ->
+# halcyond --session presents). d-1b: the clean display handoff -- tapestryd's
+# reconcile BACKGROUNDS the console renderer (aurora) when the session leaf
+# appears (-> Direct(halcyond); aurora keeps its surface but goes FRAME-dormant),
+# and FOREGROUNDS it again on logout. The logout is a scripted test lever (below).
 #
 # GATED ON THE BAKED LEVER (the cfg-4 / ls-halcyon precedent): the pool carries
 # /lib/halcyon/session = "on" only under THYLACINE_HALCYON_SESSION=1. On a
@@ -18,15 +22,23 @@
 # does NOT silence serial (no thylacine.display=gpu bootarg -- aurora only
 # silences under that arg, cons.c 1b), so login is drivable over serial exactly
 # as ls-ci; halcyond's markers ride the kernel diagnostic UART (t_puts), immune
-# to any renderer silence regardless. d-1a is content to compose alongside
-# aurora (Composed); the clean aurora relinquish -> Direct(halcyond) handoff +
-# logout resume are d-1b.
+# to any renderer silence regardless. d-1b proves the handoff: tapestryd
+# backgrounds the console renderer when the session leaf appears and switches to
+# Direct(halcyond); the scripted logout foregrounds it again.
+#
+# THE SCRIPTED LOGOUT (test lever). A real logout needs a session tile that can
+# exit (d-2/d-3); until then THYLACINE_HALCYON_SESSION_AUTOEXIT=1 -> run-vm.sh
+# appends `thylacine.halcyon.session.autoexit` -> the per-user halcyond returns
+# after a bounded frame count. It is a test DRIVER, not a behaviour double: it
+# only makes halcyond exit (the logout login already waits for), leaving aurora's
+# resume path under test untouched.
 #
 # HVF like the gfx siblings; the GPU environment (virtio-gpu + tapestryd) is
 # required for halcyond to present, and is present by default (THYLACINE_DISPLAY
 # unset -> virtio-gpu on, no display=gpu bootarg -> serial stays loud).
 
 set ::env(THYLACINE_ACCEL) hvf
+set ::env(THYLACINE_HALCYON_SESSION_AUTOEXIT) 1
 
 source [file join [file dirname [info script]] lib.exp]
 
@@ -70,21 +82,88 @@ expect {
     eof                    { lc_fail "qemu exited during login" }
 }
 
-# The bootstrap witness: halcyond connected to tapestryd + PRESENTED. A RED
-# verdict is keyed on halcyond's own FAIL line too (the safe #186 direction: a
-# spurious match turns a pass into a fail, never the reverse), so a connect/
-# present failure reports at once instead of waiting out the timeout.
+# --- d-1b: the handoff -- tapestryd backgrounds the console renderer ---
+#
+# ORDER (measured): the background fires when halcyond's surface is HOSTED (during
+# fullscreen_on), which PRECEDES halcyond's first-present "session up" marker --
+# so assert background -> Direct(halcyond) -> session up, in that order. Asserting
+# "session up" first would consume the background line and the d-1b arm would miss.
+
+# halcyond is a SESSION leaf (a real user principal); the moment its surface is
+# hosted, tapestryd's reconcile BACKGROUNDS the console renderer aurora (a SYSTEM
+# leaf) -- dropped from the scanout decision + FRAME-ticked no more, so aurora goes
+# dormant while KEEPING its surface (HALCYON 14.12 step 4). Marker on the
+# diagnostic UART (t_puts). halcyond's own FAIL line is a RED arm (#186-safe).
 expect {
-    -ex "halcyond: session up" { lc_step "saw: per-user compositor presented" }
+    -re {tapestryd: background surface [0-9]+ \(session took the display\)} {
+        lc_step "tapestryd backgrounded the console renderer under the session"
+    }
     -re {halcyond: FAIL session} { lc_fail "halcyond --session failed to connect/present (tapestryd absent or the present was refused)" }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before the renderer backgrounded" }
+    timeout { lc_fail "tapestryd never backgrounded the console renderer (session leaf not seen?)" }
+    eof     { lc_fail "qemu exited before the renderer backgrounded" }
+}
+
+# With the console renderer backgrounded, the session is the only ACTIVE leaf and
+# the scanout switches to Direct -- the full-display takeover. Earlier aurora
+# pending-directs were consumed during the login drive, so this one is the session's.
+expect {
+    -re {tapestryd: scanout pending-direct} {
+        lc_step "tapestryd -> Direct(halcyond): the full-display handoff"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during the Direct handoff" }
+    timeout { lc_fail "scanout never went Direct after backgrounding (stuck Composed?)" }
+    eof     { lc_fail "qemu exited during the Direct handoff" }
+}
+
+# The bootstrap witness (d-1a): halcyond PRESENTED. "session up" prints inside
+# Ok(present) (connect + present) and lands AFTER the handoff (the present
+# completes after the surface was hosted + backgrounded aurora above).
+expect {
+    -ex "halcyond: session up" { lc_step "d-1a: per-user compositor connected + presented" }
+    -re {halcyond: FAIL session} { lc_fail "halcyond --session failed to connect/present" }
     -re {EXTINCTION:} { lc_extinction_fail "extinction during session bringup" }
     timeout { lc_fail "halcyond: session up never appeared (the per-user compositor did not present)" }
     eof     { lc_fail "qemu exited during session bringup" }
 }
 
-lc_pass "KT-1.5d-1a: login -> per-user halcyond --session -> connected + presented"
+# --- d-1b: logout -> the renderer foregrounds + resumes (scripted test logout) ---
 
-# No shell to `exit` on the session path (halcyond --session runs blank in
-# d-1a; logout/resume is d-1b); lc_quit's `exit` line is harmlessly unread and
-# Ctrl-A x tears the VM down.
+# The scripted logout: halcyond --session returns after a bounded frame count.
+# login's wait() returns -> getty -> tapestryd retires the session leaf ->
+# reconcile re-runs -> no session leaf -> the console renderer FOREGROUNDS.
+expect {
+    -ex "halcyond: session autoexit" {
+        lc_step "session logout (test lever) -- halcyond exits"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction before session logout" }
+    timeout { lc_fail "session autoexit never fired (halcyond did not log out)" }
+    eof     { lc_fail "qemu exited before session logout" }
+}
+
+# THE RESUME WITNESS: reconcile foregrounds the console renderer (session gone);
+# the FRAME clock then ticks aurora again and it repaints.
+expect {
+    -re {tapestryd: foreground surface [0-9]+ \(session gone\)} {
+        lc_step "tapestryd FOREGROUNDED the console renderer on logout"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction during renderer foreground" }
+    timeout { lc_fail "the console renderer never foregrounded after logout (retire->reconcile broken?)" }
+    eof     { lc_fail "qemu exited before renderer foreground" }
+}
+
+# And the scanout returns to Direct on the console renderer -- the full cycle.
+expect {
+    -re {tapestryd: scanout pending-direct} {
+        lc_step "tapestryd -> Direct(console): the display returned to the console"
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "extinction returning the display to the console" }
+    timeout { lc_fail "scanout never returned to Direct on the console after logout" }
+    eof     { lc_fail "qemu exited before the console reclaimed Direct" }
+}
+
+lc_pass "KT-1.5d-1b: background renderer -> Direct(halcyond) -> logout -> foreground -> Direct(console)"
+
+# lc_quit's `exit` line lands on the resumed console login prompt; it is
+# harmlessly unread (wrong creds) and Ctrl-A x tears the VM down.
 lc_quit
