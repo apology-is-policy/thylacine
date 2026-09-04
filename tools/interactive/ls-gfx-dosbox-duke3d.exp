@@ -23,8 +23,10 @@
 #      colour-rich AND differs from the first, proving keyboard input reached
 #      the dynrec-executed game and it kept rendering.
 #
-# The game data lives at /duke3d (baked by build_duke3d_fixture); the files are
-# world-writable (0666) because DOSBox-X opens the group file read-write.
+# The game data lives at /duke3d (baked by build_duke3d_fixture) as a read-only
+# SYSTEM-owned master; the gate copies it into a writable home first (see the
+# copy below) because DOSBox-X opens the group file read-write and a non-owner
+# cannot open a SYSTEM-owned pool file read-write even at 0666 (the "walls").
 #
 # HVF posture (the ls-gfx sibling; TCG hangs, #27). SKIPs (77) when the game is
 # not baked (THYLACINE_BAKE_DUKE3D=0), stated out loud so "absent" and "works"
