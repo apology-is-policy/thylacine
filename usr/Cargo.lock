@@ -648,6 +648,7 @@ dependencies = [
  "cartoon",
  "cornucopia",
  "fontdue",
+ "kaua-term",
  "libhalcyon",
  "libtapestry",
  "libthyla-rs",

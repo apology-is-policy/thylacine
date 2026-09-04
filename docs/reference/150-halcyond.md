@@ -62,6 +62,45 @@ discipline; (Normal) the selection state. `beacon rich` is advertised on
 `/dev/consctl` at startup — halcyond is the tree's first rich advertiser;
 ut reads `/dev/beacon` and exports `/env/BEACON` (BEACON.md §12.3).
 
+## The tile model (KT-1.5b-ii): the live grid + the scrollback ingest
+
+The data flow above is halcyond's **console** path (one `/dev/consdrain` byte
+stream). The **multi-console terminal** (KT-1.5) gives each leaf its own hosted
+`kaua-term` process, and halcyond ingests a pre-digested **record** stream per
+leaf rather than raw bytes. (This "tile" is the leaf's terminal CONTENT --
+distinct from the H-3b chrome tag-bar surfaces, which are also per-leaf and
+also called tiles.)
+
+`tile.rs` holds one `Tile` per leaf: a **live grid** + a **scrollback
+`Transcript`** (HALCYON 14.11.1). They are separate because the grid spans zone
+boundaries -- the last `rows` lines routinely straddle a prompt. The record ->
+model dispatch (`Tile::apply`, 14.11.2):
+
+| Record | applied to |
+|---|---|
+| `CellDiff{changed,cursor}` | the live grid (`grid.rs`) |
+| `ScrollOff{rows}` | `Transcript::push_scrolled_rows` (history) |
+| `Control(Osc1936Raw)` | `Transcript::feed` -- the SAME beacon parser the console uses |
+| `Control(Title/Exit/Bell/WinsizeAck)` | tile fields |
+| `Mode(Normal\|AltScreen)` | the render mode |
+
+`grid.rs` is a fixed rows x cols `vt::Cell` buffer -- what `CellDiff` mutates,
+running no VT parser (the kaua-term already did). halcyond is the geometry
+authority, and a tile is untrusted (14.11.12, the format-fuzz class): an
+out-of-bounds cell write is DROPPED and the cursor is clamped on read, so a
+buggy/hostile producer cannot index past the buffer.
+
+Reusing `Transcript::feed` for the beacon frames keeps the format-fuzz surface
+(parsing an untrusted per-tile stream) ONE audited parser, not N. The ScrollOff
+path interns a pre-styled `vt::Cell` via the same `intern_style` `style_idx`
+uses, and charges the same block-cap / eviction cost, so a tile that scrolls
+forever stays bounded.
+
+**Landed at KT-1.5b-ii-a as the host-tested model** (13 grid + tile tests). The
+render composition (normal = scrollback + grid tail; alt = grid only), the child
+spawn (one `kaua-term` per leaf over a pipe pair), and folding the up-pipe into
+the unified `poll` are KT-1.5b-ii-b (graphical).
+
 ## Load-bearing invariants (prose; the audit anchors)
 
 - **The streaming property**: feeding a byte stream in any chunking yields

@@ -1051,17 +1051,22 @@ impl Transcript {
             obj: self.obj_stack.last().copied().unwrap_or(0),
             hdr: self.hdr,
         };
-        // Blocks carry few styles; a linear scan with a hot tail wins over
-        // a map here.
+        self.intern_style(s)
+    }
+
+    /// Intern an explicit style as an index in the OPEN block: dedup on the hot
+    /// tail, linear scan under the cap, then degrade-to-last past it (bounds
+    /// memory + keeps the index in u16; a truecolor-gradient spam otherwise
+    /// scans a growing table per char, and reaching thousands of distinct
+    /// styles in one block is hostile). Shared by the pen path (`style_idx`) and
+    /// the KT-1.5 ScrollOff ingest (`push_scrolled_rows`, a pre-styled vt::Cell).
+    fn intern_style(&mut self, s: Style) -> u16 {
+        // Blocks carry few styles; a linear scan with a hot tail wins over a map.
         if let Some(last) = self.open.styles.last() {
             if *last == s {
                 return (self.open.styles.len() - 1) as u16;
             }
         }
-        // At the cap: don't grow (bounds memory + keeps the index in u16) and
-        // don't full-scan (bounds CPU to O(1) post-cap -- a truecolor-gradient
-        // spam otherwise scans a growing table per char). Degrade to the last
-        // style; reaching thousands of distinct styles in one block is hostile.
         if self.open.styles.len() >= MAX_STYLES_PER_BLOCK {
             return (self.open.styles.len() - 1) as u16;
         }
@@ -1072,6 +1077,37 @@ impl Transcript {
         }
         self.open.styles.push(s);
         (self.open.styles.len() - 1) as u16
+    }
+
+    /// KT-1.5 (HALCYON 14.11.2): ingest ScrollOff rows -- lines that left the top
+    /// of a tile's live grid -- as history in the current (open) block. Each row
+    /// is a finished screen line of pre-styled `vt::Cell`s (the kaua-term already
+    /// ran the VT); intern each cell's style into the open block and append the
+    /// row as a `Line`, mirroring `flush_line`'s cost accounting so the block-cap
+    /// / eviction machinery bounds a tile that scrolls forever. No zone logic
+    /// here: a zone cut arrives as a separate `Control(Osc1936Raw)` record fed
+    /// through `feed`, and stream order (guaranteed by the producer) lands each
+    /// scroll-off in the block that was open when it happened.
+    pub fn push_scrolled_rows(&mut self, rows: &[Vec<vt::Cell>]) {
+        for row in rows {
+            let mut cells: Vec<TCell> = Vec::with_capacity(row.len());
+            for c in row {
+                let style = self.intern_style(Style {
+                    fg: c.fg,
+                    bg: c.bg,
+                    attrs: c.attrs,
+                    em: EM_NONE,
+                    obj: 0,
+                    hdr: 0,
+                });
+                cells.push(TCell { ch: c.ch, style });
+            }
+            let cost = cells.len() * core::mem::size_of::<TCell>();
+            self.open.cost += cost;
+            self.stored_cost += cost;
+            self.open.items.push(Item::Line(Line { cells }));
+            self.enforce_block_cap();
+        }
     }
 }
 

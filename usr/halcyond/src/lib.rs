@@ -12,12 +12,14 @@
 extern crate alloc;
 
 pub mod chrome;
+pub mod grid;
 pub mod input;
 pub mod layout;
 pub mod menu;
 pub mod raster;
 pub mod select;
 pub mod status;
+pub mod tile;
 pub mod transcript;
 
 /// The vendored proportional faces (third_party/dejavu-fonts; HALCYON.md
